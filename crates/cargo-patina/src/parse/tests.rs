@@ -111,7 +111,10 @@ fn run_and_replay_locate_native_positionals_around_options() {
         match parse(strings(&["replay", "--mount", "corpus", b, "run.patina"])).unwrap() {
             ParseResult::NativeRun(inv) => {
                 assert_eq!(inv.binary, ArtifactRef::Prebuilt(PathBuf::from(b)));
-                assert_eq!(inv.mount, Some(PathBuf::from("corpus")));
+                assert_eq!(
+                    inv.mount.map(|mount| mount.host),
+                    Some(PathBuf::from("corpus"))
+                );
                 match inv.mode {
                     NativeRunMode::Replay { path } => {
                         assert_eq!(path, PathBuf::from("run.patina"));

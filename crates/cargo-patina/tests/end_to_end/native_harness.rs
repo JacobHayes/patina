@@ -402,6 +402,89 @@ fn the_sdk_reaches_the_runtime() {
         );
     }
 
+    /// A test that reads its fixture by absolute host path fails under
+    /// Patina, whose filesystem was never given it: the test keeps its class
+    /// and the suite its exit status, and the test carries the path as a
+    /// likely artifact, in the document and beside it in the human summary.
+    /// The `--mount` the artifact names makes the test pass. A test that fails
+    /// on its own carries none.
+    #[test]
+    fn a_test_reading_a_host_fixture_is_flagged_and_its_mount_passes_it() {
+        let directory = tempdir().unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("fixtures")).unwrap();
+        fs::write(root.join("fixtures/data.txt"), "fixture\n").unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"host_fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+#[test]
+fn reads_fixture() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/data.txt");
+    assert_eq!(std::fs::read_to_string(path).expect("fixture"), "fixture\n");
+}
+
+#[test]
+fn fails_on_its_own() {
+    assert_eq!(1 + 1, 3);
+}
+"#,
+        )
+        .unwrap();
+        let patina = env!("CARGO_BIN_EXE_patina");
+        let test = |extra: &[&str]| {
+            let ran = invoke_unchecked(
+                patina,
+                &root,
+                &[&["test", "--format", "json"][..], extra].concat(),
+            );
+            (ran.status.code(), json_of(&ran))
+        };
+        let entry = |document: &serde_json::Value, name: &str| {
+            document["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|test| test["name"] == name)
+                .cloned()
+                .unwrap_or_else(|| panic!("no {name}: {document:#}"))
+        };
+
+        let (code, document) = test(&[]);
+        assert_eq!(
+            (code, document["result"].as_str()),
+            (Some(1), Some("failure"))
+        );
+        let flagged = entry(&document, "reads_fixture");
+        assert_eq!(flagged["result"], "failure", "{flagged:#}");
+        let artifact = &flagged["likely_artifacts"][0];
+        assert_eq!(artifact["kind"], "missing_host_path", "{flagged:#}");
+        let fixture = root.join("fixtures/data.txt");
+        assert_eq!(artifact["path"], fixture.to_str().unwrap());
+        let own = entry(&document, "fails_on_its_own");
+        assert_eq!(own["result"], "failure", "{own:#}");
+        assert!(own["likely_artifacts"].is_null(), "{own:#}");
+
+        // The human summary names the mount beside the failing test.
+        let mount = artifact["mount"].as_str().unwrap();
+        let human = invoke_unchecked(patina, &root, &["test", "reads_fixture"]);
+        assert_eq!(human.status.code(), Some(1));
+        assert!(
+            String::from_utf8_lossy(&human.stdout).contains(mount),
+            "{}",
+            String::from_utf8_lossy(&human.stdout)
+        );
+
+        let (code, mounted) = test(&["--mount", mount, "reads_fixture"]);
+        assert_eq!(code, Some(0), "{mounted:#}");
+        assert_eq!(entry(&mounted, "reads_fixture")["result"], "ok");
+    }
+
     /// Writes the fixture and returns its test source.
     fn create_native_harness_fixture(root: &Path) -> String {
         fs::create_dir_all(root.join("src")).unwrap();

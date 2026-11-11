@@ -1,6 +1,7 @@
 //! Deterministic filesystem-image capture.
 
 use super::*;
+use crate::mount::Mount;
 use std::os::unix::fs::MetadataExt;
 
 /// An encoded filesystem image held open in an anonymous file, ready to be
@@ -110,19 +111,15 @@ fn short_digest(hash: Sha256) -> String {
         .collect()
 }
 
-/// Capture `host_dir` into a deterministic [`FsImage`], encode it, and write the
-/// bytes to a rewound anonymous file ([`image_scratch`]) the child reads over its
-/// inherited image descriptor. The supervisor runs uninterposed, so reading the
-/// host tree here is sound; the guest only ever sees the rebuilt image.
-pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, CliError> {
+/// Capture `mount`'s host directory into a deterministic [`FsImage`] at its
+/// guest directory, encode it, and write the bytes to a rewound anonymous file
+/// ([`image_scratch`]) the child reads over its inherited image descriptor. The
+/// supervisor runs uninterposed, so reading the host tree here is sound; the
+/// guest only ever sees the rebuilt image.
+pub(super) fn build_fs_image_file(mount: &Mount) -> Result<FsImageCapture, CliError> {
     use std::io::{Seek, SeekFrom};
 
-    let root = fs::canonicalize(host_dir).map_err(|error| {
-        CliError(format!(
-            "failed to resolve --mount directory {}: {error}",
-            host_dir.display()
-        ))
-    })?;
+    let root = mount.canonical()?.host;
     if !root.is_dir() {
         return Err(CliError(format!(
             "--mount target is not a directory: {}",
@@ -130,7 +127,8 @@ pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, Cli
         )));
     }
     let mut entries = Vec::new();
-    collect_fs_entries(&root, "", &mut entries)?;
+    mount_point_entries(&root, mount.guest_prefix(), &mut entries)?;
+    collect_fs_entries(&root, mount.guest_prefix(), &mut entries)?;
     let image = FsImage::new(link_shared_files(entries));
     let hash = FsImageHash::of(&image);
 
@@ -149,6 +147,42 @@ pub(super) fn build_fs_image_file(host_dir: &Path) -> Result<FsImageCapture, Cli
     file.seek(SeekFrom::Start(0))
         .map_err(|error| CliError(format!("failed to rewind filesystem image: {error}")))?;
     Ok(FsImageCapture { file, hash })
+}
+
+/// The directories a mount below the guest root stands on: each ancestor of
+/// the guest directory as an image builder's `mkdir` makes one, then the
+/// mount point itself with the host directory's own mode and mtime. A mount
+/// at `/` adds none, so its image is exactly the corpus's entries.
+fn mount_point_entries(
+    root: &Path,
+    guest_prefix: &str,
+    entries: &mut Vec<CapturedEntry>,
+) -> Result<(), CliError> {
+    if guest_prefix.is_empty() {
+        return Ok(());
+    }
+    let mut ancestor = String::new();
+    let parts: Vec<&str> = guest_prefix[1..].split('/').collect();
+    for part in &parts[..parts.len() - 1] {
+        ancestor.push('/');
+        ancestor.push_str(part);
+        entries.push(CapturedEntry {
+            entry: FsImageEntry::directory(ancestor.clone()),
+            inode: None,
+        });
+    }
+    let metadata = fs::metadata(root)
+        .map_err(|error| CliError(format!("failed to stat {}: {error}", root.display())))?;
+    entries.push(CapturedEntry {
+        entry: FsImageEntry::Directory {
+            path: guest_prefix.to_owned(),
+            mode: metadata.mode() & 0o7777,
+            mtime_nanos: i128::from(metadata.mtime()) * 1_000_000_000
+                + i128::from(metadata.mtime_nsec()),
+        },
+        inode: None,
+    });
+    Ok(())
 }
 
 /// Where the encoded image waits for the child: anonymous memory on Linux,
@@ -172,7 +206,7 @@ fn image_scratch() -> std::io::Result<fs::File> {
 }
 
 /// Recursively collect `host_dir`'s contents as [`FsImageEntry`] values, mapping
-/// the mount root to the guest root `/`. Symlinks are captured verbatim (their
+/// the mount root to the guest directory `guest_prefix` (`""` for `/`). Symlinks are captured verbatim (their
 /// target string, never followed), directories are recorded and descended, and
 /// regular files carry their bytes. Each entry carries what a guest can observe
 /// of it: its permission bits (not a symlink's, which has none) and its

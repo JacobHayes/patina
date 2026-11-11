@@ -137,8 +137,12 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   non-ok test, its class, one line of why, `rerun:` and `replay:` commands.
   `--format json` prints `schema: "patina.test/v1"` with `counts`, `targets`
   and per-test `result`, `attribution`, `seed`, `seeds_passed`, `duration_ms`,
-  `why`, `stop`, `guest_exit`, `rerun`, `replay`, `trace`, plus
-  `build_seconds` and `run_seconds`.
+  `why`, `stop`, `guest_exit`, `likely_artifacts`, `rerun`, `replay`, `trace`,
+  plus `build_seconds` and `run_seconds`. A test's `likely_artifacts` (the run
+  envelope's, below; a `--timeout-secs` backstop adds a `patina_limit`) also
+  print under it in the human summary and mark its progress line. A test that
+  reads a fixture by absolute path (`env!("CARGO_MANIFEST_DIR")`) needs it
+  mounted at its own path: `--mount $PWD:$PWD`.
 - `patina replay <ARTIFACT|SOURCE> <TRACE> [--coverage-out PATH] [host inputs]`
   Reproduce a recording. Flag-free: seed, fault knobs, buggify, and guest argv
   are restored from the trace (the trace is authoritative; a re-supplied semantic
@@ -164,7 +168,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   finding. Audit source-first (or a `patina build` artifact): only a
   shim-linked binary shows the true post-interposition residual, so a stock
   prebuilt binary is refused unless `--raw`.
-- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR]` (`--mount`: the corpus every generation captures, forwarded to every reproduce command)
+- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--faults` bands every
   fault plane's knobs — `fs` (error/short/latency), `crash` (independent
@@ -403,6 +407,16 @@ fire", never zero.
 - `executable_unavailable` — `true` when the guest looked up its own
   executable (`/proc/self/exe`, `/proc/self/maps`), which the simulated
   filesystem does not hold: a backtrace it printed has no symbols.
+- `likely_artifacts[]` — on a run that did not end clean, what points at the
+  simulated world rather than the program; beside the class, never changing it
+  or the exit status. `{kind: "missing_host_path", path, mount}`: the guest
+  opened or stat'ed an absolute path the run was not given and the host has
+  (judged by the supervisor after the run, never by the guest), and
+  `--mount <mount>` provides it. `{kind: "patina_limit", limit}`: the run
+  stopped on Patina's `step_budget` or `compute_bound`. The human format
+  prints each as a `patina: likely artifact:` line. It depends on the host the
+  run ended on, so it is not part of the run's identity; paths under `/etc`,
+  `/usr` and the pseudo filesystems are never flagged, nor are relative paths.
 - `sdk` — the cooperative-SUT site accounting when the run declared or
   evaluated a site: `enabled`, `swarm_deselected`, the fire/activation
   permille, `sites_registered`, `sites_activated`, `total_firings`, the

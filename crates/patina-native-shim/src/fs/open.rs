@@ -272,6 +272,24 @@ pub(crate) unsafe fn open_at(
     mode: u32,
     scope: u32,
 ) -> c_int {
+    // SAFETY: forwarded from the caller.
+    let opened = unsafe { open_resolved(dirfd, path, flags, mode, scope) };
+    // SAFETY: as above, `path` is a readable NUL-terminated string.
+    unsafe { super::note_missing(opened, path) };
+    opened
+}
+
+/// [`open_at`] before its missing path is noted.
+///
+/// # Safety
+/// As [`open_at`].
+unsafe fn open_resolved(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    mode: u32,
+    scope: u32,
+) -> c_int {
     if flags & !O_ALL != 0 {
         return fail(EINVAL);
     }

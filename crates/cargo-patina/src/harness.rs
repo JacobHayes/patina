@@ -133,7 +133,7 @@ pub(crate) struct RunFlags {
     pub(crate) cpus: Option<u32>,
     pub(crate) params: BTreeMap<String, String>,
     pub(crate) env: BTreeMap<String, String>,
-    pub(crate) mount: Option<PathBuf>,
+    pub(crate) mount: Option<crate::mount::Mount>,
     pub(crate) knobs: KnobValues,
     pub(crate) buggify: Option<NativeBuggify>,
     pub(crate) schedule: NativeSchedule,

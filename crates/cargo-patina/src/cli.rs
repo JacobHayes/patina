@@ -473,6 +473,13 @@ impl Args {
         self.matches.get_one::<OsString>(name).map(PathBuf::from)
     }
 
+    /// A `--mount HOST_DIR[:GUEST_DIR]` value ([`crate::mount::Mount`]).
+    pub(crate) fn mount(&self, name: &str) -> Result<Option<crate::mount::Mount>, crate::CliError> {
+        self.path(name)
+            .map(|value| crate::mount::Mount::parse(value.as_os_str()))
+            .transpose()
+    }
+
     /// Every occurrence of a repeatable `Kind::Path` flag, in order.
     pub(crate) fn paths(&self, name: &str) -> Vec<PathBuf> {
         let _ = self.flag_of(name);

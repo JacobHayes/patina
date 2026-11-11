@@ -303,7 +303,7 @@ impl CampaignSpec {
                 // carries the directory and the corpus hash it started from.
                 "mount" => {
                     self.mount = Some(match val {
-                        serde_json::Value::String(dir) => Mount::unresolved(dir),
+                        serde_json::Value::String(value) => Mount::unresolved(value)?,
                         serde_json::Value::Object(recorded) => {
                             let field = |name: &str| {
                                 recorded.get(name).and_then(|v| v.as_str()).ok_or_else(|| {
@@ -314,8 +314,22 @@ impl CampaignSpec {
                             if hash.is_empty() {
                                 return Err(CliError("mount.hash must not be empty".into()));
                             }
+                            // Omitted for a mount at `/`.
+                            let guest = match recorded.get("guest") {
+                                None => "/",
+                                Some(_) => field("guest")?,
+                            };
+                            let parsed = Mount::unresolved(&format!("x:{guest}"))
+                                .ok()
+                                .filter(|parsed| parsed.guest == guest)
+                                .ok_or_else(|| {
+                                    CliError(format!(
+                                        "mount.guest {guest:?} is not a normal absolute directory"
+                                    ))
+                                })?;
                             Mount {
                                 dir: field("dir")?.to_string(),
+                                guest: parsed.guest,
                                 hash: hash.to_string(),
                             }
                         }
@@ -647,23 +661,43 @@ pub(super) fn classify_rules_to_json(rules: &ClassifyRules) -> serde_json::Value
 }
 
 /// A campaign's mounted corpus: the absolute directory every generation and
-/// reproduce command names, and the corpus hash the campaign started from, so
-/// a continuation against a corpus that changed is refused rather than mixing
-/// two inputs in one campaign.
+/// reproduce command names, the guest directory it is captured at (`/` unless
+/// `--mount HOST_DIR:GUEST_DIR` named one), and the corpus hash the campaign
+/// started from, so a continuation against a corpus that changed is refused
+/// rather than mixing two inputs in one campaign.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mount {
     pub dir: String,
+    pub guest: String,
     pub hash: String,
 }
 
 impl Mount {
-    /// A directory as the operator named it, before a fresh campaign
+    /// A `--mount` value as the operator wrote it, before a fresh campaign
     /// resolves it ([`resolve_mount`]): parsing touches no filesystem.
-    pub(crate) fn unresolved(dir: &str) -> Self {
-        Mount {
-            dir: dir.to_string(),
+    pub(crate) fn unresolved(value: &str) -> Result<Self, CliError> {
+        let mount = crate::mount::Mount::parse(std::ffi::OsStr::new(value))?;
+        Ok(Mount {
+            dir: mount.host.to_str().expect("split from UTF-8").to_string(),
+            guest: mount.guest,
             hash: String::new(),
+        })
+    }
+
+    /// The mount a generation's `run` is given.
+    pub(crate) fn run_mount(&self) -> crate::mount::Mount {
+        crate::mount::Mount {
+            host: self.dir.clone().into(),
+            guest: self.guest.clone(),
         }
+    }
+
+    /// The `--mount` value every child run and reproduce command takes.
+    pub(crate) fn arg(&self) -> String {
+        self.run_mount()
+            .to_arg()
+            .into_string()
+            .expect("a campaign mount is UTF-8")
     }
 }
 
@@ -671,15 +705,16 @@ impl Mount {
 /// hash, refusing one that is not a directory before any generation runs.
 pub(crate) fn resolve_mount(spec: &mut CampaignSpec) -> Result<(), CliError> {
     if let Some(mount) = &spec.mount {
-        spec.mount = Some(absolute_mount(&mount.dir)?);
+        spec.mount = Some(absolute_mount(mount)?);
     }
     Ok(())
 }
 
-/// A `--mount` directory as an absolute [`Mount`] with its corpus hash: a
-/// relative path would resolve against whichever directory a later
-/// `--extend`, `--resume` or pasted reproduce command runs from.
-pub(crate) fn absolute_mount(dir: &str) -> Result<Mount, CliError> {
+/// A `--mount` as an absolute [`Mount`] with its corpus hash: a relative path
+/// would resolve against whichever directory a later `--extend`, `--resume`
+/// or pasted reproduce command runs from.
+pub(crate) fn absolute_mount(mount: &Mount) -> Result<Mount, CliError> {
+    let dir = &mount.dir;
     let path = std::path::Path::new(dir);
     if !path.is_dir() {
         return Err(CliError(format!(
@@ -688,12 +723,17 @@ pub(crate) fn absolute_mount(dir: &str) -> Result<Mount, CliError> {
     }
     let absolute = std::fs::canonicalize(path)
         .map_err(|error| CliError(format!("campaign --mount {dir:?}: {error}")))?;
-    let hash = crate::native_run::mount_corpus_hash(&absolute)?;
     let dir = absolute
         .to_str()
         .map(str::to_string)
         .ok_or_else(|| CliError(format!("campaign --mount {dir:?} is not a UTF-8 path")))?;
-    Ok(Mount { dir, hash })
+    let mut resolved = Mount {
+        dir,
+        guest: mount.guest.clone(),
+        hash: String::new(),
+    };
+    resolved.hash = crate::native_run::mount_corpus_hash(&resolved.run_mount())?;
+    Ok(resolved)
 }
 
 #[cfg(test)]

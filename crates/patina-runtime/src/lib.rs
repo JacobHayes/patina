@@ -192,6 +192,11 @@ pub const STOP_SCHEMA: &str = "patina.runstop/v1";
 /// different corpus. Off when unset.
 pub const ENV_FS_IMAGE_FD: &str = "PATINA_RT_FS_IMAGE_FD";
 
+/// The most distinct missing paths a run's facts carry
+/// ([`Context::note_missing_path`]): enough for a test's fixtures, few enough
+/// that a guest probing many names cannot bloat every facts document.
+pub const MISSING_PATHS_MAX: usize = 32;
+
 /// Supervisor-owned descriptor the native shim writes a crash-restart handoff to
 /// when the run crashes. Only the native supervisor sets it; ordinary
 /// guest code never sees it after the startup scrub.
@@ -680,6 +685,10 @@ pub struct Context {
     /// Whether the guest looked for its own executable's file, which the
     /// model does not provide ([`Context::note_executable_unavailable`]).
     executable_unavailable: bool,
+    /// The absolute paths the guest opened or stat'ed and found missing
+    /// ([`Context::note_missing_path`]): distinct, in first-seen order, at
+    /// most [`MISSING_PATHS_MAX`].
+    missing_paths: Vec<String>,
     /// Poll escalation state. See [`Escalation`]; inert until a guest polls
     /// without progress, so a run that never does is unchanged by it.
     spin: Escalation,

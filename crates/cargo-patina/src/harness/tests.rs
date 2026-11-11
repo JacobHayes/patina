@@ -310,6 +310,7 @@ fn why_names_the_panic_or_the_stop() {
         stderr: stderr.to_string(),
         message: None,
         trace: None,
+        likely_artifacts: Vec::new(),
     };
     let panicked = run(
         "note: linked\nthread 'a::b' (3) panicked at src/lib.rs:5:26:\nassertion failed\n",

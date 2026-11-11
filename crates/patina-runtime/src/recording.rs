@@ -328,6 +328,9 @@ impl Context {
             if self.executable_unavailable {
                 root.insert("executable_unavailable".into(), true.into());
             }
+            if !self.missing_paths.is_empty() {
+                root.insert("missing_paths".into(), self.missing_paths.clone().into());
+            }
         }
         document
     }
@@ -352,6 +355,21 @@ impl Context {
     /// Carried on the facts channel as `executable_unavailable`.
     pub fn note_executable_unavailable(&mut self) {
         self.executable_unavailable = true;
+    }
+
+    /// Note that the guest opened or stat'ed the absolute `path` and it was
+    /// not there. Carried on the facts channel as `missing_paths` (distinct,
+    /// first seen first, at most [`MISSING_PATHS_MAX`]), so the supervisor
+    /// can tell, after the run and outside it, whether the guest looked for a
+    /// host file the simulated filesystem was never given. Nothing here or in
+    /// the guest learns whether the host has it.
+    pub fn note_missing_path(&mut self, path: &str) {
+        if path.starts_with('/')
+            && self.missing_paths.len() < crate::MISSING_PATHS_MAX
+            && !self.missing_paths.iter().any(|seen| seen == path)
+        {
+            self.missing_paths.push(path.to_owned());
+        }
     }
 
     /// Hand back a runtime-detected error, first noting it on the facts channel

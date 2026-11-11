@@ -29,6 +29,9 @@ pub(crate) struct SeedRun {
     // Choke point: a trace is taken only from the child's own receipt, never
     // inferred from a requested path or a file an earlier run left.
     pub(crate) trace: Option<output::TraceFacts>,
+    /// The child's `likely_artifacts`: what points at the simulated world
+    /// rather than the test, beside its class.
+    pub(crate) likely_artifacts: Vec<serde_json::Value>,
 }
 
 impl SeedRun {
@@ -42,6 +45,7 @@ impl SeedRun {
             stderr: String::new(),
             message: None,
             trace: None,
+            likely_artifacts: Vec::new(),
         }
     }
 }
@@ -440,7 +444,7 @@ fn list_command(
     }
     if let Some(mount) = &invocation.run.mount {
         args.push("--mount".into());
-        args.push(mount.into());
+        args.push(mount.to_arg());
     }
     if invocation.run.allow_randomized_layout {
         args.push("--allow-randomized-address-layout".into());
@@ -539,14 +543,16 @@ fn run_child(invocation: &TestInvocation, mut command: Command) -> Result<SeedRu
     let stdout = stdout.join().unwrap_or_default();
     let stderr = stderr.join().unwrap_or_default();
     if timed_out {
-        return Ok(SeedRun::patina_failed(
+        let mut run = SeedRun::patina_failed(
             RunClass::Timeout,
             BACKSTOP_STOP,
             format!(
                 "the run did not finish within {} s of host time (--timeout-secs)",
                 invocation.timeout_secs
             ),
-        ));
+        );
+        run.likely_artifacts = vec![output::limit_artifact(BACKSTOP_STOP)];
+        return Ok(run);
     }
     seed_outcome(status, &stdout, &stderr)
 }
@@ -634,6 +640,11 @@ pub(crate) fn seed_outcome(
             .map(serde_json::from_value)
             .transpose()
             .map_err(|error| CliError(format!("invalid trace receipt in a child run: {error}")))?,
+        likely_artifacts: envelope
+            .get("likely_artifacts")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
     })
 }
 
@@ -697,7 +708,7 @@ pub(crate) fn push_run_flags(args: &mut Vec<OsString>, run: &RunFlags) {
     }
     if let Some(mount) = &run.mount {
         args.push("--mount".into());
-        args.push(mount.into());
+        args.push(mount.to_arg());
     }
     let optional = |flag: &str, value: Option<&str>| {
         value.map(|value| {

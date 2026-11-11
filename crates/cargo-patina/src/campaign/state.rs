@@ -574,10 +574,11 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         map.insert("cpus".into(), cpus.into());
     }
     if let Some(mount) = &spec.mount {
-        map.insert(
-            "mount".into(),
-            serde_json::json!({"dir": mount.dir, "hash": mount.hash}),
-        );
+        let mut recorded = serde_json::json!({"dir": mount.dir, "hash": mount.hash});
+        if mount.guest != "/" {
+            recorded["guest"] = mount.guest.clone().into();
+        }
+        map.insert("mount".into(), recorded);
     }
     if let Some(value) = spec.watchdog_nanos {
         map.insert("watchdog_nanos".into(), value.into());
@@ -749,11 +750,11 @@ pub(super) fn verify_campaign_build(state: &CampaignState) -> Result<(), CliErro
 /// generation captures the directory afresh, so a changed corpus would put two
 /// different inputs into one campaign's outcomes and coverage.
 fn verify_mount_corpus(mount: &super::spec::Mount) -> Result<(), CliError> {
-    let current = crate::native_run::mount_corpus_hash(Path::new(&mount.dir)).map_err(|error| {
+    let current = crate::native_run::mount_corpus_hash(&mount.run_mount()).map_err(|error| {
         CliError(format!(
             "campaign out-dir records --mount {} but it cannot be captured: {error}; start a new \
              out-dir if the corpus moved",
-            mount.dir
+            mount.arg()
         ))
     })?;
     if current != mount.hash {
@@ -761,7 +762,8 @@ fn verify_mount_corpus(mount: &super::spec::Mount) -> Result<(), CliError> {
             "campaign out-dir records --mount {} with corpus hash {} but it now hashes {current}; \
              the corpus changed since this campaign started. Restore it, or start a new out-dir \
              for the new corpus.",
-            mount.dir, mount.hash
+            mount.arg(),
+            mount.hash
         )));
     }
     Ok(())
@@ -1054,7 +1056,10 @@ mod tests {
     fn a_continuation_refuses_a_corpus_that_changed() {
         let corpus = tempfile::tempdir().unwrap();
         fs::write(corpus.path().join("f"), b"bad").unwrap();
-        let mount = super::super::spec::absolute_mount(corpus.path().to_str().unwrap()).unwrap();
+        let mount = super::super::spec::absolute_mount(
+            &super::super::spec::Mount::unresolved(corpus.path().to_str().unwrap()).unwrap(),
+        )
+        .unwrap();
         verify_mount_corpus(&mount).expect("the recorded corpus verifies");
         fs::write(corpus.path().join("f"), b"good").unwrap();
         let error = verify_mount_corpus(&mount).expect_err("a changed corpus is refused");

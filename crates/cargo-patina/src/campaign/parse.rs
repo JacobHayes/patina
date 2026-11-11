@@ -154,7 +154,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
                 dir.display()
             ))
         })?;
-        spec.mount = Some(super::spec::Mount::unresolved(dir));
+        spec.mount = Some(super::spec::Mount::unresolved(dir)?);
     }
     if let Some(value) = args.u64("--compute-watchdog-ms") {
         spec.compute_watchdog_ms = Some(value);

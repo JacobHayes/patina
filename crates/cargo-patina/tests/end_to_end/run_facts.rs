@@ -358,4 +358,106 @@ fn main() {{
         assert_eq!(clean["result"], "ok", "{clean:#}");
         assert!(clean["executable_unavailable"].is_null(), "{clean:#}");
     }
+
+    /// A run that fails because the guest read a host path the simulated
+    /// filesystem was never given says so beside its class: the class and
+    /// the exit status are the failure's, and `likely_artifacts` names the
+    /// path and the `--mount` that provides it. That mount, at the directory's
+    /// own path, makes the run pass and replays; a path the host lacks too,
+    /// and a run that read nothing missing, carry no such entry.
+    #[test]
+    fn a_host_path_the_run_was_not_given_is_a_likely_artifact() {
+        let source = r#"
+fn main() {
+    let path = std::env::args().nth(1).expect("a path to read");
+    let text = std::fs::read_to_string(&path).expect("the fixture is readable");
+    assert_eq!(text, "fixture\n");
+}
+"#;
+        let guest = super::shared_guest("host-path-guest", |directory| {
+            build_facts_guest(directory, "host_path", source)
+        });
+        let guest = guest.to_str().unwrap();
+        let host = tempdir().unwrap();
+        let fixtures = fs::canonicalize(host.path()).unwrap().join("fixtures");
+        fs::create_dir(&fixtures).unwrap();
+        let fixture = fixtures.join("data.txt");
+        fs::write(&fixture, "fixture\n").unwrap();
+        let (fixtures, fixture) = (fixtures.to_str().unwrap(), fixture.to_str().unwrap());
+        let own_path = format!("{fixtures}:{fixtures}");
+        let run = |arguments: &[&str]| {
+            let output = invoke_with_deadline(
+                env!("CARGO_BIN_EXE_patina"),
+                native_workspace(),
+                arguments,
+                Duration::from_secs(20),
+            )
+            .expect("the run terminates");
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .unwrap_or_else(|error| {
+                    panic!("{error}:\n{}", String::from_utf8_lossy(&output.stderr))
+                });
+            assert_eq!(
+                output.status.code(),
+                envelope["exit_code"].as_i64().map(|code| code as i32),
+                "{envelope:#}"
+            );
+            envelope
+        };
+        let artifacts = |envelope: &serde_json::Value| -> Vec<(String, String)> {
+            envelope["likely_artifacts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|artifact| {
+                    let field = |key| artifact[key].as_str().unwrap_or_default().to_string();
+                    (field("kind"), field("path"))
+                })
+                .collect()
+        };
+
+        let unmounted = run(&["run", guest, "--format", "json", "--", fixture]);
+        assert_eq!(unmounted["result"], "failure", "{unmounted:#}");
+        assert_eq!(unmounted["exit_code"], 1, "{unmounted:#}");
+        assert_eq!(
+            artifacts(&unmounted),
+            [("missing_host_path".to_string(), fixture.to_string())],
+            "{unmounted:#}"
+        );
+        assert_eq!(unmounted["likely_artifacts"][0]["mount"], own_path);
+
+        // Mounted at `/`, the corpus is there under another name: the path
+        // the guest named is still one it was not given.
+        let at_root = run(&[
+            "run", guest, "--format", "json", "--mount", fixtures, "--", fixture,
+        ]);
+        assert_eq!(at_root["result"], "failure", "{at_root:#}");
+        assert_eq!(artifacts(&at_root), artifacts(&unmounted), "{at_root:#}");
+
+        let absent = format!("{fixtures}/absent.txt");
+        let nowhere = run(&["run", guest, "--format", "json", "--", &absent]);
+        assert_eq!(nowhere["result"], "failure", "{nowhere:#}");
+        assert!(nowhere["likely_artifacts"].is_null(), "{nowhere:#}");
+
+        let trace_dir = tempdir().unwrap();
+        let trace = trace_dir.path().join("mounted.patina");
+        let trace = trace.to_str().unwrap();
+        let mounted = run(&[
+            "run", guest, "--format", "json", "--mount", &own_path, "--record", trace, "--",
+            fixture,
+        ]);
+        assert_eq!(mounted["result"], "ok", "{mounted:#}");
+        assert!(mounted["likely_artifacts"].is_null(), "{mounted:#}");
+        let replayed = run(&[
+            "replay", guest, trace, "--format", "json", "--mount", &own_path,
+        ]);
+        assert_eq!(replayed["result"], "ok", "{replayed:#}");
+        // The guest directory is part of the corpus a trace pins.
+        let elsewhere = format!("{fixtures}:/elsewhere");
+        let moved = run(&[
+            "replay", guest, trace, "--format", "json", "--mount", &elsewhere,
+        ]);
+        assert_eq!(moved["result"], "error", "{moved:#}");
+        assert_eq!(moved["stop"]["mismatch"], "mount_contents", "{moved:#}");
+    }
 }

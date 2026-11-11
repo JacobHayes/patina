@@ -66,4 +66,10 @@ impl Bookkeeping<'_> {
     pub fn guest_cwd(&self) -> Option<&str> {
         self.context.guest_cwd()
     }
+
+    /// [`Context::note_missing_path`]: a fact for the supervisor, nothing the
+    /// guest can observe.
+    pub fn note_missing_path(&mut self, path: &str) {
+        self.context.note_missing_path(path);
+    }
 }

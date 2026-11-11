@@ -344,4 +344,9 @@ Current limits. Each fails loudly rather than silently:
   `addr2line -f -C -e <binary> <address - load address>` (the load address
   is `0x555555554000` on x86_64 Linux with address randomization off).
 - Host-facing escape hatches (allowlisted host files via `--mount`) are
-  explicit, read-only, and fingerprinted — never ambient.
+  explicit, read-only, and fingerprinted — never ambient. `patina test`
+  mounts nothing by default, so a test that reads a fixture by its absolute
+  host path (`env!("CARGO_MANIFEST_DIR")`) fails; the failure keeps its class
+  and is flagged as a likely artifact naming the path and the
+  `--mount HOST_DIR:GUEST_DIR` that provides it (`--mount $PWD:$PWD` mounts
+  the package at its own path).

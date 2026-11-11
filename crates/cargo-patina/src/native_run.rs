@@ -99,11 +99,11 @@ fn stage_guest_stdin(bytes: &[u8]) -> Result<fs::File, CliError> {
     Ok(file)
 }
 
-/// The fingerprint hash (`<contents>.<metadata>`) a run's `--mount` of
-/// `host_dir` folds into its trace, for a caller that pins a corpus across
-/// runs (a campaign and its continuations).
-pub(crate) fn mount_corpus_hash(host_dir: &Path) -> Result<String, CliError> {
-    Ok(build_fs_image_file(host_dir)?.hash)
+/// The fingerprint hash (`<contents>.<metadata>`) a run's `--mount` folds
+/// into its trace, for a caller that pins a corpus across runs (a campaign
+/// and its continuations).
+pub(crate) fn mount_corpus_hash(mount: &crate::mount::Mount) -> Result<String, CliError> {
+    Ok(build_fs_image_file(mount)?.hash)
 }
 pub(super) use gate::emit_native_deny_trap_note;
 use gate::native_prerun_gate;
@@ -294,7 +294,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // filesystem. The image hash folds into the fingerprint below so a replay
     // against a different corpus is rejected exactly like any incompatibility.
     let image_file = match &invocation.mount {
-        Some(host_dir) => Some(build_fs_image_file(host_dir)?),
+        Some(mount) => Some(build_fs_image_file(mount)?),
         None => None,
     };
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
@@ -337,10 +337,9 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             && let Some(mismatch) = FsImageHash::mismatch(recorded, current)
         {
             let message = format!(
-                "--mount {} is not the corpus this trace recorded: {}. Replay against the \
-                 recorded corpus (trace {IMAGE_FINGERPRINT_COMPONENT}{recorded}, this corpus \
+                "--mount {host_dir} is not the corpus this trace recorded: {}. Replay against \
+                 the recorded corpus (trace {IMAGE_FINGERPRINT_COMPONENT}{recorded}, this corpus \
                  {IMAGE_FINGERPRINT_COMPONENT}{current})",
-                host_dir.display(),
                 mismatch.describe()
             );
             let mut stop = output::Stop::new(output::TRACE_MISMATCH_STOP, message);
@@ -914,6 +913,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             qualifications,
             rust_program: crate::native_build::started_by_rust_runtime(image.bytes()),
             reproduce,
+            mount: invocation.mount.clone(),
         },
         captured,
     )?;

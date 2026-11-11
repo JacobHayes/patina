@@ -339,7 +339,7 @@ fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
         push_run_flag(&mut flags, "--cpus", RunValue::Int(u64::from(cpus)));
     }
     if let Some(mount) = &spec.mount {
-        push_run_flag(&mut flags, "--mount", RunValue::Text(mount.dir.clone()));
+        push_run_flag(&mut flags, "--mount", RunValue::Text(mount.arg()));
     }
     flags
 }

@@ -54,6 +54,9 @@ pub(super) fn progress(
     );
     if let Some((seed, run)) = deciding {
         line.push_str(&format!(" seed {seed}: {}", why(run)));
+        if !run.likely_artifacts.is_empty() {
+            line.push_str(" [likely artifact]");
+        }
     }
     if finished == total {
         line.push_str(&format!("  [{elapsed:.1}s]"));
@@ -193,6 +196,9 @@ fn run_json(run: &SeedRun) -> Value {
     }
     if let Some(exit) = &run.guest_exit {
         value["guest_exit"] = exit.clone();
+    }
+    if !run.likely_artifacts.is_empty() {
+        value["likely_artifacts"] = json!(run.likely_artifacts);
     }
     value
 }
@@ -419,6 +425,14 @@ impl Outcome<'_> {
                 problem.target.label()
             );
             println!("    {}", Self::problem_why(problem));
+            for line in problem
+                .run
+                .into_iter()
+                .flat_map(|run| &run.likely_artifacts)
+                .filter_map(output::describe_artifact)
+            {
+                println!("    likely artifact: {line}");
+            }
             if let Some(rerun) = self.rerun(problem) {
                 println!("    rerun:  {rerun}");
             }
@@ -505,6 +519,9 @@ impl Outcome<'_> {
                     }
                     if let Some(exit) = &run.guest_exit {
                         entry["guest_exit"] = exit.clone();
+                    }
+                    if !run.likely_artifacts.is_empty() {
+                        entry["likely_artifacts"] = json!(run.likely_artifacts);
                     }
                     if let Some(problem) = problem {
                         entry["accepted"] = json!(problem.accepted);

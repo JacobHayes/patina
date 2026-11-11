@@ -10,7 +10,7 @@ pub(super) const RUN: Verb = Verb {
     name: "run",
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
-        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--mount HOST_DIR] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--mount HOST_DIR[:GUEST_DIR]] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
         "patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -105,8 +105,8 @@ Reproduce a recorded run with `patina replay`.",
                 f(
                     "--mount",
                     None,
-                    Value::Required("HOST_DIR", Kind::Path),
-                    "Capture a host directory read-only (contents, modes, mtimes and the hard links among its names) into the guest filesystem at `/`.",
+                    Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
+                    "Capture a host directory read-only (contents, modes, mtimes and the hard links among its names) into the guest filesystem at GUEST_DIR, `/` unless one is named; `--mount $PWD:$PWD` keeps absolute host paths working.",
                     false,
                 ),
                 f(
@@ -388,8 +388,8 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                 f(
                     "--mount",
                     None,
-                    Value::Required("HOST_DIR", Kind::Path),
-                    "Capture a host directory read-only into every test's filesystem at `/`, where a test's relative paths resolve (its working directory is `/`).",
+                    Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
+                    "Capture a host directory read-only into every test's filesystem at GUEST_DIR, `/` unless one is named: at `/` a test's relative paths resolve (its working directory is `/`); at the package's own path (`--mount $PWD:$PWD`) its absolute ones (`env!(\"CARGO_MANIFEST_DIR\")`) do.",
                     false,
                 ),
                 Flag {
@@ -643,8 +643,8 @@ only --mount, --coverage-out, --compute-watchdog-ms, the \
             f(
                 "--mount",
                 None,
-                Value::Required("HOST_DIR", Kind::Path),
-                "Re-supply the host corpus whose hash (contents, then modes and mtimes) the fingerprint verifies.",
+                Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
+                "Re-supply the host corpus, at the guest directory it was recorded at, whose hash (contents and guest paths, then modes and mtimes) the fingerprint verifies.",
                 false,
             ),
             f(

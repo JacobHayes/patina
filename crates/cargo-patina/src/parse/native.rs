@@ -95,7 +95,7 @@ pub(crate) fn parse_test_from(
             cpus: args.u32("--cpus"),
             params: key_values(&args, "--param")?,
             env: key_values(&args, "--env")?,
-            mount: args.path("--mount"),
+            mount: args.mount("--mount")?,
             knobs: knobs_of(&args)?,
             buggify: buggify_of(&args),
             schedule: schedule_of(&args),
@@ -377,7 +377,7 @@ pub(crate) fn parse_native_run_from(
         allow: allow_of(&args),
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
-        mount: args.path("--mount"),
+        mount: args.mount("--mount")?,
         stdin: args.path("--stdin"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })
@@ -440,7 +440,7 @@ pub(crate) fn parse_native_replay(
         allow: allow_of(&args),
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
-        mount: args.path("--mount"),
+        mount: args.mount("--mount")?,
         stdin: args.path("--stdin"),
         allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
     })

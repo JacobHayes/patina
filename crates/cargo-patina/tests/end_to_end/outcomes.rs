@@ -216,6 +216,19 @@ fn run_reports_every_ending_under_one_class_and_exit_status() {
             "{}: a run that did not end clean names what stopped it: {envelope:#}",
             ending.mode
         );
+        // A run Patina stopped on a bound of its own says so beside its
+        // class, and only such a run does.
+        let limited = envelope["likely_artifacts"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .any(|artifact| artifact["kind"] == "patina_limit");
+        assert_eq!(
+            limited,
+            ending.result == "timeout",
+            "{}: {envelope:#}",
+            ending.mode
+        );
         // The guest's own status is reported beside the tool's, wherever a
         // guest ran (a platform's pre-run audit may refuse `fork` outright).
         assert!(

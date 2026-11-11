@@ -346,6 +346,24 @@ pub(crate) unsafe fn metadata_at(
     out: *mut PatinaMetadata,
     lookup: MetadataLookup,
 ) -> c_int {
+    // SAFETY: forwarded from the caller.
+    let found = unsafe { metadata_resolved(dirfd, path, flags, out, lookup) };
+    // SAFETY: as above, `path` is a readable NUL-terminated string.
+    unsafe { super::note_missing(found, path) };
+    found
+}
+
+/// [`metadata_at`] before its missing path is noted.
+///
+/// # Safety
+/// As [`metadata_at`].
+unsafe fn metadata_resolved(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: u32,
+    out: *mut PatinaMetadata,
+    lookup: MetadataLookup,
+) -> c_int {
     if flags & !paths::RESOLVE_AT_FLAGS != 0 {
         return fail(EINVAL);
     }

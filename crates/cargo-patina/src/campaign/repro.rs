@@ -289,6 +289,41 @@ mod tests {
         }
     }
 
+    /// A corpus mounted at a guest directory keeps it: in the state a
+    /// continuation reads, in the corpus hash it pins, and in the flag every
+    /// generation and reproduce command takes.
+    #[test]
+    fn a_mount_at_a_guest_directory_keeps_it_everywhere() {
+        let corpus = tempfile::tempdir().unwrap();
+        std::fs::write(corpus.path().join("f"), b"one").unwrap();
+        let host = std::fs::canonicalize(corpus.path()).unwrap();
+        let host = host.to_str().unwrap();
+        let value = format!("{host}:/data/in");
+        let mut spec = parse(
+            ["art", "--mount", value.as_str()]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap()
+        .spec;
+        super::super::spec::resolve_mount(&mut spec).unwrap();
+        let mount = spec.mount.clone().unwrap();
+        assert_eq!(
+            (mount.dir.as_str(), mount.guest.as_str()),
+            (host, "/data/in")
+        );
+        assert_eq!(invocation_flags(&spec), ["--mount", value.as_str()]);
+        assert_eq!(spec_from_state_json(&spec_to_json(&spec)).unwrap(), spec);
+        let mut at_root = mount.clone();
+        at_root.guest = "/".into();
+        assert_ne!(
+            super::super::spec::absolute_mount(&at_root).unwrap().hash,
+            mount.hash,
+            "the guest directory is part of the corpus"
+        );
+    }
+
     #[test]
     fn a_mounted_corpus_reaches_every_generation_and_reproduce_command() {
         let corpus = tempfile::tempdir().unwrap();
@@ -346,7 +381,7 @@ mod tests {
         let reloaded = spec_from_state_json(&state_spec).unwrap();
         assert_eq!(reloaded.mount, Some(mount.clone()));
         std::fs::write(nested.join("f"), b"two").unwrap();
-        let changed = super::super::spec::absolute_mount(absolute.to_str().unwrap()).unwrap();
+        let changed = super::super::spec::absolute_mount(&mount).unwrap();
         assert_ne!(
             changed.hash, mount.hash,
             "the corpus hash must see a content change"

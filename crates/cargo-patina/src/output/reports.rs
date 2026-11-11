@@ -67,6 +67,9 @@ pub struct RunReport<'a> {
     /// The command that repeats this run, for a run that does not end clean:
     /// the replay of its recording when it kept one, else the `run` itself.
     pub reproduce: Option<String>,
+    /// The host directory the run's filesystem was captured from, which a
+    /// likely artifact's missing host path is judged against.
+    pub mount: Option<crate::mount::Mount>,
 }
 
 /// Why a run's recording is not at the path it was asked for.
@@ -129,6 +132,15 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
             .is_some_and(|trace| trace.reason == "resource_limit"),
     });
     let failed = outcome.class.is_failure();
+    let likely_artifacts = if failed {
+        super::artifacts::likely_artifacts(
+            outcome.stop.as_ref().map(|stop| stop.reason.as_str()),
+            report.facts.as_ref(),
+            report.mount.as_ref(),
+        )
+    } else {
+        Vec::new()
+    };
     let guest_exit = GuestExit {
         code: captured.exit_code,
         signal: captured.signal,
@@ -233,6 +245,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
         }
+        env.likely_artifacts = likely_artifacts;
         env.stop = outcome.stop.clone();
         if failed {
             env.reproduce = report.reproduce.clone();
@@ -269,6 +282,12 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
                  it printed has no symbols; RUST_BACKTRACE=full prints the frames' addresses, \
                  which addr2line resolves against the binary (docs/GUIDE.md, \"Backtraces\")"
             );
+        }
+        for line in likely_artifacts
+            .iter()
+            .filter_map(super::artifacts::describe)
+        {
+            eprintln!("patina: likely artifact: {line}");
         }
         if let Some(headline) = outcome.headline(Some(&guest_exit)) {
             // The one line that says whose move it is, after everything the guest

@@ -19,6 +19,7 @@ use crate::CliError;
 use crate::help::{self, Flag};
 use crate::render::{self, FailureSummary};
 
+mod artifacts;
 mod capture;
 mod envelope;
 mod markers;
@@ -26,6 +27,7 @@ mod outcomes;
 pub mod progress;
 mod reports;
 
+pub use artifacts::{describe as describe_artifact, limit_artifact};
 pub use capture::Captured;
 pub use capture::StopChannel;
 pub use capture::capture_active;

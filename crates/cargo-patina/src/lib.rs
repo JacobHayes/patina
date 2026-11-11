@@ -42,6 +42,7 @@ mod help;
 mod lifeline;
 mod load_set;
 mod minimize;
+mod mount;
 mod native_build;
 mod native_run;
 mod output;
@@ -254,13 +255,13 @@ struct NativeRunInvocation {
     /// `PATINA_RT_COVERAGE_FD`, so the shim never opens it through the deterministic
     /// filesystem. Native yield-point binaries only.
     coverage_out: Option<PathBuf>,
-    /// Host directory to capture read-only into the guest filesystem, mounted at
-    /// the guest root `/`. When set, the supervisor (which is not interposed)
+    /// Host directory to capture read-only into the guest filesystem, at the
+    /// guest directory the mount names (`/` by default). When set, the supervisor (which is not interposed)
     /// walks the tree into a deterministic `FsImage`, streams it to the guest
     /// over an inherited descriptor, and the shim rebuilds it as the
     /// deterministic filesystem. The image hash is folded into the run
     /// fingerprint so replay rejects a different corpus.
-    mount: Option<PathBuf>,
+    mount: Option<mount::Mount>,
     /// Host file whose bytes are the guest's standard input (`--stdin`): read
     /// by the supervisor, streamed over an inherited descriptor, recorded into
     /// the trace, and on replay checked against the recording.

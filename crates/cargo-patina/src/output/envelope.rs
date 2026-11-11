@@ -64,6 +64,10 @@ pub struct Envelope {
     /// not provide (`patina.runfacts/v1`'s `executable_unavailable`): a
     /// backtrace it printed has no symbols.
     pub(super) executable_unavailable: bool,
+    /// What points at the simulated world rather than the program, for a run
+    /// that did not end clean (`output::artifacts`): beside the class, never
+    /// changing it.
+    pub(crate) likely_artifacts: Vec<serde_json::Value>,
     /// Native crash-restart facts, if the supervisor performed a modeled
     /// restart. `terminal_outcome.kind` is [`CRASH_REPLAY_DIVERGED`] for a
     /// replay that departed from its recording at or before the crash.
@@ -114,6 +118,7 @@ impl Envelope {
             cpu_charges: None,
             replay_divergence: None,
             executable_unavailable: false,
+            likely_artifacts: Vec::new(),
             crash_restart: None,
             qualifications: Vec::new(),
             stop: None,
@@ -216,6 +221,12 @@ impl Envelope {
         }
         if self.executable_unavailable {
             m.insert("executable_unavailable".into(), Value::from(true));
+        }
+        if !self.likely_artifacts.is_empty() {
+            m.insert(
+                "likely_artifacts".into(),
+                Value::Array(self.likely_artifacts.clone()),
+            );
         }
         if let Some(v) = &self.crash_restart {
             m.insert("crash_restart".into(), v.clone());
