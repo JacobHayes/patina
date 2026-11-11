@@ -22,6 +22,49 @@ use serde_json::Value;
 /// A child process's filesystem: the root's, over the channel.
 pub(crate) struct RemoteFs;
 
+/// What a served call does to the handles its process holds open: a call
+/// that opens one adds it, a close removes it.
+pub(super) enum Call {
+    Opens,
+    Closes(Option<Fd>),
+    Other,
+}
+
+impl Call {
+    pub(super) fn of(request: &Value) -> Call {
+        let name = request.get(0).and_then(Value::as_str).unwrap_or_default();
+        match name {
+            "open"
+            | "dup"
+            | "open_path_unfaulted"
+            | "create_anonymous"
+            | "create_input_file_unfaulted" => Call::Opens,
+            "close" => Call::Closes(
+                request
+                    .get(1)
+                    .and_then(|fd| serde_json::from_value(fd.clone()).ok()),
+            ),
+            _ => Call::Other,
+        }
+    }
+
+    /// Note `answer`, the call's `DriverResult`, in `held`.
+    pub(super) fn note(self, answer: &Value, held: &mut std::collections::BTreeSet<Fd>) {
+        let ok = answer.get("Ok");
+        match self {
+            Call::Opens => {
+                if let Some(fd) = ok.and_then(|fd| serde_json::from_value(fd.clone()).ok()) {
+                    held.insert(fd);
+                }
+            }
+            Call::Closes(Some(fd)) if ok.is_some() => {
+                held.remove(&fd);
+            }
+            Call::Closes(_) | Call::Other => {}
+        }
+    }
+}
+
 /// Ask the hub to run one driver call and wait for its answer.
 fn remote(request: Value) -> Value {
     let payload = serde_json::to_vec(&request).unwrap_or_else(|error| {

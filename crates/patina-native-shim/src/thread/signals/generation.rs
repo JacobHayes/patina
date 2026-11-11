@@ -80,6 +80,34 @@ pub(crate) unsafe fn generate_signal(
             if forged && pid != current_tid() {
                 return -i64::from(EPERM);
             }
+            // Another process of the machine: `SIGKILL` and the probe cross
+            // processes; a group while several live is not modeled.
+            #[cfg(target_os = "linux")]
+            {
+                use crate::machine;
+                let own = crate::patina_pid();
+                let init = crate::registry::INIT_PID as i32;
+                if pid <= 0 && !queued && machine::others_live() {
+                    crate::trap_unmodeled(
+                        "a signal to a process group, or to every process, while the guest's \
+machine holds several processes is not modeled",
+                    );
+                }
+                if pid > 0 && pid != own && pid != init && valid && !queued {
+                    if machine::is_child() {
+                        return machine::signal_from_child(pid, sig);
+                    }
+                    if let Some(answer) = machine::signal_child(pid, sig) {
+                        if answer == machine::UNMODELED_SIGNAL {
+                            crate::trap_unmodeled(&format!(
+                                "signal {sig} to process {pid} of the guest's machine is not \
+modeled (only SIGKILL and the probe, signal 0, cross processes)"
+                            ));
+                        }
+                        return answer;
+                    }
+                }
+            }
             // A queued signal names one process; `kill` also names groups.
             // Every signal reaching another process here comes from user
             // space (a kernel code to another pid was refused as forged), so

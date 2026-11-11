@@ -19,6 +19,8 @@ pub(crate) fn flock(raw_fd: c_int, operation: c_int) -> crate::abi::SysResult<c_
         set_errno(0);
         return Ok(0);
     }
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("a file lock (flock)");
     let non_blocking = operation & LOCK_NB != 0;
     let mode = match operation & !LOCK_NB {
         LOCK_UN => None,
@@ -219,6 +221,8 @@ pub unsafe fn patina_record_lock(raw_fd: c_int, command: u32, lock: *mut PatinaF
     ) {
         return fail(EINVAL);
     }
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("a record lock (fcntl)");
     let resolved = match fdget(raw_fd) {
         Ok(resolved) => resolved,
         Err(errno) => return fail(errno),

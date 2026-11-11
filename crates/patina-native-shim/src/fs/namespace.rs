@@ -141,6 +141,10 @@ pub unsafe fn patina_mknod(dirfd: c_int, path: *const c_char, mode: u32, dev: u3
     if cfg!(target_os = "macos") && kind != S_IFIFO {
         return fail(EPERM);
     }
+    #[cfg(target_os = "linux")]
+    if kind == S_IFIFO {
+        crate::machine::refuse_shared("a FIFO");
+    }
     let node = match kind {
         0 | S_IFREG => FsNode::File,
         S_IFIFO => FsNode::Fifo,

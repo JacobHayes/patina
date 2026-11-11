@@ -90,6 +90,11 @@ pub(crate) fn init_from_env() -> c_int {
         if let Some(fd) = control_facts_fd()? {
             builder = builder.with_facts_sink(FdFactsSink { fd });
         }
+        // A child's facts go to the hub, which writes the run's.
+        #[cfg(target_os = "linux")]
+        if crate::machine::is_child() {
+            builder = builder.with_facts_sink(crate::machine::ChannelFactsSink);
+        }
         if let Some(fd) = control_crash_report_fd()? {
             builder = builder.with_crash_attempt_sink(FdCrashAttemptSink { fd });
         }

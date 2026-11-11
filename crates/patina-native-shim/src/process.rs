@@ -264,8 +264,16 @@ pub(crate) fn record_stop(stop: RunStop<'_>) {
 /// [`record_stop`] through `send`, for the one stop that precedes the host
 /// alias table: a host symbol that would not resolve.
 pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int, &[u8])) {
-    let Some(fd) = stop_record_fd() else {
-        return;
+    // A child of the machine has no stop pipe: it ships the record to the
+    // root, which ends the run with it, naming the child.
+    #[cfg(target_os = "linux")]
+    let child = crate::machine::is_child();
+    #[cfg(not(target_os = "linux"))]
+    let child = false;
+    let fd = match stop_record_fd() {
+        Some(fd) => fd,
+        None if child => -1,
+        None => return,
     };
     // No longer than the smallest atomic pipe write (512 bytes on macOS), so
     // two threads stopping at once cannot interleave their records.
@@ -330,6 +338,11 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
     // Room for the closing quote, the guest status, the sampled site and the
     // document's end.
     const TAIL: usize = 96;
+    if child {
+        record.raw(b"process ");
+        record.number(i64::from(crate::patina_pid()));
+        record.raw(b": ");
+    }
     for part in stop.detail {
         record.escaped(part, TAIL);
     }
@@ -343,6 +356,11 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
         record.number(delta as i64);
     }
     record.raw(b"}}\n");
+    #[cfg(target_os = "linux")]
+    if child {
+        crate::machine::ship_stop(&record.bytes[..record.len]);
+        return;
+    }
     send(fd, &record.bytes[..record.len]);
 }
 
@@ -353,6 +371,21 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
 /// caller has already said it to a reader on stderr.
 pub(crate) fn host_abort(stop: RunStop<'_>) -> ! {
     record_stop(stop);
+    abort_recorded()
+}
+
+/// [`host_abort`] with a stop record another process of the machine made
+/// (`record`, one whole record), written as this process's own.
+#[cfg(target_os = "linux")]
+pub(crate) fn host_abort_with_record(record: &[u8]) -> ! {
+    if let Some(fd) = stop_record_fd() {
+        let _ = host_write_all(fd, record);
+    }
+    abort_recorded()
+}
+
+/// The host's default SIGABRT, its stop already recorded.
+fn abort_recorded() -> ! {
     let host = hostapi::get();
     let mut default: libc::sigaction = unsafe { std::mem::zeroed() };
     default.sa_sigaction = libc::SIG_DFL;

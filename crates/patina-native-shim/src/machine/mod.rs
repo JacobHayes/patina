@@ -23,9 +23,10 @@
 
 use crate::thread;
 use crate::{SpinMutex, TaskId};
+use patina_dst_abi::Fd;
 use patina_dst_abi::ForeignState;
 use patina_dst_runtime::MachineCarry;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
@@ -101,6 +102,42 @@ struct Child {
 /// The hub's process table.
 static CHILDREN: SpinMutex<BTreeMap<i32, Child>> = SpinMutex::new(BTreeMap::new());
 
+/// The root's filesystem handles each child holds open: closed when the
+/// child ends, however it ends.
+static HANDLES: SpinMutex<BTreeMap<i32, BTreeSet<Fd>>> = SpinMutex::new(BTreeMap::new());
+
+/// `SIGKILL`'s wait status.
+const KILLED: i32 = libc::SIGKILL;
+
+/// Whether another process of the machine lives now: a child's root always
+/// does; the root's children while one has not ended.
+pub(crate) fn others_live() -> bool {
+    is_child() || CHILDREN.lock().values().any(|child| child.status.is_none())
+}
+
+/// Stop the run by name if another process of the machine lives: `what` is
+/// state each process models on its own that is really the machine's
+/// (locks, FIFOs, shared file mappings, System V IPC), which another
+/// process could not see.
+pub(crate) fn refuse_shared(what: &str) {
+    if others_live() {
+        crate::trap_unmodeled(&format!(
+            "{what} while the guest's machine holds several processes is not modeled"
+        ));
+    }
+}
+
+/// Stop the run by name if this process has had a child: what a child
+/// spent (`RUSAGE_CHILDREN`, `times`) is not carried back to its parent.
+pub(crate) fn refuse_child_usage(what: &str) {
+    if is_multiprocess() && !is_child() {
+        crate::trap_unmodeled(&format!(
+            "{what} after a child process ran (its CPU time is not carried to the parent) \
+is not modeled"
+        ));
+    }
+}
+
 /// Read this process's place in the machine from the control plane, before
 /// the runtime is built: a child knows its pid, its parent and its channel.
 pub(crate) fn configure() -> Result<(), patina_dst_runtime::RuntimeError> {
@@ -138,13 +175,8 @@ pub(crate) fn child_start() {
     context(|context| context.task_foreign(ELSEWHERE, ForeignState::Parked));
     send(channel(), &Message::Ready);
     ELSEWHERE_RUNS.store(true, Ordering::Relaxed);
-    let first = receive(channel());
+    let (now, view, carry) = await_resume();
     ELSEWHERE_RUNS.store(false, Ordering::Relaxed);
-    let (now, view, carry) = match first {
-        Some(Message::Resume { now, view, carry }) => (now, view, carry),
-        Some(other) => protocol_fatal("the first resume", &other),
-        None => orphaned(),
-    };
     context(|context| {
         context.advance_to(now)?;
         context.import_machine_carry(carry);
@@ -179,6 +211,27 @@ fn take_over(now: u64, carry: MachineCarry, task: TaskId, state: ForeignState) {
 
 fn channel() -> c_int {
     CHANNEL.load(Ordering::Relaxed)
+}
+
+/// A frozen child's wait for the baton: the hub resumes it, or kills it.
+fn await_resume() -> (u64, ForeignState, MachineCarry) {
+    match receive(channel()) {
+        Some(Message::Resume { now, view, carry }) => (now, view, carry),
+        Some(Message::Kill) => killed(),
+        Some(other) => protocol_fatal("a resume", &other),
+        None => orphaned(),
+    }
+}
+
+/// This frozen child was sent `SIGKILL`: the host process dies of it, and
+/// its channel's end closes, which tells the hub.
+fn killed() -> ! {
+    // SAFETY: plain system calls on this host process.
+    unsafe {
+        let host = crate::sud_host_syscall(libc::SYS_getpid, 0, 0, 0, 0, 0, 0);
+        crate::sud_host_syscall(libc::SYS_kill, host as _, libc::SIGKILL as _, 0, 0, 0, 0);
+        (crate::hostapi::get().host_immediate_exit)(128 + libc::SIGKILL)
+    }
 }
 
 /// Run a Context step the machine takes, or end the run naming it.
@@ -230,8 +283,12 @@ fn serve_children(mut picked: TaskId) -> TaskId {
         match serve(pid, channel) {
             Message::Yield { now, state, carry } => take_over(now, carry, picked, state),
             Message::Exit { now, status, carry } => {
-                take_over(now, carry, picked, ForeignState::Gone);
-                exited(pid, status);
+                context(|context| {
+                    context.advance_to(now)?;
+                    context.import_machine_carry(carry);
+                    Ok(())
+                });
+                ended(pid, status);
             }
             other => protocol_fatal("a child's yield or exit", &other),
         }
@@ -259,12 +316,14 @@ fn serve(pid: i32, channel: c_int) -> Message {
                     protocol_fatal_text(&format!("decoding a filesystem call: {error}"))
                 });
                 // The root's driver stack answers; the root records nothing.
+                let call = fs::Call::of(&request);
                 let answer = crate::with_context_raw(|context| {
                     Ok(fs::serve(context.machine_filesystem(), request))
                 })
                 .unwrap_or_else(|errno| {
                     protocol_fatal_text(&format!("the root's runtime is gone ({errno})"))
                 });
+                call.note(&answer, HANDLES.lock().entry(pid).or_default());
                 let answer = serde_json::to_vec(&answer).unwrap_or_else(|error| {
                     protocol_fatal_text(&format!("encoding a filesystem answer: {error}"))
                 });
@@ -276,25 +335,149 @@ fn serve(pid: i32, channel: c_int) -> Message {
                     &answer,
                 );
             }
+            Some(Message::Signal { pid: target, sig }) => {
+                let answer = if target == pid || target == crate::patina_pid() {
+                    // Itself, which it signals on its own, or the root.
+                    UNMODELED_SIGNAL
+                } else {
+                    signal_child(target, sig).unwrap_or(-i64::from(libc::ESRCH))
+                };
+                send(channel, &Message::Id(answer as i32));
+            }
+            Some(Message::Facts { len }) => {
+                let facts = receive_payload(channel, len).unwrap_or_else(|| died(pid));
+                if let Ok(Some(fd)) = crate::runtime::control_facts_fd() {
+                    let _ = crate::host_write_all(fd, &facts);
+                }
+            }
+            Some(Message::Stop { len }) => {
+                let record = receive_payload(channel, len).unwrap_or_else(|| died(pid));
+                child_stopped(pid, &record);
+            }
             Some(message) => return message,
             None => died(pid),
         }
     }
 }
 
-/// Child `pid` exited with wait status `status`: it is a zombie until its
-/// parent reaps it, and every task waiting for a child of that parent
-/// looks again.
-fn exited(pid: i32, status: i32) {
-    let mut children = CHILDREN.lock();
-    let Some(child) = children.get_mut(&pid) else {
+/// Child `pid` ended with wait status `status`: its foreign task is gone
+/// (recorded), the root's filesystem handles it held are closed, it is a
+/// zombie until its parent reaps it, and every task waiting for a child of
+/// that parent looks again.
+fn ended(pid: i32, status: i32) {
+    let channel = {
+        let mut children = CHILDREN.lock();
+        let Some(child) = children
+            .get_mut(&pid)
+            .filter(|child| child.status.is_none())
+        else {
+            return;
+        };
+        child.status = Some(status);
+        child.channel
+    };
+    close(channel);
+    let handles = HANDLES.lock().remove(&pid).unwrap_or_default();
+    // Also after the root's `main` returned (teardown): a recorded state
+    // change, no scheduling decision.
+    let _ = crate::with_context_raw(|context| {
+        context.task_foreign(foreign_task(pid), ForeignState::Gone)?;
+        let filesystem = context.machine_filesystem();
+        for handle in handles {
+            let _ = filesystem.close(handle);
+        }
+        Ok(())
+    });
+    spawn::wake_waiters();
+}
+
+/// What the hub answers a child's signal to a process it does not model
+/// signals to: the child stops the run by name.
+pub(crate) const UNMODELED_SIGNAL: i64 = i32::MIN as i64;
+
+/// `kill(pid, sig)` of child `pid` from the process holding the baton:
+/// `None` when no child has that pid. Signal 0 probes it; `SIGKILL` kills a
+/// live one (a zombie is already dead); another signal stops the run by
+/// name.
+pub(crate) fn signal_child(pid: i32, sig: i32) -> Option<i64> {
+    let live = CHILDREN
+        .lock()
+        .get(&pid)
+        .map(|child| child.status.is_none())?;
+    match sig {
+        0 => {}
+        libc::SIGKILL if live => kill(pid),
+        libc::SIGKILL => {}
+        _ => return Some(UNMODELED_SIGNAL),
+    }
+    Some(0)
+}
+
+/// `kill(pid, sig)` of another process of the machine from a child: the
+/// hub answers. A signal it does not model stops the run by name.
+pub(crate) fn signal_from_child(pid: i32, sig: i32) -> i64 {
+    match exchange(&Message::Signal { pid, sig }) {
+        Message::Id(answer) if i64::from(answer) == UNMODELED_SIGNAL => {
+            crate::trap_unmodeled(&format!(
+                "signal {sig} from process {} to process {pid} of the guest's machine is not \
+modeled (only SIGKILL and the probe, signal 0, cross processes)",
+                crate::patina_pid()
+            ))
+        }
+        Message::Id(answer) => {
+            // The hub's view of the rest of the machine changed (a killed
+            // process's waiting parent wakes): the next pick of it asks.
+            context(|context| context.task_foreign(ELSEWHERE, ForeignState::Runnable));
+            i64::from(answer)
+        }
+        other => protocol_fatal("a signal's result", &other),
+    }
+}
+
+/// Kill live child `pid`, frozen on its channel: it dies of `SIGKILL`, and
+/// its end of the channel closes once the host process is gone.
+fn kill(pid: i32) {
+    let Some(channel) = CHILDREN
+        .lock()
+        .get(&pid)
+        .filter(|child| child.status.is_none())
+        .map(|child| child.channel)
+    else {
         return;
     };
-    child.status = Some(status);
-    let channel = child.channel;
-    drop(children);
-    close(channel);
-    spawn::wake_waiters();
+    send(channel, &Message::Kill);
+    while receive(channel).is_some() {}
+    ended(pid, KILLED);
+}
+
+/// The root's end: every child still running is killed (its foreign task's
+/// end recorded), so no process of the machine outlives it.
+pub(crate) fn teardown() {
+    if is_child() {
+        return;
+    }
+    let live: Vec<i32> = CHILDREN
+        .lock()
+        .iter()
+        .filter(|(_, child)| child.status.is_none())
+        .map(|(pid, _)| *pid)
+        .collect();
+    for pid in live {
+        kill(pid);
+    }
+}
+
+/// Child `pid` stopped the run with stop record `record` (its class, its
+/// reason, its detail naming it): every other child is killed, and the root
+/// ends the run with that record as its own, as a stop in the root would.
+fn child_stopped(pid: i32, record: &[u8]) -> ! {
+    if let Some(child) = CHILDREN.lock().get_mut(&pid) {
+        child.status = Some(KILLED);
+        close(child.channel);
+    }
+    teardown();
+    crate::patina_flush_captured_stdio();
+    crate::process::host_abort_with_record(record)
 }
 
 /// A child whose host process is gone without telling the hub how it ended.
@@ -312,11 +495,7 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
         debug_assert_eq!(picked, ELSEWHERE);
         let (now, state, carry) = hand_over(ELSEWHERE);
         send(channel(), &Message::Yield { now, state, carry });
-        let (now, view, carry) = match receive(channel()) {
-            Some(Message::Resume { now, view, carry }) => (now, view, carry),
-            Some(other) => protocol_fatal("a resume", &other),
-            None => orphaned(),
-        };
+        let (now, view, carry) = await_resume();
         let local = context(|context| {
             context.advance_to(now)?;
             context.import_machine_carry(carry);
@@ -339,6 +518,66 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
     }
 }
 
+/// Set once a child told the hub it ended: what it does after is its host
+/// process's end, which the hub no longer hears.
+static EXITED: AtomicBool = AtomicBool::new(false);
+
+/// The signal whose default action ends this child, if one does.
+static DYING_OF: AtomicI32 = AtomicI32::new(0);
+
+/// A child about to end by `sig`'s default action: its parent sees a death
+/// by that signal, not an exit.
+pub(crate) fn note_signal_death(sig: u8) {
+    DYING_OF.store(i32::from(sig), Ordering::Relaxed);
+}
+
+/// The wait status a child's end reports: its exit `code`, or the signal
+/// it dies of.
+pub(crate) fn exit_status(code: i32) -> i32 {
+    match DYING_OF.load(Ordering::Relaxed) {
+        0 => (code & 0xff) << 8,
+        sig => sig,
+    }
+}
+
+/// A child ships `bytes` to the hub as a `header` frame, where a stop may be
+/// (no allocation, no lock); a no-op once it reported its end, or in the
+/// root.
+fn ship(header: Message, bytes: &[u8]) {
+    if !is_child() || EXITED.load(Ordering::Relaxed) {
+        return;
+    }
+    let _ = send_bytes_once(channel(), &header.encode());
+    for chunk in bytes.chunks(wire::CHUNK_BYTES) {
+        let _ = send_bytes_once(channel(), chunk);
+    }
+}
+
+/// A child's stop record goes to the hub, which ends the run with it.
+pub(crate) fn ship_stop(record: &[u8]) {
+    ship(
+        Message::Stop {
+            len: record.len() as u64,
+        },
+        record,
+    );
+}
+
+/// A child's facts document goes to the hub, which writes it for the run.
+pub(crate) struct ChannelFactsSink;
+
+impl patina_dst_runtime::FactsSink for ChannelFactsSink {
+    fn write_facts(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        ship(
+            Message::Facts {
+                len: bytes.len() as u64,
+            },
+            bytes,
+        );
+        Ok(())
+    }
+}
+
 /// A child's exit: the hub learns its status and its time, and the host
 /// process ends without writing anything of its own (the root writes the
 /// run's facts and trace).
@@ -349,6 +588,7 @@ pub(crate) fn child_exit(status: i32) {
     })
     .unwrap_or_default();
     send(channel(), &Message::Exit { now, status, carry });
+    EXITED.store(true, Ordering::Relaxed);
 }
 
 /// The hub is gone (the root ended): a child has no machine to run in.
@@ -384,8 +624,8 @@ fn send_frame(fd: c_int, header: Message, payload: &[u8]) {
     }
 }
 
-/// One packet.
-fn send_bytes(fd: c_int, bytes: &[u8]) {
+/// One packet, or `false` if the peer is gone.
+fn send_bytes_once(fd: c_int, bytes: &[u8]) -> bool {
     loop {
         // SAFETY: a live buffer of `bytes.len()` bytes.
         let sent = unsafe {
@@ -399,17 +639,22 @@ fn send_bytes(fd: c_int, bytes: &[u8]) {
                 0,
             )
         };
-        if sent == bytes.len() as i64 {
-            return;
-        }
         if sent < 0 && crate::abi::host_errno() == libc::EINTR {
             continue;
         }
-        if is_child() {
-            orphaned();
-        }
-        protocol_fatal_text(&format!("sending on channel {fd} failed"));
+        return sent == bytes.len() as i64;
     }
+}
+
+/// One packet.
+fn send_bytes(fd: c_int, bytes: &[u8]) {
+    if send_bytes_once(fd, bytes) {
+        return;
+    }
+    if is_child() {
+        orphaned();
+    }
+    protocol_fatal_text(&format!("sending on channel {fd} failed"));
 }
 
 /// A frame's `len` payload bytes, or `None` if the peer is gone first.

@@ -6,6 +6,8 @@ use super::*;
 
 /// `semget(2)`.
 pub(crate) fn semget(key: i32, nsems: i32, flags: i32) -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("System V IPC");
     if let Err(errno) = boundary() {
         return fail(errno);
     }

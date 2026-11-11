@@ -408,13 +408,29 @@ its own runtime, and the processes run in lockstep: one runs at a time
 - While another process holds the baton, a process runs no guest code: the
   compute observer has no candidate there.
 - `wait4`/`waitid` answer from the table; a blocking wait parks the task
-  until a child's exit wakes it. A child's exit sends its status to the hub;
-  it writes no facts, trace or stop record.
-- Not modeled yet, each a named `deny_trap` stop: spawn from a child, spawn
-  while recording or replaying, file actions, spawn attributes beyond a
-  fresh process's defaults, crash-restart, crash-knob and scheduling-policy
-  runs. A
-  child's own stop or crash ends the run as an internal stop.
+  until a child's end wakes it. A child's exit sends its status to the hub;
+  a default fatal signal action (`abort` included) is the child's death by
+  that signal, which its parent's wait sees. The hub closes the root's
+  filesystem handles a child held when it ends.
+- `kill(pid, SIGKILL)` of a child, from the root or (through the hub) a
+  sibling: the hub tells the frozen child, which raises `SIGKILL` on its
+  host process; its channel's end closing confirms the death, and the
+  launcher reaps it. Signal 0 probes a child. When the root ends, the hub
+  kills every child still running (each foreign task's end recorded); the
+  launcher then kills, by pidfd, and reaps anything left.
+- A child writes no facts, trace or stop record: it ships its facts and its
+  stop record (detail prefixed `process N:`) to the hub, which kills the
+  other children and ends the run with that record, so the run has the
+  child's class. A child that dies without saying how (a host fault the C
+  signal front stops) is an internal stop naming its pid.
+- Not modeled yet, each a named stop: spawn from a child, spawn while
+  recording or replaying, file actions, spawn attributes beyond a fresh
+  process's defaults, crash-restart, crash-knob and scheduling-policy runs
+  (`deny_trap`); and, while another process lives, file locks, FIFOs, shared
+  file mappings, System V IPC, inotify, another pid's procfs directory,
+  signals across processes other than `SIGKILL` and 0, signals to a group or
+  to every process, a socket in a child, and after a child ran,
+  `RUSAGE_CHILDREN` and `times` (`not_modeled`).
 
 ## Virtual time
 

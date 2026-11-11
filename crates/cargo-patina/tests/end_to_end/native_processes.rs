@@ -20,6 +20,8 @@ unsafe extern "C" {
     fn timer_create(clock: i32, event: *mut [u64; 8], timer: *mut usize) -> i32;
     fn timer_settime(timer: usize, flags: i32, new: *const [i64; 4], old: *mut [i64; 4]) -> i32;
     fn pause() -> i32;
+    fn kill(pid: i32, sig: i32) -> i32;
+    fn flock(fd: i32, operation: i32) -> i32;
 }
 
 const SIGUSR1: i32 = 10;
@@ -131,6 +133,42 @@ fn main() {
                 status
             });
             println!("NAPPED status={:?}", status.map(|status| status.code()));
+        }
+        ["sleeper", ..] => loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        },
+        [binary, "kill-child"] => {
+            use std::os::unix::process::ExitStatusExt;
+            let mut child = Command::new(binary).arg("sleeper").spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            child.kill().unwrap();
+            let status = child.wait().unwrap();
+            println!("KILLED code={:?} signal={:?}", status.code(), status.signal());
+        }
+        ["abort"] => std::process::abort(),
+        [binary, "abort-child"] => {
+            use std::os::unix::process::ExitStatusExt;
+            let status = Command::new(binary).arg("abort").status().unwrap();
+            println!("ABORTED code={:?} signal={:?}", status.code(), status.signal());
+        }
+        [binary, "leave-child", token] => {
+            Command::new(binary).args(["sleeper", token]).spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            println!("LEFT");
+        }
+        ["signal-parent"] => {
+            unsafe { kill(std::os::unix::process::parent_id() as i32, SIGUSR1) };
+        }
+        [binary, "signal-parent"] => {
+            let status = Command::new(binary).arg("signal-parent").status();
+            println!("SIGNALED {status:?}");
+        }
+        [binary, "lock-beside-child"] => {
+            use std::os::fd::AsRawFd;
+            let _child = Command::new(binary).arg("sleeper").spawn().unwrap();
+            let file = std::fs::File::create("/tmp/lock").unwrap();
+            let locked = unsafe { flock(file.as_raw_fd(), 2) };
+            println!("LOCKED {locked}");
         }
         ["unadmitted"] => {
             let status = Command::new("/bin/true").status();
@@ -261,6 +299,89 @@ fn main() {
             "NAPPED status=Some(Some(9))",
             "{}",
             String::from_utf8_lossy(&napped.stderr)
+        );
+    }
+
+    #[test]
+    fn a_child_killed_by_sigkill_is_reaped_as_killed() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let killed = common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", binary, "kill-child"]),
+        );
+        assert_eq!(
+            stdout_line_with(&killed, "KILLED"),
+            "KILLED code=None signal=Some(9)",
+            "{}",
+            String::from_utf8_lossy(&killed.stderr)
+        );
+    }
+
+    #[test]
+    fn a_child_that_aborts_dies_of_sigabrt_and_the_run_goes_on() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let aborted = common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", binary, "abort-child"]),
+        );
+        assert_eq!(
+            stdout_line_with(&aborted, "ABORTED"),
+            "ABORTED code=None signal=Some(6)",
+            "{}",
+            String::from_utf8_lossy(&aborted.stderr)
+        );
+    }
+
+    #[test]
+    fn a_root_that_exits_leaves_no_child_process_behind() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        // The child's host command line carries a token no other process
+        // has.
+        let token = format!("patina-leave-{}", std::process::id());
+        let left = common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", binary, "leave-child", &token]),
+        );
+        assert_eq!(stdout_line_with(&left, "LEFT"), "LEFT");
+        let survivors: Vec<String> = std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+                let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+                let found = cmdline
+                    .split(|byte| *byte == 0)
+                    .any(|arg| arg == token.as_bytes());
+                found.then(|| pid.to_string())
+            })
+            .collect();
+        assert!(survivors.is_empty(), "host processes left: {survivors:?}");
+    }
+
+    fn run_class(guest: &common::native::Guest, args: &[&str]) -> serde_json::Value {
+        let mut argv = vec!["--seed", "1", "--format", "json", "--"];
+        argv.extend_from_slice(args);
+        let output = guest.command("run", &argv);
+        let envelope = json_envelope(&output);
+        assert!(!output.status.success(), "{envelope:#}");
+        envelope["result"].clone()
+    }
+
+    #[test]
+    fn a_childs_own_stop_ends_the_run_with_its_class() {
+        // The child signals its parent, which no process may yet.
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        assert_eq!(run_class(&guest, &[binary, "signal-parent"]), "unsupported");
+    }
+
+    #[test]
+    fn a_file_lock_beside_a_live_child_is_refused() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        assert_eq!(
+            run_class(&guest, &[binary, "lock-beside-child"]),
+            "unsupported"
         );
     }
 

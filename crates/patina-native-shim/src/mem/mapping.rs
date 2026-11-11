@@ -245,6 +245,10 @@ fn map_file_judged(
     if zero {
         crate::paths::Virtual::MemDevice(crate::memdev::MemDevice::Zero).unmodeled("a mapping");
     }
+    #[cfg(target_os = "linux")]
+    if shared {
+        crate::machine::refuse_shared("a shared mapping of a file");
+    }
     // `secretmem_mmap`: a shared mapping only, and its pages are locked
     // (`mlock_future_ok`: `EAGAIN` past the limit) as they fault in, unless
     // `MAP_LOCKED` populates them. It runs inside `mmap_region`, after a

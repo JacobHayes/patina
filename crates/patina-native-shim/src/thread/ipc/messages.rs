@@ -6,6 +6,8 @@ use super::*;
 
 /// `msgget(2)`.
 pub(crate) fn msgget(key: i32, flags: i32) -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("System V IPC");
     if let Err(errno) = boundary() {
         return fail(errno);
     }

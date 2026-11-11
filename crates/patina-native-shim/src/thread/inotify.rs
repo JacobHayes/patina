@@ -374,6 +374,8 @@ pub(crate) fn settle(ino: u64) {
 /// instance limit `EMFILE`. The description is read-only (`O_RDONLY`), with
 /// `O_NONBLOCK` from `IN_NONBLOCK`.
 pub(crate) fn init1(flags: i32) -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("inotify");
     if flags & !(IN_CLOEXEC | IN_NONBLOCK) != 0 {
         return errno(EINVAL);
     }

@@ -6,6 +6,8 @@ use super::*;
 
 /// `shmget(2)`.
 pub(crate) fn shmget(key: i32, size: usize, flags: i32) -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_shared("System V IPC");
     if let Err(errno) = boundary() {
         return fail(errno);
     }

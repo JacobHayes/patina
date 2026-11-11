@@ -388,6 +388,9 @@ fn next(exit: &mut Exit) -> bool {
             if matches!(instance.sig, SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU) {
                 fatal_unmodeled("default Stop-class signal would stop the only virtual process");
             }
+            // A child of the machine dies of it: its parent sees the signal.
+            #[cfg(target_os = "linux")]
+            crate::machine::note_signal_death(instance.sig);
             if crate::shutdown_run() != 0 {
                 crate::finalization_failed(
                     "signal termination finalization failed",

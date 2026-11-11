@@ -575,6 +575,11 @@ fn create(state: &mut ThreadRuntime, family: i32, ty: i32, protocol: i32) -> Res
 }
 
 pub(crate) fn socket(family: c_int, ty: c_int, protocol: c_int) -> crate::abi::SysResult<i64> {
+    // The network is the root's runtime's: a child has none of its own.
+    #[cfg(target_os = "linux")]
+    if crate::machine::is_child() {
+        crate::trap_unmodeled("a socket in a child process of the guest's machine is not modeled");
+    }
     (|| {
         let (nonblocking, cloexec) = creation_flags(ty & !SOCK_TYPE_MASK)?;
         // `__sys_socket` makes the socket, then takes the number.

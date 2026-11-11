@@ -372,6 +372,15 @@ fn lookup(dir: Node, name: &str) -> Result<Node, c_int> {
                 return Ok(Node::Machine(*file));
             }
             let pid = pid_name(name).ok_or(ENOENT)?;
+            #[cfg(target_os = "linux")]
+            if ![crate::patina_pid(), crate::registry::INIT_PID as i32].contains(&pid)
+                && crate::machine::others_live()
+            {
+                crate::trap_unmodeled(&format!(
+                    "{ROOT}/{pid}, another process's procfs directory while the guest's machine \
+holds several processes, is not modeled"
+                ));
+            }
             match crate::identity::lookup(pid) {
                 Some((process, true)) => Ok(Node::Process(process.pid())),
                 // `find_task_by_pid_ns` finds a thread too: its directory is

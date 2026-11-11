@@ -563,7 +563,11 @@ pub(crate) fn getrusage(who: i32, out: *mut Rusage) -> i64 {
     let of = match who {
         RUSAGE_SELF => Some(CpuOf::Process),
         RUSAGE_THREAD => thread::task_of(thread::current_tid()).map(CpuOf::Thread),
-        RUSAGE_CHILDREN => None,
+        RUSAGE_CHILDREN => {
+            #[cfg(target_os = "linux")]
+            crate::machine::refuse_child_usage("getrusage(RUSAGE_CHILDREN)");
+            None
+        }
         _ => return -i64::from(EINVAL),
     };
     let mut usage = Rusage::default();
@@ -592,6 +596,8 @@ const INITIAL_JIFFIES: u64 = (-300i64 * HZ as i64) as u32 as u64;
 /// an arbitrary point (`jiffies_64_to_clock_t(get_jiffies_64())`); a
 /// buffer that cannot be written is `EFAULT`.
 pub(crate) fn times(out: *mut [i64; 4]) -> i64 {
+    #[cfg(target_os = "linux")]
+    crate::machine::refuse_child_usage("times");
     #[expect(
         clippy::disallowed_methods,
         reason = "the guest's times(2) tick count, its own clock read"

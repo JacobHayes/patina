@@ -45,6 +45,16 @@ pub(super) enum Message {
     Fs { len: u64 },
     /// Hub to child: the call's answer, of `len` bytes, follows likewise.
     FsReply { len: u64 },
+    /// Child to hub: `kill(pid, sig)` of another process of the machine;
+    /// the hub answers [`Message::Id`] with the call's result.
+    Signal { pid: i32, sig: i32 },
+    /// Hub to a frozen child: it was sent `SIGKILL`, and dies.
+    Kill,
+    /// Child to hub: the child stops the run; its stop record, of `len`
+    /// bytes, follows.
+    Stop { len: u64 },
+    /// Child to hub: a facts document of `len` bytes for the run follows.
+    Facts { len: u64 },
 }
 
 /// The largest packet a frame's payload travels in: well inside a
@@ -100,6 +110,12 @@ impl Message {
             Message::Id(id) => words(6, [id as u32 as u64, 0, 0], None),
             Message::Fs { len } => words(7, [len, 0, 0], None),
             Message::FsReply { len } => words(8, [len, 0, 0], None),
+            Message::Signal { pid, sig } => {
+                words(9, [pid as u32 as u64, sig as u32 as u64, 0], None)
+            }
+            Message::Kill => words(10, [0; 3], None),
+            Message::Stop { len } => words(11, [len, 0, 0], None),
+            Message::Facts { len } => words(12, [len, 0, 0], None),
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -138,6 +154,13 @@ impl Message {
             6 => Message::Id(words[1] as u32 as i32),
             7 => Message::Fs { len: words[1] },
             8 => Message::FsReply { len: words[1] },
+            9 => Message::Signal {
+                pid: words[1] as u32 as i32,
+                sig: words[2] as u32 as i32,
+            },
+            10 => Message::Kill,
+            11 => Message::Stop { len: words[1] },
+            12 => Message::Facts { len: words[1] },
             _ => return None,
         })
     }
@@ -184,6 +207,10 @@ mod tests {
             Message::Id(42),
             Message::Fs { len: 1 << 20 },
             Message::FsReply { len: 0 },
+            Message::Signal { pid: 4, sig: 9 },
+            Message::Kill,
+            Message::Stop { len: 300 },
+            Message::Facts { len: 70_000 },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }

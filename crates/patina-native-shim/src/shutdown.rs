@@ -59,11 +59,17 @@ pub(crate) fn shutdown_run() -> c_int {
     // The run's last guest calls (a direct `exit_group` included) are charged
     // before the runtime is taken away to be finalized.
     crate::charge::flush_now();
-    thread::deactivate();
     #[cfg(target_os = "linux")]
     if crate::machine::is_child() {
+        thread::deactivate();
         return child_shutdown();
     }
+    // No process of the machine outlives its root.
+    #[cfg(target_os = "linux")]
+    if slot().lock().is_some() {
+        crate::machine::teardown();
+    }
+    thread::deactivate();
     let mut context = {
         let mut guard = slot().lock();
         match guard.take() {
@@ -191,7 +197,7 @@ fn child_shutdown() -> c_int {
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
     let flushed = flush_captured_stdio();
     let status = guest_exit_status().unwrap_or(0);
-    crate::machine::child_exit((status & 0xff) << 8);
+    crate::machine::child_exit(crate::machine::exit_status(status));
     // The baton is the hub's again: this process's runtime is done.
     if let Some(context) = slot().lock().take() {
         std::mem::forget(context);

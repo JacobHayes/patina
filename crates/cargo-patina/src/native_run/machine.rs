@@ -13,8 +13,9 @@
 //! seed, place in the process tree, working directory and channel, its guest environment through the initial
 //! stack slots, and the same address layout pin. A child dies with the
 //! launcher thread (`PR_SET_PDEATHSIG`) and inherits no other descriptor.
-//! When the root ends, its end of the launch channel closes, and the
-//! launcher kills and reaps every child still running.
+//! The launcher reaps each child as it dies. When the root ends, its end
+//! of the launch channel closes, and the launcher kills (by pidfd) and
+//! reaps every child still running.
 
 use super::*;
 use serde::Deserialize;
@@ -125,22 +126,53 @@ struct Launch {
     cwd: String,
 }
 
+/// A child the launcher started: a pidfd that names it until it is reaped
+/// (so a kill never reaches a recycled pid), and the thread that reaps it
+/// as soon as it dies.
+struct Running {
+    pidfd: Option<OwnedFd>,
+    reaper: JoinHandle<()>,
+}
+
 /// Serve the root's launch requests on `channel` until the root's end
-/// closes, then kill and reap every child still running.
+/// closes, then kill and reap every child still running. Each child is
+/// reaped when it dies (the hub kills a frozen child by having it raise
+/// `SIGKILL` on itself).
 pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut children = Vec::new();
         while let Some((payload, fds)) = receive(channel.as_raw_fd()) {
             match launch(&template, &payload, fds) {
-                Ok(child) => children.push(child),
+                Ok(mut child) => {
+                    // SAFETY: a plain system call; the child is not reaped
+                    // before its reaper starts below.
+                    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+                    // SAFETY: a fresh descriptor owned here.
+                    let pidfd = (raw >= 0).then(|| unsafe { OwnedFd::from_raw_fd(raw as RawFd) });
+                    let reaper = std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    children.push(Running { pidfd, reaper });
+                }
                 // The root waits for the child's ready on its channel, whose
                 // far end the failed launch dropped: it stops the run there.
                 Err(error) => eprintln!("patina: {error}"),
             }
         }
-        for mut child in children {
-            let _ = child.kill();
-            let _ = child.wait();
+        for child in children {
+            if let Some(pidfd) = &child.pidfd {
+                // SAFETY: a plain system call on a pidfd owned here.
+                unsafe {
+                    libc::syscall(
+                        libc::SYS_pidfd_send_signal,
+                        pidfd.as_raw_fd(),
+                        libc::SIGKILL,
+                        std::ptr::null::<libc::siginfo_t>(),
+                        0,
+                    )
+                };
+            }
+            let _ = child.reaper.join();
         }
     })
 }
