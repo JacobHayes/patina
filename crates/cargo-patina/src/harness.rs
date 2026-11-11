@@ -36,6 +36,9 @@ pub(crate) struct TestInvocation {
     /// The trailing TESTNAME: a substring of a test's path within its target,
     /// or with `exact` the whole path.
     pub(crate) filter: Option<String>,
+    /// libtest's `--skip`: a test whose path contains one of these (or with
+    /// `exact` equals one) is not run.
+    pub(crate) skip: Vec<String>,
     pub(crate) exact: bool,
     pub(crate) include_ignored: bool,
     pub(crate) features: CargoFeatures,
@@ -62,6 +65,8 @@ pub(crate) struct Selection {
     pub(crate) all_bins: bool,
     pub(crate) tests: Vec<String>,
     pub(crate) all_tests: bool,
+    /// Targets, by name, left out of what the other flags select.
+    pub(crate) skip_targets: Vec<String>,
 }
 
 impl Selection {

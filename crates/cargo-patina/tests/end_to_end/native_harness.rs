@@ -88,6 +88,29 @@ mod tests {
         let all = json_of(&all);
         assert_eq!(all["skipped"], 0);
         assert_eq!(results(&all)["tests::ignored_panics"], "failure", "{all:#}");
+
+        // `--skip` is libtest's: a substring leaves out every test whose path
+        // contains it, and with `--exact` only the test it names.
+        let skipped = |extra: &[&str]| {
+            let ran = invoke_unchecked(
+                patina,
+                directory.path(),
+                &[&["test", "--format", "json"][..], extra].concat(),
+            );
+            results(&json_of(&ran)).into_keys().collect::<Vec<_>>()
+        };
+        let kept: Vec<String> = expected
+            .keys()
+            .filter(|name| !name.contains("panic") && !name.contains("abort"))
+            .cloned()
+            .collect();
+        assert_eq!(skipped(&["--skip", "panic", "--skip", "abort"]), kept);
+        let kept: Vec<String> = expected
+            .keys()
+            .filter(|name| *name != "tests::panics")
+            .cloned()
+            .collect();
+        assert_eq!(skipped(&["--skip", "tests::panics", "--exact"]), kept);
     }
 
     /// A finding is recorded on its seed: the trace it names replays the

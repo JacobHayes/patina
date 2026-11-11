@@ -238,6 +238,7 @@ pub(super) fn select_targets(
     let mut skipped = Vec::new();
     let mut unmatched_bins: Vec<&String> = selection.bins.iter().collect();
     let mut unmatched_tests: Vec<&String> = selection.tests.iter().collect();
+    let mut unmatched_skips: Vec<&String> = selection.skip_targets.iter().collect();
     let mut available = BTreeSet::new();
     for package in packages {
         let package_name = text(package, "name").unwrap_or_default().to_string();
@@ -276,6 +277,18 @@ pub(super) fn select_targets(
                 kind,
                 name,
             };
+            if selection
+                .skip_targets
+                .iter()
+                .any(|skip| names(skip, &target.name))
+            {
+                unmatched_skips.retain(|skip| !names(skip, &target.name));
+                skipped.push(SkippedTarget {
+                    target,
+                    reason: "--skip-target".to_string(),
+                });
+                continue;
+            }
             let missing: Vec<&str> = strings(entry, "required-features")
                 .into_iter()
                 .filter(|feature| {
@@ -312,6 +325,18 @@ pub(super) fn select_targets(
             } else {
                 available.into_iter().collect::<Vec<_>>().join(", ")
             }
+        )));
+    }
+    // A skip that names nothing selected is a typo, not a smaller suite.
+    if let Some(skip) = unmatched_skips.first() {
+        return Err(CliError::usage(format!(
+            "--skip-target {skip:?} names no selected target; the selected targets: {}",
+            targets
+                .iter()
+                .chain(skipped.iter().map(|skipped| &skipped.target))
+                .map(Target::label)
+                .collect::<Vec<_>>()
+                .join(", ")
         )));
     }
     if selection.lib && !targets.iter().any(|target| target.kind == TargetKind::Lib) {

@@ -26,6 +26,8 @@ pub(crate) const NOT_ACCEPTED: &[&str] = &[
     "--bins",
     "--test",
     "--tests",
+    "--skip-target",
+    "--skip",
     "--exact",
     "--include-ignored",
     "--no-run",

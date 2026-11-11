@@ -114,15 +114,16 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run as `internal`, `stop.reason` `host_limit`.
-- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--instrument] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--skip-target NAME]... [--skip PATTERN]... [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--instrument] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   A package's own libtest suite, unmodified: selection is `cargo test`'s
   (default: the package in DIR, else the workspace's default members; lib,
   bins and integration tests). Each selected target is built shim-linked once
   and staged at `target/patina/dst/PACKAGE/KIND/TARGET/guest` (`--no-run`
   builds and prints the staged paths); its tests are listed under the
   runtime, and each test runs on each seed as its own `patina run` child in a
-  world of its own, `--jobs` at a time (default: CPUs), the trailing filter a
-  substring or with `--exact` the whole name. `#[ignore]` tests are skipped
+  world of its own, `--jobs` at a time (default: half the usable CPUs), the
+  trailing filter and each `--skip` a substring or with `--exact` the whole
+  name (libtest's rules); `--skip-target NAME` leaves out a whole target. `#[ignore]` tests are skipped
   unless `--include-ignored`; `#[should_panic]` is libtest's. One verdict per
   test: the class of its lowest failing seed (seeds above it are not run), or
   `ok`. A finding is rerun recorded to `<stage>/traces/NAME.seed-N.patina`; a

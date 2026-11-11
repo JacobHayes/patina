@@ -170,7 +170,7 @@ pub(super) const TEST: Verb = Verb {
     name: "test",
     summary: "Run a Cargo project's own test suite under the deterministic runtime, one run per test.",
     synopsis: &[
-        "patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--seed N | --seeds N] [--jobs N] [RUN OPTIONS]",
+        "patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [--skip PATTERN]... [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--skip-target NAME]... [--seed N | --seeds N] [--jobs N] [RUN OPTIONS]",
         "patina test [DIR|Cargo.toml] --no-run [SELECTION]   (build and stage the test targets; print each guest's path)",
     ],
     prose: "\
@@ -182,7 +182,8 @@ directory (or the one DIR names), `-p`/`--workspace` for workspace members, \
 `--lib`/`--bin`/`--bins`/`--test`/`--tests` for targets (default: the library, \
 binaries and integration tests), and a trailing TESTNAME that filters by \
 substring, or matches exactly with `--exact`; a filter that matches nothing is \
-an error. Doc tests are not run. `#[ignore]`d tests are skipped unless \
+an error. `--skip PATTERN` leaves tests out as libtest's own `--skip` does, and \
+`--skip-target NAME` leaves out a whole target. Doc tests are not run. `#[ignore]`d tests are skipped unless \
 `--include-ignored`; `#[should_panic]` is libtest's own.\n\
 \n\
 Each test ends in one outcome; the run exits 1 if any test is a finding, \
@@ -245,10 +246,24 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                     false,
                 ),
                 f(
+                    "--skip-target",
+                    None,
+                    Value::Required("NAME", Kind::Str),
+                    "Leave out the selected target NAME (a library, binary or integration test of that name; repeatable). A NAME that is not selected is an error.",
+                    true,
+                ),
+                f(
+                    "--skip",
+                    None,
+                    Value::Required("PATTERN", Kind::Str),
+                    "libtest's --skip: do not run a test whose path contains PATTERN (with --exact, equals it; repeatable).",
+                    true,
+                ),
+                f(
                     "--exact",
                     None,
                     Value::None,
-                    "Match TESTNAME exactly against the test's path within its target, not as a substring.",
+                    "Match TESTNAME and every --skip exactly against the test's path within its target, not as a substring.",
                     false,
                 ),
                 f(
@@ -324,7 +339,7 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                     "--jobs",
                     Some("-j"),
                     Value::Required("N", Kind::PositiveU64),
-                    "Run at most N tests at a time, each in its own process (default: the number of CPUs).",
+                    "Run at most N tests at a time, each in its own process (default: half the CPUs this process may use, at least 1).",
                     false,
                 ),
                 f(

@@ -118,10 +118,18 @@ pub(super) fn run_suite(
     }
     let (selected, skipped): (Vec<TestCase>, Vec<TestCase>) = cases
         .into_iter()
-        .filter(|case| match &invocation.filter {
-            None => true,
-            Some(filter) if invocation.exact => case.name == *filter,
-            Some(filter) => case.name.contains(filter.as_str()),
+        .filter(|case| {
+            // libtest's own matching: a substring, or the whole path with
+            // `--exact`, for the filter and every `--skip` alike.
+            let matches = |pattern: &str| {
+                if invocation.exact {
+                    case.name == pattern
+                } else {
+                    case.name.contains(pattern)
+                }
+            };
+            invocation.filter.as_deref().is_none_or(matches)
+                && !invocation.skip.iter().any(|skip| matches(skip))
         })
         .partition(|case| invocation.include_ignored || !case.ignored);
     if let Some(filter) = &invocation.filter

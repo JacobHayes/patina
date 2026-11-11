@@ -243,7 +243,7 @@ The arguments of `#[patina_dst::test]` are the flags of `patina test`, with
 
 ```text
 patina dst test failed: sorted::the_ledger_stays_sorted
-patina test: 1 test(s) in 1 target(s); built in 0.5s, ran in 0.6s (24 job(s), seeds 0..20)
+patina test: 1 test(s) in 1 target(s); built in 0.5s, ran in 0.6s (12 job(s), seeds 0..20)
   violation             1
 
 violation        ledger --test sorted the_ledger_stays_sorted (seed 5)

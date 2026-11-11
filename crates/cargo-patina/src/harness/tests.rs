@@ -119,9 +119,29 @@ fn selection_follows_cargo_test() {
             packages: vec!["c".into()],
             ..Selection::default()
         },
+        Selection {
+            skip_targets: vec!["not-a-target".into()],
+            ..Selection::default()
+        },
     ] {
         assert!(chosen(&selection, &none).is_err(), "{selection:?}");
     }
+    // `--skip-target` leaves out every selected target of that name (by
+    // target or crate name), reported as skipped, and nothing else.
+    let skipping = Selection {
+        skip_targets: vec!["it_works".into(), "a".into()],
+        ..Selection::default()
+    };
+    assert_eq!(
+        chosen(&skipping, &none).unwrap(),
+        [
+            "a:test:needs-fast",
+            "skipped a",
+            "skipped a",
+            "skipped it-works",
+            "skipped needs-slow"
+        ]
+    );
     assert_eq!(TargetKind::Lib.name(), "lib");
 }
 

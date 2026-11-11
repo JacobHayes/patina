@@ -22,9 +22,9 @@ pub(crate) fn parse_test_from(
     {
         return Err(CliError::usage("--seeds must be between 1 and 1000000"));
     }
-    if args.flag("--exact") && filter.is_none() {
+    if args.flag("--exact") && filter.is_none() && !args.supplied("--skip") {
         return Err(CliError::usage(
-            "--exact matches TESTNAME exactly; give a TESTNAME",
+            "--exact matches TESTNAME (and --skip) exactly; give a TESTNAME",
         ));
     }
     if args.flag("--workspace") && args.supplied("--package") {
@@ -34,7 +34,7 @@ pub(crate) fn parse_test_from(
     }
     let jobs = match args.u64("--jobs") {
         Some(jobs) => usize::try_from(jobs).map_err(|_| CliError::usage("--jobs is too large"))?,
-        None => std::thread::available_parallelism().map_or(1, usize::from),
+        None => default_jobs(),
     };
     Ok(TestInvocation {
         origin,
@@ -55,8 +55,18 @@ pub(crate) fn parse_test_from(
                 .map(str::to_owned)
                 .collect(),
             all_tests: args.flag("--tests"),
+            skip_targets: args
+                .texts("--skip-target")
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
         },
         filter,
+        skip: args
+            .texts("--skip")
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
         exact: args.flag("--exact"),
         include_ignored: args.flag("--include-ignored"),
         features: CargoFeatures {
@@ -96,6 +106,14 @@ pub(crate) fn parse_test_from(
             allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
         },
     })
+}
+
+/// `patina test`'s default `--jobs`: half the CPUs this process may use (its
+/// affinity mask and cgroup quota, as the standard library reads them), at
+/// least one. Each test run is a supervisor and a guest, and a shared machine
+/// has other work on it; the whole machine is `--jobs` away.
+pub(crate) fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |cpus| cpus.get().div_ceil(2))
 }
 
 /// Parse the flags of a native `audit` given an already-resolved binary

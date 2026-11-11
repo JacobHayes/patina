@@ -79,9 +79,12 @@ package's own libtest suite, one simulated run per test.
 
 `patina test [DIR|Cargo.toml]` runs an existing test suite unmodified, with
 `cargo test`'s selection (`-p`, `--workspace`, `--lib`, `--bin NAME`,
-`--test NAME`, a trailing filter and `--exact`). Each target is built
-shim-linked once; each test then runs on each seed (`--seed N`, `--seeds N`)
-as its own run, `--jobs` at a time, and ends in one outcome. A finding is
+`--test NAME`, a trailing filter and `--exact`); `--skip PATTERN` leaves
+tests out as libtest's own `--skip` does, and `--skip-target NAME` leaves out a
+whole target. Each target is built shim-linked once; each test then runs on
+each seed (`--seed N`, `--seeds N`) as its own run, `--jobs` at a time
+(default: half the CPUs the process may use, so a shared machine keeps room),
+and ends in one outcome. A finding is
 re-run recorded, and its block carries the `rerun:` and `replay:` commands.
 `--no-run` builds and prints where each target's guest is staged
 (`target/patina/dst/PACKAGE/KIND/TARGET/guest`). A test that reaches

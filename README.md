@@ -84,7 +84,7 @@ pass, why, and the seed it failed on (with your own paths, and perhaps
 another seed):
 
 ```text
-patina test: 1 test(s) in 2 target(s); built in 10.3s, ran in 0.4s (24 job(s), seeds 0..20)
+patina test: 1 test(s) in 2 target(s); built in 10.3s, ran in 0.4s (12 job(s), seeds 0..20)
   failure               1
 
 failure          jobs --test order results_come_back_in_job_order (seed 0)
