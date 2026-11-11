@@ -123,8 +123,8 @@ buggify_knob (STATIC_SITE_KIND_KNOB, "knob")
 /// Assert an invariant. Under Patina a violation reports a `violation`
 /// [`VerdictKind`] under the site's label and aborts the run — the verdict
 /// classifies the seed as a failure a campaign can dedup and a replay can
-/// reproduce. Outside Patina it is a `debug_assert` (checked in debug and
-/// test builds, free in release).
+/// reproduce. Outside Patina it is inert, as every SDK site is: the condition
+/// is evaluated and nothing else happens.
 ///
 /// ```
 /// let ledger = [1, 5, 9];

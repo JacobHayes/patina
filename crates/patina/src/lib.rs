@@ -43,7 +43,7 @@
 //!   (never a real sleep).
 //! - [`buggify_knob!`] — a per-run perturbed value within a range.
 //! - [`always!`] — a fatal invariant: under Patina a violation reports a
-//!   `violation` verdict and aborts; outside it is a `debug_assert`.
+//!   `violation` verdict and aborts; outside it is inert.
 //! - [`sometimes!`] / [`reachable!`] — coverage oracles.
 //! - [`verdict`] — report a structured outcome ([`VerdictKind`]) about the run:
 //!   recorded as a trace event and surfaced in the result envelope's

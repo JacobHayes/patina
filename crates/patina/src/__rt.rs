@@ -87,8 +87,8 @@ mod calls {
         }
     }
 
-    /// `always!`: a fatal invariant under Patina (verdict + finalized abort), a
-    /// `debug_assert` outside.
+    /// `always!`: a fatal invariant under Patina (verdict + finalized abort),
+    /// inert outside, as in the Go and Python SDKs.
     #[inline]
     #[track_caller]
     pub fn always(condition: bool, label: &str, site: &str) {
@@ -106,8 +106,7 @@ mod calls {
         }
         #[cfg(not(patina_shim))]
         {
-            let _ = site;
-            debug_assert!(condition, "always! invariant violated: {label}");
+            let _ = (condition, label, site);
         }
     }
 
