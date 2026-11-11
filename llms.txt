@@ -50,15 +50,22 @@ plane: only the supervisor sets it, and an inherited one is stripped.
 
 ## CLI verbs
 
-- `patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--instrument]`
-  Build a deterministic shim-linked artifact. `--instrument` adds an LLVM
-  SanitizerCoverage hook at every edge: it keeps edge counters (`--coverage-out`,
-  `coverage`, `campaign --guided`) and takes the scheduling points a run's
+- `patina build <SOURCE.rs|DIR|Cargo.toml> [--output PATH] [--release] [--no-instrument]`
+  Build a deterministic shim-linked artifact, instrumented by default on Linux (plain on macOS, where instrumented builds are unavailable): an LLVM
+  SanitizerCoverage hook at every edge meters computation as virtual time, so
+  compute is deterministic whatever the host's speed and a run that computes
+  without end stops as `timeout`/`compute_bound` on every host. The hook keeps
+  edge counters (`--coverage-out`, `coverage`, `campaign --guided`) and takes
+  the scheduling points a run's
   `--yield-stride N` asks for, one every N edges a thread executes, so
   atomics-only race windows become schedulable (1 = every edge, the densest and
   most expensive; the default 0 adds none). The stride is recorded in the trace
   and a replay takes it from there; an instrumented binary folds `+instrumented`
   into the compatibility fingerprint and a non-zero stride `+yieldstride`.
+  `--no-instrument` (also on `run` from source, and `test`; refused for `--go`
+  and `--python`, which carry their own meters) builds plain: compute up to
+  about 3x faster, but unmetered, so a run that computes without end stops only
+  at the host-time backstop, an inconclusive `timeout`.
   Prints `PATINA_BUILD output=...`.
 - `patina build <GO PACKAGE DIR> --go [--go-test] --output PATH [--release] [-- GO BUILD OPTIONS]` (`--go-test`: the package's test binary, `go test -c`)
   Build a Go main package as a native guest (Linux): `go build` in cgo mode
@@ -77,7 +84,7 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   data is not carried; `zlib` is built in, `ssl` is not. Linux only. Every
   guest has the Python SDK, `import patina` (inert under plain Python with
   `crates/cargo-patina/python/sdk` on the path).
-- `patina run <ARTIFACT|SOURCE> [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify] [-- ARGS]`
+- `patina run <ARTIFACT|SOURCE> [--release] [--no-instrument] [--seed N | --record PATH] [--coverage-out PATH] [FAULT OPTIONS] [--buggify] [-- ARGS]`
   Run under the deterministic runtime. `--seed` (default 0) drives everything.
   `--record PATH` writes a trace. `--env K=V` sets the guest's starting
   environment, `--cwd PATH` its starting working directory (an absolute path
@@ -92,11 +99,13 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   `--hostname NAME` sets the node name `uname`/`gethostname` report (default
   `patina`, at most 64 bytes); both are recorded and restored flag-free on
   replay.
-  Native `--instrument` binaries emit
+  `--release` and `--no-instrument` shape a source built on the fly and are
+  refused on a prebuilt binary, which is whatever it was built as; a plain
+  build gets a `patina: note:` line on stderr saying so.
+  Instrumented native binaries emit
   `PATINA_COVERAGE_REPORT`; `--coverage-out PATH` writes a `patina.covmap/v1`
-  edge-counter map and refuses plain native binaries with a
-  `build --instrument` hint; `--yield-stride N` on a plain binary is refused
-  the same way.
+  edge-counter map and refuses plain native binaries; `--yield-stride N` on a
+  plain binary is refused the same way.
   Native runs execute with address-space randomization off; a host that
   forbids it (Docker's default seccomp profile) refuses the run unless
   `--allow-randomized-address-layout` is passed (also on `test` and
@@ -111,7 +120,7 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run as `internal`, `stop.reason` `host_limit`.
-- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--skip-target NAME]... [--skip PATTERN]... [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--instrument] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--skip-target NAME]... [--skip PATTERN]... [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--no-instrument] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   A package's own libtest suite, unmodified: selection is `cargo test`'s
   (default: the package in DIR, else the workspace's default members; lib,
   bins and integration tests). Each selected target is built shim-linked once
@@ -167,7 +176,9 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   prebuilt binary is refused unless `--raw`.
 - `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL|all]... [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
-  and knobs are a pure function of the generation number. `--vary DIM,...`
+  and knobs are a pure function of the generation number. A source is built
+  instrumented; to sweep a plain build, pass a binary built with
+  `patina build --no-instrument`. `--vary DIM,...`
   names what each generation draws: `buggify` (fresh fire odds), `sched-pct`
   (a PCT depth), `yield-stride` (a stride from 1 to 1024), and fault planes.
   `faults` bands every
@@ -220,7 +231,7 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   extra runs. Novel failure
   signatures are deduped with saved
   traces, SDK site coverage is folded into `<out-dir>/sites.json` (schema
-  `patina.campaign.sites/v1`), and native edge coverage (`--instrument`, or a Go guest) is folded
+  `patina.campaign.sites/v1`), and native edge coverage (an instrumented build, or a Go guest) is folded
   into `<out-dir>/coverage/` (schema `patina.coverage.campaign/v3`) with a
   plateau report controlled by `--plateau-after`. Unsatisfied `sometimes!`/
   `reachable!` oracle sites, including link-time-declared rows with
@@ -249,8 +260,8 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   to `<out-dir>/generations.jsonl`. A spec key is its flag's name in snake
   case (`"gens"`, `"seed_start"`, `"vary"`, `"dns_entry"`, `"allow"`, ...).
 - `patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
-  Read-only offline symbolization for native edge coverage (`--instrument`, or a
-  Go guest). Resolves covmap PCs from the `patina_yield_point` anchor, demangles
+  Read-only offline symbolization for native edge coverage (an instrumented
+  build, or a Go guest). Resolves covmap PCs from the `patina_yield_point` anchor, demangles
   symbols, rolls edges up by crate/module/function (a Go edge, which has no pc,
   by its package only), refuses campaign stores whose recorded artifact
   hash does not match `<BINARY>`, and emits human tables or a
@@ -364,7 +375,8 @@ facts, the shim's stop record, the guest's wait status); printed failure text
 alone is a `failure`. `exit_code` is the tool's own exit status, never the
 guest's (`guest_exit`). A campaign's exit status is 1 when any generation is a
 finding in the guest or its coverage gate fails, else 2 when any generation is
-not clean. When applicable: `artifact`, `fingerprint`, `seed`, `render`,
+not clean. When applicable: `artifact`, `fingerprint`, `build` (what a run
+ran: `instrumented`, `go`, `python` or `plain`), `seed`, `render`,
 `reproduce` (the command that repeats a run that did not end clean: the replay
 of its recording, else the `run` with its seed spelled out), `findings`
 (audit import/finding strings), `finding_details` (structured audit symbol,
@@ -528,11 +540,11 @@ dev-dependency use under plain `cargo test`.
   build failure, refused replay) exits 2.
 - `PATINA_SCHEDULE_REPORT` (`--verbose`) reports per-task scheduling boundaries and
   warns (`vacuous_threads>0`) when a spawned thread ran zero interposed ops — i.e.
-  its interleavings were not actually explored (use `build --instrument` and
-  `run --yield-stride N`). A Go guest's threads are never flagged: its meter
+  its interleavings were not actually explored (use `run --yield-stride N` on
+  an instrumented build). A Go guest's threads are never flagged: its meter
   takes scheduling points in any thread running Go code, so a thread without
   one is an idle runtime thread.
-- `PATINA_COVERAGE_REPORT` (`--verbose`) reports native edge coverage (`--instrument`, or a Go guest)
+- `PATINA_COVERAGE_REPORT` (`--verbose`) reports native edge coverage (an instrumented build, or a Go guest)
   (`edges_covered/edges_total`, hit totals/max, saturation).
 - `PATINA_SDK_REPORT` (`--verbose`) reports buggify site registration/activation/firing (the envelope's `sdk` is the machine copy); each `site=` row ends with `|@<file:line>`. `enabled=0 swarm_deselected=1` means buggify WAS requested and this generation's `--swarm` draw dropped it; `enabled=0 swarm_deselected=0` means it was never requested.
 - `PATINA_SWARM_REPORT` (`--verbose`) reports the `--swarm` decision for every fault class: `candidates=N selected=M deselected=K vacuous=<0|1>` then one `class=<token>|<0|1>` row per candidate. A class that was never enabled appears in no row. `vacuous=1` means `--swarm` was requested with NO fault class enabled, so the draw had nothing to select and the run explored the plain configuration; the runtime warns and a campaign refuses `--swarm` when it enables nothing to mask. Dropping every candidate of a non-empty set is a legitimate draw (`vacuous=0`).

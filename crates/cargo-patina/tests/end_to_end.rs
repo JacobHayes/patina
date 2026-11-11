@@ -23,6 +23,9 @@ mod campaign_continuation;
 mod campaign_fault_planes;
 #[path = "end_to_end/campaign_forwarding.rs"]
 mod campaign_forwarding;
+// Guided campaigns steer on an instrumented build's edge coverage, which only
+// Linux builds.
+#[cfg(target_os = "linux")]
 #[path = "end_to_end/campaign_guided.rs"]
 mod campaign_guided;
 #[path = "end_to_end/campaign_outcomes.rs"]

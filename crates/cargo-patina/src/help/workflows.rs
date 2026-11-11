@@ -11,7 +11,8 @@ pub(super) const CAMPAIGN: Verb = Verb {
     ],
     prose: "\
 A campaign runs `--gens` independent child `patina run` processes over one \
-artifact. Everything is a pure function of the generation number, so a re-run with \
+artifact. A source is built once, instrumented on Linux (plain on macOS); to sweep a plain build, give \
+the campaign one built with `patina build --no-instrument`. Everything is a pure function of the generation number, so a re-run with \
 the same spec reproduces the same seeds, knobs, outcomes, and failure signatures. \
 Each generation runs with --format json and lands in the class its own \
 patina.result/v2 envelope reports (`result`: the outcome table of `patina --help`), \
@@ -131,7 +132,7 @@ that would change them.",
                     None,
                     Value::None,
                     "Bias each generation's seed and knobs toward configurations that previously \
-                 found new edge coverage (an --instrument build or a Go guest); refused \
+                 found new edge coverage (an instrumented build, the default, or a Go guest); refused \
                  when there is none.",
                     false,
                 ),
@@ -146,7 +147,7 @@ that would change them.",
                     "--vary",
                     None,
                     Value::Required("DIM,...", Kind::EnumList(crate::campaign::VARY_NAMES)),
-                    "What each generation draws from its seed: buggify (activation and firing rates), sched-pct (a PCT depth from 1 to 5), yield-stride (1 to 1024 edges; needs an --instrument artifact), and fault planes: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump), crash (native only: machine and process crash rates), or faults for every plane. Nothing varies by default.",
+                    "What each generation draws from its seed: buggify (activation and firing rates), sched-pct (a PCT depth from 1 to 5), yield-stride (1 to 1024 edges; needs an instrumented artifact, not --no-instrument), and fault planes: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump), crash (native only: machine and process crash rates), or faults for every plane. Nothing varies by default.",
                     false,
                 ),
                 f(
@@ -210,7 +211,7 @@ pub(super) const COVERAGE: Verb = Verb {
     ],
     prose: "\
 `coverage` is a read-only offline report over native edge coverage (an \
-`--instrument` build or a Go guest). Pass the same binary that produced a \
+instrumented build, the default, or a Go guest). Pass the same binary that produced a \
 `patina.covmap/v1` map (from run/replay --coverage-out) or a campaign out-dir \
 with `<out-dir>/coverage/`. The report uses the map's anchor-relative PCs, \
 resolves them against the binary's `patina_yield_point` symbol, demangles Rust \

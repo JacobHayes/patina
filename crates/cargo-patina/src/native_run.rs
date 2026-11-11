@@ -5,8 +5,8 @@ use crate::crash_restart::{
     IncarnationLaunch, append_native_infra_marker, crash_restart_plan, supervise_crash_restart,
 };
 use crate::native_build::{
-    IMAGE_FINGERPRINT_COMPONENT, binary_instrumentation, instrumentation_fingerprint,
-    native_run_fingerprint, resolve_artifact,
+    IMAGE_FINGERPRINT_COMPONENT, binary_build_kind, binary_instrumentation,
+    instrumentation_fingerprint, native_run_fingerprint, resolve_artifact,
 };
 use crate::output;
 use crate::parse::{buggify_env_pairs, knob_env_pairs, liveness_env_pairs, schedule_env_pairs};
@@ -259,7 +259,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         eprintln!("patina: WARNING: {}", layout::RANDOMIZED_QUALIFICATION);
     }
 
-    // An `--instrument` binary carries the edge hook (counters and a stride to
+    // An instrumented binary carries the edge hook (counters and a stride to
     // honour); a Go guest carries counters only. Detect the linked markers: they
     // decide whether there are counters to write and a stride to honour, and the
     // edge hook folds into the compatibility fingerprint, so a trace never
@@ -267,15 +267,35 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     let instrumented = image.remember("instrumentation", || {
         Ok::<_, CliError>(binary_instrumentation(image.bytes()))
     })?;
+    // A prebuilt binary is whatever it was built as: say so when its
+    // computation is not metered, since then a run that computes without end
+    // stops only at the host-time backstop.
+    let build_kind = image.remember("build-kind", || {
+        Ok::<_, CliError>(binary_build_kind(image.bytes()))
+    })?;
+    // Only where a metered build is the default is a plain one worth a note:
+    // on macOS every Rust/C build is plain.
+    if build_kind == crate::native_build::BuildKind::Plain
+        && crate::native_build::INSTRUMENT_BY_DEFAULT
+        && !output::options().is_json()
+    {
+        eprintln!(
+            "patina: note: {} is a plain build: its computation is not metered, so a run that \
+computes without end stops only at the host-time backstop, an inconclusive timeout; {} to \
+meter it",
+            binary.display(),
+            crate::native_build::METER_HINT
+        );
+    }
     if invocation.coverage_out.is_some() && !instrumented.edge_counters {
         return Err(CliError::usage(
-            "--coverage-out requires a native binary with edge counters: one built with `patina build --instrument` (or a Go guest built with `--go`)",
+            "--coverage-out requires a native binary with edge counters: an instrumented build (the default; not --no-instrument) or a Go guest",
         ));
     }
     if invocation.schedule.yield_stride != 0 && !instrumented.yield_hook {
         return Err(CliError::usage(format!(
-            "--yield-stride {} takes its scheduling points at the edge hooks of a binary built with \
-`patina build --instrument`; {} has none, so the stride would be inert",
+            "--yield-stride {} takes its scheduling points at the edge hooks of an instrumented \
+build; {} was built with --no-instrument (or is a Go or Python guest), so the stride would be inert",
             invocation.schedule.yield_stride,
             binary.display()
         )));
@@ -870,6 +890,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             trace_facts,
             timeline: "main",
             fingerprint,
+            build: Some(build_kind.as_str()),
             seed,
             coverage: coverage.clone(),
             crash_restart,

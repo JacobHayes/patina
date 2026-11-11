@@ -1,5 +1,5 @@
 /* The SanitizerCoverage hooks of an instrumented build
- * (`patina build --instrument`).
+ * (`patina build`, unless `--no-instrument`).
  *
  * LLVM's trace-pc-guard instrumentation calls `__sanitizer_cov_trace_pc_guard`
  * at every instrumented edge, loop backedges included. Each call does three

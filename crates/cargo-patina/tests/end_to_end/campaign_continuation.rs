@@ -2,13 +2,22 @@
 
 use super::*;
 
-fn campaign_coverage_file_hashes(out_dir: &Path) -> BTreeMap<String, String> {
+/// The campaign's coverage store, file by file: present exactly when its guest
+/// is an instrumented build, the only kind with edge coverage.
+fn campaign_coverage_file_hashes(
+    out_dir: &Path,
+    instrumented: bool,
+) -> Option<BTreeMap<String, String>> {
     let coverage_dir = out_dir.join("coverage");
-    assert!(
+    assert_eq!(
         coverage_dir.is_dir(),
-        "campaign coverage store is missing at {}",
+        instrumented,
+        "campaign coverage store at {} (instrumented guest: {instrumented})",
         coverage_dir.display()
     );
+    if !instrumented {
+        return None;
+    }
     let mut hashes = BTreeMap::new();
     collect_file_hashes(&coverage_dir, &coverage_dir, &mut hashes);
     assert!(
@@ -18,7 +27,7 @@ fn campaign_coverage_file_hashes(out_dir: &Path) -> BTreeMap<String, String> {
             && hashes.contains_key("sites.i64le"),
         "coverage store did not contain every checkpoint file: {hashes:?}"
     );
-    hashes
+    Some(hashes)
 }
 
 fn collect_file_hashes(root: &Path, dir: &Path, hashes: &mut BTreeMap<String, String>) {

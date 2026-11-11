@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs, io};
 
-/// The SanitizerCoverage hooks of an instrumented build (`--instrument`): edge
+/// The SanitizerCoverage hooks of an instrumented build (the default): edge
 /// counters at every edge, and a scheduling point every `--yield-stride`th one.
 pub(super) const PATINA_SANCOV_C: &str = include_str!("../c/patina_sancov.c");
 /// A Go guest's compute meter: the libFuzzer comparison hooks its
@@ -25,7 +25,7 @@ pub(super) const PATINA_SANCOV_C: &str = include_str!("../c/patina_sancov.c");
 pub(super) const PATINA_GO_METER_C: &str = include_str!("../c/patina_go_meter.c");
 /// Weak, inert SanitizerCoverage entry points so an instrumented artifact that
 /// links on its own — a dependency's unused `cdylib` — resolves them. Linked only
-/// under `--instrument`, alongside (and overridden by) `PATINA_SANCOV_C`.
+/// in an instrumented build, alongside (and overridden by) `PATINA_SANCOV_C`.
 pub(super) const PATINA_SANCOV_STUB_C: &str = include_str!("../c/patina_sancov_stub.c");
 /// Weak stand-ins for the SDK's shim entries, for a program a Patina build
 /// compiles without the shim: a package's own binary, built beside the
@@ -35,7 +35,7 @@ pub(super) const PATINA_SDK_STUB_C: &str = include_str!("../c/patina_sdk_stub.c"
 /// binary to know it carries the edge hook (counters and `--yield-stride`), and
 /// to fold that into the compatibility fingerprint.
 const PATINA_INSTRUMENTED_MARKER: &[u8] = b"PATINA_INSTRUMENTED_V1";
-/// Fingerprint suffix distinguishing an `--instrument` binary from a plain one,
+/// Fingerprint suffix distinguishing an instrumented binary from a plain one,
 /// so their recorded traces never cross-replay.
 const PATINA_INSTRUMENTED_FINGERPRINT_SUFFIX: &str = "+instrumented";
 pub(super) const DEFAULT_NATIVE_EDITION: &str = "2024";
@@ -161,7 +161,7 @@ fn run_native_build(invocation: NativeBuildInvocation) -> Result<PathBuf, CliErr
     // handle pins every input through compilation and the guest's final link.
     let object = built_shim.facade.clone();
     // The SanitizerCoverage hook object is compiled and linked only under
-    // `--instrument`; a plain build never references SanitizerCoverage symbols.
+    // an instrumented build; a plain build never references SanitizerCoverage symbols.
     let yield_object =
         stage_instrumentation_object(&built_shim, invocation.instrument, &host_target)?;
     let allocator = built_shim.allocator_link_args(&host_target)?;
@@ -702,7 +702,7 @@ pub(super) fn host_target_triple(rustc: &RustcInvocation) -> Result<String, CliE
 }
 
 /// Build the `CARGO_ENCODED_RUSTFLAGS` value for a package build: the
-/// cfg(patina)/cfg(dst) family plus, under `--instrument`, the
+/// cfg(patina)/cfg(dst) family plus, in an instrumented build, the
 /// SanitizerCoverage codegen flags. Encoded with the `0x1f` unit separator so values containing
 /// spaces survive intact. Any pre-existing `RUSTFLAGS` are preserved ahead of
 /// the injected flags, matching how `patina run` layers its cfgs onto the
@@ -818,7 +818,7 @@ pub(super) fn stage_sdk_stub(shim: &BuiltNativeShim, target: &str) -> Result<Pat
 }
 
 /// Stage [`PATINA_SANCOV_STUB_OBJECT`] when the build is instrumented. The stubs
-/// exist only to answer the instrumentation, so a build without `--instrument`
+/// exist only to answer the instrumentation, so a plain build (`--no-instrument`)
 /// stages nothing and no Patina object reaches a dependency's link at all.
 pub(super) fn stage_sancov_stub(
     shim: &BuiltNativeShim,
@@ -886,7 +886,7 @@ pub(super) fn native_package_link_args(
 /// markers its linked objects embed.
 ///
 /// The two properties are separate because Go guests have one without the
-/// other. An `--instrument` build's trace-pc-guard hook keeps edge counters AND
+/// other. An instrumented build's trace-pc-guard hook keeps edge counters AND
 /// takes `--yield-stride` scheduling points. A Go guest's libFuzzer
 /// instrumentation keeps 8-bit edge counters, but its hooks are the compute
 /// meter's, so it has no yield hook. This classification is load-bearing: it
@@ -898,7 +898,7 @@ pub(super) fn native_package_link_args(
 pub(crate) struct Instrumentation {
     /// The shim has edge counters to write as coverage.
     pub(crate) edge_counters: bool,
-    /// The `--instrument` edge hook, which takes `--yield-stride` points.
+    /// The instrumented build's edge hook, which takes `--yield-stride` points.
     pub(crate) yield_hook: bool,
 }
 
@@ -908,6 +908,66 @@ pub(super) fn binary_instrumentation(image: &[u8]) -> Instrumentation {
     Instrumentation {
         edge_counters: yield_hook || crate::go_build::carries_meter(image),
         yield_hook,
+    }
+}
+
+/// Whether a Rust or C guest is built instrumented when nothing asks for a
+/// plain build (`--no-instrument`): on Linux. On macOS the default, and the
+/// only Rust/C build, is plain: Mach-O keeps SanitizerCoverage's pc-table, and
+/// through it every instrumented function and its imports, alive through dead
+/// stripping, so an instrumented build of ordinary code would trip the
+/// default-deny import gate. `--no-instrument` is accepted there and asks for
+/// what is already the default.
+pub(crate) const INSTRUMENT_BY_DEFAULT: bool = cfg!(target_os = "linux");
+
+/// How to get a metered (instrumented) Rust/C build on this platform, for a
+/// message about a plain one.
+pub(crate) const METER_HINT: &str = if INSTRUMENT_BY_DEFAULT {
+    "rebuild it without --no-instrument"
+} else {
+    "instrumented Rust/C builds are Linux-only; on macOS every Rust/C build is plain"
+};
+
+/// What a program's build does with its computation, recovered from the
+/// markers its linked objects embed: a metered build charges computation as
+/// virtual time, so a computing run is bounded deterministically; a plain one
+/// leaves it to the host-time backstop, whose stop is only an inconclusive
+/// `timeout`. A run reports it (`build` in the result envelope), since a
+/// prebuilt binary is whatever it was built as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum BuildKind {
+    /// Rust/C built with the edge hook (the default): every edge is metered.
+    Instrumented,
+    /// A Go guest: Go's own comparison meter.
+    Go,
+    /// A Python guest: CPython built with its comparison meter.
+    Python,
+    /// Rust/C built with `--no-instrument`: computation is not metered.
+    Plain,
+}
+
+impl BuildKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Instrumented => "instrumented",
+            Self::Go => "go",
+            Self::Python => "python",
+            Self::Plain => "plain",
+        }
+    }
+}
+
+/// The build kind of the program whose bytes are `image`.
+pub(super) fn binary_build_kind(image: &[u8]) -> BuildKind {
+    if memchr::memmem::find(image, PATINA_INSTRUMENTED_MARKER).is_some() {
+        BuildKind::Instrumented
+    } else if crate::go_build::carries_meter(image) {
+        BuildKind::Go
+    } else if crate::python_build::carries_meter(image) {
+        BuildKind::Python
+    } else {
+        BuildKind::Plain
     }
 }
 
@@ -922,7 +982,7 @@ pub(super) fn started_by_rust_runtime(image: &[u8]) -> bool {
 }
 
 /// Append the instrumentation suffix to a base fingerprint when the binary
-/// carries the `--instrument` edge hook, leaving any other binary's fingerprint
+/// carries the instrumented build's edge hook, leaving any other binary's fingerprint
 /// untouched, so an instrumented binary and a plain one never cross-replay. A Go
 /// guest's counters add nothing: every Go guest carries them, so there is no
 /// plain Go build to keep apart.
@@ -1052,14 +1112,22 @@ mod tests {
 
     #[test]
     fn instrument_flag_marker_and_fingerprint_suffix() {
-        // Off by default on both target shapes; `--instrument` sets it on both.
+        // The platform's default on both target shapes; `--no-instrument`
+        // clears it on both.
         for target in ["probe.rs", "pkg"] {
-            assert!(
-                !native_build_invocation(&["native-build", target, "--output", "p"]).instrument
+            assert_eq!(
+                native_build_invocation(&["native-build", target, "--output", "p"]).instrument,
+                INSTRUMENT_BY_DEFAULT
             );
             assert!(
-                native_build_invocation(&["native-build", target, "--output", "p", "--instrument"])
-                    .instrument
+                !native_build_invocation(&[
+                    "native-build",
+                    target,
+                    "--output",
+                    "p",
+                    "--no-instrument"
+                ])
+                .instrument
             );
         }
         // The run side reads the build from the binary's own bytes, wherever the
@@ -1077,7 +1145,13 @@ mod tests {
         // A Go guest's meter brings edge counters but no yield hook.
         let go = plant(b"PATINA_GO_METER_V1 stride=4096;");
         assert!(go.edge_counters && !go.yield_hook);
-        // Only an `--instrument` binary's fingerprint changes, so a plain
+        // The build kind a run reports follows the same markers.
+        let kind = |image: &[u8]| binary_build_kind(image);
+        assert_eq!(kind(&[0u8; 64]), BuildKind::Plain);
+        assert_eq!(kind(PATINA_INSTRUMENTED_MARKER), BuildKind::Instrumented);
+        assert_eq!(kind(b"PATINA_GO_METER_V1 stride=4096;"), BuildKind::Go);
+        assert_eq!(kind(b"PATINA_PYTHON_METER_V1"), BuildKind::Python);
+        // Only an instrumented binary's fingerprint changes, so a plain
         // binary's traces never cross-replay against an instrumented one; a Go
         // guest, which has no plain variant, keeps the base.
         assert_eq!(

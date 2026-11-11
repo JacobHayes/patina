@@ -46,7 +46,7 @@ pub(super) fn initialize_edge_coverage(
     campaign_generations_done: u64,
 ) -> Result<EdgeCoverageState, CliError> {
     let artifact_path = PathBuf::from(&state.artifact.path);
-    // Edge coverage rides the edge counters an `--instrument` build keeps at
+    // Edge coverage rides the edge counters an instrumented build keeps at
     // every stride, 0 included, so a guided campaign pays no preemption cost
     // just to see coverage, and those a Go guest keeps without any yield hook.
     let image = fs::File::open(&artifact_path)
@@ -60,15 +60,15 @@ pub(super) fn initialize_edge_coverage(
     let instrumentation = crate::binary_instrumentation(image.bytes());
     if state.spec.vary.yield_stride && !instrumentation.yield_hook {
         return Err(CliError(format!(
-            "--vary yield-stride draws a scheduling-point stride per generation, but {} was not built \
-with patina build --instrument, so it has no edge hook to take them",
+            "--vary yield-stride draws a scheduling-point stride per generation, but {} is not an \
+instrumented build (it was built with --no-instrument, or is a Go or Python guest), so it has no edge hook to take them",
             artifact_path.display()
         )));
     }
     if !instrumentation.edge_counters {
         return Ok(EdgeCoverageState::unavailable(
             "not-instrumented",
-            Some("rebuild with patina build --instrument"),
+            Some(crate::native_build::METER_HINT),
         ));
     }
     let coverage_dir = out_dir.join("coverage");
@@ -120,11 +120,11 @@ pub(super) fn guidance_source_or_refuse(edge_coverage: &EdgeCoverageState) -> Re
     if edge_coverage.active().is_some() {
         return Ok(());
     }
-    Err(CliError(
-        "--guided needs a novelty signal but this campaign has no edge coverage; rebuild with \
-patina build --instrument so generations have edge coverage to steer by"
-            .to_string(),
-    ))
+    Err(CliError(format!(
+        "--guided needs a novelty signal but this campaign has no edge coverage, which only an \
+instrumented build has: {}",
+        crate::native_build::METER_HINT
+    )))
 }
 
 /// Decide a guided generation's material from the persisted coverage store and

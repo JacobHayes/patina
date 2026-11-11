@@ -57,7 +57,7 @@ impl FaultPlane {
 const VARY_BUGGIFY: &str = "buggify";
 /// `--vary sched-pct`: the PCT bug depth.
 const VARY_SCHED_PCT: &str = "sched-pct";
-/// `--vary yield-stride`: an `--instrument` artifact's yield stride.
+/// `--vary yield-stride`: an instrumented artifact's yield stride.
 const VARY_YIELD_STRIDE: &str = "yield-stride";
 /// `--vary faults`: every fault plane.
 const VARY_FAULTS: &str = "faults";

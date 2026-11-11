@@ -145,10 +145,11 @@ machine: the run ends as `unsupported` and names what it met. Not supported
 today are starting other processes (`fork`, `exec`, `std::process::Command`)
 and loading code at run time (`dlopen`).
 
-One limit is quiet: Patina switches threads only where a thread reaches the
-operating system (a lock it waits for, a sleep, a read, a write). A race
-between threads that only compute needs a build with `--instrument`; see the
-guide.
+One limit is quiet: Patina switches threads where a thread reaches the
+operating system (a lock it waits for, a sleep, a read, a write) and at the
+end of each 1 ms slice of computation. A race between threads that only
+compute, inside one slice, needs denser scheduling points (`run
+--yield-stride N`); see the guide.
 
 What each platform runs today:
 
@@ -157,6 +158,10 @@ What each platform runs today:
 | Linux x86_64 | Rust, Go and Python programs, and the C code they link. | |
 | Linux arm64 | Rust and Python programs, and the C code they link. | Go programs. Code that makes system calls without going through the C library is refused. |
 | macOS (Apple silicon) | Rust programs, and the C code they link. | Go and Python programs. Refused: code that makes system calls without going through the C library, shared libraries that do I/O, and C++ on the system C++ library. A signal other than one the program raises on itself, and interval timers (`alarm`, `setitimer`), stop the run. |
+
+On macOS Rust and C programs are built plain, without the compute meter
+(instrumented builds are Linux-only), so a program that computes without end
+stops only at the host-time backstop, an inconclusive timeout.
 
 On macOS heap addresses differ between runs of one seed, so a program that
 depends on pointer values can differ too. On Linux the program sees one fixed

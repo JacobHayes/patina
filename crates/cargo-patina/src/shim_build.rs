@@ -4,7 +4,7 @@ use crate::native_build::{
     PATINA_GO_METER_C, PATINA_SANCOV_C, PATINA_SANCOV_STUB_C, PATINA_SDK_STUB_C,
     hash_file_contents, host_target_triple,
 };
-use crate::{CliError, hash_bytes, hash_os, hex, output, shim_cache};
+use crate::{CliError, hash_bytes, hash_os, hex, shim_cache};
 use patina_dst_trace::lock_exclusive;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -819,7 +819,7 @@ fn indent_lines(text: &str, indent: &str) -> String {
 
 /// A shim helper object compiled below the guest and linked into every native
 /// build. Both variants are content-addressed by [`stage_shim_object`]: the POSIX
-/// layer always, the SanitizerCoverage hook only under `--instrument`.
+/// layer always, the SanitizerCoverage hook only in an instrumented build.
 pub(super) struct ShimObject {
     /// Final object file name, e.g. `patina_posix.o`.
     object_name: &'static str,
@@ -862,7 +862,7 @@ const PATINA_ALLOCATOR_ROUTING_OBJECT: ShimObject = ShimObject {
     what: "the Patina allocator routing",
 };
 
-/// The `--instrument` hook object (`patina_sancov.c`). Compiled without the
+/// The instrumented build's hook object (`patina_sancov.c`). Compiled without the
 /// SanitizerCoverage flags themselves, so the hook (and thus the
 /// `patina_yield_point` it calls) is never itself instrumented and cannot
 /// recurse.
@@ -1017,8 +1017,7 @@ fn shim_object_hash_in(
 }
 
 /// Stage the SanitizerCoverage hook object this build's instrumentation calls
-/// for, and announce it on stdout (stderr under `--format json`, so the JSON
-/// document stays parseable).
+/// for. A run reports which kind of build it ran (`build` in its envelope).
 ///
 /// `None` for a plain build: its link recipe then contains no SanitizerCoverage
 /// flags and no hook object, so a plain native build is byte-for-byte the build
@@ -1030,16 +1029,6 @@ pub(super) fn stage_instrumentation_object(
 ) -> Result<Option<PathBuf>, CliError> {
     if !instrumented {
         return Ok(None);
-    }
-    // Surface the instrumentation prominently: this binary is not a plain build —
-    // it carries LLVM SanitizerCoverage, and `run` fingerprints it apart.
-    let note = "PATINA_BUILD_INSTRUMENTED instrumentation=llvm-sancov-trace-pc-guard \
-fingerprint-suffix=+instrumented -- edge counters at every edge; `run --yield-stride N` adds a \
-scheduling point every N edges";
-    if output::options().is_json() {
-        eprintln!("{note}");
-    } else {
-        println!("{note}");
     }
     stage_shim_object(&shim.objects, &PATINA_SANCOV_OBJECT, host_target, &[]).map(Some)
 }

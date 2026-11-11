@@ -24,6 +24,9 @@ pub struct Envelope {
     result: RunClass,
     pub(crate) artifact: Option<String>,
     pub(super) fingerprint: Option<String>,
+    /// The guest's build kind: whether, and by what, its computation is
+    /// metered (`instrumented`, `go`, `python`, `plain`).
+    pub(super) build: Option<&'static str>,
     pub(super) seed: Option<u64>,
     pub(crate) trace: Option<TraceFacts>,
     pub(super) coverage: Option<CoverageReport>,
@@ -100,6 +103,7 @@ impl Envelope {
             result,
             artifact: None,
             fingerprint: None,
+            build: None,
             seed: None,
             trace: None,
             coverage: None,
@@ -148,6 +152,9 @@ impl Envelope {
         }
         if let Some(v) = &self.fingerprint {
             m.insert("fingerprint".into(), Value::from(v.clone()));
+        }
+        if let Some(v) = self.build {
+            m.insert("build".into(), Value::from(v));
         }
         if let Some(v) = self.seed {
             m.insert("seed".into(), Value::from(v));

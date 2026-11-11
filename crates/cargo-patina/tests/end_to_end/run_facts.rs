@@ -281,7 +281,13 @@ mod tests {
             ],
         );
         let recorded = fs::read_to_string(&trace).unwrap();
-        let tampered = recorded.replace("\"patina-native\"", "\"patina-native+instrumented\"");
+        // Flip the recorded build kind, whichever the platform's default is.
+        let (instrumented, plain) = ("\"patina-native+instrumented\"", "\"patina-native\"");
+        let tampered = if recorded.contains(instrumented) {
+            recorded.replace(instrumented, plain)
+        } else {
+            recorded.replace(plain, instrumented)
+        };
         assert_ne!(
             recorded, tampered,
             "the trace fingerprint was not rewritten"

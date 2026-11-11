@@ -127,8 +127,8 @@ mod tests {
     // dependency a stand-in for crc-fast rather than a trivial arithmetic crate —
     // and is deliberately NOT claimed as the duplicate-symbol discriminator: a
     // dependency like this still links clean under `-fPIC`, so that rung of the
-    // original report remains unreproduced synthetically. Exercised under
-    // `--instrument`, whose extra object travels the same path.
+    // original report remains unreproduced synthetically. Exercised
+    // with the platform default build (instrumented on Linux), whose extra object travels the same path.
     #[test]
     fn native_build_package_keeps_shim_link_args_off_a_dependency_cdylib() {
         let directory = tempdir().unwrap();
@@ -142,7 +142,6 @@ mod tests {
             &[
                 "build",
                 package.to_str().unwrap(),
-                "--instrument",
                 "--output",
                 output.to_str().unwrap(),
             ],
@@ -174,9 +173,27 @@ mod tests {
         }
 
         // The same markers must still be in the guest binary: scoping the link args
-        // must not have weakened interposition on the artifact that matters.
+        // must not have weakened interposition on the artifact that matters. The
+        // scheduling point is linked only into an instrumented build, which the
+        // run reports.
+        let ran = invoke(
+            workspace,
+            &[
+                "run",
+                output.to_str().unwrap(),
+                "--seed",
+                "1",
+                "--format",
+                "json",
+            ],
+        );
+        let ran: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+        let instrumented = ran["build"] == "instrumented";
         let guest_bytes = fs::read(&output).unwrap();
-        for symbol in SHIM_LINK_MARKER_SYMBOLS {
+        for symbol in SHIM_LINK_MARKER_SYMBOLS
+            .iter()
+            .filter(|symbol| instrumented || **symbol != b"patina_yield_point")
+        {
             assert!(
                 contains_symbol(&guest_bytes, symbol),
                 "shim symbol {} missing from the guest binary {}",
@@ -185,10 +202,7 @@ mod tests {
             );
         }
 
-        let result = String::from_utf8_lossy(
-            &invoke(workspace, &["run", output.to_str().unwrap(), "--seed", "1"]).stdout,
-        )
-        .into_owned();
+        let result = ran["stdout"].as_str().unwrap_or_default();
         assert!(
             result.contains("NATIVE_CDYLIB_DEP_RESULT"),
             "missing result marker: {result}"
@@ -197,7 +211,7 @@ mod tests {
 
     /// Symbols that exist only because the shim's C object and staticlib were on a
     /// link line: the POSIX layer's constructor-retained `environ` accessor and the
-    /// `--instrument` hook's scheduling point.
+    /// instrumented build's scheduling point.
     const SHIM_LINK_MARKER_SYMBOLS: &[&[u8]] = &[b"patina_environ_install", b"patina_yield_point"];
 
     /// Whether `image`'s symbol table names `symbol`. Symbol names are stored as

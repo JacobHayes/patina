@@ -105,31 +105,26 @@ mod tests {
         );
     }
 
-    // A campaign asked for a mode its artifact cannot serve is refused by name, never
-    // swept in a different mode than the operator asked for. A plain native binary
-    // (no yield points) has no edge coverage, so `--guided` has no novelty signal.
+    // A campaign asked for a mode its artifact cannot serve is refused, never
+    // swept in a different mode than the operator asked for. A plain native
+    // binary (`--no-instrument`: no edge hook) has no edge coverage, so
+    // `--guided` has no novelty signal.
     #[test]
     fn campaign_refuses_guided_without_a_novelty_signal() {
         let directory = tempdir().unwrap();
-        let refused = campaign_run(
-            &directory.path().join("guided"),
-            &outcome_guest(),
-            &["--guided"],
+        let plain = build_facts_guest_with(
+            directory.path(),
+            "plain",
+            "fn main() { println!(\"plain\"); }\n",
+            &["--no-instrument"],
         );
-        assert_ne!(
+        let refused = campaign_run(&directory.path().join("guided"), &plain, &["--guided"]);
+        assert_eq!(
             refused.status.code(),
-            Some(0),
-            "--guided without a novelty signal must not succeed quietly"
-        );
-        // Under `--format json` the refusal travels in the envelope.
-        let refusal = format!(
-            "{}{}",
+            Some(2),
+            "--guided without a novelty signal must be refused as patina's, not run:\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&refused.stdout),
             String::from_utf8_lossy(&refused.stderr)
-        );
-        assert!(
-            refusal.contains("--guided needs a novelty signal") && refusal.contains("--instrument"),
-            "the refusal must name the cause and the fix:\n{refusal}"
         );
     }
 }

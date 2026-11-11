@@ -75,7 +75,7 @@ pub(crate) fn parse_test_from(
             no_default_features: args.flag("--no-default-features"),
         },
         release: args.flag("--release"),
-        instrument: args.flag("--instrument"),
+        instrument: crate::native_build::INSTRUMENT_BY_DEFAULT && !args.flag("--no-instrument"),
         no_run: args.flag("--no-run"),
         seeds: match (seed, seeds) {
             (_, Some(count)) => Seeds::Range(count),
@@ -155,13 +155,14 @@ pub(crate) fn parse_native_build(
         .ok_or_else(|| CliError::usage("build requires a Rust source path or a Cargo package"))?;
     let output = args.path("--output");
     let release = args.flag("--release");
-    let instrument = args.flag("--instrument");
+    let no_instrument = args.flag("--no-instrument");
+    let instrument = crate::native_build::INSTRUMENT_BY_DEFAULT && !no_instrument;
 
     if args.flag("--go") {
-        return parse_go_build(&args, path, output, release, instrument, rustc_args);
+        return parse_go_build(&args, path, output, release, no_instrument, rustc_args);
     }
     if args.flag("--python") {
-        return parse_python_build(&args, path, output, release, instrument, rustc_args);
+        return parse_python_build(&args, path, output, release, no_instrument, rustc_args);
     }
     if is_native_package_path(&path) {
         if let Some(rustc_arg) = rustc_args.first() {
@@ -215,7 +216,7 @@ fn parse_go_build(
     path: PathBuf,
     output: Option<PathBuf>,
     release: bool,
-    instrument: bool,
+    no_instrument: bool,
     go_args: Vec<OsString>,
 ) -> Result<NativeBuildInvocation, CliError> {
     for (flag, given) in [
@@ -229,9 +230,9 @@ fn parse_go_build(
             )));
         }
     }
-    if instrument {
+    if no_instrument {
         return Err(CliError::usage(
-            "--instrument instruments Rust code through LLVM; a Go package (--go) takes no --instrument",
+            "--no-instrument builds Rust code without its edge meter; a Go package (--go) carries its own compute meter, which is not optional",
         ));
     }
     crate::go_build::check_go_args(&go_args)?;
@@ -248,7 +249,7 @@ fn parse_go_build(
         },
         output: Some(output),
         release,
-        instrument,
+        instrument: false,
     })
 }
 
@@ -259,7 +260,7 @@ fn parse_python_build(
     path: PathBuf,
     output: Option<PathBuf>,
     release: bool,
-    instrument: bool,
+    no_instrument: bool,
     trailing: Vec<OsString>,
 ) -> Result<NativeBuildInvocation, CliError> {
     for (flag, given) in [
@@ -273,9 +274,9 @@ fn parse_python_build(
             )));
         }
     }
-    if instrument {
+    if no_instrument {
         return Err(CliError::usage(
-            "--instrument instruments Rust code through LLVM; a Python application (--python) takes no --instrument",
+            "--no-instrument builds Rust code without its edge meter; a Python application (--python) carries its own compute meter, which is not optional",
         ));
     }
     if let Some(argument) = trailing.first() {
@@ -297,7 +298,7 @@ fn parse_python_build(
         },
         output: Some(output),
         release,
-        instrument,
+        instrument: false,
     })
 }
 

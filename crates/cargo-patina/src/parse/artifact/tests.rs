@@ -124,22 +124,46 @@ fn source_first_package_selection_and_release_thread_into_the_build_spec() {
     let mut source = ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs"))));
     assert!(apply_package_selection(&mut source, None, Some("x".into())).is_err());
     {
-        // `--release` is extracted from the head (before any `--`); the rest passes
-        // through, and a `--release` in the guest section stays untouched.
-        let (release, rest) =
-            take_release(strings(&["--release", "--seed", "1", "--", "--release"])).unwrap();
-        assert!(release);
+        // The build switches are extracted from the head (before any `--`); the
+        // rest passes through, and a switch in the guest section stays untouched.
+        let (switches, rest) = take_build_switches(strings(&[
+            "--release",
+            "--no-instrument",
+            "--seed",
+            "1",
+            "--",
+            "--release",
+        ]))
+        .unwrap();
+        assert!(switches.release && switches.no_instrument);
         assert_eq!(rest, strings(&["--seed", "1", "--", "--release"]));
 
+        // A build on the fly takes the platform's default unless asked otherwise.
         let mut build = ArtifactRef::Build(Box::new(native_source_spec(PathBuf::from("main.rs"))));
-        apply_release(&mut build, true).unwrap();
-        assert!(matches!(&build, ArtifactRef::Build(spec) if spec.build.release));
+        assert!(
+            matches!(&build, ArtifactRef::Build(spec) if spec.build.instrument == crate::native_build::INSTRUMENT_BY_DEFAULT)
+        );
+        apply_build_switches(&mut build, switches).unwrap();
+        assert!(
+            matches!(&build, ArtifactRef::Build(spec) if spec.build.release && !spec.build.instrument)
+        );
 
-        // An already-built artifact carries no build profile, so `--release` on a
-        // prebuilt positional fails closed rather than being silently ignored; a
-        // false (absent) release is a no-op on any artifact.
+        // An already-built artifact is whatever it was built as, so a switch on
+        // a prebuilt positional fails closed rather than being silently
+        // ignored; no switch is a no-op on any artifact.
         let mut prebuilt = ArtifactRef::Prebuilt(PathBuf::from("bin"));
-        assert!(apply_release(&mut prebuilt, true).is_err());
-        assert!(apply_release(&mut prebuilt, false).is_ok());
+        for switches in [
+            BuildSwitches {
+                release: true,
+                no_instrument: false,
+            },
+            BuildSwitches {
+                release: false,
+                no_instrument: true,
+            },
+        ] {
+            assert!(apply_build_switches(&mut prebuilt, switches).is_err());
+        }
+        assert!(apply_build_switches(&mut prebuilt, BuildSwitches::default()).is_ok());
     }
 }

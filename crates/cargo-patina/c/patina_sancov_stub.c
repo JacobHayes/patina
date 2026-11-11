@@ -1,5 +1,5 @@
 /* Weak no-op SanitizerCoverage entry points, for the artifacts an
- * instrumented (`--instrument`) build compiles but never runs.
+ * instrumented build compiles but never runs.
  *
  * The instrumentation flags are whole-graph on purpose: every crate Cargo
  * compiles from source gains edge hooks, so a race window inside a dependency

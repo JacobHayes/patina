@@ -11,13 +11,18 @@ pub(super) const RUN: Verb = Verb {
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
         "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--mount HOST_DIR[:GUEST_DIR]] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL|all]... [-- PROGRAM ARGS]",
-        "patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
+        "patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [--no-instrument] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
 `run` is source-first with artifacts accepted uniformly. A built artifact \
 (recognized by its leading magic bytes) is used as-is; a <SOURCE.rs|DIR|Cargo.toml> \
 is built on the fly through the same pipeline as `build` and its product is run \
-(a one-line PATINA_BUILD_ON_RUN note reports the built artifact and its hash).\n\
+(a one-line PATINA_BUILD_ON_RUN note reports the built artifact and its hash). \
+On Linux a source is built instrumented, so its computation costs virtual \
+time, unless --no-instrument asks for a plain build; on macOS it is built \
+plain. A built artifact is whatever it was \
+built as. The result names which (`build`: instrumented, go, python or plain), \
+and a plain one is noted on stderr.\n\
 \n\
 `run <BINARY>` runs a shim-linked native binary under a pre-run default-deny audit: every externally resolved symbol must \
 be interposed or known-safe, and any unsupported symbol on the \
@@ -76,15 +81,24 @@ Reproduce a recorded run with `patina replay`.",
             flags: SOURCE_SELECT,
         },
         Group {
-            title: "Build profile (source-first)",
+            title: "Build (source-first)",
             families: SOLE,
-            flags: &[f(
-                "--release",
-                None,
-                Value::None,
-                "Build the on-the-fly guest in release mode (default debug; debug is the bug-finding profile — see the debug-vs-release note).",
-                false,
-            )],
+            flags: &[
+                f(
+                    "--release",
+                    None,
+                    Value::None,
+                    "Build the on-the-fly guest in release mode (default debug; debug is the bug-finding profile — see the debug-vs-release note).",
+                    false,
+                ),
+                f(
+                    "--no-instrument",
+                    None,
+                    Value::None,
+                    NO_INSTRUMENT_HELP,
+                    false,
+                ),
+            ],
         },
         Group {
             title: "Fault options (seed-driven, default off)",
@@ -113,7 +127,7 @@ Reproduce a recorded run with `patina replay`.",
                     "--coverage-out",
                     None,
                     Value::Required("PATH", Kind::Path),
-                    "Write a patina.covmap/v1 edge-counter map (requires an --instrument build or a Go guest).",
+                    "Write a patina.covmap/v1 edge-counter map (requires an instrumented build, the Linux default, or a Go guest).",
                     false,
                 ),
                 f(
@@ -301,10 +315,10 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                     false,
                 ),
                 f(
-                    "--instrument",
+                    "--no-instrument",
                     None,
                     Value::None,
-                    "Build the test targets with edge hooks: edge counters, and the scheduling points --yield-stride asks for.",
+                    NO_INSTRUMENT_HELP,
                     false,
                 ),
                 f(
@@ -439,8 +453,8 @@ pub(super) const BUILD: Verb = Verb {
     name: "build",
     summary: "Build a guest linked against the native shim.",
     synopsis: &[
-        "patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--instrument] [-- RUSTC OPTIONS]",
-        "patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--instrument]",
+        "patina build <SOURCE.rs> --output <PATH> [--edition YEAR] [--release] [--no-instrument] [-- RUSTC OPTIONS]",
+        "patina build <DIR|Cargo.toml> [--output <PATH>] [--package NAME] [--bin NAME] [--release] [--no-instrument]",
         "patina build <GO PACKAGE DIR> --go [--go-test] --output <PATH> [--release] [-- GO BUILD OPTIONS]",
         "patina build <SCRIPT.py|DIR> --python --output <PATH> [--python-path DIR]... [--python-source TARBALL|DIR] [--release]",
     ],
@@ -452,22 +466,31 @@ path builds a single source directly; a directory or Cargo.toml drives the \
 package's own cargo build under Patina control. Select the member with --package \
 and the binary with --bin; --output copies the built binary out.\n\
 \n\
-`--instrument` adds a SanitizerCoverage hook at every edge of every crate \
-compiled from source. The hook keeps edge counters, so --coverage-out, `cargo \
-patina coverage` and `campaign --guided` work, and it takes the scheduling \
-points the run asks for: `run --yield-stride N` puts one every N edges a thread \
-executes (1 = every edge, the densest), which makes atomics-only race windows \
-schedulable. The default stride, 0, adds none and costs only the counters. The \
-stride is a run setting recorded in the trace, so one binary serves both and a \
-replay takes the recorded stride. An instrumented binary's traces carry \
-`+instrumented` in their fingerprint and never cross-replay with a plain one.\n\
+On Linux a Rust build is instrumented: a SanitizerCoverage hook at every edge of every \
+crate compiled from source meters the computation, so it costs virtual time \
+and a run that computes without end stops deterministically \
+(timeout/compute_bound, --compute-watchdog-ms) on every host. The hook also \
+keeps edge counters, so --coverage-out, `cargo patina coverage` and `campaign \
+--guided` work, and it takes the scheduling points the run asks for: `run \
+--yield-stride N` puts one every N edges a thread executes (1 = every edge, \
+the densest), which makes atomics-only race windows schedulable. The default \
+stride, 0, adds none. The stride is a run setting recorded in the trace, so \
+one binary serves both and a replay takes the recorded stride. \
+`--no-instrument` builds plain: faster compute (an instrumented tight loop runs \
+up to about 3x slower), but its computation is not metered, so a run that \
+computes without end stops only at the host-time backstop, an inconclusive \
+timeout. A run reports which it ran (`build` in its result). An instrumented \
+binary's traces carry `+instrumented` in their fingerprint and never \
+cross-replay with a plain one. On macOS every Rust/C build is plain \
+(--no-instrument asks for that default): Mach-O linking keeps instrumented dead \
+code and its imports alive, which the default-deny audit would refuse.\n\
 \n\
 `--go` builds the Go main package in DIR (Linux): `go build` in cgo mode, linked \
 externally with the shim, so goroutine threads start through the shim's \
 pthread_create. A pure-Go package needs no source change. Patina sets -ldflags \
 and -o and adds the `patina` build tag, which selects the Go SDK's (`go/patina`) \
 shim-backed sites; other `go build` options follow `--`. `--release` builds the shim in \
-release mode; --instrument is Rust-only. Every Go guest keeps Go's own 8-bit \
+release mode; --no-instrument is Rust-only. Every Go guest keeps Go's own 8-bit \
 edge counters, so --coverage-out, `patina coverage` and `campaign \
 --guided` work on it; it has no edge hook, so `run --yield-stride` is refused. \
 `--go-test` builds the package's test binary (`go test -c`) instead of a main \
@@ -510,10 +533,10 @@ carried. Arguments after `--` on `run` reach the program as `sys.argv[1:]`.",
                 false,
             ),
             f(
-                "--instrument",
+                "--no-instrument",
                 None,
                 Value::None,
-                "Edge hooks at every edge: edge counters, and the scheduling points run --yield-stride asks for.",
+                NO_INSTRUMENT_HELP,
                 false,
             ),
             f(

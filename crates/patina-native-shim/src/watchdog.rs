@@ -306,7 +306,12 @@ pub(crate) fn report_and_abort(
         if !metered() {
             let _ = writeln!(
                 text,
-                "patina: this build's computation is not metered: rebuild it with --instrument, which charges computation as virtual time and bounds it deterministically (--compute-watchdog-ms)"
+                "{}",
+                if cfg!(target_os = "linux") {
+                    "patina: this is a plain build, so its computation is not metered and this stop is only an inconclusive timeout: rebuild it without --no-instrument (instrumented is the default for `patina build`, `run` and `test`), which charges computation as virtual time and bounds it deterministically (--compute-watchdog-ms)"
+                } else {
+                    "patina: this is a plain build, so its computation is not metered and this stop is only an inconclusive timeout; instrumented builds, which charge computation as virtual time and bound it deterministically, are Linux-only"
+                }
             );
         }
         let _ = super::host_write_all(2, &text.bytes[..text.len]);
@@ -537,7 +542,23 @@ mod platform {
 
     /// The process's CPU time, all threads: it stands still while the
     /// process is descheduled or stopped.
+    ///
+    /// On Linux the clock is named by the host process id
+    /// (`MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)`, the clock
+    /// `clock_getcpuclockid` names), not as `CLOCK_PROCESS_CPUTIME_ID`: the
+    /// kernel reads the same clock, and the observer's host read stays apart
+    /// from the guest's modeled `CLOCK_PROCESS_CPUTIME_ID`, so a leak of that
+    /// one still shows.
     pub(super) fn process_cpu_ms() -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            let pid = unsafe {
+                (super::super::hostapi::get().host_syscall)(libc::SYS_getpid, 0, 0, 0, 0, 0, 0)
+            } as libc::clockid_t;
+            // CPUCLOCK_SCHED (2) of process `pid`.
+            clock_ms((!pid << 3) | 2)
+        }
+        #[cfg(not(target_os = "linux"))]
         clock_ms(libc::CLOCK_PROCESS_CPUTIME_ID)
     }
 

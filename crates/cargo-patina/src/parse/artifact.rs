@@ -88,7 +88,7 @@ pub(super) fn classify_arg(raw: &OsStr) -> Result<ArgKind, CliError> {
 }
 
 /// Build spec for a single-source native build on the fly (defaults: current
-/// edition, debug, uninstrumented, no extra rustc args).
+/// edition, debug, instrumented, no extra rustc args).
 fn native_source_spec(source: PathBuf) -> BuildSpec {
     BuildSpec {
         origin: source.clone(),
@@ -100,7 +100,7 @@ fn native_source_spec(source: PathBuf) -> BuildSpec {
             },
             output: None,
             release: false,
-            instrument: false,
+            instrument: crate::native_build::INSTRUMENT_BY_DEFAULT,
         },
     }
 }
@@ -118,7 +118,7 @@ fn native_package_spec(origin: PathBuf, manifest: PathBuf) -> BuildSpec {
             },
             output: None,
             release: false,
-            instrument: false,
+            instrument: crate::native_build::INSTRUMENT_BY_DEFAULT,
         },
     }
 }
@@ -197,33 +197,60 @@ pub(super) fn apply_package_selection(
     }
 }
 
-/// Extract a source-first `--release` switch from the head of a `run` flag list,
-/// stopping at `--` so a guest/program `--release` after the separator passes
-/// through untouched. Mirrors [`take_package_bin`]: the flag is consumed here so
-/// the family parser (which rejects unknown options) never sees it. Repeats are
-/// idempotent, matching the `build` parser; an inline `--release=VALUE` is
-/// rejected because the switch takes no value.
-pub(super) fn take_release(flags: Vec<OsString>) -> Result<(bool, Vec<OsString>), CliError> {
-    let (found, rest) = cli::strip(&[cli::flag("run", "--release")], flags)?;
-    Ok((found.contains_key("--release"), rest))
+/// The source-first build switches of a `run`: `--release` and
+/// `--no-instrument`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct BuildSwitches {
+    pub(super) release: bool,
+    pub(super) no_instrument: bool,
 }
 
-/// Apply a source-first `--release` to a build-on-the-fly artifact: it selects the
-/// release profile for the guest `run` builds itself (default debug). Release is a
-/// build profile, so it applies only to a source/package built on the fly; an
-/// already-built artifact carries no profile of its own, so `--release` on a
+/// Extract the source-first build switches from the head of a `run` flag
+/// list, stopping at `--` so a guest/program `--release` after the separator
+/// passes through untouched. Mirrors [`take_package_bin`]: the flags are
+/// consumed here so the family parser (which rejects unknown options) never
+/// sees them. Repeats are idempotent, matching the `build` parser; an inline
+/// `--release=VALUE` is rejected because the switch takes no value.
+pub(super) fn take_build_switches(
+    flags: Vec<OsString>,
+) -> Result<(BuildSwitches, Vec<OsString>), CliError> {
+    let (found, rest) = cli::strip(
+        &[
+            cli::flag("run", "--release"),
+            cli::flag("run", "--no-instrument"),
+        ],
+        flags,
+    )?;
+    Ok((
+        BuildSwitches {
+            release: found.contains_key("--release"),
+            no_instrument: found.contains_key("--no-instrument"),
+        },
+        rest,
+    ))
+}
+
+/// Apply the source-first build switches to a build-on-the-fly artifact:
+/// `--release` selects the release profile (default debug) and
+/// `--no-instrument` a plain build (default instrumented). Both shape a
+/// build, so they apply only to a source/package built on the fly; an
+/// already-built artifact is whatever it was built as, so either switch on a
 /// prebuilt positional fails closed rather than being silently ignored.
-pub(super) fn apply_release(artifact: &mut ArtifactRef, release: bool) -> Result<(), CliError> {
-    if !release {
+pub(super) fn apply_build_switches(
+    artifact: &mut ArtifactRef,
+    switches: BuildSwitches,
+) -> Result<(), CliError> {
+    if switches == BuildSwitches::default() {
         return Ok(());
     }
     match artifact {
         ArtifactRef::Build(spec) => {
-            spec.build.release = true;
+            spec.build.release |= switches.release;
+            spec.build.instrument &= !switches.no_instrument;
             Ok(())
         }
         ArtifactRef::Prebuilt(_) => Err(CliError::usage(
-            "--release selects a build profile for a source/package built on the fly; an already-built artifact has no build profile",
+            "--release and --no-instrument shape a source/package built on the fly; an already-built artifact is whatever it was built as",
         )),
     }
 }

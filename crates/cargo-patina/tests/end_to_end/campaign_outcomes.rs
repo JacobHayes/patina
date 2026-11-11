@@ -405,7 +405,9 @@ fn main() {
             .split(' ')
             .chain(["-v"])
             .collect();
-        let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &repro_args);
+        // Run where a reproduce command's bare output names (`--coverage-out`)
+        // land in scratch, not in the workspace.
+        let reproduced = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), &out, &repro_args);
         assert!(
             !reproduced.status.success()
                 && String::from_utf8_lossy(&reproduced.stderr)
@@ -546,8 +548,20 @@ fn main() {
             &["trace", "info", dropped_trace.to_str().unwrap()],
         );
         let info = String::from_utf8_lossy(&info.stdout).to_string();
+        // A fingerprint's `+` parts: whether the build is instrumented is the
+        // platform's default, beside the point here.
+        let fingerprint_parts = |info: &str| -> Vec<String> {
+            let line = info
+                .lines()
+                .find_map(|line| line.strip_prefix("fingerprint: "))
+                .unwrap_or_else(|| panic!("no fingerprint line:\n{info}"));
+            line.split('+').map(str::to_owned).collect()
+        };
+        let parts = fingerprint_parts(&info);
         assert!(
-            info.contains("fingerprint: patina-native+swarm"),
+            parts[0] == "patina-native"
+                && parts.iter().any(|part| part == "swarm")
+                && !parts.iter().any(|part| part == "buggify"),
             "a masked run must not declare +buggify:\n{info}"
         );
         assert!(
@@ -625,8 +639,11 @@ fn main() {
         );
         let info = invoke(workspace, &["trace", "info", kept_trace.to_str().unwrap()]);
         let info = String::from_utf8_lossy(&info.stdout).to_string();
+        let parts = fingerprint_parts(&info);
         assert!(
-            info.contains("fingerprint: patina-native+buggify+swarm"),
+            parts[0] == "patina-native"
+                && parts.iter().any(|part| part == "swarm")
+                && parts.iter().any(|part| part == "buggify"),
             "an unmasked swarm run must keep +buggify:\n{info}"
         );
         assert!(

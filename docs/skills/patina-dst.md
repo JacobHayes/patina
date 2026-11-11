@@ -100,7 +100,7 @@ Patina so adopters pay nothing in production builds:
 **Visibility into whether the search actually searched.** Inert knobs are treated
 as bugs here. Every literal-label SDK site is declared at link time, so
 the campaign's `sites.json` lists sites that never ran.
-Native binaries built with `--instrument` take a scheduling point every
+Instrumented native binaries (the default build) take a scheduling point every
 `--yield-stride` edges, so atomics-only race windows become schedulable, and
 `coverage` symbolizes their edge coverage
 and rolls it up by crate/module/function. The scheduler

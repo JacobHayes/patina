@@ -106,8 +106,8 @@ def build(patina: Optional[str], work: Path, testbeds: Sequence[Testbed]) -> Tup
         if testbed.source in artifacts:
             continue
         output = work / (Path(testbed.source).stem + '-instrumented')
-        run_checked([patina, 'build', str(ROOT / testbed.source), '--instrument',
-                     '--release', '--output', str(output)], cwd=ROOT, env=env)
+        run_checked([patina, 'build', str(ROOT / testbed.source), '--release',
+                     '--output', str(output)], cwd=ROOT, env=env)
         artifacts[testbed.source] = output
     return patina, artifacts
 

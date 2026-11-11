@@ -124,12 +124,15 @@ fn a_campaign_continued_to_more_generations_equals_the_fresh_campaign() {
             source.to_str().unwrap(),
             "--output",
             guest.to_str().unwrap(),
-            "--instrument",
         ],
         &[("CARGO_TARGET_DIR", target.to_str().unwrap())],
     );
 
     let run = |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, args);
+    // The platform's default build, as a run reports it.
+    let ran = run(&["run", guest.to_str().unwrap(), "--format", "json"]);
+    let ran: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    let instrumented = ran["build"] == "instrumented";
     let campaign = |out: &Path, gens: u64| {
         run(&[
             "campaign",
@@ -165,7 +168,7 @@ fn a_campaign_continued_to_more_generations_equals_the_fresh_campaign() {
     let fresh_site_json: serde_json::Value = serde_json::from_str(&fresh_sites).unwrap();
     assert_eq!(fresh_site_json["generations_observed"], gens);
     assert_eq!(fresh_site_json["sites"][0]["registered_gens"], gens);
-    let fresh_coverage = campaign_coverage_file_hashes(&out);
+    let fresh_coverage = campaign_coverage_file_hashes(&out, instrumented);
     let state_path = out.join("campaign-state.json");
     let fresh_state = campaign_state_without_invocations(&state_path);
 
@@ -211,7 +214,7 @@ fn a_campaign_continued_to_more_generations_equals_the_fresh_campaign() {
     );
     assert_eq!(
         fresh_coverage,
-        campaign_coverage_file_hashes(&out),
+        campaign_coverage_file_hashes(&out, instrumented),
         "k-then-continue must reproduce coverage store file hashes"
     );
     assert_eq!(

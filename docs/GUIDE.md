@@ -72,7 +72,7 @@ package's own libtest suite, one simulated run per test.
 | `audit` | Report the true residual effect surface of a binary; default-deny. | `patina audit app.rs` |
 | `replay` | Reproduce a recorded trace; seed/faults/argv restored from it. | `patina replay ./app run.patina` |
 | `trace` | Inspect an existing trace's metadata, events, stats, or diff. | `patina trace info run.patina` |
-| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `nondeterministic`), SDK oracle coverage gate, and native edge-coverage accumulation for `--instrument` binaries. | `patina campaign ./app --gens 200 --vary buggify,faults --out-dir out/` |
+| `campaign` | Config-driven fault-and-schedule sweep with failure dedup, reproduction-verified findings (a failure that does not reproduce is `nondeterministic`), SDK oracle coverage gate, and native edge-coverage accumulation. | `patina campaign ./app --gens 200 --buggify --out-dir out/` |
 | `coverage` | Symbolize and roll up a `patina.covmap/v1` map or campaign coverage store. | `patina coverage ./app out/` |
 | `minimize` | Reduce a failing campaign generation's fault knobs (and record the minimal-knob trace), or a failing run's `--param` set. A generation needs no oracle: the campaign already recorded which verdicts it reported, and those are what the reduction preserves. | `patina minimize --generation 14 --out-dir out/` |
 | `syscalls` | Print the native shim's syscall registry: every kernel number with its disposition and reasoning, and the libc symbols that serve it (including the ABI spellings the shim does not define). | `patina syscalls` |
@@ -186,19 +186,18 @@ into the trace so replay reproduces them flag-free.
 - **Timing**: `--sleep-jitter-nanos MIN..MAX` on every guest sleep.
 - **Schedule exploration** (native): `--sched-pct DEPTH` (PCT priority scheduling) and
   `--swarm` (seed-derived fault-class subsets). `campaign --vary sched-pct` sweeps
-  PCT per generation. To make atomics-only race windows schedulable, build with
-  `patina build --instrument` and run with `--yield-stride N`: a
-  scheduling point every N edges a thread executes, 1 being every edge (densest,
-  and by far the most expensive). The stride is a run setting recorded in the
-  trace; at the default 0 the same binary keeps only its edge counters, so
-  `--coverage-out` and `campaign --guided` work without paying for preemption.
+  PCT per generation. To make atomics-only race windows schedulable, run with
+  `--yield-stride N`: a scheduling point every N edges a thread executes, 1
+  being every edge (densest, and by far the most expensive). The stride is a
+  run setting recorded in the trace; at the default 0 a thread takes only the
+  compute meter's scheduling point at the end of each 1 ms slice.
   `campaign --vary yield-stride` sweeps strides from 1 to 1024 per generation.
 - **Liveness oracles**: `--liveness-watchdog NANOS` (virtual-time no-progress
   detector) and `--converge-within NANOS` (heal-then-converge budget).
-  A native guest that goes 10 host seconds without a call that reaches the
-  runtime stops by name (`--compute-watchdog-ms MS`), as a `timeout`: a known
-  cooperative-runtime limit, not a finding
-  ([details](../ARCHITECTURE.md#native-compute-only-starvation)).
+  A guest that computes for 10 s of virtual time with no call that reaches
+  the runtime stops by name (`--compute-watchdog-ms MS`), as a `timeout` with
+  reason `compute_bound`, the same on every host
+  ([details](../ARCHITECTURE.md#compute-bounds)).
 
 ## The SDK
 
@@ -272,7 +271,16 @@ guest and every dependency are extra oracles, frames stay exact for triage,
 and `--yield-stride` sees more edges to preempt.
 Use `--release` (on `run`, or `build --release` then `run`) for performance
 measurement, long campaigns once the hunt is over, and release-only codegen
-paths. `--instrument` binaries and Go guests emit edge coverage
+paths. Rust/C, Go and Python guests are built metered: computation costs
+virtual time, so it is deterministic and bounded whatever the host's speed.
+On macOS, Rust/C guests are built plain: an instrumented Mach-O build keeps
+dead code and its imports, which the default-deny audit refuses, so instrumented
+builds (and with them `--coverage-out` and `campaign --guided` on Rust/C) are
+Linux-only there and `--no-instrument` asks for the default.
+`--no-instrument` (on `build`, `run` and `test`) builds Rust/C plain: compute
+runs up to about 3x faster, but is not metered, so a run that computes without
+end stops only at the host-time backstop, an inconclusive `timeout`.
+Instrumented Rust/C binaries and Go guests emit edge coverage
 (`--coverage-out`, `patina coverage`), which campaigns accumulate and
 `campaign --guided` uses to bias generations toward new coverage.
 

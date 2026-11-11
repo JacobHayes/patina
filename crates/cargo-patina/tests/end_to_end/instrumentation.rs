@@ -1,10 +1,11 @@
 //! Native edge hooks (coverage and yield stride), teardown, and report controls.
 
-#[cfg(test)]
+// Every test here needs an instrumented Rust build, which only Linux makes.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::super::*;
 
-    // An `--instrument` guest, run at `--yield-stride 1`, whose MAIN thread owns a
+    // An instrumented guest, run at `--yield-stride 1`, whose MAIN thread owns a
     // thread-local with an instrumented `Drop`, plus a worker thread that recreates
     // the joined-task / still-exiting-host-thread teardown window. At stride 1 the main
     // thread's thread-local destructor runs instrumented code AFTER `main` returns —
@@ -63,7 +64,7 @@ fn main() {
 }
 "#;
 
-    // One `--instrument` build of the teardown guest, run at `--yield-stride 1`,
+    // One instrumented build of the teardown guest, run at `--yield-stride 1`,
     // carries the instrumented binary's contracts:
     //
     // * the root task records zero teardown yields and a worker's thread-local
@@ -93,7 +94,6 @@ fn main() {
                 source.to_str().unwrap(),
                 "--output",
                 binary.to_str().unwrap(),
-                "--instrument",
             ],
         );
         let guest = common::native::Guest { dir, binary };
@@ -188,31 +188,6 @@ fn main() {
         );
     }
 
-    // `--coverage-out` is legal only on a binary with edge counters: a plain
-    // build fails closed with the build hint.
-    #[test]
-    fn coverage_out_refuses_a_binary_without_edge_counters() {
-        let guest = native_build::source_guest("plain", "fn main() {}");
-        let refused_map = guest.dir.path().join("plain.covmap");
-        let refused = invoke_unchecked(
-            env!("CARGO_BIN_EXE_patina"),
-            native_workspace(),
-            &[
-                "run",
-                guest.binary.to_str().unwrap(),
-                "--coverage-out",
-                refused_map.to_str().unwrap(),
-            ],
-        );
-        let refused_stderr = String::from_utf8_lossy(&refused.stderr);
-        assert!(
-            !refused.status.success()
-                && refused_stderr.contains("--coverage-out requires")
-                && refused_stderr.contains("patina build --instrument"),
-            "plain-binary coverage request should fail closed with the build hint:\n{refused_stderr}"
-        );
-    }
-
     // Rewrite `source` into `dest` with the final TaskYield decision (and the
     // scheduler_next recorded after it) removed, synthesizing a recording whose
     // root-task yield count is one short of what a faithful replay executes.
@@ -289,13 +264,7 @@ fn main() {
         let bin = binary.to_str().unwrap();
         invoke(
             workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin,
-                "--instrument",
-            ],
+            &["build", source.to_str().unwrap(), "--output", bin],
         );
         let run = |args: &[&str]| invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, args);
         let lost =
@@ -388,7 +357,6 @@ fn main() {
                 path.to_str().unwrap(),
                 "--output",
                 binary.to_str().unwrap(),
-                "--instrument",
             ],
         );
         binary
@@ -919,13 +887,7 @@ fn main() {
         let bin = binary.to_str().unwrap();
         invoke(
             workspace,
-            &[
-                "build",
-                source.to_str().unwrap(),
-                "--output",
-                bin,
-                "--instrument",
-            ],
+            &["build", source.to_str().unwrap(), "--output", bin],
         );
         let run = |options: &[&str], mode: &str| -> serde_json::Value {
             let mut arguments = vec!["run", "-v", bin, "--format", "json"];
@@ -994,5 +956,110 @@ fn main() {
                 "{options:?} {mode}"
             );
         }
+    }
+}
+
+/// What a build is, on every platform.
+#[cfg(test)]
+mod build_kinds {
+    use super::super::*;
+
+    // `--coverage-out` is legal only on a binary with edge counters: a plain
+    // (`--no-instrument`) build fails closed as a usage error.
+    #[test]
+    fn coverage_out_refuses_a_binary_without_edge_counters() {
+        let directory = tempdir().unwrap();
+        let plain = build_facts_guest_with(
+            directory.path(),
+            "plain",
+            "fn main() {}",
+            &["--no-instrument"],
+        );
+        let refused_map = directory.path().join("plain.covmap");
+        let refused = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
+            native_workspace(),
+            &[
+                "run",
+                plain.to_str().unwrap(),
+                "--coverage-out",
+                refused_map.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "plain-binary coverage request should fail closed:\n{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(!refused_map.exists(), "a refused run writes no map");
+    }
+
+    // A Rust build takes the platform's default (instrumented on Linux, plain on
+    // macOS) unless `--no-instrument` asks for a plain one, and a run reports
+    // which build it ran: from a source built on the fly, and from a prebuilt
+    // binary, which is whatever it was built as. The build switch shapes a
+    // build, so it is refused on a prebuilt binary.
+    #[test]
+    fn builds_take_the_platform_default_and_runs_report_their_build() {
+        let directory = tempdir().unwrap();
+        let workspace = native_workspace();
+        let source = directory.path().join("hello.rs");
+        fs::write(&source, "fn main() { println!(\"hello\"); }\n").unwrap();
+        let source = source.to_str().unwrap();
+        let build_of = |args: &[&str]| {
+            let mut argv = vec!["run"];
+            argv.extend_from_slice(args);
+            argv.extend(["--format", "json"]);
+            let output = invoke_unchecked(env!("CARGO_BIN_EXE_patina"), workspace, &argv);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{argv:?} should run clean:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            envelope["build"].as_str().map(str::to_owned)
+        };
+        let default = if cfg!(target_os = "linux") {
+            "instrumented"
+        } else {
+            "plain"
+        };
+        assert_eq!(build_of(&[source]).as_deref(), Some(default));
+        assert_eq!(
+            build_of(&[source, "--no-instrument"]).as_deref(),
+            Some("plain")
+        );
+
+        let built = |name: &str, flags: &[&str]| {
+            let binary = directory.path().join(name);
+            let mut argv = vec!["build", source, "--output", binary.to_str().unwrap()];
+            argv.extend_from_slice(flags);
+            invoke(workspace, &argv);
+            binary
+        };
+        let by_default = built("by-default", &[]);
+        let plain = built("plain", &["--no-instrument"]);
+        assert_eq!(
+            build_of(&[by_default.to_str().unwrap()]).as_deref(),
+            Some(default)
+        );
+        assert_eq!(
+            build_of(&[plain.to_str().unwrap()]).as_deref(),
+            Some("plain")
+        );
+
+        let refused = invoke_unchecked(
+            env!("CARGO_BIN_EXE_patina"),
+            workspace,
+            &["run", plain.to_str().unwrap(), "--no-instrument"],
+        );
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "--no-instrument on a prebuilt binary must be refused:\n{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
     }
 }

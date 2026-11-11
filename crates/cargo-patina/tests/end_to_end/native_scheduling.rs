@@ -159,7 +159,8 @@ fn main() {
 }
 "#;
 
-    // The work costs about the CPU time of its reads, far under a second,
+    // The work costs its metered computation and the CPU time of its reads,
+    // far under a second,
     // and the 60 s wait ends at 60 s, after it. RED when a poll streak was
     // charged up to the earliest pending deadline: the work took 60 s and
     // the waiter timed out before it ended.
@@ -170,7 +171,7 @@ fn main() {
             let output = guest.assert_run_success(seed, &[]);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let work = stdout_field(&output, "WORK elapsed_ns=");
-            assert!(work < 10_000_000, "the work took {work} ns:\n{stdout}");
+            assert!(work < 1_000_000_000, "the work took {work} ns:\n{stdout}");
             assert!(
                 stdout.contains("WAITER work_done=true "),
                 "the wait ended before the work:\n{stdout}"

@@ -37,7 +37,7 @@ fn main() {
     // so only the bootstrap generation is ever novel.
     const CONSTANT_GUEST: &str = "fn main() { println!(\"constant\"); }\n";
 
-    /// `source` built with `--instrument`, so a campaign has edge coverage
+    /// `source` built (instrumented, the default), so a campaign has edge coverage
     /// to steer by.
     fn coverage_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
         let path = directory.join(format!("{name}.rs"));
@@ -48,7 +48,6 @@ fn main() {
             &[
                 "build",
                 path.to_str().unwrap(),
-                "--instrument",
                 "--output",
                 binary.to_str().unwrap(),
             ],

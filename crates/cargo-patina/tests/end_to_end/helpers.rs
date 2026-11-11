@@ -592,18 +592,27 @@ pub(super) fn campaign_run(out: &Path, guest: &Path, extra: &[&str]) -> Output {
 }
 
 pub(super) fn build_facts_guest(directory: &Path, name: &str, source: &str) -> PathBuf {
+    build_facts_guest_with(directory, name, source, &[])
+}
+
+/// [`build_facts_guest`] with extra `build` flags (`--no-instrument`, say).
+pub(super) fn build_facts_guest_with(
+    directory: &Path,
+    name: &str,
+    source: &str,
+    flags: &[&str],
+) -> PathBuf {
     let path = directory.join(format!("{name}.rs"));
     fs::write(&path, source).unwrap();
     let binary = directory.join(name);
-    invoke(
-        native_workspace(),
-        &[
-            "build",
-            path.to_str().unwrap(),
-            "--output",
-            binary.to_str().unwrap(),
-        ],
-    );
+    let mut args = vec![
+        "build",
+        path.to_str().unwrap(),
+        "--output",
+        binary.to_str().unwrap(),
+    ];
+    args.extend_from_slice(flags);
+    invoke(native_workspace(), &args);
     binary
 }
 

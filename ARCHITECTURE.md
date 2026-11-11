@@ -60,7 +60,7 @@ trace format.
   point. A metered run defaults `GOMAXPROCS=1`. The same instrumentation keeps
   Go's 8-bit edge counters, which the meter registers with the shim
   (`patina_coverage_register_u8`), so a Go guest has edge coverage
-  (`--coverage-out`, campaigns, `--guided`) without the `--instrument` yield
+  (`--coverage-out`, campaigns, `--guided`) without the Rust/C edge
   hook. Go records no pcs, so the covmap gives its edges the zero (unknown)
   site and `patina coverage` attributes each to its package by the
   counter's `<package>..stmp_N` symbol.
@@ -375,7 +375,8 @@ model does not answer is a named stop, never a host passthrough.
   them.
 - One authority expires timed parks, after every advance and at every
   timed-park registration, in `(deadline, registration)` order.
-- **Computation costs time.** In an instrumented build (`--instrument`)
+- **Computation costs time.** In an instrumented build (the default for
+  Rust and C; `--no-instrument` builds plain)
   every edge is a compute unit (`ChargeClass::Compute`, 2 ns of user time).
   Each thread counts its own edges and hands them over in batches of 16384,
   so a batch falls at the same edge on every run and an operation's
@@ -465,7 +466,7 @@ Computation that makes no call reaches the runtime only through its meter.
   in which the guest was charged no virtual time and began no boundary
   operation, with `PATINA_VIOLATION liveness detail=compute-bound
   known_limit=true` (the `timeout` outcome, attributed to Patina, and
-  inconclusive), and tells the user to rebuild with `--instrument`. It
+  inconclusive), and tells the user to rebuild without `--no-instrument`. It
   watches whichever thread runs guest code: a task with runnable or parked
   peers, and the main thread of a guest that never starts another (in a
   `patina build` guest; another embedding starts the observer with its first

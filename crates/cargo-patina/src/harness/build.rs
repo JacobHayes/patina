@@ -224,8 +224,8 @@ pub(super) fn build_args(invocation: &TestInvocation) -> Vec<OsString> {
     if invocation.release {
         args.push("--release".into());
     }
-    if invocation.instrument {
-        args.push("--instrument".into());
+    if !invocation.instrument {
+        args.push("--no-instrument".into());
     }
     args.extend(
         invocation

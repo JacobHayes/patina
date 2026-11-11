@@ -11,7 +11,7 @@ two Patina builds instead of Patina against native.
 
 | workload | what one iteration does | the Patina cost it isolates |
 |---|---|---|
-| `compute` | one SplitMix64 step folded into a digest | none per iteration: the loop makes no syscalls, so only the fixed start-up cost remains |
+| `compute` | one SplitMix64 step folded into a digest | the compute meter: the loop makes no syscalls, so only the edge hook of the default instrumented build and the fixed start-up cost remain |
 | `fileio` | create, write 512 bytes and close a file, then open, read back and close it | the filesystem boundary (Patina serves it from its in-memory filesystem) |
 | `condvar` | one turn of a strict two-thread alternation on a `Mutex` + `Condvar` | a scheduler hand-off between two threads |
 | `pipe` | one 8-byte round trip between two threads over a pair of pipes | a pipe transfer plus the hand-off it forces |

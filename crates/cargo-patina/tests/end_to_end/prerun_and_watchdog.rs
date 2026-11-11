@@ -127,6 +127,9 @@ fn main() {{
             "--output",
             guest.to_str().unwrap(),
             "--release",
+            // A plain build: its spin is left to the host-time observer,
+            // whose stop samples the PC.
+            "--no-instrument",
             "--",
             "-g",
         ],

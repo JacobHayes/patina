@@ -31,6 +31,9 @@ pub struct RunReport<'a> {
     pub trace_facts: Option<TraceFacts>,
     pub timeline: &'a str,
     pub fingerprint: Option<String>,
+    /// What the guest's build does with its computation
+    /// (`native_build::BuildKind`): `instrumented`, `go`, `python` or `plain`.
+    pub build: Option<&'static str>,
     pub seed: Option<u64>,
     pub coverage: Option<CoverageReport>,
     /// Supervisor-owned native crash-restart facts. These are produced by the
@@ -198,6 +201,7 @@ pub fn finalize_run(report: RunReport<'_>, captured: Captured) -> Result<i32, Cl
         let mut env = Envelope::new(report.verb, outcome.class);
         env.artifact = Some(report.artifact.to_string());
         env.fingerprint = report.fingerprint.clone();
+        env.build = report.build;
         env.seed = report.seed;
         env.render = render_path.clone();
         if !report.trace_scratch {

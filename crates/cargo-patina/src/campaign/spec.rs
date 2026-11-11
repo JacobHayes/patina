@@ -39,7 +39,7 @@ pub struct CampaignSpec {
     /// Apply seed-derived swarm fault-class selection.
     pub swarm: bool,
     /// What each generation draws (`--vary`): the buggify rates, the PCT
-    /// depth, an `--instrument` artifact's yield stride (a log sweep from every
+    /// depth, an instrumented artifact's yield stride (a log sweep from every
     /// edge to one in 1024; a dense stride multiplies a generation's cost), the
     /// knobs of the selected fault planes.
     ///

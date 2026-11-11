@@ -324,7 +324,7 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         "--yield-stride",
         None,
         Value::Required("N", Kind::U32),
-        "On an --instrument build, a scheduling point every N edges a thread executes (default 0: none; 1 = every edge).",
+        "On an instrumented build, a scheduling point every N edges a thread executes (default 0: none beyond the compute meter's; 1 = every edge).",
         false,
     ),
 ];
@@ -336,6 +336,9 @@ pub(super) const SWARM_FLAG: Flag = f(
     "Seed-derived swarm selection of a fault-class subset.",
     false,
 );
+
+/// The help of the `--no-instrument` build switch (`build`, `run`, `test`).
+pub(super) const NO_INSTRUMENT_HELP: &str = "Build plain, without the edge meter: computation is not charged as virtual time, so a run that computes without end stops only at the host-time backstop, an inconclusive timeout (default: instrumented). Rust only.";
 
 pub(super) const ALLOW_FLAG: Flag = f(
     "--allow",

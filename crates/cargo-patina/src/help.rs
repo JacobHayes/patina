@@ -42,6 +42,7 @@ pub use flags::GLOBAL_OUTPUT;
 pub use flags::HELP_FLAGS;
 use flags::LIVENESS_FLAGS;
 use flags::NATIVE_SCHEDULE_FLAGS;
+use flags::NO_INSTRUMENT_HELP;
 use flags::SOURCE_SELECT;
 use flags::{ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, CPUS_FLAG, PARAM_FLAG, SWARM_FLAG};
 pub use human::render;

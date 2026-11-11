@@ -167,7 +167,7 @@ carry the `patina run ... --seed` command instead.
 $ patina trace info bug.patina
 trace: bug.patina
 format_version: 28
-fingerprint: patina-native+buggify
+fingerprint: patina-native+instrumented+buggify
 root_seed: 5
 guest_argv: []
 timelines: main (1 events)

@@ -41,7 +41,8 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     use std::os::unix::process::ExitStatusExt;
     use std::process::Command;
     use std::time::{Duration, Instant};
-    let g = Guest::assert_build("compute_watchdog.rs");
+    // A plain build: its computation is left to the host-time observer.
+    let g = Guest::assert_build_with("compute_watchdog.rs", &["--no-instrument"]);
     g.assert_audit_clean();
     let deadline = Duration::from_secs(15);
     // Direct managed execution excludes supervisor/audit startup from timing.
@@ -273,7 +274,8 @@ fn compute_bound_finding(envelope: &serde_json::Value) -> &serde_json::Value {
 fn compute_watchdog_overflowed_recorder_does_not_enter_the_held_allocator() {
     use std::process::Command;
     use std::time::Duration;
-    let g = Guest::assert_build("compute_watchdog.rs");
+    // A plain build: its computation is left to the host-time observer.
+    let g = Guest::assert_build_with("compute_watchdog.rs", &["--no-instrument"]);
     g.assert_audit_clean();
     let trace = g.dir.path().join("overflow.patina");
     let run = |record: bool| {

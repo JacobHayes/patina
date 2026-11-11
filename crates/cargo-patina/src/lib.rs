@@ -123,10 +123,11 @@ struct NativeBuildInvocation {
     target: NativeBuildTarget,
     output: Option<PathBuf>,
     release: bool,
-    /// `--instrument`: SanitizerCoverage edge hooks in every crate compiled
-    /// from source, which keep edge counters and take the scheduling points a
-    /// run's `--yield-stride` asks for. Off by default; plain native builds are
-    /// unchanged.
+    /// SanitizerCoverage edge hooks in every crate compiled from source, which
+    /// meter computation as virtual time, keep edge counters and take the
+    /// scheduling points a run's `--yield-stride` asks for. On for Rust/C
+    /// unless `--no-instrument` asks for a plain build; off for Go and Python,
+    /// which carry their own meters.
     instrument: bool,
 }
 

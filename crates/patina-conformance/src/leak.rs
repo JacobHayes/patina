@@ -14,7 +14,8 @@
 //! is an escape. The shim's guest-memory copies are the other self-directed
 //! allowance: `process_vm_readv`/`process_vm_writev` whose pid is the traced
 //! process or the thread issuing the call (once the process's leader has
-//! exited), never another. strace's `???` for a thread killed at its syscall-entry stop
+//! exited), never another; and the compute watchdog's read of the traced
+//! process's own CPU clock, named by its pid. strace's `???` for a thread killed at its syscall-entry stop
 //! is not a call: the kernel aborted it (see `Filter::judge`).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -86,6 +87,24 @@ fn self_directed(name: &str, args: &str, pid: &str, caller: &str) -> bool {
         "tkill" => parts.len() >= 2 && parts[0] == caller,
         _ => false,
     }
+}
+
+/// Whether a `clock_gettime`'s clock is `pid`'s process CPU clock
+/// (`MAKE_PROCESS_CPUCLOCK(pid, CPUCLOCK_SCHED)`), which strace writes by
+/// name or, when it does not decode it, as its number.
+fn own_cpu_clock(args: &str, pid: &str) -> bool {
+    if let Some(named) = args.strip_prefix("MAKE_PROCESS_CPUCLOCK(") {
+        return named.split_once(',').is_some_and(|(of, kind)| {
+            of == pid && kind.trim_start().starts_with("CPUCLOCK_SCHED")
+        });
+    }
+    let clock = arguments(args).first().copied().unwrap_or("");
+    let Some(id) = clock.split_whitespace().next().and_then(number) else {
+        return false;
+    };
+    let id = id as u32 as i32;
+    // CPUCLOCK_SCHED (2), not per-thread (4), of the process `!(id >> 3)`.
+    id & 7 == 2 && (!(id >> 3)).to_string() == pid
 }
 
 /// The escaped calls in `strace -f` output (each call as strace wrote it,
@@ -324,6 +343,13 @@ impl Filter {
         if name == "getrandom" && args.contains("GRND_NONBLOCK") {
             return;
         }
+        // The compute watchdog's read of the traced process's own CPU time,
+        // by the clock its pid names: a host observation that sets no guest
+        // state. The guest's own CPU clock is modeled, and a leak of it shows
+        // as `CLOCK_PROCESS_CPUTIME_ID`.
+        if name == "clock_gettime" && own_cpu_clock(args, &self.pid) {
+            return;
+        }
         // The shim's guest-memory copies (`uaccess`) name the traced process
         // itself, or the calling thread once the leader has exited; a copy
         // aimed at any other process reaches its memory.
@@ -481,6 +507,26 @@ mod tests {
                      4242 close(7)                             = 0\n\
                      4242 read(7, \"x\", 1)                     = 1\n";
         assert_eq!(calls(escapes(trace)), ["read(7, \"x\", 1)"]);
+    }
+
+    /// Only the watchdog's read of the traced process's own CPU clock stays
+    /// inside: the static process clock, or another process's, escapes.
+    #[test]
+    fn only_the_own_cpu_clock_by_pid_stays_inside() {
+        let trace = "4242 execve(\"/x/probe\", [\"/x/probe\"], 0x7ffd /* 3 vars */) = 0\n\
+                     4243 clock_gettime(MAKE_PROCESS_CPUCLOCK(4242, CPUCLOCK_SCHED), {tv_sec=0, tv_nsec=1}) = 0\n\
+                     4243 clock_gettime(MAKE_PROCESS_CPUCLOCK(4249, CPUCLOCK_SCHED), {tv_sec=0, tv_nsec=1}) = 0\n\
+                     4243 clock_gettime(0xffff7b6a /* CLOCK_??? */, {tv_sec=0, tv_nsec=1}) = 0\n\
+                     4243 clock_gettime(0xffff7b32 /* CLOCK_??? */, {tv_sec=0, tv_nsec=1}) = 0\n\
+                     4242 clock_gettime(CLOCK_PROCESS_CPUTIME_ID, {tv_sec=0, tv_nsec=1}) = 0\n";
+        assert_eq!(
+            calls(escapes(trace)),
+            [
+                "clock_gettime(MAKE_PROCESS_CPUCLOCK(4249, CPUCLOCK_SCHED), {tv_sec=0, tv_nsec=1})",
+                "clock_gettime(0xffff7b32 /* CLOCK_??? */, {tv_sec=0, tv_nsec=1})",
+                "clock_gettime(CLOCK_PROCESS_CPUTIME_ID, {tv_sec=0, tv_nsec=1})",
+            ]
+        );
     }
 
     /// The self-signal allowance is exactly "to the calling thread": the

@@ -187,8 +187,8 @@ fn parse_run(arguments: Vec<OsString>) -> Result<ParseResult, CliError> {
     let mut binary = resolve_positional("run", &first)?;
     let selection = take_package_bin(scan.rest)?;
     apply_package_selection(&mut binary, selection.package, selection.bin)?;
-    let (release, rest) = take_release(selection.rest)?;
-    apply_release(&mut binary, release)?;
+    let (switches, rest) = take_build_switches(selection.rest)?;
+    apply_build_switches(&mut binary, switches)?;
     parse_native_run_from(binary, rest).map(ParseResult::NativeRun)
 }
 

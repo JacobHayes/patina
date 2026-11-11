@@ -52,6 +52,13 @@ fn replay_standalone(
         .expect("standalone replay exceeded 20s")
 }
 
+/// The address-layout probe, built plain: it branches on addresses, which
+/// macOS does not pin, so an instrumented build's edge count, and with it its
+/// scheduling points, could differ between a recording and its replay.
+fn layout_probe() -> Guest {
+    Guest::assert_build_with("address_layout_probe.rs", &["--no-instrument"])
+}
+
 /// With randomization off, the kernel puts the guest's image where it was
 /// linked, in every run of a seed, recorded or replayed. On Linux the initial
 /// stack the control plane cannot resize puts the main stack and its first
@@ -75,7 +82,7 @@ fn replay_standalone(
 /// native campaign records its layout policy from its first generation.
 #[test]
 fn address_layout_is_the_same_in_every_run_of_a_seed() {
-    let g = Guest::assert_build("address_layout_probe.rs");
+    let g = layout_probe();
     let pinned: &[&str] = if cfg!(target_os = "linux") {
         &[
             "code",
@@ -254,7 +261,7 @@ fn envelope(output: &std::process::Output) -> serde_json::Value {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_inherited_stack_limit_does_not_move_the_layout() {
-    let g = Guest::assert_build("address_layout_probe.rs");
+    let g = layout_probe();
     // SAFETY: `limit` is a writable `struct rlimit`.
     let hard = unsafe {
         let mut limit = std::mem::zeroed::<libc::rlimit>();
@@ -389,7 +396,7 @@ fn under_docker_seccomp(args: &[&str]) -> std::process::Output {
 #[cfg(target_os = "linux")]
 #[test]
 fn the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay() {
-    let g = Guest::assert_build("address_layout_probe.rs");
+    let g = layout_probe();
     let binary = g.binary.to_str().unwrap();
     let refused = under_docker_seccomp(&["run", binary, "--seed", "1", "--", NO_CHURN]);
     assert!(!refused.status.success(), "{refused:?}");

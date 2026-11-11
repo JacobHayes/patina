@@ -13,7 +13,7 @@ pub(crate) struct CoverageRange {
 
 /// Every counter range the guest registered, read at finalization.
 ///
-/// Two counter kinds feed one map. An `--instrument` build's trace-pc-guard
+/// Two counter kinds feed one map. An instrumented build's trace-pc-guard
 /// words are `u32` hit counters that saturate, each with a pc-table entry. A Go
 /// guest's libFuzzer instrumentation keeps one `u8` counter per block instead
 /// (Go's `-d=libfuzzer`, over the linker's `.go.fuzzcntrs` section): the
@@ -185,9 +185,11 @@ pub(crate) enum CoverageError {
 impl core::fmt::Display for CoverageError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Unavailable => f.write_str(
-                "requested coverage is unavailable: the binary registered no edge counters; rebuild with `patina build --instrument` (or `--go`)",
-            ),
+            Self::Unavailable => f.write_str(if cfg!(target_os = "linux") {
+                "requested coverage is unavailable: the binary registered no edge counters; rebuild it without --no-instrument (or with `--go`)"
+            } else {
+                "requested coverage is unavailable: the binary registered no edge counters; instrumented Rust/C builds are Linux-only"
+            }),
             Self::Empty { edges_total } => write!(
                 f,
                 "requested coverage is empty: edges_total={edges_total} edges_covered=0; no edge counter recorded an executed edge"
