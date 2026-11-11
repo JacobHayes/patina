@@ -13,7 +13,8 @@
 //! The supervisor holds the table ([`admit`]): it keeps each admitted
 //! artifact open for the run, and confirms that the open file's bytes are the
 //! audited ones (staging replaces an artifact by rename, never in place, so
-//! the open file keeps them). The guest learns only what each path is
+//! the open file keeps them) and judges each again with the pre-run gate
+//! (the request is an input, not a proof). The guest learns only what each path is
 //! ([`patina_dst_runtime::ENV_ADMIT`]): admitted, with an artifact id,
 //! refused, with the reason, or, on a replay, missing. A recording names every program but the guest
 //! by its path, its artifact's digest and whether it was admitted
@@ -185,7 +186,10 @@ pub(super) fn admit(
                         program.artifact
                     ))
                 } else {
-                    None
+                    // The request is the run's input, not its proof: the
+                    // gate judges the held bytes again, as `patina test`
+                    // did.
+                    gate_refusal(Path::new(&program.artifact), &image, allow, policy)
                 };
                 program.refused = refusal.clone();
                 match refusal {

@@ -178,14 +178,13 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
                 }
             }
         });
-    // A recording child appends its decisions to a log the hub maps.
+    // The child's page, its clock starting at the machine's time; a
+    // recording child appends its decisions to it, and records through it
+    // (its trace).
+    let now = context(|context| context.machine_now());
+    let (page, page_fd) = super::log::HubPage::create(now);
     let recording = context(|context| Ok(context.execution_mode())) == ExecutionMode::Record;
-    let (log, trace) = if recording {
-        let (log, fd) = super::log::HubLog::create();
-        (Some(log), Some(fd))
-    } else {
-        (None, trace)
-    };
+    let trace = if recording { Some(page_fd) } else { trace };
     // The pipe the child's signal front writes a stop record to.
     let [stops, stop_writer] = pipe();
     match trace {
@@ -193,20 +192,44 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
             send_with_fds(
                 launcher as c_int,
                 &payload,
-                &[child, 0, 1, 2, stop_writer, trace],
+                &[child, 0, 1, 2, stop_writer, page_fd, trace],
             );
-            close(trace);
+            if trace != page_fd {
+                close(trace);
+            }
         }
-        None => send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2, stop_writer]),
+        None => send_with_fds(
+            launcher as c_int,
+            &payload,
+            &[child, 0, 1, 2, stop_writer, page_fd],
+        ),
     }
+    close(page_fd);
     close(child);
     close(stop_writer);
+    // In the table from here on, so a death before it is ready takes the
+    // one path every death does.
+    CHILDREN.lock().insert(
+        pid,
+        Child {
+            parent,
+            channel: hub,
+            stops,
+            page,
+            ready: false,
+            status: None,
+        },
+    );
+    ROLE.store(ROLE_ROOT, Ordering::Relaxed);
     // The child may use the filesystem before it is ready (its working
     // directory): the hub serves it meanwhile.
     match off_guest(|| serve(pid, hub)) {
         Some(Message::Ready) => {}
         Some(other) => protocol_fatal("a new process's ready", &other),
-        None => died(pid),
+        None => {
+            host_death(pid);
+            protocol_fatal_text(&format!("process {pid} died before it was ready"))
+        }
     }
     // A recording root keeps the child's recording from here on.
     if let Some(metadata) = super::BEGUN.lock().remove(&pid) {
@@ -218,17 +241,9 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
             context.machine_begin_process(pid, parent, program, argv.clone(), &metadata)
         });
     }
-    CHILDREN.lock().insert(
-        pid,
-        Child {
-            parent,
-            channel: hub,
-            stops,
-            log,
-            status: None,
-        },
-    );
-    ROLE.store(ROLE_ROOT, Ordering::Relaxed);
+    if let Some(child) = CHILDREN.lock().get_mut(&pid) {
+        child.ready = true;
+    }
     context(|context| context.task_foreign(foreign_task(pid), ForeignState::Runnable));
     if !spawn.pid.is_null() {
         // SAFETY: a writable pid, per the entry's contract.

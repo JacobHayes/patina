@@ -725,7 +725,7 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
     let mut captured = if let Some(plan) = &crash_restart_plan {
         let run = supervise_crash_restart(plan, |launch| {
             let (mut command, fds) = incarnation_command(launch)?;
-            wait_native_child_once(&mut command, &binary, &fds)
+            wait_native_child_once(&mut command, &binary, &fds, || {})
         })?;
         if let (Some(sink), Some(bytes)) = (trace_sink.as_mut(), &run.trace) {
             sink.write_all(bytes)?;
@@ -763,17 +763,19 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
             ),
             None => (None, None),
         };
-        let captured = wait_native_child_once(&mut command, &binary, &inherited_fds);
-        // The root is gone: with the last copy of its launch channel end
-        // closed, the launcher kills and reaps what is left of the machine.
+        // Once the root is reaped, with the last copy of its launch channel
+        // end closed, the launcher kills and reaps what is left of the
+        // machine, which may hold the output pipes open.
         #[cfg(target_os = "linux")]
-        {
+        let reaped = move || {
             drop(root_end);
             if let Some(launcher) = launcher {
                 let _ = launcher.join();
             }
-        }
-        captured?.0
+        };
+        #[cfg(not(target_os = "linux"))]
+        let reaped = || {};
+        wait_native_child_once(&mut command, &binary, &inherited_fds, reaped)?.0
     };
     let mut committed_record_trace = None;
     let mut trace_finalization_error: Option<(PathBuf, String)> = None;

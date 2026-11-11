@@ -187,11 +187,19 @@ versions, target triple and fingerprint.
   Linux (ARCHITECTURE.md, Processes), within the named limits there; any
   other spawn, `fork` and the exec family deny-trap. Each child records and
   replays its own timeline; `native_processes` pins the behaviour (same-seed
-  trace bytes, seed variation of each child's draws and of the
-  interleaving, record-to-replay of a self-spawn, a shared filesystem, a
-  SIGKILL, an abort, a child's host fault mid-quantum and a child's own
-  stop, and a planted divergence and a planted truncation in a child's
-  timeline); `testbeds/multiproc` pins each workload's first refusal or
+  trace bytes for a self-spawn, a kill, an abort, a timer nap and a poll,
+  and the same liveness verdict for a machine that blocks or idles across
+  processes; seed variation of each child's draws and of the
+  interleaving; record-to-replay of a self-spawn, a shared filesystem, a
+  SIGKILL, an abort, a child's host fault mid-quantum, a child's own
+  stop and a child's compute-bound stop; a planted divergence, a planted
+  truncation and a planted extra decision in a child's timeline; a child's
+  death mid-quantum keeping the time it reached; a host signal from
+  outside to a running or frozen child, and a root or supervisor killed
+  from outside, stopping the run with no process left; the root's end and a
+  child's stop recording each other child's teardown; the compute
+  observer quiet in a process serving another's computation; and a forged
+  admission request judged again); `testbeds/multiproc` pins each workload's first refusal or
   pass on x86_64 Linux; arm64 and Darwin baselines are pending.
 - **Conformance coverage** is Linux only and not exhaustive.
 - **Filesystem allocation detail.** ext4 extent blocks, volume free-block

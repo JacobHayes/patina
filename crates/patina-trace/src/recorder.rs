@@ -452,6 +452,31 @@ impl Recorder {
         }
     }
 
+    /// Child `pid` stopped compute-bound at `stop`: its own timeline's
+    /// terminal boundary, which its replay stops at.
+    pub fn set_process_compute_stop(&mut self, pid: i32, stop: ComputeStop) {
+        if let Some(process) = self.processes.get_mut(&pid) {
+            process.metadata.compute_stop = Some(stop);
+        }
+    }
+
+    /// Child `pid` made more decisions than its log holds: the trace is
+    /// abandoned, as for any recording that outgrows its budget.
+    pub fn abandon_process(&mut self, pid: i32) {
+        if self.ledger.overflowed() {
+            return;
+        }
+        self.ledger.overflow = Some(Overflow {
+            message: format!(
+                "process {pid} made more decisions than its log holds while recording; the \
+                 recorder abandoned the trace rather than hold part of them"
+            ),
+            bytes: None,
+        });
+        self.decisions = Vec::new();
+        self.processes.clear();
+    }
+
     /// Child `pid` ended, with wait status `status`, as `end` says.
     pub fn end_process(&mut self, pid: i32, status: i32, end: ProcessEnd) {
         if let Some(process) = self.processes.get_mut(&pid)

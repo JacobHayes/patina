@@ -35,7 +35,7 @@ fn parse_facts_takes_the_last_complete_document_and_refuses_anything_else() {
 /// A machine's documents: the root's last one is the run's state, with each
 /// process's verdicts (one context number in two processes is two
 /// contexts), each child's latest findings and the first divergence any
-/// process noted. With no document of the root's, the last one stands.
+/// process noted. With no document of the root's, the run has no facts.
 #[test]
 fn parse_facts_keeps_the_roots_document_and_every_processs_findings() {
     let schema = patina_dst_runtime::FACTS_SCHEMA;
@@ -64,11 +64,7 @@ fn parse_facts_keeps_the_roots_document_and_every_processs_findings() {
     );
     assert_eq!(parsed["replay_divergence"], "operation");
     let children = [stream.lines().nth(1).unwrap(), "\n"].concat();
-    let parsed = parse_facts(children.as_bytes()).unwrap().unwrap();
-    assert_eq!(
-        parsed["runtime_findings"],
-        serde_json::json!([{"source": "old"}])
-    );
+    assert_eq!(parse_facts(children.as_bytes()).unwrap(), None);
 }
 
 /// The stop pipe: whether the runtime started, the first stop record, and a

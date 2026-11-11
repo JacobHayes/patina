@@ -673,6 +673,34 @@ impl Context {
         Ok(())
     }
 
+    /// Recording: child `pid` stopped compute-bound at `stop`, which its
+    /// timeline keeps so its replay stops there too.
+    pub fn machine_process_compute_stop(&mut self, pid: i32, stop: patina_dst_trace::ComputeStop) {
+        if let crate::recording::Execution::Record { recorder, .. } = &mut self.execution {
+            recorder.set_process_compute_stop(pid, stop);
+        }
+    }
+
+    /// Recording: child `pid` made more decisions than its log holds, so
+    /// the recording is abandoned (a trace over its budget).
+    pub fn machine_process_overflowed(&mut self, pid: i32) {
+        if let crate::recording::Execution::Record { recorder, .. } = &mut self.execution {
+            recorder.abandon_process(pid);
+        }
+    }
+
+    /// A replaying child process's end: the error that it ended with
+    /// recorded decisions left over (a divergence, noted on its facts), or
+    /// `None` when it consumed its whole timeline or does not replay.
+    pub fn machine_replay_unconsumed(&mut self) -> Option<RuntimeError> {
+        let crate::recording::Execution::Replay(replayer) = &self.execution else {
+            return None;
+        };
+        let error = replayer.check_complete().err()?;
+        self.note_replay_divergence(error.replay_divergence());
+        Some(RuntimeError::Trace(error))
+    }
+
     /// Recording: child `pid` ended with wait status `status`, as `end` says.
     pub fn machine_process_ended(
         &mut self,

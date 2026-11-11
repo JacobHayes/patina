@@ -49,7 +49,7 @@ pub fn capture_active() -> bool {
 /// state is then the root's last document, with every process's verdicts
 /// (kept per process and context as above), each child's latest
 /// `runtime_findings` after the root's, and the first `replay_divergence`
-/// any process noted; with no document of the root's, the last one stands.
+/// any process noted; with no document of the root's, the run has none.
 ///
 /// No complete document means the run never got that far — it aborted before
 /// finalization — and the envelope says so by omitting the fields (absent,
@@ -63,7 +63,6 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
         Some(end) => &bytes[..end],
         None => return Ok(None),
     };
-    let mut last = None;
     let mut root = None;
     let mut verdicts: Vec<(Key, Vec<serde_json::Value>)> = Vec::new();
     let mut findings: Vec<(u64, Vec<serde_json::Value>)> = Vec::new();
@@ -102,12 +101,12 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
                     None => findings.push((pid, list)),
                 }
             }
-            None => root = Some(document.clone()),
+            None => root = Some(document),
         }
-        last = Some(document);
     }
-    let from_root = root.is_some();
-    let Some(mut last) = root.or(last) else {
+    // A child's document never stands for the run's: a root that wrote
+    // none leaves the run without facts, as a single process would.
+    let Some(mut last) = root else {
         return Ok(None);
     };
     let merged: Vec<serde_json::Value> = verdicts.into_iter().flat_map(|(_, list)| list).collect();
@@ -120,11 +119,8 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
         if let Some(divergence) = divergence {
             document.entry("replay_divergence").or_insert(divergence);
         }
-        let children: Vec<serde_json::Value> = findings
-            .into_iter()
-            .filter(|_| from_root)
-            .flat_map(|(_, list)| list)
-            .collect();
+        let children: Vec<serde_json::Value> =
+            findings.into_iter().flat_map(|(_, list)| list).collect();
         if !children.is_empty()
             && let serde_json::Value::Array(list) = document
                 .entry("runtime_findings")

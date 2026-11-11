@@ -172,32 +172,59 @@ pub(crate) fn native_child_status(status: ExitStatus) -> NativeChildStatus {
 
 pub(crate) const NATIVE_CRASH_RESTART_EXIT: i32 = 112;
 
+/// Run the guest once and wait for it: `reaped` runs as soon as its host
+/// process is reaped (and the inherited descriptors' flags are restored),
+/// before the rest of its output is read (what it
+/// started may still hold the output pipes open; `reaped` ends that).
 pub(super) fn wait_native_child_once(
     command: &mut Command,
     binary: &Path,
     inherited_fds: &[i32],
+    reaped: impl FnOnce(),
 ) -> Result<(output::Captured, u32), CliError> {
+    let waiting = |error: io::Error| {
+        CliError(format!(
+            "failed while waiting on native program {}: {error}",
+            binary.display()
+        ))
+    };
     if output::capture_active() {
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let (child, inherited_guard) = spawn_native_child(command, binary, inherited_fds)?;
+        let (mut child, inherited_guard) = spawn_native_child(command, binary, inherited_fds)?;
         let host_pid = child.id();
-        let output = child.wait_with_output().map_err(|error| {
-            CliError(format!(
-                "failed while waiting on native program {}: {error}",
-                binary.display()
-            ))
-        })?;
-        inherited_guard.restore()?;
+        let read = |pipe: Option<Box<dyn io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    pipe.read_to_end(&mut bytes)?;
+                }
+                Ok::<_, io::Error>(bytes)
+            })
+        };
+        let stdout = read(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+        let stderr = read(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+        let status = child.wait().map_err(waiting);
+        let restored = inherited_guard.restore();
+        reaped();
+        let status = status?;
+        restored?;
+        let joined = |reader: std::thread::JoinHandle<io::Result<Vec<u8>>>| {
+            reader
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("an output reader panicked")))
+                .map_err(waiting)
+        };
+        let (stdout, stderr) = (joined(stdout)?, joined(stderr)?);
         let NativeChildStatus {
             exit_code,
             signal,
             core,
-        } = native_child_status(output.status);
+        } = native_child_status(status);
         Ok((
             output::Captured {
                 exit_code,
-                stdout: output.stdout,
-                stderr: output.stderr,
+                stdout,
+                stderr,
                 captured: true,
                 signal,
                 core,
@@ -207,13 +234,11 @@ pub(super) fn wait_native_child_once(
     } else {
         let (mut child, inherited_guard) = spawn_native_child(command, binary, inherited_fds)?;
         let host_pid = child.id();
-        let status = child.wait().map_err(|error| {
-            CliError(format!(
-                "failed while waiting on native program {}: {error}",
-                binary.display()
-            ))
-        })?;
-        inherited_guard.restore()?;
+        let status = child.wait().map_err(waiting);
+        let restored = inherited_guard.restore();
+        reaped();
+        let status = status?;
+        restored?;
         let NativeChildStatus {
             exit_code,
             signal,

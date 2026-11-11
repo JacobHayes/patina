@@ -606,6 +606,14 @@ fn gateway<T>(invoke: impl FnOnce(&mut Context) -> Result<T, RuntimeError>) -> R
     thread::note_expiries(context);
     #[cfg(target_os = "linux")]
     crate::charge::note_room(context);
+    // A child's page holds its time as of its latest step, which the
+    // machine keeps if the child dies before it yields.
+    #[cfg(target_os = "linux")]
+    if crate::machine::is_child()
+        && let Ok(now) = context.machine_now()
+    {
+        crate::machine::note_now(now);
+    }
     match result {
         Ok(value) => Ok(value),
         Err(RuntimeError::InjectedCrash(crash)) => terminate_for_injected_crash(*crash),

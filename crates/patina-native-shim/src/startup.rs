@@ -73,10 +73,13 @@ pub(crate) fn init_from_env() -> c_int {
         crate::admission::capture()?;
         #[cfg(target_os = "linux")]
         crate::machine::configure()?;
-        // A child process of the machine uses the root's filesystem.
+        // A child process of the machine uses the root's filesystem, and
+        // its clock starts at the machine's time.
         #[cfg(target_os = "linux")]
-        let builder = if crate::machine::is_child() {
-            RuntimeBuilder::new(config).with_filesystem(crate::machine::fs::RemoteFs)
+        let builder = if let Some(start) = crate::machine::start_nanos() {
+            RuntimeBuilder::new(config)
+                .with_filesystem(crate::machine::fs::RemoteFs)
+                .starting_at(start)
         } else {
             RuntimeBuilder::new(config).with_fs_image(fs_image_base()?)
         };
@@ -84,14 +87,15 @@ pub(crate) fn init_from_env() -> c_int {
         let builder = RuntimeBuilder::new(config).with_fs_image(fs_image_base()?);
         let mut builder = builder;
         if let Some(fd) = trace_fd {
-            // A recording child of the machine records into the decision log
-            // the hub handed it, which the root keeps.
+            // A recording child of the machine records into its page's
+            // decision log (`fd`, the page again), which the root keeps.
             #[cfg(target_os = "linux")]
             if crate::machine::is_child()
                 && crate::runtime::control_env(patina_dst_runtime::ENV_MODE).as_deref()
                     == Some("record")
             {
-                builder = builder.with_trace_transport(crate::machine::DecisionLog::open(fd)?);
+                crate::machine::close_fd(fd);
+                builder = builder.with_trace_transport(crate::machine::DecisionLog::new()?);
             } else {
                 builder = builder.with_trace_transport(FdTraceTransport { fd });
             }

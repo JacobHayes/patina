@@ -105,12 +105,12 @@ fn main() {
         }
         ["bursts"] => {
             // Two threads take turns computing, each burst well inside the
-            // compute bound and the whole far beyond it.
+            // compute bound and the whole beyond it, in host time (a plain
+            // build's computation takes no virtual time).
             let burst = || {
                 for _ in 0..6 {
-                    let start = std::time::Instant::now();
                     let mut spin = 0u64;
-                    while start.elapsed() < std::time::Duration::from_millis(300) {
+                    for _ in 0..200_000_000u64 {
                         spin = std::hint::black_box(spin.wrapping_add(1));
                     }
                     std::thread::yield_now();
@@ -403,9 +403,75 @@ fn main() {
             let status = Command::new("/bin/true").status();
             println!("UNADMITTED {status:?}");
         }
+        ["spin", _token] => {
+            // Computes until something outside stops it.
+            let mut spin = 0u64;
+            loop {
+                spin = std::hint::black_box(spin.wrapping_add(1));
+            }
+        }
+        [binary, "spin-child", token] => {
+            use std::os::unix::process::ExitStatusExt;
+            let status = Command::new(binary).args(["spin", token]).status().unwrap();
+            println!("SPUN signal={:?}", status.signal());
+        }
+        ["late-segv", dir] => {
+            // Within one quantum (its parent waits): time passes, a file is
+            // written then, and a host fault ends the process.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            std::fs::write(format!("{dir}/child"), b"late").unwrap();
+            let address = std::hint::black_box(8usize);
+            unsafe { (address as *mut u8).write_volatile(1) };
+        }
+        [binary, "late-segv-child"] => {
+            let dir = "/work/late";
+            std::fs::create_dir_all(dir).unwrap();
+            Command::new(binary).args(["late-segv", dir]).status().unwrap();
+            let child = std::fs::metadata(format!("{dir}/child")).unwrap().modified().unwrap();
+            let now = std::time::SystemTime::now();
+            std::fs::write(format!("{dir}/parent"), b"after").unwrap();
+            let parent = std::fs::metadata(format!("{dir}/parent")).unwrap().modified().unwrap();
+            println!("LATE now_after={} mtime_after={}", now >= child, parent >= child);
+        }
+        ["pause"] => unsafe {
+            pause();
+        },
+        [binary, "stuck-child"] => {
+            // Every task of the machine blocks for good.
+            let status = Command::new(binary).arg("pause").status();
+            println!("STUCK {status:?}");
+        }
+        ["idle"] => loop {
+            std::thread::yield_now();
+        },
+        [binary, "idle-child"] => {
+            // Both processes poll, and nothing progresses.
+            let mut child = Command::new(binary).arg("idle").spawn().unwrap();
+            while child.try_wait().unwrap().is_none() {
+                std::thread::yield_now();
+            }
+        }
+        [binary, "stop-beside-sleeper", token] => {
+            let _sleeper = Command::new(binary).args(["sleeper", token]).spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let status = Command::new(binary).arg("signal-parent").status();
+            println!("STOPPED {status:?}");
+        }
+        [binary, "frozen-child", token] => {
+            // The child is frozen (asleep for an hour) while its parent
+            // computes, then the parent waits for it.
+            let mut child = Command::new(binary).args(["sleeper", token]).spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let mut spin = 0u64;
+            for _ in 0..1_000_000_000u64 {
+                spin = std::hint::black_box(spin.wrapping_add(1));
+            }
+            println!("WAITED {:?}", child.wait());
+        }
         _ => panic!("unexpected arguments {args:?}"),
     }
 }
+
 "#;
 
     fn json_envelope(output: &Output) -> serde_json::Value {
@@ -473,9 +539,22 @@ fn main() {
         );
     }
 
+    /// The processes guest built plain (`--no-instrument`): computation
+    /// takes host time only, and a compute bound is the host observer's.
+    fn plain_guest() -> common::native::Guest {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = build_facts_guest_with(
+            dir.path(),
+            "processes",
+            PROCESSES_SOURCE,
+            &["--no-instrument"],
+        );
+        common::native::Guest { dir, binary }
+    }
+
     #[test]
     fn a_parent_serving_a_computing_child_is_not_compute_bound() {
-        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let guest = plain_guest();
         let binary = guest.binary.to_str().unwrap();
         let busy = common::native::assert_success(guest.command(
             "run",
@@ -1035,6 +1114,487 @@ fn main() {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+    }
+
+    /// Host processes of a guest's machine whose command line holds every
+    /// one of `args`.
+    fn host_processes_with(args: &[&str]) -> Vec<i32> {
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let pid = entry.file_name().to_str()?.parse::<i32>().ok()?;
+                let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+                let held: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+                // The supervisor's own command line names the guest's too.
+                let supervisor = held.contains(&b"--seed".as_slice());
+                (!supervisor && args.iter().all(|arg| held.contains(&arg.as_bytes())))
+                    .then_some(pid)
+            })
+            .collect()
+    }
+
+    /// `patina run` of `args` (after the binary), with `outside` called
+    /// with the supervisor's host pid at every poll until it answers that it
+    /// is done (it may signal host processes meanwhile); the run's output,
+    /// or `None` when it outlived `deadline` and was killed.
+    fn run_with_outside(
+        guest: &common::native::Guest,
+        args: &[&str],
+        env: &[(&str, &str)],
+        deadline: std::time::Duration,
+        mut outside: impl FnMut(u32) -> bool,
+    ) -> Option<Output> {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_patina"));
+        command
+            .current_dir(common::native_workspace())
+            .arg("run")
+            .arg(&guest.binary)
+            .args(args)
+            .envs(env.iter().copied());
+        let mut done = false;
+        match common::output_until(&mut command, deadline, |pid| {
+            if !done {
+                done = outside(pid);
+            }
+            false
+        }) {
+            common::Deadlined::Finished(output) => Some(output),
+            common::Deadlined::Killed { stdout, stderr } => {
+                eprintln!(
+                    "deadline exceeded\nstdout:\n{}\nstderr:\n{}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                );
+                None
+            }
+        }
+    }
+
+    /// Once a host process holding `args` has run for a moment, send it
+    /// `sig`: the `outside` of [`run_with_outside`].
+    fn signal_once_running(args: &'static [&'static str], sig: i32) -> impl FnMut(u32) -> bool {
+        let mut seen: Option<std::time::Instant> = None;
+        move |_| {
+            let found = host_processes_with(args);
+            let Some(pid) = found.first() else {
+                return false;
+            };
+            let since = *seen.get_or_insert_with(std::time::Instant::now);
+            if since.elapsed() < std::time::Duration::from_millis(300) {
+                return false;
+            }
+            unsafe { libc::kill(*pid, sig) };
+            true
+        }
+    }
+
+    /// A child's compute-bound stop is in the child's own timeline, so its
+    /// replay stops where the recording did.
+    #[test]
+    fn a_childs_compute_stop_replays_where_it_stopped() {
+        let guest = plain_guest();
+        let binary = guest.binary.to_str().unwrap();
+        let trace = guest.dir.path().join("spin.patina");
+        let recorded = json_envelope(&guest.command(
+            "run",
+            &[
+                "--seed",
+                "3",
+                "--format",
+                "json",
+                "--compute-watchdog-ms",
+                "300",
+                "--record",
+                trace.to_str().unwrap(),
+                "--",
+                binary,
+                "spin-child",
+                "patina-compute",
+            ],
+        ));
+        assert_eq!(recorded["result"], "timeout", "{recorded:#}");
+        let bundle: serde_json::Value = serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+        assert!(
+            bundle["processes"][0]["metadata"]["compute_stop"].is_object(),
+            "{:#}",
+            bundle["processes"]
+        );
+        let replayed =
+            json_envelope(&guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]));
+        assert_eq!(
+            (&replayed["result"], &replayed["stop"]["reason"]),
+            (&recorded["result"], &recorded["stop"]["reason"]),
+            "{replayed:#}"
+        );
+    }
+
+    /// A replayed child that ends with recorded decisions left over has
+    /// diverged.
+    #[test]
+    fn a_replayed_child_consumes_its_whole_timeline() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let trace = guest.dir.path().join("parent.patina");
+        common::native::assert_success(guest.command(
+            "run",
+            &[
+                "--seed",
+                "3",
+                "--record",
+                trace.to_str().unwrap(),
+                "--",
+                binary,
+                "parent",
+            ],
+        ));
+        let mut bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+        let timeline = &mut bundle["processes"][0]["timeline"];
+        let decisions = timeline["decisions"].as_array_mut().unwrap();
+        let last = decisions.last().unwrap().clone();
+        decisions.push(last);
+        let end = timeline["lifecycle"]
+            .as_array_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap();
+        end["order"] = (end["order"].as_u64().unwrap() + 1).into();
+        let planted = guest.dir.path().join("extra.patina");
+        fs::write(&planted, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let replayed = json_envelope(
+            &guest.command("replay", &[planted.to_str().unwrap(), "--format", "json"]),
+        );
+        assert_eq!(
+            (&replayed["result"], &replayed["stop"]["reason"]),
+            (&"nondeterministic".into(), &"replay_divergence".into()),
+            "{replayed:#}"
+        );
+    }
+
+    /// A child the host ends from outside the run (an operator's signal, the
+    /// out-of-memory killer's SIGKILL) did not die of its own doing: the run
+    /// stops as the host's, and its parent never sees a death.
+    #[test]
+    fn a_child_ended_from_outside_the_run_stops_it() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for (sig, token) in [
+            (libc::SIGTERM, "patina-term-child"),
+            (libc::SIGKILL, "patina-kill-child"),
+        ] {
+            let args: &'static [&'static str] = Box::leak(Box::new(["spin", token]));
+            let output = run_with_outside(
+                &guest,
+                &[
+                    "--seed",
+                    "1",
+                    "--format",
+                    "json",
+                    "--compute-watchdog-ms",
+                    "60000",
+                    "--",
+                    binary,
+                    "spin-child",
+                    token,
+                ],
+                &[],
+                std::time::Duration::from_secs(60),
+                signal_once_running(args, sig),
+            )
+            .expect("the run ended");
+            let envelope = json_envelope(&output);
+            if (&envelope["result"], &envelope["stop"]["reason"])
+                != (&"internal".into(), &"host_kill".into())
+                || String::from_utf8_lossy(&output.stdout).contains("SPUN")
+            {
+                wrong.push(format!("signal {sig}: {envelope:#}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A child that dies mid-quantum leaves the machine at the time it
+    /// reached: its parent's clock and stamps never go back before what the
+    /// child wrote.
+    #[test]
+    fn a_childs_death_mid_quantum_keeps_the_time_it_reached() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let output = common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", binary, "late-segv-child"]),
+        );
+        assert_eq!(
+            stdout_line_with(&output, "LATE"),
+            "LATE now_after=true mtime_after=true",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// `patina test`'s verdicts are judged again by the run: a request that
+    /// admits a program the gate refuses (a host binary without the shim)
+    /// still refuses its spawn.
+    #[test]
+    fn a_forged_admission_request_is_judged_again() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let digest = std::process::Command::new("sha256sum")
+            .arg("/bin/true")
+            .output()
+            .unwrap();
+        let digest = String::from_utf8(digest.stdout).unwrap();
+        let digest = digest.split_whitespace().next().unwrap();
+        let request = serde_json::json!([{
+            "program": "/bin/true",
+            "artifact": "/bin/true",
+            "sha256": format!("sha256:{digest}"),
+            "refused": null,
+        }])
+        .to_string();
+        let output = run_with_outside(
+            &guest,
+            &["--seed", "1", "--format", "json", "--", "unadmitted"],
+            &[("PATINA_RT_ADMIT_REQUEST", &request)],
+            std::time::Duration::from_secs(60),
+            |_| true,
+        )
+        .expect("the run ended");
+        let envelope = json_envelope(&output);
+        assert_eq!(
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"unsupported".into(), &"deny_trap".into()),
+            "{envelope:#}"
+        );
+    }
+
+    /// A root the host kills while a child computes: the run ends (the
+    /// supervisor does not wait on output the child still holds) and no
+    /// process of the machine outlives it.
+    #[test]
+    fn a_root_killed_from_outside_leaves_no_child_behind() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let token = "patina-root-killed";
+        let output = run_with_outside(
+            &guest,
+            &[
+                "--seed",
+                "1",
+                "--format",
+                "json",
+                "--compute-watchdog-ms",
+                "60000",
+                "--",
+                binary,
+                "spin-child",
+                token,
+            ],
+            &[],
+            std::time::Duration::from_secs(30),
+            {
+                let mut child = signal_once_running(&["spin", "patina-root-killed"], 0);
+                move |_| {
+                    if !child(0) {
+                        return false;
+                    }
+                    for pid in host_processes_with(&["spin-child", "patina-root-killed"]) {
+                        unsafe { libc::kill(pid, libc::SIGKILL) };
+                    }
+                    true
+                }
+            },
+        );
+        let survivors = host_processes_with(&[token]);
+        for pid in &survivors {
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        let output = output.expect("the run ended once its root was killed");
+        let envelope = json_envelope(&output);
+        assert_eq!(envelope["result"], "internal", "{envelope:#}");
+        assert!(survivors.is_empty(), "host processes left: {survivors:?}");
+    }
+
+    /// A supervisor killed outright takes the machine's processes with it.
+    #[test]
+    fn a_supervisor_killed_leaves_no_process_behind() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let token = "patina-supervisor-killed";
+        let mut killed_at: Option<std::time::Instant> = None;
+        let mut survived = Vec::new();
+        let mut child = signal_once_running(&["spin", "patina-supervisor-killed"], 0);
+        let _ = run_with_outside(
+            &guest,
+            &[
+                "--seed",
+                "1",
+                "--compute-watchdog-ms",
+                "60000",
+                "--",
+                binary,
+                "spin-child",
+                token,
+            ],
+            &[],
+            std::time::Duration::from_secs(30),
+            {
+                let child = &mut child;
+                let killed_at = &mut killed_at;
+                let survived = &mut survived;
+                move |supervisor| {
+                    match *killed_at {
+                        None if child(0) => {
+                            unsafe { libc::kill(supervisor as i32, libc::SIGKILL) };
+                            *killed_at = Some(std::time::Instant::now());
+                        }
+                        None => {}
+                        Some(at) => {
+                            let left = host_processes_with(&[token]);
+                            if left.is_empty() {
+                                return true;
+                            }
+                            if at.elapsed() > std::time::Duration::from_secs(5) {
+                                *survived = left;
+                                for pid in survived.iter() {
+                                    unsafe { libc::kill(*pid, libc::SIGKILL) };
+                                }
+                                return true;
+                            }
+                        }
+                    }
+                    false
+                }
+            },
+        );
+        assert!(survived.is_empty(), "host processes left: {survived:?}");
+    }
+
+    /// The root's end, and a child's stop, end every other child: the
+    /// recording says each was torn down, and no host process is left.
+    #[test]
+    fn the_machines_end_tears_down_every_child() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for (mode, token) in [
+            ("leave-child", "patina-teardown-exit"),
+            ("stop-beside-sleeper", "patina-teardown-stop"),
+        ] {
+            let trace = guest.dir.path().join(format!("{mode}.patina"));
+            let output = guest.command(
+                "run",
+                &[
+                    "--seed",
+                    "1",
+                    "--format",
+                    "json",
+                    "--record",
+                    trace.to_str().unwrap(),
+                    "--",
+                    binary,
+                    mode,
+                    token,
+                ],
+            );
+            let survivors = host_processes_with(&[token]);
+            let bundle: serde_json::Value =
+                serde_json::from_slice(&fs::read(&trace).unwrap_or_default()).unwrap_or_default();
+            let sleeper = bundle["processes"][0]["end"].clone();
+            if !survivors.is_empty() || sleeper != "teardown" {
+                wrong.push(format!(
+                    "{mode}: survivors {survivors:?}, sleeper end {sleeper}, {}",
+                    json_envelope(&output)
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The same seed records the same bytes for a machine that kills, aborts,
+    /// naps on a timer and polls, and reaches the same liveness verdict for
+    /// one that blocks or idles across processes.
+    #[test]
+    fn the_same_seed_runs_the_same_machine_to_any_end() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for mode in ["kill-child", "abort-child", "nap-child", "poll-child"] {
+            let traces: Vec<Vec<u8>> = ["a", "b"]
+                .into_iter()
+                .map(|run| {
+                    let trace = guest.dir.path().join(format!("{mode}-{run}.patina"));
+                    common::native::assert_success(guest.command(
+                        "run",
+                        &[
+                            "--seed",
+                            "5",
+                            "--record",
+                            trace.to_str().unwrap(),
+                            "--",
+                            binary,
+                            mode,
+                        ],
+                    ));
+                    fs::read(&trace).unwrap()
+                })
+                .collect();
+            if traces[0] != traces[1] {
+                wrong.push(format!("{mode}: the recordings differ"));
+            }
+        }
+        for (mode, extra) in [
+            ("stuck-child", vec![]),
+            ("idle-child", vec!["--liveness-watchdog", "300000"]),
+        ] {
+            let verdicts: Vec<serde_json::Value> = (0..2)
+                .map(|_| {
+                    let mut argv = vec!["--seed", "5", "--format", "json"];
+                    argv.extend(extra.iter().copied());
+                    argv.extend(["--", binary, mode]);
+                    let envelope = json_envelope(&guest.command("run", &argv));
+                    serde_json::json!([envelope["result"], envelope["stop"]])
+                })
+                .collect();
+            if verdicts[0] != verdicts[1] || verdicts[0][0] != "liveness" {
+                wrong.push(format!("{mode}: {verdicts:#?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A child killed from outside while it is frozen is found when the
+    /// machine next resumes it: the run stops as the host's.
+    #[test]
+    fn a_frozen_child_ended_from_outside_stops_the_run() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let token = "patina-frozen-killed";
+        let output = run_with_outside(
+            &guest,
+            &[
+                "--seed",
+                "1",
+                "--format",
+                "json",
+                "--compute-watchdog-ms",
+                "60000",
+                "--",
+                binary,
+                "frozen-child",
+                token,
+            ],
+            &[],
+            std::time::Duration::from_secs(60),
+            signal_once_running(&["sleeper", "patina-frozen-killed"], libc::SIGKILL),
+        )
+        .expect("the run ended");
+        let envelope = json_envelope(&output);
+        assert_eq!(
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"internal".into(), &"host_kill".into()),
+            "{envelope:#}"
+        );
     }
 
     #[test]

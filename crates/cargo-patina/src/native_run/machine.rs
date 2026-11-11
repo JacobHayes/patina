@@ -5,22 +5,25 @@
 //! ([`patina_dst_runtime::ENV_LAUNCH_FD`]), to start the admitted artifact (the
 //! file the admission holds open, by its descriptor),
 //! and hands it the child's end of their channel, its stdin, stdout and
-//! stderr, the write end of its stop pipe and, when the run records or
-//! replays, its trace (a decision log, or the timeline it replays). A
+//! stderr, the write end of its stop pipe, its page (the memory file it
+//! shares with the hub) and, when the run records or replays, its trace
+//! (the page again, its decisions' log, or the timeline it replays). A
 //! launcher thread serves those requests. Each child starts as
 //! the root did: the root's control plane less what only the root writes
 //! (facts, trace, coverage, stop records, reports, crash and restart
 //! channels, the base filesystem and staged stdin) and the filesystem fault
 //! knobs (the root's driver stack serves a child's filesystem), its own
-//! seed, place in the process tree, working directory, channel, stop pipe
-//! and trace, its guest environment through the initial
+//! seed, place in the process tree, working directory, channel, stop pipe,
+//! page and trace, its guest environment through the initial
 //! stack slots, and the same address layout pin. A child dies with the
 //! launcher thread (`PR_SET_PDEATHSIG`) and inherits no other descriptor.
 //! The launcher reaps each child as it dies; the root asks it how a child
 //! whose host process ended without a word died, and it answers with the
-//! wait status. When the root ends, its end
-//! of the launch channel closes, and the launcher kills (by pidfd) and
-//! reaps every child still running.
+//! wait status. A child the launcher cannot hold a pidfd for is killed at
+//! once, its launch failed. When the root ends (the supervisor drops its
+//! end of the launch channel as soon as it reaps the root, before it reads
+//! the rest of the run's output), the launcher kills (by pidfd) and reaps
+//! every child still running.
 
 use super::*;
 use serde::Deserialize;
@@ -146,7 +149,7 @@ struct Launch {
 /// (so a kill never reaches a recycled pid), and the thread that reaps it
 /// as soon as it dies.
 struct Running {
-    pidfd: Option<OwnedFd>,
+    pidfd: OwnedFd,
     /// Answers the child's raw wait status once it is reaped.
     reaper: JoinHandle<Option<i32>>,
 }
@@ -170,9 +173,20 @@ pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
                             // SAFETY: a plain system call; the child is not
                             // reaped before its reaper starts below.
                             let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
-                            let pidfd = (raw >= 0)
-                                // SAFETY: a fresh descriptor owned here.
-                                .then(|| unsafe { OwnedFd::from_raw_fd(raw as RawFd) });
+                            if raw < 0 {
+                                // Its end could not be guaranteed: the launch
+                                // fails (the root sees the child die before it
+                                // is ready).
+                                eprintln!(
+                                    "patina: failed to hold process {pid}: {}",
+                                    io::Error::last_os_error()
+                                );
+                                let _ = child.kill();
+                                let _ = child.wait();
+                                continue;
+                            }
+                            // SAFETY: a fresh descriptor owned here.
+                            let pidfd = unsafe { OwnedFd::from_raw_fd(raw as RawFd) };
                             let reaper = std::thread::spawn(move || {
                                 child.wait().ok().map(ExitStatusExt::into_raw)
                             });
@@ -203,34 +217,41 @@ pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
             }
         }
         for child in children.into_values() {
-            if let Some(pidfd) = &child.pidfd {
-                // SAFETY: a plain system call on a pidfd owned here.
-                unsafe {
-                    libc::syscall(
-                        libc::SYS_pidfd_send_signal,
-                        pidfd.as_raw_fd(),
-                        libc::SIGKILL,
-                        std::ptr::null::<libc::siginfo_t>(),
-                        0,
-                    )
-                };
-            }
+            // SAFETY: a plain system call on a pidfd owned here.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    child.pidfd.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            };
             let _ = child.reaper.join();
         }
     })
 }
 
-/// Start one child, as `payload` asks, with `fds`: its channel end, then
-/// stdin, stdout and stderr.
+/// Start one child, as `payload` asks, with `fds`: its channel end, stdin,
+/// stdout and stderr, its stop pipe, its page, and maybe its trace.
 fn launch(
     template: &Template,
     request: Launch,
     fds: Vec<OwnedFd>,
 ) -> Result<std::process::Child, CliError> {
-    // The child's channel, stdio, stop pipe, and on a recording or a replay
-    // the child's own trace.
+    // The child's channel, stdio, stop pipe, page, and on a recording or a
+    // replay the child's own trace.
     let mut fds = fds.into_iter();
-    let (Some(channel), Some(stdin), Some(stdout), Some(stderr), Some(stops), trace, None) = (
+    let (
+        Some(channel),
+        Some(stdin),
+        Some(stdout),
+        Some(stderr),
+        Some(stops),
+        Some(page),
+        trace,
+        None,
+    ) = (
         fds.next(),
         fds.next(),
         fds.next(),
@@ -238,9 +259,11 @@ fn launch(
         fds.next(),
         fds.next(),
         fds.next(),
-    ) else {
+        fds.next(),
+    )
+    else {
         return Err(CliError(
-            "a process launch request must carry five or six descriptors".into(),
+            "a process launch request must carry six or seven descriptors".into(),
         ));
     };
     let artifact = template
@@ -274,11 +297,16 @@ fn launch(
     }
     let raw_channel = channel.as_raw_fd();
     let raw_stops = stops.as_raw_fd();
+    let raw_page = page.as_raw_fd();
     let raw_trace = trace.as_ref().map(AsRawFd::as_raw_fd);
     if let Some(trace) = raw_trace {
         command.env(patina_dst_runtime::ENV_TRACE_FD, trace.to_string());
     }
     command.env(patina_dst_runtime::ENV_STOP_FD, raw_stops.to_string());
+    command.env(
+        patina_dst_runtime::ENV_PROCESS_PAGE_FD,
+        raw_page.to_string(),
+    );
     command
         .env(ENV_SEED, request.seed.to_string())
         .env(
@@ -296,7 +324,14 @@ fn launch(
     // SAFETY: the hook runs in the forked child before exec and makes only
     // async-signal-safe system calls, allocating nothing.
     unsafe {
-        command.pre_exec(move || inherit_only([Some(raw_channel), Some(raw_stops), raw_trace]));
+        command.pre_exec(move || {
+            inherit_only([
+                Some(raw_channel),
+                Some(raw_stops),
+                Some(raw_page),
+                raw_trace,
+            ])
+        });
     }
     layout::pin(
         &mut command,
@@ -314,6 +349,7 @@ fn launch(
     })?;
     drop(channel);
     drop(stops);
+    drop(page);
     drop(trace);
     Ok(child)
 }
@@ -325,8 +361,9 @@ fn json(value: &impl serde::Serialize) -> Result<String, CliError> {
 }
 
 /// In the forked child: die with the launcher thread, and let only stdio
-/// and `kept` (the channel, the stop pipe, a trace) cross the exec.
-fn inherit_only(kept: [Option<RawFd>; 3]) -> io::Result<()> {
+/// and `kept` (the channel, the stop pipe, the page, a trace) cross the
+/// exec.
+fn inherit_only(kept: [Option<RawFd>; 4]) -> io::Result<()> {
     let check = |rc: libc::c_long| {
         if rc < 0 {
             Err(io::Error::last_os_error())

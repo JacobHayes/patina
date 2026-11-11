@@ -195,20 +195,35 @@ fn child_shutdown() -> c_int {
         return 0;
     }
     SHUTDOWN.store(true, std::sync::atomic::Ordering::Relaxed);
-    let flushed = flush_captured_stdio();
+    // Whatever stops the run is decided before the hub hears of the end:
+    // after it, nothing this process says reaches the run.
+    if let Err(error) = flush_captured_stdio() {
+        let detail = error.to_string();
+        crate::host_abort(RunStop::new(
+            RunClass::Internal,
+            "shutdown_failure",
+            &[b"flush captured stdio: ", detail.as_bytes()],
+        ));
+    }
+    // A replayed child that leaves recorded decisions over has diverged.
+    if let Ok(Some(error)) =
+        crate::with_context_raw(|context| Ok(context.machine_replay_unconsumed()))
+    {
+        let detail = error.to_string();
+        crate::host_abort(RunStop::new(
+            RunClass::Nondeterministic,
+            "replay_divergence",
+            &[detail.as_bytes()],
+        ));
+    }
     let status = guest_exit_status().unwrap_or(0);
     crate::machine::child_exit(crate::machine::exit_status(status));
     // The baton is the hub's again: this process's runtime is done.
     if let Some(context) = slot().lock().take() {
         std::mem::forget(context);
     }
-    match flushed {
-        Ok(()) => {
-            set_errno(0);
-            0
-        }
-        Err(_) => fail(EIO),
-    }
+    set_errno(0);
+    0
 }
 
 fn abandon_over_budget_trace(error: &TraceError) {

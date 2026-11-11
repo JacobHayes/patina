@@ -397,12 +397,24 @@ its own runtime, and the processes run in lockstep: one runs at a time
   pid, parent, group and session (`PATINA_RT_PROCESS`), its channel to the
   hub (`PATINA_RT_CHANNEL_FD`, `SOCK_SEQPACKET`), the root's host stdio, a
   stop pipe of its own (`PATINA_RT_STOP_FD`, whose read end the hub holds),
-  on a recording or a replay its trace (`PATINA_RT_TRACE_FD`), the same
+  its page (`PATINA_RT_PROCESS_PAGE_FD`, below), on a recording or a replay
+  its trace (`PATINA_RT_TRACE_FD`), the same
   layout pin and admission table, and no other descriptor. A launch request
-  over 120 KiB (arguments and environment) is refused by name. A child reports ready from the
-  startup constructor and runs no guest code before its first resume. When
+  over 120 KiB (arguments and environment) is refused by name. A child's
+  clock starts at the machine's time when it was spawned (the boot origin
+  stays the run's, so what counts from boot counts from the machine's). A
+  child reports ready from the startup constructor and runs no guest code
+  of its own before its first resume, except what runs before the shim's
+  constructor (a shared library's constructor, an earlier entry of the
+  executable's): that code runs while another process may hold the baton,
+  with the traps armed, so an effectful call there fails closed and it can
+  only compute. When
   the root ends, a child finds its channel closed and exits; the launcher
-  kills and reaps any left.
+  kills and reaps any left. The launcher holds each child by a pidfd (a
+  child it cannot hold one for is killed, its launch failed), and a child
+  dies with the supervisor (`PR_SET_PDEATHSIG`). The supervisor ends the
+  machine as soon as it reaps the root, before it reads the rest of the
+  run's output, which a child may hold open.
 - Pids and thread ids share one namespace, which the hub allocates: a
   process's main thread id is its pid, and its other threads' ids come from
   the hub.
@@ -413,6 +425,14 @@ its own runtime, and the processes run in lockstep: one runs at a time
   records the outcome. Filesystem latency is charged by the calling
   process's own runtime, from its own seeded stream. A child starts in its
   parent's working directory.
+- Each child has a page (`src/machine/log.rs`), a memory file it shares
+  with the hub, which it writes what must outlive it to as it happens: its
+  time as of its latest runtime step, the compute-bound stop it took, and,
+  recording, its decisions. The hub reads it whenever it takes the baton
+  back and when the child ends, however it ends.
+- A child's frames on its channel never interleave: one thread sends a
+  frame at a time. A stop that cannot take the channel (the observer
+  stopping a thread mid-send) goes to the child's stop pipe instead.
 - While another process holds the baton, or the hub waits on the host for
   a child (its launch and ready, its death after `SIGKILL`), a process runs
   no guest code: the compute observer has no candidate there.
@@ -429,17 +449,22 @@ its own runtime, and the processes run in lockstep: one runs at a time
   a default fatal signal action (`abort` included) is the child's death by
   that signal, which its parent's wait sees, core dumped (`WCOREDUMP`) for a
   signal whose default action dumps core, whatever the host's core limit.
-  A child whose host process dies without a word (a host fault its guest
-  code raised, which the C signal front leaves to the default action) is
-  found by its channel closing mid-quantum: the hub reads the child's stop
-  pipe (a stop record the front wrote there stops the run, naming the
-  child), else asks the launcher, which reaped it, for its host wait status.
-  A death by a signal with no record is the guest's own (the shim cannot
-  stop without leaving one): the child died of that signal, the machine
-  goes on from the time and carried state it resumed the child with, and
-  its parent reaps it. Any other silent end is an internal stop naming its
-  pid. The hub closes the root's filesystem handles a child held when it
-  ends.
+  A child whose host process dies without a word is found by its channel
+  closing (mid-quantum, mid-frame, before it reported ready, or frozen,
+  when the hub next resumes or kills it), and every such death takes one
+  path: a stop the child sent that the hub had not read, or a stop record
+  its signal front left on its stop pipe, stops the run naming the child;
+  else the hub asks the launcher, which reaped it, for its host wait
+  status. Only a synchronous fault its guest code raised (`SIGSEGV`,
+  `SIGBUS`, `SIGILL`, `SIGFPE`, `SIGTRAP`, `SIGSYS`), which the front leaves
+  to the default action, in a child that was ready, is the guest's: the
+  child died of that signal, the machine goes on with the carried state it
+  resumed the child with, at the time the child reached (its page), and its
+  parent reaps it. Any other signal came from outside the run (an
+  operator, the out-of-memory killer, a resource limit): the run stops as
+  `internal`/`host_kill`. Any other silent end is an internal stop naming
+  its pid. The hub closes the root's filesystem handles a child held when
+  it ends.
 - `kill(pid, SIGKILL)` of a child, from the root or (through the hub) a
   sibling: the hub tells the frozen child, which raises `SIGKILL` on its
   host process; its channel's end closing confirms the death, and the
@@ -454,23 +479,28 @@ its own runtime, and the processes run in lockstep: one runs at a time
   and ends the run with that record, so the run has the child's class. The
   supervisor reads the machine's facts as the root's last document with
   every process's verdicts, each child's latest findings and the first
-  replay divergence any process noted.
+  replay divergence any process noted; a run whose root wrote none has no
+  facts. A child decides what stops the run (its output's flush, its
+  replay's completeness) before it tells the hub it ended: past that,
+  nothing it says reaches the run.
 - Recording and replay: each process records its own decisions. A
   recording child ships its metadata when it starts (`TraceBegin`) and
-  appends each decision, as it records it, to a decision log the hub maps
-  (`src/machine/log.rs`, a shared memory file), so a child that ends
-  anywhere (mid-quantum, under a lock) leaves every decision it made; the
-  hub reads the log whenever it takes the baton back and when the child
-  ends, so the root holds every frozen child's decisions whenever it runs
-  or stops;
+  appends each decision, as it records it, to its page's decision log, so
+  a child that ends anywhere (mid-quantum, under a lock) leaves every
+  decision it made, and the root holds every frozen child's decisions
+  whenever it runs or stops; a compute-bound stop's boundary goes to the
+  page too, into the child's metadata, so its replay stops there; a log
+  that fills (twice the trace budget) abandons the recording, as any trace
+  over its budget is;
   the root's bundle carries one timeline per child (`processes`, format 33:
   pid, parent, program, arguments, end and wait status, the child's
   metadata and timeline) beside its own, whose `task_foreign` decisions are
   each child's spawn, switches and end. A replaying root hands each child
   its timeline as a trace of its own, in a memory file the launcher passes
   as the child's `PATINA_RT_TRACE_FD`; each child replays strictly, so a
-  child that diverges fails the replay, and a replay that spawns a child
-  the recording lacks diverges (`trace_mismatch`).
+  child that diverges, or ends with recorded decisions left over, fails the
+  replay, and a replay that spawns a child the recording lacks diverges
+  (`trace_mismatch`).
 - Not modeled yet, each a named stop (`unsupported`/`not_modeled`, never
   `deny_trap`, which is for programs outside the admission): spawn from a
   child,
@@ -495,7 +525,13 @@ its own runtime, and the processes run in lockstep: one runs at a time
   mid-quantum gives back the clock and carried state the hub resumed it
   with: what it charged in that quantum is lost to the machine. While
   another process lives, `tkill` of any thread id not the caller's own is a
-  named stop, even one no process holds.
+  named stop, even one no process holds. The step budget
+  (`PATINA_RT_STEP_BUDGET`) bounds each process's own steps, not the
+  machine's. A child's recorded metadata lacks the finish-time buggify
+  activity record (forensics only; replay does not read it). The trace
+  budget is one for the whole machine: the root's timeline and every
+  child's count against it together. A child that dies after it told the
+  hub it ended (a destructor that faults after its exit) is not seen.
 
 ## Virtual time
 

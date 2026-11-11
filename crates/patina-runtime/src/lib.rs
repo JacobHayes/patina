@@ -252,6 +252,11 @@ pub const ENV_LAUNCH_FD: &str = "PATINA_RT_LAUNCH_FD";
 /// process; present only in a child.
 pub const ENV_CHANNEL_FD: &str = "PATINA_RT_CHANNEL_FD";
 
+/// A child process's page, a memory file it shares with the machine's hub
+/// (its time, its compute-bound stop and, recording, its decisions); present
+/// only in a child.
+pub const ENV_PROCESS_PAGE_FD: &str = "PATINA_RT_PROCESS_PAGE_FD";
+
 /// A child process's pid, its parent's, its process group and session, as
 /// `PID:PPID:PGID:SID`; present only in a child.
 pub const ENV_PROCESS: &str = "PATINA_RT_PROCESS";

@@ -204,7 +204,7 @@ impl<'a> RunStop<'a> {
 /// The supervisor's stop pipe, read without allocating or taking a lock, so a
 /// stop reached before the runtime is installed, inside the allocator or
 /// under a shim lock can still say why.
-fn stop_record_fd() -> Option<c_int> {
+pub(crate) fn stop_record_fd() -> Option<c_int> {
     #[cfg(patina_posix_exports)]
     {
         crate::posix_env::control_value(patina_dst_runtime::ENV_STOP_FD)

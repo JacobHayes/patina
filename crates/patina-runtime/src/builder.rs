@@ -50,6 +50,9 @@ pub struct RuntimeBuilder {
     /// mutually exclusive.
     fs_image: Option<MemFs>,
     clock: Option<VirtualClock>,
+    /// The monotonic instant the clock starts at, past the boot origin: a
+    /// process that joins a running machine starts at the machine's time.
+    start_nanos: Option<u64>,
     /// Byte channel for the run's structured facts document, for embedders whose
     /// guest cannot write a host file directly (the native shim).
     facts_sink: Option<Box<dyn FactsSink>>,
@@ -64,6 +67,7 @@ impl RuntimeBuilder {
             filesystem: None,
             fs_image: None,
             clock: None,
+            start_nanos: None,
             facts_sink: None,
             crash_attempt_sink: None,
         }
@@ -108,6 +112,16 @@ impl RuntimeBuilder {
 
     pub fn with_clock(mut self, clock: VirtualClock) -> Self {
         self.clock = Some(clock);
+        self
+    }
+
+    /// Start the clock at monotonic instant `nanos` (no earlier than the
+    /// boot origin) rather than at the boot origin, which stays the run's:
+    /// a process that joins a running machine starts at the machine's time,
+    /// and what counts from boot (fault windows, cutoffs) counts from the
+    /// machine's.
+    pub fn starting_at(mut self, nanos: u64) -> Self {
+        self.start_nanos = Some(nanos);
         self
     }
 
@@ -515,10 +529,15 @@ impl RuntimeBuilder {
                 Box::new(fault_fs)
             }
         };
-        let clock = self
+        let mut clock = self
             .clock
             .take()
             .unwrap_or_else(|| VirtualClock::at(boot_origin_nanos, realtime_epoch));
+        if let Some(start) = self.start_nanos {
+            clock
+                .sleep_until(ClockKind::Monotonic, start)
+                .map_err(RuntimeError::Effect)?;
+        }
         let entropy = SeededEntropy::new(domain_seed(root_seed, fault_domain::ENTROPY));
         let scheduler = DetScheduler::with_policy(root_seed, self.config.schedule_policy);
         let net = &self.config.faults.net;
