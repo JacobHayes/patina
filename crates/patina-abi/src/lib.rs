@@ -181,4 +181,10 @@ pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
 ///   computation with no operation but scheduling points is bounded by the
 ///   recorded compute budget. A `sched_yield` is a poll unless some task
 ///   made progress since the yielding task's previous one.
-pub const TIME_MODEL: u32 = 6;
+/// - 7: a machine of several processes has one clock and one set of
+///   progress trackers: the charged time one process's clock does not show
+///   yet, the no-progress horizon, the poll streak and the liveness
+///   watchdog's arms travel with the process baton, so a child's progress is
+///   its parent's and a charge shows on the clock whichever process runs
+///   next. Each process keeps its own CPU total.
+pub const TIME_MODEL: u32 = 7;

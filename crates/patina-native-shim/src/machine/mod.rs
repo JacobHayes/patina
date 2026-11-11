@@ -24,6 +24,7 @@
 use crate::thread;
 use crate::{SpinMutex, TaskId};
 use patina_dst_abi::ForeignState;
+use patina_dst_runtime::MachineCarry;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
@@ -139,14 +140,40 @@ pub(crate) fn child_start() {
     ELSEWHERE_RUNS.store(true, Ordering::Relaxed);
     let first = receive(channel());
     ELSEWHERE_RUNS.store(false, Ordering::Relaxed);
-    let (now, view) = match first {
-        Some(Message::Resume { now, view }) => (now, view),
+    let (now, view, carry) = match first {
+        Some(Message::Resume { now, view, carry }) => (now, view, carry),
         Some(other) => protocol_fatal("the first resume", &other),
         None => orphaned(),
     };
     context(|context| {
         context.advance_to(now)?;
+        context.import_machine_carry(carry);
         context.task_foreign(ELSEWHERE, view)
+    });
+}
+
+/// What this process hands the next one with the baton: the time, what
+/// every task but `except` amounts to (its timers as of now included), and
+/// the machine's carried state, which this process gives up.
+fn hand_over(except: TaskId) -> (u64, ForeignState, MachineCarry) {
+    let alarm = thread::earliest_timer();
+    context(|context| {
+        Ok((
+            context.machine_now()?,
+            context.process_view(Some(except), alarm),
+            context.export_machine_carry()?,
+        ))
+    })
+}
+
+/// Take the baton back from another process, at its time `now`, with the
+/// machine's `carry`, and set `task`, the foreign task that stands for it,
+/// to `state`.
+fn take_over(now: u64, carry: MachineCarry, task: TaskId, state: ForeignState) {
+    context(|context| {
+        context.advance_to(now)?;
+        context.import_machine_carry(carry);
+        context.task_foreign(task, state)
     });
 }
 
@@ -198,21 +225,12 @@ fn serve_children(mut picked: TaskId) -> TaskId {
             .filter(|child| child.status.is_none())
             .map(|child| child.channel)
             .unwrap_or_else(|| protocol_fatal_text(&format!("no live process {pid} to resume")));
-        let (now, view) =
-            context(|context| Ok((context.machine_now()?, context.process_view(Some(picked)))));
-        send(channel, &Message::Resume { now, view });
+        let (now, view, carry) = hand_over(picked);
+        send(channel, &Message::Resume { now, view, carry });
         match serve(pid, channel) {
-            Message::Yield { now, state } => {
-                context(|context| {
-                    context.advance_to(now)?;
-                    context.task_foreign(picked, state)
-                });
-            }
-            Message::Exit { now, status } => {
-                context(|context| {
-                    context.advance_to(now)?;
-                    context.task_foreign(picked, ForeignState::Gone)
-                });
+            Message::Yield { now, state, carry } => take_over(now, carry, picked, state),
+            Message::Exit { now, status, carry } => {
+                take_over(now, carry, picked, ForeignState::Gone);
                 exited(pid, status);
             }
             other => protocol_fatal("a child's yield or exit", &other),
@@ -292,21 +310,18 @@ fn died(pid: i32) -> ! {
 fn yield_to_hub(mut picked: TaskId) -> TaskId {
     loop {
         debug_assert_eq!(picked, ELSEWHERE);
-        let (now, state) = context(|context| {
-            Ok((
-                context.machine_now()?,
-                context.process_view(Some(ELSEWHERE)),
-            ))
-        });
-        send(channel(), &Message::Yield { now, state });
-        let (now, view) = match receive(channel()) {
-            Some(Message::Resume { now, view }) => (now, view),
+        let (now, state, carry) = hand_over(ELSEWHERE);
+        send(channel(), &Message::Yield { now, state, carry });
+        let (now, view, carry) = match receive(channel()) {
+            Some(Message::Resume { now, view, carry }) => (now, view, carry),
             Some(other) => protocol_fatal("a resume", &other),
             None => orphaned(),
         };
         let local = context(|context| {
             context.advance_to(now)?;
-            let local = context.process_view(Some(ELSEWHERE)) == ForeignState::Runnable;
+            context.import_machine_carry(carry);
+            // Whether a task of this process is runnable: no timer counts.
+            let local = context.process_view(Some(ELSEWHERE), None) == ForeignState::Runnable;
             if !local {
                 context.task_foreign(ELSEWHERE, view)?;
             } else {
@@ -329,8 +344,11 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
 /// run's facts and trace).
 pub(crate) fn child_exit(status: i32) {
     // After `main` returned: a read of the clock, no scheduling operation.
-    let now = crate::with_context_raw(|context| context.machine_now()).unwrap_or(0);
-    send(channel(), &Message::Exit { now, status });
+    let (now, carry) = crate::with_context_raw(|context| {
+        Ok((context.machine_now()?, context.export_machine_carry()?))
+    })
+    .unwrap_or_default();
+    send(channel(), &Message::Exit { now, status, carry });
 }
 
 /// The hub is gone (the root ended): a child has no machine to run in.

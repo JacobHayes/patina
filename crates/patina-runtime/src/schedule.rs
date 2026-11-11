@@ -582,8 +582,13 @@ impl Context {
 
     /// What every task but `except` amounts to, as another process sees this
     /// one: runnable when one is, else parked until the earliest timed park
-    /// or process timer, else parked.
-    pub fn process_view(&self, except: Option<TaskId>) -> patina_dst_abi::ForeignState {
+    /// or process timer (`alarm`, the embedder's earliest timer deadline as
+    /// of now), else parked.
+    pub fn process_view(
+        &self,
+        except: Option<TaskId>,
+        alarm: Option<u64>,
+    ) -> patina_dst_abi::ForeignState {
         use patina_dst_abi::ForeignState;
         let others = || {
             self.scheduler_tasks
@@ -599,7 +604,7 @@ impl Context {
             .filter(|(_, task)| Some(**task) != except)
             .map(|((deadline, _), _)| *deadline)
             .next();
-        match timed.into_iter().chain(self.alarm).min() {
+        match timed.into_iter().chain(alarm).min() {
             Some(deadline_nanos) => ForeignState::ParkedUntil { deadline_nanos },
             None => ForeignState::Parked,
         }

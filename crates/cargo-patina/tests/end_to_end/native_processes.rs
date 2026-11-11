@@ -16,7 +16,15 @@ use std::process::Command;
 
 unsafe extern "C" {
     fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
+    fn signal(sig: i32, handler: usize) -> usize;
+    fn timer_create(clock: i32, event: *mut [u64; 8], timer: *mut usize) -> i32;
+    fn timer_settime(timer: usize, flags: i32, new: *const [i64; 4], old: *mut [i64; 4]) -> i32;
+    fn pause() -> i32;
 }
+
+const SIGUSR1: i32 = 10;
+
+extern "C" fn on_usr1(_: i32) {}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -80,6 +88,49 @@ fn main() {
         [binary, "busy-child"] => {
             let status = Command::new(binary).arg("bursts").status().unwrap();
             println!("BUSY status={:?}", status.code());
+        }
+        ["churn", path] => {
+            // Progress (a file written) a thousand times over.
+            for round in 0..1000 {
+                std::fs::write(format!("{path}/round"), round.to_string()).unwrap();
+            }
+        }
+        [binary, "poll-child"] => {
+            // The parent only polls while its child makes progress.
+            std::fs::create_dir_all("/work/churn").unwrap();
+            let mut child = Command::new(binary)
+                .args(["churn", "/work/churn"])
+                .spawn()
+                .unwrap();
+            let status = loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    break status;
+                }
+                std::thread::yield_now();
+            };
+            println!("POLLED status={:?}", status.code());
+        }
+        ["timer"] => unsafe {
+            // A POSIX timer, one second on, interrupts the pause.
+            signal(SIGUSR1, on_usr1 as usize);
+            let mut event = [0u64; 8];
+            event[1] = SIGUSR1 as u64; // sigev_signo; sigev_notify SIGEV_SIGNAL
+            let mut timer = 0;
+            assert_eq!(timer_create(1, &mut event, &mut timer), 0);
+            assert_eq!(timer_settime(timer, 0, &[0, 0, 1, 0], std::ptr::null_mut()), 0);
+            pause();
+            std::process::exit(9);
+        },
+        [binary, "nap-child"] => {
+            // The parent naps between looks at its child, for at most three
+            // seconds.
+            let mut child = Command::new(binary).arg("timer").spawn().unwrap();
+            let status = (0..300).find_map(|_| {
+                let status = child.try_wait().unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                status
+            });
+            println!("NAPPED status={:?}", status.map(|status| status.code()));
         }
         ["unadmitted"] => {
             let status = Command::new("/bin/true").status();
@@ -172,6 +223,45 @@ fn main() {
             ],
         ));
         assert_eq!(stdout_line_with(&busy, "BUSY"), "BUSY status=Some(0)");
+    }
+
+    #[test]
+    fn a_childs_progress_is_the_machines_progress() {
+        // The parent makes no progress of its own while it polls; its child
+        // does, for longer than the no-progress budget.
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let polled = guest.command(
+            "run",
+            &[
+                "--seed",
+                "1",
+                "--liveness-watchdog",
+                "300000",
+                "--",
+                binary,
+                "poll-child",
+            ],
+        );
+        let polled = common::native::assert_success(polled);
+        assert_eq!(stdout_line_with(&polled, "POLLED"), "POLLED status=Some(0)");
+    }
+
+    #[test]
+    fn a_frozen_processs_timer_wakes_it_on_time() {
+        // The child's only wake is a POSIX timer: the parent's naps reach
+        // its deadline while the child is frozen, and it runs then.
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let napped = common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", binary, "nap-child"]),
+        );
+        assert_eq!(
+            stdout_line_with(&napped, "NAPPED"),
+            "NAPPED status=Some(Some(9))",
+            "{}",
+            String::from_utf8_lossy(&napped.stderr)
+        );
     }
 
     #[test]

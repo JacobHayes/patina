@@ -118,6 +118,18 @@ impl Charges {
         (by_task, unreserved)
     }
 
+    /// Take the charged time the clock does not show yet: another process
+    /// of the machine shows it ([`Context::export_machine_carry`]).
+    pub(crate) fn take_carry(&mut self) -> u64 {
+        std::mem::take(&mut self.carry)
+    }
+
+    /// Charged time another process of the machine left for the clock to
+    /// show.
+    pub(crate) fn add_carry(&mut self, nanos: u64) {
+        self.carry = self.carry.saturating_add(nanos);
+    }
+
     pub(crate) fn total(&self) -> CpuCharge {
         self.total
     }

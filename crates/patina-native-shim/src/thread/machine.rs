@@ -27,6 +27,13 @@ pub(crate) fn pick_next() -> TaskId {
     }
 }
 
+/// The earliest monotonic deadline of this process's timers (alarm,
+/// interval and POSIX timers, timer descriptors) as they are now: a frozen
+/// process's wake time, whatever the runtime context last heard.
+pub(crate) fn earliest_timer() -> Option<u64> {
+    lock_state().alarm_update().deadline
+}
+
 /// Park the calling task until a child process changes state: `register`
 /// hears its task first, so [`wake_waiting`] can find it. `Err(EINTR)` when
 /// a signal ended the wait.

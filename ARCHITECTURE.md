@@ -378,7 +378,15 @@ its own runtime, and the processes run in lockstep: one runs at a time
   with the machine's monotonic time and a view of the rest of the machine,
   and serves it until it yields or exits. A child holds one foreign task,
   `ELSEWHERE`, whose pick yields to the hub with its time and its own state.
-  Each side advances its clock to the other's on a switch.
+  Each side advances its clock to the other's on a switch. A process's view
+  includes its timers as of the switch (alarm, interval and POSIX timers,
+  timer descriptors), so a frozen process wakes at its earliest one.
+- The machine has one clock and one set of progress trackers
+  (`MachineCarry`, time model 7): the charged time the clock does not show
+  yet, the no-progress horizon, the poll streak, the yield's view of
+  progress and computation, and the liveness watchdog's arms travel with the
+  baton. A child's progress is its parent's, and a charge shows whichever
+  process runs next. Each process keeps its own CPU total.
 - The supervisor launches every child (`native_run/machine.rs`) on the
   root's request over `PATINA_RT_LAUNCH_FD`: the root's control plane less
   what only the root writes and the filesystem fault knobs, the child's seed

@@ -453,12 +453,16 @@ pub(super) struct Busy {
     /// scheduling point.
     pub(super) compute_nanos: u64,
     pub(super) compute_budget_nanos: u64,
+    /// CPU time other processes of the machine were charged since the
+    /// machine last made progress, as of this process's resume
+    /// ([`Context::import_machine_carry`]).
+    carried_nanos: u64,
     /// The CPU total when the scheduler last selected a task.
     slice_origin_nanos: u64,
-    /// The step at which the run last made progress.
-    progress_step: u64,
-    /// The step of the previous `sched_yield`, by any task.
-    yield_step: Option<u64>,
+    /// How many progress operations the machine has made.
+    progress_events: u64,
+    /// [`Busy::progress_events`] at the previous `sched_yield`, by any task.
+    yield_progress: Option<u64>,
     /// All metered computation charged in the run.
     computed_nanos: u64,
     /// [`Busy::computed_nanos`] at the previous `sched_yield`.
@@ -485,6 +489,91 @@ impl Busy {
     /// The scheduler selected a task: its slice starts.
     pub(super) fn selected(&mut self, total_nanos: u64) {
         self.slice_origin_nanos = total_nanos;
+    }
+
+    /// The CPU time charged since the machine last made progress, given
+    /// this process's CPU total.
+    fn since_progress(&self, total_nanos: u64) -> u64 {
+        total_nanos
+            .saturating_sub(self.baseline_nanos)
+            .saturating_add(self.carried_nanos)
+    }
+
+    /// Progress: the horizon starts again from `total_nanos`.
+    fn progressed(&mut self, total_nanos: u64) {
+        self.baseline_nanos = total_nanos;
+        self.carried_nanos = 0;
+        self.progress_events += 1;
+    }
+}
+
+/// One watchdog arm's state, as it travels with the process baton.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ArmCarry {
+    pub armed: bool,
+    pub baseline_nanos: u64,
+    pub stall_ops: u64,
+}
+
+/// What a process hands the next process of its machine with the baton
+/// ([`Context::export_machine_carry`]): the machine's charged time the
+/// clock does not show yet, and its progress trackers (the no-progress
+/// horizon, the poll streak, the yield's view of progress and computation,
+/// and the liveness watchdog's arms). Each is the machine's, not one
+/// process's: a child's progress is the machine's progress, and time one
+/// process was charged shows on the one clock whichever process runs next.
+/// Each process keeps its own CPU total.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MachineCarry {
+    pub carry_nanos: u64,
+    pub busy_nanos: u64,
+    pub polls: u64,
+    pub escalations: u64,
+    pub escalated_nanos: u64,
+    pub progress_events: u64,
+    pub computed_nanos: u64,
+    pub arms: [ArmCarry; 2],
+}
+
+impl MachineCarry {
+    /// How many words [`MachineCarry::to_words`] takes.
+    pub const WORDS: usize = 13;
+
+    pub fn to_words(&self) -> [u64; Self::WORDS] {
+        let [first, second] = self.arms;
+        [
+            self.carry_nanos,
+            self.busy_nanos,
+            self.polls,
+            self.escalations,
+            self.escalated_nanos,
+            self.progress_events,
+            self.computed_nanos,
+            u64::from(first.armed),
+            first.baseline_nanos,
+            first.stall_ops,
+            u64::from(second.armed),
+            second.baseline_nanos,
+            second.stall_ops,
+        ]
+    }
+
+    pub fn from_words(words: [u64; Self::WORDS]) -> Self {
+        let arm = |index: usize| ArmCarry {
+            armed: words[index] != 0,
+            baseline_nanos: words[index + 1],
+            stall_ops: words[index + 2],
+        };
+        Self {
+            carry_nanos: words[0],
+            busy_nanos: words[1],
+            polls: words[2],
+            escalations: words[3],
+            escalated_nanos: words[4],
+            progress_events: words[5],
+            computed_nanos: words[6],
+            arms: [arm(7), arm(10)],
+        }
     }
 }
 
@@ -721,8 +810,7 @@ impl Context {
         // before it is reached. A budget set below that can stop a spin-wait
         // whose setter PCT is still deferring.
         if progress {
-            self.busy.baseline_nanos = self.charges.total().total_ns();
-            self.busy.progress_step = self.steps;
+            self.busy.progressed(self.charges.total().total_ns());
         } else {
             self.busy_check()?;
         }
@@ -742,11 +830,7 @@ impl Context {
     /// The no-progress horizon ([`Busy`]): a liveness stop once the CPU
     /// time charged since the last progress reaches the budget.
     fn busy_check(&mut self) -> Result<(), RuntimeError> {
-        let busy = self
-            .charges
-            .total()
-            .total_ns()
-            .saturating_sub(self.busy.baseline_nanos);
+        let busy = self.busy.since_progress(self.charges.total().total_ns());
         if busy < self.busy.budget_nanos {
             return Ok(());
         }
@@ -877,12 +961,12 @@ runtime (no operation but scheduling points), past the compute budget; raise it 
     /// instrumented edge) are not the guest's request and are not polls.
     pub fn yield_poll(&mut self) {
         self.busy.compute_nanos = 0;
-        let previous = self.busy.yield_step.replace(self.steps);
+        let previous = self.busy.yield_progress.replace(self.busy.progress_events);
         let computed = std::mem::replace(
             &mut self.busy.yield_computed_nanos,
             self.busy.computed_nanos,
         ) != self.busy.computed_nanos;
-        if computed || previous.is_some_and(|previous| self.busy.progress_step > previous) {
+        if computed || previous.is_some_and(|previous| self.busy.progress_events > previous) {
             return;
         }
         self.spin.poll(ChargeClass::Syscall);
@@ -958,6 +1042,66 @@ runtime (no operation but scheduling points), past the compute budget; raise it 
             .into_iter()
             .flatten()
             .fold(self.spin.token_nanos().div_ceil(per_call), u64::min)
+    }
+}
+
+impl Context {
+    /// Hand the machine's carried state ([`MachineCarry`]) to the process
+    /// the baton goes to next. This process keeps none of it: its pending
+    /// charged time is the next process's to show, and its trackers start
+    /// neutral until the baton comes back with the machine's
+    /// ([`Context::import_machine_carry`]).
+    pub fn export_machine_carry(&mut self) -> Result<MachineCarry, RuntimeError> {
+        let total = self.charges.total().total_ns();
+        let now = self.current_monotonic()?;
+        let mut arms = [ArmCarry::default(); 2];
+        for (carried, arm) in arms.iter_mut().zip(&mut self.liveness.arms) {
+            *carried = ArmCarry {
+                armed: arm.armed,
+                baseline_nanos: arm.baseline_nanos,
+                stall_ops: arm.stall_ops,
+            };
+            if arm.armed {
+                arm.baseline_nanos = now;
+                arm.stall_ops = 0;
+            }
+        }
+        let carry = MachineCarry {
+            carry_nanos: self.charges.take_carry(),
+            busy_nanos: self.busy.since_progress(total),
+            polls: self.spin.polls,
+            escalations: self.spin.escalations,
+            escalated_nanos: self.spin.charged_nanos,
+            progress_events: self.busy.progress_events,
+            computed_nanos: self.busy.computed_nanos,
+            arms,
+        };
+        self.busy.baseline_nanos = total;
+        self.busy.carried_nanos = 0;
+        self.spin.end_episode();
+        Ok(carry)
+    }
+
+    /// Take the machine's carried state back with the baton, after the
+    /// clock caught up with the machine's ([`Context::advance_to`]).
+    pub fn import_machine_carry(&mut self, carry: MachineCarry) {
+        self.charges.add_carry(carry.carry_nanos);
+        self.busy.baseline_nanos = self.charges.total().total_ns();
+        self.busy.carried_nanos = carry.busy_nanos;
+        self.busy.progress_events = carry.progress_events;
+        self.busy.computed_nanos = carry.computed_nanos;
+        self.spin.polls = carry.polls;
+        self.spin.escalations = carry.escalations;
+        self.spin.charged_nanos = carry.escalated_nanos;
+        for (arm, carried) in self.liveness.arms.iter_mut().zip(carry.arms) {
+            // An arm the machine armed is armed here too, with the
+            // machine's baseline; one it has not armed arms on its own.
+            if carried.armed {
+                arm.armed = true;
+                arm.baseline_nanos = carried.baseline_nanos;
+                arm.stall_ops = carried.stall_ops;
+            }
+        }
     }
 }
 

@@ -3,22 +3,39 @@
 //! message.
 
 use patina_dst_abi::ForeignState;
+use patina_dst_runtime::MachineCarry;
 
-/// Every message's size: a tag and four words.
-pub(super) const MESSAGE_BYTES: usize = 5 * 8;
+/// How many words a message holds: a tag, the time, a state's two words
+/// and the machine's carried state.
+const WORDS: usize = 4 + MachineCarry::WORDS;
+
+/// Every message's size.
+pub(super) const MESSAGE_BYTES: usize = WORDS * 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Message {
     /// Child to hub: installed, frozen until its first resume.
     Ready,
     /// Hub to child: run, at machine time `now`, with the rest of the
-    /// machine in state `view`.
-    Resume { now: u64, view: ForeignState },
+    /// machine in state `view`, carrying the machine's `carry`.
+    Resume {
+        now: u64,
+        view: ForeignState,
+        carry: MachineCarry,
+    },
     /// Child to hub: the baton goes back, at the child's time `now`, the
-    /// child's own tasks in `state`.
-    Yield { now: u64, state: ForeignState },
+    /// child's own tasks in `state`, with the machine's `carry`.
+    Yield {
+        now: u64,
+        state: ForeignState,
+        carry: MachineCarry,
+    },
     /// Child to hub: the child exited with wait status `status`.
-    Exit { now: u64, status: i32 },
+    Exit {
+        now: u64,
+        status: i32,
+        carry: MachineCarry,
+    },
     /// Child to hub: a new thread id of the machine.
     AllocId,
     /// Hub to child: the id asked for.
@@ -53,23 +70,36 @@ fn state_of(kind: u64, deadline_nanos: u64) -> Option<ForeignState> {
     })
 }
 
+/// A message's words: the tag, then up to three words, then the carry.
+fn words(tag: u64, head: [u64; 3], carry: Option<MachineCarry>) -> [u64; WORDS] {
+    let mut words = [0u64; WORDS];
+    words[0] = tag;
+    words[1..4].copy_from_slice(&head);
+    if let Some(carry) = carry {
+        words[4..].copy_from_slice(&carry.to_words());
+    }
+    words
+}
+
 impl Message {
     pub(super) fn encode(&self) -> [u8; MESSAGE_BYTES] {
-        let words: [u64; 5] = match *self {
-            Message::Ready => [1, 0, 0, 0, 0],
-            Message::Resume { now, view } => {
+        let words = match *self {
+            Message::Ready => words(1, [0; 3], None),
+            Message::Resume { now, view, carry } => {
                 let [kind, deadline] = state_words(view);
-                [2, now, kind, deadline, 0]
+                words(2, [now, kind, deadline], Some(carry))
             }
-            Message::Yield { now, state } => {
+            Message::Yield { now, state, carry } => {
                 let [kind, deadline] = state_words(state);
-                [3, now, kind, deadline, 0]
+                words(3, [now, kind, deadline], Some(carry))
             }
-            Message::Exit { now, status } => [4, now, status as u32 as u64, 0, 0],
-            Message::AllocId => [5, 0, 0, 0, 0],
-            Message::Id(id) => [6, id as u32 as u64, 0, 0, 0],
-            Message::Fs { len } => [7, len, 0, 0, 0],
-            Message::FsReply { len } => [8, len, 0, 0, 0],
+            Message::Exit { now, status, carry } => {
+                words(4, [now, status as u32 as u64, 0], Some(carry))
+            }
+            Message::AllocId => words(5, [0; 3], None),
+            Message::Id(id) => words(6, [id as u32 as u64, 0, 0], None),
+            Message::Fs { len } => words(7, [len, 0, 0], None),
+            Message::FsReply { len } => words(8, [len, 0, 0], None),
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -82,23 +112,27 @@ impl Message {
         if bytes.len() != MESSAGE_BYTES {
             return None;
         }
-        let mut words = [0u64; 5];
+        let mut words = [0u64; WORDS];
         for (word, chunk) in words.iter_mut().zip(bytes.as_chunks::<8>().0) {
             *word = u64::from_le_bytes(*chunk);
         }
+        let carry = MachineCarry::from_words(words[4..].try_into().ok()?);
         Some(match words[0] {
             1 => Message::Ready,
             2 => Message::Resume {
                 now: words[1],
                 view: state_of(words[2], words[3])?,
+                carry,
             },
             3 => Message::Yield {
                 now: words[1],
                 state: state_of(words[2], words[3])?,
+                carry,
             },
             4 => Message::Exit {
                 now: words[1],
                 status: words[2] as u32 as i32,
+                carry,
             },
             5 => Message::AllocId,
             6 => Message::Id(words[1] as u32 as i32),
@@ -115,17 +149,37 @@ mod tests {
 
     #[test]
     fn every_message_round_trips() {
+        let carry = MachineCarry {
+            carry_nanos: 5,
+            busy_nanos: 6,
+            progress_events: 11,
+            arms: [
+                patina_dst_runtime::ArmCarry {
+                    armed: true,
+                    baseline_nanos: 12,
+                    stall_ops: 13,
+                },
+                Default::default(),
+            ],
+            ..Default::default()
+        };
         for message in [
             Message::Ready,
             Message::Resume {
                 now: 7,
                 view: ForeignState::ParkedUntil { deadline_nanos: 9 },
+                carry,
             },
             Message::Yield {
                 now: 1,
                 state: ForeignState::Runnable,
+                carry,
             },
-            Message::Exit { now: 3, status: -1 },
+            Message::Exit {
+                now: 3,
+                status: -1,
+                carry,
+            },
             Message::AllocId,
             Message::Id(42),
             Message::Fs { len: 1 << 20 },

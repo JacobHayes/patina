@@ -65,7 +65,7 @@ mod lifecycle;
 #[cfg(target_os = "linux")]
 mod machine;
 #[cfg(target_os = "linux")]
-pub(crate) use machine::{activate, pick_next, wait_for_child, wake_waiting};
+pub(crate) use machine::{activate, earliest_timer, pick_next, wait_for_child, wake_waiting};
 mod net_state;
 mod pipe;
 mod posix_error;

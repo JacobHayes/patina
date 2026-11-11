@@ -100,7 +100,7 @@ pub use filesystem::FsTime;
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
 
-pub use liveness::{ComputeStamp, ESCALATION_POLLS, LivenessKind};
+pub use liveness::{ArmCarry, ComputeStamp, ESCALATION_POLLS, LivenessKind, MachineCarry};
 
 pub use buggify::{
     BuggifyDeclaredSiteReport, BuggifyDiagnostics, BuggifyKind, BuggifySiteReport, SiteOutcome,

@@ -8,8 +8,8 @@ use std::cell::Cell;
 /// (`ThreadRuntime::publish_alarm`): the earliest monotonic deadline and
 /// the earliest CPU-time deadlines, all absolute.
 #[derive(Clone, Copy)]
-pub(super) struct AlarmUpdate {
-    pub(super) deadline: Option<u64>,
+pub(in crate::thread) struct AlarmUpdate {
+    pub(in crate::thread) deadline: Option<u64>,
     pub(super) cpu: patina_dst_runtime::CpuAlarms,
 }
 

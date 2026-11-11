@@ -484,7 +484,7 @@ impl ThreadRuntime {
 
     /// What the runtime context should hold for the timers as they are now
     /// ([`AlarmUpdate`]). Touches no context.
-    fn alarm_update(&self) -> AlarmUpdate {
+    pub(in crate::thread) fn alarm_update(&self) -> AlarmUpdate {
         AlarmUpdate {
             deadline: self.timers.alarm(&self.signals),
             cpu: self.timers.cpu_alarms(),
