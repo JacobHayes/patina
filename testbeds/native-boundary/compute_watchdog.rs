@@ -15,12 +15,12 @@ fn allocator_blocked() -> bool {
         && !DIAGNOSTIC_ALLOCATION.try_with(Cell::get).unwrap_or(false)
 }
 fn hazard_reached(label: &'static [u8]) {
-    DIAGNOSTIC_ALLOCATION.set(true);
+    let owned = DIAGNOSTIC_ALLOCATION.replace(true);
     assert_eq!(
         unsafe { patina_lifecycle_event(label.as_ptr(), label.len()) },
         0
     );
-    DIAGNOSTIC_ALLOCATION.set(false);
+    DIAGNOSTIC_ALLOCATION.set(owned);
 }
 
 // Class detector for off-baton finalization: the stopped thread may own the
@@ -165,6 +165,38 @@ fn main() {
             // Establish output probes before a runnable peer makes even host
             // descheduling gaps eligible for the watchdog.
             eprint!("COMPUTE_PARTIAL_STDERR");
+            // The hazard, and its receipt, come before the worker exists: until
+            // a runnable peer does, no host descheduling gap is eligible for the
+            // watchdog, so the stop can never precede the receipt. The main
+            // thread owns the held allocator while it spawns the worker, as
+            // the stopped thread may; every other thread, the off-baton
+            // observer included, blocks on it.
+            let held = matches!(
+                mode.as_str(),
+                "allocator-held" | "handler-alloc" | "overflow-held" | "payload-held"
+            );
+            DIAGNOSTIC_ALLOCATION.set(true);
+            ALLOCATOR_HELD.store(held, Ordering::Release);
+            let hazard: Option<&'static [u8]> = match mode.as_str() {
+                "allocator-held" => Some(b"watchdog.allocator-held"),
+                "payload-held" => Some(b"watchdog.payload-held"),
+                "overflow-held" => Some(b"watchdog.overflow-held"),
+                "handler-alloc" => Some(b"watchdog.handler-alloc"),
+                "handler-loop" => Some(b"watchdog.handler-loop"),
+                _ => None,
+            };
+            if let Some(label) = hazard {
+                if held {
+                    assert!(ALLOCATOR_HELD.load(Ordering::Acquire));
+                }
+                if matches!(mode.as_str(), "handler-loop" | "handler-alloc") {
+                    assert!(HANDLER_SEEN.load(Ordering::Acquire));
+                    assert!(!PROBE_HANDLER.load(Ordering::Acquire));
+                }
+                // Lifecycle diagnostics take no scheduling point, so the spin
+                // stays call-free.
+                hazard_reached(label);
+            }
             let started = Arc::new(AtomicBool::new(false));
             let done = Arc::new(AtomicBool::new(false));
             let worker = {
@@ -177,36 +209,7 @@ fn main() {
                     done.store(true, Ordering::Release);
                 })
             };
-            ALLOCATOR_HELD.store(
-                matches!(
-                    mode.as_str(),
-                    "allocator-held" | "handler-alloc" | "overflow-held" | "payload-held"
-                ),
-                Ordering::Release,
-            );
-            let hazard: Option<&'static [u8]> = match mode.as_str() {
-                "allocator-held" => Some(b"watchdog.allocator-held"),
-                "payload-held" => Some(b"watchdog.payload-held"),
-                "overflow-held" => Some(b"watchdog.overflow-held"),
-                "handler-alloc" => Some(b"watchdog.handler-alloc"),
-                "handler-loop" => Some(b"watchdog.handler-loop"),
-                _ => None,
-            };
-            if let Some(label) = hazard {
-                if matches!(
-                    mode.as_str(),
-                    "allocator-held" | "payload-held" | "overflow-held" | "handler-alloc"
-                ) {
-                    assert!(ALLOCATOR_HELD.load(Ordering::Acquire));
-                }
-                if matches!(mode.as_str(), "handler-loop" | "handler-alloc") {
-                    assert!(HANDLER_SEEN.load(Ordering::Acquire));
-                    assert!(!PROBE_HANDLER.load(Ordering::Acquire));
-                }
-                // Lifecycle diagnostics take no scheduling point, so the spin
-                // stays call-free.
-                hazard_reached(label);
-            }
+            DIAGNOSTIC_ALLOCATION.set(false);
             started.store(true, Ordering::Release);
             while !done.load(Ordering::Acquire) {
                 std::hint::spin_loop();
