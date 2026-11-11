@@ -44,12 +44,107 @@ extern "C" fn raise(sig: c_int) -> c_int {
 }
 
 fn process_trap(symbol: &CStr) -> ! {
+    spawn_trap(symbol, None)
+}
+
+/// The program a spawn or exec entry was asked to run, and its arguments,
+/// as the caller handed them over.
+struct Program {
+    path: *const c_char,
+    argv: *const *mut c_char,
+}
+
+/// Fixed storage for a spawn refusal's text: no allocation, so the stop is
+/// safe wherever the guest reached it. The longest text the refusal builds
+/// (a 96-byte path, eight 40-byte arguments, their markers) fits.
+struct Line {
+    bytes: [u8; 512],
+    len: usize,
+}
+
+impl Line {
+    fn push(&mut self, text: &[u8]) {
+        let end = (self.len + text.len()).min(self.bytes.len());
+        self.bytes[self.len..end].copy_from_slice(&text[..end - self.len]);
+        self.len = end;
+    }
+
+    /// At most `limit` bytes of the guest C string at `addr`, read through
+    /// `uaccess` so a bad pointer prints as unreadable instead of faulting the
+    /// shim. Control bytes print as `?`, so the text stays one line.
+    fn push_guest(&mut self, addr: usize, limit: usize) {
+        if addr == 0 {
+            self.push(b"(null)");
+            return;
+        }
+        for offset in 0..=limit {
+            let mut byte = [0u8];
+            let Some(at) = addr.checked_add(offset) else {
+                self.push(b"(unreadable)");
+                return;
+            };
+            if crate::uaccess::read_into(at, &mut byte).is_err() {
+                self.push(b"(unreadable)");
+                return;
+            }
+            match byte[0] {
+                0 => return,
+                _ if offset == limit => {
+                    self.push(b"...");
+                    return;
+                }
+                byte if byte < 0x20 || byte == 0x7f => self.push(b"?"),
+                byte => self.push(&[byte]),
+            }
+        }
+    }
+
+    fn text(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// The run stops where the guest asked for a new process: no spawn or exec
+/// reaches the host. When the entry was handed a program, the stop names it
+/// and its arguments, so a reader learns what was spawned, not only how.
+fn spawn_trap(symbol: &CStr, program: Option<Program>) -> ! {
+    let mut named = Line {
+        bytes: [0; 512],
+        len: 0,
+    };
+    if let Some(program) = program {
+        named.push(b" `");
+        named.push_guest(program.path as usize, 96);
+        // argv[0] is the program's own name, which the path already says.
+        // An unreadable or empty argv ends the list.
+        let argv = program.argv as usize;
+        let slot = |index: usize| -> Option<usize> {
+            let at = argv.checked_add(index.checked_mul(size_of::<usize>())?)?;
+            crate::uaccess::read::<usize>(at)
+                .ok()
+                .filter(|arg| *arg != 0)
+        };
+        if argv != 0 && slot(0).is_some() {
+            let mut index = 1;
+            while let Some(arg) = slot(index) {
+                if index > 8 {
+                    named.push(b" ...");
+                    break;
+                }
+                named.push(b" ");
+                named.push_guest(arg, 40);
+                index += 1;
+            }
+        }
+        named.push(b"`");
+    }
     let prefix = b"patina: process spawn reached under patina: ";
     let suffix = b"; the process class is a deterministic-runtime non-goal; failing closed\n";
     // SAFETY: each byte slice is a live read-only buffer for the synchronous stdio writes.
     unsafe {
         crate::patina_stdio_write(2, prefix.as_ptr().cast(), prefix.len());
         crate::patina_stdio_write(2, symbol.as_ptr().cast(), symbol.count_bytes());
+        crate::patina_stdio_write(2, named.text().as_ptr().cast(), named.len);
         crate::patina_stdio_write(2, suffix.as_ptr().cast(), suffix.len());
     }
     crate::patina_flush_captured_stdio();
@@ -59,9 +154,26 @@ fn process_trap(symbol: &CStr) -> ! {
         &[
             b"the guest called ",
             symbol.to_bytes(),
+            named.text(),
             b" (process spawn), which Patina does not model",
         ],
     ))
+}
+
+/// The spawn attribute and file-action calls only fill in the caller's own
+/// structure; none starts a process. They answer 0 and record nothing, so a
+/// caller reaches the spawn itself, which refuses naming the program. The
+/// structure is zeroed on `init`, as glibc leaves it, so nothing reads
+/// uninitialized bytes; the setters' values are never consulted.
+///
+/// # Safety
+/// `object` is null or a writable `T`.
+unsafe fn zero<T>(object: *mut T) -> c_int {
+    if !object.is_null() {
+        // SAFETY: a writable `T`, per this function's contract.
+        unsafe { core::ptr::write_bytes(object, 0, 1) };
+    }
+    0
 }
 
 #[unsafe(no_mangle)]
@@ -73,29 +185,29 @@ extern "C" fn fork() -> libc::pid_t {
 /// # Safety
 /// path and argv follow libc's execv argument contract.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn execv(_path: *const c_char, _argv: *const *mut c_char) -> c_int {
+unsafe extern "C" fn execv(path: *const c_char, argv: *const *mut c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"execv")
+    spawn_trap(c"execv", Some(Program { path, argv }))
 }
 
 /// # Safety
 /// path, argv and envp follow libc's execve argument contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn execve(
-    _path: *const c_char,
-    _argv: *const *mut c_char,
+    path: *const c_char,
+    argv: *const *mut c_char,
     _envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"execve")
+    spawn_trap(c"execve", Some(Program { path, argv }))
 }
 
 /// # Safety
 /// file and argv follow libc's execvp argument contract.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn execvp(_file: *const c_char, _argv: *const *mut c_char) -> c_int {
+unsafe extern "C" fn execvp(file: *const c_char, argv: *const *mut c_char) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"execvp")
+    spawn_trap(c"execvp", Some(Program { path: file, argv }))
 }
 
 /// # Safety
@@ -288,62 +400,133 @@ unsafe extern "C" fn setgroups(_count: c_int, _groups: *const libc::gid_t) -> c_
     super::error(libc::EPERM)
 }
 
+// Both platforms define the chdir action, for a caller that names it.
+/// # Safety
+/// acts and path follow libc's spawn file actions contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
+    _acts: *mut libc::posix_spawn_file_actions_t,
+    _path: *const c_char,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    0
+}
+/// # Safety
+/// acts and path follow libc's spawn file actions contract.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn posix_spawn_file_actions_addchdir(
+    _acts: *mut libc::posix_spawn_file_actions_t,
+    _path: *const c_char,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    0
+}
 /// # Safety
 /// All pointers follow libc's posix_spawnp argument contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawnp(
     _pid: *mut libc::pid_t,
-    _file: *const c_char,
+    file: *const c_char,
     _file_actions: *const libc::posix_spawn_file_actions_t,
     _attrp: *const libc::posix_spawnattr_t,
-    _argv: *const *mut c_char,
+    argv: *const *mut c_char,
     _envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawnp")
+    spawn_trap(c"posix_spawnp", Some(Program { path: file, argv }))
 }
 /// # Safety
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_init(
-    _acts: *mut libc::posix_spawn_file_actions_t,
+    acts: *mut libc::posix_spawn_file_actions_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawn_file_actions_init")
+    // macOS's std finds the chdir action by name, which reaches libSystem's
+    // and not the shim's; that one fills in a real libSystem actions object,
+    // so on macOS the object is libSystem's own. Building it touches nothing
+    // outside the process, and the spawn that would use it still refuses.
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: libSystem's own entry, with the caller's actions object.
+        unsafe { host_file_actions(c"posix_spawn_file_actions_init", acts) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // SAFETY: the caller's actions object, per libc's contract.
+        unsafe { zero(acts) }
+    }
 }
 /// # Safety
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_adddup2(
     _acts: *mut libc::posix_spawn_file_actions_t,
-    _fd: c_int,
-    _newfd: c_int,
+    fd: c_int,
+    newfd: c_int,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawn_file_actions_adddup2")
+    if fd < 0 || newfd < 0 {
+        return libc::EBADF;
+    }
+    0
 }
 /// # Safety
 /// acts follows libc's spawn file actions contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawn_file_actions_destroy(
-    _acts: *mut libc::posix_spawn_file_actions_t,
+    acts: *mut libc::posix_spawn_file_actions_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawn_file_actions_destroy")
+    // macOS: the object `init` had libSystem build is freed by libSystem.
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: libSystem's own entry, with the object its `init` built.
+        unsafe { host_file_actions(c"posix_spawn_file_actions_destroy", acts) }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = acts;
+        0
+    }
+}
+
+/// libSystem's own `init` or `destroy` of a spawn actions object, reached
+/// past the shim's definitions; `ENOMEM` if libSystem has none, as an
+/// allocation failure would answer.
+///
+/// # Safety
+/// `acts` follows libc's spawn file actions contract for `name`.
+#[cfg(target_os = "macos")]
+unsafe fn host_file_actions(name: &CStr, acts: *mut libc::posix_spawn_file_actions_t) -> c_int {
+    let entry = crate::hostapi::symbol(name);
+    if entry.is_null() {
+        return libc::ENOMEM;
+    }
+    // SAFETY: libSystem's entry of this name has this C signature.
+    let entry = unsafe {
+        core::mem::transmute::<
+            *mut core::ffi::c_void,
+            unsafe extern "C" fn(*mut libc::posix_spawn_file_actions_t) -> c_int,
+        >(entry)
+    };
+    // SAFETY: the caller's actions object, per this function's contract.
+    unsafe { entry(acts) }
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn posix_spawnattr_init(_attr: *mut libc::posix_spawnattr_t) -> c_int {
+unsafe extern "C" fn posix_spawnattr_init(attr: *mut libc::posix_spawnattr_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawnattr_init")
+    // SAFETY: the caller's attributes object, per libc's contract.
+    unsafe { zero(attr) }
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn posix_spawnattr_destroy(_attr: *mut libc::posix_spawnattr_t) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawnattr_destroy")
+    0
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
@@ -353,7 +536,7 @@ unsafe extern "C" fn posix_spawnattr_setflags(
     _flags: c_short,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawnattr_setflags")
+    0
 }
 /// # Safety
 /// attr follows libc's spawn attributes contract.
@@ -363,7 +546,7 @@ unsafe extern "C" fn posix_spawnattr_setpgroup(
     _pgroup: libc::pid_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawnattr_setpgroup")
+    0
 }
 /// # Safety
 /// attr and sigdefault follow libc's spawn attributes contract.
@@ -373,7 +556,7 @@ unsafe extern "C" fn posix_spawnattr_setsigdefault(
     _sigdefault: *const libc::sigset_t,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawnattr_setsigdefault")
+    0
 }
 
 #[cfg_attr(target_os = "linux", unsafe(export_name = "patina_door_kill"))]

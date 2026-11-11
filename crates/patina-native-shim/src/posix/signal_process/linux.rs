@@ -1,7 +1,7 @@
 //! Linux libc signal layouts, diagnostics and process-descriptor adapters.
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-use super::process_trap;
+use super::{Program, process_trap, spawn_trap};
 use crate::sud::Word;
 use crate::thread::signals::{self, Action, Info};
 use core::ffi::{c_char, c_int};
@@ -700,34 +700,14 @@ extern "C" fn pidfd_getpid(_pidfd: c_int) -> libc::pid_t {
 #[unsafe(no_mangle)]
 unsafe extern "C" fn pidfd_spawnp(
     _pidfd: *mut c_int,
-    _file: *const c_char,
+    file: *const c_char,
     _file_actions: *const libc::posix_spawn_file_actions_t,
     _attrp: *const libc::posix_spawnattr_t,
-    _argv: *const *mut c_char,
+    argv: *const *mut c_char,
     _envp: *const *mut c_char,
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"pidfd_spawnp")
-}
-/// # Safety
-/// acts and path follow libc's spawn file actions contract.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn posix_spawn_file_actions_addchdir_np(
-    _acts: *mut libc::posix_spawn_file_actions_t,
-    _path: *const c_char,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawn_file_actions_addchdir_np")
-}
-/// # Safety
-/// acts and path follow libc's spawn file actions contract.
-#[unsafe(no_mangle)]
-unsafe extern "C" fn posix_spawn_file_actions_addchdir(
-    _acts: *mut libc::posix_spawn_file_actions_t,
-    _path: *const c_char,
-) -> c_int {
-    let _panic_scope = crate::panic_boundary::PanicScope::enter();
-    process_trap(c"posix_spawn_file_actions_addchdir")
+    spawn_trap(c"pidfd_spawnp", Some(Program { path: file, argv }))
 }
 /// # Safety
 /// infop follows libc's waitid output contract.

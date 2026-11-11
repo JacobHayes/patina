@@ -17,12 +17,12 @@ RUST = {"spawn-wait", "fanout", "pipeline", "buildlike"}
 # The expected first unsupported boundary, not the eventual capability this
 # fixture will prove. A newly supported boundary requires deliberate migration.
 EXPECTED = {
-    "spawn-wait": ("runtime", "posix_spawnattr_init"),
-    "fanout": ("runtime", "posix_spawnattr_init"),
-    "pipeline": ("runtime", "posix_spawnattr_init"),
+    "spawn-wait": ("runtime", "posix_spawnp"),
+    "fanout": ("runtime", "posix_spawnp"),
+    "pipeline": ("runtime", "posix_spawnp"),
     "forkwait-c": ("runtime", "fork"),
     "forkwait-cxx": ("audit", "newlocale"),
-    "buildlike": ("runtime", "posix_spawnattr_init"),
+    "buildlike": ("runtime", "posix_spawnp"),
     "sigchld": ("runtime", "fork"),
     "failed-exec-enoent": ("runtime", "execvp"),
     "failed-exec-eacces": ("runtime", "execvp"),
@@ -56,11 +56,13 @@ def classify(status, envelope, expected):
         # A process trap is a stop patina attributes to what it does not
         # model, whose detail names the door the guest called.
         stop = envelope.get("stop", {})
-        doors = re.findall(r"[A-Za-z_][A-Za-z_0-9]*", stop.get("detail", ""))
+        # The door is the word right after "the guest called"; the rest of
+        # the detail may quote the program's arguments.
+        door = re.search(r"the guest called ([A-Za-z_][A-Za-z_0-9]*)", stop.get("detail", ""))
         if (envelope.get("verb") == "run" and envelope.get("result") == "unsupported"
                 and stop.get("reason") == "deny_trap"
                 and envelope.get("guest_exit", {}).get("signal") == 6
-                and name in doors):
+                and door is not None and door.group(1) == name):
             return "pending-gap"
     return "unexpected"
 

@@ -165,11 +165,11 @@ pub type NativeDenyTrapSymbol = (&'static str, &'static str);
 ///
 /// This is the UNION across platforms. A given binary only *defines* the members
 /// its target actually compiles — the framework/introspection set is
-/// `__APPLE__`-only, `pidfd_*`/`posix_spawn_file_actions_addchdir*` are
-/// `__linux__`-only — so [`native_deny_trap_armed`] reports exactly the
-/// platform-correct subset by intersecting this union with the binary's real
-/// symbol table (macOS ld64 further narrows it to the *referenced* traps; ELF
-/// structurally cannot — see [`native_deny_trap_armed`]).
+/// `__APPLE__`-only, `pidfd_*` are `__linux__`-only — so
+/// [`native_deny_trap_armed`] reports exactly the platform-correct subset by
+/// intersecting this union with the binary's real symbol table (macOS ld64
+/// further narrows it to the *referenced* traps; ELF structurally cannot — see
+/// [`native_deny_trap_armed`]).
 /// The data-symbol bindings the shim also defines (`kCFAllocator*`,
 /// `mach_task_self_`, ...) are deliberately absent: reading a data symbol does not
 /// abort, so it is not deny-trap armed.
@@ -188,16 +188,6 @@ const NATIVE_DENY_TRAP_SYMBOLS: &[NativeDenyTrapSymbol] = &[
     ("fork", "process"),
     ("pidfd_getpid", "process"),
     ("pidfd_spawnp", "process"),
-    ("posix_spawn_file_actions_addchdir", "process"),
-    ("posix_spawn_file_actions_addchdir_np", "process"),
-    ("posix_spawn_file_actions_adddup2", "process"),
-    ("posix_spawn_file_actions_destroy", "process"),
-    ("posix_spawn_file_actions_init", "process"),
-    ("posix_spawnattr_destroy", "process"),
-    ("posix_spawnattr_init", "process"),
-    ("posix_spawnattr_setflags", "process"),
-    ("posix_spawnattr_setpgroup", "process"),
-    ("posix_spawnattr_setsigdefault", "process"),
     ("posix_spawnp", "process"),
     // dynamic-loading: linked by extension loaders, never modeled. glibc's own
     // loads (NSS, iconv, the unwinder) go through its internal entry points,

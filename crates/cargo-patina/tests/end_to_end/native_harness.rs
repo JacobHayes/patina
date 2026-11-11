@@ -194,6 +194,12 @@ mod tests {
         let refused = json_of(&refused);
         assert_eq!(refused["tests"][0]["result"], "unsupported", "{refused:#}");
         let detail = refused["tests"][0]["stop"]["detail"].as_str().unwrap();
+        // The refusal names what the test spawned, not only the call it
+        // reached first: the program and its argument the fixture passed.
+        assert!(
+            detail.contains("patina-spawn-probe") && detail.contains("--probe-argument"),
+            "{refused:#}"
+        );
         let accepted = invoke_unchecked(
             patina,
             directory.path(),
@@ -431,7 +437,12 @@ mod tests {
 
     #[test]
     fn spawns_a_process() {
-        let _ = std::process::Command::new("true").status();
+        // A working directory takes std's chdir spawn action, which on
+        // macOS it looks up by name: the run must still reach the refusal.
+        let _ = std::process::Command::new("patina-spawn-probe")
+            .arg("--probe-argument")
+            .current_dir("/")
+            .status();
     }
 
     #[test]
