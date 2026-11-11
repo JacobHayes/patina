@@ -16,7 +16,7 @@ use patina_dst_abi::CrashKind;
 /// The envelope's fixed tag. [`VERSION`] names its layout, so a handoff of
 /// another layout is refused by its version rather than as foreign bytes.
 const MAGIC: &[u8; 12] = b"PATINA-HO-v1";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const SNAPSHOT_DIGEST_DOMAIN: &[u8] = b"patina-incarnation-handoff-snapshot-digest/v1";
 const SEAL_DOMAIN: &[u8] = b"patina-incarnation-handoff-seal/v1";
 
@@ -148,6 +148,10 @@ pub struct IncarnationHandoff {
     /// The realtime, in Unix-time nanoseconds, the crashed incarnation's clock
     /// had reached: the next incarnation's realtime carries on from it.
     pub realtime_nanos: u64,
+    /// The crashed incarnation's fault accounting, which the next
+    /// incarnation's fault reports carry on from, so they describe the whole
+    /// run. Encoded and read by the runtime; opaque here.
+    pub faults: String,
     pub snapshot: FsSnapshot,
 }
 
@@ -161,13 +165,18 @@ impl IncarnationHandoff {
         )?;
         let snapshot_bytes = self.snapshot.encode().map_err(HandoffError::Snapshot)?;
         let mut payload = Vec::new();
-        encode_string(&mut payload, &self.compatibility_fingerprint)?;
+        encode_string(
+            &mut payload,
+            &self.compatibility_fingerprint,
+            "compatibility fingerprint",
+        )?;
         payload.extend_from_slice(&self.from_incarnation.to_le_bytes());
         payload.extend_from_slice(&self.to_incarnation.to_le_bytes());
         payload.push(encode_kind(self.kind));
         payload.extend_from_slice(&self.consumed.operations.to_le_bytes());
         payload.extend_from_slice(&self.consumed.lifecycle_order.to_le_bytes());
         payload.extend_from_slice(&self.realtime_nanos.to_le_bytes());
+        encode_string(&mut payload, &self.faults, "fault accounting")?;
         encode_bytes(&mut payload, &snapshot_bytes)?;
         if payload.len() as u64 > MAX_HANDOFF_PAYLOAD_BYTES {
             return Err(HandoffError::LimitExceeded("handoff payload"));
@@ -224,6 +233,7 @@ impl IncarnationHandoff {
             lifecycle_order: payload_reader.take_u64()?,
         };
         let realtime_nanos = payload_reader.take_u64()?;
+        let faults = payload_reader.take_string("fault accounting")?;
         let snapshot_bytes = payload_reader.take_bytes()?.to_vec();
         if !payload_reader.is_empty() {
             return Err(HandoffError::Malformed(
@@ -243,6 +253,7 @@ impl IncarnationHandoff {
             kind,
             consumed,
             realtime_nanos,
+            faults,
             snapshot_digest: recorded_digest,
             snapshot_bytes,
             snapshot,
@@ -259,6 +270,7 @@ pub struct VerifiedIncarnationHandoff {
     pub kind: CrashKind,
     pub consumed: HandoffConsumedState,
     pub realtime_nanos: u64,
+    pub faults: String,
     pub snapshot_digest: [u8; 32],
     pub snapshot_bytes: Vec<u8>,
     pub snapshot: FsSnapshot,
@@ -336,9 +348,13 @@ fn validate_metadata(
     Ok(())
 }
 
-fn encode_string(bytes: &mut Vec<u8>, value: &str) -> Result<(), HandoffError> {
+fn encode_string(
+    bytes: &mut Vec<u8>,
+    value: &str,
+    field: &'static str,
+) -> Result<(), HandoffError> {
     if value.len() as u64 > MAX_FINGERPRINT_BYTES {
-        return Err(HandoffError::LimitExceeded("compatibility fingerprint"));
+        return Err(HandoffError::LimitExceeded(field));
     }
     encode_bytes(bytes, value.as_bytes())
 }
@@ -483,6 +499,7 @@ mod tests {
                 lifecycle_order: 10,
             },
             realtime_nanos: 1_784_761_209_000_000_000,
+            faults: "fs=-".to_string(),
             snapshot: fs.export_snapshot(),
         }
     }
@@ -501,6 +518,7 @@ mod tests {
         assert_eq!(verified.consumed.operations, 8);
         assert_eq!(verified.consumed.lifecycle_order, 10);
         assert_eq!(verified.realtime_nanos, handoff().realtime_nanos);
+        assert_eq!(verified.faults, handoff().faults);
         let fs = verified.snapshot.into_memfs();
         assert_eq!(fs.contents("/state").unwrap(), b"stable");
 
@@ -557,13 +575,14 @@ mod tests {
 
         // A correctly sealed and digested payload whose snapshot is not one.
         let mut payload = Vec::new();
-        encode_string(&mut payload, "fingerprint").unwrap();
+        encode_string(&mut payload, "fingerprint", "fingerprint").unwrap();
         payload.extend_from_slice(&0u64.to_le_bytes());
         payload.extend_from_slice(&1u64.to_le_bytes());
         payload.push(encode_kind(CrashKind::Machine));
         payload.extend_from_slice(&2u64.to_le_bytes());
         payload.extend_from_slice(&3u64.to_le_bytes());
         payload.extend_from_slice(&4u64.to_le_bytes());
+        encode_string(&mut payload, "fs=-", "faults").unwrap();
         encode_bytes(&mut payload, b"not-a-snapshot").unwrap();
 
         let mut encoded = Vec::new();

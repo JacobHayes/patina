@@ -496,13 +496,17 @@ impl RuntimeBuilder {
                     .torn_write_probability(0.5)
                     .build()
                     .map_err(RuntimeError::Effect)?;
-                Box::new(
-                    FaultFs::new(crash_fs, root_seed)
-                        .error_permille(self.config.faults.fs.error_permille)
-                        .error_at(self.config.faults.fs.error_at.iter().copied())
-                        .short_permille(self.config.faults.fs.short_permille)
-                        .latency_live(self.config.faults.fs.latency_nanos.is_some()),
-                )
+                let mut fault_fs = FaultFs::new(crash_fs, root_seed)
+                    .error_permille(self.config.faults.fs.error_permille)
+                    .error_at(self.config.faults.fs.error_at.iter().copied())
+                    .short_permille(self.config.faults.fs.short_permille)
+                    .latency_live(self.config.faults.fs.latency_nanos.is_some());
+                // A restarted incarnation's fault layer carries on from the
+                // crashed one's counts.
+                if let Some(tally) = self.config.carried_faults.fs() {
+                    fault_fs = fault_fs.resume(tally).map_err(RuntimeError::Config)?;
+                }
+                Box::new(fault_fs)
             }
         };
         let clock = self
@@ -636,8 +640,8 @@ impl RuntimeBuilder {
             sleep_jitter_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::SLEEP_JITTER)),
             fs_latency_nanos: self.config.faults.fs.latency_nanos,
             fs_latency_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::FS_LATENCY)),
-            fs_latency_eligible_ops: 0,
-            fs_latency_applied: 0,
+            fs_latency_eligible_ops: self.config.carried_faults.latency().0,
+            fs_latency_applied: self.config.carried_faults.latency().1,
             dns_entries: self.config.dns_entries,
             dns_fail_permille: self.config.faults.dns.fail_permille,
             dns_fault_rng: SplitMix64::new(domain_seed(root_seed, fault_domain::DNS_FAULT)),

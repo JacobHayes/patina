@@ -1,6 +1,6 @@
 //! Filesystem driver operations and extended-attribute permissions.
 
-use crate::{DriverResult, FsFaultReport};
+use crate::{DriverResult, FsFaultReport, FsFaultTally};
 use patina_dst_abi::{
     CrashKind, EffectError, ErrorCode, Fd, FsAllocateMode, FsClock, FsDirectoryEntry, FsMetadata,
     FsNode, OpenFlags, SeekWhence, XattrTarget,
@@ -554,6 +554,13 @@ pub trait FsDriver: Send {
     /// diagnosed as vacuous. Wrappers forward it so an inner fault-modeling
     /// driver remains visible.
     fn fault_report(&self) -> Option<FsFaultReport> {
+        None
+    }
+
+    /// The fault layer's counts so far ([`FsFaultTally`]), which a crashed
+    /// incarnation hands the next one. `None` for a driver that injects no
+    /// faults.
+    fn fault_tally(&self) -> Option<FsFaultTally> {
         None
     }
 }

@@ -1222,4 +1222,67 @@ fn main() {
             .unwrap_or_else(|| panic!("no {class} generation in {state:#}"))["generation"]
             .to_string()
     }
+
+    // A guest whose one fsync, in the first incarnation, comes before its first
+    // crash point, the marker's creation; the restarted incarnation sees the
+    // marker and syncs nothing.
+    const FAULT_ACROSS_CRASH_SOURCE: &str = r#"
+use std::fs::{self, File};
+
+fn main() {
+    if fs::metadata("/marker").is_ok() {
+        println!("RESTARTED");
+        return;
+    }
+    // Kept open: a close is a crash point, and the crash belongs after the
+    // sync, at the marker's creation.
+    let root = File::open("/").unwrap();
+    let synced = root.sync_all();
+    std::mem::forget(root);
+    File::create("/marker").unwrap();
+    println!("SYNC {}", synced.is_ok());
+    println!("NO_CRASH");
+}
+"#;
+
+    /// The fault report of a crash-restart run covers every incarnation: a
+    /// targeted fault that landed before the crash is counted, and is not
+    /// reported as missed because the restarted incarnation never reached it.
+    #[test]
+    fn a_fault_report_counts_every_incarnation() {
+        let guest = build_guest("fault-across-crash", FAULT_ACROSS_CRASH_SOURCE);
+        let trace = guest.dir.path().join("fault-across-crash.patina");
+        let envelope = run_envelope(
+            &guest,
+            &[
+                "--seed",
+                "1",
+                "--process-crash-permille",
+                "1000",
+                "--fs-error-at",
+                "sync:1",
+                "--record",
+                trace.to_str().unwrap(),
+                "--format",
+                "json",
+            ],
+        );
+        let crash_restart = &envelope["crash_restart"];
+        assert_eq!(
+            crash_restart["terminal_outcome"]["kind"], "completed_after_restart",
+            "{envelope:#}"
+        );
+        let stdout = envelope["stdout"].as_str().unwrap();
+        assert!(stdout.contains("RESTARTED"), "{stdout}");
+        let fs = &envelope["fault_reports"]["fs"];
+        assert_eq!(fs["errors_injected"], 1, "{envelope:#}");
+        assert_eq!(fs["targets_missed"], 0, "{envelope:#}");
+        assert_eq!(envelope["result"], "ok", "{envelope:#}");
+
+        // The replay hands the restarted incarnation the same accounting.
+        let replayed = guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]);
+        let replayed: serde_json::Value = serde_json::from_slice(&replayed.stdout).unwrap();
+        assert_eq!(replayed["result"], "ok", "{replayed:#}");
+        assert_eq!(replayed["fault_reports"]["fs"], *fs, "{replayed:#}");
+    }
 }

@@ -696,6 +696,7 @@ fn terminate_for_injected_crash(crash: patina_dst_runtime::InjectedCrash) -> ! {
         kind,
         consumed,
         realtime_nanos,
+        faults,
         snapshot,
     } = crash;
     let result = (|| -> Result<(), String> {
@@ -710,6 +711,7 @@ fn terminate_for_injected_crash(crash: patina_dst_runtime::InjectedCrash) -> ! {
             kind,
             consumed,
             realtime_nanos,
+            faults,
             snapshot,
         };
         let bytes = handoff
@@ -1189,6 +1191,15 @@ pub(crate) fn runtime_config_from_control_plane()
         config = config.with_step_budget(budget);
     }
     config = config.with_incarnation(incarnation_from_control()?);
+    if let Some(faults) = control_env(patina_dst_runtime::ENV_RESTART_FAULTS) {
+        let carried = patina_dst_runtime::FaultCarry::decode(&faults).map_err(|error| {
+            RuntimeError::Config(format!(
+                "{}: {error}",
+                patina_dst_runtime::ENV_RESTART_FAULTS
+            ))
+        })?;
+        config = config.with_carried_faults(carried);
+    }
     if control_handoff_fd()?.is_some() {
         config = config.with_crash_supervisor();
     }

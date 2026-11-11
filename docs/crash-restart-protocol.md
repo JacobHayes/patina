@@ -42,13 +42,14 @@ The crash follows incarnation 0's last decision, whatever operation that is. The
 
 ## Handoff contract
 
-`IncarnationHandoff` (layout version 3) is the supervisor-owned binary envelope around the `FsSnapshot` bytes the crash leaves. It contains:
+`IncarnationHandoff` (layout version 4) is the supervisor-owned binary envelope around the `FsSnapshot` bytes the crash leaves. It contains:
 
 - the compatibility fingerprint;
 - the from and to incarnation ids;
 - the crash kind;
 - the consumed trace state (operation count and lifecycle order);
 - the realtime the crashed incarnation's clock had reached;
+- the crashed incarnation's filesystem fault counts (see "Fault reports" below);
 - the bounded canonical `FsSnapshot` payload;
 - a domain-separated SHA-256 snapshot digest;
 - a domain-separated keyed SHA-256 seal.
@@ -83,6 +84,10 @@ Incarnation 0 reports its crash on a supervisor-owned pipe (`PATINA_RT_CRASH_REP
 - `Attempting` goes out as soon as the crash lands, before the snapshot export and before any recording I/O.
 - `HandedOver` follows once the sealed handoff is written in full.
 - `Failed(reason)` follows when recovery, the snapshot export or the handoff fails. The shim then aborts. When the pipe cannot take the report, the shim names the failure on stderr instead.
+
+### Fault reports
+
+A run's filesystem fault report covers every incarnation. The handoff carries the crashed incarnation's filesystem fault counts (operations eligible, errors and short transfers applied, short-transfer draws, delays applied, and which `--fs-error-at` targets landed), and the supervisor hands them to the restarted incarnation (`PATINA_RT_RESTART_FAULTS`), whose counts carry on from them. Only counts travel: `PATINA_FS_FAULT_REPORT`, the facts and the vacuity and never-landed verdicts are judged over the sums, so a target that landed in any incarnation is not reported as missed. A target's ordinal counts within each incarnation, and each incarnation applies every target to its own operations. The other fault planes (network, DNS, entropy, clock, custom operations) report the last incarnation only.
 
 ### A crash that fails
 

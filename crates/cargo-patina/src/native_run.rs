@@ -619,7 +619,8 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
                     .env(
                         patina_dst_runtime::ENV_RESTART_REALTIME_NANOS,
                         restart.previous_realtime_nanos.to_string(),
-                    );
+                    )
+                    .env(patina_dst_runtime::ENV_RESTART_FAULTS, restart.faults);
                 fds.push(restart.snapshot.as_raw_fd());
             }
             (None, Some(image)) => {

@@ -97,7 +97,7 @@ pub use clock::VirtualClock;
 pub use recording::TraceTransport;
 pub use scheduler::{DetScheduler, PctConfig, SchedulePolicy, SchedulePolicyReport};
 
-pub use crash::{CrashAttemptSink, Incarnation, RESTART_DOWNTIME_NANOS};
+pub use crash::{CrashAttemptSink, FaultCarry, Incarnation, RESTART_DOWNTIME_NANOS};
 pub use filesystem::FsTime;
 
 pub use schedule::{ScheduleDiagnostics, TaskCompletionCause, TaskScheduleStat};
@@ -210,6 +210,11 @@ pub const ENV_INCARNATION: &str = "PATINA_RT_INCARNATION";
 /// reached: set by the native supervisor, from the handoff, for every restarted
 /// incarnation and only for one (see [`Incarnation::Restarted`]).
 pub const ENV_RESTART_REALTIME_NANOS: &str = "PATINA_RT_RESTART_REALTIME_NANOS";
+
+/// The crashed incarnation's fault accounting ([`FaultCarry::encode`]): set by
+/// the native supervisor, from the handoff, for every restarted incarnation, so
+/// the run's fault report covers every incarnation.
+pub const ENV_RESTART_FAULTS: &str = "PATINA_RT_RESTART_FAULTS";
 
 pub const ENV_FINGERPRINT: &str = "PATINA_RT_FINGERPRINT";
 
@@ -691,6 +696,9 @@ pub struct InjectedCrash {
     /// The realtime the crashing incarnation's clock had reached, which the
     /// next incarnation's realtime carries on from.
     pub realtime_nanos: u64,
+    /// This incarnation's fault accounting ([`FaultCarry::encode`]), which
+    /// the next incarnation's fault reports carry on from.
+    pub faults: String,
     pub snapshot: FsSnapshot,
 }
 
@@ -704,6 +712,7 @@ impl fmt::Debug for InjectedCrash {
             .field("kind", &self.kind)
             .field("consumed", &self.consumed)
             .field("realtime_nanos", &self.realtime_nanos)
+            .field("faults", &self.faults)
             .field("snapshot", &self.snapshot)
             .finish()
     }

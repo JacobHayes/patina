@@ -5,7 +5,7 @@ use patina_dst_abi::{
     FsNode, OpenFlags, SeekWhence, XattrTarget,
 };
 use patina_dst_driver_api::{
-    DriverResult, FsDriver, FsErrno, FsErrorTarget, FsFaultOpKind, FsFaultReport,
+    DriverResult, FsDriver, FsErrno, FsErrorTarget, FsFaultOpKind, FsFaultReport, FsFaultTally,
     vacuity_is_diagnosable,
 };
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain};
@@ -72,6 +72,32 @@ impl<D> FaultFs<D> {
             .map(|target| (target, 0, false))
             .collect();
         self
+    }
+
+    /// Carry on from what this layer did in an earlier incarnation of the
+    /// run (its [`FsDriver::fault_tally`] there): the counts add up, the
+    /// vacuity verdicts are judged over both, and a target that landed in
+    /// either was tested. Each target still fails its operation here too.
+    /// Call after the targets are set; a tally for another target list is
+    /// refused.
+    pub fn resume(mut self, tally: &FsFaultTally) -> Result<Self, String> {
+        if tally.targets_landed.len() != self.targets.len() {
+            return Err(format!(
+                "the carried fault tally names {} --fs-error-at target(s), this run {}",
+                tally.targets_landed.len(),
+                self.targets.len()
+            ));
+        }
+        for ((_, _, mine), before) in self.targets.iter_mut().zip(&tally.targets_landed) {
+            *mine |= *before;
+        }
+        self.report.eligible_ops += tally.eligible_ops;
+        self.report.errors_injected += tally.errors_injected;
+        self.report.errors_by_op.merge(&tally.errors_by_op);
+        self.short_opportunities += tally.short_opportunities;
+        self.report.shorts_applied += tally.shorts_applied;
+        self.report.shorts_by_op.merge(&tally.shorts_by_op);
+        Ok(self)
     }
 
     /// Truncate reads and writes with the given per-mille (0..=1000)
@@ -813,6 +839,20 @@ impl<D: FsDriver> FsDriver for FaultFs<D> {
             || self.latency_live;
         (modeled || self.inner.fault_report().is_some()).then(|| self.merged_report())
     }
+
+    /// This layer's own counts: [`FaultFs::resume`] restores them into the
+    /// same layer. A run stacks one fault layer.
+    fn fault_tally(&self) -> Option<FsFaultTally> {
+        Some(FsFaultTally {
+            eligible_ops: self.report.eligible_ops,
+            errors_injected: self.report.errors_injected,
+            errors_by_op: self.report.errors_by_op,
+            short_opportunities: self.short_opportunities,
+            shorts_applied: self.report.shorts_applied,
+            shorts_by_op: self.report.shorts_by_op,
+            targets_landed: self.targets.iter().map(|(_, _, landed)| *landed).collect(),
+        })
+    }
 }
 
 /// The metadata-read fault kind an attribute read of `target` draws from: by
@@ -1362,6 +1402,64 @@ mod tests {
             !report.is_vacuous(),
             "a short knob every error pre-empted is reported inert: {report:?}"
         );
+    }
+
+    /// A layer resumed from an earlier incarnation's tally reports what one
+    /// layer that saw every operation would: counts summed, verdicts judged
+    /// over the sums, and a target landed in either counted as landed. A
+    /// tally for another target list is refused.
+    #[test]
+    fn a_resumed_layer_reports_the_whole_run() {
+        let file = || {
+            let mut inner = MemFs::new();
+            let fd = inner
+                .open(
+                    FsClock::EPOCH,
+                    "/file",
+                    OpenFlags {
+                        read: true,
+                        write: true,
+                        create: true,
+                        truncate: true,
+                        append: false,
+                        exclusive: false,
+                        path_only: false,
+                        mode: patina_dst_abi::DEFAULT_FILE_CREATE_MODE,
+                    },
+                )
+                .unwrap();
+            inner.write(FsClock::EPOCH, fd, b"abcdef").unwrap();
+            (inner, fd)
+        };
+        let layer = |inner| {
+            FaultFs::new(inner, 1)
+                .short_permille(1000)
+                .error_at(["read_at:2".parse::<FsErrorTarget>().unwrap()])
+        };
+        let reads = |fs: &mut FaultFs<MemFs>, fd, count| {
+            for _ in 0..count {
+                let _ = fs.read_at(FsClock::EPOCH, fd, 0, 8192);
+            }
+        };
+        let (inner, fd) = file();
+        let mut whole = layer(inner);
+        reads(&mut whole, fd, 4);
+
+        let (inner, fd) = file();
+        let mut first = layer(inner);
+        reads(&mut first, fd, 3);
+        let tally = first.fault_tally().unwrap();
+        let (inner, fd) = file();
+        let mut second = layer(inner).resume(&tally).unwrap();
+        reads(&mut second, fd, 1);
+        // The second incarnation never reaches the target's ordinal; the
+        // first did, so the run's report is the whole run's.
+        let resumed = second.fault_report().unwrap();
+        assert_eq!(resumed.targets_missed, 0);
+        assert_eq!(resumed, whole.fault_report().unwrap());
+
+        let (inner, _) = file();
+        assert!(FaultFs::new(inner, 1).resume(&tally).is_err());
     }
 
     #[test]

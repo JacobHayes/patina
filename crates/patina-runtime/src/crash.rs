@@ -12,6 +12,7 @@
 use crate::recording::Execution;
 use crate::{Context, InjectedCrash, RuntimeError};
 use patina_dst_abi::{CrashKind, Fd};
+use patina_dst_driver_api::{FsFaultOpKind, FsFaultTally, FsOpCounts};
 
 use patina_dst_fs_mem::FsSnapshot;
 use patina_dst_rng_seeded::{SplitMix64, domain_seed, fault_domain, incarnation_seed};
@@ -243,6 +244,7 @@ impl Context {
                 lifecycle_order: self.steps,
             },
             realtime_nanos,
+            faults: self.fault_carry().encode(),
             snapshot,
         })))
     }
@@ -303,3 +305,165 @@ impl Context {
 
 #[cfg(test)]
 mod tests;
+
+/// What a crashed incarnation's filesystem fault plane did, handed to the
+/// next incarnation (through the handoff and the supervisor), which carries
+/// its own counts on from it: the fault layer's tally, and the Context's
+/// latency counts. Only counts travel; every verdict (vacuity, missed
+/// targets) is judged afresh over the sums. Its text form is a field of the
+/// handoff. The other fault planes are not carried.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FaultCarry {
+    fs: Option<FsFaultTally>,
+    latency_eligible_ops: u64,
+    latency_applied: u64,
+}
+
+impl FaultCarry {
+    /// The text form: `fs=-`, or the tally's counts as comma-separated
+    /// integers in a fixed order then `;landed=` and one `0`/`1` per target;
+    /// then `;latency=<eligible>,<applied>`.
+    pub fn encode(&self) -> String {
+        let fs = match &self.fs {
+            None => "-".to_owned(),
+            Some(tally) => {
+                let mut words = vec![tally.eligible_ops, tally.errors_injected];
+                words.extend(FsFaultOpKind::ALL.map(|kind| tally.errors_by_op.get(kind)));
+                words.push(tally.short_opportunities);
+                words.push(tally.shorts_applied);
+                words.extend(FsFaultOpKind::ALL.map(|kind| tally.shorts_by_op.get(kind)));
+                let words: Vec<String> = words.iter().map(u64::to_string).collect();
+                let landed: String = tally
+                    .targets_landed
+                    .iter()
+                    .map(|landed| if *landed { '1' } else { '0' })
+                    .collect();
+                format!("{};landed={landed}", words.join(","))
+            }
+        };
+        format!(
+            "fs={fs};latency={},{}",
+            self.latency_eligible_ops, self.latency_applied
+        )
+    }
+
+    /// Read [`FaultCarry::encode`]'s form; anything else is refused.
+    pub fn decode(text: &str) -> Result<Self, String> {
+        let malformed = || format!("malformed fault accounting {text:?}");
+        let number = |word: &str| word.parse::<u64>().map_err(|_| malformed());
+        let rest = text.strip_prefix("fs=").ok_or_else(malformed)?;
+        let (fs, latency) = rest.rsplit_once(";latency=").ok_or_else(malformed)?;
+        let (latency_eligible_ops, latency_applied) =
+            latency.split_once(',').ok_or_else(malformed)?;
+        let (latency_eligible_ops, latency_applied) =
+            (number(latency_eligible_ops)?, number(latency_applied)?);
+        if fs == "-" {
+            return Ok(Self {
+                fs: None,
+                latency_eligible_ops,
+                latency_applied,
+            });
+        }
+        let (words, landed) = fs.split_once(";landed=").ok_or_else(malformed)?;
+        let words = words
+            .split(',')
+            .map(number)
+            .collect::<Result<Vec<_>, _>>()?;
+        let kinds = FsFaultOpKind::ALL.len();
+        if words.len() != 2 * kinds + 4 {
+            return Err(malformed());
+        }
+        let counts = |words: &[u64]| {
+            let mut counts = FsOpCounts::default();
+            for (kind, count) in FsFaultOpKind::ALL.into_iter().zip(words) {
+                counts.add(kind, *count);
+            }
+            counts
+        };
+        let targets_landed = landed
+            .chars()
+            .map(|landed| match landed {
+                '0' => Ok(false),
+                '1' => Ok(true),
+                _ => Err(malformed()),
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Self {
+            fs: Some(FsFaultTally {
+                eligible_ops: words[0],
+                errors_injected: words[1],
+                errors_by_op: counts(&words[2..2 + kinds]),
+                short_opportunities: words[2 + kinds],
+                shorts_applied: words[3 + kinds],
+                shorts_by_op: counts(&words[4 + kinds..4 + 2 * kinds]),
+                targets_landed,
+            }),
+            latency_eligible_ops,
+            latency_applied,
+        })
+    }
+
+    /// The fault layer's tally from the earlier incarnations.
+    pub(crate) fn fs(&self) -> Option<&FsFaultTally> {
+        self.fs.as_ref()
+    }
+
+    /// The Context's latency counts from the earlier incarnations: eligible
+    /// operations and delays applied.
+    pub(crate) fn latency(&self) -> (u64, u64) {
+        (self.latency_eligible_ops, self.latency_applied)
+    }
+}
+
+impl Context {
+    /// This incarnation's fault accounting as the next one carries it on,
+    /// what earlier incarnations handed this one included.
+    fn fault_carry(&self) -> FaultCarry {
+        FaultCarry {
+            fs: self.filesystem.fault_tally(),
+            latency_eligible_ops: self.fs_latency_eligible_ops,
+            latency_applied: self.fs_latency_applied,
+        }
+    }
+}
+
+#[cfg(test)]
+mod fault_carry_tests {
+    use super::*;
+
+    #[test]
+    fn a_fault_carry_round_trips_through_its_text() {
+        let mut errors_by_op = FsOpCounts::default();
+        errors_by_op.add(FsFaultOpKind::Open, 2);
+        let mut shorts_by_op = FsOpCounts::default();
+        shorts_by_op.add(FsFaultOpKind::Write, 5);
+        let carry = FaultCarry {
+            fs: Some(FsFaultTally {
+                eligible_ops: 40,
+                errors_injected: 2,
+                errors_by_op,
+                short_opportunities: 9,
+                shorts_applied: 5,
+                shorts_by_op,
+                targets_landed: vec![true, false],
+            }),
+            latency_eligible_ops: 11,
+            latency_applied: 7,
+        };
+        assert_eq!(FaultCarry::decode(&carry.encode()), Ok(carry.clone()));
+        assert_eq!(
+            FaultCarry::decode(&FaultCarry::default().encode()),
+            Ok(FaultCarry::default())
+        );
+        // Truncated, a bad landed flag, a missing latency part.
+        let text = carry.encode();
+        for bad in [
+            text.replacen(",", ";", 1),
+            text.replace("landed=10", "landed=12"),
+            text.split(";latency=").next().unwrap().to_owned(),
+            "fs=1,2;latency=0,0".to_owned(),
+        ] {
+            assert!(FaultCarry::decode(&bad).is_err(), "{bad}");
+        }
+    }
+}

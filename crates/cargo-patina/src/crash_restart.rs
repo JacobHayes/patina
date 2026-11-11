@@ -116,6 +116,9 @@ pub(super) struct IncarnationLaunch<'a> {
 pub(super) struct RestartBoot<'a> {
     pub(super) snapshot: &'a fs::File,
     pub(super) previous_realtime_nanos: u64,
+    /// The crashed incarnation's fault accounting, which the restarted one's
+    /// fault report adds to its own.
+    pub(super) faults: &'a str,
 }
 
 /// A supervised crash-restart run: its merged guest output and status, the
@@ -414,6 +417,7 @@ pub(super) fn supervise_crash_restart(
         restart: Some(RestartBoot {
             snapshot: &snapshot,
             previous_realtime_nanos: verified.realtime_nanos,
+            faults: &verified.faults,
         }),
     })?;
 

@@ -338,6 +338,11 @@ impl FsOpCounts {
         self.0[kind as usize] += 1;
     }
 
+    /// Attribute `count` effects of this class to `kind`.
+    pub fn add(&mut self, kind: FsFaultOpKind, count: u64) {
+        self.0[kind as usize] += count;
+    }
+
     /// Effects attributed to `kind`.
     pub fn get(&self, kind: FsFaultOpKind) -> u64 {
         self.0[kind as usize]
@@ -384,6 +389,23 @@ impl core::fmt::Display for FsOpCounts {
         }
         Ok(())
     }
+}
+
+/// What a filesystem fault layer has done so far, in counts and nothing
+/// derived from them: what a crashed incarnation hands the next one, which
+/// carries its own counts on from these, so the run's report (its vacuity
+/// verdicts included) is judged over every incarnation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FsFaultTally {
+    pub eligible_ops: u64,
+    pub errors_injected: u64,
+    pub errors_by_op: FsOpCounts,
+    /// Operations a short-I/O draw was taken for.
+    pub short_opportunities: u64,
+    pub shorts_applied: u64,
+    pub shorts_by_op: FsOpCounts,
+    /// Whether each `--fs-error-at` target landed, in the order given.
+    pub targets_landed: Vec<bool>,
 }
 
 /// End-of-run summary of filesystem fault-injection activity, for the
