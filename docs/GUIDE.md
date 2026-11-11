@@ -148,7 +148,9 @@ into the trace so replay reproduces them flag-free.
   overwritten in place since keeps its old or new bytes. An unsynced append
   that stays within the file's last committed block can come back as zeros:
   ext4 records that size at once, so any commit, even another file's `fsync`,
-  carries it without the bytes.
+  carries it without the bytes. The restarted guest is not told it restarted:
+  both incarnations get the same arguments and environment, so, like a
+  rebooted program, it learns that from what it finds on disk.
 - **Filesystem faults**: rate-based `--fs-error-permille` (seeded EIO/ENOSPC/EINTR,
   and on procfs, which has no storage, only ENOMEM),
   `--fs-short-permille` (short reads/writes, procfs's reads too), and `--fs-latency-nanos MIN..MAX`

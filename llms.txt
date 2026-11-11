@@ -290,7 +290,8 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
 - `--dns-entry NAME=ADDR` (repeatable), `--dns-fail-permille N`, `--dns-latency-nanos MIN..MAX`
 - The knobs above are accepted by `run` and `test` and refused by `replay`,
   which restores them from the trace. Campaigns draw the crash knobs from the
-  `crash` plane.
+  `crash` plane. A crash restarts the guest once with the same arguments and
+  environment and no restart signal: it learns it restarted only from the disk.
 - `--buggify[=PERMILLE]`, `--buggify-activation-permille N`, `--buggify-cutoff-nanos N`, `--buggify-after-setup`
 
 ## Output options (all verbs; stripped before routing, never reach the guest)
@@ -531,7 +532,6 @@ dev-dependency use under plain `cargo test`.
   trace and a loud one replay against each other. Nothing parses these lines:
   the envelope's structured fields carry the same facts whatever is silenced.
 - A trace is compact JSON: inspect it with `jq . run.patina`.
-
 ## Docs
 
 - Validation: `mise run check [nextest arguments]` is the inner loop (fmt, host
