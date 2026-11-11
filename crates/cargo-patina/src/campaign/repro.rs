@@ -233,7 +233,9 @@ pub(crate) fn run_reduced_generation(
 #[cfg(test)]
 mod tests {
     use super::super::state::{spec_from_state_json, spec_to_json};
-    use super::super::{CampaignSpec, derive_flags, generation_hash, invocation_flags, parse};
+    use super::super::{
+        CampaignSpec, derive_flags, generation_hash, invocation_flags, parse, replay_flags,
+    };
     use super::*;
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -395,11 +397,11 @@ mod tests {
             address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
             ..CampaignSpec::default()
         };
-        let invocation = invocation_flags(&spec);
+        let invocation = replay_flags(&spec);
         let artifact = PathBuf::from("guest-bin");
-        // The trace form: replay restores every SEMANTIC input, but the gate
-        // surface and address layout are host/build facts it cannot carry, so a repro line
-        // without them fails closed on the operator.
+        // The trace form: replay restores every input the trace carries, the
+        // address layout included, but the gate surface is a host fact it
+        // cannot carry, so a repro line without it fails closed on the operator.
         let replay = reproduce_command(
             &artifact,
             7,
@@ -412,7 +414,7 @@ mod tests {
         assert_eq!(
             replay,
             "patina replay guest-bin out/failures/generation-0.patina \
-             --allow-unsupported-symbols all --allow-randomized-address-layout"
+             --allow-unsupported-symbols all"
         );
         // The traceless form re-runs, and its flag list already contains them.
         let rerun = reproduce_command(
@@ -444,8 +446,8 @@ mod tests {
             !rerun.contains("--record /") && !rerun.contains("--record out/"),
             "the re-run repro baked an output-directory path into --record: {rerun}"
         );
-        // The native compute watchdog is invocation shape too: recorded, forwarded once, and in
-        // both repro forms.
+        // The native compute watchdog is invocation shape too: recorded, forwarded
+        // once, and in the re-run form; a replay follows the recorded stop.
         {
             let args = ["art", "--compute-watchdog-ms", "5000"]
                 .into_iter()
@@ -464,18 +466,16 @@ mod tests {
                     .count(),
                 1
             );
-            for trace in [None, Some("stop.patina")] {
-                let command = reproduce_command(
-                    Path::new("guest"),
-                    7,
-                    &derived,
-                    &flags,
-                    &[],
-                    trace,
-                    "stop.patina",
-                );
-                assert!(command.contains("--compute-watchdog-ms 5000"), "{command}");
-            }
+            let rerun = reproduce_command(
+                Path::new("guest"),
+                7,
+                &derived,
+                &replay_flags(&spec),
+                &[],
+                None,
+                "stop.patina",
+            );
+            assert!(rerun.contains("--compute-watchdog-ms 5000"), "{rerun}");
         }
     }
 }

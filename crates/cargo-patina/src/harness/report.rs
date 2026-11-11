@@ -337,14 +337,9 @@ impl Outcome<'_> {
             .as_ref()
             .ok()?;
         Some(format!(
-            "patina replay {} {}{}",
+            "patina replay {} {}",
             cli::shell_quote(guest.as_os_str()),
             cli::shell_quote(OsStr::new(&trace.path)),
-            if self.invocation.run.allow_randomized_layout {
-                " --allow-randomized-address-layout"
-            } else {
-                ""
-            }
         ))
     }
 

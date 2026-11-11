@@ -23,8 +23,8 @@ use super::verify::{
     samples_clean_rerun, trace_digest,
 };
 use super::{
-    CampaignInvocation, RunClass, classify, derive_flags, generation_hash, invocation_flags,
-    mutation_units, signature,
+    CampaignInvocation, RunClass, classify, derive_flags, generation_hash, mutation_units,
+    replay_flags, signature,
 };
 use crate::CliError;
 use crate::guided::{GuidanceDecision, GuidanceTally};
@@ -219,9 +219,9 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     let mut failures_so_far = class_counts_failures(&state.classes);
     let mut novel_so_far = novel_findings(&state.signatures);
 
-    // The invocation shape a trace cannot carry, and everything else a
-    // reproduction attempt shares across generations.
-    let invocation = invocation_flags(&state.spec);
+    // The inputs a trace cannot carry, which every replay of a generation
+    // shares.
+    let invocation = replay_flags(&state.spec);
     let rules = state.spec.classify.clone();
     let guest_args = state.spec.guest_args.clone();
     let verifier = Verifier {

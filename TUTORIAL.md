@@ -206,7 +206,7 @@ generations=20 failures=16 novel_signatures=1
 -- failure signatures --
   [violation] count=16 first_gen=0 seed=5133223892554006150
       signature: violation|verdict kind=violation label=ledger-sorted|
-      reproduce: patina replay ./ledger-guest /home/you/ledger/ledger-out/failures/generation-0.patina --cpus 4
+      reproduce: patina replay ./ledger-guest /home/you/ledger/ledger-out/failures/generation-0.patina
       trace:     /home/you/ledger/ledger-out/failures/generation-0.patina
       verify:    replay reproduced
 [... coverage reports ...]

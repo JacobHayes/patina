@@ -51,8 +51,7 @@ fn assert_cpu_count(out: &[u8], cpus: u32) {
 /// a constructor read them before Patina's startup ran), and the
 /// platform's own (Linux's affinity mask and each thread's CPU, through glibc
 /// and the raw syscalls; macOS's `hw.*cpu` sysctls). The count is recorded,
-/// a flag-free replay restores it, a matching `--cpus` replays, and a
-/// different one is refused by name. The flag's range is the parser's
+/// and a flag-free replay restores it. The flag's range is the parser's
 /// (`registry_value_grammars_match_the_parsers`).
 #[test]
 fn every_cpu_count_surface_agrees_with_the_run() {
@@ -71,9 +70,8 @@ fn every_cpu_count_surface_agrees_with_the_run() {
             .cpus,
         3
     );
-    let replay = |count: &str| g.command("replay", &[trace.to_str().unwrap(), "--cpus", count]);
-    assert_eq!(assert_success(replay("3")).stdout, three.stdout);
-    assert_refused(replay("4"), &["--cpus"]);
+    let replayed = assert_success(g.command("replay", &[trace.to_str().unwrap()]));
+    assert_eq!(replayed.stdout, three.stdout);
 }
 
 /// A global allocator that reads its CPU and the CPU count on every

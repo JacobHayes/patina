@@ -38,13 +38,11 @@ fn main() {
 "#;
 
     #[test]
-    fn supplied_stdin_is_a_recorded_faultable_file_and_replay_checks_a_resupplied_one() {
+    fn supplied_stdin_is_a_recorded_faultable_file_a_replay_restores() {
         let guest = native_build::source_guest("stdin", STDIN_SOURCE);
         let dir = guest.dir.path();
         let input = dir.join("input.txt");
         fs::write(&input, b"pear\napple\nfig\n").unwrap();
-        let other = dir.join("other.txt");
-        fs::write(&other, b"pear\napple\nfig!\n").unwrap();
         let input = input.to_str().unwrap();
         let line = |output: &Output| stdout_line_with(output, "STDIN_");
 
@@ -66,14 +64,8 @@ fn main() {
         );
         let trace = trace.to_str().unwrap();
 
-        // Re-supplying the recorded input replays; different bytes are refused.
-        let resupplied =
-            common::native::assert_success(guest.command("replay", &[trace, "--stdin", input]));
-        assert_eq!(line(&resupplied), line(&recorded));
-        common::native::assert_refused(
-            guest.command("replay", &[trace, "--stdin", other.to_str().unwrap()]),
-            &[],
-        );
+        let replayed = common::native::assert_success(guest.command("replay", &[trace]));
+        assert_eq!(line(&replayed), line(&recorded));
 
         // Reads of it are filesystem reads, so filesystem faults land on them,
         // and the faulted run replays flag-free too.

@@ -260,7 +260,7 @@ These concerns are kept out of the interposed data plane:
 - **Captured stdio.** Descriptor 0 is an empty pipe at startup; `--stdin
   FILE` makes it instead an unlinked read-only regular file of FILE's bytes,
   made at install with no fault drawn. The trace records the bytes, capped,
-  and replay restores them, refusing different ones. Its reads are filesystem
+  and replay restores them. Its reads are filesystem
   reads, so they fault like any file's.
   The descriptions 1 and 2 name at startup are capture
   sinks; on Linux each write also goes through to the host descriptor. The
@@ -294,8 +294,8 @@ These concerns are kept out of the interposed data plane:
   from following the shim's contents.
   The shim verifies the layout at installation and stops by name if the host
   ignored it. `--allow-randomized-address-layout` opts out, qualifying the
-  run; every trace records `address_layout`, and replay reconciles it both
-  ways. The shim answers memory calls on its arena region as for unmapped
+  run; every trace records `address_layout`, `patina replay` launches with
+  the recorded one, and the runtime reconciles it both ways. The shim answers memory calls on its arena region as for unmapped
   space.
 
 ### Scheduling, waits and signals

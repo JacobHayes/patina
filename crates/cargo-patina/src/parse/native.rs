@@ -420,9 +420,8 @@ pub(crate) fn parse_native_replay(
         // Nor --realtime-epoch/--hostname: the trace restores both.
         realtime_epoch_nanos: None,
         hostname: None,
-        // The trace restores the CPU count too; a supplied one is only checked
-        // against it.
-        cpus: args.u32("--cpus"),
+        // Nor --cpus, --stdin or the address layout: the trace restores them.
+        cpus: None,
         // Like the fault knobs, the repeatable semantic knobs come from the
         // trace.
         knobs: KnobValues::default(),
@@ -432,17 +431,15 @@ pub(crate) fn parse_native_replay(
         // the trace (see `native_schedule_from_trace`), so nothing is supplied.
         schedule: NativeSchedule::default(),
         // Liveness is schedule-invariant and informational-only in the trace, so a
-        // replay does not re-supply or reconcile it.
-        liveness: NativeLiveness {
-            compute_watchdog_ms: args.string("--compute-watchdog-ms"),
-            ..NativeLiveness::default()
-        },
+        // replay does not re-supply or reconcile it; the compute watchdog does not
+        // run on replay, which follows the recorded stop.
+        liveness: NativeLiveness::default(),
         allow: allow_of(&args),
         allow_unsupported: unsupported_policy_of(&args),
         coverage_out: args.path("--coverage-out"),
         mount: args.mount("--mount")?,
-        stdin: args.path("--stdin"),
-        allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
+        stdin: None,
+        allow_randomized_layout: false,
     })
 }
 

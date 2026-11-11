@@ -59,12 +59,14 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
         .expect("compute watchdog must stop without an outer kill");
         (output, started.elapsed())
     };
+    // A replay takes no bound: it follows the recorded stop.
     let run = |verb: &str, args: &[&str], bound: &str| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_patina"));
+        command.arg(verb).arg(&g.binary);
+        if verb == "run" {
+            command.args(["--compute-watchdog-ms", bound]);
+        }
         command
-            .arg(verb)
-            .arg(&g.binary)
-            .args(["--compute-watchdog-ms", bound])
             .args(args)
             // An inherited control-plane value never reaches the guest.
             .env("PATINA_RT_COMPUTE_WATCHDOG_MS", "0");
@@ -168,14 +170,11 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
                 );
             }
             previous = Some(events);
-            // One day, rather than 25ms: replay must stop from the trace, not redetect.
-            let (replay, elapsed) = run(
-                "replay",
-                &[trace.to_str().unwrap(), "--format", "json"],
-                "86400000",
-            );
+            // Replay stops from the trace: host-time detection is off on replay.
+            let (replay, elapsed) =
+                run("replay", &[trace.to_str().unwrap(), "--format", "json"], "");
             assert!(!replay.status.success());
-            // Replay must finish well before its one-day bound, allowing loaded CI.
+            // Replay must finish promptly, allowing loaded CI.
             assert!(
                 elapsed < Duration::from_secs(12),
                 "replay waited for host bound: {elapsed:?}"

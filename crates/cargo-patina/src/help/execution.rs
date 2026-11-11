@@ -397,7 +397,7 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                     ..CPUS_FLAG
                 },
                 Flag {
-                    doc: "Run every test, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each run's determinism is qualified and the replay command carries the flag.",
+                    doc: "Run every test, and its record-on-failure retry, with the host's address-space randomization, for a host that forbids turning it off; each run's determinism is qualified, and so is its replay.",
                     ..ALLOW_RANDOMIZED_LAYOUT_FLAG
                 },
             ],
@@ -626,32 +626,22 @@ pub(super) const REPLAY: Verb = Verb {
     synopsis: &["patina replay <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> <TRACE> [REPLAY OPTIONS]"],
     prose: "\
 `replay <ARTIFACT|SOURCE|PKG> <TRACE>` replays a native binary (or a \
-source/package built on the fly) under the native supervisor. It restores every recorded semantic input (seed, fault knobs, buggify, \
-realtime epoch, boot origin, hostname, native CPU count, guest argv, and native `--env` values) from the trace — the trace is authoritative \
-— so replay exposes no semantic flags; any re-supplied value must match the \
-recording or the replay is refused.\n\
+source/package built on the fly) under the native supervisor. It restores every recorded input (seed, fault knobs, buggify, \
+realtime epoch, boot origin, hostname, CPU count, standard input, address layout, guest argv, and `--env` values) from the trace — the trace is authoritative \
+— so replay takes none of them as flags.\n\
 \n\
-Only host/build inputs the trace cannot carry stay as flags: replay accepts \
-only --mount, --coverage-out, --compute-watchdog-ms, the \
---allow/--allow-unsupported-symbols audit surface, and a --cpus that must match the recording's.",
+Only host inputs the trace cannot carry stay as flags: the --mount corpus, \
+--coverage-out, and the --allow audit surface.",
     families: &[fam(Family::Sole, "`replay`", None)],
     groups: &[Group {
         title: "Replay options (host/build facts the trace cannot carry)",
         families: SOLE,
         flags: &[
-            COMPUTE_WATCHDOG_FLAG,
             f(
                 "--mount",
                 None,
                 Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
                 "Re-supply the host corpus, at the guest directory it was recorded at, whose hash (contents and guest paths, then modes and mtimes) the fingerprint verifies.",
-                false,
-            ),
-            f(
-                "--stdin",
-                None,
-                Value::Required("HOST_FILE", Kind::Path),
-                "The standard input the trace recorded, which replay restores without it; bytes that differ from the recording's are refused.",
                 false,
             ),
             f(
@@ -663,14 +653,6 @@ only --mount, --coverage-out, --compute-watchdog-ms, the \
             ),
             ALLOW_FLAG,
             ALLOW_UNSUPPORTED_FLAG,
-            Flag {
-                doc: "Replay a trace recorded with --allow-randomized-address-layout, keeping the host's address-space randomization; required exactly when the recording used it.",
-                ..ALLOW_RANDOMIZED_LAYOUT_FLAG
-            },
-            Flag {
-                doc: "The trace's CPU count, which replay restores without it; a count that differs from the recording's is refused.",
-                ..CPUS_FLAG
-            },
         ],
     }],
     refusals: &[
@@ -689,6 +671,10 @@ only --mount, --coverage-out, --compute-watchdog-ms, the \
                 "--cwd",
                 "--realtime-epoch",
                 "--hostname",
+                "--cpus",
+                "--stdin",
+                "--allow-randomized-address-layout",
+                "--compute-watchdog-ms",
             ],
             message: "replay restores run semantics from the trace and does not accept {flag}; the trace is authoritative",
         },

@@ -255,8 +255,8 @@ pub(super) fn reconcile_replay_guest_stdin(
         && Some(supplied) != recorded
     {
         return Err(RuntimeError::Config(
-            "replay --stdin is not the standard input this trace recorded; the trace is \
-             authoritative, so omit the flag (or supply the matching file)"
+            "this replay was given a standard input other than the one its trace recorded; the \
+             trace is authoritative, so replay it without one"
                 .into(),
         ));
     }
@@ -349,8 +349,8 @@ pub(super) fn reconcile_replay_hostname(
 }
 
 /// Reconcile the trace's recorded CPU count against this run's. The trace is
-/// authoritative: an explicitly configured count (`--cpus` /
-/// [`crate::ENV_GUEST_CPUS`]) that differs is refused; an unconfigured run adopts the
+/// authoritative: an explicitly configured count ([`crate::ENV_GUEST_CPUS`])
+/// that differs is refused; an unconfigured run adopts the
 /// recorded one.
 pub(super) fn reconcile_replay_cpus(
     config: &RuntimeConfig,
@@ -360,9 +360,8 @@ pub(super) fn reconcile_replay_cpus(
         && supplied != recorded
     {
         return Err(RuntimeError::Config(format!(
-            "replay --cpus ({supplied}) conflicts with the trace's recorded CPU count \
-                 ({recorded}); the trace is authoritative, so omit the flag (or supply the \
-                 matching value)"
+            "this replay's CPU count ({supplied}) conflicts with the trace's recorded CPU count \
+                 ({recorded}); the trace is authoritative, so replay it without one"
         )));
     }
     Ok(recorded)
@@ -569,10 +568,9 @@ pub(super) fn reconcile_replay_address_layout(
                 .into(),
         )),
         (Some(AddressLayout::Randomized), Some(AddressLayout::Fixed)) => Err(RuntimeError::Config(
-            "this trace was recorded with --allow-randomized-address-layout: the guest ran with \
-             the host's address-space randomization on, so its addresses were not a function of \
-             the seed. Replay it with --allow-randomized-address-layout to accept the same \
-             qualified determinism."
+            "this trace was recorded with the host's address-space randomization on, but this \
+             replay was launched with a fixed address layout. Replay it through `patina replay`, \
+             which keeps the recorded layout."
                 .into(),
         )),
         (None, Some(_)) => Err(RuntimeError::Config(
@@ -582,8 +580,9 @@ pub(super) fn reconcile_replay_address_layout(
                 .into(),
         )),
         (Some(AddressLayout::Fixed), Some(AddressLayout::Randomized)) => Err(RuntimeError::Config(
-            "this replay runs with --allow-randomized-address-layout, but the trace was recorded \
-             with a fixed address layout. Replay it without the flag."
+            "this replay runs with the host's address-space randomization on, but the trace was \
+             recorded with a fixed address layout. Replay it through `patina replay`, which keeps \
+             the recorded layout."
                 .into(),
         )),
     }

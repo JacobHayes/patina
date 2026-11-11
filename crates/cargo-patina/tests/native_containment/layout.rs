@@ -382,9 +382,10 @@ fn under_docker_seccomp(args: &[&str]) -> std::process::Output {
 /// A host that forbids turning randomization off (Docker's default seccomp
 /// profile) refuses the run before the guest starts, and names the opt-out.
 /// With the opt-out the same host runs the guest: the result envelope
-/// qualifies the run, the trace records the choice, and a replay must make it
-/// too, in both directions. A campaign started with the opt-out runs every
-/// generation with it and records the choice in its spec.
+/// qualifies the run, the trace records the choice, and a replay keeps it,
+/// qualified the same way, on a host that allows a fixed layout too. A
+/// campaign started with the opt-out runs every generation with it and records
+/// the choice in its spec.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay() {
@@ -417,21 +418,20 @@ fn the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay() {
         "{result}"
     );
 
-    let unqualified = assert_refused(g.command("replay", &[trace]), &[FLAG]);
-    assert!(
-        !text(&unqualified.stdout).contains("code="),
-        "{unqualified:?}"
-    );
-    let replayed = assert_success(under_docker_seccomp(&["replay", binary, trace, FLAG]));
-    assert!(text(&replayed.stdout).contains("code="), "{replayed:?}");
-    assert!(text(&replayed.stderr).contains(FLAG), "{replayed:?}");
-
-    let fixed = g.dir.path().join("fixed.patina");
-    record_no_churn(&g, &fixed, &[]);
-    assert_refused(
-        g.command("replay", &[fixed.to_str().unwrap(), FLAG]),
-        &[FLAG],
-    );
+    for replayed in [
+        g.command("replay", &[trace, "--format", "json"]),
+        under_docker_seccomp(&["replay", binary, trace, "--format", "json"]),
+    ] {
+        let result = envelope(&assert_success(replayed));
+        assert_eq!(
+            result["qualifications"][0]["kind"], "randomized_address_layout",
+            "{result}"
+        );
+        assert!(
+            result["stdout"].as_str().unwrap().contains("code="),
+            "{result}"
+        );
+    }
 
     let out = g.dir.path().join("campaign");
     let out = out.to_str().unwrap();

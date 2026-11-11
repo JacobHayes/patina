@@ -372,7 +372,7 @@ pub(super) const ALLOW_RANDOMIZED_LAYOUT_FLAG: Flag = f(
     "--allow-randomized-address-layout",
     None,
     Value::None,
-    "Run the native guest with the host's address-space randomization when the host forbids turning it off (Docker's default seccomp profile does): addresses are then not a function of the seed, and the run's determinism is qualified on stderr, in the result envelope and in the trace. A replay of such a trace needs the flag too.",
+    "Run the native guest with the host's address-space randomization when the host forbids turning it off (Docker's default seccomp profile does): addresses are then not a function of the seed, and the run's determinism is qualified on stderr, in the result envelope and in the trace, and its replay keeps the host's randomization.",
     false,
 );
 

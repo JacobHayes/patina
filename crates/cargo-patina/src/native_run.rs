@@ -169,6 +169,13 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         })?),
         NativeRunMode::Seeded { .. } | NativeRunMode::Record { .. } => None,
     };
+    // A trace recorded with the host's randomized address layout replays with
+    // it: the qualification the recording carried is the replay's too.
+    if replay_trace.as_ref().is_some_and(|bundle| {
+        bundle.metadata.address_layout == Some(patina_dst_trace::AddressLayout::Randomized)
+    }) {
+        invocation.allow_randomized_layout = true;
+    }
     let mut trace_facts = match (&invocation.mode, &replay_trace) {
         (NativeRunMode::Replay { path, .. }, Some(bundle)) => {
             Some(output::TraceFacts::of(path, bundle, "main"))
@@ -213,24 +220,11 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
             output::Stop::new(output::TRACE_MISMATCH_STOP, message),
         ));
     }
-    // The CPU count the guest's virtual machine has: on replay the trace's,
-    // which a supplied `--cpus` must equal, refused here before the guest
-    // starts; otherwise the flag's, or the runtime default.
-    let guest_cpus = match (&invocation.mode, &replay_trace) {
-        (NativeRunMode::Replay { path, .. }, Some(bundle)) => {
-            let recorded = bundle.metadata.cpus;
-            if let Some(supplied) = invocation.cpus
-                && supplied != recorded
-            {
-                return Err(CliError::usage(format!(
-                    "replay --cpus {supplied} conflicts with the CPU count trace {} recorded \
-                     ({recorded}); the trace is authoritative, so omit --cpus or supply {recorded}",
-                    path.display()
-                )));
-            }
-            Some(recorded)
-        }
-        _ => invocation.cpus,
+    // The CPU count the guest's virtual machine has: on replay the trace's;
+    // otherwise the flag's, or the runtime default.
+    let guest_cpus = match &replay_trace {
+        Some(bundle) => Some(bundle.metadata.cpus),
+        None => invocation.cpus,
     };
     // Pre-run default-deny gate. Before the guest executes, enumerate every
     // externally-resolved symbol it can reach and hard-error, listing names, if
@@ -300,25 +294,10 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     let image_hash = image_file.as_ref().map(|image| image.hash.clone());
     // A supplied standard input travels the same way: read here (a FIFO or a
     // terminal too, once), held in a scratch file every incarnation reads
-    // from the start, and recorded by the runtime into the trace. On replay
-    // the trace's bytes are authoritative, so different ones are refused
-    // here, before the guest starts.
+    // from the start, and recorded by the runtime into the trace, from which
+    // a replay restores it.
     let stdin_file = match &invocation.stdin {
-        Some(path) => {
-            let bytes = read_guest_stdin(path)?;
-            if let (NativeRunMode::Replay { path: trace, .. }, Some(bundle)) =
-                (&invocation.mode, &replay_trace)
-                && bundle.metadata.guest_stdin.as_deref() != Some(bytes.as_slice())
-            {
-                return Err(CliError::usage(format!(
-                    "replay --stdin {} is not the standard input trace {} recorded; the trace \
-                     is authoritative, so omit --stdin or supply the recorded bytes",
-                    path.display(),
-                    trace.display()
-                )));
-            }
-            Some(stage_guest_stdin(&bytes)?)
-        }
+        Some(path) => Some(stage_guest_stdin(&read_guest_stdin(path)?)?),
         None => None,
     };
     // A replay against another corpus would only fail as a fingerprint

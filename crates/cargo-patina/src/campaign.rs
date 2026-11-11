@@ -304,6 +304,27 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
 /// against the recording's, so it rides here too, and a minimized or reproduced
 /// generation keeps the machine the campaign swept even where the command is a
 /// seeded `run`.
+/// The flags a replay of a generation's trace takes: the host inputs the trace
+/// cannot carry, which are the pre-run gate's allow list and the mounted
+/// corpus. Everything else a generation ran with, the trace restores.
+fn replay_flags(spec: &CampaignSpec) -> Vec<String> {
+    let mut flags = Vec::new();
+    for symbol in &spec.allow_symbols {
+        push_run_flag(&mut flags, "--allow", RunValue::Text(symbol.clone()));
+    }
+    if let Some(policy) = &spec.allow_unsupported_symbols {
+        push_run_flag(
+            &mut flags,
+            "--allow-unsupported-symbols",
+            RunValue::Text(policy.clone()),
+        );
+    }
+    if let Some(mount) = &spec.mount {
+        push_run_flag(&mut flags, "--mount", RunValue::Text(mount.dir.clone()));
+    }
+    flags
+}
+
 fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
     let mut flags = Vec::new();
     if let Some(bound) = spec.compute_watchdog_ms {
