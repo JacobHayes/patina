@@ -293,7 +293,7 @@ that did not end clean also has a `stop` that says what stopped it.
 - Reduce a campaign failure to the fewest faults that still cause it:
   `patina minimize --generation 0 --out-dir ledger-out`.
 - Test a server: put the server and its clients in one test or one `main`. A
-  guest is one process in a closed world, and it has to finish. See
+  guest runs in a closed world, and it has to finish. See
   [What programs work](./README.md#what-programs-work).
 - Go and Python programs: [USAGE-MODES.md](./USAGE-MODES.md).
 - A larger example: `testbeds/workq`, a durable work queue tested through

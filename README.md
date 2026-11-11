@@ -127,7 +127,7 @@ pub fn run_all(jobs: Vec<fn() -> u64>) -> Vec<u64> {
 
 ## What programs work
 
-Patina runs one process in a closed world. Three rules follow from that.
+Patina runs a program in a closed world. Three rules follow from that.
 
 - **The program must be self-contained.** There is no real network, disk or
   clock behind the simulated ones. A file the program reads must be written by
@@ -141,9 +141,20 @@ Patina runs one process in a closed world. Three rules follow from that.
   in the simulated world will ever connect.
 
 Patina refuses what it does not model instead of letting it reach the real
-machine: the run ends as `unsupported` and names what it met. Not supported
-today are starting other processes (`fork`, `exec`, `std::process::Command`)
-and loading code at run time (`dlopen`).
+machine: the run ends as `unsupported` and names what it met. Loading code at
+run time (`dlopen`) is refused.
+
+On Linux a program may start itself again, and a test may start its package's
+own binaries, which `patina test` builds for the simulation too.
+`std::process::Command` works, with pipes, captured output, signals and exit
+statuses; each process is simulated in the same run and replays. Other
+programs (`cargo`, `git`, a shell), `system`, `popen`, plain `fork`, a process
+started by a child, and crash-restart runs that start processes are refused,
+and macOS runs one process. The guide says more.
+
+A dependency can link an instruction or import that its tests never run (a
+CPU random-number instruction in a crypto library). The whole target is then
+refused, and `patina test --allow SYMBOL` admits it; the result says it ran so.
 
 One limit is quiet: Patina switches threads where a thread reaches the
 operating system (a lock it waits for, a sleep, a read, a write) and at the

@@ -95,7 +95,12 @@ spawn may not do yet). A finding's replay needs only the binaries its test
 spawned; one that is still there must be the one recorded. A test that reaches
 something Patina does not model is `unsupported` (exit 2), never a pass;
 `--accept-unsupported TEXT` lets such a test, when its stop names TEXT, not
-fail CI while it still reports as `unsupported`.
+fail CI while it still reports as `unsupported`. A target the pre-run gate
+refuses for an instruction or import its tests never reach (a dependency's
+`rdrand`, say) runs with `--allow SYMBOL` (repeatable, or `all`), as `run`
+takes it: each target's JSON result lists what its gate admitted (`allow`)
+and any qualification of its determinism (`qualifications`), and the
+summary names them once.
 
 For an adopter-shaped guardrail, enable `patina-dst`'s default-off `macros`
 feature in dev-dependencies and write `#[patina_dst::test]` on a zero-argument
@@ -341,12 +346,22 @@ Current limits. Each fails loudly rather than silently:
   `tokio::process::Command` (through glibc's `posix_spawn`/`posix_spawnp`)
   may run an admitted program, the guest itself or the tested package's
   own binaries, as a lockstep child with piped, null, inherited or
-  file-redirected stdio, `current_dir` and its own environment. Any other
-  program, `fork`, the exec family, `system`/`popen`, and a `Command` that
-  falls back to `fork`+`exec` (`pre_exec`, a uid or gid, an `env("PATH")`
-  with a bare program name) are denied; macOS has one process per run.
-  Changing `O_NONBLOCK` or `O_APPEND` on a descriptor a live child shares
-  stops the run as not modeled.
+  file-redirected stdio, `current_dir` and its own environment. Processes
+  signal each other (`kill`, `sigqueue`, a group, every process) and a
+  parent sees each child's exit status or the signal that ended it; a
+  deadlock, a spin or a finding in any process is the run's, naming the
+  process. Each process has its own timeline in the recording and replays.
+  Refused, each by name: any other program (`cargo`, `git`, a shell),
+  `system`/`popen`, plain `fork` and the exec family, a `Command` that
+  falls back to `fork`+`exec` (`pre_exec`, a uid, gid or groups, `chroot`,
+  an `env("PATH")` with a bare program name), a spawn from a child process,
+  crash-restart and crash-knob runs that spawn, `SIGSTOP` to another
+  process, and any spawn on macOS, which has one process per run. Changing
+  `O_NONBLOCK` or `O_APPEND` on a descriptor a live child shares stops the
+  run as not modeled. A library that shells out for something it can also
+  read from the environment works once it is told: `insta` runs `cargo
+  metadata` to find the workspace root unless `INSTA_WORKSPACE_ROOT` is set
+  (`--env INSTA_WORKSPACE_ROOT=$PWD --mount $PWD:$PWD`).
 - **The network is virtual**: IPv4, IPv6, Unix-domain and netlink sockets see
   one virtual host (`lo`, `eth0` at 10.0.0.1/24, no default route) and names
   resolve only through the run's `--dns-entry` table. TCP and UDP over the
