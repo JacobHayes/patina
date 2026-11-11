@@ -119,9 +119,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if !allow_symbols.is_empty() {
         spec.allow_symbols = allow_symbols.into_iter().map(str::to_string).collect();
     }
-    if let Some(value) = args.text("--allow-unsupported-symbols") {
-        spec.allow_unsupported_symbols = Some(value.to_string());
-    }
     if args.flag("--allow-randomized-address-layout") {
         spec.address_layout = Some(patina_dst_trace::AddressLayout::Randomized);
     }

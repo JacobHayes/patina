@@ -347,8 +347,8 @@ pub(super) const SWARM_FLAG: Flag = f(
 pub(super) const ALLOW_FLAG: Flag = f(
     "--allow",
     None,
-    Value::Required("SYMBOL", Kind::Symbol),
-    "Add a known-safe symbol to the pre-run gate allow list.",
+    Value::Required("SYMBOL|all", Kind::Symbol),
+    "Let the pre-run gate admit SYMBOL, which the guest links but does not reach in a way that matters (repeatable). An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names, and is admitted with a warning that qualifies the run. `all` admits every unsupported symbol that way.",
     true,
 );
 
@@ -373,13 +373,5 @@ pub(super) const ALLOW_RANDOMIZED_LAYOUT_FLAG: Flag = f(
     None,
     Value::None,
     "Run the native guest with the host's address-space randomization when the host forbids turning it off (Docker's default seccomp profile does): addresses are then not a function of the seed, and the run's determinism is qualified on stderr, in the result envelope and in the trace, and its replay keeps the host's randomization.",
-    false,
-);
-
-pub(super) const ALLOW_UNSUPPORTED_FLAG: Flag = f(
-    "--allow-unsupported-symbols",
-    None,
-    Value::Required("all|name,...", Kind::UnsupportedSymbols),
-    "Downgrade matching unsupported-symbol denials to a warning. An instruction-class finding (`instruction@.text+OFF`, an address that moves on every relink) also matches by the containing symbol its provenance names.",
     false,
 );

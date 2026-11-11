@@ -210,7 +210,7 @@ pub(super) fn write_unsupported_sidecar(
         PathBuf::from(name)
     };
     let mut contents = String::from(
-        "# This trace was recorded with --allow-unsupported-symbols. The symbols\n\
+        "# This trace was recorded with symbols --allow downgraded. The symbols\n\
 # below are NOT interposed by the deterministic runtime; the run's determinism\n\
 # is qualified. Symbol (category), followed by provenance when recoverable:\n",
     );

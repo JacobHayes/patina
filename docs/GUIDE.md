@@ -307,7 +307,7 @@ case. Two things differ from plain `cargo test`:
 - **Default-deny audit gate**: before a native guest runs, every externally
   resolved symbol must be interposed or provably effect-free; unknown imports
   and raw syscall/clock/entropy instructions are refusals
-  (`--allow-unsupported-symbols` is the loud, recorded escape hatch).
+  (`--allow SYMBOL|all` is the loud, recorded escape hatch).
 - **Campaigns**: deterministic multi-generation sweeps that file each
   generation under one outcome, group failures by signature, and print a
   reproduce command for each.

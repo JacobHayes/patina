@@ -31,7 +31,7 @@ modeling both halves and keeping them apart:
 Before named pipes were modeled, `mkfifo` was not interposed at all. A guest
 that called it could not be audited — the symbol was an unsupported-symbol
 refusal in the `filesystem` escape class — and forcing it through with
-`--allow-unsupported-symbols` only moved the failure: the call escaped to the
+`--allow` only moved the failure: the call escaped to the
 host, where it failed `ENOENT` on a path that exists only inside the in-memory
 filesystem. Every leg below was unreachable.
 

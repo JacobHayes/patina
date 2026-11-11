@@ -6,7 +6,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
+        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL|all]... [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
         "patina campaign [--out-dir DIR] [--gens N] [--progress-every N] [--timeout-secs N]",
     ],
     prose: "\
@@ -178,12 +178,8 @@ that would change them.",
                 LIVENESS_FLAGS[2],
                 DNS_ENTRY_FLAGS[0],
                 Flag {
-                    doc: "Add a known-safe symbol to every generation's pre-run gate allow list.",
+                    doc: "Let every generation's pre-run gate admit SYMBOL, or with `all` every unsupported symbol, as `run --allow` does (repeatable).",
                     ..ALLOW_FLAG
-                },
-                Flag {
-                    doc: "Downgrade matching unsupported-symbol denials to a warning in every generation. An instruction-class finding (`instruction@.text+OFF`) also matches by the containing symbol its provenance names.",
-                    ..ALLOW_UNSUPPORTED_FLAG
                 },
                 Flag {
                     doc: "Run, record and replay every generation with the host's address-space randomization, for a host that forbids turning it off; every generation's determinism is qualified.",

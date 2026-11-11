@@ -331,10 +331,6 @@ mod registry {
                     "sync:1:EBADF",
                 ],
             ),
-            Kind::UnsupportedSymbols => (
-                vec!["all", "memcpy", "a,b", "foo , bar"],
-                vec!["", ",", " , "],
-            ),
             Kind::Enum(choices) => (choices.to_vec(), vec!["bogus", ""]),
             Kind::EnumList(choices) => {
                 // Samples are `&'static`; the joined list is the one that is not.

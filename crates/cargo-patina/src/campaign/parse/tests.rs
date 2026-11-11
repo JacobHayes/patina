@@ -289,14 +289,13 @@ fn the_native_invocation_flags_parse_into_the_spec() {
         "dlsym",
         "--allow",
         "semaphore_wait",
-        "--allow-unsupported-symbols",
+        "--allow",
         "all",
     ]))
     .unwrap();
-    assert_eq!(inv.spec.allow_symbols, ["dlsym", "semaphore_wait"]);
-    assert_eq!(inv.spec.allow_unsupported_symbols.as_deref(), Some("all"));
+    assert_eq!(inv.spec.allow_symbols, ["dlsym", "semaphore_wait", "all"]);
     // They describe the campaign's shape, so a continuation cannot change them.
-    for flag in ["--allow=dlsym", "--allow-unsupported-symbols=all"] {
+    for flag in ["--allow=dlsym", "--allow=all"] {
         let error = refusal(&[flag]);
         assert!(
             error.contains(flag.split('=').next().unwrap()),

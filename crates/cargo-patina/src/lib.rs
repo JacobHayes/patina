@@ -360,10 +360,10 @@ struct NativeLiveness {
 enum UnsupportedPolicy {
     /// Default: any unsupported symbol is a hard error (fail closed).
     Deny,
-    /// `--allow-unsupported-symbols all`: downgrade every unsupported symbol.
+    /// `--allow all`: downgrade every unsupported symbol.
     All,
-    /// `--allow-unsupported-symbols a,b,c`: downgrade only the listed symbols;
-    /// anything else still hard-errors.
+    /// `--allow a --allow b`: downgrade only findings that match the named
+    /// symbols; anything else still hard-errors.
     Only(BTreeSet<String>),
 }
 

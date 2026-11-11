@@ -63,7 +63,6 @@ pub(crate) fn validate(kind: Kind, name: &str, value: &str) -> Result<(), String
         Kind::DnsEntry => dns_entry(name, value).map(drop),
         Kind::AddressPair => address_pair(name, value).map(drop),
         Kind::FsErrorTarget => fs_error_target(name, value).map(drop),
-        Kind::UnsupportedSymbols => unsupported_symbols(name, value).map(drop),
         Kind::Enum(allowed) => {
             if allowed.contains(&value) {
                 Ok(())
@@ -284,27 +283,6 @@ pub(crate) fn address_pair<'a>(name: &str, value: &'a str) -> Result<(&'a str, &
         ));
     }
     Ok((left, right))
-}
-
-/// `all`, or a comma-separated list of at least one non-empty symbol.
-pub(crate) fn unsupported_symbols<'a>(
-    name: &str,
-    value: &'a str,
-) -> Result<Option<Vec<&'a str>>, String> {
-    if value == "all" {
-        return Ok(None);
-    }
-    let symbols: Vec<&str> = value
-        .split(',')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-        .collect();
-    if symbols.is_empty() {
-        return Err(format!(
-            "{name} requires `all` or a comma-separated symbol list"
-        ));
-    }
-    Ok(Some(symbols))
 }
 
 /// A `--kind` list, split into operation tags and category labels.

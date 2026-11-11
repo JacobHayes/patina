@@ -4,7 +4,7 @@
 // os_unfair_lock is interposed and accepted. The call must be unconditional (a
 // dead branch is stripped and would drop the import), so it uses harmless args:
 // O_RDONLY on a nonexistent name returns ENOENT with no host effect, so even the
-// --allow-unsupported-symbols hatch run stays clean.
+// --allow all hatch run stays clean.
 use std::ffi::c_char;
 unsafe extern "C" {
     fn shm_open(name: *const c_char, oflag: i32, mode: u32) -> i32;

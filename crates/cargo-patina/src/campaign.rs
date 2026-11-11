@@ -291,8 +291,7 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
 }
 
 /// The child-run flags that are pure INVOCATION SHAPE rather than a seed-derived
-/// draw: the pre-run gate surface (`--allow`,
-/// `--allow-unsupported-symbols`), `--allow-randomized-address-layout`,
+/// draw: the pre-run gate surface (`--allow`), `--allow-randomized-address-layout`,
 /// `--cpus` and `--mount`. Every generation gets them verbatim.
 ///
 /// Their own function because the reproduce commands need exactly this set and
@@ -312,13 +311,6 @@ fn replay_flags(spec: &CampaignSpec) -> Vec<String> {
     for symbol in &spec.allow_symbols {
         push_run_flag(&mut flags, "--allow", RunValue::Text(symbol.clone()));
     }
-    if let Some(policy) = &spec.allow_unsupported_symbols {
-        push_run_flag(
-            &mut flags,
-            "--allow-unsupported-symbols",
-            RunValue::Text(policy.clone()),
-        );
-    }
     if let Some(mount) = &spec.mount {
         push_run_flag(&mut flags, "--mount", RunValue::Text(mount.dir.clone()));
     }
@@ -332,13 +324,6 @@ fn invocation_flags(spec: &CampaignSpec) -> Vec<String> {
     }
     for symbol in &spec.allow_symbols {
         push_run_flag(&mut flags, "--allow", RunValue::Text(symbol.clone()));
-    }
-    if let Some(policy) = &spec.allow_unsupported_symbols {
-        push_run_flag(
-            &mut flags,
-            "--allow-unsupported-symbols",
-            RunValue::Text(policy.clone()),
-        );
     }
     if spec.address_layout == Some(patina_dst_trace::AddressLayout::Randomized) {
         push_run_flag(

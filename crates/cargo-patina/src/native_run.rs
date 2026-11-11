@@ -233,7 +233,7 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
     // macOS dispatch-semaphore Parker escape belonged to) structurally
     // impossible to run silently: an unmodeled blocking symbol is an import the
     // shim does not define, so it surfaces here as a denial rather than blocking
-    // a host thread outside the scheduler. `--allow-unsupported-symbols`
+    // a host thread outside the scheduler. `--allow`
     // downgrades matching denials to a loud warning for programs that carry
     // unsupported surface the scenario never reaches.
     let downgraded = match native_prerun_gate(

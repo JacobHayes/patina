@@ -100,11 +100,8 @@ pub struct CampaignSpec {
     /// are all NXDOMAIN by semantics and no DNS fault is ever eligible — so the
     /// band is only emitted when this is non-empty.
     pub dns_entries: Vec<String>,
-    /// Symbols added to every generation's pre-run gate allow list (`--allow`).
+    /// Every generation's pre-run gate `--allow` values, `all` included.
     pub allow_symbols: Vec<String>,
-    /// The `--allow-unsupported-symbols` policy (`all` or a symbol list) every
-    /// generation runs under.
-    pub allow_unsupported_symbols: Option<String>,
     /// The address layout every generation runs, and every reproduce command
     /// replays, with. `Randomized` (`--allow-randomized-address-layout`) keeps
     /// the host's randomization and qualifies each generation's determinism.
@@ -168,7 +165,6 @@ impl Default for CampaignSpec {
             fault_scale_permille: FAULT_SCALE_FULL,
             dns_entries: Vec::new(),
             allow_symbols: Vec::new(),
-            allow_unsupported_symbols: None,
             address_layout: None,
             cpus: None,
             mount: None,
@@ -319,18 +315,6 @@ impl CampaignSpec {
                         })
                         .collect::<Result<_, CliError>>()?;
                 }
-                "allow_unsupported_symbols" => {
-                    let value = val.as_str().ok_or_else(|| {
-                        CliError("allow_unsupported_symbols must be a string".into())
-                    })?;
-                    crate::values::validate(
-                        help::Kind::UnsupportedSymbols,
-                        "allow_unsupported_symbols",
-                        value,
-                    )
-                    .map_err(|error| CliError(format!("campaign spec {error}")))?;
-                    self.allow_unsupported_symbols = Some(value.to_string());
-                }
                 "compute_watchdog_ms" => {
                     let bound = json_u64(key, val)?;
                     crate::values::validate(
@@ -353,11 +337,10 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; a key is its campaign flag's name \
                          (gens, seed_start, timeout_secs, swarm, vary, fault_scale_permille, \
-                         dns_entry, allow, allow_unsupported_symbols, \
-                         allow_randomized_address_layout, cpus, mount, liveness_watchdog, \
-                         compute_watchdog_ms, converge_within, heal_after, plateau_after, guided, \
-                         allow_unmet_sometimes, no_verify), or guest_args, exclude_knobs or \
-                         classify"
+                         dns_entry, allow, allow_randomized_address_layout, cpus, mount, \
+                         liveness_watchdog, compute_watchdog_ms, converge_within, heal_after, \
+                         plateau_after, guided, allow_unmet_sometimes, no_verify), or guest_args, \
+                         exclude_knobs or classify"
                     )));
                 }
             }
@@ -699,8 +682,7 @@ mod tests {
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                allow_symbols: vec!["dlsym".into()],
-                allow_unsupported_symbols: Some("semaphore_wait,semaphore_signal".into()),
+                allow_symbols: vec!["dlsym".into(), "semaphore_wait".into()],
                 address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
                 ..CampaignSpec::default()
             },
@@ -714,7 +696,6 @@ mod tests {
             "no_verify",
             "dns_entry",
             "allow",
-            "allow_unsupported_symbols",
             "allow_randomized_address_layout",
             "exclude_knobs",
         ] {

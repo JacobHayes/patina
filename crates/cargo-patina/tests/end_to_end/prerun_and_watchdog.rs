@@ -237,11 +237,11 @@ fn campaign_forwards_the_prerun_gate_hatches_to_every_generation() {
     let hatched = campaign_run(
         &directory.path().join("green-all"),
         &guest,
-        &["--allow-unsupported-symbols", "all"],
+        &["--allow", "all"],
     );
     assert!(
         hatched.status.success(),
-        "--allow-unsupported-symbols must reach every generation:\nstderr:\n{}",
+        "--allow all must reach every generation:\nstderr:\n{}",
         String::from_utf8_lossy(&hatched.stderr)
     );
     assert_eq!(campaign_json_stdout(&hatched)["classes"]["ok"], 2);

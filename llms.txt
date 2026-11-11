@@ -165,7 +165,7 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   finding. Audit source-first (or a `patina build` artifact): only a
   shim-linked binary shows the true post-interposition residual, so a stock
   prebuilt binary is refused unless `--raw`.
-- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
+- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL|all]... [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--vary DIM,...`
   names what each generation draws: `buggify` (fresh fire odds), `sched-pct`
@@ -190,12 +190,12 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   the DNS band (fail per-mille + resolution latency) — with no defined name every
   lookup is NXDOMAIN by semantics and the knobs could not fire, so the band is not
   emitted at all. `--allow
-  SYMBOL` (repeatable), and `--allow-unsupported-symbols` are campaign SHAPE in
+  SYMBOL|all` (repeatable) is campaign SHAPE in
   the same sense: the native `run` invocation is forwarded verbatim to every
   generation, so a guest that needs the pre-run gate
   hatch can be swept at all instead of being refused identically in every
-  generation. They also ride on the reproduce commands, since a trace cannot
-  carry them; a non-native campaign carrying one is refused by name. Each
+  generation. It also rides on the reproduce commands, since a trace cannot
+  carry it; a non-native campaign carrying it is refused by name. Each
   generation lands in the class its own `patina.result/v2` envelope reports
   (`result`; the outcome table below), never read from guest output text. The
   campaign overrides it only with what it alone knows: its wall-clock backstop
@@ -465,7 +465,7 @@ fire", never zero.
 - `qualifications[]` = `{kind, detail}` — what the operator relaxed for a
   native run, each a reason its determinism is not guaranteed:
   `randomized_address_layout` (`--allow-randomized-address-layout`) and
-  `unsupported_symbols` (`--allow-unsupported-symbols` downgrades, `detail`
+  `unsupported_symbols` (`--allow` downgrades, `detail`
   naming them). Absent on an unqualified run.
 - `guest_exit` = `{code, signal?, signal_name?, core?}` — how the guest process ended.
   `core` is the observed wait-status core flag, present only on signal death.

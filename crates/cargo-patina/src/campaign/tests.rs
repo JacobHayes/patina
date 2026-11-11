@@ -222,8 +222,11 @@ fn the_dns_band_rides_on_the_host_table() {
 #[test]
 fn the_native_invocation_surface_is_forwarded_to_every_generation() {
     let spec = CampaignSpec {
-        allow_symbols: vec!["semaphore_wait".into(), "semaphore_signal".into()],
-        allow_unsupported_symbols: Some("all".into()),
+        allow_symbols: vec![
+            "semaphore_wait".into(),
+            "semaphore_signal".into(),
+            "all".into(),
+        ],
         address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
         ..CampaignSpec::default()
     };
@@ -243,22 +246,13 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation() {
             .collect();
         assert_eq!(
             allowed,
-            vec!["semaphore_wait", "semaphore_signal"],
+            vec!["semaphore_wait", "semaphore_signal", "all"],
             "the allow list must be forwarded whole and in order: {native:?}"
         );
-        let index = native
-            .iter()
-            .position(|f| f == "--allow-unsupported-symbols")
-            .expect("the gate hatch");
-        assert_eq!(native[index + 1], "all");
     }
     // A spec that asks for none of it forwards none of it.
     let bare = derive_flags(&CampaignSpec::default(), &generation_hash(0, 0));
-    for flag in [
-        "--allow",
-        "--allow-unsupported-symbols",
-        "--allow-randomized-address-layout",
-    ] {
+    for flag in ["--allow", "--allow-randomized-address-layout"] {
         assert!(!bare.iter().any(|f| f == flag), "unasked-for {flag}");
     }
 }

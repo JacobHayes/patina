@@ -43,10 +43,7 @@ pub use flags::HELP_FLAGS;
 use flags::LIVENESS_FLAGS;
 use flags::NATIVE_SCHEDULE_FLAGS;
 use flags::SOURCE_SELECT;
-use flags::{
-    ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG, PARAM_FLAG,
-    SWARM_FLAG,
-};
+use flags::{ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, CPUS_FLAG, PARAM_FLAG, SWARM_FLAG};
 pub use human::render;
 pub use human::usage_synopsis;
 use workflows::CAMPAIGN;
@@ -110,8 +107,6 @@ pub enum Kind {
     /// the kind is unknown, the ordinal below 1, or the errno one the kind
     /// cannot fail with.
     FsErrorTarget,
-    /// `all`, or a comma-separated list of at least one non-empty symbol.
-    UnsupportedSymbols,
     /// One of a fixed set of string literals.
     Enum(&'static [&'static str]),
     /// A comma-separated list of one or more of a fixed set of string literals.
@@ -145,7 +140,6 @@ impl Kind {
             Kind::DnsEntry => "dns-entry",
             Kind::AddressPair => "address-pair",
             Kind::FsErrorTarget => "fs-error-target",
-            Kind::UnsupportedSymbols => "unsupported-symbols",
             Kind::Enum(_) => "enum",
             Kind::EnumList(_) => "enum-list",
             Kind::Symbol => "symbol",

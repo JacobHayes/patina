@@ -123,9 +123,15 @@ pub(crate) fn parse_native_audit_from(
     arguments: Vec<OsString>,
 ) -> Result<NativeAuditInvocation, CliError> {
     let args = cli::parse("audit", help::Family::Sole, arguments)?;
+    let allow = allow_of(&args);
+    if allow.contains(ALLOW_ALL) {
+        return Err(CliError::usage(
+            "audit reports every finding; `--allow all` is for run, replay and campaign",
+        ));
+    }
     Ok(NativeAuditInvocation {
         binary,
-        allow: allow_of(&args),
+        allow,
         raw: args.flag("--raw"),
     })
 }
@@ -384,7 +390,7 @@ pub(crate) fn parse_native_run_from(
 }
 
 /// Parse the native `replay <BINARY> <TRACE> [--mount
-/// HOST_DIR] [--allow SYMBOL]... [--allow-unsupported-symbols <all|name,...>]
+/// HOST_DIR] [--allow SYMBOL|all]...
 /// [-- GUEST ARGS]` given an already-resolved binary reference and trace path.
 ///
 /// Native replay restores every semantic input from the trace itself — seed,

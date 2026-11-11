@@ -484,7 +484,7 @@ sites_activated={activated} site=core/storage/btree.rs:12:9:page_should_be_loade
     let supervisor_block = "patina: 3 direct-syscall instruction site(s) in /tmp/guest are \
 SUD-managed: trapped into the deterministic runtime via syscall-user-dispatch.\n\
 patina: WARNING: running /tmp/guest with 2 UNSUPPORTED symbol(s) downgraded from error by \
---allow-unsupported-symbols:\n\
+--allow:\n\
 patina:   qsort (effect)\n\
 patina:     provenance=direct call from guest\n\
 patina: these host symbols are NOT interposed by the deterministic runtime; if the guest \

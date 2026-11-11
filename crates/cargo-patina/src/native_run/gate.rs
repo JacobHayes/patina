@@ -295,7 +295,7 @@ fn judge(
     } else {
         // Not trappable here: fold back so the counter reads are blocked (with
         // the cpu-nondeterminism note below naming why), or force-runnable via
-        // the operator's --allow-unsupported-symbols hatch.
+        // the operator's --allow hatch.
         remaining.extend(tsc_instructions);
     }
     if sud_ok {
@@ -303,7 +303,7 @@ fn judge(
     } else {
         // Not downgradable here: fold back so these raw-syscall sites are blocked
         // (with a SUD-specific hint below) — or force-runnable via the operator's
-        // --allow-unsupported-symbols hatch, exactly as before SUD.
+        // --allow hatch, exactly as before SUD.
         remaining.extend(sud_instructions);
     }
 
@@ -326,7 +326,7 @@ These are contained, not escapes — the run stays deterministic.",
         let mut message = format!(
             "refusing to run {}: {} symbol(s) on the blocking/time/scheduling/effect surface are \
 neither interposed by the deterministic runtime nor known-safe (default-deny). Interpose them, or \
-pass --allow-unsupported-symbols <all|name,name,...> to run anyway with a warning:",
+pass --allow NAME (or --allow all) to run anyway with a warning:",
             binary.display(),
             blocked.len()
         );
@@ -395,8 +395,8 @@ genuine call aborts deterministically, so it never reaches this refusal. A macos
 reaching HERE is one the shim does not deny-trap (a non-enumerated framework symbol, or a prebuilt \
 non-shim binary): the Security-framework subset reads the host keychain and system trust store — \
 mutable host state that varies by machine and over time — so a run that reaches it is NOT \
-reproducible. Compile the framework path out, or pass --allow-unsupported-symbols \
-<all|name,name,...> to run anyway with a warning; determinism is then only qualified — the trust \
+reproducible. Compile the framework path out, or pass --allow \
+NAME (or --allow all) to run anyway with a warning; determinism is then only qualified — the trust \
 store the guest reads is whatever the host holds at run time.",
             );
         }
@@ -414,8 +414,8 @@ walk, mach_host_self, proc_*, vm_deallocate) is now deny-trap interposed — a b
 LINKS it runs, and a genuine call aborts deterministically. A host-introspection symbol reaching \
 HERE is a live-path member a normal startup actually reaches (sysctl/sysctlbyname, getrusage, \
 task_info) that stays refused pending a deterministic interposer, or a prebuilt non-shim binary. A \
-run that reaches one is not reproducible, so it is refused; pass --allow-unsupported-symbols \
-<all|name,name,...> to run anyway with a warning, but determinism is then only qualified.",
+run that reaches one is not reproducible, so it is refused; pass --allow \
+NAME (or --allow all) to run anyway with a warning, but determinism is then only qualified.",
             );
         }
         if !shim_linked {
@@ -436,7 +436,7 @@ run that reaches one is not reproducible, so it is refused; pass --allow-unsuppo
     if !downgraded.is_empty() {
         note(&format!(
             "patina: WARNING: running {} with {} UNSUPPORTED symbol(s) downgraded from error by \
---allow-unsupported-symbols:",
+--allow:",
             binary.display(),
             downgraded.len()
         ));

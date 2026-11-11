@@ -18,7 +18,7 @@
 # native_raw::raw_fifo_rows_transfer_and_refuse_consistently.
 #
 # It asserts:
-#   [1] the pre-run audit is CLEAN — no --allow-unsupported-symbols, and the
+#   [1] the pre-run audit is CLEAN — no --allow, and the
 #       mkfifo/mknod family appears nowhere in it;
 #   [2] the guest runs with the expected FIFO_RESULT;
 #   [3] two same-seed runs are byte-identical (stdout AND captured stderr);
@@ -33,7 +33,7 @@
 #
 # RED demonstration: before `mkfifo` was interposed the guest could not even be
 # audited — `mkfifo` was an unsupported-symbol refusal (escape class
-# `filesystem`) — and forcing it through with --allow-unsupported-symbols made
+# `filesystem`) — and forcing it through with --allow made
 # the call escape to the host, where it failed ENOENT on a path only the
 # in-memory filesystem has.
 ###############################################################################

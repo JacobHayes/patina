@@ -63,7 +63,7 @@ fn main() {
             "missing host-trust-store determinism note:\n{stderr}"
         );
         assert!(
-            stderr.contains("--allow-unsupported-symbols"),
+            stderr.contains("--allow"),
             "missing explicit allow path:\n{stderr}"
         );
 
@@ -88,7 +88,7 @@ fn main() {
     // reference at link (dropping it off the import table), so the pre-run gate passes
     // whether the path is dormant (here) or live (the conversion tests above). This is
     // the Issue-1/Issue-2 fix: an unrelated scenario no longer needs
-    // `--allow-unsupported-symbols` just because the binary links optional TLS-trust /
+    // `--allow` just because the binary links optional TLS-trust /
     // host-inventory code. macOS-only (the symbols are Darwin framework/Mach names).
     #[cfg(target_os = "macos")]
     #[test]
@@ -723,7 +723,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
                 bin.to_str().unwrap(),
                 "--seed",
                 "1",
-                "--allow-unsupported-symbols",
+                "--allow",
                 "all",
             ],
         );
@@ -750,7 +750,7 @@ fn main() { println!("PLANT_RAN {:x}", plant()); }
                 bin.to_str().unwrap(),
                 "--seed",
                 "1",
-                "--allow-unsupported-symbols",
+                "--allow",
                 "semaphore_wait",
             ],
         );

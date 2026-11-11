@@ -169,7 +169,10 @@ pub(super) fn liveness_of(args: &cli::Args) -> NativeLiveness {
     }
 }
 
-/// The pre-run gate's allow list.
+/// The `--allow` value that admits every unsupported symbol.
+pub(super) const ALLOW_ALL: &str = "all";
+
+/// Every `--allow` value, `all` included.
 pub(super) fn allow_of(args: &cli::Args) -> BTreeSet<String> {
     args.texts("--allow")
         .into_iter()
@@ -177,20 +180,18 @@ pub(super) fn allow_of(args: &cli::Args) -> BTreeSet<String> {
         .collect()
 }
 
-/// The unsupported-symbol escape hatch, default-deny.
+/// What the pre-run gate does with a finding no `--allow` name admits
+/// outright: downgrade it to a warning when `--allow all` was given, or when it
+/// matches a named symbol by its alias or containing symbol; refuse it
+/// otherwise.
 pub(super) fn unsupported_policy_of(args: &cli::Args) -> UnsupportedPolicy {
-    match args.text("--allow-unsupported-symbols") {
-        None => UnsupportedPolicy::Deny,
-        Some(value) => {
-            match values::unsupported_symbols("--allow-unsupported-symbols", value)
-                .expect("validated by the registry grammar")
-            {
-                None => UnsupportedPolicy::All,
-                Some(symbols) => {
-                    UnsupportedPolicy::Only(symbols.into_iter().map(str::to_string).collect())
-                }
-            }
-        }
+    let allow = allow_of(args);
+    if allow.contains(ALLOW_ALL) {
+        UnsupportedPolicy::All
+    } else if allow.is_empty() {
+        UnsupportedPolicy::Deny
+    } else {
+        UnsupportedPolicy::Only(allow)
     }
 }
 

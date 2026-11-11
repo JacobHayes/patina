@@ -4,7 +4,7 @@ use super::*;
 use crate::UnsupportedPolicy;
 use patina_dst_target::NativeEscape;
 
-/// `--allow-unsupported-symbols NAME` against an instruction-class finding:
+/// `--allow NAME` against an instruction-class finding:
 /// its own name (`instruction@.text+OFF`) moves on every relink, so the
 /// CONTAINING symbol its provenance names matches too — scoped to that one
 /// function, never `all`. A symbol finding keeps matching only by its own

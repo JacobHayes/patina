@@ -113,7 +113,7 @@ fn prerun_refuses_shm_open_and_hatch_warns() {
     // A replay re-checks the gate, so the hatch run is a plain seeded one.
     let hatch = assert_success(g.command(
         "run",
-        &["--seed", "1", "--allow-unsupported-symbols", "all"],
+        &["--seed", "1", "--allow", "all"],
     ));
     assert_eq!(text(&hatch.stdout), "GATE_REFUSAL_RAN\n");
     assert!(text(&hatch.stderr).contains("WARNING"));

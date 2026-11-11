@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn a_generation_that_wrote_coverage_reproduces_with_coverage() {
         let flags = vec!["--seed-flag".to_string()];
-        let invocation = vec!["--allow-unsupported-symbols".to_string(), "all".to_string()];
+        let invocation = vec!["--allow".to_string(), "all".to_string()];
         let artifact = PathBuf::from("guest-bin");
         for trace in [Some("out/failures/generation-4.patina"), None] {
             for wrote_coverage in [true, false] {
@@ -393,7 +393,7 @@ mod tests {
     #[test]
     fn a_reproduce_command_carries_the_invocation_flags_the_trace_cannot() {
         let spec = CampaignSpec {
-            allow_unsupported_symbols: Some("all".into()),
+            allow_symbols: vec!["all".into()],
             address_layout: Some(patina_dst_trace::AddressLayout::Randomized),
             ..CampaignSpec::default()
         };
@@ -414,7 +414,7 @@ mod tests {
         assert_eq!(
             replay,
             "patina replay guest-bin out/failures/generation-0.patina \
-             --allow-unsupported-symbols all"
+             --allow all"
         );
         // The traceless form re-runs, and its flag list already contains them.
         let rerun = reproduce_command(
@@ -427,8 +427,7 @@ mod tests {
             "generation-0.patina",
         );
         assert!(
-            rerun.contains("--allow-unsupported-symbols all")
-                && rerun.contains("--allow-randomized-address-layout"),
+            rerun.contains("--allow all") && rerun.contains("--allow-randomized-address-layout"),
             "the re-run repro dropped the invocation shape: {rerun}"
         );
         // `--record` is part of the experiment the campaign actually ran: without

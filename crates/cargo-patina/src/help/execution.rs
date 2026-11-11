@@ -10,7 +10,7 @@ pub(super) const RUN: Verb = Verb {
     name: "run",
     summary: "Build (on the fly) and/or run an artifact under the deterministic runtime.",
     synopsis: &[
-        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--mount HOST_DIR[:GUEST_DIR]] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL]... [-- PROGRAM ARGS]",
+        "patina run <BINARY> [--seed N | --record PATH] [--env K=V]... [--budget N] [--coverage-out PATH] [--mount HOST_DIR[:GUEST_DIR]] [FAULT OPTIONS] [BUGGIFY/SCHEDULE/LIVENESS OPTIONS] [--allow SYMBOL|all]... [-- PROGRAM ARGS]",
         "patina run <SOURCE.rs|DIR|Cargo.toml> [--release] [RUN OPTIONS]   (builds on the fly, then runs)",
     ],
     prose: "\
@@ -21,10 +21,10 @@ is built on the fly through the same pipeline as `build` and its product is run 
 \n\
 `run <BINARY>` runs a shim-linked native binary under a pre-run default-deny audit: every externally resolved symbol must \
 be interposed or known-safe, and any unsupported symbol on the \
-blocking/time/scheduling/effect surface hard-errors. --allow SYMBOL adds a \
-known-safe symbol; --allow-unsupported-symbols <all|name,...> downgrades matching \
-denials to a loud warning (an instruction-class finding matches by its own \
-`instruction@.text+OFF` name or by the containing symbol its provenance names).\n\
+blocking/time/scheduling/effect surface hard-errors. --allow SYMBOL admits \
+one (an instruction-class finding matches by its own `instruction@.text+OFF` \
+name or by the containing symbol its provenance names, and is admitted with a \
+loud warning); --allow all admits every one that way.\n\
 \n\
 Reproduce a recorded run with `patina replay`.",
     families: &[fam(Family::Sole, "`run`", None)],
@@ -138,7 +138,6 @@ Reproduce a recorded run with `patina replay`.",
                     false,
                 ),
                 ALLOW_FLAG,
-                ALLOW_UNSUPPORTED_FLAG,
                 ALLOW_RANDOMIZED_LAYOUT_FLAG,
             ],
         },
@@ -601,7 +600,11 @@ and runs the full audit anyway under a loud banner.",
             title: "Audit options",
             families: SOLE,
             flags: &[
-                ALLOW_FLAG,
+                Flag {
+                    value: Value::Required("SYMBOL", Kind::Symbol),
+                    doc: "Leave SYMBOL out of the findings, as `run --allow SYMBOL` admits it (repeatable).",
+                    ..ALLOW_FLAG
+                },
                 f(
                     "--raw",
                     None,
@@ -652,7 +655,6 @@ Only host inputs the trace cannot carry stay as flags: the --mount corpus, \
                 false,
             ),
             ALLOW_FLAG,
-            ALLOW_UNSUPPORTED_FLAG,
         ],
     }],
     refusals: &[

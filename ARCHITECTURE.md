@@ -234,7 +234,7 @@ by name if reached; a SUD-trapped row marked `Trap` aborts by name; on Linux
 otherwise; replay refuses fingerprint and operation mismatches.
 
 Explicit escape hatches: `cfg(patina)`/`cfg(dst)` replacement code,
-`--allow`/`--allow-unsupported-symbols` (loud, recorded), and host capture
+`--allow SYMBOL|all` (loud, recorded), and host capture
 (`--mount`: read-only, allowlisted, fingerprinted by contents and metadata).
 
 ## Native runtime
