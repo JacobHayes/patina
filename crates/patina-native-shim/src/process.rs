@@ -108,6 +108,10 @@ pub(crate) struct RunStop<'a> {
     detail: &'a [&'a [u8]],
     /// The status the guest itself reached, when the stop replaces it.
     guest_exit: Option<i32>,
+    /// Where the stopped thread was, as its sampled PC minus
+    /// [`patina_yield_point`]'s address: ASLR-proof, so the supervisor can
+    /// name the site from the binary on disk.
+    yield_point_delta: Option<isize>,
 }
 
 impl<'a> RunStop<'a> {
@@ -119,6 +123,7 @@ impl<'a> RunStop<'a> {
             reason,
             detail,
             guest_exit: None,
+            yield_point_delta: None,
         }
     }
 
@@ -136,6 +141,12 @@ impl<'a> RunStop<'a> {
     /// This stop, carrying the exit status the guest had already reached.
     pub(crate) const fn with_guest_exit(mut self, status: Option<i32>) -> Self {
         self.guest_exit = status;
+        self
+    }
+
+    /// This stop, carrying where the stopped thread was (`yield_point_delta`).
+    pub(crate) const fn with_yield_point_delta(mut self, delta: Option<isize>) -> Self {
+        self.yield_point_delta = delta;
         self
     }
 }
@@ -237,11 +248,11 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
                 self.raw(escape);
             }
         }
-        fn number(&mut self, value: i32) {
+        fn number(&mut self, value: i64) {
             if value < 0 {
                 self.raw(b"-");
             }
-            let mut digits = [0u8; 10];
+            let mut digits = [0u8; 20];
             let mut start = digits.len();
             let mut rest = value.unsigned_abs();
             loop {
@@ -266,15 +277,20 @@ pub(crate) fn record_stop_through(stop: RunStop<'_>, send: &mut dyn FnMut(c_int,
     record.raw(b"\",\"reason\":\"");
     record.raw(stop.reason.as_bytes());
     record.raw(b"\",\"detail\":\"");
-    // Room for the closing quote, the guest status and the document's end.
-    const TAIL: usize = 48;
+    // Room for the closing quote, the guest status, the sampled site and the
+    // document's end.
+    const TAIL: usize = 96;
     for part in stop.detail {
         record.escaped(part, TAIL);
     }
     record.raw(b"\"");
     if let Some(status) = stop.guest_exit {
         record.raw(b",\"guest_exit_code\":");
-        record.number(status);
+        record.number(i64::from(status));
+    }
+    if let Some(delta) = stop.yield_point_delta {
+        record.raw(b",\"yield_point_delta\":");
+        record.number(delta as i64);
     }
     record.raw(b"}}\n");
     send(fd, &record.bytes[..record.len]);

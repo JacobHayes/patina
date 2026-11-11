@@ -232,6 +232,9 @@ impl Envelope {
             if let Some(mismatch) = v.mismatch {
                 rm.insert("mismatch".into(), Value::from(mismatch));
             }
+            if let Some(location) = &v.location {
+                rm.insert("location".into(), super::outcomes::location_json(location));
+            }
             m.insert("stop".into(), Value::Object(rm));
         }
         if self.trace_unusable {

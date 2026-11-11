@@ -44,6 +44,7 @@ pub use outcomes::Stop;
 pub(crate) use outcomes::TRACE_MISMATCH_STOP;
 #[cfg(test)]
 pub(crate) use outcomes::TRACE_UNAVAILABLE_STOP;
+pub(crate) use outcomes::location_json;
 use patina_dst_abi::RunClass;
 pub use reports::CoverageReport;
 pub use reports::Qualification;

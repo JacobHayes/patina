@@ -793,7 +793,15 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         }
     };
     let runtime_started = stop.started;
-    if let Some(stop) = stop.stop {
+    if let Some(mut stop) = stop.stop {
+        // A compute stop's sampled PC, named from the executable that ran.
+        let location = stop
+            .get("yield_point_delta")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|delta| crate::coverage::locate(image.bytes(), delta));
+        if let (Some(location), serde_json::Value::Object(record)) = (location, &mut stop) {
+            record.insert("location".into(), output::location_json(&location));
+        }
         let document = facts.get_or_insert_with(
             || serde_json::json!({ "schema": patina_dst_runtime::FACTS_SCHEMA }),
         );

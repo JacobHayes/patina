@@ -91,6 +91,86 @@ fn main() {
     }
 }
 
+/// A compute stop names where the guest was spinning: the function its
+/// sampled PC is in and, with debug info, the source file, read from the
+/// executable rather than left as a raw address for the reader to resolve.
+#[test]
+fn a_compute_stop_names_the_function_the_guest_spins_in() {
+    const SPINNER: &str = "spin_without_calls";
+    let directory = tempdir().unwrap();
+    let source = directory.path().join("spin_site.rs");
+    fs::write(
+        &source,
+        format!(
+            r#"
+use std::sync::atomic::{{AtomicBool, Ordering}};
+static DONE: AtomicBool = AtomicBool::new(false);
+#[inline(never)]
+fn {SPINNER}() {{
+    while !DONE.load(Ordering::Relaxed) {{
+        std::hint::spin_loop();
+    }}
+}}
+fn main() {{
+    {SPINNER}();
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let guest = directory.path().join("spin-site");
+    invoke(
+        native_workspace(),
+        &[
+            "build",
+            source.to_str().unwrap(),
+            "--output",
+            guest.to_str().unwrap(),
+            "--release",
+            "--",
+            "-g",
+        ],
+    );
+    // The sampler may lose its bounded handshake on a loaded host and then
+    // names no PC; any one of a few runs must name the site.
+    let mut runs = Vec::new();
+    let located = (0..3).find_map(|_| {
+        let output = invoke_with_deadline(
+            env!("CARGO_BIN_EXE_patina"),
+            native_workspace(),
+            &[
+                "run",
+                guest.to_str().unwrap(),
+                "--compute-watchdog-ms",
+                "200",
+                "--format",
+                "json",
+            ],
+            Duration::from_secs(60),
+        )
+        .expect("the compute watchdog must end the run");
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(envelope["result"], "timeout", "{envelope:#}");
+        let location = envelope["stop"].get("location").cloned();
+        runs.push(envelope);
+        location
+    });
+    let location = located.unwrap_or_else(|| panic!("no run named its stop site: {runs:#?}"));
+    let function = location["function"].as_str().unwrap();
+    assert_eq!(function.rsplit("::").next(), Some(SPINNER), "{location:#}");
+    // macOS keeps the debug info in the object files or a dSYM, which the
+    // symbolizer does not read: there the location is the function alone.
+    if cfg!(target_os = "linux") {
+        let file = location["file"].as_str().unwrap();
+        assert_eq!(
+            Path::new(file).file_name(),
+            source.file_name(),
+            "{location:#}"
+        );
+        assert!(location["line"].as_u64().is_some(), "{location:#}");
+    }
+}
+
 // Gate: a guest the pre-run default-deny gate refuses is sweepable through the
 // same hatches `run` offers, and — the non-vacuity half — WITHOUT them the
 // campaign still files the child refusal as INFRA, its existing class, rather

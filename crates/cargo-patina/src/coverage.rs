@@ -54,6 +54,7 @@ use report::print_coverage_human;
 pub(crate) use report::top_uncovered_crates;
 use symbols::CoverageReportTree;
 use symbols::symbolize_coverage;
+pub(crate) use symbols::{CodeLocation, locate};
 
 fn permille(numerator: u64, denominator: u64) -> u64 {
     if denominator == 0 {

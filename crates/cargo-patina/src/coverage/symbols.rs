@@ -93,7 +93,18 @@ fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
             binary.display()
         ))
     })?;
-    let go_counters = go_counter_packages(&file);
+    symbol_table(&file).ok_or_else(|| {
+        CliError(format!(
+            "coverage symbolization could not find nm anchor symbol patina_yield_point in {}; is this a native --instrument binary?",
+            binary.display()
+        ))
+    })
+}
+
+/// `file`'s function symbols, anchored at `patina_yield_point`; `None` when
+/// the binary has no anchor.
+fn symbol_table(file: &object::File<'_>) -> Option<SymbolTable> {
+    let go_counters = go_counter_packages(file);
     let mut anchor = None;
     let mut functions = BTreeMap::<u64, FunctionSymbol>::new();
     for symbol in file.symbols().chain(file.dynamic_symbols()) {
@@ -122,12 +133,7 @@ fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
             demangled,
         });
     }
-    let anchor = anchor.ok_or_else(|| {
-        CliError(format!(
-            "coverage symbolization could not find nm anchor symbol patina_yield_point in {}; is this a native --instrument binary?",
-            binary.display()
-        ))
-    })?;
+    let anchor = anchor?;
     let mut functions: Vec<_> = functions.into_values().collect();
     functions.sort_by_key(|function| function.address);
     let addresses: Vec<u64> = functions.iter().map(|function| function.address).collect();
@@ -140,11 +146,73 @@ fn read_symbol_table(binary: &Path) -> Result<SymbolTable, CliError> {
             }
         }
     }
-    Ok(SymbolTable {
+    Some(SymbolTable {
         anchor,
         functions,
         go_counters,
     })
+}
+
+/// Where in the guest a code address is: its function, and the source line
+/// when the binary carries DWARF for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeLocation {
+    pub(crate) function: String,
+    pub(crate) file: Option<String>,
+    pub(crate) line: Option<u32>,
+}
+
+/// The location of the address `delta` bytes from `patina_yield_point` in
+/// the executable `image`: ASLR-proof, since the shim measures the delta in
+/// the running image. `None` unless the address lies in the image's own code
+/// and inside a function symbol: an address in a shared library, or in a
+/// stripped binary, names nothing rather than its nearest symbol.
+pub(crate) fn locate(image: &[u8], delta: i64) -> Option<CodeLocation> {
+    use object::{ObjectSection, SectionKind};
+    let file = object::File::parse(image).ok()?;
+    let table = symbol_table(&file)?;
+    let pc = u64::try_from(i128::from(table.anchor) + i128::from(delta)).ok()?;
+    file.sections()
+        .filter(|section| section.kind() == SectionKind::Text)
+        .find(|section| (section.address()..section.address() + section.size()).contains(&pc))?;
+    let function = table.function_for_pc(pc)?;
+    let (file_name, line) = source_line(&file, pc).unzip();
+    Some(CodeLocation {
+        function: function.demangled.clone(),
+        file: file_name,
+        line: line.flatten(),
+    })
+}
+
+/// The source file and line `pc` is at in the function it physically lies
+/// in: the outermost of its inlined frames, so a loop spinning through
+/// inlined library code names the line of its own function.
+fn source_line(file: &object::File<'_>, pc: u64) -> Option<(String, Option<u32>)> {
+    use addr2line::gimli;
+    use object::ObjectSection;
+    let endian = if file.is_little_endian() {
+        gimli::RunTimeEndian::Little
+    } else {
+        gimli::RunTimeEndian::Big
+    };
+    // A compressed or absent section reads as empty: no line, never a guess.
+    let sections = gimli::DwarfSections::load(|id| {
+        Ok::<_, gimli::Error>(
+            file.section_by_name(id.name())
+                .and_then(|section| section.uncompressed_data().ok())
+                .unwrap_or_default(),
+        )
+    })
+    .ok()?;
+    let dwarf = sections.borrow(|section| gimli::EndianSlice::new(section.as_ref(), endian));
+    let context = addr2line::Context::from_dwarf(dwarf).ok()?;
+    let mut frames = context.find_frames(pc).skip_all_loads().ok()?;
+    let mut outermost = None;
+    while let Ok(Some(frame)) = frames.next() {
+        outermost = Some(frame.location);
+    }
+    let location = outermost??;
+    Some((location.file?.to_owned(), location.line))
 }
 
 fn demangle_symbol(name: &str) -> String {

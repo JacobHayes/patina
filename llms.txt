@@ -397,9 +397,11 @@ fire", never zero.
   `liveness` (a fired liveness/converge watchdog, carrying
   `kind`/`detail`/`vtime_ns`/`budget_ns`/`last_fault_vtime_ns`) and `schedule`
   (`vacuous_schedule` with the unschedulable `tasks[]`).
-- `stop` = `{reason, detail, guest_exit_code?, mismatch?}` — what stopped a run
+- `stop` = `{reason, detail, guest_exit_code?, mismatch?, location?}` — what stopped a run
   that did not end clean: `reason` is a stable token, `detail` the line naming
-  what was reached. The native shim writes one to a supervisor pipe whenever it
+  what was reached. `location` = `{function, file?, line?}` names where a
+  compute-bound guest was spinning, from its sampled PC and the executable's
+  symbols (`file`/`line` need debug info); absent when neither names it. The native shim writes one to a supervisor pipe whenever it
   ends a run (its only abort vehicle requires the class and reason: `deny_trap`,
   `not_modeled`, `deadlock`, `liveness`, `step_budget`, `compute_bound`,
   `always`, `sdk_misuse`, `runtime_init`, `shutdown_failure`, `host_limit`,

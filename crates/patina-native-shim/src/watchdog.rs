@@ -233,8 +233,9 @@ pub(crate) fn report_and_abort(
     let sample = handle
         .ok_or(SampleFailure::NoTarget)
         .and_then(platform::sample_terminal_pc);
+    let anchor = super::patina_yield_point as *const () as usize;
+    let yield_point_delta = sample.ok().map(|pc| pc.wrapping_sub(anchor) as isize);
     if let Ok(pc) = sample {
-        let anchor = super::patina_yield_point as *const () as usize;
         let _ = write!(
             text,
             "patina: compute-bound sampled_pc={pc:#x} patina_yield_point_delta="
@@ -284,11 +285,10 @@ pub(crate) fn report_and_abort(
     let _ = write!(detail, "{error}");
     let (class, reason) = crate::runtime::run_stop_class(error)
         .unwrap_or((patina_dst_abi::RunClass::Internal, "compute_stop"));
-    super::host_abort(crate::RunStop::new(
-        class,
-        reason,
-        &[&detail.bytes[..detail.len]],
-    ))
+    super::host_abort(
+        crate::RunStop::new(class, reason, &[&detail.bytes[..detail.len]])
+            .with_yield_point_delta(yield_point_delta),
+    )
 }
 
 #[derive(Clone, Copy)]

@@ -2,6 +2,7 @@
 //! class the run is filed under.
 
 use super::*;
+use crate::coverage::CodeLocation;
 use patina_dst_abi::{Attribution, RunClass};
 
 /// How the guest process ended, structurally. `code` is the guest's own exit
@@ -61,6 +62,50 @@ pub struct Stop {
     pub(crate) guest_exit_code: Option<i32>,
     /// For a mismatch the supervisor judged, which of the run's inputs differs.
     pub(crate) mismatch: Option<&'static str>,
+    /// For a compute stop, where the stopped thread was spinning, named from
+    /// the executable; absent when no PC was sampled or the binary names no
+    /// function there.
+    pub(crate) location: Option<CodeLocation>,
+}
+
+/// A stop's `location` as JSON: `{function, file?, line?}`.
+pub(crate) fn location_json(location: &CodeLocation) -> serde_json::Value {
+    let mut fields = serde_json::Map::new();
+    fields.insert("function".into(), location.function.clone().into());
+    if let Some(file) = &location.file {
+        fields.insert("file".into(), file.clone().into());
+    }
+    if let Some(line) = location.line {
+        fields.insert("line".into(), line.into());
+    }
+    serde_json::Value::Object(fields)
+}
+
+/// The `location` of the stop object `stop`, read back.
+fn location_of(stop: &serde_json::Value) -> Option<CodeLocation> {
+    let location = stop.get("location")?;
+    Some(CodeLocation {
+        function: location.get("function")?.as_str()?.to_owned(),
+        file: location
+            .get("file")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        line: location
+            .get("line")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|line| u32::try_from(line).ok()),
+    })
+}
+
+impl std::fmt::Display for CodeLocation {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.write_str(&self.function)?;
+        match (&self.file, self.line) {
+            (Some(file), Some(line)) => write!(out, " ({file}:{line})"),
+            (Some(file), None) => write!(out, " ({file})"),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Stop {
@@ -70,6 +115,7 @@ impl Stop {
             detail: detail.into(),
             guest_exit_code: None,
             mismatch: None,
+            location: None,
         }
     }
 
@@ -86,6 +132,7 @@ impl Stop {
             .get("guest_exit_code")
             .and_then(serde_json::Value::as_i64)
             .map(|code| code as i32);
+        read.location = location_of(stop);
         Some(read)
     }
 }
@@ -166,6 +213,9 @@ impl Outcome {
                 None => format!("guest exit {}", exit.code),
             };
             line.push_str(&format!(" ({ended})"));
+        }
+        if let Some(location) = self.stop.as_ref().and_then(|stop| stop.location.as_ref()) {
+            line.push_str(&format!("\npatina: stopped in {location}"));
         }
         line.push_str(match attribution {
             Attribution::Guest => "",
@@ -320,6 +370,7 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
             .get("guest_exit_code")
             .and_then(serde_json::Value::as_i64)
             .map(|code| code as i32);
+        stop.location = location_of(record);
         let Some(class) = RunClass::from_name(&text(record, "class")) else {
             // A stop the supervisor cannot read is a defect in patina's own
             // channel, never the guest's finding.

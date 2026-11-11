@@ -31,6 +31,7 @@ patina-dst-fs-crash.workspace = true
 patina-dst-net-sim.workspace = true
 patina-dst-rng-seeded.workspace = true
 patina-dst-wrapper-fault.workspace = true
+addr2line.workspace = true
 blake3.workspace = true
 clap.workspace = true
 # The campaign out-dir lock is a per-process `fcntl` record lock.
