@@ -221,6 +221,15 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
         }
         flush_stdout();
     }
+    crate::output::progress::emit(
+        "campaign_started",
+        serde_json::json!({
+            "artifact": artifact_path.to_string_lossy(),
+            "out_dir": out_dir.to_string_lossy(),
+            "done": from_gen,
+            "target": state.spec.generations,
+        }),
+    );
 
     // Human-mode progress disclosure: at cadence 1 every generation prints its
     // per-generation line (the full legacy stream, no separate heartbeat); at any
@@ -513,6 +522,31 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             &coverage,
             &edge_coverage,
         )?;
+        // `--progress`: the same disclosure as the human lines above (every
+        // notable generation, and a heartbeat at the `--progress-every`
+        // cadence), plus the last generation, so the stream ends at the target.
+        // Sent after the checkpoint, so `done` is what the out-dir holds.
+        let heartbeat = progress_every > 0 && state.generations_done % progress_every == 0;
+        if novel
+            || class.is_failure()
+            || heartbeat
+            || state.generations_done == state.spec.generations
+        {
+            crate::output::progress::emit(
+                "generation",
+                serde_json::json!({
+                    "generation": generation,
+                    "seed": seed,
+                    "class": class.as_str(),
+                    "novel": novel,
+                    "done": state.generations_done,
+                    "target": state.spec.generations,
+                    "failures": failures_so_far,
+                    "novel_signatures": novel_so_far,
+                    "classes": &state.classes,
+                }),
+            );
+        }
     }
 
     let failures = class_counts_failures(&state.classes);

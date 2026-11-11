@@ -133,8 +133,9 @@ refused by name.",
                     "--progress-every",
                     None,
                     Value::Required("N", Kind::U64),
-                    "Human-mode progress heartbeat every N generations (default 100; 1 = \
-                 full per-generation stream; 0 = silent).",
+                    "Progress heartbeat every N generations (default 100; 1 = \
+                 full per-generation stream; 0 = silent): human-mode lines, or \
+                 `generation` events under --format json --progress.",
                     false,
                 ),
                 f(

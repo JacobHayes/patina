@@ -117,6 +117,10 @@ pub(super) fn build_all(
         apply_rustc_env(&mut command, rustc);
         command.args(target.cargo_args());
         command.args(invocation.features.cargo_args());
+        // Cargo's progress lines are detail; its errors and warnings still print.
+        if !crate::output::options().verbose {
+            command.arg("--quiet");
+        }
         // `cargo rustc` builds a target in test mode only under the `test` or
         // `bench` profile, and refuses `--release` beside `--profile`. `bench`
         // inherits `release`, so `--release` means the codegen a

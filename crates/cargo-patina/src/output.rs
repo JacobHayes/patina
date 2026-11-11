@@ -23,6 +23,7 @@ mod capture;
 mod envelope;
 mod markers;
 mod outcomes;
+pub mod progress;
 mod reports;
 
 pub use capture::Captured;
@@ -79,6 +80,11 @@ pub struct OutputOptions {
     pub report: Option<PathBuf>,
     /// `--verbose`: print Patina's own diagnostics beside the result.
     pub verbose: bool,
+    /// `--progress`: under `--format json`, stream [`progress::PROGRESS_SCHEMA`]
+    /// lines on stderr while the verb runs.
+    pub progress: bool,
+    /// The verb the flags were stripped from, which progress lines name.
+    pub verb: Option<String>,
 }
 
 impl OutputOptions {
@@ -144,6 +150,7 @@ pub fn run_again_command(seed: u64) -> Option<String> {
 /// ignored (the first install wins); unit tests that never install get defaults.
 pub fn install(options: OutputOptions) {
     let _ = OPTIONS.set(options);
+    progress::start_clock();
 }
 
 /// The installed options, or defaults (Human, no render/report) if none were set.
@@ -182,6 +189,8 @@ pub fn extract(arguments: Vec<OsString>) -> Result<(OutputOptions, Vec<OsString>
     options.render = value("--render")?.map(PathBuf::from);
     options.report = value("--report")?.map(PathBuf::from);
     options.verbose = value("--verbose")?.is_some();
+    options.progress = value("--progress")?.is_some();
+    options.verb = rest.first().map(|verb| verb.to_string_lossy().into_owned());
     Ok((options, rest))
 }
 

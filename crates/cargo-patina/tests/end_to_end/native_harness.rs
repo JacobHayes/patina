@@ -40,10 +40,35 @@ mod tests {
         let source = create_native_harness_fixture(directory.path());
         let declared = source.matches("#[test]").count();
         let patina = env!("CARGO_BIN_EXE_patina");
-        let ran = invoke_unchecked(patina, directory.path(), &["test", "--format", "json"]);
+        let ran = invoke_unchecked(
+            patina,
+            directory.path(),
+            &["test", "--format", "json", "--progress"],
+        );
         let document = json_of(&ran);
         assert_eq!(document["schema"], "patina.test/v1");
         assert_eq!(document["listed"], declared, "{document:#}");
+        // `--progress`: one `test_finished` event per test run, counting up
+        // to the tests the document reports, beside the one document.
+        let finished: Vec<serde_json::Value> = progress_events(&ran, "test")
+            .into_iter()
+            .filter(|event| event["event"] == "test_finished")
+            .collect();
+        let ran_tests = results(&document);
+        let failing = ran_tests.values().filter(|class| *class != "ok").count();
+        let done: Vec<u64> = finished
+            .iter()
+            .map(|event| event["done"].as_u64().unwrap())
+            .collect();
+        assert_eq!(done, (1..=ran_tests.len() as u64).collect::<Vec<_>>());
+        assert!(
+            finished
+                .windows(2)
+                .all(|pair| pair[0]["failures"].as_u64() <= pair[1]["failures"].as_u64())
+        );
+        let last = finished.last().unwrap();
+        assert_eq!(last["total"], ran_tests.len(), "{last:#}");
+        assert_eq!(last["failures"], failing, "{last:#}");
         let expected: BTreeMap<String, String> = [
             ("tests::epoch_is_seeded", "ok"),
             ("tests::should_panic_panics", "ok"),

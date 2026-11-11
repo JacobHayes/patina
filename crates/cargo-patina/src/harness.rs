@@ -146,6 +146,10 @@ pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> 
     let toolchain = build::toolchain()?;
     let metadata = select::cargo_metadata(&invocation.manifest, Some(&toolchain.rustc))?;
     let selected = select::select(&invocation, &metadata)?;
+    crate::output::progress::emit(
+        "build_started",
+        serde_json::json!({ "targets": selected.targets.len() }),
+    );
     let built = build::build_all(
         &invocation,
         &toolchain,
@@ -153,6 +157,13 @@ pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> 
         &selected.target_dir,
     )?;
     let build_seconds = started.elapsed().as_secs_f64();
+    crate::output::progress::emit(
+        "build_finished",
+        serde_json::json!({
+            "targets": built.len(),
+            "failed": built.iter().filter(|built| built.guest.is_err()).count(),
+        }),
+    );
     if invocation.no_run {
         return Ok(report::no_run(&built, &selected.skipped, build_seconds));
     }

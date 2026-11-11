@@ -428,6 +428,10 @@ fn build_native_shim_at(
             for package in &cleaned {
                 clean.arg("-p").arg(package);
             }
+            // Its `Removed N files` summary is detail too.
+            if !crate::output::options().verbose {
+                clean.arg("--quiet");
+            }
             let status = clean
                 .status()
                 .map_err(|e| CliError(format!("cleaning shim packages: {e}")))?;

@@ -75,6 +75,8 @@ mod output;
 mod package_routing;
 #[path = "end_to_end/prerun_and_watchdog.rs"]
 mod prerun_and_watchdog;
+#[path = "end_to_end/progress.rs"]
+mod progress;
 #[path = "end_to_end/proptest.rs"]
 mod proptest;
 #[path = "end_to_end/run_facts.rs"]

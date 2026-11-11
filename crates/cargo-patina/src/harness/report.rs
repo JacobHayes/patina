@@ -15,18 +15,37 @@ use std::ffi::OsStr;
 pub(crate) const TEST_SCHEMA: &str = "patina.test/v1";
 
 /// One line when a test finishes: its class, the test, and for one that did
-/// not pass, its seed and why.
+/// not pass, its seed and why. Under `--progress` the line is a
+/// `test_finished` progress event instead.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn progress(
     finished: usize,
     total: usize,
+    failures: usize,
     target: &Target,
     case: &TestCase,
     deciding: Option<(u64, &SeedRun)>,
     seconds: f64,
     elapsed: f64,
 ) {
-    let width = total.to_string().len();
     let class = deciding.map_or(RunClass::Ok, |(_, run)| run.result);
+    if output::progress::wanted() {
+        output::progress::emit(
+            "test_finished",
+            json!({
+                "test": case.name,
+                "target": target.label(),
+                "class": class.as_str(),
+                "seed": deciding.map(|(seed, _)| seed),
+                "seconds": round(seconds),
+                "done": finished,
+                "total": total,
+                "failures": failures,
+            }),
+        );
+        return;
+    }
+    let width = total.to_string().len();
     let mut line = format!(
         "[{finished:>width$}/{total}] {:<16} {} {} ({seconds:.2}s)",
         class.as_str(),

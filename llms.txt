@@ -303,6 +303,16 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   `patina.trace.events/v1` JSON Lines. Human output is unchanged by default.
   NOTE: the selector is `--format`, not
   `--output`, because `--output PATH` is already the build/minimize artifact path.
+- `--progress` (opt-in, needs `--format json`; human output always shows its
+  own progress): while `run`, `campaign` or `test` works, stream progress on
+  stderr as JSON Lines, schema `patina.progress/v1`. Every line is one object
+  with `schema`, `verb`, `event` and `elapsed_secs` plus the event's fields:
+  `build_started`/`build_finished`, `run_started` (`seed`), `campaign_started`
+  (`done`, `target`), `generation` (`done`, `target`, `failures`,
+  `novel_signatures`, `classes`; sent for every failing or novel generation,
+  every `--progress-every` generations and the last one), and `test_finished`
+  (`done`, `total`, `failures`, `class`). stdout still carries the one result.
+  Lines without the schema are diagnostics (a cargo warning, say).
 - `--verbose` / `-v`: a run's end-of-run reports (`PATINA_*_REPORT`, their
   `PATINA WARNING`s), the pre-run gate's notes and
   cargo's progress. Without it a run prints the guest's output, a one-line

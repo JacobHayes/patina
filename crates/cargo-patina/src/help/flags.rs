@@ -13,7 +13,14 @@ pub const GLOBAL_OUTPUT: &[Flag] = &[
         "--format",
         None,
         Value::Required("human|json", Kind::Enum(&["human", "json"])),
-        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v2) on stdout; `coverage --format json` prints patina.coverage/v1, `test --format json` prints patina.test/v1, and `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON.",
+        "Result format (default human). `json` prints one machine-readable result envelope (schema patina.result/v2) on stdout; `coverage --format json` prints patina.coverage/v1, `test --format json` prints patina.test/v1, and `trace events --format json` is the streaming exception and prints patina.trace.events/v1 JSON Lines. `--help --format json` prints this registry as JSON. Add --progress for progress lines on stderr while it runs.",
+        false,
+    ),
+    f(
+        "--progress",
+        None,
+        Value::None,
+        "Under --format json, also stream progress on stderr as JSON Lines (schema patina.progress/v1) while `run`, `campaign` or `test` works: one object per event with `event` and `elapsed_secs`, e.g. a campaign's `generation` events with `done`, `target`, `failures` and `novel_signatures`. stdout still carries the one result. Human output shows its own progress either way.",
         false,
     ),
     f(

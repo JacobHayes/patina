@@ -100,7 +100,15 @@ fn build_noted(
 ) -> Result<PathBuf, CliError> {
     let mut invocation = spec.build;
     invocation.output = Some(output);
+    output::progress::emit(
+        "build_started",
+        serde_json::json!({ "source": spec.origin.to_string_lossy() }),
+    );
     let path = run_native_build(invocation)?;
+    output::progress::emit(
+        "build_finished",
+        serde_json::json!({ "artifact": path.to_string_lossy() }),
+    );
     let bytes = fs::read(&path).map_err(|error| {
         CliError(format!(
             "failed to read the built artifact {}: {error}",

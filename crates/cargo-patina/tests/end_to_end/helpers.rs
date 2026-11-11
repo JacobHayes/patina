@@ -640,3 +640,41 @@ pub(super) fn supervisor_identity() -> String {
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     format!("sha256:{hex}")
 }
+
+/// The one JSON value a `--format json` invocation printed on stdout.
+pub(super) fn single_envelope(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "--format json stdout was not one JSON value: {error}\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+
+/// The `--progress` events on stderr: every line must be one JSON object
+/// carrying the progress schema and `verb`, with `elapsed_secs` never going
+/// back.
+pub(super) fn progress_events(output: &Output, verb: &str) -> Vec<serde_json::Value> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let events: Vec<serde_json::Value> = stderr
+        .lines()
+        .map(|line| {
+            let event: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("{error}: {line:?}\nstderr:\n{stderr}"));
+            assert_eq!(event["schema"], "patina.progress/v1", "{line}");
+            assert_eq!(event["verb"], verb, "{line}");
+            assert!(event["event"].is_string(), "{line}");
+            event
+        })
+        .collect();
+    let elapsed: Vec<f64> = events
+        .iter()
+        .map(|event| event["elapsed_secs"].as_f64().expect("elapsed_secs"))
+        .collect();
+    assert!(
+        elapsed.windows(2).all(|pair| pair[0] <= pair[1]),
+        "{elapsed:?}"
+    );
+    events
+}

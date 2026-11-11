@@ -663,6 +663,18 @@ pub(super) fn execute_native_run(mut invocation: NativeRunInvocation) -> Result<
         NativeRunMode::Seeded { .. } | NativeRunMode::Replay { .. } => None,
     };
 
+    output::progress::emit(
+        "run_started",
+        match &invocation.mode {
+            NativeRunMode::Seeded { seed } | NativeRunMode::Record { seed, .. } => {
+                serde_json::json!({ "artifact": binary.to_string_lossy(), "seed": seed })
+            }
+            NativeRunMode::Replay { path, .. } => serde_json::json!({
+                "artifact": binary.to_string_lossy(),
+                "trace": path.to_string_lossy(),
+            }),
+        },
+    );
     let mut crash_restart = None;
     let mut captured = if let Some(plan) = &crash_restart_plan {
         let run = supervise_crash_restart(plan, |launch| {

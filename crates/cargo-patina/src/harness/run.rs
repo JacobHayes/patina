@@ -193,6 +193,7 @@ fn run_tests(
     let mut seconds: Vec<f64> = vec![0.0; cases.len()];
     let total = cases.len();
     let mut finished = 0;
+    let mut failures = 0;
     let started = Instant::now();
     let results = pool(
         invocation.jobs,
@@ -228,9 +229,13 @@ fn run_tests(
                 finished += 1;
                 let case = &cases[index];
                 let deciding = runs[index].iter().next();
+                if deciding.is_some() {
+                    failures += 1;
+                }
                 super::report::progress(
                     finished,
                     total,
+                    failures,
                     &built[case.target].target,
                     case,
                     deciding.map(|(seed, run)| (*seed, run)),
