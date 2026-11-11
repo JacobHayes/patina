@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 #[test]
 fn an_excluded_knob_is_never_drawn_and_leaves_the_rest_alone() {
     let net = CampaignSpec {
-        faults: FaultPlanes::from_names(["net"]).unwrap(),
+        vary: Vary::from_names(["net"]).unwrap(),
         ..CampaignSpec::default()
     };
     let excluded = CampaignSpec {
@@ -36,7 +36,7 @@ fn an_excluded_knob_is_never_drawn_and_leaves_the_rest_alone() {
 #[test]
 fn the_crash_plane_draws_two_independent_moving_rates() {
     let spec = CampaignSpec {
-        faults: FaultPlanes::from_names(["crash"]).unwrap(),
+        vary: Vary::from_names(["crash"]).unwrap(),
         ..CampaignSpec::default()
     };
     let value = |flags: &[String], name: &str| -> String {
@@ -74,14 +74,17 @@ fn the_crash_plane_draws_two_independent_moving_rates() {
     assert!(!flags.iter().any(|flag| flag == "--process-crash-permille"));
 }
 
-/// `--faults=PLANE,...` emits exactly the selected planes' knobs, at the values
+/// `--vary PLANE,...` emits exactly the selected planes' knobs, at the values
 /// an every-plane campaign draws for the same generation, and leaves the rest of
 /// the generation alone: the host table and `--swarm` still ride along, so swarm
 /// masks within the subset.
 #[test]
 fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
     let spec = |faults| CampaignSpec {
-        faults,
+        vary: Vary {
+            faults,
+            ..Vary::default()
+        },
         swarm: true,
         dns_entries: vec!["db.internal=10.0.0.5".into()],
         ..CampaignSpec::default()
@@ -123,9 +126,9 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
     };
     let mut subsets: Vec<FaultPlanes> = FaultPlane::ALL
         .into_iter()
-        .map(|plane| FaultPlanes::from_names([plane.name()]).unwrap())
+        .map(|plane| Vary::from_names([plane.name()]).unwrap().faults)
         .collect();
-    subsets.push(FaultPlanes::from_names(["net", "sleep"]).unwrap());
+    subsets.push(Vary::from_names(["net", "sleep"]).unwrap().faults);
     for subset in subsets {
         let mut drawn = BTreeSet::new();
         for generation in 0..32 {
@@ -134,7 +137,7 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
             assert_eq!(
                 flags,
                 restrict(derive_flags(&spec(FaultPlanes::ALL), &hash), subset),
-                "--faults={subset:?} generation {generation}"
+                "--vary {subset:?} generation {generation}"
             );
             assert!(flags.iter().any(|flag| flag == "--swarm"));
             drawn.extend(flags.iter().filter_map(|flag| knob_of(flag)));
@@ -144,7 +147,7 @@ fn a_plane_subset_draws_exactly_its_planes_at_the_every_plane_values() {
                 drawn
                     .iter()
                     .any(|knob| *knob != FaultKnob::DnsEntry && in_plane(*knob, plane)),
-                "--faults={subset:?} drew nothing from {plane:?}"
+                "--vary {subset:?} drew nothing from {plane:?}"
             );
         }
     }
@@ -160,7 +163,7 @@ fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
     let at = |permille: u64, generation: u64| {
         derive_flags(
             &CampaignSpec {
-                faults: FaultPlanes::ALL,
+                vary: Vary::from_names(["faults"]).unwrap(),
                 fault_scale_permille: permille,
                 ..CampaignSpec::default()
             },
@@ -188,7 +191,7 @@ fn the_fault_scale_leaves_the_tcp_buffer_shape_band_alone() {
 #[test]
 fn the_dns_band_rides_on_the_host_table() {
     let bare = CampaignSpec {
-        faults: FaultPlanes::ALL,
+        vary: Vary::from_names(["faults"]).unwrap(),
         ..CampaignSpec::default()
     };
     let hash = generation_hash(0, 3);
@@ -266,8 +269,7 @@ fn the_native_invocation_surface_is_forwarded_to_every_generation() {
 #[test]
 fn a_guided_child_inherits_its_ancestors_unmutated_knobs() {
     let spec = CampaignSpec {
-        yield_stride: true,
-        faults: FaultPlanes::ALL,
+        vary: Vary::from_names(["yield-stride", "faults"]).unwrap(),
         ..CampaignSpec::default()
     };
     let units = mutation_units(&spec);

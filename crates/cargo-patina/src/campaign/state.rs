@@ -15,13 +15,11 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// The out-dir's resumable state. `v2` adds `verdicts` to every notable run: the
-/// `(kind, label)` set the generation reported through the verdict ABI, which is
-/// what `minimize --generation N` targets when no `--marker` is given. It is a
-/// required field, not an optional one — a v1 out-dir is refused by name rather
-/// than resumed with a silently empty verdict set that would make an auto-target
-/// minimize look like "this generation reported nothing".
-const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v3";
+/// The out-dir's resumable state. Every notable run carries `verdicts`, the
+/// `(kind, label)` set the generation reported through the verdict ABI, which
+/// `minimize --generation N` targets when no `--marker` is given. An out-dir of
+/// another schema is refused by name rather than read with a guessed meaning.
+const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v4";
 const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v2";
 
 // ===========================================================================
@@ -527,13 +525,14 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     map.insert("seed_base".into(), spec.seed_base.into());
     map.insert("timeout_secs".into(), spec.timeout_secs.into());
     map.insert("guest_args".into(), spec.guest_args.clone().into());
-    map.insert("buggify".into(), spec.buggify.into());
     map.insert("swarm".into(), spec.swarm.into());
-    map.insert("pct".into(), spec.pct.into());
-    map.insert("faults".into(), spec.faults.to_json());
     // Every key below is default-omitted: `spec_from_state_json` rebuilds from
     // `CampaignSpec::default()` and demands `spec_to_json` reproduce the file
     // byte for byte, so a key is written only when it differs from the default.
+    let vary = spec.vary.names();
+    if !vary.is_empty() {
+        map.insert("vary".into(), vary.into());
+    }
     if !spec.exclude_knobs.is_empty() {
         let flags: Vec<&str> = spec
             .exclude_knobs
@@ -547,9 +546,6 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
             "fault_scale_permille".into(),
             spec.fault_scale_permille.into(),
         );
-    }
-    if spec.yield_stride {
-        map.insert("yield_stride".into(), true.into());
     }
     if !spec.dns_entries.is_empty() {
         map.insert("dns_entries".into(), spec.dns_entries.clone().into());
@@ -619,10 +615,7 @@ pub(super) fn spec_from_state_json(value: &serde_json::Value) -> Result<Campaign
         "seed_base",
         "timeout_secs",
         "guest_args",
-        "buggify",
         "swarm",
-        "pct",
-        "faults",
         "report",
         "plateau_after",
     ] {
@@ -1114,7 +1107,7 @@ mod tests {
             CampaignSpec {
                 generations: 3,
                 timeout_secs: 9,
-                buggify: true,
+                vary: super::super::planes::Vary::from_names(["buggify"]).unwrap(),
                 watchdog_nanos: Some(5),
                 ..CampaignSpec::default()
             },

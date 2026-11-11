@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use patina_dst_runtime::FaultKnob;
 
-use super::planes::{FAULT_PLANE_NAMES, FaultPlanes};
+use super::planes::{VARY_NAMES, Vary};
 use super::{ClassifyRules, FAULT_SCALE_FULL, RunClass};
 use crate::{CliError, help};
 
@@ -36,29 +36,19 @@ pub struct CampaignSpec {
     pub seed_base: u64,
     pub timeout_secs: u64,
     pub guest_args: Vec<String>,
-    /// Randomize cooperative-SUT (buggify) activation/fire per generation.
-    pub buggify: bool,
     /// Apply seed-derived swarm fault-class selection.
     pub swarm: bool,
-    /// Randomize a PCT bug depth per generation.
-    pub pct: bool,
-    /// Randomize the edge-hook yield stride (`run --yield-stride`) per
-    /// generation, over powers of two from 1 (every edge) to 1024, so a sweep of
-    /// an `--instrument` artifact varies how densely atomics-only code is
-    /// preempted. Opt-in: a dense stride multiplies a
-    /// generation's cost, and an artifact without the hook has no stride to
-    /// honour.
-    pub yield_stride: bool,
-    /// The fault planes whose knobs are randomized per generation: none (the
-    /// default), every plane (bare `--faults`), or the subset `--faults=PLANE,...`
-    /// names.
+    /// What each generation draws (`--vary`): the buggify rates, the PCT
+    /// depth, an `--instrument` artifact's yield stride (a log sweep from every
+    /// edge to one in 1024; a dense stride multiplies a generation's cost), the
+    /// knobs of the selected fault planes.
     ///
-    /// A subset exists for the guest that needs one plane always off. A network
-    /// testbed whose store lives on the simulated disk only because it is the
-    /// real store gets nothing from fs faults but failed opens, which end the
-    /// generation before it reaches the network behaviour being swept.
-    pub faults: FaultPlanes,
-    /// Knobs of the selected [`Self::faults`] planes that are never drawn,
+    /// A plane subset exists for the guest that needs one plane always off. A
+    /// network testbed whose store lives on the simulated disk only because it
+    /// is the real store gets nothing from fs faults but failed opens, which end
+    /// the generation before it reaches the network behaviour being swept.
+    pub vary: Vary,
+    /// Knobs of the selected [`Self::vary`] planes that are never drawn,
     /// named by their `run` flag (`"exclude_knobs": ["--net-reset-permille"]`).
     ///
     /// For a guest that models only some of a plane's faults: a pub-sub broker
@@ -66,12 +56,12 @@ pub struct CampaignSpec {
     /// resets but a run that ends before the fault the campaign is sweeping.
     /// The excluded knob emits no flag in any generation; every other band
     /// draws exactly what it draws without the exclusion, because each reads
-    /// its own claimed byte. A name that is not a `--faults` knob, or a knob
+    /// its own claimed byte. A name that is not a knob a plane draws, or a knob
     /// whose plane the campaign does not select, is refused rather than
     /// recorded as an exclusion that excludes nothing.
     pub exclude_knobs: BTreeSet<FaultKnob>,
     /// Scale (per-mille) applied to every seed-drawn fault INTENSITY under
-    /// [`Self::faults`]: `1000` (the default) leaves the exploration bands exactly
+    /// [`Self::vary`]: `1000` (the default) leaves the exploration bands exactly
     /// as they have always been, `10` makes every injected fault a hundredfold
     /// rarer.
     ///
@@ -98,7 +88,7 @@ pub struct CampaignSpec {
     /// pick a fault's SHAPE rather than its intensity. `--net-tcp-buffer-bytes` is
     /// a capacity where a SMALLER value is the harsher one, so scaling it down
     /// would do the opposite of what the operator asked; and
-    /// `--buggify`/`--sched-pct`/`--swarm` configure exploration of the guest's own
+    /// `buggify`/`sched-pct`/`--swarm` configure exploration of the guest's own
     /// cooperative sites rather than injecting an environment fault; and the
     /// crash kind, which is a model.
     pub fault_scale_permille: u64,
@@ -106,7 +96,7 @@ pub struct CampaignSpec {
     ///
     /// Part of the campaign's shape rather than a per-generation draw: the names
     /// a guest resolves are its workload, not a fault. It is what makes the
-    /// `--faults` DNS band non-inert — with no defined name, a guest's lookups
+    /// DNS plane non-inert — with no defined name, a guest's lookups
     /// are all NXDOMAIN by semantics and no DNS fault is ever eligible — so the
     /// band is only emitted when this is non-empty.
     pub dns_entries: Vec<String>,
@@ -178,11 +168,8 @@ impl Default for CampaignSpec {
             seed_base: 0,
             timeout_secs: 60,
             guest_args: Vec::new(),
-            buggify: false,
             swarm: false,
-            pct: false,
-            yield_stride: false,
-            faults: FaultPlanes::NONE,
+            vary: Vary::default(),
             exclude_knobs: BTreeSet::new(),
             fault_scale_permille: FAULT_SCALE_FULL,
             dns_entries: Vec::new(),
@@ -231,11 +218,8 @@ impl CampaignSpec {
                         })
                         .collect::<Result<_, _>>()?;
                 }
-                "buggify" => self.buggify = json_bool(key, val)?,
                 "swarm" => self.swarm = json_bool(key, val)?,
-                "pct" => self.pct = json_bool(key, val)?,
-                "yield_stride" => self.yield_stride = json_bool(key, val)?,
-                "faults" => self.faults = json_fault_planes(key, val)?,
+                "vary" => self.vary = json_vary(key, val)?,
                 "exclude_knobs" => self.exclude_knobs = json_exclude_knobs(key, val)?,
                 "fault_scale_permille" => {
                     // A spec file bypasses the CLI value grammar, so hold it to
@@ -372,7 +356,7 @@ impl CampaignSpec {
                 other => {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
-                         timeout_secs, guest_args, buggify, swarm, pct, yield_stride, faults, exclude_knobs, \
+                         timeout_secs, guest_args, swarm, vary, exclude_knobs, \
                          fault_scale_permille, \
                          dns_entries, \
                          allow_symbols, allow_unsupported_symbols, address_layout, \
@@ -406,33 +390,24 @@ fn json_address_layout(
     }
 }
 
-/// `"faults"`: `true` for every plane, `false` for none, or an array of plane
-/// names for a subset.
-fn json_fault_planes(key: &str, value: &serde_json::Value) -> Result<FaultPlanes, CliError> {
+/// `"vary"`: an array of `--vary` dimensions.
+fn json_vary(key: &str, value: &serde_json::Value) -> Result<Vary, CliError> {
     let malformed = || {
         CliError(format!(
-            "campaign spec {key:?} must be a boolean or an array of fault planes ({})",
-            FAULT_PLANE_NAMES.join(", ")
+            "campaign spec {key:?} must be an array of --vary dimensions ({})",
+            VARY_NAMES.join(", ")
         ))
     };
-    if let Some(all) = value.as_bool() {
-        return Ok(if all {
-            FaultPlanes::ALL
-        } else {
-            FaultPlanes::NONE
-        });
-    }
     let names = value
         .as_array()
         .ok_or_else(malformed)?
         .iter()
         .map(|name| name.as_str().ok_or_else(malformed))
         .collect::<Result<Vec<_>, _>>()?;
-    FaultPlanes::from_names(names)
-        .map_err(|error| CliError(format!("campaign spec {key:?} {error}")))
+    Vary::from_names(names).map_err(|error| CliError(format!("campaign spec {key:?}: {error}")))
 }
 
-/// `"exclude_knobs"`: an array of `run` flags, each a knob some `--faults`
+/// `"exclude_knobs"`: an array of `run` flags, each a knob some `--vary`
 /// plane draws. Whether the campaign selects that plane is checked once the
 /// spec and the flags are merged (`parse.rs`).
 fn json_exclude_knobs(
@@ -463,7 +438,7 @@ fn json_exclude_knobs(
                 .find(|knob| knob.meta().flag == name && super::excludable(*knob))
                 .ok_or_else(|| {
                     CliError(format!(
-                        "campaign spec {key:?} names {entry}, which is not a knob --faults draws; \
+                        "campaign spec {key:?} names {entry}, which is not a knob a --vary plane draws; \
                          expected one or more of {}",
                         excludable()
                     ))
@@ -714,7 +689,7 @@ mod tests {
             .unwrap();
         let specs = [
             CampaignSpec {
-                pct: true,
+                vary: Vary::from_names(["sched-pct"]).unwrap(),
                 ..CampaignSpec::default()
             },
             classified,
@@ -723,21 +698,21 @@ mod tests {
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                faults: FaultPlanes::ALL,
+                vary: Vary::from_names(["faults"]).unwrap(),
                 dns_entries: vec!["db.internal=10.0.0.5".into(), "cache=10.0.0.6".into()],
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                faults: FaultPlanes::from_names(["net", "sleep"]).unwrap(),
+                vary: Vary::from_names(["net", "sleep"]).unwrap(),
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                faults: FaultPlanes::from_names(["net"]).unwrap(),
+                vary: Vary::from_names(["net"]).unwrap(),
                 exclude_knobs: [FaultKnob::NetResetPermille, FaultKnob::NetDropPermille].into(),
                 ..CampaignSpec::default()
             },
             CampaignSpec {
-                faults: FaultPlanes::from_names(["crash"]).unwrap(),
+                vary: Vary::from_names(["crash"]).unwrap(),
                 exclude_knobs: [FaultKnob::ProcessCrashPermille].into(),
                 ..CampaignSpec::default()
             },
@@ -763,18 +738,19 @@ mod tests {
         ] {
             assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
         }
-        // Every plane records as `true`.
+        // Every plane records as `faults`, whichever way it was named.
         let mut every = bare.clone();
-        every["faults"] = serde_json::json!(true);
+        every["vary"] = serde_json::json!(["faults"]);
         assert_eq!(
-            spec_from_state_json(&every).unwrap().faults,
-            FaultPlanes::ALL
+            spec_from_state_json(&every).unwrap().vary,
+            Vary::from_names(super::super::FaultPlane::ALL.map(super::super::FaultPlane::name))
+                .unwrap()
         );
         // The exploration policy is part of the coverage store's compatibility
         // fingerprint, so a PCT campaign never pools coverage with a non-PCT
         // one.
         let exploring = CampaignSpec {
-            pct: true,
+            vary: Vary::from_names(["sched-pct"]).unwrap(),
             ..CampaignSpec::default()
         };
         let instrumented = crate::Instrumentation {
@@ -801,7 +777,10 @@ mod tests {
             r#"{"exclude_knobs": ["net-reset-permille"]}"#,
             r#"{"exclude_knobs": "--net-reset-permille"}"#,
             r#"{"exclude_knobs": [7]}"#,
-            // Real knobs that no `--faults` plane draws exclude nothing.
+            r#"{"vary": ["bogus"]}"#,
+            r#"{"vary": "buggify"}"#,
+            r#"{"faults": true}"#,
+            // Real knobs that no `--vary` plane draws exclude nothing.
             r#"{"exclude_knobs": ["--net-partition"]}"#,
         ] {
             let json: serde_json::Value = serde_json::from_str(source).unwrap();
@@ -813,12 +792,12 @@ mod tests {
         let mut spec = CampaignSpec::default();
         spec.apply_json(&serde_json::json!({
             "generations": 12,
-            "buggify": true,
+            "vary": ["buggify", "net"],
             "exclude_knobs": ["--net-connect-refuse-permille"],
         }))
         .unwrap();
         assert_eq!(spec.generations, 12);
-        assert!(spec.buggify);
+        assert!(spec.vary.buggify);
         assert_eq!(
             spec.exclude_knobs.into_iter().collect::<Vec<_>>(),
             [FaultKnob::NetConnectRefusePermille]

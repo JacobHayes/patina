@@ -154,11 +154,11 @@ example ledger
   finds ledger-render.log "$patina" run ./ledger-guest --seed "$found" --buggify --render run.html
   [[ -s run.html ]] || fail "ledger: a run rendered no page without --record"
   step ledger-trace.log "$patina" trace info bug.patina
-  finds ledger-campaign.log "$patina" campaign ./ledger-guest --buggify --gens 30 --out-dir ledger-out
+  finds ledger-campaign.log "$patina" campaign ./ledger-guest --vary buggify --gens 30 --out-dir ledger-out
   generation=$(find ledger-out/failures -name 'generation-*.patina' | head -n 1)
   [[ -n $generation ]] || { cat "$work/ledger-campaign.log" >&2; fail "ledger: the campaign kept no failing trace"; }
   finds ledger-campaign-replay.log "$patina" replay ./ledger-guest "$generation"
-  finds ledger-campaign-again.log "$patina" campaign ./ledger-guest --buggify --gens 30 --out-dir ledger-out
+  finds ledger-campaign-again.log "$patina" campaign ./ledger-guest --vary buggify --gens 30 --out-dir ledger-out
   if cargo test >"$work/ledger-test.log" 2>&1; then
     cat "$work/ledger-test.log" >&2
     fail "ledger: cargo test passed over the planted bug"

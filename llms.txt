@@ -168,22 +168,25 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   finding. Audit source-first (or a `patina build` artifact): only a
   shim-linked binary shows the true post-interposition residual, so a stock
   prebuilt binary is refused unless `--raw`.
-- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes[=MIN_GENS]] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--dns-entry NAME=ADDR] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
+- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
-  and knobs are a pure function of the generation number. `--faults` bands every
+  and knobs are a pure function of the generation number. `--vary DIM,...`
+  names what each generation draws: `buggify` (fresh fire odds), `sched-pct`
+  (a PCT depth), `yield-stride` (a stride from 1 to 1024), and fault planes.
+  `faults` bands every
   fault plane's knobs — `fs` (error/short/latency), `crash` (independent
   per-operation machine and process crash rates; native-only),
   `net` (drop/latency/jitter/duplicate/connect-refuse/reset/TCP buffer), `dns`,
   `entropy`, `sleep` (sleep jitter) and `epoch` (realtime-epoch jump) — so
-  successive generations explore different fault shapes. `--faults=net,sleep`
-  (spec key `"faults": ["net", "sleep"]`) draws only the named planes, at the
+  successive generations explore different fault shapes. `--vary net,sleep`
+  (spec key `"vary": ["net", "sleep"]`) draws only the named planes, at the
   values an every-plane campaign draws, for a guest that needs a plane always
-  off; an unknown plane is a usage error. The subset is recorded in the out-dir
-  spec, so `--extend`/`--resume`, the reproduce commands and
+  off; an unknown dimension is a usage error. The list is recorded in the out-dir
+  spec, so a continuation, the reproduce commands and
   `minimize --generation` keep it, and `--swarm` masks within it. The spec key
   `"exclude_knobs": ["--net-reset-permille", ...]` turns single knobs of a
   selected plane off, for a guest that models only some of its faults; a name
-  that is not a drawn `--faults` knob, or whose plane is not selected, is
+  that is not a drawn fault knob, or whose plane is not selected, is
   refused, and the exclusion is recorded in the out-dir spec. `--dns-entry`
   (repeatable) is campaign SHAPE, not a per-generation draw: it records the host
   table in the out-dir spec, forwards it to every generation, and is what enables
@@ -258,7 +261,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   then record the minimal-knob run as a trace that replays without flags. Patina's own
   oracle needs no hand-written failure text: it targets the `verdicts` the
   campaign recorded for that generation in `campaign-state.json`
-  (`patina.campaign.state/v3`), and a candidate still fails only when its replay
+  (`patina.campaign.state/v4`), and a candidate still fails only when its replay
   reports every one of those `(kind, label)` pairs. Only
   failure verdicts (`violation`, `abort_intent`) are targeted — a `pass` reports
   that a property held, which is not a failure to preserve — and `detail` is

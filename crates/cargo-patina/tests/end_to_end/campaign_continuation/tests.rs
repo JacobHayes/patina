@@ -451,7 +451,7 @@ fn a_campaign_command_given_again_continues_its_out_dir() {
 
     let recorded = fs::read(out.join("campaign-state.json")).unwrap();
     let guest = fs::read(out.join("guest")).unwrap();
-    let other_settings = campaign(&["--gens", "3", "--buggify"]);
+    let other_settings = campaign(&["--gens", "3", "--vary", "buggify"]);
     assert_eq!(other_settings.status.code(), Some(2), "{other_settings:?}");
     fs::write(&source, "fn main() {\n    std::process::exit(4);\n}\n").unwrap();
     let other_guest = campaign(&["--gens", "3"]);
@@ -541,11 +541,12 @@ fn campaign_continuation_refusals_are_loud() {
             module_arg,
             "--gens",
             "1",
-            "--buggify",
+            "--vary",
+            "buggify",
             "--out-dir",
             out_dir,
         ]),
-        "buggify",
+        "vary",
     );
     assert_refuses(
         run(&["campaign", "--resume", "--out-dir", out_dir]),

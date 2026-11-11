@@ -326,13 +326,7 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         ),
         "--sched-pct",
     ),
-    f(
-        "--swarm",
-        None,
-        Value::None,
-        "Seed-derived swarm selection of a fault-class subset.",
-        false,
-    ),
+    SWARM_FLAG,
     f(
         "--yield-stride",
         None,
@@ -341,6 +335,14 @@ pub(super) const NATIVE_SCHEDULE_FLAGS: &[Flag] = &[
         false,
     ),
 ];
+
+pub(super) const SWARM_FLAG: Flag = f(
+    "--swarm",
+    None,
+    Value::None,
+    "Seed-derived swarm selection of a fault-class subset.",
+    false,
+);
 
 pub(super) const ALLOW_FLAG: Flag = f(
     "--allow",

@@ -6,7 +6,7 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--buggify] [--swarm] [--sched-pct] [--yield-stride] [--faults[=PLANE,...]] [--fault-scale-permille N] [--dns-entry NAME=ADDR] [--liveness-watchdog N] [--converge-within N] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
+        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
         "patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
         "patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
     ],
@@ -45,33 +45,28 @@ on-disk artifacts). Campaigns also write <out-dir>/sites.json (schema \
 patina.campaign.sites/v1), summarize SDK site coverage, and fail by default \
 when a `sometimes!`/`reachable!` oracle is never satisfied. Literal-label SDK \
 macro sites are declared through the link-time table, so never-reached oracles \
-appear with registered_gens=0; --allow-unmet-sometimes reports but waives that gate. `--faults` draws every fault plane; `--faults=net,sleep` draws only the \
-named planes, for a guest that needs one plane always off (a store that must \
-open on the simulated disk, say), and is recorded and pinned like every spec \
-flag. The spec key `\"exclude_knobs\": [\"--net-reset-permille\"]` turns single \
-knobs of a selected plane off, for a guest that models only some of a plane's \
-faults (a client that treats a reset connection as fatal, say); a name that is \
-not a knob --faults draws, or whose plane is not selected, is refused. The \
-`--faults` bands are tuned for an aggressive sweep (up to 100 \
-per-mille of filesystem operations failed, 200 per-mille short); \
---fault-scale-permille dampens every intensity band uniformly for a workload that \
-needs faults to be RARE enough to run to completion. It is part of the campaign's \
-shape, so it is recorded in the out-dir spec, baked into the per-generation flags \
-the reproduce commands replay, and refused on a continuation like every other spec \
-flag.\n\
+appear with registered_gens=0; --allow-unmet-sometimes reports but waives that gate.\n\
 \n\
-The crash plane (`crash` in --faults) draws the machine's and the process's \
-per-crash-point crash rates independently, each on a power-of-two sweep; a \
-generation whose crash lands restarts once from the image the crash leaves. `minimize --generation` on a crash generation shrinks the crashed and the \
+`--vary` names what each generation draws from its seed; everything else is \
+fixed. `--vary faults` draws every fault plane; `--vary net,sleep` only the \
+named ones, for a guest that needs one plane always off (a store that must open \
+on the simulated disk, say). The spec key `\"exclude_knobs\": \
+[\"--net-reset-permille\"]` turns single knobs of a selected plane off, for a \
+guest that models only some of a plane's faults (a client that treats a reset \
+connection as fatal, say); a name that is not a knob of a selected plane is \
+refused. The plane bands are tuned for an aggressive sweep (up to 100 per-mille \
+of filesystem operations failed, 200 per-mille short); --fault-scale-permille \
+dampens every intensity band uniformly for a workload that needs faults to be \
+RARE enough to run to completion. The crash plane draws the machine's and the \
+process's per-crash-point crash rates independently, each on a power-of-two \
+sweep; a generation whose crash lands restarts once from the image the crash \
+leaves. `minimize --generation` on a crash generation shrinks the crashed and the \
 restarted incarnation separately, keeping the crash on the operation it followed.\n\
 \n\
-A native artifact's `run` invocation shape is forwarded verbatim to every \
-generation: the pre-run gate surface `--allow SYMBOL` / `--allow-unsupported-symbols`. \
-Without it a guest needing either is refused identically in every generation \
-rather than swept. It is part of the campaign's shape, so it is recorded in \
-the out-dir spec, replayed by the reproduce commands, and refused on a \
-continuation like every other spec flag; a non-native artifact carrying one is \
-refused by name.",
+The run options are `run`'s own flags, given to every generation and to every \
+reproduce command. Like `--vary` and every other setting, they are part of the \
+campaign's shape: recorded in the out-dir spec, and refused on a continuation \
+that would change them.",
     families: &[fam(Family::Sole, "`campaign`", None)],
     groups: &[
         Group {
@@ -160,48 +155,17 @@ refused by name.",
                     false,
                 ),
                 f(
-                    "--buggify",
+                    "--vary",
                     None,
-                    Value::None,
-                    "Randomize cooperative-SUT (buggify) activation/fire per generation.",
-                    false,
-                ),
-                f(
-                    "--swarm",
-                    None,
-                    Value::None,
-                    "Apply seed-derived swarm fault-class selection.",
-                    false,
-                ),
-                f(
-                    "--sched-pct",
-                    None,
-                    Value::None,
-                    "Randomize a PCT bug depth per generation.",
-                    false,
-                ),
-                f(
-                    "--yield-stride",
-                    None,
-                    Value::None,
-                    "Randomize the yield stride (1 to 1024 edges) per generation; needs an --instrument artifact.",
-                    false,
-                ),
-                f(
-                    "--faults",
-                    None,
-                    Value::Optional(
-                        "PLANE,...",
-                        Kind::EnumList(crate::campaign::FAULT_PLANE_NAMES),
-                    ),
-                    "Randomize fault knobs per generation over every fault plane (bare) or only the named ones: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump), crash (native only: machine and process crash rates). A plane left out draws none of its knobs, and --swarm masks within the planes selected.",
+                    Value::Required("DIM,...", Kind::EnumList(crate::campaign::VARY_NAMES)),
+                    "What each generation draws from its seed: buggify (activation and firing rates), sched-pct (a PCT depth from 1 to 5), yield-stride (1 to 1024 edges; needs an --instrument artifact), and fault planes: fs (error, short I/O, latency), net (drop, latency, jitter, duplicate, connect refuse, reset, TCP buffer), dns (failure, latency; needs --dns-entry), entropy (GRND_NONBLOCK failure), sleep (sleep jitter), epoch (realtime-epoch jump), crash (native only: machine and process crash rates), or faults for every plane. Nothing varies by default.",
                     false,
                 ),
                 f(
                     "--fault-scale-permille",
                     None,
                     Value::Required("N", Kind::Permille),
-                    "Dampen every --faults intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Shape bands such as the TCP buffer size, and the cooperative-SUT knobs, are left alone.",
+                    "Dampen every fault plane's intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Shape bands such as the TCP buffer size, and the cooperative-SUT knobs, are left alone.",
                     false,
                 ),
                 f(
@@ -225,44 +189,20 @@ refused by name.",
                     "Skip reproduction verification: by default each novel finding's reproduce command runs once and a seeded one-in-16 sample of clean generations runs twice, and a differing outcome is NONDETERMINISM.",
                     false,
                 ),
-                COMPUTE_WATCHDOG_FLAG,
-                f(
-                    "--liveness-watchdog",
-                    None,
-                    Value::Required("N", Kind::U64),
-                    "Liveness-watchdog budget (virtual nanoseconds) applied every generation.",
-                    false,
-                ),
-                f(
-                    "--converge-within",
-                    None,
-                    Value::Required("N", Kind::U64),
-                    "Heal-then-converge budget (virtual nanoseconds) applied every generation.",
-                    false,
-                ),
-                f(
-                    "--heal-after",
-                    None,
-                    Value::Required("N", Kind::U64),
-                    "Explicit heal-then-converge arm-time override (virtual nanoseconds).",
-                    false,
-                ),
             ],
         },
         Group {
-            // Part of the campaign's shape, so it is recorded in the out-dir spec and
-            // refused on `--extend`/`--resume` like every other spec flag.
-            title: "DNS host table (forwarded to every generation)",
-            families: SOLE,
-            flags: DNS_ENTRY_FLAGS,
-        },
-        Group {
-            // `run <BINARY>`'s pre-run-gate surface, forwarded verbatim to
-            // every generation's child `run` (and to the reproduce commands, since
-            // these are host/build facts a trace cannot carry).
-            title: "Native run options (forwarded to every generation)",
+            // `run`'s own flags, forwarded verbatim to every generation's child
+            // `run` and recorded in the out-dir spec.
+            title: "Run options (every generation runs with them)",
             families: SOLE,
             flags: &[
+                SWARM_FLAG,
+                COMPUTE_WATCHDOG_FLAG,
+                LIVENESS_FLAGS[0],
+                LIVENESS_FLAGS[1],
+                LIVENESS_FLAGS[2],
+                DNS_ENTRY_FLAGS[0],
                 Flag {
                     doc: "Add a known-safe symbol to every generation's pre-run gate allow list.",
                     ..ALLOW_FLAG
@@ -276,14 +216,14 @@ refused by name.",
                     ..ALLOW_RANDOMIZED_LAYOUT_FLAG
                 },
                 Flag {
-                    doc: "The number of CPUs every generation's guest sees (default 4, at most 1024); recorded in the campaign's state and pinned on --extend/--resume.",
+                    doc: "The number of CPUs every generation's guest sees (default 4, at most 1024).",
                     ..CPUS_FLAG
                 },
                 f(
                     "--mount",
                     None,
                     Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
-                    "Capture HOST_DIR into every generation's guest filesystem at GUEST_DIR (`/` unless named), as `run --mount` does; recorded (absolute) in the campaign's state, pinned on --extend/--resume, and re-supplied to every reproduce command.",
+                    "Capture HOST_DIR into every generation's guest filesystem at GUEST_DIR (`/` unless named), as `run --mount` does; recorded absolute, with the corpus hash a continuation checks, and re-supplied to every reproduce command.",
                     false,
                 ),
             ],

@@ -56,8 +56,8 @@ pub(crate) use generation::{
 };
 pub use parse::{CampaignInvocation, parse};
 pub use patina_dst_abi::RunClass;
-pub(crate) use planes::FAULT_PLANE_NAMES;
-pub use planes::{FaultPlane, FaultPlanes};
+pub(crate) use planes::VARY_NAMES;
+pub use planes::{FaultPlane, FaultPlanes, Vary};
 pub(crate) use repro::{GenerationRepro, generation_repro, run_reduced_generation};
 pub use spec::CampaignSpec;
 pub(crate) use spec::DEFAULT_OUT_DIR;
@@ -131,15 +131,13 @@ impl RunValue {
 }
 
 /// Push a child `run` flag onto `flags`, rendering the exact CLI syntax the run
-/// parser accepts: the run registry decides the value form — an optional-value
-/// flag inlines (`--flag=VALUE`), a required-value flag uses the space form
-/// (`--flag VALUE`), a switch takes no value — and [`RunValue`] renders the value
+/// parser accepts: the run registry decides the value form — a required-value
+/// flag uses the space form (`--flag VALUE`), a switch takes no value — and [`RunValue`] renders the value
 /// in its canonical grammar. Routing every child flag through here (rather than
 /// hand-formatting strings) makes it structurally impossible for a campaign to
 /// emit syntax the child `run` rejects.
 fn push_run_flag(flags: &mut Vec<String>, name: &str, value: RunValue) {
     match crate::help::flag_arity("run", name) {
-        Some(crate::help::Value::Optional(..)) => flags.push(format!("{name}={}", value.render())),
         Some(crate::help::Value::Required(..)) => {
             flags.push(name.to_string());
             flags.push(value.render());
@@ -222,7 +220,7 @@ const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
     }
 }
 
-/// Whether a spec's `exclude_knobs` may name `knob`: a knob some `--faults`
+/// Whether a spec's `exclude_knobs` may name `knob`: a knob some `--vary`
 /// plane draws a band for. A waived knob, or one with its own opt-in, is never
 /// drawn by a plane, so excluding it would exclude nothing.
 fn excludable(knob: FaultKnob) -> bool {
@@ -370,7 +368,7 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
     // omission rather than an invisible one.
     let scale = spec.fault_scale_permille;
 
-    if spec.buggify {
+    if spec.vary.buggify {
         // Activation in [300, 900] permille, fire in [300, 900] permille — a wide
         // seed-varying band that both activates and fires cooperative-SUT sites
         // often enough to exercise a planted bug across a modest campaign, while
@@ -388,13 +386,13 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
             RunValue::Int(u64::from(activation)),
         );
     }
-    if !spec.faults.is_empty() {
+    {
         // Every band below passes through here, so a plane the campaign did not
         // select, or a knob the spec excludes, emits nothing. The values are
         // still drawn: each band reads its own claimed byte, so the knobs that
         // are emitted carry the draws an every-plane campaign makes for the
         // same generation.
-        let planes = spec.faults;
+        let planes = spec.vary.faults;
         let band = |flags: &mut Vec<String>, knob: FaultKnob, value: RunValue| {
             if planes.draws(knob) && !spec.exclude_knobs.contains(&knob) {
                 push_run_flag(flags, knob.meta().flag, value);
@@ -549,7 +547,8 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
         // The DNS band rides on the host table, which is spec config rather than a
         // per-generation draw: with no defined name every lookup is NXDOMAIN by
         // SEMANTICS and no DNS fault is ever eligible, so banding the knobs there
-        // would ship a knob that provably cannot fire.
+        // would ship a knob that provably cannot fire. The table itself is
+        // forwarded to every generation, whatever the campaign varies.
         if !spec.dns_entries.is_empty() {
             for entry in &spec.dns_entries {
                 push_run_flag(&mut flags, "--dns-entry", RunValue::Text(entry.clone()));
@@ -580,11 +579,11 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
     if spec.swarm {
         push_run_flag(&mut flags, "--swarm", RunValue::Switch);
     }
-    if spec.pct {
+    if spec.vary.sched_pct {
         let depth = 1 + u32::from(hash.read(gen_byte::SCHED_PCT_DEPTH) % 5); // [1, 5]
         push_run_flag(&mut flags, "--sched-pct", RunValue::Int(u64::from(depth)));
     }
-    if spec.yield_stride {
+    if spec.vary.yield_stride {
         // A log sweep: the window an atomics-only race needs is a handful of
         // edges, and the cost falls as 1/stride, so every octave from a point at
         // every edge to one per 1024 gets an equal share of the generations.

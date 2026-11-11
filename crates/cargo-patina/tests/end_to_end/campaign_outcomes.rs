@@ -330,7 +330,8 @@ fn main() {
                 // default (novel/failing + periodic heartbeat) elides.
                 "--progress-every",
                 "1",
-                "--buggify",
+                "--vary",
+                "buggify",
                 "--swarm",
                 "--liveness-watchdog",
                 "600000000000",
@@ -385,7 +386,7 @@ fn main() {
         let state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
                 .unwrap();
-        assert_eq!(state["schema"], "patina.campaign.state/v3");
+        assert_eq!(state["schema"], "patina.campaign.state/v4");
         assert_eq!(state["generations_done"], 12);
         assert_eq!(state["artifact"]["path"], guest.to_str().unwrap());
         assert!(state["artifact"]["sha256"].as_str().unwrap().len() == 64);

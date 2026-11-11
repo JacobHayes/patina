@@ -1,7 +1,7 @@
 //! Campaign invocation parsing and continuation controls.
 
 use super::spec::DEFAULT_PROGRESS_EVERY;
-use super::{CampaignSpec, DEFAULT_OUT_DIR, FaultPlane, FaultPlanes};
+use super::{CampaignSpec, DEFAULT_OUT_DIR, FaultPlane, FaultPlanes, Vary};
 use crate::{CliError, cli, help};
 use patina_dst_runtime::FaultKnob;
 use std::ffi::{OsStr, OsString};
@@ -100,22 +100,13 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     // A flag overrides the spec regardless of argument order — the same
     // precedence the config layer uses (flag > env > config > default). An
-    // ABSENT flag overrides nothing: the switches only ever turn a knob on, so a
-    // spec that enables buggify is not silently undone by omitting --buggify.
-    spec.buggify |= args.flag("--buggify");
+    // ABSENT flag overrides nothing: a switch only ever turns a setting on, so a
+    // spec that enables swarm is not silently undone by omitting --swarm, and a
+    // value flag replaces the spec's value only when supplied.
     spec.swarm |= args.flag("--swarm");
-    spec.pct |= args.flag("--sched-pct");
-    spec.yield_stride |= args.flag("--yield-stride");
-    // Bare `--faults` is every plane; `--faults=PLANE,...` the named subset.
-    if let Some(planes) = args.text("--faults") {
-        spec.faults = if planes.is_empty() {
-            FaultPlanes::ALL
-        } else {
-            FaultPlanes::from_names(planes.split(',')).expect("validated by the registry grammar")
-        };
+    if let Some(names) = args.text("--vary") {
+        spec.vary = Vary::from_names(names.split(',')).expect("validated by the registry grammar");
     }
-    // A value flag, so — unlike the switches above — it overrides the spec only
-    // when actually supplied; an absent flag leaves the spec's scale alone.
     if let Some(value) = args.u64("--fault-scale-permille") {
         spec.fault_scale_permille = value;
     }
@@ -213,12 +204,12 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     // A DNS band rides on the host table, so a subset that names `dns` without
     // one asked for a plane that could never be drawn.
-    if spec.faults != FaultPlanes::ALL
-        && spec.faults.contains(FaultPlane::Dns)
+    if spec.vary.faults != FaultPlanes::ALL
+        && spec.vary.faults.contains(FaultPlane::Dns)
         && spec.dns_entries.is_empty()
     {
         return Err(CliError::usage(
-            "--faults selects the dns plane, but the campaign has no --dns-entry host table, \
+            "--vary selects the dns plane, but the campaign has no --dns-entry host table, \
              so no DNS fault could be drawn; add --dns-entry NAME=ADDR or leave dns out",
         ));
     }
@@ -275,14 +266,14 @@ mod tests;
 /// drawn fault knob (crash included) there is nothing to mask, and every
 /// generation would explore exactly what a non-swarm one does.
 fn validate_swarm(spec: &CampaignSpec) -> Result<(), CliError> {
-    let maskable = spec.buggify
+    let maskable = spec.vary.buggify
         || FaultKnob::ALL
             .iter()
-            .any(|knob| spec.faults.draws(*knob) && !spec.exclude_knobs.contains(knob));
+            .any(|knob| spec.vary.faults.draws(*knob) && !spec.exclude_knobs.contains(knob));
     if spec.swarm && !maskable {
         return Err(CliError::usage(
             "--swarm masks fault classes and buggify, but the campaign enables none; \
-             add --buggify or --faults, or drop --swarm",
+             add buggify or a fault plane to --vary, or drop --swarm",
         ));
     }
     Ok(())
@@ -295,11 +286,11 @@ fn validate_exclusions(spec: &CampaignSpec) -> Result<(), CliError> {
     match spec
         .exclude_knobs
         .iter()
-        .find(|knob| !spec.faults.draws(**knob))
+        .find(|knob| !spec.vary.faults.draws(**knob))
     {
         Some(knob) => Err(CliError::usage(format!(
             "the spec excludes {}, but the campaign does not select its fault plane, \
-             so the exclusion would change nothing; select the plane with --faults or drop the exclusion",
+             so the exclusion would change nothing; select the plane with --vary or drop the exclusion",
             knob.meta().flag
         ))),
         None => Ok(()),

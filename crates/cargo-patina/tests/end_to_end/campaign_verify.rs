@@ -264,7 +264,7 @@ fn main() {
             &guest,
             &directory.path().join("out"),
             4,
-            &["--sched-pct"],
+            &["--vary", "sched-pct"],
             "",
         );
         assert_eq!(code, Some(1), "{envelope:#}");

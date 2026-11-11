@@ -1,7 +1,7 @@
 //! Tests for campaign invocation parsing and continuation controls.
 
 use super::super::spec::json_classify_rules;
-use super::super::{CampaignSpec, FAULT_PLANE_NAMES, FAULT_SCALE_FULL, FaultPlanes, RunClass};
+use super::super::{CampaignSpec, FAULT_SCALE_FULL, FaultPlanes, RunClass, VARY_NAMES, Vary};
 use super::*;
 use std::ffi::OsString;
 use std::fs;
@@ -15,7 +15,7 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
     let path = dir.path().join("spec.json");
     fs::write(
         &path,
-        br#"{"generations": 7, "buggify": true, "watchdog_nanos": 11}"#,
+        br#"{"generations": 7, "swarm": true, "vary": ["buggify"], "watchdog_nanos": 11}"#,
     )
     .expect("write spec");
     let spec = path.display().to_string();
@@ -24,10 +24,8 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
     // Spec alone.
     let only_spec = parse(argv(&["art", "--spec", &spec])).unwrap().spec;
     assert_eq!(only_spec.generations, 7);
-    assert!(
-        only_spec.buggify,
-        "an absent --buggify must not undo the spec"
-    );
+    assert!(only_spec.swarm, "an absent --swarm must not undo the spec");
+    assert!(only_spec.vary.buggify);
     assert_eq!(only_spec.watchdog_nanos, Some(11));
 
     // A flag wins over the spec whether it precedes or follows `--spec`.
@@ -58,7 +56,10 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
             Some(22),
             "flag beats spec for {args:?}"
         );
-        assert!(spec.buggify, "the spec's own knobs survive for {args:?}");
+        assert!(
+            spec.vary.buggify,
+            "the spec's own settings survive for {args:?}"
+        );
     }
 }
 
@@ -102,70 +103,81 @@ fn the_scale_dials_are_bounded_and_the_flag_beats_the_spec_file() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     type Field = fn(&CampaignSpec) -> u64;
     let dials: [(&str, &str, &str, Field, u64); 1] = [(
-        "faults",
+        "net",
         "fault_scale_permille",
         "--fault-scale-permille",
         |spec| spec.fault_scale_permille,
         FAULT_SCALE_FULL,
     )];
     for (switch, key, flag, field, full) in dials {
-        fs::write(&path, format!(r#"{{"{switch}": true, "{key}": 1001}}"#)).expect("write");
+        fs::write(&path, format!(r#"{{"vary": ["{switch}"], "{key}": 1001}}"#)).expect("write");
         let error = parse(args(&["art", "--spec", &spec_flag]))
             .expect_err("a scale above full intensity must be refused")
             .to_string();
         assert!(error.contains(key), "the refusal must name {key}: {error}");
 
-        fs::write(&path, format!(r#"{{"{switch}": true, "{key}": 250}}"#)).expect("write");
+        fs::write(&path, format!(r#"{{"vary": ["{switch}"], "{key}": 250}}"#)).expect("write");
         let from_spec = parse(args(&["art", "--spec", &spec_flag])).expect("spec parses");
         assert_eq!(field(&from_spec.spec), 250);
         let overridden =
             parse(args(&["art", "--spec", &spec_flag, flag, "10"])).expect("flag parses");
         assert_eq!(field(&overridden.spec), 10);
-        let default = parse(args(&["art", &format!("--{switch}")])).expect("parses");
+        let default = parse(args(&["art", "--vary", switch])).expect("parses");
         assert_eq!(field(&default.spec), full);
     }
 }
 
-/// Bare `--faults` is every plane and `--faults=PLANE,...` the named subset,
-/// from the flag or the spec file, with the flag on top. An unknown plane is a
-/// usage error that names the valid ones, and so is a subset naming a plane
-/// the campaign could never draw.
+/// `--vary` names what each generation draws, from the flag or the spec file,
+/// the flag replacing the spec's list. `faults` is every plane, however the
+/// list spells it. An unknown dimension is a usage error that names the valid
+/// ones, and so is a plane the campaign could never draw.
 #[test]
-fn faults_selects_every_plane_bare_or_the_named_subset() {
+fn vary_names_what_each_generation_draws() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("spec.json");
     let spec_flag = path.display().to_string();
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-    let faults = |values: &[&str]| parse(args(values)).expect("parses").spec.faults;
+    let vary = |values: &[&str]| parse(args(values)).expect("parses").spec.vary;
 
-    assert_eq!(faults(&["art"]), FaultPlanes::NONE);
-    assert_eq!(faults(&["art", "--faults"]), FaultPlanes::ALL);
-    let net_sleep = FaultPlanes::from_names(["net", "sleep"]).unwrap();
-    assert_eq!(faults(&["art", "--faults=sleep,net"]), net_sleep);
+    assert_eq!(vary(&["art"]), Vary::default());
+    let every = vary(&["art", "--vary", "faults"]);
+    assert_eq!(every.faults, FaultPlanes::ALL);
+    assert!(!every.buggify && !every.sched_pct && !every.yield_stride);
+    assert_eq!(vary(&["art", "--vary", "net,faults,fs"]), every);
+    let net_sleep = vary(&["art", "--vary", "net,sleep"]);
+    assert_eq!(net_sleep, vary(&["art", "--vary=sleep,net"]));
+    assert!(net_sleep.faults != FaultPlanes::ALL);
+    let explored = vary(&["art", "--vary", "buggify,sched-pct,yield-stride"]);
+    assert!(explored.buggify && explored.sched_pct && explored.yield_stride);
+    assert_eq!(explored.faults, Vary::default().faults);
 
-    fs::write(&path, br#"{"faults": ["sleep", "net"]}"#).expect("write");
-    assert_eq!(faults(&["art", "--spec", &spec_flag]), net_sleep);
+    fs::write(&path, br#"{"vary": ["sleep", "net"]}"#).expect("write");
+    assert_eq!(vary(&["art", "--spec", &spec_flag]), net_sleep);
     assert_eq!(
-        faults(&["art", "--spec", &spec_flag, "--faults=fs"]),
-        FaultPlanes::from_names(["fs"]).unwrap()
-    );
-    assert_eq!(
-        faults(&["art", "--faults", "--spec", &spec_flag]),
-        FaultPlanes::ALL
+        vary(&["art", "--spec", &spec_flag, "--vary", "buggify"]),
+        vary(&["art", "--vary", "buggify"]),
     );
 
-    for refused in [args(&["art", "--faults=net,disk"])] {
-        let error = parse(refused.clone())
-            .expect_err("an unknown plane is refused")
-            .to_string();
-        for plane in FAULT_PLANE_NAMES {
-            assert!(error.contains(plane), "{refused:?}: {error}");
-        }
+    let error = refusal(&["art", "--vary", "net,disk"]);
+    for name in VARY_NAMES {
+        assert!(error.contains(name), "{error}");
     }
-    assert!(refusal(&["art", "--faults=net,dns"]).contains("--dns-entry"));
-    assert!(parse(args(&["art", "--faults=dns", "--dns-entry", "db=10.0.0.5"])).is_ok());
-    assert!(parse(args(&["art", "--faults"])).is_ok());
-    assert!(refusal(&["--extend", "1", "--faults=net"]).contains("--faults"));
+    assert!(refusal(&["art", "--vary", "net,dns"]).contains("--dns-entry"));
+    assert!(
+        parse(args(&[
+            "art",
+            "--vary",
+            "dns",
+            "--dns-entry",
+            "db=10.0.0.5"
+        ]))
+        .is_ok()
+    );
+    // The run flags `--vary` replaced are not campaign flags.
+    for gone in ["--buggify", "--faults", "--yield-stride"] {
+        assert!(refusal(&["art", gone]).contains(gone));
+    }
+    assert!(refusal(&["--extend", "1", "--vary", "net"]).contains("--vary"));
 }
 
 /// A spec's knob exclusion applies once the flags are merged, and is refused
@@ -178,11 +190,11 @@ fn an_exclusion_needs_its_plane_selected_after_the_merge() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
     fs::write(
         &path,
-        br#"{"faults": ["sleep"], "exclude_knobs": ["--net-reset-permille"]}"#,
+        br#"{"vary": ["sleep"], "exclude_knobs": ["--net-reset-permille"]}"#,
     )
     .expect("write");
     assert!(refusal(&["art", "--spec", &spec_flag]).contains("--net-reset-permille"));
-    let merged = parse(args(&["art", "--spec", &spec_flag, "--faults=net"]))
+    let merged = parse(args(&["art", "--spec", &spec_flag, "--vary", "net"]))
         .expect("the flag selects the excluded knob's plane")
         .spec;
     assert_eq!(
@@ -262,9 +274,10 @@ fn continuation_modes_parse_and_reject_resupplied_spec() {
     assert!(refusal(&["--extend", "1", "--resume"]).contains("--resume"));
     assert!(refusal(&["guest", "--extend", "1"]).contains("--extend"));
     assert!(refusal(&["--extend", "1", "--", "guest-arg"]).contains("--extend"));
-    for flag in ["--gens", "--spec", "--buggify", "--faults"] {
+    for flag in ["--gens", "--spec", "--swarm", "--vary"] {
         let values: Vec<&str> = match flag {
-            "--buggify" | "--faults" => vec!["--extend", "1", flag],
+            "--swarm" => vec!["--extend", "1", flag],
+            "--vary" => vec!["--extend", "1", flag, "net"],
             _ => vec!["--extend", "1", flag, "1"],
         };
         let message = refusal(&values);

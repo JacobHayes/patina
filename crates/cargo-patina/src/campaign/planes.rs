@@ -1,4 +1,5 @@
-//! The fault planes `--faults` draws, and the subset of them a campaign selects.
+//! The dimensions `campaign --vary` draws per generation: the exploration
+//! dimensions and the fault planes.
 
 use patina_dst_runtime::FaultKnob;
 
@@ -52,17 +53,86 @@ impl FaultPlane {
     }
 }
 
-/// The plane names in canonical order: the members of the `--faults` value
-/// grammar.
-pub(crate) const FAULT_PLANE_NAMES: &[&str] = &{
-    let mut names = [""; FaultPlane::ALL.len()];
+/// `--vary buggify`: the buggify activation and firing rates.
+const VARY_BUGGIFY: &str = "buggify";
+/// `--vary sched-pct`: the PCT bug depth.
+const VARY_SCHED_PCT: &str = "sched-pct";
+/// `--vary yield-stride`: an `--instrument` artifact's yield stride.
+const VARY_YIELD_STRIDE: &str = "yield-stride";
+/// `--vary faults`: every fault plane.
+const VARY_FAULTS: &str = "faults";
+
+/// The members of the `--vary` grammar in canonical order: the exploration
+/// dimensions, `faults` for every plane, and each plane.
+pub(crate) const VARY_NAMES: &[&str] = &{
+    let mut names = [""; 4 + FaultPlane::ALL.len()];
+    names[0] = VARY_BUGGIFY;
+    names[1] = VARY_SCHED_PCT;
+    names[2] = VARY_YIELD_STRIDE;
+    names[3] = VARY_FAULTS;
     let mut i = 0;
-    while i < names.len() {
-        names[i] = FaultPlane::ALL[i].name();
+    while i < FaultPlane::ALL.len() {
+        names[4 + i] = FaultPlane::ALL[i].name();
         i += 1;
     }
     names
 };
+
+/// What a campaign draws per generation (`--vary`, spec key `vary`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Vary {
+    pub buggify: bool,
+    pub sched_pct: bool,
+    pub yield_stride: bool,
+    pub faults: FaultPlanes,
+}
+
+impl Vary {
+    /// The set a `--vary` list names. Refuses an unknown name, naming the
+    /// valid ones.
+    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
+        let mut vary = Vary::default();
+        for name in names {
+            match name {
+                VARY_BUGGIFY => vary.buggify = true,
+                VARY_SCHED_PCT => vary.sched_pct = true,
+                VARY_YIELD_STRIDE => vary.yield_stride = true,
+                VARY_FAULTS => vary.faults = FaultPlanes::ALL,
+                plane => {
+                    let plane = FaultPlane::from_name(plane).ok_or_else(|| {
+                        format!(
+                            "unknown --vary dimension {name:?}; expected one or more of {}",
+                            VARY_NAMES.join(", ")
+                        )
+                    })?;
+                    vary.faults.0 |= plane.bit();
+                }
+            }
+        }
+        Ok(vary)
+    }
+
+    /// The canonical names: `faults` when every plane is drawn, else each
+    /// drawn plane.
+    pub fn names(self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        if self.buggify {
+            names.push(VARY_BUGGIFY);
+        }
+        if self.sched_pct {
+            names.push(VARY_SCHED_PCT);
+        }
+        if self.yield_stride {
+            names.push(VARY_YIELD_STRIDE);
+        }
+        if self.faults == FaultPlanes::ALL {
+            names.push(VARY_FAULTS);
+        } else {
+            names.extend(self.faults.planes().map(FaultPlane::name));
+        }
+        names
+    }
+}
 
 /// The plane whose selection gates a knob's band, or `None` for a knob no plane
 /// selects. Exhaustive, so a new knob is a decision rather than an omission.
@@ -94,13 +164,12 @@ const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
     }
 }
 
-/// The fault planes a campaign draws. Empty means `--faults` is off; bare
-/// `--faults` selects every plane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The fault planes a campaign draws: none by default, every plane under
+/// `--vary faults`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FaultPlanes(u8);
 
 impl FaultPlanes {
-    pub const NONE: Self = Self(0);
     pub const ALL: Self = Self({
         let mut bits = 0;
         let mut i = 0;
@@ -110,10 +179,6 @@ impl FaultPlanes {
         }
         bits
     });
-
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
 
     pub fn contains(self, plane: FaultPlane) -> bool {
         self.0 & plane.bit() != 0
@@ -130,40 +195,5 @@ impl FaultPlanes {
         FaultPlane::ALL
             .into_iter()
             .filter(move |plane| self.contains(*plane))
-    }
-
-    /// The set the given plane names select. Refuses an empty list and an
-    /// unknown name, naming the valid planes.
-    pub fn from_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, String> {
-        let mut bits = 0;
-        for name in names {
-            let plane = FaultPlane::from_name(name).ok_or_else(|| {
-                format!(
-                    "unknown fault plane {name:?}; expected one or more of {}",
-                    FAULT_PLANE_NAMES.join(", ")
-                )
-            })?;
-            bits |= plane.bit();
-        }
-        if bits == 0 {
-            return Err(format!(
-                "names no fault plane; expected one or more of {}",
-                FAULT_PLANE_NAMES.join(", ")
-            ));
-        }
-        Ok(Self(bits))
-    }
-
-    /// The recorded form: `false` off, `true` every plane, else the selected
-    /// plane names in canonical order.
-    pub(super) fn to_json(self) -> serde_json::Value {
-        match self {
-            Self::NONE => false.into(),
-            Self::ALL => true.into(),
-            subset => subset
-                .planes()
-                .map(|plane| serde_json::Value::from(plane.name()))
-                .collect(),
-        }
     }
 }

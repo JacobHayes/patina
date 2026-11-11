@@ -1,4 +1,4 @@
-//! Campaign fault-plane selection: `--faults=PLANE,...` draws only the named
+//! Campaign fault-plane selection: `--vary PLANE,...` draws only the named
 //! planes, the out-dir records the subset, and a continuation keeps it.
 
 #[cfg(test)]
@@ -54,14 +54,15 @@ fn main() {
         invoke_unchecked(env!("CARGO_BIN_EXE_patina"), cwd, &argv)
     }
 
-    fn fresh(fixture: &Fixture, out: &Path, gens: &str, faults: &str) -> serde_json::Value {
+    fn fresh(fixture: &Fixture, out: &Path, gens: &str, vary: &str) -> serde_json::Value {
         let output = campaign(
             &fixture.cwd,
             &[
                 fixture.module.to_str().unwrap(),
                 "--gens",
                 gens,
-                faults,
+                "--vary",
+                vary,
                 "--spec",
                 fixture.spec.to_str().unwrap(),
                 "--out-dir",
@@ -96,8 +97,8 @@ fn main() {
             .any(|flag| flag.as_str().unwrap().starts_with(prefix))
     }
 
-    /// The valid planes, from the registry's own `--faults` grammar.
-    fn registry_planes(cwd: &Path) -> Vec<String> {
+    /// The valid dimensions, from the registry's own `--vary` grammar.
+    fn registry_dimensions(cwd: &Path) -> Vec<String> {
         let help = campaign(cwd, &["--help", "--format", "json"]);
         let help: serde_json::Value = serde_json::from_slice(&help.stdout).unwrap();
         help["verb"]["flag_groups"]
@@ -105,8 +106,8 @@ fn main() {
             .unwrap()
             .iter()
             .flat_map(|group| group["flags"].as_array().unwrap())
-            .find(|flag| flag["name"] == "--faults")
-            .expect("--faults is registered")["choices"]
+            .find(|flag| flag["name"] == "--vary")
+            .expect("--vary is registered")["choices"]
             .as_array()
             .unwrap()
             .iter()
@@ -114,14 +115,14 @@ fn main() {
             .collect()
     }
 
-    /// A `--faults=sleep,net` campaign draws and fires only those planes (the
+    /// A `--vary sleep,net` campaign draws and fires only those planes (the
     /// every-plane control shows fs faults do reach this guest), the out-dir
     /// records the subset, a continuation keeps it and refuses a new one, and
-    /// an unknown plane is a usage error naming the valid planes.
+    /// an unknown dimension is a usage error naming the valid ones.
     #[test]
     fn a_plane_subset_never_draws_another_plane_and_a_continuation_keeps_it() {
         let fixture = fixture();
-        let every = fresh(&fixture, &fixture.cwd.join("every"), "4", "--faults");
+        let every = fresh(&fixture, &fixture.cwd.join("every"), "4", "faults");
         assert!(
             runs(&every)
                 .iter()
@@ -132,9 +133,9 @@ fn main() {
         );
 
         let out = fixture.cwd.join("camp");
-        let recorded = fresh(&fixture, &out, "2", "--faults=sleep,net");
+        let recorded = fresh(&fixture, &out, "2", "sleep,net");
         assert_eq!(
-            recorded["spec"]["faults"],
+            recorded["spec"]["vary"],
             serde_json::json!(["net", "sleep"])
         );
         assert_ran(&campaign(
@@ -142,7 +143,7 @@ fn main() {
             &["--extend", "2", "--out-dir", out.to_str().unwrap()],
         ));
         let extended = campaign_state_without_invocations(&out.join("campaign-state.json"));
-        assert_eq!(extended["spec"]["faults"], recorded["spec"]["faults"]);
+        assert_eq!(extended["spec"]["vary"], recorded["spec"]["vary"]);
         assert_eq!(runs(&extended).len(), 4, "every generation is recorded");
         for run in runs(&extended) {
             assert!(!drew(run, "--fs-"), "an fs knob was drawn: {run:#}");
@@ -156,9 +157,9 @@ fn main() {
         );
 
         for continuation in [
-            vec!["--extend", "1", "--faults=fs"],
-            vec!["--extend", "1", "--faults"],
-            vec!["--resume", "--faults=net,sleep"],
+            vec!["--extend", "1", "--vary", "fs"],
+            vec!["--extend", "1", "--vary", "faults"],
+            vec!["--resume", "--vary", "net,sleep"],
         ] {
             let mut args = continuation.clone();
             args.extend(["--out-dir", out.to_str().unwrap()]);
@@ -175,14 +176,14 @@ fn main() {
             "a refused continuation changed the out-dir"
         );
 
-        let planes = registry_planes(&fixture.cwd);
-        assert!(!planes.is_empty());
+        let dimensions = registry_dimensions(&fixture.cwd);
+        assert!(!dimensions.is_empty());
         let unknown_out = fixture.cwd.join("unknown");
         let refused = campaign(
             &fixture.cwd,
             &[
                 fixture.module.to_str().unwrap(),
-                "--faults=net,disk",
+                "--vary=net,disk",
                 "--out-dir",
                 unknown_out.to_str().unwrap(),
             ],
@@ -191,10 +192,10 @@ fn main() {
         assert_eq!(refused.status.code(), Some(2), "accepted:\n{stderr}");
         // The message, without the synopsis a usage error appends.
         let message = stderr.split("\n\n").next().unwrap();
-        for plane in &planes {
+        for dimension in &dimensions {
             assert!(
-                message.contains(plane.as_str()),
-                "{plane} unnamed:\n{stderr}"
+                message.contains(dimension.as_str()),
+                "{dimension} unnamed:\n{stderr}"
             );
         }
         assert!(!unknown_out.exists(), "a refused campaign wrote an out-dir");
@@ -207,7 +208,7 @@ fn main() {
     #[test]
     fn the_generation_log_records_every_generation_as_the_campaign_ran_it() {
         let fixture = fixture();
-        let plain = fresh(&fixture, &fixture.cwd.join("plain"), "2", "--faults");
+        let plain = fresh(&fixture, &fixture.cwd.join("plain"), "2", "faults");
         assert!(plain["spec"].get("generation_log").is_none());
         assert!(!fixture.cwd.join("plain").join("generations.jsonl").exists());
 
@@ -218,7 +219,8 @@ fn main() {
                 fixture.module.to_str().unwrap(),
                 "--gens",
                 "3",
-                "--faults",
+                "--vary",
+                "faults",
                 "--generation-log",
                 "--spec",
                 fixture.spec.to_str().unwrap(),

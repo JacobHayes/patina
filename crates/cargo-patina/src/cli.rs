@@ -36,26 +36,13 @@ use crate::help::{self, Family, Flag, Kind, Value};
 use crate::values;
 use clap::parser::ValueSource;
 
-/// The value a bare optional-value switch records (`--buggify` with no `=N`).
-///
-/// It is a sentinel rather than the empty string because clap runs the value
-/// parser over `default_missing_value` too: with `""` as the marker, an explicit
-/// `--buggify=` would be indistinguishable from the bare switch and would slip
-/// past the flag's grammar. No CLI value carries a lone control byte, so this
-/// cannot collide with something a user typed. [`Args::text`] translates it back
-/// to the empty string the parsers store for "supplied, take the default".
-const BARE: &str = "\u{1}";
-
 /// Translate one registry flag into a clap argument.
 ///
-/// The three shapes of [`Value`] map exactly onto clap:
+/// The two shapes of [`Value`] map exactly onto clap:
 ///
 /// * `None` — a switch. `--release=x` is rejected because a `SetTrue` arg takes
 ///   no value.
 /// * `Required` — `--seed N` and `--seed=N` both work, which is clap's default.
-/// * `Optional` — `require_equals` with a missing-value default is precisely the
-///   documented `=`-only form: `--buggify` or `--buggify=500`, never
-///   `--buggify 500`, whose space form would be ambiguous with a positional.
 ///
 /// Every value-bearing arg is `Append`, whatever its declared repeatability, so
 /// that repeats are visible after parsing: [`Args::new`] then rejects a second
@@ -80,14 +67,7 @@ fn arg_of(flag: &'static Flag) -> Arg {
             .action(ArgAction::Append)
             .num_args(1)
             .value_name(placeholder)
-            .value_parser(parser_for(flag.name, kind, false)),
-        Value::Optional(placeholder, kind) => arg
-            .action(ArgAction::Append)
-            .num_args(0..=1)
-            .require_equals(true)
-            .default_missing_value(BARE)
-            .value_name(placeholder)
-            .value_parser(parser_for(flag.name, kind, true)),
+            .value_parser(parser_for(flag.name, kind)),
     }
 }
 
@@ -97,7 +77,7 @@ fn arg_of(flag: &'static Flag) -> Arg {
 /// [`Kind::Path`] yields an `OsString`: a path value may be non-UTF-8, and a
 /// `--record`/`--output` path is used verbatim. Every other grammar yields the
 /// validated text, which later conversions re-read knowing it is well-formed.
-fn parser_for(name: &'static str, kind: Kind, optional: bool) -> ValueParser {
+fn parser_for(name: &'static str, kind: Kind) -> ValueParser {
     if matches!(kind, Kind::Path) {
         // A path may be non-UTF-8 and is used verbatim, so it stays an
         // `OsString`; only its emptiness is checked.
@@ -112,9 +92,6 @@ fn parser_for(name: &'static str, kind: Kind, optional: bool) -> ValueParser {
         ));
     }
     ValueParser::from(move |value: &str| -> Result<String, String> {
-        if optional && value == BARE {
-            return Ok(BARE.to_string());
-        }
         values::validate(kind, name, value).map(|()| value.to_string())
     })
 }
@@ -370,7 +347,7 @@ impl Args {
                 continue;
             }
             let count = match flag.value {
-                Value::Required(_, Kind::Path) | Value::Optional(_, Kind::Path) => matches
+                Value::Required(_, Kind::Path) => matches
                     .get_many::<OsString>(flag.name)
                     .map(Iterator::count)
                     .unwrap_or(0),
@@ -446,16 +423,12 @@ impl Args {
     }
 
     /// The validated text of a value flag, or `None` when it was not supplied.
-    /// An optional-value flag supplied bare yields `Some("")`.
     pub(crate) fn text(&self, name: &str) -> Option<&str> {
         debug_assert!(
             !matches!(self.flag_of(name).value.grammar(), Some(Kind::Path)),
             "{name} is a path flag; read it with `path`, which keeps non-UTF-8 values"
         );
-        self.matches
-            .get_one::<String>(name)
-            .map(String::as_str)
-            .map(|value| if value == BARE { "" } else { value })
+        self.matches.get_one::<String>(name).map(String::as_str)
     }
 
     /// Every occurrence of a repeatable value flag, in order.

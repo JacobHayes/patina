@@ -23,8 +23,7 @@ impl Knob {
 ///
 /// Arity comes from the `run` registry, the same table the campaign built these
 /// flags through, so a value can never be mistaken for a flag or a flag for a
-/// value — including the `=`-only optional-value forms, which carry their value
-/// in one token.
+/// value.
 pub(super) fn split_knobs(flags: &[String]) -> Result<Vec<Knob>, CliError> {
     let mut knobs = Vec::new();
     let mut index = 0;

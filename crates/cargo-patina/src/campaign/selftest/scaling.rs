@@ -3,8 +3,7 @@
 use super::super::repro::reproduce_command;
 use super::super::state::{spec_from_state_json, spec_to_json};
 use super::super::{
-    CampaignSpec, FAULT_SCALE_FULL, FaultPlanes, derive_flags, generation_hash, parse,
-    scale_intensity,
+    CampaignSpec, FAULT_SCALE_FULL, Vary, derive_flags, generation_hash, parse, scale_intensity,
 };
 use std::ffi::OsString;
 use std::path::Path;
@@ -20,7 +19,7 @@ use std::path::Path;
 pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut out: Vec<(&'static str, bool, String)> = Vec::new();
     let scaled = |permille: u64| CampaignSpec {
-        faults: FaultPlanes::ALL,
+        vary: Vary::from_names(["faults"]).unwrap(),
         fault_scale_permille: permille,
         ..CampaignSpec::default()
     };
@@ -120,7 +119,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let on_extend = refused(&["--extend", "3", "--fault-scale-permille", "10"]);
     let on_resume = refused(&["--resume", "--fault-scale-permille", "10"]);
     let fresh_ok = parse(
-        ["art", "--faults", "--fault-scale-permille", "10"]
+        ["art", "--vary", "faults", "--fault-scale-permille", "10"]
             .iter()
             .map(OsString::from)
             .collect(),

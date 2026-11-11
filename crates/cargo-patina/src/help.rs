@@ -10,7 +10,7 @@
 //!   section, the machine-readable `--help --format json` payload, and the
 //!   synopsis lines a usage error prints; and
 //! * the PARSING — `cli::command` builds each family's `clap::Command` from
-//!   these same rows, so arity, the `=`-only optional form, repeatability, the
+//!   these same rows, so arity, repeatability, the
 //!   typed value grammar, and cross-flag dependencies are declared once and
 //!   enforced by construction.
 //!
@@ -45,6 +45,7 @@ use flags::NATIVE_SCHEDULE_FLAGS;
 use flags::SOURCE_SELECT;
 use flags::{
     ALLOW_FLAG, ALLOW_RANDOMIZED_LAYOUT_FLAG, ALLOW_UNSUPPORTED_FLAG, CPUS_FLAG, PARAM_FLAG,
+    SWARM_FLAG,
 };
 pub use human::render;
 pub use human::usage_synopsis;
@@ -161,9 +162,6 @@ pub enum Value {
     None,
     /// A required value with the given placeholder and grammar (`--seed <U64>`).
     Required(&'static str, Kind),
-    /// An optional value (`--buggify[=<PERMILLE>]`): the switch alone is valid,
-    /// and an `=VALUE` form supplies a value of the given grammar.
-    Optional(&'static str, Kind),
 }
 
 impl Value {
@@ -172,14 +170,13 @@ impl Value {
         match self {
             Value::None => "none",
             Value::Required(..) => "required",
-            Value::Optional(..) => "optional",
         }
     }
 
     pub fn placeholder(self) -> Option<&'static str> {
         match self {
             Value::None => None,
-            Value::Required(p, _) | Value::Optional(p, _) => Some(p),
+            Value::Required(p, _) => Some(p),
         }
     }
 
@@ -188,7 +185,7 @@ impl Value {
     pub fn grammar(self) -> Option<Kind> {
         match self {
             Value::None => None,
-            Value::Required(_, kind) | Value::Optional(_, kind) => Some(kind),
+            Value::Required(_, kind) => Some(kind),
         }
     }
 }

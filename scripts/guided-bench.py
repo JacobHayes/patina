@@ -57,15 +57,15 @@ class Testbed:
 
 TESTBEDS = (
     Testbed('staircase', 'testbeds/guided-bench/staircase.rs',
-            ('--faults=fs,sleep',), (),
+            ('--vary', 'fs,sleep'), (),
             ('crash', 'failure', 'violation'), 300,
             'three nested gates on fs error rate, short-write rate and sleep jitter'),
     Testbed('workq-fsync', 'testbeds/workq',
-            ('--buggify', '--swarm', '--faults=net,sleep,crash', '--allow-unmet-sometimes'),
+            ('--vary', 'buggify,net,sleep,crash', '--swarm', '--allow-unmet-sometimes'),
             WORKQ_ARGS + ('--bug', 'skip-wal-fsync'), ('violation',), 200,
             'workq skip-wal-fsync: an unsynced WAL record lost to a machine crash'),
     Testbed('workq-lock', 'testbeds/workq',
-            ('--buggify', '--swarm', '--faults=net,sleep', '--allow-unmet-sometimes'),
+            ('--vary', 'buggify,net,sleep', '--swarm', '--allow-unmet-sometimes'),
             WORKQ_ARGS + ('--bug', 'apply-check-outside-lock'), ('violation',), 200,
             'workq apply-check-outside-lock: a double apply needing a duplicate delivery race'),
 )

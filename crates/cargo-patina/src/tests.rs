@@ -358,10 +358,9 @@ mod registry {
     /// flag rather than a hand-picked sample.
     #[derive(Clone, Copy)]
     enum FlagForm<'a> {
-        /// `--flag=VALUE` — valid for required- and optional-value flags alike.
+        /// `--flag=VALUE`.
         Inline,
-        /// `--flag VALUE` — a required-value flag consumes the next token; an
-        /// optional-value flag must NOT (the sample lands as a stray positional).
+        /// `--flag VALUE` — a value flag consumes the next token.
         Spaced,
         /// `-x VALUE` — the registry short, space form.
         Short(&'a str),
@@ -439,11 +438,11 @@ mod registry {
             // one. `--spec` reads its file while parsing, so the driver makes
             // whatever path the sample names a readable empty spec — otherwise
             // the drive would fail for a reason that is not the grammar's. A
-            // `--faults` subset naming `dns` needs a host table to draw from.
+            // `--vary` list naming `dns` needs a host table to draw from.
             ("campaign", _) => {
                 let prefix = match flag {
                     "--extend" | "--resume" => none,
-                    "--faults" => vec![
+                    "--vary" => vec![
                         "art".to_string(),
                         "--dns-entry=db.internal=10.0.0.5".to_string(),
                     ],
@@ -531,9 +530,8 @@ mod registry {
             ],
         };
         // A dependent knob is refused without its parent, so supply the parent in
-        // whichever form it takes: an optional-value switch is armed bare, while a
-        // required-value parent needs a
-        // sample of its own kind, taken from the registry rather than hardcoded.
+        // whichever form it takes: a switch is armed bare, while a value parent
+        // needs a sample of its own kind, taken from the registry rather than hardcoded.
         let parent = flag.requires.map(|name| {
             let parent = help::verb(verb)
                 .expect("registered verb")
@@ -698,10 +696,8 @@ mod registry {
         }
 
         // Every per-verb flag, driven through its owning family parser, in every
-        // registry-implied form: inline `=` always; the space form must parse for
-        // required-value flags and must NOT consume the token for optional-value
-        // flags (the sample lands as a stray positional and the parse fails); a
-        // declared short takes the space form.
+        // registry-implied form: inline `=` and the space form; a declared short
+        // takes the space form.
         for verb in help::VERBS {
             for spec in verb.families {
                 let mut seen: BTreeSet<&str> = BTreeSet::new();
@@ -743,27 +739,11 @@ mod registry {
                                 });
                                 }
                             }
-                            help::Value::Optional(..) => {
-                                assert!(
-                                    drive(FlagForm::Spaced).is_err(),
-                                    "verb `{}` optional-value flag `{}` CONSUMED the space-form \
-                                 token {sample:?} (optional values are `=`-only)",
-                                    verb.name,
-                                    flag.name
-                                );
-                            }
                             help::Value::None => unreachable!("grammar() returned Some"),
                         }
                     }
                     for sample in &invalid {
                         for form in [FlagForm::Inline, FlagForm::Spaced] {
-                            // The space form only reaches the value validator on
-                            // required-value flags.
-                            if matches!(form, FlagForm::Spaced)
-                                && !matches!(flag.value, help::Value::Required(..))
-                            {
-                                continue;
-                            }
                             let outcome = drive_flag(verb.name, spec.family, flag, sample, form);
                             assert!(
                                 outcome.is_err(),

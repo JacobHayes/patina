@@ -191,10 +191,10 @@ events.
 ## 6. Let a campaign sweep for you
 
 A *campaign* runs many *generations*. Each generation is one run with its own
-seed, and with `--buggify` its own odds for the fault sites.
+seed, and with `--vary buggify` its own odds for the fault sites.
 
 ```text
-$ patina campaign ./ledger-guest --buggify --gens 20 --out-dir ledger-out
+$ patina campaign ./ledger-guest --vary buggify --gens 20 --out-dir ledger-out
 PATINA_CAMPAIGN_START artifact=./ledger-guest generations=20 seed_base=0 out=/home/you/ledger/ledger-out
 PATINA_CAMPAIGN_GEN generation=0 seed=5133223892554006150 class=violation NOVEL verify=replay:reproduced
 PATINA_CAMPAIGN_GEN generation=1 seed=9597900870906850753 class=violation
@@ -225,7 +225,7 @@ nothing runs: it reports the same result. Ask for more generations and it
 runs only the missing ones:
 
 ```text
-$ patina campaign ./ledger-guest --buggify --gens 40 --out-dir ledger-out
+$ patina campaign ./ledger-guest --vary buggify --gens 40 --out-dir ledger-out
 PATINA_CAMPAIGN_RESUME out=/home/you/ledger/ledger-out done=20 target=40 artifact=./ledger-guest sha256=96ac69fce15c6f37b2df320a4abedb04e000842949482dae3f649e5bb2d5f8cc
 ```
 

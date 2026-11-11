@@ -330,16 +330,13 @@ impl GuidanceTally {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::campaign::{CampaignSpec, FaultPlanes, mutation_units};
+    use crate::campaign::{CampaignSpec, Vary, mutation_units};
 
     /// Units for a spec that reads many knobs: every fault plane, buggify, PCT
     /// and the yield stride.
     fn units() -> Vec<Unit> {
         mutation_units(&CampaignSpec {
-            buggify: true,
-            pct: true,
-            yield_stride: true,
-            faults: FaultPlanes::ALL,
+            vary: Vary::from_names(["buggify", "sched-pct", "yield-stride", "faults"]).unwrap(),
             ..CampaignSpec::default()
         })
     }
@@ -436,7 +433,7 @@ mod tests {
     #[test]
     fn mutation_offers_only_the_seed_and_knobs_the_spec_reads() {
         let narrow = mutation_units(&CampaignSpec {
-            pct: true,
+            vary: Vary::from_names(["sched-pct"]).unwrap(),
             ..CampaignSpec::default()
         });
         assert_eq!(narrow.len(), 2, "the seed and the PCT depth: {narrow:?}");

@@ -114,7 +114,8 @@ fn main() {
                 // pure function of the seed and its index.
                 "--gens",
                 "3",
-                "--faults",
+                "--vary",
+                "faults",
                 "--timeout-secs",
                 "30",
                 "--out-dir",
@@ -401,7 +402,7 @@ fn main() {
         let envelope = refusal_campaign(
             &guest,
             &out,
-            &["--seed-start", "5", "--faults"],
+            &["--seed-start", "5", "--vary", "faults"],
             "fault-or-refusal",
         );
         assert_eq!(envelope["classes"]["failure"], 1, "{envelope:#}");

@@ -1119,7 +1119,7 @@ fn main() {
         let spec = guest.dir.path().join("spec.json");
         fs::write(
             &spec,
-            r#"{"faults": ["crash"], "classify": {"exit_codes": {"violation": [3]}}}"#,
+            r#"{"vary": ["crash"], "classify": {"exit_codes": {"violation": [3]}}}"#,
         )
         .unwrap();
         let campaign = |name: &str, guest_args: &[&str]| {

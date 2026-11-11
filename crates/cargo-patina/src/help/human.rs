@@ -22,7 +22,6 @@ fn flag_left(flag: &Flag) -> String {
     match flag.value {
         Value::None => {}
         Value::Required(p, _) => left.push_str(&format!(" <{p}>")),
-        Value::Optional(p, _) => left.push_str(&format!("[=<{p}>]")),
     }
     if flag.repeatable {
         left.push_str("...");

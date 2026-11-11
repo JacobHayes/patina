@@ -169,7 +169,6 @@ fn the_test_attribute_takes_exactly_this_verbs_flags() {
             let arity = match flag.value {
                 help::Value::None => Arity::Switch,
                 help::Value::Required(..) => Arity::Value,
-                help::Value::Optional(..) => unreachable!("`test` has no optional-value flag"),
             };
             (flag.name.trim_start_matches("--").replace('-', "_"), arity)
         })

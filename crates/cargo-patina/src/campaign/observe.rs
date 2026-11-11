@@ -58,9 +58,9 @@ pub(super) fn initialize_edge_coverage(
             ))
         })?;
     let instrumentation = crate::binary_instrumentation(image.bytes());
-    if state.spec.yield_stride && !instrumentation.yield_hook {
+    if state.spec.vary.yield_stride && !instrumentation.yield_hook {
         return Err(CliError(format!(
-            "--yield-stride draws a scheduling-point stride per generation, but {} was not built \
+            "--vary yield-stride draws a scheduling-point stride per generation, but {} was not built \
 with patina build --instrument, so it has no edge hook to take them",
             artifact_path.display()
         )));
@@ -99,16 +99,16 @@ pub(super) fn campaign_coverage_fingerprint(
 ) -> String {
     let mut fingerprint =
         crate::instrumentation_fingerprint(crate::DEFAULT_NATIVE_FINGERPRINT, instrumentation);
-    if spec.buggify {
+    if spec.vary.buggify {
         fingerprint.push_str("+buggify");
     }
-    if spec.pct {
+    if spec.vary.sched_pct {
         fingerprint.push_str("+pct");
     }
     if spec.swarm {
         fingerprint.push_str("+swarm");
     }
-    if spec.yield_stride {
+    if spec.vary.yield_stride {
         fingerprint.push_str("+yieldstride");
     }
     fingerprint

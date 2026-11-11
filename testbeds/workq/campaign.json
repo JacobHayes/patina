@@ -3,9 +3,8 @@
   "guest_args": ["--seed", "7", "--base-port", "5001", "--data-dir", "/workq",
                  "--segment-bytes", "256", "--crash-at-completed", "6",
                  "--ack-ledger", "/workq-acks"],
-  "buggify": true,
   "swarm": true,
-  "faults": ["net", "sleep", "crash"],
+  "vary": ["buggify", "net", "sleep", "crash"],
   "allow_unmet_sometimes": true,
   "classify": {"patterns": {"liveness": ["WORKQ_FAILURE not-converged"]}}
 }
