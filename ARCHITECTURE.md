@@ -381,7 +381,8 @@ its own runtime, and the processes run in lockstep: one runs at a time
   Each side advances its clock to the other's on a switch.
 - The supervisor launches every child (`native_run/machine.rs`) on the
   root's request over `PATINA_RT_LAUNCH_FD`: the root's control plane less
-  what only the root writes, the child's seed (from the run's and its pid),
+  what only the root writes and the filesystem fault knobs, the child's seed
+  (from the run's and its pid),
   pid, parent, group and session (`PATINA_RT_PROCESS`), its channel to the
   hub (`PATINA_RT_CHANNEL_FD`, `SOCK_SEQPACKET`), the root's host stdio, the
   same layout pin, and no other descriptor. A child reports ready from the
@@ -391,12 +392,20 @@ its own runtime, and the processes run in lockstep: one runs at a time
 - Pids and thread ids share one namespace, which the hub allocates: a
   process's main thread id is its pid, and its other threads' ids come from
   the hub.
+- The machine has one filesystem, the root's: a child's runtime drives
+  `RemoteFs` (`src/machine/fs.rs`), which forwards each driver call to the
+  hub, and the hub answers it on the root's driver stack, where every fault
+  is drawn, recording nothing; the child records the outcome. A child starts
+  in its parent's working directory.
+- While another process holds the baton, a process runs no guest code: the
+  compute observer has no candidate there.
 - `wait4`/`waitid` answer from the table; a blocking wait parks the task
   until a child's exit wakes it. A child's exit sends its status to the hub;
   it writes no facts, trace or stop record.
 - Not modeled yet, each a named `deny_trap` stop: spawn from a child, spawn
   while recording or replaying, file actions, spawn attributes beyond a
-  fresh process's defaults, crash-restart and scheduling-policy runs. A
+  fresh process's defaults, crash-restart, crash-knob and scheduling-policy
+  runs. A
   child's own stop or crash ends the run as an internal stop.
 
 ## Virtual time

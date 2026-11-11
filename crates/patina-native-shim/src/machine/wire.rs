@@ -23,7 +23,16 @@ pub(super) enum Message {
     AllocId,
     /// Hub to child: the id asked for.
     Id(i32),
+    /// Child to hub: a filesystem call (`super::fs`) of `len` bytes
+    /// follows, in packets of at most [`CHUNK_BYTES`].
+    Fs { len: u64 },
+    /// Hub to child: the call's answer, of `len` bytes, follows likewise.
+    FsReply { len: u64 },
 }
+
+/// The largest packet a frame's payload travels in: well inside a
+/// `SOCK_SEQPACKET` socket's default buffer.
+pub(super) const CHUNK_BYTES: usize = 32 << 10;
 
 fn state_words(state: ForeignState) -> [u64; 2] {
     match state {
@@ -59,6 +68,8 @@ impl Message {
             Message::Exit { now, status } => [4, now, status as u32 as u64, 0, 0],
             Message::AllocId => [5, 0, 0, 0, 0],
             Message::Id(id) => [6, id as u32 as u64, 0, 0, 0],
+            Message::Fs { len } => [7, len, 0, 0, 0],
+            Message::FsReply { len } => [8, len, 0, 0, 0],
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -91,6 +102,8 @@ impl Message {
             },
             5 => Message::AllocId,
             6 => Message::Id(words[1] as u32 as i32),
+            7 => Message::Fs { len: words[1] },
+            8 => Message::FsReply { len: words[1] },
             _ => return None,
         })
     }
@@ -115,6 +128,8 @@ mod tests {
             Message::Exit { now: 3, status: -1 },
             Message::AllocId,
             Message::Id(42),
+            Message::Fs { len: 1 << 20 },
+            Message::FsReply { len: 0 },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }

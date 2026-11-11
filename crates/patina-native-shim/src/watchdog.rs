@@ -167,6 +167,9 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
             // A creator waiting for its new thread's host start-up, or a
             // task waiting for a finished thread's host exit, runs no guest
             // code: a confirmed ineligible state, not a missed lock.
+            // Nor does a process while another of the machine runs.
+            #[cfg(target_os = "linux")]
+            let off_guest = off_guest || crate::machine::elsewhere_runs();
             let candidate = if off_guest {
                 None
             } else {

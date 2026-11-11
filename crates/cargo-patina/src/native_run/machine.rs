@@ -8,8 +8,9 @@
 //! stderr. A launcher thread serves those requests. Each child starts as
 //! the root did: the root's control plane less what only the root writes
 //! (facts, trace, coverage, stop records, reports, crash and restart
-//! channels, the base filesystem and staged stdin), its own seed, place in
-//! the process tree and channel, its guest environment through the initial
+//! channels, the base filesystem and staged stdin) and the filesystem fault
+//! knobs (the root's driver stack serves a child's filesystem), its own
+//! seed, place in the process tree, working directory and channel, its guest environment through the initial
 //! stack slots, and the same address layout pin. A child dies with the
 //! launcher thread (`PR_SET_PDEATHSIG`) and inherits no other descriptor.
 //! When the root ends, its end of the launch channel closes, and the
@@ -71,6 +72,11 @@ fn child_inherits(name: &str) -> bool {
         rt::ENV_ADMIT,
         rt::ENV_ADDRESS_LAYOUT,
         rt::ENV_INITIAL_STACK,
+        // The root's driver stack draws every filesystem fault and delay.
+        rt::ENV_FS_ERROR_PERMILLE,
+        rt::ENV_FS_SHORT_PERMILLE,
+        rt::ENV_FS_ERROR_AT,
+        rt::ENV_FS_LATENCY,
     ];
     !OWN.contains(&name) && !name.starts_with(ENVP_SLOT_PREFIX) && !name.starts_with("_PATINA_PAD_")
 }
@@ -116,6 +122,7 @@ struct Launch {
     pgid: i32,
     sid: i32,
     seed: u64,
+    cwd: String,
 }
 
 /// Serve the root's launch requests on `channel` until the root's end
@@ -190,6 +197,7 @@ fn launch(
             ),
         )
         .env(patina_dst_runtime::ENV_CHANNEL_FD, raw_channel.to_string())
+        .env(ENV_GUEST_CWD, &request.cwd)
         .stdin(Stdio::from(stdin))
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));

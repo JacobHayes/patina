@@ -107,10 +107,14 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     let (pgid, sid) = crate::identity::add_child(pid);
     let parent = crate::patina_pid();
     let seed = context(|context| Ok(child_seed(context.root_seed(), pid)));
+    // The child starts in the caller's working directory.
+    let cwd = crate::paths::cwd_path().unwrap_or_else(|errno| {
+        protocol_fatal_text(&format!("the working directory is unreadable ({errno})"))
+    });
     let [hub, child] = socketpair();
     // The launch request: the admitted artifact by its index in the
     // supervisor's list, and the child's arguments, environment, place in
-    // the process tree and seed. Its descriptors are the child's channel
+    // the process tree, seed and working directory. Its descriptors are the child's channel
     // end, then stdin, stdout and stderr.
     let request = serde_json::json!({
         "artifact": artifact,
@@ -121,18 +125,17 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
         "pgid": pgid,
         "sid": sid,
         "seed": seed,
+        "cwd": cwd,
     });
     let payload = serde_json::to_vec(&request)
         .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a launch: {error}")));
     send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2]);
     close(child);
-    match receive(hub) {
-        Some(Message::Ready) => {}
-        Some(other) => protocol_fatal("a new process's ready", &other),
-        None => protocol_fatal_text(&format!(
-            "process {pid} ({}) ended before it was ready",
-            path.to_string_lossy()
-        )),
+    // The child may use the filesystem before it is ready (its working
+    // directory): the hub serves it meanwhile.
+    match serve(pid, hub) {
+        Message::Ready => {}
+        other => protocol_fatal("a new process's ready", &other),
     }
     CHILDREN.lock().insert(
         pid,

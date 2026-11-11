@@ -491,13 +491,19 @@ build; {} was built with --no-instrument (or is a Go or Python guest), so the st
     let crash_restart_plan = crash_restart_plan(&invocation, replay_trace)?;
     // A guest may spawn the programs admitted to it as processes of its
     // machine, which the supervisor launches: not yet across crash-restart
-    // incarnations or under the scheduling-policy knobs, where the guest
+    // incarnations, under the crash knobs or the scheduling-policy knobs, where the guest
     // finds no launch channel and a spawn stops by name.
     #[cfg(target_os = "linux")]
     let machine = if crash_restart_plan.is_none()
         && invocation.schedule.pct.is_none()
         && !invocation.schedule.swarm
-    {
+        && !knob_env_pairs(&invocation.knobs)?.iter().any(|(name, _)| {
+            [
+                patina_dst_runtime::ENV_MACHINE_CRASH_PERMILLE,
+                patina_dst_runtime::ENV_PROCESS_CRASH_PERMILLE,
+            ]
+            .contains(name)
+        }) {
         let (root, launcher) = machine::launch_channel()?;
         let artifacts = admission
             .artifacts(&binary_file)

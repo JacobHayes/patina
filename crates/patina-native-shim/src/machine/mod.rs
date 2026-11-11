@@ -26,8 +26,9 @@ use crate::{SpinMutex, TaskId};
 use patina_dst_abi::ForeignState;
 use std::collections::BTreeMap;
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
+pub(crate) mod fs;
 pub(crate) mod spawn;
 mod wire;
 
@@ -135,7 +136,10 @@ pub(crate) fn child_start() {
     }
     context(|context| context.task_foreign(ELSEWHERE, ForeignState::Parked));
     send(channel(), &Message::Ready);
-    let (now, view) = match receive(channel()) {
+    ELSEWHERE_RUNS.store(true, Ordering::Relaxed);
+    let first = receive(channel());
+    ELSEWHERE_RUNS.store(false, Ordering::Relaxed);
+    let (now, view) = match first {
         Some(Message::Resume { now, view }) => (now, view),
         Some(other) => protocol_fatal("the first resume", &other),
         None => orphaned(),
@@ -163,11 +167,24 @@ fn context<T>(
 /// serves the machine until a local task is picked; in a child it waits on
 /// the hub.
 pub(crate) fn run_elsewhere(picked: TaskId) -> TaskId {
-    if is_child() {
+    ELSEWHERE_RUNS.store(true, Ordering::Relaxed);
+    let local = if is_child() {
         yield_to_hub(picked)
     } else {
         serve_children(picked)
-    }
+    };
+    ELSEWHERE_RUNS.store(false, Ordering::Relaxed);
+    local
+}
+
+/// Set while another process holds the baton: this process runs no guest
+/// code (frozen on its channel, or serving as the hub), so the compute
+/// observer has no candidate here.
+static ELSEWHERE_RUNS: AtomicBool = AtomicBool::new(false);
+
+/// Whether another process of the machine holds the baton.
+pub(crate) fn elsewhere_runs() -> bool {
+    ELSEWHERE_RUNS.load(Ordering::Relaxed)
 }
 
 /// The hub's side of a switch: resume the picked child and serve it until
@@ -184,36 +201,65 @@ fn serve_children(mut picked: TaskId) -> TaskId {
         let (now, view) =
             context(|context| Ok((context.machine_now()?, context.process_view(Some(picked)))));
         send(channel, &Message::Resume { now, view });
-        loop {
-            match receive(channel) {
-                Some(Message::Yield { now, state }) => {
-                    context(|context| {
-                        context.advance_to(now)?;
-                        context.task_foreign(picked, state)
-                    });
-                    break;
-                }
-                Some(Message::Exit { now, status }) => {
-                    context(|context| {
-                        context.advance_to(now)?;
-                        context.task_foreign(picked, ForeignState::Gone)
-                    });
-                    exited(pid, status);
-                    break;
-                }
-                Some(Message::AllocId) => {
-                    send(
-                        channel,
-                        &Message::Id(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-                    );
-                }
-                Some(other) => protocol_fatal("a child's message", &other),
-                None => died(pid),
+        match serve(pid, channel) {
+            Message::Yield { now, state } => {
+                context(|context| {
+                    context.advance_to(now)?;
+                    context.task_foreign(picked, state)
+                });
             }
+            Message::Exit { now, status } => {
+                context(|context| {
+                    context.advance_to(now)?;
+                    context.task_foreign(picked, ForeignState::Gone)
+                });
+                exited(pid, status);
+            }
+            other => protocol_fatal("a child's yield or exit", &other),
         }
         picked = thread::pick_next();
         if !is_foreign(picked) {
             return picked;
+        }
+    }
+}
+
+/// Serve child `pid` on `channel` (ids, filesystem calls) until it says
+/// something only its caller acts on (ready, yield, exit), and answer that.
+fn serve(pid: i32, channel: c_int) -> Message {
+    loop {
+        match receive(channel) {
+            Some(Message::AllocId) => {
+                send(
+                    channel,
+                    &Message::Id(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+                );
+            }
+            Some(Message::Fs { len }) => {
+                let request = receive_payload(channel, len).unwrap_or_else(|| died(pid));
+                let request = serde_json::from_slice(&request).unwrap_or_else(|error| {
+                    protocol_fatal_text(&format!("decoding a filesystem call: {error}"))
+                });
+                // The root's driver stack answers; the root records nothing.
+                let answer = crate::with_context_raw(|context| {
+                    Ok(fs::serve(context.machine_filesystem(), request))
+                })
+                .unwrap_or_else(|errno| {
+                    protocol_fatal_text(&format!("the root's runtime is gone ({errno})"))
+                });
+                let answer = serde_json::to_vec(&answer).unwrap_or_else(|error| {
+                    protocol_fatal_text(&format!("encoding a filesystem answer: {error}"))
+                });
+                send_frame(
+                    channel,
+                    Message::FsReply {
+                        len: answer.len() as u64,
+                    },
+                    &answer,
+                );
+            }
+            Some(message) => return message,
+            None => died(pid),
         }
     }
 }
@@ -308,7 +354,20 @@ fn exchange(message: &Message) -> Message {
 }
 
 fn send(fd: c_int, message: &Message) {
-    let bytes = message.encode();
+    send_bytes(fd, &message.encode());
+}
+
+/// Send `header`, then `payload` in packets of at most
+/// [`wire::CHUNK_BYTES`].
+fn send_frame(fd: c_int, header: Message, payload: &[u8]) {
+    send(fd, &header);
+    for chunk in payload.chunks(wire::CHUNK_BYTES) {
+        send_bytes(fd, chunk);
+    }
+}
+
+/// One packet.
+fn send_bytes(fd: c_int, bytes: &[u8]) {
     loop {
         // SAFETY: a live buffer of `bytes.len()` bytes.
         let sent = unsafe {
@@ -335,9 +394,19 @@ fn send(fd: c_int, message: &Message) {
     }
 }
 
-/// The next message on `fd`, or `None` at end of stream (the peer is gone).
-fn receive(fd: c_int) -> Option<Message> {
-    let mut buffer = [0u8; wire::MESSAGE_BYTES];
+/// A frame's `len` payload bytes, or `None` if the peer is gone first.
+fn receive_payload(fd: c_int, len: u64) -> Option<Vec<u8>> {
+    let mut payload = Vec::with_capacity(len as usize);
+    let mut chunk = vec![0u8; wire::CHUNK_BYTES];
+    while (payload.len() as u64) < len {
+        let received = receive_bytes(fd, &mut chunk)?;
+        payload.extend_from_slice(&chunk[..received]);
+    }
+    Some(payload)
+}
+
+/// One packet into `buffer`: its length, or `None` at end of stream.
+fn receive_bytes(fd: c_int, buffer: &mut [u8]) -> Option<usize> {
     loop {
         // SAFETY: a writable buffer of its length.
         let received = unsafe {
@@ -357,11 +426,18 @@ fn receive(fd: c_int) -> Option<Message> {
         if received <= 0 {
             return None;
         }
-        return Some(
-            Message::decode(&buffer[..received as usize])
-                .unwrap_or_else(|| protocol_fatal_text("an undecodable message")),
-        );
+        return Some(received as usize);
     }
+}
+
+/// The next message on `fd`, or `None` at end of stream (the peer is gone).
+fn receive(fd: c_int) -> Option<Message> {
+    let mut buffer = [0u8; wire::MESSAGE_BYTES];
+    let received = receive_bytes(fd, &mut buffer)?;
+    Some(
+        Message::decode(&buffer[..received])
+            .unwrap_or_else(|| protocol_fatal_text("an undecodable message")),
+    )
 }
 
 fn close(fd: c_int) {

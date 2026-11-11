@@ -605,6 +605,13 @@ impl Context {
         }
     }
 
+    /// The filesystem driver stack itself, for the machine's hub serving
+    /// another process's filesystem call: the call is that process's to
+    /// record, so nothing here records, charges or delays it.
+    pub fn machine_filesystem(&mut self) -> &mut dyn patina_dst_driver_api::FsDriver {
+        self.filesystem.as_mut()
+    }
+
     /// The monotonic virtual time now, unrecorded: what a process switch
     /// carries to the process it resumes.
     pub fn machine_now(&self) -> Result<u64, RuntimeError> {

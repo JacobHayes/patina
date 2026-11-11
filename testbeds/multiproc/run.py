@@ -25,7 +25,7 @@ EXPECTED = {
     "pipeline": ("admitted", "posix_spawnp"),
     "forkwait-c": ("runtime", "fork"),
     "forkwait-cxx": ("audit", "newlocale"),
-    "buildlike": ("admitted", "posix_spawnp"),
+    "buildlike": ("pass", None),
     "sigchld": ("runtime", "fork"),
     "failed-exec-enoent": ("runtime", "execvp"),
     "failed-exec-eacces": ("runtime", "execvp"),

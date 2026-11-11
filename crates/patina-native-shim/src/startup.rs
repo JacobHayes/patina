@@ -73,7 +73,16 @@ pub(crate) fn init_from_env() -> c_int {
         crate::admission::capture()?;
         #[cfg(target_os = "linux")]
         crate::machine::configure()?;
-        let mut builder = RuntimeBuilder::new(config).with_fs_image(fs_image_base()?);
+        // A child process of the machine uses the root's filesystem.
+        #[cfg(target_os = "linux")]
+        let builder = if crate::machine::is_child() {
+            RuntimeBuilder::new(config).with_filesystem(crate::machine::fs::RemoteFs)
+        } else {
+            RuntimeBuilder::new(config).with_fs_image(fs_image_base()?)
+        };
+        #[cfg(not(target_os = "linux"))]
+        let builder = RuntimeBuilder::new(config).with_fs_image(fs_image_base()?);
+        let mut builder = builder;
         if let Some(fd) = trace_fd {
             builder = builder.with_trace_transport(FdTraceTransport { fd });
         }
