@@ -349,6 +349,24 @@ fn main() {
             let status = child.wait().unwrap();
             println!("KILLED code={:?} signal={:?}", status.code(), status.signal());
         }
+        [binary, "kill-zombie"] => {
+            // kill(-1) and kill(0) before a child, beside a child that has
+            // exited and is not yet reaped (waitid's WNOWAIT), and after it
+            // is: each answer and errno.
+            let probe = |pid: i32, sig: i32| {
+                let answer = unsafe { kill(pid, sig) };
+                let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+                format!("{answer}/{}", if answer == 0 { 0 } else { errno })
+            };
+            unsafe { signal(10, 1) };
+            let alone = probe(-1, 0);
+            let mut child = Command::new(binary).args(["child", "0"]).spawn().unwrap();
+            let mut info = [0i32; 32];
+            assert_eq!(unsafe { waitid(1, child.id(), &mut info, 4 | 0x0100_0000) }, 0);
+            let beside = [probe(-1, 0), probe(-1, 10), probe(0, 0), probe(0, 10)].join(" ");
+            child.wait().unwrap();
+            println!("KILL-ZOMBIE {alone} | {beside} | {}", probe(-1, 0));
+        }
         ["abort"] => std::process::abort(),
         [binary, "abort-child"] => {
             use std::os::unix::process::ExitStatusExt;
@@ -2386,6 +2404,50 @@ fn main() {
             ],
         );
         assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// `kill(-1)` finds a child that has exited and is not yet reaped, as
+    /// the kernel's does (0, where with no other process it is `ESRCH`),
+    /// and `kill(0)` answers for the caller's group; the run replays.
+    #[test]
+    fn kill_every_process_finds_an_unreaped_child() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let trace = guest.dir.path().join("kill-zombie.patina");
+        let recorded = json_envelope(&guest.command(
+            "run",
+            &[
+                "--seed",
+                "3",
+                "--format",
+                "json",
+                "--record",
+                trace.to_str().unwrap(),
+                "--",
+                binary,
+                "kill-zombie",
+            ],
+        ));
+        let esrch = format!("-1/{}", libc::ESRCH);
+        let expected = format!("KILL-ZOMBIE {esrch} | 0/0 0/0 0/0 0/0 | {esrch}");
+        let answers = |envelope: &serde_json::Value| {
+            envelope["stdout"]
+                .as_str()
+                .and_then(|out| out.lines().find(|line| line.starts_with("KILL-ZOMBIE")))
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            answers(&recorded).as_deref(),
+            Some(&*expected),
+            "{recorded:#}"
+        );
+        let replayed =
+            json_envelope(&guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]));
+        assert_eq!(
+            (&replayed["result"], answers(&replayed)),
+            (&"ok".into(), Some(expected)),
+            "{replayed:#}"
+        );
     }
 
     /// A fault the run arms that lands only in a child is the run's: its

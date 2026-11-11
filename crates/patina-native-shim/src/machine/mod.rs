@@ -158,6 +158,12 @@ pub(crate) fn others_live() -> bool {
     }
 }
 
+/// Whether a child of this process is still in its table: live, or ended
+/// and not yet reaped.
+fn unreaped() -> bool {
+    ROLE.load(Ordering::Relaxed) == ROLE_ROOT && !CHILDREN.lock().is_empty()
+}
+
 /// Stop the run by name if another process of the machine lives: `what` is
 /// state each process models on its own that is really the machine's
 /// (locks, FIFOs, shared file mappings, System V IPC), which another
@@ -1033,10 +1039,17 @@ pub(crate) fn signal_elsewhere(
         };
         return Some(refused(answer, sig, pid));
     }
-    if queued || !others_live() || !(0..=SIGNAL_MAX).contains(&sig) {
+    if queued || !(0..=SIGNAL_MAX).contains(&sig) {
         return None;
     }
     let every = pid == -1;
+    if !others_live() {
+        // Every other process of the machine has ended: one not yet
+        // reaped is still there to signal (to no effect), so `kill(-1)`
+        // finds it, as the kernel's does, where it would find none;
+        // the group's members are the caller's own model's answer.
+        return (every && unreaped()).then_some(0);
+    }
     if !every && pid != 0 && pid.checked_neg() != Some(crate::identity::pgid()) {
         // Another group: none holds a process of the machine.
         return None;
