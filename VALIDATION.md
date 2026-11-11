@@ -200,8 +200,21 @@ versions, target triple and fingerprint.
   from outside, stopping the run with no process left; the root's end and a
   child's stop recording each other child's teardown; the compute
   observer quiet in a process serving another's computation; two hundred
-  short-lived children in turn; and a forged
-  admission request judged again; `std::process::Command` shapes against
+  short-lived children in turn; a forged
+  admission request judged again; signals across processes (a child's
+  handler and the status it chose, a default action's death and core dump
+  in the parent's wait, a discarded default, `EINTR` and `SA_RESTART` on a
+  child's read of a pipe its parent holds, a child signalling its parent,
+  whose handler sees `sigqueue`'s value and the sender's pid and uid, a
+  sibling, the machine's group and every process, and `SIGSTOP` across
+  processes a named stop); a child's crash (an abort, a raised and a real
+  `SIGSEGV`, a fault in a handler, a panic that aborts or exits 101) its
+  parent tolerates (the run ends clean) or asserts on (its failure); an
+  `always!` and a violation verdict in a child as the run's violation,
+  attributed to the child; for these, record-to-replay, same-seed trace
+  bytes and seed variation of where a signal lands in a busy child, and no
+  host process left after a signal's death or a root that ends with a
+  signal pending; `std::process::Command` shapes against
   an admitted child: `output()`, `status()`, piped stdin and stdout both
   ways, a two-child pipeline of 10,000 lines, a reader gone (`EPIPE`, and
   `SIGPIPE` by default), `Stdio::null` and `inherit`, `current_dir`,

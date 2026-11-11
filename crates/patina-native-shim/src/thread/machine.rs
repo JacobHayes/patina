@@ -74,6 +74,12 @@ pub(crate) fn child_changed(pid: c_int, status: c_int) {
     signals::child_changed(pid, status);
 }
 
+/// A signal another process of the machine sent this one, with the
+/// information its sender made (`siginfo_t`'s words).
+pub(crate) fn machine_signal(info: [u64; 16]) {
+    signals::from_process(signals::Info { words: info });
+}
+
 /// Whether this process's children would reap themselves (`SIGCHLD`
 /// ignored, or `SA_NOCLDWAIT`).
 pub(crate) fn children_reap_themselves() -> bool {

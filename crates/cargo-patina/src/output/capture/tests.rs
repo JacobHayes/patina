@@ -34,7 +34,7 @@ fn parse_facts_takes_the_last_complete_document_and_refuses_anything_else() {
 
 /// A machine's documents: the root's last one is the run's state, with each
 /// process's verdicts (one context number in two processes is two
-/// contexts), each child's latest findings and the first divergence any
+/// contexts; a child's attributed to it), each child's latest findings and the first divergence any
 /// process noted. With no document of the root's, the run has no facts.
 #[test]
 fn parse_facts_keeps_the_roots_document_and_every_processs_findings() {
@@ -56,7 +56,7 @@ fn parse_facts_keeps_the_roots_document_and_every_processs_findings() {
     assert!(parsed.get("process").is_none());
     assert_eq!(
         parsed["verdicts"],
-        serde_json::json!([{"label": "root"}, {"label": "child"}])
+        serde_json::json!([{"label": "root"}, {"label": "child", "process": 3}])
     );
     assert_eq!(
         parsed["runtime_findings"],

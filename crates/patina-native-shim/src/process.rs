@@ -413,7 +413,14 @@ fn abort_recorded() -> ! {
 /// divergent replay never passes for the finding it stopped short of.
 pub(crate) fn finalize_then_abort() -> ! {
     let _ = flush_before_refusal();
-    if shutdown_run() != 0 {
+    // A child's violation is the run's, not an end its parent reaps: its
+    // stop goes to the hub, which ends the run naming it (its decisions,
+    // the verdict's included, are on its page already).
+    #[cfg(target_os = "linux")]
+    let child = crate::machine::is_child();
+    #[cfg(not(target_os = "linux"))]
+    let child = false;
+    if !child && shutdown_run() != 0 {
         thread::fatal("always! violation finalization failed");
     }
     host_abort(RunStop::new(

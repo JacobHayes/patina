@@ -80,33 +80,13 @@ pub(crate) unsafe fn generate_signal(
             if forged && pid != current_tid() {
                 return -i64::from(EPERM);
             }
-            // Another process of the machine: `SIGKILL` and the probe cross
-            // processes; a group while several live is not modeled.
+            // Another process of the machine, its group or every process:
+            // the machine carries the signal there.
             #[cfg(target_os = "linux")]
+            if crate::machine::is_multiprocess()
+                && let Some(answer) = crate::machine::signal_elsewhere(pid, sig, info.words, queued)
             {
-                use crate::machine;
-                let own = crate::patina_pid();
-                let init = crate::registry::INIT_PID as i32;
-                if pid <= 0 && !queued && machine::others_live() {
-                    crate::trap_unmodeled(
-                        "a signal to a process group, or to every process, while the guest's \
-machine holds several processes is not modeled",
-                    );
-                }
-                if pid > 0 && pid != own && pid != init && valid && !queued {
-                    if machine::is_child() {
-                        return machine::signal_from_child(pid, sig);
-                    }
-                    if let Some(answer) = machine::signal_child(pid, sig) {
-                        if answer == machine::UNMODELED_SIGNAL {
-                            crate::trap_unmodeled(&format!(
-                                "signal {sig} to process {pid} of the guest's machine is not \
-modeled (only SIGKILL and the probe, signal 0, cross processes)"
-                            ));
-                        }
-                        return answer;
-                    }
-                }
+                return answer;
             }
             // A queued signal names one process; `kill` also names groups.
             // Every signal reaching another process here comes from user
@@ -197,6 +177,21 @@ modeled (only SIGKILL and the probe, signal 0, cross processes)"
 pub(in crate::thread) fn child_changed(pid: i32, status: i32) {
     let mut state = lock_state();
     let wakes = state.generate_locked(SignalTarget::Process, Info::child(pid, status));
+    drop(state);
+    for task in wakes {
+        RealScheduler
+            .wake(task)
+            .unwrap_or_else(|error| fatal(&error));
+    }
+}
+
+/// A signal another process of the machine sent this one (`info`, as its
+/// sender made it): generated for the process, as a `kill` of it from here
+/// is, and delivered at a task's next scheduling point.
+#[cfg(target_os = "linux")]
+pub(in crate::thread) fn from_process(info: Info) {
+    let mut state = lock_state();
+    let wakes = state.generate_locked(SignalTarget::Process, info);
     drop(state);
     for task in wakes {
         RealScheduler

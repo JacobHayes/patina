@@ -290,6 +290,7 @@ pub(crate) fn child_start() {
         context.import_machine_carry(carry);
         context.task_foreign(ELSEWHERE, view)
     });
+    raise_pending();
 }
 
 /// What this process hands the next one with the baton: the time, what
@@ -322,12 +323,34 @@ fn channel() -> c_int {
 }
 
 /// A frozen child's wait for the baton: the hub resumes it, or kills it.
+/// The signals other processes sent it meanwhile come first; it generates
+/// them once it took the baton ([`raise_pending`]).
 fn await_resume() -> (u64, ForeignState, MachineCarry) {
-    match receive(channel()) {
-        Some(Message::Resume { now, view, carry }) => (now, view, carry),
-        Some(Message::Kill) => killed(),
-        Some(other) => protocol_fatal("a resume", &other),
-        None => orphaned(),
+    loop {
+        match receive(channel()) {
+            Some(Message::Resume { now, view, carry }) => return (now, view, carry),
+            Some(Message::Raise { len }) => {
+                let info = receive_payload(channel(), len).unwrap_or_else(|| orphaned());
+                RAISED.lock().push(info_words(&info));
+            }
+            Some(Message::Kill) => killed(),
+            Some(other) => protocol_fatal("a resume", &other),
+            None => orphaned(),
+        }
+    }
+}
+
+/// The signals a frozen child was sent, until it resumes.
+static RAISED: SpinMutex<Vec<[u64; 16]>> = SpinMutex::new(Vec::new());
+
+/// A resumed child generates the signals it was sent while frozen, in the
+/// order they were sent, each a recorded decision of its own: its model
+/// then acts on them (a handler, a mask, an interrupted wait, a default
+/// action).
+fn raise_pending() {
+    let raised = std::mem::take(&mut *RAISED.lock());
+    for info in raised {
+        thread::machine_signal(info);
     }
 }
 
@@ -387,7 +410,20 @@ fn serve_children(mut picked: TaskId) -> TaskId {
             .map(|child| child.channel)
             .unwrap_or_else(|| protocol_fatal_text(&format!("no live process {pid} to resume")));
         let (now, view, carry) = hand_over(picked);
-        if !send_bytes_once(channel, &Message::Resume { now, view, carry }.encode()) {
+        // The signals sent it while it was frozen go first: it generates
+        // them as it resumes.
+        let raised = PENDING.lock().remove(&pid).unwrap_or_default();
+        let sent = raised.iter().all(|info| {
+            let bytes = info_bytes(info);
+            send_bytes_once(
+                channel,
+                &Message::Raise {
+                    len: bytes.len() as u64,
+                }
+                .encode(),
+            ) && send_bytes_once(channel, &bytes)
+        });
+        if !sent || !send_bytes_once(channel, &Message::Resume { now, view, carry }.encode()) {
             // It died frozen: the machine keeps what it would have handed it.
             context(|context| {
                 context.import_machine_carry(carry);
@@ -438,11 +474,9 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
     loop {
         match receive(channel) {
             Some(Message::AllocId) => {
-                reply(
-                    channel,
-                    Message::Id(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-                    &[],
-                )?;
+                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                CHILD_THREADS.lock().insert(id);
+                reply(channel, Message::Id(id), &[])?;
             }
             Some(Message::Fs { len }) => {
                 let request = receive_payload(channel, len)?;
@@ -469,12 +503,12 @@ fn serve(pid: i32, channel: c_int) -> Option<Message> {
                     &answer,
                 )?;
             }
-            Some(Message::Signal { pid: target, sig }) => {
-                let answer = if target == pid || target == crate::patina_pid() {
-                    // Itself, which it signals on its own, or the root.
-                    UNMODELED_SIGNAL
+            Some(Message::Signal { pid: target, len }) => {
+                let info = info_words(&receive_payload(channel, len)?);
+                let answer = if target > 0 {
+                    signal_process(pid, target, info).unwrap_or(-i64::from(libc::ESRCH))
                 } else {
-                    signal_child(target, sig).unwrap_or(-i64::from(libc::ESRCH))
+                    signal_others(pid, info)
                 };
                 reply(channel, Message::Id(answer as i32), &[])?;
             }
@@ -809,6 +843,8 @@ fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
         child.page = None;
         (child.channel, child.stops)
     };
+    // What it was sent and never took dies with it.
+    PENDING.lock().remove(&pid);
     close(channel);
     close(stops);
     let handles = HANDLES.lock().remove(&pid).unwrap_or_default();
@@ -837,47 +873,217 @@ fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
     }
 }
 
-/// What the hub answers a child's signal to a process it does not model
-/// signals to: the child stops the run by name.
-pub(crate) const UNMODELED_SIGNAL: i64 = i32::MIN as i64;
+/// What the hub answers a child's signal it does not model across
+/// processes: the child stops the run by name.
+const UNMODELED_SIGNAL: i64 = i32::MIN as i64;
 
-/// `kill(pid, sig)` of child `pid` from the process holding the baton:
-/// `None` when no child has that pid. Signal 0 probes it; `SIGKILL` kills a
-/// live one (a zombie is already dead); another signal stops the run by
-/// name.
-pub(crate) fn signal_child(pid: i32, sig: i32) -> Option<i64> {
-    let live = CHILDREN
-        .lock()
-        .get(&pid)
-        .map(|child| child.status.is_none())?;
+/// The signals the hub holds for each live child until its next resume,
+/// each as its sender made it.
+static PENDING: SpinMutex<BTreeMap<i32, Vec<[u64; 16]>>> = SpinMutex::new(BTreeMap::new());
+
+/// The thread ids the hub handed to children's threads.
+static CHILD_THREADS: SpinMutex<BTreeSet<i32>> = SpinMutex::new(BTreeSet::new());
+
+/// `kill(pid, sig)` (or a queued signal, `queued`) with `info`, as the
+/// caller made it, where `pid` names another process of the machine, its
+/// group or every process: the call's answer, or `None` when it names only
+/// this process (or init, or nothing), which the caller's own model
+/// answers. A signal to the machine's group goes to every other process
+/// here and answers `None`: the caller's model takes its own share.
+///
+/// Every process of the machine shares one credential, so a signal from
+/// one to another is permitted; a stop signal (job control) and `SIGSYS`
+/// across processes stop the run by name.
+pub(crate) fn signal_elsewhere(
+    pid: i32,
+    sig: i32,
+    mut info: [u64; 16],
+    queued: bool,
+) -> Option<i64> {
+    // The signal is the call's, whatever the information says
+    // (`do_rt_sigqueueinfo` sets it too).
+    info[0] = (info[0] & !0xffff_ffff) | u64::from(sig as u32);
+    if pid > 0 {
+        if pid == crate::patina_pid()
+            || pid == crate::registry::INIT_PID as i32
+            || crate::identity::lookup(pid).is_some()
+        {
+            return None;
+        }
+        let answer = if is_child() {
+            ask_hub(pid, info)
+        } else {
+            signal_process(crate::patina_pid(), pid, info)?
+        };
+        return Some(refused(answer, sig, pid));
+    }
+    if queued || !others_live() || !(0..=SIGNAL_MAX).contains(&sig) {
+        return None;
+    }
+    let every = pid == -1;
+    if !every && pid != 0 && pid.checked_neg() != Some(crate::identity::pgid()) {
+        // Another group: none holds a process of the machine.
+        return None;
+    }
+    let answer = if is_child() {
+        ask_hub(pid, info)
+    } else {
+        signal_others(crate::patina_pid(), info)
+    };
+    let answer = refused(answer, sig, pid);
+    // Every process but the caller (and init), or the group, the caller in
+    // it.
+    every.then_some(answer)
+}
+
+/// A child's signal to other processes of the machine: the hub sends it
+/// and answers.
+fn ask_hub(pid: i32, info: [u64; 16]) -> i64 {
+    let bytes = info_bytes(&info);
+    send_frame(
+        channel(),
+        Message::Signal {
+            pid,
+            len: bytes.len() as u64,
+        },
+        &bytes,
+    );
+    match receive(channel()) {
+        Some(Message::Id(answer)) => {
+            // The hub's view of the rest of the machine changed (a process
+            // the signal woke, or killed and whose parent wakes): the next
+            // pick of it asks.
+            context(|context| context.task_foreign(ELSEWHERE, ForeignState::Runnable));
+            i64::from(answer)
+        }
+        Some(other) => protocol_fatal("a signal's result", &other),
+        None => orphaned(),
+    }
+}
+
+/// The caller's answer, unless the signal crosses processes where the
+/// machine does not model it, which stops the run by name.
+fn refused(answer: i64, sig: i32, pid: i32) -> i64 {
+    if answer == UNMODELED_SIGNAL {
+        crate::trap_unmodeled(&format!(
+            "signal {sig} from process {} to {} of the guest's machine is not modeled (a stop \
+signal, SIGSYS, or a thread of another process)",
+            crate::patina_pid(),
+            match pid {
+                -1 => "every process".to_owned(),
+                pid if pid <= 0 => "the process group".to_owned(),
+                pid => format!("process {pid}"),
+            }
+        ))
+    }
+    answer
+}
+
+/// Whether the machine carries `sig` from one process to another: not a
+/// stop signal (job control: no process of the machine stops), not
+/// `SIGSYS` (reserved for containment).
+fn crosses(sig: i32) -> bool {
+    !matches!(sig, libc::SIGSTOP | libc::SIGSYS)
+}
+
+/// The hub sends `info` from process `from` to process `pid` (`kill`'s
+/// positive pid): `None` when no process of the machine has that pid. As
+/// the kernel does, the target is found first, then the signal judged
+/// (`EINVAL`). The root takes it in its own model; a live child gets it
+/// when it next resumes (its foreign task becomes runnable, a recorded
+/// decision of the root's), but for `SIGKILL`, which kills it now; signal
+/// 0 probes; a zombie takes nothing.
+fn signal_process(from: i32, pid: i32, info: [u64; 16]) -> Option<i64> {
+    let sig = info[0] as u32 as i32;
+    let root = pid == crate::patina_pid() && from != pid;
+    if !root && CHILD_THREADS.lock().contains(&pid) {
+        // A thread of a child, which may have ended: the hub cannot tell.
+        return Some(UNMODELED_SIGNAL);
+    }
+    let live = root
+        || CHILDREN
+            .lock()
+            .get(&pid)
+            .map(|child| child.status.is_none())?;
+    if !(0..=SIGNAL_MAX).contains(&sig) {
+        return Some(-i64::from(libc::EINVAL));
+    }
+    if sig != 0 && !crosses(sig) {
+        return Some(UNMODELED_SIGNAL);
+    }
     match sig {
         0 => {}
-        libc::SIGKILL if live => kill(pid, Notify::Parent),
-        libc::SIGKILL => {}
-        _ => return Some(UNMODELED_SIGNAL),
+        _ if !live => {}
+        _ if root => thread::machine_signal(info),
+        libc::SIGKILL => kill(pid, Notify::Parent),
+        _ => queue(pid, info),
     }
     Some(0)
 }
 
-/// `kill(pid, sig)` of another process of the machine from a child: the
-/// hub answers. A signal it does not model stops the run by name.
-pub(crate) fn signal_from_child(pid: i32, sig: i32) -> i64 {
-    match exchange(&Message::Signal { pid, sig }) {
-        Message::Id(answer) if i64::from(answer) == UNMODELED_SIGNAL => {
-            crate::trap_unmodeled(&format!(
-                "signal {sig} from process {} to process {pid} of the guest's machine is not \
-modeled (only SIGKILL and the probe, signal 0, cross processes)",
-                crate::patina_pid()
-            ))
-        }
-        Message::Id(answer) => {
-            // The hub's view of the rest of the machine changed (a killed
-            // process's waiting parent wakes): the next pick of it asks.
-            context(|context| context.task_foreign(ELSEWHERE, ForeignState::Runnable));
-            i64::from(answer)
-        }
-        other => protocol_fatal("a signal's result", &other),
+/// The highest signal number.
+const SIGNAL_MAX: i32 = 64;
+
+/// The hub sends `info` from process `from` to every other process of the
+/// machine (its one group, or every process: the same set), in pid order:
+/// the root first, then each live child.
+fn signal_others(from: i32, info: [u64; 16]) -> i64 {
+    let sig = info[0] as u32 as i32;
+    if sig != 0 && !crosses(sig) {
+        return UNMODELED_SIGNAL;
     }
+    if sig == 0 {
+        return 0;
+    }
+    let root = crate::patina_pid();
+    if from != root {
+        thread::machine_signal(info);
+    }
+    let live: Vec<i32> = CHILDREN
+        .lock()
+        .iter()
+        .filter(|(pid, child)| **pid != from && child.status.is_none())
+        .map(|(pid, _)| *pid)
+        .collect();
+    for pid in live {
+        if sig == libc::SIGKILL {
+            kill(pid, Notify::Parent);
+        } else {
+            queue(pid, info);
+        }
+    }
+    0
+}
+
+/// Hold `info` for live child `pid` until it next resumes, and make its
+/// foreign task runnable: the signal may wake it.
+fn queue(pid: i32, info: [u64; 16]) {
+    PENDING.lock().entry(pid).or_default().push(info);
+    crate::with_context_raw(|context| {
+        context.task_foreign(foreign_task(pid), ForeignState::Runnable)
+    })
+    .unwrap_or_else(|errno| protocol_fatal_text(&format!("the root's runtime is gone ({errno})")));
+}
+
+/// A signal's information as it travels on the channel.
+fn info_bytes(info: &[u64; 16]) -> [u8; 128] {
+    let mut bytes = [0u8; 128];
+    for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(info) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+/// A signal's information from the channel.
+fn info_words(bytes: &[u8]) -> [u64; 16] {
+    if bytes.len() != 128 {
+        protocol_fatal_text("a signal's information is not 128 bytes");
+    }
+    let mut info = [0u64; 16];
+    for (word, chunk) in info.iter_mut().zip(bytes.as_chunks::<8>().0) {
+        *word = u64::from_le_bytes(*chunk);
+    }
+    info
 }
 
 /// Kill live child `pid`, frozen on its channel: it dies of `SIGKILL`, and
@@ -1046,6 +1252,9 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
             context.import_machine_carry(carry);
             Ok(())
         });
+        // A signal sent it wakes the task it interrupts before the remote
+        // waiters look again, so the wait ends as the signal says.
+        raise_pending();
         // Whatever the rest of the machine did meanwhile, each task parked
         // on a pipe the root holds looks again.
         thread::wake_remote_waiters();

@@ -483,7 +483,7 @@ pub(crate) use generation::{
     GenerationInfo, GenerationTarget, abort_through_kernel, generate_signal,
 };
 #[cfg(target_os = "linux")]
-pub(super) use generation::{child_changed, children_reap_themselves};
+pub(super) use generation::{child_changed, children_reap_themselves, from_process};
 pub(super) use generation::{clear_tid, temporary_mask, with_mask, with_temporary_mask};
 pub(crate) use generation::{patina_raw_exit, patina_set_tid_address};
 #[cfg(test)]

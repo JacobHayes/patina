@@ -45,9 +45,11 @@ pub(super) enum Message {
     Fs { len: u64 },
     /// Hub to child: the call's answer, of `len` bytes, follows likewise.
     FsReply { len: u64 },
-    /// Child to hub: `kill(pid, sig)` of another process of the machine;
-    /// the hub answers [`Message::Id`] with the call's result.
-    Signal { pid: i32, sig: i32 },
+    /// Child to hub: `kill(pid, ..)` of other processes of the machine (a
+    /// pid, the machine's group or every process); the signal's
+    /// information as its sender made it, of `len` bytes, follows. The hub
+    /// answers [`Message::Id`] with the call's result.
+    Signal { pid: i32, len: u64 },
     /// Hub to a frozen child: it was sent `SIGKILL`, and dies.
     Kill,
     /// Child to hub: the child stops the run; its stop record, of `len`
@@ -68,6 +70,9 @@ pub(super) enum Message {
     Plan,
     /// Hub to child: the descriptor plan (JSON of `len` bytes) follows.
     PlanReply { len: u64 },
+    /// Hub to a frozen child, before its resume: a signal another process
+    /// sent it; its information, of `len` bytes, follows.
+    Raise { len: u64 },
 }
 
 /// The largest packet a frame's payload travels in: well inside a
@@ -123,9 +128,7 @@ impl Message {
             Message::Id(id) => words(6, [id as u32 as u64, 0, 0], None),
             Message::Fs { len } => words(7, [len, 0, 0], None),
             Message::FsReply { len } => words(8, [len, 0, 0], None),
-            Message::Signal { pid, sig } => {
-                words(9, [pid as u32 as u64, sig as u32 as u64, 0], None)
-            }
+            Message::Signal { pid, len } => words(9, [pid as u32 as u64, len, 0], None),
             Message::Kill => words(10, [0; 3], None),
             Message::Stop { len } => words(11, [len, 0, 0], None),
             Message::Facts { len } => words(12, [len, 0, 0], None),
@@ -134,6 +137,7 @@ impl Message {
             Message::PipeReply { len } => words(15, [len, 0, 0], None),
             Message::Plan => words(16, [0; 3], None),
             Message::PlanReply { len } => words(17, [len, 0, 0], None),
+            Message::Raise { len } => words(18, [len, 0, 0], None),
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -174,7 +178,7 @@ impl Message {
             8 => Message::FsReply { len: words[1] },
             9 => Message::Signal {
                 pid: words[1] as u32 as i32,
-                sig: words[2] as u32 as i32,
+                len: words[2],
             },
             10 => Message::Kill,
             11 => Message::Stop { len: words[1] },
@@ -184,6 +188,7 @@ impl Message {
             15 => Message::PipeReply { len: words[1] },
             16 => Message::Plan,
             17 => Message::PlanReply { len: words[1] },
+            18 => Message::Raise { len: words[1] },
             _ => return None,
         })
     }
@@ -230,7 +235,7 @@ mod tests {
             Message::Id(42),
             Message::Fs { len: 1 << 20 },
             Message::FsReply { len: 0 },
-            Message::Signal { pid: 4, sig: 9 },
+            Message::Signal { pid: -1, len: 128 },
             Message::Kill,
             Message::Stop { len: 300 },
             Message::Facts { len: 70_000 },
@@ -239,6 +244,7 @@ mod tests {
             Message::PipeReply { len: 32 },
             Message::Plan,
             Message::PlanReply { len: 2 },
+            Message::Raise { len: 128 },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }

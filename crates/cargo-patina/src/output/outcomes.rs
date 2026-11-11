@@ -340,11 +340,14 @@ pub(super) fn classify(evidence: &RunEvidence<'_>) -> Outcome {
         .iter()
         .find(|verdict| text(verdict, "kind") == "violation")
     {
-        let detail = format!(
+        let mut detail = format!(
             "violation of {:?} {}",
             text(verdict, "label"),
             text(verdict, "detail")
         );
+        if let Some(pid) = verdict.get("process").and_then(serde_json::Value::as_u64) {
+            detail = format!("{} (process {pid})", detail.trim());
+        }
         return Outcome::of(
             RunClass::Violation,
             Some(Stop::new("violation_verdict", detail.trim())),

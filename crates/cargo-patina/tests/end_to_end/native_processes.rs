@@ -76,7 +76,67 @@ unsafe extern "C" {
     fn close(fd: i32) -> i32;
     fn getrlimit(resource: i32, limit: *mut [u64; 2]) -> i32;
     fn setrlimit(resource: i32, limit: *const [u64; 2]) -> i32;
+    fn raise(sig: i32) -> i32;
+    fn getppid() -> i32;
+    fn getuid() -> u32;
+    fn sigqueue(pid: i32, sig: i32, value: usize) -> i32;
+    fn patina_always(condition: i32, label: *const u8, label_len: usize, site: *const u8, site_len: usize) -> i32;
+    fn patina_verdict(kind: u32, label: *const u8, label_len: usize, detail: *const u8, detail_len: usize) -> i32;
     static environ: *const *const std::ffi::c_char;
+}
+
+/// The signal a handler last ran for.
+static HANDLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+extern "C" fn on_signal(sig: i32) {
+    HANDLED.store(sig, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// What an `SA_SIGINFO` handler saw of SIGUSR1 (code, pid, uid) and of
+/// SIGUSR2 (code, pid, uid, value).
+static SEEN: [std::sync::atomic::AtomicI64; 7] = [const { std::sync::atomic::AtomicI64::new(-99) }; 7];
+extern "C" fn on_info(sig: i32, info: *const u64, _: usize) {
+    let words = unsafe { std::slice::from_raw_parts(info, 4) };
+    let code = words[1] as u32 as i32 as i64;
+    let pid = words[2] as u32 as i32 as i64;
+    let uid = (words[2] >> 32) as i64;
+    let at = if sig == SIGUSR1 { 0 } else { 3 };
+    for (offset, value) in [code, pid, uid].into_iter().enumerate() {
+        SEEN[at + offset].store(value, std::sync::atomic::Ordering::SeqCst);
+    }
+    if sig == SIGUSR2 {
+        SEEN[6].store(words[3] as i64, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A handler that faults.
+extern "C" fn fault_in_handler(_: i32) {
+    let address = std::hint::black_box(8usize);
+    unsafe { (address as *mut u8).write_volatile(1) };
+}
+
+/// Spawn `binary` with `args` and its stdout piped, and wait for its first
+/// line (`ready`): its stdout, to read the rest.
+fn spawn_ready(
+    binary: &str,
+    args: &[&str],
+) -> (std::process::Child, std::io::BufReader<std::process::ChildStdout>) {
+    use std::io::BufRead;
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    assert_eq!(line, "ready\n");
+    (child, out)
+}
+
+/// A wait status, as a parent reads it.
+fn described(status: std::process::ExitStatus) -> String {
+    use std::os::unix::process::ExitStatusExt;
+    format!("code={:?} signal={:?} core={}", status.code(), status.signal(), status.core_dumped())
 }
 
 #[repr(C)]
@@ -299,13 +359,225 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(10));
             println!("LEFT");
         }
-        ["signal-parent"] => {
-            println!("SIGNALING");
-            unsafe { kill(std::os::unix::process::parent_id() as i32, SIGUSR1) };
+        ["stop-self"] => {
+            // Leaves its group, which no process beside others may yet.
+            println!("STOPPING");
+            unsafe { setpgid(0, 0) };
         }
+        [binary, "child-stop"] => {
+            let status = Command::new(binary).arg("stop-self").status();
+            println!("STOPPED {status:?}");
+        }
+        ["handle", sig] => {
+            // A handler notes the signal; the child ends with 100 + it.
+            unsafe { signal(sig.parse().unwrap(), on_signal as usize) };
+            println!("ready");
+            while HANDLED.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                unsafe { pause() };
+            }
+            std::process::exit(100 + HANDLED.load(std::sync::atomic::Ordering::SeqCst));
+        }
+        [binary, "handled-child", sig] => {
+            // The parent signals its child once it waits in `pause`.
+            let (mut child, _out) = spawn_ready(binary, &["handle", sig]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let sent = unsafe { kill(child.id() as i32, sig.parse().unwrap()) };
+            println!("HANDLED sent={sent} {}", described(child.wait().unwrap()));
+        }
+        ["nap", _token] => {
+            println!("ready");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::process::exit(7);
+        }
+        [binary, "default-child", sig, token] => {
+            // A signal the child has no handler for: its default action.
+            let (mut child, _out) = spawn_ready(binary, &["nap", token]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let sent = unsafe { kill(child.id() as i32, sig.parse().unwrap()) };
+            println!("DEFAULT sent={sent} {}", described(child.wait().unwrap()));
+        }
+        ["read-intr", flags] => {
+            // A blocking read of a pipe the parent holds, which a handled
+            // signal interrupts.
+            let action = SigAction {
+                handler: on_signal as usize,
+                mask: [0; 16],
+                flags: if flags == "restart" { SA_RESTART } else { 0 },
+                restorer: 0,
+            };
+            assert_eq!(unsafe { sigaction(SIGUSR1, &action, std::ptr::null_mut()) }, 0);
+            println!("ready");
+            let mut byte = [0u8; 1];
+            let n = unsafe { read(0, byte.as_mut_ptr().cast(), 1) };
+            let errno = std::io::Error::last_os_error().raw_os_error();
+            println!(
+                "READ n={n} errno={:?} byte={:?} handled={}",
+                if n < 0 { errno } else { None },
+                if n == 1 { byte[0] as char } else { '-' },
+                HANDLED.load(std::sync::atomic::Ordering::SeqCst) == SIGUSR1
+            );
+        }
+        [binary, "read-intr-child", flags] => {
+            use std::io::{BufRead, Write};
+            let mut child = Command::new(binary)
+                .args(["read-intr", flags])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+            let mut line = String::new();
+            out.read_line(&mut line).unwrap();
+            assert_eq!(line, "ready\n");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            assert_eq!(unsafe { kill(child.id() as i32, SIGUSR1) }, 0);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let mut input = child.stdin.take().unwrap();
+            let _ = input.write_all(b"x");
+            drop(input);
+            line.clear();
+            out.read_line(&mut line).unwrap();
+            println!("INTR {} {}", line.trim(), described(child.wait().unwrap()));
+        }
+        ["signal-parent"] => unsafe {
+            // A plain kill, then a queued signal with a value.
+            kill(getppid(), SIGUSR1);
+            sigqueue(getppid(), SIGUSR2, 4242);
+        },
         [binary, "signal-parent"] => {
-            let status = Command::new(binary).arg("signal-parent").status();
-            println!("SIGNALED {status:?}");
+            for sig in [SIGUSR1, SIGUSR2] {
+                let action = SigAction {
+                    handler: on_info as usize,
+                    mask: [0; 16],
+                    flags: 4 | SA_RESTART, // SA_SIGINFO
+                    restorer: 0,
+                };
+                assert_eq!(unsafe { sigaction(sig, &action, std::ptr::null_mut()) }, 0);
+            }
+            let mut child = Command::new(binary).arg("signal-parent").spawn().unwrap();
+            let pid = child.id();
+            let status = child.wait().unwrap();
+            let seen: Vec<i64> = SEEN.iter().map(|seen| seen.load(std::sync::atomic::Ordering::SeqCst)).collect();
+            let uid = i64::from(unsafe { getuid() });
+            println!(
+                "FROM-CHILD {} usr1=(code {} from-child {} uid-ok {}) usr2=(code {} from-child {} uid-ok {} value {})",
+                described(status),
+                seen[0],
+                seen[1] == i64::from(pid),
+                seen[2] == uid,
+                seen[3],
+                seen[4] == i64::from(pid),
+                seen[5] == uid,
+                seen[6]
+            );
+        }
+        ["signal-pid", pid, sig] => {
+            let sent = unsafe { kill(pid.parse().unwrap(), sig.parse().unwrap()) };
+            std::process::exit(if sent == 0 { 0 } else { 1 });
+        }
+        [binary, "sibling-children"] => {
+            // One child signals another through the machine.
+            let (mut handler, _out) = spawn_ready(binary, &["handle", "10"]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let sender = Command::new(binary)
+                .args(["signal-pid", &handler.id().to_string(), "10"])
+                .status()
+                .unwrap();
+            println!("SIBLING sender={:?} {}", sender.code(), described(handler.wait().unwrap()));
+        }
+        [binary, "group-signal", how] => {
+            // The machine's one group: the caller and its child.
+            unsafe { signal(SIGUSR1, on_signal as usize) };
+            let (mut child, _out) = spawn_ready(binary, &["handle", "10"]);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let target = match how {
+                "zero" => 0,
+                // getpgid(0), through the system-call door.
+                "pgid" => -(unsafe { syscall(if cfg!(target_arch = "aarch64") { 155 } else { 121 }, 0) } as i32),
+                _ => -1,
+            };
+            let sent = unsafe { kill(target, SIGUSR1) };
+            let status = child.wait().unwrap();
+            println!(
+                "GROUP sent={sent} parent={} {}",
+                HANDLED.load(std::sync::atomic::Ordering::SeqCst) == SIGUSR1,
+                described(status)
+            );
+        }
+        [binary, "stop-signal-child"] => {
+            let (child, _out) = spawn_ready(binary, &["handle", "10"]);
+            println!("STOPPING-CHILD");
+            unsafe { kill(child.id() as i32, 19) }; // SIGSTOP
+        }
+        ["count"] => {
+            use std::io::Write;
+            println!("ready");
+            for i in 0.. {
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{i}").unwrap();
+                out.flush().unwrap();
+                drop(out);
+                std::thread::yield_now();
+            }
+        }
+        [binary, "race-child"] => {
+            // Where the signal lands in the child's count is the schedule's.
+            use std::io::BufRead;
+            let (mut child, out) = spawn_ready(binary, &["count"]);
+            let sent = unsafe { kill(child.id() as i32, 15) };
+            let last = out.lines().map_while(Result::ok).last();
+            println!("RACED sent={sent} last={last:?} {}", described(child.wait().unwrap()));
+        }
+        ["crash", how] => match how {
+            "abort" => std::process::abort(),
+            // C's view: SIGSEGV at its default (Rust's own handler, there
+            // for stack overflows, would return from a raised one).
+            "raise-segv" => unsafe {
+                signal(11, 0);
+                raise(11);
+            },
+            "segv" => {
+                let address = std::hint::black_box(8usize);
+                unsafe { (address as *mut u8).write_volatile(1) };
+            }
+            // As panic=abort ends a panic: the hook runs, then abort.
+            "panic-abort" => {
+                std::panic::set_hook(Box::new(|_| std::process::abort()));
+                panic!("the child panics");
+            }
+            "panic" => panic!("the child panics"),
+            "handler-segv" => unsafe {
+                signal(SIGUSR1, fault_in_handler as usize);
+                raise(SIGUSR1);
+            },
+            _ => unreachable!(),
+        },
+        [binary, "crash-child", how, judge] => {
+            let status = Command::new(binary).args(["crash", how]).status().unwrap();
+            println!("CRASHED {how} {}", described(status));
+            if judge == "assert" {
+                assert!(status.success(), "the child crashed");
+            }
+        }
+        ["always"] => {
+            let (label, site) = ("child-holds", "processes.rs:always");
+            unsafe { patina_always(0, label.as_ptr(), label.len(), site.as_ptr(), site.len()) };
+            println!("PAST-ALWAYS");
+        }
+        ["verdict"] => {
+            let (label, detail) = ("child-ledger", "unbalanced");
+            unsafe { patina_verdict(1, label.as_ptr(), label.len(), detail.as_ptr(), detail.len()) };
+        }
+        [binary, finding @ ("always-child" | "verdict-child")] => {
+            let mode = finding.trim_end_matches("-child");
+            let status = Command::new(binary).arg(mode).status().unwrap();
+            println!("AFTER-FINDING {}", described(status));
+        }
+        [binary, "pending-at-exit", token] => {
+            // The root ends right after it signals its child.
+            let child = Command::new(binary).args(["sleeper", token]).spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            unsafe { kill(child.id() as i32, 15) };
         }
         [binary, "lock-beside-child"] => {
             use std::os::fd::AsRawFd;
@@ -1015,7 +1287,7 @@ fn main() {
             // One child ends cleanly (its facts reach the run), then another
             // stops the run.
             assert_eq!(Command::new(binary).args(["child", "0"]).status().unwrap().code(), Some(0));
-            let status = Command::new(binary).arg("signal-parent").status();
+            let status = Command::new(binary).arg("stop-self").status();
             println!("STOPPED {status:?}");
         }
         ["environ"] => {
@@ -1180,7 +1452,7 @@ fn main() {
         [binary, "stop-beside-sleeper", token] => {
             let _sleeper = Command::new(binary).args(["sleeper", token]).spawn().unwrap();
             std::thread::sleep(std::time::Duration::from_millis(10));
-            let status = Command::new(binary).arg("signal-parent").status();
+            let status = Command::new(binary).arg("stop-self").status();
             println!("STOPPED {status:?}");
         }
         [binary, "frozen-child", token] => {
@@ -1415,9 +1687,9 @@ fn main() {
 
     #[test]
     fn a_childs_own_stop_ends_the_run_with_its_class() {
-        // The child signals its parent, which no process may yet.
+        // The child leaves its group, which no process beside others may yet.
         let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
-        stops_after_the_child_ran(&guest, "signal-parent", "SIGNALING");
+        stops_after_the_child_ran(&guest, "child-stop", "STOPPING");
     }
 
     #[test]
@@ -1680,7 +1952,7 @@ fn main() {
             )
         };
         let mut wrong = Vec::new();
-        for mode in ["segv-child", "abort-child", "signal-parent"] {
+        for mode in ["segv-child", "abort-child", "child-stop"] {
             let trace = guest.dir.path().join(format!("{mode}.patina"));
             let recorded = json_envelope(&guest.command(
                 "run",
@@ -2648,5 +2920,313 @@ fn main() {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// The line of `output` holding `needle`, or a note that none does with
+    /// what the run said: a mode's verdict, for a table of them.
+    fn judged(output: &Output, needle: &str) -> String {
+        let text = String::from_utf8_lossy(&output.stdout);
+        text.lines()
+            .find(|line| line.contains(needle))
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "no {needle} line (status {:?})\nstdout:\n{text}\nstderr:\n{}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            })
+    }
+
+    /// A signal from one process of the machine to another reaches it and
+    /// its own model acts on it: a handler runs (the child's exit status is
+    /// the one it chose), a default action ends it (its parent's wait sees
+    /// the signal, core dumped for a core signal) or discards it, a handler
+    /// interrupts a child's read of a pipe its parent holds (`EINTR`, or
+    /// the read goes on under `SA_RESTART`); a child signals its parent
+    /// (the parent's handler sees the sender's pid and uid, and a queued
+    /// signal's value) and a sibling; a signal to the machine's group
+    /// reaches every process in it, the caller included, and one to every
+    /// process all but the caller. No host process outlives a child a
+    /// signal ended.
+    #[test]
+    fn a_signal_reaches_another_process_and_its_model_acts_on_it() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let token = "patina-signal-default";
+        let none = "code=Some(0) signal=None core=false";
+        let mut wrong = Vec::new();
+        for (mode, needle, expected) in [
+            (
+                vec!["handled-child", "15"],
+                "HANDLED",
+                "HANDLED sent=0 code=Some(115) signal=None core=false".to_owned(),
+            ),
+            (
+                vec!["handled-child", "10"],
+                "HANDLED",
+                "HANDLED sent=0 code=Some(110) signal=None core=false".to_owned(),
+            ),
+            (
+                vec!["default-child", "15", token],
+                "DEFAULT",
+                "DEFAULT sent=0 code=None signal=Some(15) core=false".to_owned(),
+            ),
+            (
+                vec!["default-child", "3", token],
+                "DEFAULT",
+                "DEFAULT sent=0 code=None signal=Some(3) core=true".to_owned(),
+            ),
+            (
+                vec!["default-child", "28", token],
+                "DEFAULT",
+                "DEFAULT sent=0 code=Some(7) signal=None core=false".to_owned(),
+            ),
+            (
+                vec!["read-intr-child", "restart"],
+                "INTR",
+                format!("INTR READ n=1 errno=None byte='x' handled=true {none}"),
+            ),
+            (
+                vec!["read-intr-child", "none"],
+                "INTR",
+                format!("INTR READ n=-1 errno=Some(4) byte='-' handled=true {none}"),
+            ),
+            (
+                vec!["signal-parent"],
+                "FROM-CHILD",
+                format!(
+                    "FROM-CHILD {none} usr1=(code 0 from-child true uid-ok true) \
+usr2=(code -1 from-child true uid-ok true value 4242)"
+                ),
+            ),
+            (
+                vec!["sibling-children"],
+                "SIBLING",
+                "SIBLING sender=Some(0) code=Some(110) signal=None core=false".to_owned(),
+            ),
+            (
+                vec!["group-signal", "zero"],
+                "GROUP",
+                "GROUP sent=0 parent=true code=Some(110) signal=None core=false".to_owned(),
+            ),
+            (
+                vec!["group-signal", "pgid"],
+                "GROUP",
+                "GROUP sent=0 parent=true code=Some(110) signal=None core=false".to_owned(),
+            ),
+            (
+                vec!["group-signal", "all"],
+                "GROUP",
+                "GROUP sent=0 parent=false code=Some(110) signal=None core=false".to_owned(),
+            ),
+        ] {
+            let mut argv = vec!["--seed", "1", "--", binary];
+            argv.extend(mode.iter().copied());
+            let output = guest.command("run", &argv);
+            let line = judged(&output, needle);
+            if !output.status.success() || line != expected {
+                wrong.push(format!("{mode:?}: expected {expected:?}, got {line}"));
+            }
+        }
+        let survivors = host_processes_with(&[token]);
+        for pid in &survivors {
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        assert!(survivors.is_empty(), "host processes left: {survivors:?}");
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A child's crash is a death its parent reaps by the wait status the
+    /// kernel would report (`abort`, a raised or real `SIGSEGV`, a fault in
+    /// a signal handler, a panic that aborts, a panic that exits 101), and
+    /// the run's verdict is the root's: a parent that tolerates it ends
+    /// clean, one that asserts on it ends with its own failure.
+    #[test]
+    fn a_crashing_child_is_a_death_its_parent_judges() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for (how, status) in [
+            ("abort", "code=None signal=Some(6) core=true"),
+            ("raise-segv", "code=None signal=Some(11) core=true"),
+            ("segv", "code=None signal=Some(11) core=true"),
+            ("handler-segv", "code=None signal=Some(11) core=true"),
+            ("panic-abort", "code=None signal=Some(6) core=true"),
+            ("panic", "code=Some(101) signal=None core=false"),
+        ] {
+            for (judge, result) in [("tolerate", "ok"), ("assert", "failure")] {
+                let output = guest.command(
+                    "run",
+                    &[
+                        "--seed",
+                        "1",
+                        "--format",
+                        "json",
+                        "--",
+                        binary,
+                        "crash-child",
+                        how,
+                        judge,
+                    ],
+                );
+                let envelope = json_envelope(&output);
+                let line = envelope["stdout"]
+                    .as_str()
+                    .and_then(|text| text.lines().find(|line| line.starts_with("CRASHED")))
+                    .unwrap_or_default();
+                let expected = format!("CRASHED {how} {status}");
+                let attribution = (result != "ok").then_some("guest");
+                if (
+                    envelope["result"].as_str(),
+                    envelope["attribution"].as_str(),
+                    line,
+                ) != (Some(result), attribution, expected.as_str())
+                {
+                    wrong.push(format!("{how} {judge}: {envelope:#}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// A finding in a child is the run's, attributed to the child: an
+    /// `always!` it violates stops the run there as a violation (its parent
+    /// never resumes), and a violation verdict it reports is the run's,
+    /// carrying its process.
+    #[test]
+    fn a_finding_in_a_child_is_the_runs_attributed_to_the_child() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let mut wrong = Vec::new();
+        for (mode, parent_goes_on) in [("always-child", false), ("verdict-child", true)] {
+            let output = guest.command(
+                "run",
+                &["--seed", "1", "--format", "json", "--", binary, mode],
+            );
+            let envelope = json_envelope(&output);
+            let stdout = envelope["stdout"].as_str().unwrap_or_default();
+            let attributed = envelope["verdicts"].as_array().is_some_and(|verdicts| {
+                verdicts
+                    .iter()
+                    .any(|verdict| verdict["kind"] == "violation" && verdict["process"] == 3)
+            });
+            if (
+                envelope["result"].as_str(),
+                envelope["attribution"].as_str(),
+                stdout.contains("AFTER-FINDING"),
+                stdout.contains("PAST-ALWAYS"),
+                attributed,
+            ) != (
+                Some("violation"),
+                Some("guest"),
+                parent_goes_on,
+                false,
+                true,
+            ) {
+                wrong.push(format!("{mode}: {envelope:#}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// Signals across processes and children's crashes and findings record
+    /// and replay (every process's timeline agrees, the replay ends as the
+    /// recording did), and the same seed records the same bytes; where a
+    /// signal lands in a busy child is the schedule's, so other seeds land
+    /// it elsewhere.
+    #[test]
+    fn signals_across_processes_replay_and_vary_with_the_seed() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let outcome = |envelope: &serde_json::Value| {
+            (
+                envelope["result"].clone(),
+                envelope["stop"]["reason"].clone(),
+            )
+        };
+        let mut wrong = Vec::new();
+        for mode in [
+            vec!["handled-child", "10"],
+            vec!["default-child", "3", "patina-signal-replay"],
+            vec!["read-intr-child", "restart"],
+            vec!["read-intr-child", "none"],
+            vec!["signal-parent"],
+            vec!["sibling-children"],
+            vec!["group-signal", "zero"],
+            vec!["race-child"],
+            vec!["crash-child", "raise-segv", "tolerate"],
+            vec!["crash-child", "handler-segv", "assert"],
+            vec!["always-child"],
+        ] {
+            let name = mode.join("-");
+            let record = |run: &str| {
+                let trace = guest.dir.path().join(format!("{name}-{run}.patina"));
+                let mut argv = vec![
+                    "--seed",
+                    "3",
+                    "--format",
+                    "json",
+                    "--record",
+                    trace.to_str().unwrap(),
+                    "--",
+                    binary,
+                ];
+                argv.extend(mode.iter().copied());
+                let envelope = json_envelope(&guest.command("run", &argv));
+                (trace, envelope)
+            };
+            let (first, recorded) = record("a");
+            let (second, _) = record("b");
+            if fs::read(&first).unwrap_or_default() != fs::read(&second).unwrap_or_default() {
+                wrong.push(format!("{name}: the same seed recorded different bytes"));
+            }
+            let replayed = json_envelope(
+                &guest.command("replay", &[first.to_str().unwrap(), "--format", "json"]),
+            );
+            if outcome(&recorded) != outcome(&replayed) || replayed["result"] == "nondeterministic"
+            {
+                wrong.push(format!(
+                    "{name}: recorded {recorded:#}\nreplayed {replayed:#}"
+                ));
+            }
+        }
+        let raced = |seed: u32| {
+            let output = guest.command(
+                "run",
+                &["--seed", &seed.to_string(), "--", binary, "race-child"],
+            );
+            judged(&output, "RACED")
+        };
+        let first = raced(1);
+        if raced(1) != first {
+            wrong.push("race-child: the same seed landed the signal elsewhere".into());
+        }
+        let landed: std::collections::BTreeSet<String> = (1..9).map(raced).collect();
+        if landed.len() < 2 || landed.iter().any(|line| !line.contains("signal=Some(15)")) {
+            wrong.push(format!("race-child: {landed:#?}"));
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
+    }
+
+    /// What crosses processes past this slice stops by name: a stop signal
+    /// (job control). A root that ends while a child has a signal pending
+    /// leaves no host process behind.
+    #[test]
+    fn a_stop_signal_across_processes_is_not_modeled_and_a_pending_one_leaves_nothing() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        stops_after_the_child_ran(&guest, "stop-signal-child", "STOPPING-CHILD");
+        let binary = guest.binary.to_str().unwrap();
+        let token = "patina-pending-at-exit";
+        let output = guest.command(
+            "run",
+            &["--seed", "1", "--", binary, "pending-at-exit", token],
+        );
+        let survivors = host_processes_with(&[token]);
+        for pid in &survivors {
+            unsafe { libc::kill(*pid, libc::SIGKILL) };
+        }
+        assert!(output.status.success(), "{output:?}");
+        assert!(survivors.is_empty(), "host processes left: {survivors:?}");
     }
 }

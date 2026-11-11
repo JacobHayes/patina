@@ -78,12 +78,21 @@ pub fn parse_facts(bytes: &[u8]) -> Result<Option<serde_json::Value>, CliError> 
             .and_then(serde_json::Value::as_array)
         {
             let context = document.get("context").and_then(serde_json::Value::as_u64);
+            // A child's verdict is the run's, attributed to its process.
+            let mut list = list.clone();
+            if let Some(pid) = process {
+                for verdict in &mut list {
+                    if let serde_json::Value::Object(verdict) = verdict {
+                        verdict.insert("process".into(), pid.into());
+                    }
+                }
+            }
             match verdicts
                 .iter_mut()
                 .find(|(seen, _)| *seen == (process, context))
             {
-                Some(entry) => entry.1 = list.clone(),
-                None => verdicts.push(((process, context), list.clone())),
+                Some(entry) => entry.1 = list,
+                None => verdicts.push(((process, context), list)),
             }
         }
         if divergence.is_none() {

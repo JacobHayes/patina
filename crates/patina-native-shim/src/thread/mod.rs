@@ -68,7 +68,7 @@ mod machine;
 pub(crate) use machine::{activate, earliest_timer, pick_next, wait_for_child, wake_waiting};
 #[cfg(target_os = "linux")]
 pub(crate) use machine::{
-    child_changed, children_reap_themselves, ignore_signals, ignored_signals,
+    child_changed, children_reap_themselves, ignore_signals, ignored_signals, machine_signal,
 };
 mod net_state;
 mod pipe;

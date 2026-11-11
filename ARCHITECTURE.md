@@ -508,10 +508,28 @@ its own runtime, and the processes run in lockstep: one runs at a time
   channel failure but the peer's end closing, is an internal stop naming
   its pid. The hub closes the root's filesystem handles a child held when
   it ends.
-- `kill(pid, SIGKILL)` of a child, from the root or (through the hub) a
-  sibling: the hub tells the frozen child, which raises `SIGKILL` on its
-  host process; its channel's end closing confirms the death, and the
-  launcher reaps it. Signal 0 probes a child. When the root ends, the hub
+- A signal from one process of the machine to another (`kill` of a pid,
+  `sigqueue`, `pidfd_send_signal`'s own process aside), to the machine's
+  one group (`kill(0)`, `kill(-pgid)`, `killpg`: every process, the caller
+  included) or to every process (`kill(-1)`: all but the caller) goes from
+  a child through the hub, as its sender made it (`siginfo`: its code, the
+  sender's pid and uid, a queued signal's value). Every process shares one
+  credential, so each is permitted. The target is found first (`ESRCH`),
+  then the signal judged (`EINVAL`); signal 0 probes. The root takes a
+  signal in its own model at once (a task it wakes runs when the root
+  next does). `kill(pid, SIGKILL)` of a child: the hub tells the frozen
+  child, which raises `SIGKILL` on its host process; its channel's end
+  closing confirms the death, and the launcher reaps it. Any other signal
+  for a live child the hub holds until the child next resumes (its
+  foreign task becomes runnable, a recorded decision of the root's), and
+  the child generates each, in the order they were sent, as a recorded
+  decision of its own (`SignalGenerated` in its timeline, so its replay
+  checks it): from there its own model acts on it, as on a signal it
+  raised (a handler, its masks, any thread not blocking it, a wait it
+  interrupts with `EINTR` or restarts under `SA_RESTART`, a read of a
+  pipe the root holds included, a default action that ends it, which its
+  parent's wait sees as its death by that signal, core dumped where the
+  default dumps core, or that discards it). A zombie takes nothing. When the root ends, the hub
   kills every child still running (each foreign task's end recorded, no
   `SIGCHLD`, no waiter woken: no guest code runs any more); the
   launcher then kills, by pidfd, and reaps anything left.
@@ -521,9 +539,17 @@ its own runtime, and the processes run in lockstep: one runs at a time
   the root's facts and recording so far, as a stop the runtime takes does,
   and ends the run with that record, so the run has the child's class. The
   supervisor reads the machine's facts as the root's last document with
-  every process's verdicts, each child's latest findings and the first
-  replay divergence any process noted; a run whose root wrote none has no
-  facts. A child decides what stops the run (its output's flush, its
+  every process's verdicts (a child's marked with its `process`), each
+  child's latest findings and the first replay divergence any process
+  noted; a run whose root wrote none has no facts.
+- A child's crash (an abort, a fatal signal's default action, a fault,
+  in a signal handler too, a panic that aborts or exits 101) is a process
+  death its parent reaps, and the run's verdict follows the root's: a
+  parent that tolerates it ends clean, one that asserts on it ends with
+  its own finding. A finding in any process is the run's: an `always!` a
+  child violates stops the run there (its parent never resumes) as a
+  violation naming the child, and a violation verdict a child reports is
+  the run's, attributed to its process. A child decides what stops the run (its output's flush, its
   replay's completeness) before it tells the hub it ended: past that,
   nothing it says reaches the run.
 - Recording and replay: each process records its own decisions. A
@@ -560,10 +586,11 @@ its own runtime, and the processes run in lockstep: one runs at a time
   spawn attributes beyond a fresh process's defaults, crash-restart,
   crash-knob and scheduling-policy runs; and, while another process lives, file locks, FIFOs, shared
   file mappings, System V IPC, inotify, another pid's procfs directory,
-  signals across processes other than `SIGKILL` and 0, a thread-directed
-  signal (`tgkill`, `tkill`) to a thread that is not the caller's process's,
-  signals to a group or
-  to every process, a socket in a child, `setpgid` and `setsid`; and after a
+  `SIGSTOP` (job control: no process of the machine stops; a stop
+  signal's default action in any process is a stop of its own) and
+  `SIGSYS` to another process, a signal naming a thread of another process
+  (`kill` of a child's thread id, `tgkill`, `tkill`), a socket in a child,
+  `setpgid` and `setsid`; and after a
   child ran, `RUSAGE_CHILDREN`, `times`, and a wait that reaps into a
   resource-usage out-pointer.
 - Known limits:
@@ -579,6 +606,7 @@ its own runtime, and the processes run in lockstep: one runs at a time
   - A child's pipe data is copied through hub requests, at most 64 KiB a request, whatever the pipe's size.
   - A child's interest in a pipe outlives its poll's timeout or other wake: a later change costs it a recheck.
   - `pidfd_open` of a child answers `ESRCH`, so `tokio::process` reaps through its `SIGCHLD` fallback.
+  - A signal sent to a frozen child is pending in it only from its next resume: until then its `sigpending` and `/proc` status do not show it.
 
 ## Virtual time
 
