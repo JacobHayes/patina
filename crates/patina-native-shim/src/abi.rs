@@ -62,10 +62,36 @@ pub(crate) fn restore_host_errno(code: c_int) {
 }
 
 /// The host errno cell's value.
-#[cfg(target_os = "linux")]
 pub(crate) fn host_errno() -> c_int {
-    // SAFETY: libc exposes the current thread's errno cell.
-    unsafe { *libc::__errno_location() }
+    // SAFETY: libc exposes the current thread's errno cell on both supported hosts.
+    unsafe {
+        #[cfg(target_os = "linux")]
+        {
+            *libc::__errno_location()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            *libc::__error()
+        }
+    }
+}
+
+/// The interrupted guest code's errno, put back when this drops: an entry
+/// the guest never called (an edge hook's batch or yield point, a meter's
+/// batch) can switch threads and make host calls, and the code it
+/// interrupted may be about to read errno.
+pub(crate) struct ErrnoKept(c_int);
+
+impl ErrnoKept {
+    pub(crate) fn save() -> Self {
+        Self(host_errno())
+    }
+}
+
+impl Drop for ErrnoKept {
+    fn drop(&mut self) {
+        restore_host_errno(self.0);
+    }
 }
 
 /// Project a model result to libc's failure value, writing host errno on errors.

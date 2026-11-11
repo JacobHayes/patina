@@ -240,7 +240,7 @@ pub fn render_tsc_managed_note(managed: &[NativeEscape], subject: &str) -> Optio
          clock (1 GHz nominal, so a tick is a virtual nanosecond). These are contained, not \
          escapes — the run stays deterministic. Determinism is not progress: a guest that \
          calibrates the counter by busy-waiting on clock deltas is carried by poll escalation, \
-         and one that keeps spinning whatever it reads stops with a named poll-churn stop \
+         and one that keeps spinning whatever it reads stops at the named no-progress horizon \
          rather than hanging.",
         managed.len()
     ))

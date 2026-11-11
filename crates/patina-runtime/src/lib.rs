@@ -476,6 +476,10 @@ pub const ENV_HEAL_AFTER: &str = "PATINA_RT_HEAL_AFTER_NANOS";
 /// so a real workload's ordinary waiting never trips it.
 pub const DEFAULT_LIVENESS_BUDGET_NANOS: u64 = 600_000_000_000;
 
+/// The default compute budget ([`RuntimeConfig::with_compute_budget`]): ten
+/// virtual seconds of metered computation with no other operation.
+pub const DEFAULT_COMPUTE_BUDGET_NANOS: u64 = 10_000_000_000;
+
 /// Default heal-then-converge budget: 300 virtual seconds after the fault window.
 pub const DEFAULT_CONVERGE_BUDGET_NANOS: u64 = 300_000_000_000;
 
@@ -667,6 +671,11 @@ pub struct Context {
     /// Poll escalation state. See [`Escalation`]; inert until a guest polls
     /// without progress, so a run that never does is unchanged by it.
     spin: Escalation,
+    /// The no-progress horizon, the compute budget and the time slice. See
+    /// [`liveness::Busy`].
+    busy: liveness::Busy,
+    /// Whether the compute budget stopped the run, for the facts document.
+    compute_budget_fired: bool,
     /// The CPU time guest calls are charged, per task, and the monotonic
     /// time they have yet to move (see [`charge`]).
     charges: charge::Charges,
@@ -757,11 +766,13 @@ pub enum RuntimeError {
     ScheduleDivergence {
         detail: String,
     },
-    /// The poll churn stop fired: the guest polled away the whole churn
-    /// horizon of virtual time with no other effect. Loud (the
-    /// `PATINA_VIOLATION liveness detail=poll-churn` line was emitted, and
-    /// the partial trace flushed); `detail` holds that marker.
-    PollChurn {
+    /// The compute budget was spent: the guest charged that much metered
+    /// computation with no operation but scheduling points in between. A
+    /// deterministic stop, derived again on replay. Loud (the
+    /// `PATINA_STOP compute_bound` line was emitted, and the partial trace
+    /// flushed); `detail` holds that line.
+    ComputeBudget {
+        task: Option<TaskId>,
         detail: String,
     },
     /// Replay derived a different monotonic time than the recording read:
@@ -819,7 +830,7 @@ impl RuntimeError {
             | Self::StepBudgetExceeded { .. }
             | Self::Liveness { .. }
             | Self::InvalidOutcome { .. }
-            | Self::PollChurn { .. }
+            | Self::ComputeBudget { .. }
             | Self::ComputeBound { .. }
             | Self::ComputeStopExport => None,
         }
@@ -858,9 +869,7 @@ impl fmt::Display for RuntimeError {
                 "invalid outcome {outcome:?} for Patina operation {operation:?}"
             ),
             Self::ScheduleDivergence { detail } => f.write_str(detail),
-            Self::PollChurn { detail } => {
-                write!(f, "Patina poll churn: {detail}")
-            }
+            Self::ComputeBudget { detail, .. } => f.write_str(detail),
             Self::TimeModel { detail } => write!(f, "Patina time-model divergence: {detail}"),
             Self::ComputeStopExport => f.write_str("PATINA_INFRA compute_stop_export_failed"),
             Self::ComputeStopState => {

@@ -15,6 +15,10 @@ use patina_dst_runtime::{ComputeStamp, RuntimeError};
 
 pub(crate) const ENV: &str = "PATINA_RT_COMPUTE_WATCHDOG_MS";
 const DEFAULT_MS: u64 = 10_000;
+/// How many bounds of wall time an instrumented build's guest may hold the
+/// baton with no stamp change and no CPU time burnt (blocked on the host in
+/// code the meter does not count) before the observer stops it.
+const STALL_FACTOR: u64 = 10;
 static BOUND_MS: OnceLock<u64> = OnceLock::new();
 
 pub(crate) fn configure() -> Result<(), RuntimeError> {
@@ -129,9 +133,29 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
     let bound = *BOUND_MS.get_or_init(|| DEFAULT_MS);
     let poll = (bound / 4).clamp(1, 100);
     let mut window = Window::default();
+    // The instrumented build's wall-clock backstop, and whether it already
+    // held at the previous look (see below).
+    let mut stalled = Window::default();
+    let mut stall_seen = false;
+    let stall_bound = bound.saturating_mul(STALL_FACTOR);
     while !super::thread::main_returned() {
         platform::wait_ms(poll);
-        let now = platform::monotonic_ms();
+        // An instrumented build's computation is metered: every batch of
+        // edges is a charge, so the stamp only stands still in code the
+        // meter does not count. There the window is the process's CPU time,
+        // which a slow, loaded or stopped host does not advance: no host
+        // stall ends a metered run. A guest that burns no CPU there (blocked
+        // on the host) is caught by the wall clock instead, at
+        // [`STALL_FACTOR`] times the bound and only when it still holds one
+        // look later: a host stall that ends lets a metered guest charge its
+        // next batch within microseconds, before that second look.
+        let instrumented = metered();
+        let wall = platform::monotonic_ms();
+        let now = if instrumented {
+            platform::process_cpu_ms()
+        } else {
+            wall
+        };
         let mut observed = false;
         super::thread::watchdog_observe(|context, handles, off_guest| {
             observed = true;
@@ -148,20 +172,60 @@ extern "C" fn monitor(_: *mut c_void) -> *mut c_void {
             } else {
                 context.compute_watchdog_candidate()
             };
-            let Some(task) = window.observe(Some(candidate), now, bound) else {
+            let measure = if instrumented {
+                Measure::Cpu(bound)
+            } else {
+                Measure::Wall(bound)
+            };
+            let mut fired = window
+                .observe(Some(candidate), now, bound)
+                .map(|task| (task, measure));
+            if instrumented {
+                let stall = stalled.observe(Some(candidate), wall, stall_bound);
+                let confirmed = stall.is_some() && stall_seen;
+                stall_seen = stall.is_some();
+                if fired.is_none() && confirmed {
+                    fired = stall.map(|task| (task, Measure::Stall(stall_bound)));
+                }
+            }
+            let Some((task, measure)) = fired else {
                 return;
             };
             // Both locks stay held: the guest cannot add a modeled effect or
             // change eligibility between commitment, export and termination.
             let handle = handle_of(handles, task);
             let error = context.stop_compute_bound(task);
-            report_and_abort(&error, handle, Some(bound));
+            report_and_abort(&error, handle, Some(measure));
         });
         if !observed {
             window.observe(None, now, bound);
+            stalled.observe(None, wall, stall_bound);
+            stall_seen = false;
         }
     }
     std::ptr::null_mut()
+}
+
+/// Whether this build's computation is metered (an instrumented build's
+/// edges, or a language runtime's compute meter): charged and bounded in
+/// virtual time, so the observer's window is the process's CPU time.
+fn metered() -> bool {
+    super::coverage::EDGE_INSTRUMENTED.load(Ordering::Relaxed)
+        || super::process::EDGE_METERED.load(Ordering::Relaxed)
+        || super::process::METERED_RUNTIME.load(Ordering::Relaxed)
+}
+
+/// What the observer measured when it stopped a run.
+#[derive(Clone, Copy)]
+pub(crate) enum Measure {
+    /// Host wall time, in an unmetered build.
+    Wall(u64),
+    /// Process CPU time, in a metered build: computation the meter does not
+    /// count.
+    Cpu(u64),
+    /// Host wall time, in a metered build, held at two looks in a row: a
+    /// guest blocked on the host in code Patina does not model.
+    Stall(u64),
 }
 
 struct Text {
@@ -212,7 +276,7 @@ pub(crate) fn report_synchronous(error: &RuntimeError) {
 pub(crate) fn report_and_abort(
     error: &RuntimeError,
     handle: Option<usize>,
-    observed_bound_ms: Option<u64>,
+    observed: Option<Measure>,
 ) -> ! {
     // Off baton: never call C stream salvage or wait for guest-owned storage.
     super::flush_observed_stdio();
@@ -222,11 +286,29 @@ pub(crate) fn report_and_abort(
         bytes: [0; 1024],
         len: 0,
     };
-    if let Some(bound) = observed_bound_ms {
-        let _ = writeln!(
-            text,
-            "patina: no virtual time charged and no boundary operation begun for at least {bound} ms of host wall time (includes descheduling and untracked host blocking)"
-        );
+    if let Some(measure) = observed {
+        let _ = match measure {
+            Measure::Wall(bound) => writeln!(
+                text,
+                "patina: no virtual time charged and no boundary operation begun for at least {bound} ms of host wall time (includes descheduling and untracked host blocking)"
+            ),
+            Measure::Cpu(bound) => writeln!(
+                text,
+                "patina: no virtual time charged and no boundary operation begun for at least {bound} ms of process CPU time (computation the meter does not count)"
+            ),
+            Measure::Stall(bound) => writeln!(
+                text,
+                "patina: no virtual time charged and no boundary operation begun for at least {bound} ms of host wall time (blocked on the host in code Patina does not model)"
+            ),
+        };
+        // Metered computation is charged and bounded in virtual time; only
+        // an unmetered build leaves its computation to this observer.
+        if !metered() {
+            let _ = writeln!(
+                text,
+                "patina: this build's computation is not metered: rebuild it with --instrument, which charges computation as virtual time and bounds it deterministically (--compute-watchdog-ms)"
+            );
+        }
         let _ = super::host_write_all(2, &text.bytes[..text.len]);
         text.len = 0;
     }
@@ -450,14 +532,21 @@ mod platform {
         }
     }
     pub(super) fn monotonic_ms() -> u64 {
+        clock_ms(libc::CLOCK_MONOTONIC)
+    }
+
+    /// The process's CPU time, all threads: it stands still while the
+    /// process is descheduled or stopped.
+    pub(super) fn process_cpu_ms() -> u64 {
+        clock_ms(libc::CLOCK_PROCESS_CPUTIME_ID)
+    }
+
+    fn clock_ms(clock: libc::clockid_t) -> u64 {
         let mut time = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
-        if unsafe {
-            (super::super::hostapi::get().host_clock_gettime)(libc::CLOCK_MONOTONIC, &mut time)
-        } != 0
-        {
+        if unsafe { (super::super::hostapi::get().host_clock_gettime)(clock, &mut time) } != 0 {
             super::super::trap_fatal("compute watchdog host clock failed");
         }
         (time.tv_sec as u64).saturating_mul(1000) + time.tv_nsec as u64 / 1_000_000

@@ -329,11 +329,10 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         // the runtime has already emitted the classifiable PATINA_LIVENESS marker
         // to the captured stderr.
         RuntimeError::Liveness { .. } => {}
-        // Poll churn is the same fail-closed shape: the guest polled away
-        // the whole horizon, and an errno it could swallow would just resume
-        // the spin. The runtime has already emitted the classifiable marker
-        // and flushed the truncated trace.
-        RuntimeError::PollChurn { .. } => {}
+        // The compute budget is the same fail-closed shape: an errno the
+        // guest could swallow would just resume the computation. The runtime
+        // has already emitted the line and flushed the truncated trace.
+        RuntimeError::ComputeBudget { .. } => {}
         // A time-model divergence means the replay no longer describes the
         // run: every later clock read and expiry would answer from a different
         // timeline. Name it and stop.
@@ -373,9 +372,8 @@ fn abort_after_flushing_output(stop: RunStop<'_>) -> ! {
 pub(crate) fn run_stop_class(error: &RuntimeError) -> Option<(RunClass, &'static str)> {
     match error {
         RuntimeError::StepBudgetExceeded { .. } => Some((RunClass::Timeout, "step_budget")),
-        RuntimeError::Liveness { .. } | RuntimeError::PollChurn { .. } => {
-            Some((RunClass::Liveness, "liveness"))
-        }
+        RuntimeError::Liveness { .. } => Some((RunClass::Liveness, "liveness")),
+        RuntimeError::ComputeBudget { .. } => Some((RunClass::Timeout, "compute_bound")),
         RuntimeError::TimeModel { .. } => Some((RunClass::Nondeterministic, "replay_divergence")),
         RuntimeError::ComputeBound { .. } => Some((RunClass::Timeout, "compute_bound")),
         RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => {
@@ -1178,6 +1176,11 @@ pub(crate) fn runtime_config_from_control_plane()
         config = config.with_step_budget(budget);
     }
     config = config.with_incarnation(incarnation_from_control()?);
+    // One bound, two clocks: virtual for metered computation, host time
+    // for the observer that backs it up where nothing is metered.
+    if let Some(ms) = parse_control_u64(crate::watchdog::ENV)? {
+        config = config.with_compute_budget(ms.saturating_mul(1_000_000));
+    }
     if let Some(faults) = control_env(patina_dst_runtime::ENV_RESTART_FAULTS) {
         let carried = patina_dst_runtime::FaultCarry::decode(&faults).map_err(|error| {
             RuntimeError::Config(format!(
@@ -1418,6 +1421,7 @@ pub(crate) fn install(context: Result<Context, RuntimeError>) -> c_int {
     finish_shim_bootstrap();
     // What this thread counted until now ran before the modeled run began.
     crate::charge::discard();
+    crate::coverage::edge_meter_reset();
     // A guest is watched from here on, whether or not it ever starts a
     // thread. The observer's host threads are created through the host-alias
     // table, which only a `patina build` link resolves; any other embedding

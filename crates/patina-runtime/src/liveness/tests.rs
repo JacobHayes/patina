@@ -2,7 +2,7 @@
 //! stops.
 
 use crate::config::{LivenessConfig, RuntimeConfig};
-use crate::liveness::{CHURN_HORIZON_NANOS, ESCALATION_POLLS, LivenessKind, WatchdogArm};
+use crate::liveness::{ESCALATION_POLLS, LivenessKind, WatchdogArm};
 use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
 use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, CpuCharge, STARTUP_CPU_CHARGE, TaskId};
 
@@ -704,11 +704,11 @@ fn compute_stop_replay_cannot_cross_the_recorded_prefix_or_finish_successfully()
 }
 
 #[test]
-fn poll_churn_stops_a_loop_that_no_time_ends() {
+fn a_loop_that_no_time_ends_reaches_the_no_progress_horizon() {
     // A loop that reads the clock and goes round whatever it says: time
     // moves for it like for any poller, and no time ends it. It must become
-    // a named stop, in a bounded number of reads, once it has polled away
-    // the whole horizon.
+    // a liveness stop, in a bounded number of reads, once it has been
+    // charged the horizon's CPU time with no progress.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
     let start = context.current_monotonic().unwrap();
     let mut reads = 0u64;
@@ -718,22 +718,17 @@ fn poll_churn_stops_a_loop_that_no_time_ends() {
             Err(error) => break error,
         }
     };
-    let RuntimeError::PollChurn { detail } = error else {
-        panic!("expected a poll-churn stop, got {error:?}");
+    let RuntimeError::Liveness { kind, .. } = error else {
+        panic!("expected a liveness stop, got {error:?}");
     };
-    // The marker rides the established liveness interface contract, so a
-    // campaign consumer classifies it without a new rule.
-    assert!(detail.starts_with("PATINA_VIOLATION liveness detail=poll-churn "));
+    assert_eq!(kind, LivenessKind::NoProgress);
     assert!(reads < 4_000_000, "{reads} reads to the stop");
     // The whole horizon went by, and the guest saw it go by.
-    let charged = context.spin.charged_nanos;
-    assert!(charged >= CHURN_HORIZON_NANOS);
-    assert_eq!(context.current_monotonic().unwrap() - start, charged);
+    let elapsed = context.current_monotonic().unwrap() - start;
+    assert!(elapsed >= crate::DEFAULT_LIVENESS_BUDGET_NANOS, "{elapsed}");
     // The facts document carries the same finding as the line.
     let finding = &context.run_facts()["runtime_findings"][0];
-    assert_eq!(finding["detail"], "poll-churn");
-    assert_eq!(finding["rescues"], context.spin.escalations);
-    assert_eq!(finding["advanced_ns"], charged);
+    assert_eq!(finding["detail"], "no-progress");
 }
 
 #[test]
@@ -780,33 +775,60 @@ fn a_loop_of_yields_is_a_poll_streak_too() {
             break error;
         }
     };
-    assert!(matches!(error, RuntimeError::PollChurn { .. }), "{error:?}");
+    assert!(
+        matches!(
+            error,
+            RuntimeError::Liveness {
+                kind: LivenessKind::NoProgress,
+                ..
+            }
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]
-fn a_yield_beside_a_runnable_peer_is_no_poll() {
-    // A work-stealing pool's idle workers yield while a peer works: those
-    // yields cost their calls and nothing more, however many there are.
+fn a_yield_is_a_poll_unless_some_task_made_progress_or_computed_since_the_last() {
+    // Two tasks that only yield to each other poll: nothing happens between
+    // their yields, so their streak escalates like a lone yielder's. A
+    // yield after a progress operation since the task's previous one is no
+    // poll: something is moving.
     let mut context = Context::from_config(RuntimeConfig::seeded(1)).unwrap();
-    let worker = context.task_spawn("worker").unwrap();
-    let idle = context.task_spawn("idle").unwrap();
-    assert!(
-        matches!(context.scheduler_next().unwrap(), Some(task) if task == worker || task == idle)
-    );
-    let running = context.charges.running.unwrap();
+    let left = context.task_spawn("left").unwrap();
+    let right = context.task_spawn("right").unwrap();
+    context.scheduler_next().unwrap();
+    let mut earned = 0;
     for _ in 0..4 * ESCALATION_POLLS {
+        let running = context.charges.running.unwrap();
+        assert!(running == left || running == right);
         context.accrue_calls(Some(running), calls(ChargeClass::Syscall, 1));
+        context.yield_poll();
+        earned += u64::from(context.take_poll_streak());
+    }
+    assert_eq!(earned, 4);
+    for _ in 0..4 * ESCALATION_POLLS {
+        let running = context.charges.running;
+        context.write_file("/work", b"x").unwrap();
+        context.accrue_calls(running, calls(ChargeClass::Syscall, 1));
         context.yield_poll();
         assert!(!context.take_poll_streak());
     }
-    assert_eq!(context.spin.polls, 0);
+    // Nor is a yield after metered computation by any task: a backoff
+    // beside a computing peer.
+    for _ in 0..4 * ESCALATION_POLLS {
+        let running = context.charges.running;
+        context.accrue_calls(running, calls(ChargeClass::Compute, 16_384));
+        context.accrue_calls(running, calls(ChargeClass::Syscall, 1));
+        context.yield_poll();
+        assert!(!context.take_poll_streak());
+    }
 }
 
 #[test]
 fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
     // The watchdog's no-progress window is measured in virtual nanoseconds,
     // which escalation moves, so a budget the escalations walk past trips it,
-    // and it trips FIRST, long before the churn stop's horizon.
+    // and it trips FIRST, long before the default no-progress horizon.
     let mut context =
         Context::from_config(RuntimeConfig::seeded(1).with_liveness(LivenessConfig {
             no_progress_budget_nanos: Some(5_000),
@@ -826,7 +848,6 @@ fn the_liveness_watchdog_fires_first_on_a_poll_that_escalation_feeds() {
     assert!(detail.starts_with("PATINA_VIOLATION liveness detail=no-progress "));
     // Fired after the third escalation (1+2+4 = 7 µs past a 5 µs budget).
     assert_eq!(context.spin.escalations, 3);
-    assert!(context.spin.charged_nanos < CHURN_HORIZON_NANOS);
 }
 
 // -- Liveness watchdog --------------------------------------------------

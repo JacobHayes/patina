@@ -171,6 +171,8 @@ pub struct RuntimeConfig {
     /// byte-for-byte unchanged; enabling it only ADDS a possible violation report
     /// and is deliberately NOT a fingerprint input (schedule-invariant).
     pub(super) liveness: LivenessConfig,
+    /// The compute budget ([`RuntimeConfig::with_compute_budget`]).
+    pub(super) compute_budget_nanos: u64,
     /// Which end-of-run diagnostic reports print. Presentation only: resolved
     /// once from the family's control plane, never fingerprinted, never recorded,
     /// never reconciled — a replay may silence a report the recording printed and
@@ -232,6 +234,7 @@ impl RuntimeConfig {
             cpus: None,
             dns_entries: BTreeMap::new(),
             liveness: LivenessConfig::default(),
+            compute_budget_nanos: crate::DEFAULT_COMPUTE_BUDGET_NANOS,
             reports: ReportConfig::default(),
             sud: None,
             tsc: None,
@@ -656,6 +659,16 @@ impl RuntimeConfig {
     #[must_use]
     pub const fn reports(&self) -> ReportConfig {
         self.reports
+    }
+
+    /// The compute budget: how much metered computation (an instrumented
+    /// build's edges, a compute meter's batches) the run may charge with no
+    /// operation other than a scheduling point in between before it is
+    /// stopped as `compute_bound`. Recorded; a replay takes the recording's.
+    #[must_use]
+    pub fn with_compute_budget(mut self, nanos: u64) -> Self {
+        self.compute_budget_nanos = nanos;
+        self
     }
 
     /// Install the liveness-watchdog configuration.

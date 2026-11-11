@@ -669,6 +669,7 @@ impl Context {
         let outcome = self.reconcile(operation.clone(), expected, actual)?;
         let selected = decode_optional_task(&operation, outcome)?;
         self.charges.running = selected;
+        self.busy.selected(self.charges.total().total_ns());
         Ok(selected)
     }
 

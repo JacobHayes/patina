@@ -288,22 +288,12 @@ const ESCALATION_TOKEN_STEP_NANOS: u64 = 1_000_000;
 /// that is more than [`ESCALATION_TOKEN_STEP_NANOS`]: 1/256.
 ///
 /// It bounds how late a long busy-wait ends, as a fraction of the wait
-/// (0.4%), and sets how fast a streak that never ends reaches
-/// [`CHURN_HORIZON_NANOS`]: about two million polls, few enough that the
-/// stop comes in seconds and its trace can still be written. A smaller share
+/// (0.4%), and sets how fast a streak that never ends reaches the
+/// no-progress horizon ([`Busy`]): about two million polls, few enough that
+/// the stop comes in seconds and its trace can still be written. A smaller share
 /// is more exact and slower on both counts. The 1 ms step is 1/256 of 256 ms,
 /// so the two parts of the token meet a quarter of a second into a streak.
 const ESCALATION_TOKEN_SHARE: u64 = 256;
-
-/// The CPU time an episode's escalations may charge before the run is stopped
-/// as churn: the default no-progress budget, 10 virtual minutes.
-///
-/// A poll loop is a wait the runtime cannot see the end of: the guest may be
-/// polling toward a time of its own, which no observation can tell from a
-/// loop that ignores what it reads. So it is bounded like any other stall,
-/// by how much virtual time it has spent with nothing else happening. Ten
-/// minutes of polling with no other effect is not a wait a test means.
-const CHURN_HORIZON_NANOS: u64 = crate::DEFAULT_LIVENESS_BUDGET_NANOS;
 
 /// Whether an operation that made no progress is a poll: a clock observation,
 /// or an operation whose outcome found nothing to take.
@@ -342,8 +332,8 @@ fn poll_class(operation: &Operation) -> ChargeClass {
 /// - The **streak** (`polls`) is the trigger. It counts polls since the
 ///   episode began or the last escalation.
 /// - The **episode** (`escalations`, `charged_nanos`) survives escalations
-///   and drives the token and the churn stop. A progress operation or an
-///   idle advance (the guest waited) ends it.
+///   and drives the token. A progress operation or an idle advance (the
+///   guest waited) ends it.
 ///
 /// Escalation is charged after the escalated poll's outcome, so the poll
 /// itself observes the time before it. Every input is a recorded operation,
@@ -354,10 +344,9 @@ fn poll_class(operation: &Operation) -> ChargeClass {
 pub(super) struct Escalation {
     /// Polls since the episode began or the last escalation.
     pub(super) polls: u64,
-    /// Escalations in the current episode, for the churn diagnostic.
+    /// Escalations in the current episode.
     pub(super) escalations: u64,
-    /// CPU time the episode's escalations charged: what the token follows
-    /// and [`CHURN_HORIZON_NANOS`] bounds.
+    /// CPU time the episode's escalations charged: what the token follows.
     pub(super) charged_nanos: u64,
     /// An escalation a completed streak earned, with the class of the poll
     /// that completed it. Taken at once: by the operation's own outcome, or
@@ -369,9 +358,6 @@ pub(super) struct Escalation {
     /// [`Context::escalate_call`]), once all its reads are done. Without one,
     /// each operation is a call and is escalated at its outcome.
     pub(super) paced: bool,
-    /// The virtual time the churn stop fired at, so the facts document can
-    /// carry the same finding the marker line carries.
-    pub(super) churn_vtime_nanos: Option<u64>,
 }
 
 impl Escalation {
@@ -387,8 +373,8 @@ impl Escalation {
     /// goes cheap and a short wait exact to the millisecond. The second is
     /// what lets a busy-wait reach a deadline seconds or minutes away in a
     /// million polls or two rather than a million a second, late by at most
-    /// 0.4% of the wait, and what brings a loop that will never end to
-    /// [`CHURN_HORIZON_NANOS`].
+    /// 0.4% of the wait, and what brings a loop that will never end to the
+    /// no-progress horizon.
     fn token_nanos(&self) -> u64 {
         // The shift is clamped to the last doubling that can matter (ten of
         // them take the token past the step): `1_000 << escalations` would
@@ -428,18 +414,77 @@ impl Escalation {
         self.escalations += 1;
         self.charged_nanos = self.charged_nanos.saturating_add(nanos);
     }
+}
 
-    /// The loud line the churn stop emits. It reuses the established
-    /// `PATINA_VIOLATION liveness …` interface contract (this IS a liveness
-    /// failure, and a downstream campaign consumer already classifies that
-    /// prefix) with its own `detail=` reason; `rescues` counts escalations
-    /// and `advanced_ns` the CPU time they charged.
-    fn churn_marker_line(&self, vtime_nanos: u64) -> String {
-        format!(
-            "PATINA_VIOLATION liveness detail=poll-churn vtime_ns={} rescues={} \
-advanced_ns={} clock_ops_per_rescue={}",
-            vtime_nanos, self.escalations, self.charged_nanos, ESCALATION_POLLS,
-        )
+/// How long a running task may compute before a compute point lets a
+/// waiting peer run: 1 ms of CPU time, a scheduler's time slice.
+const COMPUTE_SLICE_NANOS: u64 = 1_000_000;
+
+/// The two bounds on CPU time, and the time slice, all measured in charged
+/// CPU time (the guest's calls, poll escalations and metered computation;
+/// never an idle advance, which is the guest waiting, not working).
+///
+/// - The **no-progress horizon**: CPU time charged since the run last made
+///   progress (an operation [`progress_of`] counts) reaching the budget is
+///   a liveness finding. A PCT deferral does not reset it: PCT runs a
+///   deferred task within its starvation bound, far inside the horizon. The budget is the
+///   liveness watchdog's (`--liveness-watchdog`), else
+///   [`crate::DEFAULT_LIVENESS_BUDGET_NANOS`]. Because only CPU time counts,
+///   a guest that sleeps or waits never reaches it, however long; a guest
+///   that spins, polls or yields with nothing else happening does, whatever
+///   it spins on.
+/// - The **compute budget**: metered computation charged with no operation
+///   but scheduling points in between reaching
+///   [`RuntimeConfig::with_compute_budget`]'s budget stops the run as
+///   `compute_bound`. It bounds a computation that never calls into the
+///   runtime, where the horizon would take minutes of host time.
+/// - The **slice**: a task that has computed [`COMPUTE_SLICE_NANOS`] since
+///   it was selected yields to a runnable peer at its next compute point.
+///
+/// Every input is a charge or a recorded operation, the same on record and
+/// replay, and the budgets are recorded, so a replay stops where the
+/// recording did.
+#[derive(Debug, Default)]
+pub(super) struct Busy {
+    /// The CPU total when the run last made progress.
+    baseline_nanos: u64,
+    pub(super) budget_nanos: u64,
+    /// Metered computation charged since the last operation other than a
+    /// scheduling point.
+    pub(super) compute_nanos: u64,
+    pub(super) compute_budget_nanos: u64,
+    /// The CPU total when the scheduler last selected a task.
+    slice_origin_nanos: u64,
+    /// The step at which the run last made progress.
+    progress_step: u64,
+    /// The step of the previous `sched_yield`, by any task.
+    yield_step: Option<u64>,
+    /// All metered computation charged in the run.
+    computed_nanos: u64,
+    /// [`Busy::computed_nanos`] at the previous `sched_yield`.
+    yield_computed_nanos: u64,
+}
+
+impl Busy {
+    pub(super) fn new(budget_nanos: u64, compute_budget_nanos: u64, startup_nanos: u64) -> Self {
+        Self {
+            baseline_nanos: startup_nanos,
+            budget_nanos,
+            compute_budget_nanos,
+            slice_origin_nanos: startup_nanos,
+            ..Self::default()
+        }
+    }
+
+    /// Note metered computation charged.
+    pub(super) fn computed(&mut self, nanos: u64) {
+        self.compute_nanos = self.compute_nanos.saturating_add(nanos);
+        self.computed_nanos = self.computed_nanos.saturating_add(nanos);
+    }
+
+    /// The scheduler selected a task: its slice starts.
+    pub(super) fn selected(&mut self, total_nanos: u64) {
+        self.slice_origin_nanos = total_nanos;
     }
 }
 
@@ -624,6 +669,15 @@ impl Context {
             Operation::TaskYield { .. } | Operation::SchedulerNext
         ) {
             self.yield_steps += 1;
+            // A scheduling point inside a computation (a compute meter's or
+            // an instrumented edge's) is where its budget is checked.
+            if matches!(operation, Operation::TaskYield { .. })
+                && self.busy.compute_nanos >= self.busy.compute_budget_nanos
+            {
+                return Err(self.compute_budget_stop());
+            }
+        } else {
+            self.busy.compute_nanos = 0;
         }
         let progress = match progress_of(operation) {
             Progress::Always => true,
@@ -660,32 +714,128 @@ impl Context {
     /// exceeded. Inert unless a budget is configured, so a plain run is
     /// unaffected.
     fn liveness_track(&mut self, progress: bool) -> Result<(), RuntimeError> {
+        // A PCT deferral does not excuse the horizon: PCT's starvation
+        // bound runs a deferred task within a bounded number of decisions
+        // (about a virtual second of a spinner's slices), far inside the
+        // default horizon, so a deferred task that could make progress does
+        // before it is reached. A budget set below that can stop a spin-wait
+        // whose setter PCT is still deferring.
+        if progress {
+            self.busy.baseline_nanos = self.charges.total().total_ns();
+            self.busy.progress_step = self.steps;
+        } else {
+            self.busy_check()?;
+        }
+        let deferring = self.scheduler.liveness_deferring();
         if !self.liveness.active {
             return Ok(());
         }
         // Arm offsets were anchored to run start at construction; observations
         // and diagnostic timestamps stay in the trace's monotonic domain.
         let now = self.current_monotonic()?;
-        let deferring = self.scheduler.liveness_deferring();
         if let Some(violation) = self.liveness.observe(now, progress, deferring) {
-            // The single interface-contract line, loud.
-            // Emitted from the runtime so it reaches stderr regardless of the
-            // driving surface, exactly like the vacuous-schedule `PATINA WARNING`.
-            let marker = violation.marker_line();
-            crate::reports::diagnostic!("{marker}");
-            // The interposed families abort the process on this error without
-            // ever reaching `finish`, so the facts document — which carries this
-            // very violation as a `runtime_findings` entry — has to be written
-            // here or it is never written at all. So does the recording: the
-            // stop is the one finding that most needs its trace.
-            self.emit_facts();
-            self.flush_recording();
-            return Err(RuntimeError::Liveness {
-                kind: violation.kind,
-                detail: marker,
-            });
+            return Err(self.liveness_stop(violation));
         }
         Ok(())
+    }
+
+    /// The no-progress horizon ([`Busy`]): a liveness stop once the CPU
+    /// time charged since the last progress reaches the budget.
+    fn busy_check(&mut self) -> Result<(), RuntimeError> {
+        let busy = self
+            .charges
+            .total()
+            .total_ns()
+            .saturating_sub(self.busy.baseline_nanos);
+        if busy < self.busy.budget_nanos {
+            return Ok(());
+        }
+        let now = self.current_monotonic()?;
+        let violation = LivenessViolation {
+            kind: LivenessKind::NoProgress,
+            vtime_ns: now,
+            budget_ns: self.busy.budget_nanos,
+            last_fault_vtime_ns: 0,
+        };
+        self.liveness.fired = true;
+        self.liveness.violation = Some(violation);
+        crate::reports::diagnostic!(
+            "patina: the guest was charged {busy} ns of CPU time (its calls, polls and \
+computation) with no progress in between: no effect but reading the clock, finding nothing to take, \
+yielding, sleeping, waiting or waking another thread. If it waits for state another thread \
+publishes, nothing ran that publishes it; if it waits for a time further off than this, give it a \
+wait the runtime can see (a sleep or a timed wait) instead of a busy-wait; if it computes this long \
+with no I/O by design, raise the horizon with --liveness-watchdog."
+        );
+        Err(self.liveness_stop(violation))
+    }
+
+    /// Stop the run for `violation`: the loud line, the facts and the
+    /// recording, then the error.
+    fn liveness_stop(&mut self, violation: LivenessViolation) -> RuntimeError {
+        // The single interface-contract line, loud.
+        // Emitted from the runtime so it reaches stderr regardless of the
+        // driving surface, exactly like the vacuous-schedule `PATINA WARNING`.
+        let marker = violation.marker_line();
+        crate::reports::diagnostic!("{marker}");
+        // The interposed families abort the process on this error without
+        // ever reaching `finish`, so the facts document — which carries this
+        // very violation as a `runtime_findings` entry — has to be written
+        // here or it is never written at all. So does the recording: the
+        // stop is the one finding that most needs its trace.
+        self.emit_facts();
+        self.flush_recording();
+        RuntimeError::Liveness {
+            kind: violation.kind,
+            detail: marker,
+        }
+    }
+
+    /// The compute budget's stop ([`Busy`]): loud, with the facts and the
+    /// recording written, as a liveness stop is.
+    fn compute_budget_stop(&mut self) -> RuntimeError {
+        let task = self.charges.running;
+        let detail = format!(
+            "PATINA_STOP compute_bound task={} compute_ns={} budget_ns={}",
+            task.map_or_else(|| "main".to_owned(), |task| task.0.to_string()),
+            self.busy.compute_nanos,
+            self.busy.compute_budget_nanos,
+        );
+        crate::reports::diagnostic!("{detail}");
+        crate::reports::diagnostic!(
+            "patina: the guest computed {} ns of virtual CPU time without calling into the \
+runtime (no operation but scheduling points), past the compute budget; raise it with \
+--compute-watchdog-ms if the computation is meant to run longer",
+            self.busy.compute_nanos
+        );
+        self.compute_budget_fired = true;
+        self.emit_facts();
+        self.flush_recording();
+        RuntimeError::ComputeBudget { task, detail }
+    }
+
+    /// A compute point: an instrumented build's edge hook hands over a
+    /// batch of edges (charged as computation through the embedder's
+    /// gateway) and asks whether to take a scheduling point. The charged
+    /// time moves the clock (expiring the parks it reaches), the
+    /// no-progress horizon and the compute budget are checked, and the
+    /// answer is yes once the running task has used its slice
+    /// ([`COMPUTE_SLICE_NANOS`]) and another task is runnable.
+    pub fn compute_point(&mut self) -> Result<bool, RuntimeError> {
+        self.show_carry()?;
+        self.busy_check()?;
+        if self.busy.compute_nanos >= self.busy.compute_budget_nanos {
+            return Err(self.compute_budget_stop());
+        }
+        let total = self.charges.total().total_ns();
+        if total.saturating_sub(self.busy.slice_origin_nanos) < COMPUTE_SLICE_NANOS {
+            return Ok(false);
+        }
+        let running = self.charges.running;
+        Ok(self
+            .scheduler_tasks
+            .iter()
+            .any(|task| Some(*task) != running && !self.parked_tasks.contains(task)))
     }
 
     /// Advance the poll streak for one boundary op, on both record and
@@ -706,26 +856,33 @@ impl Context {
         Ok(())
     }
 
-    /// The guest asked to yield (`sched_yield`): when no other task is
-    /// runnable, a poll, of a system call's class. The yield found nothing to
-    /// take, as an empty receive does, so a loop of them is escalated like a
-    /// loop of clock reads: time passes for it, a sleeping peer's deadline
-    /// arrives, and one that nothing will ever free reaches the churn stop
-    /// instead of yielding for good. A yield beside a runnable peer is no
-    /// poll, whichever task the scheduler then picks: the peer may be doing
-    /// work, and a yield-heavy library backoff (a work-stealing pool's idle
-    /// workers) must not make time run away from it.
+    /// The guest asked to yield (`sched_yield`): a poll, of a system call's
+    /// class, unless some task made progress or was charged metered
+    /// computation since the previous yield, by any task. The yield found
+    /// nothing to take, as an empty receive does, so a loop of them is
+    /// escalated like a loop of clock reads: time passes for it, a sleeping
+    /// peer's deadline arrives, and one that nothing will ever free reaches
+    /// the no-progress horizon instead of yielding for good. That holds for
+    /// tasks that only yield to each other too. A yield after progress or
+    /// computation is no poll: something is moving, and a yield-heavy
+    /// library backoff beside a peer doing I/O or computing must not make
+    /// time run away from it. Computation moves time and counts toward the
+    /// horizon itself, so a spinner that computes between its yields is
+    /// still stopped there if nothing ever frees it.
+    /// A guest's yield is also a call that reaches the runtime, so it ends
+    /// the compute budget's count.
     /// Unrecorded bookkeeping the embedder derives from the guest's own
     /// calls, identical on record and replay. The scheduling points an
     /// embedder takes for its own reasons (at a call's entry, at an
     /// instrumented edge) are not the guest's request and are not polls.
     pub fn yield_poll(&mut self) {
-        let running = self.charges.running;
-        let peer_runnable = self
-            .scheduler_tasks
-            .iter()
-            .any(|task| Some(*task) != running && !self.parked_tasks.contains(task));
-        if peer_runnable {
+        self.busy.compute_nanos = 0;
+        let previous = self.busy.yield_step.replace(self.steps);
+        let computed = std::mem::replace(
+            &mut self.busy.yield_computed_nanos,
+            self.busy.computed_nanos,
+        ) != self.busy.computed_nanos;
+        if computed || previous.is_some_and(|previous| self.busy.progress_step > previous) {
             return;
         }
         self.spin.poll(ChargeClass::Syscall);
@@ -771,12 +928,9 @@ impl Context {
     /// Charge one escalation of `class` to `task`. Its time is carried like
     /// any charge.
     fn escalate(&mut self, task: Option<TaskId>, class: ChargeClass) -> Result<(), RuntimeError> {
-        // The stop first: an episode that has polled away the whole horizon
-        // must become a named stop, not an unbounded stream of escalations.
-        if self.spin.charged_nanos >= CHURN_HORIZON_NANOS {
-            let now = self.current_monotonic()?;
-            return Err(self.poll_churn(now));
-        }
+        // The horizon first: a streak that has polled it away must become a
+        // named stop, not an unbounded stream of escalations.
+        self.busy_check()?;
         let mut calls = ChargeCounts::new();
         calls.add(class, self.escalation_calls(class));
         self.spin.on_escalated(calls.charge().total_ns());
@@ -804,35 +958,6 @@ impl Context {
             .into_iter()
             .flatten()
             .fold(self.spin.token_nanos().div_ceil(per_call), u64::min)
-    }
-
-    /// The churn stop: the episode's escalations have charged
-    /// [`CHURN_HORIZON_NANOS`] and the guest is still polling. Loud (a
-    /// `PATINA_VIOLATION liveness` line naming the pattern and what the guest
-    /// was doing) and fail-closed, in the shape the liveness watchdog
-    /// established. The line says what was observed and no more: whether the
-    /// loop would have ended at some later time is not something a run can
-    /// show.
-    fn poll_churn(&mut self, now: u64) -> RuntimeError {
-        self.spin.churn_vtime_nanos = Some(now);
-        let marker = self.spin.churn_marker_line(now);
-        crate::reports::diagnostic!("{marker}");
-        crate::reports::diagnostic!(
-            "patina: poll churn — for {} ns of virtual time ({} escalations of {} polls each) the \
-guest did nothing but poll: read the clock, find nothing to take, or yield, with no other effect \
-in between. Time moved the whole while, and no deadline of the guest's own or of a peer's ended \
-the loop. If the loop waits for state another thread publishes, nothing ran that publishes it; if \
-it waits for a time further off than this, give it a wait the runtime can see (a sleep or a timed \
-wait) instead of a busy-wait.",
-            self.spin.charged_nanos,
-            self.spin.escalations,
-            ESCALATION_POLLS,
-        );
-        // The interposed families abort on this without reaching `finish`, so
-        // the artifacts that explain the wedge have to be written here.
-        self.emit_facts();
-        self.flush_recording();
-        RuntimeError::PollChurn { detail: marker }
     }
 }
 

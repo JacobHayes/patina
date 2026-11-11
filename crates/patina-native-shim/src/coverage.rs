@@ -78,12 +78,62 @@ fn register_coverage_range(ranges: &mut Vec<CoverageRange>, start: usize, len: u
     ranges.push(CoverageRange { start, len });
 }
 
+/// Whether this is an instrumented build: its edge hook registered guards
+/// (`patina_sancov.c`), so its edges are metered computation.
+pub(crate) static EDGE_INSTRUMENTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// The edge meter's pause switch and reset (`patina_sancov.c`), or null in
+/// a build without one.
+static EDGE_METER_PAUSE: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+static EDGE_METER_RESET: std::sync::atomic::AtomicPtr<()> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[unsafe(no_mangle)]
+/// An instrumented build's edge meter registers its pause switch and reset,
+/// from guard init (before any guest code and any second thread).
+pub extern "C" fn patina_edge_meter_register(
+    pause: extern "C" fn(std::ffi::c_int),
+    reset: extern "C" fn(),
+) {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    EDGE_METER_PAUSE.store(pause as *mut (), std::sync::atomic::Ordering::Release);
+    EDGE_METER_RESET.store(reset as *mut (), std::sync::atomic::Ordering::Release);
+}
+
+/// Pause (or resume) this thread's edge meter: the shim's own edges are not
+/// the guest's computation.
+#[inline]
+pub(crate) fn edge_meter_pause(paused: bool) {
+    let pause = EDGE_METER_PAUSE.load(std::sync::atomic::Ordering::Relaxed);
+    if !pause.is_null() {
+        // SAFETY: only `patina_edge_meter_register` stores here, a function
+        // of this signature.
+        let pause: extern "C" fn(std::ffi::c_int) = unsafe { std::mem::transmute(pause) };
+        pause(std::ffi::c_int::from(paused));
+    }
+}
+
+/// Restart this thread's edge-meter countdown: what ran before the runtime
+/// was installed moves no batch boundary.
+pub(crate) fn edge_meter_reset() {
+    let reset = EDGE_METER_RESET.load(std::sync::atomic::Ordering::Acquire);
+    if !reset.is_null() {
+        // SAFETY: only `patina_edge_meter_register` stores here, a function
+        // of this signature.
+        let reset: extern "C" fn() = unsafe { std::mem::transmute(reset) };
+        reset();
+    }
+}
+
 #[unsafe(no_mangle)]
 /// Register one SanitizerCoverage guard-counter range. Called by the C hook's
 /// `__sanitizer_cov_trace_pc_guard_init` once per codegen unit. The guard words
 /// are the counters themselves, so registration records only the live range.
 pub extern "C" fn patina_coverage_register(start: *mut u32, stop: *mut u32) {
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    EDGE_INSTRUMENTED.store(true, std::sync::atomic::Ordering::Relaxed);
     let len = coverage_len(start.cast_const(), stop.cast_const());
     let mut state = coverage_state().lock();
     register_coverage_range(&mut state.guards, start as usize, len);

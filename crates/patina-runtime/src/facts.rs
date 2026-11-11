@@ -26,6 +26,7 @@ use serde_json::{Map, Value};
 
 use crate::ScheduleDiagnostics;
 use crate::liveness::LivenessViolation;
+use patina_dst_abi::TaskId;
 
 /// The stable schema identifier of the facts document.
 pub const FACTS_SCHEMA: &str = "patina.runfacts/v1";
@@ -391,24 +392,22 @@ pub(crate) fn write_compute_bound_facts(
     )
 }
 
-/// The poll-churn finding: poll escalation charged a polling guest
-/// `rescues` escalations totalling `advanced_ns` of CPU time and it still made
-/// no genuine progress. Carries the same fields as the
-/// `PATINA_VIOLATION liveness detail=poll-churn` line.
-pub(crate) fn poll_churn_finding(
-    vtime_ns: u64,
-    rescues: u64,
-    advanced_ns: u64,
-    clock_ops_per_rescue: u64,
+/// The compute budget's finding: the guest charged `compute_ns` of metered
+/// computation, past `budget_ns`, with no operation but scheduling points in
+/// between. Carries the fields of the `PATINA_STOP compute_bound` line.
+pub(crate) fn compute_budget_finding(
+    task: Option<TaskId>,
+    compute_ns: u64,
+    budget_ns: u64,
 ) -> Value {
     object(vec![
-        ("source", Value::from("liveness")),
-        ("kind", Value::from("liveness")),
-        ("detail", Value::from("poll-churn")),
-        ("vtime_ns", Value::from(vtime_ns)),
-        ("rescues", Value::from(rescues)),
-        ("advanced_ns", Value::from(advanced_ns)),
-        ("clock_ops_per_rescue", Value::from(clock_ops_per_rescue)),
+        ("source", Value::from("compute")),
+        ("kind", Value::from("compute_bound")),
+        ("detail", Value::from("compute-budget")),
+        ("known_limit", Value::from(false)),
+        ("task", task.map_or(Value::Null, |task| Value::from(task.0))),
+        ("compute_ns", Value::from(compute_ns)),
+        ("budget_ns", Value::from(budget_ns)),
     ])
 }
 

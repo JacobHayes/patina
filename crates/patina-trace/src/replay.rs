@@ -132,6 +132,10 @@ impl Replayer {
         self.metadata.watchdog
     }
 
+    pub const fn compute_budget_nanos(&self) -> Option<u64> {
+        self.metadata.compute_budget_nanos
+    }
+
     pub const fn sud(&self) -> Option<bool> {
         self.metadata.sud
     }

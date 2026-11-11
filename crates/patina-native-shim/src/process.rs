@@ -38,6 +38,9 @@ pub static PATINA_YIELD_STRIDE: core::sync::atomic::AtomicU32 =
 /// record/replay yield divergence can name the exact guest location that took
 /// the extra scheduling point. Otherwise identical to [`patina_sched_yield`].
 pub extern "C" fn patina_yield_point(site: *const c_void) {
+    // Guest code never called this: whatever it does, the errno the
+    // interrupted code may be about to read is kept.
+    let _errno = crate::abi::ErrnoKept::save();
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     thread::yield_point_from(site as usize);
 }
@@ -46,14 +49,61 @@ pub extern "C" fn patina_yield_point(site: *const c_void) {
 /// A compute meter's batch: guest code built with a meter (a Go guest's
 /// comparison hooks, `patina_go_meter.c`) counts its own work on this thread
 /// and hands over `units` of it here. The work is charged as computation,
-/// which moves virtual time, and the thread takes a scheduling point, so a
+/// which moves virtual time, the no-progress horizon and the compute budget
+/// are checked, and the thread takes a scheduling point, so a
 /// loop that makes no calls still lets due timers fire and other threads run.
 /// The countdown is the thread's own, so the batches fall at the same guest
 /// instructions on every run of a seed.
 pub extern "C" fn patina_compute_point(units: u64) {
+    // Guest code never called this: whatever it does, the errno the
+    // interrupted code may be about to read is kept.
+    let _errno = crate::abi::ErrnoKept::save();
     let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
     charge::count_compute(units);
+    // The no-progress horizon and the compute budget hold for a metered
+    // runtime as for an instrumented build; its batches always take a point.
+    if !thread::charges_silenced() && !crate::in_shim_critical() {
+        let _ = crate::with_context_raw(|context| context.compute_point());
+    }
     let _ = thread::sched_point();
+}
+
+/// Whether an instrumented build's edge hook has handed over a batch.
+pub(crate) static EDGE_METERED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[unsafe(no_mangle)]
+/// An instrumented build's edge meter (`patina_sancov.c`): the thread ran
+/// `edges` more instrumented edges, charged as computation, which moves
+/// virtual time. The runtime then checks the no-progress horizon and the
+/// compute budget, and asks for a scheduling point once this task has run
+/// its slice and another task is runnable (`Context::compute_point`), so a
+/// loop that makes no calls still lets due timers fire and waiting threads
+/// run. The count is the thread's own, so batches fall at the same guest
+/// edges on every run of a seed.
+pub extern "C" fn patina_edge_point(edges: u32) {
+    // Guest code never called this: whatever it does, the errno the
+    // interrupted code may be about to read is kept.
+    let _errno = crate::abi::ErrnoKept::save();
+    let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    EDGE_METERED.store(true, std::sync::atomic::Ordering::Relaxed);
+    charge::count_compute(u64::from(edges));
+    // The meter is paused while the shim owns the thread, so this is never
+    // reached from the shim's own path.
+    if thread::charges_silenced() || crate::in_shim_critical() {
+        return;
+    }
+    let point = crate::with_context_raw(|context| context.compute_point());
+    match point {
+        Ok(true) => {
+            let _ = thread::sched_point();
+        }
+        // No switch: a signal the batch's time made due (an alarm, a
+        // CPU-time timer) is still delivered here, as at any delivery point.
+        #[cfg(target_os = "linux")]
+        Ok(false) => thread::signals::deliver(),
+        _ => {}
+    }
 }
 
 /// Whether a compute meter announced itself ([`patina_note_metered_runtime`]).

@@ -559,6 +559,16 @@ void patina_yield_point(const void *site);
  * computation as virtual CPU time, then take a scheduling point.
  */
 void patina_compute_point(uint64_t units);
+/*
+ * edge meter (patina_sancov.c, every 16384 guest edges): charge `edges` as
+ * virtual CPU time; may take a scheduling point.
+ */
+void patina_edge_point(uint32_t edges);
+/*
+ * edge meter (patina_sancov.c, at guard init): the meter's pause switch, which
+ * the shim throws while it owns the thread, and its reset, at runtime install.
+ */
+void patina_edge_meter_register(void (*pause)(int), void (*reset)(void));
 int32_t patina_crash(void);
 /*
  * Append to the captured stdout (`sink` 1) or stderr (`sink` 2) STREAM -- the

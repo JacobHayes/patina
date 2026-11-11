@@ -361,7 +361,7 @@ impl Recorder {
 
     /// A bundle of the decisions recorded SO FAR, leaving the recorder usable.
     /// The runtime writes one of these when a run is stopped mid-flight (step
-    /// budget exhausted, poll churn) and the consuming
+    /// budget exhausted, the no-progress horizon) and the consuming
     /// [`Recorder::into_bundle`] at finalization is never reached — a truncated
     /// but structurally valid trace beats the empty file the abort would leave.
     /// An abandoned trace refuses here too, for the reason above.

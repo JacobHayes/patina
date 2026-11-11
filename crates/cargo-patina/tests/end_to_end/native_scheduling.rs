@@ -222,7 +222,7 @@ fn main() {
     // deadline arrives inside a budget those charges alone would run out of
     // (a quarter-microsecond a yield is 800,000 yields to 200 ms). And a poll
     // loop that nothing will ever end stops as a liveness finding once it
-    // has polled away the churn horizon, never a hang.
+    // has been charged the no-progress horizon, never a hang.
     #[test]
     fn a_poll_loop_reaches_a_sleeping_peer_and_one_nothing_ends_is_a_finding() {
         let guest = native_build::source_guest("poll_loop", POLL_LOOP_SOURCE);
@@ -245,10 +245,11 @@ fn main() {
             "{result:#}"
         );
         let finding = &result["runtime_findings"][0];
-        assert_eq!(finding["detail"], "poll-churn", "{result:#}");
+        assert_eq!(finding["detail"], "no-progress", "{result:#}");
         // The whole horizon went by in virtual time before the stop.
         assert!(
-            finding["advanced_ns"].as_u64().unwrap() >= 600_000_000_000,
+            finding["vtime_ns"].as_u64().unwrap() - patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS
+                >= 600_000_000_000,
             "{result:#}"
         );
     }

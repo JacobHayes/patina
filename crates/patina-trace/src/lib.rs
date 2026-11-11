@@ -135,7 +135,10 @@ pub use stream::TraceStream;
 /// - 30: no `custom_op` operation and no `custom_op_fail_permille` in the
 ///   fault configuration; custom operations are gone, so a format 29 trace
 ///   that holds one is refused.
-pub const TRACE_FORMAT_VERSION: u32 = 30;
+/// - 31: the metadata records the compute budget
+///   ([`RunMetadata::compute_budget_nanos`]), which a replay derives its
+///   compute stop from.
+pub const TRACE_FORMAT_VERSION: u32 = 31;
 /// The most a recorded trace may hold: 256 MiB serialized, and 4,000,000
 /// events in a timeline. A recording past either is abandoned
 /// ([`ABANDONED_TRACE_KEY`]) and the run goes on to its own outcome.
@@ -148,7 +151,7 @@ pub const TRACE_FORMAT_VERSION: u32 = 30;
 /// takes serialized, it binds first, near three million events. That is
 /// several minutes of virtual time of a busy multi-task guest (a tokio broker
 /// under load records about twelve thousand a second), and holds the 2.3
-/// million clock reads of a loop stopped as poll churn.
+/// million clock reads of a loop stopped at the no-progress horizon.
 pub const MAX_TRACE_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_TIMELINE_EVENTS: usize = 4_000_000;
 

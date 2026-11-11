@@ -61,6 +61,8 @@ rule:
                       - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_op($OP);'
                       - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::enter_syscall($NR);'
                       - pattern: 'let _panic_scope = crate::panic_boundary::PanicScope::resume($HELD);'
+                  # Only comments, or the guard that keeps the interrupted
+                  # code's errno across the whole entry, may precede it.
                   - not:
                       follows:
                         all:
@@ -68,6 +70,7 @@ rule:
                               any:
                                 - kind: line_comment
                                 - kind: block_comment
+                                - pattern: 'let _errno = crate::abi::ErrnoKept::save();'
                           - not:
                               regex: '^[{}]$'
                         stopBy: end

@@ -372,8 +372,40 @@ model does not answer is a named stop, never a host passthrough.
   them.
 - One authority expires timed parks, after every advance and at every
   timed-park registration, in `(deadline, registration)` order.
+- **Computation costs time.** In an instrumented build (`--instrument`)
+  every edge is a compute unit (`ChargeClass::Compute`, 2 ns of user time).
+  Each thread counts its own edges and hands them over in batches of 16384,
+  so a batch falls at the same edge on every run and an operation's
+  timestamp lags the computation before it by at most one batch. A Go
+  guest's comparison meter and the Python meter charge the same way. Only
+  the edges counted move time: host speed never does. Only guest code is
+  counted: the shim pauses the meter while it owns the thread (its own
+  allocations through an instrumented guest allocator differ between record
+  and replay), and the count restarts when the runtime is installed. Edge
+  counts are a property of the binary: another platform's or compiler's
+  build of the same source counts differently, so virtual time, like a
+  trace, is reproducible per build.
+- **One virtual CPU.** Charges from every thread add to one total, and the
+  compute budget and the no-progress horizon count it whichever task
+  computed: tasks take turns on one virtual CPU, so two spinners reach a
+  bound together as one does alone.
+- **Slices.** At a batch, the charged time moves the clock (expiring the
+  parks it reaches), and once the running task has computed 1 ms of CPU time
+  since it was selected and another task is runnable, it takes a scheduling
+  point. A spinner beside a sleeping peer therefore lets the peer's deadline
+  arrive and the peer run, with no `--yield-stride`. A batch that takes no
+  scheduling point still delivers a signal its time made due, so a lone
+  computing thread receives its alarm (Linux: the macOS shim models no
+  timer signals). A slice can end inside
+  instrumented code that holds a host lock Patina does not model (a C
+  library's internal lock around a callback); a peer that then blocks on
+  that lock in the host holds the run still, and the observer's wall-clock
+  backstop (below) ends it as an inconclusive `compute-bound` stop.
 - **Polling costs time.** A poll is a clock read, an operation that found
-  nothing to take, or a `sched_yield` while no other task is runnable. The
+  nothing to take, or a `sched_yield` with no progress and no metered
+  computation by any task since the previous `sched_yield` by any task (two
+  tasks yielding to each other poll; a backoff beside a computing peer does
+  not). The
   runtime cannot tell a guest that polls toward a time of its own from one
   that works and reads the clock as it goes, so the cost of a poll depends
   only on how long the guest has done nothing but poll, never on what
@@ -390,38 +422,62 @@ model does not answer is a named stop, never a host passthrough.
   geometrically, so a million clock reads with no other effect cost about
   4 s. A peer's timeout passes during a streak only once the streak has
   itself charged that long.
-- **Poll churn.** A streak that has charged 10 virtual minutes (the default
-  no-progress budget, fixed whatever `--liveness-watchdog` says, so a replay
-  derives the same stop) stops the run with `liveness detail=poll-churn`: for
-  that long the guest did nothing but poll. A loop that no time ends gets
-  there in about 2.3 million polls. The stop says what was seen, not that the
-  loop could never end: a busy-wait toward a time further off than that is
-  stopped the same way.
+- **The no-progress horizon.** CPU time charged since the run last made
+  progress (an operation that is not scheduling, time or an empty poll)
+  reaching the no-progress budget stops the run with
+  `liveness detail=no-progress`. The budget is `--liveness-watchdog`'s, else
+  10 virtual minutes; replay adopts the recording's. Only charged time
+  counts, never an idle advance, so a guest that sleeps or waits never
+  reaches it however long it waits, and one that spins, polls or yields with
+  nothing happening does, whatever it spins on: a clock loop in about 2.3
+  million polls, a computing spinner beside a periodic sleeper after the
+  budget's worth of edges. The stop says what was seen, not that the loop
+  could never end: a busy-wait toward a time further off is stopped the same
+  way, and so is a computation that runs longer than the budget with no
+  operation that makes progress (raise `--liveness-watchdog` for one). PCT
+  (`--sched-pct`) may defer a runnable task for about a virtual second of a
+  spinner's slices, so a budget, or a compute budget, set below that can
+  stop a spin-wait whose setter it is still deferring.
 - CPU time is the sum of charges (`cpu_charges` in the facts). A call-free
-  loop is charged nothing unless the guest carries a compute meter.
+  loop in a build with no meter is charged nothing.
 - Every trace records `time_model` (`TIME_MODEL`); a trace from another model
   is refused. A change to what moves time bumps that number.
 
-### Native compute-only starvation
+### Compute bounds
 
-Code that makes no call cannot hand over the baton, and nothing it does moves
-virtual time. A host observer, started with the runtime, stops the run after
-`--compute-watchdog-ms` (default 10 s of wall time) in which the guest was
-charged no virtual time and began no boundary operation, with
-`PATINA_VIOLATION liveness detail=compute-bound known_limit=true` (the
-`timeout` outcome). It watches whichever thread runs guest code: a task with
-runnable or parked peers, and the main thread of a guest that never starts
-another (in a `patina build` guest; another embedding starts the observer
-with its first thread). So finite compute that makes no call for longer than
-the bound ends the same way, and a run that needs it raises the bound. An instrumented build's edge yields (`--yield-stride`) are
-scheduling points that charge nothing: tasks that only pass the baton
-between them are stopped like the same loop without the hook, and so is a
-loop of calls answered without the runtime (`getpid`), whose charge waits
-for a call that reaches it. The observer never preempts, wakes, advances
-time or feeds a host answer to the guest. The trace records `compute_stop`;
-replay consumes the prefix and stops at the same point. The observer then
-samples the interrupted PC best-effort. Its helpers use only the `HostApi`
-table, block all signals, allocate nothing and only try-lock runtime locks.
+Computation that makes no call reaches the runtime only through its meter.
+
+- **Metered (instrumented, Go, Python).** Metered computation charged with no
+  guest call and no operation but scheduling points in between, by any
+  task, reaching the compute budget
+  (`--compute-watchdog-ms`, default 10 s, read as virtual time) stops the run
+  as `timeout` with reason `compute_bound` (`PATINA_STOP compute_bound`, a
+  `compute_bound` finding with `known_limit` false). The budget is recorded,
+  and replay derives the same stop at the same edge. A computation shorter
+  than the budget completes on any host, however slow; one that needs longer
+  raises the budget.
+- **Unmetered (a plain build).** Code that makes no call cannot hand over the
+  baton, and nothing it does moves virtual time. A host observer, started
+  with the runtime, stops the run after `--compute-watchdog-ms` of wall time
+  in which the guest was charged no virtual time and began no boundary
+  operation, with `PATINA_VIOLATION liveness detail=compute-bound
+  known_limit=true` (the `timeout` outcome, attributed to Patina, and
+  inconclusive), and tells the user to rebuild with `--instrument`. It
+  watches whichever thread runs guest code: a task with runnable or parked
+  peers, and the main thread of a guest that never starts another (in a
+  `patina build` guest; another embedding starts the observer with its first
+  thread). In a metered build every batch is a charge, so the observer only
+  sees code its meter does not count, and measures its window in the
+  process's CPU time, which a slow, loaded or stopped host does not advance.
+  A guest that burns no CPU there (blocked on the host) never fills that
+  window, so wall time also bounds it: the stamp standing still for ten times
+  the bound, still so one look later, stops the run whatever CPU it used: once a host stall ends, a metered guest charges its next batch
+  within microseconds. The observer never preempts, wakes,
+  advances time or feeds a host answer to the guest. The trace records
+  `compute_stop`; replay consumes the prefix and stops at the same point. The
+  observer then samples the interrupted PC best-effort. Its helpers use only
+  the `HostApi` table, block all signals, allocate nothing and only try-lock
+  runtime locks.
 
 ## Drivers and wrappers
 
@@ -535,7 +591,8 @@ compiled target's `patina.syscalls/v3` inventory.
    code.
 5. Seeds and traces are experiment-plane concerns; every run input that
    changes behaviour is recorded and reconciled on replay.
-6. Virtual time moves only by idle advances and derived charges.
+6. Virtual time moves only by idle advances and derived charges (calls,
+   poll escalations and metered computation), never by host time.
 7. A door has one model; libc doors and SUD rows never disagree.
 8. The shim extends compatibility without defining core semantics.
 9. One trace format version and one time model; old traces are refused.

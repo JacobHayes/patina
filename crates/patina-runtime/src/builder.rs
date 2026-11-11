@@ -264,6 +264,7 @@ impl RuntimeBuilder {
                         .with_schedule_policy(schedule_policy_record(&self.config))
                         .with_swarm(swarm_record.clone())
                         .with_watchdog(watchdog_record(&self.config))
+                        .with_compute_budget(self.config.compute_budget_nanos)
                         .with_guest_argv(self.config.guest_argv.clone())
                         .with_guest_env(guest_env_record(&self.config))
                         .with_guest_cwd(self.config.guest_cwd.clone())
@@ -332,6 +333,11 @@ impl RuntimeBuilder {
                     replayer.schedule_policy(),
                 )?);
                 replay_watchdog = Some(replayer.watchdog());
+                // A hand-built trace records none: its replay takes the
+                // default, whatever the replay invocation asked.
+                self.config.compute_budget_nanos = replayer
+                    .compute_budget_nanos()
+                    .unwrap_or(crate::DEFAULT_COMPUTE_BUDGET_NANOS);
                 reconcile_replay_sud(&self.config, replayer.sud())?;
                 reconcile_replay_tsc(&self.config, replayer.tsc())?;
                 reconcile_replay_address_layout(&self.config, replayer.address_layout())?;
@@ -669,6 +675,15 @@ impl RuntimeBuilder {
             executable_unavailable: false,
             missing_paths: Vec::new(),
             spin: Escalation::default(),
+            busy: crate::liveness::Busy::new(
+                self.config
+                    .liveness
+                    .no_progress_budget_nanos
+                    .unwrap_or(crate::DEFAULT_LIVENESS_BUDGET_NANOS),
+                self.config.compute_budget_nanos,
+                patina_dst_abi::STARTUP_CPU_NANOS,
+            ),
+            compute_budget_fired: false,
             charges: Default::default(),
             alarm: None,
             recording_flushed: false,

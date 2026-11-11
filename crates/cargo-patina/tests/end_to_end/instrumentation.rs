@@ -531,62 +531,496 @@ fn main() {
 }
 "#;
 
-    // Under --yield-stride the spinner's edge points charge nothing, so
-    // virtual time stands still and the sleeper's millisecond never passes
-    // (a known limit: on a real machine it would). The run still ends, as
-    // the host-time compute bound's `timeout`, on every seed. RED when edge
-    // points counted as the guest reaching the runtime: it ran for good.
-    #[test]
-    fn a_spinner_beside_a_sleeper_ends_under_a_yield_stride() {
-        let dir = tempdir().unwrap();
-        let source = dir.path().join("spin_beside_sleeper.rs");
-        fs::write(&source, SPIN_BESIDE_SLEEPER_SOURCE).unwrap();
-        let workspace = native_workspace();
-        let binary = dir.path().join("spin_beside_sleeper");
-        let bin = binary.to_str().unwrap();
+    /// Build `source` as an instrumented guest named `name` in `dir`.
+    fn instrumented(dir: &Path, name: &str, source: &str) -> PathBuf {
+        let path = dir.join(format!("{name}.rs"));
+        fs::write(&path, source).unwrap();
+        let binary = dir.join(name);
         invoke(
-            workspace,
+            native_workspace(),
             &[
                 "build",
-                source.to_str().unwrap(),
+                path.to_str().unwrap(),
                 "--output",
-                bin,
+                binary.to_str().unwrap(),
                 "--instrument",
             ],
         );
-        for seed in ["1", "2", "3"] {
-            let output = invoke_with_deadline(
-                env!("CARGO_BIN_EXE_patina"),
-                workspace,
-                &[
+        binary
+    }
+
+    /// The `--format json` result of `patina <arguments>`, which must end
+    /// within a minute.
+    fn result_of(arguments: &[&str]) -> serde_json::Value {
+        let output = invoke_with_deadline(
+            env!("CARGO_BIN_EXE_patina"),
+            native_workspace(),
+            arguments,
+            Duration::from_secs(60),
+        )
+        .unwrap_or_else(|| panic!("the run never ended: {arguments:?}"));
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "no result for {arguments:?}: {error}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        })
+    }
+
+    /// The class and exit status of a result.
+    fn class_of(result: &serde_json::Value) -> (String, i64) {
+        (
+            result["result"].as_str().unwrap().to_owned(),
+            result["exit_code"].as_i64().unwrap(),
+        )
+    }
+
+    /// The value of `key=` on the guest's stdout line.
+    fn reported(result: &serde_json::Value, key: &str) -> u64 {
+        let stdout = result["stdout"].as_str().unwrap();
+        stdout
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("no {key} in {stdout:?}"))
+            .parse()
+            .unwrap()
+    }
+
+    // An instrumented spinner's edges are computation, charged as virtual
+    // time, and it yields to a runnable peer once it has computed a 1 ms
+    // slice. So the sleeper's millisecond passes and the run ends cleanly,
+    // with or without a yield stride, on every seed, and the guest sees the
+    // millisecond it slept and the slices it waited for its turn. RED under time model 5: the edges charged
+    // nothing, time stood still, and the host-time bound ended the run as a
+    // timeout.
+    #[test]
+    fn a_spinner_beside_a_sleeper_proceeds() {
+        let dir = tempdir().unwrap();
+        let binary = instrumented(
+            dir.path(),
+            "spin_beside_sleeper",
+            SPIN_BESIDE_SLEEPER_SOURCE,
+        );
+        let bin = binary.to_str().unwrap();
+        for stride in ["0", "300"] {
+            for seed in ["1", "2", "3"] {
+                let result = result_of(&[
                     "run",
                     "-v",
                     bin,
                     "--yield-stride",
-                    "300",
+                    stride,
                     "--seed",
                     seed,
-                    "--compute-watchdog-ms",
-                    "200",
                     "--format",
                     "json",
-                ],
-                Duration::from_secs(60),
-            )
-            .unwrap_or_else(|| panic!("the run never ended: seed {seed}"));
-            let result: serde_json::Value =
-                serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-                    panic!(
-                        "seed {seed}: {error}\n{}",
-                        String::from_utf8_lossy(&output.stderr)
-                    )
-                });
-            assert_eq!(
-                (&result["result"], &result["exit_code"]),
-                (&"timeout".into(), &2.into()),
-                "seed {seed}: {result:#}"
-            );
+                ]);
+                assert_eq!(
+                    class_of(&result),
+                    ("ok".to_owned(), 0),
+                    "stride {stride} seed {seed}: {result:#}"
+                );
+                // The sleeper waits for its turn among the runnable tasks,
+                // a slice at a time, then sleeps its millisecond.
+                let elapsed = reported(&result, "elapsed_ns");
+                assert!(
+                    (1_000_000..50_000_000).contains(&elapsed),
+                    "stride {stride} seed {seed}: the 1 ms sleep took {elapsed} ns"
+                );
+            }
         }
+    }
+
+    // A spinner that waits for a flag nothing sets, beside a peer that wakes
+    // every millisecond and goes back to sleep: time passes (the spinner's
+    // edges are charged), the peer keeps running, and nothing makes
+    // progress. The CPU time the spinner is charged reaches the no-progress
+    // horizon and the run is a liveness finding there, the same stop on
+    // replay. RED under time model 5: the host-time bound's timeout.
+    const SPIN_BESIDE_PERIODIC_SOURCE: &str = r#"
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
+
+fn main() {
+    let never = Arc::new(AtomicBool::new(false));
+    let flag = never.clone();
+    thread::spawn(move || loop {
+        thread::sleep(Duration::from_millis(1));
+    });
+    let spinner = thread::spawn(move || {
+        let mut turns = 0u64;
+        while !flag.load(Ordering::Acquire) {
+            turns = turns.wrapping_add(1);
+            std::hint::black_box(turns);
+        }
+    });
+    spinner.join().unwrap();
+    println!("SPIN_ENDED");
+}
+"#;
+
+    #[test]
+    fn a_spinner_beside_a_periodic_sleeper_is_a_liveness_finding_at_the_horizon() {
+        let dir = tempdir().unwrap();
+        let binary = instrumented(dir.path(), "spin_periodic", SPIN_BESIDE_PERIODIC_SOURCE);
+        let bin = binary.to_str().unwrap();
+        let trace = dir.path().join("spin_periodic.patina");
+        // A 200 ms horizon: the default's ten minutes of edges take minutes
+        // of host time.
+        let budget = 200_000_000u64;
+        let watchdog = format!("--liveness-watchdog={budget}");
+        let recorded = result_of(&[
+            "run",
+            bin,
+            "--seed",
+            "1",
+            &watchdog,
+            "--record",
+            trace.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(
+            class_of(&recorded),
+            ("liveness".to_owned(), 1),
+            "{recorded:#}"
+        );
+        let finding = &recorded["runtime_findings"][0];
+        assert_eq!(finding["detail"], "no-progress", "{recorded:#}");
+        // The stop came once the horizon's CPU time had been charged: no
+        // sooner, and within a slice of it.
+        let elapsed =
+            finding["vtime_ns"].as_u64().unwrap() - patina_dst_abi::DEFAULT_BOOT_ORIGIN_NANOS;
+        assert!(
+            (budget..budget + 50_000_000).contains(&elapsed),
+            "stopped {elapsed} ns in: {recorded:#}"
+        );
+        let replayed = result_of(&["replay", bin, trace.to_str().unwrap(), "--format", "json"]);
+        assert_eq!(class_of(&replayed), class_of(&recorded), "{replayed:#}");
+        assert_eq!(
+            replayed["runtime_findings"][0]["vtime_ns"], finding["vtime_ns"],
+            "{replayed:#}"
+        );
+        // Under PCT, whose priorities defer the sleeper again and again,
+        // the horizon is reached the same way.
+        let pct = result_of(&[
+            "run",
+            bin,
+            "--seed",
+            "1",
+            "--sched-pct=3",
+            &watchdog,
+            "--format",
+            "json",
+        ]);
+        assert_eq!(class_of(&pct), ("liveness".to_owned(), 1), "{pct:#}");
+    }
+
+    // Two threads that only yield to each other until a flag is set: by a
+    // peer asleep for a millisecond (`set`), or by nobody (`never`). Their
+    // yields are polls (nothing else happens between them), so time passes
+    // for them: the sleeper's millisecond arrives, and with no sleeper the
+    // run reaches the no-progress horizon in seconds instead of yielding for
+    // good. RED under time model 5: a yield beside a runnable peer was no
+    // poll, so `never` ran on, its calls charging 250 ns a turn.
+    const MUTUAL_YIELD_SOURCE: &str = r#"
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+fn main() {
+    let set = std::env::args().nth(1).unwrap() == "set";
+    let start = Instant::now();
+    let flag = Arc::new(AtomicBool::new(false));
+    let setter = flag.clone();
+    let sleeper = thread::spawn(move || {
+        if set {
+            thread::sleep(Duration::from_millis(1));
+            setter.store(true, Ordering::Release);
+        }
+    });
+    let yielders: Vec<_> = (0..2)
+        .map(|_| {
+            let flag = flag.clone();
+            thread::spawn(move || {
+                while !flag.load(Ordering::Acquire) {
+                    thread::yield_now();
+                }
+            })
+        })
+        .collect();
+    sleeper.join().unwrap();
+    for yielder in yielders {
+        yielder.join().unwrap();
+    }
+    println!("YIELDERS_DONE elapsed_ns={}", start.elapsed().as_nanos());
+}
+"#;
+
+    #[test]
+    fn two_mutual_yield_spinners_end() {
+        let dir = tempdir().unwrap();
+        let binary = instrumented(dir.path(), "mutual_yield", MUTUAL_YIELD_SOURCE);
+        let bin = binary.to_str().unwrap();
+        // A 10 s horizon: the default's ten minutes take a minute of yields.
+        let run = |mode: &str| {
+            result_of(&[
+                "run",
+                bin,
+                "--seed",
+                "1",
+                "--liveness-watchdog=10000000000",
+                "--format",
+                "json",
+                "--",
+                mode,
+            ])
+        };
+        let result = run("set");
+        assert_eq!(class_of(&result), ("ok".to_owned(), 0), "{result:#}");
+        let elapsed = reported(&result, "elapsed_ns");
+        assert!(
+            (1_000_000..3_000_000).contains(&elapsed),
+            "the 1 ms sleep took {elapsed} ns"
+        );
+        let result = run("never");
+        assert_eq!(class_of(&result), ("liveness".to_owned(), 1), "{result:#}");
+        assert_eq!(result["runtime_findings"][0]["detail"], "no-progress");
+    }
+
+    // A long computation with no call: `steps` rounds of a hash. Under the
+    // edge meter its virtual duration is a count of edges, so it is the
+    // same on every run and every host, whatever the host's speed or load,
+    // and a host-time bound far shorter than the host takes does not stop
+    // it. One that never ends is stopped at the compute budget, a virtual
+    // bound, at the same edge on record and replay; what it left in C's
+    // stdout buffer, unflushed, is still in its output on both.
+    const LONG_COMPUTE_SOURCE: &str = r#"
+use std::time::Instant;
+
+unsafe extern "C" {
+    fn printf(format: *const std::ffi::c_char, ...) -> i32;
+}
+
+fn main() {
+    let steps: u64 = std::env::args().nth(1).unwrap().parse().unwrap();
+    if steps == 0 {
+        assert!(unsafe { printf(c"BUFFERED_C_STDOUT".as_ptr()) } > 0);
+    }
+    let start = Instant::now();
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    let mut step = 0u64;
+    while steps == 0 || step < steps {
+        hash = (hash ^ step).wrapping_mul(0x100_0000_01b3);
+        step += 1;
+        std::hint::black_box(hash);
+    }
+    println!("COMPUTED hash={hash} elapsed_ns={}", start.elapsed().as_nanos());
+}
+"#;
+
+    #[test]
+    fn a_long_computation_takes_the_same_virtual_time_on_any_host_and_its_budget_is_virtual() {
+        let dir = tempdir().unwrap();
+        let binary = instrumented(dir.path(), "long_compute", LONG_COMPUTE_SOURCE);
+        let bin = binary.to_str().unwrap();
+        let trace = dir.path().join("long_compute.patina");
+        // Twenty million rounds: tens of host milliseconds or more, over a
+        // compute budget of a virtual second.
+        let run = |extra: &[&str]| {
+            let mut arguments = vec![
+                "run",
+                bin,
+                "--seed",
+                "1",
+                "--compute-watchdog-ms",
+                "1000",
+                "--format",
+                "json",
+            ];
+            arguments.extend_from_slice(extra);
+            arguments.extend_from_slice(&["--", "20000000"]);
+            result_of(&arguments)
+        };
+        let first = run(&["--record", trace.to_str().unwrap()]);
+        assert_eq!(class_of(&first), ("ok".to_owned(), 0), "{first:#}");
+        let elapsed = reported(&first, "elapsed_ns");
+        assert!(
+            elapsed > 10_000_000,
+            "{elapsed} ns for twenty million rounds"
+        );
+        // Again, while the host is busy with other work on every CPU: the
+        // same virtual duration.
+        struct Load(Vec<std::process::Child>);
+        impl Drop for Load {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let load = Load(
+            (0..std::thread::available_parallelism().map_or(2, usize::from))
+                .map(|_| {
+                    std::process::Command::new("sh")
+                        .args(["-c", "while :; do :; done"])
+                        .spawn()
+                        .unwrap()
+                })
+                .collect(),
+        );
+        let loaded = run(&[]);
+        drop(load);
+        assert_eq!(reported(&loaded, "elapsed_ns"), elapsed, "{loaded:#}");
+        let replayed = result_of(&["replay", bin, trace.to_str().unwrap(), "--format", "json"]);
+        assert_eq!(replayed["stdout"], first["stdout"], "{replayed:#}");
+
+        // Never ending: stopped at a 50 ms compute budget, in virtual time.
+        let budget = 50u64;
+        let stop_trace = dir.path().join("forever.patina");
+        let stopped = result_of(&[
+            "run",
+            bin,
+            "--seed",
+            "1",
+            "--compute-watchdog-ms",
+            &budget.to_string(),
+            "--record",
+            stop_trace.to_str().unwrap(),
+            "--format",
+            "json",
+            "--",
+            "0",
+        ]);
+        assert_eq!(class_of(&stopped), ("timeout".to_owned(), 2), "{stopped:#}");
+        assert_eq!(stopped["stop"]["reason"], "compute_bound", "{stopped:#}");
+        let finding = &stopped["runtime_findings"][0];
+        assert_eq!(finding["known_limit"], false, "{stopped:#}");
+        let computed = finding["compute_ns"].as_u64().unwrap();
+        // Stopped at the first batch past the budget.
+        assert!(
+            (budget * 1_000_000..budget * 1_000_000 + 100_000).contains(&computed),
+            "{stopped:#}"
+        );
+        let replayed = result_of(&[
+            "replay",
+            bin,
+            stop_trace.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(class_of(&replayed), class_of(&stopped), "{replayed:#}");
+        assert_eq!(replayed["runtime_findings"][0]["compute_ns"], computed);
+        for result in [&stopped, &replayed] {
+            assert_eq!(result["stdout"], "BUFFERED_C_STDOUT", "{result:#}");
+        }
+    }
+
+    // A lone thread that computes until a signal handler sets its flag: the
+    // alarm is delivered at the batch its time arrives at, though the thread
+    // makes no call and has no peer to yield to.
+    #[cfg(target_os = "linux")]
+    const ALARM_COMPUTE_SOURCE: &str = r#"
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
+
+static FIRED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_alarm(_: i32) {
+    FIRED.store(true, Ordering::SeqCst);
+}
+
+unsafe extern "C" {
+    fn alarm(seconds: u32) -> u32;
+    fn signal(signum: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn main() {
+    let start = Instant::now();
+    unsafe {
+        signal(14, on_alarm);
+        alarm(1);
+    }
+    let mut hash = 0u64;
+    let mut step = 0u64;
+    while !FIRED.load(Ordering::Relaxed) {
+        hash = (hash ^ step).wrapping_mul(0x100_0000_01b3);
+        step += 1;
+        std::hint::black_box(hash);
+    }
+    println!("ALARMED elapsed_ns={}", start.elapsed().as_nanos());
+}
+"#;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_lone_computation_receives_its_alarm() {
+        let dir = tempdir().unwrap();
+        let binary = instrumented(dir.path(), "alarm_compute", ALARM_COMPUTE_SOURCE);
+        let bin = binary.to_str().unwrap();
+        let trace = dir.path().join("alarm_compute.patina");
+        let result = result_of(&[
+            "run",
+            bin,
+            "--seed",
+            "1",
+            "--record",
+            trace.to_str().unwrap(),
+            "--format",
+            "json",
+        ]);
+        assert_eq!(class_of(&result), ("ok".to_owned(), 0), "{result:#}");
+        let elapsed = reported(&result, "elapsed_ns");
+        assert!(
+            (1_000_000_000..1_010_000_000).contains(&elapsed),
+            "the one-second alarm arrived after {elapsed} ns"
+        );
+        let replayed = result_of(&["replay", bin, trace.to_str().unwrap(), "--format", "json"]);
+        assert_eq!(replayed["stdout"], result["stdout"], "{replayed:#}");
+    }
+
+    // Computation that reads the clock as it goes, up to a deadline of its
+    // own: it ends at that deadline, its edges and clock reads together
+    // making the time pass.
+    const COMPUTE_TO_DEADLINE_SOURCE: &str = r#"
+use std::time::{Duration, Instant};
+
+fn main() {
+    let start = Instant::now();
+    let deadline = start + Duration::from_millis(5);
+    let mut hash = 0u64;
+    while Instant::now() < deadline {
+        for step in 0..1000u64 {
+            hash = (hash ^ step).wrapping_mul(0x100_0000_01b3);
+            std::hint::black_box(hash);
+        }
+    }
+    println!("DEADLINE elapsed_ns={}", start.elapsed().as_nanos());
+}
+"#;
+
+    #[test]
+    fn a_computation_bounded_by_a_clock_deadline_ends_at_it() {
+        let dir = tempdir().unwrap();
+        let binary = instrumented(dir.path(), "to_deadline", COMPUTE_TO_DEADLINE_SOURCE);
+        let result = result_of(&[
+            "run",
+            binary.to_str().unwrap(),
+            "--seed",
+            "1",
+            "--format",
+            "json",
+        ]);
+        assert_eq!(class_of(&result), ("ok".to_owned(), 0), "{result:#}");
+        let elapsed = reported(&result, "elapsed_ns");
+        assert!(
+            (5_000_000..5_500_000).contains(&elapsed),
+            "the 5 ms deadline was reached at {elapsed} ns"
+        );
     }
 
     // A spin-wait on an atomic: the spinner makes no call until another
@@ -626,11 +1060,10 @@ fn main() {
 "#;
 
     // Every combination of the scheduling options ends the spin-wait in one
-    // outcome. Where the edge hook hands the scheduler the spinner again and
-    // again, the setter still gets its turn (under PCT the spinner would
-    // otherwise keep its priority for good) and the run is clean; where
-    // nothing can set the flag, or nothing lets the scheduler choose, the
-    // host-time bound ends it as a timeout, never a hang.
+    // outcome. The spinner's slice ends at its edges, so the setter gets its
+    // turn (under PCT the spinner would otherwise keep its priority for good)
+    // and the run is clean, with or without a yield stride; where nothing can
+    // set the flag, the compute budget ends it as a timeout, never a hang.
     #[test]
     fn a_spin_wait_ends_under_every_combination_of_scheduling_options() {
         let dir = tempdir().unwrap();
@@ -676,7 +1109,9 @@ fn main() {
         let clean = ("ok".to_owned(), 0);
         let timeout = ("timeout".to_owned(), 2);
         for options in [
-            &["--yield-stride", "64", "--seed", "1"][..],
+            &["--seed", "1"][..],
+            &["--sched-pct=1", "--seed", "1"],
+            &["--yield-stride", "64", "--seed", "1"],
             &["--sched-pct=1", "--yield-stride", "64", "--seed", "1"],
             &["--sched-pct=1", "--yield-stride", "64", "--seed", "2"],
             &["--sched-pct=3", "--yield-stride", "64", "--seed", "1"],
@@ -693,15 +1128,14 @@ fn main() {
             let result = run(&options, "log");
             assert_eq!(outcome(&result), clean, "{options:?}: {result:#}");
         }
-        // No edge yields: the spinner never lets the scheduler choose, and
-        // under depth-1 PCT it is the first to run. With them and no setter:
-        // the scheduler is asked for good and the guest still does nothing.
-        // Both end at the bound, with or without a recording.
+        // No setter: the spinner computes for good, with or without edge
+        // yields, and ends at the compute budget, with or without a
+        // recording.
         let bound = ["--compute-watchdog-ms", "200", "--seed", "1"];
         let trace = dir.path().join("spin.patina");
         let record = ["--record", trace.to_str().unwrap()];
         for (options, mode) in [
-            (&["--sched-pct=1"][..], "set"),
+            (&[][..], "never"),
             (&["--yield-stride", "64"], "never"),
             (&["--sched-pct=1", "--yield-stride", "64"], "never"),
             (&["--yield-stride", "64", "--record", record[1]], "never"),
@@ -710,6 +1144,10 @@ fn main() {
             options.extend_from_slice(&bound);
             let result = run(&options, mode);
             assert_eq!(outcome(&result), timeout, "{options:?} {mode}: {result:#}");
+            assert_eq!(
+                result["stop"]["reason"], "compute_bound",
+                "{options:?} {mode}"
+            );
         }
     }
 }

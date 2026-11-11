@@ -374,6 +374,12 @@ pub struct RunMetadata {
     /// terminal control-plane fact, never a scheduling decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_stop: Option<ComputeStop>,
+    /// The compute budget in virtual nanoseconds: the metered computation
+    /// a run may do with no other operation before it is stopped. Recorded
+    /// so a replay derives the same stop; absent in a hand-built trace,
+    /// whose replay takes the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_budget_nanos: Option<u64>,
     /// Whether syscall-user-dispatch (SUD) was armed for this run — recorded only
     /// when it was (`Some(true)`); absent (`None`) on every other run (macOS,
     /// a non-SUD kernel, a standalone binary). It exists so a cross-kernel
@@ -512,6 +518,7 @@ impl RunMetadata {
             swarm: None,
             watchdog: None,
             compute_stop: None,
+            compute_budget_nanos: None,
             sud: None,
             tsc: None,
             address_layout: None,
@@ -613,6 +620,13 @@ impl RunMetadata {
     #[must_use]
     pub fn with_swarm(mut self, swarm: Option<SwarmConfigRecord>) -> Self {
         self.swarm = swarm;
+        self
+    }
+
+    /// Attach the run's compute budget ([`RunMetadata::compute_budget_nanos`]).
+    #[must_use]
+    pub fn with_compute_budget(mut self, nanos: u64) -> Self {
+        self.compute_budget_nanos = Some(nanos);
         self
     }
 

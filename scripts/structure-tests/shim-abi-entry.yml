@@ -25,7 +25,20 @@ valid:
         let _panic_scope = crate::panic_boundary::PanicScope::resume(call);
         work();
     }
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn errno_kept() {
+        let _errno = crate::abi::ErrnoKept::save();
+        let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+        work();
+    }
 invalid:
+  - |
+    #[unsafe(no_mangle)]
+    pub extern "C" fn late() {
+        work();
+        let _panic_scope = crate::panic_boundary::PanicScope::enter_glue();
+    }
   - |
     #[unsafe(no_mangle)]
     pub extern "C" fn unguarded() { work(); }

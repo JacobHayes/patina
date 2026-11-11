@@ -1,6 +1,5 @@
 //! Trace transport, recording lifecycle, effect reconciliation, and outcome decoding.
 
-use crate::liveness::ESCALATION_POLLS;
 use crate::{Context, RuntimeError, facts};
 
 use crate::reports::{
@@ -287,12 +286,11 @@ impl Context {
         if let Some(violation) = self.liveness.violation.as_ref() {
             findings.push(facts::liveness_finding(violation));
         }
-        if let Some(vtime) = self.spin.churn_vtime_nanos {
-            findings.push(facts::poll_churn_finding(
-                vtime,
-                self.spin.escalations,
-                self.spin.charged_nanos,
-                ESCALATION_POLLS,
+        if self.compute_budget_fired {
+            findings.push(facts::compute_budget_finding(
+                self.charges.running,
+                self.busy.compute_nanos,
+                self.busy.compute_budget_nanos,
             ));
         }
         if !schedule.vacuous.is_empty() {
@@ -381,7 +379,7 @@ impl Context {
 
     /// Append the facts document, as the run stands now, to the installed
     /// channel. Called at every point after which the process may die without
-    /// reaching [`Context::finish`] (a liveness or churn stop, a replay
+    /// reaching [`Context::finish`] (a liveness or compute stop, a replay
     /// divergence, a verdict) and again at finish; each document is complete,
     /// so the reader takes this context's last one. A compute-bound stop seals
     /// the channel: its terminal document is the run's last word. A write failure is loud and classifiable (`PATINA_INFRA`) rather than
@@ -528,7 +526,7 @@ impl Context {
     /// ([`Context::recording_flushed`]): the native transport is append-only.
     ///
     /// Scoped to stops the RUNTIME initiates (step-budget exhaustion, a
-    /// liveness stop, poll churn, the crash that ends an incarnation), not arbitrary
+    /// liveness stop, the compute budget, the crash that ends an incarnation), not arbitrary
     /// shim failures or panics. Explicit Linux guest `abort()` separately
     /// finalizes a healthy context; other internal fatalities leave the trace
     /// incomplete.

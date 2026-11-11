@@ -164,8 +164,26 @@ impl Context {
         task: Option<TaskId>,
         calls: ChargeCounts,
     ) -> Result<(), RuntimeError> {
+        self.note_computed(calls);
         self.charges.charge(task, calls);
         self.show_carry()
+    }
+
+    /// Note the metered computation among `calls` for the compute budget.
+    /// A guest call among them (one that records no operation, such as an
+    /// uncontended lock) ends the computation's count, as an operation does.
+    fn note_computed(&mut self, calls: ChargeCounts) {
+        if ChargeClass::ALL
+            .iter()
+            .any(|class| *class != ChargeClass::Compute && calls.calls(*class) != 0)
+        {
+            self.busy.compute_nanos = 0;
+        }
+        let compute = calls.calls(ChargeClass::Compute);
+        if compute != 0 {
+            self.busy
+                .computed(compute.saturating_mul(ChargeClass::Compute.cost().total_ns()));
+        }
     }
 
     /// Charge `calls` to `task` as [`Context::charge_calls`] does, their time
@@ -181,6 +199,7 @@ impl Context {
     pub fn accrue_calls(&mut self, task: Option<TaskId>, calls: ChargeCounts) {
         if !calls.is_empty() {
             self.spin.paced = true;
+            self.note_computed(calls);
             self.charges.charge(task, calls);
         }
     }

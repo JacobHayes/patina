@@ -269,12 +269,30 @@ impl Drop for PanicScope {
 /// The thread's owner is `owner` from here: every change of owner is made
 /// here, so syscall-user-dispatch's allowed region follows it
 /// (`sud::arming`): glibc's text while the shim holds the thread, only the
-/// signal return vehicle's instruction while guest code does.
+/// signal return vehicle's instruction while guest code does. The edge
+/// meter follows it too: it counts only while guest code owns the thread.
 #[inline(always)]
 fn own(owner: Owner) {
     IN_SHIM.with(|scope| scope.set(owner));
+    follow_meter();
     #[cfg(target_os = "linux")]
     crate::sud::arming::follow(owner == Owner::Guest);
+}
+
+thread_local! {
+    /// Whether this thread's edge meter counts (see [`follow_meter`]).
+    static METERING: Cell<bool> = const { Cell::new(true) };
+}
+
+/// The edge meter counts while guest code owns the thread: the shim's own
+/// edges (an instrumented guest allocator serving it) are not the run's
+/// computation.
+#[inline(always)]
+fn follow_meter() {
+    let metering = IN_SHIM.with(Cell::get) == Owner::Guest;
+    if METERING.with(|current| current.replace(metering)) != metering {
+        crate::coverage::edge_meter_pause(!metering);
+    }
 }
 
 /// The shim took the thread from guest code whose stack pointer was `sp`.

@@ -157,4 +157,13 @@ pub const STARTUP_CPU_NANOS: u64 = 1_000_000;
 ///   what the streak has charged once that exceeds 1 ms, a `sched_yield`
 ///   while no other task is runnable is a poll, and a streak is stopped as churn once it has charged the
 ///   default no-progress budget rather than after a count of escalations.
-pub const TIME_MODEL: u32 = 5;
+/// - 6: an instrumented build's edges are metered computation: every edge
+///   costs a compute unit, charged in batches, and a batch point takes a
+///   scheduling point once the running task has computed a 1 ms slice and
+///   another task is runnable. The no-progress horizon replaces the churn
+///   stop: CPU time charged since the last progress reaching the
+///   no-progress budget is a liveness stop, whatever was charged. Metered
+///   computation with no operation but scheduling points is bounded by the
+///   recorded compute budget. A `sched_yield` is a poll unless some task
+///   made progress since the yielding task's previous one.
+pub const TIME_MODEL: u32 = 6;
