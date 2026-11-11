@@ -19,8 +19,6 @@
 extern void patina_note_metered_runtime(void);
 /* The SDK's binding (python/sdk_module.c). */
 PyMODINIT_FUNC PyInit__patina(void);
-/* The compute meter (python/meter.c). */
-extern void patina_python_meter_hold(void);
 
 static const char MAGIC[16] = "PATINAPYFROZEN2";
 
@@ -180,14 +178,7 @@ int patina_python_main(int argc, char **argv, const unsigned char *app, size_t a
     }
     /* The exit status as Py_RunMain decides it: a failed finalization is
      * 120, and an unhandled KeyboardInterrupt ends the process by SIGINT
-     * (130 should the signal not end it).
-     *
-     * Teardown runs unmetered on this thread: it walks the whole heap, whose
-     * shape a custom operation's `perform` (run on the record pass, skipped
-     * on replay) leaves different, so its comparison count is not a function
-     * of the program. Its waits for other threads are modeled calls, which
-     * still schedule. */
-    patina_python_meter_hold();
+     * (130 should the signal not end it). */
     if (Py_FinalizeEx() < 0) code = 120;
     if (interrupted) {
         signal(SIGINT, SIG_DFL);

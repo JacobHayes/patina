@@ -114,7 +114,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             FaultPlanes::from_names(planes.split(',')).expect("validated by the registry grammar")
         };
     }
-    spec.custom_op_faults |= args.flag("--custom-op-faults");
     // A value flag, so — unlike the switches above — it overrides the spec only
     // when actually supplied; an absent flag leaves the spec's scale alone.
     if let Some(value) = args.u64("--fault-scale-permille") {

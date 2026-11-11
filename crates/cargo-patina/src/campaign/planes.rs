@@ -83,9 +83,6 @@ const fn knob_plane(knob: FaultKnob) -> Option<FaultPlane> {
         FaultKnob::EntropyFailPermille => Some(FaultPlane::Entropy),
         FaultKnob::SleepJitterNanos => Some(FaultPlane::Sleep),
         FaultKnob::EpochJumpNanos => Some(FaultPlane::Epoch),
-        // Opted into by `--custom-op-faults`: only the guest knows whether its
-        // custom operations declare a failure shape.
-        FaultKnob::CustomOpFailPermille => None,
         FaultKnob::MachineCrashPermille | FaultKnob::ProcessCrashPermille => {
             Some(FaultPlane::Crash)
         }

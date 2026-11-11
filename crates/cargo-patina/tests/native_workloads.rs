@@ -34,10 +34,8 @@ mod two_copy;
 /// only other thread waits for it with no deadline (`parked-spin`); compute
 /// that a replay would finish if it forgot the stop (`finite`); a held
 /// allocator under a byte-payload export (`payload-held`); an allocating
-/// abort handler that is never called (`handler-alloc`); a custom perform
-/// replaying its committed prefix (`custom-spin`, or on Linux `sync-buffer`,
-/// whose replay also salvages buffered C stdout); and on Linux x86_64 a 2 KiB
-/// stack (`small-stack`). A failure names its mode.
+/// abort handler that is never called (`handler-alloc`); and on Linux x86_64
+/// a 2 KiB stack (`small-stack`). A failure names its mode.
 #[test]
 fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
     use std::os::unix::process::ExitStatusExt;
@@ -84,11 +82,6 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
         "payload-held",
         "handler-alloc",
     ];
-    modes.push(if cfg!(target_os = "linux") {
-        "sync-buffer"
-    } else {
-        "custom-spin"
-    });
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         modes.push("small-stack");
     }
@@ -195,15 +188,6 @@ fn compute_watchdog_stops_starvation_and_replays_its_terminal_prefix() {
                 &format!("replay mode={mode}: {replay:#}"),
                 true,
             );
-            if mode == "sync-buffer" {
-                assert!(
-                    replay["stdout"]
-                        .as_str()
-                        .unwrap()
-                        .contains("WATCHDOG_BUFFERED_C_STDOUT"),
-                    "synchronous stop lost C stdout: {replay:#}"
-                );
-            }
             assert_eq!(finding, compute_bound_finding(&replay));
         }
         // Prefix/replay checks accept legitimate early stops, but a recording
@@ -415,10 +399,7 @@ fn assert_compute_stop_eligible(
 
 /// The modes whose recording must reach the guest's own hazard marker.
 fn specialized_hazard(mode: &str) -> bool {
-    matches!(
-        mode,
-        "payload-held" | "handler-alloc" | "custom-spin" | "sync-buffer" | "small-stack"
-    )
+    matches!(mode, "payload-held" | "handler-alloc" | "small-stack")
 }
 fn recorded_hazard(stderr: &str, mode: &str) -> bool {
     stderr

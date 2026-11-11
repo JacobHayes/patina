@@ -21,8 +21,6 @@ default = []
 macros = ["dep:patina-dst-macros"]
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
 patina-dst-macros = { workspace = true, optional = true }
 
 # `patina build` injects these cfgs workspace-wide; `patina_shim` is

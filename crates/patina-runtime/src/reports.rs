@@ -134,9 +134,6 @@ report_registry! {
     /// fault-injection diagnostic when set to a false-y value (`0`, `off`, `false`,
     /// `no`).
     ClockFault => ENV_CLOCK_FAULT_REPORT = "PATINA_CLOCK_FAULT_REPORT";
-    /// Suppress the default-on end-of-run custom-operation fault-injection
-    /// diagnostic when set to a false-y value (`0`, `off`, `false`, `no`).
-    CustomOpFault => ENV_CUSTOMOP_FAULT_REPORT = "PATINA_CUSTOMOP_FAULT_REPORT";
     /// Suppress the default-on native yield-point coverage diagnostic when set to a
     /// false-y value (`0`, `off`, `false`, `no`). The diagnostic is emitted by the
     /// native shim at the same finalization point as the runtime reports.
@@ -398,46 +395,6 @@ pub(super) fn emit_entropy_fault_report(
 occurred (GRND_NONBLOCK reads before the random pool was known ready), enough that the configured \
 rate should have fired several times over, yet it applied ZERO effects.",
             report.requests,
-        );
-    }
-}
-
-/// Emit the default-on custom-operation fault-injection diagnostic. Silent when
-/// the knob was never live. Suppressed by a false-y
-/// [`ENV_CUSTOMOP_FAULT_REPORT`].
-///
-/// Unlike the other planes there is no zero-opportunity early return: a run that
-/// armed this knob and reached NO fault-eligible custom op is precisely the
-/// coverage lie the report exists to name.
-pub(super) fn emit_customop_fault_report(
-    reports: ReportConfig,
-    report: &patina_dst_driver_api::CustomOpFaultReport,
-) {
-    if !reports.enabled(Report::CustomOpFault) {
-        return;
-    }
-    report!(
-        "PATINA_CUSTOMOP_FAULT_REPORT eligible_ops={} fail_vacuity_diagnosable={} \
-faults_injected={} vacuous={}",
-        report.eligible_ops,
-        u8::from(report.fail_vacuity_diagnosable),
-        report.faults_injected,
-        u8::from(report.is_vacuous()),
-    );
-    if report.eligible_ops == 0 {
-        report!(
-            "PATINA WARNING: custom-op fault knob inert — the run armed \
---custom-op-fail-permille and executed ZERO fault-eligible custom operations, so nothing could \
-have been failed. A clean result here does NOT mean custom-op failure was tested. Verify the \
-guest declares a failure shape on the operations it wraps (`custom_op_bytes_faultable`), and that the \
-exercised path reaches them.",
-        );
-    } else if report.is_vacuous() {
-        report!(
-            "PATINA WARNING: custom-op fault knob inert — {} fault-eligible custom operation(s) \
-occurred, enough that the configured rate should have fired several times over, yet it applied \
-ZERO faults.",
-            report.eligible_ops,
         );
     }
 }

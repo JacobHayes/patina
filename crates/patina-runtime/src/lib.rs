@@ -51,7 +51,6 @@
 #![deny(clippy::disallowed_methods)]
 
 use crate::buggify::Buggify;
-use crate::custom_op::PendingCustomOp;
 use crate::liveness::{Escalation, LivenessWatchdog};
 use crate::recording::Execution;
 use crate::schedule::ScheduleTracker;
@@ -71,7 +70,6 @@ mod clock;
 mod config;
 mod config_env;
 mod crash;
-mod custom_op;
 mod entropy;
 mod filesystem;
 mod liveness;
@@ -85,9 +83,9 @@ mod swarm;
 mod time;
 
 pub use config::{
-    BuggifyConfig, ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig,
-    EntropyFaultConfig, ExecutionMode, FaultConfig, FsFaultConfig, LivenessConfig, NetFaultConfig,
-    RuntimeConfig, validate_cpus, validate_hostname,
+    BuggifyConfig, ClockFaultConfig, CrashFaultConfig, DnsFaultConfig, EntropyFaultConfig,
+    ExecutionMode, FaultConfig, FsFaultConfig, LivenessConfig, NetFaultConfig, RuntimeConfig,
+    validate_cpus, validate_hostname,
 };
 
 pub use bookkeeping::Bookkeeping;
@@ -109,15 +107,13 @@ pub use buggify::{
     VerdictRecord,
 };
 
-pub use custom_op::CustomOpMode;
-
 pub use patina_dst_abi::EntropyWait;
 
 pub use reports::{
-    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_CUSTOMOP_FAULT_REPORT, ENV_DNS_FAULT_REPORT,
-    ENV_ENTROPY_FAULT_REPORT, ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT, ENV_NET_FAULT_REPORT,
-    ENV_SCHEDULE_POLICY_REPORT, ENV_SCHEDULE_REPORT, ENV_SDK_REPORT, ENV_SWARM_REPORT, Report,
-    ReportConfig, set_diagnostic_writer, set_report_writer,
+    ENV_CLOCK_FAULT_REPORT, ENV_COVERAGE_REPORT, ENV_DNS_FAULT_REPORT, ENV_ENTROPY_FAULT_REPORT,
+    ENV_FS_FAULT_REPORT, ENV_LIVENESS_REPORT, ENV_NET_FAULT_REPORT, ENV_SCHEDULE_POLICY_REPORT,
+    ENV_SCHEDULE_REPORT, ENV_SDK_REPORT, ENV_SWARM_REPORT, Report, ReportConfig,
+    set_diagnostic_writer, set_report_writer,
 };
 
 pub use patina_dst_abi::VerdictKind;
@@ -396,12 +392,6 @@ pub const ENV_DNS_FAIL_PERMILLE: &str = "PATINA_RT_DNS_FAIL_PERMILLE";
 /// unset.
 pub const ENV_ENTROPY_FAIL_PERMILLE: &str = "PATINA_RT_ENTROPY_FAIL_PERMILLE";
 
-/// Seeded guest custom-operation failure probability in per-mille (0..=1000),
-/// applied to every custom operation the guest declared fault-eligible. On fire
-/// the operation's `perform` closure does not run and the guest is handed the
-/// failure it declared. Off (zero) when unset.
-pub const ENV_CUSTOM_OP_FAIL_PERMILLE: &str = "PATINA_RT_CUSTOM_OP_FAIL_PERMILLE";
-
 /// Seeded realtime-epoch jump magnitude in nanoseconds. Every
 /// `Context::now(ClockKind::Realtime)` read draws a signed offset uniformly in
 /// `[-hi, hi]` and applies it to that one read (saturating at 0), so wall time
@@ -632,21 +622,6 @@ pub struct Context {
     /// Every verdict the guest reported this run, in call order. Also recorded in
     /// the trace as [`Operation::Verdict`], so a replay reproduces the stream.
     verdicts: Vec<VerdictRecord>,
-    /// The custom operation currently between its `begin` and its `record`/
-    /// `replay_result` half, if any. `Some` only for the duration of one
-    /// `custom_op` call; anything that would leave it set across another
-    /// `begin` — or across [`Context::finish`] — is refused (see
-    /// [`Context::custom_op_begin`]).
-    custom_op: Option<PendingCustomOp>,
-    /// Seeded custom-operation failure knob, the root of its per-label stream
-    /// family, and the streams handed out so far — one per label first seen, so
-    /// a label's decisions depend on that label alone. Zero means the knob is
-    /// off, and no label ever gets a stream.
-    custom_op_fail_permille: u16,
-    custom_op_fault_root: u64,
-    custom_op_fault_rngs: BTreeMap<String, SplitMix64>,
-    /// Custom-op fault accounting for the end-of-run vacuity diagnostic.
-    custom_op_report: patina_dst_driver_api::CustomOpFaultReport,
     /// Diagnostic lines the runtime produced but has not printed. The runtime
     /// performs no process I/O in the middle of a run — the same doctrine
     /// [`SiteOutcome`] follows — so the embedder drains this after each entry
@@ -782,17 +757,6 @@ pub enum RuntimeError {
     ScheduleDivergence {
         detail: String,
     },
-    /// A custom operation was refused: a replay divergence on its label or key, a
-    /// nested or unclosed `begin`, a modeled effect performed inside `perform`,
-    /// or a value the SDK encoding could not carry. Every variant is fatal by
-    /// design — none of them has an answer the guest could safely be handed — so
-    /// the interposed embedders abort on it rather than returning an errno the
-    /// guest could ignore. `label` names the op class for triage; `detail` is the
-    /// full message.
-    CustomOp {
-        label: String,
-        detail: String,
-    },
     /// The poll churn stop fired: the guest polled away the whole churn
     /// horizon of virtual time with no other effect. Loud (the
     /// `PATINA_VIOLATION liveness detail=poll-churn` line was emitted, and
@@ -847,11 +811,6 @@ impl RuntimeError {
             // A recorded compute stop the strictly replayed scheduler state does
             // not reach.
             Self::ComputeStopState => Some("compute_stop_state"),
-            // A changed label or key, or an op past the trace, is a trace
-            // divergence noted where the replayer reports it; a recorded fault
-            // this call cannot take is noted where it is refused
-            // (`custom_op_begin`). What is left is the ABI misused on one pass.
-            Self::CustomOp { .. } => None,
             Self::Config(_)
             | Self::Io { .. }
             | Self::Effect(_)
@@ -899,7 +858,6 @@ impl fmt::Display for RuntimeError {
                 "invalid outcome {outcome:?} for Patina operation {operation:?}"
             ),
             Self::ScheduleDivergence { detail } => f.write_str(detail),
-            Self::CustomOp { detail, .. } => f.write_str(detail),
             Self::PollChurn { detail } => {
                 write!(f, "Patina poll churn: {detail}")
             }

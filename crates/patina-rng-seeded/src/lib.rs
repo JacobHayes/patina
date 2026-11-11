@@ -63,14 +63,6 @@ pub mod fault_domain {
     /// than by a wrapper driver.
     pub const FS_LATENCY: &str = "patina.fs.latency";
 
-    /// Seeded guest custom-operation failure-decision stream
-    /// (`--custom-op-fail-permille`). The root of a per-LABEL family of streams
-    /// rather than one stream: a custom op's label names an operation class the
-    /// guest declared, and two classes sharing a coin would make arming a fault
-    /// on one shift the other's decisions. Each label's stream is keyed by this
-    /// domain seed and the label's own hash.
-    pub const CUSTOM_OP_FAULT: &str = "patina.custom_op.fail";
-
     /// Keys a restarted incarnation's stream root to its incarnation number
     /// ([`super::incarnation_seed`]), so each boot of a crash-restart run
     /// draws its own streams from the run's seed.
@@ -115,8 +107,6 @@ pub mod fault_domain {
     pub const SWARM_ENTROPY_FAIL: &str = "patina.swarm.entropy_fail";
     /// Swarm per-class coin for the realtime-epoch jump.
     pub const SWARM_EPOCH_JUMP: &str = "patina.swarm.epoch_jump";
-    /// Swarm per-class coin for guest custom-operation failure injection.
-    pub const SWARM_CUSTOM_OP_FAIL: &str = "patina.swarm.custom_op_fail";
 }
 
 /// The specified SplitMix64 stream used by deterministic decision policies.

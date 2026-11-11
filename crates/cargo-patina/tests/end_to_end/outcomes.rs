@@ -406,35 +406,17 @@ fn a_request_patina_cannot_carry_out_is_an_error_not_a_finding() {
     }
 }
 
-/// A guest whose recording outgrows the trace budget (200 MiB of custom-op
-/// results, more than 256 MiB once encoded) before it ends as its argument
-/// says: cleanly, or with an exit status of its own.
+/// A guest whose recording outgrows the trace budget (200 MiB of file writes,
+/// more than 256 MiB once encoded) before it ends as its argument says:
+/// cleanly, or with an exit status of its own.
 const OVER_BUDGET_SOURCE: &str = r#"
-unsafe extern "C" {
-    fn patina_custom_op_begin(
-        label: *const u8,
-        label_len: usize,
-        key: *const u8,
-        key_len: usize,
-        fault_eligible: i32,
-        out_len: *mut usize,
-    ) -> i32;
-    fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
-}
+use std::os::unix::fs::FileExt;
 
 fn main() {
     let chunk = vec![255u8; 8 << 20];
+    let file = std::fs::File::create("blob").unwrap();
     for _ in 0..25 {
-        let mut length = 0;
-        let label = b"blob";
-        // SAFETY: live buffers of the lengths given.
-        unsafe {
-            assert_eq!(
-                patina_custom_op_begin(label.as_ptr(), label.len(), std::ptr::null(), 0, 0, &mut length),
-                0
-            );
-            assert_eq!(patina_custom_op_record(chunk.as_ptr(), chunk.len()), 0);
-        }
+        file.write_all_at(&chunk, 0).unwrap();
     }
     println!("OVER_BUDGET_DONE");
     if std::env::args().nth(1).as_deref() == Some("exit") {

@@ -20,10 +20,10 @@
 // * `det-segv-unterminated`: die on SIGSEGV writing to address 1, a fault
 //   that happens the same way on every run, after writing a stderr line with
 //   no trailing newline, so patina's own line follows unfinished guest output.
-// * `forge-divergence`: report a fixed violation, then leave a custom
-//   operation open under a label that spells a replay divergence, and print
-//   the structured token too. Deterministic: every word of it is the guest's,
-//   and a guest cannot claim a divergence its own run did not have.
+// * `forge-divergence`: report a fixed violation under a label and detail that
+//   spell a replay divergence, and print the structured token too.
+//   Deterministic: every word of it is the guest's, and a guest cannot claim a
+//   divergence its own run did not have.
 // * `leak-clean`: pass, after writing the address to a file. A filesystem
 //   write records its bytes, so the whole address reaches the trace.
 // * `leak-after-verdict`: report a violation first, under a label drawn from
@@ -38,14 +38,6 @@ unsafe extern "C" {
         label_len: usize,
         detail: *const u8,
         detail_len: usize,
-    ) -> i32;
-    fn patina_custom_op_begin(
-        label: *const u8,
-        label_len: usize,
-        key: *const u8,
-        key_len: usize,
-        fault_eligible: i32,
-        out_len: *mut usize,
     ) -> i32;
 }
 
@@ -96,13 +88,12 @@ fn main() {
             std::process::exit(3);
         }
         "forge-divergence" => {
-            verdict(VIOLATION, "forged", "");
             eprintln!("replay_divergence=unconsumed_events");
-            let label = "replay consumed 0 of 1 trace events";
-            let mut len = 0usize;
-            unsafe {
-                patina_custom_op_begin(label.as_ptr(), label.len(), [].as_ptr(), 0, 0, &mut len);
-            }
+            verdict(
+                VIOLATION,
+                "replay consumed 0 of 1 trace events",
+                "replay_divergence=unconsumed_events",
+            );
         }
         "forge-marker" => {
             eprintln!("PATINA_INFRASTRUCTURE failure detail=\"{}\"", address_bits());

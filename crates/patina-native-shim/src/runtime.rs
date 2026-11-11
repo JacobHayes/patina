@@ -329,15 +329,6 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         // the runtime has already emitted the classifiable PATINA_LIVENESS marker
         // to the captured stderr.
         RuntimeError::Liveness { .. } => {}
-        // A refused custom operation has no answer the guest could safely be
-        // handed: the recording disagrees with what it asked, or its `perform`
-        // did something replay could never reproduce. Returning an errno would
-        // let the guest swallow that and carry on against a trace that no longer
-        // describes the run, so name it and abort — the same treatment liveness
-        // and the step budget get.
-        RuntimeError::CustomOp { label, detail } => line(format!(
-            "PATINA_CUSTOM_OP_REFUSED label={label}\npatina: {detail}\n"
-        )),
         // Poll churn is the same fail-closed shape: the guest polled away
         // the whole horizon, and an errno it could swallow would just resume
         // the spin. The runtime has already emitted the classifiable marker
@@ -345,7 +336,7 @@ pub(crate) fn report_run_stop(error: &RuntimeError) -> bool {
         RuntimeError::PollChurn { .. } => {}
         // A time-model divergence means the replay no longer describes the
         // run: every later clock read and expiry would answer from a different
-        // timeline. Name it and stop, as a refused custom operation does.
+        // timeline. Name it and stop.
         RuntimeError::TimeModel { .. } => line(format!("patina: {error}\n")),
         RuntimeError::ComputeBound { .. } => watchdog::report_synchronous(error),
         RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => watchdog::report(error),
@@ -385,10 +376,6 @@ pub(crate) fn run_stop_class(error: &RuntimeError) -> Option<(RunClass, &'static
         RuntimeError::Liveness { .. } | RuntimeError::PollChurn { .. } => {
             Some((RunClass::Liveness, "liveness"))
         }
-        // A custom operation the guest's own `perform` or protocol broke on a
-        // new run; on a replay the runtime has noted the divergence, which
-        // the supervisor reads first.
-        RuntimeError::CustomOp { .. } => Some((RunClass::Violation, "custom_op")),
         RuntimeError::TimeModel { .. } => Some((RunClass::Nondeterministic, "replay_divergence")),
         RuntimeError::ComputeBound { .. } => Some((RunClass::Timeout, "compute_bound")),
         RuntimeError::ComputeStopExport | RuntimeError::ComputeStopState => {

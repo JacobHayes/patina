@@ -1,9 +1,8 @@
 // Package patina is Patina's SDK for Go guests: fault sites a deterministic
 // simulation run fires from its seed, invariant and coverage sites it reports
-// on, verdicts, custom operations it records and replays, lifecycle markers,
-// seeded entropy and run parameters. It lowers to the same native-shim entry
-// points as the Rust SDK (patina-dst), so a site, verdict or custom op means
-// the same thing in either language.
+// on, verdicts, lifecycle markers, seeded entropy and run parameters. It
+// lowers to the same native-shim entry points as the Rust SDK (patina-dst), so
+// a site or verdict means the same thing in either language.
 //
 // It is inert outside Patina. `patina build --go` adds the `patina`
 // build tag, which links the sites to the native shim; any other build gets
@@ -38,7 +37,6 @@
 package patina
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"runtime"
@@ -222,71 +220,3 @@ func SetupComplete() { setupComplete() }
 // LifecycleEvent marks a named point in the run; it does nothing outside
 // Patina.
 func LifecycleEvent(label string) { lifecycleEvent(label) }
-
-// CustomOpBytes performs one custom operation: an effect Patina does not
-// model (a call to a service outside the simulation, say), wrapped so a run
-// records its result and a replay reproduces it. label names the operation
-// class ("s3.get_object"), not the call; key is its logical input, checked on
-// replay so a different question is refused rather than handed a stale
-// answer.
-//
-// On the record pass perform runs and its bytes are recorded; on replay
-// perform does not run and the recorded bytes come back; an empty result is
-// nil on both. perform must not make calls Patina models (files, clocks,
-// sockets): replay skips it, so the run refuses them. Outside Patina this is
-// just perform().
-func CustomOpBytes(label string, key []byte, perform func() []byte) []byte {
-	return customOp(label, key, nil, perform)
-}
-
-// CustomOpBytesFaultable is CustomOpBytes with a declared failure: onFault
-// produces what the guest receives when a seeded fault fires
-// (`--custom-op-fail-permille`), in which case perform does not run. With
-// the knob off it behaves as CustomOpBytes; outside Patina onFault is never
-// called.
-func CustomOpBytesFaultable(label string, key []byte, onFault, perform func() []byte) []byte {
-	return customOp(label, key, onFault, perform)
-}
-
-// CustomOp is CustomOpBytes with the key and result carried as Go values,
-// encoded as JSON (encoding/json) so they stay legible in the trace. The
-// record pass returns the decoded encoding of perform's value, which is what a
-// replay hands back. Under Patina it panics when a value cannot be encoded,
-// or a recorded result cannot be decoded as T. Outside Patina nothing is
-// encoded.
-func CustomOp[T any](label string, key any, perform func() T) T {
-	return customOpTyped(label, key, nil, perform)
-}
-
-// CustomOpFaultable is CustomOp with a declared failure, as
-// CustomOpBytesFaultable is to CustomOpBytes: onFault's value is what a
-// seeded fault produces.
-func CustomOpFaultable[T any](label string, key any, onFault, perform func() T) T {
-	return customOpTyped(label, key, onFault, perform)
-}
-
-// customOpTyped lowers a typed custom op to the byte protocol, or, outside
-// Patina, just performs it.
-func customOpTyped[T any](label string, key any, onFault, perform func() T) T {
-	if !IsSimulated() {
-		return perform()
-	}
-	encode := func(what string, v any) []byte {
-		b, err := json.Marshal(v)
-		if err != nil {
-			panic(fmt.Sprintf("patina custom op %q: cannot encode %s: %v", label, what, err))
-		}
-		return b
-	}
-	var fault func() []byte
-	if onFault != nil {
-		fault = func() []byte { return encode("result", onFault()) }
-	}
-	bytes := customOp(label, encode("key", key), fault, func() []byte { return encode("result", perform()) })
-	var value T
-	if err := json.Unmarshal(bytes, &value); err != nil {
-		panic(fmt.Sprintf("patina custom op %q: cannot decode the recorded result: %v; the "+
-			"recording was produced by a guest whose result type no longer matches this one", label, err))
-	}
-	return value
-}

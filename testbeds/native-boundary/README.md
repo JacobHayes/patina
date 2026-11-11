@@ -80,16 +80,13 @@ peer, the main thread of a guest with no other thread spinning (`alone`), a
 worker spinning while the only other thread waits for it (`parked-spin`), plus
 spins that hold the guest allocator with scalar-only, byte-bearing,
 and overflowed recordings. They detect allocating or deallocating during stop
-export, including base64 helpers and overflow-error construction. `overflow-held`
-uses 25 eight-MiB results to exceed the real base64-encoded trace budget and must
+export, including base64 helpers and overflow-error construction. The
+byte-bearing recordings are positioned file writes: `overflow-held`
+uses 25 eight-MiB writes to exceed the real base64-encoded trace budget and must
 stop under the class the unrecorded run stops under, its recording reported
 lost, without inventing a replayable prefix.
-`custom-spin` stops inside an open custom perform; replay must stop at the
-committed prefix before requesting its missing outcome. `handler-loop` and
-`handler-alloc` prove SIGABRT registration, then install hostile behavior which
-private termination must never call. `sync-buffer` leaves C stdout buffered
-before the custom begin that stops synchronously on replay; the refusal must
-salvage it without enabling callback salvage on the asynchronous path. `single`
+`handler-loop` and `handler-alloc` prove SIGABRT registration, then install
+hostile behavior which private termination must never call. `single`
 and `parked` run finite compute with no runnable peer (the first after joining
 a trivial peer, the second beside one parked through a mutex/condvar handshake,
 never a synchronization sleep), and `finite` keeps a peer runnable while doing
@@ -102,8 +99,7 @@ interrupted PC or explicit sampling deadline, and valid eligible terminal traces
 Synchronous replay stops explicitly report an unsampled PC (`synchronous-stop`).
 Repeated recordings agree on overlapping decisions; host timing can stop each
 at a different prefix, including before the intended spin. Each recording must
-replay its own exact task/prefix despite a much larger host bound. The runtime
-unit pairing independently proves the open-custom-perform case.
+replay its own exact task/prefix despite a much larger host bound.
 
 Specialized modes emit lifecycle receipts only after entering their hazard;
 at least one of each mode's two recordings must contain its receipt. Early

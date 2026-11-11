@@ -33,7 +33,7 @@ extern void patina_compute_point(uint64_t units);
 /* Comparisons between two scheduling points. */
 #define PATINA_PYTHON_METER_STRIDE 4096
 
-static _Thread_local uint64_t patina_python_meter_countdown = PATINA_PYTHON_METER_STRIDE;
+static _Thread_local uint32_t patina_python_meter_countdown = PATINA_PYTHON_METER_STRIDE;
 
 static inline void patina_python_meter_tick(void) {
     if (--patina_python_meter_countdown == 0) {
@@ -42,21 +42,6 @@ static inline void patina_python_meter_tick(void) {
     }
 }
 
-/* Stop this thread's meter. The SDK holds it across a custom operation
- * (sdk_module.c): `perform` runs on the record pass and not on its replay, so
- * a batch inside it would take a scheduling point and charge compute the
- * replay never does. The launcher holds it for teardown. A 64-bit countdown
- * from its maximum never reaches zero, so the hot path carries no flag. */
-void patina_python_meter_hold(void) { patina_python_meter_countdown = UINT64_MAX; }
-
-/* Restart a held meter with a full stride, which both passes of a custom
- * operation then leave it with. What `perform` did to the interpreter (its
- * allocations, the caches and specializations it warmed) the replay never
- * does, so the comparisons after the operation can differ by a few between
- * the passes; a full stride puts the next batch as far past the operation as
- * the meter can, where such a difference is least likely to move it. It can
- * still move a later one, which the replay refuses as a divergence. */
-void patina_python_meter_resume(void) { patina_python_meter_countdown = PATINA_PYTHON_METER_STRIDE; }
 #define PATINA_TICK() patina_python_meter_tick()
 #endif
 

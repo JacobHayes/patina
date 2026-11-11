@@ -31,8 +31,6 @@ mod campaign_outcomes;
 mod campaign_verify;
 #[path = "end_to_end/crash_restart.rs"]
 mod crash_restart;
-#[path = "end_to_end/custom_ops.rs"]
-mod custom_ops;
 #[path = "end_to_end/help_flags.rs"]
 mod help_flags;
 #[path = "end_to_end/helpers.rs"]

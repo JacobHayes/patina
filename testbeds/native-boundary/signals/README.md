@@ -14,10 +14,10 @@ raw-door, trace/replay and host-oracle evidence.
 handler visibility through tgkill/tkill, reserved masks (SIGSYS stripped,
 SIGSEGV's block kept virtually while counter reads still trap, including
 handler-time temporary masks), and sigwait retry after an unrelated handler.
-The `native_signals` target also records guest abort and C/raw/internal-context
-fatal paths: guest abort must publish a complete trace; each internal fatal
-must leave it incomplete, and an internal fatal never runs the guest's SIGABRT
-handler. The internal-context case nests a custom operation.
+The `native_signals` target also records guest abort and C/raw internal fatal
+paths: guest abort must publish a complete trace; each internal fatal must
+leave it incomplete, and an internal fatal never runs the guest's SIGABRT
+handler.
 `native_containment` owns libc/raw SIGSYS registration/query round trips: the
 guest action stays virtual, a raw syscall still returns the virtual pid without
 calling it, and explicit guest SIGSYS generation aborts after registration. The

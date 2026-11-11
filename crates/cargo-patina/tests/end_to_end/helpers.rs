@@ -400,19 +400,6 @@ pub(super) fn invoke_unchecked_clean_env(
     command.output().unwrap()
 }
 
-pub(super) fn result_line(output: &Output) -> String {
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find(|line| line.starts_with("PATINA_RESULT"))
-        .unwrap_or_else(|| {
-            panic!(
-                "missing PATINA_RESULT in stdout:\n{}",
-                String::from_utf8_lossy(&output.stdout)
-            )
-        })
-        .to_owned()
-}
-
 // ---- Cooperative-SUT (buggify) SDK, end to end -------------------------------
 //
 // A whole package depending on the `patina` crate's default-feature SDK, built

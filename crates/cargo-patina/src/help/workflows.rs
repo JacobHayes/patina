@@ -207,13 +207,6 @@ refused by name.",
                     false,
                 ),
                 f(
-                    "--custom-op-faults",
-                    None,
-                    Value::None,
-                    "Also band the custom-op failure knob under --faults; declare this only for a guest whose custom operations declare a failure shape, since a guest without one can never fire it.",
-                    false,
-                ),
-                f(
                     "--report-failures",
                     None,
                     Value::None,

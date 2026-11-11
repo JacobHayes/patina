@@ -45,7 +45,6 @@ pub(crate) const TEST_FLAGS: &[(&str, Arity)] = &[
     ("compute_watchdog_ms", Arity::Value),
     ("converge_within", Arity::OptionalValue),
     ("cpus", Arity::Value),
-    ("custom_op_fail_permille", Arity::Value),
     ("dns_entry", Arity::Value),
     ("dns_fail_permille", Arity::Value),
     ("dns_latency_nanos", Arity::Value),

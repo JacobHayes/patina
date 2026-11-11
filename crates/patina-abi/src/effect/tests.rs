@@ -84,8 +84,7 @@ fn operation_variant_tags_are_pinned_by_name_not_declaration_order() {
 }
 
 /// Byte payloads serialize as base64 strings, never JSON number arrays, and
-/// base64 is the only payload encoding read. A custom-op key is arbitrary guest
-/// bytes, so non-UTF-8 and empty keys survive verbatim.
+/// base64 is the only payload encoding read.
 #[test]
 fn byte_payloads_are_base64_strings_and_refuse_number_arrays() {
     let write = Operation::FsWrite {
@@ -106,13 +105,4 @@ fn byte_payloads_are_base64_strings_and_refuse_number_arrays() {
 
     let array = "{\"kind\":\"bytes\",\"value\":[1,2,3,4]}";
     assert!(serde_json::from_str::<Outcome>(array).is_err());
-
-    for key in [vec![0x00, 0xff, 0xfe, b'k', 0x80], Vec::new()] {
-        let operation = Operation::CustomOp {
-            label: "s3.get_object".into(),
-            key,
-        };
-        let json = serde_json::to_string(&operation).unwrap();
-        assert_eq!(serde_json::from_str::<Operation>(&json).unwrap(), operation);
-    }
 }

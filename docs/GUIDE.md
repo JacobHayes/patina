@@ -215,16 +215,14 @@ patina_dst::verdict(patina_dst::VerdictKind::Violation,    // structured outcome
     "ledger-sorted", "{\"row\": 12}");
 ```
 
-The `patina-dst` crate is dependency-light and every macro is a no-op outside a
+The `patina-dst` crate has no external dependencies and every macro is a no-op outside a
 Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
 code. `verdict()` is the machine-readable outcome channel: one ABI verb whose
 kind is data, recorded as a trace event (so replay reproduces the verdict stream
 and a divergent one fails closed) and surfaced in `--format json` as `verdicts[]`
 rather than as text to grep; an `always!` violation reports one automatically.
-Effects Patina does not model (RPC, S3, devices) go through
-`patina_dst::custom_op` / `custom_op_faultable`: recorded, replayed without
-re-running, and, for the faultable form, failed on demand with
-`--custom-op-fail-permille`.
+A program that reaches an effect Patina does not model (an RPC to a real
+service, S3, a device) ends the run as `unsupported`, naming what it met.
 Enable at run time with `patina run --buggify`; decisions are pure
 functions of the seed, and the run's `sdk` facts (and its
 `PATINA_SDK_REPORT` line under `--verbose`) prove sites actually fired (no vacuous "all clean").

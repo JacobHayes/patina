@@ -21,7 +21,6 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     let mut out: Vec<(&'static str, bool, String)> = Vec::new();
     let scaled = |permille: u64| CampaignSpec {
         faults: FaultPlanes::ALL,
-        custom_op_faults: true,
         fault_scale_permille: permille,
         ..CampaignSpec::default()
     };

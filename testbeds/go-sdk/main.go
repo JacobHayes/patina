@@ -1,10 +1,9 @@
 // A Go guest instrumented with Patina's Go SDK (go/patina): an invariant, a
 // coverage site satisfied on some seeds' draws, a point always reached, and a
 // point never reached, all declared at package level; a fault site, a delay
-// site and a knob; a setup boundary; a pass verdict; seeded entropy; under the
-// run parameter `ops`, custom operations, one with a declared failure; and
-// the run parameter `violate` (or, outside Patina, an argument) that breaks
-// the invariant.
+// site and a knob; a setup boundary; a pass verdict; seeded entropy; and the
+// run parameter `violate` (or, outside Patina, an argument) that breaks the
+// invariant.
 package main
 
 import (
@@ -24,9 +23,6 @@ var (
 	stall    = patina.BuggifyDelay("go-sdk-stall")
 	width    = patina.Knob("go-sdk-ledger-width", 8, 4, 16)
 )
-
-// performed counts the custom operations whose real effect ran.
-var performed int
 
 func main() {
 	_, violate := patina.Param("violate")
@@ -55,19 +51,9 @@ func main() {
 		never.Mark()
 	}
 
-	// With the run parameter `ops`: an effect Patina does not model, with a
-	// declared failure, and one without. A run records their results and a
-	// replay returns them without performing either.
-	fetched, plain := "-", []byte("-")
-	if _, ops := patina.Param("ops"); ops {
-		fetched = patina.CustomOpFaultable("go-sdk.fetch", map[string]string{"object": "ledger"},
-			func() string { return "UNAVAILABLE" },
-			func() string { performed++; return "etag-7" })
-		plain = patina.CustomOpBytes("go-sdk.plain", []byte("seven"), func() []byte { performed++; return []byte("7") })
-	}
 	if held {
 		patina.Verdict(patina.Pass, "go-sdk-ledger-settled", fmt.Sprintf(`{"width":%d}`, len(ledger)))
 	}
-	fmt.Printf("GO_SDK_RESULT simulated=%t held=%t first=%d width=%d dropped=%d performed=%d fetched=%s plain=%s\n",
-		patina.IsSimulated(), held, ledger[0], len(ledger), dropped, performed, fetched, plain)
+	fmt.Printf("GO_SDK_RESULT simulated=%t held=%t first=%d width=%d dropped=%d\n",
+		patina.IsSimulated(), held, ledger[0], len(ledger), dropped)
 }

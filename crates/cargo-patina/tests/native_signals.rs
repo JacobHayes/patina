@@ -630,12 +630,11 @@ mod raw {
         }
     }
 
-    /// An internal stop leaves the trace incomplete: a fork reached from C,
-    /// a custom operation used with no operation open or nested or left
-    /// unclosed, and an unknown raw syscall the SUD trap meets. An internal
-    /// stop is the shim's own abort, never a delivery: a guest's SIGABRT
-    /// handler (a runtime's, whose raw syscalls would trap back into the
-    /// stopping shim) does not run.
+    /// An internal stop leaves the trace incomplete: a fork reached from C
+    /// and an unknown raw syscall the SUD trap meets. An internal stop is the
+    /// shim's own abort, never a delivery: a guest's SIGABRT handler (a
+    /// runtime's, whose raw syscalls would trap back into the stopping shim)
+    /// does not run.
     #[test]
     fn internal_stops_leave_the_trace_incomplete() {
         let Some(g) = sud_c_guest("signals/signal_boundary.c") else {
@@ -643,8 +642,6 @@ mod raw {
         };
         for (case, diagnostic) in [
             ("internal-c", "process spawn reached under patina: fork"),
-            ("internal-context-active", "no custom operation open"),
-            ("internal-context", "may not nest or be left unclosed"),
             (
                 "internal-guest-abort-handler",
                 "SUD trapped syscall number 999999",

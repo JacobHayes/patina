@@ -33,10 +33,6 @@ class Inert(unittest.TestCase):
             with self.assertRaises(ValueError):
                 patina.Always(label)
 
-    def test_custom_ops_perform(self):
-        self.assertEqual(patina.custom_op("op", {"k": 1}, lambda: {"v": 2}), {"v": 2})
-        self.assertEqual(patina.custom_op_bytes("op", b"k", lambda: b"v", lambda: b"x"), b"v")
-
     def test_run_markers_and_parameters_are_absent(self):
         patina.setup_complete()
         patina.lifecycle_event("inert")

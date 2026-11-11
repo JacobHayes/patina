@@ -6,8 +6,7 @@
 # The guest (main.go) declares its sites at package level: an Always, a
 # Sometimes its seeded draws satisfy, a Reachable it reaches and one it never
 # reaches, a fault site, a delay site and a knob. It marks its setup boundary,
-# reports a pass verdict and, under the run parameter `ops`, wraps two effects
-# as custom operations (one with a declared failure). The run parameter `violate` (or, natively, the
+# reports a pass verdict. The run parameter `violate` (or, natively, the
 # argument) breaks the invariant.
 #
 # It asserts:
@@ -23,12 +22,9 @@
 #       the same verdicts;
 #   [5] armed buggify after the setup boundary fires the fault and delay
 #       sites and perturbs the knob, where an unarmed run fires nothing;
-#   [6] custom ops perform on record and not on replay, and a seeded
-#       custom-op fault returns the declared failure without performing,
-#       which its trace replays;
-#   [7] a campaign reports the never-reached site as unmet and fails its
+#   [6] a campaign reports the never-reached site as unmet and fails its
 #       coverage gate;
-#   [8] a plain `go build` of the same package is inert: not simulated, and
+#   [7] a plain `go build` of the same package is inert: not simulated, and
 #       a broken invariant changes nothing; the SDK's own tests (go test,
 #       plain build) pass.
 ###############################################################################
@@ -162,41 +158,23 @@ knob="$(sed -n 's/.* site=go-sdk-ledger-width|knob|a1|[^ ]*|k\([0-9]*\)|.*/\1/p'
   || { echo "$armed" >&2; cat "$out/buggify.out" >&2; fail "[5] the knob was not perturbed within its bounds"; }
 (( $(field_of "$out/buggify.out" dropped) > 0 )) || { cat "$out/buggify.out" >&2; fail "[5] no draw dropped"; }
 
-echo "==> [6] custom ops: performed on record, replayed without, and a seeded fault"
-"$PATINA" run -v "$built" --seed 1 --param ops=1 --record "$out/ops.patina" >"$out/ops.out" 2>"$out/ops.err" \
-  || { cat "$out/ops.err" >&2; fail "[6] the custom-op run failed"; }
-"$PATINA" replay -v "$built" "$out/ops.patina" >"$out/ops-replay.out" 2>"$out/ops-replay.err" \
-  || { cat "$out/ops-replay.err" >&2; fail "[6] the custom-op replay failed"; }
-[[ $(field_of "$out/ops.out" performed) == 2 && $(field_of "$out/ops-replay.out" performed) == 0 ]] \
-  && [[ $(field_of "$out/ops-replay.out" fetched) == etag-7 && $(field_of "$out/ops-replay.out" plain) == 7 ]] \
-  || { cat "$out/ops.out" "$out/ops-replay.out" >&2; fail "[6] a replay performed, or lost a result"; }
-"$PATINA" run -v "$built" --seed 1 --param ops=1 --custom-op-fail-permille 1000 --record "$out/fault.patina" \
-  >"$out/fault.out" 2>"$out/fault.err" || { cat "$out/fault.err" >&2; fail "[6] the faulted run failed"; }
-"$PATINA" replay -v "$built" "$out/fault.patina" >"$out/fault-replay.out" 2>"$out/fault-replay.err" \
-  || { cat "$out/fault-replay.err" >&2; fail "[6] the faulted replay failed"; }
-# Only the op that declared a failure faults, and it does not perform.
-[[ $(field_of "$out/fault.out" performed) == 1 && $(field_of "$out/fault.out" fetched) == UNAVAILABLE ]] \
-  && [[ $(field_of "$out/fault.out" plain) == 7 && $(field_of "$out/fault-replay.out" performed) == 0 ]] \
-  && [[ $(field_of "$out/fault-replay.out" fetched) == UNAVAILABLE ]] \
-  || { cat "$out/fault.out" "$out/fault-replay.out" >&2; fail "[6] the seeded fault did not fire as declared, or replay lost it"; }
-
-echo "==> [7] a campaign fails its gate on the never-reached site"
+echo "==> [6] a campaign fails its gate on the never-reached site"
 rm -rf "$out/campaign"
 if "$PATINA" campaign "$built" --gens 2 --out-dir "$out/campaign" >"$out/campaign.out" 2>&1; then
-  cat "$out/campaign.out" >&2; fail "[7] the campaign passed with a site never reached"
+  cat "$out/campaign.out" >&2; fail "[6] the campaign passed with a site never reached"
 fi
 grep -q "UNMET reachable 'go-sdk-never-reached'" "$out/campaign.out" \
   && grep -q '^PATINA_CAMPAIGN_COVERAGE .*unmet=1 gate=fail' "$out/campaign.out" \
-  || { cat "$out/campaign.out" >&2; fail "[7] the never-reached site is not the one unmet"; }
+  || { cat "$out/campaign.out" >&2; fail "[6] the never-reached site is not the one unmet"; }
 
-echo "==> [8] a plain go build is inert, and the SDK's own tests pass"
+echo "==> [7] a plain go build is inert, and the SDK's own tests pass"
 go -C "$repo_root/go/patina" test ./... >"$out/sdk-test.out" 2>&1 \
-  || { cat "$out/sdk-test.out" >&2; fail "[8] the SDK's tests failed"; }
-go -C "$here" build -o "$out/go-sdk-plain" . || fail "[8] plain go build failed"
+  || { cat "$out/sdk-test.out" >&2; fail "[7] the SDK's tests failed"; }
+go -C "$here" build -o "$out/go-sdk-plain" . || fail "[7] plain go build failed"
 "$out/go-sdk-plain" violate >"$out/plain.out" 2>&1 \
-  || { cat "$out/plain.out" >&2; fail "[8] the plain build stopped on a broken invariant"; }
+  || { cat "$out/plain.out" >&2; fail "[7] the plain build stopped on a broken invariant"; }
 grep -q '^GO_SDK_RESULT simulated=false held=false ' "$out/plain.out" \
-  || { cat "$out/plain.out" >&2; fail "[8] unexpected plain-build result"; }
+  || { cat "$out/plain.out" >&2; fail "[7] unexpected plain-build result"; }
 
 grep '^GO_SDK_RESULT' "$out/run1.out"
-echo "GO_SDK_LEGS_RAN legs=audit-clean,live-sites,seed-replay-identity,violation-verdict,buggify-after-setup,custom-ops,campaign-gate,plain-inert"
+echo "GO_SDK_LEGS_RAN legs=audit-clean,live-sites,seed-replay-identity,violation-verdict,buggify-after-setup,campaign-gate,plain-inert"

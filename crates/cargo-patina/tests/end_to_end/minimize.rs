@@ -334,27 +334,10 @@ fn main() {
     }
 
     /// A guest that prints the marker, exits 3 when a filesystem fault reaches
-    /// it, and otherwise leaves a custom operation open at exit, which the
-    /// runtime refuses at shutdown on every platform.
-    const CUSTOM_OP_SOURCE: &str = r#"
+    /// it, and otherwise spawns a process, which Patina refuses as unsupported
+    /// on every platform.
+    const REFUSAL_SOURCE: &str = r#"
 use std::io::Write;
-
-unsafe extern "C" {
-    fn patina_custom_op_begin(
-        label: *const u8,
-        label_len: usize,
-        key: *const u8,
-        key_len: usize,
-        fault_eligible: i32,
-        out_len: *mut usize,
-    ) -> i32;
-}
-
-/// Begin one custom operation; whether this pass is a replay.
-fn begin(label: &str) -> bool {
-    let mut len = 0usize;
-    unsafe { patina_custom_op_begin(label.as_ptr(), label.len(), [].as_ptr(), 0, 0, &mut len) != 0 }
-}
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -367,27 +350,22 @@ fn main() {
             if faulted {
                 std::process::exit(3);
             }
-            begin("lookup");
+            let _ = std::process::Command::new("true").status();
         }
         other => panic!("unknown mode {other:?}"),
     }
 }
 "#;
 
-    /// The [`CUSTOM_OP_SOURCE`] guest.
-    fn custom_op_guest() -> PathBuf {
-        super::super::run_facts::shared_guest("minimize-custom-op", |directory| {
-            build_facts_guest(directory, "custom_op", CUSTOM_OP_SOURCE)
+    /// The [`REFUSAL_SOURCE`] guest.
+    fn refusal_guest() -> PathBuf {
+        super::super::run_facts::shared_guest("minimize-refusal", |directory| {
+            build_facts_guest(directory, "refusal", REFUSAL_SOURCE)
         })
     }
 
-    /// Run a one-generation campaign of the custom-op guest in `mode`.
-    fn custom_op_campaign(
-        guest: &Path,
-        out: &Path,
-        extra: &[&str],
-        mode: &str,
-    ) -> serde_json::Value {
+    /// Run a one-generation campaign of the refusal guest in `mode`.
+    fn refusal_campaign(guest: &Path, out: &Path, extra: &[&str], mode: &str) -> serde_json::Value {
         let mut arguments = vec![
             "campaign",
             guest.to_str().unwrap(),
@@ -414,13 +392,13 @@ fn main() {
     fn minimize_keeps_the_knob_whose_removal_ends_in_a_refusal() {
         let workspace = native_workspace();
         let directory = tempdir().unwrap();
-        let guest = custom_op_guest();
+        let guest = refusal_guest();
 
         // Campaign seeds and knobs are a pure function of `--seed-start` and
         // the generation, and generation 0 of this seed start draws a fault
         // that reaches the guest.
         let out = directory.path().join("camp");
-        let envelope = custom_op_campaign(
+        let envelope = refusal_campaign(
             &guest,
             &out,
             &["--seed-start", "5", "--faults"],

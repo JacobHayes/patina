@@ -43,9 +43,8 @@ func (f formatted) String() string {
 }
 
 // Outside Patina faults never fire, knobs keep their defaults, a failed
-// check formats no detail, and custom ops just perform: nothing is encoded
-// (a func key has no JSON encoding) and a declared failure is never used.
-func TestFaultsAndCustomOpsAreInertOutsidePatina(t *testing.T) {
+// check formats no detail.
+func TestFaultsAreInertOutsidePatina(t *testing.T) {
 	if Buggify("inert-fault").Fires() || Buggify("inert-fault-prob").FiresWithProb(1) {
 		t.Fatal("a fault fired outside Patina")
 	}
@@ -59,17 +58,4 @@ func TestFaultsAndCustomOpsAreInertOutsidePatina(t *testing.T) {
 	Verdict(Violation, "inert-verdict", "")
 	SetupComplete()
 	LifecycleEvent("inert-event")
-
-	performed := 0
-	never := func() []byte { t.Fatal("a declared failure was used outside Patina"); return nil }
-	got := CustomOpBytesFaultable("inert.op", []byte("k"), never, func() []byte { performed++; return []byte("v") })
-	if string(got) != "v" {
-		t.Fatalf("CustomOpBytesFaultable = %q, not perform's bytes", got)
-	}
-	unencodable := func() {}
-	value := CustomOpFaultable("inert.typed", unencodable, func() map[int]int { t.Fatal("onFault ran"); return nil },
-		func() map[int]int { performed++; return map[int]int{1: 2} })
-	if value[1] != 2 || performed != 2 {
-		t.Fatalf("typed custom op = %v after %d performs", value, performed)
-	}
 }

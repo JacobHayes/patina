@@ -130,11 +130,6 @@ pub const ENVIRONMENT: &[EnvVar] = &[
         doc: "Seeded realtime-epoch jump knob (mirrors --epoch-jump-nanos).",
     },
     EnvVar {
-        name: "PATINA_RT_CUSTOM_OP_FAIL_PERMILLE",
-        scope: "protocol",
-        doc: "Seeded guest custom-operation failure knob (mirrors --custom-op-fail-permille).",
-    },
-    EnvVar {
         name: "PATINA_RT_BUGGIFY / PATINA_RT_BUGGIFY_ACTIVATION_PERMILLE / PATINA_RT_BUGGIFY_CUTOFF_NANOS / PATINA_RT_BUGGIFY_AFTER_SETUP",
         scope: "protocol",
         doc: "Cooperative-SUT (buggify) knobs (mirror the --buggify* flags).",

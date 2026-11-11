@@ -518,12 +518,5 @@ pub(crate) fn representative_events_for_all_op_kinds() -> Vec<(Operation, Outcom
             },
             Outcome::Unit,
         ),
-        (
-            Operation::CustomOp {
-                label: "s3.get_object".into(),
-                key: b"bucket/key".to_vec(),
-            },
-            Outcome::Bytes(b"{\"etag\":\"a\"}".to_vec()),
-        ),
     ]
 }

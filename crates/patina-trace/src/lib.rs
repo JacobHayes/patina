@@ -132,7 +132,10 @@ pub use stream::TraceStream;
 ///   trace of a guest that read procfs has none, so it is refused.
 /// - 29: `compute_stop.task` may be null: the stop found the main thread of
 ///   a run that had no task yet. A format 28 reader has no such stop.
-pub const TRACE_FORMAT_VERSION: u32 = 29;
+/// - 30: no `custom_op` operation and no `custom_op_fail_permille` in the
+///   fault configuration; custom operations are gone, so a format 29 trace
+///   that holds one is refused.
+pub const TRACE_FORMAT_VERSION: u32 = 30;
 /// The most a recorded trace may hold: 256 MiB serialized, and 4,000,000
 /// events in a timeline. A recording past either is abandoned
 /// ([`ABANDONED_TRACE_KEY`]) and the run goes on to its own outcome.

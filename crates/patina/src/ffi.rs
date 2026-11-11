@@ -73,14 +73,4 @@ shim_entries! {
         detail: *const u8,
         detail_len: usize,
     ) -> i32;
-    pub fn patina_custom_op_begin(
-        label: *const u8,
-        label_len: usize,
-        key: *const u8,
-        key_len: usize,
-        fault_eligible: i32,
-        out_len: *mut usize,
-    ) -> i32;
-    pub fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize;
-    pub fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
 }

@@ -208,12 +208,6 @@ const fn campaign_policy(knob: FaultKnob) -> BandPolicy {
         FaultKnob::NetTcpBufferBytes => BandPolicy::Draw(&[gen_byte::NET_TCP_BUFFER]),
         FaultKnob::EntropyFailPermille => BandPolicy::Draw(&[gen_byte::ENTROPY_FAIL]),
         FaultKnob::EpochJumpNanos => BandPolicy::Draw(&[gen_byte::EPOCH_JUMP]),
-        // Banded, but emitted only for a spec that declares `--custom-op-faults`
-        // — the same shape as the DNS knobs riding on `--dns-entry`. A guest
-        // whose custom operations declare no failure shape has nothing this knob
-        // could fail, so banding it unconditionally would put a provably inert
-        // knob, and its vacuity class, into every campaign generation.
-        FaultKnob::CustomOpFailPermille => BandPolicy::Draw(&[gen_byte::CUSTOM_OP_FAIL]),
         // WAIVED — a partition names virtual ADDRESSES the
         // guest actually uses, which the campaign has no generic pool for (unlike
         // `--dns-entry`, there is no `spec.net_partitions` list of candidate
@@ -275,7 +269,6 @@ fn vacuity_plane(knob: FaultKnob) -> Option<&'static str> {
         FaultKnob::DnsFailPermille | FaultKnob::DnsLatencyNanos => Some("dns"),
         FaultKnob::EntropyFailPermille => Some("entropy"),
         FaultKnob::EpochJumpNanos => Some("clock"),
-        FaultKnob::CustomOpFailPermille => Some("custom_op"),
         // `NetFaultReport` carries one combined `vacuous=` bit over all seven of
         // these classes (drop/jitter/latency/duplicate/connect-refuse/reset/
         // partition all share one report line), so they share the one plane.
@@ -548,22 +541,6 @@ fn derive_flags(spec: &CampaignSpec, hash: &gen_byte::Hash) -> Vec<String> {
         ] {
             let permille = scale_intensity(1 << (band_byte(hash, knob, 0) % 8), scale);
             band(&mut flags, knob, RunValue::Int(permille));
-        }
-        // Opt-in, on the same reasoning as the DNS band below: whether a custom
-        // operation is fault-eligible is the GUEST's declaration, and over a
-        // guest that declares none the knob provably cannot fire. Every
-        // generation would then report a vacuous custom-op plane — a true
-        // statement about a band that should never have been emitted.
-        if spec.custom_op_faults {
-            let custom_op_fail = scale_intensity(
-                u64::from(band_byte(hash, FaultKnob::CustomOpFailPermille, 0)) * 200 / 255, // [0, 200] permille
-                scale,
-            );
-            push_run_flag(
-                &mut flags,
-                "--custom-op-fail-permille",
-                RunValue::Int(custom_op_fail),
-            );
         }
         // The DNS band rides on the host table, which is spec config rather than a
         // per-generation draw: with no defined name every lookup is NXDOMAIN by

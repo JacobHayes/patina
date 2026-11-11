@@ -6,10 +6,9 @@
 #
 # The guest (app/__main__.py) declares its sites at module level: an Always, a
 # Sometimes its seeded draws satisfy, a Reachable it reaches and one it never
-# reaches, a fault site, a delay site and a knob. It marks its setup boundary,
-# reports a pass verdict and, under the run parameter `ops`, wraps two effects
-# as custom operations (one with a declared failure). The run parameter
-# `violate` (or, under plain Python, the argument) breaks the invariant.
+# reaches, a fault site, a delay site and a knob. It marks its setup boundary
+# and reports a pass verdict. The run parameter `violate` (or, under plain
+# Python, the argument) breaks the invariant.
 #
 # It asserts:
 #   [1] the pre-run audit is CLEAN with no allowance;
@@ -24,12 +23,9 @@
 #       the same verdicts;
 #   [5] armed buggify after the setup boundary fires the fault and delay
 #       sites and perturbs the knob, where an unarmed run fires nothing;
-#   [6] custom ops perform on record and not on replay, and a seeded
-#       custom-op fault returns the declared failure without performing,
-#       which its trace replays;
-#   [7] a campaign reports the never-reached site as unmet and fails its
+#   [6] a campaign reports the never-reached site as unmet and fails its
 #       coverage gate;
-#   [8] plain python3 runs the same application inert: not simulated, and a
+#   [7] plain python3 runs the same application inert: not simulated, and a
 #       broken invariant changes nothing; the SDK's inert tests pass.
 ###############################################################################
 set -uo pipefail
@@ -52,7 +48,7 @@ if [[ $(uname -s) != Linux ]]; then
   echo "FATAL: Python guests build on Linux only" >&2; exit 3
 fi
 if ! command -v python3 >/dev/null; then
-  echo "FATAL: no python3 on PATH (the checks and leg [8] run it)" >&2; exit 3
+  echo "FATAL: no python3 on PATH (the checks and leg [7] run it)" >&2; exit 3
 fi
 if [[ -z ${PATINA_CLI:-} ]] && ! cargo build --release --quiet -p cargo-patina; then
   echo "FATAL: cargo build -p cargo-patina failed" >&2; exit 3
@@ -166,40 +162,22 @@ knob="$(sed -n 's/.* site=python-sdk-ledger-width|knob|a1|[^ ]*|k\([0-9]*\)|.*/\
   || { echo "$armed" >&2; cat "$out/buggify.out" >&2; fail "[5] the knob was not perturbed within its bounds"; }
 (( $(field_of "$out/buggify.out" dropped) > 0 )) || { cat "$out/buggify.out" >&2; fail "[5] no draw dropped"; }
 
-echo "==> [6] custom ops: performed on record, replayed without, and a seeded fault"
-"$PATINA" run -v "$built" --seed 1 --param ops=1 --record "$out/ops.patina" >"$out/ops.out" 2>"$out/ops.err" \
-  || { cat "$out/ops.err" >&2; fail "[6] the custom-op run failed"; }
-"$PATINA" replay -v "$built" "$out/ops.patina" >"$out/ops-replay.out" 2>"$out/ops-replay.err" \
-  || { cat "$out/ops-replay.err" >&2; fail "[6] the custom-op replay failed"; }
-[[ $(field_of "$out/ops.out" performed) == 2 && $(field_of "$out/ops-replay.out" performed) == 0 ]] \
-  && [[ $(field_of "$out/ops-replay.out" fetched) == etag-7 && $(field_of "$out/ops-replay.out" plain) == 7 ]] \
-  || { cat "$out/ops.out" "$out/ops-replay.out" >&2; fail "[6] a replay performed, or lost a result"; }
-"$PATINA" run -v "$built" --seed 1 --param ops=1 --custom-op-fail-permille 1000 --record "$out/fault.patina" \
-  >"$out/fault.out" 2>"$out/fault.err" || { cat "$out/fault.err" >&2; fail "[6] the faulted run failed"; }
-"$PATINA" replay -v "$built" "$out/fault.patina" >"$out/fault-replay.out" 2>"$out/fault-replay.err" \
-  || { cat "$out/fault-replay.err" >&2; fail "[6] the faulted replay failed"; }
-# Only the op that declared a failure faults, and it does not perform.
-[[ $(field_of "$out/fault.out" performed) == 1 && $(field_of "$out/fault.out" fetched) == UNAVAILABLE ]] \
-  && [[ $(field_of "$out/fault.out" plain) == 7 && $(field_of "$out/fault-replay.out" performed) == 0 ]] \
-  && [[ $(field_of "$out/fault-replay.out" fetched) == UNAVAILABLE ]] \
-  || { cat "$out/fault.out" "$out/fault-replay.out" >&2; fail "[6] the seeded fault did not fire as declared, or replay lost it"; }
-
-echo "==> [7] a campaign fails its gate on the never-reached site"
+echo "==> [6] a campaign fails its gate on the never-reached site"
 rm -rf "$out/campaign"
 if "$PATINA" campaign "$built" --gens 2 --out-dir "$out/campaign" >"$out/campaign.out" 2>&1; then
-  cat "$out/campaign.out" >&2; fail "[7] the campaign passed with a site never reached"
+  cat "$out/campaign.out" >&2; fail "[6] the campaign passed with a site never reached"
 fi
 grep -q "UNMET reachable 'python-sdk-never-reached'" "$out/campaign.out" \
   && grep -q '^PATINA_CAMPAIGN_COVERAGE .*unmet=1 gate=fail' "$out/campaign.out" \
-  || { cat "$out/campaign.out" >&2; fail "[7] the never-reached site is not the one unmet"; }
+  || { cat "$out/campaign.out" >&2; fail "[6] the never-reached site is not the one unmet"; }
 
-echo "==> [8] plain python3 is inert, and the SDK's inert tests pass"
+echo "==> [7] plain python3 is inert, and the SDK's inert tests pass"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$sdk" python3 -m unittest discover -s "$here" -p 'test_*.py' \
-  >"$out/sdk-test.out" 2>&1 || { cat "$out/sdk-test.out" >&2; fail "[8] the SDK's inert tests failed"; }
+  >"$out/sdk-test.out" 2>&1 || { cat "$out/sdk-test.out" >&2; fail "[7] the SDK's inert tests failed"; }
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$sdk" python3 "$here/app" violate >"$out/plain.out" 2>&1 \
-  || { cat "$out/plain.out" >&2; fail "[8] plain python3 stopped on a broken invariant"; }
+  || { cat "$out/plain.out" >&2; fail "[7] plain python3 stopped on a broken invariant"; }
 grep -q '^PY_SDK_RESULT simulated=False held=False ' "$out/plain.out" \
-  || { cat "$out/plain.out" >&2; fail "[8] unexpected plain-python result"; }
+  || { cat "$out/plain.out" >&2; fail "[7] unexpected plain-python result"; }
 
 grep '^PY_SDK_RESULT' "$out/run1.out"
-echo "PY_SDK_LEGS_RAN legs=audit-clean,live-sites,seed-replay-identity-variation,violation-verdict,buggify-after-setup,custom-ops,campaign-gate,plain-inert"
+echo "PY_SDK_LEGS_RAN legs=audit-clean,live-sites,seed-replay-identity-variation,violation-verdict,buggify-after-setup,campaign-gate,plain-inert"

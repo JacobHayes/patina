@@ -18,8 +18,6 @@ func verdict(VerdictKind, string, string) {}
 func setupComplete()                      {}
 func lifecycleEvent(string)               {}
 
-func customOp(_ string, _ []byte, _, perform func() []byte) []byte { return perform() }
-
 // IsSimulated reports whether the program runs under Patina: never, in a
 // build without the `patina` tag.
 func IsSimulated() bool { return false }

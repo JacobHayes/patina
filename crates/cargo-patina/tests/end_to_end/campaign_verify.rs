@@ -296,7 +296,7 @@ fn main() {
     /// Guest output cannot move a verification verdict either way: a
     /// deterministic fault whose last guest line is unterminated still
     /// reproduces (patina's marker follows guest output on the same stream), a
-    /// guest spelling a divergence in a custom-op label does not forge one, and
+    /// guest spelling a divergence in a verdict label does not forge one, and
     /// a guest line shaped like patina's marker keeps the evidence that the
     /// leak beside it is nondeterministic.
     #[test]

@@ -176,11 +176,6 @@ const fn knob_flag(knob: FaultKnob) -> (Flag, KnobGroup) {
             "Jump each realtime-epoch read by a seeded signed offset in [-HI, HI] nanoseconds (saturating at 0).",
             KnobGroup::Fault,
         ),
-        FaultKnob::CustomOpFailPermille => (
-            Value::Required("N", Kind::Permille),
-            "Fail guest custom operations that declared a failure shape at N per-mille, handing back that failure instead of running the operation.",
-            KnobGroup::Fault,
-        ),
         FaultKnob::DnsEntry => (
             Value::Required("NAME=ADDR", Kind::DnsEntry),
             "Define NAME to resolve to IPv4 ADDR (repeatable). Undefined names are NXDOMAIN.",

@@ -3,13 +3,12 @@
 use patina_dst_rng_seeded::fault_domain;
 
 use crate::{
-    ENV_CLOCK_FAULT_REPORT, ENV_CUSTOM_OP_FAIL_PERMILLE, ENV_CUSTOMOP_FAULT_REPORT,
-    ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT, ENV_DNS_LATENCY,
-    ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS, ENV_FS_ERROR_AT,
-    ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY, ENV_FS_SHORT_PERMILLE,
-    ENV_MACHINE_CRASH_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE, ENV_NET_DROP_PERMILLE,
-    ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER, ENV_NET_LATENCY,
-    ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
+    ENV_CLOCK_FAULT_REPORT, ENV_DNS_ENTRIES, ENV_DNS_FAIL_PERMILLE, ENV_DNS_FAULT_REPORT,
+    ENV_DNS_LATENCY, ENV_ENTROPY_FAIL_PERMILLE, ENV_ENTROPY_FAULT_REPORT, ENV_EPOCH_JUMP_NANOS,
+    ENV_FS_ERROR_AT, ENV_FS_ERROR_PERMILLE, ENV_FS_FAULT_REPORT, ENV_FS_LATENCY,
+    ENV_FS_SHORT_PERMILLE, ENV_MACHINE_CRASH_PERMILLE, ENV_NET_CONNECT_REFUSE_PERMILLE,
+    ENV_NET_DROP_PERMILLE, ENV_NET_DUPLICATE_PERMILLE, ENV_NET_FAULT_REPORT, ENV_NET_JITTER,
+    ENV_NET_LATENCY, ENV_NET_PARTITIONS, ENV_NET_RESET_PERMILLE, ENV_NET_TCP_BUFFER_BYTES,
     ENV_PROCESS_CRASH_PERMILLE, ENV_SLEEP_JITTER,
 };
 
@@ -189,7 +188,7 @@ fault_registry! {
             /// nothing is drawn, and no swarm class masks it: a target is an
             /// explicit claim about one operation, which a regression check
             /// relies on landing.
-            error_at: std::collections::BTreeSet<patina_dst_driver_api::FsErrorTarget> => FsErrorAt = 20 {
+            error_at: std::collections::BTreeSet<patina_dst_driver_api::FsErrorTarget> => FsErrorAt = 19 {
                 meta: KnobMeta {
                     flag: "--fs-error-at",
                     env: ENV_FS_ERROR_AT,
@@ -361,7 +360,7 @@ fault_registry! {
             /// Seeded resolution-failure probability in per-mille (0..=1000). On fire, a
             /// second draw picks NXDOMAIN (a stale or deleted record) or a transient
             /// timeout (a slow or unreachable resolver).
-            fail_permille: u16 => DnsFailPermille = 18 {
+            fail_permille: u16 => DnsFailPermille = 17 {
                 meta: KnobMeta {
                     flag: "--dns-fail-permille",
                     env: ENV_DNS_FAIL_PERMILLE,
@@ -373,7 +372,7 @@ fault_registry! {
             }
             /// Inclusive `[min, max]` nanoseconds of seeded latency applied before every
             /// eligible resolution.
-            latency_nanos: Option<(u64, u64)> => DnsLatencyNanos = 19 {
+            latency_nanos: Option<(u64, u64)> => DnsLatencyNanos = 18 {
                 meta: KnobMeta {
                     flag: "--dns-latency-nanos",
                     env: ENV_DNS_LATENCY,
@@ -401,33 +400,8 @@ fault_registry! {
                 sample: 1,
             }
         }
-        CustomOpFaultConfig as custom_op {
-            /// Seeded failure probability in per-mille (0..=1000) for custom operations
-            /// the guest declared fault-eligible. On fire the operation's `perform`
-            /// closure does NOT run and the guest receives the failure it declared,
-            /// exactly as if the wrapped effect had failed.
-            ///
-            /// Applies only to declared-eligible operations: a custom op that declares
-            /// no failure shape has no error the runtime could invent for it, and
-            /// inventing one would mean handing a guest a value its own type does not
-            /// admit.
-            fail_permille: u16 => CustomOpFailPermille = 16 {
-                meta: KnobMeta {
-                    flag: "--custom-op-fail-permille",
-                    env: ENV_CUSTOM_OP_FAIL_PERMILLE,
-                    plumbing: Plumbing::Scalar,
-                    // One label here, but the stream it names is a FAMILY: each
-                    // custom-op label draws from its own child stream keyed by this
-                    // domain and the label's hash, so arming the knob over one
-                    // operation class does not shift another's decisions.
-                    swarm_class: Some("custom_op_fail"),
-                    report: Some(ENV_CUSTOMOP_FAULT_REPORT),
-                },
-                sample: 1,
-            }
-        }
     }
-    semantic { DnsEntry = 17 => KnobMeta {
+    semantic { DnsEntry = 16 => KnobMeta {
             flag: "--dns-entry",
             env: ENV_DNS_ENTRIES,
             plumbing: Plumbing::Repeatable(RepeatableFormat::DnsEntries),
@@ -552,7 +526,6 @@ pub const SWARM_CLASSES: &[SwarmClass] = &[
     // never gets inserted where it would shift every later class's position
     // in an existing recorded candidate list.
     swarm_class!("epoch_jump", fault_domain::SWARM_EPOCH_JUMP),
-    swarm_class!("custom_op_fail", fault_domain::SWARM_CUSTOM_OP_FAIL),
 ];
 
 // Unique control-plane spellings and complete mask ownership are build gates.

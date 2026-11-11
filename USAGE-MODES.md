@@ -11,13 +11,10 @@ Ordinary application code instrumented with the cooperative-SUT SDK:
 `buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` fault sites,
 `always!`/`sometimes!`/`reachable!` oracles, `verdict()` for structured run
 outcomes, the `lifecycle` markers (`setup_complete()`, `event!`),
-`patina_dst::param()` run parameters, `patina_dst::rng()`/`is_simulated()`, and
-`custom_op`/`custom_op_faultable` to route an unmodeled effect (RPC, S3, a
-device) through Patina so it is recorded, replayed, and optionally faulted. The
-crate links no runtime and depends only on serde for typed custom ops; every
-macro is a no-op or plain fallback
-outside a Patina build, so adopters ship it unconditionally with no `cfg(patina)`
-in their code. The default-off `macros` feature re-exports
+`patina_dst::param()` run parameters, and `patina_dst::rng()`/`is_simulated()`.
+The crate links no runtime and has no external dependencies; every macro is a no-op or
+plain fallback outside a Patina build, so adopters ship it unconditionally with
+no `cfg(patina)` in their code. The default-off `macros` feature re-exports
 `#[patina_dst::test]` for dev-dependency use: plain `cargo test` discovers
 `patina` through `PATINA_CLI` or `PATH`, then runs `patina test` for that
 one test. The runtime otherwise enters through `patina build`/`run` (the
@@ -60,8 +57,6 @@ counterpart does:
 | `buggify!` / `buggify_with_prob!` | `Buggify(l).Fires()` / `.FiresWithProb(p)` | `Buggify(l).fires()` / `.fires(p)` |
 | `buggify_delay!` / `buggify_knob!` | `BuggifyDelay(l).Delay()` / `Knob(l, def, lo, hi).Value()` | `BuggifyDelay(l).delay()` / `Knob(l, default, low, high).value()` |
 | `verdict`, `VerdictKind` | `Verdict(kind, label, detail)`, `Violation`/`Pass`/`AbortIntent` | `verdict(kind, label, detail)`, `Verdict.VIOLATION`/`PASS`/`ABORT_INTENT` |
-| `custom_op_bytes[_faultable]` | `CustomOpBytes` / `CustomOpBytesFaultable` | `custom_op_bytes(label, key, perform, on_fault=None)` |
-| `custom_op[_faultable]` (serde JSON) | `CustomOp[T]` / `CustomOpFaultable[T]` (`encoding/json`) | `custom_op(label, key, perform, on_fault=None)` (`json`, keys sorted) |
 | `lifecycle::setup_complete`, `lifecycle::event!` | `SetupComplete()`, `LifecycleEvent(label)` | `setup_complete()`, `lifecycle_event(label)` |
 | `is_simulated`, `rng`, `param` | `IsSimulated`, `Rng`, `Param` | `is_simulated()`, `rng()`, `param(key)` (None when absent) |
 | `#[patina_dst::test]` | none: a Go DST target is a main package, or a package's test binary (`build --go --go-test`), swept with `patina run`/`campaign` | none: a Python DST target is an application, swept with `patina run`/`campaign` |
@@ -124,25 +119,7 @@ def settle(ledger):
 
 Under plain Python, with `crates/cargo-patina/python/sdk` on the path, the
 package is inert: no site fires, a check returns its condition, a knob its
-default, `rng()` draws a fixed-seed stream and a custom op just performs.
-
-A custom op's `perform` runs on the record pass and not on its replay, so the
-interpreter's compute meter is held across it: its computation takes no
-scheduling point and charges no virtual time, and both passes leave the op
-with the meter restarted at a full stride. Before the op begins, the thread
-hands the interpreter lock to any thread waiting for it, so the handover never
-falls inside the op, where modeled synchronization is refused. Interpreter
-teardown runs unmetered too.
-
-Tracked gap: the meter counts CPython's own comparisons, and `perform` changes
-interpreter state the replay never does (its allocations, the caches and
-specializations it warms), so the code after an op can count a few
-comparisons differently on the two passes. Restarting at a full stride makes
-that unlikely to move a scheduling point, but it can, and the replay then
-stops with a yield-point divergence rather than run a different schedule. A
-`perform` that does little in Python (one call out, its result returned) is
-the least exposed. The cure is a meter that counts the program's own control
-flow rather than the interpreter's comparisons.
+default, and `rng()` draws a fixed-seed stream.
 
 ### Native startup environment
 
@@ -184,7 +161,7 @@ tool is, and on the Go module at the same version
 
 | Crate | Directory | Role |
 |---|---|---|
-| `patina-dst` | `crates/patina` | the SDK; depends only on serde/serde_json; used as `patina_dst::` |
+| `patina-dst` | `crates/patina` | the SDK; no external deps; used as `patina_dst::` |
 | `patina-dst-macros` | `crates/patina-macros` | default-off `#[patina_dst::test]` proc macro; no external deps |
 | `patina-dst-runtime` | `crates/patina-runtime` | the deterministic runtime (driven through the native shim) |
 | Go SDK (Go module) | `go/patina` | the SDK for Go guests; no dependencies; shim-backed under the `patina` build tag |

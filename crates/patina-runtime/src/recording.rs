@@ -4,9 +4,9 @@ use crate::liveness::ESCALATION_POLLS;
 use crate::{Context, RuntimeError, facts};
 
 use crate::reports::{
-    emit_clock_fault_report, emit_customop_fault_report, emit_dns_fault_report,
-    emit_entropy_fault_report, emit_fs_fault_report, emit_liveness_report, emit_net_fault_report,
-    emit_schedule_policy_report, emit_schedule_report, emit_sdk_report, emit_swarm_report,
+    emit_clock_fault_report, emit_dns_fault_report, emit_entropy_fault_report,
+    emit_fs_fault_report, emit_liveness_report, emit_net_fault_report, emit_schedule_policy_report,
+    emit_schedule_report, emit_sdk_report, emit_swarm_report,
 };
 use crate::schedule::classify_yield_divergence;
 use patina_dst_abi::{
@@ -275,12 +275,6 @@ impl Context {
         if let Some(report) = self.clock_fault_report().filter(|r| r.reads > 0) {
             planes.insert("clock".into(), facts::clock_plane(&report));
         }
-        // No `had opportunities` filter, unlike every plane above: zero eligible
-        // custom operations is the plane's most important finding, not a reason
-        // to omit it.
-        if let Some(report) = self.custom_op_fault_report() {
-            planes.insert("custom_op".into(), facts::custom_op_plane(&report));
-        }
         if let Some(swarm) = self.swarm.as_ref() {
             planes.insert("swarm".into(), facts::swarm_plane(swarm));
         }
@@ -425,22 +419,6 @@ impl Context {
                 return Err(self.diverged(error));
             }
         }
-        // A custom operation still open at the end of the run means its `begin`
-        // was never closed out — on the record pass the trace is missing an event
-        // the guest logically performed, and on replay a recorded result was
-        // consumed and dropped. Either way the trace no longer describes the run,
-        // so say so here instead of letting it fail as an unexplained mismatch on
-        // some later replay.
-        if let Some(pending) = self.custom_op.take() {
-            return Err(RuntimeError::CustomOp {
-                detail: format!(
-                    "the run ended with custom op {:?} still open: its `begin` was never closed by \
-a recorded result or a replay fetch",
-                    pending.label
-                ),
-                label: pending.label,
-            });
-        }
         // Any runtime diagnostic no embedder drained. The shim
         // drains after each SDK entry point so the lines interleave with guest
         // output; this catches what a direct context's caller left. Drained, so
@@ -487,10 +465,6 @@ a recorded result or a replay fetch",
         // default-on terms.
         if let Some(report) = self.clock_fault_report() {
             emit_clock_fault_report(self.reports, &report);
-        }
-        // Custom-op fault-injection diagnostic, on the same default-on terms.
-        if let Some(report) = self.custom_op_fault_report() {
-            emit_customop_fault_report(self.reports, &report);
         }
         // Liveness-watchdog diagnostic: prove the watchdog was actually armed and
         // ran to a clean finish (it did NOT fire — a fired watchdog aborts before

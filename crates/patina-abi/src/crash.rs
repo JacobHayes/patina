@@ -175,8 +175,7 @@ impl Operation {
             | Operation::NetConnect { .. }
             | Operation::NetMark { .. }
             | Operation::NetTcpListen { .. }
-            | Operation::Verdict { .. }
-            | Operation::CustomOp { .. } => EffectClass::Local,
+            | Operation::Verdict { .. } => EffectClass::Local,
             Operation::ClockNow { .. }
             | Operation::SleepUntil { .. }
             | Operation::TaskYield { .. }

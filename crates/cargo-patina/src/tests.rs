@@ -52,7 +52,6 @@ pub(super) fn knob_sample(knob: FaultKnob) -> &'static str {
         | FaultKnob::NetResetPermille
         | FaultKnob::DnsFailPermille
         | FaultKnob::EntropyFailPermille
-        | FaultKnob::CustomOpFailPermille
         | FaultKnob::MachineCrashPermille
         | FaultKnob::ProcessCrashPermille => "100",
     }

@@ -91,7 +91,6 @@ operation_kinds! {
     Operation::NetTcpRecv { .. } => ("net_tcp_recv", Net);
     Operation::NetTcpShutdown { .. } => ("net_tcp_shutdown", Net);
     Operation::Verdict { .. } => ("verdict", Other);
-    Operation::CustomOp { .. } => ("custom_op", Other);
 }
 
 pub fn valid_op_kinds() -> BTreeSet<&'static str> {

@@ -68,8 +68,7 @@ pub(super) fn campaign_result(
 
 /// The `fault_reports{}` planes whose `vacuous` bit is a coverage failure. The
 /// schedule plane is not one: its vacuity is a runtime finding of its own.
-pub(super) const VACUITY_PLANES: &[&str] =
-    &["fs", "dns", "net", "entropy", "clock", "custom_op", "swarm"];
+pub(super) const VACUITY_PLANES: &[&str] = &["fs", "dns", "net", "entropy", "clock", "swarm"];
 
 /// The hardware/OS fault signals: the guest died executing bad code, which is a
 /// GUEST failure but not an abort — it never reached `abort()` and never got to
@@ -629,8 +628,7 @@ fn primary_finding_shape(class: RunClass, generation: &GenerationFacts) -> Strin
 ///    `PATINA_SCHEDULE_REPORT`, `PATINA_SWARM_REPORT`, `PATINA_LIVENESS_REPORT`,
 ///    `PATINA_SDK_REPORT`, `PATINA_FS_FAULT_REPORT`, `PATINA_DNS_FAULT_REPORT`,
 ///    `PATINA_NET_FAULT_REPORT`, `PATINA_ENTROPY_FAULT_REPORT`,
-///    `PATINA_CLOCK_FAULT_REPORT`, `PATINA_CUSTOMOP_FAULT_REPORT`,
-///    `PATINA_COVERAGE_REPORT`. Three siblings are named
+///    `PATINA_CLOCK_FAULT_REPORT`, `PATINA_COVERAGE_REPORT`. Three siblings are named
 ///    outright because their line name is not their knob name:
 ///    `PATINA_SCHEDULE_POLICY` (knob `PATINA_SCHEDULE_POLICY_REPORT`) and the
 ///    `PATINA_LIFECYCLE` / `PATINA_LIFECYCLE_EVENT` progress markers, and the

@@ -48,18 +48,7 @@ static ALLOCATOR: LockedAllocator = LockedAllocator;
 unsafe extern "C" {
     fn signal(sig: i32, handler: extern "C" fn(i32)) -> usize;
     fn raise(sig: i32) -> i32;
-    fn printf(format: *const std::ffi::c_char, ...) -> i32;
     fn patina_lifecycle_event(label: *const u8, label_len: usize) -> i32;
-    fn patina_custom_op_begin(
-        label: *const u8,
-        label_len: usize,
-        key: *const u8,
-        key_len: usize,
-        fault_eligible: i32,
-        out_len: *mut usize,
-    ) -> i32;
-    fn patina_custom_op_record(result: *const u8, result_len: usize) -> i32;
-    fn patina_custom_op_replay_result(out: *mut u8, out_cap: usize) -> isize;
 }
 
 static PROBE_HANDLER: AtomicBool = AtomicBool::new(true);
@@ -88,35 +77,11 @@ fn install_hostile_abort_handler(allocating: bool) {
     assert!(HANDLER_SEEN.load(Ordering::SeqCst));
 }
 
-fn custom_op(perform: impl FnOnce() -> Vec<u8>) {
-    let label = b"watchdog.perform";
-    let mut length = 0;
-    match unsafe {
-        patina_custom_op_begin(
-            label.as_ptr(),
-            label.len(),
-            std::ptr::null(),
-            0,
-            0,
-            &mut length,
-        )
-    } {
-        0 => {
-            let result = perform();
-            assert_eq!(
-                unsafe { patina_custom_op_record(result.as_ptr(), result.len()) },
-                0
-            );
-        }
-        1 => {
-            let mut result = vec![0; length];
-            assert_eq!(
-                unsafe { patina_custom_op_replay_result(result.as_mut_ptr(), result.len()) },
-                length as isize
-            );
-        }
-        other => panic!("custom-op begin refused: {other}"),
-    }
+/// Record `bytes` in the trace: a positioned file write carries its bytes.
+fn write_payload(bytes: &[u8]) {
+    use std::os::unix::fs::FileExt;
+    let file = std::fs::File::create("watchdog.payload").unwrap();
+    file.write_all_at(bytes, 0).unwrap();
 }
 
 fn compute() {
@@ -178,8 +143,8 @@ fn spin_on_a_small_stack() -> ! {
 fn main() {
     let mode = std::env::args().nth(1).unwrap();
     match mode.as_str() {
-        "starved" | "allocator-held" | "custom-spin" | "handler-loop" | "handler-alloc"
-        | "overflow-held" | "payload-held" | "sync-buffer" => {
+        "starved" | "allocator-held" | "handler-loop" | "handler-alloc" | "overflow-held"
+        | "payload-held" => {
             if mode == "handler-loop" || mode == "handler-alloc" {
                 install_hostile_abort_handler(mode == "handler-alloc");
             }
@@ -187,23 +152,19 @@ fn main() {
                 // 200 MiB of bytes becomes >256 MiB of base64: abandon the
                 // real recorder budget, in modest chunks to bound peak memory.
                 // Before a runnable peer exists, and before holding the allocator.
+                let chunk = vec![255; 8 * 1024 * 1024];
                 for _ in 0..25 {
-                    custom_op(|| vec![255; 8 * 1024 * 1024]);
+                    write_payload(&chunk);
                 }
             }
             if mode == "payload-held" {
                 // Exercise byte-field serialization too, including buffer and
                 // base64 padding boundaries, not just scalar scheduler events.
-                custom_op(|| (0..4097).map(|n| (n % 256) as u8).collect());
+                write_payload(&(0..4097).map(|n| (n % 256) as u8).collect::<Vec<u8>>());
             }
             // Establish output probes before a runnable peer makes even host
             // descheduling gaps eligible for the watchdog.
             eprint!("COMPUTE_PARTIAL_STDERR");
-            if mode == "sync-buffer" {
-                // No newline/flush: a synchronous replay refusal must salvage
-                // this stream even if recording stopped before the perform.
-                assert!(unsafe { printf(c"WATCHDOG_BUFFERED_C_STDOUT".as_ptr()) } > 0);
-            }
             let started = Arc::new(AtomicBool::new(false));
             let done = Arc::new(AtomicBool::new(false));
             let worker = {
@@ -216,52 +177,41 @@ fn main() {
                     done.store(true, Ordering::Release);
                 })
             };
-            let perform = || {
-                ALLOCATOR_HELD.store(
-                    matches!(
-                        mode.as_str(),
-                        "allocator-held" | "handler-alloc" | "overflow-held" | "payload-held"
-                    ),
-                    Ordering::Release,
-                );
-                let hazard: Option<&'static [u8]> = match mode.as_str() {
-                    "allocator-held" => Some(b"watchdog.allocator-held"),
-                    "payload-held" => Some(b"watchdog.payload-held"),
-                    "overflow-held" => Some(b"watchdog.overflow-held"),
-                    "handler-alloc" => Some(b"watchdog.handler-alloc"),
-                    "handler-loop" => Some(b"watchdog.handler-loop"),
-                    "custom-spin" => Some(b"watchdog.custom-spin"),
-                    "sync-buffer" => Some(b"watchdog.sync-buffer"),
-                    _ => None,
-                };
-                if let Some(label) = hazard {
-                    if matches!(
-                        mode.as_str(),
-                        "allocator-held" | "payload-held" | "overflow-held" | "handler-alloc"
-                    ) {
-                        assert!(ALLOCATOR_HELD.load(Ordering::Acquire));
-                    }
-                    if matches!(mode.as_str(), "handler-loop" | "handler-alloc") {
-                        assert!(HANDLER_SEEN.load(Ordering::Acquire));
-                        assert!(!PROBE_HANDLER.load(Ordering::Acquire));
-                    }
-                    // For custom modes this closure is entered only after
-                    // begin returned Record. Lifecycle diagnostics take no
-                    // scheduling point, so the open perform stays call-free.
-                    hazard_reached(label);
-                }
-                started.store(true, Ordering::Release);
-                while !done.load(Ordering::Acquire) {
-                    std::hint::spin_loop();
-                }
-                ALLOCATOR_HELD.store(false, Ordering::Release);
-                Vec::new()
+            ALLOCATOR_HELD.store(
+                matches!(
+                    mode.as_str(),
+                    "allocator-held" | "handler-alloc" | "overflow-held" | "payload-held"
+                ),
+                Ordering::Release,
+            );
+            let hazard: Option<&'static [u8]> = match mode.as_str() {
+                "allocator-held" => Some(b"watchdog.allocator-held"),
+                "payload-held" => Some(b"watchdog.payload-held"),
+                "overflow-held" => Some(b"watchdog.overflow-held"),
+                "handler-alloc" => Some(b"watchdog.handler-alloc"),
+                "handler-loop" => Some(b"watchdog.handler-loop"),
+                _ => None,
             };
-            if mode == "custom-spin" || mode == "sync-buffer" {
-                custom_op(perform);
-            } else {
-                perform();
+            if let Some(label) = hazard {
+                if matches!(
+                    mode.as_str(),
+                    "allocator-held" | "payload-held" | "overflow-held" | "handler-alloc"
+                ) {
+                    assert!(ALLOCATOR_HELD.load(Ordering::Acquire));
+                }
+                if matches!(mode.as_str(), "handler-loop" | "handler-alloc") {
+                    assert!(HANDLER_SEEN.load(Ordering::Acquire));
+                    assert!(!PROBE_HANDLER.load(Ordering::Acquire));
+                }
+                // Lifecycle diagnostics take no scheduling point, so the spin
+                // stays call-free.
+                hazard_reached(label);
             }
+            started.store(true, Ordering::Release);
+            while !done.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            ALLOCATOR_HELD.store(false, Ordering::Release);
             worker.join().unwrap();
         }
         "worker-starved" => {
@@ -361,7 +311,7 @@ fn main() {
             worker.join().unwrap();
         }
         _ => panic!(
-            "expected starved, worker-starved, allocator-held, custom-spin, handler-loop, handler-alloc, overflow-held, payload-held, sync-buffer, finite, single, alone, parked-spin, or parked"
+            "expected starved, worker-starved, allocator-held, handler-loop, handler-alloc, overflow-held, payload-held, finite, single, alone, parked-spin, or parked"
         ),
     }
     println!("COMPUTE_RESULT completed=true");

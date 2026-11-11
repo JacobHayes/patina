@@ -530,9 +530,7 @@ impl Context {
         if !self.computing(task) {
             return RuntimeError::ComputeStopState;
         }
-        // steps counts an operation at begin, before custom perform has an
-        // outcome. Only recorder decisions form a replayable prefix. A
-        // recorder that already abandoned its trace has none: the run stops
+        // Only recorder decisions form a replayable prefix. A recorder that already abandoned its trace has none: the run stops
         // the same way, under the same class, and its trace is reported lost.
         let prefix = match &self.execution {
             Execution::Record { recorder, .. } => recorder.committed_prefix_len(),

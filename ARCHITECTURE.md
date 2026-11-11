@@ -81,7 +81,7 @@ trace format.
   change hands and timers come due. The Python SDK (`python/sdk/patina`) is
   frozen with each application over `_patina` (`python/sdk_module.c`), a
   builtin module the launcher registers, which lowers sites, verdicts and
-  custom ops to the shim's `patina_*` entries as the Go SDK does.
+  lifecycle markers to the shim's `patina_*` entries as the Go SDK does.
 
 ## Crate layout
 
@@ -488,8 +488,8 @@ rule statically on every build; `dlsym` is the only control-plane import.
 ## Cooperative-SUT SDK
 
 `patina-dst` (`crates/patina`) provides `buggify!` and friends, the
-`always!`/`sometimes!`/`reachable!` oracles, `verdict()`, custom operations,
-`rng()` and lifecycle markers. They bridge to the runtime only under
+`always!`/`sometimes!`/`reachable!` oracles, `verdict()`, `param()`, `rng()`
+and lifecycle markers. They bridge to the runtime only under
 `cfg(patina_shim)`, injected by native builds; elsewhere they are no-ops, so
 a plain `cargo build` links no runtime. Buggify randomness is a pure function
 of the seed and the site label, never recorded per evaluation; the realized
@@ -506,18 +506,6 @@ registering a site. Each call is a recorded operation. A `VIOLATION` or
 `ABORT_INTENT` rewrites the run's `patina.runfacts/v1` document at once, so
 it survives the abort that follows. An `always!` violation lowers to a
 `VIOLATION` verdict.
-
-### The custom-operation ABI
-
-A guest wraps an effect Patina does not model: on record the wrapper runs and
-its result bytes are recorded; on replay the bytes are returned and the
-wrapper does not run. Three verbs, one per phase:
-`patina_custom_op_begin` (record, replay or fault), `patina_custom_op_record`,
-`patina_custom_op_replay_result`. Label, key and result are opaque bytes at
-the ABI and in `patina_dst::custom_op_bytes`; `patina_dst::custom_op` and
-`custom_op_faultable` type them with serde (JSON). Each
-call is a recorded operation. The runtime refuses, at record time, a wrapper
-that performs effects Patina models, and nested or unclosed operations.
 
 ## Syscall registry and conformance
 

@@ -76,16 +76,6 @@ pub struct CampaignSpec {
     /// whose plane the campaign does not select, is refused rather than
     /// recorded as an exclusion that excludes nothing.
     pub exclude_knobs: BTreeSet<FaultKnob>,
-    /// Band the custom-op failure knob (`--custom-op-fail-permille`) under
-    /// [`Self::faults`].
-    ///
-    /// Opt-in for the same reason the DNS band rides on [`Self::dns_entries`]:
-    /// a custom operation is fault-eligible only if the GUEST declared a failure
-    /// shape for it, so over a guest that declared none the knob provably cannot
-    /// fire and every generation would report a vacuous custom-op plane. Whether
-    /// the guest declares one is a fact about the guest, which only the operator
-    /// can tell the campaign.
-    pub custom_op_faults: bool,
     /// Scale (per-mille) applied to every seed-drawn fault INTENSITY under
     /// [`Self::faults`]: `1000` (the default) leaves the exploration bands exactly
     /// as they have always been, `10` makes every injected fault a hundredfold
@@ -200,7 +190,6 @@ impl Default for CampaignSpec {
             yield_stride: false,
             faults: FaultPlanes::NONE,
             exclude_knobs: BTreeSet::new(),
-            custom_op_faults: false,
             fault_scale_permille: FAULT_SCALE_FULL,
             dns_entries: Vec::new(),
             allow_symbols: Vec::new(),
@@ -254,7 +243,6 @@ impl CampaignSpec {
                 "yield_stride" => self.yield_stride = json_bool(key, val)?,
                 "faults" => self.faults = json_fault_planes(key, val)?,
                 "exclude_knobs" => self.exclude_knobs = json_exclude_knobs(key, val)?,
-                "custom_op_faults" => self.custom_op_faults = json_bool(key, val)?,
                 "fault_scale_permille" => {
                     // A spec file bypasses the CLI value grammar, so hold it to
                     // the same `[0, 1000]` bound here rather than letting an
@@ -393,7 +381,6 @@ impl CampaignSpec {
                     return Err(CliError(format!(
                         "unknown campaign spec key {other:?}; expected generations, seed_base, \
                          timeout_secs, guest_args, buggify, swarm, pct, yield_stride, faults, exclude_knobs, \
-                         custom_op_faults, \
                          fault_scale_permille, \
                          dns_entries, \
                          allow_symbols, allow_unsupported_symbols, address_layout, \
@@ -844,7 +831,6 @@ mod tests {
             r#"{"exclude_knobs": [7]}"#,
             // Real knobs that no `--faults` plane draws exclude nothing.
             r#"{"exclude_knobs": ["--net-partition"]}"#,
-            r#"{"exclude_knobs": ["--custom-op-fail-permille"]}"#,
         ] {
             let json: serde_json::Value = serde_json::from_str(source).unwrap();
             assert!(

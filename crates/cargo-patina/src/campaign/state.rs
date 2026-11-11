@@ -548,9 +548,6 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
             spec.fault_scale_permille.into(),
         );
     }
-    if spec.custom_op_faults {
-        map.insert("custom_op_faults".into(), true.into());
-    }
     if spec.yield_stride {
         map.insert("yield_stride".into(), true.into());
     }

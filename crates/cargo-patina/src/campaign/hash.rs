@@ -52,7 +52,6 @@ claims! {
     NET_TCP_BUFFER = 27,
     ENTROPY_FAIL = 28,
     EPOCH_JUMP = 29,
-    CUSTOM_OP_FAIL = 30,
     /// The per-crash-point machine-crash rate, as a power of two.
     MACHINE_CRASH = 33,
     /// The per-crash-point process-crash rate, as a power of two.

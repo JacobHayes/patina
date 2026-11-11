@@ -2,8 +2,8 @@
 
 use crate::clock::VirtualClock;
 use crate::config::{
-    BuggifyConfig, ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig,
-    EntropyFaultConfig, FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
+    BuggifyConfig, ClockFaultConfig, CrashFaultConfig, DnsFaultConfig, EntropyFaultConfig,
+    FaultConfig, FsFaultConfig, NetFaultConfig, RuntimeConfig,
 };
 use crate::liveness::resolve_heal_after;
 use crate::scheduler::{PctConfig, SchedulePolicy};
@@ -71,7 +71,6 @@ pub(super) fn fault_record(config: &RuntimeConfig) -> patina_dst_trace::FaultCon
         dns_latency_nanos: config.faults.dns.latency_nanos,
         entropy_fail_permille: config.faults.entropy.fail_permille,
         epoch_jump_nanos: config.faults.clock.epoch_jump_nanos,
-        custom_op_fail_permille: config.faults.custom_op.fail_permille,
     }
 }
 
@@ -125,9 +124,6 @@ pub(super) fn fault_config_from_record(
         },
         entropy: EntropyFaultConfig {
             fail_permille: record.entropy_fail_permille,
-        },
-        custom_op: CustomOpFaultConfig {
-            fail_permille: record.custom_op_fail_permille,
         },
     })
 }

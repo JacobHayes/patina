@@ -2,7 +2,6 @@
 //! stops.
 
 use crate::config::{LivenessConfig, RuntimeConfig};
-use crate::custom_op::CustomOpMode;
 use crate::liveness::{CHURN_HORIZON_NANOS, ESCALATION_POLLS, LivenessKind, WatchdogArm};
 use crate::{Context, CpuAlarms, DEFAULT_BOOT_ORIGIN_NANOS, FACTS_SCHEMA, RuntimeError};
 use patina_dst_abi::{ChargeClass, ChargeCounts, ClockKind, CpuCharge, STARTUP_CPU_CHARGE, TaskId};
@@ -646,55 +645,6 @@ fn compute_watchdog_stops_timed_peer_starvation_and_replays() {
         replay.finish(),
         Err(RuntimeError::ComputeBound { task: stopped, steps: at }) if stopped == Some(task) && at == steps
     ));
-}
-
-#[test]
-fn compute_stop_inside_an_open_custom_op_replays_only_the_committed_prefix() {
-    let directory = tempdir().unwrap();
-    let path = directory.path().join("custom-compute.patina");
-    let setup = |context: &mut Context| {
-        let main = context.task_spawn("main").unwrap();
-        assert_eq!(context.scheduler_next().unwrap(), Some(main));
-        context.task_spawn("peer").unwrap();
-        main
-    };
-    let mut record =
-        Context::from_config(RuntimeConfig::record(1, &path, "custom-compute-v1")).unwrap();
-    let main = setup(&mut record);
-    let committed = record.steps();
-    assert_eq!(
-        record.custom_op_begin("perform", b"key", false).unwrap(),
-        CustomOpMode::Record
-    );
-    assert_eq!(record.steps(), committed + 1);
-    let stop = record.stop_compute_bound(Some(main));
-    let bundle = TraceBundle::load(&path).unwrap();
-    assert_eq!(bundle.metadata.compute_stop.unwrap().steps, committed);
-    assert_eq!(
-        bundle.resolved_timeline("main").unwrap().len() as u64,
-        committed
-    );
-    assert!(matches!(stop, RuntimeError::ComputeBound { steps, .. } if steps == committed));
-    assert!(
-        matches!(record.finish(), Err(RuntimeError::ComputeBound { steps, .. }) if steps == committed)
-    );
-    for finish in [false, true] {
-        let mut replay =
-            Context::from_config(RuntimeConfig::replay(&path, "custom-compute-v1")).unwrap();
-        assert_eq!(setup(&mut replay), main);
-        let error = if finish {
-            replay.finish().unwrap_err()
-        } else {
-            // No outcome exists for this begin. The terminal fact must win
-            // before Replayer::expect can request it (or perform can run).
-            replay
-                .custom_op_begin("perform", b"key", false)
-                .unwrap_err()
-        };
-        assert!(
-            matches!(error, RuntimeError::ComputeBound { task, steps } if task == Some(main) && steps == committed)
-        );
-    }
 }
 
 #[test]

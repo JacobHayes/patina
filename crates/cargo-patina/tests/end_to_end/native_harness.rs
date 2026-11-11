@@ -356,9 +356,8 @@ fn main() {
     let fired = patina_dst::buggify!("rare") || patina_dst::buggify_delay!("slow");
     patina_dst::sometimes!(fired, "rare-fired");
     patina_dst::always!(batch > 0, "batch-positive");
-    let fetched: u32 = patina_dst::custom_op("fetch", &"key", || 7);
     patina_dst::verdict(patina_dst::VerdictKind::Pass, "done", "{}");
-    println!("{fetched} {:?}", patina_dst::param("mode"));
+    println!("{:?}", patina_dst::param("mode"));
 }
 "#,
         );

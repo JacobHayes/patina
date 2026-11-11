@@ -48,12 +48,6 @@
 //! - [`verdict`] — report a structured outcome ([`VerdictKind`]) about the run:
 //!   recorded as a trace event and surfaced in the result envelope's
 //!   `verdicts[]`. An `always!` violation reports one automatically.
-//! - [`custom_op_bytes`] — wrap an effect Patina does not model so it is
-//!   recorded on the record pass and reproduced from the recording on replay.
-//!   [`custom_op_bytes_faultable`] additionally declares what failure means for
-//!   the operation, which is what `--custom-op-fail-permille` acts on.
-//!   [`custom_op`] and [`custom_op_faultable`] are the same two with
-//!   serde-typed keys and results.
 //! - [`param`] — a named run parameter (`patina run --param K=V`), recorded
 //!   and restored on replay; `None` outside Patina.
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
@@ -116,14 +110,12 @@
 //! check_shard(3, 10);
 //! ```
 //!
-//! [`verdict`] and [`custom_op_bytes`] labels share that namespace — the same
-//! string names the same thing in `sites.json`, in a run's `verdicts[]`, and in
-//! a trace's custom-op events — but neither is a site: they register nothing, so
-//! the duplicate-label rule does not apply to them, and reporting one label
-//! repeatedly in a run is exactly how verdicts aggregate and how a custom-op
-//! label names an operation *class* rather than a call. Reusing an oracle's
-//! label for either is therefore legal and deliberate: it joins the coverage
-//! view and the outcome view of one invariant.
+//! [`verdict`] labels share that namespace — the same string names the same
+//! thing in `sites.json` and in a run's `verdicts[]` — but a verdict is not a
+//! site: it registers nothing, so the duplicate-label rule does not apply, and
+//! reporting one label repeatedly in a run is exactly how verdicts aggregate.
+//! Reusing an oracle's label for a verdict is therefore legal and deliberate: it
+//! joins the coverage view and the outcome view of one invariant.
 //!
 //! # No vacuous "all clean"
 //!
@@ -192,15 +184,12 @@ pub use patina_dst_macros::test;
 
 // ---- Cooperative-SUT SDK ------------------------------------------------------
 
-mod custom_ops;
 mod simulation;
 mod site_family;
 mod static_sites;
 mod test_harness;
 mod verdict;
 
-pub use custom_ops::{custom_op, custom_op_faultable};
-pub use custom_ops::{custom_op_bytes, custom_op_bytes_faultable};
 pub use simulation::{is_simulated, param, rng};
 pub use site_family::{AlwaysFamily, ReachableFamily, SometimesFamily};
 pub use verdict::{VerdictKind, verdict};

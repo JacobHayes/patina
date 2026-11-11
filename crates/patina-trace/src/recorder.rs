@@ -244,8 +244,7 @@ impl Recorder {
         }
     }
 
-    /// Number of fully committed decisions, excluding an announced custom op
-    /// whose outcome is not recorded yet. None means the recorder abandoned its
+    /// Number of committed decisions. None means the recorder abandoned its
     /// storage on overflow, NOT that it has a valid empty prefix. Allocation-free.
     pub fn committed_prefix_len(&self) -> Option<u64> {
         (!self.ledger.overflowed()).then_some(self.decisions.len() as u64)

@@ -192,9 +192,6 @@ impl RuntimeConfig {
             FaultKnob::EntropyFailPermille => {
                 self.faults.entropy.fail_permille = parse_permille(env, value)?;
             }
-            FaultKnob::CustomOpFailPermille => {
-                self.faults.custom_op.fail_permille = parse_permille(env, value)?;
-            }
             FaultKnob::EpochJumpNanos => {
                 self.faults.clock.epoch_jump_nanos = value.trim().parse().map_err(|_| {
                     RuntimeError::Config(format!("{env} must be an unsigned 64-bit integer"))

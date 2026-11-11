@@ -26,8 +26,8 @@ pub enum ExecutionMode {
 }
 
 pub use crate::fault_knob::{
-    ClockFaultConfig, CrashFaultConfig, CustomOpFaultConfig, DnsFaultConfig, EntropyFaultConfig,
-    FaultConfig, FsFaultConfig, NetFaultConfig,
+    ClockFaultConfig, CrashFaultConfig, DnsFaultConfig, EntropyFaultConfig, FaultConfig,
+    FsFaultConfig, NetFaultConfig,
 };
 
 /// Seed-driven cooperative-SUT (buggify) configuration. Inert (`enabled =
@@ -351,14 +351,6 @@ impl RuntimeConfig {
     /// (see [`EntropyWait`](crate::EntropyWait)).
     pub fn with_entropy_fail_permille(mut self, permille: u16) -> Self {
         self.faults.entropy.fail_permille = permille;
-        self
-    }
-
-    /// Fail guest custom operations that declared a failure shape with the given
-    /// per-mille (0..=1000) probability, handing the guest its declared failure
-    /// instead of running `perform`.
-    pub fn with_custom_op_fail_permille(mut self, permille: u16) -> Self {
-        self.faults.custom_op.fail_permille = permille;
         self
     }
 

@@ -51,7 +51,6 @@ static void fortify_failure(const char *symbol) {
 extern unsigned char PATINA_SUD_ARMED;
 extern unsigned char PATINA_TSC_ARMED;
 static volatile sig_atomic_t handled;
-static void *empty_task(void *value) { return value; }
 static uint64_t assert_safe_mask(void);
 static void handler(int sig) {
     assert(sig == SIGUSR1);
@@ -232,20 +231,6 @@ int main(int argc, char **argv) {
         sigemptyset(&action.sa_mask);
         assert(sigaction(SIGABRT, &action, NULL) == 0);
         raw4(999999, 0, 0, 0, 0);
-    }
-    if (strcmp(argv[1], "internal-context-active") == 0) {
-        pthread_t worker;
-        assert(pthread_create(&worker, NULL, empty_task, NULL) == 0);
-        assert(pthread_join(worker, NULL) == 0);
-        patina_custom_op_record(NULL, 0);
-        assert(!"custom operation without begin returned");
-    }
-    if (strcmp(argv[1], "internal-context") == 0) {
-        size_t length;
-        const uint8_t label[] = "nested";
-        assert(patina_custom_op_begin(label, sizeof(label) - 1, NULL, 0, 0, &length) == 0);
-        patina_custom_op_begin(label, sizeof(label) - 1, NULL, 0, 0, &length);
-        assert(!"nested custom operation returned");
     }
     int reserved = strstr(argv[1], "segv") ? SIGSEGV : SIGSYS;
     if (strncmp(argv[1], "reserved-", 9) == 0) {

@@ -1,11 +1,10 @@
 """Patina's SDK for Python guests.
 
 Fault sites a deterministic simulation run fires from its seed, invariant and
-coverage sites it reports on, verdicts, custom operations it records and
-replays, lifecycle markers, seeded entropy and run parameters. It lowers to
-the same native-shim entry points as the Rust SDK (patina-dst) and the Go SDK
-(go/patina), so a site, verdict or custom op means the same thing in every
-language.
+coverage sites it reports on, verdicts, lifecycle markers, seeded entropy and
+run parameters. It lowers to the same native-shim entry points as the Rust SDK
+(patina-dst) and the Go SDK (go/patina), so a site or verdict means the same
+thing in every language.
 
 Every Python guest `patina build --python` builds has this package. Under
 plain Python (this directory on the path) it is inert: no site fires, every
@@ -39,7 +38,6 @@ Reachable never marked, is reported by the run and failed by a campaign.
 """
 
 import enum
-import json
 import math
 import random
 import sys
@@ -58,8 +56,6 @@ __all__ = [
     "Reachable",
     "Sometimes",
     "Verdict",
-    "custom_op",
-    "custom_op_bytes",
     "is_simulated",
     "lifecycle_event",
     "param",
@@ -275,68 +271,3 @@ def param(key):
     value = _patina.param(key)
     return None if value is None else value.decode("utf-8", "surrogateescape")
 
-
-def custom_op_bytes(label, key, perform, on_fault=None):
-    """Perform one custom operation: an effect Patina does not model (a call
-    to a service outside the simulation, say), wrapped so a run records its
-    result and a replay reproduces it. `label` names the operation class
-    ("s3.get_object"), not the call; `key` (bytes) is its logical input,
-    checked on replay so a different question is refused rather than handed a
-    stale answer.
-
-    On the record pass `perform()` runs and its bytes are recorded; on replay
-    it does not run and the recorded bytes come back. `on_fault`, when given,
-    declares the operation's failure: what the guest receives when a seeded
-    fault fires (`--custom-op-fail-permille`), in which case `perform` does
-    not run. `perform` must not make calls Patina models (files, clocks,
-    sockets): replay skips it, so the run refuses them. Outside Patina this
-    is just `perform()`."""
-    if _patina is None:
-        return perform()
-    mode, length = _patina.custom_op_begin(label, bytes(key), on_fault is not None)
-    if mode == 2:
-        if on_fault is None:
-            raise RuntimeError(
-                f"patina custom op {label!r}: a fault on an operation that declared no failure"
-            )
-        return bytes(on_fault())
-    if mode not in (0, 1):
-        raise RuntimeError(f"patina custom op {label!r}: the runtime answered mode {mode}")
-    # The window is open, with the meter held, until custom_op_end, which both
-    # passes reach the same way.
-    try:
-        result = bytes(perform()) if mode == 0 else None
-    except BaseException:
-        _patina.custom_op_abandon()
-        raise
-    return _patina.custom_op_end(result, length)
-
-
-def _encode(label, what, value):
-    try:
-        return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    except (TypeError, ValueError) as error:
-        raise TypeError(f"patina custom op {label!r}: cannot encode {what}: {error}") from None
-
-
-def custom_op(label, key, perform, on_fault=None):
-    """`custom_op_bytes` with the key and result as JSON values (json, keys
-    sorted), so they stay legible in the trace. The record pass returns the
-    decoded encoding of `perform()`'s value, which is what a replay hands
-    back. Under Patina a value JSON cannot encode is a TypeError. Outside
-    Patina nothing is encoded."""
-    if _patina is None:
-        return perform()
-    fault = None
-    if on_fault is not None:
-
-        def fault():
-            return _encode(label, "the result", on_fault())
-
-    recorded = custom_op_bytes(
-        label,
-        _encode(label, "the key", key),
-        lambda: _encode(label, "the result", perform()),
-        fault,
-    )
-    return json.loads(recorded)
