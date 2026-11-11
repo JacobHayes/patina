@@ -649,9 +649,8 @@ impl Context {
         Ok(())
     }
 
-    /// Recording: child `pid` shipped its decisions since its last ship
-    /// (`decisions`, as [`patina_dst_trace::Recorder::write_decisions_from`]
-    /// wrote them).
+    /// Recording: child `pid` made `decisions` since those it made before,
+    /// one `[operation, outcome]` JSON pair per line.
     pub fn machine_process_decisions(
         &mut self,
         pid: i32,
@@ -660,11 +659,16 @@ impl Context {
         let crate::recording::Execution::Record { recorder, .. } = &mut self.execution else {
             return Ok(());
         };
-        let decisions = serde_json::from_slice(decisions).map_err(|error| {
-            RuntimeError::Trace(TraceError::Invalid(format!(
-                "process {pid} sent malformed decisions: {error}"
-            )))
-        })?;
+        let decisions = decisions
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_slice)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| {
+                RuntimeError::Trace(TraceError::Invalid(format!(
+                    "process {pid} made a malformed decision: {error}"
+                )))
+            })?;
         recorder.extend_process(pid, decisions);
         Ok(())
     }
@@ -700,18 +704,12 @@ impl Context {
         serde_json::to_vec(recorder.metadata()).ok()
     }
 
-    /// A recording child process: write its decisions from the `from`th on
-    /// to `writer` ([`patina_dst_trace::Recorder::write_decisions_from`]),
-    /// answering how many it holds now; `None` when it does not record.
-    pub fn machine_write_decisions_from(
-        &self,
-        from: usize,
-        writer: impl std::io::Write,
-    ) -> Option<Result<usize, patina_dst_trace::PrefixWriteError>> {
-        let crate::recording::Execution::Record { recorder, .. } = &self.execution else {
-            return None;
-        };
-        Some(recorder.write_decisions_from(from, writer))
+    /// The machine's root ends the run on another process's stop: what a
+    /// stop the runtime itself takes leaves (the facts document as the run
+    /// stands, the recording so far), so the run keeps the root's evidence.
+    pub fn machine_stopped(&mut self) {
+        self.emit_facts();
+        self.flush_recording();
     }
 
     /// The monotonic virtual time now, unrecorded: what a process switch

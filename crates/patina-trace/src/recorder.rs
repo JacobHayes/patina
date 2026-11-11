@@ -425,32 +425,6 @@ impl Recorder {
         &self.metadata
     }
 
-    /// Write the decisions recorded from the `from`th on, as a bundle's
-    /// timeline stores them (`[operation, outcome]` pairs), to `writer`, and
-    /// answer how many are recorded now: what a child process ships to the
-    /// root since its last ship. Borrowed, so a stop may call it.
-    pub fn write_decisions_from(
-        &self,
-        from: usize,
-        writer: impl std::io::Write,
-    ) -> Result<usize, PrefixWriteError> {
-        if self.ledger.overflowed() {
-            return Err(PrefixWriteError::Overflow);
-        }
-        let events = self.decisions.get(from..).unwrap_or_default();
-        serde_json::to_writer(
-            writer,
-            &Decisions {
-                start_order: events
-                    .first()
-                    .map_or(0, |event| event.order.saturating_sub(1)),
-                events,
-            },
-        )
-        .map_err(PrefixWriteError::Serialization)?;
-        Ok(self.decisions.len())
-    }
-
     /// A child process of the guest began: `process` (no decisions yet,
     /// no end), whose recording the root holds from now on.
     pub fn begin_process(&mut self, process: ProcessTrace) {

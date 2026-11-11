@@ -153,6 +153,15 @@ modeled (only SIGKILL and the probe, signal 0, cross processes)"
             }
             match task_of(tid) {
                 Some(task) if tgid.is_none_or(|pid| pid == guest) => SignalTarget::Task(task),
+                // A thread of another process of the machine, which this
+                // process's table does not hold: named, never `ESRCH` for a
+                // thread that may well live. `tgkill` naming this process
+                // is answered here: the thread is not one of its own.
+                #[cfg(target_os = "linux")]
+                _ if tgid != Some(guest) && crate::machine::others_live() => crate::trap_unmodeled(
+                    "a signal to a thread of another process of the guest's machine \
+(tgkill, tkill) is not modeled",
+                ),
                 _ => return -i64::from(ESRCH),
             }
         }

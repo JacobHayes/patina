@@ -29,11 +29,14 @@ use patina_dst_runtime::MachineCarry;
 use patina_dst_trace::ProcessEnd;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::c_int;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 
 pub(crate) mod fs;
+mod log;
 pub(crate) mod spawn;
 mod wire;
+
+pub(crate) use log::DecisionLog;
 
 use wire::Message;
 
@@ -103,6 +106,11 @@ pub(crate) fn reserve_id(id: c_int) {
 struct Child {
     parent: i32,
     channel: c_int,
+    /// The read end of the pipe the child's signal front writes a stop
+    /// record to (its `PATINA_STOP_FD`), which never enters Rust.
+    stops: c_int,
+    /// A recording child's decision log.
+    log: Option<log::HubLog>,
     status: Option<i32>,
 }
 
@@ -327,8 +335,11 @@ fn serve_children(mut picked: TaskId) -> TaskId {
         let (now, view, carry) = hand_over(picked);
         send(channel, &Message::Resume { now, view, carry });
         match serve(pid, channel) {
-            Message::Yield { now, state, carry } => take_over(now, carry, picked, state),
-            Message::Exit { now, status, carry } => {
+            Some(Message::Yield { now, state, carry }) => {
+                collect(pid);
+                take_over(now, carry, picked, state);
+            }
+            Some(Message::Exit { now, status, carry }) => {
                 context(|context| {
                     context.advance_to(now)?;
                     context.import_machine_carry(carry);
@@ -336,7 +347,17 @@ fn serve_children(mut picked: TaskId) -> TaskId {
                 });
                 ended(pid, status, ProcessEnd::Exit, Notify::Parent);
             }
-            other => protocol_fatal("a child's yield or exit", &other),
+            Some(other) => protocol_fatal("a child's yield or exit", &other),
+            None => {
+                // The child's host process is gone mid-quantum: the machine
+                // goes on from where it resumed the child, with what it
+                // handed it.
+                context(|context| {
+                    context.import_machine_carry(carry);
+                    Ok(())
+                });
+                host_death(pid);
+            }
         }
         picked = thread::pick_next();
         if !is_foreign(picked) {
@@ -346,8 +367,9 @@ fn serve_children(mut picked: TaskId) -> TaskId {
 }
 
 /// Serve child `pid` on `channel` (ids, filesystem calls) until it says
-/// something only its caller acts on (ready, yield, exit), and answer that.
-fn serve(pid: i32, channel: c_int) -> Message {
+/// something only its caller acts on (ready, yield, exit), and answer that;
+/// `None` when its host process is gone first.
+fn serve(pid: i32, channel: c_int) -> Option<Message> {
     loop {
         match receive(channel) {
             Some(Message::AllocId) => {
@@ -394,30 +416,133 @@ fn serve(pid: i32, channel: c_int) -> Message {
                 let metadata = receive_payload(channel, len).unwrap_or_else(|| died(pid));
                 BEGUN.lock().insert(pid, metadata);
             }
-            Some(Message::TraceDecisions { len }) => {
-                let decisions = receive_payload(channel, len).unwrap_or_else(|| died(pid));
-                crate::with_context_raw(|context| {
-                    Ok(context.machine_process_decisions(pid, &decisions))
-                })
-                .unwrap_or_else(|errno| {
-                    protocol_fatal_text(&format!("the root's runtime is gone ({errno})"))
-                })
-                .unwrap_or_else(|error| protocol_fatal_text(&error.to_string()));
-            }
             Some(Message::Facts { len }) => {
                 let facts = receive_payload(channel, len).unwrap_or_else(|| died(pid));
                 if let Ok(Some(fd)) = crate::runtime::control_facts_fd() {
-                    let _ = crate::host_write_all(fd, &facts);
+                    let _ = crate::host_write_all(fd, &process_facts(pid, &facts));
                 }
             }
             Some(Message::Stop { len }) => {
                 let record = receive_payload(channel, len).unwrap_or_else(|| died(pid));
                 child_stopped(pid, &record);
             }
-            Some(message) => return message,
-            None => died(pid),
+            Some(message) => return Some(message),
+            None => return None,
         }
     }
+}
+
+/// Child `pid`'s facts document, marked as that process's (`"process"`), so
+/// the run's reader keeps each process's own beside the root's.
+fn process_facts(pid: i32, document: &[u8]) -> Vec<u8> {
+    match document.strip_prefix(b"{") {
+        Some(rest) => {
+            let mut marked = format!("{{\"process\":{pid},").into_bytes();
+            marked.extend_from_slice(rest);
+            marked
+        }
+        None => protocol_fatal_text("a process's facts are not a JSON object"),
+    }
+}
+
+/// Read what child `pid` recorded since the hub last looked into the root's
+/// recording of it.
+fn collect(pid: i32) {
+    let Some(decisions) = CHILDREN
+        .lock()
+        .get_mut(&pid)
+        .and_then(|child| child.log.as_mut())
+        .map(log::HubLog::take)
+    else {
+        return;
+    };
+    if decisions.is_empty() {
+        return;
+    }
+    crate::with_context_raw(|context| Ok(context.machine_process_decisions(pid, &decisions)))
+        .unwrap_or_else(|errno| {
+            protocol_fatal_text(&format!("the root's runtime is gone ({errno})"))
+        })
+        .unwrap_or_else(|error| protocol_fatal_text(&error.to_string()));
+}
+
+/// Child `pid`'s host process is gone without telling the hub how it ended.
+/// A stop record its signal front left stops the run with it; a death by a
+/// signal with no record is the guest's own (the shim cannot stop without
+/// leaving one), and the child died of that signal; anything else is the
+/// shim's failure.
+fn host_death(pid: i32) {
+    if let Some(record) = front_stop(pid) {
+        child_stopped(pid, &record);
+    }
+    match spawn::host_status(pid) {
+        Some(status) if libc::WIFSIGNALED(status) => ended(
+            pid,
+            signal_status(libc::WTERMSIG(status)),
+            ProcessEnd::Exit,
+            Notify::Parent,
+        ),
+        _ => died(pid),
+    }
+}
+
+/// The stop record child `pid`'s signal front wrote to its stop pipe, if
+/// it wrote one, its detail naming the child.
+fn front_stop(pid: i32) -> Option<Vec<u8>> {
+    let stops = CHILDREN.lock().get(&pid).map(|child| child.stops)?;
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 4096];
+    // The child is gone, and with it the pipe's only writer.
+    loop {
+        // SAFETY: a writable buffer of its length.
+        let read = unsafe {
+            crate::sud_host_syscall(
+                libc::SYS_read,
+                stops as _,
+                buffer.as_mut_ptr() as _,
+                buffer.len() as _,
+                0,
+                0,
+                0,
+            )
+        };
+        if read < 0 && crate::abi::host_errno() == libc::EINTR {
+            continue;
+        }
+        if read <= 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read as usize]);
+    }
+    bytes
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .find_map(|mut record| {
+            let detail = record.pointer_mut("/stop/detail")?;
+            *detail = format!("process {pid}: {}", detail.as_str().unwrap_or_default()).into();
+            let mut line = serde_json::to_vec(&record).ok()?;
+            line.push(b'\n');
+            Some(line)
+        })
+}
+
+/// The wait status of a death by `sig`: a signal whose default action dumps
+/// core reports it dumped (`WCOREDUMP`), as Linux does where a dump is
+/// taken, whatever the host's core limit says.
+pub(crate) fn signal_status(sig: i32) -> i32 {
+    const CORE: [i32; 10] = [
+        libc::SIGQUIT,
+        libc::SIGILL,
+        libc::SIGTRAP,
+        libc::SIGABRT,
+        libc::SIGBUS,
+        libc::SIGFPE,
+        libc::SIGSEGV,
+        libc::SIGXCPU,
+        libc::SIGXFSZ,
+        libc::SIGSYS,
+    ];
+    if CORE.contains(&sig) { sig | 0x80 } else { sig }
 }
 
 /// How the rest of the root hears of a child's end.
@@ -440,7 +565,8 @@ pub(super) static BEGUN: SpinMutex<BTreeMap<i32, Vec<u8>>> = SpinMutex::new(BTre
 /// zombie until its parent reaps it, and, as `notify` says, its parent
 /// hears of it (`SIGCHLD`, waiters woken).
 fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
-    let channel = {
+    collect(pid);
+    let (channel, stops, log) = {
         let mut children = CHILDREN.lock();
         let Some(child) = children
             .get_mut(&pid)
@@ -449,9 +575,11 @@ fn ended(pid: i32, status: i32, end: ProcessEnd, notify: Notify) {
             return;
         };
         child.status = Some(status);
-        child.channel
+        (child.channel, child.stops, child.log.take())
     };
+    drop(log);
     close(channel);
+    close(stops);
     let handles = HANDLES.lock().remove(&pid).unwrap_or_default();
     // Also after the root's `main` returned (teardown): a recorded state
     // change, no scheduling decision.
@@ -568,12 +696,21 @@ pub(crate) fn teardown() {
 /// Child `pid` stopped the run with stop record `record` (its class, its
 /// reason, its detail naming it): every other child is killed, and the root
 /// ends the run with that record as its own, as a stop in the root would.
+///
+/// The root's own evidence goes with it, as a stop the runtime takes leaves
+/// it: its facts, written after every child's, and its recording so far.
 fn child_stopped(pid: i32, record: &[u8]) -> ! {
+    collect(pid);
     if let Some(child) = CHILDREN.lock().get_mut(&pid) {
         child.status = Some(KILLED);
         close(child.channel);
+        close(child.stops);
     }
     teardown();
+    let _ = crate::with_context_raw(|context| {
+        context.machine_stopped();
+        Ok(())
+    });
     crate::patina_flush_captured_stdio();
     crate::process::host_abort_with_record(record)
 }
@@ -592,7 +729,6 @@ fn yield_to_hub(mut picked: TaskId) -> TaskId {
     loop {
         debug_assert_eq!(picked, ELSEWHERE);
         let (now, state, carry) = hand_over(ELSEWHERE);
-        ship_decisions();
         send(channel(), &Message::Yield { now, state, carry });
         let (now, view, carry) = await_resume();
         let local = context(|context| {
@@ -635,7 +771,7 @@ pub(crate) fn note_signal_death(sig: u8) {
 pub(crate) fn exit_status(code: i32) -> i32 {
     match DYING_OF.load(Ordering::Relaxed) {
         0 => (code & 0xff) << 8,
-        sig => sig,
+        sig => signal_status(sig),
     }
 }
 
@@ -652,97 +788,8 @@ fn ship(header: Message, bytes: &[u8]) {
     }
 }
 
-/// How many of its decisions a recording child has shipped to the hub.
-static SHIPPED: AtomicUsize = AtomicUsize::new(0);
-
-/// A recording child ships the decisions it made since its last ship, ahead
-/// of a yield, its exit or its stop: whenever the root holds the baton it
-/// holds every decision of every frozen child. Allocation-free and
-/// borrowed (a stop may be anywhere): the length is counted first, then the
-/// JSON streams in packets from fixed storage. A no-op in the root and in a
-/// child that does not record.
-fn ship_decisions() {
-    struct Count(u64);
-    impl std::io::Write for Count {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len() as u64;
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    struct Packets {
-        fd: c_int,
-        buffer: [u8; wire::CHUNK_BYTES],
-        used: usize,
-    }
-    impl std::io::Write for Packets {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            let n = bytes.len().min(self.buffer.len() - self.used);
-            self.buffer[self.used..self.used + n].copy_from_slice(&bytes[..n]);
-            self.used += n;
-            if self.used == self.buffer.len() {
-                self.flush()?;
-            }
-            Ok(n)
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            if self.used > 0 {
-                send_bytes(self.fd, &self.buffer[..self.used]);
-                self.used = 0;
-            }
-            Ok(())
-        }
-    }
-    if !is_child() {
-        return;
-    }
-    let from = SHIPPED.load(Ordering::Relaxed);
-    let shipped = crate::with_context_raw(|context| {
-        let mut count = Count(0);
-        let Some(Ok(_)) = context.machine_write_decisions_from(from, &mut count) else {
-            return Ok(None);
-        };
-        send(channel(), &Message::TraceDecisions { len: count.0 });
-        let mut packets = Packets {
-            fd: channel(),
-            buffer: [0; wire::CHUNK_BYTES],
-            used: 0,
-        };
-        let shipped = context.machine_write_decisions_from(from, &mut packets);
-        let _ = std::io::Write::flush(&mut packets);
-        Ok(shipped.and_then(Result::ok))
-    });
-    if let Ok(Some(shipped)) = shipped {
-        SHIPPED.store(shipped, Ordering::Relaxed);
-    }
-}
-
-/// A recording child's trace channel: the root keeps its recording, which
-/// the child ships as it goes ([`ship_decisions`]), so nothing is written
-/// at its end.
-pub(crate) struct ShippedTrace;
-
-impl patina_dst_runtime::TraceTransport for ShippedTrace {
-    fn read_bundle(&mut self) -> std::io::Result<Vec<u8>> {
-        Err(std::io::Error::other(
-            "a recording child process reads no trace",
-        ))
-    }
-    fn write_bundle(&mut self, _bytes: &[u8]) -> std::io::Result<()> {
-        Ok(())
-    }
-    fn write_prefix(&mut self, _recorder: &patina_dst_trace::Recorder) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
 /// A child's stop record goes to the hub, which ends the run with it.
 pub(crate) fn ship_stop(record: &[u8]) {
-    if is_child() && !EXITED.load(Ordering::Relaxed) {
-        ship_decisions();
-    }
     ship(
         Message::Stop {
             len: record.len() as u64,
@@ -775,7 +822,6 @@ pub(crate) fn child_exit(status: i32) {
         Ok((context.machine_now()?, context.export_machine_carry()?))
     })
     .unwrap_or_default();
-    ship_decisions();
     send(channel(), &Message::Exit { now, status, carry });
     EXITED.store(true, Ordering::Relaxed);
 }

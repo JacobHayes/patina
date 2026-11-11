@@ -37,6 +37,10 @@ pub trait TraceTransport: Send {
             .map_err(std::io::Error::other)?;
         self.write_bundle(&bytes)
     }
+    /// One decision, as it is recorded: a transport that must hold every
+    /// decision the moment it is made (a child process of a multi-process
+    /// run, which may die between two of them) keeps it here.
+    fn decision(&mut self, _operation: &Operation, _outcome: &Outcome) {}
 }
 
 pub(super) enum Execution {
@@ -624,7 +628,12 @@ impl Context {
     }
 
     pub(super) fn complete(&mut self, operation: Operation, actual: Outcome) -> Outcome {
-        if let Execution::Record { recorder, .. } = &mut self.execution {
+        if let Execution::Record {
+            recorder,
+            transport,
+        } = &mut self.execution
+        {
+            transport.decision(&operation, &actual);
             recorder.observe(operation, actual.clone());
         }
         actual

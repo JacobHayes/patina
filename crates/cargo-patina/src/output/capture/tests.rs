@@ -32,6 +32,45 @@ fn parse_facts_takes_the_last_complete_document_and_refuses_anything_else() {
     assert!(parse_facts(b"{\"schema\":\"patina.result/v1\"}\n").is_err());
 }
 
+/// A machine's documents: the root's last one is the run's state, with each
+/// process's verdicts (one context number in two processes is two
+/// contexts), each child's latest findings and the first divergence any
+/// process noted. With no document of the root's, the last one stands.
+#[test]
+fn parse_facts_keeps_the_roots_document_and_every_processs_findings() {
+    let schema = patina_dst_runtime::FACTS_SCHEMA;
+    let line = |body: &str| format!("{{\"schema\":\"{schema}\",{body}}}\n");
+    let stream = [
+        line(r#""context":0,"cpu_charges":{"root":1},"verdicts":[{"label":"root"}]"#),
+        line(
+            r#""process":3,"context":0,"verdicts":[{"label":"child"}],"runtime_findings":[{"source":"old"}]"#,
+        ),
+        line(
+            r#""process":3,"context":0,"verdicts":[{"label":"child"}],"runtime_findings":[{"source":"liveness"}],"replay_divergence":"operation""#,
+        ),
+        line(r#""process":4,"context":0,"cpu_charges":{"child":1}"#),
+    ]
+    .concat();
+    let parsed = parse_facts(stream.as_bytes()).unwrap().unwrap();
+    assert_eq!(parsed["cpu_charges"], serde_json::json!({"root": 1}));
+    assert!(parsed.get("process").is_none());
+    assert_eq!(
+        parsed["verdicts"],
+        serde_json::json!([{"label": "root"}, {"label": "child"}])
+    );
+    assert_eq!(
+        parsed["runtime_findings"],
+        serde_json::json!([{"source": "liveness"}])
+    );
+    assert_eq!(parsed["replay_divergence"], "operation");
+    let children = [stream.lines().nth(1).unwrap(), "\n"].concat();
+    let parsed = parse_facts(children.as_bytes()).unwrap().unwrap();
+    assert_eq!(
+        parsed["runtime_findings"],
+        serde_json::json!([{"source": "old"}])
+    );
+}
+
 /// The stop pipe: whether the runtime started, the first stop record, and a
 /// refusal of anything else rather than a reading of "no stop".
 #[test]

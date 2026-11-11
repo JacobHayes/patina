@@ -28,7 +28,28 @@ unsafe extern "C" {
     fn syscall(number: i64, ...) -> i64;
     fn mkfifo(path: *const u8, mode: u32) -> i32;
     fn waitid(idtype: u32, id: u32, info: *mut [i32; 32], options: i32) -> i32;
+    fn sigaction(sig: i32, action: *const SigAction, old: *mut SigAction) -> i32;
+    fn posix_spawnp(
+        pid: *mut i32,
+        file: *const std::ffi::c_char,
+        actions: *const u8,
+        attr: *const u8,
+        argv: *const *const std::ffi::c_char,
+        envp: *const *const std::ffi::c_char,
+    ) -> i32;
+    static environ: *const *const std::ffi::c_char;
 }
+
+/// glibc's `struct sigaction` (x86_64 and aarch64).
+#[repr(C)]
+struct SigAction {
+    handler: usize,
+    mask: [u64; 16],
+    flags: i32,
+    restorer: usize,
+}
+
+const SA_RESTART: i32 = 0x1000_0000;
 
 const SIGCHLD: i32 = 17;
 static CHILD_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -264,6 +285,118 @@ fn main() {
             // than any fixed table of them holds.
             for _ in 0..count.parse::<u32>().unwrap() {
                 std::thread::spawn(|| {}).join().unwrap();
+            }
+        }
+        ["segv"] => {
+            println!("FAULTING");
+            let address = std::hint::black_box(8usize);
+            unsafe { (address as *mut u8).write_volatile(1) };
+        }
+        [binary, "segv-child"] => {
+            use std::os::unix::process::ExitStatusExt;
+            let status = Command::new(binary).arg("segv").status().unwrap();
+            println!(
+                "SEGV code={:?} signal={:?} core={}",
+                status.code(),
+                status.signal(),
+                status.core_dumped()
+            );
+        }
+        [binary, "abort-core-child"] => {
+            use std::os::unix::process::ExitStatusExt;
+            let status = Command::new(binary).arg("abort").status().unwrap();
+            println!("ABORTCORE signal={:?} core={}", status.signal(), status.core_dumped());
+        }
+        [binary, "exit-then-stop"] => {
+            // One child ends cleanly (its facts reach the run), then another
+            // stops the run.
+            assert_eq!(Command::new(binary).args(["child", "0"]).status().unwrap().code(), Some(0));
+            let status = Command::new(binary).arg("signal-parent").status();
+            println!("STOPPED {status:?}");
+        }
+        ["environ"] => {
+            let mut entries = Vec::new();
+            unsafe {
+                let mut entry = environ;
+                while !entry.is_null() && !(*entry).is_null() {
+                    entries.push(std::ffi::CStr::from_ptr(*entry).to_string_lossy().into_owned());
+                    entry = entry.add(1);
+                }
+            }
+            println!("ENVIRON [{}]", entries.join(","));
+        }
+        [binary, "empty-envp-child"] => {
+            let path = std::ffi::CString::new(binary).unwrap();
+            let arg = c"environ";
+            let argv = [path.as_ptr(), arg.as_ptr(), std::ptr::null()];
+            let envp: [*const std::ffi::c_char; 1] = [std::ptr::null()];
+            let mut pid = 0;
+            let spawned = unsafe {
+                posix_spawnp(&mut pid, path.as_ptr(), std::ptr::null(), std::ptr::null(), argv.as_ptr(), envp.as_ptr())
+            };
+            assert_eq!(spawned, 0);
+            let mut status = 0;
+            assert_eq!(unsafe { waitpid(pid, &mut status, 0) }, pid);
+        }
+        [binary, "big-env-child"] => {
+            let status = Command::new(binary).arg("pwd").env("BIG", "x".repeat(2 << 20)).status();
+            println!("BIG {status:?}");
+        }
+        ["chatter", tag] => {
+            use std::hash::BuildHasher;
+            let drawn = std::collections::hash_map::RandomState::new().hash_one(0u8);
+            println!("RAND{tag} {drawn}");
+            for round in 0..4 {
+                println!("{tag}{round}");
+                std::thread::yield_now();
+            }
+        }
+        [binary, "chatter-children"] => {
+            let mut first = Command::new(binary).args(["chatter", "a"]).spawn().unwrap();
+            let mut second = Command::new(binary).args(["chatter", "b"]).spawn().unwrap();
+            first.wait().unwrap();
+            second.wait().unwrap();
+        }
+        [binary, "thread-signal-child", how] => {
+            let child = Command::new(binary).arg("sleeper").spawn().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let pid = child.id() as i64;
+            let (tgkill, tkill) = if cfg!(target_arch = "aarch64") { (131, 130) } else { (234, 200) };
+            let sent = unsafe {
+                if how == "tgkill" {
+                    syscall(tgkill, pid, pid, SIGUSR1 as i64)
+                } else {
+                    syscall(tkill, pid, SIGUSR1 as i64)
+                }
+            };
+            println!("THREAD-SIGNALED {sent} {:?}", std::io::Error::last_os_error().raw_os_error());
+        }
+        ["nested", binary] => {
+            println!("NESTING");
+            let status = Command::new(binary).args(["child", "0"]).status();
+            println!("NESTED {status:?}");
+        }
+        [binary, "nested-child"] => {
+            let status = Command::new(binary).args(["nested", binary]).status();
+            println!("OUTER {status:?}");
+        }
+        [binary, "interrupted-wait", flags] => {
+            // SIGCHLD's handler interrupts the wait for the child that sent it.
+            let action = SigAction {
+                handler: on_chld as usize,
+                mask: [0; 16],
+                flags: if flags == "restart" { SA_RESTART } else { 0 },
+                restorer: 0,
+            };
+            assert_eq!(unsafe { sigaction(SIGCHLD, &action, std::ptr::null_mut()) }, 0);
+            let child = Command::new(binary).args(["child", "5"]).spawn().unwrap();
+            let pid = child.id() as i32;
+            let mut status = 0;
+            let waited = unsafe { waitpid(pid, &mut status, 0) };
+            if waited == pid {
+                println!("WAITED code={}", (status >> 8) & 0xff);
+            } else {
+                println!("WAITED {waited} errno={:?}", std::io::Error::last_os_error().raw_os_error());
             }
         }
         ["unadmitted"] => {
@@ -551,6 +684,8 @@ fn main() {
         let stdin = tempfile::tempdir().unwrap();
         let stdin = stdin.path().join("stdin");
         fs::write(&stdin, b"input").unwrap();
+        // Every mode is judged, so a run shows each one that went wrong.
+        let mut wrong = Vec::new();
         for (extra, mode) in [
             (vec![], "chdir-child"),
             (vec![], "redirected-child"),
@@ -558,18 +693,20 @@ fn main() {
             (vec![], "inotify-child"),
             (vec![], "fifo-child"),
             (vec!["--stdin", stdin.to_str().unwrap()], "stdin-child"),
+            (vec![], "big-env-child"),
         ] {
             let mut argv = vec!["--seed", "1", "--format", "json"];
             argv.extend(extra);
             argv.extend(["--", binary, mode]);
             let output = guest.command("run", &argv);
             let envelope = json_envelope(&output);
-            assert_eq!(
-                (&envelope["result"], &envelope["stop"]["reason"]),
-                (&"unsupported".into(), &"not_modeled".into()),
-                "{mode}: {envelope:#}"
-            );
+            if (&envelope["result"], &envelope["stop"]["reason"])
+                != (&"unsupported".into(), &"not_modeled".into())
+            {
+                wrong.push(format!("{mode}: {envelope:#}"));
+            }
         }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 
     /// A recording holds one timeline per child process; the same seed
@@ -658,6 +795,246 @@ fn main() {
             (&"nondeterministic".into(), &"replay_divergence".into()),
             "{diverged:#}"
         );
+    }
+
+    /// When a child stops the run (after another ended cleanly), the root's
+    /// own facts still reach it.
+    #[test]
+    fn a_childs_stop_keeps_the_roots_facts() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let output = guest.command(
+            "run",
+            &[
+                "--seed",
+                "1",
+                "--format",
+                "json",
+                "--",
+                binary,
+                "exit-then-stop",
+            ],
+        );
+        let envelope = json_envelope(&output);
+        assert_eq!(
+            (&envelope["result"], &envelope["stop"]["reason"]),
+            (&"unsupported".into(), &"not_modeled".into()),
+            "{envelope:#}"
+        );
+        // The root's facts document: its CPU charges reach the run.
+        assert!(envelope["cpu_charges"].is_object(), "{envelope:#}");
+    }
+
+    /// A child's host fault (a SIGSEGV its guest code raised) is a death by
+    /// that signal its parent reaps, core dumped as a core signal's is; an
+    /// abort's SIGABRT dumps core too; the run goes on.
+    #[test]
+    fn a_childs_host_fault_is_a_signal_death_its_parent_sees() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let faulted = guest.command("run", &["--seed", "1", "--", binary, "segv-child"]);
+        assert_eq!(
+            (
+                stdout_line_with(&faulted, "FAULTING"),
+                stdout_line_with(&faulted, "SEGV")
+            ),
+            (
+                "FAULTING".to_owned(),
+                "SEGV code=None signal=Some(11) core=true".to_owned()
+            ),
+            "{}",
+            String::from_utf8_lossy(&faulted.stderr)
+        );
+        assert!(faulted.status.success(), "{faulted:?}");
+        let aborted = common::native::assert_success(
+            guest.command("run", &["--seed", "1", "--", binary, "abort-core-child"]),
+        );
+        assert_eq!(
+            stdout_line_with(&aborted, "ABORTCORE"),
+            "ABORTCORE signal=Some(6) core=true"
+        );
+    }
+
+    /// A child that ends mid-quantum (a host fault, an abort) or stops the
+    /// run itself replays to the same end its recording did, its whole
+    /// timeline consumed; a child timeline cut short fails the replay.
+    #[test]
+    fn a_child_that_ends_abruptly_replays_to_the_same_end() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let outcome = |envelope: &serde_json::Value| {
+            (
+                envelope["result"].clone(),
+                envelope["stop"]["reason"].clone(),
+            )
+        };
+        let mut wrong = Vec::new();
+        for mode in ["segv-child", "abort-child", "signal-parent"] {
+            let trace = guest.dir.path().join(format!("{mode}.patina"));
+            let recorded = json_envelope(&guest.command(
+                "run",
+                &[
+                    "--seed",
+                    "3",
+                    "--format",
+                    "json",
+                    "--record",
+                    trace.to_str().unwrap(),
+                    "--",
+                    binary,
+                    mode,
+                ],
+            ));
+            let replayed = json_envelope(
+                &guest.command("replay", &[trace.to_str().unwrap(), "--format", "json"]),
+            );
+            if outcome(&recorded) != outcome(&replayed) || replayed["result"] == "nondeterministic"
+            {
+                wrong.push(format!(
+                    "{mode}: recorded {recorded:#}\nreplayed {replayed:#}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+
+        // The faulting child's timeline, its last decision cut off.
+        let trace = guest.dir.path().join("segv-child.patina");
+        let mut bundle: serde_json::Value =
+            serde_json::from_slice(&fs::read(&trace).unwrap()).unwrap();
+        let decisions = bundle["processes"][0]["timeline"]["decisions"]
+            .as_array_mut()
+            .unwrap();
+        assert!(decisions.len() > 1, "{:#}", bundle["processes"]);
+        decisions.pop();
+        let planted = guest.dir.path().join("truncated.patina");
+        fs::write(&planted, serde_json::to_vec(&bundle).unwrap()).unwrap();
+        let truncated = json_envelope(
+            &guest.command("replay", &[planted.to_str().unwrap(), "--format", "json"]),
+        );
+        assert_eq!(
+            (&truncated["result"], &truncated["stop"]["reason"]),
+            (&"nondeterministic".into(), &"replay_divergence".into()),
+            "{truncated:#}"
+        );
+    }
+
+    /// A child spawned with an empty environment has none.
+    #[test]
+    fn a_child_spawned_with_an_empty_envp_has_no_environment() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let output = guest.command("run", &["--seed", "1", "--", binary, "empty-envp-child"]);
+        assert_eq!(
+            stdout_line_with(&output, "ENVIRON"),
+            "ENVIRON []",
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Each child draws from a stream of its own that the run's seed picks:
+    /// another seed draws other values and may interleave the processes
+    /// otherwise; the same seed runs the same machine.
+    #[test]
+    fn the_seed_varies_each_child_and_the_interleaving() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        let run = |seed: u32| {
+            let output = common::native::assert_success(guest.command(
+                "run",
+                &[
+                    "--seed",
+                    &seed.to_string(),
+                    "--",
+                    binary,
+                    "chatter-children",
+                ],
+            ));
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        };
+        let draws = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| line.starts_with("RAND"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let order = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.starts_with("RAND"))
+                .map(str::to_owned)
+                .collect()
+        };
+        let first = run(1);
+        assert_eq!(run(1), first);
+        assert_eq!(draws(&first).len(), 2, "{first}");
+        let runs: Vec<String> = (2..10).map(run).collect();
+        assert!(
+            runs.iter().all(|other| {
+                let (mine, theirs) = (draws(&first), draws(other));
+                mine.iter().zip(&theirs).all(|(a, b)| a != b)
+            }),
+            "{first}\n{runs:#?}"
+        );
+        let orders: std::collections::BTreeSet<Vec<String>> = std::iter::once(&first)
+            .chain(&runs)
+            .map(|text| order(text))
+            .collect();
+        assert!(orders.len() > 1, "{orders:#?}");
+    }
+
+    /// What crosses processes past this slice stops by name: a signal to
+    /// another process's thread (`tgkill`, `tkill`) and a spawn from a child.
+    #[test]
+    fn a_thread_signal_or_spawn_across_processes_is_not_modeled() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        stops_after_the_child_ran(&guest, "nested-child", "NESTING");
+        let binary = guest.binary.to_str().unwrap();
+        for how in ["tgkill", "tkill"] {
+            let output = guest.command(
+                "run",
+                &[
+                    "--seed",
+                    "1",
+                    "--format",
+                    "json",
+                    "--",
+                    binary,
+                    "thread-signal-child",
+                    how,
+                ],
+            );
+            let envelope = json_envelope(&output);
+            assert_eq!(
+                (&envelope["result"], &envelope["stop"]["reason"]),
+                (&"unsupported".into(), &"not_modeled".into()),
+                "{how}: {envelope:#}"
+            );
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("SLEEPING"),
+                "{how}: {envelope:#}"
+            );
+        }
+    }
+
+    /// A wait SIGCHLD's handler interrupts still finds the child that sent
+    /// it, as the kernel's wait looks for a zombie before a pending signal,
+    /// with `SA_RESTART` or without.
+    #[test]
+    fn a_wait_sigchld_interrupts_finds_its_child() {
+        let guest = native_build::source_guest("processes", PROCESSES_SOURCE);
+        let binary = guest.binary.to_str().unwrap();
+        for flags in ["restart", "none"] {
+            let output = guest.command(
+                "run",
+                &["--seed", "1", "--", binary, "interrupted-wait", flags],
+            );
+            assert_eq!(
+                stdout_line_with(&output, "WAITED"),
+                "WAITED code=5",
+                "{flags}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[test]

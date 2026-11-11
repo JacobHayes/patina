@@ -4,16 +4,21 @@
 //! the root asks the supervisor, over the launch channel
 //! ([`patina_dst_runtime::ENV_LAUNCH_FD`]), to start the admitted artifact (the
 //! file the admission holds open, by its descriptor),
-//! and hands it the child's end of their channel and its stdin, stdout and
-//! stderr. A launcher thread serves those requests. Each child starts as
+//! and hands it the child's end of their channel, its stdin, stdout and
+//! stderr, the write end of its stop pipe and, when the run records or
+//! replays, its trace (a decision log, or the timeline it replays). A
+//! launcher thread serves those requests. Each child starts as
 //! the root did: the root's control plane less what only the root writes
 //! (facts, trace, coverage, stop records, reports, crash and restart
 //! channels, the base filesystem and staged stdin) and the filesystem fault
 //! knobs (the root's driver stack serves a child's filesystem), its own
-//! seed, place in the process tree, working directory and channel, its guest environment through the initial
+//! seed, place in the process tree, working directory, channel, stop pipe
+//! and trace, its guest environment through the initial
 //! stack slots, and the same address layout pin. A child dies with the
 //! launcher thread (`PR_SET_PDEATHSIG`) and inherits no other descriptor.
-//! The launcher reaps each child as it dies. When the root ends, its end
+//! The launcher reaps each child as it dies; the root asks it how a child
+//! whose host process ended without a word died, and it answers with the
+//! wait status. When the root ends, its end
 //! of the launch channel closes, and the launcher kills (by pidfd) and
 //! reaps every child still running.
 
@@ -70,7 +75,6 @@ fn child_inherits(name: &str) -> bool {
         rt::ENV_GUEST_CWD,
         rt::ENV_SEED,
         rt::ENV_LAUNCH_FD,
-        rt::ENV_ADMIT,
         rt::ENV_ADDRESS_LAYOUT,
         rt::ENV_INITIAL_STACK,
         // The root's driver stack draws every filesystem fault. Latency is
@@ -113,7 +117,18 @@ impl Template {
     }
 }
 
-/// A launch the root asks for (its descriptors ride beside it).
+/// What the root asks of the launcher.
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Request {
+    /// Start a child (its descriptors ride beside the request).
+    Launch(Launch),
+    /// The host wait status of child `pid`, whose host process is gone,
+    /// answered as eight little-endian bytes (-1 when unknown).
+    Reaped(i32),
+}
+
+/// A launch the root asks for.
 #[derive(Deserialize)]
 struct Launch {
     artifact: u32,
@@ -132,7 +147,8 @@ struct Launch {
 /// as soon as it dies.
 struct Running {
     pidfd: Option<OwnedFd>,
-    reaper: JoinHandle<()>,
+    /// Answers the child's raw wait status once it is reaped.
+    reaper: JoinHandle<Option<i32>>,
 }
 
 /// Serve the root's launch requests on `channel` until the root's end
@@ -141,26 +157,52 @@ struct Running {
 /// `SIGKILL` on itself).
 pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut children = Vec::new();
+        use std::os::unix::process::ExitStatusExt;
+        let mut children = BTreeMap::new();
         while let Some((payload, fds)) = receive(channel.as_raw_fd()) {
-            match launch(&template, &payload, fds) {
-                Ok(mut child) => {
-                    // SAFETY: a plain system call; the child is not reaped
-                    // before its reaper starts below.
-                    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
-                    // SAFETY: a fresh descriptor owned here.
-                    let pidfd = (raw >= 0).then(|| unsafe { OwnedFd::from_raw_fd(raw as RawFd) });
-                    let reaper = std::thread::spawn(move || {
-                        let _ = child.wait();
-                    });
-                    children.push(Running { pidfd, reaper });
+            let request = serde_json::from_slice(&payload)
+                .map_err(|error| CliError(format!("malformed process launch request: {error}")));
+            match request {
+                Ok(Request::Launch(request)) => {
+                    let pid = request.pid;
+                    match launch(&template, request, fds) {
+                        Ok(mut child) => {
+                            // SAFETY: a plain system call; the child is not
+                            // reaped before its reaper starts below.
+                            let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, child.id(), 0) };
+                            let pidfd = (raw >= 0)
+                                // SAFETY: a fresh descriptor owned here.
+                                .then(|| unsafe { OwnedFd::from_raw_fd(raw as RawFd) });
+                            let reaper = std::thread::spawn(move || {
+                                child.wait().ok().map(ExitStatusExt::into_raw)
+                            });
+                            children.insert(pid, Running { pidfd, reaper });
+                        }
+                        // The root waits for the child's ready on its channel,
+                        // whose far end the failed launch dropped: it stops
+                        // the run there.
+                        Err(error) => eprintln!("patina: {error}"),
+                    }
                 }
-                // The root waits for the child's ready on its channel, whose
-                // far end the failed launch dropped: it stops the run there.
+                Ok(Request::Reaped(pid)) => {
+                    let status = children
+                        .remove(&pid)
+                        .and_then(|child: Running| child.reaper.join().ok().flatten());
+                    let answer = i64::from(status.unwrap_or(-1)).to_le_bytes();
+                    // SAFETY: a live buffer of its length.
+                    unsafe {
+                        libc::send(
+                            channel.as_raw_fd(),
+                            answer.as_ptr().cast(),
+                            answer.len(),
+                            libc::MSG_NOSIGNAL,
+                        )
+                    };
+                }
                 Err(error) => eprintln!("patina: {error}"),
             }
         }
-        for child in children {
+        for child in children.into_values() {
             if let Some(pidfd) = &child.pidfd {
                 // SAFETY: a plain system call on a pidfd owned here.
                 unsafe {
@@ -182,14 +224,14 @@ pub(super) fn start(channel: OwnedFd, template: Template) -> JoinHandle<()> {
 /// stdin, stdout and stderr.
 fn launch(
     template: &Template,
-    payload: &[u8],
+    request: Launch,
     fds: Vec<OwnedFd>,
 ) -> Result<std::process::Child, CliError> {
-    let request: Launch = serde_json::from_slice(payload)
-        .map_err(|error| CliError(format!("malformed process launch request: {error}")))?;
-    // The child's channel, stdio, and on a replay the child's own trace.
+    // The child's channel, stdio, stop pipe, and on a recording or a replay
+    // the child's own trace.
     let mut fds = fds.into_iter();
-    let (Some(channel), Some(stdin), Some(stdout), Some(stderr), trace, None) = (
+    let (Some(channel), Some(stdin), Some(stdout), Some(stderr), Some(stops), trace, None) = (
+        fds.next(),
         fds.next(),
         fds.next(),
         fds.next(),
@@ -198,7 +240,7 @@ fn launch(
         fds.next(),
     ) else {
         return Err(CliError(
-            "a process launch request must carry four or five descriptors".into(),
+            "a process launch request must carry five or six descriptors".into(),
         ));
     };
     let artifact = template
@@ -231,10 +273,12 @@ fn launch(
         command.env(ENV_GUEST_ENV, &environment);
     }
     let raw_channel = channel.as_raw_fd();
+    let raw_stops = stops.as_raw_fd();
     let raw_trace = trace.as_ref().map(AsRawFd::as_raw_fd);
     if let Some(trace) = raw_trace {
         command.env(patina_dst_runtime::ENV_TRACE_FD, trace.to_string());
     }
+    command.env(patina_dst_runtime::ENV_STOP_FD, raw_stops.to_string());
     command
         .env(ENV_SEED, request.seed.to_string())
         .env(
@@ -252,7 +296,7 @@ fn launch(
     // SAFETY: the hook runs in the forked child before exec and makes only
     // async-signal-safe system calls, allocating nothing.
     unsafe {
-        command.pre_exec(move || inherit_only(raw_channel, raw_trace));
+        command.pre_exec(move || inherit_only([Some(raw_channel), Some(raw_stops), raw_trace]));
     }
     layout::pin(
         &mut command,
@@ -269,6 +313,7 @@ fn launch(
         ))
     })?;
     drop(channel);
+    drop(stops);
     drop(trace);
     Ok(child)
 }
@@ -279,9 +324,9 @@ fn json(value: &impl serde::Serialize) -> Result<String, CliError> {
         .map_err(|error| CliError(format!("failed to encode a process launch: {error}")))
 }
 
-/// In the forked child: die with the launcher thread, and let only stdio,
-/// `channel` and a replay's `trace` cross the exec.
-fn inherit_only(channel: RawFd, trace: Option<RawFd>) -> io::Result<()> {
+/// In the forked child: die with the launcher thread, and let only stdio
+/// and `kept` (the channel, the stop pipe, a trace) cross the exec.
+fn inherit_only(kept: [Option<RawFd>; 3]) -> io::Result<()> {
     let check = |rc: libc::c_long| {
         if rc < 0 {
             Err(io::Error::last_os_error())
@@ -298,9 +343,8 @@ fn inherit_only(channel: RawFd, trace: Option<RawFd>) -> io::Result<()> {
             u32::MAX,
             libc::CLOSE_RANGE_CLOEXEC,
         ))?;
-        check(libc::fcntl(channel, libc::F_SETFD, 0) as libc::c_long)?;
-        if let Some(trace) = trace {
-            check(libc::fcntl(trace, libc::F_SETFD, 0) as libc::c_long)?;
+        for fd in kept.into_iter().flatten() {
+            check(libc::fcntl(fd, libc::F_SETFD, 0) as libc::c_long)?;
         }
     }
     Ok(())

@@ -84,14 +84,20 @@ pub(crate) fn init_from_env() -> c_int {
         let builder = RuntimeBuilder::new(config).with_fs_image(fs_image_base()?);
         let mut builder = builder;
         if let Some(fd) = trace_fd {
-            builder = builder.with_trace_transport(FdTraceTransport { fd });
-        } else {
+            // A recording child of the machine records into the decision log
+            // the hub handed it, which the root keeps.
             #[cfg(target_os = "linux")]
             if crate::machine::is_child()
                 && crate::runtime::control_env(patina_dst_runtime::ENV_MODE).as_deref()
                     == Some("record")
             {
-                builder = builder.with_trace_transport(crate::machine::ShippedTrace);
+                builder = builder.with_trace_transport(crate::machine::DecisionLog::open(fd)?);
+            } else {
+                builder = builder.with_trace_transport(FdTraceTransport { fd });
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                builder = builder.with_trace_transport(FdTraceTransport { fd });
             }
         }
         // The structured run-facts channel.

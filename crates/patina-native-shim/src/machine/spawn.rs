@@ -8,9 +8,9 @@
 //! to the table and to its scheduler as a runnable foreign task. The child
 //! runs when the scheduler picks it.
 //!
-//! A recording root keeps each child's recording (the child ships its
-//! decisions with every yield, exit and stop); a replaying one hands each
-//! child its recorded timeline as a trace of its own, in a memory file.
+//! A recording root keeps each child's recording (the child appends each
+//! decision to a log the hub maps, [`super::log`]); a replaying one hands
+//! each child its recorded timeline as a trace of its own, in a memory file.
 //!
 //! What this slice does not model stops the run by name (`unsupported`,
 //! `not_modeled`): a spawn from a child, file actions (a `chdir` action included), a caller whose
@@ -19,8 +19,9 @@
 //! descriptor open across exec, spawn attributes
 //! other than the signal mask and default dispositions a fresh process has
 //! anyway, a signal mask that is not empty, a run the supervisor gave no
-//! launch channel (crash-restart and the scheduling-policy knobs), and
-//! arguments or environment that are not UTF-8.
+//! launch channel (crash-restart and the scheduling-policy knobs),
+//! arguments or environment that are not UTF-8, and a launch request (the
+//! arguments and environment, encoded) over [`LAUNCH_LIMIT`].
 
 use super::*;
 use core::ffi::{CStr, c_char};
@@ -38,6 +39,11 @@ const WNOWAIT: u32 = 0x0100_0000;
 const SPAWN_MODELED_FLAGS: i16 = 0x04 | 0x08 | 0x40;
 /// `POSIX_SPAWN_SETSIGMASK`.
 const SPAWN_SETSIGMASK: i16 = 0x08;
+
+/// The largest launch request a spawn sends: the supervisor reads it as one
+/// packet, and the child's environment travels in one exec string, which
+/// Linux caps at 128 KiB (`MAX_ARG_STRLEN`).
+const LAUNCH_LIMIT: usize = 120 << 10;
 
 /// Tasks of this process parked in a wait for a child.
 static WAITERS: SpinMutex<Vec<TaskId>> = SpinMutex::new(Vec::new());
@@ -130,7 +136,7 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
     // supervisor's list, and the child's arguments, environment, place in
     // the process tree, seed and working directory. Its descriptors are the child's channel
     // end, then stdin, stdout and stderr.
-    let request = serde_json::json!({
+    let request = serde_json::json!({"launch": {
         "artifact": artifact,
         "argv": argv,
         "env": env,
@@ -140,9 +146,18 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
         "sid": sid,
         "seed": seed,
         "cwd": cwd,
-    });
+    }});
     let payload = serde_json::to_vec(&request)
         .unwrap_or_else(|error| protocol_fatal_text(&format!("encoding a launch: {error}")));
+    if payload.len() > LAUNCH_LIMIT {
+        refuse(
+            spawn,
+            &format!(
+                "with arguments and environment over {} KiB",
+                LAUNCH_LIMIT >> 10
+            ),
+        );
+    }
     // A replayed child replays its own recorded timeline, handed to it as a
     // trace of its own; a replay that spawns a child its recording lacks
     // has diverged.
@@ -163,19 +178,35 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
                 }
             }
         });
+    // A recording child appends its decisions to a log the hub maps.
+    let recording = context(|context| Ok(context.execution_mode())) == ExecutionMode::Record;
+    let (log, trace) = if recording {
+        let (log, fd) = super::log::HubLog::create();
+        (Some(log), Some(fd))
+    } else {
+        (None, trace)
+    };
+    // The pipe the child's signal front writes a stop record to.
+    let [stops, stop_writer] = pipe();
     match trace {
         Some(trace) => {
-            send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2, trace]);
+            send_with_fds(
+                launcher as c_int,
+                &payload,
+                &[child, 0, 1, 2, stop_writer, trace],
+            );
             close(trace);
         }
-        None => send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2]),
+        None => send_with_fds(launcher as c_int, &payload, &[child, 0, 1, 2, stop_writer]),
     }
     close(child);
+    close(stop_writer);
     // The child may use the filesystem before it is ready (its working
     // directory): the hub serves it meanwhile.
     match off_guest(|| serve(pid, hub)) {
-        Message::Ready => {}
-        other => protocol_fatal("a new process's ready", &other),
+        Some(Message::Ready) => {}
+        Some(other) => protocol_fatal("a new process's ready", &other),
+        None => died(pid),
     }
     // A recording root keeps the child's recording from here on.
     if let Some(metadata) = super::BEGUN.lock().remove(&pid) {
@@ -192,6 +223,8 @@ pub(crate) unsafe fn spawn(spawn: &Spawn) -> Option<c_int> {
         Child {
             parent,
             channel: hub,
+            stops,
+            log,
             status: None,
         },
     );
@@ -342,6 +375,42 @@ fn memfd_with(bytes: &[u8]) -> c_int {
     fd
 }
 
+/// A close-on-exec pipe: its read end, its write end.
+fn pipe() -> [c_int; 2] {
+    let mut pair = [-1 as c_int; 2];
+    // SAFETY: a writable pair of descriptors.
+    let rc = unsafe {
+        crate::sud_host_syscall(
+            libc::SYS_pipe2,
+            pair.as_mut_ptr() as _,
+            libc::O_CLOEXEC as _,
+            0,
+            0,
+            0,
+            0,
+        )
+    };
+    if rc != 0 {
+        protocol_fatal_text("creating a process's stop pipe failed");
+    }
+    pair
+}
+
+/// The host wait status of child `pid`, whose host process is gone: the
+/// supervisor's launcher reaped it and answers over the launch channel.
+/// `None` if it cannot say.
+pub(super) fn host_status(pid: i32) -> Option<i32> {
+    let launcher = crate::parse_control_u64(ENV_LAUNCH_FD).ok()?? as c_int;
+    let request = serde_json::to_vec(&serde_json::json!({ "reaped": pid })).ok()?;
+    if !send_bytes_once(launcher, &request) {
+        return None;
+    }
+    let mut answer = [0u8; 8];
+    let received = off_guest(|| receive_bytes(launcher, &mut answer))?;
+    let status = i64::from_le_bytes(answer);
+    (received == answer.len() && status >= 0).then_some(status as i32)
+}
+
 /// A `SOCK_SEQPACKET` pair, close-on-exec: the hub's end, the child's end.
 fn socketpair() -> [c_int; 2] {
     let mut pair = [-1 as c_int; 2];
@@ -490,7 +559,12 @@ pub(crate) fn wait4(pid: i32, status: usize, options: u32, rusage: bool) -> i64 
             Found::None => return -i64::from(libc::ECHILD),
             Found::Running if options & WNOHANG != 0 => return 0,
             Found::Running => {
-                if let Err(errno) = park() {
+                // A signal that ends the wait (SIGCHLD's handler, say) still
+                // leaves the child that changed state to find, as the kernel's
+                // wait looks for one before it looks for a signal.
+                if let Err(errno) = park()
+                    && !matches!(find(pid), Found::Zombie(..))
+                {
                     return -i64::from(errno);
                 }
             }
@@ -526,7 +600,12 @@ pub(crate) fn waitid(id: i32, info: usize, options: u32, rusage: bool) -> i64 {
             Found::None => return -i64::from(libc::ECHILD),
             Found::Running if options & WNOHANG != 0 => return write_info(info, None),
             Found::Running => {
-                if let Err(errno) = park() {
+                // A signal that ends the wait (SIGCHLD's handler, say) still
+                // leaves the child that changed state to find, as the kernel's
+                // wait looks for one before it looks for a signal.
+                if let Err(errno) = park()
+                    && !matches!(find(id), Found::Zombie(..))
+                {
                     return -i64::from(errno);
                 }
             }

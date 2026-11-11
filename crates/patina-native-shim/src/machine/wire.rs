@@ -58,9 +58,6 @@ pub(super) enum Message {
     /// A recording child's metadata (JSON of `len` bytes), before its
     /// first decision.
     TraceBegin { len: u64 },
-    /// A recording child's decisions since its last ship (JSON of `len`
-    /// bytes), ahead of a yield, an exit or a stop.
-    TraceDecisions { len: u64 },
 }
 
 /// The largest packet a frame's payload travels in: well inside a
@@ -123,7 +120,6 @@ impl Message {
             Message::Stop { len } => words(11, [len, 0, 0], None),
             Message::Facts { len } => words(12, [len, 0, 0], None),
             Message::TraceBegin { len } => words(13, [len, 0, 0], None),
-            Message::TraceDecisions { len } => words(14, [len, 0, 0], None),
         };
         let mut bytes = [0u8; MESSAGE_BYTES];
         for (chunk, word) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(words) {
@@ -170,7 +166,6 @@ impl Message {
             11 => Message::Stop { len: words[1] },
             12 => Message::Facts { len: words[1] },
             13 => Message::TraceBegin { len: words[1] },
-            14 => Message::TraceDecisions { len: words[1] },
             _ => return None,
         })
     }
@@ -222,7 +217,6 @@ mod tests {
             Message::Stop { len: 300 },
             Message::Facts { len: 70_000 },
             Message::TraceBegin { len: 5 },
-            Message::TraceDecisions { len: 6 },
         ] {
             assert_eq!(Message::decode(&message.encode()), Some(message));
         }
