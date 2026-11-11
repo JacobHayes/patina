@@ -12,10 +12,7 @@ use super::report::{
     build_campaign_envelope, coverage_verdict, flush_stdout, novel_findings,
     print_campaign_summary, print_progress_heartbeat,
 };
-use super::repro::{
-    render_failure_report, reproduce_command, reproduce_inputs, save_failure_log,
-    save_failure_trace,
-};
+use super::repro::{reproduce_command, reproduce_inputs, save_failure_log, save_failure_trace};
 use super::state::{
     CampaignLock, CampaignState, GenerationOutcome, InvocationRecord, SignatureRecord,
     absolute_out_dir, artifact_identity, class_counts_failures, load_campaign_state,
@@ -56,12 +53,12 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     let out_dir = absolute_out_dir(&out_dir)?;
 
     let state_path = out_dir.join("campaign-state.json");
-    let store_path = out_dir.join("signatures.json");
     let sites_path = out_dir.join("sites.json");
 
-    if !matches!(mode, CampaignMode::Fresh) && !state_path.is_file() {
-        return Err(CliError(format!(
-            "campaign out-dir {} has no campaign-state.json; nothing recorded to continue",
+    if mode != CampaignMode::Fresh && !state_path.is_file() {
+        return Err(CliError::usage(format!(
+            "campaign needs an artifact: out-dir {} holds no campaign-state.json, so there is \
+             no recorded campaign to continue",
             out_dir.display()
         )));
     }
@@ -123,8 +120,13 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 Some(recorded) => continue_recorded(recorded, &identity, spec, &out_dir)?,
             }
         }
-        (CampaignMode::Resume | CampaignMode::Extend { .. }, Some(recorded)) => recorded,
-        (CampaignMode::Resume | CampaignMode::Extend { .. }, None) => {
+        (CampaignMode::Continue { gens }, Some(mut recorded)) => {
+            if let Some(gens) = gens {
+                recorded.spec.generations = recorded.spec.generations.max(gens);
+            }
+            recorded
+        }
+        (CampaignMode::Continue { .. }, None) => {
             unreachable!("a continuation without a recorded campaign was refused above")
         }
     };
@@ -138,22 +140,6 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
 
     let artifact_path = PathBuf::from(&state.artifact.path);
     verify_campaign_build(&state)?;
-
-    if let CampaignMode::Resume = mode
-        && state.generations_done == state.spec.generations
-    {
-        return Err(CliError(format!(
-            "campaign complete at {}/{}; use --extend N to continue",
-            state.generations_done, state.spec.generations
-        )));
-    }
-    if let CampaignMode::Extend { additional } = mode {
-        state.spec.generations = state
-            .spec
-            .generations
-            .checked_add(additional)
-            .ok_or_else(|| CliError::usage("--extend would overflow the generation target"))?;
-    }
 
     let mut edge_coverage = initialize_edge_coverage(&out_dir, &state, state.generations_done)?;
     if state.spec.guided {
@@ -191,14 +177,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
     });
     let invocation_index = state.invocations.len() - 1;
 
-    write_campaign_checkpoint(
-        &state_path,
-        &store_path,
-        &sites_path,
-        &state,
-        &coverage,
-        &edge_coverage,
-    )?;
+    write_campaign_checkpoint(&state_path, &sites_path, &state, &coverage, &edge_coverage)?;
 
     if !json_output {
         if continuing {
@@ -212,7 +191,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             );
         } else {
             println!(
-                "PATINA_CAMPAIGN_START artifact={} generations={} seed_base={} out={}",
+                "PATINA_CAMPAIGN_START artifact={} generations={} seed_start={} out={}",
                 artifact_path.display(),
                 state.spec.generations,
                 state.spec.seed_base,
@@ -398,11 +377,6 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                 replayable,
                 &format!("generation-{generation}.patina"),
             );
-            let report = if state.spec.report {
-                render_failure_report(&out_dir, saved_trace.as_deref(), &artifact_path, generation)
-            } else {
-                None
-            };
             state
                 .signatures
                 .entry(key.clone())
@@ -421,7 +395,6 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
                         reproduce,
                         trace: saved_trace,
                         log: saved_log,
-                        report,
                         verification: verification.clone(),
                     }
                 });
@@ -449,9 +422,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             verdicts: run.facts.facts.verdicts.clone(),
             verification,
         };
-        if state.spec.generation_log {
-            append_generation_log(&out_dir, &outcome)?;
-        }
+        append_generation_log(&out_dir, &outcome)?;
         if outcome.is_notable() {
             state.notable_runs.push(outcome.clone());
         }
@@ -514,14 +485,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             }
             flush_stdout();
         }
-        write_campaign_checkpoint(
-            &state_path,
-            &store_path,
-            &sites_path,
-            &state,
-            &coverage,
-            &edge_coverage,
-        )?;
+        write_campaign_checkpoint(&state_path, &sites_path, &state, &coverage, &edge_coverage)?;
         // `--progress`: the same disclosure as the human lines above (every
         // notable generation, and a heartbeat at the `--progress-every`
         // cadence), plus the last generation, so the stream ends at the target.
@@ -592,7 +556,7 @@ pub(super) fn run_campaign(invocation: CampaignInvocation) -> Result<i32, CliErr
             novel: novel_count,
             generations: state.spec.generations,
             result,
-            store_path: &store_path,
+            out_dir: &out_dir,
             sites_path: &sites_path,
         });
         flush_stdout();
@@ -622,15 +586,18 @@ fn continue_recorded(
         let keys: std::collections::BTreeSet<&String> = was.keys().chain(now.keys()).collect();
         differs.extend(
             keys.into_iter()
-                .filter(|key| *key != "generations" && was.get(*key) != now.get(*key))
+                // The target only ever grows, and the per-generation timeout
+                // is this invocation's backstop, not the campaign's shape.
+                .filter(|key| !["gens", "timeout_secs"].contains(&key.as_str()))
+                .filter(|key| was.get(*key) != now.get(*key))
                 .cloned(),
         );
     }
     if !differs.is_empty() {
         return Err(CliError(format!(
             "campaign out-dir {} holds a campaign this command does not continue: {} differ{}. \
-             Pick a new --out-dir or delete the old one (--extend N and --resume continue the \
-             recorded campaign as it is)",
+             Pick a new --out-dir or delete the old one (the command without the artifact \
+             continues the recorded campaign as it is)",
             out_dir.display(),
             differs.join(", "),
             if differs.len() == 1 { "s" } else { "" },
@@ -640,7 +607,9 @@ fn continue_recorded(
     Ok(recorded)
 }
 
-/// Append one generation's record to `<out>/generations.jsonl` (`--generation-log`).
+/// Append one generation's record to `<out>/generations.jsonl`, so an
+/// external judge can re-run any generation, not only the notable ones
+/// `campaign-state.json` keeps.
 ///
 /// A run killed mid-write leaves an unterminated last line; it is cut back to
 /// the last complete record before appending, so a resumed generation's

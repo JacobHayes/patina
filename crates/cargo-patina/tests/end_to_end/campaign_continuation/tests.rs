@@ -1,4 +1,4 @@
-//! Campaign extension, interruption recovery, and continuation refusals.
+//! Campaign continuation, interruption recovery, and continuation refusals.
 
 use super::*;
 
@@ -73,9 +73,10 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
         !out.join("failures/generation-0.patina").exists(),
         "campaign must not save an incomplete failure trace"
     );
-    let store: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(out.join("signatures.json")).unwrap()).unwrap();
-    let signature = &store["signatures"].as_array().unwrap()[0];
+    let state: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
+            .unwrap();
+    let signature = &state["signatures"].as_array().unwrap()[0];
     assert_eq!(signature["class"], "timeout");
     assert!(
         signature.get("trace").is_none(),
@@ -83,13 +84,14 @@ fn campaign_timeout_does_not_save_incomplete_trace() {
     );
 }
 
-/// A campaign split into a first segment and an `--extend` continuation is the
-/// fresh campaign: the per-generation stream, the signature store (novelty
-/// included), the sites store, the coverage store's bytes and the persisted
-/// state all match, the continuation runs under the recorded spec (here a
-/// non-default seed base), and the state records both invocations.
+/// A campaign split into a first segment and an artifact-free continuation to
+/// a larger `--gens` is the fresh campaign: the per-generation stream, the
+/// signatures (novelty included), the sites store, the coverage store's bytes
+/// and the persisted state all match, the continuation runs under the recorded
+/// spec (here a non-default seed start), and the state records both
+/// invocations.
 #[test]
-fn campaign_extend_equals_fresh_campaign() {
+fn a_campaign_continued_to_more_generations_equals_the_fresh_campaign() {
     let workspace = native_workspace();
     let directory = tempdir().unwrap();
     let source = directory.path().join("aux_guest");
@@ -158,11 +160,9 @@ fn campaign_extend_equals_fresh_campaign() {
     let (gens, first_segment) = (4, 2);
     let out = directory.path().join("camp");
     let fresh_stdout = failed(&campaign(&out, gens), "the fresh campaign");
-    let read_stores = || {
-        ["signatures.json", "sites.json"].map(|store| fs::read_to_string(out.join(store)).unwrap())
-    };
-    let fresh_stores = read_stores();
-    let fresh_site_json: serde_json::Value = serde_json::from_str(&fresh_stores[1]).unwrap();
+    let read_sites = || fs::read_to_string(out.join("sites.json")).unwrap();
+    let fresh_sites = read_sites();
+    let fresh_site_json: serde_json::Value = serde_json::from_str(&fresh_sites).unwrap();
     assert_eq!(fresh_site_json["generations_observed"], gens);
     assert_eq!(fresh_site_json["sites"][0]["registered_gens"], gens);
     let fresh_coverage = campaign_coverage_file_hashes(&out);
@@ -174,30 +174,30 @@ fn campaign_extend_equals_fresh_campaign() {
     let split2 = failed(
         &run(&[
             "campaign",
-            "--extend",
-            &(gens - first_segment).to_string(),
+            "--gens",
+            &gens.to_string(),
             "--out-dir",
             out.to_str().unwrap(),
             "--progress-every",
             "1",
         ]),
-        "the extension",
+        "the continuation",
     );
     assert!(
         split2.contains("PATINA_CAMPAIGN_RESUME")
             && split2.contains(&format!("done={first_segment}"))
             && split2.contains(&format!("target={gens}")),
-        "extension should announce the recorded cursor and cumulative target:\n{split2}"
+        "the continuation should announce the recorded cursor and cumulative target:\n{split2}"
     );
     assert!(
         split2.contains(&format!("PATINA_CAMPAIGN_COMPLETE generations={gens}")),
-        "extension summary must be cumulative:\n{split2}"
+        "the continuation's summary must be cumulative:\n{split2}"
     );
     let split_lines = [campaign_gen_lines(&split1), campaign_gen_lines(&split2)].join("\n");
     assert_eq!(
         campaign_gen_lines(&fresh_stdout),
         split_lines,
-        "k-then-extend must reproduce the fresh per-generation stream"
+        "k-then-continue must reproduce the fresh per-generation stream"
     );
     assert_eq!(
         split1.matches("NOVEL").count() + split2.matches("NOVEL").count(),
@@ -205,19 +205,19 @@ fn campaign_extend_equals_fresh_campaign() {
         "novelty must survive the split"
     );
     assert_eq!(
-        fresh_stores,
-        read_stores(),
-        "k-then-extend must reproduce the signature and sites store bytes"
+        fresh_sites,
+        read_sites(),
+        "k-then-continue must reproduce the sites store bytes"
     );
     assert_eq!(
         fresh_coverage,
         campaign_coverage_file_hashes(&out),
-        "k-then-extend must reproduce coverage store file hashes"
+        "k-then-continue must reproduce coverage store file hashes"
     );
     assert_eq!(
         fresh_state,
         campaign_state_without_invocations(&state_path),
-        "k-then-extend must reproduce persisted state except audit invocations"
+        "k-then-continue must reproduce persisted state except audit invocations"
     );
     let state: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&state_path).unwrap()).unwrap();
@@ -225,7 +225,7 @@ fn campaign_extend_equals_fresh_campaign() {
 }
 
 #[test]
-fn campaign_resume_after_interruption_matches_fresh_campaign() {
+fn an_interrupted_campaign_given_again_matches_the_fresh_campaign() {
     let workspace = native_workspace();
     let directory = tempdir().unwrap();
     let source = directory.path().join("burn.rs");
@@ -287,7 +287,6 @@ fn main() {
     );
     let fresh_stdout = String::from_utf8_lossy(&fresh.stdout).into_owned();
     let fresh_state = campaign_state_without_invocations(&out.join("campaign-state.json"));
-    let fresh_signatures = fs::read_to_string(out.join("signatures.json")).unwrap();
 
     fs::remove_dir_all(&out).unwrap();
     let owned = campaign_args(&out);
@@ -341,19 +340,8 @@ fn main() {
         state_path.exists(),
         "interrupted campaign left no state file"
     );
-    assert!(
-        out.join("signatures.json").exists(),
-        "interrupted campaign left no derived signature store"
-    );
 
-    let resumed = run(vec![
-        "campaign".to_string(),
-        "--resume".to_string(),
-        "--out-dir".to_string(),
-        out.to_str().unwrap().to_string(),
-        "--progress-every".to_string(),
-        "1".to_string(),
-    ]);
+    let resumed = run(campaign_args(&out));
     assert!(
         resumed.status.success(),
         "resume failed:\nstdout:\n{}\nstderr:\n{}",
@@ -386,22 +374,8 @@ fn main() {
         campaign_state_without_invocations(&state_path),
         "interrupted + resumed state must match fresh except audit invocations"
     );
-    assert_eq!(
-        fresh_signatures,
-        fs::read_to_string(out.join("signatures.json")).unwrap(),
-        "interrupted + resumed signature store must match fresh"
-    );
 }
 
-/// Every continuation and reduction that cannot honour an out-dir's recorded
-/// campaign is refused by name: a missing or completed state, flags that would
-/// override the recorded spec, an unknown schema, corrupt state, another
-/// `patina` build (the supervisor builds every generation's run, and its
-/// package version stays the same across development builds that behave
-/// differently, so the campaign names it by its executable's digest), and an
-/// artifact that changed or vanished. A continuation that is allowed reports
-/// cumulative progress, and a child launched by another build refuses before
-/// it runs anything.
 /// A campaign command given again for the out-dir it wrote continues that
 /// campaign. A finished one runs nothing and ends as it did; a larger `--gens`
 /// runs the generations that are missing; a command for another campaign
@@ -460,6 +434,15 @@ fn a_campaign_command_given_again_continues_its_out_dir() {
     assert_eq!(fs::read(out.join("guest")).unwrap(), guest);
 }
 
+/// Every continuation and reduction that cannot honour an out-dir's recorded
+/// campaign is refused by name: a missing state, flags that would
+/// override the recorded spec, an unknown schema, corrupt state, another
+/// `patina` build (the supervisor builds every generation's run, and its
+/// package version stays the same across development builds that behave
+/// differently, so the campaign names it by its executable's digest), and an
+/// artifact that changed or vanished. A continuation that is allowed reports
+/// cumulative progress, a finished one reports its recorded result, and a
+/// child launched by another build refuses before it runs anything.
 #[test]
 fn campaign_continuation_refusals_are_loud() {
     let directory = tempdir().unwrap();
@@ -495,28 +478,16 @@ fn campaign_continuation_refusals_are_loud() {
     assert_refuses(
         run(&[
             "campaign",
-            "--extend",
+            "--gens",
             "1",
             "--out-dir",
             missing.to_str().unwrap(),
         ]),
         "no campaign-state.json",
     );
-    let pre_steering = cwd.join("pre-steering");
-    fs::create_dir_all(&pre_steering).unwrap();
-    fs::write(
-        pre_steering.join("signatures.json"),
-        r#"{"schema":"patina.campaign.signatures/v2","signatures":[]}"#,
-    )
-    .unwrap();
-    assert_refuses(
-        run(&[
-            "campaign",
-            "--resume",
-            "--out-dir",
-            pre_steering.to_str().unwrap(),
-        ]),
-        "no campaign-state.json",
+    assert!(
+        !missing.exists(),
+        "a refused continuation created its out-dir"
     );
 
     let out = cwd.join("camp");
@@ -548,15 +519,21 @@ fn campaign_continuation_refusals_are_loud() {
         ]),
         "vary",
     );
-    assert_refuses(
-        run(&["campaign", "--resume", "--out-dir", out_dir]),
-        "campaign complete at 1/1",
+    // A finished campaign continued as it is runs nothing and reports what it
+    // recorded.
+    let finished = run(&["campaign", "--out-dir", out_dir]);
+    assert!(finished.status.success(), "{}", report(&finished));
+    let finished_stdout = String::from_utf8_lossy(&finished.stdout);
+    assert!(
+        finished_stdout.contains("PATINA_CAMPAIGN_COMPLETE generations=1")
+            && !finished_stdout.contains("PATINA_CAMPAIGN_GEN"),
+        "{finished_stdout}"
     );
     // Flag combinations a continuation refuses are parse-level, tested in
     // `campaign::parse`.
 
     // Each edit to the recorded state is refused, then undone.
-    let extend: &[&str] = &["campaign", "--extend", "1", "--out-dir", out_dir];
+    let extend: &[&str] = &["campaign", "--gens", "2", "--out-dir", out_dir];
     let minimized = cwd.join("minimized.patina");
     let reduce: &[&str] = &[
         "minimize",
@@ -607,8 +584,8 @@ fn campaign_continuation_refusals_are_loud() {
     // The same build continues, and its heartbeat and summary are cumulative.
     let extended = run(&[
         "campaign",
-        "--extend",
-        "2",
+        "--gens",
+        "3",
         "--out-dir",
         out_dir,
         "--progress-every",
@@ -673,7 +650,7 @@ fn campaign_continuation_refusals_are_loud() {
 /// takes its in-flight generation with it. The generation runs in its own
 /// process group, outside the campaign's, and its guest here would spin
 /// forever: with nobody left to enforce the timeout backstop, a surviving
-/// group would run on beside the `--resume` that re-runs the same generation.
+/// group would run on beside the continuation that re-runs the same generation.
 #[test]
 fn a_killed_campaign_takes_its_generation_with_it() {
     let workspace = native_workspace();

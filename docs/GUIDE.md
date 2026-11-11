@@ -125,8 +125,11 @@ A campaign keeps its state in `--out-dir` (default `patina-campaign-out`). The
 same command given again continues that campaign: it finishes an interrupted
 one, runs the missing generations when `--gens` is larger, and otherwise runs
 nothing and reports the recorded result. A command for another artifact or
-other settings is refused. `--extend N` and `--resume` continue the recorded
-campaign without repeating its command.
+other settings is refused. Without the artifact, `patina campaign --out-dir DIR
+[--gens N]` continues the recorded campaign as it is, without repeating its
+settings. Every generation's seed, run flags, class and verdicts are appended
+to `generations.jsonl` in the out-dir. A `--spec FILE.json` key is its flag's
+name in snake case (`"gens"`, `"seed_start"`, `"vary"`, `"dns_entry"`, ...).
 
 The outcomes and exit codes of every command are the table in the
 [README](../README.md#outcomes-and-exit-codes).

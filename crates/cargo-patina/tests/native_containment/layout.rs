@@ -191,8 +191,11 @@ fn address_layout_is_the_same_in_every_run_of_a_seed() {
     let state_path = out.join("campaign-state.json");
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
-    assert_eq!(state["spec"]["address_layout"], "fixed", "{state}");
-    assert_success(campaign(&["--extend", "1", "--out-dir", out_dir]));
+    assert_eq!(
+        state["spec"]["allow_randomized_address_layout"], false,
+        "{state}"
+    );
+    assert_success(campaign(&["--gens", "2", "--out-dir", out_dir]));
 }
 
 /// `patina run` of `g` at seed 1, with `args`, from a parent whose soft
@@ -447,7 +450,10 @@ fn the_randomized_layout_opt_out_qualifies_the_run_and_binds_its_replay() {
         &std::fs::read(std::path::Path::new(out).join("campaign-state.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(state["spec"]["address_layout"], "randomized", "{state}");
+    assert_eq!(
+        state["spec"]["allow_randomized_address_layout"], true,
+        "{state}"
+    );
 }
 
 /// A C guest that prints `main ran`, linked by hand over the POSIX layer with

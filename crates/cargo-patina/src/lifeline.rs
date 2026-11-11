@@ -10,7 +10,7 @@
 //! on Linux and macOS, so the one mechanism serves both, without polling.
 //!
 //! Without it a killed campaign leaves its in-flight generation running with no
-//! timeout backstop, beside the `--resume` that re-runs the same generation into
+//! timeout backstop, beside the continuation that re-runs the same generation into
 //! the same coverage map and host mounts.
 
 use std::process::Command;

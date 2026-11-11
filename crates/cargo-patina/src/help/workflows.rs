@@ -6,9 +6,8 @@ pub(super) const CAMPAIGN: Verb = Verb {
     name: "campaign",
     summary: "Config-driven deterministic fault-and-schedule sweep over one artifact.",
     synopsis: &[
-        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--report-failures] [--generation-log] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
-        "patina campaign --extend N [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
-        "patina campaign --resume [--out-dir DIR] [--progress-every N] [--timeout-secs N]",
+        "patina campaign <ARTIFACT|SOURCE.rs|DIR|Cargo.toml> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--progress-every N] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL]... [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]] [-- GUEST ARGS]",
+        "patina campaign [--out-dir DIR] [--gens N] [--progress-every N] [--timeout-secs N]",
     ],
     prose: "\
 A campaign runs `--gens` independent child `patina run` processes over one \
@@ -31,13 +30,16 @@ sample of clean generations (one in 16, chosen from --seed-start) runs twice; a 
 differing class, signature, verdict set or trace digest is `nondeterministic`, \
 reported with both outcomes. A second run patina could not finish (a timeout, a \
 host kill) is counted apart and leaves the class as observed. --no-verify skips these runs for cost. A --spec \
-FILE.json supplies overrides and individual flags override the spec. Campaigns \
-checkpoint their state in --out-dir. The same command given again continues the \
+FILE.json supplies overrides and individual flags override the spec; a spec key is \
+its flag's name in snake case (\"gens\", \"seed_start\", \"vary\", ...). Campaigns \
+checkpoint their state in --out-dir and append every generation's seed, run flags, \
+class and verdicts to <out-dir>/generations.jsonl, so any generation can be re-run \
+and judged outside the campaign. The same command given again continues the \
 campaign that out-dir holds: it finishes an interrupted one, runs the missing \
 generations when --gens is larger, and otherwise runs nothing and reports the recorded \
-result; a command for another artifact or other settings is refused. `--extend N` adds \
-N generations to the recorded target, and `--resume` finishes an interrupted campaign, \
-without re-supplying the artifact or spec flags. Output is summary-first: a human \
+result; a command for another artifact or other settings is refused. Without the \
+artifact the command continues the recorded campaign as it is, toward --gens when \
+given. Output is summary-first: a human \
 report (novel/failing generations plus a periodic progress heartbeat, tuned by \
 --progress-every) or a patina.campaign/v3 JSON envelope (class counts, deduped \
 signatures, per-run detail for novel/failing generations, and pointers to the full \
@@ -85,20 +87,6 @@ that would change them.",
                     None,
                     Value::Required("DIR", Kind::Path),
                     "Output directory (default patina-campaign-out).",
-                    false,
-                ),
-                f(
-                    "--extend",
-                    None,
-                    Value::Required("N", Kind::PositiveU64),
-                    "Continue the recorded out-dir with N additional generations (N >= 1; use --resume to finish an interrupted campaign without adding any); the out-dir's spec is authoritative.",
-                    false,
-                ),
-                f(
-                    "--resume",
-                    None,
-                    Value::None,
-                    "Finish an interrupted recorded out-dir without adding generations.",
                     false,
                 ),
                 f(
@@ -166,20 +154,6 @@ that would change them.",
                     None,
                     Value::Required("N", Kind::Permille),
                     "Dampen every fault plane's intensity band to N per-mille of its default (default 1000 = the tuned aggressive bands; 10 = a hundredfold rarer, the regime where the workload runs to completion and only unusual paths are faulted). Shape bands such as the TCP buffer size, and the cooperative-SUT knobs, are left alone.",
-                    false,
-                ),
-                f(
-                    "--report-failures",
-                    None,
-                    Value::None,
-                    "Also write a --report HTML for each failing generation.",
-                    false,
-                ),
-                f(
-                    "--generation-log",
-                    None,
-                    Value::None,
-                    "Append every generation's seed, run flags, class and verdicts to <out>/generations.jsonl, one JSON object per line, so any generation can be re-run and judged outside the campaign. A resumed generation is appended again; the last line for a generation wins.",
                     false,
                 ),
                 f(

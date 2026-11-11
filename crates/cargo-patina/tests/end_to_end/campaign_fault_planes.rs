@@ -140,7 +140,7 @@ fn main() {
         );
         assert_ran(&campaign(
             &fixture.cwd,
-            &["--extend", "2", "--out-dir", out.to_str().unwrap()],
+            &["--gens", "4", "--out-dir", out.to_str().unwrap()],
         ));
         let extended = campaign_state_without_invocations(&out.join("campaign-state.json"));
         assert_eq!(extended["spec"]["vary"], recorded["spec"]["vary"]);
@@ -156,10 +156,13 @@ fn main() {
             "a plane counted as vacuous: {classes:?}"
         );
 
+        let module = fixture.module.to_str().unwrap();
+        let spec = fixture.spec.to_str().unwrap();
         for continuation in [
-            vec!["--extend", "1", "--vary", "fs"],
-            vec!["--extend", "1", "--vary", "faults"],
-            vec!["--resume", "--vary", "net,sleep"],
+            vec!["--gens", "5", "--vary", "fs"],
+            vec!["--vary", "net,sleep"],
+            vec![module, "--gens", "5", "--spec", spec, "--vary", "fs"],
+            vec![module, "--gens", "5", "--spec", spec, "--vary", "faults"],
         ] {
             let mut args = continuation.clone();
             args.extend(["--out-dir", out.to_str().unwrap()]);
@@ -201,17 +204,13 @@ fn main() {
         assert!(!unknown_out.exists(), "a refused campaign wrote an out-dir");
     }
 
-    /// `--generation-log` records every generation once, across a
-    /// continuation (even after a torn last record), with the seed, flags and class the campaign used: here
-    /// every generation is notable, so each record must equal its notable run.
-    /// Without the flag no log is written.
+    /// The generation log records every generation once, across a
+    /// continuation (even after a torn last record), with the seed, flags and
+    /// class the campaign used: here every generation is notable, so each
+    /// record must equal its notable run.
     #[test]
     fn the_generation_log_records_every_generation_as_the_campaign_ran_it() {
         let fixture = fixture();
-        let plain = fresh(&fixture, &fixture.cwd.join("plain"), "2", "faults");
-        assert!(plain["spec"].get("generation_log").is_none());
-        assert!(!fixture.cwd.join("plain").join("generations.jsonl").exists());
-
         let out = fixture.cwd.join("logged");
         let output = campaign(
             &fixture.cwd,
@@ -221,7 +220,6 @@ fn main() {
                 "3",
                 "--vary",
                 "faults",
-                "--generation-log",
                 "--spec",
                 fixture.spec.to_str().unwrap(),
                 "--out-dir",
@@ -237,13 +235,9 @@ fn main() {
         fs::write(&log_path, torn).unwrap();
         assert_ran(&campaign(
             &fixture.cwd,
-            &["--extend", "2", "--out-dir", out.to_str().unwrap()],
+            &["--gens", "5", "--out-dir", out.to_str().unwrap()],
         ));
         let state = campaign_state_without_invocations(&out.join("campaign-state.json"));
-        assert_eq!(
-            state["spec"]["generation_log"], true,
-            "the continuation kept the log on"
-        );
         let log: Vec<serde_json::Value> = fs::read_to_string(out.join("generations.jsonl"))
             .unwrap()
             .lines()

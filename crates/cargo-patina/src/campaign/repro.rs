@@ -125,24 +125,6 @@ pub(super) fn save_failure_log(
     Some(relative)
 }
 
-/// Best-effort wave-14 `--report` HTML for a failing generation with a trace.
-pub(super) fn render_failure_report(
-    out_dir: &Path,
-    trace: Option<&str>,
-    artifact: &Path,
-    generation: u64,
-) -> Option<String> {
-    let trace = trace?;
-    let reports_dir = out_dir.join("reports");
-    std::fs::create_dir_all(&reports_dir).ok()?;
-    let dest = reports_dir.join(format!("generation-{generation}.html"));
-    let html =
-        crate::render::render_trace_file(trace, &artifact.display().to_string(), "main", None)
-            .ok()?;
-    std::fs::write(&dest, html).ok()?;
-    Some(dest.display().to_string())
-}
-
 /// Everything needed to re-run one recorded generation of a finished campaign,
 /// read back out of its out-dir.
 ///

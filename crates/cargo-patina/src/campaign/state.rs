@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 /// `minimize --generation N` targets when no `--marker` is given. An out-dir of
 /// another schema is refused by name rather than read with a guessed meaning.
 const CAMPAIGN_STATE_SCHEMA: &str = "patina.campaign.state/v4";
-const CAMPAIGN_SIGNATURES_SCHEMA: &str = "patina.campaign.signatures/v2";
 
 // ===========================================================================
 // Signature store
@@ -42,10 +41,9 @@ pub(super) struct SignatureRecord {
     /// directory: the store lives in that directory, and an absolute path would
     /// make two runs of the same campaign into two different output directories
     /// produce different stores, when the whole purpose of a dedup record is
-    /// that identical failures produce identical records. (`trace` and `report`
-    /// above predate this and are still absolute.)
+    /// that identical failures produce identical records. (`trace` above
+    /// predates this and is still absolute.)
     pub(super) log: Option<String>,
-    pub(super) report: Option<String>,
     /// The reproduction attempt run when the signature was first seen, for a
     /// novel finding of a verifying campaign.
     pub(super) verification: Option<Verification>,
@@ -69,9 +67,6 @@ impl SignatureRecord {
         }
         if let Some(log) = &self.log {
             map.insert("log".into(), log.clone().into());
-        }
-        if let Some(report) = &self.report {
-            map.insert("report".into(), report.clone().into());
         }
         if let Some(verification) = &self.verification {
             map.insert("verification".into(), verification.to_json());
@@ -99,7 +94,6 @@ impl SignatureRecord {
             reproduce: json_required_str(object, "reproduce")?.to_string(),
             trace: json_optional_str(object, "trace")?,
             log: json_optional_str(object, "log")?,
-            report: json_optional_str(object, "report")?,
             verification: object
                 .get("verification")
                 .map(Verification::from_json)
@@ -521,8 +515,8 @@ fn json_required_bool(
 
 pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    map.insert("generations".into(), spec.generations.into());
-    map.insert("seed_base".into(), spec.seed_base.into());
+    map.insert("gens".into(), spec.generations.into());
+    map.insert("seed_start".into(), spec.seed_base.into());
     map.insert("timeout_secs".into(), spec.timeout_secs.into());
     map.insert("guest_args".into(), spec.guest_args.clone().into());
     map.insert("swarm".into(), spec.swarm.into());
@@ -548,20 +542,17 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         );
     }
     if !spec.dns_entries.is_empty() {
-        map.insert("dns_entries".into(), spec.dns_entries.clone().into());
+        map.insert("dns_entry".into(), spec.dns_entries.clone().into());
     }
     if !spec.allow_symbols.is_empty() {
-        map.insert("allow_symbols".into(), spec.allow_symbols.clone().into());
+        map.insert("allow".into(), spec.allow_symbols.clone().into());
     }
     if let Some(value) = &spec.allow_unsupported_symbols {
         map.insert("allow_unsupported_symbols".into(), value.clone().into());
     }
     if let Some(layout) = spec.address_layout {
-        let layout = match layout {
-            patina_dst_trace::AddressLayout::Fixed => "fixed",
-            patina_dst_trace::AddressLayout::Randomized => "randomized",
-        };
-        map.insert("address_layout".into(), layout.into());
+        let randomized = layout == patina_dst_trace::AddressLayout::Randomized;
+        map.insert("allow_randomized_address_layout".into(), randomized.into());
     }
     if let Some(cpus) = spec.cpus {
         map.insert("cpus".into(), cpus.into());
@@ -574,18 +565,17 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
         map.insert("mount".into(), recorded);
     }
     if let Some(value) = spec.watchdog_nanos {
-        map.insert("watchdog_nanos".into(), value.into());
+        map.insert("liveness_watchdog".into(), value.into());
     }
     if let Some(value) = spec.converge_nanos {
-        map.insert("converge_nanos".into(), value.into());
+        map.insert("converge_within".into(), value.into());
     }
     if let Some(value) = spec.compute_watchdog_ms {
         map.insert("compute_watchdog_ms".into(), value.into());
     }
     if let Some(value) = spec.heal_after_nanos {
-        map.insert("heal_after_nanos".into(), value.into());
+        map.insert("heal_after".into(), value.into());
     }
-    map.insert("report".into(), spec.report.into());
     map.insert("plateau_after".into(), spec.plateau_after.into());
     map.insert("guided".into(), spec.guided.into());
     if spec.allow_unmet_sometimes {
@@ -594,14 +584,9 @@ pub(super) fn spec_to_json(spec: &CampaignSpec) -> serde_json::Value {
     if !spec.classify.is_empty() {
         map.insert("classify".into(), classify_rules_to_json(&spec.classify));
     }
-    // Off by default, so only the opt-in is recorded (older states stay
-    // canonical).
-    if spec.generation_log {
-        map.insert("generation_log".into(), true.into());
-    }
     // Verification is on by default, so only the opt-out is recorded.
     if !spec.verify {
-        map.insert("verify".into(), false.into());
+        map.insert("no_verify".into(), true.into());
     }
     serde_json::Value::Object(map)
 }
@@ -611,12 +596,11 @@ pub(super) fn spec_from_state_json(value: &serde_json::Value) -> Result<Campaign
         .as_object()
         .ok_or_else(|| "spec must be an object".to_string())?;
     for key in [
-        "generations",
-        "seed_base",
+        "gens",
+        "seed_start",
         "timeout_secs",
         "guest_args",
         "swarm",
-        "report",
         "plateau_after",
     ] {
         if !object.contains_key(key) {
@@ -781,7 +765,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 pub(super) fn write_campaign_checkpoint(
     state_path: &Path,
-    store_path: &Path,
     sites_path: &Path,
     state: &CampaignState,
     coverage: &CoverageTally,
@@ -789,14 +772,13 @@ pub(super) fn write_campaign_checkpoint(
 ) -> Result<(), CliError> {
     // The state cursor is the checkpoint readers poll. Write the derived stores
     // first, then the state file, so an observed advanced cursor has matching
-    // signatures/sites/native-coverage artifacts. Native coverage writes before
+    // sites/native-coverage artifacts. Native coverage writes before
     // the cursor on purpose: if a crash tears here, generations_applied may be
     // one ahead and resume will re-run then watermark-skip that generation.
     if let Some(store) = edge_coverage.active() {
         store.write_checkpoint()?;
     }
     write_sites_store(sites_path, coverage)?;
-    write_signature_store(store_path, &state.signatures)?;
     write_campaign_state(state_path, state)
 }
 
@@ -871,17 +853,6 @@ pub(super) fn load_coverage_tally(
         "per-generation SDK reports are transient, so refusing to resume with missing sites folds",
     )?;
     Ok(tally)
-}
-
-fn write_signature_store(
-    path: &Path,
-    signatures: &BTreeMap<String, SignatureRecord>,
-) -> Result<(), CliError> {
-    let store = serde_json::json!({
-        "schema": CAMPAIGN_SIGNATURES_SCHEMA,
-        "signatures": signatures_to_json(signatures),
-    });
-    atomic_write_json(path, &store, "signature store")
 }
 
 fn write_sites_store(path: &Path, coverage: &CoverageTally) -> Result<(), CliError> {
@@ -959,7 +930,7 @@ pub(super) fn absolute_out_dir(out_dir: &Path) -> Result<PathBuf, CliError> {
 /// those belong to the open file description, which every child the campaign
 /// spawns shares from fork until its exec closes the descriptor, so a campaign
 /// killed while starting a generation left the out-dir locked by a child that
-/// was not yet a generation, and an immediate `--resume` was refused. A record
+/// was not yet a generation, and an immediate continuation was refused. A record
 /// lock is owned by the process: fork never inherits it, and it dies with the
 /// campaign. The cost is the classic hazard: closing ANY descriptor for
 /// `campaign.lock` in this process releases it, so nothing else may open that
@@ -1059,7 +1030,7 @@ mod tests {
         // SAFETY: nextest runs each test in its own process.
         unsafe { std::env::set_var("PATINA_MOUNT", "/does-not-exist") };
         let parsed = super::super::parse(
-            ["--resume", "--out-dir", "somewhere"]
+            ["--out-dir", "somewhere"]
                 .into_iter()
                 .map(std::ffi::OsString::from)
                 .collect(),
@@ -1129,7 +1100,6 @@ mod tests {
                 reproduce: "patina run guest --seed 42".to_string(),
                 trace: None,
                 log: None,
-                report: None,
                 verification: None,
             },
         );

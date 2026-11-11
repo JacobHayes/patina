@@ -132,12 +132,6 @@ pub struct CampaignSpec {
     pub converge_nanos: Option<u64>,
     /// Explicit heal-then-converge arm-time override (virtual nanoseconds).
     pub heal_after_nanos: Option<u64>,
-    /// Also write a wave-14 `--report` HTML for each failing generation.
-    pub report: bool,
-    /// Append every generation's record (seed, flags, class, verdicts) to
-    /// `<out>/generations.jsonl`, so an external judge can re-run any
-    /// generation, not only the notable ones `campaign-state.json` keeps.
-    pub generation_log: bool,
     /// Report native edge-coverage plateau after this many generations without a
     /// new edge; 0 disables the plateau flag.
     pub plateau_after: u64,
@@ -182,8 +176,6 @@ impl Default for CampaignSpec {
             compute_watchdog_ms: None,
             converge_nanos: None,
             heal_after_nanos: None,
-            report: false,
-            generation_log: false,
             plateau_after: DEFAULT_PLATEAU_AFTER,
             guided: false,
             allow_unmet_sometimes: false,
@@ -202,8 +194,8 @@ impl CampaignSpec {
             .ok_or_else(|| CliError("campaign spec must be a JSON object".into()))?;
         for (key, val) in object {
             match key.as_str() {
-                "generations" => self.generations = json_u64(key, val)?,
-                "seed_base" => self.seed_base = json_u64(key, val)?,
+                "gens" => self.generations = json_u64(key, val)?,
+                "seed_start" => self.seed_base = json_u64(key, val)?,
                 "timeout_secs" => self.timeout_secs = json_u64(key, val)?,
                 "guest_args" => {
                     let array = val
@@ -235,27 +227,33 @@ impl CampaignSpec {
                     }
                     self.fault_scale_permille = value;
                 }
-                "dns_entries" => {
+                "dns_entry" => {
                     let array = val
                         .as_array()
-                        .ok_or_else(|| CliError("dns_entries must be a JSON array".into()))?;
+                        .ok_or_else(|| CliError("dns_entry must be a JSON array".into()))?;
                     self.dns_entries = array
                         .iter()
                         .map(|v| {
                             let entry = v.as_str().ok_or_else(|| {
-                                CliError("dns_entries entries must be strings".into())
+                                CliError("dns_entry entries must be strings".into())
                             })?;
                             // A spec file bypasses the CLI value grammar, so run
                             // the same validator here: a malformed table must fail
                             // at parse time, not as an opaque child-run refusal in
                             // every generation.
-                            crate::values::dns_entry("dns_entries", entry)
+                            crate::values::dns_entry("dns_entry", entry)
                                 .map_err(|error| CliError(format!("campaign spec {error}")))?;
                             Ok(entry.to_string())
                         })
                         .collect::<Result<_, CliError>>()?;
                 }
-                "address_layout" => self.address_layout = Some(json_address_layout(key, val)?),
+                "allow_randomized_address_layout" => {
+                    self.address_layout = Some(if json_bool(key, val)? {
+                        patina_dst_trace::AddressLayout::Randomized
+                    } else {
+                        patina_dst_trace::AddressLayout::Fixed
+                    });
+                }
                 "cpus" => {
                     let cpus = json_u64(key, val)?;
                     // A spec file bypasses the CLI value grammar; hold it to the
@@ -302,20 +300,20 @@ impl CampaignSpec {
                         _ => return Err(CliError("mount must be a directory path".into())),
                     });
                 }
-                "allow_symbols" => {
+                "allow" => {
                     let array = val
                         .as_array()
-                        .ok_or_else(|| CliError("allow_symbols must be a JSON array".into()))?;
+                        .ok_or_else(|| CliError("allow must be a JSON array".into()))?;
                     self.allow_symbols = array
                         .iter()
                         .map(|v| {
-                            let symbol = v.as_str().ok_or_else(|| {
-                                CliError("allow_symbols entries must be strings".into())
-                            })?;
+                            let symbol = v
+                                .as_str()
+                                .ok_or_else(|| CliError("allow entries must be strings".into()))?;
                             // A spec file bypasses the CLI value grammar; hold it to
                             // the same one so an empty symbol fails here rather than
                             // as an opaque child-run refusal in every generation.
-                            crate::values::validate(help::Kind::Symbol, "allow_symbols", symbol)
+                            crate::values::validate(help::Kind::Symbol, "allow", symbol)
                                 .map_err(|error| CliError(format!("campaign spec {error}")))?;
                             Ok(symbol.to_string())
                         })
@@ -343,26 +341,23 @@ impl CampaignSpec {
                     .map_err(CliError)?;
                     self.compute_watchdog_ms = Some(bound);
                 }
-                "watchdog_nanos" => self.watchdog_nanos = Some(json_u64(key, val)?),
-                "converge_nanos" => self.converge_nanos = Some(json_u64(key, val)?),
-                "heal_after_nanos" => self.heal_after_nanos = Some(json_u64(key, val)?),
-                "report" => self.report = json_bool(key, val)?,
-                "generation_log" => self.generation_log = json_bool(key, val)?,
+                "liveness_watchdog" => self.watchdog_nanos = Some(json_u64(key, val)?),
+                "converge_within" => self.converge_nanos = Some(json_u64(key, val)?),
+                "heal_after" => self.heal_after_nanos = Some(json_u64(key, val)?),
                 "plateau_after" => self.plateau_after = json_u64(key, val)?,
                 "guided" => self.guided = json_bool(key, val)?,
                 "allow_unmet_sometimes" => self.allow_unmet_sometimes = json_bool(key, val)?,
                 "classify" => self.classify = json_classify_rules(val)?,
-                "verify" => self.verify = json_bool(key, val)?,
+                "no_verify" => self.verify = !json_bool(key, val)?,
                 other => {
                     return Err(CliError(format!(
-                        "unknown campaign spec key {other:?}; expected generations, seed_base, \
-                         timeout_secs, guest_args, swarm, vary, exclude_knobs, \
-                         fault_scale_permille, \
-                         dns_entries, \
-                         allow_symbols, allow_unsupported_symbols, address_layout, \
-                         cpus, mount, watchdog_nanos, \
-                         compute_watchdog_ms, converge_nanos, heal_after_nanos, report, plateau_after, guided, \
-                         allow_unmet_sometimes, verify, or classify"
+                        "unknown campaign spec key {other:?}; a key is its campaign flag's name \
+                         (gens, seed_start, timeout_secs, swarm, vary, fault_scale_permille, \
+                         dns_entry, allow, allow_unsupported_symbols, \
+                         allow_randomized_address_layout, cpus, mount, liveness_watchdog, \
+                         compute_watchdog_ms, converge_within, heal_after, plateau_after, guided, \
+                         allow_unmet_sometimes, no_verify), or guest_args, exclude_knobs or \
+                         classify"
                     )));
                 }
             }
@@ -375,19 +370,6 @@ fn json_u64(key: &str, value: &serde_json::Value) -> Result<u64, CliError> {
     value
         .as_u64()
         .ok_or_else(|| CliError(format!("campaign spec {key:?} must be an unsigned integer")))
-}
-
-fn json_address_layout(
-    key: &str,
-    value: &serde_json::Value,
-) -> Result<patina_dst_trace::AddressLayout, CliError> {
-    match value.as_str() {
-        Some("fixed") => Ok(patina_dst_trace::AddressLayout::Fixed),
-        Some("randomized") => Ok(patina_dst_trace::AddressLayout::Randomized),
-        _ => Err(CliError(format!(
-            "campaign spec {key:?} must be \"fixed\" or \"randomized\""
-        ))),
-    }
 }
 
 /// `"vary"`: an array of `--vary` dimensions.
@@ -645,8 +627,8 @@ pub(crate) fn resolve_mount(spec: &mut CampaignSpec) -> Result<(), CliError> {
 }
 
 /// A `--mount` as an absolute [`Mount`] with its corpus hash: a relative path
-/// would resolve against whichever directory a later `--extend`, `--resume`
-/// or pasted reproduce command runs from.
+/// would resolve against whichever directory a later continuation or pasted
+/// reproduce command runs from.
 pub(crate) fn absolute_mount(mount: &Mount) -> Result<Mount, CliError> {
     let dir = &mount.dir;
     let path = std::path::Path::new(dir);
@@ -676,8 +658,8 @@ mod tests {
     use super::super::state::{spec_from_state_json, spec_to_json};
     use super::*;
 
-    /// Every opt-in part of a spec rides the recorded spec, so `--resume` and
-    /// `--extend` continue the campaign the fresh run started, and is
+    /// Every opt-in part of a spec rides the recorded spec, so a continuation
+    /// continues the campaign the fresh run started, and is
     /// default-omitted from the JSON.
     #[test]
     fn opt_in_spec_fields_round_trip_and_are_omitted_by_default() {
@@ -729,11 +711,11 @@ mod tests {
         let bare = spec_to_json(&CampaignSpec::default());
         for key in [
             "classify",
-            "verify",
-            "dns_entries",
-            "allow_symbols",
+            "no_verify",
+            "dns_entry",
+            "allow",
             "allow_unsupported_symbols",
-            "address_layout",
+            "allow_randomized_address_layout",
             "exclude_knobs",
         ] {
             assert!(bare.get(key).is_none(), "a bare spec must not record {key}");
@@ -769,8 +751,12 @@ mod tests {
     fn a_spec_file_is_grammar_validated() {
         for source in [
             r#"{"bogus": 1}"#,
-            r#"{"dns_entries": ["db.internal=nope"]}"#,
-            r#"{"allow_symbols": [""]}"#,
+            r#"{"dns_entry": ["db.internal=nope"]}"#,
+            r#"{"allow": [""]}"#,
+            r#"{"allow_randomized_address_layout": "randomized"}"#,
+            // The keys before they were named after their flags.
+            r#"{"generations": 1}"#,
+            r#"{"seed_base": 1}"#,
             r#"{"allow_unsupported_symbols": ""}"#,
             r#"{"fs_crash_reach": ["write:3"]}"#,
             r#"{"exclude_knobs": ["--net-bogus-permille"]}"#,
@@ -791,7 +777,7 @@ mod tests {
         }
         let mut spec = CampaignSpec::default();
         spec.apply_json(&serde_json::json!({
-            "generations": 12,
+            "gens": 12,
             "vary": ["buggify", "net"],
             "exclude_knobs": ["--net-connect-refuse-permille"],
         }))

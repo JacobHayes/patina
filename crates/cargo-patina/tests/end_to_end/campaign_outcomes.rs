@@ -359,7 +359,7 @@ fn main() {
             "expected a mix of LIVENESS and OK generations, got liveness={liveness_gens} ok={ok_gens}\n{stdout}"
         );
 
-        // The signature store deduplicates the planted liveness bug into ONE signature
+        // The campaign deduplicates the planted liveness bug into ONE signature
         // whose count equals the number of generations that fired it, and flags it as
         // first seen exactly once (NOVEL appears once).
         assert_eq!(
@@ -367,14 +367,14 @@ fn main() {
             1,
             "the single planted bug must produce exactly one NOVEL signature\n{stdout}"
         );
-        let store: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(out.join("signatures.json")).unwrap())
+        let state: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
                 .unwrap();
-        let signatures = store["signatures"].as_array().unwrap();
+        let signatures = state["signatures"].as_array().unwrap();
         assert_eq!(
             signatures.len(),
             1,
-            "expected exactly one deduplicated signature: {store:#}"
+            "expected exactly one deduplicated signature: {state:#}"
         );
         let signature = &signatures[0];
         assert_eq!(signature["class"], "liveness");
@@ -383,14 +383,10 @@ fn main() {
             liveness_gens,
             "signature count must equal the number of LIVENESS generations"
         );
-        let state: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
-                .unwrap();
         assert_eq!(state["schema"], "patina.campaign.state/v4");
         assert_eq!(state["generations_done"], 12);
         assert_eq!(state["artifact"]["path"], guest.to_str().unwrap());
         assert!(state["artifact"]["sha256"].as_str().unwrap().len() == 64);
-        assert_eq!(state["signatures"], store["signatures"]);
         assert_eq!(state["invocations"].as_array().unwrap().len(), 1);
 
         // The campaign replayed the liveness stop's recording itself before

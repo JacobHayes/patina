@@ -168,7 +168,7 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   finding. Audit source-first (or a `patina build` artifact): only a
   shim-linked binary shows the true post-interposition residual, so a stock
   prebuilt binary is refused unless `--raw`.
-- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
+- `patina campaign <ARTIFACT|SOURCE> [--gens N] [--out-dir DIR] [--spec FILE.json] [--seed-start N] [--plateau-after N] [--guided] [--allow-unmet-sometimes] [--vary DIM,...] [--fault-scale-permille N] [--swarm] [--dns-entry NAME=ADDR]... [--liveness-watchdog NANOS] [--converge-within NANOS] [--no-verify] [--allow SYMBOL] [--allow-unsupported-symbols all|name,...] [--allow-randomized-address-layout] [--cpus N] [--mount HOST_DIR[:GUEST_DIR]]` (`--mount`: the corpus every generation captures, at GUEST_DIR or `/`, forwarded to every reproduce command)
   Config-driven deterministic fault-and-schedule sweep: every generation's seed
   and knobs are a pure function of the generation number. `--vary DIM,...`
   names what each generation draws: `buggify` (fresh fire odds), `sched-pct`
@@ -246,7 +246,11 @@ control plane: only the supervisor sets it, and an inherited one is stripped.
   campaign: it finishes an interrupted one, runs the missing generations when
   `--gens` is larger, and otherwise runs nothing and reports the recorded
   result with the same exit status. A command for another artifact or other
-  settings is refused, naming what differs.
+  settings is refused, naming what differs. Without the artifact,
+  `patina campaign [--out-dir DIR] [--gens N]` continues the recorded campaign
+  as it is. Every generation's seed, run flags, class and verdicts are appended
+  to `<out-dir>/generations.jsonl`. A spec key is its flag's name in snake
+  case (`"gens"`, `"seed_start"`, `"vary"`, `"dns_entry"`, `"allow"`, ...).
 - `patina coverage <BINARY> <MAP|CAMPAIGN-OUT-DIR> [--focus CRATE::module] [--top N]`
   Read-only offline symbolization for native edge coverage (`--instrument`, or a
   Go guest). Resolves covmap PCs from the `patina_yield_point` anchor, demangles

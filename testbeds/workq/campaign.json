@@ -1,5 +1,5 @@
 {
-  "generations": 200,
+  "gens": 200,
   "guest_args": ["--seed", "7", "--base-port", "5001", "--data-dir", "/workq",
                  "--segment-bytes", "256", "--crash-at-completed", "6",
                  "--ack-ledger", "/workq-acks"],

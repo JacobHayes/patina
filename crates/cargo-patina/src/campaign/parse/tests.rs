@@ -15,7 +15,7 @@ fn flags_override_the_spec_in_either_order_and_absence_overrides_nothing() {
     let path = dir.path().join("spec.json");
     fs::write(
         &path,
-        br#"{"generations": 7, "swarm": true, "vary": ["buggify"], "watchdog_nanos": 11}"#,
+        br#"{"gens": 7, "swarm": true, "vary": ["buggify"], "liveness_watchdog": 11}"#,
     )
     .expect("write spec");
     let spec = path.display().to_string();
@@ -177,7 +177,7 @@ fn vary_names_what_each_generation_draws() {
     for gone in ["--buggify", "--faults", "--yield-stride"] {
         assert!(refusal(&["art", gone]).contains(gone));
     }
-    assert!(refusal(&["--extend", "1", "--vary", "net"]).contains("--vary"));
+    assert!(refusal(&["--vary", "net"]).contains("--vary"));
 }
 
 /// A spec's knob exclusion applies once the flags are merged, and is refused
@@ -252,33 +252,28 @@ fn allow_unmet_sometimes_parses_flag_and_spec_shapes() {
 }
 
 #[test]
-fn continuation_modes_parse_and_reject_resupplied_spec() {
+fn a_command_without_an_artifact_continues_and_takes_no_setting() {
     let args = |values: &[&str]| values.iter().map(OsString::from).collect::<Vec<_>>();
-    let extend = parse(args(&["--extend", "7", "--out-dir", "d"])).unwrap();
-    assert_eq!(extend.artifact, None);
-    assert_eq!(extend.mode, CampaignMode::Extend { additional: 7 });
-    assert_eq!(extend.out_dir, PathBuf::from("d"));
-    let resume = parse(args(&[
-        "--resume",
-        "--timeout-secs",
-        "120",
-        "--progress-every",
-        "2",
-    ]))
-    .unwrap();
-    assert_eq!(resume.mode, CampaignMode::Resume);
-    assert_eq!(resume.timeout_secs_override, Some(120));
-    assert_eq!(resume.progress_every, 2);
+    let to_seven = parse(args(&["--gens", "7", "--out-dir", "d"])).unwrap();
+    assert_eq!(to_seven.artifact, None);
+    assert_eq!(to_seven.mode, CampaignMode::Continue { gens: Some(7) });
+    assert_eq!(to_seven.out_dir, PathBuf::from("d"));
+    let as_recorded = parse(args(&["--timeout-secs", "120", "--progress-every", "2"])).unwrap();
+    assert_eq!(as_recorded.mode, CampaignMode::Continue { gens: None });
+    assert_eq!(as_recorded.timeout_secs_override, Some(120));
+    assert_eq!(as_recorded.progress_every, 2);
+    // A typed timeout is this invocation's, whichever mode it runs in.
+    let fresh = parse(args(&["art", "--timeout-secs", "9"])).unwrap();
+    assert_eq!(fresh.mode, CampaignMode::Fresh);
+    assert_eq!(fresh.timeout_secs_override, Some(9));
+    assert_eq!(fresh.spec.timeout_secs, 9);
 
-    assert!(refusal(&["--extend", "0"]).contains("--extend"));
-    assert!(refusal(&["--extend", "1", "--resume"]).contains("--resume"));
-    assert!(refusal(&["guest", "--extend", "1"]).contains("--extend"));
-    assert!(refusal(&["--extend", "1", "--", "guest-arg"]).contains("--extend"));
-    for flag in ["--gens", "--spec", "--swarm", "--vary"] {
+    assert!(refusal(&["--", "guest-arg"]).contains("guest arguments"));
+    for flag in ["--spec", "--swarm", "--vary", "--seed-start"] {
         let values: Vec<&str> = match flag {
-            "--swarm" => vec!["--extend", "1", flag],
-            "--vary" => vec!["--extend", "1", flag, "net"],
-            _ => vec!["--extend", "1", flag, "1"],
+            "--swarm" => vec![flag],
+            "--vary" => vec![flag, "net"],
+            _ => vec![flag, "1"],
         };
         let message = refusal(&values);
         assert!(message.contains(flag), "{message}");
@@ -302,7 +297,7 @@ fn the_native_invocation_flags_parse_into_the_spec() {
     assert_eq!(inv.spec.allow_unsupported_symbols.as_deref(), Some("all"));
     // They describe the campaign's shape, so a continuation cannot change them.
     for flag in ["--allow=dlsym", "--allow-unsupported-symbols=all"] {
-        let error = refusal(&["--resume", flag]);
+        let error = refusal(&[flag]);
         assert!(
             error.contains(flag.split('=').next().unwrap()),
             "{flag} must be refused on a continuation, got {error}"

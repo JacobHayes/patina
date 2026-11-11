@@ -10,9 +10,12 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CampaignMode {
+    /// An artifact was given: start a campaign in the out-dir, or continue
+    /// the one it holds when the command describes the same campaign.
     Fresh,
-    Extend { additional: u64 },
-    Resume,
+    /// No artifact: continue the out-dir's recorded campaign as it is,
+    /// toward `gens` generations when given.
+    Continue { gens: Option<u64> },
 }
 
 /// A parsed `campaign` invocation.
@@ -22,9 +25,9 @@ pub struct CampaignInvocation {
     pub(super) out_dir: PathBuf,
     pub(super) spec: CampaignSpec,
     pub(super) mode: CampaignMode,
-    /// A continuation-only host-side timeout override. It does not rewrite the
-    /// out-dir's recorded spec; the effective value is recorded on the invocation
-    /// audit record.
+    /// A typed `--timeout-secs`. A continuation runs under it without
+    /// rewriting the out-dir's recorded spec; the effective value is recorded
+    /// on the invocation audit record.
     pub(super) timeout_secs_override: Option<u64>,
     /// Human-mode progress-heartbeat cadence (generations per
     /// `PATINA_CAMPAIGN_PROGRESS` line). Presentation only — it never affects the
@@ -39,8 +42,8 @@ pub struct CampaignInvocation {
 // Parsing + dispatch
 // ===========================================================================
 
-/// Parse `campaign <ARTIFACT> [flags] [-- GUEST_ARGS…] |
-/// campaign --extend N [--out-dir DIR] | campaign --resume [--out-dir DIR]`.
+/// Parse `campaign <ARTIFACT> [flags] [-- GUEST_ARGS…]`, or the artifact-free
+/// continuation `campaign [--out-dir DIR] [--gens N]`.
 pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliError> {
     let cli_line = campaign_cli(&arguments);
 
@@ -56,29 +59,24 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
 
     // Options may lead the artifact (`campaign --gens 5 ./app`), so locate it
-    // registry-arity-aware rather than insisting it be the first token. In
-    // continuation mode, the absence of an artifact is intentional; a positional
-    // that is present is rejected after parsing so the error names the doctrine.
+    // registry-arity-aware rather than insisting it be the first token.
     let scan = crate::locate_positionals("campaign", &arguments, 1);
     let artifact = scan.positionals.into_iter().next().map(PathBuf::from);
     let args = cli::parse("campaign", help::Family::Sole, scan.rest)?;
 
-    // In continuation mode the out-dir's recorded spec is authoritative, so any
-    // typed flag that would change it is refused. The permitted set is the
-    // handful of knobs that describe THIS invocation rather than the campaign's
-    // shape. An environment default yields to the recorded spec as it yields to
-    // a typed flag, so it is ignored here rather than refused.
-    let (extend, resume) = args.exclusive(
-        "--extend",
-        "--resume",
-        "--extend and --resume are redundant; choose exactly one continuation mode",
-    )?;
-    let mode = match args.u64("--extend").filter(|_| extend) {
-        Some(additional) => CampaignMode::Extend { additional },
-        None if resume => CampaignMode::Resume,
-        None => CampaignMode::Fresh,
+    // Without an artifact the command continues the out-dir's recorded
+    // campaign, whose spec is authoritative, so any typed flag that would
+    // change it is refused. The permitted set is the handful that describe
+    // THIS invocation rather than the campaign's shape, and the generation
+    // target. An environment default yields to the recorded spec as it yields
+    // to a typed flag, so it is ignored here rather than refused.
+    let mode = match artifact {
+        Some(_) => CampaignMode::Fresh,
+        None => CampaignMode::Continue {
+            gens: args.u64("--gens").filter(|_| args.typed("--gens")),
+        },
     };
-    if !matches!(mode, CampaignMode::Fresh) {
+    if let CampaignMode::Continue { .. } = mode {
         for flag in help::verb("campaign")
             .expect("`campaign` is registered")
             .family_flags(help::Family::Sole)
@@ -110,8 +108,6 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     if let Some(value) = args.u64("--fault-scale-permille") {
         spec.fault_scale_permille = value;
     }
-    spec.report |= args.flag("--report-failures");
-    spec.generation_log |= args.flag("--generation-log");
     if args.flag("--no-verify") {
         spec.verify = false;
     }
@@ -134,10 +130,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     }
     // A continuation's recorded spec is authoritative, so an environment
     // default (PATINA_MOUNT) is not resolved there, where it would be ignored.
-    if let Some(dir) = args
-        .path("--mount")
-        .filter(|_| matches!(mode, CampaignMode::Fresh))
-    {
+    if let Some(dir) = args.path("--mount").filter(|_| mode == CampaignMode::Fresh) {
         let dir = dir.to_str().ok_or_else(|| {
             CliError(format!(
                 "campaign --mount {} is not a UTF-8 path",
@@ -166,11 +159,9 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
         .u64("--progress-every")
         .unwrap_or(DEFAULT_PROGRESS_EVERY);
     let timeout_secs = args.u64("--timeout-secs");
+    let timeout_secs_override = timeout_secs.filter(|_| args.typed("--timeout-secs"));
 
-    if !matches!(mode, CampaignMode::Fresh) {
-        if artifact.is_some() {
-            return Err(reject_continuation_override("artifact positional"));
-        }
+    if let CampaignMode::Continue { .. } = mode {
         if !guest_args.is_empty() {
             return Err(reject_continuation_override("guest arguments"));
         }
@@ -179,7 +170,7 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
             out_dir,
             spec,
             mode,
-            timeout_secs_override: timeout_secs,
+            timeout_secs_override,
             progress_every,
             cli: cli_line,
         });
@@ -216,27 +207,20 @@ pub fn parse(mut arguments: Vec<OsString>) -> Result<CampaignInvocation, CliErro
     validate_exclusions(&spec)?;
     validate_swarm(&spec)?;
     Ok(CampaignInvocation {
-        artifact: Some(
-            artifact.ok_or_else(|| CliError::usage("campaign requires a native binary path"))?,
-        ),
+        artifact,
         out_dir,
         spec,
         mode,
-        timeout_secs_override: None,
+        timeout_secs_override,
         progress_every,
         cli: cli_line,
     })
 }
 
-/// The flags a continuation (`--extend`/`--resume`) still accepts: they describe
-/// this invocation, not the campaign's shape, which the recorded spec owns.
-const CONTINUATION_FLAGS: &[&str] = &[
-    "--extend",
-    "--resume",
-    "--out-dir",
-    "--timeout-secs",
-    "--progress-every",
-];
+/// The flags an artifact-free continuation accepts: the generation target,
+/// and what describes this invocation rather than the campaign's shape, which
+/// the recorded spec owns.
+const CONTINUATION_FLAGS: &[&str] = &["--gens", "--out-dir", "--timeout-secs", "--progress-every"];
 
 fn campaign_cli(arguments: &[OsString]) -> String {
     let mut parts = vec!["campaign".to_string()];
@@ -255,7 +239,9 @@ fn cli_arg(argument: &OsStr) -> String {
 
 fn reject_continuation_override(name: &str) -> CliError {
     CliError::usage(format!(
-        "{name} cannot be used with --extend/--resume; the out-dir's recorded spec is authoritative; start a new out-dir to change the spec"
+        "{name} needs the artifact: a campaign command without one continues the out-dir's \
+         recorded campaign as it is; give the artifact to start or continue a campaign with \
+         these settings"
     ))
 }
 

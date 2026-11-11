@@ -195,7 +195,7 @@ seed, and with `--vary buggify` its own odds for the fault sites.
 
 ```text
 $ patina campaign ./ledger-guest --vary buggify --gens 20 --out-dir ledger-out
-PATINA_CAMPAIGN_START artifact=./ledger-guest generations=20 seed_base=0 out=/home/you/ledger/ledger-out
+PATINA_CAMPAIGN_START artifact=./ledger-guest generations=20 seed_start=0 out=/home/you/ledger/ledger-out
 PATINA_CAMPAIGN_GEN generation=0 seed=5133223892554006150 class=violation NOVEL verify=replay:reproduced
 PATINA_CAMPAIGN_GEN generation=1 seed=9597900870906850753 class=violation
 [... one line for each failing generation ...]

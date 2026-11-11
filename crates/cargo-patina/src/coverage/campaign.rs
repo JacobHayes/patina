@@ -292,7 +292,7 @@ pub(crate) struct CampaignCoverageStore {
     /// before the store had ever seen one (see
     /// [`Self::note_generation_without_covmap`]). In-memory only: once any
     /// generation folds a real map the floor is absorbed into the persisted
-    /// `generations_applied`, and a `--resume` reads the watermark from there.
+    /// `generations_applied`, and a continuation reads the watermark from there.
     skipped_watermark: u64,
 }
 

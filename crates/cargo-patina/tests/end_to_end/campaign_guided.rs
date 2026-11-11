@@ -75,7 +75,7 @@ fn main() {
     // scheduler; asserting only the second would pass for a no-op.
     //
     // The repeat is a campaign that runs the first generations fresh, survives a
-    // checkpoint tear, and runs the rest through `--extend`. An extended guided
+    // checkpoint tear, and runs the rest through a continuation. A continued guided
     // campaign re-derives generation k from the PERSISTED feature and decision logs
     // rather than from loop-carried state, so matching the fresh stream also proves
     // they are a sufficient and faithful record of the guidance input.
@@ -187,7 +187,6 @@ fn main() {
             "guided-split resumed",
             &run(vec![
                 "campaign".to_string(),
-                "--resume".to_string(),
                 "--progress-every".to_string(),
                 "1".to_string(),
                 "--out-dir".to_string(),
@@ -203,8 +202,8 @@ fn main() {
             "guided-split extended",
             &run(vec![
                 "campaign".to_string(),
-                "--extend".to_string(),
-                (gens - torn - 1).to_string(),
+                "--gens".to_string(),
+                gens.to_string(),
                 "--out-dir".to_string(),
                 split_out.to_str().unwrap().to_string(),
                 "--progress-every".to_string(),
@@ -239,8 +238,8 @@ fn main() {
         // is what actually decides the derivation.
         let toggled = run(vec![
             "campaign".to_string(),
-            "--extend".to_string(),
-            "2".to_string(),
+            "--gens".to_string(),
+            (gens + 2).to_string(),
             "--guided".to_string(),
             "--out-dir".to_string(),
             split_out.to_str().unwrap().to_string(),

@@ -143,7 +143,7 @@ mod tests {
         let state: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(out.join("campaign-state.json")).unwrap())
                 .unwrap();
-        assert_eq!(state["spec"]["verify"], false);
+        assert_eq!(state["spec"]["no_verify"], true);
     }
 
     #[test]

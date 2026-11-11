@@ -230,7 +230,7 @@ pub(super) struct CampaignSummaryInput<'a> {
     pub(super) generations: u64,
     /// The class the campaign as a whole ends in.
     pub(super) result: RunClass,
-    pub(super) store_path: &'a Path,
+    pub(super) out_dir: &'a Path,
     pub(super) sites_path: &'a Path,
 }
 
@@ -290,11 +290,7 @@ the run — the trace resource limit, an unwritable trace; not findings)"
             }
             if let Some(log) = &record.log {
                 // Stored relative to the output directory; shown absolute.
-                let shown = match input.store_path.parent() {
-                    Some(out_dir) => out_dir.join(log).display().to_string(),
-                    None => log.clone(),
-                };
-                println!("      log:       {shown}");
+                println!("      log:       {}", input.out_dir.join(log).display());
             }
             if let Some(verification) = &record.verification {
                 let path = verification.path.as_str();
@@ -316,7 +312,6 @@ the run — the trace resource limit, an unwritable trace; not findings)"
     print_coverage_summary(input.coverage, input.coverage_verdict, input.sites_path);
     print_edge_coverage_summary(input.edge_coverage, input.artifact_path);
     print_guidance_summary(input.guidance);
-    println!("signature store: {}", input.store_path.display());
     let mut complete = format!(
         "PATINA_CAMPAIGN_COMPLETE generations={} failures={} novel={} result={} attribution={}",
         input.generations,
@@ -502,24 +497,24 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         .collect();
     let failures = class_counts_failures(&state.classes);
     let novel = novel_findings(&state.signatures);
-    // Machine-readable pointers to the full on-disk detail. `failures` and
-    // `reports` are directories that exist only once a failing generation has
-    // populated them, so they are announced conditionally rather than promising a
-    // path that may not exist.
+    // Machine-readable pointers to the full on-disk detail. `failures` is a
+    // directory that exists only once a failing generation has populated it,
+    // so it is announced conditionally rather than promising a path that may
+    // not exist.
     let mut artifacts = serde_json::Map::new();
     artifacts.insert("out_dir".into(), input.out_dir.display().to_string().into());
     artifacts.insert(
-        "campaign_state".into(),
-        input.state_path.display().to_string().into(),
-    );
-    artifacts.insert(
-        "signature_store".into(),
+        "generation_log".into(),
         input
             .out_dir
-            .join("signatures.json")
+            .join("generations.jsonl")
             .display()
             .to_string()
             .into(),
+    );
+    artifacts.insert(
+        "campaign_state".into(),
+        input.state_path.display().to_string().into(),
     );
     artifacts.insert(
         "site_coverage".into(),
@@ -537,12 +532,6 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
             input.out_dir.join("failures").display().to_string().into(),
         );
     }
-    if state.spec.report && failures > 0 {
-        artifacts.insert(
-            "reports_dir".into(),
-            input.out_dir.join("reports").display().to_string().into(),
-        );
-    }
     let coverage_json = coverage_envelope_json(
         input.coverage,
         input.coverage_verdict,
@@ -558,7 +547,7 @@ pub(super) fn build_campaign_envelope(input: CampaignEnvelopeInput<'_>) -> serde
         "exit_code": input.result.exit_code(),
         "artifact": state.artifact.path.clone(),
         "generations": state.spec.generations,
-        "seed_base": state.spec.seed_base,
+        "seed_start": state.spec.seed_base,
         "failures": failures,
         "novel_signatures": novel,
         "classes": classes,
@@ -772,8 +761,6 @@ mod tests {
 
         let artifacts = &envelope["artifacts"];
         assert_eq!(artifacts["out_dir"], "out");
-        // No `--report`, so no reports pointer is promised.
-        assert!(artifacts.get("reports_dir").is_none());
 
         let mut clean = fresh_state(1);
         clean.classes.insert("ok".to_string(), 1);

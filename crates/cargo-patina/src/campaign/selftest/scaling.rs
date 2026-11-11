@@ -94,7 +94,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     ));
 
     // (4) RECORDED IN THE OUT-DIR SPEC, and round-tripped losslessly through the
-    // canonical-form gate `--resume`/`--extend` reload through. The default is
+    // canonical-form gate a continuation reloads through. The default is
     // recorded by ABSENCE.
     let json = spec_to_json(&spec);
     let recorded = json.get("fault_scale_permille") == Some(&serde_json::Value::from(LOW));
@@ -116,8 +116,7 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
             .err()
             .map(|error| error.to_string())
     };
-    let on_extend = refused(&["--extend", "3", "--fault-scale-permille", "10"]);
-    let on_resume = refused(&["--resume", "--fault-scale-permille", "10"]);
+    let on_continuation = refused(&["--gens", "3", "--fault-scale-permille", "10"]);
     let fresh_ok = parse(
         ["art", "--vary", "faults", "--fault-scale-permille", "10"]
             .iter()
@@ -127,11 +126,10 @@ pub(super) fn fault_scale_selftest() -> Vec<(&'static str, bool, String)> {
     .map(|invocation| invocation.spec.fault_scale_permille);
     out.push((
         "continuations-refuse-a-changed-fault-scale",
-        on_extend.is_some() && on_resume.is_some() && fresh_ok.as_ref().ok() == Some(&LOW),
+        on_continuation.is_some() && fresh_ok.as_ref().ok() == Some(&LOW),
         format!(
-            "extend={} resume={} fresh={fresh_ok:?}",
-            on_extend.is_some(),
-            on_resume.is_some()
+            "continuation={} fresh={fresh_ok:?}",
+            on_continuation.is_some()
         ),
     ));
 

@@ -434,14 +434,13 @@ mod registry {
             ("replay", help::Family::Sole) => {
                 parse_native_replay(prebuilt("bin"), trace(), with(none, &[])).map(|_| ())
             }
-            // A continuation takes no artifact; every other campaign flag needs
-            // one. `--spec` reads its file while parsing, so the driver makes
+            // Without an artifact a campaign continues its out-dir and takes no
+            // setting, so every flag is driven with one. `--spec` reads its file while parsing, so the driver makes
             // whatever path the sample names a readable empty spec — otherwise
             // the drive would fail for a reason that is not the grammar's. A
             // `--vary` list naming `dns` needs a host table to draw from.
             ("campaign", _) => {
                 let prefix = match flag {
-                    "--extend" | "--resume" => none,
                     "--vary" => vec![
                         "art".to_string(),
                         "--dns-entry=db.internal=10.0.0.5".to_string(),
