@@ -1,6 +1,6 @@
 //! Native address attribution and object, crate, and symbol provenance.
 
-use object::{Object, ObjectSymbol, SymbolKind};
+use object::{Object, ObjectSymbol, SymbolFlags, SymbolKind};
 use std::path::Path;
 
 /// The `object` value for a site whose defining object the linked image does not
@@ -162,6 +162,14 @@ impl NativeProvenanceIndex {
                     .map(str::to_owned);
                 continue;
             }
+            // A local with non-default visibility was a hidden global the
+            // linker demoted. lld lists it inside its own file's run or after
+            // the last one (aws-lc's functions follow `crtstuff.c`), so the
+            // marker is not evidence for it; it does not end the run either.
+            let demoted = matches!(
+                symbol.flags(),
+                SymbolFlags::Elf { st_other, .. } if st_other & 0x3 != object::elf::STV_DEFAULT
+            );
             if !symbol.is_local() {
                 current_file = None;
             }
@@ -177,7 +185,7 @@ impl NativeProvenanceIndex {
             entries.push(AddressProvenance {
                 address: symbol.address(),
                 size: symbol.size(),
-                object_path: current_file.clone(),
+                object_path: current_file.clone().filter(|_| !demoted),
                 archive_member: None,
                 symbol: symbol.name().ok().map(str::to_owned),
             });

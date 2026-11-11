@@ -49,6 +49,72 @@ fn elf_file_symbols_never_reach_past_their_own_local_run() {
     );
 }
 
+// The linker demotes a hidden global to a local and lists it inside its own
+// file's run or after the last one, so it can follow a marker that is not its
+// object's (`crtstuff.c` in a real guest, ahead of aws-lc's functions). Its
+// visibility drops the marker for that symbol alone; the run goes on.
+#[test]
+fn a_demoted_hidden_symbol_does_not_inherit_the_last_file_marker() {
+    use object::write::{Object as WriteObject, Symbol, SymbolSection};
+    use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolScope};
+
+    let mut object = WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+    let text = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+    object.append_section_data(text, &[0x90; 0x100], 16);
+    for (name, kind, address, st_other) in [
+        ("crtstuff.c", SymbolKind::File, 0, object::elf::STV_DEFAULT),
+        (
+            "frame_dummy",
+            SymbolKind::Text,
+            0x10,
+            object::elf::STV_DEFAULT,
+        ),
+        (
+            "demoted_helper",
+            SymbolKind::Text,
+            0x40,
+            object::elf::STV_HIDDEN,
+        ),
+        (
+            "later_local",
+            SymbolKind::Text,
+            0x60,
+            object::elf::STV_DEFAULT,
+        ),
+    ] {
+        let st_type = if kind == SymbolKind::File {
+            object::elf::STT_FILE
+        } else {
+            object::elf::STT_FUNC
+        };
+        object.add_symbol(Symbol {
+            name: name.as_bytes().to_vec(),
+            value: address,
+            size: if kind == SymbolKind::File { 0 } else { 0x10 },
+            kind,
+            scope: SymbolScope::Compilation,
+            weak: false,
+            section: if kind == SymbolKind::File {
+                SymbolSection::None
+            } else {
+                SymbolSection::Section(text)
+            },
+            flags: SymbolFlags::Elf {
+                st_info: object::elf::STB_LOCAL << 4 | st_type,
+                st_other,
+            },
+        });
+    }
+    let bytes = object.write().expect("synthesized ELF is writable");
+    let file = object::File::parse(&*bytes).expect("synthesized ELF parses");
+    let index = NativeProvenanceIndex::new(&file);
+    assert_eq!(index.for_address(0x18, Some(".text")).object, "crtstuff.c");
+    let demoted = index.for_address(0x48, Some(".text"));
+    assert_eq!(demoted.object, UNKNOWN_OBJECT);
+    assert_eq!(demoted.containing_symbol.as_deref(), Some("demoted_helper"));
+    assert_eq!(index.for_address(0x68, Some(".text")).object, "crtstuff.c");
+}
+
 // The bounded lookup must answer exactly what a scan of every entry answers:
 // it only skips entries whose running reach proves they end before the
 // address. The planted tables have a huge early container (whose reach keeps

@@ -233,6 +233,57 @@ pub(super) fn decode_reference(b: &[u8]) -> Option<(usize, Option<i32>)> {
     Some((len, reference))
 }
 
+/// Collect the target of every direct near branch (`call`/`jmp rel32`,
+/// `jmp rel8`, `jcc rel8`/`rel32`, `loop`/`jrcxz`) decoded in `data[range]`,
+/// as absolute addresses passed to `target`, walking boundaries as [`scan`]
+/// does and stopping where it stops.
+pub(super) fn direct_branch_targets(
+    data: &[u8],
+    range: std::ops::Range<usize>,
+    section_address: u64,
+    target: &mut impl FnMut(u64),
+) {
+    let mut offset = range.start;
+    while offset < range.end {
+        let b = &data[offset..range.end];
+        if go_build_marker(b).is_some() {
+            offset += 2 + GO_BUILD_MARKER_DATA;
+            continue;
+        }
+        let len = match decode_one(b) {
+            Step::Insn { len, .. } if len > 0 => len,
+            _ => break,
+        };
+        let insn = &b[..len];
+        let mut p = 0usize;
+        while matches!(
+            insn.get(p).copied(),
+            Some(0x66 | 0x67 | 0xF0 | 0xF2 | 0xF3 | 0x2E | 0x36 | 0x3E | 0x26 | 0x64 | 0x65)
+        ) {
+            p += 1;
+        }
+        if matches!(insn.get(p).copied(), Some(0x40..=0x4F)) {
+            p += 1;
+        }
+        let rel8 = |at: usize| insn.get(at).map(|&byte| i64::from(byte as i8));
+        let rel32 = |at: usize| {
+            insn.get(at..at + 4)
+                .map(|bytes| i64::from(i32::from_le_bytes(bytes.try_into().expect("four bytes"))))
+        };
+        let displacement = match (insn.get(p).copied(), insn.get(p + 1).copied()) {
+            (Some(0xE8 | 0xE9), _) => rel32(p + 1),
+            (Some(0xEB | 0x70..=0x7F | 0xE0..=0xE3), _) => rel8(p + 1),
+            (Some(0x0F), Some(0x80..=0x8F)) => rel32(p + 2),
+            _ => None,
+        };
+        let next = section_address + (offset + len) as u64;
+        if let Some(displacement) = displacement {
+            target(next.wrapping_add_signed(displacement));
+        }
+        offset += len;
+    }
+}
+
 /// Decode the length of the single instruction at `b[0]`, and its category
 /// if the opcode carries one. Returns `Undecodable` for anything the length
 /// rules below do not cover (fail closed).

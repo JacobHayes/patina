@@ -324,11 +324,12 @@ These are contained, not escapes — the run stays deterministic.",
     if !blocked.is_empty() {
         let has_raw_syscall = blocked.iter().any(native_escape_is_sud_manageable);
         let mut message = format!(
-            "refusing to run {}: {} symbol(s) on the blocking/time/scheduling/effect surface are \
-neither interposed by the deterministic runtime nor known-safe (default-deny). Interpose them, or \
-pass --allow NAME (or --allow all) to run anyway with a warning:",
+            "refusing to run {}: {} on the blocking/time/scheduling/effect surface, neither \
+interposed by the deterministic runtime nor known-safe (default-deny). Interpose them, or pass \
+--allow NAME (a symbol's name, or the function an instruction site is in; or --allow all) to run \
+anyway with a warning:",
             binary.display(),
-            blocked.len()
+            FindingCounts::of(&blocked).describe(&blocked),
         );
         for escape in &blocked {
             message.push_str(&format!("\n  {}", native_escape_summary(escape)));
@@ -362,9 +363,9 @@ source/package to `patina run` to link the current shim.",
             );
         }
         if let Some(note) = render_cpu_nondeterminism_note(&blocked) {
-            // Instruction-class findings have no symbol name, so `--allow` can
-            // never clear one; and only the timestamp counter is trappable at
-            // all. Say both, rather than leaving the operator to infer them.
+            // An instruction finding is allowed by the function it is in, not
+            // its offset; and only the timestamp counter is trappable at all.
+            // Say both, rather than leaving the operator to infer them.
             message.push('\n');
             message.push_str(&note);
         }
@@ -435,10 +436,9 @@ NAME (or --allow all) to run anyway with a warning, but determinism is then only
 
     if !downgraded.is_empty() {
         note(&format!(
-            "patina: WARNING: running {} with {} UNSUPPORTED symbol(s) downgraded from error by \
---allow:",
+            "patina: WARNING: running {} with {} UNSUPPORTED, downgraded from error by --allow:",
             binary.display(),
-            downgraded.len()
+            FindingCounts::of(&downgraded).describe(&downgraded),
         ));
         for escape in &downgraded {
             note(&format!("patina:   {}", native_escape_summary(escape)));
@@ -459,6 +459,62 @@ This run's determinism is NOT guaranteed and any \"deterministic\" claim on it i
         note(&text);
     }
     Ok(downgraded)
+}
+
+/// How many of a verdict's findings are symbols (imports, bindings, load-time
+/// facts) and how many are code sites (an instruction or immediate at a
+/// section offset), which `--allow` names by the function a site is in.
+#[derive(Debug, PartialEq, Eq)]
+struct FindingCounts {
+    symbols: usize,
+    sites: usize,
+}
+
+impl FindingCounts {
+    fn of(findings: &[NativeEscape]) -> Self {
+        let sites = findings
+            .iter()
+            .filter(|escape| escape.is_code_site())
+            .count();
+        Self {
+            symbols: findings.len() - sites,
+            sites,
+        }
+    }
+
+    /// `N symbol(s)` and/or `M instruction site(s) (rdrand in f, ...)`: the
+    /// sites are summarized on this one line, which is what `patina test`
+    /// shows as a target's reason.
+    fn describe(&self, findings: &[NativeEscape]) -> String {
+        const SHOWN: usize = 3;
+        let mut parts = Vec::new();
+        if self.symbols > 0 {
+            parts.push(format!("{} symbol(s)", self.symbols));
+        }
+        if self.sites > 0 {
+            let mut named: Vec<String> = findings
+                .iter()
+                .filter(|escape| escape.is_code_site())
+                .take(SHOWN)
+                .map(|escape| {
+                    let what = escape.mnemonic.unwrap_or(escape.category);
+                    match escape.containing_symbol() {
+                        Some(function) => format!("{what} in {function}"),
+                        None => format!("{what} at {}", escape.symbol),
+                    }
+                })
+                .collect();
+            if self.sites > SHOWN {
+                named.push("...".into());
+            }
+            parts.push(format!(
+                "{} instruction site(s) ({})",
+                self.sites,
+                named.join(", ")
+            ));
+        }
+        parts.join(" and ")
+    }
 }
 
 #[cfg(test)]

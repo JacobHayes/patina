@@ -113,10 +113,11 @@ pub fn render_inert_weak_imports(imports: &[String]) -> Option<String> {
 /// The refusal note for `cpu-nondeterminism` *instruction* findings that are
 /// blocked, or `None` when the blocked set has none.
 ///
-/// Two things were previously left unsaid at a refusal, and both misled:
+/// It says two things a refusal otherwise leaves the operator to infer:
 ///
-/// 1. an instruction finding has no symbol name, so `--allow <symbol>` can never
-///    clear one — the finding's "symbol" is a `.text` offset;
+/// 1. an instruction finding is named by its section offset, which moves on
+///    every relink, so `run --allow` admits it by the function it is in (the
+///    containing symbol its provenance names), as a qualified run;
 /// 2. `rdtsc`/`rdtscp` ARE trap-managed on x86-64 Linux, so the same binary that
 ///    is refused here runs contained there, while `rdrand`/`rdseed`/`mrs CNTVCT`
 ///    are refused everywhere because no mechanism traps them.
@@ -145,8 +146,9 @@ pub fn render_cpu_nondeterminism_note(blocked: &[NativeEscape]) -> Option<String
         .collect();
 
     let mut note = String::from(
-        "note: the cpu-nondeterminism finding(s) above are INSTRUCTIONS, not imports: each names a \
-         .text offset, so --allow <symbol> cannot clear one (there is no symbol to allow).",
+        "note: the cpu-nondeterminism finding(s) above are INSTRUCTIONS, not imports: each is \
+         named by a section offset that moves on every relink, so `run --allow FUNCTION` admits \
+         one by the function its provenance names (symbol=...), with a warning.",
     );
     if !trappable.is_empty() {
         note.push_str(&format!(
@@ -159,10 +161,13 @@ pub fn render_cpu_nondeterminism_note(blocked: &[NativeEscape]) -> Option<String
     }
     if !untrappable.is_empty() {
         note.push_str(&format!(
-            " The {} site(s) are unallowable AND untrappable anywhere: no mechanism intercepts a \
-             hardware entropy read or the arm64 system counter, so the deterministic runtime can \
-             neither model nor contain them. The only fix is to remove the instruction — use the \
-             interposed entropy/clock entry points (getrandom/clock_gettime) instead.",
+            " The {} site(s) are untrappable anywhere: no mechanism intercepts a hardware \
+             entropy read or the arm64 system counter, so the deterministic runtime can neither \
+             model nor contain them. Allowing one is sound only if the guest never executes it \
+             under the run; a library that picks its entropy source at run time (from the CPU's \
+             feature bits) may well execute it, and the run then reads the host. The fix is to \
+             keep the instruction off the path: use the interposed entropy/clock entry points \
+             (getrandom/clock_gettime), or build the library without its hardware-RNG source.",
             untrappable.into_iter().collect::<Vec<_>>().join("/")
         ));
     }
@@ -171,8 +176,7 @@ pub fn render_cpu_nondeterminism_note(blocked: &[NativeEscape]) -> Option<String
 
 /// The refusal note for blocked thread-pointer instruction findings, naming the
 /// instructions, or `None` when the blocked set has none. Like the
-/// cpu-nondeterminism note it says what the finding is and what fixes it, since
-/// an instruction offset has no symbol for `--allow` to clear.
+/// cpu-nondeterminism note it says what the finding is and what fixes it.
 pub fn render_thread_pointer_note(blocked: &[NativeEscape]) -> Option<String> {
     let sites: Vec<&NativeEscape> = blocked
         .iter()
@@ -189,9 +193,9 @@ pub fn render_thread_pointer_note(blocked: &[NativeEscape]) -> Option<String> {
          pointer. The shim linked into the guest finds its own per-thread state through that \
          pointer, so a guest that moves it corrupts the runtime (x86-64's syscall door, \
          arch_prctl(ARCH_SET_FS), is refused for the same reason). No trap intercepts the \
-         write, and an instruction offset has no symbol for --allow to clear. Remove the \
-         instruction: keep glibc's thread-local storage (the pointer glibc installs) rather \
-         than installing your own.",
+         write; `run --allow FUNCTION`, naming the function a site is in, admits it only for a \
+         guest that never executes it. Remove the instruction: keep glibc's thread-local \
+         storage (the pointer glibc installs) rather than installing your own.",
         mnemonics.into_iter().collect::<Vec<_>>().join("/")
     ))
 }

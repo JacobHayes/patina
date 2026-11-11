@@ -8,11 +8,14 @@
 //! are removed. Only a sized STT_FUNC in a section's ordinary .symtab licenses
 //! omitting gaps. Otherwise the whole-section scan is added, even with FDEs or
 //! dynamic exports. NOTYPE labels and unsized functions add entry walks bounded
-//! by every containing declaration, or the next entry/section end in a gap.
+//! by every containing declaration, or the next entry/section end in a gap;
+//! a local default-visibility NOTYPE label in an omitted gap names data and adds
+//! none, unless a direct branch from walked code lands in its gap.
 //! Malformed metadata is an error, never a reason to use a narrower source.
 //!
-//! Residuals: lying/short sizes, undeclared entries into gaps or operands, and
-//! runtime-generated code can evade static discovery. Active Linux x86 SUD/TSC
+//! Residuals: lying/short sizes, undeclared entries into gaps or operands, an
+//! untyped CFI-less routine under a local label reached only through a pointer,
+//! and runtime-generated code can evade static discovery. Active Linux x86 SUD/TSC
 //! traps backstop syscall/counter reads, not pre-trap startup. Entropy reads,
 //! TLS writes and far transfers have no equivalent runtime trap; CPUID/PKRU
 //! remain unmanaged. The full-section vsyscall pattern check cannot cover
@@ -27,17 +30,18 @@ use object::{
     SymbolSection,
 };
 
-use super::TargetError;
+use super::{TargetError, x86_scan};
 
 #[derive(Default)]
 pub(super) struct CodeRanges {
     sections: BTreeMap<usize, Vec<Range<usize>>>,
 }
 
-struct TextSection {
+struct TextSection<'data> {
     index: usize,
     address: u64,
     end: u64,
+    data: &'data [u8],
 }
 
 impl CodeRanges {
@@ -53,7 +57,8 @@ impl CodeRanges {
         }
         let mut sections = Vec::new();
         for section in file.sections().filter(|s| s.kind() == SectionKind::Text) {
-            let size = section.data().map_err(TargetError::Parse)?.len() as u64;
+            let data = section.data().map_err(TargetError::Parse)?;
+            let size = data.len() as u64;
             let end = section
                 .address()
                 .checked_add(size)
@@ -62,16 +67,20 @@ impl CodeRanges {
                 index: section.index().0,
                 address: section.address(),
                 end,
+                data,
             });
         }
         let mut unsized_starts = BTreeSet::new();
+        // Local untyped labels: entries inside a declaration, data names in a
+        // gap (see the per-section pass below).
+        let mut local_labels = BTreeSet::new();
         let mut sized_symtab_sections = BTreeSet::new();
         for (symbol, symtab) in file
             .symbols()
             .map(|s| (s, true))
             .chain(file.dynamic_symbols().map(|s| (s, false)))
         {
-            let SymbolFlags::Elf { st_info, .. } = symbol.flags() else {
+            let SymbolFlags::Elf { st_info, st_other } = symbol.flags() else {
                 continue;
             };
             let kind = st_info & 0x0f;
@@ -108,7 +117,16 @@ impl CodeRanges {
             }
             if symbol.size() == 0 || kind == object::elf::STT_NOTYPE {
                 if start < section.end {
-                    unsized_starts.insert((section.index, (start - section.address) as usize));
+                    let entry = (section.index, (start - section.address) as usize);
+                    if symtab
+                        && kind == object::elf::STT_NOTYPE
+                        && st_info >> 4 == object::elf::STB_LOCAL
+                        && st_other & 0x3 == object::elf::STV_DEFAULT
+                    {
+                        local_labels.insert(entry);
+                    } else {
+                        unsized_starts.insert(entry);
+                    }
                 }
             } else {
                 result.insert(section, start, end);
@@ -173,25 +191,57 @@ impl CodeRanges {
         // declaration shares the start. In gaps, stop at the next known entry.
         // Only original declarations bound these suffixes, never inferred ranges
         // or the whole-section fallback added below.
+        //
+        // A local untyped label is an entry too, except in a gap of a section
+        // whose gaps are omitted (it has a sized .symtab function), where no
+        // decoded direct branch lands: there it names data. Hand-written
+        // assembly that stores constant tables in .text after a function's
+        // `.size` (s2n-bignum's curve tables) names them this way, and reaches
+        // them with `lea`, never a branch. A file-local label declares nothing
+        // a `.L` label does not: the assembler keeps `Lname` in .symtab and
+        // drops `.Lname` by spelling alone, and an unlabeled gap is already
+        // unscanned. A linker can also demote a global to a local, though: a
+        // `.hidden` one (lld keeps its hidden visibility) or one a version
+        // script localizes (GNU ld and lld alike leave it default), and either
+        // is code other objects call. So a label keeps its walk when it is
+        // non-default visibility, when any direct call, jump or conditional
+        // branch in the walked code lands in its gap (repeated until no walk
+        // is added), and when it is global or weak, in .dynsym, a zero-sized
+        // function, inside a declared function or FDE, or in a section walked
+        // whole.
+        let mut dropped = Vec::new();
         for section in &sections {
             let ranges = result.sections.entry(section.index).or_default();
             ranges.sort_unstable_by_key(|r| (r.start, r.end));
             ranges.dedup();
             let declared = ranges.clone();
+            let gaps_omitted = sized_symtab_sections.contains(&section.index);
+            let (labels, data_labels): (Vec<usize>, Vec<usize>) = local_labels
+                .iter()
+                .filter(|(index, _)| *index == section.index)
+                .map(|(_, start)| *start)
+                .partition(|start| !gaps_omitted || declared.iter().any(|r| r.contains(start)));
+            let entries: BTreeSet<usize> = unsized_starts
+                .iter()
+                .filter(|(index, _)| *index == section.index)
+                .map(|(_, start)| *start)
+                .chain(labels)
+                .collect();
             let starts: BTreeSet<_> = ranges
                 .iter()
                 .map(|r| r.start)
-                .chain(
-                    unsized_starts
-                        .iter()
-                        .filter(|(index, _)| *index == section.index)
-                        .map(|(_, start)| *start),
-                )
+                .chain(entries.iter().copied())
                 .collect();
-            for &(_, start) in unsized_starts
-                .iter()
-                .filter(|(index, _)| *index == section.index)
-            {
+            let section_size = (section.end - section.address) as usize;
+            for start in data_labels {
+                let end = starts
+                    .range((start + 1)..)
+                    .next()
+                    .copied()
+                    .unwrap_or(section_size);
+                dropped.push((section, start..end));
+            }
+            for &start in &entries {
                 let ends: BTreeSet<_> = declared
                     .iter()
                     .filter(|r| r.contains(&start))
@@ -217,7 +267,75 @@ impl CodeRanges {
             ranges.sort_unstable_by_key(|r| (r.start, r.end));
             ranges.dedup();
         }
+        result.revive_branch_targets(&sections, dropped);
         Ok(result)
+    }
+
+    /// Walk each data label's gap that a decoded direct branch lands in, from
+    /// the label and from every target in it, until no walk adds a target.
+    fn revive_branch_targets(
+        &mut self,
+        sections: &[TextSection<'_>],
+        dropped: Vec<(&TextSection<'_>, Range<usize>)>,
+    ) {
+        if dropped.is_empty() {
+            return;
+        }
+        let mut targets = BTreeSet::new();
+        let mut walk: Vec<(&TextSection<'_>, Range<usize>)> = sections
+            .iter()
+            .flat_map(|section| {
+                self.sections
+                    .get(&section.index)
+                    .into_iter()
+                    .flatten()
+                    .map(move |range| (section, range.clone()))
+            })
+            .collect();
+        // Keep only targets that land in a dropped gap. Gaps between two
+        // walked starts share their end, so the last gap starting at or
+        // before a target is the one to test.
+        let mut gaps: Vec<(u64, u64)> = dropped
+            .iter()
+            .map(|(section, gap)| {
+                (
+                    section.address + gap.start as u64,
+                    section.address + gap.end as u64,
+                )
+            })
+            .collect();
+        gaps.sort_unstable();
+        let mut walked = BTreeSet::new();
+        while !walk.is_empty() {
+            let mut keep = |target: u64| {
+                let index = gaps.partition_point(|&(start, _)| start <= target);
+                if index > 0 && target < gaps[index - 1].1 {
+                    targets.insert(target);
+                }
+            };
+            for (section, range) in walk.drain(..) {
+                x86_scan::direct_branch_targets(section.data, range, section.address, &mut keep);
+            }
+            for (section, gap) in &dropped {
+                let base = section.address;
+                let landing: Vec<usize> = targets
+                    .range(base + gap.start as u64..base + gap.end as u64)
+                    .map(|target| (target - base) as usize)
+                    .collect();
+                if landing.is_empty() {
+                    continue;
+                }
+                let ranges = self.sections.entry(section.index).or_default();
+                for start in std::iter::once(gap.start).chain(landing) {
+                    if walked.insert((section.index, start, gap.end)) {
+                        ranges.push(start..gap.end);
+                        walk.push((*section, start..gap.end));
+                    }
+                }
+                ranges.sort_unstable_by_key(|r| (r.start, r.end));
+                ranges.dedup();
+            }
+        }
     }
 
     fn insert(&mut self, section: &TextSection, start: u64, end: u64) {
@@ -376,6 +494,56 @@ mod tests {
                 },
             });
         }
+        if let Some(unwind) = unwind {
+            let section =
+                object.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
+            object.append_section_data(section, unwind, 8);
+        }
+        linked_elf(object)
+    }
+
+    /// `elf` plus one untyped label of the given binding (`STB_LOCAL` or
+    /// `STB_GLOBAL`) and visibility at `label`.
+    fn elf_with_label(
+        text: &[u8],
+        functions: &[(u64, u64)],
+        label: u64,
+        (binding, visibility): (u8, u8),
+        unwind: Option<&[u8]>,
+    ) -> Vec<u8> {
+        let mut object =
+            WriteObject::new(BinaryFormat::Elf, Architecture::X86_64, Endianness::Little);
+        let section = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+        object.append_section_data(section, text, 4);
+        for (i, &(start, size)) in functions.iter().enumerate() {
+            object.add_symbol(Symbol {
+                name: format!("function_{i}").into_bytes(),
+                value: start,
+                size,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Linkage,
+                weak: false,
+                section: SymbolSection::Section(section),
+                flags: SymbolFlags::None,
+            });
+        }
+        object.add_symbol(Symbol {
+            name: b"Ltable".to_vec(),
+            value: label,
+            size: 0,
+            kind: SymbolKind::Unknown,
+            scope: if binding == object::elf::STB_LOCAL {
+                SymbolScope::Compilation
+            } else {
+                SymbolScope::Linkage
+            },
+            weak: false,
+            section: SymbolSection::Section(section),
+            flags: SymbolFlags::Elf {
+                st_info: binding << 4 | object::elf::STT_NOTYPE,
+                st_other: visibility,
+            },
+        });
         if let Some(unwind) = unwind {
             let section =
                 object.add_section(Vec::new(), b".eh_frame".to_vec(), SectionKind::ReadOnlyData);
@@ -620,6 +788,135 @@ mod tests {
                 assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_err());
             }
         }
+    }
+
+    // s2n-bignum's shape: a sized function, then a constant table after its
+    // `.size` under a local untyped label, then the next function. Decoded,
+    // the table reads as a far return and an invalid opcode.
+    #[test]
+    fn a_local_label_in_a_gap_names_data_not_an_entry() {
+        const TABLE: &[u8] = &[0xcb, 0x06, 0, 0, 0, 0];
+        let text = |next: &[u8]| [RETURN_42, TABLE, next].concat();
+        let functions = |next: &[u8]| [(0, 6), (12, next.len() as u64)];
+        let local = (object::elf::STB_LOCAL, object::elf::STV_DEFAULT);
+        let bytes = elf_with_label(&text(RETURN_42), &functions(RETURN_42), 6, local, None);
+        let found = scan(&bytes).unwrap();
+        assert!(found.is_empty(), "{found:?}");
+        assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_ok());
+
+        // The next function keeps every forbidden class beside the table.
+        for (opcode, category) in [
+            (&[0x0f, 0x05, 0xc3][..], "direct-syscall"),
+            (&[0xcb], "far-transfer"),
+            (&[0x0f, 0xc7, 0xf0, 0xc3], "cpu-nondeterminism"),
+        ] {
+            let bytes = elf_with_label(&text(opcode), &functions(opcode), 6, local, None);
+            let found = scan(&bytes).unwrap();
+            assert_eq!(
+                found
+                    .iter()
+                    .map(|e| (e.symbol.as_str(), e.category))
+                    .collect::<Vec<_>>(),
+                vec![("instruction@.text+0xc", category)]
+            );
+            assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_err());
+        }
+
+        // Where the label is not a gap's data name, its walk stays.
+        let refused = |bytes: Vec<u8>| {
+            let found = scan(&bytes).unwrap();
+            assert!(
+                found
+                    .iter()
+                    .any(|e| e.symbol == "instruction@.text+0x6" && e.category == "far-transfer"),
+                "{found:?}"
+            );
+            assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_err());
+        };
+        let next = functions(RETURN_42);
+        // A global label can be called from elsewhere.
+        refused(elf_with_label(
+            &text(RETURN_42),
+            &next,
+            6,
+            (object::elf::STB_GLOBAL, object::elf::STV_DEFAULT),
+            None,
+        ));
+        // A label inside a declared function or FDE is an entry into code.
+        refused(elf_with_label(
+            &text(RETURN_42),
+            &[(0, 12), next[1]],
+            6,
+            local,
+            None,
+        ));
+        refused(elf_with_label(
+            &text(RETURN_42),
+            &next,
+            6,
+            local,
+            Some(&eh_frame(&[(6, 6)])),
+        ));
+        // Without a sized function the section is walked whole anyway.
+        refused(elf_with_label(
+            &text(RETURN_42),
+            &[],
+            6,
+            local,
+            Some(&eh_frame(&[(0, 6), (12, 6)])),
+        ));
+        // A hidden global the linker demoted (lld keeps its visibility) is
+        // code other objects call.
+        refused(elf_with_label(
+            &text(RETURN_42),
+            &next,
+            6,
+            (object::elf::STB_LOCAL, object::elf::STV_HIDDEN),
+            None,
+        ));
+    }
+
+    // A demoted global with default visibility (GNU ld's `.hidden`, either
+    // linker's version-script `local:`) looks file-local. A direct branch
+    // into its gap from walked code makes it an entry again, and walks are
+    // repeated until no new one branches into another gap.
+    #[test]
+    fn a_branch_into_a_labelled_gap_walks_it() {
+        let local = (object::elf::STB_LOCAL, object::elf::STV_DEFAULT);
+        // 0: call rel32 -> 0x10; ret; pad to 0x10; gap at 0x10.
+        let caller = |target: u8| {
+            let mut code = vec![0xe8, target - 5, 0, 0, 0, 0xc3];
+            code.resize(0x10, 0xcc);
+            code
+        };
+        for (gap, site) in [
+            // A routine at the label: syscall.
+            (vec![0x0f, 0x05, 0xc3], 0x10),
+            // A routine after leading data, reached by a branch past it.
+            (vec![0xcb, 0x06, 0x0f, 0x05, 0xc3], 0x12),
+            // A routine that jumps over data to another (found by a second
+            // round of walks): jmp rel32 to 0x20, invalid bytes, syscall.
+            (
+                [&[0xe9, 0x0b, 0, 0, 0][..], &[0x06; 11], &[0x0f, 0x05, 0xc3]].concat(),
+                0x20,
+            ),
+        ] {
+            let target = if gap[0] == 0xcb { 0x12 } else { 0x10 };
+            let text = [caller(target), gap].concat();
+            let bytes = elf_with_label(&text, &[(0, 6)], 0x10, local, None);
+            let found = scan(&bytes).unwrap();
+            assert!(
+                found.iter().any(|e| e.category == "direct-syscall"
+                    && e.symbol == format!("instruction@.text+0x{site:x}")),
+                "{found:?}"
+            );
+            assert!(crate::tests::audit_with_libc(&bytes, &BTreeSet::new()).is_err());
+        }
+        // A branch elsewhere leaves the table unwalked.
+        let text = [caller(0x0e), vec![0xcb, 0x06]].concat();
+        let bytes = elf_with_label(&text, &[(0, 6)], 0x10, local, None);
+        let found = scan(&bytes).unwrap();
+        assert!(found.is_empty(), "{found:?}");
     }
 
     #[test]

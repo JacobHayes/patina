@@ -750,7 +750,33 @@ mod linux {
         #[test]
         fn rdrand_is_refused_on_every_kernel() {
             let rdrand = Guest::assert_build("rdrand_probe.rs");
-            rdrand.assert_run_refused(1, &["untrappable anywhere", "cannot clear one"]);
+            let refused = rdrand.assert_run_refused(1, &[]);
+            assert!(!text(&refused.stdout).contains("RDRAND ok="));
+            // The site is admitted by the function it is in, never by default.
+            let audit = assert_refused(rdrand.command("audit", &["--format", "json"]), &[]);
+            let envelope: serde_json::Value = serde_json::from_str(text(&audit.stdout).trim())
+                .unwrap_or_else(|error| panic!("audit JSON: {error}: {}", text(&audit.stdout)));
+            let functions: Vec<&str> = envelope["finding_details"]
+                .as_array()
+                .expect("finding_details")
+                .iter()
+                .filter(|detail| detail["mnemonic"] == "rdrand")
+                .filter_map(|detail| detail["provenance"][0]["containing_symbol"].as_str())
+                .collect();
+            assert_eq!(functions.len(), 1, "{envelope:#}");
+            let allowed =
+                assert_success(rdrand.command("run", &["--seed", "1", "--allow", functions[0]]));
+            assert!(text(&allowed.stdout).contains("RDRAND ok="));
+        }
+
+        // A table after a function's `.size`, named by a local label, is
+        // data: the scan does not decode it, and the guest runs.
+        #[test]
+        fn a_constant_table_in_text_is_not_decoded_as_code() {
+            let g = Guest::assert_build("text_table_probe.rs");
+            g.assert_audit_clean();
+            let out = assert_success(g.command("run", &["--seed", "1"]));
+            assert!(text(&out.stdout).contains("TABLE_PROBE value=42"));
         }
 
         #[test]

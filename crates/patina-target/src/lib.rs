@@ -226,6 +226,19 @@ impl NativeEscape {
         }
         line
     }
+
+    /// Whether the finding is a place in code (an instruction, or an
+    /// immediate operand), named by its section offset, rather than a symbol.
+    pub fn is_code_site(&self) -> bool {
+        self.symbol.starts_with("instruction@") || self.symbol.starts_with("immediate@")
+    }
+
+    /// The function a code site is in, when its provenance names one.
+    pub fn containing_symbol(&self) -> Option<&str> {
+        self.provenance
+            .iter()
+            .find_map(|provenance| provenance.containing_symbol.as_deref())
+    }
 }
 
 impl NativeEscape {

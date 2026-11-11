@@ -63,3 +63,36 @@ fn unsupported_only_matches_an_instruction_finding_by_its_containing_symbol() {
     assert!(policy_downgrades(&UnsupportedPolicy::All, &instruction));
     assert!(!policy_downgrades(&UnsupportedPolicy::Deny, &instruction));
 }
+
+/// A verdict counts code sites (instructions and immediates, named by offset)
+/// apart from symbols: a refusal of one `rdrand` is one site, not one symbol.
+#[test]
+fn finding_counts_keep_sites_apart_from_symbols() {
+    let finding = |symbol: &str| NativeEscape {
+        symbol: symbol.into(),
+        category: "cpu-nondeterminism",
+        provenance: Vec::new(),
+        mnemonic: None,
+        image: None,
+        binding: None,
+    };
+    let findings = [
+        finding("instruction@.text+0x10"),
+        finding("tzset"),
+        finding("immediate@.text+0x20"),
+    ];
+    assert_eq!(
+        FindingCounts::of(&findings),
+        FindingCounts {
+            symbols: 1,
+            sites: 2
+        }
+    );
+    assert_eq!(
+        FindingCounts::of(&findings[..1]),
+        FindingCounts {
+            symbols: 0,
+            sites: 1
+        }
+    );
+}
