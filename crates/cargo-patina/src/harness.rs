@@ -178,6 +178,10 @@ impl RunFlags {
 
 pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> {
     let started = Instant::now();
+    // Every test's run captures the mount: refuse one too large once, here.
+    if let Some(mount) = &invocation.run.mount {
+        crate::native_run::check_mount_size(mount)?;
+    }
     let toolchain = build::toolchain()?;
     let metadata = select::cargo_metadata(&invocation.manifest, Some(&toolchain.rustc))?;
     let selected = select::select(&invocation, &metadata)?;

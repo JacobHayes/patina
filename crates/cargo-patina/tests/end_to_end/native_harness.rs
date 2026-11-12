@@ -722,6 +722,34 @@ fn fails_on_its_own() {
         let (code, mounted) = test(&["--mount", mount, "reads_fixture"]);
         assert_eq!(code, Some(0), "{mounted:#}");
         assert_eq!(entry(&mounted, "reads_fixture")["result"], "ok");
+
+        // A tree whose files outgrow what a run captures into memory (a
+        // sparse file stands for a build directory) is refused before any
+        // test runs or any byte is read, naming the entry that is too large;
+        // the subdirectory the test reads still mounts.
+        let large = root.join("large");
+        fs::create_dir_all(&large).unwrap();
+        fs::File::create(large.join("blob"))
+            .unwrap()
+            .set_len(4 << 30)
+            .unwrap();
+        let started = std::time::Instant::now();
+        let (code, refused) = test(&["--mount", root.to_str().unwrap()]);
+        assert_eq!(
+            (code, &refused["result"]),
+            (Some(2), &"error".into()),
+            "{refused:#}"
+        );
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains(large.to_str().unwrap()),
+            "{refused:#}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(60));
+        let (code, mounted) = test(&["--mount", mount, "reads_fixture"]);
+        assert_eq!(code, Some(0), "{mounted:#}");
     }
 
     /// A test gets no fault it did not ask for: fault options on the command

@@ -59,6 +59,7 @@ use child::reconcile_replay_argv;
 use child::wait_native_child_once;
 #[cfg(test)]
 pub(super) use child::{NativeChildStatus, native_child_status};
+pub(crate) use fs_image::check_mount_size;
 use fs_image::{FsImageHash, build_fs_image_file, recorded_image_hash};
 
 /// `--stdin HOST_FILE`'s bytes: at most [`GUEST_STDIN_MAX_BYTES`], since

@@ -120,7 +120,7 @@ Reproduce a recorded run with `patina replay`.",
                     "--mount",
                     None,
                     Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
-                    "Capture a host directory read-only (contents, modes, mtimes and the hard links among its names) into the guest filesystem at GUEST_DIR, `/` unless one is named; `--mount $PWD:$PWD` keeps absolute host paths working.",
+                    "Capture a host directory read-only (contents, modes, mtimes and the hard links among its names) into the guest filesystem at GUEST_DIR, `/` unless one is named; `--mount $PWD:$PWD` keeps absolute host paths working. A run holds the whole capture in memory, so a tree of more than 1 GiB of files is refused: mount the subdirectory the guest reads.",
                     false,
                 ),
                 f(
@@ -412,7 +412,7 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
                     "--mount",
                     None,
                     Value::Required("HOST_DIR[:GUEST_DIR]", Kind::Path),
-                    "Capture a host directory read-only into every test's filesystem at GUEST_DIR, `/` unless one is named: at `/` a test's relative paths resolve (its working directory is `/`); at the package's own path (`--mount $PWD:$PWD`) its absolute ones (`env!(\"CARGO_MANIFEST_DIR\")`) do.",
+                    "Capture a host directory read-only into every test's filesystem at GUEST_DIR, `/` unless one is named: at `/` a test's relative paths resolve (its working directory is `/`); at the package's own path (`--mount $PWD:$PWD`) its absolute ones (`env!(\"CARGO_MANIFEST_DIR\")`) do. Every run holds the whole capture in memory, so a tree of more than 1 GiB of files (a `target/` directory, say) is refused: mount the subdirectory the tests read.",
                     false,
                 ),
                 Flag {

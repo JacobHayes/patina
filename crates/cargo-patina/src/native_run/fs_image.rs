@@ -126,6 +126,7 @@ pub(super) fn build_fs_image_file(mount: &Mount) -> Result<FsImageCapture, CliEr
             root.display()
         )));
     }
+    check_mount_size(mount)?;
     let mut entries = Vec::new();
     mount_point_entries(&root, mount.guest_prefix(), &mut entries)?;
     collect_fs_entries(&root, mount.guest_prefix(), &mut entries)?;
@@ -147,6 +148,82 @@ pub(super) fn build_fs_image_file(mount: &Mount) -> Result<FsImageCapture, CliEr
     file.seek(SeekFrom::Start(0))
         .map_err(|error| CliError(format!("failed to rewind filesystem image: {error}")))?;
     Ok(FsImageCapture { file, hash })
+}
+
+/// The most file bytes a mount captures. Every run holds its whole corpus in
+/// memory, the supervisor's encoded image and the guest's filesystem, so a
+/// tree past this is refused before a byte is read.
+pub(crate) const MOUNT_LIMIT_BYTES: u64 = 1 << 30;
+
+/// Refuse a mount whose regular files hold more than [`MOUNT_LIMIT_BYTES`],
+/// naming its largest entries, from their metadata alone.
+pub(crate) fn check_mount_size(mount: &Mount) -> Result<(), CliError> {
+    let root = mount.canonical()?.host;
+    let mut sizes: Vec<(u64, PathBuf)> = Vec::new();
+    for entry in fs::read_dir(&root).map_err(|error| {
+        CliError(format!(
+            "failed to read --mount directory {}: {error}",
+            root.display()
+        ))
+    })? {
+        let path = entry
+            .map_err(|error| {
+                CliError(format!(
+                    "failed to read entry under {}: {error}",
+                    root.display()
+                ))
+            })?
+            .path();
+        sizes.push((tree_bytes(&path)?, path));
+    }
+    let total: u64 = sizes.iter().map(|(bytes, _)| bytes).sum();
+    if total <= MOUNT_LIMIT_BYTES {
+        return Ok(());
+    }
+    sizes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    let largest: Vec<String> = sizes
+        .iter()
+        .take(3)
+        .map(|(bytes, path)| format!("{} ({})", path.display(), gib(*bytes)))
+        .collect();
+    Err(CliError::usage(format!(
+        "--mount {} holds {} of files, more than the {} a run captures into memory; its \
+         largest entries: {}. Mount the subdirectory the guest reads instead \
+         (--mount HOST_DIR/SUB:GUEST_DIR/SUB)",
+        root.display(),
+        gib(total),
+        gib(MOUNT_LIMIT_BYTES),
+        largest.join(", ")
+    )))
+}
+
+fn gib(bytes: u64) -> String {
+    format!("{:.1} GiB", bytes as f64 / f64::from(1u32 << 30))
+}
+
+/// The bytes of every regular file at or under `path`, symlinks not followed.
+fn tree_bytes(path: &Path) -> Result<u64, CliError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| CliError(format!("failed to stat {}: {error}", path.display())))?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+    let mut total = 0u64;
+    for entry in fs::read_dir(path)
+        .map_err(|error| CliError(format!("failed to read {}: {error}", path.display())))?
+    {
+        let entry = entry.map_err(|error| {
+            CliError(format!(
+                "failed to read entry under {}: {error}",
+                path.display()
+            ))
+        })?;
+        total = total.saturating_add(tree_bytes(&entry.path())?);
+    }
+    Ok(total)
 }
 
 /// The directories a mount below the guest root stands on: each ancestor of
