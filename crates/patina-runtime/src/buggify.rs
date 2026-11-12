@@ -508,11 +508,17 @@ impl Context {
         }
     }
 
-    /// Evaluate a `buggify_delay!` site. On firing, advance the virtual clock by
-    /// a seed-derived amount through the recorded `SleepUntil` path — never a real
-    /// sleep — so the perturbation reproduces on replay. Returns [`SiteOutcome::Fire`]
-    /// when it delayed.
-    pub fn buggify_delay(&mut self, label: &str, site: &str) -> Result<SiteOutcome, RuntimeError> {
+    /// Evaluate a `buggify_delay!` site. On firing, advance the virtual clock
+    /// through the recorded `SleepUntil` path — never a real sleep — so the
+    /// perturbation reproduces on replay: by `nanos` when the caller sized the
+    /// stall (`buggify_delay_for!`), else by a seed-derived amount. Returns
+    /// [`SiteOutcome::Fire`] when it delayed.
+    pub fn buggify_delay(
+        &mut self,
+        label: &str,
+        site: &str,
+        nanos: Option<u64>,
+    ) -> Result<SiteOutcome, RuntimeError> {
         let enabled = self.buggify.config.enabled;
         let now = if enabled {
             Some(self.current_monotonic()?)
@@ -552,8 +558,10 @@ impl Context {
         const MIN_DELAY_NANOS: u64 = 1_000_000;
         const MAX_DELAY_NANOS: u64 = 5_000_000_000;
         let span = MAX_DELAY_NANOS - MIN_DELAY_NANOS + 1;
-        let delay = MIN_DELAY_NANOS
-            + (buggify_prf(&[self.buggify.draw_seed, hash, buggify_domain::DELAY, eval]) % span);
+        let delay = nanos.unwrap_or_else(|| {
+            MIN_DELAY_NANOS
+                + (buggify_prf(&[self.buggify.draw_seed, hash, buggify_domain::DELAY, eval]) % span)
+        });
         self.buggify
             .sites
             .get_mut(label)

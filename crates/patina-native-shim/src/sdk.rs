@@ -161,7 +161,26 @@ pub unsafe extern "C" fn patina_buggify_delay(
 ) -> c_int {
     let _panic_scope = crate::panic_boundary::PanicScope::enter();
     buggify_site_call(label, label_len, site, site_len, |context, l, s| {
-        context.buggify_delay(l, s)
+        context.buggify_delay(l, s, None)
+    })
+}
+
+#[unsafe(no_mangle)]
+/// `buggify_delay_for!`: on firing, advance virtual time by exactly `nanos`,
+/// the stall the caller sized. Returns 1 when it fired.
+///
+/// # Safety
+/// See [`patina_buggify`].
+pub unsafe extern "C" fn patina_buggify_delay_for(
+    label: *const u8,
+    label_len: usize,
+    site: *const u8,
+    site_len: usize,
+    nanos: u64,
+) -> c_int {
+    let _panic_scope = crate::panic_boundary::PanicScope::enter();
+    buggify_site_call(label, label_len, site, site_len, move |context, l, s| {
+        context.buggify_delay(l, s, Some(nanos))
     })
 }
 

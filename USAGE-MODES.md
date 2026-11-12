@@ -8,7 +8,7 @@ that way; the SDK adds fault sites, oracles and run parameters that ship inert.
 ## SDK-instrumented application code — `patina-dst`
 
 Ordinary application code instrumented with the cooperative-SUT SDK:
-`buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_knob!` fault sites,
+`buggify!`/`buggify_with_prob!`/`buggify_delay!`/`buggify_delay_for!`/`buggify_knob!` fault sites,
 `always!`/`sometimes!`/`reachable!` oracles, `verdict()` for structured run
 outcomes, the `lifecycle` markers (`setup_complete()`, `event!`),
 `patina_dst::param()` run parameters, and `patina_dst::rng()`/`is_simulated()`.

@@ -61,22 +61,35 @@ declare_site_macros! { $;
 /// Trigger a probabilistic fault at a labeled site. Under Patina an activated
 /// site fires deterministically from the run seed; outside Patina always `false`.
 ///
-/// Use it to make rare paths — retries, evictions, early returns, error
+/// Use it to make rare paths — retries, short I/O, early flushes, error
 /// branches — reachable on seed-chosen runs. Enable with
 /// `patina run --buggify`; without that flag (and always outside Patina)
 /// every site is inert.
 ///
+/// A site is held to one standard:
+/// - It does only what the real system can do at that point, under the same
+///   configuration, and leaves the state that would follow.
+/// - It never overrides what the program measures for real (memory in use,
+///   cache contents, elapsed time).
+/// - It perturbs the environment (a delay, a short write, an I/O error)
+///   rather than fabricating an outcome.
+/// - A single firing that changes later, unrelated assertions is modelled
+///   wrong.
+///
 /// ```
-/// fn commit(dirty: bool) -> Result<(), &'static str> {
-///     if patina_dst::buggify!("commit-conflict") {
-///         return Err("simulated commit conflict");
+/// fn write_all(out: &mut Vec<u8>, data: &[u8]) {
+///     let mut rest = data;
+///     while !rest.is_empty() {
+///         // A real writer may take fewer bytes than offered.
+///         let n = if patina_dst::buggify!("short-write") { 1 } else { rest.len() };
+///         out.extend_from_slice(&rest[..n]);
+///         rest = &rest[n..];
 ///     }
-///     let _ = dirty;
-///     Ok(())
 /// }
 ///
-/// // Outside a Patina build the site never fires.
-/// assert_eq!(commit(true), Ok(()));
+/// let mut out = Vec::new();
+/// write_all(&mut out, b"abc");
+/// assert_eq!(out, b"abc");
 /// ```
 buggify (STATIC_SITE_KIND_FAULT, "fault")
     [] [] => buggify [-1];
@@ -104,6 +117,20 @@ buggify_with_prob (STATIC_SITE_KIND_FAULT, "fault")
 /// ```
 buggify_delay (STATIC_SITE_KIND_DELAY, "delay")
     [] [] => buggify_delay [];
+
+/// Like [`buggify_delay!`], but a firing stalls the virtual clock by exactly
+/// the duration the caller gives: the stall a real host can impose there, such
+/// as one past the time left in a deadline. Returns whether it fired.
+///
+/// ```
+/// use std::time::Duration;
+/// let left = Duration::from_millis(50);
+/// // A host stall that outlasts the budget: the timeout path must cope.
+/// let stalled = patina_dst::buggify_delay_for!("stall-past-deadline", left + Duration::from_millis(1));
+/// assert!(!stalled);
+/// ```
+buggify_delay_for (STATIC_SITE_KIND_DELAY, "delay")
+    [] [duration = ::core::time::Duration::from_millis(5) => duration_nanos] => buggify_delay_for [];
 
 /// A per-run perturbed value within `[lo, hi]` (deterministic from the seed and
 /// label) under Patina; `default` outside. Values are `i64`.

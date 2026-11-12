@@ -590,6 +590,9 @@ int32_t patina_buggify(const uint8_t *label, size_t label_len,
                        const uint8_t *site, size_t site_len, int32_t prob_permille);
 int32_t patina_buggify_delay(const uint8_t *label, size_t label_len,
                              const uint8_t *site, size_t site_len);
+/* Like patina_buggify_delay, but a firing delays by exactly nanos. */
+int32_t patina_buggify_delay_for(const uint8_t *label, size_t label_len,
+                                 const uint8_t *site, size_t site_len, uint64_t nanos);
 int64_t patina_buggify_knob(const uint8_t *label, size_t label_len,
                             const uint8_t *site, size_t site_len,
                             int64_t default_value, int64_t lo, int64_t hi);

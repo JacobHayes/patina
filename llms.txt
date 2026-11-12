@@ -507,7 +507,11 @@ dev-dependency use under plain `cargo test`.
   calls the SDK.
 - `patina_dst::buggify!("label")` -> bool: fires on a rare, seed-deterministic path.
 - `patina_dst::buggify_with_prob!("label", 0.9)`, `patina_dst::buggify_delay!("label")`,
+  `patina_dst::buggify_delay_for!("label", duration)` (a stall the caller sizes),
   `patina_dst::buggify_knob!("label", default, lo, hi)` -> value.
+  A site does only what the real system can do at that point and leaves the
+  same state: perturb the environment (a delay, an I/O error), never override
+  what the program measures (memory in use, cache contents).
 - `patina_dst::always!(cond, "label")`: fatal invariant; a violation reports a
   `violation` verdict (below) and aborts. The verdict is the only announcement.
 - `patina_dst::verdict(VerdictKind::{Violation,Pass,AbortIntent}, "label", "detail")`:

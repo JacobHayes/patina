@@ -231,6 +231,15 @@ patina_dst::verdict(patina_dst::VerdictKind::Violation,    // structured outcome
     "ledger-sorted", "{\"row\": 12}");
 ```
 
+A fault site is held to one standard: it does only what the real system can
+do at that point under the same configuration, and leaves the same state; it
+never overrides what the program measures for real (memory in use, cache
+contents, elapsed time); it perturbs the environment (a delay, a short write,
+an I/O error) rather than fabricating an outcome; and a site whose single
+firing changes later, unrelated assertions is modelled wrong.
+`buggify_delay_for!(label, duration)` stalls the virtual clock by a duration
+the caller sizes, such as one past the time left in a deadline.
+
 The `patina-dst` crate has no external dependencies and every macro is a no-op outside a
 Patina build — adopters ship it unconditionally, with no `cfg(patina)` in their
 code. `verdict()` is the machine-readable outcome channel: one ABI verb whose

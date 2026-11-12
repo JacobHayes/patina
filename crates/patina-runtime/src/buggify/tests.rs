@@ -407,7 +407,7 @@ fn buggify_record_replay_reproduces_decisions_without_re_supplying_flags() {
             context.buggify_evaluate("s", "r.rs:1", None).unwrap(),
             SiteOutcome::Fire
         ));
-        let _ = context.buggify_delay("d", "r.rs:2").unwrap();
+        let _ = context.buggify_delay("d", "r.rs:2", None).unwrap();
     }
     context.finish().unwrap();
 
@@ -421,7 +421,7 @@ fn buggify_record_replay_reproduces_decisions_without_re_supplying_flags() {
             replay.buggify_evaluate("s", "r.rs:1", None).unwrap(),
             SiteOutcome::Fire
         ));
-        let _ = replay.buggify_delay("d", "r.rs:2").unwrap();
+        let _ = replay.buggify_delay("d", "r.rs:2", None).unwrap();
     }
     // No divergence at finalization means every recorded op (entropy +
     // delay-driven SleepUntil) was consumed in the same order.

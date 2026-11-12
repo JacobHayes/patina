@@ -14,18 +14,16 @@
 //! `cargo test`:
 //!
 //! ```
-//! fn flush(batch: &[u64]) -> usize {
-//!     // A rare path, taken only under Patina on seed-chosen runs. Under a
-//!     // plain `cargo build` this is a constant `false`.
-//!     if patina_dst::buggify!("flush-early-drop") {
-//!         return 0;
-//!     }
-//!     patina_dst::always!(batch.len() <= 1_000_000, "batch-bounded"); // fatal if false
+//! fn should_flush(batch: &[u64], limit: usize) -> bool {
+//!     patina_dst::always!(batch.len() <= limit, "batch-bounded"); // fatal if false
 //!     patina_dst::sometimes!(batch.len() > 100, "large-batch-seen"); // coverage oracle
-//!     batch.len()
+//!     // The flush timer can fire before a batch fills: a rare path, taken only
+//!     // under Patina on seed-chosen runs. Under a plain `cargo build` the site
+//!     // is a constant `false`.
+//!     batch.len() == limit || (!batch.is_empty() && patina_dst::buggify!("flush-before-full"))
 //! }
 //!
-//! assert_eq!(flush(&[1, 2, 3]), 3); // outside Patina: buggify! never fires
+//! assert!(!should_flush(&[1, 2, 3], 8)); // outside Patina: buggify! never fires
 //! ```
 //!
 //! Instrumented programs run under the deterministic runtime with
@@ -40,7 +38,8 @@
 //!   labeled site. Under Patina, an activated site fires deterministically from
 //!   the run seed; outside Patina it is always `false`.
 //! - [`buggify_delay!`] — inject a deterministic delay through the virtual clock
-//!   (never a real sleep).
+//!   (never a real sleep); [`buggify_delay_for!`] stalls by a duration the
+//!   caller sizes.
 //! - [`buggify_knob!`] — a per-run perturbed value within a range.
 //! - [`always!`] — a fatal invariant: under Patina a violation reports a
 //!   `violation` verdict and aborts; outside it is inert.
@@ -53,6 +52,9 @@
 //! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
 //! - With the default-off `macros` feature, `#[patina_dst::test]` runs the
 //!   annotated test through `patina test` from plain `cargo test`.
+//!
+//! A fault site does only what the real system can do at that point and leaves
+//! the state that would follow; [`buggify!`] states the standard.
 //!
 //! # Labels, helpers and families
 //!

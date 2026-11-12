@@ -85,7 +85,13 @@ Patina so adopters pay nothing in production builds:
 
 - `buggify!` and friends — FoundationDB-style rare-path activation: a branch that
   fires only sometimes, only under simulation, deterministically per seed. This
-  is how you make your own code cooperate with the fuzzer.
+  is how you make your own code cooperate with the fuzzer. A site may only do
+  what the real system can do there, under the same configuration, leaving the
+  same state; it must not override what the program measures for real (memory
+  in use, cache contents); prefer perturbing the environment (a delay, an I/O
+  error) over fabricating an outcome. A site whose single firing changes later,
+  unrelated assertions is modelled wrong. `buggify_delay_for!` takes the stall
+  the caller sizes (past a deadline, say).
 - `always!` — a fatal invariant; a violation reports a `violation` verdict and
   aborts the run, whose recorded trace replays to it.
 - `verdict()` — report a structured outcome (violation / pass / abort-intent)

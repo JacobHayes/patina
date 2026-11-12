@@ -16,8 +16,8 @@ use crate::ffi;
 pub use crate::ffi::SHIM_ENTRIES;
 
 pub use calls::{
-    always, buggify, buggify_delay, buggify_knob, lifecycle_event, lifecycle_setup_complete,
-    prob_to_permille, reachable, sometimes,
+    always, buggify, buggify_delay, buggify_delay_for, buggify_knob, duration_nanos,
+    lifecycle_event, lifecycle_setup_complete, prob_to_permille, reachable, sometimes,
 };
 
 mod calls {
@@ -63,6 +63,35 @@ mod calls {
             let _ = (label, site);
             false
         }
+    }
+
+    /// `buggify_delay_for!`: whether the site fired and stalled the virtual
+    /// clock by exactly `nanos`.
+    #[inline]
+    pub fn buggify_delay_for(label: &str, site: &str, nanos: u64) -> bool {
+        #[cfg(patina_shim)]
+        {
+            unsafe {
+                super::ffi::patina_buggify_delay_for(
+                    label.as_ptr(),
+                    label.len(),
+                    site.as_ptr(),
+                    site.len(),
+                    nanos,
+                ) != 0
+            }
+        }
+        #[cfg(not(patina_shim))]
+        {
+            let _ = (label, site, nanos);
+            false
+        }
+    }
+
+    /// A delay's nanoseconds, saturating at `u64::MAX`.
+    #[inline]
+    pub fn duration_nanos(duration: core::time::Duration) -> u64 {
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
     }
 
     /// `buggify_knob!`: a per-run perturbed value in `[lo, hi]`, else `default`.

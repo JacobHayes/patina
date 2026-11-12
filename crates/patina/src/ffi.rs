@@ -33,6 +33,13 @@ shim_entries! {
         site: *const u8,
         site_len: usize,
     ) -> i32;
+    pub fn patina_buggify_delay_for(
+        label: *const u8,
+        label_len: usize,
+        site: *const u8,
+        site_len: usize,
+        nanos: u64,
+    ) -> i32;
     pub fn patina_buggify_knob(
         label: *const u8,
         label_len: usize,

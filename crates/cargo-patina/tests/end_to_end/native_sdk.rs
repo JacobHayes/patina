@@ -82,6 +82,50 @@ fn sdk_guest() -> (PathBuf, PathBuf) {
     (package, binary)
 }
 
+/// A guest that times one `buggify_delay_for!` of seven seconds on the
+/// virtual clock and prints whether it fired and the nanoseconds it took.
+const DELAY_FOR_MAIN: &str = r#"
+fn main() {
+    let started = std::time::Instant::now();
+    let fired = patina_dst::buggify_delay_for!("stall", std::time::Duration::from_secs(7));
+    println!("{fired} {}", started.elapsed().as_nanos());
+}
+"#;
+
+/// `buggify_delay_for!` stalls the virtual clock by the duration its caller
+/// gives when it fires, and not at all when it does not.
+#[test]
+fn a_caller_sized_delay_stalls_by_exactly_its_duration() {
+    let guest = run_facts::shared_sdk_guest("delay-for", DELAY_FOR_MAIN);
+    let patina = env!("CARGO_BIN_EXE_patina");
+    let run = |flags: &[&str]| -> (bool, u128) {
+        let mut args = vec!["run", guest.to_str().unwrap(), "--format", "json"];
+        args.extend_from_slice(flags);
+        let ran = invoke_unchecked(patina, native_workspace(), &args);
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&ran.stdout).unwrap_or_else(|error| panic!("{error}: {ran:?}"));
+        assert_eq!(envelope["result"], "ok", "{envelope:#}");
+        let line = envelope["stdout"].as_str().unwrap().trim().to_string();
+        let (fired, nanos) = line.split_once(' ').unwrap();
+        (fired.parse().unwrap(), nanos.parse().unwrap())
+    };
+    let seven = 7_000_000_000;
+    let (fired, nanos) = run(&[
+        "--buggify",
+        "--buggify-activation-permille",
+        "1000",
+        "--buggify-fire-permille",
+        "1000",
+    ]);
+    // The call's own compute is charged too, a few microseconds at most.
+    assert!(
+        fired && (seven..seven + 1_000_000).contains(&nanos),
+        "{fired} {nanos}"
+    );
+    let (fired, nanos) = run(&[]);
+    assert!(!fired && nanos < 1_000_000, "{fired} {nanos}");
+}
+
 #[cfg(test)]
 #[path = "native_sdk/tests.rs"]
 mod tests;
