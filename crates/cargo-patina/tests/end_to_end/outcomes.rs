@@ -535,3 +535,104 @@ fn a_liveness_stop_is_recorded_and_replays_to_the_same_stop() {
         assert_eq!(outcome(&replayed), outcome(&recorded), "{replayed:#}");
     }
 }
+
+/// A guest whose first argument picks the thread that calls `exit(7)` while
+/// the other is still running. The exiting thread registers an atexit
+/// handler and leaves bytes in C stdio's buffer first.
+const EXIT_WITH_A_LIVE_THREAD_SOURCE: &str = r#"
+use std::ffi::c_char;
+use std::sync::mpsc;
+
+unsafe extern "C" {
+    fn atexit(handler: extern "C" fn()) -> i32;
+    fn printf(format: *const c_char, ...) -> i32;
+}
+
+extern "C" fn at_exit() {
+    println!("atexit");
+}
+
+struct Local;
+impl Drop for Local {
+    fn drop(&mut self) {
+        println!("thread-local dropped");
+    }
+}
+thread_local! { static LOCAL: Local = const { Local }; }
+
+fn exit_here() -> ! {
+    LOCAL.with(|_| {});
+    unsafe {
+        atexit(at_exit);
+        printf(c"buffered".as_ptr());
+    }
+    std::process::exit(7)
+}
+
+fn main() {
+    let worker_exits = std::env::args().nth(1).as_deref() == Some("worker");
+    let (sender, receiver) = mpsc::channel::<u32>();
+    std::thread::spawn(move || {
+        while receiver.recv().is_ok() {
+            if worker_exits {
+                exit_here();
+            }
+        }
+    });
+    sender.send(1).unwrap();
+    if worker_exits {
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+    exit_here()
+}
+"#;
+
+/// `exit` from either thread while the other runs ends the run with the
+/// status it gave, as on Linux: the exiting thread's thread-local
+/// destructors, then the atexit handlers, then C stdio's flush, and nothing
+/// else; the recording replays to the same end. RED when an exit from a
+/// thread that is not `main`'s was a scheduling operation after `main`
+/// returned (`internal`).
+#[test]
+fn exit_with_another_thread_running_ends_with_its_status() {
+    let guest = native_build::source_guest("exit_live_thread", EXIT_WITH_A_LIVE_THREAD_SOURCE);
+    let trace = guest.dir.path().join("exit.patina");
+    let trace = trace.to_str().unwrap();
+    let json = |output: &std::process::Output| -> serde_json::Value {
+        serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{error}: {}", String::from_utf8_lossy(&output.stderr)))
+    };
+    let outcome = |result: &serde_json::Value| {
+        (
+            result["result"].clone(),
+            result["guest_exit"]["code"].clone(),
+            result["stdout"].clone(),
+        )
+    };
+    for who in ["main", "worker"] {
+        for seed in ["0", "1"] {
+            let _ = std::fs::remove_file(trace);
+            let recorded = json(&guest.command(
+                "run",
+                &[
+                    "--seed", seed, "--record", trace, "--format", "json", "--", who,
+                ],
+            ));
+            assert_eq!(
+                (&recorded["result"], &recorded["guest_exit"]["code"]),
+                (&"failure".into(), &7.into()),
+                "{who} seed {seed}: {recorded:#}"
+            );
+            if cfg!(target_os = "linux") {
+                assert_eq!(
+                    recorded["stdout"], "thread-local dropped\natexit\nbuffered",
+                    "{who} seed {seed}: {recorded:#}"
+                );
+            }
+            let replayed = json(&guest.command("replay", &[trace, "--format", "json"]));
+            assert_eq!(outcome(&replayed), outcome(&recorded), "{replayed:#}");
+        }
+    }
+}

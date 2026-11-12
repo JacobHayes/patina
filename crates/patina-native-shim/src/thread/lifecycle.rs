@@ -240,6 +240,13 @@ fn finish_after_destructors(task: TaskId) -> *mut ThreadExit {
         // SAFETY: the record leaked below, consumed exactly once here.
         let ThreadExit { task, retval } = *unsafe { Box::from_raw(record.cast::<ThreadExit>()) };
         EXIT_RECORD.with(|cell| cell.set(core::ptr::null_mut()));
+        // A thread that called `exit` runs its thread-local destructors in
+        // glibc's `exit`, before the atexit handlers: the process is ending,
+        // not the thread. It stays the running task to the end, every other
+        // task parked, as the kernel's `exit_group` ends them all at once.
+        if main_returned() {
+            return;
+        }
         thread_returns(task, retval);
     }
     unsafe extern "C" {

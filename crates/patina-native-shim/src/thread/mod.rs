@@ -357,7 +357,7 @@ fn task_completed() -> bool {
     TASK_COMPLETED.with(Cell::get)
 }
 
-/// Set once the guest's `main` has returned (or the guest called `exit`), so
+/// Set once the guest's `main` has returned (or any thread called `exit`), so
 /// the process is unwinding through the `exit` interposer. Unlike
 /// [`task_completed`] (per host thread, set for a *worker* at `thread_finish`),
 /// this is process-wide and covers the ROOT (main) task, which never runs
@@ -374,8 +374,10 @@ fn task_completed() -> bool {
 /// the TLS destructors) lets `sched_point` silence them deterministically.
 static MAIN_RETURNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Mark the process as having entered post-`main` teardown. Idempotent.
-/// Called only by the `exit` interposer at the main-return/`exit` boundary.
+/// Mark the process as having entered post-`main` teardown, from whichever
+/// thread ends it: a return from `main`, an `exit` from any thread, the last
+/// thread after the main thread's `pthread_exit`, a raw `exit_group`.
+/// Idempotent.
 pub(crate) fn note_main_returned() {
     crate::charge::flush_now();
     MAIN_RETURNED.store(true, std::sync::atomic::Ordering::SeqCst);
