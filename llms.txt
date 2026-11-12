@@ -120,7 +120,7 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   layout policy; one without it predates layout control and is not continued.
   A guest stack limit the host
   cannot apply stops the run as `internal`, `stop.reason` `host_limit`.
-- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--skip-target NAME]... [--skip PATTERN]... [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--no-instrument] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
+- `patina test [DIR|Cargo.toml] [TESTNAME] [--exact] [-p NAME]... [--workspace] [--lib] [--bin NAME]... [--bins] [--test NAME]... [--tests] [--skip-target NAME]... [--skip PATTERN]... [--include-ignored] [--seed N | --seeds N] [--jobs N] [--timeout-secs S] [--accept-unsupported TEXT]... [--no-run] [--release] [--no-instrument] [--fault-all-tests] [RUN/FAULT/BUGGIFY/SCHEDULE/LIVENESS OPTIONS]`
   A package's own libtest suite, unmodified: selection is `cargo test`'s
   (default: the package in DIR, else the workspace's default members; lib,
   bins and integration tests). Each selected target is built shim-linked once
@@ -139,6 +139,10 @@ plane: only the supervisor sets it, and an inherited one is stripped.
   (`unsupported`, `timeout`, a build failure) or the filter matched nothing.
   `--accept-unsupported TEXT` keeps an `unsupported` test whose stop names TEXT
   from raising the exit status; it still reports as `unsupported`, never `ok`.
+  No test gets a fault it did not ask for: a `#[patina_dst::test(...)]` test
+  gets the faults its arguments name, and fault, crash, buggify and swarm
+  options on the command line are a usage error (exit 2) unless
+  `--fault-all-tests` applies them to every selected test.
   Human output: progress per test on stderr, then counts per class and, per
   non-ok test, its class, one line of why, `rerun:` and `replay:` commands.
   `--format json` prints `schema: "patina.test/v1"` with `counts`, `targets`

@@ -270,6 +270,8 @@ fn every_run_flag_reaches_each_tests_run() {
         "--allow-randomized-address-layout",
     ];
     tokens.extend(switches.iter().map(OsString::from));
+    // A test's own choice, not the child run's: the faults above reach it.
+    tokens.push(OsString::from("--fault-all-tests"));
     let invocation = parse::parse_test_from(
         PathBuf::from("."),
         PathBuf::from("Cargo.toml"),

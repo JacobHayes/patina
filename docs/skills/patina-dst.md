@@ -139,6 +139,9 @@ Patina's limits with the project's bugs.
    Reduce each Patina bug to a minimal reproducer, and confirm it natively
    before reporting it.
 4. **Then add faults,** starting from the tests that pass cleanly under Patina.
+   `patina test` injects none unless asked: a test names its own in
+   `#[patina_dst::test(...)]`, or `--fault-all-tests` applies the command
+   line's to every selected test, for a suite written to expect them.
 
 The tallies from step 3 (which stops fired, what diverged) are the evidence that
 drives what Patina models next.

@@ -203,7 +203,17 @@ Each test ends in one outcome; the run exits 1 if any test is a finding, \
 else 2 if any test could not be run (unsupported, timeout, internal, error), \
 else 0. `--accept-unsupported TEXT` keeps an `unsupported` test whose stop \
 names TEXT from raising the exit status; it is still reported as unsupported, \
-never as passed. Every test that did not pass is listed with the command that \
+never as passed.\n\
+\n\
+Every test runs deterministically, on virtual time, with its seed's \
+schedule, and with no fault injected unless it asks: an existing test is an \
+oracle for the fault-free world, so a fault it does not expect fails it by \
+construction. A `#[patina_dst::test(...)]` test gets the faults its \
+arguments name. Fault, crash, buggify and swarm options on the command line \
+are refused unless `--fault-all-tests` says every selected test expects \
+them.\n\
+\n\
+Every test that did not pass is listed with the command that \
 reruns it alone on its seed; a finding is run again recorded, and a replay \
 command printed. `--format json` prints one patina.test/v1 document.\n\
 \n\
@@ -420,7 +430,18 @@ The staged guest of each target is target/patina/dst/<PACKAGE>/<KIND>/<TARGET>/g
             ],
         },
         Group {
-            title: "Fault options (seed-driven, default off; applied to every test)",
+            title: "Faults (a test gets the faults its #[patina_dst::test(...)] names; the options below need --fault-all-tests)",
+            families: SOLE,
+            flags: &[f(
+                "--fault-all-tests",
+                None,
+                Value::None,
+                "Apply the fault, crash, buggify and swarm options given here to every selected test: an existing test is an oracle for the fault-free world, so without this they are refused.",
+                false,
+            )],
+        },
+        Group {
+            title: "Fault options (seed-driven, default off)",
             families: SOLE,
             flags: FAULT_FLAGS,
         },

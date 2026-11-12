@@ -21,6 +21,32 @@ pub fn test(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn expand_test(attr: TokenStream, item: TokenStream) -> Result<TokenStream, String> {
     let cli_args = cli_args(&parse_arguments(attr)?)?;
     let parsed = parse_test_fn(item)?;
+    // `patina test` runs every test of a target; it reads each test's own
+    // arguments from this record, so a test that names faults gets them
+    // there too. The wrapper refers to it, so the linker keeps it.
+    let (record, keep) = if cli_args.is_empty() {
+        (String::new(), String::new())
+    } else {
+        let text = format!(
+            "concat!(module_path!(), {})",
+            std::iter::once(format!(
+                "::{}",
+                parsed.name.strip_prefix("r#").unwrap_or(&parsed.name)
+            ))
+            .chain(cli_args.iter().cloned())
+            .chain(std::iter::once(String::new()))
+            .map(|word| rust_string_literal(&format!("{word}\0")))
+            .collect::<Vec<_>>()
+            .join(", ")
+        );
+        let record = format!("__PATINA_DST_RECORD{}", parsed.helper);
+        (
+            format!(
+                "#[cfg(test)]\n#[used]\n#[allow(non_upper_case_globals)]\n#[cfg_attr(target_os = \"macos\", unsafe(link_section = \"__DATA,__patina_tests\"))]\n#[cfg_attr(not(target_os = \"macos\"), unsafe(link_section = \"patina_tests\"))]\nstatic {record}: [u8; {text}.len()] = ::patina_dst::__rt::test_record({text});\n"
+            ),
+            format!("        ::core::hint::black_box(&{record});\n"),
+        )
+    };
     let cli_args = cli_args
         .iter()
         .map(|arg| rust_string_literal(arg))
@@ -30,7 +56,7 @@ fn expand_test(attr: TokenStream, item: TokenStream) -> Result<TokenStream, Stri
     let attrs = prefix_line(&parsed.attrs);
     let vis = prefix_inline(&parsed.vis);
     let wrapper = format!(
-        "{attrs}#[test]\n{vis}fn {name}() {{\n    if ::patina_dst::is_simulated() {{\n        ::patina_dst::__rt::assert_test_return({helper}());\n    }} else {{\n        ::patina_dst::__rt::orchestrate(&::patina_dst::__rt::DstTest {{\n            manifest_dir: env!(\"CARGO_MANIFEST_DIR\"),\n            package: env!(\"CARGO_PKG_NAME\"),\n            crate_name: env!(\"CARGO_CRATE_NAME\"),\n            bin_name: option_env!(\"CARGO_BIN_NAME\"),\n            integration_test: option_env!(\"CARGO_TARGET_TMPDIR\").is_some(),\n            test_path: concat!(module_path!(), \"::\", stringify!({name})),\n            cli_args: &[{cli_args}],\n        }});\n    }}\n}}\nfn {helper}",
+        "{record}{attrs}#[test]\n{vis}fn {name}() {{\n    if ::patina_dst::is_simulated() {{\n{keep}        ::patina_dst::__rt::assert_test_return({helper}());\n    }} else {{\n        ::patina_dst::__rt::orchestrate(&::patina_dst::__rt::DstTest {{\n            manifest_dir: env!(\"CARGO_MANIFEST_DIR\"),\n            package: env!(\"CARGO_PKG_NAME\"),\n            crate_name: env!(\"CARGO_CRATE_NAME\"),\n            bin_name: option_env!(\"CARGO_BIN_NAME\"),\n            integration_test: option_env!(\"CARGO_TARGET_TMPDIR\").is_some(),\n            test_path: concat!(module_path!(), \"::\", stringify!({name})),\n            cli_args: &[{cli_args}],\n        }});\n    }}\n}}\nfn {helper}",
         name = parsed.name,
         helper = parsed.helper,
     );

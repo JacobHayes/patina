@@ -7,7 +7,9 @@ pub use crate::static_sites::{
     STATIC_SITE_KIND_REACHABLE, STATIC_SITE_KIND_SOMETIMES, StaticSiteDescriptor,
 };
 #[cfg(feature = "macros")]
-pub use crate::test_harness::{DstTest, DstTestReturn, assert_test_return, orchestrate};
+pub use crate::test_harness::{
+    DstTest, DstTestReturn, assert_test_return, orchestrate, test_record,
+};
 
 #[cfg(patina_shim)]
 use crate::ffi;

@@ -8,7 +8,7 @@ pub(crate) fn parse_test_from(
     filter: Option<String>,
     arguments: Vec<OsString>,
 ) -> Result<TestInvocation, CliError> {
-    use crate::harness::{CargoFeatures, RunFlags, Seeds, Selection};
+    use crate::harness::{CargoFeatures, Seeds, Selection};
     let args = cli::parse("test", help::Family::Sole, arguments)?;
     let (seed, seeds) = args.exclusive(
         "--seed",
@@ -30,6 +30,16 @@ pub(crate) fn parse_test_from(
     if args.flag("--workspace") && args.supplied("--package") {
         return Err(CliError::usage(
             "--workspace tests every member; --package selects some of them: give one or the other",
+        ));
+    }
+    let run = test_run_flags(&args)?;
+    let fault_all_tests = args.flag("--fault-all-tests");
+    if run.injects_faults() && !fault_all_tests {
+        return Err(CliError::usage(
+            "fault options reach a test only when it expects them: an existing test is an \
+             oracle for the fault-free world. Give a test its faults in \
+             #[patina_dst::test(...)], or pass --fault-all-tests to apply these to every \
+             selected test",
         ));
     }
     let jobs = match args.u64("--jobs") {
@@ -88,24 +98,32 @@ pub(crate) fn parse_test_from(
             .into_iter()
             .map(str::to_owned)
             .collect(),
-        run: RunFlags {
-            step_budget: args.u64("--budget"),
-            realtime_epoch: args.string("--realtime-epoch"),
-            hostname: args.string("--hostname"),
-            cpus: args.u32("--cpus"),
-            params: key_values(&args, "--param")?,
-            env: key_values(&args, "--env")?,
-            mount: args.mount("--mount")?,
-            knobs: knobs_of(&args)?,
-            buggify: buggify_of(&args),
-            schedule: schedule_of(&args),
-            liveness: NativeLiveness {
-                compute_watchdog_ms: args.string("--compute-watchdog-ms"),
-                ..liveness_of(&args)
-            },
-            allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
-            allow: super::control::allow_of(&args).into_iter().collect(),
+        fault_all_tests,
+        run,
+    })
+}
+
+/// The run flags of a `patina test` command line, or of one test's own
+/// `#[patina_dst::test(...)]` arguments.
+pub(crate) fn test_run_flags(args: &cli::Args) -> Result<crate::harness::RunFlags, CliError> {
+    use crate::harness::RunFlags;
+    Ok(RunFlags {
+        step_budget: args.u64("--budget"),
+        realtime_epoch: args.string("--realtime-epoch"),
+        hostname: args.string("--hostname"),
+        cpus: args.u32("--cpus"),
+        params: key_values(args, "--param")?,
+        env: key_values(args, "--env")?,
+        mount: args.mount("--mount")?,
+        knobs: knobs_of(args)?,
+        buggify: buggify_of(args),
+        schedule: schedule_of(args),
+        liveness: NativeLiveness {
+            compute_watchdog_ms: args.string("--compute-watchdog-ms"),
+            ..liveness_of(args)
         },
+        allow_randomized_layout: args.flag("--allow-randomized-address-layout"),
+        allow: super::control::allow_of(args).into_iter().collect(),
     })
 }
 

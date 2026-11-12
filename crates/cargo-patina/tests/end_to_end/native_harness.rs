@@ -155,6 +155,7 @@ mod tests {
                 "--exact",
                 "--seeds",
                 "3",
+                "--fault-all-tests",
                 "--buggify-fire-permille",
                 "1000",
                 "--buggify-activation-permille",
@@ -470,6 +471,7 @@ fn the_sdk_reaches_the_runtime() {
                 "dst",
                 "--seed",
                 "1",
+                "--fault-all-tests",
                 "--buggify",
                 "--buggify-activation-permille",
                 "1000",
@@ -720,6 +722,91 @@ fn fails_on_its_own() {
         let (code, mounted) = test(&["--mount", mount, "reads_fixture"]);
         assert_eq!(code, Some(0), "{mounted:#}");
         assert_eq!(entry(&mounted, "reads_fixture")["result"], "ok");
+    }
+
+    /// A test gets no fault it did not ask for: fault options on the command
+    /// line are refused unless `--fault-all-tests` applies them to every
+    /// test, while a `#[patina_dst::test(...)]` test gets the faults its
+    /// arguments name either way. The DNS table is configuration, not a
+    /// fault.
+    #[test]
+    fn faults_reach_only_the_tests_that_expect_them() {
+        let directory = tempdir().unwrap();
+        let root = directory.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"fault_opt_in\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dev-dependencies]\npatina-dst = {{ path = \"{}\", features = [\"macros\"] }}\n",
+                native_workspace().join("crates/patina").display()
+            ),
+        )
+        .unwrap();
+        fs::write(
+            root.join("src/lib.rs"),
+            r#"
+#[test]
+fn expects_no_fault() {
+    assert!(!patina_dst::buggify_with_prob!("unexpected", 1.0));
+}
+
+#[patina_dst::test(buggify, buggify_activation_permille = 1000)]
+fn asks_for_buggify() {
+    assert!(!patina_dst::buggify_with_prob!("expected", 1.0));
+}
+"#,
+        )
+        .unwrap();
+        let patina = env!("CARGO_BIN_EXE_patina");
+        let test = |extra: &[&str]| {
+            let ran = invoke_unchecked(
+                patina,
+                root,
+                &[&["test", "--format", "json"][..], extra].concat(),
+            );
+            (ran.status.code(), json_of(&ran))
+        };
+        let classes = |plain: &str, own: &str| {
+            BTreeMap::from([
+                ("expects_no_fault".to_string(), plain.to_string()),
+                ("asks_for_buggify".to_string(), own.to_string()),
+            ])
+        };
+
+        let (code, document) = test(&[]);
+        assert_eq!(
+            (code, results(&document)),
+            (Some(1), classes("ok", "failure")),
+            "{document:#}"
+        );
+        let (code, document) = test(&["--dns-entry", "db=10.0.0.2"]);
+        assert_eq!(
+            (code, results(&document)),
+            (Some(1), classes("ok", "failure")),
+            "{document:#}"
+        );
+        for faults in [
+            &["--buggify", "--buggify-activation-permille", "1000"][..],
+            &["--fs-error-permille", "10"][..],
+        ] {
+            let (code, document) = test(faults);
+            assert_eq!(
+                (code, &document["result"]),
+                (Some(2), &"error".into()),
+                "{faults:?}: {document:#}"
+            );
+        }
+        let (code, document) = test(&[
+            "--fault-all-tests",
+            "--buggify",
+            "--buggify-activation-permille",
+            "1000",
+        ]);
+        assert_eq!(
+            (code, results(&document)),
+            (Some(1), classes("failure", "failure")),
+            "{document:#}"
+        );
     }
 
     /// Writes the fixture and returns its test source.

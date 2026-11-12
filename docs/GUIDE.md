@@ -84,7 +84,12 @@ tests out as libtest's own `--skip` does, and `--skip-target NAME` leaves out a
 whole target. Each target is built shim-linked once; each test then runs on
 each seed (`--seed N`, `--seeds N`) as its own run, `--jobs` at a time
 (default: half the CPUs the process may use, so a shared machine keeps room),
-and ends in one outcome. A finding is
+and ends in one outcome. A test gets determinism, virtual time and its seed's
+schedule, and no fault it did not ask for: an existing test is an oracle for
+the fault-free world, so a fault it does not expect fails it by construction.
+A `#[patina_dst::test(...)]` test gets the faults its arguments name; fault,
+crash, buggify and swarm options on the command line are refused (exit 2)
+unless `--fault-all-tests` says every selected test expects them. A finding is
 re-run recorded, and its block carries the `rerun:` and `replay:` commands.
 `--no-run` builds and prints where each target's guest is staged
 (`target/patina/dst/PACKAGE/KIND/TARGET/guest`). The tested packages' binaries are built

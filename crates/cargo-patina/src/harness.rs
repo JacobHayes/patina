@@ -52,6 +52,10 @@ pub(crate) struct TestInvocation {
     /// Texts whose presence in an `unsupported` test's stop keeps it from
     /// raising the exit status.
     pub(crate) accept_unsupported: Vec<String>,
+    /// `--fault-all-tests`: the faults in `run` reach every selected test.
+    /// Without it `run` injects none, and a test gets only the faults its
+    /// own `#[patina_dst::test(...)]` names.
+    pub(crate) fault_all_tests: bool,
     pub(crate) run: RunFlags,
 }
 
@@ -141,6 +145,35 @@ pub(crate) struct RunFlags {
     pub(crate) allow_randomized_layout: bool,
     /// `--allow`: what every target's pre-run gate admits, `all` included.
     pub(crate) allow: Vec<String>,
+}
+
+impl RunFlags {
+    /// Whether these flags inject a fault: a fault-plane knob (not the DNS
+    /// table, which is the workload's configuration), buggify, or swarm.
+    pub(crate) fn injects_faults(&self) -> bool {
+        self.knobs
+            .0
+            .keys()
+            .any(|knob| knob.meta().plane == patina_dst_runtime::Plane::Fault)
+            || self.buggify.is_some()
+            || self.schedule.swarm
+    }
+
+    /// These flags with a test's own faults laid over them: each knob the
+    /// test sets replaces the suite's, and so does its buggify.
+    fn with_faults_of(&self, own: &RunFlags) -> RunFlags {
+        let mut flags = self.clone();
+        for (knob, values) in &own.knobs.0 {
+            if knob.meta().plane == patina_dst_runtime::Plane::Fault {
+                flags.knobs.0.insert(*knob, values.clone());
+            }
+        }
+        if own.buggify.is_some() {
+            flags.buggify.clone_from(&own.buggify);
+        }
+        flags.schedule.swarm |= own.schedule.swarm;
+        flags
+    }
 }
 
 pub(super) fn execute_test(invocation: TestInvocation) -> Result<i32, CliError> {

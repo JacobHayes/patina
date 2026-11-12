@@ -405,11 +405,12 @@ mod registry {
             ("run", help::Family::Sole) => {
                 parse_native_run_from(prebuilt("bin"), with(none, &[])).map(|_| ())
             }
+            // A fault option reaches every test only with `--fault-all-tests`.
             ("test", help::Family::Sole) => parse_test_from(
                 PathBuf::from("."),
                 PathBuf::from("Cargo.toml"),
                 Some("module::test".to_string()),
-                with(none, &[]),
+                with(unless("--fault-all-tests", &["--fault-all-tests"]), &[]),
             )
             .map(|_| ()),
             ("build", help::Family::Sole) => {

@@ -247,15 +247,16 @@ patina test: 1 test(s) in 1 target(s); built in 0.5s, ran in 0.6s (12 job(s), se
 
 violation        ledger --test sorted the_ledger_stays_sorted (seed 5)
     violation of "ledger-sorted" src/lib.rs:13
-    rerun:  patina test /home/you/ledger -p ledger --test sorted the_ledger_stays_sorted --exact --seed 5 --buggify
+    rerun:  patina test /home/you/ledger -p ledger --test sorted the_ledger_stays_sorted --exact --seed 5 --fault-all-tests --buggify
     replay: patina replay /home/you/ledger/target/patina/dst/ledger/test/sorted/guest /home/you/ledger/target/patina/dst/ledger/test/sorted/traces/the_ledger_stays_sorted.seed-5.patina
 
 patina: FINDING in the guest [violation]: 1 of 1 did not pass
 ```
 
-The attribute runs `patina test` for its own test. `patina test --seeds 20
---buggify` in the package runs the same check, and every other test beside
-it, without the attribute.
+The attribute runs `patina test` for its own test. `patina test --seeds 20`
+in the package runs the same check, with the buggify its attribute names, and
+every other test beside it fault-free: a test gets only the faults it asks
+for. `--fault-all-tests --buggify` would turn buggify on for every test.
 
 Now fix the bug: delete the two lines that take `last` and swap. `cargo test`
 passes, and the test stays as a guard: every `cargo test` runs it across 20

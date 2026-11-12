@@ -13,8 +13,8 @@ pub(crate) enum Arity {
 }
 
 /// The flags of `patina test` an attribute does not take: the selection of
-/// its one test, which the attribute makes itself, and the flags that select
-/// or excuse other tests.
+/// its one test, which the attribute makes itself, and the flags that select,
+/// excuse or fault other tests.
 #[allow(dead_code)]
 pub(crate) const NOT_ACCEPTED: &[&str] = &[
     "--package",
@@ -30,6 +30,7 @@ pub(crate) const NOT_ACCEPTED: &[&str] = &[
     "--include-ignored",
     "--no-run",
     "--accept-unsupported",
+    "--fault-all-tests",
 ];
 
 pub(crate) const TEST_FLAGS: &[(&str, Arity)] = &[

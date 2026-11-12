@@ -1,9 +1,28 @@
 //! Host orchestration and return-value handling for DST test attributes.
 
 #[cfg(feature = "macros")]
-pub use orchestration::{DstTest, DstTestReturn, assert_test_return, orchestrate};
+pub use orchestration::{DstTest, DstTestReturn, assert_test_return, orchestrate, test_record};
 
 mod orchestration {
+    /// The bytes of one `#[patina_dst::test(...)]` record in the test
+    /// binary's `patina_tests` section: the test's path, then each `patina
+    /// test` word its arguments stand for, every one NUL-terminated, and an
+    /// empty word to end it. `patina test` reads the section to give each
+    /// test the faults its attribute names.
+    #[cfg(feature = "macros")]
+    #[doc(hidden)]
+    pub const fn test_record<const N: usize>(text: &str) -> [u8; N] {
+        let bytes = text.as_bytes();
+        assert!(bytes.len() == N, "a test record is its text");
+        let mut record = [0; N];
+        let mut index = 0;
+        while index < N {
+            record[index] = bytes[index];
+            index += 1;
+        }
+        record
+    }
+
     /// Runtime data emitted by `#[patina_dst::test]`.
     #[cfg(feature = "macros")]
     #[doc(hidden)]
@@ -79,6 +98,9 @@ mod orchestration {
             .arg("--exact")
             // The test is asked for by name, `#[ignore]` or not.
             .arg("--include-ignored")
+            // The arguments are this test's own: any faults they name are
+            // the ones it expects.
+            .arg("--fault-all-tests")
             .args(test.cli_args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());

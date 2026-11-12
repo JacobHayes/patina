@@ -22,6 +22,7 @@ pub(crate) use artifact::*;
 mod control;
 mod native;
 pub(super) use control::*;
+pub(crate) use native::test_run_flags;
 mod inspection;
 mod minimization;
 

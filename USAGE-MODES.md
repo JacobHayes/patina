@@ -17,7 +17,8 @@ plain fallback outside a Patina build, so adopters ship it unconditionally with
 no `cfg(patina)` in their code. The default-off `macros` feature re-exports
 `#[patina_dst::test]` for dev-dependency use: plain `cargo test` discovers
 `patina` through `PATINA_CLI` or `PATH`, then runs `patina test` for that
-one test. The runtime otherwise enters through `patina build`/`run` (the
+one test; `patina test` over the whole suite gives the test the faults its
+arguments name, and no other test any. The runtime otherwise enters through `patina build`/`run` (the
 shim), `patina test [DIR|Cargo.toml] [cargo test selection] [TESTNAME]`
 (a package's own libtest suite, one simulated run per test), or not at all.
 

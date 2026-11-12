@@ -169,7 +169,11 @@ pub(super) fn run_suite(
                 .join(", ")
         )));
     }
-    let tests = run_tests(invocation, built, selected)?;
+    let mut own = BTreeMap::new();
+    for (index, guest) in &staged {
+        own.insert(*index, own_flags(guest)?);
+    }
+    let tests = run_tests(invocation, built, &own, selected)?;
     Ok(Suite {
         tests,
         skipped,
@@ -189,13 +193,77 @@ pub(crate) fn listed_tests(stdout: &str) -> Vec<String> {
         .collect()
 }
 
+/// The section a `#[patina_dst::test(...)]` record is linked into.
+const RECORD_SECTIONS: [&str; 2] = ["patina_tests", "__patina_tests"];
+
+/// Each test's own `#[patina_dst::test(...)]` arguments, as run flags, by its
+/// path within its target, read from the records its guest links. A record
+/// is the test's path from its crate root, then its `patina test` words,
+/// each NUL-terminated, ended by an empty word.
+fn own_flags(guest: &Path) -> Result<BTreeMap<String, RunFlags>, CliError> {
+    use object::{Object, ObjectSection};
+    let unreadable = |what: String| {
+        CliError(format!(
+            "failed to read the #[patina_dst::test] records of {}: {what}",
+            guest.display()
+        ))
+    };
+    let bytes = fs::read(guest).map_err(|error| unreadable(error.to_string()))?;
+    let file = object::File::parse(&*bytes).map_err(|error| unreadable(error.to_string()))?;
+    let Some(section) = RECORD_SECTIONS
+        .iter()
+        .find_map(|name| file.section_by_name(name))
+    else {
+        return Ok(BTreeMap::new());
+    };
+    let data = section
+        .data()
+        .map_err(|error| unreadable(error.to_string()))?;
+    let mut flags = BTreeMap::new();
+    let mut words = data.split(|byte| *byte == 0).peekable();
+    while words.peek().is_some() {
+        // Padding between records reads as empty words.
+        let Some(path) = words.next().filter(|word| !word.is_empty()) else {
+            continue;
+        };
+        let path = String::from_utf8_lossy(path).into_owned();
+        let mut arguments: Vec<OsString> = Vec::new();
+        for word in words.by_ref() {
+            if word.is_empty() {
+                break;
+            }
+            arguments.push(String::from_utf8_lossy(word).into_owned().into());
+        }
+        let args = cli::parse("test", crate::help::Family::Sole, arguments).map_err(|error| {
+            CliError(format!(
+                "the #[patina_dst::test] arguments of {path}: {error}"
+            ))
+        })?;
+        // The path starts with the test's crate, which libtest's names leave out.
+        let name = path
+            .split_once("::")
+            .map_or(path.as_str(), |(_, name)| name);
+        flags.insert(name.to_string(), crate::parse::test_run_flags(&args)?);
+    }
+    Ok(flags)
+}
+
 /// Run every test on every seed, then record each finding's deciding seed.
 fn run_tests(
     invocation: &TestInvocation,
     built: &[BuiltTarget],
+    own: &BTreeMap<usize, BTreeMap<String, RunFlags>>,
     cases: Vec<TestCase>,
 ) -> Result<Vec<(TestCase, Verdict)>, CliError> {
     let seeds = invocation.seeds.list();
+    // Each test's run flags: the suite's, with its own faults laid over them.
+    let flags: Vec<RunFlags> = cases
+        .iter()
+        .map(|case| match own[&case.target].get(&case.name) {
+            Some(own) => invocation.run.with_faults_of(own),
+            None => invocation.run.clone(),
+        })
+        .collect();
     let guest = |case: &TestCase| -> (&Path, &[NativeAdmittedProgram]) {
         let built = &built[case.target];
         (
@@ -230,7 +298,7 @@ fn run_tests(
             let began = Instant::now();
             let run = run_child(
                 invocation,
-                test_command(invocation, guest(case), case, seed, None)?,
+                test_command(&flags[index], guest(case), case, seed, None)?,
             )?;
             if run.result.is_failure() {
                 lowest_failure[index].fetch_min(seed, Ordering::SeqCst);
@@ -311,7 +379,7 @@ fn run_tests(
             let run = run_child(
                 invocation,
                 test_command(
-                    invocation,
+                    &flags[index],
                     guest(case),
                     case,
                     verdicts[index].seed,
@@ -491,7 +559,7 @@ fn list_command(
 /// One test's run on one seed: `patina run` of the target's guest, libtest
 /// asked for this test alone on one thread.
 fn test_command(
-    invocation: &TestInvocation,
+    flags: &RunFlags,
     (guest, admit): (&Path, &[NativeAdmittedProgram]),
     case: &TestCase,
     seed: u64,
@@ -509,7 +577,7 @@ fn test_command(
         args.push("--record".into());
         args.push(path.into());
     }
-    push_run_flags(&mut args, &invocation.run);
+    push_run_flags(&mut args, flags);
     args.extend(libtest_args(case).into_iter().map(OsString::from));
     patina_command(args, admit)
 }
@@ -807,6 +875,9 @@ pub(crate) fn rerun_command(
     }
     args.push("--seed".into());
     args.push(seed.to_string().into());
+    if invocation.fault_all_tests {
+        args.push("--fault-all-tests".into());
+    }
     args.extend(super::build::build_args(invocation));
     if invocation.timeout_secs != 300 {
         args.push("--timeout-secs".into());
