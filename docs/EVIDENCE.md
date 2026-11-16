@@ -404,3 +404,59 @@ has the finding's signature / seeds run.
   measurements while other work shared the host (median `wall_ms` 23 to 27); debug 77 to 111 ms.
   Patina 0.5.0: 27.6 ms (release). Throughput at `-j 6`: 160 to 173 runs/s release, 62 to 69
   runs/s debug.
+
+## Acceptance: Cairn and briefing
+
+`patina` built from `fa1186af` (the CLI has no `--version`), 2026-11-16, this host, every
+sweep under `capped`; `mise run sim` and the briefing sweep passed again on `f0031c52`. The applications are built with plain `cargo`; nothing of Patina is
+linked but the SDK crate.
+
+**Cairn** (`testbeds/durability`: the service on SQLite under disk faults and machine crashes;
+`testbeds/multiplayer`: the HTTP server, four HTTP clients and an in-process agent under
+buggify and network faults). Each `sim.sh` is `cargo test`, `cargo build --release`, one
+`patina verify --runs 3 --vary cpu,load`, then sweeps whose exit status is the verdict
+(out-of-reach oracles in the testbed's `patina.toml`):
+
+| Command | Result |
+|---|---|
+| `patina sweep --seeds 1..100 -- cairn-durability` | 100 `ok` |
+| `patina sweep --seeds 1..100 -- cairn-multiplayer` | 100 `ok` |
+| durability `--buggify --faults disk --fault swarm=1`, 128 seeds | 128 `ok`, every oracle in reach held |
+| durability `--crash machine`, 128 seeds | 128 `ok`; 2 to 3 crashes per run; all five crash oracles held, the torn log tail among them |
+| durability `--crash machine --fault fs-error-permille=5`, 2000 seeds | 2000 `ok` in 64 s at `-j 6`: no acknowledged commit lost |
+| durability `--crash machine -- ... --bug ack-before-commit` (planted client bug), 200 seeds | `violation always: durability-acknowledged-commit-present` in 154 of 200, attribution `crash` in every failing run; first seed replayed 5 times identical and identical under `verify --runs 5 --vary cpu,load` |
+| multiplayer `--buggify`, 640 seeds; and 256 each at `buggify-permille=500` and with the commit-wait points at 1000 | all `ok`; `service-duplicate-original-committed-meanwhile` never reached |
+| multiplayer `--faults net`, 64 seeds | 64 `ok`, vacuous: no resubmission answered from its receipt at the preset's rates |
+| multiplayer `--faults net --fault net-reset-permille=100 --fault net-connect-refuse-permille=100`, 64 seeds | 64 `ok`, the receipt oracle held |
+| `mise run sim` (both testbeds, `-j 4`) | passes in 2 min 32 s from cold testbed builds, 34 s warm; sweeps 31 s of it |
+
+The two findings recorded for Cairn are not in its current code: the resubmission reported as
+a conflict and then applied lived in the Turso store's commit path, and the lost acknowledged
+commit in Turso's MVCC store; both stores were replaced by SQLite. The 2000-seed sweep is the
+lost-commit setting on the replacement. The resubmission race's nearest oracle,
+`service-duplicate-original-committed-meanwhile`, was not reached in 1,152 seeds (listed as
+out of reach). The planted bug stands in for a finding: seeds are not compared.
+
+**briefing**: its 81 Rust tests (7 test binaries), each alone in its own world, 5 seeds, by
+this script run in the checkout (`target/debug` is mounted at its build path because tests
+start the CLI by `CARGO_BIN_EXE_briefing`):
+
+```sh
+bins=$(cargo test --locked --no-run --message-format=json 2>/dev/null |
+  jq -r 'select(.profile.test and .executable) | .executable')
+for b in $bins; do "$b" --list --format terse |
+  sed -n "s|: test\$||; s|^|$(basename "$b") |p"; done >cases
+t=$(cd target/debug && pwd -P); d="$PWD/target/debug"
+patina sweep --seeds 0..4 --cases cases --out OUT --mount "$t:$d" -j 6 \
+  -- /bin/sh -c "set -- {}; exec $d/deps/\$1 --exact \$2 --test-threads=1"
+```
+
+| Command | Result |
+|---|---|
+| `patina sweep --seeds 0..4 --cases cases -j 6 --mount ...` | 405 `ok` of 405 in 3.3 s (sweep) and 3.7 s (script, warm build); the earlier engine ran 61 tests as 305 cells in 36 min with 8 refused for spawning a process |
+| a test that starts the hub as a child and talks HTTP to it (6 connections), seed 3, `replay` 5 times | 5 identical |
+| the same, `verify --runs 5 --vary cpu,load` | 5 identical |
+| each test binary whole in one world (`http_flow`, 4 tests) | `ok` in 0.18 s |
+
+`assets::tests::inline_script_parses` passes by skipping its check: it runs `node --check`,
+and `node` is not on the guest's `PATH`.
