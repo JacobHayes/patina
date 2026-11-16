@@ -1,4 +1,4 @@
-// signals item 3: FP state across signal delivery. Thread A keeps values in all sixteen YMM
+// FP state across signal delivery. Thread A keeps values in all sixteen YMM
 // registers, x87 and a non-default MXCSR across a syscall (getppid, in one asm block),
 // and accumulates a double/AVX computation between syscalls; thread B signals A 10,000
 // times; A's handler clobbers YMM, x87 and MXCSR. Everything must come back exact.

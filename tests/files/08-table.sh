@@ -1,5 +1,5 @@
 # 8. Every row has a reason, and patina table shows no Stop for any call that strace -c reports
-#    for items 1, 5 and 6 run natively.
+#    when fs-tour and the commands below run natively.
 #@ tier=area budget=60
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/08-table

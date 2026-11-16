@@ -1,4 +1,4 @@
-/* blocking I/O item 2: 8 threads each write 1,000 records of exactly 4,096 bytes to one pipe; the
+/* Atomic pipe writes: 8 threads each write 1,000 records of exactly 4,096 bytes to one pipe; the
  * reader checks that no record is interleaved with another. */
 #include "common.h"
 

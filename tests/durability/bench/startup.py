@@ -1,4 +1,4 @@
-"""cost measurement cost: per-run start-up, broken into phases, for a static `true`, the dynamic
+"""Per-run start-up, broken into phases, for a static `true`, the dynamic
 /usr/bin/true and `python3 -c pass`. PATINA_TIMING=1 makes the launcher print host CLOCK_MONOTONIC
 marks of its own and of the supervisor (Ctl::timing). REPS runs each, median [min..max] ms:
 

@@ -1,8 +1,8 @@
 # The tracker self-check (`patina log ops --check`: replay of the whole operation log = the exported
 # live tree, every incarnation) on W1-W9, seed 1, with each workload's fault configuration
-# (tests/durability/bench/workloads.py), 4 at a time. Regression for cost measurement's unix-socket bind bug: W2
+# (tests/durability/bench/workloads.py), 4 at a time. Regression for the unix-socket bind bug: W2
 # (tokio-mt local binds unix sockets) failed the check on every run before the fix
-# (docs/EVIDENCE.md cost measurement, "unix bind").
+# (docs/EVIDENCE.md, "unix bind").
 #@ tier=quick budget=30 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_WORKLOADS:?}" "${PATINA_GUESTS:?}"

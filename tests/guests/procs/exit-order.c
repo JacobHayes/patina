@@ -1,4 +1,4 @@
-/* processes item 4: exit ordering. 50 children each write a line to one shared pipe and exit with
+/* Exit ordering. 50 children each write a line to one shared pipe and exit with
  * their index. The parent reads until EOF, then waits in a loop. A SIGCHLD handler reaps what
  * has exited (waitpid(-1, WNOHANG) in a loop) and counts the children it reaped. Printed: the
  * bytes read (as lines), the (pid, status) sequence of every reap with who reaped it, the

@@ -1,4 +1,4 @@
-# W1-W9 and the language runtimes language runtimes (sourced): entry NAME sets GDIR, CMD, OPTS.
+# W1-W9 and the language runtimes (sourced): entry NAME sets GDIR, CMD, OPTS.
 W=${PATINA_WORKLOADS:?}
 GU=${PATINA_GUESTS:?}
 

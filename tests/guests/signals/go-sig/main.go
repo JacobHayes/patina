@@ -1,4 +1,4 @@
-// signals item 9: a goroutine in a for {} loop that calls a function making a syscall,
+// A goroutine in a for {} loop that calls a function making a syscall,
 // a goroutine making a syscall every 10 ms (a raw nanosleep, in virtual time),
 // signal.Notify(SIGUSR1) and syscall.Kill(self), with one P. The ticker and main only
 // run if the spinner is preempted: Go's sysmon sends SIGURG through tgkill and the

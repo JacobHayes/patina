@@ -1,4 +1,4 @@
-/* blocking I/O item 1: pipes between threads. A: 1-byte, 4096-byte and 1 MiB writes (the last force
+/* Pipes between threads. A: 1-byte, 4096-byte and 1 MiB writes (the last force
  * partial blocking writes) checked byte for byte. B: the reader closes early, the writer
  * gets EPIPE (SIGPIPE ignored). C: the writer closes, the reader gets EOF. D: a FIFO opened
  * by two threads, both orders. */

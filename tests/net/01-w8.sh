@@ -1,6 +1,5 @@
 # 1. W8 `sockets` (faults off) is ok; patina verify --runs 3 --vary cpu,load,sandbox is identical
-#    (seed 1); 6 seeds give at least 3 distinct digests. (the recorded run: 5 seeds x 20 runs and
-#    10 seeds; the evidence tier's matrix has W8 as a cell.)
+#    (seed 1); 6 seeds give at least 3 distinct digests. (the evidence tier's matrix has W8 as a cell.)
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-w8; mkdir -p "$o"

@@ -1,4 +1,4 @@
-/* cost measurement per-call cost probes, timed from outside by the wall clock of whole runs.
+/* Per-call cost probes, timed from outside by the wall clock of whole runs.
  *   costs MODE N
  *     getppid      N x raw getppid            (class Pass)
  *     clock        N x clock_gettime(MONOTONIC) (class Virt; natively the vDSO)

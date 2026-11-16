@@ -1,4 +1,4 @@
-// signals item 5: synchronous faults. `sig-fault handled` installs handlers and recovers with
+// Synchronous faults. `sig-fault handled` installs handlers and recovers with
 // siglongjmp from a nil dereference (si_addr, faulting rip), integer division by zero,
 // ud2 and an access to a file mapping beyond end of file. `sig-fault die-<kind>` makes the
 // same fault with the default action, so the process dies of the signal.

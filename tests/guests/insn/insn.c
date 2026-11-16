@@ -1,7 +1,7 @@
-/* instruction channels item 1. insn tsc: rdtsc and rdtscp 1,000 times each, interleaved with clock_gettime;
+/* Instruction channels. insn tsc: rdtsc and rdtscp 1,000 times each, interleaved with clock_gettime;
  * checks that the values strictly increase and agree with the clock (3 ticks per ns), prints
  * every value. insn rand: rdrand and rdseed, 16/32/64-bit forms, 100 times each; prints the
- * values and checks the carry flag. insn loop N: N rdtsc in a tight loop (item 8 cost).
+ * values and checks the carry flag. insn loop N: N rdtsc in a tight loop (measures the cost per instruction).
  * insn ud2: the guest's own ud2 (must die of SIGILL). insn tscsig: the guest asks for
  * PR_TSC_SIGSEGV itself and must get the signal from rdtsc. */
 #include <stdint.h>

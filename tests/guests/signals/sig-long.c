@@ -1,4 +1,4 @@
-// signals item 8: a long-running guest with a SIGUSR1 handler. The test sends a real SIGUSR1
+// A long-running guest with a SIGUSR1 handler. The test sends a real SIGUSR1
 // to its host PID from outside the sandbox; the run must end as infra and the handler
 // must not have run (it would print a line).
 #define _GNU_SOURCE

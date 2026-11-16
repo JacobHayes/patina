@@ -1,4 +1,4 @@
-"""Instruction-site census of an ELF file (instruction channels items 5, 6 and the channel table).
+"""Instruction-site census of an ELF file.
 
 usage: python3 -I census.py [--tsv] [--kinds k1,k2] FILE...
 

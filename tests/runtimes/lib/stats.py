@@ -1,4 +1,4 @@
-"""Per-run numbers for language runtimes from result.json and the boundary log.
+"""Per-run numbers for the language-runtime workloads from result.json and the boundary log.
 
     python3 stats.py PATINA RUN [RUN...]
 

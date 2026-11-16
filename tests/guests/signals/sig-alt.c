@@ -1,4 +1,4 @@
-// signals item 2: the guest's alternate stack. A handler with SA_ONSTACK runs on the stack the
+// The guest's alternate stack. A handler with SA_ONSTACK runs on the stack the
 // guest set with sigaltstack and sees SS_ONSTACK; without SA_ONSTACK it runs on the
 // thread's stack; the query returns what was set; changing it while on it is EPERM;
 // SS_AUTODISARM disarms it during the handler. Also in a second thread with its own stack.

@@ -1,4 +1,4 @@
-# files item 6: a Python program that walks the standard library, imports modules and does
+# A Python program that walks the standard library, imports modules and does
 # file work on /work. Prints a digest of everything it saw.
 import glob
 import hashlib

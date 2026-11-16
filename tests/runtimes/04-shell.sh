@@ -1,8 +1,7 @@
-# language runtimes item 4, W6 shell-pipeline under /bin/sh (dash) and /bin/bash over the system coreutils
+# W6 shell-pipeline under /bin/sh (dash) and /bin/bash over the system coreutils
 # (tests/guests/shell-pipeline/w6.sh: pipelines, $(...), background jobs and wait, here-documents,
 # find | sort | xargs (also -P4), tar create/extract round trip, ls -l, date, mktemp, sleep 5).
-# Regressions; the recorded run used 5 seeds x 20 runs and 100 fault seeds per shell (the
-# evidence tier's matrix and soak have W6).
+# Regressions (the evidence tier's matrix and soak have W6).
 #  a. R: `ok`; stdout equals a native run after masking the "~ " lines.
 #  b. D (seed 1, 3 runs, --vary cpu,load,aslr,sandbox), faults off and on (fs-error-permille=10);
 #     identical stdout includes the masked lines (ls -l times, date, mktemp names, PIDs).

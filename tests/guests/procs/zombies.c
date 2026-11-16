@@ -1,4 +1,4 @@
-/* processes item 5: zombies and orphans.
+/* Zombies and orphans.
  * A child exits while the parent sleeps: it is a zombie until waited (kill(pid, 0) succeeds,
  * waitpid then returns it, and kill(pid, 0) fails with ESRCH afterwards). A grandchild whose
  * parent died reports getppid() == 1. */

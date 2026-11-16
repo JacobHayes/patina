@@ -1,5 +1,4 @@
-# Evidence (cost measurement outcome census and throughput, docs/EVIDENCE.md cost measurement): SEEDS seeds (default 100; the
-# recorded census used 200) of each workload with its fault configuration, 8 runs at a time (tests/durability/bench/census.py).
+# Evidence (outcome census and throughput, docs/EVIDENCE.md): SEEDS seeds (default 100) of each workload with its fault configuration, 8 runs at a time (tests/durability/bench/census.py).
 #@ tier=evidence budget=1200 slots=8
 set -eu
 : "${PATINA:?}" "${RUNS:?}"

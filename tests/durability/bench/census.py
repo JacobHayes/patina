@@ -1,4 +1,4 @@
-"""cost measurement outcome census and throughput: SEEDS seeds (default 200) of each workload with its fault
+"""Outcome census and throughput: SEEDS seeds (default 200) of each workload with its fault
 configuration, JOBS (default 8) runs at a time, each run on its own core (cores 0..JOBS-1,
 round-robin); counts by outcome, the share of unsupported/internal, and seeds per
 second per core (seeds / wall / JOBS). Boundary logs deleted; result.json kept for every run.

@@ -1,4 +1,4 @@
-// cost measurement spin-wait patterns in Rust std.
+// Spin-wait patterns in Rust std.
 //   rs-spin spin [ITERS]    a hand-written spin lock (AtomicBool, spin_loop hint, never
 //                           yields: the `spin` crate's shape) held across a system call
 //   rs-spin mutex [ITERS]   std::sync::Mutex (bounded spin, then futex) around the same call

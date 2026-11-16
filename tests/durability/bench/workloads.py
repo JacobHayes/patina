@@ -1,4 +1,4 @@
-"""The W1-W9 workload table for cost measurement (the determinism hardening protocol's commands and fault configurations,
+"""The W1-W9 workload table (the determinism hardening protocol's commands and fault configurations,
 tests/determinism/lib/workloads.inc). Each entry: guest dir, argv, fault options, extra patina options,
 native environment."""
 import os

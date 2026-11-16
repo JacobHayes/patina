@@ -836,7 +836,7 @@ static void halfclose_delay(long long min_ms) {
     CHECK(dt >= min_ms, "EOF after %lld ms, wanted at least %lld", dt, min_ms);
 }
 
-/// N one-byte request/reply round trips between two processes (the cost measurement).
+/// N one-byte request/reply round trips between two processes.
 static void pingpong(int n) {
     int port, l = listener(&port, 0);
     pid_t p = fork();

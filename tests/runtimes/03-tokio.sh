@@ -1,14 +1,14 @@
-# language runtimes item 3, W2 tokio-mt: stock tokio multi-thread runtime, 4 workers (tokio-mt local: the
+# W2 tokio-mt: stock tokio multi-thread runtime, 4 workers (tokio-mt local: the
 # echo server and 16 clients over tokio::net::Unix*, timers, spawn_blocking file writes,
-# tokio::process, a 5 s timeout on a read nobody answers). Regressions; the recorded run used 5
-# seeds x 20 runs (the evidence tier's matrix has W2).
+# tokio::process, a 5 s timeout on a read nobody answers). Regressions (the evidence
+# tier's matrix has W2).
 #  a. R: `ok`, stdout lines equal to a native run's after masking "~ " lines.
 #  b. D (seed 1, 3 runs, --vary cpu,load,aslr,sandbox), faults off and on (fs-error-permille=10).
 #  c. >= 5 distinct digests over 10 seeds.
 #  d. The 5 s tokio::time::timeout fires in virtual time: median wall of 3 runs < 1.5 s.
 #  e. F: injected file errors are seen by the program (spawn_blocking errors printed).
 #  g. TCP (tokio-mt net, the network wire): D faults off and on, at seed 5: the seed that diverged
-#     before the exit barrier (docs/EVIDENCE.md language runtimes "exit versus a wire delivery"). F: net-reset seen
+#     before the exit barrier (docs/EVIDENCE.md runtimes "exit versus a wire delivery"). F: net-reset seen
 #     as "ConnectionReset"; net-partition=1..10001: the 5 s read timeouts fire during it, then
 #     all 16 clients finish with correct data, quickly in wall time; net-chunk-max=1: all ok.
 #@ tier=area budget=60 slots=4

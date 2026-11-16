@@ -1,4 +1,4 @@
-/* blocking I/O item 7: two threads contend for flock and for F_OFD_SETLKW on one file; inside the
+/* Two threads contend for flock and for F_OFD_SETLKW on one file; inside the
  * critical section they make syscalls (switch points); mutual exclusion must hold. */
 #include "common.h"
 #include <sys/file.h>

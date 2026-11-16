@@ -1,4 +1,4 @@
-/* processes item 6: cross-process signals.
+/* Cross-process signals.
  * - kill between siblings (SIGUSR2 from one child to another, which waits in sigsuspend);
  * - kill to a process group (three children in a new group, SIGUSR1 to -pgid; each exits
  *   with the number of signals its handler saw);

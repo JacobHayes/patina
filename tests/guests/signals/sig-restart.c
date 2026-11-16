@@ -1,8 +1,8 @@
-// signals item 6: a thread blocked in a call is signalled by another thread.
+// A thread blocked in a call is signalled by another thread.
 //   sig-restart wait : nanosleep (EINTR, remaining time), futex wait with and without
 //                      SA_RESTART, futex wait with a timeout (EINTR even with SA_RESTART).
-//   sig-restart io   : read on a pipe and poll, with and without SA_RESTART (needs the
-//                      blocking I/O of blocking I/O).
+//   sig-restart io   : read on a pipe and poll, with and without SA_RESTART (needs blocking-I/O
+//                      support).
 #define _GNU_SOURCE
 #include <errno.h>
 #include <linux/futex.h>

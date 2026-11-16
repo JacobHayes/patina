@@ -1,4 +1,4 @@
-"""cost measurement cost: end to end, every workload W1-W9: wall time native, under patina with faults off and
+"""End to end, every workload W1-W9: wall time native, under patina with faults off and
 with the workload's fault configuration; traps (syscalls seen) and switches per run alongside.
 
 REPS runs of each (median [min..max]), seed = rep number (1..REPS), pinned to CPU. Native is

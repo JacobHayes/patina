@@ -1,7 +1,7 @@
 #!/bin/sh
-# Evidence (evidence item 1-3, docs/EVIDENCE.md): the whole protocol (tests/determinism/bin/protocol.sh:
+# Evidence (docs/EVIDENCE.md): the whole protocol (tests/determinism/bin/protocol.sh:
 # reference, repeat 21, cpu 6, load, aslr, sandbox, parallel 9, env) over every W1-W9 workload
-# and attack guest, seeds DET_SEEDS (default "1 2"; the recorded matrix used 1-5), faults off
+# and attack guest, seeds DET_SEEDS (default "1 2"), faults off
 # and on. Cells run 4 at a time, each with PATINA_PARALLEL=2.
 #@ tier=evidence budget=2400 slots=8
 set -eu

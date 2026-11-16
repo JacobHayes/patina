@@ -1,4 +1,4 @@
-/* blocking I/O item 3: an event loop over 32 socketpairs (half level-triggered, half edge-
+/* An event loop over 32 socketpairs (half level-triggered, half edge-
  * triggered), 4 eventfds and a periodic timerfd, fed by 4 worker threads; the same with
  * poll and with select. argv[1] = epoll | poll | select. Every event is printed in the
  * order the loop saw it (that order is part of what must be identical across runs). */

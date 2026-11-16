@@ -1,5 +1,5 @@
 #!/bin/sh
-# Evidence (evidence item 5): one seed of W2, W6 and W9, faults on, DET_SOAK_RUNS times each
+# Evidence (soak): one seed of W2, W6 and W9, faults on, DET_SOAK_RUNS times each
 # (default 1000) under load and parallel (8 sandboxes at once); the first divergence fails.
 #@ tier=evidence budget=1800 slots=8
 set -eu

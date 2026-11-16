@@ -1,4 +1,4 @@
-"""Shared helpers for the cost measurement scripts (run with python3 -I).
+"""Shared helpers for the cost scripts (run with python3 -I).
 
 Environment: PATINA, PATINA_GUESTS (as ./check sets them), OUT (an output directory). Every patina run is pinned to CPU (default the last core); boundary logs are
 deleted after each run (only result.json, stdout and stderr are kept).

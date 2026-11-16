@@ -1,8 +1,8 @@
-"""cost measurement item 1, the workload matrix: W1-W9, evidence R and D as defined in spec 05.
+"""The workload matrix: W1-W9, evidence R and D as defined below.
 
 R: seed 1, faults off: class ok and exit 0; `refused` and `unscanned_exec_mappings` listed.
 D: `patina verify --runs COSTS_D_RUNS --vary cpu,load,aslr,sandbox` identical for seeds 1..COSTS_D_SEEDS
-   (defaults 20 and 5, as recorded), faults off and with the workload's fault configuration
+   (defaults 20 and 5), faults off and with the workload's fault configuration
    (tests/durability/bench/workloads.py); and seeds 1-10, one run each, faults off: number of distinct
    digests (>= 3 required for concurrent workloads).
 Self-check: `patina log ops --check` on seed 1 faults off and on (every incarnation).

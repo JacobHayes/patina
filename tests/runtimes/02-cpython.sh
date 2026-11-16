@@ -1,5 +1,4 @@
-# language runtimes item 2, W5 cpython: stock /usr/bin/python3, no flags (regressions; the recorded run used
-# 5 seeds x 20 runs and 100 fault seeds: docs/EVIDENCE.md language runtimes, the evidence tier's matrix has W5).
+# W5 cpython: stock /usr/bin/python3, no flags (regressions; the evidence tier's matrix has W5).
 #  a. R: `ok`, stdout equal to a native run after masking "~ " and "v " lines.
 #  b. The printed values identical across runs of a seed (D: seed 1, 3 runs, --vary
 #     cpu,load,aslr,sandbox), faults off and on.

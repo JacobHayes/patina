@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# processes item 9: subprocess from CPython: Popen with pipes, communicate, check_output of a shell
+# Subprocess from CPython: Popen with pipes, communicate, check_output of a shell
 # pipeline, run with a return code, and an environment passed through.
 import os, subprocess, sys
 

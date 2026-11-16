@@ -1,4 +1,4 @@
-/* blocking I/O item 4: timeouts in virtual time. argv[1] = poll | epoll | timerfd | rcvtimeo. */
+/* Timeouts in virtual time. argv[1] = poll | epoll | timerfd | rcvtimeo. */
 #include "common.h"
 #include <poll.h>
 #include <sys/epoll.h>

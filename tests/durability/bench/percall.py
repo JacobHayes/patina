@@ -1,4 +1,4 @@
-"""cost measurement cost: per call, by class, native vs patina; and boundary logging on vs compiled out.
+"""Per call, by class, native vs patina; and boundary logging on vs compiled out.
 
 Per call = (wall(N) - wall(0)) / N for one run each, repeated REPS times: median [min..max].
 patina: the launcher's wall_ms; preempt-permille = 0 (capture + handler + record, plus the

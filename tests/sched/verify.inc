@@ -1,8 +1,8 @@
 # verify_all LABEL [patina options]: for each guest and seed ($VERIFY_SEEDS, default 1), $VERIFY_RUNS
 # runs (default 4) varying CPU and host load must be identical (patina verify exits 0, and
 # independently: one digest, one stdout over the run directories); the first run of each also
-# passes check_result. (the recorded run used seeds 1-5 x 20 runs: docs/EVIDENCE.md the scheduler; the
-# evidence tier's matrix covers volume.)
+# passes check_result. (the evidence tier's
+# matrix covers volume.)
 verify_all() {
     label=$1; shift
     mkdir -p "$RUNS/$label"

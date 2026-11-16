@@ -1,6 +1,6 @@
 # 7. Crash and restart end to end with ack-log under --faults disk --crash machine: ACK_SEEDS
 # seeds (default 20) per model, both models: the correct variant is ok on every seed and
-# some runs crash (the recorded run: tests/faults/evidence-crashes.sh). The variant without
+# some runs crash (volume: tests/faults/evidence-crashes.sh). The variant without
 # the record fsync fails with INVARIANT acked-record-lost on at least one of ACK_SEEDS seeds
 # under each model, and its result says why: faults.recent ends with the machine crash, and
 # what it lost includes data.log. That seed run twice gives the same digest and the same post-crash

@@ -1,4 +1,4 @@
-// signals item 4: siglongjmp out of a handler (the saved mask comes back); swapcontext and
+// siglongjmp out of a handler (the saved mask comes back); swapcontext and
 // getcontext/setcontext round trips.
 #define _GNU_SOURCE
 #include <setjmp.h>

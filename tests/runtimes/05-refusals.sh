@@ -1,8 +1,8 @@
-# language runtimes item 5: for each runtime, every Deny hit and refused path (outcome.refused and Deny-class
+# For each runtime, every Deny hit and refused path (outcome.refused and Deny-class
 # traps in the boundary log), with the run's outcome showing that none blocked progress: one
-# seed-1 run of each runtime and shell, none `unsupported` (Stop) or `internal`. (language runtimes counted
-# every outcome of its whole check run; this is the representative run of each.)
-# Item 6 ("changes needed to the program or its build: none") is the build.sh of each workload:
+# seed-1 run of each runtime and shell, none `unsupported` (Stop) or `internal`. (the representative run of each,
+# not every outcome of a whole check run.)
+# No changes are needed to the program or its build: the build.sh of each workload uses
 # stock toolchain commands with no patina-specific flag (printed below).
 #@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
@@ -23,7 +23,7 @@ print("%-7s class %-6s stop %d  deny %s  refused %s" % (sys.argv[1], s["class"],
     case $c in unsupported | internal) fail "$r: class $c ($(field "$RUNS/$r/result.json" message))" ;; esac
 done
 
-echo "== item 6: the build commands (no patina-specific flag, patch or library)"
+echo "== the build commands (no patina-specific flag, patch or library)"
 for b in go-static cpython tokio-mt shell-pipeline; do
     echo "-- tests/guests/$b/build.sh"
     grep -v '^#' "$HERE/../guests/$b/build.sh" | grep -v '^set -eu$' | grep -v '^$'

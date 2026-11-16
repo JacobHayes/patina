@@ -1,4 +1,4 @@
-/* cost measurement spin-wait patterns: which busy-waits survive scheduling only at system calls?
+/* Spin-wait patterns: which busy-waits survive scheduling only at system calls?
  *   spinwait MODE [ITERS]   two threads, ITERS (default 2000) lock/unlock rounds each
  *     glibc-spin   pthread_spin_lock (an unbounded spin inside libc), a getppid inside the
  *                  critical section

@@ -1,4 +1,4 @@
-// signals item 7: a guest that blocks every signal, SIGSYS and SIGSEGV included, and
+// A guest that blocks every signal, SIGSYS and SIGSEGV included, and
 // registers handlers with a full sa_mask keeps working: its syscalls still trap, handlers
 // that make syscalls run, and the mask query reports SIGSYS and SIGSEGV as blocked.
 #define _GNU_SOURCE

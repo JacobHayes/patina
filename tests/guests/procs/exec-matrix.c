@@ -1,5 +1,5 @@
 #define _GNU_SOURCE
-/* processes item 2: the exec matrix. For every target and every method (fork+execve, vfork+execve,
+/* The exec matrix. For every target and every method (fork+execve, vfork+execve,
  * posix_spawn) start the target with descriptor 5 inherited (not close-on-exec) and
  * descriptor 6 close-on-exec, EXEC_SHOW_ENV=<method>:<target> in the environment, wait for it and
  * print its status. Then the failures: each method reports the errno the kernel gives.

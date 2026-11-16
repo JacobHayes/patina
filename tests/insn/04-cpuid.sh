@@ -1,7 +1,7 @@
-# 3/4. cpuid census: every leaf and subleaf dumped by a guest pinned (taskset) to 6 different
+# 4. cpuid census: every leaf and subleaf dumped by a guest pinned (taskset) to 6 different
 # cores; the report lists which (leaf, register, bits) differ. Then workloads under
 # --vary cpu (6 runs, one per core): digests identical or not, per workload. Decision rule: patch cpuid
-# only if a workload depends on the core. The script fails if one does (then item 4 applies).
+# only if a workload depends on the core. The script fails if one does (then cpuid must be patched).
 #@ tier=area budget=120
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-cpuid
@@ -25,5 +25,5 @@ for w in "hello-dyn a b" c-threads order rs-threads insn-go-hello "/usr/bin/pyth
     # shellcheck disable=SC2086
     if (verify "$o/w-$name" 1 6 $w); then trim "$o/w-$name"; else dep="$dep [$w]"; fi
 done
-[ -z "$dep" ] || die "digests depend on the core for:$dep (item 4: patch cpuid)"
+[ -z "$dep" ] || die "digests depend on the core for:$dep (patch cpuid)"
 echo "decision: no workload's digest depends on the core; cpuid identity fields are not patched"

@@ -1,6 +1,6 @@
 # 11. Determinism with faults on: patina verify --runs 3 --vary cpu,load,sandbox identical
-# for items 3 (error injection), 4 (short transfers) and 7 (crash and restart), seed 1 (the recorded
-# run: 5 seeds x 20 runs; the evidence tier's matrix covers volume).
+# for error injection, short transfers and crash and restart, seed 1 (the evidence tier's
+# matrix covers volume).
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib/common.inc"
 for seed in 1; do

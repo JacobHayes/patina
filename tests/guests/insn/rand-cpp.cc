@@ -1,4 +1,4 @@
-// instruction channels item 2: std::random_device with each token libstdc++ offers on x86 ("default",
+// std::random_device with each token libstdc++ offers on x86 ("default",
 // "rdrand", "rdseed", "hw"); 8 values each. A token the library refuses is reported as such.
 #include <cstdio>
 #include <random>

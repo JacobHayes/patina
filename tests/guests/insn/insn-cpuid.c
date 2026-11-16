@@ -1,5 +1,5 @@
-/* instruction channels item 3: dump every cpuid leaf and subleaf (basic, hypervisor, extended ranges; subleaves
- * 0..63 for every leaf), one line "leaf sub eax ebx ecx edx". Also rdpid (item 5) when asked. */
+/* Dump every cpuid leaf and subleaf (basic, hypervisor, extended ranges; subleaves
+ * 0..63 for every leaf), one line "leaf sub eax ebx ecx edx". Also rdpid when asked. */
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>

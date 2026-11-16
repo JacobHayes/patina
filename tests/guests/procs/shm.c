@@ -1,4 +1,4 @@
-/* processes item 8: futexes in memory shared across fork.
+/* Futexes in memory shared across fork.
  * A process-shared pthread mutex and condition variable in MAP_SHARED|MAP_ANONYMOUS memory:
  * parent and child take turns incrementing a counter 200 times each, signalling the other.
  * Then a POSIX named semaphore (/dev/shm): the child posts 100 times after its own work, the

@@ -1,4 +1,4 @@
-// signals item 1: handlers, raise, kill, tgkill between threads, sigqueue with a value,
+// Handlers, raise, kill, tgkill between threads, sigqueue with a value,
 // SA_SIGINFO fields, nested delivery with and without SA_NODEFER, mask manipulation,
 // sigpending, sigsuspend, sigtimedwait with timeout, alarm and setitimer in virtual time.
 // Prints key=value lines; the checker compares values.

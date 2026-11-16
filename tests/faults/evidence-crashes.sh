@@ -1,4 +1,4 @@
-# Evidence (faults items 7, 8 and 10): ack-log crash and restart over
+# Evidence (crash and restart): ack-log crash and restart over
 # 200 seeds per model, the nofsync variant under process crashes over 100 seeds, and crash-point
 # coverage over 500 seeds.
 #@ tier=evidence budget=900 slots=8

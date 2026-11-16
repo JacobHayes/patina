@@ -1,5 +1,5 @@
 #!/bin/sh
-# Evidence (evidence item 1, variant time): every W1-W9 workload and attack guest, two runs
+# Evidence (time variant): every W1-W9 workload and attack guest, two runs
 # DET_TIME_GAP_S apart (default 600 s, long enough for host-side background work such as
 # XFS's 300 s preallocation trim), the gaps overlapped by tests/determinism/bin/timeall.sh.
 #@ tier=evidence budget=1800 slots=2

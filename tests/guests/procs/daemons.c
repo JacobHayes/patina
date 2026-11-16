@@ -1,4 +1,4 @@
-/* processes item 7: containment. Starts N daemons (default 200): double fork, setsid, every signal
+/* Containment of daemons. Starts N daemons (default 200): double fork, setsid, every signal
  * ignored, every descriptor below 1024 closed, then sleep forever. Then, with "linger K",
  * keeps the run alive for K getppid calls, and exits 0: the run ends when this process exits.
  * Usage: daemons [N [linger K]] */

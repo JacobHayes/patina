@@ -1,4 +1,4 @@
-/* blocking I/O item 6: a thread blocked reading a pipe nobody writes; every other thread has
+/* A thread blocked reading a pipe nobody writes; every other thread has
  * exited (the write end stays open). Expected outcome: deadlock naming the descriptor. */
 #include "common.h"
 

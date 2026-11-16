@@ -1,4 +1,4 @@
-"""cost measurement: patina against the existing tool (Patina v0.5.0) on the workloads both can run.
+"""Patina against the existing tool (Patina v0.5.0) on the workloads both can run.
 
 Patina v0.5.0 is built from the tag in a temporary workspace (PATINA = its `patina` binary);
 the guests are built with `patina build` from the same sources (PGUESTS: w1 from

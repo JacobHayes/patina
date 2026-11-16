@@ -1,4 +1,4 @@
-"""cost measurement: the tracker self-check (`patina log ops --check`) on W1-W9, seeds 1-3, faults off and on.
+"""The tracker self-check (`patina log ops --check`) on W1-W9, seeds 1-3, faults off and on.
 Usage: oplog.py OUTDIR (PATINA, PATINA_RT, PATINA_GUESTS set). Prints one line per run."""
 import os, subprocess, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

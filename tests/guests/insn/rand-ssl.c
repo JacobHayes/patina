@@ -1,4 +1,4 @@
-/* instruction channels item 2: OpenSSL RAND_bytes (64 bytes, twice), and RAND_priv_bytes. */
+/* OpenSSL RAND_bytes (64 bytes, twice), and RAND_priv_bytes. */
 #include <openssl/rand.h>
 #include <stdio.h>
 

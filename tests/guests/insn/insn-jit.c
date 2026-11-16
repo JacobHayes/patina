@@ -1,4 +1,4 @@
-/* instruction channels item 7 and the scanner's mapping paths.
+/* The scanner's mapping paths for code the guest generates.
  * insn-jit [anon]: write "rdrand eax; ret" into anonymous memory, make it executable, run it.
  *   The runtime does not scan anonymous executable memory: the value is the CPU's (it differs
  *   between runs) and the run is labelled with unscanned_exec_mappings >= 1.

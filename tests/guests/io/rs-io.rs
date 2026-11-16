@@ -1,4 +1,4 @@
-// blocking I/O item 8 (std): mpsc channels feeding a UnixStream pair, a UnixListener with
+// std I/O: mpsc channels feeding a UnixStream pair, a UnixListener with
 // accept/connect, and a UnixDatagram pair. Prints totals only (schedule-independent).
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixDatagram, UnixListener, UnixStream};

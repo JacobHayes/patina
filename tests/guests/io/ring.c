@@ -1,4 +1,4 @@
-/* blocking I/O item 5: 16 threads in a ring, each blocking-reads one byte from its predecessor's
+/* 16 threads in a ring, each blocking-reads one byte from its predecessor's
  * pipe and writes it to its successor's; argv[1] laps (default 100,000). */
 #include "common.h"
 

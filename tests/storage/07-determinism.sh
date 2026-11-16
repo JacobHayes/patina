@@ -1,4 +1,4 @@
-# 7. Determinism of findings: each failing seed of items 2-6 (and F6) re-run 3 times with
+# 7. Determinism of findings: each failing seed of the earlier checks in this area (and F6) re-run 3 times with
 # --vary cpu,load gives identical digests, outcomes, output and post-crash tree digests
 # (patina verify compares the crash records, which carry each post-crash tree's digest).
 #@ tier=quick budget=20

@@ -1,4 +1,4 @@
-# Evidence (cost measurement item 1, the workload matrix of spec 05): W1-W9, evidence R and D and the
+# Evidence (workload matrix): W1-W9, evidence R and D and the
 # tracker self-check (tests/durability/lib/matrix.py; COSTS_D_SEEDS and COSTS_D_RUNS, defaults 5 and 20),
 # 8 workloads at a time. F is each workload's own area script (named in the table).
 #@ tier=evidence budget=1800 slots=8

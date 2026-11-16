@@ -1,6 +1,6 @@
 # 2. Self-check: replaying the full operation log equals the exported live tree, for
 # fs-tour, randops (10,000 random operations) and Python sqlite3 writing 1,000 rows,
-# seeds 1-2 (the recorded run: 20 seeds). randops covers the two tracker bugs the self-check
+# seeds 1-2. randops covers the two tracker bugs the self-check
 # found: O_CREAT through a dangling symlink, and copy_file_range into a write-only descriptor.
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib/common.inc"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# W1-W9 and the language runtimes language runtimes (Go, CPython, tokio, the shells, and the network
+# W1-W9 and the language runtimes (Go, CPython, tokio, the shells, and the network
 # runtimes of the network wire) run unmodified on the sandbox hardening build, each verified as identical runs (seed 1,
 # repeat and env variants), with nothing refused that was not refused before sandbox hardening.
 #@ tier=area budget=240 slots=4

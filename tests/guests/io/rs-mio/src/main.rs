@@ -1,4 +1,4 @@
-// blocking I/O item 8 (readiness through mio): a Poll over 8 mio UnixStream pairs and a Waker, fed
+// Readiness through mio: a Poll over 8 mio UnixStream pairs and a Waker, fed
 // by worker threads; events are printed in the order the loop saw them.
 use mio::net::UnixStream;
 use mio::{Events, Interest, Poll, Token, Waker};
