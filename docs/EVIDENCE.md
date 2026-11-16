@@ -729,8 +729,9 @@ the acceptance, `H` rebuilt:
 `./check storage examples` passes (the examples find 14, 4, 11, 6 and 11 of 20 seeds). The
 sweep summary no longer lists the harness's `open-after-crash`, `reopen-failed` and
 `iterate-failed` (now `unreachable!`) as "`always` never evaluated"; `fresh-after-wipe-complete`,
-a real invariant evaluated only with `FJ_WIPE_PARTIAL=1`, still is. F2 has no regression
-check in `tests/storage`: no search over a few seconds of seeds reaches it.
+a real invariant evaluated only with `FJ_WIPE_PARTIAL=1`, still is. No plain search over a
+few seconds of seeds reaches F2; its check is a `--branch` sweep (below, "Crash-point
+enumeration").
 
 ### Enumerating one seed's crash points
 
@@ -765,6 +766,67 @@ time; CPU-seconds are the sum of `wall_ms`. A seed over 10,000 crash points is s
   10,000 crash points (19,536 to 23,932), skipped; F2 in 12 of the other 13 (1 to 5 F2
   children each, 2,166 children in all). This probe uses the windows found above, so its
   rate is not a search rate.
+
+### Crash-point enumeration
+
+`patina sweep --branch`: each seed once with crashes on and never firing, then once per crash
+point it counted (`--crash machine-at:N`), points ascending, seeds in turn.
+`tests/storage/evidence-branch.sh` (`./check evidence evidence-branch`, under the evidence
+lock), 2026-11-16, this host, this build (`H` debug), every sweep `-j 6 --keep fail`, run
+once. CPU-s is the sum of `wall_ms` over the sweep's runs.
+
+| Finding | Command (plus `-j 6 -- H`) | Runs with it / runs | CPU-s | Per CPU-s |
+|---|---|---|---|---|
+| F2, `--branch` | `--seeds 1..3 --branch --crash machine --buggify --env FJ_N=2000 --budget 200` | 2 / 7,283 (seed 1, points 1,721 and 1,724) | 1,032 | 1.9e-3 |
+| F2, plain (expected) | `--seeds 1..2000 --buggify --env FJ_N=2000 --crash machine:1` | 0.17 / 2,000 | about 400 | 4.3e-4 |
+| F6, same `--branch` sweep | | 4 / 7,283 (seed 2, points 1,378 to 1,382) | 1,032 | 3.9e-3 |
+| F6, `--branch`, `point:manual-flush=1000` | the F2 command plus `--fault point:manual-flush=1000` | 18 / 7,179 | 1,006 | 1.8e-2 |
+| F6, plain, `point:manual-flush=1000` | (Search quality, above) | 6 / 2,000 | about 9,000 (4.5 s a run) | 6.7e-4 |
+| F1, `--branch` | `--seeds 1..3 --branch --crash machine --max-findings 1` | 2 / 28 (first seed 1@8) | 2 | 0.95 |
+| F1, plain | `--seeds 1..300 --crash machine:3` | 6 / 300 | 38 | 0.16 |
+| acklog-c, `--branch` | `--seeds 1 --branch --crash machine -- ./acklog` | 81 / 165 | 5.5 | 15 |
+| acklog-c, plain | `--seeds 1..20 --crash machine -- ./acklog` | 6 / 20 | 0.46 | 13 |
+| F3, `--branch` | F3's acceptance flags with `--branch --crash machine`, seeds 1..3, `--budget 120` | 46 / 6,102 (all 6,099 points) | 425 | 0.11 |
+| F3, plain | F3's acceptance command, 600 seeds | 24 / 600 | 46 | 0.52 |
+| F4, `--branch` | `--seeds 1..10 --branch --crash machine --fault fsync-error-at=1..100 --budget 120` | 0 / 8,000 (7,990 of 18,375 points) | 534 | 0 |
+| F4, plain | `--seeds 1..1000 --fault fsync-error-at=1..100 --crash machine` | 4 / 1,000 | 103 | 3.9e-2 |
+
+- F2 is found within the 200 s budget, 4.5 times the plain sweep's rate per CPU-second. In
+  the sweep's order its first hit came after 602 CPU-s of children (the plain sweep's
+  expectation is one hit per 2,300 CPU-s); seed 1 alone reaches it after 227 CPU-s.
+- F6 appeared at the default rate in seed 2, the seed whose fault points are on (23,932
+  crash points against 4,069 and 6,252): a seed that holds F6's prefix finds it, as expected.
+  One sweep; a second with other seeds would say whether it is more than luck. With
+  `manual-flush` at every evaluation, `--branch` finds F6 at about 27 times the plain rate
+  per CPU-second (the plain cost is the 4.5 s base run measured for that setting).
+- The early-window findings (F1, acklog-c) are found at once, at the plain rate or better.
+  F3 and F4 need variety across seeds (fault plans drawn per seed, a failed fsync at a
+  seed-chosen call): `--branch` spends its runs on few seeds and finds F3 5 times less often
+  and F4 not at all in 120 s. Plain sweeps stay the tool for those.
+- Plain sweeps unchanged: F1 6/300, F3 24/600 (and the one F6 seed), F4 (one sweep)
+  4/1,000, F5 59/100, as recorded above. A run without `-at` gives the same digest as before
+  the change (90 of 90 runs of W1 to W9, fjall and acklog over seeds 1 to 6, 35 with a
+  crash, against the previous build).
+
+Cost, from the F2 sweep's run directories:
+
+| Row | Value |
+|---|---|
+| crash points per seed | 4,069, 6,252, 23,932 |
+| child `wall_ms` | median 133; by quarter of the point's position: 110, 193, 270 ms (no child reached the last quarter) |
+| share of a child's time that is the prefix it shares with its base | median 0.12 (base `wall_ms` times the crash's seq over the base's last seq, over the child's `wall_ms`) |
+| children repeating a post-crash tree of the same seed | 44%, 63%, 53% |
+
+Both criteria inputs of the deferred work: the prefix share is far below the 60% that would
+make building the post-crash tree from the base's log worth a second way to produce a run;
+children repeating a tree are over half in two seeds, but F2's two hits (points 1,721 and
+1,724) share one tree, so skipping repeats would have dropped a finding.
+
+`tests/storage/12-f2.sh` (nightly) is the standing check: `--seeds 1..2 --branch --crash
+machine --buggify --env FJ_N=2000 --env FJ_WIPE_PARTIAL=1 --max-findings 2` must hold F2's
+group. On this host it found F2 (seed 1, point 1,721) after 3,444 of 28,001 points, in
+82 s; with `FJ_N=500` every one of the 7,908 points ran and only F6 was found, so the check
+fails (288 s).
 
 ## Acceptance: Cairn and briefing
 

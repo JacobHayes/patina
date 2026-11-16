@@ -228,6 +228,15 @@ violation always: acked-records-kept: N acknowledged, N stored
 A run forced to crash at point N that does not crash there ran another prefix than its seed's
 first run: the sweep reports it `nondeterministic`, naming both directories.
 
+Each point is tried once, with one draw of what the crash keeps, and "every crash point tried"
+covers only the seeds swept. Seeds differ widely in their count (fjall's harness: 4,069 to
+23,932 points over three seeds, about 130 ms a run), so give large ones a `--budget`. Use it
+when a crash must land in a narrow window and plain crash sweeps find nothing: on fjall's F2
+it finds the window at 4.5 to 7 times a plain sweep's rate per CPU-second, and early windows
+(F1, acklog-c) at once. Keep plain sweeps for findings that need variety across seeds, such
+as fault plans or a failed fsync at a chosen call: there it finds 5 times less (F3) or
+nothing (F4) in the same time (docs/EVIDENCE.md, "Crash-point enumeration").
+
 ### If a sweep finds nothing
 
 A sweep that ends all `ok` has looked at as many runs as it had seeds, each one schedule and,
@@ -238,7 +247,8 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   thousands, say between a write and the next fsync) is found in about one seed in several
   thousand, whatever the other settings. Budget for that before changing anything else.
 - **Every crash point** (`--branch`, above): a few seeds with each crash point tried once,
-  instead of one crash in each of many seeds. It reaches every window of the seeds it runs.
+  instead of one crash in each of many seeds. It reaches every window of the seeds it runs:
+  the first thing to try for a crash window, not for a fault that must vary across seeds.
 - **`--buggify`**, and for a fault point that must fire at one particular moment,
   `--fault point:LABEL=1000`: the point is on in every run and fires at every evaluation,
   instead of on in a quarter of runs and firing on a quarter of evaluations.

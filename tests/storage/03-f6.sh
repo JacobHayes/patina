@@ -2,9 +2,8 @@
 # --buggify --crash machine:1 at 24 CPUs without pause points (seed 2001; 2 seeds in 6,000,
 # none at the default 4 CPUs in 2,000, see docs/EVIDENCE.md), so the settings are given here
 # and the seed is named; the kept tree makes the native harness fail the same way. F2 (the
-# journal-entry assertion) needs a crash in a window of a few crash points: 3 of 14,000 seeds
-# over both harnesses and the settings measured (docs/EVIDENCE.md, "Search quality"), so it
-# has no check here.
+# journal-entry assertion) needs a crash in a window of a few crash points, which plain sweeps
+# almost never hit; 12-f2.sh finds it by trying every crash point.
 # The seed depends on the host's libc and CPU, so this is an area check, not a quick one.
 #@ tier=area budget=15
 . "$(dirname "$0")/lib/common.inc"
