@@ -185,3 +185,32 @@ and `02-points` (quick, together under 1 s).
   Python natively, 1M iterations: 0.09 s plain, 0.12 s with the assertion.
 - **Example.** `examples/ledger` under `--buggify`, seeds 1..6: seeds 1 and 5 end
   `violation` with `ledger-sorted`, the rest `ok`.
+
+## Faults: the plan, errno fidelity, the memory limit, attribution
+
+Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
+
+- **Crash and restart with disk faults** (`./check evidence faults/evidence-crashes`, 63 s):
+  ack-log under `--faults disk --crash machine`, 200 seeds per crash model: the correct
+  variant is `ok` on 200 of 200 under both `ext4-ordered` and `posix-strict` (67 runs crash at
+  least once, 91 and 90 crashes in all); the variant without the record fsync is caught
+  (`INVARIANT acked-record-lost`), and its `faults.recent` ends with the machine crash naming
+  `/work/data.log`. Under `--crash process:20` the same variant is `ok` on 100 of 100 (97 with
+  a crash). Crash-point coverage over 500 seeds at `machine:20`: 1,381 crashes, 453 distinct
+  post-crash trees, crashes between every write and its fsync, the record fsync and the
+  acknowledgement, and the rename and the directory fsync.
+- **Plan independence** (`tests/faults/15-plan.sh`): adding `--fault net-chunk-max=1..4` to an
+  ack-log run under `--faults disk --crash machine:0..30` leaves every other resolved value and
+  the boundary log equal. Red/green: resolving every range from one shared counter instead of a
+  draw keyed by the setting's name moves the crash rate (`machine:17` to `machine:28`) and fails
+  the check.
+- **Errno fidelity** (`tests/faults/14-fidelity.sh`): stock Go running coreutils through
+  `os/exec`, `fs-error-permille=1000 fs-short-permille=300`, is `ok`; pipes saw short transfers
+  only. Red/green: letting pipes and unix sockets draw `EIO` puts an injected error on a pipe
+  and fails the check.
+- **Memory limit** (`tests/faults/06-memory.sh`): `mem-limit-mb=64` refuses a guest mapping
+  1 MiB at a time at MiB 55 (the process's own data, runtime included, counts) on both runs of
+  `verify`, and a 2 MiB `malloc` then returns NULL with `ENOMEM`. Red/green: disabling the
+  check maps all 100 MiB.
+- **Self-check** (`tests/faults/16-counts.sh`): a crash-enabled run whose operation log the
+  test hook corrupts ends `internal`; red/green: without the end-of-run check it ends `ok`.
