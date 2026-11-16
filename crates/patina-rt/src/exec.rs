@@ -427,7 +427,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
     crate::oplog::on_exit();
     set_class(call, Class::Virt);
     let row = proto::row(call.nr() as u32);
-    crate::log::trap(row, call.nr(), &a, 0);
+    crate::log::trap(row, call, 0);
     let mut ign = 0u64;
     let sa = crate::state::sigact();
     for (s, act) in sa.iter().enumerate().skip(1) {

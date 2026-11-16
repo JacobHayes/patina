@@ -98,10 +98,9 @@ fn handle_group(call: &mut dyn Call, row: &'static Row) -> Action {
 
 /// End the run naming this call: the record is written first so the log shows where.
 pub fn stop(call: &mut dyn Call, row: &'static Row) -> ! {
-    let a = args(call);
     call.thread().eff_class = Class::Stop.code();
-    crate::log::trap(row, call.nr(), &a, -e::ENOSYS);
-    crate::sup::stop(call.nr(), a[0])
+    crate::log::trap(row, call, -e::ENOSYS);
+    crate::sup::stop(call.nr(), call.guest_args()[0])
 }
 
 /// Stop for a variant of a written row that is not supported yet.

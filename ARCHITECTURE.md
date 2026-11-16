@@ -90,7 +90,10 @@ program that sleeps an hour takes milliseconds.
 
 Every boundary event (a trap, a scheduling decision, an injected fault, a preemption) appends
 one fixed-size record under the turn: the call, its arguments, its result and a hash of what
-it wrote (`patina-proto/src/rec.rs`, `patina-rt/src/log.rs`). The run's digest is the hash
+it wrote (`patina-proto/src/rec.rs`, `patina-rt/src/log.rs`). A record holds the arguments as
+the program passed them (`Call::guest_args`), not a buffer of the runtime's that a handler
+passed on instead (a resolved path, a shortened count), so no runtime address enters the log
+and a change to the runtime's own layout does not move a digest. The run's digest is the hash
 chain over the records. Replay runs the program again and compares record by record
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`).

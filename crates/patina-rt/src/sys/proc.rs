@@ -377,7 +377,7 @@ fn exit(call: &mut dyn Call, row: &'static proto::Row) -> ! {
     let a = args(call);
     let status = a[0] & 0xff;
     crate::oplog::on_exit();
-    crate::log::trap(row, call.nr(), &a, 0);
+    crate::log::trap(row, call, 0);
     crate::sup::call_sup_noreply(Op::ProcExit, [status, 0, 0, 0, 0, 0]);
     unsafe {
         sc1(nr::EXIT_GROUP, status);

@@ -298,34 +298,36 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
         return none;
     };
     let nr = call.nr();
+    // The record names the guest's own first argument, not a path the runtime resolved.
+    let a0 = call.guest_args()[0];
     if let Some(ns) = delay(obj) {
-        note(nr, INJ_DELAY, c as u64, ns, call.arg(0), who);
+        note(nr, INJ_DELAY, c as u64, ns, a0, who);
         let deadline = ctl().vclock_ns.load(Relaxed) + ns;
         crate::sup::call_sup(Op::Sleep, [deadline, 0, 0, 0, 0, 0]);
     }
     match decide(call, c, obj) {
         Decision::Proceed => none,
         Decision::Ret(v) => {
-            note(nr, INJ_ERROR, c as u64, e::ENOMEM as u64, call.arg(0), who);
+            note(nr, INJ_ERROR, c as u64, e::ENOMEM as u64, a0, who);
             Gate {
                 ret: Some(v),
                 post: None,
             }
         }
         Decision::Enospc(None) => {
-            note(nr, INJ_ENOSPC, c as u64, 0, call.arg(0), who);
+            note(nr, INJ_ENOSPC, c as u64, 0, a0, who);
             Gate {
                 ret: Some(-28),
                 post: None,
             }
         }
         Decision::Enospc(Some(n)) => {
-            note(nr, INJ_ENOSPC, c as u64, n, call.arg(0), who);
+            note(nr, INJ_ENOSPC, c as u64, n, a0, who);
             call.set_arg(2, n);
             none
         }
         Decision::Error(errno) => {
-            note(nr, INJ_ERROR, c as u64, errno as u64, call.arg(0), who);
+            note(nr, INJ_ERROR, c as u64, errno as u64, a0, who);
             if c == FClass::Close {
                 Gate {
                     ret: None,
@@ -339,7 +341,7 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
             }
         }
         Decision::Shorten(n) => {
-            note(nr, INJ_SHORT, c as u64, n, call.arg(0), who);
+            note(nr, INJ_SHORT, c as u64, n, a0, who);
             call.set_arg(2, n);
             none
         }

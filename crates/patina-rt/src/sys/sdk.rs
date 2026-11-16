@@ -193,9 +193,9 @@ fn violation(call: &mut dyn Call, label: &[u8], detail: &[u8]) -> ! {
         t.violation_len = n as u64;
         t.violation_label = label.len() as u64;
     }
-    let a = crate::trap::args(call);
+    let a = call.guest_args();
     LAST_HASH.store(proto::rec::hash_bytes(OP_ASSERT, t.violation()), Relaxed);
-    crate::log::trap(&proto::table::SDK_ROW, call.nr(), &a, 0);
+    crate::log::trap(&proto::table::SDK_ROW, call, 0);
     crate::sup::call_sup(Op::SdkViolation, [a[0], a[1], a[2], 0, 0, 0]);
     crate::sup::hang()
 }

@@ -130,14 +130,18 @@ pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
     h.finish()
 }
 
-/// Record a completed trap.
-pub fn trap(row: &Row, nr: u64, args: &[u64; 6], ret: i64) {
+/// Record a completed trap. The record holds the arguments as the guest passed them
+/// (`Call::guest_args`), never a runtime buffer a handler substituted, and the hashes read
+/// the guest's own memory.
+pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     #[cfg(patina_nolog)]
     {
-        let _ = (row, nr, args, ret);
+        let _ = (row, call, ret);
         return;
     }
     #[allow(unreachable_code)]
+    let nr = call.nr();
+    let args = &call.guest_args();
     let ts = crate::state::thread();
     let c = ctl();
     // Inputs are read only when the kernel did not report the pointer bad.

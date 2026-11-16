@@ -50,9 +50,12 @@ pub trait Call {
     fn arg(&self, i: usize) -> u64;
     fn thread(&mut self) -> &mut ThreadState;
     fn frame(&mut self) -> Option<&mut TrapFrame>;
-    /// Replace argument `i` for the handler (a shortened transfer). The boundary
-    /// record keeps the arguments as the guest passed them.
+    /// Replace argument `i` for the handler (a resolved path in a runtime buffer, a
+    /// shortened transfer). `guest_args` keeps the arguments as the guest passed them.
     fn set_arg(&mut self, i: usize, v: u64);
+    /// The arguments as the guest passed them, before any `set_arg`: what the boundary record
+    /// and the supervisor are told (never a runtime address).
+    fn guest_args(&self) -> [u64; 6];
 }
 
 #[allow(dead_code)]
@@ -69,6 +72,7 @@ pub struct TrapCall<'a> {
     pub ts: &'a mut ThreadState,
     pub nr: u64,
     pub args: [u64; 6],
+    guest: [u64; 6],
 }
 
 impl<'a> TrapCall<'a> {
@@ -82,6 +86,7 @@ impl<'a> TrapCall<'a> {
             ts,
             nr,
             args,
+            guest: args,
         }
     }
 }
@@ -101,6 +106,9 @@ impl Call for TrapCall<'_> {
     }
     fn set_arg(&mut self, i: usize, v: u64) {
         self.args[i] = v;
+    }
+    fn guest_args(&self) -> [u64; 6] {
+        self.guest
     }
 }
 

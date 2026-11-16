@@ -290,7 +290,7 @@ pub fn exit(call: &mut dyn Call) -> ! {
     let status = a[0] & 0xff;
     crate::oplog::on_exit();
     let row = proto::row(nr::EXIT as u32);
-    crate::log::trap(row, nr::EXIT, &a, 0);
+    crate::log::trap(row, call, 0);
     let ts = thread();
     let clear = ts.clear_tid;
     if clear != 0 {

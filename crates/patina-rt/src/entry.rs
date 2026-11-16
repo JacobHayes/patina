@@ -336,7 +336,6 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
     }
     let mut call = TrapCall::new(frame, ts);
     let nr = call.nr;
-    let args = call.args;
     let row = proto::row(if nr > u32::MAX as u64 {
         u32::MAX
     } else {
@@ -345,7 +344,7 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
     call.ts.eff_class = row.class.code();
     match crate::sys::dispatch(&mut call, row) {
         Action::Return(r) => {
-            crate::log::trap(row, nr, &args, r);
+            crate::log::trap(row, &call, r);
             call.frame.gregs[RAX] = r as u64;
             maybe_yield(call.ts);
             crate::sys::sig::trap_exit(call.frame, Some(nr));
