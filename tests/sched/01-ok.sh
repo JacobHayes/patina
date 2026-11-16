@@ -5,5 +5,5 @@ for g in $GUESTS; do
     out=$RUNS/01-ok/$g
     patina_run "$out" 1 "$g"
     check_result "$out" "$g"
-    echo "$g: ok, results correct, digest $(field "$out/outcome.json" digest), switches $(field "$out/outcome.json" switches)"
+    echo "$g: ok, results correct, digest $(field "$out/outcome.json" digest), switches $(field "$out/outcome.json" sched.switches)"
 done

@@ -1,5 +1,5 @@
 """Join the disassembler's classification of scanner candidates (census.py --tsv, kind `scan`)
-with the runtime rule's verdicts (patina insn-scan), per (file, address).
+with the runtime rule's verdicts (patina __insn-scan), per (file, address).
 
 usage: python3 -I audit.py CENSUS.tsv SCAN.tsv
 Prints one line per candidate and per-file totals; the last line is

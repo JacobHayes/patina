@@ -9,5 +9,5 @@ set -eu
 gap=${DET_TIME_GAP_S:-5}
 rm -rf "$RUNS/time"
 PATINA_TIME_GAP_S=$gap timeout 1800 "$PATINA" verify --seed 3 --runs 2 --vary time --out "$RUNS/time" \
-    --guest "$PATINA_ATTACK_GUESTS" -- /guest/timeprobe >"$RUNS/time.txt" 2>&1 || die "$(tail -3 "$RUNS/time.txt")"
+    --mount "$PATINA_ATTACK_GUESTS":/guest:copy -- /guest/timeprobe >"$RUNS/time.txt" 2>&1 || grep -q '^identical: ' "$RUNS/time.txt" || die "$(tail -3 "$RUNS/time.txt")"
 echo "timeprobe: 2 runs $gap s apart identical ($(digest "$RUNS/time/run-0"))"

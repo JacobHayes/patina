@@ -1,14 +1,14 @@
 # 6. Deadlock detection still works: a thread blocked reading a pipe nobody writes, every
-#    other thread exited -> deadlock, and the detail names the descriptor (and the call).
+#    other thread exited -> liveness (deadlock), and the detail names the descriptor (and the call).
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-deadlock; mkdir -p "$o"
 for rep in a b; do
-    timeout 120 "$PATINA" run --seed 1 --out "$o/$rep" --guest "$PATINA_GUESTS" -- /guest/iodead >/dev/null 2>&1 || die "patina run exit"
-    [ "$(field "$o/$rep/outcome.json" class)" = deadlock ] || die "class $(field "$o/$rep/outcome.json" class)"
+    timeout 120 "$PATINA" run --seed 1 --out "$o/$rep" --mount "$PATINA_GUESTS":/guest:copy -- /guest/iodead >/dev/null 2>&1 || [ -f "$o/$rep/outcome.json" ] || die "patina run: no outcome.json"
+    [ "$(field "$o/$rep/outcome.json" outcome)/$(field "$o/$rep/outcome.json" stop)" = liveness/deadlock ] || die "outcome $(field "$o/$rep/outcome.json" outcome) $(field "$o/$rep/outcome.json" stop)"
 done
 [ "$(field "$o/a/outcome.json" digest)" = "$(field "$o/b/outcome.json" digest)" ] || die "two digests"
-detail=$(field "$o/a/outcome.json" detail)
+detail=$(field "$o/a/outcome.json" message)
 echo "detail: $detail"
 fd=$(sed -n 's/^read fd \([0-9]*\)$/\1/p' "$o/a/inc-0/stdout")
 python3 -I - "$detail" "$fd" <<'PY'

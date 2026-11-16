@@ -13,9 +13,9 @@ line_re = re.compile(r"^seq=\d+ (\w+) slot=\d+ t=\d+ (\S+)(?: \[(\w+)\])? args=\
 for run in sys.argv[2:]:
     o = json.load(open(run + "/outcome.json"))
     s = {
-        "run": run, "class": o["class"], "wall_ms": o.get("wall_ms"), "traps": o.get("traps"),
-        "switches": o.get("switches"), "refused": o.get("refused", []), "io": o.get("io", {}),
-        "rdtsc": o.get("emulated", {}).get("rdtsc", 0), "faults": o.get("faults_count", 0),
+        "run": run, "class": o["outcome"], "wall_ms": o.get("wall_ms"), "traps": o["sched"]["traps"],
+        "switches": o["sched"]["switches"], "refused": o.get("refused", []), "io": o["counters"]["io"],
+        "rdtsc": o["counters"]["insn"]["emulated"].get("rdtsc", 0), "faults": o["faults"]["injected"],
     }
     c = collections.Counter()
     deny = collections.Counter()

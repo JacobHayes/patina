@@ -1,7 +1,7 @@
 """cost measurement cost: per call, by class, native vs patina; and boundary logging on vs compiled out.
 
 Per call = (wall(N) - wall(0)) / N for one run each, repeated REPS times: median [min..max].
-patina: the launcher's wall_ms; --preempt-permille 0 (capture + handler + record, plus the
+patina: the launcher's wall_ms; preempt-permille = 0 (capture + handler + record, plus the
 supervisor round trip the class itself needs) and the default 100 (adds the seeded yields).
 nolog: the same with a runtime built with --cfg patina_nolog (no record, no buffer hashing),
 PATINA_RT_NOLOG. Native: the same static binary pinned to the same core, outside any sandbox
@@ -34,18 +34,18 @@ for mode, n, nn in cases:
         assert r1 == 0 and r0 == 0, (mode, r1, r0)
         nat.append((t1 - t0) * 1e6 / nn)
     row = {"native_ns": stats(nat)}
-    configs = [("patina_p0_ns", ["--preempt-permille", "0"], None), ("patina_p100_ns", [], None)]
+    configs = [("patina_p0_ns", ["preempt-permille=0"], None), ("patina_p100_ns", [], None)]
     if NOLOG:
-        configs.append(("nolog_p0_ns", ["--preempt-permille", "0"], NOLOG))
+        configs.append(("nolog_p0_ns", ["preempt-permille=0"], NOLOG))
     for key, opts, rt in configs:
         xs, traps, sw = [], None, None
         for i in range(REPS):
             o1 = patina_run(f"{OUT}/patina", ["/guest/costs", mode, str(n)], opts=opts, rt=rt)
             o0 = patina_run(f"{OUT}/patina0", ["/guest/costs", mode, "0"], opts=opts, rt=rt)
-            assert o1["class"] == "ok" and o0["class"] == "ok", (mode, key, o1["class"], o1.get("detail"))
+            assert o1["outcome"] == "ok" and o0["outcome"] == "ok", (mode, key, o1["outcome"], o1.get("message"))
             xs.append((o1["wall_ms"] - o0["wall_ms"]) * 1e6 / n)
-            traps = (o1["traps"] - o0["traps"]) / n
-            sw = (o1["switches"] - o0["switches"]) / n
+            traps = (o1["sched"]["traps"] - o0["sched"]["traps"]) / n
+            sw = (o1["sched"]["switches"] - o0["sched"]["switches"]) / n
         row[key] = stats(xs)
         row[key + "_traps_per_iter"] = traps
         row[key + "_switches_per_iter"] = sw

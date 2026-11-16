@@ -44,7 +44,7 @@ for name, argv in progs.items():
         shutil.rmtree(out, ignore_errors=True)
         e = dict(os.environ, PATINA_TIMING="1")
         t0 = time.perf_counter_ns()
-        r = subprocess.run([PATINA, "run", "--cpu", str(CPU), "--seed", "1", "--out", out, "--guest", GUESTS, "--", *argv],
+        r = subprocess.run(["taskset", "-c", str(CPU), PATINA, "run", "--seed", "1", "--out", out, "--mount", GUESTS + ":/guest:copy", "--", *argv],
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=e, text=True)
         t1 = time.perf_counter_ns()
         line = [l for l in r.stderr.splitlines() if l.startswith("patina-timing")][0]
@@ -54,8 +54,8 @@ for name, argv in progs.items():
             rows[p].append((m[b] - m[a]) / 1e6)
         tot.append((t1 - t0) / 1e6)
         o = json.load(open(f"{out}/outcome.json"))
-        assert o["class"] == "ok", o
-        traps = o["traps"]
+        assert o["outcome"] == "ok", o
+        traps = o["sched"]["traps"]
     nat_direct = [native_run(f"{OUT}/nd", [a if not a.startswith("/guest/") else GUESTS + a[6:] for a in argv],
                              sandbox=False)[0] for _ in range(REPS)]
     nat_bwrap = [native_run(f"{OUT}/nb", argv)[0] for _ in range(REPS)]
@@ -63,7 +63,7 @@ for name, argv in progs.items():
     r["total (process)"] = stats(tot)
     r["native exec"] = stats(nat_direct)
     r["native in bwrap"] = stats(nat_bwrap)
-    r["traps"] = traps
+    r["sched"]["traps"] = traps
     res[name] = r
     log(f"== {name} ({traps} traps)")
     for k, v in r.items():

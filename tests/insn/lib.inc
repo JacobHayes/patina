@@ -8,7 +8,7 @@ ulimit -f 4000000
 
 die() { echo "FAIL: $*"; exit 1; }
 
-# field FILE KEY[.SUB]: one (possibly nested) field of an outcome.json
+# field FILE KEY[.SUB]: one (possibly nested) field of a outcome.json
 field() { python3 -I -c 'import json,sys
 v=json.load(open(sys.argv[1]))
 for k in sys.argv[2].split("."): v=v[k]
@@ -21,7 +21,7 @@ patina_run() { # out seed guest args...
     out=$1; seed=$2; g=$(prog "$3"); shift 3
     rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
-    timeout 300 "$PATINA" run --seed "$seed" --out "$out" --guest "$PATINA_GUESTS" -- "$g" "$@" >/dev/null
+    timeout 300 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$g" "$@" >/dev/null || [ -f "$out/outcome.json" ] || die "patina run $g: no outcome.json"
 }
 
 # verify OUT SEED RUNS GUEST ARGS...: patina verify --vary cpu exits 0 and, independently, the
@@ -30,8 +30,8 @@ verify() {
     out=$1; seed=$2; n=$3; g=$(prog "$4"); shift 4
     rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
-    timeout 1800 "$PATINA" verify --seed "$seed" --runs "$n" --vary cpu --out "$out" --guest "$PATINA_GUESTS" -- "$g" "$@" \
-        >"$out.verify.txt" 2>&1 || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"
+    timeout 1800 "$PATINA" verify --seed "$seed" --runs "$n" --vary cpu --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$g" "$@" \
+        >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"
     d=$(for i in $(seq 0 $((n - 1))); do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
     [ "$d" = 1 ] || die "$g seed $seed: $d distinct digests"
     d=$(for i in $(seq 0 $((n - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)

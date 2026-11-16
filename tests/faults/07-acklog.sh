@@ -11,28 +11,28 @@ N=${ACK_SEEDS:-40}
 for m in ext4-ordered posix-strict; do
     d=$RUNS/07/$m
     mkdir -p "$d"
-    sweep 07/$m-correct "$N" --fs-model $m --crash machine:20 -- /guest/ack-log correct
+    sweep 07/$m-correct "$N" --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:20 -- /guest/ack-log correct
     python3 -I - "$RUNS/07/$m-correct/summary.tsv" "$m" "$N" <<'PY' || exit 1
 import csv, sys
 rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
 m, n = sys.argv[2], int(sys.argv[3])
-bad = [r for r in rows if r["class"] != "ok"]
+bad = [r for r in rows if r["outcome"] != "ok"]
 c1 = sum(1 for r in rows if int(r["crashes"]) >= 1)
 c2 = sum(1 for r in rows if int(r["crashes"]) >= 2)
 print("%s: %d runs, %d ok, >=1 crash: %d, >=2 crashes: %d, crashes in all: %d" % (
     m, len(rows), len(rows) - len(bad), c1, c2, sum(int(r["crashes"]) for r in rows)))
 if bad:
-    sys.exit("FAIL: %s seed %s: %s %s" % (m, bad[0]["seed"], bad[0]["class"], bad[0]["detail"]))
+    sys.exit("FAIL: %s seed %s: %s %s" % (m, bad[0]["seed"], bad[0]["outcome"], bad[0]["message"]))
 if len(rows) != n or c1 == 0 or c2 == 0:
     sys.exit("FAIL: no run crashed (twice)")
 PY
     # The planted bug: no fsync of the record before the acknowledgement.
-    sweep 07/$m-nofsync 100 --fs-model $m --crash machine:20 -- /guest/ack-log nofsync
-    found=$(awk -F'\t' '$2 == "failed" && $3 ~ /INVARIANT acked-record-lost/ {print $1; exit}' "$RUNS/07/$m-nofsync/summary.tsv")
+    sweep 07/$m-nofsync 100 --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:20 -- /guest/ack-log nofsync
+    found=$(awk -F'\t' '$2 == "failure" && $3 ~ /INVARIANT acked-record-lost/ {print $1; exit}' "$RUNS/07/$m-nofsync/summary.tsv")
     [ -n "$found" ] || die "$m: nofsync never caught in 100 seeds"
-    run "$d/nofsync-$found" "$found" --fs-model $m --crash machine:20 -- /guest/ack-log nofsync
-    echo "$m: nofsync caught at seed $found: $(field "$d/nofsync-$found/outcome.json" detail)"
-    run "$d/nofsync-$found-again" "$found" --fs-model $m --crash machine:20 -- /guest/ack-log nofsync
+    run "$d/nofsync-$found" "$found" --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:20 -- /guest/ack-log nofsync
+    echo "$m: nofsync caught at seed $found: $(field "$d/nofsync-$found/outcome.json" message)"
+    run "$d/nofsync-$found-again" "$found" --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:20 -- /guest/ack-log nofsync
     a=$(field "$d/nofsync-$found/outcome.json" digest)
     b=$(field "$d/nofsync-$found-again/outcome.json" digest)
     [ "$a" = "$b" ] || die "$m seed $found: digests $a vs $b"

@@ -5,7 +5,7 @@
 for rep in a b; do
     out=$RUNS/08-many/$rep
     patina_run "$out" 1 many
-    [ "$(field "$out/outcome.json" class)" = ok ] || die "$rep: class $(field "$out/outcome.json" class) $(field "$out/outcome.json" detail)"
+    [ "$(field "$out/outcome.json" outcome)" = ok ] || die "$rep: class $(field "$out/outcome.json" outcome) $(field "$out/outcome.json" message)"
     n=$(wc -l <"$out/inc-0/stdout")
     u=$(sort -u "$out/inc-0/stdout" | wc -l)
     [ "$n" = 5000 ] && [ "$u" = 5000 ] || die "$rep: $n tids, $u distinct"

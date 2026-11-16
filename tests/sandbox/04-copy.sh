@@ -16,7 +16,7 @@ mv "$out/gb/hostcopy.tmp" "$out/gb/hostcopy"
 touch -d '2001-01-01 00:00:00' "$out/gb/hostcopy" "$out/gb"
 for k in a b; do
     rm -rf "$out/run-$k"
-    timeout 300 "$PATINA" run --seed 1 --out "$out/run-$k" --guest "$out/g$k" -- /guest/hostcopy >/dev/null 2>&1 || true
+    timeout 300 "$PATINA" run --seed 1 --out "$out/run-$k" --mount "$out/g$k":/guest:copy -- /guest/hostcopy >/dev/null 2>&1 || true
     [ "$(class "$out/run-$k")" = ok ] || die "hostcopy $k: $(class "$out/run-$k") $(detail "$out/run-$k")"
 done
 [ "$(stat -c %i "$out/ga/hostcopy")" != "$(stat -c %i "$out/gb/hostcopy")" ] || die "the two host copies share an inode"

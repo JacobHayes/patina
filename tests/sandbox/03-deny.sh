@@ -9,7 +9,7 @@ set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/deny
 mkdir -p "$out"
-refused() { sed -n 's/.*"refused":\[\([^]]*\)\].*/\1/p' "$1/outcome.json"; }
+refused() { jq -c '.refused' "$1/outcome.json"; }
 # Unlisted requests: refused, recorded, the same in every run.
 vfy denyprobe 3 repeat "$G17" -- /guest/denyprobe
 d=$out/denyprobe/run-0
@@ -32,7 +32,7 @@ echo "pathescape: 28 walks through symlinks, relative names and magic links refu
 # directories: same stdout and digest.
 for k in a b; do
     rm -rf "$out/procescape-$k"
-    timeout 300 "$PATINA" run --seed 1 --out "$out/procescape-$k" --guest "$G12" -- /guest/procescape >/dev/null 2>&1 || true
+    timeout 300 "$PATINA" run --seed 1 --out "$out/procescape-$k" --mount "$G12":/guest:copy -- /guest/procescape >/dev/null 2>&1 || true
 done
 cmp -s "$out/procescape-a/inc-0/stdout" "$out/procescape-b/inc-0/stdout" || die "procescape: stdout depends on the run directory"
 [ "$(digest "$out/procescape-a")" = "$(digest "$out/procescape-b")" ] || die "procescape: digests differ"

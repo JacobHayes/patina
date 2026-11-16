@@ -19,7 +19,7 @@ check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at whic
     while :; do
         rm -rf "$out/$w-on"
         # shellcheck disable=SC2086
-        timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-on" --guest "$GDIR" $fopts -- $CMD >"$out/$w-on.txt" 2>&1 || true
+        timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-on" --mount "$GDIR":/guest:copy $fopts -- $CMD >"$out/$w-on.txt" 2>&1 || true
         "$PATINA" log dump "$out/$w-on/inc-0/boundary.log" >"$out/$w-on.dump"
         ff=$(first_fault "$out/$w-on.dump")
         [ -z "$ff" ] || break
@@ -27,7 +27,7 @@ check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at whic
         seed=$((seed + 1))
     done
     rm -rf "$out/$w-off"
-    timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-off" --guest "$GDIR" -- $CMD >"$out/$w-off.txt" 2>&1 || true
+    timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-off" --mount "$GDIR":/guest:copy -- $CMD >"$out/$w-off.txt" 2>&1 || true
     d=$("$PATINA" log diff "$out/$w-off/inc-0/boundary.log" "$out/$w-on/inc-0/boundary.log" | sed -n 's/^first difference at record \([0-9]*\).*/\1/p')
     [ -n "$d" ] || die "$w: logs identical although a fault fired"
     [ "$d" -ge "$ff" ] || die "$w seed $seed: logs differ at record $d, before the first fault at $ff"
@@ -41,8 +41,8 @@ check W8 2 --fault net-reset-permille=30 --fault net-chunk-max=7
 # Classes enabled but never firing: identical digest to no faults at all.
 wl W1
 rm -rf "$out/none" "$out/idle"
-"$PATINA" run --seed 4 --out "$out/none" --guest "$GDIR" -- $CMD >/dev/null 2>&1
-"$PATINA" run --seed 4 --out "$out/idle" --guest "$GDIR" --fault fs-error-permille=0 --fault fsync-error-at=999999 \
+"$PATINA" run --seed 4 --out "$out/none" --mount "$GDIR":/guest:copy -- $CMD >/dev/null 2>&1
+"$PATINA" run --seed 4 --out "$out/idle" --mount "$GDIR":/guest:copy --fault fs-error-permille=0 --fault fsync-error-at=999999 \
     --fault short-permille=0 --fault net-reset-permille=1000 --crash machine-at:999999999 -- $CMD >/dev/null 2>&1
 [ "$(digest "$out/none")" = "$(digest "$out/idle")" ] || die "idle fault classes changed the digest"
 echo "idle fault classes: digest unchanged $(digest "$out/none")"

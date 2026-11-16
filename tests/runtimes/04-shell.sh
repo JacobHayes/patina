@@ -9,8 +9,8 @@
 #  c. ls -l times and date are virtual (2026-01-01 epoch).
 #  d. `sleep 5` costs little wall time: median of `sh -c 'sleep 5'` minus `sh -c 'sleep 0'` (3
 #     runs each) under 1.5 s; the script's own date check (elapsed >= 5 s).
-#  e. fs-error-permille=10 over 12 seeds, each shell: every run `ok` or `failed` with an exit
-#     status (no signal); every failed run stopped before "done" (set -e) with a tool's error on
+#  e. fs-error-permille=10 over 24 seeds, each shell: every run `ok` or `failure` with an exit
+#     status (no signal); every failing run stopped before "done" (set -e) with a tool's error on
 #     stderr; at least one run failed that way.
 #  f. >= 3 distinct digests over 4 seeds.
 #@ tier=area budget=150 slots=4
@@ -23,7 +23,7 @@ one_shell() {
     echo "== $sh: a. R"
     n_ms=$(native "$RUNS/$sh-native.txt" "$W/$S" /bin/$sh /guest/w6.sh)
     run $S "$RUNS/$sh-r" 1 -- /bin/$sh /guest/w6.sh
-    c=$(field "$RUNS/$sh-r/outcome.json" class)
+    c=$(field "$RUNS/$sh-r/outcome.json" outcome)
     echo "$sh seed 1: class $c, wall $(field "$RUNS/$sh-r/outcome.json" wall_ms) ms, native wall ${n_ms} ms"
     [ "$c" = ok ] || fail "W6 $sh seed 1: class $c"
     grep -v '^~ ' "$RUNS/$sh-native.txt" >"$RUNS/$sh-native.masked"
@@ -51,21 +51,21 @@ one_shell() {
     echo "W6 $sh: $d distinct digests over seeds 1-4"
     [ "$d" -ge 3 ] || fail "W6 $sh: $d distinct digests"
 
-    echo "== $sh: e. fs-error-permille=10 over 12 seeds"
-    SWEEP_JOBS=2 SWEEP_KEEP=all sweep $sh-f12 $S 1-12 -- $FAULT -- /bin/$sh /guest/w6.sh
-    awk -F'\t' 'NR>1 {print $2, $3}' "$RUNS/$sh-f12/summary.tsv" | sort | uniq -c
-    bad=$(awk -F'\t' 'NR>1 && !($2=="ok" || ($2=="failed" && $3 ~ /^exit status/))' "$RUNS/$sh-f12/summary.tsv" | wc -l)
+    echo "== $sh: e. fs-error-permille=10 over 24 seeds"
+    SWEEP_JOBS=2 SWEEP_KEEP=all sweep $sh-f24 $S 1-24 -- $FAULT -- /bin/$sh /guest/w6.sh
+    awk -F'\t' 'NR>1 {print $2, $3}' "$RUNS/$sh-f24/summary.tsv" | sort | uniq -c
+    bad=$(awk -F'\t' 'NR>1 && !($2=="ok" || ($2=="failure" && $3 ~ /^exit status/))' "$RUNS/$sh-f24/summary.tsv" | wc -l)
     [ "$bad" = 0 ] || fail "W6 $sh faults: $bad runs neither ok nor failed with an exit status"
     nf=0
-    for s in $(seq 1 12); do
-        o=$RUNS/$sh-f12/run-$s
-        if [ "$(field "$o/outcome.json" class)" = failed ]; then
+    for s in $(seq 1 24); do
+        o=$RUNS/$sh-f24/run-$s
+        if [ "$(field "$o/outcome.json" outcome)" = failure ]; then
             nf=$((nf + 1))
             [ "$(tail -1 "$o/inc-0/stdout")" != done ] || fail "W6 $sh seed $s: failed but printed done"
             [ -s "$o/inc-0/stderr" ] || fail "W6 $sh seed $s: failed with an empty stderr"
         fi
     done
-    echo "$sh: $nf of 12 runs stopped by set -e after an injected error"
+    echo "$sh: $nf of 24 runs stopped by set -e after an injected error"
     [ "$nf" -gt 0 ] || fail "W6 $sh: no run stopped on an injected error"
     exit "$FAILS"
 }

@@ -11,8 +11,8 @@ one() { # one NAME WORKLOAD SEED [faults]
     wl "$w"; o="$EXTRA"; [ "$f" = on ] && o="$o $FAULTS"
     rm -rf "$out/$n"
     # shellcheck disable=SC2086
-    timeout 900 "$PATINA" run --seed "$s" --out "$out/$n" --guest "$GDIR" $o -- $CMD >"$out/$n.txt" 2>&1 || true
-    sed -n 's/.*"class":"\([a-z]*\)".*"digest":"\([0-9a-f]*\)".*/\1 \2/p' "$out/$n/outcome.json"
+    timeout 900 "$PATINA" run --seed "$s" --out "$out/$n" --mount "$GDIR":/guest:copy $o -- $CMD >"$out/$n.txt" 2>&1 || true
+    jq -r '"\(.outcome) \(.digest)"' "$out/$n/outcome.json"
 }
 trio() { # trio A SEED B [faults]
     a1=$(one "$1-first" "$1" "$2" "${4:-off}")

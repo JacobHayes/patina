@@ -31,8 +31,10 @@ def native(cmd, *args):
 
 
 class Run:
-    def __init__(self, out):
+    def __init__(self, out, status=None):
         self.out = out
+        # patina's exit status
+        self.status = status
         with open(os.path.join(out, "outcome.json")) as f:
             self.outcome = json.load(f)
         with open(os.path.join(out, "inc-0", "stdout")) as f:
@@ -41,7 +43,7 @@ class Run:
 
     @property
     def cls(self):
-        return self.outcome["class"]
+        return self.outcome["outcome"]
 
     def site(self, label):
         got = [s for s in self.sdk["sites"] if s["label"] == label]
@@ -60,11 +62,11 @@ def run(name, seed, cmd, *args, flags=()):
     subprocess.run(["rm", "-rf", out], check=True)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     p = subprocess.run(
-        [PATINA, "run", "--seed", str(seed), "--out", out, "--guest", GUESTS, *flags, "--", *cmd, *args],
+        [PATINA, "run", "--seed", str(seed), "--out", out, "--mount", GUESTS + ":/guest:copy", *flags, "--", *cmd, *args],
         capture_output=True, text=True, timeout=120)
     if not os.path.exists(os.path.join(out, "outcome.json")):
         die(f"patina run {' '.join(cmd + list(args))}: no outcome ({p.stderr.strip()[-300:]})")
-    return Run(out)
+    return Run(out, p.returncode)
 
 
 def log_ops(r):

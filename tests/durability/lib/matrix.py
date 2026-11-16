@@ -5,10 +5,10 @@ D: `patina verify --runs COSTS_D_RUNS --vary cpu,load,aslr,sandbox` identical fo
    (defaults 20 and 5, as recorded), faults off and with the workload's fault configuration
    (tests/durability/bench/workloads.py); and seeds 1-10, one run each, faults off: number of distinct
    digests (>= 3 required for concurrent workloads).
-Self-check: `patina oplog check` on seed 1 faults off and on (every incarnation).
+Self-check: `patina log ops --check` on seed 1 faults off and on (every incarnation).
 F: the workload's fault scenario is checked by its own task's area scripts (named per workload
    in the table; ./check TNN).
-W4 runs at --ncpu 2 (its stall-free setting; spec 05 asks for the default count: see language runtimes).
+W4 runs at --cpus 2 (its stall-free setting; spec 05 asks for the default count: see language runtimes).
 Usage: matrix.py OUTDIR [W...]. Writes OUTDIR/matrix.tsv and prints the table.
 """
 import json
@@ -55,18 +55,18 @@ for w in only:
     os.makedirs(base)
     # R
     rd = os.path.join(base, "r")
-    subprocess.run([PATINA, "run", "--seed", "1", "--out", rd, "--guest", gdir, *extra, "--", *argv],
+    subprocess.run([PATINA, "run", "--seed", "1", "--out", rd, "--mount", gdir + ":/guest:copy", *extra, "--", *argv],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
     o = outcome(rd)
-    r_ok = o["class"] == "ok" and o["exit_status"] == 0
+    r_ok = o["outcome"] == "ok" and o["guest"]["exit"] == 0
     # The tracker's self-check (replay of the operation log = the live tree), faults off (the R
     # run) and on (seed 1 with the workload's fault configuration), every incarnation.
     fd = os.path.join(base, "r-faults")
-    subprocess.run([PATINA, "run", "--seed", "1", "--out", fd, "--guest", gdir, *extra, *faults, "--", *argv],
+    subprocess.run([PATINA, "run", "--seed", "1", "--out", fd, "--mount", gdir + ":/guest:copy", *extra, *faults, "--", *argv],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
     sc_ok = True
     for d in (rd, fd):
-        c = subprocess.run([PATINA, "oplog", "check", d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
+        c = subprocess.run([PATINA, "log", "ops", "--check", d], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=1800)
         with open(d + ".oplog-check.txt", "w") as fh:
             fh.write(c.stdout)
         sc_ok &= c.returncode == 0
@@ -81,7 +81,7 @@ for w in only:
         for seed in range(1, D_SEEDS + 1):
             vd = os.path.join(base, f"d-{f}-s{seed}")
             p = subprocess.run([PATINA, "verify", "--seed", str(seed), "--runs", D_RUNS, "--vary", "cpu,load,aslr,sandbox",
-                                "--out", vd, "--guest", gdir, *opts, "--", *argv],
+                                "--out", vd, "--mount", gdir + ":/guest:copy", *opts, "--", *argv],
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=7200)
             if p.returncode == 0:
                 same += 1
@@ -89,7 +89,7 @@ for w in only:
                 with open(os.path.join(base, f"d-{f}-s{seed}.txt"), "w") as fh:
                     fh.write(p.stdout)
             try:
-                classes.append(outcome(os.path.join(vd, "run-0"))["class"])
+                classes.append(outcome(os.path.join(vd, "run-0"))["outcome"])
             except OSError:
                 classes.append("none")
             if p.returncode == 0:
@@ -98,14 +98,14 @@ for w in only:
     digests = set()
     for seed in range(1, 11):
         sd = os.path.join(base, f"seed{seed}")
-        subprocess.run([PATINA, "run", "--seed", str(seed), "--out", sd, "--guest", gdir, *extra, "--", *argv],
+        subprocess.run([PATINA, "run", "--seed", str(seed), "--out", sd, "--mount", gdir + ":/guest:copy", *extra, "--", *argv],
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
         digests.add(outcome(sd)["digest"])
         prune(sd)
     d_ok = dres["off"][0] == D_SEEDS and dres["on"][0] == D_SEEDS and len(digests) >= 3
     ok_all &= r_ok and d_ok and sc_ok
-    row = [w, f"{'PASS' if r_ok else 'FAIL'} ({o['class']}, exit {o['exit_status']}, refused {','.join(o['refused']) or '-'}, "
-              f"unscanned {o['unscanned_exec_mappings']})",
+    row = [w, f"{'PASS' if r_ok else 'FAIL'} ({o['outcome']}, exit {o['guest']['exit']}, refused {','.join(o['refused']) or '-'}, "
+              f"unscanned {o['labels']['unscanned_exec_mappings']})",
            f"{dres['off'][0]}/{D_SEEDS} identical ({','.join(sorted(set(dres['off'][1])))})",
            f"{dres['on'][0]}/{D_SEEDS} identical ({','.join(sorted(set(dres['on'][1])))})",
            f"{len(digests)}/10 distinct", "PASS" if sc_ok else "FAIL", F_SCRIPT[w]]

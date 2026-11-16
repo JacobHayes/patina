@@ -14,8 +14,8 @@ done | xargs -P 4 -L 1 sh -c '
     wl "$w"
     rm -rf "$o"
     # shellcheck disable=SC2086
-    timeout 900 "$PATINA" run --seed "$s" --out "$o" --guest "$GDIR" $EXTRA -- $CMD >/dev/null 2>&1 || true
-    sed -n "s/.*\"digest\":\"\([0-9a-f]*\)\".*/\1/p" "$o/outcome.json" >"$o.digest"
+    timeout 900 "$PATINA" run --seed "$s" --out "$o" --mount "$GDIR":/guest:copy $EXTRA -- $CMD >/dev/null 2>&1 || true
+    jq -r .digest "$o/outcome.json" >"$o.digest"
     rm -rf "$o"
 ' sh "$(cd "$(dirname "$0")" && pwd)" "$out"
 fail=0

@@ -40,7 +40,7 @@ if viol != 0:
     sys.exit("FAIL: %s failed calls left an effect" % viol)
 print("violations 0 (failed calls left no effect; EIO from close still closed)")
 PY
-n=$(field "$o/run-0/outcome.json" faults_count)
+n=$(field "$o/run-0/outcome.json" faults.injected)
 echo "faults injected per run: $n; 4 runs identical"
 o=$RUNS/03/nth
 run "$o" 1 --fault fs-error-at=write:7 -- /guest/io-errors nth

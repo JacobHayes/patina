@@ -12,12 +12,12 @@ at=$(python3 -I "$LIB/faults.py" seq-after "$d/probe/inc-0" Fsync acks 1)
 echo "crash at the first crash point at or after seq $at"
 for m in ext4-ordered posix-strict; do
     o=$d/retry-$m
-    run "$o" 1 --fs-model $m --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log retry
-    echo "$m retry: $(class "$o") $(field "$o/outcome.json" detail); injected $(field "$o/outcome.json" faults_injected)"
-    [ "$(class "$o")" = failed ] && field "$o/outcome.json" detail | grep -q "INVARIANT acked-record-lost" \
+    run "$o" 1 --config "$("$PATINA_CFG" fs-model=$m)" --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log retry
+    echo "$m retry: $(class "$o") $(field "$o/outcome.json" message); injected $(field "$o/outcome.json" faults.recent)"
+    [ "$(class "$o")" = failure ] && field "$o/outcome.json" message | grep -q "INVARIANT acked-record-lost" \
         || die "$m: retry-until-success was not caught"
     o=$d/fatal-$m
-    run "$o" 1 --fs-model $m --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log fatal
+    run "$o" 1 --config "$("$PATINA_CFG" fs-model=$m)" --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log fatal
     echo "$m fatal: $(class "$o") ($(tail -1 "$o/inc-0/stdout"))"
-    [ "$(class "$o")" = ok ] || die "$m: fatal-on-EIO guest: $(class "$o") $(field "$o/outcome.json" detail)"
+    [ "$(class "$o")" = ok ] || die "$m: fatal-on-EIO guest: $(class "$o") $(field "$o/outcome.json" message)"
 done

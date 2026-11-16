@@ -12,8 +12,8 @@ for seed in 1 2; do
             randops) run "$o" "$seed" -- /guest/randops 10000 ;;
             sqlite) run "$o" "$seed" -- /usr/bin/python3 /guest/sqlite_rows.py ;;
         esac
-        [ "$(class "$o")" = ok ] || die "$g seed $seed: $(class "$o") $(field "$o/outcome.json" detail)"
-        "$PATINA" oplog check "$o" >"$o.check" || { cat "$o.check"; die "$g seed $seed: oplog check"; }
+        [ "$(class "$o")" = ok ] || die "$g seed $seed: $(class "$o") $(field "$o/outcome.json" message)"
+        "$PATINA" log ops --check "$o" >"$o.check" || { cat "$o.check"; die "$g seed $seed: oplog check"; }
         [ $seed = 1 ] && echo "$g: $(cat "$o.check")"
         if [ $g = randops ]; then
             # keep the evidence small: the summary and the check result stay

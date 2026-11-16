@@ -15,22 +15,22 @@ die() { echo "FAIL: $*"; exit 1; }
 # run_ok OUT SEED [patina options] -- /guest/prog args: one run, outcome ok.
 run_ok() {
     out=$1; seed=$2; shift 2
-    timeout 600 "$PATINA" run --seed "$seed" --out "$out" --guest "$PATINA_GUESTS" "$@" >/dev/null 2>"$out.err" \
-        || die "patina run $*: exit $?"
-    [ "$(field "$out/outcome.json" class)" = ok ] || die "$* (seed $seed): class $(field "$out/outcome.json" class): $(field "$out/outcome.json" detail)"
+    timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >/dev/null 2>"$out.err" \
+        || [ -f "$out/outcome.json" ] || die "patina run $*: no outcome.json"
+    [ "$(field "$out/outcome.json" outcome)" = ok ] || die "$* (seed $seed): class $(field "$out/outcome.json" outcome): $(field "$out/outcome.json" message)"
 }
 
 # verify_ok OUT SEED RUNS [patina options] -- cmd: patina verify --vary cpu,load says identical; independently
 # one digest and one stdout over the run directories; the first run is ok.
 verify_ok() {
     out=$1; seed=$2; runs=$3; shift 3
-    timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" --vary cpu,load --out "$out" --guest "$PATINA_GUESTS" "$@" \
-        >"$out.verify.txt" 2>&1 || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
+    timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" --vary cpu,load --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" \
+        >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
     n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$* seed $seed: $n distinct digests"
     n=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$* seed $seed: $n distinct stdout files"
-    [ "$(field "$out/run-0/outcome.json" class)" = ok ] || die "$* seed $seed: class $(field "$out/run-0/outcome.json" class)"
+    [ "$(field "$out/run-0/outcome.json" outcome)" = ok ] || die "$* seed $seed: class $(field "$out/run-0/outcome.json" outcome)"
     echo "seed $seed: $runs identical runs, digest $(field "$out/run-0/outcome.json" digest), cpus $(grep -o 'cpu [0-9]*' "$out.verify.txt" | sort -u | wc -l)"
 }
 
@@ -43,7 +43,7 @@ import json, sys
 k = ["parks", "reattempts", "spurious", "blocking_done", "blocking_parked"]
 s = dict.fromkeys(k, 0)
 for f in sys.argv[2:]:
-    io = json.load(open(f))["io"]
+    io = json.load(open(f))["counters"]["io"]
     for x in k:
         s[x] += io[x]
 rate = s["reattempts"] / s["blocking_done"] if s["blocking_done"] else 0

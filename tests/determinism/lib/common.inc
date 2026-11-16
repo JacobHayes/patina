@@ -5,5 +5,5 @@ determinism=$(cd "$(dirname "$0")" && pwd)
 export PATINA_ATTACK_WORKLOADS=$PATINA_WORKLOADS
 . "$determinism/lib/workloads.inc"
 die() { echo "FAIL: $*"; exit 1; }
-digest() { sed -n 's/.*"digest":"\([0-9a-f]*\)".*/\1/p' "$1/outcome.json"; }
-class() { sed -n 's/.*"class":"\([a-z]*\)".*/\1/p' "$1/outcome.json"; }
+digest() { jq -r .digest "$1/outcome.json"; }
+class() { jq -r .outcome "$1/outcome.json"; }

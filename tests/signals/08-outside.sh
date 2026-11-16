@@ -1,10 +1,10 @@
-# 8. A real SIGUSR1 sent from outside to the guest's host PID: outcome infra naming the
+# 8. A real SIGUSR1 sent from outside to the guest's host PID: outcome internal naming the
 # signal, and the guest's SIGUSR1 handler did not run.
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-outside
 rm -rf "$o"
-timeout 300 "$PATINA" run --seed 1 --out "$o" --guest "$PATINA_GUESTS" -- /guest/sig-long >/dev/null &
+timeout 300 "$PATINA" run --seed 1 --out "$o" --mount "$PATINA_GUESTS":/guest:copy -- /guest/sig-long >/dev/null &
 launcher=$!
 pid=
 for i in $(seq 300); do
@@ -28,10 +28,10 @@ for i in $(seq 300); do
 done
 echo "guest host pid $pid ($(grep NSpid "/proc/$pid/status"))"
 kill -USR1 "$pid"
-wait "$launcher"
-c=$(field "$o/outcome.json" class); d=$(field "$o/outcome.json" detail)
+wait "$launcher" || true
+c=$(field "$o/outcome.json" outcome); d=$(field "$o/outcome.json" message)
 echo "outcome: $c: $d"
-[ "$c" = infra ] || die "class $c"
+[ "$c" = internal ] || die "outcome $c"
 case "$d" in *SIGUSR1*) ;; *) die "detail does not name SIGUSR1: $d" ;; esac
 grep -q started "$o/inc-0/stdout" || die "guest did not start"
 ! grep -q 'handler ran' "$o/inc-0/stdout" || die "the guest handler ran"

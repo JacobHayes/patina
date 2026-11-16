@@ -1,4 +1,4 @@
-# The tracker self-check (`patina oplog check`: replay of the whole operation log = the exported
+# The tracker self-check (`patina log ops --check`: replay of the whole operation log = the exported
 # live tree, every incarnation) on W1-W9, seed 1, with each workload's fault configuration
 # (tests/durability/bench/workloads.py), 4 at a time. Regression for cost measurement's unix-socket bind bug: W2
 # (tokio-mt local binds unix sockets) failed the check on every run before the fix
@@ -15,9 +15,9 @@ PATINA = os.environ["PATINA"]; O = sys.argv[2]
 def one(w):
     g, argv, faults, extra = WL[w]
     d = f"{O}/{w}"
-    subprocess.run([PATINA, "run", "--seed", "1", "--out", d, "--guest", g, *extra, *faults, "--", *argv],
+    subprocess.run([PATINA, "run", "--seed", "1", "--out", d, "--mount", g + ":/guest:copy", *extra, *faults, "--", *argv],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300)
-    c = subprocess.run([PATINA, "oplog", "check", d], capture_output=True, text=True, timeout=300)
+    c = subprocess.run([PATINA, "log", "ops", "--check", d], capture_output=True, text=True, timeout=300)
     subprocess.run(["rm", "-rf", d])
     return w, c.returncode, ((c.stdout + c.stderr).strip().splitlines() or [""])[-1]
 bad = 0

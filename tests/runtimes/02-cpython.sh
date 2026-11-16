@@ -5,8 +5,8 @@
 #     cpu,load,aslr,sandbox), faults off and on.
 #  c. Across seeds 1-5: the values drawn from entropy (random, hash, urandom, mkdtemp, uuid4)
 #     differ for every pair of seeds; >= 3 distinct digests.
-#  e. fs-error-permille=5 over 20 seeds: every run `ok` or `failed` with exit status 1, never a
-#     signal, never unsupported/infra/stall; at least one run shows the program seeing an error.
+#  e. fs-error-permille=5 over 20 seeds: every run `ok` or `failure` with exit status 1, never a
+#     signal, never unsupported/internal; at least one run shows the program seeing an error.
 #  f. Network: D (seed 1) with network faults on; net-reset-permille seen as a
 #     ConnectionReset/Aborted error, a 15 s net-partition seen as the client's 10 s socket
 #     timeout, net-chunk-max=1 with every reply still whole.
@@ -21,7 +21,7 @@ NET="/usr/bin/python3 /guest/w5.py net"
 echo "== a. R"
 n_ms=$(native "$RUNS/py-native.txt" "$W/$P" $CMD)
 run $P "$RUNS/py-r" 1 -- $CMD
-c=$(field "$RUNS/py-r/outcome.json" class)
+c=$(field "$RUNS/py-r/outcome.json" outcome)
 echo "seed 1: class $c, native wall ${n_ms} ms"
 [ "$c" = ok ] || fail "W5 seed 1: class $c"
 grep -v '^[~v] ' "$RUNS/py-native.txt" >"$RUNS/py-native.masked"
@@ -50,15 +50,15 @@ echo "W5: $d distinct digests over seeds 1-5"
 echo "== e. fs-error-permille=5 over 20 seeds"
 SWEEP_KEEP=all sweep py-f20 $P 1-20 -- $FAULT -- $CMD
 awk -F'\t' 'NR>1 {print $2, $3}' "$RUNS/py-f20/summary.tsv" | sort | uniq -c
-bad=$(awk -F'\t' 'NR>1 && !($2=="ok" || ($2=="failed" && $3=="exit status 1"))' "$RUNS/py-f20/summary.tsv" | wc -l)
+bad=$(awk -F'\t' 'NR>1 && !($2=="ok" || ($2=="failure" && $3=="exit status 1"))' "$RUNS/py-f20/summary.tsv" | wc -l)
 [ "$bad" = 0 ] || fail "W5 faults: $bad runs neither ok nor a clean exit status 1"
 sig=$(for s in $(seq 1 20); do field "$RUNS/py-f20/outcomes/$s.json" signal; done | grep -vc null || true)
 [ "$sig" = 0 ] || fail "W5 faults: $sig runs ended by a signal"
 seen=0
 for s in $(seq 1 20); do
     o=$RUNS/py-f20/run-$s
-    [ "$(field "$o/outcome.json" faults_count)" -gt 0 ] || continue
-    if grep -q '^oserror' "$o/inc-0/stdout" || [ "$(field "$o/outcome.json" class)" = failed ]; then seen=$((seen + 1)); fi
+    [ "$(field "$o/outcome.json" faults.injected)" -gt 0 ] || continue
+    if grep -q '^oserror' "$o/inc-0/stdout" || [ "$(field "$o/outcome.json" outcome)" = failure ]; then seen=$((seen + 1)); fi
 done
 echo "runs where the program saw an injected error: $seen of 20"
 [ "$seen" -gt 0 ] || fail "W5 faults: no run saw an injected error"

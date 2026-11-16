@@ -17,11 +17,11 @@ for n in $names; do
     d=$OUT/run-$n
     rm -rf "$d"
     # shellcheck disable=SC2086
-    timeout 900 "$PATINA" run --seed 1 --out "$d" --guest "$GDIR" $OPTS -- $CMD >/dev/null 2>"$d.err" || true
+    timeout 900 "$PATINA" run --seed 1 --out "$d" --mount "$GDIR":/guest:copy $OPTS -- $CMD >/dev/null 2>"$d.err" || true
     python3 -I - "$n" "$d" >>"$OUT/outcomes.tsv" <<'PY'
 import json, sys
 o = json.load(open(sys.argv[2] + "/outcome.json"))
-print("%s\t%s\t%s" % (sys.argv[1], o["class"], ",".join(o.get("refused", []))))
+print("%s\t%s\t%s" % (sys.argv[1], o["outcome"], ",".join(o.get("refused", []))))
 PY
     for inc in "$d"/inc-*; do
         "$PATINA" log dump "$inc/boundary.log"

@@ -9,7 +9,7 @@ entry() { # entry NAME -> GDIR, CMD, OPTS
     W2-local) GDIR=$W/tokio-mt; CMD="/guest/tokio-mt local" ;;
     W2-net) GDIR=$W/tokio-mt; CMD="/guest/tokio-mt net" ;;
     W3) GDIR=$W/c-sqlite; CMD="/guest/sqlite-dur wal normal" ;;
-    W4) GDIR=$W/go-static; CMD="/guest/go-static all"; OPTS="--ncpu 2" ;;
+    W4) GDIR=$W/go-static; CMD="/guest/go-static all"; OPTS="--cpus 2" ;;
     W5) GDIR=$W/cpython; CMD="/usr/bin/python3 /guest/w5.py all" ;;
     W6-sh) GDIR=$W/shell-pipeline; CMD="/bin/sh /guest/w6.sh" ;;
     W6-bash) GDIR=$W/shell-pipeline; CMD="/bin/bash /guest/w6.sh" ;;
@@ -19,7 +19,7 @@ entry() { # entry NAME -> GDIR, CMD, OPTS
     rs-net) GDIR=$GU; CMD="/guest/rs-net" ;;
     tokio-echo) GDIR=$GU; CMD="/guest/tokio-echo" ;;
     py-net) GDIR=$GU; CMD="/usr/bin/python3 /guest/py-net.py" ;;
-    go-net) GDIR=$GU; CMD="/guest/go-net"; OPTS="--ncpu 2" ;;
+    go-net) GDIR=$GU; CMD="/guest/go-net"; OPTS="--cpus 2" ;;
     *) echo "unknown entry $1" >&2; exit 2 ;;
     esac
 }

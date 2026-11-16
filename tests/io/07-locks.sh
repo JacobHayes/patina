@@ -9,7 +9,7 @@ for seed in 1; do
 ofd entries 400 violations 0" ] || die "seed $seed: $(cat "$o/v$seed/run-0/inc-0/stdout")"
 done
 for p in 500 1000; do
-    run_ok "$o/p$p" 1 --preempt-permille "$p" -- /guest/locks
+    run_ok "$o/p$p" 1 --config "$("$PATINA_CFG" preempt-permille="$p")" -- /guest/locks
     echo "preempt $p: $(tr '\n' ' ' <"$o/p$p/inc-0/stdout")"
 done
 io_line locks $(ls "$o"/v*/run-0/outcome.json "$o"/p*/outcome.json)

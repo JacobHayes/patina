@@ -7,7 +7,7 @@ pair() {
     n=$1; f=$2; shift 2
     run_ok "$o/$n-on" 1 --fault "$f" -- /guest/sockets "$@"
     run_fails "$o/$n-off" 1 -- /guest/sockets "$@"
-    echo "$f: $*: passes with the fault, fails without; faults injected $(field "$o/$n-on/outcome.json" faults_count), net $(field "$o/$n-on/outcome.json" net)"
+    echo "$f: $*: passes with the fault, fails without; faults injected $(field "$o/$n-on/outcome.json" faults.injected), net $(field "$o/$n-on/outcome.json" counters.net)"
 }
 # A receiver that assumes one read per message breaks under 1-byte chunks.
 run_fails "$o/chunk-naive-on" 1 --fault net-chunk-max=1 -- /guest/sockets chunk naive

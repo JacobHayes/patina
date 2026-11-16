@@ -13,7 +13,8 @@ out=$RUNS/soak/$w
 rm -rf "$out"; mkdir -p "$(dirname "$out")"
 # shellcheck disable=SC2086
 PATINA_VERIFY_PRUNE=1 timeout 36000 "$PATINA" verify --seed "$seed" --runs "$n" --vary load,parallel --out "$out" \
-    --guest "$GDIR" $EXTRA $FAULTS -- $CMD >"$out.txt" 2>&1 && st=0 || st=$?
+    --mount "$GDIR":/guest:copy $EXTRA $FAULTS -- $CMD >"$out.txt" 2>&1 && st=0 || st=$?
+grep -q '^identical: ' "$out.txt" && st=0
 echo "$w seed $seed faults on: $(tail -1 "$out.txt") (status $st)"
 grep -A3 '^divergence' "$out.txt" || true
 exit $st

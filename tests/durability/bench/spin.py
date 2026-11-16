@@ -1,5 +1,5 @@
 """Is the Go stall one quirk or a class? Busy-wait patterns under scheduling at system calls
-only (stock builds). SEEDS seeds each (default 20), --stall-ms 2000. Also native: each pattern 20 times, pinned to 2 cores, must finish.
+only (stock builds). SEEDS seeds each (default 20), stall-ms 2000. Also native: each pattern 20 times, pinned to 2 cores, must finish.
 """
 import os
 import sys
@@ -21,9 +21,9 @@ res = {"seeds": SEEDS}
 for name, argv, opts in cases:
     counts, walls = {}, []
     for s in range(1, SEEDS + 1):
-        o = patina_run(f"{OUT}/sp", argv, opts=["--seed", str(s), "--stall-ms", "2000", *opts])
-        counts[o["class"]] = counts.get(o["class"], 0) + 1
-        if o["class"] == "ok":
+        o = patina_run(f"{OUT}/sp", argv, opts=["--seed", str(s), "stall-ms=2000", *opts])
+        counts[o["outcome"]] = counts.get(o["outcome"], 0) + 1
+        if o["outcome"] == "ok":
             walls.append(o["wall_ms"])
     nat_ok = 0
     if not opts:

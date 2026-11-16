@@ -31,10 +31,23 @@ def prune(d):
                 os.unlink(os.path.join(root, f))
 
 
-def patina_run(out, args, guest=GUESTS, opts=(), env=None, rt=None, timeout=900, keep_logs=False):
-    """One patina run; returns the outcome dict plus 'ext_ms' (wall of the patina process)."""
+def config(opts):
+    """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "stall-ms=2000"): the keys go
+    into a patina.toml (tests/cfg), passed as --config."""
+    keys = [o for o in opts if not o.startswith("-") and "=" in o]
+    rest = [o for o in opts if o not in keys]
+    if not keys:
+        return rest
+    f = subprocess.run([os.environ["PATINA_CFG"]] + keys, capture_output=True, text=True, check=True).stdout.strip()
+    return ["--config", f] + rest
+
+
+def patina_run(out, args, guest=GUESTS, opts=(), env=None, rt=None, timeout=900, keep_logs=False, cpu=None):
+    """One patina run, pinned to `cpu` (default CPU); returns the result dict plus 'ext_ms' (wall
+    of the patina process)."""
     shutil.rmtree(out, ignore_errors=True)
-    cmd = [PATINA, "run", "--cpu", str(CPU), "--out", out, "--guest", guest, *opts, "--", *args]
+    cpu = CPU if cpu is None else cpu
+    cmd = ["taskset", "-c", str(cpu), PATINA, "run", "--out", out, "--mount", guest + ":/guest:copy", *config(opts), "--", *args]
     e = dict(os.environ)
     if rt:
         e["PATINA_RT"] = rt

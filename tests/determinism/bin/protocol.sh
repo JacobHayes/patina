@@ -22,9 +22,9 @@ for v in repeat cpu load aslr sandbox parallel env; do
     vv=$v; [ "$v" = repeat ] && vv=repeat
     # shellcheck disable=SC2086
     if PATINA_PARALLEL=${PATINA_PARALLEL:-8} timeout 7200 "$PATINA" verify --seed "$seed" --runs "$n" --vary "$vv" --out "$out/$v" \
-        --guest "$GDIR" $opts -- $CMD >"$out/$v.txt" 2>&1; then
-        d=$(sed -n 's/.*"digest":"\([0-9a-f]*\)".*/\1/p' "$out/$v/run-0/outcome.json")
-        c=$(sed -n 's/.*"class":"\([a-z]*\)".*/\1/p' "$out/$v/run-0/outcome.json")
+        --mount "$GDIR":/guest:copy $opts -- $CMD >"$out/$v.txt" 2>&1 || grep -q '^identical: ' "$out/$v.txt"; then
+        d=$(jq -r .digest "$out/$v/run-0/outcome.json")
+        c=$(jq -r .outcome "$out/$v/run-0/outcome.json")
         if [ -z "$ref" ]; then ref=$d; refc=$c; refdir=$out/$v/run-0; echo "$w s$seed $f reference $c $d"; fi
         if [ "$d" = "$ref" ] && [ "$c" = "$refc" ]; then
             echo "$w s$seed $f $v identical ($n runs)"

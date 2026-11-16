@@ -1,7 +1,7 @@
 // go-spin: one goroutine runs a pure compute loop (no syscall, no allocation) for about
 // 2 s of native time; four goroutines wait on its result through a channel and main waits
 // on them with a 60 s time.After guard. Under patina the spinner holds the turn without
-// trapping until it finishes (or until --stall-ms ends the run as `stall`).
+// trapping until it finishes (or until stall-ms ends the run as `stall`).
 //
 //	go-spin [ITERATIONS]   default 2000000000 (about 2 s on the measuring host)
 package main

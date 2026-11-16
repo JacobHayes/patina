@@ -19,11 +19,11 @@ for i in 1 2 3; do
     echo "native unpinned run $i: $(( (t1 - t0) / 1000000 )) ms"
     for p in 0 100; do
         d=$out/patina-p$p-$i
-        "$PATINA" run --seed 1 --cpu "$cpu" --preempt-permille "$p" --out "$d" --guest "$G" -- /guest/pipecost "$N" >/dev/null
+        taskset -c "$cpu" "$PATINA" run --seed 1 --config "$("$PATINA_CFG" preempt-permille="$p")" --out "$d" --mount "$G":/guest:copy -- /guest/pipecost "$N" >/dev/null
         python3 -I - "$d/outcome.json" "$p" "$i" <<'PY'
 import json, sys
 o = json.load(open(sys.argv[1]))
-print(f"patina p{sys.argv[2]} run {sys.argv[3]}: {o['class']} {o['wall_ms']} ms, traps {o['traps']}, switches {o['switches']}, io {o['io']}")
+print(f"patina p{sys.argv[2]} run {sys.argv[3]}: {o['outcome']} {o['wall_ms']} ms, traps {o['sched']['traps']}, switches {o['sched']['switches']}, io {o['counters']['io']}")
 PY
         rm -f "$d/inc-0/boundary.log"
     done

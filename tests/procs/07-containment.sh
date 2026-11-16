@@ -11,7 +11,7 @@ mkdir -p "$o"
 
 # (a) normal end
 rm -rf "$o/a"
-timeout 300 "$PATINA" run --seed 1 --out "$o/a" --guest "$PATINA_GUESTS" -- /guest/daemons 50 linger 200000 >/dev/null 2>"$o/a.err" &
+timeout 300 "$PATINA" run --seed 1 --out "$o/a" --mount "$PATINA_GUESTS":/guest:copy -- /guest/daemons 50 linger 200000 >/dev/null 2>"$o/a.err" &
 launcher=$!
 python3 -I "$HERE/sandbox.py" "$o/a" procs:52 120 >"$o/a.ns" 2>"$o/a.alive" || { kill "$launcher"; die "(a) sandbox not seen"; }
 seen=$(cut -d' ' -f1 /proc/uptime)
@@ -20,8 +20,8 @@ n=$(sed -n 's/.*(\([0-9]*\) inside its PID namespace).*/\1/p' "$o/a.alive")
 [ "$n" -ge 52 ] || die "(a) only $n processes alive in the sandbox (supervisor, main, 50 daemons expected)"
 wait "$launcher" || die "(a) patina run exit $?"
 grep -q 'daemons started: 50' "$o/a/inc-0/stdout" || die "(a) the guest did not report its daemons"
-[ "$(field "$o/a/outcome.json" class)" = ok ] || die "(a) class $(field "$o/a/outcome.json" class)"
-[ "$(field "$o/a/outcome.json" exit_status)" = 0 ] || die "(a) exit status"
+[ "$(field "$o/a/outcome.json" outcome)" = ok ] || die "(a) class $(field "$o/a/outcome.json" outcome)"
+[ "$(field "$o/a/outcome.json" guest.exit)" = 0 ] || die "(a) exit status"
 set -- --started-before "$seen"; while read -r ns; do set -- "$@" --ns "$ns"; done <"$o/a.ns"
 no_leftovers "$o/a" "$@"
 for ns in $(cat "$o/a.ns"); do ! findmnt | grep -qF "$ns" || die "(a) $ns still mounted"; done
@@ -29,7 +29,7 @@ echo "(a) run ended ok when the main guest exited; no process, namespace holder 
 
 # (b) launcher killed with SIGKILL mid-run
 rm -rf "$o/b"
-"$PATINA" run --seed 1 --out "$o/b" --guest "$PATINA_GUESTS" -- /guest/daemons 50 linger 200000000 >/dev/null 2>"$o/b.err" &
+"$PATINA" run --seed 1 --out "$o/b" --mount "$PATINA_GUESTS":/guest:copy -- /guest/daemons 50 linger 200000000 >/dev/null 2>"$o/b.err" &
 launcher=$!
 python3 -I "$HERE/sandbox.py" "$o/b" procs:52 120 >"$o/b.ns" 2>"$o/b.alive" || { kill -KILL "$launcher"; die "(b) sandbox not seen"; }
 seen=$(cut -d' ' -f1 /proc/uptime)

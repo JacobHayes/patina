@@ -7,11 +7,11 @@ seen=""
 for n in $(seq 1 24); do
     o=$RUNS/06/at-$n
     run "$o" 1 --fault mem-error-at=$n -- /guest/memfault
-    [ "$(class "$o")" = ok ] || die "mem-error-at=$n: $(class "$o") $(field "$o/outcome.json" detail)"
+    [ "$(class "$o")" = ok ] || die "mem-error-at=$n: $(class "$o") $(field "$o/outcome.json" message)"
     grep -qx done "$o/inc-0/stdout" || die "mem-error-at=$n: guest did not finish"
     [ "$(grep -v ' ok$' "$o/inc-0/stdout" | grep -vc '^done$')" -le 1 ] || die "mem-error-at=$n: more than one failed step"
     f=$(grep -v ' ok$' "$o/inc-0/stdout" | grep -v '^done$' | tr '\n' ' ')
-    echo "mem-error-at=$n: $(field "$o/outcome.json" faults_injected | python3 -I -c 'import json,sys; print(" ".join(x["call"] for x in json.load(sys.stdin)) or "-")') -> ${f:-no failure visible to the guest (handled by libc, or N beyond its requests)}"
+    echo "mem-error-at=$n: $(field "$o/outcome.json" faults.recent | python3 -I -c 'import json,sys; print(" ".join(x["call"] for x in json.load(sys.stdin)) or "-")') -> ${f:-no failure visible to the guest (handled by libc, or N beyond its requests)}"
     seen="$seen$f"
 done
 for k in 0 1 2 3 4; do

@@ -59,8 +59,9 @@ if r.stdout != "before=11111 after=11111\n":
 print("faults-after-setup: quiet before setup-complete, firing after")
 
 out = os.path.join(RUNS, "02/verify")
-p = subprocess.run([PATINA, "verify", "--seed", "1", "--runs", "2", "--out", out, "--guest", GUESTS,
+p = subprocess.run([PATINA, "verify", "--seed", "1", "--runs", "2", "--out", out, "--mount", GUESTS + ":/guest:copy",
                     "--", *C, "fail"], capture_output=True, text=True, timeout=120)
-if p.returncode != 0 or "violation" not in p.stdout:
+# Identical runs: verify ends with the runs' own outcome and its exit status.
+if p.returncode != 1 or "identical" not in p.stdout or "violation" not in p.stdout:
     die(f"verify of a violation: exit {p.returncode}: {p.stdout} {p.stderr}")
 print("a violation repeats identically")

@@ -6,14 +6,14 @@ root=$(cd "$sandbox/../.." && pwd)
 G12=$PATINA_ATTACK_GUESTS
 G17=$PATINA_SANDBOX_GUESTS
 die() { echo "FAIL: $*"; exit 1; }
-digest() { sed -n 's/.*"digest":"\([0-9a-f]*\)".*/\1/p' "$1/outcome.json"; }
-class() { sed -n 's/.*"class":"\([a-z]*\)".*/\1/p' "$1/outcome.json"; }
-detail() { sed -n 's/.*"detail":"\([^"]*\)".*/\1/p' "$1/outcome.json"; }
+digest() { jq -r .digest "$1/outcome.json"; }
+class() { jq -r .outcome "$1/outcome.json"; }
+detail() { jq -r .message "$1/outcome.json"; }
 # vfy NAME RUNS VARY GUESTDIR -- guest...: identical runs, else fail with the difference.
 vfy() {
     n=$1; r=$2; v=$3; g=$4; shift 5
     rm -rf "${out:?}/$n"
     PATINA_PARALLEL=${PATINA_PARALLEL:-4} timeout 1800 "$PATINA" verify --seed 1 --runs "$r" --vary "$v" --out "$out/$n" \
-        --guest "$g" -- "$@" >"$out/$n.txt" 2>&1 || die "$n: $(tail -3 "$out/$n.txt")"
+        --mount "$g":/guest:copy -- "$@" >"$out/$n.txt" 2>&1 || grep -q '^identical: ' "$out/$n.txt" || die "$n: $(tail -3 "$out/$n.txt")"
     echo "$n: $r runs identical under $v ($(digest "$out/$n/run-0"))"
 }

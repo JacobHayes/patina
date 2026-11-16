@@ -5,7 +5,7 @@
 o=$RUNS/02-atomic; mkdir -p "$o"
 for p in 100 500 1000; do
     for seed in 1; do
-        run_ok "$o/p$p-s$seed" "$seed" --preempt-permille "$p" -- /guest/atomic
+        run_ok "$o/p$p-s$seed" "$seed" --config "$("$PATINA_CFG" preempt-permille="$p")" -- /guest/atomic
         [ "$(cat "$o/p$p-s$seed/inc-0/stdout")" = "records 8000 interleaved 0" ] || die "p$p seed $seed: $(cat "$o/p$p-s$seed/inc-0/stdout")"
         rm -f "$o/p$p-s$seed/inc-0/boundary.log"
     done

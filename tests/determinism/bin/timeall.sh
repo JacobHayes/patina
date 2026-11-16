@@ -14,12 +14,12 @@ for w in $wls; do
     wl "$w"
     rm -rf "${out:?}/$w"
     # shellcheck disable=SC2086
-    timeout 7200 "$PATINA" verify --seed "$seed" --runs 2 --vary time --out "$out/$w" --guest "$GDIR" $EXTRA -- $CMD \
+    timeout 7200 "$PATINA" verify --seed "$seed" --runs 2 --vary time --out "$out/$w" --mount "$GDIR":/guest:copy $EXTRA -- $CMD \
         >"$out/$w.txt" 2>&1 &
     until [ -e "$out/$w/run-0/outcome.json" ] || ! kill -0 $! 2>/dev/null; do sleep 1; done
 done
 wait
 for w in $wls; do
     if grep -q '^identical' "$out/$w.txt"; then echo "$w s$seed time identical"
-    else echo "$w s$seed time $(grep -m1 -A2 '^divergence\|^first' "$out/$w.txt" | tr '\n' ' ' | cut -c1-300)"; fi
+    else echo "$w s$seed time $(grep -m1 -A2 '^nondeterministic\|^first' "$out/$w.txt" | tr '\n' ' ' | cut -c1-300)"; fi
 done

@@ -15,8 +15,8 @@ for lang, cmd in LANGS.items():
             die(f"{lang} script natively printed {out!r}")
 
     r = run(f"01/{lang}-fail", 1, cmd, "fail")
-    if r.cls != "violation" or r.outcome["detail"] != "must-hold: balance -1":
-        die(f"{lang} fail: {r.cls} {r.outcome['detail']!r}")
+    if r.cls != "violation" or r.outcome["message"] != "must-hold: balance -1" or r.status != r.outcome["exit"] or r.status == 0:
+        die(f"{lang} fail: {r.cls} exit {r.status} {r.outcome['message']!r}")
     if r.sdk["violation"] != {"label": "must-hold", "detail": "balance -1"}:
         die(f"{lang} fail: sdk.violation {r.sdk['violation']}")
     if r.site("before-fail")["held"] != 1 or r.site("after-fail")["evaluated"] != 0:
@@ -28,7 +28,7 @@ for lang, cmd in LANGS.items():
     r = run(f"01/{lang}-script", 5, cmd, "script",
             flags=["--buggify", "--fault", "point:point-a=500"])
     if r.cls != "ok":
-        die(f"{lang} script: {r.cls} {r.outcome['detail']}")
+        die(f"{lang} script: {r.cls} {r.outcome['message']}")
     u = r.site("unreached")
     if (u["evaluated"], u["held"]) != (0, 0) or not u["location"]:
         die(f"{lang} script: declared site unreached = {u}")

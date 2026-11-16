@@ -42,10 +42,10 @@ for w in only:
             o = patina_run(f"{OUT}/{w}-{key}", argv, guest=gdir, opts=["--seed", str(i + 1), *opts])
             walls.append(o["wall_ms"])
             exts.append(o["ext_ms"])
-            traps.append(o["traps"])
-            sws.append(o["switches"])
+            traps.append(o["sched"]["traps"])
+            sws.append(o["sched"]["switches"])
             incs.append(o["incarnations"])
-            classes[o["class"]] = classes.get(o["class"], 0) + 1
+            classes[o["outcome"]] = classes.get(o["outcome"], 0) + 1
         row[key] = {"wall_ms": stats(walls), "ext_ms": stats(exts), "traps": stats(traps),
                     "switches": stats(sws), "incarnations": stats(incs), "classes": classes}
     res[w] = row

@@ -29,7 +29,7 @@ def tasks(root):
     return out
 def moved(out, cmd):
     subprocess.run(["rm", "-rf", out])
-    pr = subprocess.Popen([P, "run", "--seed", "3", "--pmu", "--out", out, "--guest", GU, "--"] + cmd,
+    pr = subprocess.Popen([P, "run", "--seed", "3"] + config(["pmu=true"]) + ["--out", out, "--mount", GU + ":/guest:copy", "--"] + cmd,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     n = 0
     rnd = random.Random(len(out))
@@ -41,17 +41,17 @@ def moved(out, cmd):
             except OSError:
                 pass
         time.sleep(0.002)
-    o = outcome(out) or {"class": "none", "digest": "-"}
+    o = outcome(out) or {"outcome": "none", "digest": "-"}
     prune(out)
     return o, n
 fail = []
 for p in ["loops", "strings", "fp", "threads"]:
     cmd = ["/guest/counters/compute", p]
-    ref = run(P, f"{RUNS}/11/{p}-ref", 3, GU, ["--pmu"], cmd)
+    ref = run(P, f"{RUNS}/11/{p}-ref", 3, GU, ["pmu=true"], cmd)
     res = [moved(f"{RUNS}/11/{p}-m{i}", cmd) for i in range(5)]
-    same = sum(o["digest"] == ref["digest"] and o["class"] == "ok" for o, _ in res)
-    print(f"{p}: reference {ref['class']} {ref['digest']} ({ref['pmu_stats']['preempts']} stops); moved runs equal: {same}/5; "
+    same = sum(o["digest"] == ref["digest"] and o["outcome"] == "ok" for o, _ in res)
+    print(f"{p}: reference {ref['outcome']} {ref['digest']} ({ref['counters']['pmu']['preempts']} stops); moved runs equal: {same}/5; "
           f"affinity changes per run: {[n for _, n in res]}")
-    if same != 5: fail.append(f"{p}: {[(o['class'], o['digest']) for o, _ in res]}")
+    if same != 5: fail.append(f"{p}: {[(o['outcome'], o['digest']) for o, _ in res]}")
 if fail: die("; ".join(fail))
 PY

@@ -1,4 +1,4 @@
-# Evidence (cost measurement/the crash materialiser): the tracker self-check (`patina oplog check`, replay of the whole log = the
+# Evidence (cost measurement/the crash materialiser): the tracker self-check (`patina log ops --check`, replay of the whole log = the
 # live tree, every incarnation) on W1-W9, seeds 1-3, faults off and on (tests/durability/bench/oplog.py).
 #@ tier=evidence budget=600 slots=1
 set -eu

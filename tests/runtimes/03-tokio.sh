@@ -20,7 +20,7 @@ NETF="--fault net-reset-permille=30 --fault net-chunk-max=7 --fault net-delay-ms
 echo "== a. R"
 n_ms=$(native "$RUNS/tk-native.txt" "$W/$T" /guest/tokio-mt local)
 run $T "$RUNS/tk-r" 1 -- /guest/tokio-mt local
-c=$(field "$RUNS/tk-r/outcome.json" class)
+c=$(field "$RUNS/tk-r/outcome.json" outcome)
 echo "seed 1: class $c, native wall ${n_ms} ms"
 [ "$c" = ok ] || fail "W2 seed 1: class $c"
 grep -v '^~ ' "$RUNS/tk-native.txt" | sort >"$RUNS/tk-native.masked"
@@ -54,7 +54,7 @@ for s in 1 2 3; do
     o=$RUNS/tk-f$s
     run $T "$o" "$s" $FAULT -- /guest/tokio-mt local
     n=$(grep -c '^spawn_blocking error' "$o/inc-0/stdout" || true)
-    echo "seed $s: $(field "$o/outcome.json" faults_count) faults injected, class $(field "$o/outcome.json" class), $n spawn_blocking errors seen"
+    echo "seed $s: $(field "$o/outcome.json" faults.injected) faults injected, class $(field "$o/outcome.json" outcome), $n spawn_blocking errors seen"
     [ "$n" -gt 0 ] && fs=$((fs + 1))
 done
 [ "$fs" -gt 0 ] || fail "W2 F: no injected error seen by the program"

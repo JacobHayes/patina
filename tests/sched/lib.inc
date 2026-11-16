@@ -5,18 +5,20 @@ set -eu
 GUESTS="c-threads rs-threads order"
 HERE=$(cd "$(dirname "$0")" && pwd)
 
-# field FILE KEY: one field of an outcome.json
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))[sys.argv[2]]; print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+# field FILE KEY[.SUB]: one (possibly nested) field of a outcome.json
+field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): v=v[k]
+print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
 
 die() { echo "FAIL: $*"; exit 1; }
 
 patina_run() { # out seed guest args...   (extra patina options in $PATINA_OPTS)
     out=$1; seed=$2; g=$3; shift 3
-    timeout 120 "$PATINA" run ${PATINA_OPTS:-} --seed "$seed" --out "$out" --guest "$PATINA_GUESTS" -- "/guest/$g" "$@" >/dev/null
+    timeout 120 "$PATINA" run ${PATINA_OPTS:-} --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" "$@" >/dev/null || [ -f "$out/outcome.json" ] || die "patina run $g: no outcome.json"
 }
 
 # check_result OUT GUEST: outcome ok and the guest's own results correct.
 check_result() {
-    [ "$(field "$1/outcome.json" class)" = ok ] || die "$2 in $1: class $(field "$1/outcome.json" class) $(field "$1/outcome.json" detail)"
+    [ "$(field "$1/outcome.json" outcome)" = ok ] || die "$2 in $1: class $(field "$1/outcome.json" outcome) $(field "$1/outcome.json" message)"
     python3 -I "$HERE/check_threads.py" "$2" "$1/inc-0/stdout" || die "$2 in $1: wrong results"
 }

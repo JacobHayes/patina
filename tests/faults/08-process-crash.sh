@@ -8,11 +8,11 @@ sweep 08 "$N" --crash process:20 -- /guest/ack-log nofsync
 python3 -I - "$RUNS/08/summary.tsv" <<'PY' || exit 1
 import csv, sys
 oc = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
-bad = [o for o in oc if o["class"] != "ok"]
+bad = [o for o in oc if o["outcome"] != "ok"]
 c1 = sum(1 for o in oc if int(o["crashes"]))
 print("nofsync under process:20: %d runs, %d ok, %d with >= 1 process crash" % (len(oc), len(oc) - len(bad), c1))
 if bad:
-    sys.exit("FAIL: seed %s: %s %s" % (bad[0]["seed"], bad[0]["class"], bad[0]["detail"]))
+    sys.exit("FAIL: seed %s: %s %s" % (bad[0]["seed"], bad[0]["outcome"], bad[0]["message"]))
 if c1 == 0:
     sys.exit("FAIL: no process crash")
 PY

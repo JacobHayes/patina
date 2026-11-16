@@ -4,12 +4,14 @@ set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 GUESTS="hello-static hello-spie hello-dyn hello-rs"
 
-# field FILE KEY: one field of an outcome.json
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))[sys.argv[2]]; print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+# field FILE KEY[.SUB]: one (possibly nested) field of a outcome.json
+field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): v=v[k]
+print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
 
 die() { echo "FAIL: $*"; exit 1; }
 
 patina_run() { # out seed guest args...
     out=$1; seed=$2; g=$3; shift 3
-    timeout 120 "$PATINA" run --seed "$seed" --out "$out" --guest "$PATINA_GUESTS" -- "/guest/$g" "$@"
+    timeout 120 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" "$@" || [ -f "$out/outcome.json" ] || die "patina run $g: no outcome.json"
 }

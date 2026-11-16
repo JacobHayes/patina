@@ -10,8 +10,8 @@ i=0
 while IFS= read -r cmd; do
     i=$((i + 1))
     set -f; set -- $cmd; set +f
-    verify_ok "$o/c$i" 1 "" 3 --root "$t" -- "$@"
-    native "$o/n$i" --root "$t" -- "$@" || die "native $cmd: exit $?"
+    verify_ok "$o/c$i" 1 "" 3 --work "$t" -- "$@"
+    native "$o/n$i" --work "$t" -- "$@" || die "native $cmd: exit $?"
     python3 -I "$LIB/mask_text.py" "$o/n$i/stdout" >"$o/n$i.masked"
     python3 -I "$LIB/mask_text.py" "$o/c$i/run-0/inc-0/stdout" >"$o/c$i.masked"
     diff "$o/n$i.masked" "$o/c$i.masked" >"$o/d$i" || { head "$o/d$i"; die "$cmd: differs from native"; }

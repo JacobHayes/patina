@@ -16,9 +16,9 @@ die() { echo "FAIL: $*"; exit 1; }
 run_ok() {
     out=$1; seed=$2; shift 2
     rm -rf "$out"; mkdir -p "$(dirname "$out")"
-    timeout 600 "$PATINA" run --seed "$seed" --out "$out" --guest "$PATINA_GUESTS" -- "$@" >/dev/null 2>"$out.err" \
-        || die "patina run $* (seed $seed): exit $?"
-    [ "$(field "$out/outcome.json" class)" = ok ] || die "$* (seed $seed): class $(field "$out/outcome.json" class): $(field "$out/outcome.json" detail)"
+    timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >/dev/null 2>"$out.err" \
+        || [ -f "$out/outcome.json" ] || die "patina run $* (seed $seed): no outcome.json"
+    [ "$(field "$out/outcome.json" outcome)" = ok ] || die "$* (seed $seed): class $(field "$out/outcome.json" outcome): $(field "$out/outcome.json" message)"
 }
 
 # verify_ok OUT SEED RUNS VARY cmd...: patina verify says identical; independently one digest and
@@ -26,13 +26,13 @@ run_ok() {
 verify_ok() {
     out=$1; seed=$2; runs=$3; vary=$4; shift 4
     rm -rf "$out"; mkdir -p "$(dirname "$out")"
-    timeout 3600 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$vary" --out "$out" --guest "$PATINA_GUESTS" -- "$@" \
-        >"$out.verify.txt" 2>&1 || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
+    timeout 3600 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$vary" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$@" \
+        >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
     n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$* seed $seed: $n distinct digests"
     n=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$* seed $seed: $n distinct stdout files"
-    [ "$(field "$out/run-0/outcome.json" class)" = ok ] || die "$* seed $seed: class $(field "$out/run-0/outcome.json" class)"
+    [ "$(field "$out/run-0/outcome.json" outcome)" = ok ] || die "$* seed $seed: class $(field "$out/run-0/outcome.json" outcome)"
     echo "seed $seed: $runs identical runs ($vary), digest $(field "$out/run-0/outcome.json" digest)"
 }
 

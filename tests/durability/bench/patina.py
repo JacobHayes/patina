@@ -51,9 +51,9 @@ def pat_run(art, args, opts, seed, cpu):
 
 
 def patina_one(gdir, argv, opts, seed, cpu, tag):
-    o = patina_run(f"{OUT}/{tag}-{seed}", argv, guest=gdir, opts=["--seed", str(seed), "--cpu", str(cpu), *opts])
+    o = patina_run(f"{OUT}/{tag}-{seed}", argv, guest=gdir, opts=["--seed", str(seed), *opts], cpu=cpu)
     shutil.rmtree(f"{OUT}/{tag}-{seed}", ignore_errors=True)
-    return o["ext_ms"], o["class"], len(o.get("crashes", []))
+    return o["ext_ms"], o["outcome"], len(o.get("crashes", []))
 
 
 res = {"loadavg_before": uptime(), "reps": REPS, "sweep": SWEEP, "jobs": JOBS}

@@ -1,7 +1,7 @@
 # Exactness at the stop. The same fixed N reached two ways must stop at the same instruction
 # with the same registers: by hops only (every conditional branch emulated and counted by the
 # runtime: the definition of the stop) and through the hardware counter (overflow aimed at
-# N - margin, then hops). With the slice fixed (--pmu-slice N..N, no short slices), the
+# N - margin, then hops). With the slice fixed (pmu-slice = N..N, no short slices), the
 # preempt records (instruction pointer, N, register hash) and so the digests must be equal.
 # N = 3000 (counter period programmed per segment) on seven small programs, and N = 1,100,000
 # (the free-running period, overflows, rearm, landing) on two.
@@ -18,10 +18,10 @@ cases = [(3000, 2048, 512, p) for p in [["loops", "1", "1000"], ["recur", "1", "
 cases += [(1100000, 1100000, 1024, p) for p in [["loops", "1", "40"], ["recur", "1", "30"]]]
 def one(c):
     n, mh, mc, p = c
-    base = ["--pmu-short-permille", "0", "--pmu-slice", f"{n}..{n}", "--pmu-short-max", "1", "--stall-ms", "600000"]
+    base = ["pmu-short-permille=0", f"pmu-slice={n}..{n}", "pmu-short-max=1", "stall-ms=600000"]
     name = f"{n}-{p[0]}"
-    a = run(P, f"{RUNS}/10/{name}-hops", 1, GU, base + ["--pmu-margin", str(mh)], ["/guest/counters/compute"] + p, keep=True)
-    b = run(P, f"{RUNS}/10/{name}-counter", 1, GU, base + ["--pmu-margin", str(mc)], ["/guest/counters/compute"] + p, keep=True)
+    a = run(P, f"{RUNS}/10/{name}-hops", 1, GU, base + [f"pmu-margin={mh}"], ["/guest/counters/compute"] + p, keep=True)
+    b = run(P, f"{RUNS}/10/{name}-counter", 1, GU, base + [f"pmu-margin={mc}"], ["/guest/counters/compute"] + p, keep=True)
     ca, _ = preempts(f"{RUNS}/10/{name}-hops/inc-0/boundary.log")
     for d in ("hops", "counter"):
         prune(f"{RUNS}/10/{name}-{d}")
@@ -29,10 +29,10 @@ def one(c):
 fail = []
 with ThreadPoolExecutor(8) as ex:
     for name, a, b, ca in ex.map(one, cases):
-        sa, sb = a.get("pmu_stats", {}), b.get("pmu_stats", {})
-        print(f"{name}: hops-only {a['class']} {a['digest']} ({sa.get('hops')} hops, {sa.get('alarms')} alarms), "
-              f"counter {b['class']} {b['digest']} ({sb.get('hops')} hops, {sb.get('alarms')} alarms, {sb.get('landings')} landings); {ca} stops")
-        if a["class"] != "ok" or b["class"] != "ok": fail.append(name + " not ok")
+        sa, sb = a.get("counters", {}).get("pmu", {}), b.get("counters", {}).get("pmu", {})
+        print(f"{name}: hops-only {a['outcome']} {a['digest']} ({sa.get('hops')} hops, {sa.get('alarms')} alarms), "
+              f"counter {b['outcome']} {b['digest']} ({sb.get('hops')} hops, {sb.get('alarms')} alarms, {sb.get('landings')} landings); {ca} stops")
+        if a["outcome"] != "ok" or b["outcome"] != "ok": fail.append(name + " not ok")
         elif a["digest"] != b["digest"]: fail.append(name + " stops differ")
         elif ca == 0 or sb.get("alarms", 0) == 0 or sa.get("alarms", 1) != 0: fail.append(name + " did not exercise both paths")
 if fail: die("; ".join(fail))

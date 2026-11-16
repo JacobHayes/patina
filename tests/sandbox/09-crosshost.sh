@@ -12,7 +12,7 @@ out=$RUNS/crosshost
 mkdir -p "$out"
 run() { # run NAME [wrapper...]: one run of the crosshost guest, class ok
     n=$1; shift
-    timeout 120 "$@" "$PATINA" run --seed 1 --out "$out/$n" --guest "$G17" -- /guest/crosshost >/dev/null 2>&1 || true
+    timeout 120 "$@" "$PATINA" run --seed 1 --out "$out/$n" --mount "$G17":/guest:copy -- /guest/crosshost >/dev/null 2>&1 || true
     [ "$(class "$out/$n")" = ok ] || die "$n: class $(class "$out/$n") ($(detail "$out/$n"))"
 }
 run plain env

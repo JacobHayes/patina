@@ -5,8 +5,8 @@
 o=$RUNS/07-jit
 for i in 1 2 3; do
     patina_run "$o/r$i" 1 insn-jit
-    [ "$(field "$o/r$i/outcome.json" class)" = ok ] || die "run $i: $(field "$o/r$i/outcome.json" detail)"
-    u=$(field "$o/r$i/outcome.json" unscanned_exec_mappings)
+    [ "$(field "$o/r$i/outcome.json" outcome)" = ok ] || die "run $i: $(field "$o/r$i/outcome.json" message)"
+    u=$(field "$o/r$i/outcome.json" labels.unscanned_exec_mappings)
     [ "$u" -ge 1 ] || die "run $i: unscanned_exec_mappings $u"
     echo "run $i: $(cat "$o/r$i/inc-0/stdout"), unscanned_exec_mappings $u, digest $(field "$o/r$i/outcome.json" digest)"
 done
@@ -19,14 +19,14 @@ echo "the labelled gap: $d distinct values in 3 runs of seed 1"
 for m in file-mmap file-mprotect file-shared; do
     for i in 1 2; do
         patina_run "$o/$m-$i" 1 insn-jit "$m"
-        [ "$(field "$o/$m-$i/outcome.json" class)" = ok ] || die "$m: $(field "$o/$m-$i/outcome.json" detail)"
+        [ "$(field "$o/$m-$i/outcome.json" outcome)" = ok ] || die "$m: $(field "$o/$m-$i/outcome.json" message)"
     done
     f=$o/$m-1/outcome.json
-    echo "$m: $(cat "$o/$m-1/inc-0/stdout") / $(cat "$o/$m-2/inc-0/stdout"); patched $(field "$f" patched_sites.rdrand), emulated $(field "$f" emulated.rdrand), unscanned $(field "$f" unscanned_exec_mappings)"
+    echo "$m: $(cat "$o/$m-1/inc-0/stdout") / $(cat "$o/$m-2/inc-0/stdout"); patched $(field "$f" counters.insn.patched_sites.rdrand), emulated $(field "$f" counters.insn.emulated.rdrand), unscanned $(field "$f" labels.unscanned_exec_mappings)"
     if [ "$m" = file-shared ]; then
-        [ "$(field "$f" unscanned_exec_mappings)" -ge 1 ] && [ "$(field "$f" patched_sites.rdrand)" = 0 ] || die "$m: not labelled"
+        [ "$(field "$f" labels.unscanned_exec_mappings)" -ge 1 ] && [ "$(field "$f" counters.insn.patched_sites.rdrand)" = 0 ] || die "$m: not labelled"
     else
         cmp -s "$o/$m-1/inc-0/stdout" "$o/$m-2/inc-0/stdout" || die "$m: runs differ"
-        [ "$(field "$f" emulated.rdrand)" = 1 ] && [ "$(field "$f" unscanned_exec_mappings)" = 0 ] || die "$m: not patched"
+        [ "$(field "$f" counters.insn.emulated.rdrand)" = 1 ] && [ "$(field "$f" labels.unscanned_exec_mappings)" = 0 ] || die "$m: not patched"
     fi
 done

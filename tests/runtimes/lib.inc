@@ -7,7 +7,7 @@ W=${PATINA_WORKLOADS:?}
 # Sweeps: 4 runs at a time (tests/storage/lib/sweep.sh).
 export SWEEP_JOBS=${SWEEP_JOBS:-4}
 # Guest output and boundary logs stay small: a soft limit for every run of these scripts
-# (a runaway log ends the run as infra, it cannot fill the disk).
+# (a runaway log ends the run as internal, it cannot fill the disk).
 ulimit -S -f 2000000
 export SWEEP_FSIZE=2000000
 FAILS=0
@@ -24,8 +24,8 @@ finish() {
 run() {
     wl=$1; out=$2; seed=$3; shift 3
     rm -rf "$out"; mkdir -p "$(dirname "$out")"
-    timeout 900 "$PATINA" run --seed "$seed" --out "$out" --guest "$W/$wl" "$@" >/dev/null 2>"$out.err" \
-        || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
+    timeout 900 "$PATINA" run --seed "$seed" --out "$out" --mount "$W/$wl":/guest:copy "$@" >/dev/null 2>"$out.err" \
+        || [ -f "$out/outcome.json" ] || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
     rm -f "$out.err"
 }
 
@@ -35,19 +35,19 @@ run() {
 verify() {
     wl=$1; out=$2; seed=$3; runs=$4; vary=$5; shift 5
     rm -rf "$out"; mkdir -p "$(dirname "$out")"
-    if ! timeout 7200 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$vary" --out "$out" --guest "$W/$wl" "$@" \
-        >"$out.verify.txt" 2>&1; then
+    if ! timeout 7200 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$vary" --out "$out" --mount "$W/$wl":/guest:copy "$@" \
+        >"$out.verify.txt" 2>&1 && ! grep -q '^identical: ' "$out.verify.txt"; then
         echo "verify $wl seed $seed: patina verify exit status non-zero: $(tail -3 "$out.verify.txt")"
         return 1
     fi
     nd=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
-    nc=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" class; done | sort -u | wc -l)
+    nc=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" outcome; done | sort -u | wc -l)
     ns=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
     [ "$nd" = 1 ] && [ "$nc" = 1 ] && [ "$ns" = 1 ] || {
         echo "verify $wl seed $seed: $nd digests, $nc classes, $ns stdout files over $runs runs"
         return 1
     }
-    echo "seed $seed: $runs identical runs ($vary), class $(field "$out/run-0/outcome.json" class), digest $(field "$out/run-0/outcome.json" digest), faults $(field "$out/run-0/outcome.json" faults_count)"
+    echo "seed $seed: $runs identical runs ($vary), class $(field "$out/run-0/outcome.json" outcome), digest $(field "$out/run-0/outcome.json" digest), faults $(field "$out/run-0/outcome.json" faults.injected)"
 }
 
 # verify_seeds WORKLOAD NAME VARY "SEEDS" [patina options] -- cmd: verify each seed ($VERIFY_RUNS runs,
@@ -92,9 +92,9 @@ netf() {
     for s in $seeds; do
         o=$RUNS/$name-$s
         run "$wl" "$o" "$s" "$@"
-        c=$(field "$o/outcome.json" class)
+        c=$(field "$o/outcome.json" outcome)
         k=$(grep -c -- "$pat" "$o/inc-0/stdout" || true)
-        echo "seed $s: class $c, wall $(field "$o/outcome.json" wall_ms) ms, faults $(field "$o/outcome.json" faults_count), net $(jq -c '.net | {connections,chunks,resets,partitioned}' "$o/outcome.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || true)"
+        echo "seed $s: class $c, wall $(field "$o/outcome.json" wall_ms) ms, faults $(field "$o/outcome.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,partitioned}' "$o/outcome.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || true)"
         [ "$c" = ok ] && [ "$k" -gt 0 ] && seen=$((seen + 1))
     done
     [ "$seen" -gt 0 ]

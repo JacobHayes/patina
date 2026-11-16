@@ -1,18 +1,20 @@
 #!/bin/sh
 # Scheduler evidence: cost of one call_sup round trip and of
 # uncontended and contended mutexes, from the launcher's wall_ms of whole runs.
-#   PATINA=... PATINA_GUESTS=... OUT=dir sh tests/sched/evidence/costs.sh
+#   PATINA=... PATINA_CFG=tests/cfg PATINA_GUESTS=... OUT=dir sh tests/sched/evidence/costs.sh
 set -eu
-: "${PATINA:?}" "${PATINA_GUESTS:?}" "${OUT:?}"
+: "${PATINA:?}" "${PATINA_CFG:?}" "${PATINA_GUESTS:?}" "${OUT:?}"
 mkdir -p "$OUT"
-field() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$1" "$2"; }
+field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."): v=v[k]
+print(v)' "$1" "$2"; }
 cpu=${CPU:-2}
 run() { # name preempt args...
     name=$1; p=$2; shift 2
     for rep in 1 2 3; do
         o=$OUT/$name-$rep
-        "$PATINA" run --cpu "$cpu" --seed 1 --preempt-permille "$p" --out "$o" --guest "$PATINA_GUESTS" -- "$@" >/dev/null
-        echo "$name rep $rep: class $(field "$o/outcome.json" class) wall_ms $(field "$o/outcome.json" wall_ms) traps $(field "$o/outcome.json" traps) switches $(field "$o/outcome.json" switches)"
+        taskset -c "$cpu" "$PATINA" run --seed 1 --config "$("$PATINA_CFG" preempt-permille="$p")" --out "$o" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >/dev/null
+        echo "$name rep $rep: class $(field "$o/outcome.json" outcome) wall_ms $(field "$o/outcome.json" wall_ms) traps $(field "$o/outcome.json" sched.traps) switches $(field "$o/outcome.json" sched.switches)"
     done
 }
 N=1000000

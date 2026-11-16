@@ -16,7 +16,7 @@ for batch in "1 2 3"; do
     wait
 done
 for seed in 1 2 3; do
-    [ "$(field "$o/s$seed/outcome.json" class)" = ok ] || die "seed $seed: not ok"
+    [ "$(field "$o/s$seed/outcome.json" outcome)" = ok ] || die "seed $seed: not ok"
     field "$o/s$seed/outcome.json" digest
 done >"$o/digests.txt"
 n=$(sort -u "$o/digests.txt" | wc -l)

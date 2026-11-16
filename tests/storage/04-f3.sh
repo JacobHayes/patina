@@ -1,4 +1,4 @@
-# 4. F3 (flush worker dies on EIO, writers sleep forever). --vtime-limit-s 400: the
+# 4. F3 (flush worker dies on EIO, writers sleep forever). --time-limit 400: the
 # outcome is liveness, the parked thread is in a sleep whose deadline is within 100 ms of
 # the limit (the write-stall loop's 100 ms sleep), in bounded wall time. Seed 40 of 600.
 # The seeds depend on the host's libc and CPU (they were found on the development host), so
@@ -7,9 +7,9 @@
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f3-40
 run fjall-harness "$o" 40 --env FJ_N=1000 --env FJ_BUGGIFY=1 --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 \
-    --vtime-limit-s 400 --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
-[ "$(field "$o/outcome.json" class)" = liveness ] || die "F3: $(field "$o/outcome.json" class) $(field "$o/outcome.json" detail)"
-d=$(field "$o/outcome.json" detail)
+    --time-limit 400 --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
+[ "$(field "$o/outcome.json" outcome)" = liveness ] || die "F3: $(field "$o/outcome.json" outcome) $(field "$o/outcome.json" message)"
+d=$(field "$o/outcome.json" message)
 dl=$(echo "$d" | sed -n 's/.*wait=sleep deadline=\([0-9]*\).*/\1/p')
 [ -n "$dl" ] || die "F3: no sleeping thread in the detail: $d"
 limit=$(( (100 + 400) * 1000000000 ))
