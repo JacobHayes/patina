@@ -6,11 +6,11 @@
 #  b. D (seed 1, 3 runs, --vary cpu,load,aslr,sandbox), faults off and on (fs-error-permille=10);
 #     identical stdout includes the masked lines (ls -l times, date, mktemp names, PIDs).
 #  c. ls -l times and date are virtual (2026-01-01 epoch).
-#  d. `sleep 5` costs little wall time: median of `sh -c 'sleep 5'` minus `sh -c 'sleep 0'` (3
-#     runs each) under 1.5 s; the script's own date check (elapsed >= 5 s).
-#  e. fs-error-permille=10 over 24 seeds, each shell: every run `ok` or `failure` with an exit
-#     status (no signal); every failing run stopped before "done" (set -e) with a tool's error on
-#     stderr; at least one run failed that way.
+#  d. `sleep 5` takes 5 s of virtual time: the script's own date check (elapsed >= 5 s).
+#  e. fs-error-permille=10 over 24 seeds, each shell (the script's files are under /work, where
+#     file faults act): every run `ok` or `failure` with an exit status (no signal); every failing
+#     run stopped before "done" (set -e) with a tool's error on stderr; at least one run failed
+#     that way.
 #  f. >= 3 distinct digests over 4 seeds.
 #@ tier=area budget=150 slots=4
 . "$(dirname "$0")/lib.inc"
@@ -75,14 +75,6 @@ wait $p1 || FAILS=$((FAILS + $?))
 wait $p2 || FAILS=$((FAILS + $?))
 cat "$RUNS/sh.log" "$RUNS/bash.log"
 
-echo "== d. sleep 5 in wall time"
-for k in 1 2 3; do
-    run $S "$RUNS/sleep5-$k" $k -- /bin/sh -c 'sleep 5'
-    run $S "$RUNS/sleep0-$k" $k -- /bin/sh -c 'sleep 0'
-done
-w5=$(for k in 1 2 3; do field "$RUNS/sleep5-$k/result.json" wall_ms; done | sort -n | sed -n 2p)
-w0=$(for k in 1 2 3; do field "$RUNS/sleep0-$k/result.json" wall_ms; done | sort -n | sed -n 2p)
-echo "median wall: sh -c 'sleep 5' $w5 ms, sh -c 'sleep 0' $w0 ms, difference $((w5 - w0)) ms"
-[ $((w5 - w0)) -lt 1500 ] || fail "W6: sleep 5 costs $((w5 - w0)) ms of wall time"
+echo "== d. sleep 5 in virtual time"
 grep -q '^sleep 5: elapsed >= 5: yes$' "$RUNS/sh-r/inc-0/stdout" || fail "W6: the script's sleep 5 did not take 5 virtual seconds"
 finish

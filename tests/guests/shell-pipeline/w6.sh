@@ -2,9 +2,9 @@
 # W6 shell-pipeline: run as `sh w6.sh` and `bash w6.sh`, over the system coreutils.
 # Lines that depend on time, PIDs or temporary names start with "~ " (masked when compared
 # with a native run; identical between patina runs of one seed). Errors stop the script
-# (`set -e`). The last line is "done".
+# (`set -e`). The last line is "done". Its files are under /work, the tree file faults act on.
 set -eu
-dir=$(mktemp -d)
+dir=$(mktemp -d /work/w6.XXXXXX)
 echo "~ mktemp -d $dir"
 cd "$dir"
 echo "pipeline: $(seq 1 2000 | sort -rn | head -3 | tr '\n' ' ')"
@@ -50,7 +50,7 @@ echo "ls -t after touch -d: $(touch -d @1000 tree/a/f3.txt && ls -t tree/a | tai
 echo "~ date $(date)"
 t0=$(date +%s)
 echo "~ date +%s $t0"
-t=$(mktemp)
+t=$(mktemp /work/w6.XXXXXX)
 echo "~ mktemp $t"
 echo payload >"$t"
 echo "mktemp content: $(cat "$t")"
