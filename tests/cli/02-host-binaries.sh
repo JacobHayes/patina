@@ -1,6 +1,7 @@
 # 2. `patina run --seed 5 -- PROGRAM ARGS` with no other flag: a static and a dynamic binary
-#    given by a host path (copied to /guest/NAME), and `python3 -c` found on the guest PATH.
-#    Each is ok, its stdout as expected, its run directory under ./patina-out.
+#    given by a relative host path (run from where they are, named by the path as given: the
+#    checks' directory is reached through a symlink), and `python3 -c` found on the guest
+#    PATH. Each is ok, its stdout as expected, its run directory under ./patina-out.
 #@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/host
@@ -13,7 +14,7 @@ for g in hello-static hello-dyn; do
     [ "$st" = 0 ] || die "$g: exit $st ($(tail -2 "$g.txt"))"
     r=patina-out/run-5/result.json
     [ "$(field "$r" outcome)" = ok ] || die "$g: $(field "$r" outcome)"
-    head -3 patina-out/run-5/inc-0/stdout | tr '\n' ';' | grep -qx "arg 0 /guest/$g;arg 1 one;arg 2 two;" \
+    head -3 patina-out/run-5/inc-0/stdout | tr '\n' ';' | grep -qx "arg 0 $d/$g;arg 1 one;arg 2 two;" \
         || die "$g: stdout $(head -3 patina-out/run-5/inc-0/stdout)"
     echo "$g: ok, digest $(field "$r" digest)"
 done

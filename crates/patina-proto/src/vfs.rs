@@ -22,6 +22,12 @@ pub const VINO_CAP: usize = 1 << 14;
 pub const VINO_BASE: u64 = 0x10_0000;
 pub const REFUSED_CAP: usize = 64;
 pub const REFUSED_LEN: usize = 120;
+/// Paths a guest could not find, kept for the launcher's hint (`Vfs::missing`).
+pub const MISSING_CAP: usize = 32;
+pub const MISSING_LEN: usize = 256;
+/// The first byte of a missing entry: what the guest tried to do with the path.
+pub const MISSING_EXEC: u8 = b'x';
+pub const MISSING_OPEN: u8 = b'o';
 
 /// Times of one sandbox inode, realtime nanoseconds. `key` 0 is an empty entry.
 #[repr(C)]
@@ -52,6 +58,12 @@ pub struct Vfs {
     pub _pad: u64,
     /// NUL-padded refused paths (or flags such as `O_DIRECT`), in first-seen order.
     pub refused: [[u8; REFUSED_LEN]; REFUSED_CAP],
+    pub missing_used: u64,
+    pub _pad2: u64,
+    /// Absolute paths an `execve` or `open` found missing (`ENOENT`), each after a byte saying
+    /// which (`MISSING_EXEC`, `MISSING_OPEN`), NUL-padded, first-seen order. Paths longer than
+    /// an entry are not kept. Read only by the launcher, which keeps those the host has.
+    pub missing: [[u8; MISSING_LEN]; MISSING_CAP],
     pub vino: [VinoEntry; VINO_CAP],
     pub vt: [VtEntry; VT_CAP],
 }
@@ -71,6 +83,33 @@ impl Vfs {
             let l = e.iter().position(|&c| c == 0).unwrap_or(REFUSED_LEN);
             &e[..l]
         })
+    }
+    /// Missing entries: (what, path).
+    pub fn missing(&self) -> impl Iterator<Item = (u8, &[u8])> + '_ {
+        let n = (self.missing_used as usize).min(MISSING_CAP);
+        self.missing[..n].iter().map(|e| {
+            let l = e.iter().position(|&c| c == 0).unwrap_or(MISSING_LEN);
+            (e[0], &e[1..l])
+        })
+    }
+    /// Record a missing path once (first-seen order).
+    pub fn miss(&mut self, what: u8, path: &[u8]) {
+        if path.len() + 1 >= MISSING_LEN || path.first() != Some(&b'/') {
+            return;
+        }
+        let n = (self.missing_used as usize).min(MISSING_CAP);
+        for e in &self.missing[..n] {
+            let l = e.iter().position(|&c| c == 0).unwrap_or(MISSING_LEN);
+            if e[0] == what && &e[1..l] == path {
+                return;
+            }
+        }
+        if n < MISSING_CAP {
+            self.missing[n] = [0; MISSING_LEN];
+            self.missing[n][0] = what;
+            self.missing[n][1..=path.len()].copy_from_slice(path);
+            self.missing_used += 1;
+        }
     }
     /// Record a refusal once (first-seen order); longer strings are cut.
     pub fn refuse(&mut self, what: &[u8]) {

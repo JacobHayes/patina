@@ -252,15 +252,10 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
     }
     a.push("--".into());
-    // A program copied in was named by a host path, perhaps relative: give it absolute.
-    let host = run["program"]["host"]
-        .as_str()
-        .filter(|_| run["program"]["copied"] == true);
-    for (i, c) in cfg.cmd.iter().enumerate() {
-        a.push(quote(match host {
-            Some(h) if i == 0 => h,
-            _ => c,
-        }));
+    // The command as given (a relative program path was made absolute by name when the run
+    // was configured).
+    for c in &cfg.cmd {
+        a.push(quote(c));
     }
     a.join(" ")
 }
@@ -380,6 +375,13 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
     let never_hit = unmet("reachable", &|_, h| h == 0);
     let never_fired = unmet("buggify", &|_, h| h == 0);
     let never_evaluated = unmet("always", &|e, _| e == 0);
+    // Paths the sandbox lacks, by hint, with the runs that met them.
+    let mut missing: BTreeMap<String, usize> = BTreeMap::new();
+    for r in runs {
+        for m in r.result["missing"].as_array().into_iter().flatten() {
+            *missing.entry(crate::result::missing_line(m)).or_default() += 1;
+        }
+    }
     let stalls = runs
         .iter()
         .filter(|r| r.result["stop"] == "compute-stall")
@@ -478,6 +480,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         },
         "faults": {"configured": configured, "eligible_zero": idle},
         "compute_stall": stalls,
+        "missing": missing,
         "host_limits": limits,
         "allow_unmet": allow,
         "vacuous": vacuous,
@@ -608,6 +611,19 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
     }
     for c in names(&v["faults"]["eligible_zero"]) {
         tail.push(format!("faults: {c} eligible 0 times: nothing to act on"));
+    }
+    let miss = v["missing"].as_object().unwrap();
+    for (l, k) in miss.iter().take(LABELS_SHOWN) {
+        tail.push(format!(
+            "{l} ({})",
+            count(k.as_u64().unwrap_or(0) as usize, "run")
+        ));
+    }
+    if miss.len() > LABELS_SHOWN {
+        tail.push(format!(
+            "not in the sandbox: {} more paths ({full})",
+            miss.len() - LABELS_SHOWN
+        ));
     }
     for (l, k) in v["host_limits"].as_object().unwrap() {
         tail.push(format!(

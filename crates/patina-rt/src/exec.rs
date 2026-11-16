@@ -226,7 +226,17 @@ pub fn resolve(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<()
         let mut norm = PathBuf::new();
         let kind = path::classify(dfd, name.b.as_ptr() as u64, &mut norm);
         let fd = match kind {
-            Kind::Plain => open_exec(dfd, &name.b[..=name.n], fl)?,
+            Kind::Plain => match open_exec(dfd, &name.b[..=name.n], fl) {
+                Ok(fd) => fd,
+                Err(r) => {
+                    // An interpreter a `#!` line names (the program itself is noted by
+                    // `resolve::note_missing`).
+                    if r == -e::ENOENT && t.depth > 0 && norm.n > 0 {
+                        path::missing(proto::vfs::MISSING_EXEC, &norm);
+                    }
+                    return Err(r);
+                }
+            },
             Kind::SelfExe => {
                 let gp = proc().guest_path();
                 let mut g = PathBuf::new();

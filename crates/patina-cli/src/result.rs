@@ -19,6 +19,9 @@ pub struct RunEnd {
     pub traps: u64,
     pub switches: u64,
     pub refused: Vec<String>,
+    /// Paths the guest tried to run or open that the sandbox lacks and the host has
+    /// (`launch::not_in_sandbox`).
+    pub missing: Vec<Value>,
     pub wall_ms: u64,
     /// Blocking I/O counters: parks, re-attempts, spurious re-attempts, blocking calls
     /// completed, of which parked at least once.
@@ -219,6 +222,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "faults": e.faults,
         "sdk": e.sdk.json(),
         "refused": e.refused,
+        "missing": e.missing,
         "labels": {
             "unscanned_exec_mappings": e.insn.unscanned_exec_mappings,
             "unix_sockets_in_flight": e.unix_sockets,
@@ -370,8 +374,31 @@ pub fn print_human(r: &Value, dir: &Path) {
     if let Some(l) = refused_line(r) {
         println!("{l}");
     }
+    for m in r["missing"].as_array().into_iter().flatten() {
+        println!("{}", missing_line(m));
+    }
     println!("run directory: {}", dir.display());
     println!("replay: patina replay {}", dir.display());
+}
+
+/// The hint for one path the guest could not find in the sandbox (`launch::not_in_sandbox`).
+pub fn missing_line(m: &Value) -> String {
+    let s = |k: &str| m[k].as_str().unwrap_or("");
+    if s("name").is_empty() {
+        format!(
+            "not in the sandbox: {} (the host has it): add --mount {d}:{d}",
+            s("path"),
+            d = s("mount")
+        )
+    } else {
+        format!(
+            "not in the sandbox: {}, run by name (the host's is {}, outside the guest's PATH): add --mount {d}:{d} and run {}",
+            s("name"),
+            s("host"),
+            s("host"),
+            d = s("mount")
+        )
+    }
 }
 
 /// One line naming what the run refused, or nothing. Calls the table answers `ENOSYS` (a

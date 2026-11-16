@@ -228,6 +228,8 @@ pub struct IncEnd {
     pub traps: u64,
     pub switches: u64,
     pub refused: Vec<String>,
+    /// Absolute paths an exec or open found missing (`proto::vfs::Vfs::missing`).
+    pub missing: Vec<(u8, String)>,
     pub seq: u64,
     pub vclock_ns: u64,
     /// Blocking I/O counters, as in `RunEnd::io`.
@@ -250,6 +252,75 @@ pub struct IncEnd {
     /// points passed.
     pub eligible: [u64; proto::faults::NKIND],
     pub crash_points: u64,
+}
+
+/// Guest paths the sandbox makes itself: a path under one is never the host's. (`/tmp` is
+/// the sandbox's too, but a host path under it can be mounted there: only `/tmp` itself is.)
+pub const SANDBOX_ROOTS: [&str; 12] = [
+    "/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/proc", "/sys", "/dev", "/work", "/guest",
+    "/.patina",
+];
+
+fn under(p: &str, dir: &str) -> bool {
+    p == dir || p.strip_prefix(dir).is_some_and(|r| r.starts_with('/')) || dir == "/"
+}
+
+/// Of the paths a run's guest found missing (`(what, path)`, `proto::vfs::MISSING_*`), those
+/// the host has, each as `{"path", "mount"}` (a directory to mount at its own path), or for a
+/// program run by name and not on the guest's `PATH`, `{"name", "path", "host", "mount"}`
+/// (where the host's `PATH` has it). Paths the sandbox itself provides or a mount covers are
+/// left out: there the guest's view is the sandbox's, not the host's.
+pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Value> {
+    let mut covered: Vec<String> = o.cfg.mounts.iter().map(|m| m.dst.clone()).collect();
+    if let Some(d) = Path::new(&o.program.guest).parent() {
+        if o.program.dir.is_some() {
+            covered.push(d.display().to_string());
+        }
+    }
+    let mut out = vec![];
+    let mut named: Vec<String> = vec![];
+    for (what, p) in missing {
+        if covered.iter().any(|c| under(p, c)) {
+            continue;
+        }
+        let parent = |p: &Path| p.parent().unwrap_or(Path::new("/")).display().to_string();
+        if p != "/tmp" && !SANDBOX_ROOTS.iter().any(|r| under(p, r)) {
+            let host = Path::new(p);
+            if host.exists() {
+                let mount = if host.is_dir() {
+                    p.clone()
+                } else {
+                    parent(host)
+                };
+                out.push(serde_json::json!({"path": p, "mount": mount}));
+            }
+            continue;
+        }
+        // A program run by name: the guest's PATH lookup tried it in each PATH directory.
+        let dir = parent(Path::new(p));
+        if *what != proto::vfs::MISSING_EXEC || !crate::config::GUEST_PATH.contains(&dir.as_str()) {
+            continue;
+        }
+        let Some(name) = Path::new(p).file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if named.iter().any(|n| n == name) {
+            continue;
+        }
+        let found = std::env::var_os("PATH").and_then(|v| {
+            std::env::split_paths(&v).map(|d| d.join(name)).find(|f| {
+                f.is_file()
+                    && !SANDBOX_ROOTS
+                        .iter()
+                        .any(|r| under(&f.display().to_string(), r))
+            })
+        });
+        if let Some(h) = found {
+            named.push(name.to_string());
+            out.push(serde_json::json!({"name": name, "path": p, "host": h, "mount": parent(&h)}));
+        }
+    }
+    out
 }
 
 /// Can a run start here? Checked by every command before its first sandbox: the launcher
@@ -464,13 +535,19 @@ pub fn run_incarnation(
         "--tmpfs".into(),
         "/guest".into(),
     ]);
+    // The program's directory, read-only where its path as given leads (no mount covers it),
+    // then the mounts, each where its path leads through the mounts before it.
+    if let (Some(d), Some(g)) = (&o.program.dir, Path::new(&o.program.guest).parent()) {
+        args.extend([
+            "--ro-bind".into(),
+            d.display().to_string(),
+            crate::config::guest_resolve(&g.display().to_string(), &c.mounts),
+        ]);
+    }
     for (i, m) in c.mounts.iter().enumerate() {
+        let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
         if !m.copy {
-            args.extend([
-                "--ro-bind".into(),
-                m.src.display().to_string(),
-                m.dst.clone(),
-            ]);
+            args.extend(["--ro-bind".into(), m.src.display().to_string(), dst]);
             continue;
         }
         let hidden = format!("/.patina/copy/{i}");
@@ -479,15 +556,15 @@ pub fn run_incarnation(
             m.src.display().to_string(),
             hidden.clone(),
         ]);
-        if m.dst != "/guest" {
+        if dst != "/guest" {
             args.extend([
                 "--size".into(),
                 c.tmpfs_bytes.to_string(),
                 "--tmpfs".into(),
-                m.dst.clone(),
+                dst.clone(),
             ]);
         }
-        copies.push(format!("{hidden}:{}", m.dst));
+        copies.push(format!("{hidden}:{dst}"));
     }
     if o.program.copied {
         let name = o.program.guest.trim_start_matches("/guest/");
@@ -734,12 +811,17 @@ pub fn run_incarnation(
         vfs.refused()
             .map(|p| String::from_utf8_lossy(p).into_owned()),
     );
+    let missing = vfs
+        .missing()
+        .map(|(w, p)| (w, String::from_utf8_lossy(p).into_owned()))
+        .collect();
     let end = IncEnd {
         verdict,
         digest: ctl.log_hash.load(Relaxed),
         traps: ctl.stats.traps.load(Relaxed),
         switches: ctl.stats.switches.load(Relaxed),
         refused,
+        missing,
         seq: ctl.seq.load(Relaxed),
         vclock_ns: ctl.vclock_ns.load(Relaxed),
         io: [

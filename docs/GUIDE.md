@@ -10,10 +10,11 @@ programs in [examples/](../examples/README.md), run from the repository root.
 patina run --seed 7 -- ./myprog --port 8080
 ```
 
-Everything after `--` is the program and its arguments. A program given by a path is copied
-into the run as `/guest/NAME`; a bare name (`python3`, `sh`) is looked up on the guest's
-`PATH` (`/guest:/usr/local/bin:/usr/bin:/bin`). The host's `/usr` is visible read-only, so
-system interpreters and shared libraries work.
+Everything after `--` is the program and its arguments. A program given by a path runs from
+that path, as given (a relative one made absolute, a symlinked directory kept by its name), and
+its directory is visible there read-only, so files beside it are found by its own path. A bare
+name (`python3`, `sh`) is looked up on the guest's `PATH` (`/guest:/usr/local/bin:/usr/bin:/bin`).
+The host's `/usr` is visible read-only, so system interpreters and shared libraries work.
 
 The program starts in `/work`, an empty writable directory that is also its `HOME`. Nothing
 else of the host is visible unless you give it:
@@ -26,6 +27,17 @@ else of the host is visible unless you give it:
 | `--stdin FILE` | standard input |
 | `--env K=V` | one environment variable (the rest is fixed: `PATH`, `HOME`, `LANG`, `TZ`, `PATINA=1`) |
 | `--cpus N` | the CPU count it sees (default 4, whatever the host has) |
+
+When the program runs, opens or looks for a host path the sandbox lacks, `patina run` names it
+once and the directory to mount, and a sweep's summary counts the runs that met it:
+
+```text
+not in the sandbox: /home/me/app/target/debug/app (the host has it): add --mount /home/me/app/target/debug:/home/me/app/target/debug
+not in the sandbox: node, run by name (the host's is /home/me/.local/bin/node, outside the guest's PATH): add --mount /home/me/.local/bin:/home/me/.local/bin and run /home/me/.local/bin/node
+```
+
+A mount's `DST` may pass through a symlink inside another mount (a project whose `target` links
+into a cache): it is placed where the guest reaches through that symlink.
 
 The guest sees no network beyond itself: a connection to another host fails with
 `Network is unreachable`, and DNS finds nothing. Servers and clients must run in the same
@@ -329,9 +341,9 @@ address randomization, background load) and checks the runs are identical:
 
 ```text
 $ patina verify --seed 3 --runs 3 --vary cpu,aslr,load --crash machine -- ./acklog
-run 0: cpu 8 aslr off load on env base violation 629a8e811d421b90 switches 0
-run 1: cpu 16 aslr on load on env base violation 629a8e811d421b90 switches 0
-run 2: cpu 0 aslr off load on env base violation 629a8e811d421b90 switches 0
+run 0: cpu 23 aslr off load on env base violation 340b31a5a3b13538 switches 0
+run 1: cpu 12 aslr on load on env base violation 340b31a5a3b13538 switches 0
+run 2: cpu 1 aslr off load on env base violation 340b31a5a3b13538 switches 0
 identical: 3 runs in /tmp/patina/patina-out/verify-3
 ```
 

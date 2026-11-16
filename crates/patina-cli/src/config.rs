@@ -135,10 +135,15 @@ impl Default for Config {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Program {
+    /// The file, symlinks resolved.
     pub host: PathBuf,
     pub guest: String,
     /// Copied to `/guest/<name>` at start.
     pub copied: bool,
+    /// The host directory (symlinks resolved) mounted read-only at the guest path's
+    /// directory: a program given by a host path runs from where it was given.
+    #[serde(default)]
+    pub dir: Option<PathBuf>,
     pub sha256: String,
 }
 
@@ -233,6 +238,7 @@ pub fn program(cmd0: &str, mounts: &[Mount]) -> Res<Program> {
             host,
             guest,
             copied,
+            dir: None,
             sha256,
         })
     };
@@ -261,14 +267,26 @@ pub fn program(cmd0: &str, mounts: &[Mount]) -> Res<Program> {
             GUEST_PATH.join(":")
         ));
     }
+    let under = |p: &str, d: &str| p == d || p.strip_prefix(d).is_some_and(|r| r.starts_with('/'));
+    let in_sandbox = |d: &str| d == "/" || crate::launch::SANDBOX_ROOTS.iter().any(|r| under(d, r));
     if cmd0.starts_with('/') {
         for m in mounts {
             if let Some(rest) = cmd0.strip_prefix(&format!("{}/", m.dst)) {
-                return file(m.src.join(rest), cmd0.to_string(), false);
+                let mut p = file(m.src.join(rest), cmd0.to_string(), false)?;
+                // A path through a symlink in the mount (a build directory linked elsewhere)
+                // reaches a place no mount covers: the program's directory goes there.
+                let dir = Path::new(cmd0).parent().unwrap_or(Path::new("/"));
+                let at = guest_resolve(&dir.display().to_string(), mounts);
+                if !mounts.iter().any(|m| under(&at, &m.dst)) && !in_sandbox(&at) {
+                    p.dir = std::fs::canonicalize(m.src.join(rest))
+                        .ok()
+                        .and_then(|f| f.parent().map(Path::to_path_buf));
+                }
+                return Ok(p);
             }
         }
     }
-    let host = std::path::absolute(cmd0).map_err(|e| format!("program {cmd0}: {e}"))?;
+    let host = logical(cmd0);
     let canon = std::fs::canonicalize(&host).map_err(|e| format!("program {cmd0}: {e}"))?;
     if canon.starts_with("/usr/") {
         let guest = if cmd0.starts_with('/') {
@@ -278,12 +296,95 @@ pub fn program(cmd0: &str, mounts: &[Mount]) -> Res<Program> {
         };
         return file(canon, guest, false);
     }
+    // Run from where it was given (programs find their siblings by their own path): its
+    // directory, read-only at that path. Where that path is the sandbox's own, or holds a
+    // mount, or the file is a symlink out of its directory, the one file is copied to /guest.
+    let dir = host.parent().unwrap_or(Path::new("/"));
+    let gdir = dir.display().to_string();
+    let placed = !in_sandbox(&gdir) && !mounts.iter().any(|m| under(&m.dst, &gdir));
+    let cdir = std::fs::canonicalize(dir).ok();
+    if let Some(cdir) = cdir.filter(|c| placed && canon.parent() == Some(c.as_path())) {
+        let mut p = file(canon, host.display().to_string(), false)?;
+        p.dir = Some(cdir);
+        return Ok(p);
+    }
     let name = host
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| format!("program {cmd0}: no file name"))?
         .to_string();
     file(canon, format!("/guest/{name}"), true)
+}
+
+/// Where the guest's kernel reaches when it walks `p`: a symlink inside a mount (the mount's
+/// host directory holds it) is followed, as the guest would follow it, to a path that may be
+/// outside every mount (`target -> /cache/build`). A mount there is placed at that path,
+/// so that the path as given works in the guest.
+pub fn guest_resolve(p: &str, mounts: &[Mount]) -> String {
+    let under = |p: &str, d: &str| p == d || p.strip_prefix(d).is_some_and(|r| r.starts_with('/'));
+    let mut path = p.to_string();
+    for _ in 0..40 {
+        let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+        let mut cur = String::new();
+        let mut next = None;
+        for (i, c) in comps.iter().enumerate() {
+            cur = format!("{cur}/{c}");
+            let Some(m) = mounts.iter().rev().find(|m| under(&cur, &m.dst)) else {
+                continue;
+            };
+            let host = m.src.join(cur[m.dst.len()..].trim_start_matches('/'));
+            if let Ok(t) = std::fs::read_link(&host) {
+                let base = Path::new(&cur).parent().unwrap_or(Path::new("/"));
+                let mut t = if t.is_absolute() { t } else { base.join(t) };
+                for r in &comps[i + 1..] {
+                    t.push(r);
+                }
+                next = Some(logical(&t.display().to_string()).display().to_string());
+                break;
+            }
+        }
+        match next {
+            Some(n) => path = n,
+            None => return path,
+        }
+    }
+    path
+}
+
+/// `p` absolute as the user means it: relative to the shell's working directory (`$PWD` when
+/// it names the current directory, so a path through a symlinked directory keeps that
+/// directory's name), with `.` and `..` removed by name. Symlinks are not resolved.
+pub fn logical(p: &str) -> PathBuf {
+    let path = Path::new(p);
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let pwd = std::env::var_os("PWD")
+            .map(PathBuf::from)
+            .filter(|d| d.is_absolute() && same_file(d, &cwd))
+            .unwrap_or(cwd);
+        pwd.join(path)
+    };
+    let mut out = PathBuf::from("/");
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::Normal(n) => out.push(n),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => (x.dev(), x.ino()) == (y.dev(), y.ino()),
+        _ => false,
+    }
 }
 
 fn table<'a>(v: &'a toml::Value, at: &str) -> Res<&'a toml::Table> {
@@ -503,6 +604,15 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     }
     if let Some(cmd) = a.cmd.as_ref().filter(|v| !v.is_empty()) {
         c.cmd = cmd.clone();
+    }
+    // A program given by a relative path: absolute, by name, so that the run's record (and
+    // the command that reruns it) names the program as it was given, from anywhere.
+    if let Some(c0) = c
+        .cmd
+        .first_mut()
+        .filter(|x| x.contains('/') && !x.starts_with('/'))
+    {
+        *c0 = logical(c0).display().to_string();
     }
     if let Some(w) = &c.work {
         if !w.is_dir() {

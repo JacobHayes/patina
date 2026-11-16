@@ -114,8 +114,9 @@ fn main() -> ExitCode {
     })
 }
 
+/// `p` absolute, by name (`config::logical`).
 fn absolute(p: PathBuf) -> PathBuf {
-    std::path::absolute(&p).unwrap_or(p)
+    config::logical(&p.to_string_lossy())
 }
 
 fn out_dir(a: &Args, default: String) -> Result<PathBuf, Fail> {

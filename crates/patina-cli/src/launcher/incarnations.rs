@@ -107,6 +107,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut sdk = crate::result::SdkReport::default();
     let mut sched = [0u64; proto::ctl::SCHED_FIELDS];
     let mut refused: Vec<String> = vec![];
+    let mut missing: Vec<(u8, String)> = vec![];
     let mut root = o.cfg.work.clone();
     let mut k = 0;
     loop {
@@ -150,6 +151,11 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 refused.push(r);
             }
         }
+        for m in end.missing {
+            if !missing.contains(&m) {
+                missing.push(m);
+            }
+        }
         if end.verdict.class != "crash" {
             // With crashes on, the operation log checks itself: replaying it must give the
             // live tree of every incarnation. A difference is a tracker bug.
@@ -173,6 +179,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 traps,
                 switches,
                 refused,
+                missing: crate::launch::not_in_sandbox(o, &missing),
                 wall_ms: t0.elapsed().as_millis() as u64,
                 crashes,
                 faults: faults.json(&o.plan, &net),

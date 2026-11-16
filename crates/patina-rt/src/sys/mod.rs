@@ -48,6 +48,9 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
             // Path arguments resolved first: handlers see the path the kernel walks.
             let mut bufs = [crate::path::PathBuf::new(), crate::path::PathBuf::new()];
             if let Err(r) = crate::resolve::prepare(call, &mut bufs) {
+                if r == -e::ENOENT {
+                    crate::resolve::note_missing(call);
+                }
                 return Action::Return(r);
             }
             // Faults are decided before the call.
@@ -62,6 +65,9 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
                 }
             }
             let act = handle_group(call, row);
+            if matches!(act, Action::Return(r) if r == -e::ENOENT) {
+                crate::resolve::note_missing(call);
+            }
             if matches!(act, Action::Return(r) if r == -e::EFBIG) && host_fsize_limited() {
                 // The launcher's RLIMIT_FSIZE is inherited and enforced by the kernel; the
                 // guest's own limit is virtual. Reaching the host's is not a sandbox answer.

@@ -1,15 +1,16 @@
-# 5. A run from ./patina.toml with no flags equals the same run given only flags: run.json is
-#    equal apart from the directory each was made in, and so are the digests. An unknown key
-#    is refused, naming it.
+# 5. A run from ./patina.toml with no flags equals the same run given only flags (from the same
+#    directory: a program runs from where it is): run.json is equal, and so are the digests.
+#    An unknown key is refused, naming it.
 #@ tier=quick budget=5
 . "$(dirname "$0")/lib.inc"
-# Each run in its own directory: the program and a mounted data directory next to it.
-for k in file flags; do
-    mkdir -p "$RUNS/$k/data"
-    cp "$PATINA_GUESTS/hello-static" "$RUNS/$k/prog"
-    echo hello >"$RUNS/$k/data/x"
-done
-cat >"$RUNS/file/patina.toml" <<'EOF'
+# The program, a mounted data directory, the configuration file, and an empty one that the
+# flags run names instead.
+d=$RUNS/same
+mkdir -p "$d/data"
+cp "$PATINA_GUESTS/hello-static" "$d/prog"
+echo hello >"$d/data/x"
+: >"$d/empty.toml"
+cat >"$d/patina.toml" <<'EOF'
 [run]
 cmd = ["./prog", "a"]
 cpus = 3
@@ -22,26 +23,20 @@ timeout = 50
 fs-error-permille = 5
 EOF
 st=0
-(cd "$RUNS/file" && PATINA_SEED=3 timeout 60 "$PATINA" run) >"$RUNS/file.txt" 2>&1 || st=$?
-[ -f "$RUNS/file/patina-out/run-3/result.json" ] || die "file: no result.json ($(tail -2 "$RUNS/file.txt"))"
-(cd "$RUNS/flags" && timeout 60 "$PATINA" run --seed 3 --cpus 3 --env CLI_TEST=1 --mount data:/data \
-    --time-limit 500 --timeout 50 --fault fs-error-permille=5 -- ./prog a) >"$RUNS/flags.txt" 2>&1 || true
-[ -f "$RUNS/flags/patina-out/run-3/result.json" ] || die "flags: no result.json ($(tail -2 "$RUNS/flags.txt"))"
-python3 -I - "$RUNS" <<'PY' || die "run.json differs"
-import json, os, sys
-runs = sys.argv[1]
-def load(k):
-    t = open(f"{runs}/{k}/patina-out/run-3/run.json").read()
-    for r in (os.path.realpath(runs), runs):
-        t = t.replace(f"{r}/{k}/", "DIR/")
-    return json.loads(t)
-a, b = load("file"), load("flags")
+(cd "$d" && PATINA_SEED=3 timeout 60 "$PATINA" run --out file) >"$RUNS/file.txt" 2>&1 || st=$?
+[ -f "$d/file/result.json" ] || die "file: no result.json ($(tail -2 "$RUNS/file.txt"))"
+(cd "$d" && timeout 60 "$PATINA" run --config empty.toml --out flags --seed 3 --cpus 3 --env CLI_TEST=1 \
+    --mount data:/data --time-limit 500 --timeout 50 --fault fs-error-permille=5 -- ./prog a) >"$RUNS/flags.txt" 2>&1 || true
+[ -f "$d/flags/result.json" ] || die "flags: no result.json ($(tail -2 "$RUNS/flags.txt"))"
+python3 -I - "$d" <<'PY' || die "run.json differs"
+import json, sys
+a, b = (json.load(open(f"{sys.argv[1]}/{k}/run.json")) for k in ("file", "flags"))
 if a != b:
     print(json.dumps(a, indent=1, sort_keys=True))
     print(json.dumps(b, indent=1, sort_keys=True))
     sys.exit(1)
 PY
-a=$(field "$RUNS/file/patina-out/run-3/result.json" digest) b=$(field "$RUNS/flags/patina-out/run-3/result.json" digest)
+a=$(field "$d/file/result.json" digest) b=$(field "$d/flags/result.json" digest)
 [ "$a" = "$b" ] || die "digests differ: $a $b"
 echo "patina.toml and flags: equal run.json, digest $a"
 # An unknown key.

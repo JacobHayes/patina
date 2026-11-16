@@ -149,6 +149,34 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
     Ok(())
 }
 
+/// A call that answered `ENOENT` for a file the guest looked for (to run it, open it, stat it
+/// or test it): its absolute path is kept for the launcher's hint about paths the sandbox
+/// lacks (`proto::vfs::Vfs::missing`).
+pub fn note_missing(call: &dyn Call) {
+    let nr = call.nr();
+    let what = match nr {
+        59 | 322 => proto::vfs::MISSING_EXEC,
+        2 | 257 | 437 | 4 | 6 | 262 | 332 | 21 | 269 | 439 => proto::vfs::MISSING_OPEN,
+        _ => return,
+    };
+    let mut a = [0u64; 6];
+    for (i, v) in a.iter_mut().enumerate() {
+        *v = call.arg(i);
+    }
+    let (args, n) = path_args(nr, &a);
+    if n == 0 || a[args[0].pi] == 0 {
+        return;
+    }
+    let Ok(s) = crate::guest::cstr(a[args[0].pi], PATH_MAX) else {
+        return;
+    };
+    let dirfd = args[0].di.map_or(AT_FDCWD, |i| a[i] as i32 as i64);
+    let mut norm = PathBuf::new();
+    if crate::path::absolute(dirfd, s, &mut norm) {
+        crate::path::missing(what, &norm);
+    }
+}
+
 enum Resolved {
     /// The guest's arguments name what the kernel will walk, lexically.
     Same,
