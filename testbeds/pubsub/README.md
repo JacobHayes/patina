@@ -1,3 +1,5 @@
+> Not built on this branch yet: parked until it is rebuilt on the new engine.
+
 # pubsub — a minimal tokio pub-sub broker under Patina
 
 A single process runs a **broker** and its **subscriber**/**publisher** clients

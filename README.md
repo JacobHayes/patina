@@ -1,3 +1,7 @@
+> **This branch replaces Patina's engine.** It runs unmodified Linux x86_64 executables by
+> trapping their system calls; see [ENGINE.md](crates/patina-cli/ENGINE.md). The text below
+> still describes the old engine, and the documents it links to are gone from this branch.
+
 # Patina
 
 **Weather your code into a fine protective patina — before production does.**

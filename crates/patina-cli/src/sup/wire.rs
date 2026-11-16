@@ -283,8 +283,8 @@ impl Wire {
         for _ in 0..span {
             let p = self.next_port;
             self.next_port = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
-            if !self.ports.contains_key(&p) {
-                self.ports.insert(p, u);
+            if let std::collections::btree_map::Entry::Vacant(e) = self.ports.entry(p) {
+                e.insert(u);
                 return Some(p);
             }
         }
@@ -1186,13 +1186,11 @@ impl Sup {
         e.eof = true;
         e.gone = true;
         let accepted = idx.is_some();
-        if !server || accepted || why != RST_LISTENER_GONE {
-            if !after_fin {
-                match idx {
-                    Some(i) => tab(self.ctl).socks[i].flags |= WF_RESET,
-                    None if server => c.server_reset = true,
-                    None => {}
-                }
+        if (!server || accepted || why != RST_LISTENER_GONE) && !after_fin {
+            match idx {
+                Some(i) => tab(self.ctl).socks[i].flags |= WF_RESET,
+                None if server => c.server_reset = true,
+                None => {}
             }
         }
         // Its own queued sends die with it.

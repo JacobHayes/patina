@@ -7,7 +7,7 @@ python3 -I - <<'PY'
 import os, random, subprocess, sys, threading, time
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from counters import *
-P = ppatina()
+P = ppatina(required=False)
 cpus = sorted(os.sched_getaffinity(0))
 def tasks(root):
     kids = {}

@@ -642,7 +642,7 @@ pub fn open(k: Synth, cloexec: bool) -> i64 {
             sc4(
                 nr::OPENAT,
                 (-100i64) as u64,
-                b"/proc/self/task\0".as_ptr() as u64,
+                c"/proc/self/task".as_ptr() as u64,
                 O_DIRECTORY | if cloexec { O_CLOEXEC_ } else { 0 },
                 0,
             )

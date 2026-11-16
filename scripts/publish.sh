@@ -4,7 +4,7 @@
 # A release is the `patina` binary on GitHub (.github/workflows/release.yml)
 # and the SDK at the release's git tag; neither needs this script. Run it for
 # the same tag to put the workspace on crates.io as well, so the SDK can be a
-# versioned dependency and `cargo install cargo-patina` installs the tool.
+# versioned dependency.
 #
 # The default mode is a DRY RUN and uploads nothing: it prints the packaged file
 # list of every publishable member (so a missing license, readme, C source, or

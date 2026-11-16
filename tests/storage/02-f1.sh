@@ -1,7 +1,9 @@
 # 2. F1 (partial create not recoverable). Known seeds from the 300-seed sweeps: 5 under
 # --crash machine:3, 3 under --crash process:3. The kept post-crash tree, copied out, makes
 # the native harness fail the same way; with FJ_WIPE_PARTIAL=1 the same seeds proceed.
-#@ tier=quick budget=15
+# The seeds depend on the host's libc and CPU (they were found on the development host), so
+# this is an area check, not a quick one.
+#@ tier=area budget=15
 . "$(dirname "$0")/lib/common.inc"
 for c in "machine:3 5" "process:3 3"; do
     set -- $c

@@ -361,7 +361,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
     // The new argument vector: [rt, image, (#! prefix, innermost interpreter first), argv[1..]].
     let mut v = [0u64; MAX_ARGS + 4 + 3 * MAX_DEPTH];
     let mut n = 0;
-    v[n] = b"rt\0".as_ptr() as u64;
+    v[n] = c"rt".as_ptr() as u64;
     n += 1;
     v[n] = t.elf.b.as_ptr() as u64;
     n += 1;
@@ -385,7 +385,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
     } else {
         if nargs == 0 {
             // The kernel passes an empty argv; the loader needs argv0: an empty string.
-            v[n] = b"\0".as_ptr() as u64;
+            v[n] = c"".as_ptr() as u64;
             n += 1;
         }
         for i in 0..nargs {
@@ -418,7 +418,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
         sc6(
             322,
             FD_RT as u64,
-            b"\0".as_ptr() as u64,
+            c"".as_ptr() as u64,
             v.as_ptr() as u64,
             envp,
             AT_EMPTY_PATH,
@@ -435,7 +435,7 @@ pub fn rescan_marks() {
         sc4(
             nr::OPENAT,
             AT_FDCWD as u64,
-            b"/proc/self/fd\0".as_ptr() as u64,
+            c"/proc/self/fd".as_ptr() as u64,
             0o2200000,
             0,
         )

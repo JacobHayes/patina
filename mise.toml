@@ -6,43 +6,21 @@ lockfile = true
 
 [env]
 # rust-toolchain.toml is the Rust pin. Export its channel so a global mise Rust
-# cannot override it, and so a cargo started without rustup's proxy (nextest
-# runs one) still compiles dependencies, whose directories hold no toolchain
-# file, with the pin rather than rustup's default.
+# cannot override it, and so the guests' own cargo builds (tests/guests) use the pin.
 RUSTUP_TOOLCHAIN = '''{{ exec(command=`awk -F'"' '/^channel/ {print $2}' rust-toolchain.toml`) }}'''
 
 [tools]
-ast-grep = "0.45.3"
-# The workspace test runner, locally and in CI.
-"github:nextest-rs/nextest" = { version = "0.9.148", version_prefix = "cargo-nextest-" }
+# The Go guests under tests/guests are built with the stock toolchain; their go.mod files
+# name this version.
+go = "1.27.3"
 
-# The inner loop. Arguments go to nextest: `mise run check -p patina-dst-runtime`,
-# `mise run check -p cargo-patina --test native_abi`, `mise run check -E 'test(/replay/)'`.
+# The landing gate, locally and in CI.
 [tasks.check]
-description = "Format, host clippy, then the tests you name (nextest arguments); with none, the workspace suite"
+description = "The landing gate: format, clippy, then ./check quick"
 run = [
   "cargo fmt --all -- --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
-  "cargo nextest run --profile local --locked",
+  # The runtime is its own workspace, built for its own target (its .cargo/config.toml).
+  "cd crates/patina-rt && cargo fmt -- --check && cargo clippy --release --locked -- -D warnings",
+  "./check quick",
 ]
-
-[tasks."check:full"]
-description = "Everything this host can check: cross-target clippy, the suite, doctests and the testbeds (CI is the landing gate)"
-run = "scripts/check.sh"
-
-[tasks.bench]
-description = "Native-versus-Patina overhead benchmark over halting workloads (measurement, not a gate)"
-run = "python3 -B scripts/bench.py"
-
-[tasks."bench:guided"]
-description = "Paired guided-versus-uniform campaign benchmark: generations to a planted bug over many seed bases (measurement, not a gate)"
-run = "python3 -B scripts/guided-bench.py"
-
-[tasks."audit-corpus"]
-description = "Ecosystem symbol-audit corpus: build and audit 20 MREs, each of which must audit clean"
-run = "testbeds/audit-corpus/run.sh"
-
-[tasks.conformance]
-description = "Syscall conformance: every scenario natively (the live host oracle) and under patina through the libc and syscall doors (raw only where the trap is the subject), record/replay on one leg per scenario, strace leak run on every leg"
-run = "cargo test -p cargo-patina --test native_conformance --locked"
-

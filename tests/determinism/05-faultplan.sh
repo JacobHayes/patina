@@ -11,19 +11,23 @@ mkdir -p "$out"
 first_fault() { # 0-based index of the first inject or crash-point record of a dump
     awk '/ inject |CrashPoint/ { print NR - 1; exit }' "$1"
 }
-check() {
+check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at which a fault fires
     w=$1; seed=$2; shift 2
     wl "$w"
     fopts="$*"
-    for f in off on; do
-        rm -rf "$out/$w-$f"
-        o=""; [ $f = on ] && o=$fopts
+    first=$seed last=$((seed + 7))
+    while :; do
+        rm -rf "$out/$w-on"
         # shellcheck disable=SC2086
-        timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-$f" --guest "$GDIR" $o -- $CMD >"$out/$w-$f.txt" 2>&1 || true
+        timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-on" --guest "$GDIR" $fopts -- $CMD >"$out/$w-on.txt" 2>&1 || true
+        "$PATINA" log dump "$out/$w-on/inc-0/boundary.log" >"$out/$w-on.dump"
+        ff=$(first_fault "$out/$w-on.dump")
+        [ -z "$ff" ] || break
+        [ "$seed" -lt "$last" ] || die "$w: no fault fired at seeds $first..$last"
+        seed=$((seed + 1))
     done
-    "$PATINA" log dump "$out/$w-on/inc-0/boundary.log" >"$out/$w-on.dump"
-    ff=$(first_fault "$out/$w-on.dump")
-    [ -n "$ff" ] || die "$w seed $seed: no fault fired (choose another seed)"
+    rm -rf "$out/$w-off"
+    timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-off" --guest "$GDIR" -- $CMD >"$out/$w-off.txt" 2>&1 || true
     d=$("$PATINA" log diff "$out/$w-off/inc-0/boundary.log" "$out/$w-on/inc-0/boundary.log" | sed -n 's/^first difference at record \([0-9]*\).*/\1/p')
     [ -n "$d" ] || die "$w: logs identical although a fault fired"
     [ "$d" -ge "$ff" ] || die "$w seed $seed: logs differ at record $d, before the first fault at $ff"

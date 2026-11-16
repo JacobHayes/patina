@@ -6,12 +6,15 @@ name: Release
 # installs the latest published release with the documented one-liner, so a
 # release that stops installing or working on a fresh machine does not go
 # unnoticed; a manual run ends with that check too.
+#
+# NOT YET UPDATED FOR THE SYSCALL-TRAP ENGINE, so the weekly schedule is off. Still to change
+# before a release: build `-p patina-cli` (the `cargo-patina` package is gone) as one static
+# x86_64 musl binary; drop the arm64 and macOS rows and runners; the Go version comes from
+# mise.toml (testbeds/go-sdk is gone); scripts/install-smoke.sh still drives the old CLI.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
-  schedule:
-    - cron: "41 6 * * 1"
 
 permissions:
   contents: read

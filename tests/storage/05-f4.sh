@@ -2,7 +2,9 @@
 # keyspace only). From the 100 x 10 sweep: fsync-error-at=61 seed 6 and fsync-error-at=37
 # seed 9 with --crash machine:3. Control: the same seeds without the fault pass. The kept
 # tree of the incarnation before the failing one makes the native harness fail the same way.
-#@ tier=quick budget=15
+# The seeds depend on the host's libc and CPU (they were found on the development host), so
+# this is an area check, not a quick one.
+#@ tier=area budget=15
 . "$(dirname "$0")/lib/common.inc"
 for c in "61 6" "37 9"; do
     set -- $c

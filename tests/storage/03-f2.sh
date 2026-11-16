@@ -1,7 +1,9 @@
 # 3. F2 (journal-entry assertion in recovery, debug only) and the new atomicity finding F6,
 # both from the 1000-seed debug sweep with FJ_N=2000 FJ_BUGGIFY=1 --crash machine:1
 # (F2: seed 634, F6: seed 946; F2 was not found within 300 seeds, see docs/EVIDENCE.md).
-#@ tier=quick budget=15
+# The seeds depend on the host's libc and CPU (they were found on the development host), so
+# this is an area check, not a quick one.
+#@ tier=area budget=15
 . "$(dirname "$0")/lib/common.inc"
 opts="--env FJ_N=2000 --env FJ_BUGGIFY=1 --crash machine:1"
 o=$RUNS/f2-debug-634

@@ -1,3 +1,5 @@
+> Not built on this branch yet: parked until it is rebuilt on the new engine.
+
 # workq — a durable work queue you can break on purpose
 
 `workq` is a small, self-contained work queue. Programs (**producers**) hand it

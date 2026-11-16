@@ -174,8 +174,8 @@ pub fn select(call: &mut dyn Call) -> i64 {
     let mut saved = [[0u64; SET_WORDS]; 3];
     for (k, &s) in sets.iter().enumerate() {
         if s != 0 {
-            for i in 0..words {
-                saved[k][i] = unsafe { *((s + i as u64 * 8) as *const u64) };
+            for (i, w) in saved[k][..words].iter_mut().enumerate() {
+                *w = unsafe { *((s + i as u64 * 8) as *const u64) };
             }
         }
     }
@@ -198,8 +198,8 @@ pub fn select(call: &mut dyn Call) -> i64 {
     let r = wait_ready(&mut w, timeout, || {
         for (k, &s) in sets.iter().enumerate() {
             if s != 0 {
-                for i in 0..words {
-                    unsafe { *((s + i as u64 * 8) as *mut u64) = saved[k][i] };
+                for (i, &w) in saved[k][..words].iter().enumerate() {
+                    unsafe { *((s + i as u64 * 8) as *mut u64) = w };
                 }
             }
         }

@@ -12,7 +12,7 @@ import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from counters import *
 from concurrent.futures import ThreadPoolExecutor
-P = ppatina()
+P = ppatina(required=False)
 cases = [(3000, 2048, 512, p) for p in [["loops", "1", "1000"], ["recur", "1", "150"], ["indirect", "1", "100"],
                                        ["strings", "1", "1500"], ["fp", "1", "60"], ["signals", "1", "3000"], ["threads", "1", "1000"]]]
 cases += [(1100000, 1100000, 1024, p) for p in [["loops", "1", "40"], ["recur", "1", "30"]]]

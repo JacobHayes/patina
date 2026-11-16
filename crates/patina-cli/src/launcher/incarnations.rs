@@ -51,7 +51,7 @@ fn inj_name(k: u64) -> &'static str {
 pub fn injected(inc: &Path, k: u64) -> Vec<String> {
     let b = fs::read(inc.join("boundary.log")).unwrap_or_default();
     let mut out = vec![];
-    for c in b.chunks_exact(REC_SIZE) {
+    for c in b.as_chunks::<REC_SIZE>().0 {
         let r = Rec::from_bytes(c);
         if r.kind != RecKind::Injected as u8 {
             continue;

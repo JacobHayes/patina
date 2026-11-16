@@ -304,9 +304,8 @@ pub fn handle(call: &mut dyn Call) -> Action {
         }
         // mlock family: memory is never paged out from the guest's point of view.
         149 | 150 | 325 => {
-            if hits_runtime(call.arg(0), call.arg(1)) {
-                -e::EINVAL
-            } else if call.nr() == 325 && call.arg(2) & !1 != 0 {
+            if hits_runtime(call.arg(0), call.arg(1)) || (call.nr() == 325 && call.arg(2) & !1 != 0)
+            {
                 -e::EINVAL
             } else {
                 set_class(call, Class::Virt);

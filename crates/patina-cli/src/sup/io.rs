@@ -257,11 +257,7 @@ impl Io {
             let Some(next) = t.next else { continue };
             t.event = None;
             let late = now.saturating_sub(next);
-            let count = if t.interval > 0 {
-                1 + late / t.interval
-            } else {
-                1
-            };
+            let count = late.checked_div(t.interval).map_or(1, |n| n + 1);
             let v = count.to_ne_bytes();
             unsafe { libc::write(t.fd, v.as_ptr() as *const _, 8) };
             if t.interval > 0 {

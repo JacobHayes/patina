@@ -15,7 +15,11 @@ fn load(path: &str) -> Res<Vec<Rec>> {
             b.len()
         ));
     }
-    Ok(b.chunks_exact(REC_SIZE).map(Rec::from_bytes).collect())
+    Ok(b.as_chunks::<REC_SIZE>()
+        .0
+        .iter()
+        .map(|c| Rec::from_bytes(c))
+        .collect())
 }
 
 pub fn describe(r: &Rec) -> String {

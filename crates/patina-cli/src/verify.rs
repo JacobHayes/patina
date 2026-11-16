@@ -148,7 +148,7 @@ fn env_perturb() -> EnvState {
         for (r, v) in &rl {
             let mut n = *v;
             if *r == libc::RLIMIT_NOFILE as i32 {
-                n.rlim_max = n.rlim_max.min(8192).max(4096);
+                n.rlim_max = n.rlim_max.clamp(4096, 8192);
             } else if *r == libc::RLIMIT_STACK as i32 {
                 n.rlim_cur = (n.rlim_cur / 2).max(1 << 20).min(n.rlim_max);
             } else {

@@ -1,7 +1,9 @@
 # 4. F3 (flush worker dies on EIO, writers sleep forever). --vtime-limit-s 400: the
 # outcome is liveness, the parked thread is in a sleep whose deadline is within 100 ms of
 # the limit (the write-stall loop's 100 ms sleep), in bounded wall time. Seed 40 of 600.
-#@ tier=quick budget=15
+# The seeds depend on the host's libc and CPU (they were found on the development host), so
+# this is an area check, not a quick one.
+#@ tier=area budget=15
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f3-40
 run fjall-harness "$o" 40 --env FJ_N=1000 --env FJ_BUGGIFY=1 --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 \

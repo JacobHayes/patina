@@ -1,258 +1,106 @@
 name: CI
 
-# Every push and pull request runs the same jobs: this is the landing gate.
-# The schedule runs only `nightly`: the long campaigns and the advisory audit.
+# Every push and pull request runs the landing gate: `mise run check` (format, clippy, then
+# `./check quick`) on one GitHub runner. `counters` is informational: it runs the counter
+# preemption checks where the runner exposes a PMU and skips them where it does not.
 on:
   pull_request:
   push:
-  schedule:
-    - cron: "17 7 * * *"
 
-# Per event as well as per ref, so the scheduled run and a push never cancel
-# each other. A newer push cancels a branch or PR run, never a main run.
-# GitHub scopes a cache to the ref that saved it and main's reach every branch,
-# so only main's runs save caches.
+# A newer push cancels a branch or PR run, never a main run.
 concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# Read-only.
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: never
+  # The runner has four cores.
+  CHECK_SLOTS: "4"
+
 jobs:
-  # Each row (the pinned toolchain on both Linux
-  # architectures) is split into parallel jobs so wall time is the longest
-  # slice, not the sum: `tests` runs the complete workspace suite in four
-  # nextest partitions, and `gates` runs every other check of the row.
-  tests:
-    if: github.event_name != 'schedule'
-    name: Rust / ${{ matrix.runner }} / tests ${{ matrix.shard }}/4
-    strategy:
-      fail-fast: false
-      matrix:
-        # x86_64 and aarch64 Linux surface different platform gaps (libgcc
-        # split-stack wrap symbols exist only on x86; the dev VM is aarch64).
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
-        shard: [1, 2, 3, 4]
-    runs-on: ${{ matrix.runner }}
+  check:
+    # Pinned: the sandbox setup below is for 24.04 (no AppArmor profile for bwrap, bwrap not
+    # installed). ubuntu-22.04's bwrap and kernel are too old.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - name: Host setup for the sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap libsqlite3-dev libssl-dev
+          uname -r; bwrap --version; grep -m1 'model name' /proc/cpuinfo; nproc
       - uses: ./.github/actions/setup-toolchain
-      # The key covers the root manifest's [profile] tables (the whole root
-      # Cargo.toml), which change what every crate compiles to.
-      # The partitions build identical artifacts under one shared key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: tests-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: sudo apt-get update && sudo apt-get install -y strace && uname -r
-      # The complete workspace suite, split across the four partitions by test
-      # name (nextest runs every test binary; doctests run separately below).
-      # Rust executes it on each Linux platform, the syscall conformance
-      # scenarios (native_conformance) included; x86_64 also runs their raw
-      # vehicle under SUD. Nested
-      # Patina shim caches are compiler-identity keyed. Off the pinned kernel
-      # the conformance comparison only reports (to this step's job summary),
-      # and nextest hides a passing test's stderr, so the summary is repeated
-      # in the log.
-      - run: |
-          status=0
-          cargo nextest run --profile ci --workspace --locked --partition hash:${{ matrix.shard }}/4 || status=$?
-          if [ -s "$GITHUB_STEP_SUMMARY" ]; then cat "$GITHUB_STEP_SUMMARY"; fi
-          exit "$status"
-      - if: matrix.shard == 1
-        run: cargo test --workspace --doc --locked
-      - if: matrix.shard == 1
-        run: cargo test -p patina-dst --features macros --locked
+          shared-key: check-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
+          save-if: ${{ github.event_name == 'push' }}
+      # The guests are content-addressed by tests/guests.sh: a restored entry is used only when
+      # its sources and compilers match, so a stale cache costs a rebuild, never a wrong guest.
+      - id: guests
+        uses: actions/cache/restore@v6
+        with:
+          path: target/patina-check/guests
+          key: guests-${{ runner.os }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
+          restore-keys: guests-${{ runner.os }}-
+      - name: Build the guests
+        run: |
+          [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+          # The Rust guests build offline.
+          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
+          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
+          mise exec -- sh tests/guests.sh
+      - if: always() && steps.guests.outputs.cache-matched-key != steps.guests.outputs.cache-primary-key
+        uses: actions/cache/save@v6
+        with:
+          path: target/patina-check/guests
+          key: ${{ steps.guests.outputs.cache-primary-key }}
+      - run: mise run check
+      # A failing script keeps its run directory; passing ones are deleted.
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: check-runs
+          path: target/patina-check/runs
+          retention-days: 7
 
-  gates:
-    if: github.event_name != 'schedule'
-    name: Rust / ${{ matrix.runner }} / gates
-    strategy:
-      fail-fast: false
-      matrix:
-        runner: [ubuntu-latest, ubuntu-24.04-arm]
-    runs-on: ${{ matrix.runner }}
-    env:
-      # The testbed scripts each default to a private target dir; one after
-      # another here, they share one and build the release patina and
-      # native shim once.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+  counters:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
+      - name: Host setup for the sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bubblewrap libsqlite3-dev libssl-dev
+          grep -m1 'model name' /proc/cpuinfo
       - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: gates-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo fmt --all -- --check
-      - run: scripts/check-structure.sh
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: testbeds/fifo-ipc/run-patina.sh
-      - run: testbeds/python-guest/run-patina.sh
-      - run: testbeds/python-sdk/run-patina.sh
-      # The SUD-only testbeds, and Go (whose runtime issues raw syscalls): x86_64.
-      - if: matrix.runner == 'ubuntu-latest'
-        run: |
-          testbeds/rustix-default/run-patina.sh
-          testbeds/cap-std-dirfd/run-patina.sh
-          mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-guest/go.mod)" -- testbeds/go-guest/run-patina.sh
-          mise exec "go@$(sed -n 's/^toolchain go//p' testbeds/go-sdk/go.mod)" -- testbeds/go-sdk/run-patina.sh
-      # The process workloads' named refusals, behind the build-free selftest
-      # of the classifier that reads them.
-      - if: matrix.runner == 'ubuntu-latest'
-        run: |
-          testbeds/multiproc/run-patina.sh --selftest
-          testbeds/multiproc/run-patina.sh
-      - run: scripts/smoke-native.sh
-      # The flagship durable-work-queue testbed's full self-checking gate
-      # (determinism, record/replay, net/fs faults, crash-recovery, buggify
-      # sweep). Its dependency tree is tiny (patina-dst + sha2 only). The
-      # heavier randomized fault-combination sweep over this same testbed runs
-      # nightly (see the `nightly` job).
-      - run: testbeds/workq/run-patina.sh
-      # The async-native testbed's full self-checking gate (multi-seed
-      # determinism + cross-seed outcome invariance, record/strict-replay,
-      # fail-closed planted-bug legs).
-      - run: testbeds/pubsub/run-patina.sh
-      # `#[patina_dst::test]` as an adopter's own crate uses it, driving the
-      # release patina the testbeds above built.
-      - run: testbeds/patina-macro-adopter/run.sh
-        env:
-          PATINA_CLI: ${{ github.workspace }}/target/release/patina
-      # The README's first run and the tutorial, as the documents say them:
-      # their projects (examples/), outside the checkout, on this checkout's
-      # SDK and the release patina and shim the testbeds above built.
-      - name: The documented first run
-        run: |
-          export RUSTUP_TOOLCHAIN="$(awk -F'"' '/^channel/ {print $2}' rust-toolchain.toml)"
-          export PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_DIR" PATH="$CARGO_TARGET_DIR/release:$PATH"
-          scripts/install-smoke.sh "$PWD"
-      # The ecosystem symbol-audit corpus: 20 per-crate MREs built and audited,
-      # each of which must audit clean. Linux x86_64 runs it here; the macOS
-      # job below checks the macOS surface.
-      - if: matrix.runner == 'ubuntu-latest'
-        run: testbeds/audit-corpus/run.sh
-
-  # The pinned macOS gates. This repo is public and takes outside pull
-  # requests, so CI never runs on a self-hosted machine. They run per push
-  # only: a scheduled rerun of an unchanged main finds nothing new, and fails
-  # on the days GitHub has no macOS runner to give.
-  macos:
-    if: github.event_name != 'schedule'
-    name: macOS / ${{ matrix.part }}
-    strategy:
-      fail-fast: false
-      matrix:
-        # The suite and the testbeds share no build (test profile against
-        # release), so they run as two parallel jobs.
-        part: [suite, testbeds]
-    runs-on: macos-latest
-    env:
-      # The testbed scripts each default to a private target dir; one after
-      # another here, they share the workspace's and build the release
-      # patina once.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-    steps:
-      - uses: actions/checkout@v7
-      # Build against the newest released Xcode the image installs rather than
-      # its default selection, so an SDK change surfaces here before it reaches
-      # a developer's Mac.
-      - name: Select the newest released Xcode
-        run: |
-          xcode=$(printf '%s\n' /Applications/Xcode_*.app | grep -Eiv 'beta|release_candidate' | sort -V | tail -n 1)
-          test -d "$xcode"
-          sudo xcode-select --switch "$xcode"
-          echo "$xcode: SDK $(xcrun --show-sdk-version)"
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
+          shared-key: check-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
+          save-if: false
+      - uses: actions/cache/restore@v6
         with:
-          key: ${{ matrix.part }}-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          workspaces: .
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          # The native shim's per-user build cache (macOS location).
-          cache-directories: |
-            ~/Library/Caches/patina
-      # The workspace suite under nextest, as on Linux (doctests separately).
-      # native_abi/native_containment/native_workloads include kqueue and
-      # Darwin locks/clocks. native_trace refuses a demanded ktrace guarantee;
-      # Linux's required strace detector runs in platform.
-      - if: matrix.part == 'suite'
-        run: cargo nextest run --profile ci --workspace --locked
-      - if: matrix.part == 'suite'
-        run: cargo test --workspace --doc --locked
-      - if: matrix.part == 'testbeds'
-        run: testbeds/fifo-ipc/run-patina.sh
-      - if: matrix.part == 'testbeds'
-        run: scripts/smoke-native.sh
-      - if: matrix.part == 'testbeds'
-        run: testbeds/workq/run-patina.sh
-      - if: matrix.part == 'testbeds'
-        run: testbeds/pubsub/run-patina.sh
-      - if: matrix.part == 'testbeds'
-        run: testbeds/patina-macro-adopter/run.sh
-        env:
-          PATINA_CLI: ${{ github.workspace }}/target/release/patina
-      - name: The documented first run
-        if: matrix.part == 'testbeds'
+          path: target/patina-check/guests
+          key: guests-${{ runner.os }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
+          restore-keys: guests-${{ runner.os }}-
+      - name: Fetch the Rust guests' dependencies (their builds are offline)
         run: |
-          export RUSTUP_TOOLCHAIN="$(awk -F'"' '/^channel/ {print $2}' rust-toolchain.toml)"
-          export PATINA_SHIM_TARGET_DIR="$CARGO_TARGET_DIR" PATH="$CARGO_TARGET_DIR/release:$PATH"
-          scripts/install-smoke.sh "$PWD"
-      - if: matrix.part == 'testbeds'
-        run: testbeds/audit-corpus/run.sh
-
-  # What a push should not wait for. The per-push jobs run a short workq
-  # campaign in its gate; nightly runs the full 200 generations of the workq
-  # and pubsub specs, on Linux, where they cover the same deterministic model
-  # as on macOS. The advisory audit is here because advisories arrive on their
-  # own schedule, whether or not anything was pushed.
-  nightly:
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
+          [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
+          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
+      # The scripts give a copy of patina CAP_PERFMON with `sudo setcap` and print SKIP when the
+      # runner exposes no PMU.
+      - run: mise exec -- ./check counters
+      - if: failure()
+        uses: actions/upload-artifact@v7
         with:
-          key: rust-${{ hashFiles('mise.lock', 'rust-toolchain.toml', 'Cargo.toml') }}
-          # The campaigns build patina and the guests under the root target dir.
-          workspaces: .
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-          # The native shim's per-user build cache.
-          cache-directories: |
-            ~/.cache/patina
-      # workq: drawn workload sizes, net/sleep/buggify/swarm faults, and a
-      # disk crash-restart checked against the acked-job ledger.
-      - env:
-          CARGO_TARGET_DIR: target/testbeds/campaigns
-        run: |
-          cargo build --release --quiet -p cargo-patina
-          "$CARGO_TARGET_DIR/release/patina" build testbeds/workq \
-            --output "$CARGO_TARGET_DIR/patina/workq" --release >/dev/null
-          "$CARGO_TARGET_DIR/release/patina" campaign \
-            "$CARGO_TARGET_DIR/patina/workq" --spec testbeds/workq/campaign.json \
-            --out-dir "$CARGO_TARGET_DIR/workq-campaign"
-      # pubsub's network faults. Runs even when workq found something.
-      - if: ${{ !cancelled() }}
-        env:
-          CARGO_TARGET_DIR: target/testbeds/campaigns
-        run: |
-          "$CARGO_TARGET_DIR/release/patina" build testbeds/pubsub \
-            --output "$CARGO_TARGET_DIR/patina/pubsub" --release >/dev/null
-          "$CARGO_TARGET_DIR/release/patina" campaign \
-            "$CARGO_TARGET_DIR/patina/pubsub" --spec testbeds/pubsub/campaign.json \
-            --out-dir "$CARGO_TARGET_DIR/pubsub-campaign"
-      # RustSec advisories against the root lockfile and the testbeds', which
-      # are standalone workspaces. Strict: no advisory is ignored anywhere.
-      - if: ${{ !cancelled() }}
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
-      - if: ${{ !cancelled() }}
-        run: |
-          for lock in Cargo.lock testbeds/{liveness-campaign,pubsub,workq,native-boundary/rand-rng,native-boundary/tokio,native-boundary/raw}/Cargo.lock; do
-            echo "== $lock"
-            cargo audit --file "$lock"
-          done
+          name: counters-runs
+          path: target/patina-check/runs
+          retention-days: 7

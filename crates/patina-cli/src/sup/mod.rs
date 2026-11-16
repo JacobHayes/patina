@@ -529,7 +529,7 @@ impl Sup {
                     let s = self.ctl.seq.load(Relaxed);
                     let who = self
                         .running
-                        .map(|i| self.slot(i).tid.load(Relaxed) as i32)
+                        .map(|i| self.slot(i).tid.load(Relaxed))
                         .unwrap_or(0);
                     let cpu = thread_cpu_ns(who);
                     if s != last_seq {

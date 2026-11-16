@@ -176,11 +176,7 @@ unsafe fn perturb_child() {
             l.rlim_max / 2
         };
         l.rlim_cur = half
-            .max(if r == libc::RLIMIT_NOFILE as u32 {
-                3100
-            } else {
-                0
-            })
+            .max(if r == libc::RLIMIT_NOFILE { 3100 } else { 0 })
             .min(l.rlim_max);
         libc::setrlimit(r, &l);
     }
@@ -514,6 +510,10 @@ pub fn run_incarnation(
             if perturb {
                 perturb_child();
             }
+            // An ignored SIGCHLD, inherited across exec, makes bwrap 0.9 wait forever for its
+            // child (its children are reaped by the kernel). The other dispositions the guests
+            // see are set by sup::inherit.
+            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
             // Room for the fixed descriptor numbers (3000-3022): the soft limit is raised to
             // the hard one here; the supervisor sets the limit the guests run under.
             let mut lim: libc::rlimit = std::mem::zeroed();

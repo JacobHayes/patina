@@ -92,14 +92,12 @@ pub fn hash_bytes(seed: u64, data: &[u8]) -> u64 {
     let mut h = mix64(
         seed ^ 0x243f_6a88_85a3_08d3 ^ (data.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
     );
-    let mut chunks = data.chunks_exact(8);
-    for c in &mut chunks {
-        let w = u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]);
-        h = mix64(h ^ w)
+    let (chunks, rest) = data.as_chunks::<8>();
+    for c in chunks {
+        h = mix64(h ^ u64::from_le_bytes(*c))
             .rotate_left(23)
             .wrapping_add(0x9e37_79b9_7f4a_7c15);
     }
-    let rest = chunks.remainder();
     if !rest.is_empty() {
         let mut b = [0u8; 8];
         b[..rest.len()].copy_from_slice(rest);

@@ -1,118 +1,91 @@
 # Agent Guidance
 
 **Patina** is an experimental deterministic execution and simulation-testing
-(DST) runtime. This file is what a builder needs: where truth lives, how to
-build, test and land, and the invariants that hold everywhere.
+(DST) runtime. It runs an unmodified Linux x86_64 executable: a runtime inside
+each guest process traps every system call, the real kernel does the work in a
+per-run bwrap sandbox, and one supervisor decides order, time, randomness,
+faults and crashes from the seed. This file is what a builder needs: where
+truth lives, how to build, check and land, and the invariants that hold
+everywhere.
 
 ## Document map
 
 | Document | Read it for |
 |---|---|
-| [INTENTS.md](./INTENTS.md) | goals, non-goals, trade-offs, design principles |
-| [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first and the rules new surface must meet; cite it when proposing new surface |
-| [ARCHITECTURE.md](./ARCHITECTURE.md) | crate boundaries, targets, drivers, traces, the native shim |
-| [VALIDATION.md](./VALIDATION.md) | what is validated, the guarantees and their oracles, known gaps |
-| [README.md](./README.md), [TUTORIAL.md](./TUTORIAL.md), [docs/GUIDE.md](./docs/GUIDE.md), [USAGE-MODES.md](./USAGE-MODES.md), `llms.txt` | the user-facing surface; must stay honest about status. The README stays short, and every output it or the tutorial shows is the tool's own |
-| `examples/` | the README's and the tutorial's projects; `scripts/install-smoke.sh` runs them in CI as the documents say, so change a documented step and its example together |
-| [docs/skills/patina-dst.md](./docs/skills/patina-dst.md) | the skill handed to agents *using* Patina; it teaches how to discover the surface, not a flag catalog |
-| [crates/patina-target/ESCAPE-CLASSES.md](./crates/patina-target/ESCAPE-CLASSES.md) | the guest-escape taxonomy behind the audit gate |
-| Nearest `AGENTS.md` | the native shim and the testbeds each have their own |
+| [crates/patina-cli/ENGINE.md](./crates/patina-cli/ENGINE.md) | how the engine works, each part pointing at its module |
+| [docs/EVIDENCE.md](./docs/EVIDENCE.md) | what the engine has been shown to do: each claim, its command, date, host and result |
+| [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first and the rules new surface must meet |
+| [README.md](./README.md) | the user-facing surface; must stay honest about status |
+| Nearest `AGENTS.md` | the testbeds have their own |
 
-When you change intent, architecture or user-visible behavior, update the docs
-in the same change. Docs describe the current state; history lives in git.
+When you change architecture or user-visible behavior, update the docs in the
+same change. Docs describe the current state; history lives in git.
 `AGENTS.local.md`, if present, holds local maintainer recipes and is gitignored.
 
-## Build, test and land
+## Layout
 
-rustup installs the toolchain `rust-toolchain.toml` pins; mise supplies nextest
-and ast-grep, so run cargo and the repository scripts through `mise run` or
-`mise exec --`.
+- `crates/patina-proto`: what the runtime and the supervisor must agree on (no_std).
+- `crates/patina-rt`: the in-guest runtime, no_std, built for `x86_64-unknown-none`
+  in its own workspace by `crates/patina-cli/build.rs` and embedded in the binary.
+- `crates/patina-cli`: the `patina` binary (launcher, supervisor, CLI).
+- `tests/<area>/`: the check scripts; `tests/guests/`: their guests.
+- `crates/patina`, `go/patina`, `testbeds/`, `examples/`: not built yet (each
+  README says so); they return when they are rebuilt on this engine.
 
-1. **Iterate** with `mise run check`: format, host clippy, then the tests you
-   name. Its arguments go to nextest (`-p patina-dst-runtime`,
-   `-p cargo-patina --test native_abi`, `-E 'test(/replay/)'`); with none it
-   runs the workspace suite. `patina` embeds the shim's C sources, so
-   rebuild it after touching the C layer.
-2. **Land** by pushing the branch. CI is the gate: the suite and the testbeds
-   on Linux x86_64 and aarch64 and on macOS. When it is green, fast-forward
-   `main`. Keep commits targeted and linear.
-3. **Before pushing a broad change** you can run `mise run check:full`:
-   everything this host can check, including clippy for the other platforms'
-   cfgs and the testbeds. It is there to save a CI round trip, not a required
-   step.
-4. **Get an independent review** before landing a change to the native shim,
-   to record/replay or scheduling determinism, or to the containment boundary
-   (audit, instruction scan, traps). Other changes land on green CI.
-5. **Release** by setting the workspace version (`workspace.package` and the
-   `workspace.dependencies` entries in `Cargo.toml`, and the tags the README
-   and tutorial show), landing that, and pushing the tag `vX.Y.Z` on it:
-   `.github/workflows/release.yml` builds, smokes and publishes. Run that
-   workflow by hand first; it does everything but publish.
+Host requirements: Linux x86_64, `bwrap` on `PATH`, and unprivileged user
+namespaces usable by bwrap (on Ubuntu 24.04:
+`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). The runtime
+runs from a file under `$XDG_CACHE_HOME/patina` (default `~/.cache/patina`),
+which must allow exec.
 
-A test that flakes under Patina is a determinism bug until proven otherwise:
-fix it, never retry it. Prove a behavior change with a planted failure: the
-check must go red without the fix.
+## Build, check and land
 
-## The CLI
+rustup installs the toolchain `rust-toolchain.toml` pins; mise supplies Go for
+the Go guests.
 
-`patina` is verb-first (`build`, `run`, `test`, `audit`, `replay`,
-`campaign`, `coverage`, `trace`, `minimize`, `syscalls`). Never guess a flag:
-ask the binary, whose help is progressive (the index, then per-verb detail).
+- **The landing gate is `mise run check`**: `cargo fmt --check`,
+  `cargo clippy -D warnings`, then `./check quick` (budget 5 minutes, fails above
+  10). CI runs exactly this on one GitHub runner (`CHECK_SLOTS=4`).
+- `./check AREA` runs one area (a directory under `tests/`) while you work on it;
+  `./check list` lists every script with its tier and budget.
+- Every check script declares `#@ tier=quick|area|evidence budget=SECONDS slots=N`
+  in its header and must fail on a planted break: show it red, then green.
+- **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a
+  soak) is run once by hand (`./check evidence NAME`, under
+  `tests/<area>/evidence-*.sh`); its command, date, host and result go into
+  `docs/EVIDENCE.md`. Nothing in `quick`, an area or CI calls it.
+- **Budgets are fixed. Over budget, cut**: move a quick script to `area` or
+  shrink it. Never raise a budget, add a shard, or add a retry. No script re-runs
+  another area's scripts.
+- Land by pushing the branch; when CI is green, fast-forward `main`. Keep
+  commits targeted and linear.
 
-```sh
-cargo run -q -p cargo-patina -- --help [--format json]
-cargo run -q -p cargo-patina -- run --help [--format json]
-```
-
-The registry in `crates/cargo-patina/src/help.rs` and its `help/` modules is the
-single source for the help text and the parsers: add a flag there and nowhere
-else. Only `--seed`, `--seeds` and `--format` have environment defaults
-(`help::ENV_DEFAULTS`); `PATINA_RT_*` is the supervisor-to-guest control plane, and a new control-plane
-variable takes that prefix. Execution verbs accept `--format json`
-(`patina.result/v2`); prefer it when parsing results.
-
-Every run ends in one outcome class (`patina_dst_abi::RunClass`); its
-attribution (the guest, something Patina does not model, Patina's own failure,
-or the request) and the tool's exit status (0, 1 or 2) are functions of the
-class. A new way for a run to end names its class where it stops (the shim's
-`RunStop`, the supervisor's `classify`); nothing reports a result under
-another name, or a guest's exit status as the tool's. README's "Outcomes and
-exit codes" is the one table.
+A run that differs between repeats of one seed is a determinism bug until proven
+otherwise: fix it, never retry it.
 
 ## Project doctrine
 
-- **Fail closed, loudly.** An unmodeled effect is a refusal or a named abort,
-  never a silent fallback to the host.
+- **Fail closed, loudly.** An effect Patina does not control is a refusal or a
+  named abort, never a silent fallback to the host.
 - **Structure before tests.** Enforce an invariant by construction first: make
   the bad state unrepresentable (types, visibility, one choke point); failing
   that, a compiler or lint rule; only then a behavioural test that drives the
-  product. Never scan or patch source text in a test. Need a fault for a test?
-  Use a test-only hook compiled into the product, not a patched copy.
+  product. Never scan or patch source text in a test.
 - **Enforcement earns its cost.** Every test, lint, fixture and gate is code to
   read, run and maintain. Protect invariants whose violation is likely, costly
-  and silent, with the smallest mechanism that does it, and stop there. A
-  review finding is an input, not a mandate: decline a fix whose machinery
-  outweighs the risk, and say why.
+  and silent, with the smallest mechanism that does it, and stop there.
 - **Detection before fixes.** A new bug class gets a detector that provably
-  fires (red before, green after) with or before the point fix. A false
-  positive from an observer is fixed in the observer, never suppressed.
-- **No cruft.** No deprecation aliases, compatibility shims or dual code paths:
-  migrate every caller and doc in the same change.
-- **Determinism claims are verified, not asserted.** Byte-identical repeats,
-  record-to-replay identity and seed variation are the evidence; a check that
-  cannot fail is a bug.
-- **Core patina is guest-agnostic.** No testbed- or guest-specific identifiers
-  or workaround branches in `crates/*`. What one guest needs for classification
-  or configuration belongs in its campaign spec or testbed scripts.
+  fires (red before, green after) with or before the point fix.
+- **No cruft.** No deprecation aliases, compatibility shims, engine flags or dual
+  code paths: migrate every caller and doc in the same change.
+- **Determinism claims are verified, not asserted.** Byte-identical repeats and
+  seed variation are the evidence; a check that cannot fail is a bug.
+- **Core patina is guest-agnostic.** No guest-specific names or branches in
+  `crates/`. What one guest needs lives in its test, example or harness.
 
 ## Conventions
 
-- Crate directories are `crates/patina-*`; published packages are
-  `patina-dst-*` (`crates/patina-runtime` is `patina-dst-runtime`), and the SDK
-  at `crates/patina` is `patina-dst`, used as `patina_dst::`.
 - Write docs in clear, concise, present-tense language.
 - Shell scripts are loud on failure and never pass vacuously.
 - Measure rather than guess: quote a duration only when observed, and answer
   status questions from fresh evidence (logs, CI, the process table).
-- When hunting bugs with Patina, a clean result counts only behind oracles
-  proven live; report it with that evidence.

@@ -30,8 +30,13 @@ def ppatina(required=True):
     r = subprocess.run([os.path.join(HERE, "mkcap.sh"), PATINA], capture_output=True, text=True)
     p = r.stdout.strip()
     if r.returncode == 0 and p and os.path.exists(p):
-        return p
-    why = "cannot make the CAP_PERFMON copy of patina: " + r.stderr.strip()
+        # The capability is not enough: the host must expose a PMU (a VM may not).
+        o = run(p, RUNS + "/pmu-probe", 1, GU, ["--pmu"], ["/guest/counters/compute", "recur"])
+        if o.get("pmu") == "on":
+            return p
+        why = "no counter on this host: pmu " + repr(o.get("pmu"))
+    else:
+        why = "cannot make the CAP_PERFMON copy of patina: " + r.stderr.strip()
     if required:
         die(why)
     print("SKIP: " + why)
