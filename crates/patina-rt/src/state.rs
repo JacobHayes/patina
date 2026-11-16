@@ -315,6 +315,11 @@ impl Proc {
 pub fn priv_alloc(size: u64, align: u64) -> u64 {
     let p = proc();
     let a = (p.priv_cursor + align - 1) & !(align - 1);
+    // The upper half holds fixed scratch areas (`spin.rs`); nothing is given back.
+    const END: u64 = RT_PRIV + RT_PRIV_SIZE / 2;
+    if a + size > END {
+        crate::sup::capacity(proto::ctl::LIMIT_RUNTIME_MEMORY, RT_PRIV_SIZE / 2);
+    }
     p.priv_cursor = a + size;
     a
 }

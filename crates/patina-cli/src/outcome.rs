@@ -4,8 +4,8 @@
 
 /// What the supervisor (or the launcher) decided. Sent as
 /// `class \t exit_status \t signal \t detail \n`. `class` is the engine's own token
-/// (`ok`, `failed`, `deadlock`, `liveness`, `stall`, `containment`, `unsupported`, `infra`, `timeout`,
-/// `crash` between incarnations); `classify` maps it to an [`Outcome`].
+/// (`ok`, `failed`, `deadlock`, `liveness`, `stall`, `containment`, `unsupported`, `capacity`,
+/// `log-limit`, `disk-full`, `infra`, `timeout`, `crash` between incarnations); `classify` maps it to an [`Outcome`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub class: String,
@@ -191,7 +191,11 @@ pub fn classify(v: &Verdict) -> Classified {
             "syscall",
             format!("the program called {d}, which Patina does not support"),
         ),
+        "capacity" => Classified::new(Unsupported, "capacity", d),
+        "log-limit" => Classified::new(Unsupported, "log-limit", d),
+        "output-limit" => Classified::new(Unsupported, "output-limit", d),
         "timeout" => Classified::new(Timeout, "timeout", d),
+        "disk-full" => Classified::new(Internal, "disk-full", d),
         "infra" => Classified::new(Internal, "internal", d),
         other => Classified::new(
             Internal,

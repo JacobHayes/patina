@@ -16,6 +16,11 @@ pub const DEFAULT_CPUS: u64 = 4;
 /// The most `--cpus` can give: the guest's affinity mask is one word.
 pub const MAX_CPUS: u64 = 64;
 
+/// The MiB a run's logs may hold when `--log-limit` is not given. A run that has not ended by
+/// then is almost always a livelock (a loop of switches or calls that never finishes), and its
+/// log fills the disk quickly (hundreds of MB a second); a long, real run raises it.
+pub const DEFAULT_LOG_LIMIT_MIB: u64 = 1024;
+
 /// Directories the program's bare name is looked up in, as the guest's `PATH` is.
 pub const GUEST_PATH: [&str; 4] = ["/guest", "/usr/local/bin", "/usr/bin", "/bin"];
 
@@ -73,6 +78,8 @@ pub struct Config {
     pub time_limit: u64,
     /// Wall seconds.
     pub timeout: u64,
+    /// MiB the run's logs may hold, every incarnation together (`--log-limit`).
+    pub log_limit: u64,
     pub tmpfs_bytes: u64,
     /// Fault presets (`--faults`, `[faults] preset`).
     pub faults_preset: Vec<String>,
@@ -115,6 +122,7 @@ impl Default for Config {
             cpus: DEFAULT_CPUS,
             time_limit: 3600,
             timeout: 600,
+            log_limit: DEFAULT_LOG_LIMIT_MIB,
             tmpfs_bytes: 256 << 20,
             faults_preset: vec![],
             faults: vec![],
@@ -560,6 +568,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
                 ("run", "stdin") => c.stdin = Some(existing(&base, &at, &string(v, &at)?)?),
                 ("run", "time-limit") => c.time_limit = int(v, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
+                ("run", "log-limit") => c.log_limit = int(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
                 ("faults", "crash") => c.crash = Some(string(v, &at)?),
                 ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
@@ -663,6 +672,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }
+    if let Some(n) = a.num("--log-limit")? {
+        c.log_limit = n;
+    }
     if let Some(p) = a.last("--faults") {
         c.faults_preset = vec![p.to_string()];
     }
@@ -723,6 +735,10 @@ impl Config {
         }
         if self.cpus == 0 || self.cpus > MAX_CPUS {
             return Err(format!("--cpus is 1 to {MAX_CPUS}"));
+        }
+        let max_log = proto::layout::LOG_MAX >> 20;
+        if self.log_limit == 0 || self.log_limit > max_log {
+            return Err(format!("--log-limit is 1 to {max_log} (MiB)"));
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());

@@ -63,12 +63,16 @@ echo "c. C++: cxx ($(field "$o/cxx/result.json" compute.events) events) and cxx-
 for r in shlib-1 shlib-2 shlib-stock; do
     [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "d. $r: $(res "$o/$r")"
     tail -1 "$o/$r/inc-0/stdout" | grep -q 'compdl=29992,29992 ok$' || die "d. $r printed $(tail -1 "$o/$r/inc-0/stdout")"
-    im=$(field "$o/$r/result.json" compute.images | python3 -I -c 'import json,sys; print(" ".join("%s:%s" % (i["path"], i["starts"]) for i in json.load(sys.stdin)))')
-    [ "$im" = "/guest/compute/${r%-[12]}:1" ] || die "d. $r: images $im"
+    # Each image that said hello is named, the program only when its own hooks did; the
+    # address space started once.
+    im=$(field "$o/$r/result.json" compute.images | python3 -I -c 'import json,sys; i=json.load(sys.stdin); print(" ".join(sorted(e["path"] for e in i)), sum(e["starts"] for e in i))')
+    want="/guest/compute/libcomp.so /guest/compute/libcompdl.so"
+    [ "$r" = shlib-stock ] || want="$want /guest/compute/shlib"
+    [ "$im" = "$want 1" ] || die "d. $r: images and starts $im, not $want 1"
 done
 # The program, libcomp.so, and libcompdl.so once per dlopen: four hook copies, one cell.
 "$PATINA" log dump "$o/shlib-1/inc-0/boundary.log" | sed -n 's/.* patina_sdk .*args=\[0x8, .*ret=\([0-9]*\) .*/\1/p' >"$o/shlib.hellos"
 [ "$(wc -l <"$o/shlib.hellos")" = 4 ] || die "d. shlib: $(wc -l <"$o/shlib.hellos") hellos, not one per hook copy loaded"
 [ "$(sort -u "$o/shlib.hellos" | wc -l)" = 1 ] || die "d. shlib: the hellos got more than one cell: $(sort -u "$o/shlib.hellos" | paste -sd' ')"
 [ "$(field "$o/shlib-1/result.json" digest)" = "$(field "$o/shlib-2/result.json" digest)" ] || die "d. shlib: two runs of seed 1 differ"
-echo "d. shared libraries: one image entry each for shlib and shlib-stock; shlib's 4 hook copies said hello and got one cell; one digest twice"
+echo "d. shared libraries: the images named are the ones whose hooks said hello (libcomp.so and libcompdl.so, and shlib itself only when it is rebuilt); shlib's 4 hook copies said hello and got one cell; one digest twice"

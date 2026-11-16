@@ -5,8 +5,9 @@
 #    same seed run alone; the bug-free guest exits 0; an unmet `sometimes` is vacuous unless
 #    allowed, as is a fault point that never fired under --buggify; --cases makes one run per
 #    (case, seed), `report` over separate `patina run` directories gives the sweep's groups,
-#    and lines that are whole commands find the same; a host file changing under the replay makes the
-#    group nondeterministic; an interrupted sweep leaves no process and no partial run;
+#    and lines that are whole commands find the same; a host file changed before a replay makes
+#    it nondeterministic; a livelock ends log-limit at the same record twice, and a sweep of it
+#    keeps bounded bytes whose cut logs still replay; an interrupted sweep leaves no process and no partial run;
 #    minimize keeps only the fault setting the finding needs, and its rerun command reproduces it.
 #@ tier=quick budget=60 slots=4
 set -eu

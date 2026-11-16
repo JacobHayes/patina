@@ -69,10 +69,43 @@ pub fn stop(nr: u64, a0: u64) -> ! {
     hang()
 }
 
-/// End the run as `infra`.
+/// End the run as `infra`. A call of the runtime's own that failed for want of a descriptor
+/// is the program's use of descriptors reaching the process's limit: a named limit.
 pub fn host_error(errno: i64, nr: u64, code: u64) -> ! {
+    const EMFILE: i64 = 24;
+    if errno == -EMFILE && (code == proto::ctl::HE_SYSCALL || code == proto::ctl::HE_RUNTIME_ASSERT)
+    {
+        capacity(proto::ctl::LIMIT_DESCRIPTORS, 4096);
+    }
     call_sup_raw(Op::HostError, [errno as u64, nr, code, 0, 0, 0]);
     hang()
+}
+
+/// End the run `unsupported`, stop `capacity`: the table `limit` (`proto::ctl::LIMIT_*`)
+/// holds `cap` entries the program still uses.
+pub fn capacity(limit: u64, cap: u64) -> ! {
+    call_sup_raw(
+        Op::HostError,
+        [limit, cap, proto::ctl::HE_CAPACITY, 0, 0, 0],
+    );
+    hang()
+}
+
+/// End the run `log-limit`: the append that would pass `Config::log_limit` is not made.
+pub fn log_limit() -> ! {
+    call_sup_raw(Op::HostError, [0, 0, proto::ctl::HE_LOG_LIMIT, 0, 0, 0]);
+    hang()
+}
+
+/// A write to a file of the run directory failed (`r` its result): a full host filesystem
+/// ends the run `disk-full`, a file size limit is a host limit, anything else a host error.
+pub fn log_write_failed(r: i64, nr: u64) -> ! {
+    let code = match -r {
+        e::ENOSPC | e::EDQUOT => proto::ctl::HE_DISK_FULL,
+        e::EFBIG => proto::ctl::HE_HOST_LIMIT,
+        _ => proto::ctl::HE_SYSCALL,
+    };
+    host_error(r, nr, code)
 }
 
 /// End the run: program code reached into the runtime (`proto::ctl::HE_CONTAINMENT`).

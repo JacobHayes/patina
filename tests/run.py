@@ -11,7 +11,8 @@ holds the guests' sources.
 
 A script declares itself in a line `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N`
 (defaults: tier=area, budget 120 s, slots 1; slots = sandboxes it runs at once). Scripts run in
-parallel, at most CHECK_SLOTS sandboxes at once (default 8), longest budget first. Each gets a
+parallel, at most CHECK_SLOTS sandboxes at once (default half the CPUs, at least 8), longest
+budget first. Each gets a
 private RUNS directory; a script still running at its budget is killed and fails, as does one
 that leaves a process behind (tests/leftovers.py on its RUNS). Passing scripts' run
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
@@ -84,7 +85,7 @@ def main():
     label = "-".join(a.lower() for a in args)[:40]
     base = os.path.join(CHECK_DIR, "runs", time.strftime("%Y%m%dT%H%M%S") + f"-{label}-{os.getpid()}")
     os.makedirs(base)
-    slots_total = int(os.environ.get("CHECK_SLOTS", "8"))
+    slots_total = int(os.environ.get("CHECK_SLOTS", max(8, (os.cpu_count() or 8) // 2)))
     keep = os.environ.get("CHECK_KEEP") == "1" or tier == "evidence"
     print(f"== {tier}: {len(sel)} scripts, at most {slots_total} sandboxes at once; output in {base}", flush=True)
 

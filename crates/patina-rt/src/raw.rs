@@ -91,6 +91,7 @@ pub mod nr {
     pub const FCNTL: u64 = 72;
     pub const IOCTL: u64 = 16;
     pub const FTRUNCATE: u64 = 77;
+    pub const FALLOCATE: u64 = 285;
     pub const SIGALTSTACK: u64 = 131;
     pub const PRCTL: u64 = 157;
     pub const GETTID: u64 = 186;
@@ -128,6 +129,8 @@ pub mod e {
     pub const ENAMETOOLONG: i64 = 36;
     pub const ELOOP: i64 = 40;
     pub const EFBIG: i64 = 27;
+    pub const ENOSPC: i64 = 28;
+    pub const EDQUOT: i64 = 122;
 }
 
 pub const PROT_READ: u64 = 1;

@@ -180,9 +180,19 @@ pub fn vkey(st: &St) -> Option<u64> {
         .then(|| vtime::key(VDEV_MOUNT_BASE + i as u64, st[1]))
 }
 
+/// Record `w` on the inode `st` names; an inode with no name left (`O_TMPFILE`, or changed
+/// through a descriptor after its unlink) is noted as such (`vtime::names`).
 fn touch(st: &Option<St>, w: Which) {
-    if let Some(k) = st.as_ref().and_then(vkey) {
+    if let Some((k, s)) = st.as_ref().and_then(|s| Some((vkey(s)?, s))) {
         vtime::touch(k, w);
+        vtime::names(k, if s[2] == 0 { s[0] } else { 0 });
+    }
+}
+
+/// The inode `st` (its `stat` from before the call) lost its last name.
+fn unnamed(st: &Option<St>) {
+    if let Some((k, s)) = st.as_ref().and_then(|s| Some((vkey(s)?, s))) {
+        vtime::names(k, s[0]);
     }
 }
 
@@ -1057,6 +1067,8 @@ fn mutate(call: &mut dyn Call) -> i64 {
                 };
                 if left > 0 {
                     touch(&t, Which::Change);
+                } else {
+                    unnamed(&t);
                 }
                 if on_work(&t) {
                     let (pino, name) = (parent.map(|p| p[1]).unwrap_or(0), name_of(ps));
@@ -1089,6 +1101,15 @@ fn mutate(call: &mut dyn Call) -> i64 {
             touch(&np, Which::Modify);
             touch(&before[0], Which::Change);
             touch(&before[1], Which::Change);
+            // A rename over a name drops the inode it named, unless that inode has others
+            // (or it is the inode renamed, or an exchange keeps it).
+            let flags = if nr == 316 { a[4] } else { 0 };
+            if let (Some(o), Some(v)) = (&before[0], &before[1]) {
+                let dir = mode_of(v) & S_IFMT == S_IFDIR;
+                if flags & RENAME_EXCHANGE == 0 && o[1] != v[1] && (dir || v[2] <= 1) {
+                    unnamed(&before[1]);
+                }
+            }
             if on_work(&before[0]) {
                 let flags = if nr == 316 { a[4] } else { 0 };
                 let replaced = if flags & RENAME_EXCHANGE != 0 {

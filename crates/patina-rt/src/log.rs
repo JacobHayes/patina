@@ -16,15 +16,9 @@ fn ensure(len: u64) {
     let mut cap = c.log_cap.load(Relaxed);
     if len > cap {
         let newcap = cap + LOG_STEP;
-        let r = unsafe { sc2(nr::FTRUNCATE, FD_LOG as u64, newcap) };
-        if r < 0 {
-            crate::sup::host_error(r, nr::FTRUNCATE, proto::ctl::HE_SYSCALL);
-        }
+        grow(cap, newcap);
         c.log_cap.store(newcap, Relaxed);
         cap = newcap;
-    }
-    if cap > LOG_MAX {
-        crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_SYSCALL);
     }
     let r = unsafe {
         sc6(
@@ -43,6 +37,28 @@ fn ensure(len: u64) {
     p.log_mapped = cap;
 }
 
+/// Extend the log file from `cap` to `newcap` bytes, its blocks allocated now: a full host
+/// filesystem is then a failed call here (`disk-full`), never a SIGBUS at a later store
+/// through the mapping. A filesystem without `fallocate` gets a sparse extension.
+fn grow(cap: u64, newcap: u64) {
+    let r = unsafe { sc4(nr::FALLOCATE, FD_LOG as u64, 0, cap, newcap - cap) };
+    if r == -e::EOPNOTSUPP {
+        let r = unsafe { sc2(nr::FTRUNCATE, FD_LOG as u64, newcap) };
+        if r < 0 {
+            crate::sup::log_write_failed(r, nr::FTRUNCATE);
+        }
+    } else if r < 0 {
+        crate::sup::log_write_failed(r, nr::FALLOCATE);
+    }
+}
+
+/// Whether one more record would take the run's logs past `Config::log_limit`. The limit
+/// counts records and logged bytes, never time: the same seed stops at the same record.
+pub fn over_limit() -> bool {
+    let c = ctl();
+    c.log_used() + REC_SIZE as u64 > c.config.log_limit
+}
+
 pub fn append(rec: &Rec) {
     // cost measurement only: `RUSTFLAGS="--cfg patina_nolog"` builds a runtime that writes no
     // boundary record (and hashes no buffer). Never the default; digests are then meaningless.
@@ -53,6 +69,9 @@ pub fn append(rec: &Rec) {
     }
     #[allow(unreachable_code)]
     let c = ctl();
+    if over_limit() {
+        crate::sup::log_limit();
+    }
     let off = c.log_len.load(Relaxed);
     ensure(off + REC_SIZE as u64);
     unsafe {

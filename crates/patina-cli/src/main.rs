@@ -106,9 +106,18 @@ fn main() -> ExitCode {
         Cmd::Minimize => minimize::main(&a),
     };
     r.unwrap_or_else(|Fail(o, e)| {
-        eprintln!("patina: {}: {e}", o.name());
+        // A full filesystem (ENOSPC, EDQUOT) is named, as the supervisor names it in a run.
+        let full = ["(os error 28)", "(os error 122)"]
+            .iter()
+            .any(|c| e.contains(c));
+        let stop = if full { "disk-full" } else { o.name() };
+        if full {
+            eprintln!("patina: {} ({stop}): {e}", o.name());
+        } else {
+            eprintln!("patina: {}: {e}", o.name());
+        }
         if a.json() {
-            println!("{}", result::error_json(o, o.name(), &e));
+            println!("{}", result::error_json(o, stop, &e));
         }
         ExitCode::from(o.exit())
     })

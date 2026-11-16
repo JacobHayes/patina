@@ -98,6 +98,11 @@ chain over the records. Replay runs the program again and compares record by rec
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`).
 
+The logs of a run (this one and the operation log) are limited (`Config::log_limit`,
+`--log-limit`): the append that would pass the limit ends the run instead, so the cut depends
+on records, not time. The log file grows by `fallocate`, so a full host filesystem is a failed
+call (`disk-full`), never a fault on a store through the mapping.
+
 ## Scheduling points
 
 The scheduler can switch threads only where a thread enters the runtime. Those points are:
@@ -163,9 +168,11 @@ touched.
   `COMPUTE_POINT` (op 9).
 - **Hello**: a hook's first event makes `COMPUTE_HELLO` (op 8), which maps the cell. The hooks
   are hidden symbols, so each executable and shared library keeps its own copy and says hello
-  itself; all get the one cell. The first hello of a process writes the program's path into
-  the control region's image table (`proto::ctl::ComputeTab`, 32 entries and a count of those
-  that did not fit), which `result.json`'s `compute` reports. Op 9 before any hello gets
+  itself; all get the one cell. Each hello notes the image that made it (the file the kernel
+  maps at its system call; the program's own path when that is the executable) in the control
+  region's image table (`proto::ctl::ComputeTab`, 32 entries, `starts` counting each process's
+  first hello, and a count of starts that did not fit), which `result.json`'s `compute`
+  reports. Op 9 before any hello gets
   `EINVAL`. A fork child keeps its parent's cell; an exec starts without one.
 - **Arming**: at every return to program code the runtime writes into the cell the smallest
   of a seeded gap (uniform in `1..2G-1`, G the run's mean from `--fault compute-gap`), the
@@ -322,5 +329,11 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 - **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with
   `ESOCKTNOSUPPORT` and listed in `result.json`'s `refused` (`socket:udp`); `patina run`
   prints them. DNS resolvers and QUIC therefore fail fast. Only TCP has a wire.
+- **Fixed tables.** The runtime keeps some state in fixed tables shared by the run: virtual
+  inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
+  work-tree mappings (128 per process), shared mappings (256 per process), injected fsync
+  failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
+  The table of changed files' times drops the entries of deleted files nothing holds open
+  (`sup/vtgc.rs`), so only files still reachable count against it (65,536).
 - Not modelled: `timer_create`, scheduling policy calls, `io_uring`; another process's
   `/proc/PID`. docs/EVIDENCE.md has the full list.

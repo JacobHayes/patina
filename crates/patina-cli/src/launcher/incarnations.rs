@@ -111,6 +111,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut refused: Vec<String> = vec![];
     let mut missing: Vec<(u8, String)> = vec![];
     let mut root = o.cfg.work.clone();
+    let mut log_used = 0;
     let mut k = 0;
     loop {
         let inc = out.join(format!("inc-{k}"));
@@ -123,9 +124,11 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             vclock0,
             faults: cfg,
             deadline,
+            log_used,
         };
         let end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
         faults.add_incarnation(&inc, k, &end);
+        log_used += end.log_bytes;
         digests.push(end.digest);
         traps += end.traps;
         switches += end.switches;

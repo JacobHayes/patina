@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 10;
+pub const LAYOUT_VERSION: u64 = 11;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -43,6 +43,11 @@ pub struct Config {
     /// time is still charged, deadlines still cut, and the cell still yields every `REFILL`), and the virtual time one event costs.
     pub compute_gap: u64,
     pub compute_charge_ns: u64,
+    /// The most bytes this incarnation's logs (the boundary log and the operation log) may
+    /// hold (`--log-limit`, less what earlier incarnations wrote). The append that would pass
+    /// it ends the run `log-limit` instead: a count of records, never of wall time, so a seed
+    /// ends at the same record in every run.
+    pub log_limit: u64,
     /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
     /// NUL-padded; all zero is `/work`.
     pub work: [u8; WORK_PATH_MAX],
@@ -100,6 +105,7 @@ impl Config {
             spin_charge_ns: 0,
             compute_gap: 0,
             compute_charge_ns: 0,
+            log_limit: crate::layout::LOG_MAX,
             work: [0; WORK_PATH_MAX],
         }
     }
@@ -147,7 +153,10 @@ pub struct Ctl {
     /// inherited filter from outside the sandbox (a container's profile) is not a reason to
     /// skip it, which is why `PR_GET_SECCOMP` cannot be the test.
     pub filter_installed: AtomicU64,
-    pub _spare: [AtomicU64; 5],
+    /// Operation-log bytes that do not count against `Config::log_limit`: the base records of
+    /// the incarnation's starting work tree, written by the supervisor before the program runs.
+    pub log_exempt: AtomicU64,
+    pub _spare: [AtomicU64; 4],
     /// One bit per syscall number answered `Deny` at least once (`refused` in the outcome).
     pub denied: [AtomicU64; 8],
     /// Syscall number that ended the run with `Stop` (or u64::MAX).
@@ -576,6 +585,9 @@ pub enum Op {
     /// A failed `always` (`sdk`): the run ends as `violation`; the message is in the SDK table.
     /// args: [op, payload pointer, length] of the trap. Never answered.
     SdkViolation = 60,
+    /// The virtual time table is 3/4 full: drop the entries of inodes nothing can reach any
+    /// more (`vfs::VtEntry::gone_dev`). Reply 0.
+    VtReclaim = 61,
 }
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -619,7 +631,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 31] = [
+        const ALL: [Op; 32] = [
             Hello,
             Yield,
             Sleep,
@@ -651,6 +663,7 @@ impl Op {
             WireSent,
             WireQuery,
             SdkViolation,
+            VtReclaim,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -688,6 +701,7 @@ impl Op {
             WireSent => "WireSent",
             WireQuery => "WireQuery",
             SdkViolation => "SdkViolation",
+            VtReclaim => "VtReclaim",
         }
     }
 }
@@ -790,6 +804,36 @@ pub const CONTAIN_SYSCALL: u64 = 3;
 /// Compute points: the cell page could not be mapped, read or written (the program mapped
 /// over it, unmapped or protected it). args[0] = the errno, args[1] = 1 for the mapping.
 pub const HE_COMPUTE_CELL: u64 = 9;
+/// The run's logs reached `Config::log_limit` (the append that would pass it was not made).
+pub const HE_LOG_LIMIT: u64 = 10;
+/// A fixed-capacity table of the runtime filled with entries the program still uses:
+/// args[0] = `LIMIT_*`, args[1] = the capacity. The run ends `unsupported`, stop `capacity`.
+pub const HE_CAPACITY: u64 = 11;
+/// The host filesystem holding the run directory is full: args[0] = errno, args[1] = syscall.
+pub const HE_DISK_FULL: u64 = 12;
+
+macro_rules! limits {
+    ($($v:ident = $n:literal: $s:literal),* $(,)?) => {
+        $(pub const $v: u64 = $n;)*
+        /// What the table of a `HE_CAPACITY` stop holds, for its message.
+        pub fn limit_name(l: u64) -> &'static str {
+            match l {
+                $($n => $s,)*
+                _ => "an unknown table",
+            }
+        }
+    };
+}
+
+limits! {
+    LIMIT_VTIME = 1: "files and directories changed in this run and still reachable (the virtual time table)",
+    LIMIT_VINO = 2: "pipes, sockets, timers and other anonymous objects seen in this run (the virtual inode table)",
+    LIMIT_SHARED_MAPS = 3: "shared, writable mappings of work-tree files open at once in one process",
+    LIMIT_FSYNC_FAILURES = 4: "files given an injected fsync failure",
+    LIMIT_DESCRIPTORS = 5: "open file descriptors (the runtime needs a few of its own)",
+    LIMIT_SHARED = 6: "shared mappings in one process, a writable one among them (the runtime keys process-shared futexes by them)",
+    LIMIT_RUNTIME_MEMORY = 7: "bytes of runtime memory used over one process's life (a copy of each shared, writable work-tree mapping, and the threads' stacks)",
+}
 
 /// Signal requests.
 ///
@@ -867,6 +911,12 @@ impl Ctl {
         if nr < 512 {
             self.denied[(nr / 64) as usize].fetch_or(1 << (nr % 64), Ordering::Relaxed);
         }
+    }
+    /// Bytes of this incarnation's logs that count against `Config::log_limit`.
+    pub fn log_used(&self) -> u64 {
+        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        (r(&self.log_len) + r(&self.oplog_len) + r(&self.opdata_len))
+            .saturating_sub(r(&self.log_exempt))
     }
     pub fn denied_nrs(&self) -> impl Iterator<Item = u64> + '_ {
         (0..512u64).filter(move |nr| {

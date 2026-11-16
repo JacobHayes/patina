@@ -52,6 +52,11 @@ pub struct VtEntry {
     pub mtime: u64,
     pub ctime: u64,
     pub btime: u64,
+    /// The inode's real `st_dev` once it has lost its last name (an unlink, an `rmdir`, a
+    /// rename over it, or an `O_TMPFILE`), else 0. Such an inode is seen only through a
+    /// descriptor or a mapping; when no process has either, the entry can never be read
+    /// again (tmpfs does not reuse inode numbers) and `Op::VtReclaim` drops it.
+    pub gone_dev: u64,
 }
 
 /// A real `(st_dev, st_ino)` and the virtual number it was given (index + `VINO_BASE`).
@@ -79,6 +84,22 @@ pub struct Vfs {
     pub missing: [[u8; MISSING_LEN]; MISSING_CAP],
     pub vino: [VinoEntry; VINO_CAP],
     pub vt: [VtEntry; VT_CAP],
+}
+
+impl Vfs {
+    /// Where `key` is (`Ok`) or would go (`Err`, an empty entry); `None` when the table has
+    /// neither (never at the occupancy the runtime allows).
+    pub fn vt_find(&self, key: u64) -> Option<Result<usize, usize>> {
+        let mut i = (crate::draw::mix64(key) as usize) & (VT_CAP - 1);
+        for _ in 0..VT_CAP {
+            match self.vt[i].key {
+                k if k == key => return Some(Ok(i)),
+                0 => return Some(Err(i)),
+                _ => i = (i + 1) & (VT_CAP - 1),
+            }
+        }
+        None
+    }
 }
 
 pub const VFS_SIZE: usize = core::mem::size_of::<Vfs>();

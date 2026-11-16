@@ -263,6 +263,13 @@ pub const FLAGS: &[Flag] = &[
         "wall time after which the run ends timeout",
         RUNLIKE,
     ),
+    flag(
+        "--log-limit",
+        "MIB",
+        "1024",
+        "size of the run's logs at which it ends unsupported (log-limit): a livelock's log fills the disk",
+        RUNLIKE,
+    ),
     flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),
     flag(
         "--vary",

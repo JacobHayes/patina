@@ -70,6 +70,25 @@ program got an error code for them). The program's full output is in the run dir
 | `inc-0/stdout`, `inc-0/stderr` | the program's output; `inc-1/` and on after a crash and restart |
 | `inc-0/boundary.log` | every system call and decision, for replay and `patina log` |
 
+A run that never ends fills its logs fast (a livelock writes hundreds of MB a second), so the
+logs are limited: `--log-limit MIB` (`[run] log-limit`, default 1024) ends the run
+`unsupported`, stop `log-limit`, at the record that would pass it, the same record on every
+run of the seed. The message says what filled it (here `tests/guests/sweep/bugs.c`, whose two
+threads each yield until the other is done):
+
+```text
+$ patina run --seed 1 --log-limit 8 -- ./sweep-bugs livelock
+unsupported (log-limit): 8.0 MiB of boundary log (87381 records, 52% scheduling-decision records) reached --log-limit: the program had not finished, likely a livelock under this schedule (a run that is only long, or writes that much to the work tree, needs a higher --log-limit)
+```
+
+The starting work tree (`--work`) does not count against it; what the program writes to the
+work tree does (the operation log keeps it for crashes).
+
+A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A table of the
+runtime's that the program fills with objects it still uses (open descriptors, shared
+mappings, files changed and still reachable) ends it `unsupported`, stop `capacity`, naming
+the table.
+
 ### A configuration file
 
 `patina.toml` in the current directory (or `--config FILE`) holds the same settings; flags
@@ -106,6 +125,12 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--keep fail\|all\|none` | whose logs to keep; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
+
+A run kept by `--keep fail` whose log is over 4 MiB keeps its first and last MiB
+(`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
+gives the whole log again. The sweep prints the bytes it kept, does not start while `-j` runs
+at `--log-limit` could fill the filesystem under `--out`, and stops launching runs when free
+space falls below that, or when a run finds the filesystem full.
 
 A sweep directory holds one sweep. It records the program's SHA-256, the command and the
 resolved settings (`sweep.json`); the same sweep run again resumes, running only the runs it
@@ -518,8 +543,9 @@ Python: not supported.
 
 ### Did it take
 
-`patina run` prints a `compute points:` line when rebuilt code ran: the program, the kinds of
-event, the events counted, the switches they caused and the mean gap the seed drew.
+`patina run` prints a `compute points:` line when rebuilt code ran: the images whose hooks ran
+(the program, a library it loads, or both), the kinds of event, the events counted, the
+switches they caused and the mean gap the seed drew.
 
 ```text
 $ patina run --seed 2 -- ./stats-cp
@@ -528,9 +554,8 @@ guest: exit 1
 compute points: /tmp/src/patina/stats-cp (edges, accesses); 81,619 events, 325 switches, mean gap 248
 ```
 
-`patina sweep` names the programs once. No line means no rebuilt code ran: the flags did not
-reach the code that ran. The line names the program even when only a library it loads is
-rebuilt. `result.json` holds the same as `compute`: `images`
+`patina sweep` names the images once. No line means no rebuilt code ran: the flags did not
+reach the code that ran. `result.json` holds the same as `compute`: `images`
 (`path`, `kinds`, `starts`), `events`, `switches`, `deadline_stops` and `gap`.
 
 ### The gap
@@ -546,6 +571,10 @@ events. The draw depends on the seed alone: seed 2 draws 248 in every program.
 | `0` | no switches; time and deadlines still apply |
 
 A single number (`compute-gap=8`) gives every seed that G.
+
+Each switch writes one 96-byte record to the boundary log, so a long program at a small gap
+can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `unsupported`, stop
+`log-limit`: raise the limit or the gap.
 
 ### Limits
 

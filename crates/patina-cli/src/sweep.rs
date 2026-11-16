@@ -463,6 +463,53 @@ fn prune(dir: &Path) {
     }
 }
 
+/// A kept run's log over `CUT_OVER` bytes keeps its first and last `CUT_KEEP` (whole records):
+/// a sweep of runs that each reach --log-limit stays small. The seed reproduces the whole log.
+const CUT_OVER: u64 = 4 << 20;
+const CUT_KEEP: u64 = (1 << 20) / proto::rec::REC_SIZE as u64 * proto::rec::REC_SIZE as u64;
+
+/// Cut the large logs of a kept run (`crate::log::Cut`); the operation log of an incarnation
+/// over the size goes whole (`patina log ops` needs all of it).
+fn cut(dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for inc in rd.flatten() {
+        if !inc.file_name().to_string_lossy().starts_with("inc-") {
+            continue;
+        }
+        let inc = inc.path();
+        let size = |f: &str| std::fs::metadata(inc.join(f)).map(|m| m.len()).unwrap_or(0);
+        if size("boundary.log") > CUT_OVER {
+            let _ = crate::log::cut(&inc, CUT_KEEP);
+        }
+        if size("oplog.meta") + size("oplog.data") > CUT_OVER {
+            let _ = std::fs::remove_file(inc.join("oplog.meta"));
+            let _ = std::fs::remove_file(inc.join("oplog.data"));
+        }
+    }
+}
+
+/// Bytes of the files under `dir`.
+fn bytes_under(dir: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => bytes_under(&e.path()),
+            _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+        })
+        .sum()
+}
+
+/// Bytes free to this user on the filesystem holding `p`.
+fn free_bytes(p: &Path) -> Option<u64> {
+    let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+    (unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0).then(|| st.f_bavail * st.f_frsize)
+}
+
 fn tail(b: &[u8]) -> String {
     String::from_utf8_lossy(b)
         .lines()
@@ -674,6 +721,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         width,
         max_findings,
         budget,
+        out: out.clone(),
+        run_bytes: (cfg.log_limit << 20) + (64 << 20),
+        cut: false,
     };
     if todo < total {
         st.say(&format!(
@@ -681,6 +731,14 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             total - todo,
             out.display()
         ));
+    }
+    if let Some(free) = free_bytes(&out).filter(|f| *f < st.run_bytes * width as u64) {
+        return Err(error(format!(
+            "the filesystem holding {} has {} free; {width} runs at once may write {} each (--log-limit and their output): free space, or lower -j or --log-limit",
+            out.display(),
+            report::bytes(free),
+            report::bytes(st.run_bytes)
+        )));
     }
     let not_started = pool(jobs, width, &child, |d, running, now| {
         st.event(d, running, now)
@@ -754,6 +812,16 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     let runs = report::collect(std::slice::from_ref(&out)).map_err(error)?;
+    st.say(&format!(
+        "sweep: {} kept in {}{}",
+        report::bytes(bytes_under(&out)),
+        out.display(),
+        if st.cut {
+            "; logs over 4 MiB keep their first and last MiB (the run's seed reproduces the whole log: patina replay RUNDIR)"
+        } else {
+            ""
+        }
+    ));
     let head = SweepHead {
         seconds: st.t0.elapsed().as_secs_f64(),
         jobs: width,
@@ -816,6 +884,11 @@ struct State {
     width: usize,
     max_findings: Option<usize>,
     budget: Option<u64>,
+    out: PathBuf,
+    /// The most one run writes: its logs' limit and room for the rest.
+    run_bytes: u64,
+    /// Some kept run's log was cut.
+    cut: bool,
 }
 
 impl State {
@@ -872,6 +945,20 @@ impl State {
         if let Some(b) = self.budget {
             if self.t0.elapsed().as_secs() >= b && self.stopped.is_none() {
                 self.stopped = Some(format!("{b} s passed (--budget)"));
+            }
+        }
+        // Stop launching while the runs at once could still fill the filesystem, rather than
+        // have them end disk-full (or fill a disk the host needs).
+        if self.stopped.is_none() {
+            let left = self.todo.saturating_sub(self.done);
+            let need = self.run_bytes * width.min(left) as u64;
+            if let Some(free) = free_bytes(&self.out).filter(|f| *f < need) {
+                self.stopped = Some(format!(
+                    "the filesystem holding {} has {} free, less than {width} runs at once may write ({} each: --log-limit and their output); stopped before it fills",
+                    self.out.display(),
+                    report::bytes(free),
+                    report::bytes(self.run_bytes)
+                ));
             }
         }
         if self.tty {
@@ -932,6 +1019,14 @@ impl State {
         }
         if outcome == "ok" && self.keep != Keep::All {
             prune(dir);
+        }
+        if outcome != "ok" && self.keep != Keep::All {
+            let before = bytes_under(dir);
+            cut(dir);
+            self.cut |= bytes_under(dir) < before;
+        }
+        if r["stop"] == "disk-full" && self.stopped.is_none() {
+            self.stopped = Some(format!("seed {seed} found the filesystem full"));
         }
         if outcome == "ok" {
             self.flush(false);

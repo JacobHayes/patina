@@ -45,33 +45,41 @@ fn slot(key: u64, insert: bool) -> Option<&'static mut VtEntry> {
         return None;
     }
     let v = vfs();
-    let mut i = (proto::draw::mix64(key) as usize) & (VT_CAP - 1);
-    for _ in 0..VT_CAP {
-        let k = v.vt[i].key;
-        if k == key {
-            return Some(&mut v.vt[i]);
-        }
-        if k == 0 {
-            if !insert {
-                return None;
+    let i = match v.vt_find(key)? {
+        Ok(i) => return Some(&mut v.vt[i]),
+        Err(_) if !insert => return None,
+        Err(i) if (v.vt_used as usize) < VT_CAP * 3 / 4 => i,
+        Err(_) => {
+            // Full of entries: drop those of inodes nothing can reach (deleted, and no
+            // descriptor or mapping left). Their numbers are never reused, so no value the
+            // program can read changes. If what is left is still over half the table, the
+            // program keeps that many changed inodes reachable: a named limit.
+            crate::sup::call_sup(proto::ctl::Op::VtReclaim, [0; 6]);
+            if v.vt_used as usize > VT_CAP / 2 {
+                crate::sup::capacity(proto::ctl::LIMIT_VTIME, (VT_CAP / 2) as u64);
             }
-            if v.vt_used as usize >= VT_CAP * 3 / 4 {
-                crate::sup::host_error(-(crate::raw::e::ENOMEM), 0, proto::ctl::HE_RUNTIME_ASSERT);
-            }
-            v.vt_used += 1;
-            let e = epoch();
-            v.vt[i] = VtEntry {
-                key,
-                atime: e,
-                mtime: e,
-                ctime: e,
-                btime: e,
-            };
-            return Some(&mut v.vt[i]);
+            v.vt_find(key)?.err()?
         }
-        i = (i + 1) & (VT_CAP - 1);
+    };
+    v.vt_used += 1;
+    let e = epoch();
+    v.vt[i] = VtEntry {
+        key,
+        atime: e,
+        mtime: e,
+        ctime: e,
+        btime: e,
+        gone_dev: 0,
+    };
+    Some(&mut v.vt[i])
+}
+
+/// Whether the inode still has a name: `gone_dev` is its real device once it has none
+/// (`VtEntry::gone_dev`), 0 while it has one. An inode without an entry needs none.
+pub fn names(key: u64, gone_dev: u64) {
+    if let Some(e) = slot(key, false) {
+        e.gone_dev = gone_dev;
     }
-    None
 }
 
 /// Record that the current call did `which` to the inode.
@@ -86,6 +94,7 @@ pub fn touch(key: u64, which: Which) {
                     mtime: t,
                     ctime: t,
                     btime: t,
+                    gone_dev: 0,
                 };
             }
             Which::Modify => {
@@ -110,6 +119,7 @@ pub fn get(key: u64) -> VtEntry {
                 mtime: e,
                 ctime: e,
                 btime: e,
+                gone_dev: 0,
             }
         }
     }

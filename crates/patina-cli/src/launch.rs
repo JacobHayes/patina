@@ -231,6 +231,8 @@ pub struct Start<'a> {
     pub faults: proto::faults::FaultCfg,
     /// Wall time after which the run ends `timeout` (`--timeout`).
     pub deadline: std::time::Instant,
+    /// Bytes the earlier incarnations' logs hold (they count against `--log-limit`).
+    pub log_used: u64,
 }
 
 /// What one incarnation left behind.
@@ -267,6 +269,8 @@ pub struct IncEnd {
     /// points passed.
     pub eligible: [u64; proto::faults::NKIND],
     pub crash_points: u64,
+    /// Bytes its boundary log and operation log hold.
+    pub log_bytes: u64,
 }
 
 pub use proto::vfs::SANDBOX_ROOTS;
@@ -529,6 +533,12 @@ pub fn run_incarnation(
             .map_err(|e| format!("create {name}: {e}"))
     };
     let log = create("boundary.log")?;
+    // Blocks allocated, as every later extension (`rt::log::grow`): a full filesystem fails
+    // here or at an extension, never as a store through the mapping.
+    let r = unsafe { libc::fallocate(log.as_raw_fd(), 0, 0, LOG_STEP as i64) };
+    if r != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EOPNOTSUPP) {
+        return Err(format!("boundary.log: {}", std::io::Error::last_os_error()));
+    }
     log.set_len(LOG_STEP)
         .map_err(|e| format!("boundary.log: {e}"))?;
     let opmeta = create("oplog.meta")?;
@@ -568,6 +578,7 @@ pub fn run_incarnation(
     cfg.spin_charge_ns = cfg.trap_charge_ns;
     cfg.compute_gap = o.plan.compute_gap;
     cfg.compute_charge_ns = proto::compute::CHARGE_NS;
+    cfg.log_limit = (c.log_limit << 20).saturating_sub(start.log_used);
     if c.pause_points {
         cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
     }
@@ -953,10 +964,10 @@ pub fn run_incarnation(
         }
     }
 
-    if !truncated.is_empty() && verdict.class != "infra" {
+    if !truncated.is_empty() && verdict.class != "infra" && verdict.class != "disk-full" {
         // More output than the run directory takes: the comparison would miss the rest.
         verdict = Verdict::new(
-            "infra",
+            "output-limit",
             format!(
                 "guest {} larger than {stdio_max} bytes (PATINA_STDIO_MAX)",
                 truncated.join(" and ")
@@ -1008,6 +1019,7 @@ pub fn run_incarnation(
         }),
         eligible: std::array::from_fn(|i| ctl.faults.eligible[i].load(Relaxed)),
         crash_points: ctl.faults.crash_points.load(Relaxed),
+        log_bytes: ctl.log_used(),
     };
     if std::env::var_os("PATINA_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.

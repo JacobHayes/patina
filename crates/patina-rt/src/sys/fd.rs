@@ -219,6 +219,7 @@ fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
     let Some(st) = fstat_raw(fd) else { return };
     if let Some(k) = vkey(&st) {
         vtime::touch(k, Which::Modify);
+        vtime::names(k, if st[2] == 0 { st[0] } else { 0 });
     }
     if crate::path::is_work(st[0]) {
         // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.

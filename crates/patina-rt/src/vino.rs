@@ -23,7 +23,7 @@ pub fn of(dev: u64, ino: u64) -> u64 {
         }
     }
     if n == VINO_CAP {
-        crate::sup::host_error(-(crate::raw::e::ENOMEM), 0, proto::ctl::HE_RUNTIME_ASSERT);
+        crate::sup::capacity(proto::ctl::LIMIT_VINO, VINO_CAP as u64);
     }
     v.vino[n] = VinoEntry { dev, ino };
     v.vino_used += 1;

@@ -161,7 +161,9 @@ fn exit_slow(ts: &mut ThreadState) {
 /// `COMPUTE_HELLO`: map the cell (first hook copy of this image), note the image and its kinds
 /// in the run's image table (`proto::ctl::ComputeTab`, keyed by the guest path; the first
 /// hello of an address space is a start), and answer the cell's address.
-pub fn hello(arg: u64) -> i64 {
+/// `COMPUTE_HELLO` from the system call instruction at `pc`, in the image whose hook copy
+/// asked.
+pub fn hello(arg: u64, pc: u64) -> i64 {
     let version = arg & 0xff;
     let kinds = arg >> 8;
     if version != proto::sdk::COMPUTE_VERSION || kinds & !proto::sdk::COMPUTE_KINDS != 0 {
@@ -195,17 +197,101 @@ pub fn hello(arg: u64) -> i64 {
         }
     }
     p.kinds |= kinds;
-    unsafe { proto::ctl::ComputeTab::at(crate::state::ctl_base()) }.note(
-        proc().guest_path(),
-        kinds,
-        start,
-    );
+    let mut path = [0u8; 4096];
+    let n = image_at(pc, &mut path);
+    let image = match n {
+        Some(n) => &path[..n],
+        None => proc().guest_path(),
+    };
+    unsafe { proto::ctl::ComputeTab::at(crate::state::ctl_base()) }.note(image, kinds, start);
     let c = ctl();
     bump(&c.compute.hellos, 1);
     c.compute
         .kinds
         .store(c.compute.kinds.load(Relaxed) | kinds, Relaxed);
     COMPUTE_CELL as i64
+}
+
+/// The path of the file mapped at `pc`, read from the kernel's map into `out`; None (the
+/// program is named) for the program itself, anonymous memory, or a map that cannot be read.
+fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
+    use crate::raw::*;
+    let fd = unsafe {
+        sc4(
+            nr::OPENAT,
+            (-100i64) as u64,
+            c"/proc/self/maps".as_ptr() as u64,
+            0o2000000,
+            0,
+        )
+    };
+    if fd < 0 {
+        return None;
+    }
+    let mut buf = [0u8; 8192];
+    let (mut have, mut hit) = (0usize, None);
+    'read: loop {
+        let r = unsafe {
+            sc3(
+                nr::READ,
+                fd as u64,
+                buf.as_mut_ptr() as u64 + have as u64,
+                (buf.len() - have) as u64,
+            )
+        };
+        if r <= 0 {
+            break;
+        }
+        have += r as usize;
+        let mut used = 0;
+        while let Some(nl) = buf[used..have].iter().position(|&c| c == b'\n') {
+            let line = &buf[used..used + nl];
+            used += nl + 1;
+            if let Some((dev, ino, path)) = maps_hit(line, pc) {
+                if ino != 0 && path.first() == Some(&b'/') && path.len() <= out.len() {
+                    out[..path.len()].copy_from_slice(path);
+                    hit = Some((dev, ino, path.len()));
+                }
+                break 'read;
+            }
+        }
+        if used == 0 && have == buf.len() {
+            break; // a line longer than the buffer
+        }
+        buf.copy_within(used..have, 0);
+        have -= used;
+    }
+    unsafe { sc1(nr::CLOSE, fd as u64) };
+    let (dev, ino, n) = hit?;
+    let me = crate::sys::fs::fstatat_raw(-100, proc().guest_path.as_ptr() as u64, 0);
+    (!me.is_some_and(|st| st[0] == dev && st[1] == ino)).then_some(n)
+}
+
+/// `(device, inode, path)` of a `/proc/self/maps` line when its range holds `pc`.
+fn maps_hit(line: &[u8], pc: u64) -> Option<(u64, u64, &[u8])> {
+    let mut f = line.splitn(6, |&c| c == b' ');
+    let (range, _perms, _off, dev, ino) = (f.next()?, f.next()?, f.next()?, f.next()?, f.next()?);
+    let rest = f.next().unwrap_or(b"");
+    let hex = |s: &[u8]| {
+        s.iter()
+            .map_while(|&c| (c as char).to_digit(16))
+            .fold(0u64, |v, d| v << 4 | d as u64)
+    };
+    let dash = range.iter().position(|&c| c == b'-')?;
+    if !(hex(&range[..dash])..hex(&range[dash + 1..])).contains(&pc) {
+        return None;
+    }
+    let colon = dev.iter().position(|&c| c == b':')?;
+    let ino = ino
+        .iter()
+        .map_while(|&c| (c as char).to_digit(10))
+        .fold(0u64, |v, d| v * 10 + d as u64);
+    let path = &rest[rest.iter().position(|&c| c != b' ').unwrap_or(rest.len())..];
+    Some((
+        crate::path::makedev(hex(&dev[..colon]), hex(&dev[colon + 1..])),
+        ino,
+        path,
+    ))
 }
 
 /// The trap of `COMPUTE_POINT` (after `enter`), with the program's registers in `frame`.

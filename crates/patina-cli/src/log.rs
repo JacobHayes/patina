@@ -25,6 +25,68 @@ pub fn load(path: &str) -> Res<Vec<Rec>> {
         .collect())
 }
 
+/// Records `[from, from + n)` of the log at `path` (fewer at its end).
+fn load_range(path: &Path, from: u64, n: u64) -> Res<Vec<Rec>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let err = |e: std::io::Error| format!("{}: {e}", path.display());
+    let mut f = std::fs::File::open(path).map_err(err)?;
+    f.seek(SeekFrom::Start(from * REC_SIZE as u64))
+        .map_err(err)?;
+    let mut b = vec![];
+    f.take(n * REC_SIZE as u64)
+        .read_to_end(&mut b)
+        .map_err(err)?;
+    Ok(b.as_chunks::<REC_SIZE>()
+        .0
+        .iter()
+        .map(|c| Rec::from_bytes(c))
+        .collect())
+}
+
+/// A boundary log a sweep cut to its first and last records (`boundary.cut` beside it):
+/// `boundary.log` holds the first `head` records, `boundary.tail` the records from `tail_from`
+/// to the end, `records` in all.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Cut {
+    pub records: u64,
+    pub head: u64,
+    pub tail_from: u64,
+}
+
+/// Cut the boundary log of the incarnation `inc` to its first and last `keep` bytes.
+pub fn cut(inc: &Path, keep: u64) -> Res<()> {
+    use std::io::{Read, Seek, SeekFrom};
+    let log = inc.join("boundary.log");
+    let err = |e: std::io::Error| format!("{}: {e}", log.display());
+    let len = std::fs::metadata(&log).map_err(err)?.len();
+    let n = len / REC_SIZE as u64;
+    let k = keep / REC_SIZE as u64;
+    if n <= 2 * k {
+        return Ok(());
+    }
+    let c = Cut {
+        records: n,
+        head: k,
+        tail_from: n - k,
+    };
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&log)
+        .map_err(err)?;
+    f.seek(SeekFrom::Start(c.tail_from * REC_SIZE as u64))
+        .map_err(err)?;
+    let mut tail = vec![];
+    f.read_to_end(&mut tail).map_err(err)?;
+    std::fs::write(inc.join("boundary.tail"), &tail).map_err(err)?;
+    f.set_len(c.head * REC_SIZE as u64).map_err(err)?;
+    // Last: a log is read as cut only once it is.
+    crate::result::write_json(
+        &inc.join("boundary.cut"),
+        &serde_json::to_value(&c).unwrap(),
+    )
+}
+
 pub fn describe(r: &Rec) -> String {
     let kind = RecKind::from_u8(r.kind);
     let what = match kind {
@@ -122,12 +184,44 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
         };
         let pa = da.join("boundary.log").display().to_string();
         let pb = db.join("boundary.log").display().to_string();
+        let show = |r: Option<Rec>| {
+            r.map(|r| describe(&r))
+                .unwrap_or_else(|| "(end of log)".into())
+        };
+        // A cut log (a sweep's kept run) is compared where it was kept: its first and last
+        // records and its length; the digest, compared after, covers the records between.
+        if let Ok(c) = crate::result::read_json(&da.join("boundary.cut")) {
+            let c: Cut = serde_json::from_value(c).map_err(|e| format!("{}: {e}", da.display()))?;
+            let pb = Path::new(&pb);
+            let len = std::fs::metadata(pb).map(|m| m.len()).unwrap_or(0) / REC_SIZE as u64;
+            if len != c.records {
+                return Ok(Some(format!(
+                    "inc-{k}: the recorded log has {} records, the replayed {len}",
+                    c.records
+                )));
+            }
+            let parts = [
+                (load(&pa)?, load_range(pb, 0, c.head)?, 0),
+                (
+                    load(&da.join("boundary.tail").display().to_string())?,
+                    load_range(pb, c.tail_from, c.records - c.tail_from)?,
+                    c.tail_from as usize,
+                ),
+            ];
+            for (x, y, at) in parts {
+                if let Some((i, ra, rb)) = first_difference(&x, &y) {
+                    return Ok(Some(format!(
+                        "inc-{k} record {}: recorded {}; replayed {}",
+                        at + i,
+                        show(ra),
+                        show(rb)
+                    )));
+                }
+            }
+            continue;
+        }
         let (x, y) = (load(&pa)?, load(&pb)?);
         if let Some((i, ra, rb)) = first_difference(&x, &y) {
-            let show = |r: Option<Rec>| {
-                r.map(|r| describe(&r))
-                    .unwrap_or_else(|| "(end of log)".into())
-            };
             return Ok(Some(format!(
                 "inc-{k} record {i}: recorded {}; replayed {}",
                 show(ra),

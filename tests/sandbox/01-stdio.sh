@@ -29,9 +29,9 @@ if command -v getfattr >/dev/null; then
 fi
 grep -q '^stdout size 1073741824' "$out/fdabuse/inc-0/stderr" || die "fdabuse: the guest's own ftruncate is not visible to it"
 echo "C3 fdabuse: fchmod, fsetxattr, ftruncate, fallocate and flock on fd 1 act on the sandbox memfd only"
-# Output larger than PATINA_STDIO_MAX is not silently cut: the run ends as internal.
+# Output larger than PATINA_STDIO_MAX is not silently cut: the run ends unsupported (output-limit).
 rm -rf "$out/big"
 PATINA_STDIO_MAX=100000 timeout 300 "$PATINA" run --seed 1 --out "$out/big" --mount "$G12":/guest:copy -- /guest/stdoutprobe >/dev/null 2>&1 || true
-[ "$(class "$out/big")" = internal ] || die "stdio max: class $(class "$out/big")"
-echo "stdio larger than PATINA_STDIO_MAX: internal ($(detail "$out/big"))"
+[ "$(class "$out/big")" = unsupported ] || die "stdio max: class $(class "$out/big")"
+echo "stdio larger than PATINA_STDIO_MAX: unsupported ($(detail "$out/big"))"
 rm -rf "$out/stdo" "$out/big" "$out/envprobe-load"

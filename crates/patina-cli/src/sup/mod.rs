@@ -15,6 +15,35 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering::*;
 
+/// What a record of the boundary log is, for the `log-limit` message.
+fn record_kind(r: &Rec) -> String {
+    match RecKind::from_u8(r.kind) {
+        Some(RecKind::Trap) => format!("{} system call records", proto::table::name(r.nr as u64)),
+        Some(RecKind::Preempt) => match r.nr {
+            1 => "counter-preemption records".into(),
+            2 => "spin-point records".into(),
+            _ => "compute-switch records".into(),
+        },
+        Some(RecKind::SupDecision) => "scheduling-decision records".into(),
+        Some(RecKind::SignalDelivery) => "signal-delivery records".into(),
+        Some(RecKind::InsnEmulation) => "instruction-emulation records".into(),
+        Some(RecKind::Injected) => "injected-fault records".into(),
+        _ => "other records".into(),
+    }
+}
+
+/// A write to the run directory failed with `errno`.
+fn log_write_verdict(errno: i32, what: &str) -> Verdict {
+    if errno == libc::ENOSPC || errno == libc::EDQUOT {
+        Verdict::new(
+            "disk-full",
+            format!("the filesystem holding the run directory is full ({what})"),
+        )
+    } else {
+        Verdict::new("infra", format!("host error: errno {errno} {what}"))
+    }
+}
+
 /// The guest's fixed environment; `--env` adds to it. `PATINA=1` tells a program it runs
 /// under Patina.
 const BASE_ENV: [&str; 5] = [
@@ -41,6 +70,7 @@ pub mod signal;
 mod stall;
 #[allow(dead_code)]
 pub mod time;
+mod vtgc;
 pub mod wire;
 
 #[allow(unused_imports)]
@@ -80,10 +110,22 @@ impl Sup {
         }
         let mut cap = self.ctl.log_cap.load(Relaxed);
         if len > cap {
-            cap += LOG_STEP;
-            if unsafe { libc::ftruncate(FD_LOG, cap as i64) } != 0 {
-                self.finish(Verdict::new("infra", "cannot extend the boundary log"));
+            // Blocks allocated now, as the runtime does (`rt::log::grow`).
+            let r = unsafe { libc::fallocate(FD_LOG, 0, cap as i64, LOG_STEP as i64) };
+            let err = std::io::Error::last_os_error();
+            let r = if r != 0 && err.raw_os_error() == Some(libc::EOPNOTSUPP) {
+                unsafe { libc::ftruncate(FD_LOG, (cap + LOG_STEP) as i64) }
+            } else {
+                r
+            };
+            if r != 0 {
+                let err = std::io::Error::last_os_error();
+                self.finish(log_write_verdict(
+                    err.raw_os_error().unwrap_or(0),
+                    "extending the boundary log",
+                ));
             }
+            cap += LOG_STEP;
             self.ctl.log_cap.store(cap, Relaxed);
         }
         let p = unsafe {
@@ -103,6 +145,13 @@ impl Sup {
     }
 
     fn append(&mut self, rec: &Rec) {
+        let c = self.ctl;
+        if c.log_used() + REC_SIZE as u64 > c.config.log_limit {
+            {
+                let v = self.log_limit_verdict();
+                self.finish(v);
+            }
+        }
         let off = self.ctl.log_len.load(Relaxed);
         self.ensure_log(off + REC_SIZE as u64);
         unsafe {
@@ -138,6 +187,51 @@ impl Sup {
         };
         self.append(&rec);
         seq
+    }
+
+    /// The run's logs reached `--log-limit`: what they hold, and which records filled them.
+    fn log_limit_verdict(&mut self) -> Verdict {
+        let c = self.ctl;
+        let len = c.log_len.load(Relaxed);
+        self.ensure_log(len);
+        let n = (len / REC_SIZE as u64) as usize;
+        let recs = unsafe { std::slice::from_raw_parts(self.log_base, n * REC_SIZE) };
+        // Counted by (kind, nr), named once.
+        let mut kinds: std::collections::HashMap<(u8, u32), u64> = Default::default();
+        for r in recs.as_chunks::<REC_SIZE>().0 {
+            let r = Rec::from_bytes(r);
+            *kinds.entry((r.kind, r.nr)).or_default() += 1;
+        }
+        let mut named: std::collections::BTreeMap<String, u64> = Default::default();
+        for ((kind, nr), v) in kinds {
+            let r = Rec {
+                kind,
+                nr,
+                ..Rec::from_bytes(&[0; REC_SIZE])
+            };
+            *named.entry(record_kind(&r)).or_default() += v;
+        }
+        let top = named
+            .into_iter()
+            .max_by_key(|(k, v)| (*v, std::cmp::Reverse(k.clone())))
+            .map(|(k, v)| format!(", {}% {k}", v * 100 / n.max(1) as u64))
+            .unwrap_or_default();
+        let ops = (c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed))
+            .saturating_sub(c.log_exempt.load(Relaxed));
+        let ops = if ops >= 1 << 20 {
+            format!(" and {} of operation log", crate::report::bytes(ops))
+        } else {
+            String::new()
+        };
+        Verdict::new(
+            "log-limit",
+            format!(
+                "{} of boundary log ({n} records{top}){ops} reached --log-limit: the program \
+                 had not finished, likely a livelock under this schedule (a run that is only \
+                 long, or writes that much to the work tree, needs a higher --log-limit)",
+                crate::report::bytes(len)
+            ),
+        )
     }
 
     fn slot(&self, i: usize) -> &'static Slot {
@@ -434,8 +528,30 @@ impl Sup {
                 self.finish(Verdict::new("unsupported", proto::table::name(a[0])));
             }
             Some(Op::HostError) => {
-                self.decide(Op::HostError as u32, idx, a, 0);
                 let [errno, nr, code, ..] = a;
+                if code == HE_LOG_LIMIT {
+                    // No record: the log has no room for one.
+                    {
+                        let v = self.log_limit_verdict();
+                        self.finish(v);
+                    }
+                }
+                self.decide(Op::HostError as u32, idx, a, 0);
+                if code == HE_CAPACITY {
+                    self.finish(Verdict::new(
+                        "capacity",
+                        format!(
+                            "the program keeps more than {nr} {} in use; Patina's table for them is full",
+                            limit_name(errno)
+                        ),
+                    ));
+                }
+                if code == HE_DISK_FULL {
+                    self.finish(log_write_verdict(
+                        -(errno as i64) as i32,
+                        &format!("in {}", proto::table::name(nr)),
+                    ));
+                }
                 if code == HE_OUTSIDE_SIGNAL {
                     self.finish(Verdict::new(
                         "infra",
@@ -509,6 +625,16 @@ impl Sup {
                         format!("runtime fault: signal {errno} at {nr:#x}"),
                     ));
                 }
+                if code == HE_RUNTIME_ASSERT {
+                    // args[1] is a value of the check (an address, a call), not always a call.
+                    self.finish(Verdict::new(
+                        "infra",
+                        format!(
+                            "runtime check failed: errno {}, value {nr:#x}",
+                            -(errno as i64)
+                        ),
+                    ));
+                }
                 self.finish(Verdict::new(
                     "infra",
                     format!(
@@ -519,6 +645,10 @@ impl Sup {
                 ));
             }
             Some(Op::SdkViolation) => self.sdk_violation(idx, a),
+            Some(Op::VtReclaim) => {
+                vtgc::reclaim(self.ctl);
+                Next::Continue(0)
+            }
             Some(Op::CrashPoint) => {
                 self.decide(Op::CrashPoint as u32, idx, a, 0);
                 self.finish(crash::crash_verdict(a, self.now()))
@@ -755,8 +885,19 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         }
     }
     if let Err(e) = crash::write_base(ctl, &work_dir(ctl)) {
+        if ["(os error 28)", "(os error 122)"]
+            .iter()
+            .any(|c| e.contains(c))
+        {
+            sup.finish(log_write_verdict(libc::ENOSPC, "writing the base records"));
+        }
         sup.finish(Verdict::new("infra", format!("base records: {e}")));
     }
+    // The starting tree's records are the program's input, not its output: not counted.
+    ctl.log_exempt.store(
+        ctl.oplog_len.load(Relaxed) + ctl.opdata_len.load(Relaxed),
+        Relaxed,
+    );
 
     ctl.timing[TM_COPIED].store(now_ns(), Relaxed);
     // The first guest: slot 0, reserved before the task exists.

@@ -5,7 +5,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import threading
 import time
 
 PATINA = os.environ["PATINA"]
@@ -199,35 +198,39 @@ print("a fault point that never fired under --buggify: exit 2, allowed: 0; one t
 host = os.path.join(RUNS, "host")
 os.makedirs(host)
 val = os.path.join(host, "val")
-stop = threading.Event()
-
-
-def churn():
-    n = 0
-    while not stop.is_set():
-        n += 1
-        with open(val + ".t", "w") as fh:
-            fh.write(str(n))
-        os.rename(val + ".t", val)
-        time.sleep(0.001)
-
-
 with open(val, "w") as fh:
     fh.write("0")
 st, rep, _ = sweep("steady", "--seeds", "1", "--mount", f"{host}:/h", "--", GUEST, "cat", "/h/val")
 if st != 1 or rep["groups"][0]["replay"]["result"] != "identical":
     die(f"steady host file: exit {st} {rep['groups']}")
-t = threading.Thread(target=churn)
-t.start()
-try:
-    st, rep, _ = sweep("churn", "--seeds", "1", "--mount", f"{host}:/h", "--", GUEST, "cat", "/h/val")
-finally:
-    stop.set()
-    t.join()
-g = rep["groups"][0]
-if st != 2 or g["outcome"] != "nondeterministic" or findings(rep):
-    die(f"changing host file: exit {st} {rep['groups']}")
-print(f"host file changing under the replay: {g['outcome']} ({g['replay']['message'][:80]}); steady: finding, identical")
+with open(val, "w") as fh:
+    fh.write("1")
+st, so, se = patina("replay", "--format", "json", rep["groups"][0]["first"]["dir"])
+r = json.loads(so or "{}")
+if st != 2 or r.get("outcome") != "nondeterministic":
+    die(f"host file changed before the replay: exit {st} {r.get('outcome')} {se[-500:]}")
+print(f"host file changed before the replay: {r['outcome']} ({r['message'][:80]}); steady: finding, identical")
+
+# A livelock ends log-limit at the same record in every run of a seed (the limit counts log,
+# not time); a sweep of it keeps each run's first and last records only, and a replay of such
+# a run still compares.
+lim = []
+for i in range(2):
+    d = os.path.join(RUNS, f"livelock-{i}")
+    patina("run", "--seed", "1", "--log-limit", "1", "--out", d, "--", GUEST, "livelock")
+    lim.append(result(d))
+    if os.path.getsize(os.path.join(d, "inc-0", "boundary.log")) > 1 << 20:
+        die(f"--log-limit 1: the log holds {os.path.getsize(os.path.join(d, 'inc-0', 'boundary.log'))} bytes")
+if [(r["outcome"], r["stop"]) for r in lim] != [("unsupported", "log-limit")] * 2 or lim[0]["digest"] != lim[1]["digest"]:
+    die(f"livelock: {[(r['outcome'], r['stop'], r['digest']) for r in lim]}")
+st, rep, text = sweep("livelock", "--seeds", "1..4", "--log-limit", "8", "--", GUEST, "livelock")
+kept = sum(os.path.getsize(os.path.join(p, f)) for p, _, fs in os.walk(os.path.join(RUNS, "livelock")) for f in fs)
+if [g["stop"] for g in rep["groups"]] != ["log-limit"] or kept > 4 * (5 << 19):
+    die(f"livelock sweep: {[(g['signature'], g['count']) for g in rep['groups']]}, {kept} bytes kept\n{text}")
+st, so, se = patina("replay", "--format", "json", os.path.join(RUNS, "livelock", "seed-2"))
+if json.loads(so or "{}").get("stop") != "log-limit":
+    die(f"replay of a cut log: exit {st} {so[:300]} {se[-300:]}")
+print(f"livelock: log-limit at digest {lim[0]['digest']} twice; a sweep of 4 at --log-limit 8 keeps {kept} bytes; a cut run replays")
 
 # Interrupted: the running children end, every remaining directory holds a finished run,
 # and the report covers them.

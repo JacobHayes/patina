@@ -157,8 +157,12 @@ const MAP_SHARED: u64 = 1;
 const MAP_ANON: u64 = 0x20;
 
 fn mmap(call: &mut dyn Call) -> i64 {
-    let [_, len, _, flags, fd, off] = args(call);
+    let [_, len, prot, flags, fd, off] = args(call);
     let r = mmap_place(call);
+    if r >= 0 && flags & 3 == 2 && flags & MAP_FIXED != 0 {
+        // A private mapping over a shared one: the shared record goes.
+        forget_shared(r as u64, page_up(len));
+    }
     if r >= 0 && flags & 3 != 0 && flags & 3 != 2 {
         // MAP_SHARED or MAP_SHARED_VALIDATE
         let _ = MAP_SHARED;
@@ -182,18 +186,26 @@ fn mmap(call: &mut dyn Call) -> i64 {
             (h >> 34) & 0x3fff_ffff
         };
         let off = if flags & MAP_ANON != 0 { 0 } else { off };
-        record_shared(r as u64, page_up(len), id, off);
+        record_shared(r as u64, page_up(len), id, off, prot & PROT_WRITE != 0);
     }
     r
 }
 
-fn record_shared(addr: u64, len: u64, id: u64, off: u64) {
+/// Record a shared mapping. With the table full, a read-only one goes unrecorded (a futex word
+/// there can be waited on but never changed by this process); a writable one ends the run,
+/// since a process-shared futex in it would be keyed as private and miss the other processes'
+/// wakes.
+fn record_shared(addr: u64, len: u64, id: u64, off: u64, writable: bool) {
     forget_shared(addr, len);
     let p = proc();
-    if p.nshared < p.shared.len() {
-        p.shared[p.nshared] = crate::state::Shared { addr, len, id, off };
-        p.nshared += 1;
+    if p.nshared == p.shared.len() {
+        if !writable {
+            return;
+        }
+        crate::sup::capacity(proto::ctl::LIMIT_SHARED, p.shared.len() as u64);
     }
+    p.shared[p.nshared] = crate::state::Shared { addr, len, id, off };
+    p.nshared += 1;
 }
 
 /// `[addr, addr+len)` is no longer mapped as it was: trim or drop overlapping records.
@@ -311,7 +323,13 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 crate::insn::patch::relocate(call.arg(0), call.arg(1), r as u64);
                 if let Some(m) = was {
                     forget_shared(old, page_up(oldlen));
-                    record_shared(r as u64, page_up(call.arg(2)), m.id, m.off + (old - m.addr));
+                    record_shared(
+                        r as u64,
+                        page_up(call.arg(2)),
+                        m.id,
+                        m.off + (old - m.addr),
+                        true,
+                    );
                 }
             }
             r

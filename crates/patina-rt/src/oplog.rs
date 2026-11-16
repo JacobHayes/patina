@@ -35,7 +35,7 @@ fn pwrite_all(fd: i32, mut off: u64, s: &[u8]) {
             )
         };
         if r <= 0 {
-            crate::sup::host_error(r, PWRITE, proto::ctl::HE_SYSCALL);
+            crate::sup::log_write_failed(r, PWRITE);
         }
         done += r as usize;
         off += r as u64;
@@ -480,7 +480,7 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     }
     let t = MAPS.get();
     if t.n == MAX_MAPS {
-        crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_RUNTIME_ASSERT);
+        crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
     }
     let hfd = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
     if hfd < 0 {
@@ -764,7 +764,10 @@ const AT_FDCWD_: i64 = -100;
 fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
     let d = dur();
     if ino != 0 && d.bump(ino).is_none() {
-        crate::sup::host_error(-e::ENOMEM, nr, proto::ctl::HE_RUNTIME_ASSERT);
+        crate::sup::capacity(
+            proto::ctl::LIMIT_FSYNC_FAILURES,
+            proto::oplog::ERRGEN_CAP as u64,
+        );
     }
     d.sync_gen += 1;
     crate::inject::note(

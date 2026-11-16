@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 P, GU, OUT = os.environ["PATINA"], os.environ["PATINA_GUESTS"], os.environ["OUT"]
 N = 20
-GUESTS = [("C", ["deadline", "deadline", "50"])]
+GUESTS = [("C", ["deadline", "deadline", "50"]), ("Go", ["go-deadline", "134217728"]), ("Rust", ["rs-deadline"])]
 COLS = [("seed's gap", []), ("gap 0", ["--fault", "compute-gap=0"])]
 WANT = 50_000_000
 

@@ -6,10 +6,12 @@
  *     never  a `sometimes` (rare-state) that never holds
  *     point  a fault point (tried-point) evaluated 50 times; it changes nothing
  *   Without a word, the same work done right: the increment is atomic and errors are retried.
- *   cat FILE   print FILE and exit 4 (a failure whose evidence is a host file) */
+ *   cat FILE   print FILE and exit 4 (a failure whose evidence is a host file)
+ *   livelock   two threads each yield until the other is done first: neither ever is */
 #include "patina.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,7 +65,22 @@ static void store(void) {
     exit(5);
 }
 
+static volatile int done[2];
+
+static void *polite(void *arg) {
+    long me = (long)arg;
+    while (!done[1 - me]) sched_yield();
+    done[me] = 1;
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "livelock")) {
+        pthread_t t[2];
+        for (long i = 0; i < 2; i++) pthread_create(&t[i], 0, polite, (void *)i);
+        for (int i = 0; i < 2; i++) pthread_join(t[i], 0);
+        return 0;
+    }
     if (argc > 2 && !strcmp(argv[1], "cat")) {
         char buf[256];
         int fd = open(argv[2], O_RDONLY);

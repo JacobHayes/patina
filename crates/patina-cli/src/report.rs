@@ -117,6 +117,25 @@ fn walk(d: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// A size in bytes, in the largest binary unit it fills (`1.0 GiB`, `512 KiB`, `96 B`).
+pub fn bytes(n: u64) -> String {
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut unit = "B";
+    for u in UNITS {
+        if v < 1024.0 {
+            break;
+        }
+        v /= 1024.0;
+        unit = u;
+    }
+    if unit == "B" {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {unit}")
+    }
+}
+
 /// `1 finding`, `2 findings`.
 pub fn count(n: usize, word: &str) -> String {
     if n == 1 {
@@ -196,6 +215,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "crash",
         "time-limit",
         "timeout",
+        "log-limit",
         "buggify",
         "allow-unmet",
         "host-cpu",
@@ -251,6 +271,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if cfg.timeout != d.timeout {
             flag("--timeout", cfg.timeout.to_string());
+        }
+        if cfg.log_limit != d.log_limit {
+            flag("--log-limit", cfg.log_limit.to_string());
         }
         if cfg.pmu.on {
             flag("--preempt", "branches".into());

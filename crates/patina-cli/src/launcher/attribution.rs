@@ -111,13 +111,10 @@ impl Faults {
         }
         self.crash_points += end.crash_points;
         let b = std::fs::read(inc.join("boundary.log")).unwrap_or_default();
-        let recs: Vec<Rec> = b
-            .as_chunks::<REC_SIZE>()
-            .0
-            .iter()
-            .map(|c| Rec::from_bytes(c))
-            .collect();
-        for (i, r) in recs.iter().enumerate() {
+        // Decoded as needed, never all at once: a log can be as large as --log-limit.
+        let chunks = b.as_chunks::<REC_SIZE>().0;
+        for (i, c) in chunks.iter().enumerate() {
+            let r = &Rec::from_bytes(c);
             if r.kind != RecKind::Injected as u8 {
                 continue;
             }
@@ -132,8 +129,9 @@ impl Faults {
                 "vtime_ms": r.vclock_ns / 1_000_000,
                 "fault": fault.unwrap_or(if kind == INJ_FSYNC_REPORT { "fsync-report" } else { "other" }),
             });
-            let name = recs
+            let name = chunks
                 .get(i + 1)
+                .map(|c| Rec::from_bytes(c))
                 .filter(|n| n.kind == RecKind::Name as u8 && n.seq == r.seq);
             match name {
                 Some(n) => {

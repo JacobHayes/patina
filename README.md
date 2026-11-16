@@ -125,7 +125,7 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 | `liveness` | 1 | every thread blocked, or the virtual time limit passed |
 | `failure` | 1 | the program exited nonzero |
 | `crash` | 1 | the program died on a signal |
-| `unsupported` | 2 | the program did something Patina does not model; the message names it |
+| `unsupported` | 2 | the program did something Patina does not model, or never finished and filled the log to `--log-limit` (stop `log-limit`); the message names it |
 | `timeout` | 2 | the wall-time limit passed |
 | `nondeterministic` | 2 | a replay differed from its run: a Patina bug, please report it |
 | `internal` | 2 | Patina failed, or the host refused a resource |
