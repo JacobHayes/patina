@@ -1,5 +1,5 @@
 //! `patina sweep`: a list of seeds (and optionally cases), each one ordinary `patina run` in
-//! a child process into `OUT/seed-N[/CASE]`, `-j` at a time, each child pinned to its own CPU.
+//! a child process into `OUT/seed-N[/K-NAME]`, `-j` at a time, each child pinned to its own CPU.
 //! A new finding prints one line at once; progress is a live line on a terminal and a plain
 //! line every 10 s otherwise. When the runs are done, the first seed of every finding is
 //! replayed once (a difference makes the group `nondeterministic`), logs are pruned by
@@ -12,7 +12,7 @@
 
 use crate::cli::{find_flag, Args, Res};
 use crate::outcome::Outcome;
-use crate::report::{self, case_dir, SweepHead};
+use crate::report::{self, SweepHead};
 use crate::result::{error_json, read_json, write_json};
 use crate::{error, Fail};
 use std::collections::{BTreeSet, VecDeque};
@@ -89,10 +89,7 @@ const SWEEP_SCHEMA: &str = "patina.sweep/v1";
 /// (its SHA-256) and the resolved settings with the command. The seeds, the cases, `-j`,
 /// `--keep` and the stopping rules are not part of it: a sweep with more seeds or cases is the
 /// same sweep, extended.
-fn identity(
-    cfg: &crate::config::Config,
-    program: &crate::config::Program,
-) -> Res<serde_json::Value> {
+fn identity(cfg: &crate::config::Config, program: Option<&String>) -> Res<serde_json::Value> {
     let mut c = cfg.clone();
     c.seed = 0;
     c.host_cpu = None;
@@ -101,7 +98,7 @@ fn identity(
     Ok(serde_json::json!({
         "schema": SWEEP_SCHEMA,
         "patina": format!("{} {}", env!("CARGO_PKG_VERSION"), crate::config::sha256_file(&exe)?),
-        "program": program.sha256,
+        "program": program,
         "config": c,
     }))
 }
@@ -134,6 +131,181 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// A case run's directory holds its case's text in this file.
+pub const CASE_FILE: &str = "case";
+/// Longest name a case's directory takes from the case (characters).
+const CASE_NAME_MAX: usize = 40;
+
+/// One line of a `--cases` file.
+struct Case {
+    /// The line as written.
+    text: String,
+    /// Its line number in the file.
+    line_no: usize,
+    /// The command its run is given.
+    cmd: Vec<String>,
+    /// Its directory under `seed-N`: `K-NAME`, K its position among the cases.
+    dir: String,
+}
+
+/// Read a cases file: one case per line; empty lines and lines starting with `#` are
+/// skipped. With a command (`cmd`), `{}` in it is replaced by the line; without one, the line
+/// is the whole command, its words split as a shell would (quotes and backslashes, no
+/// expansion).
+fn read_cases(f: &Path, cmd: &[String]) -> Res<Vec<Case>> {
+    let at = f.display();
+    let t = std::fs::read_to_string(f).map_err(|e| format!("--cases {at}: {e}"))?;
+    if !cmd.is_empty() && !cmd.iter().any(|x| x.contains("{}")) {
+        return Err(format!(
+            "--cases {at}: the command has no {{}} to put the case in (or give no command: \
+             then each line is a whole command)"
+        ));
+    }
+    let mut out = vec![];
+    for (n, line) in t.lines().enumerate() {
+        let text = line.trim().to_string();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        let w = words(&text);
+        let run = if cmd.is_empty() {
+            match w {
+                Ok(w) => w,
+                Err(e) => return Err(format!("--cases {at} line {}: {e}", n + 1)),
+            }
+        } else {
+            cmd.iter().map(|x| x.replace("{}", &text)).collect()
+        };
+        let named =
+            words(&text).unwrap_or_else(|_| text.split_whitespace().map(String::from).collect());
+        out.push(Case {
+            dir: format!("{}-{}", out.len() + 1, case_name(&named)),
+            text,
+            line_no: n + 1,
+            cmd: run,
+        });
+    }
+    if out.is_empty() {
+        return Err(format!("--cases {at}: no cases"));
+    }
+    Ok(out)
+}
+
+/// The words of a line as `sh` splits them: whitespace separates, `'...'` is literal,
+/// `"..."` keeps `\"`, `\\`, `\$` and `` \` `` escapes, a backslash outside quotes takes the
+/// next character. Nothing is expanded.
+pub fn words(line: &str) -> Res<Vec<String>> {
+    let mut out = vec![];
+    let mut cur = String::new();
+    let mut word = false;
+    let mut it = line.chars();
+    while let Some(c) = it.next() {
+        match c {
+            c if c.is_whitespace() => {
+                if word {
+                    out.push(std::mem::take(&mut cur));
+                    word = false;
+                }
+            }
+            '\'' => {
+                word = true;
+                loop {
+                    match it.next() {
+                        Some('\'') => break,
+                        Some(x) => cur.push(x),
+                        None => return Err("unterminated '".into()),
+                    }
+                }
+            }
+            '"' => {
+                word = true;
+                loop {
+                    match it.next() {
+                        Some('"') => break,
+                        Some('\\') => match it.next() {
+                            Some(x) if "\"\\$`".contains(x) => cur.push(x),
+                            Some(x) => {
+                                cur.push('\\');
+                                cur.push(x);
+                            }
+                            None => return Err("unterminated \"".into()),
+                        },
+                        Some(x) => cur.push(x),
+                        None => return Err("unterminated \"".into()),
+                    }
+                }
+            }
+            '\\' => {
+                word = true;
+                match it.next() {
+                    Some(x) => cur.push(x),
+                    None => return Err("a backslash at the end of the line".into()),
+                }
+            }
+            c => {
+                word = true;
+                cur.push(c);
+            }
+        }
+    }
+    if word {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// A short name for a case's directory: its last word that is not an option (else its last
+/// word), after the last `/`, with every character but letters, digits, `.`, `_` and `-`
+/// made `_`.
+fn case_name(words: &[String]) -> String {
+    let w = words
+        .iter()
+        .rev()
+        .find(|w| !w.starts_with('-'))
+        .or(words.last())
+        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        .unwrap_or("");
+    let mut n = String::new();
+    for c in w.chars() {
+        let c = if c.is_ascii_alphanumeric() || "._-".contains(c) {
+            c
+        } else {
+            '_'
+        };
+        if !(c == '_' && n.ends_with('_')) {
+            n.push(c);
+        }
+        if n.len() >= CASE_NAME_MAX {
+            break;
+        }
+    }
+    let n = n.trim_start_matches('.').to_string();
+    if n.is_empty() {
+        "case".into()
+    } else {
+        n
+    }
+}
+
+/// Whether `dir` holds a finished run of this case (its `case` file) and program (its
+/// SHA-256 in `run.json`): such a run is kept when a sweep resumes.
+fn done_before(dir: &Path, case: Option<&str>, sha: &str) -> bool {
+    if !dir.join("result.json").is_file() {
+        return false;
+    }
+    if let Some(c) = case {
+        let have = std::fs::read_to_string(dir.join(CASE_FILE)).unwrap_or_default();
+        if have.trim_end_matches('\n') != c {
+            return false;
+        }
+        let run = read_json(&dir.join("run.json")).unwrap_or_default();
+        if run["program"]["sha256"] != sha {
+            return false;
+        }
+    }
+    true
+}
+
 /// Default width: half the CPUs this process may use, at most 8.
 fn default_jobs() -> usize {
     (crate::launch::allowed_cpus().len() / 2).clamp(1, 8)
@@ -142,7 +314,8 @@ fn default_jobs() -> usize {
 enum Job {
     Run {
         seed: u64,
-        case: Option<String>,
+        /// Index into the cases.
+        case: Option<usize>,
         dir: PathBuf,
     },
     Replay {
@@ -310,21 +483,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             .ok_or_else(|| error("--seeds is required (A..B, or a list N,M,...)".into()))?,
     )
     .map_err(error)?;
-    let cases: Option<Vec<String>> = match a.last("--cases") {
+    // The configuration every run resolves to, checked once here rather than failing in
+    // every run. With --cases and no command, each line is a whole command.
+    let cfg = crate::config::resolve_any(a).map_err(error)?;
+    let cases: Option<Vec<Case>> = match a.last("--cases") {
         None => None,
-        Some(f) => {
-            let t = std::fs::read_to_string(f).map_err(|e| error(format!("--cases {f}: {e}")))?;
-            let c: Vec<String> = t
-                .lines()
-                .map(|l| l.trim_end().to_string())
-                .filter(|l| !l.trim().is_empty())
-                .collect();
-            if c.is_empty() {
-                return Err(error(format!("--cases {f}: no cases")));
-            }
-            Some(c)
-        }
+        Some(f) => Some(read_cases(Path::new(f), &cfg.cmd).map_err(error)?),
     };
+    if cases.is_none() && cfg.cmd.is_empty() {
+        return Err(error(
+            "no program: give -- CMD ARGS..., or [run] cmd in patina.toml".into(),
+        ));
+    }
     let keep = match a.last("--keep").unwrap_or("fail") {
         "fail" => Keep::Fail,
         "all" => Keep::All,
@@ -342,26 +512,38 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     };
     let max_findings = a.num::<usize>("--max-findings").map_err(error)?;
     let budget = a.num::<u64>("--budget").map_err(error)?;
-    // The configuration every run resolves to, checked once here rather than failing in
-    // every run; its command is what each run is given (with the case substituted).
-    let cfg = crate::config::resolve(a).map_err(error)?;
-    let subst = |case: Option<&str>| -> Vec<String> {
-        match case {
-            Some(c) => cfg.cmd.iter().map(|x| x.replace("{}", c)).collect(),
-            None => cfg.cmd.clone(),
+    let cmd_of = |case: Option<usize>| -> Vec<String> {
+        match (case, &cases) {
+            (Some(i), Some(c)) => c[i].cmd.clone(),
+            _ => cfg.cmd.clone(),
         }
     };
-    if cases.is_some() && !cfg.cmd.iter().any(|x| x.contains("{}")) {
-        return Err(error(
-            "--cases: the command has no {} to put the case in".into(),
-        ));
+    // Every program the runs start, resolved and hashed once: a run already in the sweep
+    // directory is kept only if it ran the same program.
+    let mut programs: std::collections::BTreeMap<String, crate::config::Program> =
+        Default::default();
+    let list: Vec<Option<usize>> = match &cases {
+        Some(c) => (0..c.len()).map(Some).collect(),
+        None => vec![None],
+    };
+    for &i in &list {
+        let cmd = cmd_of(i);
+        if !programs.contains_key(&cmd[0]) {
+            let p = crate::config::program(&cmd[0], &cfg.mounts).map_err(|e| {
+                error(match (i, &cases) {
+                    (Some(i), Some(c)) => format!("--cases line {}: {e}", c[i].line_no),
+                    _ => e,
+                })
+            })?;
+            programs.insert(cmd[0].clone(), p);
+        }
     }
     let probe_program = {
         let mut probe = cfg.clone();
-        if let Some(c) = &cases {
-            probe.cmd = subst(Some(&c[0]));
-        }
-        let o = probe.opts().map_err(error)?;
+        probe.cmd = cmd_of(list[0]);
+        let o = probe
+            .opts_with(programs[&probe.cmd[0]].clone())
+            .map_err(error)?;
         crate::launch::preflight(&o).map_err(error)?;
         o.program
     };
@@ -383,7 +565,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             )));
         }
     }
-    let ident = identity(&cfg, &probe_program).map_err(error)?;
+    // With whole-command cases there is no one program: each run's is checked on resume.
+    let ident =
+        identity(&cfg, (!cfg.cmd.is_empty()).then_some(&probe_program.sha256)).map_err(error)?;
     if out.is_dir() {
         if let Some(why) = differs(&out, &ident) {
             eprintln!(
@@ -399,17 +583,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let mut jobs = vec![];
     let mut total = 0;
     for &seed in &seeds {
-        let case_list: Vec<Option<String>> = match &cases {
-            Some(c) => c.iter().cloned().map(Some).collect(),
-            None => vec![None],
-        };
-        for case in case_list {
+        for &case in &list {
             let mut dir = out.join(format!("seed-{seed}"));
-            if let Some(c) = &case {
-                dir = dir.join(case_dir(c));
+            if let (Some(i), Some(c)) = (case, &cases) {
+                dir = dir.join(&c[i].dir);
             }
             total += 1;
-            if dir.join("result.json").is_file() {
+            let sha = &programs[&cmd_of(case)[0]].sha256;
+            if done_before(
+                &dir,
+                case.map(|i| cases.as_ref().unwrap()[i].text.as_str()),
+                sha,
+            ) {
                 continue;
             }
             if dir.exists() {
@@ -454,7 +639,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     .args(["--format", "json"])
                     .args(&pass)
                     .arg("--")
-                    .args(subst(case.as_deref()));
+                    .args(cmd_of(*case));
             }
             Job::Replay { dir, out } => {
                 c.arg("replay")
@@ -471,7 +656,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
+    let case_text: Vec<String> = cases.iter().flatten().map(|c| c.text.clone()).collect();
     let mut st = State {
+        cases: case_text,
         tty: std::io::stderr().is_terminal(),
         t0: Instant::now(),
         last_line: Instant::now(),
@@ -510,7 +697,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     None => vec![d],
                     Some(c) => c
                         .iter()
-                        .map(|c| d.join(case_dir(c)))
+                        .map(|c| d.join(&c.dir))
                         .filter(|x| x.is_dir() && !x.join("result.json").exists())
                         .collect(),
                 };
@@ -608,6 +795,8 @@ fn replayed(d: Done) {
 
 /// The sweep's counters and its terminal output.
 struct State {
+    /// Each case's text, for its `new:` line and its run directory's `case` file.
+    cases: Vec<String>,
     tty: bool,
     t0: Instant,
     last_line: Instant,
@@ -705,6 +894,7 @@ impl State {
         let Job::Run { seed, case, dir } = &d.job else {
             return None;
         };
+        let case = case.map(|i| self.cases[i].clone());
         if !dir.join("result.json").is_file() {
             // The run ended without a result (a request patina refused): keep its answer.
             let v = serde_json::from_slice::<serde_json::Value>(&d.stdout)
@@ -713,6 +903,9 @@ impl State {
                 .unwrap_or_else(|| error_json(Outcome::Internal, "internal", &tail(&d.stderr)));
             let _ = std::fs::create_dir_all(dir);
             let _ = write_json(&dir.join("result.json"), &v);
+        }
+        if let Some(c) = &case {
+            let _ = std::fs::write(dir.join(CASE_FILE), format!("{c}\n"));
         }
         let r = read_json(&dir.join("result.json")).unwrap_or_default();
         let outcome = r["outcome"].as_str().unwrap_or("internal");
@@ -770,5 +963,46 @@ impl State {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn case_lines_split_as_a_shell_would() {
+        assert_eq!(
+            words(r#"a 'b c' "d \"e\" \$f" g\ h"#).unwrap(),
+            v(&["a", "b c", r#"d "e" $f"#, "g h"])
+        );
+        assert!(words("a 'b").is_err());
+        assert_eq!(words("  ").unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn case_names_are_short_and_safe() {
+        let n = |s: &str| case_name(&words(s).unwrap());
+        assert_eq!(
+            n("/t/deps/http_flow-1a2b --exact tests::a::b --test-threads=1"),
+            "tests_a_b"
+        );
+        assert_eq!(
+            n("python3 -m unittest test_store.Store.x"),
+            "test_store.Store.x"
+        );
+        assert_eq!(n("../.hidden"), "hidden");
+        for s in ["a/b c/d", "x y", "'/' ", "..", "--only"] {
+            let c = n(s);
+            assert!(
+                !c.is_empty() && !c.contains(['/', ' ']) && !c.starts_with('.'),
+                "{s}: {c}"
+            );
+        }
+        assert!(n(&"x".repeat(500)).len() <= CASE_NAME_MAX);
     }
 }

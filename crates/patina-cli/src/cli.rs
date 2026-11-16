@@ -289,7 +289,7 @@ pub const FLAGS: &[Flag] = &[
         "--cases",
         "FILE",
         "none",
-        "one case per line; each (case, seed) is one run, {} in the command is the case",
+        "one case per line, each (case, seed) one run: a line is a whole command (shell quoting), or fills {} in the command after --",
         &[Cmd::Sweep],
     ),
     flag(

@@ -4,6 +4,7 @@
  *            `always` checks the total: on some schedules an update is lost
  *     fserr  a write or fsync error on /work/data exits 3 instead of being retried
  *     never  a `sometimes` (rare-state) that never holds
+ *     point  a fault point (tried-point) evaluated 50 times; it changes nothing
  *   Without a word, the same work done right: the increment is atomic and errors are retried.
  *   cat FILE   print FILE and exit 4 (a failure whose evidence is a host file) */
 #include "patina.h"
@@ -14,7 +15,7 @@
 #include <string.h>
 #include <unistd.h>
 
-static int race, fserr, never;
+static int race, fserr, never, point;
 static volatile long counter;
 static long written;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -74,6 +75,7 @@ int main(int argc, char **argv) {
         race |= !strcmp(argv[i], "race");
         fserr |= !strcmp(argv[i], "fserr");
         never |= !strcmp(argv[i], "never");
+        point |= !strcmp(argv[i], "point");
     }
     pthread_t t[2];
     for (int i = 0; i < 2; i++) pthread_create(&t[i], 0, bump, 0);
@@ -82,6 +84,7 @@ int main(int argc, char **argv) {
     PATINA_SOMETIMES(counter == 20, "all-counted");
     /* Holds on every run unless "never" asks for a state that cannot happen. */
     PATINA_SOMETIMES(never ? counter > 100 : counter == 20, "rare-state");
+    for (int i = 0; point && i < 50; i++) (void)PATINA_BUGGIFY("tried-point");
     store();
     return 0;
 }

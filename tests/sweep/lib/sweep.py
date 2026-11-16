@@ -164,6 +164,36 @@ if key(sep) != key(rep):
     die(f"report over separate runs: {key(sep)}\nthe sweep: {key(rep)}")
 print(f"--cases: 12 runs, groups by case {[(g['case'], g['count']) for g in rep['groups']]}; report over 12 separate runs agrees")
 
+# Whole-command cases: each line its own program and arguments (two programs here), in a
+# directory with a short name; the report names the whole case and finds what the {} form
+# found; the same sweep resumes without running anything.
+cmds = os.path.join(RUNS, "cmds.txt")
+with open(cmds, "w") as fh:
+    fh.write(f"{GUEST} race\n# not a case\n'{GUEST}' \"fserr\"\n/bin/sh -c 'exit 0'\n")
+st, rep, text = sweep("cmds", "--seeds", "1..4", "--cases", cmds, *FS)
+if rep["runs"] != 12:
+    die(f"whole-command cases: {rep['runs']} runs\n{text}")
+names = [n for s in range(1, 5) for n in os.listdir(os.path.join(RUNS, "cmds", f"seed-{s}"))]
+if any(" " in n or len(n) > 48 for n in names):
+    die(f"whole-command cases: directory names {names}")
+by_word = lambda rep: sorted((g["signature"], g["case"].split()[-1].strip("'\""), g["seeds"]) for g in rep["groups"])
+_, cases_rep = report(os.path.join(RUNS, "cases"))
+if by_word(rep) != by_word(cases_rep) or not all(g["case"].startswith((GUEST, f"'{GUEST}'")) for g in rep["groups"]):
+    die(f"whole-command cases: {by_word(rep)}\nthe {{}} form: {by_word(cases_rep)}")
+st2, rep2, text2 = sweep("cmds", "--seeds", "1..4", "--cases", cmds, *FS)
+if "running 0" not in text2 or rep2["groups"] != rep["groups"]:
+    die(f"whole-command cases did not resume:\n{text2}")
+print(f"whole-command cases: 12 runs of two programs, groups {[(g['case'], g['count']) for g in rep['groups']]}; resumes")
+
+# A fault point that never fires in a sweep with --buggify is unmet, as a `sometimes` that never
+# holds is (exit 2, allowable); one that fires is not.
+st, rep, _ = sweep("quiet", "--seeds", "1..4", "--buggify", "--fault", "point:tried-point=0", "--", GUEST, "point")
+st2, rep2, _ = sweep("loud", "--seeds", "1..4", "--buggify", "--fault", "point:tried-point=1000", "--", GUEST, "point")
+st3, _ = report("--allow-unmet", "tried-point", os.path.join(RUNS, "quiet"))
+if (st, st2, st3) != (2, 0, 0) or rep["sdk"]["buggify_never_fired"] != ["tried-point"] or rep2["sdk"]["buggify_never_fired"]:
+    die(f"buggify never fired: exit {st} {rep['sdk']}; firing: exit {st2} {rep2['sdk']}; allowed: exit {st3}")
+print("a fault point that never fired under --buggify: exit 2, allowed: 0; one that fired: 0")
+
 # A host file that changes between the run and its replay: nondeterministic, not a finding.
 # Without the change (red/green), the same failure is a finding that replays identically.
 host = os.path.join(RUNS, "host")

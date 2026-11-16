@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 pub const REPORT_SCHEMA: &str = "patina.report/v1";
+/// Labels of each unmet kind the text names; the JSON has all of them.
+const LABELS_SHOWN: usize = 5;
 
 /// One finished run found under the report's directories.
 pub struct Run {
@@ -50,26 +52,6 @@ pub fn main(a: &Args) -> Res<ExitCode> {
     Ok(ExitCode::from(v["exit"].as_u64().unwrap_or(2) as u8))
 }
 
-/// The directory name of a case: the case with `%`, `/` and a leading `.` escaped.
-pub fn case_dir(case: &str) -> String {
-    let mut s = String::new();
-    for (i, c) in case.chars().enumerate() {
-        match c {
-            '%' => s.push_str("%25"),
-            '/' => s.push_str("%2F"),
-            '.' if i == 0 => s.push_str("%2E"),
-            c => s.push(c),
-        }
-    }
-    s
-}
-
-fn case_name(dir: &str) -> String {
-    dir.replace("%2F", "/")
-        .replace("%2E", ".")
-        .replace("%25", "%")
-}
-
 /// Every run directory (one holding `result.json`) at or under `dirs`, in path order.
 /// Directories whose names start with `.` (a sweep's replays) are skipped.
 pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
@@ -90,14 +72,18 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
             .as_u64()
             .or(run["seed"].as_u64())
             .unwrap_or(0);
-        // A sweep's case runs live in OUT/seed-N/CASE.
+        // A sweep's case runs live in OUT/seed-N/K-NAME, with the case's text in a file;
+        // other runs in such a layout are named by their directory.
+        let written = std::fs::read_to_string(dir.join(crate::sweep::CASE_FILE))
+            .ok()
+            .map(|c| c.trim_end_matches('\n').to_string());
         let case = match (
             dir.parent()
                 .and_then(|p| p.file_name())
                 .and_then(|n| n.to_str()),
             dir.file_name().and_then(|n| n.to_str()),
         ) {
-            (Some(p), Some(n)) if p == format!("seed-{seed}") => Some(case_name(n)),
+            (Some(p), Some(n)) if p == format!("seed-{seed}") => written.or(Some(n.to_string())),
             _ => None,
         };
         let replay = read_json(&dir.join("replay.json")).ok();
@@ -301,7 +287,8 @@ struct Group<'a> {
 
 /// The report over `runs`: its JSON (with `exit`) and its text.
 pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value, String) {
-    let mut allow: BTreeSet<String> = allow.iter().cloned().collect();
+    let free = crate::signature::checkout_free;
+    let mut allow: BTreeSet<String> = allow.iter().map(|l| free(l)).collect();
     for r in runs {
         for l in r.run["config"]["allow-unmet"]
             .as_array()
@@ -309,7 +296,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             .flatten()
         {
             if let Some(l) = l.as_str() {
-                allow.insert(l.to_string());
+                allow.insert(free(l));
             }
         }
     }
@@ -366,14 +353,17 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         .filter(|(k, v)| **v == 0 && !allow.contains(*k))
         .map(|(k, _)| k.clone())
         .collect();
-    // The SDK fold.
+    // The SDK fold, by checkout-free label. Fault points count only in runs that let them
+    // fire (`--buggify`).
     let mut sites: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
     for r in runs {
+        let buggify = r.run["config"]["buggify"] == true;
         for s in r.result["sdk"]["sites"].as_array().into_iter().flatten() {
-            let k = (
-                s["kind"].as_str().unwrap_or("").to_string(),
-                s["label"].as_str().unwrap_or("").to_string(),
-            );
+            let kind = s["kind"].as_str().unwrap_or("");
+            if kind == "buggify" && !buggify {
+                continue;
+            }
+            let k = (kind.to_string(), free(s["label"].as_str().unwrap_or("")));
             let e = sites.entry(k).or_default();
             e.0 += s["evaluated"].as_u64().unwrap_or(0);
             e.1 += s["held"].as_u64().unwrap_or(0);
@@ -388,6 +378,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
     };
     let never_held = unmet("sometimes", &|_, h| h == 0);
     let never_hit = unmet("reachable", &|_, h| h == 0);
+    let never_fired = unmet("buggify", &|_, h| h == 0);
     let never_evaluated = unmet("always", &|e, _| e == 0);
     let stalls = runs
         .iter()
@@ -399,8 +390,11 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             *limits.entry(l).or_default() += 1;
         }
     }
-    let vacuous =
-        runs.is_empty() || !never_held.is_empty() || !never_hit.is_empty() || !idle.is_empty();
+    let vacuous = runs.is_empty()
+        || !never_held.is_empty()
+        || !never_hit.is_empty()
+        || !never_fired.is_empty()
+        || !idle.is_empty();
 
     // Each group's JSON, findings first, then by size.
     let mut gj: Vec<Value> = groups
@@ -479,6 +473,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         "sdk": {
             "sometimes_never_held": never_held,
             "reachable_never_hit": never_hit,
+            "buggify_never_fired": never_fired,
             "always_never_evaluated": never_evaluated,
         },
         "faults": {"configured": configured, "eligible_zero": idle},
@@ -584,15 +579,32 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
             .collect()
     };
     let mut tail = vec![];
+    // A count and the first few labels of each kind; the full lists are in the JSON.
+    let full = if head.is_some() {
+        "report.json"
+    } else {
+        "--format json"
+    };
     for (k, what) in [
         ("sometimes_never_held", "`sometimes` never held"),
         ("reachable_never_hit", "`reachable` never hit"),
+        ("buggify_never_fired", "`buggify` never fired"),
         ("always_never_evaluated", "`always` never evaluated"),
     ] {
         let l = names(&v["sdk"][k]);
-        if !l.is_empty() {
-            tail.push(format!("sdk: {what}: {}", l.join(", ")));
+        if l.is_empty() {
+            continue;
         }
+        let more = l.len().saturating_sub(LABELS_SHOWN);
+        let mut line = format!(
+            "sdk: {what}: {}: {}",
+            l.len(),
+            l[..l.len().min(LABELS_SHOWN)].join(", ")
+        );
+        if more > 0 {
+            line.push_str(&format!(", and {more} more ({full})"));
+        }
+        tail.push(line);
     }
     for c in names(&v["faults"]["eligible_zero"]) {
         tail.push(format!("faults: {c} eligible 0 times: nothing to act on"));

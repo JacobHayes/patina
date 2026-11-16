@@ -437,6 +437,15 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
 
 /// The resolved configuration of `run` and `verify`.
 pub fn resolve(a: &Args) -> Res<Config> {
+    let c = resolve_any(a)?;
+    if c.cmd.is_empty() {
+        return Err("no program: give -- CMD ARGS..., or [run] cmd in patina.toml".into());
+    }
+    Ok(c)
+}
+
+/// The resolved configuration, perhaps without a command (a sweep whose cases are commands).
+pub fn resolve_any(a: &Args) -> Res<Config> {
     let mut c = Config::default();
     let file = match a.last("--config") {
         Some(f) => Some(PathBuf::from(f)),
@@ -494,9 +503,6 @@ pub fn resolve(a: &Args) -> Res<Config> {
     }
     if let Some(cmd) = a.cmd.as_ref().filter(|v| !v.is_empty()) {
         c.cmd = cmd.clone();
-    }
-    if c.cmd.is_empty() {
-        return Err("no program: give -- CMD ARGS..., or [run] cmd in patina.toml".into());
     }
     if let Some(w) = &c.work {
         if !w.is_dir() {

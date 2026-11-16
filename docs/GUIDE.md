@@ -86,10 +86,12 @@ lacks (more seeds, or after an interrupt), and any other sweep replaces the dire
 rebuild and rerun the same command: the old runs never mix with the new.
 
 Each group in the summary is one signature: the outcome, what stopped the run, and its first
-line of evidence (the failed `always` label, the panic or assertion line or else the last
-line of stderr, the blocked waits). What names the failure is kept: the exit status, the
+line of evidence (the failed `always` label with the first line of its detail, the panic or
+assertion line or else the last line of stderr, the blocked waits). What names the failure is kept: the exit status, the
 signal, the label. Numbers in the program's text (line and column numbers, addresses, ids,
-counts, durations) become `N`, so one bug over many seeds is one group. A sweep announces each
+counts, durations) become `N`, so one bug over many seeds is one group. Absolute paths keep
+their last three components, in signatures and SDK labels alike (a label made from a source
+path is the same in every checkout). A sweep announces each
 new group with its lowest seed and replays that seed once; a replay that differs makes the
 group `nondeterministic`. `patina report DIR...` prints the same summary for any run
 directories and writes `report.json`. A replay or a minimized run is written inside the run
@@ -97,22 +99,50 @@ it comes from, so it never counts as one of the sweep's runs.
 
 ### Test runners: `--cases`
 
-A test runner usually takes a test name. `--cases FILE` runs the command once per line of
-FILE per seed, with `{}` in the command replaced by the line:
+A test suite is many tests, best run each alone. `--cases FILE` runs every line of FILE once
+per seed, each its own run. A line is a whole command: the program and its arguments, quoted
+as in a shell (no variables or globs), so one file can name several test programs. Empty
+lines and lines starting with `#` are skipped.
 
 ```sh
-patina sweep --seeds 1..10 --cases cases.txt --mount .:/guest --env PYTHONPATH=/guest \
-  -- python3 -m unittest {}
+cat tests.txt
 ```
 
 ```text
-[test_store.Store.test_counter] failure exit: AssertionError: N != N; exit 1
-  10 of 20 runs   first: seed 1   replayed: identical
-  rerun:  patina run --seed 1 --env PYTHONPATH=/guest --mount /tmp/casedemo:/guest -- python3 -m unittest test_store.Store.test_counter
+python3 -m unittest test_store.Store.test_write
+python3 -m unittest test_store.Store.test_counter
 ```
 
-Any test runner that takes a test name works the same way. Each (case, seed) is its own run
-directory, `OUT/seed-N/CASE`.
+```sh
+patina sweep --seeds 1..10 --cases tests.txt --mount .:/guest --env PYTHONPATH=/guest
+```
+
+```text
+patina sweep: 20 runs, 10 findings in 1 group, 10 ok   (0.3s, 8 jobs)
+outcomes: failure 10, ok 10
+
+[python3 -m unittest test_store.Store.test_counter] failure exit: AssertionError: N != N; exit 1
+  10 of 20 runs   first: seed 1   replayed: identical
+  rerun:  patina run --seed 1 --env PYTHONPATH=/guest --mount /tmp/casedemo:/guest -- python3 -m unittest test_store.Store.test_counter
+  replay: patina replay /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
+```
+
+Given a command after `--`, a line is instead put in place of `{}` in it: `--cases names.txt
+-- python3 -m unittest {}` runs the same. Each (case, seed) is its own run directory,
+`OUT/seed-N/K-NAME`: K the case's position in the file, NAME a short form of its last word
+that is not an option; the file `case` there and the report hold the whole line. With whole-command lines, a
+rebuilt program reruns only its own cases when the sweep runs again.
+
+A compiled test binary lists its tests; turning the list into lines is one loop. For the
+test binaries `cargo test --no-run` builds (the same works for any runner that lists and
+selects tests by name):
+
+```sh
+for b in $(cargo test --no-run --message-format=json | jq -r 'select(.profile.test and .executable) | .executable'); do
+  "$b" --list --format terse | sed -n "s|: test\$||; s|^|$b --exact |p"
+done > tests.txt
+patina sweep --seeds 1..5 --cases tests.txt
+```
 
 ## Faults
 
@@ -186,8 +216,11 @@ production builds without flags.
 | `knob(label, default, lo, hi)` | a seed-chosen value under `--buggify` |
 
 Under `--buggify` each point is active in about a quarter of runs and fires on about a
-quarter of its evaluations; `--fault point:LABEL=PERMILLE` fixes one point's rate. A sweep
-whose `sometimes` never held is `vacuous` unless allowed with `--allow-unmet LABEL`.
+quarter of its evaluations; `--fault point:LABEL=PERMILLE` fixes one point's rate. A sweep in
+which a `sometimes` never held, a `reachable` was never hit, or (under `--buggify`) a
+`buggify` point never fired is `vacuous` unless the label is allowed with `--allow-unmet
+LABEL`. The summary gives a count per kind and the first five labels; `report.json` lists
+all of them, with every `always` never evaluated.
 
 **Rust**: `patina-dst = { path = "PATINA/crates/patina" }` in `Cargo.toml`.
 
