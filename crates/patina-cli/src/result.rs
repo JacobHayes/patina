@@ -62,7 +62,7 @@ impl SchedCounts {
     }
 }
 
-pub const NET_FIELDS: usize = 12;
+pub const NET_FIELDS: usize = 13;
 pub const NET_NAMES: [&str; NET_FIELDS] = [
     "connections",
     "bytes",
@@ -76,6 +76,7 @@ pub const NET_NAMES: [&str; NET_FIELDS] = [
     "sup_hwm_kb",
     "steps",
     "fins",
+    "sends",
 ];
 
 pub fn net_read(c: &proto::wire::NetCounters) -> [u64; NET_FIELDS] {
@@ -93,6 +94,7 @@ pub fn net_read(c: &proto::wire::NetCounters) -> [u64; NET_FIELDS] {
         c.sup_hwm_kb.load(Relaxed),
         c.steps.load(Relaxed),
         c.fins.load(Relaxed),
+        c.sends.load(Relaxed),
     ]
 }
 

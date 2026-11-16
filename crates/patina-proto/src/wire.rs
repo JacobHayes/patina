@@ -83,7 +83,9 @@ pub struct NetCounters {
     pub steps: AtomicU64,
     /// FINs delivered.
     pub fins: AtomicU64,
-    pub reserved: [AtomicU64; 4],
+    /// Reads of data a guest sent, each one `net-reset-permille` draw.
+    pub sends: AtomicU64,
+    pub reserved: [AtomicU64; 3],
 }
 
 #[repr(C)]

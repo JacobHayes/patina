@@ -135,7 +135,7 @@ pub const KEYS: &[Key] = &[
         "net-reset-permille",
         "P",
         Val::Permille,
-        "reset a TCP connection",
+        "reset a TCP connection, drawn for each piece of data a guest sends on it",
     ),
     key(
         "net-connect-refuse-permille",

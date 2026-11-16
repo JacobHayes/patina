@@ -3,9 +3,9 @@
 //! - `plan`: the resolved settings (`faults::Plan::resolved`).
 //! - `counts`: per configured class, the calls it could act on (`eligible`) and the faults
 //!   it injected. Eligibility is counted where the class is consulted: in the runtime's
-//!   injector (`proto::faults::Kind`), at crash points, and on the wire (connections for
-//!   resets and connect faults, deliveries for delay, chunking and partitions, FINs for
-//!   half-close delays). Zero eligible means the class had nothing to act on.
+//!   injector (`proto::faults::Kind`), at crash points, and on the wire (reads of sent data
+//!   for resets, connections for connect faults, deliveries for delay, chunking and
+//!   partitions, FINs for half-close delays). Zero eligible means the class had nothing to act on.
 //! - `injected`: every injected fault (crashes included), all incarnations. The report of an
 //!   earlier failed fsync to another descriptor is an event, not a new fault.
 //! - `recent`: the last `RECENT` events before the run stopped, each with its call, its
@@ -215,10 +215,12 @@ impl Faults {
                 );
                 continue;
             }
-            let (connections, chunks, fins) = (net[0], net[2], net[11]);
+            let (connections, chunks, fins, sends) = (net[0], net[2], net[11], net[12]);
             let (eligible, injected) = match c {
                 "crash" => (self.crash_points, self.crashes),
                 "net-delay" => (chunks, chunks),
+                // Drawn for every read of data a guest sent, not once per connection.
+                "net-reset" => (sends, self.by_class.get(c).copied().unwrap_or(0)),
                 "net-halfclose" => (fins, fins),
                 "net-chunk" | "net-partition" => {
                     (chunks, self.by_class.get(c).copied().unwrap_or(0))

@@ -947,6 +947,7 @@ impl Sup {
                 let r = r as usize;
                 let cfg = self.net_cfg();
                 let k = self.wire.conns[&id].dirs[dir].n;
+                WireTab::inc(&tab(self.ctl).counters.sends, 1);
                 if self.net_fault(cfg.reset_permille, id, NSUB_RESET | (dir as u64) << 3, k) {
                     self.wire_inject(INJ_NET_RESET, 44, r as u64, id);
                     self.reset_both(id);

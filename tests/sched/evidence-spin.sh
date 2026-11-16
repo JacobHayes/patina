@@ -6,8 +6,8 @@
 #     points and spin probes off), pause points only, and the default (both on). Every run
 #     must be ok or compute-stall; with the default every run must be ok.
 #  b. W1-W9 with their fault settings, seeds 1-SPIN_SEEDS, default settings: outcomes and
-#     compute-stalls per workload. W8's `sockets all` failing under network faults is a known
-#     limit; any compute-stall fails the script.
+#     compute-stalls per workload. W8's `sockets all` fails on its injected resets (the guest
+#     does not retry); any compute-stall fails the script.
 #  c. Cost of pause points: W1-W9, seeds 1-5, faults off, --cpus 4, one run at a time pinned
 #     to one core: median wall_ms with pause points off and on, and of a build without them
 #     when PATINA_BASE names one (its scanner does not look for `pause`).
