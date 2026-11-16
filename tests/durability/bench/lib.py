@@ -1,7 +1,7 @@
 """Shared helpers for the cost measurement scripts (run with python3 -I).
 
 Environment: PATINA, PATINA_GUESTS (as ./check sets them), OUT (an output directory). Every patina run is pinned to CPU (default the last core); boundary logs are
-deleted after each run (only outcome.json, stdout and stderr are kept).
+deleted after each run (only result.json, stdout and stderr are kept).
 """
 import json
 import os
@@ -56,7 +56,7 @@ def patina_run(out, args, guest=GUESTS, opts=(), env=None, rt=None, timeout=900,
     t0 = time.perf_counter_ns()
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=e, timeout=timeout)
     t1 = time.perf_counter_ns()
-    with open(os.path.join(out, "outcome.json")) as f:
+    with open(os.path.join(out, "result.json")) as f:
         o = json.load(f)
     o["ext_ms"] = (t1 - t0) / 1e6
     if not keep_logs:

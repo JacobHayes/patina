@@ -22,7 +22,7 @@ NETF="--fault net-reset-permille=30 --fault net-chunk-max=7 --fault net-delay-ms
 echo "== a. R"
 n_ms=$(native "$RUNS/go-native.txt" "$W/$G" /guest/go-static all)
 run $G "$RUNS/go-r" 1 --cpus 2 -- /guest/go-static all
-c=$(field "$RUNS/go-r/outcome.json" outcome)
+c=$(field "$RUNS/go-r/result.json" outcome)
 echo "seed 1 --cpus 2: class $c, native wall ${n_ms} ms"
 if [ "$c" = ok ]; then
     # --cpus 2 changes the first line (gomaxprocs 2 numcpu 2); the rest must be native's.
@@ -54,9 +54,9 @@ echo "== d. F: injected file errors seen by the program"
 fs=""
 for s in 1 2 3; do
     run $G "$RUNS/go-f$s" "$s" --cpus 2 $FAULT -- /guest/go-static all
-    if [ "$(field "$RUNS/go-f$s/outcome.json" outcome)" = ok ] && grep -q '^file error:' "$RUNS/go-f$s/inc-0/stdout"; then
+    if [ "$(field "$RUNS/go-f$s/result.json" outcome)" = ok ] && grep -q '^file error:' "$RUNS/go-f$s/inc-0/stdout"; then
         fs="$fs $s"
-        echo "seed $s: $(field "$RUNS/go-f$s/outcome.json" faults.injected) faults injected; program printed $(grep -c '^file error:' "$RUNS/go-f$s/inc-0/stdout") file errors, e.g.: $(grep -m1 '^file error:' "$RUNS/go-f$s/inc-0/stdout")"
+        echo "seed $s: $(field "$RUNS/go-f$s/result.json" faults.injected) faults injected; program printed $(grep -c '^file error:' "$RUNS/go-f$s/inc-0/stdout") file errors, e.g.: $(grep -m1 '^file error:' "$RUNS/go-f$s/inc-0/stdout")"
     fi
 done
 [ -n "$fs" ] || fail "W4 F: no run where the program saw an injected file error"
@@ -66,11 +66,11 @@ stats "$RUNS/go-r"
 
 echo "== f. go-spin"
 run $G "$RUNS/spin-short" 1 --config "$("$PATINA_CFG" stall-ms=3000)" -- /guest/go-spin 300000000
-echo "short spin, stall-ms 3000: class $(field "$RUNS/spin-short/outcome.json" outcome), wall $(field "$RUNS/spin-short/outcome.json" wall_ms) ms, stdout: $(cat "$RUNS/spin-short/inc-0/stdout")"
-[ "$(field "$RUNS/spin-short/outcome.json" outcome)" = ok ] || fail "go-spin short: not ok"
+echo "short spin, stall-ms 3000: class $(field "$RUNS/spin-short/result.json" outcome), wall $(field "$RUNS/spin-short/result.json" wall_ms) ms, stdout: $(cat "$RUNS/spin-short/inc-0/stdout")"
+[ "$(field "$RUNS/spin-short/result.json" outcome)" = ok ] || fail "go-spin short: not ok"
 run $G "$RUNS/spin-20s" 1 --config "$("$PATINA_CFG" stall-ms=1000)" -- /guest/go-spin 20000000000
-echo "20 s spin, stall-ms 1000: class $(field "$RUNS/spin-20s/outcome.json" outcome), wall $(field "$RUNS/spin-20s/outcome.json" wall_ms) ms, detail $(field "$RUNS/spin-20s/outcome.json" message)"
-[ "$(field "$RUNS/spin-20s/outcome.json" outcome)" = unsupported ] || fail "go-spin 20 s: not stall"
+echo "20 s spin, stall-ms 1000: class $(field "$RUNS/spin-20s/result.json" outcome), wall $(field "$RUNS/spin-20s/result.json" wall_ms) ms, detail $(field "$RUNS/spin-20s/result.json" message)"
+[ "$(field "$RUNS/spin-20s/result.json" outcome)" = unsupported ] || fail "go-spin 20 s: not stall"
 
 echo "== g. network (--cpus 2)"
 verify_seeds $G go-dn cpu,load,aslr,sandbox "1" --cpus 2 $NETF -- /guest/go-static net || fail "W4 D (network faults on)"

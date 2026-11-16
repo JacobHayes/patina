@@ -9,7 +9,7 @@ set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/deny
 mkdir -p "$out"
-refused() { jq -c '.refused' "$1/outcome.json"; }
+refused() { jq -c '.refused' "$1/result.json"; }
 # Unlisted requests: refused, recorded, the same in every run.
 vfy denyprobe 3 repeat "$G17" -- /guest/denyprobe
 d=$out/denyprobe/run-0

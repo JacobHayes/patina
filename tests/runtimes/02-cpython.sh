@@ -21,7 +21,7 @@ NET="/usr/bin/python3 /guest/w5.py net"
 echo "== a. R"
 n_ms=$(native "$RUNS/py-native.txt" "$W/$P" $CMD)
 run $P "$RUNS/py-r" 1 -- $CMD
-c=$(field "$RUNS/py-r/outcome.json" outcome)
+c=$(field "$RUNS/py-r/result.json" outcome)
 echo "seed 1: class $c, native wall ${n_ms} ms"
 [ "$c" = ok ] || fail "W5 seed 1: class $c"
 grep -v '^[~v] ' "$RUNS/py-native.txt" >"$RUNS/py-native.masked"
@@ -57,8 +57,8 @@ sig=$(for s in $(seq 1 20); do field "$RUNS/py-f20/outcomes/$s.json" signal; don
 seen=0
 for s in $(seq 1 20); do
     o=$RUNS/py-f20/run-$s
-    [ "$(field "$o/outcome.json" faults.injected)" -gt 0 ] || continue
-    if grep -q '^oserror' "$o/inc-0/stdout" || [ "$(field "$o/outcome.json" outcome)" = failure ]; then seen=$((seen + 1)); fi
+    [ "$(field "$o/result.json" faults.injected)" -gt 0 ] || continue
+    if grep -q '^oserror' "$o/inc-0/stdout" || [ "$(field "$o/result.json" outcome)" = failure ]; then seen=$((seen + 1)); fi
 done
 echo "runs where the program saw an injected error: $seen of 20"
 [ "$seen" -gt 0 ] || fail "W5 faults: no run saw an injected error"

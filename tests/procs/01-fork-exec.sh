@@ -16,8 +16,8 @@ for batch in "1 2 3"; do
     wait
 done
 for seed in 1 2 3; do
-    [ "$(field "$o/s$seed/outcome.json" outcome)" = ok ] || die "seed $seed: not ok"
-    field "$o/s$seed/outcome.json" digest
+    [ "$(field "$o/s$seed/result.json" outcome)" = ok ] || die "seed $seed: not ok"
+    field "$o/s$seed/result.json" digest
 done >"$o/digests.txt"
 n=$(sort -u "$o/digests.txt" | wc -l)
 echo "distinct digests over seeds 1-3: $n"

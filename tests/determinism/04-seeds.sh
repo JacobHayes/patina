@@ -15,7 +15,7 @@ done | xargs -P 4 -L 1 sh -c '
     rm -rf "$o"
     # shellcheck disable=SC2086
     timeout 900 "$PATINA" run --seed "$s" --out "$o" --mount "$GDIR":/guest:copy $EXTRA -- $CMD >/dev/null 2>&1 || true
-    jq -r .digest "$o/outcome.json" >"$o.digest"
+    jq -r .digest "$o/result.json" >"$o.digest"
     rm -rf "$o"
 ' sh "$(cd "$(dirname "$0")" && pwd)" "$out"
 fail=0

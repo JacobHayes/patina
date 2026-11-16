@@ -31,10 +31,10 @@ PY
     found=$(awk -F'\t' '$2 == "failure" && $3 ~ /INVARIANT acked-record-lost/ {print $1; exit}' "$RUNS/07/$m-nofsync/summary.tsv")
     [ -n "$found" ] || die "$m: nofsync never caught in 100 seeds"
     run "$d/nofsync-$found" "$found" --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:20 -- /guest/ack-log nofsync
-    echo "$m: nofsync caught at seed $found: $(field "$d/nofsync-$found/outcome.json" message)"
+    echo "$m: nofsync caught at seed $found: $(field "$d/nofsync-$found/result.json" message)"
     run "$d/nofsync-$found-again" "$found" --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:20 -- /guest/ack-log nofsync
-    a=$(field "$d/nofsync-$found/outcome.json" digest)
-    b=$(field "$d/nofsync-$found-again/outcome.json" digest)
+    a=$(field "$d/nofsync-$found/result.json" digest)
+    b=$(field "$d/nofsync-$found-again/result.json" digest)
     [ "$a" = "$b" ] || die "$m seed $found: digests $a vs $b"
     n=0
     for p in "$d/nofsync-$found"/inc-*/post-crash; do
@@ -50,7 +50,7 @@ run "$RUNS/07/crash" 3 --crash machine:20 -- /guest/ack-log correct
 python3 -I - "$RUNS/07/plain" "$RUNS/07/crash" <<'PY' || exit 1
 import json, struct, sys
 a, b = sys.argv[1], sys.argv[2]
-c = json.load(open(b + "/outcome.json"))["crashes"][0]["seq"]
+c = json.load(open(b + "/result.json"))["crashes"][0]["seq"]
 recs = lambda p: [x[i:i + 96] for x in [open(p, "rb").read()] for i in range(0, len(x), 96)]
 ra, rb = recs(a + "/inc-0/boundary.log"), recs(b + "/inc-0/boundary.log")
 pre = [r for r in rb if struct.unpack_from("<Q", r, 0)[0] < c]

@@ -6,8 +6,8 @@ o=$RUNS/09-cost; mkdir -p "$o"
 ms() { python3 -I -c 'import subprocess,sys,time
 t=time.monotonic(); subprocess.run(sys.argv[1:],check=True,stdout=subprocess.DEVNULL); print(int((time.monotonic()-t)*1e6))' "$@"; }
 best() { sort -n | head -1; }
-s1=$(for i in 1 2 3; do run_ok "$o/p1k-$i" 1 -- /guest/sockets pingpong 1000; field "$o/p1k-$i/outcome.json" wall_ms; done | best)
-s2=$(for i in 1 2 3; do run_ok "$o/p11k-$i" 1 -- /guest/sockets pingpong 11000; field "$o/p11k-$i/outcome.json" wall_ms; done | best)
+s1=$(for i in 1 2 3; do run_ok "$o/p1k-$i" 1 -- /guest/sockets pingpong 1000; field "$o/p1k-$i/result.json" wall_ms; done | best)
+s2=$(for i in 1 2 3; do run_ok "$o/p11k-$i" 1 -- /guest/sockets pingpong 11000; field "$o/p11k-$i/result.json" wall_ms; done | best)
 n1=$(for i in 1 2 3; do ms "$PATINA_GUESTS/sockets" pingpong 1000; done | best)
 n2=$(for i in 1 2 3; do ms "$PATINA_GUESTS/sockets" pingpong 11000; done | best)
 rm -f "$o"/p*/inc-0/boundary.log

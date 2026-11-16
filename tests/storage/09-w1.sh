@@ -17,7 +17,7 @@ sweep b-posix-strict rust-threads-files 1-12 -- --config "$("$PATINA_CFG" fs-mod
 [ "$(count b-posix-strict failure 'INVARIANT snapshot-(lost|corrupt)')" -ge 1 ] || die "B not caught under posix-strict"
 run rust-threads-files "$RUNS/timeout" 1 -- /guest/rust-threads-files correct
 grep -q "idle wait 30000 ms" "$RUNS/timeout/inc-0/stdout" || die "idle wait: $(cat "$RUNS/timeout/inc-0/stdout")"
-ms=$(field "$RUNS/timeout/outcome.json" wall_ms)
+ms=$(field "$RUNS/timeout/result.json" wall_ms)
 [ "$ms" -lt 5000 ] || die "30 s timeout run took $ms ms of wall time"
 tables
 echo "30 s wait: $(cat "$RUNS/timeout/inc-0/stdout") in $ms ms wall"

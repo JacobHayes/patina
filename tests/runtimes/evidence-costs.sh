@@ -18,7 +18,7 @@ measure() {
 import json, sys
 runs, name = sys.argv[1], sys.argv[2]
 nat = sorted(int(x) for x in open("%s/cost-%s.native" % (runs, name)).read().split())
-os_ = [json.load(open("%s/cost-%s-%d/outcome.json" % (runs, name, k))) for k in range(1, 6)]
+os_ = [json.load(open("%s/cost-%s-%d/result.json" % (runs, name, k))) for k in range(1, 6)]
 ok = [o for o in os_ if o["outcome"] == "ok"]
 def mm(v):
     v = sorted(v)

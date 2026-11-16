@@ -35,7 +35,7 @@ class Run:
         self.out = out
         # patina's exit status
         self.status = status
-        with open(os.path.join(out, "outcome.json")) as f:
+        with open(os.path.join(out, "result.json")) as f:
             self.outcome = json.load(f)
         with open(os.path.join(out, "inc-0", "stdout")) as f:
             self.stdout = f.read()
@@ -64,7 +64,7 @@ def run(name, seed, cmd, *args, flags=()):
     p = subprocess.run(
         [PATINA, "run", "--seed", str(seed), "--out", out, "--mount", GUESTS + ":/guest:copy", *flags, "--", *cmd, *args],
         capture_output=True, text=True, timeout=120)
-    if not os.path.exists(os.path.join(out, "outcome.json")):
+    if not os.path.exists(os.path.join(out, "result.json")):
         die(f"patina run {' '.join(cmd + list(args))}: no outcome ({p.stderr.strip()[-300:]})")
     return Run(out, p.returncode)
 

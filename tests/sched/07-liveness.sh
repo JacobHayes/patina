@@ -6,6 +6,6 @@ t0=$(date +%s%N)
 PATINA_OPTS="--time-limit 100" patina_run "$out" 1 liveness
 t1=$(date +%s%N)
 ms=$(( (t1 - t0) / 1000000 ))
-[ "$(field "$out/outcome.json" outcome)/$(field "$out/outcome.json" stop)" = liveness/time-limit ] || die "outcome $(field "$out/outcome.json" outcome) $(field "$out/outcome.json" stop)"
+[ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = liveness/time-limit ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 [ "$ms" -lt 5000 ] || die "took $ms ms"
 echo "liveness after $ms ms wall"

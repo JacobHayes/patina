@@ -23,8 +23,8 @@ one_shell() {
     echo "== $sh: a. R"
     n_ms=$(native "$RUNS/$sh-native.txt" "$W/$S" /bin/$sh /guest/w6.sh)
     run $S "$RUNS/$sh-r" 1 -- /bin/$sh /guest/w6.sh
-    c=$(field "$RUNS/$sh-r/outcome.json" outcome)
-    echo "$sh seed 1: class $c, wall $(field "$RUNS/$sh-r/outcome.json" wall_ms) ms, native wall ${n_ms} ms"
+    c=$(field "$RUNS/$sh-r/result.json" outcome)
+    echo "$sh seed 1: class $c, wall $(field "$RUNS/$sh-r/result.json" wall_ms) ms, native wall ${n_ms} ms"
     [ "$c" = ok ] || fail "W6 $sh seed 1: class $c"
     grep -v '^~ ' "$RUNS/$sh-native.txt" >"$RUNS/$sh-native.masked"
     grep -v '^~ ' "$RUNS/$sh-r/inc-0/stdout" | cmp - "$RUNS/$sh-native.masked" \
@@ -59,7 +59,7 @@ one_shell() {
     nf=0
     for s in $(seq 1 24); do
         o=$RUNS/$sh-f24/run-$s
-        if [ "$(field "$o/outcome.json" outcome)" = failure ]; then
+        if [ "$(field "$o/result.json" outcome)" = failure ]; then
             nf=$((nf + 1))
             [ "$(tail -1 "$o/inc-0/stdout")" != done ] || fail "W6 $sh seed $s: failed but printed done"
             [ -s "$o/inc-0/stderr" ] || fail "W6 $sh seed $s: failed with an empty stderr"
@@ -81,8 +81,8 @@ for k in 1 2 3; do
     run $S "$RUNS/sleep5-$k" $k -- /bin/sh -c 'sleep 5'
     run $S "$RUNS/sleep0-$k" $k -- /bin/sh -c 'sleep 0'
 done
-w5=$(for k in 1 2 3; do field "$RUNS/sleep5-$k/outcome.json" wall_ms; done | sort -n | sed -n 2p)
-w0=$(for k in 1 2 3; do field "$RUNS/sleep0-$k/outcome.json" wall_ms; done | sort -n | sed -n 2p)
+w5=$(for k in 1 2 3; do field "$RUNS/sleep5-$k/result.json" wall_ms; done | sort -n | sed -n 2p)
+w0=$(for k in 1 2 3; do field "$RUNS/sleep0-$k/result.json" wall_ms; done | sort -n | sed -n 2p)
 echo "median wall: sh -c 'sleep 5' $w5 ms, sh -c 'sleep 0' $w0 ms, difference $((w5 - w0)) ms"
 [ $((w5 - w0)) -lt 1500 ] || fail "W6: sleep 5 costs $((w5 - w0)) ms of wall time"
 grep -q '^sleep 5: elapsed >= 5: yes$' "$RUNS/sh-r/inc-0/stdout" || fail "W6: the script's sleep 5 did not take 5 virtual seconds"

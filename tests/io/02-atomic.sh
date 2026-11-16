@@ -11,4 +11,4 @@ for p in 100 500 1000; do
     done
     echo "preempt $p: seed 1: 8000 records, 0 interleaved"
 done
-io_line atomic $(ls "$o"/*/outcome.json)
+io_line atomic $(ls "$o"/*/result.json)

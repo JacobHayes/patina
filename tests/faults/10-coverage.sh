@@ -17,7 +17,7 @@ for seed in $(seq 1 "$N"); do
     o=$d/sweep/run-$seed
     set --; for inc in "$o"/inc-*; do [ -d "$inc/post-crash" ] && set -- "$@" "$inc"; done
     [ $# = 0 ] || python3 -I "$LIB/faults.py" crash-position "$@" >>"$d/positions"
-    jq -r '.crashes[].tree_digest' "$o/outcome.json" >>"$d/trees"
+    jq -r '.crashes[].tree_digest' "$o/result.json" >>"$d/trees"
     rm -rf "$o"
 done
 echo "crashes: $(wc -l <"$d/positions"); distinct post-crash trees: $(sort -u "$d/trees" | wc -l)"

@@ -6,7 +6,7 @@ t0=$(date +%s%N)
 timeout 30 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" stall-ms=500)" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- /guest/spin || true
 t1=$(date +%s%N)
 ms=$(( (t1 - t0) / 1000000 ))
-[ "$(field "$out/outcome.json" outcome)/$(field "$out/outcome.json" stop)" = unsupported/compute-stall ] || die "outcome $(field "$out/outcome.json" outcome) $(field "$out/outcome.json" stop)"
+[ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = unsupported/compute-stall ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 [ "$ms" -le 3000 ] || die "took $ms ms"
 # No process of this run is left (launcher, bwrap, supervisor or guest; see tests/leftovers.py).
 left=$(python3 -I "$(dirname "$0")/../leftovers.py" "$out" || true)

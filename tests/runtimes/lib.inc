@@ -25,7 +25,7 @@ run() {
     wl=$1; out=$2; seed=$3; shift 3
     rm -rf "$out"; mkdir -p "$(dirname "$out")"
     timeout 900 "$PATINA" run --seed "$seed" --out "$out" --mount "$W/$wl":/guest:copy "$@" >/dev/null 2>"$out.err" \
-        || [ -f "$out/outcome.json" ] || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
+        || [ -f "$out/result.json" ] || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
     rm -f "$out.err"
 }
 
@@ -40,14 +40,14 @@ verify() {
         echo "verify $wl seed $seed: patina verify exit status non-zero: $(tail -3 "$out.verify.txt")"
         return 1
     fi
-    nd=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
-    nc=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" outcome; done | sort -u | wc -l)
+    nd=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
+    nc=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" outcome; done | sort -u | wc -l)
     ns=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
     [ "$nd" = 1 ] && [ "$nc" = 1 ] && [ "$ns" = 1 ] || {
         echo "verify $wl seed $seed: $nd digests, $nc classes, $ns stdout files over $runs runs"
         return 1
     }
-    echo "seed $seed: $runs identical runs ($vary), class $(field "$out/run-0/outcome.json" outcome), digest $(field "$out/run-0/outcome.json" digest), faults $(field "$out/run-0/outcome.json" faults.injected)"
+    echo "seed $seed: $runs identical runs ($vary), class $(field "$out/run-0/result.json" outcome), digest $(field "$out/run-0/result.json" digest), faults $(field "$out/run-0/result.json" faults.injected)"
 }
 
 # verify_seeds WORKLOAD NAME VARY "SEEDS" [patina options] -- cmd: verify each seed ($VERIFY_RUNS runs,
@@ -92,15 +92,15 @@ netf() {
     for s in $seeds; do
         o=$RUNS/$name-$s
         run "$wl" "$o" "$s" "$@"
-        c=$(field "$o/outcome.json" outcome)
+        c=$(field "$o/result.json" outcome)
         k=$(grep -c -- "$pat" "$o/inc-0/stdout" || true)
-        echo "seed $s: class $c, wall $(field "$o/outcome.json" wall_ms) ms, faults $(field "$o/outcome.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,partitioned}' "$o/outcome.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || true)"
+        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,partitioned}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || true)"
         [ "$c" = ok ] && [ "$k" -gt 0 ] && seen=$((seen + 1))
     done
     [ "$seen" -gt 0 ]
 }
 
-# stats RUN: per-run numbers from outcome.json and the boundary log (lib/stats.py).
+# stats RUN: per-run numbers from result.json and the boundary log (lib/stats.py).
 stats() { python3 -I "$HERE/lib/stats.py" "$PATINA" "$@"; }
 
 # native OUT cmd...: the same command outside patina, in a bwrap sandbox shaped like patina's (the

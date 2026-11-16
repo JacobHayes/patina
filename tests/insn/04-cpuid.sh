@@ -10,7 +10,7 @@ cpus=$(printf '%s\n' 0 $((n - 1)) $((n / 2)) 1 $((n / 3)) $((2 * n / 3)) | awk '
 for c in $cpus; do
     rm -rf "${o:?}/cpu-$c"; mkdir -p "$o"
     timeout 120 taskset -c "$c" "$PATINA" run --seed 1 --out "$o/cpu-$c" --mount "$PATINA_GUESTS":/guest:copy -- /guest/insn-cpuid >/dev/null
-    [ "$(field "$o/cpu-$c/outcome.json" outcome)" = ok ] || die "cpuid dump on cpu $c"
+    [ "$(field "$o/cpu-$c/result.json" outcome)" = ok ] || die "cpuid dump on cpu $c"
 done
 # The same core twice gives the same dump (so what differs is the core, not the run).
 rm -rf "${o:?}/again"

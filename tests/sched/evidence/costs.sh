@@ -14,7 +14,7 @@ run() { # name preempt args...
     for rep in 1 2 3; do
         o=$OUT/$name-$rep
         taskset -c "$cpu" "$PATINA" run --seed 1 --config "$("$PATINA_CFG" preempt-permille="$p")" --out "$o" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >/dev/null
-        echo "$name rep $rep: class $(field "$o/outcome.json" outcome) wall_ms $(field "$o/outcome.json" wall_ms) traps $(field "$o/outcome.json" sched.traps) switches $(field "$o/outcome.json" sched.switches)"
+        echo "$name rep $rep: class $(field "$o/result.json" outcome) wall_ms $(field "$o/result.json" wall_ms) traps $(field "$o/result.json" sched.traps) switches $(field "$o/result.json" sched.switches)"
     done
 }
 N=1000000

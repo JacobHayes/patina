@@ -1,4 +1,4 @@
-"""Per-run numbers for language runtimes from outcome.json and the boundary log.
+"""Per-run numbers for language runtimes from result.json and the boundary log.
 
     python3 stats.py PATINA RUN [RUN...]
 
@@ -11,7 +11,7 @@ import collections, json, re, subprocess, sys
 patina = sys.argv[1]
 line_re = re.compile(r"^seq=\d+ (\w+) slot=\d+ t=\d+ (\S+)(?: \[(\w+)\])? args=\[([^\]]*)\]")
 for run in sys.argv[2:]:
-    o = json.load(open(run + "/outcome.json"))
+    o = json.load(open(run + "/result.json"))
     s = {
         "run": run, "class": o["outcome"], "wall_ms": o.get("wall_ms"), "traps": o["sched"]["traps"],
         "switches": o["sched"]["switches"], "refused": o.get("refused", []), "io": o["counters"]["io"],

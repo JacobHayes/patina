@@ -6,9 +6,9 @@
 o=$RUNS/02-rand
 verify "$o/s1" 1 3 insn rand
 grep -qx 'OK rand' "$o/s1/run-0/inc-0/stdout" || die "guest checks failed: $(grep FAIL "$o/s1/run-0/inc-0/stdout" | head -3)"
-echo "patched $(field "$o/s1/run-0/outcome.json" counters.insn.patched_sites), emulated $(field "$o/s1/run-0/outcome.json" counters.insn.emulated)"
-[ "$(field "$o/s1/run-0/outcome.json" counters.insn.emulated.rdrand)" -ge 400 ] || die "rdrand emulations"
-[ "$(field "$o/s1/run-0/outcome.json" counters.insn.emulated.rdseed)" -ge 400 ] || die "rdseed emulations"
+echo "patched $(field "$o/s1/run-0/result.json" counters.insn.patched_sites), emulated $(field "$o/s1/run-0/result.json" counters.insn.emulated)"
+[ "$(field "$o/s1/run-0/result.json" counters.insn.emulated.rdrand)" -ge 400 ] || die "rdrand emulations"
+[ "$(field "$o/s1/run-0/result.json" counters.insn.emulated.rdseed)" -ge 400 ] || die "rdseed emulations"
 trim "$o/s1"
 for s in 2 3; do
     patina_run "$o/seed-$s" "$s" insn rand

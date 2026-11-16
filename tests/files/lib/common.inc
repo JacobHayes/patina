@@ -17,7 +17,7 @@ verify_ok() {
     v=; [ -n "$vary" ] && v="--vary $vary"
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" $v --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >"$out.log" 2>&1 \
         || grep -q '^identical: ' "$out.log" || { tail -5 "$out.log"; die "verify $* (seed $seed): not identical"; }
-    [ "$(field "$out/run-0/outcome.json" outcome)" = ok ] || die "$*: class $(field "$out/run-0/outcome.json" outcome) $(field "$out/run-0/outcome.json" message)"
+    [ "$(field "$out/run-0/result.json" outcome)" = ok ] || die "$*: class $(field "$out/run-0/result.json" outcome) $(field "$out/run-0/result.json" message)"
 }
 
 # native OUT [--work DIR] -- cmd...: the same command in a bwrap twin of the sandbox, no runtime.

@@ -19,8 +19,8 @@ import json, sys
 s = json.loads(sys.stdin.read())
 print("%-7s class %-6s stop %d  deny %s  refused %s" % (sys.argv[1], s["class"], s["stop"], s["deny"], s["refused"]))
 ' "$r"
-    c=$(field "$RUNS/$r/outcome.json" outcome)
-    case $c in unsupported | internal) fail "$r: class $c ($(field "$RUNS/$r/outcome.json" message))" ;; esac
+    c=$(field "$RUNS/$r/result.json" outcome)
+    case $c in unsupported | internal) fail "$r: class $c ($(field "$RUNS/$r/result.json" message))" ;; esac
 done
 
 echo "== item 6: the build commands (no patina-specific flag, patch or library)"

@@ -5,10 +5,10 @@
 for rep in a b; do
     out=$RUNS/08-many/$rep
     patina_run "$out" 1 many
-    [ "$(field "$out/outcome.json" outcome)" = ok ] || die "$rep: class $(field "$out/outcome.json" outcome) $(field "$out/outcome.json" message)"
+    [ "$(field "$out/result.json" outcome)" = ok ] || die "$rep: class $(field "$out/result.json" outcome) $(field "$out/result.json" message)"
     n=$(wc -l <"$out/inc-0/stdout")
     u=$(sort -u "$out/inc-0/stdout" | wc -l)
     [ "$n" = 5000 ] && [ "$u" = 5000 ] || die "$rep: $n tids, $u distinct"
 done
 cmp -s "$RUNS/08-many/a/inc-0/stdout" "$RUNS/08-many/b/inc-0/stdout" || die "tids differ between runs a and b"
-echo "5000 threads, tids $(head -1 "$RUNS/08-many/a/inc-0/stdout")..$(tail -1 "$RUNS/08-many/a/inc-0/stdout") identical in 2 runs, wall_ms $(field "$RUNS/08-many/a/outcome.json" wall_ms)"
+echo "5000 threads, tids $(head -1 "$RUNS/08-many/a/inc-0/stdout")..$(tail -1 "$RUNS/08-many/a/inc-0/stdout") identical in 2 runs, wall_ms $(field "$RUNS/08-many/a/result.json" wall_ms)"

@@ -20,7 +20,7 @@ for i in 1 2 3; do
     for p in 0 100; do
         d=$out/patina-p$p-$i
         taskset -c "$cpu" "$PATINA" run --seed 1 --config "$("$PATINA_CFG" preempt-permille="$p")" --out "$d" --mount "$G":/guest:copy -- /guest/pipecost "$N" >/dev/null
-        python3 -I - "$d/outcome.json" "$p" "$i" <<'PY'
+        python3 -I - "$d/result.json" "$p" "$i" <<'PY'
 import json, sys
 o = json.load(open(sys.argv[1]))
 print(f"patina p{sys.argv[2]} run {sys.argv[3]}: {o['outcome']} {o['wall_ms']} ms, traps {o['sched']['traps']}, switches {o['sched']['switches']}, io {o['counters']['io']}")

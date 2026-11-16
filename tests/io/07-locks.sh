@@ -12,4 +12,4 @@ for p in 500 1000; do
     run_ok "$o/p$p" 1 --config "$("$PATINA_CFG" preempt-permille="$p")" -- /guest/locks
     echo "preempt $p: $(tr '\n' ' ' <"$o/p$p/inc-0/stdout")"
 done
-io_line locks $(ls "$o"/v*/run-0/outcome.json "$o"/p*/outcome.json)
+io_line locks $(ls "$o"/v*/run-0/result.json "$o"/p*/result.json)

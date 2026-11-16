@@ -6,9 +6,9 @@ root=$(cd "$sandbox/../.." && pwd)
 G12=$PATINA_ATTACK_GUESTS
 G17=$PATINA_SANDBOX_GUESTS
 die() { echo "FAIL: $*"; exit 1; }
-digest() { jq -r .digest "$1/outcome.json"; }
-class() { jq -r .outcome "$1/outcome.json"; }
-detail() { jq -r .message "$1/outcome.json"; }
+digest() { jq -r .digest "$1/result.json"; }
+class() { jq -r .outcome "$1/result.json"; }
+detail() { jq -r .message "$1/result.json"; }
 # vfy NAME RUNS VARY GUESTDIR -- guest...: identical runs, else fail with the difference.
 vfy() {
     n=$1; r=$2; v=$3; g=$4; shift 5

@@ -12,12 +12,12 @@ verify_all() {
             out=$RUNS/$label/$g-s$seed
             timeout 1200 "$PATINA" verify "$@" --seed "$seed" --runs "$runs" --vary cpu,load --out "$out" \
                 --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"
-            n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
+            n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
             [ "$n" = 1 ] || die "$g seed $seed: $n distinct digests"
             n=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
             [ "$n" = 1 ] || die "$g seed $seed: $n distinct stdout files"
             check_result "$out/run-0" "$g"
-            echo "$label $g seed $seed: $runs identical runs, digest $(field "$out/run-0/outcome.json" digest), switches $(field "$out/run-0/outcome.json" sched.switches), cpus $(grep -o 'cpu [0-9]*' "$out.verify.txt" | sort -u | wc -l)"
+            echo "$label $g seed $seed: $runs identical runs, digest $(field "$out/run-0/result.json" digest), switches $(field "$out/run-0/result.json" sched.switches), cpus $(grep -o 'cpu [0-9]*' "$out.verify.txt" | sort -u | wc -l)"
         done
     done
 }

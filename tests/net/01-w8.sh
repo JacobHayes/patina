@@ -9,7 +9,7 @@ for seed in 2 3 4 5 6; do
     run_ok "$o/r$seed" "$seed" -- /guest/sockets all
     rm -f "$o/r$seed/inc-0/boundary.log"
 done
-d=$( (field "$o/v1/run-0/outcome.json" digest
-      for s in 2 3 4 5 6; do field "$o/r$s/outcome.json" digest; done) | sort -u | wc -l)
+d=$( (field "$o/v1/run-0/result.json" digest
+      for s in 2 3 4 5 6; do field "$o/r$s/result.json" digest; done) | sort -u | wc -l)
 echo "distinct digests over 6 seeds: $d"
 [ "$d" -ge 3 ] || die "only $d distinct digests"

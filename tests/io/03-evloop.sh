@@ -11,4 +11,4 @@ for mode in epoll poll select; do
     done
     echo "$mode: events printed per run: $(wc -l <"$o/$mode-1/run-0/inc-0/stdout"), distinct orders over seeds 1-2: $(for s in 1 2; do sha256sum <"$o/$mode-$s/run-0/inc-0/stdout"; done | sort -u | wc -l)"
 done
-io_line evloop $(ls "$o"/*/run-0/outcome.json)
+io_line evloop $(ls "$o"/*/run-0/result.json)

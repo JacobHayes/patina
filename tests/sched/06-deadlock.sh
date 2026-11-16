@@ -5,11 +5,11 @@
 for rep in a b; do
     out=$RUNS/06-deadlock/$rep
     patina_run "$out" 1 deadlock
-    [ "$(field "$out/outcome.json" outcome)/$(field "$out/outcome.json" stop)" = liveness/deadlock ] || die "outcome $(field "$out/outcome.json" outcome) $(field "$out/outcome.json" stop)"
+    [ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = liveness/deadlock ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 done
 out=$RUNS/06-deadlock/a
-[ "$(field "$out/outcome.json" digest)" = "$(field "$RUNS/06-deadlock/b/outcome.json" digest)" ] || die "two digests"
-detail=$(field "$out/outcome.json" message)
+[ "$(field "$out/result.json" digest)" = "$(field "$RUNS/06-deadlock/b/result.json" digest)" ] || die "two digests"
+detail=$(field "$out/result.json" message)
 echo "detail: $detail"
 python3 -I - "$detail" "$out/inc-0/stdout" <<'PY' || die "detail does not name both threads' waits on the two mutexes"
 import re, sys
@@ -25,4 +25,4 @@ mutex_waiters = sorted(t for t, a in waits.items() if a in (m1, m2))
 assert len(mutex_waiters) == 2 and {waits[t] for t in mutex_waiters} == {m1, m2}, waits
 print("threads", mutex_waiters, "wait on", hex(m1), hex(m2))
 PY
-echo "same digest twice: $(field "$out/outcome.json" digest)"
+echo "same digest twice: $(field "$out/result.json" digest)"

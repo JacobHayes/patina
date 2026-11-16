@@ -4,8 +4,8 @@
 for g in $GUESTS; do
     out=$RUNS/01-run/$g
     patina_run "$out" 1 "$g" a b
-    c=$(field "$out/outcome.json" outcome)
-    [ "$c" = ok ] || die "$g: class $c ($(field "$out/outcome.json" message))"
+    c=$(field "$out/result.json" outcome)
+    [ "$c" = ok ] || die "$g: class $c ($(field "$out/result.json" message))"
     python3 -I "$(dirname "$0")/check_hello.py" "$out/inc-0/stdout" "$g" a b || die "$g: stdout"
-    echo "$g ok digest $(field "$out/outcome.json" digest) traps $(field "$out/outcome.json" sched.traps)"
+    echo "$g ok digest $(field "$out/result.json" digest) traps $(field "$out/result.json" sched.traps)"
 done

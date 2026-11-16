@@ -4,8 +4,8 @@
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-guest-ud2
 patina_run "$o/ud2" 1 insn ud2 || true
-[ "$(field "$o/ud2/outcome.json" outcome)" = crash ] && [ "$(field "$o/ud2/outcome.json" guest.signal)" = 4 ] ||
-    die "guest ud2: $(field "$o/ud2/outcome.json" outcome) $(field "$o/ud2/outcome.json" message)"
+[ "$(field "$o/ud2/result.json" outcome)" = crash ] && [ "$(field "$o/ud2/result.json" guest.signal)" = 4 ] ||
+    die "guest ud2: $(field "$o/ud2/result.json" outcome) $(field "$o/ud2/result.json" message)"
 echo "guest ud2: crash, signal 4"
 python3 -I "$HERE/lib/census.py" "$RT_BIN" >"$o/rt-census.txt"
 for k in scan rdtsc rdtscp; do

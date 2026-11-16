@@ -16,7 +16,7 @@ for n in ${SANDBOX_ENTRIES:-$ENTRIES}; do
         -- $CMD >"$out/$n.txt" 2>&1 || grep -q '^identical: ' "$out/$n.txt" || die "$n: $(tail -3 "$out/$n.txt")"
     c=$(class "$out/$n/run-0")
     [ "$c" = ok ] || die "$n: class $c"
-    r=$(jq -r '.refused | join(",")' "$out/$n/run-0/outcome.json")
+    r=$(jq -r '.refused | join(",")' "$out/$n/run-0/result.json")
     # Refusals sandbox hardening added: requests of open-ended calls (ioctl, fcntl, prctl, sockopt).
     case ",$r," in *,ioctl:*|*,fcntl:*|*,prctl:*|*,sockopt:*) die "$n: refused $r" ;; esac
     echo "$n: 3 runs identical under env ($(digest "$out/$n/run-0")); refused: ${r:-none}"

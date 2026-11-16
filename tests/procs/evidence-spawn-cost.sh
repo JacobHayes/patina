@@ -9,7 +9,7 @@ n=200
 for i in 1 2 3 4 5 6 7 8 9 10; do
     run_ok "$o/base-$i" "$i" /guest/spawn-cost 0
     run_ok "$o/cost-$i" "$i" /guest/spawn-cost "$n"
-    echo "$(field "$o/cost-$i/outcome.json" wall_ms) $(field "$o/base-$i/outcome.json" wall_ms)"
+    echo "$(field "$o/cost-$i/result.json" wall_ms) $(field "$o/base-$i/result.json" wall_ms)"
     rm -rf "$o/base-$i/inc-0/boundary.log" "$o/cost-$i/inc-0/boundary.log"
 done >"$o/patina.txt"
 for i in 1 2 3 4 5 6 7 8 9 10; do

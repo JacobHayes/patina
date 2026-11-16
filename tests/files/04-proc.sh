@@ -7,7 +7,7 @@ verify_ok "$o" 1 cpu 4 -- /guest/proc-policy
 out=$o/run-0/inc-0/stdout
 for p in /proc/1/environ /proc/kallsyms /sys/class/net; do
     grep -qx "== $p open errno 2" "$out" || die "$p did not answer ENOENT"
-    field "$o/run-0/outcome.json" refused | grep -q "\"$p\"" || die "$p not in outcome.refused"
+    field "$o/run-0/result.json" refused | grep -q "\"$p\"" || die "$p not in outcome.refused"
 done
 # every listed path that must open did open (no errno line for it)
 for p in /proc/self/maps /proc/self/smaps /proc/self/stat /proc/self/status /proc/self/statm /proc/self/cgroup \
@@ -19,4 +19,4 @@ for p in /proc/self/maps /proc/self/smaps /proc/self/stat /proc/self/status /pro
     grep -q "^== $p fd " "$out" || die "$p did not open"
 done
 grep -q '^== opendir /proc/self/task errno' "$out" && die "/proc/self/task did not open"
-echo "proc: 4 runs identical under --vary cpu; refused: $(field "$o/run-0/outcome.json" refused)"
+echo "proc: 4 runs identical under --vary cpu; refused: $(field "$o/run-0/result.json" refused)"

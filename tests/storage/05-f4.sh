@@ -10,13 +10,13 @@ for c in "61 6" "37 9"; do
     set -- $c
     o=$RUNS/f4-n$1-s$2
     run fjall-harness "$o" "$2" --fault fsync-error-at=$1 --crash machine:3 -- /guest/fjall-harness-debug
-    [ "$(field "$o/outcome.json" message)" = "INVARIANT batch-atomic-across-keyspaces" ] || die "F4 $c: $(field "$o/outcome.json" message)"
-    k=$(jq '.crashes[-1].incarnation' "$o/outcome.json")
+    [ "$(field "$o/result.json" message)" = "INVARIANT batch-atomic-across-keyspaces" ] || die "F4 $c: $(field "$o/result.json" message)"
+    k=$(jq '.crashes[-1].incarnation' "$o/result.json")
     native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
     grep -q '^INVARIANT batch-atomic-across-keyspaces' "$o/native.txt" || die "F4 $c native: $(tail -2 "$o/native.txt")"
     rm -rf "$o/native"
     ctl=$RUNS/f4-control-s$2
     run fjall-harness "$ctl" "$2" --crash machine:3 -- /guest/fjall-harness-debug
-    [ "$(field "$ctl/outcome.json" outcome)" = ok ] || die "F4 control seed $2: $(field "$ctl/outcome.json" message)"
+    [ "$(field "$ctl/result.json" outcome)" = ok ] || die "F4 control seed $2: $(field "$ctl/result.json" message)"
     echo "F4 fsync-error-at=$1 seed $2: $(grep '^recovery' "$o/inc-$((k + 1))/stderr" | tail -1); native agrees; control ok"
 done

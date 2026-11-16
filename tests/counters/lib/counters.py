@@ -64,7 +64,7 @@ def ppatina(required=True):
 
 def outcome(d):
     try:
-        return json.load(open(os.path.join(d, "outcome.json")))
+        return json.load(open(os.path.join(d, "result.json")))
     except (OSError, ValueError):
         return None
 

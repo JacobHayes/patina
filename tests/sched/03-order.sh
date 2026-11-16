@@ -12,7 +12,7 @@ for seed in 1 2 3; do
     out=$RUNS/03-order/s$seed-b
     patina_run "$out" "$seed" order
     cmp -s "$RUNS/03-order/s$seed-a/inc-0/stdout" "$out/inc-0/stdout" || die "seed $seed: two different logs"
-    [ "$(field "$RUNS/03-order/s$seed-a/outcome.json" digest)" = "$(field "$out/outcome.json" digest)" ] || die "seed $seed: two digests"
+    [ "$(field "$RUNS/03-order/s$seed-a/result.json" digest)" = "$(field "$out/result.json" digest)" ] || die "seed $seed: two digests"
 done
 n=$(for seed in $(seq 1 20); do cat "$RUNS/03-order/s$seed-a/inc-0/stdout"; done | sort -u | wc -l)
 echo "distinct logs over seeds 1-20: $n"

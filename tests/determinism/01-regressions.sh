@@ -38,7 +38,7 @@ echo "fsize: a launcher file-size limit ends the run as internal"
 # In-flight unix sockets (a garbage cycle) are counted in the outcome (bucket D label).
 rm -rf "$out/scm"
 timeout 300 "$PATINA" run --seed 1 --out "$out/scm" --mount "$G":/guest:copy -- /guest/scmrights >/dev/null 2>&1 || true
-n=$(jq -r .labels.unix_sockets_in_flight "$out/scm/outcome.json")
+n=$(jq -r .labels.unix_sockets_in_flight "$out/scm/result.json")
 [ "${n:-0}" -gt 0 ] || die "scmrights: unix_sockets_in_flight not set"
 echo "scmrights: unix_sockets_in_flight $n"
 # Descriptor exhaustion does not depend on the launcher's soft limit.
@@ -60,7 +60,7 @@ echo "stdoutprobe: 40 fstat(1) block counts follow the size"
 vfy memprobe 4 repeat -- /guest/memprobe
 rm -rf "$out/mp"
 timeout 300 "$PATINA" run --seed 1 --out "$out/mp" --mount "$G":/guest:copy -- /guest/memprobe >/dev/null 2>&1 || true
-grep -q '"madvise:collapse"' "$out/mp/outcome.json" || die "memprobe: MADV_COLLAPSE not refused"
+grep -q '"madvise:collapse"' "$out/mp/result.json" || die "memprobe: MADV_COLLAPSE not refused"
 echo "memprobe: MADV_COLLAPSE refused and recorded"
 # FS_IOC_FSGETXATTR on stdout: XFS's extent count moved with writeback under load.
 vfy envprobe-load 4 load,aslr -- /guest/envprobe

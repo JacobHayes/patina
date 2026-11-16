@@ -14,7 +14,7 @@ run() {
     wl=$1; out=$2; seed=$3; shift 3
     mkdir -p "$(dirname "$out")"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$W/$wl":/guest:copy "$@" >/dev/null 2>"$out.err" \
-        || [ -f "$out/outcome.json" ] || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
+        || [ -f "$out/result.json" ] || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
     rm -f "$out.err"
 }
 # sweep NAME WORKLOAD SEEDS -- options -- cmd: tests/storage/lib/sweep.sh into $RUNS/NAME.

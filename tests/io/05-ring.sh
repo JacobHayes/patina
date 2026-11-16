@@ -28,7 +28,7 @@ import json, sys, collections
 o, n, laps = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 cls = collections.Counter(); walls = []; digests = set()
 for s in range(1, n + 1):
-    oc = json.load(open(f"{o}/s{s}/outcome.json"))
+    oc = json.load(open(f"{o}/s{s}/result.json"))
     cls[oc["outcome"]] += 1
     walls.append(oc["wall_ms"]); digests.add(oc["digest"])
     if oc["outcome"] == "ok":
@@ -38,4 +38,4 @@ for s in range(1, n + 1):
 print(f"{n} seeds x {laps} laps: classes {dict(cls)}; distinct digests {len(digests)}; wall ms min/median/max {min(walls)}/{sorted(walls)[n//2]}/{max(walls)}")
 assert cls["ok"] == n, cls
 PY
-io_line ring $(for s in $(seq 1 "$SEEDS"); do echo "$o/s$s/outcome.json"; done)
+io_line ring $(for s in $(seq 1 "$SEEDS"); do echo "$o/s$s/result.json"; done)

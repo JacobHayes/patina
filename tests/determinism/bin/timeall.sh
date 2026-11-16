@@ -16,7 +16,7 @@ for w in $wls; do
     # shellcheck disable=SC2086
     timeout 7200 "$PATINA" verify --seed "$seed" --runs 2 --vary time --out "$out/$w" --mount "$GDIR":/guest:copy $EXTRA -- $CMD \
         >"$out/$w.txt" 2>&1 &
-    until [ -e "$out/$w/run-0/outcome.json" ] || ! kill -0 $! 2>/dev/null; do sleep 1; done
+    until [ -e "$out/$w/run-0/result.json" ] || ! kill -0 $! 2>/dev/null; do sleep 1; done
 done
 wait
 for w in $wls; do

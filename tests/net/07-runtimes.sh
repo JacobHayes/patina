@@ -6,7 +6,7 @@ o=$RUNS/07-runtimes; mkdir -p "$o"
 check() {
     g=$1; shift
     verify_ok "$o/$g" 1 3 -- "$@"
-    echo "$g: $(tail -1 "$o/$g/run-0/inc-0/stdout"); net $(field "$o/$g/run-0/outcome.json" counters.net); refused $(field "$o/$g/run-0/outcome.json" refused)"
+    echo "$g: $(tail -1 "$o/$g/run-0/inc-0/stdout"); net $(field "$o/$g/run-0/result.json" counters.net); refused $(field "$o/$g/run-0/result.json" refused)"
     [ "$(net "$o/$g/run-0" unknown_opts)" = 0 ] || die "$g set an unknown socket option"
 }
 check rs-net /guest/rs-net

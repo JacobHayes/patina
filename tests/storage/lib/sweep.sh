@@ -2,7 +2,7 @@
 # Sweep driver:
 #   tests/storage/lib/sweep.sh WORKLOAD SEEDS... -- [patina run options] -- /guest/prog args...
 # WORKLOAD names the guest directory $PATINA_WORKLOADS/WORKLOAD. SEEDS are numbers or ranges A-B. Runs the seeds in
-# parallel ($SWEEP_JOBS, default 6, one core each), collects every outcome.json into
+# parallel ($SWEEP_JOBS, default 6, one core each), collects every result.json into
 # $SWEEP_OUT/outcomes/SEED.json (and the last incarnation's stderr tail into SEED.err),
 # writes $SWEEP_OUT/summary.tsv (seed, outcome, message, digest, incarnations, crashes,
 # wall_ms) and prints a table of outcome x message counts plus the sweep's wall time.
@@ -35,15 +35,15 @@ printf '%s\n' $seeds | xargs -P "${SWEEP_JOBS:-6}" -I{} sh -c '
     rm -rf "$o"
     st=0
     timeout "$SWEEP_TIMEOUT" "$PATINA" run --seed "$s" --out "$o" --mount "$guests":/guest:copy "$@" >/dev/null 2>"$SWEEP_OUT/outcomes/$s.patinaerr" || st=$?
-    if [ ! -f "$o/outcome.json" ]; then
+    if [ ! -f "$o/result.json" ]; then
         echo "{\"outcome\":\"patina-error\",\"message\":\"exit $st\",\"seed\":$s,\"crashes\":[],\"incarnations\":0,\"digest\":\"\",\"wall_ms\":0}" >"$SWEEP_OUT/outcomes/$s.json"
         exit 0
     fi
     rm -f "$SWEEP_OUT/outcomes/$s.patinaerr"
-    cp "$o/outcome.json" "$SWEEP_OUT/outcomes/$s.json"
+    cp "$o/result.json" "$SWEEP_OUT/outcomes/$s.json"
     last=$(ls -d "$o"/inc-* | sort -t- -k2 -n | tail -1)
     tail -c 4000 "$last/stderr" >"$SWEEP_OUT/outcomes/$s.err" 2>/dev/null || true
-    cls=$(jq -r .outcome "$o/outcome.json")
+    cls=$(jq -r .outcome "$o/result.json")
     case $SWEEP_KEEP in
         all) ;;
         none) rm -rf "$o" ;;

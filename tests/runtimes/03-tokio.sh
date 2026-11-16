@@ -20,7 +20,7 @@ NETF="--fault net-reset-permille=30 --fault net-chunk-max=7 --fault net-delay-ms
 echo "== a. R"
 n_ms=$(native "$RUNS/tk-native.txt" "$W/$T" /guest/tokio-mt local)
 run $T "$RUNS/tk-r" 1 -- /guest/tokio-mt local
-c=$(field "$RUNS/tk-r/outcome.json" outcome)
+c=$(field "$RUNS/tk-r/result.json" outcome)
 echo "seed 1: class $c, native wall ${n_ms} ms"
 [ "$c" = ok ] || fail "W2 seed 1: class $c"
 grep -v '^~ ' "$RUNS/tk-native.txt" | sort >"$RUNS/tk-native.masked"
@@ -42,7 +42,7 @@ echo "== d. the 5 s timeout in virtual time (3 runs one after the other)"
 for s in 1 2 3; do
     run $T "$RUNS/tk-t$s" "$s" -- /guest/tokio-mt local
     grep -q '^timeout 5s: fired, elapsed >= 5s: true$' "$RUNS/tk-t$s/inc-0/stdout" || fail "W2 seed $s: the 5 s timeout did not fire as expected"
-    field "$RUNS/tk-t$s/outcome.json" wall_ms >>"$RUNS/tk-wall.u"
+    field "$RUNS/tk-t$s/result.json" wall_ms >>"$RUNS/tk-wall.u"
 done
 med=$(sort -n "$RUNS/tk-wall.u" | sed -n 2p)
 echo "wall ms of the 3 runs: $(sort -n "$RUNS/tk-wall.u" | tr '\n' ' '); median $med; native wall ${n_ms} ms"
@@ -54,7 +54,7 @@ for s in 1 2 3; do
     o=$RUNS/tk-f$s
     run $T "$o" "$s" $FAULT -- /guest/tokio-mt local
     n=$(grep -c '^spawn_blocking error' "$o/inc-0/stdout" || true)
-    echo "seed $s: $(field "$o/outcome.json" faults.injected) faults injected, class $(field "$o/outcome.json" outcome), $n spawn_blocking errors seen"
+    echo "seed $s: $(field "$o/result.json" faults.injected) faults injected, class $(field "$o/result.json" outcome), $n spawn_blocking errors seen"
     [ "$n" -gt 0 ] && fs=$((fs + 1))
 done
 [ "$fs" -gt 0 ] || fail "W2 F: no injected error seen by the program"
@@ -71,7 +71,7 @@ cat "$RUNS/tk-part.txt"
 for s in 1 2; do
     n=$(sed -n 's/^timeouts during echo: //p' "$RUNS/tk-part-$s/inc-0/stdout")
     [ "${n:-0}" -gt 0 ] || fail "W2 seed $s: no 5 s timeout fired during the 10 s partition"
-    w=$(field "$RUNS/tk-part-$s/outcome.json" wall_ms)
+    w=$(field "$RUNS/tk-part-$s/result.json" wall_ms)
     [ "$w" -lt 3000 ] || fail "W2 seed $s: $w ms wall across a 10 s virtual partition"
 done
 echo "-- net-chunk-max=1"

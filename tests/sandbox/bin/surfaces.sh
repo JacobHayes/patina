@@ -20,7 +20,7 @@ for n in $names; do
     timeout 900 "$PATINA" run --seed 1 --out "$d" --mount "$GDIR":/guest:copy $OPTS -- $CMD >/dev/null 2>"$d.err" || true
     python3 -I - "$n" "$d" >>"$OUT/outcomes.tsv" <<'PY'
 import json, sys
-o = json.load(open(sys.argv[2] + "/outcome.json"))
+o = json.load(open(sys.argv[2] + "/result.json"))
 print("%s\t%s\t%s" % (sys.argv[1], o["outcome"], ",".join(o.get("refused", []))))
 PY
     for inc in "$d"/inc-*; do

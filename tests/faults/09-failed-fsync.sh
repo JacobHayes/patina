@@ -13,11 +13,11 @@ echo "crash at the first crash point at or after seq $at"
 for m in ext4-ordered posix-strict; do
     o=$d/retry-$m
     run "$o" 1 --config "$("$PATINA_CFG" fs-model=$m)" --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log retry
-    echo "$m retry: $(class "$o") $(field "$o/outcome.json" message); injected $(field "$o/outcome.json" faults.recent)"
-    [ "$(class "$o")" = failure ] && field "$o/outcome.json" message | grep -q "INVARIANT acked-record-lost" \
+    echo "$m retry: $(class "$o") $(field "$o/result.json" message); injected $(field "$o/result.json" faults.recent)"
+    [ "$(class "$o")" = failure ] && field "$o/result.json" message | grep -q "INVARIANT acked-record-lost" \
         || die "$m: retry-until-success was not caught"
     o=$d/fatal-$m
     run "$o" 1 --config "$("$PATINA_CFG" fs-model=$m)" --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log fatal
     echo "$m fatal: $(class "$o") ($(tail -1 "$o/inc-0/stdout"))"
-    [ "$(class "$o")" = ok ] || die "$m: fatal-on-EIO guest: $(class "$o") $(field "$o/outcome.json" message)"
+    [ "$(class "$o")" = ok ] || die "$m: fatal-on-EIO guest: $(class "$o") $(field "$o/result.json" message)"
 done

@@ -5,10 +5,10 @@
 o=$RUNS/07-jit
 for i in 1 2 3; do
     patina_run "$o/r$i" 1 insn-jit
-    [ "$(field "$o/r$i/outcome.json" outcome)" = ok ] || die "run $i: $(field "$o/r$i/outcome.json" message)"
-    u=$(field "$o/r$i/outcome.json" labels.unscanned_exec_mappings)
+    [ "$(field "$o/r$i/result.json" outcome)" = ok ] || die "run $i: $(field "$o/r$i/result.json" message)"
+    u=$(field "$o/r$i/result.json" labels.unscanned_exec_mappings)
     [ "$u" -ge 1 ] || die "run $i: unscanned_exec_mappings $u"
-    echo "run $i: $(cat "$o/r$i/inc-0/stdout"), unscanned_exec_mappings $u, digest $(field "$o/r$i/outcome.json" digest)"
+    echo "run $i: $(cat "$o/r$i/inc-0/stdout"), unscanned_exec_mappings $u, digest $(field "$o/r$i/result.json" digest)"
 done
 d=$(for i in 1 2 3; do cat "$o/r$i/inc-0/stdout"; done | sort -u | wc -l)
 [ "$d" -ge 2 ] || die "the unscanned rdrand gave the same value in 3 runs"
@@ -19,9 +19,9 @@ echo "the labelled gap: $d distinct values in 3 runs of seed 1"
 for m in file-mmap file-mprotect file-shared; do
     for i in 1 2; do
         patina_run "$o/$m-$i" 1 insn-jit "$m"
-        [ "$(field "$o/$m-$i/outcome.json" outcome)" = ok ] || die "$m: $(field "$o/$m-$i/outcome.json" message)"
+        [ "$(field "$o/$m-$i/result.json" outcome)" = ok ] || die "$m: $(field "$o/$m-$i/result.json" message)"
     done
-    f=$o/$m-1/outcome.json
+    f=$o/$m-1/result.json
     echo "$m: $(cat "$o/$m-1/inc-0/stdout") / $(cat "$o/$m-2/inc-0/stdout"); patched $(field "$f" counters.insn.patched_sites.rdrand), emulated $(field "$f" counters.insn.emulated.rdrand), unscanned $(field "$f" labels.unscanned_exec_mappings)"
     if [ "$m" = file-shared ]; then
         [ "$(field "$f" labels.unscanned_exec_mappings)" -ge 1 ] && [ "$(field "$f" counters.insn.patched_sites.rdrand)" = 0 ] || die "$m: not labelled"

@@ -4,12 +4,12 @@
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 verify "$RUNS/09-go" 1 go-sig 4
-echo "4 identical runs, digest $(field "$RUNS/09-go/run-0/outcome.json" digest), traps $(field "$RUNS/09-go/run-0/outcome.json" sched.traps)"
+echo "4 identical runs, digest $(field "$RUNS/09-go/run-0/result.json" digest), traps $(field "$RUNS/09-go/run-0/result.json" sched.traps)"
 deliveries "$RUNS/09-go/run-0" | tee "$RUNS/09-go/deliveries.txt"
 grep -q ' 0x17$' "$RUNS/09-go/deliveries.txt" || die "no SIGURG delivered"
 grep -q ' 0xa$' "$RUNS/09-go/deliveries.txt" || die "no SIGUSR1 delivered"
 for seed in 2 3; do
     patina_run "$RUNS/09-go/seed-$seed" "$seed" go-sig
     check_ok "$RUNS/09-go/seed-$seed" go-sig
-    echo "seed $seed: ok, digest $(field "$RUNS/09-go/seed-$seed/outcome.json" digest)"
+    echo "seed $seed: ok, digest $(field "$RUNS/09-go/seed-$seed/result.json" digest)"
 done

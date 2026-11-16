@@ -10,7 +10,7 @@ marks of its own and of the supervisor (Ctl::timing). REPS runs each, median [mi
   exit barrier         main_exit -> finish
   kill + export        finish -> exported     kill(-1), reap, live-tree export
   teardown             exported -> waited     verdict write, bwrap and namespaces exit
-  launcher finish      waited -> done, plus the rest of the process (outcome.json)
+  launcher finish      waited -> done, plus the rest of the process (result.json)
   total (process)      wall of the patina process
 
 Native for comparison: the same program pinned, exec'd directly and inside bwrap (native.sh).
@@ -53,7 +53,7 @@ for name, argv in progs.items():
         for p, a, b in phases:
             rows[p].append((m[b] - m[a]) / 1e6)
         tot.append((t1 - t0) / 1e6)
-        o = json.load(open(f"{out}/outcome.json"))
+        o = json.load(open(f"{out}/result.json"))
         assert o["outcome"] == "ok", o
         traps = o["sched"]["traps"]
     nat_direct = [native_run(f"{OUT}/nd", [a if not a.startswith("/guest/") else GUESTS + a[6:] for a in argv],

@@ -16,7 +16,7 @@ for seed in 1; do
     [ "$(cat "$o/v$seed/run-0/inc-0/stdout")" = "$want" ] || die "seed $seed: unexpected output"
 done
 for seed in $(seq 1 8); do run_ok "$o/s$seed" "$seed" -- /guest/pipes; done
-n=$(for seed in $(seq 1 8); do field "$o/s$seed/outcome.json" digest; done | sort -u | wc -l)
+n=$(for seed in $(seq 1 8); do field "$o/s$seed/result.json" digest; done | sort -u | wc -l)
 echo "distinct digests over seeds 1-8: $n"
 [ "$n" -ge 3 ] || die "only $n distinct digests"
-io_line pipes $(for seed in $(seq 1 8); do echo "$o/s$seed/outcome.json"; done)
+io_line pipes $(for seed in $(seq 1 8); do echo "$o/s$seed/result.json"; done)

@@ -5,7 +5,7 @@ o=$RUNS/04-delay; mkdir -p "$o"
 best=999999
 for i in 1 2 3; do
     run_ok "$o/x$i" "$i" --fault net-delay-ms=1000..2000 -- /guest/sockets xfer 1024 1000
-    w=$(field "$o/x$i/outcome.json" wall_ms)
+    w=$(field "$o/x$i/result.json" wall_ms)
     echo "seed $i: $(grep transfer: "$o/x$i/inc-0/stdout"); run wall $w ms"
     [ "$w" -lt "$best" ] && best=$w
 done

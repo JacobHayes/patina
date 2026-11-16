@@ -17,7 +17,7 @@ for g in $GUESTS; do
         out=$RUNS/05-preempt/switches-p$p-$g
         PATINA_OPTS="--config $("$PATINA_CFG" preempt-permille="$p")" patina_run "$out" 1 "$g"
         check_result "$out" "$g"
-        line="$line p$p=$(field "$out/outcome.json" sched.switches)/$(field "$out/outcome.json" sched.traps)traps"
+        line="$line p$p=$(field "$out/result.json" sched.switches)/$(field "$out/result.json" sched.traps)traps"
     done
     echo "$line"
 done

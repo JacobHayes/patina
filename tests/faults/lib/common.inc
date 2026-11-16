@@ -19,7 +19,7 @@ run() {
     rm -rf "$out"
     mkdir -p "$(dirname "$out")"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >/dev/null 2>"$out.err" \
-        || [ -f "$out/outcome.json" ] || die "patina run $* (seed $seed): no outcome.json ($(tail -2 "$out.err"))"
+        || [ -f "$out/result.json" ] || die "patina run $* (seed $seed): no result.json ($(tail -2 "$out.err"))"
     rm -f "$out.err"
 }
 
@@ -33,7 +33,7 @@ verify() {
         || grep -q '^identical: ' "$out.log" || die "verify $* (seed $seed): not identical ($(tail -3 "$out.log"))"
 }
 
-class() { field "$1/outcome.json" outcome; }
+class() { field "$1/result.json" outcome; }
 
 # sweep NAME SEEDS [patina run options] -- /guest/cmd args: one run per seed (1..SEEDS),
 # $T07_JOBS (default 4) at a time, through tests/storage/lib/sweep.sh: $RUNS/NAME/summary.tsv

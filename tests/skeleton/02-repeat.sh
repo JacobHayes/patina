@@ -6,7 +6,7 @@ for g in $GUESTS; do
     out=$RUNS/02-repeat/$g
     mkdir -p "$RUNS/02-repeat"
     timeout 120 "$PATINA" verify --seed 1 --runs 4 --vary cpu,aslr,sandbox --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" >"$out.txt" || grep -q '^identical: ' "$out.txt" || die "$g: verify exit $?"
-    n=$(for i in 0 1 2 3; do field "$out/run-$i/outcome.json" digest; done | sort -u | wc -l)
+    n=$(for i in 0 1 2 3; do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$g: $n distinct digests"
     n=$(for i in 0 1 2 3; do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$g: $n distinct stdout files"

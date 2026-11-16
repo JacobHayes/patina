@@ -29,7 +29,7 @@ done
 echo "guest host pid $pid ($(grep NSpid "/proc/$pid/status"))"
 kill -USR1 "$pid"
 wait "$launcher" || true
-c=$(field "$o/outcome.json" outcome); d=$(field "$o/outcome.json" message)
+c=$(field "$o/result.json" outcome); d=$(field "$o/result.json" message)
 echo "outcome: $c: $d"
 [ "$c" = internal ] || die "outcome $c"
 case "$d" in *SIGUSR1*) ;; *) die "detail does not name SIGUSR1: $d" ;; esac

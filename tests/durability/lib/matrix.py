@@ -32,7 +32,7 @@ F_SCRIPT = {"W1": "storage reproductions 09-w1", "W2": "language runtimes 03-tok
 
 
 def outcome(d):
-    with open(os.path.join(d, "outcome.json")) as f:
+    with open(os.path.join(d, "result.json")) as f:
         return json.load(f)
 
 
