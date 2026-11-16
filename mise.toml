@@ -20,6 +20,8 @@ description = "The landing gate: format, clippy, then ./check quick"
 run = [
   "cargo fmt --all -- --check",
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
+  # The SDK's off-by-default feature: the compute-point hooks.
+  "cargo clippy -p patina-dst --all-targets --features compute --locked -- -D warnings",
   # The runtime is its own workspace, built for its own target (its .cargo/config.toml).
   "cd crates/patina-rt && cargo fmt -- --check && cargo clippy --release --locked -- -D warnings",
   "./check quick",

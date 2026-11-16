@@ -112,7 +112,8 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
 - **Branch counters**, with `--preempt branches`: a preemption after a seed-chosen number of
   retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
 - **Compute points**, in code rebuilt with the compilers' coverage flags and the hook file
-  `sdk/c/patina_compute.c` (clang: edges, loads and stores). Each hook call is an event: it
+  `sdk/c/patina_compute.c` (clang: edges, loads and stores; Rust: the SDK crate's feature
+  `compute`, the same hooks). Each hook call is an event: it
   decrements one word of the program's own memory, the cell (a page per address space at
   `proto::layout::COMPUTE_CELL`, mapped at the hooks' first call, `COMPUTE_HELLO`), and makes
   the SDK call `COMPUTE_POINT` when it reaches 0. At every return to program code the runtime

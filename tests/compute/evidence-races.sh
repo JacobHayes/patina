@@ -1,7 +1,8 @@
 #!/bin/sh
-# Evidence (docs/EVIDENCE.md, compute points): the syscall-free races `races b` and `pool`,
-# seeds 1-200, in three columns: the stock build (tests/guests/counters), the build with
-# compute points at the default compute-gap, and at compute-gap=8. Each column: failing seeds,
+# Evidence (docs/EVIDENCE.md, compute points): the syscall-free races `races b`, `pool` and
+# `rs-race` (Rust atomics), seeds 1-200, in three columns: the stock build
+# (tests/guests/counters; rs-race-stock), the build with compute points at the default
+# compute-gap, and at compute-gap=8. Each column: failing seeds,
 # and whether the first one replays identical. The prototype found 14 and 165 of 200 with a
 # switch at 1 event in 10.
 #@ tier=evidence budget=600 slots=6
@@ -13,16 +14,19 @@ from concurrent.futures import ThreadPoolExecutor
 
 P, GU, OUT = os.environ["PATINA"], os.environ["PATINA_GUESTS"], os.environ["OUT"]
 N = int(os.environ.get("RACE_SEEDS", "200"))
-PROGS = [("races b", "races", ["b"]), ("pool", "pool", [])]
-COLS = [("stock", "counters", []), ("default", "compute", []), ("gap 8", "compute", ["--fault", "compute-gap=8"])]
+# (name, stock build, rebuilt build, arguments) under /guest
+PROGS = [("races b", "counters/races", "compute/races", ["b"]), ("pool", "counters/pool", "compute/pool", []),
+         ("rs-race", "compute/rs-race-stock", "compute/rs-race", [])]
+COLS = [("stock", []), ("default", []), ("gap 8", ["--fault", "compute-gap=8"])]
 
 
 def run(job):
-    (pn, prog, args), (cn, d, opts), s = job
-    out = os.path.join(OUT, f"{prog}-{cn.replace(' ', '')}-{s}")
+    (pn, stock, rebuilt, args), (cn, opts), s = job
+    prog = stock if cn == "stock" else rebuilt
+    out = os.path.join(OUT, f"{prog.replace('/', '-')}-{cn.replace(' ', '')}-{s}")
     subprocess.run(["rm", "-rf", out])
     subprocess.run([P, "run", "--seed", str(s), "--out", out, "--mount", GU + ":/guest:copy", *opts, "--",
-                    f"/guest/{d}/{prog}", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
+                    f"/guest/{prog}", *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
     with open(os.path.join(out, "result.json")) as f:
         r = json.load(f)
     return job, out, r

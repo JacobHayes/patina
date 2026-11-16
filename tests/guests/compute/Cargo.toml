@@ -1,0 +1,23 @@
+# The Rust compute-point guests, built by build.sh exactly as docs/GUIDE.md tells users to:
+# RUSTFLAGS with the coverage flags, `--target x86_64-unknown-linux-gnu`, the SDK's `compute`
+# feature. rs-build.rs is a build script so that a build without `--target` (the flags on
+# build scripts, which do not link the SDK) fails here.
+[package]
+name = "compute-rs"
+version = "0.1.0"
+edition = "2024"
+build = "rs-build.rs"
+publish = false
+
+[[bin]]
+name = "rs-race"
+path = "rs-race.rs"
+
+[[bin]]
+name = "rs-deadline"
+path = "rs-deadline.rs"
+
+[dependencies]
+patina-dst = { path = "../../../crates/patina", features = ["compute"] }
+
+[workspace]

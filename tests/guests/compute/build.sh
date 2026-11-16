@@ -1,8 +1,9 @@
 #!/bin/sh
 # Compute-point guests into $1/compute/ (/guest/compute/ in the sandbox): C programs rebuilt
 # with clang's coverage flags and sdk/c/patina_compute.c, from sources other areas already
-# use where they exist (deps lists them). Without clang nothing is built and MISSING says so:
-# this script succeeds, so other areas are not blocked, and tests/compute fails.
+# use where they exist (deps lists them), and Rust programs built with cargo, the coverage
+# RUSTFLAGS and the SDK's `compute` feature. Without clang the C guests are not built and
+# MISSING says so: this script succeeds, so other areas are not blocked, and tests/compute fails.
 #   races, pool       the counters area's syscall-free races (races at -O1 as there; pool at
 #                     -O2, where its `stats.done++` is one instruction in a stock build)
 #   spinpoints        tests/guests/threads/spinpoints.c (`count`: a spin-wait that changes state)
@@ -10,11 +11,38 @@
 #   cellpoke          writes into, then unmaps, its own cell
 #   loop, loop-stock  a loop between two clock reads, instrumented and not
 #   mixed             threads, then stock and instrumented children (fork, vfork, exec)
+#   rs-race           an atomics check-then-act (Rust, cargo with the flags; Cargo.toml);
+#                     rs-race-stock the same built without them
+#   rs-deadline       a loop that ends when a sleeping thread sets a flag (Rust)
+# The Rust guests need no clang. If the pinned Rust toolchain rejects the flags (they name an
+# LLVM pass and its options, which carry no stability promise), rs-MISSING says so and
+# tests/compute/05-rust fails with it; any other build failure fails this script.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 out=${1:?guest dir}/compute
 mkdir -p "$out"
+
+rf="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc"
+rf="$rf -Cllvm-args=-sanitizer-coverage-trace-loads -Cllvm-args=-sanitizer-coverage-trace-stores"
+rt=${PATINA_BUILD_DIR:?}/compute-rs-target
+if ! (cd "$here" && unset CARGO_ENCODED_RUSTFLAGS && RUSTFLAGS="$rf" cargo build --release --offline --locked --quiet \
+    --target x86_64-unknown-linux-gnu --target-dir "$rt") 2>"$out/rs-build.err"; then
+    if grep -q 'unknown pass name\|Unknown command line argument\|failed to run LLVM passes' "$out/rs-build.err"; then
+        { echo "this Rust toolchain ($(rustc -V)) no longer accepts the compute-point flags RUSTFLAGS=\"$rf\":"
+          grep -m3 'error\|Unknown' "$out/rs-build.err"; } | tee "$out/rs-MISSING" >&2
+    else
+        cat "$out/rs-build.err" >&2
+        exit 1
+    fi
+else
+    cp "$rt/x86_64-unknown-linux-gnu/release/rs-race" "$rt/x86_64-unknown-linux-gnu/release/rs-deadline" "$out/"
+fi
+(cd "$here" && unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS && cargo build --release --offline --locked --quiet \
+    --bin rs-race --target-dir "$rt-stock")
+cp "$rt-stock/release/rs-race" "$out/rs-race-stock"
+rm -f "$out/rs-build.err"
+
 if ! command -v clang >/dev/null; then
     echo "clang is not installed: the compute-point guests are not built" | tee "$out/MISSING" >&2
     exit 0

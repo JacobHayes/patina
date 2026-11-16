@@ -301,6 +301,23 @@ if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path
 patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
 ```
 
+The feature `compute` (`features = ["compute"]`) adds the hooks for compute points: a program
+built with LLVM's coverage pass gets scheduling points and virtual time in code without system
+calls. Build with the flags and `--target`, which keeps them off build scripts and proc macros
+(those do not link the SDK, and without it fail to link):
+
+```sh
+RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 \
+  -Cllvm-args=-sanitizer-coverage-trace-pc -Cllvm-args=-sanitizer-coverage-trace-loads \
+  -Cllvm-args=-sanitizer-coverage-trace-stores" \
+  cargo build --release --target x86_64-unknown-linux-gnu
+```
+
+Every crate built this way is instrumented, with what the standard library inlines into it
+(atomics, `Cell`, `Mutex`'s fast path); the prebuilt standard library itself is not. A program
+that does not call the SDK links it with `use patina_dst as _;`. A `dev`-profile build makes
+about 14 times the events, and so the virtual time, of a release build for the same work.
+
 **C and C++**: `cc -I PATINA/sdk/c`, one header.
 
 ```c

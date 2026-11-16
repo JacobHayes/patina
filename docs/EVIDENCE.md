@@ -205,6 +205,36 @@ fails `03-inert` (a stock run gains `compute`); a point at `compute-gap=0` that 
 the supervisor fails `03-inert` (a program that empties its cell forever never reaches its
 time limit).
 
+### Rust
+
+The SDK crate's feature `compute` and the RUSTFLAGS of docs/GUIDE.md ("The SDK"), stable
+1.99.1. Guests `tests/guests/compute/rs-race.rs` (the prototype's atomics check-then-act) and
+`rs-deadline.rs`, built with cargo exactly as the guide says. `rs-race`'s window is one edge:
+a load hook, the load, an edge hook, then `lock sub`; a point at the edge hook is the race.
+
+| Check | Result |
+|---|---|
+| `rs-race`, seeds 1-200: stock / default `compute-gap` / `compute-gap=8` (`compute/evidence-races`, 2026-11-16) | 0 / 1 / 5 double spends; seeds 106 and 52 replay identical |
+| `rs-race` by hand, seeds 1-200 at `compute-gap=4` / `2` | 11 / 38 double spends |
+| Lost updates of two threads, 3 each, seeds 1-200 at `compute-gap=8`, rebuilt / stock: `AtomicUsize` load then store; `Mutex` read under one lock, written under another; a shared `Cell` (`get`, `set`); an atomic load, `to_string`, a store | 36 / 0, 40 / 0, 36 / 0, 108 / 0; each first failing seed replays identical |
+| The same lost update in a crate built without the flags (as the prebuilt standard library is), called from a rebuilt program | 0 / 200: no event inside it, so no point inside it |
+| A rebuilt binary (`stdrace`): which functions call hooks | 28: the program's own and the generic or inlined standard-library code compiled into it; none in `Mutex::lock_contended`, `Barrier::wait` or `fmt` |
+| A crate using `always!` and `sometimes!`, rebuilt, seeds 1-100 at `compute-gap=8` | its own code instrumented (12 hook calls in the checked function); `always!` violated on 2 seeds, replays identical |
+| `rs-deadline`'s events per round of the same work (64 multiply-adds), `compute-gap=1024`: `opt-level` 0 / 1 / 3 / cargo `dev` profile (0, debug assertions, overflow checks) / 3 with `codegen-units` 1 / 16 | 1,688 / 194 / 195 / 2,723 / 195 / 195; every run ends `ok` at 50.03 ms |
+| tokio (multi-thread, 4 workers, 8 tasks, `tokio::sync::Mutex`, `sleep`), `cargo build --target`: natively 2,000 rounds | stock 0.07 s user / rebuilt 0.17 s user (wall 2.3 s, sleep-bound) |
+| The same under Patina, seed 2 (mean gap 248) / seed 1 at `compute-gap=0`, `65536`, `1024` | 3.0 s, 429,129 switches (stock: 0.19 s) / 0.27, 0.26, 0.86 s wall; `verify --runs 3 --vary cpu,aslr,load`: identical |
+
+`cargo build` with the flags and no `--target` fails to link the build scripts (`proc-macro2`'s,
+and the guests' own `rs-build.rs`): undefined `__sanitizer_cov_trace_pc`. With `--target` the
+flags reach only the target's crates, and proc macros (`tokio-macros`) and build scripts are
+built without them. Neither `codegen-units` nor the profile changes what is instrumented, only
+how many events the same work makes. A toolchain that rejects the flags fails the guests' build
+with "this Rust toolchain (...) no longer accepts the compute-point flags", shown by
+`compute/05-rust` (planted by misspelling the pass name).
+
+Red/green: hooks whose slow path never says hello fail `compute/05-rust` (no image in `compute.images`).
+The SDK without the feature exports the same 16 symbols as before it and no `__sanitizer_*`.
+
 ## Costs
 
 | What | Cost |
