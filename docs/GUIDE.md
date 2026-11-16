@@ -293,7 +293,7 @@ what it should be, and is not listed.
 for a checkout):
 
 ```toml
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.6.0" }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.6.1" }
 ```
 
 ```rust
@@ -308,7 +308,7 @@ patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
 PATINA_ALWAYS(acked <= stored, "acked-records-kept", detail);
 ```
 
-**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.6.0` (the
+**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.6.1` (the
 module's tags are `go/patina/vX.Y.Z`; `@main` gives the current one).
 `examples/bank-go/go.mod` builds against its checkout with a `replace`.
 
@@ -409,7 +409,7 @@ jobs:
       - run: |
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.6.0/install.sh | sh -s -- --version 0.6.0
+      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.6.1/install.sh | sh -s -- --version 0.6.1
       - run: cargo build && patina sweep --seeds 1..200 -- target/debug/myprog
 ```
 
