@@ -9,10 +9,13 @@
 //!   are `handed - cell` (clamped to `0..=handed`, so a stray store into the cell moves only
 //!   this process's own count); they are charged to virtual time at `compute_charge_ns` each.
 //! - `exit`, the last thing before every return to program code beside `pmu::exit`: draws the
-//!   next segment's gap (`proto::compute::gap`) and writes it to the cell.
-//! - `point`, the trap of `COMPUTE_POINT`: when the runtime's own count says the gap ran out
-//!   (with switches off: and a deadline or the time limit fell due), one `Preempt` record and
-//!   a yield; otherwise nothing (no record, no charge).
+//!   next segment's gap (`proto::compute::gap`), cuts it short at the next deadline or the
+//!   time limit and at `REFILL` (`proto::compute::arm`), writes it to the cell and remembers
+//!   which of the three it was.
+//! - `point`, the trap of `COMPUTE_POINT`: when the runtime's own count says the cell ran out,
+//!   one `Preempt` record with that reason and a yield (the supervisor fires what is due);
+//!   otherwise nothing (no record, no charge). So a timer, a timeout or the time limit falls
+//!   due inside instrumented code at the exact event, with or without switches.
 //!
 //! Only the thread holding the turn runs, so the one cell of a process is never contended: a
 //! thread's events are read and charged at its own next entry, before any other thread of the
@@ -24,8 +27,12 @@
 //! counted or charged here: counters own scheduling and time for the whole run.
 
 use crate::state::{config, ctl, proc, ThreadState};
+use crate::trap::{
+    reg::{EFL, R11, RIP},
+    TrapFrame,
+};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE, REASON_SWITCH, REFILL};
+use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE};
 use proto::layout::{COMPUTE_CELL, PAGE};
 
 /// No hello yet in this image: every function here is one test of `mode`.
@@ -40,9 +47,13 @@ pub struct Compute {
     pub mode: u64,
     /// Event kinds the image's hook copies named.
     pub kinds: u64,
-    /// The value last written to the cell, and that less the events charged since.
-    pub gap: i64,
+    /// The value last written to the cell, and that less the events charged since; the
+    /// segment's drawn gap (0: switches off); why the cell will run out (`proto::compute`
+    /// `REASON_*`).
+    pub armed: i64,
     pub handed: i64,
+    pub draw: u64,
+    pub cut: u64,
     /// Events charged in this process.
     pub events: u64,
 }
@@ -52,8 +63,10 @@ impl Compute {
         Compute {
             mode: OFF,
             kinds: 0,
-            gap: 0,
+            armed: 0,
             handed: 0,
+            draw: 0,
+            cut: 0,
             events: 0,
         }
     }
@@ -105,7 +118,7 @@ fn enter_slow(ts: &mut ThreadState) {
         return;
     }
     p.handed -= used as i64;
-    // At most `GAP_MAX` events per entry, whatever the program wrote into its cell.
+    // At most `REFILL` events per entry, whatever the program wrote into its cell.
     p.events += used;
     ts.compute_events += used;
     let c = ctl();
@@ -126,16 +139,23 @@ pub fn exit(ts: &mut ThreadState) {
 #[inline(never)]
 fn exit_slow(ts: &mut ThreadState) {
     ts.compute_segs += 1;
-    let cfg = config();
-    let key = proto::compute::key(ctl().seq.load(Relaxed), ts.slot, ts.compute_segs);
-    let gap = match proto::compute::gap(cfg.seed, cfg.compute_gap, key) {
-        Some(g) => g as i64,
-        None => REFILL,
-    };
+    let c = ctl();
+    let cfg = &c.config;
+    let key = proto::compute::key(c.seq.load(Relaxed), ts.slot, ts.compute_segs);
+    let draw = proto::compute::gap(cfg.seed, cfg.compute_gap, key);
+    // The first event at or after the next deadline, or past the time limit, is a point.
+    let due = c.next_deadline_ns.load(Relaxed).min(
+        proto::layout::VCLOCK_BOOT_NS
+            .saturating_add(cfg.vtime_limit_ns)
+            .saturating_add(1),
+    );
+    let (n, cut) = proto::compute::arm(draw, c.vclock_ns.load(Relaxed), due, cfg.compute_charge_ns);
     let p = &mut proc().compute;
-    p.gap = gap;
-    p.handed = gap;
-    write_cell(gap);
+    p.armed = n as i64;
+    p.handed = n as i64;
+    p.draw = draw.unwrap_or(0);
+    p.cut = cut;
+    write_cell(n as i64);
 }
 
 /// `COMPUTE_HELLO`: map the cell (first hook copy of this image), note the image and its kinds
@@ -188,26 +208,15 @@ pub fn hello(arg: u64) -> i64 {
     COMPUTE_CELL as i64
 }
 
-/// The trap of `COMPUTE_POINT` (after `enter`), at `rip`. Returns to the trap entry, which
-/// leaves through the normal trap exit.
-pub fn point(ts: &mut ThreadState, rip: u64) {
+/// The trap of `COMPUTE_POINT` (after `enter`), with the program's registers in `frame`.
+/// Returns to the trap entry, which leaves through the normal trap exit.
+pub fn point(ts: &mut ThreadState, frame: &TrapFrame) {
     let p = &mut proc().compute;
     let c = ctl();
     let reason = match p.mode {
-        // The gap ran out by the runtime's own count (a stray store that zeroed the cell
-        // counts the same): consult the supervisor.
-        ON if p.handed == 0 && config().compute_gap != 0 => REASON_SWITCH,
-        // Switches off: `exit` refills the cell, and the supervisor is consulted only when a
-        // deadline or the time limit fell due, so virtual time stays bounded however often
-        // the program empties its cell.
-        ON if p.handed == 0 && {
-            let now = c.vclock_ns.load(Relaxed);
-            now >= c.next_deadline_ns.load(Relaxed)
-                || now > proto::layout::VCLOCK_BOOT_NS.saturating_add(config().vtime_limit_ns)
-        } =>
-        {
-            REASON_DEADLINE
-        }
+        // The cell ran out by the runtime's own count (a stray store that zeroed it counts the
+        // same): consult the supervisor, for the reason `exit` armed it with.
+        ON if p.handed == 0 => p.cut,
         // Counters own the run; a program that wrote the cell gets `NO_LIMIT` back.
         COUNTERS => return write_cell(NO_LIMIT),
         // The cell has events left (a call by hand), or no stop is due: nothing happens.
@@ -216,12 +225,20 @@ pub fn point(ts: &mut ThreadState, rip: u64) {
     };
     ts.seq = c.seq.load(Relaxed) + 1;
     c.seq.store(ts.seq, Relaxed);
-    if reason == REASON_SWITCH {
-        bump(&c.compute.switches, 1);
-    } else {
+    if reason == REASON_DEADLINE {
         bump(&c.compute.deadline_stops, 1);
+    } else {
+        bump(&c.compute.switches, 1);
     }
-    let (gap, ran) = (p.gap as u64, p.events);
+    let g = &frame.gregs;
+    let mut words = [0u64; 18];
+    words.copy_from_slice(&g[..18]);
+    // The trap and resume flags a spin probe's single steps may leave (in the flags and in the
+    // copy `syscall` saved in r11) depend on when the probe came: not hashed.
+    const TF_RF: u64 = 0x100 | 0x1_0000;
+    words[EFL] &= !TF_RF;
+    words[R11] &= !TF_RF;
+    let bytes = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 18 * 8) };
     let rec = proto::Rec {
         seq: ts.seq,
         vclock_ns: c.vclock_ns.load(Relaxed),
@@ -229,9 +246,9 @@ pub fn point(ts: &mut ThreadState, rip: u64) {
         kind: proto::RecKind::Preempt as u8,
         class: 0,
         nr: PREEMPT_NR,
-        args: [rip, gap, reason, ran, 0, 0],
+        args: [g[RIP], p.armed as u64, reason, p.events, p.draw, 0],
         ret: 0,
-        out_hash: 0,
+        out_hash: proto::rec::hash_bytes(0, bytes),
         in_hash: 0,
     };
     crate::log::append(&rec);

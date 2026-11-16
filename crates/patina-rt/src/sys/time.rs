@@ -59,7 +59,7 @@ fn clock_nanosleep(clk: i64, flags: u64, req: u64, rem: u64) -> Result<i64, i64>
 }
 
 fn cpu_ns(call: &mut dyn Call) -> u64 {
-    call.thread().traps * ctl().config.trap_charge_ns
+    call.thread().cpu_ns()
 }
 
 fn clock(call: &mut dyn Call, id: i64) -> Result<u64, i64> {

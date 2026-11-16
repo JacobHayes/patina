@@ -39,8 +39,8 @@ pub struct Config {
     pub sched: u64,
     /// Virtual time charged to a pause point or a spin yield.
     pub spin_charge_ns: u64,
-    /// Compute points (`crate::compute`): the run's mean gap in events (0: no switches; time
-    /// is still charged), and the virtual time one event costs.
+    /// Compute points (`crate::compute`): the run's mean gap in events (0: no seeded switches;
+    /// time is still charged, deadlines still cut, and the cell still yields every `REFILL`), and the virtual time one event costs.
     pub compute_gap: u64,
     pub compute_charge_ns: u64,
     /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
@@ -175,8 +175,8 @@ pub struct ComputeStats {
     /// `COMPUTE_HELLO` calls answered with the cell, and the event kinds they named (or'ed).
     pub hellos: AtomicU64,
     pub kinds: AtomicU64,
-    /// Events charged; points that consulted the supervisor because the gap ran out
-    /// (`switches`) or a deadline fell due (`deadline_stops`).
+    /// Events charged; points that consulted the supervisor because the gap or the longest
+    /// run (`compute::REFILL`) ran out (`switches`), or a deadline fell due (`deadline_stops`).
     pub events: AtomicU64,
     pub switches: AtomicU64,
     pub deadline_stops: AtomicU64,

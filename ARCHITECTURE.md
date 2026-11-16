@@ -119,14 +119,22 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   the SDK call `COMPUTE_POINT` when it reaches 0. At every return to program code the runtime
   writes a seeded gap there (uniform in `1..2G-1`; the mean G is drawn per seed from
   `--fault compute-gap`, default `64..65536`); at every runtime entry it reads back how many
-  events ran and charges each 1 ns of virtual time. A point that finds the gap run out writes
-  a `preempt` record (`nr` 3) and yields; the call adds no other record and no trap charge
-  (`compute.rs`). With `--fault compute-gap=0` there are no switches: the cell holds 2^40 and
-  is refilled when it runs out, yielding then only if a deadline or the time limit fell due. Stock code never makes the call and is not touched. With `--preempt
-  branches` the cell is never armed. A fork child keeps its parent's cell and hello; an exec
-  starts without either. The first hello of each process notes its image's guest path in the
-  control region's image table (`proto::ctl::ComputeTab`: 32 paths with their kinds and
-  starts, and a count of the starts that did not fit), which `result.json` reports.
+  events ran and charges each 1 ns of virtual time. The gap is cut short at the event that
+  makes the next deadline (a timer, a timeout, the wire) or the time limit due, and at 2^22
+  events whatever the gap (`proto::compute::arm`). A point that finds the cell run out writes
+  a `preempt` record (`nr` 3: why it ran out, the general registers' hash) and yields, so the
+  supervisor fires what is due and a signal is delivered on the way out; the call adds no other
+  record and no trap charge (`compute.rs`). With `--fault compute-gap=0` there are no seeded
+  switches, but deadlines cut the cell the same way and it still yields every 2^22 events, so
+  an instrumented spin-wait hands over in every setting. Thread and process CPU clocks
+  (`clock_gettime`, `times`, `getrusage`) count the thread's events at 1 ns each beside its
+  traps. Stock code never makes the call and is not touched. With `--preempt branches` the
+  cell is never armed and events charge nothing. Replay refuses a run whose recorded gap or
+  event charge differs from what this build would use. A fork child keeps its parent's cell
+  and hello; an exec starts without either. The first hello of each process notes its image's
+  guest path in the control region's image table (`proto::ctl::ComputeTab`: 32 paths with
+  their kinds and starts, and a count of the starts that did not fit), which `result.json`
+  reports.
 
 `rdtsc`, `rdrand` and `rdseed` are answered from virtual time and the seed. Code generated
 at run time (a JIT) is not scanned for them; such mappings are counted in `result.json`.
@@ -135,7 +143,9 @@ at run time (a JIT) is not scanned for them; such mappings are counted in `resul
 while another thread could run, ends the run `unsupported` with stop `compute-stall` and
 names the thread. The cause is a loop that changes state on each pass (a counter, a
 timestamp it computes) and contains no system call or `pause`. The fix is `--preempt
-branches`, where the host allows it, or rebuilding that code with compute points. A thread
+branches`, where the host allows it, or rebuilding that code with compute points (its message
+says both: the supervisor does not know whether the code is rebuilt). Rebuilt code does not
+reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
 computing alone is left to finish.
 
 ## Counter preemption
@@ -247,7 +257,7 @@ Enforced:
 - **The compute-point cell** is program memory outside the runtime's region, read and written
   by the runtime only through its fault-safe guest copy. A program that writes it changes only
   when its own process's next compute point comes and how many events it is charged (at most
-  the gap last written, so at most 2^41 ns per runtime entry), the same in every run; one that
+  the value last written, so at most 2^22 ns per runtime entry), the same in every run; one that
   unmaps or protects it ends the run `unsupported`, stop `compute-cell`.
 
 Detected:
@@ -288,8 +298,9 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 - **Stock computation does not advance virtual time** without branch counters: a CPU-bound
   loop cannot be cut by `--time-limit` or a program's own deadline, only by `--timeout` (wall
   time). A loop that makes any system call (a clock read) advances it by the per-trap charge.
-  Code rebuilt with compute points is charged 1 ns per event at its next runtime entry, but a
-  deadline that falls due inside it is not yet a point: it fires at the next entry.
+  Code rebuilt with compute points is charged 1 ns per event, and a timer, a timeout or
+  `--time-limit` falling due inside it stops it at that exact event, in every gap setting.
+  Computation in code not rebuilt (libc, prebuilt dependencies) is still free and uncut.
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
   no simulation of several machines, and no network outside the run.
 - **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with

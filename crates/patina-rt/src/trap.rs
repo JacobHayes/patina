@@ -25,6 +25,7 @@ pub mod reg {
     pub const R8: usize = 0;
     pub const R9: usize = 1;
     pub const R10: usize = 2;
+    pub const R11: usize = 3;
     pub const RDI: usize = 8;
     pub const RSI: usize = 9;
     pub const RBP: usize = 10;

@@ -3,7 +3,9 @@
 #  a. `spinpoints count` (a wait that counts its iterations: no fixed point, so stock it ends
 #     compute-stall) ends ok on seeds 1-3 with no spin found;
 #  b. the spin table's own spin lock with its `pause` taken out (`spinwait own-spin`) ends ok
-#     on seeds 1-3 with pause points and spin probes off.
+#     on seeds 1-3 with pause points and spin probes off;
+#  c. both, with switches off (compute-gap=0), still end ok on seed 1 with no spin found: the
+#     cell runs out every 2^22 events and yields.
 #@ tier=quick budget=20 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-spin
@@ -15,6 +17,8 @@ for s in 1 2 3; do
     prun "$o/count-$s" "$s" --timeout 10 --config "$on" -- /guest/compute/spinpoints count &
     prun "$o/lock-$s" "$s" --timeout 10 --config "$off" -- /guest/compute/spinwait own-spin &
 done
+prun "$o/count-0" 1 --timeout 10 --fault compute-gap=0 --config "$on" -- /guest/compute/spinpoints count &
+prun "$o/lock-0" 1 --timeout 10 --fault compute-gap=0 --config "$off" -- /guest/compute/spinwait own-spin &
 wait
 for s in 1 2 3; do
     [ "$(field "$o/count-$s/result.json" outcome)" = ok ] || die "a. spinpoints count seed $s: $(res "$o/count-$s")"
@@ -23,3 +27,8 @@ for s in 1 2 3; do
 done
 echo "a. counting spin-wait: ok on seeds 1-3, no spin probe found one; compute switches on seed 1: $(field "$o/count-1/result.json" compute.switches)"
 echo "b. spin lock without pause, pause points and probes off: ok on seeds 1-3; compute switches on seed 1: $(field "$o/lock-1/result.json" compute.switches)"
+for r in count-0 lock-0; do
+    [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "c. $r at compute-gap=0: $(res "$o/$r")"
+    [ "$(field "$o/$r/result.json" counters.sched.spin_found)" = 0 ] || die "c. $r at compute-gap=0 needed a spin probe"
+done
+echo "c. compute-gap=0: both ok, no spin probe found one; yields: $(field "$o/count-0/result.json" compute.switches) and $(field "$o/lock-0/result.json" compute.switches)"

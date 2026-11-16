@@ -200,7 +200,7 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   `--preempt branches` (branch counters) can switch at any branch and finds them.
 - **A deadline that never comes.** Virtual time advances by a fixed charge per system call and
   when every thread sleeps, not with computation. Without branch counters a CPU-bound loop
-  does not move the clock, so neither `--time-limit` nor the program's own deadline cuts it;
+  in code not rebuilt with compute points does not move the clock, so neither `--time-limit` nor the program's own deadline cuts it;
   `--timeout` (wall seconds) does, as `timeout`. A loop that reads the clock or makes any
   call advances it by that charge; `--preempt branches` charges time per branch.
 
@@ -425,6 +425,12 @@ no system call or `pause`. `--preempt branches` also preempts after a seed-chose
 branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
 only on that CPU family. `patina doctor` says which of the three is missing.
+
+Code rebuilt with compute points (`sdk/c/patina_compute.c`) has a scheduling point every 64 to
+65,536 events on average (`--fault compute-gap`) and costs 1 ns of virtual time per event, so its loops move the clock, show in
+CPU-time clocks, and are stopped at the exact event where a timer, a timeout or `--time-limit`
+falls due. Such a loop does not end `compute-stall` while it stays in rebuilt code; the
+stop's message names rebuilding with compute points beside `--preempt branches`.
 
 ## CI on GitHub Actions
 

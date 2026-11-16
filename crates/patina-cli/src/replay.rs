@@ -89,6 +89,27 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
     Ok((cfg, program))
 }
 
+/// A run whose program had compute points repeats only with the same mean gap and event charge.
+/// A mean gap the plan did not give is drawn from the seed in this build's default range, so a
+/// build with another default (or another charge) would run another schedule: refuse that here
+/// rather than report it as a divergence.
+fn compute_unchanged(recorded: &serde_json::Value, gap: u64) -> Res<()> {
+    let c = &recorded["compute"];
+    // With counters on the gap is never used (and no event is charged).
+    if c.is_null() || c["mode"] == "counters" {
+        return Ok(());
+    }
+    let now = (gap, proto::compute::CHARGE_NS);
+    if (c["gap"].as_u64(), c["charge_ns"].as_u64()) != (Some(now.0), Some(now.1)) {
+        return Err(format!(
+            "the run's compute points had mean gap {} and {} ns per event; this patina would use gap {} and {} ns, \
+             so the run would not repeat. Replay it with the patina that recorded it.",
+            c["gap"], c["charge_ns"], now.0, now.1
+        ));
+    }
+    Ok(())
+}
+
 fn replay_into(
     rundir: &Path,
     out: &Path,
@@ -99,6 +120,7 @@ fn replay_into(
 ) -> Res<Replayed> {
     let out = out.to_path_buf();
     let o = cfg.opts_with(program)?;
+    compute_unchanged(recorded, o.plan.compute_gap)?;
     crate::launch::preflight(&o)?;
     clear_out(&out)?;
     if run["faults"] != o.plan.json() {

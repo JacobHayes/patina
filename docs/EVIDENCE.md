@@ -179,6 +179,8 @@ stock and rebuilt (`tests/guests/compute`); `pool`'s `stats.done++` is one `incq
 |---|---|
 | `races b`, seeds 1-200: stock / rebuilt, default `compute-gap` / rebuilt, `compute-gap=8` (`compute/evidence-races`, 2026-11-16) | 0 / 0 / 26 double spends; seed 18 replays identical |
 | `pool`, the same columns | 0 / 5 / 155 lost updates; seeds 9 and 1 replay identical |
+| A 50 ms `setitimer` falling due inside a loop with no system call (`deadline`, C), seeds 1-20 at the seed's gap and at `compute-gap=0`; seed 1 under `verify --runs 20 --vary cpu,load,aslr,sandbox` (`compute/evidence-deadline`, 2026-11-16, AMD Ryzen 9 9950X, 10 s) | 40 of 40 `ok`; the handler ran 3,001 virtual ns after the 50 ms in every run (the arming call, the handler's clock read and the delivery), one deadline stop each; verify identical over 20 runs |
+| Stock guests (`c-threads`, `rs-threads`, `spinpoints flag`, stock `races b`, `pool`, `loop-stock`, `sig-basic`, `fs-tour`, `go-sig`), seeds 1-3, the build with deadline cuts against the one before it (by hand, 2026-11-16) | 27 of 27 the same digest and `result.json` (but `wall_ms`, `sup_hwm_kb`, `spin_steps`) |
 | Stock programs, this build against the build before compute points (`compute/evidence-identity`, `PATINA_BASE` = 0.6.1): W1-W9 with their faults, `c-threads`, `rs-threads`, `spinpoints flag`, stock `races b`, `pool` and a loop, seeds 1-3 | 45 of 45 the same digest and `result.json` (but its host measurements `wall_ms`, `sup_hwm_kb` and `spin_steps`, which differ between two runs of one build) |
 
 The prototype (`patina-spike` T14, a switch at 1 event in 10) found 14 and 165 of 200. At the
@@ -203,7 +205,10 @@ seeds), `02-spin` (`compute-stall`) and `03-inert`; a point that does not yield 
 ends in `SIGSEGV`, not `compute-cell`); answering a hello for an image that never made one
 fails `03-inert` (a stock run gains `compute`); a point at `compute-gap=0` that never consults
 the supervisor fails `03-inert` (a program that empties its cell forever never reaches its
-time limit).
+time limit). A cell not cut at the next deadline fails `04-deadline` (the handler 69 µs late
+at seed 1's gap, 335 µs at `compute-gap=0`); CPU clocks without events and a replay that does
+not compare the gap fail it too; a refill that does not yield fails `02-spin` (`compute-stall`
+at `compute-gap=0`).
 
 ### Rust
 

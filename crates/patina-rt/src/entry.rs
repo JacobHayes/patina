@@ -336,7 +336,7 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
         && crate::compute::active()
     {
         // Its events are already charged: no trap charge, no trap record (`compute::point`).
-        crate::compute::point(ts, rip);
+        crate::compute::point(ts, frame);
         frame.gregs[RAX] = 0;
         crate::sys::sig::trap_exit(frame, None);
         check_real_mask(frame_of(uc));

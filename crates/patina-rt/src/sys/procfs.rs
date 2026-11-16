@@ -481,7 +481,7 @@ fn content(k: Synth, w: &mut W) {
     let s = STRS.get();
     let uid = unsafe { sc0(102) } as u64;
     let gid = unsafe { sc0(104) } as u64;
-    let cpu_ticks = crate::state::thread().traps * config().trap_charge_ns / 10_000_000;
+    let cpu_ticks = crate::state::thread().cpu_ns() / 10_000_000;
     match k {
         Synth::Maps => maps(w, false),
         Synth::Smaps => maps(w, true),

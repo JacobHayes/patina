@@ -21,7 +21,7 @@ fn sysinfo(p: u64) -> i64 {
     crate::guest::write(p, &b).err().unwrap_or(0)
 }
 
-/// struct rusage (144 bytes): user time is the thread's trap charges, everything else 0.
+/// struct rusage (144 bytes): user time is the thread's CPU time (`ThreadState::cpu_ns`), everything else 0.
 fn getrusage(call: &mut dyn Call) -> i64 {
     let (who, p) = (call.arg(0) as i32, call.arg(1));
     if !matches!(who, -1..=1) {
@@ -30,11 +30,7 @@ fn getrusage(call: &mut dyn Call) -> i64 {
     if p == 0 {
         return -e::EFAULT;
     }
-    let ns = if who == -1 {
-        0
-    } else {
-        call.thread().traps * config().trap_charge_ns
-    };
+    let ns = if who == -1 { 0 } else { call.thread().cpu_ns() };
     let mut w = [0u64; 18];
     w[0] = ns / NS;
     w[1] = ns % NS / 1000;

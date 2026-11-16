@@ -6,23 +6,29 @@
 //! 0. On every return to program code the runtime writes the next segment's gap there; at
 //! every runtime entry it reads back how many events ran and charges them to virtual time.
 //! A run has one mean gap G (`Config::compute_gap`, drawn per seed); each segment's gap is
-//! uniform in `1..=2G-1`.
+//! uniform in `1..=2G-1`, cut short at the next deadline (`arm`).
 
 use crate::draw::{draw, mix64, Stream};
 
 /// The cell's value with counter preemption on: nothing is counted, no point is wanted.
 pub const NO_LIMIT: i64 = i64::MAX;
-/// The cell's value with switches off (`compute_gap` 0): when it runs out the runtime refills it
-/// without consulting the supervisor. Bounded, so that what one runtime entry charges stays
-/// bounded however the program writes its cell.
-pub const REFILL: i64 = GAP_MAX as i64;
+/// The longest run the cell is armed for, whatever the gap and the deadlines: when it runs out
+/// the thread yields (`REASON_REFILL`). So an instrumented spin-wait hands over by itself in
+/// every gap setting (a spin probe cannot find one: its cell changes every pass), and what one
+/// runtime entry charges stays bounded however the program writes its cell. About 4 ms of
+/// virtual time, and a few ms of CPU time: well before the stall watchdog's first probe.
+pub const REFILL: u64 = 1 << 22;
 
 /// `Rec::nr` of a compute point's `Preempt` record (1 is a counter preemption, 2 a spin
-/// point): args [rip, the gap that ran out, reason, events of this process so far, 0, 0].
+/// point): args [rip, the value the cell was armed with, reason, events of this process so
+/// far, the segment's drawn gap (0: switches off), 0]; `out_hash` hashes the general
+/// registers at the point.
 pub const PREEMPT_NR: u32 = 3;
-/// Reasons in a compute point's record.
+/// Reasons in a compute point's record: the drawn gap ran out (a switch), a deadline or the
+/// time limit fell due, or the longest run (`REFILL`) ran out.
 pub const REASON_SWITCH: u64 = 1;
 pub const REASON_DEADLINE: u64 = 2;
+pub const REASON_REFILL: u64 = 3;
 
 /// Virtual time one event costs: a model of a machine, the same for every build and host.
 pub const CHARGE_NS: u64 = 1;
@@ -59,6 +65,24 @@ pub fn gap(seed: u64, mean: u64, key: u64) -> Option<u64> {
     Some(1 + draw(seed, Stream::Compute, key) % (2 * m - 1))
 }
 
+/// What the cell is armed with on a return to program code, and why it will run out: the
+/// smallest of the drawn gap (`None`: switches off), the events until `due_ns` (the earliest
+/// of the next deadline and the first time past the time limit; rounded up, at least 1, so the
+/// point comes at the first event at or after it, never before), and `REFILL`. A deadline wins
+/// a tie, then the gap.
+pub fn arm(gap: Option<u64>, now_ns: u64, due_ns: u64, charge_ns: u64) -> (u64, u64) {
+    let charge = charge_ns.max(1);
+    let due = due_ns.saturating_sub(now_ns).div_ceil(charge).max(1);
+    let gap = gap.unwrap_or(u64::MAX);
+    if due <= gap.min(REFILL) {
+        (due, REASON_DEADLINE)
+    } else if gap <= REFILL {
+        (gap, REASON_SWITCH)
+    } else {
+        (REFILL, REASON_REFILL)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,6 +105,33 @@ mod tests {
             );
         }
         assert_eq!(gap(7, 0, 1), None);
+    }
+
+    #[test]
+    fn the_cell_runs_out_at_the_first_event_at_or_after_the_deadline() {
+        for charge in [1u64, 3, 1000] {
+            for (now, due) in [(0u64, 1u64), (100, 100), (100, 50), (7, 7 + 5 * charge + 1)] {
+                let (n, why) = arm(None, now, due, charge);
+                assert_eq!(why, REASON_DEADLINE);
+                assert!(
+                    n >= 1 && now + n * charge >= due,
+                    "{now} {due} {charge}: {n}"
+                );
+                assert!(
+                    n == 1 || now + (n - 1) * charge < due,
+                    "{now} {due} {charge}: {n}"
+                );
+            }
+        }
+        // The earliest of the three; a tie goes to the deadline.
+        assert_eq!(arm(Some(10), 0, 10, 1), (10, REASON_DEADLINE));
+        assert_eq!(arm(Some(9), 0, 10, 1), (9, REASON_SWITCH));
+        assert_eq!(
+            arm(Some(REFILL + 1), 0, u64::MAX, 1),
+            (REFILL, REASON_REFILL)
+        );
+        assert_eq!(arm(None, 0, u64::MAX, 1), (REFILL, REASON_REFILL));
+        assert_eq!(arm(Some(REFILL), 0, u64::MAX, 1), (REFILL, REASON_SWITCH));
     }
 
     #[test]

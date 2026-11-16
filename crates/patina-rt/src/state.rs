@@ -97,7 +97,7 @@ pub struct ThreadState {
     pub slot: u32,
     pub tid: i32,
     pub pid: i32,
-    /// Traps taken by this thread (CPU-time clocks are traps x charge).
+    /// Traps taken by this thread (CPU-time clocks: `cpu_ns`).
     pub traps: u64,
     /// `seq` of the trap being handled.
     pub seq: u64,
@@ -164,6 +164,13 @@ impl ThreadState {
             compute_events: 0,
             compute_segs: 0,
         }
+    }
+    /// This thread's CPU time, the thread and process CPU clocks: its traps at the trap charge
+    /// and its compute events at the event charge (counters on: events are not counted).
+    pub fn cpu_ns(&self) -> u64 {
+        let cfg = config();
+        (self.traps * cfg.trap_charge_ns)
+            .saturating_add(self.compute_events * cfg.compute_charge_ns)
     }
 }
 

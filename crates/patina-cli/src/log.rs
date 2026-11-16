@@ -45,6 +45,7 @@ pub fn describe(r: &Rec) -> String {
             2 => "spin point".to_string(),
             proto::compute::PREEMPT_NR => match r.args[2] {
                 proto::compute::REASON_DEADLINE => "compute deadline".to_string(),
+                proto::compute::REASON_REFILL => "compute refill".to_string(),
                 _ => "compute switch".to_string(),
             },
             n => format!("{n:#x}"),
