@@ -37,10 +37,14 @@ verify_ok() {
 }
 
 # native OUT cmd...: the same command outside patina, in a bwrap sandbox shaped like patina's (the
-# guest directory at /guest, /usr, a fresh PID namespace, an empty /tmp). stdout to OUT.
+# guest directory at /guest, /usr, a fresh PID namespace, an empty /tmp, and the 4 CPUs a guest
+# sees by default: a program that sizes itself by the CPU count, as GNU sort starts a thread per
+# CPU, uses as many PIDs as under patina whatever the host has). stdout to OUT.
 native() {
     out=$1; shift
-    timeout 300 bwrap --tmpfs / --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
+    cpus=$(python3 -I -c 'import os; c = sorted(os.sched_getaffinity(0)); print(",".join(map(str, c[:4])) if len(c) >= 4 else "")')
+    [ -n "$cpus" ] || die "native: needs 4 CPUs to run as the guest sees them"
+    timeout 300 taskset -c "$cpus" bwrap --tmpfs / --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
         --symlink usr/lib64 /lib64 --symlink usr/sbin /sbin --ro-bind /etc /etc --ro-bind "$PATINA_GUESTS" /guest \
         --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp --unshare-pid --die-with-parent -- "$@" >"$out" 2>"$out.err"
 }
