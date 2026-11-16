@@ -732,6 +732,39 @@ sweep summary no longer lists the harness's `open-after-crash`, `reopen-failed` 
 a real invariant evaluated only with `FJ_WIPE_PARTIAL=1`, still is. F2 has no regression
 check in `tests/storage`: no search over a few seconds of seeds reaches it.
 
+### Enumerating one seed's crash points
+
+Does trying every crash point of a few seeds find F2 more often per CPU-second than the plain
+sweep? 2026-11-16, this host, patina 0.8.0 (release), `H` debug. `tests/storage/evidence-crash-enum.sh`
+(`./check evidence crash-enum`, under the evidence lock): one base run per seed
+(`--seed S --buggify --env FJ_N=2000 --crash machine:0 -- H`), then one child per distinct
+seq of its operation log, `--crash machine-at:SEQ`, 6 at a time; CPU-seconds are the sum
+of `wall_ms`. A seed over 10,000 crash points is skipped. The plain sweep's expectation is
+0.17 F2 runs in 2,000 seeds at about 0.2 CPU-s a seed: 4.3e-4 per CPU-second.
+
+| Seed | Crash points | Children | F2 children (seq) | CPU-s | To first F2 | Children repeating a tree |
+|---|---|---|---|---|---|---|
+| 1 | 4,069 | 3,392 | 6 (2299, 2303, 3564, 3842, 4477, 4480) | 1,021 | 216 | 38% |
+| 2 | 23,932 | skipped | | | | |
+| 3 | 6,252 | 4,741 | 4 (7254, 7632, 7634, 7969) | 1,540 | 1,120 | 45% |
+| 4 | 6,234 | 4,691 | 2 (3637, 7187) | 1,445 | 315 | 46% |
+| all | | 12,824 | 12 | 4,006 | | |
+
+- F2 per CPU-second: 12 / 4,006 = 3.0e-3 runs, 7 times the plain sweep's 4.3e-4. Counting
+  F2 children with the same post-crash tree once: 9, 5.2 times. Every enumerated seed has F2;
+  the first hit costs 216 to 1,120 CPU-s against the plain sweep's expected 2,300.
+- Counting a seed once, enumeration finds 3 per 4,006 CPU-s, 1.7 times the plain rate: its
+  gain is in reaching every window of a seed, not in finding more seeds.
+- A child costs 0.30 CPU-s on average at 6 jobs (the base: 0.2 to 0.4). Every child
+  crashed. The other non-`ok` children are F1 (`open-after-crash`, 5 or 6 a seed, all at
+  seqs 125 to 143, the first `Database::open`); no F6.
+- Seeds with a window: the same script with `ENUM_NEAR` set to the journal offsets of the F2
+  writes above (569,316, 1,097,826, 1,216,296, 1,302,500, 1,381,000) tries only the
+  journal writes within 8 KiB of one, up to the next journal fsync. Seeds 5 to 24: 7 over
+  10,000 crash points (19,536 to 23,932), skipped; F2 in 12 of the other 13 (1 to 5 F2
+  children each, 2,166 children in all). This probe uses the windows found above, so its
+  rate is not a search rate.
+
 ## Acceptance: Cairn and briefing
 
 `patina` built from `fa1186af` (the CLI has no `--version`), 2026-11-16, this host, every
