@@ -374,7 +374,13 @@ fn tmpfs_opts(w: &mut W, sopts: &[u8], point: &[u8]) {
     let sized = point == b"/work" || point == b"/tmp";
     let mut first = true;
     for o in sopts.split(|&c| c == b',') {
-        if o.starts_with(b"nr_inodes=") || (o.starts_with(b"size=") && !sized) {
+        // uid= and gid= name the launcher's own ids on the host (1000 on one machine, 1001
+        // on another), not the sandbox's: left out, as `stat` shows the owner 1000.
+        if o.starts_with(b"nr_inodes=")
+            || (o.starts_with(b"size=") && !sized)
+            || o.starts_with(b"uid=")
+            || o.starts_with(b"gid=")
+        {
             continue;
         }
         if !first {
