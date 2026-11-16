@@ -1,0 +1,14 @@
+[package]
+name = "tokio-mt"
+version = "0.1.0"
+edition = "2021"
+
+# Stock tokio from crates.io: default features plus the ones W2 uses (rt-multi-thread, net,
+# time, fs, process) and the macros/io-util/sync helpers.
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "fs", "process", "macros", "io-util", "sync"] }
+
+[profile.release]
+debug = false
+
+[workspace]

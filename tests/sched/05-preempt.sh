@@ -1,0 +1,23 @@
+# 5. --preempt-permille 0 and 1000 both pass items 1 and 2; switches per run for 0, 100, 1000.
+#@ tier=area budget=60
+. "$(dirname "$0")/lib.inc"
+. "$(dirname "$0")/verify.inc"
+for p in 0 1000; do
+    for g in $GUESTS; do
+        out=$RUNS/05-preempt/p$p-$g
+        PATINA_OPTS="--preempt-permille $p" patina_run "$out" 1 "$g"
+        check_result "$out" "$g"
+    done
+    verify_all "05-preempt/verify-p$p" --preempt-permille "$p"
+done
+echo "switches per run (seed 1):"
+for g in $GUESTS; do
+    line="$g:"
+    for p in 0 100 1000; do
+        out=$RUNS/05-preempt/switches-p$p-$g
+        PATINA_OPTS="--preempt-permille $p" patina_run "$out" 1 "$g"
+        check_result "$out" "$g"
+        line="$line p$p=$(field "$out/outcome.json" switches)/$(field "$out/outcome.json" traps)traps"
+    done
+    echo "$line"
+done

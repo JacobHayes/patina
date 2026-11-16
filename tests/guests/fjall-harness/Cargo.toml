@@ -1,0 +1,12 @@
+[package]
+name = "fjall-harness"
+version = "0.1.0"
+edition = "2021"
+
+# Unmodified fjall 3.1.13 (lsm-tree 3.1.10) from crates.io.
+[dependencies]
+log = "0.4"
+libc = "0.2"
+fjall = "=3.1.13"
+
+[workspace]

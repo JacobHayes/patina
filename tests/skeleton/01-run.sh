@@ -1,0 +1,11 @@
+# 1. patina run --seed 1 for each guest: outcome ok, stdout as expected, PID printed is 2.
+#@ tier=quick
+. "$(dirname "$0")/lib.inc"
+for g in $GUESTS; do
+    out=$RUNS/01-run/$g
+    patina_run "$out" 1 "$g" a b
+    c=$(field "$out/outcome.json" class)
+    [ "$c" = ok ] || die "$g: class $c ($(field "$out/outcome.json" detail))"
+    python3 -I "$(dirname "$0")/check_hello.py" "$out/inc-0/stdout" "$g" a b || die "$g: stdout"
+    echo "$g ok digest $(field "$out/outcome.json" digest) traps $(field "$out/outcome.json" traps)"
+done

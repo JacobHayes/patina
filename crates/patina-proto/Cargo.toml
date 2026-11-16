@@ -1,0 +1,11 @@
+[package]
+name = "patina-proto"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Shared layout, configuration, request protocol, boundary record and syscall table"
+
+[lib]
+name = "proto"
+path = "src/lib.rs"

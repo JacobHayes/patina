@@ -1,0 +1,12 @@
+[package]
+name = "rs-mio"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mio = { version = "1", features = ["os-poll", "os-ext", "net"] }
+
+[profile.release]
+debug = false
+
+[workspace]

@@ -1,0 +1,41 @@
+#!/bin/sh
+# ./check quick              the landing gate (budget 5 min, ceiling 10)
+# ./check AREA [AREA ...]    one area's checks (a directory under tests/) while working on it
+# ./check evidence [NAME..]  the sweeps, matrices and soaks behind docs/EVIDENCE.md, by hand
+# ./check list               every script with its tier and budget
+# Builds patina (the runtime is embedded), builds the guests once per source change
+# (tests/guests.sh), then runs the scripts in parallel (tests/run.py: per-script times and
+# budgets, total). Output, the guest cache and scratch go under PATINA_CHECK_DIR (default
+# target/patina-check).
+set -eu
+cd "$(dirname "$0")"
+root=$(pwd)
+[ $# -ge 1 ] || { sed -n '2,5p' "$0" >&2; exit 2; }
+[ "$1" = list ] && exec python3 -I tests/run.py list
+
+export PATINA_CHECK_DIR="${PATINA_CHECK_DIR:-$root/target/patina-check}"
+mkdir -p "$PATINA_CHECK_DIR"
+t0=$(date +%s)
+# RT_BIN: the runtime binary patina embeds (for scripts that inspect it), from the build script's
+# output directory.
+out=$(cargo build --release --quiet -p patina-cli --message-format=json | python3 -I -c '
+import json, sys
+for line in sys.stdin:
+    m = json.loads(line)
+    if m.get("reason") == "build-script-executed" and ("/patina-cli#" in m["package_id"] or "#patina-cli@" in m["package_id"]):
+        print(m["out_dir"])')
+export RT_BIN="$out/rt-target/x86_64-unknown-none/release/patina-rt"
+[ -f "$RT_BIN" ] || { echo "check: no runtime at $RT_BIN" >&2; exit 1; }
+set=$(sh tests/guests.sh)
+echo "== build: $(( $(date +%s) - t0 )) s (guests: $set)"
+
+export PATINA="$root/target/release/patina"
+export PATINA_GUESTS="$set/guests" PATINA_WORKLOADS="$set/workloads" PATINA_ATTACK_GUESTS="$set/attack" PATINA_SANDBOX_GUESTS="$set/sandbox"
+
+if [ "$1" = evidence ]; then
+    # One evidence run on the host at a time (it uses up to 8 sandboxes for up to an hour).
+    lock=${PATINA_EVIDENCE_LOCK:-$PATINA_CHECK_DIR/evidence.lock}
+    exec 9>"$lock"
+    flock -n 9 || { echo "== waiting for $lock (another evidence run)"; flock 9; }
+fi
+exec python3 -I tests/run.py "$@"

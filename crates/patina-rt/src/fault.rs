@@ -1,0 +1,74 @@
+//! Synchronous faults: real SIGSEGV, SIGILL, SIGBUS, SIGFPE and SIGTRAP arrive at
+//! `on_fault` on the runtime's alternate stack. In order: a fault in runtime code (or on
+//! runtime memory) is a runtime defect (`infra`); then the chain of instruction emulators;
+//! then the guest's virtual disposition: a handler gets a frame built by
+//! `sigframe::deliver` with the kernel's siginfo, the default action terminates.
+
+use crate::entry::charge;
+use crate::state::thread;
+use crate::sys::sig::{self, SigInfo, SIG_DFL, SIG_IGN};
+use crate::trap::{reg::*, TrapFrame};
+use proto::layout::*;
+
+/// An instruction emulator: returns true when it handled the fault (and advanced `rip`).
+pub type Emulator = fn(&mut TrapFrame, i32, &SigInfo) -> bool;
+
+/// The emulators, tried in order: the timestamp counter (SIGSEGV under `PR_SET_TSC`), then
+/// patched sites (SIGILL at a `ud2` the runtime wrote).
+static EMULATORS: &[Emulator] = &[
+    crate::insn::tsc::try_emulate,
+    crate::insn::emulate::try_emulate,
+];
+
+fn in_runtime(a: u64) -> bool {
+    (RT_BASE..RT_REGION_END).contains(&a)
+}
+
+/// The fault entry.
+pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
+    let frame = unsafe { &mut *uc };
+    let rip = frame.gregs[RIP];
+    if in_runtime(rip) {
+        if crate::pmu::is_race(rip) {
+            // Delivered on top of the overflow signal: the instruction faults again.
+            crate::pmu::note_race();
+            return;
+        }
+        crate::sup::host_error(sig as i64, 0, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
+    }
+    crate::pmu::enter(thread(), Some(frame));
+    let info: SigInfo = unsafe { core::ptr::read(info) };
+    for emu in EMULATORS {
+        if emu(frame, sig, &info) {
+            sig::trap_exit(frame, None);
+            crate::entry::check_real_mask(frame);
+            crate::pmu::exit(thread(), frame.gregs[RIP], 0);
+            return;
+        }
+    }
+    let sig = sig as u64;
+    let addr = info[2];
+    if matches!(sig, sig::SIGSEGV | sig::SIGBUS) && in_runtime(addr) {
+        crate::sup::host_error(sig as i64, 0, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
+    }
+    let ts = thread();
+    charge(ts);
+    crate::log::fault(sig, &info, rip);
+    // The kernel's force_sig: a blocked or ignored fault signal is unblocked and its
+    // disposition reset to the default, so the process dies of it.
+    let blocked = ts.vmask & sig::bit(sig) != 0;
+    let act = crate::state::sigact()[sig as usize];
+    if blocked || act[0] == SIG_IGN {
+        sig::set_action(sig, [SIG_DFL, act[1], act[2], act[3]]);
+        if blocked {
+            sig::set_vmask(ts, ts.vmask & !sig::bit(sig));
+        }
+    }
+    if crate::state::sigact()[sig as usize][0] == SIG_DFL {
+        sig::die(sig);
+    }
+    sig::act_on(frame, ts, sig, &info, None, true);
+    sig::trap_exit(frame, None);
+    crate::entry::check_real_mask(frame);
+    crate::pmu::exit(thread(), frame.gregs[RIP], 0);
+}

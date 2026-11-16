@@ -1,0 +1,15 @@
+[package]
+name = "patina-cli"
+version.workspace = true
+edition = "2021"
+license.workspace = true
+publish = false
+description = "The patina binary: launcher, supervisor and log tools, with the runtime embedded"
+
+[[bin]]
+name = "patina"
+path = "src/main.rs"
+
+[dependencies]
+proto = { package = "patina-proto", path = "../patina-proto" }
+libc = "0.2"

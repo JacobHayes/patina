@@ -3,6 +3,7 @@ members = [
     "crates/cargo-patina",
     "crates/patina",
     "crates/patina-abi",
+    "crates/patina-cli",
     "crates/patina-conformance",
     "crates/patina-driver-api",
     "crates/patina-fs-crash",
@@ -10,6 +11,7 @@ members = [
     "crates/patina-macros",
     "crates/patina-native-shim",
     "crates/patina-net-sim",
+    "crates/patina-proto",
     "crates/patina-rng-seeded",
     "crates/patina-runtime",
     "crates/patina-syscalls",
@@ -17,8 +19,9 @@ members = [
     "crates/patina-trace",
     "crates/patina-wrapper-fault",
 ]
-# The documented examples are projects of their own, as an adopter's is.
-exclude = ["examples"]
+# The documented examples are projects of their own, as an adopter's is. The in-guest
+# runtime is built for its own target by patina-cli's build script, with its own lock file.
+exclude = ["examples", "crates/patina-rt"]
 resolver = "2"
 
 # Line tables are all the debug info this workspace uses: panic backtraces
@@ -65,6 +68,12 @@ opt-level = 0
 
 [profile.test.package.patina-dst-native-shim]
 opt-level = 0
+
+# The syscall-trap engine's supervisor must die on a panic, never unwind past a
+# half-updated control region.
+[profile.release]
+panic = "abort"
+debug = 1
 
 [workspace.package]
 version = "0.5.0"

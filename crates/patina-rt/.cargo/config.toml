@@ -1,0 +1,6 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# Position-independent code (the image sits far above 2 GiB) in a non-PIE link at a fixed base.
+rustflags = ["-C", "relocation-model=pic"]

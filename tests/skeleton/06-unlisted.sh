@@ -1,0 +1,11 @@
+# 6. io_uring_setup (Deny) gives ENOSYS and the guest continues; ptrace (Stop) ends the run as unsupported naming it.
+#@ tier=quick
+. "$(dirname "$0")/lib.inc"
+out=$RUNS/06-unlisted
+patina_run "$out" 1 unlisted
+grep -qx 'io_uring_setup -1 errno 38' "$out/inc-0/stdout" || die "io_uring_setup did not return ENOSYS and continue"
+grep -q '^ptrace returned' "$out/inc-0/stdout" && die "the guest continued after ptrace"
+[ "$(field "$out/outcome.json" class)" = unsupported ] || die "class $(field "$out/outcome.json" class)"
+[ "$(field "$out/outcome.json" detail)" = ptrace ] || die "detail $(field "$out/outcome.json" detail)"
+field "$out/outcome.json" refused | grep -q '"io_uring_setup"' || die "io_uring_setup not in refused"
+echo "unlisted: ENOSYS then unsupported(ptrace)"

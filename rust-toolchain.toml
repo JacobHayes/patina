@@ -9,4 +9,6 @@ targets = [
   "x86_64-unknown-linux-gnu",
   "aarch64-unknown-linux-gnu",
   "aarch64-apple-darwin",
+  # The in-guest runtime (crates/patina-rt).
+  "x86_64-unknown-none",
 ]
