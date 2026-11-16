@@ -29,8 +29,9 @@ same change. Docs describe the current state; history lives in git.
   in its own workspace by `crates/patina-cli/build.rs` and embedded in the binary.
 - `crates/patina-cli`: the `patina` binary (launcher, supervisor, CLI).
 - `tests/<area>/`: the check scripts; `tests/guests/`: their guests.
-- `crates/patina`, `go/patina`, `testbeds/`, `examples/`: not built yet (each
-  README says so); they return when they are rebuilt on this engine.
+- `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`: the SDKs,
+  one reserved system call (`proto::sdk`); `examples/`: small programs using them.
+- `testbeds/`: not built yet (each README says so).
 
 Host requirements: Linux x86_64, `bwrap` on `PATH`, and unprivileged user
 namespaces usable by bwrap (on Ubuntu 24.04:

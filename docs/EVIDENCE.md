@@ -146,3 +146,41 @@ and `get`/`setpriority`; anything outside Linux x86_64.
   that).
 - W8's `sockets all` mode fails every seed under network faults (it checks exact transfers).
 - Every result is from one host; a second kernel, filesystem or CPU model is unchecked.
+
+## The SDK channel
+
+The four SDKs share one guest script (`tests/guests/sdk`), checked by `tests/sdk/01-languages`
+and `02-points` (quick, together under 1 s).
+
+- **Inert outside Patina.** Under `strace`, each of the C, Rust, Go and Python guests makes
+  exactly one call of system call `0x7061` for the whole script, answered `-1 ENOSYS`; every
+  later SDK call is a load and a branch. In a Docker 29.1.3 container with the default seccomp
+  profile (kernel 7.0.0), a static probe got `-1 ENOSYS` (errno 38) and the C, Go and Python
+  guests ran their script unchanged and exited 0.
+- **Violation.** In each language a failed `always` ends the run `violation` with
+  `must-hold: balance -1`, the code after it does not run, and the boundary log ends with the
+  `patina_sdk` trap followed by `SdkViolation`. `patina verify --runs 2` of that run is
+  identical.
+- **Accounting and declared sites.** The four languages produce equal site tables (minus
+  source locations) and equal decisions at seed 5; a site declared but never reached is in the
+  table with `evaluated: 0` and its location.
+- **Keyed decisions.** The same seed gives the same decision bits; enabling a second point
+  leaves the first's bits unchanged; another seed differs; a forced rate of 1000 fires every
+  time and 0 never; a `sometimes` holds on some seeds of 1..8 and not others; forked and
+  exec'd children report into the same table; with `faults-after-setup` a point is silent
+  before `setup-complete` and fires after. Red/green: keying a point's firing by the global
+  sequence number instead of its own count fails `02-points` ("a second point moved the first
+  one's decisions"); not ending the run on a failed `always` fails `01-languages`.
+- **Cost of a passing assertion under Patina.** A tight loop of trivial arithmetic with a
+  passing `always` each iteration, best of three `wall_ms`:
+
+  | Guest | 10M plain | 10M with assert | 100M plain | 100M with assert |
+  |---|---|---|---|---|
+  | C | 16 | 16 | 64 | 69 |
+  | Rust | 16 | 16 | 67 | 67 |
+  | Go | 16 | 16 | 66 | 73 |
+
+  The assertion traps once; afterwards it is one load and a branch (Go's `Check` inlines).
+  Python natively, 1M iterations: 0.09 s plain, 0.12 s with the assertion.
+- **Example.** `examples/ledger` under `--buggify`, seeds 1..6: seeds 1 and 5 end
+  `violation` with `ledger-sorted`, the rest `ok`.

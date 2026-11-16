@@ -147,6 +147,22 @@ virtual time. Network faults (`net-delay-ms`, `net-chunk-max`, `net-reset-permil
 `net-halfclose-delay-ms`) are draws keyed per connection. `AF_UNIX` sockets are
 pass-through kernel objects with attempt semantics (`sys/unixsock.rs`).
 
+## The SDK channel (`patina-proto/src/sdk.rs`, `patina-rt/src/sys/sdk.rs`, `sup/sdk.rs`)
+
+The SDKs (`crates/patina`, `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`) make one
+reserved system call, `0x7061(op, ptr, len)`; natively the kernel answers `ENOSYS` and the SDK
+goes inert. The payload is a 32-byte header, a label and a text. The table's `patina_sdk` row
+sends it to `sys/sdk.rs`, which answers under the turn: assertions count into a site table in
+the control region (`SdkTab`, shared by every process of the run, folded by the launcher across
+incarnations into the outcome's `sdk`), and fault points, knobs and delays are keyed draws of
+the seed and the label (`Stream::Sdk`), so one point never moves another's decisions. A failed
+`always` asks the supervisor for `Op::SdkViolation`, which ends the run `violation`; a delay
+sleeps through `Op::Sleep`. The trap record's input hash is the payload's, so replay compares
+labels, conditions and answers. Sites declared with a literal label sit in the ELF section
+`patina_sites`, read from the executable and interpreter files at load (`loader.rs`), so a
+site never reached is still in the table. `faults-after-setup` holds every fault, and every
+fault point, until the guest marks `setup-complete`.
+
 ## Instruction channels (`patina-rt/src/insn/`, `patina-proto/src/insn.rs`)
 
 `rdtsc` and `rdtscp` fault under `PR_SET_TSC` and are answered from virtual time
