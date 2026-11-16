@@ -24,9 +24,11 @@ mkdir -p "$cache" "$sets" "$PATINA_BUILD_DIR"
 workload_style=" c-sqlite cpython fjall-harness go-static rust-threads-files shell-pipeline tokio-mt "
 tools=$( (gcc --version | head -1; rustc -V; go version; clang --version 2>/dev/null | head -1) | sha256sum | cut -c1-16)
 
-# key DIR: hash of the files under the directory and the tool versions
+# key DIR: hash of the files under the directory, the repository paths its `deps` file lists
+# (sources it builds from outside it, such as the SDKs), and the tool versions
 key() {
-    (cd "$root" && find "$1" -type f -not -path '*/target/*' | LC_ALL=C sort | xargs sha256sum; echo "$tools") |
+    (cd "$root" && { find "$1" -type f -not -path '*/target/*'; [ ! -f "$1/deps" ] || find $(cat "$1/deps") -type f -not -path '*/target/*'; } |
+        LC_ALL=C sort | xargs sha256sum; echo "$tools") |
         sha256sum | cut -c1-16
 }
 
