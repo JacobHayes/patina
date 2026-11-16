@@ -100,7 +100,7 @@ fn replay_into(
 ) -> Res<Replayed> {
     let out = out.to_path_buf();
     let o = cfg.opts_with(program)?;
-    crate::launch::pmu_event(&o)?;
+    crate::launch::preflight(&o)?;
     clear_out(&out)?;
     if run["faults"] != o.plan.json() {
         return Err(format!(

@@ -129,7 +129,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         tries: tries.clone(),
         runs: 0,
     };
-    crate::launch::pmu_event(&cfg.opts_with(program.clone()).map_err(error)?).map_err(error)?;
+    crate::launch::preflight(&cfg.opts_with(program.clone()).map_err(error)?).map_err(error)?;
     // A preset is its keys: settings given beside it replace its keys of the same name, and
     // each key resolves from the seed alone, so the expanded run is the same run.
     let mut cfg = cfg;

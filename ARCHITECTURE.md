@@ -66,7 +66,8 @@ bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` i
 read-only bind; `/work` and `/tmp` are tmpfs; `/etc` is generated; the program's directory is
 a copy (`sup/mod.rs`). The launcher fixes every piece of process state a child inherits
 (umask, rlimits, signal dispositions, the CPU it is pinned to, address randomization off;
-`sup/inherit.rs` lists each).
+`sup/inherit.rs` lists each). It refuses to run as root (`launch::preflight`): the sandbox's
+user is the launcher's own uid, and root's would own every host file and could write `/proc`.
 
 ## The supervisor
 

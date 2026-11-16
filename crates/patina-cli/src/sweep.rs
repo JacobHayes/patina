@@ -303,10 +303,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let mut probe = cfg.clone();
         probe.cmd = subst(Some(&c[0]));
         let o = probe.opts().map_err(error)?;
-        crate::launch::pmu_event(&o).map_err(error)?;
+        crate::launch::preflight(&o).map_err(error)?;
     } else {
         let o = cfg.opts().map_err(error)?;
-        crate::launch::pmu_event(&o).map_err(error)?;
+        crate::launch::preflight(&o).map_err(error)?;
     }
 
     let out = crate::absolute(PathBuf::from(a.last("--out").unwrap_or("patina-out/sweep")));

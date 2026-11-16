@@ -95,7 +95,7 @@ pub fn available() -> Result<u64, String> {
             Ok(_) => Ok(ev),
             Err(e) if matches!(e.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => Err(format!(
                 "perf_event_open: {e}: counters need CAP_PERFMON. Give it to patina with \
-                 `sudo setcap cap_perfmon+ep $(command -v patina)`, or run as root"
+                 `sudo setcap cap_perfmon+ep $(command -v patina)`"
             )),
             Err(e) => Err(format!(
                 "perf_event_open: {e}: this host exposes no usable branch counter (a VM may hide the PMU)"

@@ -252,6 +252,25 @@ pub struct IncEnd {
     pub crash_points: u64,
 }
 
+/// Can a run start here? Checked by every command before its first sandbox: the launcher
+/// is not root, and counters work if `--preempt branches` asks for them.
+pub fn preflight(o: &Opts) -> Res<()> {
+    // The sandbox's user is the launcher's own uid behind the user namespace. Root's would
+    // own every host file and could write /proc, and bwrap then adds read-only covers over
+    // parts of /proc, which shift the mount indices statx reports: what the guest sees would
+    // depend on who started the run.
+    if unsafe { libc::geteuid() } == 0 {
+        return Err(
+            "patina does not run as root: the sandbox's user would be host root, and \
+                    the guest would see it. Run it as an ordinary user; counters need only \
+                    `sudo setcap cap_perfmon+ep $(command -v patina)`, and a profiler such as \
+                    perf can run as that user too"
+                .into(),
+        );
+    }
+    pmu_event(o).map(|_| ())
+}
+
 /// The counter event with `--preempt branches`, or why counters cannot be used here: an
 /// error, never a run without them.
 pub fn pmu_event(o: &Opts) -> Res<Option<u64>> {
