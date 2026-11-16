@@ -2,10 +2,12 @@
 # Install the patina tool from a GitHub release.
 #
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.5.0
+#   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.6.0
 #
-# Downloads the archive for this machine, checks it against the release's
-# SHA256SUMS, and installs <prefix>/bin/patina.
+# Downloads the release's one archive (a static Linux x86_64 binary), checks it against the
+# release's SHA256SUMS, installs <prefix>/bin/patina, then runs `patina doctor`, which names
+# anything the host still needs (bwrap, user namespaces) and the command that fixes it. It
+# installs no packages and changes no settings.
 
 set -eu
 
@@ -32,7 +34,7 @@ version=latest
 prefix=
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) [ $# -ge 2 ] || fail "--version takes a release, such as 0.5.0"; version=$2; shift 2 ;;
+    --version) [ $# -ge 2 ] || fail "--version takes a release, such as 0.6.0"; version=$2; shift 2 ;;
     --prefix) [ $# -ge 2 ] || fail "--prefix takes a directory"; prefix=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; fail "unknown argument: $1" ;;
@@ -45,10 +47,8 @@ fi
 
 system="$(uname -s)/$(uname -m)"
 case "$system" in
-  Linux/x86_64) target=x86_64-unknown-linux-gnu ;;
-  Linux/aarch64 | Linux/arm64) target=aarch64-unknown-linux-gnu ;;
-  Darwin/arm64) target=aarch64-apple-darwin ;;
-  *) fail "no patina release for $system (released: Linux x86_64, Linux aarch64, macOS arm64)" ;;
+  Linux/x86_64) target=x86_64-unknown-linux-musl ;;
+  *) fail "patina runs on Linux x86_64 only, and this machine is $system; on a Mac or an arm64 machine, use a Linux x86_64 VM or container (an arm64 one will not do)" ;;
 esac
 
 if [ -n "${PATINA_RELEASE_URL:-}" ]; then
@@ -99,3 +99,9 @@ case ":${PATH:-}:" in
   *":$bin:"*) ;;
   *) printf 'add %s to PATH to run it as `patina`\n' "$bin" ;;
 esac
+
+# The host check: each requirement, and the fix for any that is missing.
+printf '\n'
+if ! "$bin/patina" doctor; then
+  printf '\npatina is installed, but this host cannot run it until the FAIL lines above are fixed\n'
+fi

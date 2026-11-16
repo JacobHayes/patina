@@ -16,16 +16,13 @@ it is (`patina run -- ./prog`), and `patina sweep` runs many seeds.
 
 ## Install
 
-From a checkout, with Rust (rustup reads the pinned toolchain from `rust-toolchain.toml`):
-
 ```sh
-git clone https://github.com/JacobHayes/patina && cd patina
-cargo install --locked --path crates/patina-cli
-patina doctor
+curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
 ```
 
-`patina doctor` checks the host and prints the fix for anything missing. The last line
-should read `this host can run patina`. On Ubuntu 24.04 the two fixes are:
+This installs one static binary, `~/.local/bin/patina` (`--prefix DIR` for another place),
+and runs `patina doctor`, which checks the host and prints the fix for anything missing. The
+last line should read `this host can run patina`. On Ubuntu 24.04 the two fixes are:
 
 ```sh
 sudo apt-get install -y bubblewrap
@@ -33,7 +30,11 @@ sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 ```
 
 Root works too (the guest sees what it would for the user sudo was run by); in a container,
-see [the guide](docs/GUIDE.md#as-root-and-in-a-container) for the options it needs.
+see [the guide](docs/GUIDE.md#as-root-and-in-a-container) for the options it needs. On a Mac
+or an arm64 machine, use a Linux x86_64 VM or container.
+
+From a checkout instead, with Rust (rustup reads the pinned toolchain from
+`rust-toolchain.toml`): `cargo install --locked --path crates/patina-cli`.
 
 ## First run
 
@@ -41,7 +42,8 @@ Give Patina any program and its arguments after `--`. `examples/quickstart` is a
 program that runs three jobs on threads and checks their results come back in job order.
 
 ```sh
-cd examples/quickstart && cargo build
+git clone https://github.com/JacobHayes/patina /tmp/patina
+cd /tmp/patina/examples/quickstart && cargo build
 patina run -- target/debug/jobs fixed
 ```
 

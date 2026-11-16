@@ -289,7 +289,12 @@ LABEL`. The summary gives a count per kind and the first five labels; `report.js
 all of them, with every `always` never evaluated. An `unreachable` that no run reached is
 what it should be, and is not listed.
 
-**Rust**: `patina-dst = { path = "PATINA/crates/patina" }` in `Cargo.toml`.
+**Rust**: in `Cargo.toml`, the SDK at the release's tag (or `path = "PATINA/crates/patina"`
+for a checkout):
+
+```toml
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.6.0" }
+```
 
 ```rust
 if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path */ }
@@ -304,7 +309,7 @@ PATINA_ALWAYS(acked <= stored, "acked-records-kept", detail);
 ```
 
 **Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.6.0` (the
-module's tags are `go/patina/vX.Y.Z`; before a release, `@engine` gives the current one).
+module's tags are `go/patina/vX.Y.Z`; `@main` gives the current one).
 `examples/bank-go/go.mod` builds against its checkout with a `replace`.
 
 ```go
@@ -401,17 +406,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
-        with: { repository: JacobHayes/patina, path: patina-src }
       - run: |
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: cd patina-src && cargo install --locked --path crates/patina-cli
-      - run: patina doctor
+      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.6.0/install.sh | sh -s -- --version 0.6.0
       - run: cargo build && patina sweep --seeds 1..200 -- target/debug/myprog
 ```
 
-`patina doctor` on that runner:
+The install ends with `patina doctor`; on that runner it prints (in part):
 
 ```text
 ok    bwrap                              /usr/bin/bwrap (bubblewrap 0.9.0)
