@@ -168,6 +168,43 @@ Counter preemption on Intel: on an Intel Xeon 6975P-C (CI runner with a PMU),
 longer found the double spend. Counter preemption is therefore refused on every CPU but AMD
 family 0x1a, and a seed reproduces only on the same family.
 
+## Compute points
+
+Code rebuilt with clang's coverage flags and `sdk/c/patina_compute.c` (ARCHITECTURE.md,
+"Scheduling points"). The race guests are `tests/guests/counters/races.c` and `pool.c`, built
+stock and rebuilt (`tests/guests/compute`); `pool`'s `stats.done++` is one `incq` in the stock
+-O2 build, and a load hook, a load, `inc`, a store hook and a store in the rebuilt one.
+
+| Check | Result |
+|---|---|
+| `races b`, seeds 1-200: stock / rebuilt, default `compute-gap` / rebuilt, `compute-gap=8` (`compute/evidence-races`, 2026-11-16) | 0 / 0 / 26 double spends; seed 18 replays identical |
+| `pool`, the same columns | 0 / 5 / 155 lost updates; seeds 9 and 1 replay identical |
+| Stock programs, this build against the build before compute points (`compute/evidence-identity`, `PATINA_BASE` = 0.6.1): W1-W9 with their faults, `c-threads`, `rs-threads`, `spinpoints flag`, stock `races b`, `pool` and a loop, seeds 1-3 | 45 of 45 the same digest and `result.json` (but its host measurements `wall_ms`, `sup_hwm_kb` and `spin_steps`, which differ between two runs of one build) |
+
+The prototype (`patina-spike` T14, a switch at 1 event in 10) found 14 and 165 of 200. At the
+default range the race guests, whose threads run 12 to 15 events after they start, are rarely
+hit: tests use `compute-gap=8`.
+
+Costs, measured by hand on 2026-11-16, one run each, pinned to one core:
+
+| What | Cost |
+|---|---|
+| Rebuilt loop of 10^8 iterations (1.25 x 10^8 events), `compute-gap=0` | 125,001,003 virtual ns between its clock reads (one event per ns, one trap charge); 0.67 ns of wall time per event (the hook's armed fast path) |
+| The same loop natively: hooks inert / stock build | 0.74 ns per event / 0.18 ns per iteration |
+| A compute point that switches (`compute-gap=8` and `64`, one thread) | 3.5 µs each (a trap and a supervisor hand-off) |
+| `counters/compute.c` (`loops`, `threads`), stock against rebuilt, seeds 1-5 under Patina | stock 0.85 s / 0.21 s; rebuilt 0.59 to 6.6 s / 0.29 to 3.8 s by the seed's mean gap (64514: 0.59 / 0.29 s; 115: 6.6 / 3.8 s); natively stock 0.41 / 0.21 s, rebuilt 0.56 / 0.26 s |
+
+The stock `loops` run under Patina pays for spin probes (it computes with no system call); the
+rebuilt one has compute points and needs none.
+
+Red/green: an `exit` that never arms the cell fails `compute/01-races` (no failure in 40
+seeds), `02-spin` (`compute-stall`) and `03-inert`; a point that does not yield fails
+`01-races` and `02-spin`; unchecked cell reads and writes fail `03-inert` (the unmapped cell
+ends in `SIGSEGV`, not `compute-cell`); answering a hello for an image that never made one
+fails `03-inert` (a stock run gains `compute`); a point at `compute-gap=0` that never consults
+the supervisor fails `03-inert` (a program that empties its cell forever never reaches its
+time limit).
+
 ## Costs
 
 | What | Cost |

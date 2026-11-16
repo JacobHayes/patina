@@ -521,6 +521,7 @@ pub fn start(k: &KernelStart) -> ! {
     }
     let _ = sb.top;
 
+    crate::compute::exit(crate::state::thread());
     crate::pmu::exit(crate::state::thread(), entry, 0);
     unsafe { crate::entry::patina_enter_guest(start_sp, entry) }
 }

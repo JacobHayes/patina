@@ -13,8 +13,9 @@ pub enum RecKind {
     CrashPoint = 6,
     /// An injected fault: `nr` the syscall, args [`INJ_*` kind, class, value, ...].
     Injected = 7,
-    /// A counter preemption: `nr` 1, args [rip, N, rcx, rsp,
-    /// eflags, 0], `out_hash` a hash of the general registers.
+    /// A preemption outside a system call. `nr` 1: a counter preemption, args [rip, N, rcx,
+    /// rsp, eflags, 0], `out_hash` a hash of the general registers; `nr` 2: a spin point, the
+    /// same with the period for N; `nr` 3: a compute point (`compute::PREEMPT_NR`).
     Preempt = 8,
     /// The object of the `Injected` record just before it: `nr` the name's full length,
     /// `ret` the process id, and the name's bytes (its last `NAME_BYTES` when longer) in

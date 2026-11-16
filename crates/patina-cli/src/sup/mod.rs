@@ -488,6 +488,21 @@ impl Sup {
                         contain::describe(kind, addr, rip, store != 0),
                     ));
                 }
+                if code == HE_COMPUTE_CELL {
+                    let what = if nr == 1 {
+                        "could not be mapped (the program has a mapping there)"
+                    } else {
+                        "was unmapped or protected by the program"
+                    };
+                    self.finish(Verdict::new(
+                        "compute-cell",
+                        format!(
+                            "the compute-point cell at {:#x} {what} (errno {})",
+                            proto::layout::COMPUTE_CELL,
+                            -(errno as i64)
+                        ),
+                    ));
+                }
                 if code == HE_GUEST_FAULT_IN_RUNTIME {
                     self.finish(Verdict::new(
                         "infra",

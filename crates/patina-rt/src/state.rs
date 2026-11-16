@@ -131,6 +131,9 @@ pub struct ThreadState {
     pub pmu: crate::pmu::Pmu,
     /// Spin probes and the spin point (`spin.rs`).
     pub spin: crate::spin::Spin,
+    /// Compute points (`compute.rs`): events charged to this thread, segments it started.
+    pub compute_events: u64,
+    pub compute_segs: u64,
 }
 
 impl ThreadState {
@@ -158,6 +161,8 @@ impl ThreadState {
             vf_sigact: [[0; 4]; 65],
             pmu: crate::pmu::Pmu::new(),
             spin: crate::spin::Spin::new(),
+            compute_events: 0,
+            compute_segs: 0,
         }
     }
 }
@@ -235,6 +240,8 @@ pub struct Proc {
     /// `MAP_SHARED` mappings of this image (futex keys across processes).
     pub shared: [Shared; MAX_SHARED],
     pub nshared: usize,
+    /// Compute points of this address space (`compute.rs`).
+    pub compute: crate::compute::Compute,
 }
 
 pub struct Global<T>(UnsafeCell<T>);
@@ -265,6 +272,7 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
         off: 0,
     }; MAX_SHARED],
     nshared: 0,
+    compute: crate::compute::Compute::new(),
 }));
 
 #[allow(clippy::mut_from_ref)]

@@ -5,6 +5,7 @@
 #![no_main]
 
 mod cmem;
+mod compute;
 mod entry;
 mod exec;
 mod fault;

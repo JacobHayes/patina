@@ -111,6 +111,18 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   yields there, and at each later arrival (`spin.rs`, `sup/stall.rs`).
 - **Branch counters**, with `--preempt branches`: a preemption after a seed-chosen number of
   retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
+- **Compute points**, in code rebuilt with the compilers' coverage flags and the hook file
+  `sdk/c/patina_compute.c` (clang: edges, loads and stores). Each hook call is an event: it
+  decrements one word of the program's own memory, the cell (a page per address space at
+  `proto::layout::COMPUTE_CELL`, mapped at the hooks' first call, `COMPUTE_HELLO`), and makes
+  the SDK call `COMPUTE_POINT` when it reaches 0. At every return to program code the runtime
+  writes a seeded gap there (uniform in `1..2G-1`; the mean G is drawn per seed from
+  `--fault compute-gap`, default `64..65536`); at every runtime entry it reads back how many
+  events ran and charges each 1 ns of virtual time. A point that finds the gap run out writes
+  a `preempt` record (`nr` 3) and yields; the call adds no other record and no trap charge
+  (`compute.rs`). With `--fault compute-gap=0` there are no switches: the cell holds 2^40 and
+  is refilled when it runs out, yielding then only if a deadline or the time limit fell due. Stock code never makes the call and is not touched. With `--preempt
+  branches` the cell is never armed.
 
 `rdtsc`, `rdrand` and `rdseed` are answered from virtual time and the seed. Code generated
 at run time (a JIT) is not scanned for them; such mappings are counted in `result.json`.
@@ -119,7 +131,8 @@ at run time (a JIT) is not scanned for them; such mappings are counted in `resul
 while another thread could run, ends the run `unsupported` with stop `compute-stall` and
 names the thread. The cause is a loop that changes state on each pass (a counter, a
 timestamp it computes) and contains no system call or `pause`. The fix is `--preempt
-branches`, where the host allows it. A thread computing alone is left to finish.
+branches`, where the host allows it, or rebuilding that code with compute points. A thread
+computing alone is left to finish.
 
 ## Counter preemption
 
@@ -227,6 +240,11 @@ Enforced:
   protect there are refused). The supervisor and the launcher have their own mappings. A
   pointer to a published address passed to a system call gets `EFAULT`, as for any
   inaccessible memory.
+- **The compute-point cell** is program memory outside the runtime's region, read and written
+  by the runtime only through its fault-safe guest copy. A program that writes it changes only
+  when its own process's next compute point comes and how many events it is charged (at most
+  the gap last written, so at most 2^41 ns per runtime entry), the same in every run; one that
+  unmaps or protects it ends the run `unsupported`, stop `compute-cell`.
 
 Detected:
 - A program access that faults in the runtime's region (at a published address, in an unmapped
@@ -258,12 +276,16 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   0x1a (Zen 5) CPU, the only one checked exact; their seeds reproduce on the same family only.
 - **compute-stall**: without branch counters, a spin-wait whose iterations change state ends
   the run (above).
-- **Interleaving at system calls, pause points and spin probes only.** A race on plain
-  memory with none of these between the conflicting accesses runs in one order in every seed;
-  only `--preempt branches` switches inside it.
-- **Computation does not advance virtual time** without branch counters: a CPU-bound loop
-  cannot be cut by `--time-limit` or a program's own deadline, only by `--timeout` (wall
+- **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
+  plain memory with none of these between the conflicting accesses runs in one order in every
+  seed; only `--preempt branches`, or rebuilding the code with compute points, switches inside
+  it. Compute points do not split a `lock`-prefixed read-modify-write, and gcc gives edges only.
+  A seed found on a stock build does not replay on a rebuilt one, or the reverse.
+- **Stock computation does not advance virtual time** without branch counters: a CPU-bound
+  loop cannot be cut by `--time-limit` or a program's own deadline, only by `--timeout` (wall
   time). A loop that makes any system call (a clock read) advances it by the per-trap charge.
+  Code rebuilt with compute points is charged 1 ns per event at its next runtime entry, but a
+  deadline that falls due inside it is not yet a point: it fires at the next entry.
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
   no simulation of several machines, and no network outside the run.
 - **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with

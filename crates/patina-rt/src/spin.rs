@@ -602,6 +602,9 @@ fn found(ts: &mut ThreadState, frame: &mut TrapFrame) {
 fn spin_yield(ts: &mut ThreadState, frame: &mut TrapFrame, period: u64) {
     let c = ctl();
     let point = frame.gregs[RIP];
+    // A spin point is a runtime entry at a state that is the same in every run (it was found
+    // as a fixed point, or arrived at again): charge compute events here, as at a trap.
+    crate::compute::enter(ts);
     ts.seq = c.seq.load(Relaxed) + 1;
     c.seq.store(ts.seq, Relaxed);
     let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
@@ -624,6 +627,7 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut TrapFrame, period: u64) {
     crate::sup::call_sup(Op::Yield, [0; 6]);
     crate::sys::sig::trap_exit(frame, None);
     crate::entry::check_real_mask(frame);
+    crate::compute::exit(ts);
     // Arm the point: plant `int3` there, or, when the thread resumes at it, step its
     // instruction first and plant after.
     let Some(orig) = peek(point) else {

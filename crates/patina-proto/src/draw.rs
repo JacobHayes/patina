@@ -19,6 +19,8 @@ pub enum Stream {
     /// The run's fault plan: each setting given as a range is resolved by its own draw,
     /// keyed by the setting's name (`faults::plan_draw`).
     FaultPlan = 11,
+    /// Compute points: the gap of each segment (`compute::gap`).
+    Compute = 12,
 }
 
 /// splitmix64 finaliser.

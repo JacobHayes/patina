@@ -330,6 +330,20 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
     }
     crate::pmu::enter(ts, Some(frame));
     crate::spin::enter(ts, Some(frame));
+    crate::compute::enter(ts);
+    if frame.gregs[RAX] == proto::sdk::SYSCALL
+        && frame.gregs[RDI] == proto::sdk::OP_COMPUTE_POINT
+        && crate::compute::active()
+    {
+        // Its events are already charged: no trap charge, no trap record (`compute::point`).
+        crate::compute::point(ts, rip);
+        frame.gregs[RAX] = 0;
+        crate::sys::sig::trap_exit(frame, None);
+        check_real_mask(frame_of(uc));
+        crate::compute::exit(thread());
+        crate::pmu::exit(thread(), frame_of(uc).gregs[RIP], 0);
+        return;
+    }
     charge(ts);
     if ts.traps & 1023 == 0 {
         crate::sup::outside_check();
@@ -359,6 +373,7 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
         Action::NeedsFrame => crate::sup::host_error(0, nr, proto::ctl::HE_RUNTIME_ASSERT),
     }
     check_real_mask(frame_of(uc));
+    crate::compute::exit(thread());
     crate::pmu::exit(thread(), frame_of(uc).gregs[RIP], 0);
 }
 

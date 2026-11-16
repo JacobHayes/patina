@@ -113,7 +113,7 @@ const fn size_of_field<T, F>(_: fn(&T) -> &F) -> usize {
 const CTL_FIELDS: &[(usize, usize, &str)] = fields!(Ctl:
     magic, layout_version, config, seq, vclock_ns, next_deadline_ns, log_len, log_hash,
     log_cap, oplog_len, opdata_len, sup_word, pending_slot, stats, filter_installed, _spare,
-    denied, stop_nr, io, faults, insn, timing, pmu, sched,
+    denied, stop_nr, io, faults, insn, timing, pmu, sched, compute,
 );
 
 const SLOT_FIELDS: &[(usize, usize, &str)] =

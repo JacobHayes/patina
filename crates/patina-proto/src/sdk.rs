@@ -24,6 +24,16 @@
 //! 24  i64  c           KNOB: high
 //! 32  label bytes, then text bytes; len = HDR_LEN + label_len + text_len
 //! ```
+//!
+//! Two operations take no payload; they serve compute points (`crate::compute`): code rebuilt
+//! with the compilers' coverage hooks and a hook file (`sdk/c/patina_compute.c`) counts its
+//! events down in one guest word, the cell, and enters the runtime when it runs out.
+//!
+//! ```text
+//! COMPUTE_HELLO  arg = COMPUTE_VERSION | kinds << 8 (COMPUTE_EDGE, _ACCESS, _COMPARE)
+//!                -> the cell's address (crate::layout::COMPUTE_CELL); any error: stay inert
+//! COMPUTE_POINT  arg = 0; the cell reached 0 -> 0, the cell refilled
+//! ```
 
 use crate::draw::{draw, mix64, Stream};
 use crate::rec::hash_bytes;
@@ -45,6 +55,16 @@ pub const OP_KNOB: u64 = 4;
 pub const OP_DELAY: u64 = 5;
 pub const OP_MARK: u64 = 6;
 pub const OP_DECLARE: u64 = 7;
+/// Compute points: announce a hook copy and get the cell; and the cell ran out.
+pub const OP_COMPUTE_HELLO: u64 = 8;
+pub const OP_COMPUTE_POINT: u64 = 9;
+/// `COMPUTE_HELLO`'s version (its low 8 bits); another version is `EINVAL`.
+pub const COMPUTE_VERSION: u64 = 1;
+/// `COMPUTE_HELLO`'s event kinds (bits 8..16 of its argument): what the hook copy can count.
+pub const COMPUTE_EDGE: u64 = 1;
+pub const COMPUTE_ACCESS: u64 = 2;
+pub const COMPUTE_COMPARE: u64 = 4;
+pub const COMPUTE_KINDS: u64 = COMPUTE_EDGE | COMPUTE_ACCESS | COMPUTE_COMPARE;
 
 pub const KIND_ALWAYS: u8 = 1;
 pub const KIND_SOMETIMES: u8 = 2;

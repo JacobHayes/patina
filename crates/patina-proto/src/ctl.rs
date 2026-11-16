@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 8;
+pub const LAYOUT_VERSION: u64 = 9;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -39,6 +39,10 @@ pub struct Config {
     pub sched: u64,
     /// Virtual time charged to a pause point or a spin yield.
     pub spin_charge_ns: u64,
+    /// Compute points (`crate::compute`): the run's mean gap in events (0: no switches; time
+    /// is still charged), and the virtual time one event costs.
+    pub compute_gap: u64,
+    pub compute_charge_ns: u64,
     /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
     /// NUL-padded; all zero is `/work`.
     pub work: [u8; WORK_PATH_MAX],
@@ -94,6 +98,8 @@ impl Config {
             pmu_margin: 0,
             sched: 0,
             spin_charge_ns: 0,
+            compute_gap: 0,
+            compute_charge_ns: 0,
             work: [0; WORK_PATH_MAX],
         }
     }
@@ -159,6 +165,35 @@ pub struct Ctl {
     pub pmu: PmuStats,
     /// Pause points and spin probes, summed over every process of the run.
     pub sched: SchedStats,
+    /// Compute points, summed over every process of the run.
+    pub compute: ComputeStats,
+}
+
+/// Compute points (`crate::compute`).
+#[repr(C)]
+pub struct ComputeStats {
+    /// `COMPUTE_HELLO` calls answered with the cell, and the event kinds they named (or'ed).
+    pub hellos: AtomicU64,
+    pub kinds: AtomicU64,
+    /// Events charged; points that consulted the supervisor because the gap ran out
+    /// (`switches`) or a deadline fell due (`deadline_stops`).
+    pub events: AtomicU64,
+    pub switches: AtomicU64,
+    pub deadline_stops: AtomicU64,
+}
+
+impl ComputeStats {
+    /// [hellos, kinds, events, switches, deadline_stops].
+    pub fn read(&self) -> [u64; 5] {
+        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        [
+            r(&self.hellos),
+            r(&self.kinds),
+            r(&self.events),
+            r(&self.switches),
+            r(&self.deadline_stops),
+        ]
+    }
 }
 
 /// Pause points and spin probes (`SCHED_NAMES` order in the outcome).
@@ -665,6 +700,9 @@ pub const CONTAIN_EXEC: u64 = 1;
 pub const CONTAIN_STUB: u64 = 2;
 /// Any other `syscall` instruction in the runtime's text: trapped, never made.
 pub const CONTAIN_SYSCALL: u64 = 3;
+/// Compute points: the cell page could not be mapped, read or written (the program mapped
+/// over it, unmapped or protected it). args[0] = the errno, args[1] = 1 for the mapping.
+pub const HE_COMPUTE_CELL: u64 = 9;
 
 /// Signal requests.
 ///

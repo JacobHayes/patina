@@ -244,6 +244,7 @@ pub fn vfork_child_start(uc2: u64) -> ! {
         // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
         let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
+    crate::compute::exit(ts);
     super::thread::sigreturn_to(uc2)
 }
 

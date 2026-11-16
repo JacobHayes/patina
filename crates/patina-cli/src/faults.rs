@@ -23,6 +23,8 @@ pub struct Plan {
     pub net: proto::wire::NetCfg,
     /// `--buggify`, `buggify-permille=N`, `point:LABEL=N` (`proto::sdk`).
     pub sdk: proto::sdk::SdkCfg,
+    /// Compute points: the run's mean gap in events (`compute-gap`; 0: no compute switches).
+    pub compute_gap: u64,
     /// The resolved settings, in key order, as `result.json` and `run.json` show them: a
     /// number, a string, or `"off"` for a class `swarm` turned off.
     pub resolved: Vec<(String, Value)>,
@@ -45,6 +47,8 @@ enum Val {
     /// A position (the N-th call): may be a range, which searches positions across seeds;
     /// never swarmed.
     At,
+    /// `compute-gap`: `A..B` draws log-uniformly, not uniformly; never swarmed.
+    Gap,
 }
 
 /// One fault setting.
@@ -187,6 +191,12 @@ pub const KEYS: &[Key] = &[
         "no fault until the guest's SDK marks setup-complete",
     ),
     key(
+        "compute-gap",
+        "G|A..B",
+        Val::Gap,
+        "rebuilt code (compute points): mean events between switches, drawn log-uniformly per seed from A..B; 0 turns switches off [default: 64..65536]",
+    ),
+    key(
         "fs-error-at",
         "CLASS:N",
         Val::At,
@@ -290,6 +300,31 @@ fn resolve_num(seed: u64, k: &str, v: &str, max: u64) -> Res<u64> {
     Ok(a + plan_draw(seed, k) % (b - a + 1))
 }
 
+/// `compute-gap=G|A..B`: the run's mean gap, a range drawn log-uniformly by the key's own
+/// plan draw (`proto::compute::mean_gap`). `0` turns compute switches off.
+fn resolve_gap(seed: u64, k: &str, v: &str) -> Res<u64> {
+    let max = proto::compute::GAP_MAX;
+    let (a, b) = match v.split_once("..") {
+        Some((a, b)) => (num(k, a)?, num(k, b)?),
+        None => {
+            let x = num(k, v)?;
+            (x, x)
+        }
+    };
+    if a > b {
+        return Err(format!("--fault {k}={v}: A is larger than B"));
+    }
+    if b > max {
+        return Err(format!("--fault {k}: at most {max}"));
+    }
+    if a == 0 && b != 0 {
+        return Err(format!(
+            "--fault {k}={v}: a range starts at 1 (0 alone turns switches off)"
+        ));
+    }
+    Ok(proto::compute::mean_gap(plan_draw(seed, k), a, b))
+}
+
 /// A position key's value (`N`, or `CLASS:N` for `fs-error-at`) with `N` resolved like any
 /// other number: a range searches positions across seeds.
 fn resolve_at(seed: u64, k: &str, v: &str) -> Res<String> {
@@ -338,11 +373,15 @@ pub fn resolve(
         Some(i) => num("swarm", &given.remove(i).1)? != 0,
         None => false,
     };
+    // The default is not part of the plan: a run that does not name the key resolves it the
+    // same way every time, and a stock program's plan reads as before.
+    let (lo, hi) = proto::compute::GAP_DEFAULT;
     let mut plan = Plan {
         faults: Default::default(),
         faults_in_recovery,
         net: Default::default(),
         sdk: Default::default(),
+        compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
         resolved: vec![],
     };
     if swarm {
@@ -357,6 +396,11 @@ pub fn resolve(
             Val::Flag => json!((num(k, v)? != 0) as u64),
             Val::Own => json!(v),
             Val::At => json!(resolve_at(seed, k, v)?),
+            Val::Gap => {
+                plan.compute_gap = resolve_gap(seed, k, v)?;
+                plan.resolved.push((k.clone(), json!(plan.compute_gap)));
+                continue;
+            }
         };
         let class = matches!(info.val, Val::Permille | Val::Count | Val::Own);
         if swarm && class && plan_draw(seed, &format!("swarm:{k}")) & 1 == 1 {
@@ -676,6 +720,33 @@ mod tests {
         assert!(seen.len() > 1, "{seen:?}");
         assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None, true).is_err());
         assert!(resolve(0, &[], &[], Some("machine-at:x"), true).is_err());
+    }
+
+    #[test]
+    fn compute_gap_is_drawn_per_seed_and_never_swarmed() {
+        let mut seen = std::collections::BTreeSet::new();
+        for s in 0..64 {
+            let d = resolve(s, &[], &[], None, true).unwrap();
+            let (lo, hi) = proto::compute::GAP_DEFAULT;
+            assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
+            assert!(d.resolved.is_empty());
+            seen.insert(d.compute_gap);
+            let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None, true).unwrap();
+            assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
+            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None, true).unwrap();
+            assert!((100..=200).contains(&r.compute_gap));
+            assert_eq!(val(&r, "compute-gap"), json!(r.compute_gap));
+        }
+        assert!(seen.len() > 8, "{seen:?}");
+        assert_eq!(
+            resolve(0, &[], &v(&["compute-gap=0"]), None, true)
+                .unwrap()
+                .compute_gap,
+            0
+        );
+        for bad in ["compute-gap=0..8", "compute-gap=9..8", "compute-gap=x"] {
+            assert!(resolve(0, &[], &v(&[bad]), None, true).is_err(), "{bad}");
+        }
     }
 
     #[test]

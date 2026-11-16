@@ -5,6 +5,7 @@
 //! table as data.
 #![no_std]
 
+pub mod compute;
 pub mod ctl;
 pub mod draw;
 pub mod faults;

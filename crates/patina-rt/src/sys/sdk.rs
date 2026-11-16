@@ -64,6 +64,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 Err(e) => e,
             }
         }
+        OP_COMPUTE_HELLO => crate::compute::hello(ptr),
         _ => -e::EINVAL,
     };
     Action::Return(r)

@@ -45,6 +45,39 @@ pub struct RunEnd {
     pub sdk: SdkReport,
     /// Pause points and spin probes.
     pub sched: SchedCounts,
+    /// Compute points.
+    pub compute: ComputeCounts,
+}
+
+/// Compute points (`proto::ctl::ComputeStats`), summed over incarnations, and the run's mean gap.
+#[derive(Clone, Debug, Default)]
+pub struct ComputeCounts {
+    pub hellos: u64,
+    pub events: u64,
+    pub switches: u64,
+    pub deadline_stops: u64,
+    pub gap: u64,
+}
+
+impl ComputeCounts {
+    /// `result.json`'s `compute`: only when an image said hello or events were counted, so a
+    /// run of stock programs has the same `result.json` as before compute points existed.
+    fn json(&self, counters: bool) -> Option<Value> {
+        if self.hellos == 0 && self.events == 0 {
+            return None;
+        }
+        let mut v = json!({
+            "events": self.events,
+            "switches": self.switches,
+            "deadline_stops": self.deadline_stops,
+            "gap": self.gap,
+            "charge_ns": proto::compute::CHARGE_NS,
+        });
+        if counters {
+            v["mode"] = json!("counters");
+        }
+        Some(v)
+    }
 }
 
 /// The scheduling points beyond traps: `pause` sites patched, and the counters of
@@ -193,6 +226,7 @@ fn named<const N: usize>(names: &[&str; N], v: &[u64; N]) -> Value {
 pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     let v = &e.verdict;
     let preemptions = e.sched.get("spin_yields")
+        + e.compute.switches
         + e.pmu.map_or(0, |p| {
             p[proto::ctl::PMU_NAMES
                 .iter()
@@ -208,7 +242,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some(p) = &e.pmu {
         counters["pmu"] = named(&proto::ctl::PMU_NAMES, p);
     }
-    json!({
+    let mut r = json!({
         "schema": RESULT_SCHEMA,
         "outcome": c.outcome.name(),
         "stop": c.stop,
@@ -238,7 +272,11 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "counters": counters,
         "signature": null,
         "wall_ms": e.wall_ms,
-    })
+    });
+    if let Some(cp) = e.compute.json(e.pmu.is_some()) {
+        r["compute"] = cp;
+    }
+    r
 }
 
 /// A result without a run (a request that could not be carried out).

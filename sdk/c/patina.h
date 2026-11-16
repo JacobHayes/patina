@@ -23,6 +23,10 @@
  *
  * Wire (proto::sdk in the Patina repository): payload = 32-byte header, label, text.
  *   0 u8 kind | 1 u8 cond | 2 u16 label_len | 4 u32 text_len | 8 i64 a | 16 i64 b | 24 i64 c
+ * Ops 8 and 9 take no payload: compute points, made only by patina_compute.c (the hooks of a
+ * program rebuilt with coverage flags):
+ *   8 COMPUTE_HELLO  arg = version 1 | kinds << 8 (1 edge, 2 access, 4 compare) -> cell address
+ *   9 COMPUTE_POINT  arg = 0: the cell reached 0 -> 0, the cell refilled
  */
 #ifndef PATINA_H
 #define PATINA_H

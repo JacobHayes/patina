@@ -60,7 +60,7 @@ pub fn slice(cfg: &Config, key: u64) -> u64 {
 }
 
 /// Piecewise log-uniform in [lo, hi]: an octave uniformly, then uniform within it.
-fn log_uniform(d: u64, lo: u64, hi: u64) -> u64 {
+pub fn log_uniform(d: u64, lo: u64, hi: u64) -> u64 {
     let hi = hi.max(lo);
     let mut octaves = 0u64;
     while octaves < 63 && (lo << (octaves + 1)) <= hi {

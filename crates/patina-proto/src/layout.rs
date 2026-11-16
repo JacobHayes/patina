@@ -46,6 +46,11 @@ pub const BRK_SIZE: u64 = 64 << 30;
 pub const MMAP_TOP: u64 = 0x5f00_0000_0000;
 /// Lowest address the top-down allocator hands out (above the brk reservation).
 pub const MMAP_FLOOR: u64 = BRK_BASE + BRK_SIZE;
+/// Compute points: the page whose first word is an address space's cell (`crate::compute`),
+/// mapped by the runtime at the first `COMPUTE_HELLO`. Above the `mmap` area, below the
+/// runtime's region; nothing else is placed here.
+pub const COMPUTE_CELL: u64 = 0x5f80_0000_0000;
+const _: () = assert!(MMAP_TOP <= COMPUTE_CELL && COMPUTE_CELL + PAGE <= RT_BASE);
 /// Guest initial stack.
 pub const STACK_TOP: u64 = 0x7ff0_0000_0000;
 pub const STACK_SIZE: u64 = 8 << 20;

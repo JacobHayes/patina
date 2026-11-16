@@ -64,11 +64,13 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
     }
     crate::pmu::enter(thread(), Some(frame));
     crate::spin::enter(thread(), Some(frame));
+    crate::compute::enter(thread());
     let info: SigInfo = unsafe { core::ptr::read(info) };
     for emu in EMULATORS {
         if emu(frame, sig, &info) {
             sig::trap_exit(frame, None);
             crate::entry::check_real_mask(frame);
+            crate::compute::exit(thread());
             crate::pmu::exit(thread(), frame.gregs[RIP], 0);
             return;
         }
@@ -99,5 +101,6 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
     sig::act_on(frame, ts, sig, &info, None, true);
     sig::trap_exit(frame, None);
     crate::entry::check_real_mask(frame);
+    crate::compute::exit(thread());
     crate::pmu::exit(thread(), frame.gregs[RIP], 0);
 }

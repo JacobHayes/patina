@@ -106,6 +106,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut pmu = [0u64; proto::ctl::PMU_FIELDS];
     let mut sdk = crate::result::SdkReport::default();
     let mut sched = [0u64; proto::ctl::SCHED_FIELDS];
+    let mut compute = [0u64; 5];
     let mut refused: Vec<String> = vec![];
     let mut missing: Vec<(u8, String)> = vec![];
     let mut root = o.cfg.work.clone();
@@ -145,6 +146,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         }
         for (a, b) in sched.iter_mut().zip(end.sched) {
             *a += b;
+        }
+        for (i, (a, b)) in compute.iter_mut().zip(end.compute).enumerate() {
+            // [1] is the kinds named, a bit set.
+            *a = if i == 1 { *a | b } else { *a + b };
         }
         for r in end.refused {
             if !refused.contains(&r) {
@@ -192,6 +197,13 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 sched: crate::result::SchedCounts {
                     pause_sites: insn.patched[proto::insn::SiteKind::Pause as usize],
                     stats: sched,
+                },
+                compute: crate::result::ComputeCounts {
+                    hellos: compute[0],
+                    events: compute[2],
+                    switches: compute[3],
+                    deadline_stops: compute[4],
+                    gap: o.plan.compute_gap,
                 },
             });
         }

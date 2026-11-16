@@ -279,6 +279,7 @@ extern "C" fn thread_start(uc2: *mut TrapFrame) -> ! {
         let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
     crate::pmu::open(ts);
+    crate::compute::exit(ts);
     crate::pmu::exit(ts, unsafe { (*uc2).gregs[crate::trap::reg::RIP] }, 0);
     unsafe { patina_sigreturn_to(uc2 as u64) }
 }

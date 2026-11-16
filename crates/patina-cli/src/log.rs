@@ -40,6 +40,15 @@ pub fn describe(r: &Rec) -> String {
             0xf30fc707 => "rdpid".to_string(),
             n => format!("{n:#x}"),
         },
+        Some(RecKind::Preempt) => match r.nr {
+            1 => "counter".to_string(),
+            2 => "spin point".to_string(),
+            proto::compute::PREEMPT_NR => match r.args[2] {
+                proto::compute::REASON_DEADLINE => "compute deadline".to_string(),
+                _ => "compute switch".to_string(),
+            },
+            n => format!("{n:#x}"),
+        },
         Some(RecKind::Name) => {
             let (b, n, cut) = r.name_bytes();
             let s = String::from_utf8_lossy(&b[..n]);

@@ -185,6 +185,7 @@ pub fn classify(v: &Verdict) -> Classified {
         "liveness" => Classified::new(Liveness, "time-limit", d),
         "stall" => Classified::new(Unsupported, "compute-stall", d),
         "containment" => Classified::new(Unsupported, "containment", d),
+        "compute-cell" => Classified::new(Unsupported, "compute-cell", d),
         "unsupported" => Classified::new(
             Unsupported,
             "syscall",
