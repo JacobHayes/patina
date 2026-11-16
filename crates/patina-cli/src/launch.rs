@@ -101,12 +101,23 @@ fn data_fd(data: &[u8]) -> Res<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-fn etc_files() -> Vec<(&'static str, Vec<u8>)> {
+/// The files and directories under /etc the sandbox makes (`etc_files` and the links below).
+pub const GENERATED_ETC: [&str; 7] = [
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/hosts",
+    "/etc/nsswitch.conf",
+    "/etc/ld.so.cache",
+    "/etc/localtime",
+    "/etc/alternatives",
+];
+
+fn etc_files(home: &str) -> Vec<(&'static str, Vec<u8>)> {
     let (uid, gid) = (1000, 1000);
     vec![
         (
             "/etc/passwd",
-            format!("root:x:0:0:root:/work:/bin/sh\nuser:x:{uid}:{gid}:user:/work:/bin/sh\n")
+            format!("root:x:0:0:root:{home}:/bin/sh\nuser:x:{uid}:{gid}:user:{home}:/bin/sh\n")
                 .into_bytes(),
         ),
         (
@@ -267,6 +278,7 @@ fn under(p: &str, dir: &str) -> bool {
 /// left out: there the guest's view is the sandbox's, not the host's.
 pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Value> {
     let mut covered: Vec<String> = o.cfg.mounts.iter().map(|m| m.dst.clone()).collect();
+    covered.push(o.cfg.work_path().to_string());
     if let Some(d) = Path::new(&o.program.guest).parent() {
         if o.program.dir.is_some() {
             covered.push(d.display().to_string());
@@ -566,6 +578,7 @@ pub fn run_incarnation(
         cfg.pmu_charge_ps = c.pmu.charge_ps;
         cfg.pmu_margin = c.pmu.margin;
     }
+    cfg.work[..c.work_path().len()].copy_from_slice(c.work_path().as_bytes());
     unsafe { Ctl::init(ctl_ptr as *mut Ctl, cfg) };
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_STEP, Relaxed);
@@ -596,7 +609,8 @@ pub fn run_incarnation(
     let (outcome_r, outcome_w) = unsafe { (File::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) };
 
     // Generated /etc files, passed to bwrap as --ro-bind-data descriptors.
-    let mut etc = etc_files();
+    let work = c.work_path();
+    let mut etc = etc_files(work);
 
     // As root, the user namespace is joined from a descriptor at FD_USERNS (closed by the
     // supervisor with every other one it does not keep).
@@ -629,7 +643,7 @@ pub fn run_incarnation(
     }
     args.extend(["--dev", "/dev", "--proc", "/proc", "--size"].map(String::from));
     args.push(c.tmpfs_bytes.to_string());
-    args.extend(["--tmpfs".into(), "/work".into()]);
+    args.extend(["--tmpfs".into(), work.into()]);
     // /tmp: a second sandbox tmpfs (same argument as /work: fresh, sequential inode numbers,
     // its own virtual times); programs expect it for temporary files. Not durable.
     args.extend([
@@ -737,7 +751,7 @@ pub fn run_incarnation(
             path.to_string(),
         ]);
     }
-    args.extend(["--clearenv".into(), "--chdir".into(), "/work".into()]);
+    args.extend(["--clearenv".into(), "--chdir".into(), work.into()]);
     args.push(format!("/proc/self/fd/{FD_PATINA}"));
     args.push("__sup".into());
     for cp in copies {

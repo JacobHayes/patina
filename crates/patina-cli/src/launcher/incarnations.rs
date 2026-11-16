@@ -217,7 +217,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         if machine {
             c["model"] = json!(o.fs_model.name());
             let live = Tree::read_archive(&inc.join("live.tree"))?;
-            what = Some(lost(&live, &tree));
+            what = Some(lost(&live, &tree, o.cfg.work_path()));
         }
         crashes.push(c);
         faults.add_crash(k, &kind, seq, vclock, what);

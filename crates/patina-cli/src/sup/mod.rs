@@ -285,7 +285,7 @@ impl Sup {
             while libc::waitpid(-1, &mut st, 0) > 0 {}
         }
         // Every guest is dead: the live tree is final.
-        crash::export(Path::new("/work"));
+        crash::export(&work_dir(self.ctl));
         self.wire_note_hwm();
         self.ctl.timing[TM_EXPORTED].store(now_ns(), Relaxed);
         let _ = write_fd(FD_OUTCOME, v.encode().as_bytes());
@@ -724,11 +724,14 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         }
     }
     if Path::new("/.patina/in").is_dir() {
-        if let Err(e) = crash::copy_in(Path::new("/.patina/in"), Path::new("/work")) {
-            sup.finish(Verdict::new("infra", format!("copying /in to /work: {e}")));
+        if let Err(e) = crash::copy_in(Path::new("/.patina/in"), &work_dir(ctl)) {
+            sup.finish(Verdict::new(
+                "infra",
+                format!("copying /in to the work tree: {e}"),
+            ));
         }
     }
-    if let Err(e) = crash::write_base(ctl, Path::new("/work")) {
+    if let Err(e) = crash::write_base(ctl, &work_dir(ctl)) {
         sup.finish(Verdict::new("infra", format!("base records: {e}")));
     }
 
@@ -784,4 +787,10 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         Err(e) => sup.finish(Verdict::new("infra", format!("pidfd_open: {e}"))),
     };
     sup.serve()
+}
+
+/// The work tree's guest path (`--work DIR:GUEST`).
+fn work_dir(ctl: &Ctl) -> std::path::PathBuf {
+    use std::os::unix::ffi::OsStrExt;
+    Path::new(std::ffi::OsStr::from_bytes(ctl.config.work_path())).to_path_buf()
 }

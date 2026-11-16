@@ -371,7 +371,7 @@ fn mountinfo(w: &mut W, plain: bool) {
 /// (seen under parallel load; Go and Rust std read mountinfo at start-up). Kept: `size=` of the
 /// mounts the launcher sizes (`/work`, `/tmp`).
 fn tmpfs_opts(w: &mut W, sopts: &[u8], point: &[u8]) {
-    let sized = point == b"/work" || point == b"/tmp";
+    let sized = point == crate::state::config().work_path() || point == b"/tmp";
     let mut first = true;
     for o in sopts.split(|&c| c == b',') {
         // uid= and gid= name the launcher's own ids on the host (1000 on one machine, 1001

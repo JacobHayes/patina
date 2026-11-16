@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 7;
+pub const LAYOUT_VERSION: u64 = 8;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -39,6 +39,32 @@ pub struct Config {
     pub sched: u64,
     /// Virtual time charged to a pause point or a spin yield.
     pub spin_charge_ns: u64,
+    /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
+    /// NUL-padded; all zero is `/work`.
+    pub work: [u8; WORK_PATH_MAX],
+}
+
+/// The longest work tree path, with its NUL.
+pub const WORK_PATH_MAX: usize = 64;
+
+impl Config {
+    /// The work tree's guest path.
+    pub fn work_path(&self) -> &[u8] {
+        let n = self
+            .work
+            .iter()
+            .position(|&c| c == 0)
+            .unwrap_or(WORK_PATH_MAX);
+        if n == 0 {
+            b"/work"
+        } else {
+            &self.work[..n]
+        }
+    }
+    /// Is `p` the work tree or under it?
+    pub fn on_work(&self, p: &[u8]) -> bool {
+        crate::vfs::under(p, self.work_path())
+    }
 }
 
 /// `Config::sched`: `pause` sites are patched and each executed `pause` yields.
@@ -68,6 +94,7 @@ impl Config {
             pmu_margin: 0,
             sched: 0,
             spin_charge_ns: 0,
+            work: [0; WORK_PATH_MAX],
         }
     }
 }

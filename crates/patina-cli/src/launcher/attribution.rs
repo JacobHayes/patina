@@ -230,12 +230,16 @@ impl Faults {
 
 /// What a machine crash did to `/work`: the paths whose post-crash state differs from the
 /// live tree at the crash (missing, changed, or back from before), the first few named.
-pub fn lost(live: &crate::durability::tree::Tree, post: &crate::durability::tree::Tree) -> Value {
+pub fn lost(
+    live: &crate::durability::tree::Tree,
+    post: &crate::durability::tree::Tree,
+    work: &str,
+) -> Value {
     let (mut missing, mut changed, mut back) = (0, 0, 0);
     let mut paths = vec![];
     let note = |p: &[u8], paths: &mut Vec<String>| {
         if paths.len() < 8 {
-            paths.push(format!("/work/{}", String::from_utf8_lossy(p)));
+            paths.push(format!("{work}/{}", String::from_utf8_lossy(p)));
         }
     };
     for (p, n) in &live.nodes {

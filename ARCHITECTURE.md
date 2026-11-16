@@ -63,9 +63,9 @@ socket buffer sizes are fixed at creation, so readiness is a function of the cal
 ## The sandbox
 
 bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a
-read-only bind; `/work` and `/tmp` are tmpfs; `/etc` is generated; the program's directory is
-a read-only bind at the path it was given by (`config::program`), and `:copy` mounts are
-copies (`sup/mod.rs`). A path the guest ran, opened or looked for and found missing is kept in
+read-only bind; `/work` (or the path `--work DIR:GUEST` gives, `Config::work`) and `/tmp`
+are tmpfs; `/etc` is generated; the program's directory is a read-only bind at the path it
+was given by (`config::program`), and `:copy` mounts are copies (`sup/mod.rs`). A path the guest ran, opened or looked for and found missing is kept in
 the control region; the launcher names those the host has (`launch::not_in_sandbox`).
 The launcher fixes every piece of process state a child inherits (umask, rlimits, signal
 dispositions, the CPU it is pinned to, address randomization off; `sup/inherit.rs` lists each).

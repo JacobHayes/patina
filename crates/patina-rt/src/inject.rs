@@ -90,8 +90,7 @@ pub fn path_on_work(dirfd: i64, p: u64) -> bool {
     let s = unsafe { crate::loader::cstr(p as *const u8) };
     let mut norm = PathBuf::new();
     if path::absolute(dirfd, s, &mut norm) {
-        let b = norm.as_bytes();
-        return b == b"/work" || b.starts_with(b"/work/");
+        return crate::state::config().on_work(norm.as_bytes());
     }
     if dirfd == AT_FDCWD {
         let mut buf = [0u8; 256];
@@ -100,7 +99,7 @@ pub fn path_on_work(dirfd: i64, p: u64) -> bool {
             return false;
         }
         let c = &buf[..(r as usize).saturating_sub(1)];
-        return c == b"/work" || c.starts_with(b"/work/");
+        return crate::state::config().on_work(c);
     }
     fstat_raw(dirfd).is_some_and(|st| path::is_work(st[0]))
 }

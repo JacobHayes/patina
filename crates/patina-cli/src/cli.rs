@@ -208,9 +208,9 @@ pub const FLAGS: &[Flag] = &[
     ),
     flag(
         "--work",
-        "DIR",
+        "DIR[:GUEST]",
         "empty",
-        "initial contents of /work, the guest's writable disk",
+        "initial contents of the guest's writable, crash-modelled disk, at GUEST (default /work)",
         RUNLIKE,
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),

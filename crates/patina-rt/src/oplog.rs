@@ -801,12 +801,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
         crate::inject::crash_point();
         flush_all();
         if let Some(by) = crate::inject::sync_fails() {
-            fail(
-                0,
-                nr,
-                crate::inject::Who::At(AT_FDCWD_, c"/work".as_ptr() as u64),
-                by,
-            );
+            fail(0, nr, crate::inject::Who::At(AT_FDCWD_, work_cstr()), by);
             FDS.get().sync_seen = dur().sync_gen;
             return -e::EIO;
         }
@@ -901,4 +896,14 @@ pub fn on_exit() {
         return;
     }
     flush_all();
+}
+
+/// The work tree's path as a C string (the launcher leaves room for the NUL).
+fn work_cstr() -> u64 {
+    let w = &crate::state::config().work;
+    if w[0] == 0 {
+        c"/work".as_ptr() as u64
+    } else {
+        w.as_ptr() as u64
+    }
 }

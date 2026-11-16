@@ -220,8 +220,16 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             let c = if m.copy { ":copy" } else { "" };
             flag("--mount", format!("{}:{}{c}", m.src.display(), m.dst));
         }
-        if let Some(w) = &cfg.work {
-            flag("--work", w.display().to_string());
+        if cfg.work.is_some() || cfg.work_at.is_some() {
+            let dir = cfg
+                .work
+                .as_ref()
+                .map(|w| w.display().to_string())
+                .unwrap_or_default();
+            match &cfg.work_at {
+                Some(g) => flag("--work", format!("{dir}:{g}")),
+                None => flag("--work", dir),
+            }
         }
         if let Some(s) = &cfg.stdin {
             flag("--stdin", s.display().to_string());

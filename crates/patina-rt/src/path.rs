@@ -144,7 +144,7 @@ pub fn read_mounts() {
             dev: makedev(ma, mi),
             class,
             point: p,
-            work: point == b"/work",
+            work: point == crate::state::config().work_path(),
         };
         t.n += 1;
     }
