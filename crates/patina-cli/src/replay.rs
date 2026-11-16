@@ -6,7 +6,7 @@ use crate::cli::{Args, Res};
 use crate::config::{sha256_file, Config, Program};
 use crate::launch::{default_cpu, run_one, PERTURB_DRAWS};
 use crate::outcome::{Classified, Outcome};
-use crate::result::{read_json, result_json, write_json, RUN_SCHEMA};
+use crate::result::{read_json, result_json, same_build, write_json};
 use std::path::{Path, PathBuf};
 
 /// What a replay concluded, and the replay's directory.
@@ -50,12 +50,11 @@ pub fn replay(args: &Args) -> Res<Replayed> {
         // (a run directory's subdirectories are not walked).
         None => rundir.join("replay"),
     };
-    let run = read_json(&rundir.join("run.json"))?;
-    replay_into(&rundir, &out, cfg, program, &recorded, &run)
+    replay_into(&rundir, &out, cfg, program, &recorded)
 }
 
 /// The configuration and program a run directory's `run.json` records, after checking that
-/// the program is unchanged.
+/// this is the patina build that made it and the program is unchanged.
 pub fn load(rundir: &Path) -> Res<(Config, Program)> {
     let run_path = rundir.join("run.json");
     if !run_path.is_file() {
@@ -65,13 +64,7 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
         ));
     }
     let run = read_json(&run_path)?;
-    if run["schema"] != RUN_SCHEMA {
-        return Err(format!(
-            "{}: schema {} (this patina reads {RUN_SCHEMA})",
-            run_path.display(),
-            run["schema"]
-        ));
-    }
+    same_build(&run, &run_path)?;
     let cfg: Config = serde_json::from_value(run["config"].clone())
         .map_err(|e| format!("{}: config: {e}", run_path.display()))?;
     let program: Program = serde_json::from_value(run["program"].clone())
@@ -89,47 +82,17 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
     Ok((cfg, program))
 }
 
-/// A run whose program had compute points repeats only with the same mean gap and event charge.
-/// A mean gap the plan did not give is drawn from the seed in this build's default range, so a
-/// build with another default (or another charge) would run another schedule: refuse that here
-/// rather than report it as a divergence.
-fn compute_unchanged(recorded: &serde_json::Value, gap: u64) -> Res<()> {
-    let c = &recorded["compute"];
-    // With counters on the gap is never used (and no event is charged).
-    if c.is_null() || c["mode"] == "counters" {
-        return Ok(());
-    }
-    let now = (gap, proto::compute::CHARGE_NS);
-    if (c["gap"].as_u64(), c["charge_ns"].as_u64()) != (Some(now.0), Some(now.1)) {
-        return Err(format!(
-            "the run's compute points had mean gap {} and {} ns per event; this patina would use gap {} and {} ns, \
-             so the run would not repeat. Replay it with the patina that recorded it.",
-            c["gap"], c["charge_ns"], now.0, now.1
-        ));
-    }
-    Ok(())
-}
-
 fn replay_into(
     rundir: &Path,
     out: &Path,
     cfg: Config,
     program: Program,
     recorded: &serde_json::Value,
-    run: &serde_json::Value,
 ) -> Res<Replayed> {
     let out = out.to_path_buf();
     let o = cfg.opts_with(program)?;
-    compute_unchanged(recorded, o.plan.compute_gap)?;
     crate::launch::preflight(&o)?;
     clear_out(&out)?;
-    if run["faults"] != o.plan.json() {
-        return Err(format!(
-            "the fault plan resolves to {} now, {} in the run",
-            o.plan.json(),
-            run["faults"]
-        ));
-    }
     if std::env::var_os("PATINA_TEST_REPLAY_PERTURB").is_some() {
         PERTURB_DRAWS.store(true, std::sync::atomic::Ordering::Relaxed);
     }

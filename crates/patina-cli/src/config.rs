@@ -92,7 +92,6 @@ pub struct Config {
     pub buggify: bool,
     /// SDK labels and fault classes a sweep or report may find unmet without calling the
     /// result vacuous (`[sdk] allow-unmet`).
-    #[serde(default)]
     pub allow_unmet: Vec<String>,
     pub fs_model: String,
     pub max_incarnations: u64,
@@ -154,7 +153,6 @@ pub struct Program {
     pub copied: bool,
     /// The host directory (symlinks resolved) mounted read-only at the guest path's
     /// directory: a program given by a host path runs from where it was given.
-    #[serde(default)]
     pub dir: Option<PathBuf>,
     pub sha256: String,
 }
@@ -528,13 +526,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
     let name = path.display().to_string();
     if path.extension().is_some_and(|e| e == "json") {
         let run = crate::result::read_json(path)?;
-        if run["schema"] != crate::result::RUN_SCHEMA {
-            return Err(format!(
-                "{name}: not a run.json (schema {}, this patina reads {})",
-                run["schema"],
-                crate::result::RUN_SCHEMA
-            ));
-        }
+        crate::result::same_build(&run, path)?;
         *c = serde_json::from_value(run["config"].clone())
             .map_err(|e| format!("{name}: config: {e}"))?;
         return Ok(());

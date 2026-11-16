@@ -398,7 +398,9 @@ names the first record where two logs differ.
 ## Replay and verify
 
 `patina replay RUNDIR` runs the program again with the run's settings, into `RUNDIR/replay`,
-and compares every boundary record. It refuses a program whose SHA-256 changed. `identical` means the bug is
+and compares every boundary record. It refuses a program whose SHA-256 changed, and a run made
+by another Patina build (another version, or another binary of one): install that version
+(`install.sh --version VERSION`) or run the seed again. `identical` means the bug is
 reproduced exactly; a difference ends `nondeterministic` and names the first differing
 record, which is a Patina bug.
 
@@ -620,7 +622,7 @@ this host can run patina
 
 The sweep's exit status fails the job on a finding (1) or when Patina could not do what was
 asked (2). Upload `patina-out` as an artifact to keep the failing runs; a run directory
-replays only with the same program binary, so keep the binary with it.
+replays only with the same program binary and Patina version, so keep the binary with it.
 
 ### As root, and in a container
 

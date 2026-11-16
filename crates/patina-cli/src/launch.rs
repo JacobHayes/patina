@@ -26,6 +26,20 @@ use std::sync::atomic::Ordering::*;
 /// The in-guest runtime, built by `build.rs`.
 static RT: &[u8] = include_bytes!(env!("PATINA_RT_EMBED"));
 
+/// `$XDG_CACHE_HOME/patina` (default `~/.cache/patina`, else in the temporary directory).
+pub fn cache_dir() -> PathBuf {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|v| !v.is_empty())
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })
+        .unwrap_or_else(std::env::temp_dir)
+        .join("patina")
+}
+
 /// The runtime the sandbox executes: the file `PATINA_RT` names (runtime development), else
 /// the embedded copy written once to `$XDG_CACHE_HOME/patina/rt-<hash>` (default
 /// `~/.cache`, else the temporary directory) and checked against the embedded bytes on every
@@ -35,16 +49,7 @@ pub fn rt_file() -> Res<File> {
         return File::open(&p)
             .map_err(|e| format!("runtime {} (PATINA_RT): {e}", Path::new(&p).display()));
     }
-    let dir = std::env::var_os("XDG_CACHE_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .filter(|v| !v.is_empty())
-                .map(|h| PathBuf::from(h).join(".cache"))
-        })
-        .unwrap_or_else(std::env::temp_dir)
-        .join("patina");
+    let dir = cache_dir();
     let path = dir.join(format!("rt-{:016x}", proto::rec::hash_bytes(0x7274, RT)));
     if let Ok(mut f) = File::open(&path) {
         let mut have = Vec::with_capacity(RT.len());
@@ -212,7 +217,7 @@ pub fn run_one(
     }
     crate::result::write_json(
         &out.join("run.json"),
-        &crate::result::run_json(&o.cfg, &o.program, &o.plan),
+        &crate::result::run_json(&o.cfg, &o.program, &o.plan)?,
     )?;
     let end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
     let mut r = crate::result::result_json(&end, &crate::result::classified(&end));

@@ -2,7 +2,7 @@
 # rates in run.json and one seed twice the same. Plan independence (the coupling where one
 # setting's draw moved another's): adding --fault net-chunk-max=1..4 to a run without sockets
 # (ack-log, --faults disk --crash machine:0..30) leaves every other resolved value and the whole
-# boundary log equal. A replay re-resolves the same plan.
+# boundary log equal.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/15
@@ -33,5 +33,3 @@ PY
 done
 [ -n "$found" ] || die "no seed of 1-8 injected a fault"
 echo "seed $found: plan $(plan "$d/base-$found"); adding net-chunk-max=1..4 (resolved $(field "$d/more-$found/run.json" faults.net-chunk-max)) left the plan and the log (digest $(field "$d/base-$found/result.json" digest), $(field "$d/base-$found/result.json" faults.injected) faults) unchanged"
-"$PATINA" replay "$d/base-$found" >"$d/replay.txt" 2>&1 || die "replay: $(cat "$d/replay.txt")"
-echo "replay: $(head -1 "$d/replay.txt")"

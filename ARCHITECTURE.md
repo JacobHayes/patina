@@ -188,16 +188,14 @@ touched.
   (`compute.rs`).
 
 There is no other way into the runtime: a point that switches needs a supervisor hand-off
-anyway, so a direct call would save nothing. Replay refuses a run whose recorded gap or
-event charge differs from this build's. With `--preempt branches` the cell is never armed and
-events charge nothing.
+anyway, so a direct call would save nothing. With `--preempt branches` the cell is never armed
+and events charge nothing.
 
 ## The fault plan
 
 `--faults`, `--fault` and `--crash` give the plan (`faults.rs`). A value given as a range is
 resolved from the seed by a draw keyed by the setting's name, so adding one setting never
-moves another's value. The resolved plan is in `run.json`; replay refuses a run whose plan
-resolves differently.
+moves another's value. The resolved plan is in `run.json`.
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's
@@ -303,9 +301,11 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 
 - **Linux x86_64 only.** No macOS, no arm64. bwrap and unprivileged user namespaces are
   required.
-- **A seed reproduces for the same program binary, on the same kind of host.** Replay checks
-  the binary's hash. The kernel's own behaviour for passed calls is an input: a different
-  kernel version or filesystem may change a run.
+- **A seed reproduces for the same program binary and the same Patina build, on the same kind
+  of host.** `run.json` records both binaries' SHA-256 (`patina` is the version and the hash of
+  the `patina` binary); replay, minimize and `run --config RUNDIR/run.json` refuse a run whose
+  either one differs, and a sweep into a directory another build made starts over. The kernel's own behaviour for passed calls is an
+  input: a different kernel version or filesystem may change a run.
 - **Branch counters** (`--preempt branches`) need `CAP_PERFMON`, a PMU, and an AMD family
   0x1a (Zen 5) CPU, the only one checked exact; their seeds reproduce on the same family only.
 - **compute-stall**: in stock code without branch counters, a spin-wait whose iterations

@@ -1,6 +1,6 @@
 # 4. `patina replay RUNDIR`: identical, with the run's exit status; `error` naming the program
 #    after one byte of it changes; `nondeterministic` printing the first differing record when
-#    the test hook perturbs one draw on replay.
+#    the test hook perturbs one draw on replay; a run of another patina build refused.
 #@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/prog
@@ -28,6 +28,16 @@ PATINA_TEST_REPLAY_PERTURB=1 replay "$RUNS/ok"
 [ "$(field "$RUNS/ok/replay/result.json" outcome)" = nondeterministic ] || die "perturbed replay: outcome"
 grep -q 'record' "$RUNS/ok.replay.txt" || die "perturbed replay: no record printed"
 echo "perturbed replay: nondeterministic, $(grep -m1 record "$RUNS/ok.replay.txt")"
+# A run made by another patina build: replay and `run --config RUNDIR/run.json` refuse it
+# before running anything.
+cp -r "$RUNS/ok" "$RUNS/other"
+python3 -I -c 'import json,sys; p=sys.argv[1]; r=json.load(open(p)); r["patina"]="0.0.1 "+"0"*64; json.dump(r,open(p,"w"))' "$RUNS/other/run.json"
+st=0; timeout 60 "$PATINA" replay "$RUNS/other" --out "$RUNS/other-replay" >"$RUNS/other.txt" 2>&1 || st=$?
+[ "$st" = "$(exit_of error)" ] || die "other build, replay: exit $st ($(cat "$RUNS/other.txt"))"
+prun "$RUNS/other-run" --config "$RUNS/other/run.json"
+[ "$st" = "$(exit_of error)" ] || die "other build, run --config: exit $st ($(cat "$RUNS/other-run.txt"))"
+for x in other-replay other-run; do [ ! -e "$RUNS/$x" ] || die "other build: $x was made"; done
+echo "other build: refused before running: $(head -1 "$RUNS/other.txt")"
 # One byte of the program changes.
 printf '\001' | dd of="$d/hello" bs=1 seek=1000 conv=notrunc status=none
 replay "$RUNS/ok"

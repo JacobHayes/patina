@@ -1,6 +1,7 @@
 //! The run directory's two documents: `run.json` (the request) and `result.json` (the
 //! answer, schema `patina.result/v3`), and the human summary of a result.
 
+use crate::cli::Res;
 use crate::config::{Config, Program};
 use crate::outcome::{classify, Classified, Outcome, Verdict};
 use serde_json::{json, Value};
@@ -409,17 +410,77 @@ pub fn host_facts() -> Value {
     json!({ "kernel": kernel, "cpu": cpu, "arch": std::env::consts::ARCH })
 }
 
+/// This patina build: its version and the SHA-256 of its own binary. `run.json` and
+/// `sweep.json` record it; a recorded run is re-executed only by the same build. Hashing the
+/// binary costs more than a short run, so the hash is kept in `CACHE/build` under the
+/// binary's file identity (device, inode, size, change time), which any rewrite changes.
+pub fn build() -> Res<&'static str> {
+    use std::os::unix::fs::MetadataExt;
+    static B: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(b) = B.get() {
+        return Ok(b);
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("patina binary: {e}"))?;
+    let m = std::fs::metadata(&exe).map_err(|e| format!("patina binary: {e}"))?;
+    let key = format!(
+        "{} {} {} {}.{}",
+        m.dev(),
+        m.ino(),
+        m.size(),
+        m.ctime(),
+        m.ctime_nsec()
+    );
+    let cache = crate::launch::cache_dir().join("build");
+    let cached = std::fs::read_to_string(&cache).ok().and_then(|t| {
+        let (k, h) = t.rsplit_once(' ')?;
+        (k == key && h.len() == 64).then(|| h.to_string())
+    });
+    let hash = match cached {
+        Some(h) => h,
+        None => {
+            let h = crate::config::sha256_file(&exe)?;
+            // Best effort; a torn read of it fails the length check and hashes again.
+            let _ = std::fs::create_dir_all(crate::launch::cache_dir())
+                .and_then(|_| std::fs::write(&cache, format!("{key} {h}")));
+            h
+        }
+    };
+    let b = format!("{} {hash}", env!("CARGO_PKG_VERSION"));
+    Ok(B.get_or_init(|| b))
+}
+
+/// Refuse a run (its `run.json`, read from `at`) made by another patina build: a run repeats
+/// only under the build that made it.
+pub fn same_build(run: &Value, at: &Path) -> Res<()> {
+    let this = build()?;
+    if run["patina"] == this {
+        return Ok(());
+    }
+    let short = |b: &str| match b.split_once(' ') {
+        Some((v, h)) => format!("{v} ({})", h.chars().take(12).collect::<String>()),
+        None => b.to_string(),
+    };
+    let was = run["patina"].as_str().unwrap_or("?");
+    Err(format!(
+        "{}: made by patina {}, this is patina {}; replay it with that build (install.sh --version {}) or run the seed again with this one",
+        at.display(),
+        short(was),
+        short(this),
+        was.split(' ').next().unwrap_or("?")
+    ))
+}
+
 /// `run.json`: the request, with the fault plan resolved from the seed (`faults`).
-pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> Value {
-    json!({
+pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> Res<Value> {
+    Ok(json!({
         "schema": RUN_SCHEMA,
-        "version": env!("CARGO_PKG_VERSION"),
+        "patina": build()?,
         "seed": cfg.seed,
         "config": cfg,
         "faults": plan.json(),
         "program": program,
         "host": host_facts(),
-    })
+    }))
 }
 
 /// The run's own outcome.

@@ -94,10 +94,9 @@ fn identity(cfg: &crate::config::Config, program: Option<&String>) -> Res<serde_
     c.seed = 0;
     c.host_cpu = None;
     c.allow_unmet.clear();
-    let exe = std::env::current_exe().map_err(|e| format!("patina binary: {e}"))?;
     Ok(serde_json::json!({
         "schema": SWEEP_SCHEMA,
-        "patina": format!("{} {}", env!("CARGO_PKG_VERSION"), crate::config::sha256_file(&exe)?),
+        "patina": crate::result::build()?,
         "program": program,
         "config": c,
     }))
@@ -108,8 +107,8 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
     let Ok(old) = read_json(&out.join(SWEEP_FILE)) else {
         return Some(format!("no {SWEEP_FILE}"));
     };
-    if old["schema"] != ident["schema"] {
-        return Some(format!("{SWEEP_FILE} of another schema"));
+    if old["patina"] != ident["patina"] {
+        return Some("another patina build".into());
     }
     if old["program"] != ident["program"] {
         return Some("the program changed".into());
@@ -124,9 +123,6 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
             .collect();
         let keys: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
         return Some(format!("other settings: {}", keys.join(", ")));
-    }
-    if old["patina"] != ident["patina"] {
-        return Some("another patina build".into());
     }
     None
 }

@@ -6,9 +6,7 @@
 #     deadlines do not depend on switches), one digest twice each; seed 1 (50 ms) gives one
 #     digest under verify --runs 3 --vary cpu,aslr;
 #  b. an endless loop under --time-limit 1 ends liveness, one digest twice;
-#  c. thread and process CPU time after a loop of N iterations (at least N events) are >= N ns;
-#  d. replay refuses a run whose recorded compute gap differs from what this build would use,
-#     and replays the same run unchanged.
+#  c. thread and process CPU time after a loop of N iterations (at least N events) are >= N ns.
 #@ tier=quick budget=10 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-deadline
@@ -73,13 +71,3 @@ grep -q '^identical: 3 runs' "$o/verify.txt" || die "a. deadline seed 1 under --
 echo "a. timer in a loop: handler at $(sed -n 's/.*handler_ns=\([0-9]*\).*/\1/p' "$o/z-1-1/inc-0/stdout") ns for 50 ms (seed 1, compute-gap=0); seeds 1-3 ok at the seed's gap and at 0, one digest twice; seed 1 identical under --vary cpu,aslr"
 echo "b. endless loop, --time-limit 1: liveness after $(field "$o/e-1/result.json" compute.events) events, one digest twice"
 echo "c. CPU time after $N iterations: $(sed -n 's/^cpu [0-9]* //p' "$o/cpu/inc-0/stdout")"
-
-# d. A copy of a run at the seed's gap replays; with its result.json naming another gap, the
-#    same copy is refused before anything runs.
-rm -rf "$o/other" && cp -r "$o/d-1-1" "$o/other"
-"$PATINA" replay "$o/other" >"$o/same.txt" 2>&1 || die "d. replay of an unchanged run: $(tail -2 "$o/same.txt")"
-rm -rf "$o/other/replay"
-python3 -I -c 'import json,sys; p=sys.argv[1]; r=json.load(open(p)); r["compute"]["gap"]+=1; json.dump(r,open(p,"w"))' "$o/other/result.json"
-! "$PATINA" replay "$o/other" >"$o/other.txt" 2>&1 || die "d. replay accepted a run recorded with another compute gap"
-[ ! -e "$o/other/replay" ] || die "d. the refused replay ran"
-echo "d. a run replays; the same run recorded with another compute gap is refused"
