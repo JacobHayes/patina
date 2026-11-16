@@ -86,13 +86,21 @@ int main(void) {
     waitpid(r, &st, 0);
     printf("reader %d signaled=%d termsig=%d status=0x%x\n", r, WIFSIGNALED(st), WIFSIGNALED(st) ? WTERMSIG(st) : 0, st);
     bad |= !(WIFSIGNALED(st) && WTERMSIG(st) == SIGTERM);
+    /* The child says when it ignores everything: a sleep instead raced the child's setup on
+     * a loaded host, and SIGTERM killed it first. */
     siginfo_t si;
+    int rp[2];
+    if (pipe(rp)) return 1;
     pid_t r2 = fork();
     if (r2 == 0) {
         for (int s = 1; s < 32; s++) signal(s, SIG_IGN);
+        close(rp[0]);
+        (void)!write(rp[1], "r", 1);
         for (;;) pause();
     }
-    usleep(1000);
+    close(rp[1]);
+    (void)!read(rp[0], c3, 1);
+    close(rp[0]);
     kill(r2, SIGTERM);
     kill(r2, SIGKILL);
     memset(&si, 0, sizeof si);
