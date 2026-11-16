@@ -111,11 +111,11 @@ extern "C" fn rt_main(ksp: u64) -> ! {
             0,
         );
         if r as u64 != CTL_ADDR {
-            crate::fatal(b"cannot map control region (descriptor 3000)");
+            crate::fatal(proto::ctl::Setup::CtlMap, r);
         }
     }
     if !ctl().check() {
-        crate::fatal(b"control region magic or layout mismatch");
+        crate::fatal(proto::ctl::Setup::CtlCheck, 0);
     }
     install_handlers();
     // rdtsc/rdtscp fault from here on (inherited by fork and execve); the fault
@@ -133,7 +133,7 @@ fn install_handlers() {
     unsafe {
         let st: [u64; 3] = [alt, 0, ALT_SIZE];
         if sc2(nr::SIGALTSTACK, st.as_ptr() as u64, 0) != 0 {
-            crate::fatal(b"sigaltstack");
+            crate::fatal(proto::ctl::Setup::SigAltStack, 0);
         }
         let flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESTORER;
         let sys: [u64; 4] = [
@@ -143,7 +143,7 @@ fn install_handlers() {
             0,
         ];
         if sc4(nr::RT_SIGACTION, SIGSYS, sys.as_ptr() as u64, 0, 8) != 0 {
-            crate::fatal(b"sigaction SIGSYS");
+            crate::fatal(proto::ctl::Setup::SigactionSys, 0);
         }
         for s in [SIGSEGV, SIGILL, SIGBUS, SIGFPE, SIGTRAP] {
             // With counter preemption, SIGTRAP enters through the overflow stub, which
@@ -155,14 +155,14 @@ fn install_handlers() {
             };
             let f: [u64; 4] = [h, flags, patina_restorer as *const () as u64, 0];
             if sc4(nr::RT_SIGACTION, s, f.as_ptr() as u64, 0, 8) != 0 {
-                crate::fatal(b"sigaction fault");
+                crate::fatal(proto::ctl::Setup::SigactionFault, 0);
             }
         }
         // SIGPIPE and SIGXFSZ: ignored for real; the runtime raises the virtual signal.
         for s in [SIGPIPE, SIGXFSZ] {
             let ign: [u64; 4] = [1, SA_RESTORER, patina_restorer as *const () as u64, 0];
             if sc4(nr::RT_SIGACTION, s, ign.as_ptr() as u64, 0, 8) != 0 {
-                crate::fatal(b"sigaction ignore");
+                crate::fatal(proto::ctl::Setup::SigactionIgnore, 0);
             }
         }
         // Block every other signal at the kernel level; the guest's mask is virtual.
@@ -259,7 +259,7 @@ fn install_filter() {
             return; // already filtered (re-entry after execve; see Ctl::filter_installed)
         }
         if sc2(nr::PRCTL, PR_SET_NO_NEW_PRIVS, 1) != 0 {
-            crate::fatal(b"no_new_privs");
+            crate::fatal(proto::ctl::Setup::NoNewPrivs, 0);
         }
         if sc3(
             nr::PRCTL,
@@ -268,7 +268,7 @@ fn install_filter() {
             &prog as *const SockFprog as u64,
         ) != 0
         {
-            crate::fatal(b"seccomp");
+            crate::fatal(proto::ctl::Setup::Seccomp, 0);
         }
         ctl()
             .filter_installed
@@ -303,7 +303,7 @@ fn hello() {
         }
     }
     let Some(i) = found else {
-        crate::fatal(b"no slot reserved for this task")
+        crate::fatal(proto::ctl::Setup::NoSlot, 0)
     };
     ts.slot = i as u32;
     let p = proc();

@@ -247,7 +247,7 @@ pub fn new_alt_stack() -> u64 {
         )
     };
     if r as u64 != a {
-        crate::fatal(b"cannot map alternate stack");
+        crate::fatal(proto::ctl::Setup::AltStack, r);
     }
     a
 }

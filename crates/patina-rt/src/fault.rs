@@ -45,7 +45,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
             crate::pmu::note_race();
             return;
         }
-        crate::sup::host_error(sig as i64, 0, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
+        crate::sup::host_error(sig as i64, rip, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
     }
     crate::pmu::enter(thread(), Some(frame));
     crate::spin::enter(thread(), Some(frame));
@@ -61,7 +61,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
     let sig = sig as u64;
     let addr = info[2];
     if matches!(sig, sig::SIGSEGV | sig::SIGBUS) && in_runtime(addr) {
-        crate::sup::host_error(sig as i64, 0, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
+        crate::sup::host_error(sig as i64, addr, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
     }
     let ts = thread();
     charge(ts);

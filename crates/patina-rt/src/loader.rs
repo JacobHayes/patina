@@ -4,6 +4,7 @@
 
 use crate::raw::*;
 use crate::state::*;
+use proto::ctl::Setup;
 use proto::layout::*;
 use proto::{fill, Stream};
 
@@ -108,8 +109,8 @@ pub struct Image {
     pub interp_len: usize,
 }
 
-fn fail(what: &[u8]) -> ! {
-    crate::fatal(what)
+fn fail(step: Setup, r: i64) -> ! {
+    crate::fatal(step, r)
 }
 
 fn page_down(x: u64) -> u64 {
@@ -130,7 +131,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
             0,
         ); // O_RDONLY|O_CLOEXEC
         if fd < 0 {
-            fail(b"cannot open guest image");
+            fail(Setup::OpenImage, fd);
         }
         let fd = fd as u64;
         let mut eh: Ehdr = core::mem::zeroed();
@@ -146,15 +147,15 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
             || eh.ident[4] != 2
             || eh.machine != 62
         {
-            fail(b"not an x86_64 ELF image");
+            fail(Setup::NotElf, 0);
         }
         if eh.typ != ET_EXEC && eh.typ != ET_DYN {
-            fail(b"ELF image is neither ET_EXEC nor ET_DYN");
+            fail(Setup::ElfType, 0);
         }
         let mut ph = [Phdr::default(); 64];
         let phnum = eh.phnum as usize;
         if phnum > 64 || eh.phentsize as usize != core::mem::size_of::<Phdr>() {
-            fail(b"unsupported program header table");
+            fail(Setup::PhdrTable, 0);
         }
         let want = (phnum * core::mem::size_of::<Phdr>()) as i64;
         if sc4(
@@ -165,7 +166,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
             eh.phoff,
         ) != want
         {
-            fail(b"short program header read");
+            fail(Setup::PhdrRead, 0);
         }
         let base = if eh.typ == ET_DYN { dyn_base } else { 0 };
         let mut img = Image {
@@ -186,11 +187,11 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
             }
         }
         if lo >= hi {
-            fail(b"no loadable segments");
+            fail(Setup::NoLoad, 0);
         }
         let (rlo, rhi) = (base + lo, base + hi);
         if rhi > RT_BASE && rlo < RT_REGION_END {
-            fail(b"guest image overlaps the runtime");
+            fail(Setup::ImageInRuntime, 0);
         }
         let r = sc6(
             nr::MMAP,
@@ -202,7 +203,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
             0,
         );
         if r as u64 != rlo {
-            fail(b"cannot reserve the guest image range");
+            fail(Setup::ReserveImage, r);
         }
         for p in &ph[..phnum] {
             match p.typ {
@@ -239,7 +240,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
                             p.offset - off_in_page,
                         );
                         if r as u64 != va {
-                            fail(b"cannot map a segment");
+                            fail(Setup::MapSegment, r);
                         }
                         if p.memsz > p.filesz {
                             // zero the tail of the last file page (.bss start)
@@ -273,7 +274,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
                             0,
                         );
                         if r as u64 != anon_start {
-                            fail(b"cannot map .bss");
+                            fail(Setup::MapBss, r);
                         }
                     }
                     if img.phdr == 0 && eh.phoff >= p.offset && eh.phoff < p.offset + p.filesz {
@@ -287,7 +288,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
         crate::sys::sdk::declare_image(fd, eh.shoff, eh.shnum, eh.shentsize, eh.shstrndx);
         sc1(nr::CLOSE, fd);
         if img.phdr == 0 {
-            fail(b"program headers are not inside a loaded segment");
+            fail(Setup::PhdrNotLoaded, 0);
         }
         img
     }
@@ -360,14 +361,18 @@ const MAX_ARGS: usize = 4096;
 
 /// Load the guest named on the command line and enter it.
 pub fn start(k: &KernelStart) -> ! {
+    // The kernel placed the vDSO and its data pages below its randomised mmap base, which
+    // can fall anywhere in the terabytes under the guest stack's fixed address: remove them
+    // before the fixed placements below, or one exec in some 10^5 finds them in the way.
+    unmap_vdso();
     // argv: [rt, path, argv0, args...]
     if k.argc < 3 {
-        crate::fatal(b"usage: rt <path> <argv0> [args...]");
+        crate::fatal(Setup::Usage, 0);
     }
     let p = proc();
     let path = k.arg(1);
     if path.len() >= p.guest_path.len() - 1 {
-        crate::fatal(b"guest path too long");
+        crate::fatal(Setup::PathTooLong, 0);
     }
     p.guest_path[..path.len()].copy_from_slice(path);
     p.guest_path[path.len()] = 0;
@@ -403,7 +408,7 @@ pub fn start(k: &KernelStart) -> ! {
             0,
         );
         if r as u64 != BRK_BASE {
-            crate::fatal(b"cannot reserve brk");
+            crate::fatal(Setup::Brk, r);
         }
     }
     p.brk_cur = BRK_BASE;
@@ -421,7 +426,7 @@ pub fn start(k: &KernelStart) -> ! {
             0,
         );
         if r as u64 != lo {
-            crate::fatal(b"cannot map the guest stack");
+            crate::fatal(Setup::Stack, r);
         }
     }
     let mut sb = StackBuilder {
@@ -445,7 +450,7 @@ pub fn start(k: &KernelStart) -> ! {
         .map(|v| sb.push_cstr(unsafe { cstr(v as *const u8) }));
     let nargs = k.argc - 2;
     if nargs > MAX_ARGS || k.nenv > MAX_ARGS {
-        crate::fatal(b"too many arguments or environment strings");
+        crate::fatal(Setup::TooManyArgs, 0);
     }
     let mut argp = [0u64; MAX_ARGS];
     for (i, a) in argp.iter_mut().enumerate().take(nargs) {
@@ -516,7 +521,6 @@ pub fn start(k: &KernelStart) -> ! {
     }
     let _ = sb.top;
 
-    unmap_vdso();
     crate::pmu::exit(crate::state::thread(), entry, 0);
     unsafe { crate::entry::patina_enter_guest(start_sp, entry) }
 }

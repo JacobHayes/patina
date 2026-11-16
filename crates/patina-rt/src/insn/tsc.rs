@@ -82,7 +82,7 @@ pub fn ensure_faulting() -> bool {
         return false;
     }
     if unsafe { sc2(nr::PRCTL, PR_SET_TSC, PR_TSC_SIGSEGV) } != 0 {
-        crate::fatal(b"PR_SET_TSC");
+        crate::fatal(proto::ctl::Setup::SetTsc, 0);
     }
     true
 }

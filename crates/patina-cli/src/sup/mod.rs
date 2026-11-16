@@ -469,6 +469,23 @@ impl Sup {
                         format!("runtime invariant: real signal mask changed to {errno:#x}"),
                     ));
                 }
+                if code == HE_LOADER {
+                    let step = proto::ctl::Setup::from_code(nr).name();
+                    let why = match errno {
+                        0 => String::new(),
+                        e => format!(": errno {e}"),
+                    };
+                    self.finish(Verdict::new(
+                        "infra",
+                        format!("runtime setup failed: {step}{why}"),
+                    ));
+                }
+                if code == HE_GUEST_FAULT_IN_RUNTIME {
+                    self.finish(Verdict::new(
+                        "infra",
+                        format!("runtime fault: signal {errno} at {nr:#x}"),
+                    ));
+                }
                 self.finish(Verdict::new(
                     "infra",
                     format!(

@@ -27,16 +27,32 @@ mod trap;
 mod vino;
 mod vtime;
 
-/// An internal failure: tell the supervisor (run ends as `infra`) and say why on stderr.
-pub fn fatal(msg: &[u8]) -> ! {
+/// An internal failure at `step`: tell the supervisor (run ends as `infra`) and say why on
+/// stderr. `r` is the failed call's return value (its negated errno), or 0 when the step
+/// failed a check rather than a call.
+pub fn fatal(step: proto::ctl::Setup, r: i64) -> ! {
+    let errno = if r < 0 && r > -4096 { -r } else { 0 };
     raw::write_all(2, b"patina-rt: ");
-    raw::write_all(2, msg);
+    raw::write_all(2, step.name().as_bytes());
+    if errno != 0 {
+        let mut d = [0u8; 20];
+        let mut i = d.len();
+        let mut v = errno as u64;
+        while v > 0 || i == d.len() {
+            i -= 1;
+            d[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+        }
+        raw::write_all(2, b" (errno ");
+        raw::write_all(2, &d[i..]);
+        raw::write_all(2, b")");
+    }
     raw::write_all(2, b"\n");
     if state::ctl().check()
         && state::thread().magic == state::TS_MAGIC
         && state::thread().slot != u32::MAX
     {
-        sup::host_error(0, 0, proto::ctl::HE_LOADER);
+        sup::host_error(errno, step as u64, proto::ctl::HE_LOADER);
     }
     unsafe {
         raw::sc1(raw::nr::EXIT_GROUP, 127);
@@ -46,5 +62,5 @@ pub fn fatal(msg: &[u8]) -> ! {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    fatal(b"runtime panic")
+    fatal(proto::ctl::Setup::Panic, 0)
 }

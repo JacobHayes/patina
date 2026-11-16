@@ -546,8 +546,69 @@ impl Op {
 /// Host-error codes carried in `HostError` args[2].
 pub const HE_SYSCALL: u64 = 0;
 pub const HE_RUNTIME_ASSERT: u64 = 1;
+/// The runtime gave up setting up a process: args[1] = the `Setup` step, args[0] = the errno
+/// of the call that failed (0 when the step failed a check rather than a call).
 pub const HE_LOADER: u64 = 2;
+/// A fault inside the runtime: args[0] = the signal, args[1] = the faulting instruction or
+/// address.
 pub const HE_GUEST_FAULT_IN_RUNTIME: u64 = 3;
+
+macro_rules! setup_steps {
+    ($($v:ident = $s:literal),* $(,)?) => {
+        /// The step at which the runtime gave up setting up a process (`HE_LOADER`).
+        #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+        #[repr(u64)]
+        pub enum Setup {
+            Unknown = 0,
+            $($v,)*
+        }
+        impl Setup {
+            pub fn name(self) -> &'static str {
+                match self {
+                    Setup::Unknown => "an unknown step",
+                    $(Setup::$v => $s,)*
+                }
+            }
+            pub fn from_code(c: u64) -> Self {
+                $(if c == Setup::$v as u64 {
+                    return Setup::$v;
+                })*
+                Setup::Unknown
+            }
+        }
+    };
+}
+
+setup_steps! {
+    Usage = "usage: rt <path> <argv0> [args...]",
+    PathTooLong = "guest path too long",
+    OpenImage = "cannot open guest image",
+    NotElf = "not an x86_64 ELF image",
+    ElfType = "ELF image is neither ET_EXEC nor ET_DYN",
+    PhdrTable = "unsupported program header table",
+    PhdrRead = "short program header read",
+    NoLoad = "no loadable segments",
+    ImageInRuntime = "guest image overlaps the runtime",
+    ReserveImage = "cannot reserve the guest image range",
+    MapSegment = "cannot map a segment",
+    MapBss = "cannot map .bss",
+    PhdrNotLoaded = "program headers are not inside a loaded segment",
+    Brk = "cannot reserve brk",
+    Stack = "cannot map the guest stack",
+    TooManyArgs = "too many arguments or environment strings",
+    AltStack = "cannot map alternate stack",
+    CtlMap = "cannot map control region (descriptor 3000)",
+    CtlCheck = "control region magic or layout mismatch",
+    SigAltStack = "sigaltstack",
+    SigactionSys = "sigaction SIGSYS",
+    SigactionFault = "sigaction fault",
+    SigactionIgnore = "sigaction ignore",
+    NoNewPrivs = "no_new_privs",
+    Seccomp = "seccomp",
+    NoSlot = "no slot reserved for this task",
+    SetTsc = "PR_SET_TSC",
+    Panic = "runtime panic",
+}
 /// A real signal from outside the sandbox is pending (args[0] = the signal number).
 pub const HE_OUTSIDE_SIGNAL: u64 = 4;
 /// The trap frame's real signal mask changed (runtime invariant).
