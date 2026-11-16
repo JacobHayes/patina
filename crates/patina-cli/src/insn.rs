@@ -1,6 +1,6 @@
-//! `patina insn-scan FILE...`: run the runtime's site scanner (`proto::insn`) over the executable
+//! `patina __insn-scan FILE...`: run the runtime's site scanner (`proto::insn`) over the executable
 //! segments of ELF files and print every candidate with its verdict.
-//! `patina insn-scan --decode-check`: read `objdump -d -w` instruction lines on stdin and compare
+//! `patina __insn-scan --decode-check`: read `objdump -d -w` instruction lines on stdin and compare
 //! the decoder's length with the disassembler's for every instruction.
 
 use crate::cli::Res;

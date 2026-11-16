@@ -1,5 +1,5 @@
 //! Instruction sites: an x86-64 instruction length decoder and the scanner rule that
-//! decides which byte patterns are patched. Shared so that `patina insn-scan` runs the very code
+//! decides which byte patterns are patched. Shared so that `patina __insn-scan` runs the very code
 //! the runtime runs (the false-positive audit compares it with a disassembler).
 //!
 //! The rule: a candidate is the byte pair `0F C7` followed by a register ModRM (mod = 3) whose

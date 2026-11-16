@@ -29,7 +29,7 @@ export RT_BIN="$out/rt-target/x86_64-unknown-none/release/patina-rt"
 set=$(sh tests/guests.sh)
 echo "== build: $(( $(date +%s) - t0 )) s (guests: $set)"
 
-export PATINA="$root/target/release/patina"
+export PATINA="$root/target/release/patina" PATINA_CFG="$root/tests/cfg"
 export PATINA_GUESTS="$set/guests" PATINA_WORKLOADS="$set/workloads" PATINA_ATTACK_GUESTS="$set/attack" PATINA_SANDBOX_GUESTS="$set/sandbox"
 
 if [ "$1" = evidence ]; then

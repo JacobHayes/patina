@@ -1,361 +1,436 @@
-//! Options shared by `run` and `verify`.
+//! The command line: one static table of commands and one of flags. The parser, `--help`
+//! and `--help --format json` all read these tables, so they cannot disagree.
 
-use crate::durability::materialise::Model;
-use proto::faults::{FClass, FaultCfg, CRASH_MACHINE, CRASH_PROCESS};
-use std::path::PathBuf;
-
-#[derive(Clone, Debug)]
-pub struct Opts {
-    pub out: Option<PathBuf>,
-    pub seed: u64,
-    pub guest: Option<PathBuf>,
-    pub root: Option<PathBuf>,
-    pub cpu: Option<usize>,
-    /// `--ncpu N`: the CPU count the guest is told it has (affinity, `/sys`, `/proc`);
-    /// default 24, whatever the host has (`launch::DEFAULT_NCPU`).
-    pub ncpu: Option<u64>,
-    pub env: Vec<String>,
-    pub preempt_permille: u64,
-    pub vtime_limit_s: u64,
-    pub stall_ms: u64,
-    pub tmpfs_bytes: u64,
-    pub no_personality: bool,
-    pub runs: usize,
-    pub vary: Vec<String>,
-    pub cmd: Vec<String>,
-    /// `--fault` and `--crash`.
-    pub faults: FaultCfg,
-    pub faults_in_recovery: bool,
-    /// `--fault net-*`.
-    pub net: proto::wire::NetCfg,
-    pub fs_model: Model,
-    pub max_incarnations: u64,
-    /// `--pmu` and its policy flags (each implies `--pmu`).
-    pub pmu: bool,
-    pub pmu_slice: (u64, u64),
-    pub pmu_short_permille: u64,
-    pub pmu_short_max: u64,
-    pub pmu_charge_ps: u64,
-    pub pmu_margin: u64,
-    /// `--buggify`, `--fault buggify-permille=N`, `--fault point:LABEL=N` (`proto::sdk`).
-    pub sdk: proto::sdk::SdkCfg,
-}
+use crate::outcome::Outcome;
+use std::collections::BTreeMap;
 
 pub type Res<T> = Result<T, String>;
 
-fn num<T: std::str::FromStr>(flag: &str, v: Option<&String>) -> Res<T> {
-    let v = v.ok_or_else(|| format!("{flag} needs a value"))?;
-    v.parse().map_err(|_| format!("{flag}: not a number: {v}"))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cmd {
+    Run,
+    Replay,
+    Verify,
+    Log,
+    Table,
+    Doctor,
 }
 
-pub fn parse(args: &[String]) -> Res<Opts> {
-    let mut o = Opts {
-        out: None,
-        seed: 0,
-        guest: None,
-        root: None,
-        cpu: None,
-        ncpu: None,
-        env: vec![],
-        preempt_permille: 100,
-        vtime_limit_s: 3600,
-        stall_ms: 10_000,
-        tmpfs_bytes: 256 << 20,
-        no_personality: false,
-        runs: 1,
-        vary: vec![],
-        cmd: vec![],
-        faults: FaultCfg::default(),
-        faults_in_recovery: true,
-        net: proto::wire::NetCfg::default(),
-        fs_model: Model::Ext4Ordered,
-        max_incarnations: 4,
-        pmu: false,
-        pmu_slice: (proto::pmu::SLICE_MIN_DEFAULT, proto::pmu::SLICE_MAX_DEFAULT),
-        pmu_short_permille: proto::pmu::SHORT_PERMILLE_DEFAULT,
-        pmu_short_max: proto::pmu::SHORT_MAX_DEFAULT,
-        pmu_charge_ps: proto::pmu::CHARGE_PS_DEFAULT,
-        pmu_margin: proto::pmu::MARGIN_DEFAULT,
-        sdk: proto::sdk::SdkCfg::default(),
-    };
+pub struct Command {
+    pub cmd: Cmd,
+    pub name: &'static str,
+    pub usage: &'static str,
+    pub help: &'static str,
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command {
+        cmd: Cmd::Run,
+        name: "run",
+        usage: "patina run [options] [-- CMD ARGS...]",
+        help: "one run of a program under a seed",
+    },
+    Command {
+        cmd: Cmd::Replay,
+        name: "replay",
+        usage: "patina replay RUNDIR [--out DIR]",
+        help: "run again from a run directory and compare with its log",
+    },
+    Command {
+        cmd: Cmd::Verify,
+        name: "verify",
+        usage: "patina verify [options] [-- CMD ARGS...]",
+        help: "one seed several times under varied host conditions; names the first differing record",
+    },
+    Command {
+        cmd: Cmd::Log,
+        name: "log",
+        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR",
+        help: "read a boundary log, compare two, list file operations",
+    },
+    Command {
+        cmd: Cmd::Table,
+        name: "table",
+        usage: "patina table",
+        help: "the syscall table: every number, what Patina does with it, why",
+    },
+    Command {
+        cmd: Cmd::Doctor,
+        name: "doctor",
+        usage: "patina doctor",
+        help: "check the host; say what is missing and the command that fixes it",
+    },
+];
+
+/// One option. `value` is the grammar of its argument (empty for a switch).
+pub struct Flag {
+    pub name: &'static str,
+    pub value: &'static str,
+    pub default: &'static str,
+    pub help: &'static str,
+    pub cmds: &'static [Cmd],
+    pub repeat: bool,
+}
+
+const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify];
+const ALL: &[Cmd] = &[
+    Cmd::Run,
+    Cmd::Replay,
+    Cmd::Verify,
+    Cmd::Log,
+    Cmd::Table,
+    Cmd::Doctor,
+];
+
+const fn flag(
+    name: &'static str,
+    value: &'static str,
+    default: &'static str,
+    help: &'static str,
+    cmds: &'static [Cmd],
+) -> Flag {
+    Flag {
+        name,
+        value,
+        default,
+        help,
+        cmds,
+        repeat: false,
+    }
+}
+
+const fn many(
+    name: &'static str,
+    value: &'static str,
+    help: &'static str,
+    cmds: &'static [Cmd],
+) -> Flag {
+    Flag {
+        name,
+        value,
+        default: "",
+        help,
+        cmds,
+        repeat: true,
+    }
+}
+
+pub const FLAGS: &[Flag] = &[
+    flag(
+        "--seed",
+        "N",
+        "0",
+        "the seed (default from PATINA_SEED)",
+        RUNLIKE,
+    ),
+    flag(
+        "--out",
+        "DIR",
+        "patina-out/run-SEED",
+        "run directory (verify: patina-out/verify-SEED; replay: RUNDIR-replay)",
+        &[Cmd::Run, Cmd::Verify, Cmd::Replay],
+    ),
+    flag(
+        "--config",
+        "FILE",
+        "./patina.toml if present",
+        "configuration file; flags override it",
+        RUNLIKE,
+    ),
+    many("--env", "K=V", "add to the guest environment", RUNLIKE),
+    many(
+        "--mount",
+        "SRC:DST[:copy]",
+        "host file or directory, read-only in the guest; :copy copies a directory in at start",
+        RUNLIKE,
+    ),
+    flag(
+        "--work",
+        "DIR",
+        "empty",
+        "initial contents of /work, the guest's writable disk",
+        RUNLIKE,
+    ),
+    flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
+    flag("--cpus", "N", "24", "CPU count the guest sees", RUNLIKE),
+    many("--fault", "KEY=VALUE", "one fault setting", RUNLIKE),
+    flag(
+        "--crash",
+        "KIND:VALUE",
+        "off",
+        "crash and restart: machine:PERMILLE, process:PERMILLE, machine-at:SEQ, process-at:SEQ",
+        RUNLIKE,
+    ),
+    flag(
+        "--buggify",
+        "",
+        "off",
+        "let SDK fault points fire (rates: --fault buggify-permille=N, --fault point:LABEL=N)",
+        RUNLIKE,
+    ),
+    flag(
+        "--time-limit",
+        "SECONDS",
+        "3600",
+        "virtual time after which the run ends liveness",
+        RUNLIKE,
+    ),
+    flag(
+        "--timeout",
+        "SECONDS",
+        "600",
+        "wall time after which the run ends timeout",
+        RUNLIKE,
+    ),
+    flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),
+    flag(
+        "--vary",
+        "LIST",
+        "none",
+        "what to change between runs: cpu,load,aslr,sandbox,repeat,parallel,env,time",
+        &[Cmd::Verify],
+    ),
+    flag("--from", "SEQ", "0", "log dump: first record", &[Cmd::Log]),
+    flag("--to", "SEQ", "last", "log dump: last record", &[Cmd::Log]),
+    flag(
+        "--check",
+        "",
+        "",
+        "log ops: replay the whole operation log and compare with the exported tree",
+        &[Cmd::Log],
+    ),
+    flag(
+        "--format",
+        "text|json",
+        "text",
+        "output format (default from PATINA_FORMAT); json prints result.json",
+        ALL,
+    ),
+    flag("--help", "", "", "this help", ALL),
+];
+
+pub fn find_flag(name: &str) -> Option<&'static Flag> {
+    FLAGS.iter().find(|f| f.name == name)
+}
+
+/// A parsed command line: the flags given (in order, by name), the positional words, and
+/// the guest command after `--`.
+#[derive(Debug, Default)]
+pub struct Args {
+    pub flags: BTreeMap<&'static str, Vec<String>>,
+    pub positional: Vec<String>,
+    pub cmd: Option<Vec<String>>,
+}
+
+impl Args {
+    pub fn last(&self, name: &str) -> Option<&str> {
+        self.flags
+            .get(name)
+            .and_then(|v| v.last())
+            .map(|s| s.as_str())
+    }
+    pub fn all(&self, name: &str) -> &[String] {
+        self.flags.get(name).map(|v| v.as_slice()).unwrap_or(&[])
+    }
+    pub fn has(&self, name: &str) -> bool {
+        self.flags.contains_key(name)
+    }
+    pub fn num<T: std::str::FromStr>(&self, name: &str) -> Res<Option<T>> {
+        match self.last(name) {
+            None => Ok(None),
+            Some(v) => v
+                .parse()
+                .map(Some)
+                .map_err(|_| format!("{name}: not a number: {v}")),
+        }
+    }
+    pub fn json(&self) -> bool {
+        match self.last("--format") {
+            Some(f) => f == "json",
+            None => std::env::var("PATINA_FORMAT").is_ok_and(|v| v == "json"),
+        }
+    }
+}
+
+/// Parse `args` (after the command name) against the flag table.
+pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
+    let mut out = Args::default();
     let mut it = args.iter();
     while let Some(a) = it.next() {
-        match a.as_str() {
-            "--" => {
-                o.cmd = it.cloned().collect();
-                break;
+        if a == "--" {
+            out.cmd = Some(it.cloned().collect());
+            break;
+        }
+        if !a.starts_with("--") || a == "-" {
+            if a == "-h" {
+                out.flags.entry("--help").or_default();
+                continue;
             }
-            "--out" => o.out = Some(PathBuf::from(it.next().ok_or("--out needs a value")?)),
-            "--seed" => o.seed = num(a, it.next())?,
-            "--guest" => o.guest = Some(PathBuf::from(it.next().ok_or("--guest needs a value")?)),
-            "--root" => o.root = Some(PathBuf::from(it.next().ok_or("--root needs a value")?)),
-            "--cpu" => o.cpu = Some(num(a, it.next())?),
-            "--ncpu" => o.ncpu = Some(num(a, it.next())?),
-            "--env" => o.env.push(it.next().ok_or("--env needs K=V")?.clone()),
-            "--preempt-permille" => o.preempt_permille = num(a, it.next())?,
-            "--vtime-limit-s" => o.vtime_limit_s = num(a, it.next())?,
-            "--stall-ms" => o.stall_ms = num(a, it.next())?,
-            "--tmpfs-bytes" => o.tmpfs_bytes = num(a, it.next())?,
-            "--no-personality" => o.no_personality = true,
-            "--runs" => o.runs = num(a, it.next())?,
-            "--vary" => {
-                let v = it.next().ok_or("--vary needs a list")?;
-                for k in v.split(',') {
-                    match k {
-                        "cpu" | "aslr" | "sandbox" | "load" | "repeat" | "parallel" | "env"
-                        | "time" => o.vary.push(k.to_string()),
-                        _ => return Err(format!("--vary: unknown variant {k}")),
-                    }
+            out.positional.push(a.clone());
+            continue;
+        }
+        let (name, inline) = match a.split_once('=') {
+            Some((n, v)) => (n, Some(v.to_string())),
+            None => (a.as_str(), None),
+        };
+        let f = find_flag(name)
+            .filter(|f| f.cmds.contains(&cmd))
+            .ok_or_else(|| format!("unknown option {name} (patina {} --help)", cmd_name(cmd)))?;
+        let v = if f.value.is_empty() {
+            if inline.is_some() {
+                return Err(format!("{name} takes no value"));
+            }
+            String::new()
+        } else {
+            match inline {
+                Some(v) => v,
+                None => it
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| format!("{name} needs {}", f.value))?,
+            }
+        };
+        if f.name == "--format" && v != "text" && v != "json" {
+            return Err(format!("--format: expected text or json, not {v}"));
+        }
+        let e = out.flags.entry(f.name).or_default();
+        if !f.repeat {
+            e.clear();
+        }
+        e.push(v);
+    }
+    Ok(out)
+}
+
+pub fn cmd_name(c: Cmd) -> &'static str {
+    COMMANDS
+        .iter()
+        .find(|x| x.cmd == c)
+        .map(|x| x.name)
+        .unwrap()
+}
+
+pub fn find_cmd(name: &str) -> Option<Cmd> {
+    COMMANDS.iter().find(|x| x.name == name).map(|x| x.cmd)
+}
+
+fn flag_text(f: &Flag) -> String {
+    let mut lhs = f.name.to_string();
+    if !f.value.is_empty() {
+        lhs = format!("{lhs} {}", f.value);
+    }
+    let mut s = format!("  {lhs:<26} {}", f.help);
+    if !f.default.is_empty() {
+        s.push_str(&format!(" [default: {}]", f.default));
+    }
+    if f.repeat {
+        s.push_str(" (repeatable)");
+    }
+    s
+}
+
+/// Help text: every command, or one command and its flags.
+pub fn help_text(cmd: Option<Cmd>) -> String {
+    let mut s = String::new();
+    match cmd {
+        None => {
+            s.push_str("patina: deterministic simulation testing of any Linux x86_64 program\n\nusage: patina COMMAND [options]\n\ncommands:\n");
+            for c in COMMANDS {
+                s.push_str(&format!("  {:<8} {}\n", c.name, c.help));
+            }
+            s.push_str(
+                "\npatina COMMAND --help for its options; --help --format json for all of them.\n",
+            );
+            s.push_str("\noutcomes and exit status:\n");
+            for o in Outcome::ALL {
+                s.push_str(&format!("  {:<17} {}\n", o.name(), o.exit()));
+            }
+        }
+        Some(c) => {
+            let info = COMMANDS.iter().find(|x| x.cmd == c).unwrap();
+            s.push_str(&format!("{}\n\n{}\n\noptions:\n", info.usage, info.help));
+            for f in FLAGS.iter().filter(|f| f.cmds.contains(&c)) {
+                s.push_str(&flag_text(f));
+                s.push('\n');
+            }
+        }
+    }
+    s
+}
+
+/// The tables as JSON, for agents: every command and every flag with the commands taking it.
+pub fn help_json() -> String {
+    let cmds: Vec<serde_json::Value> = COMMANDS
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "usage": c.usage,
+                "help": c.help,
+                "flags": FLAGS.iter().filter(|f| f.cmds.contains(&c.cmd)).map(|f| f.name).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let flags: Vec<serde_json::Value> = FLAGS
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "value": f.value,
+                "default": f.default,
+                "help": f.help,
+                "repeat": f.repeat,
+                "commands": f.cmds.iter().map(|c| cmd_name(*c)).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    let outcomes: Vec<serde_json::Value> = Outcome::ALL
+        .iter()
+        .map(|o| serde_json::json!({ "name": o.name(), "exit": o.exit() }))
+        .collect();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "commands": cmds,
+        "flags": flags,
+        "outcomes": outcomes,
+    }))
+    .unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn every_flag_parses_for_every_command_listing_it() {
+        for f in FLAGS {
+            for &c in f.cmds {
+                let mut a = vec![f.name.to_string()];
+                if !f.value.is_empty() {
+                    a.push(if f.name == "--format" { "json" } else { "1" }.into());
                 }
+                let p = parse(c, &a).unwrap_or_else(|e| panic!("{} {}: {e}", cmd_name(c), f.name));
+                assert!(p.has(f.name));
             }
-            "--fault" => fault(&mut o, it.next().ok_or("--fault needs KEY=VALUE")?)?,
-            "--crash" => crash(&mut o.faults, it.next().ok_or("--crash needs KIND:VALUE")?)?,
-            "--fs-model" => {
-                let v = it.next().ok_or("--fs-model needs a value")?;
-                o.fs_model = Model::parse(v).ok_or_else(|| {
-                    format!("--fs-model: unknown model {v} (ext4-ordered, posix-strict)")
-                })?;
-            }
-            "--max-incarnations" => {
-                o.max_incarnations = num(a, it.next())?;
-                if o.max_incarnations == 0 {
-                    return Err("--max-incarnations is at least 1".into());
-                }
-            }
-            // Counter preemption: off unless asked for.
-            "--buggify" => o.sdk.buggify = 1,
-            "--pmu" => o.pmu = true,
-            "--pmu-slice" => {
-                let v = it.next().ok_or("--pmu-slice needs MIN..MAX")?;
-                let (lo, hi) = v.split_once("..").ok_or("--pmu-slice needs MIN..MAX")?;
-                let lo: u64 = lo
-                    .parse()
-                    .map_err(|_| format!("--pmu-slice: not a number: {lo}"))?;
-                let hi: u64 = hi
-                    .parse()
-                    .map_err(|_| format!("--pmu-slice: not a number: {hi}"))?;
-                o.pmu_slice = (lo, hi);
-                o.pmu = true;
-            }
-            "--pmu-short-permille" => {
-                o.pmu_short_permille = num(a, it.next())?;
-                o.pmu = true;
-            }
-            "--pmu-short-max" => {
-                o.pmu_short_max = num(a, it.next())?;
-                o.pmu = true;
-            }
-            "--pmu-charge-ps" => {
-                o.pmu_charge_ps = num(a, it.next())?;
-                o.pmu = true;
-            }
-            "--pmu-margin" => {
-                o.pmu_margin = num(a, it.next())?;
-                o.pmu = true;
-            }
-            _ => return Err(format!("unknown option {a}")),
         }
     }
-    if o.cmd.is_empty() {
-        return Err("missing -- /guest/prog args...".into());
-    }
-    if o.preempt_permille > 1000 {
-        return Err("--preempt-permille is at most 1000".into());
-    }
-    if o.pmu_short_permille > 1000 || o.pmu_short_max == 0 || o.pmu_short_max > 0xffff_ffff {
-        return Err("--pmu-short-permille is at most 1000, --pmu-short-max at least 1".into());
-    }
-    let (lo, hi) = o.pmu_slice;
-    if lo == 0 || lo > hi || o.pmu_margin < 64 {
-        return Err("--pmu-slice needs 1 <= MIN <= MAX; --pmu-margin at least 64".into());
-    }
-    if o.pmu_short_max > o.pmu_margin + proto::pmu::HOP_EXTRA {
-        return Err(
-            "--pmu-short-max is at most --pmu-margin + 1024 (short slices are hopped)".into(),
-        );
-    }
-    Ok(o)
-}
 
-fn permille(k: &str, v: &str) -> Res<u64> {
-    let p: u64 = v
-        .parse()
-        .map_err(|_| format!("--fault {k}: not a number: {v}"))?;
-    if p > 1000 {
-        return Err(format!("--fault {k}: at most 1000"));
+    #[test]
+    fn unknown_and_foreign_flags_are_refused() {
+        assert!(parse(Cmd::Run, &v(&["--bogus"])).is_err());
+        assert!(parse(Cmd::Run, &v(&["--runs", "3"])).is_err());
+        let p = parse(
+            Cmd::Run,
+            &v(&[
+                "--seed=4", "--env", "A=1", "--env", "B=2", "--", "x", "--seed",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(p.last("--seed"), Some("4"));
+        assert_eq!(p.all("--env").len(), 2);
+        assert_eq!(p.cmd, Some(v(&["x", "--seed"])));
     }
-    Ok(p)
-}
-
-/// One `--fault KEY=VALUE`; unknown keys are an error.
-fn fault(o: &mut Opts, kv: &str) -> Res<()> {
-    let (k, v) = kv
-        .split_once('=')
-        .ok_or_else(|| format!("--fault {kv}: expected KEY=VALUE"))?;
-    let n = |v: &str| -> Res<u64> {
-        v.parse()
-            .map_err(|_| format!("--fault {k}: not a number: {v}"))
-    };
-    let f = &mut o.faults;
-    match k {
-        "fs-error-permille" => f.fs_error_permille = permille(k, v)?,
-        "fs-error-at" => {
-            let (c, n_) = v
-                .split_once(':')
-                .ok_or_else(|| format!("--fault fs-error-at={v}: expected CLASS:N"))?;
-            let class = FClass::from_name(c).ok_or_else(|| {
-                let names: Vec<&str> = FClass::ALL.iter().map(|c| c.name()).collect();
-                format!(
-                    "--fault fs-error-at: unknown class {c} ({})",
-                    names.join(", ")
-                )
-            })?;
-            f.fs_error_at_class = class as u64 + 1;
-            f.fs_error_at_n = n(n_)?;
-            if f.fs_error_at_n == 0 {
-                return Err("--fault fs-error-at: N counts from 1".into());
-            }
-        }
-        "fs-eintr" => f.fs_eintr = (n(v)? != 0) as u64,
-        "short-permille" => f.short_permille = permille(k, v)?,
-        "fsync-error-permille" => f.fsync_error_permille = permille(k, v)?,
-        "fsync-error-at" => f.fsync_error_at = n(v)?,
-        "enospc-after-bytes" => f.enospc_after_bytes = n(v)?,
-        "delay-permille" => f.delay_permille = permille(k, v)?,
-        "delay-max-ms" => f.delay_max_ns = n(v)? * 1_000_000,
-        "mem-error-permille" => f.mem_error_permille = permille(k, v)?,
-        "mem-error-at" => f.mem_error_at = n(v)?,
-        "fault-after-seq" => f.fault_after_seq = n(v)?,
-        // The `setup-complete` mark lowers it to its own sequence number.
-        "faults-after-setup" => f.fault_after_seq = if n(v)? != 0 { u64::MAX } else { 0 },
-        "faults-in-recovery" => o.faults_in_recovery = n(v)? != 0,
-        "buggify-permille" => {
-            o.sdk.fire_permille = permille(k, v)?;
-            return Ok(());
-        }
-        _ if k.starts_with("point:") => return point(&mut o.sdk, &k["point:".len()..], v),
-        _ if k.starts_with("net-") => return net_fault(&mut o.net, k, v),
-        _ => return Err(format!("--fault: unknown key {k}")),
-    }
-    if !matches!(
-        k,
-        "fault-after-seq" | "faults-after-setup" | "faults-in-recovery"
-    ) {
-        o.faults.any = 1;
-    }
-    Ok(())
-}
-
-/// `--fault point:LABEL=PERMILLE`: the SDK fault point LABEL is active and fires at this rate
-/// (0: never). It acts only with `--buggify`.
-fn point(c: &mut proto::sdk::SdkCfg, label: &str, v: &str) -> Res<()> {
-    if label.is_empty() || label.len() > proto::sdk::LABEL_MAX {
-        return Err(format!("--fault point:{label}: a label is 1 to 255 bytes"));
-    }
-    let p = permille(&format!("point:{label}"), v)?;
-    let h = proto::sdk::label_hash(label.as_bytes());
-    let n = c.npoints as usize;
-    if let Some(e) = c.points[..n].iter_mut().find(|e| e[0] == h) {
-        e[1] = p;
-    } else if n < proto::sdk::MAX_POINTS {
-        c.points[n] = [h, p];
-        c.npoints += 1;
-    } else {
-        return Err(format!(
-            "--fault point: at most {} points",
-            proto::sdk::MAX_POINTS
-        ));
-    }
-    Ok(())
-}
-
-/// `A..B` (milliseconds) as nanoseconds.
-fn ms_range(k: &str, v: &str) -> Res<(u64, u64)> {
-    let (a, b) = v
-        .split_once("..")
-        .ok_or_else(|| format!("--fault {k}={v}: expected A..B (milliseconds)"))?;
-    let p = |x: &str| -> Res<u64> {
-        x.parse()
-            .map_err(|_| format!("--fault {k}: not a number: {x}"))
-    };
-    let (a, b) = (p(a)?, p(b)?);
-    if a > b {
-        return Err(format!("--fault {k}={v}: A is larger than B"));
-    }
-    Ok((a * 1_000_000, b * 1_000_000))
-}
-
-/// One `--fault net-*` key. They act on the supervisor's
-/// wire only, so they do not switch on the runtime's per-call fault work.
-fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
-    let n = |v: &str| -> Res<u64> {
-        v.parse()
-            .map_err(|_| format!("--fault {k}: not a number: {v}"))
-    };
-    match k {
-        "net-delay-ms" => {
-            (c.delay_min_ns, c.delay_max_ns) = ms_range(k, v)?;
-            c.delay_set = 1;
-        }
-        "net-chunk-max" => {
-            c.chunk_max = n(v)?;
-            if c.chunk_max == 0 {
-                return Err("--fault net-chunk-max: at least 1".into());
-            }
-        }
-        "net-reset-permille" => c.reset_permille = permille(k, v)?,
-        "net-connect-refuse-permille" => c.refuse_permille = permille(k, v)?,
-        "net-connect-timeout-permille" => c.timeout_permille = permille(k, v)?,
-        "net-partition" => {
-            let (range, port) = match v.split_once(':') {
-                Some((r, p)) => (r, n(p)?),
-                None => (v, 0),
-            };
-            if port > 65535 {
-                return Err(format!("--fault net-partition: port {port} out of range"));
-            }
-            (c.partition_from_ns, c.partition_to_ns) = ms_range(k, range)?;
-            c.partition_port = port;
-            c.partition_set = 1;
-        }
-        "net-halfclose-delay-ms" => {
-            (c.halfclose_min_ns, c.halfclose_max_ns) = ms_range(k, v)?;
-            c.halfclose_set = 1;
-        }
-        _ => return Err(format!("--fault: unknown key {k}")),
-    }
-    Ok(())
-}
-
-/// `--crash machine:P | process:P | machine-at:SEQ | process-at:SEQ`.
-fn crash(f: &mut FaultCfg, s: &str) -> Res<()> {
-    let (k, v) = s
-        .split_once(':')
-        .ok_or_else(|| format!("--crash {s}: expected KIND:VALUE"))?;
-    let n: u64 = v
-        .parse()
-        .map_err(|_| format!("--crash {s}: not a number: {v}"))?;
-    let (kind, at) = match k {
-        "machine" => (CRASH_MACHINE, false),
-        "process" => (CRASH_PROCESS, false),
-        "machine-at" => (CRASH_MACHINE, true),
-        "process-at" => (CRASH_PROCESS, true),
-        _ => {
-            return Err(format!(
-                "--crash: unknown kind {k} (machine, process, machine-at, process-at)"
-            ))
-        }
-    };
-    f.crash_kind = kind;
-    if at {
-        f.crash_at = n.max(1);
-        f.crash_permille = 0;
-    } else {
-        if n > 1000 {
-            return Err("--crash: the rate is per mille, at most 1000".into());
-        }
-        f.crash_permille = n;
-        f.crash_at = 0;
-    }
-    Ok(())
 }

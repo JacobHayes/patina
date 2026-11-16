@@ -15,17 +15,39 @@ from there (`launch::rt_file`). `PATINA_RT=path` runs another runtime build inst
 ## Running it
 
 ```
-patina run --seed 1 --out RUN --guest DIR -- /guest/prog args...
-patina verify --seed 1 --runs 20 --vary cpu,load,aslr,sandbox --out DIR --guest DIR -- /guest/prog
+patina run --seed 1 -- ./prog args...            # or a name on the guest PATH: -- python3 -c ...
+patina run --seed 1 --mount DIR:/guest:copy --out RUN -- /guest/prog args...
+patina replay RUN                                 # rerun from RUN/run.json, compare the logs
+patina verify --seed 1 --runs 20 --vary cpu,load,aslr,sandbox -- ./prog
 patina log dump RUN/inc-0/boundary.log ; patina log diff A/inc-0/boundary.log B/inc-0/boundary.log
-patina table
-patina run ... --fault fs-error-permille=100 --crash machine:20 [--fs-model ext4-ordered|posix-strict] ...
-patina oplog check RUN ; patina crash-states RUN --at SEQ --count N
+patina log ops RUN/inc-0 ; patina log ops --check RUN
+patina table ; patina doctor
+patina run ... --fault fs-error-permille=100 --crash machine:20 --config patina.toml ...
 ```
 
-`--guest DIR` is copied into the sandbox at `/guest`. A run directory holds `outcome.json`
+`patina --help` lists every command, flag, outcome and exit status; `--help --format json`
+is the same table (`cli.rs`, which the parser reads too). Settings come from
+`./patina.toml` or `--config FILE` (`config.rs`: `[run]`, `[faults]`, `[sched]`, `[sdk]`;
+expert settings such as `fs-model`, `max-incarnations`, `tmpfs-bytes`, `preempt-permille`,
+`stall-ms` and the `pmu*` keys are keys only), flags override it, and an unknown key is an
+error naming it. A program given by a host path outside `/usr` is copied to
+`/guest/NAME`; a bare name is looked up on the guest's `PATH`
+(`/guest:/usr/local/bin:/usr/bin:/bin`). `--mount SRC:DST` binds a host path read-only,
+`SRC:DST:copy` copies a directory in; `--work DIR` seeds `/work`; `--stdin FILE` is standard
+input. The guest environment is fixed (`sup/mod.rs` `BASE_ENV`, which sets `PATINA=1`), plus
+`PATINA_INCARNATION=K` after a restart and each `--env`.
+
+A run directory holds `run.json` (schema `patina.run/v1`: version, seed, the resolved
+configuration, the program's paths and SHA-256, host facts), `result.json` (schema
+`patina.result/v3`: `outcome`, `stop`, `message`, `exit`, the guest's own exit or signal,
+`digest`, crashes, faults, `sdk`, refusals, labels, scheduling and counters; `result.rs`)
 and one `inc-K/` per incarnation (`boundary.log`, `oplog.meta`, `oplog.data`, `live.tree`,
-`stdout`, `stderr`, `sandbox.log`, and `post-crash/` after a machine crash).
+`stdout`, `stderr`, `sandbox.log`, and `post-crash/` after a machine crash). The supervisor's
+verdict token maps to one of eleven outcomes, whose exit status is fixed (`outcome.rs`).
+`replay` refuses a program whose hash changed (`error`) and ends `nondeterministic` with the
+first differing record when the logs differ (`replay.rs`). `doctor` checks bwrap, user
+namespaces, seccomp, personality, the rdtsc trap and a sandbox run, and names the fix
+(`doctor.rs`).
 
 ## Launcher (`launch.rs`, `launcher/`)
 
@@ -59,7 +81,7 @@ after its last system call, and reading its sockets before then is a race.
 
 The stall watchdog counts the turn holder's CPU time since its last trap
 (`/proc/<tid>/schedstat`), with wall time as a 10x backstop. The verdict goes to the
-launcher over a pipe; `outcome.rs` writes `outcome.json`.
+launcher over a pipe; `outcome.rs` classifies it and `result.rs` writes `result.json`.
 
 ## Runtime (`patina-rt`)
 
@@ -133,7 +155,7 @@ machine crash restarts on `materialise(oplog, seed, model)` (`durability/materia
 a pure function of the log under `ext4-ordered` (`durability/model_ext4.rs`) or
 `posix-strict` (`durability/model_posix.rs`). File contents are sparse copy-on-write images
 (`durability/content.rs`); materialisation replays the log once and keeps a state at each
-forced commit. `patina oplog check` replays the whole log and compares it with the exported
+forced commit. `patina log ops --check` replays the whole log and compares it with the exported
 live tree (`durability/check.rs`).
 
 ## The network wire (`sup/wire.rs`, `patina-rt/src/sys/inet.rs`, `patina-proto/src/wire.rs`)
@@ -154,7 +176,7 @@ reserved system call, `0x7061(op, ptr, len)`; natively the kernel answers `ENOSY
 goes inert. The payload is a 32-byte header, a label and a text. The table's `patina_sdk` row
 sends it to `sys/sdk.rs`, which answers under the turn: assertions count into a site table in
 the control region (`SdkTab`, shared by every process of the run, folded by the launcher across
-incarnations into the outcome's `sdk`), and fault points, knobs and delays are keyed draws of
+incarnations into `result.json`'s `sdk`), and fault points, knobs and delays are keyed draws of
 the seed and the label (`Stream::Sdk`), so one point never moves another's decisions. A failed
 `always` asks the supervisor for `Op::SdkViolation`, which ends the run `violation`; a delay
 sleeps through `Op::Sleep`. The trap record's input hash is the payload's, so replay compares
@@ -175,11 +197,11 @@ fields, `rdpid` and `lsl` read the pinned core and are not controlled.
 ## Counter preemption (`patina-proto/src/pmu.rs`, `patina-rt/src/pmu.rs`, `launcher/pmu.rs`)
 
 Trap points only preempt at system calls, so a syscall-free spin-wait whose partner was
-preempted never yields. `patina run --pmu` preempts the turn holder after N retired
+preempted never yields. With `pmu = true` (`[sched]`), Patina preempts the turn holder after N retired
 conditional branches of guest user code, N a keyed draw, at the instruction boundary right
 after the N-th branch retires: one stop per N whatever the hardware did on the way. The
 stop is treated like a trap: a boundary record (`preempt`, with the instruction pointer, N
-and a hash of the registers), virtual time charged N x `--pmu-charge-ps`, a yield, and the
+and a hash of the registers), virtual time charged N x `pmu-charge-ps`, a yield, and the
 trap exit, where virtual signals are delivered (so Go's SIGURG reaches a thread inside
 compute).
 
@@ -189,7 +211,7 @@ namespace, which nothing in the sandbox has. The launcher (a `patina` given
 descriptor 3008). A guest thread sends a thread pidfd; the broker checks the task descends
 from this incarnation's bwrap child and returns one counter for it with a fixed attribute
 (pinned, user only, period 2^20, synchronous SIGTRAP on overflow, removed on exec).
-Capabilities never enter the sandbox. Unprivileged, `--pmu` says why it is off and the run
+Capabilities never enter the sandbox. Unprivileged, `pmu = true` says why it is off and the run
 goes on without it.
 
 **Counting guest code only.** A segment is the guest code between two runtime entries.
@@ -198,22 +220,22 @@ return to guest code starts one and draws a fresh N. The overflow handler reads 
 at its first and last instructions and counts the branches between by hand, so the guest's
 count is exact.
 
-**Reaching the exact stop**, with margin M (1,024, `--pmu-margin`):
+**Reaching the exact stop**, with margin M (1,024, `pmu-margin`):
 - Hop (N <= M + 1,024): the runtime walks forward itself, planting `int3` at the next
   control transfer through `/proc/self/mem` and emulating it (conditional branches from the
   saved flags, counted; indirect transfers from registers and memory; anything else by one
   single step). Planted bytes stay until the next runtime entry.
 - Mid (N < 2^20 + 2M): the period is set to N - M, then hops.
 - Long: the counter runs at 2^20; each overflow reprograms or switches to hops for the last
-  stretch. A skid past N cannot be repaired and ends the run `infra` ("pmu overshoot").
+  stretch. A skid past N cannot be repaired and ends the run `internal` ("pmu overshoot").
 - An overflow delivered together with a SIGSYS or a fault from the same instruction is
   recognised by the interrupted address; the trapped syscall is re-executed after it.
 
-**Policy.** With probability `--pmu-short-permille` (20) N is log-uniform in
-`[1, --pmu-short-max]` (256), stops close to a trap where check-then-act windows sit;
-otherwise log-uniform in `--pmu-slice` (2^20 + 2,048 .. 2^22). For races whose window is a
-single branch boundary, `--pmu-short-permille 1000 --pmu-short-max 64` makes every segment
-short. Counter preemption composes with trap-level `--preempt-permille`.
+**Policy.** With probability `pmu-short-permille` (20) N is log-uniform in
+`[1, pmu-short-max]` (256), stops close to a trap where check-then-act windows sit;
+otherwise log-uniform in `pmu-slice` (2^20 + 2,048 .. 2^22). For races whose window is a
+single branch boundary, `pmu-short-permille = 1000` and `pmu-short-max = 64` make every segment
+short. Counter preemption composes with trap-level `preempt-permille`.
 
 **Off by default.** It needs a capability, costs 10 to 23 µs per trap on a KVM guest
 against 0.75 µs, and 3 to 6 ms per preemption. Turn it on for programs with syscall-free

@@ -13,7 +13,7 @@ repeating each (workload, seed, faults) cell under varied host conditions (`pati
 
 | Check | Result |
 |---|---|
-| Final matrix: 29 workloads and attack guests x seeds 1-5 x faults off/on, 2,030 comparisons, ~15,000 runs | 1,985 identical; 20 bucket D (insn-probe under `cpu`/`parallel`, by design); 19 B6 `infra` (by design); 6 B13 (fixed, re-run 210/210 identical) |
+| Final matrix: 29 workloads and attack guests x seeds 1-5 x faults off/on, 2,030 comparisons, ~15,000 runs | 1,985 identical; 20 bucket D (insn-probe under `cpu`/`parallel`, by design); 19 B6 `internal` (by design); 6 B13 (fixed, re-run 210/210 identical) |
 | Soaks: W2, W6, W9 (W9 with crashes), 1,000 runs each, faults on, under `load` and `parallel` | one digest each |
 | Time variant: 26 workloads and guests, runs 600 s apart | 26/26 identical |
 | Seeds: every concurrent workload, 10 seeds | 10/10 distinct digests |
@@ -32,8 +32,8 @@ runs each seed once; repeating runs buys nothing per run.
 | B2 | `SO_NETNS_COOKIE` | host-global counter | as B1 |
 | B3 | `SO_TIMESTAMP*` cmsgs (host clock), `SO_PEERPIDFD` | host clock | as B1 |
 | B4 | launcher umask reached the guest | inherited process state | every inherited item reset from one list (`sup/inherit.rs`) |
-| B5 | launcher `RLIMIT_FSIZE` enforced underneath | inherited process state | rlimits fixed; fsize below the minimum ends `infra` |
-| B6 | `F_SETPIPE_SZ` refused once the uid's pipe pages ran out | per-user host accounting | a refused size ends `infra` (limit, below) |
+| B5 | launcher `RLIMIT_FSIZE` enforced underneath | inherited process state | rlimits fixed; fsize below the minimum ends `internal` |
+| B6 | `F_SETPIPE_SZ` refused once the uid's pipe pages ran out | per-user host accounting | a refused size ends `internal` (limit, below) |
 | B7 | `readlink` through a `/work` symlink to `/proc/1` | host names via a policy bypass | every path argument resolved against the policy first |
 | B8 | `net-chunk-max` moved unrelated delivery draws | fault-plan coupling (engine bug) | own sub-key; split is an `Injected` record |
 | B9 | host file atime moved by `relatime` | host clock through metadata | guest files are tmpfs copies; `/usr` atime reads as mtime |
@@ -51,7 +51,7 @@ runs each seed once; repeating runs buys nothing per run.
 | XSAVE in-use bits (`xgetbv(1)`, FP headers) (argued; never varied) | none |
 | In-flight descriptors freed by unix-socket GC (shown: scmrights) | `unix_sockets_in_flight` |
 | Changes to host files under `/usr` | none; replay diverges at the first read |
-| Per-user pipe accounting (B6) | run ends `infra` |
+| Per-user pipe accounting (B6) | run ends `internal` |
 
 ### Containment
 
@@ -85,9 +85,9 @@ bug B caught 315/500 under posix-strict only.
 
 | Check | Result |
 |---|---|
-| W4 and go-sweep at 24 CPUs, `--pmu` | 100/100 ok |
-| W4 at 24 CPUs without `--pmu` | stalls in 176/200 seeds |
-| Spin table (every language's spin-wait), `--pmu` | 0 stalls in 300 seeds |
+| W4 and go-sweep at 24 CPUs, `pmu = true` | 100/100 ok |
+| W4 at 24 CPUs without `pmu = true` | stalls in 176/200 seeds |
+| Spin table (every language's spin-wait), `pmu = true` | 0 stalls in 300 seeds |
 | Largest measured skid | 425 branches (margin 1,024) |
 
 ## Costs
@@ -102,8 +102,8 @@ bug B caught 315/500 under posix-strict only.
 | W9 with crashes and filesystem faults | 38.9 ms per run, 148.6 runs/s (1.92x no-fault) |
 | Crash materialisation | ~3 ms per MB of log |
 | `fork`+`execve`+`wait` of a dynamic program | 1.5 ms (native 0.38 ms; mostly the instruction scan) |
-| `--pmu` | ~17 µs per trap, 3-6 ms per preemption, W1-W9 wall x1.2 to x4.0 |
-| `--guest` copy into tmpfs | ~0.3 ms per MB |
+| `pmu = true` | ~17 µs per trap, 3-6 ms per preemption, W1-W9 wall x1.2 to x4.0 |
+| `--mount DIR:/guest:copy` copy into tmpfs | ~0.3 ms per MB |
 
 ## Known limits
 
@@ -112,20 +112,19 @@ Not implemented (run ends `unsupported` or the call is refused): `timer_create`,
 and `get`/`setpriority`; anything outside Linux x86_64.
 
 - The CPU count a guest sees defaults to 24.
-- Syscall-free spin-waits stall without `--pmu` (stock Go with GOMAXPROCS >= 3 in most seeds).
-  `--pmu` needs `CAP_PERFMON` and an exposed PMU; Intel's event is untested; a skid past
-  the margin ends `infra`; a guest reading its own text during a hop sees `int3`. A lost
+- Syscall-free spin-waits stall without `pmu = true` (stock Go with GOMAXPROCS >= 3 in most seeds).
+  `pmu = true` needs `CAP_PERFMON` and an exposed PMU; Intel's event is untested; a skid past
+  the margin ends `internal`; a guest reading its own text during a hop sees `int3`. A lost
   update inside one read-modify-write instruction cannot be found by any preemption.
-- `--preempt-permille 0` livelocks Go (it polls the clock forever).
+- `preempt-permille = 0` livelocks Go (it polls the clock forever).
 - Per-user pipe accounting is shared by every sandbox of the uid: 9 parallel guests with 500
-  pipes each end `infra`.
-- The virtual inode table holds 16,384 objects; the next ends `infra`. The virtual
+  pipes each end `internal`.
+- The virtual inode table holds 16,384 objects; the next ends `internal`. The virtual
   `RLIMIT_NOFILE` is not enforced (`EMFILE` at the real limit, 4,091). A launcher
   `RLIMIT_FSIZE` below the boundary log's size kills `patina` with no outcome.
-- A missing initial guest program ends `infra` naming errno 0, not the file.
 - Stdio are held in memory up to `PATINA_STDIO_MAX` each (1 GiB).
 - Busy many-waiter workloads re-attempt often (16-thread ring: 7.4 attempts per blocking call).
-- Bad guest pointers in path strings and futex words are a runtime fault (`infra`), not
+- Bad guest pointers in path strings and futex words are a runtime fault (`internal`), not
   `EFAULT`; a signal frame on an unmapped guest stack likewise.
 - Network differences from TCP a guest can see: no `POLLERR` on reset; `EPIPE` without a round
   trip; socket buffer and TCP options recorded and inert; `MSG_OOB` refused; no source

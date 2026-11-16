@@ -2,7 +2,7 @@
 //!
 //! Called by the loader for each executable `PT_LOAD`, by the `mmap` handler for executable
 //! mappings, and by `mprotect` when a range becomes executable. The rule is
-//! `proto::insn` (shared with `patina insn-scan`, which the false-positive audit runs): byte
+//! `proto::insn` (shared with `patina __insn-scan`, which the false-positive audit runs): byte
 //! candidates, each confirmed by a linear sweep from the nearest function symbol of the file
 //! (`.symtab`, `.dynsym`) or from the start of the mapping.
 

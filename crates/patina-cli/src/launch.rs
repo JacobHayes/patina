@@ -3,8 +3,10 @@
 //! runtime, not here: the host's glibc executes `rdtsc` at start-up, so bwrap and the supervisor
 //! would die of SIGSEGV if it were set before them.
 
-use crate::cli::{Opts, Res};
-use crate::outcome::{Outcome, Verdict};
+use crate::cli::Res;
+use crate::config::Opts;
+use crate::outcome::Verdict;
+use crate::result::RunEnd;
 use crate::sys::*;
 use proto::ctl::{
     Config, Ctl, CTL_SIZE, TM_COPIED, TM_EXPORTED, TM_FINISH, TM_FIRST_HELLO, TM_MAIN_EXIT,
@@ -18,7 +20,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::atomic::Ordering::*;
 
 /// The in-guest runtime, built by `build.rs`.
@@ -85,20 +87,6 @@ pub fn allowed_cpus() -> Vec<usize> {
 pub fn default_cpu() -> usize {
     let a = allowed_cpus();
     a[std::process::id() as usize % a.len()]
-}
-
-/// The CPU count a guest is told it has when `--ncpu` is not given: a fixed number, not
-/// the host's, so that a run (Go's GOMAXPROCS, thread pools sized from it) is the same on any
-/// host. Guest threads run one at a time whatever the count; 24 is the count of the host every
-/// earlier task measured on, so their results stand.
-const DEFAULT_NCPU: u64 = 24;
-
-pub fn run(o: &Opts) -> Res<ExitCode> {
-    let out = o.out.clone().ok_or("--out RUN is required")?;
-    let cpu = o.cpu.unwrap_or_else(default_cpu);
-    let oc = run_one(o, &out, cpu, o.no_personality)?;
-    println!("{} {} {}", oc.verdict.class, oc.digest, out.display());
-    Ok(ExitCode::SUCCESS)
 }
 
 /// A descriptor bwrap reads a generated file from (`--ro-bind-data`): a memfd at offset 0.
@@ -198,12 +186,26 @@ unsafe fn perturb_child() {
     }
 }
 
-/// Run a whole chain of incarnations into `out` (created; must not hold an earlier run)
-/// and write `outcome.json`.
-pub fn run_one(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<Outcome> {
-    let oc = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
-    fs::write(out.join("outcome.json"), oc.to_json()).map_err(|e| format!("outcome.json: {e}"))?;
-    Ok(oc)
+/// Run a whole chain of incarnations into `out` (created; must not hold an earlier run):
+/// `run.json` first, then the incarnations, then `result.json`.
+pub fn run_one(
+    o: &Opts,
+    out: &Path,
+    cpu: usize,
+    no_personality: bool,
+) -> Res<(RunEnd, serde_json::Value)> {
+    fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
+    if out.join("result.json").exists() || out.join("inc-0").exists() {
+        return Err(format!("{} already holds a run", out.display()));
+    }
+    crate::result::write_json(
+        &out.join("run.json"),
+        &crate::result::run_json(&o.cfg, &o.program),
+    )?;
+    let end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
+    let r = crate::result::result_json(&end, &crate::result::classified(&end));
+    crate::result::write_json(&out.join("result.json"), &r)?;
+    Ok((end, r))
 }
 
 /// Where an incarnation starts: its number, `/in`, the boundary sequence number and
@@ -214,6 +216,8 @@ pub struct Start<'a> {
     pub seq0: u64,
     pub vclock0: u64,
     pub faults: proto::faults::FaultCfg,
+    /// Wall time after which the run ends `timeout` (`--timeout`).
+    pub deadline: std::time::Instant,
 }
 
 /// What one incarnation left behind.
@@ -225,18 +229,18 @@ pub struct IncEnd {
     pub refused: Vec<String>,
     pub seq: u64,
     pub vclock_ns: u64,
-    /// Blocking I/O counters, as in `Outcome::io`.
+    /// Blocking I/O counters, as in `RunEnd::io`.
     pub io: [u64; 5],
     /// Instruction-channel counters.
-    pub insn: crate::outcome::InsnCounts,
-    /// Network wire counters, as in `Outcome::net`.
-    pub net: [u64; crate::outcome::NET_FIELDS],
+    pub insn: crate::result::InsnCounts,
+    /// Network wire counters, as in `RunEnd::net`.
+    pub net: [u64; crate::result::NET_FIELDS],
     /// AF_UNIX sockets sent in SCM_RIGHTS.
     pub unix_sockets: u64,
     /// Counter preemption counters (`proto::ctl::PMU_NAMES`).
     pub pmu: [u64; proto::ctl::PMU_FIELDS],
     /// The SDK's site table.
-    pub sdk: crate::outcome::SdkReport,
+    pub sdk: crate::result::SdkReport,
     /// `fault_after_seq` at the end: lowered by a `setup-complete` mark.
     pub fault_after_seq: u64,
 }
@@ -244,14 +248,14 @@ pub struct IncEnd {
 /// The counter event when `--pmu` is given and counters can be opened; otherwise
 /// `None`, and (once per process) a message saying why it is off.
 pub fn pmu_event(o: &Opts) -> Option<u64> {
-    if !o.pmu {
+    if !o.cfg.pmu.on {
         return None;
     }
     match crate::launcher::pmu::available() {
         Ok(ev) => Some(ev),
         Err(why) => {
             static SAID: std::sync::Once = std::sync::Once::new();
-            SAID.call_once(|| eprintln!("patina: --pmu: counter preemption is off: {why}"));
+            SAID.call_once(|| eprintln!("patina: pmu: counter preemption is off: {why}"));
             None
         }
     }
@@ -259,7 +263,7 @@ pub fn pmu_event(o: &Opts) -> Option<u64> {
 
 /// The outcome's `pmu` field: empty without `--pmu`, else "on" or "off: <reason>".
 pub fn pmu_status(o: &Opts) -> String {
-    if !o.pmu {
+    if !o.cfg.pmu.on {
         return String::new();
     }
     match crate::launcher::pmu::available() {
@@ -279,10 +283,6 @@ pub fn run_incarnation(
     let t_launch = mono_ns();
     let inc = inc.to_path_buf();
     fs::create_dir_all(&inc).map_err(|e| format!("create {}: {e}", inc.display()))?;
-    let guest = match &o.guest {
-        Some(g) => fs::canonicalize(g).map_err(|e| format!("--guest {}: {e}", g.display()))?,
-        None => return Err("--guest DIR is required (it is mounted at /guest)".into()),
-    };
     let rt_file = rt_file()?;
     let patina_file = File::open("/proc/self/exe").map_err(|e| format!("own executable: {e}"))?;
 
@@ -306,9 +306,13 @@ pub fn run_incarnation(
     // launcher keeps its own references and copies the contents into the run directory when
     // the sandbox is gone. bwrap's own stdout and stderr (and anything printed before the
     // supervisor starts) go to `sandbox.log`.
-    let stdin_mem = stdio_memfd("patina-stdin", true)?;
-    let stdout_mem = stdio_memfd("patina-stdout", false)?;
-    let stderr_mem = stdio_memfd("patina-stderr", false)?;
+    let stdin_data = match &o.cfg.stdin {
+        Some(p) => fs::read(p).map_err(|e| format!("--stdin {}: {e}", p.display()))?,
+        None => vec![],
+    };
+    let stdin_mem = stdio_memfd("patina-stdin", Some(&stdin_data))?;
+    let stdout_mem = stdio_memfd("patina-stdout", None)?;
+    let stderr_mem = stdio_memfd("patina-stderr", None)?;
     let sandbox_log = create("sandbox.log")?;
     let export = create("live.tree")?;
 
@@ -320,20 +324,21 @@ pub fn run_incarnation(
     cvt_i(unsafe { libc::ftruncate(memfd.as_raw_fd(), CTL_SIZE as i64) })
         .map_err(|e| format!("ftruncate ctl: {e}"))?;
     let ctl_ptr = map_shared(memfd.as_raw_fd(), CTL_SIZE).map_err(|e| format!("map ctl: {e}"))?;
-    let mut cfg = Config::default_with_seed(o.seed);
-    cfg.preempt_permille = o.preempt_permille;
-    cfg.vtime_limit_ns = o.vtime_limit_s * 1_000_000_000;
-    cfg.stall_ms = o.stall_ms;
-    cfg.tmpfs_bytes = o.tmpfs_bytes;
-    cfg.cpu_count = o.ncpu.unwrap_or(DEFAULT_NCPU);
+    let c = &o.cfg;
+    let mut cfg = Config::default_with_seed(c.seed ^ replay_perturb());
+    cfg.preempt_permille = c.preempt_permille;
+    cfg.vtime_limit_ns = c.time_limit * 1_000_000_000;
+    cfg.stall_ms = c.stall_ms;
+    cfg.tmpfs_bytes = c.tmpfs_bytes;
+    cfg.cpu_count = c.cpus;
     let pmu_ev = pmu_event(o);
     if pmu_ev.is_some() {
         cfg.pmu = proto::ctl::PMU_ON;
-        cfg.pmu_slice_min = o.pmu_slice.0;
-        cfg.pmu_slice_max = o.pmu_slice.1;
-        cfg.pmu_short = o.pmu_short_permille | (o.pmu_short_max << 16);
-        cfg.pmu_charge_ps = o.pmu_charge_ps;
-        cfg.pmu_margin = o.pmu_margin;
+        cfg.pmu_slice_min = c.pmu.slice_min;
+        cfg.pmu_slice_max = c.pmu.slice_max;
+        cfg.pmu_short = c.pmu.short_permille | (c.pmu.short_max << 16);
+        cfg.pmu_charge_ps = c.pmu.charge_ps;
+        cfg.pmu_margin = c.pmu.margin;
     }
     unsafe { Ctl::init(ctl_ptr as *mut Ctl, cfg) };
     let ctl = unsafe { Ctl::at(ctl_ptr) };
@@ -349,12 +354,12 @@ pub fn run_incarnation(
         )
     };
     // Network fault configuration, read by the supervisor's wire.
-    unsafe { proto::wire::WireTab::at(ctl_ptr).cfg = o.net };
+    unsafe { proto::wire::WireTab::at(ctl_ptr).cfg = o.plan.net };
     // SDK fault points (`proto::sdk`), read by the runtime.
     unsafe {
         proto::sdk::SdkTab::at(ctl_ptr).cfg = proto::sdk::SdkCfg {
             incarnation: start.k,
-            ..o.sdk
+            ..o.plan.sdk
         }
     };
 
@@ -393,13 +398,13 @@ pub fn run_incarnation(
         args.extend([String::from("--symlink"), t.into(), l.into()]);
     }
     args.extend(["--dev", "/dev", "--proc", "/proc", "--size"].map(String::from));
-    args.push(o.tmpfs_bytes.to_string());
+    args.push(c.tmpfs_bytes.to_string());
     args.extend(["--tmpfs".into(), "/work".into()]);
     // /tmp: a second sandbox tmpfs (same argument as /work: fresh, sequential inode numbers,
     // its own virtual times); programs expect it for temporary files. Not durable.
     args.extend([
         "--size".into(),
-        o.tmpfs_bytes.to_string(),
+        c.tmpfs_bytes.to_string(),
         "--tmpfs".into(),
         "/tmp".into(),
     ]);
@@ -429,23 +434,55 @@ pub fn run_incarnation(
             args.extend(["--symlink".into(), t, format!("/etc/alternatives/{n}")]);
         }
     }
-    // The guest directory and the incarnation's /in are bound at a hidden place, and the
-    // supervisor copies them into sandbox tmpfs (/guest, /work) before the guest starts: what
-    // the guest reads there has the sandbox's own metadata (inode numbers in copy order,
-    // virtual times, tmpfs blocks), not the host's.
-    args.extend([
-        "--ro-bind".into(),
-        guest.display().to_string(),
-        "/.patina/guest".into(),
-    ]);
+    // The program, the `:copy` mounts and the incarnation's /in are bound at a hidden place,
+    // and the supervisor copies them into sandbox tmpfs (/guest, the mount points, /work)
+    // before the guest starts: what the guest reads there has the sandbox's own metadata
+    // (inode numbers in copy order, virtual times, tmpfs blocks), not the host's. Other
+    // mounts are read-only binds.
+    let mut copies: Vec<String> = vec![];
     args.extend([
         "--size".into(),
-        o.tmpfs_bytes.to_string(),
+        c.tmpfs_bytes.to_string(),
         "--tmpfs".into(),
         "/guest".into(),
     ]);
+    for (i, m) in c.mounts.iter().enumerate() {
+        if !m.copy {
+            args.extend([
+                "--ro-bind".into(),
+                m.src.display().to_string(),
+                m.dst.clone(),
+            ]);
+            continue;
+        }
+        let hidden = format!("/.patina/copy/{i}");
+        args.extend([
+            "--ro-bind".into(),
+            m.src.display().to_string(),
+            hidden.clone(),
+        ]);
+        if m.dst != "/guest" {
+            args.extend([
+                "--size".into(),
+                c.tmpfs_bytes.to_string(),
+                "--tmpfs".into(),
+                m.dst.clone(),
+            ]);
+        }
+        copies.push(format!("{hidden}:{}", m.dst));
+    }
+    if o.program.copied {
+        let name = o.program.guest.trim_start_matches("/guest/");
+        args.extend([
+            "--ro-bind".into(),
+            o.program.host.display().to_string(),
+            format!("/.patina/prog/{name}"),
+        ]);
+        copies.push("/.patina/prog:/guest".into());
+    }
     if let Some(root) = start.root {
-        let r = fs::canonicalize(root).map_err(|e| format!("--root {}: {e}", root.display()))?;
+        let r =
+            fs::canonicalize(root).map_err(|e| format!("/work from {}: {e}", root.display()))?;
         args.extend([
             "--ro-bind".into(),
             r.display().to_string(),
@@ -467,7 +504,11 @@ pub fn run_incarnation(
     args.extend(["--clearenv".into(), "--chdir".into(), "/work".into()]);
     args.push(format!("/proc/self/fd/{FD_PATINA}"));
     args.push("__sup".into());
-    for e in &o.env {
+    for cp in copies {
+        args.extend(["--copy".into(), cp]);
+    }
+    args.extend(["--exe".into(), o.program.guest.clone()]);
+    for e in &c.env {
         args.extend(["--env".into(), e.clone()]);
     }
     // Only restarted incarnations get it: incarnation 0 must match a run without --crash
@@ -476,7 +517,13 @@ pub fn run_incarnation(
         args.extend(["--env".into(), format!("PATINA_INCARNATION={}", start.k)]);
     }
     args.push("--".into());
-    args.extend(o.cmd.iter().cloned());
+    // argv[0]: a copied program is named by where it runs from.
+    args.push(if o.program.copied {
+        o.program.guest.clone()
+    } else {
+        c.cmd[0].clone()
+    });
+    args.extend(c.cmd[1..].iter().cloned());
 
     // Descriptors to place at fixed numbers in the child.
     let mut place: Vec<(i32, i32)> = vec![
@@ -591,9 +638,25 @@ pub fn run_incarnation(
     };
     let mut verdict_text = String::new();
     let mut outcome_r = outcome_r;
-    let _ = outcome_r.read_to_string(&mut verdict_text);
+    let timed_out = !wait_readable(&outcome_r, start.deadline);
+    if timed_out {
+        // The supervisor dies with bwrap (its parent-death signal), and every guest with it.
+        let _ = child.kill();
+    } else {
+        let _ = outcome_r.read_to_string(&mut verdict_text);
+    }
     let t_verdict = mono_ns();
     let status = child.wait().map_err(|e| format!("wait bwrap: {e}"))?;
+    if timed_out {
+        verdict_text = Verdict::new(
+            "timeout",
+            format!(
+                "--timeout: {} s of wall time passed (incarnation {})",
+                o.cfg.timeout, start.k
+            ),
+        )
+        .encode();
+    }
     if let Some(b) = broker {
         b.stop();
     }
@@ -668,11 +731,11 @@ pub fn run_incarnation(
             ctl.io.blocking_done.load(Relaxed),
             ctl.io.blocking_parked.load(Relaxed),
         ],
-        insn: crate::outcome::InsnCounts::read(&ctl.insn),
-        net: crate::outcome::net_read(unsafe { &proto::wire::WireTab::at(ctl_ptr).counters }),
+        insn: crate::result::InsnCounts::read(&ctl.insn),
+        net: crate::result::net_read(unsafe { &proto::wire::WireTab::at(ctl_ptr).counters }),
         unix_sockets: ctl.stats.unix_sockets_sent.load(Relaxed),
         pmu: ctl.pmu.read(),
-        sdk: crate::outcome::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
+        sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
     };
     if std::env::var_os("PATINA_TIMING").is_some() {
@@ -698,17 +761,23 @@ pub fn run_incarnation(
 /// Default cap on what the launcher copies from each guest stdio memfd into the run directory.
 const STDIO_MAX: u64 = 1 << 30;
 
-/// A memfd for the guest's stdio. `stdin`: empty, sealed and reopened read-only (reads give
-/// end of file, writes `EBADF`, as for a redirect from an empty file).
-fn stdio_memfd(name: &str, stdin: bool) -> Res<OwnedFd> {
+/// A memfd for the guest's stdio. `stdin` (its contents): sealed and reopened read-only
+/// (reads give the contents then end of file, writes `EBADF`, as for a redirect from a file).
+fn stdio_memfd(name: &str, stdin: Option<&[u8]>) -> Res<OwnedFd> {
     let n = CString::new(name).unwrap();
-    let flags = libc::MFD_CLOEXEC | if stdin { libc::MFD_ALLOW_SEALING } else { 0 };
+    let flags = libc::MFD_CLOEXEC
+        | if stdin.is_some() {
+            libc::MFD_ALLOW_SEALING
+        } else {
+            0
+        };
     let fd = cvt_i(unsafe { libc::memfd_create(n.as_ptr(), flags) })
         .map_err(|e| format!("memfd {name}: {e}"))?;
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    if !stdin {
+    let Some(data) = stdin else {
         return Ok(fd);
-    }
+    };
+    write_fd(fd.as_raw_fd(), data).map_err(|e| format!("write {name}: {e}"))?;
     let seals = libc::F_SEAL_SEAL | libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_WRITE;
     cvt_i(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) })
         .map_err(|e| format!("seal {name}: {e}"))?;
@@ -774,3 +843,40 @@ pub(crate) fn mono_ns() -> u64 {
     unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
+
+/// Wait until `f` is readable (the supervisor's verdict, or its end) or `deadline` passes.
+/// False when the deadline passed.
+fn wait_readable(f: &File, deadline: std::time::Instant) -> bool {
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let mut p = libc::pollfd {
+            fd: f.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
+        let r = unsafe { libc::poll(&mut p, 1, ms) };
+        if r > 0 {
+            return true;
+        }
+        if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return true;
+        }
+    }
+}
+
+/// Test hook for replay: `PATINA_TEST_REPLAY_PERTURB=1` changes the seed every draw is keyed
+/// on (the recorded one is unchanged), so a replay must report the first differing record.
+pub fn replay_perturb() -> u64 {
+    if PERTURB_DRAWS.load(Relaxed) {
+        1 << 63
+    } else {
+        0
+    }
+}
+
+/// Set by `replay` when `PATINA_TEST_REPLAY_PERTURB` is set.
+pub static PERTURB_DRAWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

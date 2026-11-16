@@ -469,7 +469,7 @@ fn fd_number(s: &[u8]) -> Option<i64> {
 /// The policy for a normalised absolute path.
 pub fn policy(s: &[u8]) -> Kind {
     let under = |p: &[u8]| s == p || (s.len() > p.len() && s.starts_with(p) && s[p.len()] == b'/');
-    // The host directories the supervisor copies from (/.patina/guest, /.patina/in).
+    // The host trees the supervisor copies from (/.patina/prog, /.patina/copy, /.patina/in).
     if under(b"/.patina") {
         return Kind::Hidden;
     }

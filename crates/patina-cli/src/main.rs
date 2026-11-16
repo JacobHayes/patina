@@ -1,123 +1,181 @@
-//! `patina`: launcher, supervisor (hidden `__sup`), log tools and the table printer.
+//! `patina`: the command line, the launcher, the supervisor (hidden `__sup`) and the tools.
 
 mod cli;
+mod config;
+mod doctor;
 mod durability;
+mod faults;
 mod insn;
 mod launch;
 mod launcher;
-mod logtool;
+mod log;
 mod outcome;
+mod replay;
+mod result;
 mod sup;
 mod sys;
 mod table;
 mod verify;
 
+use cli::{Args, Cmd};
+use outcome::Outcome;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-fn usage() -> ExitCode {
-    eprintln!(
-        "usage:\n  patina run --out RUN [--seed N] [--guest DIR] [--root DIR] [--cpu N] [--env K=V]... \
-         [--preempt-permille P] [--vtime-limit-s S] [--stall-ms MS] [--tmpfs-bytes N] [--no-personality] -- /guest/prog args...\n  \
-         patina verify (run options) --runs N [--vary cpu,load,aslr,sandbox]\n  \
-         patina log dump RUN/inc-0/boundary.log [--from SEQ --to SEQ]\n  \
-         patina log diff A/boundary.log B/boundary.log\n  \
-         patina table\n  \
-         patina oplog check RUN | patina oplog dump RUN/inc-K\n  \
-         patina crash-states RUN --at SEQ --count N [--inc K] [--seed N] [--fs-model M] [--out DIR]"
-    );
-    ExitCode::from(2)
+/// A request that ended without a run: the outcome (`error` or `internal`) and why.
+struct Fail(Outcome, String);
+
+fn error(e: String) -> Fail {
+    Fail(Outcome::Error, e)
+}
+
+fn internal(e: String) -> Fail {
+    Fail(Outcome::Internal, e)
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first() else {
-        return usage();
+    let Some(first) = args.first() else {
+        eprint!("{}", cli::help_text(None));
+        return ExitCode::from(2);
     };
     let rest = &args[1..];
-    let r = match cmd.as_str() {
-        "run" => cli::parse(rest).and_then(|o| launch::run(&o)),
-        "verify" => cli::parse(rest).and_then(|o| verify::verify(&o)),
-        "log" => logtool::main(rest),
-        "table" => {
+    let hidden = match first.as_str() {
+        "__sup" => Some(sup::main(rest)),
+        "__insn-scan" => Some(insn::main(rest)),
+        _ => None,
+    };
+    if let Some(r) = hidden {
+        return r.unwrap_or_else(|e| {
+            eprintln!("patina: {e}");
+            ExitCode::from(2)
+        });
+    }
+    if first == "--help" || first == "-h" {
+        if rest
+            .windows(2)
+            .any(|w| w[0] == "--format" && w[1] == "json")
+            || rest.iter().any(|a| a == "--format=json")
+        {
+            println!("{}", cli::help_json());
+        } else {
+            print!("{}", cli::help_text(None));
+        }
+        return ExitCode::SUCCESS;
+    }
+    let Some(cmd) = cli::find_cmd(first) else {
+        eprintln!("patina: unknown command {first}\n");
+        eprint!("{}", cli::help_text(None));
+        return ExitCode::from(2);
+    };
+    let a = match cli::parse(cmd, rest) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("patina: {e}");
+            return ExitCode::from(Outcome::Error.exit());
+        }
+    };
+    if a.has("--help") {
+        if a.json() {
+            println!("{}", cli::help_json());
+        } else {
+            print!("{}", cli::help_text(Some(cmd)));
+        }
+        return ExitCode::SUCCESS;
+    }
+    let r = match cmd {
+        Cmd::Run => run(&a),
+        Cmd::Verify => verify(&a),
+        Cmd::Replay => replay(&a),
+        Cmd::Log => log::main(&a).map_err(error),
+        Cmd::Table => {
             table::print();
             Ok(ExitCode::SUCCESS)
         }
-        "__sup" => sup::main(rest),
-        "oplog" => oplog_cmd(rest),
-        "crash-states" => crash_states(rest),
-        "insn-scan" => insn::main(rest),
-        _ => return usage(),
+        Cmd::Doctor => doctor::doctor(&a).map_err(error),
     };
-    match r {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("patina: {e}");
-            ExitCode::from(2)
+    r.unwrap_or_else(|Fail(o, e)| {
+        eprintln!("patina: {}: {e}", o.name());
+        if a.json() {
+            println!("{}", result::error_json(o, o.name(), &e));
         }
-    }
+        ExitCode::from(o.exit())
+    })
 }
 
-fn oplog_cmd(args: &[String]) -> Result<ExitCode, String> {
-    let (Some(sub), Some(p)) = (args.first(), args.get(1)) else {
-        return Ok(usage());
-    };
-    let p = std::path::Path::new(p);
-    match sub.as_str() {
-        "check" => durability::check::check(p).map(|_| ExitCode::SUCCESS),
-        "dump" => durability::log::dump(p).map(|_| ExitCode::SUCCESS),
-        _ => Ok(usage()),
-    }
+fn absolute(p: PathBuf) -> PathBuf {
+    std::path::absolute(&p).unwrap_or(p)
 }
 
-/// `patina crash-states RUN --at SEQ --count N`: N post-crash trees for one crash point (the
-/// log prefix up to SEQ of incarnation K), one per `Torn` key: different legal states.
-fn crash_states(args: &[String]) -> Result<ExitCode, String> {
-    use durability::materialise::{materialise, Model};
-    let run = std::path::PathBuf::from(args.first().ok_or("crash-states needs RUN")?);
-    let (mut at, mut count, mut inc, mut seed, mut model, mut out) =
-        (u64::MAX, 10u64, 0u64, 0u64, Model::Ext4Ordered, None);
-    let mut it = args[1..].iter();
-    while let Some(a) = it.next() {
-        let v = it.next().ok_or_else(|| format!("{a} needs a value"))?;
-        let n = || {
-            v.parse::<u64>()
-                .map_err(|_| format!("{a}: not a number: {v}"))
-        };
-        match a.as_str() {
-            "--at" => at = n()?,
-            "--count" => count = n()?,
-            "--inc" => inc = n()?,
-            "--seed" => seed = n()?,
-            "--fs-model" => model = Model::parse(v).ok_or_else(|| format!("unknown model {v}"))?,
-            "--out" => out = Some(std::path::PathBuf::from(v)),
-            _ => return Err(format!("crash-states: unknown option {a}")),
+fn out_dir(a: &Args, default: String) -> Result<PathBuf, Fail> {
+    let out = absolute(PathBuf::from(
+        a.last("--out").map(|s| s.to_string()).unwrap_or(default),
+    ));
+    replay::clear_out(&out).map_err(error)?;
+    Ok(out)
+}
+
+fn run(a: &Args) -> Result<ExitCode, Fail> {
+    let cfg = config::resolve(a).map_err(error)?;
+    let out = out_dir(a, format!("patina-out/run-{}", cfg.seed))?;
+    let o = cfg.opts().map_err(error)?;
+    let cpu = cfg.host_cpu.unwrap_or_else(launch::default_cpu);
+    let (_, r) = launch::run_one(&o, &out, cpu, false).map_err(internal)?;
+    if a.json() {
+        println!("{}", serde_json::to_string_pretty(&r).unwrap());
+    } else {
+        result::print_human(&r, &out);
+    }
+    Ok(ExitCode::from(r["exit"].as_u64().unwrap_or(2) as u8))
+}
+
+fn verify(a: &Args) -> Result<ExitCode, Fail> {
+    let cfg = config::resolve(a).map_err(error)?;
+    let out = out_dir(a, format!("patina-out/verify-{}", cfg.seed))?;
+    let o = cfg.opts().map_err(error)?;
+    let runs = a.num::<usize>("--runs").map_err(error)?.unwrap_or(3);
+    let mut vary = vec![];
+    if let Some(v) = a.last("--vary") {
+        for k in v.split(',').filter(|k| !k.is_empty()) {
+            match k {
+                "cpu" | "aslr" | "sandbox" | "load" | "repeat" | "parallel" | "env" | "time" => {
+                    vary.push(k.to_string())
+                }
+                _ => return Err(error(format!("--vary: unknown variant {k}"))),
+            }
         }
     }
-    let t0 = std::time::Instant::now();
-    let log = durability::log::OpLog::load(&run.join(format!("inc-{inc}")))?;
-    if std::env::var_os("PATINA_TIMING").is_some() {
-        eprintln!(
-            "patina-timing load records={} us={}",
-            log.ops.len(),
-            t0.elapsed().as_micros()
-        );
+    let (c, code) = verify::verify(&o, &out, runs, &vary).map_err(internal)?;
+    if a.json() {
+        let v = serde_json::json!({
+            "schema": result::RESULT_SCHEMA,
+            "outcome": c.outcome.name(),
+            "stop": c.stop,
+            "message": c.message,
+            "exit": c.outcome.exit(),
+            "seed": cfg.seed,
+            "runs": runs,
+            "dir": out,
+        });
+        println!("{}", serde_json::to_string_pretty(&v).unwrap());
+    } else {
+        println!("{} ({}): {}", c.outcome.name(), c.stop, c.message);
     }
-    let mut distinct = std::collections::BTreeSet::new();
-    for key in 0..count {
-        let t = materialise(&log, at, seed, key, model, &[])?;
-        let d = t.digest();
-        println!("variant {key}: {d} {} paths", t.nodes.len());
-        if let Some(o) = &out {
-            let dir = o.join(format!("variant-{key}"));
-            t.write_dir(&dir)
-                .map_err(|e| format!("{}: {e}", dir.display()))?;
+    Ok(code)
+}
+
+fn replay(a: &Args) -> Result<ExitCode, Fail> {
+    let r = replay::replay(a).map_err(error)?;
+    let c = &r.classified;
+    if a.json() {
+        println!("{}", serde_json::to_string_pretty(&r.result).unwrap());
+    } else {
+        if c.outcome == Outcome::Nondeterministic {
+            println!("nondeterministic: {}", c.message);
+        } else {
+            println!("identical: the replay's log equals the run's");
         }
-        distinct.insert(d);
+        result::print_human(&r.result, &r.dir);
     }
-    println!(
-        "{} distinct trees of {count} ({}, prefix seq <= {at})",
-        distinct.len(),
-        model.name()
-    );
-    Ok(ExitCode::SUCCESS)
+    Ok(ExitCode::from(c.outcome.exit()))
 }

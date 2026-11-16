@@ -15,11 +15,14 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::Ordering::*;
 
-const BASE_ENV: [&str; 4] = [
-    "PATH=/usr/local/bin:/usr/bin:/bin",
+/// The guest's fixed environment; `--env` adds to it. `PATINA=1` tells a program it runs
+/// under Patina.
+const BASE_ENV: [&str; 5] = [
+    "PATH=/guest:/usr/local/bin:/usr/bin:/bin",
     "HOME=/work",
     "LANG=C.UTF-8",
     "TZ=UTC",
+    "PATINA=1",
 ];
 
 // Parts of the scheduler's interface (`Wait::Io`, `WakeReason::Signal`, `io_generation`,
@@ -182,7 +185,7 @@ impl Sup {
             self.finish(Verdict::new(
                 "liveness",
                 format!(
-                    "virtual time passed --vtime-limit-s ({} s); {running}parked: {}",
+                    "virtual time passed --time-limit ({} s); {running}parked: {}",
                     cfg.vtime_limit_ns / 1_000_000_000,
                     self.parked_detail()
                 ),
@@ -626,9 +629,18 @@ pub(crate) fn now_ns() -> u64 {
 pub fn main(args: &[String]) -> Res<ExitCode> {
     let mut env: Vec<String> = BASE_ENV.iter().map(|s| s.to_string()).collect();
     let mut cmd: Vec<String> = vec![];
+    // `HIDDEN:DST`: trees the launcher bound at a hidden place, copied to DST.
+    let mut copies: Vec<(String, String)> = vec![];
+    let mut exe: Option<String> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
+            "--copy" => {
+                let v = it.next().ok_or("--copy needs HIDDEN:DST")?;
+                let (h, d) = v.split_once(':').ok_or("--copy needs HIDDEN:DST")?;
+                copies.push((h.to_string(), d.to_string()));
+            }
+            "--exe" => exe = Some(it.next().ok_or("--exe needs PATH")?.clone()),
             "--env" => {
                 let kv = it.next().ok_or("--env needs K=V")?;
                 let k = kv.split('=').next().unwrap_or("");
@@ -719,12 +731,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         sup.finish(Verdict::new("infra", e));
     }
 
-    // The guest directory: a copy on sandbox tmpfs, not a bind of the host's.
-    if let Err(e) = inherit::copy_tree(Path::new("/.patina/guest"), Path::new("/guest")) {
-        sup.finish(Verdict::new(
-            "infra",
-            format!("copying the guest directory into /guest: {e}"),
-        ));
+    // The program and the `:copy` mounts: copies on sandbox tmpfs, not binds of the host's.
+    for (h, d) in &copies {
+        if let Err(e) = inherit::copy_tree(Path::new(h), Path::new(d)) {
+            sup.finish(Verdict::new("infra", format!("copying into {d}: {e}")));
+        }
     }
     if Path::new("/.patina/in").is_dir() {
         if let Err(e) = crash::copy_in(Path::new("/.patina/in"), Path::new("/work")) {
@@ -743,7 +754,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             .map(|s| CString::new(s.as_bytes()).unwrap())
             .collect()
     };
-    let mut rt_args = vec!["rt".to_string(), cmd[0].clone()];
+    let mut rt_args = vec!["rt".to_string(), exe.unwrap_or_else(|| cmd[0].clone())];
     rt_args.extend(cmd.iter().cloned());
     let argv_c = cstrs(&rt_args);
     let envp_c = cstrs(&env);

@@ -1,8 +1,10 @@
 //! `patina verify`: run the same inputs N times, optionally varying things that
 //! must not matter, and require identical digests, outcomes and output.
 
-use crate::cli::{Opts, Res};
+use crate::cli::Res;
+use crate::config::Opts;
 use crate::launch::{allowed_cpus, default_cpu, run_one};
+use crate::outcome::{Classified, Outcome};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -87,13 +89,6 @@ impl Drop for Load {
             let _ = t.join();
         }
     }
-}
-
-fn scratch_out() -> PathBuf {
-    let base = std::env::var_os("PATINA_SCRATCH")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join(format!("patina-verify-{}", std::process::id()))
 }
 
 fn read(p: &Path) -> Vec<u8> {
@@ -191,28 +186,15 @@ fn env_restore(st: EnvState) {
     let _ = std::env::set_current_dir(&st.cwd);
 }
 
-/// Absolute paths, so `env` can change the working directory.
-fn absolute(o: &Opts) -> Opts {
-    let mut o = o.clone();
-    let abs = |p: &Option<PathBuf>| {
-        p.as_ref()
-            .map(|p| std::path::absolute(p).unwrap_or_else(|_| p.clone()))
-    };
-    o.out = abs(&o.out);
-    o.guest = abs(&o.guest);
-    o.root = abs(&o.root);
-    o
-}
-
 struct RunResult {
-    oc: crate::outcome::Outcome,
+    oc: crate::result::RunEnd,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     dir: PathBuf,
 }
 
 fn one(o: &Opts, dir: PathBuf, cpu: usize, no_pers: bool) -> Res<RunResult> {
-    let oc = run_one(o, &dir, cpu, no_pers)?;
+    let (oc, _) = run_one(o, &dir, cpu, no_pers)?;
     // Every incarnation's output, in order.
     let incs = crate::durability::check::incarnations(&dir);
     let stdout: Vec<u8> = incs.iter().flat_map(|d| read(&d.join("stdout"))).collect();
@@ -225,22 +207,25 @@ fn one(o: &Opts, dir: PathBuf, cpu: usize, no_pers: bool) -> Res<RunResult> {
     })
 }
 
-pub fn verify(o: &Opts) -> Res<ExitCode> {
-    let o = &absolute(o);
-    let out = o.out.clone().unwrap_or_else(scratch_out);
+/// `patina verify`: `runs` runs of one seed into `out/run-K` (paths in `o` are absolute, so
+/// `env` can change the working directory). The outcome is the runs' own when they agree,
+/// else `nondeterministic` naming the first differing record.
+pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classified, ExitCode)> {
+    let o = &o.clone();
+    let out = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
     let cpus = cpu_choices();
     let all = allowed_cpus();
-    let base_cpu = o.cpu.unwrap_or_else(default_cpu);
+    let base_cpu = o.cfg.host_cpu.unwrap_or_else(default_cpu);
     // The `cpu` variant's runs start at a CPU chosen by process id (concurrent verifies spread).
     let cpu_off = std::process::id() as usize % cpus.len();
-    let vary = |k: &str| o.vary.iter().any(|v| v == k);
+    let vary = |k: &str| vary.iter().any(|v| v == k);
     let mut reference: Option<RunResult> = None;
     let _load = if vary("load") {
         Some(Load::start())
     } else {
         None
     };
-    let n = o.runs.max(1);
+    let n = runs.max(1);
     let mut i = 0;
     while i < n {
         // `parallel`: up to 12 runs at once after the reference, each on its own core.
@@ -281,7 +266,7 @@ pub fn verify(o: &Opts) -> Res<ExitCode> {
             } else {
                 base_cpu
             };
-            let no_pers = o.no_personality || (vary("aslr") && k % 2 == 1);
+            let no_pers = vary("aslr") && k % 2 == 1;
             jobs.push((k, cpu, no_pers, out.join(format!("run-{k}"))));
         }
         let results: Vec<(usize, usize, bool, Res<RunResult>)> = if batch == 1 {
@@ -332,17 +317,18 @@ pub fn verify(o: &Opts) -> Res<ExitCode> {
                         && r.stderr == rr.stderr;
                     if !same {
                         println!("divergence: run {k} differs from run 0");
-                        if r.oc.digest != rr.oc.digest {
-                            let a = r.dir.join("inc-0/boundary.log");
-                            let b = rr.dir.join("inc-0/boundary.log");
-                            crate::logtool::print_difference(
-                                &a.display().to_string(),
-                                &b.display().to_string(),
-                            )?;
-                        } else {
-                            println!("digests equal; outcome or output differ");
-                        }
-                        return Ok(ExitCode::from(1));
+                        let msg = match crate::log::first_run_difference(&r.dir, &rr.dir)? {
+                            Some(d) => {
+                                println!("{d}");
+                                format!("run {k} differs from run 0: {d}")
+                            }
+                            None => {
+                                println!("logs equal; outcome or output differ");
+                                format!("run {k} differs from run 0 in its outcome or output")
+                            }
+                        };
+                        let c = Classified::new(Outcome::Nondeterministic, "divergence", msg);
+                        return Ok((c, ExitCode::from(Outcome::Nondeterministic.exit())));
                     }
                     // Long soaks: PATINA_VERIFY_PRUNE removes each run found identical
                     // to run 0 (run 0 stays for comparison).
@@ -355,5 +341,8 @@ pub fn verify(o: &Opts) -> Res<ExitCode> {
         i += batch;
     }
     println!("identical: {n} runs in {}", out.display());
-    Ok(ExitCode::SUCCESS)
+    let r = reference.ok_or("no runs")?;
+    let c = crate::result::classified(&r.oc);
+    let code = ExitCode::from(c.outcome.exit());
+    Ok((c, code))
 }

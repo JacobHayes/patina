@@ -61,7 +61,7 @@ pub struct WSock {
     pub opts: [[i32; 2]; OPTS_CAP],
 }
 
-/// Outcome counters (`outcome.json` "net").
+/// Outcome counters (`result.json` "counters.net").
 #[repr(C)]
 pub struct NetCounters {
     pub connections: AtomicU64,

@@ -1,6 +1,6 @@
 //! Post-crash trees: a pure function of
 //! (operation log prefix, seed, model). The base image is part of the log: the supervisor
-//! records the initial `/work` (incarnation 0's `--root`, or the previous incarnation's
+//! records the initial `/work` (incarnation 0's `--work`, or the previous incarnation's
 //! post-crash tree) as base records with `seq` 0, which are durable by definition. So the
 //! function needs no filesystem and is tested without a sandbox.
 //!
@@ -542,7 +542,7 @@ pub fn unlogged_pages(log: &OpLog, replayed: &Fs, live: &Tree) -> Vec<(u64, u64,
 }
 
 /// The post-crash tree for the log prefix `seq <= upto` under `model`. `key` separates
-/// crash points and variants (`patina crash-states`); `extra` are the unlogged mapping pages
+/// crash points and variants (the crash materialiser); `extra` are the unlogged mapping pages
 /// (`unlogged_pages`), treated as unsynced writes made at the crash.
 pub fn materialise(
     log: &OpLog,

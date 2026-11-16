@@ -1,13 +1,16 @@
-//! `patina log dump` and `patina log diff`.
+//! `patina log dump|diff|ops`: read a boundary log, compare two, list file operations; and
+//! the record-by-record comparison of two run directories that replay and verify use.
 
-use crate::cli::Res;
+use crate::cli::{Args, Res};
+use crate::durability::check::incarnations;
 use proto::ctl::Op;
 use proto::rec::{Rec, REC_SIZE};
 use proto::table::{name, Class};
 use proto::RecKind;
+use std::path::Path;
 use std::process::ExitCode;
 
-fn load(path: &str) -> Res<Vec<Rec>> {
+pub fn load(path: &str) -> Res<Vec<Rec>> {
     let b = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     if b.len() % REC_SIZE != 0 {
         return Err(format!(
@@ -90,39 +93,72 @@ pub fn print_difference(pa: &str, pb: &str) -> Res<bool> {
     }
 }
 
-pub fn main(args: &[String]) -> Res<ExitCode> {
-    match args.first().map(|s| s.as_str()) {
+/// The first difference between the boundary logs of two run directories, incarnation by
+/// incarnation, decoded; `None` when every log is equal.
+pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
+    let (ia, ib) = (incarnations(a), incarnations(b));
+    for k in 0..ia.len().max(ib.len()) {
+        let (Some(da), Some(db)) = (ia.get(k), ib.get(k)) else {
+            return Ok(Some(format!(
+                "incarnation counts differ: {} and {}",
+                ia.len(),
+                ib.len()
+            )));
+        };
+        let pa = da.join("boundary.log").display().to_string();
+        let pb = db.join("boundary.log").display().to_string();
+        let (x, y) = (load(&pa)?, load(&pb)?);
+        if let Some((i, ra, rb)) = first_difference(&x, &y) {
+            let show = |r: Option<Rec>| {
+                r.map(|r| describe(&r))
+                    .unwrap_or_else(|| "(end of log)".into())
+            };
+            return Ok(Some(format!(
+                "inc-{k} record {i}: recorded {}; replayed {}",
+                show(ra),
+                show(rb)
+            )));
+        }
+    }
+    Ok(None)
+}
+
+pub fn main(args: &Args) -> Res<ExitCode> {
+    let p = &args.positional;
+    let arg = |i: usize, usage: &str| -> Res<&str> {
+        p.get(i)
+            .map(|s| s.as_str())
+            .ok_or_else(|| usage.to_string())
+    };
+    match p.first().map(|s| s.as_str()) {
         Some("dump") => {
-            let path = args.get(1).ok_or("log dump FILE")?;
-            let (mut from, mut to) = (0u64, u64::MAX);
-            let mut it = args[2..].iter();
-            while let Some(a) = it.next() {
-                let v: u64 = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .ok_or(format!("{a} needs a number"))?;
-                match a.as_str() {
-                    "--from" => from = v,
-                    "--to" => to = v,
-                    _ => return Err(format!("unknown option {a}")),
-                }
-            }
+            let path = arg(1, "log dump LOG [--from SEQ] [--to SEQ]")?;
+            let from = args.num::<u64>("--from")?.unwrap_or(0);
+            let to = args.num::<u64>("--to")?.unwrap_or(u64::MAX);
             for r in load(path)?.iter().filter(|r| r.seq >= from && r.seq <= to) {
                 println!("{}", describe(r));
             }
             Ok(ExitCode::SUCCESS)
         }
         Some("diff") => {
-            let (a, b) = (
-                args.get(1).ok_or("log diff A B")?,
-                args.get(2).ok_or("log diff A B")?,
-            );
+            let (a, b) = (arg(1, "log diff LOG LOG")?, arg(2, "log diff LOG LOG")?);
             Ok(if print_difference(a, b)? {
                 ExitCode::from(1)
             } else {
                 ExitCode::SUCCESS
             })
         }
-        _ => Err("log dump FILE | log diff A B".into()),
+        Some("ops") => {
+            let dir = Path::new(arg(1, "log ops INCDIR | log ops --check RUNDIR")?);
+            if args.has("--check") {
+                crate::durability::check::check(dir)?;
+            } else {
+                crate::durability::log::dump(dir)?;
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => {
+            Err("log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR".into())
+        }
     }
 }

@@ -8,7 +8,7 @@
   ```sh
   cargo build --release --manifest-path examples/ledger/Cargo.toml
   for s in 1 2 3 4 5 6; do
-    patina run --seed $s --buggify --guest examples/ledger/target/release -- /guest/ledger
+    patina run --seed $s --buggify -- examples/ledger/target/release/ledger
   done
   ```
 

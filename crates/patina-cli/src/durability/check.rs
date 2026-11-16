@@ -1,4 +1,4 @@
-//! `patina oplog check RUN`: for every incarnation, replaying the complete operation log onto
+//! `patina log ops --check RUN`: for every incarnation, replaying the complete operation log onto
 //! its base must give exactly the live tree the supervisor exported (`live.tree`): names,
 //! kinds, modes, owners, link structure (inode numbers), contents, extended attributes.
 //! A difference means the tracker missed a way of changing a file.
@@ -73,7 +73,7 @@ pub fn check(run: &Path) -> Result<(), String> {
         }
     }
     if bad > 0 {
-        return Err(format!("oplog check: {bad} incarnation(s) differ"));
+        return Err(format!("log ops --check: {bad} incarnation(s) differ"));
     }
     Ok(())
 }

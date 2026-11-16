@@ -14,20 +14,22 @@
 //! with crashes off. An `-at` crash fires once. With `faults-in-recovery=0` faults other
 //! than crashes stop after the first crash.
 
-use crate::cli::{Opts, Res};
+use crate::cli::Res;
+use crate::config::Opts;
 use crate::durability::log::OpLog;
 use crate::durability::materialise::{materialise, replay, unlogged_pages};
 use crate::durability::tree::Tree;
 use crate::launch::{run_incarnation, Start};
-use crate::outcome::{json_str, Outcome};
+use crate::result::RunEnd;
 use proto::faults::{CRASH_MACHINE, CRASH_NONE};
 use proto::rec::{Rec, RecKind, REC_SIZE};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-/// Injected faults listed in `outcome.json` (the total is always given).
-const FAULTS_LISTED: usize = 200;
+/// The last injected faults listed in `result.json` (the total is always given).
+const FAULTS_RECENT: usize = 20;
 
 fn inj_name(k: u64) -> &'static str {
     use proto::faults::*;
@@ -48,7 +50,7 @@ fn inj_name(k: u64) -> &'static str {
 }
 
 /// The `Injected` boundary records of an incarnation, as JSON objects.
-pub fn injected(inc: &Path, k: u64) -> Vec<String> {
+pub fn injected(inc: &Path, k: u64) -> Vec<Value> {
     let b = fs::read(inc.join("boundary.log")).unwrap_or_default();
     let mut out = vec![];
     for c in b.as_chunks::<REC_SIZE>().0 {
@@ -58,16 +60,17 @@ pub fn injected(inc: &Path, k: u64) -> Vec<String> {
         }
         let [kind, _class, value, _, _, _] = r.args;
         let v = if kind == proto::faults::INJ_DELAY || kind == proto::faults::INJ_SHORT {
-            value.to_string()
+            json!(value)
         } else {
-            (value as i64).to_string()
+            json!(value as i64)
         };
-        out.push(format!(
-            "{{\"incarnation\":{k},\"seq\":{},\"call\":{},\"kind\":{},\"value\":{v}}}",
-            r.seq,
-            json_str(proto::table::name(r.nr as u64)),
-            json_str(inj_name(kind))
-        ));
+        out.push(json!({
+            "incarnation": k,
+            "seq": r.seq,
+            "call": proto::table::name(r.nr as u64),
+            "kind": inj_name(kind),
+            "value": v,
+        }));
     }
     out
 }
@@ -109,28 +112,29 @@ pub fn next_tree(
     materialise(&log, u64::MAX, seed, key, model, &extra)
 }
 
-pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<Outcome> {
+pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<RunEnd> {
     let t0 = Instant::now();
-    if out.join("outcome.json").exists() || out.join("inc-0").exists() {
+    if out.join("result.json").exists() || out.join("inc-0").exists() {
         return Err(format!("{} already holds a run", out.display()));
     }
-    let max = o.max_incarnations.max(1);
-    let mut cfg = o.faults;
+    let deadline = t0 + std::time::Duration::from_secs(o.cfg.timeout);
+    let max = o.cfg.max_incarnations.max(1);
+    let mut cfg = o.plan.faults;
     let mut seq0 = 0;
     let mut vclock0 = 0;
     let mut crashes = vec![];
-    let mut faults = vec![];
+    let mut faults: std::collections::VecDeque<Value> = Default::default();
     let mut nfaults = 0usize;
     let mut digests = vec![];
     let (mut traps, mut switches) = (0, 0);
     let mut io = [0u64; 5];
-    let mut insn = crate::outcome::InsnCounts::default();
-    let mut net = [0u64; crate::outcome::NET_FIELDS];
+    let mut insn = crate::result::InsnCounts::default();
+    let mut net = [0u64; crate::result::NET_FIELDS];
     let mut unix_sockets = 0;
     let mut pmu = [0u64; proto::ctl::PMU_FIELDS];
-    let mut sdk = crate::outcome::SdkReport::default();
+    let mut sdk = crate::result::SdkReport::default();
     let mut refused: Vec<String> = vec![];
-    let mut root = o.root.clone();
+    let mut root = o.cfg.work.clone();
     let mut k = 0;
     loop {
         let inc = out.join(format!("inc-{k}"));
@@ -142,6 +146,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             seq0,
             vclock0,
             faults: cfg,
+            deadline,
         };
         let end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
         digests.push(end.digest);
@@ -151,7 +156,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             *a += b;
         }
         insn.add(&end.insn);
-        crate::outcome::net_add(&mut net, &end.net);
+        crate::result::net_add(&mut net, &end.net);
         unix_sockets += end.unix_sockets;
         sdk.add(end.sdk);
         // A `setup-complete` mark holds for the incarnations after it.
@@ -170,10 +175,12 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         }
         let inj = injected(&inc, k);
         nfaults += inj.len();
-        faults.extend(
-            inj.into_iter()
-                .take(FAULTS_LISTED.saturating_sub(faults.len())),
-        );
+        for f in inj {
+            if faults.len() == FAULTS_RECENT {
+                faults.pop_front();
+            }
+            faults.push_back(f);
+        }
         if end.verdict.class != "crash" {
             let digest = if digests.len() == 1 {
                 format!("{:016x}", digests[0])
@@ -181,9 +188,9 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 let b: Vec<u8> = digests.iter().flat_map(|d| d.to_le_bytes()).collect();
                 format!("{:016x}", proto::rec::hash_bytes(0x696e_6361_726e, &b))
             };
-            return Ok(Outcome {
+            return Ok(RunEnd {
                 verdict: end.verdict,
-                seed: o.seed,
+                seed: o.cfg.seed,
                 incarnations: k + 1,
                 digest,
                 traps,
@@ -191,7 +198,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 refused,
                 wall_ms: t0.elapsed().as_millis() as u64,
                 crashes,
-                faults_injected: faults,
+                faults_recent: faults.into(),
                 faults_count: nfaults,
                 io,
                 insn,
@@ -205,23 +212,24 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             .ok_or_else(|| format!("bad crash verdict: {}", end.verdict.detail))?;
         let machine = cfg.crash_kind == CRASH_MACHINE;
         let t_tree = crate::launch::mono_ns();
-        let tree = next_tree(&inc, machine, o.seed, seq, o.fs_model)?;
+        let tree = next_tree(&inc, machine, o.cfg.seed, seq, o.fs_model)?;
         let t_written = crate::launch::mono_ns();
         let post = inc.join("post-crash");
         tree.write_dir(&post)
             .map_err(|e| format!("{}: {e}", post.display()))?;
         let t_digest = crate::launch::mono_ns();
-        let model = if machine {
-            format!(",\"model\":{}", json_str(o.fs_model.name()))
-        } else {
-            String::new()
-        };
-        crashes.push(format!(
-            "{{\"incarnation\":{k},\"kind\":{},\"seq\":{seq},\"vclock_ns\":{vclock}{model},\"tree_digest\":{},\"paths\":{}}}",
-            json_str(&kind),
-            json_str(&tree.digest()),
-            tree.nodes.len()
-        ));
+        let mut c = json!({
+            "incarnation": k,
+            "kind": kind,
+            "seq": seq,
+            "vclock_ns": vclock,
+            "tree_digest": tree.digest(),
+            "paths": tree.nodes.len(),
+        });
+        if machine {
+            c["model"] = json!(o.fs_model.name());
+        }
+        crashes.push(c);
         if std::env::var_os("PATINA_TIMING").is_some() {
             // the launcher's crash work: build the next tree, write it, digest it.
             eprintln!(
@@ -233,14 +241,14 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         root = Some(post);
         seq0 = end.seq;
         let gap = 1_000_000_000
-            + proto::draw(o.seed, proto::Stream::Crash, 0x7265_626f_6f74 ^ k) % 60_000_000_000;
+            + proto::draw(o.cfg.seed, proto::Stream::Crash, 0x7265_626f_6f74 ^ k) % 60_000_000_000;
         vclock0 = end.vclock_ns.max(vclock) + gap;
         if cfg.crash_at != 0 {
             // An `-at` crash fires once.
             cfg.crash_kind = CRASH_NONE;
             cfg.crash_at = 0;
         }
-        if !o.faults_in_recovery {
+        if !o.plan.faults_in_recovery {
             cfg.faults_off = 1;
         }
         k += 1;
