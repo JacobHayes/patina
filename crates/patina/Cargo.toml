@@ -1,35 +1,12 @@
 [package]
 name = "patina-dst"
-description = "Patina cooperative-SUT SDK: fault sites, oracles, and run parameters"
-readme = "../../README.md"
+description = "Patina's SDK: assertions, fault points and marks over one reserved system call"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
-[features]
-# The dependency-light cooperative-SUT SDK: the `buggify!`, `always!`,
-# `sometimes!`, `reachable!`, and lifecycle macros plus `is_simulated`/`rng`.
-# Outside a Patina build every macro compiles to a no-op or a plain fallback, so
-# a plain `cargo build` of an adopter stays lightweight and warning-free and
-# links no runtime; this crate carries no runtime deps.
-default = []
-
-# Test-only point-solution DST attribute. Keep this feature default-off so
-# production builds of adopters do not compile the proc-macro crate.
-macros = ["dep:patina-dst-macros"]
-
-[dependencies]
-patina-dst-macros = { workspace = true, optional = true }
-
-# `patina build` injects these cfgs workspace-wide; `patina_shim` is
-# additionally injected only by the native `build` paths (which link the shim), so
-# the SDK's shim FFI is referenced only where those symbols actually resolve.
-# Declaring them here keeps `-D warnings` clean without affecting adopter crates.
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(patina)',
-    'cfg(dst)',
-    'cfg(patina_shim)',
-] }
+# No dependencies, no features, no build script: outside Patina every macro is a load and a
+# branch, and on any target but Linux x86_64 the crate compiles to the inert path.

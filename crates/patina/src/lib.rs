@@ -1,268 +1,327 @@
-//! The [Patina] SDK: cooperative fault injection and test oracles, in the style
-//! of FoundationDB's `BUGGIFY` and Antithesis assertions.
+//! Patina's SDK for Rust: state invariants, mark rare paths, and expose fault points to a
+//! [Patina] run.
 //!
-//! Patina is a deterministic simulation testing (DST) runtime that runs ordinary
-//! `std` programs under a seeded virtual OS personality — same seed, same run,
-//! byte for byte. This crate is the one Patina crate an application depends on
-//! directly: it marks the fault sites and invariants that the runtime cannot
-//! know about from outside ("what if this batch path ran?", "this must *always*
-//! hold"). Its default feature set has **zero dependencies**, and every entry
-//! point is a no-op or a plain fallback outside a Patina build, so you ship it
-//! unconditionally — no `cfg(patina)`, no runtime dependency graph, no cost in
-//! production. The default-off `macros` feature adds only the test-time
-//! `#[patina_dst::test]` attribute for point-solution DST tests under plain
-//! `cargo test`:
+//! Every call goes through one reserved system call that the Patina runtime answers. Outside
+//! Patina the kernel answers `ENOSYS`; the first call learns that, and from then on every macro
+//! is a load and a branch. There are no dependencies, no features and no build flags, and on any
+//! target but Linux x86_64 the crate compiles to the inert path, so code ships it
+//! unconditionally. It works in `no_std`.
 //!
 //! ```
-//! fn should_flush(batch: &[u64], limit: usize) -> bool {
-//!     patina_dst::always!(batch.len() <= limit, "batch-bounded"); // fatal if false
-//!     patina_dst::sometimes!(batch.len() > 100, "large-batch-seen"); // coverage oracle
-//!     // The flush timer can fire before a batch fills: a rare path, taken only
-//!     // under Patina on seed-chosen runs. Under a plain `cargo build` the site
-//!     // is a constant `false`.
-//!     batch.len() == limit || (!batch.is_empty() && patina_dst::buggify!("flush-before-full"))
+//! fn commit(ledger: &mut Vec<u64>, entry: u64) {
+//!     // A rare path, taken on seed-chosen evaluations under `patina run --buggify`.
+//!     if patina_dst::buggify!("batch-commit") && !ledger.is_empty() {
+//!         ledger.insert(ledger.len() - 1, entry);
+//!     } else {
+//!         ledger.push(entry);
+//!     }
+//!     patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
+//!     patina_dst::sometimes!(ledger.len() > 4, "ledger-grew");
 //! }
-//!
-//! assert!(!should_flush(&[1, 2, 3], 8)); // outside Patina: buggify! never fires
-//! ```
-//!
-//! Instrumented programs run under the deterministic runtime with
-//! `patina build` / `patina run`; fault sites arm with
-//! `patina run --buggify`, and every decision is a pure function of
-//! `--seed`. See the repository [README] and [TUTORIAL] for the ten-minute
-//! version.
-//!
-//! # The SDK surface
-//!
-//! - [`buggify!`] / [`buggify_with_prob!`] — a probabilistic fault trigger at a
-//!   labeled site. Under Patina, an activated site fires deterministically from
-//!   the run seed; outside Patina it is always `false`.
-//! - [`buggify_delay!`] — inject a deterministic delay through the virtual clock
-//!   (never a real sleep); [`buggify_delay_for!`] stalls by a duration the
-//!   caller sizes.
-//! - [`buggify_knob!`] — a per-run perturbed value within a range.
-//! - [`always!`] — a fatal invariant: under Patina a violation reports a
-//!   `violation` verdict and aborts; outside it is inert.
-//! - [`sometimes!`] / [`reachable!`] — coverage oracles.
-//! - [`verdict`] — report a structured outcome ([`VerdictKind`]) about the run:
-//!   recorded as a trace event and surfaced in the result envelope's
-//!   `verdicts[]`. An `always!` violation reports one automatically.
-//! - [`param`] — a named run parameter (`patina run --param K=V`), recorded
-//!   and restored on replay; `None` outside Patina.
-//! - [`is_simulated`] / [`rng`] and the [`lifecycle`] module.
-//! - With the default-off `macros` feature, `#[patina_dst::test]` runs the
-//!   annotated test through `patina test` from plain `cargo test`.
-//!
-//! A fault site does only what the real system can do at that point and leaves
-//! the state that would follow; [`buggify!`] states the standard.
-//!
-//! # Labels, helpers and families
-//!
-//! A site label is a compile-time `&str`: a literal, a `const`, or `concat!`.
-//! Every site macro declares its label in the link-time site table, so a site
-//! that never runs is still reported. A label computed at runtime (`String`,
-//! `format!`) is a compile error:
-//!
-//! ```compile_fail
-//! let shard = 3;
-//! patina_dst::reachable!(format!("shard-{shard}"));
-//! ```
-//!
-//! ```
-//! const LABEL: &str = "const-label";
-//! patina_dst::reachable!(LABEL);
-//! patina_dst::reachable!(concat!("concat-", "label"));
-//! ```
-//!
-//! Labels must be unique across the program; one reused at a different call
-//! site is fatal, and the link-time table catches it before the guest runs,
-//! even when neither site is ever evaluated. The embedder emits
-//! `PATINA_BUGGIFY_DUPLICATE_LABEL` and aborts.
-//!
-//! A site's identity is its label. A *function* that contains an assertion is one
-//! site, however many callers it has: every caller aggregates into it, as in
-//! the Antithesis SDKs. To get one site per caller, write the helper as a
-//! `macro_rules!` that takes the label as a parameter, so each expansion is its
-//! own site:
-//!
-//! ```
-//! macro_rules! check_sorted {
-//!     ($values:expr, $label:expr) => {
-//!         patina_dst::always!($values.windows(2).all(|w| w[0] <= w[1]), $label)
-//!     };
+//! let mut l = vec![];
+//! for e in 0..8 {
+//!     commit(&mut l, e);
 //! }
-//! check_sorted!([1, 2, 3], "ledger-sorted");
-//! check_sorted!([4, 5, 6], "journal-sorted");
+//! assert!(!patina_dst::is_simulated());
 //! ```
 //!
-//! When the same check genuinely runs for many dynamic instances (one per
-//! shard, table or connection), do not compute the label. Declare a family up
-//! front with a literal label ([`always_family!`], [`sometimes_family!`],
-//! [`reachable_family!`]) and put the varying part in the call's detail, not in
-//! its identity. The family is one declared site, so it is reported even if it
-//! never runs; an [`always_family!`] violation reports its detail as a verdict
-//! under the family label:
+//! - [`always!`]: an invariant. Under Patina a failure ends the run with outcome `violation`
+//!   and the message `label: detail`; the detail is formatted only on failure.
+//!   [`unreachable!`] and [`violation`] are `always!(false, ..)`.
+//! - [`sometimes!`], [`reachable!`]: coverage oracles, reported per run and folded by a sweep.
+//! - [`buggify!`], [`buggify_with_prob!`]: a fault point. False unless the run has
+//!   `--buggify`; then a point is active in a quarter of runs and an active point fires on a
+//!   quarter of its evaluations, decided from the seed and the label alone. `--fault
+//!   point:LABEL=PERMILLE` forces one point's rate (`0`: off).
+//! - [`buggify_knob!`]: a seed-chosen integer in a range; [`buggify_delay!`]: maybe sleep a
+//!   seeded virtual time.
+//! - [`mark!`] names a point in the run's log; [`setup_complete`] marks the end of setup (with
+//!   `faults-after-setup`, no fault fires before it). [`is_simulated`].
 //!
-//! ```
-//! patina_dst::always_family!(SHARD_BALANCED, "shard-balanced");
+//! # Labels and sites
 //!
-//! fn check_shard(id: u32, balance: i64) {
-//!     SHARD_BALANCED.check(balance >= 0, format_args!("shard={id}"));
-//! }
-//! check_shard(3, 10);
-//! ```
-//!
-//! [`verdict`] labels share that namespace — the same string names the same
-//! thing in `sites.json` and in a run's `verdicts[]` — but a verdict is not a
-//! site: it registers nothing, so the duplicate-label rule does not apply, and
-//! reporting one label repeatedly in a run is exactly how verdicts aggregate.
-//! Reusing an oracle's label for a verdict is therefore legal and deliberate: it
-//! joins the coverage view and the outcome view of one invariant.
-//!
-//! # No vacuous "all clean"
-//!
-//! A fault site that never fires proves nothing. Under `--buggify` the run's
-//! `sdk` facts (and a human `PATINA_SDK_REPORT` line) show how many sites
-//! registered, activated, and actually fired. Each per-site row carries the
-//! macro/import `file:line`. A green run with
-//! inert instrumentation is visible instead of silently reassuring.
-//!
-//! ## Determinism and never-reached sites
-//!
-//! SDK site macros and families also emit a dependency-free link-time site
-//! table under `cfg(patina)`. The native shim enumerates that table
-//! before the guest runs and surface `declared_site=` rows in `PATINA_SDK_REPORT`,
-//! so a `sometimes!` or `reachable!` site that no generation ever reaches still
-//! appears in campaign `sites.json` with `registered_gens=0`. The table uses no
-//! constructors and does not compute activation or firing decisions, so replay
-//! fingerprints and buggify decisions remain driven only by the runtime config,
-//! seed, and actually evaluated sites.
-//!
-//! ## Lifecycle gating (honest limitation)
-//!
-//! [`lifecycle::setup_complete`] marks the boundary between setup and workload.
-//! Patina cannot causally make sites "inert until setup" without lookahead, so
-//! buggify is armed from the start and `setup_complete()` is a boundary/coverage
-//! marker; place workload sites after it to keep setup buggify-free.
-//!
-//! # Where this crate sits (the SDK / runtime split)
-//!
-//! This crate is a pure SDK by default: it does not run applications, and it
-//! never links the simulator. The `macros` feature adds a test orchestrator that
-//! shells out to `patina`; the guest still enters through the same native
-//! shim path. Under `patina build`/`run` the native shim
-//! supplies the deterministic runtime below ordinary
-//! `std::fs`/`std::net`/clock/thread calls, so SDK-instrumented production code
-//! needs no explicit runtime dependency (see [USAGE-MODES.md]).
-//! The `cfg(patina)`/`cfg(patina_shim)` markers this crate compiles against are
-//! injected by `patina build` — an adopter never sets them.
+//! A macro's label is a compile-time `&str` (a literal, a `const`, `concat!`). Each expansion
+//! is a site: it keeps one static byte, so a passing assertion traps only the first time it is
+//! evaluated (a `sometimes!` also the first time it holds), and it places a record in the ELF
+//! section `patina_sites`, which the runtime reads before the program starts, so a site that
+//! is never reached is still reported. Sites with one label and kind are one row of the run's
+//! table, however many expansions share it. A check that runs for many dynamic instances keeps
+//! one label and puts the instance in the detail ([`always_family!`]).
 //!
 //! [Patina]: https://github.com/JacobHayes/patina
-//! [README]: https://github.com/JacobHayes/patina/blob/main/README.md
-//! [TUTORIAL]: https://github.com/JacobHayes/patina/blob/main/TUTORIAL.md
-//! [USAGE-MODES.md]: https://github.com/JacobHayes/patina/blob/main/USAGE-MODES.md
+#![no_std]
 
-/// Run a test under Patina, across seeds, from plain `cargo test`.
-///
-/// The arguments are the flags of `patina test`, with `_` for `-`, and are
-/// checked when the test is compiled:
-///
-/// ```no_run
-/// #[patina_dst::test(seeds = 30, buggify_fire_permille = 500, fs_error_permille = 20)]
-/// fn survives_faults() {}
-/// ```
-///
-/// ```compile_fail
-/// #[patina_dst::test(seedz = 30)]
-/// fn a_misspelled_argument_does_not_compile() {}
-/// ```
-///
-/// ```compile_fail
-/// #[patina_dst::test(seeds)]
-/// fn nor_does_a_missing_value() {}
-/// ```
-#[cfg(feature = "macros")]
-pub use patina_dst_macros::test;
+#[doc(hidden)]
+pub mod __rt {
+    pub use crate::sys::*;
+}
+mod sys;
 
-// ---- Cooperative-SUT SDK ------------------------------------------------------
+pub use sys::{is_simulated, mark as mark_label};
 
-mod simulation;
-mod site_family;
-mod static_sites;
-mod test_harness;
-mod verdict;
-
-pub use simulation::{is_simulated, param, rng};
-pub use site_family::{AlwaysFamily, ReachableFamily, SometimesFamily};
-pub use verdict::{VerdictKind, verdict};
-
-/// Lifecycle markers for cooperating with the simulator's run phases.
-///
-/// ```
-/// // Build fixtures, open stores, spawn workers ... then:
-/// patina_dst::lifecycle::setup_complete();
-/// patina_dst::lifecycle::event!("workload-started");
-/// // Both are no-ops outside Patina.
-/// ```
-pub mod lifecycle {
-    pub use crate::lifecycle_event as event;
-
-    /// Mark the boundary between setup and the workload under test. Emits a
-    /// `PATINA_LIFECYCLE setup_complete` marker under Patina; a no-op outside.
-    ///
-    /// Pair with `patina run --buggify --buggify-after-setup`, which gates
-    /// fault injection off until this call (and fails the run loudly if the
-    /// guest never makes it). See the crate docs for the honest limits of
-    /// lifecycle gating.
-    #[inline]
-    pub fn setup_complete() {
-        crate::__rt::lifecycle_setup_complete();
-    }
+/// Mark the end of setup: with `faults-after-setup`, no fault fires before this call.
+pub fn setup_complete() {
+    sys::mark("setup-complete");
 }
 
-/// Implementation shims the SDK macros expand into. Not a stable public API;
-/// call the macros, not these functions.
-#[doc(hidden)]
-pub mod __rt;
-
-/// FFI into the native shim. Declared only when the shim is actually linked
-/// (`cfg(patina_shim)`, injected by `patina build`). Under a plain
-/// `cargo build` these symbols are never referenced, so nothing is left
-/// unresolved at link time.
-mod ffi;
+/// Report a failed invariant under a label computed at run time. The label is not declared
+/// ahead, so prefer [`always!`] with a literal label.
+pub fn violation(label: &str, detail: &str) {
+    sys::violation(label, detail);
+}
 
 #[doc(hidden)]
 #[macro_export]
-macro_rules! __patina_static_site {
-    ($label:expr, $site:expr, $kind:expr) => {
-        // A label must be a compile-time `&str`; anything else fails here.
-        const _: &str = $label;
-        #[allow(unexpected_cfgs)]
+macro_rules! __site {
+    ($kind:expr, $label:expr) => {
+        const __PATINA_LABEL: &str = $label;
+        const __PATINA_LOC: &str = ::core::concat!(::core::file!(), ":", ::core::line!());
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         const _: () = {
-            #[cfg(patina)]
             #[used]
-            #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__patina_sites"))]
-            #[cfg_attr(not(target_os = "macos"), unsafe(link_section = "patina_sites"))]
-            static __PATINA_SITE: $crate::__rt::StaticSiteDescriptor =
-                $crate::__rt::StaticSiteDescriptor::new($label, $site, $kind);
+            #[unsafe(link_section = "patina_sites")]
+            static __PATINA_REC: $crate::__rt::Rec<
+                { __PATINA_LABEL.len() },
+                { $crate::__rt::loc_len(__PATINA_LOC) },
+            > = $crate::__rt::Rec::new($kind, __PATINA_LABEL, __PATINA_LOC);
         };
     };
 }
 
-#[macro_use]
-mod site_macros;
-
-#[doc(hidden)]
-pub use site_macros::{SDK_SITE_MACROS, SdkSiteMacro};
-
-/// Emit a named lifecycle marker (`PATINA_LIFECYCLE_EVENT label=<label>`) under
-/// Patina; a no-op outside. Invoke as [`lifecycle::event!`](crate::lifecycle::event).
+/// Assert an invariant: `always!(cond, "label")` or `always!(cond, "label", "fmt", args..)`.
+/// Under Patina a false `cond` ends the run as `violation` with `label: detail`.
+///
+/// ```
+/// let balance = 10;
+/// patina_dst::always!(balance >= 0, "balance-non-negative", "balance {balance}");
+/// ```
 #[macro_export]
-macro_rules! lifecycle_event {
-    ($label:expr) => {
-        $crate::__rt::lifecycle_event($label)
+macro_rules! always {
+    ($cond:expr, $label:expr $(,)?) => {
+        $crate::always!($cond, $label, "")
+    };
+    ($cond:expr, $label:expr, $($detail:tt)+) => {{
+        $crate::__site!($crate::__rt::KIND_ALWAYS, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.always($cond, __PATINA_LABEL, |w| {
+            let _ = ::core::fmt::Write::write_fmt(w, ::core::format_args!($($detail)+));
+        })
+    }};
+}
+
+/// `always!(false, ..)`: this point must not be reached.
+///
+/// ```
+/// fn parse(b: u8) -> u8 {
+///     match b {
+///         0..=127 => b,
+///         _ => {
+///             patina_dst::unreachable!("high-byte", "byte {b}");
+///             0
+///         }
+///     }
+/// }
+/// assert_eq!(parse(5), 5);
+/// ```
+#[macro_export]
+macro_rules! unreachable {
+    ($label:expr $(,)?) => {
+        $crate::always!(false, $label)
+    };
+    ($label:expr, $($detail:tt)+) => {
+        $crate::always!(false, $label, $($detail)+)
     };
 }
 
-#[cfg(test)]
-mod tests;
+/// Coverage: `cond` should hold on some runs.
+///
+/// ```
+/// let hit = [7].contains(&7);
+/// patina_dst::sometimes!(hit, "cache-hit");
+/// ```
+#[macro_export]
+macro_rules! sometimes {
+    ($cond:expr, $label:expr $(,)?) => {{
+        $crate::__site!($crate::__rt::KIND_SOMETIMES, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.sometimes($cond, __PATINA_LABEL)
+    }};
+}
+
+/// Coverage: this point should be reached on some runs.
+///
+/// ```
+/// patina_dst::reachable!("recovery-ran");
+/// ```
+#[macro_export]
+macro_rules! reachable {
+    ($label:expr $(,)?) => {{
+        $crate::__site!($crate::__rt::KIND_REACHABLE, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.reachable(__PATINA_LABEL)
+    }};
+}
+
+/// A fault point: true on seed-chosen evaluations of a run with `--buggify`, else false. It
+/// takes a path the real system can take there (a short write, an error, an early flush).
+///
+/// ```
+/// let n = if patina_dst::buggify!("short-write") { 1 } else { 3 };
+/// assert_eq!(n, 3);
+/// ```
+#[macro_export]
+macro_rules! buggify {
+    ($label:expr $(,)?) => {{
+        $crate::__site!($crate::__rt::KIND_BUGGIFY, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.point(false, __PATINA_LABEL, -1)
+    }};
+}
+
+/// [`buggify!`] at probability `p` (`0.0..=1.0`) per evaluation instead of the run default.
+///
+/// ```
+/// assert!(!patina_dst::buggify_with_prob!("aggressive-retry", 1.0));
+/// ```
+#[macro_export]
+macro_rules! buggify_with_prob {
+    ($label:expr, $p:expr $(,)?) => {{
+        $crate::__site!($crate::__rt::KIND_BUGGIFY, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.point(false, __PATINA_LABEL, $crate::__rt::permille($p))
+    }};
+}
+
+/// A tunable: `default` outside Patina or without `--buggify`; with it, an active point's value
+/// is a seed-chosen `i64` in `[lo, hi]`, fixed for the run.
+///
+/// ```
+/// let batch = patina_dst::buggify_knob!("batch-size", 64, 1, 1024);
+/// assert_eq!(batch, 64);
+/// ```
+#[macro_export]
+macro_rules! buggify_knob {
+    ($label:expr, $default:expr, $lo:expr, $hi:expr $(,)?) => {{
+        $crate::__site!($crate::__rt::KIND_KNOB, $label);
+        $crate::__rt::knob(__PATINA_LABEL, $default, $lo, $hi)
+    }};
+}
+
+/// Maybe sleep a seeded virtual time (never a real one): between 1 ms and 5 s, or up to `max`
+/// (a `Duration`). Returns whether it slept.
+///
+/// ```
+/// assert!(!patina_dst::buggify_delay!("pre-heartbeat-stall"));
+/// ```
+#[macro_export]
+macro_rules! buggify_delay {
+    ($label:expr $(,)?) => {
+        $crate::buggify_delay!(@ $label, 0)
+    };
+    ($label:expr, $max:expr $(,)?) => {
+        $crate::buggify_delay!(@ $label, $crate::__rt::nanos($max))
+    };
+    (@ $label:expr, $ns:expr) => {{
+        $crate::__site!($crate::__rt::KIND_DELAY, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.point(true, __PATINA_LABEL, $ns)
+    }};
+}
+
+/// A named point in the run's log (any `&str`, not declared ahead).
+///
+/// ```
+/// patina_dst::mark!("workload-started");
+/// ```
+#[macro_export]
+macro_rules! mark {
+    ($label:expr $(,)?) => {
+        $crate::mark_label($label)
+    };
+}
+
+/// A declared `always!` site that many callers share; see [`always_family!`].
+pub struct AlwaysFamily {
+    label: &'static str,
+    site: sys::Site,
+}
+
+/// A declared `sometimes!` site that many callers share; see [`sometimes_family!`].
+pub struct SometimesFamily {
+    label: &'static str,
+    site: sys::Site,
+}
+
+/// A declared `reachable!` site that many callers share; see [`reachable_family!`].
+pub struct ReachableFamily {
+    label: &'static str,
+    site: sys::Site,
+}
+
+impl AlwaysFamily {
+    #[doc(hidden)]
+    pub const fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            site: sys::Site::new(),
+        }
+    }
+    /// Assert `cond` for one instance; `detail` names it and is formatted only on failure.
+    pub fn check(&self, cond: bool, detail: impl core::fmt::Display) {
+        self.site.always(cond, self.label, |w| {
+            let _ = core::fmt::Write::write_fmt(w, format_args!("{detail}"));
+        });
+    }
+}
+
+impl SometimesFamily {
+    #[doc(hidden)]
+    pub const fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            site: sys::Site::new(),
+        }
+    }
+    pub fn check(&self, cond: bool) {
+        self.site.sometimes(cond, self.label);
+    }
+}
+
+impl ReachableFamily {
+    #[doc(hidden)]
+    pub const fn new(label: &'static str) -> Self {
+        Self {
+            label,
+            site: sys::Site::new(),
+        }
+    }
+    pub fn hit(&self) {
+        self.site.reachable(self.label);
+    }
+}
+
+macro_rules! family_macros {
+    ($d:tt; $($name:ident, $ty:ident, $kind:ident;)*) => {$(
+        #[doc = concat!("Declare a [`", stringify!($ty), "`]: one literal-label site for any number of callers.")]
+        ///
+        /// ```
+        /// patina_dst::always_family!(SHARD_BALANCED, "shard-balanced");
+        /// SHARD_BALANCED.check(10 >= 0, format_args!("shard={}", 3));
+        /// ```
+        #[macro_export]
+        macro_rules! $name {
+            ($d vis:vis $d id:ident, $d label:expr $d(,)?) => {
+                $d vis static $d id: $d crate::$ty = {
+                    $d crate::__site!($d crate::__rt::$kind, $d label);
+                    $d crate::$ty::new(__PATINA_LABEL)
+                };
+            };
+        }
+    )*};
+}
+
+family_macros! { $;
+    always_family, AlwaysFamily, KIND_ALWAYS;
+    sometimes_family, SometimesFamily, KIND_SOMETIMES;
+    reachable_family, ReachableFamily, KIND_REACHABLE;
+}

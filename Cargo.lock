@@ -17,5 +17,9 @@ dependencies = [
 ]
 
 [[package]]
+name = "patina-dst"
+version = "0.6.0-dev"
+
+[[package]]
 name = "patina-proto"
 version = "0.6.0-dev"

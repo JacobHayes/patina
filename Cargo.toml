@@ -1,8 +1,8 @@
 [workspace]
-members = ["crates/patina-proto", "crates/patina-cli"]
+members = ["crates/patina-proto", "crates/patina-cli", "crates/patina"]
 # The in-guest runtime is built for its own target by patina-cli's build script, with its own
-# lock file. The SDK and the documented examples are not built on this branch yet.
-exclude = ["crates/patina-rt", "crates/patina", "examples"]
+# lock file. The examples are programs of their own, built with their own tools.
+exclude = ["crates/patina-rt", "examples"]
 resolver = "2"
 
 # The supervisor must die on a panic, never unwind past a half-updated control region.

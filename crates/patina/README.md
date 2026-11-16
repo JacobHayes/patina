@@ -1,3 +1,20 @@
 # patina-dst (Rust SDK)
 
-> Not built on this branch yet: parked until it is rebuilt on the new engine.
+State invariants, mark rare paths and expose fault points to a Patina run. One reserved system
+call carries every call; outside Patina the kernel answers `ENOSYS`, the first call learns it,
+and from then on each macro is a load and a branch. No dependencies, no features, `no_std`.
+
+```rust
+if patina_dst::buggify!("batch-commit") { /* a rare path the real system can take */ }
+patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
+patina_dst::sometimes!(ledger.len() > 4, "ledger-grew");
+patina_dst::reachable!("recovery-ran");
+let batch = patina_dst::buggify_knob!("batch-size", 64, 1, 1024);
+patina_dst::buggify_delay!("pre-heartbeat-stall");
+patina_dst::setup_complete();
+```
+
+A failed `always!` ends the run with outcome `violation` and `label: detail`. Fault points
+fire only in a run with `--buggify`, on evaluations chosen from the seed and the label. Every
+call is in the run's boundary log, so replay checks it. The crate docs (`src/lib.rs`) have the
+details; `sdk/c/patina.h` documents the wire.
