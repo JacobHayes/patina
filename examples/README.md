@@ -30,7 +30,7 @@ cargo build --release --manifest-path examples/ledger/Cargo.toml
 patina sweep --seeds 1..20 --buggify --out patina-out/ledger -- examples/ledger/target/release/ledger
 ```
 
-Expected: `violation always: ledger-sorted`, on about 4 of the 20 seeds.
+Expected: `violation always: ledger-sorted: after N`, on about 4 of the 20 seeds.
 
 ## journal-py (Python, SDK): a short write found by disk faults
 
@@ -43,7 +43,7 @@ patina sweep --seeds 1..20 --faults disk --out patina-out/journal-py \
   -- python3 /guest/journal.py
 ```
 
-Expected: `violation always: journal-intact`, about 12 of the 20 seeds, with `faults in every
+Expected: `violation always: journal-intact: N bytes`, about 12 of the 20 seeds, with `faults in every
 failing run: fs-short`.
 
 ## acklog-c (C, SDK): lost data found by machine crashes
@@ -56,7 +56,7 @@ cc -I sdk/c -o acklog examples/acklog-c/acklog.c
 patina sweep --seeds 1..20 --crash machine --out patina-out/acklog -- ./acklog
 ```
 
-Expected: `violation always: acked-records-kept`, about 6 of the 20 seeds.
+Expected: `violation always: acked-records-kept: N acknowledged, N stored`, about 6 of the 20 seeds.
 
 ## bank-go (Go, SDK): a double deposit found by network faults
 
@@ -69,6 +69,6 @@ go build -C examples/bank-go -o "$PWD/bank"
 patina sweep --seeds 1..20 --fault net-reset-permille=50 --out patina-out/bank -- ./bank
 ```
 
-Expected: `violation always: balance-matches-deposits`, about 11 of the 20 seeds.
+Expected: `violation always: balance-matches-deposits: balance N, deposits N`, about 11 of the 20 seeds.
 
 `tests/examples/01-examples.sh` runs these sweeps and their fixed variants in the quick check.

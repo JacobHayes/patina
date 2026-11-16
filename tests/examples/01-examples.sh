@@ -33,10 +33,10 @@ example() {
 
 example quickstart 'failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101' 0 \
     -- "$E/jobs"
-example ledger 'violation always: ledger-sorted' 1 --buggify -- "$E/ledger"
-example journal-py 'violation always: journal-intact' 1 --faults disk --mount "$E":/guest -- python3 /guest/journal.py
-example acklog-c 'violation always: acked-records-kept' 1 --crash machine -- "$E/acklog"
-example bank-go 'violation always: balance-matches-deposits' 1 --fault net-reset-permille=50 -- "$E/bank"
+example ledger 'violation always: ledger-sorted: after N' 1 --buggify -- "$E/ledger"
+example journal-py 'violation always: journal-intact: N bytes' 1 --faults disk --mount "$E":/guest -- python3 /guest/journal.py
+example acklog-c 'violation always: acked-records-kept: N acknowledged, N stored' 1 --crash machine -- "$E/acklog"
+example bank-go 'violation always: balance-matches-deposits: balance N, deposits N' 1 --fault net-reset-permille=50 -- "$E/bank"
 
 [ "$FAILS" = 0 ] || { echo "$FAILS check(s) failed"; exit 1; }
 echo "all checks passed"

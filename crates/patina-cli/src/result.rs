@@ -417,8 +417,11 @@ pub struct SdkSite {
 }
 
 impl SdkReport {
+    /// The table as the runtime left it, with labels and locations made checkout-free
+    /// (`signature::checkout_free`): a label built from a source path names the same site in
+    /// every checkout.
     pub fn read(t: &proto::sdk::SdkTab) -> SdkReport {
-        let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let s = |b: &[u8]| crate::signature::checkout_free(&String::from_utf8_lossy(b));
         let mut r = SdkReport {
             sites: t
                 .used()
@@ -434,7 +437,9 @@ impl SdkReport {
                 .collect(),
             dropped: t.dropped,
             setup_complete: t.setup_seq != 0,
-            violation: t.violation_parts().map(|(l, d)| (s(l), s(d))),
+            violation: t
+                .violation_parts()
+                .map(|(l, d)| (s(l), String::from_utf8_lossy(d).into_owned())),
         };
         r.sites
             .sort_by(|a, b| (&a.label, a.kind).cmp(&(&b.label, b.kind)));

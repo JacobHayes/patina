@@ -5,16 +5,27 @@
 //! status; the unsupported call. Fault settings are not part of it. Written into `result.json`
 //! when the run ends; readers take it from there.
 //!
+//! A violation is named by its label and the first line of its detail: a program that reports
+//! every failure under one label still gets one group per bug.
+//!
 //! The rule for numbers: what names the failure is kept as it is (the exit status, the signal
 //! name, an SDK label, a call's name); numbers in text the guest or the supervisor wrote are
 //! collapsed (`normalise`), because addresses, line and column numbers, thread and process
-//! ids, counts and durations vary by seed and build while the bug stays the same.
+//! ids, counts and durations vary by seed and build while the bug stays the same. Absolute
+//! paths keep their last three components (`checkout_free`), so a label made from a source
+//! file's path is the same in every checkout.
 
 use serde_json::Value;
 use std::path::Path;
 
 /// Longest `primary` kept (characters).
 const PRIMARY_MAX: usize = 200;
+/// Longest part of a violation's detail kept in its signature (characters): enough to tell
+/// one message from another, short enough that context a program appends (state dumps,
+/// counters) does not split one bug.
+const DETAIL_MAX: usize = 64;
+/// Components an absolute path keeps (`checkout_free`).
+const PATH_KEEP: usize = 3;
 
 /// The signature of a finished run (`null` for `ok`). `dir` is its run directory: the last
 /// incarnation's stderr is read there for a panic or assertion line.
@@ -40,8 +51,25 @@ fn primary(r: &Value, stderr: &str) -> String {
     let message = r["message"].as_str().unwrap_or("");
     let p = match r["outcome"].as_str().unwrap_or("") {
         "violation" => match r["sdk"]["violation"]["label"].as_str() {
-            // The label is the assertion's name: kept as written.
-            Some(l) => return l.chars().take(PRIMARY_MAX).collect(),
+            // The label is the assertion's name: kept as written (but checkout-free); the
+            // detail's first line, normalised, tells apart bugs reported under one label.
+            Some(l) => {
+                let mut p = checkout_free(l);
+                let first = r["sdk"]["violation"]["detail"]
+                    .as_str()
+                    .unwrap_or("")
+                    .lines()
+                    .find(|x| !x.trim().is_empty())
+                    .unwrap_or("");
+                let d: String = normalise(&checkout_free(first))
+                    .chars()
+                    .take(DETAIL_MAX)
+                    .collect();
+                if !d.is_empty() {
+                    p = format!("{p}: {}", d.trim_end());
+                }
+                return p.chars().take(PRIMARY_MAX).collect();
+            }
             None => message.to_string(),
         },
         "liveness" => {
@@ -83,6 +111,40 @@ fn primary(r: &Value, stderr: &str) -> String {
         _ => String::new(),
     };
     normalise(&p)
+}
+
+/// `s` with every absolute path cut to its last three components: `/home/u/src/app/crates/
+/// store/src/log.rs:42` becomes `store/src/log.rs:42`. A path starts at a `/` that begins a
+/// word or follows a character that cannot be part of a name (`(`, `"`, `=`, ...).
+pub fn checkout_free(s: &str) -> String {
+    let name = |c: char| c.is_alphanumeric() || "._-~+@".contains(c);
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('/') {
+        let starts = rest[..i]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !name(c) && c != '/');
+        if !starts {
+            out.push_str(&rest[..=i]);
+            rest = &rest[i + 1..];
+            continue;
+        }
+        out.push_str(&rest[..i]);
+        let path = &rest[i..];
+        let end = path
+            .find(|c: char| c.is_whitespace() || "\"'()[]{}<>,;`".contains(c))
+            .unwrap_or(path.len());
+        let comps: Vec<&str> = path[..end].split('/').filter(|c| !c.is_empty()).collect();
+        if comps.len() > PATH_KEEP {
+            out.push_str(&comps[comps.len() - PATH_KEEP..].join("/"));
+        } else {
+            out.push_str(&path[..end]);
+        }
+        rest = &path[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// The distinct `wait=` tokens of a parked-threads detail, sorted, normalised.
@@ -222,15 +284,16 @@ mod tests {
             sig(fail(101), &panic("main", 10, "called unwrap on None"))
         );
         assert_ne!(sig(fail(3), ""), sig(fail(4), ""));
-        // A violation is named by its label, not its detail.
+        // A violation is named by its label and its detail's first line, numbers collapsed.
         let v = |detail: &str| {
             json!({"outcome": "violation", "stop": "always", "message": detail,
                    "sdk": {"violation": {"label": "balance", "detail": detail}}})
         };
         assert_eq!(
-            sig(v("balance -1"), ""),
-            sig(v("balance -7 at 0xdead00"), "")
+            sig(v("balance -1\nstate 4"), ""),
+            sig(v("balance -7\nstate 9 at 0xdead00"), "")
         );
+        assert_ne!(sig(v("balance -1"), ""), sig(v("lost entry 3"), ""));
         // Without a panic line, the last informative stderr line names the failure.
         assert_eq!(
             sig(fail(1), "round 3\nno convergence after 412 rounds\n"),
@@ -251,6 +314,24 @@ mod tests {
         assert!(s.ends_with("exit 101") && !s.contains("10:9"), "{s}");
         // Ok has none.
         assert!(of(&json!({"outcome": "ok"}), Path::new("/nonexistent")).is_null());
+    }
+
+    #[test]
+    fn paths_lose_their_checkout() {
+        let a = "/src/a/app-ws1/crates/store/src/log.rs:42:unreachable";
+        let b = "/home/u/app/crates/store/src/log.rs:42:unreachable";
+        assert_eq!(checkout_free(a), checkout_free(b));
+        assert_eq!(checkout_free(a), "store/src/log.rs:42:unreachable");
+        assert_eq!(checkout_free("open /x/y failed"), "open /x/y failed");
+        assert_eq!(
+            checkout_free("at (/a/b/c/d/e.rs:1) and a/b/c/d"),
+            "at (c/d/e.rs:1) and a/b/c/d"
+        );
+        let l = |label: &str| {
+            json!({"outcome": "violation", "stop": "always", "message": "x",
+                   "sdk": {"violation": {"label": label, "detail": ""}}})
+        };
+        assert_eq!(sig(l(a), ""), sig(l(b), ""));
     }
 
     #[test]

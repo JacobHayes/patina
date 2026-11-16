@@ -138,7 +138,7 @@ injected; `faults.injected` is their sum.
 A failing group says which fault classes were injected in every failing run, and in none:
 
 ```text
-violation always: journal-intact
+violation always: journal-intact: N bytes
   12 of 20 runs   first: seed 2   replayed: identical
   faults in every failing run: fs-short      in none: fs-error, fsync-error
 ```
@@ -231,7 +231,7 @@ $ jq '{outcome, stop, message, signature, incarnations, crashes: [.crashes[].kin
   "outcome": "violation",
   "stop": "always",
   "message": "acked-records-kept: 23 acknowledged, 0 stored",
-  "signature": "violation always: acked-records-kept",
+  "signature": "violation always: acked-records-kept: N acknowledged, N stored",
   "incarnations": 2,
   "crashes": [
     "machine"
