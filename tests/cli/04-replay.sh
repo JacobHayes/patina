@@ -38,6 +38,11 @@ prun "$RUNS/other-run" --config "$RUNS/other/run.json"
 [ "$st" = "$(exit_of error)" ] || die "other build, run --config: exit $st ($(cat "$RUNS/other-run.txt"))"
 for x in other-replay other-run; do [ ! -e "$RUNS/$x" ] || die "other build: $x was made"; done
 echo "other build: refused before running: $(head -1 "$RUNS/other.txt")"
+# A run.json from before 0.8.0 holds only the version; the refusal names it.
+python3 -I -c 'import json,sys; p=sys.argv[1]; r=json.load(open(p)); del r["patina"]; r["version"]="0.0.1"; json.dump(r,open(p,"w"))' "$RUNS/other/run.json"
+st=0; timeout 60 "$PATINA" replay "$RUNS/other" --out "$RUNS/other-replay" >"$RUNS/other.txt" 2>&1 || st=$?
+[ "$st" = "$(exit_of error)" ] || die "old run.json, replay: exit $st ($(cat "$RUNS/other.txt"))"
+grep -q -- '--version 0.0.1)' "$RUNS/other.txt" || die "old run.json: version not named ($(cat "$RUNS/other.txt"))"
 # One byte of the program changes.
 printf '\001' | dd of="$d/hello" bs=1 seek=1000 conv=notrunc status=none
 replay "$RUNS/ok"

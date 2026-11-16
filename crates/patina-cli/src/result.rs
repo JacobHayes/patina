@@ -466,7 +466,11 @@ pub fn same_build(run: &Value, at: &Path) -> Res<()> {
         Some((v, h)) => format!("{v} ({})", h.chars().take(12).collect::<String>()),
         None => b.to_string(),
     };
-    let was = run["patina"].as_str().unwrap_or("?");
+    // A run.json from before 0.8.0 records only the version.
+    let was = run["patina"]
+        .as_str()
+        .or(run["version"].as_str())
+        .unwrap_or("?");
     Err(format!(
         "{}: made by patina {}, this is patina {}; replay it with that build (install.sh --version {}) or run the seed again with this one",
         at.display(),
