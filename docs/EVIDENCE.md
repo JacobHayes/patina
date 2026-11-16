@@ -460,3 +460,81 @@ patina sweep --seeds 0..4 --cases cases --out OUT --mount "$t:$d" -j 6 \
 
 `assets::tests::inline_script_parses` passes by skipping its check: it runs `node --check`,
 and `node` is not on the guest's `PATH`.
+
+## Acceptance: monty
+
+pydantic/monty's harness (`dst/`, a local bookmark; nothing upstream) on the tree of its
+upstream `main` without the three fixes, so its findings are present. The guests are plain
+`cargo build` (debug; `--cfg patina` from a `.cargo/config.toml` compiles monty's ~450
+assertion and coverage sites); the old build step, `--allow-unsupported-symbols`, `--target
+native`, the staging through `patina test` and `classify.py` are gone. `patina` built from
+`999be00b` (no `--version`; `run.json` says 0.6.0-dev), 2026-11-16, this host, every sweep
+`-j 6` under `capped` beside other builders' work (load 5 to 10). `RT` is the round-trip
+guest, `MMC` the drop-checking guest; each run executes all 736 datatest cases.
+
+| Finding | Command | Rate | First seed | Wall |
+|---|---|---|---|---|
+| clean baseline | `RT`'s sweep below, seeds 0..99 | 99 `ok`, 1 finding 1 (seed 65); no `unsupported`, `internal`, `nondeterministic` | - | - |
+| 1 host call at the recursion ceiling | `sweep --seeds 0..999 --budget 540 -- RT` | 6/376 (budget stopped it) | 65 | 560 s |
+| 2 `sorted()` kwargs leak | `sweep --seeds 4000..5999 --budget 150 --time-limit 1000000000 --buggify -- MMC` | 0/149 | - | 156 s |
+| 3 leak when a poll raises | `sweep --seeds 0..1999 --budget 270 --time-limit 1000000000 --buggify --fault buggify-permille=1000 -- MMC` | 0/290 at an injected fault | - | 277 s |
+| 3, the old settings (point forced active, 5 permille) | `... --fault point:resource-time-limit-fires=5`, seeds 2000..3999, `--budget 240` | 0/489 at an injected fault | - | 245 s |
+| 3, the harness's poll enumerator | `run --seed 0 --time-limit 1000000000 --env MONTY_DST_EXHAUSTIVE=1 --env MONTY_DST_CASES=slice -- MMC` | found (the drop checker aborts the guest: `crash signal: SIGABRT`) | 0 | 0.4 s |
+
+- Finding 1 replayed 5 times from seed 65, each `identical`; `verify --seed 65 --runs 5
+  --vary cpu,load` identical (one digest). The enumerator's run: the same, 5 and 5.
+- Finding 2 is out of reach of this harness: the fault site that found it
+  (`resource-allocation-limit-fires`) was removed from the harness for faking memory refusals
+  real usage would not make. Finding 3's random-sweep reach is mostly gone too: upstream fixed
+  all but one of its sites, and at `buggify-permille=1000` the fault lands on a case's first
+  poll, before the remaining site. The enumerator reaches it deterministically.
+- The `MMC` sweeps also show 7 runs (of 928) of an unrecorded leak of finding 3's class
+  under the harness's real small memory budget (no injected fault), first seed 112 (replay 5
+  identical, `verify` identical), and finding 1 as `violation` or, when its panic leaks
+  values while unwinding, `crash signal: SIGABRT` (seeds 2084, 2139). A sweep groups every
+  guest failure under the guest's one label (`datatest-panic`), so finding 1 and the leak
+  share a group; the run's stderr tells them apart.
+- SDK cost, `RT` seed 1, 7 runs each, interleaved: with monty's sites (447 in the
+  table) median 6.25 s, built without them (6 sites) 6.11 s, +2%, inside the spread (5.5 to
+  10.8 s); traps 288,385 against 288,197 (+188, one per first report). Natively 4.97 s and
+  4.87 s.
+- monty's own tests: `dst/patina/harnesses.sh OUT 0..0` builds the `monty` and `monty-fs`
+  test binaries with `cargo test --no-run` and runs `patina sweep --cases` over every test,
+  each alone. All 1,341 tests of 56 binaries, seed 0: 1,299 `ok`, 24 `failure` (every
+  `heap_reader_compile_fail` test: it runs `cargo rustc`, which is not in the sandbox; the
+  old engine refused these for spawning), 17 `failure` and 1 `timeout` (wall-clock time-limit
+  tests: Patina's clock does not advance with computation, so `harnesses.sh` leaves these 64
+  out). No `unsupported`, `internal` or `nondeterministic`. 191 s for the sweep, 37 s for the
+  warm test build; every failing test's first seed replayed identically.
+
+## Acceptance: rshell
+
+The Go hunt harness (local only; findings undisclosed, so local ids and counts only) against
+rshell `invariant-tooling` (unfixed; 315 SDK sites in a run's table), built with stock `go build`
+against `go/patina`, one binary for native and Patina legs; its leg driver now runs `patina
+run --out` and reads `result.json`. A corpus case lives in `/work` (`--work`), where file
+faults land; a generated case's roots are copied in at `/`. ESCAPE and the trace coverage
+checks are off (they need path strings for reads; the boundary log keeps hashes). `patina`
+from `999be00b`, 2026-11-16, this host, `-j 6`, `--cpus 4`, `--preempt traps`.
+
+| Check | Command | Result |
+|---|---|---|
+| corpus, no faults | 3,448 scenarios, seed 1 | 3,448 `ok`; 0 `compute-stall`, `internal`, `nondeterministic` |
+| finding 001 | corpus at `fs-error-permille=40`, seed 1 | found in 1 scenario (old engine: 5); 1,153 runs had a fault injected |
+| finding 004 | corpus with the run deadline cut to 30, 150 and 600 µs (seeds 1, 2, 3, the last with `fs-error-permille=40`) | found in 28 scenarios (old: 6) |
+| finding 006 | 1,000 generated TOCTOU cases with a mutator thread, seeds 1..8 | not found (0/8,000; old: 19 cases, 2 to 8 of 8 seeds each) |
+| finding 006, its own reproduction case | seeds 1..8, then 9..12 | 6/8, 10/12 |
+
+- The corpus campaign (5 legs, 17,240 runs) took 3 min 46 s, 753 child CPU-s; the TOCTOU
+  campaign (8,000 runs) 1 min 52 s. No run in either ended `unsupported`: stock Go ran
+  stall-free at default settings. `--preempt branches` was not measured: this host gives
+  `patina` no `CAP_PERFMON`.
+- Replay: the first scenario of 001 and of 004 replayed 5 times, each `identical`; `verify
+  --runs 5 --vary cpu,load` identical for both.
+- Findings the old engine's coverage-guided arm found first: 009 appears in the uniform deadline legs (94 of 10,344 runs;
+  its repeat T1 has the same cause); T7 was not in reach of these legs.
+- 006: the generated cases interleave the mutator only at system calls now; the old engine's
+  Go build also preempted at memory accesses. The finding's own case still hits most seeds.
+- The deadline legs cut only work that makes system calls: a CPU-bound script runs to the
+  end inside a 30 µs deadline, because virtual time does not advance with computation. The
+  harness's planted deadline bug is therefore not caught on a CPU-bound script.
