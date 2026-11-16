@@ -371,7 +371,7 @@ what it should be, and is not listed.
 for a checkout):
 
 ```toml
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.7.0" }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.8.0" }
 ```
 
 ```rust
@@ -389,7 +389,7 @@ The feature `compute` is for code rebuilt with compute points
 PATINA_ALWAYS(acked <= stored, "acked-records-kept", detail);
 ```
 
-**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.7.0` (the
+**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.8.0` (the
 module's tags are `go/patina/vX.Y.Z`; `@main` gives the current one).
 `examples/bank-go/go.mod` builds against its checkout with a `replace`.
 
@@ -554,7 +554,7 @@ With gcc 11 or older, build the hook file in a step of its own without the flag
 Rust, stable: the SDK with the feature `compute`, and the flags with `--target`:
 
 ```toml
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.7.0", features = ["compute"] }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.8.0", features = ["compute"] }
 ```
 
 ```sh
@@ -580,7 +580,7 @@ import _ "github.com/JacobHayes/patina/go/patina/compute"
 ```
 
 ```sh
-go get github.com/JacobHayes/patina/go/patina@v0.7.0
+go get github.com/JacobHayes/patina/go/patina@v0.8.0
 CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer -o app .
 ```
 
@@ -658,7 +658,7 @@ jobs:
       - run: |
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.7.0/install.sh | sh -s -- --version 0.7.0
+      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.8.0/install.sh | sh -s -- --version 0.8.0
       - run: cargo build && patina sweep --seeds 1..200 -- target/debug/myprog
 ```
 

@@ -11,9 +11,9 @@ special linking, any language.
 Patina is experimental. Linux x86_64 only. It needs `bwrap` (bubblewrap) and unprivileged
 user namespaces.
 
-Changes in 0.7: a program rebuilt with coverage flags switches threads and moves the clock
-inside its own computation ([the guide](docs/GUIDE.md#deeper-search-rebuilt-code)), and
-`--log-limit` bounds how much a run may log.
+Changes in 0.8: UDP sockets between the run's processes, with seeded datagram loss,
+duplication and reordering; opt-in path swaps that expose check-then-use races
+([the guide](docs/GUIDE.md#path-swaps)); and replay requires the Patina build that made the run.
 
 ## Install
 
