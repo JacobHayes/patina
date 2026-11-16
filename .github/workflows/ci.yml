@@ -33,12 +33,16 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           sudo apt-get update -qq
           sudo apt-get install -y -qq bubblewrap libsqlite3-dev libssl-dev
-          uname -r; bwrap --version; grep -m1 'model name' /proc/cpuinfo; nproc
       - uses: ./.github/actions/setup-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: check-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' }}
+      # The host facts and every requirement, with the fix for any that is missing.
+      - name: patina doctor
+        run: |
+          mise exec -- cargo build --release --quiet -p patina-cli
+          target/release/patina doctor
       # The guests are content-addressed by tests/guests.sh: a restored entry is used only when
       # its sources and compilers match, so a stale cache costs a rebuild, never a wrong guest.
       - id: guests
