@@ -32,6 +32,7 @@ pub mod io;
 pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
+mod sdk;
 pub mod signal;
 #[allow(dead_code)]
 pub mod time;
@@ -473,6 +474,7 @@ impl Sup {
                     ),
                 ));
             }
+            Some(Op::SdkViolation) => self.sdk_violation(idx, a),
             Some(Op::CrashPoint) => {
                 self.decide(Op::CrashPoint as u32, idx, a, 0);
                 self.finish(crash::crash_verdict(a, self.now()))

@@ -128,6 +128,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut net = [0u64; crate::outcome::NET_FIELDS];
     let mut unix_sockets = 0;
     let mut pmu = [0u64; proto::ctl::PMU_FIELDS];
+    let mut sdk = crate::outcome::SdkReport::default();
     let mut refused: Vec<String> = vec![];
     let mut root = o.root.clone();
     let mut k = 0;
@@ -152,6 +153,9 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         insn.add(&end.insn);
         crate::outcome::net_add(&mut net, &end.net);
         unix_sockets += end.unix_sockets;
+        sdk.add(end.sdk);
+        // A `setup-complete` mark holds for the incarnations after it.
+        cfg.fault_after_seq = end.fault_after_seq;
         for (i, (a, b)) in pmu.iter_mut().zip(end.pmu).enumerate() {
             *a = if proto::ctl::PMU_NAMES[i] == "max_skid" {
                 (*a).max(b)
@@ -194,6 +198,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 net,
                 unix_sockets,
                 pmu: (crate::launch::pmu_status(o), pmu),
+                sdk,
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

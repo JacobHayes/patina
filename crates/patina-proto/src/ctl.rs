@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 5;
+pub const LAYOUT_VERSION: u64 = 6;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -252,8 +252,8 @@ const _: () = assert!(core::mem::size_of::<Ctl>() <= 4096);
 
 pub const CTL_HEADER_SIZE: usize = 4096;
 /// Header, slots, the shared filesystem state (`vfs`), the durability state (`oplog::Dur`),
-/// then the network wire's table (`wire::WireTab`).
-pub const CTL_SIZE: usize = crate::wire::WIRE_OFFSET + crate::wire::WIRE_SIZE;
+/// the network wire's table (`wire::WireTab`), then the SDK's site table (`sdk::SdkTab`).
+pub const CTL_SIZE: usize = crate::sdk::SDK_OFFSET + crate::sdk::SDK_SIZE;
 
 /// Slot states.
 pub const SLOT_FREE: u32 = 0;
@@ -372,6 +372,9 @@ pub enum Op {
     WireAccepted = 53,
     WireSent = 54,
     WireQuery = 55,
+    /// A failed `always` (`sdk`): the run ends as `violation`; the message is in the SDK table.
+    /// args: [op, payload pointer, length] of the trap. Never answered.
+    SdkViolation = 60,
 }
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -415,7 +418,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 30] = [
+        const ALL: [Op; 31] = [
             Hello,
             Yield,
             Sleep,
@@ -446,6 +449,7 @@ impl Op {
             WireAccepted,
             WireSent,
             WireQuery,
+            SdkViolation,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -482,6 +486,7 @@ impl Op {
             WireAccepted => "WireAccepted",
             WireSent => "WireSent",
             WireQuery => "WireQuery",
+            SdkViolation => "SdkViolation",
         }
     }
 }

@@ -81,6 +81,122 @@ pub struct Outcome {
     /// Counter preemption: status ("" without `--pmu`, "on", "off: <reason>") and the
     /// counters, `proto::ctl::PMU_NAMES` order (summed; `max_skid` is a maximum).
     pub pmu: (String, [u64; proto::ctl::PMU_FIELDS]),
+    pub sdk: SdkReport,
+}
+
+/// The SDK's site table and violation (`proto::sdk::SdkTab`), folded over incarnations.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SdkReport {
+    /// Sorted by label, then kind.
+    pub sites: Vec<SdkSite>,
+    pub dropped: u64,
+    pub setup_complete: bool,
+    /// The failed `always`: (label, detail).
+    pub violation: Option<(String, String)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdkSite {
+    pub kind: u8,
+    pub label: String,
+    pub location: String,
+    pub evaluated: u64,
+    pub held: u64,
+    pub value: i64,
+}
+
+impl SdkReport {
+    pub fn read(t: &proto::sdk::SdkTab) -> SdkReport {
+        let s = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        let mut r = SdkReport {
+            sites: t
+                .used()
+                .iter()
+                .map(|x| SdkSite {
+                    kind: x.kind,
+                    label: s(x.label()),
+                    location: s(x.loc()),
+                    evaluated: x.evaluated,
+                    held: x.held,
+                    value: x.value,
+                })
+                .collect(),
+            dropped: t.dropped,
+            setup_complete: t.setup_seq != 0,
+            violation: t.violation_parts().map(|(l, d)| (s(l), s(d))),
+        };
+        r.sites
+            .sort_by(|a, b| (&a.label, a.kind).cmp(&(&b.label, b.kind)));
+        r
+    }
+    /// Fold a later incarnation in: counts add, a knob keeps its last value.
+    pub fn add(&mut self, b: SdkReport) {
+        for x in b.sites {
+            match self
+                .sites
+                .iter_mut()
+                .find(|y| y.kind == x.kind && y.label == x.label)
+            {
+                Some(y) => {
+                    y.evaluated += x.evaluated;
+                    y.held += x.held;
+                    if x.evaluated > 0 {
+                        y.value = x.value;
+                    }
+                    if y.location.is_empty() {
+                        y.location = x.location;
+                    }
+                }
+                None => self.sites.push(x),
+            }
+        }
+        self.sites
+            .sort_by(|a, b| (&a.label, a.kind).cmp(&(&b.label, b.kind)));
+        self.dropped += b.dropped;
+        self.setup_complete |= b.setup_complete;
+        if b.violation.is_some() {
+            self.violation = b.violation;
+        }
+    }
+    /// `{"sites":[{"kind","label","location","evaluated","held"[,"value"]}],"setup_complete",
+    /// "violation":{"label","detail"}|null,"dropped"}`. `evaluated` counts reports (an SDK
+    /// reports a passing assertion once per process image) or a point's evaluations; `held`
+    /// counts reports whose condition held, hits of a `reachable`, firings of a point or delay.
+    pub fn json(&self) -> String {
+        let sites: Vec<String> = self
+            .sites
+            .iter()
+            .map(|x| {
+                let loc = if x.location.is_empty() {
+                    "null".into()
+                } else {
+                    json_str(&x.location)
+                };
+                let value = if x.kind == proto::sdk::KIND_KNOB && x.evaluated > 0 {
+                    format!(",\"value\":{}", x.value)
+                } else {
+                    String::new()
+                };
+                format!(
+                    "{{\"kind\":{},\"label\":{},\"location\":{loc},\"evaluated\":{},\"held\":{}{value}}}",
+                    json_str(proto::sdk::kind_name(x.kind)),
+                    json_str(&x.label),
+                    x.evaluated,
+                    x.held
+                )
+            })
+            .collect();
+        let violation = match &self.violation {
+            Some((l, d)) => format!("{{\"label\":{},\"detail\":{}}}", json_str(l), json_str(d)),
+            None => "null".into(),
+        };
+        format!(
+            "{{\"sites\":[{}],\"setup_complete\":{},\"violation\":{violation},\"dropped\":{}}}",
+            sites.join(","),
+            self.setup_complete,
+            self.dropped
+        )
+    }
 }
 
 pub const NET_FIELDS: usize = 12;
@@ -223,7 +339,7 @@ impl Outcome {
             "{{\"class\":{},\"detail\":{},\"exit_status\":{},\"signal\":{},\"seed\":{},\"incarnations\":{},\"crashes\":[{}],\
              \"digest\":{},\"traps\":{},\"switches\":{},\"faults_injected\":[{}],\"faults_count\":{},\"refused\":[{}],{},\"wall_ms\":{},\
              \"io\":{{\"parks\":{},\"reattempts\":{},\"spurious\":{},\"blocking_done\":{},\"blocking_parked\":{}}},\"net\":{{{}}},\
-             \"unix_sockets_in_flight\":{}}}\n",
+             \"unix_sockets_in_flight\":{},\"sdk\":{}}}\n",
             json_str(&self.verdict.class),
             json_str(&self.verdict.detail),
             opt(self.verdict.exit_status),
@@ -245,7 +361,8 @@ impl Outcome {
             self.io[3],
             self.io[4],
             NET_NAMES.iter().zip(self.net).map(|(n, v)| format!("\"{n}\":{v}")).collect::<Vec<_>>().join(","),
-            self.unix_sockets
+            self.unix_sockets,
+            self.sdk.json()
         );
         if !self.pmu.0.is_empty() {
             // Only with --pmu: the default outcome is unchanged.

@@ -14,6 +14,7 @@ pub mod poll;
 pub mod proc;
 pub mod procfs;
 pub mod sched;
+pub mod sdk;
 pub mod sig;
 pub mod thread;
 pub mod time;
@@ -85,6 +86,7 @@ fn handle_group(call: &mut dyn Call, row: &'static Row) -> Action {
         Group::Proc => proc::handle(call),
         Group::Net => net::handle(call),
         Group::Misc => misc::handle(call),
+        Group::Sdk => sdk::handle(call),
     }
 }
 

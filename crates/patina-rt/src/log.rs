@@ -129,7 +129,9 @@ pub fn trap(row: &Row, nr: u64, args: &[u64; 6], ret: i64) {
     let ts = crate::state::thread();
     let c = ctl();
     // Inputs are read only when the kernel did not report the pointer bad.
-    let in_hash = if ret == -e::EFAULT {
+    let in_hash = if row.group == proto::table::Group::Sdk {
+        crate::sys::sdk::take_hash()
+    } else if ret == -e::EFAULT {
         0
     } else {
         hash_bufs(row.ins, args, ret.max(0))

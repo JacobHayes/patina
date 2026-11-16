@@ -14,6 +14,8 @@ pub enum Stream {
     NetDelay = 8,
     /// Counter preemption: the slice length of each segment.
     Slice = 9,
+    /// SDK fault points, knobs and delays (`sdk::point_draw`).
+    Sdk = 10,
 }
 
 /// splitmix64 finaliser.

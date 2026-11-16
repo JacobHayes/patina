@@ -91,6 +91,8 @@ pub enum Group {
     Proc,
     Net,
     Misc,
+    /// The SDK channel (`crate::sdk`).
+    Sdk,
 }
 
 /// Length rule of a guest buffer named by an argument.
@@ -246,24 +248,47 @@ const fn build() -> [Row; NR_COUNT] {
 
 static TABLE: [Row; NR_COUNT] = build();
 
+/// The SDK channel: one number beyond the kernel's table (`crate::sdk`).
+pub static SDK_ROW: Row = Row {
+    nr: crate::sdk::SYSCALL as u32,
+    name: "patina_sdk",
+    class: Class::Virt,
+    strength: Strength::Construction,
+    why: "The SDK channel: assertions, fault points, knobs, delays and marks, answered by the runtime from the seed and recorded; outside Patina the kernel answers ENOSYS.",
+    // The payload's hash is the record's `in_hash`, computed by the handler from the copy it
+    // validated (a bad pointer or length must not be read here).
+    outs: &[],
+    ins: &[],
+    fds: 0,
+    group: Group::Sdk,
+    written: true,
+};
+
 /// The row for a syscall number. Unknown numbers map to a `Stop` row.
 pub fn row(nr: u32) -> &'static Row {
     if (nr as usize) < NR_COUNT {
         &TABLE[nr as usize]
+    } else if nr as u64 == crate::sdk::SYSCALL {
+        &SDK_ROW
     } else {
         &UNKNOWN
     }
 }
 
-/// Every number the kernel headers know, in order.
+/// Every number the kernel headers know, in order, then the SDK channel.
 pub fn known() -> impl Iterator<Item = &'static Row> {
-    TABLE.iter().filter(|r| NAMES[r.nr as usize].is_some())
+    TABLE
+        .iter()
+        .filter(|r| NAMES[r.nr as usize].is_some())
+        .chain(core::iter::once(&SDK_ROW))
 }
 
 /// Name for a number (or "unknown").
 pub fn name(nr: u64) -> &'static str {
     if (nr as usize) < NR_COUNT {
         NAMES[nr as usize].unwrap_or("unknown")
+    } else if nr == crate::sdk::SYSCALL {
+        SDK_ROW.name
     } else {
         "unknown"
     }

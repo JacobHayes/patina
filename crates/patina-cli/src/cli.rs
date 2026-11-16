@@ -37,6 +37,8 @@ pub struct Opts {
     pub pmu_short_max: u64,
     pub pmu_charge_ps: u64,
     pub pmu_margin: u64,
+    /// `--buggify`, `--fault buggify-permille=N`, `--fault point:LABEL=N` (`proto::sdk`).
+    pub sdk: proto::sdk::SdkCfg,
 }
 
 pub type Res<T> = Result<T, String>;
@@ -74,6 +76,7 @@ pub fn parse(args: &[String]) -> Res<Opts> {
         pmu_short_max: proto::pmu::SHORT_MAX_DEFAULT,
         pmu_charge_ps: proto::pmu::CHARGE_PS_DEFAULT,
         pmu_margin: proto::pmu::MARGIN_DEFAULT,
+        sdk: proto::sdk::SdkCfg::default(),
     };
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -120,6 +123,7 @@ pub fn parse(args: &[String]) -> Res<Opts> {
                 }
             }
             // Counter preemption: off unless asked for.
+            "--buggify" => o.sdk.buggify = 1,
             "--pmu" => o.pmu = true,
             "--pmu-slice" => {
                 let v = it.next().ok_or("--pmu-slice needs MIN..MAX")?;
@@ -222,12 +226,45 @@ fn fault(o: &mut Opts, kv: &str) -> Res<()> {
         "mem-error-permille" => f.mem_error_permille = permille(k, v)?,
         "mem-error-at" => f.mem_error_at = n(v)?,
         "fault-after-seq" => f.fault_after_seq = n(v)?,
+        // The `setup-complete` mark lowers it to its own sequence number.
+        "faults-after-setup" => f.fault_after_seq = if n(v)? != 0 { u64::MAX } else { 0 },
         "faults-in-recovery" => o.faults_in_recovery = n(v)? != 0,
+        "buggify-permille" => {
+            o.sdk.fire_permille = permille(k, v)?;
+            return Ok(());
+        }
+        _ if k.starts_with("point:") => return point(&mut o.sdk, &k["point:".len()..], v),
         _ if k.starts_with("net-") => return net_fault(&mut o.net, k, v),
         _ => return Err(format!("--fault: unknown key {k}")),
     }
-    if k != "fault-after-seq" && k != "faults-in-recovery" {
+    if !matches!(
+        k,
+        "fault-after-seq" | "faults-after-setup" | "faults-in-recovery"
+    ) {
         o.faults.any = 1;
+    }
+    Ok(())
+}
+
+/// `--fault point:LABEL=PERMILLE`: the SDK fault point LABEL is active and fires at this rate
+/// (0: never). It acts only with `--buggify`.
+fn point(c: &mut proto::sdk::SdkCfg, label: &str, v: &str) -> Res<()> {
+    if label.is_empty() || label.len() > proto::sdk::LABEL_MAX {
+        return Err(format!("--fault point:{label}: a label is 1 to 255 bytes"));
+    }
+    let p = permille(&format!("point:{label}"), v)?;
+    let h = proto::sdk::label_hash(label.as_bytes());
+    let n = c.npoints as usize;
+    if let Some(e) = c.points[..n].iter_mut().find(|e| e[0] == h) {
+        e[1] = p;
+    } else if n < proto::sdk::MAX_POINTS {
+        c.points[n] = [h, p];
+        c.npoints += 1;
+    } else {
+        return Err(format!(
+            "--fault point: at most {} points",
+            proto::sdk::MAX_POINTS
+        ));
     }
     Ok(())
 }

@@ -363,6 +363,8 @@ pub static NARGS: [u8; NR_COUNT] = {
 pub fn used_args(nr: u64, args: &[u64; 6]) -> [u64; 6] {
     let n = if (nr as usize) < NR_COUNT {
         NARGS[nr as usize] as usize
+    } else if nr == crate::sdk::SYSCALL {
+        3
     } else {
         6
     };

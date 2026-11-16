@@ -235,6 +235,10 @@ pub struct IncEnd {
     pub unix_sockets: u64,
     /// Counter preemption counters (`proto::ctl::PMU_NAMES`).
     pub pmu: [u64; proto::ctl::PMU_FIELDS],
+    /// The SDK's site table.
+    pub sdk: crate::outcome::SdkReport,
+    /// `fault_after_seq` at the end: lowered by a `setup-complete` mark.
+    pub fault_after_seq: u64,
 }
 
 /// The counter event when `--pmu` is given and counters can be opened; otherwise
@@ -346,6 +350,13 @@ pub fn run_incarnation(
     };
     // Network fault configuration, read by the supervisor's wire.
     unsafe { proto::wire::WireTab::at(ctl_ptr).cfg = o.net };
+    // SDK fault points (`proto::sdk`), read by the runtime.
+    unsafe {
+        proto::sdk::SdkTab::at(ctl_ptr).cfg = proto::sdk::SdkCfg {
+            incarnation: start.k,
+            ..o.sdk
+        }
+    };
 
     // Outcome pipe.
     let mut p = [0i32; 2];
@@ -661,6 +672,8 @@ pub fn run_incarnation(
         net: crate::outcome::net_read(unsafe { &proto::wire::WireTab::at(ctl_ptr).counters }),
         unix_sockets: ctl.stats.unix_sockets_sent.load(Relaxed),
         pmu: ctl.pmu.read(),
+        sdk: crate::outcome::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
+        fault_after_seq: ctl.faults.cfg.fault_after_seq,
     };
     if std::env::var_os("PATINA_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.

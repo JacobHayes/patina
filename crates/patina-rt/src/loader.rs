@@ -283,6 +283,8 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
                 _ => {}
             }
         }
+        // Sites the image declares in its `patina_sites` section (compiled SDKs).
+        crate::sys::sdk::declare_image(fd, eh.shoff, eh.shnum, eh.shentsize, eh.shstrndx);
         sc1(nr::CLOSE, fd);
         if img.phdr == 0 {
             fail(b"program headers are not inside a loaded segment");
