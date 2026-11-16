@@ -1,0 +1,8 @@
+[project]
+name = "patina-sdk"
+version = "0.6.0.dev0"
+description = "Patina's SDK for Python: one file over one reserved system call"
+requires-python = ">=3.8"
+
+[tool.setuptools]
+py-modules = ["patina"]

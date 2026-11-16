@@ -1,222 +1,358 @@
-// Package patina is Patina's SDK for Go guests: fault sites a deterministic
-// simulation run fires from its seed, invariant and coverage sites it reports
-// on, verdicts, lifecycle markers, seeded entropy and run parameters. It
-// lowers to the same native-shim entry points as the Rust SDK (patina-dst), so
-// a site or verdict means the same thing in either language.
+// Package patina is Patina's SDK for Go: invariants, coverage sites, fault points, knobs and
+// marks, reported to a Patina run through one reserved system call. Pure Go: no cgo, no build
+// tag. Outside Patina the kernel answers the call ENOSYS; the first call learns that, and
+// from then on every method is a load and a branch, so code ships the SDK unconditionally.
 //
-// It is inert outside Patina. `patina build --go` adds the `patina`
-// build tag, which links the sites to the native shim; any other build gets
-// no-op stand-ins with no cgo and no dependencies, so code ships the SDK
-// unconditionally.
-//
-// Sites are declared once, as package-level values, so a run knows every site
-// before main runs whether or not it is ever reached:
+// Sites are declared once, as package-level values, so a run knows every site before main
+// runs, whether or not it is ever reached:
 //
 //	var sorted = patina.Always("ledger-sorted")
 //	var retried = patina.Sometimes("request-retried")
-//	var drained = patina.Reachable("queue-drained")
 //	var dropFlush = patina.Buggify("flush-early-drop")
 //
 //	func settle(l []int) {
 //		if dropFlush.Fires() {
 //			return
 //		}
-//		sorted.Check(slices.IsSorted(l))
+//		sorted.Check(slices.IsSorted(l), "len ", len(l))
 //	}
 //
-// A declared site is what the Rust SDK calls a family: one label, any number
-// of callers. The part that varies per caller (a shard, a connection) goes in
-// an Always check's detail, not in its label.
+// Under Patina an Always that sees false ends the run with outcome violation and the message
+// "label: detail". A passing check reports only the first time it is evaluated in a process (a
+// Sometimes also the first time it holds), so a passing check costs one load. A fault point
+// fires only with `patina run --buggify`, on evaluations chosen by the seed and its label
+// alone; `--fault point:LABEL=PERMILLE` forces one point's rate.
 //
-// A label names one site for the whole program: declaring it twice at
-// different places (or as different kinds) stops the run as a duplicate. Under
-// Patina an Always that sees false is a violation verdict and ends the run,
-// whose recorded trace replays to it; a Sometimes that never sees true, or a
-// Reachable never marked, is reported by the run and failed by a campaign.
-// Outside Patina, Check returns its condition and nothing else happens.
+// The wire is documented in sdk/c/patina.h of the Patina repository.
 package patina
 
 import (
+	"encoding/binary"
 	"fmt"
 	"math"
+	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"unicode/utf8"
+	"unsafe"
 )
 
-// sdkPackage is this package's import path, which its frames' function names
-// start with.
-const sdkPackage = "github.com/JacobHayes/patina/go/patina"
-
-// Site kinds, as the shim's static-site table numbers them.
 const (
-	kindFault     = 1
-	kindDelay     = 2
-	kindKnob      = 3
-	kindAlways    = 4
-	kindSometimes = 5
-	kindReachable = 6
+	sysPatina    = 0x7061
+	version      = 1
+	helloBuggify = 1 << 16
+
+	opHello   = 1
+	opAssert  = 2
+	opBuggify = 3
+	opKnob    = 4
+	opDelay   = 5
+	opMark    = 6
+	opDeclare = 7
+
+	kindAlways    = 1
+	kindSometimes = 2
+	kindReachable = 3
+	kindBuggify   = 4
+	kindKnob      = 5
+	kindDelay     = 6
+
+	never    = 2
+	hdrLen   = 32
+	labelMax = 255
+	textMax  = 4096
+
+	// Site state bits: reported evaluated, reported held, never fires.
+	bitEval  = 1
+	bitHeld  = 2
+	bitQuiet = 4
+	bitAll   = bitEval | bitHeld | bitQuiet
 )
+
+// state: 0 not asked; else stAsked plus stOn (under Patina) and stBuggify.
+var state atomic.Uint32
+
+const (
+	stAsked   = 1
+	stOn      = 2
+	stBuggify = 4
+)
+
+func sys(op uintptr, b []byte) int64 {
+	var p unsafe.Pointer
+	if len(b) > 0 {
+		p = unsafe.Pointer(&b[0])
+	}
+	r, _, errno := syscall.Syscall(sysPatina, op, uintptr(p), uintptr(len(b)))
+	if errno != 0 {
+		return -int64(errno)
+	}
+	return int64(r)
+}
+
+func get() uint32 {
+	if s := state.Load(); s != 0 {
+		return s
+	}
+	r := sys(opHello, nil)
+	ok := r >= 0 && r&0xffff == version
+	if r >= 0 && !ok {
+		fmt.Fprintln(os.Stderr, "patina: unknown SDK protocol version; the SDK is inert")
+	}
+	s := uint32(stAsked)
+	if ok {
+		s |= stOn
+		if r&helloBuggify != 0 {
+			s |= stBuggify
+		}
+	}
+	state.Store(s)
+	return s
+}
+
+// IsSimulated reports whether the process runs under Patina.
+func IsSimulated() bool { return get()&stOn != 0 }
+
+// call sends one payload; a is the header's first word, read back on success (a knob).
+func call(op uintptr, kind uint8, cond bool, label, text string, a, b, c int64) (int64, int64) {
+	if len(label) > labelMax {
+		label = label[:labelMax]
+	}
+	if len(text) > textMax {
+		text = text[:textMax]
+	}
+	buf := make([]byte, hdrLen+len(label)+len(text))
+	buf[0] = kind
+	if cond {
+		buf[1] = 1
+	}
+	binary.LittleEndian.PutUint16(buf[2:], uint16(len(label)))
+	binary.LittleEndian.PutUint32(buf[4:], uint32(len(text)))
+	binary.LittleEndian.PutUint64(buf[8:], uint64(a))
+	binary.LittleEndian.PutUint64(buf[16:], uint64(b))
+	binary.LittleEndian.PutUint64(buf[24:], uint64(c))
+	copy(buf[hdrLen:], label)
+	copy(buf[hdrLen+len(label):], text)
+	r := sys(op, buf)
+	return r, int64(binary.LittleEndian.Uint64(buf[8:]))
+}
+
+// sdkPackage is this package's import path, which its frames' function names start with.
+const sdkPackage = "github.com/JacobHayes/patina/go/patina"
 
 type site struct {
 	label string
-	where string
+	bits  atomic.Uint32
 }
 
-func declare(kind uint8, label string) site {
-	// The shim takes labels as UTF-8 and refuses anything else, so a bad
-	// label fails here, at package initialization, in every build.
-	if label == "" || !utf8.ValidString(label) {
-		panic(fmt.Sprintf("patina: site label %q must be non-empty UTF-8", label))
+func (s *site) declare(kind uint8, label string) {
+	if label == "" || len(label) > labelMax || !utf8.ValidString(label) {
+		panic(fmt.Sprintf("patina: site label %q must be 1 to %d bytes of UTF-8", label, labelMax))
 	}
-	// The declaration is the first frame outside this package: the call of
-	// Always/Sometimes/Reachable. Those are never inlined, since a call
-	// inlined into a package initializer reports only <autogenerated>:1.
-	where := "unknown:0"
+	s.label = label
+	if get()&stOn == 0 {
+		s.bits.Store(bitAll)
+		return
+	}
+	// The declaration is the first frame outside this package.
+	where := ""
 	pcs := make([]uintptr, 16)
 	frames := runtime.CallersFrames(pcs[:runtime.Callers(2, pcs)])
 	for {
-		frame, more := frames.Next()
-		if !strings.HasPrefix(frame.Function, sdkPackage+".") {
-			where = strings.ToValidUTF8(fmt.Sprintf("%s:%d", frame.File, frame.Line), "\uFFFD")
+		f, more := frames.Next()
+		if !strings.HasPrefix(f.Function, sdkPackage+".") {
+			where = fmt.Sprintf("%s:%d", f.File, f.Line)
 			break
 		}
 		if !more {
 			break
 		}
 	}
-	s := site{label: label, where: where}
-	declareSite(kind, s)
-	return s
+	call(opDeclare, kind, false, label, where, 0, 0, 0)
+}
+
+// report sends a check. detail is formatted here, only for a failure, and never retained, so
+// a caller's variadic slice stays on its stack.
+func (s *site) report(kind uint8, cond bool, detail []any) {
+	if get()&stOn == 0 {
+		s.bits.Store(bitAll)
+		return
+	}
+	b := uint32(bitEval)
+	if cond {
+		b |= bitHeld
+	}
+	s.bits.Or(b)
+	text := ""
+	if !cond && len(detail) > 0 {
+		text = fmt.Sprint(detail...)
+	}
+	call(opAssert, kind, cond, s.label, text, 0, 0, 0)
+}
+
+func (s *site) point(op uintptr, kind uint8, a int64) bool {
+	if s.bits.Load()&bitQuiet != 0 {
+		return false
+	}
+	if get()&stBuggify == 0 {
+		s.bits.Store(bitAll)
+		return false
+	}
+	r, _ := call(op, kind, false, s.label, "", a, 0, 0)
+	if r == never {
+		s.bits.Or(bitQuiet)
+	}
+	return r == 1
 }
 
 // AlwaysSite is an invariant: its condition must hold every time it is checked.
-type AlwaysSite struct{ s site }
+type AlwaysSite struct{ site }
 
 // Always declares an invariant site. Call it once per label, at package level.
 //
 //go:noinline
-func Always(label string) *AlwaysSite { return &AlwaysSite{declare(kindAlways, label)} }
+func Always(label string) *AlwaysSite {
+	a := &AlwaysSite{}
+	a.declare(kindAlways, label)
+	return a
+}
 
-// Check reports cond and returns it. Under Patina a false cond is a violation
-// that ends the run; detail, formatted as fmt.Sprint does and only on a
-// violation, names the failing instance in the run's violation verdict.
+// Check reports cond and returns it. Under Patina a false cond ends the run as a violation;
+// detail, formatted as fmt.Sprint does and only on a failure, names the failing instance.
 func (a *AlwaysSite) Check(cond bool, detail ...any) bool {
-	always(cond, a.s, detail)
+	if !cond || a.bits.Load()&bitEval == 0 {
+		a.slow(cond, detail)
+	}
 	return cond
 }
 
-// SometimesSite is a coverage oracle: a run (or campaign) that never sees its
-// condition true is reported as not having exercised it.
-type SometimesSite struct{ s site }
+// slow keeps Check small enough to inline.
+//
+//go:noinline
+func (a *AlwaysSite) slow(cond bool, detail []any) { a.report(kindAlways, cond, detail) }
+
+// Unreachable reports that a point which must not be reached was reached: a failed check.
+func (a *AlwaysSite) Unreachable(detail ...any) { a.Check(false, detail...) }
+
+// SometimesSite is a coverage oracle: its condition should hold on some runs.
+type SometimesSite struct{ site }
 
 // Sometimes declares a coverage site. Call it once per label, at package level.
 //
 //go:noinline
 func Sometimes(label string) *SometimesSite {
-	return &SometimesSite{declare(kindSometimes, label)}
+	s := &SometimesSite{}
+	s.declare(kindSometimes, label)
+	return s
 }
 
-// Check notes the site reached, and satisfied when cond is true. It returns
-// cond and never changes control flow.
+// Check notes the site evaluated, and held when cond is true. It returns cond.
 func (s *SometimesSite) Check(cond bool) bool {
-	sometimes(cond, s.s)
+	if b := s.bits.Load(); b&bitEval == 0 || cond && b&bitHeld == 0 {
+		s.slow(cond)
+	}
 	return cond
 }
 
-// ReachableSite is a coverage oracle for a point the run should reach.
-type ReachableSite struct{ s site }
+//go:noinline
+func (s *SometimesSite) slow(cond bool) { s.report(kindSometimes, cond, nil) }
 
-// Reachable declares a reachability site. Call it once per label, at package
-// level.
+// ReachableSite is a coverage oracle for a point some run should reach.
+type ReachableSite struct{ site }
+
+// Reachable declares a reachability site. Call it once per label, at package level.
 //
 //go:noinline
 func Reachable(label string) *ReachableSite {
-	return &ReachableSite{declare(kindReachable, label)}
+	r := &ReachableSite{}
+	r.declare(kindReachable, label)
+	return r
 }
 
 // Mark notes the site reached.
-func (r *ReachableSite) Mark() { reachable(r.s) }
+func (r *ReachableSite) Mark() {
+	if r.bits.Load()&bitEval == 0 {
+		r.report(kindReachable, true, nil)
+	}
+}
 
-// BuggifySite is a fault site: a rare path a run takes on seed-chosen
-// evaluations, so the code behind it is exercised.
-type BuggifySite struct{ s site }
+// BuggifySite is a fault point: a path the program can take, taken on seed-chosen evaluations.
+type BuggifySite struct{ site }
 
-// Buggify declares a fault site. Call it once per label, at package level.
+// Buggify declares a fault point. Call it once per label, at package level.
 //
 //go:noinline
-func Buggify(label string) *BuggifySite { return &BuggifySite{declare(kindFault, label)} }
+func Buggify(label string) *BuggifySite {
+	b := &BuggifySite{}
+	b.declare(kindBuggify, label)
+	return b
+}
 
-// Fires reports whether the site fires on this evaluation, at the run's
-// default probability. Under Patina an active site (`patina run
-// --buggify`) fires as a pure function of the seed; outside Patina, and in a
-// run without --buggify, it never does.
-func (b *BuggifySite) Fires() bool { return buggify(b.s, -1) }
+// Fires reports whether the point fires on this evaluation at the run's default rate. Outside
+// Patina, and in a run without --buggify, it never does.
+func (b *BuggifySite) Fires() bool { return b.point(opBuggify, kindBuggify, -1) }
 
 // FiresWithProb is Fires at probability p (0 to 1) instead of the run default.
 func (b *BuggifySite) FiresWithProb(p float64) bool {
-	return buggify(b.s, int32(math.Round(min(max(p, 0), 1)*1000)))
+	return b.point(opBuggify, kindBuggify, int64(math.Round(min(max(p, 0), 1)*1000)))
 }
 
-// DelaySite injects a deterministic delay through the virtual clock.
-type DelaySite struct{ s site }
+// DelaySite sleeps a seeded virtual time on seed-chosen evaluations.
+type DelaySite struct{ site }
 
-// BuggifyDelay declares a delay site. Call it once per label, at package level.
+// BuggifyDelay declares a delay point. Call it once per label, at package level.
 //
 //go:noinline
-func BuggifyDelay(label string) *DelaySite { return &DelaySite{declare(kindDelay, label)} }
+func BuggifyDelay(label string) *DelaySite {
+	d := &DelaySite{}
+	d.declare(kindDelay, label)
+	return d
+}
 
-// Delay advances virtual time when the site fires (never a real sleep) and
-// reports whether it did; outside Patina it does nothing.
-func (d *DelaySite) Delay() bool { return buggifyDelay(d.s) }
+// Delay sleeps between 1 ms and 5 s of virtual time (never real time) when the point fires,
+// and reports whether it did.
+func (d *DelaySite) Delay() bool { return d.point(opDelay, kindDelay, 0) }
 
-// KnobSite is a tunable a run perturbs within bounds, so each seed explores
-// a different configuration.
+// DelayUpTo is Delay with the sleep at most max nanoseconds.
+func (d *DelaySite) DelayUpTo(maxNs int64) bool { return d.point(opDelay, kindDelay, maxNs) }
+
+// KnobSite is a tunable a run sets within bounds, so each seed explores a configuration.
 type KnobSite struct {
-	s              site
+	site
 	def, low, high int64
 }
 
-// Knob declares a tunable whose value is def outside Patina and, under
-// Patina, a per-run value in [low, high] for an active site. Call it once per
-// label, at package level.
+// Knob declares a tunable whose value is def outside Patina or without --buggify and, with
+// it, a seed-chosen value in [low, high] for an active point. Call it once per label, at
+// package level.
 //
 //go:noinline
 func Knob(label string, def, low, high int64) *KnobSite {
-	return &KnobSite{declare(kindKnob, label), def, low, high}
+	k := &KnobSite{def: def, low: low, high: high}
+	k.declare(kindKnob, label)
+	return k
 }
 
 // Value is the knob's value for this run.
-func (k *KnobSite) Value() int64 { return knob(k.s, k.def, k.low, k.high) }
+func (k *KnobSite) Value() int64 {
+	if get()&stBuggify == 0 {
+		return k.def
+	}
+	r, v := call(opKnob, kindKnob, false, k.label, "", k.def, k.low, k.high)
+	if r != 0 {
+		return k.def
+	}
+	return v
+}
 
-// VerdictKind is what a guest concludes about its own run.
-type VerdictKind uint32
+// Mark names a point in the run's log.
+func Mark(label string) {
+	if get()&stOn != 0 {
+		call(opMark, kindReachable, false, label, "", 0, 0, 0)
+	}
+}
 
-// Verdict kinds, numbered as the shim's verdict ABI numbers them.
-const (
-	// Violation: the guest detected a violation of its own invariant.
-	Violation VerdictKind = 1
-	// Pass: the guest confirmed a property held.
-	Pass VerdictKind = 2
-	// AbortIntent: the guest is about to abort on its own invariant, so the
-	// abort is attributed to the guest, not to a Patina refusal.
-	AbortIntent VerdictKind = 3
-)
-
-// Verdict reports a structured outcome about this run under label, which
-// aggregates verdicts across runs, with detail (JSON by convention) recorded
-// verbatim. Under Patina it is recorded in the trace and listed in the run's
-// result verdicts; it never changes control flow. Outside Patina it does
-// nothing. A verdict is not a site: one label may be reported any number of
-// times.
-func Verdict(kind VerdictKind, label, detail string) { verdict(kind, label, detail) }
-
-// SetupComplete marks the boundary between setup and the workload. With
-// `patina run --buggify-after-setup`, fault sites stay inert until it is
-// called (and a run that never calls it fails). It does nothing outside
-// Patina.
-func SetupComplete() { setupComplete() }
-
-// LifecycleEvent marks a named point in the run; it does nothing outside
-// Patina.
-func LifecycleEvent(label string) { lifecycleEvent(label) }
+// SetupComplete marks the end of setup: with faults-after-setup, no fault fires before it.
+func SetupComplete() { Mark("setup-complete") }
