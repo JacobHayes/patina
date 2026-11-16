@@ -62,17 +62,17 @@ socket buffer sizes are fixed at creation, so readiness is a function of the cal
 
 ## The sandbox
 
-bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a
-read-only bind; `/work` (or the path `--work DIR:GUEST` gives, `Config::work`) and `/tmp`
-are tmpfs; `/etc` is generated; the program's directory is a read-only bind at the path it
-was given by (`config::program`), and `:copy` mounts are copies (`sup/mod.rs`). A path the guest ran, opened or looked for and found missing is kept in
-the control region; the launcher names those the host has (`launch::not_in_sandbox`).
-The launcher fixes every piece of process state a child inherits (umask, rlimits, signal
-dispositions, the CPU it is pinned to, address randomization off; `sup/inherit.rs` lists each).
-As root, the launcher makes the user namespace and bwrap joins it (`launch::userns`): uid and
-gid 1000 are the user sudo was run by, else `nobody`, and nothing else is mapped, as in
-bwrap's own namespace for an ordinary user. Left to bwrap, root would be mapped in and parts of
-/proc covered, and the guest would see who started the run.
+bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a read-only
+bind; `/work` (or the path `--work DIR:GUEST` gives, `Config::work`) and `/tmp` are tmpfs;
+`/etc` is generated; the program's directory is a read-only bind at the path it was given by
+(`config::program`), and `:copy` mounts are copies (`sup/mod.rs`). A path the guest ran, opened
+or looked for and found missing is kept in the control region; the launcher names those the host
+has (`launch::not_in_sandbox`). The launcher fixes every piece of process state a child inherits
+(umask, rlimits, signal dispositions, the CPU it is pinned to, address randomization off;
+`sup/inherit.rs` lists each). As root, the launcher makes the user namespace and bwrap joins it
+(`launch::userns`): uid and gid 1000 are the user sudo was run by, else `nobody`, and nothing
+else is mapped, as in bwrap's own namespace for an ordinary user. Left to bwrap, root would be
+mapped in and parts of /proc covered, and the guest would see who started the run.
 
 ## The supervisor
 
@@ -214,6 +214,12 @@ instruction; Patina does not contain it.
   0x1a (Zen 5) CPU, the only one checked exact; their seeds reproduce on the same family only.
 - **compute-stall**: without branch counters, a spin-wait whose iterations change state ends
   the run (above).
+- **Interleaving at system calls, pause points and spin probes only.** A race on plain
+  memory with none of these between the conflicting accesses runs in one order in every seed;
+  only `--preempt branches` switches inside it.
+- **Computation does not advance virtual time** without branch counters: a CPU-bound loop
+  cannot be cut by `--time-limit` or a program's own deadline, only by `--timeout` (wall
+  time). A loop that makes any system call (a clock read) advances it by the per-trap charge.
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
   no simulation of several machines, and no network outside the run.
 - **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with

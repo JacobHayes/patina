@@ -114,40 +114,17 @@ rebuild and rerun the same command: the old runs never mix with the new.
 
 Each group in the summary is one signature: the outcome, what stopped the run, and its first
 line of evidence (the failed `always` label with the first line of its detail, the panic or
-assertion line or else the last line of stderr, the blocked waits). What names the failure is kept: the exit status, the
-signal, the label. Numbers in the program's text (line and column numbers, addresses, ids,
-counts, durations) become `N`, so one bug over many seeds is one group. Absolute paths keep
-their last three components, in signatures and SDK labels alike (a label made from a source
-path is the same in every checkout). A sweep announces each
-new group with its lowest seed and replays that seed once; a replay that differs makes the
-group `nondeterministic`. `patina report DIR...` prints the same summary for any run
-directories and writes `report.json`. A replay or a minimized run is written inside the run
-it comes from, so it never counts as one of the sweep's runs.
+assertion line or else the last line of stderr, the blocked waits). What names the failure is
+kept: the exit status, the signal, the label. Numbers in the program's text (line and column
+numbers, addresses, ids, counts, durations) become `N`, so one bug over many seeds is one group.
+Absolute paths keep their last three components, in signatures and SDK labels alike (a label
+made from a source path is the same in every checkout). A sweep announces each new group with
+its lowest seed and replays that seed once; a replay that differs makes the group
+`nondeterministic`. `patina report DIR...` prints the same summary for any run directories and
+writes `report.json`. A replay or a minimized run is written inside the run it comes from, so it
+never counts as one of the sweep's runs.
 
-### If a sweep finds nothing
-
-A sweep that ends all `ok` has looked at as many runs as it had seeds, each one schedule and,
-under `--crash`, usually one crash. In order of what helped most on the storage findings
-(docs/EVIDENCE.md, "Search quality: fjall F2 and F6"):
-
-- **More seeds.** A crash that must land in a short window (a few crash points out of
-  thousands, say between a write and the next fsync) is found in about one seed in several
-  thousand, whatever the other settings. Budget for that before changing anything else.
-- **`--buggify`**, and for a fault point that must fire at one particular moment,
-  `--fault point:LABEL=1000`: the point is on in every run and fires at every evaluation,
-  instead of on in a quarter of runs and firing on a quarter of evaluations.
-- **The crash position.** `--crash machine:N` crashes at each crash point with probability
-  N per mille, so most runs crash early; a lower N reaches later points and a higher one
-  earlier points. To search a region you know (from a log, `patina log ops`), give the
-  position as a range: `--crash machine-at:A..B`.
-- **The fault rates**: a preset's ranges (`--faults disk`), a key's own range, and
-  `--fault swarm=1`, which turns each configured class off in half the seeds.
-- **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
-  system call switches threads; `[sched] pause-points = false` stops treating `pause` as a
-  scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
-  its thread pools. Each changes every seed's schedule, so the same seeds then show other
-  runs; on their own they did not make the storage findings more frequent.
-
+### Test suites
 
 A test suite is many tests, best run each alone. `--cases FILE` runs every line of FILE once
 per seed, each its own run. A line is a whole command: the program and its arguments, quoted
@@ -180,8 +157,8 @@ outcomes: failure 10, ok 10
 Given a command after `--`, a line is instead put in place of `{}` in it: `--cases names.txt
 -- python3 -m unittest {}` runs the same. Each (case, seed) is its own run directory,
 `OUT/seed-N/K-NAME`: K the case's position in the file, NAME a short form of its last word
-that is not an option; the file `case` there and the report hold the whole line. With whole-command lines, a
-rebuilt program reruns only its own cases when the sweep runs again.
+that is not an option; the file `case` there and the report hold the whole line. With
+whole-command lines, a rebuilt program reruns only its own cases when the sweep runs again.
 
 A compiled test binary lists its tests; turning the list into lines is one loop. For the
 test binaries `cargo test --no-run` builds (the same works for any runner that lists and
@@ -193,6 +170,41 @@ for b in $(cargo test --no-run --message-format=json | jq -r 'select(.profile.te
 done > tests.txt
 patina sweep --seeds 1..5 --cases tests.txt
 ```
+
+### If a sweep finds nothing
+
+A sweep that ends all `ok` has looked at as many runs as it had seeds, each one schedule and,
+under `--crash`, usually one crash. In order of what helped most on the storage findings
+(docs/EVIDENCE.md, "Search quality: fjall F2 and F6"):
+
+- **More seeds.** A crash that must land in a short window (a few crash points out of
+  thousands, say between a write and the next fsync) is found in about one seed in several
+  thousand, whatever the other settings. Budget for that before changing anything else.
+- **`--buggify`**, and for a fault point that must fire at one particular moment,
+  `--fault point:LABEL=1000`: the point is on in every run and fires at every evaluation,
+  instead of on in a quarter of runs and firing on a quarter of evaluations.
+- **The crash position.** `--crash machine:N` crashes at each crash point with probability
+  N per mille, so most runs crash early; a lower N reaches later points and a higher one
+  earlier points. To search a region you know (from a log, `patina log ops`), give the
+  position as a range: `--crash machine-at:A..B`.
+- **The fault rates**: a preset's ranges (`--faults disk`), a key's own range, and
+  `--fault swarm=1`, which turns each configured class off in half the seeds.
+- **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
+  system call switches threads; `[sched] pause-points = false` stops treating `pause` as a
+  scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
+  its thread pools. Each changes every seed's schedule, so the same seeds then show other
+  runs; on their own they did not make the storage findings more frequent.
+- **A race with no system call in it.** Threads switch only at system calls, `pause`
+  instructions and spin probes. Two threads that race on plain memory with none of these
+  between the conflicting accesses always run them in the same order, whatever the seed;
+  `--preempt branches` (branch counters) can switch at any branch and finds them.
+- **A deadline that never comes.** Virtual time advances by a fixed charge per system call and
+  when every thread sleeps, not with computation. Without branch counters a CPU-bound loop
+  does not move the clock, so neither `--time-limit` nor the program's own deadline cuts it;
+  `--timeout` (wall seconds) does, as `timeout`. A loop that reads the clock or makes any
+  call advances it by that charge; `--preempt branches` charges time per branch.
+
+
 
 ## Faults
 
@@ -291,8 +303,9 @@ patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
 PATINA_ALWAYS(acked <= stored, "acked-records-kept", detail);
 ```
 
-**Go**: pure Go, no cgo; `go.mod` requires `github.com/JacobHayes/patina/go/patina`
-(`examples/bank-go/go.mod` points it at a checkout).
+**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.6.0` (the
+module's tags are `go/patina/vX.Y.Z`; before a release, `@engine` gives the current one).
+`examples/bank-go/go.mod` builds against its checkout with a `replace`.
 
 ```go
 var balanceMatches = patina.Always("balance-matches-deposits")
@@ -432,3 +445,23 @@ FAIL  personality                        errno 1 (Operation not permitted (os er
 
 With those three options, root and an ordinary user in the container both pass `patina doctor`
 and get the same digest; `seccomp=unconfined` alone still fails at bwrap's mounts.
+
+## Moving from 0.5
+
+| 0.5 | Now |
+|---|---|
+| `verdict(VerdictKind::Violation, ..)` | `always!(cond, label, ..)`, or `violation(label, detail)` for a label made at run time |
+| `verdict(VerdictKind::Pass)` and the other kinds | exit 0 passes; a nonzero exit, a panic or a signal fails |
+| `lifecycle::setup_complete()`, `lifecycle::event!` | `setup_complete()`, `mark!` |
+| `rng()` | any RNG: `getrandom` and `AT_RANDOM` come from the seed |
+| `param("k")`, `--param k=v` | `--env K=V` and `std::env::var("K")` |
+| `#[patina_dst::test]` | a plain `#[test]`, swept with `--cases` ([Test suites](#test-suites)) |
+| `patina-dst-proptest` | plain `proptest`; its seed comes from `getrandom` |
+| `patina test` | `patina sweep --cases` |
+| `patina campaign` | `patina sweep` with `--faults`, `--crash`, `--buggify` |
+| `cargo patina build`, `cargo patina audit` | `cargo build`: any Linux x86_64 binary runs |
+
+A violation ends the run. A harness that reported every broken invariant with one `verdict`
+each now checks them all first and makes one call naming each that failed, or keeps the most
+telling one. A harness gated on `cfg(patina)` needs its build to set it
+(`RUSTFLAGS="--cfg patina"` or `.cargo/config.toml`); nothing sets it for you.
