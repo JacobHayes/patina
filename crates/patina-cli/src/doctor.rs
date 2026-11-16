@@ -45,8 +45,14 @@ fn bwrap_found() -> Result<String, (String, String)> {
 }
 
 fn bwrap_sandbox() -> Result<String, (String, String)> {
-    let mut args: Vec<&str> = vec![
-        "--unshare-all",
+    // As root, the user namespace the launcher makes (`launch::userns`).
+    let userns = crate::launch::userns().map_err(|e| {
+        let e = e.split(": `patina doctor`").next().unwrap_or_default();
+        (e.to_string(), namespace_fix())
+    })?;
+    let ns = crate::launch::namespace_args(userns);
+    let mut args: Vec<&str> = ns.iter().map(String::as_str).collect();
+    args.extend([
         "--uid",
         "1000",
         "--gid",
@@ -56,7 +62,7 @@ fn bwrap_sandbox() -> Result<String, (String, String)> {
         "--ro-bind",
         "/usr",
         "/usr",
-    ];
+    ]);
     for (l, t) in [
         ("/bin", "usr/bin"),
         ("/lib", "usr/lib"),
@@ -67,27 +73,53 @@ fn bwrap_sandbox() -> Result<String, (String, String)> {
     args.extend([
         "--proc", "/proc", "--dev", "/dev", "--size", "1048576", "--tmpfs", "/tmp", "true",
     ]);
-    let out = Command::new("bwrap")
-        .args(&args)
-        .stdin(Stdio::null())
+    let mut cmd = Command::new("bwrap");
+    cmd.args(&args).stdin(Stdio::null());
+    if let Some(fd) = userns {
+        use std::os::unix::process::CommandExt;
+        // bwrap reads the namespace from the descriptor: kept across exec.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let out = cmd
         .output()
         .map_err(|e| (format!("bwrap: {e}"), "install bubblewrap".to_string()))?;
     if out.status.success() {
         return Ok("bwrap creates the sandbox (user, pid, net, mount namespaces; tmpfs)".into());
     }
     let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    let restricted = sysctl("kernel.apparmor_restrict_unprivileged_userns").as_deref() == Some("1");
-    let fix = if restricted {
+    Err((format!("bwrap failed: {err}"), namespace_fix()))
+}
+
+/// What lets bwrap make its namespaces here.
+fn namespace_fix() -> String {
+    // A container's default profile denies them (seccomp, AppArmor) and masks parts of /proc,
+    // which keeps a new /proc from being mounted.
+    if ["/.dockerenv", "/run/.containerenv"]
+        .iter()
+        .any(|p| std::path::Path::new(p).exists())
+    {
+        return "in a container: run it with --security-opt seccomp=unconfined \
+                --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
+                (or --privileged)"
+            .into();
+    }
+    if sysctl("kernel.apparmor_restrict_unprivileged_userns").as_deref() == Some("1") {
         "AppArmor restricts unprivileged user namespaces and bwrap has no profile here: \
          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, \
          or install an AppArmor profile for /usr/bin/bwrap (Ubuntu's apparmor package ships bwrap-userns-restrict)"
-            .to_string()
+            .into()
     } else if sysctl("kernel.unprivileged_userns_clone").as_deref() == Some("0") {
-        "sudo sysctl -w kernel.unprivileged_userns_clone=1".to_string()
+        "sudo sysctl -w kernel.unprivileged_userns_clone=1".into()
     } else {
-        "unprivileged user namespaces are unavailable (in a container: run it with --privileged or a seccomp and AppArmor profile that allows them)".to_string()
-    };
-    Err((format!("bwrap failed: {err}"), fix))
+        "unprivileged user namespaces are unavailable".into()
+    }
 }
 
 static TRAPPED: AtomicBool = AtomicBool::new(false);

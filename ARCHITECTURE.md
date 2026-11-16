@@ -67,9 +67,12 @@ read-only bind; `/work` and `/tmp` are tmpfs; `/etc` is generated; the program's
 a read-only bind at the path it was given by (`config::program`), and `:copy` mounts are
 copies (`sup/mod.rs`). A path the guest ran, opened or looked for and found missing is kept in
 the control region; the launcher names those the host has (`launch::not_in_sandbox`).
-The launcher fixes every piece of process state a child inherits (umask, rlimits, signal dispositions, the CPU it is pinned to, address randomization off;
-`sup/inherit.rs` lists each). It refuses to run as root (`launch::preflight`): the sandbox's
-user is the launcher's own uid, and root's would own every host file and could write `/proc`.
+The launcher fixes every piece of process state a child inherits (umask, rlimits, signal
+dispositions, the CPU it is pinned to, address randomization off; `sup/inherit.rs` lists each).
+As root, the launcher makes the user namespace and bwrap joins it (`launch::userns`): uid and
+gid 1000 are the user sudo was run by, else `nobody`, and nothing else is mapped, as in
+bwrap's own namespace for an ordinary user. Left to bwrap, root would be mapped in and parts of
+/proc covered, and the guest would see who started the run.
 
 ## The supervisor
 

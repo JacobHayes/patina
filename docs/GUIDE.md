@@ -398,3 +398,22 @@ this host can run patina
 The sweep's exit status fails the job on a finding (1) or when Patina could not do what was
 asked (2). Upload `patina-out` as an artifact to keep the failing runs; a run directory
 replays only with the same program binary, so keep the binary with it.
+
+### As root, and in a container
+
+Run as root, Patina gives the sandbox's user the uid of the user sudo was run by (else
+`nobody`): the guest sees what it sees run as that user, with the same digest. A program or
+mount the sandbox's user cannot read is refused before the run, naming the path.
+
+A container's default profile blocks the namespaces bwrap needs, as root or not. In Docker
+(debian:12 with bubblewrap), `patina doctor` there says:
+
+```text
+FAIL  user namespaces                    running as root, the sandbox's user namespace cannot be made (unshare: Operation not permitted (os error 1))
+                                         fix: in a container: run it with --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined (or --privileged)
+FAIL  personality                        errno 1 (Operation not permitted (os error 1))
+                                         fix: the process runs under a restrictive seccomp profile: in Docker, --security-opt seccomp=unconfined
+```
+
+With those three options, root and an ordinary user in the container both pass `patina doctor`
+and get the same digest; `seccomp=unconfined` alone still fails at bwrap's mounts.

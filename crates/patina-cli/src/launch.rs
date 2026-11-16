@@ -15,7 +15,7 @@ use proto::ctl::{
 use proto::layout::*;
 use std::ffi::CString;
 use std::fs::{self, File, OpenOptions};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
@@ -323,23 +323,165 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
     out
 }
 
-/// Can a run start here? Checked by every command before its first sandbox: the launcher
-/// is not root, and counters work if `--preempt branches` asks for them.
+/// Can a run start here? Checked by every command before its first sandbox: as root, the
+/// sandbox's user namespace can be made and the host paths it binds can be read by the user it
+/// maps to; counters work if `--preempt branches` asks for them.
 pub fn preflight(o: &Opts) -> Res<()> {
-    // The sandbox's user is the launcher's own uid behind the user namespace. Root's would
-    // own every host file and could write /proc, and bwrap then adds read-only covers over
-    // parts of /proc, which shift the mount indices statx reports: what the guest sees would
-    // depend on who started the run.
-    if unsafe { libc::geteuid() } == 0 {
-        return Err(
-            "patina does not run as root: the sandbox's user would be host root, and \
-                    the guest would see it. Run it as an ordinary user; counters need only \
-                    `sudo setcap cap_perfmon+ep $(command -v patina)`, and a profiler such as \
-                    perf can run as that user too"
-                .into(),
-        );
+    if let Some(user) = root_user() {
+        userns()?;
+        if user.0 == OVERFLOW {
+            let mut paths: Vec<&Path> = o.cfg.mounts.iter().map(|m| m.src.as_path()).collect();
+            paths.extend(o.program.dir.as_deref());
+            if o.program.copied {
+                paths.push(&o.program.host);
+            }
+            for p in paths {
+                if let Some(why) = closed_to_others(p) {
+                    return Err(format!(
+                        "running as root, the sandbox's user is nobody (no SUDO_UID), and {why}: \
+                         make it readable by others, or run patina through sudo as a user who can"
+                    ));
+                }
+            }
+        }
     }
     pmu_event(o).map(|_| ())
+}
+
+const OVERFLOW: u32 = 65534;
+
+/// Run as root, the host user the sandbox's user 1000 is: the user sudo was run by
+/// (`SUDO_UID`, `SUDO_GID`), else nobody. `None` for an ordinary user, whose own uid it is.
+fn root_user() -> Option<(u32, u32)> {
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+    let id = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .filter(|&v| v != 0)
+    };
+    Some((
+        id("SUDO_UID").unwrap_or(OVERFLOW),
+        id("SUDO_GID").unwrap_or(OVERFLOW),
+    ))
+}
+
+/// Why `p` cannot be read by a user who owns nothing on the way to it, if it cannot.
+fn closed_to_others(p: &Path) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |q: &Path| {
+        fs::metadata(q)
+            .map(|m| (m.permissions().mode(), m.is_dir()))
+            .ok()
+    };
+    let (m, dir) = mode(p)?;
+    if m & 0o004 == 0 || (dir && m & 0o001 == 0) {
+        return Some(format!("{} is mode {:o}", p.display(), m & 0o777));
+    }
+    for a in p.ancestors().skip(1) {
+        if let Some((m, _)) = mode(a) {
+            if m & 0o001 == 0 {
+                return Some(format!("{} is mode {:o}", a.display(), m & 0o777));
+            }
+        }
+    }
+    None
+}
+
+/// Run as root, the user namespace bwrap joins (`--userns`), made once per process: the
+/// sandbox's uid and gid 1000 are the host user `root_user` names and nothing else is mapped,
+/// as bwrap's own namespace for an ordinary user is. Without it bwrap, seeing root, would map
+/// host root into the sandbox and cover parts of /proc, and the guest would see who started
+/// the run. `None` for an ordinary user.
+pub fn userns() -> Res<Option<i32>> {
+    static NS: std::sync::OnceLock<Result<OwnedFd, String>> = std::sync::OnceLock::new();
+    let Some((uid, gid)) = root_user() else {
+        return Ok(None);
+    };
+    match NS.get_or_init(|| make_userns(uid, gid)) {
+        Ok(fd) => Ok(Some(fd.as_raw_fd())),
+        Err(e) => Err(format!(
+            "running as root, the sandbox's user namespace cannot be made ({e}): \
+             `patina doctor` says what this host needs"
+        )),
+    }
+}
+
+fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
+    let (mut a, mut b) = ([0i32; 2], [0i32; 2]);
+    cvt_i(unsafe { libc::pipe2(a.as_mut_ptr(), libc::O_CLOEXEC) }).map_err(|e| e.to_string())?;
+    cvt_i(unsafe { libc::pipe2(b.as_mut_ptr(), libc::O_CLOEXEC) }).map_err(|e| e.to_string())?;
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        // The child: a new user namespace, kept until the parent has its descriptor.
+        let mut c = [0u8; 1];
+        unsafe {
+            let ok = libc::unshare(libc::CLONE_NEWUSER) == 0;
+            let e = if ok {
+                0
+            } else {
+                *libc::__errno_location() as u8
+            };
+            libc::write(a[1], [e].as_ptr().cast(), 1);
+            libc::read(b[0], c.as_mut_ptr().cast(), 1);
+            libc::_exit(0);
+        }
+    }
+    let ours = [a[1], b[0]];
+    for fd in ours {
+        unsafe { libc::close(fd) };
+    }
+    let (rd, wr) = unsafe { (File::from_raw_fd(a[0]), File::from_raw_fd(b[1])) };
+    let res = (|| {
+        if pid < 0 {
+            return Err(format!("fork: {}", std::io::Error::last_os_error()));
+        }
+        let mut e = [0u8; 1];
+        (&rd)
+            .read_exact(&mut e)
+            .map_err(|e| format!("child: {e}"))?;
+        if e[0] != 0 {
+            return Err(format!(
+                "unshare: {}",
+                std::io::Error::from_raw_os_error(e[0] as i32)
+            ));
+        }
+        let w = |f: &str, v: String| {
+            fs::write(format!("/proc/{pid}/{f}"), v).map_err(|e| format!("{f}: {e}"))
+        };
+        w("uid_map", format!("1000 {uid} 1\n"))?;
+        w("setgroups", "deny".into())?;
+        w("gid_map", format!("1000 {gid} 1\n"))?;
+        File::open(format!("/proc/{pid}/ns/user"))
+            .map(OwnedFd::from)
+            .map_err(|e| format!("ns/user: {e}"))
+    })();
+    if pid > 0 {
+        let _ = (&wr).write_all(b"x");
+        unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
+    }
+    res
+}
+
+/// bwrap's namespace arguments: every namespace new, the user one made by bwrap, or, as root,
+/// joined from `userns` (descriptor `fd` in bwrap).
+pub fn namespace_args(userns_fd: Option<i32>) -> Vec<String> {
+    match userns_fd {
+        None => vec!["--unshare-all".into()],
+        Some(fd) => [
+            "--userns",
+            &fd.to_string(),
+            "--unshare-ipc",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-uts",
+            "--unshare-cgroup-try",
+        ]
+        .map(String::from)
+        .to_vec(),
+    }
 }
 
 /// The counter event with `--preempt branches`, or why counters cannot be used here: an
@@ -461,8 +603,12 @@ pub fn run_incarnation(
     // Generated /etc files, passed to bwrap as --ro-bind-data descriptors.
     let mut etc = etc_files();
 
-    let mut args: Vec<String> = vec![
-        "--unshare-all".into(),
+    // As root, the user namespace is joined from a descriptor at FD_USERNS (closed by the
+    // supervisor with every other one it does not keep).
+    const FD_USERNS: i32 = 3009;
+    let userns = userns()?;
+    let mut args = namespace_args(userns.map(|_| FD_USERNS));
+    args.extend([
         "--as-pid-1".into(),
         "--die-with-parent".into(),
         "--hostname".into(),
@@ -477,7 +623,7 @@ pub fn run_incarnation(
         "--ro-bind".into(),
         "/usr".into(),
         "/usr".into(),
-    ];
+    ]);
     for (l, t) in [
         ("/bin", "usr/bin"),
         ("/lib", "usr/lib"),
@@ -636,6 +782,9 @@ pub fn run_incarnation(
     ];
     for (i, f) in etc_fds.iter().enumerate() {
         place.push((f.as_raw_fd(), ETC_FD0 + i as i32));
+    }
+    if let Some(fd) = userns {
+        place.push((fd, FD_USERNS));
     }
     // The counter broker's sandbox end.
     let (pmu_sandbox, pmu_ours) = match pmu_ev {
@@ -877,6 +1026,11 @@ fn stdio_memfd(name: &str, stdin: Option<&[u8]>) -> Res<OwnedFd> {
     let fd = cvt_i(unsafe { libc::memfd_create(n.as_ptr(), flags) })
         .map_err(|e| format!("memfd {name}: {e}"))?;
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // The guest's fstat shows its owner: as root, the sandbox's user, as for an ordinary user.
+    if let Some((uid, gid)) = root_user() {
+        cvt_i(unsafe { libc::fchown(fd.as_raw_fd(), uid, gid) })
+            .map_err(|e| format!("chown {name}: {e}"))?;
+    }
     let Some(data) = stdin else {
         return Ok(fd);
     };

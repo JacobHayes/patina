@@ -32,6 +32,9 @@ sudo apt-get install -y bubblewrap
 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 ```
 
+Root works too (the guest sees what it would for the user sudo was run by); in a container,
+see [the guide](docs/GUIDE.md#as-root-and-in-a-container) for the options it needs.
+
 ## First run
 
 Give Patina any program and its arguments after `--`. `examples/quickstart` is a small Rust

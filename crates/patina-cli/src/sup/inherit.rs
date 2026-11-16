@@ -26,7 +26,7 @@
 //! | KSM merge, MDWE                    | checked: must be off                                      |
 //! | seccomp filters                    | an outer one is kept; the runtime's filter stacks on it   |
 //! | uid, gid                           | 1000/1000 in the user namespace (bwrap `--uid`/`--gid`)   |
-//! | the launcher's own uid             | checked: not root (`launch::preflight`)                   |
+//! | the launcher's own uid             | as root, made by the launcher (`launch::userns`)          |
 //! | supplementary groups               | cannot be dropped: getgroups is virtual                   |
 //! | capabilities, ambient, bounding    | bwrap; cleared in the first guest's fork child, checked   |
 //! | securebits, no_new_privs           | checked 0; no_new_privs set by bwrap and the fork child   |
