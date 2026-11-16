@@ -31,7 +31,7 @@ import struct
 import sys
 
 __all__ = [
-    "Always", "Sometimes", "Reachable", "Buggify", "BuggifyDelay", "Knob",
+    "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "BuggifyDelay", "Knob",
     "mark", "setup_complete", "is_simulated",
 ]
 
@@ -39,7 +39,7 @@ _SYSCALL = 0x7061
 _VERSION = 1
 _HELLO_BUGGIFY = 1 << 16
 _HELLO, _ASSERT, _BUGGIFY, _KNOB, _DELAY, _MARK, _DECLARE = range(1, 8)
-_ALWAYS, _SOMETIMES, _REACHABLE, _POINT, _KNOBK, _DELAYK = range(1, 7)
+_ALWAYS, _SOMETIMES, _REACHABLE, _POINT, _KNOBK, _DELAYK, _UNREACHABLE = range(1, 8)
 _NEVER = 2
 _LABEL_MAX = 255
 _TEXT_MAX = 4096
@@ -153,9 +153,16 @@ class Always(_Site):
             self._report(condition, detail)
         return condition
 
-    def unreachable(self, detail=None):
-        """A point that must not be reached was reached."""
-        self.check(False, detail)
+
+class Unreachable(_Site):
+    """A point that must not be reached. A run that never reaches it is not reported as
+    unmet."""
+
+    _kind = _UNREACHABLE
+
+    def reached(self, detail=None):
+        """The point was reached: under Patina the run ends as a violation."""
+        self._report(False, detail)
 
 
 class Sometimes(_Site):

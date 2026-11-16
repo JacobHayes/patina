@@ -1,4 +1,5 @@
-//! The SDK test guest in Rust: the script of guest.c (modes script [two], fail, coin, loop).
+//! The SDK test guest in Rust: the script of guest.c (modes script [two], fail, unreach, coin,
+//! loop).
 use std::io::Read;
 
 fn script(two: bool, argc: usize) {
@@ -33,6 +34,7 @@ fn main() {
             patina_dst::always!(balance >= 0, "must-hold", "balance {balance}");
             patina_dst::reachable!("after-fail");
         }
+        "unreach" => patina_dst::unreachable!("never-here", "reached"),
         "coin" => {
             let mut b = [0u8; 1];
             std::fs::File::open("/dev/urandom").unwrap().read_exact(&mut b).unwrap();

@@ -69,6 +69,15 @@ def run(name, seed, cmd, *args, flags=()):
     return Run(out, p.returncode)
 
 
+def report(r):
+    """`patina report --format json` of one run directory."""
+    p = subprocess.run([PATINA, "report", "--format", "json", r.out], capture_output=True, text=True, timeout=60)
+    try:
+        return json.loads(p.stdout)
+    except ValueError:
+        die(f"patina report {r.out}: exit {p.returncode} ({p.stderr.strip()[-300:]})")
+
+
 def log_ops(r):
     """The boundary log's records, decoded: one line each."""
     p = subprocess.run([PATINA, "log", "dump", os.path.join(r.out, "inc-0", "boundary.log")],

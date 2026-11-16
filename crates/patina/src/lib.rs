@@ -27,7 +27,9 @@
 //!
 //! - [`always!`]: an invariant. Under Patina a failure ends the run with outcome `violation`
 //!   and the message `label: detail`; the detail is formatted only on failure.
-//!   [`unreachable!`] and [`violation`] are `always!(false, ..)`.
+//!   [`unreachable!`] marks a point that must not be reached: reaching it is a violation,
+//!   and a sweep does not list it as unmet when no run reaches it. [`violation`] is a failed
+//!   `always` with a label computed at run time.
 //! - [`sometimes!`], [`reachable!`]: coverage oracles, reported per run and folded by a sweep.
 //! - [`buggify!`], [`buggify_with_prob!`]: a fault point. False unless the run has
 //!   `--buggify`; then a point is active in a quarter of runs and an active point fires on a
@@ -109,7 +111,9 @@ macro_rules! always {
     }};
 }
 
-/// `always!(false, ..)`: this point must not be reached.
+/// This point must not be reached: reaching it ends the run as `violation` with
+/// `label: detail`, as a failed [`always!`] does. Unlike an `always` that no run evaluates, an
+/// `unreachable` that no run reaches is not reported as unmet.
 ///
 /// ```
 /// fn parse(b: u8) -> u8 {
@@ -126,11 +130,15 @@ macro_rules! always {
 #[macro_export]
 macro_rules! unreachable {
     ($label:expr $(,)?) => {
-        $crate::always!(false, $label)
+        $crate::unreachable!($label, "")
     };
-    ($label:expr, $($detail:tt)+) => {
-        $crate::always!(false, $label, $($detail)+)
-    };
+    ($label:expr, $($detail:tt)+) => {{
+        $crate::__site!($crate::__rt::KIND_UNREACHABLE, $label);
+        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
+        __PATINA_SITE.unreachable(__PATINA_LABEL, |w| {
+            let _ = ::core::fmt::Write::write_fmt(w, ::core::format_args!($($detail)+));
+        })
+    }};
 }
 
 /// Coverage: `cond` should hold on some runs.

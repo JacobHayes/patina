@@ -97,7 +97,30 @@ group `nondeterministic`. `patina report DIR...` prints the same summary for any
 directories and writes `report.json`. A replay or a minimized run is written inside the run
 it comes from, so it never counts as one of the sweep's runs.
 
-### Test runners: `--cases`
+### If a sweep finds nothing
+
+A sweep that ends all `ok` has looked at as many runs as it had seeds, each one schedule and,
+under `--crash`, usually one crash. In order of what helped most on the storage findings
+(docs/EVIDENCE.md, "Search quality: fjall F2 and F6"):
+
+- **More seeds.** A crash that must land in a short window (a few crash points out of
+  thousands, say between a write and the next fsync) is found in about one seed in several
+  thousand, whatever the other settings. Budget for that before changing anything else.
+- **`--buggify`**, and for a fault point that must fire at one particular moment,
+  `--fault point:LABEL=1000`: the point is on in every run and fires at every evaluation,
+  instead of on in a quarter of runs and firing on a quarter of evaluations.
+- **The crash position.** `--crash machine:N` crashes at each crash point with probability
+  N per mille, so most runs crash early; a lower N reaches later points and a higher one
+  earlier points. To search a region you know (from a log, `patina log ops`), give the
+  position as a range: `--crash machine-at:A..B`.
+- **The fault rates**: a preset's ranges (`--faults disk`), a key's own range, and
+  `--fault swarm=1`, which turns each configured class off in half the seeds.
+- **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
+  system call switches threads; `[sched] pause-points = false` stops treating `pause` as a
+  scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
+  its thread pools. Each changes every seed's schedule, so the same seeds then show other
+  runs; on their own they did not make the storage findings more frequent.
+
 
 A test suite is many tests, best run each alone. `--cases FILE` runs every line of FILE once
 per seed, each its own run. A line is a whole command: the program and its arguments, quoted
@@ -184,7 +207,10 @@ that reruns the reduced run (written to `RUNDIR/minimized`).
 the same arguments, on what had reached the disk: data never synced may be gone, renames and
 creations may be undone. `--crash process` kills the processes but keeps what they wrote, as
 an operating system does when a program dies. The default rate is 3 per mille per crash
-point (`--crash machine:10` for 10); `machine-at:SEQ` crashes at one boundary record.
+point (`--crash machine:10` for 10); `machine-at:SEQ` crashes at the first crash point at or
+after boundary record SEQ. Like the other `-at` settings (`fsync-error-at=N`,
+`fs-error-at=CLASS:N`, `mem-error-at=N`), SEQ may be a range `A..B`: each seed picks its own
+position in it, so a sweep searches the region.
 
 A program under `--crash` must be restartable: on start, it recovers its state from `/work`
 and checks it. `PATINA_INCARNATION=K` is set after the K-th restart. `examples/acklog-c`
@@ -211,6 +237,7 @@ production builds without flags.
 | Call | Meaning |
 |---|---|
 | `always(cond, label)` | must hold; a false one ends the run `violation` |
+| `unreachable(label)` | must not be reached; reaching it ends the run `violation` |
 | `sometimes(cond, label)`, `reachable(label)` | should hold or be reached in some run of a sweep |
 | `buggify(label)` | a fault point: true on seed-chosen evaluations under `--buggify` |
 | `knob(label, default, lo, hi)` | a seed-chosen value under `--buggify` |
@@ -220,7 +247,8 @@ quarter of its evaluations; `--fault point:LABEL=PERMILLE` fixes one point's rat
 which a `sometimes` never held, a `reachable` was never hit, or (under `--buggify`) a
 `buggify` point never fired is `vacuous` unless the label is allowed with `--allow-unmet
 LABEL`. The summary gives a count per kind and the first five labels; `report.json` lists
-all of them, with every `always` never evaluated.
+all of them, with every `always` never evaluated. An `unreachable` that no run reached is
+what it should be, and is not listed.
 
 **Rust**: `patina-dst = { path = "PATINA/crates/patina" }` in `Cargo.toml`.
 

@@ -405,6 +405,90 @@ has the finding's signature / seeds run.
   Patina 0.5.0: 27.6 ms (release). Throughput at `-j 6`: 160 to 173 runs/s release, 62 to 69
   runs/s debug.
 
+## Search quality: fjall F2 and F6
+
+Why F2 and F6 of the fjall acceptance are rare at the defaults, 2026-11-16, this host, the
+`engine` build after `3d485e87`. `H` is `tests/guests/fjall-harness` (debug). Each sweep is
+`patina sweep -j 6 --seeds 1..2000 --buggify --env FJ_N=2000 --crash machine:1 -- H` plus
+the setting named, run alone under the evidence lock; total sweep time about 15 min.
+
+**What F2 needs** (the panic at fjall `journal/entry.rs:190`, a `debug_assert` on bytes read
+back). The journal is preallocated to 64 MiB, so a batch written after the last fsync goes
+into blocks a machine crash may keep or lose one by one. The panic needs a block boundary to
+fall between an item's `value_len` and its `on_disk_value_len` (a 4-byte target per item),
+the block before it kept and the one after it lost. The batch sizes are fixed by the batch
+number, so the layout is the same in every run: in the 2,000-batch journal four batches
+straddle a boundary that way, the first at offset 569,316 (batch about 800). A run finds F2
+only if its one crash lands in the 2 to 5 crash points between that write and the next
+journal fsync, about 1,700 crash points in, and the ext4 model then keeps the earlier block
+(one draw in two) without a spontaneous commit after the write. The pre-SDK harness's three
+seeds (634, 1173, 1514) all crash at that write, in runs where no fault point fired.
+
+**What F6 needs** (`batch-atomic-across-keyspaces`, a table of keyspace `a` holding batches the
+journal lost). fjall's worker persists the journal and then flushes every sealed memtable of
+the keyspace, not only the one it was asked to. F6 needs the writer to commit a batch and
+rotate `a` (fault point `manual-flush`) between those two steps, typically while it sleeps
+100 ms in write backpressure, and then a crash after the new table and manifest are durable
+and before the next journal fsync: a window of a few crash points. It all happens in the first
+incarnation; the violation is found by the recovery check.
+
+**Hypotheses.** Rates are seeds with the finding / seeds. F2 is also given as the expected
+count per 2,000 seeds from 60 seeds each: one run without crash to locate the window, a forced
+crash (`machine-at`) at each crash point of the window, and the chance a 1 per mille crash
+first lands there.
+
+| Setting | F2 | F6 |
+|---|---|---|
+| defaults | 0/2,000 (expected 0.17) | 0/2,000 |
+| `--cpus 24`, `pause-points = false` | 0/6,000 (acceptance; expected 0.15) | 2/6,000 (acceptance) |
+| pre-SDK harness (fault points from `getrandom`, active per process), `--cpus 24`, `pause-points = false` | 3/2,000 (acceptance), then 0/4,000 on seeds 2001..6000 (expected 0.19) | 1/2,000, then 1/4,000 |
+| `manual-flush` always on (`point:manual-flush=250`): defaults | - | 0/2,000 |
+| same, `pause-points = false` | - | 2/2,000 |
+| same, `--cpus 24` | - | 1/2,000 |
+| same, `preempt-permille = 300` | - | 1/2,000 |
+| same, `preempt-permille = 30` | - | 1/2,000 |
+| `point:manual-flush=1000` (fires at every evaluation): defaults | 0/2,000 | 6/2,000 |
+| same, `pause-points = false` | 0/2,000 | 10/2,000 |
+| `--crash machine` (3 per mille) | 0/2,000 | 1/2,000 |
+| `--crash machine-at:2250..2450` (the window's region) | 4/2,000 | 0/2,000 |
+
+- Fault-point activation per run against per incarnation: both findings are made in the first
+  incarnation and detected when the second opens the database, before any fault point is
+  evaluated; F2's pre-SDK seed 634 had both points inactive. Re-drawing activation after a
+  restart cannot change either, so it was not built.
+- CPU count, pause points, preempt rate: the harness fixes fjall's worker count, and a run
+  has about 20 pause points. In 60 seeds without a crash the number of crash points before
+  F2's window fell into the same three groups at every setting (30 near 1,425, 14 between
+  1,600 and 3,000, 16 beyond), set by which fault points were active. These settings move
+  every draw, so they reshuffle which seeds find a bug; none changed either rate by more than
+  the sampling noise of a few hits in 2,000.
+- The old 3/2,000 for F2 was a run of luck: the expected count is the same for both harnesses,
+  and the old harness found none in the next 4,000 seeds.
+- What does change the rates: F6 scales with how often `manual-flush` fires in the window
+  (6 and 10 in 2,000 at every evaluation, against about 1 in 2,000 at a quarter); F2 needs the
+  crash in its window, and a crash position range over the region finds it 4 times in 2,000.
+  Neither is a default to change: one is a fault point's rate, the other a window known in
+  advance. The guide's "If a sweep finds nothing" gives both settings.
+
+**At the defaults after the changes** (`-at` ranges; `unreachable` sites), same commands as
+the acceptance, `H` rebuilt:
+
+| Finding | Command | Before | After |
+|---|---|---|---|
+| clean | `--seeds 1..100` | 100 `ok` | 100 `ok` |
+| F1 | `--seeds 1..300 --crash machine:3` | 6/300, first 62 | 6/300, first 62 |
+| F2, F6 | `--seeds 1..2000 --buggify --env FJ_N=2000 --crash machine:1` | 0, 0 | 0, 0 |
+| F3 | acceptance F3 command, 600 seeds | 24/600, first 31 (and 1 F6, seed 22) | the same |
+| F4 | `fsync-error-at=N --crash machine`, N in 1..100 x seeds 1..10 | 4/1,000 | 4/1,000 (38 s) |
+| F4, one sweep | `--seeds 1..1000 --fault fsync-error-at=1..100 --crash machine` | refused: not a number | 4/1,000 (25 s) |
+| F5 | `--seeds 1..100 --fault fs-short-permille=20` | 59/100 | 59/100 |
+
+`./check storage examples` passes (the examples find 14, 4, 11, 6 and 11 of 20 seeds). The
+sweep summary no longer lists the harness's `open-after-crash`, `reopen-failed` and
+`iterate-failed` (now `unreachable!`) as "`always` never evaluated"; `fresh-after-wipe-complete`,
+a real invariant evaluated only with `FJ_WIPE_PARTIAL=1`, still is. F2 has no regression
+check in `tests/storage`: no search over a few seconds of seeds reaches it.
+
 ## Acceptance: Cairn and briefing
 
 `patina` built from `fa1186af` (the CLI has no `--version`), 2026-11-16, this host, every

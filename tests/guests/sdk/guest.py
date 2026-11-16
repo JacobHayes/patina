@@ -1,4 +1,5 @@
-"""The SDK test guest in Python: the script of guest.c (modes script [two], fail, coin, loop)."""
+"""The SDK test guest in Python: the script of guest.c (modes script [two], fail, unreach, coin,
+loop)."""
 import os
 import sys
 
@@ -16,6 +17,7 @@ DELAY_A = patina.BuggifyDelay("delay-a")
 BEFORE_FAIL = patina.Reachable("before-fail")
 MUST_HOLD = patina.Always("must-hold")
 AFTER_FAIL = patina.Reachable("after-fail")
+NEVER_HERE = patina.Unreachable("never-here")
 COIN = patina.Sometimes("coin")
 LOOP_BOUNDED = patina.Always("loop-bounded")
 
@@ -47,6 +49,8 @@ def main():
         balance = -1
         MUST_HOLD.check(balance >= 0, f"balance {balance}")
         AFTER_FAIL.mark()
+    elif mode == "unreach":
+        NEVER_HERE.reached("reached")
     elif mode == "coin":
         COIN.check(os.urandom(1)[0] % 2 == 0)
     elif mode == "loop":

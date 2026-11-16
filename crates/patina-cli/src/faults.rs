@@ -42,8 +42,9 @@ enum Val {
     /// The key's own grammar (`A..B` milliseconds are the per-event spread, not a plan
     /// range); a class `swarm` may turn off.
     Own,
-    /// An exact position, for regression tests: never a range, never swarmed.
-    Exact,
+    /// A position (the N-th call): may be a range, which searches positions across seeds;
+    /// never swarmed.
+    At,
 }
 
 /// One fault setting.
@@ -188,19 +189,19 @@ pub const KEYS: &[Key] = &[
     key(
         "fs-error-at",
         "CLASS:N",
-        Val::Exact,
+        Val::At,
         "fail exactly the N-th call of CLASS (open, read, write, sync, ...)",
     ),
     key(
         "fsync-error-at",
         "N",
-        Val::Exact,
+        Val::At,
         "fail exactly the N-th fsync",
     ),
     key(
         "mem-error-at",
         "N",
-        Val::Exact,
+        Val::At,
         "fail exactly the N-th memory request",
     ),
 ];
@@ -289,6 +290,17 @@ fn resolve_num(seed: u64, k: &str, v: &str, max: u64) -> Res<u64> {
     Ok(a + plan_draw(seed, k) % (b - a + 1))
 }
 
+/// A position key's value (`N`, or `CLASS:N` for `fs-error-at`) with `N` resolved like any
+/// other number: a range searches positions across seeds.
+fn resolve_at(seed: u64, k: &str, v: &str) -> Res<String> {
+    Ok(match v.split_once(':') {
+        Some((class, n)) => format!("{class}:{}", resolve_num(seed, k, n, u64::MAX / 2)?),
+        // `apply` names what is missing.
+        None if k == "fs-error-at" => v.to_string(),
+        None => resolve_num(seed, k, v, u64::MAX / 2)?.to_string(),
+    })
+}
+
 /// Resolve presets, settings (later ones replace earlier ones of the same key, settings
 /// replace presets) and `--crash` against `seed`.
 pub fn resolve(
@@ -343,7 +355,8 @@ pub fn resolve(
             Val::Permille => json!(resolve_num(seed, k, v, 1000)?),
             Val::Count | Val::Param => json!(resolve_num(seed, k, v, u64::MAX / 2)?),
             Val::Flag => json!((num(k, v)? != 0) as u64),
-            Val::Own | Val::Exact => json!(v),
+            Val::Own => json!(v),
+            Val::At => json!(resolve_at(seed, k, v)?),
         };
         let class = matches!(info.val, Val::Permille | Val::Count | Val::Own);
         if swarm && class && plan_draw(seed, &format!("swarm:{k}")) & 1 == 1 {
@@ -502,8 +515,8 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
     Ok(())
 }
 
-/// `--crash machine|process[:PERMILLE or A..B] | machine-at:SEQ | process-at:SEQ`. Returns
-/// the resolved form.
+/// `--crash machine|process[:PERMILLE] | machine-at:SEQ | process-at:SEQ`, where PERMILLE and
+/// SEQ may be a range `A..B`. Returns the resolved form.
 fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String> {
     let (k, v) = s.split_once(':').unwrap_or((s, ""));
     let (kind, at) = match k {
@@ -519,9 +532,11 @@ fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String
     };
     f.crash_kind = kind;
     if at {
-        let n: u64 = v
-            .parse()
-            .map_err(|_| format!("--crash {s}: expected {k}:SEQ"))?;
+        if v.is_empty() {
+            return Err(format!("--crash {s}: expected {k}:SEQ (or A..B)"));
+        }
+        let n = resolve_num(seed, "crash-at", v, u64::MAX / 2)
+            .map_err(|e| e.replace("--fault crash-at", &format!("--crash {k}")))?;
         f.crash_at = n.max(1);
         f.crash_permille = 0;
         return Ok(format!("{k}:{}", f.crash_at));
@@ -629,6 +644,38 @@ mod tests {
         assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), None, true).is_err());
         let c = resolve(0, &[], &[], Some("machine"), true).unwrap();
         assert_eq!(c.faults.crash_permille, CRASH_DEFAULT_PERMILLE);
+    }
+
+    #[test]
+    fn positions_may_be_ranges() {
+        let at = v(&[
+            "fsync-error-at=1..100",
+            "fs-error-at=write:5..9",
+            "mem-error-at=3",
+        ]);
+        let mut seen = std::collections::BTreeSet::new();
+        for s in 0..64 {
+            let p = resolve(s, &[], &at, Some("machine-at:10..20"), true).unwrap();
+            let q = resolve(s, &[], &at, Some("machine-at:10..20"), true).unwrap();
+            assert_eq!(p.json(), q.json());
+            let f = p.faults;
+            assert!(
+                (1..=100).contains(&f.fsync_error_at),
+                "{}",
+                f.fsync_error_at
+            );
+            assert!((5..=9).contains(&f.fs_error_at_n), "{}", f.fs_error_at_n);
+            assert!((10..=20).contains(&f.crash_at), "{}", f.crash_at);
+            assert_eq!(f.mem_error_at, 3);
+            assert_eq!(
+                val(&p, "fs-error-at"),
+                json!(format!("write:{}", f.fs_error_at_n))
+            );
+            seen.insert(f.fsync_error_at);
+        }
+        assert!(seen.len() > 1, "{seen:?}");
+        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None, true).is_err());
+        assert!(resolve(0, &[], &[], Some("machine-at:x"), true).is_err());
     }
 
     #[test]

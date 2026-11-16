@@ -175,8 +175,10 @@ the run `internal`. `patina log ops` prints the log.
 The SDKs make one reserved system call, `0x7061`. Outside Patina the kernel answers `ENOSYS`
 and the SDK goes inert. Under Patina the runtime answers it (`sys/sdk.rs`): assertions count
 into a site table shared by every process of the run, and fault points are draws keyed by
-the seed and the label. A failed `always` ends the run `violation`. Sites declared with a
-literal label are in an ELF section, so a site never reached is still reported.
+the seed and the label. A failed `always`, or a reached `unreachable`, ends the run
+`violation`. Sites declared with a literal label are in an ELF section, so a site never reached
+is still reported (an `unreachable` never reached is as it should be, and a sweep does not list
+it).
 
 ## What is deterministic, and how we know
 

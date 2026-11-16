@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! 0   u8   kind        KIND_*
-//! 1   u8   cond        ASSERT: 1 if the condition held
+//! 1   u8   cond        ASSERT: 1 if the condition held (ignored for UNREACHABLE: it fails)
 //! 2   u16  label_len   1..=LABEL_MAX
 //! 4   u32  text_len    0..=TEXT_MAX
 //! 8   i64  a           BUGGIFY: permille or -1 (run default); KNOB: default, and the answer
@@ -52,6 +52,9 @@ pub const KIND_REACHABLE: u8 = 3;
 pub const KIND_BUGGIFY: u8 = 4;
 pub const KIND_KNOB: u8 = 5;
 pub const KIND_DELAY: u8 = 6;
+/// A point that must not be reached (`unreachable!`): reaching it is a failed `always`; never
+/// reaching it is what it says, so a report does not list it as unmet.
+pub const KIND_UNREACHABLE: u8 = 7;
 
 /// `BUGGIFY` and `DELAY` answers: 0 no, 1 fire, `NEVER` no, and this point never fires in this
 /// run (inactive, or forced off): the SDK may stop asking for it in this process.
@@ -71,6 +74,7 @@ pub fn kind_name(k: u8) -> &'static str {
         KIND_BUGGIFY => "buggify",
         KIND_KNOB => "knob",
         KIND_DELAY => "delay",
+        KIND_UNREACHABLE => "unreachable",
         _ => "?",
     }
 }
@@ -106,7 +110,7 @@ impl Hdr {
         let ok = (1..=LABEL_MAX).contains(&h.label_len)
             && h.text_len <= TEXT_MAX
             && HDR_LEN + h.label_len + h.text_len == len
-            && (KIND_ALWAYS..=KIND_DELAY).contains(&h.kind);
+            && (KIND_ALWAYS..=KIND_UNREACHABLE).contains(&h.kind);
         ok.then_some(h)
     }
 }
@@ -372,7 +376,7 @@ pub fn records(mut b: &[u8]) -> impl Iterator<Item = (u8, &[u8], &[u8])> {
             return None;
         }
         let (kind, ll, sl) = (b[1], b[2] as usize, b[3] as usize);
-        if !(KIND_ALWAYS..=KIND_DELAY).contains(&kind) || ll == 0 {
+        if !(KIND_ALWAYS..=KIND_UNREACHABLE).contains(&kind) || ll == 0 {
             b = &b[1..];
             continue;
         }

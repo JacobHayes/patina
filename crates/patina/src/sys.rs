@@ -21,6 +21,7 @@ pub const KIND_REACHABLE: u8 = 3;
 pub const KIND_BUGGIFY: u8 = 4;
 pub const KIND_KNOB: u8 = 5;
 pub const KIND_DELAY: u8 = 6;
+pub const KIND_UNREACHABLE: u8 = 7;
 
 const NEVER: i64 = 2;
 const HDR: usize = 32;
@@ -166,6 +167,12 @@ impl Site {
             return;
         }
         self.report(KIND_ALWAYS, cond, label, detail);
+    }
+
+    /// A point that must not be reached was reached.
+    #[inline]
+    pub fn unreachable(&self, label: &str, detail: impl FnOnce(&mut Text)) {
+        self.report(KIND_UNREACHABLE, false, label, detail);
     }
 
     #[inline]

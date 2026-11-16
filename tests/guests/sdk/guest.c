@@ -2,6 +2,7 @@
  *   script [two]   the shared script: coverage, assertions, a fault point, a knob, a delay;
  *                  prints the fault point's decisions ("two": a second point interleaved)
  *   fail           an `always` fails
+ *   unreach        an `unreachable` is reached
  *   coin           a `sometimes` on one random byte
  *   loop N [sdk]   N iterations of a little arithmetic, with a passing `always` if "sdk"  */
 #include "patina.h"
@@ -38,6 +39,10 @@ int main(int argc, char **argv) {
         int balance = -1;
         PATINA_ALWAYS(balance >= 0, "must-hold", "balance -1");
         PATINA_REACHABLE("after-fail");
+        return 0;
+    }
+    if (!strcmp(mode, "unreach")) {
+        PATINA_UNREACHABLE("never-here", "reached");
         return 0;
     }
     if (!strcmp(mode, "coin")) {

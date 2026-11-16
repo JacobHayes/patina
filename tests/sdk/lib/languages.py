@@ -2,7 +2,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from sdk import LANGS, die, log_ops, native, run  # noqa: E402
+from sdk import LANGS, die, log_ops, native, report, run  # noqa: E402
 
 INERT = "a=00000000000000000000 knob=7 delay=0\n"
 tables, lines = {}, {}
@@ -25,6 +25,10 @@ for lang, cmd in LANGS.items():
     if "patina_sdk" not in last[0] or "SdkViolation" not in last[1]:
         die(f"{lang} fail: the log does not end with the trap and the decision: {last}")
 
+    r = run(f"01/{lang}-unreach", 1, cmd, "unreach")
+    if r.cls != "violation" or r.outcome["message"] != "never-here: reached":
+        die(f"{lang} unreach: {r.cls} {r.outcome['message']!r}")
+
     r = run(f"01/{lang}-script", 5, cmd, "script",
             flags=["--buggify", "--fault", "point:point-a=500"])
     if r.cls != "ok":
@@ -32,6 +36,11 @@ for lang, cmd in LANGS.items():
     u = r.site("unreached")
     if (u["evaluated"], u["held"]) != (0, 0) or not u["location"]:
         die(f"{lang} script: declared site unreached = {u}")
+    u = r.site("never-here")
+    if (u["kind"], u["evaluated"]) != ("unreachable", 0):
+        die(f"{lang} script: unreachable site = {u}")
+    if "never-here" in report(r)["sdk"]["always_never_evaluated"]:
+        die(f"{lang} script: an unreachable site never reached is reported as unmet")
     if r.site("half-way")["held"] != 1 or r.site("never-holds")["held"] != 0:
         die(f"{lang} script: sometimes counts {r.site('half-way')} {r.site('never-holds')}")
     tables[lang], lines[lang] = r.table(), r.stdout

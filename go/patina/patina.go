@@ -58,6 +58,7 @@ const (
 	kindBuggify   = 4
 	kindKnob      = 5
 	kindDelay     = 6
+	kindUnreach   = 7
 
 	never    = 2
 	hdrLen   = 32
@@ -233,8 +234,23 @@ func (a *AlwaysSite) Check(cond bool, detail ...any) bool {
 //go:noinline
 func (a *AlwaysSite) slow(cond bool, detail []any) { a.report(kindAlways, cond, detail) }
 
-// Unreachable reports that a point which must not be reached was reached: a failed check.
-func (a *AlwaysSite) Unreachable(detail ...any) { a.Check(false, detail...) }
+// UnreachableSite is a point that must not be reached. A run that never reaches it is not
+// reported as unmet.
+type UnreachableSite struct{ site }
+
+// Unreachable declares a point that must not be reached. Call it once per label, at package
+// level.
+//
+//go:noinline
+func Unreachable(label string) *UnreachableSite {
+	u := &UnreachableSite{}
+	u.declare(kindUnreach, label)
+	return u
+}
+
+// Reached reports that the point was reached: under Patina the run ends as a violation with
+// "label: detail", detail formatted as fmt.Sprint does.
+func (u *UnreachableSite) Reached(detail ...any) { u.report(kindUnreach, false, detail) }
 
 // SometimesSite is a coverage oracle: its condition should hold on some runs.
 type SometimesSite struct{ site }

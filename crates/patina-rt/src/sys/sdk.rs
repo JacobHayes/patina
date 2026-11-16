@@ -93,7 +93,10 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
     let t = tab();
     let seed = config().seed;
     let want = match op {
-        OP_ASSERT => matches!(h.kind, KIND_ALWAYS | KIND_SOMETIMES | KIND_REACHABLE),
+        OP_ASSERT => matches!(
+            h.kind,
+            KIND_ALWAYS | KIND_SOMETIMES | KIND_REACHABLE | KIND_UNREACHABLE
+        ),
         OP_BUGGIFY => h.kind == KIND_BUGGIFY,
         OP_KNOB => h.kind == KIND_KNOB,
         OP_DELAY => h.kind == KIND_DELAY,
@@ -119,7 +122,7 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
     let Some(s) = t.site(h.kind, label) else {
         // Table full (counted): the call is still answered.
         return match op {
-            OP_ASSERT if h.kind == KIND_ALWAYS && h.cond == 0 => violation(call, label, text),
+            OP_ASSERT if fails(h) => violation(call, label, text),
             _ => 0,
         };
     };
@@ -130,9 +133,8 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         }
         OP_ASSERT => {
             s.evaluated += 1;
-            let held = h.kind == KIND_REACHABLE || h.cond != 0;
-            s.held += held as u64;
-            if h.kind == KIND_ALWAYS && !held {
+            s.held += (h.kind == KIND_REACHABLE || (h.cond != 0 && !fails(h))) as u64;
+            if fails(h) {
                 violation(call, label, text)
             }
             0
@@ -167,6 +169,11 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         }
         _ => -e::EINVAL,
     }
+}
+
+/// A failed `always`, or an `unreachable` reached.
+fn fails(h: &Hdr) -> bool {
+    (h.kind == KIND_ALWAYS && h.cond == 0) || h.kind == KIND_UNREACHABLE
 }
 
 /// A failed `always`: record it, write the trap's boundary record, and end the run.

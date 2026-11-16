@@ -7,7 +7,7 @@
  *   PATINA_ALWAYS(cond, "label", detail)   invariant; a failure ends the run as `violation`
  *   PATINA_SOMETIMES(cond, "label")        should hold on some runs
  *   PATINA_REACHABLE("label")              should be reached on some runs
- *   PATINA_UNREACHABLE("label", detail)    PATINA_ALWAYS(0, ...)
+ *   PATINA_UNREACHABLE("label", detail)    must not be reached: reaching it is a violation
  *   PATINA_BUGGIFY("label")                fault point: 1 on seed-chosen evaluations (--buggify)
  *   PATINA_BUGGIFY_WITH_PROB("label", p)   the same at p per mille instead of the run default
  *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--buggify)
@@ -37,7 +37,7 @@
 enum { PATINA_OP_HELLO = 1, PATINA_OP_ASSERT, PATINA_OP_BUGGIFY, PATINA_OP_KNOB,
        PATINA_OP_DELAY, PATINA_OP_MARK, PATINA_OP_DECLARE };
 enum { PATINA_KIND_ALWAYS = 1, PATINA_KIND_SOMETIMES, PATINA_KIND_REACHABLE,
-       PATINA_KIND_BUGGIFY, PATINA_KIND_KNOB, PATINA_KIND_DELAY };
+       PATINA_KIND_BUGGIFY, PATINA_KIND_KNOB, PATINA_KIND_DELAY, PATINA_KIND_UNREACHABLE };
 
 #define PATINA_NEVER 2 /* a point's answer: no, and never in this run */
 #define PATINA_LABEL_MAX 255
@@ -179,7 +179,13 @@ static inline void patina_declare(int kind, const char *label, const char *where
             patina__assert(&patina__b, PATINA_KIND_ALWAYS, patina__c, label, (detail));        \
     } while (0)
 
-#define PATINA_UNREACHABLE(label, detail) PATINA_ALWAYS(0, label, detail)
+#define PATINA_UNREACHABLE(label, detail)                                                      \
+    do {                                                                                       \
+        PATINA__SITE(PATINA_KIND_UNREACHABLE, label);                                          \
+        static unsigned char patina__b;                                                        \
+        if (patina__state != 2)                                                                \
+            patina__assert(&patina__b, PATINA_KIND_UNREACHABLE, 0, label, (detail));           \
+    } while (0)
 
 #define PATINA_SOMETIMES(cond, label)                                                          \
     do {                                                                                       \

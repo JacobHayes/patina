@@ -1,4 +1,5 @@
-// The SDK test guest in Go: the script of guest.c (modes script [two], fail, coin, loop).
+// The SDK test guest in Go: the script of guest.c (modes script [two], fail, unreach, coin,
+// loop).
 package main
 
 import (
@@ -23,6 +24,7 @@ var (
 	beforeFail  = patina.Reachable("before-fail")
 	mustHold    = patina.Always("must-hold")
 	afterFail   = patina.Reachable("after-fail")
+	neverHere   = patina.Unreachable("never-here")
 	coin        = patina.Sometimes("coin")
 	loopBounded = patina.Always("loop-bounded")
 )
@@ -68,6 +70,8 @@ func main() {
 		balance := -1
 		mustHold.Check(balance >= 0, "balance ", balance)
 		afterFail.Mark()
+	case "unreach":
+		neverHere.Reached("reached")
 	case "coin":
 		b := make([]byte, 1)
 		if _, err := rand.Read(b); err != nil {

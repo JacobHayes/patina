@@ -17,8 +17,9 @@
 //!   `FJ_ROOT` (default `/work/fjtest`; the native check points it at a copied tree),
 //!   `FJ_WIPE_PARTIAL=1` (a workaround for finding F1: wipe a db without a `version`
 //!   marker and start over).
-//! - Invariants are `patina_dst::always!`: under Patina a failure ends the run `violation`
-//!   with `label: detail`. Run natively (on a kept post-crash tree) the SDK is inert, so a
+//! - Invariants are `patina_dst::always!`, and failures found without a condition (an open
+//!   or iteration error) `patina_dst::unreachable!`: under Patina either ends the run
+//!   `violation` with `label: detail`. Run natively (on a kept post-crash tree) the SDK is inert, so a
 //!   failure prints `INVARIANT label: detail` to stderr and exits 1.
 //! - Two fault points, `persist-now` (persist and acknowledge early) and `manual-flush`
 //!   (rotate keyspace a's memtable), are `patina_dst::buggify!`: they fire only under
@@ -53,6 +54,16 @@ macro_rules! check {
             eprintln!("INVARIANT {}: {}", $label, format_args!($($detail)+));
             std::process::exit(1);
         }
+    }};
+}
+
+/// A failure found without a condition to check: `fail!("label", "fmt", args..)`. An
+/// `unreachable!` under Patina, so a sweep in which no run fails this way does not list it.
+macro_rules! fail {
+    ($label:expr, $($detail:tt)+) => {{
+        patina_dst::unreachable!($label, $($detail)+);
+        eprintln!("INVARIANT {}: {}", $label, format_args!($($detail)+));
+        std::process::exit(1);
     }};
 }
 
@@ -119,10 +130,9 @@ fn open(root: &Path, recovering: bool) -> (Database, Keyspace, Keyspace) {
                 std::process::exit(0);
             }
             if recovering {
-                check!(false, "open-after-crash", "open db: {d}");
+                fail!("open-after-crash", "open db: {d}");
             }
-            check!(false, "reopen-failed", "open db: {d}");
-            unreachable!()
+            fail!("reopen-failed", "open db: {d}");
         }
     }
 }
@@ -177,8 +187,7 @@ fn snapshot(ks: &Keyspace) -> Vec<(u64, Vec<u8>)> {
                     eprintln!("UNJUDGED iterate hit injected I/O error: {d}");
                     std::process::exit(0);
                 }
-                check!(false, "iterate-failed", "iter: {d}");
-                unreachable!()
+                fail!("iterate-failed", "iter: {d}");
             }
         };
         let k = u64::from_be_bytes(k.as_ref().try_into().expect("8-byte key"));
