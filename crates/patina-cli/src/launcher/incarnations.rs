@@ -227,6 +227,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             "incarnation": k,
             "kind": kind,
             "seq": seq,
+            "point": end.crash_points,
             "vclock_ns": vclock,
             "tree_digest": tree.digest(),
             "paths": tree.nodes.len(),
@@ -238,7 +239,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             what = Some(lost(&live, &tree, o.cfg.work_path()));
         }
         crashes.push(c);
-        faults.add_crash(k, &kind, seq, vclock, what);
+        faults.add_crash(k, &kind, seq, end.crash_points, vclock, what);
         if std::env::var_os("PATINA_TIMING").is_some() {
             // the launcher's crash work: build the next tree, write it, digest it.
             eprintln!(

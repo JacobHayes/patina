@@ -49,15 +49,41 @@ def crash_position(inc):
     return "%s (%s)" % (p["kind"], who)
 
 
+SYNCS = ("Fsync", "FsyncDir", "FsyncFail", "Sync")
+
+
+def points(ops):
+    """The crash point ordinal just after each record (None for base records and the Crash
+    record), as the runtime counts them with no setup-complete mark: one point after each
+    record it appends, and one before each sync-class call, ahead of the records that call
+    appends (writeback, then the sync record; all with the call's seq). Scripts check what a
+    run crashed at, so a difference from the runtime's count shows as a crash elsewhere."""
+    sync_seqs = {o["seq"] for o in ops if o["kind"] in SYNCS}
+    n, seen, out = 0, set(), []
+    for o in ops:
+        if o["pid"] == 0 or o["kind"] == "Crash":
+            out.append(None)
+            continue
+        if o["seq"] in sync_seqs and o["seq"] not in seen:
+            seen.add(o["seq"])
+            n += 1
+        n += 1
+        out.append(n)
+    return out
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "crash-position":
         for inc in sys.argv[2:]:
             print(crash_position(inc))
-    elif cmd == "seq-after":
-        # seq-after INC KIND NAME NTH: seq of the NTH (1-based) KIND record on NAME, +1
+    elif cmd == "point-after":
+        # point-after INC KIND NAME NTH: the crash point just after the NTH (1-based) KIND
+        # record on NAME, and that record's seq
         inc, kind, name, nth = sys.argv[2], sys.argv[3], sys.argv[4], int(sys.argv[5])
         ops = oplog(inc)
         nm = names(ops)
-        hits = [o for o in ops if o["kind"] == kind and nm.get(o["ino"]) == name]
-        print(hits[nth - 1]["seq"] + 1)
+        pts = points(ops)
+        hits = [i for i, o in enumerate(ops) if o["kind"] == kind and nm.get(o["ino"]) == name]
+        print(pts[hits[nth - 1]], ops[hits[nth - 1]]["seq"])
+

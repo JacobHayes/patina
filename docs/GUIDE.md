@@ -212,8 +212,9 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   instead of on in a quarter of runs and firing on a quarter of evaluations.
 - **The crash position.** `--crash machine:N` crashes at each crash point with probability
   N per mille, so most runs crash early; a lower N reaches later points and a higher one
-  earlier points. To search a region you know (from a log, `patina log ops`), give the
-  position as a range: `--crash machine-at:A..B`.
+  earlier points. To search a region you know (from the `point` of a crash near it, or
+  `faults.counts.crash.eligible` of a run without crashes), give the position as a range:
+  `--crash machine-at:A..B`.
 - **The fault rates**: a preset's ranges (`--faults disk`), a key's own range, and
   `--fault swarm=1`, which turns each configured class off in half the seeds.
 - **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
@@ -324,10 +325,16 @@ ops` lists its renames and symlinks at the use's seq.
 the same arguments, on what had reached the disk: data never synced may be gone, renames and
 creations may be undone. `--crash process` kills the processes but keeps what they wrote, as
 an operating system does when a program dies. The default rate is 3 per mille per crash
-point (`--crash machine:10` for 10); `machine-at:SEQ` crashes at the first crash point at or
-after boundary record SEQ. Like the other `-at` settings (`fsync-error-at=N`,
-`fs-error-at=CLASS:N`, `mem-error-at=N`), SEQ may be a range `A..B`: each seed picks its own
-position in it, so a sweep searches the region.
+point (`--crash machine:10` for 10); `machine-at:N` crashes at the N-th crash point of the
+first run (counted from the `setup-complete` mark under `faults-after-setup`). Crash points
+follow each change to `/work` and precede each sync, so one call can hold several (an
+`fsync`: before it and after it). A run with `machine-at:N` is the same as the run without
+it up to that point. `crashes[].point` in `result.json` (and `point=` in `last injected:`)
+is a crash's ordinal within its incarnation, so a crash of incarnation 0 that a sweep found
+can be moved one point earlier or later with `-at`. Like the other `-at` settings (`fsync-error-at=N`,
+`fs-error-at=CLASS:N`, `mem-error-at=N`), N may be a range `A..B`: each seed picks its own
+point in it, so a sweep searches the region. An N past the run's last crash point never
+fires: the run ends as it would without the crash, with `faults.counts.crash.injected` 0.
 
 A program under `--crash` must be restartable: on start, it recovers its state from `/work`
 and checks it. `PATINA_INCARNATION=K` is set after the K-th restart. `examples/acklog-c`
@@ -338,7 +345,7 @@ $ patina run --seed 3 --crash machine -- ./acklog
 violation (always): acked-records-kept: 23 acknowledged, 0 stored
 faults injected: 1 (crash 1)
 last injected:
-  seq 124 t=100000ms crash kind=machine object=/work/data.log lost: 0 missing, 1 changed, 0 back
+  seq 124 t=100000ms crash kind=machine point=97 object=/work/data.log lost: 0 missing, 1 changed, 0 back
 ```
 
 What survives a machine crash follows `ext4-ordered` by default; `[faults] fs-model =

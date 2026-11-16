@@ -17,7 +17,8 @@ echo "--work $d/init:/var/lib/app: the guest starts there, with seed"
 # The crash model: as tests/faults/09-failed-fsync.sh, at /work and at /var/lib/app.
 g() { timeout 60 "$PATINA" run --seed 1 --mount "$PATINA_GUESTS":/guest:copy --fault fsync-error-at=3 "$@" >/dev/null 2>&1 || true; }
 g --out "$d/probe" -- /guest/ack-log retry
-at=$(python3 -I "$(dirname "$0")/../faults/lib/faults.py" seq-after "$d/probe/inc-0" Fsync acks 1)
+set -- $(python3 -I "$(dirname "$0")/../faults/lib/faults.py" point-after "$d/probe/inc-0" Fsync acks 1)
+at=$1 aseq=$2
 for w in /work /var/lib/app; do
     g --out "$d/crash$(echo "$w" | tr / -)" --work ":$w" --crash machine-at:"$at" -- /guest/ack-log retry
 done
@@ -25,6 +26,7 @@ a=$d/crash-work b=$d/crash-var-lib-app
 for o in "$a" "$b"; do
     [ "$(field "$o/result.json" outcome)" = failure ] && field "$o/result.json" message | grep -q acked-record-lost ||
         die "$o: $(field "$o/result.json" outcome) $(field "$o/result.json" message)"
+    [ "$(jq '.crashes[0].seq' "$o/result.json")" = "$aseq" ] || die "$o: crashed at seq $(jq '.crashes[0].seq' "$o/result.json"), not after the acks fsync at seq $aseq"
 done
 [ "$(field "$a/result.json" message)" = "$(field "$b/result.json" message)" ] ||
     die "the crash differs at /var/lib/app: $(field "$b/result.json" message)"

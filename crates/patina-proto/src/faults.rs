@@ -256,7 +256,8 @@ pub struct FaultCfg {
     pub crash_kind: u64,
     /// Per-mille rate at each crash point (when `crash_at` is 0).
     pub crash_permille: u64,
-    /// `machine-at:SEQ` / `process-at:SEQ`: crash at the first crash point at or after SEQ (0: off).
+    /// `machine-at:N` / `process-at:N`: crash at the N-th crash point of the first incarnation
+    /// (0: off).
     pub crash_at: u64,
     /// 1 when this incarnation may crash (not the last permitted one; `-at` only until it fired).
     pub crash_enabled: u64,
@@ -292,7 +293,8 @@ pub struct FaultCtl {
     pub sync_calls: AtomicU64,
     pub work_bytes: AtomicU64,
     pub injected: AtomicU64,
-    /// Crash points passed (whether or not one fired).
+    /// Crash points passed in this incarnation (whether or not one fired); after a crash, the
+    /// ordinal of the point that fired.
     pub crash_points: AtomicU64,
     /// Eligible calls per `Kind`, counted while faults are active.
     pub eligible: [AtomicU64; NKIND],

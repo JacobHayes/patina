@@ -1,15 +1,13 @@
 # Evidence (crash-point enumeration): for each base seed, one run without a crash, then one
-# child per distinct seq of the base's operation log with the crash forced there
-# (`--crash machine-at:SEQ`), counting the children that end in fjall's journal-entry
-# assertion (F2, docs/EVIDENCE.md "Search quality"). Prints, per seed, the crash points, the
-# children, the F2 children and their seqs, the CPU-seconds in all and to the first F2, and
-# the share of children whose post-crash tree repeats an earlier child's.
+# child per crash point of it (`--crash machine-at:N`), counting the children that end in
+# fjall's journal-entry assertion (F2, docs/EVIDENCE.md "Search quality"). Prints, per seed,
+# the crash points, the children, the F2 children and their points, the CPU-seconds in all
+# and to the first F2, and the share of children whose post-crash tree repeats an earlier
+# child's.
 #   ENUM_SEEDS   base seeds to take in order (default 1 to 20); a seed over 10,000 crash points
 #                is skipped and the next taken, until ENUM_COUNT (default 3) are enumerated
 #   ENUM_DIR ENUM_CMD ENUM_OPTS  the guest directory, command and options (default the debug
 #                fjall harness with FJ_N=2000 --buggify)
-#   ENUM_NEAR    journal offsets: only the journal writes within 8 KiB of one of them, and the
-#                operations after each up to the next journal fsync (the F2 windows), are tried
 #   ENUM_JOBS    parallel children (default 6)
 #@ tier=evidence budget=1200 slots=6
 set -eu
@@ -31,31 +29,11 @@ for s in $seeds; do
     pts=$(jq '.faults.counts.crash.eligible // 0' "$b/result.json")
     [ "$pts" -gt 0 ] || die "seed $s: the base has no crash point ($(jq -r .outcome "$b/result.json"))"
     [ "$pts" -le 10000 ] || { echo "seed $s: $pts crash points, skipped"; rm -rf "$b"; continue; }
-    "$PATINA" log ops "$b/inc-0" >"$out/ops-$s.txt"
-    if [ -n "${ENUM_NEAR:-}" ]; then
-        # The journal is the file of the first Truncate (fjall preallocates it).
-        python3 -I - "$out/ops-$s.txt" "$ENUM_NEAR" >"$out/seqs-$s" <<'PY'
-import re, sys
-ops = [dict(re.findall(r'(\w+)=(\S+)', l), op=l.split()[4]) for l in open(sys.argv[1])]
-near = [int(x) for x in sys.argv[2].split(",")]
-jnl = next(o["ino"] for o in ops if o["op"] == "Truncate")
-on, seqs = False, set()
-for o in ops:
-    if o.get("ino") == jnl and o["op"] == "Write" and any(abs(int(o["off"]) - n) <= 8192 for n in near):
-        on = True
-    if on:
-        seqs.add(int(o["seq"]))
-    if o.get("ino") == jnl and o["op"] == "Fsync":
-        on = False
-print("\n".join(map(str, sorted(seqs))))
-PY
-    else
-        sed -n 's/.* seq=\([0-9]*\) .*/\1/p' "$out/ops-$s.txt" | sort -un >"$out/seqs-$s"
-    fi
+    seq 1 "$pts" >"$out/points-$s"
     base_ms=$(jq .wall_ms "$b/result.json"); echo "$base_ms" >>"$out/base-ms"
     rm -rf "$b"
     : >"$out/children-$s.tsv"
-    # One child per seq: its line is seq, crash seq, outcome, F2 (1/0), wall_ms, tree digest.
+    # One child per point: its line is point, crash seq, outcome, F2 (1/0), wall_ms, tree digest.
     xargs -P "${ENUM_JOBS:-6}" -I{} sh -c '
         s=$1 q=$2 c=$RUNS/enum/child-$1-$2
         timeout 600 "$PATINA" run --seed "$s" --crash "machine-at:$q" --out "$c" --mount "$G":/guest:copy $opts -- $cmd >/dev/null 2>&1 || true
@@ -65,7 +43,7 @@ PY
             printf "%s\t-\tpatina-error\t0\t0\t-\n" "$q"
         fi
         rm -rf "$c"
-    ' sh "$s" {} <"$out/seqs-$s" >>"$out/children-$s.tsv"
+    ' sh "$s" {} <"$out/points-$s" >>"$out/children-$s.tsv"
     python3 -I - "$out/children-$s.tsv" "$s" "$pts" "$base_ms" <<'PY'
 import sys, collections
 rows = sorted((l.rstrip("\n").split("\t") for l in open(sys.argv[1])), key=lambda r: int(r[0]))
@@ -78,12 +56,13 @@ to_first = base_ms + sum(ms[: first + 1]) if first is not None else None
 trees = collections.Counter(r[5] for r in crashed)
 rep = sum(n - 1 for n in trees.values())
 outc = collections.Counter(r[2] for r in rows)
-print("seed %s: crash points %d, children %d (crashed %d), F2 %d at seqs %s, CPU-s %.1f (base %.2f), to first F2 %s, children repeating a tree %.0f%%, outcomes %s" % (
+print("seed %s: crash points %d, children %d (crashed %d), F2 %d at points %s, CPU-s %.1f (base %.2f), to first F2 %s, children repeating a tree %.0f%%, outcomes %s" % (
     s, pts, len(rows), len(crashed), len(f2), [int(r[0]) for r in f2], (base_ms + sum(ms)) / 1000, base_ms / 1000,
     "%.1f" % (to_first / 1000) if to_first is not None else "-", 100 * rep / max(len(crashed), 1), dict(outc)))
 PY
+    # Every child must crash at its point; the rows with no crash name the child's outcome.
     n=$(awk -F'\t' '$2 != "-"' "$out/children-$s.tsv" | wc -l)
-    [ "$n" -gt 0 ] || die "seed $s: no child crashed"
+    [ "$n" = "$pts" ] || die "seed $s: $n of $pts children crashed; the others: $(awk -F'\t' '$2 == "-" {printf "%s %s; ", $1, $3}' "$out/children-$s.tsv" | head -c 400)"
     tried=$((tried + 1))
 done
 [ "$tried" -gt 0 ] || die "every seed was skipped"

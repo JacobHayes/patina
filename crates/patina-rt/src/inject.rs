@@ -452,9 +452,12 @@ struct CrashSub {
 static SUB: path::Global<CrashSub> = path::Global::new(CrashSub { seq: 0, sub: 0 });
 
 /// A crash point: the tracker's state changed (a record was appended) or a sync-class call is
-/// about to be made. Draws `draw(Crash, seq * 16 + k)` (k counts the points of this trap) and,
-/// when it fires, appends the `Crash` record and hands the crash to the supervisor, which
-/// kills every guest process. Never returns in that case.
+/// about to be made. Counts the point (`crash_points`: its ordinal in this incarnation), then
+/// either fires at the `crash_at`-th point or draws `draw(Crash, seq * 16 + k)` (k counts the
+/// points of this trap). When it fires it appends the `Crash` record and hands the crash to
+/// the supervisor, which kills every guest process. Never returns in that case. A point that
+/// does not fire changes nothing but the count, so a run's prefix is the same whatever the
+/// crash setting.
 pub fn crash_point() {
     let c = ctl();
     let f = &c.faults;
@@ -473,10 +476,10 @@ pub fn crash_point() {
     }
     let k = s.sub;
     s.sub += 1;
-    f.crash_points
-        .store(f.crash_points.load(Relaxed) + 1, Relaxed);
+    let n = f.crash_points.load(Relaxed) + 1;
+    f.crash_points.store(n, Relaxed);
     let fire = if cfg.crash_at != 0 {
-        ts.seq >= cfg.crash_at
+        n == cfg.crash_at
     } else {
         cfg.crash_permille != 0
             && draw(

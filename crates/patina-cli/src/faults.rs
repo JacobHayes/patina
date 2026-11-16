@@ -600,8 +600,9 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
     Ok(())
 }
 
-/// `--crash machine|process[:PERMILLE] | machine-at:SEQ | process-at:SEQ`, where PERMILLE and
-/// SEQ may be a range `A..B`. Returns the resolved form.
+/// `--crash machine|process[:PERMILLE] | machine-at:N | process-at:N`, where PERMILLE and N
+/// may be a range `A..B`. N is a crash point's ordinal in the first incarnation. Returns the
+/// resolved form.
 fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String> {
     let (k, v) = s.split_once(':').unwrap_or((s, ""));
     let (kind, at) = match k {
@@ -611,14 +612,14 @@ fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String
         "process-at" => (CRASH_PROCESS, true),
         _ => {
             return Err(format!(
-                "--crash: unknown kind {k} (machine, process, machine-at:SEQ, process-at:SEQ)"
+                "--crash: unknown kind {k} (machine, process, machine-at:N, process-at:N)"
             ))
         }
     };
     f.crash_kind = kind;
     if at {
         if v.is_empty() {
-            return Err(format!("--crash {s}: expected {k}:SEQ (or A..B)"));
+            return Err(format!("--crash {s}: expected {k}:N (or A..B)"));
         }
         let n = resolve_num(seed, "crash-at", v, u64::MAX / 2)
             .map_err(|e| e.replace("--fault crash-at", &format!("--crash {k}")))?;

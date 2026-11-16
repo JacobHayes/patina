@@ -267,7 +267,8 @@ name, Go's pure resolver "no such host"; no resolver sends a datagram.
 
 The runtime records every change to `/work` with its data in an operation log, along with
 every sync (`patina-proto/src/oplog.rs`). Crash points follow each change and precede each
-sync; the crash draw is used only when it fires, so a run is identical to the run without
+sync; each is counted (its ordinal is what `-at:N` names and what `crashes[].point` reports)
+and the crash draw is used only when it fires, so a run is identical to the run without
 `--crash` up to the crash.
 
 A process crash restarts the program on `/work` as it was. A machine crash restarts it on

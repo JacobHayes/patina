@@ -8,11 +8,14 @@ d=$RUNS/09
 # without crashes; the run before the crash is the same).
 run "$d/probe" 1 --fault fsync-error-at=3 -- /guest/ack-log retry
 "$PATINA" oplog dump "$d/probe/inc-0" | sed -n 1,12p
-at=$(python3 -I "$LIB/faults.py" seq-after "$d/probe/inc-0" Fsync acks 1)
-echo "crash at the first crash point at or after seq $at"
+set -- $(python3 -I "$LIB/faults.py" point-after "$d/probe/inc-0" Fsync acks 1)
+at=$1 aseq=$2
+echo "crash at crash point $at, after the acks fsync at seq $aseq"
 for m in ext4-ordered posix-strict; do
     o=$d/retry-$m
     run "$o" 1 --config "$("$PATINA_CFG" fs-model=$m)" --fault fsync-error-at=3 --crash machine-at:$at -- /guest/ack-log retry
+    [ "$(jq '.crashes[0].seq' "$o/result.json")" = "$aseq" ] && [ "$(jq '.crashes[0].point' "$o/result.json")" = "$at" ] ||
+        die "$m: crashed at seq $(jq '.crashes[0].seq' "$o/result.json") point $(jq '.crashes[0].point' "$o/result.json"), not point $at after seq $aseq"
     echo "$m retry: $(class "$o") $(field "$o/result.json" message); injected $(field "$o/result.json" faults.recent)"
     [ "$(class "$o")" = failure ] && field "$o/result.json" message | grep -q "INVARIANT acked-record-lost" \
         || die "$m: retry-until-success was not caught"

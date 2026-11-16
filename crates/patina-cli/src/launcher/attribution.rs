@@ -208,11 +208,20 @@ impl Faults {
     }
 
     /// A crash ended incarnation `k`; `lost` says what it did to `/work` (machine crashes).
-    pub fn add_crash(&mut self, k: u64, kind: &str, seq: u64, vclock: u64, lost: Option<Value>) {
+    pub fn add_crash(
+        &mut self,
+        k: u64,
+        kind: &str,
+        seq: u64,
+        point: u64,
+        vclock: u64,
+        lost: Option<Value>,
+    ) {
         self.crashes += 1;
         let mut e = json!({
             "incarnation": k,
             "seq": seq,
+            "point": point,
             "vtime_ms": vclock / 1_000_000,
             "fault": "crash",
             "kind": kind,
@@ -367,7 +376,7 @@ pub fn line(f: &Value) -> String {
         return out;
     }
     for k in [
-        "kind", "call", "object", "errno", "count", "bytes", "delay_ns",
+        "kind", "point", "call", "object", "errno", "count", "bytes", "delay_ns",
     ] {
         if let Some(v) = s(k) {
             out.push_str(&format!(" {k}={v}"));

@@ -693,7 +693,7 @@ first lands there.
 | `point:manual-flush=1000` (fires at every evaluation): defaults | 0/2,000 | 6/2,000 |
 | same, `pause-points = false` | 0/2,000 | 10/2,000 |
 | `--crash machine` (3 per mille) | 0/2,000 | 1/2,000 |
-| `--crash machine-at:2250..2450` (the window's region) | 4/2,000 | 0/2,000 |
+| `--crash machine-at:2250..2450` (the window's region; boundary seq, as `-at` meant then; on seed 1 crash points 1,668 to 1,883 now) | 4/2,000 | 0/2,000 |
 
 - Fault-point activation per run against per incarnation: both findings are made in the first
   incarnation and detected when the second opens the database, before any fault point is
@@ -738,8 +738,9 @@ Does trying every crash point of a few seeds find F2 more often per CPU-second t
 sweep? 2026-11-16, this host, patina 0.8.0 (release), `H` debug. `tests/storage/evidence-crash-enum.sh`
 (`./check evidence crash-enum`, under the evidence lock): one base run per seed
 (`--seed S --buggify --env FJ_N=2000 --crash machine:0 -- H`), then one child per distinct
-seq of its operation log, `--crash machine-at:SEQ`, 6 at a time; CPU-seconds are the sum
-of `wall_ms`. A seed over 10,000 crash points is skipped. The plain sweep's expectation is
+seq of its operation log, `--crash machine-at:SEQ` (when `-at` named a boundary seq: the
+first crash point of each seq; the script now runs one child per crash point), 6 at a
+time; CPU-seconds are the sum of `wall_ms`. A seed over 10,000 crash points is skipped. The plain sweep's expectation is
 0.17 F2 runs in 2,000 seeds at about 0.2 CPU-s a seed: 4.3e-4 per CPU-second.
 
 | Seed | Crash points | Children | F2 children (seq) | CPU-s | To first F2 | Children repeating a tree |
@@ -758,9 +759,9 @@ of `wall_ms`. A seed over 10,000 crash points is skipped. The plain sweep's expe
 - A child costs 0.30 CPU-s on average at 6 jobs (the base: 0.2 to 0.4). Every child
   crashed. The other non-`ok` children are F1 (`open-after-crash`, 5 or 6 a seed, all at
   seqs 125 to 143, the first `Database::open`); no F6.
-- Seeds with a window: the same script with `ENUM_NEAR` set to the journal offsets of the F2
-  writes above (569,316, 1,097,826, 1,216,296, 1,302,500, 1,381,000) tries only the
-  journal writes within 8 KiB of one, up to the next journal fsync. Seeds 5 to 24: 7 over
+- Seeds with a window: the script, then with a filter that kept only the journal writes
+  within 8 KiB of the offsets of the F2 writes above (569,316, 1,097,826, 1,216,296,
+  1,302,500, 1,381,000) and the operations after each up to the next journal fsync. Seeds 5 to 24: 7 over
   10,000 crash points (19,536 to 23,932), skipped; F2 in 12 of the other 13 (1 to 5 F2
   children each, 2,166 children in all). This probe uses the windows found above, so its
   rate is not a search rate.

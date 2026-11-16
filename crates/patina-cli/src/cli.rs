@@ -239,7 +239,7 @@ pub const FLAGS: &[Flag] = &[
         "--crash",
         "KIND[:VALUE]",
         "off",
-        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:SEQ, process-at:SEQ; PERMILLE and SEQ may be A..B",
+        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B",
         RUNLIKE,
     ),
     flag(
