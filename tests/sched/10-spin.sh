@@ -4,7 +4,7 @@
 #  a. A flag spin (each iteration leaves the state unchanged) is found by a spin probe and the
 #     run ends ok; with probes off it ends unsupported, stop compute-stall.
 #  b. A spin that counts its iterations cannot be preempted: unsupported, stop compute-stall,
-#     within stall-ms plus a margin, naming the spinning thread; the same seed twice stops at
+#     after stall-ms of CPU time plus a margin (CPU time, which host load does not stretch), naming the spinning thread; the same seed twice stops at
 #     the same record (same digest).
 #  c. One thread computing for about 2 s with no other thread is ok, not a stall.
 #  d. Stock Go at the default CPU count (go-sweep, whose background sweeper spins without a
@@ -23,8 +23,7 @@ one() { # OUT GUESTDIR SEED CONFIG -- PROG ARGS...
 G=$PATINA_GUESTS
 one flag "$G" 1 "$on" -- /guest/spinpoints flag &
 one flag-off "$G" 1 "$off" -- /guest/spinpoints flag &
-t0=$(date +%s%N)
-(one count-a "$G" 1 "$on" -- /guest/spinpoints count; echo $(( ($(date +%s%N) - t0) / 1000000 )) >"$o/count-a.ms")&
+python3 -I "$(dirname "$0")/../cpu-ms.py" sh -c 'rm -rf "$1" && exec timeout 60 "$2" run --seed 1 --config "$3" --out "$1" --mount "$4":/guest:copy -- /guest/spinpoints count' sh "$o/count-a" "$PATINA" "$on" "$G" >"$o/count-a.ms" &
 one count-b "$G" 1 "$on" -- /guest/spinpoints count &
 one alone "$G" 1 "$on" -- /guest/spinpoints alone 2000 &
 wait
@@ -40,11 +39,11 @@ echo "a. flag spin: ok, preemptions $(field "$o/flag/result.json" sched.preempti
 
 stall count-a || die "b. counting spin: $(res count-a)"
 ms=$(cat "$o/count-a.ms")
-[ "$ms" -le 4000 ] || die "b. counting spin took $ms ms"
+[ "$ms" -ge 1000 ] && [ "$ms" -le 4000 ] || die "b. counting spin used $ms ms of CPU time"
 field "$o/count-a/result.json" message | grep -q spinpoints || die "b. the message does not name the thread: $(res count-a)"
 [ "$(field "$o/count-a/result.json" digest)" = "$(field "$o/count-b/result.json" digest)" ] ||
     die "b. the same seed stopped at different records"
-echo "b. counting spin after $ms ms: $(res count-a | cut -c1-110)"
+echo "b. counting spin after $ms ms of CPU time: $(res count-a | cut -c1-110)"
 
 [ "$(field "$o/alone/result.json" outcome)" = ok ] || die "c. lone compute: $(res alone)"
 echo "c. lone compute of about 2 s: ok, wall $(field "$o/alone/result.json" wall_ms) ms"
