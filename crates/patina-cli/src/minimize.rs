@@ -44,11 +44,16 @@ struct Search<'a> {
     signature: Value,
     tries: PathBuf,
     runs: usize,
+    /// What each run tried and whether it still failed the same way.
+    log: Vec<(String, bool)>,
+    /// Print each try on standard error (JSON output) rather than standard output.
+    quiet: bool,
 }
 
 impl Search<'_> {
-    /// Run `cfg`; its directory if it fails with the target signature.
-    fn attempt(&mut self, cfg: &Config) -> Result<Option<PathBuf>, Fail> {
+    /// Run `cfg` (`change` says what it changed); its directory if it fails with the target
+    /// signature.
+    fn attempt(&mut self, cfg: &Config, change: String) -> Result<Option<PathBuf>, Fail> {
         if self.runs >= MAX_RUNS {
             return Ok(None);
         }
@@ -58,12 +63,20 @@ impl Search<'_> {
         let cpu = cfg.host_cpu.unwrap_or_else(default_cpu);
         let (_, r) = run_one(&o, &dir, cpu, false).map_err(internal)?;
         let same = r["signature"] == self.signature;
-        eprintln!(
-            "minimize: run {}: {} {}",
-            self.runs,
-            if same { "keeps" } else { "loses" },
-            describe(cfg)
+        let line = format!(
+            "{change}: {}",
+            if same {
+                "still fails"
+            } else {
+                "no longer fails"
+            }
         );
+        if self.quiet {
+            eprintln!("minimize: {line}");
+        } else {
+            println!("{line}");
+        }
+        self.log.push((change, same));
         if same {
             Ok(Some(dir))
         } else {
@@ -112,11 +125,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     };
     let out = crate::absolute(match a.last("--out") {
         Some(o) => PathBuf::from(o),
-        None => {
-            let mut s = rundir.as_os_str().to_owned();
-            s.push("-min");
-            PathBuf::from(s)
-        }
+        // Inside the run it reduces, so that a report over the run's parent does not count it.
+        None => rundir.join("minimized"),
     });
     clear_out(&out).map_err(error)?;
     let mut tries = out.as_os_str().to_owned();
@@ -128,6 +138,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         signature,
         tries: tries.clone(),
         runs: 0,
+        log: vec![],
+        quiet: a.json(),
     };
     crate::launch::preflight(&cfg.opts_with(program.clone()).map_err(error)?).map_err(error)?;
     // A preset is its keys: settings given beside it replace its keys of the same name, and
@@ -151,48 +163,51 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     cfg.faults_preset.clear();
     let mut cur = cfg.clone();
     let mut best: Option<PathBuf> = None;
-    let mut keep = |s: &mut Search, cand: Config, cur: &mut Config| -> Result<bool, Fail> {
-        match s.attempt(&cand)? {
-            Some(d) => {
-                if let Some(old) = best.replace(d) {
-                    let _ = std::fs::remove_dir_all(old);
+    let mut keep =
+        |s: &mut Search, cand: Config, cur: &mut Config, change: String| -> Result<bool, Fail> {
+            match s.attempt(&cand, change)? {
+                Some(d) => {
+                    if let Some(old) = best.replace(d) {
+                        let _ = std::fs::remove_dir_all(old);
+                    }
+                    *cur = cand;
+                    Ok(true)
                 }
-                *cur = cand;
-                Ok(true)
+                None => Ok(false),
             }
-            None => Ok(false),
-        }
-    };
+        };
     // Drop each setting in turn.
     for f in cfg.faults.clone() {
         let mut c = cur.clone();
         c.faults.retain(|x| *x != f);
-        keep(&mut s, c, &mut cur)?;
+        keep(&mut s, c, &mut cur, format!("without {f}"))?;
     }
-    if cur.crash.is_some() {
+    if let Some(cr) = cur.crash.clone() {
         let mut c = cur.clone();
         c.crash = None;
-        keep(&mut s, c, &mut cur)?;
+        keep(&mut s, c, &mut cur, format!("without --crash {cr}"))?;
     }
     if cur.buggify {
         let mut c = cur.clone();
         c.buggify = false;
-        keep(&mut s, c, &mut cur)?;
+        keep(&mut s, c, &mut cur, "without --buggify".into())?;
     }
     // Halve what is left.
     for i in 0..cur.faults.len() {
         while let Some(h) = halve(&cur.faults[i]) {
             let mut c = cur.clone();
+            let change = format!("{} -> {h}", c.faults[i]);
             c.faults[i] = h;
-            if !keep(&mut s, c, &mut cur)? {
+            if !keep(&mut s, c, &mut cur, change)? {
                 break;
             }
         }
     }
     while let Some(h) = cur.crash.as_deref().and_then(halve) {
         let mut c = cur.clone();
+        let change = format!("--crash {} -> {h}", c.crash.as_deref().unwrap_or(""));
         c.crash = Some(h);
-        if !keep(&mut s, c, &mut cur)? {
+        if !keep(&mut s, c, &mut cur, change)? {
             break;
         }
     }
@@ -213,7 +228,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         result.is_ok(),
         &cfg,
         &cur,
-        s.runs,
+        &s.log,
         budget_spent,
     )
 }
@@ -226,16 +241,17 @@ fn finish(
     reduced: bool,
     from: &Config,
     to: &Config,
-    runs: usize,
+    log: &[(String, bool)],
     budget_spent: bool,
 ) -> Result<ExitCode, Fail> {
     let dir = if reduced { out } else { rundir };
     let run = read_json(&dir.join("run.json")).map_err(error)?;
-    let rerun = crate::report::rerun_command(&run, to.seed);
+    let rerun = crate::report::rerun_command(&run, to.seed, dir);
     if a.json() {
         let v = serde_json::json!({
-            "runs": runs,
+            "runs": log.len(),
             "max_runs": MAX_RUNS,
+            "tries": log.iter().map(|(c, f)| serde_json::json!({"change": c, "still_fails": f})).collect::<Vec<_>>(),
             "reduced": reduced,
             "from": describe(from),
             "to": describe(to),
@@ -244,22 +260,20 @@ fn finish(
         });
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
     } else {
-        println!(
-            "minimize: {runs} runs{}",
-            if budget_spent {
-                " (the limit; there may be more to remove)"
-            } else {
-                ""
-            }
-        );
-        println!("from: {}", describe(from));
-        println!("to:   {}", describe(to));
-        if reduced {
-            println!("run directory: {}", out.display());
-        } else {
-            println!("nothing could be removed; the run is already minimal");
+        if budget_spent {
+            println!("stopped at {MAX_RUNS} runs, the limit; more may go");
         }
-        println!("rerun: {rerun}");
+        if reduced {
+            println!(
+                "reduced: {} (from {}); run directory {}",
+                describe(to),
+                describe(from),
+                out.display()
+            );
+        } else {
+            println!("nothing could go: the run is already minimal");
+        }
+        println!("{rerun}");
     }
     Ok(ExitCode::SUCCESS)
 }

@@ -176,6 +176,9 @@ pub const INJ_SHORT: u64 = 2;
 pub const INJ_DELAY: u64 = 3;
 pub const INJ_ENOSPC: u64 = 4;
 pub const INJ_FSYNC_EIO: u64 = 5;
+/// The class that failed a sync (`args[3]` of an `INJ_FSYNC_EIO` record).
+pub const SYNC_BY_FSYNC_ERROR: u64 = 0;
+pub const SYNC_BY_FS_ERROR: u64 = 1;
 /// An earlier failed writeback reported again to a descriptor that had not seen it.
 pub const INJ_FSYNC_REPORT: u64 = 6;
 /// `mem-limit-mb`: a growth of anonymous memory past the limit (value: the bytes asked for).

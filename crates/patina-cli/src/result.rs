@@ -294,28 +294,105 @@ pub fn classified(e: &RunEnd) -> Classified {
     classify(&e.verdict)
 }
 
-/// The human summary: outcome and stop, message, the guest's exit, the run directory and
-/// how to replay it.
+/// Lines of the guest's stderr the summary shows at most, and characters of each.
+const STDERR_LINES: usize = 12;
+const LINE_MAX: usize = 240;
+
+/// The human summary: the outcome line, the guest's exit; when the run is not ok, the tail of
+/// the guest's stderr (with its panic or assertion line) and the faults injected; the calls
+/// refused (each answered with an errno the guest may have handled silently); the run
+/// directory and how to replay it. `--format json` prints `result.json`, which holds all of it
+/// but stderr (in `inc-K/stderr`).
 pub fn print_human(r: &Value, dir: &Path) {
     let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
     println!("{} ({}): {}", s("outcome"), s("stop"), s("message"));
     let g = &r["guest"];
     if let Some(x) = g["exit"].as_i64() {
         match g["signal"].as_i64() {
-            Some(sig) => println!("guest: killed by signal {sig}"),
+            Some(sig) => println!("guest: killed by {}", crate::outcome::signal_name(sig)),
             None => println!("guest: exit {x}"),
         }
     }
-    // Under a finding: the last faults done to the program before it.
-    let recent = r["faults"]["recent"].as_array().map_or(&[][..], |v| v);
-    if r["exit"] == 1 && !recent.is_empty() {
-        println!("last injected faults ({} in all):", r["faults"]["injected"]);
-        for f in &recent[recent.len().saturating_sub(5)..] {
-            println!("  {}", crate::launcher::attribution::line(f));
+    let ok = r["outcome"] == "ok";
+    if !ok {
+        let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
+        let path = dir.join(format!("inc-{inc}")).join("stderr");
+        let text = std::fs::read(&path)
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        if !lines.is_empty() {
+            let from = lines.len().saturating_sub(STDERR_LINES);
+            let cut = |l: &str| l.chars().take(LINE_MAX).collect::<String>();
+            println!(
+                "guest stderr ({}, {}):",
+                if from > 0 {
+                    format!("last {STDERR_LINES} of {} lines", lines.len())
+                } else {
+                    format!("{} lines", lines.len())
+                },
+                path.display()
+            );
+            // The panic or assertion line, when it scrolled out of the tail.
+            if let Some(i) = lines[..from]
+                .iter()
+                .position(|l| crate::signature::guest_line(l).is_some())
+            {
+                println!("  {}", cut(lines[i]));
+                println!("  ...");
+            }
+            for l in &lines[from..] {
+                println!("  {}", cut(l));
+            }
         }
+    }
+    // The faults done to the program: per class, then the last few under a finding.
+    let injected = r["faults"]["injected"].as_u64().unwrap_or(0);
+    if injected > 0 {
+        let per: Vec<String> = r["faults"]["counts"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(k, v)| {
+                let n = v["injected"].as_u64().unwrap_or(0);
+                (n > 0).then(|| format!("{k} {n}"))
+            })
+            .collect();
+        println!("faults injected: {injected} ({})", per.join(", "));
+        let recent = r["faults"]["recent"].as_array().map_or(&[][..], |v| v);
+        if r["exit"] == 1 && !recent.is_empty() {
+            println!("last injected:");
+            for f in &recent[recent.len().saturating_sub(5)..] {
+                println!("  {}", crate::launcher::attribution::line(f));
+            }
+        }
+    }
+    if let Some(l) = refused_line(r) {
+        println!("{l}");
     }
     println!("run directory: {}", dir.display());
     println!("replay: patina replay {}", dir.display());
+}
+
+/// One line naming what the run refused, or nothing. Calls the table answers `ENOSYS` (a
+/// kernel without them; libraries probe for them and fall back) are left out; `result.json`'s
+/// `refused` has them all.
+pub fn refused_line(r: &Value) -> Option<String> {
+    let probe = |n: &str| {
+        proto::table::known().any(|row| row.name == n && row.class == proto::table::Class::Deny(38))
+    };
+    let names: Vec<&str> = r["refused"]
+        .as_array()?
+        .iter()
+        .filter_map(|x| x.as_str())
+        .filter(|n| !probe(n))
+        .collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "refused: {} (unsupported; the guest got an error code)",
+            names.join(", ")
+        )
+    })
 }
 
 /// The SDK's site table and violation (`proto::sdk::SdkTab`), folded over incarnations.

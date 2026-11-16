@@ -347,22 +347,31 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
     }
 }
 
-/// The sync handler's question: does this sync-class call on an eligible target fail?
-/// Counts the call for `fsync-error-at` and `fs-error-at=sync:N`.
-pub fn sync_fails() -> bool {
+/// The sync handler's question: does this sync-class call on an eligible target fail, and by
+/// which class (`SYNC_BY_FSYNC_ERROR` or `SYNC_BY_FS_ERROR`)? Counts the call for
+/// `fsync-error-at` and `fs-error-at=sync:N`, and as eligible for both classes.
+pub fn sync_fails() -> Option<u64> {
     let f = &ctl().faults;
     let cfg = &f.cfg;
     if !cfg.faults_active() || !after_start() {
-        return false;
+        return None;
     }
     let n = f.sync_calls.load(Relaxed) + 1;
     f.sync_calls.store(n, Relaxed);
     let cn = f.count(FClass::Sync);
     f.eligible(Kind::FsyncError);
-    (cfg.fsync_error_at != 0 && cfg.fsync_error_at == n)
-        || (cfg.fs_error_at_class == FClass::Sync as u64 + 1 && cfg.fs_error_at_n == cn)
+    f.eligible(Kind::FsError);
+    if (cfg.fsync_error_at != 0 && cfg.fsync_error_at == n)
         || permille(cfg.fsync_error_permille, SUB_FSYNC_FIRE)
+    {
+        Some(SYNC_BY_FSYNC_ERROR)
+    } else if (cfg.fs_error_at_class == FClass::Sync as u64 + 1 && cfg.fs_error_at_n == cn)
         || permille(cfg.fs_error_permille, SUB_ERR_FIRE)
+    {
+        Some(SYNC_BY_FS_ERROR)
+    } else {
+        None
+    }
 }
 
 /// `mem-limit-mb`: may this process's anonymous memory grow by `grow` bytes? It is the

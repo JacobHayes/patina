@@ -5,8 +5,8 @@ command that finds it. Each builds with its own language's tool and nothing else
 commands from the repository root. Each program takes `fixed` as its first argument to run
 without the bug; the same sweep with `fixed` added at the end is `ok` on every seed.
 
-A sweep writes to `--out` and keeps the runs it finds there, so give each sweep its own
-directory (or delete it first).
+A sweep directory holds one sweep: running the same command again runs only what is missing,
+and running it with `fixed` added (or after a rebuild) replaces the old runs.
 
 ## quickstart (Rust): a race found by scheduling
 
@@ -61,7 +61,8 @@ Expected: `violation always: acked-records-kept`, about 6 of the 20 seeds.
 ## bank-go (Go, SDK): a double deposit found by network faults
 
 An HTTP server and its client in one program. The client retries a deposit whose connection
-was reset; the server may already have applied it.
+was reset; the server may already have applied it. `--faults net` finds it too, on about
+10 of 20 seeds; `--fault net-reset-permille=50` below fixes the reset rate.
 
 ```sh
 go build -C examples/bank-go -o "$PWD/bank"

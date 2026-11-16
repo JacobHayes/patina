@@ -153,7 +153,9 @@ draws. An injected errno is one Linux returns for that call on that object
 The network wire: a TCP socket in the guest is a real unix socket whose peer the supervisor
 holds (`sup/wire.rs`). The supervisor reads what each side sent, stamps it with a seeded
 delivery time, and delivers it in virtual time. Delays, splits, resets, refused connects and
-partitions are draws keyed per connection.
+partitions are draws keyed by the connection and what they act on: a reset is drawn on each
+piece of data a guest sends (so a long-lived connection meets one), a refusal or timeout once
+per connect, a delay or split per delivery.
 
 ## The crash model
 
@@ -207,5 +209,8 @@ instruction; Patina does not contain it.
   the run (above).
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
   no simulation of several machines, and no network outside the run.
-- Not modelled: UDP and other non-TCP sockets, `timer_create`, scheduling policy calls,
-  `io_uring`; another process's `/proc/PID`. docs/EVIDENCE.md has the full list.
+- **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with
+  `ESOCKTNOSUPPORT` and listed in `result.json`'s `refused` (`socket:udp`); `patina run`
+  prints them. DNS resolvers and QUIC therefore fail fast. Only TCP has a wire.
+- Not modelled: `timer_create`, scheduling policy calls, `io_uring`; another process's
+  `/proc/PID`. docs/EVIDENCE.md has the full list.

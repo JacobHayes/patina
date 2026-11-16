@@ -91,6 +91,19 @@ pub struct Flag {
     pub help: &'static str,
     pub cmds: &'static [Cmd],
     pub repeat: bool,
+    /// Commands whose default and help differ from `default` and `help`.
+    pub per: &'static [(Cmd, &'static str, &'static str)],
+}
+
+impl Flag {
+    /// The default and help this flag has for `c`.
+    pub fn for_cmd(&self, c: Cmd) -> (&'static str, &'static str) {
+        self.per
+            .iter()
+            .find(|p| p.0 == c)
+            .map(|p| (p.1, p.2))
+            .unwrap_or((self.default, self.help))
+    }
 }
 
 const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
@@ -120,6 +133,7 @@ const fn flag(
         help,
         cmds,
         repeat: false,
+        per: &[],
     }
 }
 
@@ -136,6 +150,7 @@ const fn many(
         help,
         cmds,
         repeat: true,
+        per: &[],
     }
 }
 
@@ -147,18 +162,41 @@ pub const FLAGS: &[Flag] = &[
         "the seed (default from PATINA_SEED)",
         &[Cmd::Run, Cmd::Verify],
     ),
-    flag(
-        "--out",
-        "DIR",
-        "patina-out/run-SEED",
-        "run directory (verify: patina-out/verify-SEED; replay: RUNDIR-replay; sweep: patina-out/sweep; minimize: RUNDIR-min)",
-        &[Cmd::Run, Cmd::Verify, Cmd::Replay, Cmd::Sweep, Cmd::Minimize],
-    ),
+    Flag {
+        name: "--out",
+        value: "DIR",
+        default: "patina-out/run-SEED",
+        help: "run directory; an earlier run there is replaced",
+        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Replay, Cmd::Sweep, Cmd::Minimize],
+        repeat: false,
+        per: &[
+            (
+                Cmd::Verify,
+                "patina-out/verify-SEED",
+                "directory of the runs (run-0, run-1, ...); an earlier one there is replaced",
+            ),
+            (
+                Cmd::Replay,
+                "RUNDIR/replay",
+                "the replay's run directory; an earlier one there is replaced",
+            ),
+            (
+                Cmd::Sweep,
+                "patina-out/sweep",
+                "sweep directory: the same sweep there (program, command, settings, patina) resumes, running only the runs it lacks; any other is replaced",
+            ),
+            (
+                Cmd::Minimize,
+                "RUNDIR/minimized",
+                "the reduced run's directory; an earlier one there is replaced",
+            ),
+        ],
+    },
     flag(
         "--config",
         "FILE",
         "./patina.toml if present",
-        "configuration file; flags override it",
+        "configuration file: a patina.toml, or a run's run.json for all its settings; flags override it",
         RUNLIKE,
     ),
     many("--env", "K=V", "add to the guest environment", RUNLIKE),
@@ -410,14 +448,15 @@ pub fn find_cmd(name: &str) -> Option<Cmd> {
     COMMANDS.iter().find(|x| x.name == name).map(|x| x.cmd)
 }
 
-fn flag_text(f: &Flag) -> String {
+fn flag_text(f: &Flag, c: Cmd) -> String {
     let mut lhs = f.name.to_string();
     if !f.value.is_empty() {
         lhs = format!("{lhs} {}", f.value);
     }
-    let mut s = format!("  {lhs:<26} {}", f.help);
-    if !f.default.is_empty() {
-        s.push_str(&format!(" [default: {}]", f.default));
+    let (default, help) = f.for_cmd(c);
+    let mut s = format!("  {lhs:<26} {help}");
+    if !default.is_empty() {
+        s.push_str(&format!(" [default: {default}]"));
     }
     if f.repeat {
         s.push_str(" (repeatable)");
@@ -435,7 +474,7 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
                 s.push_str(&format!("  {:<8} {}\n", c.name, c.help));
             }
             s.push_str(
-                "\npatina COMMAND --help for its options; --help --format json for all of them.\n",
+                "\npatina COMMAND --help for its options; --help --format json for all of them;\npatina --version for the version.\n",
             );
             s.push_str("\noutcomes and exit status:\n");
             for o in Outcome::ALL {
@@ -446,7 +485,7 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
             let info = COMMANDS.iter().find(|x| x.cmd == c).unwrap();
             s.push_str(&format!("{}\n\n{}\n\noptions:\n", info.usage, info.help));
             for f in FLAGS.iter().filter(|f| f.cmds.contains(&c)) {
-                s.push_str(&flag_text(f));
+                s.push_str(&flag_text(f, c));
                 s.push('\n');
             }
             if RUNLIKE.contains(&c) {
@@ -480,6 +519,7 @@ pub fn help_json() -> String {
                 "help": f.help,
                 "repeat": f.repeat,
                 "commands": f.cmds.iter().map(|c| cmd_name(*c)).collect::<Vec<_>>(),
+                "by_command": f.per.iter().map(|(c, d, h)| (cmd_name(*c).to_string(), serde_json::json!({"default": d, "help": h}))).collect::<serde_json::Map<_, _>>(),
             })
         })
         .collect();

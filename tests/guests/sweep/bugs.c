@@ -16,6 +16,7 @@
 
 static int race, fserr, never;
 static volatile long counter;
+static long written;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void *bump(void *arg) {
@@ -46,13 +47,15 @@ static void store(void) {
                 ssize_t n = write(fd, data + off, sizeof data - off);
                 ok = n > 0;
                 off += ok ? (size_t)n : 0;
+                written += ok ? n : 0;
             }
         }
         ok = ok && fsync(fd) == 0;
         close(fd);
         if (ok) return;
         if (fserr) {
-            fprintf(stderr, "store failed\n");
+            /* Numbers that vary by seed: the signature collapses them. */
+            fprintf(stderr, "store failed after %ld bytes\n", written);
             exit(3);
         }
     }

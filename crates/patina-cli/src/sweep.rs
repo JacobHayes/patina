@@ -4,7 +4,11 @@
 //! line every 10 s otherwise. When the runs are done, the first seed of every finding is
 //! replayed once (a difference makes the group `nondeterministic`), logs are pruned by
 //! `--keep`, and the report of `patina report OUT` is printed and written to
-//! `OUT/report.json`. Running again into the same `--out` runs only the seeds not there yet.
+//! `OUT/report.json`. `OUT/sweep.json` records what the sweep runs (the program's SHA-256, the
+//! resolved settings and command, and patina's own version and hash): running the same sweep
+//! again into the same `--out` runs only the runs not there yet (more seeds, an interrupted
+//! sweep); any other sweep replaces the directory, so that edit, rebuild and the same command
+//! never report an old program's runs.
 
 use crate::cli::{find_flag, Args, Res};
 use crate::outcome::Outcome;
@@ -75,6 +79,59 @@ pub fn parse_seeds(s: &str) -> Res<Vec<u64>> {
         return Err("--seeds: no seeds".into());
     }
     Ok(out.into_iter().collect())
+}
+
+/// What a sweep directory records about the sweep that made it.
+const SWEEP_FILE: &str = "sweep.json";
+const SWEEP_SCHEMA: &str = "patina.sweep/v1";
+
+/// What decides every run of a sweep besides its seed and case: patina itself, the program
+/// (its SHA-256) and the resolved settings with the command. The seeds, the cases, `-j`,
+/// `--keep` and the stopping rules are not part of it: a sweep with more seeds or cases is the
+/// same sweep, extended.
+fn identity(
+    cfg: &crate::config::Config,
+    program: &crate::config::Program,
+) -> Res<serde_json::Value> {
+    let mut c = cfg.clone();
+    c.seed = 0;
+    c.host_cpu = None;
+    c.allow_unmet.clear();
+    let exe = std::env::current_exe().map_err(|e| format!("patina binary: {e}"))?;
+    Ok(serde_json::json!({
+        "schema": SWEEP_SCHEMA,
+        "patina": format!("{} {}", env!("CARGO_PKG_VERSION"), crate::config::sha256_file(&exe)?),
+        "program": program.sha256,
+        "config": c,
+    }))
+}
+
+/// Why the sweep recorded in `out` is not the one described by `ident`, if it is not.
+fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
+    let Ok(old) = read_json(&out.join(SWEEP_FILE)) else {
+        return Some(format!("no {SWEEP_FILE}"));
+    };
+    if old["schema"] != ident["schema"] {
+        return Some(format!("{SWEEP_FILE} of another schema"));
+    }
+    if old["program"] != ident["program"] {
+        return Some("the program changed".into());
+    }
+    if old["config"] != ident["config"] {
+        let keys: Vec<&String> = ident["config"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(k, v)| old["config"].get(k.as_str()) != Some(v))
+            .map(|(k, _)| k)
+            .collect();
+        let keys: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+        return Some(format!("other settings: {}", keys.join(", ")));
+    }
+    if old["patina"] != ident["patina"] {
+        return Some("another patina build".into());
+    }
+    None
 }
 
 /// Default width: half the CPUs this process may use, at most 8.
@@ -294,20 +351,20 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             None => cfg.cmd.clone(),
         }
     };
-    if let Some(c) = &cases {
-        if !cfg.cmd.iter().any(|x| x.contains("{}")) {
-            return Err(error(
-                "--cases: the command has no {} to put the case in".into(),
-            ));
-        }
+    if cases.is_some() && !cfg.cmd.iter().any(|x| x.contains("{}")) {
+        return Err(error(
+            "--cases: the command has no {} to put the case in".into(),
+        ));
+    }
+    let probe_program = {
         let mut probe = cfg.clone();
-        probe.cmd = subst(Some(&c[0]));
+        if let Some(c) = &cases {
+            probe.cmd = subst(Some(&c[0]));
+        }
         let o = probe.opts().map_err(error)?;
         crate::launch::preflight(&o).map_err(error)?;
-    } else {
-        let o = cfg.opts().map_err(error)?;
-        crate::launch::preflight(&o).map_err(error)?;
-    }
+        o.program
+    };
 
     let out = crate::absolute(PathBuf::from(a.last("--out").unwrap_or("patina-out/sweep")));
     if let Ok(rd) = std::fs::read_dir(&out) {
@@ -318,7 +375,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         if !names.is_empty()
             && !names
                 .iter()
-                .any(|n| n == "report.json" || n.starts_with("seed-"))
+                .any(|n| n == "report.json" || n == SWEEP_FILE || n.starts_with("seed-"))
         {
             return Err(error(format!(
                 "{}: exists and is not a sweep directory; give another --out",
@@ -326,7 +383,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             )));
         }
     }
+    let ident = identity(&cfg, &probe_program).map_err(error)?;
+    if out.is_dir() {
+        if let Some(why) = differs(&out, &ident) {
+            eprintln!(
+                "sweep: {} holds another sweep ({why}); replacing it",
+                out.display()
+            );
+            std::fs::remove_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
+        }
+    }
     std::fs::create_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
+    write_json(&out.join(SWEEP_FILE), &ident).map_err(error)?;
 
     let mut jobs = vec![];
     let mut total = 0;
@@ -352,6 +420,12 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     let todo = jobs.len();
+    let mut unfinished: std::collections::BTreeMap<u64, usize> = Default::default();
+    for j in &jobs {
+        if let Job::Run { seed, .. } = j {
+            *unfinished.entry(*seed).or_default() += 1;
+        }
+    }
 
     // What each `patina run` is given besides its seed, directory and command.
     let mut pass: Vec<String> = vec![];
@@ -405,6 +479,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         done: 0,
         finding_runs: 0,
         groups: BTreeSet::new(),
+        pending: Default::default(),
+        unfinished,
         finding_groups: 0,
         stopped: None,
         keep,
@@ -414,7 +490,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     };
     if todo < total {
         st.say(&format!(
-            "sweep: {} of {total} runs already in {}; running {todo}",
+            "sweep: {} of {total} runs of this sweep already in {}; running {todo}",
             total - todo,
             out.display()
         ));
@@ -422,6 +498,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let not_started = pool(jobs, width, &child, |d, running, now| {
         st.event(d, running, now)
     });
+    st.flush(true);
     let interrupted = INTERRUPTED.load(SeqCst);
     if interrupted {
         st.stopped = Some("interrupted".into());
@@ -447,7 +524,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         st.say("");
     }
     if not_started > 0 && st.stopped.is_some() {
-        st.say(&format!("sweep: {not_started} runs not started"));
+        st.say(&format!(
+            "sweep: {} not started",
+            report::count(not_started, "run")
+        ));
     }
 
     // Replay the first seed of each finding once.
@@ -470,8 +550,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
         if !replays.is_empty() {
             st.say(&format!(
-                "sweep: replaying the first seed of {} findings",
-                replays.len()
+                "sweep: replaying the first seed of {}",
+                report::count(replays.len(), "finding")
             ));
             pool(replays, st.width, &child, |d, _, _| {
                 if let Some(d) = d {
@@ -535,6 +615,11 @@ struct State {
     done: usize,
     finding_runs: usize,
     groups: BTreeSet<(String, Option<String>)>,
+    /// Groups found whose `new:` line waits until no lower seed is left to run, so that it
+    /// names the group's lowest seed, the one the report calls first: (seed, run directory).
+    pending: std::collections::BTreeMap<(String, Option<String>), (u64, PathBuf)>,
+    /// Runs not finished yet, by seed.
+    unfinished: std::collections::BTreeMap<u64, usize>,
     finding_groups: usize,
     stopped: Option<String>,
     keep: Keep,
@@ -548,14 +633,34 @@ impl State {
     fn status(&self, running: usize) -> String {
         let s = self.t0.elapsed().as_secs_f64();
         format!(
-            "{}/{} runs, {} findings in {} groups, {running} running, {:.1} runs/s, {}",
+            "{}/{} runs, {} in {}, {running} running, {:.1} runs/s, {}",
             self.done,
             self.todo,
-            self.finding_runs,
-            self.finding_groups,
+            report::count(self.finding_runs, "finding"),
+            report::count(self.finding_groups, "group"),
             self.done as f64 / s.max(0.001),
             clock(s)
         )
+    }
+
+    /// Print the `new:` lines no lower seed can still take over (all of them with `all`).
+    fn flush(&mut self, all: bool) {
+        let low = self.unfinished.keys().next().copied();
+        let ready: Vec<_> = self
+            .pending
+            .iter()
+            .filter(|(_, (seed, _))| all || low.is_none_or(|l| *seed < l))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in ready {
+            let (seed, dir) = self.pending.remove(&k).unwrap();
+            let c = k.1.as_ref().map(|c| format!(" [{c}]")).unwrap_or_default();
+            self.say(&format!(
+                "new{c}: {}   (seed {seed}: patina replay {})",
+                k.0,
+                dir.display()
+            ));
+        }
     }
 
     /// One line; on a terminal it replaces the live status line, which the next tick redraws.
@@ -626,10 +731,17 @@ impl State {
             return Some(d.job);
         }
         self.done += 1;
+        if let Some(n) = self.unfinished.get_mut(seed) {
+            *n -= 1;
+            if *n == 0 {
+                self.unfinished.remove(seed);
+            }
+        }
         if outcome == "ok" && self.keep != Keep::All {
             prune(dir);
         }
         if outcome == "ok" {
+            self.flush(false);
             return None;
         }
         let finding = Outcome::ALL
@@ -639,16 +751,16 @@ impl State {
         if finding {
             self.finding_runs += 1;
         }
-        if self.groups.insert((sig.clone(), case.clone())) {
+        let key = (sig, case.clone());
+        if self.groups.insert(key.clone()) {
             if finding {
                 self.finding_groups += 1;
             }
-            let c = case.as_ref().map(|c| format!(" [{c}]")).unwrap_or_default();
-            self.say(&format!(
-                "new{c}: {sig}   (seed {seed}: patina replay {})",
-                dir.display()
-            ));
+            self.pending.insert(key, (*seed, dir.clone()));
+        } else if let Some(p) = self.pending.get_mut(&key).filter(|p| *seed < p.0) {
+            *p = (*seed, dir.clone());
         }
+        self.flush(false);
         if let Some(n) = self.max_findings {
             if self.finding_groups >= n && self.stopped.is_none() {
                 self.stopped = Some(format!(

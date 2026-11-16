@@ -31,8 +31,10 @@ The guest sees no network beyond itself: a connection to another host fails with
 `Network is unreachable`, and DNS finds nothing. Servers and clients must run in the same
 program or in programs it starts.
 
-`patina run` prints the outcome and the run directory, not the program's output. The run
-directory (`--out`, default `patina-out/run-SEED`, replaced on each run) holds:
+`patina run` prints the outcome and the run directory; when the run is not ok, also the last
+lines of the program's stderr and the faults injected, and any calls Patina refused (the
+program got an error code for them). The program's full output is in the run directory
+(`--out`, default `patina-out/run-SEED`, replaced on each run):
 
 | File | Content |
 |---|---|
@@ -44,7 +46,8 @@ directory (`--out`, default `patina-out/run-SEED`, replaced on each run) holds:
 ### A configuration file
 
 `patina.toml` in the current directory (or `--config FILE`) holds the same settings; flags
-override it, and an unknown key is an error.
+override it, and an unknown key is an error. `--config RUNDIR/run.json` takes every setting
+of an earlier run.
 
 ```toml
 [run]
@@ -77,15 +80,20 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
 
-A sweep keeps the runs it finds in `--out` and only runs the seeds that are missing. It does
-not check that those runs were made with the same program or settings, so give a changed
-program or new settings a new `--out`, or delete the old one.
+A sweep directory holds one sweep. It records the program's SHA-256, the command and the
+resolved settings (`sweep.json`); the same sweep run again resumes, running only the runs it
+lacks (more seeds, or after an interrupt), and any other sweep replaces the directory. Edit,
+rebuild and rerun the same command: the old runs never mix with the new.
 
 Each group in the summary is one signature: the outcome, what stopped the run, and its first
-line of evidence (the failed `always` label, the panic line, the blocked waits), with numbers
-replaced by `N`. A sweep replays the first seed of each group once; a replay that differs
-makes the group `nondeterministic`. `patina report DIR...` prints the same summary for any
-run directories and writes `report.json`.
+line of evidence (the failed `always` label, the panic or assertion line or else the last
+line of stderr, the blocked waits). What names the failure is kept: the exit status, the
+signal, the label. Numbers in the program's text (line and column numbers, addresses, ids,
+counts, durations) become `N`, so one bug over many seeds is one group. A sweep announces each
+new group with its lowest seed and replays that seed once; a replay that differs makes the
+group `nondeterministic`. `patina report DIR...` prints the same summary for any run
+directories and writes `report.json`. A replay or a minimized run is written inside the run
+it comes from, so it never counts as one of the sweep's runs.
 
 ### Test runners: `--cases`
 
@@ -99,7 +107,7 @@ patina sweep --seeds 1..10 --cases cases.txt --mount .:/guest --env PYTHONPATH=/
 
 ```text
 [test_store.Store.test_counter] failure exit: AssertionError: N != N; exit 1
-  seeds 10 of 20   first 1   replayed: identical
+  10 of 20 runs   first: seed 1   replayed: identical
   rerun:  patina run --seed 1 --env PYTHONPATH=/guest --mount /tmp/casedemo:/guest -- python3 -m unittest test_store.Store.test_counter
 ```
 
@@ -115,25 +123,30 @@ settings.
 | Preset | Settings |
 |---|---|
 | `--faults disk` | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
-| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=0..5 net-connect-refuse-permille=0..10` |
+| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10` |
 | `--faults all` | both, plus `mem-error-permille=0..2` |
 
 `--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --help`
 lists every key. Disk faults act on files under `/work`, pipes and unix sockets; an injected
 error is one Linux can return for that call on that object. Network faults act on TCP
-connections; the reset and refusal rates are per connection. `mem-limit-mb=N` makes memory
-requests past N MiB fail with `ENOMEM`.
+connections: a reset is drawn on each piece of data a program sends, so a long-lived (keep-alive)
+connection meets one; a refusal or timeout is drawn once per connect. `mem-limit-mb=N` makes
+memory requests past N MiB fail with `ENOMEM`. `result.json`'s `faults.counts` gives per
+class the calls (or sends, connections, deliveries) it was drawn on and the faults it
+injected; `faults.injected` is their sum.
 
 A failing group says which fault classes were injected in every failing run, and in none:
 
 ```text
 violation always: journal-intact
-  seeds 12 of 20   first 2   replayed: identical
+  12 of 20 runs   first: seed 2   replayed: identical
   faults in every failing run: fs-short      in none: fs-error, fsync-error
 ```
 
 `patina minimize RUNDIR` drops and halves a failing run's fault settings while the run still
-fails the same way, and prints the smallest set it found and the command to rerun it.
+fails the same way. It prints each try (`without fs-short-permille=0..20: still fails`,
+`fs-error-permille=40 -> 20: no longer fails`), the settings it kept, and last the command
+that reruns the reduced run (written to `RUNDIR/minimized`).
 
 ### Crashes
 
@@ -150,7 +163,8 @@ shows the shape:
 ```text
 $ patina run --seed 3 --crash machine -- ./acklog
 violation (always): acked-records-kept: 23 acknowledged, 0 stored
-last injected faults (1 in all):
+faults injected: 1 (crash 1)
+last injected:
   seq 124 t=100000ms crash kind=machine object=/work/data.log lost: 0 missing, 1 changed, 0 back
 ```
 
@@ -244,8 +258,8 @@ names the first record where two logs differ.
 
 ## Replay and verify
 
-`patina replay RUNDIR` runs the program again with the run's settings and compares every
-boundary record. It refuses a program whose SHA-256 changed. `identical` means the bug is
+`patina replay RUNDIR` runs the program again with the run's settings, into `RUNDIR/replay`,
+and compares every boundary record. It refuses a program whose SHA-256 changed. `identical` means the bug is
 reproduced exactly; a difference ends `nondeterministic` and names the first differing
 record, which is a Patina bug.
 
@@ -271,8 +285,9 @@ A thread that computes for 10 s of CPU time without reaching a scheduling point,
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
 no system call or `pause`. `--preempt branches` also preempts after a seed-chosen number of
-branches; it needs `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`) and an
-AMD Zen 5 CPU, and its seeds reproduce only on that CPU family.
+branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
+`CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
+only on that CPU family. `patina doctor` says which of the three is missing.
 
 ## CI on GitHub Actions
 
@@ -301,7 +316,7 @@ jobs:
 ok    bwrap                              /usr/bin/bwrap (bubblewrap 0.9.0)
 ok    user namespaces                    bwrap creates the sandbox (user, pid, net, mount namespaces; tmpfs)
 ok    sandbox run                        a run of /usr/bin/true is ok (166 ms)
-off   branch counters (pmu, optional)    this CPU (GenuineIntel family 0x6 model 0xad) is not supported: counter preemption is checked exact on AMD family 0x1a (Zen 5) only
+off   branch counters (pmu, optional)    not supported on this CPU, GenuineIntel family 0x6 model 0xad (supported: AMD Zen 5)
 info  cpu_model                          Intel(R) Xeon(R) 6975P-C
 info  kernel                             7.0.0-1014-aws
 this host can run patina

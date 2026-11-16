@@ -19,13 +19,13 @@ for want in ok failure; do
     replay "$RUNS/$want"
     [ "$st" = "$rst" ] || die "replay of $want: exit $st, the run exited $rst ($(tail -3 "$RUNS/$want.replay.txt"))"
     grep -q '^identical' "$RUNS/$want.replay.txt" || die "replay of $want: $(cat "$RUNS/$want.replay.txt")"
-    [ "$(field "$RUNS/$want-replay/result.json" digest)" = "$(field "$RUNS/$want/result.json" digest)" ] || die "replay of $want: digest"
+    [ "$(field "$RUNS/$want/replay/result.json" digest)" = "$(field "$RUNS/$want/result.json" digest)" ] || die "replay of $want: digest"
     echo "replay of $want: identical, exit $st"
 done
 # The planted divergence.
 PATINA_TEST_REPLAY_PERTURB=1 replay "$RUNS/ok"
 [ "$st" = "$(exit_of nondeterministic)" ] || die "perturbed replay: exit $st ($(tail -3 "$RUNS/ok.replay.txt"))"
-[ "$(field "$RUNS/ok-replay/result.json" outcome)" = nondeterministic ] || die "perturbed replay: outcome"
+[ "$(field "$RUNS/ok/replay/result.json" outcome)" = nondeterministic ] || die "perturbed replay: outcome"
 grep -q 'record' "$RUNS/ok.replay.txt" || die "perturbed replay: no record printed"
 echo "perturbed replay: nondeterministic, $(grep -m1 record "$RUNS/ok.replay.txt")"
 # One byte of the program changes.

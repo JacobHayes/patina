@@ -55,6 +55,10 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         });
     }
+    if first == "--version" || first == "-V" {
+        println!("patina {}", env!("CARGO_PKG_VERSION"));
+        return ExitCode::SUCCESS;
+    }
     if first == "--help" || first == "-h" {
         if rest
             .windows(2)

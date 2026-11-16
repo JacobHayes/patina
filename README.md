@@ -57,17 +57,18 @@ patina sweep --seeds 1..20 -- target/debug/jobs
 ```
 
 ```text
-patina sweep: 20 runs, 14 findings in 1 groups, 6 ok   (0.2s, 8 jobs)
+patina sweep: 20 runs, 14 findings in 1 group, 6 ok   (0.2s, 8 jobs)
 outcomes: failure 14, ok 6
 
 failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101
-  seeds 14 of 20   first 1   replayed: identical
+  14 of 20 runs   first: seed 1   replayed: identical
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
 ```
 
-Each group is one bug: its signature, how many seeds hit it, and the first of them. Patina
-already replayed that seed once and got the same run. The run directory holds the evidence:
+Each group is one bug: its signature, how many runs hit it, and the lowest seed among them.
+Patina already replayed that seed once and got the same run. `patina run --seed 1 -- target/debug/jobs`
+prints the outcome with the tail of the program's stderr; the run directory holds all of it:
 
 ```sh
 cat patina-out/sweep/seed-1/inc-0/stderr
@@ -80,9 +81,10 @@ assertion `left == right` failed: results out of job order
  right: [1, 2, 3]
 ```
 
-`patina replay DIR` runs the seed again and compares every system call with the recorded one.
-Fix the code, rebuild, and sweep into a new directory (a sweep keeps the runs it finds in its
-`--out`, default `patina-out/sweep`).
+`patina replay DIR` runs the seed again, into `DIR/replay`, and compares every system call
+with the recorded one. Fix the code, rebuild, and run the same sweep command: a sweep
+directory (`--out`, default `patina-out/sweep`) holds one sweep, so a changed program or
+setting replaces it, and the same sweep with more seeds runs only the new ones.
 
 ## What works
 
@@ -91,7 +93,8 @@ the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals 
 localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
 that starts at the same time every run, an empty writable `/work` as its working directory.
 
-What it does not do: UDP and other non-TCP network sockets (the call fails with an error),
+What it does not do: UDP and other non-TCP network sockets (the call fails with an error,
+and `patina run` lists it under `refused:`),
 connections to anything outside the run, and macOS or arm64 hosts. A call Patina does not
 model ends the run `unsupported` and names it. [ARCHITECTURE.md](ARCHITECTURE.md#limits)
 lists the limits.

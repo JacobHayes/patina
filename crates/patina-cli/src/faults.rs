@@ -135,7 +135,7 @@ pub const KEYS: &[Key] = &[
         "net-reset-permille",
         "P",
         Val::Permille,
-        "reset a TCP connection, drawn for each piece of data a guest sends on it",
+        "reset a TCP connection, drawn for each piece of data a guest sends on it (so a long-lived connection meets one)",
     ),
     key(
         "net-connect-refuse-permille",
@@ -205,7 +205,9 @@ pub const KEYS: &[Key] = &[
     ),
 ];
 
-/// `--faults NAME`: rare-fault rates, each a range the seed resolves.
+/// `--faults NAME`: rare-fault rates, each a range the seed resolves. `net-reset-permille` is
+/// drawn for each send, so its preset rate is high enough that a connection carrying a few
+/// dozen sends (a keep-alive client's) meets a reset in a good share of seeds.
 pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
     (
         "disk",
@@ -221,7 +223,7 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
-            ("net-reset-permille", "0..5"),
+            ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
         ],
     ),
@@ -234,7 +236,7 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("fs-delay-permille", "0..20"),
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
-            ("net-reset-permille", "0..5"),
+            ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
             ("mem-error-permille", "0..2"),
         ],

@@ -6,8 +6,10 @@
 //!   injector (`proto::faults::Kind`), at crash points, and on the wire (reads of sent data
 //!   for resets, connections for connect faults, deliveries for delay, chunking and
 //!   partitions, FINs for half-close delays). Zero eligible means the class had nothing to act on.
-//! - `injected`: every injected fault (crashes included), all incarnations. The report of an
-//!   earlier failed fsync to another descriptor is an event, not a new fault.
+//! - `injected`: the sum of the classes' `injected` (crashes included), all incarnations. The
+//!   report of an earlier failed fsync to another descriptor is an event, not a new fault. A
+//!   sync failed by `fs-error-permille` counts for `fs-error`, one failed by
+//!   `fsync-error-permille` for `fsync-error`.
 //! - `recent`: the last `RECENT` events before the run stopped, each with its call, its
 //!   object (the `/work` path, or `pipe`, `unix`, `memory`, `tcp:PORT`) and what was
 //!   returned; a crash is an event too, with what it did to `/work`.
@@ -28,8 +30,10 @@ use std::path::Path;
 pub const RECENT: usize = 20;
 
 /// The class an `Injected` record counts for (`None`: a consequence, not an injection).
-fn class_of(kind: u64, class: u64) -> Option<&'static str> {
+/// `by` is `args[3]`: for a failed sync, the class that failed it.
+fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
     Some(match kind {
+        INJ_FSYNC_EIO if by == SYNC_BY_FS_ERROR => "fs-error",
         INJ_ERROR if class == FClass::Mem as u64 => "mem-error",
         INJ_ERROR => "fs-error",
         INJ_SHORT => "fs-short",
@@ -86,7 +90,6 @@ fn class_of_key(k: &str) -> Option<&'static str> {
 #[derive(Default)]
 pub struct Faults {
     recent: VecDeque<Value>,
-    injected: u64,
     by_class: BTreeMap<&'static str, u64>,
     eligible: [u64; NKIND],
     crash_points: u64,
@@ -118,10 +121,9 @@ impl Faults {
             if r.kind != RecKind::Injected as u8 {
                 continue;
             }
-            let [kind, class, value, _, port, _] = r.args;
-            let fault = class_of(kind, class);
+            let [kind, class, value, by, port, _] = r.args;
+            let fault = class_of(kind, class, by);
             if let Some(c) = fault {
-                self.injected += 1;
                 *self.by_class.entry(c).or_default() += 1;
             }
             let mut e = json!({
@@ -170,7 +172,6 @@ impl Faults {
     /// A crash ended incarnation `k`; `lost` says what it did to `/work` (machine crashes).
     pub fn add_crash(&mut self, k: u64, kind: &str, seq: u64, vclock: u64, lost: Option<Value>) {
         self.crashes += 1;
-        self.injected += 1;
         let mut e = json!({
             "incarnation": k,
             "seq": seq,
@@ -190,58 +191,38 @@ impl Faults {
     /// The `faults` object of `result.json`.
     pub fn json(&self, plan: &Plan, net: &[u64; NET_FIELDS]) -> Value {
         let mut counts = serde_json::Map::new();
-        let has = |c: &str| {
-            plan.resolved
-                .iter()
-                .any(|(k, v)| class_of_key(k) == Some(c) && *v != "off")
-        };
-        // `fs-error-permille` also fails fsyncs; without an fsync-error class they are its.
-        let fsync_as_fs = !has("fsync-error");
+        let got = |c: &str| self.by_class.get(c).copied().unwrap_or(0);
         for (k, v) in &plan.resolved {
             let Some(c) = class_of_key(k) else { continue };
             if *v == "off" || counts.contains_key(c) {
                 continue;
             }
             let kind = KIND_NAMES.iter().position(|n| *n == c);
-            let got = |c: &str| self.by_class.get(c).copied().unwrap_or(0);
-            if c == "fs-error" && fsync_as_fs {
-                let f = Kind::FsyncError as usize;
-                counts.insert(
-                    c.into(),
-                    json!({
-                        "eligible": self.eligible[Kind::FsError as usize] + self.eligible[f],
-                        "injected": got("fs-error") + got("fsync-error"),
-                    }),
-                );
-                continue;
-            }
             let (connections, chunks, fins, sends) = (net[0], net[2], net[11], net[12]);
             let (eligible, injected) = match c {
                 "crash" => (self.crash_points, self.crashes),
                 "net-delay" => (chunks, chunks),
-                // Drawn for every read of data a guest sent, not once per connection.
-                "net-reset" => (sends, self.by_class.get(c).copied().unwrap_or(0)),
                 "net-halfclose" => (fins, fins),
-                "net-chunk" | "net-partition" => {
-                    (chunks, self.by_class.get(c).copied().unwrap_or(0))
-                }
-                _ if c.starts_with("net-") => {
-                    (connections, self.by_class.get(c).copied().unwrap_or(0))
-                }
-                _ => (
-                    kind.map_or(0, |i| self.eligible[i]),
-                    self.by_class.get(c).copied().unwrap_or(0),
-                ),
+                // Drawn for every read of data a guest sent, not once per connection.
+                "net-reset" => (sends, got(c)),
+                "net-chunk" | "net-partition" => (chunks, got(c)),
+                _ if c.starts_with("net-") => (connections, got(c)),
+                _ => (kind.map_or(0, |i| self.eligible[i]), got(c)),
             };
             counts.insert(
                 c.into(),
                 json!({ "eligible": eligible, "injected": injected }),
             );
         }
+        // The total is the sum of the classes, so the two always agree.
+        let injected: u64 = counts
+            .values()
+            .map(|v| v["injected"].as_u64().unwrap_or(0))
+            .sum();
         json!({
             "plan": plan.json(),
             "counts": counts,
-            "injected": self.injected,
+            "injected": injected,
             "recent": self.recent,
         })
     }

@@ -1,6 +1,6 @@
 # 7. Every flag `patina --help --format json` lists for a command parses for that command (the
 #    help and the parser read one table); a flag the table does not list for it is refused.
-#    Each command's text help names each of its flags.
+#    Each command's text help names each of its flags. --version prints a parseable version.
 #@ tier=quick budget=5
 . "$(dirname "$0")/lib.inc"
 "$PATINA" --help --format json >"$RUNS/help.json"
@@ -34,3 +34,7 @@ for c in h["commands"]:
         assert r.returncode != 0, (argv, "accepted a flag the table does not list for it")
 print(f"{n} (command, flag) pairs parse; {len(h['commands'])} commands")
 PY
+# --version: exit 0, `patina X.Y.Z[-pre]` (the release workflow reads it).
+v=$("$PATINA" --version) || die "--version: exit $?"
+echo "$v" | grep -Eq '^patina [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || die "--version: $v"
+echo "--version: $v"

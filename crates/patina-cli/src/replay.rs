@@ -1,5 +1,6 @@
 //! `patina replay RUNDIR`: run again from `run.json` and compare the logs record by record.
-//! A re-execution checked against the log; the log is not fed back as input.
+//! A re-execution checked against the log; the log is not fed back as input. The replay is
+//! written to `RUNDIR/replay` unless `--out` says otherwise.
 
 use crate::cli::{Args, Res};
 use crate::config::{sha256_file, Config, Program};
@@ -45,11 +46,9 @@ pub fn replay(args: &Args) -> Res<Replayed> {
     let recorded = read_json(&rundir.join("result.json"))?;
     let out = match args.last("--out") {
         Some(o) => PathBuf::from(o),
-        None => {
-            let mut s = rundir.as_os_str().to_owned();
-            s.push("-replay");
-            PathBuf::from(s)
-        }
+        // Inside the run it replays: a report or sweep over the run's parent never counts it
+        // (a run directory's subdirectories are not walked).
+        None => rundir.join("replay"),
     };
     let run = read_json(&rundir.join("run.json"))?;
     replay_into(&rundir, &out, cfg, program, &recorded, &run)

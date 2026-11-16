@@ -342,9 +342,23 @@ fn range(v: &str, at: &str) -> Res<(u64, u64)> {
     Ok((p(a)?, p(b)?))
 }
 
-/// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory).
+/// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory),
+/// or take the whole configuration a run recorded when `path` is a `run.json`.
 fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
     let name = path.display().to_string();
+    if path.extension().is_some_and(|e| e == "json") {
+        let run = crate::result::read_json(path)?;
+        if run["schema"] != crate::result::RUN_SCHEMA {
+            return Err(format!(
+                "{name}: not a run.json (schema {}, this patina reads {})",
+                run["schema"],
+                crate::result::RUN_SCHEMA
+            ));
+        }
+        *c = serde_json::from_value(run["config"].clone())
+            .map_err(|e| format!("{name}: config: {e}"))?;
+        return Ok(());
+    }
     let text = std::fs::read_to_string(path).map_err(|e| format!("{name}: {e}"))?;
     let doc: toml::Table = text.parse().map_err(|e| format!("{name}: {e}"))?;
     let base = path

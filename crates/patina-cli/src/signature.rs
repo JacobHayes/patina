@@ -2,9 +2,13 @@
 //! one bug once however many seeds hit it. It is `outcome stop: primary`, where `primary` is
 //! what failed: the failed `always` label; the waits the blocked threads were parked in; the
 //! first panic or assertion line the guest printed on stderr, then the signal name or the exit
-//! status; the unsupported call. Digit and hex runs are collapsed, so addresses, thread ids,
-//! line numbers and counts that vary by seed do not split a group. Fault settings are not part
-//! of it. Written into `result.json` when the run ends; readers take it from there.
+//! status; the unsupported call. Fault settings are not part of it. Written into `result.json`
+//! when the run ends; readers take it from there.
+//!
+//! The rule for numbers: what names the failure is kept as it is (the exit status, the signal
+//! name, an SDK label, a call's name); numbers in text the guest or the supervisor wrote are
+//! collapsed (`normalise`), because addresses, line and column numbers, thread and process
+//! ids, counts and durations vary by seed and build while the bug stays the same.
 
 use serde_json::Value;
 use std::path::Path;
@@ -36,7 +40,8 @@ fn primary(r: &Value, stderr: &str) -> String {
     let message = r["message"].as_str().unwrap_or("");
     let p = match r["outcome"].as_str().unwrap_or("") {
         "violation" => match r["sdk"]["violation"]["label"].as_str() {
-            Some(l) => l.to_string(),
+            // The label is the assertion's name: kept as written.
+            Some(l) => return l.chars().take(PRIMARY_MAX).collect(),
             None => message.to_string(),
         },
         "liveness" => {
@@ -53,6 +58,8 @@ fn primary(r: &Value, stderr: &str) -> String {
                 parts.push(l);
             } else if message.starts_with("INVARIANT ") {
                 parts.push(message.to_string());
+            } else if let Some(l) = last_line(stderr) {
+                parts.push(l);
             }
             let g = &r["guest"];
             match (g["signal"].as_i64(), g["exit"].as_i64()) {
@@ -124,6 +131,16 @@ pub fn guest_line(stderr: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The guest's last stderr line, normalised, when it says something: at least one word of
+/// three letters (not a bare number, address or punctuation).
+fn last_line(stderr: &str) -> Option<String> {
+    let l = stderr.lines().rev().find(|l| !l.trim().is_empty())?.trim();
+    let wordy = l
+        .split(|c: char| !c.is_ascii_alphabetic())
+        .any(|w| w.len() >= 3);
+    wordy.then(|| normalise(l))
 }
 
 /// Collapse what varies between seeds: `0x` hex to `0x_`, digit runs to `N`, other runs of
@@ -214,6 +231,24 @@ mod tests {
             sig(v("balance -1"), ""),
             sig(v("balance -7 at 0xdead00"), "")
         );
+        // Without a panic line, the last informative stderr line names the failure.
+        assert_eq!(
+            sig(fail(1), "round 3\nno convergence after 412 rounds\n"),
+            sig(fail(1), "round 9\nno convergence after 77 rounds\n")
+        );
+        assert_ne!(
+            sig(fail(1), "no convergence after 412 rounds\n"),
+            sig(fail(1), "lost write at offset 4096\n")
+        );
+        // A label is a name: its digits are kept.
+        let l = |label: &str| {
+            json!({"outcome": "violation", "stop": "always", "message": "x",
+                   "sdk": {"violation": {"label": label, "detail": "x"}}})
+        };
+        assert_ne!(sig(l("queue-1-bound"), ""), sig(l("queue-2-bound"), ""));
+        // Exit status and signal are kept; the panic's line, column and values collapse.
+        let s = sig(fail(101), &panic("main", 10, "index 3 out of range"));
+        assert!(s.ends_with("exit 101") && !s.contains("10:9"), "{s}");
         // Ok has none.
         assert!(of(&json!({"outcome": "ok"}), Path::new("/nonexistent")).is_null());
     }

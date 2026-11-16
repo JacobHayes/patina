@@ -331,9 +331,25 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
     checks.push(Check {
         name: "branch counters (pmu, optional)",
         required: false,
-        result: crate::launcher::pmu::available()
-            .map(|ev| format!("event {ev:#x} opens"))
-            .map_err(|e| (e, "sudo setcap cap_perfmon+ep $(command -v patina), on a host whose kernel exposes a PMU".into())),
+        result: {
+            use crate::launcher::pmu::Unavailable as U;
+            crate::launcher::pmu::available()
+                .map(|ev| format!("event {ev:#x} opens"))
+                .map_err(|e| match e {
+                    U::Cpu(m) => (
+                        format!("not supported on this CPU, {m} (supported: AMD Zen 5)"),
+                        String::new(),
+                    ),
+                    U::Permission(m) => (
+                        format!("supported, but needs CAP_PERFMON: {m}"),
+                        "sudo setcap cap_perfmon+ep $(command -v patina)".into(),
+                    ),
+                    U::NoPmu(m) => (
+                        format!("no PMU exposed (virtual machine?): {m}"),
+                        "run on bare metal, or a VM that passes the PMU through".into(),
+                    ),
+                })
+        },
     });
     let pidfd_thread = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::gettid(), libc::O_EXCL) };
     checks.push(Check {

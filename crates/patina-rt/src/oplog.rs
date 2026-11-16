@@ -736,8 +736,13 @@ pub fn on_msync(addr: u64, len: u64, flags: u64) -> i64 {
     }
     let mut r = 0;
     for &ino in &inos[..ni] {
-        if crate::inject::sync_fails() {
-            fail(ino, 26, crate::inject::Who::Kind(proto::faults::Obj::File));
+        if let Some(by) = crate::inject::sync_fails() {
+            fail(
+                ino,
+                26,
+                crate::inject::Who::Kind(proto::faults::Obj::File),
+                by,
+            );
             r = -e::EIO;
         } else {
             append(
@@ -754,8 +759,9 @@ pub fn on_msync(addr: u64, len: u64, flags: u64) -> i64 {
 
 const AT_FDCWD_: i64 = -100;
 
-/// An injected writeback failure on `ino` (0: everything, for `syncfs`), named by `who`.
-fn fail(ino: u64, nr: u64, who: crate::inject::Who) {
+/// An injected writeback failure on `ino` (0: everything, for `syncfs`), named by `who`,
+/// caused by the class `by` (`proto::faults::SYNC_BY_*`).
+fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
     let d = dur();
     if ino != 0 && d.bump(ino).is_none() {
         crate::sup::host_error(-e::ENOMEM, nr, proto::ctl::HE_RUNTIME_ASSERT);
@@ -766,7 +772,7 @@ fn fail(ino: u64, nr: u64, who: crate::inject::Who) {
         proto::faults::INJ_FSYNC_EIO,
         proto::faults::FClass::Sync as u64,
         ino,
-        0,
+        by,
         who,
     );
     append(OpKind::FsyncFail, ino, [0; 6], &[], 0);
@@ -794,11 +800,12 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     if nr == 306 {
         crate::inject::crash_point();
         flush_all();
-        if crate::inject::sync_fails() {
+        if let Some(by) = crate::inject::sync_fails() {
             fail(
                 0,
                 nr,
                 crate::inject::Who::At(AT_FDCWD_, c"/work".as_ptr() as u64),
+                by,
             );
             FDS.get().sync_seen = dur().sync_gen;
             return -e::EIO;
@@ -821,13 +828,13 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     if !dir {
         flush_ino(ino);
     }
-    if crate::inject::sync_fails() {
+    if let Some(by) = crate::inject::sync_fails() {
         let o = if dir {
             proto::faults::Obj::Path
         } else {
             proto::faults::Obj::File
         };
-        fail(ino, nr, crate::inject::Who::Fd(fd, o));
+        fail(ino, nr, crate::inject::Who::Fd(fd, o), by);
         if let Some(s) = seen(fd) {
             *s = dur().gen(ino) as u32;
         }

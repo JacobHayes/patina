@@ -131,6 +131,15 @@ fn walk(d: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// `1 finding`, `2 findings`.
+pub fn count(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
 fn outcome_of(name: &str) -> Outcome {
     Outcome::ALL
         .into_iter()
@@ -163,11 +172,15 @@ fn quote(s: &str) -> String {
     }
 }
 
-/// `patina run` with the seed and the flags that reproduce a run from its `run.json`. Settings
-/// only a config file can carry are named after it.
-pub fn rerun_command(run: &Value, seed: u64) -> String {
+/// One runnable `patina run` command that reproduces a run from its `run.json` (in `dir`):
+/// the seed and flags, or, when the run has settings only a configuration file carries, the
+/// seed and `--config DIR/run.json`, which carries all of them.
+pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
     let Ok(cfg) = serde_json::from_value::<Config>(run["config"].clone()) else {
-        return format!("patina run --seed {seed} (run.json unreadable)");
+        return format!(
+            "patina run --seed {seed} --config {}",
+            quote(&dir.join("run.json").display().to_string())
+        );
     };
     let d = Config::default();
     let mut a = vec![
@@ -176,59 +189,8 @@ pub fn rerun_command(run: &Value, seed: u64) -> String {
         "--seed".into(),
         seed.to_string(),
     ];
-    let mut flag = |n: &str, v: String| {
-        a.push(n.into());
-        a.push(quote(&v));
-    };
-    for e in &cfg.env {
-        flag("--env", e.clone());
-    }
-    for m in &cfg.mounts {
-        let c = if m.copy { ":copy" } else { "" };
-        flag("--mount", format!("{}:{}{c}", m.src.display(), m.dst));
-    }
-    if let Some(w) = &cfg.work {
-        flag("--work", w.display().to_string());
-    }
-    if let Some(s) = &cfg.stdin {
-        flag("--stdin", s.display().to_string());
-    }
-    if cfg.cpus != d.cpus {
-        flag("--cpus", cfg.cpus.to_string());
-    }
-    if !cfg.faults_preset.is_empty() {
-        flag("--faults", cfg.faults_preset.join(","));
-    }
-    for f in &cfg.faults {
-        flag("--fault", f.clone());
-    }
-    if let Some(c) = &cfg.crash {
-        flag("--crash", c.clone());
-    }
-    if cfg.time_limit != d.time_limit {
-        flag("--time-limit", cfg.time_limit.to_string());
-    }
-    if cfg.timeout != d.timeout {
-        flag("--timeout", cfg.timeout.to_string());
-    }
-    if cfg.pmu.on {
-        flag("--preempt", "branches".into());
-    }
-    if cfg.buggify {
-        a.push("--buggify".into());
-    }
-    a.push("--".into());
-    // A program copied in was named by a host path, perhaps relative: give it absolute.
-    let host = run["program"]["host"]
-        .as_str()
-        .filter(|_| run["program"]["copied"] == true);
-    for (i, c) in cfg.cmd.iter().enumerate() {
-        a.push(quote(match host {
-            Some(h) if i == 0 => h,
-            _ => c,
-        }));
-    }
-    // What no flag above carries: config keys that differ from the defaults.
+    // Settings no flag carries: config keys (other than those the flags below set) that
+    // differ from the defaults. Allow-unmet and the host CPU do not change the run.
     let mut rest = cfg.clone();
     rest.pmu.on = d.pmu.on;
     let (have, def) = (
@@ -243,6 +205,7 @@ pub fn rerun_command(run: &Value, seed: u64) -> String {
         "work",
         "stdin",
         "cpus",
+        "faults-preset",
         "faults",
         "crash",
         "time-limit",
@@ -251,18 +214,69 @@ pub fn rerun_command(run: &Value, seed: u64) -> String {
         "allow-unmet",
         "host-cpu",
     ];
-    let extra: Vec<String> = have
+    let config_only = have
         .as_object()
         .unwrap()
         .iter()
-        .filter(|(k, v)| !flagged.contains(&k.as_str()) && def.get(k.as_str()) != Some(v))
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
-    let mut s = a.join(" ");
-    if !extra.is_empty() {
-        s.push_str(&format!("   (with config: {})", extra.join(" ")));
+        .any(|(k, v)| !flagged.contains(&k.as_str()) && def.get(k.as_str()) != Some(v));
+    if config_only {
+        a.push("--config".into());
+        a.push(quote(&dir.join("run.json").display().to_string()));
+    } else {
+        let mut flag = |n: &str, v: String| {
+            a.push(n.into());
+            a.push(quote(&v));
+        };
+        for e in &cfg.env {
+            flag("--env", e.clone());
+        }
+        for m in &cfg.mounts {
+            let c = if m.copy { ":copy" } else { "" };
+            flag("--mount", format!("{}:{}{c}", m.src.display(), m.dst));
+        }
+        if let Some(w) = &cfg.work {
+            flag("--work", w.display().to_string());
+        }
+        if let Some(s) = &cfg.stdin {
+            flag("--stdin", s.display().to_string());
+        }
+        if cfg.cpus != d.cpus {
+            flag("--cpus", cfg.cpus.to_string());
+        }
+        if !cfg.faults_preset.is_empty() {
+            flag("--faults", cfg.faults_preset.join(","));
+        }
+        for f in &cfg.faults {
+            flag("--fault", f.clone());
+        }
+        if let Some(c) = &cfg.crash {
+            flag("--crash", c.clone());
+        }
+        if cfg.time_limit != d.time_limit {
+            flag("--time-limit", cfg.time_limit.to_string());
+        }
+        if cfg.timeout != d.timeout {
+            flag("--timeout", cfg.timeout.to_string());
+        }
+        if cfg.pmu.on {
+            flag("--preempt", "branches".into());
+        }
+        if cfg.buggify {
+            a.push("--buggify".into());
+        }
     }
-    s
+    a.push("--".into());
+    // A program copied in was named by a host path, perhaps relative: give it absolute.
+    let host = run["program"]["host"]
+        .as_str()
+        .filter(|_| run["program"]["copied"] == true);
+    for (i, c) in cfg.cmd.iter().enumerate() {
+        a.push(quote(match host {
+            Some(h) if i == 0 => h,
+            _ => c,
+        }));
+    }
+    a.join(" ")
 }
 
 /// The host limit a run ended on, named, if it ended on one: the supervisor reports a host
@@ -421,7 +435,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
                 "first": {"seed": first.seed, "dir": first.dir},
                 "replay": replay,
                 "faults": {"every": every, "none": none},
-                "rerun": rerun_command(&first.run, first.seed),
+                "rerun": rerun_command(&first.run, first.seed, &first.dir),
                 "replay_command": format!("patina replay {}", quote(&first.dir.display().to_string())),
             })
         })
@@ -484,26 +498,23 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
 fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String {
     let n = |k: &str| v[k].as_u64().unwrap_or(0);
     let ok = v["outcomes"]["ok"].as_u64().unwrap_or(0);
+    let what = format!(
+        "{}, {} in {}, {} ok",
+        count(n("runs") as usize, "run"),
+        count(n("findings") as usize, "finding"),
+        count(finding_groups, "group"),
+        ok
+    );
     let mut s = match head {
         Some(h) => format!(
-            "patina sweep: {} runs, {} findings in {} groups, {} ok   ({:.1}s, {} jobs{})\n",
-            n("runs"),
-            n("findings"),
-            finding_groups,
-            ok,
+            "patina sweep: {what}   ({:.1}s, {}{})\n",
             h.seconds,
-            h.jobs,
+            count(h.jobs, "job"),
             h.lowered_to
                 .map(|w| format!(", lowered to {w} by a host limit"))
                 .unwrap_or_default()
         ),
-        None => format!(
-            "patina report: {} runs, {} findings in {} groups, {} ok\n",
-            n("runs"),
-            n("findings"),
-            finding_groups,
-            ok
-        ),
+        None => format!("patina report: {what}\n"),
     };
     if let Some(stop) = head.and_then(|h| h.stopped.as_ref()) {
         s.push_str(&format!("stopped early: {stop}\n"));
@@ -537,7 +548,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
             }
         };
         s.push_str(&format!(
-            "  seeds {} of {}   first {}   {replay}\n",
+            "  {} of {} runs   first: seed {}   {replay}\n",
             g["count"],
             n("runs"),
             g["first"]["seed"]
@@ -580,7 +591,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
     ] {
         let l = names(&v["sdk"][k]);
         if !l.is_empty() {
-            tail.push(format!("sdk: {} {what}: {}", l.len(), l.join(", ")));
+            tail.push(format!("sdk: {what}: {}", l.join(", ")));
         }
     }
     for c in names(&v["faults"]["eligible_zero"]) {
@@ -588,7 +599,8 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
     }
     for (l, k) in v["host_limits"].as_object().unwrap() {
         tail.push(format!(
-            "host: {k} runs ended internal on {l}; run fewer at once (-j) or raise the limit"
+            "host: {} ended internal on {l}; run fewer at once (-j) or raise the limit",
+            count(k.as_u64().unwrap_or(0) as usize, "run")
         ));
     }
     if n("compute_stall") > 0 {

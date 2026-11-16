@@ -79,27 +79,53 @@ fn event() -> Result<u64, String> {
     if &v == b"AuthenticAMD" && proto::pmu::AMD_FAMILIES.contains(&family) {
         return Ok(proto::pmu::EVENT_AMD);
     }
-    Err(format!(
-        "this CPU ({vendor} family {family:#x} model {model:#x}) is not supported: counter \
-         preemption is checked exact on AMD family 0x1a (Zen 5) only"
-    ))
+    Err(format!("{vendor} family {family:#x} model {model:#x}"))
+}
+
+/// Why counters cannot be used here.
+#[derive(Clone, Debug)]
+pub enum Unavailable {
+    /// The CPU's branch counting is not one Patina has checked exact.
+    Cpu(String),
+    /// The CPU is supported; this process lacks `CAP_PERFMON`.
+    Permission(String),
+    /// The CPU is supported but no counter opens (no PMU exposed, as in most virtual machines).
+    NoPmu(String),
+}
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Unavailable::Cpu(m) => write!(
+                f,
+                "this CPU ({m}) is not supported: counter preemption is checked exact on AMD \
+                 family 0x1a (Zen 5) only"
+            ),
+            Unavailable::Permission(m) => write!(
+                f,
+                "{m}: counters need CAP_PERFMON. Give it to patina with \
+                 `sudo setcap cap_perfmon+ep $(command -v patina)`"
+            ),
+            Unavailable::NoPmu(m) => write!(
+                f,
+                "{m}: no branch counter is exposed (a virtual machine usually hides the PMU)"
+            ),
+        }
+    }
 }
 
 /// Can this launcher open counters? The event, or why not. Checked once per process by
 /// opening the event on the calling thread.
-pub fn available() -> Result<u64, String> {
-    static S: OnceLock<Result<u64, String>> = OnceLock::new();
+pub fn available() -> Result<u64, Unavailable> {
+    static S: OnceLock<Result<u64, Unavailable>> = OnceLock::new();
     S.get_or_init(|| {
-        let ev = event()?;
+        let ev = event().map_err(Unavailable::Cpu)?;
         match perf_open(ev, 0) {
             Ok(_) => Ok(ev),
-            Err(e) if matches!(e.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => Err(format!(
-                "perf_event_open: {e}: counters need CAP_PERFMON. Give it to patina with \
-                 `sudo setcap cap_perfmon+ep $(command -v patina)`"
-            )),
-            Err(e) => Err(format!(
-                "perf_event_open: {e}: this host exposes no usable branch counter (a VM may hide the PMU)"
-            )),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => {
+                Err(Unavailable::Permission(format!("perf_event_open: {e}")))
+            }
+            Err(e) => Err(Unavailable::NoPmu(format!("perf_event_open: {e}"))),
         }
     })
     .clone()
