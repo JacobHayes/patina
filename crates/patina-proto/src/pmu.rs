@@ -1,5 +1,5 @@
 //! Counter preemption: what the runtime and the launcher agree on, the slice draw, and
-//! the control-transfer classifier the runtime's hops use. Design: `crates/patina-cli/ENGINE.md`, "Counter preemption".
+//! the control-transfer classifier the runtime's hops use. Design: `ARCHITECTURE.md`, "Counter preemption".
 //!
 //! Kept here (not in `rt`) so that `cargo test -p proto` checks the classifier and the
 //! branch-condition evaluator against hand-assembled cases.
@@ -20,7 +20,7 @@ pub const MARGIN_DEFAULT: u64 = 1024;
 pub const HOP_EXTRA: u64 = 1024;
 /// Smallest period the runtime programs (avoids interrupt storms).
 pub const MIN_REARM: u64 = 64;
-/// Defaults of the policy (`crates/patina-cli/ENGINE.md`, "Counter preemption").
+/// Defaults of the policy (`ARCHITECTURE.md`, "Counter preemption").
 pub const SLICE_MIN_DEFAULT: u64 = PERIOD + 2 * MARGIN_DEFAULT;
 pub const SLICE_MAX_DEFAULT: u64 = 1 << 22;
 pub const SHORT_PERMILLE_DEFAULT: u64 = 20;

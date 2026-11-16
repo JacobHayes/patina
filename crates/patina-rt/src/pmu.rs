@@ -1,5 +1,5 @@
 //! Counter preemption: preempt the thread holding the turn after N retired conditional
-//! branches of guest code. Design and the reasons behind it: `crates/patina-cli/ENGINE.md`,
+//! branches of guest code. Design and the reasons behind it: `ARCHITECTURE.md`,
 //! "Counter preemption".
 //!
 //! A *segment* is the guest code between two runtime entries. Every entry calls `enter`

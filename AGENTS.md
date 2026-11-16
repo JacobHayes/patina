@@ -1,92 +1,67 @@
-# Agent Guidance
+# Agent guidance
 
-**Patina** is an experimental deterministic execution and simulation-testing
-(DST) runtime. It runs an unmodified Linux x86_64 executable: a runtime inside
-each guest process traps every system call, the real kernel does the work in a
-per-run bwrap sandbox, and one supervisor decides order, time, randomness,
-faults and crashes from the seed. This file is what a builder needs: where
-truth lives, how to build, check and land, and the invariants that hold
-everywhere.
+Patina runs an unmodified Linux x86_64 program under a seed that decides scheduling, time,
+randomness, faults and crashes. This file is what a builder needs: where things are, how to
+check and land, and the rules that hold everywhere.
 
-## Document map
+## Documents
 
-| Document | Read it for |
+| Document | For |
 |---|---|
-| [crates/patina-cli/ENGINE.md](./crates/patina-cli/ENGINE.md) | how the engine works, each part pointing at its module |
-| [docs/EVIDENCE.md](./docs/EVIDENCE.md) | what the engine has been shown to do: each claim, its command, date, host and result |
-| [docs/SCOPE.md](./docs/SCOPE.md) | who Patina serves first and the rules new surface must meet |
-| [README.md](./README.md) | the user-facing surface; must stay honest about status |
-| Nearest `AGENTS.md` | the testbeds have their own |
+| [README.md](README.md) | users: install, first run, outcomes |
+| [docs/GUIDE.md](docs/GUIDE.md) | users: every workflow, with real output |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | how it works, each part pointing at its module; limits |
+| [docs/EVIDENCE.md](docs/EVIDENCE.md) | measured results: claim, command, date, host, result |
+| [examples/README.md](examples/README.md) | one small program per kind of bug |
 
-When you change architecture or user-visible behavior, update the docs in the
-same change. Docs describe the current state; history lives in git.
-`AGENTS.local.md`, if present, holds local maintainer recipes and is gitignored.
+Flags and commands: `patina --help --format json` is the source of truth (`cli.rs`, which
+the parser reads too). Docs describe the present; history is in git. A change to behaviour
+updates the docs in the same commit.
 
 ## Layout
 
-- `crates/patina-proto`: what the runtime and the supervisor must agree on (no_std).
-- `crates/patina-rt`: the in-guest runtime, no_std, built for `x86_64-unknown-none`
-  in its own workspace by `crates/patina-cli/build.rs` and embedded in the binary.
-- `crates/patina-cli`: the `patina` binary (launcher, supervisor, CLI).
-- `tests/<area>/`: the check scripts; `tests/guests/`: their guests.
-- `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`: the SDKs,
-  one reserved system call (`proto::sdk`); `examples/`: small programs using them.
-- `testbeds/`: not built yet (each README says so).
+- `crates/patina-proto`: what the runtime and supervisor agree on (no_std).
+- `crates/patina-rt`: the in-guest runtime, its own workspace, built for `x86_64-unknown-none`
+  by `crates/patina-cli/build.rs` and embedded in the binary.
+- `crates/patina-cli`: the `patina` binary: launcher, supervisor, CLI.
+- SDKs: `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`.
+- `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run.
+- `examples/`: small programs, one bug each; `testbeds/`: two larger ones for the nightly job.
 
-Host requirements: Linux x86_64, `bwrap` on `PATH`, and unprivileged user
-namespaces usable by bwrap (on Ubuntu 24.04:
-`sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`). The runtime
-runs from a file under `$XDG_CACHE_HOME/patina` (default `~/.cache/patina`),
-which must allow exec.
+Host: Linux x86_64, `bwrap`, unprivileged user namespaces (`patina doctor` says what is
+missing). rustup installs the pinned toolchain; mise supplies Go.
 
-## Build, check and land
+## Checks and landing
 
-rustup installs the toolchain `rust-toolchain.toml` pins; mise supplies Go for
-the Go guests.
+- **Landing is `mise run check`**: `cargo fmt --check`, clippy with `-D warnings`, then
+  `./check quick`. Quick's budget is 5 minutes and it fails above 10. CI runs exactly this.
+  Land by pushing the branch; when CI is green, fast-forward `main`.
+- **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
+  `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
+  date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
+- **Budgets are fixed by cutting.** Over budget, shrink a script or move it to `area`. Never
+  raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
+- Every script declares `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N` and must
+  fail on a planted break: show it red, then green.
+- `./check AREA` runs one area; `./check nightly` is the scheduled job (testbeds, 10 minutes,
+  not required); `./check list` shows every script.
 
-- **The landing gate is `mise run check`**: `cargo fmt --check`,
-  `cargo clippy -D warnings`, then `./check quick` (budget 5 minutes, fails above
-  10). CI runs exactly this on one GitHub runner (`CHECK_SLOTS=4`).
-- `./check AREA` runs one area (a directory under `tests/`) while you work on it;
-  `./check list` lists every script with its tier and budget.
-- Every check script declares `#@ tier=quick|area|evidence budget=SECONDS slots=N`
-  in its header and must fail on a planted break: show it red, then green.
-- **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a
-  soak) is run once by hand (`./check evidence NAME`, under
-  `tests/<area>/evidence-*.sh`); its command, date, host and result go into
-  `docs/EVIDENCE.md`. Nothing in `quick`, an area or CI calls it.
-- **Budgets are fixed. Over budget, cut**: move a quick script to `area` or
-  shrink it. Never raise a budget, add a shard, or add a retry. No script re-runs
-  another area's scripts.
-- Land by pushing the branch; when CI is green, fast-forward `main`. Keep
-  commits targeted and linear.
+A run that differs between repeats of one seed is a determinism bug until proven otherwise:
+find it, never retry it.
 
-A run that differs between repeats of one seed is a determinism bug until proven
-otherwise: fix it, never retry it.
+## Rules
 
-## Project doctrine
-
-- **Fail closed, loudly.** An effect Patina does not control is a refusal or a
-  named abort, never a silent fallback to the host.
-- **Structure before tests.** Enforce an invariant by construction first: make
-  the bad state unrepresentable (types, visibility, one choke point); failing
-  that, a compiler or lint rule; only then a behavioural test that drives the
-  product. Never scan or patch source text in a test.
-- **Enforcement earns its cost.** Every test, lint, fixture and gate is code to
-  read, run and maintain. Protect invariants whose violation is likely, costly
-  and silent, with the smallest mechanism that does it, and stop there.
-- **Detection before fixes.** A new bug class gets a detector that provably
-  fires (red before, green after) with or before the point fix.
-- **No cruft.** No deprecation aliases, compatibility shims, engine flags or dual
-  code paths: migrate every caller and doc in the same change.
-- **Determinism claims are verified, not asserted.** Byte-identical repeats and
-  seed variation are the evidence; a check that cannot fail is a bug.
-- **Core patina is guest-agnostic.** No guest-specific names or branches in
-  `crates/`. What one guest needs lives in its test, example or harness.
-
-## Conventions
-
-- Write docs in clear, concise, present-tense language.
-- Shell scripts are loud on failure and never pass vacuously.
-- Measure rather than guess: quote a duration only when observed, and answer
-  status questions from fresh evidence (logs, CI, the process table).
+- **Fail closed.** An effect Patina does not control is a refusal or a named stop, never a
+  silent pass-through to the host.
+- **Structure before tests.** Make the bad state unrepresentable first; then a lint; then a
+  behavioural test. Never scan or patch source text in a test, and never assert wording or
+  counts of docs.
+- **Enforcement earns its cost.** Every test and gate is code to maintain; protect what is
+  likely, costly and silent, with the smallest mechanism.
+- **Detection before fixes.** A new bug class gets a check that fires before the fix lands.
+- **No cruft.** No aliases, compatibility paths or engine flags; migrate every caller and doc
+  in the same change.
+- **The core is guest-agnostic.** No program-specific names or branches in `crates/`.
+- **New surface needs a program that needs it**: the stop it hit and a small reproducer.
+  Outside that, the answer is a clear refusal.
+- Shell scripts fail loudly and never pass vacuously. Quote durations only when measured.

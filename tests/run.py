@@ -3,19 +3,21 @@
     run.py quick              the landing gate: every script marked tier=quick
     run.py AREA ...           one area's scripts (tier quick and area) of tests/AREA
     run.py evidence [NAME..]  the evidence scripts (all, or those whose AREA/name contains NAME)
+    run.py nightly            the scheduled job's scripts: every script marked tier=nightly
     run.py list               every script with its tier, budget and slots
 
 An area is a directory under tests/ holding check scripts (`*.sh` directly in it); guests/
 holds the guests' sources.
 
-A script declares itself in a line `#@ tier=quick|area|evidence budget=SECONDS slots=N`
+A script declares itself in a line `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N`
 (defaults: tier=area, budget 120 s, slots 1; slots = sandboxes it runs at once). Scripts run in
 parallel, at most CHECK_SLOTS sandboxes at once (default 8), longest budget first. Each gets a
 private RUNS directory; a script still running at its budget is killed and fails, as does one
 that leaves a process behind (tests/leftovers.py on its RUNS). Passing scripts' run
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
-The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s.
+The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s, nightly
+above 600 s.
 """
 import os
 import signal
@@ -27,9 +29,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CHECK_DIR = os.environ.get("PATINA_CHECK_DIR") or os.path.join(ROOT, "target", "patina-check")
-DEFAULTS = {"quick": 15, "area": 120, "evidence": 1800}
-CEILING = {"quick": int(os.environ.get("QUICK_CEILING", "600")), "area": 300, "evidence": None}
-TARGET = {"quick": 300, "area": 300, "evidence": 3600}
+DEFAULTS = {"quick": 15, "area": 120, "nightly": 300, "evidence": 1800}
+CEILING = {"quick": int(os.environ.get("QUICK_CEILING", "600")), "area": 300, "nightly": 600, "evidence": None}
+TARGET = {"quick": 300, "area": 300, "nightly": 600, "evidence": 3600}
 
 
 def scripts():
@@ -53,8 +55,8 @@ def scripts():
 
 
 def select(args, allsc):
-    if args[0] == "quick":
-        return "quick", [s for s in allsc if s["tier"] == "quick"]
+    if args[0] in ("quick", "nightly"):
+        return args[0], [s for s in allsc if s["tier"] == args[0]]
     if args[0] == "evidence":
         names = args[1:]
         sel = [s for s in allsc if s["tier"] == "evidence"

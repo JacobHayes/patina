@@ -1,0 +1,5 @@
+examples
+sdk/c
+sdk/python
+crates/patina
+go/patina

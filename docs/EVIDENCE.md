@@ -1,9 +1,15 @@
 # Evidence
 
-What the syscall-trap engine (`crates/patina-cli/ENGINE.md`) has been shown to do, one line
-per result. All measured 2026-11-12 to 2026-11-16 on one host: a KVM guest, Linux 7.0,
-24 vCPUs (AMD Ryzen 9 9950X), run directories on XFS; "Second hosts" adds five GitHub runners. The scripts behind each claim are `./check evidence`
-and the `area` tier of each test directory.
+What Patina (`ARCHITECTURE.md`) has been shown to do, one line per result. Unless a section
+names another host, measured 2026-11-12 to 2026-11-16 on one host: a KVM guest, Linux 7.0,
+24 vCPUs (AMD Ryzen 9 9950X), run directories on XFS; "Second hosts" adds five GitHub
+runners. The scripts behind each claim are `./check evidence` and the `area` tier of each
+test directory.
+
+The workloads W1-W9 (`tests/durability/bench/workloads.py`): W1 Rust threads and files under
+machine crashes, W2 tokio multi-thread, W3 SQLite from C, W4 stock static Go, W5 CPython, W6 a
+shell pipeline over coreutils, W7 fork and exec, W8 sockets under network faults, W9 the fjall
+harness.
 
 ## Determinism
 
@@ -21,7 +27,7 @@ repeating each (workload, seed, faults) cell under varied host conditions (`pati
 | Table strength (`patina table`) | 227 C, 158 A over 385 known syscalls |
 
 The list of difference kinds did not plateau: new kinds appeared up to the last matrix. Run
-the protocol again after any change to the engine, kernel, host or filesystem. A campaign
+the protocol again after any change to the engine, kernel, host or filesystem. A sweep
 runs each seed once; repeating runs buys nothing per run.
 
 ### The thirteen differences found, and how each ended
