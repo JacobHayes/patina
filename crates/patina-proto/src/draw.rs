@@ -16,6 +16,9 @@ pub enum Stream {
     Slice = 9,
     /// SDK fault points, knobs and delays (`sdk::point_draw`).
     Sdk = 10,
+    /// The run's fault plan: each setting given as a range is resolved by its own draw,
+    /// keyed by the setting's name (`faults::plan_draw`).
+    FaultPlan = 11,
 }
 
 /// splitmix64 finaliser.

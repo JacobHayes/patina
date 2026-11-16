@@ -40,6 +40,11 @@ pub fn describe(r: &Rec) -> String {
             0xf30fc707 => "rdpid".to_string(),
             n => format!("{n:#x}"),
         },
+        Some(RecKind::Name) => {
+            let (b, n, cut) = r.name_bytes();
+            let s = String::from_utf8_lossy(&b[..n]);
+            format!("{}{s}", if cut { "..." } else { "" })
+        }
         _ => format!("{:#x}", r.nr),
     };
     format!(

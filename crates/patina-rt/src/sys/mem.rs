@@ -251,7 +251,40 @@ pub fn futex_key(addr: u64) -> u64 {
     addr
 }
 
+/// `mem-limit-mb`: the growth of private anonymous memory this call asks for (0: none).
+fn anon_growth(call: &dyn Call) -> u64 {
+    let a = |i: usize| call.arg(i);
+    match call.nr() {
+        9 if a(3) & 3 == 2
+            && (a(3) & MAP_ANON != 0 || a(4) as i32 == -1)
+            && a(2) & PROT_WRITE != 0 =>
+        {
+            page_up(a(1))
+        }
+        12 => {
+            let cur = proc().brk_cur;
+            if (BRK_BASE..=BRK_BASE + BRK_SIZE).contains(&a(0)) {
+                page_up(a(0)).saturating_sub(page_up(cur))
+            } else {
+                0
+            }
+        }
+        25 => page_up(a(2)).saturating_sub(page_up(a(1))),
+        _ => 0,
+    }
+}
+
 pub fn handle(call: &mut dyn Call) -> Action {
+    if ctl().faults.cfg.mem_limit_bytes != 0
+        && matches!(call.nr(), 9 | 12 | 25)
+        && crate::inject::mem_limit_refuses(call.nr(), anon_growth(call))
+    {
+        return Action::Return(if call.nr() == 12 {
+            proc().brk_cur as i64
+        } else {
+            -e::ENOMEM
+        });
+    }
     let r = match call.nr() {
         9 => {
             // Shared writable mappings of /work files are tracked by the durability log.

@@ -82,6 +82,13 @@ pub fn replay(args: &Args) -> Res<Replayed> {
     let o = cfg.opts_with(program)?;
     crate::launch::pmu_event(&o)?;
     clear_out(&out)?;
+    if run["faults"] != o.plan.json() {
+        return Err(format!(
+            "the fault plan resolves to {} now, {} in the run",
+            o.plan.json(),
+            run["faults"]
+        ));
+    }
     if std::env::var_os("PATINA_TEST_REPLAY_PERTURB").is_some() {
         PERTURB_DRAWS.store(true, std::sync::atomic::Ordering::Relaxed);
     }

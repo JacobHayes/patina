@@ -1,9 +1,9 @@
-# 6. F5 (a short read is not retried: UnexpectedEof). short-permille=20 seed 3; control:
+# 6. F5 (a short read is not retried: UnexpectedEof). fs-short-permille=20 seed 3; control:
 # seed 3 without faults passes.
 #@ tier=quick budget=15
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f5-3
-run fjall-harness "$o" 3 --fault short-permille=20 -- /guest/fjall-harness-debug
+run fjall-harness "$o" 3 --fault fs-short-permille=20 -- /guest/fjall-harness-debug
 case "$(field "$o/result.json" message)" in
     "INVARIANT iterate-failed"|"INVARIANT reopen-failed") ;;
     *) die "F5: $(field "$o/result.json" message)" ;;

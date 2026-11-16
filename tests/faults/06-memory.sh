@@ -1,6 +1,7 @@
 # 6. Memory: mem-error-at=N swept over the guest's memory requests: each mmap step sees
 # ENOMEM exactly at its call and the guest carries on; thread creation fails with EAGAIN;
-# with every request failing after a point, malloc returns NULL with ENOMEM.
+# under mem-limit-mb, growth past the limit is refused at the same call every run and
+# malloc returns NULL with ENOMEM.
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib/common.inc"
 seen=""
@@ -26,13 +27,24 @@ for n in $(seq 1 24); do
     [ "$k" -gt "$prev" ] || die "mmap failures not in call order"
     prev=$k
 done
-# malloc: fail every request from the first malloc's mmap on (its seq from a plain run).
-o0=$RUNS/06/plain
-run "$o0" 1 -- /guest/memfault
-s=$("$PATINA" log dump "$o0/inc-0/boundary.log" | grep -m1 ' mmap .*args=\[0x0, 0x41000,' | awk '{print $1}' | cut -d= -f2)
-[ -n "$s" ] || die "cannot find the first malloc's mmap in the log"
-o=$RUNS/06/malloc
-run "$o" 1 --fault mem-error-permille=1000 --fault fault-after-seq=$s -- /guest/memfault
-grep -q "step 5 malloc ENOMEM" "$o/inc-0/stdout" || die "malloc did not return NULL/ENOMEM: $(cat "$o/inc-0/stdout")"
-grep -qx done "$o/inc-0/stdout" || die "guest did not finish after malloc failures"
-echo "every request failing from seq $s: $(grep -v ' ok$' "$o/inc-0/stdout" | tr '\n' ' ')"
+# mem-limit-mb=64: a guest mapping 1 MiB at a time up to 100 MiB is refused at the same call
+# on every run, near 64 MiB, and malloc then returns NULL with ENOMEM; the result names it.
+o=$RUNS/06/limit
+verify "$o" 1 2 "" --fault mem-limit-mb=64 -- /guest/memfault limit
+cat "$o/run-0/inc-0/stdout"
+k=$(sed -n 's/^limit: ENOMEM at MiB \([0-9]*\)$/\1/p' "$o/run-0/inc-0/stdout")
+[ -n "$k" ] || die "mem-limit-mb=64: no ENOMEM in 100 MiB"
+[ "$k" -gt 48 ] && [ "$k" -le 64 ] || die "mem-limit-mb=64: refused at MiB $k"
+grep -qx "malloc ENOMEM" "$o/run-0/inc-0/stdout" || die "malloc past the limit did not return NULL/ENOMEM"
+python3 -I - "$o/run-0/result.json" <<'PY' || exit 1
+import json, sys
+f = json.load(open(sys.argv[1]))["faults"]
+c, last = f["counts"].get("mem-limit"), f["recent"][-1]
+if not c or c["injected"] < 2 or c["eligible"] < c["injected"]:
+    sys.exit("FAIL: mem-limit counts %s" % c)
+if (last["fault"], last["errno"], last["object"]) != ("mem-limit", "ENOMEM", "memory"):
+    sys.exit("FAIL: last event %s" % last)
+print("mem-limit: eligible %d, injected %d; last: %s %s %s bytes" % (
+    c["eligible"], c["injected"], last["call"], last["errno"], last["bytes"]))
+PY
+echo "mem-limit-mb=64: refused at MiB $k in both runs (identical)"

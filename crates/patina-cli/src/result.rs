@@ -25,9 +25,9 @@ pub struct RunEnd {
     pub io: [u64; 5],
     /// One object per crash.
     pub crashes: Vec<Value>,
-    /// The last injected faults (at most `faults::RECENT`), and the total.
-    pub faults_recent: Vec<Value>,
-    pub faults_count: usize,
+    /// What was done to the program (`attribution::faults_json`): the resolved plan, eligible
+    /// and injected calls per class, the total and the last injected events.
+    pub faults: Value,
     /// Instruction channels.
     pub insn: InsnCounts,
     /// Network wire counters, `NET_NAMES` order, summed over incarnations
@@ -214,7 +214,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "digest": e.digest,
         "incarnations": e.incarnations,
         "crashes": e.crashes,
-        "faults": { "injected": e.faults_count, "recent": e.faults_recent },
+        "faults": e.faults,
         "sdk": e.sdk.json(),
         "refused": e.refused,
         "labels": {
@@ -274,12 +274,14 @@ pub fn host_facts() -> Value {
     json!({ "kernel": kernel, "cpu": cpu, "arch": std::env::consts::ARCH })
 }
 
-pub fn run_json(cfg: &Config, program: &Program) -> Value {
+/// `run.json`: the request, with the fault plan resolved from the seed (`faults`).
+pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> Value {
     json!({
         "schema": RUN_SCHEMA,
         "version": env!("CARGO_PKG_VERSION"),
         "seed": cfg.seed,
         "config": cfg,
+        "faults": plan.json(),
         "program": program,
         "host": host_facts(),
     })
@@ -300,6 +302,14 @@ pub fn print_human(r: &Value, dir: &Path) {
         match g["signal"].as_i64() {
             Some(sig) => println!("guest: killed by signal {sig}"),
             None => println!("guest: exit {x}"),
+        }
+    }
+    // Under a finding: the last faults done to the program before it.
+    let recent = r["faults"]["recent"].as_array().map_or(&[][..], |v| v);
+    if r["exit"] == 1 && !recent.is_empty() {
+        println!("last injected faults ({} in all):", r["faults"]["injected"]);
+        for f in &recent[recent.len().saturating_sub(5)..] {
+            println!("  {}", crate::launcher::attribution::line(f));
         }
     }
     println!("run directory: {}", dir.display());

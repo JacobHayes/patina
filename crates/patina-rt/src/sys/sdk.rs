@@ -82,7 +82,7 @@ fn payload(ptr: u64, len: u64, buf: &mut [u8; MAX_LEN]) -> Result<Hdr, i64> {
 
 /// Fault points stay quiet before `setup-complete` when the run asks for faults after setup
 /// (the mark lowers `fault_after_seq` to its own sequence number), and after a crash with
-/// `faults-in-recovery=0`.
+/// `faults-in-recovery = false`.
 fn quiet() -> bool {
     let f = &ctl().faults.cfg;
     thread().seq < f.fault_after_seq || f.faults_off != 0

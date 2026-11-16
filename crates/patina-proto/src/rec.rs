@@ -16,6 +16,55 @@ pub enum RecKind {
     /// A counter preemption: `nr` 1, args [rip, N, rcx, rsp,
     /// eflags, 0], `out_hash` a hash of the general registers.
     Preempt = 8,
+    /// The object of the `Injected` record just before it: `nr` the name's full length,
+    /// `ret` the process id, and the name's bytes (its last `NAME_BYTES` when longer) in
+    /// `args`, `out_hash` and `in_hash`.
+    Name = 9,
+}
+
+/// Name bytes one `Name` record carries.
+pub const NAME_BYTES: usize = 64;
+
+impl Rec {
+    /// A `Name` record for `name` (its last `NAME_BYTES` bytes when longer).
+    pub fn name(seq: u64, vclock_ns: u64, slot: u16, pid: i64, name: &[u8]) -> Rec {
+        let tail = &name[name.len().saturating_sub(NAME_BYTES)..];
+        let mut b = [0u8; NAME_BYTES];
+        b[..tail.len()].copy_from_slice(tail);
+        let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+        Rec {
+            seq,
+            vclock_ns,
+            slot,
+            kind: RecKind::Name as u8,
+            class: 0,
+            nr: name.len() as u32,
+            args: [w(0), w(1), w(2), w(3), w(4), w(5)],
+            ret: pid,
+            out_hash: w(6),
+            in_hash: w(7),
+        }
+    }
+
+    /// The bytes of a `Name` record and whether the name was cut (only its tail kept).
+    pub fn name_bytes(&self) -> ([u8; NAME_BYTES], usize, bool) {
+        let mut b = [0u8; NAME_BYTES];
+        let words = [
+            self.args[0],
+            self.args[1],
+            self.args[2],
+            self.args[3],
+            self.args[4],
+            self.args[5],
+            self.out_hash,
+            self.in_hash,
+        ];
+        for (i, w) in words.iter().enumerate() {
+            b[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
+        }
+        let n = self.nr as usize;
+        (b, n.min(NAME_BYTES), n > NAME_BYTES)
+    }
 }
 
 impl RecKind {
@@ -30,6 +79,7 @@ impl RecKind {
             CrashPoint,
             Injected,
             Preempt,
+            Name,
         ]
         .into_iter()
         .find(|k| *k as u8 == v)
@@ -44,6 +94,7 @@ impl RecKind {
             RecKind::CrashPoint => "crash",
             RecKind::Injected => "inject",
             RecKind::Preempt => "preempt",
+            RecKind::Name => "name",
         }
     }
 }

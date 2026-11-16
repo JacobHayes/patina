@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib/common.inc"
 for seed in 1; do
     verify "$RUNS/11/errors-$seed" $seed 3 cpu,load,sandbox --fault fs-error-permille=100 -- /guest/io-errors tally
-    verify "$RUNS/11/short-$seed" $seed 3 cpu,load,sandbox --fault short-permille=200 -- /guest/short correct
+    verify "$RUNS/11/short-$seed" $seed 3 cpu,load,sandbox --fault fs-short-permille=200 -- /guest/short correct
     verify "$RUNS/11/crash-$seed" $seed 3 cpu,load,sandbox --crash machine:20 -- /guest/ack-log correct
     echo "seed $seed: errors $(field "$RUNS/11/errors-$seed/run-0/result.json" digest)," \
         "short $(field "$RUNS/11/short-$seed/run-0/result.json" digest)," \

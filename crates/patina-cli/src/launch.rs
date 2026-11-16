@@ -200,7 +200,7 @@ pub fn run_one(
     }
     crate::result::write_json(
         &out.join("run.json"),
-        &crate::result::run_json(&o.cfg, &o.program),
+        &crate::result::run_json(&o.cfg, &o.program, &o.plan),
     )?;
     let end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
     let r = crate::result::result_json(&end, &crate::result::classified(&end));
@@ -245,6 +245,10 @@ pub struct IncEnd {
     pub fault_after_seq: u64,
     /// Pause points and spin probes (`proto::ctl::SCHED_NAMES`).
     pub sched: [u64; proto::ctl::SCHED_FIELDS],
+    /// Calls eligible for each runtime fault class (`proto::faults::Kind`), and crash
+    /// points passed.
+    pub eligible: [u64; proto::faults::NKIND],
+    pub crash_points: u64,
 }
 
 /// The counter event with `--preempt branches`, or why counters cannot be used here: an
@@ -732,6 +736,8 @@ pub fn run_incarnation(
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         sched: ctl.sched.read(),
+        eligible: std::array::from_fn(|i| ctl.faults.eligible[i].load(Relaxed)),
+        crash_points: ctl.faults.crash_points.load(Relaxed),
     };
     if std::env::var_os("PATINA_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.

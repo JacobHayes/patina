@@ -43,6 +43,6 @@ wl W1
 rm -rf "$out/none" "$out/idle"
 "$PATINA" run --seed 4 --out "$out/none" --mount "$GDIR":/guest:copy -- $CMD >/dev/null 2>&1
 "$PATINA" run --seed 4 --out "$out/idle" --mount "$GDIR":/guest:copy --fault fs-error-permille=0 --fault fsync-error-at=999999 \
-    --fault short-permille=0 --fault net-reset-permille=1000 --crash machine-at:999999999 -- $CMD >/dev/null 2>&1
+    --fault fs-short-permille=0 --fault net-reset-permille=1000 --crash machine-at:999999999 -- $CMD >/dev/null 2>&1
 [ "$(digest "$out/none")" = "$(digest "$out/idle")" ] || die "idle fault classes changed the digest"
 echo "idle fault classes: digest unchanged $(digest "$out/none")"

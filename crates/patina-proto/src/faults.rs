@@ -64,25 +64,75 @@ impl FClass {
     pub fn from_u8(v: u8) -> Option<FClass> {
         FClass::ALL.get(v as usize).copied()
     }
-    /// Errnos an injected error of this class is drawn from. `EINTR` is
-    /// appended by the runtime only when `fs-eintr=1`.
-    pub fn errnos(self) -> &'static [i32] {
-        const EIO: i32 = 5;
+}
+
+/// What a faultable call acts on, as the runtime classifies it before deciding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Obj {
+    /// A regular file under `/work`.
+    File,
+    /// A directory under `/work`, or a path under `/work` named by a call (open, rename,
+    /// unlink, mkdir, link, truncate by name).
+    Path,
+    /// A pipe or FIFO.
+    Pipe,
+    /// A unix socket. (TCP sockets are the wire's: the runtime does not fault them.)
+    Unix,
+    /// Memory: mappings, the break, thread and process creation.
+    Mem,
+}
+
+impl Obj {
+    pub fn name(self) -> &'static str {
         match self {
-            FClass::Open => &[EIO, 28, 24, 12], // EIO ENOSPC EMFILE ENOMEM
-            FClass::Read => &[EIO],
-            FClass::Write => &[EIO, 28],
-            FClass::Sync => &[EIO],
-            FClass::Rename | FClass::Unlink | FClass::Mkdir | FClass::Link => &[EIO, 28],
-            FClass::Truncate | FClass::Fallocate => &[EIO, 28],
-            FClass::Close => &[EIO],
-            FClass::Mem => &[12],
+            Obj::File => "file",
+            Obj::Path => "path",
+            Obj::Pipe => "pipe",
+            Obj::Unix => "unix",
+            Obj::Mem => "memory",
         }
     }
-    /// Can `EINTR` be drawn (with `fs-eintr=1`)? Only for calls that can wait in Linux.
-    pub fn eintr_ok(self) -> bool {
-        matches!(self, FClass::Open | FClass::Read | FClass::Write)
+}
+
+const EIO: i32 = 5;
+const ENOMEM: i32 = 12;
+const ENFILE: i32 = 23;
+const EMFILE: i32 = 24;
+const ENOSPC: i32 = 28;
+const EDQUOT: i32 = 122;
+
+/// The errnos an injected error may take: only what Linux can return for this call on this
+/// object. The injector draws from this table and from nothing else; an empty slice means
+/// the call is never failed with an error (pipes and unix sockets get short transfers and
+/// delays only; `close` fails only on a regular file, after closing it). `EINTR` is added
+/// by the runtime, with `fs-eintr=1`, where `eintr_ok` says so.
+pub fn errnos(obj: Obj, c: FClass, creating: bool) -> &'static [i32] {
+    match (obj, c) {
+        (Obj::Mem, FClass::Mem) => &[ENOMEM],
+        (Obj::Mem, _) | (_, FClass::Mem) => &[],
+        (Obj::Pipe | Obj::Unix, _) => &[],
+        (_, FClass::Open) if creating => &[EIO, ENOSPC, EMFILE, ENFILE],
+        (_, FClass::Open) => &[EIO, EMFILE, ENFILE],
+        (Obj::File, FClass::Read) => &[EIO],
+        (Obj::File, FClass::Write) => &[EIO, ENOSPC, EDQUOT],
+        (Obj::File, FClass::Close) => &[EIO],
+        (Obj::File | Obj::Path, FClass::Sync) => &[EIO],
+        // read and write on a directory answer EISDIR before any I/O; close has no flush.
+        (Obj::Path, FClass::Read | FClass::Write | FClass::Close) => &[],
+        (_, FClass::Rename | FClass::Mkdir | FClass::Link | FClass::Fallocate) => &[EIO, ENOSPC],
+        (_, FClass::Unlink | FClass::Truncate) => &[EIO],
     }
+}
+
+/// Can `EINTR` be drawn (with `fs-eintr=1`)? For the calls on a `/work` file or path that
+/// can wait in Linux.
+pub fn eintr_ok(obj: Obj, c: FClass) -> bool {
+    matches!(obj, Obj::File | Obj::Path) && matches!(c, FClass::Open | FClass::Read | FClass::Write)
+}
+
+/// May the count of this read or write be shortened? Regular files, pipes and unix sockets.
+pub fn short_ok(obj: Obj) -> bool {
+    matches!(obj, Obj::File | Obj::Pipe | Obj::Unix)
 }
 
 /// The class of a syscall number, if it is faultable at all. Which target (path or
@@ -128,6 +178,34 @@ pub const INJ_ENOSPC: u64 = 4;
 pub const INJ_FSYNC_EIO: u64 = 5;
 /// An earlier failed writeback reported again to a descriptor that had not seen it.
 pub const INJ_FSYNC_REPORT: u64 = 6;
+/// `mem-limit-mb`: a growth of anonymous memory past the limit (value: the bytes asked for).
+pub const INJ_MEM_LIMIT: u64 = 7;
+
+/// The runtime's fault classes whose eligible calls are counted (`FaultCtl::eligible`): a
+/// call is eligible for a class when that class could act on it, whatever its rate.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    FsError = 0,
+    FsShort = 1,
+    FsDelay = 2,
+    FsyncError = 3,
+    Enospc = 4,
+    MemError = 5,
+    MemLimit = 6,
+}
+
+pub const NKIND: usize = 8;
+/// The plan's class name of each `Kind` (`result.json` `faults.counts`).
+pub const KIND_NAMES: [&str; 7] = [
+    "fs-error",
+    "fs-short",
+    "fs-delay",
+    "fsync-error",
+    "enospc",
+    "mem-error",
+    "mem-limit",
+];
 
 /// Written by the launcher, read-only afterwards (except the counters below it).
 #[repr(C)]
@@ -140,16 +218,20 @@ pub struct FaultCfg {
     pub fs_error_at_class: u64,
     pub fs_error_at_n: u64,
     pub fs_eintr: u64,
+    /// `fs-short-permille`.
     pub short_permille: u64,
     pub fsync_error_permille: u64,
     /// 0: off.
     pub fsync_error_at: u64,
     /// 0: off.
     pub enospc_after_bytes: u64,
+    /// `fs-delay-permille`, `fs-delay-max-ms`.
     pub delay_permille: u64,
     pub delay_max_ns: u64,
     pub mem_error_permille: u64,
     pub mem_error_at: u64,
+    /// No fault before this sequence number: `faults-after-setup=1` sets it to the maximum
+    /// and the SDK's `setup-complete` mark lowers it to the mark's own.
     pub fault_after_seq: u64,
     /// `CRASH_*`.
     pub crash_kind: u64,
@@ -161,9 +243,11 @@ pub struct FaultCfg {
     pub crash_enabled: u64,
     /// Incarnation number (also `PATINA_INCARNATION`).
     pub incarnation: u64,
-    /// `faults-in-recovery=0`: no faults other than crashes after the first crash.
+    /// `faults-in-recovery = false`: no faults other than crashes after the first crash.
     pub faults_off: u64,
-    pub reserved: [u64; 4],
+    /// `mem-limit-mb` in bytes (0: off): anonymous memory growth past it answers `ENOMEM`.
+    pub mem_limit_bytes: u64,
+    pub reserved: [u64; 3],
 }
 
 impl FaultCfg {
@@ -185,9 +269,16 @@ pub struct FaultCtl {
     pub injected: AtomicU64,
     /// Crash points passed (whether or not one fired).
     pub crash_points: AtomicU64,
+    /// Eligible calls per `Kind`, counted while faults are active.
+    pub eligible: [AtomicU64; NKIND],
 }
 
 impl FaultCtl {
+    /// Count one eligible call for `k`.
+    pub fn eligible(&self, k: Kind) {
+        let e = &self.eligible[k as usize];
+        e.store(e.load(Relaxed) + 1, Relaxed);
+    }
     /// Increment and return the new count of `c`.
     pub fn count(&self, c: FClass) -> u64 {
         let v = self.counters[c as usize].load(Relaxed) + 1;

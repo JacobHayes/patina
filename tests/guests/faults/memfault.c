@@ -5,6 +5,10 @@
  *   steps 0-4:  mmap of 1 MiB, anonymous
  *   steps 5-9:  malloc of 256 KiB (served by mmap; glibc may fall back to brk)
  *   step 10:    pthread_create
+ *
+ * memfault limit: map 1 MiB at a time (writable, touched) up to 100 MiB; print
+ * "limit: ENOMEM at MiB K" for the first refused one (or "limit: none"), then try a
+ * malloc of 2 MiB ("malloc ok|ENOMEM"), then "done".
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -17,8 +21,27 @@
 
 static void *worker(void *a) { return a; }
 
-int main(void) {
+static int limit(void) {
+    int k;
+    for (k = 0; k < 100; k++) {
+        char *p = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            printf("limit: %s at MiB %d\n", strerrorname_np(errno), k);
+            break;
+        }
+        p[0] = 1;
+    }
+    if (k == 100) printf("limit: none\n");
+    errno = 0;
+    char *volatile m = malloc(2 << 20); /* volatile: the compiler may not elide the call */
+    printf("malloc %s\n", m ? "ok" : strerrorname_np(errno));
+    printf("done\n");
+    return 0;
+}
+
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
+    if (argc > 1 && strcmp(argv[1], "limit") == 0) return limit();
     int k = 0;
     for (int i = 0; i < 5; i++, k++) {
         void *p = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

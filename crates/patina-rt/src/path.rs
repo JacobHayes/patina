@@ -413,6 +413,24 @@ fn normalise(p: &[u8], out: &mut PathBuf) {
     out.b[out.n] = 0;
 }
 
+/// The normalised absolute path of `(dirfd, p)` whatever its form, or of the descriptor
+/// `dirfd` itself when `p` is empty (fault records name their object with it).
+pub fn full(dirfd: i64, p: &[u8], out: &mut PathBuf) -> bool {
+    if p.first() == Some(&b'/') {
+        normalise(p, out);
+        return true;
+    }
+    let mut base = PathBuf::new();
+    if !base_dir(dirfd, &mut base) {
+        return false;
+    }
+    if !p.is_empty() && !(base.push(b"/") && base.push(p)) {
+        return false;
+    }
+    normalise(base.as_bytes(), out);
+    true
+}
+
 fn has_dotdot(p: &[u8]) -> bool {
     p.split(|&c| c == b'/').any(|c| c == b"..")
 }

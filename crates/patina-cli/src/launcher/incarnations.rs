@@ -11,9 +11,11 @@
 //! ```
 //!
 //! Crashes are drawn only while incarnations remain: the last permitted incarnation runs
-//! with crashes off. An `-at` crash fires once. With `faults-in-recovery=0` faults other
-//! than crashes stop after the first crash.
+//! with crashes off. An `-at` crash fires once. With `faults-in-recovery = false` faults
+//! other than crashes stop after the first crash. A run with crashes on ends with the
+//! operation log's self-check (`self_check`).
 
+use super::attribution::{lost, Faults};
 use crate::cli::Res;
 use crate::config::Opts;
 use crate::durability::log::OpLog;
@@ -22,58 +24,9 @@ use crate::durability::tree::Tree;
 use crate::launch::{run_incarnation, Start};
 use crate::result::RunEnd;
 use proto::faults::{CRASH_MACHINE, CRASH_NONE};
-use proto::rec::{Rec, RecKind, REC_SIZE};
-use serde_json::{json, Value};
-use std::fs;
+use serde_json::json;
 use std::path::Path;
 use std::time::Instant;
-
-/// The last injected faults listed in `result.json` (the total is always given).
-const FAULTS_RECENT: usize = 20;
-
-fn inj_name(k: u64) -> &'static str {
-    use proto::faults::*;
-    match k {
-        INJ_ERROR => "error",
-        INJ_SHORT => "short",
-        INJ_DELAY => "delay",
-        INJ_ENOSPC => "enospc",
-        INJ_FSYNC_EIO => "fsync-eio",
-        INJ_FSYNC_REPORT => "fsync-report",
-        proto::wire::INJ_NET_RESET => "net-reset",
-        proto::wire::INJ_NET_REFUSE => "net-connect-refuse",
-        proto::wire::INJ_NET_TIMEOUT => "net-connect-timeout",
-        proto::wire::INJ_NET_PARTITION => "net-partition",
-        proto::wire::INJ_NET_CHUNK => "net-chunk",
-        _ => "other",
-    }
-}
-
-/// The `Injected` boundary records of an incarnation, as JSON objects.
-pub fn injected(inc: &Path, k: u64) -> Vec<Value> {
-    let b = fs::read(inc.join("boundary.log")).unwrap_or_default();
-    let mut out = vec![];
-    for c in b.as_chunks::<REC_SIZE>().0 {
-        let r = Rec::from_bytes(c);
-        if r.kind != RecKind::Injected as u8 {
-            continue;
-        }
-        let [kind, _class, value, _, _, _] = r.args;
-        let v = if kind == proto::faults::INJ_DELAY || kind == proto::faults::INJ_SHORT {
-            json!(value)
-        } else {
-            json!(value as i64)
-        };
-        out.push(json!({
-            "incarnation": k,
-            "seq": r.seq,
-            "call": proto::table::name(r.nr as u64),
-            "kind": inj_name(kind),
-            "value": v,
-        }));
-    }
-    out
-}
 
 /// Parse the crash verdict detail `KIND SEQ VCLOCK SUBPOINT`.
 fn crash_detail(d: &str) -> Option<(String, u64, u64)> {
@@ -82,6 +35,26 @@ fn crash_detail(d: &str) -> Option<(String, u64, u64)> {
     let seq = f.next()?.parse().ok()?;
     let vclock = f.next()?.parse().ok()?;
     Some((kind, seq, vclock))
+}
+
+/// Replay every incarnation's operation log and compare it with the live tree it exported
+/// (`durability::check`). `PATINA_TEST_OPLOG_CORRUPT=1` inverts the bytes of incarnation
+/// 0's logged data first, so a test can show a mismatch ends the run `internal`.
+fn self_check(run: &Path) -> Res<()> {
+    if std::env::var_os("PATINA_TEST_OPLOG_CORRUPT").is_some() {
+        let p = run.join("inc-0/oplog.data");
+        let b: Vec<u8> = std::fs::read(&p)
+            .map_err(|e| format!("{}: {e}", p.display()))?
+            .iter()
+            .map(|x| !x)
+            .collect();
+        std::fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()))?;
+    }
+    for inc in crate::durability::check::incarnations(run) {
+        crate::durability::check::check_inc(&inc)
+            .map_err(|e| format!("operation log self-check: {e}"))?;
+    }
+    Ok(())
 }
 
 /// The tree the next incarnation starts from.
@@ -123,8 +96,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut seq0 = 0;
     let mut vclock0 = 0;
     let mut crashes = vec![];
-    let mut faults: std::collections::VecDeque<Value> = Default::default();
-    let mut nfaults = 0usize;
+    let mut faults = Faults::default();
     let mut digests = vec![];
     let (mut traps, mut switches) = (0, 0);
     let mut io = [0u64; 5];
@@ -150,6 +122,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             deadline,
         };
         let end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
+        faults.add_incarnation(&inc, k, &end);
         digests.push(end.digest);
         traps += end.traps;
         switches += end.switches;
@@ -177,15 +150,15 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 refused.push(r);
             }
         }
-        let inj = injected(&inc, k);
-        nfaults += inj.len();
-        for f in inj {
-            if faults.len() == FAULTS_RECENT {
-                faults.pop_front();
-            }
-            faults.push_back(f);
-        }
         if end.verdict.class != "crash" {
+            // With crashes on, the operation log checks itself: replaying it must give the
+            // live tree of every incarnation. A difference is a tracker bug.
+            let mut verdict = end.verdict;
+            if o.plan.faults.crash_kind != CRASH_NONE {
+                if let Err(e) = self_check(out) {
+                    verdict = crate::outcome::Verdict::new("infra", e);
+                }
+            }
             let digest = if digests.len() == 1 {
                 format!("{:016x}", digests[0])
             } else {
@@ -193,7 +166,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 format!("{:016x}", proto::rec::hash_bytes(0x696e_6361_726e, &b))
             };
             return Ok(RunEnd {
-                verdict: end.verdict,
+                verdict,
                 seed: o.cfg.seed,
                 incarnations: k + 1,
                 digest,
@@ -202,8 +175,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 refused,
                 wall_ms: t0.elapsed().as_millis() as u64,
                 crashes,
-                faults_recent: faults.into(),
-                faults_count: nfaults,
+                faults: faults.json(&o.plan, &net),
                 io,
                 insn,
                 net,
@@ -234,10 +206,14 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             "tree_digest": tree.digest(),
             "paths": tree.nodes.len(),
         });
+        let mut what = None;
         if machine {
             c["model"] = json!(o.fs_model.name());
+            let live = Tree::read_archive(&inc.join("live.tree"))?;
+            what = Some(lost(&live, &tree));
         }
         crashes.push(c);
+        faults.add_crash(k, &kind, seq, vclock, what);
         if std::env::var_os("PATINA_TIMING").is_some() {
             // the launcher's crash work: build the next tree, write it, digest it.
             eprintln!(

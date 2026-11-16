@@ -160,12 +160,24 @@ pub const FLAGS: &[Flag] = &[
         "where threads are preempted: system calls and spin-waits, or also after N branches (needs CAP_PERFMON and a supported CPU)",
         RUNLIKE,
     ),
-    many("--fault", "KEY=VALUE", "one fault setting", RUNLIKE),
+    flag(
+        "--faults",
+        "NAME",
+        "off",
+        "fault preset: disk, net, all (or several: disk,net); its rates are ranges the seed resolves",
+        RUNLIKE,
+    ),
+    many(
+        "--fault",
+        "KEY=VALUE",
+        "one fault setting; replaces the preset's (keys below)",
+        RUNLIKE,
+    ),
     flag(
         "--crash",
-        "KIND:VALUE",
+        "KIND[:VALUE]",
         "off",
-        "crash and restart: machine:PERMILLE, process:PERMILLE, machine-at:SEQ, process-at:SEQ",
+        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3, may be A..B), machine-at:SEQ, process-at:SEQ",
         RUNLIKE,
     ),
     flag(
@@ -360,6 +372,9 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
                 s.push_str(&flag_text(f));
                 s.push('\n');
             }
+            if RUNLIKE.contains(&c) {
+                s.push_str(&crate::faults::help_text());
+            }
         }
     }
     s
@@ -399,6 +414,7 @@ pub fn help_json() -> String {
         "commands": cmds,
         "flags": flags,
         "outcomes": outcomes,
+        "faults": crate::faults::help_json(),
     }))
     .unwrap()
 }

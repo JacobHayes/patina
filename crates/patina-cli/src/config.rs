@@ -71,8 +71,12 @@ pub struct Config {
     /// Wall seconds.
     pub timeout: u64,
     pub tmpfs_bytes: u64,
-    /// `KEY=VALUE` fault settings, in order.
+    /// Fault presets (`--faults`, `[faults] preset`).
+    pub faults_preset: Vec<String>,
+    /// `KEY=VALUE` fault settings, in order; they replace a preset's.
     pub faults: Vec<String>,
+    /// `[faults] faults-in-recovery = false`: no faults other than crashes after a crash.
+    pub faults_in_recovery: bool,
     pub crash: Option<String>,
     /// Let SDK fault points fire (`--buggify`, `[sdk] buggify`).
     pub buggify: bool,
@@ -104,7 +108,9 @@ impl Default for Config {
             time_limit: 3600,
             timeout: 600,
             tmpfs_bytes: 256 << 20,
+            faults_preset: vec![],
             faults: vec![],
+            faults_in_recovery: true,
             crash: None,
             buggify: false,
             fs_model: Model::Ext4Ordered.name().into(),
@@ -365,6 +371,12 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
                 ("faults", "crash") => c.crash = Some(string(v, &at)?),
+                ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
+                ("faults", "faults-in-recovery") => {
+                    c.faults_in_recovery = v
+                        .as_bool()
+                        .ok_or_else(|| format!("{at}: expected true or false"))?
+                }
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
                 ("faults", "max-incarnations") => c.max_incarnations = int(v, &at)?,
                 ("faults", _) => c.faults.push(format!("{k}={}", scalar(v, &at)?)),
@@ -450,6 +462,9 @@ pub fn resolve(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }
+    if let Some(p) = a.last("--faults") {
+        c.faults_preset = vec![p.to_string()];
+    }
     c.faults.extend(a.all("--fault").iter().cloned());
     if let Some(cr) = a.last("--crash") {
         c.crash = Some(cr.to_string());
@@ -474,13 +489,13 @@ pub fn resolve(a: &Args) -> Res<Config> {
 impl Config {
     /// Check every setting and build the launcher's plan around an already resolved program.
     pub fn opts_with(&self, program: Program) -> Res<Opts> {
-        let mut plan = faults::Plan::new();
-        for kv in &self.faults {
-            faults::fault(&mut plan, kv)?;
-        }
-        if let Some(c) = &self.crash {
-            faults::crash(&mut plan.faults, c)?;
-        }
+        let mut plan = faults::resolve(
+            self.seed,
+            &self.faults_preset,
+            &self.faults,
+            self.crash.as_deref(),
+            self.faults_in_recovery,
+        )?;
         plan.sdk.buggify = self.buggify as _;
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
             format!(

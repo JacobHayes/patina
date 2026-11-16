@@ -17,4 +17,4 @@ v f6 946 --env FJ_N=2000 --env FJ_BUGGIFY=1 --crash machine:1 -- /guest/fjall-ha
 v f3 40 --env FJ_N=1000 --env FJ_BUGGIFY=1 --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --time-limit 400 \
     --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
 v f4 6 --fault fsync-error-at=61 --crash machine:3 -- /guest/fjall-harness-debug
-v f5 3 --fault short-permille=20 -- /guest/fjall-harness-debug
+v f5 3 --fault fs-short-permille=20 -- /guest/fjall-harness-debug

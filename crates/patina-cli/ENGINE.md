@@ -22,7 +22,7 @@ patina verify --seed 1 --runs 20 --vary cpu,load,aslr,sandbox -- ./prog
 patina log dump RUN/inc-0/boundary.log ; patina log diff A/inc-0/boundary.log B/inc-0/boundary.log
 patina log ops RUN/inc-0 ; patina log ops --check RUN
 patina table ; patina doctor
-patina run ... --fault fs-error-permille=100 --crash machine:20 --config patina.toml ...
+patina run ... --faults disk --fault fs-error-permille=0..20 --crash machine --config patina.toml ...
 ```
 
 `patina --help` lists every command, flag, outcome and exit status; `--help --format json`
@@ -38,7 +38,7 @@ input. The guest environment is fixed (`sup/mod.rs` `BASE_ENV`, which sets `PATI
 `PATINA_INCARNATION=K` after a restart and each `--env`.
 
 A run directory holds `run.json` (schema `patina.run/v1`: version, seed, the resolved
-configuration, the program's paths and SHA-256, host facts), `result.json` (schema
+configuration and fault plan, the program's paths and SHA-256, host facts), `result.json` (schema
 `patina.result/v3`: `outcome`, `stop`, `message`, `exit`, the guest's own exit or signal,
 `digest`, crashes, faults, `sdk`, refusals, labels, scheduling and counters; `result.rs`)
 and one `inc-K/` per incarnation (`boundary.log`, `oplog.meta`, `oplog.data`, `live.tree`,
@@ -140,10 +140,36 @@ conditions (`--vary repeat,cpu,load,aslr,sandbox,parallel,env,time`) and compare
 
 ## Faults, the operation log and crash models
 
-Faults are decided before the call (`patina-rt/src/inject.rs`; configuration in
-`patina-proto/src/faults.rs`): error, short transfer, delay, `ENOSPC`, memory. Each is a
-boundary record and an entry of `outcome.faults_injected`. Draws are keyed per fault class,
-so turning one class on does not move another's draws.
+**The plan** (`faults.rs`). Faults come from `--faults disk|net|all` (presets whose rates
+are ranges), `--fault KEY=VALUE` (which replaces a preset's value) and `--crash`; `patina run
+--help` prints the presets and every key. A value given as a range `A..B` is resolved from
+the seed by a draw on its own stream (`Stream::FaultPlan`) keyed by the setting's name, so
+adding or changing one setting never moves another's value or any other decision; `swarm=1`
+turns each configured class off with probability one half by the same kind of draw. The
+resolved plan is `run.json`'s `faults` and `result.json`'s `faults.plan`; `replay` refuses a
+run whose plan no longer resolves the same.
+
+**Decisions** are made before the call (`patina-rt/src/inject.rs`; configuration in
+`patina-proto/src/faults.rs`): error, short transfer, delay, `ENOSPC`, memory. The injector
+first names the call's object (`Obj`: a `/work` file or path, a pipe, a unix socket,
+memory; TCP sockets are the wire's), counts the call as eligible for each class that could
+act on it (`FaultCtl::eligible`), then draws, keyed by the trap's `seq` and the class, so
+turning one class on does not move another's draws. An injected errno comes only from
+`faults::errnos(obj, class)`, what Linux can return for that call on that object: pipes and
+unix sockets get short transfers and delays only, `close` fails only on a regular file, a
+finding made of an impossible errno is a Patina bug. Each injected fault is an `Injected`
+boundary record followed by a `Name` record holding its object (the `/work` path, or the
+object type). `mem-limit-mb=N` is a limit, not a draw: when a private writable mapping,
+`brk` or `mremap` would take the process's data size (`/proc/self/statm`, what
+`RLIMIT_DATA` limits; the runtime's own few MiB included) past N MiB, the call answers
+`ENOMEM`.
+
+**Attribution** (`launcher/attribution.rs`): `result.json`'s `faults` holds the plan, per
+configured class the calls it could act on and the faults it injected (`counts`; zero
+eligible means the class had nothing to act on), the total, and the last 20 events
+(`recent`: call, object, errno or size, virtual time, process and thread). A machine crash
+is an event too, naming the `/work` paths whose post-crash state differs from the live tree
+(`lost`). The human summary prints the last five under a finding.
 
 The operation log records every mutating call on `/work` with its data, sync-class calls,
 failed fsyncs and shared-mapping stores (`patina-proto/src/oplog.rs`,
@@ -155,7 +181,8 @@ a pure function of the log under `ext4-ordered` (`durability/model_ext4.rs`) or
 `posix-strict` (`durability/model_posix.rs`). File contents are sparse copy-on-write images
 (`durability/content.rs`); materialisation replays the log once and keeps a state at each
 forced commit. `patina log ops --check` replays the whole log and compares it with the exported
-live tree (`durability/check.rs`).
+live tree (`durability/check.rs`); every run with `--crash` ends with this check, and a
+difference ends it `internal`.
 
 ## The network wire (`sup/wire.rs`, `patina-rt/src/sys/inet.rs`, `patina-proto/src/wire.rs`)
 

@@ -13,7 +13,7 @@ for kv in "$@"; do
     case $k in
         tmpfs-bytes | time-limit | timeout | cpus) run="$run$k = $v
 " ;;
-        fs-model | max-incarnations) faults="$faults$k = $v
+        fs-model | max-incarnations | faults-in-recovery) faults="$faults$k = $v
 " ;;
         pmu-* | branches) sched="$sched$k = $v
 preempt = \"branches\"

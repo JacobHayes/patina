@@ -1,7 +1,8 @@
 /* ack-log: append a record, fsync it, then acknowledge it in an fsynced acks file. Every
  * fifth record, a checkpoint file is replaced by write-temp, fsync, rename, directory fsync.
  * On start, if state exists, every acknowledged record must be present (else it prints
- * "INVARIANT acked-record-lost" and exits 1), then it continues where it left off.
+ * "INVARIANT acked-record-lost" and exits 1), then it continues where it left off. Any
+ * failed open, read or write stops it (exit 0) without acknowledging more.
  *
  *   ack-log MODE [TOTAL]
  *     correct  as above; an fsync error stops the program before acknowledging
@@ -45,8 +46,13 @@ static char *slurp(const char *p, long *len) {
     struct stat st;
     fstat(fd, &st);
     char *b = calloc(1, st.st_size + 1);
-    long n = 0, r;
+    long n = 0, r = 0;
     while (n < st.st_size && (r = read(fd, b + n, st.st_size - n)) > 0) n += r;
+    if (r < 0) {
+        /* Recovery cannot judge what it cannot read: stop without acknowledging more. */
+        printf("read %s: %s: stopping\n", p, strerrorname_np(errno));
+        exit(0);
+    }
     close(fd);
     *len = n;
     return b;
@@ -73,8 +79,8 @@ static int open_new(const char *p) {
     int existed = exists(p);
     int fd = open(p, O_CREAT | O_RDWR, 0644);
     if (fd < 0) {
-        perror(p);
-        exit(2);
+        printf("open %s: %s: stopping\n", p, strerrorname_np(errno));
+        exit(0);
     }
     if (!existed && sync_fd(dirfd_) != 0) exit(0);
     return fd;

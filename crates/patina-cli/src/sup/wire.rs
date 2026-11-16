@@ -319,10 +319,12 @@ impl Sup {
         self.decide(code, 0, args, 0);
     }
 
-    /// An injected network fault: a boundary record of kind `Injected` written by the supervisor.
+    /// An injected network fault: a boundary record of kind `Injected` written by the
+    /// supervisor; `args[4]` is the connection's server port (the object, `tcp:PORT`).
     fn wire_inject(&mut self, kind: u64, nr: u32, value: u64, conn: u32) {
         let seq = self.ctl.seq.load(Relaxed) + 1;
         self.ctl.seq.store(seq, Relaxed);
+        let port = self.wire.conns.get(&conn).map_or(0, |c| c.sport as u64);
         let rec = proto::Rec {
             seq,
             vclock_ns: self.now(),
@@ -330,7 +332,7 @@ impl Sup {
             kind: proto::RecKind::Injected as u8,
             class: 0,
             nr,
-            args: [kind, 0, value, conn as u64, 0, 0],
+            args: [kind, 0, value, conn as u64, port, 0],
             ret: 0,
             out_hash: 0,
             in_hash: 0,
