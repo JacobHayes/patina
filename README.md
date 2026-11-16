@@ -11,8 +11,9 @@ special linking, any language.
 Patina is experimental. Linux x86_64 only. It needs `bwrap` (bubblewrap) and unprivileged
 user namespaces.
 
-Changes in 0.6: macOS, `patina test` and `patina campaign` are gone. Any executable runs as
-it is (`patina run -- ./prog`), and `patina sweep` runs many seeds.
+Changes in 0.7: a program rebuilt with coverage flags switches threads and moves the clock
+inside its own computation ([the guide](docs/GUIDE.md#deeper-search-rebuilt-code)), and
+`--log-limit` bounds how much a run may log.
 
 ## Install
 
