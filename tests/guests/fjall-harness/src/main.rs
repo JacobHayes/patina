@@ -1,5 +1,4 @@
-//! Crash-recovery harness for fjall, ported from the Patina trial
-//! (`trial-fjall/harness/src/main.rs`) to run as an ordinary binary under `patina`.
+//! Crash-recovery harness for fjall, an ordinary binary run under `patina run`.
 //!
 //! Incarnation 0 (no `ROOT/db` yet): create the db, commit batches that insert
 //! key i into two keyspaces atomically, and every few batches call
@@ -12,28 +11,25 @@
 //!  3. the key set is a prefix 0..n (no holes)
 //!  4. a second reopen gives the same contents (recovery is stable)
 //!
-//! Port (W9):
-//! - parameters come from the environment: `FJ_N` (default 300), `FJ_WORKERS`
+//! - Parameters come from the environment: `FJ_N` (default 300), `FJ_WORKERS`
 //!   (default 1), `FJ_PERSIST` (`buffer` = planted bug: acknowledge without fsync),
 //!   `FJ_LOG` (`1`: fjall's log at info and progress every 50 batches; `2`: every batch),
 //!   `FJ_ROOT` (default `/work/fjtest`; the native check points it at a copied tree),
-//!   `FJ_WIPE_PARTIAL=1` (the trial's workaround for finding F1: wipe a db without a
-//!   `version` marker and start over), `FJ_BUGGIFY=1` (enable the two buggify sites).
-//! - `always!(c, name)` prints `INVARIANT name` to stderr and exits 1.
-//! - `sometimes!` is gone (it only fed coverage reports).
-//! - `buggify!(site)`: when `FJ_BUGGIFY=1`, each site is active for the run with
-//!   probability 250/1000 and an active site fires with probability 250/1000 per
-//!   evaluation (the trial tool's defaults). The draws come from `getrandom`, which is
-//!   the tool's seeded entropy stream under `patina`.
-//! - An open that fails with an error that was not an injected I/O error reports
-//!   `INVARIANT open-after-crash` when recovering after a crash, `INVARIANT reopen-failed`
-//!   in the checks after writing; an iteration error reports `INVARIANT iterate-failed`
-//!   (the trial panicked in all three).
-//! - The trial's `fsync_dir("/tmp")` and `fsync_dir("/")` fsync the parent of the root.
-//! - "Injected" errors (UNJUDGED, exit 0) also include EMFILE, ENFILE and ENOMEM, which
-//!   this tool draws for `open`, and EDQUOT, which it draws for writes; an injected error
-//!   opening or reading the ack file is UNJUDGED too (the trial panicked there); so is one
-//!   creating the root or wiping a partial database.
+//!   `FJ_WIPE_PARTIAL=1` (a workaround for finding F1: wipe a db without a `version`
+//!   marker and start over).
+//! - Invariants are `patina_dst::always!`: under Patina a failure ends the run `violation`
+//!   with `label: detail`. Run natively (on a kept post-crash tree) the SDK is inert, so a
+//!   failure prints `INVARIANT label: detail` to stderr and exits 1.
+//! - Two fault points, `persist-now` (persist and acknowledge early) and `manual-flush`
+//!   (rotate keyspace a's memtable), are `patina_dst::buggify!`: they fire only under
+//!   `patina run --buggify`.
+//! - An open that fails with an error that was not an injected I/O error violates
+//!   `open-after-crash` when recovering after a crash, `reopen-failed` in the checks after
+//!   writing; an iteration error violates `iterate-failed`.
+//! - "Injected" errors (UNJUDGED, exit 0) are the errnos Patina's fault injection returns
+//!   (EIO, ENOSPC, EDQUOT, EMFILE, ENFILE, ENOMEM, EINTR); an injected error opening or
+//!   reading the ack file is UNJUDGED too, and so is one creating the root or wiping a
+//!   partial database.
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use std::fs::{File, OpenOptions};
@@ -44,42 +40,20 @@ fn param(name: &str) -> Option<String> {
     std::env::var(format!("FJ_{}", name.to_uppercase())).ok()
 }
 
-fn always(cond: bool, name: &str) {
-    if !cond {
-        eprintln!("INVARIANT {name}");
-        std::process::exit(1);
-    }
-}
-
-fn rand_u64() -> u64 {
-    let mut b = [0u8; 8];
-    let mut got = 0;
-    while got < 8 {
-        let r = unsafe { libc::getrandom(b[got..].as_mut_ptr().cast(), 8 - got, 0) };
-        if r > 0 {
-            got += r as usize;
-        } else if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            panic!("getrandom: {}", std::io::Error::last_os_error());
-        }
-    }
-    u64::from_le_bytes(b)
-}
-
-/// Buggify sites: activation is decided once per run per site, then each evaluation
-/// of an active site fires with probability 250/1000.
-fn buggify(site: &str) -> bool {
-    use std::collections::HashMap;
-    use std::sync::Mutex;
-    static ACTIVE: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
-    if param("buggify").as_deref() != Some("1") {
-        return false;
-    }
-    let active = {
-        let mut g = ACTIVE.lock().unwrap();
-        let m = g.get_or_insert_with(HashMap::new);
-        *m.entry(site.to_string()).or_insert_with(|| rand_u64() % 1000 < 250)
+/// An invariant: `check!(cond, "label")` or `check!(cond, "label", "fmt", args..)`.
+macro_rules! check {
+    ($cond:expr, $label:expr) => {
+        check!($cond, $label, "")
     };
-    active && rand_u64() % 1000 < 250
+    ($cond:expr, $label:expr, $($detail:tt)+) => {{
+        let ok: bool = $cond;
+        patina_dst::always!(ok, $label, $($detail)+);
+        if !ok {
+            // natively the SDK is inert: report and stop like any failed check
+            eprintln!("INVARIANT {}: {}", $label, format_args!($($detail)+));
+            std::process::exit(1);
+        }
+    }};
 }
 
 struct StderrLog;
@@ -118,11 +92,11 @@ fn fsync_dir(p: &Path) {
     }
 }
 
-/// Errnos the fault injector can return (EIO, ENOSPC, EINTR as in the trial, plus EMFILE,
-/// ENFILE and ENOMEM, which this tool also draws for `open`, and EDQUOT for writes): an
-/// open that fails with one of these cannot be judged.
+/// Errnos Patina's fault injection can return on a `/work` file or path (EIO, ENOSPC,
+/// EDQUOT, EMFILE, ENFILE, ENOMEM, and EINTR with `fs-eintr=1`): an operation that fails
+/// with one of these cannot be judged.
 fn is_injected_io(d: &str) -> bool {
-    ["code: 5,", "code: 28,", "code: 4,", "code: 24,", "code: 23,", "code: 12,", "code: 122,"]
+    ["code: 5,", "code: 28,", "code: 122,", "code: 24,", "code: 23,", "code: 12,", "code: 4,"]
         .iter()
         .any(|c| d.contains(c))
 }
@@ -132,9 +106,9 @@ fn unjudged(what: &str, e: std::io::Error) -> ! {
     std::process::exit(0);
 }
 
-/// `invariant`: what an open that fails with a non-injected error violates
-/// (`open-after-crash` when recovering a database a crash left, else `reopen-failed`).
-fn open(root: &Path, invariant: &str) -> (Database, Keyspace, Keyspace) {
+/// An open that fails with a non-injected error violates `open-after-crash` when
+/// recovering a database a crash left (`recovering`), else `reopen-failed`.
+fn open(root: &Path, recovering: bool) -> (Database, Keyspace, Keyspace) {
     match try_open(root) {
         Ok(x) => x,
         Err(e) => {
@@ -144,8 +118,10 @@ fn open(root: &Path, invariant: &str) -> (Database, Keyspace, Keyspace) {
                 eprintln!("UNJUDGED open hit injected I/O error: {d}");
                 std::process::exit(0);
             }
-            eprintln!("open db: {d}");
-            always(false, invariant);
+            if recovering {
+                check!(false, "open-after-crash", "open db: {d}");
+            }
+            check!(false, "reopen-failed", "open db: {d}");
             unreachable!()
         }
     }
@@ -201,8 +177,7 @@ fn snapshot(ks: &Keyspace) -> Vec<(u64, Vec<u8>)> {
                     eprintln!("UNJUDGED iterate hit injected I/O error: {d}");
                     std::process::exit(0);
                 }
-                eprintln!("iter: {d}");
-                always(false, "iterate-failed");
+                check!(false, "iterate-failed", "iter: {d}");
                 unreachable!()
             }
         };
@@ -214,8 +189,7 @@ fn snapshot(ks: &Keyspace) -> Vec<(u64, Vec<u8>)> {
 
 fn check(root: &Path, recovering: bool) -> usize {
     let acked = read_acked(root);
-    let inv = if recovering { "open-after-crash" } else { "reopen-failed" };
-    let (db, a, b) = open(root, inv);
+    let (db, a, b) = open(root, recovering);
     let sa = snapshot(&a);
     let sb = snapshot(&b);
     drop((a, b));
@@ -226,26 +200,26 @@ fn check(root: &Path, recovering: bool) -> usize {
     if keys_a != keys_b {
         eprintln!("A keys {keys_a:?}\nB keys {keys_b:?}");
     }
-    always(keys_a == keys_b, "batch-atomic-across-keyspaces");
+    check!(keys_a == keys_b, "batch-atomic-across-keyspaces", "a has {} keys, b has {}", keys_a.len(), keys_b.len());
     let prefix = keys_a.iter().enumerate().all(|(n, k)| *k == n as u64);
     if !prefix {
         eprintln!("A keys not a prefix: {keys_a:?}");
     }
-    always(prefix, "recovered-keys-are-prefix");
+    check!(prefix, "recovered-keys-are-prefix");
     let vals_ok = sa.iter().chain(sb.iter()).all(|(k, v)| *v == val(*k));
-    always(vals_ok, "recovered-values-correct");
+    check!(vals_ok, "recovered-values-correct");
     if let Some(h) = acked {
         let durable = keys_a.len() as u64 > h && keys_b.len() as u64 > h;
         if !durable {
             eprintln!("LOST ACKED: acked through {h}, a has {} b has {}", keys_a.len(), keys_b.len());
         }
-        always(durable, "acked-writes-survive");
+        check!(durable, "acked-writes-survive", "acked through {h}, a has {} b has {}", keys_a.len(), keys_b.len());
     }
     // recovery must be stable: reopen again and compare
-    let (db2, a2, b2) = open(root, "reopen-failed");
+    let (db2, a2, b2) = open(root, false);
     let sa2 = snapshot(&a2);
     let sb2 = snapshot(&b2);
-    always(sa2 == sa && sb2 == sb, "reopen-is-stable");
+    check!(sa2 == sa && sb2 == sb, "reopen-is-stable");
     drop((a2, b2));
     drop(db2);
     sa.len()
@@ -268,7 +242,7 @@ fn workload(root: &Path, start: u64, n: u64) -> Result<(), String> {
         batch.insert(&a, key(i), val(i));
         batch.insert(&b, key(i), val(i));
         batch.commit().map_err(|e| format!("commit {i}: {e:?}"))?;
-        if i % 7 == 6 || buggify("persist-now") {
+        if i % 7 == 6 || patina_dst::buggify!("persist-now") {
             // planted-bug control: FJ_PERSIST=buffer acks without fsync
             let mode = if param("persist").as_deref() == Some("buffer") { PersistMode::Buffer } else { PersistMode::SyncAll };
             if log.as_deref() == Some("2") {
@@ -281,7 +255,7 @@ fn workload(root: &Path, start: u64, n: u64) -> Result<(), String> {
         if log.as_deref() == Some("2") {
             eprintln!("COMMITTED {i}");
         }
-        if buggify("manual-flush") {
+        if patina_dst::buggify!("manual-flush") {
             if log.as_deref() == Some("2") {
                 eprintln!("ROTATE {i}");
             }
@@ -341,7 +315,7 @@ fn main() {
         fsync_dir(root);
         if run_workload(root, 0, 100) {
             let have = check(root, false);
-            always(have == 100, "fresh-after-wipe-complete");
+            check!(have == 100, "fresh-after-wipe-complete", "{have} keys");
         }
         println!("wiped and rebuilt 0");
     } else if recovering {
@@ -351,7 +325,7 @@ fn main() {
             return;
         }
         let have2 = check(root, false);
-        always(have2 == have + 50, "post-recovery-writes-land");
+        check!(have2 == have + 50, "post-recovery-writes-land", "{have} then {have2} keys");
         println!("recovered {have} then {have2}");
     } else {
         if let Err(e) = std::fs::create_dir_all(root) {
@@ -362,7 +336,7 @@ fn main() {
             return;
         }
         let have = check(root, false);
-        always(have as u64 == n, "clean-run-complete");
+        check!(have as u64 == n, "clean-run-complete", "{have} of {n} keys");
         println!("clean run: {have} keys");
     }
 }

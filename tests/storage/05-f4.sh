@@ -1,13 +1,13 @@
 # 5. F4 (a failed journal fsync followed by a successful one loses batches from one keyspace
 # only), with --crash machine:3: fsync-error-at=50..80 x seeds 1-10 are searched, in that
-# order, for INVARIANT batch-atomic-across-keyspaces (a few cells of the 100 x 10 grid reach
+# order, for the violation batch-atomic-across-keyspaces (a few cells of the 100 x 10 grid reach
 # it). For the first such cell the kept tree of the incarnation before the failing one makes
 # the native harness fail the same way, and the same seed without the fault passes. The
 # cells depend on the schedule and the guest build, so this is an area check, not a quick one.
 #@ tier=area budget=30
 . "$(dirname "$0")/lib/common.inc"
 for n in $(seq 50 80); do
-    seeds=$(matches "f4-n$n" '^INVARIANT batch-atomic-across-keyspaces$' fjall-harness 1-10 -- \
+    seeds=$(matches "f4-n$n" '^batch-atomic-across-keyspaces: ' fjall-harness 1-10 -- \
         --fault "fsync-error-at=$n" --crash machine:3 -- /guest/fjall-harness-debug)
     for s in $seeds; do
         o=$RUNS/f4-n$n/run-$s

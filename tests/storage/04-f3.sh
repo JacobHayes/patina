@@ -6,7 +6,7 @@
 # check, not a quick one.
 #@ tier=area budget=30
 . "$(dirname "$0")/lib/common.inc"
-seeds=$(matches f3 'parked: .*wait=sleep deadline=' fjall-harness 1-100 -- --env FJ_N=1000 --env FJ_BUGGIFY=1 \
+seeds=$(matches f3 'parked: .*wait=sleep deadline=' fjall-harness 1-100 -- --env FJ_N=1000 --buggify \
     --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --time-limit 400 --fault fs-error-permille=3 --crash machine:2 \
     -- /guest/fjall-harness-debug)
 found=

@@ -16,7 +16,7 @@ chk() {
     echo "$name: $N seeds, $k incarnations, replay = live tree in every one"
 }
 chk fjall fjall-harness 1-$N -- --crash machine:3 -- /guest/fjall-harness-debug
-chk fjall-faults fjall-harness 1-$N -- --env FJ_BUGGIFY=1 --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
+chk fjall-faults fjall-harness 1-$N -- --buggify --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
 chk sqlite-delete c-sqlite 1-$N -- --crash machine:5 -- /guest/sqlite-dur delete full
 chk sqlite-wal c-sqlite 1-$N -- --crash machine:5 -- /guest/sqlite-dur wal full
 chk w1 rust-threads-files 1-$N -- --crash machine:5 -- /guest/rust-threads-files correct

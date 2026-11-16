@@ -366,3 +366,41 @@ Across hosts, a statically linked guest that reads no host file gives the same r
 CPU's XSAVE size is the same and it does not read `uname` or mountinfo; a dynamic guest
 also needs the same `/usr` and `/etc/ld.so.cache`, which in practice means the same image.
 Cross-host identity is not promised.
+
+## Acceptance: fjall
+
+fjall 3.1.13 under `tests/guests/fjall-harness` (invariants through `always!`, the two fault
+points through `buggify!`), built with plain `cargo build`, debug unless named. Run by hand
+with `patina sweep -j 6`, 2026-11-16, this host, patina 0.6.0-dev (`run.json` `version`;
+the binary has no `--version`). `H` is the harness binary. Rate = seeds whose report group
+has the finding's signature / seeds run.
+
+| Finding | Command | Rate | First seed | Sweep wall |
+|---|---|---|---|---|
+| clean, debug | `sweep --seeds 1..100 -- H` | 100/100 `ok` | - | 1.4 s |
+| clean, release | same, release build | 100/100 `ok` | - | 0.6 s |
+| F1 `open-after-crash` (EEXIST) | `--seeds 1..300 --crash machine:3` | 6/300 | 62 | 7.7 s |
+| F2 journal-entry assertion | `--seeds 1..2000 --buggify --env FJ_N=2000 --crash machine:1` | 0/2,000 | - | 66 s |
+| F2, `--cpus 24` | same | 0/2,000 | - | 70 s |
+| F2, `--cpus 24`, `pause-points = false` | same, seeds 1..6000 | 0/6,000 | - | 190 s |
+| F3 writer sleeps forever (`liveness`) | `--seeds 1..600 --fault fs-error-permille=3 --crash machine:2 --buggify --env FJ_N=1000 --env FJ_WIPE_PARTIAL=1 --env FJ_LOG=1 --time-limit 400` | 24/600 | 31 | 10.5 s |
+| F4 `batch-atomic-across-keyspaces` | `--seeds 1..10 --fault fsync-error-at=N --crash machine`, one sweep per N in 1..100 | 4/1,000 | N=35 seed 6 | 33 s |
+| F5 `iterate-failed`/`reopen-failed` (UnexpectedEof) | `--seeds 1..100 --fault fs-short-permille=20` | 59/100 | 3 | 1.5 s |
+| F6 `batch-atomic-across-keyspaces`, no fault but the crash | F2's sweeps | 0, 0, 2/6,000 | 2001 | (F2's) |
+
+- Attribution: every F1 run names `crash`, every F4 run `crash, fsync-error`, every F3 run
+  `fs-error`, every F5 run `fs-short`. The report names the class, not the crash kind.
+- `fsync-error-at=2..4` ends `open-after-crash` in 30 of 30 runs: a failed fsync inside the
+  first `Database::open` leaves the same unrecoverable partial database as F1.
+- F2 and F6 under the harness before it used the SDK (buggify drawn from `getrandom`), same
+  engine, `--cpus 24`, `pause-points = false`, seeds 1..2000: F2 3/2,000 (first 634), F6
+  1/2,000 (first 946). The SDK harness reaches F6 at that schedule at a similar rate, F2 not
+  in 6,000 seeds; nor with a `getrandom` call added at each fault point (0/2,000). At the
+  default schedule, `--fault buggify-permille=1000` gives F6 1/1,000 (seed 259), F2 0/1,000.
+- Replay: the first seed of F1, F3, F4, F5 and F6 replayed 5 times, each `identical` with the
+  same digest; `patina verify --runs 5 --vary cpu,load` identical for each, and for the old
+  harness's F2 seed 634 and F6 seed 946.
+- Per run, no faults, release, `sweep -j 1` over 100 seeds: 27.6 to 30.7 ms in two
+  measurements while other work shared the host (median `wall_ms` 23 to 27); debug 77 to 111 ms.
+  Patina 0.5.0: 27.6 ms (release). Throughput at `-j 6`: 160 to 173 runs/s release, 62 to 69
+  runs/s debug.

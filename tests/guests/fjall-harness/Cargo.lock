@@ -127,8 +127,8 @@ name = "fjall-harness"
 version = "0.1.0"
 dependencies = [
  "fjall",
- "libc",
  "log",
+ "patina-dst",
 ]
 
 [[package]]
@@ -248,6 +248,10 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "patina-dst"
+version = "0.6.0-dev"
 
 [[package]]
 name = "proc-macro2"

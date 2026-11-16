@@ -8,6 +8,6 @@ for b in debug release; do
     [ "$(count clean-$b ok)" = 40 ] || die "clean $b: not all ok ($(tail -1 "$RUNS/clean-$b.table"))"
 done
 sweep process3 fjall-harness 1-40 -- --crash process:3 -- /guest/fjall-harness-debug >/dev/null
-other=$(awk -F'\t' 'NR>1 && $2!="ok" && $3!="INVARIANT open-after-crash"' "$RUNS/process3/summary.tsv" | wc -l)
+other=$(awk -F'\t' 'NR>1 && $2!="ok" && $3!~/^open-after-crash: /' "$RUNS/process3/summary.tsv" | wc -l)
 [ "$other" = 0 ] || die "process:3: $other failures other than F1"
 tables
