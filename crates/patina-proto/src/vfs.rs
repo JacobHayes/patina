@@ -28,6 +28,19 @@ pub const MISSING_LEN: usize = 256;
 /// The first byte of a missing entry: what the guest tried to do with the path.
 pub const MISSING_EXEC: u8 = b'x';
 pub const MISSING_OPEN: u8 = b'o';
+/// Guest paths the sandbox makes itself: a path under one is never the host's. (`/tmp` is
+/// the sandbox's too, but a host path under it can be mounted there: only `/tmp` itself is.)
+/// A file missing under one is not kept (a program probes many there); a program is (one run by
+/// name, looked for along PATH).
+pub const SANDBOX_ROOTS: [&str; 12] = [
+    "/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/proc", "/sys", "/dev", "/work", "/guest",
+    "/.patina",
+];
+
+/// Is `p` `dir` or under it?
+pub fn under(p: &[u8], dir: &[u8]) -> bool {
+    p == dir || (p.starts_with(dir) && p.get(dir.len()) == Some(&b'/'))
+}
 
 /// Times of one sandbox inode, realtime nanoseconds. `key` 0 is an empty entry.
 #[repr(C)]
@@ -95,6 +108,11 @@ impl Vfs {
     /// Record a missing path once (first-seen order).
     pub fn miss(&mut self, what: u8, path: &[u8]) {
         if path.len() + 1 >= MISSING_LEN || path.first() != Some(&b'/') {
+            return;
+        }
+        if what != MISSING_EXEC
+            && (path == b"/tmp" || SANDBOX_ROOTS.iter().any(|r| under(path, r.as_bytes())))
+        {
             return;
         }
         let n = (self.missing_used as usize).min(MISSING_CAP);

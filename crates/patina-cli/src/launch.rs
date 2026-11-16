@@ -254,12 +254,7 @@ pub struct IncEnd {
     pub crash_points: u64,
 }
 
-/// Guest paths the sandbox makes itself: a path under one is never the host's. (`/tmp` is
-/// the sandbox's too, but a host path under it can be mounted there: only `/tmp` itself is.)
-pub const SANDBOX_ROOTS: [&str; 12] = [
-    "/usr", "/bin", "/lib", "/lib64", "/sbin", "/etc", "/proc", "/sys", "/dev", "/work", "/guest",
-    "/.patina",
-];
+pub use proto::vfs::SANDBOX_ROOTS;
 
 fn under(p: &str, dir: &str) -> bool {
     p == dir || p.strip_prefix(dir).is_some_and(|r| r.starts_with('/')) || dir == "/"

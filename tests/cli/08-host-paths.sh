@@ -41,10 +41,13 @@ prun "$d/found" --seed 1 --mount "$mount:$mount" -- /bin/cat "$d/data/x"
 [ "$(field "$d/found/result.json" missing)" = "[]" ] || die "mounted, still missing: $(field "$d/found/result.json" missing)"
 echo "a missing host file is named with $mount to mount; mounted, the run passes"
 
-# A program run by name that is not on the guest's PATH: named, with the host's.
+# A program run by name that is not on the guest's PATH: named, with the host's, after the
+# guest has looked for many files of the sandbox's own that it lacks (as an interpreter does).
 st=0
-PATH="$d/hostbin:$PATH" timeout 60 "$PATINA" run --seed 1 --out "$d/named" -- /usr/bin/python3 -c \
-    'import subprocess; subprocess.run(["mytool"])' >"$d/named.txt" 2>&1 || st=$?
+PATH="$d/hostbin:$PATH" timeout 60 "$PATINA" run --seed 1 --out "$d/named" -- /usr/bin/python3 -c '
+import os, subprocess
+for i in range(100): os.path.exists(f"/usr/lib/no-such-{i}")
+subprocess.run(["mytool"])' >"$d/named.txt" 2>&1 || st=$?
 python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1]))["missing"]
 sys.exit(0 if any(x.get("name") == "mytool" and x.get("host") == sys.argv[2] for x in m) else 1)' \
     "$d/named/result.json" "$d/hostbin/mytool" || die "a program run by name: $(field "$d/named/result.json" missing)"
