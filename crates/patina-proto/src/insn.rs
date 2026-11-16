@@ -325,9 +325,32 @@ fn is_pause(code: &[u8], off: usize) -> bool {
     off + 1 < code.len() && code[off] == 0xf3 && code[off + 1] == 0x90
 }
 
-/// Call `f` with every candidate offset in `code`.
+/// Call `f` with every candidate offset in `code`, in order.
 pub fn candidates(code: &[u8], mut f: impl FnMut(usize)) {
+    // Eight offsets at a time: `w` holds the bytes at them, `n` the bytes after them, and a
+    // byte of `eq(w, a) & eq(n, b)` is set where the pair `a b` starts. Only `0F C7` and
+    // `F3 90` can start a candidate; offsets so marked get the full test.
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    // The high bit of each byte of `x` that equals `b`, exactly.
+    let eq = |x: u64, b: u64| {
+        let t = x ^ (b * LO);
+        !(((t & !HI) + !HI) | t) & HI
+    };
     let mut i = 0;
+    while i + 9 <= code.len() {
+        let w = u64::from_le_bytes(code[i..i + 8].try_into().unwrap());
+        let n = u64::from_le_bytes(code[i + 1..i + 9].try_into().unwrap());
+        let mut m = (eq(w, 0x0f) & eq(n, 0xc7)) | (eq(w, 0xf3) & eq(n, 0x90));
+        while m != 0 {
+            let j = i + (m.trailing_zeros() / 8) as usize;
+            if is_candidate(code, j) {
+                f(j);
+            }
+            m &= m - 1;
+        }
+        i += 8;
+    }
     while i + 1 < code.len() {
         if is_candidate(code, i) {
             f(i);
@@ -468,6 +491,44 @@ mod tests {
         });
         assert_eq!(&c[..n], &[3]);
         assert_eq!(confirm(&code, 0, 3), Verdict::Inside { at: 1 });
+    }
+
+    #[test]
+    fn candidates_are_every_matching_offset() {
+        // Pseudo-random bytes rich in 0F, C7, F3 and 90, at every alignment and length.
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let pick = [0x0f, 0xc7, 0xf3, 0x90, 0xf0, 0xf8, 0x00, 0x48];
+        let mut bytes = [0u8; 4096];
+        for b in bytes.iter_mut() {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *b = pick[(x % 8) as usize];
+        }
+        for start in 0..9 {
+            for end in [start, start + 1, start + 2, start + 9, start + 17, 4096] {
+                let code = &bytes[start..end];
+                // Every offset reported is a candidate, in order, and none is missed.
+                let mut next = 0;
+                candidates(code, |o| {
+                    assert!(o >= next, "start {start} end {end}: {o} out of order");
+                    for m in next..o {
+                        assert!(
+                            !is_candidate(code, m),
+                            "start {start} end {end}: {m} missed"
+                        );
+                    }
+                    assert!(is_candidate(code, o));
+                    next = o + 1;
+                });
+                for m in next..code.len() {
+                    assert!(
+                        !is_candidate(code, m),
+                        "start {start} end {end}: {m} missed"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
