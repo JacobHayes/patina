@@ -48,7 +48,7 @@ leg() {
 net="--fault net-delay-ms=0..40 --fault net-chunk-max=16..4096 --fault net-halfclose-delay-ms=0..20"
 # shellcheck disable=SC2086
 leg clean clean $net -- "$bin"
-leg lost-wakeup "failure exit: exit 1" -- "$bin" --bug lost-wakeup --timeout-secs 10
+leg lost-wakeup "failure exit: PUBSUB_FAILURE not-converged" -- "$bin" --bug lost-wakeup --timeout-secs 10
 leg drop-read-remainder "always: seq-gap" -- "$bin" --bug drop-read-remainder
 leg stale-timeout "always: liveness-timeout" -- "$bin" --bug stale-timeout
 exit $fail
