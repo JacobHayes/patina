@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::state::config;
-use proto::{fill, Stream};
+use proto::{fill_from, Stream};
 
 const NS: u64 = 1_000_000_000;
 
@@ -18,8 +18,7 @@ fn sysinfo(p: u64) -> i64 {
     b[40..48].copy_from_slice(&(12u64 << 30).to_le_bytes()); // freeram
     b[80..82].copy_from_slice(&1u16.to_le_bytes()); // procs
     b[104..108].copy_from_slice(&1u32.to_le_bytes()); // mem_unit
-    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), p as *mut u8, 112) };
-    0
+    crate::guest::write(p, &b).err().unwrap_or(0)
 }
 
 /// struct rusage (144 bytes): user time is the thread's trap charges, everything else 0.
@@ -39,8 +38,29 @@ fn getrusage(call: &mut dyn Call) -> i64 {
     let mut w = [0u64; 18];
     w[0] = ns / NS;
     w[1] = ns % NS / 1000;
-    unsafe { core::ptr::copy_nonoverlapping(w.as_ptr() as *const u8, p as *mut u8, 144) };
-    0
+    crate::guest::put(p, w).err().unwrap_or(0)
+}
+
+/// Write `len` bytes of the entropy stream for draw `seq` to guest memory at `buf`: `len`,
+/// the bytes written before a fault, or `-EFAULT`.
+pub fn write_entropy(seq: u64, buf: u64, len: u64) -> i64 {
+    let mut off = 0u64;
+    let mut chunk = [0u8; 512];
+    while off < len {
+        let k = (len - off).min(chunk.len() as u64) as usize;
+        fill_from(
+            config().seed,
+            Stream::Entropy,
+            seq,
+            off / 8,
+            &mut chunk[..k],
+        );
+        if let Err(e) = crate::guest::write(buf + off, &chunk[..k]) {
+            return if off == 0 { e } else { off as i64 };
+        }
+        off += k as u64;
+    }
+    len as i64
 }
 
 pub fn handle(call: &mut dyn Call) -> Action {
@@ -50,24 +70,22 @@ pub fn handle(call: &mut dyn Call) -> Action {
             if buf == 0 && len != 0 {
                 return Action::Return(-e::EFAULT);
             }
-            let seq = call.thread().seq;
-            let s = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
-            fill(config().seed, Stream::Entropy, seq, s);
-            len as i64
+            write_entropy(call.thread().seq, buf, len)
         }
         99 => sysinfo(call.arg(0)),
         98 => getrusage(call),
         // get_mempolicy: the default policy, no nodes.
         239 => {
             let (mode, mask, maxnode) = (call.arg(0), call.arg(1), call.arg(2));
-            if mode != 0 {
-                unsafe { *(mode as *mut i32) = 0 };
-            }
-            if mask != 0 && maxnode != 0 {
-                let bytes = maxnode.div_ceil(64) * 8;
-                unsafe { core::ptr::write_bytes(mask as *mut u8, 0, bytes as usize) };
-            }
-            0
+            let r = if mode != 0 { put(mode, 0i32) } else { Ok(()) };
+            let r = r.and_then(|()| {
+                if mask != 0 && maxnode != 0 {
+                    crate::guest::zero(mask, (maxnode.div_ceil(64) * 8) as usize)
+                } else {
+                    Ok(())
+                }
+            });
+            r.err().unwrap_or(0)
         }
         // Supplementary groups: the launcher's are inherited and cannot be dropped
         // without a capability (unmapped ones read as the overflow id, so their number shows).

@@ -391,11 +391,9 @@ fn sigpending(call: &mut dyn Call) -> i64 {
     let ts = call.thread();
     let p = slot_of(ts).sigpend.load(Relaxed) & ts.vmask;
     let b = p.to_le_bytes();
-    if set == 0 {
-        return -e::EFAULT;
-    }
-    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), set as *mut u8, size as usize) };
-    0
+    crate::guest::write(set, &b[..size as usize])
+        .err()
+        .unwrap_or(0)
 }
 
 fn sigtimedwait(call: &mut dyn Call) -> i64 {
@@ -560,7 +558,10 @@ fn restart_syscall(call: &mut dyn Call) -> i64 {
             }
         }
         RB_FUTEX => {
-            let cur = unsafe { core::ptr::read_volatile(rb[1] as *const u32) };
+            let cur = match crate::guest::get::<u32>(rb[1]) {
+                Ok(v) => v,
+                Err(r) => return r,
+            };
             if cur != rb[2] as u32 {
                 return -e::EAGAIN;
             }

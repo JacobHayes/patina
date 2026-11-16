@@ -67,7 +67,7 @@ fn path_args(nr: u64, a: &[u64; 6]) -> ([Arg; 2], usize) {
             // openat2: the guest's own resolve flags stay in force (RESOLVE_BENEATH and
             // RESOLVE_IN_ROOT refuse absolute paths): such calls are only checked.
             let flags = if a[2] != 0 && a[3] >= 24 {
-                unsafe { *(a[2] as *const u64) }
+                crate::guest::get::<u64>(a[2]).unwrap_or(0)
             } else {
                 0
             };
@@ -118,7 +118,8 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
         if p == 0 {
             continue;
         }
-        let s = unsafe { crate::loader::cstr(p as *const u8) };
+        // A pointer the kernel could not read is its EFAULT, before any walk.
+        let s = crate::guest::cstr(p, PATH_MAX)?;
         if s.is_empty() || s.len() >= PATH_MAX {
             continue; // AT_EMPTY_PATH (the descriptor), ENOENT or ENAMETOOLONG from the kernel
         }
@@ -127,7 +128,7 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
             None => AT_FDCWD,
         };
         let check_only =
-            nr == 437 && a[2] != 0 && a[3] >= 24 && unsafe { *((a[2] + 16) as *const u64) } != 0;
+            nr == 437 && a[2] != 0 && a[3] >= 24 && crate::guest::get::<u64>(a[2] + 16)? != 0;
         let out = &mut bufs[k];
         match resolve(dirfd, s, arg.follow, out)? {
             Resolved::Same => continue,

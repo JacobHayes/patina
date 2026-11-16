@@ -2,20 +2,16 @@
 
 use super::fs::{after_mutation, fstat_raw, vkey, Data, FsOp};
 use super::*;
-use crate::state::{config, proc};
+use crate::state::proc;
 use crate::vtime::{self, Which};
 use proto::layout::FD_HIDDEN_MIN;
-use proto::{fill, Stream};
 
 fn entropy(call: &mut dyn Call, buf: u64, len: u64) -> i64 {
     set_class(call, Class::Virt);
     if buf == 0 {
         return -e::EFAULT;
     }
-    let seq = call.thread().seq;
-    let s = unsafe { core::slice::from_raw_parts_mut(buf as *mut u8, len as usize) };
-    fill(config().seed, Stream::Entropy, seq, s);
-    len as i64
+    super::misc::write_entropy(call.thread().seq, buf, len)
 }
 
 fn readv_entropy(call: &mut dyn Call) -> i64 {
@@ -24,10 +20,17 @@ fn readv_entropy(call: &mut dyn Call) -> i64 {
     let seq = call.thread().seq;
     let mut total = 0u64;
     for i in 0..cnt.min(1024) {
-        let [base, len] = unsafe { *((iov + i * 16) as *const [u64; 2]) };
-        let s = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, len as usize) };
-        fill(config().seed, Stream::Entropy, seq.wrapping_add(i << 48), s);
-        total += len;
+        let Ok([base, len]) = get::<[u64; 2]>(iov + i * 16) else {
+            return if total == 0 { -e::EFAULT } else { total as i64 };
+        };
+        let r = super::misc::write_entropy(seq.wrapping_add(i << 48), base, len);
+        if r < 0 {
+            return if total == 0 { r } else { total as i64 };
+        }
+        total += r as u64;
+        if (r as u64) < len {
+            break;
+        }
     }
     total as i64
 }

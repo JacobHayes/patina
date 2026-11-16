@@ -19,6 +19,6 @@ pub mod vfs;
 pub mod wire;
 
 pub use ctl::{Config, Ctl, Op, Reply, Request, Slot};
-pub use draw::{draw, fill, Stream};
+pub use draw::{draw, fill, fill_from, Stream};
 pub use rec::{Rec, RecKind};
 pub use table::{row, Class, Group, Len, Out, Row, Strength};

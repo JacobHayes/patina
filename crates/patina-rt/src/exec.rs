@@ -310,17 +310,26 @@ pub fn resolve(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<()
     }
 }
 
+/// The kernel's limit on one argument or environment string.
+const MAX_ARG_STRLEN: usize = 32 * 4096;
+
+/// The number of strings in a NULL-terminated vector.
 fn count(v: u64) -> Result<usize, i64> {
     if v == 0 {
         return Ok(0);
     }
     let mut n = 0;
-    unsafe {
-        while *((v + 8 * n as u64) as *const u64) != 0 {
-            n += 1;
-            if n > MAX_ARGS {
-                return Err(-e::E2BIG);
-            }
+    // Every string is checked readable here, before the point of no return: the kernel's
+    // EFAULT for one it cannot read must be the guest's answer, not a failed re-execution.
+    loop {
+        let s = crate::guest::get::<u64>(v + 8 * n as u64)?;
+        if s == 0 {
+            break;
+        }
+        crate::guest::strlen(s, MAX_ARG_STRLEN)?;
+        n += 1;
+        if n > MAX_ARGS {
+            return Err(-e::E2BIG);
         }
     }
     Ok(n)
@@ -340,7 +349,10 @@ pub fn execve(call: &mut dyn Call) -> Action {
     if flags & !(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW) != 0 {
         return Action::Return(-e::EINVAL);
     }
-    let path = unsafe { crate::loader::cstr(p as *const u8) };
+    let path = match crate::guest::cstr(p, crate::path::PATH_MAX) {
+        Ok(s) => s,
+        Err(r) => return Action::Return(r),
+    };
     if path.is_empty() && flags & AT_EMPTY_PATH == 0 {
         return Action::Return(-e::ENOENT);
     }
@@ -356,7 +368,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
     }
     let (nargs, nenv) = match (count(argv), count(envp)) {
         (Ok(a), Ok(e)) => (a, e),
-        _ => return Action::Return(-e::E2BIG),
+        (Err(r), _) | (_, Err(r)) => return Action::Return(r),
     };
     // The new argument vector: [rt, image, (#! prefix, innermost interpreter first), argv[1..]].
     let mut v = [0u64; MAX_ARGS + 4 + 3 * MAX_DEPTH];
@@ -379,7 +391,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
         v[n] = t.levels[0][2].as_ptr() as u64;
         n += 1;
         for i in 1..nargs {
-            v[n] = unsafe { *((argv + 8 * i as u64) as *const u64) };
+            v[n] = crate::guest::get::<u64>(argv + 8 * i as u64).unwrap_or(0);
             n += 1;
         }
     } else {
@@ -389,7 +401,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
             n += 1;
         }
         for i in 0..nargs {
-            v[n] = unsafe { *((argv + 8 * i as u64) as *const u64) };
+            v[n] = crate::guest::get::<u64>(argv + 8 * i as u64).unwrap_or(0);
             n += 1;
         }
     }

@@ -8,6 +8,7 @@ mod cmem;
 mod entry;
 mod exec;
 mod fault;
+mod guest;
 mod inject;
 mod insn;
 mod loader;

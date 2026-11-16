@@ -190,11 +190,13 @@ fn on_work(st: &Option<St>) -> bool {
     st.as_ref().is_some_and(|s| path::is_work(s[0]))
 }
 
+/// A guest path argument (`resolve::prepare` has already answered EFAULT for one that
+/// cannot be read; anything else unreadable reads as empty).
 unsafe fn cs<'a>(p: u64) -> &'a [u8] {
     if p == 0 {
         &[]
     } else {
-        crate::loader::cstr(p as *const u8)
+        crate::guest::cstr(p, 4096).unwrap_or(&[])
     }
 }
 
@@ -396,7 +398,10 @@ fn open(call: &mut dyn Call) -> i64 {
             if a[2] == 0 || a[3] < 24 {
                 return -e::EINVAL;
             }
-            unsafe { *(a[2] as *const u64) }
+            match get::<u64>(a[2]) {
+                Ok(f) => f,
+                Err(r) => return r,
+            }
         }
     };
     let dirfd = dirfd_arg(call, di);
@@ -429,7 +434,11 @@ fn open(call: &mut dyn Call) -> i64 {
         match nr {
             2 => a[1] = flags,
             257 => a[2] = flags,
-            437 => unsafe { *(a[2] as *mut u64) = flags },
+            437 => {
+                if let Err(r) = put(a[2], flags) {
+                    return r;
+                }
+            }
             _ => {}
         }
     }

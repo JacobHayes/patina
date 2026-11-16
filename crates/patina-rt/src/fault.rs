@@ -1,6 +1,7 @@
 //! Synchronous faults: real SIGSEGV, SIGILL, SIGBUS, SIGFPE and SIGTRAP arrive at
-//! `on_fault` on the runtime's alternate stack. In order: a fault in runtime code (or on
-//! runtime memory) is a runtime defect (`infra`); then the chain of instruction emulators;
+//! `on_fault` on the runtime's alternate stack. In order: a fault in a guest copy
+//! (`guest.rs`) returns `EFAULT` from it; any other fault in runtime code (or on runtime
+//! memory) is a runtime defect (`infra`); then the chain of instruction emulators;
 //! then the guest's virtual disposition: a handler gets a frame built by
 //! `sigframe::deliver` with the kernel's siginfo, the default action terminates.
 
@@ -32,6 +33,13 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
         return;
     }
     if in_runtime(rip) {
+        // A guest pointer the runtime was copying through: the copy returns EFAULT.
+        if matches!(sig as u64, sig::SIGSEGV | sig::SIGBUS) {
+            if let Some(to) = crate::guest::fixup(rip) {
+                frame.gregs[RIP] = to;
+                return;
+            }
+        }
         if crate::pmu::is_race(rip) {
             // Delivered on top of the overflow signal: the instruction faults again.
             crate::pmu::note_race();

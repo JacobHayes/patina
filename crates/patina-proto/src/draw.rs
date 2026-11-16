@@ -37,9 +37,16 @@ pub const fn draw(seed: u64, stream: Stream, seq: u64) -> u64 {
 
 /// Fill `buf` with bytes derived from one draw: word `i` is `mix64(draw + i * golden)`.
 pub fn fill(seed: u64, stream: Stream, seq: u64, buf: &mut [u8]) {
+    fill_from(seed, stream, seq, 0, buf)
+}
+
+/// The bytes of `fill` from word `word0` on: a buffer filled in pieces, each starting at a
+/// multiple of 8 bytes, reads as one `fill`.
+pub fn fill_from(seed: u64, stream: Stream, seq: u64, word0: u64, buf: &mut [u8]) {
     let base = draw(seed, stream, seq);
     for (i, chunk) in buf.chunks_mut(8).enumerate() {
-        let w = mix64(base.wrapping_add((i as u64 + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
+        let i = word0 + i as u64;
+        let w = mix64(base.wrapping_add((i + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15)));
         let b = w.to_le_bytes();
         chunk.copy_from_slice(&b[..chunk.len()]);
     }

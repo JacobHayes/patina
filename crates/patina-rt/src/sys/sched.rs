@@ -29,7 +29,7 @@ fn word(addr: u64) -> Result<u32, i64> {
     if addr & 3 != 0 {
         return Err(-e::EINVAL);
     }
-    Ok(unsafe { core::ptr::read_volatile(addr as *const u32) })
+    crate::guest::get::<u32>(addr)
 }
 
 /// Count argument of a wake (an `int` in the kernel; negative means none).
@@ -207,7 +207,9 @@ fn wake_op(uaddr: u64, n: u64, uaddr2: u64, n2: u64, enc: u32) -> i64 {
         5 => o >= cmparg,
         _ => return -e::ENOSYS,
     };
-    unsafe { core::ptr::write_volatile(uaddr2 as *mut u32, new) };
+    if let Err(r) = crate::guest::put(uaddr2, new) {
+        return r;
+    }
     let n2 = if pass { n2 } else { 0 };
     crate::sup::call_sup(
         Op::FutexWake,
@@ -238,19 +240,19 @@ pub fn handle(call: &mut dyn Call) -> Action {
             } else {
                 let n = config().cpu_count.clamp(1, 64);
                 let bits = if n == 64 { u64::MAX } else { (1u64 << n) - 1 };
-                let _ = put(mask, bits);
-                8
+                match put(mask, bits) {
+                    Ok(()) => 8,
+                    Err(r) => r,
+                }
             }
         }
         203 => 0,
         309 => {
-            if call.arg(0) != 0 {
-                let _ = put(call.arg(0), 0u32);
-            }
-            if call.arg(1) != 0 {
-                let _ = put(call.arg(1), 0u32);
-            }
-            0
+            let one = |p: u64| if p != 0 { put(p, 0u32) } else { Ok(()) };
+            one(call.arg(0))
+                .and_then(|()| one(call.arg(1)))
+                .err()
+                .unwrap_or(0)
         }
         202 => futex(call),
         56 => {

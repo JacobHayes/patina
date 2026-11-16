@@ -173,18 +173,4 @@ pub fn host_check(call: &dyn Call, r: i64) {
     }
 }
 
-/// Write `v` to guest memory (null pointer: EFAULT).
-pub fn put<T: Copy>(p: u64, v: T) -> Result<(), i64> {
-    if p == 0 {
-        return Err(-e::EFAULT);
-    }
-    unsafe { core::ptr::write_unaligned(p as *mut T, v) };
-    Ok(())
-}
-
-pub fn get<T: Copy>(p: u64) -> Result<T, i64> {
-    if p == 0 {
-        return Err(-e::EFAULT);
-    }
-    Ok(unsafe { core::ptr::read_unaligned(p as *const T) })
-}
+pub use crate::guest::{get, put};

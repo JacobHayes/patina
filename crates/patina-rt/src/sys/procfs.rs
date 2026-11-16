@@ -763,8 +763,7 @@ pub fn fake_stat(k: Synth, p: u64) -> i64 {
     for i in [9, 11, 13] {
         st[i] = t / 1_000_000_000;
     }
-    unsafe { core::ptr::copy_nonoverlapping(st.as_ptr() as *const u8, p as *mut u8, 144) };
-    0
+    crate::guest::put(p, st).err().unwrap_or(0)
 }
 
 /// `struct statx` of a synthesised file.
@@ -795,8 +794,7 @@ pub fn fake_statx(k: Synth, p: u64) -> i64 {
         .map(|i| i as u64 + 1)
         .unwrap_or(0);
     put64(&mut b, 144, idx);
-    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), p as *mut u8, 256) };
-    0
+    crate::guest::write(p, &b).err().unwrap_or(0)
 }
 
 /// `struct statfs` of `/proc`: constants.
@@ -807,8 +805,7 @@ pub fn fake_statfs(p: u64) -> i64 {
     w[8] = 255;
     w[9] = 4096;
     w[10] = 0x26; // ST_NOSUID|ST_NODEV|ST_NOEXEC|ST_RELATIME... as proc reports
-    unsafe { core::ptr::copy_nonoverlapping(w.as_ptr() as *const u8, p as *mut u8, 120) };
-    0
+    crate::guest::put(p, w).err().unwrap_or(0)
 }
 
 /// getdents on a `/proc` directory handed out by the policy: inode numbers become virtual.

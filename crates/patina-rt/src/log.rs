@@ -64,8 +64,13 @@ pub fn append(rec: &Rec) {
         .store(chain(c.log_hash.load(Relaxed), rec), Relaxed);
 }
 
-unsafe fn bytes<'a>(p: u64, n: u64) -> &'a [u8] {
-    core::slice::from_raw_parts(p as *const u8, n as usize)
+/// Hash `n` guest bytes at `p`. Memory the guest named but cannot be read (a call that wrote
+/// nothing through a dangling pointer, as `getgroups(0, p)`) hashes as a marker: the runtime
+/// never faults on a guest pointer (`guest.rs`).
+fn hash_guest(h: &mut Hasher, p: u64, n: u64) {
+    if crate::guest::each(p, n, |b| h.update(b)).is_err() {
+        h.update(b"\0EFAULT");
+    }
 }
 
 /// Hash the guest buffers described by `bufs` (output side: after the call).
@@ -79,38 +84,42 @@ pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
         if p == 0 {
             continue;
         }
-        unsafe {
-            match b.len {
-                Len::Ret => h.update(bytes(p, ret as u64)),
-                Len::Arg(i) => h.update(bytes(p, args[i as usize])),
-                Len::Fixed(n) => h.update(bytes(p, n as u64)),
-                Len::RetTimes(n) => h.update(bytes(p, ret as u64 * n as u64)),
-                Len::ArgTimes { arg, size } => h.update(bytes(p, args[arg as usize] * size as u64)),
-                Len::CStr => {
-                    let mut n = 0;
-                    while n < 4096 && *((p + n) as *const u8) != 0 {
-                        n += 1;
-                    }
-                    h.update(bytes(p, n));
-                }
-                Len::IovRet { .. } | Len::MsgIovRet => {
-                    let mut left = ret as u64;
-                    let (iov, n) = match b.len {
-                        Len::IovRet { cnt } => (p as *const [u64; 2], args[cnt as usize]),
-                        _ => (
-                            *((p + 16) as *const u64) as *const [u64; 2],
-                            *((p + 24) as *const u64),
-                        ),
-                    };
-                    for i in 0..n.min(1024) {
-                        if left == 0 {
-                            break;
+        match b.len {
+            Len::Ret => hash_guest(&mut h, p, ret as u64),
+            Len::Arg(i) => hash_guest(&mut h, p, args[i as usize]),
+            Len::Fixed(n) => hash_guest(&mut h, p, n as u64),
+            Len::RetTimes(n) => hash_guest(&mut h, p, ret as u64 * n as u64),
+            Len::ArgTimes { arg, size } => hash_guest(&mut h, p, args[arg as usize] * size as u64),
+            Len::CStr => match crate::guest::strlen(p, 4096) {
+                Ok(n) => hash_guest(&mut h, p, n as u64),
+                Err(_) => h.update(b"\0EFAULT"),
+            },
+            Len::IovRet { .. } | Len::MsgIovRet => {
+                let mut left = ret as u64;
+                let (iov, n) = match b.len {
+                    Len::IovRet { cnt } => (p, args[cnt as usize]),
+                    _ => match (
+                        crate::guest::get::<u64>(p + 16),
+                        crate::guest::get::<u64>(p + 24),
+                    ) {
+                        (Ok(iov), Ok(n)) => (iov, n),
+                        _ => {
+                            h.update(b"\0EFAULT");
+                            continue;
                         }
-                        let [base, len] = *iov.add(i as usize);
-                        let n = len.min(left);
-                        h.update(bytes(base, n));
-                        left -= n;
+                    },
+                };
+                for i in 0..n.min(1024) {
+                    if left == 0 {
+                        break;
                     }
+                    let Ok([base, len]) = crate::guest::get::<[u64; 2]>(iov + i * 16) else {
+                        h.update(b"\0EFAULT");
+                        break;
+                    };
+                    let n = len.min(left);
+                    hash_guest(&mut h, base, n);
+                    left -= n;
                 }
             }
         }

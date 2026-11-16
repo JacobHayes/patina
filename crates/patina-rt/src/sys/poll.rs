@@ -74,30 +74,39 @@ fn ppoll0(fds: u64, n: u64) -> i64 {
     let mut hidden = [(0u64, 0i32); MAX_HIDDEN];
     let mut nh = 0;
     if fds != 0 {
+        let restore = |hidden: &[(u64, i32)]| {
+            for &(j, f) in hidden {
+                let _ = put(fds + j * 8, f);
+            }
+        };
         for i in 0..n.min(4096) {
-            let p = (fds + i * 8) as *mut i32;
-            let fd = unsafe { *p };
+            let fd = match get::<i32>(fds + i * 8) {
+                Ok(fd) => fd,
+                Err(r) => {
+                    restore(&hidden[..nh]);
+                    return r;
+                }
+            };
             if fd >= FD_HIDDEN_MIN {
                 if nh == MAX_HIDDEN {
-                    for &(j, f) in &hidden[..nh] {
-                        unsafe { *((fds + j * 8) as *mut i32) = f };
-                    }
+                    restore(&hidden[..nh]);
                     return -e::EINVAL;
                 }
                 hidden[nh] = (i, fd);
                 nh += 1;
-                unsafe { *p = -1 };
+                if let Err(r) = put(fds + i * 8, -1i32) {
+                    restore(&hidden[..nh - 1]);
+                    return r;
+                }
             }
         }
     }
     let ts = [0u64; 2];
     let r = unsafe { sc6(PPOLL, fds, n, ts.as_ptr() as u64, 0, 8, 0) };
     for &(i, fd) in &hidden[..nh] {
-        let p = (fds + i * 8) as *mut u32;
-        unsafe {
-            *p = fd as u32;
-            *p.add(1) = (*p.add(1) & 0xffff) | (POLLNVAL << 16);
-        }
+        // Both words were read and written above: these copies succeed.
+        let ev = get::<u32>(fds + i * 8 + 4).unwrap_or(0);
+        let _ = put(fds + i * 8, [fd as u32, (ev & 0xffff) | (POLLNVAL << 16)]);
     }
     if r < 0 {
         r
@@ -110,7 +119,7 @@ fn first_fd(fds: u64, n: u64) -> i64 {
     if fds == 0 || n == 0 {
         -1
     } else {
-        unsafe { *(fds as *const i32) as i64 }
+        get::<i32>(fds).map_or(-1, |fd| fd as i64)
     }
 }
 
@@ -162,7 +171,10 @@ pub fn select(call: &mut dyn Call) -> i64 {
                 continue;
             }
             for fd in FD_HIDDEN_MIN as i64..n {
-                let word = unsafe { *((s + (fd as u64 / 64) * 8) as *const u64) };
+                let word = match get::<u64>(s + (fd as u64 / 64) * 8) {
+                    Ok(w) => w,
+                    Err(r) => return r,
+                };
                 if word & (1 << (fd % 64)) != 0 {
                     return -e::EBADF;
                 }
@@ -175,7 +187,10 @@ pub fn select(call: &mut dyn Call) -> i64 {
     for (k, &s) in sets.iter().enumerate() {
         if s != 0 {
             for (i, w) in saved[k][..words].iter_mut().enumerate() {
-                *w = unsafe { *((s + i as u64 * 8) as *const u64) };
+                *w = match get::<u64>(s + i as u64 * 8) {
+                    Ok(v) => v,
+                    Err(r) => return r,
+                };
             }
         }
     }
@@ -199,7 +214,8 @@ pub fn select(call: &mut dyn Call) -> i64 {
         for (k, &s) in sets.iter().enumerate() {
             if s != 0 {
                 for (i, &w) in saved[k][..words].iter().enumerate() {
-                    unsafe { *((s + i as u64 * 8) as *mut u64) = w };
+                    // Read above; a set the kernel cannot write is its EFAULT below.
+                    let _ = put(s + i as u64 * 8, w);
                 }
             }
         }
