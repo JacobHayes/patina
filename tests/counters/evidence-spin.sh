@@ -1,4 +1,4 @@
-# Item 2. cost measurement's spin table, unrebuilt binaries, the holder making a call inside the critical
+# The spin table, unrebuilt binaries, the holder making a call inside the critical
 # section: glibc pthread_spin_lock, a C test-and-set lock, a Rust spin_loop lock. 100 seeds
 # each with --preempt branches (stall-ms = 2000): no stall, every run ok with the right count.
 #@ tier=evidence budget=3600 slots=8

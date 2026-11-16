@@ -1,22 +1,25 @@
-# 5. F4 (a failed journal fsync followed by a successful one loses batches from one
-# keyspace only). From the 100 x 10 sweep: fsync-error-at=61 seed 6 and fsync-error-at=37
-# seed 9 with --crash machine:3. Control: the same seeds without the fault pass. The kept
-# tree of the incarnation before the failing one makes the native harness fail the same way.
-# The seeds depend on the host's libc and CPU (they were found on the development host), so
-# this is an area check, not a quick one.
-#@ tier=area budget=15
+# 5. F4 (a failed journal fsync followed by a successful one loses batches from one keyspace
+# only), with --crash machine:3: fsync-error-at=50..80 x seeds 1-10 are searched, in that
+# order, for INVARIANT batch-atomic-across-keyspaces (a few cells of the 100 x 10 grid reach
+# it). For the first such cell the kept tree of the incarnation before the failing one makes
+# the native harness fail the same way, and the same seed without the fault passes. The
+# cells depend on the schedule and the guest build, so this is an area check, not a quick one.
+#@ tier=area budget=30
 . "$(dirname "$0")/lib/common.inc"
-for c in "61 6" "37 9"; do
-    set -- $c
-    o=$RUNS/f4-n$1-s$2
-    run fjall-harness "$o" "$2" --fault fsync-error-at=$1 --crash machine:3 -- /guest/fjall-harness-debug
-    [ "$(field "$o/result.json" message)" = "INVARIANT batch-atomic-across-keyspaces" ] || die "F4 $c: $(field "$o/result.json" message)"
-    k=$(jq '.crashes[-1].incarnation' "$o/result.json")
-    native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
-    grep -q '^INVARIANT batch-atomic-across-keyspaces' "$o/native.txt" || die "F4 $c native: $(tail -2 "$o/native.txt")"
-    rm -rf "$o/native"
-    ctl=$RUNS/f4-control-s$2
-    run fjall-harness "$ctl" "$2" --crash machine:3 -- /guest/fjall-harness-debug
-    [ "$(field "$ctl/result.json" outcome)" = ok ] || die "F4 control seed $2: $(field "$ctl/result.json" message)"
-    echo "F4 fsync-error-at=$1 seed $2: $(grep '^recovery' "$o/inc-$((k + 1))/stderr" | tail -1); native agrees; control ok"
+for n in $(seq 50 80); do
+    seeds=$(matches "f4-n$n" '^INVARIANT batch-atomic-across-keyspaces$' fjall-harness 1-10 -- \
+        --fault "fsync-error-at=$n" --crash machine:3 -- /guest/fjall-harness-debug)
+    for s in $seeds; do
+        o=$RUNS/f4-n$n/run-$s
+        k=$(jq '.crashes[-1].incarnation' "$o/result.json")
+        native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
+        rm -rf "$o/native"
+        grep -q '^INVARIANT batch-atomic-across-keyspaces' "$o/native.txt" || continue
+        ctl=$RUNS/f4-control-s$s
+        run fjall-harness "$ctl" "$s" --crash machine:3 -- /guest/fjall-harness-debug
+        [ "$(field "$ctl/result.json" outcome)" = ok ] || die "F4 control seed $s: $(field "$ctl/result.json" message)"
+        echo "F4 fsync-error-at=$n seed $s: $(grep '^recovery' "$o/inc-$((k + 1))/stderr" | tail -1); native agrees; control ok"
+        exit 0
+    done
 done
+die "F4: no cell of fsync-error-at=50..80 x seeds 1-10 reproduced with the native harness agreeing"

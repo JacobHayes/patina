@@ -1,5 +1,5 @@
-# Item 3. Stock Go at the default CPU count (GOMAXPROCS 4), with --preempt branches:
-# go-sweep (language runtimes's stall reproducer) and W4 (go-static all): 100 seeds each, no stall, all ok;
+# Stock Go at the default CPU count (GOMAXPROCS 4), with --preempt branches:
+# go-sweep (the Go stall reproducer) and W4 (go-static all): 100 seeds each, no stall, all ok;
 # 5 seeds x 20 runs under --vary cpu,load,aslr,sandbox identical, faults off and on.
 # No --cpus.
 #@ tier=evidence budget=1500 slots=8

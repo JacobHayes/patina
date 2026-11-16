@@ -1,4 +1,4 @@
-# Item 1. Seven compute programs (loops, recursion, indirect calls, string ops, floating
+# Seven compute programs (loops, recursion, indirect calls, string ops, floating
 # point, signals in flight, 16 threads), stock gcc builds: per program, one seed, 100 runs
 # under --vary cpu,load,aslr,sandbox and 100 runs under --vary parallel (8 sandboxes at once):
 # all identical (digest: every preempt record's stop instruction, N, register hash; virtual

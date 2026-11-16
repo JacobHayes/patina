@@ -2,7 +2,7 @@
 
 What the syscall-trap engine (`crates/patina-cli/ENGINE.md`) has been shown to do, one line
 per result. All measured 2026-11-12 to 2026-11-16 on one host: a KVM guest, Linux 7.0,
-24 vCPUs (AMD), run directories on XFS. The scripts behind each claim are `./check evidence`
+24 vCPUs (AMD Ryzen 9 9950X), run directories on XFS. The scripts behind each claim are `./check evidence`
 and the `area` tier of each test directory.
 
 ## Determinism
@@ -81,14 +81,72 @@ by ext4-ordered). W1 (`--crash machine:5`): correct version 500/500 under both m
 bug A (no fsync before the ack) caught 233/500 under ext4-ordered, 330/500 under posix-strict;
 bug B caught 315/500 under posix-strict only.
 
-## Finding bugs: syscall-free races and spin-waits
+## Spin-waits and scheduling points
 
-| Check | Result |
+A spin-wait loops in user space until another thread changes memory, so a run that preempts
+only at system calls never hands the turn to that thread. Pause points (every executed
+`pause` yields) and spin probes (a thread computing for 20 ms of CPU time is single-stepped
+for a loop that changes nothing, and yields there) reach these loops without counters; what
+neither reaches ends `unsupported` with stop `compute-stall`. Measured 2026-11-16 on an AMD
+Ryzen 9 9950X (family 0x1a), each sweep run once under the evidence lock:
+`./check evidence sched/evidence-spin` (with `PATINA_BASE` naming a build without pause
+points), `runtimes/evidence-go-stalls`, `counters/evidence-go` and `counters/evidence-costs`.
+
+Which spin-waits execute `pause`: glibc `pthread_spin_lock`, a C test-and-set lock with the
+usual hint, Rust `spin_loop` locks and `std::sync::Mutex`'s spin phase, Go's `procyield`. Go's
+background sweeper polling an idle heap does not; spin probes find it.
+
+| Check (default 4 CPUs, 20 seeds a row unless stated) | Result |
 |---|---|
-| W4 and go-sweep at 24 CPUs, `--preempt branches` | 100/100 ok |
-| W4 at 24 CPUs, system-call preemption only (before scheduling points) | stalls in 176/200 seeds |
-| Spin table (every language's spin-wait), `--preempt branches` | 0 stalls in 300 seeds |
+| Spin table, 7 spin-waits, system calls only (`pause-points = false`, `spin-probes = false`) | glibc spin lock, C spin lock and Rust spin lock (each with a call inside) `compute-stall` 20/20; the 4 others `ok` |
+| Spin table, pause points only | 140/140 `ok` |
+| Spin table, default | 140/140 `ok` |
+| W1-W9, default, with their faults | no `compute-stall`; W8 `sockets all` fails 20/20 (limit below); W9 seed 5 fails on an injected `ENFILE` after a crash; the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
+| W4 (stock Go), 100 seeds, spin probes off / on | `compute-stall` 92/100 / 0/100 |
+| go-sweep, 100 seeds, spin probes off / on | 99/100 / 0/100 |
+| go-sweep at 24 CPUs, 100 seeds, spin probes off / on | 97/100 / 0/100 |
+| W4 and go-sweep, `--preempt branches`, 100 seeds each | 100/100 `ok`, 100 distinct digests; 5 seeds x 20 runs under `--vary cpu,load,aslr,sandbox`, faults off and on: identical |
+| Spin table (call inside), `--preempt branches`, 100 seeds each | 0 stalls in 300 seeds |
+| A pause-point guest under `verify --runs 5 --vary cpu,aslr` | one digest |
 | Largest measured skid | 425 branches (margin 1,024) |
+
+What still ends `compute-stall` without counters: a spin-wait with neither a system call nor
+`pause` whose iterations change state (a counter or a timestamp it computes), and an endless
+loop while another thread waits. A lone thread computing is left alone (2 s of compute is
+`ok`).
+
+Cost of pause points, W1-W9, faults off, seeds 1-5, one run at a time pinned to one core,
+median `wall_ms`, against a build without pause points:
+
+| | W1 | W2 | W3 | W4 | W5 | W6 | W7 | W8 | W9 |
+|---|---|---|---|---|---|---|---|---|---|
+| Without | 12 | 42 | 15 | 136 (1/5 `ok`) | 96 | 914 | 212 | 108 | 29 |
+| `pause-points = false` | 12 | 46 | 13 | 188 | 101 | 1,118 | 213 | 109 | 28 |
+| Default | 12 | 46 | 13 | 383 | 101 | 1,127 | 214 | 109 | 28 |
+
+W4 pays for 7,242 pause points (its Go workers spinning for work); the build without them
+stalls on 4 of its 5 seeds. W6's extra time is the instruction scan (the `pause` candidates
+of `sh` and coreutils, decoded at every `execve`), paid with pause points on or off.
+
+The 4-CPU default: enough workers for races, and few enough that a stock Go or tokio
+runtime's idle workers do not dominate the schedule (go-sweep stalled on every seed at 24
+CPUs with pause points alone).
+
+The fjall findings below were swept at 24 CPUs before pause points. At the default their
+seeds move: F1 reaches 3-4 seeds in 100, F3's liveness 3 in 100, F4 3 cells of the 100 x 10
+grid; F2 and F6 appeared in none of 1,000 seeds and still reproduce at their seeds with
+`--cpus 24` and `pause-points = false` (`tests/storage`).
+
+Red/green: ignoring the page comparison of a fixed point fails `sched/10-spin` (a counting
+loop was treated as a spin); a pause point that does not yield fails `insn/10-pause` (glibc
+spin lock times out); a watchdog that never ends a run fails `skeleton/09-stall`; falling back
+to traps when `--preempt branches` is not available fails `counters/01-unprivileged`.
+
+Counter preemption on Intel: on an Intel Xeon 6975P-C (CI runner with a PMU),
+`counters/02-counter` and `05-exact` stopped at different instructions for the same count,
+`06-migrate` gave 5 different digests in 5 runs, and the race seed `03-races` relies on no
+longer found the double spend. Counter preemption is therefore refused on every CPU but AMD
+family 0x1a, and a seed reproduces only on the same family.
 
 ## Costs
 
@@ -102,7 +160,7 @@ bug B caught 315/500 under posix-strict only.
 | W9 with crashes and filesystem faults | 38.9 ms per run, 148.6 runs/s (1.92x no-fault) |
 | Crash materialisation | ~3 ms per MB of log |
 | `fork`+`execve`+`wait` of a dynamic program | 1.5 ms (native 0.38 ms; mostly the instruction scan) |
-| `--preempt branches` | ~17 µs per trap, 3-6 ms per preemption, W1-W9 wall x1.2 to x4.0 |
+| `--preempt branches` | 9.7 µs per trap, 1.7-2.3 ms per preemption, W1-W9 wall x0.6 to x6.5 (W1 x6.5, W2 x4.4, the rest under x2) |
 | `--mount DIR:/guest:copy` copy into tmpfs | ~0.3 ms per MB |
 
 ## Known limits

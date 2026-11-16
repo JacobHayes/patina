@@ -1,4 +1,4 @@
-# Item 6. Costs, serially (run on a quiet host for the numbers in docs/EVIDENCE.md): per-trap
+# Costs, serially (run on a quiet host for the numbers in docs/EVIDENCE.md): per-trap
 # overhead (getppid loop, off/on), per-preemption cost (compute loops: extra wall per stop),
 # W1-W9 end-to-end wall off/on (median of 3). Writes $RUNS/07/costs.tsv. Measurement: fails
 # only if a run is not ok.

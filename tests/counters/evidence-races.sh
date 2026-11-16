@@ -1,4 +1,4 @@
-# Item 4. the toolchain tier's syscall-free races, stock builds (no patina-cc), counter preemption only (no
+# The syscall-free race guests, stock builds (no patina-cc), counter preemption only (no
 # --mem). races b (check-then-act, no system call in the window): 200 seeds with the default
 # policy and 200 with the race-hunting policy (`branches = "hunt"`: every segment short);
 # found in some seeds; a failing seed replays 20/20 (patina verify, varied).

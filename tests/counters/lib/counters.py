@@ -23,9 +23,12 @@ PMU = ["--preempt", "branches"]
 
 def config(opts):
     """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "stall-ms=2000"):
-    the keys go into a patina.toml (tests/cfg), passed as --config."""
-    keys = [o for o in opts if not o.startswith("-") and "=" in o]
-    rest = [o for o in opts if o not in keys]
+    the keys go into a patina.toml (tests/cfg), passed as --config. A flag's value
+    (`--fault fs-error-permille=20`) stays with its flag."""
+    keys, rest = [], []
+    for i, o in enumerate(opts):
+        flag_value = i > 0 and opts[i - 1].startswith("--") and "=" not in opts[i - 1]
+        (keys if "=" in o and not o.startswith("-") and not flag_value else rest).append(o)
     if not keys:
         return rest
     f = subprocess.run([os.environ["PATINA_CFG"]] + keys, capture_output=True, text=True, check=True).stdout.strip()

@@ -1,4 +1,4 @@
-# Item 5. W1-W9 (determinism hardening/cost measurement's commands and fault configurations; W4 at the default CPU count)
+# W1-W9 (the workloads' commands and fault settings; W4 at the default CPU count)
 # with --preempt branches: 3 runs under --vary cpu,aslr,sandbox identical; 3 seeds give 3 distinct digests.
 #@ tier=evidence budget=900 slots=3
 . "$(dirname "$0")/lib.inc"

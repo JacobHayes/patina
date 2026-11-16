@@ -1,22 +1,26 @@
-# 2. F1 (partial create not recoverable). Known seeds from the 300-seed sweeps: 5 under
-# --crash machine:3, 3 under --crash process:3. The kept post-crash tree, copied out, makes
-# the native harness fail the same way; with FJ_WIPE_PARTIAL=1 the same seeds proceed.
-# The seeds depend on the host's libc and CPU (they were found on the development host), so
-# this is an area check, not a quick one.
-#@ tier=area budget=15
+# 2. F1 (partial create not recoverable). Under --crash machine:3 and --crash process:3, seeds
+# 1-100 are searched for INVARIANT open-after-crash (a few percent of seeds reach it). For the
+# first seed whose kept post-crash tree, copied out, makes the native harness fail the same
+# way, FJ_WIPE_PARTIAL=1 must let the same seed proceed. The rate depends on the schedule
+# and the guest build, so this is an area check, not a quick one.
+#@ tier=area budget=30
 . "$(dirname "$0")/lib/common.inc"
-for c in "machine:3 5" "process:3 3"; do
-    set -- $c
-    o=$RUNS/f1-$1-$2
-    run fjall-harness "$o" "$2" --crash "$1" -- /guest/fjall-harness-debug
-    [ "$(field "$o/result.json" message)" = "INVARIANT open-after-crash" ] || die "$c: $(field "$o/result.json" message)"
-    # The tree the failing incarnation started from: the last crash's post-crash tree.
-    k=$(jq '.crashes[-1].incarnation' "$o/result.json")
-    native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
-    grep -q '^INVARIANT open-after-crash' "$o/native.txt" || die "$c native: $(tail -2 "$o/native.txt")"
-    rm -rf "$o/native"
-    w=$RUNS/f1-wipe-$1-$2
-    run fjall-harness "$w" "$2" --env FJ_WIPE_PARTIAL=1 --crash "$1" -- /guest/fjall-harness-debug
-    [ "$(field "$w/result.json" outcome)" = ok ] || die "$c with FJ_WIPE_PARTIAL=1: $(field "$w/result.json" message)"
-    echo "F1 $1 seed $2: $(field "$o/result.json" message); native: $(grep -v '^INVARIANT' "$o/native.txt" | tail -1); FJ_WIPE_PARTIAL=1: ok"
+for crash in machine:3 process:3; do
+    n=f1-${crash%%:*}
+    seeds=$(matches "$n" '^INVARIANT open-after-crash$' fjall-harness 1-100 -- --crash "$crash" -- /guest/fjall-harness-debug)
+    [ -n "$seeds" ] || die "$crash: no seed of 1-100 reached open-after-crash ($(tail -1 "$RUNS/$n.table"))"
+    found=
+    for s in $seeds; do
+        o=$RUNS/$n/run-$s
+        # The tree the failing incarnation started from: the last crash's post-crash tree.
+        k=$(jq '.crashes[-1].incarnation' "$o/result.json")
+        native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
+        rm -rf "$o/native"
+        grep -q '^INVARIANT open-after-crash' "$o/native.txt" && { found=$s; break; }
+    done
+    [ -n "$found" ] || die "$crash: the native harness recovered every kept tree (seeds $(echo $seeds))"
+    w=$RUNS/f1-wipe-$n-$found
+    run fjall-harness "$w" "$found" --env FJ_WIPE_PARTIAL=1 --crash "$crash" -- /guest/fjall-harness-debug
+    [ "$(field "$w/result.json" outcome)" = ok ] || die "$crash seed $found with FJ_WIPE_PARTIAL=1: $(field "$w/result.json" message)"
+    echo "F1 $crash: seeds $(echo $seeds) of 1-100; seed $found native: $(grep -v '^INVARIANT' "$o/native.txt" | tail -1); FJ_WIPE_PARTIAL=1: ok"
 done

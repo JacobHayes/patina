@@ -23,6 +23,15 @@ sweep() {
     SWEEP_OUT=$RUNS/$name "$HERE/lib/sweep.sh" "$@" | tee "$RUNS/$name.table"
     SWEPT="${SWEPT:-} $name"
 }
+# matches NAME REGEX WORKLOAD SEEDS... -- options -- cmd: sweep the seeds into $RUNS/NAME and
+# print, in seed order, those whose message matches REGEX. Runs that are not ok are kept as
+# $RUNS/NAME/run-SEED. A finding's seeds move with the schedule (CPU count, guest build), so
+# a reproduction searches a small range for the finding's signature instead of naming a seed.
+matches() {
+    name=$1 re=$2; shift 2
+    SWEEP_OUT=$RUNS/$name "$HERE/lib/sweep.sh" "$@" >"$RUNS/$name.table"
+    awk -F'\t' -v re="$re" 'NR>1 && $3 ~ re {print $1}' "$RUNS/$name/summary.tsv" | sort -n
+}
 # tables: the last line of each sweep this script ran.
 tables() {
     for n in ${SWEPT:-}; do echo "$n: $(tail -1 "$RUNS/$n.table")"; done
