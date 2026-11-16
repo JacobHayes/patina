@@ -282,6 +282,79 @@ Red/green: a fast path that never takes the slow path fails `compute/06-go` (`go
 never cut); a hook whose `//go:linkname` the toolchain does not resolve fails the guests' build
 into `GO-BROKEN`, which `06-go` prints with the Go version.
 
+### The default gap
+
+Which `compute-gap` range to use when a run gives none. Each cell is one `patina sweep
+--seeds 1..200 -j 6 --keep none --fault compute-gap=RANGE` (log-uniform per seed), run once
+under the evidence lock on 2026-11-16, this host; about 8 minutes of sweeps in all. Tiny
+programs are the race guests above. The longer ones were built for this and not kept:
+
+- `jobq`: C, clang, 4 threads take 400 jobs from a locked queue, each job about 5,000 events
+  of hashing; after a job a worker adds to a shared count without the lock, with W events
+  of other work between its load and its store. About 2.0 M events a run. "every job" makes
+  that update after each job, "1 in 20" after every 20th.
+- `gorace`: Go, an HTTP server and 8 concurrent clients, 80 requests, about 380 k events. The
+  handler reads a served count, formats a log line with `strconv.Itoa` (a few comparisons)
+  or with `fmt.Sprintf` ("wide", a few hundred), and stores the count plus one.
+- fjall: `tests/guests/fjall-harness`, release, rebuilt with the SDK's `compute` feature and
+  the flags, under F1's `--crash machine:3` (F1 depends on the crash, not on a race). About
+  4.8 M events a run.
+
+Findings in 200 seeds:
+
+| Program | Stock | `2..64` | `8..1024` | `64..65536` | `2..65536` |
+|---|---|---|---|---|---|
+| `races b` (22 events) | 0 | 38 | 4 | 0 | 6 |
+| `pool` (530) | - | 110 | 32 | 5 | 41 |
+| `rs-race` (190) | - | 13 | 1 | 1 | 4 |
+| `go-race` | - | 86 | 18 | 2 | 25 |
+| `races-gcc b` (14, edges only) | - | 19 | 2 | 0 | 3 |
+| `jobq` every job, W = 4 | 0 | 154 | 145 | 80 | 101 |
+| `jobq` every job, W = 200 | 0 | 200 | 200 | 191 | 189 |
+| `jobq` 1 in 20, W = 4 | 0 | 0 | 0 | 1 | 0 |
+| `jobq` 1 in 20, W = 200 | 0 | 0 | 0 | 3 | 1 |
+| `gorace` | 0 | 0 | 0 | 0 | 0 |
+| `gorace` wide | 0 | 200 | 191 | 112 | 128 |
+| fjall F1 | 11 | 8 | 7 | 6 | 9 |
+
+Cost, mean / largest `wall_ms` of one run (the tiny programs take 10 to 11 ms a run at
+every setting):
+
+| Program | Stock | `2..64` | `8..1024` | `64..65536` | `2..65536` |
+|---|---|---|---|---|---|
+| `jobq` every job, W = 4 | 16 / 21 | 1,145 / 4,812 | 199 / 1,205 | 33 / 123 | 378 / 4,697 |
+| `gorace` wide | 37 / 68 | 259 / 966 | 72 / 266 | 43 / 73 | 116 / 1,134 |
+| fjall F1 | 59 / 128 | 2,485 / 19,392 | 502 / 9,946 | 104 / 684 | 858 / 16,004 |
+
+The fjall harness's debug build (cargo `dev` profile, about 78 M events), seed 1, one run
+each at a fixed gap: 65,536: 0.26 s and 1.4 MB of run directory; 64: 5.2 s, 230 MB; 8:
+35 s, 1.8 GB; 2: stopped by `ulimit -f` (4 GB) after 83 s and 45 M events. Every switch
+writes a record. At the default, seeds 1, 2, 3 draw mean gaps 64,514, 248 and 115 (the
+draw depends on the seed alone, so they are the same for every program) and take 0.24, 1.5
+and 3.1 s, against 0.05 s stock.
+
+What the numbers say:
+
+- A switch has to land in the window, and the other thread has to reach its own access
+  before the first resumes. Tiny programs need gaps under about 10 events. On the long
+  programs a gap of 64 to a few thousand events found the dense races almost as often as
+  gaps of 2, and the sparse one (`jobq` 1 in 20) was found by none: a smaller gap there buys
+  nothing, because the other threads barely move between switches.
+- Per seed, the wide range `2..65536` finds more than the default on every tiny program
+  (4 to 12 times where the default found any) and 1.0 to 1.3 times as much on the dense long
+  ones. It costs 3 to 11 times the default's mean time on the long programs, its slowest
+  seed 15 to 40 times the default's slowest, and on a 78 M-event debug build a seed at gap 2
+  takes minutes and writes gigabytes of log. Per second of machine time the default finds
+  2.4 to 12 times as much on the long programs.
+- The default stays `64..65536`, drawn log-uniformly per seed. The guide gives
+  `--fault compute-gap=2..64` for short programs: it found the tiny races 13 to 43 times as
+  often as the default (where the default found any), at no measurable cost. Tests that need a find in a handful of seeds keep
+  their fixed gaps (`8`, or `2` for the one-edge windows).
+- A known race found in fewer than 1 seed in 100 at the default: `races b`, `races-gcc b`,
+  `rs-race`, `go-race` (2 in 200) and `jobq` 1 in 20. The last is missed at every range, so
+  the follow-up that switches on memory another thread touched (race-directed points) is
+  the next step for search; not built.
+
 ## Costs
 
 | What | Cost |

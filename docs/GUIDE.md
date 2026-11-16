@@ -196,15 +196,14 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   runs; on their own they did not make the storage findings more frequent.
 - **A race with no system call in it.** Threads switch only at system calls, `pause`
   instructions and spin probes. Two threads that race on plain memory with none of these
-  between the conflicting accesses always run them in the same order, whatever the seed;
-  `--preempt branches` (branch counters) can switch at any branch and finds them.
-- **A deadline that never comes.** Virtual time advances by a fixed charge per system call and
-  when every thread sleeps, not with computation. Without branch counters a CPU-bound loop
-  in code not rebuilt with compute points does not move the clock, so neither `--time-limit` nor the program's own deadline cuts it;
-  `--timeout` (wall seconds) does, as `timeout`. A loop that reads the clock or makes any
-  call advances it by that charge; `--preempt branches` charges time per branch.
-
-
+  between the conflicting accesses always run them in the same order, whatever the seed.
+  Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code));
+  branch counters (`--preempt branches`, AMD Zen 5 only) switch there too.
+- **A deadline that never comes.** In stock code virtual time advances by a fixed charge per
+  system call and when every thread sleeps, not with computation, so neither `--time-limit`
+  nor the program's own deadline cuts a CPU-bound loop; `--timeout` (wall seconds) does, as
+  `timeout`. Rebuilt code is charged 1 ns per event and is cut where the deadline falls due;
+  `--preempt branches` charges time per branch.
 
 ## Faults
 
@@ -301,22 +300,8 @@ if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path
 patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
 ```
 
-The feature `compute` (`features = ["compute"]`) adds the hooks for compute points: a program
-built with LLVM's coverage pass gets scheduling points and virtual time in code without system
-calls. Build with the flags and `--target`, which keeps them off build scripts and proc macros
-(those do not link the SDK, and without it fail to link):
-
-```sh
-RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 \
-  -Cllvm-args=-sanitizer-coverage-trace-pc -Cllvm-args=-sanitizer-coverage-trace-loads \
-  -Cllvm-args=-sanitizer-coverage-trace-stores" \
-  cargo build --release --target x86_64-unknown-linux-gnu
-```
-
-Every crate built this way is instrumented, with what the standard library inlines into it
-(atomics, `Cell`, `Mutex`'s fast path); the prebuilt standard library itself is not. A program
-that does not call the SDK links it with `use patina_dst as _;`. A `dev`-profile build makes
-about 14 times the events, and so the virtual time, of a release build for the same work.
+The feature `compute` is for code rebuilt with compute points
+([Deeper search](#deeper-search-rebuilt-code)).
 
 **C and C++**: `cc -I PATINA/sdk/c`, one header.
 
@@ -334,22 +319,8 @@ var balanceMatches = patina.Always("balance-matches-deposits")
 balanceMatches.Check(balance == deposits, "balance ", balance, ", deposits ", deposits)
 ```
 
-Compute points for Go (a scheduling point and 1 ns of virtual time at every integer and
-string comparison, the standard library included; the Go runtime is not instrumented): one
-blank import in package `main` and one compiler flag, no cgo.
-
-```go
-import _ "github.com/JacobHayes/patina/go/patina/compute"
-```
-
-```sh
-CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer -o app .
-```
-
-Built without the flag the program is unchanged. Built with the flag and without the import,
-the link fails with `reference to undefined builtin "runtime.libfuzzerTraceCmp8"`: add the
-import. `go test` binaries cannot use the flag (the testing package defines the same hooks);
-build the scenario as a `main` package instead.
+`go/patina/compute` is for code rebuilt with compute points
+([Deeper search](#deeper-search-rebuilt-code)).
 
 **Python**: one file, `sdk/python/patina.py`; copy it next to the program or put its
 directory on `PYTHONPATH`.
@@ -384,19 +355,8 @@ many it hit, and the last 20 injected), `sdk` (every declared site, evaluated an
 counts), `refused` (calls answered with an error because Patina does not model them),
 `sched`, `counters`, `digest`, `wall_ms`.
 
-`compute` is there only when code rebuilt with compute points ran (ARCHITECTURE.md,
-"Scheduling points"): each image that announced them (`path`, event `kinds`, `starts`), the
-events counted, the `switches` and `deadline_stops` they caused, and the mean `gap` in force.
-`patina run` prints it as one line, and `patina sweep` names the images once; no line means
-no rebuilt code ran. For `tests/guests/compute/mixed.c` (threads, then stock and rebuilt
-child processes):
-
-```text
-$ patina run --seed 1 --fault compute-gap=8 -- ./mixed
-ok (exit): the program exited 0
-guest: exit 0
-compute points: /tmp/patina/mixed (edges, accesses; 3 starts); 75,069 events, 9,404 switches, mean gap 8
-```
+`compute` is there only when code rebuilt with compute points ran
+([Did it take](#did-it-take)).
 
 For storage bugs, `patina log ops RUNDIR/inc-0` lists every change to `/work` in order. In the
 acklog run the record write to `data.log` (ino 2) has no fsync before the acknowledgement's:
@@ -438,16 +398,165 @@ stepped until it is found looping without changing anything, and yields there.
 A thread that computes for 10 s of CPU time without reaching a scheduling point, while
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
-no system call or `pause`. `--preempt branches` also preempts after a seed-chosen number of
-branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
+no system call or `pause`. Rebuilt code does not stall that way
+([Deeper search](#deeper-search-rebuilt-code)). `--preempt branches` also preempts after a
+seed-chosen number of branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
 only on that CPU family. `patina doctor` says which of the three is missing.
 
-Code rebuilt with compute points (`sdk/c/patina_compute.c`) has a scheduling point every 64 to
-65,536 events on average (`--fault compute-gap`) and costs 1 ns of virtual time per event, so its loops move the clock, show in
-CPU-time clocks, and are stopped at the exact event where a timer, a timeout or `--time-limit`
-falls due. Such a loop does not end `compute-stall` while it stays in rebuilt code; the
-stop's message names rebuilding with compute points beside `--preempt branches`.
+## Deeper search: rebuilt code
+
+A stock program switches threads only where it makes a system call or spins. Rebuilt with a
+compiler's coverage flags and Patina's hook file, its own code gets points too:
+
+- Threads switch inside computation, so a race on plain memory with no system call in it (a
+  count updated without its lock, a check and an act on an atomic) can be found.
+- Virtual time advances with computation, 1 ns per event, so a timer, a timeout or
+  `--time-limit` cuts a CPU-bound loop at the event where it falls due.
+- A spin-wait in rebuilt code yields by itself instead of ending `compute-stall` (in Go, if
+  its loop makes a comparison).
+
+An event is one hook call: each edge (a branch taken) and, with clang and Rust, each load and
+store; in Go, each comparison. `examples/stats-c` has four workers that update shared
+statistics without their lock. The stock build never shows it; the rebuilt one does:
+
+```sh
+cc -O2 -pthread -o stats examples/stats-c/stats.c
+patina sweep --seeds 1..20 --out patina-out/stats -- ./stats
+```
+
+```text
+patina sweep: 20 runs, 0 findings in 0 groups, 20 ok   (0.1s, 8 jobs)
+outcomes: ok 20
+```
+
+```sh
+clang -O2 -pthread -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \
+  -o stats-cp examples/stats-c/stats.c sdk/c/patina_compute.c
+patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
+```
+
+```text
+patina sweep: 20 runs, 8 findings in 1 group, 12 ok   (0.1s, 8 jobs)
+outcomes: failure 8, ok 12
+compute points: /tmp/src/patina/stats-cp (edges, accesses)
+
+failure exit: lost updates: N of N jobs counted; exit 1
+  8 of 20 runs   first: seed 2   replayed: identical
+```
+
+The cost: an event takes under a nanosecond in C and Rust and about 2 ns in Go, natively or
+under Patina, and a switch about 3.5 µs. At the default gap, a C program of 2 million events
+took 33 ms a run against 16 ms stock; a debug Rust build of 78 million events took 0.2 to 3 s
+against 0.05 s, by the seed (docs/EVIDENCE.md, "The default gap").
+
+### Building
+
+Add the flags to every compile of the code to search, and the hook file once to each
+executable or shared library built with them. `PATINA` is a checkout of this repository.
+
+C and C++ with clang (edges, loads and stores):
+
+```sh
+clang -O2 -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \
+  -o app app.c PATINA/sdk/c/patina_compute.c
+clang++ -O2 -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \
+  -o app app.cc -x c PATINA/sdk/c/patina_compute.c
+```
+
+gcc and g++ take `-fsanitize-coverage=trace-pc` and the same file, and give edges only: a
+switch lands only at a branch, so it cannot split an `x++` or `stats.done = done + 1`. The
+gcc build of `stats-c` found nothing in 20 seeds, at the default gap and at 2. Prefer clang.
+With gcc 11 or older, build the hook file in a step of its own without the flag
+(`gcc -O2 -c patina_compute.c`) and link the object.
+
+Rust, stable: the SDK with the feature `compute`, and the flags with `--target`:
+
+```toml
+patina-dst = { path = "PATINA/crates/patina", features = ["compute"] }
+```
+
+```sh
+RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 \
+  -Cllvm-args=-sanitizer-coverage-trace-pc -Cllvm-args=-sanitizer-coverage-trace-loads \
+  -Cllvm-args=-sanitizer-coverage-trace-stores" \
+  cargo build --release --target x86_64-unknown-linux-gnu
+```
+
+The binary is under `target/x86_64-unknown-linux-gnu/release/`. `--target` keeps the flags
+off build scripts and proc macros, which do not link the SDK and would fail with undefined
+`__sanitizer_cov_trace_pc`. A program that uses nothing else from the SDK fails the same way
+unless it says `use patina_dst as _;`. Your crates and their dependencies get the hooks, with
+what they inline from the standard library; the prebuilt standard library does not. A `dev`
+build makes about 14 times the events of a release build for the same work, and so that much
+more virtual time and switching.
+
+Go: one blank import in package `main` and one flag, without cgo. Points are at integer and
+string comparisons, in every package but the Go runtime.
+
+```go
+import _ "github.com/JacobHayes/patina/go/patina/compute"
+```
+
+```sh
+CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer -o app .
+```
+
+With the flag and without the import, the link fails with `reference to undefined builtin
+"runtime.libfuzzerTraceCmp8"`. `go test` binaries cannot be built this way (the testing
+package defines the same hooks): build the scenario as a `main` package.
+
+Shared libraries: each instrumented library links its own copy of the hook file, and a stock
+program may load it.
+
+```sh
+clang -O2 -fPIC -shared -fsanitize-coverage=trace-pc,trace-loads,trace-stores \
+  -fno-sanitize-link-runtime -o libwork.so work.c PATINA/sdk/c/patina_compute.c
+```
+
+Python: not supported.
+
+### Did it take
+
+`patina run` prints a `compute points:` line when rebuilt code ran: the program, the kinds of
+event, the events counted, the switches they caused and the mean gap the seed drew.
+
+```text
+$ patina run --seed 2 -- ./stats-cp
+failure (exit): exit status 1
+guest: exit 1
+compute points: /tmp/src/patina/stats-cp (edges, accesses); 81,619 events, 325 switches, mean gap 248
+```
+
+`patina sweep` names the programs once. No line means no rebuilt code ran: the flags did not
+reach the code that ran. The line names the program even when only a library it loads is
+rebuilt. `result.json` holds the same as `compute`: `images`
+(`path`, `kinds`, `starts`), `events`, `switches`, `deadline_stops` and `gap`.
+
+### The gap
+
+`--fault compute-gap` is the one setting. Each seed draws a mean gap G, log-uniformly from
+`64..65536` by default, and each stretch between two switches is uniform in `1..2G-1`
+events. The draw depends on the seed alone: seed 2 draws 248 in every program.
+
+| Setting | For |
+|---|---|
+| `64..65536` (default) | long programs: the measured ones ran 1.2 to 2 times as long as stock, and their races that recur were found |
+| `2..64` | short programs, tests whose threads run tens of events: found such races 13 to 43 times as often as the default |
+| `0` | no switches; time and deadlines still apply |
+
+A single number (`compute-gap=8`) gives every seed that G.
+
+### Limits
+
+- A seed found on a stock build does not replay on a rebuilt one, or the reverse: they are
+  different binaries. Each repeats on its own.
+- Code not rebuilt (libc, the prebuilt Rust standard library, the Go runtime, any prebuilt
+  library) has no points and costs no virtual time. A race wholly inside it stays out of
+  reach.
+- One thread runs at a time, so weak-memory behaviours (a store another CPU sees late) never
+  happen, and a `lock`-prefixed read-modify-write is never split.
+- With `--preempt branches` the hooks do nothing; branch counters switch instead.
 
 ## CI on GitHub Actions
 

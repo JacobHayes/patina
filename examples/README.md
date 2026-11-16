@@ -1,6 +1,6 @@
 # Examples
 
-Five small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
+Six small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
 command that finds it. Each builds with its own language's tool and nothing else. Run the
 commands from the repository root. Each program takes `fixed` as its first argument to run
 without the bug; the same sweep with `fixed` added at the end is `ok` on every seed.
@@ -70,5 +70,22 @@ patina sweep --seeds 1..20 --fault net-reset-permille=50 --out patina-out/bank -
 ```
 
 Expected: `violation always: balance-matches-deposits: balance N, deposits N`, about 11 of the 20 seeds.
+
+## stats-c (C, compute points): a race with no system call in it
+
+Four workers update shared statistics without their lock. The update makes no system call, so
+the stock build runs it the same way on every seed. Rebuilt with clang's coverage flags and the
+hook file, its threads also switch inside computation
+([the guide](../docs/GUIDE.md#deeper-search-rebuilt-code)).
+
+```sh
+cc -O2 -pthread -o stats examples/stats-c/stats.c
+patina sweep --seeds 1..20 --out patina-out/stats -- ./stats
+clang -O2 -pthread -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \
+  -o stats-cp examples/stats-c/stats.c sdk/c/patina_compute.c
+patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
+```
+
+Expected: the stock sweep `ok` on every seed; the rebuilt one `failure exit: lost updates: N of N jobs counted; exit 1`, on about 8 of the 20 seeds.
 
 `tests/examples/01-examples.sh` runs these sweeps and their fixed variants in the quick check.

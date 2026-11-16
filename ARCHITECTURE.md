@@ -111,30 +111,8 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   yields there, and at each later arrival (`spin.rs`, `sup/stall.rs`).
 - **Branch counters**, with `--preempt branches`: a preemption after a seed-chosen number of
   retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
-- **Compute points**, in code rebuilt with the compilers' coverage flags and the hook file
-  `sdk/c/patina_compute.c` (clang: edges, loads and stores; Rust: the SDK crate's feature
-  `compute`, the same hooks). Each hook call is an event: it
-  decrements one word of the program's own memory, the cell (a page per address space at
-  `proto::layout::COMPUTE_CELL`, mapped at the hooks' first call, `COMPUTE_HELLO`), and makes
-  the SDK call `COMPUTE_POINT` when it reaches 0. At every return to program code the runtime
-  writes a seeded gap there (uniform in `1..2G-1`; the mean G is drawn per seed from
-  `--fault compute-gap`, default `64..65536`); at every runtime entry it reads back how many
-  events ran and charges each 1 ns of virtual time. The gap is cut short at the event that
-  makes the next deadline (a timer, a timeout, the wire) or the time limit due, and at 2^22
-  events whatever the gap (`proto::compute::arm`). A point that finds the cell run out writes
-  a `preempt` record (`nr` 3: why it ran out, the general registers' hash) and yields, so the
-  supervisor fires what is due and a signal is delivered on the way out; the call adds no other
-  record and no trap charge (`compute.rs`). With `--fault compute-gap=0` there are no seeded
-  switches, but deadlines cut the cell the same way and it still yields every 2^22 events, so
-  an instrumented spin-wait hands over in every setting. Thread and process CPU clocks
-  (`clock_gettime`, `times`, `getrusage`) count the thread's events at 1 ns each beside its
-  traps. Stock code never makes the call and is not touched. With `--preempt branches` the
-  cell is never armed and events charge nothing. Replay refuses a run whose recorded gap or
-  event charge differs from what this build would use. A fork child keeps its parent's cell
-  and hello; an exec starts without either. The first hello of each process notes its image's
-  guest path in the control region's image table (`proto::ctl::ComputeTab`: 32 paths with
-  their kinds and starts, and a count of the starts that did not fit), which `result.json`
-  reports.
+- **Compute points**, in code rebuilt with the compilers' coverage flags: the hooks count
+  events and enter the runtime when a seeded number has run (below).
 
 `rdtsc`, `rdrand` and `rdseed` are answered from virtual time and the seed. Code generated
 at run time (a JIT) is not scanned for them; such mappings are counted in `result.json`.
@@ -171,6 +149,41 @@ makes every segment short.
 Only AMD family 0x1a (Zen 5) is accepted: on an Intel Xeon the conditional-branch event
 stopped at different instructions for the same count. Other CPUs are refused with an error,
 never silently run without counters.
+
+## Compute points
+
+Code rebuilt with the compilers' coverage flags calls a hook at each edge, and with clang and
+Rust at each load and store; Go's `-d=libfuzzer` calls one at each comparison. The hooks are
+`sdk/c/patina_compute.c` (C, C++, and Rust through the SDK's feature `compute`) and
+`go/patina/compute`. Each call is an event. Stock code makes none of these calls and is not
+touched.
+
+- **The cell**: one word of the program's own memory per address space, at
+  `proto::layout::COMPUTE_CELL`. Each event decrements it; at 0 the hook makes the SDK call
+  `COMPUTE_POINT` (op 9).
+- **Hello**: a hook's first event makes `COMPUTE_HELLO` (op 8), which maps the cell. The hooks
+  are hidden symbols, so each executable and shared library keeps its own copy and says hello
+  itself; all get the one cell. The first hello of a process writes the program's path into
+  the control region's image table (`proto::ctl::ComputeTab`, 32 entries and a count of those
+  that did not fit), which `result.json`'s `compute` reports. Op 9 before any hello gets
+  `EINVAL`. A fork child keeps its parent's cell; an exec starts without one.
+- **Arming**: at every return to program code the runtime writes into the cell the smallest
+  of a seeded gap (uniform in `1..2G-1`, G the run's mean from `--fault compute-gap`), the
+  events until the next deadline is due (a timer, a timeout, the wire, the time limit), and
+  2^22 (`proto::compute::arm`). The last is the refill: an instrumented spin-wait yields in
+  every setting, `compute-gap=0` included.
+- **Charge**: at every runtime entry the runtime reads back how many events ran and charges
+  each 1 ns of virtual time, which thread and process CPU clocks count too.
+- **The point**: a hook that finds the cell empty enters the runtime, which writes a `preempt`
+  record (`nr` 3: the address, the armed value, why it ran out (switch, deadline, refill),
+  the process's events, the drawn gap; a hash of the general registers) and yields, so the
+  supervisor fires what is due and a pending signal is delivered on the way out
+  (`compute.rs`).
+
+There is no other way into the runtime: a point that switches needs a supervisor hand-off
+anyway, so a direct call would save nothing. Replay refuses a run whose recorded gap or
+event charge differs from this build's. With `--preempt branches` the cell is never armed and
+events charge nothing.
 
 ## The fault plan
 
@@ -288,19 +301,22 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   kernel version or filesystem may change a run.
 - **Branch counters** (`--preempt branches`) need `CAP_PERFMON`, a PMU, and an AMD family
   0x1a (Zen 5) CPU, the only one checked exact; their seeds reproduce on the same family only.
-- **compute-stall**: without branch counters, a spin-wait whose iterations change state ends
-  the run (above).
+- **compute-stall**: in stock code without branch counters, a spin-wait whose iterations
+  change state ends the run (above).
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
-  seed; only `--preempt branches`, or rebuilding the code with compute points, switches inside
-  it. Compute points do not split a `lock`-prefixed read-modify-write, and gcc gives edges only.
-  A seed found on a stock build does not replay on a rebuilt one, or the reverse.
-- **Stock computation does not advance virtual time** without branch counters: a CPU-bound
-  loop cannot be cut by `--time-limit` or a program's own deadline, only by `--timeout` (wall
-  time). A loop that makes any system call (a clock read) advances it by the per-trap charge.
-  Code rebuilt with compute points is charged 1 ns per event, and a timer, a timeout or
-  `--time-limit` falling due inside it stops it at that exact event, in every gap setting.
-  Computation in code not rebuilt (libc, prebuilt dependencies) is still free and uncut.
+  seed. Rebuilding the code with compute points switches inside it; so does
+  `--preempt branches`, on one CPU family. Compute points do not split a `lock`-prefixed
+  read-modify-write, gcc gives edges only, and code not rebuilt (libc, the Go runtime,
+  prebuilt libraries) has no points. A seed found on a stock build does not replay on a
+  rebuilt one, or the reverse.
+- **Stock computation does not advance virtual time**: a CPU-bound loop cannot be cut by
+  `--time-limit` or a program's own deadline, only by `--timeout` (wall time). A loop that
+  makes any system call (a clock read) advances it by the per-trap charge. Rebuilt code is
+  charged 1 ns per event and cut at the event where a deadline falls due; branch counters
+  charge per branch.
+- **One thread runs at a time**, so weak-memory behaviours (a store another CPU sees late)
+  never happen.
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
   no simulation of several machines, and no network outside the run.
 - **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with

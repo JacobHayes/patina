@@ -1,6 +1,7 @@
 # The examples (examples/README.md), each with its documented sweep options over seeds 1-20:
 # the bug is found, under the expected signature; the fixed variant is ok on every seed, and
-# the fault or fault point the example is about fired in at least one of those runs.
+# the fault or fault point the example is about fired in at least one of those runs. stats-c's
+# stock build is ok on every seed (its race needs compute points).
 #@ tier=quick budget=20 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -37,6 +38,11 @@ example ledger 'violation always: ledger-sorted: after N' 1 --buggify -- "$E/led
 example journal-py 'violation always: journal-intact: N bytes' 1 --faults disk --mount "$E":/guest -- python3 /guest/journal.py
 example acklog-c 'violation always: acked-records-kept: N acknowledged, N stored' 1 --crash machine -- "$E/acklog"
 example bank-go 'violation always: balance-matches-deposits: balance N, deposits N' 1 --fault net-reset-permille=50 -- "$E/bank"
+example stats-c 'failure exit: lost updates: N of N jobs counted; exit 1' 0 -- "$E/stats-cp"
+# stats-c built without compute points: the race has no system call in it, so no seed finds it.
+rc=$(sweep "$RUNS/stats-c-stock" -- "$E/stats")
+echo "stats-c stock: exit $rc, $(jq -c .outcomes "$RUNS/stats-c-stock/report.json")"
+[ "$rc" = 0 ] || fail "stats-c stock: a finding without compute points"
 
 [ "$FAILS" = 0 ] || { echo "$FAILS check(s) failed"; exit 1; }
 echo "all checks passed"
