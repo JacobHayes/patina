@@ -240,6 +240,48 @@ with "this Rust toolchain (...) no longer accepts the compute-point flags", show
 Red/green: hooks whose slow path never says hello fail `compute/05-rust` (no image in `compute.images`).
 The SDK without the feature exports the same 16 symbols as before it and no `__sanitizer_*`.
 
+### Go
+
+`go/patina/compute` and `-gcflags=all=-d=libfuzzer`, go 1.27.3, `CGO_ENABLED=0`, the runtime
+unpatched. Guests `tests/guests/compute/go/`: `go-race` (16 rounds of a spin barrier, then an
+`atomic.Int64` check and `Add`), `go-deadline` (a CPU loop polling `ctx.Err()` under a 50 ms
+`context.WithTimeout`), and W4 (`go-static`) rebuilt with the import. Measured by hand,
+2026-11-16.
+
+| Check | Result |
+|---|---|
+| What the compiler instruments (`go tool objdump` of W4: 20,168 hook calls) | every package but `runtime` and its internal packages (`objabi` runtimePkgs: the compiler turns the flag off there); generic runtime code instantiated in user packages (`runtime.AddCleanup[...]`) is instrumented, as is code the runtime calls back: `sync.poolCleanup` (during a stop of the world) and `internal/godebug.update`. No hook between `entersyscall` and `exitsyscall` (the `syscall` wrappers compare nothing) |
+| The hooks | nosplit, no stack check, no allocation, no pointer store (the cell is a NOPTR word set in assembly), no Go comparison; the event, hello and point are assembly |
+| `go-race`, seeds 1-40 at `compute-gap=8`, `--cpus` 2 / 4; stock build at 4 | 19 / 20 / 0 double spends; seed 4 replays identical, and `verify --runs 5 --vary cpu,aslr,load` is identical |
+| `go-race` at the default gap, seeds 1-40 | 0 (one round only: 0 of 40 at `compute-gap=8`, hence 16 rounds) |
+| `go-deadline`, default gap, seeds 1-3 | `ok`, cut by its context at 50.44 / 50.04 / 50.01 virtual ms; 2 events per iteration; 0.2 s wall at mean gap 64514, 2.0 s at 115 |
+| `go-deadline` at `compute-gap=0` | not cut (runs to its bound): with no switch the timer's thread never runs; the deadline cut at gap 0 is separate work |
+| 2^28 iterations, wall: rebuilt under Patina at gap 0 / stock under Patina / natively rebuilt / natively stock | 1.25 s / 0.21 s / about 4.2 ns / 0.4 ns per iteration |
+| W4 rebuilt (`all`), seeds 1-20 | 20 `ok`, no `compute-stall`, `internal` or `nondeterministic`; about 918k events; `verify --runs 5 --vary cpu,load` seed 3 identical |
+| W4 `net` (HTTP server and 16 clients), seeds 1-5, median `wall_ms` | stock 22 ms, rebuilt 46 ms (about 90k events) |
+| `for !flag.Load() {}` on an `atomic.Bool` | has a hook (`Load` is `!= 0`, inlined and instrumented); `go-race boolspin` ends `ok` |
+| `go test -c` with the flag and the package | does not link: `duplicated definition of symbol runtime.libfuzzerTraceCmp1` (internal/fuzz; with `-tags libfuzzer`, the runtime). Build the scenario as a `main` package |
+
+Go preempts a loop without calls by a signal, honoured only at an asynchronous safe point.
+Under Patina a signal is delivered as a thread leaves the runtime, which after a compute point
+is inside the hook's assembly, never a safe point: in the first version a spin barrier at
+`--cpus 1` was never preempted (SIGURG at the hook's `ret`, every time) and each run logged a
+switch record every 8 events until `--timeout` (about 45 MB of boundary log per second of wall
+time; 6 runs filled 98 GB). The hooks now check the goroutine's stack guard after a point and,
+if the runtime has asked, call a function whose prologue takes the runtime's own preemption
+path. `go-race boolspin` at `--cpus 1` then ends `ok` (one preemption, 10 ms of virtual time,
+sysmon's interval); `go-race` at `--cpus 1`, `compute-gap=8` is still slow (one preemption per
+barrier wait, 10 ms of virtual time each, 1.4 million switches): 40 of 40 seeds reach a 15 s
+`--timeout`.
+
+The flag also adds libfuzzer's 8-bit edge counters (a byte increment per block): a spin with
+no comparison writes memory on every pass, so spin probes see it change and it ends
+`compute-stall` rather than yielding.
+
+Red/green: a fast path that never takes the slow path fails `compute/06-go` (`go-deadline`
+never cut); a hook whose `//go:linkname` the toolchain does not resolve fails the guests' build
+into `GO-BROKEN`, which `06-go` prints with the Go version.
+
 ## Costs
 
 | What | Cost |

@@ -3,3 +3,5 @@ tests/guests/counters
 tests/guests/threads
 tests/guests/costs
 crates/patina
+go/patina
+tests/guests/go-static/w4

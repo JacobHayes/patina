@@ -334,6 +334,23 @@ var balanceMatches = patina.Always("balance-matches-deposits")
 balanceMatches.Check(balance == deposits, "balance ", balance, ", deposits ", deposits)
 ```
 
+Compute points for Go (a scheduling point and 1 ns of virtual time at every integer and
+string comparison, the standard library included; the Go runtime is not instrumented): one
+blank import in package `main` and one compiler flag, no cgo.
+
+```go
+import _ "github.com/JacobHayes/patina/go/patina/compute"
+```
+
+```sh
+CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer -o app .
+```
+
+Built without the flag the program is unchanged. Built with the flag and without the import,
+the link fails with `reference to undefined builtin "runtime.libfuzzerTraceCmp8"`: add the
+import. `go test` binaries cannot use the flag (the testing package defines the same hooks);
+build the scenario as a `main` package instead.
+
 **Python**: one file, `sdk/python/patina.py`; copy it next to the program or put its
 directory on `PYTHONPATH`.
 
