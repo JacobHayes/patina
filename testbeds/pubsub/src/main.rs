@@ -1,33 +1,8 @@
-//! pubsub — a minimal single-process tokio pub-sub broker under Patina.
-//!
-//! One process runs a **broker** (TcpListener fan-in, per-topic registry,
-//! per-subscriber bounded queues, heartbeat timers), **subscriber** tasks, and
-//! **publisher** tasks, all as tokio tasks on one current-thread runtime over
-//! loopback TCP. Readiness multiplexing IS the app's core problem — many
-//! connections, timers, and backpressured queues on one event loop — which is
-//! why it is an async program: this is the classic single-threaded broker
-//! architecture (an I/O-bound fan-out gains nothing from CPU parallelism).
-//! Under Patina, mio's selector runs on the deterministic readiness reactor
-//! (kqueue on macOS, epoll on Linux) and every timer on the virtual clock.
-//!
-//! Self-checking, workq conventions. Outcomes are announced through the
-//! **verdict ABI** (`patina_dst::verdict`), not through the printed `PUBSUB_*`
-//! lines: an invariant breach reports a `Violation` under the invariant's label
-//! (exit 1), an internal broker fault reports an `AbortIntent` before failing
-//! closed (exit 2), and a clean run reports a `Pass` under `pubsub-outcome`
-//! carrying the outcome digest. The `PUBSUB_*` lines stay for log readability;
-//! nothing downstream needs them.
-//!
-//! As in workq, the outcomes with NO verdict are the liveness/transport misses
-//! (`PUBSUB_FAILURE`, exit 1): the verdict ABI has no liveness kind, and whether
-//! a run should have converged depends on the injected fault configuration the
-//! guest cannot see — Patina's liveness watchdog is that structural channel.
-//! The `PUBSUB_RESULT ... hash=` line is an
-//! order-invariant digest over the delivery outcome: per-topic payload digests
-//! are wrapping sums of per-message FNV values, so the hash does not depend on
-//! how two publishers' messages interleaved on a shared topic — for a fixed
-//! guest `--seed` it is identical across Patina schedule seeds and across
-//! platforms.
+//! pubsub: a single-process tokio pub-sub broker. One current-thread runtime
+//! runs a broker (TcpListener fan-in, per-topic registry, per-subscriber
+//! bounded queues, heartbeat timers) and its subscriber and publisher tasks over
+//! loopback TCP. At the end it audits exact per-subscriber delivery; a breach is
+//! reported through `patina_dst::violation` under the invariant's label (exit 1).
 
 mod broker;
 mod clients;
@@ -35,26 +10,19 @@ mod clients;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch};
 
 use clients::{PublisherSpec, StartGate, SubOutcome, SubscriberSpec, TopicFacts};
-use patina_dst::VerdictKind;
 
-/// Report one self-detected invariant breach: the verdict is the announcement,
-/// the printed line is the human echo of it. `label` names the invariant and
-/// aggregates across runs; `detail` carries the run-specific particulars.
+/// The broker's loopback port.
+const PORT: u16 = 6001;
+
+/// Report one self-detected invariant breach under the invariant's label; the
+/// detail carries the run's particulars. Under Patina this ends the run.
 fn report_violation(label: &str, detail: &str) {
-    patina_dst::verdict(VerdictKind::Violation, label, detail);
     eprintln!("PUBSUB_VIOLATION {label} {detail}");
-}
-
-/// Announce a deliberate fail-closed stop before exiting 2, so the abort is
-/// attributed to this guest rather than mistaken for a Patina refusal.
-fn report_abort(label: &str, detail: &str) {
-    patina_dst::verdict(VerdictKind::AbortIntent, label, detail);
-    eprintln!("PUBSUB_ABORT {label} {detail}");
+    patina_dst::violation(label, detail);
 }
 
 /// Split a self-reported breach into its invariant label (the leading token,
@@ -85,8 +53,8 @@ const QUEUE_DEPTH: usize = 8;
 /// pipeline on every clean run.
 const WINDOW: usize = 4;
 
-/// Planted bugs, one per async failure class, each a single legible site
-/// (workq's `--bug` convention). The clean program must never trip a marker.
+/// Planted bugs, one per async failure class, each a single legible site. The
+/// clean program must never trip one.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Bug {
     None,
@@ -129,7 +97,6 @@ struct Options {
     publishers: u32,
     /// Messages per publisher.
     messages: u64,
-    base_port: u16,
     timeout: Duration,
     bug: Bug,
 }
@@ -139,7 +106,7 @@ fn main() {
         eprintln!("error: {message}");
         eprintln!(
             "usage: pubsub [--seed N] [--topics N] [--subscribers N] [--publishers N] \
-             [--messages N] [--base-port N] [--timeout-secs N] [--bug NAME]\n\
+             [--messages N] [--timeout-secs N] [--bug NAME]\n\
              valid --bug names: {}",
             Bug::NAMES.join(", ")
         );
@@ -170,11 +137,11 @@ fn subscriber_topics(id: u32, topics: u32, subscribers: u32) -> Vec<String> {
 }
 
 async fn orchestrate(options: Options) -> i32 {
-    let addr = format!("127.0.0.1:{}", options.base_port);
+    let addr = format!("127.0.0.1:{PORT}");
     let listener = match TcpListener::bind(&addr).await {
         Ok(listener) => listener,
         Err(error) => {
-            report_abort("bind", &format!("{addr}: {error}"));
+            eprintln!("PUBSUB_ABORT bind {addr}: {error}");
             return 2;
         }
     };
@@ -218,7 +185,7 @@ async fn orchestrate(options: Options) -> i32 {
                 .await
                 .ok_or_else(|| "a subscriber exited before becoming ready".to_string())?;
         }
-        patina_dst::lifecycle::setup_complete(); // setup/workload boundary
+        patina_dst::setup_complete();
 
         // Every subscriber is registered: launch the publishers and release the
         // start gate. The LEVEL signal reaches each publisher whenever it first
@@ -273,7 +240,7 @@ async fn orchestrate(options: Options) -> i32 {
     let (published, reports, stats) = match tokio::time::timeout(options.timeout, drive).await {
         Ok(Ok(parts)) => parts,
         Ok(Err(message)) => {
-            report_abort("broker-fault", &message);
+            eprintln!("PUBSUB_ABORT broker-fault {message}");
             return 2;
         }
         Err(_) => {
@@ -295,7 +262,7 @@ fn report(
     heartbeats: u64,
 ) -> i32 {
     // (label, detail) per breach: the label names the invariant and is what
-    // verdicts aggregate on, so subscriber/topic particulars stay in the detail.
+    // findings group by, so subscriber/topic particulars stay in the detail.
     let mut violations: Vec<(String, String)> = Vec::new();
     let mut failures: Vec<String> = Vec::new();
     let mut delivered: u64 = 0;
@@ -345,18 +312,9 @@ fn report(
     }
 
     let total_published: u64 = published.values().map(|f| f.count).sum();
-    let outcome = format!(
-        "workload_seed={} topics={} subscribers={} publishers={} published={} \
-         delivered={} heartbeats={heartbeats} hash={}",
-        options.seed,
-        options.topics,
-        options.subscribers,
-        options.publishers,
-        total_published,
-        delivered,
-        outcome_hash(options, published, reports)
+    println!(
+        "PUBSUB_RESULT published={total_published} delivered={delivered} heartbeats={heartbeats}"
     );
-    println!("PUBSUB_RESULT {outcome}");
     if !violations.is_empty() {
         for (label, detail) in &violations {
             report_violation(label, detail);
@@ -376,50 +334,7 @@ fn report(
         );
         return 1;
     }
-    // Every invariant held and every message landed: the one place a `Pass` is
-    // meaningful. Its detail carries the order-invariant outcome digest, so a
-    // consumer reading only the verdict channel gets the `hash=` the
-    // cross-platform outcome-invariance property is stated over.
-    patina_dst::verdict(VerdictKind::Pass, "pubsub-outcome", &outcome);
     0
-}
-
-/// The order-invariant outcome fingerprint: one row per published topic and one
-/// per (subscriber, topic) delivery, each carrying the topic's count and its
-/// order-invariant payload digest (a wrapping sum of per-message FNV values),
-/// sorted and SHA-256'd. Nothing depends on fanout interleaving or completion
-/// order, so for a fixed guest seed the digest is schedule- and
-/// platform-invariant. `heartbeats` is schedule-sensitive and deliberately
-/// excluded (reported, workq's `attempts` convention).
-fn outcome_hash(
-    options: &Options,
-    published: &BTreeMap<String, TopicFacts>,
-    reports: &[clients::SubscriberReport],
-) -> String {
-    let mut rows: Vec<(u32, String, u64, u64)> = Vec::new();
-    for (topic, facts) in published {
-        // u32::MAX marks the publisher-side row, sorting after all subscribers.
-        rows.push((u32::MAX, topic.clone(), facts.count, facts.digest));
-    }
-    for sub in reports {
-        for (topic, facts) in &sub.received {
-            rows.push((sub.id, topic.clone(), facts.count, facts.digest));
-        }
-    }
-    rows.sort();
-    let mut hasher = Sha256::new();
-    hasher.update(options.seed.to_le_bytes());
-    for (who, topic, count, digest) in rows {
-        hasher.update(who.to_le_bytes());
-        hasher.update(topic.as_bytes());
-        hasher.update(count.to_le_bytes());
-        hasher.update(digest.to_le_bytes());
-    }
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
 }
 
 /// splitmix64: the seeded payload stream (pure function of guest seed,
@@ -449,7 +364,6 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         subscribers: 4,
         publishers: 2,
         messages: 16,
-        base_port: 6001,
         timeout: Duration::from_secs(30),
         bug: Bug::None,
     };
@@ -474,7 +388,6 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             "--subscribers" => o.subscribers = n("--subscribers")? as u32,
             "--publishers" => o.publishers = n("--publishers")? as u32,
             "--messages" => o.messages = n("--messages")?,
-            "--base-port" => o.base_port = n("--base-port")? as u16,
             "--timeout-secs" => o.timeout = Duration::from_secs(n("--timeout-secs")?),
             "--bug" => {
                 let name = val("--bug")?;

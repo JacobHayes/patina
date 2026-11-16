@@ -50,7 +50,7 @@ pub struct BrokerSpec {
 #[derive(Default)]
 pub struct BrokerStats {
     /// Total HB lines written across all subscriber connections
-    /// (schedule-sensitive; reported, never hashed).
+    /// (schedule-sensitive; reported only).
     pub heartbeats: u64,
 }
 

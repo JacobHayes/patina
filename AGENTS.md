@@ -26,7 +26,7 @@ updates the docs in the same commit.
 - `crates/patina-cli`: the `patina` binary: launcher, supervisor, CLI.
 - SDKs: `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`.
 - `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run.
-- `examples/`: small programs, one bug each; `testbeds/`: two larger ones for the nightly job.
+- `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the nightly job.
 
 Host: Linux x86_64, `bwrap`, unprivileged user namespaces (`patina doctor` says what is
 missing). rustup installs the pinned toolchain; mise supplies Go.
@@ -43,8 +43,8 @@ missing). rustup installs the pinned toolchain; mise supplies Go.
   raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
 - Every script declares `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N` and must
   fail on a planted break: show it red, then green.
-- `./check AREA` runs one area; `./check nightly` is the scheduled job (testbeds, 10 minutes,
-  not required); `./check list` shows every script.
+- `./check AREA` runs one area; `./check nightly` is the scheduled job
+  (`testbeds/pubsub` at 200 seeds, not required); `./check list` shows every script.
 
 A run that differs between repeats of one seed is a determinism bug until proven otherwise:
 find it, never retry it.
