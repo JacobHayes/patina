@@ -30,9 +30,10 @@
 //!   in the checks after writing; an iteration error reports `INVARIANT iterate-failed`
 //!   (the trial panicked in all three).
 //! - The trial's `fsync_dir("/tmp")` and `fsync_dir("/")` fsync the parent of the root.
-//! - "Injected" errors (UNJUDGED, exit 0) also include EMFILE and ENOMEM, which this tool
-//!   draws for `open`; an injected error opening or reading the ack file is UNJUDGED too
-//!   (the trial panicked there); so is one while wiping a partial database.
+//! - "Injected" errors (UNJUDGED, exit 0) also include EMFILE, ENFILE and ENOMEM, which
+//!   this tool draws for `open`, and EDQUOT, which it draws for writes; an injected error
+//!   opening or reading the ack file is UNJUDGED too (the trial panicked there); so is one
+//!   creating the root or wiping a partial database.
 
 use fjall::{Database, Keyspace, KeyspaceCreateOptions, PersistMode};
 use std::fs::{File, OpenOptions};
@@ -117,11 +118,13 @@ fn fsync_dir(p: &Path) {
     }
 }
 
-/// Errnos the fault injector can return (EIO, ENOSPC, EINTR as in the trial, plus EMFILE
-/// and ENOMEM, which this tool also draws for `open`): an open that fails with one of
-/// these cannot be judged.
+/// Errnos the fault injector can return (EIO, ENOSPC, EINTR as in the trial, plus EMFILE,
+/// ENFILE and ENOMEM, which this tool also draws for `open`, and EDQUOT for writes): an
+/// open that fails with one of these cannot be judged.
 fn is_injected_io(d: &str) -> bool {
-    ["code: 5,", "code: 28,", "code: 4,", "code: 24,", "code: 12,"].iter().any(|c| d.contains(c))
+    ["code: 5,", "code: 28,", "code: 4,", "code: 24,", "code: 23,", "code: 12,", "code: 122,"]
+        .iter()
+        .any(|c| d.contains(c))
 }
 
 fn unjudged(what: &str, e: std::io::Error) -> ! {
@@ -351,7 +354,9 @@ fn main() {
         always(have2 == have + 50, "post-recovery-writes-land");
         println!("recovered {have} then {have2}");
     } else {
-        std::fs::create_dir_all(root).expect("mkdir root");
+        if let Err(e) = std::fs::create_dir_all(root) {
+            unjudged("mkdir root", e);
+        }
         fsync_dir(root.parent().unwrap_or(Path::new("/")));
         if !run_workload(root, 0, n) {
             return;

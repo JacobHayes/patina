@@ -107,7 +107,7 @@ background sweeper polling an idle heap does not; spin probes find it.
 | Spin table, 7 spin-waits, system calls only (`pause-points = false`, `spin-probes = false`) | glibc spin lock, C spin lock and Rust spin lock (each with a call inside) `compute-stall` 20/20; the 4 others `ok` |
 | Spin table, pause points only | 140/140 `ok` |
 | Spin table, default | 140/140 `ok` |
-| W1-W9, default, with their faults | no `compute-stall`; W8 `sockets all` fails 20/20 (limit below); W9 seed 5 fails on an injected `ENFILE` after a crash; the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
+| W1-W9, default, with their faults | no `compute-stall`; W8 `sockets all` fails 20/20 on an injected reset (its faults draw `net-reset-permille=30` for every send, so every seed resets a connection, and the guest exits on `ECONNRESET`); W9 seed 5 failed on an injected `ENFILE` after a crash, which the harness judged a finding (fixed; `storage/11-unjudged`); the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
 | W4 (stock Go), 100 seeds, spin probes off / on | `compute-stall` 92/100 / 0/100 |
 | go-sweep, 100 seeds, spin probes off / on | 99/100 / 0/100 |
 | go-sweep at 24 CPUs, 100 seeds, spin probes off / on | 97/100 / 0/100 |
@@ -209,7 +209,6 @@ and `get`/`setpriority`; anything outside Linux x86_64.
   memory; `/tmp` is not tracked; the initial tree has no times (virtual epoch).
 - Go `os/exec` deadlocks when an injected `EIO` hits its status-pipe read (Linux never does
   that).
-- W8's `sockets all` mode fails every seed under network faults (it checks exact transfers).
 - Repeat stability is shown on five more hosts ("Second hosts"); the long matrix, soaks and
   time variant are from one host only.
 
