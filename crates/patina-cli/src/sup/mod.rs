@@ -70,6 +70,7 @@ pub mod signal;
 mod stall;
 #[allow(dead_code)]
 pub mod time;
+pub mod udp;
 mod vtgc;
 pub mod wire;
 
@@ -93,6 +94,8 @@ struct Sup {
     procs: proc::Procs,
     /// The network wire.
     wire: wire::Wire,
+    /// Datagram sockets.
+    udp: udp::Udp,
 }
 
 /// What a request does with the turn.
@@ -669,6 +672,9 @@ impl Sup {
                 | Op::WireSent
                 | Op::WireQuery),
             ) => self.wire_op(op, a),
+            Some(op @ (Op::UdpSocket | Op::UdpBind | Op::UdpConnect | Op::UdpSend)) => {
+                self.udp_op(op, a)
+            }
             None => self.finish(Verdict::new("infra", format!("unknown request {}", req.op))),
         }
     }
@@ -861,12 +867,16 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         sig: signal::Signals::new(MAX_THREADS),
         procs: proc::Procs::default(),
         wire: wire::Wire::default(),
+        udp: udp::Udp::default(),
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
         sup.finish(Verdict::new("infra", e));
     }
     if let Err(e) = sup.wire.init() {
+        sup.finish(Verdict::new("infra", e));
+    }
+    if let Err(e) = sup.udp.init() {
         sup.finish(Verdict::new("infra", e));
     }
 

@@ -582,6 +582,11 @@ pub enum Op {
     WireAccepted = 53,
     WireSent = 54,
     WireQuery = 55,
+    /// Datagram sockets, see `UDP_*` below.
+    UdpSocket = 56,
+    UdpBind = 57,
+    UdpConnect = 58,
+    UdpSend = 59,
     /// A failed `always` (`sdk`): the run ends as `violation`; the message is in the SDK table.
     /// args: [op, payload pointer, length] of the trap. Never answered.
     SdkViolation = 60,
@@ -612,6 +617,26 @@ pub const DEC_WIRE_RST: u32 = 0x144;
 pub const DEC_WIRE_FAIL: u32 = 0x145;
 pub const DEC_WIRE_CLOSE: u32 = 0x146;
 
+/// Datagram-socket requests (`patina/src/sup/udp.rs`). Socket indexes as for the wire.
+///
+/// - `UdpSocket`: [index, family]: the runtime connected the real `SOCK_SEQPACKET` socket to
+///   `@patina-udp` and sent the preamble. Reply 0.
+/// - `UdpBind`: [index, port (0: allocate), address kind, `UDP_REUSEADDR`|`UDP_REUSEPORT`|`UDP_V6ONLY`].
+///   Reply the port or -errno (`EADDRINUSE`, `EADDRNOTAVAIL`).
+/// - `UdpConnect`: [index, port, address kind, 1: connect | 0: disconnect | 2: the read side
+///   was shut down (queue a wake marker)]. Reply 0.
+/// - `UdpSend`: [index, destination port, destination address kind, payload bytes]: the
+///   runtime has written the payload as one packet; the supervisor reads it now. Reply 0.
+pub const UDP_REUSEADDR: u64 = 1;
+pub const UDP_REUSEPORT: u64 = 2;
+pub const UDP_V6ONLY: u64 = 4;
+/// Decision codes of datagrams: `DEC_UDP_SEND` [id, source port, destination port, bytes,
+/// delivery time (0: lost), fate (`UF_*` bits)]; `DEC_UDP_DELIVER` [id, receiving socket
+/// index + 1 (0: none), bytes, outcome (`UD_*`), 1 for a duplicate]; `DEC_UDP_CLOSE` [index, port].
+pub const DEC_UDP_SEND: u32 = 0x147;
+pub const DEC_UDP_DELIVER: u32 = 0x148;
+pub const DEC_UDP_CLOSE: u32 = 0x149;
+
 /// `TimerFdSet` sub-operations.
 pub const TFD_CREATE: u64 = 0;
 pub const TFD_ARM: u64 = 1;
@@ -631,7 +656,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 32] = [
+        const ALL: [Op; 36] = [
             Hello,
             Yield,
             Sleep,
@@ -662,6 +687,10 @@ impl Op {
             WireAccepted,
             WireSent,
             WireQuery,
+            UdpSocket,
+            UdpBind,
+            UdpConnect,
+            UdpSend,
             SdkViolation,
             VtReclaim,
         ];
@@ -700,6 +729,10 @@ impl Op {
             WireAccepted => "WireAccepted",
             WireSent => "WireSent",
             WireQuery => "WireQuery",
+            UdpSocket => "UdpSocket",
+            UdpBind => "UdpBind",
+            UdpConnect => "UdpConnect",
+            UdpSend => "UdpSend",
             SdkViolation => "SdkViolation",
             VtReclaim => "VtReclaim",
         }

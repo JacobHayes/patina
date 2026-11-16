@@ -95,13 +95,13 @@ setting replaces it, and the same sweep with more seeds runs only the new ones.
 ## What works
 
 Any Linux x86_64 executable: static or dynamic, Rust, C, C++, Go, Python, shell scripts and
-the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals and TCP on
-localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
+the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals and TCP and
+UDP on localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
 that starts at the same time every run, an empty writable `/work` as its working directory.
 
-What it does not do: UDP and other non-TCP network sockets (the call fails with an error,
-and `patina run` lists it under `refused:`),
-connections to anything outside the run, and macOS or arm64 hosts. A call Patina does not
+What it does not do: network sockets other than TCP and UDP, multicast and broadcast (the
+call fails with an error, and `patina run` lists it under `refused:`), DNS beyond
+`/etc/hosts`, connections to anything outside the run, and macOS or arm64 hosts. A call Patina does not
 model ends the run `unsupported` and names it. [ARCHITECTURE.md](ARCHITECTURE.md#limits)
 lists the limits.
 

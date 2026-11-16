@@ -22,6 +22,8 @@ const AF_UNIX: u64 = 1;
 const AF_NETLINK: u64 = 16;
 const AF_PACKET: u64 = 17;
 const SOCK_STREAM: u64 = 1;
+const SOCK_DGRAM: u64 = 2;
+const IPPROTO_UDP: u64 = 17;
 const SOCK_NONBLOCK: u64 = 0o4000;
 const SOCK_CLOEXEC: u64 = 0o2000000;
 const IPPROTO_TCP: u64 = 6;
@@ -48,16 +50,16 @@ const EALREADY: i64 = 114;
 const EINPROGRESS: i64 = 115;
 const ENOPROTOOPT: i64 = 92;
 
-fn tab() -> &'static mut WireTab {
+pub(super) fn tab() -> &'static mut WireTab {
     unsafe { WireTab::at(crate::state::ctl_base()) }
 }
 
-fn sock(i: usize) -> &'static mut WSock {
+pub(super) fn sock(i: usize) -> &'static mut WSock {
     &mut tab().socks[i]
 }
 
 /// Table index of the socket open on `fd` (any socket), None for other objects.
-fn idx_of(fd: i64) -> Option<usize> {
+pub(super) fn idx_of(fd: i64) -> Option<usize> {
     let st = super::fs::fstat_raw(fd)?;
     if st[3] as u32 & 0o170000 != 0o140000 {
         return None;
@@ -71,6 +73,23 @@ pub fn wire_idx(fd: i64) -> Option<usize> {
     idx_of(fd).filter(|&i| sock(i).family != 0)
 }
 
+/// Index of the UDP socket open on `fd`, if it is one. Allocates no virtual inode number
+/// (a wire socket has had one since it was made), so asking about any other descriptor
+/// leaves the run as it was.
+pub fn dgram_idx(fd: i64) -> Option<usize> {
+    let st = super::fs::fstat_raw(fd)?;
+    if st[3] as u32 & 0o170000 != 0o140000 {
+        return None;
+    }
+    let i = (crate::vino::find(st[0], st[1])? - VINO_BASE) as usize;
+    (i < VINO_CAP && sock(i).family != 0 && is_dgram(i)).then_some(i)
+}
+
+/// Is wire socket `i` a datagram (UDP) socket?
+pub fn is_dgram(i: usize) -> bool {
+    sock(i).flags & WF_DGRAM != 0
+}
+
 /// Bytes or a close may be waiting at the hidden end of socket `i`.
 pub fn mark(i: usize) {
     tab().mark(i);
@@ -81,18 +100,23 @@ pub fn mark_all() {
     tab().scan_all = 1;
 }
 
-fn sup(op: Op, a: [u64; 6]) -> i64 {
+pub(super) fn sup(op: Op, a: [u64; 6]) -> i64 {
     crate::sup::call_sup(op, a).ret
 }
 
-fn refuse(what: &[u8]) {
+pub(super) fn refuse(what: &[u8]) {
     unsafe { proto::vfs::Vfs::at(crate::state::ctl_base()) }.refuse(what);
 }
 
 // ---- addresses ----
 
 /// (port, address kind) of a guest `sockaddr_in`/`sockaddr_in6`, or -errno.
-fn parse_addr(family: u16, addr: u64, len: u64, connect: bool) -> Result<(u16, u8), i64> {
+pub(super) fn parse_addr(
+    family: u16,
+    addr: u64,
+    len: u64,
+    connect: bool,
+) -> Result<(u16, u8), i64> {
     if addr == 0 {
         return Err(-e::EFAULT);
     }
@@ -163,7 +187,7 @@ fn parse_addr(family: u16, addr: u64, len: u64, connect: bool) -> Result<(u16, u
 }
 
 /// Write the address `(kind, port)` as the socket's family sees it to `addr`/`*alen`.
-fn put_addr(family: u16, kind: u8, port: u16, addr: u64, alen: u64) -> i64 {
+pub(super) fn put_addr(family: u16, kind: u8, port: u16, addr: u64, alen: u64) -> i64 {
     if addr == 0 || alen == 0 {
         return 0;
     }
@@ -210,14 +234,17 @@ fn socket(call: &mut dyn Call) -> Action {
     let [dom, ty, proto_, ..] = args(call);
     let family = dom as u16;
     let base = ty & !(SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if base == SOCK_DGRAM {
+        if proto_ != 0 && proto_ != IPPROTO_UDP {
+            // ICMP echo, UDP-Lite: no wire.
+            refuse(b"socket:dgram-proto");
+            return Action::Return(-EPROTONOSUPPORT);
+        }
+        return super::udp::socket(call, family, ty);
+    }
     if base != SOCK_STREAM {
-        // UDP, raw: no wire. Refused with an errno so that glibc's address sorting and
-        // resolvers that would need DNS fail fast instead of ending the run.
-        refuse(if base == 2 {
-            b"socket:udp"
-        } else {
-            b"socket:raw"
-        });
+        // Raw sockets: no wire. Refused with an errno so that the program can fall back.
+        refuse(b"socket:raw");
         return Action::Return(-ESOCKTNOSUPPORT);
     }
     if proto_ != 0 && proto_ != IPPROTO_TCP {
@@ -618,9 +645,13 @@ fn unknown_opt(level: i32, name: i32) -> i64 {
     -ENOPROTOOPT
 }
 
-fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
+pub(super) fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
     let [fd, level, name, val, len, ..] = args(call);
     let (level, name) = (level as i32, name as i32);
+    let dgram = is_dgram(i);
+    if dgram && level == 6 {
+        return -ENOPROTOOPT; // TCP options on a UDP socket: what Linux answers
+    }
     // Timeouts are the blocking I/O park deadlines, read back from the real socket; SO_RCVLOWAT is real.
     if level == SOL_SOCKET && matches!(name, 18 | 20 | 21 | 66 | 67) {
         let r = raw(call);
@@ -653,6 +684,8 @@ fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
         unsafe { *(val as *const i32) }
     };
     let v = if level == SOL_SOCKET && (name == 7 || name == 8) {
+        // UDP: an unprivileged request is capped at rmem_max/wmem_max before doubling.
+        let v = if dgram { v.clamp(0, DGRAM_BUF_MAX) } else { v };
         v.saturating_mul(2).max(4608)
     } else {
         v
@@ -675,11 +708,15 @@ fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
     0
 }
 
-fn getsockopt(call: &mut dyn Call, i: usize) -> i64 {
+pub(super) fn getsockopt(call: &mut dyn Call, i: usize) -> i64 {
     let [fd, level, name, val, lenp, ..] = args(call);
     let fd = fd as i32 as i64;
     let (level, name) = (level as i32, name as i32);
     let s = *sock(i);
+    let dgram = is_dgram(i);
+    if dgram && level == 6 {
+        return -ENOPROTOOPT;
+    }
     let cap = match get::<u32>(lenp) {
         Ok(c) => c as i32,
         Err(e) => return e,
@@ -700,6 +737,10 @@ fn getsockopt(call: &mut dyn Call, i: usize) -> i64 {
     };
     let int = |v: i32| out(&v.to_ne_bytes());
     match (level, name) {
+        (SOL_SOCKET, 4) if dgram => int(super::udp::take_err(i) as i32),
+        (SOL_SOCKET, 3) if dgram => int(SOCK_DGRAM as i32),
+        (SOL_SOCKET, 38) if dgram => int(IPPROTO_UDP as i32),
+        (SOL_SOCKET, 7 | 8) if dgram => int(s.opt(key(level, name)).unwrap_or(DGRAM_BUF_DEFAULT)),
         (SOL_SOCKET, 4) => {
             // SO_ERROR: the wire's pending error (a failed connect); a reset not yet reported.
             let e = if s.err != 0 {
@@ -999,6 +1040,9 @@ fn recvmsg(call: &mut dyn Call, i: usize) -> i64 {
 /// read/write/readv/writev/preadv2/pwritev2 on a wire socket: blocking I/O's attempt path, with TCP's
 /// conventions around it.
 pub fn rw(call: &mut dyn Call, i: usize) -> i64 {
+    if is_dgram(i) {
+        return super::udp::rw(call, i);
+    }
     let fd = call.arg(0) as i32 as i64;
     let write = matches!(call.nr(), 1 | 20 | 328);
     if write {
@@ -1020,6 +1064,10 @@ pub fn rw(call: &mut dyn Call, i: usize) -> i64 {
 /// non-blocking for the call only, parking while the socket is full; continued to the full
 /// count like a blocking send.
 pub fn sendfile(call: &mut dyn Call, i: usize) -> i64 {
+    if is_dgram(i) {
+        refuse(b"sendfile:udp");
+        return -e::EINVAL;
+    }
     let [out, inp, off, count, ..] = args(call);
     let fd = out as i32 as i64;
     if let Some(r) = send_check(fd, i) {
@@ -1084,6 +1132,9 @@ pub fn socket_call(call: &mut dyn Call) -> Option<Action> {
 
 /// A call on wire socket `i` (descriptor in argument 0).
 pub fn handle(call: &mut dyn Call, i: usize) -> Action {
+    if is_dgram(i) {
+        return super::udp::handle(call, i);
+    }
     let r = match call.nr() {
         49 => bind(call, i),
         50 => listen(call, i),

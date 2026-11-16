@@ -30,6 +30,15 @@ pub fn of(dev: u64, ino: u64) -> u64 {
     VINO_BASE + n as u64
 }
 
+/// The virtual number of `(dev, ino)` if it has one; allocates nothing.
+pub fn find(dev: u64, ino: u64) -> Option<u64> {
+    let v = vfs();
+    (0..v.vino_used as usize)
+        .rev()
+        .find(|&i| v.vino[i].dev == dev && v.vino[i].ino == ino)
+        .map(|i| VINO_BASE + i as u64)
+}
+
 /// The virtual number of the object open on `fd` (None if `fd` is not open).
 #[allow(dead_code)] // the interface the network wire keys sockets by
 pub fn of_fd(fd: i64) -> Option<u64> {

@@ -105,7 +105,11 @@ const EDQUOT: i32 = 122;
 /// object. The injector draws from this table and from nothing else; an empty slice means
 /// the call is never failed with an error (pipes and unix sockets get short transfers and
 /// delays only; `close` fails only on a regular file, after closing it). `EINTR` is added
-/// by the runtime, with `fs-eintr=1`, where `eintr_ok` says so.
+/// by the runtime, with `fs-eintr=1`, where `eintr_ok` says so. Network faults draw no errno
+/// here: TCP's act on the wire (a reset answers `ECONNRESET`, a refused connect
+/// `ECONNREFUSED`), and a datagram fault loses, duplicates or holds the datagram, so a UDP
+/// call never fails from a fault (`ECONNREFUSED` on a connected UDP socket is a port nobody
+/// holds, as Linux reports it).
 pub fn errnos(obj: Obj, c: FClass, creating: bool) -> &'static [i32] {
     match (obj, c) {
         (Obj::Mem, FClass::Mem) => &[ENOMEM],

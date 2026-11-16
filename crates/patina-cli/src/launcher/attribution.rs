@@ -20,7 +20,8 @@ use crate::result::NET_FIELDS;
 use proto::faults::*;
 use proto::rec::{Rec, RecKind, REC_SIZE};
 use proto::wire::{
-    INJ_NET_CHUNK, INJ_NET_PARTITION, INJ_NET_REFUSE, INJ_NET_RESET, INJ_NET_TIMEOUT,
+    INJ_NET_CHUNK, INJ_NET_DROP, INJ_NET_DUP, INJ_NET_PARTITION, INJ_NET_PARTITION_DROP,
+    INJ_NET_REFUSE, INJ_NET_REORDER, INJ_NET_RESET, INJ_NET_TIMEOUT,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, VecDeque};
@@ -47,6 +48,10 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_NET_TIMEOUT => "net-connect-timeout",
         INJ_NET_PARTITION => "net-partition",
         INJ_NET_CHUNK => "net-chunk",
+        INJ_NET_DROP => "net-drop",
+        INJ_NET_DUP => "net-dup",
+        INJ_NET_REORDER => "net-reorder",
+        INJ_NET_PARTITION_DROP => "net-partition",
         _ => return None,
     })
 }
@@ -83,6 +88,9 @@ fn class_of_key(k: &str) -> Option<&'static str> {
         "net-connect-timeout-permille" => "net-connect-timeout",
         "net-partition" => "net-partition",
         "net-halfclose-delay-ms" => "net-halfclose",
+        "net-drop-permille" => "net-drop",
+        "net-dup-permille" => "net-dup",
+        "net-reorder-permille" => "net-reorder",
         "crash" => "crash",
         _ => return None,
     })
@@ -148,6 +156,14 @@ impl Faults {
                     e["thread"] = json!(r.slot);
                     e["call"] = json!(proto::table::name(r.nr as u64));
                 }
+                // Datagram faults: the datagram, its source and destination ports.
+                None if (INJ_NET_DROP..=INJ_NET_PARTITION_DROP).contains(&kind) => {
+                    e["object"] = json!(format!("udp:{port}"));
+                    e["datagram"] = json!(by);
+                    e["from"] = json!(r.args[5]);
+                    e["to"] = json!(port);
+                    e["call"] = json!(proto::table::name(r.nr as u64));
+                }
                 // The wire's records: the connection's server port.
                 None => e["object"] = json!(format!("tcp:{port}")),
             }
@@ -183,6 +199,8 @@ impl Faults {
                     e["bytes"] = json!(value);
                 }
                 INJ_NET_CHUNK => e["bytes"] = json!(value),
+                INJ_NET_DROP | INJ_NET_DUP | INJ_NET_PARTITION_DROP => e["bytes"] = json!(value),
+                INJ_NET_REORDER => e["delay_ns"] = json!(value),
                 _ => {}
             }
             self.push(e);
@@ -219,13 +237,18 @@ impl Faults {
             }
             let kind = KIND_NAMES.iter().position(|n| *n == c);
             let (connections, chunks, fins, sends) = (net[0], net[2], net[11], net[12]);
+            let datagrams = net[13];
             let (eligible, injected) = match c {
                 "crash" => (self.crash_points, self.crashes),
-                "net-delay" => (chunks, chunks),
+                // One delay per TCP delivery and per datagram sent.
+                "net-delay" => (chunks + datagrams, chunks + datagrams),
                 "net-halfclose" => (fins, fins),
                 // Drawn for every read of data a guest sent, not once per connection.
                 "net-reset" => (sends, got(c)),
-                "net-chunk" | "net-partition" => (chunks, got(c)),
+                "net-chunk" => (chunks, got(c)),
+                "net-partition" => (chunks + datagrams, got(c)),
+                // Drawn once for every datagram sent.
+                "net-drop" | "net-dup" | "net-reorder" => (datagrams, got(c)),
                 _ if c.starts_with("net-") => (connections, got(c)),
                 _ => (kind.map_or(0, |i| self.eligible[i]), got(c)),
             };
@@ -295,6 +318,30 @@ pub fn line(f: &Value) -> String {
         s("vtime_ms").unwrap_or_default(),
         s("fault").unwrap_or_default()
     );
+    if let Some(d) = s("datagram") {
+        // A datagram fault reads as what happened to which datagram.
+        let what = match s("fault").as_deref() {
+            Some("net-drop") => "dropped",
+            Some("net-dup") => "duplicated",
+            Some("net-reorder") => "held back",
+            _ => "lost in a partition:",
+        };
+        out = format!(
+            "seq {} t={}ms {} {what} datagram {d} from :{} to :{}",
+            s("seq").unwrap_or_default(),
+            s("vtime_ms").unwrap_or_default(),
+            s("fault").unwrap_or_default(),
+            s("from").unwrap_or_default(),
+            s("to").unwrap_or_default(),
+        );
+        if let Some(b) = s("bytes") {
+            out.push_str(&format!(" ({b} bytes)"));
+        }
+        if let Some(n) = s("delay_ns") {
+            out.push_str(&format!(" by {n} ns"));
+        }
+        return out;
+    }
     if let Some(m) = s("swap") {
         // A path swap reads as what happened to the path between the two calls.
         let (t, call) = (

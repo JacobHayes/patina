@@ -374,7 +374,8 @@ What the numbers say:
 ## Known limits
 
 Not implemented (run ends `unsupported` or the call is refused): `timer_create`,
-`ITIMER_VIRTUAL`/`ITIMER_PROF`; UDP, raw, netlink and packet sockets; `sched_*` policy calls
+`ITIMER_VIRTUAL`/`ITIMER_PROF`; raw, netlink and packet sockets, UDP multicast and broadcast;
+`sched_*` policy calls
 and `get`/`setpriority`; anything outside Linux x86_64.
 
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
@@ -397,7 +398,10 @@ and `get`/`setpriority`; anything outside Linux x86_64.
 - Network differences from TCP a guest can see: no `POLLERR` on reset; `EPIPE` without a round
   trip; socket buffer and TCP options recorded and inert; `MSG_OOB` refused; no source
   address from `recvfrom`; one `connect` per socket; a reset in the accept queue fails
-  `accept` with `ECONNABORTED`.
+  `accept` with `ECONNABORTED`. UDP: a receive carries no ancillary data; `recvmmsg` returns
+  once one datagram is there; a datagram's `SO_RCVBUF` charge is at least the kernel's, so a
+  queue may drop slightly earlier than Linux; an unreachable port gives `ECONNREFUSED` only to
+  a connected sender, and makes the socket readable, not `POLLERR`.
 - Blocking-I/O gaps: `sendfile`/`copy_file_range`/`splice` with a socket or pipe side answer
   `EINVAL`; `F_SETLKW` deadlock detection is absent; `ppoll`/`pselect6`/`epoll_pwait` masks
   are not applied; `poll` restarts with the full timeout.
@@ -491,6 +495,32 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   W9 at seed 3, faults off and on, have the same digests as the build before path swaps (18 of
   18), and `tests/determinism/05-faultplan.sh` checks the W3 log is unchanged up to the first
   swap and that an enabled class that never fires leaves the digest unchanged.
+- **UDP** (`tests/net/09-udp.sh`, 6.3 s, adds about 3 s to `quick`; guests in
+  `tests/guests/udp`): a C request/response pair that retries on timeout is `ok` with faults
+  off and under `net-drop-permille=200`; its variant without a retry ends `liveness` at the
+  first seed tried under `net-drop-permille=50` (seeds 1, 2 and 3 all do) with
+  `net-drop dropped datagram 9 from :32769 to :32768` last, and replays `identical`. A reader
+  that trusts datagram order fails at the first seed under the default delivery jitter alone;
+  one that orders by sequence number is `ok`. Red/green: making every datagram's delay the
+  same constant makes the order-trusting reader pass seeds 1..8 and fails the check. Stock Go
+  (`net.ListenPacket`, `DialUDP` with read deadlines), CPython (`socket` threads and
+  `asyncio` datagram endpoints) and tokio are identical under `verify --runs 3 --vary
+  cpu,aslr`, `ECONNREFUSED` from a connected send to a port nobody holds included. Lookups of
+  `localhost` and `unknown.example` in C (`getaddrinfo`: `127.0.0.1`, then `EAI_NONAME`), Go
+  (`[127.0.0.1 ::1]`, then "no such host" with `IsNotFound`) and Python (`gaierror -2`) are
+  identical across runs and send no datagram (`net.datagrams` 0). Plan independence
+  (`tests/determinism/05-faultplan.sh`, workload U1): with `net-drop-permille`,
+  `net-dup-permille` or `net-reorder-permille` added, the first record that differs is the
+  first injected fault. Stock TCP invariance: W1 to W9, W8 under `--faults net` and a fixed
+  network plan, `rs-net`, `tokio-echo` and `go-net` (plain and `--faults net`) and `py-net`,
+  seeds 1-2, give the same digest and outcome under the build before UDP and after (34 of 34).
+  A program that only looks names up can still differ: glibc's `getaddrinfo`, given two or
+  more addresses for a name, connects a UDP socket to each to order them, which used to fail;
+  its runs now make those sockets (the same in every run). Review fixes, each with a check in
+  `udp semantics` that fails without it: an error marker is queued once per socket, not once
+  per refused datagram (a sender ignoring 2,000 refusals could fill the hidden end, hold later
+  deliveries and never wake its reader); `FIONREAD` leaves a pending `ECONNREFUSED` pending;
+  `shutdown(SHUT_RD)` wakes a thread in `poll`.
 
 ## Sweeps
 

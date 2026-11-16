@@ -18,6 +18,7 @@ wl() {
     W6) GDIR=$WL/shell-pipeline; CMD="/bin/sh /guest/w6.sh"; FAULTS="--fault fs-error-permille=20" ;;
     W7) GDIR=$GU; CMD="/guest/exec-matrix" ;;
     W8) GDIR=$GU; CMD="/guest/sockets all"; FAULTS=$NETF ;;
+    U1) GDIR=$GU; CMD="/guest/udp rpc retry"; FAULTS="--fault net-drop-permille=100 --fault net-dup-permille=50 --fault net-reorder-permille=50" ;;
     W9) GDIR=$W/fjall-harness; CMD="/guest/fjall-harness-release"; FAULTS="--crash machine:5 --fault fs-error-permille=2" ;;
     churn) GDIR=$G12; CMD="/guest/churn 300 2000" ;;
     pipeprobe) GDIR=$G12; CMD="/guest/pipeprobe 300" ;;

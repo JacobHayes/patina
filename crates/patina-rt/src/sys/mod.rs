@@ -19,6 +19,7 @@ pub mod sig;
 pub mod thread;
 pub mod time;
 pub mod timerfd;
+pub mod udp;
 pub mod unixsock;
 
 use crate::raw::*;

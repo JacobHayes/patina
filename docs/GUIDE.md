@@ -54,9 +54,11 @@ where a program expects its data, and it is still the working directory and `HOM
 one work tree; other places a program writes (`/tmp`, a `:copy` mount) are writable but not
 crash-modelled.
 
-The guest sees no network beyond itself: a connection to another host fails with
-`Network is unreachable`, and DNS finds nothing. Servers and clients must run in the same
-program or in programs it starts.
+The guest sees no network beyond itself: a connection or datagram to another host fails with
+`Network is unreachable`, and names resolve from the sandbox's `/etc/hosts` only (`localhost`
+works; any other name is not found, and no lookup sends a packet). Servers and clients must
+run in the same program or in programs it starts. TCP and UDP work on loopback and on the
+addresses `/etc/hosts` gives; multicast, broadcast and raw sockets are refused.
 
 `patina run` prints the outcome and the run directory; when the run is not ok, also the last
 lines of the program's stderr and the faults injected, and any calls Patina refused (the
@@ -239,16 +241,31 @@ settings.
 | Preset | Settings |
 |---|---|
 | `--faults disk` | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
-| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10` |
+| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
 | `--faults all` | both, plus `mem-error-permille=0..2` |
 
 `--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --help`
 lists every key. Disk faults act on files under `/work`, pipes and unix sockets; an injected
 error is one Linux can return for that call on that object. Network faults act on TCP
-connections: a reset is drawn on each piece of data a program sends, so a long-lived (keep-alive)
-connection meets one; a refusal or timeout is drawn once per connect. `mem-limit-mb=N` makes
-memory requests past N MiB fail with `ENOMEM`. `result.json`'s `faults.counts` gives per
-class the calls (or sends, connections, deliveries) it was drawn on and the faults it
+connections and UDP datagrams: a reset is drawn on each piece of data a program sends, so a
+long-lived (keep-alive) connection meets one; a refusal or timeout is drawn once per connect.
+Each datagram gets its own delivery time in the `net-delay-ms` range, so datagrams already
+arrive out of order within that jitter; `net-drop-permille`, `net-dup-permille` and
+`net-reorder-permille` (held back past later datagrams) are drawn per datagram, and a
+datagram due inside a `net-partition` window is lost. A receive queue past the socket's
+`SO_RCVBUF` drops datagrams with no fault, as Linux does. A request/response protocol with
+no retry, run with `--fault net-drop-permille=50`:
+
+```text
+liveness (deadlock): every thread is blocked with no deadline: slot=0 tid=2 wait=io gen=19 fd=3 dir=in call=poll nfds=1 deadline=none; slot=1 tid=3 wait=io gen=19 fd=3 dir=in call=recvfrom nfds=1 deadline=none
+faults injected: 1 (net-drop 1)
+last injected:
+  seq 147 t=100000ms net-drop dropped datagram 9 from :32769 to :32768 (3 bytes)
+```
+
+`mem-limit-mb=N` makes memory requests past N MiB fail with `ENOMEM`. `result.json`'s
+`faults.counts` gives per class the calls (or sends, connections, deliveries, datagrams) it
+was drawn on and the faults it
 injected; `faults.injected` is their sum.
 
 A failing group says which fault classes were injected in every failing run, and in none:

@@ -211,7 +211,7 @@ fn name_alive(port: u16) -> bool {
     r != 0 && e == libc::EADDRINUSE
 }
 
-fn pollhup(fd: i32) -> bool {
+pub(super) fn pollhup(fd: i32) -> bool {
     let mut p = libc::pollfd {
         fd,
         events: 0,
@@ -314,7 +314,7 @@ impl Wire {
 }
 
 impl Sup {
-    fn wire_decide(&mut self, code: u32, args: [u64; 6]) {
+    pub(super) fn wire_decide(&mut self, code: u32, args: [u64; 6]) {
         WireTab::inc(&tab(self.ctl).counters.steps, 1);
         self.decide(code, 0, args, 0);
     }
@@ -344,7 +344,7 @@ impl Sup {
         s.store(s.load(Relaxed) + 1, Relaxed);
     }
 
-    fn bump_gen(&self) {
+    pub(super) fn bump_gen(&self) {
         self.ctl
             .io
             .gen
@@ -355,7 +355,7 @@ impl Sup {
         tab(self.ctl).cfg
     }
 
-    fn faults_on(&self) -> bool {
+    pub(super) fn faults_on(&self) -> bool {
         self.ctl.seq.load(Relaxed) >= self.ctl.faults.cfg.fault_after_seq
     }
 
@@ -382,7 +382,7 @@ impl Sup {
         lo + d % (hi - lo + 1)
     }
 
-    fn delay_range(&self) -> (u64, u64) {
+    pub(super) fn delay_range(&self) -> (u64, u64) {
         let c = self.net_cfg();
         if c.delay_set != 0 {
             (c.delay_min_ns, c.delay_max_ns)
@@ -393,7 +393,7 @@ impl Sup {
 
     /// `net-partition`: a delivery due at `t` on a connection between `sport` and `cport`
     /// waits for the end of the window.
-    fn partition_hold(&self, t: u64, sport: u16, cport: u16) -> Option<u64> {
+    pub(super) fn partition_hold(&self, t: u64, sport: u16, cport: u16) -> Option<u64> {
         let c = self.net_cfg();
         if c.partition_set == 0 {
             return None;
@@ -711,6 +711,7 @@ impl Sup {
             && t.dirty_n == 0
             && t.scan_all == 0
             && self.sched.fired_wire.is_empty()
+            && self.udp.blocked.is_empty()
         {
             self.wire.last_gen = gen;
             return;
@@ -727,6 +728,7 @@ impl Sup {
         t.dirty_n = 0;
         t.scan_all = 0;
         let mut sides: BTreeSet<(u32, bool)> = BTreeSet::new();
+        let mut closed: Vec<usize> = vec![];
         if all {
             for (&id, c) in &self.wire.conns {
                 sides.insert((id, false));
@@ -741,6 +743,10 @@ impl Sup {
             marked.sort_unstable();
             marked.dedup();
             for i in marked {
+                if i < VINO_CAP && t.socks[i].flags & WF_DGRAM != 0 {
+                    closed.push(i);
+                    continue;
+                }
                 if let Some(&(id, server)) = self.wire.by_idx.get(&i) {
                     sides.insert((id, server));
                 }
@@ -756,6 +762,12 @@ impl Sup {
         }
         for (id, server) in sides {
             self.read_side(id, server);
+        }
+        // Datagram sockets whose last descriptor may have closed.
+        if all {
+            self.udp_sweep(None);
+        } else if !closed.is_empty() {
+            self.udp_sweep(Some(&closed));
         }
         // 2. The generation moved: receivers may have room, a backlog may have space.
         if gen != self.wire.last_gen || all {
@@ -774,11 +786,16 @@ impl Sup {
             for id in retry {
                 self.establish(id);
             }
+            let held: Vec<usize> = self.udp.blocked.iter().copied().collect();
+            for j in held {
+                self.udp_flush(j);
+            }
         }
         // 3. Events.
         for k in std::mem::take(&mut self.sched.fired_wire) {
             let id = (k >> 2) as u32;
             match k & 3 {
+                super::udp::EV_UDP => self.udp_fire(k >> 2),
                 EV_DIR0 | EV_DIR1 => {
                     let dir = (k & 3) as usize;
                     if let Some(c) = self.wire.conns.get_mut(&id) {

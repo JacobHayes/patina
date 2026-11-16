@@ -190,7 +190,7 @@ impl SchedCounts {
     }
 }
 
-pub const NET_FIELDS: usize = 13;
+pub const NET_FIELDS: usize = 16;
 pub const NET_NAMES: [&str; NET_FIELDS] = [
     "connections",
     "bytes",
@@ -205,6 +205,9 @@ pub const NET_NAMES: [&str; NET_FIELDS] = [
     "steps",
     "fins",
     "sends",
+    "datagrams",
+    "dgram_delivered",
+    "dgram_lost",
 ];
 
 pub fn net_read(c: &proto::wire::NetCounters) -> [u64; NET_FIELDS] {
@@ -223,6 +226,9 @@ pub fn net_read(c: &proto::wire::NetCounters) -> [u64; NET_FIELDS] {
         c.steps.load(Relaxed),
         c.fins.load(Relaxed),
         c.sends.load(Relaxed),
+        c.datagrams.load(Relaxed),
+        c.dgram_delivered.load(Relaxed),
+        c.dgram_lost.load(Relaxed),
     ]
 }
 

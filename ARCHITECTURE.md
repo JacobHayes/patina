@@ -238,6 +238,31 @@ partitions are draws keyed by the connection and what they act on: a reset is dr
 piece of data a guest sends (so a long-lived connection meets one), a refusal or timeout once
 per connect, a delay or split per delivery.
 
+Datagrams (`sup/udp.rs`, `rt/sys/udp.rs`): a UDP socket in the guest is a real unix
+`SOCK_SEQPACKET` socket whose peer the supervisor holds, one per socket and never shared
+between sockets. Ports, addresses, connection state and options live in the shared socket
+table like TCP's; ephemeral ports count up from 32768 in a port space of their own. A send
+puts the payload on the socket and then tells the supervisor, which reads exactly that packet,
+so a datagram is stamped at the send's virtual time and never waits in a kernel buffer. The
+supervisor draws its fate and a delivery time (the `net-delay-ms` range, each datagram on its
+own, so datagrams reorder within the jitter), and at that time routes it to the bound socket
+that matches best: a connected socket whose peer is the source, then a specific address, then
+the socket's own family (a v6 wildcard receives v4 unless `IPV6_V6ONLY`). A `SO_REUSEPORT`
+group picks by a hash of the source; otherwise the socket bound last wins. A delivery is a
+16-byte header (source, length) and the payload; the runtime reads the header into its own
+buffer, so the guest never sees a unix address or credentials. A receiver whose queue is past
+its `SO_RCVBUF` (charged per datagram at least what the kernel charges) loses the datagram, as
+Linux does; the runtime uncharges as the program reads. A datagram to a port nobody holds is
+lost, and a connected sender gets `ECONNREFUSED` on its next call (`SO_ERROR` reports it),
+as the kernel's ICMP handling gives on loopback. Drop, duplicate, reorder (an extra hold beyond
+the jitter) and partition (a datagram due inside a partition window is lost) are draws on
+their own stream keyed by the datagram's id and the class, so enabling one class moves no
+other draw. Every send, delivery and close is a decision record; replay compares them.
+Multicast and broadcast destinations fail with `ENETUNREACH` (`udp:multicast-or-broadcast`
+in `refused`), as do addresses outside the run. Names resolve from the sandbox's `/etc/hosts`
+only (`hosts: files`, no `resolv.conf`): glibc and Python answer `EAI_NONAME` for an unknown
+name, Go's pure resolver "no such host"; no resolver sends a datagram.
+
 ## The crash model
 
 The runtime records every change to `/work` with its data in an operation log, along with
@@ -354,9 +379,14 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   never happen.
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
   no simulation of several machines, and no network outside the run.
-- **No UDP.** `socket(AF_INET[6], SOCK_DGRAM)` and raw sockets are refused with
-  `ESOCKTNOSUPPORT` and listed in `result.json`'s `refused` (`socket:udp`); `patina run`
-  prints them. DNS resolvers and QUIC therefore fail fast. Only TCP has a wire.
+- **TCP and UDP only.** Raw, packet and netlink sockets, and `SOCK_DGRAM` with a protocol
+  other than UDP, are refused and listed in `result.json`'s `refused`; `patina run` prints
+  them. On UDP: multicast and broadcast (and their membership options), ancillary data on send,
+  options that ask for it on receive (`IP_PKTINFO`, `UDP_GRO`) or change segmentation
+  (`UDP_SEGMENT`, `UDP_CORK`), `MSG_MORE`, more than 64 iovecs in one datagram and `sendfile`
+  to a UDP socket are refused; a receive carries no ancillary data and `MSG_ERRQUEUE` finds
+  nothing.
+  `recvmmsg` returns once at least one datagram is there. Names resolve from `/etc/hosts` only.
 - **Fixed tables.** The runtime keeps some state in fixed tables shared by the run: virtual
   inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
   work-tree mappings (128 per process), shared mappings (256 per process), injected fsync

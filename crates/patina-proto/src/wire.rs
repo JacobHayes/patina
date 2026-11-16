@@ -1,6 +1,6 @@
 //! The network wire's shared state: one entry per
-//! virtual inode number (the key of every guest socket), the "sent" marks the runtime leaves
-//! for the supervisor, and the outcome counters. Lives in the control region after the
+//! virtual inode number (the key of every guest socket, stream or datagram), the "sent" marks
+//! the runtime leaves for the supervisor, and the outcome counters. Lives in the control region after the
 //! durability state, so every process of a run sees one table. Written only by whoever holds
 //! the turn: the runtime of the calling thread, or the supervisor in its own steps.
 
@@ -33,6 +33,15 @@ pub const WF_SENT: u8 = 1;
 /// The connection was reset: the next receive or send reports `ECONNRESET` once.
 pub const WF_RESET: u8 = 2;
 pub const WF_V6ONLY: u8 = 4;
+/// A datagram (UDP) socket: `state` is `WS_NEW`, `WS_BOUND` or `WS_CONNECTED` (a default peer).
+pub const WF_DGRAM: u8 = 8;
+/// `shutdown` of a datagram socket: reads return 0 / writes `EPIPE`.
+pub const WF_SHUT_RD: u8 = 16;
+pub const WF_SHUT_WR: u8 = 32;
+/// The guest bound the address (not only the port): `connect` keeps it, a disconnect does not reset it.
+pub const WF_USER_ADDR: u8 = 64;
+/// The guest bound the port: a disconnect keeps it.
+pub const WF_USER_PORT: u8 = 128;
 
 /// Address kinds (`laddr`, `raddr`): the host has one address plus loopback.
 pub const ADDR_ANY: u8 = 0;
@@ -59,7 +68,17 @@ pub struct WSock {
     pub nopts: u32,
     /// Recorded options: `[level << 16 | name, value]`.
     pub opts: [[i32; 2]; OPTS_CAP],
+    /// Datagram sockets: what the datagrams waiting in the guest's receive queue are charged
+    /// against `SO_RCVBUF` (`dgram_charge`). The supervisor adds at delivery, the runtime
+    /// subtracts when the guest takes one.
+    pub rq: u32,
+    /// Datagram sockets: `MARK_QUEUED` while a marker (an error or a wake, no data) waits in
+    /// the guest's queue, so at most one does. The supervisor sets it, the runtime clears it.
+    pub marks: u32,
 }
+
+/// `WSock::marks`: a marker packet is queued.
+pub const MARK_QUEUED: u32 = 1;
 
 /// Outcome counters (`result.json` "counters.net").
 #[repr(C)]
@@ -85,7 +104,12 @@ pub struct NetCounters {
     pub fins: AtomicU64,
     /// Reads of data a guest sent, each one `net-reset-permille` draw.
     pub sends: AtomicU64,
-    pub reserved: [AtomicU64; 3],
+    /// Datagrams sent (each one draw of every datagram fault class).
+    pub datagrams: AtomicU64,
+    /// Datagrams put into a receiver's queue (duplicates included).
+    pub dgram_delivered: AtomicU64,
+    /// Datagrams lost: injected drops, partitions, a full receive buffer, no receiver.
+    pub dgram_lost: AtomicU64,
 }
 
 #[repr(C)]
@@ -243,7 +267,10 @@ pub struct NetCfg {
     pub halfclose_set: u64,
     pub halfclose_min_ns: u64,
     pub halfclose_max_ns: u64,
-    pub reserved: [u64; 2],
+    /// Datagram faults (per mille, drawn per datagram).
+    pub drop_permille: u64,
+    pub dup_permille: u64,
+    pub reorder_permille: u64,
 }
 
 /// Sub-keys of `draw(Stream::FaultNet, key)`.
@@ -263,3 +290,62 @@ pub const INJ_NET_TIMEOUT: u64 = 22;
 pub const INJ_NET_PARTITION: u64 = 23;
 /// A delivery split by `net-chunk-max` (value: bytes of the piece delivered).
 pub const INJ_NET_CHUNK: u64 = 24;
+/// Datagram faults: `args` = [kind, 0, bytes, datagram id, destination port, source port].
+pub const INJ_NET_DROP: u64 = 25;
+pub const INJ_NET_DUP: u64 = 26;
+/// value: the extra delay (ns).
+pub const INJ_NET_REORDER: u64 = 27;
+/// A datagram due inside a `net-partition` window is lost.
+pub const INJ_NET_PARTITION_DROP: u64 = 28;
+
+// ---- datagrams (UDP) ----
+
+/// The supervisor's listener for the hidden ends of datagram sockets (`SOCK_SEQPACKET`).
+pub const UDP_NAME: &[u8] = b"patina-udp";
+/// The preamble packet a datagram socket sends right after connecting to `@patina-udp`:
+/// magic, then the socket's virtual inode number (16 bytes, as `PREAMBLE_LEN`).
+pub const UDP_MAGIC: u64 = 0x0070_6475_7461_7021; // "!patudp"
+/// Every packet the supervisor writes to a guest's datagram socket starts with this header:
+/// `[kind | address kind << 8 | port << 16 | errno << 32, datagram id]`.
+pub const DGRAM_HDR: usize = 16;
+pub const DG_DATA: u64 = 1;
+/// An ICMP-style error for a connected socket (no payload): wakes a reader; the error itself
+/// is `WSock::err`.
+pub const DG_ERR: u64 = 2;
+/// Largest payload: 65,535 less the IPv4 and UDP headers (IPv6: less 8 only).
+pub const DGRAM_MAX4: usize = 65_507;
+pub const DGRAM_MAX6: usize = 65_527;
+/// `SO_RCVBUF`/`SO_SNDBUF` of a datagram socket never set (Linux `rmem_default`), and the
+/// most an unprivileged `setsockopt` can ask for (`rmem_max`; the kernel doubles it).
+pub const DGRAM_BUF_DEFAULT: i32 = 212_992;
+pub const DGRAM_BUF_MAX: i32 = 212_992;
+
+/// What one queued datagram of `len` payload bytes costs against `SO_RCVBUF`: what the
+/// kernel's allocator charges for a buffer holding it and the header (the data rounded up to
+/// the allocator's size, 320 bytes of shared info, 256 of buffer head; beyond 16 KiB, pages).
+/// It is never less than what the kernel charges the supervisor for the same packet, so the
+/// supervisor's limit is reached before the kernel's.
+pub const fn dgram_charge(len: usize) -> u32 {
+    let f = len + DGRAM_HDR + 320;
+    let data = if f <= 16384 {
+        // At least 1024: since Linux 6.3 a small head comes from a cache sized for the largest
+        // protocol header (640 bytes on common configurations), more than 512.
+        let mut p = 1024;
+        while p < f {
+            p *= 2;
+        }
+        p
+    } else {
+        16384 + (len + DGRAM_HDR).div_ceil(4096) * 4096
+    };
+    (data + 256) as u32
+}
+
+/// Sub-keys of `draw(Stream::Dgram, id << 4 | sub)`: every class has its own draw per
+/// datagram, so turning one on moves no other decision.
+pub const DSUB_DELAY: u64 = 0;
+pub const DSUB_DROP: u64 = 1;
+pub const DSUB_DUP: u64 = 2;
+pub const DSUB_REORDER: u64 = 3;
+pub const DSUB_HOLD: u64 = 4;
+pub const DSUB_DUP_DELAY: u64 = 5;

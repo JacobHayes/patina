@@ -73,7 +73,13 @@ fn ioctl(call: &mut dyn Call) -> Action {
     {
         return Action::Return(-e::ENOTTY);
     }
+    let fd = call.arg(0) as i32 as i64;
     match req {
+        // A datagram socket's queue holds headers the guest never sees.
+        FIONREAD if super::inet::dgram_idx(fd).is_some() => {
+            let i = super::inet::dgram_idx(fd).unwrap();
+            Action::Return(super::udp::fionread(fd, i, call.arg(2)))
+        }
         FIONREAD | FIONBIO | FIONCLEX | FIOCLEX => {
             set_class(call, Class::Pass);
             pass(call)

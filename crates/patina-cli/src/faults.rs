@@ -134,7 +134,7 @@ pub const KEYS: &[Key] = &[
         "net-delay-ms",
         "A..B",
         Val::Own,
-        "each TCP delivery is delayed by a draw in A..B ms",
+        "each TCP delivery and each datagram is delayed by a draw in A..B ms [default: 0.01..0.05]",
     ),
     key(
         "net-chunk-max",
@@ -164,7 +164,25 @@ pub const KEYS: &[Key] = &[
         "net-partition",
         "A..B[:PORT]",
         Val::Own,
-        "hold TCP deliveries (to PORT) from A to B ms of virtual time",
+        "from A to B ms of virtual time, hold TCP deliveries and lose datagrams (from or to PORT)",
+    ),
+    key(
+        "net-drop-permille",
+        "P",
+        Val::Permille,
+        "lose a datagram (UDP)",
+    ),
+    key(
+        "net-dup-permille",
+        "P",
+        Val::Permille,
+        "deliver a datagram twice, the copy with its own delay",
+    ),
+    key(
+        "net-reorder-permille",
+        "P",
+        Val::Permille,
+        "hold a datagram back past the delay range, so later ones overtake it",
     ),
     key(
         "net-halfclose-delay-ms",
@@ -248,6 +266,9 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("net-chunk-max", "1..65536"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
+            ("net-drop-permille", "0..50"),
+            ("net-dup-permille", "0..20"),
+            ("net-reorder-permille", "0..50"),
         ],
     ),
     (
@@ -261,6 +282,9 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("net-chunk-max", "1..65536"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
+            ("net-drop-permille", "0..50"),
+            ("net-dup-permille", "0..20"),
+            ("net-reorder-permille", "0..50"),
             ("mem-error-permille", "0..2"),
         ],
     ),
@@ -568,6 +592,9 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
             (c.halfclose_min_ns, c.halfclose_max_ns) = ms_range(k, v)?;
             c.halfclose_set = 1;
         }
+        "net-drop-permille" => c.drop_permille = n(v)?,
+        "net-dup-permille" => c.dup_permille = n(v)?,
+        "net-reorder-permille" => c.reorder_permille = n(v)?,
         _ => return Err(format!("--fault: unknown key {k}")),
     }
     Ok(())

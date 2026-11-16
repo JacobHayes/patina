@@ -21,6 +21,8 @@ pub enum Stream {
     FaultPlan = 11,
     /// Compute points: the gap of each segment (`compute::gap`).
     Compute = 12,
+    /// Datagrams: delay and faults, keyed by datagram id and a sub-key (`wire::DSUB_*`).
+    Dgram = 13,
 }
 
 /// splitmix64 finaliser.

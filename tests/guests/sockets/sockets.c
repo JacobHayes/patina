@@ -639,14 +639,14 @@ static void t_v6(void) {
     int r = connect(c, (void *)&c6a, sizeof c6a);
     CHECK(r == -1 && errno == ECONNREFUSED, "v6 client to a v4 listener: %d", r);
     close(l4);
-    // UDP is refused at creation; an unknown address is unreachable.
-    CHECK(socket(AF_INET, SOCK_DGRAM, 0) == -1, "udp socket");
+    // Raw sockets are refused at creation; an unknown address is unreachable.
+    CHECK(socket(AF_INET, SOCK_RAW, IPPROTO_ICMP) == -1, "raw socket");
     struct sockaddr_in far = loop4(80);
     far.sin_addr.s_addr = inet_addr("192.0.2.1");
     c = socket(AF_INET, SOCK_STREAM, 0);
     r = connect(c, (void *)&far, sizeof far);
     CHECK(r == -1 && errno == ENETUNREACH, "connect to 192.0.2.1: %d", r);
-    printf("v6 client to a v4-only listener: ECONNREFUSED; UDP refused; 192.0.2.1 unreachable\n");
+    printf("v6 client to a v4-only listener: ECONNREFUSED; raw refused; 192.0.2.1 unreachable\n");
 }
 
 // ---- fault scenarios ----
