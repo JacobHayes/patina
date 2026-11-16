@@ -156,7 +156,8 @@ unsafe fn perturb_child() {
     libc::personality((libc::READ_IMPLIES_EXEC | libc::ADDR_COMPAT_LAYOUT) as libc::c_ulong);
     libc::setpriority(libc::PRIO_PROCESS, 0, 5);
     libc::syscall(libc::SYS_ioprio_set, 1, 0, 3 << 13);
-    let p = libc::sched_param { sched_priority: 0 };
+    // Zeroed, not a struct literal: musl's sched_param has more fields than glibc's.
+    let p: libc::sched_param = std::mem::zeroed();
     libc::sched_setscheduler(0, libc::SCHED_BATCH, &p);
     libc::prctl(libc::PR_SET_TIMERSLACK, 1_000_000, 0, 0, 0);
     libc::prctl(libc::PR_SET_THP_DISABLE, 1, 0, 0, 0);

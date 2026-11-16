@@ -174,7 +174,7 @@ fn recv(fd: RawFd) -> io::Result<Option<Option<OwnedFd>>> {
     m.msg_iov = &mut iov;
     m.msg_iovlen = 1;
     m.msg_control = cbuf.as_mut_ptr() as *mut _;
-    m.msg_controllen = std::mem::size_of_val(&cbuf);
+    m.msg_controllen = std::mem::size_of_val(&cbuf) as _;
     let r = unsafe { libc::recvmsg(fd, &mut m, libc::MSG_CMSG_CLOEXEC) };
     if r < 0 {
         return Err(io::Error::last_os_error());
@@ -218,12 +218,12 @@ fn reply(fd: RawFd, r: Result<OwnedFd, i32>) {
     m.msg_iovlen = 1;
     if let Ok(f) = &r {
         m.msg_control = cbuf.as_mut_ptr() as *mut _;
-        m.msg_controllen = unsafe { libc::CMSG_SPACE(4) } as usize;
+        m.msg_controllen = unsafe { libc::CMSG_SPACE(4) } as _;
         unsafe {
             let c = libc::CMSG_FIRSTHDR(&m);
             (*c).cmsg_level = libc::SOL_SOCKET;
             (*c).cmsg_type = libc::SCM_RIGHTS;
-            (*c).cmsg_len = libc::CMSG_LEN(4) as usize;
+            (*c).cmsg_len = libc::CMSG_LEN(4) as _;
             *(libc::CMSG_DATA(c) as *mut i32) = f.as_raw_fd();
         }
     }
