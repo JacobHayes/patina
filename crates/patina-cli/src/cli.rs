@@ -314,6 +314,13 @@ pub const FLAGS: &[Flag] = &[
         &[Cmd::Sweep],
     ),
     flag(
+        "--branch",
+        "",
+        "off",
+        "run each seed once without a crash, then once per crash point, crashing there (needs --crash machine or process, without a rate)",
+        &[Cmd::Sweep],
+    ),
+    flag(
         "--budget",
         "SECONDS",
         "no limit",

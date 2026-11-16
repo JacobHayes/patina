@@ -16,6 +16,8 @@ use std::process::ExitCode;
 pub const REPORT_SCHEMA: &str = "patina.report/v1";
 /// Labels of each unmet kind the text names; the JSON has all of them.
 const LABELS_SHOWN: usize = 5;
+/// Seeds the text lists with their crash points tried, when a branch sweep stopped early.
+const SEEDS_SHOWN: usize = 8;
 
 /// One finished run found under the report's directories.
 pub struct Run {
@@ -26,6 +28,17 @@ pub struct Run {
     pub run: Value,
     /// `replay.json`, written by a sweep that replayed this run.
     pub replay: Option<Value>,
+    /// In a `--branch` sweep: 0 for a base (`seed-N`), P for the child crashing at point P
+    /// (`seed-N@P`).
+    pub point: Option<u64>,
+}
+
+/// How a run is named: `seed 3`, or `seed 3@120` for a branch child.
+pub fn run_name(seed: u64, point: Option<u64>) -> String {
+    match point {
+        Some(p) if p > 0 => format!("{seed}@{p}"),
+        _ => seed.to_string(),
+    }
 }
 
 /// What a sweep adds to the head of its report.
@@ -60,12 +73,16 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         if !d.is_dir() {
             return Err(format!("{}: not a directory", d.display()));
         }
-        walk(d, &mut found);
+        let mut here = vec![];
+        walk(d, &mut here);
+        // A branch sweep's directory says so in its sweep.json.
+        let branch = read_json(&d.join("sweep.json")).is_ok_and(|v| v["branch"] == true);
+        found.extend(here.into_iter().map(|r| (r, branch)));
     }
     found.sort();
-    found.dedup();
+    found.dedup_by(|a, b| a.0 == b.0);
     let mut runs = vec![];
-    for dir in found {
+    for (dir, branch) in found {
         let result = read_json(&dir.join("result.json"))?;
         let run = read_json(&dir.join("run.json")).unwrap_or(Value::Null);
         let seed = result["seed"]
@@ -77,15 +94,24 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         let written = std::fs::read_to_string(dir.join(crate::sweep::CASE_FILE))
             .ok()
             .map(|c| c.trim_end_matches('\n').to_string());
-        let case = match (
-            dir.parent()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str()),
-            dir.file_name().and_then(|n| n.to_str()),
-        ) {
-            (Some(p), Some(n)) if p == format!("seed-{seed}") => written.or(Some(n.to_string())),
+        // A branch child lives in OUT/seed-N@P[/K-NAME].
+        let name = |d: &Path| d.file_name().and_then(|n| n.to_str()).map(str::to_string);
+        let parent = dir.parent().and_then(name);
+        let seed_dir = |n: &str| {
+            n == format!("seed-{seed}")
+                || n.strip_prefix(&format!("seed-{seed}@"))
+                    .is_some_and(|p| p.parse::<u64>().is_ok())
+        };
+        let case = match (&parent, name(&dir)) {
+            (Some(p), Some(n)) if seed_dir(p) => written.or(Some(n)),
             _ => None,
         };
+        let own = if case.is_some() { parent } else { name(&dir) };
+        let point = own
+            .as_deref()
+            .and_then(|n| n.strip_prefix(&format!("seed-{seed}@")))
+            .and_then(|p| p.parse::<u64>().ok())
+            .or((branch && own.as_deref() == Some(format!("seed-{seed}").as_str())).then_some(0));
         let replay = read_json(&dir.join("replay.json")).ok();
         runs.push(Run {
             dir,
@@ -94,6 +120,7 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
             result,
             run,
             replay,
+            point,
         });
     }
     Ok(runs)
@@ -362,7 +389,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         }
     }
     for g in &mut groups {
-        g.runs.sort_by_key(|r| (r.seed, r.dir.clone()));
+        g.runs.sort_by_key(|r| (r.seed, r.point, r.dir.clone()));
     }
     // Faults: configured classes over the whole set, eligible counts.
     let mut configured = BTreeSet::new();
@@ -443,7 +470,30 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             *limits.entry(l).or_default() += 1;
         }
     }
+    // A branch sweep: each base's crash points and the children run of them.
+    let mut bases: BTreeMap<(u64, Option<String>), (u64, u64)> = BTreeMap::new();
+    for r in runs {
+        match r.point {
+            Some(0) => {
+                bases.entry((r.seed, r.case.clone())).or_default().0 = r.result["faults"]["counts"]
+                    ["crash"]["eligible"]
+                    .as_u64()
+                    .unwrap_or(0)
+            }
+            Some(_) => bases.entry((r.seed, r.case.clone())).or_default().1 += 1,
+            None => {}
+        }
+    }
+    let branch = (!bases.is_empty()).then(|| {
+        json!({
+            "points": bases.values().map(|b| b.0).sum::<u64>(),
+            "tried": bases.values().map(|b| b.1).sum::<u64>(),
+            "seeds": bases.iter().map(|((s, c), (p, t))| json!({"seed": s, "case": c, "points": p, "tried": t})).collect::<Vec<_>>(),
+        })
+    });
+    let no_points = branch.as_ref().is_some_and(|b| b["points"] == 0);
     let vacuous = runs.is_empty()
+        || no_points
         || !never_held.is_empty()
         || !never_hit.is_empty()
         || !never_fired.is_empty()
@@ -479,7 +529,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
                 "case": g.case,
                 "count": g.runs.len(),
                 "seeds": g.runs.iter().map(|r| r.seed).collect::<Vec<_>>(),
-                "first": {"seed": first.seed, "dir": first.dir},
+                "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "dir": first.dir},
                 "replay": replay,
                 "faults": {"every": every, "none": none},
                 "rerun": rerun_command(&first.run, first.seed, &first.dir),
@@ -494,6 +544,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             o,
             std::cmp::Reverse(g["count"].as_u64().unwrap_or(0)),
             g["first"]["seed"].as_u64().unwrap_or(0),
+            g["first"]["point"].as_u64().unwrap_or(0),
         )
     });
     let finding = gj
@@ -537,6 +588,9 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         "vacuous": vacuous,
         "exit": exit,
     });
+    if let Some(b) = branch {
+        v["branch"] = b;
+    }
     if with_points > 0 {
         v["compute"] = json!({
             "images": images.iter().map(|(p, k)| json!({"path": p, "kinds": k})).collect::<Vec<_>>(),
@@ -581,6 +635,34 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         .map(|(k, n)| format!("{k} {n}"))
         .collect();
     s.push_str(&format!("outcomes: {}\n", classes.join(", ")));
+    if let Some(b) = v.get("branch") {
+        let (p, t) = (
+            b["points"].as_u64().unwrap_or(0),
+            b["tried"].as_u64().unwrap_or(0),
+        );
+        s.push_str(&format!("crash points: {t} of {p} tried\n"));
+        if t < p {
+            let seeds = b["seeds"].as_array().unwrap();
+            let mut l: Vec<String> = seeds
+                .iter()
+                .take(SEEDS_SHOWN)
+                .map(|x| {
+                    let c = x["case"]
+                        .as_str()
+                        .map(|c| format!(" [{c}]"))
+                        .unwrap_or_default();
+                    format!("seed {}{c}: {} of {}", x["seed"], x["tried"], x["points"])
+                })
+                .collect();
+            if seeds.len() > SEEDS_SHOWN {
+                l.push(format!(
+                    "and {} more (report.json)",
+                    seeds.len() - SEEDS_SHOWN
+                ));
+            }
+            s.push_str(&format!("  {}\n", l.join("   ")));
+        }
+    }
     if let Some(c) = v.get("compute") {
         let with = c["runs_with_points"].as_u64().unwrap_or(0);
         s.push_str(&format!(
@@ -625,7 +707,10 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
             "  {} of {} runs   first: seed {}   {replay}\n",
             g["count"],
             n("runs"),
-            g["first"]["seed"]
+            run_name(
+                g["first"]["seed"].as_u64().unwrap_or(0),
+                g["first"]["point"].as_u64()
+            )
         ));
         let list = |k: &str| {
             let v: Vec<&str> = g["faults"][k]
@@ -717,6 +802,8 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
     if v["vacuous"] == true {
         tail.push(if n("runs") == 0 {
             "vacuous: no runs".to_string()
+        } else if v["branch"]["points"] == 0 {
+            "vacuous: no base has a crash point: nothing under the work tree changed, nothing to branch at".to_string()
         } else {
             "vacuous: see above (allow a label with --allow-unmet or [sdk] allow-unmet)".to_string()
         });

@@ -127,6 +127,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--keep fail\|all\|none` | whose logs to keep; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
+| `--branch` | with `--crash machine` or `process`: every crash point of each seed (below) |
 
 A run kept by `--keep fail` whose log is over 4 MiB keeps its first and last MiB
 (`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
@@ -198,6 +199,35 @@ done > tests.txt
 patina sweep --seeds 1..5 --cases tests.txt
 ```
 
+### Every crash point of a seed
+
+`--branch` with `--crash machine` (or `process`) runs each seed once with crashes on and
+never firing, which counts its crash points, then once per crash point with the crash forced
+there (`--crash machine-at:N` into `OUT/seed-S@N`), points ascending and seeds in turn. A run
+crashed at point N is the same as its seed's run up to N, so the sweep tries every place a
+crash could fall in that seed's schedule. `--budget` and `--max-findings` stop it; the same
+command again runs only the points not tried yet.
+
+```text
+$ patina sweep --seeds 1..2 --branch --crash machine -- ./acklog
+sweep: 2 seeds, 328 crash points
+new: violation always: acked-records-kept: N acknowledged, N stored   (seed 1@8: patina replay /tmp/acklog/patina-out/sweep/seed-1@8)
+sweep: replaying the first seed of 1 finding
+sweep: 5.6 MiB kept in /tmp/acklog/patina-out/sweep
+patina sweep: 330 runs, 164 findings in 1 group, 166 ok   (1.2s, 8 jobs)
+outcomes: ok 166, violation 164
+crash points: 328 of 328 tried
+
+violation always: acked-records-kept: N acknowledged, N stored
+  164 of 330 runs   first: seed 1@8   replayed: identical
+  faults in every failing run: crash      in none: -
+  rerun:  patina run --seed 1 --crash machine-at:8 -- /tmp/acklog/acklog
+  replay: patina replay /tmp/acklog/patina-out/sweep/seed-1@8
+```
+
+A run forced to crash at point N that does not crash there ran another prefix than its seed's
+first run: the sweep reports it `nondeterministic`, naming both directories.
+
 ### If a sweep finds nothing
 
 A sweep that ends all `ok` has looked at as many runs as it had seeds, each one schedule and,
@@ -207,6 +237,8 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
 - **More seeds.** A crash that must land in a short window (a few crash points out of
   thousands, say between a write and the next fsync) is found in about one seed in several
   thousand, whatever the other settings. Budget for that before changing anything else.
+- **Every crash point** (`--branch`, above): a few seeds with each crash point tried once,
+  instead of one crash in each of many seeds. It reaches every window of the seeds it runs.
 - **`--buggify`**, and for a fault point that must fire at one particular moment,
   `--fault point:LABEL=1000`: the point is on in every run and fires at every evaluation,
   instead of on in a quarter of runs and firing on a quarter of evaluations.

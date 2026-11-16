@@ -9,6 +9,11 @@
 //! again into the same `--out` runs only the runs not there yet (more seeds, an interrupted
 //! sweep); any other sweep replaces the directory, so that edit, rebuild and the same command
 //! never report an old program's runs.
+//!
+//! `--branch` runs each seed (and case) once with crashes on and never firing (a base, in
+//! `OUT/seed-N`), then once per crash point the base counted, with the crash forced there (a
+//! child, `--crash KIND-at:P` in `OUT/seed-N@P`), points ascending and seeds round-robin. A
+//! child is its base up to its point, so one that does not crash there is `nondeterministic`.
 
 use crate::cli::{find_flag, Args, Res};
 use crate::outcome::Outcome;
@@ -30,8 +35,9 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 10] = [
+const OWN: [&str; 11] = [
     "--seeds",
+    "--branch",
     "--jobs",
     "--cases",
     "--keep",
@@ -89,7 +95,11 @@ const SWEEP_SCHEMA: &str = "patina.sweep/v1";
 /// (its SHA-256) and the resolved settings with the command. The seeds, the cases, `-j`,
 /// `--keep` and the stopping rules are not part of it: a sweep with more seeds or cases is the
 /// same sweep, extended.
-fn identity(cfg: &crate::config::Config, program: Option<&String>) -> Res<serde_json::Value> {
+fn identity(
+    cfg: &crate::config::Config,
+    program: Option<&String>,
+    branch: bool,
+) -> Res<serde_json::Value> {
     let mut c = cfg.clone();
     c.seed = 0;
     c.host_cpu = None;
@@ -99,6 +109,7 @@ fn identity(cfg: &crate::config::Config, program: Option<&String>) -> Res<serde_
         "patina": crate::result::build()?,
         "program": program,
         "config": c,
+        "branch": branch,
     }))
 }
 
@@ -112,6 +123,13 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
     }
     if old["program"] != ident["program"] {
         return Some("the program changed".into());
+    }
+    if old["branch"] != ident["branch"] {
+        return Some(if ident["branch"] == true {
+            "a sweep without --branch".into()
+        } else {
+            "a sweep with --branch".into()
+        });
     }
     if old["config"] != ident["config"] {
         let keys: Vec<&String> = ident["config"]
@@ -313,6 +331,8 @@ enum Job {
         /// Index into the cases.
         case: Option<usize>,
         dir: PathBuf,
+        /// Under `--branch`: `Some(0)` for a base, `Some(P)` for the child crashing at point P.
+        point: Option<u64>,
     },
     Replay {
         dir: PathBuf,
@@ -529,6 +549,20 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // The configuration every run resolves to, checked once here rather than failing in
     // every run. With --cases and no command, each line is a whole command.
     let cfg = crate::config::resolve_any(a).map_err(error)?;
+    // --branch: the crash kind each base and child is given (the sweep places the crash).
+    let kind: Option<String> = if a.has("--branch") {
+        match cfg.crash.as_deref() {
+            Some(k @ ("machine" | "process")) => Some(k.to_string()),
+            None => return Err(error(
+                "--branch needs --crash machine or --crash process: it crashes each seed at each of its crash points".into(),
+            )),
+            Some(c) => return Err(error(format!(
+                "--branch needs --crash machine or --crash process without a rate or position, not --crash {c}: it places the crash at each crash point itself"
+            ))),
+        }
+    } else {
+        None
+    };
     let cases: Option<Vec<Case>> = match a.last("--cases") {
         None => None,
         Some(f) => Some(read_cases(Path::new(f), &cfg.cmd).map_err(error)?),
@@ -609,8 +643,12 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     // With whole-command cases there is no one program: each run's is checked on resume.
-    let ident =
-        identity(&cfg, (!cfg.cmd.is_empty()).then_some(&probe_program.sha256)).map_err(error)?;
+    let ident = identity(
+        &cfg,
+        (!cfg.cmd.is_empty()).then_some(&probe_program.sha256),
+        kind.is_some(),
+    )
+    .map_err(error)?;
     if out.is_dir() {
         if let Some(why) = differs(&out, &ident) {
             eprintln!(
@@ -623,28 +661,43 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     std::fs::create_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
     write_json(&out.join(SWEEP_FILE), &ident).map_err(error)?;
 
+    let run_dir = |seed: u64, case: Option<usize>, point: Option<u64>| -> PathBuf {
+        let mut dir = out.join(match point {
+            Some(p) if p > 0 => format!("seed-{seed}@{p}"),
+            _ => format!("seed-{seed}"),
+        });
+        if let (Some(i), Some(c)) = (case, &cases) {
+            dir = dir.join(&c[i].dir);
+        }
+        dir
+    };
+    // The job for a run, or none when the directory already holds it (a resumed sweep).
+    let fresh = |seed: u64, case: Option<usize>, point: Option<u64>| -> Result<Option<Job>, Fail> {
+        let dir = run_dir(seed, case, point);
+        let sha = &programs[&cmd_of(case)[0]].sha256;
+        if done_before(
+            &dir,
+            case.map(|i| cases.as_ref().unwrap()[i].text.as_str()),
+            sha,
+        ) {
+            return Ok(None);
+        }
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| error(format!("{}: {e}", dir.display())))?;
+        }
+        Ok(Some(Job::Run {
+            seed,
+            case,
+            dir,
+            point,
+        }))
+    };
     let mut jobs = vec![];
     let mut total = 0;
     for &seed in &seeds {
         for &case in &list {
-            let mut dir = out.join(format!("seed-{seed}"));
-            if let (Some(i), Some(c)) = (case, &cases) {
-                dir = dir.join(&c[i].dir);
-            }
             total += 1;
-            let sha = &programs[&cmd_of(case)[0]].sha256;
-            if done_before(
-                &dir,
-                case.map(|i| cases.as_ref().unwrap()[i].text.as_str()),
-                sha,
-            ) {
-                continue;
-            }
-            if dir.exists() {
-                std::fs::remove_dir_all(&dir)
-                    .map_err(|e| error(format!("{}: {e}", dir.display())))?;
-            }
-            jobs.push(Job::Run { seed, case, dir });
+            jobs.extend(fresh(seed, case, kind.as_ref().map(|_| 0))?);
         }
     }
     let todo = jobs.len();
@@ -658,7 +711,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // What each `patina run` is given besides its seed, directory and command.
     let mut pass: Vec<String> = vec![];
     for (name, vals) in &a.flags {
-        if OWN.contains(name) {
+        if OWN.contains(name) || (kind.is_some() && *name == "--crash") {
             continue;
         }
         let f = find_flag(name).unwrap();
@@ -673,16 +726,26 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let child = |job: &Job| -> Command {
         let mut c = Command::new(&exe);
         match job {
-            Job::Run { seed, case, dir } => {
+            Job::Run {
+                seed,
+                case,
+                dir,
+                point,
+            } => {
                 c.arg("run")
                     .arg("--seed")
                     .arg(seed.to_string())
                     .arg("--out")
                     .arg(dir)
                     .args(["--format", "json"])
-                    .args(&pass)
-                    .arg("--")
-                    .args(cmd_of(*case));
+                    .args(&pass);
+                if let Some(k) = &kind {
+                    c.arg("--crash").arg(match point {
+                        Some(p) if *p > 0 => format!("{k}-at:{p}"),
+                        _ => format!("{k}:0"),
+                    });
+                }
+                c.arg("--").args(cmd_of(*case));
             }
             Job::Replay { dir, out } => {
                 c.arg("replay")
@@ -720,6 +783,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         out: out.clone(),
         run_bytes: (cfg.log_limit << 20) + (64 << 20),
         cut: false,
+        bases: Default::default(),
     };
     if todo < total {
         st.say(&format!(
@@ -736,26 +800,76 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             report::bytes(st.run_bytes)
         )));
     }
-    let not_started = pool(jobs, width, &child, |d, running, now| {
+    let mut not_started = pool(jobs, width, &child, |d, running, now| {
         st.event(d, running, now)
     });
     st.flush(true);
+    if kind.is_some() && st.stopped.is_none() && !INTERRUPTED.load(SeqCst) {
+        // The children: each base's crash points, points ascending, seeds (and cases)
+        // round-robin.
+        let mut most = 0;
+        for &seed in &seeds {
+            for &case in &list {
+                let b = run_dir(seed, case, Some(0));
+                let r = read_json(&b.join("result.json")).unwrap_or_default();
+                let n = r["faults"]["counts"]["crash"]["eligible"]
+                    .as_u64()
+                    .unwrap_or(0);
+                most = most.max(n);
+                st.bases.insert((seed, case), (n, b));
+            }
+        }
+        let points: u64 = st.bases.values().map(|b| b.0).sum();
+        st.say(&format!(
+            "sweep: {}, {}",
+            report::count(
+                st.bases.len(),
+                if cases.is_some() { "base" } else { "seed" }
+            ),
+            report::count(points as usize, "crash point")
+        ));
+        let mut children = vec![];
+        let mut have = 0;
+        for p in 1..=most {
+            for &seed in &seeds {
+                for &case in &list {
+                    if p <= st.bases[&(seed, case)].0 {
+                        match fresh(seed, case, Some(p))? {
+                            Some(j) => children.push(j),
+                            None => have += 1,
+                        }
+                    }
+                }
+            }
+        }
+        if have > 0 {
+            st.say(&format!(
+                "sweep: {have} of {points} children already in {}; running {}",
+                out.display(),
+                children.len()
+            ));
+        }
+        st.todo += children.len();
+        // Children of all seeds run interleaved: announce each group as it is found.
+        st.unfinished.clear();
+        not_started = pool(children, st.width, &child, |d, running, now| {
+            st.event(d, running, now)
+        });
+        st.flush(true);
+    }
     let interrupted = INTERRUPTED.load(SeqCst);
     if interrupted {
         st.stopped = Some("interrupted".into());
         // Runs that were terminated left a directory without a result.
-        for &seed in &seeds {
-            let d = out.join(format!("seed-{seed}"));
-            if d.is_dir() && !d.join("result.json").exists() {
-                let partial = match &cases {
-                    None => vec![d],
-                    Some(c) => c
-                        .iter()
-                        .map(|c| d.join(&c.dir))
-                        .filter(|x| x.is_dir() && !x.join("result.json").exists())
-                        .collect(),
-                };
-                for p in partial {
+        let rd = std::fs::read_dir(&out).into_iter().flatten().flatten();
+        for d in rd.filter(|e| e.file_name().to_string_lossy().starts_with("seed-")) {
+            let d = d.path();
+            let partial = match &cases {
+                None => vec![d],
+                Some(c) => c.iter().map(|c| d.join(&c.dir)).collect(),
+            };
+            for p in partial {
+                if p.is_dir() && !p.join("result.json").exists() {
                     let _ = std::fs::remove_dir_all(p);
                 }
             }
@@ -857,6 +971,10 @@ fn replayed(d: Done) {
     }
 }
 
+/// A group's `new:` line waiting to be printed: the seed, branch point and directory of the
+/// run it names.
+type Announce = (u64, Option<u64>, PathBuf);
+
 /// The sweep's counters and its terminal output.
 struct State {
     /// Each case's text, for its `new:` line and its run directory's `case` file.
@@ -870,7 +988,7 @@ struct State {
     groups: BTreeSet<(String, Option<String>)>,
     /// Groups found whose `new:` line waits until no lower seed is left to run, so that it
     /// names the group's lowest seed, the one the report calls first: (seed, run directory).
-    pending: std::collections::BTreeMap<(String, Option<String>), (u64, PathBuf)>,
+    pending: std::collections::BTreeMap<(String, Option<String>), Announce>,
     /// Runs not finished yet, by seed.
     unfinished: std::collections::BTreeMap<u64, usize>,
     finding_groups: usize,
@@ -885,6 +1003,8 @@ struct State {
     run_bytes: u64,
     /// Some kept run's log was cut.
     cut: bool,
+    /// Under `--branch`, once the bases ran: each (seed, case)'s crash points and base directory.
+    bases: std::collections::BTreeMap<(u64, Option<usize>), (u64, PathBuf)>,
 }
 
 impl State {
@@ -907,15 +1027,16 @@ impl State {
         let ready: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, (seed, _))| all || low.is_none_or(|l| *seed < l))
+            .filter(|(_, (seed, _, _))| all || low.is_none_or(|l| *seed < l))
             .map(|(k, _)| k.clone())
             .collect();
         for k in ready {
-            let (seed, dir) = self.pending.remove(&k).unwrap();
+            let (seed, point, dir) = self.pending.remove(&k).unwrap();
             let c = k.1.as_ref().map(|c| format!(" [{c}]")).unwrap_or_default();
             self.say(&format!(
-                "new{c}: {}   (seed {seed}: patina replay {})",
+                "new{c}: {}   (seed {}: patina replay {})",
                 k.0,
+                report::run_name(seed, point),
                 dir.display()
             ));
         }
@@ -974,10 +1095,16 @@ impl State {
 
     /// Count a finished run; the job back if it should run again at half the width.
     fn finished(&mut self, d: Done, running: usize, width: usize) -> Option<Job> {
-        let Job::Run { seed, case, dir } = &d.job else {
+        let Job::Run {
+            seed,
+            case: case_index,
+            dir,
+            point,
+        } = &d.job
+        else {
             return None;
         };
-        let case = case.map(|i| self.cases[i].clone());
+        let case = case_index.map(|i| self.cases[i].clone());
         if !dir.join("result.json").is_file() {
             // The run ended without a result (a request patina refused): keep its answer.
             let v = serde_json::from_slice::<serde_json::Value>(&d.stdout)
@@ -990,8 +1117,7 @@ impl State {
         if let Some(c) = &case {
             let _ = std::fs::write(dir.join(CASE_FILE), format!("{c}\n"));
         }
-        let r = read_json(&dir.join("result.json")).unwrap_or_default();
-        let outcome = r["outcome"].as_str().unwrap_or("internal");
+        let mut r = read_json(&dir.join("result.json")).unwrap_or_default();
         // A host limit shared by every sandbox of this user (the kernel's per-user pipe
         // accounting) says nothing about the guest: fewer runs at once, and this one again.
         // A run that hit it while others were running also runs again.
@@ -1006,6 +1132,31 @@ impl State {
             let _ = std::fs::remove_dir_all(dir);
             return Some(d.job);
         }
+        if let (Some(p), Some((n, base))) = (
+            point.filter(|p| *p > 0),
+            self.bases.get(&(*seed, *case_index)),
+        ) {
+            if let Some(why) = missed_point(&r, p, *n) {
+                let was = r.clone();
+                r["outcome"] = "nondeterministic".into();
+                r["exit"] = Outcome::Nondeterministic.exit().into();
+                r["stop"] = "point-missed".into();
+                r["signature"] =
+                    "nondeterministic: a child did not crash at its crash point".into();
+                r["message"] = format!(
+                    "{why}; its base {} counted {n} crash points, so this run's prefix differs from the base's",
+                    base.display()
+                )
+                .into();
+                r["branch_missed"] = serde_json::json!({
+                    "outcome": was["outcome"],
+                    "message": was["message"],
+                    "base": base,
+                });
+                let _ = write_json(&dir.join("result.json"), &r);
+            }
+        }
+        let outcome = r["outcome"].as_str().unwrap_or("internal");
         self.done += 1;
         if let Some(n) = self.unfinished.get_mut(seed) {
             *n -= 1;
@@ -1040,9 +1191,10 @@ impl State {
             if finding {
                 self.finding_groups += 1;
             }
-            self.pending.insert(key, (*seed, dir.clone()));
+            self.pending
+                .insert(key, (*seed, point.filter(|p| *p > 0), dir.clone()));
         } else if let Some(p) = self.pending.get_mut(&key).filter(|p| *seed < p.0) {
-            *p = (*seed, dir.clone());
+            *p = (*seed, point.filter(|p| *p > 0), dir.clone());
         }
         self.flush(false);
         if let Some(n) = self.max_findings {
@@ -1057,12 +1209,47 @@ impl State {
     }
 }
 
+/// Why a `--branch` child that should have crashed at `point` did not (`None`: it did, or it
+/// is not a finished run). `base_points` is the crash points its base counted.
+fn missed_point(r: &serde_json::Value, point: u64, base_points: u64) -> Option<String> {
+    let injected = r["faults"]["counts"]["crash"]["injected"].as_u64()?;
+    if point > base_points {
+        return None;
+    }
+    let at = r["crashes"][0]["point"].as_u64();
+    match (injected, at) {
+        (0, _) => Some(format!("crash point {point} was not reached")),
+        (_, Some(at)) if at != point => Some(format!("crashed at point {at}, not {point}")),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn a_child_that_misses_its_point_is_named() {
+        let run = |injected: u64, crashed_at: Option<u64>| {
+            serde_json::json!({
+                "outcome": "ok",
+                "faults": {"counts": {"crash": {"eligible": 9, "injected": injected}}},
+                "crashes": crashed_at.map(|p| vec![serde_json::json!({"point": p})]).unwrap_or_default(),
+            })
+        };
+        assert_eq!(missed_point(&run(1, Some(5)), 5, 9), None);
+        assert!(missed_point(&run(0, None), 5, 9).is_some());
+        assert!(missed_point(&run(1, Some(4)), 5, 9).is_some());
+        // Past the base's count, or not a finished run: nothing to say.
+        assert_eq!(missed_point(&run(0, None), 10, 9), None);
+        assert_eq!(
+            missed_point(&serde_json::json!({"outcome": "internal"}), 5, 9),
+            None
+        );
     }
 
     #[test]
