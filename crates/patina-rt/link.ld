@@ -1,5 +1,7 @@
-/* Text first at the fixed base 0x6000_0000_0000; everything executable stays
-   below 0x6000_1000_0000, the range the seccomp filter lets through. */
+/* Text first at the fixed base 0x6000_0000_0000, below 0x6000_1000_0000 (the control
+   region's read-write window and the rest of the runtime's region follow; proto::layout).
+   The base is fixed, so the syscall stub the seccomp filter lets through is at the same
+   address in every image. */
 ENTRY(_start)
 PHDRS {
   text PT_LOAD FLAGS(5);

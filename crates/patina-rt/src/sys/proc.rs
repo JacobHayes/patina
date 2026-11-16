@@ -164,7 +164,8 @@ fn fork_child(call: &mut dyn Call, flags: u64, stack: u64, ctid: u64) -> i64 {
         [ts.pid as u64, ts.tid as u64, HELLO_FORK, 0, 0, 0],
     );
     if ts.child_settid != 0 {
-        unsafe { core::ptr::write_volatile(ts.child_settid as *mut i32, ts.tid) };
+        // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
+        let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
     // The inherited counters count the parent's threads: replace them.
     crate::pmu::fork_child(ts, &others[..nothers]);
@@ -240,7 +241,8 @@ pub fn vfork_child_start(uc2: u64) -> ! {
         [ts.pid as u64, ts.tid as u64, HELLO_VFORK, 0, 0, 0],
     );
     if ts.child_settid != 0 {
-        unsafe { core::ptr::write_volatile(ts.child_settid as *mut i32, ts.tid) };
+        // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
+        let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
     super::thread::sigreturn_to(uc2)
 }

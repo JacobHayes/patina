@@ -27,6 +27,7 @@ const BASE_ENV: [&str; 5] = [
 
 // Parts of the scheduler's interface (`Wait::Io`, `WakeReason::Signal`, `io_generation`,
 // `cancel`, ...) are for blocking I/O and signals; unit tests use the rest.
+mod contain;
 pub mod crash;
 #[allow(dead_code)]
 pub mod futex;
@@ -478,6 +479,13 @@ impl Sup {
                     self.finish(Verdict::new(
                         "infra",
                         format!("runtime setup failed: {step}{why}"),
+                    ));
+                }
+                if code == HE_CONTAINMENT {
+                    let [kind, addr, _, rip, store, _] = a;
+                    self.finish(Verdict::new(
+                        "containment",
+                        contain::describe(kind, addr, rip, store != 0),
                     ));
                 }
                 if code == HE_GUEST_FAULT_IN_RUNTIME {

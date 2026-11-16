@@ -1,5 +1,5 @@
 //! Control region: the first page (`Ctl`) followed by `MAX_THREADS` slots.
-//! Shared between every guest process (mapped at `CTL_ADDR`), the supervisor
+//! Shared between every guest process (mapped where `rt::state::map_shared` draws), the supervisor
 //! and, after the run, the launcher. Written only by whoever holds the turn.
 
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
@@ -652,6 +652,19 @@ pub const PMU_E_MISSED: u64 = 2;
 pub const PMU_E_DECODE: u64 = 3;
 pub const PMU_E_OPEN: u64 = 4;
 pub const PMU_E_PAGE: u64 = 5;
+/// Program code reached into the runtime: args[0] = `CONTAIN_*`, args[1] = the address,
+/// args[3] = the program's instruction pointer, args[4] = 1 for a store.
+pub const HE_CONTAINMENT: u64 = 8;
+/// A load or store at an address of the runtime's region (the control region's or the
+/// boundary log's published address, or any other part).
+pub const CONTAIN_ACCESS: u64 = 0;
+/// Program code ran runtime code (a jump into the runtime's text) at the address.
+pub const CONTAIN_EXEC: u64 = 1;
+/// A jump to the runtime's one permitted `syscall` instruction: the call reached the kernel
+/// at most once, and the run ends when it returns, before any program code sees its result.
+pub const CONTAIN_STUB: u64 = 2;
+/// Any other `syscall` instruction in the runtime's text: trapped, never made.
+pub const CONTAIN_SYSCALL: u64 = 3;
 
 /// Signal requests.
 ///

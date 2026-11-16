@@ -7,7 +7,7 @@ use super::*;
 use crate::state::{config, thread};
 use core::sync::atomic::AtomicU64;
 use proto::ctl::Op;
-use proto::layout::{CTL_ADDR, PAGE};
+use proto::layout::PAGE;
 use proto::sdk::*;
 
 const PROCESS_VM_READV: u64 = 310;
@@ -22,7 +22,7 @@ pub fn take_hash() -> u64 {
 }
 
 fn tab() -> &'static mut SdkTab {
-    unsafe { SdkTab::at(CTL_ADDR as *mut u8) }
+    unsafe { SdkTab::at(crate::state::ctl_base()) }
 }
 
 /// Copy guest memory with the kernel's checks: a bad pointer is `EFAULT`, never a fault in the

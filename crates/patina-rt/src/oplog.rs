@@ -19,7 +19,7 @@ const PWRITE: u64 = 18;
 const PREAD: u64 = 17;
 
 fn dur() -> &'static mut Dur {
-    unsafe { Dur::at(CTL_ADDR as *mut u8) }
+    unsafe { Dur::at(crate::state::ctl_base()) }
 }
 
 fn pwrite_all(fd: i32, mut off: u64, s: &[u8]) {

@@ -7,7 +7,7 @@
 
 use crate::state::ctl;
 use core::sync::atomic::Ordering::Relaxed;
-use proto::layout::{CTL_ADDR, FILE_EPOCH_S, REALTIME_EPOCH_S, VCLOCK_BOOT_NS};
+use proto::layout::{FILE_EPOCH_S, REALTIME_EPOCH_S, VCLOCK_BOOT_NS};
 use proto::vfs::{Vfs, VtEntry, VT_CAP};
 
 const NS: u64 = 1_000_000_000;
@@ -24,7 +24,7 @@ pub enum Which {
 }
 
 fn vfs() -> &'static mut Vfs {
-    unsafe { Vfs::at(CTL_ADDR as *mut u8) }
+    unsafe { Vfs::at(crate::state::ctl_base()) }
 }
 
 /// Virtual realtime, nanoseconds since 1970.

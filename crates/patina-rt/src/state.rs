@@ -4,11 +4,84 @@
 //! thread holding the turn runs runtime code.
 
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use proto::ctl::Ctl;
 use proto::layout::*;
 
+/// Where this image maps the control region and the boundary log read-write (`map_shared`).
+/// Per-process statics: written once at image start, before anything else uses them.
+static CTL_RW: AtomicU64 = AtomicU64::new(0);
+static LOG_RW: AtomicU64 = AtomicU64::new(0);
+
+/// The control region, through the runtime's read-write mapping.
+#[inline]
+pub fn ctl_base() -> *mut u8 {
+    CTL_RW.load(Relaxed) as *mut u8
+}
+
 pub fn ctl() -> &'static Ctl {
-    unsafe { Ctl::at(CTL_ADDR as *mut u8) }
+    unsafe { Ctl::at(ctl_base()) }
+}
+
+/// Is the control region mapped yet (false only early in an image's start)?
+pub fn ctl_mapped() -> bool {
+    CTL_RW.load(Relaxed) != 0
+}
+
+/// The boundary log's read-write mapping (its first byte; `log::ensure` extends it).
+#[inline]
+pub fn log_base() -> u64 {
+    LOG_RW.load(Relaxed)
+}
+
+/// Map the control region at a drawn address and reserve the published addresses of the
+/// control region and the boundary log inaccessible (`proto::layout`). A program's access to
+/// a published address faults (`fault::on_fault` names it); the drawn ones are written only
+/// here and appear nowhere a program can read (`/proc/self/maps` hides the runtime's region).
+pub fn map_shared() {
+    use crate::raw::*;
+    let mut r = [0u8; 8];
+    // The draw comes from the host, not the seed: it decides no value the program can see.
+    let n = unsafe { sc3(nr::GETRANDOM, r.as_mut_ptr() as u64, 8, 0) };
+    if n != 8 {
+        crate::fatal(proto::ctl::Setup::CtlMap, n.min(0));
+    }
+    let v = u64::from_le_bytes(r);
+    let pages = RW_SPAN / PAGE;
+    let ctl_rw = CTL_RW_LO + (v % pages) * PAGE;
+    let log_rw = LOG_RW_LO + ((v >> 32) % pages) * PAGE;
+    let size = proto::ctl::CTL_SIZE as u64;
+    let maps = [
+        (
+            ctl_rw,
+            size,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            FD_CTL as u64,
+        ),
+        (
+            CTL_ADDR,
+            size,
+            0,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+            u64::MAX,
+        ),
+        (
+            LOG_ADDR,
+            LOG_GUARD,
+            0,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE,
+            u64::MAX,
+        ),
+    ];
+    for (a, len, prot, flags, fd) in maps {
+        let m = unsafe { sc6(nr::MMAP, a, len, prot, flags | MAP_FIXED_NOREPLACE, fd, 0) };
+        if m as u64 != a {
+            crate::fatal(proto::ctl::Setup::CtlMap, m);
+        }
+    }
+    CTL_RW.store(ctl_rw, Relaxed);
+    LOG_RW.store(log_rw, Relaxed);
 }
 
 pub fn config() -> &'static proto::Config {

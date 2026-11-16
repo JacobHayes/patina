@@ -61,11 +61,25 @@ runs each seed once; repeating runs buys nothing per run.
 
 ### Containment
 
-Determinism of a cooperative or buggy guest holds; containment of a hostile one does not.
-C1: one store into the read-write control region moves supervisor decisions (open). C2: a
-jump to a `syscall` instruction in runtime text makes real, unrecorded calls (open,
-architectural). C3 (stdout a host file) and C4 (supervisor descriptors writable through
-`/proc/1/fd`) are closed.
+Program code that reaches into the runtime ends the run `unsupported`, stop `containment`
+(ARCHITECTURE.md, "Containment"); a program set on defeating the runtime is out of scope.
+Measured 2026-11-16 (reproducers in `tests/determinism/attack/contain`, regression
+`sandbox/11-containment`).
+
+| Hole | Before | Now |
+|---|---|---|
+| C1: `ctlwrite` adds an hour to the clock's word | one store: monotonic 3700 s, run `liveness` | `containment`: read of the control region's `magic` at `0x602000000000` |
+| C1: a random byte stored at a random offset of the control region (or the log) mid-run | silently changed the run | `containment` naming the address and field (as `slot 162 (tid)`); same digest twice |
+| C2: `gadget`, jumps to each `0f 05` byte pair in runtime text | 611 pairs; the real `CLOCK_REALTIME` and `getrandom` returned, run `ok` | 3 pairs (the count depends on the build); each ends `containment`: the stub's after one untrapped call, before the program sees the result; the rest trapped, never made |
+| `tidptr`: a thread's clear-tid pointer at the control region's published address | the runtime stored through it itself: run `internal` (runtime fault) | ignored, as the kernel does: `liveness` (glibc's join waits for ever, natively too) |
+| C3 (stdout a host file), C4 (supervisor descriptors through `/proc/1/fd`) | | closed earlier |
+
+| Check | Result |
+|---|---|
+| Per trap, `costs getppid` / `costs clock`, 2,000,000 calls, 5 runs each, before / after | 1.17 / 1.13 µs and 1.07 / 1.13 µs (means; within run-to-run spread) |
+| `mprotect` read-only then read-write of a shared memfd mapping (the rejected design), per pair | 1.95 µs (64 KiB), 1.30 µs (1 MiB, 1 page in 64 touched), 7.8 µs (1 MiB touched) |
+| W1-W9, `rs-net`, `tokio-echo`, `py-net`, `go-net`, seeds 1-2, before / after | 30/30 same outcome (`ok`); digests equal except where the program calls `execve` (W2, W4-W7): that record's first argument is the address of the path the runtime rewrote on its own stack, which moved 16 bytes; every other record equal |
+| `./check` every area but `evidence` and `nightly` | all pass but `procs/09-subprocess` and `runtimes/04-shell`, which fail the same way before the change on this host |
 
 ## Finding bugs: storage
 

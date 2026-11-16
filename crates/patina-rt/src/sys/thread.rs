@@ -43,22 +43,21 @@ pub const THREAD_FLAGS: u64 =
     CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
 
 global_asm!(
-    // patina_clone_vm(flags, stack, ptid, ctid, tls, uc2): the real clone. The child
-    // starts on `stack` (inside its own alternate stack) and calls thread_start(uc2);
-    // it never returns here and never touches the parent's stacks.
+    // patina_clone_vm(flags, stack, ptid, ctid, tls, uc2): the real clone, through the syscall
+    // stub. The child starts on `stack` (inside its own alternate stack), where the stub's `ret`
+    // finds `patina_clone_child` and then `uc2`; it calls thread_start(uc2) and never returns
+    // here or touches the parent's stacks. The parent returns from the stub to the caller.
     ".globl patina_clone_vm",
     "patina_clone_vm:",
-    "  push r12",
-    "  mov r12, r9",
+    "  lea rax, [rip + patina_clone_child]",
+    "  mov [rsi - 16], rax",
+    "  mov [rsi - 8], r9",
+    "  sub rsi, 16",
     "  mov r10, rcx",
     "  mov eax, 56",
-    "  syscall",
-    "  test rax, rax",
-    "  jz 2f",
-    "  pop r12",
-    "  ret",
-    "2:",
-    "  mov rdi, r12",
+    "  jmp patina_syscall",
+    "patina_clone_child:",
+    "  pop rdi",
     "  and rsp, -16",
     "  call {start}",
     "  ud2",
@@ -67,8 +66,7 @@ global_asm!(
     "patina_sigreturn_to:",
     "  mov rsp, rdi",
     "  mov eax, 15",
-    "  syscall",
-    "  ud2",
+    "  jmp patina_syscall",
     start = sym thread_start,
 );
 
@@ -277,7 +275,8 @@ extern "C" fn thread_start(uc2: *mut TrapFrame) -> ! {
         ],
     );
     if ts.child_settid != 0 {
-        unsafe { core::ptr::write_volatile(ts.child_settid as *mut i32, ts.tid) };
+        // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
+        let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
     crate::pmu::open(ts);
     crate::pmu::exit(ts, unsafe { (*uc2).gregs[crate::trap::reg::RIP] }, 0);
@@ -295,7 +294,8 @@ pub fn exit(call: &mut dyn Call) -> ! {
     let ts = thread();
     let clear = ts.clear_tid;
     if clear != 0 {
-        unsafe { core::ptr::write_volatile(clear as *mut u32, 0) };
+        // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
+        let _ = crate::guest::put(clear, 0u32);
     }
     crate::pmu::close(ts);
     crate::sup::call_sup_noreply(Op::ThreadExit, [status, clear, 0, 0, 0, 0]);

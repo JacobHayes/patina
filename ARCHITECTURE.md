@@ -27,8 +27,8 @@ executed from there (`launch.rs`).
 
 The runtime is started by `execveat` with the program's path. It loads the program itself
 (`loader.rs`: static or dynamic, its own stack and auxiliary vector, a seeded `AT_RANDOM`, no
-vDSO), then installs a seccomp filter that traps every system call made from outside the
-runtime's own code (`entry.rs`). Each trap lands in the runtime's SIGSYS handler: look up the
+vDSO), then installs a seccomp filter that traps every system call but those made by the
+runtime's one `syscall` instruction (`entry.rs`, `raw.rs`). Each trap lands in the runtime's SIGSYS handler: look up the
 call's row, decide faults, do the call, write the boundary record, return.
 
 `execve` loads the runtime again with the new program (`exec.rs`); `fork` is real
@@ -199,9 +199,50 @@ measured record, with the thirteen differences found and closed, is in
 [docs/EVIDENCE.md](docs/EVIDENCE.md). New kinds of difference were still appearing when the
 last matrix ran, so a difference is a Patina bug to report, not noise.
 
-Determinism holds for a cooperating program. A hostile program can corrupt the control
-region it shares with the supervisor, or jump into the runtime's own system call
-instruction; Patina does not contain it.
+## Containment
+
+The runtime shares a process with the program, so program code can reach the runtime's
+memory and code. Patina contains an accidental or curious program (a stray store, a corrupted
+function pointer, a library poking at addresses it found): such a reach ends the run
+`unsupported`, stop `containment`, naming what was reached, the same on every repeat. It does
+not contain a program that sets out to defeat the runtime.
+
+Enforced:
+- **System calls.** The seccomp filter lets through one instruction address, the `syscall` of
+  the runtime's stub (`raw.rs`). A `syscall` anywhere else, the runtime's text included,
+  traps; one there reached from program code ends the run.
+- **The stub.** It checks after the call that it ran on a runtime stack (every runtime stack
+  lies in the runtime's region; a program cannot map there). Program code that jumps to the
+  stub runs on its own stack: the call reaches the kernel once, and the stub stops at `ud2`
+  before any program code sees the result; the fault entry ends the run. A call that does not
+  return (`exit_group`, a successful `execve`, `rt_sigreturn`) is not stopped by the check;
+  an accidental jump makes one of those with the slim chance that `rax` holds its number.
+- **The control region and the boundary log.** Their published addresses
+  (`proto::layout::CTL_ADDR`, `LOG_ADDR`) are inaccessible reservations. The runtime maps them
+  read-write at addresses drawn from the host at each image start (`state::map_shared`), which
+  nothing reports (`/proc/self/maps` hides the runtime's region; calls that map, unmap or
+  protect there are refused). The supervisor and the launcher have their own mappings. A
+  pointer to a published address passed to a system call gets `EFAULT`, as for any
+  inaccessible memory.
+
+Detected:
+- A program access that faults in the runtime's region (at a published address, in an unmapped
+  part, or a store into its text), and program code running runtime code (a jump into its
+  text), end the run with the address, the instruction, and for the control region the field
+  (`sup/contain.rs`). A program that probes addresses with its own SIGSEGV handler and walks
+  into the runtime's region therefore ends the run there, where natively its handler would run.
+
+Out of scope (a deliberate attack):
+- Finding the read-write mappings (reading the runtime's memory, or probing about 2^23 pages
+  of each window) and storing there. Storing into the runtime's own data and per-thread state
+  (its `.data`, and the base of its alternate stacks, which stay writable because the kernel
+  writes signal frames there): they sit at fixed addresses no program is given. Reading the
+  runtime's text and data is not detected.
+- Pointing the stack pointer into the runtime's region before jumping to the stub, or
+  `rt_sigreturn` through the stub with a forged frame.
+
+Write protection that switches at every trap (`mprotect` on entry and exit) was measured and
+rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.md).
 
 ## Limits
 

@@ -4,7 +4,7 @@
 
 /// What the supervisor (or the launcher) decided. Sent as
 /// `class \t exit_status \t signal \t detail \n`. `class` is the engine's own token
-/// (`ok`, `failed`, `deadlock`, `liveness`, `stall`, `unsupported`, `infra`, `timeout`,
+/// (`ok`, `failed`, `deadlock`, `liveness`, `stall`, `containment`, `unsupported`, `infra`, `timeout`,
 /// `crash` between incarnations); `classify` maps it to an [`Outcome`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
@@ -184,6 +184,7 @@ pub fn classify(v: &Verdict) -> Classified {
         ),
         "liveness" => Classified::new(Liveness, "time-limit", d),
         "stall" => Classified::new(Unsupported, "compute-stall", d),
+        "containment" => Classified::new(Unsupported, "containment", d),
         "unsupported" => Classified::new(
             Unsupported,
             "syscall",

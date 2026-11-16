@@ -551,12 +551,12 @@ pub fn classify(dirfd: i64, p: u64, norm: &mut PathBuf) -> Kind {
 /// Record an absolute path an `execve` (`what` = `MISSING_EXEC`) or `open` found missing,
 /// for the launcher's hint about paths the sandbox lacks.
 pub fn missing(what: u8, path: &PathBuf) {
-    let v = unsafe { proto::vfs::Vfs::at(proto::layout::CTL_ADDR as *mut u8) };
+    let v = unsafe { proto::vfs::Vfs::at(crate::state::ctl_base()) };
     v.miss(what, path.as_bytes());
 }
 
 /// Record a refusal (shown in `outcome.refused`).
 pub fn refuse(what: &[u8]) {
-    let v = unsafe { proto::vfs::Vfs::at(proto::layout::CTL_ADDR as *mut u8) };
+    let v = unsafe { proto::vfs::Vfs::at(crate::state::ctl_base()) };
     v.refuse(what);
 }

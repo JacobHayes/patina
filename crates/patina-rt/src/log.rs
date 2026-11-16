@@ -1,4 +1,4 @@
-//! Boundary log: a shared file mapping at `LOG_ADDR`, appended under the turn.
+//! Boundary log: a shared file mapping at `state::log_base`, appended under the turn.
 
 use crate::raw::*;
 use crate::state::{ctl, proc};
@@ -23,10 +23,13 @@ fn ensure(len: u64) {
         c.log_cap.store(newcap, Relaxed);
         cap = newcap;
     }
+    if cap > LOG_MAX {
+        crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_SYSCALL);
+    }
     let r = unsafe {
         sc6(
             nr::MMAP,
-            LOG_ADDR + p.log_mapped,
+            crate::state::log_base() + p.log_mapped,
             cap - p.log_mapped,
             PROT_READ | PROT_WRITE,
             MAP_SHARED | MAP_FIXED_NOREPLACE,
@@ -34,7 +37,7 @@ fn ensure(len: u64) {
             p.log_mapped,
         )
     };
-    if r as u64 != LOG_ADDR + p.log_mapped {
+    if r as u64 != crate::state::log_base() + p.log_mapped {
         crate::sup::host_error(r, nr::MMAP, proto::ctl::HE_SYSCALL);
     }
     p.log_mapped = cap;
@@ -55,7 +58,7 @@ pub fn append(rec: &Rec) {
     unsafe {
         core::ptr::copy_nonoverlapping(
             rec.as_bytes().as_ptr(),
-            (LOG_ADDR + off) as *mut u8,
+            (crate::state::log_base() + off) as *mut u8,
             REC_SIZE,
         );
     }

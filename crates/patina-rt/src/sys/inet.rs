@@ -49,7 +49,7 @@ const EINPROGRESS: i64 = 115;
 const ENOPROTOOPT: i64 = 92;
 
 fn tab() -> &'static mut WireTab {
-    unsafe { WireTab::at(proto::layout::CTL_ADDR as *mut u8) }
+    unsafe { WireTab::at(crate::state::ctl_base()) }
 }
 
 fn sock(i: usize) -> &'static mut WSock {
@@ -86,7 +86,7 @@ fn sup(op: Op, a: [u64; 6]) -> i64 {
 }
 
 fn refuse(what: &[u8]) {
-    unsafe { proto::vfs::Vfs::at(proto::layout::CTL_ADDR as *mut u8) }.refuse(what);
+    unsafe { proto::vfs::Vfs::at(crate::state::ctl_base()) }.refuse(what);
 }
 
 // ---- addresses ----

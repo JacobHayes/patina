@@ -5,11 +5,10 @@
 //! `(st_dev, st_ino)`, in the control region so that every process of a run
 //! agrees (a pipe is shared across `fork`). the network wire uses `of_fd` as the socket key.
 
-use proto::layout::CTL_ADDR;
 use proto::vfs::{Vfs, VinoEntry, VINO_BASE, VINO_CAP};
 
 fn vfs() -> &'static mut Vfs {
-    unsafe { Vfs::at(CTL_ADDR as *mut u8) }
+    unsafe { Vfs::at(crate::state::ctl_base()) }
 }
 
 /// The virtual number of the object `(dev, ino)`, allocating one at first sight.

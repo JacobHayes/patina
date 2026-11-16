@@ -14,16 +14,22 @@ global_asm!(
     ".section .text.entry,\"ax\"",
     ".globl _start",
     "_start:",
+    // Continue on the start-up stack in `.bss` until the first alternate stack exists: the
+    // syscall stub accepts only a stack in the runtime's region (`raw.rs`).
     "  mov rdi, rsp",
-    "  and rsp, -16",
+    "  lea rsp, [rip + patina_boot_stack_top]",
     "  call {start}",
     "  ud2",
+    ".pushsection .bss.patina_boot_stack,\"aw\",@nobits",
+    ".balign 16",
+    "  .skip 65536",
+    "patina_boot_stack_top:",
+    ".popsection",
     ".text",
     ".globl patina_restorer",
     "patina_restorer:",
     "  mov eax, 15",
-    "  syscall",
-    "  ud2",
+    "  jmp patina_syscall",
     // switch_stack(top, ksp, f): run f(ksp) on a new stack
     ".globl patina_switch_stack",
     "patina_switch_stack:",
@@ -100,20 +106,7 @@ extern "C" fn rt_main(ksp: u64) -> ! {
     );
     // The kernel clears the runtime's tid word when this task is gone (thread reclamation).
     unsafe { sc1(nr::SET_TID_ADDRESS, &ts.ktid as *const u32 as u64) };
-    unsafe {
-        let r = sc6(
-            nr::MMAP,
-            CTL_ADDR,
-            proto::ctl::CTL_SIZE as u64,
-            PROT_READ | PROT_WRITE,
-            MAP_SHARED | MAP_FIXED_NOREPLACE,
-            FD_CTL as u64,
-            0,
-        );
-        if r as u64 != CTL_ADDR {
-            crate::fatal(proto::ctl::Setup::CtlMap, r);
-        }
-    }
+    map_shared();
     if !ctl().check() {
         crate::fatal(proto::ctl::Setup::CtlCheck, 0);
     }
@@ -184,67 +177,25 @@ struct SockFprog {
     filter: *const SockFilter,
 }
 
-/// Trap every syscall whose instruction pointer is outside the runtime's text.
+/// Trap every syscall but the runtime's own, made by its one `syscall` instruction
+/// (`raw::stub_ip`; the same address in every image, the runtime being linked at a fixed base).
 /// Installed once per process tree: the filter is inherited by fork and kept across execve.
 fn install_filter() {
     const PR_SET_NO_NEW_PRIVS: u64 = 38;
     const PR_SET_SECCOMP: u64 = 22;
     const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+    let ip = crate::raw::stub_ip();
+    let ins = |code: u16, jt: u8, jf: u8, k: u32| SockFilter { code, jt, jf, k };
     let f = [
-        SockFilter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 4,
-        }, // ld arch
-        SockFilter {
-            code: 0x15,
-            jt: 0,
-            jf: 6,
-            k: AUDIT_ARCH_X86_64,
-        },
-        SockFilter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 12,
-        }, // ld ip high word
-        SockFilter {
-            code: 0x15,
-            jt: 0,
-            jf: 3,
-            k: RT_IP_HI32,
-        },
-        SockFilter {
-            code: 0x20,
-            jt: 0,
-            jf: 0,
-            k: 8,
-        }, // ld ip low word
-        SockFilter {
-            code: 0x35,
-            jt: 1,
-            jf: 0,
-            k: RT_IP_LO_END,
-        }, // jge end -> trap
-        SockFilter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: 0x7fff_0000,
-        }, // allow
-        SockFilter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: 0x0003_0000,
-        }, // trap
-        SockFilter {
-            code: 0x06,
-            jt: 0,
-            jf: 0,
-            k: 0x8000_0000,
-        }, // kill process
+        ins(0x20, 0, 0, 4),                 // ld arch
+        ins(0x15, 0, 6, AUDIT_ARCH_X86_64), // jne -> kill
+        ins(0x20, 0, 0, 12),                // ld ip high word
+        ins(0x15, 0, 2, (ip >> 32) as u32), // jne -> trap
+        ins(0x20, 0, 0, 8),                 // ld ip low word
+        ins(0x15, 1, 0, ip as u32),         // jeq -> allow
+        ins(0x06, 0, 0, 0x0003_0000),       // trap
+        ins(0x06, 0, 0, 0x7fff_0000),       // allow
+        ins(0x06, 0, 0, 0x8000_0000),       // kill process
     ];
     let prog = SockFprog {
         len: f.len() as u16,
@@ -366,6 +317,16 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
         // Delivered on top of the overflow signal: that handler re-executes the call.
         crate::pmu::sigsys_race(ts);
         return;
+    }
+    let rip = frame.gregs[RIP];
+    // The instruction's own address: a program mapping may end where the region starts.
+    if crate::fault::in_runtime(rip.wrapping_sub(2)) {
+        // A `syscall` in the runtime's text other than the stub's. On a program stack: program
+        // code jumped there. On a runtime stack: a runtime defect.
+        if crate::fault::in_runtime(frame.gregs[RSP]) {
+            crate::sup::host_error(0, rip, proto::ctl::HE_RUNTIME_ASSERT);
+        }
+        crate::sup::containment(proto::ctl::CONTAIN_SYSCALL, rip - 2, rip - 2, false);
     }
     crate::pmu::enter(ts, Some(frame));
     crate::spin::enter(ts, Some(frame));

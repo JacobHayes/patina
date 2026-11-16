@@ -48,7 +48,8 @@ pub fn fatal(step: proto::ctl::Setup, r: i64) -> ! {
         raw::write_all(2, b")");
     }
     raw::write_all(2, b"\n");
-    if state::ctl().check()
+    if state::ctl_mapped()
+        && state::ctl().check()
         && state::thread().magic == state::TS_MAGIC
         && state::thread().slot != u32::MAX
     {

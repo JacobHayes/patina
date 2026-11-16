@@ -1,9 +1,11 @@
 //! Synchronous faults: real SIGSEGV, SIGILL, SIGBUS, SIGFPE and SIGTRAP arrive at
-//! `on_fault` on the runtime's alternate stack. In order: a fault in a guest copy
-//! (`guest.rs`) returns `EFAULT` from it; any other fault in runtime code (or on runtime
-//! memory) is a runtime defect (`infra`); then the chain of instruction emulators;
-//! then the guest's virtual disposition: a handler gets a frame built by
-//! `sigframe::deliver` with the kernel's siginfo, the default action terminates.
+//! `on_fault` on the runtime's alternate stack. In order: runtime code running on a program
+//! stack (program code jumped into the runtime) ends the run (`HE_CONTAINMENT`); a fault in a
+//! guest copy (`guest.rs`) returns `EFAULT` from it; any other fault in runtime code is a
+//! runtime defect (`infra`); then the chain of instruction emulators; a program access to the
+//! runtime's region ends the run (`HE_CONTAINMENT`); then the guest's virtual disposition: a
+//! handler gets a frame built by `sigframe::deliver` with the kernel's siginfo, the default
+//! action terminates.
 
 use crate::entry::charge;
 use crate::state::thread;
@@ -21,9 +23,12 @@ static EMULATORS: &[Emulator] = &[
     crate::insn::emulate::try_emulate,
 ];
 
-fn in_runtime(a: u64) -> bool {
+pub fn in_runtime(a: u64) -> bool {
     (RT_BASE..RT_REGION_END).contains(&a)
 }
+
+/// Page-fault error code bit: the access was a store.
+const PF_WRITE: u64 = 2;
 
 /// The fault entry.
 pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
@@ -31,6 +36,16 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
     let rip = frame.gregs[RIP];
     if sig as u64 == sig::SIGTRAP && crate::spin::on_sigtrap(unsafe { &*info }, frame) {
         return;
+    }
+    if in_runtime(rip) && !in_runtime(frame.gregs[RSP]) {
+        // Runtime code on a program stack: program code jumped into the runtime's text; at the
+        // syscall stub's stop, after making a call through its instruction (`raw.rs`).
+        let kind = if rip == crate::raw::stub_escape() {
+            proto::ctl::CONTAIN_STUB
+        } else {
+            proto::ctl::CONTAIN_EXEC
+        };
+        crate::sup::containment(kind, rip, rip, false);
     }
     if in_runtime(rip) {
         // A guest pointer the runtime was copying through: the copy returns EFAULT.
@@ -61,7 +76,9 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
     let sig = sig as u64;
     let addr = info[2];
     if matches!(sig, sig::SIGSEGV | sig::SIGBUS) && in_runtime(addr) {
-        crate::sup::host_error(sig as i64, addr, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
+        // Program code loaded or stored at an address of the runtime's region.
+        let store = frame.gregs[ERR] & PF_WRITE != 0;
+        crate::sup::containment(proto::ctl::CONTAIN_ACCESS, addr, rip, store);
     }
     let ts = thread();
     charge(ts);

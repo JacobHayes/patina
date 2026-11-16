@@ -75,6 +75,15 @@ pub fn host_error(errno: i64, nr: u64, code: u64) -> ! {
     hang()
 }
 
+/// End the run: program code reached into the runtime (`proto::ctl::HE_CONTAINMENT`).
+pub fn containment(kind: u64, addr: u64, rip: u64, store: bool) -> ! {
+    call_sup_raw(
+        Op::HostError,
+        [kind, addr, proto::ctl::HE_CONTAINMENT, rip, store as u64, 0],
+    );
+    hang()
+}
+
 pub fn hang() -> ! {
     loop {
         unsafe {

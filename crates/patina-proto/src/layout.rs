@@ -1,23 +1,39 @@
 //! Fixed address map and hidden descriptor numbers.
 //! Identical in every guest process.
 
-/// Runtime image, text first. The seccomp filter lets through syscalls whose
-/// instruction pointer lies in `[RT_BASE, RT_TEXT_END)`.
+/// Runtime image, text first (below `0x6000_1000_0000`, `link.ld`). The seccomp filter lets
+/// through only the one `syscall` instruction of the runtime's stub (`rt::raw`).
 pub const RT_BASE: u64 = 0x6000_0000_0000;
-pub const RT_TEXT_END: u64 = 0x6000_1000_0000;
-/// High and low 32-bit halves the filter compares.
-pub const RT_IP_HI32: u32 = 0x6000;
-pub const RT_IP_LO_END: u32 = 0x1000_0000;
 /// Runtime private memory: alternate stacks (aligned to their size), tables. Bump allocated.
 pub const RT_PRIV: u64 = 0x6010_0000_0000;
 pub const RT_PRIV_SIZE: u64 = 0x10_0000_0000;
-/// Control region (shared memfd).
+/// The control region's published address: an inaccessible reservation, so that a program's
+/// load or store there faults and is named (`HE_CONTAINMENT`). The runtime reaches the region
+/// (a shared memfd) through a read-write mapping at a page in `[CTL_RW_LO, CTL_RW_LO +
+/// RW_SPAN)` drawn from the host at each image start; nothing reports where.
 pub const CTL_ADDR: u64 = 0x6020_0000_0000;
-/// Boundary log mapping (shared file mapping, extended in `LOG_STEP` steps).
+pub const CTL_RW_LO: u64 = 0x6021_0000_0000;
+/// Boundary log: the published address (an inaccessible reservation of `LOG_GUARD` bytes),
+/// and the window whose first `RW_SPAN` bytes hold the read-write mapping's drawn start (it
+/// grows upwards in `LOG_STEP` steps, to the end of the runtime's region).
 pub const LOG_ADDR: u64 = 0x6030_0000_0000;
+pub const LOG_GUARD: u64 = 1 << 30;
+pub const LOG_RW_LO: u64 = 0x6031_0000_0000;
 pub const LOG_STEP: u64 = 16 << 20;
+/// The longest boundary log (28 GiB): what fits above the highest drawn start, so the limit
+/// does not depend on the draw.
+pub const LOG_MAX: u64 = RT_REGION_END - (LOG_RW_LO + RW_SPAN);
+/// Width of the windows the read-write mappings are drawn from (32 GiB: `2^23` pages).
+pub const RW_SPAN: u64 = 0x8_0000_0000;
 /// Everything in `[RT_BASE, RT_REGION_END)` belongs to the runtime; the guest may not map there.
 pub const RT_REGION_END: u64 = 0x6040_0000_0000;
+/// The runtime's region is `2^RT_REGION_SHIFT` bytes, aligned: an address `a` is in it exactly
+/// when `a >> RT_REGION_SHIFT == RT_REGION_TAG`. The syscall stub checks its stack pointer so.
+pub const RT_REGION_SHIFT: u32 = 38;
+pub const RT_REGION_TAG: u64 = RT_BASE >> RT_REGION_SHIFT;
+const _: () = assert!(RT_REGION_END - RT_BASE == 1 << RT_REGION_SHIFT);
+const _: () = assert!(RT_BASE & ((1 << RT_REGION_SHIFT) - 1) == 0);
+const _: () = assert!(CTL_RW_LO + RW_SPAN <= LOG_ADDR && LOG_RW_LO + RW_SPAN < RT_REGION_END);
 
 /// Guest `ET_DYN` executable base; `ET_EXEC` images load where they were linked.
 pub const EXE_BASE: u64 = 0x5555_5555_0000;
