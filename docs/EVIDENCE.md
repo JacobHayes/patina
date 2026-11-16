@@ -2,7 +2,7 @@
 
 What the syscall-trap engine (`crates/patina-cli/ENGINE.md`) has been shown to do, one line
 per result. All measured 2026-11-12 to 2026-11-16 on one host: a KVM guest, Linux 7.0,
-24 vCPUs (AMD Ryzen 9 9950X), run directories on XFS. The scripts behind each claim are `./check evidence`
+24 vCPUs (AMD Ryzen 9 9950X), run directories on XFS; "Second hosts" adds five GitHub runners. The scripts behind each claim are `./check evidence`
 and the `area` tier of each test directory.
 
 ## Determinism
@@ -204,7 +204,8 @@ and `get`/`setpriority`; anything outside Linux x86_64.
 - Go `os/exec` deadlocks when an injected `EIO` hits its status-pipe read (Linux never does
   that).
 - W8's `sockets all` mode fails every seed under network faults (it checks exact transfers).
-- Every result is from one host; a second kernel, filesystem or CPU model is unchecked.
+- Repeat stability is shown on five more hosts ("Second hosts"); the long matrix, soaks and
+  time variant are from one host only.
 
 ## The SDK channel
 
@@ -297,3 +298,66 @@ file-error group names the injected class in every failing run. The 30 digests a
 `-j 4` and `-j 1`, and equal to the same seeds run alone. Red/green: adding the seed to the
 signature splits the race into one group per seed and fails the check; not acting on a
 replay's divergence turns a host file changing under the replay into a finding and fails it.
+
+## Second hosts
+
+One `patina` binary and one set of guest binaries, built once on the development VM from
+`90c261f7` and copied unchanged to every host (`sha256` checked in each host's log). Each
+cell is `patina verify --seed S --runs 5 --vary repeat,cpu,aslr,sandbox --mount
+GUEST:/guest:copy [--faults all] -- CMD`, seeds 1 to 3, faults off and `all`: 11 guests,
+66 cells, 330 runs per host. Guests: the seven of the reduced protocol (`hello-static`,
+`hello-dyn`, `fs-tour`, `sockets all`, CPython `w5.py all`, `tokio-mt local`, `/bin/sh w6.sh`)
+and four static ones to separate the host's libc from the engine (`fs-tour` and `sockets`
+built `-static`, `tokio-mt` with `crt-static`, `go-static all`). 2026-11-16.
+
+| Host | Image, kernel | CPU | Cells identical over 5 runs |
+|---|---|---|---|
+| development VM | 26.04, 7.0.0-43-generic | AMD Ryzen 9 9950X | 66/66 |
+| GitHub `ubuntu-24.04` | 24.04, 7.0.0-1017-azure | AMD EPYC 9V45 | 65/66 (below) |
+| GitHub `ubuntu-24.04` | 24.04, 7.0.0-1017-azure | AMD EPYC 9V74 | 66/66 |
+| GitHub `ubuntu-24.04` | 24.04, 7.0.0-1017-azure | Intel Xeon 8370C | 66/66 |
+| GitHub `ubuntu-24.04` | 24.04, 7.0.0-1014-aws | Intel Xeon 6975P-C | 66/66 |
+| GitHub `ubuntu-latest` | 26.04, 7.0.0-1016-aws | Intel Xeon 6975P-C | 66/66 |
+
+The runner pool moves: `ubuntu-24.04` landed on Azure AMD, Azure Intel and AWS Intel, and
+`ubuntu-latest` on AWS Intel and Azure AMD, within one hour.
+
+Within a host, the one difference: on the EPYC 9V45 runner, `w6.sh` seed 1 faults off, one
+ASLR-on repeat ended `internal` (`HostError` code `HE_LOADER` right after a child's `execve`
+and `Hello`: the runtime's loader failed before the new image's first instruction). Not
+reproduced in 800 more ASLR-varied runs of that cell on an `ubuntu-24.04` runner, 140 on an
+`ubuntu-latest` runner, 60 on the development VM, or the two later full matrices. It fails
+closed (`internal`, not a silent divergence), but it varies run to run on one host: a defect,
+open. Its message reads "errno 0 in read (code 2)": loader failures are printed as a system
+call error.
+
+Across hosts, cells with equal digests (of 66; the seven protocol guests, of 42, in brackets):
+
+| | dev VM | Azure AMD 9V45 | Azure AMD 9V74 | Azure Intel 8370C | AWS Intel 24.04 | AWS Intel 26.04 |
+|---|---|---|---|---|---|---|
+| dev VM | | 12 (6) | 12 (6) | 12 (6) | 12 (6) | 12 (6) |
+| Azure AMD 9V45 | | | 66 (42) | 36 (24) | 12 (6) | 12 (6) |
+| Azure Intel 8370C | | | | | 12 (6) | 12 (6) |
+| AWS Intel 24.04 | | | | | | 12 (6) |
+
+`hello-static` and `sockets-static` give one digest per cell on all six hosts. Every other
+guest differs between some hosts. The first differing record (`patina log diff`) and its
+cause:
+
+| What differed | Guests | Kind | Verdict |
+|---|---|---|---|
+| `uname` release (`7.0.0-43-generic`, `-1017-azure`, `-1014-aws`, `-1016-aws`) | `fs-tour`, `fs-tour-static` (the only difference for the static one) | kernel version | allowed |
+| the host's `/lib64/ld-linux-x86-64.so.2` (first `rdtsc` at another address) or `/etc/ld.so.cache` (`fstat` output; Azure and AWS 24.04 images differ) | every dynamic guest, `python3`, `/bin/sh` | libc and loader from the host's `/usr` | allowed: dynamic guests run the host's `/usr` |
+| a host program the guest runs (`seq` for `tokio-mt`, `os/exec` targets for `go-static`) | `tokio-mt-static`, `go-static` | host `/usr` | allowed |
+| signal frame address and runtime buffer addresses moved by 0x100 or 0x180 bytes; the Rust alternate signal stack 0x3000 or 0x3eb0 bytes (`AT_MINSIGSTKSZ`) | `go-static`, `tokio-mt*`, `cpython`, `w6.sh` between AMD, Intel 8370C and Intel 6975P-C | CPU identity (XSAVE area size) | allowed |
+| `/proc/self/mountinfo` 1306 or 1307 bytes: tmpfs options carry the launcher's `uid=`/`gid=` (1000 on the VM, 1001 on runners) while `stat` reports 1000 | `go-static` (Go reads mountinfo at start-up) | inherited launcher state | defect, open |
+
+Two Azure 24.04 hosts with different AMD models give equal digests in all 66 cells.
+
+New kinds of difference: one within a host (the ASLR-on loader failure, cause unconfirmed),
+none across hosts (the mountinfo uid is the inherited-launcher-state kind, B4). What can be
+promised: a seed gives the same run on one host, repeated, across CPUs, ASLR and sandboxes.
+Across hosts, a statically linked guest that reads no host file gives the same run when the
+CPU's XSAVE size is the same and it does not read `uname` or mountinfo; a dynamic guest
+also needs the same `/usr` and `/etc/ld.so.cache`, which in practice means the same image.
+Cross-host identity is not promised.
