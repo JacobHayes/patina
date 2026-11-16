@@ -80,6 +80,10 @@ pub struct Config {
     pub crash: Option<String>,
     /// Let SDK fault points fire (`--buggify`, `[sdk] buggify`).
     pub buggify: bool,
+    /// SDK labels and fault classes a sweep or report may find unmet without calling the
+    /// result vacuous (`[sdk] allow-unmet`).
+    #[serde(default)]
+    pub allow_unmet: Vec<String>,
     pub fs_model: String,
     pub max_incarnations: u64,
     pub preempt_permille: u64,
@@ -113,6 +117,7 @@ impl Default for Config {
             faults_in_recovery: true,
             crash: None,
             buggify: false,
+            allow_unmet: vec![],
             fs_model: Model::Ext4Ordered.name().into(),
             max_incarnations: 4,
             preempt_permille: 100,
@@ -385,6 +390,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
                         .as_bool()
                         .ok_or_else(|| format!("{at}: expected true or false"))?
                 }
+                ("sdk", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "stall-ms") => c.stall_ms = int(v, &at)?,
                 ("sched", "host-cpu") => c.host_cpu = Some(int(v, &at)? as usize),

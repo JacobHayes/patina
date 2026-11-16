@@ -9,10 +9,14 @@ mod insn;
 mod launch;
 mod launcher;
 mod log;
+mod minimize;
 mod outcome;
 mod replay;
+mod report;
 mod result;
+mod signature;
 mod sup;
+mod sweep;
 mod sys;
 mod table;
 mod verify;
@@ -93,6 +97,9 @@ fn main() -> ExitCode {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Doctor => doctor::doctor(&a).map_err(error),
+        Cmd::Sweep => sweep::main(&a),
+        Cmd::Report => report::main(&a).map_err(error),
+        Cmd::Minimize => minimize::main(&a),
     };
     r.unwrap_or_else(|Fail(o, e)| {
         eprintln!("patina: {}: {e}", o.name());

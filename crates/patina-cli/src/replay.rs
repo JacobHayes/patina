@@ -41,6 +41,23 @@ pub fn replay(args: &Args) -> Res<Replayed> {
         return Err("usage: patina replay RUNDIR [--out DIR]".into());
     };
     let rundir = PathBuf::from(rundir);
+    let (cfg, program) = load(&rundir)?;
+    let recorded = read_json(&rundir.join("result.json"))?;
+    let out = match args.last("--out") {
+        Some(o) => PathBuf::from(o),
+        None => {
+            let mut s = rundir.as_os_str().to_owned();
+            s.push("-replay");
+            PathBuf::from(s)
+        }
+    };
+    let run = read_json(&rundir.join("run.json"))?;
+    replay_into(&rundir, &out, cfg, program, &recorded, &run)
+}
+
+/// The configuration and program a run directory's `run.json` records, after checking that
+/// the program is unchanged.
+pub fn load(rundir: &Path) -> Res<(Config, Program)> {
     let run_path = rundir.join("run.json");
     if !run_path.is_file() {
         return Err(format!(
@@ -70,15 +87,18 @@ pub fn replay(args: &Args) -> Res<Replayed> {
             now
         ));
     }
-    let recorded = read_json(&rundir.join("result.json"))?;
-    let out = match args.last("--out") {
-        Some(o) => PathBuf::from(o),
-        None => {
-            let mut s = rundir.as_os_str().to_owned();
-            s.push("-replay");
-            PathBuf::from(s)
-        }
-    };
+    Ok((cfg, program))
+}
+
+fn replay_into(
+    rundir: &Path,
+    out: &Path,
+    cfg: Config,
+    program: Program,
+    recorded: &serde_json::Value,
+    run: &serde_json::Value,
+) -> Res<Replayed> {
+    let out = out.to_path_buf();
     let o = cfg.opts_with(program)?;
     crate::launch::pmu_event(&o)?;
     clear_out(&out)?;
@@ -95,7 +115,7 @@ pub fn replay(args: &Args) -> Res<Replayed> {
     let cpu = cfg.host_cpu.unwrap_or_else(default_cpu);
     let (end, mut result) = run_one(&o, &out, cpu, false)?;
     let mine = crate::result::classified(&end);
-    let diverged = match crate::log::first_run_difference(&rundir, &out)? {
+    let diverged = match crate::log::first_run_difference(rundir, &out)? {
         Some(d) => Some(d),
         None if recorded["outcome"] != result["outcome"]
             || recorded["digest"] != result["digest"] =>
@@ -111,6 +131,7 @@ pub fn replay(args: &Args) -> Res<Replayed> {
         Some(d) => {
             let c = Classified::new(Outcome::Nondeterministic, "divergence", d);
             result = result_json(&end, &c);
+            result["signature"] = crate::signature::of(&result, &out);
             write_json(&out.join("result.json"), &result)?;
             c
         }

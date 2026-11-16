@@ -14,6 +14,9 @@ pub enum Cmd {
     Log,
     Table,
     Doctor,
+    Sweep,
+    Report,
+    Minimize,
 }
 
 pub struct Command {
@@ -41,6 +44,24 @@ pub const COMMANDS: &[Command] = &[
         name: "verify",
         usage: "patina verify [options] [-- CMD ARGS...]",
         help: "one seed several times under varied host conditions; names the first differing record",
+    },
+    Command {
+        cmd: Cmd::Sweep,
+        name: "sweep",
+        usage: "patina sweep --seeds A..B [--cases FILE] [-j N] [run options] [-- CMD ARGS...]",
+        help: "many seeds in parallel, each a normal run; findings grouped by signature",
+    },
+    Command {
+        cmd: Cmd::Report,
+        name: "report",
+        usage: "patina report DIR...",
+        help: "summarise run directories (a sweep's, or any made by patina run --out)",
+    },
+    Command {
+        cmd: Cmd::Minimize,
+        name: "minimize",
+        usage: "patina minimize RUNDIR [--out DIR]",
+        help: "drop and halve a failing run's fault settings while it fails the same way",
     },
     Command {
         cmd: Cmd::Log,
@@ -72,7 +93,7 @@ pub struct Flag {
     pub repeat: bool,
 }
 
-const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify];
+const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
 const ALL: &[Cmd] = &[
     Cmd::Run,
     Cmd::Replay,
@@ -80,6 +101,9 @@ const ALL: &[Cmd] = &[
     Cmd::Log,
     Cmd::Table,
     Cmd::Doctor,
+    Cmd::Sweep,
+    Cmd::Report,
+    Cmd::Minimize,
 ];
 
 const fn flag(
@@ -121,14 +145,14 @@ pub const FLAGS: &[Flag] = &[
         "N",
         "0",
         "the seed (default from PATINA_SEED)",
-        RUNLIKE,
+        &[Cmd::Run, Cmd::Verify],
     ),
     flag(
         "--out",
         "DIR",
         "patina-out/run-SEED",
-        "run directory (verify: patina-out/verify-SEED; replay: RUNDIR-replay)",
-        &[Cmd::Run, Cmd::Verify, Cmd::Replay],
+        "run directory (verify: patina-out/verify-SEED; replay: RUNDIR-replay; sweep: patina-out/sweep; minimize: RUNDIR-min)",
+        &[Cmd::Run, Cmd::Verify, Cmd::Replay, Cmd::Sweep, Cmd::Minimize],
     ),
     flag(
         "--config",
@@ -209,6 +233,54 @@ pub const FLAGS: &[Flag] = &[
         "what to change between runs: cpu,load,aslr,sandbox,repeat,parallel,env,time",
         &[Cmd::Verify],
     ),
+    flag(
+        "--seeds",
+        "A..B|N,M,...",
+        "",
+        "the seeds: an inclusive range, a list, or both (1..100,250)",
+        &[Cmd::Sweep],
+    ),
+    flag(
+        "--jobs",
+        "N",
+        "half the CPUs, at most 8",
+        "runs at once, each pinned to its own CPU (also -j N)",
+        &[Cmd::Sweep],
+    ),
+    flag(
+        "--cases",
+        "FILE",
+        "none",
+        "one case per line; each (case, seed) is one run, {} in the command is the case",
+        &[Cmd::Sweep],
+    ),
+    flag(
+        "--keep",
+        "fail|all|none",
+        "fail",
+        "whose logs to keep (run.json and result.json are always kept)",
+        &[Cmd::Sweep],
+    ),
+    flag(
+        "--max-findings",
+        "N",
+        "no limit",
+        "stop launching runs once N distinct findings (signatures) are seen; 1: the first",
+        &[Cmd::Sweep],
+    ),
+    flag(
+        "--budget",
+        "SECONDS",
+        "no limit",
+        "stop launching runs after this much wall time",
+        &[Cmd::Sweep],
+    ),
+    many(
+        "--allow-unmet",
+        "LABEL",
+        "an SDK label or fault class that may stay unmet without making the result vacuous",
+        &[Cmd::Sweep, Cmd::Report],
+    ),
     flag("--from", "SEQ", "0", "log dump: first record", &[Cmd::Log]),
     flag("--to", "SEQ", "last", "log dump: last record", &[Cmd::Log]),
     flag(
@@ -283,6 +355,11 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
         if !a.starts_with("--") || a == "-" {
             if a == "-h" {
                 out.flags.entry("--help").or_default();
+                continue;
+            }
+            if a == "-j" && cmd == Cmd::Sweep {
+                let v = it.next().ok_or("-j needs N")?;
+                out.flags.insert("--jobs", vec![v.clone()]);
                 continue;
             }
             out.positional.push(a.clone());

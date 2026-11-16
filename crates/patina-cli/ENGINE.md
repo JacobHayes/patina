@@ -49,6 +49,19 @@ first differing record when the logs differ (`replay.rs`). `doctor` checks bwrap
 namespaces, seccomp, personality, the rdtsc trap and a sandbox run, and names the fix
 (`doctor.rs`).
 
+`result.json`'s `signature` names what failed so that one bug over many seeds counts once:
+`outcome stop: primary`, where `primary` is the failed `always` label, the waits of the
+blocked threads, the guest's first panic or assertion line on stderr with the signal or exit
+status, or the unsupported call, with digit and hex runs collapsed (`signature.rs`). `sweep`
+runs each seed (and each `--cases` line) as a child `patina run` into `OUT/seed-N[/CASE]`, `-j`
+at a time, each child pinned to its own CPU; it lowers `-j` and reruns the seed when a run
+hits the per-user pipe limit, replays the first seed of each finding once (a difference makes
+the group `nondeterministic`), and prints `report` over `OUT` (`sweep.rs`). `report` groups
+any run directories by signature and case, with the attribution line (fault classes injected
+in every failing run, in none), the SDK fold and the fault counts, and writes the same as JSON
+(`report.rs`). `minimize` drops, then halves, a failing run's fault settings while its
+signature holds, in at most 30 runs (`minimize.rs`).
+
 ## Launcher (`launch.rs`, `launcher/`)
 
 One sandbox per incarnation. The launcher sets the process state the run inherits to fixed

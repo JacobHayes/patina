@@ -214,3 +214,28 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   check maps all 100 MiB.
 - **Self-check** (`tests/faults/16-counts.sh`): a crash-enabled run whose operation log the
   test hook corrupts ends `internal`; red/green: without the end-of-run check it ends `ok`.
+
+## Sweeps
+
+`./check evidence sweep` (`tests/sweep/evidence-throughput.sh`, 400 seeds per line, `--keep
+none`), 2026-11-16, this host:
+
+| Guest | `-j` | Runs per second |
+|---|---|---|
+| `hello-static` | 1 | 109 |
+| `hello-static` | 4 | 340 |
+| `hello-static` | 8 | 529 |
+| `python3` holding 500 pipes with 4 KB in each | 8, lowered to 1 | 29 (all `ok`) |
+
+The 500-pipe guest hits the kernel's per-user pipe accounting (`fs.pipe-user-pages-soft`,
+16384 pages here) at `-j 2` already: without the sweep's response, 381 of 400 runs at `-j 8`
+ended `internal` (`host limit: errno 1 in pipe2`). The sweep now halves `-j` on such a run and
+runs it again; a run that still hits the limit is counted in the report's `host:` line.
+
+`tests/sweep/01-sweep.sh` (quick, about 3 s): on a guest with a lost-update race behind an
+`always` and an exit 3 on a file error, 30 seeds with `fs-error-permille=30` give 19 failing
+seeds in exactly two groups (9 and 10 seeds), each first seed replaying identically; the
+file-error group names the injected class in every failing run. The 30 digests are equal at
+`-j 4` and `-j 1`, and equal to the same seeds run alone. Red/green: adding the seed to the
+signature splits the race into one group per seed and fails the check; not acting on a
+replay's divergence turns a host file changing under the replay into a finding and fails it.

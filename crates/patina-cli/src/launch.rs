@@ -203,7 +203,8 @@ pub fn run_one(
         &crate::result::run_json(&o.cfg, &o.program, &o.plan),
     )?;
     let end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
-    let r = crate::result::result_json(&end, &crate::result::classified(&end));
+    let mut r = crate::result::result_json(&end, &crate::result::classified(&end));
+    r["signature"] = crate::signature::of(&r, out);
     crate::result::write_json(&out.join("result.json"), &r)?;
     Ok((end, r))
 }
