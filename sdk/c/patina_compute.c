@@ -5,8 +5,9 @@
  *
  * and this file added once to each linked executable or shared library that has objects built
  * with the flags. Without it the link fails on `__sanitizer_cov_trace_pc`. Clang and gcc 12 or
- * later never instrument it, so it may be built with the flags; build it without them on older
- * gcc, whose hooks would call themselves. Outside Patina the first event makes one unknown
+ * later never instrument it, so it may be built with the flags. gcc 11 and older have no
+ * attribute for that: there build it in a step of its own without them (its hooks would call
+ * themselves), `gcc -O2 -c patina_compute.c` then link the object. Outside Patina the first event makes one unknown
  * system call, so a seccomp filter that kills on unknown calls kills the program there.
  *
  * Each hook call is an event. Under Patina an event decrements one word of the program's own
@@ -32,8 +33,11 @@ extern "C" {
 #ifndef PATINA_NOCOV
 #define PATINA_NOCOV
 #endif
-/* Each library keeps its own copy: its hooks bind to it, and it says hello on its own. */
-#define PATINA_HOOK PATINA_NOCOV __attribute__((visibility("hidden")))
+/* Each library keeps its own copy: its hooks bind to it, and it says hello on its own. The
+ * hooks are hidden by name in the assembly: g++ predeclares `__sanitizer_cov_trace_pc` under
+ * its flag and then ignores a visibility attribute on it. */
+#define PATINA_HOOK PATINA_NOCOV
+#define PATINA_HIDE(f) __asm__(".hidden " #f);
 
 #define PATINA_SYSCALL 0x7061L
 #define PATINA_OP_COMPUTE_HELLO 8L
@@ -77,10 +81,12 @@ static PATINA_NOCOV __attribute__((noinline, cold)) void patina_compute_slow(lon
 	} while (0)
 
 PATINA_HOOK void __sanitizer_cov_trace_pc(void) { PATINA_EVENT(); }
+PATINA_HIDE(__sanitizer_cov_trace_pc)
 
 #define PATINA_ACCESS(n)                                                              \
 	PATINA_HOOK void __sanitizer_cov_load##n(void *p) { (void)p; PATINA_EVENT(); }  \
-	PATINA_HOOK void __sanitizer_cov_store##n(void *p) { (void)p; PATINA_EVENT(); }
+	PATINA_HOOK void __sanitizer_cov_store##n(void *p) { (void)p; PATINA_EVENT(); } \
+	PATINA_HIDE(__sanitizer_cov_load##n) PATINA_HIDE(__sanitizer_cov_store##n)
 PATINA_ACCESS(1)
 PATINA_ACCESS(2)
 PATINA_ACCESS(4)
