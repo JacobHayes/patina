@@ -41,6 +41,7 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_ENOSPC => "enospc",
         INJ_FSYNC_EIO => "fsync-error",
         INJ_MEM_LIMIT => "mem-limit",
+        INJ_PATH_SWAP => "path-swap",
         INJ_NET_RESET => "net-reset",
         INJ_NET_REFUSE => "net-connect-refuse",
         INJ_NET_TIMEOUT => "net-connect-timeout",
@@ -74,6 +75,7 @@ fn class_of_key(k: &str) -> Option<&'static str> {
         "enospc-after-bytes" => "enospc",
         "mem-error-permille" | "mem-error-at" => "mem-error",
         "mem-limit-mb" => "mem-limit",
+        "path-swap-permille" | "path-swap-at" => "path-swap",
         "net-delay-ms" => "net-delay",
         "net-chunk-max" => "net-chunk",
         "net-reset-permille" => "net-reset",
@@ -148,6 +150,26 @@ impl Faults {
                 }
                 // The wire's records: the connection's server port.
                 None => e["object"] = json!(format!("tcp:{port}")),
+            }
+            if kind == INJ_PATH_SWAP {
+                let target = chunks
+                    .get(i + 2)
+                    .map(|c| Rec::from_bytes(c))
+                    .filter(|n| n.kind == RecKind::Name as u8 && n.seq == r.seq)
+                    .map(|n| {
+                        let (bytes, len, _) = n.name_bytes();
+                        String::from_utf8_lossy(&bytes[..len]).into_owned()
+                    });
+                let (m, _, back) = proto::swap::decode(class);
+                e["swap"] = json!(match m {
+                    proto::swap::MUT_SYMLINK => "symlink",
+                    proto::swap::MUT_RENAME => "rename",
+                    _ => "remove",
+                });
+                e["target"] = json!(target);
+                e["after"] = json!(proto::table::name(r.args[4]));
+                e["after_seq"] = json!(r.args[5]);
+                e["put_back"] = json!(back);
             }
             match kind {
                 INJ_ERROR | INJ_FSYNC_REPORT => e["errno"] = json!(errno_name(value)),
@@ -273,6 +295,30 @@ pub fn line(f: &Value) -> String {
         s("vtime_ms").unwrap_or_default(),
         s("fault").unwrap_or_default()
     );
+    if let Some(m) = s("swap") {
+        // A path swap reads as what happened to the path between the two calls.
+        let (t, call) = (
+            s("target").unwrap_or_default(),
+            s("call").unwrap_or_default(),
+        );
+        let what = match m.as_str() {
+            "symlink" => format!("became a symlink to {t}"),
+            "rename" => format!("was replaced by {t}, renamed into its place"),
+            _ => format!("was renamed away to {t}"),
+        };
+        out.push_str(&format!(
+            " {} {what} between {} (seq {}) and {call}{}",
+            s("object").unwrap_or_default(),
+            s("after").unwrap_or_default(),
+            s("after_seq").unwrap_or_default(),
+            if f["put_back"] == true {
+                ", put back after it where the call allowed"
+            } else {
+                ""
+            }
+        ));
+        return out;
+    }
     for k in [
         "kind", "call", "object", "errno", "count", "bytes", "delay_ns",
     ] {

@@ -169,6 +169,12 @@ pub const SUB_SHORT_FIRE: u64 = 5;
 pub const SUB_SHORT_LEN: u64 = 6;
 pub const SUB_FSYNC_FIRE: u64 = 7;
 pub const SUB_MEM_FIRE: u64 = 8;
+pub const SUB_SWAP_FIRE: u64 = 9;
+/// The swap's mutation, symlink target and whether it is put back (`swap_how`).
+pub const SUB_SWAP_HOW: u64 = 10;
+/// The component swapped, and the sibling a rename or a symlink takes.
+pub const SUB_SWAP_PICK: u64 = 11;
+pub const SUB_SWAP_SIBLING: u64 = 12;
 
 /// Injected-fault kinds (`Rec::args[0]` of an `Injected` boundary record).
 pub const INJ_ERROR: u64 = 1;
@@ -183,6 +189,10 @@ pub const SYNC_BY_FS_ERROR: u64 = 1;
 pub const INJ_FSYNC_REPORT: u64 = 6;
 /// `mem-limit-mb`: a growth of anonymous memory past the limit (value: the bytes asked for).
 pub const INJ_MEM_LIMIT: u64 = 7;
+/// `path-swap`: a path the process checked was changed before it used it. args: [kind,
+/// `swap_how` code, 0, the guest's first argument, the checking call's number, its seq];
+/// two `Name` records follow: the swapped path, then the target (`swap_how`).
+pub const INJ_PATH_SWAP: u64 = 8;
 
 /// The runtime's fault classes whose eligible calls are counted (`FaultCtl::eligible`): a
 /// call is eligible for a class when that class could act on it, whatever its rate.
@@ -196,11 +206,12 @@ pub enum Kind {
     Enospc = 4,
     MemError = 5,
     MemLimit = 6,
+    PathSwap = 7,
 }
 
 pub const NKIND: usize = 8;
 /// The plan's class name of each `Kind` (`result.json` `faults.counts`).
-pub const KIND_NAMES: [&str; 7] = [
+pub const KIND_NAMES: [&str; NKIND] = [
     "fs-error",
     "fs-short",
     "fs-delay",
@@ -208,6 +219,7 @@ pub const KIND_NAMES: [&str; 7] = [
     "enospc",
     "mem-error",
     "mem-limit",
+    "path-swap",
 ];
 
 /// Written by the launcher, read-only afterwards (except the counters below it).
@@ -250,12 +262,18 @@ pub struct FaultCfg {
     pub faults_off: u64,
     /// `mem-limit-mb` in bytes (0: off): anonymous memory growth past it answers `ENOMEM`.
     pub mem_limit_bytes: u64,
-    pub reserved: [u64; 3],
+    /// `path-swap-permille`, `path-swap-at` (0: off).
+    pub path_swap_permille: u64,
+    pub path_swap_at: u64,
+    pub reserved: [u64; 1],
 }
 
 impl FaultCfg {
     pub fn faults_active(&self) -> bool {
         self.any != 0 && self.faults_off == 0
+    }
+    pub fn path_swap(&self) -> bool {
+        self.path_swap_permille != 0 || self.path_swap_at != 0
     }
 }
 

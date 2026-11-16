@@ -1,6 +1,6 @@
 # Examples
 
-Six small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
+Seven small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
 command that finds it. Each builds with its own language's tool and nothing else. Run the
 commands from the repository root. Each program takes `fixed` as its first argument to run
 without the bug; the same sweep with `fixed` added at the end is `ok` on every seed.
@@ -87,5 +87,22 @@ patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
 ```
 
 Expected: the stock sweep `ok` on every seed; the rebuilt one `failure exit: lost updates: N of N jobs counted; exit 1`, on about 8 of the 20 seeds.
+
+## serve-c (C, SDK): a check-then-use race found by path swaps
+
+The program serves `public/report.txt` ten times and refuses a symlink there, so that a link
+planted in `public/` cannot make it serve a file from elsewhere. It checks the name with
+`lstat` and then opens the name. `--fault path-swap-permille` lets the seed change a path
+between a check of it and its use, as another process could
+([the guide](../docs/GUIDE.md#path-swaps)).
+
+```sh
+cc -I sdk/c -o serve examples/serve-c/serve.c
+patina sweep --seeds 1..20 --fault path-swap-permille=300 --out patina-out/serve -- ./serve
+```
+
+Expected: `violation always: served-only-public: N bytes`, about 5 of the 20 seeds, with
+`faults in every failing run: path-swap`. The fixed program opens with `O_NOFOLLOW` and serves
+only the file it checked.
 
 `tests/examples/01-examples.sh` runs these sweeps and their fixed variants in the quick check.

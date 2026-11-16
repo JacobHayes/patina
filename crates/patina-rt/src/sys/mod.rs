@@ -45,39 +45,55 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
         }
         Class::Stop => stop(call, row),
         _ => {
-            // Path arguments resolved first: handlers see the path the kernel walks.
-            let mut bufs = [crate::path::PathBuf::new(), crate::path::PathBuf::new()];
-            if let Err(r) = crate::resolve::prepare(call, &mut bufs) {
-                if r == -e::ENOENT {
-                    crate::resolve::note_missing(call);
-                }
+            // A path swap is made before the paths are resolved, so the walk sees it.
+            let cfg = &ctl().faults.cfg;
+            let swap = if cfg.any != 0 && cfg.path_swap() {
+                crate::swap::before(call)
+            } else {
+                None
+            };
+            let act = passed(call, row);
+            if let Some(s) = swap {
+                crate::swap::after(s);
+            }
+            act
+        }
+    }
+}
+
+/// A call the table lets through: its paths, its faults, its handler.
+fn passed(call: &mut dyn Call, row: &'static Row) -> Action {
+    // Path arguments resolved first: handlers see the path the kernel walks.
+    let mut bufs = [crate::path::PathBuf::new(), crate::path::PathBuf::new()];
+    if let Err(r) = crate::resolve::prepare(call, &mut bufs) {
+        if r == -e::ENOENT {
+            crate::resolve::note_missing(call);
+        }
+        return Action::Return(r);
+    }
+    // Faults are decided before the call.
+    let mut post = None;
+    if ctl().faults.cfg.any != 0 {
+        if let Some(c) = proto::faults::class_of(call.nr()) {
+            let g = crate::inject::before(call, c);
+            if let Some(r) = g.ret {
                 return Action::Return(r);
             }
-            // Faults are decided before the call.
-            let mut post = None;
-            if ctl().faults.cfg.any != 0 {
-                if let Some(c) = proto::faults::class_of(call.nr()) {
-                    let g = crate::inject::before(call, c);
-                    if let Some(r) = g.ret {
-                        return Action::Return(r);
-                    }
-                    post = g.post;
-                }
-            }
-            let act = handle_group(call, row);
-            if matches!(act, Action::Return(r) if r == -e::ENOENT) {
-                crate::resolve::note_missing(call);
-            }
-            if matches!(act, Action::Return(r) if r == -e::EFBIG) && host_fsize_limited() {
-                // The launcher's RLIMIT_FSIZE is inherited and enforced by the kernel; the
-                // guest's own limit is virtual. Reaching the host's is not a sandbox answer.
-                crate::sup::host_error(-e::EFBIG, call.nr(), proto::ctl::HE_HOST_LIMIT);
-            }
-            match (post, act) {
-                (Some(errno), Action::Return(0)) => Action::Return(errno),
-                (_, a) => a,
-            }
+            post = g.post;
         }
+    }
+    let act = handle_group(call, row);
+    if matches!(act, Action::Return(r) if r == -e::ENOENT) {
+        crate::resolve::note_missing(call);
+    }
+    if matches!(act, Action::Return(r) if r == -e::EFBIG) && host_fsize_limited() {
+        // The launcher's RLIMIT_FSIZE is inherited and enforced by the kernel; the
+        // guest's own limit is virtual. Reaching the host's is not a sandbox answer.
+        crate::sup::host_error(-e::EFBIG, call.nr(), proto::ctl::HE_HOST_LIMIT);
+    }
+    match (post, act) {
+        (Some(errno), Action::Return(0)) => Action::Return(errno),
+        (_, a) => a,
     }
 }
 

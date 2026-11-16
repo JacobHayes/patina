@@ -38,6 +38,7 @@ example ledger 'violation always: ledger-sorted: after N' 1 --buggify -- "$E/led
 example journal-py 'violation always: journal-intact: N bytes' 1 --faults disk --mount "$E":/guest -- python3 /guest/journal.py
 example acklog-c 'violation always: acked-records-kept: N acknowledged, N stored' 1 --crash machine -- "$E/acklog"
 example bank-go 'violation always: balance-matches-deposits: balance N, deposits N' 1 --fault net-reset-permille=50 -- "$E/bank"
+example serve-c 'violation always: served-only-public: N bytes' 1 --fault path-swap-permille=300 -- "$E/serve"
 example stats-c 'failure exit: lost updates: N of N jobs counted; exit 1' 0 -- "$E/stats-cp"
 # stats-c built without compute points: the race has no system call in it, so no seed finds it.
 rc=$(sweep "$RUNS/stats-c-stock" -- "$E/stats")

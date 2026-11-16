@@ -36,7 +36,7 @@ pub enum Decision {
     Enospc(Option<u64>),
 }
 
-fn d(sub: u64) -> u64 {
+pub fn d(sub: u64) -> u64 {
     let ts = thread();
     draw(
         ctl().config.seed,
@@ -45,7 +45,7 @@ fn d(sub: u64) -> u64 {
     )
 }
 
-fn permille(p: u64, sub: u64) -> bool {
+pub fn permille(p: u64, sub: u64) -> bool {
     p != 0 && d(sub) % 1000 < p
 }
 
@@ -184,11 +184,22 @@ pub fn note(nr: u64, kind: u64, class: u64, value: u64, a0: u64, who: Who) {
         ts.pid as i64,
         name,
     ));
+    count_injected();
+}
+
+/// Count one injected fault.
+pub fn count_injected() {
+    let c = ctl();
     let f = &c.faults;
     f.injected.store(f.injected.load(Relaxed) + 1, Relaxed);
     c.stats
         .faults_injected
         .store(c.stats.faults_injected.load(Relaxed) + 1, Relaxed);
+}
+
+/// Faults are active and the run is past `faults-after-setup`.
+pub fn active() -> bool {
+    ctl().faults.cfg.faults_active() && after_start()
 }
 
 fn after_start() -> bool {

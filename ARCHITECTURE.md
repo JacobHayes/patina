@@ -203,6 +203,34 @@ draws. An injected errno is one Linux returns for that call on that object
 (`faults::errnos`). Every injected fault is a boundary record naming its object, and
 `result.json`'s `faults` counts per class the calls it could act on and the faults injected.
 
+Path swaps (`path-swap-permille`, `path-swap-at`; `patina-rt/src/swap.rs`,
+`proto::swap`) stand in for another process of the same uid that changes the work tree
+between a program's check of a path and its use. Each process keeps the hashes of the work-tree
+paths named by its last 16 checks (`stat`, `lstat`, `access`, `readlink`, `open`). A use (`open`,
+`exec`, `chdir`, a creation, removal, rename, link or attribute change by name) whose path is a
+checked path or lies below one is eligible; the decision is drawn, keyed by its seq, before the
+use's paths are resolved, so the kernel's walk and the policy see the swap. The draws pick a
+component of the checked path below the work root and one of three mutations: it becomes a
+symlink (to `/etc/passwd` or the work root's parent, to another entry of its directory, or to
+nothing), another entry of its directory is renamed into its place, or it is renamed away. A
+displaced original goes to `.patina-swap-SEQ` in its directory. Half the swaps (none
+before an `exec`) are put back right after the call, as far as the call left the entries the
+swap made. A path with a `..` component is not eligible: the kernel resolves it through what
+precedes it, which the swap does not follow. The runtime makes each
+step with its own calls in the guest process, relative to the component's directory opened with
+`RESOLVE_NO_SYMLINKS` and checked to be on the work tree: the kernel applies the guest's
+permissions and the sticky bit, a mount point refuses, nothing outside the work tree changes,
+and a target outside is only a name. Each step is recorded like the program's own name change
+(virtual times, an operation record, a crash point after it), so inode numbers and times are
+the run's, a machine crash may lose part of a swap like any unsynced rename, and replay is
+exact. The swap is an `Injected` record (`INJ_PATH_SWAP`: the mutation, the checking call and
+its seq) followed by `Name` records for the path and the target, written once the swap is made;
+a crash between two of its steps leaves those steps in the operation log and no `Injected`
+record, and a mutation the kernel refuses falls back to the next (none: no swap, though the use
+was counted eligible, so `path-swap-at` can miss).
+Path swaps are in no preset: they model a concurrent writer the program may not be meant to
+withstand.
+
 The network wire: a TCP socket in the guest is a real unix socket whose peer the supervisor
 holds (`sup/wire.rs`). The supervisor reads what each side sent, stamps it with a seeded
 delivery time, and delivers it in virtual time. Delays, splits, resets, refused connects and

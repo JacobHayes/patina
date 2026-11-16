@@ -23,6 +23,7 @@ mod sigframe;
 mod spin;
 mod state;
 mod sup;
+mod swap;
 mod sys;
 mod trap;
 mod vino;

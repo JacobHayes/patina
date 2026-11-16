@@ -996,6 +996,27 @@ fn mutate(call: &mut dyn Call) -> i64 {
             return r;
         }
     }
+    tracked(nr, &a, || {
+        let r = raw(call);
+        host_check(call, r);
+        r
+    })
+}
+
+/// A name change the runtime makes itself in the work tree (a path swap, `crate::swap`): the
+/// kernel call with the runtime's own arguments, then the same times and operation record as
+/// the program's own call would get.
+pub fn mutate_as_guest(nr: u64, a: [u64; 6]) -> i64 {
+    tracked(nr, &a, || unsafe {
+        sc6(nr, a[0], a[1], a[2], a[3], a[4], a[5])
+    })
+}
+
+/// A mutating path call (`call` makes it) and its bookkeeping: the virtual times it changes,
+/// and on `/work` its operation record.
+fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
+    let a = *a;
+    let (names, _) = name_args(nr, &a);
     let empty_fd = |_d: i64, p: u64| p == 0 || unsafe { cs(p) }.is_empty();
     let nf = if nofollow(nr, &a) {
         AT_SYMLINK_NOFOLLOW
@@ -1014,8 +1035,7 @@ fn mutate(call: &mut dyn Call) -> i64 {
         }
         _ => {}
     }
-    let r = raw(call);
-    host_check(call, r);
+    let r = call();
     if r < 0 {
         return r;
     }

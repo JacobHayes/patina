@@ -264,6 +264,43 @@ fails the same way. It prints each try (`without fs-short-permille=0..20: still 
 `fs-error-permille=40 -> 20: no longer fails`), the settings it kept, and last the command
 that reruns the reduced run (written to `RUNDIR/minimized`).
 
+### Path swaps
+
+A program that checks a path and then uses it by name assumes nothing changed it in between.
+Another process can: replace the file with a symlink, rename a directory into the path, or
+take the file away. `--fault path-swap-permille=P` makes that change itself. When a process
+uses a path under the work tree (`open`, `exec`, `chdir`, creating, removing, renaming or
+changing it by name) that it checked within its last 16 checks (`stat`, `lstat`, `access`,
+`readlink`, `open`) or that lies below one, Patina changes one component of the checked path
+before the use, at rate P per such use:
+
+- it becomes a symlink: to a path outside the work tree (`/etc/passwd` for a file, the work
+  tree's parent for a directory), to another entry of its directory, or to nothing;
+- another entry of its directory is renamed into its place;
+- it is renamed away.
+
+The original goes to `.patina-swap-SEQ` in its directory, and half the swaps are put back right
+after the use (as far as the use left them; never after an `exec`). A swap is made as a process
+with the program's uid would make it, only inside the work tree. `path-swap-at=N` swaps at the
+N-th eligible use (`A..B` searches a range).
+
+Path swaps are in no preset. A program that owns its directory is entitled to assume nobody
+else renames things in it, so a finding is a bug only where the program must withstand another
+writer: a server reading a shared directory, a tool that enforces which paths a user may touch.
+`examples/serve-c` checks a file with `lstat` and then opens it by name:
+
+```text
+$ patina run --seed 4 --fault path-swap-permille=300 -- ./serve
+violation (always): served-only-public: 66 bytes
+faults injected: 1 (path-swap 1)
+last injected:
+  seq 83 t=100000ms path-swap /work/public/report.txt became a symlink to /etc/passwd between newfstatat (seq 82) and openat
+```
+
+In `result.json` each swap names its `object`, the `swap` (`symlink`, `rename`, `remove`), its
+`target`, the checking call (`after`, `after_seq`) and whether it was `put_back`; `patina log
+ops` lists its renames and symlinks at the use's seq.
+
 ### Crashes
 
 `--crash machine` crashes the whole program at a seed-chosen point and starts it again with

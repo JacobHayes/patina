@@ -480,6 +480,17 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   check maps all 100 MiB.
 - **Self-check** (`tests/faults/16-counts.sh`): a crash-enabled run whose operation log the
   test hook corrupts ends `internal`; red/green: without the end-of-run check it ends `ok`.
+- **Path swaps** (`examples/serve-c`, `tests/examples/01-examples.sh`): the `lstat`-then-`open`
+  server under `path-swap-permille=300` is caught on 5 of seeds 1..20 (first seed 4, replayed
+  `identical`, `faults in every failing run: path-swap`) and 10 of seeds 1..40; at 200 and 500
+  it is 8 of 40. The fixed variant (`O_NOFOLLOW`, then `fstat` compared with the `lstat`) is
+  `ok` on 40 of 40 at each rate. The example's two sweeps add about 0.25 s to `quick`. Under
+  `--crash machine:30` with `path-swap-permille=500` (seeds 1..12) and with a machine crash at
+  a swap's own seq (between its two renames), `patina log ops --check` passes and replay is
+  `identical`. W1 to
+  W9 at seed 3, faults off and on, have the same digests as the build before path swaps (18 of
+  18), and `tests/determinism/05-faultplan.sh` checks the W3 log is unchanged up to the first
+  swap and that an enabled class that never fires leaves the digest unchanged.
 
 ## Sweeps
 
@@ -810,6 +821,7 @@ from `999be00b`, 2026-11-16, this host, `-j 6`, `--cpus 4`, `--preempt traps`.
 | finding 004 | corpus with the run deadline cut to 30, 150 and 600 µs (seeds 1, 2, 3, the last with `fs-error-permille=40`) | found in 28 scenarios (old: 6) |
 | finding 006 | 1,000 generated TOCTOU cases with a mutator thread, seeds 1..8 | not found (0/8,000; old: 19 cases, 2 to 8 of 8 seeds each) |
 | finding 006, its own reproduction case | seeds 1..8, then 9..12 | 6/8, 10/12 |
+| finding 006 by path swaps | the same 1,000 cases without the mutator, the case's tree as `--work`, `path-swap-permille=300`, seeds 1..8 | found in 27 cases, 30 of 8,000 runs; first among the first 20 cases to complete |
 
 - The corpus campaign (5 legs, 17,240 runs) took 3 min 46 s, 753 child CPU-s; the TOCTOU
   campaign (8,000 runs) 1 min 52 s. No run in either ended `unsupported`: stock Go ran
@@ -824,3 +836,8 @@ from `999be00b`, 2026-11-16, this host, `-j 6`, `--cpus 4`, `--preempt traps`.
 - The deadline legs cut only work that makes system calls: a CPU-bound script runs to the
   end inside a 30 µs deadline, because virtual time does not advance with computation. The
   harness's planted deadline bug is therefore not caught on a CPU-bound script.
+- 006 by path swaps: Patina itself is the concurrent process. The campaign (8,000 runs) took
+  1 min 45 s, 363 child CPU-s, under the shared evidence lock; three runs of it found the same
+  30 runs. Every one of the 30 replays `identical`, and its operation log shows the swap that
+  made it. Since the swaps rename entries themselves, the harness's name-based check is replaced
+  in these legs by one over the operation log (`patina log ops`), which follows inodes.

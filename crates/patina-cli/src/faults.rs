@@ -125,6 +125,12 @@ pub const KEYS: &[Key] = &[
         "a process's private writable memory past N MiB: mmap, brk, mremap answer ENOMEM",
     ),
     key(
+        "path-swap-permille",
+        "P",
+        Val::Permille,
+        "between a process's check of a /work path and its use, make it a symlink, rename another entry into its place, or rename it away (opt-in: models a concurrent process)",
+    ),
+    key(
         "net-delay-ms",
         "A..B",
         Val::Own,
@@ -213,6 +219,12 @@ pub const KEYS: &[Key] = &[
         "N",
         Val::At,
         "fail exactly the N-th memory request",
+    ),
+    key(
+        "path-swap-at",
+        "N",
+        Val::At,
+        "swap the path at exactly the N-th use of a checked /work path",
     ),
 ];
 
@@ -464,6 +476,8 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         "fs-delay-max-ms" => f.delay_max_ns = n(v)? * 1_000_000,
         "mem-error-permille" => f.mem_error_permille = n(v)?,
         "mem-error-at" => f.mem_error_at = n(v)?,
+        "path-swap-permille" => f.path_swap_permille = n(v)?,
+        "path-swap-at" => f.path_swap_at = n(v)?,
         "mem-limit-mb" => {
             // A limit, not a draw: it holds whether or not other faults are active.
             f.mem_limit_bytes = n(v)?.saturating_mul(1 << 20);
