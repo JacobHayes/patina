@@ -1,5 +1,5 @@
-"""Join the disassembler's classification of scanner candidates (census.py --tsv, kind `scan`)
-with the runtime rule's verdicts (patina __insn-scan), per (file, address).
+"""Join the disassembler's classification of scanner candidates (census.py --tsv, kinds `scan`
+and `pause`) with the runtime rule's verdicts (patina __insn-scan), per (file, address).
 
 usage: python3 -I audit.py CENSUS.tsv SCAN.tsv
 Prints one line per candidate and per-file totals; the last line is
@@ -10,7 +10,7 @@ import sys
 dis = {}
 for line in open(sys.argv[1]):
     f = line.rstrip("\n").split("\t")
-    if f[0] == "site" and f[2] == "scan":
+    if f[0] == "site" and f[2] in ("scan", "pause"):
         dis[(f[1], int(f[3], 16))] = (f[4], f[5])
 rule = {}
 for line in open(sys.argv[2]):

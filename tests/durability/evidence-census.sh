@@ -3,4 +3,4 @@
 #@ tier=evidence budget=1200 slots=8
 set -eu
 : "${PATINA:?}" "${RUNS:?}"
-OUT=$RUNS/census JOBS=8 SEEDS=${SEEDS:-100} python3 -I "$(dirname "$0")/bench/census.py" W1 W2 W3 W4 W4@24 W5 W6 W7 W8 W9
+OUT=$RUNS/census JOBS=8 SEEDS=${SEEDS:-100} python3 -I "$(dirname "$0")/bench/census.py" W1 W2 W3 W4 W5 W6 W7 W8 W9

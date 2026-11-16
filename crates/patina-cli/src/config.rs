@@ -10,7 +10,11 @@ use std::path::{Path, PathBuf};
 
 /// The CPU count a guest is told it has when `--cpus` is not given: a fixed number, not the
 /// host's, so that a run (Go's GOMAXPROCS, thread pools sized from it) is the same on any host.
-pub const DEFAULT_CPUS: u64 = 24;
+/// Four: enough worker threads for the races of a small server, few enough that idle workers
+/// polling for work (Go's Ps, tokio's workers) do not dominate the schedule.
+pub const DEFAULT_CPUS: u64 = 4;
+/// The most `--cpus` can give: the guest's affinity mask is one word.
+pub const MAX_CPUS: u64 = 64;
 
 /// Directories the program's bare name is looked up in, as the guest's `PATH` is.
 pub const GUEST_PATH: [&str; 4] = ["/guest", "/usr/local/bin", "/usr/bin", "/bin"];
@@ -23,7 +27,7 @@ pub struct Mount {
     pub copy: bool,
 }
 
-/// Counter preemption (`[sched] pmu`) and its slice policy.
+/// Counter preemption (`--preempt branches`, `[sched] preempt`) and its slice policy.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Pmu {
@@ -76,6 +80,11 @@ pub struct Config {
     pub max_incarnations: u64,
     pub preempt_permille: u64,
     pub stall_ms: u64,
+    /// Every executed `pause` is a scheduling point (`[sched] pause-points`).
+    pub pause_points: bool,
+    /// Spin probes for a thread that computes without a boundary event (`[sched]
+    /// spin-probes`; only with `--preempt traps`).
+    pub spin_probes: bool,
     pub pmu: Pmu,
     /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
     /// chosen by process id). Does not reach the guest.
@@ -102,6 +111,8 @@ impl Default for Config {
             max_incarnations: 4,
             preempt_permille: 100,
             stall_ms: 10_000,
+            pause_points: true,
+            spin_probes: true,
             pmu: Pmu::default(),
             host_cpu: None,
         }
@@ -289,6 +300,20 @@ fn strings(v: &toml::Value, at: &str) -> Res<Vec<String>> {
         .collect()
 }
 
+fn boolean(v: &toml::Value, at: &str) -> Res<bool> {
+    v.as_bool()
+        .ok_or_else(|| format!("{at}: expected true or false"))
+}
+
+/// `traps` or `branches`: whether counter preemption is on.
+fn preempt(v: &str, at: &str) -> Res<bool> {
+    match v {
+        "traps" => Ok(false),
+        "branches" => Ok(true),
+        _ => Err(format!("{at}: expected traps or branches, not {v}")),
+    }
+}
+
 fn scalar(v: &toml::Value, at: &str) -> Res<String> {
     match v {
         toml::Value::String(s) => Ok(s.clone()),
@@ -351,11 +376,18 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "stall-ms") => c.stall_ms = int(v, &at)?,
                 ("sched", "host-cpu") => c.host_cpu = Some(int(v, &at)? as usize),
-                ("sched", "pmu") => {
-                    c.pmu.on = v
-                        .as_bool()
-                        .ok_or_else(|| format!("{at}: expected true or false"))?
-                }
+                ("sched", "preempt") => c.pmu.on = preempt(&string(v, &at)?, &at)?,
+                ("sched", "pause-points") => c.pause_points = boolean(v, &at)?,
+                ("sched", "spin-probes") => c.spin_probes = boolean(v, &at)?,
+                // The race-hunting policy: every segment short, stops close to traps.
+                ("sched", "branches") => match string(v, &at)?.as_str() {
+                    "default" => {
+                        let d = Pmu::default();
+                        (c.pmu.short_permille, c.pmu.short_max) = (d.short_permille, d.short_max)
+                    }
+                    "hunt" => (c.pmu.short_permille, c.pmu.short_max) = (1000, 64),
+                    o => return Err(format!("{at}: expected default or hunt, not {o}")),
+                },
                 ("sched", "pmu-slice") => {
                     (c.pmu.slice_min, c.pmu.slice_max) = range(&string(v, &at)?, &at)?
                 }
@@ -409,6 +441,9 @@ pub fn resolve(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--cpus")? {
         c.cpus = n;
     }
+    if let Some(p) = a.last("--preempt") {
+        c.pmu.on = preempt(p, "--preempt")?;
+    }
     if let Some(n) = a.num("--time-limit")? {
         c.time_limit = n;
     }
@@ -456,8 +491,8 @@ impl Config {
         if self.max_incarnations == 0 {
             return Err("max-incarnations is at least 1".into());
         }
-        if self.cpus == 0 {
-            return Err("--cpus is at least 1".into());
+        if self.cpus == 0 || self.cpus > MAX_CPUS {
+            return Err(format!("--cpus is 1 to {MAX_CPUS}"));
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());

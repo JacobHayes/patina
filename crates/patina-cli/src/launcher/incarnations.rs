@@ -133,6 +133,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut unix_sockets = 0;
     let mut pmu = [0u64; proto::ctl::PMU_FIELDS];
     let mut sdk = crate::result::SdkReport::default();
+    let mut sched = [0u64; proto::ctl::SCHED_FIELDS];
     let mut refused: Vec<String> = vec![];
     let mut root = o.cfg.work.clone();
     let mut k = 0;
@@ -167,6 +168,9 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             } else {
                 *a + b
             };
+        }
+        for (a, b) in sched.iter_mut().zip(end.sched) {
+            *a += b;
         }
         for r in end.refused {
             if !refused.contains(&r) {
@@ -204,8 +208,12 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 insn,
                 net,
                 unix_sockets,
-                pmu: (crate::launch::pmu_status(o), pmu),
+                pmu: o.cfg.pmu.on.then_some(pmu),
                 sdk,
+                sched: crate::result::SchedCounts {
+                    pause_sites: insn.patched[proto::insn::SiteKind::Pause as usize],
+                    stats: sched,
+                },
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

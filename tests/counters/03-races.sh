@@ -10,7 +10,7 @@ import os, sys
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from counters import *
 P = ppatina(required=False)
-HUNT = ["pmu-short-permille=1000", "pmu-short-max=64"]
+HUNT = ["branches=hunt"]
 cmd = ["/guest/counters/races", "b"]
 ok, txt = verify(P, f"{RUNS}/b-replay", 13, GU, 3, "cpu,aslr,sandbox", HUNT, cmd)
 o = outcome(f"{RUNS}/b-replay/run-0") or {}

@@ -1,7 +1,7 @@
 # Item 4. the toolchain tier's syscall-free races, stock builds (no patina-cc), counter preemption only (no
 # --mem). races b (check-then-act, no system call in the window): 200 seeds with the default
-# policy and 200 with a race-hunting policy (every segment short: pmu-short-permille = 1000
-# pmu-short-max = 64); found in some seeds; a failing seed replays 20/20 (patina verify, varied).
+# policy and 200 with the race-hunting policy (`branches = "hunt"`: every segment short);
+# found in some seeds; a failing seed replays 20/20 (patina verify, varied).
 # pool: measured the same way. Its updates are single read-modify-write instructions
 # (`incq mem`, `add reg, mem`): no instruction-boundary schedule can interleave them, so it
 # cannot be found by any preemption on a one-thread-at-a-time executor; printed, not failed,
@@ -15,11 +15,11 @@ from counters import *
 P = ppatina()
 n = int(os.environ.get("COUNTERS_RACE_SEEDS", "200"))
 T = GU + "/tier"
-HUNT = ["pmu-short-permille=1000", "pmu-short-max=64"]
+HUNT = ["branches=hunt"]
 fail = []
 for name, cmd, pat in [("b", ["/guest/counters/races", "b"], "DOUBLE-SPEND"), ("pool", ["/guest/counters/pool"], "LOST-UPDATE")]:
     found = {}
-    for pol, opts in [("default", ["pmu=true"]), ("hunt", HUNT)]:
+    for pol, opts in [("default", PMU), ("hunt", HUNT)]:
         res = sweep(P, f"05/{name}-{pol}", list(range(1, n + 1)), GU, opts, cmd)
         bad = [s for s, o in res.items() if o["outcome"] not in ("ok", "failure", "crash")]
         f = sorted(s for s, o in res.items() if pat in o["_last"])

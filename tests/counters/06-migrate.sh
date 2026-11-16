@@ -29,7 +29,7 @@ def tasks(root):
     return out
 def moved(out, cmd):
     subprocess.run(["rm", "-rf", out])
-    pr = subprocess.Popen([P, "run", "--seed", "3"] + config(["pmu=true"]) + ["--out", out, "--mount", GU + ":/guest:copy", "--"] + cmd,
+    pr = subprocess.Popen([P, "run", "--seed", "3"] + config(PMU) + ["--out", out, "--mount", GU + ":/guest:copy", "--"] + cmd,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     n = 0
     rnd = random.Random(len(out))
@@ -47,7 +47,7 @@ def moved(out, cmd):
 fail = []
 for p in ["loops", "strings", "fp", "threads"]:
     cmd = ["/guest/counters/compute", p]
-    ref = run(P, f"{RUNS}/11/{p}-ref", 3, GU, ["pmu=true"], cmd)
+    ref = run(P, f"{RUNS}/11/{p}-ref", 3, GU, PMU, cmd)
     res = [moved(f"{RUNS}/11/{p}-m{i}", cmd) for i in range(5)]
     same = sum(o["digest"] == ref["digest"] and o["outcome"] == "ok" for o, _ in res)
     print(f"{p}: reference {ref['outcome']} {ref['digest']} ({ref['counters']['pmu']['preempts']} stops); moved runs equal: {same}/5; "

@@ -50,22 +50,39 @@ fn perf_open(event: u64, tid: i32) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(r as RawFd) })
 }
 
-/// The retired-conditional-branch event of this CPU.
+/// The retired-conditional-branch event of this CPU, if its family is supported. Elsewhere
+/// counter preemption is refused, not attempted. On an Intel Xeon 6975P-C
+/// (`BR_INST_RETIRED.CONDITIONAL`, 0x01c4) the stops differed from those reached by stepping
+/// branch by branch, and one seed moved between CPUs gave a different digest each run; a run
+/// must not mean something different on another host. A seed run with counters reproduces
+/// on the same CPU family.
 fn event() -> Result<u64, String> {
     let r = std::arch::x86_64::__cpuid(0);
     let mut v = [0u8; 12];
     v[0..4].copy_from_slice(&r.ebx.to_le_bytes());
     v[4..8].copy_from_slice(&r.edx.to_le_bytes());
     v[8..12].copy_from_slice(&r.ecx.to_le_bytes());
-    match &v {
-        b"AuthenticAMD" => Ok(proto::pmu::EVENT_AMD),
-        // Untested here (only AMD was available).
-        b"GenuineIntel" => Ok(proto::pmu::EVENT_INTEL),
-        _ => Err(format!(
-            "unknown CPU vendor {}",
-            String::from_utf8_lossy(&v)
-        )),
+    let sig = std::arch::x86_64::__cpuid(1).eax;
+    let base = (sig >> 8) & 0xf;
+    let family = if base == 0xf {
+        base + ((sig >> 20) & 0xff)
+    } else {
+        base
+    };
+    let model = ((sig >> 4) & 0xf)
+        | if base >= 0x6 {
+            ((sig >> 16) & 0xf) << 4
+        } else {
+            0
+        };
+    let vendor = String::from_utf8_lossy(&v).to_string();
+    if &v == b"AuthenticAMD" && proto::pmu::AMD_FAMILIES.contains(&family) {
+        return Ok(proto::pmu::EVENT_AMD);
     }
+    Err(format!(
+        "this CPU ({vendor} family {family:#x} model {model:#x}) is not supported: counter \
+         preemption is checked exact on AMD family 0x1a (Zen 5) only"
+    ))
 }
 
 /// Can this launcher open counters? The event, or why not. Checked once per process by
@@ -76,8 +93,12 @@ pub fn available() -> Result<u64, String> {
         let ev = event()?;
         match perf_open(ev, 0) {
             Ok(_) => Ok(ev),
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => Err(format!(
+                "perf_event_open: {e}: counters need CAP_PERFMON. Give it to patina with \
+                 `sudo setcap cap_perfmon+ep $(command -v patina)`, or run as root"
+            )),
             Err(e) => Err(format!(
-                "perf_event_open: {e} (needs CAP_PERFMON: run a copy of patina given `setcap cap_perfmon+ep`, or as root)"
+                "perf_event_open: {e}: this host exposes no usable branch counter (a VM may hide the PMU)"
             )),
         }
     })

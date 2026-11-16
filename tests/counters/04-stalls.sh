@@ -19,7 +19,7 @@ cases = [("glibc-spin", GU, ["stall-ms=2000"], ["/guest/spinwait", "glibc-spin"]
          ("w4", GO, [], ["/guest/go-static", "all"], None)]
 def one(c):
     name, g, opts, cmd, want = c
-    return c, run(P, f"{RUNS}/{name}", 1, g, ["pmu=true"] + opts, cmd)
+    return c, run(P, f"{RUNS}/{name}", 1, g, PMU + opts, cmd)
 fail = []
 with ThreadPoolExecutor(5) as ex:
     for (name, g, opts, cmd, want), o in ex.map(one, cases):

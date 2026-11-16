@@ -35,11 +35,31 @@ pub struct RunEnd {
     pub net: [u64; NET_FIELDS],
     /// AF_UNIX sockets sent in SCM_RIGHTS, summed over incarnations.
     pub unix_sockets: u64,
-    /// Counter preemption: status ("" when off, "on", "off: <reason>") and the counters,
-    /// `proto::ctl::PMU_NAMES` order (summed; `max_skid` is a maximum).
-    pub pmu: (String, [u64; proto::ctl::PMU_FIELDS]),
+    /// With `--preempt branches`, the counters in `proto::ctl::PMU_NAMES` order (summed;
+    /// `max_skid` is a maximum).
+    pub pmu: Option<[u64; proto::ctl::PMU_FIELDS]>,
     /// The SDK's site table, folded over incarnations.
     pub sdk: SdkReport,
+    /// Pause points and spin probes.
+    pub sched: SchedCounts,
+}
+
+/// The scheduling points beyond traps: `pause` sites patched, and the counters of
+/// `proto::ctl::SCHED_NAMES`, summed over incarnations.
+#[derive(Clone, Debug, Default)]
+pub struct SchedCounts {
+    pub pause_sites: u64,
+    pub stats: [u64; proto::ctl::SCHED_FIELDS],
+}
+
+impl SchedCounts {
+    pub fn get(&self, name: &str) -> u64 {
+        proto::ctl::SCHED_NAMES
+            .iter()
+            .position(|n| *n == name)
+            .map(|i| self.stats[i])
+            .unwrap_or(0)
+    }
 }
 
 pub const NET_FIELDS: usize = 12;
@@ -89,8 +109,8 @@ pub fn net_add(a: &mut [u64; NET_FIELDS], b: &[u64; NET_FIELDS]) {
 /// Instruction-channel counters, as in `proto::ctl::InsnCtl`, summed over incarnations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InsnCounts {
-    /// By `proto::insn::SiteKind`: [unused, rdrand, rdseed, rdpid].
-    pub patched: [u64; 4],
+    /// By `proto::insn::SiteKind`: [unused, rdrand, rdseed, rdpid, pause].
+    pub patched: [u64; 5],
     /// By `proto::ctl::INSN_*`.
     pub emulated: [u64; 5],
     pub unscanned_exec_mappings: u64,
@@ -140,7 +160,7 @@ impl InsnCounts {
             .map(|(n, v)| (n.to_string(), json!(v)))
             .collect();
         json!({
-            "patched_sites": { "rdrand": self.patched[1], "rdseed": self.patched[2] },
+            "patched_sites": { "rdrand": self.patched[1], "rdseed": self.patched[2], "pause": self.patched[4] },
             "emulated": em,
             "scan": {
                 "mappings": self.scanned_mappings,
@@ -167,20 +187,21 @@ fn named<const N: usize>(names: &[&str; N], v: &[u64; N]) -> Value {
 /// override the run's own).
 pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     let v = &e.verdict;
-    let preempt = if e.pmu.0.is_empty() {
-        "traps".to_string()
-    } else if e.pmu.0 == "on" {
-        "branches".to_string()
-    } else {
-        format!("traps ({})", e.pmu.0)
-    };
+    let preemptions = e.sched.get("spin_yields")
+        + e.pmu.map_or(0, |p| {
+            p[proto::ctl::PMU_NAMES
+                .iter()
+                .position(|n| *n == "preempts")
+                .unwrap()]
+        });
     let mut counters = json!({
         "io": named(&["parks", "reattempts", "spurious", "blocking_done", "blocking_parked"], &e.io),
         "net": named(&NET_NAMES, &e.net),
         "insn": e.insn.json(),
     });
-    if !e.pmu.0.is_empty() {
-        counters["pmu"] = named(&proto::ctl::PMU_NAMES, &e.pmu.1);
+    counters["sched"] = named(&proto::ctl::SCHED_NAMES, &e.sched.stats);
+    if let Some(p) = &e.pmu {
+        counters["pmu"] = named(&proto::ctl::PMU_NAMES, p);
     }
     json!({
         "schema": RESULT_SCHEMA,
@@ -200,7 +221,14 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
             "unscanned_exec_mappings": e.insn.unscanned_exec_mappings,
             "unix_sockets_in_flight": e.unix_sockets,
         },
-        "sched": { "traps": e.traps, "switches": e.switches, "preempt": preempt },
+        "sched": {
+            "traps": e.traps,
+            "switches": e.switches,
+            "mode": if e.pmu.is_some() { "branches" } else { "traps" },
+            "pause_sites": e.sched.pause_sites,
+            "pause_points": e.sched.get("pause_points"),
+            "preemptions": preemptions,
+        },
         "counters": counters,
         "signature": null,
         "wall_ms": e.wall_ms,

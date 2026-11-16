@@ -243,33 +243,19 @@ pub struct IncEnd {
     pub sdk: crate::result::SdkReport,
     /// `fault_after_seq` at the end: lowered by a `setup-complete` mark.
     pub fault_after_seq: u64,
+    /// Pause points and spin probes (`proto::ctl::SCHED_NAMES`).
+    pub sched: [u64; proto::ctl::SCHED_FIELDS],
 }
 
-/// The counter event when `--pmu` is given and counters can be opened; otherwise
-/// `None`, and (once per process) a message saying why it is off.
-pub fn pmu_event(o: &Opts) -> Option<u64> {
+/// The counter event with `--preempt branches`, or why counters cannot be used here: an
+/// error, never a run without them.
+pub fn pmu_event(o: &Opts) -> Res<Option<u64>> {
     if !o.cfg.pmu.on {
-        return None;
+        return Ok(None);
     }
-    match crate::launcher::pmu::available() {
-        Ok(ev) => Some(ev),
-        Err(why) => {
-            static SAID: std::sync::Once = std::sync::Once::new();
-            SAID.call_once(|| eprintln!("patina: pmu: counter preemption is off: {why}"));
-            None
-        }
-    }
-}
-
-/// The outcome's `pmu` field: empty without `--pmu`, else "on" or "off: <reason>".
-pub fn pmu_status(o: &Opts) -> String {
-    if !o.cfg.pmu.on {
-        return String::new();
-    }
-    match crate::launcher::pmu::available() {
-        Ok(_) => "on".into(),
-        Err(why) => format!("off: {why}"),
-    }
+    crate::launcher::pmu::available().map(Some).map_err(|why| {
+        format!("--preempt branches: counter preemption is not available here: {why}")
+    })
 }
 
 /// Run one incarnation into `inc` (created).
@@ -331,7 +317,15 @@ pub fn run_incarnation(
     cfg.stall_ms = c.stall_ms;
     cfg.tmpfs_bytes = c.tmpfs_bytes;
     cfg.cpu_count = c.cpus;
-    let pmu_ev = pmu_event(o);
+    cfg.spin_charge_ns = cfg.trap_charge_ns;
+    if c.pause_points {
+        cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
+    }
+    let pmu_ev = pmu_event(o)?;
+    // Counter preemption stops a spinning thread itself.
+    if c.spin_probes && pmu_ev.is_none() {
+        cfg.sched |= proto::ctl::SCHED_SPIN_PROBE;
+    }
     if pmu_ev.is_some() {
         cfg.pmu = proto::ctl::PMU_ON;
         cfg.pmu_slice_min = c.pmu.slice_min;
@@ -737,6 +731,7 @@ pub fn run_incarnation(
         pmu: ctl.pmu.read(),
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
+        sched: ctl.sched.read(),
     };
     if std::env::var_os("PATINA_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.

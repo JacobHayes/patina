@@ -56,6 +56,8 @@ pub struct ThreadState {
     pub vf_sigact: [[u64; 4]; 65],
     /// Counter preemption (`pmu.rs`).
     pub pmu: crate::pmu::Pmu,
+    /// Spin probes and the spin point (`spin.rs`).
+    pub spin: crate::spin::Spin,
 }
 
 impl ThreadState {
@@ -82,6 +84,7 @@ impl ThreadState {
             vfork: 0,
             vf_sigact: [[0; 4]; 65],
             pmu: crate::pmu::Pmu::new(),
+            spin: crate::spin::Spin::new(),
         }
     }
 }

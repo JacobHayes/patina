@@ -18,10 +18,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 JOBS = int(os.environ.get("COUNTERS_JOBS", "8"))
 GO = WL + "/go-static"
 FAULT = ["--fault", "fs-error-permille=20"]
+PMU = ["--preempt", "branches"]
 
 
 def config(opts):
-    """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "pmu=true", "stall-ms=2000"):
+    """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "stall-ms=2000"):
     the keys go into a patina.toml (tests/cfg), passed as --config."""
     keys = [o for o in opts if not o.startswith("-") and "=" in o]
     rest = [o for o in opts if o not in keys]
@@ -32,11 +33,8 @@ def config(opts):
 
 
 def pmu(o):
-    """Counter preemption of a result: "on", "off: why", or None when it was not asked for."""
-    p = (o.get("sched") or {}).get("preempt", "traps")
-    if p == "branches":
-        return "on"
-    return p[len("traps ("):-1] if p.startswith("traps (") else None
+    """"on" when a result ran with counter preemption, else None."""
+    return "on" if (o.get("sched") or {}).get("mode") == "branches" else None
 
 
 def die(msg):
@@ -49,11 +47,15 @@ def ppatina(required=True):
     r = subprocess.run([os.path.join(HERE, "mkcap.sh"), PATINA], capture_output=True, text=True)
     p = r.stdout.strip()
     if r.returncode == 0 and p and os.path.exists(p):
-        # The capability is not enough: the host must expose a PMU (a VM may not).
-        o = run(p, RUNS + "/pmu-probe", 1, GU, ["pmu=true"], ["/guest/counters/compute", "recur"])
-        if pmu(o) == "on":
+        # The capability is not enough: the host must expose a PMU (a VM may not) of a
+        # supported CPU family; otherwise --preempt branches refuses and says why.
+        subprocess.run(["rm", "-rf", RUNS + "/pmu-probe"])
+        t = subprocess.run([p, "run", "--seed", "1", "--out", RUNS + "/pmu-probe", "--mount", GU + ":/guest:copy"] + PMU
+                           + ["--", "/guest/counters/compute", "recur"], capture_output=True, text=True)
+        o = outcome(RUNS + "/pmu-probe")
+        if o and pmu(o) == "on":
             return p
-        why = "no counter on this host: pmu " + repr(pmu(o))
+        why = "no counters on this host: " + (t.stderr.strip() or repr(o))
     else:
         why = "cannot make the CAP_PERFMON copy of patina: " + r.stderr.strip()
     if required:

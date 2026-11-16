@@ -1,6 +1,6 @@
 # 6. False-positive audit of the scanner. For libc, ld.so, libstdc++, libcrypto, the CPython
 # binary, a static Go binary, a Rust binary (and the instruction channels guests): every byte candidate
-# (0F C7 /6|/7, register form) classified by objdump's linear sweep as a real instruction or
+# (0F C7 /6|/7, register form; F3 90) classified by objdump's linear sweep as a real instruction or
 # bytes inside another instruction/data, against the runtime's rule (patina __insn-scan runs the
 # same proto::insn code). They must agree on every candidate. The decoder the rule sweeps
 # with must give objdump's length for every instruction of these files.

@@ -28,6 +28,9 @@ fn in_runtime(a: u64) -> bool {
 pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
     let frame = unsafe { &mut *uc };
     let rip = frame.gregs[RIP];
+    if sig as u64 == sig::SIGTRAP && crate::spin::on_sigtrap(unsafe { &*info }, frame) {
+        return;
+    }
     if in_runtime(rip) {
         if crate::pmu::is_race(rip) {
             // Delivered on top of the overflow signal: the instruction faults again.
@@ -37,6 +40,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
         crate::sup::host_error(sig as i64, 0, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
     }
     crate::pmu::enter(thread(), Some(frame));
+    crate::spin::enter(thread(), Some(frame));
     let info: SigInfo = unsafe { core::ptr::read(info) };
     for emu in EMULATORS {
         if emu(frame, sig, &info) {

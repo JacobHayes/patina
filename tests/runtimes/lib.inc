@@ -77,6 +77,8 @@ sweep() {
 }
 # count NAME CLASS: runs of the sweep with that outcome class.
 count() { awk -F'\t' -v c="$2" 'NR>1 && $2==c' "$RUNS/$1/summary.tsv" | wc -l; }
+# stalls NAME: runs of the sweep that ended unsupported, stop compute-stall.
+stalls() { cat "$RUNS/$1"/outcomes/*.json | jq -r .stop | grep -c '^compute-stall$' || true; }
 # digests NAME: distinct digests among the sweep's ok runs.
 digests() { awk -F'\t' 'NR>1 && $2=="ok" {print $4}' "$RUNS/$1/summary.tsv" | sort -u | wc -l; }
 # ok_seeds NAME N: the first N seeds whose run was ok.

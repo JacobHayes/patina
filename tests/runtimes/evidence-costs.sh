@@ -1,8 +1,7 @@
 # Evidence: wall time per run, native against patina, with syscalls (traps) and switches per run,
 # for all four runtimes. Median (min-max) of 5 runs each; patina runs are seeds 1-5, faults off;
 # native runs are the same command in a bwrap sandbox shaped like patina's (lib.inc `native`), not
-# pinned. W4 is measured at the default CPU count (seeds that stall are reported, not timed) and
-# at --cpus 2.
+# pinned. Runs that do not end ok are reported, not timed.
 #@ tier=evidence budget=600 slots=8
 . "$(dirname "$0")/lib.inc"
 
@@ -30,8 +29,7 @@ PY
     for k in 1 2 3 4 5; do rm -rf "$RUNS/cost-$name-$k"; done
 }
 
-measure go24 go-static -- /guest/go-static all
-measure go2 go-static --cpus 2 -- /guest/go-static all
+measure go go-static -- /guest/go-static all
 measure cpython cpython -- /usr/bin/python3 /guest/w5.py all
 measure tokio tokio-mt -- /guest/tokio-mt local
 measure tokio-tcp tokio-mt -- /guest/tokio-mt net

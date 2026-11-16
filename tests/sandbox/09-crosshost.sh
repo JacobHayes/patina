@@ -19,7 +19,7 @@ run plain env
 s=$out/plain/inc-0/stdout
 grep -q '^stat /usr/bin/sh uid=65534 gid=65534 dev=0:' "$s" || die "host file: $(grep '^stat /usr' "$s")"
 grep -q '^stat /work/own uid=1000 gid=1000 dev=0:' "$s" || die "sandbox file: $(grep '^stat /work' "$s")"
-grep -q '^cpus 24$' "$s" || die "CPU count: $(grep '^cpus' "$s")"
+grep -q '^cpus 4$' "$s" || die "CPU count: $(grep '^cpus' "$s")"
 # mountinfo: "ID PARENT MAJ:MIN ROOT POINT OPTS - FSTYPE SOURCE SUPER"
 awk '/^[0-9]+ [0-9]+ [0-9]+:[0-9]+ / { split($3, d, ":"); if (d[1] != 0 || ($6 != "ro" && $6 != "rw")) { print; bad = 1 } }
      END { exit bad }' "$s" >"$out/mountinfo.bad" || die "mount table: $(head -2 "$out/mountinfo.bad")"
@@ -28,4 +28,4 @@ grep ' getppid ' "$out/plain.dump" | grep -q 'args=\[0x0, 0x0, 0x0, 0x0, 0x0, 0x
     die "getppid recorded with leftover registers: $(grep ' getppid ' "$out/plain.dump" | head -1)"
 run wrapped "$G17/seccomp-wrap"
 [ "$(digest "$out/wrapped")" = "$(digest "$out/plain")" ] || die "under an outer seccomp filter: digest $(digest "$out/wrapped"), plain $(digest "$out/plain")"
-echo "crosshost: host files 65534, devices by mount index, 24 CPUs, unread registers not recorded; same digest under an outer seccomp filter ($(digest "$out/plain"))"
+echo "crosshost: host files 65534, devices by mount index, 4 CPUs, unread registers not recorded; same digest under an outer seccomp filter ($(digest "$out/plain"))"

@@ -1,5 +1,5 @@
 # Item 5. W1-W9 (determinism hardening/cost measurement's commands and fault configurations; W4 at the default CPU count)
-# with pmu = true: 3 runs under --vary cpu,aslr,sandbox identical; 3 seeds give 3 distinct digests.
+# with --preempt branches: 3 runs under --vary cpu,aslr,sandbox identical; 3 seeds give 3 distinct digests.
 #@ tier=evidence budget=900 slots=3
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
@@ -13,9 +13,9 @@ P = ppatina()
 def one(w):
     g, cmd, fo, extra = WL[w]
     extra = [] if w == "W4" else extra
-    ok, txt = verify(P, f"{RUNS}/06/{w}-verify", 1, g, 3, "cpu,aslr,sandbox", ["pmu=true"] + fo + extra, cmd)
+    ok, txt = verify(P, f"{RUNS}/06/{w}-verify", 1, g, 3, "cpu,aslr,sandbox", PMU + fo + extra, cmd)
     o = outcome(f"{RUNS}/06/{w}-verify/run-0") or {}
-    ds = [run(P, f"{RUNS}/06/{w}-s{s}", s, g, ["pmu=true"] + fo + extra, cmd)["digest"] for s in (2, 3)]
+    ds = [run(P, f"{RUNS}/06/{w}-s{s}", s, g, PMU + fo + extra, cmd)["digest"] for s in (2, 3)]
     return w, ok, txt, o, [o.get("digest")] + ds
 fail = []
 with ThreadPoolExecutor(3) as ex:

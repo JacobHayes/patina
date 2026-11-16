@@ -8,7 +8,6 @@ D: `patina verify --runs COSTS_D_RUNS --vary cpu,load,aslr,sandbox` identical fo
 Self-check: `patina log ops --check` on seed 1 faults off and on (every incarnation).
 F: the workload's fault scenario is checked by its own task's area scripts (named per workload
    in the table; ./check TNN).
-W4 runs at --cpus 2 (its stall-free setting; spec 05 asks for the default count: see language runtimes).
 Usage: matrix.py OUTDIR [W...]. Writes OUTDIR/matrix.tsv and prints the table.
 """
 import json

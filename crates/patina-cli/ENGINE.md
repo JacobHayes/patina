@@ -29,7 +29,7 @@ patina run ... --fault fs-error-permille=100 --crash machine:20 --config patina.
 is the same table (`cli.rs`, which the parser reads too). Settings come from
 `./patina.toml` or `--config FILE` (`config.rs`: `[run]`, `[faults]`, `[sched]`, `[sdk]`;
 expert settings such as `fs-model`, `max-incarnations`, `tmpfs-bytes`, `preempt-permille`,
-`stall-ms` and the `pmu*` keys are keys only), flags override it, and an unknown key is an
+`stall-ms`, `pause-points`, `spin-probes` and the `pmu-*` keys are keys only), flags override it, and an unknown key is an
 error naming it. A program given by a host path outside `/usr` is copied to
 `/guest/NAME`; a bare name is looked up on the guest's `PATH`
 (`/guest:/usr/local/bin:/usr/bin:/bin`). `--mount SRC:DST` binds a host path read-only,
@@ -79,9 +79,8 @@ are all its state. A request that ends a process takes the exit barrier (the pro
 is readable) before anything else of the step: the kernel closes an exiting process's files
 after its last system call, and reading its sockets before then is a race.
 
-The stall watchdog counts the turn holder's CPU time since its last trap
-(`/proc/<tid>/schedstat`), with wall time as a 10x backstop. The verdict goes to the
-launcher over a pipe; `outcome.rs` classifies it and `result.rs` writes `result.json`.
+The stall watchdog (`sup/stall.rs`) watches a turn holder that computes without a boundary
+event; see Scheduling points. The verdict goes to the launcher over a pipe; `outcome.rs` classifies it and `result.rs` writes `result.json`.
 
 ## Runtime (`patina-rt`)
 
@@ -121,7 +120,7 @@ arguments are resolved against that policy before any handler runs (`resolve.rs`
 logged. Host-dependent values are rewritten: virtual inode numbers (`vino.rs`), the virtual
 time table for sandbox files (`vtime.rs`), synthesised `/proc` and `/sys` files
 (`sys/procfs.rs`), host files owned by the overflow id, mount devices by index, a fixed CPU
-count.
+count (`--cpus`, default 4, at most 64: affinity masks, `/proc/cpuinfo`, `/sys`).
 
 ## Blocking I/O (`sys/io.rs`, `sys/poll.rs`, `sup/io.rs`)
 
@@ -188,16 +187,52 @@ fault point, until the guest marks `setup-complete`.
 ## Instruction channels (`patina-rt/src/insn/`, `patina-proto/src/insn.rs`)
 
 `rdtsc` and `rdtscp` fault under `PR_SET_TSC` and are answered from virtual time
-(`insn/tsc.rs`). `rdrand` and `rdseed` sites are found in every executable private mapping
-(an x86-64 length decoder confirms each byte candidate), patched to `ud2`, and emulated
-from the seed (`insn/scan.rs`, `insn/patch.rs`, `insn/emulate.rs`). Anonymous executable
+(`insn/tsc.rs`). `rdrand`, `rdseed` and `pause` sites are found in every executable private
+mapping (an x86-64 length decoder, sweeping from the nearest symbol, confirms each byte
+candidate), patched to `ud2`, and emulated (`insn/scan.rs`, `insn/patch.rs`,
+`insn/emulate.rs`): `rdrand` and `rdseed` from the seed, `pause` as a pause point (below). Anonymous executable
 memory (JIT) is not scanned and is counted (`unscanned_exec_mappings`). `cpuid` identity
 fields, `rdpid` and `lsl` read the pinned core and are not controlled.
 
+## Scheduling points (`insn/emulate.rs`, `patina-rt/src/spin.rs`, `sup/stall.rs`)
+
+Traps preempt only at system calls, so a thread spinning without one while the thread it
+waits for is preempted would never yield. Three mechanisms, on by default with
+`--preempt traps`:
+
+- **Pause points.** Every executed `pause` (the spin-wait hint of glibc's
+  `pthread_spin_lock`, Rust's `spin_loop`, Go's `procyield`, most hand-written spin locks)
+  is a scheduling point: an insn record (`0xf390`, the address), virtual time charged as for
+  a trap, and a yield. `pause-points = false` (`[sched]`) leaves `pause` alone.
+- **Spin probes.** A spin-wait without `pause` (Go's background sweeper polling an idle
+  runtime) is found by the watchdog: after 20 ms of the holder's CPU time without a
+  boundary event, then at four times the previous amount, the supervisor sends it SIGTRAP.
+  The runtime single-steps the thread until its instruction pointers repeat with period P,
+  moves to a canonical position (the least rotation of the P addresses, so every run picks
+  the same one) and compares the state there across iterations: registers, the FPU and
+  vector state, and every page written (soft-dirty bits through `PAGEMAP_SCAN`, the
+  runtime's region excluded) must be identical, and each iteration must write only pages
+  the previous one wrote. Such a loop is at a fixed point: it computes nothing until
+  another thread acts, and its state there is the same in every run whenever the probe
+  arrives. The thread then yields (a `preempt` record, number 2, with the address and P),
+  and an `int3` planted at that address yields again at each later arrival, until the
+  thread's next other runtime entry (a guest reading its own text there sees the `int3`).
+  A loop that counts or changes memory is not a fixed point and is left alone.
+  `spin-probes = false` disables them; with `--preempt branches` they are off.
+- **compute-stall.** When the holder's CPU time since its last boundary event
+  (`/proc/<tid>/schedstat`, so host load does not count) reaches `stall-ms` (10,000) while
+  another thread is runnable or a virtual-time event is due, the run ends `unsupported`,
+  stop `compute-stall`, naming the thread and `--preempt branches`. A thread computing
+  alone is left to run. A thread that neither makes progress nor runs ends the run
+  `internal` after ten times `stall-ms` of wall time.
+
+`result.json`'s `sched` holds the mode (`traps` or `branches`), the `pause` sites patched,
+the pause points taken and the preemptions outside system calls (spin yields and counter
+stops); `counters.sched` has the probe counts.
+
 ## Counter preemption (`patina-proto/src/pmu.rs`, `patina-rt/src/pmu.rs`, `launcher/pmu.rs`)
 
-Trap points only preempt at system calls, so a syscall-free spin-wait whose partner was
-preempted never yields. With `pmu = true` (`[sched]`), Patina preempts the turn holder after N retired
+With `--preempt branches` (`[sched] preempt = "branches"`), Patina preempts the turn holder after N retired
 conditional branches of guest user code, N a keyed draw, at the instruction boundary right
 after the N-th branch retires: one stop per N whatever the hardware did on the way. The
 stop is treated like a trap: a boundary record (`preempt`, with the instruction pointer, N
@@ -211,8 +246,9 @@ namespace, which nothing in the sandbox has. The launcher (a `patina` given
 descriptor 3008). A guest thread sends a thread pidfd; the broker checks the task descends
 from this incarnation's bwrap child and returns one counter for it with a fixed attribute
 (pinned, user only, period 2^20, synchronous SIGTRAP on overflow, removed on exec).
-Capabilities never enter the sandbox. Unprivileged, `pmu = true` says why it is off and the run
-goes on without it.
+Capabilities never enter the sandbox. Where counters cannot be used (no capability, no
+PMU, an unsupported CPU), `--preempt branches` is an error (outcome `error`, exit 2) that
+says why; it never runs without them.
 
 **Counting guest code only.** A segment is the guest code between two runtime entries.
 Every runtime entry (trap, emulation, fault, the overflow handler's own work) ends one; each
@@ -234,16 +270,23 @@ count is exact.
 **Policy.** With probability `pmu-short-permille` (20) N is log-uniform in
 `[1, pmu-short-max]` (256), stops close to a trap where check-then-act windows sit;
 otherwise log-uniform in `pmu-slice` (2^20 + 2,048 .. 2^22). For races whose window is a
-single branch boundary, `pmu-short-permille = 1000` and `pmu-short-max = 64` make every segment
-short. Counter preemption composes with trap-level `preempt-permille`.
+single branch boundary, `branches = "hunt"` (`[sched]`; `pmu-short-permille = 1000`,
+`pmu-short-max = 64`) makes every segment short. Counter preemption composes with
+trap-level `preempt-permille`.
 
-**Off by default.** It needs a capability, costs 10 to 23 µs per trap on a KVM guest
-against 0.75 µs, and 3 to 6 ms per preemption. Turn it on for programs with syscall-free
-waits (stock Go above two CPUs, spin locks) and for syscall-free races. Hazards: a guest
-reading its own text while a segment hops sees `int3` bytes (private copy-on-write pages);
-throttling (`perf_event_max_sample_rate`) stops counting and shows as an overshoot;
-Intel's event (`0x01c4`, `BR_INST_RETIRED.CONDITIONAL`) counts on Intel hosts but the
-engine's use of it is untested; AMD's is `0xd1`.
+**Supported CPUs.** The families where `./check counters` has passed: AMD family 0x1a
+(Zen 5), event `0xd1` (retired conditional branches). Every other CPU is refused, earlier
+Zen families (same event, unverified) and Intel included: on an Intel Xeon 6975P-C, Intel's conditional-branch event
+(`0x01c4`) gave stops different from those reached by stepping branch by branch, and a
+different digest each time one seed moved between CPUs. The count is a property of the
+CPU's branch accounting, so a seed run with `--preempt branches` reproduces only on the
+same CPU family.
+
+**Off by default.** It needs a capability and costs more per trap and per preemption
+(`docs/EVIDENCE.md`). Use it for loops the scheduling points cannot reach (a compute-stall
+names it) and for syscall-free races. Hazards: a guest reading its own text while a
+segment hops sees `int3` bytes (private copy-on-write pages); throttling
+(`perf_event_max_sample_rate`) stops counting and shows as an overshoot.
 
 ## Checks (`check`, `tests/`)
 

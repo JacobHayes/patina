@@ -29,8 +29,11 @@ pub const CHARGE_PS_DEFAULT: u64 = 1000;
 
 /// AMD `ex_ret_cond`: retired conditional branches (raw event 0xd1).
 pub const EVENT_AMD: u64 = 0xd1;
-/// Intel `BR_INST_RETIRED.CONDITIONAL` (event 0xc4, umask 0x01). Untested.
-pub const EVENT_INTEL: u64 = 0x01c4;
+/// CPU families whose counter is supported: those where `./check counters` (exactness against
+/// stepping, migration, the race and the spin table) has passed. AMD family 1Ah (Zen 5).
+/// Earlier Zen families use the same event but are unverified (rr needs a workaround for
+/// their counts), so they are refused until checked.
+pub const AMD_FAMILIES: [u32; 1] = [0x1a];
 
 /// How a segment reaches its stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

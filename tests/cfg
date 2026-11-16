@@ -1,7 +1,7 @@
 #!/bin/sh
 # tests/cfg KEY=VALUE...: write a patina.toml holding these settings (expert settings are
 # config keys only) into $RUNS and print its path, for `patina run --config "$(cfg ...)"`.
-# A pmu-* key also turns counter preemption on.
+# A pmu-* or branches key also turns counter preemption on (preempt = "branches").
 set -eu
 f=$(mktemp "${RUNS:-${TMPDIR:-/tmp}}/cfg-XXXXXX.toml")
 run="" faults="" sched=""
@@ -15,16 +15,16 @@ for kv in "$@"; do
 " ;;
         fs-model | max-incarnations) faults="$faults$k = $v
 " ;;
-        pmu-*) sched="$sched$k = $v
-pmu = true
+        pmu-* | branches) sched="$sched$k = $v
+preempt = \"branches\"
 " ;;
-        pmu | preempt-permille | stall-ms | host-cpu) sched="$sched$k = $v
+        preempt | preempt-permille | stall-ms | host-cpu | pause-points | spin-probes) sched="$sched$k = $v
 " ;;
         *) echo "cfg: unknown key $k" >&2; exit 2 ;;
     esac
 done
-# `pmu = true` once, whatever set it.
-sched=$(printf '%s' "$sched" | awk '!(/^pmu = / && seen++)')
+# `preempt` once, whatever set it.
+sched=$(printf '%s' "$sched" | awk '!(/^preempt = / && seen++)')
 {
     [ -z "$run" ] || printf '[run]\n%s\n' "$run"
     [ -z "$faults" ] || printf '[faults]\n%s\n' "$faults"

@@ -1,5 +1,9 @@
 //! SIGILL at a patched site: emulate the original instruction.
 //!
+//! A `pause` site is a scheduling point: the runtime charges virtual time, records it, and
+//! yields to the supervisor as `sched_yield` does. Under one-thread-at-a-time scheduling a
+//! thread that executes `pause` is waiting for another thread, so handing over loses nothing.
+//!
 //! The faulting instruction starts at the saved instruction pointer; the prefixes the CPU
 //! actually decoded (`66`, `F3`, REX) are read from there up to the `ud2`, whose address must
 //! be in the side table. `rdrand`/`rdseed` get a value from the seeded entropy stream keyed by
@@ -10,12 +14,14 @@ use crate::entry::{charge, maybe_yield};
 use crate::state::{config, thread};
 use crate::sys::sig::{self, SigInfo};
 use crate::trap::{reg::*, TrapFrame};
+use core::sync::atomic::Ordering::Relaxed;
 use proto::ctl::{INSN_RDPID, INSN_RDRAND, INSN_RDSEED};
 use proto::{draw, Stream};
 
 pub const CODE_RDRAND: u32 = 0x0fc706;
 pub const CODE_RDSEED: u32 = 0x0fc707;
 pub const CODE_RDPID: u32 = 0xf30fc707;
+pub const CODE_PAUSE: u32 = 0xf390;
 
 /// Hardware register number -> index in the saved `gregs`.
 const GREG: [usize; 16] = [
@@ -57,8 +63,15 @@ pub fn try_emulate(frame: &mut TrapFrame, sig: i32, _info: &SigInfo) -> bool {
     if !found {
         return false;
     }
-    if super::patch::lookup(op).is_none() {
+    let Some(site) = super::patch::lookup(op) else {
         return false;
+    };
+    if site.kind == proto::insn::SiteKind::Pause as u8 {
+        // Written over the `F3 90` itself: no prefixes of its own.
+        if op != rip {
+            return false;
+        }
+        return pause(frame, rip);
     }
     if unsafe { *((op + 1) as *const u8) } != 0x0b {
         return false;
@@ -98,5 +111,20 @@ pub fn try_emulate(frame: &mut TrapFrame, sig: i32, _info: &SigInfo) -> bool {
     frame.gregs[RIP] = op + 3;
     crate::log::insn(code, rip, v);
     maybe_yield(ts);
+    true
+}
+
+/// A patched `pause`: a scheduling point.
+fn pause(frame: &mut TrapFrame, rip: u64) -> bool {
+    let ts = thread();
+    let c = crate::state::ctl();
+    ts.seq = c.seq.load(Relaxed) + 1;
+    c.seq.store(ts.seq, Relaxed);
+    let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
+    c.vclock_ns.store(t, Relaxed);
+    crate::insn::bump(&c.sched.pause_points, 1);
+    frame.gregs[RIP] = rip + 2;
+    crate::log::insn(CODE_PAUSE, rip, 0);
+    crate::sup::call_sup(proto::ctl::Op::Yield, [0; 6]);
     true
 }

@@ -1,4 +1,5 @@
-//! Find and patch `rdrand`/`rdseed` sites in executable mappings, before the guest can run them.
+//! Find and patch `rdrand`/`rdseed` and `pause` sites in executable mappings, before the guest
+//! can run them.
 //!
 //! Called by the loader for each executable `PT_LOAD`, by the `mmap` handler for executable
 //! mappings, and by `mprotect` when a range becomes executable. The rule is
@@ -9,7 +10,7 @@
 use crate::insn::bump;
 use crate::raw::*;
 use crate::state::ctl;
-use proto::insn::{candidates, confirm, sweep_start, SiteKind, Verdict};
+use proto::insn::{candidates, sweep, SiteKind, Verdict};
 
 /// The file a mapping came from: descriptor and file offset of the mapping's first byte.
 #[derive(Clone, Copy)]
@@ -18,6 +19,7 @@ pub struct FileId {
     pub off: u64,
 }
 
+/// Candidates confirmed per batch.
 const MAX_CANDS: usize = 256;
 
 /// Scan `[va, va + len)` (mapped, readable) and patch the confirmed sites. `writable`: the
@@ -47,35 +49,57 @@ pub fn scan_exec(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: 
 }
 
 fn scan_range(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: u64) {
-    let c = ctl();
     let code = unsafe { core::slice::from_raw_parts(va as *const u8, len as usize) };
+    // Candidates in batches: each batch looks up its sweep starts in the file's symbols once.
     let mut cands = [0usize; MAX_CANDS];
     let mut n = 0;
-    let mut over = 0u64;
     candidates(code, |o| {
-        if n < MAX_CANDS {
-            cands[n] = o;
-            n += 1;
-        } else {
-            over += 1;
+        cands[n] = o;
+        n += 1;
+        if n == MAX_CANDS {
+            confirm_batch(code, va, file, writable, prot, &cands);
+            n = 0;
         }
     });
-    if over > 0 {
-        bump(&c.insn.rejected_sites, over);
+    if n > 0 {
+        confirm_batch(code, va, file, writable, prot, &cands[..n]);
     }
-    if n == 0 {
-        return;
-    }
+}
+
+fn confirm_batch(
+    code: &[u8],
+    va: u64,
+    file: Option<FileId>,
+    writable: bool,
+    prot: u64,
+    cands: &[usize],
+) {
+    let c = ctl();
+    let n = cands.len();
     let mut starts = [va; MAX_CANDS];
     if let Some(f) = file {
-        symbol_starts(f, va, len, &cands[..n], &mut starts[..n]);
+        symbol_starts(f, va, code.len() as u64, cands, &mut starts[..n]);
     }
+    let pause = crate::state::config().sched & proto::ctl::SCHED_PAUSE_POINTS != 0;
+    // Candidates are in address order: one whose sweep starts where the last one's did
+    // resumes that sweep instead of decoding the same bytes again.
+    let (mut last_from, mut stop) = (usize::MAX, 0);
     for i in 0..n {
         let from = (starts[i] - va) as usize;
-        match confirm(code, from, cands[i]) {
+        let at = if from == last_from && stop >= from {
+            stop
+        } else {
+            from
+        };
+        let (v, s) = sweep(code, at, cands[i]);
+        (last_from, stop) = (from, s);
+        match v {
             Verdict::Real(s) => match s.kind {
-                Some(SiteKind::Rdrand | SiteKind::Rdseed) => {
-                    let k = s.kind.unwrap() as u8;
+                Some(k @ (SiteKind::Rdrand | SiteKind::Rdseed | SiteKind::Pause)) => {
+                    if k == SiteKind::Pause && !pause {
+                        continue;
+                    }
+                    let k = k as u8;
                     if super::patch::patch(va + s.op as u64, k, writable, prot) {
                         bump(&c.insn.patched[k as usize], 1);
                     } else {
@@ -185,11 +209,20 @@ fn symbol_starts(f: FileId, va: u64, len: u64, cands: &[usize], starts: &mut [u6
                 if a < va || a >= end {
                     continue;
                 }
-                for (j, &cand) in cands.iter().enumerate() {
-                    starts[j] = sweep_start(va + cand as u64, starts[j], core::iter::once(a));
+                // The symbol starts the sweep of every candidate at or after it: note it at
+                // the first such candidate; the prefix maximum below carries it forward.
+                let j = cands.partition_point(|&c| va + (c as u64) < a);
+                if j < cands.len() && starts[j] < a {
+                    starts[j] = a;
                 }
             }
             done += chunk;
+        }
+    }
+    // Candidates are in address order: each starts at the nearest symbol at or before it.
+    for j in 1..cands.len() {
+        if starts[j] < starts[j - 1] {
+            starts[j] = starts[j - 1];
         }
     }
 }

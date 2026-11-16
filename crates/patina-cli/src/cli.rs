@@ -152,7 +152,14 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
-    flag("--cpus", "N", "24", "CPU count the guest sees", RUNLIKE),
+    flag("--cpus", "N", "4", "CPU count the guest sees (1 to 64)", RUNLIKE),
+    flag(
+        "--preempt",
+        "traps|branches",
+        "traps",
+        "where threads are preempted: system calls and spin-waits, or also after N branches (needs CAP_PERFMON and a supported CPU)",
+        RUNLIKE,
+    ),
     many("--fault", "KEY=VALUE", "one fault setting", RUNLIKE),
     flag(
         "--crash",

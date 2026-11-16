@@ -18,19 +18,19 @@ def med(patina, name, g, opts, cmd, k=3):
     rs.sort(key=lambda r: r["wall_ms"])
     return rs[k // 2]
 a = med(P, "traps-off", GU, [], ["/guest/counters/compute", "traps", "10"])
-b = med(P, "traps-on", GU, ["pmu=true"], ["/guest/counters/compute", "traps", "10"])
+b = med(P, "traps-on", GU, PMU, ["/guest/counters/compute", "traps", "10"])
 per_trap = (b["wall_ms"] - a["wall_ms"]) * 1e3 / b["sched"]["traps"]
 rows.append(("per-trap overhead (us)", f"{per_trap:.2f}", f"{a['wall_ms']} ms off, {b['wall_ms']} ms on, {b['sched']['traps']} traps"))
 for p in ["loops", "fp"]:
     a = med(P, p + "-off", GU, [], ["/guest/counters/compute", p])
-    b = med(P, p + "-on", GU, ["pmu=true"], ["/guest/counters/compute", p])
+    b = med(P, p + "-on", GU, PMU, ["/guest/counters/compute", p])
     st = b["counters"]["pmu"]
     rows.append((f"per-preemption cost, {p} (ms)", f"{(b['wall_ms'] - a['wall_ms']) / max(st['preempts'], 1):.2f}",
                  f"{a['wall_ms']} ms off, {b['wall_ms']} ms on, {st['preempts']} stops, {st['hops']} hops, {st['landings']} landings"))
 for w in ORDER:
     g, cmd, fo, extra = WL[w]
     a = med(P, w + "-off", g, fo + extra, cmd)
-    b = med(P, w + "-on", g, ["pmu=true"] + fo + extra, cmd)
+    b = med(P, w + "-on", g, PMU + fo + extra, cmd)
     rows.append((f"{w} wall (ms)", f"{a['wall_ms']} -> {b['wall_ms']}", f"x{b['wall_ms'] / max(a['wall_ms'], 1):.2f}, {b['counters']['pmu']['preempts']} stops, {b['sched']['traps']} traps"))
 with open(RUNS + "/07/costs.tsv", "w") as f:
     for r in rows:

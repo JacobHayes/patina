@@ -368,6 +368,7 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
         return;
     }
     crate::pmu::enter(ts, Some(frame));
+    crate::spin::enter(ts, Some(frame));
     charge(ts);
     if ts.traps & 1023 == 0 {
         crate::sup::outside_check();

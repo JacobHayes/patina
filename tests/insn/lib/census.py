@@ -8,8 +8,9 @@ hit with a linear-sweep disassembler (`objdump -d`): `real` when an instruction 
 expected mnemonic starts at the hit (or at prefixes right before it), otherwise `fp`
 (the bytes are inside another instruction, or in bytes objdump does not disassemble).
 
-The `scan` kind is exactly the runtime scanner's rule (`rt/src/insn/scan.rs`): 0F C7 with a
-register ModRM whose reg field is 6 or 7, i.e. rdrand, rdseed and (with an F3 prefix) rdpid.
+The `scan` and `pause` kinds are exactly the runtime scanner's rule (`rt/src/insn/scan.rs`):
+0F C7 with a register ModRM whose reg field is 6 or 7, i.e. rdrand, rdseed and (with an F3
+prefix) rdpid; and F3 90, `pause`, which must start the instruction.
 """
 import struct
 import subprocess
@@ -18,6 +19,7 @@ import sys
 # kind -> (pattern bytes, predicate on the byte after the pattern or None, mnemonics)
 PATTERNS = {
     "scan": (b"\x0f\xc7", lambda m: m >> 6 == 3 and (m >> 3) & 7 in (6, 7), ("rdrand", "rdseed", "rdpid")),
+    "pause": (b"\xf3\x90", None, ("pause",)),
     "rdtsc": (b"\x0f\x31", None, ("rdtsc",)),
     "rdtscp": (b"\x0f\x01\xf9", None, ("rdtscp",)),
     "cpuid": (b"\x0f\xa2", None, ("cpuid",)),
@@ -87,7 +89,9 @@ def classify(path, hs):
             mn = text.split()[0] if text else ""
             mnems = PATTERNS[kind][2]
             ok = any(mn.startswith(m) for m in mnems)
-            if ok and va != start:
+            if ok and kind == "pause":
+                ok = va == start
+            elif ok and va != start:
                 # prefixes only between the instruction start and the pattern
                 ok = va - start <= 4
             res[(va, kind)] = ("real" if ok else "fp", f"{start:x}+{va - start}: {text}")

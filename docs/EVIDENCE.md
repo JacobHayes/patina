@@ -85,9 +85,9 @@ bug B caught 315/500 under posix-strict only.
 
 | Check | Result |
 |---|---|
-| W4 and go-sweep at 24 CPUs, `pmu = true` | 100/100 ok |
-| W4 at 24 CPUs without `pmu = true` | stalls in 176/200 seeds |
-| Spin table (every language's spin-wait), `pmu = true` | 0 stalls in 300 seeds |
+| W4 and go-sweep at 24 CPUs, `--preempt branches` | 100/100 ok |
+| W4 at 24 CPUs, system-call preemption only (before scheduling points) | stalls in 176/200 seeds |
+| Spin table (every language's spin-wait), `--preempt branches` | 0 stalls in 300 seeds |
 | Largest measured skid | 425 branches (margin 1,024) |
 
 ## Costs
@@ -102,7 +102,7 @@ bug B caught 315/500 under posix-strict only.
 | W9 with crashes and filesystem faults | 38.9 ms per run, 148.6 runs/s (1.92x no-fault) |
 | Crash materialisation | ~3 ms per MB of log |
 | `fork`+`execve`+`wait` of a dynamic program | 1.5 ms (native 0.38 ms; mostly the instruction scan) |
-| `pmu = true` | ~17 µs per trap, 3-6 ms per preemption, W1-W9 wall x1.2 to x4.0 |
+| `--preempt branches` | ~17 µs per trap, 3-6 ms per preemption, W1-W9 wall x1.2 to x4.0 |
 | `--mount DIR:/guest:copy` copy into tmpfs | ~0.3 ms per MB |
 
 ## Known limits
@@ -111,11 +111,13 @@ Not implemented (run ends `unsupported` or the call is refused): `timer_create`,
 `ITIMER_VIRTUAL`/`ITIMER_PROF`; UDP, raw, netlink and packet sockets; `sched_*` policy calls
 and `get`/`setpriority`; anything outside Linux x86_64.
 
-- The CPU count a guest sees defaults to 24.
-- Syscall-free spin-waits stall without `pmu = true` (stock Go with GOMAXPROCS >= 3 in most seeds).
-  `pmu = true` needs `CAP_PERFMON` and an exposed PMU; Intel's event is untested; a skid past
-  the margin ends `internal`; a guest reading its own text during a hop sees `int3`. A lost
-  update inside one read-modify-write instruction cannot be found by any preemption.
+- A spin-wait with neither a system call nor `pause` whose iterations change state (a
+  counter, a timestamp it computes itself) ends `compute-stall` without `--preempt
+  branches`. `--preempt branches` needs `CAP_PERFMON`, an exposed PMU and an AMD family
+  0x1a (Zen 5) CPU, the only family checked; its seeds reproduce on the same CPU family only; a skid past
+  the margin ends `internal`; a guest reading its own text during a hop or at a spin point
+  sees `int3`. A lost update inside one read-modify-write instruction cannot be found by any
+  preemption.
 - `preempt-permille = 0` livelocks Go (it polls the clock forever).
 - Per-user pipe accounting is shared by every sandbox of the uid: 9 parallel guests with 500
   pipes each end `internal`.
@@ -136,7 +138,7 @@ and `get`/`setpriority`; anything outside Linux x86_64.
 - Processes: another process's `/proc/<pid>` is refused (`ps` sees nothing); `fork` or a thread
   `clone` inside a vfork child ends the run; `wait4` rusage is zero; unusual `clone` flag sets
   end the run.
-- Instruction scanning: 256 candidates per mapping, 4,096 patched sites per process; shared
+- Instruction scanning: 4,096 patched sites per process (`rdrand`, `rdseed` and `pause`); shared
   executable file mappings are not scanned (labelled).
 - Storage: the ext4 model treats preallocated holes as in place (more generous than ext4);
   F4's state has not been produced on a real device; the materialiser holds the whole log in

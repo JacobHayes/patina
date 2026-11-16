@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 6;
+pub const LAYOUT_VERSION: u64 = 7;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -35,7 +35,17 @@ pub struct Config {
     pub pmu_charge_ps: u64,
     /// Branches before N at which the hardware alarm is aimed (above the largest skid).
     pub pmu_margin: u64,
+    /// Scheduling points beyond traps (`SCHED_*` bits).
+    pub sched: u64,
+    /// Virtual time charged to a pause point or a spin yield.
+    pub spin_charge_ns: u64,
 }
+
+/// `Config::sched`: `pause` sites are patched and each executed `pause` yields.
+pub const SCHED_PAUSE_POINTS: u64 = 1;
+/// `Config::sched`: the supervisor may probe a thread that computes without a boundary event
+/// for a spin-wait whose iterations leave its state unchanged (`rt::spin`).
+pub const SCHED_SPIN_PROBE: u64 = 2;
 
 /// `Config::pmu`: counter preemption is on.
 pub const PMU_ON: u64 = 1;
@@ -56,6 +66,8 @@ impl Config {
             pmu_short: 0,
             pmu_charge_ps: 0,
             pmu_margin: 0,
+            sched: 0,
+            spin_charge_ns: 0,
         }
     }
 }
@@ -118,6 +130,45 @@ pub struct Ctl {
     pub timing: [AtomicU64; 8],
     /// Counter preemption counters, summed over every thread of the run.
     pub pmu: PmuStats,
+    /// Pause points and spin probes, summed over every process of the run.
+    pub sched: SchedStats,
+}
+
+/// Pause points and spin probes (`SCHED_NAMES` order in the outcome).
+#[repr(C)]
+pub struct SchedStats {
+    /// Executed `pause` instructions at patched sites (each a scheduling point; the sites
+    /// are `InsnCtl::patched[4]`).
+    pub pause_points: AtomicU64,
+    /// Probes the supervisor sent that reached guest code; of them, the ones that found a
+    /// spin-wait whose iteration is a fixed point.
+    pub spin_probes: AtomicU64,
+    pub spin_found: AtomicU64,
+    /// Yields at a found spin point (the first at each find, then one per arrival).
+    pub spin_yields: AtomicU64,
+    /// Single steps taken by probes.
+    pub spin_steps: AtomicU64,
+}
+pub const SCHED_FIELDS: usize = 5;
+pub const SCHED_NAMES: [&str; SCHED_FIELDS] = [
+    "pause_points",
+    "spin_probes",
+    "spin_found",
+    "spin_yields",
+    "spin_steps",
+];
+
+impl SchedStats {
+    pub fn read(&self) -> [u64; SCHED_FIELDS] {
+        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
+        [
+            r(&self.pause_points),
+            r(&self.spin_probes),
+            r(&self.spin_found),
+            r(&self.spin_yields),
+            r(&self.spin_steps),
+        ]
+    }
 }
 
 /// Counter preemption counters (`PMU_NAMES` order in the outcome).
@@ -195,8 +246,9 @@ pub const TM_EXPORTED: usize = 5;
 /// Instruction-channel counters, summed over every process of the run.
 #[repr(C)]
 pub struct InsnCtl {
-    /// Sites patched to `ud2`, by `proto::insn::SiteKind` (index 1 rdrand, 2 rdseed, 3 rdpid).
-    pub patched: [AtomicU64; 4],
+    /// Sites patched to `ud2`, by `proto::insn::SiteKind` (index 1 rdrand, 2 rdseed, 3 rdpid,
+    /// 4 pause).
+    pub patched: [AtomicU64; 5],
     /// Emulated executions, by `INSN_*` index.
     pub emulated: [AtomicU64; 8],
     /// Executable mappings whose code the scanner could not see or vouch for: anonymous

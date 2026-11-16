@@ -2,7 +2,7 @@
 configuration, JOBS (default 8) runs at a time, each run on its own core (cores 0..JOBS-1,
 round-robin); counts by outcome, the share of unsupported/internal, and seeds per
 second per core (seeds / wall / JOBS). Boundary logs deleted; result.json kept for every run.
-Usage: census.py [W...]   (W4 runs at --cpus 2; W4@24 is W4 at the default CPU count)
+Usage: census.py [W...]
 """
 import concurrent.futures as cf
 import os
@@ -36,9 +36,7 @@ def one(w, gdir, argv, opts, seed):
 
 for w in only:
     name = w
-    gdir, argv, faults, extra = WL[w.split("@")[0]]
-    if w == "W4@24":
-        extra = []
+    gdir, argv, faults, extra = WL[w]
     opts = extra + faults
     t0 = time.time()
     counts, details, walls = {}, {}, []

@@ -117,8 +117,9 @@ fn out_dir(a: &Args, default: String) -> Result<PathBuf, Fail> {
 
 fn run(a: &Args) -> Result<ExitCode, Fail> {
     let cfg = config::resolve(a).map_err(error)?;
-    let out = out_dir(a, format!("patina-out/run-{}", cfg.seed))?;
     let o = cfg.opts().map_err(error)?;
+    launch::pmu_event(&o).map_err(error)?;
+    let out = out_dir(a, format!("patina-out/run-{}", cfg.seed))?;
     let cpu = cfg.host_cpu.unwrap_or_else(launch::default_cpu);
     let (_, r) = launch::run_one(&o, &out, cpu, false).map_err(internal)?;
     if a.json() {
@@ -131,8 +132,9 @@ fn run(a: &Args) -> Result<ExitCode, Fail> {
 
 fn verify(a: &Args) -> Result<ExitCode, Fail> {
     let cfg = config::resolve(a).map_err(error)?;
-    let out = out_dir(a, format!("patina-out/verify-{}", cfg.seed))?;
     let o = cfg.opts().map_err(error)?;
+    launch::pmu_event(&o).map_err(error)?;
+    let out = out_dir(a, format!("patina-out/verify-{}", cfg.seed))?;
     let runs = a.num::<usize>("--runs").map_err(error)?.unwrap_or(3);
     let mut vary = vec![];
     if let Some(v) = a.last("--vary") {

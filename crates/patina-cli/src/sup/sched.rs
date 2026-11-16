@@ -116,6 +116,17 @@ pub struct Sched {
 }
 
 impl Sched {
+    /// What could happen if `holder` stopped running: threads runnable besides it, and
+    /// whether a virtual-time event is queued.
+    pub fn waiting_besides(&self, holder: Option<usize>) -> super::stall::Others {
+        super::stall::Others {
+            runnable: self.runnable.iter().filter(|&&i| Some(i) != holder).count(),
+            timed: !self.events.is_empty(),
+        }
+    }
+}
+
+impl Sched {
     pub fn new(seed: u64, slots: usize) -> Sched {
         Sched {
             seed,

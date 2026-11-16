@@ -18,10 +18,10 @@ seed = 7
 # The varied runs: a few programs at once (one sandbox each); the parallel runs: one program
 # at a time (8 sandboxes), so at most 8 sandboxes run at any moment.
 def vary(p):
-    return verify(P, f"{RUNS}/02/{p}-vary", seed, GU, n, "cpu,load,aslr,sandbox", ["pmu=true"], ["/guest/counters/compute", p])
+    return verify(P, f"{RUNS}/02/{p}-vary", seed, GU, n, "cpu,load,aslr,sandbox", PMU, ["/guest/counters/compute", p])
 with ThreadPoolExecutor(int(os.environ.get("COUNTERS_VJOBS", "2"))) as ex:
     va = dict(zip(progs, ex.map(vary, progs)))
-pa = {p: verify(P, f"{RUNS}/02/{p}-par", seed, GU, n, "parallel", ["pmu=true"], ["/guest/counters/compute", p]) for p in progs}
+pa = {p: verify(P, f"{RUNS}/02/{p}-par", seed, GU, n, "parallel", PMU, ["/guest/counters/compute", p]) for p in progs}
 def one(p):
     a, b = va[p], pa[p]
     nat = native([GU + "/counters/compute", p])

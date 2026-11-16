@@ -3,11 +3,12 @@
 //! the runtime runs (the false-positive audit compares it with a disassembler).
 //!
 //! The rule: a candidate is the byte pair `0F C7` followed by a register ModRM (mod = 3) whose
-//! reg field is 6 or 7 (`rdrand`, `rdseed`, and with an `F3` prefix `rdpid`). It is accepted
-//! only when a linear sweep, started at a known instruction boundary at or before it (the
-//! nearest function symbol, else the start of the mapping), lands on an instruction whose
-//! opcode bytes are exactly the candidate. Bytes that sit inside another instruction (an
-//! immediate, a displacement) or that the sweep skips are rejected and counted.
+//! reg field is 6 or 7 (`rdrand`, `rdseed`, and with an `F3` prefix `rdpid`), or the pair
+//! `F3 90` (`pause`). It is accepted only when a linear sweep, started at a known instruction
+//! boundary at or before it (the nearest function symbol, else the start of the mapping),
+//! lands on an instruction whose opcode bytes are exactly the candidate (for `pause`: an
+//! instruction that starts at the `F3` and is those two bytes). Bytes that sit inside another
+//! instruction (an immediate, a displacement) or that the sweep skips are rejected and counted.
 
 /// What a confirmed site is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +17,7 @@ pub enum SiteKind {
     Rdrand = 1,
     Rdseed = 2,
     Rdpid = 3,
+    Pause = 4,
 }
 
 impl SiteKind {
@@ -24,6 +26,7 @@ impl SiteKind {
             SiteKind::Rdrand => "rdrand",
             SiteKind::Rdseed => "rdseed",
             SiteKind::Rdpid => "rdpid",
+            SiteKind::Pause => "pause",
         }
     }
 }
@@ -305,20 +308,27 @@ pub fn decode(code: &[u8]) -> Option<Insn> {
     }
 }
 
-/// Is `code[off..]` a candidate (`0F C7` with a register ModRM, reg 6 or 7)?
+/// Is `code[off..]` a candidate (`0F C7` with a register ModRM, reg 6 or 7; or `F3 90`)?
 #[inline]
 pub fn is_candidate(code: &[u8], off: usize) -> bool {
-    off + 2 < code.len()
+    (off + 2 < code.len()
         && code[off] == 0x0f
         && code[off + 1] == 0xc7
         && code[off + 2] >> 6 == 3
-        && (code[off + 2] >> 3) & 7 >= 6
+        && (code[off + 2] >> 3) & 7 >= 6)
+        || is_pause(code, off)
+}
+
+/// `F3 90` at `off`.
+#[inline]
+fn is_pause(code: &[u8], off: usize) -> bool {
+    off + 1 < code.len() && code[off] == 0xf3 && code[off + 1] == 0x90
 }
 
 /// Call `f` with every candidate offset in `code`.
 pub fn candidates(code: &[u8], mut f: impl FnMut(usize)) {
     let mut i = 0;
-    while i + 2 < code.len() {
+    while i + 1 < code.len() {
         if is_candidate(code, i) {
             f(i);
         }
@@ -344,7 +354,7 @@ pub fn sweep_start(cand: u64, seg: u64, syms: impl Iterator<Item = u64>) -> u64 
 pub struct Site {
     /// Offset of the instruction's first byte (prefixes included).
     pub start: usize,
-    /// Offset of the `0F` opcode byte (where `ud2` is written).
+    /// Offset of the bytes `ud2` replaces: the `0F` opcode byte, or a `pause`'s `F3`.
     pub op: usize,
     pub len: usize,
     pub kind: Option<SiteKind>,
@@ -366,11 +376,30 @@ pub enum Verdict {
 /// boundary at or before `off`). Undecodable bytes are skipped one at a time, as a
 /// linear-sweep disassembler does.
 pub fn confirm(code: &[u8], from: usize, off: usize) -> Verdict {
+    sweep(code, from, off).0
+}
+
+/// `confirm`, and where the sweep stopped: an offset the same sweep reaches, at or before
+/// `off` unless the verdict is `Skipped`. A later candidate whose sweep starts at the same
+/// `from` may resume there (`confirm(code, from, c2)` = `sweep(code, stop, c2).0`), which
+/// keeps a scan of many candidates linear.
+pub fn sweep(code: &[u8], from: usize, off: usize) -> (Verdict, usize) {
     let mut pos = from;
     while pos <= off {
         match decode(&code[pos..]) {
             Some(d) => {
                 if pos + d.len > off {
+                    if pos == off && d.len == 2 && is_pause(code, off) {
+                        return (
+                            Verdict::Real(Site {
+                                start: pos,
+                                op: off,
+                                len: 2,
+                                kind: Some(SiteKind::Pause),
+                            }),
+                            pos,
+                        );
+                    }
                     if pos + d.op == off && code[off] == 0x0f && code[off + 1] == 0xc7 {
                         let reg = (code[off + 2] >> 3) & 7;
                         let kind = match (reg, d.pf3) {
@@ -379,21 +408,24 @@ pub fn confirm(code: &[u8], from: usize, off: usize) -> Verdict {
                             (7, true) => Some(SiteKind::Rdpid),
                             _ => None,
                         };
-                        return Verdict::Real(Site {
-                            start: pos,
-                            op: off,
-                            len: d.len,
-                            kind,
-                        });
+                        return (
+                            Verdict::Real(Site {
+                                start: pos,
+                                op: off,
+                                len: d.len,
+                                kind,
+                            }),
+                            pos,
+                        );
                     }
-                    return Verdict::Inside { at: pos };
+                    return (Verdict::Inside { at: pos }, pos);
                 }
                 pos += d.len;
             }
             None => pos += 1,
         }
     }
-    Verdict::Skipped
+    (Verdict::Skipped, pos)
 }
 
 #[cfg(test)]
@@ -436,6 +468,24 @@ mod tests {
         });
         assert_eq!(&c[..n], &[3]);
         assert_eq!(confirm(&code, 0, 3), Verdict::Inside { at: 1 });
+    }
+
+    #[test]
+    fn pause_sites() {
+        // pause; mov eax, 0x90f3 (the pair inside an immediate); pause after a skipped byte.
+        let code = [0xf3, 0x90, 0xb8, 0xf3, 0x90, 0, 0, 0xf3, 0x90];
+        let mut c = [0usize; 4];
+        let mut n = 0;
+        candidates(&code, |o| {
+            c[n] = o;
+            n += 1
+        });
+        assert_eq!(&c[..n], &[0, 3, 7]);
+        assert!(
+            matches!(confirm(&code, 0, 0), Verdict::Real(s) if s.kind == Some(SiteKind::Pause) && s.op == 0)
+        );
+        assert_eq!(confirm(&code, 0, 3), Verdict::Inside { at: 2 });
+        assert!(matches!(confirm(&code, 0, 7), Verdict::Real(s) if s.op == 7 && s.len == 2));
     }
 
     #[test]

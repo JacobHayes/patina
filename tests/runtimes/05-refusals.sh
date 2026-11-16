@@ -8,12 +8,12 @@
 . "$(dirname "$0")/lib.inc"
 
 echo "== representative runs (seed 1, one per runtime and shell)"
-run go-static "$RUNS/go-n2" 1 --cpus 2 -- /guest/go-static all
+run go-static "$RUNS/go-r" 1 -- /guest/go-static all
 run cpython "$RUNS/py-r" 1 -- /usr/bin/python3 /guest/w5.py all
 run tokio-mt "$RUNS/tk-r" 1 -- /guest/tokio-mt local
 run shell-pipeline "$RUNS/sh-r" 1 -- /bin/sh /guest/w6.sh
 run shell-pipeline "$RUNS/bash-r" 1 -- /bin/bash /guest/w6.sh
-for r in go-n2 py-r tk-r sh-r bash-r; do
+for r in go-r py-r tk-r sh-r bash-r; do
     stats "$RUNS/$r" | python3 -I -c '
 import json, sys
 s = json.loads(sys.stdin.read())

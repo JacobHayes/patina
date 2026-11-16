@@ -31,7 +31,7 @@ with ThreadPoolExecutor(4) as ex:
         if a["outcome"] != "ok" or b["outcome"] != "ok": fail.append(name + " not ok")
         elif a["digest"] != b["digest"]: fail.append(name + " stops differ")
         elif not sa.get("preempts") or not sb.get("alarms") or sa.get("alarms"): fail.append(name + " did not exercise both paths")
-ok, txt = verify(P, f"{RUNS}/verify", 7, GU, 3, "cpu,aslr", ["pmu=true"], ["/guest/counters/compute", "loops"])
+ok, txt = verify(P, f"{RUNS}/verify", 7, GU, 3, "cpu,aslr", PMU, ["/guest/counters/compute", "loops"])
 o = outcome(f"{RUNS}/verify/run-0") or {}
 print(f"default policy, loops: {'identical' if ok else 'NOT IDENTICAL'} (3 runs), preemptions {o.get('counters', {}).get('pmu', {}).get('preempts')}")
 if not ok: fail.append("verify: " + txt[-300:])

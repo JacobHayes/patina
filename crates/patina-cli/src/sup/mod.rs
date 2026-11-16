@@ -37,6 +37,7 @@ pub mod proc;
 pub mod sched;
 mod sdk;
 pub mod signal;
+mod stall;
 #[allow(dead_code)]
 pub mod time;
 pub mod wire;
@@ -504,15 +505,13 @@ impl Sup {
 
     fn serve(&mut self) -> ! {
         let cfg = self.ctl.config;
-        let stall = cfg.stall_ms * 1_000_000;
-        let slice = (cfg.stall_ms / 8).clamp(1, 250);
-        let mut last_seq = self.ctl.seq.load(Relaxed);
-        let mut last_progress = now_ns();
-        // The stall watchdog counts the running guest thread's CPU time since its last
-        // trap, not wall time: a spinning thread accumulates it, a thread the host does not
-        // schedule (load) does not. Wall time is a backstop only, at 10x, for a thread that
-        // neither traps nor runs (blocked in the kernel outside any row).
-        let mut last_cpu: Option<(i32, u64)> = None;
+        let slice = stall::Watchdog::slice_ms(cfg.stall_ms);
+        let mut dog = stall::Watchdog::new(
+            cfg.stall_ms,
+            cfg.sched & SCHED_SPIN_PROBE != 0,
+            self.ctl.seq.load(Relaxed),
+            now_ns(),
+        );
         loop {
             if self.ctl.sup_word.load(SeqCst) == 0 {
                 futex_wait_ms(&self.ctl.sup_word as *const _ as *const u32, 0, slice);
@@ -531,45 +530,25 @@ impl Sup {
                         v.signal = if sig != 0 { Some(sig) } else { None };
                         self.finish(v);
                     }
-                    let s = self.ctl.seq.load(Relaxed);
-                    let who = self
-                        .running
-                        .map(|i| self.slot(i).tid.load(Relaxed))
-                        .unwrap_or(0);
-                    let cpu = thread_cpu_ns(who);
-                    if s != last_seq {
-                        last_seq = s;
-                        last_progress = now_ns();
-                        last_cpu = cpu.map(|c| (who, c));
-                    } else {
-                        let spun = match (cpu, last_cpu) {
-                            (Some(c), Some((t, c0))) if t == who => c.saturating_sub(c0) >= stall,
-                            (Some(c), _) => {
-                                last_cpu = Some((who, c));
-                                false
-                            }
-                            (None, _) => false,
-                        };
-                        let waited = now_ns() - last_progress;
-                        if spun
-                            || waited >= stall.saturating_mul(10)
-                            || (cpu.is_none() && waited >= stall)
-                        {
-                            self.finish(Verdict::new(
-                                "stall",
-                                format!(
-                                    "no trap for {} ms of guest CPU time (tid {who}, last seq {s})",
-                                    cfg.stall_ms
-                                ),
-                            ));
-                        }
+                    let holder = self.running.map(|i| stall::Holder {
+                        slot: i,
+                        tid: self.slot(i).tid.load(Relaxed),
+                        pid: self.slot(i).pid.load(Relaxed),
+                    });
+                    let running = self.running;
+                    let sched = &self.sched;
+                    match dog.poll(self.ctl.seq.load(Relaxed), now_ns(), holder, || {
+                        sched.waiting_besides(running)
+                    }) {
+                        stall::Poll::Quiet => {}
+                        stall::Poll::Probe { tid, pid } => stall::probe(pid, tid),
+                        stall::Poll::End(v) => self.finish(v),
                     }
                     continue;
                 }
             }
             self.ctl.sup_word.store(0, SeqCst);
-            last_progress = now_ns();
-            last_cpu = None;
+            dog.progress(self.ctl.seq.load(Relaxed), now_ns());
             let idx = self.ctl.pending_slot.load(SeqCst) as usize;
             let req = unsafe { std::ptr::read_volatile(&(*self.ctl.slot(idx)).req) };
             self.running = None;
@@ -598,7 +577,7 @@ impl Sup {
                     to
                 }
             };
-            last_seq = self.ctl.seq.load(Relaxed);
+            dog.progress(self.ctl.seq.load(Relaxed), now_ns());
             self.io.refresh(&self.sched, self.ctl);
             self.reply(idx, to);
         }
@@ -607,16 +586,6 @@ impl Sup {
 
 /// Wall-clock monotonic time by a real syscall. The supervisor runs with the
 /// timestamp counter faulting (see `main`), so it must not use the vDSO, which reads it.
-/// CPU time of guest thread `tid` (a PID-namespace id; 0: none), from
-/// `/proc/TID/schedstat`.
-fn thread_cpu_ns(tid: i32) -> Option<u64> {
-    if tid <= 0 {
-        return None;
-    }
-    let t = std::fs::read_to_string(format!("/proc/{tid}/schedstat")).ok()?;
-    t.split_whitespace().next()?.parse().ok()
-}
-
 pub(crate) fn now_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,

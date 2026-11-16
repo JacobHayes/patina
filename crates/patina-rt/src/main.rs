@@ -18,6 +18,7 @@ mod pmu;
 mod raw;
 mod resolve;
 mod sigframe;
+mod spin;
 mod state;
 mod sup;
 mod sys;

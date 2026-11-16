@@ -47,6 +47,7 @@ pub mod nr {
     pub const MREMAP: u64 = 25;
     pub const GETPID: u64 = 39;
     pub const FCNTL: u64 = 72;
+    pub const IOCTL: u64 = 16;
     pub const FTRUNCATE: u64 = 77;
     pub const SIGALTSTACK: u64 = 131;
     pub const PRCTL: u64 = 157;
