@@ -57,6 +57,95 @@ pub struct ComputeCounts {
     pub switches: u64,
     pub deadline_stops: u64,
     pub gap: u64,
+    /// The image table (`proto::ctl::ComputeTab`), folded over incarnations.
+    pub images: ComputeImages,
+}
+
+/// The images that said `COMPUTE_HELLO`, in the order they first did, and the starts of
+/// images the table had no room for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ComputeImages {
+    pub images: Vec<ComputeImage>,
+    pub dropped: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ComputeImage {
+    /// The guest path (its end, after `...`, when longer than the table keeps).
+    pub path: String,
+    /// The table's key: a hash of the whole path (two cut paths may print alike).
+    pub key: u64,
+    pub kinds: u64,
+    pub starts: u64,
+}
+
+/// `proto::sdk::COMPUTE_*` bits by name.
+const COMPUTE_KIND_NAMES: [(u64, &str); 3] = [
+    (proto::sdk::COMPUTE_EDGE, "edge"),
+    (proto::sdk::COMPUTE_ACCESS, "access"),
+    (proto::sdk::COMPUTE_COMPARE, "compare"),
+];
+
+impl ComputeImages {
+    pub fn read(t: &proto::ctl::ComputeTab) -> ComputeImages {
+        ComputeImages {
+            images: t
+                .used()
+                .iter()
+                .map(|e| ComputeImage {
+                    path: format!(
+                        "{}{}",
+                        if e.cut() { "..." } else { "" },
+                        String::from_utf8_lossy(e.tail())
+                    ),
+                    key: e.key,
+                    kinds: e.kinds,
+                    starts: e.starts,
+                })
+                .collect(),
+            dropped: t.dropped,
+        }
+    }
+
+    /// Fold a later incarnation in: starts add, kinds join.
+    pub fn add(&mut self, b: ComputeImages) {
+        for x in b.images {
+            match self
+                .images
+                .iter_mut()
+                .find(|y| y.key == x.key && y.path == x.path)
+            {
+                Some(y) => {
+                    y.kinds |= x.kinds;
+                    y.starts += x.starts;
+                }
+                None => self.images.push(x),
+            }
+        }
+        self.dropped += b.dropped;
+    }
+}
+
+impl ComputeImage {
+    fn json(&self) -> Value {
+        json!({"path": self.path, "kinds": kind_names(self.kinds), "starts": self.starts})
+    }
+}
+
+/// A kind name's place in `COMPUTE_KIND_NAMES` (unknown names last).
+pub fn kind_rank(name: &str) -> usize {
+    COMPUTE_KIND_NAMES
+        .iter()
+        .position(|(_, n)| *n == name)
+        .unwrap_or(usize::MAX)
+}
+
+fn kind_names(kinds: u64) -> Vec<&'static str> {
+    COMPUTE_KIND_NAMES
+        .iter()
+        .filter(|(b, _)| kinds & b != 0)
+        .map(|(_, n)| *n)
+        .collect()
 }
 
 impl ComputeCounts {
@@ -67,6 +156,8 @@ impl ComputeCounts {
             return None;
         }
         let mut v = json!({
+            "images": self.images.images.iter().map(ComputeImage::json).collect::<Vec<_>>(),
+            "images_dropped": self.images.dropped,
             "events": self.events,
             "switches": self.switches,
             "deadline_stops": self.deadline_stops,
@@ -355,6 +446,9 @@ pub fn print_human(r: &Value, dir: &Path) {
             None => println!("guest: exit {x}"),
         }
     }
+    if let Some(l) = compute_line(&r["compute"]) {
+        println!("{l}");
+    }
     let ok = r["outcome"] == "ok";
     if !ok {
         let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
@@ -417,6 +511,115 @@ pub fn print_human(r: &Value, dir: &Path) {
     }
     println!("run directory: {}", dir.display());
     println!("replay: patina replay {}", dir.display());
+}
+
+/// Images a summary line names; the rest are counted (the JSON has them all).
+pub const IMAGES_SHOWN: usize = 4;
+
+/// `path (edges, accesses)` for the first `IMAGES_SHOWN` images of a `compute.images` list
+/// (report.json's or result.json's), with `; N starts` when an image started more than once,
+/// then `and N more` naming `full`, where the rest are.
+pub fn compute_images(images: &Value, full: &str) -> String {
+    let all = images.as_array().map_or(&[][..], |v| v);
+    let mut l: Vec<String> = all
+        .iter()
+        .take(IMAGES_SHOWN)
+        .map(|i| {
+            let kinds: Vec<String> = i["kinds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|k| k.as_str())
+                .map(|k| match k {
+                    "access" => "accesses".to_string(),
+                    k => format!("{k}s"),
+                })
+                .collect();
+            let starts = match i["starts"].as_u64() {
+                Some(n) if n > 1 => format!("; {n} starts"),
+                _ => String::new(),
+            };
+            let what = format!("{}{starts}", kinds.join(", "));
+            let what = what.trim_start_matches("; ");
+            match what {
+                "" => i["path"].as_str().unwrap_or("").to_string(),
+                w => format!("{} ({w})", i["path"].as_str().unwrap_or("")),
+            }
+        })
+        .collect();
+    if all.len() > IMAGES_SHOWN {
+        l.push(format!("and {} more ({full})", all.len() - IMAGES_SHOWN));
+    }
+    l.join(", ")
+}
+
+/// The `patina run` line for result.json's `compute`, or nothing when no image said hello:
+/// which images, the events counted, the points that switched or met a deadline, the mean
+/// gap in force.
+pub fn compute_line(c: &Value) -> Option<String> {
+    let images = c["images"].as_array()?;
+    let n = |k: &str| c[k].as_u64().unwrap_or(0);
+    let mut s = format!(
+        "compute points: {}",
+        compute_images(&c["images"], "result.json")
+    );
+    if images.is_empty() {
+        s.push_str("(none listed)");
+    }
+    if n("images_dropped") > 0 {
+        s.push_str(&format!(
+            ", and {} not listed (the table holds {} images)",
+            plural(n("images_dropped"), "more start"),
+            proto::ctl::IMAGES_MAX
+        ));
+    }
+    if c["mode"] == "counters" {
+        s.push_str("; idle: branch counters schedule this run");
+        return Some(s);
+    }
+    s.push_str(&format!("; {} events", big(n("events"))));
+    match n("gap") {
+        0 => s.push_str(", switches off (compute-gap=0)"),
+        g => s.push_str(&format!(
+            ", {}, mean gap {}",
+            plural(n("switches"), "switch"),
+            commas(g)
+        )),
+    }
+    if n("deadline_stops") > 0 {
+        s.push_str(&format!(
+            ", {}",
+            plural(n("deadline_stops"), "deadline stop")
+        ));
+    }
+    Some(s)
+}
+
+fn plural(n: u64, word: &str) -> String {
+    let es = if word.ends_with("ch") { "es" } else { "s" };
+    format!("{} {word}{}", commas(n), if n == 1 { "" } else { es })
+}
+
+/// 1,234,567
+fn commas(n: u64) -> String {
+    let d = n.to_string();
+    let mut s = String::new();
+    for (i, c) in d.chars().enumerate() {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
+            s.push(',');
+        }
+        s.push(c);
+    }
+    s
+}
+
+/// Below a million with commas, else 48.2 M or 3.1 G.
+fn big(n: u64) -> String {
+    match n {
+        0..=999_999 => commas(n),
+        1_000_000..=999_949_999 => format!("{:.1} M", n as f64 / 1e6),
+        _ => format!("{:.1} G", n as f64 / 1e9),
+    }
 }
 
 /// The hint for one path the guest could not find in the sandbox (`launch::not_in_sandbox`).

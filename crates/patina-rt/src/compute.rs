@@ -138,8 +138,9 @@ fn exit_slow(ts: &mut ThreadState) {
     write_cell(gap);
 }
 
-/// `COMPUTE_HELLO`: map the cell (first hook copy of this image), note the kinds, and answer
-/// its address.
+/// `COMPUTE_HELLO`: map the cell (first hook copy of this image), note the image and its kinds
+/// in the run's image table (`proto::ctl::ComputeTab`, keyed by the guest path; the first
+/// hello of an address space is a start), and answer the cell's address.
 pub fn hello(arg: u64) -> i64 {
     let version = arg & 0xff;
     let kinds = arg >> 8;
@@ -147,7 +148,8 @@ pub fn hello(arg: u64) -> i64 {
         return -crate::raw::e::EINVAL;
     }
     let p = &mut proc().compute;
-    if p.mode == OFF {
+    let start = p.mode == OFF;
+    if start {
         use crate::raw::*;
         let r = unsafe {
             sc6(
@@ -173,6 +175,11 @@ pub fn hello(arg: u64) -> i64 {
         }
     }
     p.kinds |= kinds;
+    unsafe { proto::ctl::ComputeTab::at(crate::state::ctl_base()) }.note(
+        proc().guest_path(),
+        kinds,
+        start,
+    );
     let c = ctl();
     bump(&c.compute.hellos, 1);
     c.compute

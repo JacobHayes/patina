@@ -260,8 +260,9 @@ pub struct IncEnd {
     pub fault_after_seq: u64,
     /// Pause points and spin probes (`proto::ctl::SCHED_NAMES`).
     pub sched: [u64; proto::ctl::SCHED_FIELDS],
-    /// Compute points (`proto::ctl::ComputeStats::read`).
+    /// Compute points (`proto::ctl::ComputeStats::read`), and the image table.
     pub compute: [u64; 5],
+    pub compute_images: crate::result::ComputeImages,
     /// Calls eligible for each runtime fault class (`proto::faults::Kind`), and crash
     /// points passed.
     pub eligible: [u64; proto::faults::NKIND],
@@ -1002,6 +1003,9 @@ pub fn run_incarnation(
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         sched: ctl.sched.read(),
         compute: ctl.compute.read(),
+        compute_images: crate::result::ComputeImages::read(unsafe {
+            proto::ctl::ComputeTab::at(ctl_ptr)
+        }),
         eligible: std::array::from_fn(|i| ctl.faults.eligible[i].load(Relaxed)),
         crash_points: ctl.faults.crash_points.load(Relaxed),
     };

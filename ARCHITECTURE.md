@@ -122,7 +122,10 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   a `preempt` record (`nr` 3) and yields; the call adds no other record and no trap charge
   (`compute.rs`). With `--fault compute-gap=0` there are no switches: the cell holds 2^40 and
   is refilled when it runs out, yielding then only if a deadline or the time limit fell due. Stock code never makes the call and is not touched. With `--preempt
-  branches` the cell is never armed.
+  branches` the cell is never armed. A fork child keeps its parent's cell and hello; an exec
+  starts without either. The first hello of each process notes its image's guest path in the
+  control region's image table (`proto::ctl::ComputeTab`: 32 paths with their kinds and
+  starts, and a count of the starts that did not fit), which `result.json` reports.
 
 `rdtsc`, `rdrand` and `rdseed` are answered from virtual time and the seed. Code generated
 at run time (a JIT) is not scanned for them; such mappings are counted in `result.json`.

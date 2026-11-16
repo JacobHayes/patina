@@ -80,6 +80,11 @@ fn ctl_field(off: usize) -> String {
             proto::sdk::SDK_SIZE,
             "SDK site table",
         ),
+        (
+            COMPUTE_TAB_OFFSET,
+            COMPUTE_TAB_SIZE,
+            "compute-point image table",
+        ),
     ];
     for (start, len, name) in tables {
         if (start..start + len).contains(&off) {

@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 9;
+pub const LAYOUT_VERSION: u64 = 10;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -366,8 +366,95 @@ const _: () = assert!(core::mem::size_of::<Ctl>() <= 4096);
 
 pub const CTL_HEADER_SIZE: usize = 4096;
 /// Header, slots, the shared filesystem state (`vfs`), the durability state (`oplog::Dur`),
-/// the network wire's table (`wire::WireTab`), then the SDK's site table (`sdk::SdkTab`).
-pub const CTL_SIZE: usize = crate::sdk::SDK_OFFSET + crate::sdk::SDK_SIZE;
+/// the network wire's table (`wire::WireTab`), the SDK's site table (`sdk::SdkTab`), then the
+/// compute-point image table (`ComputeTab`).
+pub const CTL_SIZE: usize = COMPUTE_TAB_OFFSET + COMPUTE_TAB_SIZE;
+
+/// Images listed in `ComputeTab`, and the bytes of each one's path kept (its end).
+pub const IMAGES_MAX: usize = 32;
+pub const IMAGE_TAIL: usize = 96;
+
+/// One program image that said `COMPUTE_HELLO` (`crate::compute`), keyed by its guest path.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ComputeImage {
+    /// A hash of the whole path, never 0 (0: the entry is free).
+    pub key: u64,
+    /// The whole path's length; `tail` holds its last `IMAGE_TAIL` bytes at most.
+    pub path_len: u64,
+    /// Event kinds its hook copies named (`sdk::COMPUTE_*`, or'ed).
+    pub kinds: u64,
+    /// Processes that started this image and said hello (a fork child inherits its parent's
+    /// hello and is not another start).
+    pub starts: u64,
+    pub tail: [u8; IMAGE_TAIL],
+}
+
+impl ComputeImage {
+    pub fn tail(&self) -> &[u8] {
+        &self.tail[..(self.path_len as usize).min(IMAGE_TAIL)]
+    }
+    /// The path was longer than the tail kept.
+    pub fn cut(&self) -> bool {
+        self.path_len as usize > IMAGE_TAIL
+    }
+}
+
+/// The run's compute-point images, after the SDK's site table in the control region. Written
+/// by the runtime under the turn at `COMPUTE_HELLO`, read by the launcher after the run.
+#[repr(C)]
+pub struct ComputeTab {
+    pub n: u64,
+    /// Starts of images that did not fit.
+    pub dropped: u64,
+    pub images: [ComputeImage; IMAGES_MAX],
+}
+
+pub const COMPUTE_TAB_OFFSET: usize =
+    (crate::sdk::SDK_OFFSET + crate::sdk::SDK_SIZE + 0xFFF) & !0xFFF;
+pub const COMPUTE_TAB_SIZE: usize = core::mem::size_of::<ComputeTab>();
+
+impl ComputeTab {
+    /// # Safety
+    /// `ctl_base` must point at a full control region of `CTL_SIZE` bytes.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn at<'a>(ctl_base: *mut u8) -> &'a mut ComputeTab {
+        &mut *(ctl_base.add(COMPUTE_TAB_OFFSET) as *mut ComputeTab)
+    }
+
+    /// A hello from an image at `path` naming `kinds`; `start` for the first hello of its
+    /// address space. A new path when the table is full counts in `dropped`.
+    pub fn note(&mut self, path: &[u8], kinds: u64, start: bool) {
+        let key = crate::rec::hash_bytes(0x696d_6167_6573, path) | 1;
+        let t = &path[path.len().saturating_sub(IMAGE_TAIL)..];
+        let n = (self.n as usize).min(IMAGES_MAX);
+        let i = match self.images[..n]
+            .iter()
+            .position(|e| e.key == key && e.path_len == path.len() as u64 && e.tail() == t)
+        {
+            Some(i) => i,
+            None if n < IMAGES_MAX => {
+                let e = &mut self.images[n];
+                e.key = key;
+                e.path_len = path.len() as u64;
+                e.tail[..t.len()].copy_from_slice(t);
+                self.n += 1;
+                n
+            }
+            None => {
+                self.dropped += start as u64;
+                return;
+            }
+        };
+        let e = &mut self.images[i];
+        e.kinds |= kinds;
+        e.starts += start as u64;
+    }
+
+    pub fn used(&self) -> &[ComputeImage] {
+        &self.images[..(self.n as usize).min(IMAGES_MAX)]
+    }
+}
 
 /// Slot states.
 pub const SLOT_FREE: u32 = 0;
@@ -806,5 +893,46 @@ impl Ctl {
     pub fn check(&self) -> bool {
         self.magic.load(Ordering::Acquire) == MAGIC
             && self.layout_version.load(Ordering::Relaxed) == LAYOUT_VERSION
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn images_are_keyed_by_path_and_overflow_is_counted() {
+        // SAFETY: every field is an integer or an array of them.
+        let mut t: ComputeTab = unsafe { core::mem::zeroed() };
+        for _ in 0..3 {
+            t.note(b"/guest/a", 1, true);
+        }
+        t.note(b"/guest/a", 2, false);
+        assert_eq!(t.used().len(), 1);
+        let a = &t.used()[0];
+        assert_eq!(
+            (a.tail(), a.kinds, a.starts, a.cut()),
+            (&b"/guest/a"[..], 3, 3, false)
+        );
+        // Two long paths with one tail are two images.
+        let long = |c: u8| {
+            let mut p = [b'x'; IMAGE_TAIL + 20];
+            p[0] = c;
+            p
+        };
+        t.note(&long(b'/'), 1, true);
+        t.note(&long(b'.'), 1, true);
+        assert_eq!(t.used().len(), 3);
+        assert!(t.used()[1].cut() && t.used()[1].tail().len() == IMAGE_TAIL);
+        let total = IMAGES_MAX + 5;
+        for i in 0..total as u8 {
+            let p = [b'/', b'p', b'/', i];
+            t.note(&p, 1, true);
+            t.note(&p, 1, false);
+        }
+        let listed = IMAGES_MAX - 3;
+        assert_eq!(t.used().len(), IMAGES_MAX);
+        assert_eq!(t.dropped as usize, total - listed);
+        assert!(t.used()[3..].iter().all(|e| e.starts == 1));
     }
 }

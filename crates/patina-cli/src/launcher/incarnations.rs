@@ -107,6 +107,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut sdk = crate::result::SdkReport::default();
     let mut sched = [0u64; proto::ctl::SCHED_FIELDS];
     let mut compute = [0u64; 5];
+    let mut images = crate::result::ComputeImages::default();
     let mut refused: Vec<String> = vec![];
     let mut missing: Vec<(u8, String)> = vec![];
     let mut root = o.cfg.work.clone();
@@ -147,6 +148,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         for (a, b) in sched.iter_mut().zip(end.sched) {
             *a += b;
         }
+        images.add(end.compute_images);
         for (i, (a, b)) in compute.iter_mut().zip(end.compute).enumerate() {
             // [1] is the kinds named, a bit set.
             *a = if i == 1 { *a | b } else { *a + b };
@@ -204,6 +206,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                     switches: compute[3],
                     deadline_stops: compute[4],
                     gap: o.plan.compute_gap,
+                    images,
                 },
             });
         }

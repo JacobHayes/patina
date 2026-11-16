@@ -350,6 +350,20 @@ many it hit, and the last 20 injected), `sdk` (every declared site, evaluated an
 counts), `refused` (calls answered with an error because Patina does not model them),
 `sched`, `counters`, `digest`, `wall_ms`.
 
+`compute` is there only when code rebuilt with compute points ran (ARCHITECTURE.md,
+"Scheduling points"): each image that announced them (`path`, event `kinds`, `starts`), the
+events counted, the `switches` and `deadline_stops` they caused, and the mean `gap` in force.
+`patina run` prints it as one line, and `patina sweep` names the images once; no line means
+no rebuilt code ran. For `tests/guests/compute/mixed.c` (threads, then stock and rebuilt
+child processes):
+
+```text
+$ patina run --seed 1 --fault compute-gap=8 -- ./mixed
+ok (exit): the program exited 0
+guest: exit 0
+compute points: /tmp/patina/mixed (edges, accesses; 3 starts); 75,069 events, 9,404 switches, mean gap 8
+```
+
 For storage bugs, `patina log ops RUNDIR/inc-0` lists every change to `/work` in order. In the
 acklog run the record write to `data.log` (ino 2) has no fsync before the acknowledgement's:
 

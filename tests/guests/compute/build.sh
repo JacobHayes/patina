@@ -9,6 +9,7 @@
 #   spinwait          tests/guests/costs/spinwait.c with its spin lock's `pause` taken out
 #   cellpoke          writes into, then unmaps, its own cell
 #   loop, loop-stock  a loop between two clock reads, instrumented and not
+#   mixed             threads, then stock and instrumented children (fork, vfork, exec)
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -28,3 +29,4 @@ clang -O2 $cp '-D__builtin_ia32_pause()=((void)0)' -o "$out/spinwait" "$g/costs/
 clang -O2 $cp -o "$out/cellpoke" "$here/cellpoke.c" "$hook"
 clang -O2 $cp -o "$out/loop" "$here/loop.c" "$hook"
 clang -O2 -g -o "$out/loop-stock" "$here/loop.c"
+clang -O2 $cp -o "$out/mixed" "$here/mixed.c" "$hook"

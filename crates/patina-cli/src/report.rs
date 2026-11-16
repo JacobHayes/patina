@@ -394,6 +394,26 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         .iter()
         .filter(|r| r.result["stop"] == "compute-stall")
         .count();
+    // Compute points: every image any run listed (kinds joined), and the runs with any.
+    let mut images: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut with_points = 0;
+    for r in runs {
+        let Some(l) = r.result["compute"]["images"].as_array() else {
+            continue;
+        };
+        with_points += 1;
+        for i in l {
+            let k = images
+                .entry(i["path"].as_str().unwrap_or("").to_string())
+                .or_default();
+            for x in i["kinds"].as_array().into_iter().flatten() {
+                if let Some(x) = x.as_str().filter(|x| !k.iter().any(|y| y == x)) {
+                    k.push(x.to_string());
+                }
+            }
+            k.sort_by_key(|x| crate::result::kind_rank(x));
+        }
+    }
     let mut limits: BTreeMap<String, usize> = BTreeMap::new();
     for r in runs {
         if let Some(l) = host_limit(&r.result) {
@@ -494,6 +514,12 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         "vacuous": vacuous,
         "exit": exit,
     });
+    if with_points > 0 {
+        v["compute"] = json!({
+            "images": images.iter().map(|(p, k)| json!({"path": p, "kinds": k})).collect::<Vec<_>>(),
+            "runs_with_points": with_points,
+        });
+    }
     if let Some(h) = &head {
         v["sweep"] = json!({"seconds": h.seconds, "jobs": h.jobs, "lowered_to": h.lowered_to, "stopped": h.stopped});
     }
@@ -532,6 +558,25 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         .map(|(k, n)| format!("{k} {n}"))
         .collect();
     s.push_str(&format!("outcomes: {}\n", classes.join(", ")));
+    if let Some(c) = v.get("compute") {
+        let with = c["runs_with_points"].as_u64().unwrap_or(0);
+        s.push_str(&format!(
+            "compute points: {}{}\n",
+            crate::result::compute_images(
+                &c["images"],
+                if head.is_some() {
+                    "report.json"
+                } else {
+                    "--format json"
+                }
+            ),
+            if with < n("runs") {
+                format!(" (in {with} of {} runs)", n("runs"))
+            } else {
+                String::new()
+            }
+        ));
+    }
     for g in v["groups"].as_array().unwrap() {
         let st = |k: &str| g[k].as_str().unwrap_or("").to_string();
         s.push('\n');
