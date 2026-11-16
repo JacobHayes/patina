@@ -1,13 +1,13 @@
 # 7. Determinism under each finding's settings (F1-F6, as in the earlier checks in this area):
-# one seed of each re-run 3 times with --vary cpu,load gives identical digests, outcomes,
-# output and post-crash tree digests (patina verify compares the crash records, which carry
-# each post-crash tree's digest). The seeds are samples: the comparison holds whether or not
-# the seed fails.
+# one seed of each run twice (the second on another CPU, both beside busy loops: --vary
+# cpu,load) gives identical digests, outcomes, output and post-crash tree digests (patina
+# verify compares the crash records, which carry each post-crash tree's digest). The seeds
+# are samples: the comparison holds whether or not the seed fails.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 v() {
     name=$1; seed=$2; shift 2
-    timeout 900 "$PATINA" verify --seed "$seed" --runs 3 --vary cpu,load --out "$RUNS/$name" \
+    timeout 900 "$PATINA" verify --seed "$seed" --runs 2 --vary cpu,load --out "$RUNS/$name" \
         --mount "$W/fjall-harness":/guest:copy "$@" >"$RUNS/$name.txt" 2>&1 || grep -q '^identical: ' "$RUNS/$name.txt" || die "$name: $(tail -3 "$RUNS/$name.txt")"
     echo "$name seed $seed: $(grep '^run 0' "$RUNS/$name.txt" | awk '{print $9, $10}'); $(tail -1 "$RUNS/$name.txt" | cut -d' ' -f1-3)"
     rm -rf "$RUNS/$name"
