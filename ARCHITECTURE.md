@@ -130,7 +130,14 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
 - **Spin probes.** A thread that runs 20 ms of CPU time without a point is single-stepped
   until its loop repeats with nothing changed (registers, vector state, written pages). Such
   a loop waits for another thread, and its state there is the same in every run, so it
-  yields there, and at each later arrival (`spin.rs`, `sup/stall.rs`).
+  yields there, and at each later arrival (`spin.rs`, `sup/stall.rs`). x86_64 steps with the
+  trap flag, plants `int3` and finds written pages by soft-dirty bits. arm64 has neither a
+  step bit a program may set nor soft-dirty bits: its stepper decodes the instruction's
+  successor (the branches, with their conditions on the frame) and plants a `brk` there
+  (`proto::step`, `arch/aarch64/step.rs`); an exclusive pair (`ldxr` to `stxr`) is stepped
+  whole, as a stop inside it would fail the store every time; written pages are found by
+  userfaultfd's asynchronous write-protection, set up when a probe starts and closed when it
+  ends.
 - **Branch counters**, with `--preempt branches`: a preemption after a seed-chosen number of
   retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
 - **Compute points**, in code rebuilt with the compilers' coverage flags: the hooks count
@@ -159,7 +166,8 @@ while another thread could run, ends the run `unsupported` with stop `compute-st
 names the thread. The cause is a loop that changes state on each pass (a counter, a
 timestamp it computes) and contains no system call or spin hint. The fix is `--preempt
 branches`, where the host allows it, or rebuilding that code with compute points (its message
-says both: the supervisor does not know whether the code is rebuilt). Rebuilt code does not
+says both: the supervisor does not know whether the code is rebuilt; on arm64, where branch
+counters are not ported, it names compute points only). Rebuilt code does not
 reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
 computing alone is left to finish.
 
@@ -390,10 +398,10 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   branch counters are not supported (the launcher refuses `--preempt branches`, and
-  `patina doctor` checks the host's arm64 requirements); spin probes are not ported yet (a spin-wait
-  that needs one ends `compute-stall`). Threads, fork,
+  `patina doctor` checks the host's arm64 requirements). Threads, fork,
   vfork, exec and signals work as on x86_64 (the clone trampoline is in
-  `arch/aarch64/thread.rs`); so do the instruction channels and pause points (above), and the
+  `arch/aarch64/thread.rs`); so do the instruction channels, pause points and spin probes
+  (above), and the
   four SDKs and compute points (the SDKs' raw call is `svc #0`; Go's hook is
   `go/patina/compute/compute_arm64.s`). The
   runtime's loader maps a BTI-marked static program, or the interpreter, `PROT_BTI` as the

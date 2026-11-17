@@ -8,4 +8,8 @@ cc=${CC:-gcc}
 for g in c-threads order deadlock liveness many cost spinpoints; do
     $cc -O1 -pthread -o "$out/$g" "$here/$g.c"
 done
+# arm64: a spin lock on exclusive pairs (no single-instruction atomics)
+if [ "$(uname -m)" = aarch64 ]; then
+    $cc -O1 -pthread -march=armv8-a -mno-outline-atomics -o "$out/llsc-spin" "$here/llsc-spin.c"
+fi
 rustc -O --edition 2021 -o "$out/rs-threads" "$here/rs-threads.rs"

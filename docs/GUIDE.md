@@ -530,7 +530,7 @@ A thread that computes for 10 s of CPU time without reaching a scheduling point,
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
 no system call or `pause`. Rebuilt code does not stall that way
-([Deeper search](#deeper-search-rebuilt-code)). `--preempt branches` also preempts after a
+([Deeper search](#deeper-search-rebuilt-code)). On x86_64, `--preempt branches` also preempts after a
 seed-chosen number of branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
 only on that CPU family. `patina doctor` says which of the three is missing.

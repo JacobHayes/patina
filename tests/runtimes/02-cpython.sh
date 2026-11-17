@@ -9,7 +9,7 @@
 #  f. Network: D (seed 1) with network faults on; net-reset-permille seen as a
 #     ConnectionReset/Aborted error, a 15 s net-partition seen as the client's 10 s socket
 #     timeout, net-chunk-max=1 with every reply still whole.
-#@ tier=area budget=60 slots=4 arch=x86_64
+#@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 P=cpython
 CMD="/usr/bin/python3 /guest/w5.py all"

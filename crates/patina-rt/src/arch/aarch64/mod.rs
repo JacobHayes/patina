@@ -6,6 +6,7 @@ mod entry;
 mod guest;
 pub mod insn;
 mod sigframe;
+pub mod step;
 mod stub;
 mod thread;
 
@@ -241,7 +242,7 @@ impl Frame {
     }
     /// The words a preempt record hashes: `x0`-`x30`, `sp`, `pc` and the condition flags of
     /// `pstate` (its other bits are set by the kernel and the CPU: speculation controls, PAN,
-    /// the single-step bit a spin probe's steps leave).
+    /// `BTYPE`).
     pub fn regs_for_record(&self) -> [u64; RECORD_WORDS] {
         const NZCV: u64 = 0xf000_0000;
         let mut words = [0u64; RECORD_WORDS];

@@ -1,7 +1,8 @@
 #!/bin/sh
 # Evidence (docs/EVIDENCE.md, scheduling points), unprivileged, at the default CPU count:
 #  a. The spin table (stock binaries: glibc and hand-written C spin locks with and without a
-#     call inside, spin-then-yield, pthread mutex, Rust spin_loop and std Mutex) over seeds
+#     call inside and with and without the spin hint, spin-then-yield, pthread mutex, Rust
+#     spin_loop and std Mutex; on arm64 also exclusive-pair spin locks) over seeds
 #     1-SPIN_SEEDS (20), stall-ms = 2000, under three settings: system calls only (pause
 #     points and spin probes off), pause points only, and the default (both on). Every run
 #     must be ok or compute-stall; with the default every run must be ok.
@@ -11,7 +12,7 @@
 #  c. Cost of pause points: W1-W9, seeds 1-5, faults off, --cpus 4, one run at a time pinned
 #     to one core: median wall_ms with pause points off and on, and of a build without them
 #     when PATINA_BASE names one (its scanner does not look for `pause`).
-#@ tier=evidence budget=1800 slots=8 arch=x86_64
+#@ tier=evidence budget=1800 slots=8
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${PATINA_WORKLOADS:?}" "${RUNS:?}"
@@ -30,11 +31,15 @@ SETTINGS = [("system calls only", ["pause-points=false", "spin-probes=false"]),
             ("default", [])]
 TABLE = [("C pthread_spin_lock, call inside", ["/guest/spinwait", "glibc-spin"]),
          ("C own spin lock, call inside", ["/guest/spinwait", "own-spin"]),
+         ("C own spin lock, no hint, call inside", ["/guest/spinwait", "own-spin-nohint"]),
          ("C own spin lock, no call inside", ["/guest/spinwait", "own-spin-nocall"]),
          ("C spin 100 then sched_yield", ["/guest/spinwait", "bounded"]),
          ("C pthread_mutex", ["/guest/spinwait", "mutex"]),
          ("Rust spin lock (spin_loop), call inside", ["/guest/rs-spin", "spin"]),
          ("Rust std Mutex", ["/guest/rs-spin", "mutex"])]
+if os.uname().machine == "aarch64":
+    TABLE += [("C ldxr/stxr swap spin lock, call inside", ["/guest/llsc-spin", "xchg"]),
+              ("C ldxr/stxr compare spin lock, call inside", ["/guest/llsc-spin", "cas"])]
 cpus = os.cpu_count()
 
 

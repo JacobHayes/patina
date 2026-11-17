@@ -4,7 +4,7 @@
 # not every outcome of a whole check run.)
 # No changes are needed to the program or its build: the build.sh of each workload uses
 # stock toolchain commands with no patina-specific flag (printed below).
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
 
 echo "== representative runs (seed 1, one per runtime and shell)"

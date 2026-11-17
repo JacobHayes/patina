@@ -3,7 +3,7 @@
 # a fresh PID namespace), and the derived values are right: the image each child saw, its argv,
 # its environment variable, inherited descriptors 0,1,2,5 (5 inherited, 6 close-on-exec gone),
 # the hidden descriptor EBADF, and the kernel's error for each failure (posix_spawn returns it).
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-exec-matrix
 mkdir -p "$o"

@@ -152,13 +152,20 @@ fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
             "thread {} (tid {}, {name}) computed for {:.1} s without a system call or pause while {waiting}. \
              This is a spin-wait Patina could not preempt, or an endless loop. \
              If that code was not rebuilt with compute points, rebuilding it with them makes such a loop a scheduling point \
-             (docs/GUIDE.md, \"Scheduling\"); or rerun with --preempt branches (needs CAP_PERFMON and a host PMU; see `patina doctor`).",
+             (docs/GUIDE.md, \"Scheduling\"){BRANCHES}",
             h.slot,
             h.tid,
             spun as f64 / 1e9
         ),
     )
 }
+
+/// The other way out where branch counters exist (x86_64 only).
+#[cfg(target_arch = "x86_64")]
+const BRANCHES: &str =
+    "; or rerun with --preempt branches (needs CAP_PERFMON and a host PMU; see `patina doctor`).";
+#[cfg(not(target_arch = "x86_64"))]
+const BRANCHES: &str = ".";
 
 /// CPU time of guest thread `tid` (a PID-namespace id; 0: none), from `/proc/TID/schedstat`.
 fn thread_cpu_ns(tid: i32) -> Option<u64> {

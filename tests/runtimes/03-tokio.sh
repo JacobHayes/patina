@@ -11,7 +11,7 @@
 #     before the exit barrier (docs/EVIDENCE.md runtimes "exit versus a wire delivery"). F: net-reset seen
 #     as "ConnectionReset"; net-partition=1..10001: the 5 s read timeouts fire during it, then
 #     all 16 clients finish with correct data, quickly in wall time; net-chunk-max=1: all ok.
-#@ tier=area budget=60 slots=4 arch=x86_64
+#@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 T=tokio-mt
 FAULT="--fault fs-error-permille=10"

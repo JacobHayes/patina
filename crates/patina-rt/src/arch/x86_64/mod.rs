@@ -6,6 +6,7 @@ mod entry;
 mod guest;
 pub mod insn;
 mod sigframe;
+pub mod step;
 mod stub;
 mod thread;
 

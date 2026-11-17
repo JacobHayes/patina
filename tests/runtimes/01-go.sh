@@ -13,7 +13,7 @@
 #  g. Network: D with network faults; net-reset-permille seen as "connection reset
 #     by peer", a 10 s net-partition seen as the http.Client's 5 s timeout, net-chunk-max=1
 #     with all 16 responses correct.
-#@ tier=area budget=90 slots=4 arch=x86_64
+#@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
 G=go-static
 FAULT="--fault fs-error-permille=20"

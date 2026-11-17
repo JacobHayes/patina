@@ -9,7 +9,16 @@
 #  c. One thread computing for about 2 s with no other thread is ok, not a stall.
 #  d. Stock Go at the default CPU count (go-sweep, whose background sweeper spins without a
 #     system call or `pause`) ends ok on seeds 1-3.
-#@ tier=quick budget=30 slots=5 arch=x86_64
+#  e. A spin that changes only memory (spinpoints memcount: its registers are the same each
+#     iteration) is not found: unsupported, stop compute-stall.
+#  f. No breakpoint stays in code once a probe ends: spinpoints text, 10 rounds each found by a
+#     probe, checksums every executable segment after each round: unchanged; a thread that
+#     finds a second spin point right after leaving the first (no system call between), then
+#     its code run again by another thread: ok.
+#  g. arm64: a spin lock on exclusive pairs (llsc-spin, ldaxr/stxr: test-and-set and
+#     compare-and-swap) is found and ends ok with the right count; a stop inside a pair would
+#     make its store fail every time.
+#@ tier=quick budget=30 slots=5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-spin
 mkdir -p "$o"
@@ -28,6 +37,12 @@ one count-b "$G" 1 "$on" -- /guest/spinpoints count &
 one alone "$G" 1 "$on" -- /guest/spinpoints alone 2000 &
 wait
 for s in 1 2 3; do one "go-$s" "$PATINA_WORKLOADS/go-static" "$s" "$on" -- /guest/go-sweep & done
+one memcount "$G" 1 "$on" -- /guest/spinpoints memcount &
+one text "$G" 1 "$on" -- /guest/spinpoints text 10 &
+wait
+arm64=$([ "$(uname -m)" = aarch64 ] && echo yes || true)
+one twice "$G" 1 "$on" -- /guest/spinpoints twice &
+[ -z "$arm64" ] || for m in xchg cas; do one "llsc-$m" "$G" 1 "$on" -- /guest/llsc-spin "$m" & done
 wait
 res() { echo "$(field "$o/$1/result.json" outcome)/$(field "$o/$1/result.json" stop): $(field "$o/$1/result.json" message)"; }
 stall() { [ "$(field "$o/$1/result.json" outcome)/$(field "$o/$1/result.json" stop)" = unsupported/compute-stall ]; }
@@ -52,3 +67,24 @@ for s in 1 2 3; do
     [ "$(field "$o/go-$s/result.json" outcome)" = ok ] || die "d. go-sweep seed $s: $(res "go-$s")"
 done
 echo "d. go-sweep at the default CPU count: ok on seeds 1-3 (spin points found on seed 1: $(field "$o/go-1/result.json" counters.sched.spin_found))"
+
+stall memcount || die "e. memory-only counting spin: $(res memcount)"
+echo "e. memory-only counting spin: $(res memcount | cut -c1-60)"
+
+[ "$(field "$o/text/result.json" outcome)" = ok ] && grep -qx 'text same after 10 rounds' "$o/text/inc-0/stdout" ||
+    die "f. text checksum: $(res text) $(cat "$o/text/inc-0/stdout" 2>/dev/null)"
+echo "f. text unchanged after 10 rounds ($(field "$o/text/result.json" counters.sched.spin_found) spin points found)"
+[ "$(field "$o/twice/result.json" outcome)" = ok ] && grep -qx 'twice done' "$o/twice/inc-0/stdout" ||
+    die "f. two spin points in a row: $(res twice) $(cat "$o/twice/inc-0/stdout" 2>/dev/null)"
+[ "$(field "$o/twice/result.json" counters.sched.spin_found)" -ge 2 ] || die "f. twice: fewer than two spin points found"
+echo "f. two spin points in a row, then their code run again: ok"
+
+if [ "$arm64" ]; then
+    for m in xchg cas; do
+        d=$o/llsc-$m
+        [ "$(field "$d/result.json" outcome)" = ok ] && grep -qx "$m counter=400" "$d/inc-0/stdout" ||
+            die "g. llsc-spin $m: $(res "llsc-$m") $(cat "$d/inc-0/stdout" 2>/dev/null)"
+        [ "$(field "$d/result.json" counters.sched.spin_found)" -gt 0 ] || die "g. llsc-spin $m: ok without a found spin"
+    done
+    echo "g. exclusive-pair spin locks: ok (spin points found: xchg $(field "$o/llsc-xchg/result.json" counters.sched.spin_found), cas $(field "$o/llsc-cas/result.json" counters.sched.spin_found))"
+fi

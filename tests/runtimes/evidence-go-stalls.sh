@@ -3,7 +3,7 @@
 # reproducer go-sweep over seeds 1-RUNTIMES_STALL_SEEDS (100), each with spin probes on and off;
 # go-sweep also at --cpus 24 with probes on and off. stall-ms = 3000. With probes on every run
 # must be ok; a run that is neither ok nor compute-stall fails the script.
-#@ tier=evidence budget=1200 slots=8 arch=x86_64
+#@ tier=evidence budget=1200 slots=8
 . "$(dirname "$0")/lib.inc"
 export SWEEP_JOBS=8
 G=go-static

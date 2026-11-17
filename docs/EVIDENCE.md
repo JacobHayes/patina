@@ -168,6 +168,52 @@ Counter preemption on Intel: on an Intel Xeon 6975P-C (CI runner with a PMU),
 longer found the double spend. Counter preemption is therefore refused on every CPU but AMD
 family 0x1a, and a seed reproduces only on the same family.
 
+### arm64
+
+Spin probes on arm64 step in software: a `brk` planted at the decoded successor, exclusive
+pairs stepped whole, written pages by userfaultfd write-protection (ARCHITECTURE.md). Hosts:
+the hosted runner (`ubuntu-24.04-arm`, Neoverse-N2, 4 CPUs, Linux 7.0, gcc 13, guests built
+natively), run once from a throwaway branch, and the development VM (Apple M4, 4 CPUs, Linux
+7.0; gcc guests built there, Go and Rust guests cross-built). Seeds and digests are per
+architecture. 2026-11-17.
+
+| Check (default 4 CPUs, 20 seeds a row unless stated) | Result |
+|---|---|
+| Spin table, 10 spin-waits (the x86_64 seven, the C lock without its hint, two `ldaxr`/`stxr` locks), system calls only, runner | glibc spin lock, C spin lock with and without the hint, Rust spin lock (each with a call inside) and both exclusive-pair locks `compute-stall` 20/20; the 4 others `ok` |
+| The same, pause points only | glibc spin lock (no hint on arm64), the C lock without the hint and both exclusive-pair locks `compute-stall` 20/20; the rest `ok` |
+| The same, default | 200/200 `ok`; 4,141 spin preemptions in each of glibc's and the hintless lock's 20 runs, 405 in each exclusive-pair lock's |
+| W1-W9, default, with their faults, runner | no `compute-stall`; W4: 2,579 pause points, 596 spin preemptions; W8 and W6 fail 20/20 on injected errors (W6 `ok` on x86_64; no pause point or probe in it) |
+| W4 (stock Go), 100 seeds, spin probes off / on, runner | `compute-stall` 84/100 / 0/100 |
+| go-sweep, 100 seeds, spin probes off / on, runner | 100/100 / 0/100 |
+| go-sweep at 24 CPUs, 100 seeds, spin probes off / on, runner | 97/100 / 0/100 |
+| `verify --runs 5`, `--vary cpu,aslr` and `--vary repeat,cpu,load`, runner: `spinpoints flag`, the glibc, C (hint, no hint), Rust and both exclusive-pair locks, go-sweep seeds 1 and 2, W4 | one digest each; the same on the VM with `cpu,aslr` |
+| Exclusive-pair locks under `verify --runs 20 --vary cpu,aslr,load`, seeds 1-100 each, runner | 200 of 200 one digest; with the retry branch after the store left out of the pair (red), 4 of 300 diverged (seeds 1-150 each): the store failed spuriously (an interrupt clears the monitor) and the retry passed the planted point, one more yield |
+| `spinpoints text 1000`: 1,000 rounds, each a find, executable segments checksummed after each, runner | `text same after 1000 rounds` |
+| Stock `go-race`, seeds 1-20, runner | 20/20 `ok` |
+
+The development VM gave the same outcomes and found no divergence in 80 verifies of the
+exclusive-pair locks before the retry rule; only the runner showed spurious store failures.
+
+Cost. A probe step (a trap, a breakpoint planted and restored through `/proc/self/mem`)
+takes about 4.8 us on the runner: a probe that gives up at the trace limit (`spinpoints
+wander`, 65,536 steps) costs about 0.3 s of wall time (1.54 s against 1.22 s with probes off,
+3 seeds); one that ends early on a loop that changes state (`spinpoints alone`) about 0.5 ms
+(4 probes, 1.668 s against 1.667 s). A find takes 8 to 9 steps on `spinpoints flag` (the
+run 104-108 ms), and a round of `spinpoints text` (a thread, 20 ms of CPU time spinning
+before the probe, the find) 32 ms. On the VM, runs that need no probe cost the same with
+probes on and off (own spin lock, spin-then-yield, mutexes, Rust: medians 9-19 ms either way,
+10 seeds); those that need one end `compute-stall` without probes and `ok` with them in
+40-50 ms (glibc and hintless spin locks, exclusive-pair locks), go-sweep in 259 ms (20 of
+20), W4 in 168 ms (20 of 20; 3 of 20 `ok` without probes, median 48 ms).
+
+Red/green on the VM: stepping into an exclusive pair one instruction at a time (no pair
+rule), the compare-and-swap lock runs to `--timeout` (1.4 M yields) and the swap lock ends
+`compute-stall`; without the written-page check, the counting spins are reported found; with
+the step's breakpoints never restored, `spinpoints text` reports its text changed after
+round 1. Without taking out the earlier spin point when a second loop is found right after
+it (a bug the x86_64 probe had too), `spinpoints twice` dies of `SIGTRAP` on x86_64
+(`sched/10-spin`).
+
 ## Instruction sites on arm64
 
 Measured 2026-11-17 on the arm64 development VM (Apple M4, Ubuntu 24.04, Linux 7.0) and a
@@ -413,7 +459,7 @@ cross-built). 2026-11-17.
 
 | Check | Result |
 |---|---|
-| `compute/evidence-races`, seeds 1-200, stock / default `compute-gap` / `compute-gap=8`, runner | `races b` 0 / 0 / 30 (seed 3 replays identical); `pool` 0 / 1 / 113 (seeds 29 and 4); `rs-race` 0 / 0 / 8 (seed 17); `go-race` 0 / 0 / 102 (seed 2); stock `go-race` ends `compute-stall` on every seed (its spin barrier needs a spin probe, not ported to arm64 yet) |
+| `compute/evidence-races`, seeds 1-200, stock / default `compute-gap` / `compute-gap=8`, runner | `races b` 0 / 0 / 30 (seed 3 replays identical); `pool` 0 / 1 / 113 (seeds 29 and 4); `rs-race` 0 / 0 / 8 (seed 17); `go-race` 0 / 0 / 102 (seed 2); stock `go-race` then ended `compute-stall` on every seed (its spin barrier needs a spin probe); with spin probes (below) it is `ok` on seeds 1-20 |
 | The same on the VM | `races b` 0 / 0 / 30; `pool` 0 / 1 / 113; `rs-race` 0 / 0 / 6 (seed 2); `go-race` 0 / 0 / 102; every first failing seed replays identical |
 | `compute/evidence-deadline`, runner (204 s) | C: 40 of 40 `ok`, the handler 3,001 virtual ns after the 50 ms in every run, one deadline stop each; Go: 20 of 20 at the seed's gap (62 to 65 deadline stops), 20 of 20 at `compute-gap=0`; Rust: 20 of 20 at the seed's gap, 10 of 20 at `compute-gap=0` (the sleeper's wake-up is the seed's pick, as on x86_64); `verify --runs 20 --vary cpu,load,aslr,sandbox` identical for all three |
 | `compute/evidence-identity`, runner, `PATINA_BASE` = `70803a86` (compute points a stand-in): W1-W9, `c-threads`, `rs-threads`, `spinpoints flag`, stock `races b`, `pool`, a loop, seeds 1-3 | 45 of 45 the same digest and `result.json` (W4 and `spinpoints flag` end `compute-stall` in both builds: spin probes) |

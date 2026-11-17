@@ -15,24 +15,42 @@
 //!    the cycle, the same whichever instruction the probe arrived at.
 //! 3. **A fixed point.** At that position, a full iteration later and another after that,
 //!    the registers (general, flags, the whole FPU/SIMD state) are equal, and so is every
-//!    page the iteration wrote (soft-dirty bits: `/proc/self/clear_refs`, `PAGEMAP_SCAN`;
-//!    the runtime's own region is excluded). The thread's next state is a function of its
+//!    page the iteration wrote (x86_64: soft-dirty bits; arm64: userfaultfd's asynchronous
+//!    write-protection; both read by `PAGEMAP_SCAN`; the runtime's own region is excluded).
+//!    The thread's next state is a function of its
 //!    state alone (no other thread runs, no system call is made), so equal states mean the
 //!    loop never ends by itself, and every later arrival at the point is in that same state.
 //!
 //! The state there is therefore the same in every run, however late the probe came: the
 //! thread yields there exactly as at a trap (a `preempt` record with `nr` 2, virtual time
-//! charged, virtual signals delivered at its exit). It then stays a scheduling point: an
-//! `int3` is planted at it, and each arrival yields again, until the thread's next other
+//! charged, virtual signals delivered at its exit). It then stays a scheduling point: a
+//! breakpoint is planted at it, and each arrival yields again, until the thread's next other
 //! runtime entry. A probe that does not find a fixed point changes nothing the guest can see,
 //! so the supervisor can probe again, and in the end reports `compute-stall`.
 //!
+//! The architecture's part is `arch::step`: how one step is taken and recognised (x86_64: the
+//! trap flag; arm64: a `brk` planted at the decoded successor, `proto::step`), the planted
+//! word (`int3`, `brk`), the state words, and how written pages are tracked. Only one guest
+//! thread runs at a time, and every planted word is restored before the thread yields or
+//! enters the runtime otherwise, so no other thread or process executes one; a fork child
+//! gets copies of the pages as they were before the plant.
+//!
 //! Not found: loops whose iterations change state (a counter in memory or a register), loops
-//! longer than the trace, and code the runtime cannot single-step. Hazards as for hops (see
-//! `pmu.rs`): a guest that reads its own flags sees the trap flag, and one that reads its own
-//! code at the point sees the planted byte.
+//! longer than the trace, and code the runtime cannot step (arm64: an exclusive pair the
+//! rule does not cover, an exception-generating instruction, an undecoded branch, code in a
+//! writable mapping; a wait inside a pair, `ldaxr` and a branch back to it while the value is
+//! held, never ends its step, so its probe never ends either and the run ends
+//! `compute-stall`). A store-exclusive also fails, natively, when the host interrupts its
+//! pair; a program that reads the status (a weak compare-and-swap) can take another path,
+//! more or less often by host, which Patina does not hide. Hazards
+//! as for hops (see `pmu.rs`): a guest that reads its own flags sees the trap flag (x86_64),
+//! and one that reads its own code at the point or at the step's stop while it is planted
+//! sees the breakpoint (only the stepped thread runs then, and it reads its code only by
+//! executing a load; a guest that checksums its text between probes sees it unchanged,
+//! `spinpoints text`).
 
-use crate::arch::{reg::*, Frame};
+use crate::arch::step::{self as st, Arm, Word, STATE_WORDS};
+use crate::arch::Frame;
 use crate::raw::*;
 use crate::state::{config, ctl, thread, ThreadState};
 use crate::sys::sig::SigInfo;
@@ -45,11 +63,7 @@ const PH_TRACE: u64 = 1;
 const PH_ALIGN: u64 = 2;
 const PH_CHECK: u64 = 3;
 
-const TF: u64 = 0x100;
-const RF: u64 = 0x1_0000;
 const SI_TKILL: i32 = -6;
-const SI_KERNEL: i32 = 0x80;
-const TRAP_TRACE: i32 = 2;
 
 /// Trace length (single steps) a probe may take to find the period.
 const TRACE_MAX: usize = 1 << 16;
@@ -80,17 +94,23 @@ pub struct Spin {
     pub period: u64,
     pub target: u64,
     pub checks: u64,
-    /// The last checkpoint's registers (r8..rip, flags) and how many pages it saved.
-    pub regs: [u64; 18],
+    /// The last checkpoint's registers (`arch::step::state_words`) and how many pages it
+    /// saved.
+    pub regs: [u64; STATE_WORDS],
     pub npages: u64,
     pub fp_len: u64,
-    /// The spin point (0: none), its original byte, whether `int3` is planted there, and
-    /// whether the thread is stepping over it.
+    /// The spin point (0: none), its original word, whether the breakpoint is planted there,
+    /// and whether the thread is stepping over it.
     pub point: u64,
-    pub orig: u8,
+    pub orig: Word,
     pub planted: u8,
     pub over: u8,
-    pub _pad: [u8; 5],
+    /// Whether the trace was restarted after the probe's first exclusive pair; restarts left
+    /// where the path leaves its cycle (from `arch::step::RETRACES`).
+    pub anchored: u8,
+    pub retraces: u8,
+    /// The step in progress (`arch::step`).
+    pub st: st::Stepper,
 }
 
 impl Spin {
@@ -102,14 +122,16 @@ impl Spin {
             period: 0,
             target: 0,
             checks: 0,
-            regs: [0; 18],
+            regs: [0; STATE_WORDS],
             npages: 0,
             fp_len: 0,
             point: 0,
             orig: 0,
             planted: 0,
             over: 0,
-            _pad: [0; 5],
+            anchored: 0,
+            retraces: 0,
+            st: st::Stepper::new(),
         }
     }
 }
@@ -129,9 +151,9 @@ fn in_runtime(a: u64) -> bool {
 static OWNER: AtomicI32 = AtomicI32::new(0);
 static MEM: AtomicI32 = AtomicI32::new(-1);
 static PAGEMAP: AtomicI32 = AtomicI32::new(-1);
-static CLEAR: AtomicI32 = AtomicI32::new(-1);
+static TRACK: AtomicI32 = AtomicI32::new(-1);
 
-fn open_hidden(path: &[u8], flags: u64) -> i32 {
+pub(crate) fn open_hidden(path: &[u8], flags: u64) -> i32 {
     const F_DUPFD_CLOEXEC: u64 = 1030;
     let fd = unsafe {
         sc4(
@@ -156,7 +178,7 @@ fn resources() -> bool {
     if OWNER.load(Relaxed) == pid {
         return true;
     }
-    for d in [&MEM, &PAGEMAP, &CLEAR] {
+    for d in [&MEM, &PAGEMAP, &TRACK] {
         let fd = d.swap(-1, Relaxed);
         if fd >= 0 {
             unsafe { sc1(nr::CLOSE, fd as u64) };
@@ -179,10 +201,10 @@ fn resources() -> bool {
     }
     let mem = open_hidden(b"/proc/self/mem\0", 2);
     let pm = open_hidden(b"/proc/self/pagemap\0", 0);
-    let cl = open_hidden(b"/proc/self/clear_refs\0", 1);
+    let cl = st::track_open(open_hidden);
     MEM.store(mem, Relaxed);
     PAGEMAP.store(pm, Relaxed);
-    CLEAR.store(cl, Relaxed);
+    TRACK.store(cl, Relaxed);
     if mem < 0 || pm < 0 || cl < 0 {
         return false;
     }
@@ -194,40 +216,56 @@ fn trace() -> &'static mut [u64] {
     unsafe { core::slice::from_raw_parts_mut((SCRATCH + TRACE_OFF) as *mut u64, TRACE_MAX) }
 }
 
-fn poke(a: u64, b: u8) -> bool {
+const WORD: u64 = core::mem::size_of::<Word>() as u64;
+
+/// Write the code word at `a` through `/proc/self/mem` (which reaches read-only and
+/// execute-only pages, and makes the CPU fetch the new word).
+pub(crate) fn poke(a: u64, w: Word) -> bool {
     let r = unsafe {
         sc4(
             nr::PWRITE64,
             MEM.load(Relaxed) as u64,
-            &b as *const u8 as u64,
-            1,
+            &w as *const Word as u64,
+            WORD,
             a,
         )
     };
-    r == 1
+    r == WORD as i64
 }
 
-fn peek(a: u64) -> Option<u8> {
-    let mut b = 0u8;
+pub(crate) fn peek(a: u64) -> Option<Word> {
+    let mut w: Word = 0;
     let r = unsafe {
         sc4(
             nr::PREAD64,
             MEM.load(Relaxed) as u64,
-            &mut b as *mut u8 as u64,
-            1,
+            &mut w as *mut Word as u64,
+            WORD,
             a,
         )
     };
-    (r == 1).then_some(b)
+    (r == WORD as i64).then_some(w)
 }
 
-fn clear_soft_dirty() -> bool {
-    let b = b"4";
-    unsafe { sc3(nr::WRITE, CLEAR.load(Relaxed) as u64, b.as_ptr() as u64, 1) == 1 }
+/// Read code at `a` into `out`; the bytes read (fewer at the end of a mapping).
+#[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+pub(crate) fn peek_bytes(a: u64, out: &mut [u8]) -> usize {
+    let r = unsafe {
+        sc4(
+            nr::PREAD64,
+            MEM.load(Relaxed) as u64,
+            out.as_mut_ptr() as u64,
+            out.len() as u64,
+            a,
+        )
+    };
+    r.max(0) as usize
 }
+
+pub(crate) const PAGEMAP_SCAN: u64 = 0xc060_6610;
 
 #[repr(C)]
-struct ScanArg {
+pub(crate) struct ScanArg {
     size: u64,
     flags: u64,
     start: u64,
@@ -242,59 +280,81 @@ struct ScanArg {
     return_mask: u64,
 }
 
-/// Pages written since the last clear, outside the runtime's region, into `out` (sorted).
-/// None when there are more than `out` holds.
-fn dirty_pages(out: &mut [u64]) -> Option<usize> {
-    const PAGEMAP_SCAN: u64 = 0xc060_6610;
-    const PAGE_IS_SOFT_DIRTY: u64 = 1 << 7;
-    let mut n = 0;
-    for (lo, hi) in [(0, RT_BASE), (RT_REGION_END, 0x7fff_ffff_f000)] {
-        let mut start = lo;
-        while start < hi {
-            let mut regions = [[0u64; 3]; REGIONS];
-            let mut a = ScanArg {
-                size: core::mem::size_of::<ScanArg>() as u64,
-                flags: 0,
-                start,
-                end: hi,
-                walk_end: 0,
-                vec: regions.as_mut_ptr() as u64,
-                vec_len: REGIONS as u64,
-                max_pages: 0,
-                category_inverted: 0,
-                category_mask: PAGE_IS_SOFT_DIRTY,
-                category_anyof_mask: 0,
-                return_mask: PAGE_IS_SOFT_DIRTY,
-            };
-            let r = unsafe {
-                sc3(
-                    nr::IOCTL,
-                    PAGEMAP.load(Relaxed) as u64,
-                    PAGEMAP_SCAN,
-                    &mut a as *mut ScanArg as u64,
-                )
-            };
-            if r < 0 {
-                return None;
-            }
-            for reg in &regions[..r as usize] {
-                let mut p = reg[0];
-                while p < reg[1] {
-                    if n == out.len() {
-                        return None;
-                    }
-                    out[n] = p;
-                    n += 1;
-                    p += PAGE;
-                }
-            }
-            if (r as usize) < REGIONS || a.walk_end <= start {
-                break;
-            }
-            start = a.walk_end;
+impl ScanArg {
+    /// A scan of `[start, end)` for pages in category `cat`, with no output vector.
+    pub(crate) fn new(start: u64, end: u64, flags: u64, cat: u64) -> ScanArg {
+        ScanArg {
+            size: core::mem::size_of::<ScanArg>() as u64,
+            flags,
+            start,
+            end,
+            walk_end: 0,
+            vec: 0,
+            vec_len: 0,
+            max_pages: 0,
+            category_inverted: 0,
+            category_mask: cat,
+            category_anyof_mask: 0,
+            return_mask: cat,
         }
     }
+}
+
+/// `PAGEMAP_SCAN` of `[lo, hi)` for pages in category `cat` (with `flags`), appended to
+/// `out` from index `n`; the new count, or None when `out` is full or the scan fails.
+pub(crate) fn scan(
+    pagemap: i32,
+    lo: u64,
+    hi: u64,
+    cat: u64,
+    flags: u64,
+    out: &mut [u64],
+    mut n: usize,
+) -> Option<usize> {
+    let mut start = lo;
+    while start < hi {
+        let mut regions = [[0u64; 3]; REGIONS];
+        let mut a = ScanArg::new(start, hi, flags, cat);
+        a.vec = regions.as_mut_ptr() as u64;
+        a.vec_len = REGIONS as u64;
+        let r = unsafe {
+            sc3(
+                nr::IOCTL,
+                pagemap as u64,
+                PAGEMAP_SCAN,
+                &mut a as *mut ScanArg as u64,
+            )
+        };
+        if r < 0 {
+            return None;
+        }
+        for reg in &regions[..r as usize] {
+            let mut p = reg[0];
+            while p < reg[1] {
+                if n == out.len() {
+                    return None;
+                }
+                out[n] = p;
+                n += 1;
+                p += PAGE;
+            }
+        }
+        if (r as usize) < REGIONS || a.walk_end <= start {
+            break;
+        }
+        start = a.walk_end;
+    }
     Some(n)
+}
+
+/// Pages written since the last reset, outside the runtime's region, into `out` (sorted).
+/// None when there are more than `out` holds.
+fn dirty_pages(out: &mut [u64]) -> Option<usize> {
+    st::track_written(PAGEMAP.load(Relaxed), out)
+}
+
+fn clear_dirty() -> bool {
+    st::track_reset(TRACK.load(Relaxed), PAGEMAP.load(Relaxed))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -315,9 +375,10 @@ pub fn enter(ts: &mut ThreadState, frame: Option<&mut Frame>) {
 fn enter_slow(ts: &mut ThreadState, frame: Option<&mut Frame>) {
     if let Some(f) = frame {
         if ts.spin.phase != PH_NONE || ts.spin.over != 0 {
-            f.gregs[EFL] &= !TF;
+            st::step_disarm(&mut ts.spin.st, f);
         }
     }
+    st::track_end();
     ts.spin.phase = PH_NONE;
     disarm(ts);
 }
@@ -332,16 +393,26 @@ fn disarm(ts: &mut ThreadState) {
     s.point = 0;
 }
 
-/// Every SIGTRAP first: probes, single steps and the spin point. True when handled.
+/// The address the stepper must not plant at: the spin point, while its breakpoint is there.
+fn planted_point(ts: &ThreadState) -> u64 {
+    if ts.spin.planted != 0 {
+        ts.spin.point
+    } else {
+        0
+    }
+}
+
+/// Every SIGTRAP first:
+/// probes, single steps and the spin point. True when handled.
 pub fn on_sigtrap(info: &SigInfo, frame: &mut Frame) -> bool {
     let ts = thread();
     let code = (info[1] & 0xffff_ffff) as i32;
-    let rip = frame.gregs[RIP];
+    let pc = frame.pc();
     if code == SI_TKILL && (info[2] & 0xffff_ffff) as i32 == 1 {
         // A probe from the supervisor (PID 1). Ignored unless the thread is in guest code
         // with nothing of ours in progress.
         if config().sched & SCHED_SPIN_PROBE != 0
-            && !in_runtime(rip)
+            && !in_runtime(pc)
             && ts.vfork == 0
             && ts.spin.phase == PH_NONE
             && ts.spin.over == 0
@@ -350,63 +421,93 @@ pub fn on_sigtrap(info: &SigInfo, frame: &mut Frame) -> bool {
         }
         return true;
     }
-    if in_runtime(rip) {
+    if in_runtime(pc) {
         return false;
     }
-    if code == SI_KERNEL && ts.spin.planted != 0 && rip.wrapping_sub(1) == ts.spin.point {
+    if ts.spin.planted != 0 && st::at_point(code, frame, ts.spin.point) {
         if ts.spin.phase != PH_NONE {
             ts.spin.phase = PH_NONE;
+            st::track_end();
         }
-        frame.gregs[EFL] &= !TF;
+        st::step_disarm(&mut ts.spin.st, frame);
         let s = &mut ts.spin;
         poke(s.point, s.orig);
         s.planted = 0;
-        frame.gregs[RIP] = s.point;
         bump(&ctl().sched.spin_yields, 1);
         spin_yield(ts, frame, 0);
         return true;
     }
-    if code == TRAP_TRACE {
+    if st::step_trap(&ts.spin.st, code, frame) {
         if ts.spin.over != 0 {
             // Stepped over the spin point: plant it again.
-            frame.gregs[EFL] &= !TF;
-            let s = &mut ts.spin;
-            s.over = 0;
-            if s.point != 0 && poke(s.point, 0xcc) {
-                s.planted = 1;
-            } else {
-                s.point = 0;
-            }
+            st::step_disarm(&mut ts.spin.st, frame);
+            ts.spin.over = 0;
+            replant(ts);
             return true;
         }
         if ts.spin.phase != PH_NONE {
             step(ts, frame);
             return true;
         }
+        if st::step_owned(&ts.spin.st) {
+            st::step_disarm(&mut ts.spin.st, frame);
+            return true;
+        }
     }
     false
 }
 
-fn abort(ts: &mut ThreadState, frame: &mut Frame) {
+/// Plant the spin point's breakpoint again, or let the point go.
+fn replant(ts: &mut ThreadState) {
+    let s = &mut ts.spin;
+    if s.point != 0 && st::plantable(s.point) && poke(s.point, st::BRK) {
+        s.planted = 1;
+    } else {
+        s.point = 0;
+    }
+}
+
+/// End the probe in progress: no fixed point (or one, handled by the caller).
+fn end(ts: &mut ThreadState, frame: &mut Frame) {
     ts.spin.phase = PH_NONE;
-    frame.gregs[EFL] &= !TF;
+    st::step_disarm(&mut ts.spin.st, frame);
+    st::track_end();
+}
+
+fn abort(ts: &mut ThreadState, frame: &mut Frame) {
+    end(ts, frame);
 }
 
 fn start(ts: &mut ThreadState, frame: &mut Frame) {
     let c = ctl();
     bump(&c.sched.spin_probes, 1);
-    if !resources() {
+    if !resources() || !st::track_begin(PAGEMAP.load(Relaxed)) {
         return;
     }
     let s = &mut ts.spin;
-    trace()[0] = frame.gregs[RIP];
+    trace()[0] = frame.pc();
     s.i = 0;
     s.cand = 0;
     s.period = 0;
     s.checks = 0;
     s.npages = 0;
+    s.anchored = 0;
+    s.retraces = st::RETRACES;
     s.phase = PH_TRACE;
-    frame.gregs[EFL] |= TF;
+    arm(ts, frame);
+}
+
+/// Arm the next step of the probe in progress. A step the stepper takes in the frame
+/// itself (arm64: a branch to itself) is recorded at once.
+fn arm(ts: &mut ThreadState, frame: &mut Frame) {
+    while ts.spin.phase != PH_NONE {
+        let p = planted_point(ts);
+        match st::step_arm(&mut ts.spin.st, frame, p) {
+            Arm::Armed => return,
+            Arm::Refused => return abort(ts, frame),
+            Arm::Taken => record(ts, frame),
+        }
+    }
 }
 
 /// Index of the least rotation of `s` (the two-pointer minimum-expression algorithm).
@@ -434,10 +535,36 @@ fn least_rotation(s: &[u64]) -> usize {
 
 /// A single step of a probe finished.
 fn step(ts: &mut ThreadState, frame: &mut Frame) {
-    frame.gregs[EFL] &= !TF;
+    st::step_disarm(&mut ts.spin.st, frame);
+    record(ts, frame);
+    arm(ts, frame);
+}
+
+/// Start the trace again at `rip`, with nothing compared yet.
+fn retrace(ts: &mut ThreadState, rip: u64) {
+    let s = &mut ts.spin;
+    trace()[0] = rip;
+    s.i = 0;
+    s.cand = 0;
+    s.period = 0;
+    s.checks = 0;
+    s.npages = 0;
+    s.phase = PH_TRACE;
+}
+
+/// Record the step that ended at `frame`: extend the trace, or compare at the canonical
+/// position.
+fn record(ts: &mut ThreadState, frame: &mut Frame) {
     bump(&ctl().sched.spin_steps, 1);
-    let rip = frame.gregs[RIP];
+    let rip = frame.pc();
     let t = trace();
+    if st::step_was_pair(&ts.spin.st) && ts.spin.anchored == 0 && ts.spin.phase == PH_TRACE {
+        // The first exclusive pair of the probe: the trace starts again after it. Stops are
+        // never inside a pair from here on, but the probe may have arrived inside one, and
+        // that address would not come round again.
+        ts.spin.anchored = 1;
+        return retrace(ts, rip);
+    }
     let s = &mut ts.spin;
     s.i += 1;
     let i = s.i as usize;
@@ -453,6 +580,12 @@ fn step(ts: &mut ThreadState, frame: &mut Frame) {
                     s.cand = i as u64;
                 }
             } else if rip != t[i - cand] {
+                if s.retraces > 0 {
+                    // The path after the start was not the cycle (a store-exclusive that failed
+                    // once): start again here.
+                    s.retraces -= 1;
+                    return retrace(ts, rip);
+                }
                 s.cand = if rip == t[0] { i as u64 } else { 0 };
             } else if i == 2 * cand {
                 let p = cand;
@@ -461,15 +594,17 @@ fn step(ts: &mut ThreadState, frame: &mut Frame) {
                 s.phase = PH_ALIGN;
                 if i as u64 == s.target {
                     s.phase = PH_CHECK;
-                    if !checkpoint(ts, frame) {
-                        return;
-                    }
+                    checkpoint(ts, frame);
                 }
             }
         }
         _ => {
             let p = s.period as usize;
             if rip != t[i % p] {
+                if s.retraces > 0 {
+                    s.retraces -= 1;
+                    return retrace(ts, rip);
+                }
                 return abort(ts, frame);
             }
             let at_check = if s.phase == PH_ALIGN {
@@ -479,70 +614,34 @@ fn step(ts: &mut ThreadState, frame: &mut Frame) {
             };
             if at_check {
                 s.phase = PH_CHECK;
-                if !checkpoint(ts, frame) {
-                    return;
-                }
+                checkpoint(ts, frame);
             }
         }
     }
-    if ts.spin.phase != PH_NONE {
-        frame.gregs[EFL] |= TF;
-    }
-}
-
-fn regs_of(frame: &Frame) -> [u64; 18] {
-    let mut r = [0u64; 18];
-    r.copy_from_slice(&frame.gregs[..18]);
-    r[EFL] &= !(TF | RF);
-    r
-}
-
-/// The FPU/SIMD state of the frame, without the kernel's software bytes (464..512).
-fn fp_of(frame: &Frame) -> Option<&'static [u8]> {
-    if frame.fpstate == 0 {
-        return Some(&[]);
-    }
-    let base = frame.fpstate as *const u8;
-    let magic = unsafe { core::ptr::read_unaligned(base.add(464) as *const u32) };
-    let len = if magic == 0x4650_5853 {
-        unsafe { core::ptr::read_unaligned(base.add(480) as *const u32) as usize }
-    } else {
-        512
-    };
-    if !(512..=FP_MAX).contains(&len) {
-        return None;
-    }
-    Some(unsafe { core::slice::from_raw_parts(base, len) })
-}
-
-fn fp_equal(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a[..464] == b[..464] && a[512..] == b[512..]
 }
 
 /// The thread is at the canonical position. Compare with the last checkpoint; on a fixed
-/// point, yield. Returns false when the probe ended (found or given up).
-fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) -> bool {
+/// point, yield; after `CHECKS` unequal ones, give up.
+fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
     let list = unsafe {
         core::slice::from_raw_parts_mut((SCRATCH + PAGES_LIST_OFF) as *mut u64, COPY_PAGES)
     };
     let saved_fp =
         unsafe { core::slice::from_raw_parts_mut((SCRATCH + FP_OFF) as *mut u8, FP_MAX) };
     let copies = SCRATCH + COPY_OFF;
-    let regs = regs_of(frame);
-    let Some(fp) = fp_of(frame) else {
-        abort(ts, frame);
-        return false;
+    let regs = st::state_words(frame);
+    let Some(fp) = st::fp_state(frame, FP_MAX) else {
+        return abort(ts, frame);
     };
     let s = &mut ts.spin;
     if s.checks > 0 {
         let mut now = [0u64; COPY_PAGES];
         let Some(n) = dirty_pages(&mut now) else {
-            abort(ts, frame);
-            return false;
+            return abort(ts, frame);
         };
         let prev = &list[..s.npages as usize];
         let mut equal =
-            s.checks > 1 && regs == s.regs && fp_equal(fp, &saved_fp[..s.fp_len as usize]);
+            s.checks > 1 && regs == s.regs && st::fp_equal(fp, &saved_fp[..s.fp_len as usize]);
         // Every page written in this iteration was written in the last one too (so its
         // contents then were saved) and holds the same bytes.
         let mut k = 0;
@@ -564,12 +663,10 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) -> bool {
                 };
         }
         if equal {
-            found(ts, frame);
-            return false;
+            return found(ts, frame);
         }
         if s.checks > CHECKS {
-            abort(ts, frame);
-            return false;
+            return abort(ts, frame);
         }
         // Save this iteration's pages for the next comparison.
         list[..n].copy_from_slice(&now[..n]);
@@ -588,11 +685,9 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) -> bool {
     saved_fp[..fp.len()].copy_from_slice(fp);
     s.fp_len = fp.len() as u64;
     s.checks += 1;
-    if !clear_soft_dirty() {
+    if !clear_dirty() {
         abort(ts, frame);
-        return false;
     }
-    true
 }
 
 /// A fixed point: the canonical position is a spin point from now on.
@@ -600,16 +695,18 @@ fn found(ts: &mut ThreadState, frame: &mut Frame) {
     let c = ctl();
     bump(&c.sched.spin_found, 1);
     bump(&c.sched.spin_yields, 1);
-    ts.spin.phase = PH_NONE;
-    frame.gregs[EFL] &= !TF;
+    end(ts, frame);
+    // The last spin point, if still planted (this loop was reached from it without a runtime
+    // entry), comes out: nothing stays planted across a yield.
+    disarm(ts);
     let period = ts.spin.period;
     spin_yield(ts, frame, period);
 }
 
-/// Yield at the spin point (the frame's `rip`), as at a trap; then keep it a spin point.
+/// Yield at the spin point (the frame's `pc`), as at a trap; then keep it a spin point.
 fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     let c = ctl();
-    let point = frame.gregs[RIP];
+    let point = frame.pc();
     // A spin point is a runtime entry at a state that is the same in every run (it was found
     // as a fixed point, or arrived at again): charge compute events here, as at a trap.
     crate::compute::enter(ts);
@@ -617,8 +714,9 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     c.seq.store(ts.seq, Relaxed);
     let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
     c.vclock_ns.store(t, Relaxed);
-    let g = regs_of(frame);
-    let bytes = unsafe { core::slice::from_raw_parts(g.as_ptr() as *const u8, 18 * 8) };
+    let g = st::state_words(frame);
+    let bytes = unsafe { core::slice::from_raw_parts(g.as_ptr() as *const u8, STATE_WORDS * 8) };
+    let [a2, a3, a4] = st::record_args(&g);
     let rec = proto::Rec {
         seq: ts.seq,
         vclock_ns: t,
@@ -626,7 +724,7 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
         kind: proto::RecKind::Preempt as u8,
         class: 0,
         nr: 2,
-        args: [point, period, g[RCX], g[RSP], g[EFL], 0],
+        args: [point, period, a2, a3, a4, 0],
         ret: 0,
         out_hash: proto::rec::hash_bytes(0, bytes),
         in_hash: 0,
@@ -636,7 +734,7 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     crate::sys::sig::trap_exit(frame, None);
     crate::entry::check_real_mask(frame);
     crate::compute::exit(ts);
-    // Arm the point: plant `int3` there, or, when the thread resumes at it, step its
+    // Arm the point: plant the breakpoint there, or, when the thread resumes at it, step its
     // instruction first and plant after.
     let Some(orig) = peek(point) else {
         return;
@@ -644,12 +742,14 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     let s = &mut ts.spin;
     s.point = point;
     s.orig = orig;
-    if frame.gregs[RIP] == point {
-        s.over = 1;
-        frame.gregs[EFL] |= TF;
-    } else if poke(point, 0xcc) {
-        s.planted = 1;
+    if frame.pc() == point {
+        match st::step_arm(&mut s.st, frame, 0) {
+            Arm::Armed => s.over = 1,
+            // Stepped already (a branch to itself): the point is planted for the next arrival.
+            Arm::Taken => replant(ts),
+            Arm::Refused => s.point = 0,
+        }
     } else {
-        s.point = 0;
+        replant(ts);
     }
 }
