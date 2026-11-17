@@ -2,7 +2,7 @@
 # the bug is found, under the expected signature; the fixed variant is ok on every seed, and
 # the fault or fault point the example is about fired in at least one of those runs. stats-c's
 # stock build is ok on every seed (its race needs compute points).
-#@ tier=quick budget=20 slots=4 arch=x86_64
+#@ tier=quick budget=20 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 E=$PATINA_GUESTS/examples

@@ -54,12 +54,23 @@ static long *patina_cell = &patina_boot;  /* NULL once this is known not to run 
 
 static PATINA_NOCOV inline long patina_compute_call(long op, long arg)
 {
+#if defined(__x86_64__)
 	long r;
 	__asm__ volatile("syscall"
 			 : "=a"(r)
 			 : "a"(PATINA_SYSCALL), "D"(op), "S"(arg), "d"(0L)
 			 : "rcx", "r11", "memory");
 	return r;
+#elif defined(__aarch64__)
+	register long x8 __asm__("x8") = PATINA_SYSCALL;
+	register long x0 __asm__("x0") = op;
+	register long x1 __asm__("x1") = arg;
+	register long x2 __asm__("x2") = 0L;
+	__asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+	return x0;
+#else
+#error "patina_compute.c: Linux x86_64 or aarch64"
+#endif
 }
 
 static PATINA_NOCOV __attribute__((noinline, cold)) void patina_compute_slow(long *c)

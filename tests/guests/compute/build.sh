@@ -8,7 +8,8 @@
 #   races, pool       the counters area's syscall-free races (races at -O1 as there; pool at
 #                     -O2, where its `stats.done++` is one instruction in a stock build)
 #   spinpoints        tests/guests/threads/spinpoints.c (`count`: a spin-wait that changes state)
-#   spinwait          tests/guests/costs/spinwait.c with its spin lock's `pause` taken out
+#   spinwait          tests/guests/costs/spinwait.c (its `own-spin-nohint` lock waits without a
+#                     spin hint, so nothing but compute points can switch inside it)
 #   cellpoke          writes into, then unmaps, its own cell
 #   loop, loop-stock  a loop between two clock reads, instrumented and not
 #   mixed             threads, then stock and instrumented children (fork, vfork, exec)
@@ -37,8 +38,10 @@ sh "$here/go/build.sh" "$out"
 rf="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc"
 rf="$rf -Cllvm-args=-sanitizer-coverage-trace-loads -Cllvm-args=-sanitizer-coverage-trace-stores"
 rt=${PATINA_BUILD_DIR:?}/compute-rs-target
+# The host's own target, named so that RUSTFLAGS reach the program and not build scripts.
+triple=$(uname -m)-unknown-linux-gnu
 if ! (cd "$here" && unset CARGO_ENCODED_RUSTFLAGS && RUSTFLAGS="$rf" cargo build --release --offline --locked --quiet \
-    --target x86_64-unknown-linux-gnu --target-dir "$rt") 2>"$out/rs-build.err"; then
+    --target "$triple" --target-dir "$rt") 2>"$out/rs-build.err"; then
     if grep -q 'unknown pass name\|Unknown command line argument\|failed to run LLVM passes' "$out/rs-build.err"; then
         { echo "this Rust toolchain ($(rustc -V)) no longer accepts the compute-point flags RUSTFLAGS=\"$rf\":"
           grep -m3 'error\|Unknown' "$out/rs-build.err"; } | tee "$out/rs-MISSING" >&2
@@ -47,7 +50,7 @@ if ! (cd "$here" && unset CARGO_ENCODED_RUSTFLAGS && RUSTFLAGS="$rf" cargo build
         exit 1
     fi
 else
-    cp "$rt/x86_64-unknown-linux-gnu/release/rs-race" "$rt/x86_64-unknown-linux-gnu/release/rs-deadline" "$out/"
+    cp "$rt/$triple/release/rs-race" "$rt/$triple/release/rs-deadline" "$out/"
 fi
 (cd "$here" && unset CARGO_ENCODED_RUSTFLAGS RUSTFLAGS && cargo build --release --offline --locked --quiet \
     --bin rs-race --target-dir "$rt-stock")
@@ -64,7 +67,7 @@ g=$root/tests/guests
 clang -O1 $cp -o "$out/races" "$g/counters/races.c" "$hook"
 clang -O2 $cp -o "$out/pool" "$g/counters/pool.c" "$hook"
 clang -O2 $cp -o "$out/spinpoints" "$g/threads/spinpoints.c" "$hook"
-clang -O2 $cp '-D__builtin_ia32_pause()=((void)0)' -o "$out/spinwait" "$g/costs/spinwait.c" "$hook"
+clang -O2 $cp -o "$out/spinwait" "$g/costs/spinwait.c" "$hook"
 clang -O2 $cp -o "$out/cellpoke" "$here/cellpoke.c" "$hook"
 clang -O2 $cp -o "$out/loop" "$here/loop.c" "$hook"
 clang -O2 -g -o "$out/loop-stock" "$here/loop.c"

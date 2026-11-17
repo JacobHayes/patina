@@ -916,7 +916,6 @@ macro_rules! unported {
 
 unported! {
     UNPORTED_COUNTERS = 4: "branch-counter preemption",
-    UNPORTED_COMPUTE = 5: "compute points",
 }
 
 macro_rules! limits {

@@ -614,7 +614,8 @@ RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 \
   cargo build --release --target x86_64-unknown-linux-gnu
 ```
 
-The binary is under `target/x86_64-unknown-linux-gnu/release/`. `--target` keeps the flags
+The binary is under `target/x86_64-unknown-linux-gnu/release/`; on arm64 the target is
+`aarch64-unknown-linux-gnu`, and the rest is the same. `--target` keeps the flags
 off build scripts and proc macros, which do not link the SDK and would fail with undefined
 `__sanitizer_cov_trace_pc`. A program that uses nothing else from the SDK fails the same way
 unless it says `use patina_dst as _;`. Your crates and their dependencies get the hooks, with

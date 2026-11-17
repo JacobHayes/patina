@@ -8,7 +8,7 @@
 #  c. more distinct instrumented paths than the table holds: ok, and every start is either
 #     listed or counted in images_dropped;
 #  d. `patina report` over a and b and a stock run: the one image, in all runs but the stock one.
-#@ tier=quick budget=8 slots=6 arch=x86_64
+#@ tier=quick budget=8 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-mixed
 mkdir -p "$o"

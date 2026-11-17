@@ -390,9 +390,11 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   a program that reaches a part not ported yet ends the run `unsupported`, stop
-  `arm64-unported`, naming it (branch counters, spin probes, compute points). Threads, fork,
+  `arm64-unported`, naming it (branch counters, spin probes). Threads, fork,
   vfork, exec and signals work as on x86_64 (the clone trampoline is in
-  `arch/aarch64/thread.rs`); so do the instruction channels and pause points (above). The
+  `arch/aarch64/thread.rs`); so do the instruction channels and pause points (above), and the
+  four SDKs and compute points (the SDKs' raw call is `svc #0`; Go's hook is
+  `go/patina/compute/compute_arm64.s`). The
   runtime's loader maps a BTI-marked static program, or the interpreter, `PROT_BTI` as the
   kernel does where the host has BTI; the interpreter does it for the program and its
   libraries. The runtime disables the pointer-authentication keys before
@@ -421,8 +423,10 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
   seed. Rebuilding the code with compute points switches inside it; so does
-  `--preempt branches`, on one CPU family. Compute points do not split a `lock`-prefixed
-  read-modify-write, gcc gives edges only, and code not rebuilt (libc, the Go runtime,
+  `--preempt branches`, on one CPU family. Compute points do not split an atomic
+  read-modify-write (a `lock`-prefixed instruction; on arm64 an LSE instruction, an
+  exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not
+  rebuilt), gcc gives edges only, and code not rebuilt (libc, the Go runtime,
   prebuilt libraries) has no points. A seed found on a stock build does not replay on a
   rebuilt one, or the reverse.
 - **Stock computation does not advance virtual time**: a CPU-bound loop cannot be cut by

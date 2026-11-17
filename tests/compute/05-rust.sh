@@ -11,7 +11,7 @@
 # The race's window is one edge wide: compute-gap=8 hits it on about 1 seed in 40
 # (evidence-races), compute-gap=2 on about 1 in 5. The deadline's 50 ms are 50 million events,
 # so a small gap would spend seconds switching.
-#@ tier=quick budget=10 slots=4 arch=x86_64
+#@ tier=quick budget=10 slots=4
 . "$(dirname "$0")/lib.inc"
 [ ! -f "$G/compute/rs-MISSING" ] || die "$(cat "$G/compute/rs-MISSING")"
 o=$RUNS/05-rust

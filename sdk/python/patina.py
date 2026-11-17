@@ -54,7 +54,7 @@ _libc = None
 def _sys(op, buf):
     global _libc
     if _libc is None:
-        if not (sys.platform.startswith("linux") and os.uname().machine == "x86_64"):
+        if not (sys.platform.startswith("linux") and os.uname().machine in ("x86_64", "aarch64")):
             return -38
         _libc = ctypes.CDLL(None, use_errno=True)
         _libc.syscall.restype = ctypes.c_long

@@ -62,6 +62,13 @@ static inline long patina__sys(long op, const void *p, unsigned long len) {
     __asm__ volatile("syscall" : "=a"(r) : "a"((long)PATINA_SYSCALL), "D"(op), "S"(p), "d"(len)
                      : "rcx", "r11", "memory");
     return r;
+#elif defined(__aarch64__) && defined(__linux__)
+    register long x8 __asm__("x8") = PATINA_SYSCALL;
+    register long x0 __asm__("x0") = op;
+    register const void *x1 __asm__("x1") = p;
+    register unsigned long x2 __asm__("x2") = len;
+    __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
+    return x0;
 #else
     (void)op; (void)p; (void)len;
     return -38;
@@ -79,6 +86,13 @@ static inline int patina_is_simulated(void) {
             __asm__ volatile("syscall" : "=a"(w) : "a"(1L), "D"(2L), "S"(m), "d"(sizeof m - 1)
                              : "rcx", "r11", "memory");
             (void)w;
+#elif defined(__aarch64__) && defined(__linux__)
+            static const char m[] = "patina: unknown SDK protocol version; the SDK is inert\n";
+            register long x8 __asm__("x8") = 64; /* write */
+            register long x0 __asm__("x0") = 2;
+            register const char *x1 __asm__("x1") = m;
+            register unsigned long x2 __asm__("x2") = sizeof m - 1;
+            __asm__ volatile("svc #0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
 #endif
         }
         patina__buggify = ok && (r & PATINA_HELLO_BUGGIFY) != 0;

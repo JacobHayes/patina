@@ -5,7 +5,7 @@
 # compute-gap, and at compute-gap=8. Each column: failing seeds,
 # and whether the first one replays identical. The prototype found 14 and 165 of 200 with a
 # switch at 1 event in 10.
-#@ tier=evidence budget=600 slots=6 arch=x86_64
+#@ tier=evidence budget=600 slots=6
 set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-races python3 -I - <<'PY'

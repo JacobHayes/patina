@@ -8,7 +8,7 @@
 //! RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 \
 //!   -Cllvm-args=-sanitizer-coverage-trace-pc -Cllvm-args=-sanitizer-coverage-trace-loads \
 //!   -Cllvm-args=-sanitizer-coverage-trace-stores" \
-//!   cargo build --release --target x86_64-unknown-linux-gnu
+//!   cargo build --release --target x86_64-unknown-linux-gnu   # or aarch64-unknown-linux-gnu
 //! ```
 //!
 //! with `patina-dst = { ..., features = ["compute"] }` among the dependencies. The hooks must
@@ -56,7 +56,22 @@ fn call(op: u64, arg: u64) -> i64 {
     r
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline(always)]
+fn call(op: u64, arg: u64) -> i64 {
+    let r: i64;
+    // SAFETY: as above; the kernel preserves every register but x0.
+    unsafe {
+        core::arch::asm!("svc #0", in("x8") crate::sys::SYSCALL, inlateout("x0") op as i64 => r,
+            in("x1") arg, in("x2") 0, options(nostack));
+    }
+    r
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 #[inline(always)]
 fn call(_op: u64, _arg: u64) -> i64 {
     -38

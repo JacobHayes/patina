@@ -12,7 +12,7 @@
 # - --branch without --crash, or with a rate, is refused and runs nothing; a plain sweep and a
 #   branch sweep into one directory replace each other.
 # - examples/acklog-c: the sweep finds acked-records-kept.
-#@ tier=quick budget=15 slots=4 arch=x86_64
+#@ tier=quick budget=15 slots=4
 . "$(dirname "$0")/../cli/lib.inc"
 d=$RUNS/branch
 mkdir -p "$d"

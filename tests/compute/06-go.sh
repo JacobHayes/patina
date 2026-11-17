@@ -9,8 +9,9 @@
 #     and under a second;
 #  d. go-race (check-then-act on an atomic.Int64, no system call in the window) ends `failure`
 #     on at least one of seeds 1-40 at compute-gap=8, every other seed `ok`; the first failing
-#     seed replays identical; result.json names one image, kind compare; an atomic.Bool spin (go-race boolspin) ends `ok`.
-#@ tier=quick budget=8 slots=5 arch=x86_64
+#     seed replays identical; result.json names one image, kind compare; an atomic.Bool spin (go-race boolspin)
+#     with one P (GOMAXPROCS=1: only the hook's preemption check lets main run) ends `ok`.
+#@ tier=quick budget=8 slots=5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-go
 mkdir -p "$o"
@@ -41,7 +42,7 @@ for s in 1 2; do
 done
 echo "c. go-deadline: cut by its context at $(sed -n 's/.*elapsed_ns=\([0-9]*\).*/\1/p' "$o/dl-1/inc-0/stdout") virtual ns on seed 1 ($(field "$o/dl-1/result.json" compute.events) events)"
 
-prun "$o/bool" 1 -- /guest/compute/go-race boolspin &
+prun "$o/bool" 1 --env GOMAXPROCS=1 -- /guest/compute/go-race boolspin &
 hunt "$o" race 40 --fault compute-gap=8 -- /guest/compute/go-race
 wait
 img=$(python3 -I -c 'import json,sys

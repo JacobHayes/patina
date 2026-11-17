@@ -4,8 +4,8 @@
 //! Every call goes through one reserved system call that the Patina runtime answers. Outside
 //! Patina the kernel answers `ENOSYS`; the first call learns that, and from then on every macro
 //! is a load and a branch. There are no dependencies and no build flags, and on any target but
-//! Linux x86_64 the crate compiles to the inert path, so code ships it unconditionally. It works
-//! in `no_std`. The feature `compute` (off by default) adds the hooks of compute points: see
+//! Linux x86_64 and aarch64 the crate compiles to the inert path, so code ships it
+//! unconditionally. It works in `no_std`. The feature `compute` (off by default) adds the hooks of compute points: see
 //! the module `compute`.
 //!
 //! ```
@@ -82,7 +82,10 @@ macro_rules! __site {
     ($kind:expr, $label:expr) => {
         const __PATINA_LABEL: &str = $label;
         const __PATINA_LOC: &str = ::core::concat!(::core::file!(), ":", ::core::line!());
-        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        #[cfg(all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ))]
         const _: () = {
             #[used]
             #[unsafe(link_section = "patina_sites")]

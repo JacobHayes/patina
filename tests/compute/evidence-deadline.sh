@@ -5,7 +5,7 @@
 # range, and for guests that report it the handler within ten trap charges of 50 ms; then one
 # seed under verify --runs 20 --vary cpu,load,aslr,sandbox: one digest.
 # Languages add their guest to GUESTS: (name, program and arguments under /guest/compute).
-#@ tier=evidence budget=300 slots=6 arch=x86_64
+#@ tier=evidence budget=300 slots=6
 set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-deadline python3 -I - <<'PY'

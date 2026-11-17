@@ -9,7 +9,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 # No dependencies, no build script: outside Patina every macro is a load and a branch, and on
-# any target but Linux x86_64 the crate compiles to the inert path.
+# any target but Linux x86_64 and aarch64 the crate compiles to the inert path.
 
 [features]
 # The hooks of code rebuilt with LLVM's coverage pass (compute points; src/compute.rs). Off by

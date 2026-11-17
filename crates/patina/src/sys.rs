@@ -47,7 +47,22 @@ fn sys(op: u64, p: *const u8, len: usize) -> i64 {
     r
 }
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[inline(always)]
+fn sys(op: u64, p: *const u8, len: usize) -> i64 {
+    let r: i64;
+    // SAFETY: as above; the kernel preserves every register but x0.
+    unsafe {
+        core::arch::asm!("svc #0", in("x8") SYSCALL, inlateout("x0") op as i64 => r,
+            in("x1") p, in("x2") len, options(nostack));
+    }
+    r
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 #[inline(always)]
 fn sys(_op: u64, _p: *const u8, _len: usize) -> i64 {
     -38
@@ -70,6 +85,12 @@ fn hello() -> u8 {
         unsafe {
             core::arch::asm!("syscall", inlateout("rax") 1i64 => _, in("rdi") 2, in("rsi") m.as_ptr(),
                 in("rdx") m.len(), lateout("rcx") _, lateout("r11") _, options(nostack));
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        // SAFETY: write(2) of a static buffer to stderr.
+        unsafe {
+            core::arch::asm!("svc #0", in("x8") 64u64, inlateout("x0") 2u64 => _, in("x1") m.as_ptr(),
+                in("x2") m.len(), options(nostack));
         }
         let _ = m;
     }

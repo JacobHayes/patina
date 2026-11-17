@@ -1,4 +1,4 @@
-//go:build linux && amd64
+//go:build linux && (amd64 || arm64)
 
 // Package compute gives a Go program compute points under Patina: a scheduling point, and
 // virtual time, at every integer and string comparison the compiler instruments. Two lines:
@@ -34,8 +34,8 @@
 // stack, in code the runtime calls back (timers, finalizers, sync's pool cleanup during a
 // stop of the world). So they are nosplit, allocate nothing, write no pointer (no write
 // barrier), and compare nothing in Go (a comparison here would call a hook): the event, the
-// hello and the system call are in compute_amd64.s. After a compute point a hook may yield to
-// a pending preemption (see preempt).
+// hello and the system call are in assembly (compute_amd64.s, compute_arm64.s). After a
+// compute point a hook may yield to a pending preemption (see preempt).
 package compute
 
 import _ "unsafe" // for go:linkname

@@ -10,7 +10,7 @@
 #     under an instrumented and a stock program: the image table has one entry, the program;
 #     each instrumented image says hello itself and every hello gets the same cell; the
 #     instrumented program's run repeats (one digest twice).
-#@ tier=quick budget=6 slots=6 arch=x86_64
+#@ tier=quick budget=6 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-gcc
 mkdir -p "$o"
