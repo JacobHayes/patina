@@ -26,6 +26,10 @@ fn tab() -> &'static mut SdkTab {
 /// Copy guest memory with the kernel's checks: a bad pointer is `EFAULT`, never a fault in the
 /// runtime.
 fn vm(nr: u64, local: *mut u8, remote: u64, len: usize) -> Result<(), i64> {
+    // The kernel's checks pass the runtime's own memory; the program's view of it is a hole.
+    if crate::guest::in_region(remote, len as u64) {
+        return Err(-e::EFAULT);
+    }
     let l = [local as u64, len as u64];
     let r = [remote, len as u64];
     let n = unsafe {

@@ -1386,6 +1386,15 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
+        // `/proc/self/task` is handed out as a directory, never as the working directory:
+        // relative names are policed only by their descriptor (`path::absolute`).
+        nr::FCHDIR
+            if super::procfs::kind_of(call.arg(0) as i32 as i64)
+                == Some(crate::path::Synth::Task) =>
+        {
+            crate::path::refuse(b"/proc/self/task");
+            -e::EACCES
+        }
         nr::GETCWD | nr::FCHDIR | nr::UMASK => {
             let r = raw(call);
             host_check(call, r);

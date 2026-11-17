@@ -12,6 +12,6 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::CLOCK_GETRES, Virt, C, "Resolution is a constant (1 ns, coarse clocks 4 ms).").outs(&[out(1, Len::Fixed(16))]),
     Row::new(G, nr::TIMES, Virt, C, "CPU times are the sum of trap charges; elapsed ticks are virtual time at 100 Hz.")
         .outs(&[out(0, Len::Fixed(32))]),
-    Row::new(G, nr::NANOSLEEP, Virt, C, "A Sleep request: the deadline is virtual and the supervisor's event queue wakes the thread; the kernel never waits."),
-    Row::new(G, nr::CLOCK_NANOSLEEP, Virt, C, "A Sleep request (relative or TIMER_ABSTIME, realtime converted by the fixed epoch); CPU-time clocks are refused with EINVAL."),
+    Row::new(G, nr::NANOSLEEP, Virt, C, "A Sleep request: the deadline is virtual and the supervisor's event queue wakes the thread; the kernel never waits.").refs(&[out(0, Len::Fixed(16))]),
+    Row::new(G, nr::CLOCK_NANOSLEEP, Virt, C, "A Sleep request (relative or TIMER_ABSTIME, realtime converted by the fixed epoch); CPU-time clocks are refused with EINVAL.").refs(&[out(2, Len::Fixed(16))]),
 ];

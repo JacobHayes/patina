@@ -332,6 +332,13 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
         note(nr, INJ_DELAY, c as u64, ns, a0, who);
         let deadline = ctl().vclock_ns.load(Relaxed) + ns;
         crate::sup::call_sup(Op::Sleep, [deadline, 0, 0, 0, 0, 0]);
+        // Other threads ran: an iovec or msghdr the call names may now point elsewhere.
+        if !crate::guest::still_clear() {
+            return Gate {
+                ret: Some(-e::EFAULT),
+                post: None,
+            };
+        }
     }
     match decide(call, c, obj) {
         Decision::Proceed => none,

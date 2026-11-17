@@ -20,13 +20,16 @@ const OBSOLETE: &str = "Obsolete or removed interface; a current kernel answers 
 const CREDS: &str = "Fixed by the user namespace mapping (the guest has no capabilities, so changes other than to the same ids fail as the kernel decides).";
 const UTS: &str = "Changes the UTS namespace of the sandbox (the guest has no capability, so the kernel answers EPERM).";
 
+/// `capget`, `capset`: the header (version, pid) and the data records (`_LINUX_CAPABILITY_VERSION_3`: two).
+const CAPS: &[Out] = &[out(0, Len::Fixed(8)), out(1, Len::Fixed(24))];
+
 pub const ROWS: &[Row] = &[
-    Row::new(G, nr::GETRANDOM, Virt, C, "Bytes from draw(Entropy, seq); flags are ignored and the call never waits.").outs(&[out(0, Len::Ret)]),
+    Row::new(G, nr::GETRANDOM, Virt, C, "Bytes from draw(Entropy, seq); flags are ignored and the call never waits.").outs(&[out(0, Len::Ret { max: 1 })]),
     Row::new(G, nr::SYSINFO, Virt, C, "Constants: uptime is the virtual clock, 16 GiB total and 12 GiB free memory, no swap, one process, unit 1.").outs(&[out(0, Len::Fixed(112))]),
     Row::new(G, nr::GETRUSAGE, Virt, C, "User time is the thread's trap charges; every other field (system time, page faults, context switches, max RSS) is 0.").outs(&[out(1, Len::Fixed(144))]),
     Row::new(G, nr::GET_MEMPOLICY, Virt, C, "The default policy with an empty node mask."),
-    Row::new(G, nr::GETGROUPS, Virt, C, "The list is the namespace's primary group alone: the launcher's supplementary groups are inherited and cannot be dropped without a capability, and unmapped ones read as the overflow id, so their number would show.").outs(&[out(1, Len::RetTimes(4))]),
-    Row::new(G, nr::SETGROUPS, Pass, A, CREDS),
+    Row::new(G, nr::GETGROUPS, Virt, C, "The list is the namespace's primary group alone: the launcher's supplementary groups are inherited and cannot be dropped without a capability, and unmapped ones read as the overflow id, so their number would show.").outs(&[out(1, Len::RetTimes { max: 0, size: 4 })]),
+    Row::new(G, nr::SETGROUPS, Pass, A, CREDS).refs(&[out(1, Len::ArgTimes { arg: 0, size: 4 })]),
     Row::new(G, nr::SETRESUID, Pass, A, CREDS),
     Row::new(G, nr::GETRESUID, Pass, A, CREDS).outs(&[out(0, Len::Fixed(4)), out(1, Len::Fixed(4)), out(2, Len::Fixed(4))]),
     Row::new(G, nr::SETRESGID, Pass, A, CREDS),
@@ -37,10 +40,10 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::SETREGID, Pass, A, CREDS),
     Row::new(G, nr::SETFSUID, Pass, A, CREDS),
     Row::new(G, nr::SETFSGID, Pass, A, CREDS),
-    Row::new(G, nr::CAPGET, Pass, A, "Capabilities are fixed by the user namespace (none for the guest)."),
-    Row::new(G, nr::CAPSET, Pass, A, "Capabilities can only be dropped; the result is a function of the call and the fixed starting set."),
-    Row::new(G, nr::SETHOSTNAME, Pass, A, UTS),
-    Row::new(G, nr::SETDOMAINNAME, Pass, A, UTS),
+    Row::new(G, nr::CAPGET, Pass, A, "Capabilities are fixed by the user namespace (none for the guest).").refs(CAPS),
+    Row::new(G, nr::CAPSET, Pass, A, "Capabilities can only be dropped; the result is a function of the call and the fixed starting set.").refs(CAPS),
+    Row::new(G, nr::SETHOSTNAME, Pass, A, UTS).refs(&[out(0, Len::Arg(1))]),
+    Row::new(G, nr::SETDOMAINNAME, Pass, A, UTS).refs(&[out(0, Len::Arg(1))]),
     Row::new(G, nr::IO_URING_SETUP, Deny(errno::ENOSYS), C, NO_URING),
     Row::new(G, nr::IO_URING_ENTER, Deny(errno::ENOSYS), C, NO_URING),
     Row::new(G, nr::IO_URING_REGISTER, Deny(errno::ENOSYS), C, NO_URING),

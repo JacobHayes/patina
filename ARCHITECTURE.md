@@ -363,15 +363,54 @@ Enforced:
 - **The control region and the boundary log.** Their published addresses
   (`proto::layout::CTL_ADDR`, `LOG_ADDR`) are inaccessible reservations. The runtime maps them
   read-write at addresses drawn from the host at each image start (`state::map_shared`), which
-  nothing reports (`/proc/self/maps` hides the runtime's region; calls that map, unmap or
-  protect there are refused). The supervisor and the launcher have their own mappings. A
-  pointer to a published address passed to a system call gets `EFAULT`, as for any
-  inaccessible memory.
+  nothing reports (`/proc/self/maps` hides the runtime's region). The supervisor and the
+  launcher have their own mappings.
+- **System call arguments.** To the program the runtime's region (`[RT_BASE, RT_REGION_END)`:
+  image, private memory and alternate stacks, both reservations and both drawn windows) is
+  address space nothing is mapped in, as above the top of user space, so the kernel never
+  reads or writes it on the program's behalf. Before a call the table passes, rewrites or
+  answers is served, every pointer the kernel would follow is checked against the region
+  (`guest::names_runtime`): each buffer the boundary record hashes (`Row::ins`, `Row::outs`)
+  and every other pointer the row lists (`Row::refs`: iovec arrays and segments, a `msghdr`
+  and its name, iovecs and control buffer, `mmsghdr` arrays, socket addresses through their
+  length pointers, `select` sets and `pselect6`'s mask pair, `futex` words and timeouts,
+  `execve`'s vectors and strings, and the request-dependent arguments of `fcntl`, `ioctl`,
+  `prctl` and `arch_prctl`), with the extent the kernel may touch (the length argument for a
+  transfer, clamped to `MAX_RW_COUNT`). One that reaches the region answers `EFAULT`, the
+  kernel's answer for a hole; the record is the call's as the program made it. A length rule
+  without a pre-call extent cannot be written (`Len`), and `ins`/`outs` take only rules the
+  log can hash, so a buffer is never logged without being checked. A buffer that starts in
+  program memory and runs into the region is refused whole, where the kernel would move the
+  first part. The check is made before anything else of the call, so a call the kernel would
+  first have failed for another reason (except a hidden descriptor's `EBADF`), waited on, or
+  consumed input for (a datagram dequeued before the copy faults) answers `EFAULT` at once and
+  consumes nothing. It is made again after a park and after an injected delay, when other
+  threads have run and may have rewritten an iovec or `msghdr`; otherwise only one guest
+  thread runs and signals arrive at trap exits, so nothing changes between the check and the
+  call. Calls on ranges there answer as for unavailable address space: `mmap` with a fixed
+  address ENOMEM, `mremap` to it EINVAL and from it EFAULT, `mprotect`, `pkey_mprotect`,
+  `madvise`, `msync`, `mlock` and `PR_SET_VMA` ENOMEM, `munmap` EINVAL; `mincore` is refused
+  for every range. A parent-tid pointer of `clone` there is ignored, as the kernel ignores
+  one it cannot write. The SDK channel's own copies (`process_vm_readv`/`writev` on itself)
+  refuse the region the same way; the program's `process_vm_*`, `ptrace`, `userfaultfd`,
+  `io_uring`, `shmat` and `rseq` are refused, and no `mem` file under `/proc` is reachable,
+  by path or through the `/proc/self/task` directory (names relative to it are policed as
+  `/proc/self/task/...`, and it cannot become the working directory: `fchdir` to it EACCES).
+  A signal frame that would land in the region (an alternate stack placed there) is SIGSEGV,
+  as for a frame the kernel cannot write. The runtime's own reads and writes of program memory go through its guest
+  copy (`guest.rs`), which refuses the region too, except reads of the calling thread's
+  runtime stack, where handlers keep arrays they built; a pointer the program passes never
+  reaches those, since the check refused the call first. Cost: a few comparisons per pointer,
+  and for iovecs and `msghdr`s one fault-safe read per entry; a call with no pointer pays a
+  slice-length test (`costs getppid` and `costs pipe` within run-to-run spread, EVIDENCE).
 - **The compute-point cell** is program memory outside the runtime's region, read and written
   by the runtime only through its fault-safe guest copy. A program that writes it changes only
   when its own process's next compute point comes and how many events it is charged (at most
   the value last written, so at most 2^22 ns per runtime entry), the same in every run; one that
-  unmaps or protects it ends the run `unsupported`, stop `compute-cell`.
+  unmaps or protects it ends the run `unsupported`, stop `compute-cell`. A system call that
+  writes it (a `read` into it) is such a write. The arm64 signal restorer page is program
+  memory too (read-execute, listed in `/proc/self/maps`): a call reading it reads its two
+  instructions, one writing it gets `EFAULT` as for any read-only page.
 
 Detected:
 - A program access that faults in the runtime's region (at a published address, in an unmapped
@@ -381,11 +420,12 @@ Detected:
   into the runtime's region therefore ends the run there, where natively its handler would run.
 
 Out of scope (a deliberate attack):
-- Finding the read-write mappings (reading the runtime's memory, or probing about 2^23 pages
-  of each window) and storing there. Storing into the runtime's own data and per-thread state
-  (its `.data`, and the base of its alternate stacks, which stay writable because the kernel
-  writes signal frames there): they sit at fixed addresses no program is given. Reading the
-  runtime's text and data is not detected.
+- Finding the read-write mappings (reading the runtime's memory with the program's own loads,
+  or probing about 2^23 pages of each window) and storing there. Storing into the runtime's
+  own data and per-thread state (its `.data`, and the base of its alternate stacks, which stay
+  writable because the kernel writes signal frames there): they sit at fixed addresses no
+  program is given. Reading the runtime's text and data with the program's own loads is not
+  detected (a system call cannot read them for it: above).
 - Pointing the stack pointer into the runtime's region before jumping to the stub, or
   `rt_sigreturn` through the stub with a forged frame.
 

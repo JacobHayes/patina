@@ -255,6 +255,9 @@ impl Waiter {
             }
             self.parked = true;
             again = true;
+            if !crate::guest::still_clear() {
+                return Got::Done(-e::EFAULT);
+            }
         }
     }
 
@@ -313,8 +316,16 @@ impl IovCursor {
             off: 0,
         }
     }
+    /// Entry `i`. The array is the runtime's own (`rw` builds one for `read` and `write`) or
+    /// the program's, read as guest memory: one it unmapped meanwhile reads as empty. A
+    /// program's array is never in the runtime's region (`guest::names_runtime`).
     fn at(&self, i: u64) -> [u64; 2] {
-        unsafe { *((self.iov + i * 16) as *const [u64; 2]) }
+        let p = self.iov + i * 16;
+        if crate::guest::in_region(p, 16) {
+            unsafe { *(p as *const [u64; 2]) }
+        } else {
+            crate::guest::get::<[u64; 2]>(p).unwrap_or([0, 0])
+        }
     }
     /// Skip `n` transferred bytes.
     pub fn advance(&mut self, mut n: u64) {

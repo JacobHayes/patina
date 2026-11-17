@@ -58,17 +58,17 @@ pub const ROWS: &[Row] = &[
         .outs(&[out(1, Len::Fixed(120))]),
     Row::new(G, nr::READLINK, Pass, A, LINK_R)
         .ins(&[out(0, Len::CStr)])
-        .outs(&[out(1, Len::Ret)]),
+        .outs(&[out(1, Len::Ret { max: 2 })]),
     Row::new(G, nr::READLINKAT, Pass, A, LINK_R)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
-        .outs(&[out(2, Len::Ret)]),
+        .outs(&[out(2, Len::Ret { max: 3 })]),
     Row::new(G, nr::GETDENTS64, Pass, A, DIRS)
         .fd(0)
-        .outs(&[out(1, Len::Ret)]),
+        .outs(&[out(1, Len::Ret { max: 2 })]),
     Row::new(G, nr::GETDENTS, Pass, A, DIRS)
         .fd(0)
-        .outs(&[out(1, Len::Ret)]),
+        .outs(&[out(1, Len::Ret { max: 2 })]),
     Row::new(G, nr::ACCESS, Pass, A, ACCESS).ins(&[out(0, Len::CStr)]),
     Row::new(G, nr::FACCESSAT, Pass, A, ACCESS)
         .fd(0)
@@ -130,23 +130,24 @@ pub const ROWS: &[Row] = &[
         .ins(&[out(1, Len::CStr), out(2, Len::Fixed(32))]),
     Row::new(G, nr::GETXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr), out(1, Len::CStr)])
-        .outs(&[out(2, Len::Ret)]),
+        .outs(&[out(2, Len::Ret { max: 3 })]),
     Row::new(G, nr::LGETXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr), out(1, Len::CStr)])
-        .outs(&[out(2, Len::Ret)]),
+        .outs(&[out(2, Len::Ret { max: 3 })]),
     Row::new(G, nr::LISTXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr)])
-        .outs(&[out(1, Len::Ret)]),
+        .outs(&[out(1, Len::Ret { max: 2 })]),
     Row::new(G, nr::LLISTXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr)])
-        .outs(&[out(1, Len::Ret)]),
+        .outs(&[out(1, Len::Ret { max: 2 })]),
     Row::new(G, nr::GETXATTRAT, Pass, A, XATTR_R)
         .fd(0)
-        .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
+        .ins(&[out(1, Len::CStr), out(3, Len::CStr)])
+        .refs(&[out(4, Len::XattrArgs { size: 5 })]),
     Row::new(G, nr::LISTXATTRAT, Pass, A, XATTR_R)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
-        .outs(&[out(3, Len::Ret)]),
+        .outs(&[out(3, Len::Ret { max: 4 })]),
     Row::new(G, nr::SETXATTR, Pass, A, XATTR_W).ins(&[
         out(0, Len::CStr),
         out(1, Len::CStr),
@@ -161,11 +162,12 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::LREMOVEXATTR, Pass, A, XATTR_W).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
     Row::new(G, nr::SETXATTRAT, Pass, A, XATTR_W)
         .fd(0)
-        .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
+        .ins(&[out(1, Len::CStr), out(3, Len::CStr)])
+        .refs(&[out(4, Len::XattrArgs { size: 5 })]),
     Row::new(G, nr::REMOVEXATTRAT, Pass, A, XATTR_W)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, nr::GETCWD, Pass, A, CWD).outs(&[out(0, Len::Ret)]),
+    Row::new(G, nr::GETCWD, Pass, A, CWD).outs(&[out(0, Len::Ret { max: 1 })]),
     Row::new(G, nr::CHDIR, Pass, A, CWD).ins(&[out(0, Len::CStr)]),
     Row::new(G, nr::FCHDIR, Pass, A, CWD).fd(0),
     Row::new(G, nr::UMASK, Pass, A, CWD),

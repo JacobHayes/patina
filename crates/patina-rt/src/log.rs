@@ -107,10 +107,10 @@ pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
             continue;
         }
         match b.len {
-            Len::Ret => hash_guest(&mut h, p, ret as u64),
+            Len::Ret { .. } => hash_guest(&mut h, p, ret as u64),
             Len::Arg(i) => hash_guest(&mut h, p, args[i as usize]),
             Len::Fixed(n) => hash_guest(&mut h, p, n as u64),
-            Len::RetTimes(n) => hash_guest(&mut h, p, ret as u64 * n as u64),
+            Len::RetTimes { size, .. } => hash_guest(&mut h, p, ret as u64 * size as u64),
             Len::ArgTimes { arg, size } => hash_guest(&mut h, p, args[arg as usize] * size as u64),
             Len::CStr => match crate::guest::strlen(p, 4096) {
                 Ok(n) => hash_guest(&mut h, p, n as u64),
@@ -144,6 +144,18 @@ pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
                     left -= n;
                 }
             }
+            // `refs` only (`proto::table::Row::ins` refuses them at compile time).
+            Len::Mmsg { .. }
+            | Len::Indirect { .. }
+            | Len::FdSet { .. }
+            | Len::SigPair
+            | Len::XattrArgs { .. }
+            | Len::Fcntl
+            | Len::Ioctl
+            | Len::Prctl
+            | Len::ArchPrctl
+            | Len::Futex
+            | Len::StrVec => {}
         }
     }
     h.finish()

@@ -20,6 +20,7 @@ use crate::state::{ctl, proc, thread, ThreadState};
 use proto::ctl::{
     Op, FORKED_PROCESS, HELLO_FORK, MAX_THREADS, SLOT_FREE, SLOT_RESERVED, WAIT_PARK, WAIT_REAPED,
 };
+use proto::layout::{RT_BASE, RT_REGION_END};
 
 pub const CLONE_VFORK: u64 = 0x4000;
 const CSIGNAL: u64 = 0xff;
@@ -476,6 +477,16 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         },
         nr::PRCTL => match call.arg(0) {
+            // PR_SET_VMA names mappings: the runtime's region holds none the program has (as
+            // for a hole, ENOMEM), and its own must keep their names.
+            0x5356_4d41
+                if call.arg(1) == 0
+                    && call.arg(3) != 0
+                    && call.arg(2) < RT_REGION_END
+                    && call.arg(2).saturating_add(call.arg(3)) > RT_BASE =>
+            {
+                -e::ENOMEM
+            }
             15 | 16 | 3 | 0x5356_4d41 => raw(call),
             // instruction channels: the timestamp-counter mode is virtual (the real one stays SIGSEGV).
             25 => {

@@ -437,10 +437,20 @@ fn has_dotdot(p: &[u8]) -> bool {
 
 /// The normalised absolute path for `(dirfd, p)`, when it can be policy-relevant.
 /// Relative paths without `..` stay relative to a directory the guest could only
-/// have opened outside `/proc` and `/sys` (directories there are never handed out).
+/// have opened outside `/proc` and `/sys`: the one directory there handed out,
+/// `/proc/self/task`, names its entries by its own path (so `<tid>/mem` is policed as
+/// `/proc/self/task/<tid>/mem`), and it can never be the working directory (`fchdir`).
 pub fn absolute(dirfd: i64, p: &[u8], out: &mut PathBuf) -> bool {
     if p.first() == Some(&b'/') {
         normalise(p, out);
+        return true;
+    }
+    if dirfd != AT_FDCWD && crate::sys::procfs::kind_of(dirfd) == Some(Synth::Task) {
+        let mut base = PathBuf::new();
+        if !(base.push(b"/proc/self/task/") && base.push(p)) {
+            return false;
+        }
+        normalise(base.as_bytes(), out);
         return true;
     }
     if p.is_empty() || !has_dotdot(p) {

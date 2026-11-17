@@ -97,25 +97,55 @@ pub enum Group {
     Sdk,
 }
 
-/// Length rule of a guest buffer named by an argument.
+/// Length rule of guest memory named by an argument. Every rule has an extent before the call
+/// (what the kernel may touch, checked against the runtime's region before the call is
+/// forwarded: rt `guest::check_call`) and, for `ins` and `outs`, an extent after it (what is
+/// hashed into the boundary record).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Len {
-    /// The return value, when positive.
-    Ret,
+    /// The return value, when positive; before the call, at most the value of argument `max`.
+    Ret { max: u8 },
     /// The value of argument `n`.
     Arg(u8),
     /// A fixed size, when the call succeeded.
     Fixed(u32),
-    /// The argument is an iovec array with the count in argument `cnt`; covers `ret` bytes in total.
+    /// The argument is an iovec array with the count in argument `cnt`; covers `ret` bytes in
+    /// total (before the call: the array and every segment).
     IovRet { cnt: u8 },
     /// A NUL-terminated string (input only).
     CStr,
-    /// The return value times a record size.
-    RetTimes(u32),
+    /// The return value times a record size; before the call, argument `max` records.
+    RetTimes { max: u8, size: u32 },
     /// The value of argument `arg` times a record size, when the call succeeded.
     ArgTimes { arg: u8, size: u32 },
-    /// The argument is a `struct msghdr`; its iovec array covers `ret` bytes in total.
+    /// The argument is a `struct msghdr`; its iovec array covers `ret` bytes in total (before
+    /// the call: the header, its name, iovec array, segments and control buffer).
     MsgIovRet,
+    // Rules used only in `refs` (checked before the call, not hashed):
+    /// An array of `struct mmsghdr`, the count in argument `cnt`; each one's message as
+    /// `MsgIovRet`.
+    Mmsg { cnt: u8 },
+    /// A buffer whose length is the `u32` the pointer in argument `lenp` points at (indirect)
+    /// (socket addresses with `socklen_t *`, `getsockopt`'s value).
+    Indirect { lenp: u8 },
+    /// An `fd_set` for the descriptor count in argument `nfds`.
+    FdSet { nfds: u8 },
+    /// `pselect6`'s `{ const sigset_t *, size_t }` pair and the set it points at.
+    SigPair,
+    /// `struct xattr_args` (`*xattrat`), its size in argument `size`, and the value it points at.
+    XattrArgs { size: u8 },
+    /// `fcntl`'s argument for the lock commands (`struct flock`).
+    Fcntl,
+    /// `ioctl`'s argument for the requests the runtime passes.
+    Ioctl,
+    /// `prctl`'s pointer argument for the options the runtime passes or answers.
+    Prctl,
+    /// `arch_prctl`'s argument for `ARCH_GET_FS` and `ARCH_GET_GS`.
+    ArchPrctl,
+    /// `futex`'s words and timeout for the operations that read them.
+    Futex,
+    /// A NULL-terminated array of string pointers and the strings (`execve`'s `argv`, `envp`).
+    StrVec,
 }
 
 /// A guest buffer: which argument holds the pointer and how long it is.
@@ -140,6 +170,10 @@ pub struct Row {
     pub outs: &'static [Out],
     /// Input buffers (hashed into `in_hash`).
     pub ins: &'static [Out],
+    /// Other guest memory the kernel reads or writes for the call (pointers inside structures,
+    /// optional arguments, request-dependent ones): checked before the call like `ins` and
+    /// `outs`, not hashed.
+    pub refs: &'static [Out],
     /// Bit `i` set: argument `i` is a descriptor; hidden numbers give `EBADF`.
     pub fds: u8,
     pub group: Group,
@@ -166,6 +200,7 @@ impl Row {
                 why,
                 outs: &[],
                 ins: &[],
+                refs: &[],
                 fds: 0,
                 group,
                 written: false,
@@ -184,17 +219,24 @@ impl Row {
             why,
             outs: &[],
             ins: &[],
+            refs: &[],
             fds: 0,
             group,
             written: true,
         }
     }
     pub const fn outs(mut self, outs: &'static [Out]) -> Row {
+        assert!(hashable(outs), "a refs-only length rule in outs");
         self.outs = outs;
         self
     }
     pub const fn ins(mut self, ins: &'static [Out]) -> Row {
+        assert!(hashable(ins), "a refs-only length rule in ins");
         self.ins = ins;
+        self
+    }
+    pub const fn refs(mut self, refs: &'static [Out]) -> Row {
+        self.refs = refs;
         self
     }
     /// Mark argument `i` as a descriptor.
@@ -214,11 +256,37 @@ impl Row {
             why: "No row written yet: the run ends as unsupported, naming the call.",
             outs: &[],
             ins: &[],
+            refs: &[],
             fds: 0,
             group: Group::Misc,
             written: false,
         }
     }
+}
+
+/// Whether every rule can be hashed after the call (the boundary record's `ins` and `outs`).
+const fn hashable(bufs: &[Out]) -> bool {
+    let mut i = 0;
+    while i < bufs.len() {
+        if matches!(
+            bufs[i].len,
+            Len::Mmsg { .. }
+                | Len::Indirect { .. }
+                | Len::FdSet { .. }
+                | Len::SigPair
+                | Len::XattrArgs { .. }
+                | Len::Fcntl
+                | Len::Ioctl
+                | Len::Prctl
+                | Len::ArchPrctl
+                | Len::Futex
+                | Len::StrVec
+        ) {
+            return false;
+        }
+        i += 1;
+    }
+    true
 }
 
 /// The `nr` of a row whose call the architecture lacks.
@@ -232,6 +300,7 @@ static UNKNOWN: Row = Row {
     why: "Not a syscall number known to the kernel headers: the run ends as unsupported.",
     outs: &[],
     ins: &[],
+    refs: &[],
     fds: 0,
     group: Group::Misc,
     written: false,
@@ -282,6 +351,7 @@ pub static SDK_ROW: Row = Row {
     // validated (a bad pointer or length must not be read here).
     outs: &[],
     ins: &[],
+    refs: &[],
     fds: 0,
     group: Group::Sdk,
     written: true,

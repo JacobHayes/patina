@@ -256,7 +256,12 @@ pub fn handle(call: &mut dyn Call) -> Action {
         }
         nr::FUTEX => futex(call),
         nr::CLONE => {
-            let [flags, stack, ptid, ctid, tls] = crate::arch::clone_args(args(call));
+            let [mut flags, stack, ptid, ctid, tls] = crate::arch::clone_args(args(call));
+            // The kernel ignores a parent-tid pointer it cannot write; one into the runtime's
+            // region reads as such (the kernel must not store the tid there).
+            if flags & thread::CLONE_PARENT_SETTID != 0 && crate::guest::in_region(ptid, 4) {
+                flags &= !thread::CLONE_PARENT_SETTID;
+            }
             // Threads here; fork (no CLONE_VM) and vfork (CLONE_VM|CLONE_VFORK): processes.
             if flags & thread::CLONE_VM == 0 || flags & super::proc::CLONE_VFORK != 0 {
                 return super::proc::clone_process(call, flags, stack, ptid, ctid, tls);

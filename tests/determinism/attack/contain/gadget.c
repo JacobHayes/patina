@@ -2,8 +2,11 @@
  * in the runtime's text, made by program code on its own stack, as through a corrupted
  * function pointer. Before the containment change it reached the real kernel: the host's
  * CLOCK_REALTIME and the real getrandom, neither recorded.
- *   gadget count   print how many such instructions the runtime's text holds
- *   gadget N       jump to the N-th, as clock_gettime(CLOCK_REALTIME), then as getrandom */
+ *   gadget count TEXT   print how many such instructions the runtime's text holds (TEXT: the
+ *                       text segment's size, from the runtime binary) and a hash of the text
+ *   gadget N TEXT       jump to the N-th, as clock_gettime(CLOCK_REALTIME), then as getrandom
+ * The text is read with plain loads (reading the runtime is not contained); a system call
+ * cannot read it for the program (`write(fd, text, 1)` is EFAULT, as for a hole). */
 #define _GNU_SOURCE
 #include <stdint.h>
 #include <stdio.h>
@@ -12,21 +15,20 @@
 #include <time.h>
 #include <unistd.h>
 static uint8_t *at[4096];
-static int find(void) {
+static uint64_t text_hash;
+static int find(size_t size) {
     uint8_t *t = (uint8_t *)0x600000000000ull;
-    int p[2], n = 0;
-    if (pipe(p)) return 0;
-    for (size_t pg = 0; pg < (8u << 20); pg += 4096) {
-        if (write(p[1], t + pg, 1) != 1) break; /* EFAULT: past the mapped text */
-        char c; read(p[0], &c, 1);
+    int n = 0;
+    uint64_t h = 0xcbf29ce484222325ull;
+    for (size_t i = 0; i < size; i++) h = (h ^ t[i]) * 0x100000001b3ull;
+    text_hash = h;
 #ifdef __x86_64__
-        for (size_t i = pg; i < pg + 4096; i++)
-            if (t[i] == 0x0f && t[i + 1] == 0x05 && n < 4096) at[n++] = t + i;
+    for (size_t i = 0; i + 1 < size; i++)
+        if (t[i] == 0x0f && t[i + 1] == 0x05 && n < 4096) at[n++] = t + i;
 #else
-        for (size_t i = pg; i < pg + 4096; i += 4)
-            if (*(uint32_t *)(t + i) == 0xd4000001 && n < 4096) at[n++] = t + i;
+    for (size_t i = 0; i + 4 <= size; i += 4)
+        if (*(uint32_t *)(t + i) == 0xd4000001 && n < 4096) at[n++] = t + i;
 #endif
-    }
     return n;
 }
 #ifdef __x86_64__
@@ -60,8 +62,9 @@ static long raw(uint8_t *g, long nr, long a, long b, long c) {
 }
 #endif
 int main(int argc, char **argv) {
-    int n = find();
-    if (argc < 2 || !strcmp(argv[1], "count")) { printf("%d\n", n); return 0; }
+    if (argc < 3) return 2;
+    int n = find(strtoul(argv[2], 0, 0));
+    if (!strcmp(argv[1], "count")) { printf("%d\n%016llx\n", n, (unsigned long long)text_hash); return 0; }
     int i = atoi(argv[1]);
     if (i < 0 || i >= n) { printf("no pair %d of %d\n", i, n); return 2; }
     struct timespec v, h = {0};

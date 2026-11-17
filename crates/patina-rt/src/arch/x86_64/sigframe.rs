@@ -223,6 +223,10 @@ pub fn deliver(
         // The kernel's "overflowed sigaltstack": the process gets SIGSEGV.
         die(SIGSEGV);
     }
+    if crate::guest::in_region(f, sp - f) {
+        // A frame the kernel could not write (the runtime's region reads as a hole): SIGSEGV.
+        die(SIGSEGV);
+    }
     charge_delivery(sig, handler, f, info, frame.gregs[RIP], frame.gregs[RSP]);
     unsafe {
         if src != 0 {

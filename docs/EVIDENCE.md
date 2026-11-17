@@ -78,6 +78,22 @@ Measured 2026-11-16 (reproducers in `tests/determinism/attack/contain`, regressi
 |---|---|
 | Per trap, `costs getppid` / `costs clock`, 2,000,000 calls, 5 runs each, before / after | 1.17 / 1.13 µs and 1.07 / 1.13 µs (means; within run-to-run spread) |
 | `mprotect` read-only then read-write of a shared memfd mapping (the rejected design), per pair | 1.95 µs (64 KiB), 1.30 µs (1 MiB, 1 page in 64 touched), 7.8 µs (1 MiB touched) |
+
+System call arguments into the runtime's region (ARCHITECTURE.md, "System call arguments").
+Measured 2026-11-17 on the x86_64 host above and the arm64 development VM (Apple M4, Ubuntu
+24.04, Linux 7.0); base `caa853bd`. Reproducer `ptrprobe` (30 calls, both directions, direct
+and inside iovecs and `msghdr`s, plus the memory calls, at 10 addresses across the region);
+regression `sandbox/11-containment`.
+
+| Check | Before | Now |
+|---|---|---|
+| `sandbox/11-containment`, dev VM: the old `gadget 0` (it found the runtime's mapped pages with `write(pipe, page, 1)`), seed 1, 30 runs | 2 digests, 8 runs in the minority: one page read lies in `state::PROC`, whose mount table holds the host's mount ids; CI `check-arm64` failed on it about one run in four | the same guest: `write` gets `EFAULT`, it finds nothing; 30 runs, one digest. The script (gadget now told the text's size, plus `ptrprobe`): 50 of 50 consecutive passes |
+| `ptrprobe` against the base build, dev VM, at the text, data and private memory | `write`, `writev`, `pwrite64`, ... return 16 (the kernel read runtime bytes out): 9 and 16 calls differ from a hole; at the alternate stacks the kernel's writes crash the runtime (`internal`, status 139) | every call answers what a native run of the same program answers at the same (natively unmapped) address and what it answers for a hole it made itself; no byte of the runtime's arrives; `munmap` EINVAL; a buffer running into the region `EFAULT`, nothing moved |
+| `/proc/self/task/TID/mem` opened through the task directory's descriptor, x86_64 | opened (read and write access to the runtime's memory) | `ENOENT`, as by path |
+| The check disabled (planted), x86_64 and dev VM | | `sandbox/11-containment` fails: the runtime crashes (status 139) |
+| `verify --runs 10 --vary cpu,aslr`, `ptrprobe` at 9 addresses | | identical on x86_64 and the dev VM |
+| x86_64 ledger (90 cells), dev VM ledger (90 cells, 60 with a result), base / now | | identical |
+| Per call, `costs getppid` / `costs pipe` (a 1-byte `write` and `read`), 2,000,000 iterations, 5 runs each minus `N=0`, base / now, two alternations | 1.08, 1.09 µs / 3.41, 3.35 µs | 1.11, 1.11 µs / 3.45, 3.37 µs (within run-to-run spread) |
 | W1-W9, `rs-net`, `tokio-echo`, `py-net`, `go-net`, seeds 1-2, before / after | 30/30 same outcome (`ok`); digests equal except where the program calls `execve` (W2, W4-W7): that record's first argument is the address of the path the runtime rewrote on its own stack, which moved 16 bytes; every other record equal |
 | `./check` every area but `evidence` and `nightly` | all pass but `procs/09-subprocess` and `runtimes/04-shell`, which fail the same way before the change on this host |
 

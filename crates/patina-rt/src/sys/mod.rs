@@ -46,6 +46,15 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
         }
         Class::Stop => stop(call, row),
         _ => {
+            // Memory the kernel would touch for the program (`Row::ins`, `outs`, `refs`),
+            // checked before anything reads it: the runtime's region reads as a hole.
+            let guest = call.guest_args();
+            if crate::guest::names_runtime(row, &guest) {
+                return Action::Return(-e::EFAULT);
+            }
+            let ts = call.thread();
+            ts.call_row = row as *const Row as u64;
+            ts.call_args = guest;
             // A path swap is made before the paths are resolved, so the walk sees it.
             let cfg = &ctl().faults.cfg;
             let swap = if cfg.any != 0 && cfg.path_swap() {
@@ -57,6 +66,7 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
             if let Some(s) = swap {
                 crate::swap::after(s);
             }
+            call.thread().call_row = 0;
             act
         }
     }

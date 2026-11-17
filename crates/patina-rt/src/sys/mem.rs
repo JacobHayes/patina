@@ -15,10 +15,14 @@ fn page_up(x: u64) -> u64 {
     x.wrapping_add(PAGE - 1) & !(PAGE - 1)
 }
 
-/// Does `[a, a+len)` touch the runtime's region?
+/// Does `[a, a+len)` touch the runtime's region? To the program the region is address space
+/// no mapping can occupy, as above the top of user space: nothing is placed there (`mmap`
+/// ENOMEM, `mremap` to it EINVAL), nothing is there to change (`mprotect`, `madvise`,
+/// `msync`, `mlock` ENOMEM, `mremap` from it EFAULT, `munmap` EINVAL), and a pointer into it
+/// is `EFAULT` (`guest::names_runtime`).
 fn hits_runtime(a: u64, len: u64) -> bool {
     let end = a.saturating_add(len);
-    end > RT_BASE && a < RT_REGION_END
+    len != 0 && end > RT_BASE && a < RT_REGION_END
 }
 
 /// Next address from the top-down cursor (never reused within an image).
@@ -118,8 +122,8 @@ fn brk(call: &mut dyn Call) -> i64 {
 
 fn mremap(call: &mut dyn Call) -> i64 {
     let [old, oldlen, newlen, flags, new, _] = args(call);
-    if hits_runtime(old, oldlen) {
-        return -e::EINVAL;
+    if hits_runtime(old, oldlen.max(1)) {
+        return -e::EFAULT;
     }
     if flags & MREMAP_FIXED != 0 {
         if hits_runtime(new, newlen) {
@@ -313,7 +317,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::MREMAP => {
             let (old, oldlen) = (call.arg(0), call.arg(1));
             let was = shared_at(old);
-            let prev = if hits_runtime(old, oldlen) {
+            let prev = if hits_runtime(old, oldlen.max(1)) {
                 None
             } else {
                 crate::oplog::on_mremap_before(old, oldlen)
@@ -337,7 +341,11 @@ pub fn handle(call: &mut dyn Call) -> Action {
         }
         nr::MUNMAP | nr::MPROTECT => {
             if hits_runtime(call.arg(0), call.arg(1)) {
-                -e::EINVAL
+                if call.nr() == nr::MUNMAP {
+                    -e::EINVAL
+                } else {
+                    -e::ENOMEM
+                }
             } else {
                 if call.nr() == nr::MUNMAP {
                     crate::oplog::on_munmap(call.arg(0), call.arg(1));
@@ -363,10 +371,10 @@ pub fn handle(call: &mut dyn Call) -> Action {
         }
         // mlock family: memory is never paged out from the guest's point of view.
         nr::MLOCK | nr::MUNLOCK | nr::MLOCK2 => {
-            if hits_runtime(call.arg(0), call.arg(1))
-                || (call.nr() == nr::MLOCK2 && call.arg(2) & !1 != 0)
-            {
+            if call.nr() == nr::MLOCK2 && call.arg(2) & !1 != 0 {
                 -e::EINVAL
+            } else if hits_runtime(call.arg(0), call.arg(1)) {
+                -e::ENOMEM
             } else {
                 set_class(call, Class::Virt);
                 0
@@ -396,7 +404,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         // pkey_mprotect with no key (pkey_alloc is refused, so the key is always -1).
         nr::PKEY_MPROTECT => {
             if hits_runtime(call.arg(0), call.arg(1)) {
-                -e::EINVAL
+                -e::ENOMEM
             } else {
                 let r = raw(call);
                 if r == 0 {
@@ -411,7 +419,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::MADVISE => {
             let [a, len, mut advice, ..] = args(call);
             if hits_runtime(a, len) {
-                -e::EINVAL
+                -e::ENOMEM
             } else if advice == MADV_COLLAPSE {
                 // Whether a synchronous collapse into huge pages succeeds (0) or not
                 // (EAGAIN) depends on the host's free huge pages and fragmentation. A kernel
