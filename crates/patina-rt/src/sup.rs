@@ -108,14 +108,6 @@ pub fn log_write_failed(r: i64, nr: u64) -> ! {
     host_error(r, nr, code)
 }
 
-/// End the run `unsupported`, stop `arm64-unported`: the run reached `part`
-/// (`proto::ctl::UNPORTED_*`), a mechanism not ported to this architecture yet.
-#[allow(dead_code)]
-pub fn unported(part: u64) -> ! {
-    call_sup_raw(Op::HostError, [part, 0, proto::ctl::HE_UNPORTED, 0, 0, 0]);
-    hang()
-}
-
 /// End the run `unsupported`, stop `signal-context`: a signal frame would hold the context
 /// record `magic`, which the runtime does not build (`proto::ctl::HE_SIGNAL_CONTEXT`).
 #[allow(dead_code)]

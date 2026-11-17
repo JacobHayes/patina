@@ -1,6 +1,7 @@
-//! Branch-counter preemption is not ported to arm64: the launcher refuses `--preempt branches`
-//! there, and a run that asks for it anyway ends `arm64-unported`. Without it every entry
-//! point here does nothing, as on x86_64 with counters off.
+//! Branch-counter preemption on arm64: none. No arm64 CPU's branch counting is checked exact,
+//! so the launcher refuses `--preempt branches` before any run (`launcher::pmu`), and every
+//! entry point here does nothing, as on x86_64 with counters off. A configuration that asks
+//! for counters anyway ends the run at setup (`Setup::Counters`), never runs without them.
 
 use crate::arch::Frame;
 use crate::state::{config, ThreadState};
@@ -16,12 +17,12 @@ impl Pmu {
 
 fn refuse_if_on() {
     if config().pmu & proto::ctl::PMU_ON != 0 {
-        crate::sup::unported(proto::ctl::UNPORTED_COUNTERS);
+        crate::fatal(proto::ctl::Setup::Counters, 0);
     }
 }
 
 pub fn sigtrap_entry() -> u64 {
-    crate::sup::unported(proto::ctl::UNPORTED_COUNTERS)
+    crate::fatal(proto::ctl::Setup::Counters, 0)
 }
 
 pub fn open(_ts: &mut ThreadState) {

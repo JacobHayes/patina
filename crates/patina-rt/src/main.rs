@@ -19,7 +19,7 @@ mod path;
 #[cfg(target_arch = "x86_64")]
 mod pmu;
 #[cfg(target_arch = "aarch64")]
-#[path = "arch/aarch64/standin/pmu.rs"]
+#[path = "arch/aarch64/pmu.rs"]
 mod pmu;
 mod raw;
 mod resolve;

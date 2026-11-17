@@ -833,6 +833,7 @@ setup_steps! {
     Panic = "runtime panic",
     PacKeys = "PR_PAC_SET_ENABLED_KEYS",
     RestorerPage = "cannot map the signal restorer page",
+    Counters = "branch counters are not supported on this architecture",
 }
 /// A real signal from outside the sandbox is pending (args[0] = the signal number).
 pub const HE_OUTSIDE_SIGNAL: u64 = 4;
@@ -874,12 +875,6 @@ pub const HE_CAPACITY: u64 = 11;
 /// The host filesystem holding the run directory is full: args[0] = errno, args[1] = syscall.
 pub const HE_DISK_FULL: u64 = 12;
 
-/// A mechanism the run reached that is not ported to this architecture yet: args[0] =
-/// `UNPORTED_*`. The run ends `unsupported`,
-/// stop `arm64-unported`, naming it. Sent only by the arm64 runtime while the port is under
-/// way: each stand-in goes when its mechanism is ported.
-pub const HE_UNPORTED: u64 = 13;
-
 /// A signal frame the runtime does not build: the trap frame (or, at `rt_sigreturn`, the
 /// program's frame) holds a context record outside those the runtime normalises (arm64:
 /// streaming SVE mode, the SME ZA array or ZT0 in use, FPMR, POE, GCS, an extra-context
@@ -899,23 +894,6 @@ pub fn signal_context_name(magic: u64) -> &'static str {
         0x4558_5401 => "an extra-context record (a frame larger than 4096 bytes of records)",
         _ => "a record of unknown kind",
     }
-}
-
-macro_rules! unported {
-    ($($v:ident = $n:literal: $s:literal),* $(,)?) => {
-        $(pub const $v: u64 = $n;)*
-        /// What an `HE_UNPORTED` stop reached, for its message.
-        pub fn unported_name(u: u64) -> &'static str {
-            match u {
-                $($n => $s,)*
-                _ => "an unknown part",
-            }
-        }
-    };
-}
-
-unported! {
-    UNPORTED_COUNTERS = 4: "branch-counter preemption",
 }
 
 macro_rules! limits {

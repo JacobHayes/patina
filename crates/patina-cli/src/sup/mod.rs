@@ -549,15 +549,6 @@ impl Sup {
                         ),
                     ));
                 }
-                if code == HE_UNPORTED {
-                    self.finish(Verdict::new(
-                        "arm64-unported",
-                        format!(
-                            "the run reached {}, which is not ported to arm64 yet",
-                            unported_name(errno)
-                        ),
-                    ));
-                }
                 if code == HE_SIGNAL_CONTEXT {
                     self.finish(Verdict::new(
                         "signal-context",
