@@ -402,6 +402,40 @@ What the numbers say:
   the follow-up that switches on memory another thread touched (race-directed points) is
   the next step for search; not built.
 
+### arm64
+
+The same hooks on Linux arm64: the SDKs' raw call is `svc #0`, Go's hook is
+`go/patina/compute/compute_arm64.s`. Seeds and digests are per architecture and per kind of
+host; nothing here is compared with x86_64. Hosts: the hosted runner (`ubuntu-24.04-arm`,
+Neoverse-N2, 4 CPUs, Linux 7.0, clang 18, gcc 13; build `c9f0a2ac`, guests built natively) and
+the development VM (Apple M4, 4 CPUs, Linux 7.0; the same build, clang, Rust and Go guests
+cross-built). 2026-11-17.
+
+| Check | Result |
+|---|---|
+| `compute/evidence-races`, seeds 1-200, stock / default `compute-gap` / `compute-gap=8`, runner | `races b` 0 / 0 / 30 (seed 3 replays identical); `pool` 0 / 1 / 113 (seeds 29 and 4); `rs-race` 0 / 0 / 8 (seed 17); `go-race` 0 / 0 / 102 (seed 2); stock `go-race` ends `compute-stall` on every seed (its spin barrier needs a spin probe, not ported to arm64 yet) |
+| The same on the VM | `races b` 0 / 0 / 30; `pool` 0 / 1 / 113; `rs-race` 0 / 0 / 6 (seed 2); `go-race` 0 / 0 / 102; every first failing seed replays identical |
+| `compute/evidence-deadline`, runner (204 s) | C: 40 of 40 `ok`, the handler 3,001 virtual ns after the 50 ms in every run, one deadline stop each; Go: 20 of 20 at the seed's gap (62 to 65 deadline stops), 20 of 20 at `compute-gap=0`; Rust: 20 of 20 at the seed's gap, 10 of 20 at `compute-gap=0` (the sleeper's wake-up is the seed's pick, as on x86_64); `verify --runs 20 --vary cpu,load,aslr,sandbox` identical for all three |
+| `compute/evidence-identity`, runner, `PATINA_BASE` = `70803a86` (compute points a stand-in): W1-W9, `c-threads`, `rs-threads`, `spinpoints flag`, stock `races b`, `pool`, a loop, seeds 1-3 | 45 of 45 the same digest and `result.json` (W4 and `spinpoints flag` end `compute-stall` in both builds: spin probes) |
+
+What compiles to what (disassembly of the guests above): every read-modify-write on memory is a
+load, an operation and a store. With clang and Rust a load hook and a store hook precede the
+load and the store, so a switch can fall between them, as on x86_64; gcc gives edges only and
+cannot. Atomics are never split: C `stdatomic` and Rust atomics compile, by default, to calls
+of the out-of-line helpers (`__aarch64_ldadd8_acq_rel` and its siblings, from libgcc or Rust's
+compiler-builtins), which are not rebuilt and choose an LSE instruction or an exclusive
+`ldaxr`/`stlxr` loop at run time (both hosts have LSE); with `-march=armv8.1-a` they are single
+`ldaddal`, `casal`, `swpal`, and with `-mno-outline-atomics` inline exclusive loops. Go's
+`sync/atomic` is assembly in the runtime, never instrumented. Every exclusive pair in the
+rebuilt `rs-race` (14) and `go-race` (413) has no call or `svc` before its store; clang and gcc
+test programs the same. An atomic load (`ldar`) gets a load hook before it, as a plain load does.
+
+Red/green (VM): the compute-point stand-in restored fails `compute/03-inert` (`arm64-unported`);
+`patina.h` without its arm64 call fails `sdk/01-languages` (C inert under Patina), and so do
+`patina.py` accepting only `x86_64` and the Rust SDK without its arm64 call; the Rust compute
+hooks without it fail `compute/05-rust` (no hello); `compute_arm64.s` that never reports the
+preemption mark fails `compute/06-go` (`boolspin` with one P livelocks).
+
 ## Costs
 
 | What | Cost |

@@ -390,7 +390,8 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   a program that reaches a part not ported yet ends the run `unsupported`, stop
-  `arm64-unported`, naming it (branch counters, spin probes). Threads, fork,
+  `arm64-unported`, naming it (branch counters); spin probes are not ported yet (a spin-wait
+  that needs one ends `compute-stall`). Threads, fork,
   vfork, exec and signals work as on x86_64 (the clone trampoline is in
   `arch/aarch64/thread.rs`); so do the instruction channels and pause points (above), and the
   four SDKs and compute points (the SDKs' raw call is `svc #0`; Go's hook is

@@ -5,8 +5,8 @@
 //! Patina the kernel answers `ENOSYS`; the first call learns that, and from then on every macro
 //! is a load and a branch. There are no dependencies and no build flags, and on any target but
 //! Linux x86_64 and aarch64 the crate compiles to the inert path, so code ships it
-//! unconditionally. It works in `no_std`. The feature `compute` (off by default) adds the hooks of compute points: see
-//! the module `compute`.
+//! unconditionally. It works in `no_std`. The feature `compute` (off by default) adds the
+//! hooks of compute points: see the module `compute`.
 //!
 //! ```
 //! fn commit(ledger: &mut Vec<u64>, entry: u64) {

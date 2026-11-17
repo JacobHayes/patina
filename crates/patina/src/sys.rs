@@ -89,8 +89,8 @@ fn hello() -> u8 {
         #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
         // SAFETY: write(2) of a static buffer to stderr.
         unsafe {
-            core::arch::asm!("svc #0", in("x8") 64u64, inlateout("x0") 2u64 => _, in("x1") m.as_ptr(),
-                in("x2") m.len(), options(nostack));
+            core::arch::asm!("svc #0", in("x8") 64u64, inlateout("x0") 2u64 => _,
+                in("x1") m.as_ptr(), in("x2") m.len(), options(nostack));
         }
         let _ = m;
     }

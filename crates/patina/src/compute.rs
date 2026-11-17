@@ -63,7 +63,7 @@ fn call(op: u64, arg: u64) -> i64 {
     // SAFETY: as above; the kernel preserves every register but x0.
     unsafe {
         core::arch::asm!("svc #0", in("x8") crate::sys::SYSCALL, inlateout("x0") op as i64 => r,
-            in("x1") arg, in("x2") 0, options(nostack));
+            in("x1") arg, in("x2") 0u64, options(nostack));
     }
     r
 }
