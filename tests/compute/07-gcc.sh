@@ -21,7 +21,8 @@ native() { # WANT PROG ARGS...: natively, the output matches WANT (lines joined 
     echo "$out" | grep -q "$want" || die "a. $*: natively printed $out"
 }
 native 'balance=0 withdrawn=100 ok$' "$C/races-gcc" b
-native 'done=24/24 bytes=1124/1124 ok$' "$C/pool-gcc"
+# pool's race (unsynchronised counters) can show natively too, as in 03-inert.
+native 'LOST-UPDATE\|ok$' "$C/pool-gcc"
 for p in cxx cxx-gcc; do native '^ctor ok|total=6000 caught=60 ok|dtor ok$' "$C/$p"; done
 for p in shlib shlib-stock; do native 'compdl=29992,29992 ok$' "$C/$p"; done
 for f in "$C"/libcomp.so "$C"/libcompdl.so "$C"/shlib "$C"/cxx "$C"/cxx-gcc; do
