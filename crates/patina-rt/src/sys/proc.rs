@@ -18,8 +18,7 @@ use super::thread::{CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_PARENT_SETTI
 use super::*;
 use crate::state::{ctl, proc, thread, ThreadState};
 use proto::ctl::{
-    Op, FORKED_PROCESS, HELLO_FORK, HELLO_VFORK, MAX_THREADS, SLOT_FREE, SLOT_RESERVED, WAIT_PARK,
-    WAIT_REAPED,
+    Op, FORKED_PROCESS, HELLO_FORK, MAX_THREADS, SLOT_FREE, SLOT_RESERVED, WAIT_PARK, WAIT_REAPED,
 };
 
 pub const CLONE_VFORK: u64 = 0x4000;
@@ -118,7 +117,7 @@ fn fork_child(call: &mut dyn Call, flags: u64, stack: u64, ctid: u64) -> i64 {
     let slot = proc().fork_slot as usize;
     if stack != 0 {
         if let Some(f) = call.frame() {
-            f.gregs[crate::trap::reg::RSP] = stack;
+            f.set_sp(stack);
         }
     }
     let ts = thread();
@@ -182,7 +181,7 @@ fn vfork(call: &mut dyn Call, flags: u64, stack: u64, ptid: u64, ctid: u64) -> i
     let Some(frame) = call.frame() else {
         return i64::MIN;
     };
-    let uc = frame as *mut crate::trap::TrapFrame as u64;
+    let uc = frame as *mut crate::arch::Frame as u64;
     super::thread::reclaim();
     let Some(slot) = super::thread::take_slot() else {
         return -e::EAGAIN;
@@ -233,12 +232,20 @@ fn vfork(call: &mut dyn Call, flags: u64, stack: u64, ptid: u64, ctid: u64) -> i
 
 /// First code of a vfork child after `thread::thread_start` (own alternate stack installed).
 /// It holds the turn already.
+#[cfg(target_arch = "x86_64")]
 pub fn vfork_child_start(uc2: u64) -> ! {
     let ts = thread();
     ts.pid = unsafe { sc0(nr::GETPID) } as i32;
     crate::sup::call_sup(
         Op::Hello,
-        [ts.pid as u64, ts.tid as u64, HELLO_VFORK, 0, 0, 0],
+        [
+            ts.pid as u64,
+            ts.tid as u64,
+            proto::ctl::HELLO_VFORK,
+            0,
+            0,
+            0,
+        ],
     );
     if ts.child_settid != 0 {
         // As the kernel: a pointer it cannot write is ignored (and never runtime memory).

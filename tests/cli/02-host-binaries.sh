@@ -2,7 +2,7 @@
 #    given by a relative host path (run from where they are, named by the path as given: the
 #    checks' directory is reached through a symlink), and `python3 -c` found on the guest
 #    PATH. Each is ok, its stdout as expected, its run directory under ./patina-out.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/host
 mkdir -p "$d"

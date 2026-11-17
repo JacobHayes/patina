@@ -25,7 +25,11 @@ for line in sys.stdin:
     m = json.loads(line)
     if m.get("reason") == "build-script-executed" and ("/patina-cli#" in m["package_id"] or "#patina-cli@" in m["package_id"]):
         print(m["out_dir"])')
-export RT_BIN="$out/rt-target/x86_64-unknown-none/release/patina-rt"
+case $(uname -m) in
+    aarch64) rt_target=aarch64-unknown-none-softfloat ;;
+    *) rt_target=x86_64-unknown-none ;;
+esac
+export RT_BIN="$out/rt-target/$rt_target/release/patina-rt"
 [ -f "$RT_BIN" ] || { echo "check: no runtime at $RT_BIN" >&2; exit 1; }
 set=$(sh tests/guests.sh)
 echo "== build: $(( $(date +%s) - t0 )) s (guests: $set)"

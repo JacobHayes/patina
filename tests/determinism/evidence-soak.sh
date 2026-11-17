@@ -1,7 +1,7 @@
 #!/bin/sh
 # Evidence (soak): one seed of W2, W6 and W9, faults on, DET_SOAK_RUNS times each
 # (default 1000) under load and parallel (8 sandboxes at once); the first divergence fails.
-#@ tier=evidence budget=1800 slots=8
+#@ tier=evidence budget=1800 slots=8 arch=x86_64
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 export PATINA_PARALLEL=8

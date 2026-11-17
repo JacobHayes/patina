@@ -192,6 +192,7 @@ pub fn classify(v: &Verdict) -> Classified {
             format!("the program called {d}, which Patina does not support"),
         ),
         "capacity" => Classified::new(Unsupported, "capacity", d),
+        "arm64-unported" => Classified::new(Unsupported, "arm64-unported", d),
         "log-limit" => Classified::new(Unsupported, "log-limit", d),
         "output-limit" => Classified::new(Unsupported, "output-limit", d),
         "timeout" => Classified::new(Timeout, "timeout", d),

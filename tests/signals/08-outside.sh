@@ -1,6 +1,6 @@
 # 8. A real SIGUSR1 sent from outside to the guest's host PID: outcome internal naming the
 # signal, and the guest's SIGUSR1 handler did not run.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-outside
 rm -rf "$o"

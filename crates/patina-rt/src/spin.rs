@@ -32,10 +32,10 @@
 //! `pmu.rs`): a guest that reads its own flags sees the trap flag, and one that reads its own
 //! code at the point sees the planted byte.
 
+use crate::arch::{reg::*, Frame};
 use crate::raw::*;
 use crate::state::{config, ctl, thread, ThreadState};
 use crate::sys::sig::SigInfo;
-use crate::trap::{reg::*, TrapFrame};
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
 use proto::ctl::{Op, SCHED_SPIN_PROBE};
 use proto::layout::*;
@@ -303,7 +303,7 @@ fn dirty_pages(out: &mut [u64]) -> Option<usize> {
 /// A runtime entry other than the spin point (`on_sigsys`, `on_fault`): a probe in progress
 /// ends without a trace, and the spin point stops being one.
 #[inline]
-pub fn enter(ts: &mut ThreadState, frame: Option<&mut TrapFrame>) {
+pub fn enter(ts: &mut ThreadState, frame: Option<&mut Frame>) {
     let s = &ts.spin;
     if s.phase == PH_NONE && s.point == 0 && s.over == 0 {
         return;
@@ -312,7 +312,7 @@ pub fn enter(ts: &mut ThreadState, frame: Option<&mut TrapFrame>) {
 }
 
 #[inline(never)]
-fn enter_slow(ts: &mut ThreadState, frame: Option<&mut TrapFrame>) {
+fn enter_slow(ts: &mut ThreadState, frame: Option<&mut Frame>) {
     if let Some(f) = frame {
         if ts.spin.phase != PH_NONE || ts.spin.over != 0 {
             f.gregs[EFL] &= !TF;
@@ -333,7 +333,7 @@ fn disarm(ts: &mut ThreadState) {
 }
 
 /// Every SIGTRAP first: probes, single steps and the spin point. True when handled.
-pub fn on_sigtrap(info: &SigInfo, frame: &mut TrapFrame) -> bool {
+pub fn on_sigtrap(info: &SigInfo, frame: &mut Frame) -> bool {
     let ts = thread();
     let code = (info[1] & 0xffff_ffff) as i32;
     let rip = frame.gregs[RIP];
@@ -387,12 +387,12 @@ pub fn on_sigtrap(info: &SigInfo, frame: &mut TrapFrame) -> bool {
     false
 }
 
-fn abort(ts: &mut ThreadState, frame: &mut TrapFrame) {
+fn abort(ts: &mut ThreadState, frame: &mut Frame) {
     ts.spin.phase = PH_NONE;
     frame.gregs[EFL] &= !TF;
 }
 
-fn start(ts: &mut ThreadState, frame: &mut TrapFrame) {
+fn start(ts: &mut ThreadState, frame: &mut Frame) {
     let c = ctl();
     bump(&c.sched.spin_probes, 1);
     if !resources() {
@@ -433,7 +433,7 @@ fn least_rotation(s: &[u64]) -> usize {
 }
 
 /// A single step of a probe finished.
-fn step(ts: &mut ThreadState, frame: &mut TrapFrame) {
+fn step(ts: &mut ThreadState, frame: &mut Frame) {
     frame.gregs[EFL] &= !TF;
     bump(&ctl().sched.spin_steps, 1);
     let rip = frame.gregs[RIP];
@@ -490,7 +490,7 @@ fn step(ts: &mut ThreadState, frame: &mut TrapFrame) {
     }
 }
 
-fn regs_of(frame: &TrapFrame) -> [u64; 18] {
+fn regs_of(frame: &Frame) -> [u64; 18] {
     let mut r = [0u64; 18];
     r.copy_from_slice(&frame.gregs[..18]);
     r[EFL] &= !(TF | RF);
@@ -498,7 +498,7 @@ fn regs_of(frame: &TrapFrame) -> [u64; 18] {
 }
 
 /// The FPU/SIMD state of the frame, without the kernel's software bytes (464..512).
-fn fp_of(frame: &TrapFrame) -> Option<&'static [u8]> {
+fn fp_of(frame: &Frame) -> Option<&'static [u8]> {
     if frame.fpstate == 0 {
         return Some(&[]);
     }
@@ -521,7 +521,7 @@ fn fp_equal(a: &[u8], b: &[u8]) -> bool {
 
 /// The thread is at the canonical position. Compare with the last checkpoint; on a fixed
 /// point, yield. Returns false when the probe ended (found or given up).
-fn checkpoint(ts: &mut ThreadState, frame: &mut TrapFrame) -> bool {
+fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) -> bool {
     let list = unsafe {
         core::slice::from_raw_parts_mut((SCRATCH + PAGES_LIST_OFF) as *mut u64, COPY_PAGES)
     };
@@ -596,7 +596,7 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut TrapFrame) -> bool {
 }
 
 /// A fixed point: the canonical position is a spin point from now on.
-fn found(ts: &mut ThreadState, frame: &mut TrapFrame) {
+fn found(ts: &mut ThreadState, frame: &mut Frame) {
     let c = ctl();
     bump(&c.sched.spin_found, 1);
     bump(&c.sched.spin_yields, 1);
@@ -607,7 +607,7 @@ fn found(ts: &mut ThreadState, frame: &mut TrapFrame) {
 }
 
 /// Yield at the spin point (the frame's `rip`), as at a trap; then keep it a spin point.
-fn spin_yield(ts: &mut ThreadState, frame: &mut TrapFrame, period: u64) {
+fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     let c = ctl();
     let point = frame.gregs[RIP];
     // A spin point is a runtime entry at a state that is the same in every run (it was found

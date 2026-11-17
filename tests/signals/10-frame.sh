@@ -3,7 +3,7 @@
 # normalisations: XSAVE in-use bits set for every AVX..PKRU component, and the bytes the
 # kernel leaves as stack garbage (sigcontext reserved1, legacy FXSAVE reserved, the padding
 # in uc_stack) zeroed.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-frame
 mkdir -p "$o"

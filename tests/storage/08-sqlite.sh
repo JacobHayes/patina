@@ -4,7 +4,7 @@
 # (under posix-strict it loses the last commit: the journal unlink is not made durable,
 # SQLite's documented reason for EXTRA, checked natively in docs/EVIDENCE.md). synchronous=OFF
 # is caught. fs-error-permille=5: never a corrupt database.
-#@ tier=area budget=60 slots=4
+#@ tier=area budget=60 slots=4 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 for m in ext4-ordered posix-strict; do
     for v in "wal full" "delete extra"; do

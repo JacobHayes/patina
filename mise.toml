@@ -22,7 +22,8 @@ run = [
   "cargo clippy --workspace --all-targets --locked -- -D warnings",
   # The SDK's off-by-default feature: the compute-point hooks.
   "cargo clippy -p patina-dst --all-targets --features compute --locked -- -D warnings",
-  # The runtime is its own workspace, built for its own target (its .cargo/config.toml).
-  "cd crates/patina-rt && cargo fmt -- --check && cargo clippy --release --locked -- -D warnings",
+  # The runtime is its own workspace, built for a bare target per architecture: both are
+  # linted on every host.
+  "cd crates/patina-rt && cargo fmt -- --check && cargo clippy --release --locked --target x86_64-unknown-none -- -D warnings && cargo clippy --release --locked --target aarch64-unknown-none-softfloat -- -D warnings",
   "./check quick",
 ]

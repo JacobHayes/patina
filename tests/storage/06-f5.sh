@@ -2,7 +2,7 @@
 # fs-short-permille=20 (about half the seeds reach it) must end at least one run
 # `iterate-failed` or `reopen-failed` on an UnexpectedEof, with fs-short injected in every
 # failing run of that group; the same seed without faults passes.
-#@ tier=quick budget=15
+#@ tier=quick budget=15 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f5
 "$PATINA" sweep --seeds 1..10 -j 4 --out "$o" --mount "$W/fjall-harness":/guest:copy --fault fs-short-permille=20 \

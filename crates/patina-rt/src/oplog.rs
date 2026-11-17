@@ -476,7 +476,7 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
         return; // not MAP_SHARED / MAP_SHARED_VALIDATE
     }
     let Some(st) = fstat_raw(fd) else { return };
-    if !path::is_work(st[0]) || st[3] & 0o170000 != 0o100000 {
+    if !path::is_work(st[0]) || proto::abi::stat::mode(&st) & 0o170000 != 0o100000 {
         return;
     }
     let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // F_GETFL
@@ -826,7 +826,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
         return 0;
     }
     let ino = st[1];
-    let dir = st[3] & 0o170000 == 0o040000;
+    let dir = proto::abi::stat::mode(&st) & 0o170000 == 0o040000;
     crate::inject::crash_point();
     if !dir {
         flush_ino(ino);
@@ -888,7 +888,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
 /// Before `close(fd)`: the inode, when it is a `/work` regular file.
 pub fn before_close(fd: i64) -> Option<u64> {
     let st = fstat_raw(fd)?;
-    (path::is_work(st[0]) && st[3] & 0o170000 == 0o100000).then_some(st[1])
+    (path::is_work(st[0]) && proto::abi::stat::mode(&st) & 0o170000 == 0o100000).then_some(st[1])
 }
 
 /// After a successful `close`: the `Close` record (the materialiser derives

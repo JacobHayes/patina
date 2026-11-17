@@ -9,7 +9,7 @@
 #   ENUM_DIR ENUM_CMD ENUM_OPTS  the guest directory, command and options (default the debug
 #                fjall harness with FJ_N=2000 --buggify)
 #   ENUM_JOBS    parallel children (default 6)
-#@ tier=evidence budget=1200 slots=6
+#@ tier=evidence budget=1200 slots=6 arch=x86_64
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_WORKLOADS:?}"
 seeds=${ENUM_SEEDS:-$(seq 1 20)}

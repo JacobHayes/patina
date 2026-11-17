@@ -1,6 +1,6 @@
 # Hazard: a ud2 the guest itself contains goes to the guest as SIGILL (only addresses in the
 # side table are emulated); the runtime's own code contains no rdtsc, rdtscp, rdrand or rdseed.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-guest-ud2
 patina_run "$o/ud2" 1 insn ud2 || true

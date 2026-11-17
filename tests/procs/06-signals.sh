@@ -1,6 +1,6 @@
 # 6. Cross-process signals: kill between siblings, kill to a process group, SIGTERM (default
 # action) killing a child blocked in read; the wait status shows the signal. Same as native.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-signals
 mkdir -p "$o"

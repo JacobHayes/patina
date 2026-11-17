@@ -21,27 +21,36 @@ updates the docs in the same commit.
 ## Layout
 
 - `crates/patina-proto`: what the runtime and supervisor agree on (no_std).
-- `crates/patina-rt`: the in-guest runtime, its own workspace, built for `x86_64-unknown-none`
-  by `crates/patina-cli/build.rs` and embedded in the binary.
+- `crates/patina-rt`: the in-guest runtime, its own workspace, built for the host's bare target
+  (`x86_64-unknown-none`, `aarch64-unknown-none-softfloat`) by `crates/patina-cli/build.rs` and
+  embedded in the binary. What differs by architecture (entry, the syscall stub, the signal
+  frame, the guest copy) is in `src/arch/<arch>/`; arm64 stand-ins for parts not ported yet
+  are in `src/arch/aarch64/standin/` and end the run `unsupported`, stop `arm64-unported`.
+- System call numbers by name: `proto::nr` (generated); structure layouts and flags that
+  differ by architecture: `proto::abi`.
 - `crates/patina-cli`: the `patina` binary: launcher, supervisor, CLI.
 - SDKs: `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`.
-- `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run.
+- `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run. A script marked
+  `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`); during the arm64
+  port each ported area loses its marks.
 - `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the nightly job.
 
-Host: Linux x86_64, `bwrap`, unprivileged user namespaces (`patina doctor` says what is
+Host: Linux x86_64 (arm64: a hello-sized slice so far), `bwrap`, unprivileged user namespaces (`patina doctor` says what is
 missing). rustup installs the pinned toolchain; mise supplies Go.
 
 ## Checks and landing
 
 - **Landing is `mise run check`**: `cargo fmt --check`, clippy with `-D warnings`, then
-  `./check quick`. Quick's budget is 5 minutes and it fails above 10. CI runs exactly this.
+  `./check quick`. Quick's budget is 5 minutes and it fails above 10. CI runs exactly this, on
+  x86_64 (`check`) and on arm64 (`check-arm64`).
   Land by pushing the branch; when CI is green, fast-forward `main`.
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
 - **Budgets are fixed by cutting.** Over budget, shrink a script or move it to `area`. Never
   raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
-- Every script declares `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N` and must
+- Every script declares `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N` (and
+  `arch=MACHINE` when it runs on one architecture only) and must
   fail on a planted break: show it red, then green.
 - `./check AREA` runs one area; `./check nightly` is the scheduled job
   (`testbeds/pubsub` at 200 seeds, not required); `./check list` shows every script.

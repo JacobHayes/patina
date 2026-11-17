@@ -1,6 +1,6 @@
 # 7. A thread sleeping 1 s in a loop forever: outcome liveness at --time-limit 100, in less
 # wall time than the 100 virtual seconds (no real wait).
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/07-liveness
 t0=$(date +%s%N)

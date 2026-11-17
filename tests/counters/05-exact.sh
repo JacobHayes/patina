@@ -5,7 +5,7 @@
 # preempt records (instruction pointer, N, register hash) and so the digests must be equal.
 # N = 3000 (counter period programmed per segment) on seven small programs, and N = 1,100,000
 # (the free-running period, overflows, rearm, landing) on two.
-#@ tier=area budget=200 slots=8
+#@ tier=area budget=200 slots=8 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys

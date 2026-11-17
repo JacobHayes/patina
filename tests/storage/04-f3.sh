@@ -4,7 +4,7 @@
 # percent reach it); the first liveness seed whose log shows the flush worker crash must
 # show all of that. The rate depends on the schedule and the guest build, so this is an area
 # check, not a quick one.
-#@ tier=area budget=30
+#@ tier=area budget=30 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 seeds=$(matches f3 'parked: .*wait=sleep deadline=' fjall-harness 1-100 -- --env FJ_N=1000 --buggify \
     --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --time-limit 400 --fault fs-error-permille=3 --crash machine:2 \

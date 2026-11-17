@@ -1,6 +1,6 @@
 # 7. Runtimes: Rust std::net, tokio multi-thread echo, Python socket+selectors, Go net
 #    listener+dialer in one process. Each ok and identical across 3 runs.
-#@ tier=area budget=90
+#@ tier=area budget=90 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-runtimes; mkdir -p "$o"
 check() {

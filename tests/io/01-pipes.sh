@@ -2,7 +2,7 @@
 #    writes continued), reader closes early (EPIPE), writer closes (EOF), FIFO opened by
 #    two threads in both orders. ok; verify --runs 4 --vary cpu,load identical (seed 1);
 #    at least 3 distinct digests over 8 seeds.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-pipes; mkdir -p "$o"
 want='A bytes=4604904 ok

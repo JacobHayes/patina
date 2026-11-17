@@ -1,5 +1,5 @@
 # 6. io_uring_setup (Deny) gives ENOSYS and the guest continues; ptrace (Stop) ends the run as unsupported naming it.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/06-unlisted
 patina_run "$out" 1 unlisted

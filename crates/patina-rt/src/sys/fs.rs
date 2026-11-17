@@ -20,8 +20,7 @@ const O_ACCMODE: u64 = 3;
 const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
 const O_TRUNC: u64 = 0o1000;
-const O_DIRECT: u64 = 0o40000;
-const O_DIRECTORY: u64 = 0o200000;
+use proto::abi::open::{O_DIRECT, O_DIRECTORY};
 const O_CLOEXEC: u64 = 0o2000000;
 const O_TMPFILE: u64 = 0o20000000 | O_DIRECTORY;
 const RENAME_EXCHANGE: u64 = 2;
@@ -155,10 +154,11 @@ pub fn after_mutation(op: &FsOp) {
 
 // ---- raw helpers ----
 
-pub type St = [u64; 18];
+use proto::abi::stat;
+pub use proto::abi::stat::Stat as St;
 
 pub fn fstatat_raw(dirfd: i64, p: u64, flags: u64) -> Option<St> {
-    let mut st: St = [0; 18];
+    let mut st: St = [0; stat::WORDS];
     let r = unsafe {
         sc4(
             nr::NEWFSTATAT,
@@ -172,13 +172,13 @@ pub fn fstatat_raw(dirfd: i64, p: u64, flags: u64) -> Option<St> {
 }
 
 pub fn fstat_raw(fd: i64) -> Option<St> {
-    let mut st: St = [0; 18];
+    let mut st: St = [0; stat::WORDS];
     let r = unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     (r == 0).then_some(st)
 }
 
 fn mode_of(st: &St) -> u32 {
-    st[3] as u32
+    stat::mode(st)
 }
 
 /// Virtual time key of an inode on a sandbox tmpfs.
@@ -193,7 +193,7 @@ pub fn vkey(st: &St) -> Option<u64> {
 fn touch(st: &Option<St>, w: Which) {
     if let Some((k, s)) = st.as_ref().and_then(|s| Some((vkey(s)?, s))) {
         vtime::touch(k, w);
-        vtime::names(k, if s[2] == 0 { s[0] } else { 0 });
+        vtime::names(k, if stat::nlink(s) == 0 { s[0] } else { 0 });
     }
 }
 
@@ -484,8 +484,8 @@ fn open(call: &mut dyn Call) -> i64 {
     }
     let st = fstat_raw(r);
     if let Some(s) = &st {
-        let rdev = s[5];
-        if s[3] as u32 & S_IFMT == 0o020000 {
+        let rdev = stat::rdev(s);
+        if stat::mode(s) & S_IFMT == 0o020000 {
             if rdev == RDEV_TTY
                 || rdev == RDEV_CONSOLE
                 || rdev == RDEV_PTMX
@@ -614,7 +614,7 @@ pub fn ident(dev: u64, ino: u64) -> Ident {
 
 const NS: u64 = 1_000_000_000;
 
-/// Rewrite a kernel `struct stat` (144 bytes) in guest memory.
+/// Rewrite a kernel `struct stat` (`proto::abi::stat`) in guest memory.
 pub fn rewrite_stat(p: u64) {
     let w = p as *mut u64;
     unsafe {
@@ -635,8 +635,8 @@ pub fn rewrite_stat(p: u64) {
             // sandbox's 1000 and every other id as the overflow id, so which host files read
             // as 1000 depends on who launched the run. Every host file reads as the overflow id.
             let ids = p as *mut u32;
-            *ids.add(7) = OVERFLOW_ID;
-            *ids.add(8) = OVERFLOW_ID;
+            *ids.add(stat::UID32) = OVERFLOW_ID;
+            *ids.add(stat::GID32) = OVERFLOW_ID;
         }
     }
 }
@@ -1118,7 +1118,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 let left = if mode_of(s) & S_IFMT == S_IFDIR {
                     0
                 } else {
-                    s[2].saturating_sub(1)
+                    stat::nlink(s).saturating_sub(1)
                 };
                 if left > 0 {
                     touch(&t, Which::Change);
@@ -1161,7 +1161,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             let flags = if nr == nr::RENAMEAT2 { a[4] } else { 0 };
             if let (Some(o), Some(v)) = (&before[0], &before[1]) {
                 let dir = mode_of(v) & S_IFMT == S_IFDIR;
-                if flags & RENAME_EXCHANGE == 0 && o[1] != v[1] && (dir || v[2] <= 1) {
+                if flags & RENAME_EXCHANGE == 0 && o[1] != v[1] && (dir || stat::nlink(v) <= 1) {
                     unnamed(&before[1]);
                 }
             }
@@ -1252,8 +1252,8 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
 fn meta_of(st: &St) -> Attr<'static> {
     Attr::Meta {
         mode: mode_of(st) & 0o7777,
-        uid: (st[3] >> 32) as u32,
-        gid: st[4] as u32,
+        uid: stat::uid(st),
+        gid: stat::gid(st),
     }
 }
 

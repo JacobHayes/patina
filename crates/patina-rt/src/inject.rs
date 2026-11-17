@@ -70,7 +70,7 @@ pub enum Who {
 fn fd_obj(fd: u64) -> Option<Obj> {
     let fd = fd as i32 as i64;
     let st = fstat_raw(fd)?;
-    let fmt = st[3] & S_IFMT;
+    let fmt = proto::abi::stat::mode(&st) as u64 & S_IFMT;
     if path::is_work(st[0]) {
         return Some(if fmt == S_IFREG { Obj::File } else { Obj::Path });
     }

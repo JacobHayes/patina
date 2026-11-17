@@ -55,7 +55,16 @@ fn perf_open(event: u64, tid: i32) -> io::Result<OwnedFd> {
 /// (`BR_INST_RETIRED.CONDITIONAL`, 0x01c4) the stops differed from those reached by stepping
 /// branch by branch, and one seed moved between CPUs gave a different digest each run; a run
 /// must not mean something different on another host. A seed run with counters reproduces
-/// on the same CPU family.
+/// on the same CPU family. No arm64 CPU is supported.
+#[cfg(not(target_arch = "x86_64"))]
+fn event() -> Result<u64, String> {
+    Err(format!(
+        "{} (branch counters are not supported on this architecture)",
+        std::env::consts::ARCH
+    ))
+}
+
+#[cfg(target_arch = "x86_64")]
 fn event() -> Result<u64, String> {
     let r = std::arch::x86_64::__cpuid(0);
     let mut v = [0u8; 12];

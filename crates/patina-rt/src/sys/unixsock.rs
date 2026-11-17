@@ -511,7 +511,8 @@ fn listed_opt(get: bool, level: u64, name: u64) -> bool {
 
 /// A socket option call on a descriptor that is not a socket goes to the kernel (ENOTSOCK).
 fn is_socket(fd: u64) -> bool {
-    super::fs::fstat_raw(fd as i32 as i64).is_some_and(|st| st[3] as u32 & 0o170000 == 0o140000)
+    super::fs::fstat_raw(fd as i32 as i64)
+        .is_some_and(|st| proto::abi::stat::mode(&st) & 0o170000 == 0o140000)
 }
 
 pub fn handle(call: &mut dyn Call) -> Action {

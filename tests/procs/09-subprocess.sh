@@ -1,6 +1,6 @@
 # 9. subprocess from CPython: Popen with pipes, communicate, check_output of a shell pipeline,
 # run, check_call failing, a missing program. ok, identical, same output as native.
-#@ tier=area budget=60
+#@ tier=area budget=60 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-subprocess
 mkdir -p "$o"

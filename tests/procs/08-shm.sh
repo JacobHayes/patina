@@ -1,7 +1,7 @@
 # 8. Shared-memory futex across fork: a process-shared pthread mutex and condition variable in
 # MAP_SHARED|MAP_ANONYMOUS memory, and a POSIX semaphore in /dev/shm. ok, identical runs, the
 # values right (the guest checks its own invariants and exits 1 otherwise), several seeds.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-shm
 for seed in 1 2 3; do

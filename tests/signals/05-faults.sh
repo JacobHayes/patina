@@ -1,6 +1,6 @@
 # 5. Faults forwarded to guest handlers (si_addr, faulting rip, recovery by siglongjmp), and
 # the default action: death by the signal, seen by the launcher as guest.signal in result.json.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 patina_run "$RUNS/05-faults/handled" 1 sig-fault handled
 check_ok "$RUNS/05-faults/handled" sig-fault

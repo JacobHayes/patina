@@ -10,7 +10,7 @@
 #  d. go-race (check-then-act on an atomic.Int64, no system call in the window) ends `failure`
 #     on at least one of seeds 1-40 at compute-gap=8, every other seed `ok`; the first failing
 #     seed replays identical; result.json names one image, kind compare; an atomic.Bool spin (go-race boolspin) ends `ok`.
-#@ tier=quick budget=8 slots=5
+#@ tier=quick budget=8 slots=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-go
 mkdir -p "$o"

@@ -18,7 +18,8 @@ patina (patina-cli)
 
 Three crates: `patina-proto` (no_std; everything the runtime and the supervisor must agree
 on: layouts, the syscall table, records, the fault and SDK wire), `patina-rt` (the runtime,
-no_std, built for `x86_64-unknown-none`) and `patina-cli` (the `patina` binary). The SDK
+no_std, built for the host's bare target: `x86_64-unknown-none` or
+`aarch64-unknown-none-softfloat`) and `patina-cli` (the `patina` binary). The SDK
 crate `crates/patina` is separate and has no dependencies. `patina-cli/build.rs` builds the
 runtime and embeds it; at run time it is written once to `~/.cache/patina/rt-<hash>` and
 executed from there (`launch.rs`).
@@ -28,7 +29,8 @@ executed from there (`launch.rs`).
 The runtime is started by `execveat` with the program's path. It loads the program itself
 (`loader.rs`: static or dynamic, its own stack and auxiliary vector, a seeded `AT_RANDOM`, no
 vDSO), then installs a seccomp filter that traps every system call but those made by the
-runtime's one `syscall` instruction (`entry.rs`, `raw.rs`). Each trap lands in the runtime's SIGSYS handler: look up the
+runtime's one system-call instruction (`syscall`; `svc #0` on arm64) (`entry.rs`, `raw.rs`,
+`arch/`). Each trap lands in the runtime's SIGSYS handler: look up the
 call's row, decide faults, do the call, write the boundary record, return.
 
 `execve` loads the runtime again with the new program (`exec.rs`); `fork` is real
@@ -318,9 +320,10 @@ Enforced:
 - **The stub.** It checks after the call that it ran on a runtime stack (every runtime stack
   lies in the runtime's region; a program cannot map there). Program code that jumps to the
   stub runs on its own stack: the call reaches the kernel once, and the stub stops at `ud2`
-  before any program code sees the result; the fault entry ends the run. A call that does not
-  return (`exit_group`, a successful `execve`, `rt_sigreturn`) is not stopped by the check;
-  an accidental jump makes one of those with the slim chance that `rax` holds its number.
+  (`udf` on arm64) before any program code sees the result; the fault entry ends the run. A
+  call that does not return (`exit_group`, a successful `execve`, `rt_sigreturn`) is not
+  stopped by the check; an accidental jump makes one of those with the slim chance that `rax`
+  (`x8`) holds its number.
 - **The control region and the boundary log.** Their published addresses
   (`proto::layout::CTL_ADDR`, `LOG_ADDR`) are inaccessible reservations. The runtime maps them
   read-write at addresses drawn from the host at each image start (`state::map_shared`), which
@@ -355,8 +358,14 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 
 ## Limits
 
-- **Linux x86_64 only.** No macOS, no arm64. bwrap and unprivileged user namespaces are
-  required.
+- **Linux x86_64; arm64 is being ported.** No macOS. bwrap and unprivileged user namespaces
+  are required. On arm64 (Linux 6.12 or later) a static program whose calls are those of a
+  small hello runs and reproduces; anything else ends the run `unsupported`, stop
+  `arm64-unported`, naming the call or the part reached (signals to the program, threads,
+  fork and exec, branch counters, spin probes, compute points, `RNDR`). The runtime disables
+  the pointer-authentication keys before anything else (`arch/aarch64`), and
+  `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`, `CNTFRQ_EL0`) fault, answered
+  from virtual time. Seeds and digests are per architecture.
 - **A seed reproduces for the same program binary and the same Patina build, on the same kind
   of host.** `run.json` records both binaries' SHA-256 (`patina` is the version and the hash of
   the `patina` binary); replay, minimize and `run --config RUNDIR/run.json` refuse a run whose

@@ -1,6 +1,6 @@
 # 6. `patina doctor` exits 0 on this host with every required check ok; with no bwrap on PATH
 #    it exits with the `error` status and names the package that provides it.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 st=0
 timeout 60 "$PATINA" doctor --format json >"$RUNS/doctor.json" 2>"$RUNS/doctor.err" || st=$?

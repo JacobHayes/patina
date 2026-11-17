@@ -2,7 +2,7 @@
 # every class, identical across 4 runs of a seed, and no failed call left an effect
 # (a close that returned EIO still closed the descriptor); fs-error-at=write:7 fails
 # exactly the 7th write and the file proves it was not made.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/03/tally
 verify "$o" 5 4 "" --fault fs-error-permille=100 -- /guest/io-errors tally

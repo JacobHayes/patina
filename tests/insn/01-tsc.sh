@@ -1,7 +1,7 @@
 # 1a. rdtsc and rdtscp 1,000 times interleaved with clock_gettime: values strictly increase,
 # lie between the surrounding clock reads (3 ticks per virtual ns), rdtscp's aux is 0; identical
 # over 3 runs varying the core. A guest that asks for PR_TSC_SIGSEGV gets the signal.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-tsc
 verify "$o/v" 1 3 insn tsc

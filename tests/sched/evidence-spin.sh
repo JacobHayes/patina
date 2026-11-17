@@ -11,7 +11,7 @@
 #  c. Cost of pause points: W1-W9, seeds 1-5, faults off, --cpus 4, one run at a time pinned
 #     to one core: median wall_ms with pause points off and on, and of a build without them
 #     when PATINA_BASE names one (its scanner does not look for `pause`).
-#@ tier=evidence budget=1800 slots=8
+#@ tier=evidence budget=1800 slots=8 arch=x86_64
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${PATINA_WORKLOADS:?}" "${RUNS:?}"

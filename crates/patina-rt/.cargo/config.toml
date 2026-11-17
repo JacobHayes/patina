@@ -1,6 +1,9 @@
-[build]
-target = "x86_64-unknown-none"
+# The runtime is built for the bare target of the host's architecture, chosen by the caller
+# (`crates/patina-cli/build.rs`, `./check`, `mise run check`): `--target` is always given.
 
-[target.x86_64-unknown-none]
 # Position-independent code (the image sits far above 2 GiB) in a non-PIE link at a fixed base.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=pic"]
+
+[target.aarch64-unknown-none-softfloat]
 rustflags = ["-C", "relocation-model=pic"]

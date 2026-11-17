@@ -1,7 +1,7 @@
 # 5. A run from ./patina.toml with no flags equals the same run given only flags (from the same
 #    directory: a program runs from where it is): run.json is equal, and so are the digests.
 #    An unknown key is refused, naming it.
-#@ tier=quick budget=5
+#@ tier=quick budget=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 # The program, a mounted data directory, the configuration file, and an empty one that the
 # flags run names instead.

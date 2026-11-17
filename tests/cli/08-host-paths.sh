@@ -4,7 +4,7 @@
 #    of it. A file or program the guest looks for that the sandbox lacks and the host has is named
 #    in result.json with a directory to mount, and mounting it makes the run pass; a program
 #    run by name is named with where the host's PATH has it.
-#@ tier=quick budget=5
+#@ tier=quick budget=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/paths
 mkdir -p "$d/real/bin" "$d/proj" "$d/data" "$d/hostbin"

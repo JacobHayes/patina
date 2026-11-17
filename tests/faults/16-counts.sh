@@ -2,7 +2,7 @@
 # to act on shows eligible 0 (the net preset on a guest without sockets), while the disk
 # classes on the same guest count eligible calls and every injected fault. With crashes on,
 # a run whose operation log was corrupted (test hook PATINA_TEST_OPLOG_CORRUPT) ends internal.
-#@ tier=quick budget=15
+#@ tier=quick budget=15 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/16
 run "$d/counts" 1 --faults disk,net --fault fs-error-permille=50 -- /guest/io-errors tally

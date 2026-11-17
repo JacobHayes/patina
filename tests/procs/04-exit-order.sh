@@ -1,7 +1,7 @@
 # 4. Exit ordering: 50 children write to one pipe and exit; the parent reads to EOF, then waits.
 # The (pid, status) sequence and the bytes read are identical across runs; the SIGCHLD handler
 # reaps (and so counts) exactly 50.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-exit-order
 for seed in 1 2 3; do

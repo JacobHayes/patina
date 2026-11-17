@@ -12,7 +12,7 @@
 #     run stopped before "done" (set -e) with a tool's error on stderr; at least one run failed
 #     that way.
 #  f. >= 3 distinct digests over 4 seeds.
-#@ tier=area budget=150 slots=4
+#@ tier=area budget=150 slots=4 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 S=shell-pipeline
 FAULT="--fault fs-error-permille=10"

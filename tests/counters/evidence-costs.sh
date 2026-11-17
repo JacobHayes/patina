@@ -2,7 +2,7 @@
 # overhead (getppid loop, off/on), per-preemption cost (compute loops: extra wall per stop),
 # W1-W9 end-to-end wall off/on (median of 3). Writes $RUNS/07/costs.tsv. Measurement: fails
 # only if a run is not ok.
-#@ tier=evidence budget=1200 slots=1
+#@ tier=evidence budget=1200 slots=1 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys

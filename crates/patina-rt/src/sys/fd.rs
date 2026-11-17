@@ -51,7 +51,7 @@ const F_DUPFD_CLOEXEC: u64 = 1030;
 const F_SETPIPE_SZ: u64 = 1031;
 /// Pipe capacity set at creation, so the host's pipe limits are not an input.
 const PIPE_SIZE: u64 = 65_536;
-const O_DIRECT: u64 = 0o40000;
+use proto::abi::open::O_DIRECT;
 
 /// Requests whose answer is a function of the file on a sandbox or host-stable filesystem.
 const FILE_IOCTLS: [u64; 6] = [
@@ -225,7 +225,14 @@ fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
     let Some(st) = fstat_raw(fd) else { return };
     if let Some(k) = vkey(&st) {
         vtime::touch(k, Which::Modify);
-        vtime::names(k, if st[2] == 0 { st[0] } else { 0 });
+        vtime::names(
+            k,
+            if proto::abi::stat::nlink(&st) == 0 {
+                st[0]
+            } else {
+                0
+            },
+        );
     }
     if crate::path::is_work(st[0]) {
         // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.
@@ -330,7 +337,7 @@ fn splice(call: &mut dyn Call) -> i64 {
         } else {
             None
         };
-        if fstat_raw(out).is_some_and(|st| st[3] as u32 & 0o170000 == 0o100000) {
+        if fstat_raw(out).is_some_and(|st| proto::abi::stat::mode(&st) & 0o170000 == 0o100000) {
             wrote(out, off, r, Data::InFile(out));
         }
     }

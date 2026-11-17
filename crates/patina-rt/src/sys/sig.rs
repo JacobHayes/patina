@@ -11,9 +11,9 @@
 //! "anything deliverable?" at every trap exit without a round trip.
 
 use super::*;
+use crate::arch::Frame;
 use crate::sigframe;
 use crate::state::{ctl, thread, ThreadState};
-use crate::trap::{reg::*, TrapFrame};
 use proto::ctl::{Op, NO_DEADLINE, REP_DELIVER_MASK, SIGK_DEFAULT, SIGK_HANDLER, SIGK_IGNORE};
 
 pub const SIGILL: u64 = 4;
@@ -259,7 +259,7 @@ pub fn set_altstack(ts: &mut ThreadState, v: [u64; 3], sp: u64) -> i64 {
 fn sigaltstack(call: &mut dyn Call) -> i64 {
     let [ss, oss, ..] = args(call);
     let sp = match call.frame() {
-        Some(f) => f.gregs[RSP],
+        Some(f) => f.sp(),
         None => return i64::MIN,
     };
     let ts = call.thread();
@@ -681,8 +681,8 @@ fn restart_class(nr: u64) -> Option<i64> {
 }
 
 /// A handler is about to run: an interrupted call returns `EINTR` or restarts (`SA_RESTART`).
-fn resolve_for_handler(frame: &mut TrapFrame, nr: u64, flags: u64) {
-    let r = frame.gregs[RAX] as i64;
+fn resolve_for_handler(frame: &mut Frame, nr: u64, flags: u64) {
+    let r = frame.ret();
     if !is_restart(r) {
         return;
     }
@@ -692,26 +692,24 @@ fn resolve_for_handler(frame: &mut TrapFrame, nr: u64, flags: u64) {
         _ => false,
     };
     if restart {
-        frame.gregs[RAX] = nr;
-        frame.gregs[RIP] -= 2;
+        frame.restart_after_result(nr);
     } else {
-        frame.gregs[RAX] = (-e::EINTR) as u64;
+        frame.set_ret(-e::EINTR);
     }
 }
 
 /// No handler ran: an interrupted call restarts (through `restart_syscall` when it has a
 /// restart block).
-fn resolve_without_handler(frame: &mut TrapFrame, nr: u64) {
-    let r = frame.gregs[RAX] as i64;
+fn resolve_without_handler(frame: &mut Frame, nr: u64) {
+    let r = frame.ret();
     if !is_restart(r) {
         return;
     }
-    frame.gregs[RAX] = if -r == ERESTART_RESTARTBLOCK {
+    frame.restart_after_result(if -r == ERESTART_RESTARTBLOCK {
         nr::RESTART_SYSCALL
     } else {
         nr
-    };
-    frame.gregs[RIP] -= 2;
+    });
 }
 
 /// End the process as killed by `sig` (default action "terminate").
@@ -725,7 +723,7 @@ pub fn die(sig: u64) -> ! {
 
 /// Act on one dequeued signal. Returns true if a handler frame was built.
 pub fn act_on(
-    frame: &mut TrapFrame,
+    frame: &mut Frame,
     ts: &mut ThreadState,
     sig: u64,
     info: &SigInfo,
@@ -754,12 +752,12 @@ pub fn act_on(
 /// one, as the kernel's exit-to-user loop does), then resolve an interrupted call that
 /// ran no handler. `nr` is the syscall that trapped (None for faults, emulated
 /// instructions and `rt_sigreturn`).
-pub fn trap_exit(frame: &mut TrapFrame, nr: Option<u64>) {
+pub fn trap_exit(frame: &mut Frame, nr: Option<u64>) {
     let ts = thread();
     let nr = nr.filter(|&n| n != nr::RT_SIGRETURN);
     if let Some(code) = nr.and_then(restart_class) {
-        if frame.gregs[RAX] as i64 == -e::EINTR {
-            frame.gregs[RAX] = (-code) as u64;
+        if frame.ret() == -e::EINTR {
+            frame.set_ret(-code);
         }
     }
     let mut handled = false;

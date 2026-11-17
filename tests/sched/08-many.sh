@@ -1,6 +1,6 @@
 # 8. 5,000 threads created and joined in batches of 50: ok, no slot or memory exhaustion,
 #    the printed tids are identical across two runs.
-#@ tier=area budget=60
+#@ tier=area budget=60 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 for rep in a b; do
     out=$RUNS/08-many/$rep

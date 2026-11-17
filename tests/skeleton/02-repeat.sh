@@ -1,6 +1,6 @@
 # 2. patina verify --seed 1 --runs 4 --vary cpu,aslr,sandbox exits 0 for each guest; independently:
 #    one digest and one stdout over the run directories.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 for g in $GUESTS; do
     out=$RUNS/02-repeat/$g

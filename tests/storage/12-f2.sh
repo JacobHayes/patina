@@ -6,7 +6,7 @@
 # journal/entry.rs. The window lies about 1,700
 # points into a seed (docs/EVIDENCE.md, "Crash-point enumeration"), several minutes of runs,
 # so this is a nightly check. F2_N sets FJ_N (a short journal holds no straddling batch: red).
-#@ tier=nightly budget=400 slots=6
+#@ tier=nightly budget=400 slots=6 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f2
 timeout 1200 "$PATINA" sweep -j 6 --seeds 1..2 --branch --crash machine --buggify \

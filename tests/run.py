@@ -9,8 +9,9 @@
 An area is a directory under tests/ holding check scripts (`*.sh` directly in it); guests/
 holds the guests' sources.
 
-A script declares itself in a line `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N`
-(defaults: tier=area, budget 120 s, slots 1; slots = sandboxes it runs at once). Scripts run in
+A script declares itself in a line `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N
+arch=MACHINE` (defaults: tier=area, budget 120 s, slots 1, every architecture; slots = sandboxes
+it runs at once; arch = the only `uname -m` it runs on, the others skip it and count it). Scripts run in
 parallel, at most CHECK_SLOTS sandboxes at once (default half the CPUs, at least 8), longest
 budget first. Each gets a
 private RUNS directory; a script still running at its budget is killed and fails, as does one
@@ -21,6 +22,7 @@ The tier total is printed; quick fails above QUICK_CEILING s (600), an area abov
 above 600 s.
 """
 import os
+import platform
 import signal
 import subprocess
 import sys
@@ -51,7 +53,8 @@ def scripts():
                         meta.update(kv.split("=", 1) for kv in line[2:].split())
             tier = meta["tier"]
             out.append({"area": area, "name": f[:-3], "path": os.path.join(d, f), "tier": tier,
-                        "budget": int(meta.get("budget", DEFAULTS[tier])), "slots": int(meta["slots"])})
+                        "budget": int(meta.get("budget", DEFAULTS[tier])), "slots": int(meta["slots"]),
+                        "arch": meta.get("arch")})
     return out
 
 
@@ -77,9 +80,15 @@ def main():
     allsc = scripts()
     if args[0] == "list":
         for s in allsc:
-            print(f"{s['tier']:9} {s['budget']:5} s  slots {s['slots']}  {s['area']}/{s['name']}")
+            arch = f"  arch {s['arch']}" if s["arch"] else ""
+            print(f"{s['tier']:9} {s['budget']:5} s  slots {s['slots']}  {s['area']}/{s['name']}{arch}")
         return 0
     tier, sel = select(args, allsc)
+    machine = platform.machine()
+    skipped = [s for s in sel if s["arch"] not in (None, machine)]
+    sel = [s for s in sel if s not in skipped]
+    if skipped:
+        print(f"== {len(skipped)} scripts skipped: marked for another architecture than {machine}", flush=True)
     if not sel:
         sys.exit(f"no scripts for {' '.join(args)}")
     label = "-".join(a.lower() for a in args)[:40]

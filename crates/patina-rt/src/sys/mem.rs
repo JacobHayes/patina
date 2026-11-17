@@ -173,7 +173,7 @@ fn mmap(call: &mut dyn Call) -> i64 {
         } else {
             // A shared file mapping: the file's identity (tmpfs inode numbers are
             // a function of creation order).
-            let mut st = [0u64; 18];
+            let mut st = [0u64; proto::abi::stat::WORDS];
             if unsafe { sc2(nr::FSTAT, fd, st.as_mut_ptr() as u64) } != 0 {
                 return r;
             }

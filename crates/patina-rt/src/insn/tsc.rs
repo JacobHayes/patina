@@ -4,10 +4,10 @@
 //! (the kernel's CPU number in `TSC_AUX`) is 0. Each emulation is a boundary event charged like a
 //! trap; no supervisor round trip unless the usual preemption draw fires.
 
+use crate::arch::{reg::*, Frame};
 use crate::entry::{charge, maybe_yield};
 use crate::state::{ctl, thread};
 use crate::sys::sig::{self, SigInfo};
-use crate::trap::{reg::*, TrapFrame};
 use core::sync::atomic::Ordering::Relaxed;
 use proto::ctl::{INSN_RDTSC, INSN_RDTSCP};
 
@@ -36,7 +36,7 @@ pub fn set_virtual_mode(m: u64) -> bool {
     true
 }
 
-pub fn try_emulate(frame: &mut TrapFrame, sig: i32, info: &SigInfo) -> bool {
+pub fn try_emulate(frame: &mut Frame, sig: i32, info: &SigInfo) -> bool {
     if VMODE.load(Relaxed) == 2 {
         return false;
     }

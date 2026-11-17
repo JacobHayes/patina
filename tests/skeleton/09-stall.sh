@@ -2,7 +2,7 @@
 # probe cannot preempt) ends unsupported, stop compute-stall, after stall-ms 500 of the
 # spinner's CPU time: the whole run uses at least that and under 2.5 s more CPU time (CPU
 # time, which host load does not stretch, as it does wall time). Leaves no process behind.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/09-stall
 ms=$(python3 -I "$(dirname "$0")/../cpu-ms.py" timeout 8 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" stall-ms=500)" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinpoints count)

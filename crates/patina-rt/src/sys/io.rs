@@ -41,7 +41,7 @@ pub enum Kind {
 
 pub fn kind_of(fd: i64) -> Option<Kind> {
     let st = fstat_raw(fd)?;
-    Some(match st[3] as u32 & 0o170000 {
+    Some(match proto::abi::stat::mode(&st) & 0o170000 {
         0o010000 => Kind::Pipe,
         0o140000 => Kind::Sock,
         0 => Kind::Anon,
@@ -503,7 +503,7 @@ const O_ACCMODE: u64 = 3;
 const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
 const O_PATH: u64 = 0o10000000;
-const O_NOFOLLOW: u64 = 0o400000;
+use proto::abi::open::O_NOFOLLOW;
 
 /// `open`/`openat` of a FIFO without O_NONBLOCK would wait in the kernel for the other
 /// side. Returns None when the call is not that case. A writer opens non-blocking and
@@ -523,7 +523,7 @@ pub fn fifo_open(nr: u64, a: &[u64; 6], dirfd: i64, pi: usize, flags: u64) -> Op
     }
     let nofollow = if flags & O_NOFOLLOW != 0 { 0x100 } else { 0 };
     let st = super::fs::fstatat_raw(dirfd, a[pi], nofollow)?;
-    if st[3] as u32 & 0o170000 != 0o010000 {
+    if proto::abi::stat::mode(&st) & 0o170000 != 0o010000 {
         return None;
     }
     let mut b = *a;

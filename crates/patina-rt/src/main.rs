@@ -4,22 +4,38 @@
 #![no_std]
 #![no_main]
 
-mod cmem;
+mod arch;
 mod compute;
 mod entry;
 mod exec;
 mod fault;
 mod guest;
 mod inject;
+#[cfg(target_arch = "x86_64")]
+mod insn;
+#[cfg(target_arch = "aarch64")]
+#[path = "arch/aarch64/standin/insn.rs"]
 mod insn;
 mod loader;
 mod log;
 mod oplog;
 mod path;
+#[cfg(target_arch = "x86_64")]
+mod pmu;
+#[cfg(target_arch = "aarch64")]
+#[path = "arch/aarch64/standin/pmu.rs"]
 mod pmu;
 mod raw;
 mod resolve;
+#[cfg(target_arch = "x86_64")]
 mod sigframe;
+#[cfg(target_arch = "aarch64")]
+#[path = "arch/aarch64/standin/sigframe.rs"]
+mod sigframe;
+#[cfg(target_arch = "x86_64")]
+mod spin;
+#[cfg(target_arch = "aarch64")]
+#[path = "arch/aarch64/standin/spin.rs"]
 mod spin;
 mod state;
 mod sup;

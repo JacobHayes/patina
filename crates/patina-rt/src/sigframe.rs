@@ -16,9 +16,9 @@
 //! below the 128-byte red zone of the interrupted code, or at the top of the guest's
 //! alternate stack for `SA_ONSTACK`.
 
+use crate::arch::{reg::*, Frame};
 use crate::state::{ctl, proc, ThreadState};
 use crate::sys::sig::*;
-use crate::trap::{reg::*, TrapFrame};
 use core::sync::atomic::Ordering::*;
 
 pub const FRAME_SIZE: u64 = 440;
@@ -190,7 +190,7 @@ unsafe fn fp_copy_in(dst: u64, src: u64) {
 /// for any other signal they are 0 (the kernel leaves whatever the thread's last exception
 /// set, which here would include the runtime's own `rdtsc` emulation).
 pub fn deliver(
-    frame: &mut TrapFrame,
+    frame: &mut Frame,
     ts: &mut ThreadState,
     sig: u64,
     info: &SigInfo,
@@ -232,7 +232,7 @@ pub fn deliver(
         zero(f, FRAME_SIZE);
         wr64(f, restorer);
         let uc = f + UC_OFF;
-        let g = &mut *(uc as *mut TrapFrame);
+        let g = &mut *(uc as *mut Frame);
         g.uc_flags = frame.uc_flags;
         g.uc_link = 0;
         g.ss_sp = valt[0];
@@ -285,7 +285,7 @@ pub fn deliver(
 }
 
 /// A delivery is a boundary event of its own.
-fn charge_delivery(sig: u64, handler: u64, f: u64, info: &SigInfo, frame: &TrapFrame) {
+fn charge_delivery(sig: u64, handler: u64, f: u64, info: &SigInfo, frame: &Frame) {
     let ts = crate::state::thread();
     crate::entry::charge(ts);
     let c = ctl();
@@ -317,9 +317,9 @@ fn charge_delivery(sig: u64, handler: u64, f: u64, info: &SigInfo, frame: &TrapF
 /// guest stack pointer is just above `pretcode`, at the frame's `ucontext`. Registers, FP
 /// state, mask and alternate stack come from that `ucontext`, including any change the
 /// handler made to it. Returns the restored `rax`.
-pub fn sigreturn(frame: &mut TrapFrame, ts: &mut ThreadState) -> i64 {
+pub fn sigreturn(frame: &mut Frame, ts: &mut ThreadState) -> i64 {
     let uc = frame.gregs[RSP];
-    let g = unsafe { &*(uc as *const TrapFrame) };
+    let g = unsafe { &*(uc as *const Frame) };
     let efl = frame.gregs[EFL];
     for i in 0..=RIP {
         frame.gregs[i] = g.gregs[i];

@@ -1,5 +1,5 @@
 # 1. c-threads, rs-threads, order: outcome ok and correct results (seed 1).
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 for g in $GUESTS; do
     out=$RUNS/01-ok/$g

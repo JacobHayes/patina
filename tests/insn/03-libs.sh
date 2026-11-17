@@ -1,7 +1,7 @@
 # 2. Library sites: std::random_device (libstdc++ rdrand/rdseed) and OpenSSL RAND_bytes
 # (libcrypto): identical over 3 runs of a seed, different across seeds; patched_sites and
 # emulated reported.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-libs
 for w in insn-rand-cpp insn-rand-ssl; do

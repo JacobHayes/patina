@@ -1,6 +1,6 @@
 # 7. Memory: 100k mmap/munmap of mixed sizes, mremap growth, brk grow and shrink, MADV_DONTNEED
 #    and MADV_FREE read zeros; addresses identical under --vary aslr.
-#@ tier=quick budget=40
+#@ tier=quick budget=40 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/07-memory
 verify_ok "$o" 1 aslr 2 -- /guest/memtest

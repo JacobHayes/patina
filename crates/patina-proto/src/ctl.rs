@@ -779,7 +779,7 @@ setup_steps! {
     Usage = "usage: rt <path> <argv0> [args...]",
     PathTooLong = "guest path too long",
     OpenImage = "cannot open guest image",
-    NotElf = "not an x86_64 ELF image",
+    NotElf = "not a 64-bit ELF image of this architecture",
     ElfType = "ELF image is neither ET_EXEC nor ET_DYN",
     PhdrTable = "unsupported program header table",
     PhdrRead = "short program header read",
@@ -804,6 +804,7 @@ setup_steps! {
     NoSlot = "no slot reserved for this task",
     SetTsc = "PR_SET_TSC",
     Panic = "runtime panic",
+    PacKeys = "PR_PAC_SET_ENABLED_KEYS",
 }
 /// A real signal from outside the sandbox is pending (args[0] = the signal number).
 pub const HE_OUTSIDE_SIGNAL: u64 = 4;
@@ -844,6 +845,35 @@ pub const HE_LOG_LIMIT: u64 = 10;
 pub const HE_CAPACITY: u64 = 11;
 /// The host filesystem holding the run directory is full: args[0] = errno, args[1] = syscall.
 pub const HE_DISK_FULL: u64 = 12;
+
+/// A mechanism the run reached that is not ported to this architecture yet: args[0] =
+/// `UNPORTED_*`, args[1] = the system call for `UNPORTED_CALL`. The run ends `unsupported`,
+/// stop `arm64-unported`, naming it. Sent only by the arm64 runtime while the port is under
+/// way: each stand-in goes when its mechanism is ported.
+pub const HE_UNPORTED: u64 = 13;
+
+macro_rules! unported {
+    ($($v:ident = $n:literal: $s:literal),* $(,)?) => {
+        $(pub const $v: u64 = $n;)*
+        /// What an `HE_UNPORTED` stop reached, for its message.
+        pub fn unported_name(u: u64) -> &'static str {
+            match u {
+                $($n => $s,)*
+                _ => "an unknown part",
+            }
+        }
+    };
+}
+
+unported! {
+    UNPORTED_CALL = 1: "a system call this slice of the port does not serve",
+    UNPORTED_SIGNALS = 2: "signal delivery to a handler, sigreturn and system-call restart",
+    UNPORTED_THREADS = 3: "threads, fork and vfork (the clone trampolines)",
+    UNPORTED_COUNTERS = 4: "branch-counter preemption",
+    UNPORTED_COMPUTE = 5: "compute points",
+    UNPORTED_INSN = 6: "an instruction with a host-random result (RNDR, RNDRRS, PACGA) in program code",
+    UNPORTED_UNSCANNED = 7: "executable memory the instruction scan does not read (anonymous, shared, or made executable later)",
+}
 
 macro_rules! limits {
     ($($v:ident = $n:literal: $s:literal),* $(,)?) => {

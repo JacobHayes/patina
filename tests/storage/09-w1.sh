@@ -3,7 +3,7 @@
 # syncing data or directory) is caught under posix-strict and passes under ext4-ordered
 # (auto_da_alloc). The 30 s condvar timeout fires in virtual time: a crash-free run takes
 # under 5 s of wall time.
-#@ tier=area budget=60 slots=4
+#@ tier=area budget=60 slots=4 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 for m in ext4-ordered posix-strict; do
     sweep correct-$m rust-threads-files 1-20 -- --config "$("$PATINA_CFG" fs-model=$m)" --crash machine:5 -- /guest/rust-threads-files correct >/dev/null

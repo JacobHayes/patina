@@ -8,7 +8,7 @@
 //! above `u32::MAX` the `unknown` row, which stops the run) and `Row::new` leaves it out of
 //! the table.
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(test, target_arch = "x86_64"))]
 pub(crate) mod x86_64;
 #[cfg(target_arch = "x86_64")]
 pub use x86_64::*;
@@ -35,7 +35,7 @@ pub const fn present(nr: u64) -> bool {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod aarch64_table;
 
-#[cfg(all(test, target_arch = "x86_64"))]
+#[cfg(test)]
 mod tests {
     use super::{aarch64, present, x86_64};
 

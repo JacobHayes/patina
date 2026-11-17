@@ -639,7 +639,7 @@ fn content(k: Synth, w: &mut W) {
 /// Open a synthesised file: a read-only memfd at the lowest free descriptor.
 pub fn open(k: Synth, cloexec: bool) -> i64 {
     const MFD_CLOEXEC: u64 = 1;
-    const O_DIRECTORY: u64 = 0o200000;
+    use proto::abi::open::O_DIRECTORY;
     const O_CLOEXEC_: u64 = 0o2000000;
     if k == Synth::Task {
         // The thread list is sandbox history (tids in the PID namespace); only the inode
@@ -756,14 +756,9 @@ fn fake_mode(k: Synth) -> u32 {
 
 /// `struct stat` of a synthesised file.
 pub fn fake_stat(k: Synth, p: u64) -> i64 {
-    let mut st = [0u64; 18];
-    st[0] = proc_dev();
-    st[1] = fake_ino(k);
-    st[2] = 1;
-    let uid = unsafe { sc0(nr::GETUID) } as u64;
-    let gid = unsafe { sc0(nr::GETGID) } as u64;
-    st[3] = fake_mode(k) as u64 | (uid << 32);
-    st[4] = gid;
+    let uid = unsafe { sc0(nr::GETUID) } as u32;
+    let gid = unsafe { sc0(nr::GETGID) } as u32;
+    let mut st = proto::abi::stat::new(proc_dev(), fake_ino(k), 1, fake_mode(k), uid, gid);
     st[7] = 1024;
     let t = crate::vtime::epoch();
     for i in [9, 11, 13] {

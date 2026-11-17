@@ -1,6 +1,6 @@
 # Evidence (the crash materialiser): the tracker self-check (`patina log ops --check`, replay of the whole log = the
 # live tree, every incarnation) on W1-W9, seeds 1-3, faults off and on (tests/durability/bench/oplog.py).
-#@ tier=evidence budget=600 slots=1
+#@ tier=evidence budget=600 slots=1 arch=x86_64
 set -eu
 : "${PATINA:?}" "${RUNS:?}"
 mkdir -p "$RUNS/oplog"

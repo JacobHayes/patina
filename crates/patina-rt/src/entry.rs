@@ -1,60 +1,14 @@
 //! Process entry, the trap entry (`trap`, the SIGSYS handler), the fault
 //! entry (timestamp-counter emulation, guest faults), and the seccomp filter.
 
+use crate::arch::Frame;
 use crate::raw::*;
 use crate::state::*;
-use crate::trap::{reg::*, Action, TrapCall, TrapFrame};
-use core::arch::global_asm;
+use crate::trap::{Action, TrapCall};
 use core::sync::atomic::Ordering::*;
 use proto::ctl::Op;
 use proto::layout::*;
 use proto::{draw, Stream};
-
-global_asm!(
-    ".section .text.entry,\"ax\"",
-    ".globl _start",
-    "_start:",
-    // Continue on the start-up stack in `.bss` until the first alternate stack exists: the
-    // syscall stub accepts only a stack in the runtime's region (`raw.rs`).
-    "  mov rdi, rsp",
-    "  lea rsp, [rip + patina_boot_stack_top]",
-    "  call {start}",
-    "  ud2",
-    ".pushsection .bss.patina_boot_stack,\"aw\",@nobits",
-    ".balign 16",
-    "  .skip 65536",
-    "patina_boot_stack_top:",
-    ".popsection",
-    ".text",
-    ".globl patina_restorer",
-    "patina_restorer:",
-    "  mov eax, {rt_sigreturn}",
-    "  jmp patina_syscall",
-    // switch_stack(top, ksp, f): run f(ksp) on a new stack
-    ".globl patina_switch_stack",
-    "patina_switch_stack:",
-    "  mov rsp, rdi",
-    "  mov rdi, rsi",
-    "  call rdx",
-    "  ud2",
-    // enter_guest(sp, entry): clean registers, jump
-    ".globl patina_enter_guest",
-    "patina_enter_guest:",
-    "  mov rsp, rdi",
-    "  mov rax, rsi",
-    "  xor ebx, ebx", "xor ecx, ecx", "xor edx, edx", "xor esi, esi", "xor edi, edi", "xor ebp, ebp",
-    "  xor r8d, r8d", "xor r9d, r9d", "xor r10d, r10d", "xor r11d, r11d",
-    "  xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
-    "  jmp rax",
-    start = sym rt_start,
-    rt_sigreturn = const nr::RT_SIGRETURN,
-);
-
-extern "C" {
-    fn patina_restorer();
-    fn patina_switch_stack(top: u64, ksp: u64, f: extern "C" fn(u64) -> !) -> !;
-    pub fn patina_enter_guest(sp: u64, entry: u64) -> !;
-}
 
 use crate::fault::on_fault;
 use crate::sys::sig::{
@@ -79,7 +33,7 @@ pub const OPEN_SIGNALS: u64 = bit(SIGSYS)
 pub const REAL_MASK: u64 = !OPEN_SIGNALS & !crate::sys::sig::UNBLOCKABLE;
 
 /// The invariant that the kernel-level mask never changes.
-pub fn check_real_mask(frame: &TrapFrame) {
+pub fn check_real_mask(frame: &Frame) {
     if frame.sigmask != REAL_MASK {
         crate::sup::host_error(frame.sigmask as i64, 0, proto::ctl::HE_REAL_MASK);
     }
@@ -87,14 +41,16 @@ pub fn check_real_mask(frame: &TrapFrame) {
 
 /// The runtime's signal restorer (for real `rt_sigaction` calls made by handlers).
 pub fn restorer() -> u64 {
-    patina_restorer as *const () as u64
+    crate::arch::restorer()
 }
 
-extern "C" fn rt_start(ksp: u64) -> ! {
+/// The first Rust code of an image, on the start-up stack (`arch`'s `_start`).
+pub extern "C" fn rt_start(ksp: u64) -> ! {
+    crate::arch::process_init();
     // Map the first alternate stack and continue on it, so that thread state
     // is found by masking the stack pointer from here on.
     let alt = new_alt_stack();
-    unsafe { patina_switch_stack(alt + ALT_SIZE - 64, ksp, rt_main) }
+    crate::arch::switch_stack(alt + ALT_SIZE - 64, ksp, rt_main)
 }
 
 extern "C" fn rt_main(ksp: u64) -> ! {
@@ -130,12 +86,7 @@ fn install_handlers() {
             crate::fatal(proto::ctl::Setup::SigAltStack, 0);
         }
         let flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESTORER;
-        let sys: [u64; 4] = [
-            on_sigsys as *const () as u64,
-            flags,
-            patina_restorer as *const () as u64,
-            0,
-        ];
+        let sys: [u64; 4] = [on_sigsys as *const () as u64, flags, restorer(), 0];
         if sc4(nr::RT_SIGACTION, SIGSYS, sys.as_ptr() as u64, 0, 8) != 0 {
             crate::fatal(proto::ctl::Setup::SigactionSys, 0);
         }
@@ -147,14 +98,14 @@ fn install_handlers() {
             } else {
                 on_fault as *const () as u64
             };
-            let f: [u64; 4] = [h, flags, patina_restorer as *const () as u64, 0];
+            let f: [u64; 4] = [h, flags, restorer(), 0];
             if sc4(nr::RT_SIGACTION, s, f.as_ptr() as u64, 0, 8) != 0 {
                 crate::fatal(proto::ctl::Setup::SigactionFault, 0);
             }
         }
         // SIGPIPE and SIGXFSZ: ignored for real; the runtime raises the virtual signal.
         for s in [SIGPIPE, SIGXFSZ] {
-            let ign: [u64; 4] = [1, SA_RESTORER, patina_restorer as *const () as u64, 0];
+            let ign: [u64; 4] = [1, SA_RESTORER, restorer(), 0];
             if sc4(nr::RT_SIGACTION, s, ign.as_ptr() as u64, 0, 8) != 0 {
                 crate::fatal(proto::ctl::Setup::SigactionIgnore, 0);
             }
@@ -178,25 +129,24 @@ struct SockFprog {
     filter: *const SockFilter,
 }
 
-/// Trap every syscall but the runtime's own, made by its one `syscall` instruction
+/// Trap every syscall but the runtime's own, made by its one system-call instruction
 /// (`raw::stub_ip`; the same address in every image, the runtime being linked at a fixed base).
 /// Installed once per process tree: the filter is inherited by fork and kept across execve.
 fn install_filter() {
     const PR_SET_NO_NEW_PRIVS: u64 = 38;
     const PR_SET_SECCOMP: u64 = 22;
-    const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
     let ip = crate::raw::stub_ip();
     let ins = |code: u16, jt: u8, jf: u8, k: u32| SockFilter { code, jt, jf, k };
     let f = [
-        ins(0x20, 0, 0, 4),                 // ld arch
-        ins(0x15, 0, 6, AUDIT_ARCH_X86_64), // jne -> kill
-        ins(0x20, 0, 0, 12),                // ld ip high word
-        ins(0x15, 0, 2, (ip >> 32) as u32), // jne -> trap
-        ins(0x20, 0, 0, 8),                 // ld ip low word
-        ins(0x15, 1, 0, ip as u32),         // jeq -> allow
-        ins(0x06, 0, 0, 0x0003_0000),       // trap
-        ins(0x06, 0, 0, 0x7fff_0000),       // allow
-        ins(0x06, 0, 0, 0x8000_0000),       // kill process
+        ins(0x20, 0, 0, 4),                       // ld arch
+        ins(0x15, 0, 6, crate::arch::AUDIT_ARCH), // jne -> kill
+        ins(0x20, 0, 0, 12),                      // ld ip high word
+        ins(0x15, 0, 2, (ip >> 32) as u32),       // jne -> trap
+        ins(0x20, 0, 0, 8),                       // ld ip low word
+        ins(0x15, 1, 0, ip as u32),               // jeq -> allow
+        ins(0x06, 0, 0, 0x0003_0000),             // trap
+        ins(0x06, 0, 0, 0x7fff_0000),             // allow
+        ins(0x06, 0, 0, 0x8000_0000),             // kill process
     ];
     let prog = SockFprog {
         len: f.len() as u16,
@@ -311,38 +261,39 @@ pub fn maybe_yield(ts: &ThreadState) {
 }
 
 /// The trap entry: SIGSYS for every guest syscall.
-pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
+pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
     let ts = thread();
     let frame = unsafe { &mut *uc };
-    if crate::pmu::is_race(frame.gregs[RIP]) {
+    if crate::pmu::is_race(frame.pc()) {
         // Delivered on top of the overflow signal: that handler re-executes the call.
         crate::pmu::sigsys_race(ts);
         return;
     }
-    let rip = frame.gregs[RIP];
+    let pc = frame.pc();
     // The instruction's own address: a program mapping may end where the region starts.
-    if crate::fault::in_runtime(rip.wrapping_sub(2)) {
-        // A `syscall` in the runtime's text other than the stub's. On a program stack: program
-        // code jumped there. On a runtime stack: a runtime defect.
-        if crate::fault::in_runtime(frame.gregs[RSP]) {
-            crate::sup::host_error(0, rip, proto::ctl::HE_RUNTIME_ASSERT);
+    let insn = pc.wrapping_sub(crate::arch::SYSCALL_LEN);
+    if crate::fault::in_runtime(insn) {
+        // A system-call instruction in the runtime's text other than the stub's. On a program
+        // stack: program code jumped there. On a runtime stack: a runtime defect.
+        if crate::fault::in_runtime(frame.sp()) {
+            crate::sup::host_error(0, pc, proto::ctl::HE_RUNTIME_ASSERT);
         }
-        crate::sup::containment(proto::ctl::CONTAIN_SYSCALL, rip - 2, rip - 2, false);
+        crate::sup::containment(proto::ctl::CONTAIN_SYSCALL, insn, insn, false);
     }
     crate::pmu::enter(ts, Some(frame));
     crate::spin::enter(ts, Some(frame));
     crate::compute::enter(ts);
-    if frame.gregs[RAX] == proto::sdk::SYSCALL
-        && frame.gregs[RDI] == proto::sdk::OP_COMPUTE_POINT
+    if frame.nr() == proto::sdk::SYSCALL
+        && frame.args()[0] == proto::sdk::OP_COMPUTE_POINT
         && crate::compute::active()
     {
         // Its events are already charged: no trap charge, no trap record (`compute::point`).
         crate::compute::point(ts, frame);
-        frame.gregs[RAX] = 0;
+        frame.set_ret(0);
         crate::sys::sig::trap_exit(frame, None);
         check_real_mask(frame_of(uc));
         crate::compute::exit(thread());
-        crate::pmu::exit(thread(), frame_of(uc).gregs[RIP], 0);
+        crate::pmu::exit(thread(), frame_of(uc).pc(), 0);
         return;
     }
     charge(ts);
@@ -360,14 +311,13 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
     match crate::sys::dispatch(&mut call, row) {
         Action::Return(r) => {
             crate::log::trap(row, &call, r);
-            call.frame.gregs[RAX] = r as u64;
+            call.frame.set_ret(r);
             maybe_yield(call.ts);
             crate::sys::sig::trap_exit(call.frame, Some(nr));
         }
         Action::Restart => {
-            // Re-execute the same syscall instruction after the handler returns.
-            call.frame.gregs[RAX] = nr;
-            call.frame.gregs[RIP] -= 2;
+            // Re-execute the same system call instruction after the handler returns.
+            call.frame.rewind(nr);
             crate::sys::sig::trap_exit(call.frame, None);
         }
         Action::NoReturn => crate::sup::hang(),
@@ -375,9 +325,9 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut TrapFrame) {
     }
     check_real_mask(frame_of(uc));
     crate::compute::exit(thread());
-    crate::pmu::exit(thread(), frame_of(uc).gregs[RIP], 0);
+    crate::pmu::exit(thread(), frame_of(uc).pc(), 0);
 }
 
-fn frame_of<'a>(uc: *mut TrapFrame) -> &'a TrapFrame {
+fn frame_of<'a>(uc: *mut Frame) -> &'a Frame {
     unsafe { &*uc }
 }

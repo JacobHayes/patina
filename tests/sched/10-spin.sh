@@ -9,7 +9,7 @@
 #  c. One thread computing for about 2 s with no other thread is ok, not a stall.
 #  d. Stock Go at the default CPU count (go-sweep, whose background sweeper spins without a
 #     system call or `pause`) ends ok on seeds 1-3.
-#@ tier=quick budget=30 slots=5
+#@ tier=quick budget=30 slots=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-spin
 mkdir -p "$o"

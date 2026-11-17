@@ -7,7 +7,7 @@
 #     digest under verify --runs 3 --vary cpu,aslr;
 #  b. an endless loop under --time-limit 1 ends liveness, one digest twice;
 #  c. thread and process CPU time after a loop of N iterations (at least N events) are >= N ns.
-#@ tier=quick budget=10 slots=6
+#@ tier=quick budget=10 slots=6 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-deadline
 mkdir -p "$o"

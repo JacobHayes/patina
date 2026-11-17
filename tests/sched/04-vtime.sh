@@ -1,6 +1,6 @@
 # 4. c-threads waits 30 virtual seconds, finishes in less wall time than that (no real wait); its own measurement
 #    of the timed wait is >= 30 s and < 30.1 s.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 for i in 1 2 3; do
     out=$RUNS/04-vtime/run$i

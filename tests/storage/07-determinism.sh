@@ -3,7 +3,7 @@
 # cpu,load) gives identical digests, outcomes, output and post-crash tree digests (patina
 # verify compares the crash records, which carry each post-crash tree's digest). The seeds
 # are samples: the comparison holds whether or not the seed fails.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 v() {
     name=$1; seed=$2; shift 2

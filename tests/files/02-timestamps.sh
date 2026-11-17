@@ -1,6 +1,6 @@
 # 2. Timestamp ordering: tsorder natively on a tmpfs with 20 ms between operations, and under
 #    patina; the relation (<, =, >) of every pair of (file, field) records must match.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/02-timestamps
 mkdir -p "$o"

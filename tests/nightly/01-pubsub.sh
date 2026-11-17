@@ -1,6 +1,6 @@
 # testbeds/pubsub/sim.sh at 200 seeds: each planted bug is found, the clean program is ok and
 # not vacuous (see the script).
-#@ tier=nightly budget=300 slots=8
+#@ tier=nightly budget=300 slots=8 arch=x86_64
 set -eu
 : "${PATINA:?}" "${RUNS:?}"
 export CARGO_TARGET_DIR="$PATINA_CHECK_DIR/build/testbeds"

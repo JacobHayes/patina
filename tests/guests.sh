@@ -3,7 +3,7 @@
 #
 # Each tests/guests/<name>/ (and tests/determinism/attack/, tests/sandbox/guests/) is built by
 # its build.sh into $PATINA_CHECK_DIR/guests/cache/<name>-<key>, where <key> hashes that
-# directory's files and the compiler versions. A cache entry is built once, then made
+# directory's files, the machine and the compiler versions. A cache entry is built once, then made
 # read-only. The set for this tree, $PATINA_CHECK_DIR/guests/sets/<key of all keys>/, holds
 # hard links:
 #   guests/      every guest-style build (build.sh writes into its argument)
@@ -22,7 +22,12 @@ sets=$base/guests/sets
 mkdir -p "$cache" "$sets" "$PATINA_BUILD_DIR"
 
 workload_style=" c-sqlite cpython fjall-harness go-static rust-threads-files shell-pipeline tokio-mt "
-tools=$( (gcc --version | head -1; rustc -V; go version; clang --version 2>/dev/null | head -1) | sha256sum | cut -c1-16)
+# During the arm64 port only the guests of the ported slices are built there.
+case $(uname -m) in
+    x86_64) built="" ;;
+    *) built=" hello arm64 " ;;
+esac
+tools=$( (uname -m; gcc --version | head -1; rustc -V; go version; clang --version 2>/dev/null | head -1) | sha256sum | cut -c1-16)
 
 # key DIR: hash of the files under the directory, the repository paths its `deps` file lists
 # (sources it builds from outside it, such as the SDKs), and the tool versions
@@ -44,6 +49,7 @@ name() {
 entries=""
 for b in "$root"/tests/guests/*/build.sh "$root"/tests/determinism/attack/build.sh "$root"/tests/sandbox/guests/build.sh; do
     rel=$(dirname "$b"); rel=${rel#"$root"/}
+    [ -z "$built" ] || case $built in *" $(name "$b") "*) ;; *) continue ;; esac
     entries="$entries $(name "$b")-$(key "$rel")"
 done
 setkey=$(echo "$entries" | sha256sum | cut -c1-16)

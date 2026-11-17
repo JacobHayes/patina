@@ -2,8 +2,8 @@
 //!
 //! A guest may pass any address to a system call. The kernel answers `EFAULT` for one it
 //! cannot use; the runtime must too, never fault itself. Every runtime access to memory a
-//! guest named goes through `copy`: one `rep movsb` whose fault `fault::on_fault`
-//! recognises by its address and turns into a return of `-EFAULT` (the kernel's own
+//! guest named goes through `copy`: `arch::guest_copy`, whose faults `fault::on_fault`
+//! recognises by their address and turns into a return of `-EFAULT` (the kernel's own
 //! exception-table technique). Ranges that touch the runtime's region are refused before
 //! any access (`plausible`): a guest pointer never makes the runtime write its own memory.
 
@@ -11,52 +11,35 @@ use proto::layout::{ALT_SIZE, RT_BASE, RT_REGION_END};
 
 const EFAULT: i64 = 14;
 
-core::arch::global_asm!(
-    ".pushsection .text.patina_guest_copy,\"ax\",@progbits",
-    ".globl patina_guest_copy",
-    "patina_guest_copy:",
-    "mov rcx, rdx",
-    ".globl patina_guest_copy_insn",
-    "patina_guest_copy_insn:",
-    "rep movsb",
-    "xor eax, eax",
-    "ret",
-    ".globl patina_guest_copy_fixup",
-    "patina_guest_copy_fixup:",
-    "mov rax, -14",
-    "ret",
-    ".popsection",
-);
+pub use crate::arch::fixup;
 
-extern "C" {
-    fn patina_guest_copy(dst: *mut u8, src: *const u8, n: usize) -> i64;
-    fn patina_guest_copy_insn();
-    fn patina_guest_copy_fixup();
+/// Past the user address space? On arm64, above 48 bits: there a data access ignores the top
+/// byte (a tagged pointer), so a value outside the runtime's region as a number can be inside
+/// it as an address; the kernel answers `EFAULT` to such a pointer.
+#[cfg(target_arch = "aarch64")]
+fn past_user(end: u64) -> bool {
+    end > 1 << 48
+}
+/// On x86_64 the kernel decides (4- or 5-level paging).
+#[cfg(target_arch = "x86_64")]
+fn past_user(_end: u64) -> bool {
+    false
 }
 
-/// Called by the fault handler for a fault at `rip` in runtime text: where to resume, if the
-/// fault was a guest copy's.
-pub fn fixup(rip: u64) -> Option<u64> {
-    let insn = patina_guest_copy_insn as *const () as u64;
-    (rip == insn).then_some(patina_guest_copy_fixup as *const () as u64)
-}
-
-/// Is `[p, p + n)` a range a call may use? Not null, no wrap, and outside the runtime's
-/// region, except, for reads, the calling thread's own runtime stack: `resolve::prepare`
-/// hands a handler path arguments it rewrote into buffers there.
+/// Is `[p, p + n)` a range a call may use? Not null, no wrap, not `past_user`, and outside
+/// the runtime's region, except, for reads, the calling thread's own runtime stack:
+/// `resolve::prepare` hands a handler path arguments it rewrote into buffers there.
 fn plausible(p: u64, n: usize, reading: bool) -> bool {
     let Some(end) = p.checked_add(n as u64) else {
         return false;
     };
-    if p == 0 {
+    if p == 0 || past_user(end) {
         return false;
     }
     if !(p < RT_REGION_END && end > RT_BASE) {
         return true;
     }
-    let sp: u64;
-    unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack)) };
-    let own = sp & !(ALT_SIZE - 1);
+    let own = crate::arch::current_sp() & !(ALT_SIZE - 1);
     reading && p >= own && end <= own + ALT_SIZE
 }
 
@@ -68,7 +51,7 @@ fn copy(dst: u64, src: u64, n: usize, guest: u64) -> i64 {
     if !plausible(guest, n, guest == src) {
         return -EFAULT;
     }
-    unsafe { patina_guest_copy(dst as *mut u8, src as *const u8, n) }
+    unsafe { crate::arch::guest_copy(dst as *mut u8, src as *const u8, n) }
 }
 
 /// Read guest bytes at `p` into `buf`.

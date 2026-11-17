@@ -61,7 +61,7 @@ pub(super) fn sock(i: usize) -> &'static mut WSock {
 /// Table index of the socket open on `fd` (any socket), None for other objects.
 pub(super) fn idx_of(fd: i64) -> Option<usize> {
     let st = super::fs::fstat_raw(fd)?;
-    if st[3] as u32 & 0o170000 != 0o140000 {
+    if proto::abi::stat::mode(&st) & 0o170000 != 0o140000 {
         return None;
     }
     let i = (crate::vino::of(st[0], st[1]) - VINO_BASE) as usize;
@@ -78,7 +78,7 @@ pub fn wire_idx(fd: i64) -> Option<usize> {
 /// leaves the run as it was.
 pub fn dgram_idx(fd: i64) -> Option<usize> {
     let st = super::fs::fstat_raw(fd)?;
-    if st[3] as u32 & 0o170000 != 0o140000 {
+    if proto::abi::stat::mode(&st) & 0o170000 != 0o140000 {
         return None;
     }
     let i = (crate::vino::find(st[0], st[1])? - VINO_BASE) as usize;

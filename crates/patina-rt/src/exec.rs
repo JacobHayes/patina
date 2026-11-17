@@ -112,7 +112,7 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
         }
     } else {
         let nofollow = if flags & AT_SYMLINK_NOFOLLOW != 0 {
-            0o400000
+            proto::abi::open::O_NOFOLLOW
         } else {
             0
         };
@@ -124,11 +124,11 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
     if fd < 0 {
         return Err(fd);
     }
-    let mut st = [0u64; 18];
+    let mut st = [0u64; proto::abi::stat::WORDS];
     unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     const S_IFMT: u32 = 0o170000;
     const S_IFREG: u32 = 0o100000;
-    if (st[3] as u32) & S_IFMT != S_IFREG {
+    if proto::abi::stat::mode(&st) & S_IFMT != S_IFREG {
         unsafe { sc1(nr::CLOSE, fd as u64) };
         return Err(-e::EACCES);
     }
@@ -137,7 +137,10 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
 
 /// Is the ELF image on `fd` one this runtime can load, and does its interpreter exist?
 fn check_elf(fd: i64, head: &[u8]) -> Result<(), i64> {
-    if head.len() < 64 || head[4] != 2 || u16::from_le_bytes([head[18], head[19]]) != 62 {
+    if head.len() < 64
+        || head[4] != 2
+        || u16::from_le_bytes([head[18], head[19]]) != crate::loader::ELF_MACHINE
+    {
         return Err(-e::ENOEXEC);
     }
     let typ = u16::from_le_bytes([head[16], head[17]]);

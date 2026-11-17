@@ -1,6 +1,6 @@
 # 7. Locks: two threads contend for flock and F_OFD_SETLKW on one file; mutual exclusion
 #    holds (the guest counts violations), identical across runs.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-locks; mkdir -p "$o"
 for seed in 1; do

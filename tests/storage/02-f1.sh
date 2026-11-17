@@ -3,7 +3,7 @@
 # first seed whose kept post-crash tree, copied out, makes the native harness fail the same
 # way, FJ_WIPE_PARTIAL=1 must let the same seed proceed. The rate depends on the schedule
 # and the guest build, so this is an area check, not a quick one.
-#@ tier=area budget=30
+#@ tier=area budget=30 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 for crash in machine:3 process:3; do
     n=f1-${crash%%:*}

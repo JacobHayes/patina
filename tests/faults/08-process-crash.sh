@@ -1,7 +1,7 @@
 # 8. Process crash: the variant without the record fsync passes under --crash process:20
 # (the page cache survives a process crash), PCRASH_SEEDS seeds (default 20; evidence: 100). The
 # expected contrast with the machine-crash case in 07-acklog.sh.
-#@ tier=area budget=60 slots=4
+#@ tier=area budget=60 slots=4 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 N=${PCRASH_SEEDS:-20}
 sweep 08 "$N" --crash process:20 -- /guest/ack-log nofsync

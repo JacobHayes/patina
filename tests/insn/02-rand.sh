@@ -1,7 +1,7 @@
 # 1b. rdrand and rdseed (16/32/64-bit, an extended register, a 16-bit form keeping the upper
 # bits) 100 times each: carry flag set, identical over 3 runs varying the core, different seeds
 # give different values.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-rand
 verify "$o/s1" 1 3 insn rand

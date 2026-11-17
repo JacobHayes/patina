@@ -1,5 +1,5 @@
 # 5. Each network fault has a scenario that passes with the fault and fails without it.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/05-faults; mkdir -p "$o"
 # pair NAME FAULT ARGS...: ok with --fault FAULT, guest failure without.

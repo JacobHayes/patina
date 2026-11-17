@@ -4,7 +4,7 @@
 # bytes inside another instruction/data, against the runtime's rule (patina __insn-scan runs the
 # same proto::insn code). They must agree on every candidate. The decoder the rule sweeps
 # with must give objdump's length for every instruction of these files.
-#@ tier=area budget=120
+#@ tier=area budget=120 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-scanner-audit
 mkdir -p "$o"

@@ -1,57 +1,17 @@
-//! Raw system calls. The runtime has exactly one `syscall` instruction, in `patina_syscall`,
-//! and the seccomp filter lets through only that one (`entry::install_filter`); a `syscall`
+//! Raw system calls. The runtime has exactly one system-call instruction, in `patina_syscall`
+//! (`arch`), and the seccomp filter lets through only that one (`entry::install_filter`); one
 //! anywhere else, the runtime's text included, traps.
 //!
 //! The stub checks after the call that it runs on a runtime stack (every runtime stack is in
 //! the runtime's region: the alternate stacks, and the start-up stack in `.bss`). Program code
 //! that jumps to the instruction runs on its own stack, so the call reaches the kernel once,
-//! then the stub stops at `ud2` before any program code sees the result, and the fault entry
-//! ends the run (`fault::on_fault`, `CONTAIN_STUB`). A program that sets its stack pointer into
-//! the runtime's region first is not stopped: that is deliberate, and out of scope.
+//! then the stub stops at an undefined instruction before any program code sees the result,
+//! and the fault entry ends the run (`fault::on_fault`, `CONTAIN_STUB`). A program that sets
+//! its stack pointer into the runtime's region first is not stopped: that is deliberate, and
+//! out of scope.
 
-use core::arch::{asm, global_asm};
-use proto::layout::{RT_REGION_SHIFT, RT_REGION_TAG};
+pub use crate::arch::{sc6, stub_escape, stub_ip};
 
-global_asm!(
-    ".globl patina_syscall",
-    "patina_syscall:",
-    "  syscall",
-    "  mov rcx, rsp",
-    "  shr rcx, {shift}",
-    "  cmp rcx, {tag}",
-    "  jne patina_syscall_escape",
-    "  ret",
-    ".globl patina_syscall_escape",
-    "patina_syscall_escape:",
-    "  ud2",
-    shift = const RT_REGION_SHIFT,
-    tag = const RT_REGION_TAG,
-);
-
-extern "C" {
-    fn patina_syscall();
-    fn patina_syscall_escape();
-}
-
-/// The address the kernel reports for a call from the stub (after its `syscall`).
-pub fn stub_ip() -> u64 {
-    patina_syscall as *const () as u64 + 2
-}
-
-/// The stub's stop for a call made from a program's stack.
-pub fn stub_escape() -> u64 {
-    patina_syscall_escape as *const () as u64
-}
-
-#[inline(always)]
-pub unsafe fn sc6(n: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) -> i64 {
-    let r: i64;
-    // `call` pushes below the stack pointer: the target has no red zone to clobber.
-    asm!("call {stub}", stub = sym patina_syscall, inlateout("rax") n as i64 => r,
-         in("rdi") a, in("rsi") b, in("rdx") c, in("r10") d, in("r8") e, in("r9") f,
-         lateout("rcx") _, lateout("r11") _);
-    r
-}
 #[inline(always)]
 pub unsafe fn sc0(n: u64) -> i64 {
     sc6(n, 0, 0, 0, 0, 0, 0)

@@ -205,11 +205,7 @@ pub const MAX_SHARED: usize = 256;
 /// The calling thread's state (valid on the alternate stack only).
 #[inline(always)]
 pub fn thread() -> &'static mut ThreadState {
-    let sp: u64;
-    unsafe {
-        core::arch::asm!("mov {}, rsp", out(reg) sp, options(nomem, nostack, preserves_flags))
-    };
-    let base = sp & !(ALT_SIZE - 1);
+    let base = crate::arch::current_sp() & !(ALT_SIZE - 1);
     unsafe { &mut *(base as *mut ThreadState) }
 }
 
@@ -239,7 +235,9 @@ pub struct Proc {
     pub alt_free: [u64; proto::ctl::MAX_THREADS],
     pub nalt_free: usize,
     /// Standard-format XSAVE component offsets and sizes (CPUID 0xD), filled on use.
+    #[cfg(target_arch = "x86_64")]
     pub xsave_off: [u32; 64],
+    #[cfg(target_arch = "x86_64")]
     pub xsave_len: [u32; 64],
     /// The slot a `fork` child takes (written by the parent just before the real fork,
     /// read by the child in its copy).
@@ -269,7 +267,9 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
     alt_of_slot: [0; proto::ctl::MAX_THREADS],
     alt_free: [0; proto::ctl::MAX_THREADS],
     nalt_free: 0,
+    #[cfg(target_arch = "x86_64")]
     xsave_off: [0; 64],
+    #[cfg(target_arch = "x86_64")]
     xsave_len: [0; 64],
     fork_slot: 0,
     shared: [Shared {

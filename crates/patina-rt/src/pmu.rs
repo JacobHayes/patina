@@ -24,10 +24,10 @@
 //! (the instruction faults again), a trapped syscall is rewound by the overflow handler so
 //! that it executes again.
 
+use crate::arch::{reg::*, Frame};
 use crate::raw::*;
 use crate::state::{config, ctl, thread, ThreadState};
 use crate::sys::sig::SigInfo;
-use crate::trap::{reg::*, TrapFrame};
 use core::arch::global_asm;
 use core::sync::atomic::{AtomicI32, Ordering::*};
 use proto::ctl::*;
@@ -447,7 +447,7 @@ pub fn fork_child(ts: &mut ThreadState, others: &[u64]) {
 
 /// A runtime entry: the segment ends.
 #[inline]
-pub fn enter(ts: &mut ThreadState, frame: Option<&mut TrapFrame>) {
+pub fn enter(ts: &mut ThreadState, frame: Option<&mut Frame>) {
     if ts.pmu.mode == M_NONE {
         return;
     }
@@ -455,7 +455,7 @@ pub fn enter(ts: &mut ThreadState, frame: Option<&mut TrapFrame>) {
 }
 
 #[inline(never)]
-fn enter_slow(ts: &mut ThreadState, frame: Option<&mut TrapFrame>) {
+fn enter_slow(ts: &mut ThreadState, frame: Option<&mut Frame>) {
     ts.pmu.armed = 0;
     ts.pmu.mode = M_NONE;
     if ts.pmu.stepping != 0 {
@@ -540,7 +540,7 @@ fn set_period(p: &mut Pmu, period: u64) {
 
 /// The overflow handler (from `patina_sigtrap`, after the first read). Returns the address of
 /// `x` when the window must be accounted (the stub adds the second read to it), else 0.
-extern "C" fn alarm(_info: *const u8, uc: *mut TrapFrame, r_a: u64, retries: u64) -> u64 {
+extern "C" fn alarm(_info: *const u8, uc: *mut Frame, r_a: u64, retries: u64) -> u64 {
     let ts = thread();
     let frame = unsafe { &mut *uc };
     let c = ctl();
@@ -605,7 +605,7 @@ extern "C" fn alarm(_info: *const u8, uc: *mut TrapFrame, r_a: u64, retries: u64
 }
 
 /// Every other SIGTRAP: our breakpoints and single steps, else the fault entry.
-extern "C" fn trap_plain(sig: i32, info: *mut SigInfo, uc: *mut TrapFrame) {
+extern "C" fn trap_plain(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     let ts = thread();
     let frame = unsafe { &mut *uc };
     let rip = frame.gregs[RIP];
@@ -724,7 +724,7 @@ fn plant(ts: &mut ThreadState, a: u64, orig: u8) -> bool {
 /// Walk from `ip` to the next control transfer that needs the runtime and plant there. With
 /// a frame (we are in a handler that returns to `ip`), a transfer that cannot be planted is
 /// single-stepped; without one (the start of a segment), the segment gives up hopping.
-fn walk(ts: &mut ThreadState, start: u64, mut frame: Option<&mut TrapFrame>) {
+fn walk(ts: &mut ThreadState, start: u64, mut frame: Option<&mut Frame>) {
     let mut code = Code::new();
     let mut ip = start;
     for _ in 0..WALK_MAX {
@@ -778,7 +778,7 @@ fn walk(ts: &mut ThreadState, start: u64, mut frame: Option<&mut TrapFrame>) {
 }
 
 /// Single-step the instruction at the frame's `rip`.
-fn step_from(ts: &mut ThreadState, f: &mut TrapFrame, cond: bool) {
+fn step_from(ts: &mut ThreadState, f: &mut Frame, cond: bool) {
     f.gregs[EFL] |= 0x100;
     ts.pmu.stepping = if cond { 2 } else { 1 };
     bump(&ctl().pmu.steps, 1);
@@ -790,11 +790,11 @@ fn give_up(ts: &mut ThreadState) {
     ts.pmu.mode = M_NONE;
 }
 
-fn reg(f: &TrapFrame, r: u8) -> u64 {
+fn reg(f: &Frame, r: u8) -> u64 {
     f.gregs[GREG_OF[r as usize & 15]]
 }
 
-fn operand(f: &TrapFrame, o: Operand, next: u64) -> u64 {
+fn operand(f: &Frame, o: Operand, next: u64) -> u64 {
     match o {
         Operand::Reg(r) => reg(f, r),
         Operand::Mem {
@@ -820,7 +820,7 @@ fn operand(f: &TrapFrame, o: Operand, next: u64) -> u64 {
 }
 
 /// The guest reached a planted `int3` at `a`: emulate the transfer there.
-fn hop_hit(ts: &mut ThreadState, frame: &mut TrapFrame, a: u64) {
+fn hop_hit(ts: &mut ThreadState, frame: &mut Frame, a: u64) {
     let c = ctl();
     let mut code = Code::new();
     let Some((len, cti)) = classify(code.at(ts, a), a) else {
@@ -879,7 +879,7 @@ fn hop_hit(ts: &mut ThreadState, frame: &mut TrapFrame, a: u64) {
 }
 
 /// A single step finished.
-fn step_done(ts: &mut ThreadState, frame: &mut TrapFrame) {
+fn step_done(ts: &mut ThreadState, frame: &mut Frame) {
     frame.gregs[EFL] &= !0x100;
     let cond = ts.pmu.stepping == 2;
     ts.pmu.stepping = 0;
@@ -895,7 +895,7 @@ fn step_done(ts: &mut ThreadState, frame: &mut TrapFrame) {
 }
 
 /// The N-th branch retired: preempt here, as at a trap.
-fn stop(ts: &mut ThreadState, frame: &mut TrapFrame) {
+fn stop(ts: &mut ThreadState, frame: &mut Frame) {
     restore_all(ts);
     frame.gregs[EFL] &= !0x100;
     let short = ts.pmu.mode == M_HOPPING && ts.pmu.n <= config().pmu_margin + proto::pmu::HOP_EXTRA;

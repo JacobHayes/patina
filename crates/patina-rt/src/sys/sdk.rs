@@ -63,7 +63,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         }
         OP_COMPUTE_HELLO => {
-            let pc = call.frame().map_or(0, |f| f.gregs[crate::trap::reg::RIP]);
+            let pc = call.frame().map_or(0, |f| f.pc());
             crate::compute::hello(ptr, pc)
         }
         _ => -e::EINVAL,

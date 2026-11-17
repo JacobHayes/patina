@@ -99,6 +99,11 @@ const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
+/// `e_machine` of this architecture's images.
+#[cfg(target_arch = "x86_64")]
+pub const ELF_MACHINE: u16 = 62;
+#[cfg(target_arch = "aarch64")]
+pub const ELF_MACHINE: u16 = 183;
 
 pub struct Image {
     pub base: u64,
@@ -145,7 +150,7 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
         if n != core::mem::size_of::<Ehdr>() as i64
             || &eh.ident[..4] != b"\x7fELF"
             || eh.ident[4] != 2
-            || eh.machine != 62
+            || eh.machine != ELF_MACHINE
         {
             fail(Setup::NotElf, 0);
         }
@@ -485,7 +490,7 @@ pub fn start(k: &KernelStart) -> ! {
     }
     for t in COPIED {
         if let Some(v) = k.aux(t) {
-            put(t, v);
+            put(t, crate::arch::aux_value(t, v));
         }
     }
     // rseq is refused, so its feature fields are left out.
@@ -523,7 +528,7 @@ pub fn start(k: &KernelStart) -> ! {
 
     crate::compute::exit(crate::state::thread());
     crate::pmu::exit(crate::state::thread(), entry, 0);
-    unsafe { crate::entry::patina_enter_guest(start_sp, entry) }
+    crate::arch::enter_guest(start_sp, entry)
 }
 
 /// Remove the kernel's vDSO and its data pages, found by name in /proc/self/maps.

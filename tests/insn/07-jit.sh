@@ -1,6 +1,6 @@
 # 7. JIT label: rdrand written into anonymous memory made executable runs unpatched; the run
 # completes with unscanned_exec_mappings >= 1 and the value differs between runs of one seed.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-jit
 for i in 1 2 3; do

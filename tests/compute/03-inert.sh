@@ -7,7 +7,7 @@
 #  d. a program that writes 0, -1 and a huge value into its cell repeats (one digest twice);
 #     one that unmaps the cell's page ends unsupported, stop compute-cell; one that empties it
 #     forever at compute-gap=0 reaches the time limit (its clock does not wrap).
-#@ tier=quick budget=15 slots=5
+#@ tier=quick budget=15 slots=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-inert
 mkdir -p "$o"

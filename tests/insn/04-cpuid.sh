@@ -2,7 +2,7 @@
 # cores; the report lists which (leaf, register, bits) differ. Then workloads under
 # --vary cpu (6 runs, one per core): digests identical or not, per workload. Decision rule: patch cpuid
 # only if a workload depends on the core. The script fails if one does (then cpuid must be patched).
-#@ tier=area budget=120
+#@ tier=area budget=120 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-cpuid
 n=$(nproc)

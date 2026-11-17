@@ -1,6 +1,6 @@
 # 3. epoll echo server, level and edge triggered, 50 non-blocking clients x 100 messages;
 #    a non-blocking connect is not writable before the handshake (500 ms delay).
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-epoll; mkdir -p "$o"
 for m in lt et; do

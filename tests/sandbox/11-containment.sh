@@ -6,7 +6,7 @@
 # - A store at a random offset of the control region's published address, and of the boundary
 #   log's, mid-run (`ctlwrite OFF BYTE`, `ctlwrite log OFF`): the message names the address.
 # - The clock-moving reproducer (`ctlwrite`); a clear-tid pointer there (`tidptr`).
-#@ tier=quick budget=20 slots=2
+#@ tier=quick budget=20 slots=2 arch=x86_64
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/containment

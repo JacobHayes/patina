@@ -1,6 +1,6 @@
 # 4. 1 MiB with net-delay-ms=1000..2000 takes more than 1 virtual second and less
 #    wall time than that (no real wait).
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-delay; mkdir -p "$o"
 best=999999

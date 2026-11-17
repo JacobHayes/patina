@@ -20,10 +20,9 @@
 
 use super::*;
 use crate::state::{ctl, proc, thread, ThreadState};
-use crate::trap::TrapFrame;
-use core::arch::global_asm;
-use proto::ctl::{Op, MAX_THREADS, SLOT_EXITING, SLOT_FREE, SLOT_RESERVED};
-use proto::layout::ALT_SIZE;
+use proto::ctl::{Op, MAX_THREADS, SLOT_EXITING, SLOT_FREE};
+#[cfg(target_arch = "x86_64")]
+use {crate::arch::Frame, proto::ctl::SLOT_RESERVED, proto::layout::ALT_SIZE};
 
 pub const CLONE_VM: u64 = 0x100;
 pub const CLONE_FS: u64 = 0x200;
@@ -42,7 +41,8 @@ pub const CLONE_DETACHED: u64 = 0x400000;
 pub const THREAD_FLAGS: u64 =
     CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM;
 
-global_asm!(
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
     // patina_clone_vm(flags, stack, ptid, ctid, tls, uc2): the real clone, through the syscall
     // stub. The child starts on `stack` (inside its own alternate stack), where the stub's `ret`
     // finds `patina_clone_child` and then `uc2`; it calls thread_start(uc2) and never returns
@@ -72,14 +72,31 @@ global_asm!(
     rt_sigreturn = const nr::RT_SIGRETURN,
 );
 
+#[cfg(target_arch = "x86_64")]
 extern "C" {
     fn patina_clone_vm(flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64, uc2: u64) -> i64;
     fn patina_sigreturn_to(uc: u64) -> !;
 }
 
 /// Enter guest code with the frame at `uc` (`rt_sigreturn`).
+#[cfg(target_arch = "x86_64")]
 pub fn sigreturn_to(uc: u64) -> ! {
     unsafe { patina_sigreturn_to(uc) }
+}
+
+// The clone and sigreturn trampolines are not ported to arm64: a run that creates a thread,
+// forks or vforks ends `arm64-unported`.
+#[cfg(target_arch = "aarch64")]
+pub fn copy_frame(_uc: u64, _alt: u64, _stack: u64) -> (u64, u64) {
+    crate::sup::unported(proto::ctl::UNPORTED_THREADS)
+}
+#[cfg(target_arch = "aarch64")]
+pub fn raw_clone_vm(_f: u64, _start: u64, _ptid: u64, _ctid: u64, _tls: u64, _uc2: u64) -> i64 {
+    crate::sup::unported(proto::ctl::UNPORTED_THREADS)
+}
+#[cfg(target_arch = "aarch64")]
+pub fn clone_vm(_c: &mut dyn Call, _f: u64, _stack: u64, _ptid: u64, _ctid: u64, _tls: u64) -> i64 {
+    crate::sup::unported(proto::ctl::UNPORTED_THREADS)
 }
 
 /// An alternate stack for a new thread: a reclaimed one, or a fresh mapping.
@@ -132,6 +149,7 @@ pub fn take_slot() -> Option<usize> {
 /// Copy the trap frame at `uc` to the top of the alternate stack `alt` (from the restorer
 /// slot below the ucontext to the top), patching `rax = 0`, the FP-state pointer, `uc_stack`
 /// and, if `stack` is not 0, `rsp`. Returns (the copy, the stack the child starts on).
+#[cfg(target_arch = "x86_64")]
 pub fn copy_frame(uc: u64, alt: u64, stack: u64) -> (u64, u64) {
     let top = alt + ALT_SIZE;
     let own_top = (uc & !(ALT_SIZE - 1)) + ALT_SIZE;
@@ -144,27 +162,29 @@ pub fn copy_frame(uc: u64, alt: u64, stack: u64) -> (u64, u64) {
             (own_top - lo) as usize,
         )
     };
-    let uc2 = unsafe { &mut *((uc + delta) as *mut TrapFrame) };
+    let uc2 = unsafe { &mut *((uc + delta) as *mut Frame) };
     if uc2.fpstate != 0 {
         uc2.fpstate += delta;
     }
     uc2.ss_sp = alt;
     uc2.ss_flags = 0;
     uc2.ss_size = ALT_SIZE;
-    uc2.gregs[crate::trap::reg::RAX] = 0;
+    uc2.gregs[crate::arch::reg::RAX] = 0;
     if stack != 0 {
-        uc2.gregs[crate::trap::reg::RSP] = stack;
+        uc2.gregs[crate::arch::reg::RSP] = stack;
     }
     let start = (lo + delta - 512) & !15;
     (uc + delta, start)
 }
 
 /// The real clone on the trampoline: the child starts in `thread_start(uc2)` on `start`.
+#[cfg(target_arch = "x86_64")]
 pub fn raw_clone_vm(flags: u64, start: u64, ptid: u64, ctid: u64, tls: u64, uc2: u64) -> i64 {
     unsafe { patina_clone_vm(flags, start, ptid, ctid, tls, uc2) }
 }
 
 /// `clone` with `CLONE_VM`: the trampoline. Returns the child's tid or -errno.
+#[cfg(target_arch = "x86_64")]
 pub fn clone_vm(
     call: &mut dyn Call,
     flags: u64,
@@ -180,7 +200,7 @@ pub fn clone_vm(
     let Some(frame) = call.frame() else {
         return i64::MIN;
     };
-    let uc = frame as *mut TrapFrame as u64;
+    let uc = frame as *mut Frame as u64;
     reclaim();
     let Some(slot) = take_slot() else {
         return -e::EAGAIN;
@@ -245,7 +265,8 @@ pub fn free_altstack(alt: u64) {
 
 /// First code of a new thread, on its own alternate stack. Must not trap and must
 /// not touch shared runtime state until it holds the turn.
-extern "C" fn thread_start(uc2: *mut TrapFrame) -> ! {
+#[cfg(target_arch = "x86_64")]
+extern "C" fn thread_start(uc2: *mut Frame) -> ! {
     let alt = (uc2 as u64) & !(ALT_SIZE - 1);
     unsafe {
         // CLONE_VM without CLONE_VFORK cleared the kernel's alternate stack in the child.
@@ -282,7 +303,7 @@ extern "C" fn thread_start(uc2: *mut TrapFrame) -> ! {
     }
     crate::pmu::open(ts);
     crate::compute::exit(ts);
-    crate::pmu::exit(ts, unsafe { (*uc2).gregs[crate::trap::reg::RIP] }, 0);
+    crate::pmu::exit(ts, unsafe { (*uc2).gregs[crate::arch::reg::RIP] }, 0);
     unsafe { patina_sigreturn_to(uc2 as u64) }
 }
 

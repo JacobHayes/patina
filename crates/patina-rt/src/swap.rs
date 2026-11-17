@@ -27,7 +27,7 @@ use proto::rec::hash_bytes;
 use proto::swap::*;
 
 const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
-const O_RDONLY_DIR: u64 = 0o200000 | 0o2000000; // O_DIRECTORY | O_CLOEXEC
+const O_RDONLY_DIR: u64 = proto::abi::open::O_DIRECTORY | 0o2000000; // O_DIRECTORY | O_CLOEXEC
 const O_PATH: u64 = 0o10000000;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RENAME_NOREPLACE: u64 = 1;
@@ -234,7 +234,11 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
         return None;
     }
     match fstat_raw(fd) {
-        Some(st) if path::is_work(st[0]) && st[3] & S_IFMT == S_IFDIR => Some(fd),
+        Some(st)
+            if path::is_work(st[0]) && proto::abi::stat::mode(&st) as u64 & S_IFMT == S_IFDIR =>
+        {
+            Some(fd)
+        }
         _ => {
             unsafe { sc1(nr::CLOSE, fd as u64) };
             None
@@ -392,7 +396,9 @@ fn swap(
                 let tb: &[u8] = match to {
                     TO_SIBLING => sib.as_ref().unwrap().bytes(),
                     TO_DANGLING => DANGLING,
-                    _ if st.is_some_and(|x| x[3] & S_IFMT == S_IFDIR) => {
+                    _ if st
+                        .is_some_and(|x| proto::abi::stat::mode(&x) as u64 & S_IFMT == S_IFDIR) =>
+                    {
                         // The work root's parent.
                         let i = root.iter().rposition(|&b| b == b'/').unwrap_or(0);
                         if i == 0 {
@@ -439,7 +445,8 @@ pub fn after(s: Swap) {
     let ours = lstat_in(pfd, &s.name).is_some_and(|x| x[1] == s.ino);
     let undone = match s.mutation {
         MUT_SYMLINK => {
-            ours && lstat_in(pfd, &s.name).is_some_and(|x| x[3] & S_IFMT == S_IFLNK)
+            ours && lstat_in(pfd, &s.name)
+                .is_some_and(|x| proto::abi::stat::mode(&x) as u64 & S_IFMT == S_IFLNK)
                 && mutate_as_guest(nr::UNLINKAT, [pfd as u64, s.name.ptr(), 0, 0, 0, 0]) == 0
         }
         MUT_RENAME => ours && rename_in(pfd, &s.name, &s.sibling),

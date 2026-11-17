@@ -1,6 +1,6 @@
 # 3. W6 shell-pipeline under /bin/sh (dash) and /bin/bash: ok; stdout equals a native run after
 # masking the lines the workload marks ("~ "); identical over 3 runs, seed 1 (--vary cpu,load).
-#@ tier=area budget=120
+#@ tier=area budget=120 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-shell
 mkdir -p "$o"

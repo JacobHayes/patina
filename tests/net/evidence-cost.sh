@@ -1,6 +1,6 @@
 # Evidence: cost of a one-byte round trip between two processes under patina versus native
 # loopback TCP (difference of 11000 and 1000 round trips, best of 3), and supervisor steps per MB.
-#@ tier=evidence budget=300 slots=8
+#@ tier=evidence budget=300 slots=8 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-cost; mkdir -p "$o"
 ms() { python3 -I -c 'import subprocess,sys,time

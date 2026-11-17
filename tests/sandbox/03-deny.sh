@@ -4,7 +4,7 @@
 # runtime before the policy decides (symlinks and relative names cannot walk into /proc,
 # /sys or /dev), and the determinism hardening checks after the call (by the mount of what was reached) are
 # gone. The determinism hardening reproducers of B7 (procescape) still pass.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=4 arch=x86_64
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/deny

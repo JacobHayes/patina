@@ -1,5 +1,5 @@
 # 5. Every time call trapped: hello-dyn's log has >= 200 clock records; no clock or randomness record is Pass.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/05-clock/hello-dyn
 patina_run "$out" 1 hello-dyn

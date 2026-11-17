@@ -1,7 +1,7 @@
 # Hazard: CPU migration inside a run. patina pins a sandbox to one CPU; here a second thread moves
 # every task of the run to a random CPU every 2 ms while it runs (counters are per task, so
 # they must follow). 5 runs each of four programs must equal an unperturbed run.
-#@ tier=area budget=200 slots=2
+#@ tier=area budget=200 slots=2 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, random, subprocess, sys, threading, time

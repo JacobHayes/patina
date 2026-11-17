@@ -1,6 +1,6 @@
 # 8. Every row has a reason, and patina table shows no Stop for any call that strace -c reports
 #    when fs-tour and the commands below run natively.
-#@ tier=area budget=60
+#@ tier=area budget=60 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/08-table
 mkdir -p "$o"

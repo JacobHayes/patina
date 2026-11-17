@@ -6,7 +6,7 @@
 # (`incq mem`, `add reg, mem`): no instruction-boundary schedule can interleave them, so it
 # cannot be found by any preemption on a one-thread-at-a-time executor; printed, not failed,
 # after checking that the compiled code is indeed so.
-#@ tier=evidence budget=1200 slots=8
+#@ tier=evidence budget=1200 slots=8 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, subprocess, sys

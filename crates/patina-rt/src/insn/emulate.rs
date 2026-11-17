@@ -10,10 +10,10 @@
 //! the event's `seq`, and the carry flag set (OF, SF, ZF, AF, PF cleared, as the instructions
 //! do). Any other `ud2` is not ours: the guest's own SIGILL.
 
+use crate::arch::{reg::*, Frame};
 use crate::entry::{charge, maybe_yield};
 use crate::state::{config, thread};
 use crate::sys::sig::{self, SigInfo};
-use crate::trap::{reg::*, TrapFrame};
 use core::sync::atomic::Ordering::Relaxed;
 use proto::ctl::{INSN_RDPID, INSN_RDRAND, INSN_RDSEED};
 use proto::{draw, Stream};
@@ -31,7 +31,7 @@ const GREG: [usize; 16] = [
 const EFL_CF: u64 = 1 << 0;
 const EFL_ARITH: u64 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
 
-pub fn try_emulate(frame: &mut TrapFrame, sig: i32, _info: &SigInfo) -> bool {
+pub fn try_emulate(frame: &mut Frame, sig: i32, _info: &SigInfo) -> bool {
     if sig as u64 != sig::SIGILL {
         return false;
     }
@@ -115,7 +115,7 @@ pub fn try_emulate(frame: &mut TrapFrame, sig: i32, _info: &SigInfo) -> bool {
 }
 
 /// A patched `pause`: a scheduling point.
-fn pause(frame: &mut TrapFrame, rip: u64) -> bool {
+fn pause(frame: &mut Frame, rip: u64) -> bool {
     let ts = thread();
     let c = crate::state::ctl();
     ts.seq = c.seq.load(Relaxed) + 1;

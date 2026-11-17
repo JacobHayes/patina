@@ -1,5 +1,5 @@
 # 7. patina log diff: different seeds -> prints the first differing record, exits non-zero; one seed twice -> exits 0.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/07-logdiff
 patina_run "$d/s1a" 1 hello-static

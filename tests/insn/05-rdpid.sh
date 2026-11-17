@@ -1,7 +1,7 @@
 # 5. rdpid: the same census and decision rule as cpuid. The instruction reports the core
 # (shown by a guest on two cores); the scanner finds no rdpid site in glibc, ld.so, libstdc++,
 # libcrypto, CPython, Go or Rust binaries.
-#@ tier=area budget=60
+#@ tier=area budget=60 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/05-rdpid
 mkdir -p "$o"

@@ -1,7 +1,7 @@
 # 7. Every flag `patina --help --format json` lists for a command parses for that command (the
 #    help and the parser read one table); a flag the table does not list for it is refused.
 #    Each command's text help names each of its flags. --version prints a parseable version.
-#@ tier=quick budget=5
+#@ tier=quick budget=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 "$PATINA" --help --format json >"$RUNS/help.json"
 python3 -I - "$PATINA" "$RUNS/help.json" <<'PY' || die "help and parser disagree"

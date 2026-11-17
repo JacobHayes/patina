@@ -2,7 +2,7 @@
 # The 29 rows (not Deny or Stop) no determinism hardening run reached, exercised by one guest under the determinism hardening
 # protocol (reference; repeat, cpu, load, aslr, sandbox, parallel and env variants), faults
 # off and on: every variant identical to the reference.
-#@ tier=area budget=120 slots=8
+#@ tier=area budget=120 slots=8 arch=x86_64
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/rows

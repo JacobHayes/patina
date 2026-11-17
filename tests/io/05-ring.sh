@@ -3,7 +3,7 @@
 #    none unsupported. Runs go RING_JOBS (default 4) at a time, each pinned to its own CPU; each boundary
 #    log is deleted once its digest is recorded. The large version (50 seeds x 100,000 laps)
 #    is tests/io/evidence-ring.sh.
-#@ tier=area budget=120 slots=4
+#@ tier=area budget=120 slots=4 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/05-ring; mkdir -p "$o"
 LAPS=${RING_LAPS:-5000}

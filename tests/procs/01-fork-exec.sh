@@ -1,7 +1,7 @@
 # 1. fork-exec: ok; patina verify --runs 3 --vary cpu,load,sandbox identical (seed 1);
 # at least 2 distinct digests over seeds 1-3 (one run each, at once); the PIDs printed are identical across runs; no
 # process of any of these runs is left (200 daemons are running when the main guest exits).
-#@ tier=quick budget=60 slots=3
+#@ tier=quick budget=60 slots=3 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-fork-exec
 for seed in 1; do

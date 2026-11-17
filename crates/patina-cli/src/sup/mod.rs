@@ -549,6 +549,17 @@ impl Sup {
                         ),
                     ));
                 }
+                if code == HE_UNPORTED {
+                    let what = if errno == UNPORTED_CALL {
+                        format!("the program called {}", proto::table::name(nr))
+                    } else {
+                        format!("the run reached {}", unported_name(errno))
+                    };
+                    self.finish(Verdict::new(
+                        "arm64-unported",
+                        format!("{what}, which is not ported to arm64 yet"),
+                    ));
+                }
                 if code == HE_DISK_FULL {
                     self.finish(log_write_verdict(
                         -(errno as i64) as i32,

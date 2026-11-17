@@ -30,6 +30,10 @@ use proto::layout::FD_HIDDEN_MIN;
 use proto::table::{Class, Group, Row};
 
 pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
+    #[cfg(target_arch = "aarch64")]
+    if !slice_serves(call.nr()) {
+        crate::sup::unported_call(call, row);
+    }
     for i in 0..6 {
         if row.fds & (1 << i) != 0 && call.arg(i) as i32 >= FD_HIDDEN_MIN {
             return Action::Return(-e::EBADF);
@@ -60,6 +64,37 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
             act
         }
     }
+}
+
+/// The calls the first slice of the arm64 port serves: those a static C program printing
+/// to stdout and a file under /work makes. Any other ends the run `arm64-unported`, naming it.
+/// Goes when the whole call surface is ported to arm64.
+#[cfg(target_arch = "aarch64")]
+fn slice_serves(n: u64) -> bool {
+    matches!(
+        n,
+        nr::BRK
+            | nr::MMAP
+            | nr::MUNMAP
+            | nr::MPROTECT
+            | nr::SET_TID_ADDRESS
+            | nr::SET_ROBUST_LIST
+            | nr::RSEQ
+            | nr::PRLIMIT64
+            | nr::GETRANDOM
+            | nr::READLINKAT
+            | nr::GETPID
+            | nr::CLOCK_GETTIME
+            | nr::OPENAT
+            | nr::CLOSE
+            | nr::READ
+            | nr::WRITE
+            | nr::IOCTL
+            | nr::FSTAT
+            | nr::NEWFSTATAT
+            | nr::GETDENTS64
+            | nr::EXIT_GROUP
+    )
 }
 
 /// A call the table lets through: its paths, its faults, its handler.

@@ -31,7 +31,7 @@ const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 const O_CREAT: u64 = 0o100;
 const O_EXCL: u64 = 0o200;
-const O_NOFOLLOW: u64 = 0o400000;
+use proto::abi::open::O_NOFOLLOW;
 const O_PATH: u64 = 0o10000000;
 const O_CLOEXEC: u64 = 0o2000000;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
@@ -350,7 +350,7 @@ fn policy_ground(p: &[u8], next: &[u8]) -> bool {
 }
 
 fn is_dir(p: &PathBuf) -> Result<bool, i64> {
-    let mut st = [0u64; 18];
+    let mut st = [0u64; proto::abi::stat::WORDS];
     let r = unsafe {
         sc4(
             nr::NEWFSTATAT,
@@ -363,7 +363,7 @@ fn is_dir(p: &PathBuf) -> Result<bool, i64> {
     if r < 0 {
         return Err(r);
     }
-    Ok(st[3] as u32 & 0o170000 == 0o040000)
+    Ok(proto::abi::stat::mode(&st) & 0o170000 == 0o040000)
 }
 
 /// Walk `s` from `dirfd` in the runtime; `out` gets the absolute, symlink-free path.

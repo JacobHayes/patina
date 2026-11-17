@@ -6,6 +6,7 @@ profile = "minimal"
 components = ["rustfmt", "clippy"]
 targets = [
   "x86_64-unknown-linux-gnu",
-  # The in-guest runtime (crates/patina-rt).
+  # The in-guest runtime (crates/patina-rt), one per architecture.
   "x86_64-unknown-none",
+  "aarch64-unknown-none-softfloat",
 ]

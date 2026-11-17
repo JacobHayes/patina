@@ -1,5 +1,5 @@
 # 8. patina table prints a row for every syscall number the host's kernel headers know for its architecture; rows not written show Stop.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 "$PATINA" table >"$RUNS/08-table.md"
 # The host's numbers for its own architecture, from <asm/unistd.h> with the macros expanded

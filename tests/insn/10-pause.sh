@@ -5,7 +5,7 @@
 # yielded at them; with pause points off it ends unsupported, stop compute-stall. One of
 # them gives one digest over 5 runs under --vary cpu,aslr. Spin probes are off throughout,
 # so that pause points alone are measured.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=4 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-pause
 mkdir -p "$o"

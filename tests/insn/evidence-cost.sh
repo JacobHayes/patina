@@ -1,6 +1,6 @@
 # Evidence. Cost: a tight loop of 1,000,000 rdtsc natively and under patina (same core), time per
 # emulation; rdtsc/rdtscp emulations per run for the scheduler/files guests, CPython and Go start-up.
-#@ tier=evidence budget=300 slots=8
+#@ tier=evidence budget=300 slots=8 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-cost
 mkdir -p "$o"

@@ -1,7 +1,7 @@
 # 4. Timeouts in virtual time: poll and epoll_wait with 10 s on a silent pipe return 0 after
 #    >= 10 virtual seconds and in less wall time than that (no real wait); a 1 s periodic timerfd read 100 times reports
 #    100 expirations at exact virtual times; SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-timeouts; mkdir -p "$o"
 for m in poll epoll timerfd rcvtimeo; do

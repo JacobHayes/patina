@@ -4,6 +4,6 @@
 #    and =0 never; a `sometimes` holds on some seeds and not others; a child started by fork
 #    and one by execve report into the run's table; with faults-after-setup no point fires
 #    before `setup-complete`; a violation replays identically.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 arch=x86_64
 set -eu
 exec python3 -I "$(dirname "$0")/lib/points.py"

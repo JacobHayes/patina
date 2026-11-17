@@ -4,7 +4,7 @@
 # holder making a call inside the critical section) and of stock Go at the default CPU count
 # (go-sweep, the Go stall reproducer, and W4). The 100-seed sweeps are evidence-spin and
 # evidence-go. SKIP without CAP_PERFMON.
-#@ tier=area budget=280 slots=5
+#@ tier=area budget=280 slots=5 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys

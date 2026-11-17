@@ -7,7 +7,7 @@
 #   position, the share of a child's time that is the prefix it shares with its base, and the
 #   share of children whose post-crash tree repeats an earlier child's of the same seed.
 # Every line gives the runs with the finding, the CPU-seconds (sum of wall_ms) and the rate.
-#@ tier=evidence budget=1500 slots=6
+#@ tier=evidence budget=1500 slots=6 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 : "${PATINA_GUESTS:?}"
 H=/guest/fjall-harness-debug

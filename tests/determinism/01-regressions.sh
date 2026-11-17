@@ -1,7 +1,7 @@
 #!/bin/sh
 # Regression tests for the differences determinism hardening found and fixed (docs/EVIDENCE.md, "Differences").
 # Each runs the attack guest that first showed the difference under the variant that exposed it.
-#@ tier=quick budget=60 slots=4
+#@ tier=quick budget=60 slots=4 arch=x86_64
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/regress

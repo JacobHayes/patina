@@ -5,7 +5,7 @@
 # journal-entry assertion) needs a crash in a window of a few crash points, which plain sweeps
 # almost never hit; 12-f2.sh finds it by trying every crash point.
 # The seed depends on the host's libc and CPU, so this is an area check, not a quick one.
-#@ tier=area budget=15
+#@ tier=area budget=15 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 opts="--config $("$PATINA_CFG" pause-points=false) --cpus 24 --env FJ_N=2000 --buggify --crash machine:1"
 f=$RUNS/f6-2001

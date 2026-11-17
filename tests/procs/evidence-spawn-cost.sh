@@ -1,7 +1,7 @@
 # Evidence: start-up cost of one
 # fork+execve of /bin/true + waitpid under patina and natively (median of 10, min, max). Timing:
 # runs alone (slots=8). No pass/fail threshold beyond the runs being ok.
-#@ tier=evidence budget=300 slots=8
+#@ tier=evidence budget=300 slots=8 arch=x86_64
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/11-evidence
 mkdir -p "$o"

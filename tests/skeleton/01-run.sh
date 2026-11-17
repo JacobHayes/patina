@@ -1,5 +1,5 @@
 # 1. patina run --seed 1 for each guest: outcome ok, stdout as expected, PID printed is 2.
-#@ tier=quick
+#@ tier=quick arch=x86_64
 . "$(dirname "$0")/lib.inc"
 for g in $GUESTS; do
     out=$RUNS/01-run/$g

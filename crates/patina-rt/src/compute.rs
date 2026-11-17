@@ -26,11 +26,8 @@
 //! With counter preemption on (`Config::pmu`) the cell holds `NO_LIMIT` and nothing is
 //! counted or charged here: counters own scheduling and time for the whole run.
 
+use crate::arch::Frame;
 use crate::state::{config, ctl, proc, ThreadState};
-use crate::trap::{
-    reg::{EFL, R11, RIP},
-    TrapFrame,
-};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE};
 use proto::layout::{COMPUTE_CELL, PAGE};
@@ -296,7 +293,7 @@ fn maps_hit(line: &[u8], pc: u64) -> Option<(u64, u64, &[u8])> {
 
 /// The trap of `COMPUTE_POINT` (after `enter`), with the program's registers in `frame`.
 /// Returns to the trap entry, which leaves through the normal trap exit.
-pub fn point(ts: &mut ThreadState, frame: &TrapFrame) {
+pub fn point(ts: &mut ThreadState, frame: &Frame) {
     let p = &mut proc().compute;
     let c = ctl();
     let reason = match p.mode {
@@ -316,14 +313,7 @@ pub fn point(ts: &mut ThreadState, frame: &TrapFrame) {
     } else {
         bump(&c.compute.switches, 1);
     }
-    let g = &frame.gregs;
-    let mut words = [0u64; 18];
-    words.copy_from_slice(&g[..18]);
-    // The trap and resume flags a spin probe's single steps may leave (in the flags and in the
-    // copy `syscall` saved in r11) depend on when the probe came: not hashed.
-    const TF_RF: u64 = 0x100 | 0x1_0000;
-    words[EFL] &= !TF_RF;
-    words[R11] &= !TF_RF;
+    let words = frame.regs_for_record();
     let bytes = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 18 * 8) };
     let rec = proto::Rec {
         seq: ts.seq,
@@ -332,7 +322,7 @@ pub fn point(ts: &mut ThreadState, frame: &TrapFrame) {
         kind: proto::RecKind::Preempt as u8,
         class: 0,
         nr: PREEMPT_NR,
-        args: [g[RIP], p.armed as u64, reason, p.events, p.draw, 0],
+        args: [frame.pc(), p.armed as u64, reason, p.events, p.draw, 0],
         ret: 0,
         out_hash: proto::rec::hash_bytes(0, bytes),
         in_hash: 0,
