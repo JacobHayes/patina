@@ -4,7 +4,7 @@
 # it). For the first such cell the kept tree of the incarnation before the failing one makes
 # the native harness fail the same way, and the same seed without the fault passes. The
 # cells depend on the schedule and the guest build, so this is an area check, not a quick one.
-#@ tier=area budget=30 arch=x86_64
+#@ tier=area budget=30 slots=4
 . "$(dirname "$0")/lib/common.inc"
 for n in $(seq 50 80); do
     seeds=$(matches "f4-n$n" '^batch-atomic-across-keyspaces: ' fjall-harness 1-10 -- \

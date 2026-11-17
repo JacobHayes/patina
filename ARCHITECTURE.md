@@ -24,6 +24,16 @@ crate `crates/patina` is separate and has no dependencies. `patina-cli/build.rs`
 runtime and embeds it; at run time it is written once to `~/.cache/patina/rt-<hash>` and
 executed from there (`launch.rs`).
 
+The architecture seam: in the runtime, `arch/x86_64/` and `arch/aarch64/` export the same names
+(the trap frame and its accessors, the system-call stub, process entry, the signal frame, the
+clone trampoline, instruction sites and their patch, the stepper of a spin probe, the counter
+trap), and portable code names no register or instruction (`arch/mod.rs`). In `patina-proto`,
+what both sides must agree on per architecture: system-call numbers (`nr/`), the structure
+layouts and flags that differ (`abi.rs`), the instruction-site rules (`insn/`), and for arm64
+the successor decoder (`step.rs`) and signal-frame records (`sigrec.rs`), compiled and tested
+on every host. In `patina-cli`, the host checks (`host.rs`) and branch counters
+(`launcher/pmu.rs`, x86_64 only). One build serves one architecture; seeds do not cross.
+
 ## The trap
 
 The runtime is started by `execveat` with the program's path. It loads the program itself
@@ -173,7 +183,7 @@ names the thread. The cause is a loop that changes state on each pass (a counter
 timestamp it computes) and contains no system call or spin hint. The fix is `--preempt
 branches`, where the host allows it, or rebuilding that code with compute points (its message
 says both: the supervisor does not know whether the code is rebuilt; on arm64, where branch
-counters are not ported, it names compute points only). Rebuilt code does not
+counters are not supported, it names compute points only). Rebuilt code does not
 reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
 computing alone is left to finish.
 
@@ -440,8 +450,14 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 
 ## Limits
 
-- **Linux x86_64; arm64 is being ported.** No macOS. bwrap and unprivileged user namespaces
-  are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
+- **Linux x86_64 and arm64.** No macOS. bwrap and unprivileged user namespaces
+  are required. arm64 needs Linux 6.12 or later (the counter-timer trap), 4 KiB pages, a
+  48-bit address space and one CPU model among the CPUs a run may use; `patina doctor`
+  refuses a host without them. Also refused there: an SVE vector length above 512 bits, and a
+  run that uses SME's streaming mode or ZA (`signal-context`). A program cannot enable MTE or
+  guarded control stacks (their `prctl`s answer `EINVAL` and are recorded) or allocate a
+  protection key (`pkey_alloc` answers `ENOSYS`); `FPMR` and `POR_EL0` are carried through
+  signal frames. On arm64 every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   branch counters are not supported (the launcher refuses `--preempt branches`, and
   `patina doctor` checks the host's arm64 requirements). Threads, fork,

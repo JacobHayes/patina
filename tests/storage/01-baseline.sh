@@ -1,7 +1,7 @@
 # 1. W9 clean baseline (reduced: 40 seeds per build; the 200-seed sweeps are in docs/EVIDENCE.md).
 # No faults, no crash: every seed ok, debug and release. With --crash process:3 the only
 # failures allowed are F1 (open-after-crash).
-#@ tier=area budget=90 slots=4 arch=x86_64
+#@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib/common.inc"
 for b in debug release; do
     sweep clean-$b fjall-harness 1-40 -- -- /guest/fjall-harness-$b >/dev/null

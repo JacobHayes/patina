@@ -695,6 +695,52 @@ can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `unsu
   happen, and a `lock`-prefixed read-modify-write is never split.
 - With `--preempt branches` the hooks do nothing; branch counters switch instead.
 
+## Hosts
+
+Patina runs on Linux x86_64 and arm64, not on macOS. `patina doctor` checks the host, one line
+per requirement, and prints the fix for anything missing:
+
+| `patina doctor` line | x86_64 | arm64 |
+|---|---|---|
+| `bwrap`, `user namespaces`, `seccomp`, `personality`, `sandbox run` | bubblewrap on `PATH` and unprivileged user namespaces | the same |
+| the clock trap | `rdtsc trap` | `counter-timer trap`: Linux 6.12 or newer |
+| `page size`, `address space` | | 4 KiB pages, 48-bit addresses |
+| `one CPU model` | | every CPU a run may use is one model (on a big.LITTLE machine, choose them with `taskset`) |
+| `signal context` | | FP/SIMD, SVE up to 512 bits, FPMR and POE records; a run that uses SME's streaming mode or ZA stops `signal-context` |
+| `pointer authentication` | | its keys are disabled for programs under Patina |
+| `spin probes` (not required) | code writes through `/proc/self/mem`; soft-dirty bits | code writes through `/proc/self/mem`; userfaultfd write protection |
+| `branch counters` (optional) | AMD Zen 5 with its PMU exposed, and `CAP_PERFMON` | not supported |
+
+Where `spin probes` is off, programs still run; a spin-wait with no hint instruction in its loop
+ends `compute-stall`, and the stall's message says why the probe was off.
+
+Seeds and digests are per architecture and per kind of host. A seed found on x86_64 is a
+different run on arm64. On one host a seed repeats exactly. Across hosts of one architecture, a
+static program that reads no host file gives the same digest; a dynamic one reads the host's
+loader, libc and `/etc/ld.so.cache`, so its digest follows the image
+([EVIDENCE](EVIDENCE.md#second-hosts)).
+
+What differs on arm64:
+
+- The spin hints that are scheduling points are `yield`, `isb`, `wfe` and `wfi` (x86_64:
+  `pause`); `RNDR` and `RNDRRS` answer from the seed (x86_64: `rdrand`, `rdseed`).
+- `--preempt branches` is refused: no branch counters.
+- Rust compute points build with `--target aarch64-unknown-linux-gnu`.
+- The system call table is the generic one: no `select`, `pause`, `alarm`, `fork` or
+  `epoll_create`; libc uses `pselect6`, `clone` and `epoll_create1` instead.
+
+On an Apple Silicon Mac, run Patina in a Linux arm64 VM with 4 KiB pages and a 6.12 or newer
+kernel. There, `patina doctor` should end `this host can run patina`, and a first run:
+
+```text
+$ patina run --seed 1 -- /bin/echo hello
+ok (exit): the program exited 0
+```
+
+This is verified in one VM product (Tart, Ubuntu 24.04 with the 7.0 kernel). UTM, Parallels,
+VMware Fusion, Lima, OrbStack and Docker Desktop are not yet confirmed. Asahi Linux (16 KiB
+pages) and Ubuntu 24.04's original 6.8 kernel are refused.
+
 ## CI on GitHub Actions
 
 Patina runs on the `ubuntu-24.04` runner after two setup lines. A job that sweeps a Rust
@@ -722,6 +768,21 @@ ok    sandbox run                        a run of /usr/bin/true is ok (166 ms)
 off   branch counters (pmu, optional)    not supported on this CPU, GenuineIntel family 0x6 model 0xad (supported: AMD Zen 5)
 info  cpu_model                          Intel(R) Xeon(R) 6975P-C
 info  kernel                             7.0.0-1014-aws
+this host can run patina
+```
+
+On arm64 (from 0.9.0, the first release with an arm64 binary), `runs-on: ubuntu-24.04-arm`
+takes the same two setup lines; `ubuntu-26.04-arm` needs neither (its bubblewrap is installed
+and allowed). On `ubuntu-24.04-arm`, `patina doctor` prints (in part):
+
+```text
+ok    counter-timer trap                 PR_SET_TSC makes the counter-timer registers fault
+ok    one CPU model                      cpus 0-3: MIDR 0x410fd490
+ok    signal context                     records: FP/SIMD, SVE
+ok    sandbox run                        a run of /usr/bin/true is ok (47 ms)
+ok    spin probes                        code writes through /proc/self/mem; userfaultfd write protection tracks written pages
+off   branch counters (pmu, optional)    not supported on arm64
+info  kernel                             7.0.0-1017-azure
 this host can run patina
 ```
 
@@ -761,7 +822,7 @@ and get the same digest; `seccomp=unconfined` alone still fails at bwrap's mount
 | `patina-dst-proptest` | plain `proptest`; its seed comes from `getrandom` |
 | `patina test` | `patina sweep --cases` |
 | `patina campaign` | `patina sweep` with `--faults`, `--crash`, `--buggify` |
-| `cargo patina build`, `cargo patina audit` | `cargo build`: any Linux x86_64 binary runs |
+| `cargo patina build`, `cargo patina audit` | `cargo build`: any Linux binary for the host runs |
 
 A violation ends the run. A harness that reported every broken invariant with one `verdict`
 each now checks them all first and makes one call naming each that failed, or keeps the most

@@ -1,6 +1,6 @@
 # Agent guidance
 
-Patina runs an unmodified Linux x86_64 program under a seed that decides scheduling, time,
+Patina runs an unmodified Linux program (x86_64 or arm64) under a seed that decides scheduling, time,
 randomness, faults and crashes. This file is what a builder needs: where things are, how to
 check and land, and the rules that hold everywhere.
 
@@ -24,20 +24,23 @@ updates the docs in the same commit.
 - `crates/patina-rt`: the in-guest runtime, its own workspace, built for the host's bare target
   (`x86_64-unknown-none`, `aarch64-unknown-none-softfloat`) by `crates/patina-cli/build.rs` and
   embedded in the binary. What differs by architecture (entry, the syscall stub, the signal
-  frame, the guest copy) is in `src/arch/<arch>/`; arm64 stand-ins for parts not ported yet
-  are in `src/arch/aarch64/standin/`.
-- System call numbers by name: `proto::nr` (generated); structure layouts and flags that
-  differ by architecture: `proto::abi`.
+  frame, the clone trampoline, instruction sites, the spin probe's stepper, the guest copy) is
+  in `src/arch/<arch>/`, both exporting the same names (`src/arch/mod.rs`).
+- System call numbers by name: `proto::nr` (generated, one table per architecture); structure
+  layouts and flags that differ by architecture: `proto::abi`; arm64's successor decoder and
+  signal-frame records: `proto::step`, `proto::sigrec` (tested on every host).
 - `crates/patina-cli`: the `patina` binary: launcher, supervisor, CLI.
 - SDKs: `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`.
 - `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run. A script marked
-  `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`); during the arm64
-  port each ported area loses its marks.
+  `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`): the branch
+  counter scripts, x86-only instructions, a seed found on x86_64, and evidence scripts not
+  yet run on arm64; each says why in its header or in docs/EVIDENCE.md.
 - `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the nightly job.
 
-Host: Linux x86_64 or arm64 (arm64: the parts ARCHITECTURE "Limits" lists are not ported
-yet), `bwrap`, unprivileged user namespaces (`patina doctor` says what is
-missing). rustup installs the pinned toolchain; mise supplies Go.
+Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), `bwrap`, unprivileged user
+namespaces (`patina doctor` says what is missing). rustup installs the pinned toolchain; mise
+supplies Go. arm64 changes are developed against a Linux arm64 VM and accepted on the hosted
+arm runner (`check-arm64`).
 
 ## Checks and landing
 

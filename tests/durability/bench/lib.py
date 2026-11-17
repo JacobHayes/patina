@@ -34,8 +34,15 @@ def prune(d):
 def config(opts):
     """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "stall-ms=2000"): the keys go
     into a patina.toml (tests/cfg), passed as --config."""
-    keys = [o for o in opts if not o.startswith("-") and "=" in o]
-    rest = [o for o in opts if o not in keys]
+    keys, rest, i = [], [], 0
+    while i < len(opts):
+        o = opts[i]
+        if o.startswith("-") and "=" not in o and i + 1 < len(opts) and not opts[i + 1].startswith("-"):
+            rest += [o, opts[i + 1]]  # a flag and its value (`--fault fs-error-permille=5`)
+            i += 2
+            continue
+        (keys if not o.startswith("-") and "=" in o else rest).append(o)
+        i += 1
     if not keys:
         return rest
     f = subprocess.run([os.environ["PATINA_CFG"]] + keys, capture_output=True, text=True, check=True).stdout.strip()

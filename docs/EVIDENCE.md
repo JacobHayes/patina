@@ -137,7 +137,7 @@ background sweeper polling an idle heap does not; spin probes find it.
 | Spin table, 7 spin-waits, system calls only (`pause-points = false`, `spin-probes = false`) | glibc spin lock, C spin lock and Rust spin lock (each with a call inside) `compute-stall` 20/20; the 4 others `ok` |
 | Spin table, pause points only | 140/140 `ok` |
 | Spin table, default | 140/140 `ok` |
-| W1-W9, default, with their faults | no `compute-stall`; W8 `sockets all` fails 20/20 on an injected reset (its faults draw `net-reset-permille=30` for every send, so every seed resets a connection, and the guest exits on `ECONNRESET`); W9 seed 5 failed on an injected `ENFILE` after a crash, which the harness judged a finding (fixed; `storage/11-unjudged`); the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
+| W1-W9, default, with their faults | no `compute-stall`; W8 `sockets all` fails 20/20 on an injected reset (its faults draw `net-reset-permille=30` for every send, so every seed resets a connection, and the guest exits on `ECONNRESET`); W9 seed 5 failed on an injected `ENFILE` after a crash, which the harness judged a finding (fixed; `storage/11-unjudged`); W6 (`fs-error-permille=20`) `failure` on 18 of 20 seeds, where an injected file-system error makes a command of the pipeline exit nonzero (no pause point or probe in it); the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
 | W4 (stock Go), 100 seeds, spin probes off / on | `compute-stall` 92/100 / 0/100 |
 | go-sweep, 100 seeds, spin probes off / on | 99/100 / 0/100 |
 | go-sweep at 24 CPUs, 100 seeds, spin probes off / on | 97/100 / 0/100 |
@@ -198,7 +198,7 @@ architecture. 2026-11-17.
 | Spin table, 10 spin-waits (the x86_64 seven, the C lock without its hint, two `ldaxr`/`stxr` locks), system calls only, runner | glibc spin lock, C spin lock with and without the hint, Rust spin lock (each with a call inside) and both exclusive-pair locks `compute-stall` 20/20; the 4 others `ok` |
 | The same, pause points only | glibc spin lock (no hint on arm64), the C lock without the hint and both exclusive-pair locks `compute-stall` 20/20; the rest `ok` |
 | The same, default | 200/200 `ok`; 4,141 spin preemptions in each of glibc's and the hintless lock's 20 runs, 405 in each exclusive-pair lock's |
-| W1-W9, default, with their faults, runner | no `compute-stall`; W4: 2,579 pause points, 596 spin preemptions; W8 and W6 fail 20/20 on injected errors (W6 `ok` on x86_64; no pause point or probe in it) |
+| W1-W9, default, with their faults, runner | no `compute-stall`; W4: 2,579 pause points, 596 spin preemptions; W8 fails 20/20 on injected resets, as on x86_64; W6 `failure` on 20 of 20 seeds (VM: 19 of 20; x86_64: 18 of 20), an injected file-system error ending the pipeline, not an arm64 difference |
 | W4 (stock Go), 100 seeds, spin probes off / on, runner | `compute-stall` 84/100 / 0/100 |
 | go-sweep, 100 seeds, spin probes off / on, runner | 100/100 / 0/100 |
 | go-sweep at 24 CPUs, 100 seeds, spin probes off / on, runner | 97/100 / 0/100 |
@@ -241,8 +241,8 @@ it, or a `$d` mapping symbol marks it as data.
 
 | | Dev VM | Runner |
 |---|---|---|
-| ELF files, words of executable sections | 2,493, 121.2 M | 4,421, 502.9 M |
-| Words read by literal loads; words under `$d` | 2,101; 18,714 | 24,274; 217,663 |
+| ELF files, words of executable sections | 2,493, 121.2 M | 4,422, 502.9 M |
+| Words read by literal loads; words under `$d` | 2,101; 18,714 | 24,274; 19,001 |
 | Pause hints in executable sections | 115 (`isb` 72, `yield` 43) | 1,066 (`isb` 966, `yield` 62, `wfe` 38) |
 | `RNDR`/`RNDRRS`, `PACGA`, counter reads | 0, 0, 27 | 12, 0, 283 |
 | Of those, read by a literal load or under `$d` | 0 | 0 |
@@ -518,7 +518,7 @@ preemption mark fails `compute/06-go` (`boolspin` with one P livelocks).
 Not implemented (run ends `unsupported` or the call is refused): `timer_create`,
 `ITIMER_VIRTUAL`/`ITIMER_PROF`; raw, netlink and packet sockets, UDP multicast and broadcast;
 `sched_*` policy calls
-and `get`/`setpriority`; anything outside Linux x86_64.
+and `get`/`setpriority`; anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
   counter, a timestamp it computes itself) ends `compute-stall` without `--preempt
@@ -754,6 +754,46 @@ Across hosts, a statically linked guest that reads no host file gives the same r
 CPU's XSAVE size is the same and it does not read `uname` or mountinfo; a dynamic guest
 also needs the same `/usr` and `/etc/ld.so.cache`, which in practice means the same image.
 Cross-host identity is not promised.
+
+### arm64
+
+The same protocol on arm64, 2026-11-17: one `patina` and one guest set built on an
+`ubuntu-24.04-arm` runner from `c15ebe60` (static guests built `-static`, `tokio-mt` with
+`crt-static`), copied unchanged to each host, 66 cells, 330 runs per host. The workflow took
+6 minutes (bundle 2.5, each matrix job 3).
+
+| Host | Image, kernel | CPU | Cells identical over 5 runs |
+|---|---|---|---|
+| GitHub `ubuntu-24.04-arm` (two concurrent jobs, two runners) | 24.04, 7.0.0-1017-azure | Neoverse-N2, SVE 128 bits | 66/66 each |
+| GitHub `ubuntu-26.04-arm` | 26.04, 7.0.0-1019-azure | Neoverse-N2, SVE 128 bits | 66/66 |
+| development VM (Tart) | 24.04, 7.0.0-43-generic | Apple M4, no SVE, SME | 66/66 |
+
+Within each host every run of a cell has one digest; two counters outside the digest vary
+(the supervisor's memory high-water mark, and in `go-static` the number of spin-probe steps,
+whose arrival is not deterministic by design). Outcomes other than `ok`, the same on every
+host: `sockets` and `sockets-static` with faults `all` (`failure`, an injected reset), and
+`w6.sh` seeds 2-3 with faults `all` (`failure`, an injected error). Only the 26.04 runner adds
+`w6.sh` seed 1 (`mktemp` fails to map `libgcc_s`, which 26.04's coreutils load, on an injected
+`ENOMEM`) and CPython 3.14 seed 2 `liveness` (every thread blocked after an injected `ENOMEM`
+in a thread): its `/usr` moves where the draws land.
+
+Across hosts: the two 24.04 runners give equal digests in all 66 cells; every other pair
+agrees on 12 (`hello-static` and `sockets-static`). First differing record (`patina log diff`)
+and cause:
+
+| What differed | Guests | Kind | Verdict |
+|---|---|---|---|
+| `fstat` of `/etc/ld.so.cache` (VM against runner); 24.04's loader calls `faccessat` (`ld.so.preload`) where 26.04's calls `uname` first | every dynamic guest, `python3`, `/bin/sh`; `tokio-mt-static` in its `seq` child | the host's loader and libc | allowed |
+| `uname` release | `fs-tour-static` (the only difference between the 24.04 and 26.04 runners) | kernel version | allowed |
+| `stat` of the host's `/usr/bin/sort` (Go's `os/exec` path search) | `go-static` | host programs | allowed |
+| argument registers a call does not read: `mremap` without `MREMAP_FIXED` and `prctl(PR_GET_NAME)` called through `syscall()` carry a leftover `x4`, which static glibc's `memcpy` sets on the VM (its generic routine) and not on the runners (the SVE routine's short path) | `fs-tour-static`, `tokio-mt-static` (`futex` wake), VM against runner | CPU identity (SVE or not chooses the library routine) | allowed; it widens what differs across arm64 hosts |
+
+No new kind of difference within a host. What can be promised on arm64 is what x86_64
+promises: a seed gives the same run on one host, repeated, across CPUs, ASLR and sandboxes;
+across hosts a static guest that reads no host file and passes no unused argument registers
+gives the same run on CPUs with the same features. The `/proc/self/mountinfo` difference of
+x86_64 did not appear: `go-static`'s first difference on every pair comes after its start-up
+read of that file.
 
 ## Acceptance: fjall
 
@@ -1112,3 +1152,58 @@ from `999be00b`, 2026-11-16, this host, `-j 6`, `--cpus 4`, `--preempt traps`.
   30 runs. Every one of the 30 replays `identical`, and its operation log shows the swap that
   made it. Since the swaps rename entries themselves, the harness's name-based check is replaced
   in these legs by one over the operation log (`patina log ops`), which follows inodes.
+
+## arm64
+
+What else was measured on arm64, 2026-11-17, besides the sections above ("Spin-waits ...
+arm64", "Instruction sites on arm64", "Compute points ... arm64", "Second hosts ... arm64").
+Hosts: GitHub `ubuntu-24.04-arm` runners (Neoverse-N2, 4 CPUs, 7.0.0-1017-azure), each check
+run once from a throwaway branch, and the development VM (Apple M4, 4 CPUs, Linux 7.0).
+
+**The quick tier** (`check-arm64`, every script but the branch-counter one, 115): 141, 149
+and 123 s of wall time on three pushes (x86_64 `check` on the same pushes: 94 to 101 s). Every
+script is under half its budget there.
+
+**Areas.** `./check AREA` for every area once on the runner, with every `arch=x86_64` mark
+removed but the branch-counter scripts, `insn/04-cpuid` and `insn/05-rdpid`: all pass but
+three, each fixed or explained:
+
+| Script | On the runner | Now |
+|---|---|---|
+| `insn/06-scanner-audit` | the census called four `isb` sites of `hello-rs` (std's `Mutex::lock_contended` and `RwLock::read_contended`, real code) data: it read the `$d` symbols of `.debug_aranges`, whose values are offsets in that section, as addresses | the census takes mapping symbols of loaded sections only |
+| `sandbox/05-rows` | expected x86_64's 31 lines and its call names | arm64's table: 26 lines, `epoll_create1` and `clone` for `epoll_create` and `fork`, no `select`, `pause` or `alarm` |
+| `storage/02-f1`, `05-f4` | over their 30 s budgets (each runs four sandboxes and declared one) | they declare four; F1 searches its seeds 25 at a time and stops at the first block with a confirmed seed (6.1 s; F4 17.2 s, F3 7.6 s) |
+| `storage/03-f6` | its named seed (2001, found on x86_64) is `ok` | stays x86_64 only: the seed is the host's |
+
+**Costs** (runner; VM in brackets). From whole runs, median of 5 seeds, the `costs` guest (`tests/guests/costs`):
+
+| What | Cost |
+|---|---|
+| Trap answered in the runtime (`getppid`) | 3.0 us (VM 1.9 us); native 0.21 us (VM 0.13 us) |
+| Counter-timer read (`clock_gettime`, trapped `CNTVCT_EL0`) | 2.7 us (VM 1.8 us) |
+| `sched_yield` (a supervisor hand-off) | 8.7 to 13 us (VM 4.6 us) |
+| A run of a static `true` (`wall_ms`) | 15 ms (VM 6 ms) |
+| The `patina run` process, static `true` / `python3 -c pass` (`durability/evidence-costs`) | 116 ms (77 to 1,091) / 109 ms; native 1.6 ms / 32 ms |
+| W1-W9 per run, faults off (`durability/evidence-costs`) | W1 31, W2 80, W3 36, W4 175, W5 152, W6 360, W7 306, W8 350, W9 69 ms |
+| Runtimes (`runtimes/evidence-costs`), per run | Go 187 ms, CPython 162, tokio 86, tokio TCP 117, sh 395, bash 493 (natively 1.6 to 5.5 s: their sleeps) |
+| Sweep throughput, `hello-static` (`sweep/evidence-throughput`) | 42 runs/s at `-j 1`, 131 at `-j 4`, 132 at `-j 8` (4 CPUs); 500 pipes at `-j 8`, 14 runs/s, all `ok` |
+
+**Adopter checks** (runner; counts are per architecture, x86_64's in brackets):
+
+| Check | Result |
+|---|---|
+| Examples, documented sweeps, seeds 1-20 (`examples/01`) | every bug found under its signature, every fixed variant `ok` 20/20: quickstart 15 (14), ledger 4 (4), journal-py 7 (11), acklog 2 (6), bank 11 (11), stats-cp 6 (8), serve 7 (5) |
+| fjall F1, `--crash machine:3` / `process:3`, seeds 1-100 | 3 / 4 seeds (3 / 4), the native harness agreeing |
+| fjall F3, seeds 1-100 | 3 `liveness` (2) |
+| fjall F4, `fsync-error-at=50..80` x seeds 1-10 | first confirmed cell `fsync-error-at=63` seed 7 (x86_64: 67, seed 4) |
+| fjall F5, seeds 1-10 | 3 of 10 |
+| fjall F2, `storage/12-f2` (`sweep --branch`, seeds 1-2, until two groups) | 3 of 14,007 crash points tried hit the journal-entry assertion (first seed 1, point 3,010), 2 the batch-atomicity violation (seed 2); 48 min on the runner, over the nightly's 400 s budget, so `12-f2` stays x86_64 only |
+| `testbeds/pubsub` nightly (`nightly/01-pubsub`), 200 seeds | clean: no finding; lost-wakeup 200, drop-read-remainder 199, stale-timeout 165 of 200 |
+
+**Not run on arm64**: the evidence scripts still marked `arch=x86_64` (the determinism matrix
+`determinism/evidence-matrix`, the soaks and the time variant, the durability census,
+operation log and workload sweeps, `faults/evidence-crashes`, the per-call costs of I/O rings,
+networking and spawning, `storage/evidence-branch` and `evidence-crash-enum`); the
+branch-counter scripts (no PMU on arm64); `insn/04-cpuid`, `insn/05-rdpid` (x86_64
+instructions). Hosts not checked: bare-metal arm64, a host with 16 or 64 KiB pages, SVE above
+128 bits, a heterogeneous (big.LITTLE) machine, and any Mac VM product but Tart.

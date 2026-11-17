@@ -144,15 +144,18 @@ def a64_census(path, data):
     for i in range(shnum):
         _n, typ, flags, addr, off, size, link, _i, _a, _e = struct.unpack_from("<IIQQQQIIQQ", data, shoff + i * shentsize)
         secs.append((typ, flags, addr, off, size, link))
-    marks = []  # (address, 'd' | 'x') from $d / $x mapping symbols
+    # (address, 'd' | 'x') from $d / $x mapping symbols of loaded sections: a program built with
+    # debug info also has mapping symbols in .debug_* sections, whose values are offsets there.
+    marks = []
     for typ, _f, _a, off, size, link in secs:
         if typ != 2:
             continue
         stroff = secs[link][3]
         for k in range(size // 24):
-            nm, _info, _o, _shn, val, _sz = struct.unpack_from("<IBBHQQ", data, off + k * 24)
+            nm, _i, _o, shn, val, _sz = struct.unpack_from("<IBBHQQ", data, off + k * 24)
             o = stroff + nm
-            if nm and data[o] == 0x24 and data[o + 1] in b"dx" and data[o + 2] in (0, 0x2E):
+            if (nm and data[o] == 0x24 and data[o + 1] in b"dx" and data[o + 2] in (0, 0x2E)
+                    and 0 < shn < len(secs) and secs[shn][1] & 2):  # SHF_ALLOC
                 marks.append((val, chr(data[o + 1])))
     marks.sort()
     addrs = [a for a, _ in marks]

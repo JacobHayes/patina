@@ -1,6 +1,6 @@
 # 8. Rust: std mpsc + UnixStream (pair, listener, datagrams); readiness through the mio
 #    crate directly (Poll, Waker, UnixStream pairs). ok, identical.
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-rust; mkdir -p "$o"
 for g in rs-io rs-mio; do

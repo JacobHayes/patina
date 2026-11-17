@@ -1,7 +1,7 @@
 #!/bin/sh
 # 4. Seed sensitivity: for W1, W2, W4-W9, the digests of seeds 1-4 (faults off) include at
 # least 3 distinct values (the seed reaches the schedule and the draws). 4 runs at a time.
-#@ tier=area budget=60 slots=4 arch=x86_64
+#@ tier=area budget=60 slots=4
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/seeds

@@ -8,6 +8,11 @@ without the bug; the same sweep with `fixed` added at the end is `ok` on every s
 A sweep directory holds one sweep: running the same command again runs only what is missing,
 and running it with `fixed` added (or after a rebuild) replaces the old runs.
 
+The commands are the same on x86_64 and arm64. The counts of finding seeds below are
+x86_64's; seeds are per architecture, so on arm64 the same sweeps find each bug on a different
+number of the 20 seeds (on the arm64 runner: quickstart 15, ledger 4, journal-py 7, acklog 2,
+bank 11, stats-cp 6, serve 7).
+
 ## quickstart (Rust): a race found by scheduling
 
 Three jobs run on threads; their results must come back in job order. They come back in the

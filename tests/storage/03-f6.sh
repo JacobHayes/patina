@@ -4,7 +4,8 @@
 # and the seed is named; the kept tree makes the native harness fail the same way. F2 (the
 # journal-entry assertion) needs a crash in a window of a few crash points, which plain sweeps
 # almost never hit; 12-f2.sh finds it by trying every crash point.
-# The seed depends on the host's libc and CPU, so this is an area check, not a quick one.
+# The seed depends on the host's libc and CPU, so this is an area check, not a quick one; it was
+# found on x86_64, so the script runs there only.
 #@ tier=area budget=15 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
 opts="--config $("$PATINA_CFG" pause-points=false) --cpus 24 --env FJ_N=2000 --buggify --crash machine:1"

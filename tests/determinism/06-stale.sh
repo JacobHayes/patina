@@ -1,7 +1,7 @@
 #!/bin/sh
 # 6. Stale-state attack: run A, then a different workload B, then A again in a new sandbox; the
 # second A equals the first (digest, class, stdout): nothing leaks between runs through the host.
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/stale

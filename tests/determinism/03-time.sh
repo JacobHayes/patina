@@ -3,7 +3,7 @@
 # and timestamp it reaches, at start and after a 60-virtual-second sleep, in two runs started
 # DET_TIME_GAP_S apart (default 5 s: any host clock that leaks differs by that much). The
 # 600 s gap of the full matrix, over every workload, is tests/determinism/evidence-time.sh.
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 gap=${DET_TIME_GAP_S:-5}

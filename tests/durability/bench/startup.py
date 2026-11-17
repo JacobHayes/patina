@@ -63,7 +63,7 @@ for name, argv in progs.items():
     r["total (process)"] = stats(tot)
     r["native exec"] = stats(nat_direct)
     r["native in bwrap"] = stats(nat_bwrap)
-    r["sched"]["traps"] = traps
+    r["traps"] = traps
     res[name] = r
     log(f"== {name} ({traps} traps)")
     for k, v in r.items():

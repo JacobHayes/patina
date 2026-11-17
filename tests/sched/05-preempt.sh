@@ -1,5 +1,5 @@
 # 5. preempt-permille 0 and 1000 both pass the 01-ok and 02-verify checks; switches per run for 0, 100, 1000.
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
 . "$(dirname "$0")/verify.inc"
 for p in 0 1000; do

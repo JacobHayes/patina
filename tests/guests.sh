@@ -22,8 +22,7 @@ sets=$base/guests/sets
 mkdir -p "$cache" "$sets" "$PATINA_BUILD_DIR"
 
 workload_style=" c-sqlite cpython fjall-harness go-static rust-threads-files shell-pipeline tokio-mt "
-# During the arm64 port the guests of the parts not ported yet are not built there: branch
-# counters (counters).
+# arm64 has no branch counters: the counters guests are built on x86_64 only.
 case $(uname -m) in
     x86_64) skipped="" ;;
     *) skipped=" counters " ;;

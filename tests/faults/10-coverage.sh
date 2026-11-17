@@ -3,7 +3,7 @@
 # number of distinct post-crash trees, and crashes observed between a write and its fsync,
 # between the record fsync and the acknowledgement write, and between the checkpoint
 # rename and the directory fsync.
-#@ tier=area budget=120 arch=x86_64
+#@ tier=area budget=120
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/10
 mkdir -p "$d"

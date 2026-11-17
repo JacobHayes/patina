@@ -483,7 +483,7 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
     let mut s = String::new();
     match cmd {
         None => {
-            s.push_str("patina: deterministic simulation testing of any Linux x86_64 program\n\nusage: patina COMMAND [options]\n\ncommands:\n");
+            s.push_str("patina: deterministic simulation testing of any Linux program (x86_64, arm64)\n\nusage: patina COMMAND [options]\n\ncommands:\n");
             for c in COMMANDS {
                 s.push_str(&format!("  {:<8} {}\n", c.name, c.help));
             }

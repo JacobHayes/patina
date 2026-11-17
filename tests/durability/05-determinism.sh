@@ -1,7 +1,7 @@
 # 5. Determinism with crashes on: W9 with crashes + filesystem errors, 4 runs per seed under
 # --vary cpu,load,aslr,sandbox, seeds 1-2, both crash models (the two models in parallel). patina verify compares digests,
 # outcomes, output and every crash record (which carries the post-crash tree's digest).
-#@ tier=area budget=60 slots=4 arch=x86_64
+#@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib/common.inc"
 one_model() {
     m=$1

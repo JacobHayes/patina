@@ -1,6 +1,6 @@
 # 3. order prints at least 8 distinct logs over seeds 1-20 (one run each), and the same log for
 #    the same seed (seeds 1-3 run twice).
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
 for seed in $(seq 1 20); do
     out=$RUNS/03-order/s$seed-a

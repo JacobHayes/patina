@@ -1,6 +1,6 @@
 # 5. coreutils as direct guests on an input tree: ok, identical over 3 runs, and equal to a
 #    native run after masking file times, device numbers and mktemp's random names.
-#@ tier=area budget=120 arch=x86_64
+#@ tier=area budget=120
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/05-coreutils
 mkdir -p "$o"
