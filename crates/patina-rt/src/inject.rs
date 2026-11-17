@@ -94,7 +94,7 @@ pub fn path_on_work(dirfd: i64, p: u64) -> bool {
     }
     if dirfd == AT_FDCWD {
         let mut buf = [0u8; 256];
-        let r = unsafe { sc2(79, buf.as_mut_ptr() as u64, buf.len() as u64) };
+        let r = unsafe { sc2(nr::GETCWD, buf.as_mut_ptr() as u64, buf.len() as u64) };
         if r <= 0 {
             return false;
         }
@@ -113,28 +113,42 @@ fn target(call: &dyn Call) -> Option<(Obj, Who)> {
     let by_fd = |i: usize| fd_obj(a(i)).map(|o| (o, Who::Fd(fd(i), o)));
     match call.nr() {
         // open family
-        2 | 85 => on(AT_FDCWD, a(0)),
-        257 | 437 => on(fd(0), a(1)),
+        nr::OPEN | nr::CREAT => on(AT_FDCWD, a(0)),
+        nr::OPENAT | nr::OPENAT2 => on(fd(0), a(1)),
         // read/write family on descriptors; copy_file_range and sendfile by their target
-        0 | 17 | 19 | 295 | 327 | 1 | 18 | 20 | 296 | 328 | 77 | 285 | 3 => by_fd(0),
-        326 => by_fd(2).filter(|t| t.0 == Obj::File),
-        40 => by_fd(0).filter(|t| t.0 == Obj::File),
+        nr::READ
+        | nr::PREAD64
+        | nr::READV
+        | nr::PREADV
+        | nr::PREADV2
+        | nr::WRITE
+        | nr::PWRITE64
+        | nr::WRITEV
+        | nr::PWRITEV
+        | nr::PWRITEV2
+        | nr::FTRUNCATE
+        | nr::FALLOCATE
+        | nr::CLOSE => by_fd(0),
+        nr::COPY_FILE_RANGE => by_fd(2).filter(|t| t.0 == Obj::File),
+        nr::SENDFILE => by_fd(0).filter(|t| t.0 == Obj::File),
         // names
-        82 | 87 | 84 | 83 | 133 | 76 => on(AT_FDCWD, a(0)),
-        86 | 88 => on(AT_FDCWD, a(1)),
-        264 | 316 | 265 => on(fd(0), a(1)).or_else(|| on(fd(2), a(3))),
-        263 | 258 | 259 => on(fd(0), a(1)),
-        266 => on(fd(1), a(2)),
+        nr::RENAME | nr::UNLINK | nr::RMDIR | nr::MKDIR | nr::MKNOD | nr::TRUNCATE => {
+            on(AT_FDCWD, a(0))
+        }
+        nr::LINK | nr::SYMLINK => on(AT_FDCWD, a(1)),
+        nr::RENAMEAT | nr::RENAMEAT2 | nr::LINKAT => on(fd(0), a(1)).or_else(|| on(fd(2), a(3))),
+        nr::UNLINKAT | nr::MKDIRAT | nr::MKNODAT => on(fd(0), a(1)),
+        nr::SYMLINKAT => on(fd(1), a(2)),
         // memory: anonymous or /work mappings, growth of brk and mremap, thread or process creation
-        9 => {
+        nr::MMAP => {
             const MAP_ANON: u64 = 0x20;
             const MAP_FIXED_ANY: u64 = 0x10 | 0x10_0000;
             (a(3) & MAP_FIXED_ANY == 0 && (a(3) & MAP_ANON != 0 || fd_obj(a(4)) == Some(Obj::File)))
                 .then_some((Obj::Mem, Who::Kind(Obj::Mem)))
         }
-        12 => (a(0) > proc().brk_cur).then_some((Obj::Mem, Who::Kind(Obj::Mem))),
-        25 => (a(2) > a(1)).then_some((Obj::Mem, Who::Kind(Obj::Mem))),
-        56..=58 => Some((Obj::Mem, Who::Kind(Obj::Mem))),
+        nr::BRK => (a(0) > proc().brk_cur).then_some((Obj::Mem, Who::Kind(Obj::Mem))),
+        nr::MREMAP => (a(2) > a(1)).then_some((Obj::Mem, Who::Kind(Obj::Mem))),
+        nr::CLONE | nr::FORK | nr::VFORK => Some((Obj::Mem, Who::Kind(Obj::Mem))),
         _ => None,
     }
 }
@@ -236,17 +250,17 @@ fn decide(call: &dyn Call, c: FClass, obj: Obj) -> Decision {
             return Decision::Proceed;
         }
         let errno = match nr {
-            56 if call.arg(0) & 0x10000 != 0 => e::EAGAIN, // CLONE_THREAD
-            12 => return Decision::Ret(proc().brk_cur as i64),
+            nr::CLONE if call.arg(0) & 0x10000 != 0 => e::EAGAIN, // CLONE_THREAD
+            nr::BRK => return Decision::Ret(proc().brk_cur as i64),
             _ => e::ENOMEM,
         };
         return Decision::Error(errno);
     }
     const O_CREAT: u64 = 0o100;
     let creating = match nr {
-        2 => call.arg(1) & O_CREAT != 0,
-        257 => call.arg(2) & O_CREAT != 0,
-        85 => true,
+        nr::OPEN => call.arg(1) & O_CREAT != 0,
+        nr::OPENAT => call.arg(2) & O_CREAT != 0,
+        nr::CREAT => true,
         _ => false,
     };
     let base = errnos(obj, c, creating);
@@ -275,12 +289,15 @@ fn decide(call: &dyn Call, c: FClass, obj: Obj) -> Decision {
             if left == 0 {
                 return Decision::Enospc(None);
             }
-            if matches!(nr, 1 | 18) && call.arg(2) > left {
+            if matches!(nr, nr::WRITE | nr::PWRITE64) && call.arg(2) > left {
                 return Decision::Enospc(Some(left));
             }
         }
     }
-    if matches!(nr, 0 | 17 | 1 | 18) && call.arg(2) >= 2 && short_ok(obj) {
+    if matches!(nr, nr::READ | nr::PREAD64 | nr::WRITE | nr::PWRITE64)
+        && call.arg(2) >= 2
+        && short_ok(obj)
+    {
         f.eligible(Kind::FsShort);
         if permille(cfg.short_permille, SUB_SHORT_FIRE) {
             let n = call.arg(2);
@@ -417,7 +434,7 @@ pub fn mem_limit_refuses(nr: u64, grow: u64) -> bool {
 fn statm_data_bytes() -> u64 {
     let fd = unsafe {
         sc4(
-            257,
+            nr::OPENAT,
             AT_FDCWD as u64,
             c"/proc/self/statm".as_ptr() as u64,
             0o2000000,
@@ -425,11 +442,11 @@ fn statm_data_bytes() -> u64 {
         )
     };
     if fd < 0 {
-        crate::sup::host_error(fd, 257, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(fd, nr::OPENAT, proto::ctl::HE_SYSCALL);
     }
     let mut b = [0u8; 128];
-    let n = unsafe { sc3(0, fd as u64, b.as_mut_ptr() as u64, b.len() as u64) };
-    unsafe { sc1(3, fd as u64) };
+    let n = unsafe { sc3(nr::READ, fd as u64, b.as_mut_ptr() as u64, b.len() as u64) };
+    unsafe { sc1(nr::CLOSE, fd as u64) };
     if n <= 0 {
         crate::sup::host_error(n, 0, proto::ctl::HE_SYSCALL);
     }

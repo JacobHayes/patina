@@ -180,7 +180,7 @@ pub fn pass(call: &mut dyn Call) -> Action {
 /// Whether the real `RLIMIT_FSIZE` (the launcher's, inherited) is finite.
 pub fn host_fsize_limited() -> bool {
     let mut rl = [0u64; 2];
-    let r = unsafe { sc4(302, 0, 1, 0, rl.as_mut_ptr() as u64) };
+    let r = unsafe { sc4(nr::PRLIMIT64, 0, 1, 0, rl.as_mut_ptr() as u64) };
     r == 0 && rl[0] != u64::MAX
 }
 
@@ -190,7 +190,7 @@ pub fn host_check(call: &dyn Call, r: i64) {
     }
     // RLIMIT_NPROC counts the user's processes on the whole host: a refused clone is the
     // host's limit, not a sandbox answer.
-    if r == -e::EAGAIN && matches!(call.nr(), 56 | 57 | 58 | 435) {
+    if r == -e::EAGAIN && matches!(call.nr(), nr::CLONE | nr::FORK | nr::VFORK | nr::CLONE3) {
         crate::sup::host_error(r, call.nr(), proto::ctl::HE_HOST_LIMIT);
     }
 }

@@ -8,6 +8,7 @@
 //! run` needs (bwrap, user namespaces) and the host's python3.
 
 use proto::layout::{RT_BASE, RT_REGION_END};
+use proto::nr;
 use proto::rec::{Rec, REC_SIZE};
 use proto::RecKind;
 use std::process::Command;
@@ -87,7 +88,7 @@ fn no_record_holds_a_runtime_address() {
     );
     let execs = recs
         .iter()
-        .filter(|r| r.kind == RecKind::Trap as u8 && r.nr == 59)
+        .filter(|r| r.kind == RecKind::Trap as u8 && u64::from(r.nr) == nr::EXECVE)
         .count();
     assert!(execs > 0, "exec seed {seed}: no execve in the log");
 
@@ -102,7 +103,7 @@ fn no_record_holds_a_runtime_address() {
     );
     let injected = recs
         .iter()
-        .filter(|r| r.kind == RecKind::Injected as u8 && r.nr == 83)
+        .filter(|r| r.kind == RecKind::Injected as u8 && u64::from(r.nr) == nr::MKDIR)
         .count();
     assert!(
         injected > 0,

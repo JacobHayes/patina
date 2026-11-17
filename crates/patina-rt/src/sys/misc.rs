@@ -61,17 +61,17 @@ pub fn write_entropy(seq: u64, buf: u64, len: u64) -> i64 {
 
 pub fn handle(call: &mut dyn Call) -> Action {
     let r = match call.nr() {
-        318 => {
+        nr::GETRANDOM => {
             let (buf, len) = (call.arg(0), call.arg(1));
             if buf == 0 && len != 0 {
                 return Action::Return(-e::EFAULT);
             }
             write_entropy(call.thread().seq, buf, len)
         }
-        99 => sysinfo(call.arg(0)),
-        98 => getrusage(call),
+        nr::SYSINFO => sysinfo(call.arg(0)),
+        nr::GETRUSAGE => getrusage(call),
         // get_mempolicy: the default policy, no nodes.
-        239 => {
+        nr::GET_MEMPOLICY => {
             let (mode, mask, maxnode) = (call.arg(0), call.arg(1), call.arg(2));
             let r = if mode != 0 { put(mode, 0i32) } else { Ok(()) };
             let r = r.and_then(|()| {
@@ -86,14 +86,14 @@ pub fn handle(call: &mut dyn Call) -> Action {
         // Supplementary groups: the launcher's are inherited and cannot be dropped
         // without a capability (unmapped ones read as the overflow id, so their number shows).
         // The guest's list is the namespace's primary group alone.
-        115 => {
+        nr::GETGROUPS => {
             let (size, list) = (call.arg(0) as i32, call.arg(1));
             if size < 0 {
                 -e::EINVAL
             } else if size == 0 {
                 1
             } else {
-                let gid = unsafe { crate::raw::sc0(104) } as u32;
+                let gid = unsafe { crate::raw::sc0(nr::GETGID) } as u32;
                 match put(list, gid) {
                     Ok(()) => 1,
                     Err(r) => r,
@@ -101,7 +101,21 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         }
         // Credentials and identity: confined by the user and UTS namespaces.
-        105 | 106 | 113 | 114 | 116..=120 | 122 | 123 | 125 | 126 | 170 | 171 => {
+        nr::SETUID
+        | nr::SETGID
+        | nr::SETREUID
+        | nr::SETREGID
+        | nr::SETGROUPS
+        | nr::SETRESUID
+        | nr::GETRESUID
+        | nr::SETRESGID
+        | nr::GETRESGID
+        | nr::SETFSUID
+        | nr::SETFSGID
+        | nr::CAPGET
+        | nr::CAPSET
+        | nr::SETHOSTNAME
+        | nr::SETDOMAINNAME => {
             let r = raw(call);
             host_check(call, r);
             r

@@ -54,7 +54,7 @@ global_asm!(
     "  mov [rsi - 8], r9",
     "  sub rsi, 16",
     "  mov r10, rcx",
-    "  mov eax, 56",
+    "  mov eax, {clone}",
     "  jmp patina_syscall",
     "patina_clone_child:",
     "  pop rdi",
@@ -65,9 +65,11 @@ global_asm!(
     ".globl patina_sigreturn_to",
     "patina_sigreturn_to:",
     "  mov rsp, rdi",
-    "  mov eax, 15",
+    "  mov eax, {rt_sigreturn}",
     "  jmp patina_syscall",
     start = sym thread_start,
+    clone = const nr::CLONE,
+    rt_sigreturn = const nr::RT_SIGRETURN,
 );
 
 extern "C" {

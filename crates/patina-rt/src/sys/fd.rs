@@ -123,7 +123,7 @@ fn clear_marks(fd: i64) {
 fn dup_like(call: &mut dyn Call) -> i64 {
     let src = call.arg(0) as i32 as i64;
     // dup2/dup3 over a wire socket may close its last reference.
-    let over = if call.nr() != 32 && call.arg(0) != call.arg(1) {
+    let over = if call.nr() != nr::DUP && call.arg(0) != call.arg(1) {
         super::inet::wire_idx(call.arg(1) as i32 as i64)
     } else {
         None
@@ -137,7 +137,7 @@ fn dup_like(call: &mut dyn Call) -> i64 {
     host_check(call, r);
     if r >= 0 {
         copy_marks(src, r);
-        if call.nr() != 32 {
+        if call.nr() != nr::DUP {
             super::io::bump(); // dup2/dup3 closed whatever was at the target number
         }
     }
@@ -201,7 +201,7 @@ fn close_range(call: &mut dyn Call) -> i64 {
         return 0;
     }
     let last = last.min(max);
-    let r = unsafe { sc3(436, first, last, flags) };
+    let r = unsafe { sc3(nr::CLOSE_RANGE, first, last, flags) };
     const CLOSE_RANGE_CLOEXEC: u64 = 4;
     if r == 0 && flags & CLOSE_RANGE_CLOEXEC == 0 {
         for fd in first..=last {
@@ -237,7 +237,7 @@ fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
             offset
         };
         let off = offset.unwrap_or_else(|| {
-            let pos = unsafe { sc3(8, fd as u64, 0, 1) }; // lseek(fd, 0, SEEK_CUR)
+            let pos = unsafe { sc3(nr::LSEEK, fd as u64, 0, 1) }; // lseek(fd, 0, SEEK_CUR)
             (pos - len).max(0) as u64
         });
         after_mutation(&FsOp::Write {
@@ -254,7 +254,7 @@ const RWF_NOWAIT: u64 = 8;
 fn write_call(call: &mut dyn Call) -> i64 {
     let nr = call.nr();
     let mut a = args(call);
-    if nr == 328 || nr == 327 {
+    if nr == nr::PWRITEV2 || nr == nr::PREADV2 {
         // preadv2/pwritev2: RWF_NOWAIT from the guest would expose page-cache state.
         a[5] &= !RWF_NOWAIT;
     }
@@ -262,11 +262,11 @@ fn write_call(call: &mut dyn Call) -> i64 {
     host_check(call, r);
     let fd = a[0] as i32 as i64;
     match nr {
-        1 => wrote(fd, None, r, Data::Buf(a[1])),
-        18 => wrote(fd, Some(a[3]), r, Data::Buf(a[1])),
-        20 => wrote(fd, None, r, Data::Iov(a[1], a[2])),
-        296 => wrote(fd, Some(a[3]), r, Data::Iov(a[1], a[2])),
-        328 => {
+        nr::WRITE => wrote(fd, None, r, Data::Buf(a[1])),
+        nr::PWRITE64 => wrote(fd, Some(a[3]), r, Data::Buf(a[1])),
+        nr::WRITEV => wrote(fd, None, r, Data::Iov(a[1], a[2])),
+        nr::PWRITEV => wrote(fd, Some(a[3]), r, Data::Iov(a[1], a[2])),
+        nr::PWRITEV2 => {
             const RWF_APPEND: u64 = 0x10;
             wrote_ex(
                 fd,
@@ -277,7 +277,7 @@ fn write_call(call: &mut dyn Call) -> i64 {
             )
         }
         // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)
-        326 => {
+        nr::COPY_FILE_RANGE => {
             let off = if a[3] != 0 {
                 Some(unsafe { *(a[3] as *const u64) }.wrapping_sub(r.max(0) as u64))
             } else {
@@ -286,7 +286,7 @@ fn write_call(call: &mut dyn Call) -> i64 {
             wrote(a[2] as i32 as i64, off, r, Data::InFile(a[2] as i32 as i64))
         }
         // sendfile(out_fd, in_fd, offset, count)
-        40 => wrote(fd, None, r, Data::InFile(fd)),
+        nr::SENDFILE => wrote(fd, None, r, Data::InFile(fd)),
         _ => {}
     }
     r
@@ -296,7 +296,7 @@ fn write_call(call: &mut dyn Call) -> i64 {
 /// socket or anonymous object on either side they answer EINVAL (programs fall back to
 /// read and write, which are attempts), and the refusal is listed in the outcome.
 fn file_to_file(call: &mut dyn Call) -> i64 {
-    if call.nr() == 40 {
+    if call.nr() == nr::SENDFILE {
         if let Some(i) = super::inet::wire_idx(call.arg(0) as i32 as i64) {
             if !super::io::can_block(super::io::kind_of(call.arg(1) as i32 as i64)) {
                 set_class(call, Class::Attempt);
@@ -305,7 +305,7 @@ fn file_to_file(call: &mut dyn Call) -> i64 {
         }
     }
     let (a, b) = match call.nr() {
-        326 => (call.arg(0), call.arg(2)),
+        nr::COPY_FILE_RANGE => (call.arg(0), call.arg(2)),
         _ => (call.arg(1), call.arg(0)),
     };
     for fd in [a, b] {
@@ -323,7 +323,7 @@ fn splice(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let r = super::io::splice(call);
     host_check(call, r);
-    if call.nr() == 275 && r > 0 {
+    if call.nr() == nr::SPLICE && r > 0 {
         let out = a[2] as i32 as i64;
         let off = if a[3] != 0 {
             Some(unsafe { *(a[3] as *const u64) }.wrapping_sub(r as u64))
@@ -345,16 +345,19 @@ fn sync_call(call: &mut dyn Call) -> i64 {
 
 pub fn handle(call: &mut dyn Call) -> Action {
     let fd = call.arg(0) as i32 as i64;
-    if matches!(call.nr(), 0 | 1 | 19 | 20 | 327 | 328) {
+    if matches!(
+        call.nr(),
+        nr::READ | nr::WRITE | nr::READV | nr::WRITEV | nr::PREADV2 | nr::PWRITEV2
+    ) {
         // Attempt rows; on files, directories and devices they are plain passes.
         set_class(call, Class::Pass);
     }
     let (a1, a2) = (call.arg(1), call.arg(2));
     let r = match call.nr() {
-        0 if proc().is_urandom(fd) => entropy(call, a1, a2),
-        17 if proc().is_urandom(fd) => entropy(call, a1, a2),
-        19 | 295 | 327 if proc().is_urandom(fd) => readv_entropy(call),
-        3 => {
+        nr::READ if proc().is_urandom(fd) => entropy(call, a1, a2),
+        nr::PREAD64 if proc().is_urandom(fd) => entropy(call, a1, a2),
+        nr::READV | nr::PREADV | nr::PREADV2 if proc().is_urandom(fd) => readv_entropy(call),
+        nr::CLOSE => {
             let ino = crate::oplog::before_close(fd);
             let wire = super::inet::wire_idx(fd);
             let r = raw(call);
@@ -370,41 +373,50 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        32 | 33 | 292 => dup_like(call),
-        72 => fcntl(call),
-        73 => super::lock::flock(call),
-        436 => close_range(call),
-        16 => return ioctl(call),
-        7 | 271 => super::poll::poll(call),
-        23 | 270 => super::poll::select(call),
-        232 | 281 | 441 => super::poll::epoll_wait(call),
-        233 => super::poll::epoll_ctl(call),
-        283 | 286 | 287 => super::timerfd::handle(call),
-        0 | 1 | 19 | 20 | 327 | 328 if super::io::can_block(super::io::kind_of(fd)) => {
+        nr::DUP | nr::DUP2 | nr::DUP3 => dup_like(call),
+        nr::FCNTL => fcntl(call),
+        nr::FLOCK => super::lock::flock(call),
+        nr::CLOSE_RANGE => close_range(call),
+        nr::IOCTL => return ioctl(call),
+        nr::POLL | nr::PPOLL => super::poll::poll(call),
+        nr::SELECT | nr::PSELECT6 => super::poll::select(call),
+        nr::EPOLL_WAIT | nr::EPOLL_PWAIT | nr::EPOLL_PWAIT2 => super::poll::epoll_wait(call),
+        nr::EPOLL_CTL => super::poll::epoll_ctl(call),
+        nr::TIMERFD_CREATE | nr::TIMERFD_SETTIME | nr::TIMERFD_GETTIME => {
+            super::timerfd::handle(call)
+        }
+        nr::READ | nr::WRITE | nr::READV | nr::WRITEV | nr::PREADV2 | nr::PWRITEV2
+            if super::io::can_block(super::io::kind_of(fd)) =>
+        {
             let k = super::io::kind_of(fd).unwrap();
             match (k, super::inet::wire_idx(fd)) {
                 (super::io::Kind::Sock, Some(i)) => super::inet::rw(call, i),
                 _ => super::io::rw(call, k),
             }
         }
-        1 | 18 | 20 | 296 | 328 => write_call(call),
-        326 | 40 => file_to_file(call),
-        275 | 276 | 278 => splice(call),
-        327 => {
+        nr::WRITE | nr::PWRITE64 | nr::WRITEV | nr::PWRITEV | nr::PWRITEV2 => write_call(call),
+        nr::COPY_FILE_RANGE | nr::SENDFILE => file_to_file(call),
+        nr::SPLICE | nr::TEE | nr::VMSPLICE => splice(call),
+        nr::PREADV2 => {
             let mut a = args(call);
             a[5] &= !RWF_NOWAIT;
-            let r = unsafe { sc6(327, a[0], a[1], a[2], a[3], a[4], a[5]) };
+            let r = unsafe { sc6(nr::PREADV2, a[0], a[1], a[2], a[3], a[4], a[5]) };
             host_check(call, r);
             r
         }
-        74 | 75 | 162 | 306 | 277 => sync_call(call),
-        77 | 285 | 91 | 93 | 190 | 199 => {
+        nr::FSYNC | nr::FDATASYNC | nr::SYNC | nr::SYNCFS | nr::SYNC_FILE_RANGE => sync_call(call),
+        nr::FTRUNCATE
+        | nr::FALLOCATE
+        | nr::FCHMOD
+        | nr::FCHOWN
+        | nr::FSETXATTR
+        | nr::FREMOVEXATTR => {
             let r = raw(call);
             host_check(call, r);
             super::fs::fd_mutation(call, r);
             r
         }
-        22 | 293 => {
+        nr::PIPE | nr::PIPE2 => {
             let r = raw(call);
             host_check(call, r);
             if r == 0 {
@@ -424,12 +436,20 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        284 | 290 | 319 | 213 | 291 => {
+        nr::EVENTFD | nr::EVENTFD2 | nr::MEMFD_CREATE | nr::EPOLL_CREATE | nr::EPOLL_CREATE1 => {
             let r = raw(call);
             host_check(call, r);
             r
         }
-        0 | 17 | 19 | 295 | 8 | 193 | 196 | 221 | 187 => {
+        nr::READ
+        | nr::PREAD64
+        | nr::READV
+        | nr::PREADV
+        | nr::LSEEK
+        | nr::FGETXATTR
+        | nr::FLISTXATTR
+        | nr::FADVISE64
+        | nr::READAHEAD => {
             let r = raw(call);
             host_check(call, r);
             r

@@ -53,7 +53,7 @@ const SNDBUF: u32 = 131_072;
 pub fn socket(call: &mut dyn Call, family: u16, ty: u64) -> Action {
     let fd = unsafe {
         sc3(
-            41,
+            nr::SOCKET,
             AF_UNIX,
             SOCK_SEQPACKET | SOCK_NONBLOCK | (ty & SOCK_CLOEXEC),
             0,
@@ -64,19 +64,29 @@ pub fn socket(call: &mut dyn Call, family: u16, ty: u64) -> Action {
         return Action::Return(fd);
     }
     let v = SNDBUF;
-    unsafe { sc6(54, fd as u64, SOL_SOCKET, 7, &v as *const u32 as u64, 4, 0) };
+    unsafe {
+        sc6(
+            nr::SETSOCKOPT,
+            fd as u64,
+            SOL_SOCKET,
+            7,
+            &v as *const u32 as u64,
+            4,
+            0,
+        )
+    };
     let (a, n) = abstract_addr(UDP_NAME, None);
-    let r = unsafe { sc3(42, fd as u64, a.as_ptr() as u64, n as u64) };
+    let r = unsafe { sc3(nr::CONNECT, fd as u64, a.as_ptr() as u64, n as u64) };
     if r < 0 {
-        crate::sup::host_error(r, 42, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(r, nr::CONNECT, proto::ctl::HE_SYSCALL);
     }
     let Some(i) = super::inet::idx_of(fd) else {
-        crate::sup::host_error(-e::EIO, 41, proto::ctl::HE_RUNTIME_ASSERT);
+        crate::sup::host_error(-e::EIO, nr::SOCKET, proto::ctl::HE_RUNTIME_ASSERT);
     };
     let pre = [UDP_MAGIC, i as u64 + VINO_BASE];
     let w = unsafe {
         sc6(
-            44,
+            nr::SENDTO,
             fd as u64,
             pre.as_ptr() as u64,
             16,
@@ -86,7 +96,11 @@ pub fn socket(call: &mut dyn Call, family: u16, ty: u64) -> Action {
         )
     };
     if w != 16 {
-        crate::sup::host_error(if w < 0 { w } else { -e::EIO }, 44, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(
+            if w < 0 { w } else { -e::EIO },
+            nr::SENDTO,
+            proto::ctl::HE_SYSCALL,
+        );
     }
     if ty & SOCK_NONBLOCK == 0 {
         io::set_nonblock(fd, false);
@@ -371,7 +385,7 @@ fn send_iov(
     let m = [0u64, 0, kiov.as_ptr() as u64 + 16, n as u64, 0, 0, 0];
     let r = unsafe {
         sc3(
-            46,
+            nr::SENDMSG,
             fd as u64,
             m.as_ptr() as u64,
             MSG_DONTWAIT | MSG_NOSIGNAL,
@@ -381,7 +395,11 @@ fn send_iov(
         return r;
     }
     if r != len as i64 {
-        crate::sup::host_error(if r < 0 { r } else { -e::EIO }, 46, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(
+            if r < 0 { r } else { -e::EIO },
+            nr::SENDMSG,
+            proto::ctl::HE_SYSCALL,
+        );
     }
     sup(
         Op::UdpSend,
@@ -422,7 +440,7 @@ fn recv1(
         let m = [0u64, 0, kiov.as_ptr() as u64, n as u64 + 1, 0, 0, 0];
         let r = unsafe {
             sc3(
-                47,
+                nr::RECVMSG,
                 fd as u64,
                 m.as_ptr() as u64,
                 (flags & MSG_PEEK) | MSG_DONTWAIT | MSG_TRUNC,
@@ -442,14 +460,14 @@ fn recv1(
             return Err(r);
         }
         if (r as usize) < DGRAM_HDR {
-            crate::sup::host_error(-e::EIO, 47, proto::ctl::HE_RUNTIME_ASSERT);
+            crate::sup::host_error(-e::EIO, nr::RECVMSG, proto::ctl::HE_RUNTIME_ASSERT);
         }
         if kind == DG_ERR {
             if peek {
                 // Not the guest's data: take it out of the queue.
                 let h = [hdr.as_mut_ptr() as u64, DGRAM_HDR as u64];
                 let m = [0u64, 0, h.as_ptr() as u64, 1, 0, 0, 0];
-                unsafe { sc3(47, fd as u64, m.as_ptr() as u64, MSG_DONTWAIT) };
+                unsafe { sc3(nr::RECVMSG, fd as u64, m.as_ptr() as u64, MSG_DONTWAIT) };
             }
             // The marker is gone from the queue: another may be queued, and a held delivery
             // behind it can go on.
@@ -522,7 +540,7 @@ fn sendto(call: &mut dyn Call, i: usize) -> i64 {
     send_iov(
         a[0] as i32 as i64,
         i,
-        44,
+        nr::SENDTO,
         one.as_ptr() as u64,
         1,
         Some((a[4], a[5])),
@@ -550,7 +568,7 @@ fn sendmsg(call: &mut dyn Call, i: usize) -> i64 {
     send_iov(
         a[0] as i32 as i64,
         i,
-        46,
+        nr::SENDMSG,
         iov,
         cnt,
         Some((name, nlen)),
@@ -571,7 +589,7 @@ fn sendmmsg(call: &mut dyn Call, i: usize) -> i64 {
                     refuse(b"udp:cmsg");
                     -e::EINVAL
                 } else {
-                    send_iov(fd, i, 307, iov, cnt, Some((name, nlen)), a[3])
+                    send_iov(fd, i, nr::SENDMMSG, iov, cnt, Some((name, nlen)), a[3])
                 }
             }
             Err(e) => e,
@@ -591,7 +609,7 @@ fn recvfrom(call: &mut dyn Call, i: usize) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
     let one = [a[1], a[2]];
-    let mut w = receiver(fd, 45, a[3]);
+    let mut w = receiver(fd, nr::RECVFROM, a[3]);
     let (r, got) = recv_iov(&mut w, fd, i, one.as_ptr() as u64, 1, a[3]);
     if r >= 0 && a[4] != 0 && a[5] != 0 {
         let pr = put_addr(sock(i).family, got.kind, got.port, a[4], a[5]);
@@ -634,7 +652,7 @@ fn recvmsg(call: &mut dyn Call, i: usize) -> i64 {
         Ok(v) => v,
         Err(e) => return e,
     };
-    let mut w = receiver(fd, 47, a[2]);
+    let mut w = receiver(fd, nr::RECVMSG, a[2]);
     let (r, got) = recv_iov(&mut w, fd, i, iov, cnt, a[2]);
     if r >= 0 {
         let e = msg_out(i, a[1], &got);
@@ -653,7 +671,7 @@ fn recvmmsg(call: &mut dyn Call, i: usize) -> i64 {
     let fd = a[0] as i32 as i64;
     let vlen = a[2].min(1024);
     let flags = a[3] & !MSG_WAITFORONE;
-    let mut w = receiver(fd, 299, flags);
+    let mut w = receiver(fd, nr::RECVMMSG, flags);
     if a[4] != 0 {
         match super::time::read_timespec(a[4]) {
             Ok(ns) => w.deadline = Deadline::after(ns),
@@ -692,12 +710,12 @@ pub fn rw(call: &mut dyn Call, i: usize) -> i64 {
     let one = [a[1], a[2]];
     let p1 = one.as_ptr() as u64;
     let (write, iov, cnt, flags) = match call.nr() {
-        0 => (false, p1, 1, 0),
-        1 => (true, p1, 1, 0),
-        19 => (false, a[1], a[2], 0),
-        20 => (true, a[1], a[2], 0),
-        327 | 328 if a[3] as i64 == -1 => (
-            call.nr() == 328,
+        nr::READ => (false, p1, 1, 0),
+        nr::WRITE => (true, p1, 1, 0),
+        nr::READV => (false, a[1], a[2], 0),
+        nr::WRITEV => (true, a[1], a[2], 0),
+        nr::PREADV2 | nr::PWRITEV2 if a[3] as i64 == -1 => (
+            call.nr() == nr::PWRITEV2,
             a[1],
             a[2],
             if a[5] & io::RWF_NOWAIT != 0 {
@@ -739,21 +757,21 @@ pub fn fionread(fd: i64, i: usize, out: u64) -> i64 {
 /// A call on datagram socket `i`.
 pub fn handle(call: &mut dyn Call, i: usize) -> Action {
     let r = match call.nr() {
-        49 => bind(call, i),
-        42 => connect(call, i),
+        nr::BIND => bind(call, i),
+        nr::CONNECT => connect(call, i),
         // listen, accept: not for datagram sockets.
-        50 | 43 | 288 => -EOPNOTSUPP,
-        51 => names(call, i, false),
-        52 => names(call, i, true),
-        54 => super::inet::setsockopt(call, i),
-        55 => super::inet::getsockopt(call, i),
-        48 => shutdown(call, i),
-        44 => sendto(call, i),
-        46 => sendmsg(call, i),
-        307 => sendmmsg(call, i),
-        45 => recvfrom(call, i),
-        47 => recvmsg(call, i),
-        299 => recvmmsg(call, i),
+        nr::LISTEN | nr::ACCEPT | nr::ACCEPT4 => -EOPNOTSUPP,
+        nr::GETSOCKNAME => names(call, i, false),
+        nr::GETPEERNAME => names(call, i, true),
+        nr::SETSOCKOPT => super::inet::setsockopt(call, i),
+        nr::GETSOCKOPT => super::inet::getsockopt(call, i),
+        nr::SHUTDOWN => shutdown(call, i),
+        nr::SENDTO => sendto(call, i),
+        nr::SENDMSG => sendmsg(call, i),
+        nr::SENDMMSG => sendmmsg(call, i),
+        nr::RECVFROM => recvfrom(call, i),
+        nr::RECVMSG => recvmsg(call, i),
+        nr::RECVMMSG => recvmmsg(call, i),
         _ => return stop_here(call),
     };
     Action::Return(r)

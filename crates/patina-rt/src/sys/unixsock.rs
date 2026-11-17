@@ -30,7 +30,7 @@ pub fn fix_bufs(fd: i64) {
     for opt in [SO_SNDBUF, SO_RCVBUF] {
         unsafe {
             sc6(
-                54,
+                nr::SETSOCKOPT,
                 fd as u64,
                 SOL_SOCKET,
                 opt,
@@ -47,7 +47,7 @@ fn is_stream(fd: i64) -> bool {
     let mut len: u32 = 4;
     let r = unsafe {
         sc6(
-            55,
+            nr::GETSOCKOPT,
             fd as u64,
             SOL_SOCKET,
             SO_TYPE,
@@ -104,7 +104,7 @@ fn bind(call: &mut dyn Call) -> i64 {
                 let d = ((n >> (4 * (4 - i))) & 0xf) as u8;
                 sa[3 + i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
             }
-            let r = unsafe { sc3(49, fd, sa.as_ptr() as u64, 8) };
+            let r = unsafe { sc3(nr::BIND, fd, sa.as_ptr() as u64, 8) };
             if r != -EADDRINUSE {
                 return r;
             }
@@ -125,7 +125,7 @@ fn bind(call: &mut dyn Call) -> i64 {
 fn accept(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
-    let flags = if call.nr() == 288 { a[3] } else { 0 };
+    let flags = if call.nr() == nr::ACCEPT4 { a[3] } else { 0 };
     let mut w = Waiter::new(fd, PARK_IN, call.nr());
     let g = w.run(|| {
         if io::poll1(fd, POLLIN) & (POLLIN | POLLERR | POLLHUP) == 0 {
@@ -133,11 +133,11 @@ fn accept(call: &mut dyn Call) -> i64 {
             // two without waiting; for the third, wait.
             let st = io::kind_of(fd);
             if st != Some(Kind::Sock) || !listening(fd) {
-                return Some(unsafe { sc4(288, a[0], a[1], a[2], flags) });
+                return Some(unsafe { sc4(nr::ACCEPT4, a[0], a[1], a[2], flags) });
             }
             return None;
         }
-        io::eagain(unsafe { sc4(288, a[0], a[1], a[2], flags) })
+        io::eagain(unsafe { sc4(nr::ACCEPT4, a[0], a[1], a[2], flags) })
     });
     let r = io::result(g, -e::EAGAIN);
     if r >= 0 {
@@ -153,7 +153,7 @@ fn listening(fd: i64) -> bool {
     let mut len: u32 = 4;
     let r = unsafe {
         sc6(
-            55,
+            nr::GETSOCKOPT,
             fd as u64,
             SOL_SOCKET,
             SO_ACCEPTCONN,
@@ -177,7 +177,7 @@ fn connect(call: &mut dyn Call) -> i64 {
         }
         return r;
     }
-    let mut w = Waiter::new(fd, PARK_OUT, 42);
+    let mut w = Waiter::new(fd, PARK_OUT, nr::CONNECT);
     w.nonblock = Some(false);
     w.deadline = Deadline::SndTimeo;
     let g = w.run(|| {
@@ -185,7 +185,7 @@ fn connect(call: &mut dyn Call) -> i64 {
         if s < 0 {
             return Some(s);
         }
-        let r = unsafe { sc3(42, a[0], a[1], a[2]) };
+        let r = unsafe { sc3(nr::CONNECT, a[0], a[1], a[2]) };
         io::set_nonblock(fd, false);
         // EINPROGRESS is not used by AF_UNIX; EAGAIN is a full backlog.
         io::eagain(r)
@@ -205,7 +205,7 @@ fn note_unix_in_flight(fd: i64) {
     let mut len: u32 = 4;
     let r = unsafe {
         sc6(
-            55,
+            nr::GETSOCKOPT,
             fd as u64,
             SOL_SOCKET,
             SO_DOMAIN,
@@ -278,11 +278,11 @@ fn receiver(fd: i64, nr: u64, flags: u64) -> Waiter {
 fn sendto(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
-    let mut w = sender(fd, 44, a[3]);
+    let mut w = sender(fd, nr::SENDTO, a[3]);
     let one = [a[1], a[2]];
     let r = io::write_all(&mut w, one.as_ptr() as u64, 1, |p, _| {
         let [b, l] = unsafe { *(p as *const [u64; 2]) };
-        unsafe { sc6(44, a[0], b, l, a[3] | MSG_DONTWAIT, a[4], a[5]) }
+        unsafe { sc6(nr::SENDTO, a[0], b, l, a[3] | MSG_DONTWAIT, a[4], a[5]) }
     });
     w.finish(r)
 }
@@ -299,16 +299,16 @@ fn sendmsg(call: &mut dyn Call) -> i64 {
     if msg == 0 {
         return -e::EFAULT;
     }
-    let mut w = sender(fd, 46, a[2]);
+    let mut w = sender(fd, nr::SENDMSG, a[2]);
     let (iov, cnt) = unsafe { (*((msg + 16) as *const u64), *((msg + 24) as *const u64)) };
     // The window the cursor builds lives on the runtime stack, so `p == iov` only for the
     // first attempt (repeated as long as it would block).
     let r = io::write_all(&mut w, iov, cnt, |p, n| {
         if p == iov {
-            return unsafe { sc3(46, a[0], msg, a[2] | MSG_DONTWAIT) };
+            return unsafe { sc3(nr::SENDMSG, a[0], msg, a[2] | MSG_DONTWAIT) };
         }
         let m = [0u64, 0, p, n, 0, 0, 0];
-        unsafe { sc3(46, a[0], m.as_ptr() as u64, a[2] | MSG_DONTWAIT) }
+        unsafe { sc3(nr::SENDMSG, a[0], m.as_ptr() as u64, a[2] | MSG_DONTWAIT) }
     });
     w.finish(r)
 }
@@ -323,13 +323,13 @@ fn sendmmsg(call: &mut dyn Call) -> i64 {
             return -e::EBADF;
         }
     }
-    let mut w = sender(fd, 307, a[3]);
+    let mut w = sender(fd, nr::SENDMMSG, a[3]);
     let mut done = 0u64;
     while done < vlen {
         let g = w.run(|| {
             io::eagain(unsafe {
                 sc4(
-                    307,
+                    nr::SENDMMSG,
                     a[0],
                     a[1] + done * 64,
                     vlen - done,
@@ -359,7 +359,7 @@ fn sendmmsg(call: &mut dyn Call) -> i64 {
 fn recvfrom(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
-    let mut w = receiver(fd, 45, a[3]);
+    let mut w = receiver(fd, nr::RECVFROM, a[3]);
     let waitall = a[3] & MSG_WAITALL != 0 && a[3] & MSG_DONTWAIT == 0 && is_stream(fd);
     let mut total = 0u64;
     loop {
@@ -367,7 +367,7 @@ fn recvfrom(call: &mut dyn Call) -> i64 {
         let g = w.run(|| {
             io::eagain(unsafe {
                 sc6(
-                    45,
+                    nr::RECVFROM,
                     a[0],
                     a[1] + off,
                     a[2] - off,
@@ -402,8 +402,8 @@ fn recvmsg(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
     let msg = a[1];
-    let mut w = receiver(fd, 47, a[2]);
-    let g = w.run(|| io::eagain(unsafe { sc3(47, a[0], msg, a[2] | MSG_DONTWAIT) }));
+    let mut w = receiver(fd, nr::RECVMSG, a[2]);
+    let g = w.run(|| io::eagain(unsafe { sc3(nr::RECVMSG, a[0], msg, a[2] | MSG_DONTWAIT) }));
     let r = match g {
         Got::Done(r) => r,
         g => return w.finish(io::result(g, -e::EAGAIN)),
@@ -426,7 +426,7 @@ fn recvmsg(call: &mut dyn Call) -> i64 {
         let g = w.run(|| {
             io::eagain(unsafe {
                 sc3(
-                    47,
+                    nr::RECVMSG,
                     a[0],
                     m.as_ptr() as u64,
                     (a[2] & !MSG_WAITALL) | MSG_DONTWAIT,
@@ -449,14 +449,16 @@ fn recvmsg(call: &mut dyn Call) -> i64 {
 fn recvmmsg(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
-    let mut w = receiver(fd, 299, a[3]);
+    let mut w = receiver(fd, nr::RECVMMSG, a[3]);
     if a[4] != 0 {
         match super::time::read_timespec(a[4]) {
             Ok(ns) => w.deadline = Deadline::after(ns),
             Err(e) => return e,
         }
     }
-    let g = w.run(|| io::eagain(unsafe { sc6(299, a[0], a[1], a[2], a[3] | MSG_DONTWAIT, 0, 0) }));
+    let g = w.run(|| {
+        io::eagain(unsafe { sc6(nr::RECVMMSG, a[0], a[1], a[2], a[3] | MSG_DONTWAIT, 0, 0) })
+    });
     let r = io::result(g, -e::EAGAIN);
     if r > 0 {
         io::bump();
@@ -514,19 +516,20 @@ fn is_socket(fd: u64) -> bool {
 
 pub fn handle(call: &mut dyn Call) -> Action {
     let r = match call.nr() {
-        41 => return socket(call),
-        53 => return socketpair(call),
-        49 => bind(call),
-        43 | 288 => accept(call),
-        42 => connect(call),
-        44 => sendto(call),
-        46 => sendmsg(call),
-        307 => sendmmsg(call),
-        45 => recvfrom(call),
-        47 => recvmsg(call),
-        299 => recvmmsg(call),
-        54 | 55
-            if !listed_opt(call.nr() == 55, call.arg(1), call.arg(2)) && is_socket(call.arg(0)) =>
+        nr::SOCKET => return socket(call),
+        nr::SOCKETPAIR => return socketpair(call),
+        nr::BIND => bind(call),
+        nr::ACCEPT | nr::ACCEPT4 => accept(call),
+        nr::CONNECT => connect(call),
+        nr::SENDTO => sendto(call),
+        nr::SENDMSG => sendmsg(call),
+        nr::SENDMMSG => sendmmsg(call),
+        nr::RECVFROM => recvfrom(call),
+        nr::RECVMSG => recvmsg(call),
+        nr::RECVMMSG => recvmmsg(call),
+        nr::SETSOCKOPT | nr::GETSOCKOPT
+            if !listed_opt(call.nr() == nr::GETSOCKOPT, call.arg(1), call.arg(2))
+                && is_socket(call.arg(0)) =>
         {
             // Recorded as sockopt:LEVEL:NAME.
             let mut pre = [0u8; 24];
@@ -536,7 +539,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             refuse_request(call, &pre[..n], name, false, -ENOPROTOOPT)
         }
         // listen, shutdown, setsockopt change what others see; names and options are queries.
-        50 | 48 | 54 => {
+        nr::LISTEN | nr::SHUTDOWN | nr::SETSOCKOPT => {
             let r = raw(call);
             host_check(call, r);
             if r == 0 {
@@ -544,7 +547,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        51 | 52 | 55 => {
+        nr::GETSOCKNAME | nr::GETPEERNAME | nr::GETSOCKOPT => {
             let r = raw(call);
             host_check(call, r);
             r

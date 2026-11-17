@@ -79,10 +79,10 @@ fn ts(ns: u64) -> [u64; 2] {
 pub fn handle(call: &mut dyn Call) -> Action {
     let (a0, a1) = (call.arg(0), call.arg(1));
     let r = match call.nr() {
-        228 => clock(call, a0 as i32 as i64)
+        nr::CLOCK_GETTIME => clock(call, a0 as i32 as i64)
             .and_then(|t| put(a1, ts(t)))
             .map(|_| 0),
-        229 => {
+        nr::CLOCK_GETRES => {
             let id = a0 as i32 as i64;
             clock(call, id).and_then(|_| {
                 let res = if id == 5 || id == 6 { 4_000_000 } else { 1 };
@@ -92,7 +92,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 Ok(0)
             })
         }
-        96 => {
+        nr::GETTIMEOFDAY => {
             let t = realtime_ns();
             let mut r: Result<i64, i64> = Ok(0);
             if call.arg(0) != 0 {
@@ -103,7 +103,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        201 => {
+        nr::TIME => {
             let s = realtime_ns() / NS;
             if call.arg(0) != 0 {
                 put(call.arg(0), s).map(|_| s as i64)
@@ -111,7 +111,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 Ok(s as i64)
             }
         }
-        100 => {
+        nr::TIMES => {
             let tick = NS / 100;
             let u = cpu_ns(call) / tick;
             let r = (now() / tick) as i64;
@@ -121,8 +121,8 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 Ok(r)
             }
         }
-        35 => nanosleep(a0, a1),
-        230 => clock_nanosleep(a0 as i32 as i64, a1, call.arg(2), call.arg(3)),
+        nr::NANOSLEEP => nanosleep(a0, a1),
+        nr::CLOCK_NANOSLEEP => clock_nanosleep(a0 as i32 as i64, a1, call.arg(2), call.arg(3)),
         _ => return stop_here(call),
     };
     Action::Return(r.unwrap_or_else(|e| e))

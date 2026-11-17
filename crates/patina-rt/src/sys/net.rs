@@ -9,14 +9,14 @@ const EOPNOTSUPP: i64 = 95;
 
 pub fn handle(call: &mut dyn Call) -> Action {
     match call.nr() {
-        41 => {
+        nr::SOCKET => {
             if let Some(a) = super::inet::socket_call(call) {
                 return a;
             }
         }
         // socketpair(AF_INET/AF_INET6): the kernel answers EOPNOTSUPP.
-        53 if matches!(call.arg(0), 2 | 10) => return Action::Return(-EOPNOTSUPP),
-        53 => {}
+        nr::SOCKETPAIR if matches!(call.arg(0), 2 | 10) => return Action::Return(-EOPNOTSUPP),
+        nr::SOCKETPAIR => {}
         _ => {
             let fd = call.arg(0) as i32 as i64;
             if let Some(i) = super::inet::wire_idx(fd) {
@@ -24,13 +24,13 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             // The wire's own abstract names are not reachable from guest AF_UNIX sockets.
             match call.nr() {
-                49 if super::inet::reserved_unix_name(call.arg(1), call.arg(2)) => {
+                nr::BIND if super::inet::reserved_unix_name(call.arg(1), call.arg(2)) => {
                     return Action::Return(-EADDRINUSE)
                 }
-                42 if super::inet::reserved_unix_name(call.arg(1), call.arg(2)) => {
+                nr::CONNECT if super::inet::reserved_unix_name(call.arg(1), call.arg(2)) => {
                     return Action::Return(-ECONNREFUSED)
                 }
-                44 if super::inet::reserved_unix_name(call.arg(4), call.arg(5)) => {
+                nr::SENDTO if super::inet::reserved_unix_name(call.arg(4), call.arg(5)) => {
                     return Action::Return(-ECONNREFUSED)
                 }
                 _ => {}

@@ -227,11 +227,11 @@ fn wake_op(uaddr: u64, n: u64, uaddr2: u64, n2: u64, enc: u32) -> i64 {
 
 pub fn handle(call: &mut dyn Call) -> Action {
     let r = match call.nr() {
-        24 => {
+        nr::SCHED_YIELD => {
             crate::sup::call_sup(Op::Yield, [0; 6]);
             0
         }
-        204 => {
+        nr::SCHED_GETAFFINITY => {
             let (len, mask) = (call.arg(1), call.arg(2));
             if len < 8 || len % 8 != 0 {
                 -e::EINVAL
@@ -246,16 +246,16 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 }
             }
         }
-        203 => 0,
-        309 => {
+        nr::SCHED_SETAFFINITY => 0,
+        nr::GETCPU => {
             let one = |p: u64| if p != 0 { put(p, 0u32) } else { Ok(()) };
             one(call.arg(0))
                 .and_then(|()| one(call.arg(1)))
                 .err()
                 .unwrap_or(0)
         }
-        202 => futex(call),
-        56 => {
+        nr::FUTEX => futex(call),
+        nr::CLONE => {
             let [flags, stack, ptid, ctid, tls, _] = args(call);
             // Threads here; fork (no CLONE_VM) and vfork (CLONE_VM|CLONE_VFORK): processes.
             if flags & thread::CLONE_VM == 0 || flags & super::proc::CLONE_VFORK != 0 {
@@ -279,7 +279,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        60 => thread::exit(call),
+        nr::EXIT => thread::exit(call),
         _ => return stop_here(call),
     };
     Action::Return(r)

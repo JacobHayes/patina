@@ -11,6 +11,7 @@ pub mod draw;
 pub mod faults;
 pub mod insn;
 pub mod layout;
+pub mod nr;
 pub mod oplog;
 pub mod pmu;
 pub mod rec;

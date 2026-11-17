@@ -1,12 +1,13 @@
 //! The syscall table as data.
 //!
 //! One file per class of call, so that later tasks add rows without
-//! conflicts. Every number known to the kernel headers has a row: numbers
-//! without a written row are `Stop`, and so is any number beyond the headers.
+//! conflicts. Rows name calls (`nr::OPENAT`), so each is written once for every
+//! architecture. Every number known to the kernel has a row: numbers without a
+//! written row are `Stop`, and so is any number beyond the kernel's table.
 //! A row is only built by `Row::new`, which requires a class, a strength and a
 //! non-empty reason (checked at compile time, because the table is a `static`).
+//! A row naming a call the architecture lacks is left out.
 
-mod names;
 pub mod nargs;
 
 pub mod fd;
@@ -19,7 +20,8 @@ pub mod sched;
 pub mod sig;
 pub mod time;
 
-pub use names::{NAMES, NR_COUNT};
+use super::nr;
+pub use super::nr::{NAMES, NR_COUNT};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
@@ -148,19 +150,34 @@ pub struct Row {
 impl Row {
     pub const fn new(
         group: Group,
-        nr: u32,
+        nr: u64,
         class: Class,
         strength: Strength,
         why: &'static str,
     ) -> Row {
         assert!(!why.is_empty(), "every row needs a reason");
-        assert!((nr as usize) < NR_COUNT, "number beyond the kernel headers");
+        if !nr::present(nr) {
+            // The architecture lacks the call: `add` leaves the row out.
+            return Row {
+                nr: ABSENT,
+                name: "",
+                class,
+                strength,
+                why,
+                outs: &[],
+                ins: &[],
+                fds: 0,
+                group,
+                written: false,
+            };
+        }
+        assert!((nr as usize) < NR_COUNT, "number beyond the kernel's table");
         let name = match NAMES[nr as usize] {
             Some(n) => n,
             None => panic!("number not in the kernel headers"),
         };
         Row {
-            nr,
+            nr: nr as u32,
             name,
             class,
             strength,
@@ -204,6 +221,9 @@ impl Row {
     }
 }
 
+/// The `nr` of a row whose call the architecture lacks.
+const ABSENT: u32 = u32::MAX;
+
 static UNKNOWN: Row = Row {
     nr: u32::MAX,
     name: "unknown",
@@ -221,9 +241,12 @@ const fn add(t: &mut [Row; NR_COUNT], rows: &[Row]) {
     let mut i = 0;
     while i < rows.len() {
         let r = rows[i];
+        i += 1;
+        if r.nr == ABSENT {
+            continue;
+        }
         assert!(!t[r.nr as usize].written, "two rows for one syscall");
         t[r.nr as usize] = r;
-        i += 1;
     }
 }
 

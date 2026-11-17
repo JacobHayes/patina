@@ -10,8 +10,6 @@ use proto::ctl::Op;
 use proto::layout::PAGE;
 use proto::sdk::*;
 
-const PROCESS_VM_READV: u64 = 310;
-const PROCESS_VM_WRITEV: u64 = 311;
 const MAX_LEN: usize = HDR_LEN + LABEL_MAX + TEXT_MAX;
 
 /// The payload hash of the last SDK trap, taken by `log::trap`.
@@ -31,7 +29,7 @@ fn vm(nr: u64, local: *mut u8, remote: u64, len: usize) -> Result<(), i64> {
     let l = [local as u64, len as u64];
     let r = [remote, len as u64];
     let n = unsafe {
-        let pid = sc0(crate::raw::nr::GETPID) as u64;
+        let pid = sc0(proto::nr::GETPID) as u64;
         sc6(nr, pid, l.as_ptr() as u64, 1, r.as_ptr() as u64, 1, 0)
     };
     if n == len as i64 {
@@ -80,7 +78,7 @@ fn payload(ptr: u64, len: u64, buf: &mut [u8; MAX_LEN]) -> Result<Hdr, i64> {
     if ptr == 0 {
         return Err(-e::EFAULT);
     }
-    vm(PROCESS_VM_READV, buf.as_mut_ptr(), ptr, len as usize)?;
+    vm(nr::PROCESS_VM_READV, buf.as_mut_ptr(), ptr, len as usize)?;
     Hdr::parse(&buf[..], len as usize).ok_or(-e::EINVAL)
 }
 
@@ -166,7 +164,7 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
             let v = cfg.knob(seed, s.label_hash, h.a, h.b, h.c);
             s.value = v;
             buf[8..16].copy_from_slice(&v.to_le_bytes());
-            match vm(PROCESS_VM_WRITEV, buf[8..16].as_mut_ptr(), ptr + 8, 8) {
+            match vm(nr::PROCESS_VM_WRITEV, buf[8..16].as_mut_ptr(), ptr + 8, 8) {
                 Ok(()) => 0,
                 Err(e) => e,
             }
@@ -225,7 +223,7 @@ const NAMES_MAX: u64 = 64 << 10;
 const SITES_MAX: u64 = 16 << 20;
 
 fn pread(fd: u64, buf: *mut u8, len: u64, off: u64) -> bool {
-    unsafe { sc4(crate::raw::nr::PREAD64, fd, buf as u64, len, off) == len as i64 }
+    unsafe { sc4(proto::nr::PREAD64, fd, buf as u64, len, off) == len as i64 }
 }
 
 /// Declare the sites an image's `patina_sites` section lists (see `proto::sdk::records`). Read
@@ -295,7 +293,7 @@ impl Map {
 
 impl Drop for Map {
     fn drop(&mut self) {
-        unsafe { sc2(crate::raw::nr::MUNMAP, self.base, self.len) };
+        unsafe { sc2(proto::nr::MUNMAP, self.base, self.len) };
     }
 }
 
@@ -305,7 +303,7 @@ fn map(fd: u64, off: u64, size: u64) -> Option<Map> {
     let base = crate::state::priv_alloc(len, PAGE);
     let r = unsafe {
         sc6(
-            crate::raw::nr::MMAP,
+            proto::nr::MMAP,
             base,
             len,
             PROT_READ,

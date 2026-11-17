@@ -36,9 +36,6 @@ const O_PATH: u64 = 0o10000000;
 const O_CLOEXEC: u64 = 0o2000000;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const MAX_LINKS: u32 = 40;
-const OPENAT2: u64 = 437;
-const READLINKAT: u64 = 267;
-const NEWFSTATAT: u64 = 262;
 
 /// A path argument: descriptor argument (if any), path argument, whether the last
 /// component is followed.
@@ -61,9 +58,9 @@ fn path_args(nr: u64, a: &[u64; 6]) -> ([Arg; 2], usize) {
     let one = |v: Arg| ([v, x], 1);
     let nf = |f: u64| f & AT_SYMLINK_NOFOLLOW == 0;
     match nr {
-        2 => one(p(None, 0, open_follows(a[1]))),
-        257 => one(p(Some(0), 1, open_follows(a[2]))),
-        437 => {
+        nr::OPEN => one(p(None, 0, open_follows(a[1]))),
+        nr::OPENAT => one(p(Some(0), 1, open_follows(a[2]))),
+        nr::OPENAT2 => {
             // openat2: the guest's own resolve flags stay in force (RESOLVE_BENEATH and
             // RESOLVE_IN_ROOT refuse absolute paths): such calls are only checked.
             let flags = if a[2] != 0 && a[3] >= 24 {
@@ -73,32 +70,55 @@ fn path_args(nr: u64, a: &[u64; 6]) -> ([Arg; 2], usize) {
             };
             one(p(Some(0), 1, open_follows(flags)))
         }
-        85 => one(p(None, 0, true)),
-        4 | 21 | 80 | 191 | 194 | 188 | 197 | 137 | 76 | 90 | 92 | 132 | 235 | 59 => {
-            one(p(None, 0, true))
+        nr::CREAT => one(p(None, 0, true)),
+        nr::STAT
+        | nr::ACCESS
+        | nr::CHDIR
+        | nr::GETXATTR
+        | nr::LISTXATTR
+        | nr::SETXATTR
+        | nr::REMOVEXATTR
+        | nr::STATFS
+        | nr::TRUNCATE
+        | nr::CHMOD
+        | nr::CHOWN
+        | nr::UTIME
+        | nr::UTIMES
+        | nr::EXECVE => one(p(None, 0, true)),
+        nr::LSTAT
+        | nr::READLINK
+        | nr::LGETXATTR
+        | nr::LLISTXATTR
+        | nr::LSETXATTR
+        | nr::LREMOVEXATTR
+        | nr::LCHOWN
+        | nr::MKDIR
+        | nr::MKNOD
+        | nr::UNLINK
+        | nr::RMDIR => one(p(None, 0, false)),
+        nr::NEWFSTATAT => one(p(Some(0), 1, nf(a[3]))),
+        nr::STATX => one(p(Some(0), 1, nf(a[2]))),
+        nr::READLINKAT => one(p(Some(0), 1, false)),
+        nr::FACCESSAT | nr::FCHMODAT | nr::FUTIMESAT => one(p(Some(0), 1, true)),
+        nr::FACCESSAT2 | nr::FCHMODAT2 | nr::UTIMENSAT => one(p(Some(0), 1, nf(a[3]))),
+        nr::FCHOWNAT => one(p(Some(0), 1, nf(a[4]))),
+        nr::EXECVEAT => one(p(Some(0), 1, nf(a[4]))),
+        nr::SETXATTRAT | nr::GETXATTRAT | nr::LISTXATTRAT | nr::REMOVEXATTRAT => {
+            one(p(Some(0), 1, nf(a[2])))
         }
-        6 | 89 | 192 | 195 | 189 | 198 | 94 | 83 | 133 | 87 | 84 => one(p(None, 0, false)),
-        262 => one(p(Some(0), 1, nf(a[3]))),
-        332 => one(p(Some(0), 1, nf(a[2]))),
-        267 => one(p(Some(0), 1, false)),
-        269 | 268 | 261 => one(p(Some(0), 1, true)),
-        439 | 452 | 280 => one(p(Some(0), 1, nf(a[3]))),
-        260 => one(p(Some(0), 1, nf(a[4]))),
-        322 => one(p(Some(0), 1, nf(a[4]))),
-        463..=466 => one(p(Some(0), 1, nf(a[2]))),
-        258 | 259 | 263 => one(p(Some(0), 1, false)),
-        82 => ([p(None, 0, false), p(None, 1, false)], 2),
-        86 => ([p(None, 0, false), p(None, 1, false)], 2),
-        88 => one(p(None, 1, false)),
-        264 | 316 => ([p(Some(0), 1, false), p(Some(2), 3, false)], 2),
-        265 => (
+        nr::MKDIRAT | nr::MKNODAT | nr::UNLINKAT => one(p(Some(0), 1, false)),
+        nr::RENAME => ([p(None, 0, false), p(None, 1, false)], 2),
+        nr::LINK => ([p(None, 0, false), p(None, 1, false)], 2),
+        nr::SYMLINK => one(p(None, 1, false)),
+        nr::RENAMEAT | nr::RENAMEAT2 => ([p(Some(0), 1, false), p(Some(2), 3, false)], 2),
+        nr::LINKAT => (
             [
                 p(Some(0), 1, a[4] & AT_SYMLINK_FOLLOW != 0),
                 p(Some(2), 3, false),
             ],
             2,
         ),
-        266 => one(p(Some(1), 2, false)),
+        nr::SYMLINKAT => one(p(Some(1), 2, false)),
         _ => ([x, x], 0),
     }
 }
@@ -127,8 +147,10 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
             Some(i) => a[i] as i32 as i64,
             None => AT_FDCWD,
         };
-        let check_only =
-            nr == 437 && a[2] != 0 && a[3] >= 24 && crate::guest::get::<u64>(a[2] + 16)? != 0;
+        let check_only = nr == nr::OPENAT2
+            && a[2] != 0
+            && a[3] >= 24
+            && crate::guest::get::<u64>(a[2] + 16)? != 0;
         let out = &mut bufs[k];
         match resolve(dirfd, s, arg.follow, out)? {
             Resolved::Same => continue,
@@ -155,8 +177,17 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
 pub fn note_missing(call: &dyn Call) {
     let nr = call.nr();
     let what = match nr {
-        59 | 322 => proto::vfs::MISSING_EXEC,
-        2 | 257 | 437 | 4 | 6 | 262 | 332 | 21 | 269 | 439 => proto::vfs::MISSING_OPEN,
+        nr::EXECVE | nr::EXECVEAT => proto::vfs::MISSING_EXEC,
+        nr::OPEN
+        | nr::OPENAT
+        | nr::OPENAT2
+        | nr::STAT
+        | nr::LSTAT
+        | nr::NEWFSTATAT
+        | nr::STATX
+        | nr::ACCESS
+        | nr::FACCESSAT
+        | nr::FACCESSAT2 => proto::vfs::MISSING_OPEN,
         _ => return,
     };
     let mut a = [0u64; 6];
@@ -201,7 +232,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
     ];
     let fd = unsafe {
         sc4(
-            OPENAT2,
+            nr::OPENAT2,
             dirfd as u64,
             c.as_ptr() as u64,
             how.as_ptr() as u64,
@@ -220,7 +251,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
                 let how = [O_PATH | O_CLOEXEC, 0, RESOLVE_NO_SYMLINKS];
                 let fd = unsafe {
                     sc4(
-                        OPENAT2,
+                        nr::OPENAT2,
                         dirfd as u64,
                         c.as_ptr() as u64,
                         how.as_ptr() as u64,
@@ -275,7 +306,7 @@ fn push(b: &mut PathBuf, s: &[u8]) -> bool {
 /// The real path of `dirfd` (or the working directory).
 fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
     let r = if dirfd == AT_FDCWD {
-        unsafe { sc2(79, out.b.as_mut_ptr() as u64, PATH_MAX as u64) }
+        unsafe { sc2(nr::GETCWD, out.b.as_mut_ptr() as u64, PATH_MAX as u64) }
     } else {
         let mut lp = [0u8; 32];
         let pre = b"/proc/self/fd/";
@@ -284,7 +315,7 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
         lp[l] = 0;
         let r = unsafe {
             sc4(
-                READLINKAT,
+                nr::READLINKAT,
                 AT_FDCWD as u64,
                 lp.as_ptr() as u64,
                 out.b.as_mut_ptr() as u64,
@@ -322,7 +353,7 @@ fn is_dir(p: &PathBuf) -> Result<bool, i64> {
     let mut st = [0u64; 18];
     let r = unsafe {
         sc4(
-            NEWFSTATAT,
+            nr::NEWFSTATAT,
             AT_FDCWD as u64,
             p.b.as_ptr() as u64,
             st.as_mut_ptr() as u64,
@@ -431,7 +462,7 @@ fn walk(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<(), i64
         out.b[out.n] = 0;
         let r = unsafe {
             sc4(
-                READLINKAT,
+                nr::READLINKAT,
                 AT_FDCWD as u64,
                 out.b.as_ptr() as u64,
                 t.as_mut_ptr() as u64,

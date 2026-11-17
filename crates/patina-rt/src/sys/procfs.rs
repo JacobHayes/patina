@@ -132,7 +132,7 @@ fn read_real(path: &[u8], buf: &mut [u8]) -> usize {
 
 fn uname_field(field: usize) -> ([u8; 65], usize) {
     let mut u = [0u8; 390];
-    unsafe { sc1(63, u.as_mut_ptr() as u64) };
+    unsafe { sc1(nr::UNAME, u.as_mut_ptr() as u64) };
     let mut out = [0u8; 65];
     out.copy_from_slice(&u[field * 65..field * 65 + 65]);
     let n = out.iter().position(|&c| c == 0).unwrap_or(65);
@@ -477,10 +477,10 @@ const MEM_FREE_KB: u64 = 12 << 20;
 /// The contents of a synthesised file.
 fn content(k: Synth, w: &mut W) {
     let pid = crate::state::thread().pid as u64;
-    let ppid = unsafe { sc0(110) } as u64;
+    let ppid = unsafe { sc0(nr::GETPPID) } as u64;
     let s = STRS.get();
-    let uid = unsafe { sc0(102) } as u64;
-    let gid = unsafe { sc0(104) } as u64;
+    let uid = unsafe { sc0(nr::GETUID) } as u64;
+    let gid = unsafe { sc0(nr::GETGID) } as u64;
     let cpu_ticks = crate::state::thread().cpu_ns() / 10_000_000;
     match k {
         Synth::Maps => maps(w, false),
@@ -672,7 +672,7 @@ pub fn open(k: Synth, cloexec: bool) -> i64 {
     name[14] = b'0' + kv % 10;
     let fd = unsafe {
         sc2(
-            319,
+            nr::MEMFD_CREATE,
             name.as_ptr() as u64,
             if cloexec { MFD_CLOEXEC } else { 0 },
         )
@@ -720,7 +720,7 @@ pub fn open(k: Synth, cloexec: bool) -> i64 {
     }
     unsafe {
         sc3(
-            292,
+            nr::DUP3,
             ro as u64,
             fd as u64,
             if cloexec { O_CLOEXEC } else { 0 },
@@ -760,8 +760,8 @@ pub fn fake_stat(k: Synth, p: u64) -> i64 {
     st[0] = proc_dev();
     st[1] = fake_ino(k);
     st[2] = 1;
-    let uid = unsafe { sc0(102) } as u64;
-    let gid = unsafe { sc0(104) } as u64;
+    let uid = unsafe { sc0(nr::GETUID) } as u64;
+    let gid = unsafe { sc0(nr::GETGID) } as u64;
     st[3] = fake_mode(k) as u64 | (uid << 32);
     st[4] = gid;
     st[7] = 1024;
@@ -777,8 +777,8 @@ pub fn fake_statx(k: Synth, p: u64) -> i64 {
     let mut b = [0u8; 256];
     let put32 = |b: &mut [u8; 256], o: usize, v: u32| b[o..o + 4].copy_from_slice(&v.to_le_bytes());
     let put64 = |b: &mut [u8; 256], o: usize, v: u64| b[o..o + 8].copy_from_slice(&v.to_le_bytes());
-    let uid = unsafe { sc0(102) } as u32;
-    let gid = unsafe { sc0(104) } as u32;
+    let uid = unsafe { sc0(nr::GETUID) } as u32;
+    let gid = unsafe { sc0(nr::GETGID) } as u32;
     put32(&mut b, 0, 0x7ff | 0x1000); // basic stats, mount id
     put32(&mut b, 4, 1024);
     put32(&mut b, 16, 1);

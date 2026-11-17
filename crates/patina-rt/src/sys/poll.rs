@@ -10,7 +10,6 @@ use proto::layout::FD_HIDDEN_MIN;
 
 const NS: u64 = 1_000_000_000;
 const POLLNVAL: u32 = 0x20;
-const PPOLL: u64 = 271;
 const MAX_HIDDEN: usize = 32;
 
 /// Read a guest timespec (None: NULL pointer = wait forever).
@@ -102,7 +101,7 @@ fn ppoll0(fds: u64, n: u64) -> i64 {
         }
     }
     let ts = [0u64; 2];
-    let r = unsafe { sc6(PPOLL, fds, n, ts.as_ptr() as u64, 0, 8, 0) };
+    let r = unsafe { sc6(nr::PPOLL, fds, n, ts.as_ptr() as u64, 0, 8, 0) };
     for &(i, fd) in &hidden[..nh] {
         // Both words were read and written above: these copies succeed.
         let ev = get::<u32>(fds + i * 8 + 4).unwrap_or(0);
@@ -127,7 +126,7 @@ fn first_fd(fds: u64, n: u64) -> i64 {
 pub fn poll(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let (fds, n) = (a[0], a[1]);
-    let (timeout, tsp) = if call.nr() == 7 {
+    let (timeout, tsp) = if call.nr() == nr::POLL {
         let t = a[2] as i32;
         (
             if t < 0 {
@@ -194,7 +193,7 @@ pub fn select(call: &mut dyn Call) -> i64 {
             }
         }
     }
-    let pselect = call.nr() == 270;
+    let pselect = call.nr() == nr::PSELECT6;
     let timeout = if pselect {
         timespec(a[4])
     } else {
@@ -223,7 +222,7 @@ pub fn select(call: &mut dyn Call) -> i64 {
         // pselect6 with a zero timespec and no mask: the attempt for both.
         unsafe {
             sc6(
-                270,
+                nr::PSELECT6,
                 n as u64,
                 sets[0],
                 sets[1],
@@ -248,7 +247,7 @@ pub fn select(call: &mut dyn Call) -> i64 {
 /// epoll_pwait2(ep, ev, max, timespec, mask, size).
 pub fn epoll_wait(call: &mut dyn Call) -> i64 {
     let a = args(call);
-    let timeout = if call.nr() == 441 {
+    let timeout = if call.nr() == nr::EPOLL_PWAIT2 {
         match timespec(a[3]) {
             Ok(t) => t,
             Err(e) => return e,
@@ -263,7 +262,7 @@ pub fn epoll_wait(call: &mut dyn Call) -> i64 {
     };
     let mut w = Waiter::new(a[0] as i32 as i64, proto::ctl::PARK_IN, call.nr());
     wait_ready(&mut w, timeout, || unsafe {
-        sc6(281, a[0], a[1], a[2], 0, 0, 8)
+        sc6(nr::EPOLL_PWAIT, a[0], a[1], a[2], 0, 0, 8)
     })
 }
 

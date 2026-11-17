@@ -252,7 +252,7 @@ fn socket(call: &mut dyn Call) -> Action {
     }
     let fd = unsafe {
         sc3(
-            41,
+            nr::SOCKET,
             AF_UNIX,
             SOCK_STREAM | (ty & (SOCK_NONBLOCK | SOCK_CLOEXEC)),
             0,
@@ -264,7 +264,7 @@ fn socket(call: &mut dyn Call) -> Action {
     }
     super::unixsock::fix_bufs(fd);
     let Some(i) = idx_of(fd) else {
-        crate::sup::host_error(-e::EIO, 41, proto::ctl::HE_RUNTIME_ASSERT);
+        crate::sup::host_error(-e::EIO, nr::SOCKET, proto::ctl::HE_RUNTIME_ASSERT);
     };
     *sock(i) = WSock {
         family,
@@ -277,7 +277,7 @@ fn socket(call: &mut dyn Call) -> Action {
 /// Bind the real socket to `@patina-l-<port>`.
 fn real_bind(fd: i64, port: u16) -> i64 {
     let (a, n) = abstract_addr(LISTEN_PREFIX, Some(port as u64));
-    unsafe { sc3(49, fd as u64, a.as_ptr() as u64, n as u64) }
+    unsafe { sc3(nr::BIND, fd as u64, a.as_ptr() as u64, n as u64) }
 }
 
 fn bind_to(fd: i64, i: usize, port: u16, kind: u8) -> i64 {
@@ -294,7 +294,7 @@ fn bind_to(fd: i64, i: usize, port: u16, kind: u8) -> i64 {
     }
     let b = real_bind(fd, r as u16);
     if b < 0 {
-        crate::sup::host_error(b, 49, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(b, nr::BIND, proto::ctl::HE_SYSCALL);
     }
     let s = sock(i);
     s.state = WS_BOUND;
@@ -325,7 +325,7 @@ fn listen(call: &mut dyn Call, i: usize) -> i64 {
     if st != WS_BOUND && st != WS_LISTEN {
         return -e::EINVAL;
     }
-    let r = unsafe { sc2(50, fd as u64, backlog) };
+    let r = unsafe { sc2(nr::LISTEN, fd as u64, backlog) };
     host_check(call, r);
     if r == 0 && st != WS_LISTEN {
         let s = *sock(i);
@@ -358,21 +358,25 @@ fn pad(fd: i64, pre: &[u64; 2]) -> i64 {
     let msg = [0u64, 0, iov.as_ptr() as u64, 17, 0, 0, 0];
     let r = unsafe {
         sc3(
-            46,
+            nr::SENDMSG,
             fd as u64,
             msg.as_ptr() as u64,
             MSG_DONTWAIT | MSG_NOSIGNAL,
         )
     };
     if r < PREAMBLE_LEN as i64 {
-        crate::sup::host_error(if r < 0 { r } else { -e::EIO }, 46, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(
+            if r < 0 { r } else { -e::EIO },
+            nr::SENDMSG,
+            proto::ctl::HE_SYSCALL,
+        );
     }
     let mut total = r - PREAMBLE_LEN as i64;
     let msg = [0u64, 0, iov.as_ptr() as u64 + 16, 16, 0, 0, 0];
     loop {
         let r = unsafe {
             sc3(
-                46,
+                nr::SENDMSG,
                 fd as u64,
                 msg.as_ptr() as u64,
                 MSG_DONTWAIT | MSG_NOSIGNAL,
@@ -413,9 +417,9 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
     if !nonblock {
         io::set_nonblock(fd, true);
     }
-    let r = unsafe { sc3(42, fd as u64, wa.as_ptr() as u64, wn as u64) };
+    let r = unsafe { sc3(nr::CONNECT, fd as u64, wa.as_ptr() as u64, wn as u64) };
     if r < 0 {
-        crate::sup::host_error(r, 42, proto::ctl::HE_SYSCALL);
+        crate::sup::host_error(r, nr::CONNECT, proto::ctl::HE_SYSCALL);
     }
     let vino = i as u64 + VINO_BASE;
     let pre = [PREAMBLE_MAGIC, vino];
@@ -424,7 +428,7 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
     } else {
         let w = unsafe {
             sc6(
-                44,
+                nr::SENDTO,
                 fd as u64,
                 pre.as_ptr() as u64,
                 PREAMBLE_LEN as u64,
@@ -434,7 +438,11 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
             )
         };
         if w != PREAMBLE_LEN as i64 {
-            crate::sup::host_error(if w < 0 { w } else { -e::EIO }, 44, proto::ctl::HE_SYSCALL);
+            crate::sup::host_error(
+                if w < 0 { w } else { -e::EIO },
+                nr::SENDTO,
+                proto::ctl::HE_SYSCALL,
+            );
         }
         io::set_nonblock(fd, false);
         0
@@ -457,7 +465,7 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
     if nonblock {
         return -EINPROGRESS;
     }
-    let mut w = Waiter::new(fd, PARK_OUT, 42);
+    let mut w = Waiter::new(fd, PARK_OUT, nr::CONNECT);
     w.nonblock = Some(false);
     w.deadline = Deadline::SndTimeo;
     let g = w.run(|| match sock(i).state {
@@ -483,7 +491,7 @@ fn take_err(fd: i64, i: usize) -> u16 {
     let mut l: u32 = 4;
     unsafe {
         sc6(
-            55,
+            nr::GETSOCKOPT,
             fd as u64,
             SOL_SOCKET as u64,
             4,
@@ -511,7 +519,7 @@ fn take_reset(fd: i64, i: usize) -> bool {
 fn accept(call: &mut dyn Call, i: usize) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
-    let flags = if call.nr() == 288 { a[3] } else { 0 };
+    let flags = if call.nr() == nr::ACCEPT4 { a[3] } else { 0 };
     if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
         return -e::EINVAL;
     }
@@ -523,7 +531,7 @@ fn accept(call: &mut dyn Call, i: usize) -> i64 {
         if io::poll1(fd, POLLIN) & (POLLIN | POLLERR | POLLHUP) == 0 {
             return None;
         }
-        io::eagain(unsafe { sc4(288, fd as u64, 0, 0, flags) })
+        io::eagain(unsafe { sc4(nr::ACCEPT4, fd as u64, 0, 0, flags) })
     });
     let r = io::result(g, -e::EAGAIN);
     if r < 0 {
@@ -535,7 +543,7 @@ fn accept(call: &mut dyn Call, i: usize) -> i64 {
     let mut sl: u32 = 110;
     let p = unsafe {
         sc3(
-            52,
+            nr::GETPEERNAME,
             r as u64,
             sa.as_mut_ptr() as u64,
             &mut sl as *mut u32 as u64,
@@ -863,7 +871,7 @@ fn send_iov(fd: i64, i: usize, nr: u64, iov: u64, cnt: u64, flags: u64) -> i64 {
     let f = (flags & !(MSG_WAITALL)) | MSG_DONTWAIT | MSG_NOSIGNAL;
     let r = io::write_all(&mut w, iov, cnt, |p, n| {
         let m = [0u64, 0, p, n, 0, 0, 0];
-        let r = unsafe { sc3(46, fd as u64, m.as_ptr() as u64, f) };
+        let r = unsafe { sc3(nr::SENDMSG, fd as u64, m.as_ptr() as u64, f) };
         if r > 0 {
             mark(i);
         }
@@ -875,7 +883,14 @@ fn send_iov(fd: i64, i: usize, nr: u64, iov: u64, cnt: u64, flags: u64) -> i64 {
 fn sendto(call: &mut dyn Call, i: usize) -> i64 {
     let a = args(call);
     let one = [a[1], a[2]];
-    send_iov(a[0] as i32 as i64, i, 44, one.as_ptr() as u64, 1, a[3])
+    send_iov(
+        a[0] as i32 as i64,
+        i,
+        nr::SENDTO,
+        one.as_ptr() as u64,
+        1,
+        a[3],
+    )
 }
 
 fn sendmsg(call: &mut dyn Call, i: usize) -> i64 {
@@ -895,7 +910,7 @@ fn sendmsg(call: &mut dyn Call, i: usize) -> i64 {
         // The wire copies bytes, not ancillary data (SCM_RIGHTS over TCP does not exist).
         return -e::EINVAL;
     }
-    send_iov(a[0] as i32 as i64, i, 46, iov, cnt, a[2])
+    send_iov(a[0] as i32 as i64, i, nr::SENDMSG, iov, cnt, a[2])
 }
 
 fn sendmmsg(call: &mut dyn Call, i: usize) -> i64 {
@@ -914,7 +929,7 @@ fn sendmmsg(call: &mut dyn Call, i: usize) -> i64 {
         let r = if ctll != 0 {
             -e::EINVAL
         } else {
-            send_iov(a[0] as i32 as i64, i, 307, iov, cnt, a[3])
+            send_iov(a[0] as i32 as i64, i, nr::SENDMMSG, iov, cnt, a[3])
         };
         if r < 0 {
             return if done > 0 { done as i64 } else { r };
@@ -936,14 +951,15 @@ fn recvfrom(call: &mut dyn Call, i: usize) -> i64 {
         refuse(b"MSG_OOB");
         return -e::EINVAL;
     }
-    let mut w = receiver(fd, 45, a[3]);
+    let mut w = receiver(fd, nr::RECVFROM, a[3]);
     let waitall = a[3] & MSG_WAITALL != 0 && a[3] & MSG_DONTWAIT == 0;
     let f = (a[3] & !MSG_WAITALL) | MSG_DONTWAIT;
     let mut total = 0u64;
     let r = loop {
         let off = total;
-        let g =
-            w.run(|| io::eagain(unsafe { sc6(45, fd as u64, a[1] + off, a[2] - off, f, 0, 0) }));
+        let g = w.run(|| {
+            io::eagain(unsafe { sc6(nr::RECVFROM, fd as u64, a[1] + off, a[2] - off, f, 0, 0) })
+        });
         match g {
             Got::Done(r) if r > 0 => {
                 total += r as u64;
@@ -1002,8 +1018,8 @@ fn recvmsg(call: &mut dyn Call, i: usize) -> i64 {
     let waitall = a[2] & MSG_WAITALL != 0 && a[2] & MSG_DONTWAIT == 0 && !peek;
     let f = (a[2] & !MSG_WAITALL) | MSG_DONTWAIT;
     unsafe { *(msg as *mut u64) = 0 };
-    let mut w = receiver(fd, 47, a[2]);
-    let g = w.run(|| io::eagain(unsafe { sc3(47, fd as u64, msg, f) }));
+    let mut w = receiver(fd, nr::RECVMSG, a[2]);
+    let g = w.run(|| io::eagain(unsafe { sc3(nr::RECVMSG, fd as u64, msg, f) }));
     let mut r = match g {
         Got::Done(r) if r > 0 => r,
         Got::Done(r) => received(fd, i, r),
@@ -1019,7 +1035,8 @@ fn recvmsg(call: &mut dyn Call, i: usize) -> i64 {
         while !cur.done() {
             let n = cur.window(&mut win);
             let m = [0u64, 0, win.as_ptr() as u64, n, 0, 0, 0];
-            let g = w.run(|| io::eagain(unsafe { sc3(47, fd as u64, m.as_ptr() as u64, f) }));
+            let g =
+                w.run(|| io::eagain(unsafe { sc3(nr::RECVMSG, fd as u64, m.as_ptr() as u64, f) }));
             match g {
                 Got::Done(k) if k > 0 => {
                     r += k;
@@ -1044,7 +1061,7 @@ pub fn rw(call: &mut dyn Call, i: usize) -> i64 {
         return super::udp::rw(call, i);
     }
     let fd = call.arg(0) as i32 as i64;
-    let write = matches!(call.nr(), 1 | 20 | 328);
+    let write = matches!(call.nr(), nr::WRITE | nr::WRITEV | nr::PWRITEV2);
     if write {
         if let Some(r) = send_check(fd, i) {
             return sent(i, r, false);
@@ -1074,7 +1091,7 @@ pub fn sendfile(call: &mut dyn Call, i: usize) -> i64 {
         return sent(i, r, false);
     }
     let guest_nb = io::nonblocking(fd);
-    let mut w = Waiter::new(fd, PARK_OUT, 40);
+    let mut w = Waiter::new(fd, PARK_OUT, nr::SENDFILE);
     w.deadline = Deadline::SndTimeo;
     w.nonblock = Some(guest_nb);
     let mut total = 0u64;
@@ -1084,7 +1101,7 @@ pub fn sendfile(call: &mut dyn Call, i: usize) -> i64 {
             if !guest_nb {
                 io::set_nonblock(fd, true);
             }
-            let r = unsafe { sc4(40, out, inp, off, left) };
+            let r = unsafe { sc4(nr::SENDFILE, out, inp, off, left) };
             if !guest_nb {
                 io::set_nonblock(fd, false);
             }
@@ -1136,20 +1153,20 @@ pub fn handle(call: &mut dyn Call, i: usize) -> Action {
         return super::udp::handle(call, i);
     }
     let r = match call.nr() {
-        49 => bind(call, i),
-        50 => listen(call, i),
-        42 => connect(call, i),
-        43 | 288 => accept(call, i),
-        51 => names(call, i, false),
-        52 => names(call, i, true),
-        54 => setsockopt(call, i),
-        55 => getsockopt(call, i),
-        48 => shutdown(call, i),
-        44 => sendto(call, i),
-        46 => sendmsg(call, i),
-        307 => sendmmsg(call, i),
-        45 => recvfrom(call, i),
-        47 => recvmsg(call, i),
+        nr::BIND => bind(call, i),
+        nr::LISTEN => listen(call, i),
+        nr::CONNECT => connect(call, i),
+        nr::ACCEPT | nr::ACCEPT4 => accept(call, i),
+        nr::GETSOCKNAME => names(call, i, false),
+        nr::GETPEERNAME => names(call, i, true),
+        nr::SETSOCKOPT => setsockopt(call, i),
+        nr::GETSOCKOPT => getsockopt(call, i),
+        nr::SHUTDOWN => shutdown(call, i),
+        nr::SENDTO => sendto(call, i),
+        nr::SENDMSG => sendmsg(call, i),
+        nr::SENDMMSG => sendmmsg(call, i),
+        nr::RECVFROM => recvfrom(call, i),
+        nr::RECVMSG => recvmsg(call, i),
         _ => return stop_here(call),
     };
     Action::Return(r)

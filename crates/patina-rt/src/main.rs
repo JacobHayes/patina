@@ -58,7 +58,7 @@ pub fn fatal(step: proto::ctl::Setup, r: i64) -> ! {
         sup::host_error(errno, step as u64, proto::ctl::HE_LOADER);
     }
     unsafe {
-        raw::sc1(raw::nr::EXIT_GROUP, 127);
+        raw::sc1(proto::nr::EXIT_GROUP, 127);
     }
     sup::hang()
 }

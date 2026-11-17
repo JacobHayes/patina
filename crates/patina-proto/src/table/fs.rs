@@ -1,5 +1,4 @@
 //! Paths, directories, metadata, timestamps, the `/proc` `/sys` `/dev` policy.
-use super::misc::n;
 use super::*;
 
 const G: Group = Group::Fs;
@@ -26,150 +25,146 @@ const TRUNC: &str = "Size change on the sandbox tmpfs: a function of the guest's
 const S144: &[Out] = &[out(1, Len::Fixed(144))];
 
 pub const ROWS: &[Row] = &[
-    Row::new(G, n(2, "open"), Pass, A, OPEN_W).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(85, "creat"), Pass, A, OPEN_W).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(257, "openat"), Pass, A, OPEN_W)
+    Row::new(G, nr::OPEN, Pass, A, OPEN_W).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::CREAT, Pass, A, OPEN_W).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::OPENAT, Pass, A, OPEN_W)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(437, "openat2"), Pass, A, OPEN_W)
+    Row::new(G, nr::OPENAT2, Pass, A, OPEN_W)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(2, Len::Arg(3))]),
-    Row::new(G, n(4, "stat"), Rewrite, A, STAT_W)
+    Row::new(G, nr::STAT, Rewrite, A, STAT_W)
         .ins(&[out(0, Len::CStr)])
         .outs(S144),
-    Row::new(G, n(6, "lstat"), Rewrite, A, STAT_W)
+    Row::new(G, nr::LSTAT, Rewrite, A, STAT_W)
         .ins(&[out(0, Len::CStr)])
         .outs(S144),
-    Row::new(G, n(5, "fstat"), Rewrite, A, STAT_W)
-        .fd(0)
-        .outs(S144),
-    Row::new(G, n(262, "newfstatat"), Rewrite, A, STAT_W)
+    Row::new(G, nr::FSTAT, Rewrite, A, STAT_W).fd(0).outs(S144),
+    Row::new(G, nr::NEWFSTATAT, Rewrite, A, STAT_W)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
         .outs(&[out(2, Len::Fixed(144))]),
-    Row::new(G, n(332, "statx"), Rewrite, A, STATX_W)
+    Row::new(G, nr::STATX, Rewrite, A, STATX_W)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
         .outs(&[out(4, Len::Fixed(256))]),
-    Row::new(G, n(137, "statfs"), Rewrite, A, STATFS_W)
+    Row::new(G, nr::STATFS, Rewrite, A, STATFS_W)
         .ins(&[out(0, Len::CStr)])
         .outs(&[out(1, Len::Fixed(120))]),
-    Row::new(G, n(138, "fstatfs"), Rewrite, A, STATFS_W)
+    Row::new(G, nr::FSTATFS, Rewrite, A, STATFS_W)
         .fd(0)
         .outs(&[out(1, Len::Fixed(120))]),
-    Row::new(G, n(89, "readlink"), Pass, A, LINK_R)
+    Row::new(G, nr::READLINK, Pass, A, LINK_R)
         .ins(&[out(0, Len::CStr)])
         .outs(&[out(1, Len::Ret)]),
-    Row::new(G, n(267, "readlinkat"), Pass, A, LINK_R)
+    Row::new(G, nr::READLINKAT, Pass, A, LINK_R)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
         .outs(&[out(2, Len::Ret)]),
-    Row::new(G, n(217, "getdents64"), Pass, A, DIRS)
+    Row::new(G, nr::GETDENTS64, Pass, A, DIRS)
         .fd(0)
         .outs(&[out(1, Len::Ret)]),
-    Row::new(G, n(78, "getdents"), Pass, A, DIRS)
+    Row::new(G, nr::GETDENTS, Pass, A, DIRS)
         .fd(0)
         .outs(&[out(1, Len::Ret)]),
-    Row::new(G, n(21, "access"), Pass, A, ACCESS).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(269, "faccessat"), Pass, A, ACCESS)
+    Row::new(G, nr::ACCESS, Pass, A, ACCESS).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::FACCESSAT, Pass, A, ACCESS)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(439, "faccessat2"), Pass, A, ACCESS)
+    Row::new(G, nr::FACCESSAT2, Pass, A, ACCESS)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(83, "mkdir"), Pass, A, CREATE).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(258, "mkdirat"), Pass, A, CREATE)
+    Row::new(G, nr::MKDIR, Pass, A, CREATE).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::MKDIRAT, Pass, A, CREATE)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(133, "mknod"), Pass, A, CREATE).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(259, "mknodat"), Pass, A, CREATE)
+    Row::new(G, nr::MKNOD, Pass, A, CREATE).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::MKNODAT, Pass, A, CREATE)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(88, "symlink"), Pass, A, CREATE).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
-    Row::new(G, n(266, "symlinkat"), Pass, A, CREATE)
+    Row::new(G, nr::SYMLINK, Pass, A, CREATE).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
+    Row::new(G, nr::SYMLINKAT, Pass, A, CREATE)
         .fd(1)
         .ins(&[out(0, Len::CStr), out(2, Len::CStr)]),
-    Row::new(G, n(87, "unlink"), Pass, A, REMOVE).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(84, "rmdir"), Pass, A, REMOVE).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(263, "unlinkat"), Pass, A, REMOVE)
+    Row::new(G, nr::UNLINK, Pass, A, REMOVE).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::RMDIR, Pass, A, REMOVE).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::UNLINKAT, Pass, A, REMOVE)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(82, "rename"), Pass, A, RENAME).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
-    Row::new(G, n(264, "renameat"), Pass, A, RENAME)
+    Row::new(G, nr::RENAME, Pass, A, RENAME).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
+    Row::new(G, nr::RENAMEAT, Pass, A, RENAME)
         .fd(0)
         .fd(2)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, n(316, "renameat2"), Pass, A, RENAME)
+    Row::new(G, nr::RENAMEAT2, Pass, A, RENAME)
         .fd(0)
         .fd(2)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, n(86, "link"), Pass, A, LINK).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
-    Row::new(G, n(265, "linkat"), Pass, A, LINK)
+    Row::new(G, nr::LINK, Pass, A, LINK).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
+    Row::new(G, nr::LINKAT, Pass, A, LINK)
         .fd(0)
         .fd(2)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, n(90, "chmod"), Pass, A, ATTR).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(268, "fchmodat"), Pass, A, ATTR)
+    Row::new(G, nr::CHMOD, Pass, A, ATTR).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::FCHMODAT, Pass, A, ATTR)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(452, "fchmodat2"), Pass, A, ATTR)
+    Row::new(G, nr::FCHMODAT2, Pass, A, ATTR)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(92, "chown"), Pass, A, ATTR).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(94, "lchown"), Pass, A, ATTR).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(260, "fchownat"), Pass, A, ATTR)
+    Row::new(G, nr::CHOWN, Pass, A, ATTR).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::LCHOWN, Pass, A, ATTR).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::FCHOWNAT, Pass, A, ATTR)
         .fd(0)
         .ins(&[out(1, Len::CStr)]),
-    Row::new(G, n(76, "truncate"), Pass, A, TRUNC).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(132, "utime"), Virt, C, TIMES).ins(&[out(0, Len::CStr), out(1, Len::Fixed(16))]),
-    Row::new(G, n(235, "utimes"), Virt, C, TIMES).ins(&[out(0, Len::CStr), out(1, Len::Fixed(32))]),
-    Row::new(G, n(261, "futimesat"), Virt, C, TIMES)
+    Row::new(G, nr::TRUNCATE, Pass, A, TRUNC).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::UTIME, Virt, C, TIMES).ins(&[out(0, Len::CStr), out(1, Len::Fixed(16))]),
+    Row::new(G, nr::UTIMES, Virt, C, TIMES).ins(&[out(0, Len::CStr), out(1, Len::Fixed(32))]),
+    Row::new(G, nr::FUTIMESAT, Virt, C, TIMES)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(2, Len::Fixed(32))]),
-    Row::new(G, n(280, "utimensat"), Virt, C, TIMES)
+    Row::new(G, nr::UTIMENSAT, Virt, C, TIMES)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(2, Len::Fixed(32))]),
-    Row::new(G, n(191, "getxattr"), Pass, A, XATTR_R)
+    Row::new(G, nr::GETXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr), out(1, Len::CStr)])
         .outs(&[out(2, Len::Ret)]),
-    Row::new(G, n(192, "lgetxattr"), Pass, A, XATTR_R)
+    Row::new(G, nr::LGETXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr), out(1, Len::CStr)])
         .outs(&[out(2, Len::Ret)]),
-    Row::new(G, n(194, "listxattr"), Pass, A, XATTR_R)
+    Row::new(G, nr::LISTXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr)])
         .outs(&[out(1, Len::Ret)]),
-    Row::new(G, n(195, "llistxattr"), Pass, A, XATTR_R)
+    Row::new(G, nr::LLISTXATTR, Pass, A, XATTR_R)
         .ins(&[out(0, Len::CStr)])
         .outs(&[out(1, Len::Ret)]),
-    Row::new(G, n(464, "getxattrat"), Pass, A, XATTR_R)
+    Row::new(G, nr::GETXATTRAT, Pass, A, XATTR_R)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, n(465, "listxattrat"), Pass, A, XATTR_R)
+    Row::new(G, nr::LISTXATTRAT, Pass, A, XATTR_R)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
         .outs(&[out(3, Len::Ret)]),
-    Row::new(G, n(188, "setxattr"), Pass, A, XATTR_W).ins(&[
+    Row::new(G, nr::SETXATTR, Pass, A, XATTR_W).ins(&[
         out(0, Len::CStr),
         out(1, Len::CStr),
         out(2, Len::Arg(3)),
     ]),
-    Row::new(G, n(189, "lsetxattr"), Pass, A, XATTR_W).ins(&[
+    Row::new(G, nr::LSETXATTR, Pass, A, XATTR_W).ins(&[
         out(0, Len::CStr),
         out(1, Len::CStr),
         out(2, Len::Arg(3)),
     ]),
-    Row::new(G, n(197, "removexattr"), Pass, A, XATTR_W)
-        .ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
-    Row::new(G, n(198, "lremovexattr"), Pass, A, XATTR_W)
-        .ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
-    Row::new(G, n(463, "setxattrat"), Pass, A, XATTR_W)
+    Row::new(G, nr::REMOVEXATTR, Pass, A, XATTR_W).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
+    Row::new(G, nr::LREMOVEXATTR, Pass, A, XATTR_W).ins(&[out(0, Len::CStr), out(1, Len::CStr)]),
+    Row::new(G, nr::SETXATTRAT, Pass, A, XATTR_W)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, n(466, "removexattrat"), Pass, A, XATTR_W)
+    Row::new(G, nr::REMOVEXATTRAT, Pass, A, XATTR_W)
         .fd(0)
         .ins(&[out(1, Len::CStr), out(3, Len::CStr)]),
-    Row::new(G, n(79, "getcwd"), Pass, A, CWD).outs(&[out(0, Len::Ret)]),
-    Row::new(G, n(80, "chdir"), Pass, A, CWD).ins(&[out(0, Len::CStr)]),
-    Row::new(G, n(81, "fchdir"), Pass, A, CWD).fd(0),
-    Row::new(G, n(95, "umask"), Pass, A, CWD),
+    Row::new(G, nr::GETCWD, Pass, A, CWD).outs(&[out(0, Len::Ret)]),
+    Row::new(G, nr::CHDIR, Pass, A, CWD).ins(&[out(0, Len::CStr)]),
+    Row::new(G, nr::FCHDIR, Pass, A, CWD).fd(0),
+    Row::new(G, nr::UMASK, Pass, A, CWD),
 ];

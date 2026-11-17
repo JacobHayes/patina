@@ -39,7 +39,9 @@ thread-local storage; each thread's state sits at the base of its alternate sign
 ## The syscall table
 
 Every system call number has a row in `patina-proto/src/table/` with a class, a strength and
-a reason; `patina table` prints them.
+a reason; `patina table` prints them. Rows, handlers and the runtime's own calls name a call
+(`nr::OPENAT`), never its number: the numbers are per architecture, in `patina-proto/src/nr/`,
+generated from the kernel's tables by `scripts/gen-syscalls.py`.
 
 | Class | What happens |
 |---|---|

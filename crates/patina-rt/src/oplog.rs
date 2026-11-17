@@ -15,9 +15,6 @@ use core::sync::atomic::Ordering::Relaxed;
 use proto::layout::*;
 use proto::oplog::*;
 
-const PWRITE: u64 = 18;
-const PREAD: u64 = 17;
-
 fn dur() -> &'static mut Dur {
     unsafe { Dur::at(crate::state::ctl_base()) }
 }
@@ -27,7 +24,7 @@ fn pwrite_all(fd: i32, mut off: u64, s: &[u8]) {
     while done < s.len() {
         let r = unsafe {
             sc4(
-                PWRITE,
+                nr::PWRITE64,
                 fd as u64,
                 s.as_ptr() as u64 + done as u64,
                 (s.len() - done) as u64,
@@ -35,7 +32,7 @@ fn pwrite_all(fd: i32, mut off: u64, s: &[u8]) {
             )
         };
         if r <= 0 {
-            crate::sup::log_write_failed(r, PWRITE);
+            crate::sup::log_write_failed(r, nr::PWRITE64);
         }
         done += r as usize;
         off += r as u64;
@@ -55,7 +52,7 @@ enum Src<'a> {
 fn readable(fd: i64) -> i64 {
     const O_ACCMODE: i64 = 3;
     const O_WRONLY: i64 = 1;
-    let fl = unsafe { sc2(72, fd as u64, 3) }; // fcntl F_GETFL
+    let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // fcntl F_GETFL
     if fl >= 0 && fl & O_ACCMODE != O_WRONLY {
         return fd;
     }
@@ -74,9 +71,17 @@ fn readable(fd: i64) -> i64 {
     let digits = 24 - i;
     p.copy_within(i..24, 14);
     p[14 + digits] = 0;
-    let r = unsafe { sc4(257, (-100i64) as u64, p.as_ptr() as u64, 0o2000000, 0) }; // O_RDONLY|O_CLOEXEC
+    let r = unsafe {
+        sc4(
+            nr::OPENAT,
+            (-100i64) as u64,
+            p.as_ptr() as u64,
+            0o2000000,
+            0,
+        )
+    }; // O_RDONLY|O_CLOEXEC
     if r < 0 {
-        crate::sup::host_error(r, 257, proto::ctl::HE_RUNTIME_ASSERT);
+        crate::sup::host_error(r, nr::OPENAT, proto::ctl::HE_RUNTIME_ASSERT);
     }
     r
 }
@@ -115,10 +120,10 @@ fn put_data(pieces: &[Src], len_hint: u64) -> (u64, u64) {
                 let mut at = foff;
                 while left > 0 {
                     let n = left.min(buf.len() as u64);
-                    let r = unsafe { sc4(PREAD, rfd as u64, buf.as_mut_ptr() as u64, n, at) };
+                    let r = unsafe { sc4(nr::PREAD64, rfd as u64, buf.as_mut_ptr() as u64, n, at) };
                     if r <= 0 {
                         // The file is shorter than the call said: record zeros (cannot happen on tmpfs).
-                        crate::sup::host_error(r, PREAD, proto::ctl::HE_RUNTIME_ASSERT);
+                        crate::sup::host_error(r, nr::PREAD64, proto::ctl::HE_RUNTIME_ASSERT);
                     }
                     pwrite_all(FD_OPLOG_DATA, off, &buf[..r as usize]);
                     off += r as u64;
@@ -126,7 +131,7 @@ fn put_data(pieces: &[Src], len_hint: u64) -> (u64, u64) {
                     left -= r as u64;
                 }
                 if rfd != fd {
-                    unsafe { sc1(3, rfd as u64) };
+                    unsafe { sc1(nr::CLOSE, rfd as u64) };
                 }
             }
         }
@@ -739,7 +744,7 @@ pub fn on_msync(addr: u64, len: u64, flags: u64) -> i64 {
         if let Some(by) = crate::inject::sync_fails() {
             fail(
                 ino,
-                26,
+                nr::MSYNC,
                 crate::inject::Who::Kind(proto::faults::Obj::File),
                 by,
             );
@@ -786,7 +791,7 @@ fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
 /// `sync`, `syncfs`.
 pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     const F_GETFD: u64 = 1;
-    if nr == 162 {
+    if nr == nr::SYNC {
         // sync(2) reports nothing.
         crate::inject::crash_point();
         flush_all();
@@ -797,10 +802,10 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     if unsafe { sc2(nr::FCNTL, fd as u64, F_GETFD) } < 0 {
         return -e::EBADF;
     }
-    if nr == 277 && a[3] & !7 != 0 {
+    if nr == nr::SYNC_FILE_RANGE && a[3] & !7 != 0 {
         return -e::EINVAL;
     }
-    if nr == 306 {
+    if nr == nr::SYNCFS {
         crate::inject::crash_point();
         flush_all();
         if let Some(by) = crate::inject::sync_fails() {
@@ -842,7 +847,11 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
         append(OpKind::FsyncDir, ino, [0; 6], &[], 0);
         return 0;
     }
-    let data_only = if nr == 75 { FSYNC_DATA_ONLY } else { 0 };
+    let data_only = if nr == nr::FDATASYNC {
+        FSYNC_DATA_ONLY
+    } else {
+        0
+    };
     let g = dur().gen(ino) as u32;
     if let Some(s) = seen(fd) {
         if *s < g {
@@ -867,7 +876,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
             return -e::EIO;
         }
     }
-    let flags = if nr == 277 {
+    let flags = if nr == nr::SYNC_FILE_RANGE {
         FSYNC_DATA_ONLY | FSYNC_NO_COMMIT
     } else {
         data_only

@@ -60,7 +60,7 @@ fn fd_path(fd: i64, out: &mut PathBuf) -> bool {
     lp[l] = 0;
     let r = unsafe {
         sc4(
-            89,
+            nr::READLINK,
             lp.as_ptr() as u64,
             out.b.as_mut_ptr() as u64,
             out.b.len() as u64 - 1,
@@ -81,7 +81,7 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
     let ap = p.as_ptr() as u64;
     let r = unsafe {
         sc4(
-            439,
+            nr::FACCESSAT2,
             dirfd as u64,
             ap,
             X_OK,
@@ -125,7 +125,7 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
         return Err(fd);
     }
     let mut st = [0u64; 18];
-    unsafe { sc2(5, fd as u64, st.as_mut_ptr() as u64) };
+    unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     const S_IFMT: u32 = 0o170000;
     const S_IFREG: u32 = 0o100000;
     if (st[3] as u32) & S_IFMT != S_IFREG {
@@ -174,7 +174,7 @@ fn check_elf(fd: i64, head: &[u8]) -> Result<(), i64> {
                 )
             };
             ip[n] = 0;
-            let r = unsafe { sc4(439, AT_FDCWD as u64, ip.as_ptr() as u64, 0, 0) };
+            let r = unsafe { sc4(nr::FACCESSAT2, AT_FDCWD as u64, ip.as_ptr() as u64, 0, 0) };
             if r < 0 {
                 return Err(if r == -e::EACCES { r } else { -e::ENOENT });
             }
@@ -348,7 +348,7 @@ fn count(v: u64) -> Result<usize, i64> {
 /// `execve(path, argv, envp)` and `execveat(dirfd, path, argv, envp, flags)`.
 pub fn execve(call: &mut dyn Call) -> Action {
     let a = args(call);
-    let (dirfd, p, argv, envp, flags) = if call.nr() == 59 {
+    let (dirfd, p, argv, envp, flags) = if call.nr() == nr::EXECVE {
         (AT_FDCWD, a[0], a[1], a[2], 0)
     } else {
         (a[0] as i32 as i64, a[1], a[2], a[3], a[4])
@@ -438,7 +438,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
     crate::sup::call_sup(Op::Exec, [ign, 0, 0, 0, 0, 0]);
     let r = unsafe {
         sc6(
-            322,
+            nr::EXECVEAT,
             FD_RT as u64,
             c"".as_ptr() as u64,
             v.as_ptr() as u64,
@@ -467,7 +467,14 @@ pub fn rescan_marks() {
     }
     let mut buf = [0u8; 4096];
     loop {
-        let n = unsafe { sc3(217, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+        let n = unsafe {
+            sc3(
+                nr::GETDENTS64,
+                fd as u64,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )
+        };
         if n <= 0 {
             break;
         }

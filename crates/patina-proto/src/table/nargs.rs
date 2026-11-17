@@ -5,357 +5,364 @@
 //! hosts where the guest's behaviour does not. Calls without a trace event (`rt_sigreturn`,
 //! numbers the kernel does not know) keep all six.
 
-use super::names::NR_COUNT;
+use super::{nr, NR_COUNT};
+
+/// Set by name: a call this architecture lacks has no slot.
+const fn set(a: &mut [u8; NR_COUNT], nr: u64, n: u8) {
+    if nr::present(nr) {
+        a[nr as usize] = n;
+    }
+}
 
 pub static NARGS: [u8; NR_COUNT] = {
     let mut a = [6u8; NR_COUNT];
-    a[0] = 3; // read
-    a[1] = 3; // write
-    a[2] = 3; // open
-    a[3] = 1; // close
-    a[4] = 2; // stat
-    a[5] = 2; // fstat
-    a[6] = 2; // lstat
-    a[7] = 3; // poll
-    a[8] = 3; // lseek
-    a[10] = 3; // mprotect
-    a[11] = 2; // munmap
-    a[12] = 1; // brk
-    a[13] = 4; // rt_sigaction
-    a[14] = 4; // rt_sigprocmask
-    a[15] = 0; // rt_sigreturn
-    a[16] = 3; // ioctl
-    a[17] = 4; // pread64
-    a[18] = 4; // pwrite64
-    a[19] = 3; // readv
-    a[20] = 3; // writev
-    a[21] = 2; // access
-    a[22] = 1; // pipe
-    a[23] = 5; // select
-    a[24] = 0; // sched_yield
-    a[25] = 5; // mremap
-    a[26] = 3; // msync
-    a[27] = 3; // mincore
-    a[28] = 3; // madvise
-    a[29] = 3; // shmget
-    a[30] = 3; // shmat
-    a[31] = 3; // shmctl
-    a[32] = 1; // dup
-    a[33] = 2; // dup2
-    a[34] = 0; // pause
-    a[35] = 2; // nanosleep
-    a[36] = 2; // getitimer
-    a[37] = 1; // alarm
-    a[38] = 3; // setitimer
-    a[39] = 0; // getpid
-    a[40] = 4; // sendfile
-    a[41] = 3; // socket
-    a[42] = 3; // connect
-    a[43] = 3; // accept
-    a[46] = 3; // sendmsg
-    a[47] = 3; // recvmsg
-    a[48] = 2; // shutdown
-    a[49] = 3; // bind
-    a[50] = 2; // listen
-    a[51] = 3; // getsockname
-    a[52] = 3; // getpeername
-    a[53] = 4; // socketpair
-    a[54] = 5; // setsockopt
-    a[55] = 5; // getsockopt
-    a[56] = 5; // clone
-    a[57] = 0; // fork
-    a[58] = 0; // vfork
-    a[59] = 3; // execve
-    a[60] = 1; // exit
-    a[61] = 4; // wait4
-    a[62] = 2; // kill
-    a[63] = 1; // uname
-    a[64] = 3; // semget
-    a[65] = 3; // semop
-    a[66] = 4; // semctl
-    a[67] = 1; // shmdt
-    a[68] = 2; // msgget
-    a[69] = 4; // msgsnd
-    a[70] = 5; // msgrcv
-    a[71] = 3; // msgctl
-    a[72] = 3; // fcntl
-    a[73] = 2; // flock
-    a[74] = 1; // fsync
-    a[75] = 1; // fdatasync
-    a[76] = 2; // truncate
-    a[77] = 2; // ftruncate
-    a[78] = 3; // getdents
-    a[79] = 2; // getcwd
-    a[80] = 1; // chdir
-    a[81] = 1; // fchdir
-    a[82] = 2; // rename
-    a[83] = 2; // mkdir
-    a[84] = 1; // rmdir
-    a[85] = 2; // creat
-    a[86] = 2; // link
-    a[87] = 1; // unlink
-    a[88] = 2; // symlink
-    a[89] = 3; // readlink
-    a[90] = 2; // chmod
-    a[91] = 2; // fchmod
-    a[92] = 3; // chown
-    a[93] = 3; // fchown
-    a[94] = 3; // lchown
-    a[95] = 1; // umask
-    a[96] = 2; // gettimeofday
-    a[97] = 2; // getrlimit
-    a[98] = 2; // getrusage
-    a[99] = 1; // sysinfo
-    a[100] = 1; // times
-    a[101] = 4; // ptrace
-    a[102] = 0; // getuid
-    a[103] = 3; // syslog
-    a[104] = 0; // getgid
-    a[105] = 1; // setuid
-    a[106] = 1; // setgid
-    a[107] = 0; // geteuid
-    a[108] = 0; // getegid
-    a[109] = 2; // setpgid
-    a[110] = 0; // getppid
-    a[111] = 0; // getpgrp
-    a[112] = 0; // setsid
-    a[113] = 2; // setreuid
-    a[114] = 2; // setregid
-    a[115] = 2; // getgroups
-    a[116] = 2; // setgroups
-    a[117] = 3; // setresuid
-    a[118] = 3; // getresuid
-    a[119] = 3; // setresgid
-    a[120] = 3; // getresgid
-    a[121] = 1; // getpgid
-    a[122] = 1; // setfsuid
-    a[123] = 1; // setfsgid
-    a[124] = 1; // getsid
-    a[125] = 2; // capget
-    a[126] = 2; // capset
-    a[127] = 2; // rt_sigpending
-    a[128] = 4; // rt_sigtimedwait
-    a[129] = 3; // rt_sigqueueinfo
-    a[130] = 2; // rt_sigsuspend
-    a[131] = 2; // sigaltstack
-    a[132] = 2; // utime
-    a[133] = 3; // mknod
-    a[135] = 1; // personality
-    a[136] = 2; // ustat
-    a[137] = 2; // statfs
-    a[138] = 2; // fstatfs
-    a[139] = 3; // sysfs
-    a[140] = 2; // getpriority
-    a[141] = 3; // setpriority
-    a[142] = 2; // sched_setparam
-    a[143] = 2; // sched_getparam
-    a[144] = 3; // sched_setscheduler
-    a[145] = 1; // sched_getscheduler
-    a[146] = 1; // sched_get_priority_max
-    a[147] = 1; // sched_get_priority_min
-    a[148] = 2; // sched_rr_get_interval
-    a[149] = 2; // mlock
-    a[150] = 2; // munlock
-    a[151] = 1; // mlockall
-    a[152] = 0; // munlockall
-    a[153] = 0; // vhangup
-    a[154] = 3; // modify_ldt
-    a[155] = 2; // pivot_root
-    a[157] = 5; // prctl
-    a[158] = 2; // arch_prctl
-    a[159] = 1; // adjtimex
-    a[160] = 2; // setrlimit
-    a[161] = 1; // chroot
-    a[162] = 0; // sync
-    a[163] = 1; // acct
-    a[164] = 2; // settimeofday
-    a[165] = 5; // mount
-    a[166] = 2; // umount2
-    a[167] = 2; // swapon
-    a[168] = 1; // swapoff
-    a[169] = 4; // reboot
-    a[170] = 2; // sethostname
-    a[171] = 2; // setdomainname
-    a[172] = 1; // iopl
-    a[173] = 3; // ioperm
-    a[175] = 3; // init_module
-    a[176] = 2; // delete_module
-    a[179] = 4; // quotactl
-    a[186] = 0; // gettid
-    a[187] = 3; // readahead
-    a[188] = 5; // setxattr
-    a[189] = 5; // lsetxattr
-    a[190] = 5; // fsetxattr
-    a[191] = 4; // getxattr
-    a[192] = 4; // lgetxattr
-    a[193] = 4; // fgetxattr
-    a[194] = 3; // listxattr
-    a[195] = 3; // llistxattr
-    a[196] = 3; // flistxattr
-    a[197] = 2; // removexattr
-    a[198] = 2; // lremovexattr
-    a[199] = 2; // fremovexattr
-    a[200] = 2; // tkill
-    a[201] = 1; // time
-    a[203] = 3; // sched_setaffinity
-    a[204] = 3; // sched_getaffinity
-    a[206] = 2; // io_setup
-    a[207] = 1; // io_destroy
-    a[208] = 5; // io_getevents
-    a[209] = 3; // io_submit
-    a[210] = 3; // io_cancel
-    a[213] = 1; // epoll_create
-    a[216] = 5; // remap_file_pages
-    a[217] = 3; // getdents64
-    a[218] = 1; // set_tid_address
-    a[219] = 0; // restart_syscall
-    a[220] = 4; // semtimedop
-    a[221] = 4; // fadvise64
-    a[222] = 3; // timer_create
-    a[223] = 4; // timer_settime
-    a[224] = 2; // timer_gettime
-    a[225] = 1; // timer_getoverrun
-    a[226] = 1; // timer_delete
-    a[227] = 2; // clock_settime
-    a[228] = 2; // clock_gettime
-    a[229] = 2; // clock_getres
-    a[230] = 4; // clock_nanosleep
-    a[231] = 1; // exit_group
-    a[232] = 4; // epoll_wait
-    a[233] = 4; // epoll_ctl
-    a[234] = 3; // tgkill
-    a[235] = 2; // utimes
-    a[238] = 3; // set_mempolicy
-    a[239] = 5; // get_mempolicy
-    a[240] = 4; // mq_open
-    a[241] = 1; // mq_unlink
-    a[242] = 5; // mq_timedsend
-    a[243] = 5; // mq_timedreceive
-    a[244] = 2; // mq_notify
-    a[245] = 3; // mq_getsetattr
-    a[246] = 4; // kexec_load
-    a[247] = 5; // waitid
-    a[248] = 5; // add_key
-    a[249] = 4; // request_key
-    a[250] = 5; // keyctl
-    a[251] = 3; // ioprio_set
-    a[252] = 2; // ioprio_get
-    a[253] = 0; // inotify_init
-    a[254] = 3; // inotify_add_watch
-    a[255] = 2; // inotify_rm_watch
-    a[256] = 4; // migrate_pages
-    a[257] = 4; // openat
-    a[258] = 3; // mkdirat
-    a[259] = 4; // mknodat
-    a[260] = 5; // fchownat
-    a[261] = 3; // futimesat
-    a[262] = 4; // newfstatat
-    a[263] = 3; // unlinkat
-    a[264] = 4; // renameat
-    a[265] = 5; // linkat
-    a[266] = 3; // symlinkat
-    a[267] = 4; // readlinkat
-    a[268] = 3; // fchmodat
-    a[269] = 3; // faccessat
-    a[271] = 5; // ppoll
-    a[272] = 1; // unshare
-    a[273] = 2; // set_robust_list
-    a[274] = 3; // get_robust_list
-    a[276] = 4; // tee
-    a[277] = 4; // sync_file_range
-    a[278] = 4; // vmsplice
-    a[280] = 4; // utimensat
-    a[282] = 3; // signalfd
-    a[283] = 2; // timerfd_create
-    a[284] = 1; // eventfd
-    a[285] = 4; // fallocate
-    a[286] = 4; // timerfd_settime
-    a[287] = 2; // timerfd_gettime
-    a[288] = 4; // accept4
-    a[289] = 4; // signalfd4
-    a[290] = 2; // eventfd2
-    a[291] = 1; // epoll_create1
-    a[292] = 3; // dup3
-    a[293] = 2; // pipe2
-    a[294] = 1; // inotify_init1
-    a[295] = 5; // preadv
-    a[296] = 5; // pwritev
-    a[297] = 4; // rt_tgsigqueueinfo
-    a[298] = 5; // perf_event_open
-    a[299] = 5; // recvmmsg
-    a[300] = 2; // fanotify_init
-    a[301] = 5; // fanotify_mark
-    a[302] = 4; // prlimit64
-    a[303] = 5; // name_to_handle_at
-    a[304] = 3; // open_by_handle_at
-    a[305] = 2; // clock_adjtime
-    a[306] = 1; // syncfs
-    a[307] = 4; // sendmmsg
-    a[308] = 2; // setns
-    a[309] = 3; // getcpu
-    a[312] = 5; // kcmp
-    a[313] = 3; // finit_module
-    a[314] = 3; // sched_setattr
-    a[315] = 4; // sched_getattr
-    a[316] = 5; // renameat2
-    a[317] = 3; // seccomp
-    a[318] = 3; // getrandom
-    a[319] = 2; // memfd_create
-    a[320] = 5; // kexec_file_load
-    a[321] = 3; // bpf
-    a[322] = 5; // execveat
-    a[323] = 1; // userfaultfd
-    a[324] = 3; // membarrier
-    a[325] = 3; // mlock2
-    a[329] = 4; // pkey_mprotect
-    a[330] = 2; // pkey_alloc
-    a[331] = 1; // pkey_free
-    a[332] = 5; // statx
-    a[334] = 4; // rseq
-    a[335] = 0; // uretprobe
-    a[336] = 0; // uprobe
-    a[424] = 4; // pidfd_send_signal
-    a[425] = 2; // io_uring_setup
-    a[427] = 4; // io_uring_register
-    a[428] = 3; // open_tree
-    a[429] = 5; // move_mount
-    a[430] = 2; // fsopen
-    a[431] = 5; // fsconfig
-    a[432] = 3; // fsmount
-    a[433] = 3; // fspick
-    a[434] = 2; // pidfd_open
-    a[435] = 2; // clone3
-    a[436] = 3; // close_range
-    a[437] = 4; // openat2
-    a[438] = 3; // pidfd_getfd
-    a[439] = 4; // faccessat2
-    a[440] = 5; // process_madvise
-    a[442] = 5; // mount_setattr
-    a[443] = 4; // quotactl_fd
-    a[444] = 3; // landlock_create_ruleset
-    a[445] = 4; // landlock_add_rule
-    a[446] = 2; // landlock_restrict_self
-    a[447] = 1; // memfd_secret
-    a[448] = 2; // process_mrelease
-    a[449] = 5; // futex_waitv
-    a[450] = 4; // set_mempolicy_home_node
-    a[451] = 4; // cachestat
-    a[452] = 4; // fchmodat2
-    a[453] = 3; // map_shadow_stack
-    a[454] = 4; // futex_wake
-    a[456] = 4; // futex_requeue
-    a[457] = 4; // statmount
-    a[458] = 4; // listmount
-    a[459] = 4; // lsm_get_self_attr
-    a[460] = 4; // lsm_set_self_attr
-    a[461] = 3; // lsm_list_modules
-    a[462] = 3; // mseal
-    a[465] = 5; // listxattrat
-    a[466] = 4; // removexattrat
-    a[467] = 5; // open_tree_attr
-    a[468] = 5; // file_getattr
-    a[469] = 5; // file_setattr
-    a[470] = 4; // listns
+    set(&mut a, nr::READ, 3);
+    set(&mut a, nr::WRITE, 3);
+    set(&mut a, nr::OPEN, 3);
+    set(&mut a, nr::CLOSE, 1);
+    set(&mut a, nr::STAT, 2);
+    set(&mut a, nr::FSTAT, 2);
+    set(&mut a, nr::LSTAT, 2);
+    set(&mut a, nr::POLL, 3);
+    set(&mut a, nr::LSEEK, 3);
+    set(&mut a, nr::MPROTECT, 3);
+    set(&mut a, nr::MUNMAP, 2);
+    set(&mut a, nr::BRK, 1);
+    set(&mut a, nr::RT_SIGACTION, 4);
+    set(&mut a, nr::RT_SIGPROCMASK, 4);
+    set(&mut a, nr::RT_SIGRETURN, 0);
+    set(&mut a, nr::IOCTL, 3);
+    set(&mut a, nr::PREAD64, 4);
+    set(&mut a, nr::PWRITE64, 4);
+    set(&mut a, nr::READV, 3);
+    set(&mut a, nr::WRITEV, 3);
+    set(&mut a, nr::ACCESS, 2);
+    set(&mut a, nr::PIPE, 1);
+    set(&mut a, nr::SELECT, 5);
+    set(&mut a, nr::SCHED_YIELD, 0);
+    set(&mut a, nr::MREMAP, 5);
+    set(&mut a, nr::MSYNC, 3);
+    set(&mut a, nr::MINCORE, 3);
+    set(&mut a, nr::MADVISE, 3);
+    set(&mut a, nr::SHMGET, 3);
+    set(&mut a, nr::SHMAT, 3);
+    set(&mut a, nr::SHMCTL, 3);
+    set(&mut a, nr::DUP, 1);
+    set(&mut a, nr::DUP2, 2);
+    set(&mut a, nr::PAUSE, 0);
+    set(&mut a, nr::NANOSLEEP, 2);
+    set(&mut a, nr::GETITIMER, 2);
+    set(&mut a, nr::ALARM, 1);
+    set(&mut a, nr::SETITIMER, 3);
+    set(&mut a, nr::GETPID, 0);
+    set(&mut a, nr::SENDFILE, 4);
+    set(&mut a, nr::SOCKET, 3);
+    set(&mut a, nr::CONNECT, 3);
+    set(&mut a, nr::ACCEPT, 3);
+    set(&mut a, nr::SENDMSG, 3);
+    set(&mut a, nr::RECVMSG, 3);
+    set(&mut a, nr::SHUTDOWN, 2);
+    set(&mut a, nr::BIND, 3);
+    set(&mut a, nr::LISTEN, 2);
+    set(&mut a, nr::GETSOCKNAME, 3);
+    set(&mut a, nr::GETPEERNAME, 3);
+    set(&mut a, nr::SOCKETPAIR, 4);
+    set(&mut a, nr::SETSOCKOPT, 5);
+    set(&mut a, nr::GETSOCKOPT, 5);
+    set(&mut a, nr::CLONE, 5);
+    set(&mut a, nr::FORK, 0);
+    set(&mut a, nr::VFORK, 0);
+    set(&mut a, nr::EXECVE, 3);
+    set(&mut a, nr::EXIT, 1);
+    set(&mut a, nr::WAIT4, 4);
+    set(&mut a, nr::KILL, 2);
+    set(&mut a, nr::UNAME, 1);
+    set(&mut a, nr::SEMGET, 3);
+    set(&mut a, nr::SEMOP, 3);
+    set(&mut a, nr::SEMCTL, 4);
+    set(&mut a, nr::SHMDT, 1);
+    set(&mut a, nr::MSGGET, 2);
+    set(&mut a, nr::MSGSND, 4);
+    set(&mut a, nr::MSGRCV, 5);
+    set(&mut a, nr::MSGCTL, 3);
+    set(&mut a, nr::FCNTL, 3);
+    set(&mut a, nr::FLOCK, 2);
+    set(&mut a, nr::FSYNC, 1);
+    set(&mut a, nr::FDATASYNC, 1);
+    set(&mut a, nr::TRUNCATE, 2);
+    set(&mut a, nr::FTRUNCATE, 2);
+    set(&mut a, nr::GETDENTS, 3);
+    set(&mut a, nr::GETCWD, 2);
+    set(&mut a, nr::CHDIR, 1);
+    set(&mut a, nr::FCHDIR, 1);
+    set(&mut a, nr::RENAME, 2);
+    set(&mut a, nr::MKDIR, 2);
+    set(&mut a, nr::RMDIR, 1);
+    set(&mut a, nr::CREAT, 2);
+    set(&mut a, nr::LINK, 2);
+    set(&mut a, nr::UNLINK, 1);
+    set(&mut a, nr::SYMLINK, 2);
+    set(&mut a, nr::READLINK, 3);
+    set(&mut a, nr::CHMOD, 2);
+    set(&mut a, nr::FCHMOD, 2);
+    set(&mut a, nr::CHOWN, 3);
+    set(&mut a, nr::FCHOWN, 3);
+    set(&mut a, nr::LCHOWN, 3);
+    set(&mut a, nr::UMASK, 1);
+    set(&mut a, nr::GETTIMEOFDAY, 2);
+    set(&mut a, nr::GETRLIMIT, 2);
+    set(&mut a, nr::GETRUSAGE, 2);
+    set(&mut a, nr::SYSINFO, 1);
+    set(&mut a, nr::TIMES, 1);
+    set(&mut a, nr::PTRACE, 4);
+    set(&mut a, nr::GETUID, 0);
+    set(&mut a, nr::SYSLOG, 3);
+    set(&mut a, nr::GETGID, 0);
+    set(&mut a, nr::SETUID, 1);
+    set(&mut a, nr::SETGID, 1);
+    set(&mut a, nr::GETEUID, 0);
+    set(&mut a, nr::GETEGID, 0);
+    set(&mut a, nr::SETPGID, 2);
+    set(&mut a, nr::GETPPID, 0);
+    set(&mut a, nr::GETPGRP, 0);
+    set(&mut a, nr::SETSID, 0);
+    set(&mut a, nr::SETREUID, 2);
+    set(&mut a, nr::SETREGID, 2);
+    set(&mut a, nr::GETGROUPS, 2);
+    set(&mut a, nr::SETGROUPS, 2);
+    set(&mut a, nr::SETRESUID, 3);
+    set(&mut a, nr::GETRESUID, 3);
+    set(&mut a, nr::SETRESGID, 3);
+    set(&mut a, nr::GETRESGID, 3);
+    set(&mut a, nr::GETPGID, 1);
+    set(&mut a, nr::SETFSUID, 1);
+    set(&mut a, nr::SETFSGID, 1);
+    set(&mut a, nr::GETSID, 1);
+    set(&mut a, nr::CAPGET, 2);
+    set(&mut a, nr::CAPSET, 2);
+    set(&mut a, nr::RT_SIGPENDING, 2);
+    set(&mut a, nr::RT_SIGTIMEDWAIT, 4);
+    set(&mut a, nr::RT_SIGQUEUEINFO, 3);
+    set(&mut a, nr::RT_SIGSUSPEND, 2);
+    set(&mut a, nr::SIGALTSTACK, 2);
+    set(&mut a, nr::UTIME, 2);
+    set(&mut a, nr::MKNOD, 3);
+    set(&mut a, nr::PERSONALITY, 1);
+    set(&mut a, nr::USTAT, 2);
+    set(&mut a, nr::STATFS, 2);
+    set(&mut a, nr::FSTATFS, 2);
+    set(&mut a, nr::SYSFS, 3);
+    set(&mut a, nr::GETPRIORITY, 2);
+    set(&mut a, nr::SETPRIORITY, 3);
+    set(&mut a, nr::SCHED_SETPARAM, 2);
+    set(&mut a, nr::SCHED_GETPARAM, 2);
+    set(&mut a, nr::SCHED_SETSCHEDULER, 3);
+    set(&mut a, nr::SCHED_GETSCHEDULER, 1);
+    set(&mut a, nr::SCHED_GET_PRIORITY_MAX, 1);
+    set(&mut a, nr::SCHED_GET_PRIORITY_MIN, 1);
+    set(&mut a, nr::SCHED_RR_GET_INTERVAL, 2);
+    set(&mut a, nr::MLOCK, 2);
+    set(&mut a, nr::MUNLOCK, 2);
+    set(&mut a, nr::MLOCKALL, 1);
+    set(&mut a, nr::MUNLOCKALL, 0);
+    set(&mut a, nr::VHANGUP, 0);
+    set(&mut a, nr::MODIFY_LDT, 3);
+    set(&mut a, nr::PIVOT_ROOT, 2);
+    set(&mut a, nr::PRCTL, 5);
+    set(&mut a, nr::ARCH_PRCTL, 2);
+    set(&mut a, nr::ADJTIMEX, 1);
+    set(&mut a, nr::SETRLIMIT, 2);
+    set(&mut a, nr::CHROOT, 1);
+    set(&mut a, nr::SYNC, 0);
+    set(&mut a, nr::ACCT, 1);
+    set(&mut a, nr::SETTIMEOFDAY, 2);
+    set(&mut a, nr::MOUNT, 5);
+    set(&mut a, nr::UMOUNT2, 2);
+    set(&mut a, nr::SWAPON, 2);
+    set(&mut a, nr::SWAPOFF, 1);
+    set(&mut a, nr::REBOOT, 4);
+    set(&mut a, nr::SETHOSTNAME, 2);
+    set(&mut a, nr::SETDOMAINNAME, 2);
+    set(&mut a, nr::IOPL, 1);
+    set(&mut a, nr::IOPERM, 3);
+    set(&mut a, nr::INIT_MODULE, 3);
+    set(&mut a, nr::DELETE_MODULE, 2);
+    set(&mut a, nr::QUOTACTL, 4);
+    set(&mut a, nr::GETTID, 0);
+    set(&mut a, nr::READAHEAD, 3);
+    set(&mut a, nr::SETXATTR, 5);
+    set(&mut a, nr::LSETXATTR, 5);
+    set(&mut a, nr::FSETXATTR, 5);
+    set(&mut a, nr::GETXATTR, 4);
+    set(&mut a, nr::LGETXATTR, 4);
+    set(&mut a, nr::FGETXATTR, 4);
+    set(&mut a, nr::LISTXATTR, 3);
+    set(&mut a, nr::LLISTXATTR, 3);
+    set(&mut a, nr::FLISTXATTR, 3);
+    set(&mut a, nr::REMOVEXATTR, 2);
+    set(&mut a, nr::LREMOVEXATTR, 2);
+    set(&mut a, nr::FREMOVEXATTR, 2);
+    set(&mut a, nr::TKILL, 2);
+    set(&mut a, nr::TIME, 1);
+    set(&mut a, nr::SCHED_SETAFFINITY, 3);
+    set(&mut a, nr::SCHED_GETAFFINITY, 3);
+    set(&mut a, nr::IO_SETUP, 2);
+    set(&mut a, nr::IO_DESTROY, 1);
+    set(&mut a, nr::IO_GETEVENTS, 5);
+    set(&mut a, nr::IO_SUBMIT, 3);
+    set(&mut a, nr::IO_CANCEL, 3);
+    set(&mut a, nr::EPOLL_CREATE, 1);
+    set(&mut a, nr::REMAP_FILE_PAGES, 5);
+    set(&mut a, nr::GETDENTS64, 3);
+    set(&mut a, nr::SET_TID_ADDRESS, 1);
+    set(&mut a, nr::RESTART_SYSCALL, 0);
+    set(&mut a, nr::SEMTIMEDOP, 4);
+    set(&mut a, nr::FADVISE64, 4);
+    set(&mut a, nr::TIMER_CREATE, 3);
+    set(&mut a, nr::TIMER_SETTIME, 4);
+    set(&mut a, nr::TIMER_GETTIME, 2);
+    set(&mut a, nr::TIMER_GETOVERRUN, 1);
+    set(&mut a, nr::TIMER_DELETE, 1);
+    set(&mut a, nr::CLOCK_SETTIME, 2);
+    set(&mut a, nr::CLOCK_GETTIME, 2);
+    set(&mut a, nr::CLOCK_GETRES, 2);
+    set(&mut a, nr::CLOCK_NANOSLEEP, 4);
+    set(&mut a, nr::EXIT_GROUP, 1);
+    set(&mut a, nr::EPOLL_WAIT, 4);
+    set(&mut a, nr::EPOLL_CTL, 4);
+    set(&mut a, nr::TGKILL, 3);
+    set(&mut a, nr::UTIMES, 2);
+    set(&mut a, nr::SET_MEMPOLICY, 3);
+    set(&mut a, nr::GET_MEMPOLICY, 5);
+    set(&mut a, nr::MQ_OPEN, 4);
+    set(&mut a, nr::MQ_UNLINK, 1);
+    set(&mut a, nr::MQ_TIMEDSEND, 5);
+    set(&mut a, nr::MQ_TIMEDRECEIVE, 5);
+    set(&mut a, nr::MQ_NOTIFY, 2);
+    set(&mut a, nr::MQ_GETSETATTR, 3);
+    set(&mut a, nr::KEXEC_LOAD, 4);
+    set(&mut a, nr::WAITID, 5);
+    set(&mut a, nr::ADD_KEY, 5);
+    set(&mut a, nr::REQUEST_KEY, 4);
+    set(&mut a, nr::KEYCTL, 5);
+    set(&mut a, nr::IOPRIO_SET, 3);
+    set(&mut a, nr::IOPRIO_GET, 2);
+    set(&mut a, nr::INOTIFY_INIT, 0);
+    set(&mut a, nr::INOTIFY_ADD_WATCH, 3);
+    set(&mut a, nr::INOTIFY_RM_WATCH, 2);
+    set(&mut a, nr::MIGRATE_PAGES, 4);
+    set(&mut a, nr::OPENAT, 4);
+    set(&mut a, nr::MKDIRAT, 3);
+    set(&mut a, nr::MKNODAT, 4);
+    set(&mut a, nr::FCHOWNAT, 5);
+    set(&mut a, nr::FUTIMESAT, 3);
+    set(&mut a, nr::NEWFSTATAT, 4);
+    set(&mut a, nr::UNLINKAT, 3);
+    set(&mut a, nr::RENAMEAT, 4);
+    set(&mut a, nr::LINKAT, 5);
+    set(&mut a, nr::SYMLINKAT, 3);
+    set(&mut a, nr::READLINKAT, 4);
+    set(&mut a, nr::FCHMODAT, 3);
+    set(&mut a, nr::FACCESSAT, 3);
+    set(&mut a, nr::PPOLL, 5);
+    set(&mut a, nr::UNSHARE, 1);
+    set(&mut a, nr::SET_ROBUST_LIST, 2);
+    set(&mut a, nr::GET_ROBUST_LIST, 3);
+    set(&mut a, nr::TEE, 4);
+    set(&mut a, nr::SYNC_FILE_RANGE, 4);
+    set(&mut a, nr::VMSPLICE, 4);
+    set(&mut a, nr::UTIMENSAT, 4);
+    set(&mut a, nr::SIGNALFD, 3);
+    set(&mut a, nr::TIMERFD_CREATE, 2);
+    set(&mut a, nr::EVENTFD, 1);
+    set(&mut a, nr::FALLOCATE, 4);
+    set(&mut a, nr::TIMERFD_SETTIME, 4);
+    set(&mut a, nr::TIMERFD_GETTIME, 2);
+    set(&mut a, nr::ACCEPT4, 4);
+    set(&mut a, nr::SIGNALFD4, 4);
+    set(&mut a, nr::EVENTFD2, 2);
+    set(&mut a, nr::EPOLL_CREATE1, 1);
+    set(&mut a, nr::DUP3, 3);
+    set(&mut a, nr::PIPE2, 2);
+    set(&mut a, nr::INOTIFY_INIT1, 1);
+    set(&mut a, nr::PREADV, 5);
+    set(&mut a, nr::PWRITEV, 5);
+    set(&mut a, nr::RT_TGSIGQUEUEINFO, 4);
+    set(&mut a, nr::PERF_EVENT_OPEN, 5);
+    set(&mut a, nr::RECVMMSG, 5);
+    set(&mut a, nr::FANOTIFY_INIT, 2);
+    set(&mut a, nr::FANOTIFY_MARK, 5);
+    set(&mut a, nr::PRLIMIT64, 4);
+    set(&mut a, nr::NAME_TO_HANDLE_AT, 5);
+    set(&mut a, nr::OPEN_BY_HANDLE_AT, 3);
+    set(&mut a, nr::CLOCK_ADJTIME, 2);
+    set(&mut a, nr::SYNCFS, 1);
+    set(&mut a, nr::SENDMMSG, 4);
+    set(&mut a, nr::SETNS, 2);
+    set(&mut a, nr::GETCPU, 3);
+    set(&mut a, nr::KCMP, 5);
+    set(&mut a, nr::FINIT_MODULE, 3);
+    set(&mut a, nr::SCHED_SETATTR, 3);
+    set(&mut a, nr::SCHED_GETATTR, 4);
+    set(&mut a, nr::RENAMEAT2, 5);
+    set(&mut a, nr::SECCOMP, 3);
+    set(&mut a, nr::GETRANDOM, 3);
+    set(&mut a, nr::MEMFD_CREATE, 2);
+    set(&mut a, nr::KEXEC_FILE_LOAD, 5);
+    set(&mut a, nr::BPF, 3);
+    set(&mut a, nr::EXECVEAT, 5);
+    set(&mut a, nr::USERFAULTFD, 1);
+    set(&mut a, nr::MEMBARRIER, 3);
+    set(&mut a, nr::MLOCK2, 3);
+    set(&mut a, nr::PKEY_MPROTECT, 4);
+    set(&mut a, nr::PKEY_ALLOC, 2);
+    set(&mut a, nr::PKEY_FREE, 1);
+    set(&mut a, nr::STATX, 5);
+    set(&mut a, nr::RSEQ, 4);
+    set(&mut a, nr::URETPROBE, 0);
+    set(&mut a, nr::UPROBE, 0);
+    set(&mut a, nr::PIDFD_SEND_SIGNAL, 4);
+    set(&mut a, nr::IO_URING_SETUP, 2);
+    set(&mut a, nr::IO_URING_REGISTER, 4);
+    set(&mut a, nr::OPEN_TREE, 3);
+    set(&mut a, nr::MOVE_MOUNT, 5);
+    set(&mut a, nr::FSOPEN, 2);
+    set(&mut a, nr::FSCONFIG, 5);
+    set(&mut a, nr::FSMOUNT, 3);
+    set(&mut a, nr::FSPICK, 3);
+    set(&mut a, nr::PIDFD_OPEN, 2);
+    set(&mut a, nr::CLONE3, 2);
+    set(&mut a, nr::CLOSE_RANGE, 3);
+    set(&mut a, nr::OPENAT2, 4);
+    set(&mut a, nr::PIDFD_GETFD, 3);
+    set(&mut a, nr::FACCESSAT2, 4);
+    set(&mut a, nr::PROCESS_MADVISE, 5);
+    set(&mut a, nr::MOUNT_SETATTR, 5);
+    set(&mut a, nr::QUOTACTL_FD, 4);
+    set(&mut a, nr::LANDLOCK_CREATE_RULESET, 3);
+    set(&mut a, nr::LANDLOCK_ADD_RULE, 4);
+    set(&mut a, nr::LANDLOCK_RESTRICT_SELF, 2);
+    set(&mut a, nr::MEMFD_SECRET, 1);
+    set(&mut a, nr::PROCESS_MRELEASE, 2);
+    set(&mut a, nr::FUTEX_WAITV, 5);
+    set(&mut a, nr::SET_MEMPOLICY_HOME_NODE, 4);
+    set(&mut a, nr::CACHESTAT, 4);
+    set(&mut a, nr::FCHMODAT2, 4);
+    set(&mut a, nr::MAP_SHADOW_STACK, 3);
+    set(&mut a, nr::FUTEX_WAKE, 4);
+    set(&mut a, nr::FUTEX_REQUEUE, 4);
+    set(&mut a, nr::STATMOUNT, 4);
+    set(&mut a, nr::LISTMOUNT, 4);
+    set(&mut a, nr::LSM_GET_SELF_ATTR, 4);
+    set(&mut a, nr::LSM_SET_SELF_ATTR, 4);
+    set(&mut a, nr::LSM_LIST_MODULES, 3);
+    set(&mut a, nr::MSEAL, 3);
+    set(&mut a, nr::LISTXATTRAT, 5);
+    set(&mut a, nr::REMOVEXATTRAT, 4);
+    set(&mut a, nr::OPEN_TREE_ATTR, 5);
+    set(&mut a, nr::FILE_GETATTR, 5);
+    set(&mut a, nr::FILE_SETATTR, 5);
+    set(&mut a, nr::LISTNS, 4);
     a
 };
 

@@ -339,7 +339,7 @@ const AT_FDCWD: i64 = -100;
 /// The real path of `dirfd` (or the working directory) by the runtime's own calls.
 fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
     let r = if dirfd == AT_FDCWD {
-        unsafe { sc2(79, out.b.as_mut_ptr() as u64, PATH_MAX as u64) } // getcwd: length incl. NUL
+        unsafe { sc2(nr::GETCWD, out.b.as_mut_ptr() as u64, PATH_MAX as u64) } // length incl. NUL
     } else {
         let mut lp = [0u8; 32];
         let mut l = 0;
@@ -351,7 +351,7 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
         lp[l] = 0;
         let r = unsafe {
             sc4(
-                89,
+                nr::READLINK,
                 lp.as_ptr() as u64,
                 out.b.as_mut_ptr() as u64,
                 PATH_MAX as u64 - 1,

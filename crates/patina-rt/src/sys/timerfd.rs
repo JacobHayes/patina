@@ -86,7 +86,7 @@ fn create(clock: u64, flags: u64) -> i64 {
     if flags & !(TFD_NONBLOCK | TFD_CLOEXEC) != 0 {
         return -e::EINVAL;
     }
-    let fd = unsafe { sc2(290, 0, flags) }; // eventfd2: EFD_NONBLOCK/EFD_CLOEXEC have the same values
+    let fd = unsafe { sc2(nr::EVENTFD2, 0, flags) }; // EFD_NONBLOCK/EFD_CLOEXEC have the same values
     if fd < 0 {
         return fd;
     }
@@ -153,7 +153,7 @@ fn settime(fd: i64, flags: u64, new: u64, old: u64) -> i64 {
     let iov = [&mut c as *mut u64 as u64, 8];
     let r = unsafe {
         sc6(
-            327,
+            nr::PREADV2,
             fd as u64,
             iov.as_ptr() as u64,
             1,
@@ -192,8 +192,8 @@ fn gettime(fd: i64, cur: u64) -> i64 {
 pub fn handle(call: &mut dyn Call) -> i64 {
     let a = args(call);
     match call.nr() {
-        283 => create(a[0], a[1]),
-        286 => settime(a[0] as i32 as i64, a[1], a[2], a[3]),
+        nr::TIMERFD_CREATE => create(a[0], a[1]),
+        nr::TIMERFD_SETTIME => settime(a[0] as i32 as i64, a[1], a[2], a[3]),
         _ => gettime(a[0] as i32 as i64, a[1]),
     }
 }

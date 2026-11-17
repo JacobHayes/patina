@@ -278,11 +278,8 @@ struct MsgHdr {
 
 /// Ask the launcher for a counter on this thread: send a thread pidfd, get the counter.
 fn broker_open(tid: i32) -> i64 {
-    const PIDFD_OPEN: u64 = 434;
     const PIDFD_THREAD: u64 = 0x80;
-    const SENDMSG: u64 = 46;
-    const RECVMSG: u64 = 47;
-    let pidfd = unsafe { sc2(PIDFD_OPEN, tid as u64, PIDFD_THREAD) };
+    let pidfd = unsafe { sc2(nr::PIDFD_OPEN, tid as u64, PIDFD_THREAD) };
     if pidfd < 0 {
         return pidfd;
     }
@@ -301,7 +298,14 @@ fn broker_open(tid: i32) -> i64 {
         flags: 0,
         _p2: 0,
     };
-    let r = unsafe { sc3(SENDMSG, FD_PMU as u64, &m as *const MsgHdr as u64, 0x4000) };
+    let r = unsafe {
+        sc3(
+            nr::SENDMSG,
+            FD_PMU as u64,
+            &m as *const MsgHdr as u64,
+            0x4000,
+        )
+    };
     unsafe { sc1(nr::CLOSE, pidfd as u64) };
     if r < 0 {
         return r;
@@ -322,7 +326,7 @@ fn broker_open(tid: i32) -> i64 {
     };
     let r = unsafe {
         sc3(
-            RECVMSG,
+            nr::RECVMSG,
             FD_PMU as u64,
             &mut rm as *mut MsgHdr as u64,
             0x4000_0000,
@@ -522,7 +526,7 @@ fn set_period(p: &mut Pmu, period: u64) {
     const PERF_EVENT_IOC_PERIOD: u64 = 0x4008_2404;
     let r = unsafe {
         sc3(
-            16,
+            nr::IOCTL,
             p.fd as u64,
             PERF_EVENT_IOC_PERIOD,
             &period as *const u64 as u64,
@@ -676,7 +680,7 @@ fn find(ts: &ThreadState, a: u64) -> Option<usize> {
 }
 
 fn poke(a: u64, b: u8) -> bool {
-    let r = unsafe { sc4(18, memfd(), &b as *const u8 as u64, 1, a) };
+    let r = unsafe { sc4(nr::PWRITE64, memfd(), &b as *const u8 as u64, 1, a) };
     r == 1
 }
 

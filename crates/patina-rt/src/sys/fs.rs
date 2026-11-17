@@ -159,13 +159,21 @@ pub type St = [u64; 18];
 
 pub fn fstatat_raw(dirfd: i64, p: u64, flags: u64) -> Option<St> {
     let mut st: St = [0; 18];
-    let r = unsafe { sc4(262, dirfd as u64, p, st.as_mut_ptr() as u64, flags) };
+    let r = unsafe {
+        sc4(
+            nr::NEWFSTATAT,
+            dirfd as u64,
+            p,
+            st.as_mut_ptr() as u64,
+            flags,
+        )
+    };
     (r == 0).then_some(st)
 }
 
 pub fn fstat_raw(fd: i64) -> Option<St> {
     let mut st: St = [0; 18];
-    let r = unsafe { sc2(5, fd as u64, st.as_mut_ptr() as u64) };
+    let r = unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     (r == 0).then_some(st)
 }
 
@@ -267,7 +275,6 @@ pub fn created_elsewhere(p: u64) {
 /// creates its target. Resolve that chain into `buf` (the path of the file that was created,
 /// relative to `dirfd`); returns its length, or None when the last component is no symlink.
 fn created_through_symlink(dirfd: i64, p: &[u8], buf: &mut [u8; path::PATH_MAX]) -> Option<usize> {
-    const READLINKAT: u64 = 267;
     let mut cur = [0u8; path::PATH_MAX];
     if p.len() >= cur.len() {
         return None;
@@ -284,7 +291,7 @@ fn created_through_symlink(dirfd: i64, p: &[u8], buf: &mut [u8; path::PATH_MAX])
         let mut t = [0u8; path::PATH_MAX];
         let l = unsafe {
             sc4(
-                READLINKAT,
+                nr::READLINKAT,
                 dirfd as u64,
                 cur.as_ptr() as u64,
                 t.as_mut_ptr() as u64,
@@ -397,13 +404,13 @@ fn open(call: &mut dyn Call) -> i64 {
     let mut a = args(call);
     // (dirfd index, path index, flags)
     let (di, pi) = match nr {
-        257 | 437 => (Some(0), 1),
+        nr::OPENAT | nr::OPENAT2 => (Some(0), 1),
         _ => (None, 0),
     };
     let mut flags = match nr {
-        2 => a[1],
-        85 => O_CREAT | 1 | O_TRUNC,
-        257 => a[2],
+        nr::OPEN => a[1],
+        nr::CREAT => O_CREAT | 1 | O_TRUNC,
+        nr::OPENAT => a[2],
         _ => {
             if a[2] == 0 || a[3] < 24 {
                 return -e::EINVAL;
@@ -442,9 +449,9 @@ fn open(call: &mut dyn Call) -> i64 {
         flags &= !O_DIRECT;
         path::refuse(b"O_DIRECT");
         match nr {
-            2 => a[1] = flags,
-            257 => a[2] = flags,
-            437 => {
+            nr::OPEN => a[1] = flags,
+            nr::OPENAT => a[2] = flags,
+            nr::OPENAT2 => {
                 if let Err(r) = put(a[2], flags) {
                     return r;
                 }
@@ -458,8 +465,16 @@ fn open(call: &mut dyn Call) -> i64 {
     let existed = creat && (flags & O_EXCL == 0) && fstatat_raw(dirfd, a[pi], 0).is_some();
     let r = if let Some(r) = super::io::fifo_open(nr, &a, dirfd, pi, flags) {
         r // a FIFO without O_NONBLOCK: attempts plus park
-    } else if nr == 85 {
-        unsafe { sc4(257, AT_FDCWD as u64, a[0], O_CREAT | 1 | O_TRUNC, a[1]) }
+    } else if nr == nr::CREAT {
+        unsafe {
+            sc4(
+                nr::OPENAT,
+                AT_FDCWD as u64,
+                a[0],
+                O_CREAT | 1 | O_TRUNC,
+                a[1],
+            )
+        }
     } else {
         unsafe { sc6(nr, a[0], a[1], a[2], a[3], a[4], a[5]) }
     };
@@ -684,10 +699,10 @@ fn stat_call(call: &mut dyn Call) -> i64 {
     let mut a = args(call);
     // (dirfd index, path index, buffer index, flags)
     let (di, pi, bi, flags) = match nr {
-        4 => (None, Some(0), 1, 0),
-        6 => (None, Some(0), 1, AT_SYMLINK_NOFOLLOW),
-        5 => (Some(0), None, 1, AT_EMPTY_PATH),
-        262 => (Some(0), Some(1), 2, a[3]),
+        nr::STAT => (None, Some(0), 1, 0),
+        nr::LSTAT => (None, Some(0), 1, AT_SYMLINK_NOFOLLOW),
+        nr::FSTAT => (Some(0), None, 1, AT_EMPTY_PATH),
+        nr::NEWFSTATAT => (Some(0), Some(1), 2, a[3]),
         _ => (Some(0), Some(1), 4, a[2]),
     };
     let dirfd = dirfd_arg(call, di);
@@ -712,7 +727,7 @@ fn stat_call(call: &mut dyn Call) -> i64 {
         if a[bi] == 0 {
             return -e::EFAULT;
         }
-        return if nr == 332 {
+        return if nr == nr::STATX {
             super::procfs::fake_statx(s, a[bi])
         } else {
             super::procfs::fake_stat(s, a[bi])
@@ -733,7 +748,7 @@ fn stat_call(call: &mut dyn Call) -> i64 {
     if r != 0 {
         return r;
     }
-    if nr == 332 {
+    if nr == nr::STATX {
         rewrite_statx(a[bi]);
     } else {
         rewrite_stat(a[bi]);
@@ -750,7 +765,7 @@ fn statfs_call(call: &mut dyn Call) -> i64 {
     let nr = call.nr();
     let a = args(call);
     let buf = a[1];
-    let st = if nr == 138 {
+    let st = if nr == nr::FSTATFS {
         if let Some(s) = super::procfs::kind_of(a[0] as i32 as i64) {
             set_class(call, Class::Virt);
             let _ = s;
@@ -817,7 +832,7 @@ fn copy_out(buf: u64, size: u64, s: &[u8]) -> i64 {
 
 fn readlink(call: &mut dyn Call) -> i64 {
     let nr = call.nr();
-    let (di, pi, bi, li) = if nr == 89 {
+    let (di, pi, bi, li) = if nr == nr::READLINK {
         (None, 0, 1, 2)
     } else {
         (Some(0), 1, 2, 3)
@@ -840,7 +855,7 @@ fn readlink(call: &mut dyn Call) -> i64 {
             let mut t = [0u8; path::PATH_MAX];
             let r = unsafe {
                 sc4(
-                    89,
+                    nr::READLINK,
                     norm.b.as_ptr() as u64,
                     t.as_mut_ptr() as u64,
                     t.len() as u64,
@@ -889,7 +904,7 @@ fn read_path_call(call: &mut dyn Call, di: Option<usize>, pi: usize) -> i64 {
             set_class(call, Class::Virt);
             return match nr {
                 // access: readable, nothing else
-                21 | 269 | 439 => {
+                nr::ACCESS | nr::FACCESSAT | nr::FACCESSAT2 => {
                     let mode = a[pi + 1];
                     if mode & 3 != 0 {
                         -e::EACCES
@@ -897,7 +912,7 @@ fn read_path_call(call: &mut dyn Call, di: Option<usize>, pi: usize) -> i64 {
                         0
                     }
                 }
-                80 => -e::ENOTDIR,
+                nr::CHDIR => -e::ENOTDIR,
                 _ => -e::EOPNOTSUPP,
             };
         }
@@ -923,14 +938,34 @@ fn name_args(nr: u64, a: &[u64; 6]) -> ([(i64, u64); 2], usize) {
     let fd = |i: usize| a[i] as i32 as i64;
     let none = (AT_FDCWD, 0);
     match nr {
-        83 | 133 | 87 | 84 | 90 | 92 | 94 | 76 | 132 | 235 | 188 | 189 | 197 | 198 => {
-            ([(AT_FDCWD, a[0]), none], 1)
-        }
-        258 | 259 | 263 | 268 | 452 | 260 | 261 | 280 | 463 | 466 => ([(fd(0), a[1]), none], 1),
-        82 | 86 => ([(AT_FDCWD, a[0]), (AT_FDCWD, a[1])], 2),
-        264 | 316 | 265 => ([(fd(0), a[1]), (fd(2), a[3])], 2),
-        88 => ([(AT_FDCWD, a[1]), none], 1),
-        266 => ([(fd(1), a[2]), none], 1),
+        nr::MKDIR
+        | nr::MKNOD
+        | nr::UNLINK
+        | nr::RMDIR
+        | nr::CHMOD
+        | nr::CHOWN
+        | nr::LCHOWN
+        | nr::TRUNCATE
+        | nr::UTIME
+        | nr::UTIMES
+        | nr::SETXATTR
+        | nr::LSETXATTR
+        | nr::REMOVEXATTR
+        | nr::LREMOVEXATTR => ([(AT_FDCWD, a[0]), none], 1),
+        nr::MKDIRAT
+        | nr::MKNODAT
+        | nr::UNLINKAT
+        | nr::FCHMODAT
+        | nr::FCHMODAT2
+        | nr::FCHOWNAT
+        | nr::FUTIMESAT
+        | nr::UTIMENSAT
+        | nr::SETXATTRAT
+        | nr::REMOVEXATTRAT => ([(fd(0), a[1]), none], 1),
+        nr::RENAME | nr::LINK => ([(AT_FDCWD, a[0]), (AT_FDCWD, a[1])], 2),
+        nr::RENAMEAT | nr::RENAMEAT2 | nr::LINKAT => ([(fd(0), a[1]), (fd(2), a[3])], 2),
+        nr::SYMLINK => ([(AT_FDCWD, a[1]), none], 1),
+        nr::SYMLINKAT => ([(fd(1), a[2]), none], 1),
         _ => ([none, none], 0),
     }
 }
@@ -938,11 +973,11 @@ fn name_args(nr: u64, a: &[u64; 6]) -> ([(i64, u64); 2], usize) {
 /// Flags of a call that decide whether its last component is followed.
 fn nofollow(nr: u64, a: &[u64; 6]) -> bool {
     match nr {
-        94 | 189 | 198 => true,
-        260 => a[4] & AT_SYMLINK_NOFOLLOW != 0,
-        280 => a[3] & AT_SYMLINK_NOFOLLOW != 0,
-        452 => a[3] & AT_SYMLINK_NOFOLLOW != 0,
-        463 | 466 => a[2] & AT_SYMLINK_NOFOLLOW != 0,
+        nr::LCHOWN | nr::LSETXATTR | nr::LREMOVEXATTR => true,
+        nr::FCHOWNAT => a[4] & AT_SYMLINK_NOFOLLOW != 0,
+        nr::UTIMENSAT => a[3] & AT_SYMLINK_NOFOLLOW != 0,
+        nr::FCHMODAT2 => a[3] & AT_SYMLINK_NOFOLLOW != 0,
+        nr::SETXATTRAT | nr::REMOVEXATTRAT => a[2] & AT_SYMLINK_NOFOLLOW != 0,
         _ => false,
     }
 }
@@ -954,8 +989,8 @@ const UTIME_OMIT: u64 = (1 << 30) - 2;
 fn utimes_of(nr: u64, a: &[u64; 6]) -> (Option<u64>, Option<u64>) {
     let now = vtime::now();
     let p = match nr {
-        132 | 235 => a[1],
-        261 | 280 => a[2],
+        nr::UTIME | nr::UTIMES => a[1],
+        nr::FUTIMESAT | nr::UTIMENSAT => a[2],
         _ => 0,
     };
     if p == 0 {
@@ -964,8 +999,8 @@ fn utimes_of(nr: u64, a: &[u64; 6]) -> (Option<u64>, Option<u64>) {
     unsafe {
         let w = p as *const u64;
         match nr {
-            132 => (Some(*w * NS), Some(*w.add(1) * NS)),
-            235 | 261 => (
+            nr::UTIME => (Some(*w * NS), Some(*w.add(1) * NS)),
+            nr::UTIMES | nr::FUTIMESAT => (
                 Some(*w * NS + *w.add(1) * 1000),
                 Some(*w.add(2) * NS + *w.add(3) * 1000),
             ),
@@ -1028,8 +1063,8 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
     let obj_before = |d: i64, p: u64| fstatat_raw(d, p, AT_SYMLINK_NOFOLLOW);
     let mut before = [None, None];
     match nr {
-        87 | 84 | 263 => before[0] = obj_before(d0, p0),
-        82 | 264 | 316 => {
+        nr::UNLINK | nr::RMDIR | nr::UNLINKAT => before[0] = obj_before(d0, p0),
+        nr::RENAME | nr::RENAMEAT | nr::RENAMEAT2 => {
             before[0] = obj_before(d0, p0);
             before[1] = obj_before(names[1].0, names[1].1);
         }
@@ -1042,7 +1077,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
     let ps = unsafe { cs(p0) };
     match nr {
         // creations
-        83 | 258 | 133 | 259 | 88 | 266 => {
+        nr::MKDIR | nr::MKDIRAT | nr::MKNOD | nr::MKNODAT | nr::SYMLINK | nr::SYMLINKAT => {
             let st = fstatat_raw(d0, p0, AT_SYMLINK_NOFOLLOW);
             let parent = parent_stat(d0, ps);
             touch(&st, Which::Create);
@@ -1052,13 +1087,13 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 let (pino, ino, name) = (parent.map(|p| p[1]).unwrap_or(0), s[1], name_of(ps));
                 let mode = mode_of(&s);
                 after_mutation(&match nr {
-                    83 | 258 => FsOp::Mkdir {
+                    nr::MKDIR | nr::MKDIRAT => FsOp::Mkdir {
                         parent: pino,
                         name,
                         ino,
                         mode: mode & 0o7777,
                     },
-                    88 | 266 => FsOp::Symlink {
+                    nr::SYMLINK | nr::SYMLINKAT => FsOp::Symlink {
                         parent: pino,
                         name,
                         ino,
@@ -1075,7 +1110,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             }
         }
         // removals
-        87 | 84 | 263 => {
+        nr::UNLINK | nr::RMDIR | nr::UNLINKAT => {
             let parent = parent_stat(d0, ps);
             touch(&parent, Which::Modify);
             let t = before[0];
@@ -1092,7 +1127,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 }
                 if on_work(&t) {
                     let (pino, name) = (parent.map(|p| p[1]).unwrap_or(0), name_of(ps));
-                    let rmdir = nr == 84 || (nr == 263 && a[2] & AT_REMOVEDIR != 0);
+                    let rmdir = nr == nr::RMDIR || (nr == nr::UNLINKAT && a[2] & AT_REMOVEDIR != 0);
                     after_mutation(&if rmdir {
                         FsOp::Rmdir {
                             parent: pino,
@@ -1112,7 +1147,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             }
         }
         // renames
-        82 | 264 | 316 => {
+        nr::RENAME | nr::RENAMEAT | nr::RENAMEAT2 => {
             let (d1, p1) = names[1];
             let ns = unsafe { cs(p1) };
             let op = parent_stat(d0, ps);
@@ -1123,7 +1158,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             touch(&before[1], Which::Change);
             // A rename over a name drops the inode it named, unless that inode has others
             // (or it is the inode renamed, or an exchange keeps it).
-            let flags = if nr == 316 { a[4] } else { 0 };
+            let flags = if nr == nr::RENAMEAT2 { a[4] } else { 0 };
             if let (Some(o), Some(v)) = (&before[0], &before[1]) {
                 let dir = mode_of(v) & S_IFMT == S_IFDIR;
                 if flags & RENAME_EXCHANGE == 0 && o[1] != v[1] && (dir || v[2] <= 1) {
@@ -1131,7 +1166,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 }
             }
             if on_work(&before[0]) {
-                let flags = if nr == 316 { a[4] } else { 0 };
+                let flags = if nr == nr::RENAMEAT2 { a[4] } else { 0 };
                 let replaced = if flags & RENAME_EXCHANGE != 0 {
                     before[1].map(|s| s[1]).unwrap_or(0)
                 } else {
@@ -1149,7 +1184,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             }
         }
         // links
-        86 | 265 => {
+        nr::LINK | nr::LINKAT => {
             let (d1, p1) = names[1];
             let ns = unsafe { cs(p1) };
             let st = fstatat_raw(d1, p1, AT_SYMLINK_NOFOLLOW);
@@ -1176,9 +1211,19 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 fstatat_raw(d0, p0, nf)
             };
             let what = match nr {
-                90 | 268 | 452 | 92 | 94 | 260 => st.as_ref().map(meta_of),
-                188 | 189 | 463 | 197 | 198 | 466 => Some(xattr_of(nr, &a)),
-                132 | 235 | 261 | 280 => Some(Attr::Times),
+                nr::CHMOD
+                | nr::FCHMODAT
+                | nr::FCHMODAT2
+                | nr::CHOWN
+                | nr::LCHOWN
+                | nr::FCHOWNAT => st.as_ref().map(meta_of),
+                nr::SETXATTR
+                | nr::LSETXATTR
+                | nr::SETXATTRAT
+                | nr::REMOVEXATTR
+                | nr::LREMOVEXATTR
+                | nr::REMOVEXATTRAT => Some(xattr_of(nr, &a)),
+                nr::UTIME | nr::UTIMES | nr::FUTIMESAT | nr::UTIMENSAT => Some(Attr::Times),
                 _ => None,
             };
             match what {
@@ -1223,12 +1268,12 @@ fn xattr_of(nr: u64, a: &[u64; 6]) -> Attr<'static> {
     };
     match nr {
         // setxattr(path, name, value, size, flags), fsetxattr(fd, ...)
-        188..=190 => Attr::XattrSet {
+        nr::SETXATTR | nr::LSETXATTR | nr::FSETXATTR => Attr::XattrSet {
             name: unsafe { cs(a[1]) },
             value: bytes(a[2], a[3]),
         },
         // setxattrat(dfd, path, at_flags, name, struct xattr_args { value, size, flags }, usize)
-        463 => {
+        nr::SETXATTRAT => {
             let (v, n) = if a[4] != 0 {
                 unsafe { (*(a[4] as *const u64), *((a[4] + 8) as *const u32) as u64) }
             } else {
@@ -1239,7 +1284,7 @@ fn xattr_of(nr: u64, a: &[u64; 6]) -> Attr<'static> {
                 value: bytes(v, n),
             }
         }
-        466 => Attr::XattrRemove {
+        nr::REMOVEXATTRAT => Attr::XattrRemove {
             name: unsafe { cs(a[3]) },
         },
         _ => Attr::XattrRemove {
@@ -1258,19 +1303,19 @@ pub fn fd_mutation(call: &mut dyn Call, r: i64) {
     let a = args(call);
     let st = fstat_raw(a[0] as i32 as i64);
     let w = match nr {
-        77 | 285 => Which::Modify,
+        nr::FTRUNCATE | nr::FALLOCATE => Which::Modify,
         _ => Which::Change,
     };
     touch(&st, w);
     if on_work(&st) {
         let ino = st.unwrap()[1];
         after_mutation(&match nr {
-            91 | 93 => FsOp::SetAttr {
+            nr::FCHMOD | nr::FCHOWN => FsOp::SetAttr {
                 ino,
                 what: meta_of(st.as_ref().unwrap()),
             },
-            77 => FsOp::Truncate { ino, size: a[1] },
-            285 => FsOp::Fallocate {
+            nr::FTRUNCATE => FsOp::Truncate { ino, size: a[1] },
+            nr::FALLOCATE => FsOp::Fallocate {
                 ino,
                 mode: a[1],
                 offset: a[2],
@@ -1286,26 +1331,57 @@ pub fn fd_mutation(call: &mut dyn Call, r: i64) {
 
 pub fn handle(call: &mut dyn Call) -> Action {
     let r = match call.nr() {
-        2 | 85 | 257 | 437 => open(call),
-        4 | 5 | 6 | 262 | 332 => stat_call(call),
-        137 | 138 => statfs_call(call),
-        89 | 267 => readlink(call),
-        21 | 80 | 191 | 192 | 194 | 195 => read_path_call(call, None, 0),
-        269 | 439 | 464 | 465 => read_path_call(call, Some(0), 1),
-        83 | 258 | 133 | 259 | 87 | 84 | 263 | 82 | 264 | 316 | 86 | 265 | 88 | 266 | 90 | 268
-        | 452 | 92 | 94 | 260 | 76 | 132 | 235 | 261 | 280 | 188 | 189 | 197 | 198 | 463 | 466 => {
-            mutate(call)
+        nr::OPEN | nr::CREAT | nr::OPENAT | nr::OPENAT2 => open(call),
+        nr::STAT | nr::FSTAT | nr::LSTAT | nr::NEWFSTATAT | nr::STATX => stat_call(call),
+        nr::STATFS | nr::FSTATFS => statfs_call(call),
+        nr::READLINK | nr::READLINKAT => readlink(call),
+        nr::ACCESS | nr::CHDIR | nr::GETXATTR | nr::LGETXATTR | nr::LISTXATTR | nr::LLISTXATTR => {
+            read_path_call(call, None, 0)
         }
-        217 | 78 => {
+        nr::FACCESSAT | nr::FACCESSAT2 | nr::GETXATTRAT | nr::LISTXATTRAT => {
+            read_path_call(call, Some(0), 1)
+        }
+        nr::MKDIR
+        | nr::MKDIRAT
+        | nr::MKNOD
+        | nr::MKNODAT
+        | nr::UNLINK
+        | nr::RMDIR
+        | nr::UNLINKAT
+        | nr::RENAME
+        | nr::RENAMEAT
+        | nr::RENAMEAT2
+        | nr::LINK
+        | nr::LINKAT
+        | nr::SYMLINK
+        | nr::SYMLINKAT
+        | nr::CHMOD
+        | nr::FCHMODAT
+        | nr::FCHMODAT2
+        | nr::CHOWN
+        | nr::LCHOWN
+        | nr::FCHOWNAT
+        | nr::TRUNCATE
+        | nr::UTIME
+        | nr::UTIMES
+        | nr::FUTIMESAT
+        | nr::UTIMENSAT
+        | nr::SETXATTR
+        | nr::LSETXATTR
+        | nr::REMOVEXATTR
+        | nr::LREMOVEXATTR
+        | nr::SETXATTRAT
+        | nr::REMOVEXATTRAT => mutate(call),
+        nr::GETDENTS64 | nr::GETDENTS => {
             let r = raw(call);
             host_check(call, r);
             if r > 0 && super::procfs::kind_of(call.arg(0) as i32 as i64).is_some() {
                 set_class(call, Class::Rewrite);
-                super::procfs::rewrite_dents(call.arg(1), r, call.nr() == 78);
+                super::procfs::rewrite_dents(call.arg(1), r, call.nr() == nr::GETDENTS);
             }
             r
         }
-        79 | 81 | 95 => {
+        nr::GETCWD | nr::FCHDIR | nr::UMASK => {
             let r = raw(call);
             host_check(call, r);
             r

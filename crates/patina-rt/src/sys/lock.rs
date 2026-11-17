@@ -21,9 +21,9 @@ pub fn flock(call: &mut dyn Call) -> i64 {
         }
         return r;
     }
-    let mut w = Waiter::new(fd as i32 as i64, PARK_LOCK, 73);
+    let mut w = Waiter::new(fd as i32 as i64, PARK_LOCK, nr::FLOCK);
     w.nonblock = Some(false);
-    let g = w.run(|| io::eagain(unsafe { sc2(73, fd, op | LOCK_NB) }));
+    let g = w.run(|| io::eagain(unsafe { sc2(nr::FLOCK, fd, op | LOCK_NB) }));
     let r = io::result(g, -e::EAGAIN);
     if r == 0 {
         io::bump();
@@ -41,7 +41,7 @@ pub fn fcntl_lock(fd: u64, cmd: u64, arg: u64) -> i64 {
             } else {
                 F_OFD_SETLK
             };
-            let mut w = Waiter::new(fd as i32 as i64, PARK_LOCK, 72);
+            let mut w = Waiter::new(fd as i32 as i64, PARK_LOCK, nr::FCNTL);
             w.nonblock = Some(false);
             let g = w.run(|| {
                 let r = unsafe { sc3(nr::FCNTL, fd, try_cmd, arg) };

@@ -5,6 +5,7 @@
 //! Every decision is a stateless draw keyed by the trap's `seq` and a sub-key, so turning a
 //! fault kind on never shifts another stream's draws.
 
+use crate::nr;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 /// Classes of faultable calls. The order is the index of the per-class counter.
@@ -143,18 +144,26 @@ pub fn short_ok(obj: Obj) -> bool {
 /// descriptor) is eligible is decided by the runtime (`/work`, pipes, sockets).
 pub fn class_of(nr: u64) -> Option<FClass> {
     Some(match nr {
-        2 | 85 | 257 | 437 => FClass::Open,
-        0 | 17 | 19 | 295 | 327 => FClass::Read,
-        1 | 18 | 20 | 296 | 328 | 326 | 40 => FClass::Write,
-        74 | 75 | 277 | 26 | 162 | 306 => FClass::Sync,
-        82 | 264 | 316 => FClass::Rename,
-        87 | 263 | 84 => FClass::Unlink,
-        83 | 258 | 133 | 259 => FClass::Mkdir,
-        76 | 77 => FClass::Truncate,
-        86 | 265 | 88 | 266 => FClass::Link,
-        285 => FClass::Fallocate,
-        3 => FClass::Close,
-        9 | 12 | 25 | 56 | 57 | 58 => FClass::Mem,
+        nr::OPEN | nr::CREAT | nr::OPENAT | nr::OPENAT2 => FClass::Open,
+        nr::READ | nr::PREAD64 | nr::READV | nr::PREADV | nr::PREADV2 => FClass::Read,
+        nr::WRITE
+        | nr::PWRITE64
+        | nr::WRITEV
+        | nr::PWRITEV
+        | nr::PWRITEV2
+        | nr::COPY_FILE_RANGE
+        | nr::SENDFILE => FClass::Write,
+        nr::FSYNC | nr::FDATASYNC | nr::SYNC_FILE_RANGE | nr::MSYNC | nr::SYNC | nr::SYNCFS => {
+            FClass::Sync
+        }
+        nr::RENAME | nr::RENAMEAT | nr::RENAMEAT2 => FClass::Rename,
+        nr::UNLINK | nr::UNLINKAT | nr::RMDIR => FClass::Unlink,
+        nr::MKDIR | nr::MKDIRAT | nr::MKNOD | nr::MKNODAT => FClass::Mkdir,
+        nr::TRUNCATE | nr::FTRUNCATE => FClass::Truncate,
+        nr::LINK | nr::LINKAT | nr::SYMLINK | nr::SYMLINKAT => FClass::Link,
+        nr::FALLOCATE => FClass::Fallocate,
+        nr::CLOSE => FClass::Close,
+        nr::MMAP | nr::BRK | nr::MREMAP | nr::CLONE | nr::FORK | nr::VFORK => FClass::Mem,
         _ => return None,
     })
 }

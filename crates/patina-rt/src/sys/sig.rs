@@ -70,8 +70,6 @@ pub const ERESTARTSYS: i64 = 512;
 pub const ERESTARTNOINTR: i64 = 513;
 pub const ERESTARTNOHAND: i64 = 514;
 pub const ERESTART_RESTARTBLOCK: i64 = 516;
-const NR_RESTART_SYSCALL: u64 = 219;
-const NR_RT_SIGRETURN: u64 = 15;
 
 /// Restart blocks (`ThreadState::restart[0]`).
 pub const RB_NONE: u64 = 0;
@@ -482,12 +480,12 @@ fn itimer(call: &mut dyn Call) -> i64 {
         }
         _ => return -e::EINVAL,
     }
-    let (newp, oldp) = if nr == 38 {
+    let (newp, oldp) = if nr == nr::SETITIMER {
         (call.arg(1), call.arg(2))
     } else {
         (0, call.arg(1))
     };
-    let old = if nr == 38 {
+    let old = if nr == nr::SETITIMER {
         let new = if newp == 0 {
             [0, 0]
         } else {
@@ -586,32 +584,32 @@ fn restart_syscall(call: &mut dyn Call) -> i64 {
 pub fn handle(call: &mut dyn Call) -> Action {
     let a = args(call);
     let r = match call.nr() {
-        13 => sigaction(call),
-        14 => sigprocmask(call),
-        131 => sigaltstack(call),
-        15 => match call.frame() {
+        nr::RT_SIGACTION => sigaction(call),
+        nr::RT_SIGPROCMASK => sigprocmask(call),
+        nr::SIGALTSTACK => sigaltstack(call),
+        nr::RT_SIGRETURN => match call.frame() {
             Some(f) => sigframe::sigreturn(f, thread()),
             None => return Action::NeedsFrame,
         },
-        62 => kill(call),
-        200 => tgkill(call, None, a[0] as i32 as i64, a[1] as i32 as i64),
-        234 => tgkill(
+        nr::KILL => kill(call),
+        nr::TKILL => tgkill(call, None, a[0] as i32 as i64, a[1] as i32 as i64),
+        nr::TGKILL => tgkill(
             call,
             Some(a[0] as i32 as i64),
             a[1] as i32 as i64,
             a[2] as i32 as i64,
         ),
-        129 => sigqueue(call, a[0] as i32 as i64, 0, a[1] as i32 as i64, a[2]),
-        297 => sigqueue(
+        nr::RT_SIGQUEUEINFO => sigqueue(call, a[0] as i32 as i64, 0, a[1] as i32 as i64, a[2]),
+        nr::RT_TGSIGQUEUEINFO => sigqueue(
             call,
             a[0] as i32 as i64,
             a[1] as i32 as i64,
             a[2] as i32 as i64,
             a[3],
         ),
-        127 => sigpending(call),
-        128 => sigtimedwait(call),
-        130 => {
+        nr::RT_SIGPENDING => sigpending(call),
+        nr::RT_SIGTIMEDWAIT => sigtimedwait(call),
+        nr::RT_SIGSUSPEND => {
             if a[1] != 8 {
                 -e::EINVAL
             } else {
@@ -621,10 +619,10 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 }
             }
         }
-        34 => suspend(call, None),
-        37 => alarm(a[0]),
-        36 | 38 => itimer(call),
-        219 => restart_syscall(call),
+        nr::PAUSE => suspend(call, None),
+        nr::ALARM => alarm(a[0]),
+        nr::GETITIMER | nr::SETITIMER => itimer(call),
+        nr::RESTART_SYSCALL => restart_syscall(call),
         _ => return stop_here(call),
     };
     if r == i64::MIN {
@@ -651,10 +649,33 @@ fn restart_class(nr: u64) -> Option<i64> {
         // read, write, pread64, pwrite64, readv, writev, connect, accept, sendto, recvfrom,
         // sendmsg, recvmsg, wait4, fcntl (F_SETLKW), flock, accept4, preadv, pwritev,
         // recvmmsg, sendmmsg, waitid, preadv2, pwritev2, open/openat (FIFO)
-        0 | 1 | 17 | 18 | 19 | 20 | 42 | 43 | 44 | 45 | 46 | 47 | 61 | 72 | 73 | 288 | 295
-        | 296 | 299 | 307 | 247 | 327 | 328 | 2 | 257 => Some(ERESTARTSYS),
+        nr::READ
+        | nr::WRITE
+        | nr::PREAD64
+        | nr::PWRITE64
+        | nr::READV
+        | nr::WRITEV
+        | nr::CONNECT
+        | nr::ACCEPT
+        | nr::SENDTO
+        | nr::RECVFROM
+        | nr::SENDMSG
+        | nr::RECVMSG
+        | nr::WAIT4
+        | nr::FCNTL
+        | nr::FLOCK
+        | nr::ACCEPT4
+        | nr::PREADV
+        | nr::PWRITEV
+        | nr::RECVMMSG
+        | nr::SENDMMSG
+        | nr::WAITID
+        | nr::PREADV2
+        | nr::PWRITEV2
+        | nr::OPEN
+        | nr::OPENAT => Some(ERESTARTSYS),
         // poll, select, pselect6, ppoll
-        7 | 23 | 270 | 271 => Some(ERESTARTNOHAND),
+        nr::POLL | nr::SELECT | nr::PSELECT6 | nr::PPOLL => Some(ERESTARTNOHAND),
         _ => None,
     }
 }
@@ -686,7 +707,7 @@ fn resolve_without_handler(frame: &mut TrapFrame, nr: u64) {
         return;
     }
     frame.gregs[RAX] = if -r == ERESTART_RESTARTBLOCK {
-        NR_RESTART_SYSCALL
+        nr::RESTART_SYSCALL
     } else {
         nr
     };
@@ -735,7 +756,7 @@ pub fn act_on(
 /// instructions and `rt_sigreturn`).
 pub fn trap_exit(frame: &mut TrapFrame, nr: Option<u64>) {
     let ts = thread();
-    let nr = nr.filter(|&n| n != NR_RT_SIGRETURN);
+    let nr = nr.filter(|&n| n != nr::RT_SIGRETURN);
     if let Some(code) = nr.and_then(restart_class) {
         if frame.gregs[RAX] as i64 == -e::EINTR {
             frame.gregs[RAX] = (-code) as u64;

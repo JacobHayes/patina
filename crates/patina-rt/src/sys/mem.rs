@@ -174,7 +174,7 @@ fn mmap(call: &mut dyn Call) -> i64 {
             // A shared file mapping: the file's identity (tmpfs inode numbers are
             // a function of creation order).
             let mut st = [0u64; 18];
-            if unsafe { sc2(5, fd, st.as_mut_ptr() as u64) } != 0 {
+            if unsafe { sc2(nr::FSTAT, fd, st.as_mut_ptr() as u64) } != 0 {
                 return r;
             }
             // The device as its mount index (st_dev itself comes from a host-global counter).
@@ -267,13 +267,14 @@ pub fn futex_key(addr: u64) -> u64 {
 fn anon_growth(call: &dyn Call) -> u64 {
     let a = |i: usize| call.arg(i);
     match call.nr() {
-        9 if a(3) & 3 == 2
-            && (a(3) & MAP_ANON != 0 || a(4) as i32 == -1)
-            && a(2) & PROT_WRITE != 0 =>
+        nr::MMAP
+            if a(3) & 3 == 2
+                && (a(3) & MAP_ANON != 0 || a(4) as i32 == -1)
+                && a(2) & PROT_WRITE != 0 =>
         {
             page_up(a(1))
         }
-        12 => {
+        nr::BRK => {
             let cur = proc().brk_cur;
             if (BRK_BASE..=BRK_BASE + BRK_SIZE).contains(&a(0)) {
                 page_up(a(0)).saturating_sub(page_up(cur))
@@ -281,24 +282,24 @@ fn anon_growth(call: &dyn Call) -> u64 {
                 0
             }
         }
-        25 => page_up(a(2)).saturating_sub(page_up(a(1))),
+        nr::MREMAP => page_up(a(2)).saturating_sub(page_up(a(1))),
         _ => 0,
     }
 }
 
 pub fn handle(call: &mut dyn Call) -> Action {
     if ctl().faults.cfg.mem_limit_bytes != 0
-        && matches!(call.nr(), 9 | 12 | 25)
+        && matches!(call.nr(), nr::MMAP | nr::BRK | nr::MREMAP)
         && crate::inject::mem_limit_refuses(call.nr(), anon_growth(call))
     {
-        return Action::Return(if call.nr() == 12 {
+        return Action::Return(if call.nr() == nr::BRK {
             proc().brk_cur as i64
         } else {
             -e::ENOMEM
         });
     }
     let r = match call.nr() {
-        9 => {
+        nr::MMAP => {
             // Shared writable mappings of /work files are tracked by the durability log.
             let r = mmap(call);
             if r >= 0 {
@@ -308,8 +309,8 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        12 => brk(call),
-        25 => {
+        nr::BRK => brk(call),
+        nr::MREMAP => {
             let (old, oldlen) = (call.arg(0), call.arg(1));
             let was = shared_at(old);
             let prev = if hits_runtime(old, oldlen) {
@@ -334,16 +335,16 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        11 | 10 => {
+        nr::MUNMAP | nr::MPROTECT => {
             if hits_runtime(call.arg(0), call.arg(1)) {
                 -e::EINVAL
             } else {
-                if call.nr() == 11 {
+                if call.nr() == nr::MUNMAP {
                     crate::oplog::on_munmap(call.arg(0), call.arg(1));
                 }
                 let r = raw(call);
                 if r == 0 {
-                    if call.nr() == 11 {
+                    if call.nr() == nr::MUNMAP {
                         crate::insn::patch::forget(call.arg(0), call.arg(1));
                         forget_shared(call.arg(0), page_up(call.arg(1)));
                     } else if call.arg(2) & PROT_EXEC != 0 {
@@ -354,8 +355,9 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         }
         // mlock family: memory is never paged out from the guest's point of view.
-        149 | 150 | 325 => {
-            if hits_runtime(call.arg(0), call.arg(1)) || (call.nr() == 325 && call.arg(2) & !1 != 0)
+        nr::MLOCK | nr::MUNLOCK | nr::MLOCK2 => {
+            if hits_runtime(call.arg(0), call.arg(1))
+                || (call.nr() == nr::MLOCK2 && call.arg(2) & !1 != 0)
             {
                 -e::EINVAL
             } else {
@@ -363,16 +365,16 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 0
             }
         }
-        151 => {
+        nr::MLOCKALL => {
             if call.arg(0) == 0 || call.arg(0) & !7 != 0 {
                 -e::EINVAL
             } else {
                 0
             }
         }
-        152 => 0,
+        nr::MUNLOCKALL => 0,
         // msync: on tmpfs and anonymous memory the kernel call only validates its arguments.
-        26 => {
+        nr::MSYNC => {
             if hits_runtime(call.arg(0), call.arg(1)) {
                 -e::ENOMEM
             } else {
@@ -385,7 +387,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         }
         // pkey_mprotect with no key (pkey_alloc is refused, so the key is always -1).
-        329 => {
+        nr::PKEY_MPROTECT => {
             if hits_runtime(call.arg(0), call.arg(1)) {
                 -e::EINVAL
             } else {
@@ -396,7 +398,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 r
             }
         }
-        28 => {
+        nr::MADVISE => {
             let [a, len, mut advice, ..] = args(call);
             if hits_runtime(a, len) {
                 -e::EINVAL
@@ -410,7 +412,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 if advice == MADV_FREE {
                     advice = MADV_DONTNEED;
                 }
-                unsafe { sc3(28, a, len, advice) }
+                unsafe { sc3(nr::MADVISE, a, len, advice) }
             }
         }
         _ => return stop_here(call),

@@ -1,9 +1,15 @@
-# 8. patina table prints a row for every syscall number known to the kernel headers; rows not written show Stop.
+# 8. patina table prints a row for every syscall number the host's kernel headers know for its architecture; rows not written show Stop.
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
-h=/usr/include/x86_64-linux-gnu/asm/unistd_64.h
 "$PATINA" table >"$RUNS/08-table.md"
-awk '/^#define __NR_/ {sub("__NR_","",$2); print $3, $2}' "$h" | sort -n >"$RUNS/08-header.txt"
+# The host's numbers for its own architecture, from <asm/unistd.h> with the macros expanded
+# (the generic header that arm64 used before Linux 6.11 defines some numbers through others,
+# and two names that are no calls: the count and the start of the architecture's range).
+echo '#include <asm/unistd.h>' | cc -dM -E - |
+    awk '/^#define __NR_/ {n = substr($2, 6); if (n != "syscalls" && n != "arch_specific_syscall") print n, "__NR_" n}' >"$RUNS/08-names.txt"
+{ echo '#include <asm/unistd.h>'; cat "$RUNS/08-names.txt"; } | cc -E -P - |
+    awk 'NF == 2 && $2 ~ /^[0-9]+$/ {print $2, $1}' | sort -n >"$RUNS/08-header.txt"
+[ "$(wc -l <"$RUNS/08-header.txt")" -eq "$(wc -l <"$RUNS/08-names.txt")" ] || die "a header number did not expand"
 awk -F' [|] ' '/^[|] [0-9]/ {sub(/^[|] /,"",$1); print $1, $2}' "$RUNS/08-table.md" | sort -n >"$RUNS/08-rows.txt"
 # The host's headers may be older than the table (which may know newer numbers), never newer.
 missing=$(awk 'NR == FNR { row[$0] = 1; next } !($0 in row)' "$RUNS/08-rows.txt" "$RUNS/08-header.txt")

@@ -28,7 +28,7 @@ global_asm!(
     ".text",
     ".globl patina_restorer",
     "patina_restorer:",
-    "  mov eax, 15",
+    "  mov eax, {rt_sigreturn}",
     "  jmp patina_syscall",
     // switch_stack(top, ksp, f): run f(ksp) on a new stack
     ".globl patina_switch_stack",
@@ -47,6 +47,7 @@ global_asm!(
     "  xor r12d, r12d", "xor r13d, r13d", "xor r14d, r14d", "xor r15d, r15d",
     "  jmp rax",
     start = sym rt_start,
+    rt_sigreturn = const nr::RT_SIGRETURN,
 );
 
 extern "C" {

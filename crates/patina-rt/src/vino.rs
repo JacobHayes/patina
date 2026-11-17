@@ -5,6 +5,7 @@
 //! `(st_dev, st_ino)`, in the control region so that every process of a run
 //! agrees (a pipe is shared across `fork`). the network wire uses `of_fd` as the socket key.
 
+use proto::nr;
 use proto::vfs::{Vfs, VinoEntry, VINO_BASE, VINO_CAP};
 
 fn vfs() -> &'static mut Vfs {
@@ -43,7 +44,7 @@ pub fn find(dev: u64, ino: u64) -> Option<u64> {
 #[allow(dead_code)] // the interface the network wire keys sockets by
 pub fn of_fd(fd: i64) -> Option<u64> {
     let mut st = [0u64; 18];
-    let r = unsafe { crate::raw::sc2(5, fd as u64, st.as_mut_ptr() as u64) };
+    let r = unsafe { crate::raw::sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     if r != 0 {
         return None;
     }

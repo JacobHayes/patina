@@ -25,9 +25,6 @@ const F_SETFL: u64 = 4;
 pub const POLLIN: u16 = 1;
 pub const POLLERR: u16 = 8;
 pub const POLLHUP: u16 = 0x10;
-const PREADV2: u64 = 327;
-const PWRITEV2: u64 = 328;
-const PPOLL: u64 = 271;
 const NS: u64 = 1_000_000_000;
 
 /// What kind of object a descriptor is, decided by `fstat` at the call.
@@ -100,7 +97,17 @@ pub fn set_nonblock(fd: i64, on: bool) -> i64 {
 pub fn poll1(fd: i64, events: u16) -> u16 {
     let mut p: [u32; 2] = [fd as u32, events as u32];
     let ts = [0u64; 2];
-    let r = unsafe { sc6(PPOLL, p.as_mut_ptr() as u64, 1, ts.as_ptr() as u64, 0, 8, 0) };
+    let r = unsafe {
+        sc6(
+            nr::PPOLL,
+            p.as_mut_ptr() as u64,
+            1,
+            ts.as_ptr() as u64,
+            0,
+            8,
+            0,
+        )
+    };
     if r <= 0 {
         0
     } else {
@@ -124,7 +131,7 @@ fn sock_timeo(fd: i64, opt: u64) -> Option<u64> {
     let mut len: u32 = 16;
     let r = unsafe {
         sc6(
-            55,
+            nr::GETSOCKOPT,
             fd as u64,
             1,
             opt,
@@ -414,7 +421,7 @@ pub fn read_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) ->
     let g = w.run(|| {
         let mut r = unsafe {
             sc6(
-                PREADV2,
+                nr::PREADV2,
                 fd as u64,
                 iov,
                 cnt,
@@ -424,7 +431,7 @@ pub fn read_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) ->
             )
         };
         if r == -EOPNOTSUPP && flags & !RWF_NOWAIT == 0 {
-            r = toggled(fd, 19, iov, cnt);
+            r = toggled(fd, nr::READV, iov, cnt);
         }
         eagain(r)
     });
@@ -450,7 +457,7 @@ pub fn write_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) -
     let r = write_all(&mut w, iov, cnt, |p, n| {
         let r = unsafe {
             sc6(
-                PWRITEV2,
+                nr::PWRITEV2,
                 fd as u64,
                 p,
                 n,
@@ -460,7 +467,7 @@ pub fn write_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) -
             )
         };
         if r == -EOPNOTSUPP && flags & !RWF_NOWAIT == 0 {
-            toggled(fd, 20, p, n)
+            toggled(fd, nr::WRITEV, p, n)
         } else {
             r
         }
@@ -476,12 +483,12 @@ pub fn rw(call: &mut dyn Call, kind: Kind) -> i64 {
     let one = [a[1], a[2]];
     let p1 = one.as_ptr() as u64;
     match call.nr() {
-        0 => read_iov(0, fd, kind, p1, 1, 0),
-        1 => write_iov(1, fd, kind, p1, 1, 0),
-        19 => read_iov(19, fd, kind, a[1], a[2], 0),
-        20 => write_iov(20, fd, kind, a[1], a[2], 0),
-        PREADV2 if a[3] as i64 == -1 => read_iov(PREADV2, fd, kind, a[1], a[2], a[5]),
-        PWRITEV2 if a[3] as i64 == -1 => write_iov(PWRITEV2, fd, kind, a[1], a[2], a[5]),
+        nr::READ => read_iov(nr::READ, fd, kind, p1, 1, 0),
+        nr::WRITE => write_iov(nr::WRITE, fd, kind, p1, 1, 0),
+        nr::READV => read_iov(nr::READV, fd, kind, a[1], a[2], 0),
+        nr::WRITEV => write_iov(nr::WRITEV, fd, kind, a[1], a[2], 0),
+        nr::PREADV2 if a[3] as i64 == -1 => read_iov(nr::PREADV2, fd, kind, a[1], a[2], a[5]),
+        nr::PWRITEV2 if a[3] as i64 == -1 => write_iov(nr::PWRITEV2, fd, kind, a[1], a[2], a[5]),
         // An explicit offset on a pipe or socket: the kernel answers ESPIPE without waiting.
         _ => {
             set_class(call, Class::Pass);
@@ -505,7 +512,10 @@ const O_NOFOLLOW: u64 = 0o400000;
 /// count of writers to wait on). The new description's O_NONBLOCK, set
 /// by the runtime before the guest has seen it, is then cleared.
 pub fn fifo_open(nr: u64, a: &[u64; 6], dirfd: i64, pi: usize, flags: u64) -> Option<i64> {
-    if !(nr == 2 || nr == 257) || flags & (O_NONBLOCK | O_PATH) != 0 || flags & O_ACCMODE == 2 {
+    if !(nr == nr::OPEN || nr == nr::OPENAT)
+        || flags & (O_NONBLOCK | O_PATH) != 0
+        || flags & O_ACCMODE == 2
+    {
         return None;
     }
     if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
@@ -517,7 +527,7 @@ pub fn fifo_open(nr: u64, a: &[u64; 6], dirfd: i64, pi: usize, flags: u64) -> Op
         return None;
     }
     let mut b = *a;
-    let fi = if nr == 2 { 1 } else { 2 };
+    let fi = if nr == nr::OPEN { 1 } else { 2 };
     b[fi] = flags | O_NONBLOCK;
     let open = || unsafe { sc6(nr, b[0], b[1], b[2], b[3], b[4], b[5]) };
     let mut w = Waiter::new(-1, PARK_OPEN, nr);
@@ -571,8 +581,8 @@ pub fn splice(call: &mut dyn Call) -> i64 {
     let mut a = args(call);
     let nr = call.nr();
     let (fi, fdi, fdo) = match nr {
-        275 => (5, a[0], a[2]),
-        276 => (3, a[0], a[1]),
+        nr::SPLICE => (5, a[0], a[2]),
+        nr::TEE => (3, a[0], a[1]),
         _ => (3, a[0], u64::MAX), // vmsplice(fd, iov, n, flags)
     };
     let mut nb = [-1i64; 2];

@@ -195,7 +195,15 @@ fn trace() -> &'static mut [u64] {
 }
 
 fn poke(a: u64, b: u8) -> bool {
-    let r = unsafe { sc4(18, MEM.load(Relaxed) as u64, &b as *const u8 as u64, 1, a) };
+    let r = unsafe {
+        sc4(
+            nr::PWRITE64,
+            MEM.load(Relaxed) as u64,
+            &b as *const u8 as u64,
+            1,
+            a,
+        )
+    };
     r == 1
 }
 

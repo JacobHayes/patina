@@ -9,6 +9,8 @@
 //! path, or an ancestor of it below the work root, was named by one of the process's last
 //! `WINDOW` checks.
 
+use crate::nr;
+
 /// How a path call takes part.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -35,18 +37,40 @@ pub const WINDOW: usize = 16;
 /// The role of a system call, if it takes part.
 pub fn role(nr: u64) -> Option<Role> {
     Some(match nr {
-        // stat, lstat, newfstatat, statx, access, faccessat, faccessat2, readlink, readlinkat
-        4 | 6 | 262 | 332 | 21 | 269 | 439 | 89 | 267 => Role::Check,
-        // open, creat, openat, openat2
-        2 | 85 | 257 | 437 => Role::Open,
-        // mkdir, mkdirat, mknod, mknodat, unlink, rmdir, unlinkat
-        83 | 258 | 133 | 259 | 87 | 84 | 263
-        // rename, renameat, renameat2, link, linkat, symlink, symlinkat
-        | 82 | 264 | 316 | 86 | 265 | 88 | 266
-        // truncate, chmod, fchmodat, fchmodat2, chown, lchown, fchownat
-        | 76 | 90 | 268 | 452 | 92 | 94 | 260
-        // chdir, execve, execveat
-        | 80 | 59 | 322 => Role::Use,
+        nr::STAT
+        | nr::LSTAT
+        | nr::NEWFSTATAT
+        | nr::STATX
+        | nr::ACCESS
+        | nr::FACCESSAT
+        | nr::FACCESSAT2
+        | nr::READLINK
+        | nr::READLINKAT => Role::Check,
+        nr::OPEN | nr::CREAT | nr::OPENAT | nr::OPENAT2 => Role::Open,
+        nr::MKDIR
+        | nr::MKDIRAT
+        | nr::MKNOD
+        | nr::MKNODAT
+        | nr::UNLINK
+        | nr::RMDIR
+        | nr::UNLINKAT
+        | nr::RENAME
+        | nr::RENAMEAT
+        | nr::RENAMEAT2
+        | nr::LINK
+        | nr::LINKAT
+        | nr::SYMLINK
+        | nr::SYMLINKAT
+        | nr::TRUNCATE
+        | nr::CHMOD
+        | nr::FCHMODAT
+        | nr::FCHMODAT2
+        | nr::CHOWN
+        | nr::LCHOWN
+        | nr::FCHOWNAT
+        | nr::CHDIR
+        | nr::EXECVE
+        | nr::EXECVEAT => Role::Use,
         _ => return None,
     })
 }
@@ -59,13 +83,24 @@ pub type PathArg = (Option<usize>, usize);
 pub fn path_args(nr: u64) -> ([PathArg; 2], usize) {
     let one = |d: Option<usize>, p: usize| ([(d, p), (None, 0)], 1);
     match nr {
-        82 | 86 => ([(None, 0), (None, 1)], 2),
-        264 | 316 | 265 => ([(Some(0), 1), (Some(2), 3)], 2),
-        88 => one(None, 1),
-        266 => one(Some(1), 2),
-        257 | 437 | 262 | 332 | 269 | 439 | 267 | 258 | 259 | 263 | 268 | 452 | 260 | 322 => {
-            one(Some(0), 1)
-        }
+        nr::RENAME | nr::LINK => ([(None, 0), (None, 1)], 2),
+        nr::RENAMEAT | nr::RENAMEAT2 | nr::LINKAT => ([(Some(0), 1), (Some(2), 3)], 2),
+        nr::SYMLINK => one(None, 1),
+        nr::SYMLINKAT => one(Some(1), 2),
+        nr::OPENAT
+        | nr::OPENAT2
+        | nr::NEWFSTATAT
+        | nr::STATX
+        | nr::FACCESSAT
+        | nr::FACCESSAT2
+        | nr::READLINKAT
+        | nr::MKDIRAT
+        | nr::MKNODAT
+        | nr::UNLINKAT
+        | nr::FCHMODAT
+        | nr::FCHMODAT2
+        | nr::FCHOWNAT
+        | nr::EXECVEAT => one(Some(0), 1),
         _ => one(None, 0),
     }
 }

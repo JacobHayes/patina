@@ -205,7 +205,7 @@ fn decide(nr: u64, a0: u64, checked: &[u8], root: &[u8], chk: Seen) -> Option<Sw
     let name = Name::of(&c[slash + 1..])?;
     let (m, t, back) = choose(crate::inject::d(SUB_SWAP_HOW));
     // An exec that succeeds does not come back to be put back after.
-    let back = back && nr != 59 && nr != 322;
+    let back = back && nr != nr::EXECVE && nr != nr::EXECVEAT;
     let pfd = open_parent(&parent)?;
     let r = swap(pfd, &parent, name, m, t, root);
     unsafe { sc1(nr::CLOSE, pfd as u64) };
@@ -223,7 +223,7 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
     let how = [O_PATH | O_RDONLY_DIR, 0, RESOLVE_NO_SYMLINKS];
     let fd = unsafe {
         sc4(
-            437,
+            nr::OPENAT2,
             AT_FDCWD as u64,
             z.as_ptr() as u64,
             how.as_ptr() as u64,
@@ -245,7 +245,15 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
 /// The entry of `pfd` other than `not` (and the swap's own names) that the draw picks, in an
 /// order that does not depend on the directory's.
 fn sibling(pfd: i64, not: &Name) -> Option<Name> {
-    let dfd = unsafe { sc4(257, pfd as u64, c".".as_ptr() as u64, O_RDONLY_DIR, 0) };
+    let dfd = unsafe {
+        sc4(
+            nr::OPENAT,
+            pfd as u64,
+            c".".as_ptr() as u64,
+            O_RDONLY_DIR,
+            0,
+        )
+    };
     if dfd < 0 {
         return None;
     }
@@ -253,7 +261,14 @@ fn sibling(pfd: i64, not: &Name) -> Option<Name> {
     let mut best: Option<(u64, Name)> = None;
     let mut buf = [0u8; 4096];
     loop {
-        let r = unsafe { sc3(217, dfd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+        let r = unsafe {
+            sc3(
+                nr::GETDENTS64,
+                dfd as u64,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+            )
+        };
         if r <= 0 {
             break;
         }
@@ -282,7 +297,7 @@ fn lstat_in(pfd: i64, n: &Name) -> Option<crate::sys::fs::St> {
 
 fn rename_in(pfd: i64, from: &Name, to: &Name) -> bool {
     mutate_as_guest(
-        316,
+        nr::RENAMEAT2,
         [
             pfd as u64,
             from.ptr(),
@@ -394,7 +409,7 @@ fn swap(
                     continue;
                 }
                 let r = mutate_as_guest(
-                    266,
+                    nr::SYMLINKAT,
                     [target.b.as_ptr() as u64, pfd as u64, name.ptr(), 0, 0, 0],
                 );
                 if r != 0 {
@@ -425,7 +440,7 @@ pub fn after(s: Swap) {
     let undone = match s.mutation {
         MUT_SYMLINK => {
             ours && lstat_in(pfd, &s.name).is_some_and(|x| x[3] & S_IFMT == S_IFLNK)
-                && mutate_as_guest(263, [pfd as u64, s.name.ptr(), 0, 0, 0, 0]) == 0
+                && mutate_as_guest(nr::UNLINKAT, [pfd as u64, s.name.ptr(), 0, 0, 0, 0]) == 0
         }
         MUT_RENAME => ours && rename_in(pfd, &s.name, &s.sibling),
         _ => true,

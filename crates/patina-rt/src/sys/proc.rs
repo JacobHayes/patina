@@ -90,7 +90,7 @@ fn fork(call: &mut dyn Call, flags: u64, stack: u64, ptid: u64, ctid: u64) -> i6
     reserve(slot, vmask);
     proc().fork_slot = slot as u64;
     let kflags = flags & (CSIGNAL | CLONE_PARENT_SETTID);
-    let r = unsafe { sc6(56, kflags, 0, ptid, 0, 0, 0) };
+    let r = unsafe { sc6(nr::CLONE, kflags, 0, ptid, 0, 0, 0) };
     if r < 0 {
         release(slot);
         host_check(call, r);
@@ -273,7 +273,15 @@ fn wait4(call: &mut dyn Call) -> i64 {
     let [pid, ustatus, options, urusage, ..] = args(call);
     loop {
         let mut st: i32 = 0;
-        let r = unsafe { sc4(61, pid, &mut st as *mut i32 as u64, options | WNOHANG, 0) };
+        let r = unsafe {
+            sc4(
+                nr::WAIT4,
+                pid,
+                &mut st as *mut i32 as u64,
+                options | WNOHANG,
+                0,
+            )
+        };
         if r > 0 {
             let st = reaped(r, true, st);
             if ustatus != 0 {
@@ -304,7 +312,7 @@ fn waitid(call: &mut dyn Call) -> i64 {
         let mut info = [0u64; 16];
         let r = unsafe {
             sc6(
-                247,
+                nr::WAITID,
                 idtype,
                 id,
                 info.as_mut_ptr() as u64,
@@ -389,11 +397,17 @@ fn exit(call: &mut dyn Call, row: &'static proto::Row) -> ! {
 pub fn handle(call: &mut dyn Call) -> Action {
     let nr = call.nr();
     let r = match nr {
-        39 | 110 | 186 | 102 | 107 | 104 | 108 => raw(call),
+        nr::GETPID
+        | nr::GETPPID
+        | nr::GETTID
+        | nr::GETUID
+        | nr::GETEUID
+        | nr::GETGID
+        | nr::GETEGID => raw(call),
         // The UTS namespace starts as a copy of the host's: its NIS domain name reads as
         // a fixed "(none)" (the sandbox cannot set it: bwrap's user namespace is nested, so the
         // UTS namespace is not the sandbox's to change).
-        63 => {
+        nr::UNAME => {
             let r = raw(call);
             if r == 0 {
                 let p = call.arg(0) + 5 * 65;
@@ -404,20 +418,20 @@ pub fn handle(call: &mut dyn Call) -> Action {
             r
         }
         // Process groups and sessions: the kernel's.
-        109 | 111 | 112 | 121 | 124 => raw(call),
-        57 => return clone_process(call, SIGCHLD, 0, 0, 0, 0),
-        58 => return clone_process(call, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0),
-        59 | 322 => return crate::exec::execve(call),
-        61 => wait4(call),
-        247 => waitid(call),
-        231 => exit(call, proto::row(nr as u32)),
-        218 => {
+        nr::SETPGID | nr::GETPGRP | nr::SETSID | nr::GETPGID | nr::GETSID => raw(call),
+        nr::FORK => return clone_process(call, SIGCHLD, 0, 0, 0, 0),
+        nr::VFORK => return clone_process(call, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0),
+        nr::EXECVE | nr::EXECVEAT => return crate::exec::execve(call),
+        nr::WAIT4 => wait4(call),
+        nr::WAITID => waitid(call),
+        nr::EXIT_GROUP => exit(call, proto::row(nr as u32)),
+        nr::SET_TID_ADDRESS => {
             let a0 = call.arg(0);
             let ts = call.thread();
             ts.clear_tid = a0;
             ts.tid as i64
         }
-        273 => {
+        nr::SET_ROBUST_LIST => {
             if call.arg(1) != 24 {
                 -e::EINVAL
             } else {
@@ -426,7 +440,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 0
             }
         }
-        302 => {
+        nr::PRLIMIT64 => {
             let [pid, res, _new, old, ..] = args(call);
             let own = call.thread().pid as u64;
             if pid != 0 && pid != own {
@@ -443,19 +457,19 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 Err(e) => e,
             }
         }
-        97 => rlimit(call.arg(0))
+        nr::GETRLIMIT => rlimit(call.arg(0))
             .and_then(|v| put(call.arg(1), v))
             .map(|_| 0)
             .unwrap_or_else(|e| e),
-        160 => rlimit(call.arg(0)).map(|_| 0).unwrap_or_else(|e| e),
-        158 => match call.arg(0) {
+        nr::SETRLIMIT => rlimit(call.arg(0)).map(|_| 0).unwrap_or_else(|e| e),
+        nr::ARCH_PRCTL => match call.arg(0) {
             0x1001..=0x1004 => raw(call),
             _ => {
                 set_class(call, Class::Virt);
                 -e::EINVAL
             }
         },
-        157 => match call.arg(0) {
+        nr::PRCTL => match call.arg(0) {
             15 | 16 | 3 | 0x5356_4d41 => raw(call),
             // instruction channels: the timestamp-counter mode is virtual (the real one stays SIGSEGV).
             25 => {

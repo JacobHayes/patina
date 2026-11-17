@@ -30,6 +30,7 @@
 use super::{Next, Sup};
 use crate::outcome::Verdict;
 use proto::ctl::*;
+use proto::nr;
 use proto::vfs::{VINO_BASE, VINO_CAP};
 use proto::wire::*;
 use proto::{draw, Stream};
@@ -321,7 +322,7 @@ impl Sup {
 
     /// An injected network fault: a boundary record of kind `Injected` written by the
     /// supervisor; `args[4]` is the connection's server port (the object, `tcp:PORT`).
-    fn wire_inject(&mut self, kind: u64, nr: u32, value: u64, conn: u32) {
+    fn wire_inject(&mut self, kind: u64, nr: u64, value: u64, conn: u32) {
         let seq = self.ctl.seq.load(Relaxed) + 1;
         self.ctl.seq.store(seq, Relaxed);
         let port = self.wire.conns.get(&conn).map_or(0, |c| c.sport as u64);
@@ -331,7 +332,7 @@ impl Sup {
             slot: 0,
             kind: proto::RecKind::Injected as u8,
             class: 0,
-            nr,
+            nr: nr as u32,
             args: [kind, 0, value, conn as u64, port, 0],
             ret: 0,
             out_hash: 0,
@@ -427,7 +428,7 @@ impl Sup {
         if let Some(to) = self.partition_hold(t, sport, cport) {
             t = to;
             WireTab::inc(&tab(self.ctl).counters.partitioned, 1);
-            self.wire_inject(INJ_NET_PARTITION, 44, t, id);
+            self.wire_inject(INJ_NET_PARTITION, nr::SENDTO, t, id);
         }
         self.wire.conns.get_mut(&id).unwrap().dirs[dir].last_t = t;
         t
@@ -601,10 +602,10 @@ impl Sup {
         let cfg = self.net_cfg();
         let listener = self.wire.listener(port, kind, self.ctl);
         let fate = if self.net_fault(cfg.refuse_permille, id, NSUB_REFUSE, 0) {
-            self.wire_inject(INJ_NET_REFUSE, 42, ECONNREFUSED as u64, id);
+            self.wire_inject(INJ_NET_REFUSE, nr::CONNECT, ECONNREFUSED as u64, id);
             Fate::Refuse { injected: true }
         } else if self.net_fault(cfg.timeout_permille, id, NSUB_TIMEOUT, 0) {
-            self.wire_inject(INJ_NET_TIMEOUT, 42, ETIMEDOUT as u64, id);
+            self.wire_inject(INJ_NET_TIMEOUT, nr::CONNECT, ETIMEDOUT as u64, id);
             Fate::Timeout
         } else if listener.is_none() {
             Fate::Refuse { injected: false }
@@ -620,7 +621,7 @@ impl Sup {
             if let Some(to) = self.partition_hold(t, port, cport) {
                 t = to;
                 WireTab::inc(&tab(self.ctl).counters.partitioned, 1);
-                self.wire_inject(INJ_NET_PARTITION, 42, t, id);
+                self.wire_inject(INJ_NET_PARTITION, nr::CONNECT, t, id);
             }
         }
         let ev = self.sched.schedule(
@@ -966,7 +967,7 @@ impl Sup {
                 let k = self.wire.conns[&id].dirs[dir].n;
                 WireTab::inc(&tab(self.ctl).counters.sends, 1);
                 if self.net_fault(cfg.reset_permille, id, NSUB_RESET | (dir as u64) << 3, k) {
-                    self.wire_inject(INJ_NET_RESET, 44, r as u64, id);
+                    self.wire_inject(INJ_NET_RESET, nr::SENDTO, r as u64, id);
                     self.reset_both(id);
                     break;
                 }
@@ -1082,7 +1083,7 @@ impl Sup {
                         self.bump_gen();
                         let split = chunk_max > 0 && !done;
                         if split {
-                            self.wire_inject(INJ_NET_CHUNK, 44, r as u64, id);
+                            self.wire_inject(INJ_NET_CHUNK, nr::SENDTO, r as u64, id);
                         }
                         self.wire_decide(
                             DEC_WIRE_DELIVER,
