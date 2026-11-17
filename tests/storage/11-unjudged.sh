@@ -2,7 +2,7 @@
 # error rate (--crash machine:5, fs-error-permille=20), seeds 1-40: in every run whose guest
 # reports the errno of the last injected fault, the guest must call it UNJUDGED (exit 0),
 # never an INVARIANT or a panic. At least one run must reach that case.
-#@ tier=quick budget=15 slots=4 arch=x86_64
+#@ tier=quick budget=15 slots=4
 . "$(dirname "$0")/lib/common.inc"
 sweep unjudged fjall-harness 1-40 -- --crash machine:5 --fault fs-error-permille=20 -- /guest/fjall-harness-release >/dev/null
 python3 -I - "$RUNS/unjudged/outcomes" <<'PY'

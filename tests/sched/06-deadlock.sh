@@ -1,6 +1,6 @@
 # 6. Deadlock guest: outcome liveness, stop deadlock; the detail names both threads' futex waits (on the two
 #    mutexes the guest printed); same seed, same digest.
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib.inc"
 for rep in a b; do
     out=$RUNS/06-deadlock/$rep

@@ -2,7 +2,7 @@
 # ENOMEM exactly at its call and the guest carries on; thread creation fails with EAGAIN;
 # under mem-limit-mb, growth past the limit is refused at the same call every run and
 # malloc returns NULL with ENOMEM.
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib/common.inc"
 seen=""
 for n in $(seq 1 24); do

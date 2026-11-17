@@ -42,6 +42,9 @@ pub fn feature_hidden(_w: &[u8]) -> bool {
     false
 }
 
+/// The number of words `Frame::regs_for_record` gives.
+pub const RECORD_WORDS: usize = 18;
+
 /// x86_64 kernel `ucontext` as delivered on the alternate stack.
 #[repr(C)]
 pub struct Frame {
@@ -140,8 +143,8 @@ impl Frame {
     /// The words a preempt record hashes: the general registers, without the trap and resume
     /// flags a spin probe's single steps may leave (in the flags and in the copy `syscall`
     /// saved in r11), which depend on when the probe came.
-    pub fn regs_for_record(&self) -> [u64; 18] {
-        let mut words = [0u64; 18];
+    pub fn regs_for_record(&self) -> [u64; RECORD_WORDS] {
+        let mut words = [0u64; RECORD_WORDS];
         words.copy_from_slice(&self.gregs[..18]);
         const TF_RF: u64 = 0x100 | 0x1_0000;
         words[EFL] &= !TF_RF;

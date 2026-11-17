@@ -1,6 +1,6 @@
 # 6. Deadlock detection still works: a thread blocked reading a pipe nobody writes, every
 #    other thread exited -> liveness (deadlock), and the detail names the descriptor (and the call).
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-deadlock; mkdir -p "$o"
 for rep in a b; do

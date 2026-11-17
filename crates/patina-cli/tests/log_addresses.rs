@@ -103,7 +103,10 @@ fn no_record_holds_a_runtime_address() {
     );
     let injected = recs
         .iter()
-        .filter(|r| r.kind == RecKind::Injected as u8 && u64::from(r.nr) == nr::MKDIR)
+        .filter(|r| {
+            // `mkdir` makes `mkdirat` where the architecture has no `mkdir` (arm64).
+            r.kind == RecKind::Injected as u8 && [nr::MKDIR, nr::MKDIRAT].contains(&u64::from(r.nr))
+        })
         .count();
     assert!(
         injected > 0,

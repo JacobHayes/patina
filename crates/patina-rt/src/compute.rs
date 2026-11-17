@@ -160,7 +160,11 @@ fn exit_slow(ts: &mut ThreadState) {
 /// hello of an address space is a start), and answer the cell's address.
 /// `COMPUTE_HELLO` from the system call instruction at `pc`, in the image whose hook copy
 /// asked.
+#[cfg_attr(target_arch = "aarch64", allow(unreachable_code, unused_variables))]
 pub fn hello(arg: u64, pc: u64) -> i64 {
+    // Compute points are not ported to arm64 (the hook's entry): no image starts them there.
+    #[cfg(target_arch = "aarch64")]
+    crate::sup::unported(proto::ctl::UNPORTED_COMPUTE);
     let version = arg & 0xff;
     let kinds = arg >> 8;
     if version != proto::sdk::COMPUTE_VERSION || kinds & !proto::sdk::COMPUTE_KINDS != 0 {
@@ -314,7 +318,8 @@ pub fn point(ts: &mut ThreadState, frame: &Frame) {
         bump(&c.compute.switches, 1);
     }
     let words = frame.regs_for_record();
-    let bytes = unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, 18 * 8) };
+    let bytes =
+        unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 8) };
     let rec = proto::Rec {
         seq: ts.seq,
         vclock_ns: c.vclock_ns.load(Relaxed),

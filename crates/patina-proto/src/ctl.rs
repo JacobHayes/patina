@@ -880,7 +880,6 @@ macro_rules! unported {
 
 unported! {
     UNPORTED_SIGNALS = 2: "signal delivery to a handler, sigreturn and system-call restart",
-    UNPORTED_THREADS = 3: "threads, fork and vfork (the clone trampolines)",
     UNPORTED_COUNTERS = 4: "branch-counter preemption",
     UNPORTED_COMPUTE = 5: "compute points",
     UNPORTED_INSN = 6: "an instruction with a host-random result (RNDR, RNDRRS, PACGA) in program code",

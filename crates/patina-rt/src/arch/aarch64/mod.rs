@@ -5,10 +5,12 @@
 mod entry;
 mod guest;
 mod stub;
+mod thread;
 
 pub use entry::{enter_guest, restorer, switch_stack};
 pub use guest::{current_sp, fixup, guest_copy};
 pub use stub::{sc6, stub_escape, stub_ip};
+pub use thread::{clone_vm, frame_extent, rebase_frame, sigreturn_to};
 
 /// The seccomp program's architecture (`seccomp_data.arch`).
 pub const AUDIT_ARCH: u32 = 0xC000_00B7;
@@ -98,6 +100,9 @@ pub fn process_init() {
         crate::fatal(proto::ctl::Setup::PacKeys, r);
     }
 }
+
+/// The number of words `Frame::regs_for_record` gives.
+pub const RECORD_WORDS: usize = 34;
 
 /// The kernel's `ucontext` as delivered on the alternate stack (`uapi/asm/ucontext.h`,
 /// `sigcontext.h`): `uc_sigmask` at 40, `uc_mcontext` at 176, the records at 464.
@@ -191,9 +196,17 @@ impl Frame {
     pub fn restart_after_result(&mut self, _nr: u64) {
         crate::sup::unported(proto::ctl::UNPORTED_SIGNALS)
     }
-    /// The words a preempt record hashes (compute points: not ported yet).
-    pub fn regs_for_record(&self) -> [u64; 18] {
-        crate::sup::unported(proto::ctl::UNPORTED_COMPUTE)
+    /// The words a preempt record hashes: `x0`-`x30`, `sp`, `pc` and the condition flags of
+    /// `pstate` (its other bits are set by the kernel and the CPU: speculation controls, PAN,
+    /// the single-step bit a spin probe's steps leave).
+    pub fn regs_for_record(&self) -> [u64; RECORD_WORDS] {
+        const NZCV: u64 = 0xf000_0000;
+        let mut words = [0u64; RECORD_WORDS];
+        words[..31].copy_from_slice(&self.regs);
+        words[31] = self.sp;
+        words[32] = self.pc;
+        words[33] = self.pstate & NZCV;
+        words
     }
     /// The value of general register `n` as an instruction names it (31 = the zero register).
     #[inline(always)]

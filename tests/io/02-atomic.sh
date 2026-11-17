@@ -1,6 +1,6 @@
 # 2. Atomicity: 8 threads x 1,000 records of exactly 4,096 bytes into one pipe; the reader
 #    never sees an interleaved record. Seed 1 at the default preemption and at 500/1000.
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-atomic; mkdir -p "$o"
 for p in 100 500 1000; do

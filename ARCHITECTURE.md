@@ -362,10 +362,12 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   a program that reaches a part not ported yet ends the run `unsupported`, stop
-  `arm64-unported`, naming it (signal delivery to a handler, threads and vfork, branch
-  counters, spin probes, compute points, `RNDR` or `PACGA` in program code, executable memory
-  the scan does not read). The runtime disables the pointer-authentication keys before
-  anything else (`arch/aarch64`); `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`,
+  `arm64-unported`, naming it (signal delivery to a handler, branch counters, spin probes,
+  compute points, `RNDR` or `PACGA` in program code, executable memory the scan does not
+  read). Threads, fork, vfork and exec work as on x86_64 (the clone trampoline is in
+  `arch/aarch64/thread.rs`). The runtime disables the pointer-authentication keys before
+  anything else at every image start (`arch/aarch64`): the kernel enables and redraws them at
+  each exec. `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`,
   `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
   under Patina alike. CPU features reach the program as the host has them (`AT_HWCAP`,
   `AT_HWCAP2`, `AT_MINSIGSTKSZ`, the `Features` of `/proc/cpuinfo`), as `cpuid` does on x86_64:

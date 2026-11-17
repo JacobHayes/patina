@@ -1,7 +1,7 @@
 # 1. One guest per outcome: each run ends with that outcome in result.json and exits with the
 #    status `patina --help --format json` gives for it. A missing program is `error` naming the
 #    file; a call on a `Stop` row of `patina table` is `unsupported` naming the call.
-#@ tier=quick budget=15 arch=x86_64
+#@ tier=quick budget=15
 . "$(dirname "$0")/lib.inc"
 G=$PATINA_GUESTS
 # expect NAME OUTCOME STOP [run options] -- CMD...
