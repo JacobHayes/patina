@@ -14,6 +14,7 @@
 //! - Parameters come from the environment: `FJ_N` (default 300), `FJ_WORKERS`
 //!   (default 1), `FJ_PERSIST` (`buffer` = planted bug: acknowledge without fsync),
 //!   `FJ_LOG` (`1`: fjall's log at info and progress every 50 batches; `2`: every batch),
+//!   `FJ_VAL_SHIFT` (default 0; shifts the sequence of value lengths, and so the journal's layout),
 //!   `FJ_ROOT` (default `/work/fjtest`; the native check points it at a copied tree),
 //!   `FJ_WIPE_PARTIAL=1` (a workaround for finding F1: wipe a db without a `version`
 //!   marker and start over).
@@ -82,8 +83,11 @@ impl log::Log for StderrLog {
 static LOGGER: StderrLog = StderrLog;
 
 fn val(i: u64) -> Vec<u8> {
-    // value length varies with i so blocks/tables vary
-    let len = 16 + (i.wrapping_mul(2654435761) % 600) as usize;
+    // value length varies with i so blocks/tables vary; FJ_VAL_SHIFT moves the sequence of
+    // lengths, so the journal's layout (where its 4 KiB block boundaries fall) changes
+    static SHIFT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let shift = *SHIFT.get_or_init(|| param("val_shift").and_then(|s| s.parse().ok()).unwrap_or(0));
+    let len = 16 + (i.wrapping_add(shift).wrapping_mul(2654435761) % 600) as usize;
     let mut v = Vec::with_capacity(len);
     while v.len() < len {
         v.extend_from_slice(&i.to_be_bytes());

@@ -52,7 +52,10 @@ jobs:
             echo "== $lock"
             cargo audit --file "$lock"
           done
+      # The runs of a failed check (its scripts are killed and quiet by then); an upload error
+      # does not hide the failure that made the job red.
       - if: failure()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: nightly-runs

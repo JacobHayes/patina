@@ -14,8 +14,9 @@ arch=MACHINE` (defaults: tier=area, budget 120 s, slots 1, every architecture; s
 it runs at once; arch = the only `uname -m` it runs on, the others skip it and count it). Scripts run in
 parallel, at most CHECK_SLOTS sandboxes at once (default half the CPUs, at least 8), longest
 budget first. Each gets a
-private RUNS directory; a script still running at its budget is killed and fails, as does one
-that leaves a process behind (tests/leftovers.py on its RUNS). Passing scripts' run
+private RUNS directory; a script still running at its budget is killed with its whole session
+and fails, as does one that leaves a process behind (tests/leftovers.py on its RUNS; those are
+killed too, so a failed script's directory is quiet when it is kept or uploaded). Passing scripts' run
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
 The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s, nightly
@@ -73,6 +74,31 @@ def select(args, allsc):
     return "area", [s for s in allsc if s["area"] in areas and s["tier"] in ("quick", "area")]
 
 
+def kill_session(sid):
+    """SIGKILL every process of session SID (a script runs in its own session; a process
+    group is not enough: `timeout` and other job-control tools move to their own group) until
+    none is left."""
+    for _ in range(100):
+        pids = []
+        for name in os.listdir("/proc"):
+            if name.isdigit():
+                try:
+                    with open(f"/proc/{name}/stat") as f:
+                        st = f.read().rsplit(")", 1)[1].split()
+                    if st[0] != "Z" and int(st[3]) == sid:
+                        pids.append(int(name))
+                except (OSError, IndexError, ValueError):
+                    pass
+        if not pids:
+            return
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        time.sleep(0.05)
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -122,7 +148,7 @@ def main():
                 rc = p.wait(timeout=s["budget"])
                 why = "" if rc == 0 else f"exit {rc}"
             except subprocess.TimeoutExpired:
-                os.killpg(p.pid, signal.SIGKILL)
+                kill_session(p.pid)
                 p.wait()
                 why = f"over budget ({s['budget']} s), killed"
         dt = time.monotonic() - t0
@@ -137,6 +163,19 @@ def main():
             time.sleep(0.1)
         if left:
             why = (why + "; " if why else "") + "processes left: " + left.splitlines()[0]
+            # Kill them, so the run directory is quiet when it is kept or uploaded.
+            for _ in range(50):
+                for line in left.splitlines():
+                    try:
+                        os.kill(int(line.split()[0]), signal.SIGKILL)
+                    except (OSError, ValueError):
+                        pass
+                time.sleep(0.1)
+                r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "leftovers.py"), runs],
+                                   stdout=subprocess.PIPE, text=True)
+                left = r.stdout.strip()
+                if not left:
+                    break
         ok = not why
         if ok and not keep:
             subprocess.run(["rm", "-rf", runs])

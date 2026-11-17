@@ -1007,11 +1007,16 @@ make building the post-crash tree from the base's log worth a second way to prod
 children repeating a tree are over half in two seeds, but F2's two hits (points 1,721 and
 1,724) share one tree, so skipping repeats would have dropped a finding.
 
-`tests/storage/12-f2.sh` (nightly) is the standing check: `--seeds 1..2 --branch --crash
-machine --buggify --env FJ_N=2000 --env FJ_WIPE_PARTIAL=1 --max-findings 2` must hold F2's
-group. On this host it found F2 (seed 1, point 1,721) after 3,444 of 28,001 points, in
-82 s; with `FJ_N=500` every one of the 7,908 points ran and only F6 was found, so the check
-fails (288 s).
+`tests/storage/12-f2.sh` (nightly, both architectures) is the standing check, on a journal
+laid out so the window comes early: `FJ_VAL_SHIFT=289` shifts the harness's value lengths so
+that batch 5 straddles the first 4 KiB block boundary between an item's `value_len` and its
+`on_disk_value_len` (at the default layout the first such batch is about 800, which on the
+4-core runners put seed 1's window at point 3,005 (x86_64) and 3,010 (arm64): 349 and 426 s
+for that seed alone). `--seeds 1..3 --branch --crash machine --buggify --env FJ_N=100 --env
+FJ_VAL_SHIFT=289 --max-findings 1 -j 4` must hold F2's group. 2026-11-17: on this host, four
+CPUs (`taskset -c 0-3`), F2 at seed 1, point 241, after 724 of 2,615 points, 16 s; on the
+runners 727 points, 33 s (x86_64) and 35 s (arm64). With `FJ_N=5` (the journal ends before
+batch 5) all 1,053 points ran and nothing was found, so the check fails (23 s).
 
 ## Acceptance: Cairn and briefing
 
@@ -1197,7 +1202,7 @@ three, each fixed or explained:
 | fjall F3, seeds 1-100 | 3 `liveness` (2) |
 | fjall F4, `fsync-error-at=50..80` x seeds 1-10 | first confirmed cell `fsync-error-at=63` seed 7 (x86_64: 67, seed 4) |
 | fjall F5, seeds 1-10 | 3 of 10 |
-| fjall F2, `storage/12-f2` (`sweep --branch`, seeds 1-2, until two groups) | 3 of 14,007 crash points tried hit the journal-entry assertion (first seed 1, point 3,010), 2 the batch-atomicity violation (seed 2); 48 min on the runner, over the nightly's 400 s budget, so `12-f2` stays x86_64 only |
+| fjall F2, `storage/12-f2` (`sweep --branch`, seeds 1-3, early journal layout) | found at seed 1 after 727 crash points, 35 s (x86_64: 33 s); "Crash-point enumeration" |
 | `testbeds/pubsub` nightly (`nightly/01-pubsub`), 200 seeds | clean: no finding; lost-wakeup 200, drop-read-remainder 199, stale-timeout 165 of 200 |
 
 **Not run on arm64**: the evidence scripts still marked `arch=x86_64` (the determinism matrix
