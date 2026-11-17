@@ -73,5 +73,7 @@ find it, never retry it.
   in the same change.
 - **The core is guest-agnostic.** No program-specific names or branches in `crates/`.
 - **New surface needs a program that needs it**: the stop it hit and a small reproducer.
-  Outside that, the answer is a clear refusal.
+  Outside that, the answer is a clear refusal. A system call's pointer arguments are
+  described in its table row (`ins`, `outs`, `refs`): the runtime refuses those that point
+  into its own region.
 - Shell scripts fail loudly and never pass vacuously. Quote durations only when measured.

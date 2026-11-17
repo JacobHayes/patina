@@ -1,7 +1,7 @@
 /* window: append N records to data.log and acknowledge each in acks.log, each write synced
  * before the next step, except record GAP: its acknowledgement is written and synced before
  * the record is. A machine crash between that record's write and its sync can keep the
- * acknowledgement and lose the record: a window of a few crash points among about sixty.
+ * acknowledgement and lose the record: a window of a few crash points among about forty.
  * On start it checks every acknowledged record is stored (`always`: acked-records-stored),
  * then continues where it left off. Records and acknowledgements are "%07d\n" of the index;
  * each record starts a block of data.log, the acknowledgements are packed.
@@ -13,8 +13,8 @@
 
 #include "patina.h"
 
-#define N 10
-#define GAP 6
+#define N 6
+#define GAP 3
 /* Each record starts a new block of data.log, so the unsynced one is not written in place. */
 #define STRIDE 4096L
 

@@ -321,6 +321,12 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
             ))
         },
     });
+    let (name, result) = crate::host::spin_probes(&facts);
+    checks.push(Check {
+        name,
+        required: false,
+        result,
+    });
     checks.push(Check {
         name: "branch counters (pmu, optional)",
         required: false,

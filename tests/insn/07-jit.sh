@@ -4,7 +4,9 @@
 # run, and an RNDR there runs natively: SIGILL on a host without it). The same code in a file,
 # mapped executable (mmap hook) or made executable later (mprotect hook), is patched (x86: the
 # rdrand's value is the seed's; arm64: its yield is a pause point, its RNDR answered from the
-# seed); mapped shared, not patched (it would write into the file) and labelled.
+# seed); mapped shared, not patched (it would write into the file) and labelled. Mapped from the
+# file, run, then its page discarded (MADV_DONTNEED drops the patched private copy) and run
+# again: patched both times.
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-jit
@@ -19,7 +21,7 @@ d=$(for i in 1 2 3; do cat "$o/r$i/inc-0/stdout"; done | sort -u | wc -l)
 if [ "$ARCH" = x86_64 ]; then
     [ "$d" -ge 2 ] || die "the unscanned rdrand gave the same value in 3 runs"
     echo "the labelled gap: $d distinct values in 3 runs of seed 1"
-    modes="file-mmap file-mprotect file-shared"
+    modes="file-mmap file-mprotect file-shared file-dontneed"
 else
     [ "$d" = 1 ] || die "the counter read in anonymous code gave $d values in 3 runs"
     echo "anonymous code: its counter read is trapped (one value in 3 runs)"
@@ -31,7 +33,7 @@ else
         [ "$(field "$f" outcome)/$(field "$f" guest.signal)" = crash/4 ] || die "anon-rndr on a host without RNDR: $(field "$f" outcome) $(field "$f" message)"
     fi
     echo "anonymous RNDR: unpatched, $(field "$f" outcome) $(field "$f" message), labelled"
-    modes="file-mmap file-mprotect file-shared file-mmap:rndr file-mprotect:rndr"
+    modes="file-mmap file-mprotect file-shared file-mmap:rndr file-mprotect:rndr file-dontneed:rndr"
 fi
 for m in $modes; do
     for i in 1 2; do
@@ -44,6 +46,8 @@ for m in $modes; do
     u=$(field "$f" labels.unscanned_exec_mappings)
     case $ARCH/$m in
         x86_64/file-shared) [ "$u" -ge 1 ] && [ "$(field "$f" counters.insn.patched_sites.rdrand)" = 0 ] || die "$m: not labelled" ;;
+        x86_64/file-dontneed) [ "$(field "$f" counters.insn.emulated.rdrand)" = 2 ] && [ "$u" = 0 ] || die "$m: not patched again" ;;
+        */file-dontneed:rndr) [ "$(field "$f" counters.insn.emulated.rndr)" = 2 ] && [ "$u" = 0 ] || die "$m: not patched again" ;;
         x86_64/*) [ "$(field "$f" counters.insn.emulated.rdrand)" = 1 ] && [ "$u" = 0 ] || die "$m: not patched" ;;
         */file-shared) [ "$u" -ge 1 ] && [ "$(field "$f" sched.pause_points)" = 0 ] || die "$m: not labelled" ;;
         */*:rndr) [ "$(field "$f" counters.insn.emulated.rndr)" = 1 ] && [ "$u" = 0 ] || die "$m: not patched" ;;

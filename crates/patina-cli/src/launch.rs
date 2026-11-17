@@ -594,8 +594,13 @@ pub fn run_incarnation(
     }
     let pmu_ev = pmu_event(o)?;
     // Counter preemption stops a spinning thread itself.
+    // Where the host cannot make spin probes work they are off (`host::spin_probes`).
     if c.spin_probes && pmu_ev.is_none() {
-        cfg.sched |= proto::ctl::SCHED_SPIN_PROBE;
+        cfg.sched |= if crate::host::spin_ok() {
+            proto::ctl::SCHED_SPIN_PROBE
+        } else {
+            proto::ctl::SCHED_SPIN_HOST_OFF
+        };
     }
     if pmu_ev.is_some() {
         cfg.pmu = proto::ctl::PMU_ON;

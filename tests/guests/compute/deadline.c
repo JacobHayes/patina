@@ -2,7 +2,8 @@
  *   deadline [MS]   arms ITIMER_REAL for MS ms (default 50) and computes until its handler sets
  *                   a flag; prints the virtual ns from before the arming to the handler and to
  *                   the loop's end, and exits 0 if the loop ran MS to MS*1.2 ms, else 1
- *   endless         computes forever (only --time-limit or --timeout ends it)
+ *   endless [MS]    sleeps MS ms (default 0), then computes forever (only --time-limit or
+ *                   --timeout ends it)
  *   cpu N           N iterations, then prints the thread's and the process's CPU time (each
  *                   iteration is at least one event, so under Patina each is at least N ns)
  * The stock engine cannot end `deadline` except by compute-stall or --timeout: its clock does
@@ -34,6 +35,9 @@ int main(int argc, char **argv)
 	for (int i = 0; i < 256; i++) table[i] = i + argc; /* not a constant the compiler can fold */
 	long s = 0, i = 0;
 	if (!strcmp(argv[1], "endless")) {
+		long ms = argc > 2 ? atol(argv[2]) : 0;
+		struct timespec z = {ms / 1000, (ms % 1000) * 1000000L};
+		nanosleep(&z, NULL);
 		for (;;) s += table[i++ & 255], sink = s;
 	}
 	if (!strcmp(argv[1], "cpu") && argc > 2) {

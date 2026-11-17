@@ -152,6 +152,8 @@ static OWNER: AtomicI32 = AtomicI32::new(0);
 static MEM: AtomicI32 = AtomicI32::new(-1);
 static PAGEMAP: AtomicI32 = AtomicI32::new(-1);
 static TRACK: AtomicI32 = AtomicI32::new(-1);
+/// `/proc/self/maps`, for `PROCMAP_QUERY` (`vma`).
+static MAPS: AtomicI32 = AtomicI32::new(-1);
 
 pub(crate) fn open_hidden(path: &[u8], flags: u64) -> i32 {
     const F_DUPFD_CLOEXEC: u64 = 1030;
@@ -172,13 +174,14 @@ pub(crate) fn open_hidden(path: &[u8], flags: u64) -> i32 {
     h as i32
 }
 
-/// Make the scratch and descriptors ready for this process. False if they cannot be.
+/// Make the scratch and descriptors ready for this process. False if they cannot be (the
+/// host's refusal is noted).
 fn resources() -> bool {
     let pid = unsafe { sc0(nr::GETPID) } as i32;
     if OWNER.load(Relaxed) == pid {
         return true;
     }
-    for d in [&MEM, &PAGEMAP, &TRACK] {
+    for d in [&MEM, &PAGEMAP, &TRACK, &MAPS] {
         let fd = d.swap(-1, Relaxed);
         if fd >= 0 {
             unsafe { sc1(nr::CLOSE, fd as u64) };
@@ -201,15 +204,149 @@ fn resources() -> bool {
     }
     let mem = open_hidden(b"/proc/self/mem\0", 2);
     let pm = open_hidden(b"/proc/self/pagemap\0", 0);
+    let maps = open_hidden(b"/proc/self/maps\0", 0);
     let cl = st::track_open(open_hidden);
     MEM.store(mem, Relaxed);
     PAGEMAP.store(pm, Relaxed);
-    TRACK.store(cl, Relaxed);
-    if mem < 0 || pm < 0 || cl < 0 {
+    MAPS.store(maps, Relaxed);
+    TRACK.store(cl.unwrap_or(-1), Relaxed);
+    if mem < 0 || pm < 0 || maps < 0 || cl.is_none() {
+        note_host(proto::ctl::SPIN_HOST_MEM, 0);
         return false;
     }
     OWNER.store(pid, Relaxed);
     true
+}
+
+/// The host refused something a probe needs (`proto::ctl::SPIN_HOST_*`): the first one is
+/// kept for a `compute-stall` message. Never seen by the program or the log.
+pub(crate) fn note_host(what: u64, errno: i64) {
+    let _ = ctl().sched.spin_host.compare_exchange(
+        0,
+        what << 32 | (errno as u64 & 0xffff_ffff),
+        Relaxed,
+        Relaxed,
+    );
+}
+
+/// `struct procmap_query` (Linux 6.11).
+#[repr(C)]
+#[derive(Default)]
+pub(crate) struct ProcmapQuery {
+    size: u64,
+    query_flags: u64,
+    query_addr: u64,
+    pub vma_start: u64,
+    pub vma_end: u64,
+    pub vma_flags: u64,
+    vma_page_size: u64,
+    vma_offset: u64,
+    inode: u64,
+    dev_major: u32,
+    dev_minor: u32,
+    vma_name_size: u32,
+    build_id_size: u32,
+    vma_name_addr: u64,
+    build_id_addr: u64,
+}
+
+/// `ProcmapQuery::vma_flags`.
+pub(crate) const VMA_WRITE: u64 = 2;
+pub(crate) const VMA_EXEC: u64 = 4;
+pub(crate) const VMA_SHARED: u64 = 8;
+
+/// The mapping that holds `a` (or, with `next`, the first one at or above it). A kernel
+/// before 6.11 has no `PROCMAP_QUERY`: the covering mapping is read from the text of
+/// `/proc/self/maps` (x86_64; arm64 needs 6.12).
+pub(crate) fn vma(a: u64, next: bool) -> Option<ProcmapQuery> {
+    const PROCMAP_QUERY: u64 = 0xc068_6611;
+    const COVERING_OR_NEXT_VMA: u64 = 0x10;
+    let mut q = ProcmapQuery {
+        size: core::mem::size_of::<ProcmapQuery>() as u64,
+        query_flags: if next { COVERING_OR_NEXT_VMA } else { 0 },
+        query_addr: a,
+        ..Default::default()
+    };
+    let fd = MAPS.load(Relaxed) as u64;
+    let r = unsafe {
+        sc3(
+            nr::IOCTL,
+            fd,
+            PROCMAP_QUERY,
+            &mut q as *mut ProcmapQuery as u64,
+        )
+    };
+    if r == -e::ENOTTY && !next {
+        return vma_text(fd, a);
+    }
+    (r == 0).then_some(q)
+}
+
+/// The mapping that holds `a`, from the text of `/proc/self/maps` (`start-end perms ...`).
+fn vma_text(fd: u64, a: u64) -> Option<ProcmapQuery> {
+    let mut buf = [0u8; 4096];
+    let mut off = 0u64;
+    loop {
+        let n = unsafe {
+            sc4(
+                nr::PREAD64,
+                fd,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+                off,
+            )
+        };
+        if n <= 0 {
+            return None;
+        }
+        let b = &buf[..n as usize];
+        // Whole lines only; the last partial one is read again.
+        let end = b.iter().rposition(|&c| c == b'\n')? + 1;
+        for line in b[..end].split(|&c| c == b'\n') {
+            let mut f = line.split(|&c| c == b' ');
+            let (Some(range), Some(perms)) = (f.next(), f.next()) else {
+                continue;
+            };
+            let Some(dash) = range.iter().position(|&c| c == b'-') else {
+                continue;
+            };
+            let (lo, hi) = (hex(&range[..dash]), hex(&range[dash + 1..]));
+            if a < lo || a >= hi || perms.len() < 4 {
+                continue;
+            }
+            let bit = |i: usize, c: u8, v: u64| if perms[i] == c { v } else { 0 };
+            return Some(ProcmapQuery {
+                vma_start: lo,
+                vma_end: hi,
+                vma_flags: bit(0, b'r', 1)
+                    | bit(1, b'w', VMA_WRITE)
+                    | bit(2, b'x', VMA_EXEC)
+                    | bit(3, b's', VMA_SHARED),
+                ..Default::default()
+            });
+        }
+        off += end as u64;
+    }
+}
+
+fn hex(s: &[u8]) -> u64 {
+    s.iter()
+        .map_while(|&c| (c as char).to_digit(16))
+        .fold(0, |v, d| v * 16 + d as u64)
+}
+
+/// Whether a breakpoint may be planted at `a`: in a private, executable, non-writable mapping
+/// outside the runtime's region. Never a shared one, whose other views and processes would see
+/// it; never a writable one, where a store of the program's to the planted word (a JIT patching
+/// its code) would be undone when the original word goes back.
+pub(crate) fn plantable(a: u64) -> bool {
+    if in_runtime(a) {
+        return false;
+    }
+    match vma(a, false) {
+        Some(q) => q.vma_flags & (VMA_WRITE | VMA_EXEC | VMA_SHARED) == VMA_EXEC,
+        None => false,
+    }
 }
 
 fn trace() -> &'static mut [u64] {
@@ -230,6 +367,9 @@ pub(crate) fn poke(a: u64, w: Word) -> bool {
             a,
         )
     };
+    if r < 0 {
+        note_host(proto::ctl::SPIN_HOST_POKE, -r);
+    }
     r == WORD as i64
 }
 
@@ -481,7 +621,11 @@ fn abort(ts: &mut ThreadState, frame: &mut Frame) {
 fn start(ts: &mut ThreadState, frame: &mut Frame) {
     let c = ctl();
     bump(&c.sched.spin_probes, 1);
-    if !resources() || !st::track_begin(PAGEMAP.load(Relaxed)) {
+    if !resources() {
+        return;
+    }
+    if !st::track_begin(PAGEMAP.load(Relaxed)) {
+        note_host(proto::ctl::SPIN_HOST_TRACK, 0);
         return;
     }
     let s = &mut ts.spin;
@@ -631,6 +775,7 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
     let copies = SCRATCH + COPY_OFF;
     let regs = st::state_words(frame);
     let Some(fp) = st::fp_state(frame, FP_MAX) else {
+        note_host(proto::ctl::SPIN_HOST_EXTRA, 0);
         return abort(ts, frame);
     };
     let s = &mut ts.spin;
@@ -686,6 +831,7 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
     s.fp_len = fp.len() as u64;
     s.checks += 1;
     if !clear_dirty() {
+        note_host(proto::ctl::SPIN_HOST_TRACK, 0);
         abort(ts, frame);
     }
 }

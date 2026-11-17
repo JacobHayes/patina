@@ -6,8 +6,8 @@
 #   sync (from a base run's operation log); its rerun line gives the same signature; it replayed
 #   identical. It ran one child per crash point of the base.
 # - Cut by --max-findings 1, the report says fewer points were tried than exist; the same
-#   command without it runs only the missing children, and the report's groups and counts then
-#   equal the uncut sweep's.
+#   command without it runs only the missing children, and the report's outcomes and groups
+#   then count every run in the directory, the cut sweep's and the resumed one's.
 # - With two seeds and two cases, the children are each base's crash points, per base.
 # - --branch without --crash, or with a rate, is refused and runs nothing; a plain sweep and a
 #   branch sweep into one directory replace each other.
@@ -42,10 +42,16 @@ timeout 60 "$PATINA" run --seed $s --crash machine:0 --out "$d/base" --mount "$P
 set -- $(window "$d/base")
 [ $# = 2 ] || die "the base acknowledges no record before its sync"
 lo=$1 hi=$2
+# Cut, then resumed: the resumed sweep is the whole one.
+sw full --seeds $s --branch --crash machine --max-findings 1 -- $W
+grep -q '^crash points: [0-9]* of [0-9]* tried' "$d/full.txt" || die "cut: $(cat "$d/full.txt")"
+tried=$(field "$d/full/report.json" branch.tried) all=$(field "$d/full/report.json" branch.points)
+[ "$tried" -lt "$all" ] || die "--max-findings 1 tried $tried of $all"
 sw full --seeds $s --branch --crash machine -- $W
 [ "$st" = 1 ] || die "branch sweep of seed $s: exit $st ($(tail -3 "$d/full.txt"))"
+grep -q "^sweep: $tried of $all children already in" "$d/full.txt" || die "resume: $(head -3 "$d/full.txt")"
 rerun=$(python3 -I - "$d" "$s" "$lo" "$hi" <<'PY'
-import json, os, sys
+import collections, glob, json, os, sys
 d, s, lo, hi = sys.argv[1], *map(int, sys.argv[2:])
 rep = json.load(open(os.path.join(d, "full", "report.json")))
 n = json.load(open(os.path.join(d, "base", "result.json")))["faults"]["counts"]["crash"]["eligible"]
@@ -61,6 +67,14 @@ if (g["replay"] or {}).get("result") != "identical":
 b = rep["branch"]
 if rep["runs"] != n + 1 or b["points"] != n or b["tried"] != n:
     sys.exit("FAIL: %d runs, branch %s; the base counted %d" % (rep["runs"], b, n))
+# The report counts every run in the directory, before and after the resume.
+runs = [json.load(open(f)) for f in glob.glob(os.path.join(d, "full", "seed-*", "result.json"))]
+outcomes = collections.Counter(r["outcome"] for r in runs)
+pts = sorted(int(f.split("@")[1].split("/")[0]) for f in glob.glob(os.path.join(d, "full", "seed-*@*", "result.json"))
+             if "acked-records-stored" in (json.load(open(f)).get("signature") or ""))
+if len(runs) != n + 1 or dict(outcomes) != rep["outcomes"] or g["count"] != len(pts) or p != pts[0]:
+    sys.exit("FAIL: the report says %s, group %d first %s; the directory holds %d runs, %s, acked-records-stored at %s"
+             % (rep["outcomes"], g["count"], p, len(runs), dict(outcomes), pts))
 print(g["rerun"])
 print("window: first run seed %d@%d in points %d..%d of %d; %d runs, replayed identical" % (s, p, lo, hi, n, rep["runs"]), file=sys.stderr)
 PY
@@ -69,23 +83,7 @@ sh -c "$(echo "$rerun" | sed "s|^patina run |'$PATINA' run --out '$d/rerun' |")"
 sig() { field "$1" signature; }
 [ "$(sig "$d/rerun/result.json")" = "$(field "$d/full/report.json" groups | python3 -I -c 'import json,sys; print([g for g in json.load(sys.stdin) if "acked" in g["signature"]][0]["signature"])')" ] ||
     die "rerun: $(sig "$d/rerun/result.json")"
-echo "rerun gives the same signature: $rerun"
-
-# Cut and resume.
-sw cut --seeds $s --branch --crash machine --max-findings 1 -- $W
-grep -q '^crash points: [0-9]* of [0-9]* tried' "$d/cut.txt" || die "cut: $(cat "$d/cut.txt")"
-tried=$(field "$d/cut/report.json" branch.tried) all=$(field "$d/cut/report.json" branch.points)
-[ "$tried" -lt "$all" ] || die "--max-findings 1 tried $tried of $all"
-sw cut --seeds $s --branch --crash machine -- $W
-grep -q "^sweep: $tried of $all children already in" "$d/cut.txt" || die "resume: $(head -3 "$d/cut.txt")"
-python3 -I - "$d/full/report.json" "$d/cut/report.json" <<'PY' || exit 1
-import json, sys
-a, b = (json.load(open(f)) for f in sys.argv[1:])
-key = lambda r: (r["runs"], r["outcomes"], r["branch"], [(g["signature"], g["count"], g["first"]["seed"], g["first"]["point"]) for g in r["groups"]])
-if key(a) != key(b):
-    sys.exit("FAIL: resumed %s, uncut %s" % (key(b), key(a)))
-PY
-echo "cut at $tried of $all points; resumed, the report equals the uncut sweep's"
+echo "cut at $tried of $all points; resumed, the report counts every run; rerun gives the same signature: $rerun"
 
 # Two seeds, two cases: one base per pair, one child per point of each.
 printf '/guest/hello-static\n/guest/hello-static x\n' >"$d/lines"

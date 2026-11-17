@@ -83,10 +83,10 @@ pub fn at_point(code: i32, frame: &mut Frame, point: u64) -> bool {
     false
 }
 
-/// Whether a breakpoint may be planted at `a` (executable code of this process only).
+/// Whether a breakpoint may be planted at `a` (`spin::plantable`).
 #[inline(always)]
-pub fn plantable(_a: u64) -> bool {
-    true
+pub fn plantable(a: u64) -> bool {
+    crate::spin::plantable(a)
 }
 
 /// The state compared at a fixed point, and hashed in the yield's record: the general
@@ -133,8 +133,9 @@ pub fn fp_equal(a: &[u8], b: &[u8]) -> bool {
 const USER_TOP: u64 = 0x7fff_ffff_f000;
 
 /// Open what tracking needs (at the process's first probe): `/proc/self/clear_refs`.
-pub fn track_open(open: impl Fn(&[u8], u64) -> i32) -> i32 {
-    open(b"/proc/self/clear_refs\0", 1)
+pub fn track_open(open: impl Fn(&[u8], u64) -> i32) -> Option<i32> {
+    let fd = open(b"/proc/self/clear_refs\0", 1);
+    (fd >= 0).then_some(fd)
 }
 
 /// Times a probe may start its trace again where the path left its cycle: none (a probe

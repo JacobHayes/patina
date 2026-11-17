@@ -15,6 +15,11 @@
  *                      call between: two spin points in a row); then main runs the same two
  *                      loops itself with both flags set (no planted breakpoint may be left in
  *                      the first). Prints "twice done"
+ *   spinpoints jit     JIT-style code: a second thread runs a branch to itself in anonymous
+ *                      writable, executable memory; once it spins, main signals it, and
+ *                      the handler (on the spinning thread) patches the branch into a no-op,
+ *                      so the code returns. A breakpoint planted there and restored after the
+ *                      handler would undo the patch. Prints "jit patched"
  *   spinpoints alone MS  one thread computes for about MS ms (no other thread): not a stall
  *   spinpoints wander MS  the same along a path that never repeats (each pass calls one of two
  *                      functions, picked by a pseudo-random bit): every probe gives up at its
@@ -25,6 +30,8 @@
 #include <link.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
+#include <sys/mman.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -106,6 +113,48 @@ static uint64_t text_sum(void)
 	return s;
 }
 
+static unsigned char *jit;
+
+/* The code: a branch to itself, then a return. */
+#if defined(__x86_64__)
+static const unsigned char jit_code[] = {0xeb, 0xfe, 0xc3};      /* jmp .; ret */
+static const unsigned char jit_nop[] = {0x66, 0x90};             /* xchg ax, ax */
+#else
+static const uint32_t jit_code[] = {0x14000000u, 0xd65f03c0u};    /* b .; ret */
+static const uint32_t jit_nop[] = {0xd503201fu};                 /* nop */
+#endif
+
+static void jit_patch(int sig)
+{
+	(void)sig;
+	memcpy(jit, jit_nop, sizeof jit_nop);
+	__builtin___clear_cache((char *)jit, (char *)jit + sizeof jit_code);
+}
+
+static void *jit_run(void *a)
+{
+	(void)a;
+	started = 1;
+	((void (*)(void))jit)();
+	return NULL;
+}
+
+static int jit_main(void)
+{
+	jit = mmap(NULL, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+	if (jit == MAP_FAILED) return 3;
+	memcpy(jit, jit_code, sizeof jit_code);
+	__builtin___clear_cache((char *)jit, (char *)jit + sizeof jit_code);
+	signal(SIGUSR1, jit_patch);
+	pthread_t t;
+	pthread_create(&t, NULL, jit_run, NULL);
+	while (!started) sched_yield();
+	pthread_kill(t, SIGUSR1);
+	pthread_join(t, NULL);
+	printf("jit patched\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2) return 2;
@@ -147,6 +196,7 @@ int main(int argc, char **argv)
 		printf("twice done\n");
 		return 0;
 	}
+	if (!strcmp(argv[1], "jit")) return jit_main();
 	if (!strcmp(argv[1], "count")) mode = 1;
 	else if (!strcmp(argv[1], "memcount")) mode = 2;
 	else if (strcmp(argv[1], "flag")) return 2;

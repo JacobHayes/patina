@@ -160,6 +160,35 @@ fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
     )
 }
 
+/// Why spin probes could not help, when the host or the thread's state is the reason: the
+/// launcher turned them off (`patina doctor`'s "spin probes" says why), or a probe met a
+/// refusal.
+pub fn spin_host(ctl: &proto::ctl::Ctl) -> String {
+    if ctl.config.sched & proto::ctl::SCHED_SPIN_HOST_OFF != 0 {
+        return " Spin probes are off: this host cannot make them work (`patina doctor` says why)."
+            .into();
+    }
+    let v = ctl
+        .sched
+        .spin_host
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let Some(t) = proto::ctl::spin_host_text(v) else {
+        return String::new();
+    };
+    let errno = v & 0xffff_ffff;
+    let errno = if errno != 0 {
+        format!(" (errno {errno})")
+    } else {
+        String::new()
+    };
+    let doctor = if v >> 32 == proto::ctl::SPIN_HOST_EXTRA {
+        ""
+    } else {
+        " (`patina doctor`)"
+    };
+    format!(" A spin probe could not run: {t}{errno}{doctor}.")
+}
+
 /// The other way out where branch counters exist (x86_64 only).
 #[cfg(target_arch = "x86_64")]
 const BRANCHES: &str =

@@ -727,7 +727,12 @@ impl Sup {
                     }) {
                         stall::Poll::Quiet => {}
                         stall::Poll::Probe { tid, pid } => stall::probe(pid, tid),
-                        stall::Poll::End(v) => self.finish(v),
+                        stall::Poll::End(mut v) => {
+                            if v.class == "stall" {
+                                v.detail += &stall::spin_host(self.ctl);
+                            }
+                            self.finish(v)
+                        }
                     }
                     continue;
                 }

@@ -7,7 +7,8 @@
 //! SIGILL with the instruction pointer at the first prefix); on arm64 `udf #0x7061` over the
 //! whole word. The table is per process (runtime memory: copied by fork, fresh after execve).
 //! Unmapping or replacing a range drops its entries; `mremap` moves them; `mprotect` updates
-//! the protection they record.
+//! the protection they record; discarding the pages (`MADV_DONTNEED`) scans them again
+//! (`repatch`).
 
 use crate::raw::*;
 use core::cell::UnsafeCell;
@@ -95,6 +96,38 @@ fn insert(addr: u64, orig: [u8; 4], kind: u8, prot: u8) -> bool {
     true
 }
 
+/// The pages of `[a, a + len)` were discarded (`MADV_DONTNEED`): a private copy that held
+/// patches is gone and the file's bytes are back. Every site there (and one starting just
+/// before, whose patch reaches in) that reads its original bytes again is patched again, with
+/// the protection it recorded (`PROT_BTI` included).
+pub fn repatch(a: u64, len: u64) {
+    let t = table();
+    if t.n == 0 {
+        return;
+    }
+    let n = crate::arch::insn::PATCH.len();
+    let (i, j) = (
+        lower(t, a.saturating_sub(n as u64 - 1)),
+        lower(t, page_end(a, len)),
+    );
+    for k in i..j {
+        let e = t.e[k];
+        let prot = e.prot as u64;
+        let (lo, hi) = (e.addr & !(PAGE - 1), page_end(e.addr, n as u64));
+        // Execute-only code is made readable for the comparison.
+        let unreadable = prot & PROT_READ == 0;
+        if unreadable {
+            unsafe { sc3(nr::MPROTECT, lo, hi - lo, prot | PROT_READ) };
+        }
+        let now = unsafe { core::slice::from_raw_parts(e.addr as *const u8, n) };
+        if now == &e.orig[..n] {
+            write(e.addr, false, prot);
+        } else if unreadable {
+            unsafe { sc3(nr::MPROTECT, lo, hi - lo, prot) };
+        }
+    }
+}
+
 /// Drop every entry in `[a, a + len)` (the range was unmapped or replaced).
 pub fn forget(a: u64, len: u64) {
     let t = table();
@@ -146,7 +179,6 @@ fn page_end(a: u64, len: u64) -> u64 {
 /// private copy of the page. Returns false if the table is full.
 pub fn patch(op: u64, kind: u8, writable: bool, prot: u64) -> bool {
     let bytes = crate::arch::insn::PATCH;
-    let n = bytes.len() as u64;
     let mut orig = [0u8; 4];
     for (k, o) in orig.iter_mut().enumerate().take(bytes.len()) {
         *o = unsafe { *((op + k as u64) as *const u8) };
@@ -154,6 +186,14 @@ pub fn patch(op: u64, kind: u8, writable: bool, prot: u64) -> bool {
     if !insert(op, orig, kind, prot as u8) {
         return false;
     }
+    write(op, writable, prot);
+    true
+}
+
+/// Write the patch at `op`: `patch`'s write, with `prot` given back.
+fn write(op: u64, writable: bool, prot: u64) {
+    let bytes = crate::arch::insn::PATCH;
+    let n = bytes.len() as u64;
     let lo = op & !(PAGE - 1);
     let hi = (op + n + PAGE - 1) & !(PAGE - 1);
     if !writable {
@@ -172,5 +212,4 @@ pub fn patch(op: u64, kind: u8, writable: bool, prot: u64) -> bool {
             crate::sup::host_error(r, nr::MPROTECT, proto::ctl::HE_SYSCALL);
         }
     }
-    true
 }

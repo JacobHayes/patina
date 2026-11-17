@@ -18,6 +18,9 @@
 #  g. arm64: a spin lock on exclusive pairs (llsc-spin, ldaxr/stxr: test-and-set and
 #     compare-and-swap) is found and ends ok with the right count; a stop inside a pair would
 #     make its store fail every time.
+#  h. JIT-style code (spinpoints jit): a branch to itself in writable, executable memory,
+#     which the spinning thread's signal handler patches into a no-op: ok, the patch held (no
+#     breakpoint is planted in writable code, where restoring the old word would undo it).
 #@ tier=quick budget=30 slots=5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-spin
@@ -42,6 +45,7 @@ one text "$G" 1 "$on" -- /guest/spinpoints text 10 &
 wait
 arm64=$([ "$(uname -m)" = aarch64 ] && echo yes || true)
 one twice "$G" 1 "$on" -- /guest/spinpoints twice &
+one jit "$G" 1 "$on" --timeout 20 -- /guest/spinpoints jit &
 [ -z "$arm64" ] || for m in xchg cas; do one "llsc-$m" "$G" 1 "$on" -- /guest/llsc-spin "$m" & done
 wait
 res() { echo "$(field "$o/$1/result.json" outcome)/$(field "$o/$1/result.json" stop): $(field "$o/$1/result.json" message)"; }
@@ -78,6 +82,11 @@ echo "f. text unchanged after 10 rounds ($(field "$o/text/result.json" counters.
     die "f. two spin points in a row: $(res twice) $(cat "$o/twice/inc-0/stdout" 2>/dev/null)"
 [ "$(field "$o/twice/result.json" counters.sched.spin_found)" -ge 2 ] || die "f. twice: fewer than two spin points found"
 echo "f. two spin points in a row, then their code run again: ok"
+
+[ "$(field "$o/jit/result.json" outcome)" = ok ] && grep -qx 'jit patched' "$o/jit/inc-0/stdout" ||
+    die "h. JIT code patched by its handler: $(res jit) $(cat "$o/jit/inc-0/stdout" 2>/dev/null)"
+[ "$(field "$o/jit/result.json" counters.sched.spin_found)" -ge 1 ] || die "h. jit: ok without a found spin"
+echo "h. JIT code patched by its signal handler while it spins: ok"
 
 if [ "$arm64" ]; then
     for m in xchg cas; do

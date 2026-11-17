@@ -17,6 +17,7 @@ pub mod oplog;
 pub mod pmu;
 pub mod rec;
 pub mod sdk;
+pub mod sigrec;
 pub mod step;
 pub mod swap;
 pub mod table;

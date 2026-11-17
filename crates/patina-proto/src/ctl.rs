@@ -83,6 +83,28 @@ pub const SCHED_PAUSE_POINTS: u64 = 1;
 /// `Config::sched`: the supervisor may probe a thread that computes without a boundary event
 /// for a spin-wait whose iterations leave its state unchanged (`rt::spin`).
 pub const SCHED_SPIN_PROBE: u64 = 2;
+/// `Config::sched`: spin probes were asked for and this host cannot make them work
+/// (`patina doctor`'s "spin probes"): they are off, and a `compute-stall` says why.
+pub const SCHED_SPIN_HOST_OFF: u64 = 4;
+
+/// `SchedStats::spin_host`: what a probe found this host refusing, as `SPIN_HOST_* << 32 |
+/// errno` (the first one; 0: nothing).
+pub const SPIN_HOST_MEM: u64 = 1;
+pub const SPIN_HOST_TRACK: u64 = 2;
+pub const SPIN_HOST_POKE: u64 = 3;
+pub const SPIN_HOST_EXTRA: u64 = 4;
+
+/// What a `SchedStats::spin_host` value names, for a `compute-stall` message.
+pub fn spin_host_text(v: u64) -> Option<&'static str> {
+    Some(match v >> 32 {
+        0 => return None,
+        SPIN_HOST_MEM => "/proc/self/mem or /proc/self/pagemap could not be opened",
+        SPIN_HOST_TRACK => "written pages could not be tracked (soft-dirty bits on x86_64, userfaultfd write protection on arm64)",
+        SPIN_HOST_POKE => "the kernel refused a write to code through /proc/self/mem (proc_mem.force_override)",
+        SPIN_HOST_EXTRA => "the thread's register state is larger than a probe compares (arm64: SME's ZA storage in use; x86_64: an XSAVE area over 8 KiB)",
+        _ => "an unknown host refusal",
+    })
+}
 
 /// `Config::insn` (arm64): answer `RNDR`/`RNDRRS` from the seed and advertise them
 /// (`HWCAP2_RNG`) even on a host without them: the test of that path on such hosts
@@ -227,6 +249,8 @@ pub struct SchedStats {
     pub spin_yields: AtomicU64,
     /// Single steps taken by probes.
     pub spin_steps: AtomicU64,
+    /// What a probe found the host refusing (`SPIN_HOST_*`); not in the outcome's `sched`.
+    pub spin_host: AtomicU64,
 }
 pub const SCHED_FIELDS: usize = 5;
 pub const SCHED_NAMES: [&str; SCHED_FIELDS] = [
@@ -877,7 +901,7 @@ pub const HE_DISK_FULL: u64 = 12;
 
 /// A signal frame the runtime does not build: the trap frame (or, at `rt_sigreturn`, the
 /// program's frame) holds a context record outside those the runtime normalises (arm64:
-/// streaming SVE mode, the SME ZA array or ZT0 in use, FPMR, POE, GCS, an extra-context
+/// streaming SVE mode, the SME ZA array or ZT0 in use, GCS, an extra-context
 /// record, or a magic it does not know). args[0] = the record's magic. The run ends
 /// `unsupported`, stop `signal-context`.
 pub const HE_SIGNAL_CONTEXT: u64 = 14;
@@ -888,8 +912,6 @@ pub fn signal_context_name(magic: u64) -> &'static str {
         0x5356_4501 => "the SVE record in streaming mode",
         0x5436_6345 => "the SME ZA array in use",
         0x5a54_4e01 => "the SME2 ZT0 register",
-        0x4650_4d52 => "the FPMR register",
-        0x504f_4530 => "the POE overlay register",
         0x4743_5300 => "the guarded control stack",
         0x4558_5401 => "an extra-context record (a frame larger than 4096 bytes of records)",
         _ => "a record of unknown kind",

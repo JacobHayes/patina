@@ -188,22 +188,9 @@ pub fn at_point(code: i32, frame: &mut Frame, point: u64) -> bool {
     code == TRAP_BRKPT && frame.pc == point
 }
 
-/// Whether a breakpoint may be planted at `a`: in a private, executable, non-writable mapping
-/// (never a shared one, whose other views and processes would see it), outside the runtime's
-/// region.
+/// Whether a breakpoint may be planted at `a` (`spin::plantable`), a word-aligned address.
 pub fn plantable(a: u64) -> bool {
-    const WRITABLE: u64 = 2;
-    const EXECUTABLE: u64 = 4;
-    const SHARED: u64 = 8;
-    if (RT_BASE..RT_REGION_END).contains(&a) || a & 3 != 0 {
-        return false;
-    }
-    match vma(a, false) {
-        // Not writable either: a store of the program's to a planted word (a JIT patching
-        // its code) would be undone when the original word goes back.
-        Some(q) => q.vma_flags & (WRITABLE | EXECUTABLE | SHARED) == EXECUTABLE,
-        None => false,
-    }
+    a & 3 == 0 && crate::spin::plantable(a)
 }
 
 /// The state compared at a fixed point, and hashed in the yield's record.
@@ -274,62 +261,16 @@ pub fn fp_equal(a: &[u8], b: &[u8]) -> bool {
 // ---------------------------------------------------------------------------------------
 // Written memory: userfaultfd's asynchronous write protection.
 
-/// `struct procmap_query` (Linux 6.11).
-#[repr(C)]
-#[derive(Default)]
-struct ProcmapQuery {
-    size: u64,
-    query_flags: u64,
-    query_addr: u64,
-    vma_start: u64,
-    vma_end: u64,
-    vma_flags: u64,
-    vma_page_size: u64,
-    vma_offset: u64,
-    inode: u64,
-    dev_major: u32,
-    dev_minor: u32,
-    vma_name_size: u32,
-    build_id_size: u32,
-    vma_name_addr: u64,
-    build_id_addr: u64,
-}
-
-/// `/proc/self/maps`, for `PROCMAP_QUERY` (`spin.rs` opens it per process as the tracker's
-/// descriptor).
-static MAPS: AtomicI32 = AtomicI32::new(-1);
 /// The probe's userfaultfd, from its first checkpoint to its end.
 static UFFD: AtomicI32 = AtomicI32::new(-1);
 /// The end of the highest program mapping when the probe registered them.
 static TOP: AtomicU64 = AtomicU64::new(0);
 
-/// The mapping that holds `a` (or, with `next`, the first one at or above it).
-fn vma(a: u64, next: bool) -> Option<ProcmapQuery> {
-    const PROCMAP_QUERY: u64 = 0xc068_6611;
-    const COVERING_OR_NEXT_VMA: u64 = 0x10;
-    let mut q = ProcmapQuery {
-        size: core::mem::size_of::<ProcmapQuery>() as u64,
-        query_flags: if next { COVERING_OR_NEXT_VMA } else { 0 },
-        query_addr: a,
-        ..Default::default()
-    };
-    let r = unsafe {
-        sc3(
-            nr::IOCTL,
-            MAPS.load(Relaxed) as u64,
-            PROCMAP_QUERY,
-            &mut q as *mut ProcmapQuery as u64,
-        )
-    };
-    (r == 0).then_some(q)
-}
-
-/// Open what tracking needs (at the process's first probe): `/proc/self/maps`.
-pub fn track_open(open: impl Fn(&[u8], u64) -> i32) -> i32 {
-    let fd = open(b"/proc/self/maps\0", 0);
-    MAPS.store(fd, Relaxed);
+/// Open what tracking needs (at the process's first probe): nothing (the descriptor is made
+/// at each probe's start).
+pub fn track_open(_open: impl Fn(&[u8], u64) -> i32) -> Option<i32> {
     UFFD.store(-1, Relaxed);
-    fd
+    Some(-1)
 }
 
 /// Times a probe may start its trace again where the path left the cycle it was about to
@@ -378,7 +319,7 @@ fn register(pagemap: i32) -> bool {
     }
     let mut a = 0u64;
     let mut top = 0u64;
-    while let Some(q) = vma(a, true) {
+    while let Some(q) = crate::spin::vma(a, true) {
         a = q.vma_end;
         if q.vma_start >= RT_BASE && q.vma_end <= RT_REGION_END {
             continue;

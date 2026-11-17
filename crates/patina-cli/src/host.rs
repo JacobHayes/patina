@@ -33,6 +33,20 @@ pub struct Facts {
     pub hwcap2: u64,
     /// arm64: the SVE vector length in bytes programs start with (0: no SVE).
     pub sve_vl: u64,
+    /// What spin probes need (`spin_probes`): a write to read-only code through
+    /// `/proc/self/mem`, and written-page tracking (x86_64: soft-dirty bits; arm64:
+    /// userfaultfd's asynchronous write protection), each read by `PAGEMAP_SCAN`. `Err`: the
+    /// step that failed and why.
+    pub spin: Result<(), (SpinStep, String)>,
+}
+
+/// The part of spin probes' host support that failed (`Facts::spin`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SpinStep {
+    /// Writing code through `/proc/self/mem`.
+    ProcMem,
+    /// Written-page tracking.
+    Track,
 }
 
 /// The layout (`proto::layout`) ends below `STACK_TOP`: a 47-bit address space holds it.
@@ -45,8 +59,8 @@ const HWCAP_SVE: u64 = 1 << 22;
 const HWCAP_PACA: u64 = 1 << 30;
 const HWCAP_PACG: u64 = 1 << 31;
 const HWCAP2_SME: u64 = 1 << 23;
-/// Features whose records the kernel adds to every signal frame and the runtime does not
-/// build (each would end every run that takes a signal `signal-context`).
+/// Features whose one-register records the kernel adds to every signal frame
+/// (`proto::sigrec`).
 const HWCAP2_FRAME_RECORDS: [(u64, &str); 2] = [(1 << 48, "FPMR"), (1 << 63, "POE")];
 
 impl Facts {
@@ -107,6 +121,7 @@ impl Facts {
             } else {
                 0
             },
+            spin: spin_support().clone(),
         }
     }
 
@@ -166,6 +181,41 @@ pub fn checks(f: &Facts) -> Vec<Check> {
         ],
         _ => vec![],
     }
+}
+
+/// What works less well on this host without refusing it: spin probes (`doctor` prints it as
+/// `off`; the launcher turns them off and a `compute-stall` names the cause). Spin probes
+/// matter only to a program that waits by spinning on memory with no system call; refusing
+/// every run for them would refuse hosts (containers whose seccomp profile denies
+/// `userfaultfd`) where most programs run unchanged.
+pub fn spin_probes(f: &Facts) -> Check {
+    let r = match &f.spin {
+        Ok(()) => Ok(if f.arch == "aarch64" {
+            "code writes through /proc/self/mem; userfaultfd write protection tracks written pages"
+                .into()
+        } else {
+            "code writes through /proc/self/mem; soft-dirty bits track written pages".into()
+        }),
+        Err((SpinStep::ProcMem, e)) => Err((
+            format!("the kernel refuses writes to read-only code through /proc/self/mem: {e}"),
+            "boot with proc_mem.force_override=always (it is never or ptrace)".into(),
+        )),
+        Err((SpinStep::Track, e)) => Err((
+            if f.arch == "aarch64" {
+                format!("userfaultfd's asynchronous write protection (UFFD_USER_MODE_ONLY, Linux 6.7) does not work: {e}")
+            } else {
+                format!("soft-dirty page tracking (CONFIG_MEM_SOFT_DIRTY, PAGEMAP_SCAN of Linux 6.7) does not work: {e}")
+            },
+            if e.contains("Operation not permitted") {
+                crate::doctor::CONTAINER_FIX.into()
+            } else if f.arch == "aarch64" {
+                "a kernel with CONFIG_USERFAULTFD and CONFIG_PTE_MARKER_UFFD_WP".into()
+            } else {
+                "a kernel with CONFIG_MEM_SOFT_DIRTY".into()
+            },
+        )),
+    };
+    ("spin probes", r)
 }
 
 /// The first requirement this host fails, as the launcher's `error`.
@@ -286,20 +336,6 @@ fn one_model(f: &Facts) -> Result<String, (String, String)> {
 }
 
 fn signal_context(f: &Facts) -> Result<String, (String, String)> {
-    let records: Vec<&str> = HWCAP2_FRAME_RECORDS
-        .iter()
-        .filter(|(b, _)| f.hwcap2 & b != 0)
-        .map(|(_, n)| *n)
-        .collect();
-    if !records.is_empty() {
-        return Err((
-            format!(
-                "this CPU has {}, whose signal-frame records Patina does not build",
-                records.join(" and ")
-            ),
-            String::new(),
-        ));
-    }
     if f.sve_vl > SVE_VL_MAX {
         return Err((
             format!(
@@ -312,6 +348,11 @@ fn signal_context(f: &Facts) -> Result<String, (String, String)> {
     let mut has = vec!["FP/SIMD"];
     if f.sve_vl > 0 {
         has.push("SVE");
+    }
+    for (b, n) in HWCAP2_FRAME_RECORDS {
+        if f.hwcap2 & b != 0 {
+            has.push(n);
+        }
     }
     if f.hwcap2 & HWCAP2_SME != 0 {
         has.push("SME (a run that uses streaming mode or ZA stops `signal-context`)");
@@ -434,6 +475,200 @@ fn pac_child() -> i32 {
     0
 }
 
+/// Can spin probes work here: a word of code written through `/proc/self/mem`, then a page
+/// written after tracking started reported as written and an untouched one not (each in a
+/// child; once per process).
+fn spin_support() -> &'static Result<(), (SpinStep, String)> {
+    static S: std::sync::OnceLock<Result<(), (SpinStep, String)>> = std::sync::OnceLock::new();
+    S.get_or_init(spin_try)
+}
+
+/// Whether spin probes can work on this host (`spin_probes`).
+pub fn spin_ok() -> bool {
+    spin_support().is_ok()
+}
+
+fn spin_try() -> Result<(), (SpinStep, String)> {
+    in_child(proc_mem_child).map_err(|e| (SpinStep::ProcMem, e))?;
+    let track = if cfg!(target_arch = "aarch64") {
+        uffd_child
+    } else {
+        soft_dirty_child
+    };
+    in_child(track).map_err(|e| {
+        let e = if e.starts_with(&format!("errno {} ", libc::ENODATA)) {
+            "a written page was not reported".to_string()
+        } else {
+            e
+        };
+        (SpinStep::Track, e)
+    })
+}
+
+/// A word of this function's own code (read-only, executable), written back unchanged through
+/// `/proc/self/mem`, as a probe plants a breakpoint.
+fn proc_mem_child() -> i32 {
+    let at = proc_mem_child as *const () as i64;
+    unsafe {
+        let fd = libc::open(c"/proc/self/mem".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC);
+        if fd < 0 {
+            return errno();
+        }
+        let mut w = [0u8; 4];
+        if libc::pread(fd, w.as_mut_ptr().cast(), 4, at) != 4 {
+            return errno();
+        }
+        if libc::pwrite(fd, w.as_ptr().cast(), 4, at) != 4 {
+            return errno();
+        }
+    }
+    0
+}
+
+/// `struct pm_scan_arg` (Linux 6.7).
+#[repr(C)]
+#[derive(Default)]
+struct ScanArg {
+    size: u64,
+    flags: u64,
+    start: u64,
+    end: u64,
+    walk_end: u64,
+    vec: u64,
+    vec_len: u64,
+    max_pages: u64,
+    category_inverted: u64,
+    category_mask: u64,
+    category_anyof_mask: u64,
+    return_mask: u64,
+}
+
+const PAGEMAP_SCAN: libc::c_ulong = 0xc060_6610;
+
+/// `PAGEMAP_SCAN` of the page at `p` for category `cat` with `flags`: the regions found, or
+/// -1 (errno set).
+fn scan_page(pagemap: i32, p: *mut u8, cat: u64, flags: u64) -> i64 {
+    let mut regions = [[0u64; 3]; 2];
+    let mut a = ScanArg {
+        size: std::mem::size_of::<ScanArg>() as u64,
+        flags,
+        start: p as u64,
+        end: p as u64 + 4096,
+        vec: regions.as_mut_ptr() as u64,
+        vec_len: 2,
+        category_mask: cat,
+        return_mask: cat,
+        ..Default::default()
+    };
+    unsafe { libc::ioctl(pagemap, PAGEMAP_SCAN as _, &mut a as *mut ScanArg) as i64 }
+}
+
+/// Two anonymous pages, both touched; their address.
+fn two_pages() -> Option<*mut u8> {
+    let p = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            8192,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if p == libc::MAP_FAILED {
+        return None;
+    }
+    // Small pages: one huge page would make a write to the first page mark the second too.
+    unsafe { libc::madvise(p, 8192, libc::MADV_NOHUGEPAGE) };
+    let p = p as *mut u8;
+    unsafe {
+        p.write_volatile(1);
+        p.add(4096).write_volatile(1);
+    }
+    Some(p)
+}
+
+/// Whether, after tracking starts, a write to the first of two pages is reported and the
+/// second page is not: 0, or `ENODATA` when the report is wrong.
+fn written_ok(pagemap: i32, p: *mut u8, cat: u64) -> i32 {
+    unsafe { p.write_volatile(2) };
+    let (a, b) = (
+        scan_page(pagemap, p, cat, 0),
+        scan_page(pagemap, unsafe { p.add(4096) }, cat, 0),
+    );
+    if a < 0 || b < 0 {
+        return errno();
+    }
+    if a == 1 && b == 0 {
+        0
+    } else {
+        libc::ENODATA
+    }
+}
+
+/// x86_64: soft-dirty bits cleared through `/proc/self/clear_refs`, read by `PAGEMAP_SCAN`.
+fn soft_dirty_child() -> i32 {
+    const PAGE_IS_SOFT_DIRTY: u64 = 1 << 7;
+    let Some(p) = two_pages() else {
+        return errno();
+    };
+    unsafe {
+        let pm = libc::open(c"/proc/self/pagemap".as_ptr(), libc::O_RDONLY);
+        let cl = libc::open(c"/proc/self/clear_refs".as_ptr(), libc::O_WRONLY);
+        if pm < 0 || cl < 0 {
+            return errno();
+        }
+        if libc::write(cl, b"4".as_ptr().cast(), 1) != 1 {
+            return errno();
+        }
+        written_ok(pm, p, PAGE_IS_SOFT_DIRTY)
+    }
+}
+
+/// arm64: userfaultfd's asynchronous write protection, as `arch/aarch64/step.rs` sets it up.
+fn uffd_child() -> i32 {
+    const UFFD_USER_MODE_ONLY: libc::c_int = 1;
+    const UFFDIO_API: libc::c_ulong = 0xc018_aa3f;
+    const UFFDIO_REGISTER: libc::c_ulong = 0xc020_aa00;
+    const UFFD_API: u64 = 0xaa;
+    const FEATURES: u64 = 1 << 15 | 1 << 13 | 1 << 12;
+    const MODE_WP: u64 = 2;
+    const PM_SCAN_WP_MATCHING: u64 = 1;
+    const PAGE_IS_WPALLOWED: u64 = 1;
+    const PAGE_IS_WRITTEN: u64 = 2;
+    let Some(p) = two_pages() else {
+        return errno();
+    };
+    unsafe {
+        let fd = libc::syscall(libc::SYS_userfaultfd, libc::O_CLOEXEC | UFFD_USER_MODE_ONLY);
+        if fd < 0 {
+            return errno();
+        }
+        let fd = fd as i32;
+        let mut api = [UFFD_API, FEATURES, 0];
+        if libc::ioctl(fd, UFFDIO_API as _, api.as_mut_ptr()) != 0 {
+            return errno();
+        }
+        if api[1] & FEATURES != FEATURES {
+            return libc::EOPNOTSUPP;
+        }
+        let mut reg = [p as u64, 8192, MODE_WP, 0];
+        if libc::ioctl(fd, UFFDIO_REGISTER as _, reg.as_mut_ptr()) != 0 {
+            return errno();
+        }
+        let pm = libc::open(c"/proc/self/pagemap".as_ptr(), libc::O_RDONLY);
+        if pm < 0 {
+            return errno();
+        }
+        for q in [p, p.add(4096)] {
+            if scan_page(pm, q, PAGE_IS_WRITTEN, PM_SCAN_WP_MATCHING) < 0 {
+                return errno();
+            }
+        }
+        written_ok(pm, p, PAGE_IS_WPALLOWED | PAGE_IS_WRITTEN)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +686,7 @@ mod tests {
             hwcap: HWCAP_SVE | HWCAP_PACA | HWCAP_PACG,
             hwcap2: 0,
             sve_vl: 16,
+            spin: Ok(()),
         }
     }
 
@@ -528,13 +764,6 @@ mod tests {
                 },
             ),
             (
-                "signal context",
-                Facts {
-                    hwcap2: 1 << 48,
-                    ..runner()
-                },
-            ),
-            (
                 "pointer authentication",
                 Facts {
                     pac: Err("errno 22 (Invalid argument)".into()),
@@ -551,7 +780,7 @@ mod tests {
     #[test]
     fn accepted_variants() {
         // SME (the development VM: SME, BTI, no SVE), no PAC, an SVE length at the limit,
-        // and a single kind of CPU out of order.
+        // a single kind of CPU out of order, FPMR and POE.
         for f in [
             Facts {
                 hwcap: HWCAP_PACA,
@@ -569,6 +798,11 @@ mod tests {
             },
             Facts {
                 midr: vec![(3, Some(1)), (1, Some(1))],
+                ..runner()
+            },
+            // FPMR and POE: their records are built.
+            Facts {
+                hwcap2: 1 << 48 | 1 << 63,
                 ..runner()
             },
         ] {
@@ -592,6 +826,30 @@ mod tests {
         };
         assert!(fix.contains("taskset -c 4-5"), "{fix}");
         assert_eq!(ranges(&[0, 1, 2, 3, 6, 8, 9]), "0-3,6,8-9");
+    }
+
+    #[test]
+    fn spin_probes_degrade_and_never_refuse() {
+        for (arch, step, e) in [
+            (
+                "aarch64",
+                SpinStep::Track,
+                "errno 1 (Operation not permitted)",
+            ),
+            ("aarch64", SpinStep::ProcMem, "errno 5 (Input/output error)"),
+            ("x86_64", SpinStep::Track, "a written page was not reported"),
+        ] {
+            let f = Facts {
+                arch,
+                spin: Err((step, e.into())),
+                ..runner()
+            };
+            assert!(refusal(&f).is_ok(), "{f:?}");
+            let (_, r) = spin_probes(&f);
+            let (why, fix) = r.expect_err("spin probes judged available");
+            assert!(why.contains(e) && !fix.is_empty(), "{why}; {fix}");
+        }
+        assert!(spin_probes(&runner()).1.is_ok());
     }
 
     #[test]

@@ -44,8 +44,9 @@ runtime's own faults leave none), unused fields and the tail zeroed. `rt_sigretu
 emulated: the runtime checks the frame the program hands back as the kernel does, and a
 frame it would refuse ends in `SIGSEGV`, never in a fault of the runtime. On arm64 the frame
 carries the records the host's kernel writes (FP/SIMD, the fault syndrome, SVE, `TPIDR2`, the
-ZA header); one Patina does not build (SME's streaming mode or ZA contents, ZT, FPMR, POE,
-GCS, the extra record) ends the run `unsupported`, stop `signal-context`, naming it. The
+ZA header, `FPMR`, `POR_EL0`; `proto/src/sigrec.rs`); one Patina does not build (SME's
+streaming mode or ZA contents, ZT, GCS, the extra record) ends the run `unsupported`, stop
+`signal-context`, naming it. The
 handler returns through a fixed page holding `rt_sigreturn` unless it gives its own restorer,
 and is entered with `BTYPE` set for a branch-target host. The runtime has no thread-local
 storage; each thread's state sits at the base of its alternate signal stack.
@@ -137,7 +138,11 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   (`proto::step`, `arch/aarch64/step.rs`); an exclusive pair (`ldxr` to `stxr`) is stepped
   whole, as a stop inside it would fail the store every time; written pages are found by
   userfaultfd's asynchronous write-protection, set up when a probe starts and closed when it
-  ends.
+  ends. A breakpoint goes only into private, read-only code: in writable code (a JIT) the
+  program's own patch would be undone when the old word goes back. Where the host cannot make
+  probes work (`patina doctor`, "spin probes": a container's seccomp profile, a kernel
+  without userfaultfd or soft-dirty bits, `/proc/self/mem` closed to code writes), they are
+  off, and a `compute-stall` says so.
 - **Branch counters**, with `--preempt branches`: a preemption after a seed-chosen number of
   retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
 - **Compute points**, in code rebuilt with the compilers' coverage flags: the hooks count
@@ -146,7 +151,8 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
 `rdtsc`, `rdrand` and `rdseed` (arm64: the counter-timer reads, `RNDR` and `RNDRRS`) are
 answered from virtual time and the seed. The counter faults wherever the code came from;
 code generated at run time (a JIT) is not scanned for the others, and such mappings are
-counted in `result.json` (`unscanned_exec_mappings`).
+counted in `result.json` (`unscanned_exec_mappings`). `MADV_DONTNEED` over patched code drops
+the patched copy of the page; the runtime patches its sites again.
 
 On arm64 the scan is a compare under a mask of each aligned word of a file's executable
 sections (`proto/src/insn/aarch64.rs`), and a site becomes `udf #0x7061`. A word that a

@@ -5,7 +5,9 @@
  * insn-jit file-mmap | file-mprotect | file-shared: the same bytes in a file under /tmp, mapped
  *   executable directly, mapped readable then made executable, or mapped shared: the first two
  *   are scanned and patched (deterministic value); the shared one is not patched (a patch would
- *   write into the file) and is labelled. */
+ *   write into the file) and is labelled.
+ * insn-jit file-dontneed: as file-mmap, run, then MADV_DONTNEED over the page (which drops the
+ *   patched private copy: the file's bytes come back), and run again: patched both times. */
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -19,7 +21,7 @@ static unsigned char *from_file(const char *mode) {
     int fd = open("/tmp/code.bin", O_RDWR | O_CREAT | O_TRUNC, 0700);
     if (fd < 0 || write(fd, code, sizeof code) != sizeof code) return MAP_FAILED;
     unsigned char *p;
-    if (!strcmp(mode, "file-mmap")) {
+    if (!strcmp(mode, "file-mmap") || !strcmp(mode, "file-dontneed")) {
         p = mmap(0, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
     } else if (!strcmp(mode, "file-shared")) {
         p = mmap(0, 4096, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
@@ -47,6 +49,12 @@ int main(int argc, char **argv) {
         }
     }
     uint32_t (*f)(void) = (uint32_t (*)(void))p;
+    if (!strcmp(mode, "file-dontneed")) {
+        uint32_t a = f();
+        if (madvise(p, 4096, MADV_DONTNEED)) return 4;
+        printf("%s rdrand %08x %08x\n", mode, a, f());
+        return 0;
+    }
     printf("%s rdrand %08x\n", mode, f());
     return 0;
 }

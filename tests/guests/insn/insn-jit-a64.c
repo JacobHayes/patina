@@ -9,7 +9,9 @@
  *   executable directly, mapped readable then made executable, or mapped shared. The first two
  *   are scanned and patched (the yield is a pause point; with `rndr`, the RNDR is answered from
  *   the seed); the shared one is not patched (a patch would write into the file) and is
- *   labelled. */
+ *   labelled.
+ * insn-jit file-dontneed [rndr]: as file-mmap, run, then MADV_DONTNEED over the page (which drops
+ *   the patched private copy: the file's bytes come back), and run again: patched both times. */
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -26,7 +28,7 @@ static unsigned char *from_file(const char *mode) {
     int fd = open("/tmp/code.bin", O_RDWR | O_CREAT | O_TRUNC, 0700);
     if (fd < 0 || write(fd, code, sizeof code) != sizeof code) return MAP_FAILED;
     unsigned char *p;
-    if (!strcmp(mode, "file-mmap")) {
+    if (!strcmp(mode, "file-mmap") || !strcmp(mode, "file-dontneed")) {
         p = mmap(0, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
     } else if (!strcmp(mode, "file-shared")) {
         p = mmap(0, 4096, PROT_READ | PROT_EXEC, MAP_SHARED, fd, 0);
@@ -58,6 +60,13 @@ int main(int argc, char **argv) {
     }
     uint64_t (*f)(void) = (uint64_t (*)(void))p;
     fflush(stdout);
+    if (!strcmp(mode, "file-dontneed")) {
+        uint64_t a = f();
+        if (madvise(p, 4096, MADV_DONTNEED)) return 4;
+        printf("%s %s %016llx %016llx\n", mode, rndr ? "rndr" : "cntvct", (unsigned long long)a,
+               (unsigned long long)f());
+        return 0;
+    }
     printf("%s %s %016llx\n", mode, rndr ? "rndr" : "cntvct", (unsigned long long)f());
     return 0;
 }
