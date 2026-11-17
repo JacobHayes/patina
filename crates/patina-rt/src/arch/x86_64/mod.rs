@@ -5,10 +5,12 @@ mod cmem;
 mod entry;
 mod guest;
 mod stub;
+mod thread;
 
 pub use entry::{enter_guest, restorer, switch_stack};
 pub use guest::{current_sp, fixup, guest_copy};
 pub use stub::{sc6, stub_escape, stub_ip};
+pub use thread::{clone_vm, frame_extent, rebase_frame, sigreturn_to};
 
 /// The seccomp program's architecture (`seccomp_data.arch`).
 pub const AUDIT_ARCH: u32 = 0xC000_003E;

@@ -211,7 +211,7 @@ fn vfork(call: &mut dyn Call, flags: u64, stack: u64, ptid: u64, ctid: u64) -> i
     let me = unsafe { &*ctl().slot(own_slot as usize) };
     me.go.store(0, SeqCst);
     let kflags = CLONE_VM | CLONE_VFORK | (flags & (CSIGNAL | CLONE_PARENT_SETTID));
-    let r = super::thread::raw_clone_vm(kflags, start, ptid, 0, 0, uc2);
+    let r = crate::arch::clone_vm(kflags, start, ptid, 0, 0, uc2);
     if r < 0 {
         // The child never ran: this thread still holds the turn.
         release(slot);
@@ -232,7 +232,6 @@ fn vfork(call: &mut dyn Call, flags: u64, stack: u64, ptid: u64, ctid: u64) -> i
 
 /// First code of a vfork child after `thread::thread_start` (own alternate stack installed).
 /// It holds the turn already.
-#[cfg(target_arch = "x86_64")]
 pub fn vfork_child_start(uc2: u64) -> ! {
     let ts = thread();
     ts.pid = unsafe { sc0(nr::GETPID) } as i32;
@@ -252,7 +251,7 @@ pub fn vfork_child_start(uc2: u64) -> ! {
         let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
     crate::compute::exit(ts);
-    super::thread::sigreturn_to(uc2)
+    crate::arch::sigreturn_to(uc2)
 }
 
 /// Status word to report for a reaped child: the supervisor's record of a virtual signal death.
