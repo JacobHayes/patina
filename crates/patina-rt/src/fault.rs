@@ -4,7 +4,7 @@
 //! guest copy (`guest.rs`) returns `EFAULT` from it; any other fault in runtime code is a
 //! runtime defect (`infra`); then the chain of instruction emulators; a program access to the
 //! runtime's region ends the run (`HE_CONTAINMENT`); then the guest's virtual disposition: a
-//! handler gets a frame built by `sigframe::deliver` with the kernel's siginfo, the default
+//! handler gets a frame built by `arch::deliver` with the kernel's siginfo, the default
 //! action terminates.
 
 use crate::arch::Frame;

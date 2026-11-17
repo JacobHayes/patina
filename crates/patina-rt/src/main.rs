@@ -28,11 +28,6 @@ mod pmu;
 mod raw;
 mod resolve;
 #[cfg(target_arch = "x86_64")]
-mod sigframe;
-#[cfg(target_arch = "aarch64")]
-#[path = "arch/aarch64/standin/sigframe.rs"]
-mod sigframe;
-#[cfg(target_arch = "x86_64")]
 mod spin;
 #[cfg(target_arch = "aarch64")]
 #[path = "arch/aarch64/standin/spin.rs"]

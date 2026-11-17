@@ -1,7 +1,7 @@
 //! Signals: virtual dispositions, masks, the alternate stack, sending, waiting,
 //! interval timers, and the trap-exit delivery loop. The kernel-level mask and handlers
 //! stay the runtime's; guest handlers are entered only through frames built
-//! by `crate::sigframe` at a trap exit of the receiving thread.
+//! by `arch::deliver` at a trap exit of the receiving thread.
 //!
 //! State: dispositions are per process in runtime memory (`Proc::sigact`); the supervisor
 //! is told the kind of a disposition (default, ignore, handler) when it changes, because it
@@ -12,7 +12,6 @@
 
 use super::*;
 use crate::arch::Frame;
-use crate::sigframe;
 use crate::state::{ctl, thread, ThreadState};
 use proto::ctl::{Op, NO_DEADLINE, REP_DELIVER_MASK, SIGK_DEFAULT, SIGK_HANDLER, SIGK_IGNORE};
 
@@ -588,7 +587,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::RT_SIGPROCMASK => sigprocmask(call),
         nr::SIGALTSTACK => sigaltstack(call),
         nr::RT_SIGRETURN => match call.frame() {
-            Some(f) => sigframe::sigreturn(f, thread()),
+            Some(f) => crate::arch::sigreturn(f, thread()),
             None => return Action::NeedsFrame,
         },
         nr::KILL => kill(call),
@@ -742,7 +741,7 @@ pub fn act_on(
             if let Some(nr) = nr {
                 resolve_for_handler(frame, nr, act[1]);
             }
-            sigframe::deliver(frame, ts, sig, info, act, fault);
+            crate::arch::deliver(frame, ts, sig, info, act, fault);
             true
         }
     }

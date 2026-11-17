@@ -4,11 +4,13 @@
 mod cmem;
 mod entry;
 mod guest;
+mod sigframe;
 mod stub;
 mod thread;
 
 pub use entry::{enter_guest, restorer, switch_stack};
 pub use guest::{current_sp, fixup, guest_copy};
+pub use sigframe::{deliver, sigreturn};
 pub use stub::{sc6, stub_escape, stub_ip};
 pub use thread::{clone_vm, frame_extent, rebase_frame, sigreturn_to};
 
