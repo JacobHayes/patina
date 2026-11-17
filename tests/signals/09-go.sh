@@ -1,7 +1,7 @@
 # 9. Stock static Go: spinning goroutine, 10 ms syscall ticker, signal.Notify(SIGUSR1) and
 # syscall.Kill(self), one P: ok, notified, identical over 4 runs. The log must show Go's
 # preemption signal (SIGURG, 0x17) and SIGUSR1 (0xa) delivered through runtime-built frames.
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 verify "$RUNS/09-go" 1 go-sig 4
 echo "4 identical runs, digest $(field "$RUNS/09-go/run-0/result.json" digest), traps $(field "$RUNS/09-go/run-0/result.json" sched.traps)"

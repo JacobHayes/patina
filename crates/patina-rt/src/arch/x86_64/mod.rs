@@ -26,6 +26,23 @@ pub fn clone_args(a: [u64; 6]) -> [u64; 5] {
     [a[0], a[1], a[2], a[3], a[4]]
 }
 
+/// `sigaction` flags Patina keeps beyond the generic ones (`sys::sig`'s `SA_KNOWN`): none here
+/// (the kernel also keeps `SA_EXPOSE_TAGBITS`, which has no effect on x86_64).
+pub const SA_ARCH_KNOWN: u64 = 0;
+/// Flags of the runtime's own fault and trap handlers beyond the generic ones: none here.
+pub const SA_ARCH_RUNTIME: u64 = 0;
+
+/// A fault address as an access resolves it: no tag bits on x86_64.
+#[inline(always)]
+pub fn untagged(a: u64) -> u64 {
+    a
+}
+
+/// Per-image setup of the program's address space, at the loader's start: nothing on x86_64
+/// (handlers name their restorer, `SA_RESTORER`).
+#[inline(always)]
+pub fn image_init(_hwcap2: u64) {}
+
 /// Per-image setup that must come before anything else: none on x86_64 (the counter trap is
 /// set in `rt_main`, `insn::tsc::ensure_faulting`).
 #[inline(always)]
@@ -139,7 +156,7 @@ impl Frame {
     /// Re-execute the call `nr` after a result was written (`sys::sig`'s restarts): the
     /// result register is not an argument here, so this is `rewind`.
     #[inline(always)]
-    pub fn restart_after_result(&mut self, nr: u64) {
+    pub fn restart_after_result(&mut self, nr: u64, _arg0: u64) {
         self.rewind(nr);
     }
     /// The words a preempt record hashes: the general registers, without the trap and resume

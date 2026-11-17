@@ -3,6 +3,10 @@
 //                      SA_RESTART, futex wait with a timeout (EINTR even with SA_RESTART).
 //   sig-restart io   : read on a pipe and poll, with and without SA_RESTART (needs blocking-I/O
 //                      support).
+//   sig-restart self : one thread, signalled by its own interval timer: a futex wait and a
+//                      pipe read restarted (SA_RESTART; the handler makes the restarted call
+//                      return at once, so it sees the call's own arguments again), and a futex
+//                      wait without SA_RESTART (EINTR).
 #define _GNU_SOURCE
 #include <errno.h>
 #include <linux/futex.h>
@@ -44,8 +48,10 @@ static long futex_wait(volatile uint32_t *w, uint32_t v, const struct timespec *
     return syscall(SYS_futex, w, FUTEX_WAIT_PRIVATE, v, to, NULL, 0);
 }
 
-// The other thread: at each phase, wait a second of virtual time, signal A, then (for the
-// futex and I/O phases) wait another second and release A.
+// The other thread: at each phase, wait a second of virtual time, signal A, then wait another
+// second and release A (nothing to release after the nanosleep). Each phase starts only once A
+// has reached it, and A leaves a phase only once released, so no phase is skipped whatever the
+// schedule.
 static void *thread_b(void *arg) {
     int io = (int)(intptr_t)arg;
     for (int p = 1; p <= 4; p++) {
@@ -54,6 +60,7 @@ static void *thread_b(void *arg) {
         syscall(SYS_tgkill, getpid(), tid_a, SIGUSR1);
         sleep_ns(1000000000L);
         if (!io) {
+            if (p == 1) continue;
             word = 1;
             syscall(SYS_futex, &word, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
         } else if (p <= 2) {
@@ -136,7 +143,48 @@ static void run_io(void) {
     printf("poll_norestart r=%d eintr=%d handled=%d\n", r, e == EINTR, handled);
 }
 
+static volatile int self_action;
+
+static void on_alrm(int sig) {
+    (void)sig;
+    handled++;
+    if (self_action == 1) word = 1;
+    if (self_action == 2 && write(pfd[1], "x", 1) != 1) perror("write");
+}
+
+static void run_self(int restart, int action) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = on_alrm;
+    sa.sa_flags = restart ? SA_RESTART : 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, NULL);
+    self_action = action;
+    word = 0;
+    alarm(1);
+}
+
+static void self_mode(void) {
+    if (pipe(pfd)) perror("pipe");
+    run_self(1, 1);
+    long fr = futex_wait(&word, 0, NULL);
+    int e = errno;
+    printf("self_futex_restart r=%ld eagain=%d handled=%d\n", fr, e == EAGAIN, handled);
+    run_self(1, 2);
+    char c = '-';
+    ssize_t n = read(pfd[0], &c, 1);
+    printf("self_read_restart n=%zd c=%c handled=%d\n", n, c, handled);
+    run_self(0, 0);
+    fr = futex_wait(&word, 0, NULL);
+    e = errno;
+    printf("self_futex_norestart r=%ld eintr=%d handled=%d\n", fr, e == EINTR, handled);
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "self")) {
+        self_mode();
+        return 0;
+    }
     int io = argc > 1 && !strcmp(argv[1], "io");
     tid_a = (pid_t)syscall(SYS_gettid);
     if (io && pipe(pfd)) perror("pipe");

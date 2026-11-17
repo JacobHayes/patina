@@ -116,6 +116,17 @@ pub fn unported(part: u64) -> ! {
     hang()
 }
 
+/// End the run `unsupported`, stop `signal-context`: a signal frame would hold the context
+/// record `magic`, which the runtime does not build (`proto::ctl::HE_SIGNAL_CONTEXT`).
+#[allow(dead_code)]
+pub fn signal_context(magic: u32) -> ! {
+    call_sup_raw(
+        Op::HostError,
+        [magic as u64, 0, proto::ctl::HE_SIGNAL_CONTEXT, 0, 0, 0],
+    );
+    hang()
+}
+
 /// End the run: program code reached into the runtime (`proto::ctl::HE_CONTAINMENT`).
 pub fn containment(kind: u64, addr: u64, rip: u64, store: bool) -> ! {
     call_sup_raw(

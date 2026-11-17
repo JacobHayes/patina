@@ -193,6 +193,7 @@ pub fn classify(v: &Verdict) -> Classified {
         ),
         "capacity" => Classified::new(Unsupported, "capacity", d),
         "arm64-unported" => Classified::new(Unsupported, "arm64-unported", d),
+        "signal-context" => Classified::new(Unsupported, "signal-context", d),
         "log-limit" => Classified::new(Unsupported, "log-limit", d),
         "output-limit" => Classified::new(Unsupported, "output-limit", d),
         "timeout" => Classified::new(Timeout, "timeout", d),

@@ -818,6 +818,7 @@ setup_steps! {
     SetTsc = "PR_SET_TSC",
     Panic = "runtime panic",
     PacKeys = "PR_PAC_SET_ENABLED_KEYS",
+    RestorerPage = "cannot map the signal restorer page",
 }
 /// A real signal from outside the sandbox is pending (args[0] = the signal number).
 pub const HE_OUTSIDE_SIGNAL: u64 = 4;
@@ -865,6 +866,27 @@ pub const HE_DISK_FULL: u64 = 12;
 /// way: each stand-in goes when its mechanism is ported.
 pub const HE_UNPORTED: u64 = 13;
 
+/// A signal frame the runtime does not build: the trap frame (or, at `rt_sigreturn`, the
+/// program's frame) holds a context record outside those the runtime normalises (arm64:
+/// streaming SVE mode, the SME ZA array or ZT0 in use, FPMR, POE, GCS, an extra-context
+/// record, or a magic it does not know). args[0] = the record's magic. The run ends
+/// `unsupported`, stop `signal-context`.
+pub const HE_SIGNAL_CONTEXT: u64 = 14;
+
+/// The name of an arm64 signal context record (`HE_SIGNAL_CONTEXT`), for its message.
+pub fn signal_context_name(magic: u64) -> &'static str {
+    match magic {
+        0x5356_4501 => "the SVE record in streaming mode",
+        0x5436_6345 => "the SME ZA array in use",
+        0x5a54_4e01 => "the SME2 ZT0 register",
+        0x4650_4d52 => "the FPMR register",
+        0x504f_4530 => "the POE overlay register",
+        0x4743_5300 => "the guarded control stack",
+        0x4558_5401 => "an extra-context record (a frame larger than 4096 bytes of records)",
+        _ => "a record of unknown kind",
+    }
+}
+
 macro_rules! unported {
     ($($v:ident = $n:literal: $s:literal),* $(,)?) => {
         $(pub const $v: u64 = $n;)*
@@ -879,7 +901,6 @@ macro_rules! unported {
 }
 
 unported! {
-    UNPORTED_SIGNALS = 2: "signal delivery to a handler, sigreturn and system-call restart",
     UNPORTED_COUNTERS = 4: "branch-counter preemption",
     UNPORTED_COMPUTE = 5: "compute points",
     UNPORTED_INSN = 6: "an instruction with a host-random result (RNDR, RNDRRS, PACGA) in program code",

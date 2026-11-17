@@ -60,26 +60,36 @@ elif g == "sig-alt":
         need(f"{who} autodisarm", in_handler_disabled=1, after_sp_ok=1, after_autodisarm=1)
 elif g == "sig-fp":
     need("fp", handled=10000, reg_errors=0, exact=1)
-    need("ucontext", rax=4242)
+    if "x0" in rows.get("ucontext", {}):
+        # The arm64 twin: more edits, and a P register where the host has SVE.
+        need("ucontext", x0=4242, v31_edited=1, mask_edited=1)
+        if rows.get("sve", {}).get("p0_edited") not in ("1", "no-sve"):
+            fail("sve: p0 edit")
+    else:
+        need("ucontext", rax=4242)
 elif g == "sig-ctx":
     need("siglongjmp", jumps=3, v=3, blocked_in_handler=1, blocked_after=0)
     need("swapcontext", rounds=5, steps=35)
     need("setcontext", resumed=3)
 elif g == "sig-fault":
-    want = {"segv": (11, 1), "fpe": (8, 1), "ill": (4, 2), "bus": (7, 2)}
-    lines = [l.split() for l in out.splitlines() if l.split() and l.split()[0] in want]
-    if len(lines) != 8:
-        fail(f"{len(lines)} fault lines, want 8")
+    # Two rounds of four faults; the guest prints what the kernel gives for each (the second
+    # kind is SIGFPE on x86_64, SIGTRAP on arm64).
+    lines = [l.split() for l in out.splitlines() if "want_code=" in l]
+    if len(lines) != 8 or len({l[0] for l in lines}) != 4:
+        fail(f"{len(lines)} fault lines, want 8 of 4 kinds")
     for l in lines:
         d = dict(p.split("=") for p in l[1:])
-        s, code = want[l[0]]
-        if (d["sig"], d["want"], d["code"], d["addr_ok"], d["rip_ok"]) != (str(s), str(s), str(code), "1", "1"):
+        if (d["sig"], d["code"], d["addr_ok"], d["rip_ok"]) != (d["want"], d["want_code"], "1", "1"):
             fail(" ".join(l))
 elif g == "sig-restart":
     need("nanosleep", r=-1, eintr=1, handled=1, elapsed_plus_rem_ok=1, rem_s=3)
-    need("futex_restart", r=0, handled=1, woken_after_s=1)
-    need("futex_norestart", r=-1, eintr=1, handled=2)
-    need("futex_timeout", r=-1, eintr=1, handled=3)
+    need("futex_restart", r=0, handled=2, woken_after_s=3)
+    need("futex_norestart", r=-1, eintr=1, handled=3)
+    need("futex_timeout", r=-1, eintr=1, handled=4)
+elif g == "sig-restart-self":
+    need("self_futex_restart", r=-1, eagain=1, handled=1)
+    need("self_read_restart", n=1, c="x", handled=2)
+    need("self_futex_norestart", r=-1, eintr=1, handled=3)
 elif g == "sig-restart-io":
     need("read_restart", n=1, c="x", handled=1)
     need("read_norestart", n=-1, eintr=1, handled=2)

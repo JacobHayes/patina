@@ -1,5 +1,5 @@
 # 2. Socket semantics: each mode checks what it observes and exits non-zero otherwise.
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-semantics; mkdir -p "$o"
 for m in names refused addrinuse halfclose eof rst epipe sigpipe-kill rcvtimeo peek waitall sendfile v6; do

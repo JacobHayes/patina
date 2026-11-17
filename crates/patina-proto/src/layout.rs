@@ -51,6 +51,12 @@ pub const MMAP_FLOOR: u64 = BRK_BASE + BRK_SIZE;
 /// runtime's region; nothing else is placed here.
 pub const COMPUTE_CELL: u64 = 0x5f80_0000_0000;
 const _: () = assert!(MMAP_TOP <= COMPUTE_CELL && COMPUTE_CELL + PAGE <= RT_BASE);
+/// The signal restorer (arm64): one read-execute page holding `mov x8, #139; svc #0`, the
+/// kernel's own vDSO trampoline, which the runtime removes. A handler installed without
+/// `SA_RESTORER` (glibc's on arm64) returns here; the `svc` is program code and traps like any
+/// call. Mapped by the loader at every image start; nothing else is placed here.
+pub const SIGRETURN_PAGE: u64 = 0x5fc0_0000_0000;
+const _: () = assert!(COMPUTE_CELL + PAGE <= SIGRETURN_PAGE && SIGRETURN_PAGE + PAGE <= RT_BASE);
 /// Guest initial stack.
 pub const STACK_TOP: u64 = 0x7ff0_0000_0000;
 pub const STACK_SIZE: u64 = 8 << 20;

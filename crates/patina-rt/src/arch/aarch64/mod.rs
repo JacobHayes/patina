@@ -64,6 +64,40 @@ pub fn feature_hidden(w: &[u8]) -> bool {
     w == b"pacg" || w == b"cpuid" || w.starts_with(b"sme")
 }
 
+/// `sigaction` flags Patina keeps beyond the generic ones (`sys::sig`'s `SA_KNOWN`):
+/// `SA_EXPOSE_TAGBITS` (a fault's `si_addr` keeps the top byte).
+pub const SA_ARCH_KNOWN: u64 = crate::sys::sig::SA_EXPOSE_TAGBITS;
+/// Flags of the runtime's own fault and trap handlers beyond the generic ones:
+/// `SA_EXPOSE_TAGBITS`, so a fault's address reaches the runtime whole, and a program handler
+/// that asked for the tag gets it (`sigframe::deliver` clears it for the others).
+pub const SA_ARCH_RUNTIME: u64 = crate::sys::sig::SA_EXPOSE_TAGBITS;
+
+/// A fault address as an access resolves it: the top byte is ignored (the kernel's
+/// `untagged_addr`: bit 55 extended over it).
+#[inline(always)]
+pub fn untagged(a: u64) -> u64 {
+    ((a << 8) as i64 >> 8) as u64
+}
+
+/// Whether the host has branch target identification (`HWCAP2_BTI`): a handler is then
+/// entered as an indirect call is (`sigframe::deliver`). Set by `image_init`.
+static HOST_BTI: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+pub fn host_bti() -> bool {
+    HOST_BTI.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Per-image setup of the program's address space, at the loader's start: note the host's
+/// BTI from the kernel's `AT_HWCAP2` and map the signal restorer page (`sigframe`).
+pub fn image_init(hwcap2: u64) {
+    const HWCAP2_BTI: u64 = 1 << 17;
+    HOST_BTI.store(
+        hwcap2 & HWCAP2_BTI != 0,
+        core::sync::atomic::Ordering::Relaxed,
+    );
+    sigframe::map_restorer();
+}
+
 /// Per-image setup that must come before anything else: the pointer-authentication keys off.
 /// Every image starts with all four enabled and freshly drawn (exec), so a pointer the program
 /// signs would differ from run to run. With the keys disabled the sign and authenticate
@@ -109,6 +143,7 @@ pub const RECORD_WORDS: usize = 34;
 /// The kernel's `ucontext` as delivered on the alternate stack (`uapi/asm/ucontext.h`,
 /// `sigcontext.h`): `uc_sigmask` at 40, `uc_mcontext` at 176, the records at 464.
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 pub struct Frame {
     pub uc_flags: u64,
     pub uc_link: u64,
@@ -141,7 +176,7 @@ const _: () = {
 };
 
 /// The ESR record: the fault's exception syndrome, present when the thread has one.
-const ESR_MAGIC: u32 = 0x4553_5201;
+pub(crate) const ESR_MAGIC: u32 = 0x4553_5201;
 /// ESR_EL1 exception class of a data abort from a lower exception level.
 const EC_DABT_LOW: u64 = 0x24;
 /// ISS bit of a data abort: write, not read.
@@ -193,10 +228,13 @@ impl Frame {
         self.regs[8] = nr;
         self.pc -= SYSCALL_LEN;
     }
-    /// Re-execute the call `nr` after a result was written (`sys::sig`'s restarts): needs the
-    /// first argument back in `x0`, which signal delivery (not ported yet) must keep.
-    pub fn restart_after_result(&mut self, _nr: u64) {
-        crate::sup::unported(proto::ctl::UNPORTED_SIGNALS)
+    /// Re-execute the call `nr` after a result was written (`sys::sig`'s restarts): the
+    /// result overwrote the first argument's register, so `x0` gets `arg0` back (the kernel's
+    /// `orig_x0`).
+    #[inline(always)]
+    pub fn restart_after_result(&mut self, nr: u64, arg0: u64) {
+        self.regs[0] = arg0;
+        self.rewind(nr);
     }
     /// The words a preempt record hashes: `x0`-`x30`, `sp`, `pc` and the condition flags of
     /// `pstate` (its other bits are set by the kernel and the CPU: speculation controls, PAN,

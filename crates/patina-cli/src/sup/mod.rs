@@ -558,6 +558,15 @@ impl Sup {
                         ),
                     ));
                 }
+                if code == HE_SIGNAL_CONTEXT {
+                    self.finish(Verdict::new(
+                        "signal-context",
+                        format!(
+                            "a signal frame would hold {} (record {errno:#x}), which Patina does not build",
+                            signal_context_name(errno)
+                        ),
+                    ));
+                }
                 if code == HE_DISK_FULL {
                     self.finish(log_write_verdict(
                         -(errno as i64) as i32,

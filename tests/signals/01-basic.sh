@@ -1,5 +1,5 @@
 # 1. sig-basic: ok and right results; identical over 4 runs (varying the CPU), seed 1; at least 3 distinct digests over seeds 1-10 (the threaded parts follow the seed).
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 for seed in 1; do
     verify "$RUNS/01-basic/s$seed" "$seed" sig-basic 4

@@ -35,8 +35,20 @@ call's row, decide faults, do the call, write the boundary record, return.
 
 `execve` loads the runtime again with the new program (`exec.rs`); `fork` is real
 (`sys/proc.rs`). Signals are virtual: the kernel never delivers one to program code; the
-runtime builds the signal frame on the way out of a trap (`sys/sig.rs`). The runtime has no
-thread-local storage; each thread's state sits at the base of its alternate signal stack.
+runtime builds the signal frame on the way out of a trap (`sys/sig.rs`, the frame itself in
+`arch/<arch>/sigframe.rs`), so a signal arrives only at a trap boundary: a system call, a
+fault, a compute point, never in the middle of straight-line code. The frame is the kernel's
+layout with its contents normalised to the registers, not to the kernel's history: no stale
+fault code or address from an earlier fault (on arm64 the counter-timer reads and the
+runtime's own faults leave none), unused fields and the tail zeroed. `rt_sigreturn` is
+emulated: the runtime checks the frame the program hands back as the kernel does, and a
+frame it would refuse ends in `SIGSEGV`, never in a fault of the runtime. On arm64 the frame
+carries the records the host's kernel writes (FP/SIMD, the fault syndrome, SVE, `TPIDR2`, the
+ZA header); one Patina does not build (SME's streaming mode or ZA contents, ZT, FPMR, POE,
+GCS, the extra record) ends the run `unsupported`, stop `signal-context`, naming it. The
+handler returns through a fixed page holding `rt_sigreturn` unless it gives its own restorer,
+and is entered with `BTYPE` set for a branch-target host. The runtime has no thread-local
+storage; each thread's state sits at the base of its alternate signal stack.
 
 ## The syscall table
 
@@ -362,13 +374,12 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   a program that reaches a part not ported yet ends the run `unsupported`, stop
-  `arm64-unported`, naming it (signal delivery to a handler, branch counters, spin probes,
-  compute points, `RNDR` or `PACGA` in program code, executable memory the scan does not
-  read). Threads, fork, vfork and exec work as on x86_64 (the clone trampoline is in
-  `arch/aarch64/thread.rs`). The runtime disables the pointer-authentication keys before
-  anything else at every image start (`arch/aarch64`): the kernel enables and redraws them at
-  each exec. `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`,
-  `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
+  `arm64-unported`, naming it (branch counters, spin probes, compute points, `RNDR` or `PACGA`
+  in program code, executable memory the scan does not read). Threads, fork, vfork and exec
+  work as on x86_64 (the clone trampoline is in `arch/aarch64/thread.rs`). The runtime
+  disables the pointer-authentication keys before anything else at every image start
+  (`arch/aarch64`): the kernel enables and redraws them at each exec. `PR_SET_TSC` makes the
+  counter-timer reads (`CNTVCT_EL0`, `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
   under Patina alike. CPU features reach the program as the host has them (`AT_HWCAP`,
   `AT_HWCAP2`, `AT_MINSIGSTKSZ`, the `Features` of `/proc/cpuinfo`), as `cpuid` does on x86_64:
   two hosts of the same kind give the same run. Three are hidden: `PACGA` (its keys are off);

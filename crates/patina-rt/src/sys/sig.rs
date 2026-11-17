@@ -37,7 +37,12 @@ pub const SA_RESTART: u64 = 0x1000_0000;
 pub const SA_NODEFER: u64 = 0x4000_0000;
 pub const SA_RESETHAND: u64 = 0x8000_0000;
 pub const SA_RESTORER: u64 = 0x0400_0000;
-/// Flags the kernel keeps (`UAPI_SA_FLAGS` on x86_64); others read back as 0.
+/// A fault's `si_addr` keeps the address's tag bits (arm64: the top byte).
+#[allow(dead_code)]
+pub const SA_EXPOSE_TAGBITS: u64 = 0x800;
+/// Flags the kernel keeps (`UAPI_SA_FLAGS`); others read back as 0. The kernel keeps
+/// `SA_EXPOSE_TAGBITS` on every architecture; Patina keeps it where `arch::SA_ARCH_KNOWN` says
+/// (arm64, where it changes `si_addr`; on x86_64 it reads back as 0, as it always has here).
 const SA_KNOWN: u64 = SA_NOCLDSTOP
     | SA_NOCLDWAIT
     | SA_SIGINFO
@@ -45,7 +50,8 @@ const SA_KNOWN: u64 = SA_NOCLDSTOP
     | SA_RESTART
     | SA_NODEFER
     | SA_RESETHAND
-    | SA_RESTORER;
+    | SA_RESTORER
+    | crate::arch::SA_ARCH_KNOWN;
 
 pub const SIG_DFL: u64 = 0;
 pub const SIG_IGN: u64 = 1;
@@ -680,7 +686,8 @@ fn restart_class(nr: u64) -> Option<i64> {
 }
 
 /// A handler is about to run: an interrupted call returns `EINTR` or restarts (`SA_RESTART`).
-fn resolve_for_handler(frame: &mut Frame, nr: u64, flags: u64) {
+/// `arg0`: the call's first argument as the program passed it.
+fn resolve_for_handler(frame: &mut Frame, nr: u64, arg0: u64, flags: u64) {
     let r = frame.ret();
     if !is_restart(r) {
         return;
@@ -691,7 +698,7 @@ fn resolve_for_handler(frame: &mut Frame, nr: u64, flags: u64) {
         _ => false,
     };
     if restart {
-        frame.restart_after_result(nr);
+        frame.restart_after_result(nr, arg0);
     } else {
         frame.set_ret(-e::EINTR);
     }
@@ -699,16 +706,19 @@ fn resolve_for_handler(frame: &mut Frame, nr: u64, flags: u64) {
 
 /// No handler ran: an interrupted call restarts (through `restart_syscall` when it has a
 /// restart block).
-fn resolve_without_handler(frame: &mut Frame, nr: u64) {
+fn resolve_without_handler(frame: &mut Frame, nr: u64, arg0: u64) {
     let r = frame.ret();
     if !is_restart(r) {
         return;
     }
-    frame.restart_after_result(if -r == ERESTART_RESTARTBLOCK {
-        nr::RESTART_SYSCALL
-    } else {
-        nr
-    });
+    frame.restart_after_result(
+        if -r == ERESTART_RESTARTBLOCK {
+            nr::RESTART_SYSCALL
+        } else {
+            nr
+        },
+        arg0,
+    );
 }
 
 /// End the process as killed by `sig` (default action "terminate").
@@ -720,13 +730,14 @@ pub fn die(sig: u64) -> ! {
     crate::sup::hang()
 }
 
-/// Act on one dequeued signal. Returns true if a handler frame was built.
+/// Act on one dequeued signal. Returns true if a handler frame was built. `call`: the
+/// system call that trapped and its first argument as the program passed it.
 pub fn act_on(
     frame: &mut Frame,
     ts: &mut ThreadState,
     sig: u64,
     info: &SigInfo,
-    nr: Option<u64>,
+    call: Option<(u64, u64)>,
     fault: bool,
 ) -> bool {
     let act = crate::state::sigact()[sig as usize];
@@ -734,12 +745,12 @@ pub fn act_on(
         SIG_IGN => false,
         SIG_DFL => match default_action(sig) {
             Default::Ignore => false,
-            Default::Stop => crate::sup::stop(nr.unwrap_or(0), sig),
+            Default::Stop => crate::sup::stop(call.map_or(0, |c| c.0), sig),
             Default::Terminate => die(sig),
         },
         _ => {
-            if let Some(nr) = nr {
-                resolve_for_handler(frame, nr, act[1]);
+            if let Some((nr, arg0)) = call {
+                resolve_for_handler(frame, nr, arg0, act[1]);
             }
             crate::arch::deliver(frame, ts, sig, info, act, fault);
             true
@@ -747,14 +758,55 @@ pub fn act_on(
     }
 }
 
+/// Deliver a synchronous signal the way the kernel's `force_sig` does: blocked or ignored, it
+/// is unblocked and its disposition reset to the default, so the process dies of it;
+/// otherwise its handler runs. `fault`: a hardware fault, whose syndrome the frame keeps.
+pub fn force(frame: &mut Frame, ts: &mut ThreadState, sig: u64, info: &SigInfo, fault: bool) {
+    let blocked = ts.vmask & bit(sig) != 0;
+    let act = crate::state::sigact()[sig as usize];
+    if blocked || act[0] == SIG_IGN {
+        set_action(sig, [SIG_DFL, act[1], act[2], act[3]]);
+        if blocked {
+            set_vmask(ts, ts.vmask & !bit(sig));
+        }
+    }
+    if crate::state::sigact()[sig as usize][0] == SIG_DFL {
+        die(sig);
+    }
+    act_on(frame, ts, sig, info, None, fault);
+}
+
+/// A delivery is a boundary event of its own: `f` is the new frame, `pc` and `sp` where the
+/// program was interrupted.
+pub fn charge_delivery(sig: u64, handler: u64, f: u64, info: &SigInfo, pc: u64, sp: u64) {
+    let ts = crate::state::thread();
+    crate::entry::charge(ts);
+    let c = ctl();
+    let rec = proto::Rec {
+        seq: ts.seq,
+        vclock_ns: c.vclock_ns.load(Relaxed),
+        slot: ts.slot as u16,
+        kind: proto::RecKind::SignalDelivery as u8,
+        class: 0,
+        nr: sig as u32,
+        args: [handler, f, info[1] & 0xffff_ffff, pc, sp, ts.vmask],
+        ret: 0,
+        out_hash: proto::rec::hash_bytes(0, unsafe {
+            core::slice::from_raw_parts(info.as_ptr() as *const u8, 128)
+        }),
+        in_hash: 0,
+    };
+    crate::log::append(&rec);
+}
+
 /// The trap exit: deliver every deliverable signal (each new frame nests on the previous
 /// one, as the kernel's exit-to-user loop does), then resolve an interrupted call that
-/// ran no handler. `nr` is the syscall that trapped (None for faults, emulated
-/// instructions and `rt_sigreturn`).
-pub fn trap_exit(frame: &mut Frame, nr: Option<u64>) {
+/// ran no handler. `call` is the syscall that trapped and its first argument as the program
+/// passed it (None for faults, emulated instructions and `rt_sigreturn`).
+pub fn trap_exit(frame: &mut Frame, call: Option<(u64, u64)>) {
     let ts = thread();
-    let nr = nr.filter(|&n| n != nr::RT_SIGRETURN);
-    if let Some(code) = nr.and_then(restart_class) {
+    let call = call.filter(|&(n, _)| n != nr::RT_SIGRETURN);
+    if let Some(code) = call.and_then(|(n, _)| restart_class(n)) {
         if frame.ret() == -e::EINTR {
             frame.set_ret(-code);
         }
@@ -771,11 +823,11 @@ pub fn trap_exit(frame: &mut Frame, nr: Option<u64>) {
             break;
         }
         let info = unsafe { core::ptr::read_volatile(&slot.siginfo) };
-        handled |= act_on(frame, ts, sig, &info, nr, false);
+        handled |= act_on(frame, ts, sig, &info, call, false);
     }
     if !handled {
-        if let Some(nr) = nr {
-            resolve_without_handler(frame, nr);
+        if let Some((nr, arg0)) = call {
+            resolve_without_handler(frame, nr, arg0);
         }
         if ts.has_saved != 0 {
             ts.has_saved = 0;

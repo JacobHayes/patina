@@ -10,7 +10,7 @@
 use crate::arch::Frame;
 use crate::entry::charge;
 use crate::state::thread;
-use crate::sys::sig::{self, SigInfo, SIG_DFL, SIG_IGN};
+use crate::sys::sig::{self, SigInfo};
 use proto::layout::*;
 
 /// An instruction emulator: returns true when it handled the fault (and advanced `pc`).
@@ -73,7 +73,9 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
         }
     }
     let sig = sig as u64;
-    let addr = info[2];
+    // The address without its tag bits (arm64: the runtime's handlers see them,
+    // `arch::SA_ARCH_RUNTIME`), as an access resolves it.
+    let addr = crate::arch::untagged(info[2]);
     if matches!(sig, sig::SIGSEGV | sig::SIGBUS) && in_runtime(addr) {
         // Program code loaded or stored at an address of the runtime's region.
         let store = frame.fault_is_store();
@@ -84,18 +86,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     crate::log::fault(sig, &info, pc);
     // The kernel's force_sig: a blocked or ignored fault signal is unblocked and its
     // disposition reset to the default, so the process dies of it.
-    let blocked = ts.vmask & sig::bit(sig) != 0;
-    let act = crate::state::sigact()[sig as usize];
-    if blocked || act[0] == SIG_IGN {
-        sig::set_action(sig, [SIG_DFL, act[1], act[2], act[3]]);
-        if blocked {
-            sig::set_vmask(ts, ts.vmask & !sig::bit(sig));
-        }
-    }
-    if crate::state::sigact()[sig as usize][0] == SIG_DFL {
-        sig::die(sig);
-    }
-    sig::act_on(frame, ts, sig, &info, None, true);
+    sig::force(frame, ts, sig, &info, true);
     sig::trap_exit(frame, None);
     crate::entry::check_real_mask(frame);
     crate::compute::exit(thread());

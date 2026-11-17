@@ -17,9 +17,8 @@
 //! alternate stack for `SA_ONSTACK`.
 
 use crate::arch::{reg::*, Frame};
-use crate::state::{ctl, proc, ThreadState};
+use crate::state::{proc, ThreadState};
 use crate::sys::sig::*;
-use core::sync::atomic::Ordering::*;
 
 pub const FRAME_SIZE: u64 = 440;
 const UC_OFF: u64 = 8;
@@ -224,7 +223,7 @@ pub fn deliver(
         // The kernel's "overflowed sigaltstack": the process gets SIGSEGV.
         die(SIGSEGV);
     }
-    charge_delivery(sig, handler, f, info, frame);
+    charge_delivery(sig, handler, f, info, frame.gregs[RIP], frame.gregs[RSP]);
     unsafe {
         if src != 0 {
             fp_copy_out(fp, src, xsize, ext, xfeatures);
@@ -282,35 +281,6 @@ pub fn deliver(
     if flags & SA_RESETHAND != 0 {
         set_action(sig, [SIG_DFL, flags & !SA_SIGINFO, restorer, sa_mask]);
     }
-}
-
-/// A delivery is a boundary event of its own.
-fn charge_delivery(sig: u64, handler: u64, f: u64, info: &SigInfo, frame: &Frame) {
-    let ts = crate::state::thread();
-    crate::entry::charge(ts);
-    let c = ctl();
-    let rec = proto::Rec {
-        seq: ts.seq,
-        vclock_ns: c.vclock_ns.load(Relaxed),
-        slot: ts.slot as u16,
-        kind: proto::RecKind::SignalDelivery as u8,
-        class: 0,
-        nr: sig as u32,
-        args: [
-            handler,
-            f,
-            info[1] & 0xffff_ffff,
-            frame.gregs[RIP],
-            frame.gregs[RSP],
-            ts.vmask,
-        ],
-        ret: 0,
-        out_hash: proto::rec::hash_bytes(0, unsafe {
-            core::slice::from_raw_parts(info.as_ptr() as *const u8, 128)
-        }),
-        in_hash: 0,
-    };
-    crate::log::append(&rec);
 }
 
 /// Emulated `rt_sigreturn`: the guest's handler returned through its restorer, so the

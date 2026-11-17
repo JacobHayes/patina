@@ -85,7 +85,8 @@ fn install_handlers() {
         if sc2(nr::SIGALTSTACK, st.as_ptr() as u64, 0) != 0 {
             crate::fatal(proto::ctl::Setup::SigAltStack, 0);
         }
-        let flags = SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESTORER;
+        let flags =
+            SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESTORER | crate::arch::SA_ARCH_RUNTIME;
         let sys: [u64; 4] = [on_sigsys as *const () as u64, flags, restorer(), 0];
         if sc4(nr::RT_SIGACTION, SIGSYS, sys.as_ptr() as u64, 0, 8) != 0 {
             crate::fatal(proto::ctl::Setup::SigactionSys, 0);
@@ -313,7 +314,8 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
             crate::log::trap(row, &call, r);
             call.frame.set_ret(r);
             maybe_yield(call.ts);
-            crate::sys::sig::trap_exit(call.frame, Some(nr));
+            let arg0 = crate::trap::Call::guest_args(&call)[0];
+            crate::sys::sig::trap_exit(call.frame, Some((nr, arg0)));
         }
         Action::Restart => {
             // Re-execute the same system call instruction after the handler returns.

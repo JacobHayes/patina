@@ -366,6 +366,7 @@ pub fn start(k: &KernelStart) -> ! {
     // can fall anywhere in the terabytes under the guest stack's fixed address: remove them
     // before the fixed placements below, or one exec in some 10^5 finds them in the way.
     unmap_vdso();
+    crate::arch::image_init(k.aux(AT_HWCAP2).unwrap_or(0));
     // argv: [rt, path, argv0, args...]
     if k.argc < 3 {
         crate::fatal(Setup::Usage, 0);
