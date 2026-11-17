@@ -347,8 +347,15 @@ pub fn handle(call: &mut dyn Call) -> Action {
                     if call.nr() == nr::MUNMAP {
                         crate::insn::patch::forget(call.arg(0), call.arg(1));
                         forget_shared(call.arg(0), page_up(call.arg(1)));
-                    } else if call.arg(2) & PROT_EXEC != 0 {
-                        crate::insn::scan::on_mprotect_exec(call.arg(0), call.arg(1), call.arg(2));
+                    } else {
+                        crate::insn::patch::reprotect(call.arg(0), call.arg(1), call.arg(2));
+                        if call.arg(2) & PROT_EXEC != 0 {
+                            crate::insn::scan::on_mprotect_exec(
+                                call.arg(0),
+                                call.arg(1),
+                                call.arg(2),
+                            );
+                        }
                     }
                 }
                 r
@@ -392,6 +399,9 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 -e::EINVAL
             } else {
                 let r = raw(call);
+                if r == 0 {
+                    crate::insn::patch::reprotect(call.arg(0), call.arg(1), call.arg(2));
+                }
                 if r == 0 && call.arg(2) & PROT_EXEC != 0 {
                     crate::insn::scan::on_mprotect_exec(call.arg(0), call.arg(1), call.arg(2));
                 }

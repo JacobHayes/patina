@@ -1,8 +1,6 @@
 //! SIGILL at a patched site: emulate the original instruction.
 //!
-//! A `pause` site is a scheduling point: the runtime charges virtual time, records it, and
-//! yields to the supervisor as `sched_yield` does. Under one-thread-at-a-time scheduling a
-//! thread that executes `pause` is waiting for another thread, so handing over loses nothing.
+//! A `pause` site is a scheduling point (`crate::insn::pause_point`).
 //!
 //! The faulting instruction starts at the saved instruction pointer; the prefixes the CPU
 //! actually decoded (`66`, `F3`, REX) are read from there up to the `ud2`, whose address must
@@ -14,7 +12,6 @@ use crate::arch::{reg::*, Frame};
 use crate::entry::{charge, maybe_yield};
 use crate::state::{config, thread};
 use crate::sys::sig::{self, SigInfo};
-use core::sync::atomic::Ordering::Relaxed;
 use proto::ctl::{INSN_RDPID, INSN_RDRAND, INSN_RDSEED};
 use proto::{draw, Stream};
 
@@ -63,7 +60,7 @@ pub fn try_emulate(frame: &mut Frame, sig: i32, _info: &SigInfo) -> bool {
     if !found {
         return false;
     }
-    let Some(site) = super::patch::lookup(op) else {
+    let Some(site) = crate::insn::patch::lookup(op) else {
         return false;
     };
     if site.kind == proto::insn::SiteKind::Pause as u8 {
@@ -71,7 +68,7 @@ pub fn try_emulate(frame: &mut Frame, sig: i32, _info: &SigInfo) -> bool {
         if op != rip {
             return false;
         }
-        return pause(frame, rip);
+        return crate::insn::pause_point(frame, rip, 2, CODE_PAUSE);
     }
     if unsafe { *((op + 1) as *const u8) } != 0x0b {
         return false;
@@ -111,20 +108,5 @@ pub fn try_emulate(frame: &mut Frame, sig: i32, _info: &SigInfo) -> bool {
     frame.gregs[RIP] = op + 3;
     crate::log::insn(code, rip, v);
     maybe_yield(ts);
-    true
-}
-
-/// A patched `pause`: a scheduling point.
-fn pause(frame: &mut Frame, rip: u64) -> bool {
-    let ts = thread();
-    let c = crate::state::ctl();
-    ts.seq = c.seq.load(Relaxed) + 1;
-    c.seq.store(ts.seq, Relaxed);
-    let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
-    c.vclock_ns.store(t, Relaxed);
-    crate::insn::bump(&c.sched.pause_points, 1);
-    frame.gregs[RIP] = rip + 2;
-    crate::log::insn(CODE_PAUSE, rip, 0);
-    crate::sup::call_sup(proto::ctl::Op::Yield, [0; 6]);
     true
 }

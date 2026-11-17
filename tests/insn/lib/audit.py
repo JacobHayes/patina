@@ -1,5 +1,6 @@
 """Join the disassembler's classification of scanner candidates (census.py --tsv, kinds `scan`
-and `pause`) with the runtime rule's verdicts (patina __insn-scan), per (file, address).
+and `pause`; on arm64 `rndr`, `pause` and `pacga`) with the runtime rule's verdicts (patina
+__insn-scan), per (file, address).
 
 usage: python3 -I audit.py CENSUS.tsv SCAN.tsv
 Prints one line per candidate and per-file totals; the last line is
@@ -10,7 +11,7 @@ import sys
 dis = {}
 for line in open(sys.argv[1]):
     f = line.rstrip("\n").split("\t")
-    if f[0] == "site" and f[2] in ("scan", "pause"):
+    if f[0] == "site" and f[2] in ("scan", "pause", "rndr", "pacga"):
         dis[(f[1], int(f[3], 16))] = (f[4], f[5])
 rule = {}
 for line in open(sys.argv[2]):
@@ -27,7 +28,7 @@ for k in sorted(set(dis) | set(rule)):
     real += d[0] == "real"
     fp += d[0] == "fp"
     acc += r[0] == "real"
-    rej += r[0] in ("inside", "skipped")
+    rej += r[0] in ("inside", "skipped", "data")
     print(f"{'ok ' if ok else 'BAD'} {k[0]} {k[1]:#x} objdump={d[0]} ({d[1]}) rule={r[0]} {r[1]}")
 print(f"agree={agree} disagree={disagree} real={real} fp={fp} accepted={acc} rejected={rej}")
 sys.exit(1 if disagree else 0)

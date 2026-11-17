@@ -1,11 +1,13 @@
 //! The side table of patched sites and the patch itself.
 //!
-//! A site is keyed by the address of its `0F` opcode byte. Patching overwrites the two opcode
-//! bytes `0F C7` with `ud2` (`0F 0B`); prefixes before them and the ModRM byte after them stay,
-//! so the CPU still decodes one instruction starting at the same first byte, and it raises #UD
-//! there (SIGILL with the instruction pointer at the first prefix). The table is per process
-//! (runtime memory: copied by fork, fresh after execve). Unmapping or replacing a range drops
-//! its entries; `mremap` moves them.
+//! A site is keyed by the address the patch is written at, and keeps the bytes it replaced.
+//! The patch is `crate::arch::insn::PATCH`: on x86_64 `ud2` (`0F 0B`) over the two opcode
+//! bytes `0F C7` or `F3 90` (prefixes before them and the ModRM byte after them stay, so the
+//! CPU still decodes one instruction starting at the same first byte, and it raises #UD there:
+//! SIGILL with the instruction pointer at the first prefix); on arm64 `udf #0x7061` over the
+//! whole word. The table is per process (runtime memory: copied by fork, fresh after execve).
+//! Unmapping or replacing a range drops its entries; `mremap` moves them; `mprotect` updates
+//! the protection they record.
 
 use crate::raw::*;
 use core::cell::UnsafeCell;
@@ -16,17 +18,22 @@ const CAP: usize = 4096;
 #[repr(C)]
 pub struct Entry {
     pub addr: u64,
-    pub orig: [u8; 2],
+    /// The bytes the patch replaced (the first `PATCH.len()`).
+    pub orig: [u8; 4],
     /// `proto::insn::SiteKind` as u8.
     pub kind: u8,
-    _pad: [u8; 5],
+    /// The mapping's protection bits (low byte): arm64 asks whether the page is guarded
+    /// (`PROT_BTI`).
+    pub prot: u8,
+    _pad: [u8; 2],
 }
 
 const EMPTY: Entry = Entry {
     addr: 0,
-    orig: [0; 2],
+    orig: [0; 4],
     kind: 0,
-    _pad: [0; 5],
+    prot: 0,
+    _pad: [0; 2],
 };
 
 /// Sorted by address: lookups are a binary search, range operations touch only their entries.
@@ -67,7 +74,7 @@ pub fn lookup(addr: u64) -> Option<Entry> {
     (i < t.n && t.e[i].addr == addr).then(|| t.e[i])
 }
 
-fn insert(addr: u64, orig: [u8; 2], kind: u8) -> bool {
+fn insert(addr: u64, orig: [u8; 4], kind: u8, prot: u8) -> bool {
     let t = table();
     let i = lower(t, addr);
     if i < t.n && t.e[i].addr == addr {
@@ -81,7 +88,8 @@ fn insert(addr: u64, orig: [u8; 2], kind: u8) -> bool {
         addr,
         orig,
         kind,
-        _pad: [0; 5],
+        prot,
+        _pad: [0; 2],
     };
     t.n += 1;
     true
@@ -93,7 +101,7 @@ pub fn forget(a: u64, len: u64) {
     if t.n == 0 {
         return;
     }
-    let (i, j) = (lower(t, a), lower(t, a.saturating_add(len)));
+    let (i, j) = (lower(t, a), lower(t, page_end(a, len)));
     if i < j {
         t.e.copy_within(j..t.n, i);
         t.n -= j - i;
@@ -112,33 +120,52 @@ pub fn relocate(old: u64, len: u64, new: u64) {
     moved[..k].copy_from_slice(&t.e[i..i + k]);
     forget(old, len);
     for m in &moved[..k] {
-        insert(new + (m.addr - old), m.orig, m.kind);
+        insert(new + (m.addr - old), m.orig, m.kind, m.prot);
+    }
+}
+
+/// `mprotect` gave `[a, a + len)` the protection `prot`: the entries there record it.
+pub fn reprotect(a: u64, len: u64, prot: u64) {
+    let t = table();
+    let (i, j) = (lower(t, a), lower(t, page_end(a, len)));
+    for e in &mut t.e[i..j] {
+        e.prot = prot as u8;
     }
 }
 
 const PAGE: u64 = 4096;
 
-/// Overwrite the opcode at `op` with `ud2` and record the site. `writable`: the mapping is
-/// writable right now (the loader's segments before their final protection); otherwise the
-/// pages are made writable for the write and given back `prot`. The mapping is private, so
-/// the write makes a private copy of the page. Returns false if the table is full.
+/// The end of `[a, a + len)` rounded up to a page, as `munmap` and `mprotect` take it.
+fn page_end(a: u64, len: u64) -> u64 {
+    a.saturating_add(len).saturating_add(PAGE - 1) & !(PAGE - 1)
+}
+
+/// Write the patch at `op` and record the site. `writable`: the mapping is writable right now
+/// (the loader's segments before their final protection); otherwise the pages are made
+/// writable for the write and given back `prot`. The mapping is private, so the write makes a
+/// private copy of the page. Returns false if the table is full.
 pub fn patch(op: u64, kind: u8, writable: bool, prot: u64) -> bool {
-    let orig = unsafe { [*(op as *const u8), *((op + 1) as *const u8)] };
-    if !insert(op, orig, kind) {
+    let bytes = crate::arch::insn::PATCH;
+    let n = bytes.len() as u64;
+    let mut orig = [0u8; 4];
+    for (k, o) in orig.iter_mut().enumerate().take(bytes.len()) {
+        *o = unsafe { *((op + k as u64) as *const u8) };
+    }
+    if !insert(op, orig, kind, prot as u8) {
         return false;
     }
     let lo = op & !(PAGE - 1);
-    let hi = (op + 2 + PAGE - 1) & !(PAGE - 1);
+    let hi = (op + n + PAGE - 1) & !(PAGE - 1);
     if !writable {
         let r = unsafe { sc3(nr::MPROTECT, lo, hi - lo, prot | PROT_WRITE) };
         if r != 0 {
             crate::sup::host_error(r, nr::MPROTECT, proto::ctl::HE_SYSCALL);
         }
     }
-    unsafe {
-        core::ptr::write_volatile(op as *mut u8, 0x0f);
-        core::ptr::write_volatile((op + 1) as *mut u8, 0x0b);
+    for (k, &b) in bytes.iter().enumerate() {
+        unsafe { core::ptr::write_volatile((op + k as u64) as *mut u8, b) };
     }
+    crate::arch::insn::sync_code(op, n);
     if !writable {
         let r = unsafe { sc3(nr::MPROTECT, lo, hi - lo, prot) };
         if r != 0 {

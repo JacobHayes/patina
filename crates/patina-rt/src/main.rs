@@ -11,10 +11,6 @@ mod exec;
 mod fault;
 mod guest;
 mod inject;
-#[cfg(target_arch = "x86_64")]
-mod insn;
-#[cfg(target_arch = "aarch64")]
-#[path = "arch/aarch64/standin/insn.rs"]
 mod insn;
 mod loader;
 mod log;

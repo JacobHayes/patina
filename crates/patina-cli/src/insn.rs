@@ -1,10 +1,12 @@
 //! `patina __insn-scan FILE...`: run the runtime's site scanner (`proto::insn`) over the executable
-//! segments of ELF files and print every candidate with its verdict.
-//! `patina __insn-scan --decode-check`: read `objdump -d -w` instruction lines on stdin and compare
-//! the decoder's length with the disassembler's for every instruction.
+//! segments (on arm64: sections) of ELF files and print every candidate with its verdict.
+//! `patina __insn-scan --decode-check` (x86_64): read `objdump -d -w` instruction lines on stdin
+//! and compare the decoder's length with the disassembler's for every instruction.
 
 use crate::cli::Res;
+#[cfg(target_arch = "x86_64")]
 use proto::insn::{candidates, confirm, decode, Verdict};
+#[cfg(target_arch = "x86_64")]
 use std::io::BufRead;
 use std::process::ExitCode;
 
@@ -19,6 +21,7 @@ fn u64_at(d: &[u8], o: usize) -> u64 {
 }
 
 /// Function symbol addresses (link-time) from `.symtab` and `.dynsym`.
+#[cfg(target_arch = "x86_64")]
 pub fn func_symbols(d: &[u8]) -> Vec<u64> {
     let mut out = vec![];
     let shoff = u64_at(d, 0x28) as usize;
@@ -54,6 +57,7 @@ pub fn func_symbols(d: &[u8]) -> Vec<u64> {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 fn scan_file(path: &str) -> Res<()> {
     let d = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     if d.len() < 64 || &d[..4] != b"\x7fELF" {
@@ -109,7 +113,68 @@ fn scan_file(path: &str) -> Res<()> {
     Ok(())
 }
 
+/// arm64: every word of each executable section (`SHF_EXECINSTR`) under the rule. Prints
+/// `cand FILE ADDR real|data KIND` for each candidate: `data` when a literal load reads it.
+#[cfg(target_arch = "aarch64")]
+fn scan_file(path: &str) -> Res<()> {
+    let d = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+    if d.len() < 64 || &d[..4] != b"\x7fELF" {
+        return Err(format!("{path}: not an ELF file"));
+    }
+    let shoff = u64_at(&d, 0x28) as usize;
+    let (shentsize, shnum) = (u16_at(&d, 0x3a) as usize, u16_at(&d, 0x3c) as usize);
+    let (mut real, mut data) = (0, 0);
+    for i in 0..shnum {
+        let s = shoff + i * shentsize;
+        if s + 64 > d.len() {
+            break;
+        }
+        let (typ, flags) = (u32_at(&d, s + 4), u64_at(&d, s + 8));
+        // SHF_EXECINSTR, not SHT_NOBITS
+        if flags & 4 == 0 || typ == 8 {
+            continue;
+        }
+        let (addr, off, size) = (
+            u64_at(&d, s + 0x10),
+            u64_at(&d, s + 0x18) as usize,
+            u64_at(&d, s + 0x20) as usize,
+        );
+        let skip = ((4 - addr % 4) % 4) as usize;
+        let (start, end) = (off + skip, (off + size).min(d.len()));
+        if start >= end {
+            continue;
+        }
+        let words: Vec<u32> = d[start..end]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|w| u32::from_le_bytes(*w))
+            .collect();
+        let base = addr + skip as u64;
+        proto::insn::sites(&words, base, |k, r| {
+            let (what, kind) = match r {
+                Ok(k) => {
+                    real += 1;
+                    ("real", k)
+                }
+                Err(k) => {
+                    data += 1;
+                    ("data", k)
+                }
+            };
+            println!(
+                "cand\t{path}\t{:#x}\t{what}\t{}",
+                base + 4 * k as u64,
+                kind.name()
+            );
+        });
+    }
+    println!("total\t{path}\taccepted={real}\trejected-data={data}");
+    Ok(())
+}
+
 /// Lines like `  401000:\t0f c7 f0             \trdrand %eax`: compare lengths.
+#[cfg(target_arch = "x86_64")]
 fn decode_check() -> Res<()> {
     let (mut n, mut bad, mut skipped) = (0u64, 0u64, 0u64);
     for line in std::io::stdin().lock().lines() {
@@ -154,7 +219,11 @@ fn decode_check() -> Res<()> {
 
 pub fn main(args: &[String]) -> Res<ExitCode> {
     if args.first().map(String::as_str) == Some("--decode-check") {
+        #[cfg(target_arch = "x86_64")]
         decode_check()?;
+        #[cfg(not(target_arch = "x86_64"))]
+        return Err("--decode-check checks the x86-64 length decoder".into());
+        #[cfg(target_arch = "x86_64")]
         return Ok(ExitCode::SUCCESS);
     }
     for p in args {

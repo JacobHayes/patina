@@ -1,22 +1,28 @@
 //! Instruction channels: the ways guest code can read something that varies from run to
 //! run without a system call.
 //!
-//! - `tsc`: `rdtsc`/`rdtscp` fault under `PR_SET_TSC` and are answered from virtual time
-//!   (complete: every occurrence faults, wherever the code came from).
-//! - `scan` + `patch`: `rdrand`/`rdseed` sites in executable file mappings are found when the
-//!   mapping appears (loader, `mmap`, `mprotect`) and overwritten with `ud2`; `emulate` answers
-//!   the SIGILL from the seeded entropy stream. Only addresses in the side table are emulated:
-//!   any other `ud2` is the guest's own and goes to its SIGILL disposition. Code that is not a
-//!   scanned file mapping (anonymous memory made executable) is counted, not scanned.
+//! - `tsc`: the counter (`rdtsc`/`rdtscp`; on arm64 `mrs` of `CNTVCT_EL0`, `CNTVCTSS_EL0`,
+//!   `CNTFRQ_EL0`) faults under `PR_SET_TSC` and is answered from virtual time (complete:
+//!   every occurrence faults, wherever the code came from).
+//! - `scan` + `patch`: sites in executable file mappings (`rdrand`/`rdseed`; `RNDR`/`RNDRRS`;
+//!   the pause hints) are found when the mapping appears (loader, `mmap`, `mprotect`) and
+//!   overwritten with an undefined instruction; `emulate` answers the SIGILL. Only addresses in
+//!   the side table are emulated: any other undefined instruction is the guest's own and goes to
+//!   its SIGILL disposition. Code that is not a scanned file mapping (anonymous memory made
+//!   executable) is counted, not scanned.
+//!
+//! What differs by architecture (the rule, the emulators, the record codes) is
+//! `crate::arch::insn`; the mappings, the side table and the write are here.
 //!
 //! Counters live in the control region (`proto::ctl::InsnCtl`) and become the outcome fields
 //! `patched_sites`, `emulated` and `unscanned_exec_mappings`.
 
-pub mod emulate;
 pub mod patch;
 pub mod scan;
-pub mod tsc;
 
+pub use crate::arch::insn::{emulate, tsc};
+
+use crate::arch::Frame;
 use crate::state::ctl;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
@@ -27,4 +33,22 @@ pub fn bump(c: &AtomicU64, n: u64) {
 
 pub fn count_emulated(i: usize) {
     bump(&ctl().insn.emulated[i], 1);
+}
+
+/// A patched pause hint at `pc` (`len` bytes, record code `code`): a scheduling point. The
+/// runtime charges virtual time, records it, and yields to the supervisor as `sched_yield`
+/// does. Under one-thread-at-a-time scheduling a thread that executes a pause hint is waiting
+/// for another thread, so handing over loses nothing.
+pub fn pause_point(frame: &mut Frame, pc: u64, len: u64, code: u32) -> bool {
+    let ts = crate::state::thread();
+    let c = ctl();
+    ts.seq = c.seq.load(Relaxed) + 1;
+    c.seq.store(ts.seq, Relaxed);
+    let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
+    c.vclock_ns.store(t, Relaxed);
+    bump(&c.sched.pause_points, 1);
+    frame.set_pc(pc + len);
+    crate::log::insn(code, pc, 0);
+    crate::sup::call_sup(proto::ctl::Op::Yield, [0; 6]);
+    true
 }

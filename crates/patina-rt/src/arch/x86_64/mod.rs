@@ -4,6 +4,7 @@
 mod cmem;
 mod entry;
 mod guest;
+pub mod insn;
 mod sigframe;
 mod stub;
 mod thread;

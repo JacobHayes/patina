@@ -40,7 +40,7 @@ impl KernelStart {
     fn arg(&self, i: usize) -> &'static [u8] {
         unsafe { cstr(*self.argv.add(i)) }
     }
-    fn aux(&self, t: u64) -> Option<u64> {
+    pub fn aux(&self, t: u64) -> Option<u64> {
         unsafe {
             let mut p = self.auxv;
             while (*p)[0] != 0 {
@@ -97,6 +97,7 @@ struct Phdr {
 const PT_LOAD: u32 = 1;
 const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
+const PT_GNU_PROPERTY: u32 = 0x6474_e553;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 use proto::abi::ELF_MACHINE;
@@ -121,8 +122,40 @@ fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
 }
 
-/// Map an ELF image. `path` must be NUL-terminated.
-pub fn load(path: &[u8], dyn_base: u64) -> Image {
+/// The `pr_type` property's word in the image's `NT_GNU_PROPERTY_TYPE_0` note, 0 if absent.
+fn gnu_property(fd: u64, ph: &[Phdr], pr_type: u32) -> u32 {
+    let Some(p) = ph.iter().find(|p| p.typ == PT_GNU_PROPERTY) else {
+        return 0;
+    };
+    let mut b = [0u8; 256];
+    let n = (p.filesz as usize).min(b.len());
+    if unsafe { sc4(nr::PREAD64, fd, b.as_mut_ptr() as u64, n as u64, p.offset) } != n as i64 {
+        return 0;
+    }
+    let u = |i: usize| {
+        b.get(i..i + 4)
+            .map_or(0, |w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+    };
+    // namesz, descsz, type (NT_GNU_PROPERTY_TYPE_0), "GNU\0", then the properties: type,
+    // size, data padded to 8.
+    let (namesz, descsz) = (u(0) as usize, u(4) as usize);
+    if u(8) != 5 || namesz != 4 || &b[12..16] != b"GNU\0" {
+        return 0;
+    }
+    let end = (16 + descsz).min(n);
+    let mut i = 16;
+    while i + 8 <= end {
+        let (t, sz) = (u(i), u(i + 4) as usize);
+        if t == pr_type && sz >= 4 && i + 12 <= end {
+            return u(i + 8);
+        }
+        i += 8 + ((sz + 7) & !7);
+    }
+    0
+}
+
+/// Map an ELF image. `path` must be NUL-terminated. `interp`: this is the interpreter.
+pub fn load(path: &[u8], dyn_base: u64, interp: bool) -> Image {
     unsafe {
         let fd = sc4(
             nr::OPENAT,
@@ -179,6 +212,16 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
             interp_len: 0,
         };
 
+        // The kernel adds protection bits (arm64: `PROT_BTI`) to the executable segments of the
+        // image it maps itself: the interpreter, or a program without one. So does this loader;
+        // the interpreter does it for the rest.
+        let own = interp || !ph[..phnum].iter().any(|p| p.typ == PT_INTERP);
+        let exec_extra = if own {
+            crate::arch::insn::image_prot(|t| gnu_property(fd, &ph[..phnum], t))
+        } else {
+            0
+        };
+
         // Span of all PT_LOAD segments, reserved first so gaps stay ours.
         let (mut lo, mut hi) = (u64::MAX, 0u64);
         for p in &ph[..phnum] {
@@ -226,7 +269,11 @@ pub fn load(path: &[u8], dyn_base: u64) -> Image {
                     let va = base + p.vaddr - off_in_page;
                     let prot = (if p.flags & 4 != 0 { PROT_READ } else { 0 })
                         | (if p.flags & 2 != 0 { PROT_WRITE } else { 0 })
-                        | (if p.flags & 1 != 0 { PROT_EXEC } else { 0 });
+                        | (if p.flags & 1 != 0 {
+                            PROT_EXEC | exec_extra
+                        } else {
+                            0
+                        });
                     let flen = p.filesz + off_in_page;
                     let fmap = page_up(flen);
                     let mend = page_up(p.vaddr + p.memsz) + base;
@@ -389,11 +436,11 @@ pub fn start(k: &KernelStart) -> ! {
     comm[..n].copy_from_slice(&base[..n]);
     unsafe { sc2(nr::PRCTL, 15, comm.as_ptr() as u64) }; // PR_SET_NAME
 
-    let exe = load(&p.guest_path[..=path.len()], EXE_BASE);
+    let exe = load(&p.guest_path[..=path.len()], EXE_BASE, false);
     let mut entry = exe.entry;
     let mut ibase = 0;
     if exe.interp_len > 0 {
-        let li = load(&exe.interp[..=exe.interp_len], INTERP_BASE);
+        let li = load(&exe.interp[..=exe.interp_len], INTERP_BASE, true);
         entry = li.entry;
         ibase = li.base;
     }

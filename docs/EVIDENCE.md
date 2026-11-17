@@ -53,7 +53,7 @@ runs each seed once; repeating runs buys nothing per run.
 | Entry | Label |
 |---|---|
 | JIT code (anonymous executable memory) is not scanned for `rdrand`/`rdseed` | `unscanned_exec_mappings` |
-| Core identity: `cpuid` APIC fields, `rdpid`, `lsl` CPU number (shown: insn-probe, 20 comparisons; no workload) | `insn_scan.rdpid_sites`; others show as a divergence |
+| Core identity: `cpuid` APIC fields, `rdpid`, `lsl` CPU number (shown: insn-probe, 20 comparisons; no workload) | `insn_scan.rdpid_sites` (arm64: `PACGA`, `pacga_sites`); others show as a divergence |
 | XSAVE in-use bits (`xgetbv(1)`, FP headers) (argued; never varied) | none |
 | In-flight descriptors freed by unix-socket GC (shown: scmrights) | `unix_sockets_in_flight` |
 | Changes to host files under `/usr` | none; replay diverges at the first read |
@@ -167,6 +167,52 @@ Counter preemption on Intel: on an Intel Xeon 6975P-C (CI runner with a PMU),
 `06-migrate` gave 5 different digests in 5 runs, and the race seed `03-races` relies on no
 longer found the double spend. Counter preemption is therefore refused on every CPU but AMD
 family 0x1a, and a seed reproduces only on the same family.
+
+## Instruction sites on arm64
+
+Measured 2026-11-17 on the arm64 development VM (Apple M4, Ubuntu 24.04, Linux 7.0) and a
+GitHub `ubuntu-24.04-arm` runner (Neoverse-N2, 7.0.0-1017-azure). The census is `./check
+evidence insn/evidence-census` (`tests/insn/lib/census.py --summary` over `/usr/bin`,
+`/usr/sbin`, `/usr/lib`, `/usr/libexec`): every aligned word of every executable section that
+matches a site the scan would patch, classed by whether a literal load of the same file reads
+it, or a `$d` mapping symbol marks it as data.
+
+| | Dev VM | Runner |
+|---|---|---|
+| ELF files, words of executable sections | 2,493, 121.2 M | 4,421, 502.9 M |
+| Words read by literal loads; words under `$d` | 2,101; 18,714 | 24,274; 217,663 |
+| Pause hints in executable sections | 115 (`isb` 72, `yield` 43) | 1,066 (`isb` 966, `yield` 62, `wfe` 38) |
+| `RNDR`/`RNDRRS`, `PACGA`, counter reads | 0, 0, 27 | 12, 0, 283 |
+| Of those, read by a literal load or under `$d` | 0 | 0 |
+| Matches in non-executable sections (not scanned) | `pacga` 17, pause 4 | `pacga` 81, pause 19 |
+
+No literal-pool word in either census collides with a site, so the literal-load guard is a
+guard, not a filter that changes what is patched; `insn/09` checks it on a guest that puts
+the `yield` encoding in a literal pool. Data reached otherwise (a table addressed by `adr`)
+cannot be told from code; the census found no `$d`-marked word that matches either, which is
+why the policy is to patch every match the literal guard leaves.
+
+Which spin-waits carry a hint, from their disassembly: glibc 2.39 `pthread_spin_lock` has
+none (a load and branch loop; glibc's arm64 libc has no `yield`, `isb`, `wfe` or `wfi`); Rust
+`spin_loop` is `isb` (the spin phase of `std::sync::Mutex` and `RwLock` too); Go 1.27
+`procyield` is `isb`, older Go `yield`; libuv and libcurl use `yield`; CPython 3.14 has `wfe`.
+Other `isb` sites are cache maintenance after writing code (CPython, libffi, libgcc_s, pcre2)
+and straight-line-speculation padding after `ret` (40 in libgcrypt, never executed). Patching
+an `isb` keeps its meaning: the exception taken on the patch and the return from it are
+context synchronization events. Cost of one hint, native, per execution: dev VM `yield`
+0.3 ns, `isb` 8.5 ns, `wfi` 90 ns, `wfe` 1.3 us; runner `isb` 9.4 ns, `wfi` 130-145 ns, `wfe`
+6-15 us.
+
+| Check (arm64 development VM) | Result |
+|---|---|
+| Spin table (`insn/10`), pause points on | own spin lock (`yield`) and Rust spin lock (`isb`) `ok`, 5 runs one digest; the same lock without a hint and glibc's spin lock `compute-stall` |
+| `insn/06` scanner audit (ld.so, libc, libstdc++, libcrypto, libffi, libgcrypt, python3, Go, Rust, the insn guests) | every site the census finds is patched, none in data |
+| BTI (`arm64/09`): static and dynamic programs marked BTI, `isb` spin through an indirect call; a signal handler in a `-z force-bti` shared object | `ok`, one digest; an indirect call to a non-landing pad dies of `SIGILL` in both (the patch is not a landing pad and the runtime does not answer a branch-target fault); a handler with a landing pad runs, one without dies of `SIGILL`, as natively |
+| Hosts: `RNDR` (`HWCAP2_RNG`), BTI, execute-only pages | dev VM: no, yes, yes; runner: no, no, no |
+
+Execute-only patched pages (so a guest cannot read the patch) were not built: the runner
+cannot make them, and every literal-pool read from a patched page would fault and need a
+load emulator.
 
 ## Compute points
 
@@ -408,8 +454,11 @@ and `get`/`setpriority`; anything outside Linux x86_64.
 - Processes: another process's `/proc/<pid>` is refused (`ps` sees nothing); `fork` or a thread
   `clone` inside a vfork child ends the run; `wait4` rusage is zero; unusual `clone` flag sets
   end the run.
-- Instruction scanning: 4,096 patched sites per process (`rdrand`, `rdseed` and `pause`); shared
-  executable file mappings are not scanned (labelled).
+- Instruction scanning: 4,096 patched sites per process (`rdrand`, `rdseed` and `pause`; arm64
+  `RNDR`, `RNDRRS` and the four hints); shared executable file mappings are not scanned
+  (labelled); a page holding a patched site is a private copy and shows as its own line in
+  `/proc/self/maps` (arm64: libpcre2's one `isb` adds two lines to `grep`'s maps). On arm64, data in text not read by a literal load is patched if it matches (none
+  found, above); `CNTPCT_EL0` and `RNDR` on a host without it raise `SIGILL` as without Patina.
 - Storage: the ext4 model treats preallocated holes as in place (more generous than ext4);
   F4's state has not been produced on a real device; the materialiser holds the whole log in
   memory; `/tmp` is not tracked; the initial tree has no times (virtual epoch).

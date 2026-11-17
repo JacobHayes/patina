@@ -245,13 +245,15 @@ pub fn net_add(a: &mut [u64; NET_FIELDS], b: &[u64; NET_FIELDS]) {
 /// Instruction-channel counters, as in `proto::ctl::InsnCtl`, summed over incarnations.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InsnCounts {
-    /// By `proto::insn::SiteKind`: [unused, rdrand, rdseed, rdpid, pause].
+    /// By `proto::insn::SiteKind`: [unused, rdrand, rdseed, rdpid, pause] on x86_64, [unused,
+    /// rndr, rndrrs, pacga, pause] on arm64.
     pub patched: [u64; 5],
     /// By `proto::ctl::INSN_*`.
     pub emulated: [u64; 5],
     pub unscanned_exec_mappings: u64,
     pub rejected_sites: u64,
-    pub rdpid_sites: u64,
+    /// `rdpid` sites on x86_64, `pacga` sites on arm64: counted, not patched.
+    pub counted_sites: u64,
     pub scanned_mappings: u64,
     pub scanned_bytes: u64,
     pub table_full: u64,
@@ -269,7 +271,7 @@ impl InsnCounts {
         }
         o.unscanned_exec_mappings = c.unscanned_exec_mappings.load(Relaxed);
         o.rejected_sites = c.rejected_sites.load(Relaxed);
-        o.rdpid_sites = c.rdpid_sites.load(Relaxed);
+        o.counted_sites = c.counted_sites.load(Relaxed);
         o.scanned_mappings = c.scanned_mappings.load(Relaxed);
         o.scanned_bytes = c.scanned_bytes.load(Relaxed);
         o.table_full = c.table_full.load(Relaxed);
@@ -284,7 +286,7 @@ impl InsnCounts {
         }
         self.unscanned_exec_mappings += b.unscanned_exec_mappings;
         self.rejected_sites += b.rejected_sites;
-        self.rdpid_sites += b.rdpid_sites;
+        self.counted_sites += b.counted_sites;
         self.scanned_mappings += b.scanned_mappings;
         self.scanned_bytes += b.scanned_bytes;
         self.table_full += b.table_full;
@@ -295,14 +297,19 @@ impl InsnCounts {
             .zip(self.emulated)
             .map(|(n, v)| (n.to_string(), json!(v)))
             .collect();
+        // The names of the patched kinds and of the counted one, per architecture.
+        #[cfg(target_arch = "x86_64")]
+        let (patched, counted) = (["rdrand", "rdseed"], "rdpid_sites");
+        #[cfg(target_arch = "aarch64")]
+        let (patched, counted) = (["rndr", "rndrrs"], "pacga_sites");
         json!({
-            "patched_sites": { "rdrand": self.patched[1], "rdseed": self.patched[2], "pause": self.patched[4] },
+            "patched_sites": { patched[0]: self.patched[1], patched[1]: self.patched[2], "pause": self.patched[4] },
             "emulated": em,
             "scan": {
                 "mappings": self.scanned_mappings,
                 "bytes": self.scanned_bytes,
                 "rejected_sites": self.rejected_sites,
-                "rdpid_sites": self.rdpid_sites,
+                counted: self.counted_sites,
                 "table_full": self.table_full,
             },
         })
@@ -373,6 +380,11 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     });
     if let Some(cp) = e.compute.json(e.pmu.is_some()) {
         r["compute"] = cp;
+    }
+    // `PACGA` reads a key the kernel redraws at every exec and that cannot be turned off: a
+    // program that executes it differs run to run, so its sites are a label.
+    if cfg!(target_arch = "aarch64") {
+        r["labels"]["pacga_sites"] = json!(e.insn.counted_sites);
     }
     r
 }

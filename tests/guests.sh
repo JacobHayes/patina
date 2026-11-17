@@ -22,11 +22,11 @@ sets=$base/guests/sets
 mkdir -p "$cache" "$sets" "$PATINA_BUILD_DIR"
 
 workload_style=" c-sqlite cpython fjall-harness go-static rust-threads-files shell-pipeline tokio-mt "
-# During the arm64 port the guests of the parts not ported yet are not built there: x86
-# instructions (insn, counters), the SDKs and compute points (sdk, compute, examples, costs).
+# During the arm64 port the guests of the parts not ported yet are not built there: branch
+# counters (counters), the SDKs and compute points (sdk, compute, examples).
 case $(uname -m) in
     x86_64) skipped="" ;;
-    *) skipped=" insn counters sdk compute examples costs " ;;
+    *) skipped=" counters sdk compute examples " ;;
 esac
 tools=$( (uname -m; gcc --version | head -1; rustc -V; go version; clang --version 2>/dev/null | head -1) | sha256sum | cut -c1-16)
 

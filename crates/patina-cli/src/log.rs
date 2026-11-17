@@ -104,6 +104,13 @@ pub fn describe(r: &Rec) -> String {
             0xd53be040 => "mrs cntvct_el0".to_string(),
             0xd53be0c0 => "mrs cntvctss_el0".to_string(),
             0xd53be000 => "mrs cntfrq_el0".to_string(),
+            0xd53b2400 => "mrs rndr".to_string(),
+            0xd53b2420 => "mrs rndrrs".to_string(),
+            // arm64 pause points: the original word.
+            0xd503203f => "yield".to_string(),
+            0xd503205f => "wfe".to_string(),
+            0xd503207f => "wfi".to_string(),
+            0xd5033fdf => "isb".to_string(),
             n => format!("{n:#x}"),
         },
         Some(RecKind::Preempt) => match r.nr {

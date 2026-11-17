@@ -260,8 +260,8 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
 - **The fault rates**: a preset's ranges (`--faults disk`), a key's own range, and
   `--fault swarm=1`, which turns each configured class off in half the seeds.
 - **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
-  system call switches threads; `[sched] pause-points = false` stops treating `pause` as a
-  scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
+  system call switches threads; `[sched] pause-points = false` stops treating the spin hint
+  (`pause`; on arm64 `yield`, `isb`, `wfe`, `wfi`) as a scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
   its thread pools. Each changes every seed's schedule, so the same seeds then show other
   runs; on their own they did not make the storage findings more frequent.
 - **A race with no system call in it.** Threads switch only at system calls, `pause`
@@ -521,7 +521,8 @@ identical: 3 runs in /tmp/patina/patina-out/verify-3
 ## Scheduling
 
 One thread of the program runs at a time; the seed picks the next one at each scheduling
-point. The points are every system call, every `pause` instruction (the hint in spin locks),
+point. The points are every system call, every spin hint (`pause`; on arm64 `yield`, `isb`,
+`wfe`, `wfi`),
 and spin-waits Patina detects: a thread that computes for 20 ms without a system call is
 stepped until it is found looping without changing anything, and yields there.
 

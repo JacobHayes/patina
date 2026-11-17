@@ -4,6 +4,7 @@
 
 mod entry;
 mod guest;
+pub mod insn;
 mod sigframe;
 mod stub;
 mod thread;
@@ -28,9 +29,10 @@ pub fn clone_args(a: [u64; 6]) -> [u64; 5] {
 }
 
 /// The value the program sees for an auxiliary vector entry copied from the kernel's: the
-/// host's (host-stable facts), less three features.
+/// host's (host-stable facts), less three features, plus `HWCAP2_RNG` when `RNDR` is answered
+/// from the seed on a host without it (`insn::rndr_on`, a test of that path).
 /// - `HWCAP_PACG`: the generic key cannot be disabled, so `PACGA` would give a different value
-///   in every run (the scan stops a program that has one, `insn`).
+///   in every run (the scan counts the program's sites, `insn`).
 /// - SME (`HWCAP2_SME` and every SME sub-feature, some in `AT_HWCAP`): with it hidden,
 ///   libraries that choose code by the auxiliary vector (glibc, language runtimes) never turn
 ///   on streaming mode or the ZA array, whose contents and vector length are the host's.
@@ -49,6 +51,7 @@ pub fn aux_value(t: u64, v: u64) -> u64 {
     const HWCAP_SME: u64 = 0x3f << 42;
     match t {
         AT_HWCAP => v & !(HWCAP_PACG | HWCAP_CPUID | HWCAP_SME),
+        AT_HWCAP2 if insn::rndr_on() => v & !HWCAP2_SME_ALL | insn::HWCAP2_RNG,
         AT_HWCAP2 => v & !HWCAP2_SME_ALL,
         _ => v,
     }

@@ -1,11 +1,14 @@
 #!/bin/sh
-# 10. Pause points. The spin table (glibc pthread_spin_lock, a C test-and-set lock with
-# `pause`, a Rust spin_loop lock; two threads, the holder makes a system call inside the
-# critical section) ends ok with the right count on seeds 1-3 with pause points, having
-# yielded at them; with pause points off it ends unsupported, stop compute-stall. One of
-# them gives one digest over 5 runs under --vary cpu,aslr. Spin probes are off throughout,
-# so that pause points alone are measured.
-#@ tier=quick budget=30 slots=4 arch=x86_64
+# 10. Pause points. The spin table (glibc pthread_spin_lock, a C test-and-set lock with the
+# spin hint (x86 `pause`, arm64 `yield`), a Rust spin_loop lock (x86 `pause`, arm64 `isb`); two
+# threads, the holder makes a system call inside the critical section) ends ok with the right
+# count on seeds 1-3 with pause points, having yielded at them; with pause points off it ends
+# unsupported, stop compute-stall; so does the C lock without the hint, with pause points on.
+# glibc's arm64 spin lock has no hint (a plain load loop, glibc 2.39): it is a no-hint lock
+# there and stalls with pause points on too (spin probes are its answer). One lock gives one
+# digest over 5 runs under --vary cpu,aslr. Spin probes are off throughout, so that pause
+# points alone are measured.
+#@ tier=quick budget=30 slots=5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-pause
 mkdir -p "$o"
@@ -21,7 +24,16 @@ one() { # NAME SEED on|off PROG ARGS...
 for spec in "glibc-spin /guest/spinwait glibc-spin" "own-spin /guest/spinwait own-spin" "rs-spin /guest/rs-spin spin"; do
     for s in 1 2 3; do echo "$spec" | (read -r n g m; one "$n" "$s" on "$g" "$m") & done
     echo "$spec" | (read -r n g m; one "$n" 1 off "$g" "$m") &
+    [ "$spec" != "${spec#own-spin}" ] && one nohint 1 on /guest/spinwait own-spin-nohint &
     wait
+done
+# The hinted locks; on arm64 glibc's is not one.
+hinted="own-spin rs-spin"
+if [ "$ARCH" = x86_64 ]; then hinted="glibc-spin $hinted"; else nohint="glibc-spin-1-on"; fi
+for d in nohint-1-on ${nohint:-}; do
+    r="$(field "$o/$d/result.json" outcome)/$(field "$o/$d/result.json" stop)"
+    [ "$r" = unsupported/compute-stall ] || die "$d (no hint), pause points on: $r $(field "$o/$d/result.json" message)"
+    echo "${d%-1-on} (no hint), pause points on: $r"
 done
 # Determinism with pause points: 5 runs under varied CPU and address layout, one digest.
 rm -rf "$o/verify"
@@ -30,7 +42,7 @@ timeout 60 "$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --config "$cfg_on"
 nd=$(for i in 0 1 2 3 4; do field "$o/verify/run-$i/result.json" digest; done | sort -u | wc -l)
 [ "$nd" = 1 ] || die "own-spin seed 2: $nd digests over 5 runs under --vary cpu,aslr"
 echo "own-spin seed 2: one digest over 5 runs under --vary cpu,aslr ($(field "$o/verify/run-0/result.json" sched.pause_points) pause points)"
-for n in glibc-spin own-spin rs-spin; do
+for n in $hinted; do
     for s in 1 2 3; do
         d=$o/$n-$s-on
         [ "$(field "$d/result.json" outcome)" = ok ] || die "$n seed $s: $(field "$d/result.json" outcome) $(field "$d/result.json" message)"

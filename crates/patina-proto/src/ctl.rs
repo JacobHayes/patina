@@ -37,6 +37,8 @@ pub struct Config {
     pub pmu_margin: u64,
     /// Scheduling points beyond traps (`SCHED_*` bits).
     pub sched: u64,
+    /// Instruction channels (`INSN_*` bits).
+    pub insn: u64,
     /// Virtual time charged to a pause point or a spin yield.
     pub spin_charge_ns: u64,
     /// Compute points (`crate::compute`): the run's mean gap in events (0: no seeded switches;
@@ -82,6 +84,11 @@ pub const SCHED_PAUSE_POINTS: u64 = 1;
 /// for a spin-wait whose iterations leave its state unchanged (`rt::spin`).
 pub const SCHED_SPIN_PROBE: u64 = 2;
 
+/// `Config::insn` (arm64): answer `RNDR`/`RNDRRS` from the seed and advertise them
+/// (`HWCAP2_RNG`) even on a host without them: the test of that path on such hosts
+/// (`[run] emulate-rndr`).
+pub const INSN_EMULATE_RNDR: u64 = 1;
+
 /// `Config::pmu`: counter preemption is on.
 pub const PMU_ON: u64 = 1;
 
@@ -102,6 +109,7 @@ impl Config {
             pmu_charge_ps: 0,
             pmu_margin: 0,
             sched: 0,
+            insn: 0,
             spin_charge_ns: 0,
             compute_gap: 0,
             compute_charge_ns: 0,
@@ -317,8 +325,8 @@ pub const TM_EXPORTED: usize = 5;
 /// Instruction-channel counters, summed over every process of the run.
 #[repr(C)]
 pub struct InsnCtl {
-    /// Sites patched to `ud2`, by `proto::insn::SiteKind` (index 1 rdrand, 2 rdseed, 3 rdpid,
-    /// 4 pause).
+    /// Sites patched, by `proto::insn::SiteKind` (x86_64: 1 rdrand, 2 rdseed, 4 pause; arm64:
+    /// 1 rndr, 2 rndrrs, 4 pause).
     pub patched: [AtomicU64; 5],
     /// Emulated executions, by `INSN_*` index.
     pub emulated: [AtomicU64; 8],
@@ -329,8 +337,9 @@ pub struct InsnCtl {
     /// sweep), and candidates beyond the per-mapping limit. A refused real site would run
     /// unpatched; the count makes that visible.
     pub rejected_sites: AtomicU64,
-    /// `rdpid` sites seen and left alone (it reads the pinned core: no system ELF file seen has one).
-    pub rdpid_sites: AtomicU64,
+    /// Sites seen and left alone, counted: `rdpid` on x86_64 (it reads the pinned core: no
+    /// system ELF file seen has one), `pacga` on arm64 (its key cannot be disabled).
+    pub counted_sites: AtomicU64,
     /// Executable file mappings scanned, and their bytes.
     pub scanned_mappings: AtomicU64,
     pub scanned_bytes: AtomicU64,
@@ -351,13 +360,18 @@ pub const INSN_RDSEED: usize = 3;
 pub const INSN_RDPID: usize = 4;
 #[cfg(target_arch = "x86_64")]
 pub const INSN_NAMES: &[&str] = &["rdtsc", "rdtscp", "rdrand", "rdseed", "rdpid"];
-/// arm64: reads of the counter (`CNTVCT_EL0`, `CNTVCTSS_EL0`) and of its frequency.
+/// arm64: reads of the counter (`CNTVCT_EL0`, `CNTVCTSS_EL0`) and of its frequency, and the
+/// random-number reads.
 #[cfg(target_arch = "aarch64")]
 pub const INSN_CNTVCT: usize = 0;
 #[cfg(target_arch = "aarch64")]
 pub const INSN_CNTFRQ: usize = 1;
 #[cfg(target_arch = "aarch64")]
-pub const INSN_NAMES: &[&str] = &["cntvct", "cntfrq"];
+pub const INSN_RNDR: usize = 2;
+#[cfg(target_arch = "aarch64")]
+pub const INSN_RNDRRS: usize = 3;
+#[cfg(target_arch = "aarch64")]
+pub const INSN_NAMES: &[&str] = &["cntvct", "cntfrq", "rndr", "rndrrs"];
 
 /// Blocking I/O state shared by the runtime and the supervisor.
 /// Written only by whoever holds the turn.
@@ -903,8 +917,6 @@ macro_rules! unported {
 unported! {
     UNPORTED_COUNTERS = 4: "branch-counter preemption",
     UNPORTED_COMPUTE = 5: "compute points",
-    UNPORTED_INSN = 6: "an instruction with a host-random result (RNDR, RNDRRS, PACGA) in program code",
-    UNPORTED_UNSCANNED = 7: "executable memory the instruction scan does not read (anonymous, shared, or made executable later)",
 }
 
 macro_rules! limits {

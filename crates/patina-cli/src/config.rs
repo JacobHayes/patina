@@ -97,8 +97,12 @@ pub struct Config {
     pub max_incarnations: u64,
     pub preempt_permille: u64,
     pub stall_ms: u64,
-    /// Every executed `pause` is a scheduling point (`[sched] pause-points`).
+    /// Every executed pause hint (`pause`; on arm64 `yield`, `wfe`, `wfi`, `isb`) is a
+    /// scheduling point (`[sched] pause-points`).
     pub pause_points: bool,
+    /// arm64: answer `RNDR`/`RNDRRS` from the seed and advertise them on a host without them
+    /// (`[run] emulate-rndr`; a test of that path: the default follows the host).
+    pub emulate_rndr: bool,
     /// Spin probes for a thread that computes without a boundary event (`[sched]
     /// spin-probes`; only with `--preempt traps`).
     pub spin_probes: bool,
@@ -134,6 +138,7 @@ impl Default for Config {
             preempt_permille: 100,
             stall_ms: 10_000,
             pause_points: true,
+            emulate_rndr: false,
             spin_probes: true,
             pmu: Pmu::default(),
             host_cpu: None,
@@ -562,6 +567,9 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
+                ("run", "emulate-rndr") if cfg!(target_arch = "aarch64") => {
+                    c.emulate_rndr = boolean(v, &at)?
+                }
                 ("faults", "crash") => c.crash = Some(string(v, &at)?),
                 ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
                 ("faults", "faults-in-recovery") => {

@@ -11,7 +11,7 @@ for kv in "$@"; do
         true | false | *[!0-9]* | '') case $v in true | false) ;; *) v="\"$v\"" ;; esac ;;
     esac
     case $k in
-        tmpfs-bytes | time-limit | timeout | cpus) run="$run$k = $v
+        tmpfs-bytes | time-limit | timeout | cpus | emulate-rndr) run="$run$k = $v
 " ;;
         fs-model | max-incarnations | faults-in-recovery) faults="$faults$k = $v
 " ;;

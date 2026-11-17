@@ -124,8 +124,9 @@ call (`disk-full`), never a fault on a store through the mapping.
 The scheduler can switch threads only where a thread enters the runtime. Those points are:
 
 - **System calls.** Every trap is a point.
-- **Pause points.** Every `pause` instruction (the hint in glibc's spin lock, Rust's
-  `spin_loop`, Go's spinning) is patched to trap and yields (`insn/`).
+- **Pause points.** Every spin hint is patched to trap and yields (`insn/`): `pause` on
+  x86_64 (glibc's spin lock, Rust's `spin_loop`, Go's spinning); on arm64 `yield`, `isb`
+  (Rust's `spin_loop`, Go's `procyield`), `wfe` and `wfi`. glibc's arm64 spin lock has no hint.
 - **Spin probes.** A thread that runs 20 ms of CPU time without a point is single-stepped
   until its loop repeats with nothing changed (registers, vector state, written pages). Such
   a loop waits for another thread, and its state there is the same in every run, so it
@@ -135,13 +136,28 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
 - **Compute points**, in code rebuilt with the compilers' coverage flags: the hooks count
   events and enter the runtime when a seeded number has run (below).
 
-`rdtsc`, `rdrand` and `rdseed` are answered from virtual time and the seed. Code generated
-at run time (a JIT) is not scanned for them; such mappings are counted in `result.json`.
+`rdtsc`, `rdrand` and `rdseed` (arm64: the counter-timer reads, `RNDR` and `RNDRRS`) are
+answered from virtual time and the seed. The counter faults wherever the code came from;
+code generated at run time (a JIT) is not scanned for the others, and such mappings are
+counted in `result.json` (`unscanned_exec_mappings`).
+
+On arm64 the scan is a compare under a mask of each aligned word of a file's executable
+sections (`proto/src/insn/aarch64.rs`), and a site becomes `udf #0x7061`. A word that a
+literal load of the same code reads is data and is left alone (`rejected_sites`); data in text
+reached otherwise (a table addressed by `adr` in a stripped file) cannot be told from code,
+and the census of every executable file on the dev VM and the CI runner found none that
+matches (docs/EVIDENCE.md). `RNDR` is answered only where the host has it (`HWCAP2_RNG`);
+elsewhere it raises `SIGILL` as it would without Patina (`[run] emulate-rndr` answers and
+advertises it anyway, to test that path). `PACGA` is counted and labelled (`labels.pacga_sites`), not patched. An
+`isb` that is not a spin hint loses nothing to the patch (the fault and the return from it
+synchronize the context as `isb` does). No landing pad is ever patched and `udf` is not one,
+so BTI checks fall where they would; an indirect branch to a site in a guarded page is the
+program's fault, not emulated.
 
 **compute-stall.** A thread that computes for 10 s of its own CPU time without a point,
 while another thread could run, ends the run `unsupported` with stop `compute-stall` and
 names the thread. The cause is a loop that changes state on each pass (a counter, a
-timestamp it computes) and contains no system call or `pause`. The fix is `--preempt
+timestamp it computes) and contains no system call or spin hint. The fix is `--preempt
 branches`, where the host allows it, or rebuilding that code with compute points (its message
 says both: the supervisor does not know whether the code is rebuilt). Rebuilt code does not
 reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
@@ -374,15 +390,19 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
   a program that reaches a part not ported yet ends the run `unsupported`, stop
-  `arm64-unported`, naming it (branch counters, spin probes, compute points, `RNDR` or `PACGA`
-  in program code, executable memory the scan does not read). Threads, fork, vfork and exec
-  work as on x86_64 (the clone trampoline is in `arch/aarch64/thread.rs`). The runtime
-  disables the pointer-authentication keys before anything else at every image start
-  (`arch/aarch64`): the kernel enables and redraws them at each exec. `PR_SET_TSC` makes the
-  counter-timer reads (`CNTVCT_EL0`, `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
+  `arm64-unported`, naming it (branch counters, spin probes, compute points). Threads, fork,
+  vfork, exec and signals work as on x86_64 (the clone trampoline is in
+  `arch/aarch64/thread.rs`); so do the instruction channels and pause points (above). The
+  runtime's loader maps a BTI-marked static program, or the interpreter, `PROT_BTI` as the
+  kernel does where the host has BTI; the interpreter does it for the program and its
+  libraries. The runtime disables the pointer-authentication keys before
+  anything else at every image start (`arch/aarch64`): the kernel enables and redraws them at
+  each exec. `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`, `CNTVCTSS_EL0`,
+  `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
   under Patina alike. CPU features reach the program as the host has them (`AT_HWCAP`,
   `AT_HWCAP2`, `AT_MINSIGSTKSZ`, the `Features` of `/proc/cpuinfo`), as `cpuid` does on x86_64:
-  two hosts of the same kind give the same run. Three are hidden: `PACGA` (its keys are off);
+  two hosts of the same kind give the same run. Three are hidden: `PACGA` (its key cannot be turned off and
+  is redrawn at each exec; a program that executes it anyway is labelled, `pacga_sites`);
   SME (with its ZA storage and streaming mode), so a program that asks before using a feature
   never enters SME state, whose contents and vector length are host-dependent; and `CPUID`,
   the kernel's emulation of the ID registers, whose `MIDR_EL1` names the core a thread runs

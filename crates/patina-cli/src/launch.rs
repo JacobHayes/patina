@@ -587,6 +587,9 @@ pub fn run_incarnation(
     if c.pause_points {
         cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
     }
+    if c.emulate_rndr {
+        cfg.insn |= proto::ctl::INSN_EMULATE_RNDR;
+    }
     let pmu_ev = pmu_event(o)?;
     // Counter preemption stops a spinning thread itself.
     if c.spin_probes && pmu_ev.is_none() {

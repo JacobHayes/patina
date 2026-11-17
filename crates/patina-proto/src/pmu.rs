@@ -6,7 +6,7 @@
 
 use crate::ctl::Config;
 use crate::draw::{draw, Stream};
-use crate::insn::decode;
+use crate::insn::x86_64::decode;
 
 /// `perf_event_attr::sig_data` of every counter: tells the runtime's SIGTRAP handler that a
 /// `TRAP_PERF` came from its own counter.
