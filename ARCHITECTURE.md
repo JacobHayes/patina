@@ -359,13 +359,23 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 ## Limits
 
 - **Linux x86_64; arm64 is being ported.** No macOS. bwrap and unprivileged user namespaces
-  are required. On arm64 (Linux 6.12 or later) a static program whose calls are those of a
-  small hello runs and reproduces; anything else ends the run `unsupported`, stop
-  `arm64-unported`, naming the call or the part reached (signals to the program, threads,
-  fork and exec, branch counters, spin probes, compute points, `RNDR`). The runtime disables
-  the pointer-authentication keys before anything else (`arch/aarch64`), and
-  `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`, `CNTFRQ_EL0`) fault, answered
-  from virtual time. Seeds and digests are per architecture.
+  are required. On arm64 (Linux 6.12 or later) every system call is served as on x86_64 (the
+  structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
+  a program that reaches a part not ported yet ends the run `unsupported`, stop
+  `arm64-unported`, naming it (signal delivery to a handler, threads and vfork, branch
+  counters, spin probes, compute points, `RNDR` or `PACGA` in program code, executable memory
+  the scan does not read). The runtime disables the pointer-authentication keys before
+  anything else (`arch/aarch64`); `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`,
+  `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
+  under Patina alike. CPU features reach the program as the host has them (`AT_HWCAP`,
+  `AT_HWCAP2`, `AT_MINSIGSTKSZ`, the `Features` of `/proc/cpuinfo`), as `cpuid` does on x86_64:
+  two hosts of the same kind give the same run. Three are hidden: `PACGA` (its keys are off);
+  SME (with its ZA storage and streaming mode), so a program that asks before using a feature
+  never enters SME state, whose contents and vector length are host-dependent; and `CPUID`,
+  the kernel's emulation of the ID registers, whose `MIDR_EL1` names the core a thread runs
+  on. A program that executes SME instructions or reads ID registers without asking is not
+  stopped. Seeds and digests are per architecture and per kind of host: the host's own
+  libraries and `/etc/ld.so.cache` are inputs of a dynamic program's run.
 - **A seed reproduces for the same program binary and the same Patina build, on the same kind
   of host.** `run.json` records both binaries' SHA-256 (`patina` is the version and the hash of
   the `patina` binary); replay, minimize and `run --config RUNDIR/run.json` refuse a run whose

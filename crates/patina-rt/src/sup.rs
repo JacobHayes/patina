@@ -116,26 +116,6 @@ pub fn unported(part: u64) -> ! {
     hang()
 }
 
-/// End the run `unsupported`, stop `arm64-unported`, naming the system call `nr` (one this
-/// slice of the port does not serve). The record is written first so the log shows where.
-#[allow(dead_code)]
-pub fn unported_call(call: &mut dyn crate::trap::Call, row: &'static proto::table::Row) -> ! {
-    call.thread().eff_class = proto::table::Class::Stop.code();
-    crate::log::trap(row, call, -e::ENOSYS);
-    call_sup_raw(
-        Op::HostError,
-        [
-            proto::ctl::UNPORTED_CALL,
-            call.nr(),
-            proto::ctl::HE_UNPORTED,
-            0,
-            0,
-            0,
-        ],
-    );
-    hang()
-}
-
 /// End the run: program code reached into the runtime (`proto::ctl::HE_CONTAINMENT`).
 pub fn containment(kind: u64, addr: u64, rip: u64, store: bool) -> ! {
     call_sup_raw(

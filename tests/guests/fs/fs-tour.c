@@ -1,7 +1,9 @@
 // files fs-tour: every call of the files classes at least once on /work, through raw syscalls,
 // printing every return value and every byte of every stat/statx/statfs/getdents buffer.
 // Lines whose answer is virtual by design (limits, system information, refused interfaces)
-// start with "virt "; the differential test masks their values.
+// start with "virt "; the differential test masks their values. On an architecture without
+// a legacy call (arm64 has no open, stat, mkdir...) its line makes the call's *at form; utimes,
+// futimesat, utime and getdents, which have no equivalent, are left out there.
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +24,42 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#ifndef SYS_open // the generic table (arm64): the *at forms the legacy calls stand for
+#define SYS_open SYS_openat, AT_FDCWD
+#define SYS_creat SYS_openat, AT_FDCWD
+#define CREAT_FLAGS O_CREAT | O_WRONLY | O_TRUNC,
+#define SYS_mkdir SYS_mkdirat, AT_FDCWD
+#define SYS_mknod SYS_mknodat, AT_FDCWD
+#define SYS_readlink SYS_readlinkat, AT_FDCWD
+#define SYS_access SYS_faccessat, AT_FDCWD
+#define SYS_chmod SYS_fchmodat, AT_FDCWD
+#define SYS_eventfd SYS_eventfd2
+#define SYMLINK(t, l) syscall(SYS_symlinkat, t, AT_FDCWD, l)
+#define LINK(a, b) syscall(SYS_linkat, AT_FDCWD, a, AT_FDCWD, b, 0)
+#define STAT(p, b) syscall(SYS_newfstatat, AT_FDCWD, p, b, 0)
+#define LSTAT(p, b) syscall(SYS_newfstatat, AT_FDCWD, p, b, AT_SYMLINK_NOFOLLOW)
+#define CHOWN(p, u, g) syscall(SYS_fchownat, AT_FDCWD, p, u, g, 0)
+#define UNLINK(p) syscall(SYS_unlinkat, AT_FDCWD, p, 0)
+#define LCHOWN(p, u, g) syscall(SYS_fchownat, AT_FDCWD, p, u, g, AT_SYMLINK_NOFOLLOW)
+#define RENAME(a, b) syscall(SYS_renameat, AT_FDCWD, a, AT_FDCWD, b)
+#define RMDIR(p) syscall(SYS_unlinkat, AT_FDCWD, p, AT_REMOVEDIR)
+#define DUP2(a, b) syscall(SYS_dup3, a, b, 0)
+#define PIPE(p) syscall(SYS_pipe2, p, 0)
+#else
+#define CREAT_FLAGS
+#define SYMLINK(t, l) syscall(SYS_symlink, t, l)
+#define LINK(a, b) syscall(SYS_link, a, b)
+#define STAT(p, b) syscall(SYS_stat, p, b)
+#define LSTAT(p, b) syscall(SYS_lstat, p, b)
+#define CHOWN(p, u, g) syscall(SYS_chown, p, u, g)
+#define UNLINK(p) syscall(SYS_unlink, p)
+#define LCHOWN(p, u, g) syscall(SYS_lchown, p, u, g)
+#define RENAME(a, b) syscall(SYS_rename, a, b)
+#define RMDIR(p) syscall(SYS_rmdir, p)
+#define DUP2(a, b) syscall(SYS_dup2, a, b)
+#define PIPE(p) syscall(SYS_pipe, p)
+#endif
+
 static long R(const char *what, long r) {
     if (r < 0) printf("%s = -1 errno %d\n", what, errno);
     else printf("%s = %ld\n", what, r);
@@ -40,7 +78,7 @@ static void hex(const char *kind, const char *label, const void *p, size_t n) {
 }
 static void st(const char *label, long r, const void *buf) {
     R(label, r);
-    if (r == 0) hex("stat", label, buf, 144);
+    if (r == 0) hex("stat", label, buf, sizeof(struct stat));
 }
 static void stx(const char *label, long r, const void *buf) {
     R(label, r);
@@ -113,7 +151,7 @@ int main(void) {
     R("sync", syscall(SYS_sync));
     R("fsync-badf", syscall(SYS_fsync, 999));
     st("fstat-a", syscall(SYS_fstat, fd, sb), sb);
-    R("creat", syscall(SYS_creat, "/work/b.txt", 0600));
+    R("creat", syscall(SYS_creat, "/work/b.txt", CREAT_FLAGS 0600));
     struct open_how how = {.flags = O_CREAT | O_WRONLY, .mode = 0640, .resolve = RESOLVE_NO_SYMLINKS};
     fd2 = R("openat2", syscall(SYS_openat2, AT_FDCWD, "c.txt", &how, sizeof how));
     R("write-c", syscall(SYS_write, fd2, "ccc", 3));
@@ -122,13 +160,13 @@ int main(void) {
     if (fd2 >= 0) R("close-direct", syscall(SYS_close, fd2));
     R("mknod-fifo", syscall(SYS_mknod, "/work/fifo", S_IFIFO | 0644, 0));
     R("mknodat-reg", syscall(SYS_mknodat, AT_FDCWD, "d1/reg", S_IFREG | 0600, 0));
-    R("symlink", syscall(SYS_symlink, "a.txt", "/work/sl"));
+    R("symlink", SYMLINK("a.txt", "/work/sl"));
     R("symlinkat", syscall(SYS_symlinkat, "../a.txt", AT_FDCWD, "d1/sl2"));
     r = syscall(SYS_readlink, "/work/sl", buf, sizeof buf);
     rl("readlink", r, buf);
     r = syscall(SYS_readlinkat, AT_FDCWD, "d1/sl2", buf, sizeof buf);
     rl("readlinkat", r, buf);
-    R("link", syscall(SYS_link, "/work/a.txt", "/work/a.hard"));
+    R("link", LINK("/work/a.txt", "/work/a.hard"));
     R("linkat", syscall(SYS_linkat, AT_FDCWD, "b.txt", AT_FDCWD, "d1/b.hard", 0));
     long tf = R("open-tmpfile", syscall(SYS_openat, AT_FDCWD, "/work", O_TMPFILE | O_RDWR, 0600));
     if (tf >= 0) {
@@ -141,14 +179,14 @@ int main(void) {
     }
 
     // ---- stat family ----
-    st("stat", syscall(SYS_stat, "/work/a.txt", sb), sb);
-    st("lstat", syscall(SYS_lstat, "/work/sl", sb), sb);
+    st("stat", STAT("/work/a.txt", sb), sb);
+    st("lstat", LSTAT("/work/sl", sb), sb);
     st("newfstatat", syscall(SYS_newfstatat, AT_FDCWD, "d1", sb, 0), sb);
     st("newfstatat-nofollow", syscall(SYS_newfstatat, AT_FDCWD, "d1/sl2", sb, AT_SYMLINK_NOFOLLOW), sb);
     st("newfstatat-empty", syscall(SYS_newfstatat, fd, "", sb, AT_EMPTY_PATH), sb);
-    st("stat-root", syscall(SYS_stat, "/work", sb), sb);
-    st("stat-fifo", syscall(SYS_stat, "/work/fifo", sb), sb);
-    st("stat-enoent", syscall(SYS_stat, "/work/nope", sb), sb);
+    st("stat-root", STAT("/work", sb), sb);
+    st("stat-fifo", STAT("/work/fifo", sb), sb);
+    st("stat-enoent", STAT("/work/nope", sb), sb);
     unsigned mask = STATX_BASIC_STATS | STATX_BTIME | STATX_MNT_ID;
     stx("statx", syscall(SYS_statx, AT_FDCWD, "/work/a.txt", 0, mask, sb), sb);
     stx("statx-dir", syscall(SYS_statx, AT_FDCWD, "d1", 0, mask, sb), sb);
@@ -175,8 +213,8 @@ int main(void) {
     R("fchmodat2", syscall(SYS_fchmodat2, AT_FDCWD, "c.txt", 0644, 0));
     uid_t u = syscall(SYS_getuid);
     gid_t g = syscall(SYS_getgid);
-    R("chown", syscall(SYS_chown, "/work/a.txt", u, g));
-    R("lchown", syscall(SYS_lchown, "/work/sl", u, g));
+    R("chown", CHOWN("/work/a.txt", u, g));
+    R("lchown", LCHOWN("/work/sl", u, g));
     R("fchown", syscall(SYS_fchown, fd, -1, -1));
     R("fchownat", syscall(SYS_fchownat, AT_FDCWD, "b.txt", u, g, 0));
     R("truncate", syscall(SYS_truncate, "/work/b.txt", 100));
@@ -187,10 +225,14 @@ int main(void) {
     R("futimens", syscall(SYS_utimensat, fd, NULL, ts, 0));
     R("utimensat-null", syscall(SYS_utimensat, AT_FDCWD, "c.txt", NULL, 0));
     struct timeval tv[2] = {{1200000000, 1}, {1300000000, 2}};
+#ifdef SYS_utimes
     R("utimes", syscall(SYS_utimes, "/work/d1/reg", tv));
     R("futimesat", syscall(SYS_futimesat, AT_FDCWD, "d1/b.hard", tv));
     struct { long a, m; } ub = {1400000000, 1500000000};
     R("utime", syscall(SYS_utime, "/work/c.txt", &ub));
+#else
+    (void)tv;
+#endif
     R("utimensat-badns", syscall(SYS_utimensat, AT_FDCWD, "a.txt", (struct timespec[2]){{0, 2000000000}, {0, 0}}, 0));
 
     // ---- extended attributes ----
@@ -221,23 +263,23 @@ int main(void) {
     st("fstat-copy", syscall(SYS_fstat, cfd, sb), sb);
 
     // ---- renames and removals ----
-    R("rename", syscall(SYS_rename, "/work/c.txt", "/work/c2.txt"));
+    R("rename", RENAME("/work/c.txt", "/work/c2.txt"));
     R("renameat", syscall(SYS_renameat, AT_FDCWD, "b.txt", AT_FDCWD, "d1/b2.txt"));
     R("renameat2-noreplace", syscall(SYS_renameat2, AT_FDCWD, "c2.txt", AT_FDCWD, "a.txt", RENAME_NOREPLACE));
     R("renameat2-exchange", syscall(SYS_renameat2, AT_FDCWD, "c2.txt", AT_FDCWD, "copy.bin", RENAME_EXCHANGE));
-    R("rename-over", syscall(SYS_rename, "/work/a.hard", "/work/c2.txt"));
-    R("unlink", syscall(SYS_unlink, "/work/sl"));
+    R("rename-over", RENAME("/work/a.hard", "/work/c2.txt"));
+    R("unlink", UNLINK("/work/sl"));
     R("unlinkat", syscall(SYS_unlinkat, AT_FDCWD, "d1/sl2", 0));
     R("unlinkat-dir", syscall(SYS_unlinkat, AT_FDCWD, "d1/sub", AT_REMOVEDIR));
     R("mkdir-gone", syscall(SYS_mkdir, "/work/gone", 0755));
-    R("rmdir", syscall(SYS_rmdir, "/work/gone"));
-    R("rmdir-notempty", syscall(SYS_rmdir, "/work/d1"));
+    R("rmdir", RMDIR("/work/gone"));
+    R("rmdir-notempty", RMDIR("/work/d1"));
 
     // ---- descriptors ----
     R("dup", syscall(SYS_dup, fd));
-    R("dup2", syscall(SYS_dup2, fd, 20));
+    R("dup2", DUP2(fd, 20));
     R("dup3", syscall(SYS_dup3, fd, 21, O_CLOEXEC));
-    V("dup2-hidden", syscall(SYS_dup2, fd, 3001)); // hidden descriptors
+    V("dup2-hidden", DUP2(fd, 3001)); // hidden descriptors
     R("fcntl-getfd", syscall(SYS_fcntl, 21, F_GETFD));
     R("fcntl-setfd", syscall(SYS_fcntl, 21, F_SETFD, 0));
     R("fcntl-getfl", syscall(SYS_fcntl, fd, F_GETFL));
@@ -270,7 +312,7 @@ int main(void) {
     r = syscall(SYS_readlink, lp, buf, sizeof buf);
     rl("readlink-pipe", r, buf);
     int p2[2];
-    R("pipe", syscall(SYS_pipe, p2));
+    R("pipe", PIPE(p2));
     st("fstat-pipe2", syscall(SYS_fstat, p2[1], sb), sb);
     long efd = R("eventfd2", syscall(SYS_eventfd2, 3, EFD_CLOEXEC));
     long efd1 = R("eventfd", syscall(SYS_eventfd, 0));
@@ -301,7 +343,9 @@ int main(void) {
     long wfd = R("open-work", syscall(SYS_openat, AT_FDCWD, "/work", O_RDONLY | O_DIRECTORY));
     dents("getdents64", wfd, SYS_getdents64);
     R("lseek-dir", syscall(SYS_lseek, wfd, 0, SEEK_SET));
+#ifdef SYS_getdents
     dents("getdents", wfd, SYS_getdents);
+#endif
     dents("getdents64-d1", dfd, SYS_getdents64);
 
     // ---- memory ----

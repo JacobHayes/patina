@@ -256,7 +256,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         }
         nr::FUTEX => futex(call),
         nr::CLONE => {
-            let [flags, stack, ptid, ctid, tls, _] = args(call);
+            let [flags, stack, ptid, ctid, tls] = crate::arch::clone_args(args(call));
             // Threads here; fork (no CLONE_VM) and vfork (CLONE_VM|CLONE_VFORK): processes.
             if flags & thread::CLONE_VM == 0 || flags & super::proc::CLONE_VFORK != 0 {
                 return super::proc::clone_process(call, flags, stack, ptid, ctid, tls);

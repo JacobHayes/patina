@@ -2,9 +2,11 @@
 # numbers, inode numbers of pipes and other anonymous objects, mount ids, statfs f_fsid,
 # addresses, and lines tagged "virt" (answers that are virtual by design: limits, system
 # information, refused interfaces, MADV_FREE, hidden descriptors).
-import re, sys
+import platform, re, sys
 
 S_IFMT, S_IFIFO, S_IFSOCK = 0o170000, 0o010000, 0o140000
+# st_mode's offset in struct stat: x86_64's own layout, or the generic one (arm64).
+MODE_OFF = 24 if platform.machine() == "x86_64" else 16
 
 def zero(h, off, n):
     return h[:2 * off] + "--" * n + h[2 * (off + n):]
@@ -22,7 +24,7 @@ def mask_line(l, anon_labels):
         if kind == "stat":
             h = zero(h, 0, 8)                      # st_dev
             h = zero(h, 72, 48)                    # atime, mtime, ctime
-            mode = le(h, 24, 4)
+            mode = le(h, MODE_OFF, 4)
             if mode & S_IFMT in (S_IFIFO, S_IFSOCK) and "pipe" in label or label in anon_labels:
                 h = zero(h, 8, 8)                  # st_ino of an anonymous object
         elif kind == "statx":

@@ -74,8 +74,7 @@ jobs:
           path: target/patina-check/runs
           retention-days: 7
 
-  # The arm64 port's gate: the steps of `check` without `patina doctor` (not ported yet) and the
-  # Rust guests' fetches (tests/guests.sh builds only the ported guests on arm64).
+  # The arm64 port's gate: the steps of `check` without `patina doctor` (not ported yet).
   check-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -100,6 +99,9 @@ jobs:
       - name: Build the guests
         run: |
           [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+          # The Rust guests build offline.
+          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
+          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
           mise exec -- sh tests/guests.sh
       - if: always() && steps.guests.outputs.cache-matched-key != steps.guests.outputs.cache-primary-key
         uses: actions/cache/save@v6

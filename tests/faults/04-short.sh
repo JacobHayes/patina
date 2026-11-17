@@ -1,6 +1,6 @@
 # 4. Short transfers (fs-short-permille=200): correct read/write loops give the right file,
 # code assuming full counts gives a detectably wrong one; identical across runs.
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib/common.inc"
 for mode in correct naive; do
     o=$RUNS/04/$mode

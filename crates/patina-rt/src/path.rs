@@ -351,11 +351,11 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
         lp[l] = 0;
         let r = unsafe {
             sc4(
-                nr::READLINK,
+                nr::READLINKAT,
+                AT_FDCWD as u64,
                 lp.as_ptr() as u64,
                 out.b.as_mut_ptr() as u64,
                 PATH_MAX as u64 - 1,
-                0,
             )
         };
         if r > 0 {

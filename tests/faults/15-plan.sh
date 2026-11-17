@@ -3,7 +3,7 @@
 # setting's draw moved another's): adding --fault net-chunk-max=1..4 to a run without sockets
 # (ack-log, --faults disk --crash machine:0..30) leaves every other resolved value and the whole
 # boundary log equal.
-#@ tier=quick budget=20 arch=x86_64
+#@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/15
 plan() { python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["faults"], sort_keys=True))' "$1/run.json"; }

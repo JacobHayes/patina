@@ -234,11 +234,7 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
         return None;
     }
     match fstat_raw(fd) {
-        Some(st)
-            if path::is_work(st[0]) && proto::abi::stat::mode(&st) as u64 & S_IFMT == S_IFDIR =>
-        {
-            Some(fd)
-        }
+        Some(st) if path::is_work(st.dev()) && st.mode() as u64 & S_IFMT == S_IFDIR => Some(fd),
         _ => {
             unsafe { sc1(nr::CLOSE, fd as u64) };
             None
@@ -383,7 +379,7 @@ fn swap(
                     s.aside = aside;
                 }
                 s.sibling = sb;
-                s.ino = lstat_in(pfd, &name).map_or(0, |x| x[1]);
+                s.ino = lstat_in(pfd, &name).map_or(0, |x| x.ino());
                 return Some((s, full(sb.bytes()), MUT_RENAME, 0));
             }
             MUT_SYMLINK => {
@@ -396,9 +392,7 @@ fn swap(
                 let tb: &[u8] = match to {
                     TO_SIBLING => sib.as_ref().unwrap().bytes(),
                     TO_DANGLING => DANGLING,
-                    _ if st
-                        .is_some_and(|x| proto::abi::stat::mode(&x) as u64 & S_IFMT == S_IFDIR) =>
-                    {
+                    _ if st.is_some_and(|x| x.mode() as u64 & S_IFMT == S_IFDIR) => {
                         // The work root's parent.
                         let i = root.iter().rposition(|&b| b == b'/').unwrap_or(0);
                         if i == 0 {
@@ -427,7 +421,7 @@ fn swap(
                 if st.is_some() {
                     s.aside = aside;
                 }
-                s.ino = lstat_in(pfd, &name).map_or(0, |x| x[1]);
+                s.ino = lstat_in(pfd, &name).map_or(0, |x| x.ino());
                 return Some((s, target, MUT_SYMLINK, to));
             }
             _ => {}
@@ -442,11 +436,10 @@ pub fn after(s: Swap) {
     let Some(pfd) = open_parent(&s.parent) else {
         return;
     };
-    let ours = lstat_in(pfd, &s.name).is_some_and(|x| x[1] == s.ino);
+    let ours = lstat_in(pfd, &s.name).is_some_and(|x| x.ino() == s.ino);
     let undone = match s.mutation {
         MUT_SYMLINK => {
-            ours && lstat_in(pfd, &s.name)
-                .is_some_and(|x| proto::abi::stat::mode(&x) as u64 & S_IFMT == S_IFLNK)
+            ours && lstat_in(pfd, &s.name).is_some_and(|x| x.mode() as u64 & S_IFMT == S_IFLNK)
                 && mutate_as_guest(nr::UNLINKAT, [pfd as u64, s.name.ptr(), 0, 0, 0, 0]) == 0
         }
         MUT_RENAME => ours && rename_in(pfd, &s.name, &s.sibling),

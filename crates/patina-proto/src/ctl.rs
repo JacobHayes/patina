@@ -338,13 +338,26 @@ pub struct InsnCtl {
     pub table_full: AtomicU64,
 }
 
-/// Indexes of `InsnCtl::emulated`.
+/// Indexes of `InsnCtl::emulated`, and their names in `result.json`.
+#[cfg(target_arch = "x86_64")]
 pub const INSN_RDTSC: usize = 0;
+#[cfg(target_arch = "x86_64")]
 pub const INSN_RDTSCP: usize = 1;
+#[cfg(target_arch = "x86_64")]
 pub const INSN_RDRAND: usize = 2;
+#[cfg(target_arch = "x86_64")]
 pub const INSN_RDSEED: usize = 3;
+#[cfg(target_arch = "x86_64")]
 pub const INSN_RDPID: usize = 4;
-pub const INSN_NAMES: [&str; 5] = ["rdtsc", "rdtscp", "rdrand", "rdseed", "rdpid"];
+#[cfg(target_arch = "x86_64")]
+pub const INSN_NAMES: &[&str] = &["rdtsc", "rdtscp", "rdrand", "rdseed", "rdpid"];
+/// arm64: reads of the counter (`CNTVCT_EL0`, `CNTVCTSS_EL0`) and of its frequency.
+#[cfg(target_arch = "aarch64")]
+pub const INSN_CNTVCT: usize = 0;
+#[cfg(target_arch = "aarch64")]
+pub const INSN_CNTFRQ: usize = 1;
+#[cfg(target_arch = "aarch64")]
+pub const INSN_NAMES: &[&str] = &["cntvct", "cntfrq"];
 
 /// Blocking I/O state shared by the runtime and the supervisor.
 /// Written only by whoever holds the turn.
@@ -847,7 +860,7 @@ pub const HE_CAPACITY: u64 = 11;
 pub const HE_DISK_FULL: u64 = 12;
 
 /// A mechanism the run reached that is not ported to this architecture yet: args[0] =
-/// `UNPORTED_*`, args[1] = the system call for `UNPORTED_CALL`. The run ends `unsupported`,
+/// `UNPORTED_*`. The run ends `unsupported`,
 /// stop `arm64-unported`, naming it. Sent only by the arm64 runtime while the port is under
 /// way: each stand-in goes when its mechanism is ported.
 pub const HE_UNPORTED: u64 = 13;
@@ -866,7 +879,6 @@ macro_rules! unported {
 }
 
 unported! {
-    UNPORTED_CALL = 1: "a system call this slice of the port does not serve",
     UNPORTED_SIGNALS = 2: "signal delivery to a handler, sigreturn and system-call restart",
     UNPORTED_THREADS = 3: "threads, fork and vfork (the clone trampolines)",
     UNPORTED_COUNTERS = 4: "branch-counter preemption",

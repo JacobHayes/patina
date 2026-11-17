@@ -43,10 +43,10 @@ pub fn find(dev: u64, ino: u64) -> Option<u64> {
 /// The virtual number of the object open on `fd` (None if `fd` is not open).
 #[allow(dead_code)] // the interface the network wire keys sockets by
 pub fn of_fd(fd: i64) -> Option<u64> {
-    let mut st = [0u64; proto::abi::stat::WORDS];
+    let mut st = proto::abi::stat::Stat::zeroed();
     let r = unsafe { crate::raw::sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     if r != 0 {
         return None;
     }
-    Some(of(st[0], st[1]))
+    Some(of(st.dev(), st.ino()))
 }

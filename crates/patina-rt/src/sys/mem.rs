@@ -173,16 +173,16 @@ fn mmap(call: &mut dyn Call) -> i64 {
         } else {
             // A shared file mapping: the file's identity (tmpfs inode numbers are
             // a function of creation order).
-            let mut st = [0u64; proto::abi::stat::WORDS];
+            let mut st = proto::abi::stat::Stat::zeroed();
             if unsafe { sc2(nr::FSTAT, fd, st.as_mut_ptr() as u64) } != 0 {
                 return r;
             }
             // The device as its mount index (st_dev itself comes from a host-global counter).
-            let dev = crate::path::mount_index(st[0])
+            let dev = crate::path::mount_index(st.dev())
                 .map(|i| i as u64 + 1)
                 .unwrap_or(0);
-            let h =
-                dev.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ st[1].wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+            let h = dev.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                ^ st.ino().wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
             (h >> 34) & 0x3fff_ffff
         };
         let off = if flags & MAP_ANON != 0 { 0 } else { off };

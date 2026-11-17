@@ -1,7 +1,7 @@
 # 9. Bad and boundary pointers (efault: small, unmapped, the runtime's range, read-only, off
 #    the end of a mapping) to a spread of calls: every one answers EFAULT, as natively, and
 #    the runtime never faults on a guest pointer (a fault there ends the run internal).
-#@ tier=quick budget=15 arch=x86_64
+#@ tier=quick budget=15
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/09-efault
 mkdir -p "$o"

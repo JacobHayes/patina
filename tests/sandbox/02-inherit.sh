@@ -5,7 +5,7 @@
 # limits, and in the launcher's child before bwrap: a leaked descriptor, a new session with a
 # controlling terminal, the persona, nice, IO priority, scheduling policy, timer slack, THP,
 # OOM adjustment and every soft limit. A hard limit too low to honour ends the run as internal.
-#@ tier=quick budget=30 slots=4 arch=x86_64
+#@ tier=quick budget=30 slots=4
 set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/inherit

@@ -1,5 +1,5 @@
 # 4. Seeds 1 and 2 give different stdout (random bytes differ) and different digests.
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib.inc"
 for g in $GUESTS; do
     for s in 1 2; do patina_run "$RUNS/04-seeds/$g-s$s" "$s" "$g"; done

@@ -2,7 +2,7 @@
 #     one at a time (more inodes than the virtual time table holds) end ok, and a file held
 #     open after its unlink keeps its times through the table's reclaiming; pipes past the
 #     virtual inode table end unsupported (capacity), never internal.
-#@ tier=quick budget=20 arch=x86_64
+#@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/10-churn
 mkdir -p "$o"

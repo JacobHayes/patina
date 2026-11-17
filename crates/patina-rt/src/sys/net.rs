@@ -23,17 +23,18 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 return super::inet::handle(call, i);
             }
             // The wire's own abstract names are not reachable from guest AF_UNIX sockets.
-            match call.nr() {
-                nr::BIND if super::inet::reserved_unix_name(call.arg(1), call.arg(2)) => {
-                    return Action::Return(-EADDRINUSE)
+            let (name, refused) = match call.nr() {
+                nr::BIND => (Some((call.arg(1), call.arg(2))), -EADDRINUSE),
+                nr::CONNECT => (Some((call.arg(1), call.arg(2))), -ECONNREFUSED),
+                nr::SENDTO => (Some((call.arg(4), call.arg(5))), -ECONNREFUSED),
+                _ => (None, 0),
+            };
+            if let Some((addr, len)) = name {
+                match super::inet::reserved_unix_name(addr, len) {
+                    Ok(false) => {}
+                    Ok(true) => return Action::Return(refused),
+                    Err(e) => return Action::Return(e),
                 }
-                nr::CONNECT if super::inet::reserved_unix_name(call.arg(1), call.arg(2)) => {
-                    return Action::Return(-ECONNREFUSED)
-                }
-                nr::SENDTO if super::inet::reserved_unix_name(call.arg(4), call.arg(5)) => {
-                    return Action::Return(-ECONNREFUSED)
-                }
-                _ => {}
             }
         }
     }

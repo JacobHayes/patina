@@ -61,10 +61,10 @@ pub(super) fn sock(i: usize) -> &'static mut WSock {
 /// Table index of the socket open on `fd` (any socket), None for other objects.
 pub(super) fn idx_of(fd: i64) -> Option<usize> {
     let st = super::fs::fstat_raw(fd)?;
-    if proto::abi::stat::mode(&st) & 0o170000 != 0o140000 {
+    if st.mode() & 0o170000 != 0o140000 {
         return None;
     }
-    let i = (crate::vino::of(st[0], st[1]) - VINO_BASE) as usize;
+    let i = (crate::vino::of(st.dev(), st.ino()) - VINO_BASE) as usize;
     (i < VINO_CAP).then_some(i)
 }
 
@@ -78,10 +78,10 @@ pub fn wire_idx(fd: i64) -> Option<usize> {
 /// leaves the run as it was.
 pub fn dgram_idx(fd: i64) -> Option<usize> {
     let st = super::fs::fstat_raw(fd)?;
-    if proto::abi::stat::mode(&st) & 0o170000 != 0o140000 {
+    if st.mode() & 0o170000 != 0o140000 {
         return None;
     }
-    let i = (crate::vino::find(st[0], st[1])? - VINO_BASE) as usize;
+    let i = (crate::vino::find(st.dev(), st.ino())? - VINO_BASE) as usize;
     (i < VINO_CAP && sock(i).family != 0 && is_dgram(i)).then_some(i)
 }
 
@@ -123,8 +123,12 @@ pub(super) fn parse_addr(
     if len < 2 {
         return Err(-e::EINVAL);
     }
-    let fam = unsafe { *(addr as *const u16) };
-    let b = |i: u64| unsafe { *((addr + i) as *const u8) };
+    // The longest address read here is a `sockaddr_in6` (28 bytes); the kernel reads `len`.
+    let mut sa = [0u8; 28];
+    let n = (len as usize).min(sa.len());
+    crate::guest::read(addr, &mut sa[..n])?;
+    let fam = u16::from_ne_bytes([sa[0], sa[1]]);
+    let b = |i: u64| sa[i as usize];
     let port = u16::from_be_bytes([b(2), b(3)]);
     let unknown = if connect {
         -ENETUNREACH
@@ -221,7 +225,9 @@ pub(super) fn put_addr(family: u16, kind: u8, port: u16, addr: u64, alen: u64) -
         return -e::EINVAL;
     }
     let m = cap.min(n);
-    unsafe { core::ptr::copy_nonoverlapping(out.as_ptr(), addr as *mut u8, m) };
+    if let Err(e) = crate::guest::write(addr, &out[..m]) {
+        return e;
+    }
     match put(alen, n as u32) {
         Ok(()) => 0,
         Err(e) => e,
@@ -680,7 +686,9 @@ pub(super) fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
         if len < 8 {
             return -e::EINVAL;
         }
-        let l = unsafe { *(val as *const [i32; 2]) };
+        let Ok(l) = crate::guest::get::<[i32; 2]>(val) else {
+            return -e::EFAULT;
+        };
         sock(i).set_opt(key(-1, 13), l[1]);
         l[0]
     } else if level == 6 && name == 13 {
@@ -689,7 +697,10 @@ pub(super) fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
         if len < 4 {
             return -e::EINVAL;
         }
-        unsafe { *(val as *const i32) }
+        match crate::guest::get::<i32>(val) {
+            Ok(v) => v,
+            Err(e) => return e,
+        }
     };
     let v = if level == SOL_SOCKET && (name == 7 || name == 8) {
         // UDP: an unprivileged request is capped at rmem_max/wmem_max before doubling.
@@ -737,7 +748,9 @@ pub(super) fn getsockopt(call: &mut dyn Call, i: usize) -> i64 {
         if val == 0 && n > 0 {
             return -e::EFAULT;
         }
-        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), val as *mut u8, n) };
+        if let Err(e) = crate::guest::write(val, &bytes[..n]) {
+            return e;
+        }
         match put(lenp, n as u32) {
             Ok(()) => 0,
             Err(e) => e,
@@ -899,12 +912,10 @@ fn sendmsg(call: &mut dyn Call, i: usize) -> i64 {
     if msg == 0 {
         return -e::EFAULT;
     }
-    let (iov, cnt, ctll) = unsafe {
-        (
-            *((msg + 16) as *const u64),
-            *((msg + 24) as *const u64),
-            *((msg + 40) as *const u64),
-        )
+    // struct msghdr: name, namelen, iov, iovlen, control, controllen (words).
+    let (iov, cnt, ctll) = match get::<[u64; 6]>(msg) {
+        Ok(h) => (h[2], h[3], h[5]),
+        Err(e) => return e,
     };
     if ctll != 0 {
         // The wire copies bytes, not ancillary data (SCM_RIGHTS over TCP does not exist).
@@ -919,22 +930,18 @@ fn sendmmsg(call: &mut dyn Call, i: usize) -> i64 {
     let mut done = 0u64;
     while done < vlen {
         let m = a[1] + done * 64;
-        let (iov, cnt, ctll) = unsafe {
-            (
-                *((m + 16) as *const u64),
-                *((m + 24) as *const u64),
-                *((m + 40) as *const u64),
-            )
-        };
-        let r = if ctll != 0 {
-            -e::EINVAL
-        } else {
-            send_iov(a[0] as i32 as i64, i, nr::SENDMMSG, iov, cnt, a[3])
+        let r = match get::<[u64; 6]>(m) {
+            Err(e) => e,
+            Ok(h) if h[5] != 0 => -e::EINVAL,
+            Ok(h) => send_iov(a[0] as i32 as i64, i, nr::SENDMMSG, h[2], h[3], a[3]),
         };
         if r < 0 {
             return if done > 0 { done as i64 } else { r };
         }
-        unsafe { *((m + 56) as *mut u32) = r as u32 };
+        // msg_len of this struct mmsghdr.
+        if let Err(e) = put(m + 56, r as u32) {
+            return if done > 0 { done as i64 } else { e };
+        }
         done += 1;
     }
     done as i64
@@ -1007,17 +1014,16 @@ fn recvmsg(call: &mut dyn Call, i: usize) -> i64 {
         refuse(b"MSG_OOB");
         return -e::EINVAL;
     }
-    let (name, iov, cnt) = unsafe {
-        (
-            *(msg as *const u64),
-            *((msg + 16) as *const u64),
-            *((msg + 24) as *const u64),
-        )
+    let (name, iov, cnt) = match get::<[u64; 4]>(msg) {
+        Ok(h) => (h[0], h[2], h[3]),
+        Err(e) => return e,
     };
     let peek = a[2] & 2 != 0;
     let waitall = a[2] & MSG_WAITALL != 0 && a[2] & MSG_DONTWAIT == 0 && !peek;
     let f = (a[2] & !MSG_WAITALL) | MSG_DONTWAIT;
-    unsafe { *(msg as *mut u64) = 0 };
+    if let Err(e) = put(msg, 0u64) {
+        return e;
+    }
     let mut w = receiver(fd, nr::RECVMSG, a[2]);
     let g = w.run(|| io::eagain(unsafe { sc3(nr::RECVMSG, fd as u64, msg, f) }));
     let mut r = match g {
@@ -1047,10 +1053,8 @@ fn recvmsg(call: &mut dyn Call, i: usize) -> i64 {
             }
         }
     }
-    unsafe {
-        *(msg as *mut u64) = name;
-        *((msg + 8) as *mut u32) = 0;
-    }
+    // The name is left alone (TCP reports none): the pointer back, length 0.
+    let _ = put(msg, name).and_then(|()| put(msg + 8, 0u32));
     w.finish(r)
 }
 
@@ -1172,19 +1176,22 @@ pub fn handle(call: &mut dyn Call, i: usize) -> Action {
     Action::Return(r)
 }
 
-/// An `AF_UNIX` address naming the wire's reserved abstract names (`@patina-...`).
-pub fn reserved_unix_name(addr: u64, len: u64) -> bool {
+/// An `AF_UNIX` address naming the wire's reserved abstract names (`@patina-...`), or
+/// `-EFAULT` for one the guest copy cannot read (the kernel is not asked to read it either).
+pub fn reserved_unix_name(addr: u64, len: u64) -> Result<bool, i64> {
     if addr == 0 || len < 3 + RESERVED_PREFIX.len() as u64 {
-        return false;
+        return Ok(false);
     }
-    let b = |i: u64| unsafe { *((addr + i) as *const u8) };
+    let mut sa = [0u8; 3 + RESERVED_PREFIX.len()];
+    crate::guest::read(addr, &mut sa)?;
+    let b = |i: u64| sa[i as usize];
     if b(0) as u64 != AF_UNIX || b(1) != 0 || b(2) != 0 {
-        return false;
+        return Ok(false);
     }
-    RESERVED_PREFIX
+    Ok(RESERVED_PREFIX
         .iter()
         .enumerate()
-        .all(|(k, &c)| b(3 + k as u64) == c)
+        .all(|(k, &c)| b(3 + k as u64) == c))
 }
 
 #[allow(dead_code)]

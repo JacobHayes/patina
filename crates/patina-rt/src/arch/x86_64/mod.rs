@@ -16,6 +16,12 @@ pub const AUDIT_ARCH: u32 = 0xC000_003E;
 /// Bytes of the system-call instruction: the kernel's reported address is this far past it.
 pub const SYSCALL_LEN: u64 = 2;
 
+/// `clone`'s arguments by role, from the raw ones: (flags, stack, ptid, ctid, tls).
+#[inline(always)]
+pub fn clone_args(a: [u64; 6]) -> [u64; 5] {
+    [a[0], a[1], a[2], a[3], a[4]]
+}
+
 /// Per-image setup that must come before anything else: none on x86_64 (the counter trap is
 /// set in `rt_main`, `insn::tsc::ensure_faulting`).
 #[inline(always)]
@@ -26,6 +32,12 @@ pub fn process_init() {}
 #[inline(always)]
 pub fn aux_value(_t: u64, v: u64) -> u64 {
     v
+}
+
+/// Whether `/proc/cpuinfo`'s feature list leaves out the word `w`: nothing is hidden on x86_64.
+#[inline(always)]
+pub fn feature_hidden(_w: &[u8]) -> bool {
+    false
 }
 
 /// x86_64 kernel `ucontext` as delivered on the alternate stack.

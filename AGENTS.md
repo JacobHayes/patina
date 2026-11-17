@@ -35,7 +35,8 @@ updates the docs in the same commit.
   port each ported area loses its marks.
 - `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the nightly job.
 
-Host: Linux x86_64 (arm64: a hello-sized slice so far), `bwrap`, unprivileged user namespaces (`patina doctor` says what is
+Host: Linux x86_64 or arm64 (arm64: signals, threads and the parts ARCHITECTURE "Limits" lists
+are not ported yet), `bwrap`, unprivileged user namespaces (`patina doctor` says what is
 missing). rustup installs the pinned toolchain; mise supplies Go.
 
 ## Checks and landing

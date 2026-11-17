@@ -54,7 +54,7 @@ pub const SIG_IGN: u64 = 1;
 pub const SS_ONSTACK: u64 = 1;
 pub const SS_DISABLE: u64 = 2;
 pub const SS_AUTODISARM: u64 = 1 << 31;
-const MINSIGSTKSZ: u64 = 2048;
+use proto::abi::MINSIGSTKSZ;
 
 pub const SI_USER: i32 = 0;
 pub const SI_TKILL: i32 = -6;

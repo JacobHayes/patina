@@ -1,6 +1,6 @@
 # 5. Delay: fs-delay-permille=1000 fs-delay-max-ms=50: 100 writes take > 1 s of virtual time and
 # less than that in wall time (no real wait).
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/05/delay
 run "$o" 1 --fault fs-delay-permille=1000 --fault fs-delay-max-ms=50 -- /guest/delay

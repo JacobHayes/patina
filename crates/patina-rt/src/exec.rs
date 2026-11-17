@@ -60,11 +60,11 @@ fn fd_path(fd: i64, out: &mut PathBuf) -> bool {
     lp[l] = 0;
     let r = unsafe {
         sc4(
-            nr::READLINK,
+            nr::READLINKAT,
+            crate::sys::fs::AT_FDCWD as u64,
             lp.as_ptr() as u64,
             out.b.as_mut_ptr() as u64,
             out.b.len() as u64 - 1,
-            0,
         )
     };
     if r <= 0 {
@@ -124,11 +124,11 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
     if fd < 0 {
         return Err(fd);
     }
-    let mut st = [0u64; proto::abi::stat::WORDS];
+    let mut st = proto::abi::stat::Stat::zeroed();
     unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     const S_IFMT: u32 = 0o170000;
     const S_IFREG: u32 = 0o100000;
-    if proto::abi::stat::mode(&st) & S_IFMT != S_IFREG {
+    if st.mode() & S_IFMT != S_IFREG {
         unsafe { sc1(nr::CLOSE, fd as u64) };
         return Err(-e::EACCES);
     }
@@ -139,7 +139,7 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
 fn check_elf(fd: i64, head: &[u8]) -> Result<(), i64> {
     if head.len() < 64
         || head[4] != 2
-        || u16::from_le_bytes([head[18], head[19]]) != crate::loader::ELF_MACHINE
+        || u16::from_le_bytes([head[18], head[19]]) != proto::abi::ELF_MACHINE
     {
         return Err(-e::ENOEXEC);
     }

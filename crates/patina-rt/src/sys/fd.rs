@@ -225,21 +225,14 @@ fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
     let Some(st) = fstat_raw(fd) else { return };
     if let Some(k) = vkey(&st) {
         vtime::touch(k, Which::Modify);
-        vtime::names(
-            k,
-            if proto::abi::stat::nlink(&st) == 0 {
-                st[0]
-            } else {
-                0
-            },
-        );
+        vtime::names(k, if st.nlink() == 0 { st.dev() } else { 0 });
     }
-    if crate::path::is_work(st[0]) {
+    if crate::path::is_work(st.dev()) {
         // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.
         const O_APPEND: i64 = 0o2000;
         let append = append || unsafe { sc2(nr::FCNTL, fd as u64, 3) } & O_APPEND != 0;
         let offset = if append {
-            Some((st[6] as i64 - len).max(0) as u64)
+            Some((st.size() as i64 - len).max(0) as u64)
         } else {
             offset
         };
@@ -248,7 +241,7 @@ fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
             (pos - len).max(0) as u64
         });
         after_mutation(&FsOp::Write {
-            ino: st[1],
+            ino: st.ino(),
             offset: off,
             len: len as u64,
             data,
@@ -337,7 +330,7 @@ fn splice(call: &mut dyn Call) -> i64 {
         } else {
             None
         };
-        if fstat_raw(out).is_some_and(|st| proto::abi::stat::mode(&st) & 0o170000 == 0o100000) {
+        if fstat_raw(out).is_some_and(|st| st.mode() & 0o170000 == 0o100000) {
             wrote(out, off, r, Data::InFile(out));
         }
     }

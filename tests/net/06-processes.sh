@@ -1,6 +1,6 @@
 # 6. Across processes: a forking server; a socket inherited across execve; a socket whose last
 #    reference is closed by exit (EOF only after the exit and the FIN delay).
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-processes; mkdir -p "$o"
 for m in forkserver execinherit; do

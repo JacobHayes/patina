@@ -1,7 +1,7 @@
 # 9. Failed fsync end to end: with fsync-error-at=3 (the first record's fsync) and a
 # machine crash right after the acknowledgement, the guest that retries fsync until it
 # succeeds loses an acknowledged record; the guest that treats the first EIO as fatal is ok.
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/09
 # The crash point: just after the fsync of "acks" that follows the failure (from a run

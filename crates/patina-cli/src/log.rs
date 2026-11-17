@@ -100,6 +100,10 @@ pub fn describe(r: &Rec) -> String {
             0x0fc706 => "rdrand".to_string(),
             0x0fc707 => "rdseed".to_string(),
             0xf30fc707 => "rdpid".to_string(),
+            // arm64: `mrs` with the target register cleared.
+            0xd53be040 => "mrs cntvct_el0".to_string(),
+            0xd53be0c0 => "mrs cntvctss_el0".to_string(),
+            0xd53be000 => "mrs cntfrq_el0".to_string(),
             n => format!("{n:#x}"),
         },
         Some(RecKind::Preempt) => match r.nr {

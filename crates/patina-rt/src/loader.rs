@@ -99,11 +99,7 @@ const PT_INTERP: u32 = 3;
 const PT_PHDR: u32 = 6;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
-/// `e_machine` of this architecture's images.
-#[cfg(target_arch = "x86_64")]
-pub const ELF_MACHINE: u16 = 62;
-#[cfg(target_arch = "aarch64")]
-pub const ELF_MACHINE: u16 = 183;
+use proto::abi::ELF_MACHINE;
 
 pub struct Image {
     pub base: u64,

@@ -70,8 +70,8 @@ pub enum Who {
 fn fd_obj(fd: u64) -> Option<Obj> {
     let fd = fd as i32 as i64;
     let st = fstat_raw(fd)?;
-    let fmt = proto::abi::stat::mode(&st) as u64 & S_IFMT;
-    if path::is_work(st[0]) {
+    let fmt = st.mode() as u64 & S_IFMT;
+    if path::is_work(st.dev()) {
         return Some(if fmt == S_IFREG { Obj::File } else { Obj::Path });
     }
     match fmt {
@@ -101,7 +101,7 @@ pub fn path_on_work(dirfd: i64, p: u64) -> bool {
         let c = &buf[..(r as usize).saturating_sub(1)];
         return crate::state::config().on_work(c);
     }
-    fstat_raw(dirfd).is_some_and(|st| path::is_work(st[0]))
+    fstat_raw(dirfd).is_some_and(|st| path::is_work(st.dev()))
 }
 
 /// The call's object, if it is eligible for faults, and how to name it. (The sync class

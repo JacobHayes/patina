@@ -158,7 +158,7 @@ use proto::abi::stat;
 pub use proto::abi::stat::Stat as St;
 
 pub fn fstatat_raw(dirfd: i64, p: u64, flags: u64) -> Option<St> {
-    let mut st: St = [0; stat::WORDS];
+    let mut st = St::zeroed();
     let r = unsafe {
         sc4(
             nr::NEWFSTATAT,
@@ -172,20 +172,20 @@ pub fn fstatat_raw(dirfd: i64, p: u64, flags: u64) -> Option<St> {
 }
 
 pub fn fstat_raw(fd: i64) -> Option<St> {
-    let mut st: St = [0; stat::WORDS];
+    let mut st = St::zeroed();
     let r = unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
     (r == 0).then_some(st)
 }
 
 fn mode_of(st: &St) -> u32 {
-    stat::mode(st)
+    st.mode()
 }
 
 /// Virtual time key of an inode on a sandbox tmpfs.
 pub fn vkey(st: &St) -> Option<u64> {
-    let i = path::mount_index(st[0])?;
+    let i = path::mount_index(st.dev())?;
     (path::mounts().m[i].class == MountClass::Tmpfs)
-        .then(|| vtime::key(VDEV_MOUNT_BASE + i as u64, st[1]))
+        .then(|| vtime::key(VDEV_MOUNT_BASE + i as u64, st.ino()))
 }
 
 /// Record `w` on the inode `st` names; an inode with no name left (`O_TMPFILE`, or changed
@@ -193,19 +193,19 @@ pub fn vkey(st: &St) -> Option<u64> {
 fn touch(st: &Option<St>, w: Which) {
     if let Some((k, s)) = st.as_ref().and_then(|s| Some((vkey(s)?, s))) {
         vtime::touch(k, w);
-        vtime::names(k, if stat::nlink(s) == 0 { s[0] } else { 0 });
+        vtime::names(k, if s.nlink() == 0 { s.dev() } else { 0 });
     }
 }
 
 /// The inode `st` (its `stat` from before the call) lost its last name.
 fn unnamed(st: &Option<St>) {
     if let Some((k, s)) = st.as_ref().and_then(|s| Some((vkey(s)?, s))) {
-        vtime::names(k, s[0]);
+        vtime::names(k, s.dev());
     }
 }
 
 fn on_work(st: &Option<St>) -> bool {
-    st.as_ref().is_some_and(|s| path::is_work(s[0]))
+    st.as_ref().is_some_and(|s| path::is_work(s.dev()))
 }
 
 /// A guest path argument (`resolve::prepare` has already answered EFAULT for one that
@@ -260,11 +260,11 @@ pub fn created_elsewhere(p: u64) {
     if on_work(&st) {
         let s = st.unwrap();
         let mode = mode_of(&s);
-        let pino = parent.map(|p| p[1]).unwrap_or(0);
+        let pino = parent.map(|p| p.ino()).unwrap_or(0);
         after_mutation(&FsOp::Create {
             parent: pino,
             name: name_of(ps),
-            ino: s[1],
+            ino: s.ino(),
             mode: mode & 0o7777,
             kind: mode & S_IFMT,
         });
@@ -484,12 +484,12 @@ fn open(call: &mut dyn Call) -> i64 {
     }
     let st = fstat_raw(r);
     if let Some(s) = &st {
-        let rdev = stat::rdev(s);
-        if stat::mode(s) & S_IFMT == 0o020000 {
+        let rdev = s.rdev();
+        if s.mode() & S_IFMT == 0o020000 {
             if rdev == RDEV_TTY
                 || rdev == RDEV_CONSOLE
                 || rdev == RDEV_PTMX
-                || path::mount_of(s[0]).is_some_and(|m| m.point.starts_with(b"/dev/pts"))
+                || path::mount_of(s.dev()).is_some_and(|m| m.point.starts_with(b"/dev/pts"))
             {
                 unsafe { sc1(nr::CLOSE, r as u64) };
                 return -e::ENXIO;
@@ -506,7 +506,7 @@ fn open(call: &mut dyn Call) -> i64 {
         }
     }
     if on_work(&st) && st.is_some_and(|s| mode_of(&s) & S_IFMT == S_IFREG) {
-        crate::oplog::opened(r, st.unwrap()[1]);
+        crate::oplog::opened(r, st.unwrap().ino());
     }
     // Timestamps and the operation record.
     if tmpfile {
@@ -517,7 +517,7 @@ fn open(call: &mut dyn Call) -> i64 {
             after_mutation(&FsOp::Create {
                 parent: 0,
                 name: b"",
-                ino: s[1],
+                ino: s.ino(),
                 mode: mode_of(&s) & 0o7777,
                 kind: mode_of(&s) & S_IFMT,
             });
@@ -534,9 +534,9 @@ fn open(call: &mut dyn Call) -> i64 {
         if on_work(&st) {
             let s = st.unwrap();
             after_mutation(&FsOp::Create {
-                parent: parent.map(|p| p[1]).unwrap_or(0),
+                parent: parent.map(|p| p.ino()).unwrap_or(0),
                 name: name_of(pstr),
-                ino: s[1],
+                ino: s.ino(),
                 mode: mode_of(&s) & 0o7777,
                 kind: mode_of(&s) & S_IFMT,
             });
@@ -548,7 +548,7 @@ fn open(call: &mut dyn Call) -> i64 {
         touch(&st, Which::Modify);
         if on_work(&st) {
             after_mutation(&FsOp::Truncate {
-                ino: st.unwrap()[1],
+                ino: st.unwrap().ino(),
                 size: 0,
             });
         }
@@ -622,21 +622,23 @@ pub fn rewrite_stat(p: u64) {
         *w = id.dev;
         *w.add(1) = id.ino;
         if let Some(t) = id.times {
-            for (k, v) in [(9, t.atime), (11, t.mtime), (13, t.ctime)] {
+            for (k, v) in [
+                (stat::ATIME, t.atime),
+                (stat::MTIME, t.mtime),
+                (stat::CTIME, t.ctime),
+            ] {
                 *w.add(k) = v / NS;
                 *w.add(k + 1) = v % NS;
             }
         } else {
             // Host file: its atime is not host-stable (reading it moves it, `relatime`
             // at most once a day), so it reads as the mtime.
-            *w.add(9) = *w.add(11);
-            *w.add(10) = *w.add(12);
+            *w.add(stat::ATIME) = *w.add(stat::MTIME);
+            *w.add(stat::ATIME + 1) = *w.add(stat::MTIME + 1);
             // Its owner: the user namespace shows the launcher's own uid and gid as the
             // sandbox's 1000 and every other id as the overflow id, so which host files read
             // as 1000 depends on who launched the run. Every host file reads as the overflow id.
-            let ids = p as *mut u32;
-            *ids.add(stat::UID32) = OVERFLOW_ID;
-            *ids.add(stat::GID32) = OVERFLOW_ID;
+            stat::set_owner(p as *mut u8, OVERFLOW_ID, OVERFLOW_ID);
         }
     }
 }
@@ -794,7 +796,7 @@ fn statfs_call(call: &mut dyn Call) -> i64 {
         return r;
     }
     let w = buf as *mut u64;
-    let class = st.and_then(|s| path::mount_of(s[0])).map(|m| m.class);
+    let class = st.and_then(|s| path::mount_of(s.dev())).map(|m| m.class);
     unsafe {
         *w.add(7) = 0; // f_fsid: random per superblock
         if class != Some(MountClass::Tmpfs) {
@@ -826,8 +828,10 @@ fn copy_out(buf: u64, size: u64, s: &[u8]) -> i64 {
         return -e::EINVAL;
     }
     let n = s.len().min(size as usize);
-    unsafe { core::ptr::copy_nonoverlapping(s.as_ptr(), buf as *mut u8, n) };
-    n as i64
+    match crate::guest::write(buf, &s[..n]) {
+        Ok(()) => n as i64,
+        Err(e) => e,
+    }
 }
 
 fn readlink(call: &mut dyn Call) -> i64 {
@@ -855,11 +859,11 @@ fn readlink(call: &mut dyn Call) -> i64 {
             let mut t = [0u8; path::PATH_MAX];
             let r = unsafe {
                 sc4(
-                    nr::READLINK,
+                    nr::READLINKAT,
+                    AT_FDCWD as u64,
                     norm.b.as_ptr() as u64,
                     t.as_mut_ptr() as u64,
                     t.len() as u64,
-                    0,
                 )
             };
             if r < 0 {
@@ -1084,7 +1088,8 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             touch(&parent, Which::Modify);
             if on_work(&st) {
                 let s = st.unwrap();
-                let (pino, ino, name) = (parent.map(|p| p[1]).unwrap_or(0), s[1], name_of(ps));
+                let (pino, ino, name) =
+                    (parent.map(|p| p.ino()).unwrap_or(0), s.ino(), name_of(ps));
                 let mode = mode_of(&s);
                 after_mutation(&match nr {
                     nr::MKDIR | nr::MKDIRAT => FsOp::Mkdir {
@@ -1118,7 +1123,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 let left = if mode_of(s) & S_IFMT == S_IFDIR {
                     0
                 } else {
-                    stat::nlink(s).saturating_sub(1)
+                    s.nlink().saturating_sub(1)
                 };
                 if left > 0 {
                     touch(&t, Which::Change);
@@ -1126,20 +1131,20 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                     unnamed(&t);
                 }
                 if on_work(&t) {
-                    let (pino, name) = (parent.map(|p| p[1]).unwrap_or(0), name_of(ps));
+                    let (pino, name) = (parent.map(|p| p.ino()).unwrap_or(0), name_of(ps));
                     let rmdir = nr == nr::RMDIR || (nr == nr::UNLINKAT && a[2] & AT_REMOVEDIR != 0);
                     after_mutation(&if rmdir {
                         FsOp::Rmdir {
                             parent: pino,
                             name,
-                            ino: s[1],
+                            ino: s.ino(),
                             nlink_left: 0,
                         }
                     } else {
                         FsOp::Unlink {
                             parent: pino,
                             name,
-                            ino: s[1],
+                            ino: s.ino(),
                             nlink_left: left,
                         }
                     });
@@ -1161,23 +1166,23 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             let flags = if nr == nr::RENAMEAT2 { a[4] } else { 0 };
             if let (Some(o), Some(v)) = (&before[0], &before[1]) {
                 let dir = mode_of(v) & S_IFMT == S_IFDIR;
-                if flags & RENAME_EXCHANGE == 0 && o[1] != v[1] && (dir || stat::nlink(v) <= 1) {
+                if flags & RENAME_EXCHANGE == 0 && o.ino() != v.ino() && (dir || v.nlink() <= 1) {
                     unnamed(&before[1]);
                 }
             }
             if on_work(&before[0]) {
                 let flags = if nr == nr::RENAMEAT2 { a[4] } else { 0 };
                 let replaced = if flags & RENAME_EXCHANGE != 0 {
-                    before[1].map(|s| s[1]).unwrap_or(0)
+                    before[1].map(|s| s.ino()).unwrap_or(0)
                 } else {
-                    before[1].map(|s| s[1]).unwrap_or(0)
+                    before[1].map(|s| s.ino()).unwrap_or(0)
                 };
                 after_mutation(&FsOp::Rename {
-                    old_parent: op.map(|p| p[1]).unwrap_or(0),
+                    old_parent: op.map(|p| p.ino()).unwrap_or(0),
                     old_name: name_of(ps),
-                    new_parent: np.map(|p| p[1]).unwrap_or(0),
+                    new_parent: np.map(|p| p.ino()).unwrap_or(0),
                     new_name: name_of(ns),
-                    ino: before[0].unwrap()[1],
+                    ino: before[0].unwrap().ino(),
                     replaced,
                     flags,
                 });
@@ -1193,9 +1198,9 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
             touch(&np, Which::Modify);
             if on_work(&st) {
                 after_mutation(&FsOp::Link {
-                    parent: np.map(|p| p[1]).unwrap_or(0),
+                    parent: np.map(|p| p.ino()).unwrap_or(0),
                     name: name_of(ns),
-                    ino: st.unwrap()[1],
+                    ino: st.unwrap().ino(),
                 });
             }
         }
@@ -1237,7 +1242,7 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
                 None => touch(&st, Which::Modify), // truncate
             }
             if on_work(&st) {
-                let ino = st.unwrap()[1];
+                let ino = st.unwrap().ino();
                 after_mutation(&match what {
                     Some(w) => FsOp::SetAttr { ino, what: w },
                     None => FsOp::Truncate { ino, size: a[1] },
@@ -1252,8 +1257,8 @@ fn tracked(nr: u64, a: &[u64; 6], call: impl FnOnce() -> i64) -> i64 {
 fn meta_of(st: &St) -> Attr<'static> {
     Attr::Meta {
         mode: mode_of(st) & 0o7777,
-        uid: stat::uid(st),
-        gid: stat::gid(st),
+        uid: st.uid(),
+        gid: st.gid(),
     }
 }
 
@@ -1308,7 +1313,7 @@ pub fn fd_mutation(call: &mut dyn Call, r: i64) {
     };
     touch(&st, w);
     if on_work(&st) {
-        let ino = st.unwrap()[1];
+        let ino = st.unwrap().ino();
         after_mutation(&match nr {
             nr::FCHMOD | nr::FCHOWN => FsOp::SetAttr {
                 ino,

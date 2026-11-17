@@ -1,7 +1,7 @@
 # 11. Determinism with faults on: patina verify --runs 3 --vary cpu,load,sandbox identical
 # for error injection, short transfers and crash and restart, seed 1 (the evidence tier's
 # matrix covers volume).
-#@ tier=quick budget=30 arch=x86_64
+#@ tier=quick budget=30
 . "$(dirname "$0")/lib/common.inc"
 for seed in 1; do
     verify "$RUNS/11/errors-$seed" $seed 3 cpu,load,sandbox --fault fs-error-permille=100 -- /guest/io-errors tally

@@ -27,10 +27,11 @@ const MAX_CANDS: usize = 256;
 pub fn scan_exec(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: u64) {
     let c = ctl();
     // Pages wholly past the end of the file would raise SIGBUS when read.
-    let len = match file.and_then(|f| crate::sys::fs::fstat_raw(f.fd as i64).map(|st| (f, st[6]))) {
-        Some((f, size)) => len.min(((size.saturating_sub(f.off)) + 4095) & !4095),
-        None => len,
-    };
+    let len =
+        match file.and_then(|f| crate::sys::fs::fstat_raw(f.fd as i64).map(|st| (f, st.size()))) {
+            Some((f, size)) => len.min(((size.saturating_sub(f.off)) + 4095) & !4095),
+            None => len,
+        };
     if len == 0 {
         return;
     }

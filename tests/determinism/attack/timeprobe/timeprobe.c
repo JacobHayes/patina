@@ -12,7 +12,9 @@
 #include <sys/times.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __x86_64__
 #include <x86intrin.h>
+#endif
 static void dump(const char *tag) {
     int clocks[] = {CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID, CLOCK_MONOTONIC_RAW,
                     CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE, CLOCK_BOOTTIME, CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM, CLOCK_TAI};
@@ -24,8 +26,13 @@ static void dump(const char *tag) {
     struct tms tm; clock_t c = times(&tm); printf("%s times %ld %ld %ld\n", tag, (long)c, (long)tm.tms_utime, (long)tm.tms_stime);
     struct rusage ru; getrusage(RUSAGE_SELF, &ru); hexline("rusage", &ru, sizeof ru);
     struct sysinfo si; sysinfo(&si); printf("%s uptime %ld\n", tag, si.uptime);
+#ifdef __x86_64__
     printf("%s rdtsc %llu\n", tag, (unsigned long long)__rdtsc());
     unsigned aux; printf("%s rdtscp %llu %u\n", tag, (unsigned long long)__rdtscp(&aux), aux);
+#else
+    unsigned long long cv, cf; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(cv)); __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(cf));
+    printf("%s cntvct %llu cntfrq %llu\n", tag, cv, cf);
+#endif
     char b[256]; int fd = open("/proc/uptime", O_RDONLY); int n = read(fd, b, 255); b[n > 0 ? n : 0] = 0; close(fd); printf("%s /proc/uptime %s", tag, b);
     fd = open("/proc/self/stat", O_RDONLY); n = read(fd, b, 255); b[n > 0 ? n : 0] = 0; close(fd); printf("%s stat %s\n", tag, b);
     struct stat st; stat("/work/t", &st); hexline("work-stat", &st, sizeof st);

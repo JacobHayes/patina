@@ -25,25 +25,38 @@ static volatile int got;
 static void h(int s) { got += s; }
 
 struct xattr_args { unsigned long long value; unsigned int size, flags; };
+#ifndef SYS_fork
+#define SYS_fork SYS_clone, SIGCHLD, 0, 0, 0, 0
+#endif
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 1 << 16);
     signal(SIGUSR1, h); signal(SIGALRM, h);
     int p[2]; pipe(p); write(p[1], "x", 1);
     fd_set rs; FD_ZERO(&rs); FD_SET(p[0], &rs); struct timeval tv = {0, 1000};
+#ifdef SYS_select
     r("select", syscall(SYS_select, p[0] + 1, &rs, 0, 0, &tv));
+#else /* the generic table (arm64) has no select, epoll_create, pause, alarm or fork */
+    (void)tv;
+#endif
     struct pollfd pf = {p[0], POLLIN, 0}; struct timespec ts = {0, 1000};
     r("ppoll", syscall(SYS_ppoll, &pf, 1, &ts, 0, 8));
+#ifdef SYS_epoll_create
     int ep = syscall(SYS_epoll_create, 4); r("epoll_create", ep);
+#else
+    int ep = syscall(SYS_epoll_create1, 0); r("epoll_create1", ep);
+#endif
     struct epoll_event ev = {EPOLLIN, {.u64 = 7}}; epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &ev);
     struct epoll_event out[2]; r("epoll_pwait2", syscall(SYS_epoll_pwait2, ep, out, 2, &ts, 0, 8));
     struct itimerval it = {{0, 0}, {0, 20000}}, old;
     r("setitimer", setitimer(ITIMER_REAL, &it, &old));
     r("getitimer", syscall(SYS_getitimer, ITIMER_REAL, &old));
+#ifdef SYS_pause
     r("pause", syscall(SYS_pause));
     r("alarm", syscall(SYS_alarm, 0));
     r("alarm-set", syscall(SYS_alarm, 1));
     r("alarm-cancel", syscall(SYS_alarm, 0));
+#endif
     sigset_t m; sigemptyset(&m); sigaddset(&m, SIGUSR2); sigprocmask(SIG_BLOCK, &m, 0);
     raise(SIGUSR2);
     siginfo_t si; r("rt_sigtimedwait", syscall(SYS_rt_sigtimedwait, &m, &si, &ts, 8));

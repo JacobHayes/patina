@@ -435,7 +435,7 @@ fn page_up(x: u64) -> u64 {
 }
 
 fn file_size(fd: i64) -> u64 {
-    fstat_raw(fd).map(|st| st[6]).unwrap_or(0)
+    fstat_raw(fd).map(|st| st.size()).unwrap_or(0)
 }
 
 fn new_shadow(len: u64) -> u64 {
@@ -476,7 +476,7 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
         return; // not MAP_SHARED / MAP_SHARED_VALIDATE
     }
     let Some(st) = fstat_raw(fd) else { return };
-    if !path::is_work(st[0]) || proto::abi::stat::mode(&st) & 0o170000 != 0o100000 {
+    if !path::is_work(st.dev()) || st.mode() & 0o170000 != 0o100000 {
         return;
     }
     let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // F_GETFL
@@ -495,7 +495,7 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     let m = Map {
         addr,
         len,
-        ino: st[1],
+        ino: st.ino(),
         off,
         shadow,
         shadow_len: page_up(len),
@@ -505,7 +505,7 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, shadow as *mut u8, v as usize) };
     t.m[t.n] = m;
     t.n += 1;
-    append(OpKind::MmapShared, st[1], [off, len, 0, 0, 0, 0], &[], 0);
+    append(OpKind::MmapShared, st.ino(), [off, len, 0, 0, 0, 0], &[], 0);
 }
 
 /// Record the pages of mapping `i` that differ from the tracker's view (`MmapDirty`), and
@@ -822,11 +822,11 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     let Some(st) = fstat_raw(fd) else {
         return -e::EBADF;
     };
-    if !path::is_work(st[0]) {
+    if !path::is_work(st.dev()) {
         return 0;
     }
-    let ino = st[1];
-    let dir = proto::abi::stat::mode(&st) & 0o170000 == 0o040000;
+    let ino = st.ino();
+    let dir = st.mode() & 0o170000 == 0o040000;
     crate::inject::crash_point();
     if !dir {
         flush_ino(ino);
@@ -888,7 +888,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
 /// Before `close(fd)`: the inode, when it is a `/work` regular file.
 pub fn before_close(fd: i64) -> Option<u64> {
     let st = fstat_raw(fd)?;
-    (path::is_work(st[0]) && proto::abi::stat::mode(&st) & 0o170000 == 0o100000).then_some(st[1])
+    (path::is_work(st.dev()) && st.mode() & 0o170000 == 0o100000).then_some(st.ino())
 }
 
 /// After a successful `close`: the `Close` record (the materialiser derives

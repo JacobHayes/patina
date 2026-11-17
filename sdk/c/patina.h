@@ -73,8 +73,8 @@ static inline int patina_is_simulated(void) {
         long r = patina__sys(PATINA_OP_HELLO, 0, 0);
         int ok = r >= 0 && (r & 0xffff) == PATINA_VERSION;
         if (r >= 0 && !ok) {
-            static const char m[] = "patina: unknown SDK protocol version; the SDK is inert\n";
 #if defined(__x86_64__) && defined(__linux__)
+            static const char m[] = "patina: unknown SDK protocol version; the SDK is inert\n";
             long w;
             __asm__ volatile("syscall" : "=a"(w) : "a"(1L), "D"(2L), "S"(m), "d"(sizeof m - 1)
                              : "rcx", "r11", "memory");

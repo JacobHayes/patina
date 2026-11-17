@@ -350,7 +350,7 @@ fn policy_ground(p: &[u8], next: &[u8]) -> bool {
 }
 
 fn is_dir(p: &PathBuf) -> Result<bool, i64> {
-    let mut st = [0u64; proto::abi::stat::WORDS];
+    let mut st = proto::abi::stat::Stat::zeroed();
     let r = unsafe {
         sc4(
             nr::NEWFSTATAT,
@@ -363,7 +363,7 @@ fn is_dir(p: &PathBuf) -> Result<bool, i64> {
     if r < 0 {
         return Err(r);
     }
-    Ok(proto::abi::stat::mode(&st) & 0o170000 == 0o040000)
+    Ok(st.mode() & 0o170000 == 0o040000)
 }
 
 /// Walk `s` from `dirfd` in the runtime; `out` gets the absolute, symlink-free path.

@@ -22,7 +22,7 @@ const XATTR_W: &str =
 const CWD: &str = "Working directory and umask are per-process kernel state changed only by the process; the guest starts with umask 022 whatever the launcher's umask.";
 const TRUNC: &str = "Size change on the sandbox tmpfs: a function of the guest's writes. mtime and ctime are stamped; on /work reported.";
 
-const S144: &[Out] = &[out(1, Len::Fixed(144))];
+const STAT_OUT: &[Out] = &[out(1, Len::Fixed(crate::abi::stat::SIZE))];
 
 pub const ROWS: &[Row] = &[
     Row::new(G, nr::OPEN, Pass, A, OPEN_W).ins(&[out(0, Len::CStr)]),
@@ -35,15 +35,17 @@ pub const ROWS: &[Row] = &[
         .ins(&[out(1, Len::CStr), out(2, Len::Arg(3))]),
     Row::new(G, nr::STAT, Rewrite, A, STAT_W)
         .ins(&[out(0, Len::CStr)])
-        .outs(S144),
+        .outs(STAT_OUT),
     Row::new(G, nr::LSTAT, Rewrite, A, STAT_W)
         .ins(&[out(0, Len::CStr)])
-        .outs(S144),
-    Row::new(G, nr::FSTAT, Rewrite, A, STAT_W).fd(0).outs(S144),
+        .outs(STAT_OUT),
+    Row::new(G, nr::FSTAT, Rewrite, A, STAT_W)
+        .fd(0)
+        .outs(STAT_OUT),
     Row::new(G, nr::NEWFSTATAT, Rewrite, A, STAT_W)
         .fd(0)
         .ins(&[out(1, Len::CStr)])
-        .outs(&[out(2, Len::Fixed(144))]),
+        .outs(&[out(2, Len::Fixed(crate::abi::stat::SIZE))]),
     Row::new(G, nr::STATX, Rewrite, A, STATX_W)
         .fd(0)
         .ins(&[out(1, Len::CStr)])

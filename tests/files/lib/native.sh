@@ -22,6 +22,7 @@ if [ -n "${STRACE:-}" ]; then
     set -- /usr/bin/strace -f -c -o /dev/fd/9 "$@"
 fi
 mkdir -p "$out/etc"
+umask 022 # the launcher's (sup/inherit.rs), whatever the caller's
 uid=1000; gid=1000 # patina's fixed ids in the user namespace
 printf 'root:x:0:0:root:/work:/bin/sh\nuser:x:%s:%s:user:/work:/bin/sh\n' "$uid" "$gid" >"$out/etc/passwd"
 printf 'root:x:0:\nuser:x:%s:\n' "$gid" >"$out/etc/group"

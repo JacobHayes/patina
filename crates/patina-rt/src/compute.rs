@@ -261,7 +261,7 @@ fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
     unsafe { sc1(nr::CLOSE, fd as u64) };
     let (dev, ino, n) = hit?;
     let me = crate::sys::fs::fstatat_raw(-100, proc().guest_path.as_ptr() as u64, 0);
-    (!me.is_some_and(|st| st[0] == dev && st[1] == ino)).then_some(n)
+    (!me.is_some_and(|st| st.dev() == dev && st.ino() == ino)).then_some(n)
 }
 
 /// `(device, inode, path)` of a `/proc/self/maps` line when its range holds `pc`.

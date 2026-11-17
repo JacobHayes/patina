@@ -16,8 +16,9 @@ for g in "$here"/contain/*.c; do
     n=$(basename "$g" .c)
     $cc -O1 -w -pthread -o "$out/$n" "$g"
 done
+# x86 instructions with host results.
 for g in "$here"/insn/*.c; do
-    [ -e "$g" ] || continue
+    [ -e "$g" ] && [ "$(uname -m)" = x86_64 ] || continue
     $cc -O1 -w -o "$out/$(basename "$g" .c)" "$g"
 done
 $cc -O1 -w -shared -fPIC -o "$out/skew.so" "$here/probe/skew.c" -ldl

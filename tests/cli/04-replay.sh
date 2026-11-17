@@ -1,7 +1,7 @@
 # 4. `patina replay RUNDIR`: identical, with the run's exit status; `error` naming the program
 #    after one byte of it changes; `nondeterministic` printing the first differing record when
 #    the test hook perturbs one draw on replay; a run of another patina build refused.
-#@ tier=quick budget=10 arch=x86_64
+#@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/prog
 mkdir -p "$d"

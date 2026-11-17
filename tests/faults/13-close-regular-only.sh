@@ -1,7 +1,7 @@
 # 13. (storage reproductions regression) An injected close error applies to regular files only: Linux's
 # close of a directory cannot fail with EIO (Rust's std asserts on it). close #1 is a
 # directory: never faulted, also not when targeted; close #2 is a file: EIO when targeted.
-#@ tier=quick arch=x86_64
+#@ tier=quick
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/13
 run "$d/dir" 1 --fault fs-error-at=close:1 -- /guest/closedir

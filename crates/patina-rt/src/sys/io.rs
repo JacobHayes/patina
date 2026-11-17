@@ -41,7 +41,7 @@ pub enum Kind {
 
 pub fn kind_of(fd: i64) -> Option<Kind> {
     let st = fstat_raw(fd)?;
-    Some(match proto::abi::stat::mode(&st) & 0o170000 {
+    Some(match st.mode() & 0o170000 {
         0o010000 => Kind::Pipe,
         0o140000 => Kind::Sock,
         0 => Kind::Anon,
@@ -523,7 +523,7 @@ pub fn fifo_open(nr: u64, a: &[u64; 6], dirfd: i64, pi: usize, flags: u64) -> Op
     }
     let nofollow = if flags & O_NOFOLLOW != 0 { 0x100 } else { 0 };
     let st = super::fs::fstatat_raw(dirfd, a[pi], nofollow)?;
-    if proto::abi::stat::mode(&st) & 0o170000 != 0o010000 {
+    if st.mode() & 0o170000 != 0o010000 {
         return None;
     }
     let mut b = *a;

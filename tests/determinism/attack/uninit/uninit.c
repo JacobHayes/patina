@@ -15,12 +15,18 @@ static uint64_t frame_hash; static size_t frame_len;
 static void on_sig(int s, siginfo_t *si, void *uc) {
     (void)s; ucontext_t *u = uc;
     frame_hash = fnv_add(FNV0, si, sizeof *si);
+#ifdef __x86_64__
     frame_hash = fnv_add(frame_hash, &u->uc_mcontext.gregs, sizeof u->uc_mcontext.gregs);
     if (u->uc_mcontext.fpregs) { frame_hash = fnv_add(frame_hash, u->uc_mcontext.fpregs, 512); frame_len = 512; }
     /* XSAVE header and beyond, as far as the frame claims */
     unsigned char *fp = (unsigned char *)u->uc_mcontext.fpregs;
     if (fp) { uint32_t magic1 = *(uint32_t *)(fp + 464), xsz = *(uint32_t *)(fp + 468 + 4);
         if (magic1 == 0x46505853u && xsz < 16384) { frame_hash = fnv_add(frame_hash, fp, xsz); frame_len = xsz; } }
+#else
+    /* the registers and the context records (FPSIMD and the rest), byte for byte */
+    frame_hash = fnv_add(frame_hash, &u->uc_mcontext, sizeof u->uc_mcontext);
+    frame_len = sizeof u->uc_mcontext;
+#endif
 }
 static __attribute__((noinline)) uint64_t deep(int n) { volatile char pad[512]; for (int i = 0; i < 512; i++) pad[i] = (char)(n + i); return n ? deep(n - 1) + pad[3] : pad[7]; }
 static __attribute__((noinline)) void below(const char *tag) {

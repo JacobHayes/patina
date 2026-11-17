@@ -404,13 +404,21 @@ pub fn host_facts() -> Value {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let cpu = std::fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|s| {
-            s.lines()
-                .find(|l| l.starts_with("model name"))
-                .and_then(|l| l.split_once(':'))
-                .map(|(_, v)| v.trim().to_string())
+    // x86_64 names the model; arm64 gives the implementer and part numbers.
+    let info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    let field = |k: &str| {
+        info.lines()
+            .find(|l| l.split(':').next().is_some_and(|f| f.trim() == k))
+            .and_then(|l| l.split_once(':'))
+            .map(|(_, v)| v.trim().to_string())
+    };
+    let cpu = field("model name")
+        .or_else(|| {
+            Some(format!(
+                "implementer {} part {}",
+                field("CPU implementer")?,
+                field("CPU part")?
+            ))
         })
         .unwrap_or_default();
     json!({ "kernel": kernel, "cpu": cpu, "arch": std::env::consts::ARCH })

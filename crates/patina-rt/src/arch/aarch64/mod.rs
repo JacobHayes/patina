@@ -16,17 +16,48 @@ pub const AUDIT_ARCH: u32 = 0xC000_00B7;
 /// Bytes of the system-call instruction: the kernel's reported address is this far past it.
 pub const SYSCALL_LEN: u64 = 4;
 
-/// The value the program sees for an auxiliary vector entry copied from the kernel's.
-/// `HWCAP_PACG` is cleared: the generic key cannot be disabled, so `PACGA` would give a
-/// different value in every run (the scan stops a program that has one, `insn`).
+/// `clone`'s arguments by role, from the raw ones: (flags, stack, ptid, ctid, tls). The
+/// generic order (`CONFIG_CLONE_BACKWARDS`) has the TLS before the child's tid pointer.
+#[inline(always)]
+pub fn clone_args(a: [u64; 6]) -> [u64; 5] {
+    [a[0], a[1], a[2], a[4], a[3]]
+}
+
+/// The value the program sees for an auxiliary vector entry copied from the kernel's: the
+/// host's (host-stable facts), less three features.
+/// - `HWCAP_PACG`: the generic key cannot be disabled, so `PACGA` would give a different value
+///   in every run (the scan stops a program that has one, `insn`).
+/// - SME (`HWCAP2_SME` and every SME sub-feature, some in `AT_HWCAP`): with it hidden,
+///   libraries that choose code by the auxiliary vector (glibc, language runtimes) never turn
+///   on streaming mode or the ZA array, whose contents and vector length are the host's.
+///   Instructions are not checked: a program that executes SME anyway computes
+///   deterministically on that host. (The kernel's signal frames and `AT_MINSIGSTKSZ` still
+///   carry the SME records on an SME host: seeds and digests are per kind of host.)
+/// - `HWCAP_CPUID`: the kernel emulates `mrs` of the ID registers, and `MIDR_EL1` answers
+///   for the core the thread runs on, which on a host with two kinds of core changes between
+///   runs. glibc reads it only when the bit is set (to choose `memcpy`).
 pub fn aux_value(t: u64, v: u64) -> u64 {
     const AT_HWCAP: u64 = 16;
+    const AT_HWCAP2: u64 = 26;
+    const HWCAP_CPUID: u64 = 1 << 11;
     const HWCAP_PACG: u64 = 1 << 31;
-    if t == AT_HWCAP {
-        v & !HWCAP_PACG
-    } else {
-        v
+    // HWCAP_SME2P2, SME_SBITPERM, SME_AES, SME_SFEXPA, SME_STMOP, SME_SMOP4.
+    const HWCAP_SME: u64 = 0x3f << 42;
+    match t {
+        AT_HWCAP => v & !(HWCAP_PACG | HWCAP_CPUID | HWCAP_SME),
+        AT_HWCAP2 => v & !HWCAP2_SME_ALL,
+        _ => v,
     }
+}
+
+/// `HWCAP2_SME` and its sub-features: bits 23-30 (SME .. SME_FA64), 37-42 (SME2 ..
+/// SME_F16F16) and 57-62 (SME_LUTV2 .. SME_SF8DP2).
+const HWCAP2_SME_ALL: u64 = 0xff << 23 | 0x3f << 37 | 0x3f << 57;
+
+/// Whether `/proc/cpuinfo`'s `Features` line leaves out the word `w`: the features
+/// `aux_value` hides.
+pub fn feature_hidden(w: &[u8]) -> bool {
+    w == b"pacg" || w == b"cpuid" || w.starts_with(b"sme")
 }
 
 /// Per-image setup that must come before anything else: the pointer-authentication keys off.

@@ -22,10 +22,12 @@ sets=$base/guests/sets
 mkdir -p "$cache" "$sets" "$PATINA_BUILD_DIR"
 
 workload_style=" c-sqlite cpython fjall-harness go-static rust-threads-files shell-pipeline tokio-mt "
-# During the arm64 port only the guests of the ported slices are built there.
+# During the arm64 port the guests of the parts not ported yet are not built there: x86
+# instructions (insn, counters), signal frames (signals), the SDKs and compute points
+# (sdk, compute, examples, costs).
 case $(uname -m) in
-    x86_64) built="" ;;
-    *) built=" hello arm64 " ;;
+    x86_64) skipped="" ;;
+    *) skipped=" insn counters signals sdk compute examples costs " ;;
 esac
 tools=$( (uname -m; gcc --version | head -1; rustc -V; go version; clang --version 2>/dev/null | head -1) | sha256sum | cut -c1-16)
 
@@ -49,7 +51,7 @@ name() {
 entries=""
 for b in "$root"/tests/guests/*/build.sh "$root"/tests/determinism/attack/build.sh "$root"/tests/sandbox/guests/build.sh; do
     rel=$(dirname "$b"); rel=${rel#"$root"/}
-    [ -z "$built" ] || case $built in *" $(name "$b") "*) ;; *) continue ;; esac
+    case $skipped in *" $(name "$b") "*) continue ;; esac
     entries="$entries $(name "$b")-$(key "$rel")"
 done
 setkey=$(echo "$entries" | sha256sum | cut -c1-16)

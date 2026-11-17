@@ -441,7 +441,18 @@ fn cpuinfo(w: &mut W) {
                 .map(|i| i + 1)
                 .unwrap_or(0)];
             match key {
-                b"cpu MHz" | b"bogomips" => continue, // frequency and calibration vary
+                b"cpu MHz" | b"bogomips" | b"BogoMIPS" => continue, // frequency and calibration vary
+                // arm64: the features the auxiliary vector hides are not listed either.
+                b"Features" => {
+                    let colon = line.iter().position(|&c| c == b':').unwrap_or(0);
+                    w.s(&line[..colon + 1]);
+                    for f in line[colon + 1..].split(|&c| c == b' ') {
+                        if !f.is_empty() && !crate::arch::feature_hidden(f) {
+                            w.c(b' ').s(f);
+                        }
+                    }
+                    w.c(b'\n');
+                }
                 b"processor" | b"core id" | b"apicid" | b"initial apicid" => {
                     w.s(&line[..line.iter().position(|&c| c == b':').unwrap_or(0) + 1])
                         .c(b' ')
@@ -758,12 +769,9 @@ fn fake_mode(k: Synth) -> u32 {
 pub fn fake_stat(k: Synth, p: u64) -> i64 {
     let uid = unsafe { sc0(nr::GETUID) } as u32;
     let gid = unsafe { sc0(nr::GETGID) } as u32;
-    let mut st = proto::abi::stat::new(proc_dev(), fake_ino(k), 1, fake_mode(k), uid, gid);
-    st[7] = 1024;
-    let t = crate::vtime::epoch();
-    for i in [9, 11, 13] {
-        st[i] = t / 1_000_000_000;
-    }
+    let t = crate::vtime::epoch() / 1_000_000_000;
+    let st =
+        proto::abi::stat::Stat::new(proc_dev(), fake_ino(k), 1, fake_mode(k), uid, gid, 1024, t);
     crate::guest::put(p, st).err().unwrap_or(0)
 }
 

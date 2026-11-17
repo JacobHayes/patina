@@ -90,7 +90,7 @@ fn socketpair(call: &mut dyn Call) -> Action {
 /// from a run counter instead of the kernel's random choice.
 fn bind(call: &mut dyn Call) -> i64 {
     let [fd, addr, len, ..] = args(call);
-    if len == 2 && addr != 0 && unsafe { *(addr as *const u16) } as u64 == AF_UNIX {
+    if len == 2 && crate::guest::get::<u16>(addr) == Ok(AF_UNIX as u16) {
         let io = &ctl().io;
         loop {
             let n = io.autobind_next.load(Relaxed);
@@ -220,40 +220,37 @@ fn note_unix_in_flight(fd: i64) {
     }
 }
 
-/// A hidden descriptor named in SCM_RIGHTS answers EBADF.
-fn hidden_rights(msg: u64) -> bool {
+/// A hidden descriptor named in SCM_RIGHTS answers EBADF; a header or control block the
+/// guest copy cannot read, EFAULT (the kernel is not asked to read it either).
+fn hidden_rights(msg: u64) -> Result<bool, i64> {
     if msg == 0 {
-        return false;
+        return Ok(false);
     }
-    let (ctlp, ctll) = unsafe { (*((msg + 32) as *const u64), *((msg + 40) as *const u64)) };
+    let [ctlp, ctll] = crate::guest::get::<[u64; 2]>(msg + 32)?;
     if ctlp == 0 {
-        return false;
+        return Ok(false);
     }
     let mut off = 0u64;
     while off + 16 <= ctll {
         let h = ctlp + off;
-        let (len, level, ty) = unsafe {
-            (
-                *(h as *const u64),
-                *((h + 8) as *const i32),
-                *((h + 12) as *const i32),
-            )
-        };
+        // struct cmsghdr { size_t len; int level; int type; }
+        let [len, lt] = crate::guest::get::<[u64; 2]>(h)?;
+        let (level, ty) = (lt as u32 as i32, (lt >> 32) as i32);
         if len < 16 {
             break;
         }
         if level == SOL_SOCKET as i32 && ty == SCM_RIGHTS {
             for i in 0..(len - 16) / 4 {
-                let fd = unsafe { *((h + 16 + i * 4) as *const i32) };
+                let fd = crate::guest::get::<i32>(h + 16 + i * 4)?;
                 if fd >= FD_HIDDEN_MIN {
-                    return true;
+                    return Ok(true);
                 }
                 note_unix_in_flight(fd as i64);
             }
         }
         off += (len + 7) & !7;
     }
-    false
+    Ok(false)
 }
 
 fn sender(fd: i64, nr: u64, flags: u64) -> Waiter {
@@ -293,14 +290,18 @@ fn sendmsg(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let fd = a[0] as i32 as i64;
     let msg = a[1];
-    if hidden_rights(msg) {
-        return -e::EBADF;
+    match hidden_rights(msg) {
+        Ok(false) => {}
+        Ok(true) => return -e::EBADF,
+        Err(e) => return e,
     }
     if msg == 0 {
         return -e::EFAULT;
     }
+    let Ok([iov, cnt]) = crate::guest::get::<[u64; 2]>(msg + 16) else {
+        return -e::EFAULT;
+    };
     let mut w = sender(fd, nr::SENDMSG, a[2]);
-    let (iov, cnt) = unsafe { (*((msg + 16) as *const u64), *((msg + 24) as *const u64)) };
     // The window the cursor builds lives on the runtime stack, so `p == iov` only for the
     // first attempt (repeated as long as it would block).
     let r = io::write_all(&mut w, iov, cnt, |p, n| {
@@ -319,8 +320,10 @@ fn sendmmsg(call: &mut dyn Call) -> i64 {
     let fd = a[0] as i32 as i64;
     let vlen = a[2].min(1024);
     for i in 0..vlen {
-        if hidden_rights(a[1] + i * 64) {
-            return -e::EBADF;
+        match hidden_rights(a[1] + i * 64) {
+            Ok(false) => {}
+            Ok(true) => return -e::EBADF,
+            Err(e) => return e,
         }
     }
     let mut w = sender(fd, nr::SENDMMSG, a[3]);
@@ -511,8 +514,7 @@ fn listed_opt(get: bool, level: u64, name: u64) -> bool {
 
 /// A socket option call on a descriptor that is not a socket goes to the kernel (ENOTSOCK).
 fn is_socket(fd: u64) -> bool {
-    super::fs::fstat_raw(fd as i32 as i64)
-        .is_some_and(|st| proto::abi::stat::mode(&st) & 0o170000 == 0o140000)
+    super::fs::fstat_raw(fd as i32 as i64).is_some_and(|st| st.mode() & 0o170000 == 0o140000)
 }
 
 pub fn handle(call: &mut dyn Call) -> Action {
