@@ -2,7 +2,7 @@
 # Install the patina tool from a GitHub release.
 #
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.8.0
+#   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.9.0
 #
 # Downloads the release's archive for this machine (a static Linux x86_64 or aarch64 binary),
 # checks it against the release's SHA256SUMS, installs <prefix>/bin/patina, then runs `patina doctor`, which names
@@ -34,7 +34,7 @@ version=latest
 prefix=
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) [ $# -ge 2 ] || fail "--version takes a release, such as 0.8.0"; version=$2; shift 2 ;;
+    --version) [ $# -ge 2 ] || fail "--version takes a release, such as 0.9.0"; version=$2; shift 2 ;;
     --prefix) [ $# -ge 2 ] || fail "--prefix takes a directory"; prefix=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) usage >&2; fail "unknown argument: $1" ;;
