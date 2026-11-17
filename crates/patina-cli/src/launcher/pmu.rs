@@ -57,15 +57,12 @@ fn perf_open(event: u64, tid: i32) -> io::Result<OwnedFd> {
 /// must not mean something different on another host. A seed run with counters reproduces
 /// on the same CPU family. No arm64 CPU is supported.
 #[cfg(not(target_arch = "x86_64"))]
-fn event() -> Result<u64, String> {
-    Err(format!(
-        "{} (branch counters are not supported on this architecture)",
-        std::env::consts::ARCH
-    ))
+fn event() -> Result<u64, Unavailable> {
+    Err(Unavailable::Arch)
 }
 
 #[cfg(target_arch = "x86_64")]
-fn event() -> Result<u64, String> {
+fn event() -> Result<u64, Unavailable> {
     let r = std::arch::x86_64::__cpuid(0);
     let mut v = [0u8; 12];
     v[0..4].copy_from_slice(&r.ebx.to_le_bytes());
@@ -88,13 +85,19 @@ fn event() -> Result<u64, String> {
     if &v == b"AuthenticAMD" && proto::pmu::AMD_FAMILIES.contains(&family) {
         return Ok(proto::pmu::EVENT_AMD);
     }
-    Err(format!("{vendor} family {family:#x} model {model:#x}"))
+    Err(Unavailable::Cpu(format!(
+        "{vendor} family {family:#x} model {model:#x}"
+    )))
 }
 
 /// Why counters cannot be used here.
 #[derive(Clone, Debug)]
 pub enum Unavailable {
+    /// Not on arm64: no CPU of it is supported.
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    Arch,
     /// The CPU's branch counting is not one Patina has checked exact.
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Cpu(String),
     /// The CPU is supported; this process lacks `CAP_PERFMON`.
     Permission(String),
@@ -105,6 +108,7 @@ pub enum Unavailable {
 impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
+            Unavailable::Arch => write!(f, "branch counters are not supported on arm64"),
             Unavailable::Cpu(m) => write!(
                 f,
                 "this CPU ({m}) is not supported: counter preemption is checked exact on AMD \
@@ -128,7 +132,7 @@ impl std::fmt::Display for Unavailable {
 pub fn available() -> Result<u64, Unavailable> {
     static S: OnceLock<Result<u64, Unavailable>> = OnceLock::new();
     S.get_or_init(|| {
-        let ev = event().map_err(Unavailable::Cpu)?;
+        let ev = event()?;
         match perf_open(ev, 0) {
             Ok(_) => Ok(ev),
             Err(e) if matches!(e.raw_os_error(), Some(libc::EACCES | libc::EPERM)) => {

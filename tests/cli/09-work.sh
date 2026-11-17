@@ -3,7 +3,7 @@
 #    after a failed fsync loses an acknowledged record there as at /work (the same outcome and
 #    message; the digest differs by the paths the records name). A mount that would shadow the sandbox's own paths is refused, naming
 #    why; one under /etc or /tmp is not.
-#@ tier=quick budget=10 arch=x86_64
+#@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/work
 mkdir -p "$d/init"

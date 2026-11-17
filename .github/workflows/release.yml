@@ -1,27 +1,42 @@
 name: Release
 
-# A `v*` tag builds the one release artifact, a static x86_64 Linux `patina` with the runtime
-# embedded; checks it names the tag's version; installs it from the archive with install.sh,
-# on the runner and in a bare ubuntu:24.04 container; runs the adopter smoke; and only then
-# pushes the Go SDK's tag and publishes the release. A manual run does all of that except
-# publish, and ends by installing the latest published release with the documented one-liner.
-# Linux x86_64 only. Nothing here publishes to crates.io.
+# A `v*` tag builds the release artifacts, one static Linux `patina` per architecture with the
+# runtime embedded, each natively on a runner of its architecture; checks each names the tag's
+# version; installs each from its archive with install.sh, on its runner and in a bare
+# ubuntu:24.04 container; runs the adopter smoke on both; merges the archives under one
+# SHA256SUMS; and only then pushes the Go SDK's tag and publishes the release. A manual run does
+# all of that except publish, and ends by installing the latest published release with the
+# documented one-liner on both architectures (`published: false` skips that, for a dry run
+# before the first release that has both). Nothing here publishes to crates.io.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      published:
+        description: End by installing the latest published release
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: never
-  TARGET: x86_64-unknown-linux-musl
 
 jobs:
   build:
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    env:
+      TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
       - name: Host setup for the sandbox
@@ -38,6 +53,7 @@ jobs:
       - name: A release tag names the version it builds
         if: github.ref_type == 'tag'
         run: test "$(target/$TARGET/release/patina --version)" = "patina ${GITHUB_REF_NAME#v}"
+      # This architecture's archive with a SHA256SUMS of its own, for the installs below.
       - name: Package
         run: |
           mkdir dist
@@ -64,6 +80,28 @@ jobs:
           scripts/install-smoke.sh
       - uses: actions/upload-artifact@v7
         with:
+          name: archive-${{ matrix.target }}
+          path: dist/patina-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  # The release's files: both archives, one SHA256SUMS listing both, install.sh.
+  dist:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+      - run: |
+          cp install.sh dist/
+          (cd dist && sha256sum patina-*.tar.gz >SHA256SUMS && cat SHA256SUMS)
+          test "$(wc -l <dist/SHA256SUMS)" = 2
+      - uses: actions/upload-artifact@v7
+        with:
           name: dist
           path: dist
           if-no-files-found: error
@@ -72,7 +110,7 @@ jobs:
   # is versioned by a tag that carries its path.
   publish:
     if: github.ref_type == 'tag'
-    needs: build
+    needs: dist
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -90,11 +128,15 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
             dist/patina-*.tar.gz dist/SHA256SUMS dist/install.sh
 
-  # Install the published release as the README says, on a fresh runner, and run the smoke.
+  # Install the published release as the README says, on a fresh runner of each architecture,
+  # and run the smoke.
   published:
-    if: ${{ !cancelled() && (github.event_name != 'push' || needs.publish.result == 'success') }}
+    if: ${{ !cancelled() && (github.event_name == 'push' && needs.publish.result == 'success' || github.event_name == 'workflow_dispatch' && inputs.published) }}
     needs: publish
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
       # Only for the smoke script and the examples it builds.

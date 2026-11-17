@@ -3,6 +3,7 @@
 //! otherwise. This is the definition of "this host is supported".
 
 use crate::cli::{Args, Res};
+use crate::host::{errno, in_child};
 use serde_json::{json, Value};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,39 +129,6 @@ extern "C" fn on_sigsys(_: libc::c_int) {
     TRAPPED.store(true, Ordering::SeqCst);
 }
 
-/// Run `f` in a forked child; its exit status 0 is success, else `f`'s nonzero code and
-/// errno are reported.
-fn in_child(f: fn() -> i32) -> Result<(), String> {
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        return Err(format!("fork: {}", std::io::Error::last_os_error()));
-    }
-    if pid == 0 {
-        let code = f();
-        unsafe { libc::_exit(code) };
-    }
-    let mut st = 0;
-    unsafe { libc::waitpid(pid, &mut st, 0) };
-    if libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0 {
-        Ok(())
-    } else if libc::WIFEXITED(st) {
-        Err(format!(
-            "errno {} ({})",
-            libc::WEXITSTATUS(st),
-            std::io::Error::from_raw_os_error(libc::WEXITSTATUS(st))
-        ))
-    } else {
-        Err(format!("child died (status {st:#x})"))
-    }
-}
-
-fn errno() -> i32 {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(1)
-        .clamp(1, 255)
-}
-
 /// A filter that traps `getppid` with SIGSYS, then a `getppid` that must be trapped.
 fn seccomp_child() -> i32 {
     unsafe {
@@ -222,14 +190,7 @@ fn personality_child() -> i32 {
     0
 }
 
-fn tsc_child() -> i32 {
-    if unsafe { libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) } != 0 {
-        return errno();
-    }
-    0
-}
-
-const CONTAINER_FIX: &str =
+pub const CONTAINER_FIX: &str =
     "the process runs under a restrictive seccomp profile: in Docker, --security-opt seccomp=unconfined";
 
 /// One real run of `/usr/bin/true` through this binary, in a scratch directory.
@@ -296,14 +257,12 @@ fn cpu() -> (String, String) {
 }
 
 pub fn doctor(args: &Args) -> Res<ExitCode> {
+    let facts = crate::host::Facts::probe(None);
+    let (name, result) = crate::host::platform(&facts);
     let mut checks = vec![Check {
-        name: "platform",
+        name,
         required: true,
-        result: if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
-            Ok("Linux x86_64".into())
-        } else {
-            Err(("Patina runs on Linux x86_64 only".into(), String::new()))
-        },
+        result,
     }];
     let bwrap = bwrap_found();
     let have_bwrap = bwrap.is_ok();
@@ -342,11 +301,13 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         required: true,
         result: child(personality_child, "ADDR_NO_RANDOMIZE can be set"),
     });
-    checks.push(Check {
-        name: "rdtsc trap",
-        required: true,
-        result: child(tsc_child, "PR_SET_TSC makes rdtsc fault"),
-    });
+    for (name, result) in crate::host::checks(&facts) {
+        checks.push(Check {
+            name,
+            required: true,
+            result,
+        });
+    }
     let ready = checks.iter().all(|c| c.result.is_ok());
     checks.push(Check {
         name: "sandbox run",
@@ -368,6 +329,7 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
             crate::launcher::pmu::available()
                 .map(|ev| format!("event {ev:#x} opens"))
                 .map_err(|e| match e {
+                    U::Arch => ("not supported on arm64".into(), String::new()),
                     U::Cpu(m) => (
                         format!("not supported on this CPU, {m} (supported: AMD Zen 5)"),
                         String::new(),
@@ -383,27 +345,31 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
                 })
         },
     });
-    let pidfd_thread = unsafe { libc::syscall(libc::SYS_pidfd_open, libc::gettid(), libc::O_EXCL) };
-    checks.push(Check {
-        name: "pidfd of a thread (pmu, optional)",
-        required: false,
-        result: if pidfd_thread >= 0 {
-            unsafe { libc::close(pidfd_thread as i32) };
-            Ok("pidfd_open(PIDFD_THREAD) works".into())
-        } else {
-            Err((
-                format!(
-                    "pidfd_open(PIDFD_THREAD): {}",
-                    std::io::Error::last_os_error()
-                ),
-                "kernel 6.9 or newer".into(),
-            ))
-        },
-    });
+    // Counter preemption's broker reads a thread's pidfd; not asked on arm64 (no counters).
+    if cfg!(target_arch = "x86_64") {
+        let pidfd_thread =
+            unsafe { libc::syscall(libc::SYS_pidfd_open, libc::gettid(), libc::O_EXCL) };
+        checks.push(Check {
+            name: "pidfd of a thread (pmu, optional)",
+            required: false,
+            result: if pidfd_thread >= 0 {
+                unsafe { libc::close(pidfd_thread as i32) };
+                Ok("pidfd_open(PIDFD_THREAD) works".into())
+            } else {
+                Err((
+                    format!(
+                        "pidfd_open(PIDFD_THREAD): {}",
+                        std::io::Error::last_os_error()
+                    ),
+                    "kernel 6.9 or newer".into(),
+                ))
+            },
+        });
+    }
 
     let (vendor, model) = cpu();
     let out_dir = std::env::current_dir().unwrap_or_else(|_| "/".into());
-    let host = json!({
+    let mut host = json!({
         "kernel": sysctl("kernel.osrelease"),
         "cpu_vendor": vendor,
         "cpu_model": model,
@@ -411,6 +377,7 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         "pipe_user_pages_soft": sysctl("fs.pipe-user-pages-soft"),
         "apparmor_restrict_unprivileged_userns": sysctl("kernel.apparmor_restrict_unprivileged_userns"),
     });
+    host.as_object_mut().unwrap().extend(facts.info());
     let ok = checks.iter().all(|c| !c.required || c.result.is_ok());
     if args.json() {
         let cs: Vec<Value> = checks

@@ -1,10 +1,10 @@
 name: CI
 
 # Every push and pull request runs the landing gate: `mise run check` (format, clippy, then
-# `./check quick`) on one GitHub runner. `check-arm64` runs the same gate on an arm64 runner,
-# where `./check` skips the scripts marked `arch=x86_64` (tests/run.py) while the port is under
-# way. `counters` is informational: it runs the counter preemption checks where the runner
-# exposes a PMU and skips them where it does not.
+# `./check quick`), on an x86_64 runner (`check`) and with the same steps on an arm64 runner
+# (`check-arm64`), where `./check` skips the scripts marked `arch=x86_64` (tests/run.py). Both
+# must be green to land. `counters` is informational: it runs the counter preemption checks
+# where the runner exposes a PMU and skips them where it does not.
 on:
   pull_request:
   push:
@@ -74,7 +74,7 @@ jobs:
           path: target/patina-check/runs
           retention-days: 7
 
-  # The arm64 port's gate: the steps of `check` without `patina doctor` (not ported yet).
+  # The steps of `check`, on arm64.
   check-arm64:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -90,6 +90,10 @@ jobs:
         with:
           shared-key: check-arm64-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
           save-if: ${{ github.event_name == 'push' }}
+      - name: patina doctor
+        run: |
+          mise exec -- cargo build --release --quiet -p patina-cli
+          target/release/patina doctor
       - id: guests
         uses: actions/cache/restore@v6
         with:

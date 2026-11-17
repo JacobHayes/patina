@@ -5,6 +5,7 @@ mod config;
 mod doctor;
 mod durability;
 mod faults;
+mod host;
 mod insn;
 mod launch;
 mod launcher;

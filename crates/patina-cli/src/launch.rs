@@ -343,10 +343,12 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
     out
 }
 
-/// Can a run start here? Checked by every command before its first sandbox: as root, the
+/// Can a run start here? Checked by every command before its first sandbox: the host meets
+/// this architecture's requirements (`host`, which `patina doctor` explains); as root, the
 /// sandbox's user namespace can be made and the host paths it binds can be read by the user it
 /// maps to; counters work if `--preempt branches` asks for them.
 pub fn preflight(o: &Opts) -> Res<()> {
+    crate::host::refusal(&crate::host::Facts::probe(o.cfg.host_cpu))?;
     if let Some(user) = root_user() {
         userns()?;
         if user.0 == OVERFLOW {

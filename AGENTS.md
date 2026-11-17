@@ -25,7 +25,7 @@ updates the docs in the same commit.
   (`x86_64-unknown-none`, `aarch64-unknown-none-softfloat`) by `crates/patina-cli/build.rs` and
   embedded in the binary. What differs by architecture (entry, the syscall stub, the signal
   frame, the guest copy) is in `src/arch/<arch>/`; arm64 stand-ins for parts not ported yet
-  are in `src/arch/aarch64/standin/` and end the run `unsupported`, stop `arm64-unported`.
+  are in `src/arch/aarch64/standin/`.
 - System call numbers by name: `proto::nr` (generated); structure layouts and flags that
   differ by architecture: `proto::abi`.
 - `crates/patina-cli`: the `patina` binary: launcher, supervisor, CLI.
@@ -44,7 +44,7 @@ missing). rustup installs the pinned toolchain; mise supplies Go.
 - **Landing is `mise run check`**: `cargo fmt --check`, clippy with `-D warnings`, then
   `./check quick`. Quick's budget is 5 minutes and it fails above 10. CI runs exactly this, on
   x86_64 (`check`) and on arm64 (`check-arm64`).
-  Land by pushing the branch; when CI is green, fast-forward `main`.
+  Land by pushing the branch; when both `check` and `check-arm64` are green, fast-forward `main`.
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.

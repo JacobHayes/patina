@@ -4,8 +4,8 @@
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.8.0
 #
-# Downloads the release's one archive (a static Linux x86_64 binary), checks it against the
-# release's SHA256SUMS, installs <prefix>/bin/patina, then runs `patina doctor`, which names
+# Downloads the release's archive for this machine (a static Linux x86_64 or aarch64 binary),
+# checks it against the release's SHA256SUMS, installs <prefix>/bin/patina, then runs `patina doctor`, which names
 # anything the host still needs (bwrap, user namespaces) and the command that fixes it. It
 # installs no packages and changes no settings.
 
@@ -48,7 +48,10 @@ fi
 system="$(uname -s)/$(uname -m)"
 case "$system" in
   Linux/x86_64) target=x86_64-unknown-linux-musl ;;
-  *) fail "patina runs on Linux x86_64 only, and this machine is $system; on a Mac or an arm64 machine, use a Linux x86_64 VM or container (an arm64 one will not do)" ;;
+  Linux/aarch64|Linux/arm64) target=aarch64-unknown-linux-musl ;;
+  Darwin/arm64) fail "patina runs on Linux x86_64 and arm64, not macOS; on an Apple Silicon Mac, run it inside a Linux arm64 VM with 4 KiB pages and a 6.12+ kernel" ;;
+  Darwin/*) fail "patina runs on Linux x86_64 and arm64, not macOS; on an Intel Mac, run it inside a Linux x86_64 VM" ;;
+  *) fail "patina runs on Linux x86_64 and arm64 only, and this machine is $system" ;;
 esac
 
 if [ -n "${PATINA_RELEASE_URL:-}" ]; then
