@@ -11,7 +11,9 @@ special linking, any language.
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
 needs `bwrap` (bubblewrap) and unprivileged user namespaces.
 
-Changes in 0.12: triage of a checker's findings, and branch counters on arm64. A finding can
+Changes in 0.12.2: a `#!` script runs as the program, as `execve` runs it
+(`patina run -- ./script.sh`; [the guide](docs/GUIDE.md#running-a-program)). In 0.12: triage
+of a checker's findings, and branch counters on arm64. A finding can
 carry its grouping key (`LABEL [KEY]: detail`), `patina recheck` judges kept runs again with an
 edited checker, and `--only-case` runs one case
 ([the guide](docs/GUIDE.md#judging-again)); `--preempt branches` works on the Arm Neoverse N2.
