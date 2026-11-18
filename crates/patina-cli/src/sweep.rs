@@ -527,6 +527,8 @@ enum Fresh {
 struct Judged {
     /// To judge again from their kept logs.
     jobs: Vec<Job>,
+    /// Judged again, for the sweep to account as finished runs (`State::account`).
+    done: Vec<Job>,
     judged: usize,
     /// Run again: their logs were pruned.
     rerun: usize,
@@ -550,7 +552,10 @@ impl Judged {
         let mut again = vec![];
         for (job, (dir, r)) in jobs.into_iter().zip(done) {
             match r.map_err(|e| error(format!("{}: {e}", dir.display())))? {
-                crate::recheck::Rejudged::Judged(_) => self.judged += 1,
+                crate::recheck::Rejudged::Judged(_) => {
+                    self.judged += 1;
+                    self.done.push(job);
+                }
                 crate::recheck::Rejudged::Unmade => {}
                 crate::recheck::Rejudged::Pruned => {
                     self.rerun += 1;
@@ -1212,9 +1217,16 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         )));
     }
     let serve = cfg.check.as_ref().filter(|k| k.serve);
-    let mut not_started = pool(jobs, width, &child, serve, |d, running, now| {
-        st.event(d, running, now)
-    });
+    // Runs judged again count as finished runs: pruned or cut by --keep, their findings
+    // toward --max-findings, which may stop the sweep before it starts a run.
+    st.rejudged(std::mem::take(&mut judged_again.done));
+    let mut not_started = if st.stopped.is_some() {
+        jobs.len()
+    } else {
+        pool(jobs, width, &child, serve, |d, running, now| {
+            st.event(d, running, now)
+        })
+    };
     st.flush(true);
     if kind.is_some() && st.stopped.is_none() && !INTERRUPTED.load(SeqCst) {
         // The children: each base's crash points, points ascending, seeds (and cases)
@@ -1275,9 +1287,14 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         st.todo += children.len();
         // Children of all seeds run interleaved: announce each group as it is found.
         st.unfinished.clear();
-        not_started = pool(children, st.width, &child, serve, |d, running, now| {
-            st.event(d, running, now)
-        });
+        st.rejudged(std::mem::take(&mut judged_again.done));
+        not_started = if st.stopped.is_some() {
+            children.len()
+        } else {
+            pool(children, st.width, &child, serve, |d, running, now| {
+                st.event(d, running, now)
+            })
+        };
         st.flush(true);
     }
     let interrupted = INTERRUPTED.load(SeqCst);
@@ -1564,7 +1581,6 @@ impl State<'_> {
         if let Some(c) = &case {
             let _ = std::fs::write(dir.join(CASE_FILE), format!("{c}\n"));
         }
-        let case = case.map(|c| case_shown(&c));
         let mut r = read_json(&dir.join("result.json")).unwrap_or_default();
         // A host limit shared by every sandbox of this user (the kernel's per-user pipe
         // accounting) says nothing about the guest: fewer runs at once, and this one again.
@@ -1604,7 +1620,6 @@ impl State<'_> {
                 let _ = write_json(&dir.join("result.json"), &r);
             }
         }
-        let outcome = r["outcome"].as_str().unwrap_or("internal");
         self.done += 1;
         if let Some(n) = self.unfinished.get_mut(seed) {
             *n -= 1;
@@ -1612,6 +1627,38 @@ impl State<'_> {
                 self.unfinished.remove(seed);
             }
         }
+        self.account(*seed, *case_index, *point, dir, &r);
+        None
+    }
+
+    /// The runs judged again by this sweep's checker, accounted as finished runs.
+    fn rejudged(&mut self, jobs: Vec<Job>) {
+        for j in jobs {
+            if let Job::Run {
+                seed,
+                case,
+                dir,
+                point,
+            } = j
+            {
+                let r = read_json(&dir.join("result.json")).unwrap_or_default();
+                self.account(seed, case, point, &dir, &r);
+            }
+        }
+    }
+
+    /// What a finished run (or one judged again) does to the sweep: its logs pruned or cut
+    /// by `--keep`, a finding counted, grouped and announced, `--max-findings`.
+    fn account(
+        &mut self,
+        seed: u64,
+        case_index: Option<usize>,
+        point: Option<u64>,
+        dir: &Path,
+        r: &serde_json::Value,
+    ) {
+        let case = case_index.map(|i| case_shown(&self.cases[i]));
+        let outcome = r["outcome"].as_str().unwrap_or("internal");
         // A run the checker ran on keeps its logs under --keep checked; a sweep with it has a
         // checker, which runs on every run that ended ok.
         let checked = self.keep == Keep::Checked && r["check"]["verdict"] != "not-run";
@@ -1628,25 +1675,30 @@ impl State<'_> {
         }
         if outcome == "ok" {
             self.flush(false);
-            return None;
+            return;
         }
         let finding = report::is_finding(outcome);
-        let sig = report::signature_of(&r);
+        let sig = report::signature_of(r);
         // A known finding is counted, never announced, replayed or counted as a group.
         if finding
             && self
                 .known
-                .is_some_and(|k| k.id_of(case.as_deref(), &r).is_some())
+                .is_some_and(|k| k.id_of(case.as_deref(), r).is_some())
         {
             self.known_runs += 1;
             self.flush(false);
-            return None;
+            return;
         }
         if finding {
             self.finding_runs += 1;
         }
         let key = (sig.clone(), report::group_case(&sig, case.as_deref()));
-        let at = (*seed, point.filter(|p| *p > 0), *case_index, dir.clone());
+        let at = (
+            seed,
+            point.filter(|p| *p > 0),
+            case_index,
+            dir.to_path_buf(),
+        );
         if self.groups.insert(key.clone()) {
             if finding {
                 self.finding_groups += 1;
@@ -1665,7 +1717,6 @@ impl State<'_> {
                 ));
             }
         }
-        None
     }
 }
 

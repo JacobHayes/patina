@@ -741,7 +741,8 @@ check: these verdicts are of 2 checkers (check.checkers in --format json): patin
 The same sweep run again with a changed checker does the same before it runs anything: a run
 whose recorded checker differs (its words, or its file's SHA-256), or whose verdict was left
 `pending`, is judged again from its logs, and run again only when they were pruned; one line
-says which. Patina knows the checker's own file only: a table or a reference it reads is not
+says which. A run judged again counts as one the sweep finished: `--keep` prunes or keeps its
+logs by the new verdict, and its findings count toward `--max-findings`. Patina knows the checker's own file only: a table or a reference it reads is not
 tracked, so after editing those, run `patina recheck`. With `--check-serve` the servers are
 started once per job, as in a sweep.
 
