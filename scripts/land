@@ -1,0 +1,77 @@
+#!/bin/sh
+# scripts/land [--dry-run] [--accept-rerun REASON] [-r REV] BOOKMARK: land REV (default @-) on main.
+#
+# Refuses unless the working copy has no changes and every commit to land is described. Then:
+# fetch; rebase REV onto main@origin; `mise run check`; push REV to the branch BOOKMARK (never
+# main); wait for the CI run of that exact commit, whose required jobs must have passed on their
+# first attempt; fast-forward main to REV (forward only: if main moved, rebase and run again);
+# push main; delete BOOKMARK; print the commit and the CI run. It pushes only BOOKMARK and main.
+# A re-run job is refused: a flaky test is a defect to fix (AGENTS.md). --accept-rerun REASON
+# lands anyway and prints REASON with the result. --dry-run checks and shows the plan only.
+set -eu
+REQUIRED="check check-arm64"
+die() { echo "land: refused: $*" >&2; exit 1; }
+say() { echo "land: $*"; }
+dry=0 accept="" rev=@-
+while [ $# -gt 0 ]; do
+    case $1 in
+        --dry-run) dry=1; shift ;;
+        --accept-rerun) [ -n "${2:-}" ] || die "--accept-rerun needs a reason"; accept=$2; shift 2 ;;
+        -r) rev=${2:?-r needs a revision}; shift 2 ;;
+        -*) die "unknown option $1" ;;
+        *) [ -z "${name:-}" ] || die "one bookmark only"; name=$1; shift ;;
+    esac
+done
+[ -n "${name:-}" ] || { sed -n '2,10p' "$0" >&2; exit 2; }
+[ "$name" != main ] || die "the branch bookmark cannot be main"
+cd "$(jj workspace root)"
+id() { jj log --no-graph -r "$1" -T 'commit_id ++ "\n"'; }
+[ -z "$(jj diff -r @ --summary)" ] || die "the working copy has changes: commit them (jj commit) or set them aside"
+[ "$(id "$rev")" != "$(id @)" ] || die "$rev is the working-copy commit: land a committed revision (jj commit, then -r @-)"
+jj git fetch
+[ -n "$(jj log --no-graph -r "main@origin..$rev" -T 'commit_id')" ] || die "nothing to land: $rev is already on main"
+[ -z "$(jj log --no-graph -r "(main@origin..$rev) & description(exact:'')" -T 'commit_id')" ] ||
+    die "an undescribed commit in main@origin..$rev"
+if [ "$dry" = 1 ]; then
+    say "dry run: would rebase these onto main@origin $(id main@origin | cut -c1-12):"
+    jj log --no-graph -r "main@origin..$rev" -T '"  " ++ commit_id.short(12) ++ " " ++ description.first_line() ++ "\n"'
+    say "dry run: then mise run check; push $rev to $name; wait for CI jobs $REQUIRED (first attempt);"
+    say "dry run: fast-forward main to it and push; delete $name"
+    exit 0
+fi
+jj rebase -b "$rev" -d main@origin
+[ -z "$(jj log --no-graph -r "(main@origin..$rev) & conflicts()" -T 'commit_id')" ] ||
+    die "the rebase onto main@origin conflicts: resolve, then run again"
+sha=$(id "$rev")
+mise run check || die "mise run check failed at $sha"
+jj bookmark set "$name" -r "$sha"
+jj git push --bookmark "$name"
+# From here a refusal also deletes the branch, so a run after "rebase and run again" starts afresh.
+drop() { jj bookmark delete "$name" && jj git push --bookmark "$name"; }
+die() { echo "land: refused: $*" >&2; drop >&2; exit 1; }
+say "pushed $sha to $name; waiting for its CI run"
+run=""
+for _ in $(seq 60); do
+    run=$(gh run list --workflow ci.yml --branch "$name" --commit "$sha" --event push --limit 1 --json databaseId -q '.[0].databaseId')
+    [ -z "$run" ] || break
+    sleep 10
+done
+[ -n "$run" ] || die "no CI run for $sha on $name after 10 minutes"
+timeout 3600 gh run watch "$run" --interval 60 >/dev/null || true
+url=$(gh run view "$run" --json url -q .url)
+repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+first=$(gh api "repos/$repo/actions/runs/$run/attempts/1/jobs" -q '.jobs[] | "\(.name) \(.conclusion)"')
+last=$(gh run view "$run" --json jobs -q '.jobs[] | "\(.name) \(.conclusion)"')
+for j in $REQUIRED; do
+    echo "$last" | grep -qx "$j success" || die "CI job $j did not pass at $sha: $url"
+    if ! echo "$first" | grep -qx "$j success"; then
+        [ -n "$accept" ] || die "CI job $j passed only on a re-run: fix the flaky test; $url"
+        echo "land: !!! ACCEPTED A RE-RUN of $j: $accept"
+    fi
+done
+jj git fetch
+[ "$(id "main@origin & ::$sha")" = "$(id main@origin)" ] || die "main moved since the rebase: rebase and run again"
+jj bookmark set main -r "$sha"
+jj git push --bookmark main
+drop
+say "landed $sha on main; CI $url${accept:+ (re-run accepted: $accept)}"

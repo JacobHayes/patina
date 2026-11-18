@@ -35,7 +35,7 @@ updates the docs in the same commit.
   `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`): the branch
   counter scripts, x86-only instructions, a seed found on x86_64, and evidence scripts not
   yet run on arm64; each says why in its header or in docs/EVIDENCE.md.
-- `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the nightly job.
+- `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the release tier.
 
 Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), `bwrap`, unprivileged user
 namespaces (`patina doctor` says what is missing). rustup installs the pinned toolchain; mise
@@ -44,20 +44,25 @@ arm runner (`check-arm64`).
 
 ## Checks and landing
 
-- **Landing is `mise run check`**: `cargo fmt --check`, clippy with `-D warnings`, then
-  `./check quick`. Quick's budget is 5 minutes and it fails above 10. CI runs exactly this, on
-  x86_64 (`check`) and on arm64 (`check-arm64`).
-  Land by pushing the branch; when both `check` and `check-arm64` are green, fast-forward `main`.
+- **Tiers**: `quick` gates every landing (budget 5 minutes, fails above 10); `./check AREA` runs
+  an area's quick and `area` scripts while working on it; `release` gates a release and runs
+  nightly (examples at 200 seeds, a determinism matrix, F2, pubsub, install, doctor, replay;
+  fails above 10 minutes); `evidence` is by hand. `./check list` shows every script.
+- **The gate is `mise run check`**: fmt, clippy `-D warnings`, `tests/lint.py`, `./check quick`;
+  CI runs it on x86_64 (`check`) and arm64 (`check-arm64`). **Land with `scripts/land BRANCH`**
+  (`--dry-run` first): it rebases, runs the gate, pushes BRANCH, needs both jobs green on the
+  first attempt, fast-forwards `main` and deletes BRANCH. Never move `main` by hand.
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
 - **Budgets are fixed by cutting.** Over budget, shrink a script or move it to `area`. Never
   raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
-- Every script declares `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N` (and
-  `arch=MACHINE` when it runs on one architecture only) and must
-  fail on a planted break: show it red, then green.
-- `./check AREA` runs one area; `./check nightly` is the scheduled job
-  (`testbeds/pubsub` at 200 seeds, not required); `./check list` shows every script.
+- Every script declares `#@ tier=TIER[,TIER] budget=SECONDS slots=N` (and `arch=MACHINE` when
+  it runs on one architecture only) and must fail on a planted break: show it red, then green.
+- **No wall clock, fixed sleeps or pinned seeds in tests** (`tests/lint.py`): assert virtual
+  time, poll for the condition, search a seed range. An exception says why on its line.
+- Builders run under a resource wrapper (memory cap, CPU weight, a scratch-size cap) and delete
+  their scratch at hand-back; sweeps keep only failures.
 
 A run that differs between repeats of one seed is a determinism bug until proven otherwise:
 find it, never retry it.

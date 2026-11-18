@@ -13,6 +13,8 @@ RUSTUP_TOOLCHAIN = '''{{ exec(command=`awk -F'"' '/^channel/ {print $2}' rust-to
 # The Go guests under tests/guests are built with the stock toolchain; their go.mod files
 # name this version.
 go = "1.27.3"
+# scripts/land and its test (tests/scripts) use jj.
+jj = "0.47.1"
 
 # The landing gate, locally and in CI.
 [tasks.check]
