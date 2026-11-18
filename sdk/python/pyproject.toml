@@ -1,6 +1,6 @@
 [project]
 name = "patina-sdk"
-version = "0.12.0"
+version = "0.12.1"
 description = "Patina's SDK for Python: one file over one reserved system call"
 requires-python = ">=3.8"
 
