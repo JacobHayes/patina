@@ -118,6 +118,17 @@ fn violation(label: &str, detail: &str) -> String {
     p.chars().take(PRIMARY_MAX).collect()
 }
 
+/// Whether a signature names its bug by a name the program's or checker's author chose: a
+/// violation (an `always` label, a checker's label) or an `INVARIANT` line. Such a finding is
+/// one bug in whichever case it appears. Every other signature is a status, a signal, a
+/// blocked wait, or text that recurs across unrelated bugs (`exit 101` of every failing Rust
+/// test, Go's `panic: runtime error: index out of range`, an `assert_eq!` without a message
+/// once its line number is `N`), so the case stays part of its group.
+pub fn names_its_bug(signature: &str) -> bool {
+    let (head, primary) = signature.split_once(": ").unwrap_or((signature, ""));
+    head.starts_with("violation ") || primary.starts_with("INVARIANT ")
+}
+
 /// The key two verdicts of one checker on one run are compared by: the verdict and the
 /// finding's name as a signature gives it.
 pub fn check_key(c: &Value) -> (Value, String) {
@@ -340,6 +351,23 @@ mod tests {
         let (a, c) = (sig(always, ""), sig(check, ""));
         assert_eq!(a.split_once(": ").unwrap().1, c.split_once(": ").unwrap().1);
         assert!(c.starts_with("violation check: acked-record-lost"), "{c}");
+    }
+
+    #[test]
+    fn only_a_named_finding_spans_cases() {
+        assert!(names_its_bug("violation check: wrong-sub: got N"));
+        assert!(names_its_bug("violation always: balance"));
+        assert!(names_its_bug(
+            "failure exit: INVARIANT open-after-crash; exit 1"
+        ));
+        for s in [
+            "failure exit: exit 101",
+            "failure exit: panic: runtime error: index out of range [N] with length N; exit 2",
+            "crash signal: SIGABRT",
+            "liveness time-limit: parked in sleep",
+        ] {
+            assert!(!names_its_bug(s), "{s}");
+        }
     }
 
     #[test]

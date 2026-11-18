@@ -1,8 +1,8 @@
 //! `patina sweep`: a list of seeds (and optionally cases), each one ordinary `patina run` in
 //! a child process into `OUT/seed-N[/K-NAME]`, `-j` at a time, each child pinned to its own CPU.
-//! A new finding prints one line at once; progress is a live line on a terminal and a plain
-//! line every 10 s otherwise. When the runs are done, the first seed of every finding is
-//! replayed once (a difference makes the group `nondeterministic`), logs are pruned by
+//! A new finding (one no `--known` entry matches) prints one line at once; progress is a live
+//! line on a terminal and a plain line every 10 s otherwise. When the runs are done, the first
+//! seed of every new finding is replayed once (a difference makes the group `nondeterministic`), logs are pruned by
 //! `--keep`, and the report of `patina report OUT` is printed and written to
 //! `OUT/report.json`. `OUT/sweep.json` records what the sweep runs (the program's SHA-256, the
 //! resolved settings and command, and patina's own version and hash): running the same sweep
@@ -35,7 +35,7 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 11] = [
+const OWN: [&str; 12] = [
     "--seeds",
     "--branch",
     "--jobs",
@@ -44,6 +44,7 @@ const OWN: [&str; 11] = [
     "--max-findings",
     "--budget",
     "--allow-unmet",
+    "--known",
     "--out",
     "--format",
     "--help",
@@ -593,6 +594,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         None => default_jobs(),
     };
     let max_findings = a.num::<usize>("--max-findings").map_err(error)?;
+    let known = report::known_flag(a).map_err(error)?;
     let budget = a.num::<u64>("--budget").map_err(error)?;
     let cmd_of = |case: Option<usize>| -> Vec<String> {
         match (case, &cases) {
@@ -785,6 +787,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         todo,
         done: 0,
         finding_runs: 0,
+        known_runs: 0,
+        known: known.as_ref(),
         groups: BTreeSet::new(),
         pending: Default::default(),
         unfinished,
@@ -902,13 +906,13 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // Replay the first seed of each finding once.
     let runs = report::collect(std::slice::from_ref(&out)).map_err(error)?;
     if !interrupted {
-        let (v, _) = report::build(&runs, &[], None);
+        let (v, _) = report::build(&runs, &[], known.as_ref(), None);
         let mut replays = vec![];
         for g in v["groups"].as_array().unwrap() {
             let finding = Outcome::ALL
                 .iter()
                 .any(|o| g["run_outcome"] == o.name() && o.exit() == 1);
-            if finding && g["replay"].is_null() {
+            if finding && g["known"].is_null() && g["replay"].is_null() {
                 let dir = PathBuf::from(g["first"]["dir"].as_str().unwrap());
                 let rel = dir.strip_prefix(&out).unwrap_or(&dir).to_path_buf();
                 replays.push(Job::Replay {
@@ -952,7 +956,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         lowered_to: Some(st.width).filter(|w| *w != width),
         stopped: st.stopped.clone(),
     };
-    let (v, text) = report::build(&runs, a.all("--allow-unmet"), Some(head));
+    let (v, text) = report::build(&runs, a.all("--allow-unmet"), known.as_ref(), Some(head));
     write_json(&out.join("report.json"), &v).map_err(error)?;
     if a.json() {
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
@@ -988,12 +992,12 @@ fn replayed(d: Done) {
     }
 }
 
-/// A group's `new:` line waiting to be printed: the seed, branch point and directory of the
+/// A group's `new:` line waiting to be printed: the seed, branch point, case and directory of the
 /// run it names.
-type Announce = (u64, Option<u64>, PathBuf);
+type Announce = (u64, Option<u64>, Option<usize>, PathBuf);
 
 /// The sweep's counters and its terminal output.
-struct State {
+struct State<'k> {
     /// Each case's text, for its `new:` line and its run directory's `case` file.
     cases: Vec<String>,
     tty: bool,
@@ -1001,7 +1005,12 @@ struct State {
     last_line: Instant,
     todo: usize,
     done: usize,
+    /// New findings (a known entry matches none of them).
     finding_runs: usize,
+    /// Findings a known entry matches: counted, not announced.
+    known_runs: usize,
+    known: Option<&'k report::Known>,
+    /// Groups seen: (signature, the case when it is part of the key).
     groups: BTreeSet<(String, Option<String>)>,
     /// Groups found whose `new:` line waits until no lower seed is left to run, so that it
     /// names the group's lowest seed, the one the report calls first: (seed, run directory).
@@ -1024,15 +1033,20 @@ struct State {
     bases: std::collections::BTreeMap<(u64, Option<usize>), (u64, PathBuf)>,
 }
 
-impl State {
+impl State<'_> {
     fn status(&self, running: usize) -> String {
         let s = self.t0.elapsed().as_secs_f64();
         format!(
-            "{}/{} runs, {} in {}, {running} running, {:.1} runs/s, {}",
+            "{}/{} runs, {} in {}{}, {running} running, {:.1} runs/s, {}",
             self.done,
             self.todo,
             report::count(self.finding_runs, "finding"),
             report::count(self.finding_groups, "group"),
+            if self.known_runs > 0 {
+                format!(", {} known", self.known_runs)
+            } else {
+                String::new()
+            },
             self.done as f64 / s.max(0.001),
             clock(s)
         )
@@ -1044,11 +1058,11 @@ impl State {
         let ready: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, (seed, _, _))| all || low.is_none_or(|l| *seed < l))
+            .filter(|(_, (seed, ..))| all || low.is_none_or(|l| *seed < l))
             .map(|(k, _)| k.clone())
             .collect();
         for k in ready {
-            let (seed, point, dir) = self.pending.remove(&k).unwrap();
+            let (seed, point, _, dir) = self.pending.remove(&k).unwrap();
             let c = k.1.as_ref().map(|c| format!(" [{c}]")).unwrap_or_default();
             self.say(&format!(
                 "new{c}: {}   (seed {}: patina replay {})",
@@ -1196,22 +1210,31 @@ impl State {
             self.flush(false);
             return None;
         }
-        let finding = Outcome::ALL
-            .iter()
-            .any(|o| o.name() == outcome && o.exit() == 1);
-        let sig = r["signature"].as_str().unwrap_or(outcome).to_string();
+        let finding = report::is_finding(outcome);
+        let sig = report::signature_of(&r);
+        // A known finding is counted, never announced, replayed or counted as a group.
+        if finding
+            && self
+                .known
+                .is_some_and(|k| k.id_of(case.as_deref(), &sig).is_some())
+        {
+            self.known_runs += 1;
+            self.flush(false);
+            return None;
+        }
         if finding {
             self.finding_runs += 1;
         }
-        let key = (sig, case.clone());
+        let key = (sig.clone(), report::group_case(&sig, case.as_deref()));
+        let at = (*seed, point.filter(|p| *p > 0), *case_index, dir.clone());
         if self.groups.insert(key.clone()) {
             if finding {
                 self.finding_groups += 1;
             }
-            self.pending
-                .insert(key, (*seed, point.filter(|p| *p > 0), dir.clone()));
-        } else if let Some(p) = self.pending.get_mut(&key).filter(|p| *seed < p.0) {
-            *p = (*seed, point.filter(|p| *p > 0), dir.clone());
+            self.pending.insert(key, at);
+        } else if let Some(p) = self.pending.get_mut(&key).filter(|p| at < **p) {
+            // The run the report calls first: the lowest seed, point and case.
+            *p = at;
         }
         self.flush(false);
         if let Some(n) = self.max_findings {

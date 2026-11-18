@@ -344,7 +344,14 @@ pub const FLAGS: &[Flag] = &[
     many(
         "--allow-unmet",
         "LABEL",
-        "an SDK label or fault class that may stay unmet without making the result vacuous",
+        "an SDK label (* matches any text: 'lib-*'), a fault class, or check (a check that judged no run) that may stay unmet without making the result vacuous",
+        &[Cmd::Sweep, Cmd::Report],
+    ),
+    flag(
+        "--known",
+        "FILE",
+        "none",
+        "findings already known: lines of ID PATTERN matched against [CASE] SIGNATURE (* any text, # comments); a known finding is counted and does not fail the sweep; an ID written !ID must match some run or the result is vacuous",
         &[Cmd::Sweep, Cmd::Report],
     ),
     flag("--from", "SEQ", "0", "log dump: first record", &[Cmd::Log]),

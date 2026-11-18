@@ -129,6 +129,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
 | `--branch` | with `--crash machine` or `process`: every crash point of each seed (below) |
+| `--known FILE` | findings already known: counted, and they do not fail the sweep ([below](#known-findings)) |
 
 A run kept by `--keep fail` whose log is over 4 MiB keeps its first and last MiB
 (`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
@@ -147,7 +148,11 @@ assertion line or else the last line of stderr, the blocked waits). What names t
 kept: the exit status, the signal, the label. Numbers in the program's text (line and column
 numbers, addresses, ids, counts, durations) become `N`, so one bug over many seeds is one group.
 Absolute paths keep their last three components, in signatures and SDK labels alike (a label
-made from a source path is the same in every checkout). A sweep announces each new group with
+made from a source path is the same in every checkout). With `--cases`, a finding named by a
+label (an `always`, a `--check` finding) or by an `INVARIANT` line is one group over every case
+it appears in; any other is grouped per case, since an exit status, a signal, a blocked wait
+or a runtime's panic text (Go's `index out of range`, an `assert_eq!` without a message) is
+the same for unrelated failures. A sweep announces each new group with
 its lowest seed and replays that seed once; a replay that differs makes the group
 `nondeterministic`. `patina report DIR...` prints the same summary for any run directories and
 writes `report.json`. A replay or a minimized run is written inside the run it comes from, so it
@@ -199,6 +204,53 @@ for b in $(cargo test --no-run --message-format=json | jq -r 'select(.profile.te
 done > tests.txt
 patina sweep --seeds 1..5 --cases tests.txt
 ```
+
+### Known findings
+
+A finding already known (being fixed, or a library's to fix) need not fail every sweep.
+`--known FILE` (on `sweep` and `report`) names them, one `ID PATTERN` per line:
+
+```text
+# ID, then a pattern: * matches any text; a pattern starting with [ also matches the case.
+sub-clamps  violation check: wrong-sub: *
+!planted    [*planted*] violation check: wrong-*
+```
+
+A pattern is matched against the whole of a finding's signature as the report prints it, or,
+when it starts with `[`, against `[CASE] SIGNATURE`. Each failing run is matched alone and the
+first line that matches names it. A known finding is counted and listed after the new ones,
+one line per ID and signature, and is not announced or replayed; only a new finding makes
+the exit status 1. Here `calc OP A B` gets subtraction below zero and multiplication by zero
+wrong, a checker names a wrong answer `wrong-OP`, and the 31 cases include one wrong by
+construction:
+
+```text
+$ patina sweep --seeds 1..2 --cases cases.txt --mount /tmp/calc:/demo --check ./same-as-sh --known known.txt
+new: violation check: wrong-mul: got N, want N   (seed 1: patina replay /tmp/calc/patina-out/sweep/seed-1/9-0)
+sweep: replaying the first seed of 1 finding
+sweep: 350.5 KiB kept in /tmp/calc/patina-out/sweep
+patina sweep: 62 runs, 18 findings in 3 groups, 44 ok   (0.2s, 8 jobs)
+outcomes: ok 44, violation 18
+check: judged 62 of 62 runs: 44 passed, 18 failed
+known: 12 of 18 findings (sub-clamps 10, planted 2); 6 new, in 1 group
+
+violation check: wrong-mul: got N, want N
+  6 of 62 runs, 3 cases   first: seed 1 [/bin/sh /demo/calc mul 4 0]   replayed: identical
+  rerun:  patina run --seed 1 --config /tmp/calc/patina-out/sweep/seed-1/9-0/run.json -- /bin/sh /demo/calc mul 4 0
+  replay: patina replay /tmp/calc/patina-out/sweep/seed-1/9-0
+
+known sub-clamps: violation check: wrong-sub: got N, want -N   (10 runs, 5 cases)
+known planted: violation check: wrong-planted: got , want N   (2 runs)
+```
+
+An entry that matched no run is listed (`known: ID matched no run`): the bug may be fixed, and
+its line can go. An entry written `!ID` must match: a checker that never fails looks like a
+correct program, so a case that is wrong by construction, with a `!` entry for it, proves on
+every sweep that the check can fail. When it matches nothing the result is `vacuous` (exit 2).
+`patina report --known FILE DIR` applies a file to runs already made, with the same groups
+and exit status as a sweep given it; the file is not part of a sweep's identity, so changing
+it never reruns anything. `report.json` gives each group its `known` ID (or `null`) and has
+every entry's count under `known`.
 
 ### Every crash point of a seed
 
@@ -441,6 +493,7 @@ sweep: replaying the first seed of 1 finding
 sweep: 383.4 KiB kept in /tmp/kvlog/patina-out/sweep
 patina sweep: 30 runs, 9 findings in 1 group, 21 ok   (0.2s, 8 jobs)
 outcomes: ok 21, violation 9
+check: judged 13 of 30 runs: 4 passed, 9 failed; 17 not judged (no crash in this run 17)
 
 violation check: acked-record-lost: acknowledged N, N stored after the crash
   9 of 30 runs   first: seed 2   replayed: identical
@@ -449,8 +502,12 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
   replay: patina replay /tmp/kvlog/patina-out/sweep/seed-2
 ```
 
-The same sweep of `./kvlog fixed`, which syncs each record before acknowledging it, has 30
-`ok` runs. One run:
+The `check:` line counts what the checker said: judged (it passed or failed the run), not
+judged with the three most common reasons (the first line it printed; `report.json` has
+all), and errors. A sweep with a check that judged no run is `vacuous` (exit 2): the same
+sweep without `--crash` has nothing for `acked-kept` to look at. `--allow-unmet check`
+allows that. The same sweep of `./kvlog fixed`, which syncs each record before acknowledging
+it, has 30 `ok` runs. One run:
 
 ```text
 $ patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
@@ -515,8 +572,11 @@ Under `--buggify` each point is active in about a quarter of runs and fires on a
 quarter of its evaluations; `--fault point:LABEL=PERMILLE` fixes one point's rate. A sweep in
 which a `sometimes` never held, a `reachable` was never hit, or (under `--buggify`) a
 `buggify` point never fired is `vacuous` unless the label is allowed with `--allow-unmet
-LABEL`. The summary gives a count per kind and the first five labels; `report.json` lists
-all of them, with every `always` never evaluated. An `unreachable` that no run reached is
+LABEL` (or `[sdk] allow-unmet` in `patina.toml`). A `*` in it matches any text: a library's
+labels share a prefix, so `--allow-unmet 'fjall-*'` allows the sites a program does not reach
+in a library it uses, and `--allow-unmet '*'` allows every label (when the oracle is a
+`--check`). The summary gives a count per kind and the first five labels; `report.json` lists
+all of them, with every `always` never evaluated, and the allowed ones under `allowed_unmet`. An `unreachable` that no run reached is
 what it should be, and is not listed.
 
 **Rust**: in `Cargo.toml`, the SDK at the release's tag (or `path = "PATINA/crates/patina"`

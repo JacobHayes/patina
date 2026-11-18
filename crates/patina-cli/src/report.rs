@@ -1,7 +1,10 @@
 //! `patina report DIR...`: one report over any set of run directories (a sweep's, or runs
-//! made by `patina run --out`). Runs are grouped by their `result.json` signature (and case);
-//! each group gets its count, first seed, replay result, the rerun and replay commands and
-//! the fault attribution line. The SDK and fault-count folds are the vacuity check.
+//! made by `patina run --out`). Runs are grouped by their `result.json` signature, and by case
+//! unless the signature names its bug (`group_case`); each group gets its count, first seed,
+//! replay result, the rerun and replay commands and the fault attribution line. A `--known`
+//! file labels findings already known: they are counted and listed, and do not fail the
+//! report. The SDK, fault-count and check folds, and the known file's `!` entries, are the
+//! vacuity check.
 //! `report.json` (`patina.report/v1`) is the same in JSON.
 
 use crate::cli::{Args, Res};
@@ -16,6 +19,8 @@ use std::process::ExitCode;
 pub const REPORT_SCHEMA: &str = "patina.report/v1";
 /// Labels of each unmet kind the text names; the JSON has all of them.
 const LABELS_SHOWN: usize = 5;
+/// Reasons the `check:` line names for runs the checker did not judge; the JSON has all.
+const REASONS_SHOWN: usize = 3;
 /// Seeds the text lists with their crash points tried, when a branch sweep stopped early.
 const SEEDS_SHOWN: usize = 8;
 
@@ -24,6 +29,9 @@ pub struct Run {
     pub dir: PathBuf,
     pub seed: u64,
     pub case: Option<String>,
+    /// A sweep case's position in its cases file (its directory's `K-`), which orders a
+    /// group's runs of one seed.
+    pub case_pos: Option<usize>,
     pub result: Value,
     pub run: Value,
     /// `replay.json`, written by a sweep that replayed this run.
@@ -56,7 +64,8 @@ pub fn main(a: &Args) -> Res<ExitCode> {
     }
     let dirs: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
     let runs = collect(&dirs)?;
-    let (v, text) = build(&runs, a.all("--allow-unmet"), None);
+    let known = known_flag(a)?;
+    let (v, text) = build(&runs, a.all("--allow-unmet"), known.as_ref(), None);
     if a.json() {
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
     } else {
@@ -113,10 +122,14 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
             .and_then(|p| p.parse::<u64>().ok())
             .or((branch && own.as_deref() == Some(format!("seed-{seed}").as_str())).then_some(0));
         let replay = read_json(&dir.join("replay.json")).ok();
+        let case_pos = case
+            .as_ref()
+            .and_then(|_| name(&dir)?.split_once('-')?.0.parse::<usize>().ok());
         runs.push(Run {
             dir,
             seed,
             case,
+            case_pos,
             result,
             run,
             replay,
@@ -338,14 +351,174 @@ pub fn host_limit(r: &Value) -> Option<String> {
     })
 }
 
+/// `*` matches any text (also none); every other character itself; the whole of `s` must match.
+pub fn glob(pat: &str, s: &str) -> bool {
+    let mut parts = pat.split('*');
+    let first = parts.next().unwrap_or("");
+    let Some(mut rest) = s.strip_prefix(first) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    for p in middle {
+        match rest.find(p) {
+            Some(i) => rest = &rest[i + p.len()..],
+            None => return false,
+        }
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
+/// A finding as the report prints it, and as a known file's patterns see it: `[CASE] SIGNATURE`,
+/// or `SIGNATURE` for a run without a case.
+pub fn subject(case: Option<&str>, signature: &str) -> String {
+    match case {
+        Some(c) => format!("[{c}] {signature}"),
+        None => signature.to_string(),
+    }
+}
+
+/// The case a run's group is keyed by: none for a finding that names its bug
+/// (`signature::names_its_bug`), which is one group over every case it appears in.
+pub fn group_case(signature: &str, case: Option<&str>) -> Option<String> {
+    if crate::signature::names_its_bug(signature) {
+        None
+    } else {
+        case.map(str::to_string)
+    }
+}
+
+/// A `--known` file: findings already known, each `ID PATTERN` on its own line (`#` starts a
+/// comment line). `!ID` marks one that must appear.
+pub struct Known {
+    pub file: PathBuf,
+    entries: Vec<KnownEntry>,
+}
+
+struct KnownEntry {
+    id: String,
+    required: bool,
+    pattern: String,
+}
+
+impl Known {
+    pub fn read(file: &Path) -> Res<Known> {
+        let t = std::fs::read_to_string(file)
+            .map_err(|e| format!("--known {}: {e}", file.display()))?;
+        let mut entries = vec![];
+        for (n, line) in t.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (id, pattern) = line
+                .split_once(char::is_whitespace)
+                .map(|(i, p)| (i, p.trim()))
+                .unwrap_or((line, ""));
+            let (id, required) = match id.strip_prefix('!') {
+                Some(i) => (i, true),
+                None => (id, false),
+            };
+            if id.is_empty() || pattern.is_empty() {
+                return Err(format!(
+                    "--known {} line {}: expected ID PATTERN, not {line:?}",
+                    file.display(),
+                    n + 1
+                ));
+            }
+            entries.push(KnownEntry {
+                id: id.to_string(),
+                required,
+                pattern: pattern.to_string(),
+            });
+        }
+        Ok(Known {
+            file: std::path::absolute(file).unwrap_or_else(|_| file.to_path_buf()),
+            entries,
+        })
+    }
+
+    /// The ID of the first entry whose pattern matches the finding, if one does. A pattern
+    /// that starts with `[` is matched against `[CASE] SIGNATURE`; any other, against the
+    /// signature alone, in whatever case it appears.
+    pub fn id_of(&self, case: Option<&str>, signature: &str) -> Option<&str> {
+        let with_case = subject(case, signature);
+        self.entries
+            .iter()
+            .find(|e| {
+                let s = if e.pattern.starts_with('[') {
+                    &with_case
+                } else {
+                    signature
+                };
+                glob(&e.pattern, s)
+            })
+            .map(|e| e.id.as_str())
+    }
+
+    /// Every ID once, in file order, with whether it must appear (any of its lines has `!`).
+    fn ids(&self) -> Vec<(&str, bool)> {
+        let mut out: Vec<(&str, bool)> = vec![];
+        for e in &self.entries {
+            match out.iter_mut().find(|(i, _)| *i == e.id) {
+                Some(x) => x.1 |= e.required,
+                None => out.push((&e.id, e.required)),
+            }
+        }
+        out
+    }
+}
+
+/// `--known FILE`, read, if given.
+pub fn known_flag(a: &Args) -> Res<Option<Known>> {
+    a.last("--known")
+        .map(|f| Known::read(Path::new(f)))
+        .transpose()
+}
+
+/// Whether `label` is allowed to stay unmet: a pattern with `*` matches by `glob`, one
+/// without matches exactly.
+fn allowed(allow: &BTreeSet<String>, label: &str) -> bool {
+    allow.iter().any(|p| glob(p, label))
+}
+
+/// A run's signature, or `OUTCOME STOP` for a result that has none.
+pub fn signature_of(result: &Value) -> String {
+    result["signature"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "{} {}",
+                result["outcome"].as_str().unwrap_or("?"),
+                result["stop"].as_str().unwrap_or("?")
+            )
+        })
+}
+
+/// Whether an outcome name is a finding (exit status 1).
+pub fn is_finding(outcome: &str) -> bool {
+    outcome_of(outcome).exit() == 1
+}
+
 struct Group<'a> {
     signature: String,
+    /// The case in its key: `None` for a finding that names its bug, which may span cases.
     case: Option<String>,
+    /// The known file's ID its runs matched.
+    known: Option<String>,
     runs: Vec<&'a Run>,
 }
 
 /// The report over `runs`: its JSON (with `exit`) and its text.
-pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value, String) {
+pub fn build(
+    runs: &[Run],
+    allow: &[String],
+    known: Option<&Known>,
+    head: Option<SweepHead>,
+) -> (Value, String) {
     let free = crate::signature::checkout_free;
     let mut allow: BTreeSet<String> = allow.iter().map(|l| free(l)).collect();
     for r in runs {
@@ -366,36 +539,39 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             .entry(outcome_of(r.result["outcome"].as_str().unwrap_or("")))
             .or_default() += 1;
     }
-    // Groups: every run that is not ok, by (signature, case).
+    // Groups: every run that is not ok, by signature, and by case unless the signature names
+    // its bug. A finding a known entry matches is grouped by that entry and its signature.
     let mut groups: Vec<Group> = vec![];
     for r in runs {
-        if r.result["outcome"] == "ok" {
+        let outcome = r.result["outcome"].as_str().unwrap_or("");
+        if outcome == "ok" {
             continue;
         }
-        let signature = r.result["signature"]
-            .as_str()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                format!(
-                    "{} {}",
-                    r.result["outcome"].as_str().unwrap_or("?"),
-                    r.result["stop"].as_str().unwrap_or("?")
-                )
-            });
+        let signature = signature_of(&r.result);
+        let known = known
+            .filter(|_| is_finding(outcome))
+            .and_then(|k| k.id_of(r.case.as_deref(), &signature))
+            .map(str::to_string);
+        let case = match known {
+            Some(_) => None,
+            None => group_case(&signature, r.case.as_deref()),
+        };
         match groups
             .iter_mut()
-            .find(|g| g.signature == signature && g.case == r.case)
+            .find(|g| g.signature == signature && g.case == case && g.known == known)
         {
             Some(g) => g.runs.push(r),
             None => groups.push(Group {
                 signature,
-                case: r.case.clone(),
+                case,
+                known,
                 runs: vec![r],
             }),
         }
     }
     for g in &mut groups {
-        g.runs.sort_by_key(|r| (r.seed, r.point, r.dir.clone()));
+        g.runs
+            .sort_by_key(|r| (r.seed, r.point, r.case_pos, r.dir.clone()));
     }
     // Faults: configured classes over the whole set, eligible counts.
     let mut configured = BTreeSet::new();
@@ -428,12 +604,20 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             e.1 += s["held"].as_u64().unwrap_or(0);
         }
     }
-    let unmet = |kind: &str, f: &dyn Fn(u64, u64) -> bool| -> Vec<String> {
-        sites
-            .iter()
-            .filter(|((k, l), (e, h))| k == kind && f(*e, *h) && !allow.contains(l))
-            .map(|((_, l), _)| l.clone())
-            .collect()
+    // Unmet labels a pattern allows do not make the result vacuous; they are listed apart.
+    let mut allowed_unmet: BTreeSet<String> = BTreeSet::new();
+    let mut unmet = |kind: &str, f: &dyn Fn(u64, u64) -> bool| -> Vec<String> {
+        let mut out = vec![];
+        for ((k, l), (e, h)) in &sites {
+            if k == kind && f(*e, *h) {
+                if allowed(&allow, l) {
+                    allowed_unmet.insert(l.clone());
+                } else {
+                    out.push(l.clone());
+                }
+            }
+        }
+        out
     };
     let never_held = unmet("sometimes", &|_, h| h == 0);
     let never_hit = unmet("reachable", &|_, h| h == 0);
@@ -498,12 +682,51 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         })
     });
     let no_points = branch.as_ref().is_some_and(|b| b["points"] == 0);
+    // The check: what the checker said of each run it ran after (`check.verdict`).
+    let mut check = (0u64, 0u64, 0u64, 0u64); // passed, failed, not judged, errors
+    let mut not_judged: BTreeMap<String, u64> = BTreeMap::new();
+    let mut checked = false;
+    for r in runs {
+        checked |= !r.run["config"]["check"].is_null();
+        let c = &r.result["check"];
+        match c["verdict"].as_str() {
+            Some("pass") => check.0 += 1,
+            Some("fail") => check.1 += 1,
+            Some("not-judged") => {
+                check.2 += 1;
+                let why = crate::signature::normalise(c["detail"].as_str().unwrap_or(""));
+                *not_judged.entry(why).or_default() += 1;
+            }
+            Some("error" | "pending") => check.3 += 1,
+            _ => {}
+        }
+    }
+    let judged_none = checked && check.0 + check.1 == 0 && !allow.contains("check");
+    // Known entries: the runs each ID labels; one that must appear and did not.
+    let mut known_counts: Vec<(String, bool, usize)> = vec![];
+    if let Some(k) = known {
+        for (id, required) in k.ids() {
+            let n = groups
+                .iter()
+                .filter(|g| g.known.as_deref() == Some(id))
+                .map(|g| g.runs.len())
+                .sum();
+            known_counts.push((id.to_string(), required, n));
+        }
+    }
+    let missing_required: Vec<&str> = known_counts
+        .iter()
+        .filter(|(_, req, n)| *req && *n == 0)
+        .map(|(id, _, _)| id.as_str())
+        .collect();
     let vacuous = runs.is_empty()
         || no_points
         || !never_held.is_empty()
         || !never_hit.is_empty()
         || !never_fired.is_empty()
-        || !idle.is_empty();
+        || !idle.is_empty()
+        || judged_none
+        || !missing_required.is_empty();
 
     // Each group's JSON, findings first, then by size.
     let mut gj: Vec<Value> = groups
@@ -529,12 +752,17 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
                 .fold(classes[0].clone(), |a, b| &a & b);
             let any: BTreeSet<String> = classes.iter().flatten().cloned().collect();
             let none: Vec<&String> = configured.difference(&any).collect();
+            let mut cases: Vec<&String> = g.runs.iter().filter_map(|r| r.case.as_ref()).collect();
+            cases.sort();
+            cases.dedup();
             json!({
                 "signature": g.signature,
                 "outcome": effective,
                 "run_outcome": outcome,
                 "stop": first.result["stop"],
-                "case": g.case,
+                "known": g.known,
+                "case": first.case,
+                "cases": cases,
                 "count": g.runs.len(),
                 "seeds": g.runs.iter().map(|r| r.seed).collect::<Vec<_>>(),
                 "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "dir": first.dir},
@@ -548,6 +776,7 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
     gj.sort_by_key(|g| {
         let o = outcome_of(g["outcome"].as_str().unwrap_or(""));
         (
+            !g["known"].is_null(),
             o.exit() != 1,
             o,
             std::cmp::Reverse(g["count"].as_u64().unwrap_or(0)),
@@ -555,11 +784,14 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             g["first"]["point"].as_u64().unwrap_or(0),
         )
     });
-    let finding = gj
+    // A new finding fails; a known one does not. What is neither ok nor a finding (and a
+    // finding whose replay differed) is exit 2, known or not.
+    let finding = gj.iter().any(|g| {
+        g["known"].is_null() && outcome_of(g["outcome"].as_str().unwrap_or("")).exit() == 1
+    });
+    let not_ok = gj
         .iter()
-        .any(|g| outcome_of(g["outcome"].as_str().unwrap_or("")).exit() == 1);
-    let not_ok = runs.iter().any(|r| r.result["outcome"] != "ok")
-        || gj.iter().any(|g| g["outcome"] == "nondeterministic");
+        .any(|g| outcome_of(g["outcome"].as_str().unwrap_or("")).exit() == 2);
     let exit = if finding {
         1
     } else if not_ok || vacuous {
@@ -593,11 +825,32 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
         "missing": missing,
         "host_limits": limits,
         "allow_unmet": allow,
+        "allowed_unmet": allowed_unmet,
         "vacuous": vacuous,
         "exit": exit,
     });
     if let Some(b) = branch {
         v["branch"] = b;
+    }
+    if checked {
+        v["check"] = json!({
+            "judged": check.0 + check.1,
+            "passed": check.0,
+            "failed": check.1,
+            "not_judged": not_judged,
+            "errors": check.3,
+            "vacuous": judged_none,
+        });
+    }
+    if let Some(k) = known {
+        let matched: usize = known_counts.iter().map(|e| e.2).sum();
+        v["known"] = json!({
+            "file": k.file,
+            "findings": matched,
+            "new": findings - matched,
+            "entries": known_counts.iter().map(|(id, req, n)| json!({"id": id, "required": req, "count": n})).collect::<Vec<_>>(),
+            "required_unseen": missing_required,
+        });
     }
     if with_points > 0 {
         v["compute"] = json!({
@@ -643,6 +896,66 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         .map(|(k, n)| format!("{k} {n}"))
         .collect();
     s.push_str(&format!("outcomes: {}\n", classes.join(", ")));
+    if let Some(c) = v.get("check") {
+        let judged = c["judged"].as_u64().unwrap_or(0);
+        let mut line = format!(
+            "check: judged {judged} of {}: {} passed, {} failed",
+            count(n("runs") as usize, "run"),
+            c["passed"],
+            c["failed"]
+        );
+        let nj = c["not_judged"].as_object().unwrap();
+        if !nj.is_empty() {
+            let mut why: Vec<(&String, u64)> = nj
+                .iter()
+                .map(|(k, n)| (k, n.as_u64().unwrap_or(0)))
+                .collect();
+            why.sort_by_key(|(k, n)| (std::cmp::Reverse(*n), (*k).clone()));
+            let total: u64 = why.iter().map(|w| w.1).sum();
+            let mut shown: Vec<String> = why
+                .iter()
+                .take(REASONS_SHOWN)
+                .map(|(k, n)| format!("{} {n}", if k.is_empty() { "no reason given" } else { k }))
+                .collect();
+            if why.len() > REASONS_SHOWN {
+                shown.push("...".into());
+            }
+            line.push_str(&format!("; {total} not judged ({})", shown.join(", ")));
+        }
+        if c["errors"].as_u64().unwrap_or(0) > 0 {
+            line.push_str(&format!("; {} errors", c["errors"]));
+        }
+        s.push_str(&format!("{line}\n"));
+    }
+    if let Some(k) = v.get("known") {
+        let matched = k["findings"].as_u64().unwrap_or(0);
+        let by_id: Vec<String> = k["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["count"].as_u64().unwrap_or(0) > 0)
+            .map(|e| format!("{} {}", e["id"].as_str().unwrap_or(""), e["count"]))
+            .collect();
+        let new_groups = v["groups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|g| g["known"].is_null() && is_finding(g["run_outcome"].as_str().unwrap_or("")))
+            .count();
+        s.push_str(&format!(
+            "known: {matched} of {}{}; {}\n",
+            count(n("findings") as usize, "finding"),
+            if by_id.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", by_id.join(", "))
+            },
+            match new_groups {
+                0 => "none new".to_string(),
+                g => format!("{} new, in {}", k["new"], count(g, "group")),
+            }
+        ));
+    }
     if let Some(b) = v.get("branch") {
         let (p, t) = (
             b["points"].as_u64().unwrap_or(0),
@@ -690,11 +1003,13 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
             }
         ));
     }
-    for g in v["groups"].as_array().unwrap() {
+    let groups = v["groups"].as_array().unwrap();
+    for g in groups.iter().filter(|g| g["known"].is_null()) {
         let st = |k: &str| g[k].as_str().unwrap_or("").to_string();
         s.push('\n');
         let mut name = st("signature");
-        if let Some(c) = g["case"].as_str() {
+        let cases = g["cases"].as_array().map_or(0, |c| c.len());
+        if let (Some(c), 1) = (g["case"].as_str(), cases) {
             name = format!("[{c}] {name}");
         }
         if g["outcome"] != g["run_outcome"] {
@@ -711,8 +1026,12 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
                 }
             }
         };
+        let (of_cases, first_case) = match (cases, g["case"].as_str()) {
+            (k, Some(c)) if k > 1 => (format!(", {k} cases"), format!(" [{c}]")),
+            _ => (String::new(), String::new()),
+        };
         s.push_str(&format!(
-            "  {} of {} runs   first: seed {}   {replay}\n",
+            "  {} of {} runs{of_cases}   first: seed {}{first_case}   {replay}\n",
             g["count"],
             n("runs"),
             run_name(
@@ -742,6 +1061,25 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         }
         s.push_str(&format!("  rerun:  {}\n", st("rerun")));
         s.push_str(&format!("  replay: {}\n", st("replay_command")));
+    }
+    // Known groups: one line each, after the new ones.
+    let known: Vec<&Value> = groups.iter().filter(|g| !g["known"].is_null()).collect();
+    if !known.is_empty() {
+        s.push('\n');
+    }
+    for g in known {
+        let cases = g["cases"].as_array().map_or(0, |c| c.len());
+        s.push_str(&format!(
+            "known {}: {}   ({}{})\n",
+            g["known"].as_str().unwrap_or(""),
+            g["signature"].as_str().unwrap_or(""),
+            count(g["count"].as_u64().unwrap_or(0) as usize, "run"),
+            if cases > 1 {
+                format!(", {cases} cases")
+            } else {
+                String::new()
+            }
+        ));
     }
     let names = |a: &Value| -> Vec<String> {
         a.as_array()
@@ -807,14 +1145,43 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
             n("runs")
         ));
     }
+    if let Some(k) = v.get("known") {
+        for e in k["entries"].as_array().unwrap() {
+            if e["count"] != 0 {
+                continue;
+            }
+            let id = e["id"].as_str().unwrap_or("");
+            tail.push(if e["required"] == true {
+                format!("vacuous: known !{id} matched no run: the check may be unable to fail")
+            } else {
+                format!("known: {id} matched no run")
+            });
+        }
+    }
+    if v["check"]["vacuous"] == true {
+        tail.push(
+            "vacuous: the check judged no run (allow it with --allow-unmet check)".to_string(),
+        );
+    }
+    let unmet = [
+        "sometimes_never_held",
+        "reachable_never_hit",
+        "buggify_never_fired",
+    ]
+    .iter()
+    .any(|k| !names(&v["sdk"][*k]).is_empty())
+        || !names(&v["faults"]["eligible_zero"]).is_empty();
     if v["vacuous"] == true {
-        tail.push(if n("runs") == 0 {
-            "vacuous: no runs".to_string()
+        if n("runs") == 0 {
+            tail.push("vacuous: no runs".to_string());
         } else if v["branch"]["points"] == 0 {
-            "vacuous: no base has a crash point: nothing under the work tree changed, nothing to branch at".to_string()
-        } else {
-            "vacuous: see above (allow a label with --allow-unmet or [sdk] allow-unmet)".to_string()
-        });
+            tail.push("vacuous: no base has a crash point: nothing under the work tree changed, nothing to branch at".to_string());
+        } else if unmet {
+            tail.push(
+                "vacuous: see above (allow a label with --allow-unmet or [sdk] allow-unmet)"
+                    .to_string(),
+            );
+        }
     }
     if !tail.is_empty() {
         s.push('\n');
@@ -824,4 +1191,66 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_star_matches_any_text_and_the_rest_matches_whole() {
+        assert!(glob("abc", "abc") && !glob("abc", "abcd") && !glob("abc", "xabc"));
+        assert!(glob("*", "") && glob("*", "anything"));
+        assert!(glob("lib-*", "lib-a") && !glob("lib-*", "app-lib-a"));
+        assert!(glob("*-x-*", "a-x-b") && !glob("*-x-*", "a-x"));
+        assert!(glob("a*b*c", "abc") && glob("a*b*c", "a1b2c") && !glob("a*b*c", "acb"));
+        // A literal end is not matched twice.
+        assert!(!glob("a*a", "a") && glob("a*a", "aa"));
+    }
+
+    fn known(text: &str) -> Known {
+        let f = std::env::temp_dir().join(format!(
+            "patina-known-{}-{}",
+            std::process::id(),
+            text.len()
+        ));
+        std::fs::write(&f, text).unwrap();
+        let k = Known::read(&f);
+        std::fs::remove_file(&f).unwrap();
+        k.unwrap()
+    }
+
+    #[test]
+    fn the_first_matching_line_names_a_finding() {
+        let k = known("# known\nwide violation check: *\nnarrow violation check: wrong-sub*\n");
+        assert_eq!(k.id_of(None, "violation check: wrong-sub: N"), Some("wide"));
+        let k = known("narrow violation check: wrong-sub*\nwide violation check: *\n");
+        assert_eq!(
+            k.id_of(None, "violation check: wrong-sub: N"),
+            Some("narrow")
+        );
+        assert_eq!(k.id_of(None, "failure exit: exit N"), None);
+    }
+
+    #[test]
+    fn a_bracketed_pattern_selects_by_case() {
+        let k = known("p [*planted*] violation *\nany violation *\n");
+        assert_eq!(
+            k.id_of(Some("t planted 2"), "violation check: x"),
+            Some("p")
+        );
+        assert_eq!(k.id_of(Some("t add 2"), "violation check: x"), Some("any"));
+        // Without a bracket the signature alone is matched, with or without a case.
+        assert_eq!(k.id_of(None, "violation check: x"), Some("any"));
+    }
+
+    #[test]
+    fn a_required_entry_and_a_malformed_line() {
+        let k = known("!p violation *\nq failure *\np crash *\n");
+        assert_eq!(k.ids(), vec![("p", true), ("q", false)]);
+        let f = std::env::temp_dir().join(format!("patina-known-bad-{}", std::process::id()));
+        std::fs::write(&f, "lonely\n").unwrap();
+        assert!(Known::read(&f).is_err());
+        std::fs::remove_file(&f).unwrap();
+    }
 }

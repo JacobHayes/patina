@@ -8,6 +8,12 @@
 #    `error check-unstable`, not `nondeterministic`; a run that ends failure, crash or liveness
 #    does not start it; a path in the run directory in a finding replays the same; a passing checker leaves the run's outcome, digest and logs as a run
 #    without --check has them.
+# 2. The report: a `check:` line that counts each verdict; a check that judged no run makes the
+#    sweep vacuous (`--allow-unmet check` allows it); `--allow-unmet 'lib-*'` allows by pattern.
+#    A finding named by its label is one group over every case it appears in; two tests that
+#    exit 1 with the same last line stay two. `--known`: the first matching line names a
+#    finding, known findings do not fail the sweep, `[*planted*]` selects by case, and a `!`
+#    entry that matched no run makes the report vacuous.
 #@ tier=quick budget=10 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -112,6 +118,69 @@ is plain "$(run plain -- "$hello")" 0 ok exit
 [ "$(jq -r .digest plain.json)" = "$(jq -r .digest marked.json)" ] || die "the digest differs with --check"
 cmp -s plain/inc-0/boundary.log marked/inc-0/boundary.log || die "the boundary log differs with --check"
 [ "$(jq -r .check.verdict marked.json)" = pass ] && [ "$(jq -r .check plain.json)" = null ] || die "check verdicts: $(jq -c .check marked.json) $(jq -c .check plain.json)"
+
+# The check: line. Every run that ended ok was judged or not judged, and a run without a crash
+# is not judged for the checker's own reason; a sweep in which no run was judged is vacuous.
+ran=$(cat kv/seed-*/result.json | jq -sc '[map(select(.check.verdict == "pass")), map(select(.check.verdict == "fail")), map(select(.check.verdict == "not-judged"))] | map(length)')
+said=$(jq -c '.check | [.passed, .failed, ([.not_judged[]] | add // 0)]' kv/report.json)
+[ "$ran" = "$said" ] && [ "$(jq '.check.not_judged["no crash in this run"]' kv/report.json)" -gt 0 ] || die "check: line: pass, fail, not judged $said; the runs' verdicts $ran"
+grep -q '^check: judged ' kv.txt || die "the kvlog sweep printed no check: line"
+rc=0
+"$PATINA" sweep --seeds 1..4 -j 4 --out kvn --check chk/acked -- "$kv" >kvn.txt 2>&1 || rc=$?
+[ "$rc" = 2 ] && [ "$(jq -r '.check.vacuous' kvn/report.json)" = true ] || die "a check that judged nothing: exit $rc: $(tail -3 kvn.txt)"
+[ "$(jq -r '.check.not_judged | keys[0]' kvn/report.json)" = "no crash in this run" ] || die "not judged reasons: $(jq -c .check kvn/report.json)"
+rc=0
+"$PATINA" report --allow-unmet check kvn >/dev/null || rc=$?
+[ "$rc" = 0 ] || die "--allow-unmet check: exit $rc"
+
+# --allow-unmet patterns: unmet sometimes labels lib-a, lib-b and app-c.
+run sdk --mount "$root/sdk/python:/sdk" -- /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/sdk"); import patina
+for l in ("lib-a", "lib-b", "app-c"): patina.Sometimes(l).check(False)' >/dev/null
+unmet() { rc=0; "$PATINA" report --format json "$@" sdk >unmet.json || rc=$?; echo "$rc $(jq -r '.sdk.sometimes_never_held | join(",")' unmet.json)"; }
+[ "$(unmet --allow-unmet 'lib-*')" = "2 app-c" ] || die "--allow-unmet 'lib-*': $(unmet --allow-unmet 'lib-*')"
+[ "$(unmet --allow-unmet 'lib-*' --allow-unmet app-c)" = "0 " ] || die "--allow-unmet 'lib-*' app-c: $(unmet --allow-unmet 'lib-*' --allow-unmet app-c)"
+[ "$(unmet --allow-unmet '*')" = "0 " ] || die "--allow-unmet '*': $(unmet --allow-unmet '*')"
+[ "$(jq -r '.allowed_unmet | length' unmet.json)" = 3 ] || die "allowed unmet labels are not listed: $(jq -c .allowed_unmet unmet.json)"
+
+# Grouping across cases and known findings. calc OP A B has two planted bugs (sub clamps at 0,
+# mul by 0 gives A); the checker names a wrong answer wrong-OP, so each bug is one group over
+# every case that reaches it.
+mkdir calc
+printf '%s\n' '#!/bin/sh' 'case $1 in' 'add) echo $(($2 + $3)) ;;' \
+  'sub) r=$(($2 - $3)); [ "$r" -lt 0 ] && r=0; echo $r ;;' \
+  'mul) if [ "$3" = 0 ]; then echo "$2"; else echo $(($2 * $3)); fi ;;' 'esac' >calc/calc
+printf '%s\n' '#!/bin/sh' 'd=$1' 'set -- $PATINA_CASE' 'shift 2' \
+  'case $1 in add) w=$(($2 + $3)) ;; sub) w=$(($2 - $3)) ;; mul) w=$(($2 * $3)) ;; esac' \
+  'g=$(cat "$d/inc-0/stdout")' '[ "$g" = "$w" ] && exit 0' 'echo "wrong-$1: got $g, want $w"' 'exit 1' >chk/calc
+chmod +x chk/calc
+for c in "add 1 2" "sub 1 5" "mul 3 0" "add 4 4" "sub 2 9" "mul 5 0" "sub 9 1" "mul 2 2" "sub 3 7 planted"; do
+  echo "/bin/sh /calc/calc $c"
+done >calc.txt
+calc() { n=$1; shift; rc=0; "$PATINA" sweep --seeds 1..2 -j 4 --cases calc.txt --mount "$RUNS/calc:/calc" --out "$n" --check chk/calc "$@" >"$n.txt" 2>&1 || rc=$?; echo "$rc"; }
+rc=$(calc calcs)
+[ "$rc" = 1 ] || die "calc sweep: exit $rc: $(tail -3 calcs.txt)"
+[ "$(jq '[.groups[] | select(.run_outcome == "violation")] | length' calcs/report.json)" = 2 ] || die "calc sweep: groups $(jq -c '[.groups[] | [.signature, .cases]]' calcs/report.json)"
+[ "$(jq '[.groups[] | select((.cases | length) < 2)] | length' calcs/report.json)" = 0 ] || die "calc sweep: a group over one case: $(jq -c '[.groups[] | [.signature, .cases]]' calcs/report.json)"
+calc_groups=$(jq -r '[.groups[] | "\(.signature) (\(.cases | length) cases)"] | join("; ")' calcs/report.json)
+# Known: the first matching line names a run; [*planted*] selects by the case line.
+printf '%s\n' '!planted [*planted*] violation check: wrong-sub*' 'clamp violation check: wrong-sub: *' 'fixed violation check: wrong-add*' >known1
+cp known1 known2; echo 'mul-zero violation check: wrong-mul: *' >>known2
+kn() { rc=0; "$PATINA" report --format json --known "$@" >kn.json || rc=$?; echo "$rc $(jq -r '[.known.entries[] | "\(.id)=\(.count)"] | join(" ")' kn.json) new=$(jq '[.groups[] | select(.known == null)] | length' kn.json)"; }
+[ "$(kn known1 calcs)" = "1 planted=2 clamp=4 fixed=0 new=1" ] || die "known file without mul-zero: $(kn known1 calcs)"
+[ "$(kn known2 calcs)" = "0 planted=2 clamp=4 fixed=0 mul-zero=4 new=0" ] || die "known file naming both: $(kn known2 calcs)"
+# The sweep with the known file says what the report over its runs says.
+[ "$(calc calcs --known known2)" = 0 ] && [ "$(kn known2 calcs | cut -c1)" = 0 ] || die "sweep --known: $(tail -3 calcs.txt)"
+grep -q '^known: .*none new' calcs.txt || die "sweep --known printed no known: line: $(cat calcs.txt)"
+# Without the planted case's runs, the !planted entry makes the report vacuous.
+rc=0
+"$PATINA" report --known known2 $(ls -d calcs/seed-*/* | grep -v planted) >noplant.txt || rc=$?
+[ "$rc" = 2 ] && grep -q '!planted matched no run' noplant.txt || die "without the planted case: exit $rc: $(cat noplant.txt)"
+# Two tests that exit 1 with the same last line stay two groups.
+printf '%s\n' "/bin/sh -c 'echo boom >&2; exit 1' first" "/bin/sh -c 'echo boom >&2; exit 1' second" >two.txt
+"$PATINA" sweep --seeds 1 --cases two.txt --out two >two.out 2>&1 || true
+[ "$(jq '.groups | length' two/report.json)" = 2 ] || die "two failing tests: $(jq -c '[.groups[] | [.signature, .cases]]' two/report.json)"
+echo "calc: $calc_groups; known: $(kn known1 calcs)"
+echo "check: $(jq -c .check kv/report.json); without crashes: vacuous"
 
 wait "$hang" || true
 is hang "$(cat hang.rc)" 2 error check

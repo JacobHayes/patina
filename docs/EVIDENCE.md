@@ -780,6 +780,19 @@ seeds, `-j 8`, `--keep none`, two rounds interleaved), 2026-11-18, this host:
 
 `--check true` costs 6% and 14% of the rate; every run ended `ok`.
 
+`./check evidence crash-check` (`tests/oracles/evidence-crash-check.sh`: `examples/kvlog-c`
+with `examples/checks/acked-kept`, `-j 8`, `--keep none`), 2026-11-18, this host:
+
+| Sweep | Runs | Judged: passed, failed | Not judged (no crash in this run) | Findings |
+|---|---|---|---|---|
+| `kvlog`, seeds 1-200, `--crash machine` | 200 | 28: 5, 23 | 172 | 23, one group, replayed identical |
+| `kvlog`, seeds 1-2, `--branch --crash machine` | 88 | 86: 13, 73 | 2 (the bases) | 73, one group, replayed identical |
+| `kvlog fixed`, seeds 1-200, `--crash machine` | 200 | 64: 64, 0 | 136 | 0 |
+| `kvlog fixed`, seeds 1-2, `--branch --crash machine` | 248 | 246: 246, 0 | 2 (the bases) | 0 |
+
+Under `--crash machine` most runs end before their crash fires and the checker has nothing to
+judge (172 of 200); every crash point of two seeds judges 86 runs and finds the bug in 73.
+
 ## Second hosts
 
 One `patina` binary and one set of guest binaries, built once on the development VM from
