@@ -238,8 +238,13 @@ def main():
             free[0] += need
             lock.notify_all()
             results.append((s, ok, dt, why))
+            # A pass that skipped its work (no PMU, no sudo) says so, so a log tells it from a run.
+            skip = ""
+            if ok:
+                with open(log, errors="replace") as fh:
+                    skip = next((" (" + l.strip()[:120] + ")" for l in fh if l.startswith("SKIP")), "")
             print(f"{'PASS' if ok else 'FAIL'} {s['area']}/{s['name']} {dt:.1f} s (budget {s['budget']})"
-                  + ("" if ok else f": {why} (see {log})"), flush=True)
+                  + (skip if ok else f": {why} (see {log})"), flush=True)
             if not ok:
                 with open(log) as fh:
                     for line in fh.readlines()[-5:]:

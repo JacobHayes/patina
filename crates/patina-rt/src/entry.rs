@@ -76,7 +76,7 @@ extern "C" fn rt_main(ksp: u64) -> ! {
     crate::pmu::open(thread());
     let k = crate::loader::KernelStart::parse(ksp);
     // The host facts the instruction rule depends on, before any image is scanned.
-    crate::arch::insn::init(k.aux(26)); // AT_HWCAP2
+    crate::arch::insn::init(k.aux(16), k.aux(26)); // AT_HWCAP, AT_HWCAP2
     crate::loader::start(&k)
 }
 

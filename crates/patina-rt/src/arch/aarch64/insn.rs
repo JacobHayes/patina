@@ -58,8 +58,16 @@ static HOST_RNG: AtomicBool = AtomicBool::new(false);
 /// `AT_HWCAP2`'s `HWCAP2_RNG`.
 pub const HWCAP2_RNG: u64 = 1 << 16;
 
-/// At image start, from the kernel's `AT_HWCAP2`.
-pub fn init(hwcap2: Option<u64>) {
+/// Whether the host has FEAT_LSE2 (the kernel's `HWCAP_USCAT`), from this image's start: an
+/// unaligned exclusive access then faults only when it crosses a 16-byte boundary.
+static HOST_USCAT: AtomicBool = AtomicBool::new(false);
+
+/// `AT_HWCAP`'s `HWCAP_USCAT`.
+pub const HWCAP_USCAT: u64 = 1 << 25;
+
+/// At image start, from the kernel's `AT_HWCAP` and `AT_HWCAP2`.
+pub fn init(hwcap: Option<u64>, hwcap2: Option<u64>) {
+    HOST_USCAT.store(hwcap.unwrap_or(0) & HWCAP_USCAT != 0, Relaxed);
     HOST_RNG.store(hwcap2.unwrap_or(0) & HWCAP2_RNG != 0, Relaxed);
 }
 
@@ -252,10 +260,14 @@ pub mod emulate {
 /// are the atomic access. Emulation is not a boundary event (no record, no sequence number,
 /// no yield): the hops' breakpoints and the overflow signal in between leave the monitor
 /// alone. Its SIGILL still ends the counted segment, as every runtime entry does
-/// (ARCHITECTURE.md, "arm64" under counter preemption). An access that would fault (unaligned, unmapped, not readable or writable) raises
-/// the fault the instruction would (SIGBUS `BUS_ADRALN`, SIGSEGV), with the program counter
-/// still at it: the site stays emulated, so a handler that fixes the page and returns runs
-/// it again, and both halves of a pair stay on the one monitor.
+/// (ARCHITECTURE.md, "arm64" under counter preemption). An access that would fault (unaligned,
+/// unmapped, not readable or writable) raises the fault the instruction would (SIGBUS
+/// `BUS_ADRALN`, SIGSEGV), with the program counter still at it: the site stays emulated, so a
+/// handler that fixes the page and returns runs it again, and both halves of a pair stay on the
+/// one monitor. Unaligned is the architecture's rule (`AArch64.CheckAlignment`): an address not
+/// a multiple of the access's size (a pair's both elements) faults, except that with FEAT_LSE2
+/// it faults only when the access crosses a 16-byte boundary; the store's alignment check comes
+/// before its monitor's, so a store that would fail faults too.
 pub mod exclusive {
     use crate::arch::Frame;
     use crate::raw::sc3;
@@ -320,7 +332,7 @@ pub mod exclusive {
         let total = if pair { 2 * esize } else { esize };
         let addr = if rn == 31 { frame.sp() } else { frame.regs[rn] };
         let acq_rel = w >> 15 & 1 == 1;
-        if addr % total != 0 {
+        if addr % total != 0 && (!super::HOST_USCAT.load(Relaxed) || (addr & 15) + total > 16) {
             return Err(Fault(sig::SIGBUS, BUS_ADRALN, addr));
         }
         let reg = |f: &Frame, r: usize| if r == 31 { 0 } else { f.regs[r] };

@@ -636,6 +636,26 @@ seed. `dmesg` showed no new perf message either way. After it: `counters` area p
 90-cell ledger is unchanged. On arm64 `07-exclusive` fails with the faulting-exclusive fix
 reverted (`map`: SIGILL) and with the full-table stop removed (`many` ends `ok`).
 
+Unaligned exclusive accesses (`excl align`: each of the 27 load, store and load-then-store
+forms at offsets 0, 1, 2, 4, 8, 12, 14 and 15 of a 64-byte-aligned buffer), native against
+`--preempt branches`, five runner jobs (all Neoverse N2, `uscat` in `/proc/cpuinfo`; the native
+table the same in each):
+
+| Access | Native | Patina before | Patina now |
+|---|---|---|---|
+| Byte forms, any offset | no fault | no fault | no fault |
+| Halfword, word, doubleword, word pair (2 to 8 bytes) at an unaligned offset inside one 16-byte block (e.g. `ldxr x` at +1, +4) | no fault | SIGBUS `BUS_ADRALN` | no fault |
+| The same across a 16-byte boundary (`ldxrh` +15, `ldxr w` +14, `ldxr x` +12, `ldxp w` +12) | SIGBUS 1, `si_addr` the address | SIGBUS 1, the address | the same as native |
+| Doubleword pair (`ldxp`/`stxp x`, 16 bytes) at any unaligned offset | SIGBUS 1, the address | SIGBUS 1, the address | the same as native |
+| A store-exclusive whose monitor is clear (it would fail) | as the load of its size: the alignment check comes first | the same | the same |
+
+The architecture's rule (`AArch64.CheckAlignment`): with FEAT_LSE2 an unaligned exclusive
+access faults only when it crosses a 16-byte boundary. The emulation now applies it when the
+kernel reports `HWCAP_USCAT` and faults on every unaligned address otherwise. An unaligned
+`ldxr` that did not fault natively was inside one 16-byte block. `07-exclusive`'s `align` mode
+compares the 216 lines with the native run; with the old rule planted it fails (`ldxrh +1`
+and 40 more lines raise SIGBUS where natively they do not), and passes with the fix.
+
 What differs from the Apple VM (Tart, Apple M4): no PMU is exposed to the guest, so
 `--preempt branches` is refused there (`patina doctor`: no PMU); the hop logic and the
 exclusive emulation were also run there with a software event standing in for the counter

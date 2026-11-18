@@ -20,9 +20,9 @@ pub const PATCH: &[u8] = &[0x0f, 0x0b];
 #[inline(always)]
 pub fn sync_code(_a: u64, _len: u64) {}
 
-/// At image start, from the kernel's `AT_HWCAP2`: nothing on x86_64.
+/// At image start, from the kernel's `AT_HWCAP` and `AT_HWCAP2`: nothing on x86_64.
 #[inline(always)]
-pub fn init(_hwcap2: Option<u64>) {}
+pub fn init(_hwcap: Option<u64>, _hwcap2: Option<u64>) {}
 
 /// The protection bits the kernel adds to an image's executable segments: none on x86_64.
 pub fn image_prot(_feature_1_and: impl FnOnce(u32) -> u32) -> u64 {

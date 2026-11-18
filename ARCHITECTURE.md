@@ -331,7 +331,9 @@ differences from x86_64:
   preemptions fall soon after one. (Keeping the segment across it was tried: a waiter
   spinning on an exclusive pair then needs a whole long N of emulated instructions, seconds,
   before its preemption, and the exclusive-pair spin locks stalled.) An access that would fault raises the fault the
-  instruction would (SIGSEGV, SIGBUS for an unaligned address) with the site still emulated,
+  instruction would (SIGSEGV; SIGBUS `BUS_ADRALN` for an address that is not a multiple of the
+  access size, a pair's two elements together, and on a host with FEAT_LSE2, as the Neoverse
+  N2, only for one that also crosses a 16-byte boundary) with the site still emulated,
   so both halves of a pair stay on the one monitor; a process whose patch table is full when
   an exclusive instruction is found stops (`unsupported`, stop `capacity`), since one left
   native would fail at random. Without counters they are not patched.
