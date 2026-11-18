@@ -11,6 +11,10 @@ special linking, any language.
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
 needs `bwrap` (bubblewrap) and unprivileged user namespaces.
 
+Changes in 0.9.1: a run records only the argument registers each call reads, so every digest
+differs from 0.9.0 (outcomes do not), and valid calls that 0.9.0 answered `EFAULT` or `EBADF`
+because of a register they do not read now succeed.
+
 Changes in 0.9: Linux arm64 ([the guide](docs/GUIDE.md#hosts)), including Apple Silicon
 Macs through a Linux arm64 VM; `patina sweep --branch`, which tries every crash point of each
 seed ([the guide](docs/GUIDE.md#every-crash-point-of-a-seed)); and `--crash machine-at:N` now
