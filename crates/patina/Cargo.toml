@@ -5,7 +5,8 @@ readme = "README.md"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+# The SDK builds on older compilers than the workspace needs: edition 2024's first (1.85).
+rust-version = "1.85"
 repository.workspace = true
 
 # No dependencies, no build script: outside Patina every macro is a load and a branch, and on

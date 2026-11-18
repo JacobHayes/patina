@@ -854,7 +854,7 @@ all of them, with every `always` never evaluated, and the allowed ones under `al
 what it should be, and is not listed.
 
 **Rust**: in `Cargo.toml`, the SDK at the release's tag (or `path = "PATINA/crates/patina"`
-for a checkout):
+for a checkout). It needs Rust 1.85 or later (edition 2024):
 
 ```toml
 patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.11.0" }
