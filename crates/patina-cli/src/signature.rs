@@ -6,7 +6,9 @@
 //! when the run ends; readers take it from there.
 //!
 //! A violation is named by its label and the first line of its detail: a program that reports
-//! every failure under one label still gets one group per bug.
+//! every failure under one label still gets one group per bug. A checker that names its finding
+//! `LABEL [KEY]` (`check::finding`) chose its grouping itself: the label and key, verbatim,
+//! are the whole name, and the detail is left to the report to show.
 //!
 //! The rule for numbers: what names the failure is kept as it is (the exit status, the signal
 //! name, an SDK label, a call's name); numbers in text the guest or the supervisor wrote are
@@ -60,13 +62,10 @@ fn primary(r: &Value, stderr: &str) -> String {
             } else {
                 &r["sdk"]["violation"]
             };
-            let max = if r["stop"] == "check" {
-                CHECK_DETAIL_MAX
-            } else {
-                DETAIL_MAX
-            };
             match v["label"].as_str() {
-                Some(l) => return violation(l, v["detail"].as_str().unwrap_or(""), max),
+                Some(l) => {
+                    return violation(l, v["detail"].as_str().unwrap_or(""), r["stop"] == "check")
+                }
                 None => message.to_string(),
             }
         }
@@ -111,10 +110,25 @@ fn primary(r: &Value, stderr: &str) -> String {
     normalise(&p)
 }
 
+/// A checker's label split into its name and its key: `LABEL [KEY]` (`check::finding`).
+pub fn keyed(label: &str) -> Option<(&str, &str)> {
+    let (name, rest) = label.split_once(" [")?;
+    let key = rest.strip_suffix(']')?;
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then_some((name, key))
+}
+
 /// A violation's name: its label kept as written (but checkout-free; its digits are kept),
 /// then the first line of its detail, normalised and cut at `max` characters, which tells
-/// apart bugs reported under one label.
-fn violation(label: &str, detail: &str, max: usize) -> String {
+/// apart bugs reported under one label. A checker's keyed label (`LABEL [KEY]`) is the whole
+/// name: the key as written, the detail left out.
+fn violation(label: &str, detail: &str, check: bool) -> String {
+    let max = if check { CHECK_DETAIL_MAX } else { DETAIL_MAX };
+    if check {
+        if let Some((name, key)) = keyed(label) {
+            let p = format!("{} [{key}]", checkout_free(name));
+            return p.chars().take(PRIMARY_MAX).collect();
+        }
+    }
     let mut p = checkout_free(label);
     let first = detail.lines().find(|x| !x.trim().is_empty()).unwrap_or("");
     let d: String = normalise(&checkout_free(first)).chars().take(max).collect();
@@ -139,7 +153,7 @@ pub fn names_its_bug(signature: &str) -> bool {
 /// finding's name as a signature gives it.
 pub fn check_key(c: &Value) -> (Value, String) {
     let line = match c["label"].as_str() {
-        Some(l) => violation(l, c["detail"].as_str().unwrap_or(""), CHECK_DETAIL_MAX),
+        Some(l) => violation(l, c["detail"].as_str().unwrap_or(""), true),
         None => normalise(c["detail"].as_str().unwrap_or("")),
     };
     (c["verdict"].clone(), line)
@@ -366,6 +380,39 @@ mod tests {
         assert!(
             c.starts_with("violation check: open-ps1: ") && c.ends_with("(inc-N)"),
             "{c}"
+        );
+    }
+
+    #[test]
+    fn a_checker_key_groups_and_the_detail_does_not() {
+        let check = |label: &str, detail: &str| {
+            sig(
+                json!({"outcome": "violation", "stop": "check", "message": "x",
+                       "check": {"verdict": "fail", "label": label, "detail": detail}}),
+                "",
+            )
+        };
+        // Keyed: the detail never splits a group, and the key is kept as written.
+        assert_eq!(
+            check("wrong-output [cat]", "line 3: got 0x0"),
+            check("wrong-output [cat]", "line 9: got 1")
+        );
+        assert_ne!(
+            check("wrong-output [cat]", "x"),
+            check("wrong-output [cat2]", "x")
+        );
+        assert_eq!(
+            check("wrong-output [exit 2: 0x0]", "x"),
+            "violation check: wrong-output [exit 2: 0x0]"
+        );
+        // Unkeyed, as before: the detail's first line, numbers collapsed.
+        assert_ne!(
+            check("wrong-output", "got 0x0 in cat"),
+            check("wrong-output", "got 0x0 in ls")
+        );
+        assert_eq!(
+            check_key(&json!({"verdict": "fail", "label": "w [k]", "detail": "a 1"})),
+            check_key(&json!({"verdict": "fail", "label": "w [k]", "detail": "b 2"}))
         );
     }
 

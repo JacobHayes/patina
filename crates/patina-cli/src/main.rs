@@ -14,6 +14,7 @@ mod launcher;
 mod log;
 mod minimize;
 mod outcome;
+mod recheck;
 mod replay;
 mod report;
 mod result;
@@ -108,6 +109,7 @@ fn main() -> ExitCode {
         Cmd::Doctor => doctor::doctor(&a).map_err(error),
         Cmd::Sweep => sweep::main(&a),
         Cmd::Report => report::main(&a).map_err(error),
+        Cmd::Recheck => recheck::main(&a),
         Cmd::Minimize => minimize::main(&a),
     };
     r.unwrap_or_else(|Fail(o, e)| {

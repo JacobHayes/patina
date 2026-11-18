@@ -113,7 +113,8 @@ jobs:
           path: dist/patina-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
-  # The release's files: both archives, one SHA256SUMS listing both, install.sh.
+  # The release's files: both archives, one SHA256SUMS listing both, install.sh (a tag's
+  # installs that tag's version unless given --version).
   dist:
     needs: build
     runs-on: ubuntu-24.04
@@ -126,7 +127,11 @@ jobs:
           path: dist
           merge-multiple: true
       - run: |
-          cp install.sh dist/
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            scripts/stamp-install "$GITHUB_REF_NAME" >dist/install.sh
+          else
+            cp install.sh dist/
+          fi
           (cd dist && sha256sum patina-*.tar.gz >SHA256SUMS && cat SHA256SUMS)
           test "$(wc -l <dist/SHA256SUMS)" = 2
       - uses: actions/upload-artifact@v7

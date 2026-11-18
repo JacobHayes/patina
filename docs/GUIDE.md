@@ -54,6 +54,13 @@ where a program expects its data, and it is still the working directory and `HOM
 one work tree; other places a program writes (`/tmp`, a `:copy` mount) are writable but not
 crash-modelled.
 
+Every file in the work tree starts with the same modification time (the simulated clock's
+start, 2026-01-01), whatever it was on the host: a run depends on the tree's contents only,
+not on when its files were last touched. A program whose behaviour depends on file times
+(`make`, `find -newer`, an mtime-ordered cache) sees them all equal. To give it times, set them
+inside the run, at the start of the case: `touch -d '2026-01-01 00:00:05' src/b.c && make`
+(a `--cases` line, or a wrapper script), and they are part of the run like any other change.
+
 The guest sees no network beyond itself: a connection or datagram to another host fails with
 `Network is unreachable`, and names resolve from the sandbox's `/etc/hosts` only (`localhost`
 works; any other name is not found, and no lookup sends a packet). Servers and clients must
@@ -125,13 +132,14 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--seeds 1..200,250` | an inclusive range, a list, or both |
 | `-j N` | runs at once (default half the CPUs, at most 8) |
 | `--out DIR` | where runs go (default `patina-out/sweep`) |
-| `--keep fail\|all\|none` | whose logs to keep; `run.json` and `result.json` always stay |
+| `--keep fail\|checked\|all\|none` | whose logs to keep: the findings', also those of every run a `--check` read (to judge them again, [below](#judging-again)), every run's, none; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
+| `--only-case ID[,ID...]` | with `--cases`: only these cases ([below](#test-suites)) |
 | `--branch` | with `--crash machine` or `process`: every crash point of each seed (below) |
 | `--known FILE` | findings already known: counted, and they do not fail the sweep ([below](#known-findings)) |
 
-A run kept by `--keep fail` whose log is over 4 MiB keeps its first and last MiB
+A run kept by `--keep fail` or `checked` whose log is over 4 MiB keeps its first and last MiB
 (`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
 gives the whole log again. The sweep prints the bytes it kept, does not start while `-j` runs
 at `--log-limit` could fill the filesystem under `--out`, and stops launching runs when free
@@ -140,7 +148,9 @@ space falls below that, or when a run finds the filesystem full.
 A sweep directory holds one sweep. It records the program's SHA-256, the command and the
 resolved settings (`sweep.json`); the same sweep run again resumes, running only the runs it
 lacks (more seeds, or after an interrupt), and any other sweep replaces the directory. Edit,
-rebuild and rerun the same command: the old runs never mix with the new.
+rebuild and rerun the same command: the old runs never mix with the new. The checker is not
+part of that identity: a changed checker judges the runs again rather than running them
+([Judging again](#judging-again)).
 
 Each group in the summary is one signature: the outcome, what stopped the run, and its first
 line of evidence (the failed `always` label with the first line of its detail, the panic or
@@ -162,7 +172,9 @@ The summary prints the first three new groups in full (counts, first seed and ca
 replay lines) and every other group on one line, numbered: `#7 [CASE] SIGNATURE   2 of 40
 runs   first: seed 3   replayed: identical`; `patina report --group 7 DIR` prints one in full.
 `report.json` has every group in full, each with its runs (`runs`: seed, crash point, case,
-directory) and `case` set only when all its runs share one.
+case id, directory) and `case` set only when all its runs share one. A group whose first run's
+message differs from its signature (numbers made `N`, a checker's detail left out) shows that
+message as written, `example:` (`example` in `report.json`), so one real instance is in view.
 
 ### Test suites
 
@@ -189,22 +201,31 @@ patina sweep: 20 runs, 10 findings in 1 group, 10 ok   (0.3s, 8 jobs)
 outcomes: failure 10, ok 10
 
 [python3 -m unittest test_store.Store.test_counter] failure exit: AssertionError: N != N; exit 1
-  10 of 20 runs   first: seed 1   replayed: identical
+  10 of 20 runs   first: seed 1, case 2   replayed: identical
   rerun:  patina run --seed 1 --env PYTHONPATH=/guest --mount /tmp/casedemo:/guest -- python3 -m unittest test_store.Store.test_counter
   replay: patina replay /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
 ```
 
 Given a command after `--`, a line is instead put in place of `{}` in it: `--cases names.txt
 -- python3 -m unittest {}` runs the same. Each (case, seed) is its own run directory,
-`OUT/seed-N/K-NAME`: K the case's position in the file, NAME a short form of its last word
-that is not an option; the file `case` there and the report hold the whole line. With
-whole-command lines, a rebuilt program reruns only its own cases when the sweep runs again.
+`OUT/seed-N/L-NAME`: L the case's line number in the file, NAME its `--name` (below) or a short
+form of its last word that is not an option; the file `case` there and the report hold the
+whole line. With whole-command lines, a rebuilt program reruns only its own cases when the
+sweep runs again.
+
+A case's id is its `--name`, or else its line number: it is `PATINA_CASE_ID` for the checker,
+`config.case` in `run.json` (with the whole line, so a replay and `--config run.json` keep
+it), `case_id` in `report.json`, and the summary's `first: seed 1, case 2`. `--only-case
+ID[,ID...]` runs only those cases, as the same sweep would have run them; an id no line has
+is an error. A name is letters, digits, `.`, `_` and `-`, at most 64 characters, not
+starting with `.` or `-`, not a number, and unique in the file. A line number moves when a
+line is added above it; a `--name` does not, so a corpus that grows names its cases.
 
 A case can bring its own settings: a line whose first word starts with `--` gives `patina
 run` flags up to a word `--`, then the case as before. `--work DIR[:GUEST]`, `--mount`,
 `--env K=V` and `--stdin FILE` are allowed, parsed as `patina run` parses them, after the
 sweep's (a case's `--work` and `--stdin` replace the sweep's, its mounts and variables add to
-them); `--name NAME` names the case's directory. Anything else is a setting of the whole sweep
+them); `--name NAME` names the case: its id and its directory. Anything else is a setting of the whole sweep
 and refused. A corpus whose cases each have a tree of their own:
 
 ```text
@@ -266,7 +287,8 @@ check: judged 62 of 62 runs: 44 passed, 18 failed
 known: 12 of 18 findings (sub-clamps 10, planted 2); 6 new, in 1 group
 
 violation check: wrong-mul: got N, want N
-  6 of 62 runs, 3 cases   first: seed 1 [/bin/sh /demo/calc mul 4 0]   replayed: identical
+  6 of 62 runs, 3 cases   first: seed 1, case 9 [/bin/sh /demo/calc mul 4 0]   replayed: identical
+  example: wrong-mul: got 4, want 0
   rerun:  patina run --seed 1 --config /tmp/calc/patina-out/sweep/seed-1/9-0/run.json -- /bin/sh /demo/calc mul 4 0
   replay: patina replay /tmp/calc/patina-out/sweep/seed-1/9-0
 
@@ -502,20 +524,24 @@ after a run that ended `ok`, Patina runs `CMD ARGS RUNDIR` on the host.
 | `RUNDIR` | its last argument: `run.json`, `result.json`, per incarnation `inc-K/stdout`, `stderr`, `post-crash/` |
 | working directory | where patina was started (recorded in `run.json`); paths in `CMD ARGS` are relative to it |
 | `PATINA_SEED`, `PATINA_EXIT` | the seed; the program's exit status |
-| `PATINA_CASE`, `PATINA_CASE_NAME` | in a sweep with `--cases`: the case's line (after its settings), and its directory `K-NAME` |
+| `PATINA_CASE`, `PATINA_CASE_NAME`, `PATINA_CASE_ID` | in a sweep with `--cases`: the case's line (after its settings), its directory `L-NAME`, and its id (its `--name`, or its line number) |
 | `PATINA` | the `patina` that runs it, for `"$PATINA" log events RUNDIR` whatever the `PATH` |
 
 | It answers | The run |
 |---|---|
 | exit 0 | stays `ok` (`check.verdict` `pass`) |
-| exit 1 | `violation`, stop `check`, named by the first line of its stdout, `LABEL: detail` |
-| exit 77 | stays `ok`, not judged (`not-judged`; the first line says why) |
+| exit 1 | `violation`, stop `check`, named by the first line of its stdout, `LABEL: detail` or `LABEL [KEY]: detail` |
+| exit 77 | stays `ok`, not judged (`not-judged`; the first line says why, `CLASS: detail`) |
 | any other exit, a signal, cannot be started, still running after `--check-timeout` seconds (default 60) | `error`, stop `check`: a broken checker is never a pass |
 
 `LABEL: detail` is treated as an SDK `always` label and detail are: the label is kept as
 written, digits included, and numbers in the detail become `N`, so a sweep groups one bug once
 however many runs hit it; put what tells findings apart, as the leg or the oracle's variant, in
-the label (`SILENT-err7: ...`), not the detail. The detail is cut at 200 characters, keeping
+the label (`SILENT-err7: ...`), not the detail. When the checker knows what tells its findings
+apart, it says so with a key: `LABEL [KEY]: detail`, LABEL one word and KEY anything up to the
+`]`, groups by the label and key as written, and the detail does not enter the signature at all
+(`wrong-output [grep-basic]: got 3 lines, want 4` is the group `wrong-output [grep-basic]`,
+with that line as its `example:`). The detail is cut at 200 characters, keeping
 its end (a trailing `(inc-K)`). The run directory's own path in that line is written `RUNDIR`
 (a replay's is elsewhere). One run is one finding: a checker that sees several problems prints
 the most specific first, and the rest go to `check.out`.
@@ -562,14 +588,18 @@ check: judged 13 of 30 runs: 4 passed, 9 failed; 17 not judged (no crash in this
 
 violation check: acked-record-lost: acknowledged N, N stored after the crash
   9 of 30 runs   first: seed 2   replayed: identical
+  example: acked-record-lost: acknowledged 22, 21 stored after the crash
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
   replay: patina replay /tmp/kvlog/patina-out/sweep/seed-2
 ```
 
 The `check:` line counts what the checker said: judged (it passed or failed the run), not
-judged with the three most common reasons (the first line it printed; `report.json` has
-all), and errors. A sweep with a check that judged no run is `vacuous` (exit 2): the same
+judged by reason, and errors. A reason written `CLASS: detail` counts under its CLASS as
+written (`no-reference: seed-4 has no run`, `expected: case 12 differs by design`); any other
+counts under the whole line with its numbers made `N`. The line shows the three most common
+and sums the rest (`5 more in 2 classes`); `report.json` has every class under
+`check.not_judged`. A sweep with a check that judged no run is `vacuous` (exit 2): the same
 sweep without `--crash` has nothing for `acked-kept` to look at. `--allow-unmet check`
 allows that. A check under which every judged run passed, with no `--known` `!ID` entry
 (below) to show it can fail, gets one more line, `check: every judged run passed and no
@@ -593,8 +623,8 @@ replay: patina replay /tmp/kvlog/patina-out/run-2
 The checker is part of the run's record: `run.json` keeps its words, its directory, its
 program and that program's SHA-256, so `replay`, `verify`, `minimize` and `run --config
 RUNDIR/run.json` run it too, and replay and minimize refuse a checker whose file changed (as
-they refuse a changed program). A sweep whose checker changed starts over. `minimize` keeps
-what the finding needs:
+they refuse a changed program). A sweep whose checker changed judges its runs again
+([Judging again](#judging-again)). `minimize` keeps what the finding needs:
 
 ```text
 $ patina minimize patina-out/run-2
@@ -662,20 +692,70 @@ One `--check` per run: several checks are one script that runs them and prints t
 failure. A slow checker sets a sweep's speed. In shell, `$( )` strips trailing newlines:
 compare files with `cmp`.
 
+### Judging again
+
+A checker changes more often than the program: a table of expected differences gains a line,
+an oracle a rule. The runs need not be made again to be judged again, only kept:
+
+```sh
+patina sweep --seeds 1..10 --cases corpus.txt --keep checked --check 'chk/diff patina-out/ref' -- ./prog {}
+echo 4 >> chk/expected.txt
+patina recheck patina-out/sweep
+```
+
+```text
+recheck: judged 8 runs again in 0.0s
+patina report: 8 runs, 0 findings in 0 groups, 8 ok
+outcomes: ok 8
+check: judged 6 of 8 runs: 6 passed, 0 failed; 2 not judged (expected 2)
+```
+
+`patina recheck DIR...` runs the checker again on each run's kept logs and rewrites only its
+verdict: `check` in `result.json` (and the outcome, stop, message and signature that follow
+from it), the checker `run.json` records, `check.out`. The run's digest, logs, faults and SDK
+results stay as they were, and a run judged as before is rewritten byte for byte as it was.
+Without `--check` or `--check-serve` it judges each run with the checker the run records,
+read again from its file; with one, every run gets that checker. It then prints the report
+(`--known`, `--allow-unmet` as for `report`) and, given one sweep directory, writes its
+`report.json`. A run that did not end `ok` stays a finding, as in a sweep. A replay made
+before a recheck that changed the verdict is removed: it judged with the earlier checker.
+
+`--keep checked` keeps the logs of every run the checker read, cut as `--keep fail` cuts
+them: for a corpus of short runs, about what `--keep all` keeps (each run's `inc-0` with its
+stdout, stderr and log), which is what makes judging again possible. A run whose logs were
+pruned (`--keep fail`, an `ok` run) has nothing to read: a recheck names it, leaves its
+verdict as the earlier checker's, and does not count that as a failure; the report then says
+its verdicts are of two checkers (`check.checkers` in `report.json`):
+
+```text
+recheck: seed-1/2-readf: its logs were pruned (a sweep's --keep fail): not judged again; its verdict is the earlier checker's
+...
+recheck: judged 2 runs again in 0.0s; 6 pruned, left as they were (a sweep with --keep checked keeps what a checker reads)
+patina report: 8 runs, 2 findings in 1 group, 6 ok
+check: these verdicts are of 2 checkers (check.checkers in --format json): patina recheck judges them again with one
+```
+
+The same sweep run again with a changed checker does the same before it runs anything: a run
+whose recorded checker differs (its words, or its file's SHA-256), or whose verdict was left
+`pending`, is judged again from its logs, and run again only when they were pruned; one line
+says which. Patina knows the checker's own file only: a table or a reference it reads is not
+tracked, so after editing those, run `patina recheck`. With `--check-serve` the servers are
+started once per job, as in a sweep.
+
 ### A checker that serves
 
 A checker in a scripting language spends most of its time starting: an interpreter and its
 imports cost 30 to 100 ms, where a short run costs 10 to 30. `--check-serve 'CMD ARGS'` (`[run]
 check-serve`) starts it once per sweep job instead, with `PATINA_CHECK_SERVE=1` and no run
 directory, and asks it about each run on its stdin, one JSON line, `{"rundir": DIR, "env":
-{"PATINA_SEED": ..., "PATINA_EXIT": ..., "PATINA_CASE": ..., "PATINA_CASE_NAME": ...}}`. It
-answers one line on its stdout:
+{"PATINA_SEED": ..., "PATINA_EXIT": ..., "PATINA_CASE": ..., "PATINA_CASE_NAME": ...,
+"PATINA_CASE_ID": ...}}`. It answers one line on its stdout:
 
 | It answers | The run |
 |---|---|
 | `pass` | stays `ok` |
-| `fail LABEL: detail` | `violation`, stop `check` |
-| `skip REASON` | stays `ok`, not judged |
+| `fail LABEL: detail`, `fail LABEL [KEY]: detail` | `violation`, stop `check` |
+| `skip CLASS: detail` (or any reason) | stays `ok`, not judged |
 | anything else, two lines, a line before it was asked, nothing within `--check-timeout`, or it ended | `error`; the server is killed and the sweep starts another for the job's next run |
 
 A line carries no request number: an answer written out of turn is found at the job's next
@@ -696,7 +776,7 @@ if os.environ.get("PATINA_CHECK_SERVE"):
         req = json.loads(line)
         os.environ.update(req["env"])
         code, say = check(sys.argv[1], req["rundir"])
-        print({0: "pass", 1: f"fail {say}", 77: f"skip {say}"}[code], flush=True)
+        print({0: "pass", 1: f"fail {say}", 77: f"skip {say}", 2: f"error: {say}"}[code], flush=True)
 ```
 
 A run started per run costs less when the interpreter is named by its path with no wrapper
@@ -744,7 +824,7 @@ sweep: replaying the first seed of 1 finding
 sweep: 1.9 MiB kept in /tmp/upcase/patina-out/sweep
 patina sweep: 40 runs, 9 findings in 1 group, 31 ok (4 by --ok-exit)   (0.2s, 8 jobs)
 outcomes: ok 31, violation 9
-check: judged 36 of 40 runs: 27 passed, 9 failed; 4 not judged (exited N: a clean failure, not compared 4)
+check: judged 36 of 40 runs: 27 passed, 9 failed; 4 not judged (clean-failure 4)
 
 violation check: wrong-output: Files want/out.txt and got/out.txt differ
   9 of 40 runs   first: seed 5   replayed: identical
@@ -811,12 +891,48 @@ patina sweep: 9 runs, 3 findings in 1 group, 6 ok   (0.1s, 8 jobs)
 outcomes: ok 6, violation 3
 
 [echo -e 'a\tb'] violation check: wrong-output: stdout differs from the reference's
-  3 of 9 runs   first: seed 1   replayed: identical
+  3 of 9 runs   first: seed 1, case 1   replayed: identical
   rerun:  patina run --seed 1 --config /tmp/upcase/patina-out/sh/seed-1/1-a_tb/run.json -- dash -c 'echo -e '\''a\tb'\'''
   replay: patina replay /tmp/upcase/patina-out/sh/seed-1/1-a_tb
 ```
 
 (dash's `echo` prints `-e a	b`.) A checker may as well run the reference itself, natively.
+
+A reference made from other inputs compares the wrong things and says so only as findings.
+`same-output` and `same-tree` first check that the reference run had this run's input, from
+the two `run.json` files: the case id (`case-id`), the work tree's source and place (`work`),
+`--stdin` (`stdin`), and the case line's own settings (`settings`). The program may differ; that
+is the point. On a difference the checker exits 2, so the run is an `error`, never a finding,
+with one line naming the field:
+
+```text
+reference-mismatch: work differs: the reference has ["/tmp/sh/t2",null], this run ["/tmp/sh/t1",null] (--relax work to compare anyway)
+```
+
+`--relax FIELD` (before the reference, repeatable) compares anyway: a reference deliberately
+run on another tree. The comparison is one shell function, `same_input` in
+`examples/checks/same-input.sh`, for a checker of your own to source.
+
+### Triage with a known table and an expected-differences table
+
+A corpus compared with a reference turns up three kinds of difference: bugs, bugs already
+known, and differences that are correct (the reference is another implementation, or an older
+version). Keep each in its own table and judge again as the tables grow:
+
+1. Sweep the reference once, `--seeds 1 --keep all`, and the program with `--keep checked`.
+2. The checker reads a table of expected differences (case ids, one per line) and exits 77
+   with `expected: case ID differs by design` for a case it names: not judged, counted under
+   `expected`, never a finding. It reports any other difference keyed by the case,
+   `wrong-output [$PATINA_CASE_ID]: got ...`, so each case is one group and `example:` shows
+   what it got.
+3. Read the groups. A correct difference: add the case id to the table. A bug already known:
+   a `--known` line for it (`[*grep-basic*] violation check: wrong-output*`). A new bug:
+   reproduce it with the group's `rerun:` line, which runs the case alone.
+4. `patina recheck --known known.txt OUT` after each table edit: no run is made again, and the
+   report shows what is left. Keep one `!ID` entry for a case wrong by construction, so a
+   checker that stopped failing is caught.
+
+The checker of `tests/oracles/06-triage.sh` is such a checker, in eight lines of shell.
 
 ## The SDK
 
@@ -852,6 +968,20 @@ in a library it uses, and `--allow-unmet '*'` allows every label (when the oracl
 `--check`). The summary gives a count per kind and the first five labels; `report.json` lists
 all of them, with every `always` never evaluated, and the allowed ones under `allowed_unmet`. An `unreachable` that no run reached is
 what it should be, and is not listed.
+
+This stays strict on purpose: a `sometimes` you wrote that no run met fails your sweep, since a
+search that never reached what it was meant to reach found nothing there. Patina cannot tell a
+library's sites from the program's by itself (a static link puts them in one image, and labels
+carry no owner), so a library's are allowed by its prefix, once, in `patina.toml`:
+
+```toml
+[sdk]
+allow-unmet = ["fjall-*"]
+```
+
+When most unmet labels share a prefix, the `vacuous` line suggests that entry; the allowed ones
+are counted on one line, `sdk: 12 sites unmet, allowed by --allow-unmet ('fjall-*' 12;
+report.json: allowed_unmet)`, so they stay in view.
 
 **Rust**: in `Cargo.toml`, the SDK at the release's tag (or `path = "PATINA/crates/patina"`
 for a checkout). It needs Rust 1.85 or later (edition 2024):
@@ -1028,6 +1158,13 @@ by another Patina build (another version, or another binary of one): install tha
 (`install.sh --version VERSION`) or run the seed again. `identical` means the bug is
 reproduced exactly; a difference ends `nondeterministic` and names the first differing
 record, which is a Patina bug.
+
+A replay refuses a rebuilt program; to check a fix, run the finding's `rerun:` line instead.
+It names the program by path and carries the seed, the faults, the checker and the case (with
+`--config RUNDIR/run.json` for a case run), so against the rebuilt program it runs the same
+test: the finding gone (`ok`, or the checker's `pass`) is the fix verified for that seed.
+The same sweep command then checks every seed again (a rebuilt program starts the sweep
+afresh).
 
 `patina verify` runs one seed several times while changing the host (the CPU it runs on,
 address randomization, background load) and checks the runs are identical:

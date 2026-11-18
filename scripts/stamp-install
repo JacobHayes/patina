@@ -1,0 +1,13 @@
+#!/bin/sh
+# scripts/stamp-install VERSION: install.sh as a release attaches it, on stdout: installing
+# VERSION unless given --version. The release workflow runs it; tests/cli/10-install.sh too.
+set -eu
+[ $# = 1 ] || { echo "usage: scripts/stamp-install VERSION" >&2; exit 2; }
+root=$(cd "$(dirname "$0")/.." && pwd)
+v=${1#v}
+case $v in *[!0-9A-Za-z.+-]* | '') echo "stamp-install: not a version: $1" >&2; exit 2 ;; esac
+out=$(sed "s/^default_version=latest\$/default_version=$v/" "$root/install.sh")
+case $out in *"
+default_version=$v
+"*) ;; *) echo "stamp-install: install.sh has no line default_version=latest" >&2; exit 1 ;; esac
+printf '%s\n' "$out"

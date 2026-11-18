@@ -29,6 +29,8 @@ pub struct Run {
     pub dir: PathBuf,
     pub seed: u64,
     pub case: Option<String>,
+    /// A sweep case's id (`run.json`'s `case.id`): its `--name`, or its line number.
+    pub case_id: Option<String>,
     /// A sweep case's position in its cases file (its directory's `K-`), which orders a
     /// group's runs of one seed.
     pub case_pos: Option<usize>,
@@ -134,10 +136,14 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         let case_pos = case
             .as_ref()
             .and_then(|_| name(&dir)?.split_once('-')?.0.parse::<usize>().ok());
+        let case_id = case
+            .as_ref()
+            .and_then(|_| run["config"]["case"]["id"].as_str().map(str::to_string));
         runs.push(Run {
             dir,
             seed,
             case,
+            case_id,
             case_pos,
             result,
             run,
@@ -562,6 +568,49 @@ pub fn signature_of(result: &Value) -> String {
         })
 }
 
+/// The class a reason for not judging a run is counted under: its text before `: `, as the
+/// checker wrote it (`CLASS: detail`), or else the whole reason with its numbers as `N`.
+pub fn skip_class(why: &str) -> String {
+    match why.split_once(": ") {
+        Some((c, _)) if !c.trim().is_empty() => c.trim().to_string(),
+        _ => crate::signature::normalise(why),
+    }
+}
+
+/// The prefix most of `labels` share, up to and including the first `-`, `_`, `:`, `/` or `.`
+/// of a label, and how many share it, when at least two do.
+fn shared_prefix(labels: &[String]) -> Option<(String, usize)> {
+    let mut by: BTreeMap<&str, usize> = BTreeMap::new();
+    for l in labels {
+        if let Some(i) = l.find(['-', '_', ':', '/', '.']).filter(|i| *i > 0) {
+            *by.entry(&l[..=i]).or_default() += 1;
+        }
+    }
+    by.into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .max_by_key(|(p, n)| (*n, std::cmp::Reverse(*p)))
+        .map(|(p, n)| (p.to_string(), n))
+}
+
+/// Characters of a finding's example the report shows.
+const EXAMPLE_MAX: usize = 240;
+
+/// One finding of a violation group as its run wrote it, before the signature normalised it
+/// (`0x0`, an exit status) or left the detail out (a checker's keyed label), or why a checker
+/// failed: `null` when the signature already says the same.
+fn example(signature: &str, result: &Value) -> Value {
+    let checker_error = result["outcome"] == "error" && result["stop"] == "check";
+    if result["outcome"] != "violation" && !checker_error {
+        return Value::Null;
+    }
+    let m = result["message"].as_str().unwrap_or("").trim();
+    let primary = signature.split_once(": ").map_or("", |p| p.1);
+    if m.is_empty() || m == primary {
+        return Value::Null;
+    }
+    Value::String(m.chars().take(EXAMPLE_MAX).collect())
+}
+
 /// Whether an outcome name is a finding (exit status 1).
 pub fn is_finding(outcome: &str) -> bool {
     outcome_of(outcome).exit() == 1
@@ -760,14 +809,31 @@ pub fn build(
             Some("fail") => check.1 += 1,
             Some("not-judged") => {
                 check.2 += 1;
-                let why = crate::signature::normalise(c["detail"].as_str().unwrap_or(""));
-                *not_judged.entry(why).or_default() += 1;
+                *not_judged
+                    .entry(skip_class(c["detail"].as_str().unwrap_or("")))
+                    .or_default() += 1;
             }
             Some("error" | "pending") => check.3 += 1,
             _ => {}
         }
     }
     let judged_none = checked && check.0 + check.1 == 0 && !allow.contains("check");
+    // The checkers that judged these runs (`run.json`), each with its runs: more than one, and
+    // the verdicts are not one checker's (a recheck that could not judge pruned runs).
+    let mut checkers: Vec<(Value, usize)> = vec![];
+    for r in runs {
+        let k = &r.run["config"]["check"];
+        if k.is_null() || r.result["check"].is_null() {
+            continue;
+        }
+        match checkers
+            .iter_mut()
+            .find(|(c, _)| crate::recheck::same_checker(c, k))
+        {
+            Some(c) => c.1 += 1,
+            None => checkers.push((k.clone(), 1)),
+        }
+    }
     // Known entries: the runs each ID labels; one that must appear and did not.
     let mut known_counts: Vec<(String, bool, usize)> = vec![];
     if let Some(k) = known {
@@ -832,8 +898,9 @@ pub fn build(
                 "cases": cases,
                 "count": g.runs.len(),
                 "seeds": g.runs.iter().map(|r| r.seed).collect::<Vec<_>>(),
-                "runs": g.runs.iter().map(|r| json!({"seed": r.seed, "point": r.point.filter(|p| *p > 0), "case": r.case, "dir": r.dir})).collect::<Vec<_>>(),
-                "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "dir": first.dir},
+                "runs": g.runs.iter().map(|r| json!({"seed": r.seed, "point": r.point.filter(|p| *p > 0), "case": r.case, "case_id": r.case_id, "dir": r.dir})).collect::<Vec<_>>(),
+                "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "case_id": first.case_id, "dir": first.dir},
+                "example": example(&g.signature, &first.result),
                 "replay": replay,
                 "faults": {"every": every, "none": none},
                 "rerun": rerun_command(&first.run, first.seed, &first.dir),
@@ -910,6 +977,7 @@ pub fn build(
             "failed": check.1,
             "not_judged": not_judged,
             "errors": check.3,
+            "checkers": checkers.iter().map(|(k, n)| json!({"words": k["words"], "program": k["program"], "sha256": k["sha256"], "runs": n})).collect::<Vec<_>>(),
             "vacuous": judged_none,
             "unproven": check.0 > 0 && check.1 == 0 && !required,
         });
@@ -976,9 +1044,13 @@ fn group_runs(g: &Value, runs: u64) -> String {
         }
     };
     let cases = g["cases"].as_array().map_or(0, |c| c.len());
+    let id = g["first"]["case_id"]
+        .as_str()
+        .map(|i| format!(", case {i}"))
+        .unwrap_or_default();
     let (of_cases, first_case) = match (cases, g["first"]["case"].as_str()) {
-        (k, Some(c)) if k > 1 => (format!(", {k} cases"), format!(" [{c}]")),
-        _ => (String::new(), String::new()),
+        (k, Some(c)) if k > 1 => (format!(", {k} cases"), format!("{id} [{c}]")),
+        _ => (String::new(), id),
     };
     format!(
         "{} of {runs} runs{of_cases}   first: seed {}{first_case}   {replay}",
@@ -994,6 +1066,9 @@ fn group_runs(g: &Value, runs: u64) -> String {
 fn group_text(g: &Value, runs: u64, faulted: bool) -> String {
     let st = |k: &str| g[k].as_str().unwrap_or("").to_string();
     let mut s = format!("{}\n  {}\n", group_name(g), group_runs(g, runs));
+    if let Some(e) = g["example"].as_str() {
+        s.push_str(&format!("  example: {e}\n"));
+    }
     let list = |k: &str| {
         let v: Vec<&str> = g["faults"][k]
             .as_array()
@@ -1100,7 +1175,13 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 .map(|(k, n)| format!("{} {n}", if k.is_empty() { "no reason given" } else { k }))
                 .collect();
             if why.len() > REASONS_SHOWN {
-                shown.push("...".into());
+                let rest = &why[REASONS_SHOWN..];
+                shown.push(format!(
+                    "{} more in {} {}",
+                    rest.iter().map(|w| w.1).sum::<u64>(),
+                    rest.len(),
+                    if rest.len() == 1 { "class" } else { "classes" }
+                ));
             }
             line.push_str(&format!("; {total} not judged ({})", shown.join(", ")));
         }
@@ -1108,6 +1189,13 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             line.push_str(&format!("; {} errors", c["errors"]));
         }
         s.push_str(&format!("{line}\n"));
+        let checkers = c["checkers"].as_array().map_or(0, |k| k.len());
+        if checkers > 1 {
+            s.push_str(&format!(
+                "check: these verdicts are of {checkers} checkers (check.checkers in {}): patina recheck judges them again with one\n",
+                if head.is_some() { "report.json" } else { "--format json" }
+            ));
+        }
         if c["unproven"] == true {
             s.push_str("check: every judged run passed and no --known !ID entry shows that this check can fail\n");
         }
@@ -1266,6 +1354,31 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         }
         tail.push(line);
     }
+    // Unmet sites a pattern allowed: one line, by the pattern that allowed them, so that a
+    // pattern as wide as '*' is seen hiding what it hides.
+    let allowed_unmet = names(&v["allowed_unmet"]);
+    if !allowed_unmet.is_empty() {
+        let pats = names(&v["allow_unmet"]);
+        let mut by: Vec<(String, usize)> = vec![];
+        for l in &allowed_unmet {
+            if let Some(p) = pats.iter().find(|p| glob(p, l)) {
+                match by.iter_mut().find(|(q, _)| q == p) {
+                    Some(x) => x.1 += 1,
+                    None => by.push((p.clone(), 1)),
+                }
+            }
+        }
+        by.sort_by_key(|(p, n)| (std::cmp::Reverse(*n), p.clone()));
+        let by: Vec<String> = by
+            .iter()
+            .map(|(p, n)| format!("{} {n}", quote(p)))
+            .collect();
+        tail.push(format!(
+            "sdk: {} unmet, allowed by --allow-unmet ({}; {full}: allowed_unmet)",
+            count(allowed_unmet.len(), "site"),
+            by.join(", ")
+        ));
+    }
     for c in names(&v["faults"]["eligible_zero"]) {
         tail.push(format!("faults: {c} eligible 0 times: nothing to act on"));
     }
@@ -1336,10 +1449,23 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         } else if v["branch"]["points"] == 0 {
             tail.push("vacuous: no base has a crash point: nothing under the work tree changed, nothing to branch at".to_string());
         } else if unmet {
-            tail.push(
-                "vacuous: see above (allow a label with --allow-unmet or [sdk] allow-unmet)"
-                    .to_string(),
-            );
+            let labels: Vec<String> = [
+                "sometimes_never_held",
+                "reachable_never_hit",
+                "buggify_never_fired",
+            ]
+            .iter()
+            .flat_map(|k| names(&v["sdk"][*k]))
+            .collect();
+            let hint = match shared_prefix(&labels) {
+                Some((p, n)) => format!(
+                    "; {n} of these labels start {p:?}, a library's perhaps: allow them once in patina.toml, [sdk] allow-unmet = [\"{p}*\"]"
+                ),
+                None => String::new(),
+            };
+            tail.push(format!(
+                "vacuous: see above (allow a label with --allow-unmet or [sdk] allow-unmet{hint})"
+            ));
         }
     }
     if !tail.is_empty() {
@@ -1428,6 +1554,39 @@ mod tests {
         let mut r = silent(&[]);
         r["sdk"] = json!({"sites": [{"kind": "buggify", "label": "drop", "held": 2}]});
         assert_eq!(fired(&r), vec!["point:drop".to_string()]);
+    }
+
+    #[test]
+    fn reasons_count_by_class_and_findings_show_as_written() {
+        assert_eq!(skip_class("no-ref: case 17 has none"), "no-ref");
+        assert_eq!(
+            skip_class("no-ref: case 17 has none"),
+            skip_class("no-ref: case 3 has none")
+        );
+        // No class: the reason, its numbers collapsed, as before.
+        assert_eq!(
+            skip_class("no crash in run 3"),
+            skip_class("no crash in run 4")
+        );
+        let v = |m: &str| json!({"outcome": "violation", "stop": "check", "message": m});
+        assert_eq!(
+            example("violation check: w [k]", &v("w [k]: got 0x0")),
+            json!("w [k]: got 0x0")
+        );
+        assert_eq!(example("violation check: w: x", &v("w: x")), Value::Null);
+        assert_eq!(
+            example(
+                "failure exit: exit 1",
+                &json!({"outcome": "failure", "message": "m"})
+            ),
+            Value::Null
+        );
+        let l = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shared_prefix(&l(&["lib-a", "lib-b", "app-c"])),
+            Some(("lib-".into(), 2))
+        );
+        assert_eq!(shared_prefix(&l(&["lib-a", "app-c"])), None);
     }
 
     #[test]

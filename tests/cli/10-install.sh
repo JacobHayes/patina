@@ -2,7 +2,9 @@
 #     aarch64 (and arm64) each install their own archive's binary from a local file:// release
 #     and then run its `doctor`; macOS and other systems are refused, installing nothing. The
 #     archives hold stand-in binaries that name their target, so no sandbox runs. It installs
-#     the same way under dash and busybox sh, where this machine has them.
+#     the same way under dash and busybox sh, where this machine has them. The first line
+#     names the release it installs: the latest, or with a release's copy
+#     (scripts/stamp-install) that release, fetched from its own download URL (a faked curl).
 #@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -54,3 +56,17 @@ for ish in dash "busybox sh"; do
         die "$ish (uname -m $m): exit $st, first call '$first': $(cat "$d/Linux-x86_64.txt")"
     echo "$ish: installed patina-$t.tar.gz"
 done
+# The release a copy installs: the first line names it, and a release's copy fetches its own.
+head -n1 "$d/Linux-x86_64.txt" | grep -q '^installing the latest patina release' ||
+    die "the first line does not name the release: $(head -n1 "$d/Linux-x86_64.txt")"
+"$root/scripts/stamp-install" v9.8.7 >"$d/install-stamped.sh"
+chmod 755 "$d/install-stamped.sh"
+printf '#!/bin/sh\ncase "$1" in -s) echo Linux ;; -m) echo x86_64 ;; *) exit 1 ;; esac\n' >"$d/bin/uname"
+printf '#!/bin/sh\nfor a; do last=$a; done\necho "$last" >>"%s/fetched"\nexit 22\n' "$d" >"$d/bin/curl"
+chmod 755 "$d/bin/curl"
+st=0
+PATH="$d/bin:$PATH" "$d/install-stamped.sh" --prefix "$d/stamped" >"$d/stamped.txt" 2>&1 || st=$?
+[ "$st" = 1 ] && head -n1 "$d/stamped.txt" | grep -q '^installing patina 9.8.7 from ' &&
+    grep -q '/releases/download/v9.8.7/patina-' "$d/fetched" ||
+    die "a stamped copy: exit $st, $(cat "$d/stamped.txt"), fetched $(cat "$d/fetched" 2>/dev/null)"
+echo "a release's copy: $(head -n1 "$d/stamped.txt")"

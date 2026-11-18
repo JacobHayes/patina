@@ -16,6 +16,7 @@ pub enum Cmd {
     Doctor,
     Sweep,
     Report,
+    Recheck,
     Minimize,
 }
 
@@ -56,6 +57,12 @@ pub const COMMANDS: &[Command] = &[
         name: "report",
         usage: "patina report [--known FILE] [--group N] DIR...",
         help: "summarise run directories (a sweep's, or any made by patina run --out)",
+    },
+    Command {
+        cmd: Cmd::Recheck,
+        name: "recheck",
+        usage: "patina recheck [--check 'CMD ARGS' | --check-serve 'CMD ARGS'] [--known FILE] DIR...",
+        help: "judge kept runs again with a checker (each run's own, read anew, or the one given), without running them; then report",
     },
     Command {
         cmd: Cmd::Minimize,
@@ -127,6 +134,7 @@ const ALL: &[Cmd] = &[
     Cmd::Doctor,
     Cmd::Sweep,
     Cmd::Report,
+    Cmd::Recheck,
     Cmd::Minimize,
 ];
 
@@ -310,8 +318,8 @@ pub const FLAGS: &[Flag] = &[
         "--jobs",
         "N",
         "half the CPUs, at most 8",
-        "runs at once, each pinned to its own CPU (also -j N)",
-        &[Cmd::Sweep],
+        "runs at once, each pinned to its own CPU (also -j N); recheck: checkers at once",
+        &[Cmd::Sweep, Cmd::Recheck],
     ),
     flag(
         "--cases",
@@ -321,10 +329,17 @@ pub const FLAGS: &[Flag] = &[
         &[Cmd::Sweep],
     ),
     flag(
+        "--only-case",
+        "ID[,ID...]",
+        "every case",
+        "run only these cases of --cases FILE: a case's id is its line's --name, or its line number (PATINA_CASE_ID, report.json's case_id)",
+        &[Cmd::Sweep],
+    ),
+    flag(
         "--keep",
-        "fail|all|none",
+        "fail|checked|all|none",
         "fail",
-        "whose logs to keep (run.json and result.json are always kept)",
+        "whose logs to keep (run.json and result.json are always kept); checked: also every run the checker ran on, logs over 4 MiB cut as a failure's, for patina recheck",
         &[Cmd::Sweep],
     ),
     flag(
@@ -352,14 +367,14 @@ pub const FLAGS: &[Flag] = &[
         "--allow-unmet",
         "LABEL",
         "an SDK label (* matches any text: 'lib-*'), a fault class, or check (a check that judged no run) that may stay unmet without making the result vacuous",
-        &[Cmd::Sweep, Cmd::Report],
+        &[Cmd::Sweep, Cmd::Report, Cmd::Recheck],
     ),
     flag(
         "--known",
         "FILE",
         "none",
         "findings already known: lines of ID PATTERN matched against [CASE] SIGNATURE (* any text, # comments); a known finding is counted and does not fail the sweep; an ID written !ID must match some run or the result is vacuous",
-        &[Cmd::Sweep, Cmd::Report],
+        &[Cmd::Sweep, Cmd::Report, Cmd::Recheck],
     ),
     flag(
         "--group",
@@ -381,29 +396,36 @@ pub const FLAGS: &[Flag] = &[
         name: "--check",
         value: "'CMD ARGS'",
         default: "none",
-        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail, 77 not judged, else error",
-        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log],
+        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA_CASE_ID, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail or LABEL [KEY]: detail (grouped by LABEL [KEY]), 77 not judged (first line CLASS: detail, counted by CLASS), else error",
+        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log, Cmd::Recheck],
         repeat: false,
-        per: &[(
-            Cmd::Log,
-            "",
-            "log ops: replay the whole operation log and compare with the exported tree",
-        )],
+        per: &[
+            (
+                Cmd::Log,
+                "",
+                "log ops: replay the whole operation log and compare with the exported tree",
+            ),
+            (
+                Cmd::Recheck,
+                "each run's own, read anew",
+                "the checker to judge the runs with, in place of the one each recorded",
+            ),
+        ],
         per_value: &[(Cmd::Log, "")],
     },
     flag(
         "--check-serve",
         "'CMD ARGS'",
         "none",
-        "--check with one checker process per sweep job, not per run: CMD ARGS starts with PATINA_CHECK_SERVE=1, reads one JSON line per run on stdin ({\"rundir\": ..., \"env\": {PATINA_SEED, ...}}) and answers one line: pass, fail LABEL: detail, or skip REASON; anything else is error and the process is restarted",
-        &[Cmd::Run, Cmd::Verify, Cmd::Sweep],
+        "--check with one checker process per sweep job, not per run: CMD ARGS starts with PATINA_CHECK_SERVE=1, reads one JSON line per run on stdin ({\"rundir\": ..., \"env\": {PATINA_SEED, ...}}) and answers one line: pass, fail LABEL[ [KEY]]: detail, or skip CLASS: detail; anything else is error and the process is restarted",
+        &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Recheck],
     ),
     flag(
         "--check-timeout",
         "SECONDS",
         "60",
         "wall time after which the checker is stopped and the run ends error",
-        RUNLIKE,
+        &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Recheck],
     ),
     flag(
         "--ok-exit",
@@ -479,7 +501,7 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
                 out.flags.entry("--help").or_default();
                 continue;
             }
-            if a == "-j" && cmd == Cmd::Sweep {
+            if a == "-j" && matches!(cmd, Cmd::Sweep | Cmd::Recheck) {
                 let v = it.next().ok_or("-j needs N")?;
                 out.flags.insert("--jobs", vec![v.clone()]);
                 continue;

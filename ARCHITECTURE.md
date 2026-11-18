@@ -175,9 +175,19 @@ a replay, minimize), or whose server ended after its last answer, starts one for
 run`, rather than judging in the sweep, keeps one code path for verdicts, `check.out` and
 `pending`. Its cost decided the design: a Python checker started per run costs 2 to 4 times
 the unchecked sweep, a server 1.0 to 1.2 times (docs/EVIDENCE.md, Oracles).
+Judging again (`recheck.rs`) is the one exception: `recheck::rejudge` runs the checker on a
+kept run directory (`check::run_on`, with a worker's server or none) and rewrites only what
+follows from the verdict (`result::with_check` over the run's own end, `outcome::ok_end`),
+writing `pending` first so an interrupted recheck never leaves the old verdict under the new
+checker. `patina recheck` and a resumed sweep share it: the checker is not part of a sweep's
+identity (`sweep::identity`); a run whose recorded checker differs (`recheck::same_checker`) or
+whose verdict is `pending` is judged again from its logs, or run again when they were pruned
+(`sweep::have`). The case (`Config::case`: id and line) is in `run.json`, so a replay and
+`--config run.json` keep `PATINA_CASE_ID`.
 A `--cases` line may give its own run settings before `--` (`sweep::case_line`, the flags of
 `CASE_FLAGS` parsed by `patina run`'s parser); they follow the sweep's on the run's command
-line. The whole line is the case's identity on resume (the `case` file); a checker, the report
+line. The whole line is the case's identity on resume (the `case` file); its id (its `--name`
+or line number) names its directory and `--only-case` selects it; a checker, the report
 and a known pattern see the line after its settings (`sweep::case_shown`), so a pattern
 written for a case still matches once its line gains settings.
 `--ok-exit` (`Config::ok_exit`, in `run.json`) is an input of `outcome::classify`: a guest

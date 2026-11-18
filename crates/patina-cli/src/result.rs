@@ -523,9 +523,13 @@ pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> 
 
 /// The run's outcome: its own, or for a run that ended ok, the checker's finding or error.
 pub fn classified(e: &RunEnd) -> Classified {
+    with_check(classify(&e.verdict, &e.ok_exit), e.check.as_ref())
+}
+
+/// A run's outcome given its own and its checker's verdict.
+pub fn with_check(own: Classified, check: Option<&crate::check::Verdict>) -> Classified {
     use crate::check::Kind;
-    let own = classify(&e.verdict, &e.ok_exit);
-    match (&e.check, own.outcome) {
+    match (check, own.outcome) {
         (Some(k), Outcome::Ok) => match k.verdict {
             Kind::Fail => Classified::new(Outcome::Violation, "check", k.line()),
             Kind::Error | Kind::Pending => Classified::new(

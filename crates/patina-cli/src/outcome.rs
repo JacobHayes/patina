@@ -162,6 +162,19 @@ pub fn signal_name(sig: i64) -> String {
     n.to_string()
 }
 
+/// A run that ended `ok` on its own, by its exit status: 0, or one `--ok-exit` allows.
+pub fn ok_end(exit: i64) -> Classified {
+    if exit == 0 {
+        Classified::new(Outcome::Ok, "exit", "the program exited 0")
+    } else {
+        Classified::new(
+            Outcome::Ok,
+            "ok-exit",
+            format!("the program exited {exit}, a status --ok-exit allows"),
+        )
+    }
+}
+
 /// The one mapping from a verdict to an outcome. `ok_exit` holds the exit statuses that end
 /// the run `ok` (`--ok-exit`): a clean failure the program documents, stop `ok-exit`. A
 /// signal is a crash whatever the list says, an exit after the program's `INVARIANT` line a
@@ -170,7 +183,7 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
     use Outcome::*;
     let d = v.detail.as_str();
     match v.class.as_str() {
-        "ok" => Classified::new(Ok, "exit", "the program exited 0"),
+        "ok" => ok_end(0),
         "failed" => match (v.signal, v.exit_status) {
             (Some(sig), _) => Classified::new(
                 Crash,
@@ -181,11 +194,7 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
             (None, Some(x))
                 if ok_exit.iter().any(|&o| i64::from(o) == x) && !d.starts_with("INVARIANT ") =>
             {
-                Classified::new(
-                    Ok,
-                    "ok-exit",
-                    format!("the program exited {x}, a status --ok-exit allows"),
-                )
+                ok_end(x)
             }
             (None, _) => Classified::new(Failure, "exit", d),
         },

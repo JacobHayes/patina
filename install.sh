@@ -4,6 +4,10 @@
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.11.0
 #
+# The copy attached to a release installs that release unless given --version (the release
+# workflow writes its version into `default_version`, scripts/stamp-install); this one, the
+# latest.
+#
 # Downloads the release's archive for this machine (a static Linux x86_64 or aarch64 binary),
 # checks it against the release's SHA256SUMS, installs <prefix>/bin/patina, then runs `patina doctor`, which names
 # anything the host still needs (bwrap, user namespaces) and the command that fixes it. It
@@ -17,7 +21,7 @@ usage() {
   cat <<EOF
 usage: install.sh [--version X.Y.Z] [--prefix DIR]
 
-  --version X.Y.Z  the release to install (default: the latest)
+  --version X.Y.Z  the release to install (default: $default_version)
   --prefix DIR     install DIR/bin/patina (default: ~/.local)
 
 PATINA_RELEASE_URL names a directory URL that holds the release's files, in
@@ -30,7 +34,8 @@ fail() {
   exit 1
 }
 
-version=latest
+default_version=latest
+version=$default_version
 prefix=
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -72,6 +77,12 @@ fi
 for tool in curl tar; do
   command -v "$tool" >/dev/null 2>&1 || fail "$tool is not installed"
 done
+
+if [ "$version" = latest ]; then
+  printf 'installing the latest patina release from %s\n' "$base"
+else
+  printf 'installing patina %s from %s\n' "${version#v}" "$base"
+fi
 
 archive="patina-$target.tar.gz"
 work=$(mktemp -d)

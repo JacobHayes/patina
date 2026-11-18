@@ -31,6 +31,9 @@ sudo apt-get install -y bubblewrap
 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
 ```
 
+Its first line names the release it installs. A release's own copy
+(`releases/download/vX.Y.Z/install.sh`) installs that release; `--version X.Y.Z` picks any.
+
 Root works too (the guest sees what it would for the user sudo was run by); in a container,
 see [the guide](docs/GUIDE.md#as-root-and-in-a-container) for the options it needs. Patina
 does not run on macOS itself. On an Apple Silicon Mac, run it in a Linux arm64 VM with 4 KiB

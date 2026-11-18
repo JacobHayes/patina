@@ -35,11 +35,12 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 12] = [
+const OWN: [&str; 13] = [
     "--seeds",
     "--branch",
     "--jobs",
     "--cases",
+    "--only-case",
     "--keep",
     "--max-findings",
     "--budget",
@@ -55,6 +56,9 @@ enum Keep {
     Fail,
     All,
     None,
+    /// Every run the checker judged or did not judge, as a failure is kept (`cut`): what a
+    /// checker reads, so that `patina recheck` and a resumed sweep can judge it again.
+    Checked,
 }
 
 /// `A..B` (inclusive), `N`, comma-separated.
@@ -89,13 +93,15 @@ pub fn parse_seeds(s: &str) -> Res<Vec<u64>> {
 }
 
 /// What a sweep directory records about the sweep that made it.
-const SWEEP_FILE: &str = "sweep.json";
+pub const SWEEP_FILE: &str = "sweep.json";
 const SWEEP_SCHEMA: &str = "patina.sweep/v1";
 
 /// What decides every run of a sweep besides its seed and case: patina itself, the program
 /// (its SHA-256) and the resolved settings with the command. The seeds, the cases, `-j`,
 /// `--keep` and the stopping rules are not part of it: a sweep with more seeds or cases is the
-/// same sweep, extended.
+/// same sweep, extended. Nor is the checker: it decides verdicts, not runs. Each run records
+/// the checker that judged it (`run.json`); a resumed sweep judges again the runs another
+/// checker judged (`have`).
 fn identity(
     cfg: &crate::config::Config,
     program: Option<&String>,
@@ -105,9 +111,8 @@ fn identity(
     c.seed = 0;
     c.host_cpu = None;
     c.allow_unmet.clear();
-    if let Some(k) = &mut c.check {
-        k.case = None;
-    }
+    c.check = None;
+    c.case = None;
     Ok(serde_json::json!({
         "schema": SWEEP_SCHEMA,
         "patina": crate::result::build()?,
@@ -167,9 +172,12 @@ struct Case {
     shown: String,
     /// Its line number in the file.
     line_no: usize,
+    /// Its id: its `--name`, or its line number.
+    id: String,
     /// The command its run is given.
     cmd: Vec<String>,
-    /// Its directory under `seed-N`: `K-NAME`, K its position among the cases.
+    /// Its directory under `seed-N`: `LINE-NAME`, its line number and its `--name` or a short
+    /// form of its last word.
     dir: String,
     /// The settings the line gives (`CASE_FLAGS`), as flag and value, in order.
     flags: Vec<(&'static str, String)>,
@@ -294,13 +302,22 @@ fn read_cases(f: &Path, cmd: &[String]) -> Res<Vec<Case>> {
         } else {
             cmd.iter().map(|x| x.replace("{}", l.rest)).collect()
         };
-        let named = match &l.name {
-            Some(n) => vec![n.clone()],
-            None => words(l.rest)
-                .unwrap_or_else(|_| l.rest.split_whitespace().map(String::from).collect()),
+        let name = match &l.name {
+            Some(id) => {
+                id_ok(id).map_err(|e| bad(format!("--name {id}: {e}")))?;
+                if out.iter().any(|c: &Case| c.id == *id) {
+                    return Err(bad(format!("--name {id}: another line has this name")));
+                }
+                id.clone()
+            }
+            None => case_name(
+                &words(l.rest)
+                    .unwrap_or_else(|_| l.rest.split_whitespace().map(String::from).collect()),
+            ),
         };
         out.push(Case {
-            dir: format!("{}-{}", out.len() + 1, case_name(&named)),
+            dir: format!("{}-{name}", n + 1),
+            id: l.name.clone().unwrap_or_else(|| (n + 1).to_string()),
             line_no: n + 1,
             cmd: run,
             flags: l.flags,
@@ -312,6 +329,26 @@ fn read_cases(f: &Path, cmd: &[String]) -> Res<Vec<Case>> {
         return Err(format!("--cases {at}: no cases"));
     }
     Ok(out)
+}
+
+/// Longest `--name` (characters).
+const ID_MAX: usize = 64;
+
+/// Whether a case's `--name` can be its id: one word that names its directory as written, and
+/// not a number (a line number is the id of a line without a name).
+fn id_ok(id: &str) -> Res<()> {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "._-".contains(c);
+    if id.is_empty()
+        || id.len() > ID_MAX
+        || !id.chars().all(safe)
+        || id.starts_with(['.', '-'])
+        || id.chars().all(|c| c.is_ascii_digit())
+    {
+        return Err(format!(
+            "a case's name is its id and part of its directory: letters, digits, '.', '_' and '-', not starting with '.' or '-', at most {ID_MAX} characters, not a number"
+        ));
+    }
+    Ok(())
 }
 
 /// The words of a line as `sh` splits them: whitespace separates, `'...'` is literal,
@@ -444,8 +481,106 @@ fn done_before(dir: &Path, case: Option<&str>, sha: &str) -> bool {
     true
 }
 
+/// What a run directory of a resumed sweep holds.
+enum Have {
+    /// No finished run of this case and program.
+    Missing,
+    /// One, judged by this sweep's checker (or by none, as this sweep has none).
+    Current,
+    /// One whose verdict is another checker's (or was left pending), with what a checker reads.
+    Stale,
+    /// One whose verdict is another checker's, ended ok, and its logs were pruned.
+    StalePruned,
+}
+
+fn have(dir: &Path, case: Option<&str>, sha: &str, check: &serde_json::Value) -> Have {
+    if !done_before(dir, case, sha) {
+        return Have::Missing;
+    }
+    // A run patina refused has no run.json and no verdict: kept, as before.
+    let Ok(run) = read_json(&dir.join("run.json")) else {
+        return Have::Current;
+    };
+    let r = read_json(&dir.join("result.json")).unwrap_or_default();
+    let current = crate::recheck::same_checker(&run["config"]["check"], check)
+        && r["check"]["verdict"] != "pending";
+    if current {
+        Have::Current
+    } else if !check.is_null() && crate::recheck::pruned(dir, &r) {
+        Have::StalePruned
+    } else {
+        Have::Stale
+    }
+}
+
+/// What a resumed sweep does with a run it already has.
+enum Fresh {
+    Kept,
+    /// Judge it again; the job runs it again if that cannot be done.
+    Rejudge(Job),
+    /// Run it (again: `true` when its verdict was stale and its logs pruned).
+    Run(Job, bool),
+}
+
+/// The runs of a resumed sweep whose checker changed.
+#[derive(Default)]
+struct Judged {
+    /// To judge again from their kept logs.
+    jobs: Vec<Job>,
+    judged: usize,
+    /// Run again: their logs were pruned.
+    rerun: usize,
+}
+
+impl Judged {
+    /// Judge the waiting runs again, `width` at a time; the jobs of those that cannot be.
+    fn settle(
+        &mut self,
+        check: Option<&crate::check::Check>,
+        width: usize,
+    ) -> Result<Vec<Job>, Fail> {
+        let jobs = std::mem::take(&mut self.jobs);
+        let dirs: Vec<PathBuf> = jobs
+            .iter()
+            .map(|j| match j {
+                Job::Run { dir, .. } | Job::Replay { dir, .. } => dir.clone(),
+            })
+            .collect();
+        let done = crate::recheck::rejudge_all(&dirs, &|_| Ok(check.cloned()), width);
+        let mut again = vec![];
+        for (job, (dir, r)) in jobs.into_iter().zip(done) {
+            match r.map_err(|e| error(format!("{}: {e}", dir.display())))? {
+                crate::recheck::Rejudged::Judged(_) => self.judged += 1,
+                crate::recheck::Rejudged::Unmade => {}
+                crate::recheck::Rejudged::Pruned => {
+                    self.rerun += 1;
+                    std::fs::remove_dir_all(&dir)
+                        .map_err(|e| error(format!("{}: {e}", dir.display())))?;
+                    again.push(job);
+                }
+            }
+        }
+        Ok(again)
+    }
+
+    /// One line, when the checker changed for some runs.
+    fn say(&mut self, out: &Path) {
+        if self.judged + self.rerun > 0 {
+            eprintln!(
+                "sweep: {} in {} had another checker's verdict: {} judged again from their logs, {} to run again (their logs were pruned; --keep checked keeps them)",
+                report::count(self.judged + self.rerun, "run"),
+                out.display(),
+                self.judged,
+                self.rerun
+            );
+        }
+        self.judged = 0;
+        self.rerun = 0;
+    }
+}
+
 /// Default width: half the CPUs this process may use, at most 8.
-fn default_jobs() -> usize {
+pub fn default_jobs() -> usize {
     (crate::launch::allowed_cpus().len() / 2).clamp(1, 8)
 }
 
@@ -743,9 +878,15 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         "fail" => Keep::Fail,
         "all" => Keep::All,
         "none" => Keep::None,
+        "checked" if cfg.check.is_none() => {
+            return Err(error(
+                "--keep checked keeps what a checker reads: give --check or --check-serve (or --keep all)".into(),
+            ))
+        }
+        "checked" => Keep::Checked,
         k => {
             return Err(error(format!(
-                "--keep: expected fail, all or none, not {k}"
+                "--keep: expected fail, checked, all or none, not {k}"
             )))
         }
     };
@@ -768,10 +909,27 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // here too (the sweep's, with the line's on top), and its mounts may hold its program.
     let mut programs: std::collections::BTreeMap<String, crate::config::Program> =
         Default::default();
-    let list: Vec<Option<usize>> = match &cases {
+    let mut list: Vec<Option<usize>> = match &cases {
         Some(c) => (0..c.len()).map(Some).collect(),
         None => vec![None],
     };
+    // --only-case ID,...: those cases of the file alone.
+    if let Some(only) = a.last("--only-case") {
+        let Some(c) = &cases else {
+            return Err(error("--only-case needs --cases".into()));
+        };
+        let ids: Vec<&str> = only
+            .split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .collect();
+        if let Some(bad) = ids.iter().find(|id| !c.iter().any(|k| k.id == **id)) {
+            return Err(error(format!(
+                "--only-case {bad}: no case has this id (a line's --name, or its line number)"
+            )));
+        }
+        list.retain(|i| i.is_some_and(|i| ids.contains(&c[i].id.as_str())));
+    }
     let mut program_of: Vec<String> = vec![];
     let mut first_cfg = None;
     for &i in &list {
@@ -869,35 +1027,68 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
         dir
     };
-    // The job for a run, or none when the directory already holds it (a resumed sweep).
-    let fresh = |seed: u64, case: Option<usize>, point: Option<u64>| -> Result<Option<Job>, Fail> {
+    // What a run needs: none when the directory already holds it judged by this checker (a
+    // resumed sweep), a new verdict when another checker judged it and its logs are kept, else
+    // the run.
+    let want_check = cfg
+        .check
+        .as_ref()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .unwrap_or_default();
+    let fresh = |seed: u64, case: Option<usize>, point: Option<u64>| -> Result<Fresh, Fail> {
         let dir = run_dir(seed, case, point);
         let sha = &programs[program_key(case)].sha256;
-        if done_before(
+        let have = have(
             &dir,
             case.map(|i| cases.as_ref().unwrap()[i].text.as_str()),
             sha,
-        ) {
-            return Ok(None);
+            &want_check,
+        );
+        let run = |stale| -> Result<Fresh, Fail> {
+            if dir.exists() {
+                std::fs::remove_dir_all(&dir)
+                    .map_err(|e| error(format!("{}: {e}", dir.display())))?;
+            }
+            Ok(Fresh::Run(
+                Job::Run {
+                    seed,
+                    case,
+                    dir: dir.clone(),
+                    point,
+                },
+                stale,
+            ))
+        };
+        match have {
+            Have::Current => Ok(Fresh::Kept),
+            Have::Stale => Ok(Fresh::Rejudge(Job::Run {
+                seed,
+                case,
+                dir: dir.clone(),
+                point,
+            })),
+            Have::StalePruned => run(true),
+            Have::Missing => run(false),
         }
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(|e| error(format!("{}: {e}", dir.display())))?;
-        }
-        Ok(Some(Job::Run {
-            seed,
-            case,
-            dir,
-            point,
-        }))
     };
+    let mut judged_again = Judged::default();
     let mut jobs = vec![];
     let mut total = 0;
     for &seed in &seeds {
         for &case in &list {
             total += 1;
-            jobs.extend(fresh(seed, case, kind.as_ref().map(|_| 0))?);
+            match fresh(seed, case, kind.as_ref().map(|_| 0))? {
+                Fresh::Kept => {}
+                Fresh::Rejudge(j) => judged_again.jobs.push(j),
+                Fresh::Run(j, stale) => {
+                    judged_again.rerun += stale as usize;
+                    jobs.push(j);
+                }
+            }
         }
     }
+    jobs.extend(judged_again.settle(cfg.check.as_ref(), width)?);
+    judged_again.say(&out);
     let todo = jobs.len();
     let mut unfinished: std::collections::BTreeMap<u64, usize> = Default::default();
     for j in &jobs {
@@ -951,14 +1142,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     }
                 }
                 c.arg("--").args(cmd_of(*case));
-                // The case, for a checker (`check::CASE_VAR`).
+                // The case, for a checker (`check::CASE_VAR`) and the run's run.json.
                 match (case, &cases) {
                     (Some(i), Some(cs)) => c
                         .env(crate::check::CASE_VAR, &cs[*i].shown)
-                        .env(crate::check::CASE_NAME_VAR, &cs[*i].dir),
+                        .env(crate::check::CASE_NAME_VAR, &cs[*i].dir)
+                        .env(crate::check::CASE_ID_VAR, &cs[*i].id)
+                        .env(crate::check::CASE_LINE_VAR, &cs[*i].text),
                     _ => c
                         .env_remove(crate::check::CASE_VAR)
-                        .env_remove(crate::check::CASE_NAME_VAR),
+                        .env_remove(crate::check::CASE_NAME_VAR)
+                        .env_remove(crate::check::CASE_ID_VAR)
+                        .env_remove(crate::check::CASE_LINE_VAR),
                 };
             }
             Job::Replay { dir, out } => {
@@ -1052,13 +1247,24 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 for &case in &list {
                     if p <= st.bases[&(seed, case)].0 {
                         match fresh(seed, case, Some(p))? {
-                            Some(j) => children.push(j),
-                            None => have += 1,
+                            Fresh::Run(j, stale) => {
+                                judged_again.rerun += stale as usize;
+                                children.push(j)
+                            }
+                            Fresh::Kept => have += 1,
+                            Fresh::Rejudge(j) => {
+                                have += 1;
+                                judged_again.jobs.push(j)
+                            }
                         }
                     }
                 }
             }
         }
+        let again = judged_again.settle(cfg.check.as_ref(), st.width)?;
+        have -= again.len();
+        children.extend(again);
+        judged_again.say(&out);
         if have > 0 {
             st.say(&format!(
                 "sweep: {have} of {points} children already in {}; running {}",
@@ -1406,10 +1612,13 @@ impl State<'_> {
                 self.unfinished.remove(seed);
             }
         }
-        if outcome == "ok" && self.keep != Keep::All {
+        // A run the checker ran on keeps its logs under --keep checked; a sweep with it has a
+        // checker, which runs on every run that ended ok.
+        let checked = self.keep == Keep::Checked && r["check"]["verdict"] != "not-run";
+        if outcome == "ok" && self.keep != Keep::All && !checked {
             prune(dir);
         }
-        if outcome != "ok" && self.keep != Keep::All {
+        if (outcome != "ok" || checked) && self.keep != Keep::All {
             let before = bytes_under(dir);
             cut(dir);
             self.cut |= bytes_under(dir) < before;
@@ -1541,6 +1750,29 @@ mod tests {
         assert!(case_line("--crash machine -- ./t")
             .err()
             .is_some_and(|e| e.starts_with("--crash ")));
+    }
+
+    #[test]
+    fn a_case_is_named_by_its_name_or_its_line() {
+        let dir = std::env::temp_dir().join(format!("patina-ids-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("cases.txt");
+        let read = |t: &str| {
+            std::fs::write(&f, t).unwrap();
+            read_cases(&f, &[])
+        };
+        let c = read("# a comment\n./t a\n\n--name b.1 -- ./t b\n").unwrap();
+        let ids: Vec<(&str, &str)> = c.iter().map(|c| (c.id.as_str(), c.dir.as_str())).collect();
+        assert_eq!(ids, vec![("2", "2-a"), ("b.1", "4-b.1")]);
+        for bad in [
+            "--name 12 -- ./t\n",
+            "--name 'a b' -- ./t\n",
+            "--name .x -- ./t\n",
+            "--name x -- ./t\n--name x -- ./u\n",
+        ] {
+            assert!(read(bad).is_err(), "{bad}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

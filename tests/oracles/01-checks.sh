@@ -27,6 +27,8 @@
 #    (marklog fixed marks progress before its fsync: only the `ack` marks are judged). With
 #    --log-paths, an open through a symlink has its path as passed and the path it walked, the
 #    same in five runs under cpu and aslr variation.
+# 6. `patina recheck`: the same checker leaves each kept run's result.json byte for byte; a
+#    keyed finding (LABEL [KEY]: detail) is grouped by its key, and shown as written.
 #@ tier=quick budget=10 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -318,6 +320,24 @@ lhs=$(head -1 g2.txt); rhs=$(jq -r '.groups[1].signature' calcs/report.json)
 lhs=$(jq '[.groups[].runs | length] | add' calcs/report.json); rhs=$(jq .findings calcs/report.json)
 [ "$lhs" = "$rhs" ] || die "report.json: groups do not list every finding's run"
 echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case settings, faults patterns, --group, --ok-exit any"
+
+# 6. Judging kept runs again (`patina recheck`). The same checker leaves every kept run's
+#    result.json as it was, byte for byte; a checker that names its finding LABEL [KEY] is
+#    grouped by the key alone, and the report shows one finding as the checker wrote it.
+for r in calcs/seed-*/*; do [ ! -d "$r/inc-0" ] || cp "$r/result.json" "$r/result.before"; done
+"$PATINA" recheck calcs >rk.txt 2>&1 || true
+n=0
+for b in calcs/seed-*/*/result.before; do
+    cmp -s "$b" "${b%.before}.json" || die "recheck with the same checker rewrote $(dirname "$b")/result.json"
+    n=$((n + 1))
+done
+[ "$n" -gt 0 ] || die "no kept calc run to judge again"
+sed 's/echo "wrong-$1: got $g, want $w"/echo "wrong [$1]: got $g, want $w (0x$g)"/' chk/calc >chk/calc-key && chmod +x chk/calc-key
+"$PATINA" recheck --check chk/calc-key calcs >rk2.txt 2>&1 || true
+keyed=$(jq -r '[.groups[] | select(.run_outcome == "violation") | .signature] | sort | join(",")' calcs/report.json)
+[ "$keyed" = "violation check: wrong [mul],violation check: wrong [sub]" ] || die "keyed findings: $keyed"
+jq -e '.groups[0].example | test("0x[0-9]")' calcs/report.json >/dev/null || die "the example is not as written: $(jq -c '.groups[0].example' calcs/report.json)"
+echo "recheck: $n kept runs unchanged by the same checker; keyed: $keyed, e.g. $(jq -r '.groups[0].example' calcs/report.json)"
 
 wait "$hang" || true
 is hang "$(cat hang.rc)" 2 error check

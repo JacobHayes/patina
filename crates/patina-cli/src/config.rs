@@ -120,6 +120,20 @@ pub struct Config {
     /// failed cleanly, as it documents. Never 0, never a signal.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ok_exit: Vec<u8>,
+    /// The case of a sweep's `--cases` run (set by the sweep), kept so that a replay or a
+    /// rerun from `run.json` is the same case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub case: Option<RunCase>,
+}
+
+/// A sweep case, as its run records it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunCase {
+    /// Its id: the line's `--name`, or its line number.
+    pub id: String,
+    /// The line as written, settings included.
+    pub line: String,
 }
 
 impl Default for Config {
@@ -155,6 +169,7 @@ impl Default for Config {
             host_cpu: None,
             check: None,
             ok_exit: vec![],
+            case: None,
         }
     }
 }
@@ -805,12 +820,22 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         _ => {}
     }
     // A sweep gives each of its --cases runs its case.
+    if let (Ok(id), Ok(line)) = (
+        std::env::var(crate::check::CASE_ID_VAR),
+        std::env::var(crate::check::CASE_LINE_VAR),
+    ) {
+        c.case = Some(RunCase { id, line });
+    }
     if let (Some(k), Ok(text), Ok(name)) = (
         c.check.as_mut(),
         std::env::var(crate::check::CASE_VAR),
         std::env::var(crate::check::CASE_NAME_VAR),
     ) {
-        k.case = Some(crate::check::Case { text, name });
+        k.case = Some(crate::check::Case {
+            text,
+            name,
+            id: std::env::var(crate::check::CASE_ID_VAR).ok(),
+        });
     }
     if let Some(cmd) = a.cmd.as_ref().filter(|v| !v.is_empty()) {
         c.cmd = cmd.clone();

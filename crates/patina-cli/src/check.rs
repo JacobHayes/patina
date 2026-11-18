@@ -4,7 +4,8 @@
 //! Its working directory is the directory patina was started in (recorded), so paths in
 //! `ARGS` are relative to it. It gets `PATINA_SEED`, `PATINA_EXIT` (the program's exit
 //! status) and, for a sweep's `--cases` run, `PATINA_CASE` (the line) and `PATINA_CASE_NAME`
-//! (the case's directory, `K-NAME`). Its stdout, then its stderr, go to `RUNDIR/check.out`.
+//! (the case's directory, `ID-NAME` or `NAME`) and `PATINA_CASE_ID`. Its stdout, then its
+//! stderr, go to `RUNDIR/check.out`.
 //!
 //! The words are split as a `--cases` line is (quotes, no expansion; no shell runs unless the
 //! user names one). The program is resolved (a path against the recorded directory, a bare
@@ -12,7 +13,8 @@
 //! `verify` run the same checker, and refuse a changed one.
 //!
 //! Exit 0 passes; 1 is a finding, named by the first non-empty line of stdout, `LABEL:
-//! detail` (`signature::violation`); 77 is "not judged" (the run stays `ok`); anything else,
+//! detail` or `LABEL [KEY]: detail` (`finding`, `signature::violation`); 77 is "not judged"
+//! (the run stays `ok`; its first line, `CLASS: detail` or a reason); anything else,
 //! a signal, a checker that cannot be started or one still running after `--timeout` seconds
 //! (its own, counted from its start) ends the run `error`, stop `check`: a checker that fails
 //! is never a pass. The checker's output never reaches the run's logs or its digest.
@@ -50,10 +52,13 @@ pub struct Check {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
-    /// The line as written.
+    /// The line after its settings.
     pub text: String,
-    /// Its directory under `seed-N`: `K-NAME`.
+    /// Its directory under `seed-N`.
     pub name: String,
+    /// Its id: the line's `--name`, or its line number in the cases file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 /// `--check-timeout`'s default: a checker reads a run directory; one still running after a
@@ -67,6 +72,10 @@ fn default_timeout() -> u64 {
 /// The variables a sweep passes a case in to its runs (and the checker gets).
 pub const CASE_VAR: &str = "PATINA_CASE";
 pub const CASE_NAME_VAR: &str = "PATINA_CASE_NAME";
+pub const CASE_ID_VAR: &str = "PATINA_CASE_ID";
+/// The whole case line, settings included, from a sweep to its run (for `run.json`); not
+/// passed on to the checker.
+pub const CASE_LINE_VAR: &str = "PATINA_CASE_LINE";
 
 /// The checker's output file in the run directory.
 pub const OUTPUT: &str = "check.out";
@@ -253,6 +262,7 @@ fn command(c: &Check) -> Command {
         .env("PATINA", patina_exe())
         .env_remove(SERVER_VAR)
         .env_remove(SERVE_VAR)
+        .env_remove(CASE_LINE_VAR)
         .process_group(0);
     unsafe {
         cmd.pre_exec(|| {
@@ -274,15 +284,61 @@ fn command(c: &Check) -> Command {
         Some(k) => cmd.env(CASE_VAR, &k.text).env(CASE_NAME_VAR, &k.name),
         None => cmd.env_remove(CASE_VAR).env_remove(CASE_NAME_VAR),
     };
+    match c.case.as_ref().and_then(|k| k.id.as_ref()) {
+        Some(id) => cmd.env(CASE_ID_VAR, id),
+        None => cmd.env_remove(CASE_ID_VAR),
+    };
     cmd
+}
+
+/// A finding's line split into its label and detail: `LABEL: detail`, or `LABEL [KEY]:
+/// detail`, whose label is `LABEL [KEY]` (a word, then a key in brackets that may hold `: `),
+/// or a line without `: `, all label.
+pub fn finding(line: &str) -> (String, String) {
+    let keyed = line.split_once(" [").and_then(|(name, rest)| {
+        if name.is_empty() || name.contains(char::is_whitespace) {
+            return None;
+        }
+        // The key ends at the first `]` that ends the line or is followed by `: `.
+        let mut at = 0;
+        while let Some(i) = rest[at..].find(']') {
+            let end = at + i;
+            let after = &rest[end + 1..];
+            if after.is_empty() || after.starts_with(": ") {
+                let label = &line[..name.len() + 2 + end + 1];
+                return Some((
+                    label.to_string(),
+                    after.strip_prefix(": ").unwrap_or("").to_string(),
+                ));
+            }
+            at = end + 1;
+        }
+        None
+    });
+    keyed.unwrap_or_else(|| match line.split_once(": ") {
+        Some((l, d)) => (l.to_string(), d.to_string()),
+        None => (line.to_string(), String::new()),
+    })
 }
 
 /// Run `c` on the run directory `rundir`: its seed, the program's exit status, at most
 /// `c.timeout` seconds. A serving checker (`--check-serve`) is asked through the sweep job's
 /// server (`SERVER_VAR`), or one started for this run alone.
 pub fn run(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>) -> Verdict {
+    run_on(c, rundir, seed, exit, None)
+}
+
+/// `run`, asking `server` (one this process started) when the checker serves. A server that
+/// answered with an error has been killed: the caller starts another.
+pub fn run_on(
+    c: &Check,
+    rundir: &Path,
+    seed: u64,
+    exit: Option<i64>,
+    server: Option<&Server>,
+) -> Verdict {
     let r = if c.serve {
-        serve_one(c, rundir, seed, exit)
+        serve_one(c, rundir, seed, exit, server.map(|s| s.channel()))
     } else {
         run_inner(c, rundir, seed, exit, c.timeout)
     };
@@ -429,7 +485,13 @@ pub fn adopt_server() {
     let _ = channel();
 }
 
-fn serve_one(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>) -> Res<Verdict> {
+fn serve_one(
+    c: &Check,
+    rundir: &Path,
+    seed: u64,
+    exit: Option<i64>,
+    own: Option<Channel>,
+) -> Res<Verdict> {
     let rundir = std::path::absolute(rundir).unwrap_or_else(|_| rundir.to_path_buf());
     let path = rundir.join(OUTPUT);
     let mut out = std::fs::OpenOptions::new()
@@ -447,9 +509,12 @@ fn serve_one(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>) -> Res<Verd
     if let Some(k) = &c.case {
         env.insert(CASE_VAR.into(), k.text.clone().into());
         env.insert(CASE_NAME_VAR.into(), k.name.clone().into());
+        if let Some(id) = &k.id {
+            env.insert(CASE_ID_VAR.into(), id.clone().into());
+        }
     }
     let line = serde_json::json!({"rundir": rundir, "env": env}).to_string();
-    let (mut v, said, stderr) = match channel().map(|ch| (ch, idle(ch))) {
+    let (mut v, said, stderr) = match own.or_else(channel).map(|ch| (ch, idle(ch))) {
         Some((ch, Idle::Yes)) => ask(ch, &line, c.timeout),
         Some((ch, Idle::Wrote)) => {
             unsafe { libc::kill(-ch.pgid, libc::SIGKILL) };
@@ -624,10 +689,7 @@ fn verdict_line(l: &str) -> Verdict {
     match word {
         "pass" if rest.is_empty() => Verdict::new(Kind::Pass),
         "fail" if !rest.is_empty() => {
-            let (label, detail) = match rest.split_once(": ") {
-                Some((l, d)) => (l.to_string(), d.to_string()),
-                None => (rest.to_string(), String::new()),
-            };
+            let (label, detail) = finding(rest);
             Verdict {
                 label: Some(label),
                 detail: Some(detail),
@@ -639,7 +701,7 @@ fn verdict_line(l: &str) -> Verdict {
             ..Verdict::new(Kind::NotJudged)
         },
         _ => Verdict::error(format!(
-            "the checker server answered {l:?}, not pass, fail LABEL: detail, or skip REASON"
+            "the checker server answered {l:?}, not pass, fail LABEL: detail, or skip CLASS: detail"
         )),
     }
 }
@@ -730,10 +792,7 @@ fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u6
     let mut v = match (status.code(), status.signal()) {
         (Some(0), _) => Verdict::new(Kind::Pass),
         (Some(1), _) => {
-            let (label, detail) = match first.split_once(": ") {
-                Some((l, d)) => (l.to_string(), d.to_string()),
-                None => (first.clone(), String::new()),
-            };
+            let (label, detail) = finding(&first);
             Verdict {
                 label: Some(label),
                 detail: Some(detail),
@@ -761,6 +820,27 @@ fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finding_line_may_carry_its_grouping_key() {
+        let f = |l: &str| {
+            let (a, b) = finding(l);
+            (a, b)
+        };
+        let s = |a: &str, b: &str| (a.to_string(), b.to_string());
+        assert_eq!(f("wrong-exit: exit 3"), s("wrong-exit", "exit 3"));
+        assert_eq!(f("wrong-exit"), s("wrong-exit", ""));
+        assert_eq!(
+            f("wrong-output [echo -e]: got 0x0"),
+            s("wrong-output [echo -e]", "got 0x0")
+        );
+        // A key may hold `: ` and `]`; it ends at a `]` before `: ` or the end.
+        assert_eq!(f("diff [a: b] c]: x: y"), s("diff [a: b] c]", "x: y"));
+        assert_eq!(f("diff [k]"), s("diff [k]", ""));
+        // Not a key: a label with a space, or a bracket that does not close before `: `.
+        assert_eq!(f("two words [k]: d"), s("two words [k]", "d"));
+        assert_eq!(f("x [open: d"), s("x [open", "d"));
+    }
 
     #[test]
     fn words_round_trip_through_one_argument() {

@@ -985,6 +985,42 @@ corpus file no longer labels a path-swap PROTECT hit 010: no fs error fired.
   passed 30 of 30 under 60 burners, 09-stall 30 of 30 under 400 (3 of 12 before, killed by its
   own 8 s `timeout`, now 120 s as for every other run).
 
+### Third round: grouping keys, judging again, case ids, the reference guard
+
+After the change that adds `LABEL [KEY]` findings, `CLASS: detail` reasons, `patina recheck`
+and `--keep checked`, case ids (`PATINA_CASE_ID`, `--only-case`) and the guard in
+`same-output` and `same-tree`. `tests/oracles/evidence-triage.sh`, run once by hand,
+2026-11-18, this host, `-j 8`, with `OLD_PATINA` the build before the change. The corpus: 200
+generated cases `OP A B` of a shell calculator with two planted bugs (a difference above 50 is
+one too many; anything times 0 is the other operand) and one difference by design (it divides
+toward zero, the reference toward minus infinity), each at seeds 1-2 (400 runs), against a
+reference sweep of a correct calculator; the checker compares stdout and prints what it got
+and wanted.
+
+| Leg | Result |
+|---|---|
+| groups, `wrong-output: got G, want W` | 3 groups by the numbers' signs, each mixing bugs: `got N, want N` 46 (e.g. `got 69, want 68`), `got -N, want -N` 12, `got N, want -N` 4 |
+| groups, `wrong-output [OP]: got G, want W` | 3 groups, one per cause: `[sub]` 38, `[div]` 16, `[mul]` 8, each with its example (`[mul]: got 46, want 0`); the same groups and counts by `patina recheck` of the first sweep and by a fresh sweep |
+| the 8 division cases added to the expected-differences table | `patina recheck` 0.39 s; the same sweep afresh 1.06 s; both `judged 384 of 400 runs: 338 passed, 46 failed; 16 not judged (expected 16)` and the same 2 groups |
+| disk for the 400 runs | `--keep checked` 13.1 MB (here every run was judged, so as `--keep all`); `--keep fail` 6.0 MB |
+| recheck of the `--keep fail` sweep with another checker | the 46 kept runs judged again, 354 pruned named and left; exit 1 (the findings), the report naming 2 checkers |
+| reference made with another `--work` tree (`same-output`) | exit 2, `200 errors`, none a finding: `reference-mismatch: work differs: the reference has [".../t2",null], this run [".../t1",null] (--relax work to compare anyway)` |
+| the same with `--relax work` | exit 1, `judged 200 of 200 runs: 169 passed, 31 failed` |
+| fjall harness, `--buggify`, seed 1 / seeds 1-4 | this build: exit 2 (`buggify never fired: manual-flush, persist-now`) / exit 0; the build before: the same |
+
+- The unmet-sites rule is unchanged on purpose: the fjall harness's two unmet points are its
+  own (`src/main.rs`), unmet at one seed and met at four, which is what the rule is for. A
+  library's sites are allowed by prefix in `patina.toml`; the change adds the line that counts
+  allowed sites and, when most unmet labels share a prefix, the `[sdk] allow-unmet` entry to
+  write.
+- Runs without the new settings are unchanged against the build before: `hello-static` seed
+  3, `kvlog` `--crash machine:10 --check acked-kept` seed 2, `sdk-rs --buggify` seed 4,
+  `upcase --faults disk` seed 5, and a kvlog sweep of seeds 1-3: `result.json` and `run.json`
+  identical but for `wall_ms`, `patina` and the supervisor's memory high-water mark (which
+  differs between two runs of one build), every `boundary.log` byte for byte; a sdk-rs
+  `--buggify` sweep's text identical. A sweep's text gains the `example:` line, `report.json`
+  `checkers`, `example` and `case_id`; `sweep.json` no longer holds the checker.
+
 ## Second hosts
 
 One `patina` binary and one set of guest binaries, built once on the development VM from
