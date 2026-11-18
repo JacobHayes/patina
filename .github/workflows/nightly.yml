@@ -1,9 +1,7 @@
 name: Nightly
 
-# The standing proof that the oracles fire: `./check nightly` sweeps testbeds/pubsub over 200
-# seeds with its planted bugs on, each of which must be found, and off,
-# which must be ok and not vacuous; then `cargo audit` over every lock file. Not a gate:
-# nothing waits on it, and a red nightly is fixed forward.
+# The release tier, `./check release` (tests/run.py), on both architectures; then `cargo audit`
+# over every lock file. Not a gate: nothing waits on it, and a red nightly is fixed forward.
 on:
   schedule:
     - cron: "17 9 * * *"
@@ -18,35 +16,22 @@ env:
 
 jobs:
   nightly:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      - name: Host setup for the sandbox
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap libsqlite3-dev libssl-dev
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: check-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: false
-      - uses: actions/cache/restore@v6
-        with:
-          path: target/patina-check/guests
-          key: guests-${{ runner.os }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
-          restore-keys: guests-${{ runner.os }}-
-      - name: Fetch the Rust guests' dependencies (their builds are offline)
-        run: |
-          [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
-          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
-          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
-      - run: mise exec -- ./check nightly
-      - uses: taiki-e/install-action@v2
+      - uses: ./.github/actions/check-host
+      - run: mise exec -- ./check release
+      - if: matrix.runner == 'ubuntu-24.04'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
       - name: cargo audit
+        if: matrix.runner == 'ubuntu-24.04'
         run: |
           for lock in Cargo.lock crates/patina-rt/Cargo.lock testbeds/*/Cargo.lock examples/*/Cargo.lock tests/guests/*/Cargo.lock; do
             echo "== $lock"
@@ -58,6 +43,6 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: nightly-runs
+          name: nightly-runs-${{ matrix.runner }}
           path: target/patina-check/runs
           retention-days: 7

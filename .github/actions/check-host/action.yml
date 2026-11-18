@@ -1,0 +1,27 @@
+name: Check host
+description: The sandbox host setup, the pinned tools and the restored caches of the CI check jobs, for jobs that run ./check without saving caches
+runs:
+  using: composite
+  steps:
+    - name: Host setup for the sandbox
+      shell: bash
+      run: |
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        sudo apt-get update -qq
+        sudo apt-get install -y -qq bubblewrap libsqlite3-dev libssl-dev
+    - uses: ./.github/actions/setup-toolchain
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: check-${{ runner.arch == 'ARM64' && 'arm64-' || '' }}${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
+        save-if: false
+    - uses: actions/cache/restore@v6
+      with:
+        path: target/patina-check/guests
+        key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
+        restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
+    - name: Fetch the Rust guests' dependencies (their builds are offline)
+      shell: bash
+      run: |
+        [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+        cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
+        cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml

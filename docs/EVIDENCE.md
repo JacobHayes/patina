@@ -1007,7 +1007,7 @@ make building the post-crash tree from the base's log worth a second way to prod
 children repeating a tree are over half in two seeds, but F2's two hits (points 1,721 and
 1,724) share one tree, so skipping repeats would have dropped a finding.
 
-`tests/storage/12-f2.sh` (nightly, both architectures) is the standing check, on a journal
+`tests/storage/12-f2.sh` (release tier, both architectures) is the standing check, on a journal
 laid out so the window comes early: `FJ_VAL_SHIFT=289` shifts the harness's value lengths so
 that batch 5 straddles the first 4 KiB block boundary between an item's `value_len` and its
 `on_disk_value_len` (at the default layout the first such batch is about 800, which on the
@@ -1203,7 +1203,7 @@ three, each fixed or explained:
 | fjall F4, `fsync-error-at=50..80` x seeds 1-10 | first confirmed cell `fsync-error-at=63` seed 7 (x86_64: 67, seed 4) |
 | fjall F5, seeds 1-10 | 3 of 10 |
 | fjall F2, `storage/12-f2` (`sweep --branch`, seeds 1-3, early journal layout) | found at seed 1 after 727 crash points, 35 s (x86_64: 33 s); "Crash-point enumeration" |
-| `testbeds/pubsub` nightly (`nightly/01-pubsub`), 200 seeds | clean: no finding; lost-wakeup 200, drop-read-remainder 199, stale-timeout 165 of 200 |
+| `testbeds/pubsub` (`sweep/03-pubsub`), 200 seeds | clean: no finding; lost-wakeup 200, drop-read-remainder 199, stale-timeout 165 of 200 |
 
 **Not run on arm64**: the evidence scripts still marked `arch=x86_64` (the determinism matrix
 `determinism/evidence-matrix`, the soaks and the time variant, the durability census,

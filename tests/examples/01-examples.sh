@@ -1,19 +1,22 @@
-# The examples (examples/README.md), each with its documented sweep options over seeds 1-20:
+# The examples (examples/README.md), each with its documented sweep options over seeds 1-20
+# (1-200 in the release tier):
 # the bug is found, under the expected signature; the fixed variant is ok on every seed, and
 # the fault or fault point the example is about fired in at least one of those runs. stats-c's
 # stock build is ok on every seed (its race needs compute points).
-#@ tier=quick budget=20 slots=4
+#@ tier=quick,release budget=20 budget-release=120 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 E=$PATINA_GUESTS/examples
+N=20
+[ "${CHECK_TIER:-}" != release ] || N=200
 FAILS=0
 fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 
-# sweep OUT [options] -- CMD: seeds 1-20; prints patina's exit status
+# sweep OUT [options] -- CMD: seeds 1-N; prints patina's exit status
 sweep() {
     out=$1; shift
     rc=0
-    "$PATINA" sweep --seeds 1..20 -j 4 --keep none --out "$out" "$@" >"$out.txt" 2>&1 || rc=$?
+    "$PATINA" sweep --seeds "1..$N" -j 4 --keep none --out "$out" "$@" >"$out.txt" 2>&1 || rc=$?
     echo "$rc"
 }
 

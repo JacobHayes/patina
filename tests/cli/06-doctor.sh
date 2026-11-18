@@ -2,7 +2,7 @@
 #    it exits with the `error` status and names the package that provides it. On arm64, a host
 #    with 16 KiB pages (faked: PATINA_TEST_PAGE_SIZE) fails the page-size check, and the
 #    launcher refuses a run with `error` before any sandbox.
-#@ tier=quick budget=10
+#@ tier=quick,release budget=10
 . "$(dirname "$0")/lib.inc"
 st=0
 timeout 60 "$PATINA" doctor --format json >"$RUNS/doctor.json" 2>"$RUNS/doctor.err" || st=$?

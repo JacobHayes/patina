@@ -1,6 +1,7 @@
 name: Release
 
-# A `v*` tag builds the release artifacts, one static Linux `patina` per architecture with the
+# A `v*` tag runs the release tier (`./check release`, tests/run.py) on both architectures and
+# builds the release artifacts, one static Linux `patina` per architecture with the
 # runtime embedded, each natively on a runner of its architecture; checks each names the tag's
 # version; installs each from its archive with install.sh, on its runner and in a bare
 # ubuntu:24.04 container; runs the adopter smoke on both; merges the archives under one
@@ -25,6 +26,27 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
+  # The release tier, on a runner of each architecture: the gate before publish.
+  check:
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      CHECK_SLOTS: "4"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/check-host
+      - run: mise exec -- ./check release
+      - if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-check-runs-${{ matrix.runner }}
+          path: target/patina-check/runs
+          retention-days: 7
+
   build:
     strategy:
       matrix:
@@ -110,7 +132,7 @@ jobs:
   # is versioned by a tag that carries its path.
   publish:
     if: github.ref_type == 'tag'
-    needs: dist
+    needs: [check, dist]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

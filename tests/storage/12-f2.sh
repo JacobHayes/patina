@@ -7,7 +7,7 @@
 # docs/EVIDENCE.md, "Crash-point enumeration"); here the window lies about 240 points in.
 # FJ_WIPE_PARTIAL=1: the early open-after-crash finding (F1) recovers instead of ending the
 # sweep. F2_N sets FJ_N (5: the journal ends before batch 5, no straddling item: red).
-#@ tier=nightly budget=120 slots=4
+#@ tier=release budget=120 slots=4
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f2
 "$PATINA" sweep -j 4 --seeds 1..3 --branch --crash machine --buggify \

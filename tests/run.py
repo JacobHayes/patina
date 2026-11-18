@@ -1,17 +1,19 @@
 """tests/run.py: the check runner (./check builds, then runs this).
 
-    run.py quick              the landing gate: every script marked tier=quick
+    run.py quick              the landing gate: every script in tier quick
     run.py AREA ...           one area's scripts (tier quick and area) of tests/AREA
+    run.py release            the release gate (and the nightly job): every script in tier release
     run.py evidence [NAME..]  the evidence scripts (all, or those whose AREA/name contains NAME)
-    run.py nightly            the scheduled job's scripts: every script marked tier=nightly
-    run.py list               every script with its tier, budget and slots
+    run.py list               every script with its tiers, budget and slots
 
 An area is a directory under tests/ holding check scripts (`*.sh` directly in it); guests/
 holds the guests' sources.
 
-A script declares itself in a line `#@ tier=quick|area|nightly|evidence budget=SECONDS slots=N
-arch=MACHINE` (defaults: tier=area, budget 120 s, slots 1, every architecture; slots = sandboxes
-it runs at once; arch = the only `uname -m` it runs on, the others skip it and count it). Scripts run in
+A script declares itself in a line `#@ tier=TIER[,TIER] budget=SECONDS slots=N arch=MACHINE`
+(tiers quick, area, release, evidence; defaults: tier=area, budget 120 s, slots 1, every
+architecture; slots = sandboxes it runs at once; arch = the only `uname -m` it runs on, the
+others skip it and count it). A script in two tiers may set `budget-TIER=SECONDS` for the
+second; it sees the tier it runs for in CHECK_TIER. Scripts run in
 parallel, at most CHECK_SLOTS sandboxes at once (default half the CPUs, at least 8), longest
 budget first. Each gets a
 private RUNS directory; a script still running at its budget is killed with its whole session
@@ -19,7 +21,7 @@ and fails, as does one that leaves a process behind (tests/leftovers.py on its R
 killed too, so a failed script's directory is quiet when it is kept or uploaded). Passing scripts' run
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
-The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s, nightly
+The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s, release
 above 600 s.
 """
 import os
@@ -33,9 +35,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 CHECK_DIR = os.environ.get("PATINA_CHECK_DIR") or os.path.join(ROOT, "target", "patina-check")
-DEFAULTS = {"quick": 15, "area": 120, "nightly": 300, "evidence": 1800}
-CEILING = {"quick": int(os.environ.get("QUICK_CEILING", "600")), "area": 300, "nightly": 600, "evidence": None}
-TARGET = {"quick": 300, "area": 300, "nightly": 600, "evidence": 3600}
+DEFAULTS = {"quick": 15, "area": 120, "release": 300, "evidence": 1800}
+CEILING = {"quick": int(os.environ.get("QUICK_CEILING", "600")), "area": 300, "release": 600, "evidence": None}
+TARGET = {"quick": 300, "area": 300, "release": 600, "evidence": 3600}
 
 
 def scripts():
@@ -52,26 +54,27 @@ def scripts():
                 for line in fh:
                     if line.startswith("#@"):
                         meta.update(kv.split("=", 1) for kv in line[2:].split())
-            tier = meta["tier"]
-            out.append({"area": area, "name": f[:-3], "path": os.path.join(d, f), "tier": tier,
-                        "budget": int(meta.get("budget", DEFAULTS[tier])), "slots": int(meta["slots"]),
-                        "arch": meta.get("arch")})
+            tiers = meta["tier"].split(",")
+            budget = int(meta.get("budget", DEFAULTS[tiers[0]]))
+            out.append({"area": area, "name": f[:-3], "path": os.path.join(d, f), "tier": meta["tier"],
+                        "tiers": tiers, "budget": budget, "slots": int(meta["slots"]), "arch": meta.get("arch"),
+                        "budgets": {t: int(meta.get(f"budget-{t}", budget)) for t in tiers}})
     return out
 
 
 def select(args, allsc):
-    if args[0] in ("quick", "nightly"):
-        return args[0], [s for s in allsc if s["tier"] == args[0]]
+    if args[0] in ("quick", "release"):
+        return args[0], [dict(s, budget=s["budgets"][args[0]]) for s in allsc if args[0] in s["tiers"]]
     if args[0] == "evidence":
         names = args[1:]
-        sel = [s for s in allsc if s["tier"] == "evidence"
+        sel = [s for s in allsc if "evidence" in s["tiers"]
                and (not names or any(n in f"{s['area']}/{s['name']}" for n in names))]
         return "evidence", sel
     areas = [a.lower() for a in args]
     for a in areas:
         if not os.path.isdir(os.path.join(HERE, a)):
             sys.exit(f"no area tests/{a}")
-    return "area", [s for s in allsc if s["area"] in areas and s["tier"] in ("quick", "area")]
+    return "area", [s for s in allsc if s["area"] in areas and {"quick", "area"} & set(s["tiers"])]
 
 
 def kill_session(sid):
@@ -107,7 +110,8 @@ def main():
     if args[0] == "list":
         for s in allsc:
             arch = f"  arch {s['arch']}" if s["arch"] else ""
-            print(f"{s['tier']:9} {s['budget']:5} s  slots {s['slots']}  {s['area']}/{s['name']}{arch}")
+            more = "".join(f"  {t} {b} s" for t, b in s["budgets"].items() if b != s["budget"])
+            print(f"{s['tier']:13} {s['budget']:5} s  slots {s['slots']}  {s['area']}/{s['name']}{arch}{more}")
         return 0
     tier, sel = select(args, allsc)
     machine = platform.machine()
@@ -137,7 +141,7 @@ def main():
             free[0] -= need
         runs = os.path.join(base, s["area"], s["name"])
         os.makedirs(runs)
-        env = dict(os.environ, RUNS=runs, PATINA_SCRATCH=os.path.join(runs, "scratch"))
+        env = dict(os.environ, RUNS=runs, PATINA_SCRATCH=os.path.join(runs, "scratch"), CHECK_TIER=tier)
         env.setdefault("PATINA_LOAD_THREADS", "2")
         log = os.path.join(base, f"{s['area']}-{s['name']}.out")
         t0 = time.monotonic()

@@ -2,7 +2,7 @@
 # ./check quick              the landing gate (budget 5 min, ceiling 10)
 # ./check AREA [AREA ...]    one area's checks (a directory under tests/) while working on it
 # ./check evidence [NAME..]  the sweeps, matrices and soaks behind docs/EVIDENCE.md, by hand
-# ./check nightly            the scheduled job: planted bugs at 200 seeds (budget 10 min)
+# ./check release            the release gate and the nightly job (ceiling 10 min)
 # ./check list               every script with its tier and budget
 # Builds patina (the runtime is embedded), builds the guests once per source change
 # (tests/guests.sh), then runs the scripts in parallel (tests/run.py: per-script times and
