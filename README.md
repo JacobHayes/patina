@@ -11,9 +11,10 @@ special linking, any language.
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
 needs `bwrap` (bubblewrap) and unprivileged user namespaces.
 
-Changes in 0.10: Python 3.12 or later runs with compute points, with no rebuild and no change
-to the program (`python3 -m patina app.py`, [the guide](docs/GUIDE.md#python)): threads switch
-between lines and loop passes, and timers fire inside pure-Python loops.
+Changes in 0.11: checks from outside the program. `--check 'CMD ARGS'` runs a checker on each
+run that ended `ok`, and its verdict is a finding like any other, grouped, replayed and
+minimized ([the guide](docs/GUIDE.md#checks-from-outside-the-program)); `patina log events`
+gives it the run as JSON lines.
 
 ## Install
 
