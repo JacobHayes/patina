@@ -79,6 +79,9 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
             now
         ));
     }
+    if let Some(c) = &cfg.check {
+        c.unchanged()?;
+    }
     Ok((cfg, program))
 }
 
@@ -99,21 +102,48 @@ fn replay_into(
     let cpu = cfg.host_cpu.unwrap_or_else(default_cpu);
     let (end, mut result) = run_one(&o, &out, cpu, false)?;
     let mine = crate::result::classified(&end);
+    // The run's own outcome, before a checker judged it: a run the checker judged was ok.
+    let own = |r: &serde_json::Value| -> serde_json::Value {
+        let judged = r["check"]["verdict"]
+            .as_str()
+            .is_some_and(|v| v != "not-run");
+        if judged {
+            "ok".into()
+        } else {
+            r["outcome"].clone()
+        }
+    };
     let diverged = match crate::log::first_run_difference(rundir, &out)? {
         Some(d) => Some(d),
-        None if recorded["outcome"] != result["outcome"]
-            || recorded["digest"] != result["digest"] =>
-        {
+        None if own(recorded) != own(&result) || recorded["digest"] != result["digest"] => {
             Some(format!(
                 "logs equal, but the outcome differs: recorded {} {}, replayed {} {}",
-                recorded["outcome"], recorded["digest"], result["outcome"], result["digest"]
+                own(recorded),
+                recorded["digest"],
+                own(&result),
+                result["digest"]
             ))
         }
         None => None,
     };
+    let key = |r: &serde_json::Value| crate::signature::check_key(&r["check"]);
     let classified = match diverged {
-        Some(d) => {
-            let c = Classified::new(Outcome::Nondeterministic, "divergence", d);
+        Some(d) => Some(Classified::new(Outcome::Nondeterministic, "divergence", d)),
+        // The same run, judged otherwise: the checker reads something besides the run
+        // directory. Not a Patina divergence.
+        None if key(recorded) != key(&result) => Some(Classified::new(
+            Outcome::Error,
+            "check-unstable",
+            format!(
+                "the logs are identical and the checker answered differently ({}, now {}): it depends on something outside the run directory",
+                verdict_text(&recorded["check"]),
+                verdict_text(&result["check"])
+            ),
+        )),
+        None => None,
+    };
+    let classified = match classified {
+        Some(c) => {
             result = result_json(&end, &c);
             result["signature"] = crate::signature::of(&result, &out);
             write_json(&out.join("result.json"), &result)?;
@@ -126,4 +156,17 @@ fn replay_into(
         result,
         dir: out,
     })
+}
+
+/// A checker's verdict in a sentence's words: `fail (LABEL: detail)`, `pass`.
+fn verdict_text(c: &serde_json::Value) -> String {
+    let v = c["verdict"].as_str().unwrap_or("none");
+    let label = c["label"].as_str().unwrap_or("");
+    let detail = c["detail"].as_str().unwrap_or("");
+    match (label, detail) {
+        ("", "") => v.to_string(),
+        ("", d) => format!("{v}: {d}"),
+        (l, "") => format!("{v}: {l}"),
+        (l, d) => format!("{v}: {l}: {d}"),
+    }
 }

@@ -93,9 +93,20 @@ pub struct Flag {
     pub repeat: bool,
     /// Commands whose default and help differ from `default` and `help`.
     pub per: &'static [(Cmd, &'static str, &'static str)],
+    /// Commands whose value differs from `value` (a switch in one, a value in another).
+    pub per_value: &'static [(Cmd, &'static str)],
 }
 
 impl Flag {
+    /// The value this flag takes for `c` (empty: a switch).
+    pub fn value_for(&self, c: Cmd) -> &'static str {
+        self.per_value
+            .iter()
+            .find(|p| p.0 == c)
+            .map(|p| p.1)
+            .unwrap_or(self.value)
+    }
+
     /// The default and help this flag has for `c`.
     pub fn for_cmd(&self, c: Cmd) -> (&'static str, &'static str) {
         self.per
@@ -134,6 +145,7 @@ const fn flag(
         cmds,
         repeat: false,
         per: &[],
+        per_value: &[],
     }
 }
 
@@ -151,6 +163,7 @@ const fn many(
         cmds,
         repeat: true,
         per: &[],
+        per_value: &[],
     }
 }
 
@@ -191,6 +204,7 @@ pub const FLAGS: &[Flag] = &[
                 "the reduced run's directory; an earlier one there is replaced",
             ),
         ],
+        per_value: &[],
     },
     flag(
         "--config",
@@ -335,13 +349,20 @@ pub const FLAGS: &[Flag] = &[
     ),
     flag("--from", "SEQ", "0", "log dump: first record", &[Cmd::Log]),
     flag("--to", "SEQ", "last", "log dump: last record", &[Cmd::Log]),
-    flag(
-        "--check",
-        "",
-        "",
-        "log ops: replay the whole operation log and compare with the exported tree",
-        &[Cmd::Log],
-    ),
+    Flag {
+        name: "--check",
+        value: "'CMD ARGS'",
+        default: "none",
+        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail, 77 not judged, else error; at most --timeout seconds",
+        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log],
+        repeat: false,
+        per: &[(
+            Cmd::Log,
+            "",
+            "log ops: replay the whole operation log and compare with the exported tree",
+        )],
+        per_value: &[(Cmd::Log, "")],
+    },
     flag(
         "--format",
         "text|json",
@@ -424,7 +445,7 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
         let f = find_flag(name)
             .filter(|f| f.cmds.contains(&cmd))
             .ok_or_else(|| format!("unknown option {name} (patina {} --help)", cmd_name(cmd)))?;
-        let v = if f.value.is_empty() {
+        let v = if f.value_for(cmd).is_empty() {
             if inline.is_some() {
                 return Err(format!("{name} takes no value"));
             }
@@ -435,7 +456,7 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
                 None => it
                     .next()
                     .cloned()
-                    .ok_or_else(|| format!("{name} needs {}", f.value))?,
+                    .ok_or_else(|| format!("{name} needs {}", f.value_for(cmd)))?,
             }
         };
         if f.name == "--format" && v != "text" && v != "json" {
@@ -464,8 +485,8 @@ pub fn find_cmd(name: &str) -> Option<Cmd> {
 
 fn flag_text(f: &Flag, c: Cmd) -> String {
     let mut lhs = f.name.to_string();
-    if !f.value.is_empty() {
-        lhs = format!("{lhs} {}", f.value);
+    if !f.value_for(c).is_empty() {
+        lhs = format!("{lhs} {}", f.value_for(c));
     }
     let (default, help) = f.for_cmd(c);
     let mut s = format!("  {lhs:<26} {help}");
@@ -533,7 +554,7 @@ pub fn help_json() -> String {
                 "help": f.help,
                 "repeat": f.repeat,
                 "commands": f.cmds.iter().map(|c| cmd_name(*c)).collect::<Vec<_>>(),
-                "by_command": f.per.iter().map(|(c, d, h)| (cmd_name(*c).to_string(), serde_json::json!({"default": d, "help": h}))).collect::<serde_json::Map<_, _>>(),
+                "by_command": f.per.iter().map(|(c, d, h)| (cmd_name(*c).to_string(), serde_json::json!({"value": f.value_for(*c), "default": d, "help": h}))).collect::<serde_json::Map<_, _>>(),
             })
         })
         .collect();
@@ -563,7 +584,7 @@ mod tests {
         for f in FLAGS {
             for &c in f.cmds {
                 let mut a = vec![f.name.to_string()];
-                if !f.value.is_empty() {
+                if !f.value_for(c).is_empty() {
                     a.push(if f.name == "--format" { "json" } else { "1" }.into());
                 }
                 let p = parse(c, &a).unwrap_or_else(|e| panic!("{} {}: {e}", cmd_name(c), f.name));

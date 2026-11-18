@@ -1,6 +1,6 @@
 # Examples
 
-Seven small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
+Eight small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
 command that finds it. Each builds with its own language's tool and nothing else. Run the
 commands from the repository root. Each program takes `fixed` as its first argument to run
 without the bug; the same sweep with `fixed` added at the end is `ok` on every seed.
@@ -62,6 +62,21 @@ patina sweep --seeds 1..20 --crash machine --out patina-out/acklog -- ./acklog
 ```
 
 Expected: `violation always: acked-records-kept: N acknowledged, N stored`, about 6 of the 20 seeds.
+
+## kvlog-c (C, no SDK): lost data found by a check from outside
+
+The same bug as acklog's, in a program with no SDK: it prints `ack I` once record I is
+written and never syncs it. `examples/checks/acked-kept` runs after each run, outside the
+simulation, and compares the last record acknowledged before each machine crash with the
+tree the crash left ([Checks from outside the program](../docs/GUIDE.md#checks-from-outside-the-program)).
+
+```sh
+cc -o kvlog examples/kvlog-c/kvlog.c
+patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept --out patina-out/kvlog -- ./kvlog
+```
+
+Expected: `violation check: acked-record-lost: acknowledged N, N stored after the crash`, 9 of
+the 30 seeds (counted on x86_64 only); runs that did not crash are not judged.
 
 ## bank-go (Go, SDK): a double deposit found by network faults
 

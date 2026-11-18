@@ -7,9 +7,10 @@
 python3 -I - "$PATINA" "$RUNS/help.json" <<'PY' || die "help and parser disagree"
 import json, subprocess, sys
 patina, h = sys.argv[1], json.load(open(sys.argv[2]))
-def value(f):
-    """A value of the flag's documented form: the first choice of A|B, else 1."""
-    return [f["value"].split("|")[0] if "|" in f["value"] else "1"] if f["value"] else []
+def value(f, c):
+    """A value of the flag's documented form for command c: the first choice of A|B, else 1."""
+    v = f["by_command"].get(c, {}).get("value", f["value"])
+    return [v.split("|")[0] if "|" in v else "1"] if v else []
 flags = {f["name"]: f for f in h["flags"]}
 assert h["commands"] and flags
 n = 0
@@ -20,7 +21,7 @@ for c in h["commands"]:
         f = flags[name]
         assert c["name"] in f["commands"], (c["name"], name)
         assert name in text.stdout, (c["name"], name, "not in text help")
-        argv = [patina, c["name"], name] + value(f) + ["--help"]
+        argv = [patina, c["name"], name] + value(f, c["name"]) + ["--help"]
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         assert r.returncode == 0, (argv, r.returncode, r.stderr)
         n += 1
@@ -29,7 +30,7 @@ for c in h["commands"]:
     assert r.returncode != 0 and "--no-such-flag" in r.stderr, (unknown, r.returncode, r.stderr)
     missing = [f for f in flags if f not in c["flags"]]
     for name in missing:
-        argv = [patina, c["name"], name] + value(flags[name]) + ["--help"]
+        argv = [patina, c["name"], name] + value(flags[name], c["name"]) + ["--help"]
         r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
         assert r.returncode != 0, (argv, "accepted a flag the table does not list for it")
 print(f"{n} (command, flag) pairs parse; {len(h['commands'])} commands")

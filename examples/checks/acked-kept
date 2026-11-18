@@ -1,0 +1,11 @@
+#!/bin/sh
+# acked-kept RUN: a record acknowledged on stdout ("ack I") before a machine crash is in the
+# tree the crash left (data.log, 8 bytes a record). For `patina run --check`.
+ls -d "$1"/inc-*/post-crash >/dev/null 2>&1 || { echo "no crash in this run"; exit 77; }
+for inc in "$1"/inc-*; do
+  [ -d "$inc/post-crash" ] || continue
+  last=$(sed -n 's/^ack //p' "$inc/stdout" | tail -n1)
+  stored=0
+  [ ! -f "$inc/post-crash/data.log" ] || stored=$(($(wc -c <"$inc/post-crash/data.log") / 8))
+  [ "${last:--1}" -lt "$stored" ] || { echo "acked-record-lost: acknowledged $last, $stored stored after the crash"; exit 1; }
+done

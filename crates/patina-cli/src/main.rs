@@ -1,5 +1,6 @@
 //! `patina`: the command line, the launcher, the supervisor (hidden `__sup`) and the tools.
 
+mod check;
 mod cli;
 mod config;
 mod doctor;
@@ -196,6 +197,8 @@ fn replay(a: &Args) -> Result<ExitCode, Fail> {
     } else {
         if c.outcome == Outcome::Nondeterministic {
             println!("nondeterministic: {}", c.message);
+        } else if c.stop == "check-unstable" {
+            println!("check-unstable: {}", c.message);
         } else {
             println!("identical: the replay's log equals the run's");
         }

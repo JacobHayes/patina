@@ -126,7 +126,7 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 | Outcome | Exit | Meaning |
 |---|---|---|
 | `ok` | 0 | the program exited 0 and broke no invariant |
-| `violation` | 1 | an SDK invariant (`always`) failed |
+| `violation` | 1 | an invariant failed: an SDK `always`, or the `--check` command |
 | `liveness` | 1 | every thread blocked, or the virtual time limit passed |
 | `failure` | 1 | the program exited nonzero |
 | `crash` | 1 | the program died on a signal |
@@ -135,7 +135,7 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 | `nondeterministic` | 2 | a replay differed from its run: a Patina bug, please report it |
 | `internal` | 2 | Patina failed, or the host refused a resource |
 | `vacuous` | 2 | a sweep's fault or SDK check never had anything to act on |
-| `error` | 2 | the command could not be carried out |
+| `error` | 2 | the command could not be carried out, or the `--check` command failed (stop `check`) or answered otherwise on replay (`check-unstable`) |
 
 ## Where next
 

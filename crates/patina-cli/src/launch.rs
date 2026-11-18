@@ -204,7 +204,9 @@ unsafe fn perturb_child() {
 }
 
 /// Run a whole chain of incarnations into `out` (created; must not hold an earlier run):
-/// `run.json` first, then the incarnations, then `result.json`.
+/// `run.json` first, then the incarnations, then `result.json`. With `--check`, when the run
+/// ended ok the checker runs on the finished directory and `result.json` is written again
+/// with its verdict (`check.rs`); the run itself, its logs and digest, are done by then.
 pub fn run_one(
     o: &Opts,
     out: &Path,
@@ -219,10 +221,33 @@ pub fn run_one(
         &out.join("run.json"),
         &crate::result::run_json(&o.cfg, &o.program, &o.plan)?,
     )?;
-    let end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
-    let mut r = crate::result::result_json(&end, &crate::result::classified(&end));
-    r["signature"] = crate::signature::of(&r, out);
-    crate::result::write_json(&out.join("result.json"), &r)?;
+    let mut end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
+    let write = |end: &RunEnd| -> Res<serde_json::Value> {
+        let mut r = crate::result::result_json(end, &crate::result::classified(end));
+        r["signature"] = crate::signature::of(&r, out);
+        crate::result::write_json(&out.join("result.json"), &r)?;
+        Ok(r)
+    };
+    // With a checker, an ok run is written pending until it answers.
+    let ok = crate::result::classified(&end).outcome == crate::outcome::Outcome::Ok;
+    if o.cfg.check.is_some() {
+        end.check = Some(if ok {
+            crate::check::Verdict::pending()
+        } else {
+            crate::check::Verdict::not_run()
+        });
+    }
+    let mut r = write(&end)?;
+    if let (Some(c), true) = (&o.cfg.check, ok) {
+        end.check = Some(crate::check::run(
+            c,
+            out,
+            o.cfg.seed,
+            end.verdict.exit_status,
+            o.cfg.timeout,
+        ));
+        r = write(&end)?;
+    }
     Ok((end, r))
 }
 

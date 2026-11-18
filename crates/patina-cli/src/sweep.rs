@@ -104,6 +104,9 @@ fn identity(
     c.seed = 0;
     c.host_cpu = None;
     c.allow_unmet.clear();
+    if let Some(k) = &mut c.check {
+        k.case = None;
+    }
     Ok(serde_json::json!({
         "schema": SWEEP_SCHEMA,
         "patina": crate::result::build()?,
@@ -468,7 +471,8 @@ fn pool(
     queue.into_inner().unwrap().len()
 }
 
-/// Remove the logs (`inc-*`) of a run directory, keeping `run.json` and `result.json`.
+/// Remove the logs (`inc-*`) and the checker's output of a run directory, keeping `run.json`
+/// and `result.json`.
 fn prune(dir: &Path) {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
@@ -477,6 +481,7 @@ fn prune(dir: &Path) {
             }
         }
     }
+    let _ = std::fs::remove_file(dir.join(crate::check::OUTPUT));
 }
 
 /// A kept run's log over `CUT_OVER` bytes keeps its first and last `CUT_KEEP` (whole records):
@@ -717,7 +722,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let f = find_flag(name).unwrap();
         for v in vals {
             pass.push(name.to_string());
-            if !f.value.is_empty() {
+            if !f.value_for(crate::cli::Cmd::Sweep).is_empty() {
                 pass.push(v.clone());
             }
         }
@@ -746,6 +751,15 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     });
                 }
                 c.arg("--").args(cmd_of(*case));
+                // The case, for a checker (`check::CASE_VAR`).
+                match (case, &cases) {
+                    (Some(i), Some(cs)) => c
+                        .env(crate::check::CASE_VAR, &cs[*i].text)
+                        .env(crate::check::CASE_NAME_VAR, &cs[*i].dir),
+                    _ => c
+                        .env_remove(crate::check::CASE_VAR)
+                        .env_remove(crate::check::CASE_NAME_VAR),
+                };
             }
             Job::Replay { dir, out } => {
                 c.arg("replay")
@@ -961,6 +975,9 @@ fn replayed(d: Done) {
     let v = match &r {
         Ok(r) if r["outcome"] == "nondeterministic" => {
             serde_json::json!({"result": "nondeterministic", "message": r["message"], "dir": out})
+        }
+        Ok(r) if r["stop"] == "check-unstable" => {
+            serde_json::json!({"result": "check-unstable", "message": r["message"], "dir": out})
         }
         Ok(_) => serde_json::json!({"result": "identical", "message": ""}),
         Err(_) => serde_json::json!({"result": "error", "message": tail(&d.stderr)}),

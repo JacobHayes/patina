@@ -330,6 +330,20 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
                         let c = Classified::new(Outcome::Nondeterministic, "divergence", msg);
                         return Ok((c, ExitCode::from(Outcome::Nondeterministic.exit())));
                     }
+                    let key = |v: &Option<crate::check::Verdict>| {
+                        crate::signature::check_key(&serde_json::to_value(v).unwrap())
+                    };
+                    if key(&r.oc.check) != key(&rr.oc.check) {
+                        println!(
+                            "check-unstable: run {k}'s checker answered otherwise than run 0's"
+                        );
+                        let c = Classified::new(
+                            Outcome::Error,
+                            "check-unstable",
+                            format!("run {k} equals run 0 and the checker answered differently: it depends on something outside the run directory"),
+                        );
+                        return Ok((c, ExitCode::from(Outcome::Error.exit())));
+                    }
                     // Long soaks: PATINA_VERIFY_PRUNE removes each run found identical
                     // to run 0 (run 0 stays for comparison).
                     if std::env::var_os("PATINA_VERIFY_PRUNE").is_some() {

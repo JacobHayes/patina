@@ -211,6 +211,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                     gap: o.plan.compute_gap,
                     images,
                 },
+                check: None,
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

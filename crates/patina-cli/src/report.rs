@@ -193,7 +193,7 @@ fn fault_classes(r: &Value) -> (BTreeSet<String>, BTreeSet<String>, BTreeMap<Str
     (conf, inj, elig)
 }
 
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     if !s.is_empty()
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "_./=:,+-@%".contains(c))
@@ -246,12 +246,15 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "buggify",
         "allow-unmet",
         "host-cpu",
+        "check",
     ];
+    // A case's checker gets its case only from run.json.
     let config_only = have
         .as_object()
         .unwrap()
         .iter()
-        .any(|(k, v)| !flagged.contains(&k.as_str()) && def.get(k.as_str()) != Some(v));
+        .any(|(k, v)| !flagged.contains(&k.as_str()) && def.get(k.as_str()) != Some(v))
+        || cfg.check.as_ref().is_some_and(|k| k.case.is_some());
     if config_only {
         a.push("--config".into());
         a.push(quote(&dir.join("run.json").display().to_string()));
@@ -304,6 +307,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if cfg.pmu.on {
             flag("--preempt", "branches".into());
+        }
+        if let Some(k) = &cfg.check {
+            flag("--check", crate::check::join(&k.words));
         }
         if cfg.buggify {
             a.push("--buggify".into());
@@ -512,6 +518,8 @@ pub fn build(runs: &[Run], allow: &[String], head: Option<SweepHead>) -> (Value,
             });
             let effective = match &replay {
                 Some(v) if v["result"] == "nondeterministic" => "nondeterministic".to_string(),
+                // A finding its checker does not repeat is not evidence about the program.
+                Some(v) if v["result"] == "check-unstable" => "error".to_string(),
                 _ => outcome.clone(),
             };
             let classes: Vec<_> = g.runs.iter().map(|r| fault_classes(&r.result).1).collect();

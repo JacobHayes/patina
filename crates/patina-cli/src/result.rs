@@ -48,6 +48,8 @@ pub struct RunEnd {
     pub sched: SchedCounts,
     /// Compute points.
     pub compute: ComputeCounts,
+    /// With `--check`, what the checker said (`not-run` when the run did not end ok).
+    pub check: Option<crate::check::Verdict>,
 }
 
 /// Compute points (`proto::ctl::ComputeStats`), summed over incarnations, and the run's mean gap.
@@ -382,6 +384,9 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some(cp) = e.compute.json(e.pmu.is_some()) {
         r["compute"] = cp;
     }
+    if let Some(k) = &e.check {
+        r["check"] = serde_json::to_value(k).unwrap();
+    }
     // `PACGA` reads a key the kernel redraws at every exec and that cannot be turned off: a
     // program that executes it differs run to run, so its sites are a label.
     if cfg!(target_arch = "aarch64") {
@@ -514,9 +519,22 @@ pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> 
     }))
 }
 
-/// The run's own outcome.
+/// The run's outcome: its own, or for a run that ended ok, the checker's finding or error.
 pub fn classified(e: &RunEnd) -> Classified {
-    classify(&e.verdict)
+    use crate::check::Kind;
+    let own = classify(&e.verdict);
+    match (&e.check, own.outcome) {
+        (Some(k), Outcome::Ok) => match k.verdict {
+            Kind::Fail => Classified::new(Outcome::Violation, "check", k.line()),
+            Kind::Error | Kind::Pending => Classified::new(
+                Outcome::Error,
+                "check",
+                k.message.clone().unwrap_or_default(),
+            ),
+            Kind::Pass | Kind::NotJudged | Kind::NotRun => own,
+        },
+        _ => own,
+    }
 }
 
 /// Lines of the guest's stderr the summary shows at most, and characters of each.
@@ -600,6 +618,21 @@ pub fn print_human(r: &Value, dir: &Path) {
     }
     for m in r["missing"].as_array().into_iter().flatten() {
         println!("{}", missing_line(m));
+    }
+    let check = &r["check"];
+    if check.is_object() && check["verdict"] != "not-run" {
+        match check["verdict"].as_str() {
+            Some("pass") => println!("check: pass"),
+            Some("not-judged") => println!(
+                "check: not judged: {}",
+                check["detail"].as_str().unwrap_or("")
+            ),
+            _ => {}
+        }
+        println!(
+            "checker output: {}",
+            dir.join(crate::check::OUTPUT).display()
+        );
     }
     println!("run directory: {}", dir.display());
     println!("replay: patina replay {}", dir.display());

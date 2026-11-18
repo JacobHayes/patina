@@ -110,6 +110,9 @@ pub struct Config {
     /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
     /// chosen by process id). Does not reach the guest.
     pub host_cpu: Option<usize>,
+    /// The checker run after a run that ended ok (`--check`, `[run] check`; `check.rs`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check: Option<crate::check::Check>,
 }
 
 impl Default for Config {
@@ -142,6 +145,7 @@ impl Default for Config {
             spin_probes: true,
             pmu: Pmu::default(),
             host_cpu: None,
+            check: None,
         }
     }
 }
@@ -525,17 +529,20 @@ fn range(v: &str, at: &str) -> Res<(u64, u64)> {
     Ok((p(a)?, p(b)?))
 }
 
-/// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory),
-/// or take the whole configuration a run recorded when `path` is a `run.json`.
-fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
+/// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory,
+/// but `[run] cmd` and `[run] check`, commands, are relative to where patina is started), or
+/// take the whole configuration a run recorded when `path` is a `run.json`. Returns `[run]
+/// check`, resolved by the caller once flags are known.
+fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
     let name = path.display().to_string();
     if path.extension().is_some_and(|e| e == "json") {
         let run = crate::result::read_json(path)?;
         crate::result::same_build(&run, path)?;
         *c = serde_json::from_value(run["config"].clone())
             .map_err(|e| format!("{name}: config: {e}"))?;
-        return Ok(());
+        return Ok(None);
     }
+    let mut check = None;
     let text = std::fs::read_to_string(path).map_err(|e| format!("{name}: {e}"))?;
     let doc: toml::Table = text.parse().map_err(|e| format!("{name}: {e}"))?;
     let base = path
@@ -567,6 +574,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
+                ("run", "check") => check = Some(string(v, &at)?),
                 ("run", "emulate-rndr") if cfg!(target_arch = "aarch64") => {
                     c.emulate_rndr = boolean(v, &at)?
                 }
@@ -613,7 +621,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<()> {
             }
         }
     }
-    Ok(())
+    Ok(check)
 }
 
 /// The resolved configuration of `run` and `verify`.
@@ -632,8 +640,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         Some(f) => Some(PathBuf::from(f)),
         None => Some(PathBuf::from("patina.toml")).filter(|p| p.is_file()),
     };
+    let mut check = None;
     if let Some(f) = &file {
-        apply_file(&mut c, f)?;
+        check = apply_file(&mut c, f)?;
     }
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
     c.seed = match a.num::<u64>("--seed")? {
@@ -684,6 +693,23 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     }
     if a.has("--buggify") {
         c.buggify = true;
+    }
+    if let Some(k) = a.last("--check") {
+        check = Some(k.to_string());
+    }
+    // A checker is resolved where patina starts (one a run.json recorded, again from its own
+    // directory): its SHA-256 is the file's now.
+    c.check = match check {
+        Some(k) => Some(crate::check::Check::resolve(&k, &logical("."))?),
+        None => c.check.as_ref().map(|k| k.again()).transpose()?,
+    };
+    // A sweep gives each of its --cases runs its case.
+    if let (Some(k), Ok(text), Ok(name)) = (
+        c.check.as_mut(),
+        std::env::var(crate::check::CASE_VAR),
+        std::env::var(crate::check::CASE_NAME_VAR),
+    ) {
+        k.case = Some(crate::check::Case { text, name });
     }
     if let Some(cmd) = a.cmd.as_ref().filter(|v| !v.is_empty()) {
         c.cmd = cmd.clone();

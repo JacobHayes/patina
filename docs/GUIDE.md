@@ -71,6 +71,7 @@ program got an error code for them). The program's full output is in the run dir
 | `result.json` | the outcome and everything measured (below) |
 | `inc-0/stdout`, `inc-0/stderr` | the program's output; `inc-1/` and on after a crash and restart |
 | `inc-0/boundary.log` | every system call and decision, for replay and `patina log` |
+| `check.out` | with `--check`, the checker's output ([Checks from outside the program](#checks-from-outside-the-program)) |
 
 A run that never ends fills its logs fast (a livelock writes hundreds of MB a second), so the
 logs are limited: `--log-limit MIB` (`[run] log-limit`, default 1024) ends the run
@@ -392,6 +393,108 @@ last injected:
 
 What survives a machine crash follows `ext4-ordered` by default; `[faults] fs-model =
 "posix-strict"` allows everything POSIX allows, which loses more.
+
+## Checks from outside the program
+
+A program that exits 0 can still be wrong: it acknowledged a record a crash then lost, or
+wrote the wrong file. `--check 'CMD ARGS'` (on `run`, `verify` and `sweep`; `[run] check =
+"CMD ARGS"` in `patina.toml`) judges each run from outside, with no change to the program:
+after a run that ended `ok`, Patina runs `CMD ARGS RUNDIR` on the host.
+
+| The checker gets | |
+|---|---|
+| `RUNDIR` | its last argument: `run.json`, `result.json`, per incarnation `inc-K/stdout`, `stderr`, `post-crash/` |
+| working directory | where patina was started (recorded in `run.json`); paths in `CMD ARGS` are relative to it |
+| `PATINA_SEED`, `PATINA_EXIT` | the seed; the program's exit status |
+| `PATINA_CASE`, `PATINA_CASE_NAME` | in a sweep with `--cases`: the case's line, and its directory `K-NAME` |
+
+| It answers | The run |
+|---|---|
+| exit 0 | stays `ok` (`check.verdict` `pass`) |
+| exit 1 | `violation`, stop `check`, named by the first line of its stdout, `LABEL: detail` |
+| exit 77 | stays `ok`, not judged (`not-judged`; the first line says why) |
+| any other exit, a signal, cannot be started, still running after `--timeout` seconds | `error`, stop `check`: a broken checker is never a pass |
+
+`LABEL: detail` is treated exactly as an SDK `always` label and detail are: the label is kept,
+numbers in the detail become `N`, so a sweep groups one bug once however many runs hit it;
+the run directory's own path in that line is written `RUNDIR` (a replay's is elsewhere).
+The checker's stdout, then its stderr, are in `RUNDIR/check.out`; `result.json` has its
+verdict under `check`. The checker is your program, run as you on the host: Patina does not
+sandbox it or limit its network. `CMD ARGS` is split into words as a `--cases` line is
+(quotes, no expansion); no shell runs unless you name one (`--check 'sh -c "..."'`). Its time
+limit is `--timeout`, counted from its own start; it is killed if patina is, and a run
+directory left by a patina stopped during the check says `error` (`check.verdict` `pending`).
+`verify --vary env` changes the environment variables, umask and limits the checker inherits
+too. A run that did not end `ok` (a failure, a
+crash, a hang) is a finding already and its checker is not started.
+
+`examples/kvlog-c` is an append-only log with no SDK in it: it prints `ack I` once record I
+is written, and never syncs it. `examples/checks/acked-kept` compares, after each machine
+crash, the last record acknowledged on `inc-K/stdout` with what `inc-K/post-crash/data.log`
+(the disk the crash left) holds, and exits 77 for a run that did not crash:
+
+```text
+$ cc -o kvlog examples/kvlog-c/kvlog.c
+$ patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
+new: violation check: acked-record-lost: acknowledged N, N stored after the crash   (seed 2: patina replay /tmp/kvlog/patina-out/sweep/seed-2)
+sweep: replaying the first seed of 1 finding
+sweep: 383.4 KiB kept in /tmp/kvlog/patina-out/sweep
+patina sweep: 30 runs, 9 findings in 1 group, 21 ok   (0.2s, 8 jobs)
+outcomes: ok 21, violation 9
+
+violation check: acked-record-lost: acknowledged N, N stored after the crash
+  9 of 30 runs   first: seed 2   replayed: identical
+  faults in every failing run: crash      in none: -
+  rerun:  patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
+  replay: patina replay /tmp/kvlog/patina-out/sweep/seed-2
+```
+
+The same sweep of `./kvlog fixed`, which syncs each record before acknowledging it, has 30
+`ok` runs. One run:
+
+```text
+$ patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
+violation (check): acked-record-lost: acknowledged 22, 21 stored after the crash
+guest: exit 0
+faults injected: 1 (crash 1)
+last injected:
+  seq 98 t=100000ms crash kind=machine point=27 object=/work/data.log lost: 0 missing, 1 changed, 0 back
+checker output: /tmp/kvlog/patina-out/run-2/check.out
+run directory: /tmp/kvlog/patina-out/run-2
+replay: patina replay /tmp/kvlog/patina-out/run-2
+```
+
+The checker is part of the run's record: `run.json` keeps its words, its directory, its
+program and that program's SHA-256, so `replay`, `verify`, `minimize` and `run --config
+RUNDIR/run.json` run it too, and replay and minimize refuse a checker whose file changed (as
+they refuse a changed program). A sweep whose checker changed starts over. `minimize` keeps
+what the finding needs:
+
+```text
+$ patina minimize patina-out/run-2
+without --crash machine:10: no longer fails
+--crash machine:10 -> machine:5: still fails
+--crash machine:5 -> machine:2: no longer fails
+reduced: crash machine:5 (from crash machine:10); run directory /tmp/kvlog/patina-out/run-2/minimized
+patina run --seed 2 --crash machine:5 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
+```
+
+A checker must be a function of the run directory and of files that do not change. One that
+reads the wall clock, the network or a reference that moves answers differently for the
+same run: a replay whose logs are identical to the run's while the checker's verdict differs
+ends `error`, stop `check-unstable` (not `nondeterministic`, which is a Patina bug), and a
+sweep's group whose replay did so is `error`. The checker's output never enters the run's
+logs or digest: a run judged `pass` has the digest it has without `--check`.
+
+What a checker can read after a crash: `inc-K/stdout` and `stderr` (what each incarnation
+wrote before its crash), `inc-K/post-crash/` (the tree a machine crash left, the next
+incarnation's starting disk; a process crash loses nothing and has none) and `result.json`'s
+`crashes[]`. It runs once, after the last incarnation. With `--cases`, each case's run has its
+own check; under `--branch` each base and each child is judged.
+
+One `--check` per run: several checks are one script that runs them and prints the first
+failure. A slow checker sets a sweep's speed. In shell, `$( )` strips trailing newlines:
+compare files with `cmp`.
 
 ## The SDK
 

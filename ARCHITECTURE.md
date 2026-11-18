@@ -138,6 +138,14 @@ chain over the records. Replay runs the program again and compares record by rec
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`).
 
+A `--check` command (`check.rs`) runs after a run that ended ok, on the host and outside the
+sandbox, with the run directory as its argument; it is never part of the run. `run.json`
+records its words, working directory, program and SHA-256 (`Config::check`); `result.json`
+records its verdict (`check`), which can turn an ok run into a `violation` (stop `check`,
+signed as an `always` is) or an `error`. Its output is not in the logs or the digest. A
+replay whose logs equal the run's while the verdict differs ends `error`, stop
+`check-unstable`, not `nondeterministic`.
+
 The logs of a run (this one and the operation log) are limited (`Config::log_limit`,
 `--log-limit`): the append that would pass the limit ends the run instead, so the cut depends
 on records, not time. The log file grows by `fallocate`, so a full host filesystem is a failed

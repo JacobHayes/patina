@@ -50,28 +50,18 @@ pub fn of(r: &Value, dir: &Path) -> Value {
 fn primary(r: &Value, stderr: &str) -> String {
     let message = r["message"].as_str().unwrap_or("");
     let p = match r["outcome"].as_str().unwrap_or("") {
-        "violation" => match r["sdk"]["violation"]["label"].as_str() {
-            // The label is the assertion's name: kept as written (but checkout-free); the
-            // detail's first line, normalised, tells apart bugs reported under one label.
-            Some(l) => {
-                let mut p = checkout_free(l);
-                let first = r["sdk"]["violation"]["detail"]
-                    .as_str()
-                    .unwrap_or("")
-                    .lines()
-                    .find(|x| !x.trim().is_empty())
-                    .unwrap_or("");
-                let d: String = normalise(&checkout_free(first))
-                    .chars()
-                    .take(DETAIL_MAX)
-                    .collect();
-                if !d.is_empty() {
-                    p = format!("{p}: {}", d.trim_end());
-                }
-                return p.chars().take(PRIMARY_MAX).collect();
+        // A failed `always`, or a `--check` finding: the same rule.
+        "violation" => {
+            let v = if r["stop"] == "check" {
+                &r["check"]
+            } else {
+                &r["sdk"]["violation"]
+            };
+            match v["label"].as_str() {
+                Some(l) => return violation(l, v["detail"].as_str().unwrap_or("")),
+                None => message.to_string(),
             }
-            None => message.to_string(),
-        },
+        }
         "liveness" => {
             let w = waits(message);
             if w.is_empty() {
@@ -111,6 +101,31 @@ fn primary(r: &Value, stderr: &str) -> String {
         _ => String::new(),
     };
     normalise(&p)
+}
+
+/// A violation's name: its label kept as written (but checkout-free), then the first line of
+/// its detail, normalised and cut, which tells apart bugs reported under one label.
+fn violation(label: &str, detail: &str) -> String {
+    let mut p = checkout_free(label);
+    let first = detail.lines().find(|x| !x.trim().is_empty()).unwrap_or("");
+    let d: String = normalise(&checkout_free(first))
+        .chars()
+        .take(DETAIL_MAX)
+        .collect();
+    if !d.is_empty() {
+        p = format!("{p}: {}", d.trim_end());
+    }
+    p.chars().take(PRIMARY_MAX).collect()
+}
+
+/// The key two verdicts of one checker on one run are compared by: the verdict and the
+/// finding's name as a signature gives it.
+pub fn check_key(c: &Value) -> (Value, String) {
+    let line = match c["label"].as_str() {
+        Some(l) => violation(l, c["detail"].as_str().unwrap_or("")),
+        None => normalise(c["detail"].as_str().unwrap_or("")),
+    };
+    (c["verdict"].clone(), line)
 }
 
 /// `s` with every absolute path cut to its last three components: `/home/u/src/app/crates/
@@ -314,6 +329,17 @@ mod tests {
         assert!(s.ends_with("exit 101") && !s.contains("10:9"), "{s}");
         // Ok has none.
         assert!(of(&json!({"outcome": "ok"}), Path::new("/nonexistent")).is_null());
+    }
+
+    #[test]
+    fn a_check_is_named_as_an_always_is() {
+        let always = json!({"outcome": "violation", "stop": "always", "message": "x",
+            "sdk": {"violation": {"label": "acked-record-lost", "detail": "acknowledged 17, 16 stored"}}});
+        let check = json!({"outcome": "violation", "stop": "check", "message": "x",
+            "check": {"verdict": "fail", "label": "acked-record-lost", "detail": "acknowledged 9, 3 stored"}});
+        let (a, c) = (sig(always, ""), sig(check, ""));
+        assert_eq!(a.split_once(": ").unwrap().1, c.split_once(": ").unwrap().1);
+        assert!(c.starts_with("violation check: acked-record-lost"), "{c}");
     }
 
     #[test]

@@ -754,6 +754,32 @@ file-error group names the injected class in every failing run. The 30 digests a
 signature splits the race into one group per seed and fails the check; not acting on a
 replay's divergence turns a host file changing under the replay into a finding and fails it.
 
+## Checks from outside the program
+
+`tests/oracles/01-checks.sh` (quick, about 2 s, most of it the checker that outlives a 2 s
+`--timeout`), 2026-11-18, this host: `examples/kvlog-c` (no SDK) under `--crash machine:10`
+with `examples/checks/acked-kept`, seeds 1-30: 9 failing seeds in exactly one group,
+`violation check: acked-record-lost: acknowledged N, N stored after the crash`, its first seed
+replayed identical; `minimize` keeps the crash (`machine:10` to `machine:5`) and the
+signature; `kvlog fixed` gives 30 `ok`. Red/green, each planted in turn: every checker exit
+status read as a pass (the sweep exits 0 with no finding), a checker's error left `ok` (exit 2
+passes), a missing checker accepted (the run starts), a checker past `--timeout` read as a pass,
+the checker started after a failure, and the replay's differing verdict left
+`nondeterministic` each fail the check. The first version of `acked-kept` failed on a crash
+before `data.log` reached the disk (no file in `post-crash/`); the sweep reported it as
+`error check` on that seed, not as a pass.
+
+`./check evidence check-cost` (`tests/oracles/evidence-check-cost.sh`, `hello-static`, 400
+seeds, `-j 8`, `--keep none`, two rounds interleaved), 2026-11-18, this host:
+
+| Check | Runs per second, round 1 | Round 2 |
+|---|---|---|
+| none | 537 | 557 |
+| `--check true` | 505 | 481 |
+| a five-line `sh` checker reading the run directory | 472 | 475 |
+
+`--check true` costs 6% and 14% of the rate; every run ended `ok`.
+
 ## Second hosts
 
 One `patina` binary and one set of guest binaries, built once on the development VM from
