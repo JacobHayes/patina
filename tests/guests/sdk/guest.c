@@ -4,8 +4,10 @@
  *   fail           an `always` fails
  *   unreach        an `unreachable` is reached
  *   coin           a `sometimes` on one random byte
- *   loop N [sdk]   N iterations of a little arithmetic, with a passing `always` if "sdk"  */
+ *   loop N [sdk]   N iterations of a little arithmetic, with a passing `always` if "sdk"
+ *   marks          mark "ack 1", write the file `marked`, mark "ack 2"  */
 #include "patina.h"
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,6 +51,13 @@ int main(int argc, char **argv) {
         unsigned char b = 0;
         if (getrandom(&b, 1, 0) != 1) return 2;
         PATINA_SOMETIMES(b % 2 == 0, "coin");
+        return 0;
+    }
+    if (!strcmp(mode, "marks")) {
+        patina_mark("ack 1");
+        int fd = open("marked", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+        if (fd < 0 || write(fd, "x", 1) != 1 || close(fd)) return 2;
+        patina_mark("ack 2");
         return 0;
     }
     if (!strcmp(mode, "loop")) {

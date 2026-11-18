@@ -21,10 +21,47 @@ pub enum RecKind {
     /// `ret` the process id, and the name's bytes (its last `NAME_BYTES` when longer) in
     /// `args`, `out_hash` and `in_hash`.
     Name = 9,
+    /// A string of the record before it (a call's trap record, or a string record of the same
+    /// call), in clear: `class` says which string (`STR_*`, with `STR_CUT` on a string longer
+    /// than was kept and `STR_MORE` on every record after its first), `nr` the bytes kept,
+    /// `ret` the process id, and `STR_BYTES` of the bytes in `args`, `out_hash` and `in_hash`
+    /// (zero past the end). A string of N bytes is N / `STR_BYTES` records, rounded up (one
+    /// for an empty string), one after another under the same turn.
+    Str = 10,
 }
 
 /// Name bytes one `Name` record carries.
 pub const NAME_BYTES: usize = 64;
+
+/// String bytes one `Str` record carries.
+pub const STR_BYTES: usize = 64;
+/// Which string a `Str` record holds (its `class`, less the flags): an SDK call's label.
+pub const STR_LABEL: u8 = 1;
+/// An SDK call's text (a `mark`'s; an assertion's detail is in `result.json`, not here).
+pub const STR_TEXT: u8 = 2;
+/// The string was longer than the bytes kept (on its first record).
+pub const STR_CUT: u8 = 0x40;
+/// A record after the first of its string.
+pub const STR_MORE: u8 = 0x80;
+/// The bits of `class` that say which string.
+pub const STR_WHICH: u8 = 0x3f;
+
+/// The words of a record that carry 64 bytes: `args`, `out_hash`, `in_hash`.
+fn pack(b: &[u8; 64]) -> ([u64; 6], u64, u64) {
+    let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+    ([w(0), w(1), w(2), w(3), w(4), w(5)], w(6), w(7))
+}
+
+fn unpack(r: &Rec) -> [u8; 64] {
+    let mut b = [0u8; 64];
+    let words = [
+        r.args[0], r.args[1], r.args[2], r.args[3], r.args[4], r.args[5], r.out_hash, r.in_hash,
+    ];
+    for (i, w) in words.iter().enumerate() {
+        b[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
+    }
+    b
+}
 
 impl Rec {
     /// A `Name` record for `name` (its last `NAME_BYTES` bytes when longer).
@@ -32,7 +69,7 @@ impl Rec {
         let tail = &name[name.len().saturating_sub(NAME_BYTES)..];
         let mut b = [0u8; NAME_BYTES];
         b[..tail.len()].copy_from_slice(tail);
-        let w = |i: usize| u64::from_le_bytes(b[i * 8..i * 8 + 8].try_into().unwrap());
+        let (args, out_hash, in_hash) = pack(&b);
         Rec {
             seq,
             vclock_ns,
@@ -40,31 +77,61 @@ impl Rec {
             kind: RecKind::Name as u8,
             class: 0,
             nr: name.len() as u32,
-            args: [w(0), w(1), w(2), w(3), w(4), w(5)],
+            args,
             ret: pid,
-            out_hash: w(6),
-            in_hash: w(7),
+            out_hash,
+            in_hash,
         }
     }
 
     /// The bytes of a `Name` record and whether the name was cut (only its tail kept).
     pub fn name_bytes(&self) -> ([u8; NAME_BYTES], usize, bool) {
-        let mut b = [0u8; NAME_BYTES];
-        let words = [
-            self.args[0],
-            self.args[1],
-            self.args[2],
-            self.args[3],
-            self.args[4],
-            self.args[5],
-            self.out_hash,
-            self.in_hash,
-        ];
-        for (i, w) in words.iter().enumerate() {
-            b[i * 8..i * 8 + 8].copy_from_slice(&w.to_le_bytes());
-        }
         let n = self.nr as usize;
-        (b, n.min(NAME_BYTES), n > NAME_BYTES)
+        (unpack(self), n.min(NAME_BYTES), n > NAME_BYTES)
+    }
+
+    /// The `Str` records of `s` (`which`, one of `STR_*`; `cut`: `s` is the kept part of a
+    /// longer string), stamped as the call they follow (`seq`, `vclock_ns`, `slot`).
+    pub fn strs(
+        seq: u64,
+        vclock_ns: u64,
+        slot: u16,
+        pid: i64,
+        which: u8,
+        s: &[u8],
+        cut: bool,
+    ) -> impl Iterator<Item = Rec> + '_ {
+        let n = s.len().div_ceil(STR_BYTES).max(1);
+        (0..n).map(move |i| {
+            let part = &s[(i * STR_BYTES).min(s.len())..((i + 1) * STR_BYTES).min(s.len())];
+            let mut b = [0u8; STR_BYTES];
+            b[..part.len()].copy_from_slice(part);
+            let (args, out_hash, in_hash) = pack(&b);
+            let flags = if i > 0 {
+                STR_MORE
+            } else if cut {
+                STR_CUT
+            } else {
+                0
+            };
+            Rec {
+                seq,
+                vclock_ns,
+                slot,
+                kind: RecKind::Str as u8,
+                class: (which & STR_WHICH) | flags,
+                nr: s.len() as u32,
+                args,
+                ret: pid,
+                out_hash,
+                in_hash,
+            }
+        })
+    }
+
+    /// A `Str` record's bytes (`STR_BYTES`; those past the string's end are zero).
+    pub fn str_bytes(&self) -> [u8; STR_BYTES] {
+        unpack(self)
     }
 }
 
@@ -81,6 +148,7 @@ impl RecKind {
             Injected,
             Preempt,
             Name,
+            Str,
         ]
         .into_iter()
         .find(|k| *k as u8 == v)
@@ -96,6 +164,7 @@ impl RecKind {
             RecKind::Injected => "inject",
             RecKind::Preempt => "preempt",
             RecKind::Name => "name",
+            RecKind::Str => "str",
         }
     }
 }

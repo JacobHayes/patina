@@ -1,5 +1,5 @@
 //! The SDK test guest in Rust: the script of guest.c (modes script [two], fail, unreach, coin,
-//! loop).
+//! loop, marks).
 use std::io::Read;
 
 fn script(two: bool, argc: usize) {
@@ -51,6 +51,11 @@ fn main() {
                 }
             }
             println!("{acc}");
+        }
+        "marks" => {
+            patina_dst::mark!("ack 1");
+            std::fs::write("marked", "x").unwrap();
+            patina_dst::mark!("ack 2");
         }
         m => {
             eprintln!("unknown mode {m}");

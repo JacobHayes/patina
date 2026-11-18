@@ -28,6 +28,7 @@ fn record_kind(r: &Rec) -> String {
         Some(RecKind::SignalDelivery) => "signal-delivery records".into(),
         Some(RecKind::InsnEmulation) => "instruction-emulation records".into(),
         Some(RecKind::Injected) => "injected-fault records".into(),
+        Some(RecKind::Str) => "string records (SDK labels)".into(),
         _ => "other records".into(),
     }
 }

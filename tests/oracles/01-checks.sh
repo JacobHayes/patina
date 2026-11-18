@@ -1,9 +1,8 @@
 # 1. `--check`: a checker outside the simulation judges each run that ended ok.
 #    kvlog (no SDK; acknowledges records it never syncs) under machine crashes with
 #    examples/checks/acked-kept: one finding group, `violation check: acked-record-lost`,
-#    replayed identical, minimised with the crash kept; `kvlog fixed` has none; the checker
-#    run by hand on the run directory says the same; the sweep resumes, and a changed checker
-#    file replaces it. A checker that exits 2, cannot be started, is missing or outlives
+#    replayed identical, minimised with the crash kept; the checker run by hand on the run
+#    directory says the same (`kvlog fixed`, and resuming a sweep: 02-sweeps.sh). A checker that exits 2, cannot be started, is missing or outlives
 #    --timeout is never a pass (`error`, exit 2); one whose verdict alternates makes the replay
 #    `error check-unstable`, not `nondeterministic`; a run that ends failure, crash or liveness
 #    does not start it; a path in the run directory in a finding replays the same; a passing checker leaves the run's outcome, digest and logs as a run
@@ -15,16 +14,17 @@
 #    finding, known findings do not fail the sweep, `[*planted*]` selects by case, and a `!`
 #    entry that matched no run makes the report vacuous.
 # 3. `--ok-exit` and `patina log tree`: upcase (a short write gives the wrong file and exit 0)
-#    swept with disk faults against a faults-off reference run: plainly, clean failures only;
-#    with `--ok-exit 1 --check same-tree`, one `wrong-output` group with fs-short in every run
-#    and no failure; `upcase fixed` none. An --ok-exit status the program did not exit with is
+#    swept with disk faults against a faults-off reference run with `--ok-exit 1 --check
+#    same-tree`: one `wrong-output` group with fs-short in every run and no failure (the plain
+#    sweep and `upcase fixed`: 02-sweeps.sh). An --ok-exit status the program did not exit with is
 #    still a failure, as is a listed status after an INVARIANT line, and a signal still a
 #    crash; the rerun line and run.json carry the list. `log tree` writes the tree the guest ended with (not the one it started from) and works
 #    on every incarnation of a crashed run.
 # 4. `patina log events`: a file created as a/x and renamed to b/y is named a/x before the
 #    rename and b/y after it, under --work's guest location; one line per trap record; two runs
 #    of one seed give the same bytes. examples/checks/confined and synced-before-mark, which
-#    read it, find their planted bugs over a seed range through --check and pass the fixes.
+#    read it, find their planted bugs over a seed range through --check and pass the fixes
+#    (marklog fixed marks progress before its fsync: only the `ack` marks are judged).
 #@ tier=quick budget=10 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -72,10 +72,6 @@ case $groups in "violation check: acked-record-lost"*) ;; *) die "kvlog sweep: g
 [ "$(jq -r '.groups[0].replay.result' kv/report.json)" = identical ] || die "kvlog: the first seed's replay: $(jq -c .groups[0].replay kv/report.json)"
 first=$(jq -r '.groups[0].first.dir' kv/report.json)
 echo "kvlog: $(jq -r .findings kv/report.json) of 30 runs: $groups (first $first)"
-rc=0
-"$PATINA" sweep --seeds 1..30 -j 4 --crash machine:10 --out kvf --check chk/acked -- "$kv" fixed >kvf.txt 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ "$(jq '.groups | length' kvf/report.json)" = 0 ] || die "kvlog fixed: exit $rc: $(tail -3 kvf.txt)"
-[ "$(jq '.outcomes.ok' kvf/report.json)" = 30 ] || die "kvlog fixed: not 30 ok runs"
 
 # By hand, outside patina, the checker says what it said in the run.
 rc=0
@@ -87,14 +83,6 @@ want=$(jq -r '"\(.check.label): \(.check.detail)"' "$first/result.json")
 "$PATINA" minimize "$first" --out min --format json >min.json 2>min.err || die "minimize: $(tail -2 min.err)"
 case $(jq -r .to min.json) in *"crash machine"*) ;; *) die "minimize dropped the crash: $(jq -c . min.json)" ;; esac
 [ "$(jq -r .signature "$(jq -r .dir min.json)/result.json")" = "$(jq -r .signature "$first/result.json")" ] || die "minimize: another signature"
-
-# The same sweep resumes (a kept run stays); with the checker's file changed it is replaced.
-: >"$first/kept"
-"$PATINA" sweep --seeds 1..30 -j 4 --crash machine:10 --out kv --check chk/acked -- "$kv" >kv2.txt 2>&1 || true
-[ -f "$first/kept" ] || die "the same sweep did not resume"
-echo "# changed" >>chk/acked
-"$PATINA" sweep --seeds 1..30 -j 4 --crash machine:10 --out kv --check chk/acked -- "$kv" >kv3.txt 2>&1 || true
-[ ! -f "$first/kept" ] || die "a changed checker did not replace the sweep"
 
 # A checker that fails is never a pass.
 is exit2 "$(run exit2 --check chk/exit2 -- "$hello")" 2 error check
@@ -198,18 +186,12 @@ up=$PATINA_GUESTS/examples/upcase same=$root/examples/checks/same-tree
 export PATINA
 "$PATINA" run --seed 1 --out upref -- "$up" >upref.txt 2>&1 || die "upcase reference: $(tail -2 upref.txt)" # lint-allow: seed — faults off, upcase writes the same tree on every seed
 rc=0
-"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --out up0 -- "$up" >up0.txt 2>&1 || rc=$?
-[ "$rc" = 1 ] && [ "$(jq -r '[.groups[].outcome] | unique | join(" ")' up0/report.json)" = failure ] || die "upcase plain sweep: exit $rc: $(tail -3 up0.txt)"
-rc=0
 "$PATINA" sweep --seeds 1..40 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up1 -- "$up" >up1.txt 2>&1 || rc=$?
 [ "$rc" = 1 ] && [ "$(jq '.groups | length' up1/report.json)" = 1 ] || die "upcase checked sweep: exit $rc: $(tail -3 up1.txt)"
 case $(jq -r '.groups[0].signature' up1/report.json) in "violation check: wrong-output"*) ;; *) die "upcase: $(jq -c '.groups[0]' up1/report.json)" ;; esac
 jq -e '.groups[0].faults.every | index("fs-short")' up1/report.json >/dev/null || die "upcase: fs-short is not in every failing run"
 [ "$(jq '.ok_exit // 0' up1/report.json)" -gt 0 ] || die "upcase: no run counted as a clean failure"
-rc=0
-"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up2 -- "$up" fixed >up2.txt 2>&1 || rc=$?
-[ "$rc" = 0 ] && [ "$(jq '.groups | length' up2/report.json)" = 0 ] || die "upcase fixed: exit $rc: $(tail -3 up2.txt)"
-echo "upcase: plain $(jq -r .findings up0/report.json) clean failures; checked: $(jq -r '"\(.findings) \(.groups[0].signature)"' up1/report.json)"
+echo "upcase: checked: $(jq -r '"\(.findings) \(.groups[0].signature)"' up1/report.json)"
 # Only the statuses named, never a signal; the rerun line and run.json carry the list.
 is okexit "$(run okexit --ok-exit 1,3 -- /bin/sh -c 'exit 3')" 0 ok ok-exit
 is okexit2 "$(run okexit2 --ok-exit 1,3 -- /bin/sh -c 'exit 2')" 1 failure exit
@@ -230,7 +212,7 @@ run lt --work lt-start -- /bin/sh -c "rm gone; mkdir -p d/e; echo new >d/f; chmo
 mv lt-tree/listing lt-listing
 [ "$(cd lt-tree && sh -c "$list")" = "$(cat lt-listing)" ] || die "log tree differs from the guest's own tree: $(cd lt-tree && sh -c "$list")"
 ! "$PATINA" log tree lt/inc-0 lt-tree 2>/dev/null || die "log tree wrote into a directory that is not empty"
-pruned=$(for d in up2/seed-*; do [ -d "$d/inc-0" ] || { echo "$d"; break; }; done)
+pruned=$(for d in up1/seed-*; do [ -d "$d/inc-0" ] || { echo "$d"; break; }; done)
 [ -n "$pruned" ] && ! "$PATINA" log tree "$pruned/inc-0" lt-pruned 2>/dev/null && [ ! -e lt-pruned ] || die "log tree of a pruned run '$pruned'"
 # Every incarnation of a crashed run; each holds at least the records acknowledged in it.
 n=0
@@ -251,7 +233,7 @@ mkdir app
         "$PATINA" sweep --seeds 1..4 -j 2 --out conf-$v --check "$root/examples/checks/confined /work/data" -- "$files" $v >conf-$v.txt 2>&1 || true
     done
     for v in bug fixed; do
-        "$PATINA" sweep --seeds 1..4 -j 2 --out mark-$v --check "$root/examples/checks/synced-before-mark /work/data.log" -- "$marklog" $v >mark-$v.txt 2>&1 || true
+        "$PATINA" sweep --seeds 1..4 -j 2 --out mark-$v --check "$root/examples/checks/synced-before-mark /work/data.log ack" -- "$marklog" $v >mark-$v.txt 2>&1 || true
     done
 ) &
 sweeps=$!
@@ -277,7 +259,7 @@ found() {
 }
 found conf-other "violation check: outside-roots: mkdir /work/other"
 found conf-data none
-found mark-bug "violation check: ack-before-fsync"
+found mark-bug "violation check: ack-before-fsync: ack N (seq N)"
 found mark-fixed none
 
 wait "$hang" || true

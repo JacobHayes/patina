@@ -6,7 +6,7 @@
 use crate::cli::{Args, Res};
 use crate::durability::check::incarnations;
 use proto::ctl::Op;
-use proto::rec::{Rec, REC_SIZE};
+use proto::rec::{Rec, REC_SIZE, STR_BYTES, STR_CUT, STR_LABEL, STR_MORE, STR_TEXT, STR_WHICH};
 use proto::table::{name, Class};
 use proto::RecKind;
 use std::path::Path;
@@ -135,6 +135,26 @@ pub fn describe(r: &Rec) -> String {
             let s = String::from_utf8_lossy(&b[..n]);
             format!("{}{s}", if cut { "..." } else { "" })
         }
+        Some(RecKind::Str) => {
+            let b = r.str_bytes();
+            let more = r.class & STR_MORE != 0;
+            // This record's part of the string, escaped on one line (a later record does not
+            // know where the string ends: its zero padding is left out). `log events` joins
+            // the parts.
+            let k = if more {
+                b.iter().rposition(|&c| c != 0).map_or(0, |i| i + 1)
+            } else {
+                (r.nr as usize).min(STR_BYTES)
+            };
+            format!(
+                "{} of {}{}{} \"{}\"",
+                str_which(r.class & STR_WHICH),
+                r.nr,
+                if more { " (more)" } else { "" },
+                if r.class & STR_CUT != 0 { " (cut)" } else { "" },
+                b[..k].escape_ascii()
+            )
+        }
         _ => format!("{:#x}", r.nr),
     };
     format!(
@@ -154,6 +174,68 @@ pub fn describe(r: &Rec) -> String {
         r.out_hash,
         r.in_hash
     )
+}
+
+/// The name of a string (`Str` record) kind.
+pub fn str_which(w: u8) -> &'static str {
+    match w {
+        STR_LABEL => "label",
+        STR_TEXT => "text",
+        _ => "string",
+    }
+}
+
+/// A string read back from its `Str` records: `start` at its first record, `push` the ones
+/// after it until it is whole.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Str {
+    pub which: u8,
+    pub pid: i64,
+    pub bytes: Vec<u8>,
+    /// Longer than the bytes kept.
+    pub cut: bool,
+    len: usize,
+}
+
+impl Str {
+    pub fn start(r: &Rec) -> Option<Str> {
+        if r.kind != RecKind::Str as u8 || r.class & STR_MORE != 0 {
+            return None;
+        }
+        let mut s = Str {
+            which: r.class & STR_WHICH,
+            pid: r.ret,
+            bytes: vec![],
+            cut: r.class & STR_CUT != 0,
+            len: r.nr as usize,
+        };
+        s.take(r);
+        Some(s)
+    }
+
+    fn take(&mut self, r: &Rec) {
+        let k = (self.len - self.bytes.len()).min(STR_BYTES);
+        self.bytes.extend_from_slice(&r.str_bytes()[..k]);
+    }
+
+    /// All of its records read (not so when a log was cut in the middle of one).
+    pub fn whole(&self) -> bool {
+        self.bytes.len() == self.len
+    }
+
+    /// Whether `r` is this string's next record; if so its bytes are taken.
+    pub fn push(&mut self, r: &Rec) -> bool {
+        let next = !self.whole()
+            && r.kind == RecKind::Str as u8
+            && r.class & STR_MORE != 0
+            && r.class & STR_WHICH == self.which
+            && r.nr as usize == self.len
+            && r.ret == self.pid;
+        if next {
+            self.take(r);
+        }
+        next
+    }
 }
 
 /// Index and both versions of the first differing record, if any.
@@ -331,5 +413,32 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR | log events RUNDIR"
                 .into(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A string of any length comes back whole from its records, which follow one another
+    /// with the same process; a record of another string ends it.
+    #[test]
+    fn strings_round_trip() {
+        for n in [0usize, 1, 63, 64, 65, 255, 4096] {
+            let s: Vec<u8> = (0..n).map(|i| (i * 7 % 256) as u8).collect();
+            let recs: Vec<Rec> = Rec::strs(9, 5, 2, 42, STR_LABEL, &s, n == 255).collect();
+            assert_eq!(recs.len(), n.div_ceil(STR_BYTES).max(1));
+            let mut got = Str::start(&recs[0]).unwrap();
+            for r in &recs[1..] {
+                assert!(got.push(r));
+                assert!(Str::start(r).is_none());
+            }
+            assert!(got.whole());
+            assert_eq!((got.bytes, got.pid, got.cut), (s, 42, n == 255));
+        }
+        let a: Vec<Rec> = Rec::strs(1, 0, 0, 7, STR_LABEL, &[1; 100], false).collect();
+        let b: Vec<Rec> = Rec::strs(1, 0, 0, 7, STR_TEXT, &[2; 100], false).collect();
+        let mut s = Str::start(&a[0]).unwrap();
+        assert!(!s.push(&b[0]) && !s.push(&b[1]) && !s.whole());
     }
 }

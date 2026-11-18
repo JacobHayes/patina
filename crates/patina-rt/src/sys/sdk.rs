@@ -1,22 +1,66 @@
 //! The SDK channel (`proto::sdk`), answered here under the turn. Decisions are keyed draws of
 //! the seed and the label; the site table is shared by every process of the run (it sits in
 //! the control region) and read by the launcher after the run. The payload's hash is the trap
-//! record's `in_hash`, so replay compares every label, condition and answer.
+//! record's `in_hash`, so replay compares every label, condition and answer; the label (and a
+//! mark's text) follows the trap record in clear (`proto::RecKind::Str`).
 
 use super::*;
+use crate::path::Global;
 use crate::state::{config, thread};
-use core::sync::atomic::AtomicU64;
 use proto::ctl::Op;
 use proto::layout::PAGE;
+use proto::rec::{STR_LABEL, STR_TEXT};
 use proto::sdk::*;
 
 const MAX_LEN: usize = HDR_LEN + LABEL_MAX + TEXT_MAX;
 
-/// The payload hash of the last SDK trap, taken by `log::trap`.
-static LAST_HASH: AtomicU64 = AtomicU64::new(0);
+/// The last SDK trap's payload hash and strings, copied from the payload the handler read and
+/// taken by `log::trap` for that trap's records. Set after the call is served (a `delay` gives
+/// up the turn while it is served) and taken before the turn is given up again.
+struct Last {
+    hash: u64,
+    /// Strings to write: none for a call whose payload was refused.
+    set: bool,
+    label: [u8; LABEL_MAX],
+    label_len: usize,
+    text: [u8; TEXT_MAX],
+    text_len: usize,
+}
+
+static LAST: Global<Last> = Global::new(Last {
+    hash: 0,
+    set: false,
+    label: [0; LABEL_MAX],
+    label_len: 0,
+    text: [0; TEXT_MAX],
+    text_len: 0,
+});
+
+/// Keep the trap's hash, its label and (for a mark) its text.
+fn keep(hash: u64, label: &[u8], text: &[u8]) {
+    let l = LAST.get();
+    l.hash = hash;
+    l.set = true;
+    l.label_len = label.len().min(LABEL_MAX);
+    l.label[..l.label_len].copy_from_slice(&label[..l.label_len]);
+    l.text_len = text.len().min(TEXT_MAX);
+    l.text[..l.text_len].copy_from_slice(&text[..l.text_len]);
+}
 
 pub fn take_hash() -> u64 {
-    LAST_HASH.swap(0, Relaxed)
+    core::mem::take(&mut LAST.get().hash)
+}
+
+/// Append the strings of the trap just recorded (`log::trap`, after its record).
+pub fn log_strings() {
+    let l = LAST.get();
+    if !core::mem::take(&mut l.set) {
+        return;
+    }
+    crate::log::strs(STR_LABEL, &l.label[..l.label_len], false);
+    if l.text_len > 0 {
+        crate::log::strs(STR_TEXT, &l.text[..l.text_len], false);
+    }
 }
 
 fn tab() -> &'static mut SdkTab {
@@ -60,7 +104,10 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 Ok(h) => {
                     let n = len as usize;
                     let r = serve(call, op, &h, &mut buf[..n], ptr);
-                    LAST_HASH.store(proto::rec::hash_bytes(op, &buf[..n]), Relaxed);
+                    let (label, text) = buf[HDR_LEN..n].split_at(h.label_len);
+                    // A mark's text is kept; an assertion's detail reaches result.json.
+                    let text = if op == OP_MARK { text } else { &[] };
+                    keep(proto::rec::hash_bytes(op, &buf[..n]), label, text);
                     r
                 }
                 Err(e) => e,
@@ -200,7 +247,7 @@ fn violation(call: &mut dyn Call, label: &[u8], detail: &[u8]) -> ! {
         t.violation_label = label.len() as u64;
     }
     let a = call.guest_args();
-    LAST_HASH.store(proto::rec::hash_bytes(OP_ASSERT, t.violation()), Relaxed);
+    keep(proto::rec::hash_bytes(OP_ASSERT, t.violation()), label, &[]);
     crate::log::trap(&proto::table::SDK_ROW, call, 0);
     crate::sup::call_sup(Op::SdkViolation, [a[0], a[1], a[2], 0, 0, 0]);
     crate::sup::hang()

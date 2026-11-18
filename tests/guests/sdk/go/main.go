@@ -1,5 +1,5 @@
 // The SDK test guest in Go: the script of guest.c (modes script [two], fail, unreach, coin,
-// loop).
+// loop, marks).
 package main
 
 import (
@@ -92,6 +92,12 @@ func main() {
 			}
 		}
 		fmt.Println(acc)
+	case "marks":
+		patina.Mark("ack 1")
+		if err := os.WriteFile("marked", []byte("x"), 0o644); err != nil {
+			os.Exit(2)
+		}
+		patina.Mark("ack 2")
 	default:
 		fmt.Fprintln(os.Stderr, "unknown mode", mode)
 		os.Exit(2)

@@ -195,6 +195,26 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
         in_hash,
     };
     append(&rec);
+    if row.group == proto::table::Group::Sdk {
+        crate::sys::sdk::log_strings();
+    }
+}
+
+/// Append the `Str` records of `s` after the current call's record (`proto::RecKind::Str`).
+pub fn strs(which: u8, s: &[u8], cut: bool) {
+    let ts = crate::state::thread();
+    let vclock_ns = ctl().vclock_ns.load(Relaxed);
+    for r in Rec::strs(
+        ts.seq,
+        vclock_ns,
+        ts.slot as u16,
+        ts.pid as i64,
+        which,
+        s,
+        cut,
+    ) {
+        append(&r);
+    }
 }
 
 /// Record an emulated instruction (`nr` is the instruction code).

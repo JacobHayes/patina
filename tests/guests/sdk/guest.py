@@ -1,5 +1,5 @@
 """The SDK test guest in Python: the script of guest.c (modes script [two], fail, unreach, coin,
-loop)."""
+loop, marks)."""
 import os
 import sys
 
@@ -62,6 +62,11 @@ def main():
             if sdk:
                 LOOP_BOUNDED.check(acc != 0xFFFFFFFFFFFFFFFF, "saturated")
         print(acc)
+    elif mode == "marks":
+        patina.mark("ack 1")
+        with open("marked", "w") as f:
+            f.write("x")
+        patina.mark("ack 2")
     else:
         sys.stderr.write(f"unknown mode {mode}\n")
         sys.exit(2)

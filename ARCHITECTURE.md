@@ -134,7 +134,17 @@ third, and for `fcntl`, `ioctl`, `prctl` and `arch_prctl` what the command's ent
 `proto::table::cmds` names). An unread register holds whatever the program's code left there,
 which can differ between hosts where the program's behaviour does not (static glibc's
 `memcpy` leaves another value in `x4` on an arm64 CPU with SVE than on one without). The run's digest is the hash
-chain over the records. Replay runs the program again and compares record by record
+chain over the records.
+
+A string the program passed that a checker needs in clear (an SDK call's label, a mark's text)
+follows its call's record as `Str` records (`proto::RecKind::Str`): which string, its length,
+the process, and 64 of its bytes per record, as many records as the string needs, appended
+under the same turn right after the trap record, so they are in the digest and in replay's
+comparison. The bytes are a copy of what the handler already read through the checked guest
+copy (`sys/sdk.rs` keeps the label it was given until `log::trap` writes it), never a second
+read of the program's memory. A call whose payload could not be read has none.
+
+Replay runs the program again and compares record by record
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`).
 
@@ -156,7 +166,8 @@ one JSON line per boundary record, with each operation-log record after its call
 goes before the first record later in virtual time) and named by replaying the namespace
 (create, link, rename, unlink) as the operations go by, so a path is the one the file had at
 that moment. An `Injected` record and its `Name` records become one `fault` event with the
-fields `faults.recent` shows (`launcher::attribution::injected`, shared). It streams both
+fields `faults.recent` shows (`launcher::attribution::injected`, shared); a call's `Str`
+records become fields of its event. It streams both
 logs and keeps only the live names. Its fields are versioned (`v` in the header) and only
 added to; `log dump` and `log ops` stay the text forms.
 
@@ -407,8 +418,9 @@ the run `internal`. `patina log ops` prints the log.
 The SDKs make one reserved system call, `0x7061`. Outside Patina the kernel answers `ENOSYS`
 and the SDK goes inert. Under Patina the runtime answers it (`sys/sdk.rs`): assertions count
 into a site table shared by every process of the run, and fault points are draws keyed by
-the seed and the label. A failed `always`, or a reached `unreachable`, ends the run
-`violation`. Sites declared with a literal label are in an ELF section, so a site never reached
+the seed and the label. The payload's hash is the trap record's `in_hash`, and its label (a
+mark's text too) follows the record in clear. A failed `always`, or a reached `unreachable`,
+ends the run `violation`. Sites declared with a literal label are in an ELF section, so a site never reached
 is still reported (an `unreachable` never reached is as it should be, and a sweep does not list
 it).
 

@@ -21,9 +21,10 @@ for lang, cmd in LANGS.items():
         die(f"{lang} fail: sdk.violation {r.sdk['violation']}")
     if r.site("before-fail")["held"] != 1 or r.site("after-fail")["evaluated"] != 0:
         die(f"{lang} fail: the run went on past the violation")
-    last = log_ops(r)[-2:]
-    if "patina_sdk" not in last[0] or "SdkViolation" not in last[1]:
-        die(f"{lang} fail: the log does not end with the trap and the decision: {last}")
+    # The trap, its label in clear, the decision.
+    last = log_ops(r)[-3:]
+    if "patina_sdk" not in last[0] or " str " not in last[1] or '"must-hold"' not in last[1] or "SdkViolation" not in last[2]:
+        die(f"{lang} fail: the log does not end with the trap, its label and the decision: {last}")
 
     r = run(f"01/{lang}-unreach", 1, cmd, "unreach")
     if r.cls != "violation" or r.outcome["message"] != "never-here: reached":

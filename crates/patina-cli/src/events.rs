@@ -10,10 +10,10 @@
 use crate::cli::Res;
 use crate::durability::check::incarnations;
 use crate::durability::tree::Tree;
-use crate::log::Cut;
+use crate::log::{Cut, Str};
 use proto::ctl::Op;
 use proto::oplog::{OpKind, OpRec, OPREC_SIZE};
-use proto::rec::{Rec, RecKind, REC_SIZE};
+use proto::rec::{Rec, RecKind, REC_SIZE, STR_LABEL, STR_TEXT};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -88,6 +88,22 @@ impl Line {
     fn str(&mut self, k: &str, v: &str) -> &mut Line {
         let _ = write!(self.0, ",\"{k}\":{}", Value::from(v));
         self
+    }
+    /// Bytes from the program as a string: as they are when they are UTF-8; otherwise each
+    /// invalid byte as U+FFFD and the exact bytes in `K_hex` (lowercase hex), so nothing is
+    /// lost and a reader that wants the bytes has them.
+    fn bytes(&mut self, k: &str, v: &[u8]) -> &mut Line {
+        match std::str::from_utf8(v) {
+            Ok(s) => self.str(k, s),
+            Err(_) => {
+                self.str(k, &String::from_utf8_lossy(v));
+                let mut h = String::with_capacity(2 * v.len());
+                for b in v {
+                    let _ = write!(h, "{b:02x}");
+                }
+                self.str(&format!("{k}_hex"), &h)
+            }
+        }
     }
     fn hex(&mut self, k: &str, v: u64) -> &mut Line {
         if v != 0 {
@@ -176,6 +192,28 @@ impl Records {
             Some(i) => Ok(Some(i)),
             None => self.read(),
         }
+    }
+
+    /// The strings that follow the record `r` (`Str` records of its call), taken from the
+    /// stream. A string whose records a cut log lost is left out.
+    fn strings(&mut self, r: &Rec) -> Res<Vec<Str>> {
+        let mut v: Vec<Str> = vec![];
+        while let Some(n) = self.peek(0)? {
+            if n.kind != RecKind::Str as u8 || n.seq != r.seq || n.slot != r.slot {
+                break;
+            }
+            self.next()?;
+            if let Some(s) = v.last_mut().filter(|s| !s.whole()) {
+                if s.push(&n) {
+                    continue;
+                }
+            }
+            if let Some(s) = Str::start(&n) {
+                v.push(s);
+            }
+        }
+        v.retain(Str::whole);
+        Ok(v)
     }
 
     /// The `i`-th record after the current one (0: the next), if it is a record.
@@ -548,10 +586,21 @@ impl<W: Write> Export<'_, W> {
                     l.str("op", op);
                 }
                 // The payload's label and text: their length and the payload's hash (the
-                // same label and text, the same hash).
+                // same label and text, the same hash); the label (and a mark's text) in clear.
                 if (proto::sdk::OP_ASSERT..=proto::sdk::OP_DECLARE).contains(&a[0]) {
                     l.num("len", a[2].saturating_sub(proto::sdk::HDR_LEN as u64));
                     l.hex("hash", r.in_hash);
+                }
+                let strs = recs.strings(r)?;
+                if let Some(s) = strs.first() {
+                    l.num("pid", s.pid);
+                }
+                for s in &strs {
+                    match s.which {
+                        STR_LABEL => l.bytes("label", &s.bytes),
+                        STR_TEXT => l.bytes("text", &s.bytes),
+                        _ => &mut l,
+                    };
                 }
                 l.num("ret", r.ret);
                 self.emit(ty, Some(r.seq), l)
@@ -593,8 +642,8 @@ impl<W: Write> Export<'_, W> {
                 }
                 self.emit("fault", Some(r.seq), l)
             }
-            // An injected fault's names, read with it.
-            Some(RecKind::Name) => Ok(()),
+            // An injected fault's names, read with it; a call's strings, read with it.
+            Some(RecKind::Name | RecKind::Str) => Ok(()),
             Some(RecKind::SupDecision) if r.nr == Op::CrashPoint as u32 => self.crash(k, inc, r),
             Some(RecKind::SupDecision) => {
                 let mut l = Line::at("sched", k, r);

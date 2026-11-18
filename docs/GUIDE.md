@@ -568,9 +568,9 @@ Two examples ship beside `acked-kept`:
 
 - `examples/checks/confined ROOT... RUN`: every change to the work tree (`op` events other
   than `close` and the syncs) is on a path under a root.
-- `examples/checks/synced-before-mark FILE RUN`: for a program that calls the SDK's `mark`
-  after it wrote and acknowledged a record, no write to `FILE` is unsynced at a mark. Mark
-  labels are not in the stream yet, so every mark counts as an acknowledgement.
+- `examples/checks/synced-before-mark FILE PREFIX RUN`: for a program that marks each
+  acknowledgement with the SDK's `mark` (`mark("ack 17")`), no write to `FILE` is unsynced at
+  a mark whose label starts with `PREFIX`; other marks are ignored.
 
 The core of `confined`, the first change outside the roots:
 
@@ -723,6 +723,15 @@ production builds without flags.
 | `sometimes(cond, label)`, `reachable(label)` | should hold or be reached in some run of a sweep |
 | `buggify(label)` | a fault point: true on seed-chosen evaluations under `--buggify` |
 | `knob(label, default, lo, hi)` | a seed-chosen value under `--buggify` |
+| `mark(label)` | a named point in the run's log, label in clear (up to 255 bytes, so it can carry data: `mark("ack 17")`); `setup_complete()` is `mark("setup-complete")` |
+
+A mark records what the program promised, where it promised it; a checker decides whether
+the promise was backed. `patina log events` shows each mark's label, process and place among
+the calls and file operations, so "every acknowledgement follows the fsync of its record" is a
+few lines of `jq` that find the bug in every run, crash or not
+(`examples/checks/synced-before-mark`, [Checks from outside the
+program](#checks-from-outside-the-program)). Every SDK call's label is in the log in clear, so
+a run that makes SDK calls changes its digest when a label changes.
 
 Under `--buggify` each point is active in about a quarter of runs and fires on about a
 quarter of its evaluations; `--fault point:LABEL=PERMILLE` fixes one point's rate. A sweep in
@@ -855,14 +864,20 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `op` | a change to the work tree, after its call: `pid`, `op`, `ino`, `path` (absent for a file with no name left), and by `op`: `create` `mode` `fmt`; `mkdir` `mode`; `symlink` `target`; `unlink`, `rmdir` `left` (links); `rename` `to`, `replaced`, `flags`; `write`, `mmap-dirty`, `mmap-shared` `off` `len`; `truncate` `size`; `fallocate` `mode` `off` `len`; `setattr` `mode` `uid` `gid`; `xattr-set`, `xattr-remove` `name`; `fsync` `flags` (1 data only, 2 no commit, 4 msync); also `link`, `fsync-dir`, `fsync-fail`, `sync`, `close`. No `slot` |
 | `fault` | an injected fault, as `faults.recent` shows it (every one, not the last 20): `class`, `call`, `object`, `pid`, and `errno`, `count`, `bytes` or `delay_ns`; a path swap's `swap`, `target`, `after`, `after_seq`, `put_back`; a datagram's `datagram`, `from`, `to` |
 | `crash` | a crash point fired (`seq` is its call's): `kind` (`machine`, `process`), `point`, and for a machine crash `lost` (as `faults.recent`) |
-| `mark` | SDK `mark`: `len` (the label's bytes), `hash` (of the label: one label, one hash), `ret` |
-| `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, ...), `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never) |
+| `mark` | SDK `mark`: `label`, `text` (when the mark has one; the SDKs send none), `pid` (the process), `len` (the payload's label and text bytes), `hash` (of the payload: one label, one hash), `ret` |
+| `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, ...), `label`, `pid`, `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never). An assertion's detail is in `result.json`, not here |
 | `signal`, `sigfault` | a signal delivered (`sig`, `code`, `pc`); a synchronous fault forwarded to the program (`sig`, `code`, `addr`, `pc`) |
 | `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
 
-Not in it yet: mark and assertion labels in clear (a `mark` has its label's hash and length),
-the path and argument strings of calls (only their hashes, `in`), the process of a call (an
-`op` and a `fault` have `pid`; a `call` has its thread's `slot`, which is not a process id),
+Strings from the program (`label`, `text`) are JSON strings when they are UTF-8. Otherwise
+each byte that is not is U+FFFD in the string and the exact bytes are in a second field with
+`_hex` after the name (`label_hex`: lowercase hex), so nothing is lost. A call whose payload
+the program's pointer did not cover (`ret` -14, `EFAULT`) has no `label`, nor does one
+whose strings a sweep's cut log or the log limit left out (a reader should allow for it).
+
+Not in it: the path and argument strings of calls (only their hashes, `in`), the process of a
+call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its thread's `slot`, which is
+not a process id),
 buffer contents (read the trees: `patina log tree`, `post-crash/`). A run directory a sweep
 pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
 and fields are only ever added: a reader should ignore what it does not know.
