@@ -3,7 +3,7 @@
 # under --vary cpu,load,aslr,sandbox and 100 runs under --vary parallel (8 sandboxes at once):
 # all identical (digest: every preempt record's stop instruction, N, register hash; virtual
 # counts), the same digest in both, at least one preemption, checksum equal to native.
-#@ tier=evidence budget=1200 slots=8 arch=x86_64
+#@ tier=evidence budget=1200 slots=8
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys

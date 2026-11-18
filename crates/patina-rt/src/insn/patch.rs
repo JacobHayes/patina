@@ -13,7 +13,7 @@
 use crate::raw::*;
 use core::cell::UnsafeCell;
 
-const CAP: usize = 4096;
+pub const CAP: usize = 4096;
 
 #[derive(Clone, Copy)]
 #[repr(C)]

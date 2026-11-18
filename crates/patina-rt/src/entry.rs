@@ -89,7 +89,14 @@ fn install_handlers() {
         }
         let flags =
             SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESTORER | crate::arch::SA_ARCH_RUNTIME;
-        let sys: [u64; 4] = [on_sigsys as *const () as u64, flags, restorer(), 0];
+        // arm64 with counter preemption: SIGTRAP waits while a handler runs, so that the
+        // overflow signal never interrupts runtime code (`arch/aarch64/pmu.rs`).
+        let held: u64 = if cfg!(target_arch = "aarch64") && config().pmu & proto::ctl::PMU_ON != 0 {
+            bit(SIGTRAP)
+        } else {
+            0
+        };
+        let sys: [u64; 4] = [on_sigsys as *const () as u64, flags, restorer(), held];
         if sc4(nr::RT_SIGACTION, SIGSYS, sys.as_ptr() as u64, 0, 8) != 0 {
             crate::fatal(proto::ctl::Setup::SigactionSys, 0);
         }
@@ -101,7 +108,7 @@ fn install_handlers() {
             } else {
                 on_fault as *const () as u64
             };
-            let f: [u64; 4] = [h, flags, restorer(), 0];
+            let f: [u64; 4] = [h, flags, restorer(), held];
             if sc4(nr::RT_SIGACTION, s, f.as_ptr() as u64, 0, 8) != 0 {
                 crate::fatal(proto::ctl::Setup::SigactionFault, 0);
             }

@@ -1,12 +1,14 @@
 # Hazard: CPU migration inside a run. patina pins a sandbox to one CPU; here a second thread moves
 # every task of the run to a random CPU every 2 ms while it runs (counters are per task, so
-# they must follow). 5 runs each of four programs must equal an unperturbed run.
-#@ tier=area budget=200 slots=2 arch=x86_64
+# they must follow). 5 runs each of four programs (two programs at a time) must equal an
+# unperturbed run.
+#@ tier=area budget=200 slots=2
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, random, subprocess, sys, threading, time
 sys.path.insert(0, os.environ["PYTHONPATH"])
 from counters import *
+from concurrent.futures import ThreadPoolExecutor
 P = ppatina(required=False)
 cpus = sorted(os.sched_getaffinity(0))
 def tasks(root):
@@ -44,11 +46,14 @@ def moved(out, cmd):
     o = outcome(out) or {"outcome": "none", "digest": "-"}
     prune(out)
     return o, n
-fail = []
-for p in ["loops", "strings", "fp", "threads"]:
+def one(p):
     cmd = ["/guest/counters/compute", p]
     ref = run(P, f"{RUNS}/11/{p}-ref", 3, GU, PMU, cmd)
-    res = [moved(f"{RUNS}/11/{p}-m{i}", cmd) for i in range(5)]
+    return p, ref, [moved(f"{RUNS}/11/{p}-m{i}", cmd) for i in range(5)]
+fail = []
+with ThreadPoolExecutor(2) as ex:
+    done = list(ex.map(one, ["loops", "strings", "fp", "threads"]))
+for p, ref, res in done:
     same = sum(o["digest"] == ref["digest"] and o["outcome"] == "ok" for o, _ in res)
     print(f"{p}: reference {ref['outcome']} {ref['digest']} ({ref['counters']['pmu']['preempts']} stops); moved runs equal: {same}/5; "
           f"affinity changes per run: {[n for _, n in res]}")

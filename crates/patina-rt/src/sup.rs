@@ -32,13 +32,22 @@ pub fn call_sup(op: Op, args: [u64; 6]) -> Reply {
 }
 
 /// Real signals pending for this task other than SIGCHLD: every asynchronous signal is held
-/// blocked in the kernel, so anything pending was sent from outside the sandbox.
+/// blocked in the kernel, so anything pending was sent from outside the sandbox. (On arm64
+/// with counter preemption, SIGTRAP waits while runtime code runs: an overflow pending is the
+/// counter's, `arch/aarch64/pmu.rs`.)
 /// The call is made from runtime text and does not trap.
 pub fn outside_check() {
     const SIGCHLD_BIT: u64 = 1 << (17 - 1);
+    const SIGTRAP_BIT: u64 = 1 << (5 - 1);
+    let held =
+        if cfg!(target_arch = "aarch64") && crate::state::config().pmu & proto::ctl::PMU_ON != 0 {
+            SIGTRAP_BIT
+        } else {
+            0
+        };
     let mut set: u64 = 0;
     let r = unsafe { sc2(nr::RT_SIGPENDING, &mut set as *mut u64 as u64, 8) };
-    let set = set & !SIGCHLD_BIT;
+    let set = set & !SIGCHLD_BIT & !held;
     if r == 0 && set != 0 {
         let sig = set.trailing_zeros() as u64 + 1;
         host_error(sig as i64, 0, proto::ctl::HE_OUTSIDE_SIGNAL);

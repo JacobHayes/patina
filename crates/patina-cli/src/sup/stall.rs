@@ -189,12 +189,9 @@ pub fn spin_host(ctl: &proto::ctl::Ctl) -> String {
     format!(" A spin probe could not run: {t}{errno}{doctor}.")
 }
 
-/// The other way out where branch counters exist (x86_64 only).
-#[cfg(target_arch = "x86_64")]
+/// The other way out: branch counters.
 const BRANCHES: &str =
     "; or rerun with --preempt branches (needs CAP_PERFMON and a host PMU; see `patina doctor`).";
-#[cfg(not(target_arch = "x86_64"))]
-const BRANCHES: &str = ".";
 
 /// CPU time of guest thread `tid` (a PID-namespace id; 0: none), from `/proc/TID/schedstat`.
 fn thread_cpu_ns(tid: i32) -> Option<u64> {

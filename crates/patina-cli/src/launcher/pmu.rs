@@ -16,8 +16,9 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::OnceLock;
 use std::thread::JoinHandle;
 
-/// The event attribute: raw `event`, user mode only, overflow every `PERIOD` branches with a
-/// synchronous SIGTRAP to the counted thread, removed at `execve`.
+/// The event attribute: raw `event` (the CPU's own PMU: x86_64 `PERF_TYPE_RAW` names it, and
+/// so does arm64 on a host with one kind of core), user mode only, overflow every `PERIOD`
+/// branches with a synchronous SIGTRAP to the counted thread, removed at `execve`.
 fn attr(event: u64) -> [u8; 128] {
     let mut a = [0u8; 128];
     a[0..4].copy_from_slice(&4u32.to_le_bytes()); // PERF_TYPE_RAW
@@ -50,15 +51,54 @@ fn perf_open(event: u64, tid: i32) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(r as RawFd) })
 }
 
-/// The retired-conditional-branch event of this CPU, if its family is supported. Elsewhere
-/// counter preemption is refused, not attempted. On an Intel Xeon 6975P-C
-/// (`BR_INST_RETIRED.CONDITIONAL`, 0x01c4) the stops differed from those reached by stepping
-/// branch by branch, and one seed moved between CPUs gave a different digest each run; a run
-/// must not mean something different on another host. A seed run with counters reproduces
-/// on the same CPU family. No arm64 CPU is supported.
-#[cfg(not(target_arch = "x86_64"))]
+/// The branch event of this CPU, if it is supported. Elsewhere counter preemption is refused,
+/// not attempted. On an Intel Xeon 6975P-C (`BR_INST_RETIRED.CONDITIONAL`, 0x01c4) the stops
+/// differed from those reached by stepping branch by branch, and one seed moved between CPUs
+/// gave a different digest each run; a run must not mean something different on another host.
+/// A seed run with counters reproduces on the same CPU family (x86_64) or core (arm64).
+///
+/// arm64: every core of the host (`MIDR_EL1` from sysfs, which needs no privilege) must be in
+/// `proto::pmu::ARM_CORES`; a host with two kinds of core is refused unless both are.
+#[cfg(target_arch = "aarch64")]
 fn event() -> Result<u64, Unavailable> {
-    Err(Unavailable::Arch)
+    let mut midrs = Vec::new();
+    if let Ok(d) = std::fs::read_dir("/sys/devices/system/cpu") {
+        for e in d.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if !name
+                .strip_prefix("cpu")
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            {
+                continue;
+            }
+            let Ok(v) = std::fs::read_to_string(e.path().join("regs/identification/midr_el1"))
+            else {
+                continue;
+            };
+            if let Ok(m) = u64::from_str_radix(v.trim().trim_start_matches("0x"), 16) {
+                midrs.push(m);
+            }
+        }
+    }
+    midrs.sort_unstable();
+    midrs.dedup();
+    if midrs.is_empty() {
+        return Err(Unavailable::Cpu("MIDR_EL1 unknown".into()));
+    }
+    match midrs.iter().find(|&&m| proto::pmu::arm_core(m).is_none()) {
+        None => Ok(proto::pmu::EVENT_ARM_BR_RETIRED),
+        Some(m) => Err(Unavailable::Cpu(format!(
+            "MIDR_EL1 {m:#x}: implementer {:#x} part {:#x}",
+            m >> 24 & 0xff,
+            m >> 4 & 0xfff
+        ))),
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn event() -> Result<u64, Unavailable> {
+    Err(Unavailable::Cpu(std::env::consts::ARCH.into()))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -93,11 +133,7 @@ fn event() -> Result<u64, Unavailable> {
 /// Why counters cannot be used here.
 #[derive(Clone, Debug)]
 pub enum Unavailable {
-    /// Not on arm64: no CPU of it is supported.
-    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
-    Arch,
     /// The CPU's branch counting is not one Patina has checked exact.
-    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
     Cpu(String),
     /// The CPU is supported; this process lacks `CAP_PERFMON`.
     Permission(String),
@@ -108,11 +144,11 @@ pub enum Unavailable {
 impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Unavailable::Arch => write!(f, "branch counters are not supported on arm64"),
             Unavailable::Cpu(m) => write!(
                 f,
-                "this CPU ({m}) is not supported: counter preemption is checked exact on AMD \
-                 family 0x1a (Zen 5) only"
+                "this CPU ({m}) is not supported: counter preemption is checked exact on {} \
+                 only",
+                proto::pmu::SUPPORTED_CPUS
             ),
             Unavailable::Permission(m) => write!(
                 f,

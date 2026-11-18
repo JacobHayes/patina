@@ -5,7 +5,9 @@
  *     indirect  calls through function-pointer tables and a switch jump table
  *     strings   memcpy/memset/memmove/strlen/strcmp/memchr on growing buffers (rep string
  *               instructions and vector code in glibc), and an inline rep movsb/stosb/cmpsb
- *     fp        floating point: SSE double, x87 long double, libm (sqrt, sin, exp, log)
+ *               (x86_64; byte loops elsewhere)
+ *     fp        floating point: double, long double (x87 on x86_64, binary128 on arm64), libm
+ *               (sqrt, sin, exp, log)
  *     signals   a thread computing while another thread sends it SIGUSR1 every few ms of
  *               compute (handlers compute too), and an interval timer (SIGALRM)
  *     threads   16 threads computing, combining results under a mutex
@@ -117,11 +119,18 @@ static uint64_t strings(long n)
 			h = mix(h, (uint64_t)(memchr(a, 0, len) ? 1 : 0));
 			size_t k = len;
 			char *d = b, *s = a;
+#if defined(__x86_64__)
 			__asm__ volatile("rep movsb" : "+D"(d), "+S"(s), "+c"(k) : : "memory");
 			k = len / 2; d = a;
 			__asm__ volatile("rep stosb" : "+D"(d), "+c"(k) : "a"('z') : "memory");
 			k = len; s = a; d = b;
 			__asm__ volatile("repe cmpsb" : "+D"(d), "+S"(s), "+c"(k) : : "memory", "cc");
+#else
+			/* The same three operations as byte loops (no string instructions). */
+			for (; k; k--) *(volatile char *)d++ = *s++;
+			for (k = len / 2, d = a; k; k--) *(volatile char *)d++ = 'z';
+			for (k = len, s = a, d = b; k;) { k--; if (*(volatile char *)s++ != *d++) break; }
+#endif
 			h = mix(h, k);
 		}
 	}

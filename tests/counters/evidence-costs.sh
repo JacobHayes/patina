@@ -1,8 +1,10 @@
 # Costs, serially (run on a quiet host for the numbers in docs/EVIDENCE.md): per-trap
 # overhead (getppid loop, off/on), per-preemption cost (compute loops: extra wall per stop),
 # W1-W9 end-to-end wall off/on (median of 3). Writes $RUNS/07/costs.tsv. Measurement: fails
-# only if a run is not ok.
-#@ tier=evidence budget=1200 slots=1 arch=x86_64
+# only if a run ends without a verdict (a timeout, an internal error); a run that ends in a
+# finding (W9 under counters can crash fjall where its open after the crash fails) is
+# timed like any other and its outcome noted.
+#@ tier=evidence budget=1200 slots=1
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys
@@ -14,7 +16,7 @@ P = ppatina()
 rows = []
 def med(patina, name, g, opts, cmd, k=3):
     rs = [run(patina, f"{RUNS}/07/{name}-{i}", 1, g, opts, cmd) for i in range(k)]
-    if any(r["outcome"] not in ("ok", "failure", "crash") for r in rs): die(f"{name}: {[r['outcome'] + ' ' + r['message'][:80] for r in rs]}")
+    if any(r["outcome"] not in ("ok", "failure", "crash", "violation") for r in rs): die(f"{name}: {[r['outcome'] + ' ' + r['message'][:80] for r in rs]}")
     rs.sort(key=lambda r: r["wall_ms"])
     return rs[k // 2]
 a = med(P, "traps-off", GU, [], ["/guest/counters/compute", "traps", "10"])
@@ -31,7 +33,8 @@ for w in ORDER:
     g, cmd, fo, extra = WL[w]
     a = med(P, w + "-off", g, fo + extra, cmd)
     b = med(P, w + "-on", g, PMU + fo + extra, cmd)
-    rows.append((f"{w} wall (ms)", f"{a['wall_ms']} -> {b['wall_ms']}", f"x{b['wall_ms'] / max(a['wall_ms'], 1):.2f}, {b['counters']['pmu']['preempts']} stops, {b['sched']['traps']} traps"))
+    note = "" if a["outcome"] == b["outcome"] else f", {a['outcome']} off, {b['outcome']} on"
+    rows.append((f"{w} wall (ms)", f"{a['wall_ms']} -> {b['wall_ms']}", f"x{b['wall_ms'] / max(a['wall_ms'], 1):.2f}, {b['counters']['pmu']['preempts']} stops, {b['sched']['traps']} traps{note}"))
 with open(RUNS + "/07/costs.tsv", "w") as f:
     for r in rows:
         f.write("\t".join(r) + "\n")

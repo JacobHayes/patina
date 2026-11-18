@@ -4,7 +4,7 @@
 # with the same registers (equal digests), for N = 3,000 (period per segment) and N = 1,100,000
 # (free-running period, rearm, landing); and the default policy gives identical runs under
 # --vary cpu,aslr with at least one preemption. SKIP without CAP_PERFMON.
-#@ tier=area budget=60 slots=4 arch=x86_64
+#@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys

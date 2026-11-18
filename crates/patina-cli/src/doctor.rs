@@ -333,11 +333,13 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         result: {
             use crate::launcher::pmu::Unavailable as U;
             crate::launcher::pmu::available()
-                .map(|ev| format!("event {ev:#x} opens"))
+                .map(|ev| format!("supported: event {ev:#x} opens"))
                 .map_err(|e| match e {
-                    U::Arch => ("not supported on arm64".into(), String::new()),
                     U::Cpu(m) => (
-                        format!("not supported on this CPU, {m} (supported: AMD Zen 5)"),
+                        format!(
+                            "not supported on this CPU, {m} (supported: {})",
+                            proto::pmu::SUPPORTED_CPUS
+                        ),
                         String::new(),
                     ),
                     U::Permission(m) => (
@@ -351,8 +353,8 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
                 })
         },
     });
-    // Counter preemption's broker reads a thread's pidfd; not asked on arm64 (no counters).
-    if cfg!(target_arch = "x86_64") {
+    // Counter preemption's broker reads a thread's pidfd.
+    {
         let pidfd_thread =
             unsafe { libc::syscall(libc::SYS_pidfd_open, libc::gettid(), libc::O_EXCL) };
         checks.push(Check {

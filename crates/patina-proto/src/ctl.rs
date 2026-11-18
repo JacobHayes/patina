@@ -354,8 +354,8 @@ pub const TM_EXPORTED: usize = 5;
 #[repr(C)]
 pub struct InsnCtl {
     /// Sites patched, by `proto::insn::SiteKind` (x86_64: 1 rdrand, 2 rdseed, 4 pause; arm64:
-    /// 1 rndr, 2 rndrrs, 4 pause).
-    pub patched: [AtomicU64; 5],
+    /// 1 rndr, 2 rndrrs, 4 pause, 5 exclusive).
+    pub patched: [AtomicU64; 6],
     /// Emulated executions, by `INSN_*` index.
     pub emulated: [AtomicU64; 8],
     /// Executable mappings whose code the scanner could not see or vouch for: anonymous
@@ -943,6 +943,7 @@ limits! {
     LIMIT_DESCRIPTORS = 5: "open file descriptors (the runtime needs a few of its own)",
     LIMIT_SHARED = 6: "shared mappings in one process, a writable one among them (the runtime keys process-shared futexes by them)",
     LIMIT_RUNTIME_MEMORY = 7: "bytes of runtime memory used over one process's life (a copy of each shared, writable work-tree mapping, and the threads' stacks)",
+    LIMIT_PATCH_SITES = 8: "patched instruction sites in one process (under branch counters on arm64 every exclusive load and store is one, and none may run natively)",
 }
 
 /// Signal requests.

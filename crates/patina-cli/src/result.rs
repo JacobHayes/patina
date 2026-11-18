@@ -252,7 +252,7 @@ pub fn net_add(a: &mut [u64; NET_FIELDS], b: &[u64; NET_FIELDS]) {
 pub struct InsnCounts {
     /// By `proto::insn::SiteKind`: [unused, rdrand, rdseed, rdpid, pause] on x86_64, [unused,
     /// rndr, rndrrs, pacga, pause] on arm64.
-    pub patched: [u64; 5],
+    pub patched: [u64; 6],
     /// By `proto::ctl::INSN_*`.
     pub emulated: [u64; 5],
     pub unscanned_exec_mappings: u64,
@@ -307,8 +307,13 @@ impl InsnCounts {
         let (patched, counted) = (["rdrand", "rdseed"], "rdpid_sites");
         #[cfg(target_arch = "aarch64")]
         let (patched, counted) = (["rndr", "rndrrs"], "pacga_sites");
+        let mut sites = json!({ patched[0]: self.patched[1], patched[1]: self.patched[2], "pause": self.patched[4] });
+        // arm64 with counter preemption: the exclusive instructions (`proto::insn`).
+        if self.patched[5] != 0 {
+            sites["exclusive"] = json!(self.patched[5]);
+        }
         json!({
-            "patched_sites": { patched[0]: self.patched[1], patched[1]: self.patched[2], "pause": self.patched[4] },
+            "patched_sites": sites,
             "emulated": em,
             "scan": {
                 "mappings": self.scanned_mappings,

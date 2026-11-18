@@ -23,11 +23,6 @@ sets=$base/guests/sets
 mkdir -p "$cache" "$sets" "$PATINA_BUILD_DIR"
 
 workload_style=" c-sqlite cpython fjall-harness go-static rust-threads-files shell-pipeline tokio-mt "
-# arm64 has no branch counters: the counters guests are built on x86_64 only.
-case $(uname -m) in
-    x86_64) skipped="" ;;
-    *) skipped=" counters " ;;
-esac
 nl='
 '
 machine=$(uname -m); gccv=$(gcc --version); rustv=$(rustc -V); gov=$(go version)
@@ -56,7 +51,6 @@ name() {
 entries=""
 for b in "$root"/tests/guests/*/build.sh "$root"/tests/determinism/attack/build.sh "$root"/tests/sandbox/guests/build.sh; do
     rel=$(dirname "$b"); rel=${rel#"$root"/}
-    case $skipped in *" $(name "$b") "*) continue ;; esac
     entries="$entries $(name "$b")-$(key "$rel")"
 done
 setkey=$(echo "$entries" | sha256sum | cut -c1-16)

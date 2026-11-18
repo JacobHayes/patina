@@ -3,9 +3,11 @@
 # runtime: the definition of the stop) and through the hardware counter (overflow aimed at
 # N - margin, then hops). With the slice fixed (pmu-slice = N..N, no short slices), the
 # preempt records (instruction pointer, N, register hash) and so the digests must be equal.
-# N = 3000 (counter period programmed per segment) on seven small programs, and N = 1,100,000
-# (the free-running period, overflows, rearm, landing) on two.
-#@ tier=area budget=200 slots=8 arch=x86_64
+# N = 3000 (counter period programmed per segment) on seven small programs (six on arm64,
+# where every branch is a hop: the floating-point program's 35 million hops alone outlast the
+# budget; evidence-compute repeats its stops), and N = 1,100,000 (the free-running period,
+# overflows, rearm, landing) on two.
+#@ tier=area budget=200 slots=8
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys
@@ -14,7 +16,8 @@ from counters import *
 from concurrent.futures import ThreadPoolExecutor
 P = ppatina(required=False)
 cases = [(3000, 2048, 512, p) for p in [["loops", "1", "1000"], ["recur", "1", "150"], ["indirect", "1", "100"],
-                                       ["strings", "1", "1500"], ["fp", "1", "60"], ["signals", "1", "3000"], ["threads", "1", "1000"]]]
+                                       ["strings", "1", "1500"], ["fp", "1", "60"], ["signals", "1", "3000"], ["threads", "1", "1000"]]
+         if os.uname().machine == "x86_64" or p[0] != "fp"]
 cases += [(1100000, 1100000, 1024, p) for p in [["loops", "1", "40"], ["recur", "1", "30"]]]
 def one(c):
     n, mh, mc, p = c

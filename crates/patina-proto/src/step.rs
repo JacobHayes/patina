@@ -218,6 +218,42 @@ pub fn next(pc: u64, w: u32, r: &Regs, code: &[u32]) -> Next {
     }
 }
 
+/// What a word is to branch counting (`rt::pmu` on arm64, whose event counts every branch
+/// instruction): the hops walk straight-line code to the next `Branch`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    /// Not a branch: execution continues at the next word.
+    Plain,
+    /// A branch decoded here (`next` gives its successor): conditional or direct.
+    Branch,
+    /// A branch to a register's value (`br`, `blr`, `ret` and their authenticating forms).
+    Indirect,
+    /// Enters the kernel, and so the runtime: `svc` and the exception-generating group,
+    /// `udf` (a patched site), and branch-group encodings not decoded here (the program's
+    /// SIGILL), including `bc.cond`.
+    Enters,
+}
+
+/// The class of `w` for branch counting.
+pub fn flow(w: u32) -> Flow {
+    if w >> 16 == 0 {
+        return Flow::Enters;
+    }
+    let zero = [0u64; 31];
+    let r = Regs {
+        x: &zero,
+        pstate: 0,
+    };
+    match branch(0, w, &r) {
+        Branch::No => Flow::Plain,
+        // `bc.cond` (FEAT_HBC) is decoded as `b.cond` by `branch`: left to the CPU.
+        Branch::Cond(..) if w >> 24 == 0x54 && w & 0x10 != 0 => Flow::Enters,
+        Branch::Cond(..) | Branch::Direct(..) => Flow::Branch,
+        Branch::Indirect(..) => Flow::Indirect,
+        Branch::Refuse(_) => Flow::Enters,
+    }
+}
+
 /// Whether `b`, at `at`, branches into `range` when status register `rs` is nonzero (a
 /// failed store): `cbnz` or `tbnz #0` on it.
 fn retries(b: u32, rs: u32, at: u64, range: core::ops::RangeInclusive<u64>) -> bool {

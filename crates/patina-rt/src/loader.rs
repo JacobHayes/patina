@@ -571,6 +571,9 @@ pub fn start(k: &KernelStart) -> ! {
     let _ = sb.top;
 
     crate::compute::exit(crate::state::thread());
+    // arm64: the entry is a jump, not a return with a counter read; the image's first segment
+    // is not measured (`arch/aarch64/pmu.rs`).
+    #[cfg(target_arch = "x86_64")]
     crate::pmu::exit(crate::state::thread(), entry, 0);
     crate::arch::enter_guest(start_sp, entry)
 }

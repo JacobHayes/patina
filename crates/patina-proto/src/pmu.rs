@@ -35,6 +35,26 @@ pub const EVENT_AMD: u64 = 0xd1;
 /// their counts), so they are refused until checked.
 pub const AMD_FAMILIES: [u32; 1] = [0x1a];
 
+/// Arm `BR_RETIRED`: every retired branch instruction, taken or not (conditional and
+/// unconditional, direct and indirect, calls and returns; not `svc`). PMUv3 common event 0x21.
+pub const EVENT_ARM_BR_RETIRED: u64 = 0x21;
+/// arm64 cores whose counter is supported, by `MIDR_EL1` implementer and part number (variant
+/// and revision are not compared): those where `./check counters` and the exactness probe of
+/// `docs/EVIDENCE.md` have passed. Every core of the host must be one of them.
+pub const ARM_CORES: [(u32, u32, &str); 1] = [(0x41, 0xd49, "Arm Neoverse N2")];
+
+/// The supported core named by a `MIDR_EL1` value, if any.
+pub fn arm_core(midr: u64) -> Option<&'static str> {
+    let (imp, part) = ((midr >> 24 & 0xff) as u32, (midr >> 4 & 0xfff) as u32);
+    ARM_CORES
+        .iter()
+        .find(|c| c.0 == imp && c.1 == part)
+        .map(|c| c.2)
+}
+
+/// The supported CPUs, as the refusal and `patina doctor` name them.
+pub const SUPPORTED_CPUS: &str = "AMD family 0x1a (Zen 5) and Arm Neoverse N2";
+
 /// How a segment reaches its stop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -462,5 +482,17 @@ mod tests {
         // about 2% short
         assert!(short > 250 && short < 600, "{short}");
         assert!(long > 19_000);
+    }
+
+    #[test]
+    fn arm_cores_by_midr() {
+        // Neoverse N2 r0p0 and r0p3; variant and revision do not matter.
+        assert!(arm_core(0x410f_d490).is_some());
+        assert!(arm_core(0x410f_d493).is_some());
+        // Neoverse N1, V2; Apple; another implementer with the same part number.
+        assert!(arm_core(0x413f_d0c1).is_none());
+        assert!(arm_core(0x410f_d4f1).is_none());
+        assert!(arm_core(0x6100_0000).is_none());
+        assert!(arm_core(0x420f_d490).is_none());
     }
 }

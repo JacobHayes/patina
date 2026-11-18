@@ -182,7 +182,8 @@ Counter preemption on Intel: on an Intel Xeon 6975P-C (CI runner with a PMU),
 `counters/02-counter` and `05-exact` stopped at different instructions for the same count,
 `06-migrate` gave 5 different digests in 5 runs, and the race seed `03-races` relies on no
 longer found the double spend. Counter preemption is therefore refused on every CPU but AMD
-family 0x1a, and a seed reproduces only on the same family.
+family 0x1a and (arm64) the Arm Neoverse N2 ("Branch counters on arm64"), and a seed
+reproduces only on the same family.
 
 ### arm64
 
@@ -560,6 +561,71 @@ By hand, 3.14 unless noted:
 Red/green: the jump hook not holding the exception fails `compute/09-python` (c, `oneline`
 exit 1); the planted `PyDLL` above finds nothing in `cache` and runs `cpu` serially.
 
+## Branch counters on arm64
+
+Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`
+0x410fd490, 4 CPUs, Linux 7.0.0-1017-azure; the `armv8_pmuv3_0` PMU, 6 counters a group), each
+check run once from a throwaway branch.
+
+**Is the count exact?** A probe program (C, run natively, no Patina) counted events over 50
+processes per body, idle, under 4 `yes` loads, and with a thread moving it between CPUs every
+300 µs:
+
+| Check | Result |
+|---|---|
+| What `BR_RETIRED` (0x21) counts | every branch instruction executed, taken or not: `b.cond`, `cbz`/`cbnz`, `tbz`/`tbnz`, `b`, `bl`, `br`, `blr`, `ret`; nothing else (`svc`, `isb`: 0). A walk single-stepping every instruction with a counter read after each: every branch counted once, 0 of ~600,000 other instructions |
+| Count over 50 runs, 20 bodies (calibration loops, loops, recursion, indirect calls, glibc string functions, libm, `malloc`, uncontended mutex, outline atomics, 8 threads on 4 CPUs, LSE atomics, contended `ldadd`) | one value per body, in all three conditions |
+| Signals arriving (SIGUSR1 every 100 µs) | base + 1 per signal (the handler's `ret`), exactly |
+| Inline `ldxr`/`stxr`, 200,000 operations | base + 2 per failed store, exactly; spurious store failures 0 to 4 per run idle, up to 7 moved; 4 million operations: 17 to 75. The count is exact, the program's path is not: hence the emulation below |
+| A program reading the clock through the vDSO | not one value (its seqlock retries); Patina has no vDSO |
+| Overflow, then single steps to period + 1,500 (ASLR off), 11 bodies x 3 conditions x 2 periods x 50 runs | one stop instruction in every cell; register hashes differ only by pointer-authentication-signed pointers and thread ids (keys are per process natively; Patina turns them off) |
+| Skid (branches past the programmed overflow at the signal) | 11 to 333; margin 1,024 |
+| Overflow signals (`TRAP_PERF`), 75 runs x 3 periods | overflows = total / period every time: none lost, none doubled |
+| Exclusive pairs started per program (a breakpoint on every load-exclusive) | glibc 2.39 dynamic programs, C++, Rust, Python: 0; static glibc 4; Go 93; ubuntu 26.04: 2 in `ld.so` per program |
+| Cost | `read()` of the counter 735 ns; a user read of the PMU registers (with `perf_user_access=1`) 606 ns, trapped by the hypervisor; `brk` round trip 1.2 µs |
+
+rr counts the same event on these cores (skid allowance 1,000) and supports only programs
+using LSE atomics, not exclusive pairs, for the same reason.
+
+**Patina** (`tests/counters`, the runner; x86_64's numbers in "Spin-waits and scheduling
+points"):
+
+| Check | Result |
+|---|---|
+| `05-exact`: the same N reached by hops only and through the counter, N = 3,000 on six programs and N = 1,100,000 on two | 8/8 equal digests (e.g. strings: 8.6 million hops against 2,883 overflows, 2,869 landings, 2,869 stops) |
+| `06-migrate`: tasks moved to a random CPU every 2 ms, 5 runs of four programs | 20/20 equal to the unmoved run (13,500 affinity changes in a strings run) |
+| `evidence-compute`, 7 programs, 10 runs `--vary cpu,load,aslr,sandbox` and 10 `--vary parallel` each | all identical, the same digest both ways, checksums equal to native; largest skid 316 |
+| `evidence-races` (stock builds, no compute points), 100 seeds | race b found in 1 seed with the default policy, 3 with `branches = "hunt"`; seed 16 replays 20/20 under `--vary cpu,load,aslr,sandbox`. pool: in no seed, as on x86_64: its updates are a load, an add and a store with no branch between, and a stop comes only after a branch |
+| `evidence-go`: go-sweep and W4 (stock Go) at 4 CPUs, 20 seeds | 20/20 `ok` each, 20 distinct digests each, 0 stalls; seeds 1-5 x 5 runs, faults off and on: identical |
+| `evidence-spin`: glibc, C and Rust spin locks, 20 seeds | 60/60 `ok`, 0 stalls; largest skid 331 |
+| `04-stalls`: the exclusive-pair spin locks (`llsc-spin`), whose waiter runs only emulated exclusive instructions | `ok` |
+| `evidence-workloads`: W1-W9, 3 runs of seed 1, seeds 1-3 | identical across runs, 3 distinct digests over seeds for each; W9 is a `violation` under counters (below) |
+
+W9 under counters: its crash lands at point 15, before fjall has made its `version` file
+durable, and the harness's open after the crash fails with `EEXIST`, the same in every run
+(seed 1 on arm64; seed 12 of 40 on x86_64 with counters; none of 40 without). It is the
+fjall harness's finding, not Patina's; not investigated further.
+
+Costs (`evidence-costs`, runner, median of 3): a trap with counters on costs 1.28 µs more;
+a preemption 2.6 ms (loops) to 3.4 ms (fp); W1-W9 wall x0.66 (W9, which ends early) to x2.01
+(W2), the rest x1.07 to x1.58.
+
+Red/green: stopping at the overflow without the landing walk fails `05-exact` (9 of 9 cases
+stop elsewhere); not subtracting the return path's three branches (`TAIL` = 0) fails it too
+(9 of 9). Keeping the counted segment across an emulated exclusive instruction (a stub reading
+the counter at SIGILL as at the overflow) made `04-stalls`' two exclusive-pair locks end
+`compute-stall` with no preemption in 2 s (the waiter's every few branches cost an
+emulation, so a long N takes seconds), where ending the segment there passes them: the
+segment ends there.
+
+Runners differ: one of the five jobs got a Neoverse V3 (`MIDR_EL1` 0x410fd841), where
+`--preempt branches` is refused and the branch-counter scripts SKIP.
+
+What differs from the Apple VM (Tart, Apple M4): no PMU is exposed to the guest, so
+`--preempt branches` is refused there (`patina doctor`: no PMU); the hop logic and the
+exclusive emulation were also run there with a software event standing in for the counter
+(not shipped).
+
 ## Costs
 
 | What | Cost |
@@ -572,7 +638,7 @@ exit 1); the planted `PyDLL` above finds nothing in `cache` and runs `cpu` seria
 | W9 with crashes and filesystem faults | 38.9 ms per run, 148.6 runs/s (1.92x no-fault) |
 | Crash materialisation | ~3 ms per MB of log |
 | `fork`+`execve`+`wait` of a dynamic program | 1.5 ms (native 0.38 ms; mostly the instruction scan) |
-| `--preempt branches` | 9.7 µs per trap, 1.7-2.3 ms per preemption, W1-W9 wall x0.6 to x6.5 (W1 x6.5, W2 x4.4, the rest under x2) |
+| `--preempt branches` | 9.7 µs per trap, 1.7-2.3 ms per preemption, W1-W9 wall x0.6 to x6.5 (W1 x6.5, W2 x4.4, the rest under x2); arm64 (runner): 1.3 µs per trap, 2.6-3.4 ms per preemption, W1-W9 x0.66 to x2.0 |
 | `--mount DIR:/guest:copy` copy into tmpfs | ~0.3 ms per MB |
 
 ## Known limits
@@ -585,7 +651,7 @@ and `get`/`setpriority`; anything outside Linux x86_64 and arm64 (arm64: ARCHITE
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
   counter, a timestamp it computes itself) ends `compute-stall` without `--preempt
   branches`. `--preempt branches` needs `CAP_PERFMON`, an exposed PMU and an AMD family
-  0x1a (Zen 5) CPU, the only family checked; its seeds reproduce on the same CPU family only; a skid past
+  0x1a (Zen 5) or Arm Neoverse N2 CPU, the ones checked; its seeds reproduce on the same CPU family only; a skid past
   the margin ends `internal`; a guest reading its own text during a hop or at a spin point
   sees `int3`. A lost update inside one read-modify-write instruction cannot be found by any
   preemption.
@@ -1591,7 +1657,6 @@ three, each fixed or explained:
 **Not run on arm64**: the evidence scripts still marked `arch=x86_64` (the determinism matrix
 `determinism/evidence-matrix`, the soaks and the time variant, the durability census,
 operation log and workload sweeps, `faults/evidence-crashes`, the per-call costs of I/O rings,
-networking and spawning, `storage/evidence-branch` and `evidence-crash-enum`); the
-branch-counter scripts (no PMU on arm64); `insn/04-cpuid`, `insn/05-rdpid` (x86_64
+networking and spawning, `storage/evidence-branch` and `evidence-crash-enum`); `insn/04-cpuid`, `insn/05-rdpid` (x86_64
 instructions). Hosts not checked: bare-metal arm64, a host with 16 or 64 KiB pages, SVE above
 128 bits, a heterogeneous (big.LITTLE) machine, and any Mac VM product but Tart.

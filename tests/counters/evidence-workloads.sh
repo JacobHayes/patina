@@ -1,6 +1,6 @@
 # W1-W9 (the workloads' commands and fault settings; W4 at the default CPU count)
 # with --preempt branches: 3 runs under --vary cpu,aslr,sandbox identical; 3 seeds give 3 distinct digests.
-#@ tier=evidence budget=900 slots=3 arch=x86_64
+#@ tier=evidence budget=900 slots=3
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
 import os, sys

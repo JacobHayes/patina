@@ -20,10 +20,11 @@ global_asm!(
     "patina_boot_stack_top:",
     ".popsection",
     ".text",
+    // The restorer: `rt_sigreturn` through the stub, after the counter read that starts a
+    // measured segment (`pmu`'s `patina_sigreturn_read`; no read without counters).
     ".globl patina_restorer",
     "patina_restorer:",
-    "  mov x8, #{rt_sigreturn}",
-    "  b patina_syscall",
+    "  b patina_sigreturn_read",
     // switch_stack(top, ksp, f): run f(ksp) on a new stack
     ".globl patina_switch_stack",
     "patina_switch_stack:",
@@ -45,7 +46,6 @@ global_asm!(
     "  msr nzcv, xzr",
     "  br x17",
     start = sym crate::entry::rt_start,
-    rt_sigreturn = const crate::raw::nr::RT_SIGRETURN,
 );
 
 extern "C" {

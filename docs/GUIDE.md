@@ -387,7 +387,7 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   instructions and spin probes. Two threads that race on plain memory with none of these
   between the conflicting accesses always run them in the same order, whatever the seed.
   Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code));
-  branch counters (`--preempt branches`, AMD Zen 5 only) switch there too.
+  branch counters (`--preempt branches`, AMD Zen 5 and Arm Neoverse N2 only) switch there too.
 - **A deadline that never comes.** In stock code virtual time advances by a fixed charge per
   system call and when every thread sleeps, not with computation, so neither `--time-limit`
   nor the program's own deadline cuts a CPU-bound loop; `--timeout` (wall seconds) does, as
@@ -1189,8 +1189,9 @@ A thread that computes for 10 s of CPU time without reaching a scheduling point,
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
 no system call or `pause`. Rebuilt code, and Python under `python3 -m patina`, does not stall
-that way ([Deeper search](#deeper-search-rebuilt-code)). On x86_64, `--preempt branches` also preempts after a
-seed-chosen number of branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
+that way ([Deeper search](#deeper-search-rebuilt-code)). `--preempt branches` also preempts after a
+seed-chosen number of branches; it needs an AMD Zen 5 or Arm Neoverse N2 CPU with its PMU exposed (not in most virtual machines;
+GitHub's `ubuntu-24.04-arm` runners expose theirs) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
 only on that CPU family. `patina doctor` says which of the three is missing.
 
@@ -1443,7 +1444,10 @@ What differs on arm64:
 
 - The spin hints that are scheduling points are `yield`, `isb`, `wfe` and `wfi` (x86_64:
   `pause`); `RNDR` and `RNDRRS` answer from the seed (x86_64: `rdrand`, `rdseed`).
-- `--preempt branches` is refused: no branch counters.
+- `--preempt branches` works on the Arm Neoverse N2 only, and counts every branch, not only
+  conditional ones (the same N stops sooner in the program than on x86_64). An image's first
+  trap (a system call, usually) comes before its first preemption. With it, the exclusive load/store
+  instructions are emulated (`patched_sites.exclusive` in `result.json`).
 - Rust compute points build with `--target aarch64-unknown-linux-gnu`.
 - The system call table is the generic one: no `select`, `pause`, `alarm`, `fork` or
   `epoll_create`; libc uses `pselect6`, `clone` and `epoll_create1` instead.

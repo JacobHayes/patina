@@ -21,6 +21,7 @@ mod pmu;
 #[cfg(target_arch = "aarch64")]
 #[path = "arch/aarch64/pmu.rs"]
 mod pmu;
+mod pmu_open;
 mod raw;
 mod resolve;
 mod spin;

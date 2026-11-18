@@ -263,16 +263,16 @@ while another thread could run, ends the run `unsupported` with stop `compute-st
 names the thread. The cause is a loop that changes state on each pass (a counter, a
 timestamp it computes) and contains no system call or spin hint. The fix is `--preempt
 branches`, where the host allows it, or rebuilding that code with compute points (its message
-says both: the supervisor does not know whether the code is rebuilt; on arm64, where branch
-counters are not supported, it names compute points only). Rebuilt code does not
+says both: the supervisor does not know whether the code is rebuilt). Rebuilt code does not
 reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
 computing alone is left to finish.
 
 ## Counter preemption
 
 With `--preempt branches`, the turn holder is preempted right after its N-th retired
-conditional branch of program code, N a draw from the seed. The stop is treated like a trap:
-a boundary record, virtual time charged, a yield, and pending signals delivered.
+branch of program code (x86_64: conditional branches; arm64: every branch instruction), N a
+draw from the seed. The stop is treated like a trap: a boundary record, virtual time charged,
+a yield, and pending signals delivered.
 
 `perf_event_open` needs `CAP_PERFMON`, which nothing in the sandbox has. The launcher (a
 `patina` given the capability) serves a broker on a hidden socket: a guest thread sends its
@@ -288,9 +288,46 @@ Most draws are long (about 1 to 4 million branches); 2% are short (up to 256), w
 stops just after a system call, where check-then-act windows sit. `[sched] branches = "hunt"`
 makes every segment short.
 
-Only AMD family 0x1a (Zen 5) is accepted: on an Intel Xeon the conditional-branch event
-stopped at different instructions for the same count. Other CPUs are refused with an error,
-never silently run without counters.
+Only CPUs whose counting was checked exact are accepted: AMD family 0x1a (Zen 5), and on
+arm64 the Arm Neoverse N2 (by `MIDR_EL1` implementer and part, every core of the host;
+`proto::pmu::ARM_CORES`). On an Intel Xeon the conditional-branch event stopped at different
+instructions for the same count. Other CPUs are refused with an error, never silently run
+without counters.
+
+**arm64** (`arch/aarch64/pmu.rs`). The event is `BR_RETIRED` (0x21), every branch taken or
+not, measured exact on the Neoverse N2 (docs/EVIDENCE.md, "Branch counters on arm64"). The
+differences from x86_64:
+
+- The counter is read with `read()` on its descriptor (user access to the PMU registers needs
+  a host setting and, on the hosts measured, traps to the hypervisor at the same cost). Each
+  read the count depends on is in assembly a fixed number of branches from program code: at
+  the return to the program (the signal restorer and `sigreturn_to`, which read only when a
+  segment asks and then `rt_sigreturn`) and at the head of the overflow handler. The kernel
+  writes the value into the thread state, so no branch follows the read to keep it.
+- No overflow is taken inside the runtime: with counters on, every runtime handler blocks
+  SIGTRAP, so an overflow that comes while runtime code runs waits until `rt_sigreturn`
+  restores the program's mask and is taken at the program's next instruction. The program's
+  entry is a jump, not such a return: an image's first segment (from its entry point to its
+  first trap) is not measured.
+- Hops plant `brk` at the next branch; conditional and direct branches are taken in the frame
+  (`proto::step`), indirect ones (`br`, `blr`, `ret`) and any branch reached with
+  `PSTATE.BTYPE` set run natively to a breakpoint at their successor, so the CPU makes its own
+  branch-target check.
+- A store-exclusive natively fails now and then with no other writer (the host clears the
+  exclusive monitor), and its retry loop counts two more branches, more or less often by run.
+  With counters on, the scanner also patches every exclusive instruction (`ldxr`/`stxr` and
+  their acquire, release and pair forms, and `clrex`) and the runtime emulates them with a
+  monitor of its own: the store fails exactly when a boundary event (a trap, a preemption,
+  a signal) came between the load and the store. Emulation is no boundary event (no record,
+  no sequence number), but its SIGILL is a runtime entry like any other: the counted segment
+  ends there and the next starts with a new N, so in code dense with exclusive pairs
+  preemptions fall soon after one. (Keeping the segment across it was tried: a waiter
+  spinning on an exclusive pair then needs a whole long N of emulated instructions, seconds,
+  before its preemption, and the exclusive-pair spin locks stalled.) An access that would fault raises the fault the
+  instruction would (SIGSEGV, SIGBUS for an unaligned address) with the site still emulated,
+  so both halves of a pair stay on the one monitor; a process whose patch table is full when
+  an exclusive instruction is found stops (`unsupported`, stop `capacity`), since one left
+  native would fail at random. Without counters they are not patched.
 
 ## Compute points
 
@@ -577,8 +614,8 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   protection key (`pkey_alloc` answers `ENOSYS`); `FPMR` and `POR_EL0` are carried through
   signal frames. On arm64 every system call is served as on x86_64 (the
   structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
-  branch counters are not supported (the launcher refuses `--preempt branches`, and
-  `patina doctor` checks the host's arm64 requirements). Threads, fork,
+  branch counters work on the Neoverse N2 only (above, "Counter preemption"), and
+  `patina doctor` checks the host's arm64 requirements. Threads, fork,
   vfork, exec and signals work as on x86_64 (the clone trampoline is in
   `arch/aarch64/thread.rs`); so do the instruction channels, pause points and spin probes
   (above), and the
@@ -605,14 +642,19 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   the `patina` binary); replay, minimize and `run --config RUNDIR/run.json` refuse a run whose
   either one differs, and a sweep into a directory another build made starts over. The kernel's own behaviour for passed calls is an
   input: a different kernel version or filesystem may change a run.
-- **Branch counters** (`--preempt branches`) need `CAP_PERFMON`, a PMU, and an AMD family
-  0x1a (Zen 5) CPU, the only one checked exact; their seeds reproduce on the same family only.
+- **Branch counters** (`--preempt branches`) need `CAP_PERFMON`, a PMU, and a CPU checked
+  exact: AMD family 0x1a (Zen 5), or on arm64 the Arm Neoverse N2; their seeds reproduce on the
+  same family (core) only; on arm64 the core's variant and revision are not checked (the
+  evidence is from r0p0). On arm64 an image's first segment, up to its first trap, is never
+  preempted; code the scanner does not see (a JIT) keeps its native exclusive pairs, whose
+  spurious failures can change the count (a hop walk that meets one gives up for that
+  segment); more than 4,096 patched sites in one process stop the run.
 - **compute-stall**: in stock code without branch counters, a spin-wait whose iterations
   change state ends the run (above).
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
   seed. Rebuilding the code with compute points switches inside it; so does
-  `--preempt branches`, on one CPU family. Compute points do not split an atomic
+  `--preempt branches`, on the CPUs checked exact. Compute points do not split an atomic
   read-modify-write (a `lock`-prefixed instruction; on arm64 an LSE instruction, an
   exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not
   rebuilt), gcc gives edges only, and code not rebuilt (libc, the Go runtime,

@@ -25,11 +25,12 @@
 //! that it executes again.
 
 use crate::arch::{reg::*, Frame};
+use crate::pmu_open::{broker_open, hide, memfd, MEMFD};
 use crate::raw::*;
 use crate::state::{config, ctl, thread, ThreadState};
 use crate::sys::sig::SigInfo;
 use core::arch::global_asm;
-use core::sync::atomic::{AtomicI32, Ordering::*};
+use core::sync::atomic::Ordering::*;
 use proto::ctl::*;
 use proto::layout::*;
 use proto::pmu::{classify, eval, mode, slice, Cti, Mode, Operand, GREG_OF, MIN_REARM, PERIOD};
@@ -225,124 +226,6 @@ fn fail(what: u64, val: u64) -> ! {
 
 // ---------------------------------------------------------------------------------------
 // Opening, fork, exit.
-
-/// `/proc/self/mem` of this process (hops write and read guest code through it).
-static MEMFD: AtomicI32 = AtomicI32::new(-1);
-
-fn memfd() -> u64 {
-    let fd = MEMFD.load(Relaxed);
-    if fd >= 0 {
-        return fd as u64;
-    }
-    let path = b"/proc/self/mem\0";
-    let r = unsafe {
-        sc4(
-            nr::OPENAT,
-            (-100i64) as u64,
-            path.as_ptr() as u64,
-            2 | 0x80000,
-            0,
-        )
-    };
-    if r < 0 {
-        fail(PMU_E_OPEN, (-r) as u64);
-    }
-    let h = hide(r);
-    MEMFD.store(h as i32, Relaxed);
-    h as u64
-}
-
-/// Move a descriptor to the runtime's hidden range (close-on-exec).
-fn hide(fd: i64) -> i64 {
-    const F_DUPFD_CLOEXEC: u64 = 1030;
-    let h = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, FD_RT_DYN as u64) };
-    unsafe { sc1(nr::CLOSE, fd as u64) };
-    if h < 0 {
-        fail(PMU_E_OPEN, (-h) as u64);
-    }
-    h
-}
-
-#[repr(C)]
-struct MsgHdr {
-    name: u64,
-    namelen: u32,
-    _p: u32,
-    iov: u64,
-    iovlen: u64,
-    control: u64,
-    controllen: u64,
-    flags: i32,
-    _p2: u32,
-}
-
-/// Ask the launcher for a counter on this thread: send a thread pidfd, get the counter.
-fn broker_open(tid: i32) -> i64 {
-    const PIDFD_THREAD: u64 = 0x80;
-    let pidfd = unsafe { sc2(nr::PIDFD_OPEN, tid as u64, PIDFD_THREAD) };
-    if pidfd < 0 {
-        return pidfd;
-    }
-    let req = *b"patpmu01";
-    let iov: [u64; 2] = [req.as_ptr() as u64, 8];
-    // cmsghdr: len 20, SOL_SOCKET, SCM_RIGHTS, the descriptor.
-    let cm: [u64; 3] = [20, 1 | (1 << 32), pidfd as u64];
-    let m = MsgHdr {
-        name: 0,
-        namelen: 0,
-        _p: 0,
-        iov: iov.as_ptr() as u64,
-        iovlen: 1,
-        control: cm.as_ptr() as u64,
-        controllen: 24,
-        flags: 0,
-        _p2: 0,
-    };
-    let r = unsafe {
-        sc3(
-            nr::SENDMSG,
-            FD_PMU as u64,
-            &m as *const MsgHdr as u64,
-            0x4000,
-        )
-    };
-    unsafe { sc1(nr::CLOSE, pidfd as u64) };
-    if r < 0 {
-        return r;
-    }
-    let mut rep: i64 = 0;
-    let riov: [u64; 2] = [&mut rep as *mut i64 as u64, 8];
-    let mut rcm: [u64; 3] = [0; 3];
-    let mut rm = MsgHdr {
-        name: 0,
-        namelen: 0,
-        _p: 0,
-        iov: riov.as_ptr() as u64,
-        iovlen: 1,
-        control: rcm.as_mut_ptr() as u64,
-        controllen: 24,
-        flags: 0,
-        _p2: 0,
-    };
-    let r = unsafe {
-        sc3(
-            nr::RECVMSG,
-            FD_PMU as u64,
-            &mut rm as *mut MsgHdr as u64,
-            0x4000_0000,
-        )
-    };
-    if r < 8 {
-        return if r < 0 { r } else { -e::EIO };
-    }
-    if rep < 0 {
-        return rep;
-    }
-    if rcm[0] < 20 || rcm[1] != 1 | (1 << 32) {
-        return -e::EIO;
-    }
-    (rcm[2] & 0xffff_ffff) as i64
-}
 
 /// Open this thread's counter and map its page. Called once the thread holds the turn, at
 /// thread start, in a fork child and in a new image. Nothing without counter preemption, and
