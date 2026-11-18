@@ -48,7 +48,8 @@ case $pids in child=*,t1=*,t2=*) ;; *) die "marks and their processes: $pids" ;;
 
 # No SDK call, no string record.
 "$PATINA" run --out nosdk -- "$PATINA_GUESTS/hello-static" >nosdk.txt 2>&1 || die "hello: $(tail -2 nosdk.txt)"
-[ "$("$PATINA" log dump nosdk/inc-0/boundary.log | awk '$2 == "str"' | wc -l)" = 0 ] || die "string records in a run without SDK calls"
+"$PATINA" log dump nosdk/inc-0/boundary.log >nosdk.dump || die "log dump of nosdk"
+[ "$(awk '$2 == "str"' nosdk.dump | wc -l)" = 0 ] || die "string records in a run without SDK calls"
 
 # synced-before-mark: every seed of the bug, one signature; the fix passes; all marks judged,
 # the fix's progress marks fail it.

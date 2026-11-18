@@ -121,8 +121,11 @@ native() {
 
 # no_leftovers DIR: no process of this user still belongs to a run under DIR.
 no_leftovers() {
-    left=$(python3 -I "$HERE/../leftovers.py" "$@" || true)
+    # leftovers.py exits 1 when it lists processes; exit 1 with no list is its own failure.
+    rc=0; left=$(python3 -I "$HERE/../leftovers.py" "$@") || rc=$?
     [ -z "$left" ] || die "processes left from $1: $left"
-    m=$(findmnt | grep -c patina || true)
+    [ "$rc" = 0 ] || die "leftovers.py failed (exit $rc)"
+    mounts=$(findmnt -rn -o TARGET) || die "findmnt failed"
+    m=$(printf '%s\n' "$mounts" | grep -c patina || true)
     [ "$m" = 0 ] || die "$m mounts mention patina"
 }

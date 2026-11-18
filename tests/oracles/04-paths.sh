@@ -35,7 +35,8 @@ long=$(awk 'BEGIN { for (i = 0; i < 300; i++) printf (i == 150 ? "/" : "p") }')
 
 # Off: no string record, nothing in run.json; on: the rerun line and the replay.
 "$PATINA" run --out off -- "$paths" tour >off.txt 2>&1 || die "tour without --log-paths"
-[ "$("$PATINA" log dump off/inc-0/boundary.log | awk '$2 == "str"' | wc -l)" = 0 ] || die "string records without --log-paths"
+"$PATINA" log dump off/inc-0/boundary.log >off.dump || die "log dump of off"
+[ "$(awk '$2 == "str"' off.dump | wc -l)" = 0 ] || die "string records without --log-paths"
 [ "$(jq '.config | has("log-paths")' off/run.json)" = false ] && [ "$(jq '.config["log-paths"]' tour/run.json)" = true ] || die "run.json and log-paths"
 [ "$(jq -r .digest off/result.json)" != "$(jq -r .digest tour/result.json)" ] || die "--log-paths does not change the digest"
 "$PATINA" replay tour >replay.txt 2>&1 || die "replay: $(tail -2 replay.txt)"

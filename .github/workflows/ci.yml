@@ -14,6 +14,11 @@ concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+# bash -eo pipefail: a step fails when any command of a pipeline fails, not only its last.
+defaults:
+  run:
+    shell: bash
+
 permissions:
   contents: read
 

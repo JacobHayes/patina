@@ -4,9 +4,10 @@
 # ./check evidence [NAME..]  the sweeps, matrices and soaks behind docs/EVIDENCE.md, by hand
 # ./check release            the release gate and the nightly job (ceiling 10 min)
 # ./check list               every script with its tier and budget
-# Builds patina (the runtime is embedded), builds the guests once per source change
-# (tests/guests.sh), then runs the scripts in parallel (tests/run.py: per-script times and
-# budgets, total). Output, the guest cache and scratch go under PATINA_CHECK_DIR (default
+# Builds patina (the runtime is embedded; a failed build stops here), builds the guests once per
+# source change (tests/guests.sh; a failed guest build stops here), then runs the scripts in
+# parallel (tests/run.py: the build under test, per-script times and budgets, total; it refuses
+# a binary older than the sources it is built from). Output, the guest cache and scratch go under PATINA_CHECK_DIR (default
 # target/patina-check).
 set -eu
 cd "$(dirname "$0")"
@@ -17,14 +18,19 @@ root=$(pwd)
 export PATINA_CHECK_DIR="${PATINA_CHECK_DIR:-$root/target/patina-check}"
 mkdir -p "$PATINA_CHECK_DIR"
 t0=$(date +%s)
+# A failed build stops here, with the compiler's errors on stderr: nothing runs against the
+# binary of an earlier build. (No pipe: a pipe's status is its last command's.)
+msgs=$PATINA_CHECK_DIR/build-messages.json
+cargo build --release --quiet -p patina-cli --message-format=json-render-diagnostics >"$msgs" ||
+    { echo "check: the patina build failed; no script was run" >&2; exit 1; }
 # RT_BIN: the runtime binary patina embeds (for scripts that inspect it), from the build script's
 # output directory.
-out=$(cargo build --release --quiet -p patina-cli --message-format=json | python3 -I -c '
+out=$(python3 -I -c '
 import json, sys
-for line in sys.stdin:
+for line in open(sys.argv[1]):
     m = json.loads(line)
     if m.get("reason") == "build-script-executed" and ("/patina-cli#" in m["package_id"] or "#patina-cli@" in m["package_id"]):
-        print(m["out_dir"])')
+        print(m["out_dir"])' "$msgs")
 case $(uname -m) in
     aarch64) rt_target=aarch64-unknown-none-softfloat ;;
     *) rt_target=x86_64-unknown-none ;;

@@ -52,6 +52,11 @@ arm runner (`check-arm64`).
   CI runs it on x86_64 (`check`) and arm64 (`check-arm64`). **Land with `scripts/land BRANCH`**
   (`--dry-run` first): it rebases, runs the gate, pushes BRANCH, needs both jobs green on the
   first attempt, fast-forwards `main` and deletes BRANCH. Never move `main` by hand.
+- **A check tests the build it just made.** `./check` stops on a failed patina or guest build
+  (no pipe hides a status: `sh` has no pipefail on every host, so a command whose status
+  matters runs alone or in an assignment; workflow steps run under bash `-eo pipefail`);
+  `tests/run.py` prints the build under test and refuses a binary older than its sources. A
+  planted break that does not compile proves nothing unless the check failed on it.
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.

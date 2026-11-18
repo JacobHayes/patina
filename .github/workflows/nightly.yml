@@ -7,6 +7,11 @@ on:
     - cron: "17 9 * * *"
   workflow_dispatch:
 
+# bash -eo pipefail: a step fails when any command of a pipeline fails, not only its last.
+defaults:
+  run:
+    shell: bash
+
 permissions:
   contents: read
 

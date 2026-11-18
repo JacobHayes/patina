@@ -10,6 +10,7 @@ ms=$(python3 -I "$(dirname "$0")/../cpu-ms.py" timeout 120 "$PATINA" run --seed 
 [ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = unsupported/compute-stall ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 [ "$ms" -ge 500 ] && [ "$ms" -le 3000 ] || die "used $ms ms of CPU time"
 # No process of this run is left (launcher, bwrap, supervisor or guest; see tests/leftovers.py).
-left=$(python3 -I "$(dirname "$0")/../leftovers.py" "$out" || true)
+rc=0; left=$(python3 -I "$(dirname "$0")/../leftovers.py" "$out") || rc=$?
 [ -z "$left" ] || die "processes left: $left"
+[ "$rc" = 0 ] || die "leftovers.py failed (exit $rc)"
 echo "compute-stall after $ms ms of CPU time, no process left"

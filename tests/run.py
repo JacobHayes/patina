@@ -6,6 +6,10 @@
     run.py evidence [NAME..]  the evidence scripts (all, or those whose AREA/name contains NAME)
     run.py list               every script with its tiers, budget and slots
 
+Before any script runs, it prints the build under test (PATINA: the version and SHA-256 that
+run.json records) and refuses a binary older than any source in its cargo dep-info (a build
+that failed or was skipped).
+
 An area is a directory under tests/ holding check scripts (`*.sh` directly in it); guests/
 holds the guests' sources.
 
@@ -24,6 +28,7 @@ where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/pat
 The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s, release
 above 600 s.
 """
+import hashlib
 import os
 import platform
 import signal
@@ -77,6 +82,44 @@ def select(args, allsc):
     return "area", [s for s in allsc if s["area"] in areas and {"quick", "area"} & set(s["tiers"])]
 
 
+def build_under_test():
+    """The build the scripts test (PATINA): the identity run.json records ("VERSION SHA256"),
+    or exit when it is missing or older than any source its dep-info (BINARY.d, written by
+    cargo) names: a build that failed or was skipped left an earlier binary behind, and
+    scripts run against it would test old code."""
+    exe = os.environ.get("PATINA")
+    if not exe:
+        sys.exit("run.py: PATINA is not set: run it through ./check, which builds patina first")
+    try:
+        built = os.stat(exe).st_mtime_ns
+        with open(exe + ".d") as f:
+            deps = f.read().replace("\\\n", " ").split("\n", 1)[0].split(": ", 1)[1]
+    except (OSError, IndexError) as e:
+        sys.exit(f"run.py: the build under test: {e}")
+    # Paths with spaces are escaped as "\ " in dep-info.
+    paths = [p.replace("\0", " ") for p in deps.replace("\\ ", "\0").split()]
+    newer = []
+    for p in paths:
+        for d, _, files in os.walk(p) if os.path.isdir(p) else [(os.path.dirname(p), [], [os.path.basename(p)])]:
+            for n in files:
+                q = os.path.join(d, n)
+                try:
+                    if os.stat(q).st_mtime_ns > built:
+                        newer.append(q)
+                except OSError:
+                    newer.append(q + " (missing)")
+    if newer:
+        sys.exit(f"run.py: {exe} is older than {len(newer)} of its sources (first: {newer[0]}): "
+                 "its build failed or was skipped; build it (./check does) before running scripts")
+    version = subprocess.run([exe, "--version"], stdout=subprocess.PIPE, text=True, check=True).stdout.split()[-1]
+    h = hashlib.sha256()
+    with open(exe, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(built / 1e9))
+    return f"{version} {h.hexdigest()}", stamp
+
+
 def kill_session(sid):
     """SIGKILL every process of session SID (a script runs in its own session; a process
     group is not enough: `timeout` and other job-control tools move to their own group) until
@@ -121,6 +164,8 @@ def main():
         print(f"== {len(skipped)} scripts skipped: marked for another architecture than {machine}", flush=True)
     if not sel:
         sys.exit(f"no scripts for {' '.join(args)}")
+    build, stamp = build_under_test()
+    print(f"== patina under test: {build} (built {stamp})", flush=True)
     label = "-".join(a.lower() for a in args)[:40]
     base = os.path.join(CHECK_DIR, "runs", time.strftime("%Y%m%dT%H%M%S") + f"-{label}-{os.getpid()}")
     os.makedirs(base)

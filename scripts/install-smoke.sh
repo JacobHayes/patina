@@ -22,7 +22,9 @@ sweep() {
     [ "$rc" = 1 ] || { echo "install-smoke: $name: expected a finding (exit 1), got exit $rc" >&2; exit 1; }
     patina sweep --seeds 1..20 --out "runs/$name-fixed" "$@" fixed
     first=$(sed -n 's/.*"dir": *"\([^"]*\)".*/\1/p' "runs/$name/report.json" | head -1)
-    patina replay "$first" --out "runs/$name-replay" | grep -q '^identical' \
+    # replay exits with the replayed outcome's status; its first line says whether it repeated.
+    patina replay "$first" --out "runs/$name-replay" >"runs/$name-replay.txt" || true
+    grep -q '^identical' "runs/$name-replay.txt" \
         || { echo "install-smoke: $name: the replay of $first differs" >&2; exit 1; }
 }
 sweep quickstart -- quickstart/target/debug/jobs

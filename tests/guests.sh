@@ -12,8 +12,11 @@
 #   sandbox/     the sandbox guests
 # so a set never changes once made: checks of different trees, in parallel, read their own.
 # Builds take the build lock and share PATINA_BUILD_DIR (cargo targets, the Go cache). Sets
-# and cache entries unused for 3 days are deleted.
+# and cache entries unused for 3 days are deleted. A failed build fails this script, and ./check
+# with it.
 set -eu
+# sh has no pipefail on every host: a command whose status matters runs alone, in an assignment
+# (set -e sees its status), and only commands that cannot fail feed a pipe.
 root=$(cd "$(dirname "$0")/.." && pwd)
 base=${PATINA_CHECK_DIR:-$root/target/patina-check}
 export PATINA_BUILD_DIR="$base/build"
@@ -27,14 +30,20 @@ case $(uname -m) in
     x86_64) skipped="" ;;
     *) skipped=" counters " ;;
 esac
-tools=$( (uname -m; gcc --version | head -1; rustc -V; go version; clang --version 2>/dev/null | head -1) | sha256sum | cut -c1-16)
+nl='
+'
+machine=$(uname -m); gccv=$(gcc --version); rustv=$(rustc -V); gov=$(go version)
+clangv=$(clang --version 2>/dev/null) || clangv=""
+tools=$(printf '%s\n' "$machine" "${gccv%%"$nl"*}" "$rustv" "$gov" ${clangv:+"${clangv%%"$nl"*}"} | sha256sum | cut -c1-16)
 
 # key DIR: hash of the files under the directory, the repository paths its `deps` file lists
 # (sources it builds from outside it, such as the SDKs), and the tool versions
 key() {
-    (cd "$root" && { find "$1" -type f -not -path '*/target/*'; [ ! -f "$1/deps" ] || find $(cat "$1/deps") -type f -not -path '*/target/*'; } |
-        LC_ALL=C sort | xargs sha256sum; echo "$tools") |
-        sha256sum | cut -c1-16
+    deps=""
+    [ ! -f "$root/$1/deps" ] || deps=$(cat "$root/$1/deps")
+    files=$(cd "$root" && find "$1" $deps -type f -not -path '*/target/*')
+    sums=$(cd "$root" && printf '%s\n' "$files" | LC_ALL=C sort | xargs sha256sum)
+    printf '%s\n%s\n' "$sums" "$tools" | sha256sum | cut -c1-16
 }
 
 # name BUILD_SH: the entry name of a build script
