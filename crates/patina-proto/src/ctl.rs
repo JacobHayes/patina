@@ -902,6 +902,9 @@ pub const HE_LOG_LIMIT: u64 = 10;
 pub const HE_CAPACITY: u64 = 11;
 /// The host filesystem holding the run directory is full: args[0] = errno, args[1] = syscall.
 pub const HE_DISK_FULL: u64 = 12;
+/// The first image cannot run (as `execve` would fail): args[0] = errno, args[1] =
+/// `exec::Why`, args[3] = the `#!` depth reached. The run ends `error`, stop `exec`.
+pub const HE_EXEC: u64 = 13;
 
 /// A signal frame the runtime does not build: the trap frame (or, at `rt_sigreturn`, the
 /// program's frame) holds a context record outside those the runtime normalises (arm64:

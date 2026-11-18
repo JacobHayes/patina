@@ -90,6 +90,22 @@ pub fn host_error(errno: i64, nr: u64, code: u64) -> ! {
     hang()
 }
 
+/// The first image cannot run (`exec::resolve` failed with `r`): the run ends `error`.
+pub fn exec_failed(r: i64, why: proto::exec::Why, depth: usize) -> ! {
+    call_sup_raw(
+        Op::HostError,
+        [
+            (-r) as u64,
+            why as u64,
+            proto::ctl::HE_EXEC,
+            depth as u64,
+            0,
+            0,
+        ],
+    );
+    hang()
+}
+
 /// End the run `unsupported`, stop `capacity`: the table `limit` (`proto::ctl::LIMIT_*`)
 /// holds `cap` entries the program still uses.
 pub fn capacity(limit: u64, cap: u64) -> ! {

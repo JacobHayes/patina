@@ -60,6 +60,7 @@ pub mod e {
     pub const EISDIR: i64 = 21;
     pub const ENAMETOOLONG: i64 = 36;
     pub const ELOOP: i64 = 40;
+    pub const ELIBBAD: i64 = 80;
     pub const EFBIG: i64 = 27;
     pub const ENOSPC: i64 = 28;
     pub const EDQUOT: i64 = 122;

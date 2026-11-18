@@ -1160,7 +1160,9 @@ and compares every boundary record. It refuses a program whose SHA-256 changed, 
 by another Patina build (another version, or another binary of one): install that version
 (`install.sh --version VERSION`) or run the seed again. `identical` means the bug is
 reproduced exactly; a difference ends `nondeterministic` and names the first differing
-record, which is a Patina bug.
+record, which is a Patina bug unless the host's files changed: the program is the file the
+command names (a `#!` script itself), and what it runs from the host (a script's interpreter,
+shared libraries, anything under `/usr`) is not recorded.
 
 A replay refuses a rebuilt program; to check a fix, run the finding's `rerun:` line instead.
 It names the program by path and carries the seed, the faults, the checker and the case (with

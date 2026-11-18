@@ -1,7 +1,6 @@
 # 8. Host paths. A program given by a host path runs from there, so the files beside it are
-#    there by their own paths (a shell given a script beside it, which runs a program beside
-#    itself), also through a symlinked directory and from inside a mount whose symlink leads out
-#    of it. A file or program the guest looks for that the sandbox lacks and the host has is named
+#    there by their own paths (a script that runs a program beside itself), also through a
+#    symlinked directory and from inside a mount whose symlink leads out of it. A file or program the guest looks for that the sandbox lacks and the host has is named
 #    in result.json with a directory to mount, and mounting it makes the run pass; a program
 #    run by name is named with where the host's PATH has it.
 #@ tier=quick budget=5
@@ -10,7 +9,6 @@ d=$RUNS/paths
 mkdir -p "$d/real/bin" "$d/proj" "$d/data" "$d/hostbin"
 ln -sfn "$d/real" "$d/proj/build"
 cp "$PATINA_GUESTS/hello-static" "$d/real/bin/hello"
-cp /usr/bin/dash "$d/real/bin/sh"
 printf '#!/bin/sh\nexec "$(dirname "$0")/hello" "$@"\n' >"$d/real/bin/run.sh"
 printf '#!/bin/sh\necho tool\n' >"$d/hostbin/mytool"
 echo data >"$d/data/x"
@@ -20,9 +18,9 @@ chmod +x "$d/real/bin/run.sh" "$d/hostbin/mytool"
 # of the project whose `build` links outside it.
 for how in direct link mount; do
     case $how in
-        direct) set -- -- "$d/real/bin/sh" "$d/real/bin/run.sh" one ;;
-        link) set -- -- "$d/proj/build/bin/sh" "$d/proj/build/bin/run.sh" one ;;
-        mount) set -- --mount "$d/proj:$d/proj" -- "$d/proj/build/bin/sh" "$d/proj/build/bin/run.sh" one ;;
+        direct) set -- -- "$d/real/bin/run.sh" one ;;
+        link) set -- -- "$d/proj/build/bin/run.sh" one ;;
+        mount) set -- --mount "$d/proj:$d/proj" -- "$d/proj/build/bin/run.sh" one ;;
     esac
     prun "$d/sib-$how" --seed 1 "$@"
     [ "$st" = 0 ] || die "sibling ($how): exit $st ($(tail -3 "$d/sib-$how.txt"))"

@@ -134,12 +134,12 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 | `liveness` | 1 | every thread blocked, or the virtual time limit passed |
 | `failure` | 1 | the program exited nonzero, with a status `--ok-exit` does not name |
 | `crash` | 1 | the program died on a signal |
-| `unsupported` | 2 | the program did something Patina does not model, or never finished and filled the log to `--log-limit` (stop `log-limit`); the message names it |
+| `unsupported` | 2 | the program did something Patina does not model (stop `exec`: an image the kernel would run that Patina does not load, such as a 32-bit program), or never finished and filled the log to `--log-limit` (stop `log-limit`); the message names it |
 | `timeout` | 2 | the wall-time limit passed |
 | `nondeterministic` | 2 | a replay differed from its run: a Patina bug, please report it |
 | `internal` | 2 | Patina failed, or the host refused a resource |
 | `vacuous` | 2 | a sweep's fault, SDK check or `--check` never had anything to act on, or a finding a known file requires (`!ID`) did not appear |
-| `error` | 2 | the command could not be carried out, or the `--check` command failed (stop `check`) or answered otherwise on replay (`check-unstable`) |
+| `error` | 2 | the command could not be carried out: the program cannot run, as `execve` would refuse it (stop `exec`: not executable, a `#!` interpreter missing, not an image of this architecture), or the `--check` command failed (stop `check`) or answered otherwise on replay (`check-unstable`) |
 
 ## Where next
 

@@ -1,12 +1,14 @@
-//! `execve` and `execveat`.
+//! `execve` and `execveat`, and what the first image runs.
 //!
 //! The runtime resolves what will run, so that every failure is reported to the caller as
 //! the kernel would report it: the path walk (`ENOENT`, `ENOTDIR`, `ELOOP`, `ENAMETOOLONG`),
 //! no execute permission or not a regular file (`EACCES`), neither ELF nor `#!` (`ENOEXEC`),
-//! a missing ELF interpreter (`ENOENT`). `#!` lines are resolved here, at most 4 deep as the
-//! kernel allows (`ELOOP` beyond). Then it sends `Exec` and re-executes itself from descriptor
-//! 3004 with the resolved image as its argument; the new runtime instance starts in the same
-//! task, holding the turn. A failure of that last call is `infra`.
+//! a missing ELF interpreter (`ENOENT`). `#!` lines are read as the kernel reads them
+//! (`proto::exec::parse`), at most `proto::exec::MAX_DEPTH` deep (`ELOOP` beyond). Then it sends
+//! `Exec` and re-executes itself from descriptor 3004 with the resolved image as its argument;
+//! the new runtime instance starts in the same task, holding the turn. A failure of that last
+//! call is `infra`. The first image goes through the same `resolve` (`loader::start`): a
+//! program that cannot run ends the run `error`, saying why (`proto::exec::Why`).
 
 use crate::path::{self, Kind, PathBuf};
 use crate::raw::*;
@@ -14,6 +16,7 @@ use crate::state::proc;
 use crate::sys::{set_class, stop_here};
 use crate::trap::{args, Action, Call};
 use proto::ctl::Op;
+use proto::exec::{Why, BINPRM_BUF_SIZE as BUF, MAX_DEPTH};
 use proto::layout::FD_RT;
 use proto::table::Class;
 
@@ -23,20 +26,80 @@ const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const X_OK: u64 = 1;
 const AT_EACCESS: u64 = 0x200;
 const O_RDONLY_CLOEXEC: u64 = 0o2000000;
-const MAX_DEPTH: usize = 4;
-const BUF: usize = 256;
 /// The loader takes at most this many arguments and environment strings.
 const MAX_ARGS: usize = 4096;
 
 /// What `execve` will run: the ELF image's canonical path and the `#!` prefix of the
-/// argument vector (outermost script first: interpreter, optional argument, script name).
+/// argument vector (outermost script first: interpreter, optional argument; then the script
+/// name). On failure, `why` and `depth` say what failed (`depth` 0: the file itself, K: the
+/// K-th interpreter).
 pub struct Target {
     pub elf: PathBuf,
-    /// For each `#!` level: [interpreter as written, optional argument, file name as given].
-    pub levels: [[[u8; BUF]; 3]; MAX_DEPTH],
-    pub lens: [[usize; 3]; MAX_DEPTH],
-    pub has_arg: [bool; MAX_DEPTH],
+    /// For each `#!` level: [interpreter as written, optional argument], NUL-terminated.
+    levels: [[[u8; BUF]; 2]; MAX_DEPTH],
+    lens: [[usize; 2]; MAX_DEPTH],
+    has_arg: [bool; MAX_DEPTH],
+    /// The outermost script's name as the kernel passes it, NUL-terminated.
+    script: PathBuf,
     pub depth: usize,
+    pub why: Why,
+}
+
+impl Target {
+    pub const fn new() -> Target {
+        Target {
+            elf: PathBuf::new(),
+            levels: [[[0; BUF]; 2]; MAX_DEPTH],
+            lens: [[0; 2]; MAX_DEPTH],
+            has_arg: [false; MAX_DEPTH],
+            script: PathBuf::new(),
+            depth: 0,
+            why: Why::Errno,
+        }
+    }
+
+    /// The strings the kernel puts before the caller's `argv[1..]` for a script: each level's
+    /// interpreter and optional argument, innermost first, then the outermost script's name
+    /// (which replaces `argv[0]`; inner levels' names are the interpreters already given).
+    /// Nothing for an ELF image. Each slice is followed by a NUL in memory.
+    pub fn prefix(&self, mut f: impl FnMut(&[u8])) {
+        for d in (0..self.depth).rev() {
+            f(&self.levels[d][0][..self.lens[d][0]]);
+            if self.has_arg[d] {
+                f(&self.levels[d][1][..self.lens[d][1]]);
+            }
+        }
+        if self.depth > 0 {
+            f(self.script.as_bytes());
+        }
+    }
+}
+
+impl Target {
+    /// The script's name as the kernel passes it: the path as the caller gave it (`execveat`
+    /// with a descriptor: /dev/fd/N[/path]).
+    pub fn set_script(&mut self, dirfd: i64, given: &[u8]) -> Result<(), i64> {
+        let s = &mut self.script;
+        s.n = 0;
+        if dirfd != AT_FDCWD && given.first() != Some(&b'/') {
+            for &c in b"/dev/fd/" {
+                s.b[s.n] = c;
+                s.n += 1;
+            }
+            s.n += path::fmt_dec(&mut s.b[s.n..], dirfd as u64);
+            if !given.is_empty() {
+                s.b[s.n] = b'/';
+                s.n += 1;
+            }
+        }
+        if s.n + given.len() >= s.b.len() {
+            return Err(-e::ENAMETOOLONG);
+        }
+        s.b[s.n..s.n + given.len()].copy_from_slice(given);
+        s.n += given.len();
+        s.b[s.n] = 0;
+        Ok(())
+    }
 }
 
 fn copy_into(dst: &mut [u8; BUF], s: &[u8]) -> Result<usize, i64> {
@@ -75,10 +138,14 @@ fn fd_path(fd: i64, out: &mut PathBuf) -> bool {
     true
 }
 
+const S_IFMT: u32 = 0o170000;
+const S_IFREG: u32 = 0o100000;
+
 /// Open the file `execve` would open, with the kernel's checks and errors.
 /// `p` is NUL-terminated; `flags` are `execveat`'s.
-fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
+fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, (i64, Why)> {
     let ap = p.as_ptr() as u64;
+    let empty = p.len() <= 1 && flags & AT_EMPTY_PATH != 0;
     let r = unsafe {
         sc4(
             nr::FACCESSAT2,
@@ -89,9 +156,22 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
         )
     };
     if r < 0 {
-        return Err(r);
+        let mut why = Why::Errno;
+        if r == -e::EACCES {
+            // The file's own mode, or a directory on the way (the errno alone says that).
+            let mut st = proto::abi::stat::Stat::zeroed();
+            let fl = flags & (AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW);
+            if unsafe { sc4(nr::NEWFSTATAT, dirfd as u64, ap, st.as_mut_ptr() as u64, fl) } == 0 {
+                why = if st.mode() & S_IFMT != S_IFREG {
+                    Why::NotRegular
+                } else {
+                    Why::NotExecutable
+                };
+            }
+        }
+        return Err((r, why));
     }
-    let fd = if p.len() <= 1 && flags & AT_EMPTY_PATH != 0 {
+    let fd = if empty {
         // The descriptor itself (fexecve): reopen it for reading through /proc/self/fd.
         let mut lp = PathBuf::new();
         let mut l = 0;
@@ -119,37 +199,30 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, i64> {
         unsafe { sc4(nr::OPENAT, dirfd as u64, ap, O_RDONLY_CLOEXEC | nofollow, 0) }
     };
     if fd == -e::EISDIR || fd == -e::ENXIO {
-        return Err(-e::EACCES);
+        return Err((-e::EACCES, Why::NotRegular));
+    }
+    if fd == -e::EACCES {
+        return Err((fd, Why::Unreadable));
     }
     if fd < 0 {
-        return Err(fd);
+        return Err((fd, Why::Errno));
     }
     let mut st = proto::abi::stat::Stat::zeroed();
     unsafe { sc2(nr::FSTAT, fd as u64, st.as_mut_ptr() as u64) };
-    const S_IFMT: u32 = 0o170000;
-    const S_IFREG: u32 = 0o100000;
     if st.mode() & S_IFMT != S_IFREG {
         unsafe { sc1(nr::CLOSE, fd as u64) };
-        return Err(-e::EACCES);
+        return Err((-e::EACCES, Why::NotRegular));
     }
     Ok(fd)
 }
 
 /// Is the ELF image on `fd` one this runtime can load, and does its interpreter exist?
-fn check_elf(fd: i64, head: &[u8]) -> Result<(), i64> {
-    if head.len() < 64
-        || head[4] != 2
-        || u16::from_le_bytes([head[18], head[19]]) != proto::abi::ELF_MACHINE
-    {
-        return Err(-e::ENOEXEC);
-    }
-    let typ = u16::from_le_bytes([head[16], head[17]]);
-    if typ != 2 && typ != 3 {
-        return Err(-e::ENOEXEC);
-    }
+fn check_elf(fd: i64, head: &[u8]) -> Result<(), (i64, Why)> {
+    proto::exec::elf_header(head).map_err(|w| (-e::ENOEXEC, w))?;
     let phoff = u64::from_le_bytes(head[32..40].try_into().unwrap());
     let phnum = u16::from_le_bytes([head[56], head[57]]) as u64;
-    for i in 0..phnum.min(64) {
+    let mut loads = 0;
+    for i in 0..phnum {
         let mut ph = [0u64; 7];
         let r = unsafe {
             sc4(
@@ -161,83 +234,130 @@ fn check_elf(fd: i64, head: &[u8]) -> Result<(), i64> {
             )
         };
         if r != 56 {
-            return Err(-e::ENOEXEC);
+            return Err((-e::ENOEXEC, Why::ElfShort));
+        }
+        if ph[0] as u32 == 1 {
+            loads += 1;
         }
         if ph[0] as u32 == 3 {
             // PT_INTERP: the interpreter must exist (the kernel answers ENOENT otherwise).
-            let mut ip = [0u8; BUF];
+            let mut ip = PathBuf::new();
             let n = (ph[4] as usize).min(BUF - 1);
             unsafe {
                 sc4(
                     nr::PREAD64,
                     fd as u64,
-                    ip.as_mut_ptr() as u64,
+                    ip.b.as_mut_ptr() as u64,
                     n as u64,
                     ph[1],
                 )
             };
-            ip[n] = 0;
-            let r = unsafe { sc4(nr::FACCESSAT2, AT_FDCWD as u64, ip.as_ptr() as u64, 0, 0) };
+            ip.n = ip.b[..n].iter().position(|&c| c == 0).unwrap_or(n);
+            ip.b[ip.n] = 0;
+            let r = unsafe { sc4(nr::FACCESSAT2, AT_FDCWD as u64, ip.b.as_ptr() as u64, 0, 0) };
             if r < 0 {
-                return Err(if r == -e::EACCES { r } else { -e::ENOENT });
+                if r == -e::EACCES {
+                    return Err((r, Why::Errno));
+                }
+                path::missing(proto::vfs::MISSING_EXEC, &ip);
+                return Err((-e::ENOENT, Why::ElfInterp));
             }
+            interp_image(&ip)?;
         }
+    }
+    if loads == 0 {
+        return Err((-e::ENOEXEC, Why::ElfNoLoad));
     }
     Ok(())
 }
 
-/// Parse a `#!` line: (interpreter, optional argument), as the kernel's `load_script` does.
-fn parse_shebang(head: &[u8]) -> Result<(&[u8], Option<&[u8]>), i64> {
-    let line = &head[2..];
-    let end = line.iter().position(|&c| c == b'\n').unwrap_or(line.len());
-    let mut l = &line[..end];
-    let ws = |c: u8| c == b' ' || c == b'\t';
-    while l.first().is_some_and(|&c| ws(c)) {
-        l = &l[1..];
+/// Whether the ELF interpreter at `ip` (NUL-terminated) is an image the runtime loads, with
+/// the kernel's errors: `EIO` for a header it cannot read whole, `ELIBBAD` for one that is not
+/// a 64-bit ELF image of this architecture or whose program headers are cut off.
+fn interp_image(ip: &PathBuf) -> Result<(), (i64, Why)> {
+    let fd = unsafe {
+        sc4(
+            nr::OPENAT,
+            AT_FDCWD as u64,
+            ip.b.as_ptr() as u64,
+            O_RDONLY_CLOEXEC,
+            0,
+        )
+    };
+    if fd < 0 {
+        return Err((fd, Why::ElfInterpBad));
     }
-    while l.last().is_some_and(|&c| ws(c) || c == 0) {
-        l = &l[..l.len() - 1];
-    }
-    if l.is_empty() {
-        return Err(-e::ENOEXEC);
-    }
-    let i = l.iter().position(|&c| ws(c)).unwrap_or(l.len());
-    let interp = &l[..i];
-    let mut rest = &l[i..];
-    while rest.first().is_some_and(|&c| ws(c)) {
-        rest = &rest[1..];
-    }
-    Ok((interp, if rest.is_empty() { None } else { Some(rest) }))
+    let mut head = [0u8; 64];
+    let n = unsafe { sc4(nr::PREAD64, fd as u64, head.as_mut_ptr() as u64, 64, 0) };
+    let r = if n != 64 {
+        Err((-e::EIO, Why::ElfInterpBad))
+    } else if &head[..4] != b"\x7fELF" || proto::exec::elf_header(&head).is_err() {
+        Err((-e::ELIBBAD, Why::ElfInterpBad))
+    } else {
+        let phoff = u64::from_le_bytes(head[32..40].try_into().unwrap());
+        let phnum = u16::from_le_bytes([head[56], head[57]]) as u64;
+        let mut ph = [0u8; 56];
+        let last = phoff + phnum.saturating_sub(1) * 56;
+        let got = unsafe { sc4(nr::PREAD64, fd as u64, ph.as_mut_ptr() as u64, 56, last) };
+        if phnum == 0 || got != 56 {
+            Err((-e::ELIBBAD, Why::ElfInterpBad))
+        } else {
+            Ok(())
+        }
+    };
+    unsafe { sc1(nr::CLOSE, fd as u64) };
+    r
 }
 
-/// Resolve `(dirfd, path)` with `execveat` flags into a target.
+/// Resolve `(dirfd, path)` with `execveat` flags into a target. On failure `t.why` and
+/// `t.depth` say what failed.
 pub fn resolve(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<(), i64> {
+    resolve_in(dirfd, path, flags, t).map_err(|(r, why)| {
+        t.why = why;
+        r
+    })
+}
+
+fn resolve_in(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<(), (i64, Why)> {
     t.depth = 0;
-    let mut cur = [0u8; BUF + 1];
-    let mut cur_len;
+    t.why = Why::Errno;
     let mut dfd = dirfd;
     let mut fl = flags;
     // The policy on the first path (later ones are interpreter paths, checked the same way).
     let mut name = PathBuf::new();
     if path.len() >= name.b.len() {
-        return Err(-e::ENAMETOOLONG);
+        return Err((-e::ENAMETOOLONG, Why::Errno));
     }
     name.b[..path.len()].copy_from_slice(path);
     name.b[path.len()] = 0;
     name.n = path.len();
+    // The interpreter one past the kernel's depth: opened, as the kernel does, then ELOOP.
+    let mut last = false;
     loop {
         let mut norm = PathBuf::new();
         let kind = path::classify(dfd, name.b.as_ptr() as u64, &mut norm);
         let fd = match kind {
             Kind::Plain => match open_exec(dfd, &name.b[..=name.n], fl) {
+                // An interpreter's name is not resolved before it is opened (the program's
+                // is, `resolve`): where its symbolic links lead is checked here.
+                Ok(fd) if t.depth > 0 && hidden_target(fd) => {
+                    unsafe { sc1(nr::CLOSE, fd as u64) };
+                    path::refuse(norm.as_bytes());
+                    return Err((-e::ENOENT, Why::Hidden));
+                }
                 Ok(fd) => fd,
-                Err(r) => {
+                Err((r, why)) => {
                     // An interpreter a `#!` line names (the program itself is noted by
                     // `resolve::note_missing`).
-                    if r == -e::ENOENT && t.depth > 0 && norm.n > 0 {
-                        path::missing(proto::vfs::MISSING_EXEC, &norm);
+                    if r == -e::ENOENT && t.depth > 0 {
+                        if name.as_bytes().last() == Some(&b'\r') {
+                            return Err((r, Why::CarriageReturn));
+                        }
+                        if norm.n > 0 {
+                            path::missing(proto::vfs::MISSING_EXEC, &norm);
+                        }
                     }
-                    return Err(r);
+                    return Err((r, why));
                 }
             },
             Kind::SelfExe => {
@@ -250,11 +370,17 @@ pub fn resolve(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<()
             Kind::SelfFd(n) => open_exec(n, b"\0", AT_EMPTY_PATH)?,
             Kind::Hidden => {
                 path::refuse(norm.as_bytes());
-                return Err(-e::ENOENT);
+                return Err((-e::ENOENT, Why::Hidden));
             }
-            Kind::NoPty => return Err(-e::ENOENT),
-            Kind::Synth(_) | Kind::Random | Kind::NoTty => return Err(-e::EACCES),
+            Kind::NoPty => return Err((-e::ENOENT, Why::Errno)),
+            Kind::Synth(_) | Kind::Random | Kind::NoTty => {
+                return Err((-e::EACCES, Why::NotRegular))
+            }
         };
+        if last {
+            unsafe { sc1(nr::CLOSE, fd as u64) };
+            return Err((-e::ELOOP, Why::TooDeep));
+        }
         let mut head = [0u8; BUF];
         let n = unsafe {
             sc4(
@@ -273,54 +399,60 @@ pub fn resolve(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<()
             unsafe { sc1(nr::CLOSE, fd as u64) };
             ok?;
             if !named {
-                return Err(-e::ENOENT);
+                return Err((-e::ENOENT, Why::Errno));
             }
             return Ok(());
         }
         unsafe { sc1(nr::CLOSE, fd as u64) };
-        if head.len() < 2 || &head[..2] != b"#!" {
-            return Err(-e::ENOEXEC);
+        if head.is_empty() {
+            return Err((-e::ENOEXEC, Why::Empty));
         }
-        if t.depth == MAX_DEPTH {
-            return Err(-e::ELOOP);
+        let script =
+            proto::exec::parse(head).map_err(|n| (-e::ENOEXEC, Why::from_not_script(n)))?;
+        if script.interp.is_empty() {
+            // The kernel opens "": the working directory, not a regular file.
+            return Err((-e::EACCES, Why::NoInterp));
         }
-        let (interp, arg) = parse_shebang(head)?;
         let d = t.depth;
-        t.lens[d][0] = copy_into(&mut t.levels[d][0], interp)?;
-        t.has_arg[d] = arg.is_some();
-        t.lens[d][1] = copy_into(&mut t.levels[d][1], arg.unwrap_or(b""))?;
-        // The script's name as the kernel passes it: the path as given (execveat with a
-        // descriptor: /dev/fd/N[/path]).
-        let given: &[u8] = &name.b[..name.n];
-        let mut fdname = [0u8; BUF];
-        let given = if dfd != AT_FDCWD && (given.first() != Some(&b'/')) {
-            let mut l = 0;
-            for &c in b"/dev/fd/" {
-                fdname[l] = c;
-                l += 1;
-            }
-            l += path::fmt_dec(&mut fdname[l..], dfd as u64);
-            if !given.is_empty() {
-                fdname[l] = b'/';
-                l += 1;
-                let k = given.len().min(BUF - 1 - l);
-                fdname[l..l + k].copy_from_slice(&given[..k]);
-                l += k;
-            }
-            &fdname[..l]
-        } else {
-            given
-        };
-        t.lens[d][2] = copy_into(&mut t.levels[d][2], given)?;
+        if d == MAX_DEPTH {
+            // The kernel opens this level's interpreter, then gives up.
+            last = true;
+            let l = script.interp.len();
+            name.b[..l].copy_from_slice(script.interp);
+            name.b[l] = 0;
+            name.n = l;
+            dfd = AT_FDCWD;
+            fl = 0;
+            continue;
+        }
+        let long = |r| (r, Why::NameTooLong);
+        t.lens[d][0] = copy_into(&mut t.levels[d][0], script.interp).map_err(long)?;
+        t.has_arg[d] = script.arg.is_some();
+        t.lens[d][1] = copy_into(&mut t.levels[d][1], script.arg.unwrap_or(b"")).map_err(long)?;
+        if d == 0 {
+            t.set_script(dfd, &name.b[..name.n])
+                .map_err(|r| (r, Why::NameTooLong))?;
+        }
         t.depth += 1;
-        cur_len = interp.len();
-        cur[..cur_len].copy_from_slice(interp);
-        cur[cur_len] = 0;
-        name.b[..=cur_len].copy_from_slice(&cur[..=cur_len]);
-        name.n = cur_len;
+        let l = script.interp.len();
+        name.b[..l].copy_from_slice(script.interp);
+        name.b[l] = 0;
+        name.n = l;
         dfd = AT_FDCWD;
         fl = 0;
     }
+}
+
+/// Whether the file open at `fd` is one Patina keeps from the program (reached through a
+/// symbolic link).
+fn hidden_target(fd: i64) -> bool {
+    let mut real = PathBuf::new();
+    let mut norm = PathBuf::new();
+    fd_path(fd, &mut real)
+        && matches!(
+            path::classify(AT_FDCWD, real.b.as_ptr() as u64, &mut norm),
+            Kind::Hidden
+        )
 }
 
 /// The kernel's limit on one argument or environment string.
@@ -369,40 +501,43 @@ pub fn execve(call: &mut dyn Call) -> Action {
     if path.is_empty() && flags & AT_EMPTY_PATH == 0 {
         return Action::Return(-e::ENOENT);
     }
-    let mut t = Target {
-        elf: PathBuf::new(),
-        levels: [[[0; BUF]; 3]; MAX_DEPTH],
-        lens: [[0; 3]; MAX_DEPTH],
-        has_arg: [false; MAX_DEPTH],
-        depth: 0,
-    };
+    let mut t = Target::new();
     if let Err(e) = resolve(dirfd, path, flags, &mut t) {
         return Action::Return(e);
+    }
+    if t.depth > 0 {
+        // The handler's path has its symlinks resolved (`resolve::prepare`); the script's
+        // name is the one the guest gave.
+        let g = call.guest_args();
+        let (gdir, gp) = if call.nr() == nr::EXECVE {
+            (AT_FDCWD, g[0])
+        } else {
+            (g[0] as i32 as i64, g[1])
+        };
+        let given = match crate::guest::cstr(gp, crate::path::PATH_MAX) {
+            Ok(s) => s,
+            Err(r) => return Action::Return(r),
+        };
+        if let Err(r) = t.set_script(gdir, given) {
+            return Action::Return(r);
+        }
     }
     let (nargs, nenv) = match (count(argv), count(envp)) {
         (Ok(a), Ok(e)) => (a, e),
         (Err(r), _) | (_, Err(r)) => return Action::Return(r),
     };
     // The new argument vector: [rt, image, (#! prefix, innermost interpreter first), argv[1..]].
-    let mut v = [0u64; MAX_ARGS + 4 + 3 * MAX_DEPTH];
+    let mut v = [0u64; MAX_ARGS + 4 + 2 * MAX_DEPTH];
     let mut n = 0;
     v[n] = c"rt".as_ptr() as u64;
     n += 1;
     v[n] = t.elf.b.as_ptr() as u64;
     n += 1;
-    for d in (0..t.depth).rev() {
-        v[n] = t.levels[d][0].as_ptr() as u64;
+    t.prefix(|s| {
+        v[n] = s.as_ptr() as u64;
         n += 1;
-        if t.has_arg[d] {
-            v[n] = t.levels[d][1].as_ptr() as u64;
-            n += 1;
-        }
-    }
+    });
     if t.depth > 0 {
-        // The outermost script's name replaces argv[0]; inner levels' names are the
-        // interpreters already pushed (each level's file is the previous interpreter).
-        v[n] = t.levels[0][2].as_ptr() as u64;
-        n += 1;
         for i in 1..nargs {
             v[n] = crate::guest::get::<u64>(argv + 8 * i as u64).unwrap_or(0);
             n += 1;

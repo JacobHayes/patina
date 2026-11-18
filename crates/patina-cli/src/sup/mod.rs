@@ -97,6 +97,11 @@ struct Sup {
     wire: wire::Wire,
     /// Datagram sockets.
     udp: udp::Udp,
+    /// The program's path in the sandbox (the first image).
+    exe: String,
+    /// An `execve` has replaced an image: a runtime that cannot run its image now was handed
+    /// one an `execve` resolved, not the program.
+    execed: bool,
 }
 
 /// What a request does with the turn.
@@ -435,7 +440,10 @@ impl Sup {
         match Op::from_u32(req.op) {
             Some(Op::Hello) => self.hello(idx, a),
             Some(Op::VforkStart) => self.vfork_start(idx, a),
-            Some(Op::Exec) => self.exec(idx, a),
+            Some(Op::Exec) => {
+                self.execed = true;
+                self.exec(idx, a)
+            }
             Some(Op::WaitPark) => self.wait_park(idx, a),
             Some(Op::Yield) => {
                 self.sched.entries[idx].reply = 0;
@@ -549,6 +557,33 @@ impl Sup {
                             limit_name(errno)
                         ),
                     ));
+                }
+                if code == HE_EXEC {
+                    let why = proto::exec::Why::from_code(nr);
+                    if self.execed {
+                        // The image an `execve` resolved (and the guest left) does not resolve
+                        // again in the new runtime: Patina's failure, not the program's.
+                        self.finish(Verdict::new(
+                            "infra",
+                            format!(
+                                "the runtime could not load again the image an execve resolved ({}errno {errno})",
+                                match why.text() {
+                                    "" => String::new(),
+                                    t => format!("{t}, "),
+                                }
+                            ),
+                        ));
+                    }
+                    let d = exec_failure(&self.exe, errno, why, a[3] as usize);
+                    // What the kernel would run and Patina does not load is not the request's
+                    // fault.
+                    let class = match why {
+                        proto::exec::Why::Elf32
+                        | proto::exec::Why::ElfHeaders
+                        | proto::exec::Why::Unreadable => "exec-unsupported",
+                        _ => "exec",
+                    };
+                    self.finish(Verdict::new(class, d));
                 }
                 if code == HE_SIGNAL_CONTEXT {
                     self.finish(Verdict::new(
@@ -883,6 +918,8 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         procs: proc::Procs::default(),
         wire: wire::Wire::default(),
         udp: udp::Udp::default(),
+        exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
+        execed: false,
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
@@ -982,4 +1019,61 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
 fn work_dir(ctl: &Ctl) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt;
     Path::new(std::ffi::OsStr::from_bytes(ctl.config.work_path())).to_path_buf()
+}
+
+/// Why the first image cannot run, in a sentence: the program, the `#!` interpreter that
+/// failed (read again along the program's `#!` lines, `depth` deep), the reason and the errno.
+fn exec_failure(exe: &str, errno: u64, why: proto::exec::Why, depth: usize) -> String {
+    use proto::exec::Why;
+    use std::io::Read;
+    let mut file = exe.to_string();
+    let mut chain = vec![];
+    for _ in 0..depth {
+        let mut head = vec![0u8; proto::exec::BINPRM_BUF_SIZE];
+        let n = std::fs::File::open(&file)
+            .and_then(|mut f| f.read(&mut head))
+            .unwrap_or(0);
+        let Ok(s) = proto::exec::parse(&head[..n]) else {
+            break;
+        };
+        file = String::from_utf8_lossy(s.interp).into_owned();
+        chain.push(file.escape_debug().to_string());
+    }
+    let errno_name = match errno {
+        1 => "EPERM",
+        2 => "ENOENT",
+        8 => "ENOEXEC",
+        13 => "EACCES",
+        20 => "ENOTDIR",
+        26 => "ETXTBSY",
+        36 => "ENAMETOOLONG",
+        5 => "EIO",
+        40 => "ELOOP",
+        80 => "ELIBBAD",
+        _ => "",
+    };
+    let reason = match (why, errno) {
+        (Why::Errno, 2) => "not in the sandbox",
+        (Why::Errno, 13) => "permission denied (a directory on its path)",
+        (Why::Errno, 20) => "a component of its path is not a directory",
+        (Why::Errno, 40) => "too many symbolic links",
+        (Why::Errno, 36) => "its name is too long",
+        (w, _) => w.text(),
+    };
+    let errno = match errno_name {
+        "" => format!("errno {errno}"),
+        n => n.to_string(),
+    };
+    let reason = if reason.is_empty() {
+        "cannot run"
+    } else {
+        reason
+    };
+    match chain.as_slice() {
+        [] => format!("cannot run the program {exe}: {reason} ({errno})"),
+        c => format!(
+            "cannot run the program {exe}: its #! interpreter {}: {reason} ({errno})",
+            c.join(" -> #! ")
+        ),
+    }
 }

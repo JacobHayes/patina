@@ -9,6 +9,7 @@ pub mod abi;
 pub mod compute;
 pub mod ctl;
 pub mod draw;
+pub mod exec;
 pub mod faults;
 pub mod insn;
 pub mod layout;

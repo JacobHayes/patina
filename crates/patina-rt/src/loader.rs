@@ -428,6 +428,24 @@ pub fn start(k: &KernelStart) -> ! {
     p.guest_path_len = path.len();
 
     crate::sys::fs::read_mounts();
+    // What runs, resolved as `execve` resolves it (`exec::resolve`): an image this runtime
+    // loads, or a script's `#!` interpreters down to one. (After an `execve`, `path` is the
+    // image that call resolved.) A program that cannot run ends the run `error`.
+    let mut t = crate::exec::Target::new();
+    if let Err(r) = crate::exec::resolve(-100, path, 0, &mut t) {
+        crate::sup::exec_failed(r, t.why, t.depth);
+    }
+    if t.depth > 0 {
+        // The kernel's view of a script: the image is its interpreter's (`/proc/self/exe`),
+        // the name and AT_EXECFN stay the script's.
+        let e = t.elf.as_bytes();
+        if e.len() >= p.guest_path.len() - 1 {
+            crate::fatal(Setup::PathTooLong, 0);
+        }
+        p.guest_path[..e.len()].copy_from_slice(e);
+        p.guest_path[e.len()] = 0;
+        p.guest_path_len = e.len();
+    }
     // The task name the kernel would have given the guest: the basename of the
     // path, at most 15 bytes (it is "rt" after the runtime's own exec).
     let base = path.rsplit(|&c| c == b'/').next().unwrap_or(path);
@@ -436,7 +454,7 @@ pub fn start(k: &KernelStart) -> ! {
     comm[..n].copy_from_slice(&base[..n]);
     unsafe { sc2(nr::PRCTL, 15, comm.as_ptr() as u64) }; // PR_SET_NAME
 
-    let exe = load(&p.guest_path[..=path.len()], EXE_BASE, false);
+    let exe = load(&p.guest_path[..=p.guest_path_len], EXE_BASE, false);
     let mut entry = exe.entry;
     let mut ibase = 0;
     if exe.interp_len > 0 {
@@ -497,13 +515,23 @@ pub fn start(k: &KernelStart) -> ! {
     let base_platform = k
         .aux(AT_BASE_PLATFORM)
         .map(|v| sb.push_cstr(unsafe { cstr(v as *const u8) }));
-    let nargs = k.argc - 2;
-    if nargs > MAX_ARGS || k.nenv > MAX_ARGS {
+    // A script's argument vector: its `#!` prefix (interpreters, their arguments, the script's
+    // name), then the program's argv[1..] (`exec::Target::prefix`).
+    let mut argp = [0u64; MAX_ARGS];
+    let mut nargs = 0;
+    t.prefix(|s| {
+        if nargs < MAX_ARGS {
+            argp[nargs] = sb.push_cstr(s);
+        }
+        nargs += 1;
+    });
+    let from = if t.depth > 0 { 3 } else { 2 };
+    if nargs + (k.argc - from) > MAX_ARGS || k.nenv > MAX_ARGS {
         crate::fatal(Setup::TooManyArgs, 0);
     }
-    let mut argp = [0u64; MAX_ARGS];
-    for (i, a) in argp.iter_mut().enumerate().take(nargs) {
-        *a = sb.push_cstr(k.arg(i + 2));
+    for i in from..k.argc {
+        argp[nargs] = sb.push_cstr(k.arg(i));
+        nargs += 1;
     }
     let mut envp = [0u64; MAX_ARGS];
     for (i, e) in envp.iter_mut().enumerate().take(k.nenv) {

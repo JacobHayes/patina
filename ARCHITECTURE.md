@@ -43,7 +43,14 @@ runtime's one system-call instruction (`syscall`; `svc #0` on arm64) (`entry.rs`
 `arch/`). Each trap lands in the runtime's SIGSYS handler: look up the
 call's row, decide faults, do the call, write the boundary record, return.
 
-`execve` loads the runtime again with the new program (`exec.rs`); `fork` is real
+What runs is resolved as the kernel's `execve` resolves it, for the first program and for every
+`execve` alike (`exec.rs`, `resolve`): permission and file type, an ELF image of this
+architecture and its interpreter, `#!` lines read as the kernel reads them (one optional
+argument, the first 255 bytes, five nested interpreters; `proto::exec`); an interpreter's
+symbolic links are checked against the paths Patina keeps from the program. A program that
+cannot run ends the run `error`, stop `exec`, naming why and the kernel's errno (`unsupported`
+when the kernel would run it and the runtime does not load it, as a 32-bit image); `execve`
+returns that errno. `execve` loads the runtime again with the new program; `fork` is real
 (`sys/proc.rs`). Signals are virtual: the kernel never delivers one to program code; the
 runtime builds the signal frame on the way out of a trap (`sys/sig.rs`, the frame itself in
 `arch/<arch>/sigframe.rs`), so a signal arrives only at a trap boundary: a system call, a
