@@ -603,8 +603,13 @@ points"):
 
 W9 under counters: its crash lands at point 15, before fjall has made its `version` file
 durable, and the harness's open after the crash fails with `EEXIST`, the same in every run
-(seed 1 on arm64; seed 12 of 40 on x86_64 with counters; none of 40 without). It is the
-fjall harness's finding, not Patina's; not investigated further.
+(seed 1 on arm64; seed 12 of 40 on x86_64 with counters; none of 40 without). It is fjall
+F1, not a Patina bug: the tree the crash left fails the same way when the harness opens a copy
+of it natively, the run is the same digest in 3 of 3 runs, the harness's F1 workaround
+(`FJ_WIPE_PARTIAL=1`) makes the seed `ok`, and without counters seeds 1-200 reach F1 in 14
+runs (10 `EEXIST`, 4 an empty `version`). Counters move the crash points (seed 12's first
+crash at point 10 with them, during fjall's first open, at point 164 without), which is why
+that seed reaches F1 only with them.
 
 Costs (`evidence-costs`, runner, median of 3): a trap with counters on costs 1.28 µs more;
 a preemption 2.6 ms (loops) to 3.4 ms (fp); W1-W9 wall x0.66 (W9, which ends early) to x2.01
@@ -620,6 +625,16 @@ segment ends there.
 
 Runners differ: one of the five jobs got a Neoverse V3 (`MIDR_EL1` 0x410fd841), where
 `--preempt branches` is refused and the branch-counter scripts SKIP.
+
+The period before hop segments, on x86_64 (Zen 5, `perf_event_max_sample_rate` 6,000 at
+HZ 1,000: 6 samples a tick before the kernel throttles): a guest whose bursts of branches end
+just short of a mid-length segment, with every third segment short, left the short period in
+place for the hops after it. Counted with a scratch build: 1,104 and 1,225 overflows while
+hopping and 5,487 and 6,115 hops that found the counter stopped (throttled) over two seeds;
+with the period set before every segment, 30 and 0, and the same digest as before for each
+seed. `dmesg` showed no new perf message either way. After it: `counters` area passes, the
+90-cell ledger is unchanged. On arm64 `07-exclusive` fails with the faulting-exclusive fix
+reverted (`map`: SIGILL) and with the full-table stop removed (`many` ends `ok`).
 
 What differs from the Apple VM (Tart, Apple M4): no PMU is exposed to the guest, so
 `--preempt branches` is refused there (`patina doctor`: no PMU); the hop logic and the
