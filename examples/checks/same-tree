@@ -1,0 +1,15 @@
+#!/bin/sh
+# same-tree REF RUN: a run that exits 0 leaves the work tree the reference left. REF is a run
+# directory, or a sweep kept whole (--keep all) over the same seeds, whose seed-$PATINA_SEED
+# is the reference. Each side's last incarnation is compared. A run that failed cleanly (an
+# --ok-exit status) is not judged. For `patina run --check`; uses `patina log tree`.
+[ "$PATINA_EXIT" = 0 ] || { echo "exited $PATINA_EXIT: a clean failure, not compared"; exit 77; }
+ref=$1; [ ! -d "$ref/seed-$PATINA_SEED" ] || ref=$ref/seed-$PATINA_SEED
+last() { k=0; while [ -d "$1/inc-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/inc-$k"; }
+t=$(mktemp -d) || exit 2
+trap 'rm -rf "$t"' EXIT
+"${PATINA:-patina}" log tree "$(last "$ref")" "$t/want" && "${PATINA:-patina}" log tree "$(last "$2")" "$t/got" || exit 2
+diff -rq --no-dereference "$t/want" "$t/got" >"$t/diff"
+case $? in 0) exit 0 ;; 1) ;; *) cat "$t/diff"; exit 2 ;; esac
+echo "wrong-output: $(head -n1 "$t/diff" | sed "s|$t/||g")"
+exit 1

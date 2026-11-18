@@ -14,6 +14,13 @@
 #    exit 1 with the same last line stay two. `--known`: the first matching line names a
 #    finding, known findings do not fail the sweep, `[*planted*]` selects by case, and a `!`
 #    entry that matched no run makes the report vacuous.
+# 3. `--ok-exit` and `patina log tree`: upcase (a short write gives the wrong file and exit 0)
+#    swept with disk faults against a faults-off reference run: plainly, clean failures only;
+#    with `--ok-exit 1 --check same-tree`, one `wrong-output` group with fs-short in every run
+#    and no failure; `upcase fixed` none. An --ok-exit status the program did not exit with is
+#    still a failure, as is a listed status after an INVARIANT line, and a signal still a
+#    crash; the rerun line and run.json carry the list. `log tree` writes the tree the guest ended with (not the one it started from) and works
+#    on every incarnation of a crashed run.
 #@ tier=quick budget=10 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -181,6 +188,56 @@ printf '%s\n' "/bin/sh -c 'echo boom >&2; exit 1' first" "/bin/sh -c 'echo boom 
 [ "$(jq '.groups | length' two/report.json)" = 2 ] || die "two failing tests: $(jq -c '[.groups[] | [.signature, .cases]]' two/report.json)"
 echo "calc: $calc_groups; known: $(kn known1 calcs)"
 echo "check: $(jq -c .check kv/report.json); without crashes: vacuous"
+
+# 3. --ok-exit and log tree.
+up=$PATINA_GUESTS/examples/upcase same=$root/examples/checks/same-tree
+export PATINA
+"$PATINA" run --seed 1 --out upref -- "$up" >upref.txt 2>&1 || die "upcase reference: $(tail -2 upref.txt)" # lint-allow: seed — faults off, upcase writes the same tree on every seed
+rc=0
+"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --out up0 -- "$up" >up0.txt 2>&1 || rc=$?
+[ "$rc" = 1 ] && [ "$(jq -r '[.groups[].outcome] | unique | join(" ")' up0/report.json)" = failure ] || die "upcase plain sweep: exit $rc: $(tail -3 up0.txt)"
+rc=0
+"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up1 -- "$up" >up1.txt 2>&1 || rc=$?
+[ "$rc" = 1 ] && [ "$(jq '.groups | length' up1/report.json)" = 1 ] || die "upcase checked sweep: exit $rc: $(tail -3 up1.txt)"
+case $(jq -r '.groups[0].signature' up1/report.json) in "violation check: wrong-output"*) ;; *) die "upcase: $(jq -c '.groups[0]' up1/report.json)" ;; esac
+jq -e '.groups[0].faults.every | index("fs-short")' up1/report.json >/dev/null || die "upcase: fs-short is not in every failing run"
+[ "$(jq '.ok_exit // 0' up1/report.json)" -gt 0 ] || die "upcase: no run counted as a clean failure"
+rc=0
+"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up2 -- "$up" fixed >up2.txt 2>&1 || rc=$?
+[ "$rc" = 0 ] && [ "$(jq '.groups | length' up2/report.json)" = 0 ] || die "upcase fixed: exit $rc: $(tail -3 up2.txt)"
+echo "upcase: plain $(jq -r .findings up0/report.json) clean failures; checked: $(jq -r '"\(.findings) \(.groups[0].signature)"' up1/report.json)"
+# Only the statuses named, never a signal; the rerun line and run.json carry the list.
+is okexit "$(run okexit --ok-exit 1,3 -- /bin/sh -c 'exit 3')" 0 ok ok-exit
+is okexit2 "$(run okexit2 --ok-exit 1,3 -- /bin/sh -c 'exit 2')" 1 failure exit
+is okexitinv "$(run okexitinv --ok-exit 1 -- /bin/sh -c 'echo "INVARIANT kept: no" >&2; exit 1')" 1 failure exit
+is okexitsig "$(run okexitsig --ok-exit 1,134 -- /usr/bin/python3 -I -c 'import os; os.abort()')" 1 crash signal
+printf '#!/bin/sh\necho "exited: status $PATINA_EXIT"\nexit 1\n' >chk/exited && chmod +x chk/exited
+"$PATINA" sweep --seeds 1..1 --ok-exit 3 --check chk/exited --out okx -- /bin/sh -c 'exit 3' >okx.txt 2>&1 || true
+rerun=$(jq -r '.groups[0].rerun' okx/report.json)
+rc=0
+eval "\"\$PATINA\" run --out okx-rerun --format json ${rerun#patina run }" >okx-rerun.json 2>/dev/null || rc=$?
+[ "$rc $(jq -r .outcome okx-rerun.json)" = "1 violation" ] || die "the rerun line ($rerun): exit $rc"
+# log tree: the tree the guest ended with, against the guest's own listing of it.
+mkdir lt-start && echo old >lt-start/gone && echo keep >lt-start/kept
+list='find . -mindepth 1 -path ./listing -prune -o -printf "%p %y %m %l\n" | LC_ALL=C sort; find . -type f ! -name listing | LC_ALL=C sort | xargs cat'
+run lt --work lt-start -- /bin/sh -c "rm gone; mkdir -p d/e; echo new >d/f; chmod 640 d/f; ln -s d/f l; { $list; } >listing" >/dev/null
+[ "$(jq -r .outcome lt.json)" = ok ] || die "log tree guest: $(tail -2 lt.err)"
+"$PATINA" log tree lt/inc-0 lt-tree || die "log tree failed"
+mv lt-tree/listing lt-listing
+[ "$(cd lt-tree && sh -c "$list")" = "$(cat lt-listing)" ] || die "log tree differs from the guest's own tree: $(cd lt-tree && sh -c "$list")"
+! "$PATINA" log tree lt/inc-0 lt-tree 2>/dev/null || die "log tree wrote into a directory that is not empty"
+pruned=$(for d in up2/seed-*; do [ -d "$d/inc-0" ] || { echo "$d"; break; }; done)
+[ -n "$pruned" ] && ! "$PATINA" log tree "$pruned/inc-0" lt-pruned 2>/dev/null && [ ! -e lt-pruned ] || die "log tree of a pruned run '$pruned'"
+# Every incarnation of a crashed run; each holds at least the records acknowledged in it.
+n=0
+for inc in "$first"/inc-*; do
+    "$PATINA" log tree "$inc" "lt-$n" || die "log tree $inc"
+    last=$(sed -n 's/^ack //p' "$inc/stdout" | tail -n1)
+    [ $(($(wc -c <"lt-$n/data.log") / 8)) -gt "${last:--1}" ] || die "log tree $inc: fewer records than acknowledged"
+    n=$((n + 1))
+done
+[ "$n" -gt 1 ] || die "the crashed run has one incarnation"
+echo "log tree: $n incarnations of $first"
 
 wait "$hang" || true
 is hang "$(cat hang.rc)" 2 error check

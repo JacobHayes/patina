@@ -1,6 +1,6 @@
 # Examples
 
-Eight small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
+Nine small programs, each with one bug that ordinary runs rarely hit, and the one `patina`
 command that finds it. Each builds with its own language's tool and nothing else. Run the
 commands from the repository root. Each program takes `fixed` as its first argument to run
 without the bug; the same sweep with `fixed` added at the end is `ok` on every seed.
@@ -78,6 +78,24 @@ patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept
 Expected: `violation check: acked-record-lost: acknowledged N, N stored after the crash`, 9 of
 the 30 seeds (counted on x86_64 only); runs that did not crash are not judged.
 
+## upcase-c (C, no SDK): wrong output found against a faults-off run
+
+The program writes a text in upper case to `out.txt` and exits 1 on every error, but checks
+`write` for -1 only: a short write loses the rest of a block and it still exits 0. One run
+without faults is the reference; `--ok-exit 1` lets the clean failures end `ok`, and
+`examples/checks/same-tree` compares each run's final work tree with the reference's
+(`patina log tree`; [Faults off versus on](../docs/GUIDE.md#faults-off-versus-on)).
+
+```sh
+cc -o upcase examples/upcase-c/upcase.c
+patina run --seed 1 --out patina-out/upcase-ref -- ./upcase
+patina sweep --seeds 1..40 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/upcase-ref' --out patina-out/upcase -- ./upcase
+```
+
+Expected: `violation check: wrong-output: Files want/out.txt and got/out.txt differ`, 9 of
+the 40 seeds (counted on x86_64 only), with `faults in every failing run: fs-short`. The same
+sweep without `--ok-exit` and `--check` reports only the clean failures.
+
 ## bank-go (Go, SDK): a double deposit found by network faults
 
 An HTTP server and its client in one program. The client retries a deposit whose connection
@@ -125,4 +143,5 @@ Expected: `violation always: served-only-public: N bytes`, about 5 of the 20 see
 `faults in every failing run: path-swap`. The fixed program opens with `O_NOFOLLOW` and serves
 only the file it checked.
 
-`tests/examples/01-examples.sh` runs these sweeps and their fixed variants in the quick check.
+`tests/examples/01-examples.sh` runs these sweeps and their fixed variants in the quick check
+(kvlog-c and upcase-c: `tests/oracles/01-checks.sh`).

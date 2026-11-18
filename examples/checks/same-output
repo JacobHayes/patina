@@ -1,0 +1,12 @@
+#!/bin/sh
+# same-output REF RUN: the run's stdout and exit status are the reference's. REF is a run
+# directory, or a sweep of the reference over the same --cases file with --seeds 1 --keep
+# all, whose seed-1/$PATINA_CASE_NAME is the reference for each case. Each side's last
+# incarnation is compared. For `patina run --check`; needs jq.
+ref=$1
+[ -z "${PATINA_CASE_NAME:-}" ] || ref=$ref/seed-1/$PATINA_CASE_NAME
+last() { k=0; while [ -d "$1/inc-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/inc-$k"; }
+want=$(jq -r .guest.exit "$ref/result.json") || exit 2
+[ "$PATINA_EXIT" = "$want" ] || { echo "wrong-exit: exit $PATINA_EXIT, the reference exited $want"; exit 1; }
+cmp -s "$(last "$ref")/stdout" "$(last "$2")/stdout"
+case $? in 0) ;; 1) echo "wrong-output: stdout differs from the reference's"; exit 1 ;; *) echo "no stdout to compare (a reference sweep needs --keep all)"; exit 2 ;; esac

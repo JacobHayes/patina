@@ -145,6 +145,10 @@ records its verdict (`check`), which can turn an ok run into a `violation` (stop
 signed as an `always` is) or an `error`. Its output is not in the logs or the digest. A
 replay whose logs equal the run's while the verdict differs ends `error`, stop
 `check-unstable`, not `nondeterministic`.
+`--ok-exit` (`Config::ok_exit`, in `run.json`) is an input of `outcome::classify`: a guest
+that exited with a listed status, not on a signal, ends `ok`, stop `ok-exit`, and the checker
+judges it; the logs and digest are those of the run without the flag. Each incarnation's
+final work tree is `inc-K/live.tree` (`durability::tree`); `patina log tree` writes it out.
 
 The logs of a run (this one and the operation log) are limited (`Config::log_limit`,
 `--log-limit`): the append that would pass the limit ends the run instead, so the cut depends

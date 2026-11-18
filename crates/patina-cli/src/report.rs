@@ -260,6 +260,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "allow-unmet",
         "host-cpu",
         "check",
+        "ok-exit",
     ];
     // A case's checker gets its case only from run.json.
     let config_only = have
@@ -323,6 +324,10 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if let Some(k) = &cfg.check {
             flag("--check", crate::check::join(&k.words));
+        }
+        if !cfg.ok_exit.is_empty() {
+            let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
+            flag("--ok-exit", l.join(","));
         }
         if cfg.buggify {
             a.push("--buggify".into());
@@ -852,6 +857,15 @@ pub fn build(
             "required_unseen": missing_required,
         });
     }
+    // The ok runs that are clean failures (`--ok-exit`), counted apart from the passes: a
+    // sweep where every run failed cleanly says so.
+    let ok_exit = runs
+        .iter()
+        .filter(|r| r.result["outcome"] == "ok" && r.result["stop"] == "ok-exit")
+        .count();
+    if ok_exit > 0 {
+        v["ok_exit"] = ok_exit.into();
+    }
     if with_points > 0 {
         v["compute"] = json!({
             "images": images.iter().map(|(p, k)| json!({"path": p, "kinds": k})).collect::<Vec<_>>(),
@@ -868,8 +882,12 @@ pub fn build(
 fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String {
     let n = |k: &str| v[k].as_u64().unwrap_or(0);
     let ok = v["outcomes"]["ok"].as_u64().unwrap_or(0);
+    let ok_exit = match n("ok_exit") {
+        0 => String::new(),
+        k => format!(" ({k} by --ok-exit)"),
+    };
     let what = format!(
-        "{}, {} in {}, {} ok",
+        "{}, {} in {}, {} ok{ok_exit}",
         count(n("runs") as usize, "run"),
         count(n("findings") as usize, "finding"),
         count(finding_groups, "group"),

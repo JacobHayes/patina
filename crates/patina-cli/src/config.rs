@@ -113,6 +113,10 @@ pub struct Config {
     /// The checker run after a run that ended ok (`--check`, `[run] check`; `check.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<crate::check::Check>,
+    /// Guest exit statuses that end the run `ok` (`--ok-exit`, `[run] ok-exit`): the program
+    /// failed cleanly, as it documents. Never 0, never a signal.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ok_exit: Vec<u8>,
 }
 
 impl Default for Config {
@@ -146,6 +150,7 @@ impl Default for Config {
             pmu: Pmu::default(),
             host_cpu: None,
             check: None,
+            ok_exit: vec![],
         }
     }
 }
@@ -478,6 +483,14 @@ fn table<'a>(v: &'a toml::Value, at: &str) -> Res<&'a toml::Table> {
         .ok_or_else(|| format!("{at}: expected a table"))
 }
 
+/// An exit status `--ok-exit` may name: 1 to 255 (0 is `ok` already).
+fn exit_status(v: &str, at: &str) -> Res<u8> {
+    match v.parse::<u8>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err(format!("{at}: {v:?} is not an exit status from 1 to 255")),
+    }
+}
+
 fn int(v: &toml::Value, at: &str) -> Res<u64> {
     v.as_integer()
         .and_then(|i| u64::try_from(i).ok())
@@ -575,6 +588,21 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
                 ("run", "check") => check = Some(string(v, &at)?),
+                ("run", "ok-exit") => {
+                    c.ok_exit = v
+                        .as_array()
+                        .ok_or_else(|| format!("{at}: expected an array of exit statuses"))?
+                        .iter()
+                        .map(|x| {
+                            exit_status(
+                                &x.as_integer()
+                                    .map(|i| i.to_string())
+                                    .unwrap_or_else(|| x.to_string()),
+                                &at,
+                            )
+                        })
+                        .collect::<Res<_>>()?
+                }
                 ("run", "emulate-rndr") if cfg!(target_arch = "aarch64") => {
                     c.emulate_rndr = boolean(v, &at)?
                 }
@@ -697,6 +725,14 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(k) = a.last("--check") {
         check = Some(k.to_string());
     }
+    if let Some(l) = a.last("--ok-exit") {
+        c.ok_exit = l
+            .split(',')
+            .map(|x| exit_status(x.trim(), "--ok-exit"))
+            .collect::<Res<_>>()?;
+    }
+    c.ok_exit.sort_unstable();
+    c.ok_exit.dedup();
     // A checker is resolved where patina starts (one a run.json recorded, again from its own
     // directory): its SHA-256 is the file's now.
     c.check = match check {

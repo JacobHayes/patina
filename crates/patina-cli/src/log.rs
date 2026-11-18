@@ -1,4 +1,5 @@
-//! `patina log dump|diff|ops`: read a boundary log, compare two, list file operations; and
+//! `patina log dump|diff|ops|tree`: read a boundary log, compare two, list file operations,
+//! write out an incarnation's final work tree; and
 //! the record-by-record comparison of two run directories that replay and verify use.
 
 use crate::cli::{Args, Res};
@@ -243,6 +244,31 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
     Ok(None)
 }
 
+/// `log tree INCDIR DIR`: write the work tree the incarnation ended with (`INCDIR/live.tree`)
+/// into `DIR`, which must not exist or be empty: names, kinds, modes, contents, symlinks, hard
+/// links and user xattrs, as `Tree::write_dir` does.
+fn tree(inc: &Path, dir: &Path) -> Res<()> {
+    let live = inc.join("live.tree");
+    if !live.is_file() {
+        return Err(format!(
+            "{}: no such file: an incarnation's final tree is kept only with its run's logs; a sweep prunes the logs of ok runs unless given --keep all",
+            live.display()
+        ));
+    }
+    let t = crate::durability::tree::Tree::read_archive(&live)?;
+    let err = |e: std::io::Error| format!("{}: {e}", dir.display());
+    match std::fs::read_dir(dir) {
+        Ok(mut rd) => {
+            if rd.next().is_some() {
+                return Err(format!("{}: exists and is not empty", dir.display()));
+            }
+            t.fill(dir, 0o700).map_err(err)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => t.write_dir(dir).map_err(err),
+        Err(e) => Err(err(e)),
+    }
+}
+
 pub fn main(args: &Args) -> Res<ExitCode> {
     let p = &args.positional;
     let arg = |i: usize, usage: &str| -> Res<&str> {
@@ -277,8 +303,14 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             }
             Ok(ExitCode::SUCCESS)
         }
-        _ => {
-            Err("log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR".into())
+        Some("tree") => {
+            let usage = "log tree INCDIR DIR";
+            tree(Path::new(arg(1, usage)?), Path::new(arg(2, usage)?))?;
+            Ok(ExitCode::SUCCESS)
         }
+        _ => Err(
+            "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR"
+                .into(),
+        ),
     }
 }

@@ -793,6 +793,32 @@ with `examples/checks/acked-kept`, `-j 8`, `--keep none`), 2026-11-18, this host
 Under `--crash machine` most runs end before their crash fires and the checker has nothing to
 judge (172 of 200); every crash point of two seeds judges 86 runs and finds the bug in 73.
 
+The same script, for `--ok-exit` and `patina log tree`, 2026-11-18, this host: `upcase`
+against one faults-off reference run with `--faults disk --ok-exit 1 --check same-tree`, seeds
+1-40, gives one group, `violation check: wrong-output`, `fs-short` in every failing run and no
+`failure` group; plainly, the same sweep has `failure` groups only; `upcase fixed` none. An
+`--ok-exit` list stays a `failure` for a status not in it and a `crash` for a signal; the
+rerun line carries the list (it reproduces a finding that needs it). `log tree` of `inc-0`
+equals the guest's own listing of its final tree, refuses a non-empty directory and a pruned
+run, and works on each incarnation of a machine-crashed `kvlog` run. Red/green, each planted
+in turn: `--ok-exit` taking every nonzero status (a status not listed ends `ok`), and `log
+tree` writing the starting tree (`--work`) instead of the final one (the checked sweep finds
+nothing; the tree differs from the guest's listing) each fail the check.
+
+`./check evidence faults-off-on` (`tests/oracles/evidence-faults-off-on.sh`,
+`examples/upcase-c`, 200 seeds, `--faults disk`, `-j 8`), 2026-11-18, this host, x86_64:
+
+| Sweep | Runs | Findings | Groups | `ok` (by `--ok-exit`) |
+|---|---|---|---|---|
+| plain | 200 | 13, all `failure exit` after an injected `fs-error` (clean failures) | 4 | 187 (0) |
+| `--ok-exit 1 --check 'same-tree REF'` | 200 | 43 | 1: `violation check: wrong-output: Files want/out.txt and got/out.txt differ`, `fs-short` in every run, first seed replayed `identical` | 157 (13) |
+| the same, `upcase fixed` | 200 | 0 | 0 | 200 (13) |
+
+`patina minimize` of the group's first run: `fs-error-permille=0..5 fs-short-permille=0..20
+fsync-error-permille=0..3 fs-delay-permille=0..20` to `fs-short-permille=0..20`. No assertion
+in the program sees the bug; the 43 runs exit 0 with a short `out.txt`, `ok` in the plain
+sweep.
+
 ## Second hosts
 
 One `patina` binary and one set of guest binaries, built once on the development VM from

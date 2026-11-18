@@ -480,6 +480,19 @@ directory left by a patina stopped during the check says `error` (`check.verdict
 too. A run that did not end `ok` (a failure, a
 crash, a hang) is a finding already and its checker is not started.
 
+Under faults a correct program often fails cleanly: it reports the error and exits 1. `--ok-exit
+N[,N...]` (`[run] ok-exit = [1]`) names the exit statuses that mean that: such a run ends `ok`,
+stop `ok-exit`, so the checker judges it too and gets the status as `PATINA_EXIT`;
+`result.json` keeps it as `guest.exit`, and `run.json` and the rerun line carry the list. A
+program killed by a signal is a `crash` whatever the list holds, an exit status not in it is
+still a `failure`, as is a listed status after the program wrote a line starting `INVARIANT `
+to stderr, and a failed `always` is still a `violation`. A sweep counts these runs apart
+from the passes (`31 ok (4 by --ok-exit)`, `ok_exit` in `report.json`), so a sweep in which
+every run failed cleanly says so. Name only statuses the program documents as a clean
+failure: a program that exits 1 both for an error it handled and for an uncaught exception
+passes both with `--ok-exit 1`; a checker can still fail such a run on its stderr. A Rust
+panic exits 101, so `--ok-exit 1` leaves panics findings.
+
 `examples/kvlog-c` is an append-only log with no SDK in it: it prints `ack I` once record I
 is written, and never syncs it. `examples/checks/acked-kept` compares, after each machine
 crash, the last record acknowledged on `inc-K/stdout` with what `inc-K/post-crash/data.log`
@@ -552,6 +565,118 @@ own check; under `--branch` each base and each child is judged.
 One `--check` per run: several checks are one script that runs them and prints the first
 failure. A slow checker sets a sweep's speed. In shell, `$( )` strips trailing newlines:
 compare files with `cmp`.
+
+### Faults off versus on
+
+A run with faults that exits 0 must leave what the same program leaves without them. One
+faults-off run is the reference: a run of a seed with faults equals the faults-off run of that
+seed up to the first fault injected, so for a program whose output does not depend on the
+schedule one reference run serves every seed; otherwise sweep the reference over the same
+seeds with `--keep all`, and the checker reads `REF/seed-$PATINA_SEED`. `patina log tree INCDIR
+DIR` writes the work tree an incarnation ended with (`INCDIR/live.tree`) into the new or empty
+directory `DIR`: names, kinds, modes, contents, symlinks. `examples/checks/same-tree` compares
+the two runs' trees with it, and does not judge a run that failed cleanly (exit 77).
+
+`examples/upcase-c` writes a text in upper case to `out.txt`. Every error ends it with a
+message and exit 1, but it checks `write` for -1 only: a short write loses the rest of the
+block, and it still exits 0. No assertion sees that, and a plain sweep reports only the clean
+failures:
+
+```text
+$ cc -o upcase examples/upcase-c/upcase.c
+$ patina sweep --seeds 1..40 --faults disk -- ./upcase
+...
+patina sweep: 40 runs, 4 findings in 3 groups, 36 ok   (0.1s, 8 jobs)
+outcomes: failure 4, ok 36
+
+failure exit: upcase: write: Disk quota exceeded; exit 1
+  2 of 40 runs   first: seed 6   replayed: identical
+  faults in every failing run: fs-error      in none: fs-delay, fs-short, fsync-error
+...
+```
+
+With a reference run, `--ok-exit 1` and the check:
+
+```text
+$ patina run --seed 1 --out patina-out/ref -- ./upcase
+ok (exit): the program exited 0
+$ patina sweep --seeds 1..40 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/ref' -- ./upcase
+new: violation check: wrong-output: Files want/out.txt and got/out.txt differ   (seed 5: patina replay /tmp/upcase/patina-out/sweep/seed-5)
+sweep: replaying the first seed of 1 finding
+sweep: 1.9 MiB kept in /tmp/upcase/patina-out/sweep
+patina sweep: 40 runs, 9 findings in 1 group, 31 ok (4 by --ok-exit)   (0.2s, 8 jobs)
+outcomes: ok 31, violation 9
+
+violation check: wrong-output: Files want/out.txt and got/out.txt differ
+  9 of 40 runs   first: seed 5   replayed: identical
+  faults in every failing run: fs-short      in none: fs-error, fsync-error
+  rerun:  patina run --seed 5 --faults disk --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
+  replay: patina replay /tmp/upcase/patina-out/sweep/seed-5
+```
+
+The finding is like any other: one run of it names the short write, `minimize` keeps only the
+fault class it needs, and `patina log tree` shows the file it left.
+
+```text
+$ patina run --seed 5 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/ref' -- ./upcase
+violation (check): wrong-output: Files want/out.txt and got/out.txt differ
+guest: exit 0
+faults injected: 1 (fs-short 1)
+last injected:
+  seq 54 t=100000ms fs-short call=write object=/work/out.txt count=3228
+checker output: /tmp/upcase/patina-out/run-5/check.out
+run directory: /tmp/upcase/patina-out/run-5
+replay: patina replay /tmp/upcase/patina-out/run-5
+$ patina minimize patina-out/sweep/seed-5
+without fs-error-permille=0..5: still fails
+without fs-short-permille=0..20: no longer fails
+without fsync-error-permille=0..3: still fails
+without fs-delay-permille=0..20: still fails
+fs-short-permille=0..20 -> fs-short-permille=0..10: no longer fails
+reduced: fs-short-permille=0..20 (from fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20); run directory /tmp/upcase/patina-out/sweep/seed-5/minimized
+$ patina log tree patina-out/run-5/inc-0 tree-5
+$ patina log tree patina-out/ref/inc-0 tree-ref
+$ wc -c tree-5/out.txt tree-ref/out.txt
+ 97377 tree-5/out.txt
+ 98245 tree-ref/out.txt
+195622 total
+```
+
+`./upcase fixed` writes the rest of each block; the same sweep of it is `40 ok (4 by
+--ok-exit)`. A sweep keeps the work tree of the runs it keeps: `patina log tree` of a run a
+sweep pruned (an `ok` run, without `--keep all`) is an error. After crashes, `inc-K/live.tree`
+is each incarnation's tree as it ran, before the crash lost anything; `inc-K/post-crash/` is
+what the crash left.
+
+### Against a reference
+
+A program and a reference implementation, or version N and N+1, run the same `--cases` file.
+The reference runs first, with `--seeds 1 --keep all`; the program's sweep checks each run
+against `REF/seed-1/$PATINA_CASE_NAME`. Running the reference under Patina gives both the
+same `/work`, clock and environment. `examples/checks/same-output` compares stdout and the
+exit status. Three shell scripts, bash as the reference for dash:
+
+```text
+$ cat scripts.txt
+echo -e 'a\tb'
+printf '%s\n' one two
+x=3; echo $((x << 2))
+$ patina sweep --seeds 1 --keep all --cases scripts.txt --out patina-out/ref-bash -- bash -c {}
+patina sweep: 3 runs, 0 findings in 0 groups, 3 ok   (0.0s, 8 jobs)
+$ patina sweep --seeds 1..3 --cases scripts.txt --check 'examples/checks/same-output patina-out/ref-bash' --out patina-out/sh -- dash -c {}
+new [echo -e 'a\tb']: violation check: wrong-output: stdout differs from the reference's   (seed 1: patina replay /tmp/upcase/patina-out/sh/seed-1/1-a_tb)
+sweep: replaying the first seed of 1 finding
+sweep: 52.8 KiB kept in /tmp/upcase/patina-out/sh
+patina sweep: 9 runs, 3 findings in 1 group, 6 ok   (0.1s, 8 jobs)
+outcomes: ok 6, violation 3
+
+[echo -e 'a\tb'] violation check: wrong-output: stdout differs from the reference's
+  3 of 9 runs   first: seed 1   replayed: identical
+  rerun:  patina run --seed 1 --config /tmp/upcase/patina-out/sh/seed-1/1-a_tb/run.json -- dash -c 'echo -e '\''a\tb'\'''
+  replay: patina replay /tmp/upcase/patina-out/sh/seed-1/1-a_tb
+```
+
+(dash's `echo` prints `-e a	b`.) A checker may as well run the reference itself, natively.
 
 ## The SDK
 
@@ -659,7 +784,9 @@ acklog run the record write to `data.log` (ino 2) has no fsync before the acknow
 ```
 
 `patina log dump LOG --from SEQ --to SEQ` prints the boundary log; `patina log diff A B`
-names the first record where two logs differ.
+names the first record where two logs differ. `patina log tree INCDIR DIR` writes the work
+tree an incarnation ended with into a new directory ([Faults off versus
+on](#faults-off-versus-on)).
 
 ## Replay and verify
 

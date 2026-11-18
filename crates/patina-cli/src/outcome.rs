@@ -162,19 +162,32 @@ pub fn signal_name(sig: i64) -> String {
     n.to_string()
 }
 
-/// The one mapping from a verdict to an outcome.
-pub fn classify(v: &Verdict) -> Classified {
+/// The one mapping from a verdict to an outcome. `ok_exit` holds the exit statuses that end
+/// the run `ok` (`--ok-exit`): a clean failure the program documents, stop `ok-exit`. A
+/// signal is a crash whatever the list says, an exit after the program's `INVARIANT` line a
+/// failure, and every other verdict stands.
+pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
     use Outcome::*;
     let d = v.detail.as_str();
     match v.class.as_str() {
         "ok" => Classified::new(Ok, "exit", "the program exited 0"),
-        "failed" => match v.signal {
-            Some(sig) => Classified::new(
+        "failed" => match (v.signal, v.exit_status) {
+            (Some(sig), _) => Classified::new(
                 Crash,
                 "signal",
                 format!("killed by signal {sig} ({})", signal_name(sig)),
             ),
-            None => Classified::new(Failure, "exit", d),
+            // A program's own `INVARIANT` line (its detail) is a finding whatever its status.
+            (None, Some(x))
+                if ok_exit.iter().any(|&o| i64::from(o) == x) && !d.starts_with("INVARIANT ") =>
+            {
+                Classified::new(
+                    Ok,
+                    "ok-exit",
+                    format!("the program exited {x}, a status --ok-exit allows"),
+                )
+            }
+            (None, _) => Classified::new(Failure, "exit", d),
         },
         "violation" => Classified::new(Violation, "always", d),
         "deadlock" => Classified::new(
@@ -232,17 +245,44 @@ mod tests {
     fn signals_are_crashes_and_statuses_failures() {
         let mut v = Verdict::new("failed", "killed by signal 6");
         v.signal = Some(6);
-        assert_eq!(classify(&v).outcome, Outcome::Crash);
+        assert_eq!(classify(&v, &[]).outcome, Outcome::Crash);
         let mut v = Verdict::new("failed", "exit status 3");
         v.exit_status = Some(3);
-        assert_eq!(classify(&v).outcome, Outcome::Failure);
+        assert_eq!(classify(&v, &[]).outcome, Outcome::Failure);
         assert_eq!(
-            classify(&Verdict::new("stall", "x")).stop,
+            classify(&Verdict::new("stall", "x"), &[]).stop,
             "compute-stall".to_string()
         );
         assert_eq!(
-            classify(&Verdict::new("bogus", "x")).outcome,
+            classify(&Verdict::new("bogus", "x"), &[]).outcome,
             Outcome::Internal
         );
+    }
+
+    #[test]
+    fn ok_exit_takes_only_its_statuses_and_never_a_signal() {
+        let failed = |status: i64, sig: Option<i64>| Verdict {
+            class: "failed".into(),
+            exit_status: Some(status),
+            signal: sig,
+            detail: String::new(),
+        };
+        let ok = classify(&failed(1, None), &[1, 3]);
+        assert_eq!((ok.outcome, ok.stop.as_str()), (Outcome::Ok, "ok-exit"));
+        assert_eq!(
+            classify(&failed(2, None), &[1, 3]).outcome,
+            Outcome::Failure
+        );
+        // A signal's status (128 + N) in the list is still a crash.
+        assert_eq!(
+            classify(&failed(134, Some(6)), &[134]).outcome,
+            Outcome::Crash
+        );
+        let mut v = failed(1, None);
+        v.detail = "INVARIANT kept: no".into();
+        assert_eq!(classify(&v, &[1]).outcome, Outcome::Failure);
+        let mut v = Verdict::new("violation", "always");
+        v.exit_status = Some(1);
+        assert_eq!(classify(&v, &[1]).outcome, Outcome::Violation);
     }
 }

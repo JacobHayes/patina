@@ -212,6 +212,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                     images,
                 },
                 check: None,
+                ok_exit: o.cfg.ok_exit.clone(),
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

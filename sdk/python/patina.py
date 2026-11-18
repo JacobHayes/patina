@@ -284,7 +284,8 @@ def compute():
     E = mon.events
     # A signal arriving at a point runs its Python handler inside the hook. An exception it
     # raises in a line's hook reaches the program at that line, as natively. Raised in a
-    # jump's hook, CPython 3.12 and 3.14 would let it skip the frame's handlers, so the hook
+    # jump's hook, CPython 3.12 (all), 3.13.0–3.13.14 and 3.14.0–3.14.6 let it skip the
+    # frame's handlers (python/cpython#152375, fixed in 3.13.15, 3.14.7 and 3.15), so the hook
     # keeps it and raises it from the next instruction of that code in that thread.
     held = {}
 

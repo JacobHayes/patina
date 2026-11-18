@@ -1,7 +1,8 @@
 #!/bin/sh
 # Build examples/ into $1/examples with each language's own tool, as examples/README.md does:
-# cargo (quickstart, ledger), cc (acklog-c, kvlog-c, serve-c, stats-c stock), clang with the compute-point flags
-# (stats-c rebuilt), go (bank-go); journal-py is copied with patina.py.
+# cargo (quickstart, ledger), cc (acklog-c, kvlog-c, upcase-c, serve-c, stats-c stock), clang
+# with the compute-point flags (stats-c rebuilt), go (bank-go); journal-py is copied with
+# patina.py.
 set -eu
 root=$(cd "$(dirname "$0")/../../.." && pwd)
 out=${1:?output directory}/examples
@@ -13,6 +14,7 @@ cargo build --quiet --release --manifest-path "$ex/ledger/Cargo.toml"
 cp "$CARGO_TARGET_DIR/debug/jobs" "$CARGO_TARGET_DIR/release/ledger" "$out/"
 cc -I "$root/sdk/c" -o "$out/acklog" "$ex/acklog-c/acklog.c"
 cc -o "$out/kvlog" "$ex/kvlog-c/kvlog.c"
+cc -o "$out/upcase" "$ex/upcase-c/upcase.c"
 cc -I "$root/sdk/c" -o "$out/serve" "$ex/serve-c/serve.c"
 cc -O2 -pthread -o "$out/stats" "$ex/stats-c/stats.c"
 clang -O2 -pthread -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \

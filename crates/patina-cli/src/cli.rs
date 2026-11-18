@@ -66,8 +66,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Log,
         name: "log",
-        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR",
-        help: "read a boundary log, compare two, list file operations",
+        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR",
+        help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree",
     },
     Command {
         cmd: Cmd::Table,
@@ -370,6 +370,13 @@ pub const FLAGS: &[Flag] = &[
         )],
         per_value: &[(Cmd::Log, "")],
     },
+    flag(
+        "--ok-exit",
+        "N[,N...]",
+        "none",
+        "guest exit statuses that end the run ok: the program failed cleanly, as it documents (a checker still judges it; PATINA_EXIT has the status); a signal never does",
+        RUNLIKE,
+    ),
     flag(
         "--format",
         "text|json",

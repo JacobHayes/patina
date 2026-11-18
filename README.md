@@ -125,10 +125,10 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 
 | Outcome | Exit | Meaning |
 |---|---|---|
-| `ok` | 0 | the program exited 0 and broke no invariant |
+| `ok` | 0 | the program exited 0, or with a status `--ok-exit` names (stop `ok-exit`), and broke no invariant |
 | `violation` | 1 | an invariant failed: an SDK `always`, or the `--check` command |
 | `liveness` | 1 | every thread blocked, or the virtual time limit passed |
-| `failure` | 1 | the program exited nonzero |
+| `failure` | 1 | the program exited nonzero, with a status `--ok-exit` does not name |
 | `crash` | 1 | the program died on a signal |
 | `unsupported` | 2 | the program did something Patina does not model, or never finished and filled the log to `--log-limit` (stop `log-limit`); the message names it |
 | `timeout` | 2 | the wall-time limit passed |
