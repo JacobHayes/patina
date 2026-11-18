@@ -16,6 +16,37 @@ its directory is visible there read-only, so files beside it are found by its ow
 name (`python3`, `sh`) is looked up on the guest's `PATH` (`/guest:/usr/local/bin:/usr/bin:/bin`).
 The host's `/usr` is visible read-only, so system interpreters and shared libraries work.
 
+A script runs as `execve` runs it: it needs the execute bit, and its `#!` line names the
+interpreter (read as the kernel reads it: one optional argument, five nested interpreters at
+most). A program that cannot run ends `error`, stop `exec`, with the kernel's errno:
+
+```text
+$ cat script.sh
+#!/bin/sh
+echo "hello from $0"
+$ patina run -- ./script.sh
+ok (exit): the program exited 0
+guest: exit 0
+run directory: /tmp/scripts-demo/patina-out/run-0
+replay: patina replay /tmp/scripts-demo/patina-out/run-0
+$ cat patina-out/run-0/inc-0/stdout
+hello from /tmp/scripts-demo/script.sh
+$ cat script.py
+#!/usr/bin/env python3
+import random
+print("a random number:", random.random())
+$ patina run -- ./script.py
+ok (exit): the program exited 0
+guest: exit 0
+refused: /sys/fs/selinux (unsupported; the guest got an error code)
+run directory: /tmp/scripts-demo/patina-out/run-0
+replay: patina replay /tmp/scripts-demo/patina-out/run-0
+$ chmod -x script.sh; patina run -- ./script.sh
+error (exec): cannot run the program /tmp/scripts-demo/script.sh: no execute permission (EACCES)
+run directory: /tmp/scripts-demo/patina-out/run-0
+replay: patina replay /tmp/scripts-demo/patina-out/run-0
+```
+
 The program starts in `/work`, an empty writable directory that is also its `HOME`. Nothing
 else of the host is visible unless you give it:
 

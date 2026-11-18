@@ -102,7 +102,7 @@ setting replaces it, and the same sweep with more seeds runs only the new ones.
 ## What works
 
 Any Linux executable built for the host (x86_64 or arm64): static or dynamic, Rust, C, C++,
-Go, Python, shell scripts and the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals and TCP and
+Go, Python, shell scripts (run directly: `patina run -- ./script.sh`) and the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals and TCP and
 UDP on localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
 that starts at the same time every run, an empty writable `/work` as its working directory.
 
