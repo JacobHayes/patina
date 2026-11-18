@@ -39,6 +39,24 @@ pub const STR_BYTES: usize = 64;
 pub const STR_LABEL: u8 = 1;
 /// An SDK call's text (a `mark`'s; an assertion's detail is in `result.json`, not here).
 pub const STR_TEXT: u8 = 2;
+/// With `--log-paths` (`Config::log_paths`): a call's first C-string argument as the program
+/// passed it (a path; an attribute's or a memfd's name), and its second (`rename`'s new path).
+pub const STR_PATH: u8 = 3;
+pub const STR_PATH2: u8 = 4;
+/// The absolute path the call walks for `STR_PATH` (`STR_PATH2`): symlinks on the walk
+/// followed by the runtime's resolver, otherwise the passed path made absolute against the
+/// working directory or the directory descriptor and normalised.
+pub const STR_RESOLVED: u8 = 5;
+pub const STR_RESOLVED2: u8 = 6;
+/// One argument of `execve` / `execveat`, in order (`STR_CUT`: cut at `PATH_BYTES`).
+pub const STR_ARGV: u8 = 7;
+/// Arguments after the last `STR_ARGV` were left out (`ARGV_MAX`, `ARGV_BYTES`); no bytes.
+pub const STR_ARGV_CUT: u8 = 8;
+/// The most bytes kept of one path or argument (a longer path is `ENAMETOOLONG`).
+pub const PATH_BYTES: usize = 4096;
+/// The most arguments, and argument bytes, kept of one `execve`.
+pub const ARGV_MAX: usize = 256;
+pub const ARGV_BYTES: usize = 32 << 10;
 /// The string was longer than the bytes kept (on its first record).
 pub const STR_CUT: u8 = 0x40;
 /// A record after the first of its string.

@@ -256,6 +256,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "time-limit",
         "timeout",
         "log-limit",
+        "log-paths",
         "buggify",
         "allow-unmet",
         "host-cpu",
@@ -331,6 +332,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if cfg.buggify {
             a.push("--buggify".into());
+        }
+        if cfg.log_paths {
+            a.push("--log-paths".into());
         }
     }
     a.push("--".into());

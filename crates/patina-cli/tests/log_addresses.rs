@@ -4,8 +4,10 @@
 //! resolves the path into its own buffer and passes that on): one execs, opens and stats through
 //! `/bin`, takes a signal and connects a TCP socket (a unix socket underneath); one makes
 //! directories through a symlink in `/work` with file faults on, so injected-fault records name
-//! such calls. No value of any record may fall inside the runtime's region. Needs what `patina
-//! run` needs (bwrap, user namespaces) and the host's python3.
+//! such calls. No value of any record may fall inside the runtime's region. The first runs
+//! with `--log-paths`: the path strings are the program's own (`/bin/true` as it named it),
+//! not the runtime's rewritten paths. Needs what `patina run` needs (bwrap, user namespaces)
+//! and the host's python3.
 
 use proto::layout::{RT_BASE, RT_REGION_END};
 use proto::nr;
@@ -46,8 +48,8 @@ fn run(name: &str, opts: &[&str], script: &str, args: &[&str]) -> (u64, Vec<Rec>
         .collect();
     let rt = RT_BASE..RT_REGION_END;
     for r in &recs {
-        // A Name record's words are a file name's bytes, not values.
-        if r.kind == RecKind::Name as u8 {
+        // A Name or Str record's words are a string's bytes, not values.
+        if r.kind == RecKind::Name as u8 || r.kind == RecKind::Str as u8 {
             continue;
         }
         let hit = r
@@ -73,7 +75,7 @@ fn run(name: &str, opts: &[&str], script: &str, args: &[&str]) -> (u64, Vec<Rec>
 fn no_record_holds_a_runtime_address() {
     let (seed, recs) = run(
         "exec",
-        &[],
+        &["--log-paths"],
         "set -e; test -L /bin; for i in 1 2 3; do /bin/true; done; \
          /bin/cat /bin/true >/dev/null; /bin/sh -c 'exec /bin/true'; /bin/python3 -c \"$1\"; \
          exec /bin/ls /bin/sh",
@@ -91,6 +93,25 @@ fn no_record_holds_a_runtime_address() {
         .filter(|r| r.kind == RecKind::Trap as u8 && u64::from(r.nr) == nr::EXECVE)
         .count();
     assert!(execs > 0, "exec seed {seed}: no execve in the log");
+    // The path of each execve as the program passed it: through the /bin symlink.
+    let passed: Vec<Vec<u8>> = recs
+        .windows(2)
+        .filter(|w| {
+            w[0].kind == RecKind::Trap as u8
+                && u64::from(w[0].nr) == nr::EXECVE
+                && w[1].kind == RecKind::Str as u8
+                && w[1].class == proto::rec::STR_PATH
+        })
+        .map(|w| w[1].str_bytes()[..(w[1].nr as usize).min(64)].to_vec())
+        .collect();
+    assert!(
+        passed.iter().any(|p| p == b"/bin/true"),
+        "exec seed {seed}: no execve path recorded as passed: {:?}",
+        passed
+            .iter()
+            .map(|p| String::from_utf8_lossy(p))
+            .collect::<Vec<_>>()
+    );
 
     // Half the file calls on /work fail: set up with retries, then ten mkdirs through the link.
     let (seed, recs) = run(

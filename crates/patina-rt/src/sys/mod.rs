@@ -77,8 +77,7 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
 /// A call the table lets through: its paths, its faults, its handler.
 fn passed(call: &mut dyn Call, row: &'static Row) -> Action {
     // Path arguments resolved first: handlers see the path the kernel walks.
-    let mut bufs = [crate::path::PathBuf::new(), crate::path::PathBuf::new()];
-    if let Err(r) = crate::resolve::prepare(call, &mut bufs) {
+    if let Err(r) = crate::resolve::prepare(call) {
         if r == -e::ENOENT {
             crate::resolve::note_missing(call);
         }

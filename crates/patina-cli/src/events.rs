@@ -13,7 +13,10 @@ use crate::durability::tree::Tree;
 use crate::log::{Cut, Str};
 use proto::ctl::Op;
 use proto::oplog::{OpKind, OpRec, OPREC_SIZE};
-use proto::rec::{Rec, RecKind, REC_SIZE, STR_LABEL, STR_TEXT};
+use proto::rec::{
+    Rec, RecKind, REC_SIZE, STR_ARGV, STR_ARGV_CUT, STR_LABEL, STR_PATH, STR_PATH2, STR_RESOLVED,
+    STR_RESOLVED2, STR_TEXT,
+};
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
@@ -104,6 +107,27 @@ impl Line {
                 self.str(&format!("{k}_hex"), &h)
             }
         }
+    }
+    /// A list of byte strings, as `bytes` does one (`K_hex` when any is not UTF-8).
+    fn list(&mut self, k: &str, v: &[&[u8]]) -> &mut Line {
+        let s: Vec<Value> = v
+            .iter()
+            .map(|b| String::from_utf8_lossy(b).into())
+            .collect();
+        self.raw(k, &Value::from(s).to_string());
+        if v.iter().any(|b| std::str::from_utf8(b).is_err()) {
+            let h: Vec<Value> = v
+                .iter()
+                .map(|b| {
+                    b.iter()
+                        .map(|c| format!("{c:02x}"))
+                        .collect::<String>()
+                        .into()
+                })
+                .collect();
+            self.raw(&format!("{k}_hex"), &Value::from(h).to_string());
+        }
+        self
     }
     fn hex(&mut self, k: &str, v: u64) -> &mut Line {
         if v != 0 {
@@ -627,6 +651,50 @@ impl<W: Write> Export<'_, W> {
                     &proto::table::Class::code_name(r.class).to_ascii_lowercase(),
                 );
                 l.hex("in", r.in_hash).hex("out", r.out_hash);
+                // With --log-paths: the call's strings.
+                let strs = recs.strings(r)?;
+                if let Some(s) = strs.first() {
+                    l.num("pid", s.pid);
+                }
+                let (mut argv, mut cut) = (vec![], false);
+                for s in &strs {
+                    match s.which {
+                        STR_PATH => {
+                            l.bytes("path", &s.bytes);
+                        }
+                        STR_PATH2 => {
+                            l.bytes("path2", &s.bytes);
+                        }
+                        STR_RESOLVED => {
+                            l.bytes("resolved", &s.bytes);
+                        }
+                        STR_RESOLVED2 => {
+                            l.bytes("resolved2", &s.bytes);
+                        }
+                        STR_ARGV => {
+                            cut |= s.cut;
+                            argv.push(&s.bytes[..]);
+                        }
+                        STR_ARGV_CUT => cut = true,
+                        _ => {}
+                    }
+                    if matches!(s.which, STR_PATH | STR_PATH2) && s.cut {
+                        l.raw(
+                            if s.which == STR_PATH {
+                                "path_cut"
+                            } else {
+                                "path2_cut"
+                            },
+                            "true",
+                        );
+                    }
+                }
+                if !argv.is_empty() || cut {
+                    l.list("argv", &argv);
+                }
+                if cut {
+                    l.raw("argv_cut", "true");
+                }
                 self.emit("call", Some(r.seq), l)
             }
             Some(RecKind::Injected) => {

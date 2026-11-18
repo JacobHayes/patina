@@ -35,6 +35,7 @@ use proto::abi::open::O_NOFOLLOW;
 const O_PATH: u64 = 0o10000000;
 const O_CLOEXEC: u64 = 0o2000000;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
+const RESOLVE_IN_ROOT: u64 = 0x10;
 const MAX_LINKS: u32 = 40;
 
 /// A path argument: descriptor argument (if any), path argument, whether the last
@@ -123,17 +124,63 @@ fn path_args(nr: u64, a: &[u64; 6]) -> ([Arg; 2], usize) {
     }
 }
 
-/// Prepare every path argument of the call: `bufs` hold the resolved paths for as long as
-/// the handler runs. `Err(errno)`: the walk itself failed (ELOOP, ENOENT on the way,
-/// ENOTDIR), which is what the kernel would answer.
-pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> {
+/// A call's path buffers (in the trap entry's frame, so they outlive the handler until the
+/// call's record is written): the resolved paths a handler is given, and with `--log-paths`
+/// the path each walked argument resolves to.
+pub struct Paths {
+    pub bufs: [PathBuf; 2],
+    /// With `--log-paths`: the argument whose walk `bufs[k]` holds, or `NONE`.
+    pub logged: [u8; 2],
+}
+
+impl Paths {
+    pub const NONE: u8 = u8::MAX;
+    pub const fn new() -> Paths {
+        Paths {
+            bufs: [PathBuf::new(), PathBuf::new()],
+            logged: [Paths::NONE; 2],
+        }
+    }
+    /// The resolved path of argument `i`, if `--log-paths` kept one.
+    pub fn logged(&self, i: usize) -> Option<&[u8]> {
+        (0..2)
+            .find(|&k| self.logged[k] as usize == i)
+            .map(|k| self.bufs[k].as_bytes())
+    }
+}
+
+/// Prepare every path argument of the call: `call.paths()` holds the resolved paths for as
+/// long as the handler runs (and, with `--log-paths`, until the record is written).
+/// `Err(errno)`: the walk itself failed (ELOOP, ENOENT on the way, ENOTDIR), which is what
+/// the kernel would answer.
+pub fn prepare(call: &mut dyn Call) -> Result<(), i64> {
     let nr = call.nr();
     let mut a = [0u64; 6];
     for (i, v) in a.iter_mut().enumerate() {
         *v = call.arg(i);
     }
     let (args, n) = path_args(nr, &a);
-    for (k, arg) in args[..n].iter().enumerate() {
+    let log = crate::state::config().log_paths != 0;
+    // Arguments to replace once the buffers are no longer borrowed: (index, value).
+    let mut set = [(usize::MAX, 0u64); 4];
+    let mut ns = 0;
+    let r = prepare_into(call.paths(), nr, &a, &args[..n], log, &mut set, &mut ns);
+    for &(i, v) in &set[..ns] {
+        call.set_arg(i, v);
+    }
+    r
+}
+
+fn prepare_into(
+    paths: &mut Paths,
+    nr: u64,
+    a: &[u64; 6],
+    args: &[Arg],
+    log: bool,
+    set: &mut [(usize, u64); 4],
+    ns: &mut usize,
+) -> Result<(), i64> {
+    for (k, arg) in args.iter().enumerate() {
         let p = a[arg.pi];
         if p == 0 {
             continue;
@@ -147,14 +194,30 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
             Some(i) => a[i] as i32 as i64,
             None => AT_FDCWD,
         };
-        let check_only = nr == nr::OPENAT2
-            && a[2] != 0
-            && a[3] >= 24
-            && crate::guest::get::<u64>(a[2] + 16)? != 0;
-        let out = &mut bufs[k];
+        let resolve_flags = if nr == nr::OPENAT2 && a[2] != 0 && a[3] >= 24 {
+            crate::guest::get::<u64>(a[2] + 16)?
+        } else {
+            0
+        };
+        let check_only = resolve_flags != 0;
+        // RESOLVE_IN_ROOT walks from the descriptor as its root: the runtime's walk (from `/`)
+        // is not the path the call walks, so the log has none.
+        let log = log && resolve_flags & RESOLVE_IN_ROOT == 0;
+        let out = &mut paths.bufs[k];
         match resolve(dirfd, s, arg.follow, out)? {
-            Resolved::Same => continue,
+            Resolved::Same => {
+                // Nothing to change for the handler; the log gets the lexical absolute path,
+                // which is the walked one (no symlink on the walk, or the kernel answers the
+                // call with an error before it is walked).
+                if log && crate::path::full(dirfd, s, out) {
+                    paths.logged[k] = arg.pi as u8;
+                }
+                continue;
+            }
             Resolved::Path => {}
+        }
+        if log {
+            paths.logged[k] = arg.pi as u8;
         }
         if check_only {
             if crate::path::policy(out.as_bytes()) != crate::path::Kind::Plain {
@@ -163,9 +226,11 @@ pub fn prepare(call: &mut dyn Call, bufs: &mut [PathBuf; 2]) -> Result<(), i64> 
             }
             continue;
         }
-        call.set_arg(arg.pi, out.b.as_ptr() as u64);
+        set[*ns] = (arg.pi, out.b.as_ptr() as u64);
+        *ns += 1;
         if let Some(i) = arg.di {
-            call.set_arg(i, AT_FDCWD as u64);
+            set[*ns] = (i, AT_FDCWD as u64);
+            *ns += 1;
         }
     }
     Ok(())

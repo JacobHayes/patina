@@ -284,6 +284,13 @@ pub const FLAGS: &[Flag] = &[
         "size of the run's logs at which it ends unsupported (log-limit): a livelock's log fills the disk",
         RUNLIKE,
     ),
+    flag(
+        "--log-paths",
+        "",
+        "off",
+        "record each call's paths (as passed and as walked) and execve's arguments in the log, for a checker (`patina log events`); logs grow by about a third at most",
+        RUNLIKE,
+    ),
     flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),
     flag(
         "--vary",

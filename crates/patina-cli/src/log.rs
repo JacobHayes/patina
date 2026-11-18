@@ -6,7 +6,10 @@
 use crate::cli::{Args, Res};
 use crate::durability::check::incarnations;
 use proto::ctl::Op;
-use proto::rec::{Rec, REC_SIZE, STR_BYTES, STR_CUT, STR_LABEL, STR_MORE, STR_TEXT, STR_WHICH};
+use proto::rec::{
+    Rec, REC_SIZE, STR_ARGV, STR_ARGV_CUT, STR_BYTES, STR_CUT, STR_LABEL, STR_MORE, STR_PATH,
+    STR_PATH2, STR_RESOLVED, STR_RESOLVED2, STR_TEXT, STR_WHICH,
+};
 use proto::table::{name, Class};
 use proto::RecKind;
 use std::path::Path;
@@ -181,6 +184,12 @@ pub fn str_which(w: u8) -> &'static str {
     match w {
         STR_LABEL => "label",
         STR_TEXT => "text",
+        STR_PATH => "path",
+        STR_PATH2 => "path2",
+        STR_RESOLVED => "resolved",
+        STR_RESOLVED2 => "resolved2",
+        STR_ARGV => "argv",
+        STR_ARGV_CUT => "argv-cut",
         _ => "string",
     }
 }

@@ -3,6 +3,7 @@
 //! entry exists in the skeleton; it provides a frame.
 
 use crate::arch::Frame;
+use crate::resolve::Paths;
 use crate::state::ThreadState;
 
 // `frame()`, `Restart`, `NoReturn` and `NeedsFrame`: the interface of handlers that need the
@@ -19,6 +20,10 @@ pub trait Call {
     /// The arguments as the guest passed them, before any `set_arg`: what the boundary record
     /// and the supervisor are told (never a runtime address).
     fn guest_args(&self) -> [u64; 6];
+    /// The call's resolved paths: the buffers a handler is given in place of the guest's
+    /// paths, and what `--log-paths` records (`resolve::prepare`).
+    fn paths(&mut self) -> &mut Paths;
+    fn paths_ref(&self) -> &Paths;
 }
 
 #[allow(dead_code)]
@@ -36,10 +41,15 @@ pub struct TrapCall<'a> {
     pub nr: u64,
     pub args: [u64; 6],
     guest: [u64; 6],
+    paths: &'a mut Paths,
 }
 
 impl<'a> TrapCall<'a> {
-    pub fn new(frame: &'a mut Frame, ts: &'a mut ThreadState) -> TrapCall<'a> {
+    pub fn new(
+        frame: &'a mut Frame,
+        ts: &'a mut ThreadState,
+        paths: &'a mut Paths,
+    ) -> TrapCall<'a> {
         let args = frame.args();
         let nr = frame.nr();
         TrapCall {
@@ -48,6 +58,7 @@ impl<'a> TrapCall<'a> {
             nr,
             args,
             guest: args,
+            paths,
         }
     }
 }
@@ -70,6 +81,12 @@ impl Call for TrapCall<'_> {
     }
     fn guest_args(&self) -> [u64; 6] {
         self.guest
+    }
+    fn paths(&mut self) -> &mut Paths {
+        self.paths
+    }
+    fn paths_ref(&self) -> &Paths {
+        self.paths
     }
 }
 

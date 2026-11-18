@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 13;
+pub const LAYOUT_VERSION: u64 = 14;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -50,6 +50,9 @@ pub struct Config {
     /// it ends the run `log-limit` instead: a count of records, never of wall time, so a seed
     /// ends at the same record in every run.
     pub log_limit: u64,
+    /// `--log-paths`: each call's path arguments (as passed, and the path the call walks) and
+    /// `execve`'s arguments follow its trap record in clear (`rec::STR_PATH` ...). 0: off.
+    pub log_paths: u64,
     /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
     /// NUL-padded; all zero is `/work`.
     pub work: [u8; WORK_PATH_MAX],
@@ -136,6 +139,7 @@ impl Config {
             compute_gap: 0,
             compute_charge_ns: 0,
             log_limit: crate::layout::LOG_MAX,
+            log_paths: 0,
             work: [0; WORK_PATH_MAX],
         }
     }

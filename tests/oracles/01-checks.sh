@@ -24,7 +24,9 @@
 #    rename and b/y after it, under --work's guest location; one line per trap record; two runs
 #    of one seed give the same bytes. examples/checks/confined and synced-before-mark, which
 #    read it, find their planted bugs over a seed range through --check and pass the fixes
-#    (marklog fixed marks progress before its fsync: only the `ack` marks are judged).
+#    (marklog fixed marks progress before its fsync: only the `ack` marks are judged). With
+#    --log-paths, an open through a symlink has its path as passed and the path it walked, the
+#    same in five runs under cpu and aslr variation.
 #@ tier=quick budget=10 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -246,6 +248,11 @@ ops=$(jq -r 'select(.type == "op" and .op != "close") | "\(.op) \(.path)\(if .to
 traps=$("$PATINA" log dump tour/inc-0/boundary.log | awk '$2 == "trap"' | wc -l)
 calls=$(jq -s 'map(select(.type | IN("call", "sdk", "mark"))) | length' tour.jsonl)
 [ "$calls" = "$traps" ] || die "tour: $calls calls for $traps trap records"
+rc=0
+"$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --log-paths --out lp -- "$PATINA_GUESTS/oracles-paths" tour >lp.txt 2>&1 || rc=$? # lint-allow: seed — verify repeats one seed; any seed shows it
+[ "$rc" = 0 ] && grep -q '^identical: 5 runs' lp.txt || die "verify --log-paths: $(tail -3 lp.txt)"
+lp=$("$PATINA" log events lp/run-0 --types call | jq -r 'select(.path == "link/a.txt") | .resolved')
+[ "$lp" = /work/data/a.txt ] || die "--log-paths: link/a.txt resolved to '$lp'"
 app=$("$PATINA" log events app --types op | jq -r 'select(.type == "op") | .path' | sort -u | paste -sd,)
 [ "$app" = "/var/lib/app/a,/var/lib/app/a/x,/var/lib/app/b,/var/lib/app/b/y" ] || die "--work DIR:/var/lib/app: paths $app"
 wait "$sweeps"

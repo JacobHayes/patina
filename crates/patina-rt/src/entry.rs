@@ -303,7 +303,9 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
     if ts.traps & 1023 == 0 {
         crate::sup::outside_check();
     }
-    let mut call = TrapCall::new(frame, ts);
+    // The call's path buffers live as long as its record is not yet written.
+    let mut paths = crate::resolve::Paths::new();
+    let mut call = TrapCall::new(frame, ts, &mut paths);
     let nr = call.nr;
     let row = proto::row(if nr > u32::MAX as u64 {
         u32::MAX

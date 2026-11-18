@@ -611,6 +611,7 @@ pub fn run_incarnation(
     cfg.compute_gap = o.plan.compute_gap;
     cfg.compute_charge_ns = proto::compute::CHARGE_NS;
     cfg.log_limit = (c.log_limit << 20).saturating_sub(start.log_used);
+    cfg.log_paths = c.log_paths as u64;
     if c.pause_points {
         cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
     }

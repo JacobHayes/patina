@@ -144,6 +144,15 @@ comparison. The bytes are a copy of what the handler already read through the ch
 copy (`sys/sdk.rs` keeps the label it was given until `log::trap` writes it), never a second
 read of the program's memory. A call whose payload could not be read has none.
 
+With `--log-paths` (`Config::log_paths`) a call's C-string arguments follow its record the
+same way: each as the program passed it, read once (the bytes the input hash reads,
+`log::trap_paths`), and the absolute path each walked argument resolved to, kept by the path
+resolver (`resolve::prepare`) in the call's path buffers, which live in the trap entry's frame
+until the record is written; `execve`'s arguments are read from the program's array, bounded
+(`proto::rec::ARGV_MAX`, `ARGV_BYTES`, `PATH_BYTES`). The resolver's walk is in the
+program's view of the file system, so no host path enters. Without the flag `log::trap`
+takes one more branch and writes what it wrote before.
+
 Replay runs the program again and compares record by record
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`).

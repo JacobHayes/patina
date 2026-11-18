@@ -1,10 +1,12 @@
 //! Boundary log: a shared file mapping at `state::log_base`, appended under the turn.
 
+use crate::path::PathBuf;
 use crate::raw::*;
+use crate::resolve::Paths;
 use crate::state::{ctl, proc};
 use core::sync::atomic::Ordering::*;
 use proto::layout::*;
-use proto::rec::{chain, hash_bytes, Hasher, Rec, REC_SIZE};
+use proto::rec::{chain, hash_bytes, Hasher, Rec, PATH_BYTES, REC_SIZE};
 use proto::table::{Len, Out, Row};
 
 fn ensure(len: u64) {
@@ -95,8 +97,23 @@ fn hash_guest(h: &mut Hasher, p: u64, n: u64) {
     }
 }
 
+/// The C strings a call's inputs named, kept as the hash read them (`--log-paths`).
+struct Kept {
+    s: [PathBuf; 2],
+    /// Per string: the argument it is (`Paths::NONE`: none kept), and whether it was cut.
+    arg: [u8; 2],
+    cut: [bool; 2],
+    /// C strings met so far: the first is `STR_PATH`, the second `STR_PATH2`.
+    met: usize,
+}
+
 /// Hash the guest buffers described by `bufs` (output side: after the call).
 pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
+    hash_keep(bufs, args, ret, None)
+}
+
+/// `hash_bufs`, keeping each C string's bytes in `keep` from the same read.
+fn hash_keep(bufs: &[Out], args: &[u64; 6], ret: i64, mut keep: Option<&mut Kept>) -> u64 {
     if bufs.is_empty() || ret < 0 {
         return 0;
     }
@@ -112,9 +129,32 @@ pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
             Len::Fixed(n) => hash_guest(&mut h, p, n as u64),
             Len::RetTimes { size, .. } => hash_guest(&mut h, p, ret as u64 * size as u64),
             Len::ArgTimes { arg, size } => hash_guest(&mut h, p, args[arg as usize] * size as u64),
-            Len::CStr => match crate::guest::strlen(p, 4096) {
-                Ok(n) => hash_guest(&mut h, p, n as u64),
-                Err(_) => h.update(b"\0EFAULT"),
+            Len::CStr => match (crate::guest::strlen(p, PATH_BYTES), keep.as_deref_mut()) {
+                (Ok(n), None) => hash_guest(&mut h, p, n as u64),
+                (Ok(n), Some(k)) => {
+                    let j = k.met.min(1);
+                    k.met += 1;
+                    let buf = &mut k.s[j];
+                    buf.n = 0;
+                    let read = crate::guest::each(p, n as u64, |b| {
+                        h.update(b);
+                        buf.b[buf.n..buf.n + b.len()].copy_from_slice(b);
+                        buf.n += b.len();
+                    });
+                    if read.is_err() {
+                        h.update(b"\0EFAULT");
+                    } else {
+                        k.arg[j] = b.arg;
+                        // No NUL within the bytes kept: a longer string.
+                        k.cut[j] = n == PATH_BYTES;
+                    }
+                }
+                (Err(_), k) => {
+                    if let Some(k) = k {
+                        k.met += 1;
+                    }
+                    h.update(b"\0EFAULT")
+                }
             },
             Len::IovRet { .. } | Len::MsgIovRet => {
                 let mut left = ret as u64;
@@ -174,6 +214,9 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     let args = &proto::table::nargs::used_args(nr, &call.guest_args());
     let ts = crate::state::thread();
     let c = ctl();
+    if c.config.log_paths != 0 && row.group != proto::table::Group::Sdk {
+        return trap_paths(row, call, ret, args);
+    }
     // Inputs are read only when the kernel did not report the pointer bad.
     let in_hash = if row.group == proto::table::Group::Sdk {
         crate::sys::sdk::take_hash()
@@ -197,6 +240,95 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     append(&rec);
     if row.group == proto::table::Group::Sdk {
         crate::sys::sdk::log_strings();
+    }
+}
+
+/// `trap` with `--log-paths`: the record, then each C string the call read (as the hash read
+/// it, once), the path each walked argument resolved to, and `execve`'s arguments.
+#[inline(never)]
+fn trap_paths(row: &Row, call: &dyn crate::trap::Call, ret: i64, args: &[u64; 6]) {
+    use proto::rec::*;
+    let ts = crate::state::thread();
+    let c = ctl();
+    let mut kept = Kept {
+        s: [PathBuf::new(), PathBuf::new()],
+        arg: [Paths::NONE; 2],
+        cut: [false; 2],
+        met: 0,
+    };
+    // Inputs are read only when the kernel did not report the pointer bad.
+    let in_hash = if ret == -e::EFAULT {
+        0
+    } else {
+        hash_keep(row.ins, args, ret.max(0), Some(&mut kept))
+    };
+    append(&Rec {
+        seq: ts.seq,
+        vclock_ns: c.vclock_ns.load(Relaxed),
+        slot: ts.slot as u16,
+        kind: proto::RecKind::Trap as u8,
+        class: ts.eff_class,
+        nr: call.nr() as u32,
+        args: *args,
+        ret,
+        out_hash: hash_bufs(row.outs, args, ret),
+        in_hash,
+    });
+    if ret == -e::EFAULT {
+        return;
+    }
+    let paths = call.paths_ref();
+    for j in 0..2 {
+        if kept.arg[j] == Paths::NONE {
+            continue;
+        }
+        strs(STR_PATH + j as u8, kept.s[j].as_bytes(), kept.cut[j]);
+        if let Some(r) = paths.logged(kept.arg[j] as usize) {
+            strs(STR_RESOLVED + j as u8, r, false);
+        }
+    }
+    let argv = match call.nr() {
+        nr::EXECVE => args[1],
+        nr::EXECVEAT => args[2],
+        _ => return,
+    };
+    log_argv(argv);
+}
+
+/// `execve`'s arguments, each one string (at most `ARGV_MAX` of them, `ARGV_BYTES` in all,
+/// `PATH_BYTES` each); `STR_ARGV_CUT` after them when some were left out. An argument that
+/// cannot be read ends the list there.
+fn log_argv(argv: u64) {
+    use proto::rec::*;
+    if argv == 0 {
+        return;
+    }
+    let mut buf = PathBuf::new();
+    let mut total = 0usize;
+    for i in 0..=ARGV_MAX as u64 {
+        let Ok(p) = crate::guest::get::<u64>(argv + 8 * i) else {
+            return;
+        };
+        if p == 0 {
+            return;
+        }
+        let Ok(n) = crate::guest::strlen(p, PATH_BYTES) else {
+            return;
+        };
+        if i as usize == ARGV_MAX || total + n > ARGV_BYTES {
+            strs(STR_ARGV_CUT, b"", false);
+            return;
+        }
+        buf.n = 0;
+        let ok = crate::guest::each(p, n as u64, |b| {
+            buf.b[buf.n..buf.n + b.len()].copy_from_slice(b);
+            buf.n += b.len();
+        });
+        if ok.is_err() {
+            return;
+        }
+        strs(STR_ARGV, buf.as_bytes(), n == PATH_BYTES);
+        total += n;
     }
 }
 

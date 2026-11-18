@@ -566,8 +566,15 @@ A property of what the program did, rather than of what it left, reads the event
 ([The event stream](#the-event-stream)): a few lines of `jq` over `patina log events RUNDIR`.
 Two examples ship beside `acked-kept`:
 
-- `examples/checks/confined ROOT... RUN`: every change to the work tree (`op` events other
-  than `close` and the syncs) is on a path under a root.
+- `examples/checks/confined [-r PREFIX]... ROOT... RUN`: every change to the work tree (`op`
+  events other than `close` and the syncs) is on a path under a root; in a run made with
+  `--log-paths`, every file opened is too, or under a prefix it may read (`-r /usr -r /etc`
+  for a dynamically linked program), judged on the path the open walked.
+- `examples/checks/no-symlink-escape ROOT... RUN`: in a run made with `--log-paths`, every
+  file opened resolves under a root, symlinks followed: a link planted in a directory the
+  program serves, or one a path swap makes between a check and the open
+  ([path swaps](#path-swaps)), does not take it elsewhere. Without the flag it does not judge
+  (exit 77).
 - `examples/checks/synced-before-mark FILE PREFIX RUN`: for a program that marks each
   acknowledgement with the SDK's `mark` (`mark("ack 17")`), no write to `FILE` is unsynced at
   a mark whose label starts with `PREFIX`; other marks are ignored.
@@ -860,7 +867,7 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `header` | first line: `v` (1), `seed`, `work` (the work tree's guest path), `incarnations` |
 | `inc` | an incarnation begins: `records` (its boundary records), `oplog` (false: a sweep removed its operation log) |
 | `cut` | a sweep kept only the head and tail of the log: `records`, `head`, `tail_from` (the records between are not printed; operations are) |
-| `call` | a system call: `name` (`nr` too when unknown), `args` (only the registers the call reads, as the program set them: an `int` may show its 32-bit value), `ret`, `disp` (`pass`, `virt`, `attempt`, `rewrite`, `place`, `deny`, `stop`), `in`, `out` (hashes of what it read and wrote; absent when none) |
+| `call` | a system call: `name` (`nr` too when unknown), `args` (only the registers the call reads, as the program set them: an `int` may show its 32-bit value), `ret`, `disp` (`pass`, `virt`, `attempt`, `rewrite`, `place`, `deny`, `stop`), `in`, `out` (hashes of what it read and wrote; absent when none); with `--log-paths` (below): `pid`, `path`, `path2`, `resolved`, `resolved2`, `argv`, `argv_cut`, `path_cut` |
 | `op` | a change to the work tree, after its call: `pid`, `op`, `ino`, `path` (absent for a file with no name left), and by `op`: `create` `mode` `fmt`; `mkdir` `mode`; `symlink` `target`; `unlink`, `rmdir` `left` (links); `rename` `to`, `replaced`, `flags`; `write`, `mmap-dirty`, `mmap-shared` `off` `len`; `truncate` `size`; `fallocate` `mode` `off` `len`; `setattr` `mode` `uid` `gid`; `xattr-set`, `xattr-remove` `name`; `fsync` `flags` (1 data only, 2 no commit, 4 msync); also `link`, `fsync-dir`, `fsync-fail`, `sync`, `close`. No `slot` |
 | `fault` | an injected fault, as `faults.recent` shows it (every one, not the last 20): `class`, `call`, `object`, `pid`, and `errno`, `count`, `bytes` or `delay_ns`; a path swap's `swap`, `target`, `after`, `after_seq`, `put_back`; a datagram's `datagram`, `from`, `to` |
 | `crash` | a crash point fired (`seq` is its call's): `kind` (`machine`, `process`), `point`, and for a machine crash `lost` (as `faults.recent`) |
@@ -869,15 +876,44 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `signal`, `sigfault` | a signal delivered (`sig`, `code`, `pc`); a synchronous fault forwarded to the program (`sig`, `code`, `addr`, `pc`) |
 | `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
 
-Strings from the program (`label`, `text`) are JSON strings when they are UTF-8. Otherwise
+**Paths.** With `--log-paths` (`[run] log-paths = true`) a `call` also has its C-string
+arguments as the program passed them: `path` and `path2` (a path, a rename's new path; for
+the attribute calls the attribute's name, for `memfd_create` its name), and for each path the
+call walks, the absolute path it reached, `resolved` (`resolved2`): symlinks on the way
+followed as the kernel follows them, relative names taken from the working directory or the
+directory descriptor, `.` and `..` gone. `execve` has `argv` (at most 256 arguments and 32 KiB;
+`argv_cut` when some were left out or one was longer than 4096 bytes). A path is kept whole up
+to 4096 bytes (`path_cut` beyond: the kernel refuses such a path). The strings are what the
+program saw, in its own view of the file system (`/work`, `/usr`, never a host path of the
+sandbox). `resolved` is the walk's result whether or not the call succeeded: select on `ret`.
+A call that answered `EFAULT` has no strings, and a walk that failed (a missing directory on
+the way) has no `resolved`.
+
+The flag is off by default because the log grows: W1-W9 at seed 3 (x86_64) gained 0% (W8,
+sockets), +1.3% to +1.9% (W2, tokio), +3.4% (W4, Go), +8.9% (W1, Rust), +10% (W3 SQLite, W9
+fjall), +24% (W6 shell pipelines, W7 fork and exec) and +32% (W5, a CPython start and its
+imports). It is part of the run: `run.json` names it, the rerun line and `replay` carry it,
+and a run with it has another digest than one without; a run without it has the log it had
+before the flag existed. Each recorded call costs about half a microsecond of CPU (an open in
+a loop of opens: 5% to 10% more CPU); W1-W9's wall time, the least of three runs each, moved
+by at most 3 ms or 4%; without the flag the cost is not measurable.
+
+```text
+$ patina run --log-paths -- /bin/sh -c 'mkdir data; echo a > data/a.txt; ln -s data link; cat link/a.txt'
+$ patina log events patina-out/run-0 --types call | jq -c 'select(.argv[0]? == "cat" or (.name == "openat" and .path == "link/a.txt")) | {name, path, resolved, argv, ret}'
+{"name":"execve","path":"/usr/bin/cat","resolved":"/usr/lib/cargo/bin/coreutils/cat","argv":["cat","link/a.txt"],"ret":0}
+{"name":"openat","path":"link/a.txt","resolved":"/work/data/a.txt","argv":null,"ret":3}
+```
+
+Strings from the program (`label`, `text`, `path`, `argv`, ...) are JSON strings when they are UTF-8. Otherwise
 each byte that is not is U+FFFD in the string and the exact bytes are in a second field with
 `_hex` after the name (`label_hex`: lowercase hex), so nothing is lost. A call whose payload
 the program's pointer did not cover (`ret` -14, `EFAULT`) has no `label`, nor does one
 whose strings a sweep's cut log or the log limit left out (a reader should allow for it).
 
-Not in it: the path and argument strings of calls (only their hashes, `in`), the process of a
-call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its thread's `slot`, which is
-not a process id),
+Not in it: without `--log-paths`, the path and argument strings of calls (only their hashes,
+`in`) and the process of a call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its
+thread's `slot`, which is not a process id),
 buffer contents (read the trees: `patina log tree`, `post-crash/`). A run directory a sweep
 pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
 and fields are only ever added: a reader should ignore what it does not know.

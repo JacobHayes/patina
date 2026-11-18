@@ -1,0 +1,16 @@
+#!/bin/sh
+# no-symlink-escape ROOT... RUN: every file the program opened resolves under one of the
+# ROOTs, symlinks followed: a link planted in a served directory, or one a path swap made
+# between a check and the open, does not take it elsewhere. Needs a run made with
+# --log-paths (`resolved` of each open in `patina log events`); exits 77 (not judged) on one
+# without. For `patina run --check`.
+set -eu
+for run; do :; done
+roots=$(for r; do [ "$r" = "$run" ] || printf '%s\n' "$r"; done | jq -Rsc 'split("\n")[:-1] | map(if . == "/" then . else rtrimstr("/") end)')
+[ "$(jq -r '.config["log-paths"] // false' "$run/run.json")" = true ] || { echo "no paths: the run was made without --log-paths"; exit 77; }
+bad=$({ "${PATINA:-patina}" log events "$run" --types call || echo '"patina log events failed"'; } | jq -rn --argjson roots "$roots" '
+  first(inputs | if type == "string" then error(.) else . end
+    | select(.type == "call" and (.name | IN("open", "openat", "openat2", "creat")) and .ret >= 0 and .resolved)
+    | select(.resolved as $p | all($roots[]; . as $r | $p != $r and ($p | startswith($r + "/") | not)))
+    | "\(.path) -> \(.resolved) (seq \(.seq))") // empty')
+[ -z "$bad" ] || { echo "symlink-escape: $bad"; exit 1; }

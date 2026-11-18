@@ -80,6 +80,9 @@ pub struct Config {
     pub timeout: u64,
     /// MiB the run's logs may hold, every incarnation together (`--log-limit`).
     pub log_limit: u64,
+    /// Path and argument strings in the boundary log (`--log-paths`, `[run] log-paths`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub log_paths: bool,
     pub tmpfs_bytes: u64,
     /// Fault presets (`--faults`, `[faults] preset`).
     pub faults_preset: Vec<String>,
@@ -133,6 +136,7 @@ impl Default for Config {
             time_limit: 3600,
             timeout: 600,
             log_limit: DEFAULT_LOG_LIMIT_MIB,
+            log_paths: false,
             tmpfs_bytes: 256 << 20,
             faults_preset: vec![],
             faults: vec![],
@@ -586,6 +590,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "time-limit") => c.time_limit = int(v, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
+                ("run", "log-paths") => c.log_paths = boolean(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
                 ("run", "check") => check = Some(string(v, &at)?),
                 ("run", "ok-exit") => {
@@ -711,6 +716,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     }
     if let Some(n) = a.num("--log-limit")? {
         c.log_limit = n;
+    }
+    if a.has("--log-paths") {
+        c.log_paths = true;
     }
     if let Some(p) = a.last("--faults") {
         c.faults_preset = vec![p.to_string()];

@@ -78,7 +78,8 @@ patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept
 Expected: `violation check: acked-record-lost: acknowledged N, N stored after the crash`, 9 of
 the 30 seeds (counted on x86_64 only); runs that did not crash are not judged.
 
-`examples/checks/confined` and `examples/checks/synced-before-mark` judge what a program did
+`examples/checks/confined`, `examples/checks/no-symlink-escape` (with `--log-paths`) and
+`examples/checks/synced-before-mark` judge what a program did
 rather than what it left, from `patina log events` ([Checks from outside the
 program](../docs/GUIDE.md#checks-from-outside-the-program)).
 
