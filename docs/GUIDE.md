@@ -529,8 +529,8 @@ stepped until it is found looping without changing anything, and yields there.
 A thread that computes for 10 s of CPU time without reaching a scheduling point, while
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
-no system call or `pause`. Rebuilt code does not stall that way
-([Deeper search](#deeper-search-rebuilt-code)). On x86_64, `--preempt branches` also preempts after a
+no system call or `pause`. Rebuilt code, and Python under `python3 -m patina`, does not stall
+that way ([Deeper search](#deeper-search-rebuilt-code)). On x86_64, `--preempt branches` also preempts after a
 seed-chosen number of branches; it needs an AMD Zen 5 CPU with its PMU exposed (not in most virtual machines) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
 only on that CPU family. `patina doctor` says which of the three is missing.
@@ -647,13 +647,68 @@ clang -O2 -fPIC -shared -fsanitize-coverage=trace-pc,trace-loads,trace-stores \
   -fno-sanitize-link-runtime -o libwork.so work.c PATINA/sdk/c/patina_compute.c
 ```
 
-Python: not supported.
+Python needs no rebuild: see [Python](#python) below.
+
+### Python
+
+Python 3.12 or later runs with compute points under the SDK file's runner, with no change to
+the program: put `sdk/python` on `PYTHONPATH` and start the program with `-m patina` before
+the script (or before `-m MODULE`):
+
+```sh
+patina run --mount PATINA/sdk/python:/sdk --env PYTHONPATH=/sdk -- python3 -m patina app.py ARGS
+```
+
+Every line the interpreter starts and every jump it takes (each pass of a loop) is a point
+worth 15 events, so 15 ns of virtual time, a fixed constant near what a plain line takes
+natively. Threads switch between any two lines: ctypes releases the GIL at the point, so the
+thread switched to runs. `tests/guests/compute/py/pycompute.py cache` fills a cache from two
+threads with a check and an act and no system call between them:
+
+```text
+$ patina sweep --seeds 1..20 --mount tests/guests/compute/py:/guest -- python3 /guest/pycompute.py cache 200
+patina sweep: 20 runs, 0 findings in 0 groups, 20 ok   (0.1s, 8 jobs)
+outcomes: ok 20
+$ patina sweep --seeds 1..20 --mount tests/guests/compute/py:/guest --mount sdk/python:/sdk \
+    --env PYTHONPATH=/sdk -- python3 -m patina /guest/pycompute.py cache 200
+patina sweep: 20 runs, 15 findings in 1 group, 5 ok   (0.2s, 8 jobs)
+outcomes: failure 15, ok 5
+compute points: /usr/bin/python3 (lines)
+
+failure exit: exit 1
+  15 of 20 runs   first: seed 1   replayed: identical
+```
+
+CPU-bound Python now moves the clock: a timer or a `threading.Timer` cuts a loop with no
+system call where it falls due, and two CPU-bound threads take
+turns (stock, the one holding the GIL runs to its end, or to `compute-stall` after 10 s).
+Outside Patina (or under a Patina before this feature) the runner makes one failed call and runs
+the program as `python3 app.py` would, with nothing registered and no `compute points:` line.
+
+The cost is the interpreter calling the hook, 50 to 100 ns per line or jump. Under Patina a
+tight loop ran 4 times as long as stock, a mixed pure-Python workload 1.5 times, and
+`tests/guests/cpython/w5.py local` (threads, files, sqlite) 1.1 times; natively the hook would
+make such code 7 to 17 times slower, which is why it is off outside Patina
+(docs/EVIDENCE.md, "Python").
+
+Limits:
+
+- The points are at line starts and jumps of Python code. Inside one line only CPython's own
+  5 ms switch request switches threads, so a race within a line (`d[k] = d.get(k, 0) + 1`) is
+  rarely found, and a bytecode-atomic operation (`dict.setdefault`, `list.append`) never. C
+  extensions and the interpreter's own C code have no points.
+- Processes the program starts run without points unless started the same way.
+- At `compute-gap=0` a line costs real time enough that a stretch between two yields (2^22
+  events) can pass the spin probe's 20 ms, and the probes slow the run: 2 to 3 times on
+  Python 3.12.
+- The free-threaded build works the same on 3.14t (the only one tried): the race above was
+  found in 21 of 40 seeds.
 
 ### Did it take
 
 `patina run` prints a `compute points:` line when rebuilt code ran: the images whose hooks ran
-(the program, a library it loads, or both), the kinds of event, the events counted, the
-switches they caused and the mean gap the seed drew.
+(the program, a library it loads, or both; for Python the interpreter, kind `lines`), the kinds
+of event, the events counted, the switches they caused and the mean gap the seed drew.
 
 ```text
 $ patina run --seed 2 -- ./stats-cp
@@ -693,7 +748,8 @@ can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `unsu
   reach.
 - One thread runs at a time, so weak-memory behaviours (a store another CPU sees late) never
   happen, and a `lock`-prefixed read-modify-write is never split.
-- With `--preempt branches` the hooks do nothing; branch counters switch instead.
+- With `--preempt branches` the hooks do nothing (Python's is not registered); branch
+  counters switch instead.
 
 ## Hosts
 

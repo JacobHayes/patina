@@ -30,7 +30,7 @@
 //! events down in one guest word, the cell, and enters the runtime when it runs out.
 //!
 //! ```text
-//! COMPUTE_HELLO  arg = COMPUTE_VERSION | kinds << 8 (COMPUTE_EDGE, _ACCESS, _COMPARE)
+//! COMPUTE_HELLO  arg = COMPUTE_VERSION | kinds << 8 (COMPUTE_EDGE, _ACCESS, _COMPARE, _LINE)
 //!                -> the cell's address (crate::layout::COMPUTE_CELL); any error: stay inert
 //! COMPUTE_POINT  arg = 0; the cell reached 0 -> 0, the cell refilled
 //! ```
@@ -64,7 +64,10 @@ pub const COMPUTE_VERSION: u64 = 1;
 pub const COMPUTE_EDGE: u64 = 1;
 pub const COMPUTE_ACCESS: u64 = 2;
 pub const COMPUTE_COMPARE: u64 = 4;
-pub const COMPUTE_KINDS: u64 = COMPUTE_EDGE | COMPUTE_ACCESS | COMPUTE_COMPARE;
+/// An interpreter's lines and jumps (`sdk/python/patina.py`). Its hook runs in the program
+/// that interprets, through libc, so the image noted is the program, not the image at the call.
+pub const COMPUTE_LINE: u64 = 8;
+pub const COMPUTE_KINDS: u64 = COMPUTE_EDGE | COMPUTE_ACCESS | COMPUTE_COMPARE | COMPUTE_LINE;
 
 pub const KIND_ALWAYS: u8 = 1;
 pub const KIND_SOMETIMES: u8 = 2;

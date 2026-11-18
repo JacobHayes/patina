@@ -260,6 +260,40 @@ There is no other way into the runtime: a point that switches needs a supervisor
 anyway, so a direct call would save nothing. With `--preempt branches` the cell is never armed
 and events charge nothing.
 
+**Python** (3.12 and later) needs no rebuild: `python3 -m patina SCRIPT` runs the script with
+the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sys.monitoring`.
+
+- **Events**: `LINE` and `JUMP`. A line start is a point between any two lines; a jump is
+  every pass of a loop, which a one-line loop or a comprehension makes without starting a
+  line. Branch events add nothing these do not, and calls and returns would cost more for no
+  new place. Each costs one pure-Python call, 50 to 100 ns, against about 13 ns for the work of
+  a plain line natively: that call is the cost, not the cell (docs/EVIDENCE.md).
+- **The cell**: `COMPUTE_HELLO` with kind `COMPUTE_LINE` answers its address; the hook reads
+  and writes it through a `memoryview` over that address, and makes `COMPUTE_POINT` through
+  ctypes when it reaches 0. The hello comes from libc's `syscall`, so for this kind the image
+  table notes the program (the interpreter), not the image at the call.
+- **Charge**: each event takes `LINE_EVENTS` = 15 from the cell, so it costs 15 ns of virtual
+  time and a gap counts in the same units as for rebuilt code. 15 is a fixed constant, about
+  what a line of plain Python takes natively; it is not calibrated per host.
+- **The GIL**: ctypes releases the GIL around a foreign call, so at a point the other threads
+  can take it; when the seed switches, the thread switched to runs Python code, and the one
+  that yielded waits for the GIL when it runs again. Releasing the GIL may wake a waiter with
+  a system call before the point; that call is a scheduling point of its own, which charges
+  and re-arms the cell, and the point after it then finds the cell full and does nothing. CPython's own switch request (a thread
+  waiting for the GIL longer than the switch interval, 5 ms) is a timed wait in virtual time:
+  stock, a CPU-bound thread never makes time pass, so the waiter never asks and the holder
+  runs to its end or to `compute-stall`; with points it asks after 5 ms of events, as
+  natively, at a time the seed decides.
+- **Signals**: a signal due at a point runs its Python handler inside the hook. An exception
+  it raises from a line's hook reaches the program at that line; from a jump's hook CPython
+  3.12 and 3.14 would let it skip the frame's handlers, so the hook keeps it and raises it from
+  the next instruction of that code (local `INSTRUCTION` events) in that thread.
+- **Inert**: outside Patina the hello fails and nothing is registered. Under `--preempt
+  branches` the cell holds `NO_LIMIT` after the hello and nothing is registered either.
+
+A generator or coroutine resuming gets no point of its own: its next line or jump has one, and
+the order of asyncio tasks is the event loop's, which a point in one thread does not change.
+
 ## The fault plan
 
 `--faults`, `--fault` and `--crash` give the plan (`faults.rs`). A value given as a range is
@@ -514,12 +548,15 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not
   rebuilt), gcc gives edges only, and code not rebuilt (libc, the Go runtime,
   prebuilt libraries) has no points. A seed found on a stock build does not replay on a
-  rebuilt one, or the reverse.
+  rebuilt one, or the reverse. In Python (`python3 -m patina`) the points are at line starts
+  and jumps: inside a line only CPython's own switch request switches, a bytecode-atomic
+  operation (`dict.setdefault`, `list.append`) is never split, and C extensions and the
+  interpreter's own C code have none.
 - **Stock computation does not advance virtual time**: a CPU-bound loop cannot be cut by
   `--time-limit` or a program's own deadline, only by `--timeout` (wall time). A loop that
   makes any system call (a clock read) advances it by the per-trap charge. Rebuilt code is
-  charged 1 ns per event and cut at the event where a deadline falls due; branch counters
-  charge per branch.
+  charged 1 ns per event (Python under `python3 -m patina`, 15 ns per line and jump) and cut at
+  the event where a deadline falls due; branch counters charge per branch.
 - **One thread runs at a time**, so weak-memory behaviours (a store another CPU sees late)
   never happen.
 - **One machine.** All processes of a run share one sandbox, one disk and one clock. There is

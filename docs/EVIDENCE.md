@@ -498,6 +498,68 @@ Red/green (VM): the compute-point stand-in restored fails `compute/03-inert` (`a
 hooks without it fail `compute/05-rust` (no hello); `compute_arm64.s` that never reports the
 preemption mark fails `compute/06-go` (`boolspin` with one P livelocks).
 
+### Python
+
+`python3 -m patina` (sdk/python/patina.py, ARCHITECTURE.md "Compute points"), guest
+`tests/guests/compute/py/pycompute.py`. Host: AMD Ryzen 9 9950X, Linux 7.0; Python 3.14.4
+(the host's `/usr/bin/python3`) and 3.12.16 (a standalone build mounted at `/py`, as the CI
+runners' 3.12); 2026-11-18.
+
+Stock behaviour first (by hand, 3.14): two threads in loops with no system call run one after
+the other (10^8 passes each, a progress mark every 10^6: 1 alternation of the marks; natively
+199).
+The thread waiting for the GIL waits with a 5 ms timeout in virtual time, which a computing
+thread never moves, so CPython's switch request is never made. Over 10 s of CPU without a
+system call (`burn 1000000000`; also a two-thread loop of 9 x 10^8 passes, seeds 1 and 2) the
+run ends `compute-stall`. With points and `compute-gap=0` (no seeded switch) the 5 ms request
+fires in virtual time: `cpu 5000000` alternates 62 and 57 times on seeds 1 and 2 (39 natively),
+one digest over three runs.
+
+| Check (`compute/evidence-python`, 3.14 / 3.12) | Result |
+|---|---|
+| `cache 200` (check-then-act, two threads), seeds 1-200: stock / default gap / `compute-gap=16..256` / `compute-gap=0` | 3.14: 0 / 110 / 200 / 0; 3.12: 0 / 113 / 200 / 0; the first failing seed (2, 1) replays identical |
+| `timer 50` (a 50 ms `setitimer` inside a loop with no system call), seeds 1-20 at the seed's gap and at `compute-gap=0`; stock seed 1; seed 1 under `verify --runs 20 --vary cpu,load,aslr,sandbox` | both: 40 of 40 fired, the handler at 50,004,015 virtual ns in every run, one deadline stop each; stock: never fires (20 million passes); verify identical over 20 runs |
+| `burn 1000000000` (two threads, 10^9 passes each, no system call), seed 1 | stock: `compute-stall` after 10 s (both); with points: 3.12 `ok`, both threads ran, 1,395,037 switches, 452 s (3.14, `burn 450000000` by hand: `ok`, 627,808 switches, 165 s) |
+| Costs, median of 5 runs, ms: natively / natively under the runner / Patina stock / with points / `compute-gap=0` | 3.14: `loop 3000000` 47 / 54 / 156 / 620 / 619; `mix 10` 143 / 179 / 666 / 971 / 945; W5 `local` 2,581 / 2,595 / 111 / 127 / 125. 3.12 under Patina: 237 / 799 / 797; 704 / 1,312 / 3,632; 128 / 156 / 154 |
+
+By hand, 3.14 unless noted:
+
+- **Quick check numbers** (`compute/09-python`): `cache` 0 of 40 stock, 21 of 40 with
+  points; `timer 10` handler at 10,004,015 ns; `cpu 50000` 1 alternation stock, 32, 93 and 97
+  on seeds 1-3 with points; identical under `verify --runs 3 --vary cpu,aslr`. 3.12 the same
+  shape (`cache` 26 of 40, `cpu 200000` 387 alternations on seed 2).
+- **Event sets.** `LINE` alone misses loops on one line: a 1,000-pass `while i < 1000: i += 1`
+  makes 3 line events, a comprehension or generator expression of 1,000 items 1 to 3; with
+  `JUMP` each pass is an event. Native count over `mix`-like code: 9.8 million lines, 11.0
+  million lines and jumps, for 146 ms of work: 13 to 15 ns per event, so `LINE_EVENTS` = 15.
+- **Hook cost** (natively, the hook forced on over a buffer): a callback that does nothing
+  costs 25 to 40 ns per event; the cell read and write through a `memoryview` another 40;
+  ctypes `c_int64.value` is slower. Per event in all: `loop` 67, `mix` 80 ns (3.14), 79 and
+  99 ns (3.12). A countdown kept in Python, synchronised with the cell every 8 or 32 events,
+  saved 25% or 45% but loses the exact switch place after a system call re-arms the cell:
+  not used. Natively the hook would make `loop` 17 times and `mix` 7 times slower.
+- **Exceptions from hooks.** An exception raised in a `JUMP` callback skips the frame's
+  `except` on 3.12 and 3.14 (19 of 19 positions; 3.13 catches them), in a `BRANCH` callback on
+  all three; in a `LINE` callback, or an `INSTRUCTION` callback enabled after the jump, it is
+  caught. A `setitimer` handler raising inside a one-line loop and a comprehension, under
+  points: `Stop caught` for both on seeds 1-8 (3.14) and seed 2 (3.12); with the jump hook's
+  exception not held: the exception escaped (`failure`, seeds 1 and 2).
+- **The GIL.** The point made through `ctypes.PyDLL` (which keeps the GIL) instead of `CDLL`:
+  `cpu 50000` 1 alternation on seeds 1-3 (23, 95, 98 with `CDLL`), `cache` 0 of 40 (23 of 40).
+- **`compute-gap=0` on 3.12** (`mix 10`): 2.6 to 4.2 s against 1.3 s at the seed's gap: a
+  stretch of 2^22 events is 280,000 lines, past the 20 ms of CPU after which the stall
+  watchdog probes (6 probes, 358,305 steps in one run); at 3.14's speed it stays under.
+- **Free-threaded 3.14.10t**: `cache` 21 of 40 with points (0 stock), seed 2 replays
+  identical; `timer`, `oneline` and `cpu` as with the GIL.
+- **Stock programs unchanged**: W1-W8, U1, W5 with faults, `py-net`, `pyscript`,
+  `compute/races b`, seeds 1-3, this build against `main` (0.9.1): 39 of 39 the same outcome
+  and digest. Programs that import the SDK file (`sdk-py.py fail`, `script`, `journal.py`)
+  read a changed file, so their digests change with any edit of it; with the 0.9.1 file under
+  this build, 9 of 9 the same digest as 0.9.1.
+
+Red/green: the jump hook not holding the exception fails `compute/09-python` (c, `oneline`
+exit 1); the planted `PyDLL` above finds nothing in `cache` and runs `cpu` serially.
+
 ## Costs
 
 | What | Cost |

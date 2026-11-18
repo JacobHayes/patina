@@ -81,10 +81,11 @@ pub struct ComputeImage {
 }
 
 /// `proto::sdk::COMPUTE_*` bits by name.
-const COMPUTE_KIND_NAMES: [(u64, &str); 3] = [
+const COMPUTE_KIND_NAMES: [(u64, &str); 4] = [
     (proto::sdk::COMPUTE_EDGE, "edge"),
     (proto::sdk::COMPUTE_ACCESS, "access"),
     (proto::sdk::COMPUTE_COMPARE, "compare"),
+    (proto::sdk::COMPUTE_LINE, "line"),
 ];
 
 impl ComputeImages {

@@ -28,11 +28,13 @@
 # LLVM pass and its options, which carry no stability promise), rs-MISSING says so and
 # tests/compute/05-rust fails with it; any other build failure fails this script.
 #   go-*              the Go guests (go/build.sh): they need Go, not clang
+#   py/               py/pycompute.py with sdk/python/patina.py, for `python3 -m patina`
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 out=${1:?guest dir}/compute
-mkdir -p "$out"
+mkdir -p "$out/py"
+cp "$here/py/pycompute.py" "$root/sdk/python/patina.py" "$out/py/"
 sh "$here/go/build.sh" "$out"
 
 rf="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc"

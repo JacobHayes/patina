@@ -5,3 +5,4 @@ tests/guests/costs
 crates/patina
 go/patina
 tests/guests/go-static/w4
+sdk/python

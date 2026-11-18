@@ -113,14 +113,15 @@ call fails with an error, and `patina run` lists it under `refused:`), DNS beyon
 model ends the run `unsupported` and names it. [ARCHITECTURE.md](ARCHITECTURE.md#limits)
 lists the limits.
 
-Deeper search: a program rebuilt with coverage flags and Patina's hook file also switches
-threads and moves the clock inside its own computation, so races with no system call in them
-are found. [The guide](docs/GUIDE.md#deeper-search-rebuilt-code) has the details.
+Deeper search: a program rebuilt with coverage flags and Patina's hook file (or a Python
+program run with `python3 -m patina`) also switches threads and moves the clock inside its own
+computation, so races with no system call in them are found. [The guide](docs/GUIDE.md#deeper-search-rebuilt-code) has the details.
 
 ```text
 C, C++  clang -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime, plus sdk/c/patina_compute.c
 Rust    patina-dst with features = ["compute"]; the guide's RUSTFLAGS; cargo build --target x86_64-unknown-linux-gnu (arm64: aarch64-unknown-linux-gnu)
 Go      import _ "github.com/JacobHayes/patina/go/patina/compute"; CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer
+Python  no rebuild (3.12+): sdk/python on PYTHONPATH, then python3 -m patina app.py
 ```
 
 ## Outcomes

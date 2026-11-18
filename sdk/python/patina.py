@@ -22,9 +22,15 @@ message ``label: detail``. A passing check reports only the first time it is eva
 process (a ``Sometimes`` also the first time it holds). A fault point fires only with
 ``patina run --buggify``, on evaluations chosen by the seed and its label alone.
 
+Compute points (Python 3.12 or later): ``python3 -m patina SCRIPT ARGS...`` (or ``-m MODULE``)
+runs the program with a scheduling point and virtual time at every line and every pass of a
+loop, so threads switch between any two lines and CPU-bound code moves the clock. Outside
+Patina it runs the program as ``python3 SCRIPT`` would.
+
 The wire is documented in sdk/c/patina.h of the Patina repository.
 """
 
+import _thread
 import ctypes
 import os
 import struct
@@ -32,7 +38,7 @@ import sys
 
 __all__ = [
     "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "BuggifyDelay", "Knob",
-    "mark", "setup_complete", "is_simulated",
+    "mark", "setup_complete", "is_simulated", "compute",
 ]
 
 _SYSCALL = 0x7061
@@ -59,7 +65,7 @@ def _sys(op, buf):
         _libc = ctypes.CDLL(None, use_errno=True)
         _libc.syscall.restype = ctypes.c_long
         _libc.syscall.argtypes = [ctypes.c_long, ctypes.c_long, ctypes.c_void_p, ctypes.c_size_t]
-    n = len(buf) if buf is not None else 0
+    n = 0 if buf is None or isinstance(buf, int) else len(buf)
     r = _libc.syscall(_SYSCALL, op, buf, n)
     return -ctypes.get_errno() if r == -1 else r
 
@@ -235,3 +241,106 @@ def mark(label):
 def setup_complete():
     """The end of setup: with faults-after-setup, no fault fires before it."""
     mark("setup-complete")
+
+
+# Compute points (ARCHITECTURE.md, "Compute points"): `python3 -m patina SCRIPT ARGS...` runs
+# SCRIPT with them on. Each line the interpreter starts and each jump it takes (every pass of a
+# loop, a one-line loop included) is LINE_EVENTS events: ``sys.monitoring`` calls the hook,
+# which takes them from the cell the runtime maps and, when the cell runs out, makes the call
+# COMPUTE_POINT, where the seed may switch threads. ctypes releases the GIL around that call,
+# so the thread switched to can run Python code.
+_COMPUTE_HELLO, _COMPUTE_POINT = 8, 9
+_COMPUTE_VERSION = 1
+_COMPUTE_LINE = 8
+# Events (virtual ns) per line or jump: about what a line of plain Python takes natively.
+LINE_EVENTS = 15
+_compute_on = None
+
+
+def compute():
+    """Turn compute points on for this process (all its threads, and a fork child) from the
+    next line on, and return whether they are on. Outside Patina: one failed call, then
+    nothing, and False. Needs Python 3.12 or later (``sys.monitoring``)."""
+    global _compute_on
+    if _compute_on is not None:
+        return _compute_on
+    _compute_on = False
+    mon = getattr(sys, "monitoring", None)
+    if mon is None:
+        if is_simulated():
+            raise RuntimeError("patina: compute points need Python 3.12 or later (sys.monitoring)")
+        return False
+    addr = _sys(_COMPUTE_HELLO, _COMPUTE_VERSION | _COMPUTE_LINE << 8)
+    if addr <= 0:
+        return False
+    cell = memoryview((ctypes.c_ubyte * 8).from_address(addr)).cast("B").cast("q")
+    _compute_on = True
+    if cell[0] == (1 << 63) - 1:
+        return True  # --preempt branches: counters switch and charge, the hook would do nothing
+    tool = next((i for i in (4, 3) if mon.get_tool(i) is None), None)
+    if tool is None:
+        raise RuntimeError("patina: compute points need a free sys.monitoring tool id (3 or 4)")
+    call = _libc.syscall
+    E = mon.events
+    # A signal arriving at a point runs its Python handler inside the hook. An exception it
+    # raises in a line's hook reaches the program at that line, as natively. Raised in a
+    # jump's hook, CPython 3.12 and 3.14 would let it skip the frame's handlers, so the hook
+    # keeps it and raises it from the next instruction of that code in that thread.
+    held = {}
+
+    def line(code, n, _c=cell, _n=LINE_EVENTS):
+        v = _c[0] - _n
+        _c[0] = v
+        if v <= 0:
+            call(_SYSCALL, _COMPUTE_POINT, None, 0)
+
+    def jump(code, src, dst, _c=cell, _n=LINE_EVENTS):
+        v = _c[0] - _n
+        _c[0] = v
+        if v <= 0:
+            try:
+                call(_SYSCALL, _COMPUTE_POINT, None, 0)
+            except BaseException as e:
+                held[_thread.get_ident()] = e
+                mon.set_local_events(tool, code, E.INSTRUCTION)
+
+    def instruction(code, offset):
+        e = held.pop(_thread.get_ident(), None)
+        if e is not None:
+            mon.set_local_events(tool, code, 0)
+            raise e
+
+    mon.use_tool_id(tool, "patina")
+    mon.register_callback(tool, E.LINE, line)
+    mon.register_callback(tool, E.JUMP, jump)
+    mon.register_callback(tool, E.INSTRUCTION, instruction)
+    mon.set_events(tool, E.LINE | E.JUMP)
+    return True
+
+
+def _main(argv):
+    import runpy
+
+    if not argv or argv[0] in ("-h", "--help") or argv == ["-m"]:
+        sys.stderr.write("usage: python3 -m patina SCRIPT [ARGS...] | -m MODULE [ARGS...]\n"
+                         "Runs the program with Patina's compute points on (Python 3.12+).\n")
+        sys.exit(2)
+    try:
+        compute()
+    except RuntimeError as e:
+        sys.stderr.write(f"{e}\n")
+        sys.exit(2)
+    if argv[0] == "-m":
+        sys.argv = argv[1:]
+        runpy.run_module(argv[1], run_name="__main__", alter_sys=True)
+    else:
+        sys.argv = argv
+        if not sys.flags.safe_path:
+            sys.path[0] = os.path.dirname(os.path.realpath(argv[0]))
+        runpy.run_path(argv[0], run_name="__main__")
+
+
+if __name__ == "__main__":
+    import patina
+
+    patina._main(sys.argv[1:])

@@ -159,7 +159,8 @@ fn exit_slow(ts: &mut ThreadState) {
 /// in the run's image table (`proto::ctl::ComputeTab`, keyed by the guest path; the first
 /// hello of an address space is a start), and answer the cell's address.
 /// `COMPUTE_HELLO` from the system call instruction at `pc`, in the image whose hook copy
-/// asked.
+/// asked; an interpreter's hello (`COMPUTE_LINE`) notes the program, whatever image made the
+/// call.
 pub fn hello(arg: u64, pc: u64) -> i64 {
     let version = arg & 0xff;
     let kinds = arg >> 8;
@@ -195,7 +196,10 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
     }
     p.kinds |= kinds;
     let mut path = [0u8; 4096];
-    let n = image_at(pc, &mut path);
+    let n = match kinds & proto::sdk::COMPUTE_LINE {
+        0 => image_at(pc, &mut path),
+        _ => None,
+    };
     let image = match n {
         Some(n) => &path[..n],
         None => proc().guest_path(),
