@@ -14,14 +14,17 @@
 o=$RUNS/07-gcc
 mkdir -p "$o"
 C=$G/compute
-native() { # WANT PROG ARGS...: natively, the output matches WANT (lines joined by |)
+native() { # [-s N] WANT PROG ARGS...: natively, exit 0 (or N) and the output matches WANT (lines joined by |)
+    may=0; if [ "$1" = -s ]; then may=$2; shift 2; fi
     want=$1; shift
-    out=$(timeout 20 "$@" 2>&1 | tail -3 | paste -sd'|') || die "a. $*: natively: $out"
+    st=0; timeout 20 "$@" >"$o/native.out" 2>&1 || st=$?
+    out=$(tail -3 "$o/native.out" | paste -sd'|')
+    [ "$st" = 0 ] || [ "$st" = "$may" ] || die "a. $*: natively: exit $st: $out"
     echo "$out" | grep -q "$want" || die "a. $*: natively printed $out"
 }
 native 'balance=0 withdrawn=100 ok$' "$C/races-gcc" b
-# pool's race (unsynchronised counters) can show natively too, as in 03-inert.
-native 'LOST-UPDATE\|ok$' "$C/pool-gcc"
+# pool's race (unsynchronised counters) can show natively too, as in 03-inert: then it exits 1.
+native -s 1 'LOST-UPDATE\|ok$' "$C/pool-gcc"
 for p in cxx cxx-gcc; do native '^ctor ok|total=6000 caught=60 ok|dtor ok$' "$C/$p"; done
 for p in shlib shlib-stock; do native 'compdl=29992,29992 ok$' "$C/$p"; done
 for f in "$C"/libcomp.so "$C"/libcompdl.so "$C"/shlib "$C"/cxx "$C"/cxx-gcc; do

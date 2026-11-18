@@ -12,13 +12,16 @@ o=$RUNS/03-inert
 mkdir -p "$o"
 C=$G/compute
 N=100000
-native() { # WANT PROG ARGS...: natively, the last line of output matches WANT
+native() { # [-s N] WANT PROG ARGS...: natively, exit 0 (or N) and the last line of output matches WANT
+    may=0; if [ "$1" = -s ]; then may=$2; shift 2; fi
     want=$1; shift
-    out=$(timeout 20 "$@" 2>&1 | tail -1) || die "a. $*: natively: $out"
+    st=0; timeout 20 "$@" >"$o/native.out" 2>&1 || st=$?
+    out=$(tail -1 "$o/native.out")
+    [ "$st" = 0 ] || [ "$st" = "$may" ] || die "a. $*: natively: exit $st: $out"
     echo "$out" | grep -q "$want" || die "a. $*: natively printed $out"
 }
 native '^balance=0 withdrawn=100 ok$' "$C/races" b
-native 'LOST-UPDATE\|ok$' "$C/pool"
+native -s 1 'LOST-UPDATE\|ok$' "$C/pool"  # its race, when it shows natively, exits 1
 native '^done$' "$C/spinpoints" count
 native 'counter=4000$' "$C/spinwait" own-spin
 native '^total=230000$' "$C/cellpoke" scribble
