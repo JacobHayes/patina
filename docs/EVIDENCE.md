@@ -819,6 +819,111 @@ fsync-error-permille=0..3 fs-delay-permille=0..20` to `fs-short-permille=0..20`.
 in the program sees the bug; the 43 runs exit 0 with a short `out.txt`, `ok` in the plain
 sweep.
 
+## Oracles
+
+Do `--check`, `--known`, `--ok-exit` and the `check:` line replace what the two motivating
+adopters built by hand? Run once by hand, 2026-11-18, this host, `patina` from `ab11a704`,
+every sweep `-j 6` under the shared evidence lock, `--keep fail` except the reference legs
+(`--keep all`). The rshell hunt is local: ids and counts only.
+
+**The rshell hunt.** Its driver (`corpus.py`, 2,510 lines with the path-swap legs) is kept
+as the reference; its oracle functions (`judge`, `same`, the SILENT and PROTECT rules) are
+imported unchanged by an 81-line checker (`CHECKER LEG REF STAGE RUNDIR`: the reference's run
+is `REF/seed-1/$PATINA_CASE_NAME`; the first flag is `ORACLE: [LEG] detail`; exit 77 with the
+reason when the leg's comparison oracle cannot judge), and a 41-line one for the path-swap
+legs. A 96-line script writes the hunt's known table as a `--known` file. Same settings on
+both sides; `--ok-exit 3,4,5,6` (the harness's own HANG, LEAK, stuck and setup statuses) so
+the checker, not the exit status, names those runs.
+
+| Leg | Old driver | Patina sweeps | Same findings, same labels? |
+|---|---|---|---|
+| path swaps: 1,000 generated cases × seeds 1-8 (8,000 runs), case lines `HARNESS 'CASE-JSON'`, one shared fixture as `--work` | 130 s wall, 436 child CPU-s; 30 runs in 27 cases flagged, all labelled 006 | 381 s; 30 findings in 10 groups, all labelled 006 by `--known`, `check: judged 8000 of 8000` | yes: the same 30 (case, seed, flag) and labels; one case's run has the same digest under both |
+| fs errors (`fs-error-permille=40`, after setup), seed 1, against the rshell faults-off run, 3,448 corpus cases | one leg of a 4-leg 108 s campaign; SILENT in 5 cases (1 labelled 001), 10 coverage flags | 163 s; SILENT in 5 cases (3 labelled 001 by both), the same 10 coverage findings; 155 not judged (live state 101, stderr redirected 54) | 001 found as a check finding; the SILENT cases are disjoint (below); on the same runs 2 of 5 SILENT hits labelled 001 by the file and by nothing in the table |
+| rshell against bash: bash under Patina (`--keep all`), then rshell's faults-off sweep checked against it | its bash leg cannot run a corpus case (the case's directory does not exist in its bubblewrap root); its coverage cell reports 0 judged | bash 601 s (two scripts loop until the default 600 s `--timeout`; the other runs total 90 CPU-s), rshell 168 s; 128 differences in 93 groups, 1,018 not judged (rshell stderr 941, bash stderr 74, no result 3) | the old leg judged nothing; not triaged here |
+| one planted case (a write into a read-only root), `!planted` in the file | (its own planted gate, 736 lines) | matched on every leg; `required_unseen` empty | - |
+
+- Why the fs-error cases differ: a corpus case is its own work tree. A `--cases` line cannot
+  carry `--work`, so the sweep mounts every staged tree and each line copies its own into
+  `/work` (`sh -c 'cp -a ... && exec HARNESS ...'`) with `faults-after-setup=1`. The extra
+  processes before the harness move the fault draws: on the same seed the injected error lands
+  on another call (shown on one case: `write` against `openat`). Both sides find 5 cases, none
+  in common. The path-swap leg, whose cases share one tree, has no staging and matches exactly.
+- Wall time: the checker is a Python process per run that imports the hunt's module (about
+  0.1 s; a corpus run is about 25 ms of `wall_ms`), where the old driver judged in a pool of
+  long-lived workers. That is 3 times the old wall on the path-swap legs and about 6 times per
+  corpus leg. The reference legs kept 1.2 and 1.5 GiB; `--keep fail` kept 632 MiB for 8,000
+  `ok` path-swap runs (about 75 KiB of `result.json` and `run.json` each: 315 SDK sites).
+- Lines, by the driver's functions (the 767 lines of plumbing measured before, plus
+  staging): 495 are not needed (the
+  leg runner, pool, resume, pruning, result files, known glue); 249 (reading a run directory
+  into the oracles' inputs: `finish_leg`, `parse`, the operation-log PROTECT) are imported by
+  the checker; 190 that stage a case's tree from its YAML are still needed, since a case line
+  cannot carry a tree. The 199 lines of known table and glue become a 36-line file. Of the
+  269 lines of eligibility accounting, the per-run "why not judged" is now exit 77 and the
+  `check:` line; the per-oracle floor (an oracle that judged none of a population fails the
+  campaign) has no equivalent: a sweep is vacuous only when the check judged no run at all.
+  The 698 lines of oracles stay as they were.
+
+**The known table** (23 entries), as `ID PATTERN` lines over these signatures:
+
+| Expressible | Entries | Ids |
+|---|---|---|
+| exactly, with signature globs | 10 | 004, 005, 008, 009, 017, 018, 019, 020, 021, T8 |
+| only with a `[CASE]` pattern | 1 | 006 (by the item's name; the corpus's case lines are names, the path-swap lines are the case JSON, so its line globs the JSON instead) |
+| coarser: the oracle part fits, a script or fired-fault condition is dropped | 11 | 001, 002, 003, 007, 010, 011, 013, 014, 015, 016, check-class |
+| not at all | 1 | T7 (needs a frame of the panic's stack; the signature keeps the panic line) |
+
+The glob over the signature is too coarse for half the table. Five entries (001, 002, 013,
+014, 015) share one oracle and differ only by the script and the fault that fired: as globs
+they are one pattern, the first wins, and the others can never match; on this run's err leg
+that labelled two hits 001 that the table's own matcher leaves unlabelled. A known entry
+needs to see the case's input (here a file the case line names) and the fault classes of the
+run (`faults` per run is in `result.json` already), or the checker must put both into its
+detail, which moves the table's logic into the checker. Separately, the old matcher read the
+total injected count as "an fs error fired", so path swaps matched 010 (1,789 flags on a
+corpus path-swap leg); the hunt has since fixed that, and `--known` cannot make that mistake.
+
+**fjall F1, from outside.** The harness run with its embedder workaround for F1
+(`FJ_WIPE_PARTIAL=1`, which wipes a database the crash left half-created, so the in-program
+check never sees it) and `--check NATIVE-CHECK`: for each `inc-K/post-crash`, copy it and run
+the harness's own binary natively on the copy, outside the simulation; its first `INVARIANT`
+line is the finding (17 lines of `sh`).
+
+| Sweep | In-program oracle (no workaround) | External native check (workaround on) |
+|---|---|---|
+| `--seeds 1..300 --crash machine:3` | 11 seeds, 2 groups (`open-after-crash`, two causes); 4.4 s | the same 11 seeds, the same 2 groups as `violation check`; 281 judged, 19 not judged (no crash); 60 s |
+| `--seeds 1..3 --branch --crash machine` | 23 of 2,909 runs, all 2,906 points; 27 s | the same 23 runs within the first 340 points; the 45 s `--budget` stopped it there |
+
+The post-crash trees fail the same way when opened natively: the external check finds what
+the workaround hides, on the same seeds and points. It is 17 times slower per run: the native
+recovery fsyncs on the host's disk.
+
+**Defects for follow-up** (none fixed here):
+
+1. A case line cannot carry per-case settings (`--work`, `--mount`, `--env`): staging a
+   case's tree in the guest moves the schedule, so a corpus with its own tree per case cannot
+   reproduce its old driver's runs.
+2. A checker is a process per run; a checker in a scripting language with a real oracle
+   library costs more than the run. A long-lived checker (or one run per batch) would remove it.
+3. A checker that degrades silently passes every run: with one environment variable unset the
+   path-swap checker could not run `patina log ops` and judged 8,000 runs `pass` (`check:
+   judged 8000 of 8000`). Only a `!ID` planted case catches that; nothing tells a sweep it has
+   none. The checker is not told which `patina` started it.
+4. One finding per run: the first flag names the run; the hunt kept every flag (old items had
+   up to 7). The rest are only in `check.out`.
+5. A reference sweep of another program needs `--ok-exit` with every status
+   (`$(seq -s, 1 255)`): there is no range or `any`; and one looping reference holds the whole
+   leg to the 600 s default `--timeout`.
+6. The report is long: 93 groups of differences printed 3 lines each (about 600 lines);
+   `known: ID matched no run` is one line per unmatched entry (20 of 23 every sweep).
+7. Numbers become `N` in the checker's detail, leg names included (`err7` reads `errN`), and in
+   one case the appended `(inc-K)` was cut by the first-line length.
+8. `report.json`: a group over many cases has `case` set to its first case (`cases` has all),
+   and groups do not list their runs, so mapping a run to its known ID means recomputing it.
+9. A case line that is one long argument gets the case directory `K-rw_` for all 1,000 cases.
+10. `log events` lacks mark labels (to find `setup-complete`) and read paths: the hunt's
+    ESCAPE oracle stays off (T7), and a swap-aware PROTECT had to use `log ops`.
+
 ## Second hosts
 
 One `patina` binary and one set of guest binaries, built once on the development VM from
