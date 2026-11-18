@@ -74,3 +74,17 @@ timeout 900 "$PATINA" verify --seed 4 --runs 6 --vary repeat --out "$out/w8" --m
     >"$out/w8.txt" 2>&1 || grep -q '^identical: ' "$out/w8.txt" || die "W8 seed 4 faults on: $(tail -3 "$out/w8.txt")"
 echo "W8 seed 4 faults on: 6 runs identical ($(digest "$out/w8/run-0"))"
 rm -rf "$out/w8"
+# Argument registers a call does not read for its other arguments' values (mremap's new address
+# without MREMAP_FIXED, a futex wake's timeout, fcntl's argument for F_GETFD, ...) hold what the
+# program's code left there: on arm64 static glibc's memcpy leaves a different x4 on CPUs with
+# and without SVE. The boundary log keeps only what each call reads, so JUNK there changes
+# nothing; nor is it checked as a descriptor or a pointer (the guest checks every answer).
+for j in 1111111111111111 2222222222222222; do
+    rm -rf "$out/dead-$j"
+    timeout 120 "$PATINA" run --seed 1 --out "$out/dead-$j" --mount "$G":/guest:copy -- /guest/deadargs "$j" >/dev/null 2>&1 || true
+    [ "$(class "$out/dead-$j")" = ok ] || die "deadargs $j: $(class "$out/dead-$j"): $(head -3 "$out/dead-$j/inc-0/stderr")"
+done
+[ "$(digest "$out/dead-1111111111111111")" = "$(digest "$out/dead-2222222222222222")" ] ||
+    die "deadargs: unread argument registers reach the log: $("$PATINA" log diff "$out/dead-1111111111111111/inc-0/boundary.log" "$out/dead-2222222222222222/inc-0/boundary.log" | sed -n 2,3p)"
+echo "deadargs: junk in the argument registers calls do not read leaves the digest unchanged"
+rm -rf "$out"/dead-*

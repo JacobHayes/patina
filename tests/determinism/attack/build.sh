@@ -8,7 +8,7 @@ cc=${CC:-gcc}
 for g in dents pipebuf epollorder churn addr sigstorm uninit scmrights timeprobe initstack; do
     $cc -O1 -w -pthread -o "$out/$g" "$here/$g/$g.c"
 done
-for g in envprobe sockprobe pipeprobe procread memprobe coreprobe fdexhaust fillfs stdoutprobe stdoutlong; do
+for g in envprobe sockprobe pipeprobe procread memprobe coreprobe fdexhaust fillfs stdoutprobe stdoutlong deadargs; do
     $cc -O1 -w -pthread -o "$out/$g" "$here/probe/$g.c"
 done
 for g in "$here"/contain/*.c; do

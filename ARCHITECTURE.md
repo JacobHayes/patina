@@ -79,7 +79,9 @@ generated from the kernel's tables by `scripts/gen-syscalls.py`.
 | `Stop` | the run ends `unsupported` |
 
 A number without a row is `Stop`. Open-ended interfaces (`ioctl`, `fcntl`, `prctl`, socket
-options, paths under `/proc`, `/sys`, `/dev`) are refused unless listed. Path arguments are
+options, paths under `/proc`, `/sys`, `/dev`) are refused unless listed; the commands of
+`ioctl`, `fcntl`, `prctl` and `arch_prctl` are listed with the arguments each reads
+(`proto::table::cmds`), so none is let through without saying what it reads. Path arguments are
 checked against that policy before any handler runs (`resolve.rs`, `path.rs`). Host values
 are replaced: inode numbers, file times, `/proc` contents, the CPU count (`--cpus`).
 
@@ -120,7 +122,18 @@ one fixed-size record under the turn: the call, its arguments, its result and a 
 it wrote (`patina-proto/src/rec.rs`, `patina-rt/src/log.rs`). A record holds the arguments as
 the program passed them (`Call::guest_args`), not a buffer of the runtime's that a handler
 passed on instead (a resolved path, a shortened count), so no runtime address enters the log
-and a change to the runtime's own layout does not move a digest. The run's digest is the hash
+and a change to the runtime's own layout does not move a digest. It holds only the arguments
+the call reads, given the values of the others (`proto::table::nargs::live`): the count from
+the kernel's trace events, less those a flag, a command or a NULL pointer leaves unread
+(`mremap`'s new address without `MREMAP_FIXED` or `MREMAP_DONTUNMAP`, an anonymous `mmap`'s
+descriptor, `open`'s mode without `O_CREAT` or `O_TMPFILE`, `mknod`'s device for anything but
+a device node, `futex`'s by operation, `clone`'s tid words and TLS by flag, `epoll_ctl`'s event
+for `EPOLL_CTL_DEL`, a signal set's size or an address length with no set or address, an
+absolute `clock_nanosleep`'s remainder, the high half of `preadv`'s offset, `getcpu`'s unused
+third, and for `fcntl`, `ioctl`, `prctl` and `arch_prctl` what the command's entry in
+`proto::table::cmds` names). An unread register holds whatever the program's code left there,
+which can differ between hosts where the program's behaviour does not (static glibc's
+`memcpy` leaves another value in `x4` on an arm64 CPU with SVE than on one without). The run's digest is the hash
 chain over the records. Replay runs the program again and compares record by record
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
 while changing the host and compares (`verify.rs`).
@@ -390,9 +403,11 @@ Enforced:
   and every other pointer the row lists (`Row::refs`: iovec arrays and segments, a `msghdr`
   and its name, iovecs and control buffer, `mmsghdr` arrays, socket addresses through their
   length pointers, `select` sets and `pselect6`'s mask pair, `futex` words and timeouts,
-  `execve`'s vectors and strings, and the request-dependent arguments of `fcntl`, `ioctl`,
-  `prctl` and `arch_prctl`), with the extent the kernel may touch (the length argument for a
-  transfer, clamped to `MAX_RW_COUNT`). One that reaches the region answers `EFAULT`, the
+  `execve`'s vectors and strings, and the arguments of `fcntl`, `ioctl`, `prctl` and
+  `arch_prctl` their command reads), with the extent the kernel may touch (the length argument
+  for a transfer, clamped to `MAX_RW_COUNT`). Only arguments the call reads are checked, as
+  pointers and as descriptors (`nargs::live`, above): a register the call ignores may hold
+  anything, an address in the region or a hidden descriptor number included. One that reaches the region answers `EFAULT`, the
   kernel's answer for a hole; the record is the call's as the program made it. A length rule
   without a pre-call extent cannot be written (`Len`), and `ins`/`outs` take only rules the
   log can hash, so a buffer is never logged without being checked. A buffer that starts in

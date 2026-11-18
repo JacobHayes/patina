@@ -30,8 +30,10 @@ use proto::layout::FD_HIDDEN_MIN;
 use proto::table::{Class, Group, Row};
 
 pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
+    // Descriptors the call reads (an anonymous `mmap` ignores its descriptor argument).
+    let fds = row.fds & proto::table::nargs::live(call.nr(), &call.guest_args());
     for i in 0..6 {
-        if row.fds & (1 << i) != 0 && call.arg(i) as i32 >= FD_HIDDEN_MIN {
+        if fds & (1 << i) != 0 && call.arg(i) as i32 >= FD_HIDDEN_MIN {
             return Action::Return(-e::EBADF);
         }
     }

@@ -8,6 +8,7 @@
 //! non-empty reason (checked at compile time, because the table is a `static`).
 //! A row naming a call the architecture lacks is left out.
 
+pub mod cmds;
 pub mod nargs;
 
 pub mod fd;
@@ -99,8 +100,10 @@ pub enum Group {
 
 /// Length rule of guest memory named by an argument. Every rule has an extent before the call
 /// (what the kernel may touch, checked against the runtime's region before the call is
-/// forwarded: rt `guest::check_call`) and, for `ins` and `outs`, an extent after it (what is
-/// hashed into the boundary record).
+/// forwarded: rt `guest::names_runtime`) and, for `ins` and `outs`, an extent after it (what is
+/// hashed into the boundary record). A rule applies only when the call reads its argument for
+/// the values of the others (`nargs::live`): a pointer the call ignores is neither checked nor
+/// hashed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Len {
     /// The return value, when positive; before the call, at most the value of argument `max`.
@@ -134,14 +137,9 @@ pub enum Len {
     SigPair,
     /// `struct xattr_args` (`*xattrat`), its size in argument `size`, and the value it points at.
     XattrArgs { size: u8 },
-    /// `fcntl`'s argument for the lock commands (`struct flock`).
-    Fcntl,
-    /// `ioctl`'s argument for the requests the runtime passes.
-    Ioctl,
-    /// `prctl`'s pointer argument for the options the runtime passes or answers.
-    Prctl,
-    /// `arch_prctl`'s argument for `ARCH_GET_FS` and `ARCH_GET_GS`.
-    ArchPrctl,
+    /// The arguments after a multiplexed call's command (`fcntl`, `ioctl`, `prctl`,
+    /// `arch_prctl`), from the first (`Out::arg`) on, as the command's entry in `cmds` says.
+    Command,
     /// `futex`'s words and timeout for the operations that read them.
     Futex,
     /// A NULL-terminated array of string pointers and the strings (`execve`'s `argv`, `envp`).
@@ -174,7 +172,8 @@ pub struct Row {
     /// optional arguments, request-dependent ones): checked before the call like `ins` and
     /// `outs`, not hashed.
     pub refs: &'static [Out],
-    /// Bit `i` set: argument `i` is a descriptor; hidden numbers give `EBADF`.
+    /// Bit `i` set: argument `i` is a descriptor; hidden numbers give `EBADF` when the call
+    /// reads it (`nargs::live`: `mmap` ignores the descriptor of an anonymous mapping).
     pub fds: u8,
     pub group: Group,
     /// false only for the generated `Stop` rows of numbers nobody has written yet.
@@ -275,10 +274,7 @@ const fn hashable(bufs: &[Out]) -> bool {
                 | Len::FdSet { .. }
                 | Len::SigPair
                 | Len::XattrArgs { .. }
-                | Len::Fcntl
-                | Len::Ioctl
-                | Len::Prctl
-                | Len::ArchPrctl
+                | Len::Command
                 | Len::Futex
                 | Len::StrVec
         ) {

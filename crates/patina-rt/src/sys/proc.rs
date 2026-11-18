@@ -469,25 +469,32 @@ pub fn handle(call: &mut dyn Call) -> Action {
             .map(|_| 0)
             .unwrap_or_else(|e| e),
         nr::SETRLIMIT => rlimit(call.arg(0)).map(|_| 0).unwrap_or_else(|e| e),
-        nr::ARCH_PRCTL => match call.arg(0) {
-            0x1001..=0x1004 => raw(call),
-            _ => {
+        // The codes listed with their arguments (`proto::table::cmds::ARCH_PRCTL`): the FS and
+        // GS bases.
+        nr::ARCH_PRCTL => match proto::table::cmds::arch_prctl(call.arg(0)) {
+            Some(_) => raw(call),
+            None => {
                 set_class(call, Class::Virt);
                 -e::EINVAL
             }
         },
+        // The options let through or answered are those listed with their arguments
+        // (`proto::table::cmds::PRCTL`); any other is refused (EINVAL, as an unknown option).
+        nr::PRCTL if proto::table::cmds::prctl(call.arg(0)).is_none() => {
+            let o = call.arg(0);
+            refuse_request(call, b"prctl", o, false, -e::EINVAL)
+        }
         nr::PRCTL => match call.arg(0) {
             // PR_SET_VMA names mappings: the runtime's region holds none the program has (as
             // for a hole, ENOMEM), and its own must keep their names.
-            0x5356_4d41
-                if call.arg(1) == 0
+            proto::table::cmds::PR_SET_VMA
+                if call.arg(1) == proto::table::cmds::PR_SET_VMA_ANON_NAME
                     && call.arg(3) != 0
                     && call.arg(2) < RT_REGION_END
                     && call.arg(2).saturating_add(call.arg(3)) > RT_BASE =>
             {
                 -e::ENOMEM
             }
-            15 | 16 | 3 | 0x5356_4d41 => raw(call),
             // instruction channels: the timestamp-counter mode is virtual (the real one stays SIGSEGV).
             25 => {
                 set_class(call, Class::Virt);
@@ -531,8 +538,8 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 set_class(call, Class::Virt);
                 -e::EINVAL
             }
-            // Any other option: refused (EINVAL, as for an unknown option).
-            o => refuse_request(call, b"prctl", o, false, -e::EINVAL),
+            // The others listed: PR_SET_NAME, PR_GET_NAME, PR_GET_DUMPABLE, PR_SET_VMA.
+            _ => raw(call),
         },
         _ => return stop_here(call),
     };

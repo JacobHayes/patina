@@ -63,15 +63,19 @@ pub fn in_region(p: u64, n: u64) -> bool {
 /// the program's behalf? Every buffer the boundary record hashes (`Row::ins`, `Row::outs`)
 /// and every other pointer it lists (`Row::refs`) is checked, with the extent the kernel may
 /// touch before the call: the one rule for every call the table passes, rewrites or answers.
-/// The caller answers `EFAULT`, as the kernel does for a pointer into a hole: the region
-/// reads as address space nothing is mapped in. Structures the runtime cannot read here
-/// (a pointer into a real hole) are left to the kernel, which answers for them itself.
+/// A pointer the call does not read for its other arguments' values (`nargs::live`) is not
+/// checked: it is whatever the program left in the register. The caller answers `EFAULT`, as
+/// the kernel does for a pointer into a hole: the region reads as address space nothing is
+/// mapped in. Structures the runtime cannot read here (a pointer into a real hole) are left
+/// to the kernel, which answers for them itself.
 pub fn names_runtime(row: &proto::table::Row, a: &[u64; 6]) -> bool {
+    let live = proto::table::nargs::live(row.nr as u64, a);
     row.ins
         .iter()
         .chain(row.outs)
         .chain(row.refs)
-        .any(|b| reaches(b.len, a[b.arg as usize], a))
+        .filter(|b| live & (1 << b.arg) != 0)
+        .any(|b| reaches(row.nr as u64, b, a))
 }
 
 /// After a park, before the call is attempted again: does the call being served still name
@@ -85,9 +89,10 @@ pub fn still_clear() -> bool {
     !names_runtime(row, &ts.call_args)
 }
 
-fn reaches(len: proto::table::Len, p: u64, a: &[u64; 6]) -> bool {
+fn reaches(nr: u64, b: &proto::table::Out, a: &[u64; 6]) -> bool {
     use proto::table::Len::*;
-    match len {
+    let p = a[b.arg as usize];
+    match b.len {
         Ret { max } => in_region(p, a[max as usize]),
         Arg(i) => in_region(p, a[i as usize]),
         Fixed(n) => in_region(p, n as u64),
@@ -116,34 +121,15 @@ fn reaches(len: proto::table::Len, p: u64, a: &[u64; 6]) -> bool {
                 || (a[size as usize] >= 16
                     && get::<[u64; 2]>(p).is_ok_and(|[v, n]| in_region(v, n & 0xffff_ffff)))
         }
-        Fcntl => match a[1] {
-            // F_GETLK, F_SETLK, F_SETLKW and their OFD forms: a `struct flock`.
-            5..=7 | 36..=38 => in_region(p, 32),
-            // F_GET_RW_HINT, F_SET_RW_HINT, F_GET_FILE_RW_HINT, F_SET_FILE_RW_HINT: a u64.
-            1035..=1038 => in_region(p, 8),
-            _ => false,
-        },
-        Ioctl => match a[1] & 0xffff_ffff {
-            // FIONBIO, FIONREAD, FS_IOC_GETFLAGS, FIGETBSZ: an int.
-            0x5421 | 0x541b | 0x8008_6601 | 2 => in_region(p, 4),
-            0x4020_940d => in_region(p, 32), // FICLONERANGE
-            0x801c_581f => in_region(p, 28), // FS_IOC_FSGETXATTR
-            // FIDEDUPERANGE: a 24-byte header, then `dest_count` 32-byte records.
-            0xc018_9436 => {
-                in_region(p, 24)
-                    || get::<u16>(p + 16).is_ok_and(|n| in_region(p, 24 + n as u64 * 32))
-            }
-            _ => false, // FICLONE takes a descriptor; FIOCLEX, FIONCLEX nothing
-        },
-        Prctl => match a[0] {
-            15 | 16 => in_region(p, 16), // PR_SET_NAME, PR_GET_NAME
-            2 | 25 => in_region(p, 4),   // PR_GET_PDEATHSIG, PR_GET_TSC
-            0x5356_4d41 => a[1] == 0 && cstr_reaches(a[4]), // PR_SET_VMA_ANON_NAME's name
-            _ => false,
-        },
-        ArchPrctl => matches!(a[0], 0x1003 | 0x1004) && in_region(p, 8), // ARCH_GET_FS/GS
-        // The command without FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME (FUTEX_CMD_MASK).
-        Futex => match a[1] & !0x180 {
+        Command => proto::table::cmds::args_of(nr, a).is_some_and(|(first, uses)| {
+            let live = proto::table::nargs::live(nr, a);
+            uses.iter()
+                .enumerate()
+                .filter(|(i, _)| live & (1 << (first + i)) != 0)
+                .any(|(i, u)| command_reaches(*u, a[first + i]))
+        }),
+        // The command (FUTEX_CMD_MASK, as the handler takes it, `sys::sched`).
+        Futex => match a[1] & 0x7f {
             // FUTEX_WAIT, FUTEX_WAIT_BITSET: the word and the timeout.
             0 | 9 => in_region(p, 4) || in_region(a[3], 16),
             4 => in_region(p, 4),    // FUTEX_CMP_REQUEUE: the word
@@ -162,6 +148,20 @@ fn reaches(len: proto::table::Len, p: u64, a: &[u64; 6]) -> bool {
                 }
             }
             false
+        }
+    }
+}
+
+/// One argument of a multiplexed call's command (`proto::table::cmds`).
+fn command_reaches(u: proto::table::cmds::Use, p: u64) -> bool {
+    use proto::table::cmds::Use::*;
+    match u {
+        Value => false,
+        Ptr(n) => in_region(p, n as u64),
+        CStr => cstr_reaches(p),
+        // A 24-byte header, then `dest_count` 32-byte records.
+        DedupeRange => {
+            in_region(p, 24) || get::<u16>(p + 16).is_ok_and(|n| in_region(p, 24 + n as u64 * 32))
         }
     }
 }

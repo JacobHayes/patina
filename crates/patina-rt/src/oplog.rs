@@ -475,6 +475,9 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     if flags & 0x03 != 0x01 && flags & 0x03 != 0x03 {
         return; // not MAP_SHARED / MAP_SHARED_VALIDATE
     }
+    if flags & 0x20 != 0 {
+        return; // MAP_ANONYMOUS: the descriptor argument is not read (it may be any number)
+    }
     let Some(st) = fstat_raw(fd) else { return };
     if !path::is_work(st.dev()) || st.mode() & 0o170000 != 0o100000 {
         return;

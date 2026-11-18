@@ -716,9 +716,13 @@ ends `compute-stall`, and the stall's message says why the probe was off.
 
 Seeds and digests are per architecture and per kind of host. A seed found on x86_64 is a
 different run on arm64. On one host a seed repeats exactly. Across hosts of one architecture, a
-static program that reads no host file gives the same digest; a dynamic one reads the host's
-loader, libc and `/etc/ld.so.cache`, so its digest follows the image
-([EVIDENCE](EVIDENCE.md#second-hosts)).
+static program that reads no host file gives the same digest, apart from what it reads of the
+host: the kernel release (`uname`), addresses that follow the CPU's state size (XSAVE on
+x86_64), signal-frame records that follow the CPU's features, and code a library chooses by CPU
+feature when that code makes different system calls. Registers a call does not read are not
+recorded, so a library routine that only leaves different values in them changes nothing. A
+dynamic program reads the host's loader, libc and `/etc/ld.so.cache`, so its digest follows the
+image ([EVIDENCE](EVIDENCE.md#second-hosts)).
 
 What differs on arm64:
 

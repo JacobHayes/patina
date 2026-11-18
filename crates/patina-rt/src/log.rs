@@ -150,10 +150,7 @@ pub fn hash_bufs(bufs: &[Out], args: &[u64; 6], ret: i64) -> u64 {
             | Len::FdSet { .. }
             | Len::SigPair
             | Len::XattrArgs { .. }
-            | Len::Fcntl
-            | Len::Ioctl
-            | Len::Prctl
-            | Len::ArchPrctl
+            | Len::Command
             | Len::Futex
             | Len::StrVec => {}
         }
@@ -172,7 +169,9 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     }
     #[allow(unreachable_code)]
     let nr = call.nr();
-    let args = &call.guest_args();
+    // Only the registers the call reads (`proto::table::nargs`): the others are zero here, in
+    // the record and for the hashes (a pointer the call ignores names nothing).
+    let args = &proto::table::nargs::used_args(nr, &call.guest_args());
     let ts = crate::state::thread();
     let c = ctl();
     // Inputs are read only when the kernel did not report the pointer bad.
@@ -190,8 +189,7 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
         kind: proto::RecKind::Trap as u8,
         class: ts.eff_class,
         nr: nr as u32,
-        // Only the registers the call reads (`proto::table::nargs`).
-        args: proto::table::nargs::used_args(nr, args),
+        args: *args,
         ret,
         out_hash: hash_bufs(row.outs, args, ret),
         in_hash,

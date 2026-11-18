@@ -10,6 +10,8 @@
  * through the pipe or the socket after the calls that send (none: nothing of the runtime's).
  * After a refused receive the program's own bytes may still be queued where the kernel, faulting
  * part-way, would have dropped them (a datagram): those are drained, not compared.
+ * The `dead-` probes put the address in an argument the call does not read for the values of
+ * the others (it answers as for any value there).
  * `story` lines are where the region is not a plain hole: `munmap` there answers EINVAL (as
  * above the top of user space), and a buffer that starts in program memory and runs into the
  * region is refused whole (EFAULT, nothing moved) where the kernel would move the first part;
@@ -31,7 +33,8 @@
 #include <unistd.h>
 
 extern char **environ;
-static int pip[2], sv[2], filefd, dfd, ep;
+static int pip[2], sv[2], filefd, dfd, ep, lst;
+static char *dm;
 static char *argv0;
 static uint64_t learned = 0xcbf29ce484222325ull;
 static const char data[16] = "0123456789abcdef";
@@ -125,6 +128,31 @@ static long p_mprotect(char *a) { return rs(syscall(SYS_mprotect, a, 4096, PROT_
 static long p_madvise(char *a) { return rs(syscall(SYS_madvise, a, 4096, MADV_DONTNEED)); }
 static long p_msync(char *a) { return rs(syscall(SYS_msync, a, 4096, MS_ASYNC)); }
 static long p_mremap(char *a) { return rs(syscall(SYS_mremap, a, 4096, 8192, MREMAP_MAYMOVE, 0)); }
+/* dead: the call does not read the register holding `a` */
+static long p_dead_mremap(char *a) {
+    long r = rs(syscall(SYS_mremap, dm, 4096, 4096, 0, a));
+    return r == (long)dm ? 0 : r;
+}
+static long p_dead_epoll_ctl_del(char *a) {
+    struct epoll_event ev = {.events = EPOLLIN};
+    epoll_ctl(ep, EPOLL_CTL_ADD, pip[0], &ev);
+    return rs(syscall(SYS_epoll_ctl, ep, EPOLL_CTL_DEL, pip[0], a));
+}
+static long p_dead_recvfrom(char *a) {
+    char b[16];
+    fill_sock();
+    return rs(syscall(SYS_recvfrom, sv[1], b, 16, MSG_DONTWAIT, 0, a));
+}
+static long p_dead_accept4(char *a) { return rs(syscall(SYS_accept4, lst, 0, a, 0)); }
+static long p_dead_futex_wake(char *a) {
+    static uint32_t w;
+    return rs(syscall(SYS_futex, &w, FUTEX_WAKE_PRIVATE, 1, a, a, 0));
+}
+static long p_dead_fcntl_getfd(char *a) { return rs(syscall(SYS_fcntl, filefd, F_GETFD, a)); }
+static long p_dead_clock_nanosleep(char *a) {
+    struct timespec z = {0, 0};
+    return rs(syscall(SYS_clock_nanosleep, CLOCK_MONOTONIC, TIMER_ABSTIME, &z, a));
+}
 
 static const struct {
     const char *name;
@@ -142,6 +170,10 @@ static const struct {
     {"fcntl-getlk", p_fcntl_getlk}, {"fcntl-rw-hint", p_fcntl_rw_hint}, {"getsockopt", p_getsockopt},
     {"mprotect", p_mprotect},
     {"madvise", p_madvise}, {"msync", p_msync}, {"mremap", p_mremap},
+    {"dead-mremap", p_dead_mremap}, {"dead-epoll_ctl-del", p_dead_epoll_ctl_del},
+    {"dead-recvfrom", p_dead_recvfrom}, {"dead-accept4", p_dead_accept4},
+    {"dead-futex-wake", p_dead_futex_wake}, {"dead-fcntl-getfd", p_dead_fcntl_getfd},
+    {"dead-clock_nanosleep", p_dead_clock_nanosleep},
 };
 
 int main(int argc, char **argv) {
@@ -154,6 +186,10 @@ int main(int argc, char **argv) {
     struct epoll_event ev = {.events = EPOLLOUT};
     if (filefd < 0 || dfd < 0 || ep < 0 || epoll_ctl(ep, EPOLL_CTL_ADD, pip[1], &ev)) return 4;
     unlink(path);
+    dm = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    lst = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    sa_family_t an = AF_UNIX; /* autobind */
+    if (dm == MAP_FAILED || lst < 0 || bind(lst, (struct sockaddr *)&an, sizeof an) || listen(lst, 1)) return 6;
     /* A hole of the program's own making. */
     char *hole = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (hole == MAP_FAILED || munmap(hole, 4096)) return 5;

@@ -53,18 +53,6 @@ const F_SETPIPE_SZ: u64 = 1031;
 const PIPE_SIZE: u64 = 65_536;
 use proto::abi::open::O_DIRECT;
 
-/// Requests whose answer is a function of the file on a sandbox or host-stable filesystem.
-const FILE_IOCTLS: [u64; 6] = [
-    0x4004_9409, // FICLONE
-    0x4020_940d, // FICLONERANGE
-    0xc018_9436, // FIDEDUPERANGE
-    0x8008_6601, // FS_IOC_GETFLAGS
-    FS_IOC_FSGETXATTR,
-    2, // FIGETBSZ
-];
-
-const FS_IOC_FSGETXATTR: u64 = 0x801c_581f;
-
 fn ioctl(call: &mut dyn Call) -> Action {
     let req = call.arg(1) & 0xffff_ffff;
     if super::procfs::kind_of(call.arg(0) as i32 as i64).is_some()
@@ -80,11 +68,10 @@ fn ioctl(call: &mut dyn Call) -> Action {
             let i = super::inet::dgram_idx(fd).unwrap();
             Action::Return(super::udp::fionread(fd, i, call.arg(2)))
         }
-        FIONREAD | FIONBIO | FIONCLEX | FIOCLEX => {
-            set_class(call, Class::Pass);
-            pass(call)
-        }
-        r if FILE_IOCTLS.contains(&r) => {
+        // The requests listed with their arguments (`proto::table::cmds::IOCTL`): FIONREAD,
+        // FIONBIO, FIONCLEX, FIOCLEX, and those whose answer is a function of the file on a
+        // sandbox or host-stable filesystem.
+        r if proto::table::cmds::ioctl(r).is_some() => {
             set_class(call, Class::Pass);
             pass(call)
         }
@@ -148,9 +135,15 @@ fn dup_like(call: &mut dyn Call) -> i64 {
 /// one non-blocking attempt (a lock held elsewhere is blocking I/O's park); O_DIRECT is dropped.
 fn fcntl(call: &mut dyn Call) -> i64 {
     let [fd, cmd, arg, ..] = args(call);
+    // The commands let through are those listed with their arguments
+    // (`proto::table::cmds::FCNTL`); any other answers EINVAL, as an unknown command does.
+    if proto::table::cmds::fcntl(cmd).is_none() {
+        return refuse_request(call, b"fcntl", cmd, false, -e::EINVAL);
+    }
     match cmd {
         F_DUPFD | F_DUPFD_CLOEXEC => {
-            if arg as i64 >= FD_HIDDEN_MIN as i64 {
+            // The kernel takes the lowest number as an `int`.
+            if arg as i32 >= FD_HIDDEN_MIN {
                 return -e::EINVAL;
             }
             let r = raw(call);
@@ -178,15 +171,13 @@ fn fcntl(call: &mut dyn Call) -> i64 {
             }
             r
         }
-        // F_GETFD F_SETFD F_GETFL F_SETFL F_GETLK F_SETLK F_OFD_GETLK F_OFD_SETLK, pipe size,
-        // seals, write-life hints, F_DUPFD_QUERY.
-        1 | 2 | 3 | 4 | 5 | 36 | 1032 | 1033 | 1034 | 1035 | 1036 | 1037 | 1038 | 1027 => {
+        // The others: descriptor and status flags, F_GETLK, F_OFD_GETLK, pipe size, seals,
+        // write-life hints, F_DUPFD_QUERY.
+        _ => {
             let r = raw(call);
             host_check(call, r);
             r
         }
-        // Any other command: refused (EINVAL, as for an unknown command).
-        _ => refuse_request(call, b"fcntl", cmd, false, -e::EINVAL),
     }
 }
 

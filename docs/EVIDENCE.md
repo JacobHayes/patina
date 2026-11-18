@@ -786,14 +786,68 @@ and cause:
 | `fstat` of `/etc/ld.so.cache` (VM against runner); 24.04's loader calls `faccessat` (`ld.so.preload`) where 26.04's calls `uname` first | every dynamic guest, `python3`, `/bin/sh`; `tokio-mt-static` in its `seq` child | the host's loader and libc | allowed |
 | `uname` release | `fs-tour-static` (the only difference between the 24.04 and 26.04 runners) | kernel version | allowed |
 | `stat` of the host's `/usr/bin/sort` (Go's `os/exec` path search) | `go-static` | host programs | allowed |
-| argument registers a call does not read: `mremap` without `MREMAP_FIXED` and `prctl(PR_GET_NAME)` called through `syscall()` carry a leftover `x4`, which static glibc's `memcpy` sets on the VM (its generic routine) and not on the runners (the SVE routine's short path) | `fs-tour-static`, `tokio-mt-static` (`futex` wake), VM against runner | CPU identity (SVE or not chooses the library routine) | allowed; it widens what differs across arm64 hosts |
+| argument registers a call does not read: `mremap` without `MREMAP_FIXED` and `prctl(PR_GET_NAME)` called through `syscall()` carry a leftover `x4`, which static glibc's `memcpy` sets on the VM (its generic routine) and not on the runners (the SVE routine's short path) | `fs-tour-static`, `tokio-mt-static` (`futex` wake), VM against runner | CPU identity (SVE or not chooses the library routine) | fixed: the record keeps only the registers a call reads ("Unread argument registers", below) |
 
 No new kind of difference within a host. What can be promised on arm64 is what x86_64
 promises: a seed gives the same run on one host, repeated, across CPUs, ASLR and sandboxes;
-across hosts a static guest that reads no host file and passes no unused argument registers
-gives the same run on CPUs with the same features. The `/proc/self/mountinfo` difference of
+across hosts a static guest that reads no host file gives the same run on CPUs with the same
+features (and, since the change below, the leftover registers of a different library routine
+no longer count). The `/proc/self/mountinfo` difference of
 x86_64 did not appear: `go-static`'s first difference on every pair comes after its start-up
 read of that file.
+
+### Unread argument registers
+
+A boundary record kept every argument register a call has, so one the call reads only under
+some flag, command or non-NULL pointer reached the digest with whatever the program's code left
+there. The record (and its hashes, the containment check and the hidden-descriptor check) now
+keeps only the registers the call reads for the values of the others
+(`proto::table::nargs::live`, `proto::table::cmds`). 2026-11-18, base `a9da5847`, head the
+commit that made the change.
+
+The same bytes on several hosts: one throwaway workflow built `patina` at base and at head and
+six static guests once per architecture on a GitHub runner (`hello-static`, `fs-tour-static`,
+`sockets-static` and the regression guest `deadargs` with `gcc -static`; `tokio-mt` with
+`crt-static`; `go-static`), ran each at seeds 1-3, faults off and `all`, on eight hosted jobs,
+and the arm64 bundle ran again on the development VM. Records compared one by one between hosts
+(cells: 3 seeds x 2 fault settings per guest; a host pair, both builds):
+
+| Hosts | Guest | Base: records that differ | Head: records that differ |
+|---|---|---|---|
+| Apple M4 VM (no SVE) / `ubuntu-24.04-arm` Neoverse-N2 (SVE) | `fs-tour-static` | `mremap` x4 (new address, no `MREMAP_FIXED`), `prctl(PR_GET_NAME)` x4, `uname`, the `write` that prints it | `uname`, the `write` that prints it |
+| same | `tokio-mt-static` | `futex` wake/wait timeout, `uaddr2`, `val3` (4 records), then the host's `seq` child (its loader and libc) | the host's `seq` child only |
+| same | `go-static` | `stat` of the host's `/usr/bin/sort`, then its schedule | the same |
+| same | `hello-static`, `sockets-static`, `deadargs` | none | none |
+| `ubuntu-24.04-arm` / `ubuntu-26.04-arm` (both Neoverse-N2) | all | `uname` (`fs-tour-static`), the host's loader (`tokio-mt-static`, `go-static`) | the same |
+| `ubuntu-24.04` AMD EPYC 7763 / AMD EPYC 9V74 | `tokio-mt-static` | `prctl(PR_SET_NAME)` 3rd argument x12 (one per thread), then the host's `seq` | the host's `seq` only |
+| `ubuntu-24.04` AMD EPYC 7763 / Intel Xeon 6975P-C | `tokio-mt-static` | thread stack and signal-frame addresses (XSAVE size), `prctl(PR_SET_NAME)` 3rd argument | the addresses only |
+| x86 hosts pairwise (five jobs: AMD 7763 on 24.04 and 26.04, AMD 9V74, Intel 6975P-C on 24.04 and 26.04) | `fs-tour-static`, `go-static` | `uname` and the `write` that prints it; `go-static`: buffer addresses, then its schedule | the same |
+
+With the change, no difference between two hosts of one architecture names an argument a call
+did not read. What still differs: the kernel release (`uname`), the host's files (loader, libc,
+programs a guest runs, `/usr/bin/sort`'s `stat`), addresses that follow the CPU's XSAVE size on
+x86_64, signal-frame records that follow the CPU's features, and code paths a library chooses
+by CPU feature when they make different system calls (not merely leave different registers).
+
+Identity on one host: the 90 cells of the builder's ledger (`hello`, `fs-tour`, `sockets`,
+signals, fork/exec, threads, instructions, UDP, tokio, Go, CPython, a shell pipeline; seeds 1-3,
+faults off and `all`) at base and head on the development host, compared record by record:
+every cell's digest changes, and every differing record differs only in arguments head records
+as zero (and, for `epoll_ctl(EPOLL_CTL_DEL)`, its input hash): `mmap`'s descriptor of an
+anonymous mapping (-1) in all 90; `futex` timeout, `uaddr2`, `val3` of wakes and waits; `ioctl`
+and `fcntl` arguments of commands that read none (`FIOCLEX`, `F_GETFD`, `F_GETFL`); `prctl`'s
+arguments after `PR_SET_NAME`'s; `clone`'s parent tid word without `CLONE_PARENT_SETTID`;
+`epoll_ctl`'s event for `EPOLL_CTL_DEL`. The same on the arm64 development VM (60 cells with a
+result): also `openat`'s mode without `O_CREAT`, `mremap`'s new address, `clone`'s TLS and
+child tid, `ppoll`'s and `epoll_pwait`'s signal-set size without a set. No cell differs for
+another reason.
+
+Four valid calls the change makes answer as natively, which before answered an error because
+of an unread register (`ptrprobe`'s `dead-` probes, `deadargs`): `epoll_ctl(EPOLL_CTL_DEL)`
+with an event pointer into the runtime's region, `recvfrom` and `accept4` with no address and an
+address-length pointer there (`EFAULT` before), and an anonymous `mmap` whose descriptor
+argument is a hidden number (`EBADF` before). `mremap` without `MREMAP_FIXED` with a runtime
+address in its fifth register was already answered correctly; it is checked too.
 
 ## Acceptance: fjall
 
