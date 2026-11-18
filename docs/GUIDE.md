@@ -671,12 +671,12 @@ patina sweep: 20 runs, 0 findings in 0 groups, 20 ok   (0.1s, 8 jobs)
 outcomes: ok 20
 $ patina sweep --seeds 1..20 --mount tests/guests/compute/py:/guest --mount sdk/python:/sdk \
     --env PYTHONPATH=/sdk -- python3 -m patina /guest/pycompute.py cache 200
-patina sweep: 20 runs, 15 findings in 1 group, 5 ok   (0.2s, 8 jobs)
-outcomes: failure 15, ok 5
+patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.2s, 8 jobs)
+outcomes: failure 11, ok 9
 compute points: /usr/bin/python3 (lines)
 
 failure exit: exit 1
-  15 of 20 runs   first: seed 1   replayed: identical
+  11 of 20 runs   first: seed 2   replayed: identical
 ```
 
 CPU-bound Python now moves the clock: a timer or a `threading.Timer` cuts a loop with no
