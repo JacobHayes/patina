@@ -695,10 +695,12 @@ compare files with `cmp`.
 ### Judging again
 
 A checker changes more often than the program: a table of expected differences gains a line,
-an oracle a rule. The runs need not be made again to be judged again, only kept:
+an oracle a rule. The runs need not be made again to be judged again, only kept. Here
+`corpus.txt` has four cases, case 4 differs from the reference by design, and `chk/diff` is
+the checker of `tests/oracles/06-triage.sh`, which skips the cases `chk/expected.txt` names:
 
 ```sh
-patina sweep --seeds 1..10 --cases corpus.txt --keep checked --check 'chk/diff patina-out/ref' -- ./prog {}
+patina sweep --seeds 1..2 --cases corpus.txt --keep checked --check 'chk/diff patina-out/ref' -- ./prog {}
 echo 4 >> chk/expected.txt
 patina recheck patina-out/sweep
 ```
@@ -708,6 +710,7 @@ recheck: judged 8 runs again in 0.0s
 patina report: 8 runs, 0 findings in 0 groups, 8 ok
 outcomes: ok 8
 check: judged 6 of 8 runs: 6 passed, 0 failed; 2 not judged (expected 2)
+check: every judged run passed and no --known !ID entry shows that this check can fail
 ```
 
 `patina recheck DIR...` runs the checker again on each run's kept logs and rewrites only its
