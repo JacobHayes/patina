@@ -24,6 +24,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: never
+  # Outside target/, as in ci.yml.
+  PATINA_CHECK_DIR: ${{ github.workspace }}-check
 
 jobs:
   # The release tier, on a runner of each architecture: the gate before publish.
@@ -44,7 +46,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: release-check-runs-${{ matrix.runner }}
-          path: target/patina-check/runs
+          path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7
 
   build:

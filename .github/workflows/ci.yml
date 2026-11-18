@@ -21,6 +21,10 @@ env:
   CARGO_TERM_COLOR: never
   # The runner has four cores.
   CHECK_SLOTS: "4"
+  # The check's output and guest cache (./check), outside target/: Swatinem/rust-cache saves and
+  # restores all of target/, and a stale copy of the read-only guests restored with it makes the
+  # guests' own cache fail to restore over it.
+  PATINA_CHECK_DIR: ${{ github.workspace }}-check
 
 jobs:
   check:
@@ -50,12 +54,12 @@ jobs:
       - id: guests
         uses: actions/cache/restore@v6
         with:
-          path: target/patina-check/guests
+          path: ${{ env.PATINA_CHECK_DIR }}/guests
           key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
           restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
       - name: Build the guests
         run: |
-          [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+          [ ! -d "$PATINA_CHECK_DIR/guests" ] || find "$PATINA_CHECK_DIR/guests" -mindepth 2 -maxdepth 2 -exec touch -h {} +
           # The Rust guests build offline.
           cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
@@ -63,7 +67,7 @@ jobs:
       - if: always() && steps.guests.outputs.cache-matched-key != steps.guests.outputs.cache-primary-key
         uses: actions/cache/save@v6
         with:
-          path: target/patina-check/guests
+          path: ${{ env.PATINA_CHECK_DIR }}/guests
           key: ${{ steps.guests.outputs.cache-primary-key }}
       - run: mise run check
       # A failing script keeps its run directory; passing ones are deleted.
@@ -71,7 +75,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: check-runs
-          path: target/patina-check/runs
+          path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7
 
   # The steps of `check`, on arm64.
@@ -97,12 +101,12 @@ jobs:
       - id: guests
         uses: actions/cache/restore@v6
         with:
-          path: target/patina-check/guests
+          path: ${{ env.PATINA_CHECK_DIR }}/guests
           key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
           restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
       - name: Build the guests
         run: |
-          [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+          [ ! -d "$PATINA_CHECK_DIR/guests" ] || find "$PATINA_CHECK_DIR/guests" -mindepth 2 -maxdepth 2 -exec touch -h {} +
           # The Rust guests build offline.
           cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
@@ -110,14 +114,14 @@ jobs:
       - if: always() && steps.guests.outputs.cache-matched-key != steps.guests.outputs.cache-primary-key
         uses: actions/cache/save@v6
         with:
-          path: target/patina-check/guests
+          path: ${{ env.PATINA_CHECK_DIR }}/guests
           key: ${{ steps.guests.outputs.cache-primary-key }}
       - run: mise run check
       - if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: check-arm64-runs
-          path: target/patina-check/runs
+          path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7
 
   counters:
@@ -139,12 +143,12 @@ jobs:
           save-if: false
       - uses: actions/cache/restore@v6
         with:
-          path: target/patina-check/guests
+          path: ${{ env.PATINA_CHECK_DIR }}/guests
           key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
           restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
       - name: Fetch the Rust guests' dependencies (their builds are offline)
         run: |
-          [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+          [ ! -d "$PATINA_CHECK_DIR/guests" ] || find "$PATINA_CHECK_DIR/guests" -mindepth 2 -maxdepth 2 -exec touch -h {} +
           cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
       # The scripts give a copy of patina CAP_PERFMON with `sudo setcap` and print SKIP when the
@@ -154,5 +158,5 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: counters-runs
-          path: target/patina-check/runs
+          path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7

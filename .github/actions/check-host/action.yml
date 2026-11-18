@@ -16,12 +16,12 @@ runs:
         save-if: false
     - uses: actions/cache/restore@v6
       with:
-        path: target/patina-check/guests
+        path: ${{ env.PATINA_CHECK_DIR }}/guests
         key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
         restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
     - name: Fetch the Rust guests' dependencies (their builds are offline)
       shell: bash
       run: |
-        [ ! -d target/patina-check/guests ] || find target/patina-check/guests -mindepth 2 -maxdepth 2 -exec touch -h {} +
+        [ ! -d "$PATINA_CHECK_DIR/guests" ] || find "$PATINA_CHECK_DIR/guests" -mindepth 2 -maxdepth 2 -exec touch -h {} +
         cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
         cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
