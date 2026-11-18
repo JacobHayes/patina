@@ -375,26 +375,26 @@ fn exit_slow(ts: &mut ThreadState, rip: u64, tail: u64) {
     p.armed = 0;
     p.target = 0;
     bump(&c.pmu.segments, 1);
-    match mode(cfg, n) {
+    let m = mode(cfg, n);
+    // Every segment programs its period, hops included: a short period left from a segment
+    // that ended before its overflow would raise an overflow every few branches while hopping
+    // (the runtime's own branches count too), and the kernel throttles (stops) an event that
+    // interrupts too often.
+    let want = match m {
+        Mode::Mid => n - cfg.pmu_margin,
+        Mode::Hop | Mode::Long => PERIOD,
+    };
+    if p.period != want || m == Mode::Mid {
+        set_period(p, want);
+    }
+    match m {
         Mode::Hop => {
             p.mode = M_HOPPING;
             p.g_soft = 0;
             walk(ts, rip, None);
         }
         Mode::Mid | Mode::Long => {
-            let want = if mode(cfg, n) == Mode::Mid {
-                n - cfg.pmu_margin
-            } else {
-                PERIOD
-            };
-            if p.period != want || mode(cfg, n) == Mode::Mid {
-                set_period(p, want);
-            }
-            p.mode = if mode(cfg, n) == Mode::Mid {
-                M_MID
-            } else {
-                M_LONG
-            };
+            p.mode = if m == Mode::Mid { M_MID } else { M_LONG };
             bump(&c.pmu.reads, 1);
             let page = p.page;
             let (v, _) = read(page);
