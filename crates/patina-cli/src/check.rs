@@ -299,22 +299,16 @@ fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u6
     let deadline = started + std::time::Duration::from_secs(timeout);
     // Readable once the checker has exited; it stays a zombie (its pid and group not reused)
     // until the wait below, so the group can be ended safely first.
-    let mut timed_out = true;
-    loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
-        if crate::sys::readable(pidfd.as_raw_fd(), ms) {
-            timed_out = false;
-            break;
-        }
-    }
+    let waited = crate::sys::wait_fd(pidfd.as_raw_fd(), deadline);
+    let timed_out = waited == crate::sys::Waited::Timeout;
     unsafe { libc::kill(-pid, libc::SIGKILL) };
     let status = child
         .wait()
         .map_err(|e| format!("wait for the checker: {e}"))?;
+    if waited == crate::sys::Waited::Terminated {
+        // Stopped: the checker's group is ended; `result.json` stays `pending`.
+        crate::sys::exit_terminated();
+    }
     let mut raw = vec![];
     out.rewind().map_err(|e| e.to_string())?;
     (&out)

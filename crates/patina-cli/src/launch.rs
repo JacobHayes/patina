@@ -949,15 +949,19 @@ pub fn run_incarnation(
     };
     let mut verdict_text = String::new();
     let mut outcome_r = outcome_r;
-    let timed_out = !wait_readable(&outcome_r, start.deadline);
+    let waited = wait_fd(outcome_r.as_raw_fd(), start.deadline);
+    let timed_out = waited != Waited::Ready;
     if timed_out {
-        // The supervisor dies with bwrap (its parent-death signal), and every guest with it.
-        let _ = child.kill();
+        end_sandbox(&mut child);
     } else {
         let _ = outcome_r.read_to_string(&mut verdict_text);
     }
     let t_verdict = mono_ns();
     let status = child.wait().map_err(|e| format!("wait bwrap: {e}"))?;
+    if waited == Waited::Terminated {
+        // Stopped (a sweep interrupted): the sandbox is gone; no result is written.
+        exit_terminated();
+    }
     if timed_out {
         verdict_text = Verdict::new(
             "timeout",
@@ -1175,26 +1179,30 @@ pub(crate) fn mono_ns() -> u64 {
 
 /// Wait until `f` is readable (the supervisor's verdict, or its end) or `deadline` passes.
 /// False when the deadline passed.
-fn wait_readable(f: &File, deadline: std::time::Instant) -> bool {
-    loop {
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return false;
+/// End a sandbox so that its processes are gone when bwrap is reaped: kill its PID 1 (the
+/// supervisor, bwrap's child), not bwrap. The kernel ends every process of a PID namespace whose
+/// first process exits, and that process's exit completes only once they are all gone; bwrap,
+/// its parent, reaps it and exits. Killing bwrap instead leaves the supervisor to its
+/// parent-death signal, and the guests dying after `wait` returned.
+fn end_sandbox(child: &mut std::process::Child) {
+    let pid = child.id();
+    for _ in 0..2500 {
+        if let Ok(Some(_)) = child.try_wait() {
+            return;
         }
-        let mut p = libc::pollfd {
-            fd: f.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ms = left.as_millis().clamp(1, i32::MAX as u128) as i32;
-        let r = unsafe { libc::poll(&mut p, 1, ms) };
-        if r > 0 {
-            return true;
-        }
-        if r < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-            return true;
+        match fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")) {
+            Ok(k) if !k.trim().is_empty() => {
+                for p in k.split_whitespace().filter_map(|p| p.parse::<i32>().ok()) {
+                    unsafe { libc::kill(p, libc::SIGKILL) };
+                }
+                return;
+            }
+            // bwrap has not started its child yet: look again.
+            Ok(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            Err(_) => break,
         }
     }
+    let _ = child.kill();
 }
 
 /// Test hook for replay: `PATINA_TEST_REPLAY_PERTURB=1` changes the seed every draw is keyed
