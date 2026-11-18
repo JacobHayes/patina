@@ -68,7 +68,7 @@ jobs:
           # The Rust guests build offline.
           cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
-          mise exec -- sh tests/guests.sh
+          mise exec -- bash tests/guests.sh
       - if: always() && steps.guests.outputs.cache-matched-key != steps.guests.outputs.cache-primary-key
         uses: actions/cache/save@v6
         with:
@@ -115,7 +115,7 @@ jobs:
           # The Rust guests build offline.
           cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
           cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
-          mise exec -- sh tests/guests.sh
+          mise exec -- bash tests/guests.sh
       - if: always() && steps.guests.outputs.cache-matched-key != steps.guests.outputs.cache-primary-key
         uses: actions/cache/save@v6
         with:

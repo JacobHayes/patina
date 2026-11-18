@@ -26,7 +26,7 @@ print("%-10s native wall ms %-16s patina wall ms %-16s traps %-20s switches %-18
     name, mm(nat), mm([o["wall_ms"] for o in ok]), mm([o["sched"]["traps"] for o in ok]),
     mm([o["sched"]["switches"] for o in ok]), len(ok), "" if len(ok) == 5 else "(not ok: %s)" % [o["outcome"] for o in os_ if o["outcome"] != "ok"]))
 PY
-    for k in 1 2 3 4 5; do rm -rf "$RUNS/cost-$name-$k"; done
+    for k in 1 2 3 4 5; do rm -rf "${RUNS:?}/cost-$name-$k"; done
 }
 
 measure go go-static -- /guest/go-static all

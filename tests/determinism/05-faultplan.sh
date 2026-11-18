@@ -1,10 +1,8 @@
-#!/bin/sh
 # 7. Fault-plan independence: for W1 (machine crash), W3 (fs errors, path swaps), W8
 # (connection resets and short chunks) and U1 (datagram drops), the boundary log with faults on equals the log with faults off up to the
 # first injected fault or crash point (the fault draws do not disturb any other stream). Also:
 # fault classes that never fire leave the digest unchanged.
 #@ tier=quick budget=20
-set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/faultplan
 mkdir -p "$out"
@@ -17,7 +15,7 @@ check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at whic
     fopts="$*"
     first=$seed last=$((seed + 7))
     while :; do
-        rm -rf "$out/$w-on"
+        rm -rf "${out:?}/$w-on"
         # shellcheck disable=SC2086
         timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-on" --mount "$GDIR":/guest:copy $fopts -- $CMD >"$out/$w-on.txt" 2>&1 || true
         "$PATINA" log dump "$out/$w-on/inc-0/boundary.log" >"$out/$w-on.dump"
@@ -26,10 +24,12 @@ check() { # WORKLOAD SEED FAULT-OPTS...: from SEED, the first of 8 seeds at whic
         [ "$seed" -lt "$last" ] || die "$w: no fault fired at seeds $first..$last"
         seed=$((seed + 1))
     done
-    rm -rf "$out/$w-off"
+    rm -rf "${out:?}/$w-off"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out/$w-off" --mount "$GDIR":/guest:copy -- $CMD >"$out/$w-off.txt" 2>&1 || true
-    d=$("$PATINA" log diff "$out/$w-off/inc-0/boundary.log" "$out/$w-on/inc-0/boundary.log" | sed -n 's/^first difference at record \([0-9]*\).*/\1/p')
-    [ -n "$d" ] || die "$w: logs identical although a fault fired"
+    # log diff exits 1 when the logs differ, as they must here.
+    st=0; "$PATINA" log diff "$out/$w-off/inc-0/boundary.log" "$out/$w-on/inc-0/boundary.log" >"$out/$w.diff" || st=$?
+    [ "$st" = 1 ] || die "$w: log diff exit $st (0: logs identical although a fault fired): $(tail -2 "$out/$w.diff")"
+    d=$(sed -n 's/^first difference at record \([0-9]*\).*/\1/p' "$out/$w.diff")
     [ "$d" -ge "$ff" ] || die "$w seed $seed: logs differ at record $d, before the first fault at $ff"
     echo "$w seed $seed: first fault at record $ff, first difference at record $d"
     rm -f "$out/$w-on.dump"
@@ -42,9 +42,10 @@ check U1 1 --fault net-drop-permille=100
 
 # Classes enabled but never firing: identical digest to no faults at all.
 wl W1
-rm -rf "$out/none" "$out/idle"
+rm -rf "${out:?}/none" "${out:?}/idle"
 "$PATINA" run --seed 4 --out "$out/none" --mount "$GDIR":/guest:copy -- $CMD >/dev/null 2>&1
 "$PATINA" run --seed 4 --out "$out/idle" --mount "$GDIR":/guest:copy --fault fs-error-permille=0 --fault fsync-error-at=999999 \
     --fault fs-short-permille=0 --fault net-reset-permille=1000 --fault net-drop-permille=1000 --fault path-swap-at=999999 --crash machine-at:999999999 -- $CMD >/dev/null 2>&1
-[ "$(digest "$out/none")" = "$(digest "$out/idle")" ] || die "idle fault classes changed the digest"
+lhs=$(digest "$out/none"); rhs=$(digest "$out/idle")
+[ "$lhs" = "$rhs" ] || die "idle fault classes changed the digest"
 echo "idle fault classes: digest unchanged $(digest "$out/none")"

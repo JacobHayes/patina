@@ -1,10 +1,10 @@
-#!/bin/sh
+#!/bin/bash
 # mkcap.sh PATINA: print the path of a copy of PATINA that has CAP_PERFMON (counter preemption needs
 # it in the initial user namespace). Copies are keyed by content under
 # $PATINA_CHECK_DIR/cap/<sha256>/patina, so parallel checks of different trees do not clash; a
 # new binary costs one `sudo -n setcap cap_perfmon+ep` on its copy, recorded in
 # $PATINA_CHECK_DIR/cap/sudo-log.txt. Fails (exit 1, reason on stderr) when sudo cannot do it.
-set -eu
+set -euo pipefail; shopt -s inherit_errexit
 src=$1
 d=${PATINA_CHECK_DIR:?}/cap
 key=$(sha256sum "$src" | cut -c1-16)

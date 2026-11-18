@@ -4,7 +4,6 @@
 # the fault or fault point the example is about fired in at least one of those runs. stats-c's
 # stock build is ok on every seed (its race needs compute points).
 #@ tier=quick,release budget=20 budget-release=120 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 E=$PATINA_GUESTS/examples
 N=20

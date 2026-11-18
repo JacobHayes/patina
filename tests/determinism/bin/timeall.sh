@@ -1,9 +1,9 @@
-#!/bin/sh
+#!/bin/bash
 # tests/determinism/bin/timeall.sh [WORKLOADS] [SEED]: the `time` variant for many workloads at once. Each
 # workload's `patina verify --vary time` (2 runs, PATINA_TIME_GAP_S apart) is started when the
 # previous one's first run has finished, so at most two sandboxes run at a time while the
 # gaps overlap. Prints one line per workload. Output under $RUNS/timeall.
-set -u
+set -euo pipefail; shopt -s inherit_errexit
 here=$(cd "$(dirname "$0")/.." && pwd)
 . "$here/lib/workloads.inc"
 : "${PATINA:?}" "${RUNS:?}"

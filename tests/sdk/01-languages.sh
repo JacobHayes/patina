@@ -5,5 +5,4 @@
 #    in the table with `evaluated: 0`, and an `unreachable` never reached is not reported as
 #    unmet; the four site tables and fault-point decisions are equal.
 #@ tier=quick budget=30
-set -eu
 exec python3 -I "$(dirname "$0")/lib/languages.py"

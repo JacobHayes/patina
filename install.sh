@@ -75,7 +75,7 @@ done
 
 archive="patina-$target.tar.gz"
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "${work:?}"' EXIT
 curl -fsSL -o "$work/$archive" "$base/$archive" || fail "could not download $base/$archive"
 curl -fsSL -o "$work/SHA256SUMS" "$base/SHA256SUMS" || fail "could not download $base/SHA256SUMS"
 grep " $archive\$" "$work/SHA256SUMS" >"$work/expected" \

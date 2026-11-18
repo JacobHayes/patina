@@ -1,4 +1,3 @@
-#!/bin/sh
 # 10. Pause points. The spin table (glibc pthread_spin_lock, a C test-and-set lock with the
 # spin hint (x86 `pause`, arm64 `yield`), a Rust spin_loop lock (x86 `pause`, arm64 `isb`); two
 # threads, the holder makes a system call inside the critical section) ends ok with the right
@@ -16,7 +15,7 @@ cfg_on=$("$PATINA_CFG" pause-points=true spin-probes=false stall-ms=1000)
 cfg_off=$("$PATINA_CFG" pause-points=false spin-probes=false stall-ms=1000)
 one() { # NAME SEED on|off PROG ARGS...
     n=$1 s=$2 p=$3; shift 3
-    rm -rf "$o/$n-$s-$p"
+    rm -rf "${o:?}/$n-$s-$p"
     if [ "$p" = on ]; then c=$cfg_on; else c=$cfg_off; fi
     timeout 20 "$PATINA" run --seed "$s" --config "$c" --out "$o/$n-$s-$p" \
         --mount "$PATINA_GUESTS":/guest:copy -- "$@" >/dev/null 2>&1 || true
@@ -36,7 +35,7 @@ for d in nohint-1-on ${nohint:-}; do
     echo "${d%-1-on} (no hint), pause points on: $r"
 done
 # Determinism with pause points: 5 runs under varied CPU and address layout, one digest.
-rm -rf "$o/verify"
+rm -rf "${o:?}/verify"
 timeout 60 "$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --config "$cfg_on" --out "$o/verify" \
     --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinwait own-spin >/dev/null 2>&1 || true
 nd=$(for i in 0 1 2 3 4; do field "$o/verify/run-$i/result.json" digest; done | sort -u | wc -l)

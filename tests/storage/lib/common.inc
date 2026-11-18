@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced). Environment from ./check:
 # PATINA, PATINA_RT, RUNS, PATINA_WORKLOADS. The storage reproductions workloads have their own guest directories.
-set -eu
 : "${PATINA:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${PATINA_WORKLOADS:?}
@@ -45,5 +44,7 @@ native_fjall() {
     bin=$1; tree=$2; copy=$3
     mkdir -p "$copy"
     cp -a "$tree" "$copy/tree"
-    FJ_ROOT=$copy/tree/fjtest timeout 120 "$W/fjall-harness/$bin" 2>&1 >/dev/null | grep -v '^PROGRESS' || true
+    # Its exit status is not the verdict (it fails on the finding the callers look for): its stderr is.
+    FJ_ROOT=$copy/tree/fjtest timeout 120 "$W/fjall-harness/$bin" >/dev/null 2>"$copy/stderr" || :
+    grep -v '^PROGRESS' "$copy/stderr" || [ $? = 1 ]
 }

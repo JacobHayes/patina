@@ -10,7 +10,7 @@ o=$RUNS/07-containment
 mkdir -p "$o"
 
 # (a) normal end
-rm -rf "$o/a"
+rm -rf "${o:?}/a"
 timeout 300 "$PATINA" run --seed 1 --out "$o/a" --mount "$PATINA_GUESTS":/guest:copy -- /guest/daemons 50 linger 200000 >/dev/null 2>"$o/a.err" &
 launcher=$!
 python3 -I "$HERE/sandbox.py" "$o/a" procs:52 120 >"$o/a.ns" 2>"$o/a.alive" || { kill "$launcher"; die "(a) sandbox not seen"; }
@@ -24,11 +24,12 @@ grep -q 'daemons started: 50' "$o/a/inc-0/stdout" || die "(a) the guest did not 
 [ "$(field "$o/a/result.json" guest.exit)" = 0 ] || die "(a) exit status"
 set -- --started-before "$seen"; while read -r ns; do set -- "$@" --ns "$ns"; done <"$o/a.ns"
 no_leftovers "$o/a" "$@"
-for ns in $(cat "$o/a.ns"); do ! findmnt | grep -qF "$ns" || die "(a) $ns still mounted"; done
+mounts=$(findmnt)
+for ns in $(cat "$o/a.ns"); do case $mounts in *"$ns"*) die "(a) $ns still mounted" ;; esac; done
 echo "(a) run ended ok when the main guest exited; no process, namespace holder or mount left"
 
 # (b) launcher killed with SIGKILL mid-run
-rm -rf "$o/b"
+rm -rf "${o:?}/b"
 "$PATINA" run --seed 1 --out "$o/b" --mount "$PATINA_GUESTS":/guest:copy -- /guest/daemons 50 linger 200000000 >/dev/null 2>"$o/b.err" &
 launcher=$!
 python3 -I "$HERE/sandbox.py" "$o/b" procs:52 120 >"$o/b.ns" 2>"$o/b.alive" || { kill -KILL "$launcher"; die "(b) sandbox not seen"; }
@@ -45,5 +46,6 @@ while ! python3 -I "$HERE/../leftovers.py" "$o/b" "$@" >"$o/b.left"; do
     sleep 0.1
 done
 no_leftovers "$o/b" "$@"
-for ns in $(cat "$o/b.ns"); do ! findmnt | grep -qF "$ns" || die "(b) $ns still mounted"; done
+mounts=$(findmnt)
+for ns in $(cat "$o/b.ns"); do case $mounts in *"$ns"*) die "(b) $ns still mounted" ;; esac; done
 echo "(b) launcher SIGKILLed: no process, namespace holder or mount left after $((i * 100)) ms"

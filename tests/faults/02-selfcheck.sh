@@ -18,8 +18,8 @@ for seed in 1 2; do
         if [ $g = randops ]; then
             # keep the evidence small: the summary and the check result stay
             cp "$o/inc-0/stdout" "$o.stdout"
-            rm -rf "$o"
+            rm -rf "${o:?}"
         fi
     done
 done
-grep -h "ok (" "$RUNS"/02/*.check | wc -l | xargs echo "oplog check ok for runs:"
+awk '/ok \(/ {n++} END {print "oplog check ok for runs:", n + 0}' "$RUNS"/02/*.check

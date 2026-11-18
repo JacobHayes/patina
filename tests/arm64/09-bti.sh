@@ -15,7 +15,8 @@ for g in bti-dyn bti-static; do
         grep -qx 'spin 45' "$RUNS/$g-$k/inc-0/stdout" || die "$g $k: $(cat "$RUNS/$g-$k/inc-0/stdout")"
         [ "$(field "$RUNS/$g-$k/result.json" sched.pause_points)" -ge 10 ] || die "$g $k: the isb was not a pause point"
     done
-    [ "$(field "$RUNS/$g-a/result.json" digest)" = "$(field "$RUNS/$g-b/result.json" digest)" ] || die "$g: digests differ between repeats"
+    lhs=$(field "$RUNS/$g-a/result.json" digest); rhs=$(field "$RUNS/$g-b/result.json" digest)
+    [ "$lhs" = "$rhs" ] || die "$g: digests differ between repeats"
     echo "$g: spin 45, $(field "$RUNS/$g-a/result.json" sched.pause_points) pause points, the same digest twice"
 done
 bti=0

@@ -22,7 +22,7 @@ expect abort crash signal -- /usr/bin/python3 -c 'import os; os.abort()'
 expect deadlock liveness deadlock -- "$G/deadlock"
 expect sleeploop liveness time-limit --time-limit 100 -- "$G/liveness"
 # The first Stop row of the syscall table.
-set -- $("$PATINA" table | awk -F'|' '$4 ~ /Stop/ {gsub(/ /, ""); print $2, $3; exit}')
+set -- $("$PATINA" table | awk -F'|' '$4 ~ /Stop/ && !n++ {gsub(/ /, ""); print $2, $3}')
 [ $# = 2 ] || die "no Stop row in patina table"
 nr=$1 name=$2
 expect stoprow unsupported syscall -- /usr/bin/python3 -c "import ctypes; ctypes.CDLL(None).syscall($nr, 0, 0, 0, 0)"

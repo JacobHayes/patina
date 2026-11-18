@@ -4,7 +4,6 @@
 # and no checker has clean failures only, and `upcase fixed` under `--ok-exit 1 --check
 # same-tree` has no finding.
 #@ tier=area budget=20 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 kv=$PATINA_GUESTS/examples/kvlog up=$PATINA_GUESTS/examples/upcase

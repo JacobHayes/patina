@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
 # Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 # No guest output or boundary log may grow without bound (dash: 512-byte blocks, 2 GB).
@@ -15,7 +14,7 @@ VARY=cpu,load,sandbox
 # run OUT SEED [patina options] -- /guest/prog args: one run; prints the class.
 run() {
     out=$1; seed=$2; shift 2
-    rm -rf "$out"
+    rm -rf "${out:?}"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >/dev/null 2>"$out.err" \
         || [ -f "$out/result.json" ] || die "patina run $*: no result.json"
     field "$out/result.json" outcome
@@ -36,7 +35,7 @@ net() { field "$1/result.json" "counters.net.$2"; }
 # digest and one stdout over the run directories. Prints the first run's class.
 verify_same() {
     out=$1; seed=$2; runs=$3; shift 3
-    rm -rf "$out"
+    rm -rf "${out:?}"
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$VARY" --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" \
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
     _n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)

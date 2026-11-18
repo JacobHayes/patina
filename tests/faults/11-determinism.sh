@@ -14,4 +14,4 @@ for p in $e $s $c; do wait $p || { cat "$RUNS"/11-*.txt; exit 1; }; done
 echo "seed $seed: errors $(field "$RUNS/11/errors/run-0/result.json" digest)," \
     "short $(field "$RUNS/11/short/run-0/result.json" digest)," \
     "crash $(field "$RUNS/11/crash/run-0/result.json" digest) ($(field "$RUNS/11/crash/run-0/result.json" incarnations) incarnations): 3 runs identical"
-rm -rf "$RUNS/11"
+rm -rf "${RUNS:?}/11"

@@ -10,7 +10,7 @@
 #                                 carries the tag v<version> (jj: on @-, with @ empty).
 #
 # Exit codes: 0 = success, 1 = refused or a cargo step failed, 2 = bad usage.
-set -euo pipefail
+set -euo pipefail; shopt -s inherit_errexit
 
 mode=dry-run
 case "${1:-}" in

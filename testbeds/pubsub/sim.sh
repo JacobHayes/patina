@@ -1,8 +1,8 @@
-#!/bin/sh
+#!/bin/bash
 # Build pubsub and sweep it under Patina. Fails if the clean program has a finding or saw
 # no fault, or if a planted bug is not found in the seed range.
 #   SEEDS=N (200)  JOBS=N (8)  OUT=DIR (/tmp/pubsub-sim)  PATINA=path (patina on PATH)
-set -eu
+set -euo pipefail; shopt -s inherit_errexit
 cd "$(dirname "$0")"
 PATINA=${PATINA:-patina}
 SEEDS=${SEEDS:-200}
@@ -19,7 +19,7 @@ leg() {
     name=$1 expect=$2
     shift 2
     dir=$OUT/$name
-    rm -rf "$dir"
+    rm -rf "${dir:?}"
     "$PATINA" sweep --seeds "1..$SEEDS" -j "$JOBS" --keep fail --out "$dir" "$@" >"$dir.log" 2>&1 || true
     if [ ! -f "$dir/report.json" ]; then
         echo "FAIL $name: no report, see $dir.log"; fail=1; return

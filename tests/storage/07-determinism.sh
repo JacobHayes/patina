@@ -10,7 +10,7 @@ v() {
     timeout 900 "$PATINA" verify --seed "$seed" --runs 2 --vary cpu,load --out "$RUNS/$name" \
         --mount "$W/fjall-harness":/guest:copy "$@" >"$RUNS/$name.txt" 2>&1 || grep -q '^identical: ' "$RUNS/$name.txt" || die "$name: $(tail -3 "$RUNS/$name.txt")"
     echo "$name seed $seed: $(grep '^run 0' "$RUNS/$name.txt" | awk '{print $9, $10}'); $(tail -1 "$RUNS/$name.txt" | cut -d' ' -f1-3)"
-    rm -rf "$RUNS/$name"
+    rm -rf "${RUNS:?}/$name"
 }
 v f1-machine3 5 --crash machine:3 -- /guest/fjall-harness-debug
 v f1-process3 3 --crash process:3 -- /guest/fjall-harness-debug

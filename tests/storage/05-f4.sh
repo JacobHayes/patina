@@ -13,7 +13,7 @@ for n in $(seq 50 80); do
         o=$RUNS/f4-n$n/run-$s
         k=$(jq '.crashes[-1].incarnation' "$o/result.json")
         native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
-        rm -rf "$o/native"
+        rm -rf "${o:?}/native"
         grep -q '^INVARIANT batch-atomic-across-keyspaces' "$o/native.txt" || continue
         ctl=$RUNS/f4-control-s$s
         run fjall-harness "$ctl" "$s" --crash machine:3 -- /guest/fjall-harness-debug

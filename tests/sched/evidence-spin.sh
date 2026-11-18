@@ -1,4 +1,3 @@
-#!/bin/sh
 # Evidence (docs/EVIDENCE.md, scheduling points), unprivileged, at the default CPU count:
 #  a. The spin table (stock binaries: glibc and hand-written C spin locks with and without a
 #     call inside and with and without the spin hint, spin-then-yield, pthread mutex, Rust
@@ -13,7 +12,6 @@
 #     to one core: median wall_ms with pause points off and on, and of a build without them
 #     when PATINA_BASE names one (its scanner does not look for `pause`).
 #@ tier=evidence budget=1800 slots=8
-set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${PATINA_WORKLOADS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-spin PYTHONPATH=$HERE/../durability/bench python3 -I - <<'PY'

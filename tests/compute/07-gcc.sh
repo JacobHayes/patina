@@ -1,4 +1,3 @@
-#!/bin/sh
 # The hook file beyond C with clang (tests/guests/compute):
 #  a. every guest here runs natively with its normal output, and no image exports a hook;
 #  b. gcc (edges only, hook file built in a step of its own): `races-gcc b` ends `failure` on
@@ -26,11 +25,12 @@ native 'LOST-UPDATE\|ok$' "$C/pool-gcc"
 for p in cxx cxx-gcc; do native '^ctor ok|total=6000 caught=60 ok|dtor ok$' "$C/$p"; done
 for p in shlib shlib-stock; do native 'compdl=29992,29992 ok$' "$C/$p"; done
 for f in "$C"/libcomp.so "$C"/libcompdl.so "$C"/shlib "$C"/cxx "$C"/cxx-gcc; do
-    ! readelf -W --dyn-syms "$f" | grep -q __sanitizer_cov || die "a. $f exports a hook: $(readelf -W --dyn-syms "$f" | grep -m1 __sanitizer_cov)"
+    syms=$(readelf -W --dyn-syms "$f")
+    case $syms in *__sanitizer_cov*) die "a. $f exports a hook: $(printf '%s\n' "$syms" | grep -m1 __sanitizer_cov)" ;; esac
 done
 echo "a. the guests run natively with their normal output; no image exports a hook"
 
-seq 1 8 | xargs -P 6 -I{} sh -c '
+seq 1 8 | xargs -P 6 -I{} bash -euo pipefail -O inherit_errexit -c '
     timeout 60 "$PATINA" run --seed "$2" --fault compute-gap=2 --out "$1/races-$2" --mount "$3":/guest:copy -- /guest/compute/races-gcc b >/dev/null 2>&1 || true' \
     sh "$o" {} "$G" &
 prun "$o/cxx" 1 -- /guest/compute/cxx &
@@ -75,5 +75,6 @@ done
 "$PATINA" log dump "$o/shlib-1/inc-0/boundary.log" | sed -n 's/.* patina_sdk .*args=\[0x8, .*ret=\([0-9]*\) .*/\1/p' >"$o/shlib.hellos"
 [ "$(wc -l <"$o/shlib.hellos")" = 4 ] || die "d. shlib: $(wc -l <"$o/shlib.hellos") hellos, not one per hook copy loaded"
 [ "$(sort -u "$o/shlib.hellos" | wc -l)" = 1 ] || die "d. shlib: the hellos got more than one cell: $(sort -u "$o/shlib.hellos" | paste -sd' ')"
-[ "$(field "$o/shlib-1/result.json" digest)" = "$(field "$o/shlib-2/result.json" digest)" ] || die "d. shlib: two runs of seed 1 differ"
+lhs=$(field "$o/shlib-1/result.json" digest); rhs=$(field "$o/shlib-2/result.json" digest)
+[ "$lhs" = "$rhs" ] || die "d. shlib: two runs of seed 1 differ"
 echo "d. shared libraries: the images named are the ones whose hooks said hello (libcomp.so and libcompdl.so, and shlib itself only when it is rebuilt); shlib's 4 hook copies said hello and got one cell; one digest twice"

@@ -20,12 +20,18 @@ run "$d/base" 1 --crash machine:0 -- /guest/window
 n=$(field "$d/base/result.json" faults.counts.crash.eligible)
 [ "$n" -gt 2 ] || die "the base has $n crash points"
 export PATINA PATINA_GUESTS d
-seq 1 $((n + 1)) | xargs -P 4 -I{} sh -c '
-    timeout 60 "$PATINA" run --seed 1 --crash machine-at:$1 --out "$d/c-$1" --mount "$PATINA_GUESTS":/guest:copy -- /guest/window >/dev/null 2>&1
-    [ -f "$d/c-$1/result.json" ] || echo "child $1: no result.json"' sh {} | grep . && die "a child did not run"
+seq 1 $((n + 1)) | xargs -P 4 -I{} bash -euo pipefail -O inherit_errexit -c '
+    st=0; timeout 60 "$PATINA" run --seed 1 --crash machine-at:$1 --out "$d/c-$1" --mount "$PATINA_GUESTS":/guest:copy -- /guest/window >/dev/null 2>&1 || st=$?
+    [ -f "$d/c-$1/result.json" ] || echo "child $1: no result.json (exit $st)"' sh {} >"$d/children.txt"
+[ ! -s "$d/children.txt" ] || die "a child did not run: $(head -3 "$d/children.txt")"
 mid=$((n / 2)) late=$((n * 3 / 4))
-first() { "$PATINA" log diff "$1/inc-0/boundary.log" "$2/inc-0/boundary.log" | sed -n 's/^first difference at record \([0-9]*\) .*/\1/p'; }
-cp_at() { "$PATINA" log dump "$1/inc-0/boundary.log" | grep -n ' CrashPoint ' | head -1 | cut -d: -f1; }
+# first A B: the first record at which two runs' logs differ (log diff exits 1: they differ)
+first() {
+    "$PATINA" log diff "$1/inc-0/boundary.log" "$2/inc-0/boundary.log" >"$1.diff" || [ $? = 1 ]
+    sed -n 's/^first difference at record \([0-9]*\) .*/\1/p' "$1.diff"
+}
+# cp_at RUN: the line number of the first CrashPoint record of a run's log dump
+cp_at() { "$PATINA" log dump "$1/inc-0/boundary.log" | awk '/ CrashPoint / && !n {n = NR} END {print n}'; }
 for c in "$mid" "$late"; do
     i=$(($(cp_at "$d/c-$c") - 1))
     [ "$(first "$d/ref" "$d/c-$c")" = "$i" ] || die "child $c: first differs from the run without --crash at record $(first "$d/ref" "$d/c-$c"), its CrashPoint is record $i"

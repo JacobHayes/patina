@@ -8,7 +8,8 @@ for rep in a b; do
     [ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = liveness/deadlock ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 done
 out=$RUNS/06-deadlock/a
-[ "$(field "$out/result.json" digest)" = "$(field "$RUNS/06-deadlock/b/result.json" digest)" ] || die "two digests"
+lhs=$(field "$out/result.json" digest); rhs=$(field "$RUNS/06-deadlock/b/result.json" digest)
+[ "$lhs" = "$rhs" ] || die "two digests"
 detail=$(field "$out/result.json" message)
 echo "detail: $detail"
 python3 -I - "$detail" "$out/inc-0/stdout" <<'PY' || die "detail does not name both threads' waits on the two mutexes"

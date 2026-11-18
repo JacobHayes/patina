@@ -9,6 +9,7 @@ for m in za sm; do
         prun "$RUNS/$m$k" --seed 1 -- "$PATINA_GUESTS/sme-state" "$m"
         [ "$(stop "$RUNS/$m$k")" = "unsupported signal-context" ] || die "$m $k: $(stop "$RUNS/$m$k"): $(tail -2 "$RUNS/$m$k.txt")"
     done
-    [ "$(field "$RUNS/${m}a/result.json" digest)" = "$(field "$RUNS/${m}b/result.json" digest)" ] || die "$m: digests differ between repeats"
+    lhs=$(field "$RUNS/${m}a/result.json" digest); rhs=$(field "$RUNS/${m}b/result.json" digest)
+    [ "$lhs" = "$rhs" ] || die "$m: digests differ between repeats"
     echo "$m: $(field "$RUNS/${m}a/result.json" message)"
 done

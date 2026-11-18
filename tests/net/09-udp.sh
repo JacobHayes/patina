@@ -24,12 +24,13 @@ hunt() {
         c=$(run "$o/$n-$s" "$s" "$@")
         if [ "$c" != ok ]; then
             timeout 120 "$PATINA" replay "$o/$n-$s" >"$o/$n.replay.txt" 2>&1 || true
-            [ "$(field "$o/$n-$s/replay/result.json" digest)" = "$(field "$o/$n-$s/result.json" digest)" ] ||
+            lhs=$(field "$o/$n-$s/replay/result.json" digest); rhs=$(field "$o/$n-$s/result.json" digest)
+            [ "$lhs" = "$rhs" ] ||
                 die "$n seed $s: replay differs ($(tail -2 "$o/$n.replay.txt"))"
             echo "$n: seed $s: $c, replayed identically; $(field "$o/$n-$s/result.json" faults.recent | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print(r[-1] if r else "no fault")')"
             return 0
         fi
-        rm -rf "$o/$n-$s"
+        rm -rf "${o:?}/$n-$s"
     done
     die "$n: no finding in seeds 1..8"
 }

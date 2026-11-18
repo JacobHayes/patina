@@ -1,7 +1,8 @@
 # 10. install.sh picks the release archive by `uname -m` (a faked uname): Linux x86_64 and
 #     aarch64 (and arm64) each install their own archive's binary from a local file:// release
 #     and then run its `doctor`; macOS and other systems are refused, installing nothing. The
-#     archives hold stand-in binaries that name their target, so no sandbox runs.
+#     archives hold stand-in binaries that name their target, so no sandbox runs. It installs
+#     the same way under dash and busybox sh, where this machine has them.
 #@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -14,13 +15,15 @@ for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
     tar -czf "$d/dist/patina-$t.tar.gz" -C "$d/$t" patina
 done
 (cd "$d/dist" && sha256sum patina-*.tar.gz >SHA256SUMS)
-# try_install S M: install.sh with `uname -s` S and `uname -m` M, into $d/S-M; sets $st.
+# try_install S M: install.sh with `uname -s` S and `uname -m` M, into $d/S-M; sets $st. The
+# shell is $ish (default sh).
 try_install() {
     printf '#!/bin/sh\ncase "$1" in -s) echo %s ;; -m) echo %s ;; *) exit 1 ;; esac\n' "$1" "$2" >"$d/bin/uname"
     chmod 755 "$d/bin/uname"
     rm -f "$d/calls"
     st=0
-    PATH="$d/bin:$PATH" PATINA_RELEASE_URL="file://$d/dist" sh "$root/install.sh" --prefix "$d/$1-$2" \
+    # install.sh runs as users run it: by sh (piped into it), or by $ish
+    PATH="$d/bin:$PATH" PATINA_RELEASE_URL="file://$d/dist" ${ish:-sh} "$root/install.sh" --prefix "$d/$1-$2" \
         >"$d/$1-$2.txt" 2>&1 || st=$?
 }
 for case in x86_64:x86_64-unknown-linux-musl aarch64:aarch64-unknown-linux-musl arm64:aarch64-unknown-linux-musl; do
@@ -37,4 +40,17 @@ for sys in Darwin:arm64 Darwin:x86_64 Linux:riscv64 FreeBSD:amd64; do
     [ "$st" = 1 ] || die "$sys: exit $st: $(cat "$d/${sys%%:*}-${sys#*:}.txt")"
     [ ! -e "$d/${sys%%:*}-${sys#*:}" ] && [ ! -e "$d/calls" ] || die "$sys: installed something"
     echo "$sys: refused: $(cat "$d/${sys%%:*}-${sys#*:}.txt")"
+done
+for ish in dash "busybox sh"; do
+    command -v "${ish%% *}" >/dev/null || { echo "$ish: not on this machine, not tried"; continue; }
+    rm -rf "${d:?}/Linux-x86_64"
+    try_install Linux x86_64
+    # busybox sh may run its own uname applet, not the faked one: expect the archive for the
+    # machine this shell reports.
+    m=$(PATH="$d/bin:$PATH" $ish -c 'uname -m')
+    case $m in x86_64) t=x86_64-unknown-linux-musl ;; *) t=aarch64-unknown-linux-musl ;; esac
+    first=$(sed -n 1p "$d/calls" 2>/dev/null) || first="(no calls)"
+    [ "$st" = 0 ] && [ "$first" = "$t --version" ] ||
+        die "$ish (uname -m $m): exit $st, first call '$first': $(cat "$d/Linux-x86_64.txt")"
+    echo "$ish: installed patina-$t.tar.gz"
 done

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # ./check quick              the landing gate (budget 5 min, ceiling 10)
 # ./check AREA [AREA ...]    one area's checks (a directory under tests/) while working on it
 # ./check evidence [NAME..]  the sweeps, matrices and soaks behind docs/EVIDENCE.md, by hand
@@ -9,7 +9,7 @@
 # parallel (tests/run.py: the build under test, per-script times and budgets, total; it refuses
 # a binary older than the sources it is built from). Output, the guest cache and scratch go under PATINA_CHECK_DIR (default
 # target/patina-check).
-set -eu
+set -euo pipefail; shopt -s inherit_errexit
 cd "$(dirname "$0")"
 root=$(pwd)
 [ $# -ge 1 ] || { sed -n '2,6p' "$0" >&2; exit 2; }
@@ -19,7 +19,7 @@ export PATINA_CHECK_DIR="${PATINA_CHECK_DIR:-$root/target/patina-check}"
 mkdir -p "$PATINA_CHECK_DIR"
 t0=$(date +%s)
 # A failed build stops here, with the compiler's errors on stderr: nothing runs against the
-# binary of an earlier build. (No pipe: a pipe's status is its last command's.)
+# binary of an earlier build.
 msgs=$PATINA_CHECK_DIR/build-messages.json
 cargo build --release --quiet -p patina-cli --message-format=json-render-diagnostics >"$msgs" ||
     { echo "check: the patina build failed; no script was run" >&2; exit 1; }
@@ -37,7 +37,7 @@ case $(uname -m) in
 esac
 export RT_BIN="$out/rt-target/$rt_target/release/patina-rt"
 [ -f "$RT_BIN" ] || { echo "check: no runtime at $RT_BIN" >&2; exit 1; }
-set=$(sh tests/guests.sh)
+set=$(bash tests/guests.sh)
 echo "== build: $(( $(date +%s) - t0 )) s (guests: $set)"
 
 export PATINA="$root/target/release/patina" PATINA_CFG="$root/tests/cfg"

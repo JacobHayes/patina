@@ -11,7 +11,7 @@ one_model() {
             --mount "$W/fjall-harness":/guest:copy --config "$("$PATINA_CFG" fs-model="$m")" --crash machine:5 --fault fs-error-permille=2 \
             -- /guest/fjall-harness-release >"$o.txt" 2>&1 || grep -q '^identical: ' "$o.txt" || { echo "FAIL: $m seed $s: $(tail -3 "$o.txt")"; return 1; }
         echo "$m seed $s: $(tail -1 "$o.txt")"
-        rm -rf "$o"
+        rm -rf "${o:?}"
     done
 }
 one_model ext4-ordered >"$RUNS/ext4.log" 2>&1 & p1=$!

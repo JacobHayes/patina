@@ -13,9 +13,11 @@ done
 run "$d/disk-1-again" 1 --faults disk -- /guest/io-errors tally
 echo "seed 1: $(plan "$d/disk-1")"
 echo "seed 2: $(plan "$d/disk-2")"
-[ "$(plan "$d/disk-1")" = "$(plan "$d/disk-1-again")" ] || die "one seed resolved two plans"
-[ "$(plan "$d/disk-1")" != "$(plan "$d/disk-2")" ] || die "two seeds resolved the same plan"
-[ "$(field "$d/disk-1/result.json" digest)" = "$(field "$d/disk-1-again/result.json" digest)" ] || die "one seed, two digests"
+p1=$(plan "$d/disk-1"); p1again=$(plan "$d/disk-1-again"); p2=$(plan "$d/disk-2")
+[ "$p1" = "$p1again" ] || die "one seed resolved two plans"
+[ "$p1" != "$p2" ] || die "two seeds resolved the same plan"
+lhs=$(field "$d/disk-1/result.json" digest); rhs=$(field "$d/disk-1-again/result.json" digest)
+[ "$lhs" = "$rhs" ] || die "one seed, two digests"
 found=""
 for s in 1 2 3 4 5 6 7 8; do
     run "$d/base-$s" $s --faults disk --crash machine:0..30 -- /guest/ack-log correct
@@ -27,7 +29,8 @@ extra = {k: v for k, v in b.items() if k not in a}
 if {k: v for k, v in b.items() if k in a} != a or list(extra) != ["net-chunk-max"]:
     sys.exit("FAIL: adding net-chunk-max moved the plan: %s vs %s" % (a, b))
 PY
-    [ "$(field "$d/base-$s/result.json" digest)" = "$(field "$d/more-$s/result.json" digest)" ] \
+    lhs=$(field "$d/base-$s/result.json" digest); rhs=$(field "$d/more-$s/result.json" digest)
+    [ "$lhs" = "$rhs" ] \
         || die "seed $s: net-chunk-max on a run without sockets changed the boundary log ($("$PATINA" log diff "$d/base-$s/inc-0/boundary.log" "$d/more-$s/inc-0/boundary.log" | head -1))"
     if [ "$(field "$d/base-$s/result.json" faults.injected)" -gt 0 ]; then found=$s; break; fi
 done

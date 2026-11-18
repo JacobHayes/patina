@@ -5,7 +5,6 @@
 # from before the crash materialiser and no longer runs; crash work against log size is tests/durability/bench.py size
 # (./check evidence durability/evidence-speed).
 #@ tier=evidence budget=1200 slots=1
-set -eu
 : "${PATINA:?}" "${RUNS:?}"
 b=$(dirname "$0")/bench
 export OUT=$RUNS/costs REPS=${REPS:-5}

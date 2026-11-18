@@ -28,7 +28,8 @@ for o in "$a" "$b"; do
         die "$o: $(field "$o/result.json" outcome) $(field "$o/result.json" message)"
     [ "$(jq '.crashes[0].seq' "$o/result.json")" = "$aseq" ] || die "$o: crashed at seq $(jq '.crashes[0].seq' "$o/result.json"), not after the acks fsync at seq $aseq"
 done
-[ "$(field "$a/result.json" message)" = "$(field "$b/result.json" message)" ] ||
+lhs=$(field "$a/result.json" message); rhs=$(field "$b/result.json" message)
+[ "$lhs" = "$rhs" ] ||
     die "the crash differs at /var/lib/app: $(field "$b/result.json" message)"
 echo "a machine crash loses the acknowledged record at /var/lib/app as at /work: $(field "$b/result.json" message)"
 
@@ -39,5 +40,5 @@ for bad in /etc/passwd /usr/local /proc/x /tmp; do
     prun "$d/bad" --seed 1 --mount "$d/init:$bad" -- /bin/true
     [ "$st" = "$(exit_of error)" ] && grep -q "$bad" "$d/bad.txt" || die "--mount at $bad: exit $st: $(cat "$d/bad.txt")"
     echo "--mount at $bad: $(cat "$d/bad.txt")"
-    rm -rf "$d/bad"
+    rm -rf "${d:?}/bad"
 done

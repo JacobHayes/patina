@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Sweep driver:
 #   tests/storage/lib/sweep.sh WORKLOAD SEEDS... -- [patina run options] -- /guest/prog args...
 # WORKLOAD names the guest directory $PATINA_WORKLOADS/WORKLOAD. SEEDS are numbers or ranges A-B. Runs the seeds in
@@ -8,7 +8,7 @@
 # wall_ms) and prints a table of outcome x message counts plus the sweep's wall time.
 # Run directories: $SWEEP_OUT/run-SEED. $SWEEP_KEEP: fail (default: keep runs whose outcome
 # is not ok, delete the rest), all, none. Every run is under ulimit -f and timeout.
-set -eu
+set -euo pipefail; shopt -s inherit_errexit
 [ $# -ge 4 ] || { echo "usage: sweep.sh WORKLOAD SEEDS... -- [patina options] -- /guest/prog args" >&2; exit 2; }
 : "${PATINA:?}" "${SWEEP_OUT:?}"
 wl=$1; shift
@@ -29,10 +29,10 @@ ulimit -f "${SWEEP_FSIZE:-8000000}"
 export PATINA SWEEP_OUT SWEEP_KEEP="${SWEEP_KEEP:-fail}" SWEEP_TIMEOUT="${SWEEP_TIMEOUT:-600}" guests
 t0=$(date +%s.%N)
 # Each seed: one patina run; arguments after the seed are the patina options.
-printf '%s\n' $seeds | xargs -P "${SWEEP_JOBS:-6}" -I{} sh -c '
+printf '%s\n' $seeds | xargs -P "${SWEEP_JOBS:-6}" -I{} bash -euo pipefail -O inherit_errexit -c '
     s=$1; shift
     o=$SWEEP_OUT/run-$s
-    rm -rf "$o"
+    rm -rf "${o:?}"
     st=0
     timeout "$SWEEP_TIMEOUT" "$PATINA" run --seed "$s" --out "$o" --mount "$guests":/guest:copy "$@" >/dev/null 2>"$SWEEP_OUT/outcomes/$s.patinaerr" || st=$?
     if [ ! -f "$o/result.json" ]; then
@@ -46,8 +46,8 @@ printf '%s\n' $seeds | xargs -P "${SWEEP_JOBS:-6}" -I{} sh -c '
     cls=$(jq -r .outcome "$o/result.json")
     case $SWEEP_KEEP in
         all) ;;
-        none) rm -rf "$o" ;;
-        *) [ "$cls" = ok ] && rm -rf "$o" ;;
+        none) rm -rf "${o:?}" ;;
+        *) [ "$cls" = ok ] && rm -rf "${o:?}" ;;
     esac
     exit 0
 ' sh {} "$@"

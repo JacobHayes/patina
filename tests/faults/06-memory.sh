@@ -10,8 +10,10 @@ for n in $(seq 1 24); do
     run "$o" 1 --fault mem-error-at=$n -- /guest/memfault
     [ "$(class "$o")" = ok ] || die "mem-error-at=$n: $(class "$o") $(field "$o/result.json" message)"
     grep -qx done "$o/inc-0/stdout" || die "mem-error-at=$n: guest did not finish"
-    [ "$(grep -v ' ok$' "$o/inc-0/stdout" | grep -vc '^done$')" -le 1 ] || die "mem-error-at=$n: more than one failed step"
-    f=$(grep -v ' ok$' "$o/inc-0/stdout" | grep -v '^done$' | tr '\n' ' ')
+    # The steps that failed (lines neither "... ok" nor "done"): none, or one.
+    f=$(awk '!/ ok$/ && $0 != "done" {printf "%s ", $0}' "$o/inc-0/stdout")
+    nf=$(awk '!/ ok$/ && $0 != "done" {n++} END {print n + 0}' "$o/inc-0/stdout")
+    [ "$nf" -le 1 ] || die "mem-error-at=$n: more than one failed step"
     echo "mem-error-at=$n: $(field "$o/result.json" faults.recent | python3 -I -c 'import json,sys; print(" ".join(x["call"] for x in json.load(sys.stdin)) or "-")') -> ${f:-no failure visible to the guest (handled by libc, or N beyond its requests)}"
     seen="$seen$f"
 done
@@ -22,7 +24,7 @@ echo "$seen" | grep -q "step 10 thread EAGAIN" || die "thread creation never fai
 # The order: the failing mmap step follows N.
 prev=-1
 for n in $(seq 1 24); do
-    k=$(grep -o 'step [0-4] mmap ENOMEM' "$RUNS/06/at-$n/inc-0/stdout" | awk '{print $2}')
+    k=$(sed -n 's/.*step \([0-4]\) mmap ENOMEM.*/\1/p' "$RUNS/06/at-$n/inc-0/stdout")
     [ -z "$k" ] && continue
     [ "$k" -gt "$prev" ] || die "mmap failures not in call order"
     prev=$k

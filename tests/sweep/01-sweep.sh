@@ -10,5 +10,4 @@
 #    keeps bounded bytes whose cut logs still replay; an interrupted sweep leaves no process and no partial run;
 #    minimize keeps only the fault setting the finding needs, and its rerun command reproduces it.
 #@ tier=quick budget=60 slots=4
-set -eu
 exec python3 -I "$(dirname "$0")/lib/sweep.py"

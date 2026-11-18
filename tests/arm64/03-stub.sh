@@ -8,5 +8,6 @@ for k in a b; do
     [ "$(stop "$RUNS/$k")" = "unsupported containment" ] || die "$k: $(stop "$RUNS/$k"): $(cat "$RUNS/$k/inc-0/stdout" 2>/dev/null) $(tail -2 "$RUNS/$k.txt")"
     [ ! -s "$RUNS/$k/inc-0/stdout" ] || die "$k: the program printed: $(cat "$RUNS/$k/inc-0/stdout")"
 done
-[ "$(field "$RUNS/a/result.json" digest)" = "$(field "$RUNS/b/result.json" digest)" ] || die "digests differ between repeats"
+lhs=$(field "$RUNS/a/result.json" digest); rhs=$(field "$RUNS/b/result.json" digest)
+[ "$lhs" = "$rhs" ] || die "digests differ between repeats"
 field "$RUNS/a/result.json" message

@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
 # Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 
@@ -13,7 +12,7 @@ die() { echo "FAIL: $*"; exit 1; }
 
 patina_run() { # out seed guest args...
     out=$1; seed=$2; g=$3; shift 3
-    rm -rf "$out"
+    rm -rf "${out:?}"
     timeout 300 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" "$@" >/dev/null || [ -f "$out/result.json" ] || die "patina run $g: no result.json"
 }
 
@@ -27,7 +26,7 @@ check_ok() {
 # hold one digest and one stdout; the first run passes check_ok.
 verify() {
     out=$1; seed=$2; g=$3; n=$4
-    rm -rf "$out"
+    rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$n" --vary cpu --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" \
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"

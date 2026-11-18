@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
 # Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 GUESTS="hello-static hello-spie hello-dyn hello-rs"
 

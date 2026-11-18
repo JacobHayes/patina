@@ -12,7 +12,6 @@
 # passes both; without --log-paths it does not judge. examples/checks/confined fails the open
 # with --log-paths and passes the same run's changes without it.
 #@ tier=area budget=30 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 paths=$PATINA_GUESTS/oracles-paths
@@ -36,9 +35,11 @@ long=$(awk 'BEGIN { for (i = 0; i < 300; i++) printf (i == 150 ? "/" : "p") }')
 # Off: no string record, nothing in run.json; on: the rerun line and the replay.
 "$PATINA" run --out off -- "$paths" tour >off.txt 2>&1 || die "tour without --log-paths"
 "$PATINA" log dump off/inc-0/boundary.log >off.dump || die "log dump of off"
-[ "$(awk '$2 == "str"' off.dump | wc -l)" = 0 ] || die "string records without --log-paths"
+n=$(awk '$2 == "str" {n++} END {print n + 0}' off.dump)
+[ "$n" = 0 ] || die "string records without --log-paths"
 [ "$(jq '.config | has("log-paths")' off/run.json)" = false ] && [ "$(jq '.config["log-paths"]' tour/run.json)" = true ] || die "run.json and log-paths"
-[ "$(jq -r .digest off/result.json)" != "$(jq -r .digest tour/result.json)" ] || die "--log-paths does not change the digest"
+a=$(jq -r .digest off/result.json); b=$(jq -r .digest tour/result.json)
+[ "$a" != "$b" ] || die "--log-paths does not change the digest"
 "$PATINA" replay tour >replay.txt 2>&1 || die "replay: $(tail -2 replay.txt)"
 grep -q identical replay.txt || die "replay of a --log-paths run: $(tail -2 replay.txt)"
 vfy() {

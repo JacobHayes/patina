@@ -3,7 +3,6 @@
 # point of seeds 1 and 2 (--branch), then `kvlog fixed` under both. Prints each sweep's
 # summary head (findings, the check: line); kvlog must have a finding and kvlog fixed none.
 #@ tier=evidence budget=60 slots=8
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 n=${SEEDS:-200}

@@ -1,10 +1,8 @@
-#!/bin/sh
 # Run as root (sudo), the guest sees what it sees run as an ordinary user: the same digest for
 # the crosshost guest, which stats host and sandbox files and reads the mount table. SKIP where
 # `sudo -n` cannot run. Each sudo call is recorded in $PATINA_CHECK_DIR/sudo-log.txt; its files
 # are given back to the caller and its runtime cache is under $RUNS.
 #@ tier=quick budget=20 slots=1
-set -eu
 . "$(dirname "$0")/lib/common.inc"
 if ! sudo -n true 2>/dev/null; then
     echo "SKIP: sudo -n cannot run here"

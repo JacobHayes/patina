@@ -10,7 +10,6 @@
 #                fjall harness with FJ_N=2000 --buggify)
 #   ENUM_JOBS    parallel children (default 6)
 #@ tier=evidence budget=1200 slots=6 arch=x86_64
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_WORKLOADS:?}"
 seeds=${ENUM_SEEDS:-$(seq 1 20)}
 cmd=${ENUM_CMD:-/guest/fjall-harness-debug}
@@ -28,13 +27,13 @@ for s in $seeds; do
         || [ -f "$b/result.json" ] || die "seed $s: the base run failed"
     pts=$(jq '.faults.counts.crash.eligible // 0' "$b/result.json")
     [ "$pts" -gt 0 ] || die "seed $s: the base has no crash point ($(jq -r .outcome "$b/result.json"))"
-    [ "$pts" -le 10000 ] || { echo "seed $s: $pts crash points, skipped"; rm -rf "$b"; continue; }
+    [ "$pts" -le 10000 ] || { echo "seed $s: $pts crash points, skipped"; rm -rf "${b:?}"; continue; }
     seq 1 "$pts" >"$out/points-$s"
     base_ms=$(jq .wall_ms "$b/result.json"); echo "$base_ms" >>"$out/base-ms"
-    rm -rf "$b"
+    rm -rf "${b:?}"
     : >"$out/children-$s.tsv"
     # One child per point: its line is point, crash seq, outcome, F2 (1/0), wall_ms, tree digest.
-    xargs -P "${ENUM_JOBS:-6}" -I{} sh -c '
+    xargs -P "${ENUM_JOBS:-6}" -I{} bash -euo pipefail -O inherit_errexit -c '
         s=$1 q=$2 c=$RUNS/enum/child-$1-$2
         timeout 600 "$PATINA" run --seed "$s" --crash "machine-at:$q" --out "$c" --mount "$G":/guest:copy $opts -- $cmd >/dev/null 2>&1 || true
         if [ -f "$c/result.json" ]; then
@@ -42,7 +41,7 @@ for s in $seeds; do
         else
             printf "%s\t-\tpatina-error\t0\t0\t-\n" "$q"
         fi
-        rm -rf "$c"
+        rm -rf "${c:?}"
     ' sh "$s" {} <"$out/points-$s" >>"$out/children-$s.tsv"
     python3 -I - "$out/children-$s.tsv" "$s" "$pts" "$base_ms" <<'PY'
 import sys, collections

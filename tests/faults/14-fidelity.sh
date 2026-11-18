@@ -6,7 +6,7 @@
 . "$(dirname "$0")/lib/common.inc"
 : "${PATINA_WORKLOADS:?}"
 o=$RUNS/14/go
-rm -rf "$o"; mkdir -p "$(dirname "$o")"
+rm -rf "${o:?}"; mkdir -p "$(dirname "$o")"
 timeout 300 "$PATINA" run --seed 1 --cpus 2 --out "$o" --mount "$PATINA_WORKLOADS/go-static":/guest:copy \
     --fault fs-error-permille=1000 --fault fs-short-permille=300 -- /guest/go-static local >/dev/null 2>&1 \
     || [ -f "$o/result.json" ] || die "go-static: no result.json"

@@ -130,4 +130,4 @@ for s in sorted(pts):
     if hit:
         print("  seed %d: first F2 at point %d, %.0f CPU-s of its own children up to it" % (s, hit, sum(r["wall_ms"] for p, r in mine if p <= hit) / 1000))
 PY
-rm -rf "$RUNS"/base-*
+rm -rf "${RUNS:?}"/base-*

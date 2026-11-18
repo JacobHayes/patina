@@ -3,7 +3,7 @@
 # /work and /tmp tmpfs, /in copied into /work in sorted order), without the runtime.
 # usage: [STRACE=1] native.sh OUTDIR [--work DIR] [--env K=V]... -- /guest/prog args...
 # stdout and stderr go to OUTDIR/stdout, OUTDIR/stderr; the exit status is the command's.
-set -eu
+set -euo pipefail; shopt -s inherit_errexit
 out=$1; shift
 root=
 envs=()

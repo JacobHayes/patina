@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
 # Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 # No guest output or log may grow without bound (dash counts in 512-byte blocks: 1 GB). Soft
@@ -15,7 +14,7 @@ die() { echo "FAIL: $*"; exit 1; }
 # run_ok OUT SEED cmd...: one run, outcome ok.
 run_ok() {
     out=$1; seed=$2; shift 2
-    rm -rf "$out"; mkdir -p "$(dirname "$out")"
+    rm -rf "${out:?}"; mkdir -p "$(dirname "$out")"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >/dev/null 2>"$out.err" \
         || [ -f "$out/result.json" ] || die "patina run $* (seed $seed): no result.json"
     [ "$(field "$out/result.json" outcome)" = ok ] || die "$* (seed $seed): class $(field "$out/result.json" outcome): $(field "$out/result.json" message)"
@@ -25,7 +24,7 @@ run_ok() {
 # one stdout over the run directories; the first run is ok.
 verify_ok() {
     out=$1; seed=$2; runs=$3; vary=$4; shift 4
-    rm -rf "$out"; mkdir -p "$(dirname "$out")"
+    rm -rf "${out:?}"; mkdir -p "$(dirname "$out")"
     timeout 3600 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$vary" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$@" \
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
     n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
@@ -66,6 +65,6 @@ no_leftovers() {
     [ -z "$left" ] || die "processes left from $1: $left"
     [ "$rc" = 0 ] || die "leftovers.py failed (exit $rc)"
     mounts=$(findmnt -rn -o TARGET) || die "findmnt failed"
-    m=$(printf '%s\n' "$mounts" | grep -c patina || true)
+    m=$(printf '%s\n' "$mounts" | awk '/patina/ {n++} END {print n + 0}')
     [ "$m" = 0 ] || die "$m mounts mention patina"
 }

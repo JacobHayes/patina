@@ -1,4 +1,3 @@
-#!/bin/sh
 # Spin-waits that stall without counter preemption run to the end with it: one seed each of
 # the spin table (glibc pthread_spin_lock, a C test-and-set lock, a Rust spin_loop lock, the
 # holder making a call inside the critical section) and of stock Go at the default CPU count

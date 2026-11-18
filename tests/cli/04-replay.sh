@@ -19,7 +19,8 @@ for want in ok failure; do
     replay "$RUNS/$want"
     [ "$st" = "$rst" ] || die "replay of $want: exit $st, the run exited $rst ($(tail -3 "$RUNS/$want.replay.txt"))"
     grep -q '^identical' "$RUNS/$want.replay.txt" || die "replay of $want: $(cat "$RUNS/$want.replay.txt")"
-    [ "$(field "$RUNS/$want/replay/result.json" digest)" = "$(field "$RUNS/$want/result.json" digest)" ] || die "replay of $want: digest"
+    lhs=$(field "$RUNS/$want/replay/result.json" digest); rhs=$(field "$RUNS/$want/result.json" digest)
+    [ "$lhs" = "$rhs" ] || die "replay of $want: digest"
     echo "replay of $want: identical, exit $st"
 done
 # The planted divergence.

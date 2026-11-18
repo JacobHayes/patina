@@ -1,4 +1,3 @@
-#!/bin/sh
 # Rust with compute points (the SDK's `compute` feature, the coverage RUSTFLAGS, cargo with
 # --target; tests/guests/compute/Cargo.toml):
 #  a. rs-race and rs-deadline run natively with their normal output;
@@ -41,5 +40,6 @@ wait
 for s in 1 2 3; do
     [ "$(field "$o/dl-$s/result.json" outcome)" = ok ] || die "c. rs-deadline seed $s: $(res "$o/dl-$s"): $(tail -1 "$o/dl-$s/inc-0/stdout")"
 done
-[ "$(field "$o/dl-1/result.json" digest)" = "$(field "$o/dl-1b/result.json" digest)" ] || die "c. rs-deadline seed 1: two digests"
+lhs=$(field "$o/dl-1/result.json" digest); rhs=$(field "$o/dl-1b/result.json" digest)
+[ "$lhs" = "$rhs" ] || die "c. rs-deadline seed 1: two digests"
 echo "c. rs-deadline ok on seeds 1-3 ($(tail -1 "$o/dl-1/inc-0/stdout")); seed 1 gives one digest twice"

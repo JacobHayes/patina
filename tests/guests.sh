@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # tests/guests.sh: build the guests once per source change and print the directory of the set.
 #
 # Each tests/guests/<name>/ (and tests/determinism/attack/, tests/sandbox/guests/) is built by
@@ -13,10 +13,8 @@
 # so a set never changes once made: checks of different trees, in parallel, read their own.
 # Builds take the build lock and share PATINA_BUILD_DIR (cargo targets, the Go cache). Sets
 # and cache entries unused for 3 days are deleted. A failed build fails this script, and ./check
-# with it.
-set -eu
-# sh has no pipefail on every host: a command whose status matters runs alone, in an assignment
-# (set -e sees its status), and only commands that cannot fail feed a pipe.
+# with it. Each build.sh runs in the checks' strict mode (tests/run.py), as this script does.
+set -euo pipefail; shopt -s inherit_errexit
 root=$(cd "$(dirname "$0")/.." && pwd)
 base=${PATINA_CHECK_DIR:-$root/target/patina-check}
 export PATINA_BUILD_DIR="$base/build"
@@ -77,16 +75,16 @@ if [ ! -d "$set" ]; then
         esac
         tmp=$cache/.tmp-$e
         chmod -R u+w "$tmp" 2>/dev/null || true
-        rm -rf "$tmp"; mkdir -p "$tmp"
+        rm -rf "${tmp:?}"; mkdir -p "$tmp"
         t0=$(date +%s)
-        sh "$b" "$tmp" >"$tmp.log" 2>&1 || { tail -20 "$tmp.log" >&2; echo "guests.sh: $b failed (log $tmp.log)" >&2; exit 1; }
+        bash -euo pipefail -O inherit_errexit "$b" "$tmp" >"$tmp.log" 2>&1 || { tail -20 "$tmp.log" >&2; echo "guests.sh: $b failed (log $tmp.log)" >&2; exit 1; }
         chmod -R a-w "$tmp"
         mv "$tmp" "$cache/$e"
         rm -f "$tmp.log"
         echo "guests.sh: built $n ($(( $(date +%s) - t0 )) s)" >&2
     done
     tmp=$sets/.tmp-$setkey
-    rm -rf "$tmp"; mkdir -p "$tmp/guests" "$tmp/workloads" "$tmp/attack" "$tmp/sandbox"
+    rm -rf "${tmp:?}"; mkdir -p "$tmp/guests" "$tmp/workloads" "$tmp/attack" "$tmp/sandbox"
     for e in $entries; do
         n=${e%-*}
         case $n in
@@ -104,7 +102,7 @@ if [ ! -d "$set" ]; then
     # Unused for 3 days: deleted (every check touches its set and the entries it uses).
     for old in $(find "$sets" "$cache" -mindepth 1 -maxdepth 1 -mtime +3 2>/dev/null); do
         chmod -R u+w "$old" 2>/dev/null || true
-        rm -rf "$old"
+        rm -rf "${old:?}"
     done
     flock -u 9
 fi

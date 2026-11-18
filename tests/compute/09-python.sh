@@ -1,4 +1,3 @@
-#!/bin/sh
 # Python compute points (`python3 -m patina`, sdk/python/patina.py; tests/guests/compute/py):
 #  a. natively the runner is inert: the program's own output, and no sys.monitoring tool;
 #  b. `cache` (check-then-act between two threads, no system call in the window): no failure
@@ -51,7 +50,8 @@ grep -q '^timer did not fire' "$o/t-stock/inc-0/stdout" || die "c. stock: $(cat 
 for r in t-1 t-2 one; do [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "c. $r: $(res "$o/$r")"; done
 h=$(sed -n 's/.*handler_ns=//p' "$o/t-1/inc-0/stdout")
 [ -n "$h" ] && [ "$h" -ge 10000000 ] && [ "$h" -le 10010000 ] || die "c. the handler ran at '$h' virtual ns: $(cat "$o/t-1/inc-0/stdout")"
-[ "$(field "$o/t-1/result.json" digest)" = "$(field "$o/t-2/result.json" digest)" ] || die "c. two runs of the timer differ"
+lhs=$(field "$o/t-1/result.json" digest); rhs=$(field "$o/t-2/result.json" digest)
+[ "$lhs" = "$rhs" ] || die "c. two runs of the timer differ"
 [ "$(cat "$o/one/inc-0/stdout")" = "one-line loop: Stop caught
 comprehension: Stop caught" ] || die "c. oneline: $(cat "$o/one/inc-0/stdout") $(tail -2 "$o/one/inc-0/stderr")"
 echo "c. stock: $(cat "$o/t-stock/inc-0/stdout"); compute points: $(cat "$o/t-1/inc-0/stdout"), one digest twice; a one-line loop and a comprehension: Stop caught"
@@ -66,7 +66,7 @@ for s in 1 2 3; do
     a=$(alt "$o/c-$s")
     [ -n "$a" ] && [ "$a" -gt 1 ] || die "d. seed $s: $(res "$o/c-$s"); $(cat "$o/c-$s/inc-0/stdout")"
 done
-rm -rf "$o/verify"
+rm -rf "${o:?}/verify"
 "$PATINA" verify --runs 3 --vary cpu,aslr --seed 1 --out "$o/verify" --mount "$G":/guest:copy \
     $CP "$PC" cpu 50000 >"$o/verify.txt" 2>&1 || true
 grep -q '^identical: 3 runs' "$o/verify.txt" || die "d. cpu seed 1 under --vary cpu,aslr: $(tail -3 "$o/verify.txt")"

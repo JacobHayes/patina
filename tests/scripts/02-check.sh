@@ -2,7 +2,6 @@
 #    fail, ./check exits non-zero with the compiler's error and runs nothing; and tests/run.py
 #    refuses a patina binary older than a source its dep-info names (a failed or skipped build).
 #@ tier=quick budget=15
-set -eu
 : "${RUNS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 die() { echo "FAIL: $*"; exit 1; }

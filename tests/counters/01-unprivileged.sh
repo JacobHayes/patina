@@ -1,4 +1,3 @@
-#!/bin/sh
 # 1 (privilege). Without CAP_PERFMON (this unprivileged patina), --preempt branches is an
 # error (outcome error, exit 2) and no run directory is made; the default (--preempt traps)
 # runs, and its result says mode traps.

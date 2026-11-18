@@ -4,7 +4,6 @@
 # and examples/checks/same-tree: one group, its first seed replayed identical, minimize keeping
 # fs-short alone; `upcase fixed` ok on every seed.
 #@ tier=evidence budget=60 slots=8
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 n=${SEEDS:-200}
@@ -29,4 +28,5 @@ case $(jq -r '.groups[0].signature' checked/report.json) in "violation check: wr
 first=$(jq -r '.groups[0].first.dir' checked/report.json)
 "$PATINA" minimize "$first" --out min --format json >min.json 2>min.err || die "minimize: $(tail -2 min.err)"
 echo "minimize: $(jq -r '"\(.from) -> \(.to)"' min.json)"
-[ "$(jq -r .to min.json)" = "$(jq -r .to min.json | grep -o 'fs-short-permille=[^ ]*')" ] || die "minimize kept more than fs-short"
+lhs=$(jq -r .to min.json); rhs=$(jq -r .to min.json | grep -o 'fs-short-permille=[^ ]*')
+[ "$lhs" = "$rhs" ] || die "minimize kept more than fs-short"

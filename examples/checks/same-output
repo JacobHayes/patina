@@ -3,6 +3,7 @@
 # directory, or a sweep of the reference over the same --cases file with --seeds 1 --keep
 # all, whose seed-1/$PATINA_CASE_NAME is the reference for each case. Each side's last
 # incarnation is compared. For `patina run --check`; needs jq.
+set -u # lint-allow: strict-line — no set -e: exit 1 is a finding, so a command that fails exits 2 (error) itself
 ref=$1
 [ -z "${PATINA_CASE_NAME:-}" ] || ref=$ref/seed-1/$PATINA_CASE_NAME
 last() { k=0; while [ -d "$1/inc-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/inc-$k"; }

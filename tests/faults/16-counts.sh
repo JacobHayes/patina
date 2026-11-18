@@ -26,7 +26,7 @@ if any(not e.get("object") for e in f["recent"]):
 print("last event:", json.dumps(f["recent"][-1], sort_keys=True))
 PY
 o=$d/corrupt
-rm -rf "$o"
+rm -rf "${o:?}"
 PATINA_TEST_OPLOG_CORRUPT=1 "$PATINA" run --seed 1 --out "$o" --mount "$PATINA_GUESTS":/guest:copy --crash machine:0 -- /guest/ack-log correct >/dev/null 2>&1 || true
 [ "$(class "$o")" = internal ] || die "corrupted operation log: $(class "$o") $(field "$o/result.json" message)"
 echo "corrupted operation log: internal ($(field "$o/result.json" message | cut -c1-120))"

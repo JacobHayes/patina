@@ -1,4 +1,3 @@
-#!/bin/sh
 # Evidence (docs/EVIDENCE.md, compute points, Python): `python3 -m patina` with
 # tests/guests/compute/py/pycompute.py.
 #  1. `cache` (check-then-act between two threads), seeds 1-200: stock / default compute-gap /
@@ -13,7 +12,6 @@
 # PATINA_PY (default /usr/bin/python3) names the interpreter in the sandbox; PATINA_PY_MOUNT
 # ("DIR:/py") mounts one that is not on the host's /usr.
 #@ tier=evidence budget=900 slots=6
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${PATINA_WORKLOADS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-python PY=${PATINA_PY:-/usr/bin/python3} PYM=${PATINA_PY_MOUNT:-} python3 -I - <<'PY'
 import json, os, statistics, subprocess, time

@@ -1,4 +1,3 @@
-#!/bin/sh
 # Spin-waits in rebuilt code need neither `pause` nor a spin probe (stall-ms=1000):
 #  a. `spinpoints count` (a wait that counts its iterations: no fixed point, so stock it ends
 #     compute-stall) ends ok on seeds 1-3 with no spin found;

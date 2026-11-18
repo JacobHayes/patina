@@ -2,7 +2,6 @@
 # SEEDS (default 400) seeds, with no checker, with `--check true` and with a five-line sh
 # checker that reads the run directory; two rounds, interleaved. Every run must end ok.
 #@ tier=evidence budget=300 slots=8
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 n=${SEEDS:-400}
 cat >"$RUNS/five" <<'EOF'

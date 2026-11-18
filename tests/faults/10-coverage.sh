@@ -11,14 +11,14 @@ mkdir -p "$d"
 : >"$d/trees"
 N=${COV_SEEDS:-20}
 SWEEP_KEEP=all sweep 10/sweep "$N" --crash machine:20 -- /guest/ack-log correct
-bad=$(awk -F'\t' 'NR > 1 && $2 != "ok"' "$d/sweep/summary.tsv" | head -1)
+bad=$(awk -F'\t' 'NR > 1 && $2 != "ok" {print; exit}' "$d/sweep/summary.tsv")
 [ -z "$bad" ] || die "not ok: $bad"
 for seed in $(seq 1 "$N"); do
     o=$d/sweep/run-$seed
     set --; for inc in "$o"/inc-*; do [ -d "$inc/post-crash" ] && set -- "$@" "$inc"; done
     [ $# = 0 ] || python3 -I "$LIB/faults.py" crash-position "$@" >>"$d/positions"
     jq -r '.crashes[].tree_digest' "$o/result.json" >>"$d/trees"
-    rm -rf "$o"
+    rm -rf "${o:?}"
 done
 echo "crashes: $(wc -l <"$d/positions"); distinct post-crash trees: $(sort -u "$d/trees" | wc -l)"
 sort "$d/positions" | uniq -c | sort -rn

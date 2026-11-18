@@ -1,4 +1,3 @@
-#!/bin/sh
 # Evidence (docs/EVIDENCE.md, compute points): a timer that falls due inside rebuilt code
 # stops it at the exact event. Each `deadline` guest (a 50 ms timer, a loop with no system
 # call), seeds 1-20 at the seed's gap and at compute-gap=0: all ok, the loop's virtual time in
@@ -6,7 +5,6 @@
 # seed under verify --runs 20 --vary cpu,load,aslr,sandbox: one digest.
 # Languages add their guest to GUESTS: (name, program and arguments under /guest/compute).
 #@ tier=evidence budget=300 slots=6
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-deadline python3 -I - <<'PY'
 import json, os, re, subprocess

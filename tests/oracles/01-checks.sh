@@ -28,7 +28,6 @@
 #    --log-paths, an open through a symlink has its path as passed and the path it walked, the
 #    same in five runs under cpu and aslr variation.
 #@ tier=quick budget=10 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 kv=$PATINA_GUESTS/examples/kvlog hello=$PATINA_GUESTS/hello-static
@@ -84,7 +83,8 @@ want=$(jq -r '"\(.check.label): \(.check.detail)"' "$first/result.json")
 # minimize keeps the crash and the signature; the checker runs in each try.
 "$PATINA" minimize "$first" --out min --format json >min.json 2>min.err || die "minimize: $(tail -2 min.err)"
 case $(jq -r .to min.json) in *"crash machine"*) ;; *) die "minimize dropped the crash: $(jq -c . min.json)" ;; esac
-[ "$(jq -r .signature "$(jq -r .dir min.json)/result.json")" = "$(jq -r .signature "$first/result.json")" ] || die "minimize: another signature"
+lhs=$(jq -r .signature "$(jq -r .dir min.json)/result.json"); rhs=$(jq -r .signature "$first/result.json")
+[ "$lhs" = "$rhs" ] || die "minimize: another signature"
 
 # A checker that fails is never a pass.
 is exit2 "$(run exit2 --check chk/exit2 -- "$hello")" 2 error check
@@ -116,7 +116,8 @@ is marked "$(run marked --check chk/mark -- "$hello")" 0 ok exit
 
 # A passing checker leaves the run as a run without --check has it.
 is plain "$(run plain -- "$hello")" 0 ok exit
-[ "$(jq -r .digest plain.json)" = "$(jq -r .digest marked.json)" ] || die "the digest differs with --check"
+lhs=$(jq -r .digest plain.json); rhs=$(jq -r .digest marked.json)
+[ "$lhs" = "$rhs" ] || die "the digest differs with --check"
 cmp -s plain/inc-0/boundary.log marked/inc-0/boundary.log || die "the boundary log differs with --check"
 [ "$(jq -r .check.verdict marked.json)" = pass ] && [ "$(jq -r .check plain.json)" = null ] || die "check verdicts: $(jq -c .check marked.json) $(jq -c .check plain.json)"
 
@@ -212,7 +213,9 @@ run lt --work lt-start -- /bin/sh -c "rm gone; mkdir -p d/e; echo new >d/f; chmo
 [ "$(jq -r .outcome lt.json)" = ok ] || die "log tree guest: $(tail -2 lt.err)"
 "$PATINA" log tree lt/inc-0 lt-tree || die "log tree failed"
 mv lt-tree/listing lt-listing
-[ "$(cd lt-tree && sh -c "$list")" = "$(cat lt-listing)" ] || die "log tree differs from the guest's own tree: $(cd lt-tree && sh -c "$list")"
+# lint-allow: plain-sh — the listing command the guest ran under /bin/sh, run the same way
+lhs=$(cd lt-tree && sh -c "$list"); rhs=$(cat lt-listing)
+[ "$lhs" = "$rhs" ] || die "log tree differs from the guest's own tree: $lhs"
 ! "$PATINA" log tree lt/inc-0 lt-tree 2>/dev/null || die "log tree wrote into a directory that is not empty"
 pruned=$(for d in up1/seed-*; do [ -d "$d/inc-0" ] || { echo "$d"; break; }; done)
 [ -n "$pruned" ] && ! "$PATINA" log tree "$pruned/inc-0" lt-pruned 2>/dev/null && [ ! -e lt-pruned ] || die "log tree of a pruned run '$pruned'"
@@ -282,7 +285,9 @@ chmod +x chk/calc-serve chk/serve-garbage chk/serve-gone
 calcs() { n=$1; shift; rc=0; "$PATINA" sweep --seeds 1..2 -j 4 --cases calc.txt --mount "$RUNS/calc:/calc" --out "$n" "$@" >"$n.txt" 2>&1 || rc=$?; echo "$rc"; }
 rc=$(calcs calcs-serve --known known2 --check-serve chk/calc-serve)
 groups() { jq -c '[.groups[] | [.signature, (.cases | length), .count]]' "$1/report.json"; }
-[ "$rc" = 0 ] && [ "$(groups calcs-serve)" = "$(groups calcs)" ] || die "calc with --check-serve: exit $rc, groups $(groups calcs-serve), --check gave $(groups calcs)"
+[ "$rc" = 0 ] || die "calc with --check-serve: exit $rc"
+lhs=$(groups calcs-serve); rhs=$(groups calcs)
+[ "$lhs" = "$rhs" ] || die "calc with --check-serve: groups $lhs, --check gave $rhs"
 # A server that answers anything but a verdict, or ends, judges nothing: every run is an error.
 for s in garbage gone; do
   rc=$(calcs calcs-$s --check-serve chk/serve-$s)
@@ -308,8 +313,10 @@ rc=0
 [ "$rc" = 2 ] && grep -q -- '--fault is a setting of the whole sweep' cw-bad.out && [ ! -e cw-bad/seed-1 ] || die "a sweep's flag on a case line: exit $rc: $(cat cw-bad.out)"
 # The report: a group in full by its number, and its runs listed in report.json.
 "$PATINA" report --group 2 calcs >g2.txt || true
-[ "$(head -1 g2.txt)" = "$(jq -r '.groups[1].signature' calcs/report.json)" ] && grep -q '^  replay: ' g2.txt || die "report --group 2: $(cat g2.txt)"
-[ "$(jq '[.groups[].runs | length] | add' calcs/report.json)" = "$(jq .findings calcs/report.json)" ] || die "report.json: groups do not list every finding's run"
+lhs=$(head -1 g2.txt); rhs=$(jq -r '.groups[1].signature' calcs/report.json)
+[ "$lhs" = "$rhs" ] && grep -q '^  replay: ' g2.txt || die "report --group 2: $(cat g2.txt)"
+lhs=$(jq '[.groups[].runs | length] | add' calcs/report.json); rhs=$(jq .findings calcs/report.json)
+[ "$lhs" = "$rhs" ] || die "report.json: groups do not list every finding's run"
 echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case settings, faults patterns, --group, --ok-exit any"
 
 wait "$hang" || true

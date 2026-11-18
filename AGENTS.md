@@ -52,11 +52,15 @@ arm runner (`check-arm64`).
   CI runs it on x86_64 (`check`) and arm64 (`check-arm64`). **Land with `scripts/land BRANCH`**
   (`--dry-run` first): it rebases, runs the gate, pushes BRANCH, needs both jobs green on the
   first attempt, fast-forwards `main` and deletes BRANCH. Never move `main` by hand.
-- **A check tests the build it just made.** `./check` stops on a failed patina or guest build
-  (no pipe hides a status: `sh` has no pipefail on every host, so a command whose status
-  matters runs alone or in an assignment; workflow steps run under bash `-eo pipefail`);
+- **A check tests the build it just made.** `./check` stops on a failed patina or guest build;
   `tests/run.py` prints the build under test and refuses a binary older than its sources. A
   planted break that does not compile proves nothing unless the check failed on it.
+- **Scripts run strict.** `tests/run.py` runs every check script under `bash -euo pipefail`
+  (`inherit_errexit`) whatever its first line; every other script says `set -euo pipefail;
+  shopt -s inherit_errexit` (`install.sh` and `examples/checks/` stay POSIX `sh`, `set -eu`).
+  An expected failure is written out (`if ! cmd`, `cmd || [ $? = 1 ]`, `st=0; cmd || st=$?`);
+  `tests/lint.py` rejects what strict mode cannot see: `|| true` on a pipe or a captured value,
+  a negated pipe, `$(...)` that `[ ]` passes on failure, `rm -r "$VAR"` without `:?`, plain `sh`.
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.

@@ -1,10 +1,8 @@
-#!/bin/sh
 # Evidence (docs/EVIDENCE.md, compute points): compute points change nothing for stock
 # programs. W1-W9 with their fault settings, and the stock thread, race and loop guests,
 # seeds 1-3: the build named by PATINA_BASE (one without compute points) and this build give
 # the same digest and the same result.json but for wall_ms.
 #@ tier=evidence budget=600 slots=6
-set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 : "${PATINA:?}" "${PATINA_BASE:?a build without compute points}" "${PATINA_GUESTS:?}" "${PATINA_WORKLOADS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-identity PYTHONPATH=$HERE/../durability/bench python3 -I - <<'PY'

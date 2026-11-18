@@ -37,9 +37,9 @@ one_shell() {
 
     echo "== $sh: c. virtual times"
     o=$RUNS/$sh-d/seed-1/run-0/inc-0/stdout
-    grep '^~ ls -l -' "$o" | head -2
+    awk '/^~ ls -l -/ && n++ < 2' "$o"
     grep '^~ date' "$o"
-    n=$(grep '^~ ls -l -' "$o" | grep -vc ' 2026-01-01 00:00:0' || true)
+    n=$(awk '/^~ ls -l -/ && !/ 2026-01-01 00:00:0/ {n++} END {print n + 0}' "$o")
     [ "$n" = 0 ] || fail "W6 $sh: $n ls -l lines with a time outside the virtual epoch's first seconds"
     d=$(sed -n 's/^~ date +%s //p' "$o")
     [ "$d" -ge 1767225600 ] && [ "$d" -lt 1767225660 ] || fail "W6 $sh: date +%s = $d, not virtual time"
@@ -60,7 +60,8 @@ one_shell() {
         o=$RUNS/$sh-f24/run-$s
         if [ "$(field "$o/result.json" outcome)" = failure ]; then
             nf=$((nf + 1))
-            [ "$(tail -1 "$o/inc-0/stdout")" != done ] || fail "W6 $sh seed $s: failed but printed done"
+            last=$(tail -1 "$o/inc-0/stdout")
+            [ "$last" != done ] || fail "W6 $sh seed $s: failed but printed done"
             [ -s "$o/inc-0/stderr" ] || fail "W6 $sh seed $s: failed with an empty stderr"
         fi
     done

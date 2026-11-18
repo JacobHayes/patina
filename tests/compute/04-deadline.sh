@@ -1,4 +1,3 @@
-#!/bin/sh
 # Deadlines inside rebuilt code (`deadline`: loops with no system call):
 #  a. an ITIMER_REAL falls due inside the loop: its handler runs at the timer's virtual time
 #     plus at most ten trap charges (the calls made), and the loop ends in range, on seeds 1-3
@@ -29,7 +28,7 @@ done
 wait
 dl "$o/d-1-1" 1 10 & dl "$o/d-1-2" 1 10 &
 prun "$o/cpu" 1 -- /guest/compute/deadline cpu "$N" &
-rm -rf "$o/verify"
+rm -rf "${o:?}/verify"
 "$PATINA" verify --runs 3 --vary cpu,aslr --seed 1 --out "$o/verify" \
     --mount "$G":/guest:copy -- /guest/compute/deadline deadline 10 >"$o/verify.txt" 2>&1 || true
 wait

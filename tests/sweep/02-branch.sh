@@ -79,9 +79,11 @@ print(g["rerun"])
 print("window: first run seed %d@%d in points %d..%d of %d; %d runs, replayed identical" % (s, p, lo, hi, n, rep["runs"]), file=sys.stderr)
 PY
 ) || { echo "$rerun"; exit 1; }
+# lint-allow: plain-sh — the rerun line is printed for a user's shell; run it as one would
 sh -c "$(echo "$rerun" | sed "s|^patina run |'$PATINA' run --out '$d/rerun' |")" >/dev/null 2>&1 || true
 sig() { field "$1" signature; }
-[ "$(sig "$d/rerun/result.json")" = "$(field "$d/full/report.json" groups | python3 -I -c 'import json,sys; print([g for g in json.load(sys.stdin) if "acked" in g["signature"]][0]["signature"])')" ] ||
+lhs=$(sig "$d/rerun/result.json"); rhs=$(field "$d/full/report.json" groups | python3 -I -c 'import json,sys; print([g for g in json.load(sys.stdin) if "acked" in g["signature"]][0]["signature"])')
+[ "$lhs" = "$rhs" ] ||
     die "rerun: $(sig "$d/rerun/result.json")"
 echo "cut at $tried of $all points; resumed, the report counts every run; rerun gives the same signature: $rerun"
 
@@ -106,9 +108,11 @@ for c in "" "--crash machine:5" "--crash machine-at:3"; do
 done
 sw swap --seeds 1 --crash machine -- /guest/hello-static
 sw swap --seeds 1 --branch --crash machine -- /guest/hello-static
-grep -q 'replacing it' "$d/swap.txt" && ls "$d/swap" | grep -q '^seed-1@' || die "branch over plain: $(head -2 "$d/swap.txt")"
+ls "$d/swap" >"$d/swap.ls"
+grep -q 'replacing it' "$d/swap.txt" && grep -q '^seed-1@' "$d/swap.ls" || die "branch over plain: $(head -2 "$d/swap.txt")"
 sw swap --seeds 1 --crash machine -- /guest/hello-static
-grep -q 'replacing it' "$d/swap.txt" && ! ls "$d/swap" | grep -q '^seed-1@' || die "plain over branch: $(head -2 "$d/swap.txt")"
+ls "$d/swap" >"$d/swap.ls"
+grep -q 'replacing it' "$d/swap.txt" && ! grep -q '^seed-1@' "$d/swap.ls" || die "plain over branch: $(head -2 "$d/swap.txt")"
 echo "a branch sweep and a plain sweep replace each other"
 
 sw acklog --seeds 1 --branch --crash machine --max-findings 1 -- /guest/examples/acklog

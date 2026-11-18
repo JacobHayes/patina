@@ -6,7 +6,6 @@
 #    process. The checker gets `PATINA`. A case line's settings are part of the case: a sweep
 #    run again keeps the cases whose line is unchanged and replaces the one whose --env changed.
 #@ tier=area budget=30 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 hello=$PATINA_GUESTS/hello-static
@@ -33,7 +32,8 @@ for s in double early; do
     # The extra line is found at the latest by the job's next request: that run is an error.
     [ "$rc" = 2 ] && [ "$(jq .check.errors $s/report.json)" -ge 1 ] || die "a server that answers $s: exit $rc, $(check $s)"
 done
-[ "$(sweep env env)" = 0 ] && [ "$(sort -u chk/patina.seen)" = "$(realpath "$PATINA")" ] || die "PATINA for a served checker: $(sort -u chk/patina.seen)"
+rc=$(sweep env env); seen=$(sort -u chk/patina.seen); self=$(realpath "$PATINA")
+[ "$rc" = 0 ] && [ "$seen" = "$self" ] || die "PATINA for a served checker: exit $rc, $seen"
 
 # Replays: a server of their own, the same verdict; an alternating one is check-unstable.
 rc=$(sweep wrong wrong)
@@ -54,7 +54,11 @@ while [ "$(wc -l 2>/dev/null <chk/hang.starts || echo 0)" -lt 2 ] && [ $i -lt 20
 kill -INT $pid
 rc=0
 wait $pid || rc=$?
-[ "$rc" != 0 ] && [ -z "$(ls hang/seed-*/result.json 2>/dev/null | xargs -r jq -r 'select(.check.verdict == "pass") | .seed')" ] || die "an interrupted served sweep: exit $rc, a run passed"
+passed=""
+for f in hang/seed-*/result.json; do
+    [ ! -e "$f" ] || passed="$passed$(jq -r 'select(.check.verdict == "pass") | .seed' "$f")"
+done
+[ "$rc" != 0 ] && [ -z "$passed" ] || die "an interrupted served sweep: exit $rc, a run passed"
 python3 -I "$root/tests/leftovers.py" "$RUNS" || die "an interrupted served sweep left processes"
 
 # Case lines: their settings are part of the case when a sweep resumes.

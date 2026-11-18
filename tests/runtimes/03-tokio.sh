@@ -50,7 +50,7 @@ fs=0
 for s in 1 2 3; do
     o=$RUNS/tk-f$s
     run $T "$o" "$s" $FAULT -- /guest/tokio-mt local
-    n=$(grep -c '^spawn_blocking error' "$o/inc-0/stdout" || true)
+    n=$(grep -c '^spawn_blocking error' "$o/inc-0/stdout") || [ $? = 1 ]
     echo "seed $s: $(field "$o/result.json" faults.injected) faults injected, class $(field "$o/result.json" outcome), $n spawn_blocking errors seen"
     [ "$n" -gt 0 ] && fs=$((fs + 1))
 done

@@ -10,11 +10,12 @@ d=$RUNS/release
 mkdir -p "$d/dist"
 tar -czf "$d/dist/patina-$t.tar.gz" -C "$(dirname "$PATINA")" patina -C "$root" LICENSE-APACHE
 (cd "$d/dist" && sha256sum "patina-$t.tar.gz" >SHA256SUMS)
+# lint-allow: plain-sh — install.sh runs as users run it: piped into sh
 PATINA_RELEASE_URL="file://$d/dist" sh "$root/install.sh" --prefix "$d/prefix" >"$d/install.txt" 2>&1 ||
     die "install.sh: $(tail -5 "$d/install.txt")"
 echo "installed patina-$t.tar.gz: $(grep -m1 . "$d/install.txt")"
 # The smoke's projects live outside this checkout, where its toolchain file does not reach.
 RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-$(awk -F'"' '/^channel/ {print $2}' "$root/rust-toolchain.toml")}
-PATH="$d/prefix/bin:$PATH" RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN sh "$root/scripts/install-smoke.sh" >"$d/smoke.txt" 2>&1 ||
+PATH="$d/prefix/bin:$PATH" RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN bash "$root/scripts/install-smoke.sh" >"$d/smoke.txt" 2>&1 ||
     die "install-smoke: $(tail -5 "$d/smoke.txt")"
 tail -1 "$d/smoke.txt"

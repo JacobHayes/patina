@@ -1,4 +1,3 @@
-#!/bin/sh
 # Compute points change nothing they should not:
 #  a. every compute guest runs natively (its hooks go inert) with its normal output;
 #  b. a stock program's run has no `compute` in result.json, no SDK call and no compute record
@@ -51,7 +50,8 @@ echo "c. rebuilt, compute-gap=0: loop of $N iterations: $t virtual ns, $(field "
 for r in poke-1 poke-2; do
     [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "d. cellpoke scribble: $(res "$o/$r")"
 done
-[ "$(field "$o/poke-1/result.json" digest)" = "$(field "$o/poke-2/result.json" digest)" ] ||
+lhs=$(field "$o/poke-1/result.json" digest); rhs=$(field "$o/poke-2/result.json" digest)
+[ "$lhs" = "$rhs" ] ||
     die "d. cellpoke scribble: two runs of seed 1 differ"
 [ "$(field "$o/unmap/result.json" outcome)/$(field "$o/unmap/result.json" stop)" = unsupported/compute-cell ] ||
     die "d. cellpoke unmap: $(res "$o/unmap")"

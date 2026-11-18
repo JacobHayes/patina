@@ -8,6 +8,7 @@ for g in $GUESTS; do
     cmp -s "$a/inc-0/stdout" "$b/inc-0/stdout" && die "$g: same stdout for seeds 1 and 2"
     ra=$(grep '^random ' "$a/inc-0/stdout"); rb=$(grep '^random ' "$b/inc-0/stdout")
     [ "$ra" != "$rb" ] || die "$g: same random bytes"
-    [ "$(field "$a/result.json" digest)" != "$(field "$b/result.json" digest)" ] || die "$g: same digest"
+    da=$(field "$a/result.json" digest); db=$(field "$b/result.json" digest)
+    [ "$da" != "$db" ] || die "$g: same digest"
     echo "$g: seeds differ ($ra / $rb)"
 done

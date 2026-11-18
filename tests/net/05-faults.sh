@@ -16,7 +16,7 @@ run_ok "$o/chunk-correct-on" 1 --fault net-chunk-max=1 -- /guest/sockets chunk c
 echo "net-chunk-max=1: naive receiver fails, passes without; correct receiver: $(grep 'correct receiver' "$o/chunk-correct-on/inc-0/stdout")"
 [ "$(net "$o/chunk-correct-on" chunks)" -ge 500 ] || die "chunks"
 pair reset net-reset-permille=200 reset reset
-grep -h 'reset\|ECONN\|Connection' "$o/reset-on/inc-0/stdout" | head -3
+awk '/reset|ECONN|Connection/ && n++ < 3' "$o/reset-on/inc-0/stdout"
 pair refuse net-connect-refuse-permille=1000 connect refused
 pair timeout net-connect-timeout-permille=1000 connect timeout
 grep -h 'connect ->' "$o/timeout-on/inc-0/stdout"

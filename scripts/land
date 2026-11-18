@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # scripts/land [--dry-run] [--accept-rerun REASON] [-r REV] BOOKMARK: land REV (default @-) on main.
 #
 # Refuses unless the working copy has no changes and every commit to land is described. Then:
@@ -8,7 +8,7 @@
 # push main; delete BOOKMARK; print the commit and the CI run. It pushes only BOOKMARK and main.
 # A re-run job is refused: a flaky test is a defect to fix (AGENTS.md). --accept-rerun REASON
 # lands anyway and prints REASON with the result. --dry-run checks and shows the plan only.
-set -eu
+set -euo pipefail; shopt -s inherit_errexit
 REQUIRED="check check-arm64"
 die() { echo "land: refused: $*" >&2; exit 1; }
 say() { echo "land: $*"; }
@@ -26,12 +26,14 @@ done
 [ "$name" != main ] || die "the branch bookmark cannot be main"
 cd "$(jj workspace root)"
 id() { jj log --no-graph -r "$1" -T 'commit_id ++ "\n"'; }
-[ -z "$(jj diff -r @ --summary)" ] || die "the working copy has changes: commit them (jj commit) or set them aside"
-[ "$(id "$rev")" != "$(id @)" ] || die "$rev is the working-copy commit: land a committed revision (jj commit, then -r @-)"
+changes=$(jj diff -r @ --summary)
+[ -z "$changes" ] || die "the working copy has changes: commit them (jj commit) or set them aside"
+this=$(id "$rev"); at=$(id @)
+[ "$this" != "$at" ] || die "$rev is the working-copy commit: land a committed revision (jj commit, then -r @-)"
 jj git fetch
 [ -n "$(jj log --no-graph -r "main@origin..$rev" -T 'commit_id')" ] || die "nothing to land: $rev is already on main"
-[ -z "$(jj log --no-graph -r "(main@origin..$rev) & description(exact:'')" -T 'commit_id')" ] ||
-    die "an undescribed commit in main@origin..$rev"
+undescribed=$(jj log --no-graph -r "(main@origin..$rev) & description(exact:'')" -T 'commit_id')
+[ -z "$undescribed" ] || die "an undescribed commit in main@origin..$rev"
 if [ "$dry" = 1 ]; then
     say "dry run: would rebase these onto main@origin $(id main@origin | cut -c1-12):"
     jj log --no-graph -r "main@origin..$rev" -T '"  " ++ commit_id.short(12) ++ " " ++ description.first_line() ++ "\n"'
@@ -40,8 +42,8 @@ if [ "$dry" = 1 ]; then
     exit 0
 fi
 jj rebase -b "$rev" -d main@origin
-[ -z "$(jj log --no-graph -r "(main@origin..$rev) & conflicts()" -T 'commit_id')" ] ||
-    die "the rebase onto main@origin conflicts: resolve, then run again"
+conflicted=$(jj log --no-graph -r "(main@origin..$rev) & conflicts()" -T 'commit_id')
+[ -z "$conflicted" ] || die "the rebase onto main@origin conflicts: resolve, then run again"
 sha=$(id "$rev")
 mise run check || die "mise run check failed at $sha"
 jj bookmark set "$name" -r "$sha"
@@ -70,7 +72,8 @@ for j in $REQUIRED; do
     fi
 done
 jj git fetch
-[ "$(id "main@origin & ::$sha")" = "$(id main@origin)" ] || die "main moved since the rebase: rebase and run again"
+lhs=$(id "main@origin & ::$sha"); rhs=$(id main@origin)
+[ "$lhs" = "$rhs" ] || die "main moved since the rebase: rebase and run again"
 jj bookmark set main -r "$sha"
 jj git push --bookmark main
 drop

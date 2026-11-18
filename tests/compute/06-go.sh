@@ -1,4 +1,3 @@
-#!/bin/sh
 # Go with compute points (go/patina/compute, -gcflags=all=-d=libfuzzer, no cgo):
 #  a. the pinned toolchain builds the guests (else GO-BROKEN says why); a build with the flag
 #     that does not import the package fails to link on a libfuzzer hook (fail closed); a build

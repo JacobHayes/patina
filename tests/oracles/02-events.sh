@@ -4,7 +4,6 @@
 # `cut` line, tail) and a pruned run (an error, no stream); an operation after its call; the
 # filters.
 #@ tier=area budget=20 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 kv=$PATINA_GUESTS/examples/kvlog churn=$PATINA_GUESTS/churn
 die() { echo "FAIL: $*"; exit 1; }
@@ -35,8 +34,9 @@ for d in crashes/seed-*; do
     got=$(jq -r 'select(.type == "inc" or .type == "crash") | "\(.type)\(.inc)"' c.jsonl | paste -sd,)
     want=$(i=0; while [ $i -lt "$k" ]; do printf 'inc%s' $i; [ $i = $((k - 1)) ] || printf ',crash%s,' $i; i=$((i + 1)); done)
     [ "$got" = "$want" ] || die "$d: incarnations and crashes: $got, want $want"
-    [ "$(jq -s '[.[] | select(.type == "crash")] | length' c.jsonl)" = "$(jq '.crashes | length' "$d/result.json")" ] || die "$d: crash count"
-    bad=$(jq -r 'select(.type == "op" and (.op | IN("write", "fsync")) and .path != "/work/data.log") | .inc' c.jsonl | head -n1)
+    lhs=$(jq -s '[.[] | select(.type == "crash")] | length' c.jsonl); rhs=$(jq '.crashes | length' "$d/result.json")
+    [ "$lhs" = "$rhs" ] || die "$d: crash count"
+    bad=$(jq -r 'select(.type == "op" and (.op | IN("write", "fsync")) and .path != "/work/data.log") | .inc' c.jsonl | sed -n 1p)
     [ -z "$bad" ] || die "$d: inc-$bad: an operation not on /work/data.log"
     [ "$(jq -s '[.[] | select(.type == "op" and .op == "write" and .inc > 0)] | length' c.jsonl)" -gt 0 ] || die "$d: no writes after the crash"
 done
@@ -46,7 +46,7 @@ done
 for f in faults.jsonl crashes/seed-*/events.jsonl; do
     bad=$(jq -rn '[inputs] as $e | ($e | map(select(.type == "call") | {key: "\(.inc) \(.seq)", value: 1}) | from_entries) as $calls
         | range(1; $e | length) | select($e[.].type == "op" and $calls["\($e[.].inc) \($e[.].seq)"])
-        | select($e[. - 1].seq != $e[.].seq or ($e[. - 1].type | IN("call", "op") | not)) | $e[.]' "$f" | head -n1)
+        | select($e[. - 1].seq != $e[.].seq or ($e[. - 1].type | IN("call", "op") | not)) | $e[.]' "$f" | sed -n 1p)
     [ -z "$bad" ] || die "$f: an operation away from its call: $bad"
 done
 
@@ -62,7 +62,7 @@ rc=0
 
 # A sweep's cut log: its first and last records, a `cut` line between; a pruned run: no stream.
 "$PATINA" sweep --seeds 1..2 --log-limit 12 --out cut -- "$churn" 100000000 >cut.txt 2>&1 || true
-d=$(ls -d cut/seed-* | head -n1)
+d=$(ls -d cut/seed-* | sed -n 1p)
 [ -f "$d/inc-0/boundary.cut" ] || die "the cut sweep kept no cut log: $(tail -2 cut.txt)"
 "$PATINA" log events "$d" >cut.jsonl
 records=$(jq -s 'map(select(.type | IN("header", "inc", "cut", "op") | not)) | length' cut.jsonl)

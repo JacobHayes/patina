@@ -5,5 +5,4 @@
 #    and one by execve report into the run's table; with faults-after-setup no point fires
 #    before `setup-complete`; a violation replays identically.
 #@ tier=quick budget=30
-set -eu
 exec python3 -I "$(dirname "$0")/lib/points.py"

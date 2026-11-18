@@ -2,7 +2,6 @@
 # (hello-static) at -j 1, 4 and 8, and for a guest that holds 500 pipes with data in each at
 # -j 8; the outcomes of each sweep. SEEDS (default 400) seeds per sweep.
 #@ tier=evidence budget=600 slots=8
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 n=${SEEDS:-400}
 pipes='import os

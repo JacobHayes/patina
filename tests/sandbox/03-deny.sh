@@ -1,11 +1,9 @@
-#!/bin/sh
 # Change 3: deny by default. Requests of ioctl, fcntl, prctl and socket options that no row
 # lists are refused with their documented errno and recorded; paths are resolved by the
 # runtime before the policy decides (symlinks and relative names cannot walk into /proc,
 # /sys or /dev), and the determinism hardening checks after the call (by the mount of what was reached) are
 # gone. The determinism hardening reproducers of B7 (procescape) still pass.
 #@ tier=quick budget=30 slots=4
-set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/deny
 mkdir -p "$out"
@@ -31,10 +29,11 @@ echo "pathescape: 28 walks through symlinks, relative names and magic links refu
 # B7: the supervisor's /proc entries through symlinks and dot-dot, from two run
 # directories: same stdout and digest.
 for k in a b; do
-    rm -rf "$out/procescape-$k"
+    rm -rf "${out:?}/procescape-$k"
     timeout 300 "$PATINA" run --seed 1 --out "$out/procescape-$k" --mount "$G12":/guest:copy -- /guest/procescape >/dev/null 2>&1 || true
 done
 cmp -s "$out/procescape-a/inc-0/stdout" "$out/procescape-b/inc-0/stdout" || die "procescape: stdout depends on the run directory"
-[ "$(digest "$out/procescape-a")" = "$(digest "$out/procescape-b")" ] || die "procescape: digests differ"
+lhs=$(digest "$out/procescape-a"); rhs=$(digest "$out/procescape-b")
+[ "$lhs" = "$rhs" ] || die "procescape: digests differ"
 awk '{ if ($0 ~ /fd=[0-9]/ && $0 !~ /fd=-1/) bad++ } END { exit bad > 0 }' "$out/procescape-a/inc-0/stdout" || die "procescape: an escape opened"
 echo "B7 procescape: every escape refused, same stdout and digest from two run directories"

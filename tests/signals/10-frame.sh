@@ -17,10 +17,10 @@ patina_run "$o/patina" 1 sig-frame
 cp "$o/patina/inc-0/stdout" "$o/patina.txt"
 diff "$o/native.txt" "$o/patina.txt" >"$o/diff.txt" || true
 cat "$o/diff.txt"
-fields=$(grep '^[<>]' "$o/diff.txt" | awk '{print $2, $3}' | sort -u | tr '\n' ';')
+fields=$(awk '/^[<>]/ {print $2, $3}' "$o/diff.txt" | sort -u | tr '\n' ';')
 echo "differing fields: $fields"
 allowed="fp.hdr.xstate_bv fp.legacy_reserved_416_464_zero mc.reserved1_zero uc_stack.pad uc.unused_zero mc.pad_zero rec.tail_zero rec.sve.size rec.sve.beyond_fpsimd"
-for f in $(grep '^[<>]' "$o/diff.txt" | awk '{print $3}' | sort -u); do
+for f in $(awk '/^[<>]/ {print $3}' "$o/diff.txt" | sort -u); do
     case " $allowed " in *" $f "*) ;; *) die "field $f differs" ;; esac
 done
 # The normalised values themselves.

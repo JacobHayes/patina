@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced). Environment from ./check: PATINA,
 # PATINA_RT, RUNS. The four workloads have their own guest directories under $W.
-set -eu
 : "${PATINA:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${PATINA_WORKLOADS:?}
@@ -23,7 +22,7 @@ finish() {
 # run WORKLOAD OUT SEED [patina options] -- /guest/cmd args: one run (OUT is replaced).
 run() {
     wl=$1; out=$2; seed=$3; shift 3
-    rm -rf "$out"; mkdir -p "$(dirname "$out")"
+    rm -rf "${out:?}"; mkdir -p "$(dirname "$out")"
     timeout 900 "$PATINA" run --seed "$seed" --out "$out" --mount "$W/$wl":/guest:copy "$@" >/dev/null 2>"$out.err" \
         || [ -f "$out/result.json" ] || die "patina run $* (seed $seed): exit $? ($(tail -2 "$out.err"))"
     rm -f "$out.err"
@@ -34,7 +33,7 @@ run() {
 # Prints "seed S: N identical runs (VARY), class C, digest D". Returns 1 on any difference.
 verify() {
     wl=$1; out=$2; seed=$3; runs=$4; vary=$5; shift 5
-    rm -rf "$out"; mkdir -p "$(dirname "$out")"
+    rm -rf "${out:?}"; mkdir -p "$(dirname "$out")"
     if ! timeout 7200 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$vary" --out "$out" --mount "$W/$wl":/guest:copy "$@" \
         >"$out.verify.txt" 2>&1 && ! grep -q '^identical: ' "$out.verify.txt"; then
         echo "verify $wl seed $seed: patina verify exit status non-zero: $(tail -3 "$out.verify.txt")"
@@ -64,7 +63,7 @@ verify_seeds() {
         cat "$RUNS/$name.seed-$s.txt"
         grep -q "NOT IDENTICAL" "$RUNS/$name.seed-$s.txt" && bad=$((bad + 1))
         # keep the first run of each seed (evidence), drop the others (disk)
-        for i in $(seq 1 $((${VERIFY_RUNS:-3} - 1))); do rm -rf "$RUNS/$name/seed-$s/run-$i"; done
+        for i in $(seq 1 $((${VERIFY_RUNS:-3} - 1))); do rm -rf "${RUNS:?}/$name/seed-$s/run-$i"; done
     done
     return $bad
 }
@@ -78,11 +77,11 @@ sweep() {
 # count NAME CLASS: runs of the sweep with that outcome class.
 count() { awk -F'\t' -v c="$2" 'NR>1 && $2==c' "$RUNS/$1/summary.tsv" | wc -l; }
 # stalls NAME: runs of the sweep that ended unsupported, stop compute-stall.
-stalls() { cat "$RUNS/$1"/outcomes/*.json | jq -r .stop | grep -c '^compute-stall$' || true; }
+stalls() { jq -r .stop "$RUNS/$1"/outcomes/*.json | awk '$0 == "compute-stall" {n++} END {print n + 0}'; }
 # digests NAME: distinct digests among the sweep's ok runs.
 digests() { awk -F'\t' 'NR>1 && $2=="ok" {print $4}' "$RUNS/$1/summary.tsv" | sort -u | wc -l; }
 # ok_seeds NAME N: the first N seeds whose run was ok.
-ok_seeds() { awk -F'\t' 'NR>1 && $2=="ok" {print $1}' "$RUNS/$1/summary.tsv" | head -"$2" | tr '\n' ' '; }
+ok_seeds() { awk -F'\t' -v n="$2" 'NR>1 && $2=="ok" && n-- > 0 {print $1}' "$RUNS/$1/summary.tsv" | tr '\n' ' '; }
 
 # netf WORKLOAD NAME PATTERN "SEEDS" [patina options] -- cmd: one run per seed with a network
 # fault; prints per seed the class, wall time, wire counters and the first stdout line matching
@@ -95,8 +94,8 @@ netf() {
         o=$RUNS/$name-$s
         run "$wl" "$o" "$s" "$@"
         c=$(field "$o/result.json" outcome)
-        k=$(grep -c -- "$pat" "$o/inc-0/stdout" || true)
-        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,partitioned}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || true)"
+        k=$(grep -c -- "$pat" "$o/inc-0/stdout") || [ $? = 1 ]
+        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,partitioned}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || [ $? = 1 ])"
         [ "$c" = ok ] && [ "$k" -gt 0 ] && seen=$((seen + 1))
     done
     [ "$seen" -gt 0 ]
@@ -126,6 +125,6 @@ no_leftovers() {
     [ -z "$left" ] || die "processes left from $1: $left"
     [ "$rc" = 0 ] || die "leftovers.py failed (exit $rc)"
     mounts=$(findmnt -rn -o TARGET) || die "findmnt failed"
-    m=$(printf '%s\n' "$mounts" | grep -c patina || true)
+    m=$(printf '%s\n' "$mounts" | awk '/patina/ {n++} END {print n + 0}')
     [ "$m" = 0 ] || die "$m mounts mention patina"
 }

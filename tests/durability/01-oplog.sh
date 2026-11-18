@@ -4,7 +4,6 @@
 # (tokio-mt local binds unix sockets) failed the check on every run before the fix
 # (docs/EVIDENCE.md, "unix bind").
 #@ tier=quick budget=30 slots=4
-set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_WORKLOADS:?}" "${PATINA_GUESTS:?}"
 here=$(cd "$(dirname "$0")" && pwd)
 python3 -I - "$here/bench" "$RUNS" <<'PY'

@@ -51,7 +51,7 @@ SWEEP_KEEP=all sweep py-f20 $P 1-20 -- $FAULT -- $CMD
 awk -F'\t' 'NR>1 {print $2, $3}' "$RUNS/py-f20/summary.tsv" | sort | uniq -c
 bad=$(awk -F'\t' 'NR>1 && !($2=="ok" || ($2=="failure" && $3=="exit status 1"))' "$RUNS/py-f20/summary.tsv" | wc -l)
 [ "$bad" = 0 ] || fail "W5 faults: $bad runs neither ok nor a clean exit status 1"
-sig=$(for s in $(seq 1 20); do field "$RUNS/py-f20/outcomes/$s.json" signal; done | grep -vc null || true)
+sig=$(for s in $(seq 1 20); do field "$RUNS/py-f20/outcomes/$s.json" signal; done | awk '!/null/ {n++} END {print n + 0}')
 [ "$sig" = 0 ] || fail "W5 faults: $sig runs ended by a signal"
 seen=0
 for s in $(seq 1 20); do

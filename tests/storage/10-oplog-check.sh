@@ -11,7 +11,7 @@ chk() {
     for s in $(seq 1 "$N"); do
         "$PATINA" log ops --check "$RUNS/$name/run-$s" >"$RUNS/$name/check-$s.txt" 2>&1 || die "$name seed $s: $(tail -2 "$RUNS/$name/check-$s.txt")"
         k=$((k + $(grep -c ': ok (' "$RUNS/$name/check-$s.txt")))
-        rm -rf "$RUNS/$name/run-$s"
+        rm -rf "${RUNS:?}/$name/run-$s"
     done
     echo "$name: $N seeds, $k incarnations, replay = live tree in every one"
 }

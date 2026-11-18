@@ -1,4 +1,3 @@
-#!/bin/sh
 # the toolchain tier's syscall-free race b (check-then-act, no system call in the window), stock build,
 # counter preemption only: with the race-hunting policy (every segment short) seed 13 finds
 # the double spend (evidence-races: 10 of 200 seeds), and 3 varied runs of it are identical.

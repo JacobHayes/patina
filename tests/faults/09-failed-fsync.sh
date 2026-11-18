@@ -7,7 +7,8 @@ d=$RUNS/09
 # The crash point: just after the fsync of "acks" that follows the failure (from a run
 # without crashes; the run before the crash is the same).
 run "$d/probe" 1 --fault fsync-error-at=3 -- /guest/ack-log retry
-"$PATINA" oplog dump "$d/probe/inc-0" | sed -n 1,12p
+"$PATINA" log ops "$d/probe/inc-0" >"$d/probe.ops"
+sed -n 1,12p "$d/probe.ops"
 set -- $(python3 -I "$LIB/faults.py" point-after "$d/probe/inc-0" Fsync acks 1)
 at=$1 aseq=$2
 echo "crash at crash point $at, after the acks fsync at seq $aseq"

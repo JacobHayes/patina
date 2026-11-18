@@ -9,7 +9,7 @@ mkdir -p "$o"
 timeout 60 "$PATINA" run --seed 1 --out "$o/files" --mount "$PATINA_GUESTS":/guest:copy -- /guest/churn 60000 >/dev/null || true
 [ "$(field "$o/files/result.json" outcome)" = ok ] \
     || die "file churn: $(field "$o/files/result.json" outcome): $(field "$o/files/result.json" message) $(cat "$o/files/inc-0/stderr")"
-rm -rf "$o/files"
+rm -rf "${o:?}/files"
 timeout 60 "$PATINA" run --seed 1 --out "$o/pipes" --mount "$PATINA_GUESTS":/guest:copy -- /guest/churn pipes 20000 >/dev/null || true
 [ "$(field "$o/pipes/result.json" outcome) $(field "$o/pipes/result.json" stop)" = "unsupported capacity" ] \
     || die "pipe churn: $(field "$o/pipes/result.json" outcome) $(field "$o/pipes/result.json" stop): $(field "$o/pipes/result.json" message)"

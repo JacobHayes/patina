@@ -1,4 +1,3 @@
-#!/bin/sh
 # 10. Spin-waits without a system call or `pause` (tests/guests/threads/spinpoints.c), with
 # stall-ms = 1000:
 #  a. A flag spin (each iteration leaves the state unchanged) is found by a spin probe and the
@@ -29,13 +28,13 @@ on=$("$PATINA_CFG" stall-ms=1000)
 off=$("$PATINA_CFG" stall-ms=1000 spin-probes=false)
 one() { # OUT GUESTDIR SEED CONFIG -- PROG ARGS...
     d=$o/$1 g=$2 s=$3 c=$4; shift 4
-    rm -rf "$d"
+    rm -rf "${d:?}"
     timeout 60 "$PATINA" run --seed "$s" --config "$c" --out "$d" --mount "$g":/guest:copy "$@" >/dev/null 2>&1 || true
 }
 G=$PATINA_GUESTS
 one flag "$G" 1 "$on" -- /guest/spinpoints flag &
 one flag-off "$G" 1 "$off" -- /guest/spinpoints flag &
-python3 -I "$(dirname "$0")/../cpu-ms.py" sh -c 'rm -rf "$1" && exec timeout 60 "$2" run --seed 1 --config "$3" --out "$1" --mount "$4":/guest:copy -- /guest/spinpoints count' sh "$o/count-a" "$PATINA" "$on" "$G" >"$o/count-a.ms" &
+python3 -I "$(dirname "$0")/../cpu-ms.py" sh -c 'rm -rf "${1:?}" && exec timeout 60 "$2" run --seed 1 --config "$3" --out "$1" --mount "$4":/guest:copy -- /guest/spinpoints count' sh "$o/count-a" "$PATINA" "$on" "$G" >"$o/count-a.ms" &
 one count-b "$G" 1 "$on" -- /guest/spinpoints count &
 one alone "$G" 1 "$on" -- /guest/spinpoints alone 2000 &
 wait
@@ -43,7 +42,7 @@ for s in 1 2 3; do one "go-$s" "$PATINA_WORKLOADS/go-static" "$s" "$on" -- /gues
 one memcount "$G" 1 "$on" -- /guest/spinpoints memcount &
 one text "$G" 1 "$on" -- /guest/spinpoints text 10 &
 wait
-arm64=$([ "$(uname -m)" = aarch64 ] && echo yes || true)
+arm64=""; [ "$(uname -m)" != aarch64 ] || arm64=yes # lint-allow: test-subst — uname -m does not fail
 one twice "$G" 1 "$on" -- /guest/spinpoints twice &
 one jit "$G" 1 "$on" --timeout 20 -- /guest/spinpoints jit &
 [ -z "$arm64" ] || for m in xchg cas; do one "llsc-$m" "$G" 1 "$on" -- /guest/llsc-spin "$m" & done
@@ -60,7 +59,8 @@ stall count-a || die "b. counting spin: $(res count-a)"
 ms=$(cat "$o/count-a.ms")
 [ "$ms" -ge 1000 ] && [ "$ms" -le 4000 ] || die "b. counting spin used $ms ms of CPU time"
 field "$o/count-a/result.json" message | grep -q spinpoints || die "b. the message does not name the thread: $(res count-a)"
-[ "$(field "$o/count-a/result.json" digest)" = "$(field "$o/count-b/result.json" digest)" ] ||
+lhs=$(field "$o/count-a/result.json" digest); rhs=$(field "$o/count-b/result.json" digest)
+[ "$lhs" = "$rhs" ] ||
     die "b. the same seed stopped at different records"
 echo "b. counting spin after $ms ms of CPU time: $(res count-a | cut -c1-110)"
 

@@ -3,12 +3,12 @@
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-outside
-rm -rf "$o"
+rm -rf "${o:?}"
 timeout 300 "$PATINA" run --seed 1 --out "$o" --mount "$PATINA_GUESTS":/guest:copy -- /guest/sig-long >/dev/null &
 launcher=$!
 pid=
 for i in $(seq 300); do
-    for p in $(pgrep -u "$(id -u)" -x sig-long || true); do
+    for p in $(pgrep -u "$(id -u)" -x sig-long || [ $? = 1 ]); do
         # Ours: a descendant of this launcher.
         q=$p
         while [ "$q" -gt 1 ]; do

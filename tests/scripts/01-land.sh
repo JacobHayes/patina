@@ -4,7 +4,6 @@
 #    main having moved while CI ran. Each refusal leaves main@origin off the commit and no branch
 #    on origin; otherwise main@origin is fast-forwarded to the commit and the branch is gone.
 #@ tier=quick budget=15
-set -eu
 : "${RUNS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 die() { echo "FAIL: $*"; exit 1; }
@@ -39,13 +38,13 @@ jj git clone --quiet "$s/origin.git" "$s/w"
 cd "$s/w"
 main() { jj log --no-graph -r main@origin -T commit_id; }
 # land ARGS: sets $st and keeps the output in $s/out.
-land() { st=0; sh "$root/scripts/land" "$@" >"$s/out" 2>&1 || st=$?; }
+land() { st=0; bash "$root/scripts/land" "$@" >"$s/out" 2>&1 || st=$?; }
 ontopic() { git --git-dir="$s/origin.git" branch --list topic; }
 # refused ARGS: land exits non-zero, main@origin did not move to the commit, origin has no branch.
 refused() {
     before=$(main); land "$@"
-    { [ "$(main)" = "$before" ] || [ "$(main)" != "$(jj log --no-graph -r @- -T commit_id)" ]; } &&
-        [ "$st" != 0 ] && [ -z "$(ontopic)" ] ||
+    after=$(main); head=$(jj log --no-graph -r @- -T commit_id); topic=$(ontopic)
+    { [ "$after" = "$before" ] || [ "$after" != "$head" ]; } && [ "$st" != 0 ] && [ -z "$topic" ] ||
         die "not refused ($*): $(cat "$s/out")"
     echo "refused ($1): $(grep -m1 refused "$s/out")"
 }
@@ -61,6 +60,8 @@ FIRST="check failure,check-arm64 success" refused topic
 WHILE_CI="cd $s/seed && jj git fetch --quiet && echo m >g && jj commit --quiet -m moved && jj bookmark set --quiet main -r @- && jj git push --quiet --bookmark main" refused topic
 FIRST="check failure,check-arm64 success" land --accept-rerun "the stub's planted re-run" topic
 [ "$st" = 0 ] || die "--accept-rerun: exit $st: $(cat "$s/out")"
-[ "$(main)" = "$(jj log --no-graph -r @- -T commit_id)" ] || die "main@origin is not the landed commit"
-[ -z "$(ontopic)" ] || die "the branch bookmark is still on origin"
+lhs=$(main); rhs=$(jj log --no-graph -r @- -T commit_id)
+[ "$lhs" = "$rhs" ] || die "main@origin is not the landed commit"
+topic=$(ontopic)
+[ -z "$topic" ] || die "the branch bookmark is still on origin"
 echo "landed with --accept-rerun: main@origin is the commit; the branch bookmark is gone from origin"

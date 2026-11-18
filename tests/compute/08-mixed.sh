@@ -1,4 +1,3 @@
-#!/bin/sh
 # Instrumented and stock processes under one seed (tests/guests/compute/mixed.c), compute-gap=8:
 #  a. `mixed` (threads; posix_spawn of stock sha256sum on itself; a fork child computing;
 #     vfork and fork, each then exec of `mixed leaf`) ends ok on seeds 1-4 with the child's
@@ -21,12 +20,12 @@ done
 prun "$o/sh" 1 $gap -- /bin/sh -c "$M leaf 2000 && $M leaf 3000" &
 prun "$o/many" 1 $gap -- $M many /tmp 40 &
 prun "$o/stock" 1 -- /bin/true &
-rm -rf "$o/verify"
+rm -rf "${o:?}/verify"
 "$PATINA" verify --runs 3 --vary cpu,load --seed 1 $gap --out "$o/verify" \
     --mount "$G":/guest:copy -- $M >"$o/verify.txt" 2>&1 || true
 wait
 grep -q '^identical: 3 runs' "$o/verify.txt" || die "a. mixed seed 1 under --vary cpu,load: $(tail -3 "$o/verify.txt")"
-rm -rf "$o/tree-1"
+rm -rf "${o:?}/tree-1"
 cp -r "$o/verify/run-0" "$o/tree-1"
 # images DIR: compute.images as "path:kind,kind:starts ..."
 images() { python3 -I -c 'import json,sys
@@ -40,7 +39,7 @@ for s in 1 2 3 4; do
         die "a. mixed seed $s: compute.images $(images "$d")"
     [ "$(field "$d/result.json" compute.switches)" -gt 0 ] || die "a. mixed seed $s: no compute switch"
 done
-rm -rf "$o/line"
+rm -rf "${o:?}/line"
 "$PATINA" run --seed 1 $gap --out "$o/line" --mount "$G":/guest:copy -- $M >"$o/line.txt" 2>&1 || true
 grep -qF "$M" "$o/line.txt" || die "a. the patina run output names no image: $(cat "$o/line.txt")"
 echo "a. mixed, seeds 1-4: ok, hash right, one image with 3 starts ($(field "$o/tree-1/result.json" compute.switches) switches on seed 1); one digest over 3 runs varying cpu and load"

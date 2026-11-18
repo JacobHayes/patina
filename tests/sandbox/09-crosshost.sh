@@ -1,4 +1,3 @@
-#!/bin/sh
 # What made digests differ between hosts (CI runners, containers) before sandbox hardening's fixes, each held
 # by construction now: host files read as owned by the overflow id whoever launched the run;
 # every mount's device reads as its index and the mount table carries no host mount flags and
@@ -7,7 +6,6 @@
 # already runs under a seccomp filter (a container's profile) still gets the runtime's filter
 # stacked on it, with the same digest.
 #@ tier=quick budget=30 slots=1
-set -eu
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/crosshost
 mkdir -p "$out"
@@ -28,5 +26,6 @@ awk '/^[0-9]+ [0-9]+ [0-9]+:[0-9]+ / { split($3, d, ":"); if (d[1] != 0 || ($6 !
 grep ' getppid ' "$out/plain.dump" | grep -q 'args=\[0x0, 0x0, 0x0, 0x0, 0x0, 0x0\]' ||
     die "getppid recorded with leftover registers: $(grep ' getppid ' "$out/plain.dump" | head -1)"
 run wrapped "$G17/seccomp-wrap"
-[ "$(digest "$out/wrapped")" = "$(digest "$out/plain")" ] || die "under an outer seccomp filter: digest $(digest "$out/wrapped"), plain $(digest "$out/plain")"
+lhs=$(digest "$out/wrapped"); rhs=$(digest "$out/plain")
+[ "$lhs" = "$rhs" ] || die "under an outer seccomp filter: digest $(digest "$out/wrapped"), plain $(digest "$out/plain")"
 echo "crosshost: host files 65534, devices by mount index, 4 CPUs, unread registers not recorded; same digest under an outer seccomp filter ($(digest "$out/plain"))"

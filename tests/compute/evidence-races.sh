@@ -1,4 +1,3 @@
-#!/bin/sh
 # Evidence (docs/EVIDENCE.md, compute points): the syscall-free races `races b`, `pool`,
 # `rs-race` (Rust atomics) and `go-race` (Go atomics), seeds 1-200, in three columns: the stock
 # build (tests/guests/counters; rs-race-stock, go-race-stock), the build with compute points at the default
@@ -6,7 +5,6 @@
 # and whether the first one replays identical. The prototype found 14 and 165 of 200 with a
 # switch at 1 event in 10.
 #@ tier=evidence budget=600 slots=6
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 OUT=$RUNS/evidence-races python3 -I - <<'PY'
 import json, os, subprocess

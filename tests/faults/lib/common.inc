@@ -1,6 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
 # Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
-set -eu
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 LIB=$HERE/lib
@@ -16,7 +15,7 @@ die() { echo "FAIL: $*"; exit 1; }
 # run OUT SEED [patina run options] -- /guest/cmd args: one run (OUT replaced).
 run() {
     out=$1; seed=$2; shift 2
-    rm -rf "$out"
+    rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
     timeout 600 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >/dev/null 2>"$out.err" \
         || [ -f "$out/result.json" ] || die "patina run $* (seed $seed): no result.json ($(tail -2 "$out.err"))"
@@ -26,7 +25,7 @@ run() {
 # verify OUT SEED RUNS VARY [patina options] -- cmd: patina verify identical.
 verify() {
     out=$1; seed=$2; n=$3; vary=$4; shift 4
-    rm -rf "$out"
+    rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
     v=; [ -n "$vary" ] && v="--vary $vary"
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$n" $v --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >"$out.log" 2>&1 \

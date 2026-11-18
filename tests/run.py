@@ -42,6 +42,12 @@ ROOT = os.path.dirname(HERE)
 CHECK_DIR = os.environ.get("PATINA_CHECK_DIR") or os.path.join(ROOT, "target", "patina-check")
 DEFAULTS = {"quick": 15, "area": 120, "release": 300, "evidence": 1800}
 CEILING = {"quick": int(os.environ.get("QUICK_CEILING", "600")), "area": 300, "release": 600, "evidence": None}
+# Every script runs under bash in strict mode, whatever its first line says: a failed command, a
+# failed command anywhere in a pipeline (also inside $(...)) and an unset variable stop it, and
+# the line and command that stopped it are printed. An expected failure is written out: `if !
+# cmd`, `cmd && die ...`, `st=0; cmd || st=$?` (tests/lint.py checks what this cannot).
+STRICT = ["bash", "-euo", "pipefail", "-E", "-O", "inherit_errexit", "-c",
+          'trap \'s=$?; echo "strict: ${BASH_SOURCE[0]}:$LINENO: exit $s: $BASH_COMMAND" >&2\' ERR; . "$0"']
 TARGET = {"quick": 300, "area": 300, "release": 600, "evidence": 3600}
 
 
@@ -191,7 +197,7 @@ def main():
         log = os.path.join(base, f"{s['area']}-{s['name']}.out")
         t0 = time.monotonic()
         with open(log, "w") as fh:
-            p = subprocess.Popen(["sh", s["path"]], cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT,
+            p = subprocess.Popen(STRICT + [s["path"]], cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT,
                                  start_new_session=True)
             try:
                 rc = p.wait(timeout=s["budget"])

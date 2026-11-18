@@ -1,4 +1,3 @@
-#!/bin/sh
 # Counter preemption, the mechanism in seconds: the same fixed N reached by hops only (every
 # conditional branch emulated and counted by the runtime: the definition of the stop) and
 # through the counter (overflow aimed at N - margin, then hops) stops at the same instructions
