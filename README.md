@@ -11,10 +11,10 @@ special linking, any language.
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
 needs `bwrap` (bubblewrap) and unprivileged user namespaces.
 
-Changes in 0.11: checks from outside the program. `--check 'CMD ARGS'` runs a checker on each
-run that ended `ok`, and its verdict is a finding like any other, grouped, replayed and
-minimized ([the guide](docs/GUIDE.md#checks-from-outside-the-program)); `patina log events`
-gives it the run as JSON lines.
+Changes in 0.12: triage of a checker's findings, and branch counters on arm64. A finding can
+carry its grouping key (`LABEL [KEY]: detail`), `patina recheck` judges kept runs again with an
+edited checker, and `--only-case` runs one case
+([the guide](docs/GUIDE.md#judging-again)); `--preempt branches` works on the Arm Neoverse N2.
 
 ## Install
 
