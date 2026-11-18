@@ -65,8 +65,17 @@ pub fn main(a: &Args) -> Res<ExitCode> {
     let dirs: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
     let runs = collect(&dirs)?;
     let known = known_flag(a)?;
-    let (v, text) = build(&runs, a.all("--allow-unmet"), known.as_ref(), None);
-    if a.json() {
+    let mut again = "patina report --group N".to_string();
+    if let Some(k) = a.last("--known") {
+        again.push_str(&format!(" --known {}", quote(k)));
+    }
+    for d in &a.positional {
+        again.push_str(&format!(" {}", quote(d)));
+    }
+    let (v, text) = build(&runs, a.all("--allow-unmet"), known.as_ref(), None, &again);
+    if let Some(n) = a.num::<usize>("--group")? {
+        print!("{}", group(&v, n, a.json())?);
+    } else if a.json() {
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
     } else {
         print!("{text}");
@@ -102,7 +111,7 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         // other runs in such a layout are named by their directory.
         let written = std::fs::read_to_string(dir.join(crate::sweep::CASE_FILE))
             .ok()
-            .map(|c| c.trim_end_matches('\n').to_string());
+            .map(|c| crate::sweep::case_shown(c.trim_end_matches('\n')));
         // A branch child lives in OUT/seed-N@P[/K-NAME].
         let name = |d: &Path| d.file_name().and_then(|n| n.to_str()).map(str::to_string);
         let parent = dir.parent().and_then(name);
@@ -324,9 +333,19 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             flag("--preempt", "branches".into());
         }
         if let Some(k) = &cfg.check {
-            flag("--check", crate::check::join(&k.words));
+            let f = if k.serve { "--check-serve" } else { "--check" };
+            flag(f, crate::check::join(&k.words));
         }
-        if !cfg.ok_exit.is_empty() {
+        if let Some(k) = cfg
+            .check
+            .as_ref()
+            .filter(|k| k.timeout != crate::check::DEFAULT_TIMEOUT)
+        {
+            flag("--check-timeout", k.timeout.to_string());
+        }
+        if cfg.ok_exit == crate::config::ok_exit_any() {
+            flag("--ok-exit", "any".into());
+        } else if !cfg.ok_exit.is_empty() {
             let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
             flag("--ok-exit", l.join(","));
         }
@@ -389,6 +408,42 @@ pub fn subject(case: Option<&str>, signature: &str) -> String {
     }
 }
 
+/// What a known pattern is matched against: the signature, after `[CASE] ` when the pattern
+/// starts with `[`, then ` {faults: F}` when it holds `{faults:`.
+fn matched_text(pattern: &str, case: Option<&str>, signature: &str, fired: &[String]) -> String {
+    let mut t = if pattern.starts_with('[') {
+        subject(case, signature)
+    } else {
+        signature.to_string()
+    };
+    if pattern.contains("{faults:") {
+        let f = if fired.is_empty() {
+            "-".to_string()
+        } else {
+            fired.join(",")
+        };
+        t.push_str(&format!(" {{faults: {f}}}"));
+    }
+    t
+}
+
+/// The faults that fired in a run, sorted: each fault class that injected (`faults.counts`),
+/// and `point:LABEL` for each SDK fault point that fired (`--buggify`).
+pub fn fired(result: &Value) -> Vec<String> {
+    let mut out: Vec<String> = fault_classes(result).1.into_iter().collect();
+    for s in result["sdk"]["sites"].as_array().into_iter().flatten() {
+        if s["kind"] == "buggify" && s["held"].as_u64().unwrap_or(0) > 0 {
+            out.push(format!(
+                "point:{}",
+                crate::signature::checkout_free(s["label"].as_str().unwrap_or(""))
+            ));
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// The case a run's group is keyed by: none for a finding that names its bug
 /// (`signature::names_its_bug`), which is one group over every case it appears in.
 pub fn group_case(signature: &str, case: Option<&str>) -> Option<String> {
@@ -449,20 +504,20 @@ impl Known {
         })
     }
 
-    /// The ID of the first entry whose pattern matches the finding, if one does. A pattern
-    /// that starts with `[` is matched against `[CASE] SIGNATURE`; any other, against the
-    /// signature alone, in whatever case it appears.
-    pub fn id_of(&self, case: Option<&str>, signature: &str) -> Option<&str> {
-        let with_case = subject(case, signature);
+    /// The ID of the first entry whose pattern matches the finding of `result` (a run's
+    /// `result.json`), if one does. A pattern is matched against the signature; one that
+    /// starts with `[` against `[CASE] SIGNATURE`; one holding `{faults:` with ` {faults: F}`
+    /// after that, F the fault classes that fired in the run (`fired`).
+    pub fn id_of(&self, case: Option<&str>, result: &Value) -> Option<&str> {
+        let signature = signature_of(result);
+        let fired = fired(result);
         self.entries
             .iter()
             .find(|e| {
-                let s = if e.pattern.starts_with('[') {
-                    &with_case
-                } else {
-                    signature
-                };
-                glob(&e.pattern, s)
+                glob(
+                    &e.pattern,
+                    &matched_text(&e.pattern, case, &signature, &fired),
+                )
             })
             .map(|e| e.id.as_str())
     }
@@ -521,12 +576,14 @@ struct Group<'a> {
     runs: Vec<&'a Run>,
 }
 
-/// The report over `runs`: its JSON (with `exit`) and its text.
+/// The report over `runs`: its JSON (with `exit`) and its text. `again` is the command that
+/// prints one group in full (`patina report --group N ...`).
 pub fn build(
     runs: &[Run],
     allow: &[String],
     known: Option<&Known>,
     head: Option<SweepHead>,
+    again: &str,
 ) -> (Value, String) {
     let free = crate::signature::checkout_free;
     let mut allow: BTreeSet<String> = allow.iter().map(|l| free(l)).collect();
@@ -559,7 +616,7 @@ pub fn build(
         let signature = signature_of(&r.result);
         let known = known
             .filter(|_| is_finding(outcome))
-            .and_then(|k| k.id_of(r.case.as_deref(), &signature))
+            .and_then(|k| k.id_of(r.case.as_deref(), &r.result))
             .map(str::to_string);
         let case = match known {
             Some(_) => None,
@@ -770,11 +827,13 @@ pub fn build(
                 "run_outcome": outcome,
                 "stop": first.result["stop"],
                 "known": g.known,
-                "case": first.case,
+                // The group's case when it has one; `null` for a group over several (`cases`).
+                "case": (cases.len() == 1).then(|| cases[0]),
                 "cases": cases,
                 "count": g.runs.len(),
                 "seeds": g.runs.iter().map(|r| r.seed).collect::<Vec<_>>(),
-                "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "dir": first.dir},
+                "runs": g.runs.iter().map(|r| json!({"seed": r.seed, "point": r.point.filter(|p| *p > 0), "case": r.case, "dir": r.dir})).collect::<Vec<_>>(),
+                "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "dir": first.dir},
                 "replay": replay,
                 "faults": {"every": every, "none": none},
                 "rerun": rerun_command(&first.run, first.seed, &first.dir),
@@ -842,6 +901,9 @@ pub fn build(
         v["branch"] = b;
     }
     if checked {
+        // Nothing shows that the check can fail: it judged runs, passed every one, and no
+        // `!ID` entry requires a finding. Said, not failed: `!ID` is how to make it a failure.
+        let required = known.is_some_and(|k| k.ids().iter().any(|(_, r)| *r));
         v["check"] = json!({
             "judged": check.0 + check.1,
             "passed": check.0,
@@ -849,6 +911,7 @@ pub fn build(
             "not_judged": not_judged,
             "errors": check.3,
             "vacuous": judged_none,
+            "unproven": check.0 > 0 && check.1 == 0 && !required,
         });
     }
     if let Some(k) = known {
@@ -879,11 +942,108 @@ pub fn build(
     if let Some(h) = &head {
         v["sweep"] = json!({"seconds": h.seconds, "jobs": h.jobs, "lowered_to": h.lowered_to, "stopped": h.stopped});
     }
-    let text = render(&v, finding_groups, head.as_ref());
+    let text = render(&v, finding_groups, head.as_ref(), again);
     (v, text)
 }
 
-fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String {
+/// Groups a report prints in full; the others get one line (`patina report --group N`).
+const GROUPS_SHOWN: usize = 3;
+
+/// A group's name: `[CASE] SIGNATURE` for a group of one case, after the effective outcome
+/// when its replay changed it.
+fn group_name(g: &Value) -> String {
+    let st = |k: &str| g[k].as_str().unwrap_or("").to_string();
+    let mut name = st("signature");
+    if let Some(c) = g["case"].as_str() {
+        name = format!("[{c}] {name}");
+    }
+    if g["outcome"] != g["run_outcome"] {
+        name = format!("{}: {name}", st("outcome"));
+    }
+    name
+}
+
+/// `K of R runs, C cases   first: seed S [CASE]   replayed: RESULT`.
+fn group_runs(g: &Value, runs: u64) -> String {
+    let replay = match &g["replay"] {
+        Value::Null => "not replayed".to_string(),
+        r => {
+            let res = r["result"].as_str().unwrap_or("");
+            match r["message"].as_str().filter(|m| !m.is_empty()) {
+                Some(m) if res != "identical" => format!("replayed: {res}: {m}"),
+                _ => format!("replayed: {res}"),
+            }
+        }
+    };
+    let cases = g["cases"].as_array().map_or(0, |c| c.len());
+    let (of_cases, first_case) = match (cases, g["first"]["case"].as_str()) {
+        (k, Some(c)) if k > 1 => (format!(", {k} cases"), format!(" [{c}]")),
+        _ => (String::new(), String::new()),
+    };
+    format!(
+        "{} of {runs} runs{of_cases}   first: seed {}{first_case}   {replay}",
+        g["count"],
+        run_name(
+            g["first"]["seed"].as_u64().unwrap_or(0),
+            g["first"]["point"].as_u64()
+        )
+    )
+}
+
+/// A group in full: its name, runs, the faults in its runs, the rerun and replay commands.
+fn group_text(g: &Value, runs: u64, faulted: bool) -> String {
+    let st = |k: &str| g[k].as_str().unwrap_or("").to_string();
+    let mut s = format!("{}\n  {}\n", group_name(g), group_runs(g, runs));
+    let list = |k: &str| {
+        let v: Vec<&str> = g["faults"][k]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str())
+            .collect();
+        if v.is_empty() {
+            "-".to_string()
+        } else {
+            v.join(", ")
+        }
+    };
+    if faulted {
+        s.push_str(&format!(
+            "  faults in every failing run: {}      in none: {}\n",
+            list("every"),
+            list("none")
+        ));
+    }
+    s.push_str(&format!("  rerun:  {}\n", st("rerun")));
+    s.push_str(&format!("  replay: {}\n", st("replay_command")));
+    s
+}
+
+/// `patina report --group N`: group N of a report (its position in `report.json`'s `groups`,
+/// from 1) in full, or as JSON.
+pub fn group(v: &Value, n: usize, json: bool) -> Res<String> {
+    let groups = v["groups"].as_array().unwrap();
+    let g = n
+        .checked_sub(1)
+        .and_then(|i| groups.get(i))
+        .ok_or_else(|| {
+            format!(
+                "--group {n}: the report has {}",
+                count(groups.len(), "group")
+            )
+        })?;
+    if json {
+        return Ok(format!("{}\n", serde_json::to_string_pretty(g).unwrap()));
+    }
+    let faulted = !v["faults"]["configured"].as_array().unwrap().is_empty();
+    let mut s = group_text(g, v["runs"].as_u64().unwrap_or(0), faulted);
+    if let Some(id) = g["known"].as_str() {
+        s = format!("known {id}: {s}");
+    }
+    Ok(s)
+}
+
+fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &str) -> String {
     let n = |k: &str| v[k].as_u64().unwrap_or(0);
     let ok = v["outcomes"]["ok"].as_u64().unwrap_or(0);
     let ok_exit = match n("ok_exit") {
@@ -948,6 +1108,9 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
             line.push_str(&format!("; {} errors", c["errors"]));
         }
         s.push_str(&format!("{line}\n"));
+        if c["unproven"] == true {
+            s.push_str("check: every judged run passed and no --known !ID entry shows that this check can fail\n");
+        }
     }
     if let Some(k) = v.get("known") {
         let matched = k["findings"].as_u64().unwrap_or(0);
@@ -1026,63 +1189,28 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         ));
     }
     let groups = v["groups"].as_array().unwrap();
-    for g in groups.iter().filter(|g| g["known"].is_null()) {
-        let st = |k: &str| g[k].as_str().unwrap_or("").to_string();
+    let faulted = !v["faults"]["configured"].as_array().unwrap().is_empty();
+    // The first few groups in full; the others one line each, numbered for `--group N`.
+    let new: Vec<(usize, &Value)> = groups
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g["known"].is_null())
+        .collect();
+    for (_, g) in new.iter().take(GROUPS_SHOWN) {
         s.push('\n');
-        let mut name = st("signature");
-        let cases = g["cases"].as_array().map_or(0, |c| c.len());
-        if let (Some(c), 1) = (g["case"].as_str(), cases) {
-            name = format!("[{c}] {name}");
-        }
-        if g["outcome"] != g["run_outcome"] {
-            name = format!("{}: {name}", st("outcome"));
-        }
-        s.push_str(&format!("{name}\n"));
-        let replay = match &g["replay"] {
-            Value::Null => "not replayed".to_string(),
-            r => {
-                let res = r["result"].as_str().unwrap_or("");
-                match r["message"].as_str().filter(|m| !m.is_empty()) {
-                    Some(m) if res != "identical" => format!("replayed: {res}: {m}"),
-                    _ => format!("replayed: {res}"),
-                }
-            }
-        };
-        let (of_cases, first_case) = match (cases, g["case"].as_str()) {
-            (k, Some(c)) if k > 1 => (format!(", {k} cases"), format!(" [{c}]")),
-            _ => (String::new(), String::new()),
-        };
-        s.push_str(&format!(
-            "  {} of {} runs{of_cases}   first: seed {}{first_case}   {replay}\n",
-            g["count"],
-            n("runs"),
-            run_name(
-                g["first"]["seed"].as_u64().unwrap_or(0),
-                g["first"]["point"].as_u64()
-            )
-        ));
-        let list = |k: &str| {
-            let v: Vec<&str> = g["faults"][k]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter_map(|x| x.as_str())
-                .collect();
-            if v.is_empty() {
-                "-".to_string()
-            } else {
-                v.join(", ")
-            }
-        };
-        if !v["faults"]["configured"].as_array().unwrap().is_empty() {
+        s.push_str(&group_text(g, n("runs"), faulted));
+    }
+    if new.len() > GROUPS_SHOWN {
+        s.push('\n');
+        for (i, g) in &new[GROUPS_SHOWN..] {
             s.push_str(&format!(
-                "  faults in every failing run: {}      in none: {}\n",
-                list("every"),
-                list("none")
+                "#{} {}   {}\n",
+                i + 1,
+                group_name(g),
+                group_runs(g, n("runs"))
             ));
         }
-        s.push_str(&format!("  rerun:  {}\n", st("rerun")));
-        s.push_str(&format!("  replay: {}\n", st("replay_command")));
+        s.push_str(&format!("(a group in full: {again})\n"));
     }
     // Known groups: one line each, after the new ones.
     let known: Vec<&Value> = groups.iter().filter(|g| !g["known"].is_null()).collect();
@@ -1168,16 +1296,25 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>) -> String 
         ));
     }
     if let Some(k) = v.get("known") {
+        let mut unmatched = 0;
         for e in k["entries"].as_array().unwrap() {
             if e["count"] != 0 {
                 continue;
             }
             let id = e["id"].as_str().unwrap_or("");
-            tail.push(if e["required"] == true {
-                format!("vacuous: known !{id} matched no run: the check may be unable to fail")
+            if e["required"] == true {
+                tail.push(format!(
+                    "vacuous: known !{id} matched no run: the check may be unable to fail"
+                ));
             } else {
-                format!("known: {id} matched no run")
-            });
+                unmatched += 1;
+            }
+        }
+        if unmatched > 0 {
+            tail.push(format!(
+                "known: {unmatched} {} matched no run ({full}: known.entries)",
+                if unmatched == 1 { "entry" } else { "entries" }
+            ));
         }
     }
     if v["check"]["vacuous"] == true {
@@ -1242,28 +1379,55 @@ mod tests {
         k.unwrap()
     }
 
+    /// A finding's result: its signature and the fault classes that fired.
+    fn res(signature: &str, fired: &[&str]) -> Value {
+        let counts: serde_json::Map<String, Value> = ["fs-error", "crash"]
+            .iter()
+            .map(|c| {
+                (
+                    c.to_string(),
+                    json!({"eligible": 9, "injected": fired.contains(c) as u64}),
+                )
+            })
+            .collect();
+        json!({"outcome": "violation", "signature": signature, "faults": {"counts": counts}})
+    }
+
     #[test]
     fn the_first_matching_line_names_a_finding() {
+        let sub = res("violation check: wrong-sub: N", &[]);
         let k = known("# known\nwide violation check: *\nnarrow violation check: wrong-sub*\n");
-        assert_eq!(k.id_of(None, "violation check: wrong-sub: N"), Some("wide"));
+        assert_eq!(k.id_of(None, &sub), Some("wide"));
         let k = known("narrow violation check: wrong-sub*\nwide violation check: *\n");
-        assert_eq!(
-            k.id_of(None, "violation check: wrong-sub: N"),
-            Some("narrow")
-        );
-        assert_eq!(k.id_of(None, "failure exit: exit N"), None);
+        assert_eq!(k.id_of(None, &sub), Some("narrow"));
+        assert_eq!(k.id_of(None, &res("failure exit: exit N", &[])), None);
     }
 
     #[test]
     fn a_bracketed_pattern_selects_by_case() {
+        let x = res("violation check: x", &[]);
         let k = known("p [*planted*] violation *\nany violation *\n");
-        assert_eq!(
-            k.id_of(Some("t planted 2"), "violation check: x"),
-            Some("p")
-        );
-        assert_eq!(k.id_of(Some("t add 2"), "violation check: x"), Some("any"));
+        assert_eq!(k.id_of(Some("t planted 2"), &x), Some("p"));
+        assert_eq!(k.id_of(Some("t add 2"), &x), Some("any"));
         // Without a bracket the signature alone is matched, with or without a case.
-        assert_eq!(k.id_of(None, "violation check: x"), Some("any"));
+        assert_eq!(k.id_of(None, &x), Some("any"));
+    }
+
+    #[test]
+    fn a_pattern_with_faults_selects_by_what_fired() {
+        let k = known(
+            "err violation check: SILENT: * {faults: *fs-error*}\n\
+             calm [*vmstat*] violation check: SILENT: * {faults: -}\n\
+             any violation check: SILENT: *\n",
+        );
+        let silent = |f: &[&str]| res("violation check: SILENT: wrote nothing", f);
+        assert_eq!(k.id_of(None, &silent(&["crash", "fs-error"])), Some("err"));
+        assert_eq!(k.id_of(Some("x vmstat"), &silent(&[])), Some("calm"));
+        assert_eq!(k.id_of(Some("x vmstat"), &silent(&["crash"])), Some("any"));
+        assert_eq!(k.id_of(Some("x ls"), &silent(&[])), Some("any"));
+        let mut r = silent(&[]);
+        r["sdk"] = json!({"sites": [{"kind": "buggify", "label": "drop", "held": 2}]});
+        assert_eq!(fired(&r), vec!["point:drop".to_string()]);
     }
 
     #[test]

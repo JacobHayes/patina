@@ -924,6 +924,67 @@ recovery fsyncs on the host's disk.
 10. `log events` lacks mark labels (to find `setup-complete`) and read paths: the hunt's
     ESCAPE oracle stays off (T7), and a swap-aware PROTECT had to use `log ops`.
 
+### Second round: case settings, serving checkers, faults in known patterns
+
+Defects 1 to 9, after the change that adds `--cases` line settings, `--check-serve`,
+`{faults: ...}` in known patterns, `PATINA` for the checker, the `check:` health line,
+`--ok-exit any`, `--check-timeout` and the shorter report. Run once by hand, 2026-11-18, this
+host, every sweep `-j 6` under the shared evidence lock, `--keep fail` but the references;
+the same checkers, with one change each where noted. Ids and counts only.
+
+| Leg (3,449 corpus cases, seed 1, unless noted) | Before | After |
+|---|---|---|
+| fs errors with each case's own tree: `--work CASE/t:/work/t -- NAME` per line, no staging, no `faults-after-setup` | the line could not carry a tree: staged in the guest, 16 findings in 4 groups (SILENT 5 cases) | 38 findings in the same 4 groups: the 9 + 1 coverage cases and the planted case identical, SILENT in 27 cases, none of them the staged leg's 5 |
+| the same leg, wall time by checker mode | (per run, through a version manager's shim, 163 s in round one) | no check 42.0 s; per run with the interpreter's path 67.9 s (1.6×); per run through the shim 101.8 s (2.4×); `--check-serve` 43.3 s (1.03×); the same 38 findings in 4 groups in all three |
+| path swaps, 150 generated cases × seeds 1-2 | - | no check 1.9 s; per run through the shim 7.2 s (3.8×); with the path 4.3 s (2.3×); serving 2.3 s (1.2×); the same 3 findings in each |
+| rshell checked against bash | 168.2 s; the report 505 lines | serving 35.8 s, the same 139 findings, now in 99 groups (details are no longer cut at 64 characters); the report 120 lines, the 22 unmatched known entries one line |
+| bash reference | 601 s (two scripts loop to the 600 s default) | 32.6 s with `--timeout 30 --ok-exit any` |
+| path swaps with the checker's `patina` variable unset (defect 3) | `check: judged 300 of 300 runs: 300 passed`, nothing else | the same, then `check: every judged run passed and no --known !ID entry shows that this check can fail`; with the checker reading `PATINA` when its own variable is unset (one line), 3 findings |
+
+- Why the SILENT cases differ again: the fault draws follow the run's own sequence of
+  eligible operations, and staging changed it. On one staged case
+  (`shell_redirections_file_target_append`) the staged run had 13 eligible operations and two
+  injected `EIO`s (the `close` and a `write` of its output file, which the case reports
+  nothing about); the run on its own tree had 15 and none. The oracle is the same and finds
+  the same class of bug on other cases; one seed is a sample of placements, not a replica.
+- A line can also carry the case itself: `--work CASE/t:/work/t --name NAME -- HARNESS
+  'CASE-JSON'` drops the shell and the `cat` the staged command needed: 20.4 s for the leg.
+- The serving checker is the hunt's checker module behind a 15-line wrapper whose serving loop
+  is 5 lines; started per run, the same file runs as before. Interpreter start-up was most of
+  the per-run cost (about 30 ms with the interpreter's path, 80 ms through the shim, against
+  1.5 ms of judging); a further cost was Patina's: every run hashed the checker's program,
+  which through a shim is a 175 MB binary. Large files' hashes are now kept by file identity
+  (device, inode, size, change time), as the `patina` binary's own is: serving through the
+  shim took 9.4 s before, 2.2 s after (the unchecked sweep 2.4 s and 1.9 s).
+
+**The known table again** (23 entries). With `{faults: ...}` and, on lines whose case is the
+case JSON, a glob between its `"script":"` and `","allowed_commands"` keys, which sees the
+script alone:
+
+| Expressible | Round one | Now | Ids now |
+|---|---|---|---|
+| exactly | 10 | 14 | round one's, and 010 (by the fault that fired), 011, 013, 016 (a word in the script) |
+| only with a `[CASE]` pattern | 1 | 1 | 006 |
+| coarser | 11 | 7 | 001, 002, 003, 007, 014, 015, check-class: their script regexes use word boundaries or classes a glob has not; the fault part of 001 and 014 is exact |
+| not at all | 1 | 1 | T7 |
+
+On the leg whose lines carry the case JSON (42 findings), the new file and the table's own
+matcher agree on all 41 hits but the planted one: 12 labelled the same (001 twice, 002 ten
+times), 29 by neither; the planted case matched its `!` entry. Round one's file, over the same
+runs, labels all 31 SILENT hits 001 and the planted one 010. On the path-swap leg the
+corpus file no longer labels a path-swap PROTECT hit 010: no fs error fired.
+
+- Runs without the new settings are unchanged: `compute/evidence-identity` against the build
+  before (W1-W9, the stock thread, race and loop guests, seeds 1-3): 45 of 45 the same digest
+  and `result.json`.
+- Two checks that failed under load (`sweep/01-sweep`'s interrupted sweep, which found a
+  process left; `skeleton/09-stall`): a `patina run` stopped by SIGTERM exited at once and
+  left its sandbox to die after it. It now ends the sandbox and waits until its processes are
+  gone, and a checker's, first. With CPU burners in the same cgroup, a memory-heavy
+  interrupted sweep left processes in 13 of 30 tries before and none of 30 after; 01-sweep
+  passed 30 of 30 under 60 burners, 09-stall 30 of 30 under 400 (3 of 12 before, killed by its
+  own 8 s `timeout`, now 120 s as for every other run).
+
 ## Second hosts
 
 One `patina` binary and one set of guest binaries, built once on the development VM from

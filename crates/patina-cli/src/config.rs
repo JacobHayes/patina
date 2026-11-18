@@ -311,12 +311,41 @@ fn mount(base: &Path, s: &str) -> Res<Mount> {
     Ok(Mount { src, dst, copy })
 }
 
-/// The SHA-256 of a file, as hex.
+/// The SHA-256 of a file, as hex. A large file's hash is kept in the cache directory under its
+/// file identity (device, inode, size, change time), which any rewrite changes, as for the
+/// patina binary's own (`result::build`): every run of a sweep hashes its program and checker
+/// again, and an interpreter can be a large file.
 pub fn sha256_file(p: &Path) -> Res<String> {
     use sha2::{Digest, Sha256};
+    use std::os::unix::fs::MetadataExt;
+    const CACHED_FROM: u64 = 1 << 20;
+    let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+    let at = crate::launch::cache_dir()
+        .join("sha256")
+        .join(format!("{}-{}", m.dev(), m.ino()));
+    let key = format!("{} {}.{}", m.size(), m.ctime(), m.ctime_nsec());
+    if m.size() >= CACHED_FROM {
+        let cached = std::fs::read_to_string(&at).ok().and_then(|t| {
+            let (k, h) = t.rsplit_once(' ')?;
+            (k == key && h.len() == 64).then(|| h.to_string())
+        });
+        if let Some(h) = cached {
+            return Ok(h);
+        }
+    }
     let b = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
-    let d = Sha256::digest(&b);
-    Ok(d.iter().map(|x| format!("{x:02x}")).collect())
+    let h: String = Sha256::digest(&b)
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
+    if m.size() >= CACHED_FROM {
+        // Best effort, written whole then renamed: a reader sees the old entry or the new one.
+        let tmp = at.with_extension(format!("{}", std::process::id()));
+        let _ = std::fs::create_dir_all(at.parent().unwrap())
+            .and_then(|_| std::fs::write(&tmp, format!("{key} {h}")))
+            .and_then(|_| std::fs::rename(&tmp, &at));
+    }
+    Ok(h)
 }
 
 /// Resolve `CMD` as the guest will see it. A path inside a mount is the guest's; another
@@ -487,6 +516,12 @@ fn table<'a>(v: &'a toml::Value, at: &str) -> Res<&'a toml::Table> {
         .ok_or_else(|| format!("{at}: expected a table"))
 }
 
+/// `--ok-exit any`: every exit status (a reference sweep of a program whose failures are
+/// its output); a signal still ends a run `crash`.
+pub fn ok_exit_any() -> Vec<u8> {
+    (1..=255).collect()
+}
+
 /// An exit status `--ok-exit` may name: 1 to 255 (0 is `ok` already).
 fn exit_status(v: &str, at: &str) -> Res<u8> {
     match v.parse::<u8>() {
@@ -549,8 +584,8 @@ fn range(v: &str, at: &str) -> Res<(u64, u64)> {
 /// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory,
 /// but `[run] cmd` and `[run] check`, commands, are relative to where patina is started), or
 /// take the whole configuration a run recorded when `path` is a `run.json`. Returns `[run]
-/// check`, resolved by the caller once flags are known.
-fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
+/// check` (or `check-serve`, true), resolved by the caller once flags are known.
+fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
     let name = path.display().to_string();
     if path.extension().is_some_and(|e| e == "json") {
         let run = crate::result::read_json(path)?;
@@ -592,7 +627,9 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
                 ("run", "log-paths") => c.log_paths = boolean(v, &at)?,
                 ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
-                ("run", "check") => check = Some(string(v, &at)?),
+                ("run", "check") => check = Some((string(v, &at)?, false)),
+                ("run", "check-serve") => check = Some((string(v, &at)?, true)),
+                ("run", "ok-exit") if v.as_str() == Some("any") => c.ok_exit = ok_exit_any(),
                 ("run", "ok-exit") => {
                     c.ok_exit = v
                         .as_array()
@@ -730,23 +767,43 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if a.has("--buggify") {
         c.buggify = true;
     }
-    if let Some(k) = a.last("--check") {
-        check = Some(k.to_string());
+    match (a.last("--check"), a.last("--check-serve")) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "--check and --check-serve: give one (the same checker runs either way)".into(),
+            )
+        }
+        (Some(k), None) => check = Some((k.to_string(), false)),
+        (None, Some(k)) => check = Some((k.to_string(), true)),
+        (None, None) => {}
     }
+    let check_timeout = a.num::<u64>("--check-timeout")?;
     if let Some(l) = a.last("--ok-exit") {
-        c.ok_exit = l
-            .split(',')
-            .map(|x| exit_status(x.trim(), "--ok-exit"))
-            .collect::<Res<_>>()?;
+        c.ok_exit = if l == "any" {
+            ok_exit_any()
+        } else {
+            l.split(',')
+                .map(|x| exit_status(x.trim(), "--ok-exit"))
+                .collect::<Res<_>>()?
+        };
     }
     c.ok_exit.sort_unstable();
     c.ok_exit.dedup();
     // A checker is resolved where patina starts (one a run.json recorded, again from its own
     // directory): its SHA-256 is the file's now.
     c.check = match check {
-        Some(k) => Some(crate::check::Check::resolve(&k, &logical("."))?),
+        Some((k, serve)) => {
+            let mut k = crate::check::Check::resolve(&k, &logical("."))?;
+            k.serve = serve;
+            Some(k)
+        }
         None => c.check.as_ref().map(|k| k.again()).transpose()?,
     };
+    match (c.check.as_mut(), check_timeout) {
+        (Some(k), Some(t)) => k.timeout = t,
+        (None, Some(_)) => return Err("--check-timeout needs --check or --check-serve".into()),
+        _ => {}
+    }
     // A sweep gives each of its --cases runs its case.
     if let (Some(k), Ok(text), Ok(name)) = (
         c.check.as_mut(),

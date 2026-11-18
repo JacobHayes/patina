@@ -36,6 +36,12 @@ pub struct Check {
     /// The program the first word names, absolute.
     pub program: PathBuf,
     pub sha256: String,
+    /// A serving checker (`--check-serve`): one process answers a line per run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub serve: bool,
+    /// Wall seconds the checker may run (`--check-timeout`).
+    #[serde(default = "default_timeout")]
+    pub timeout: u64,
     /// The case of a sweep's `--cases` run (set by the sweep for its runs).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<Case>,
@@ -48,6 +54,14 @@ pub struct Case {
     pub text: String,
     /// Its directory under `seed-N`: `K-NAME`.
     pub name: String,
+}
+
+/// `--check-timeout`'s default: a checker reads a run directory; one still running after a
+/// minute is stuck, and should not hold a sweep for the run's own `--timeout`.
+pub const DEFAULT_TIMEOUT: u64 = 60;
+
+fn default_timeout() -> u64 {
+    DEFAULT_TIMEOUT
 }
 
 /// The variables a sweep passes a case in to its runs (and the checker gets).
@@ -83,6 +97,8 @@ impl Check {
     pub fn again(&self) -> Res<Check> {
         let mut c = Check::resolve(&join(&self.words), &self.dir)?;
         c.case = self.case.clone();
+        c.timeout = self.timeout;
+        c.serve = self.serve;
         Ok(c)
     }
 
@@ -103,6 +119,8 @@ impl Check {
             dir,
             program,
             sha256,
+            serve: false,
+            timeout: DEFAULT_TIMEOUT,
             case: None,
         })
     }
@@ -130,6 +148,11 @@ pub fn join(words: &[String]) -> String {
         .map(|w| crate::report::quote(w))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// This patina binary, as the checker gets it in `PATINA`.
+fn patina_exe() -> PathBuf {
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("patina"))
 }
 
 fn executable(p: &Path) -> bool {
@@ -218,44 +241,18 @@ fn first_line(text: &str) -> &str {
         .unwrap_or("")
 }
 
-/// Run `c` on the run directory `rundir`: its seed, the program's exit status, at most
-/// `timeout` seconds.
-pub fn run(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u64) -> Verdict {
-    match run_inner(c, rundir, seed, exit, timeout) {
-        Ok(v) => v,
-        Err(e) => Verdict::error(e),
-    }
-}
-
-fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u64) -> Res<Verdict> {
-    let rundir = std::path::absolute(rundir).unwrap_or_else(|_| rundir.to_path_buf());
-    let path = rundir.join(OUTPUT);
-    let mut out = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    // Stderr apart, appended after stdout: the first line of stdout names a finding.
-    let name = c"patina-check-stderr";
-    let err = crate::sys::cvt_i(unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) })
-        .map_err(|e| format!("memfd: {e}"))?;
-    let mut err = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(err) });
+/// The checker's command, without what differs by run: its words, from its directory, with
+/// `PATINA`; in its own process group (what it leaves running is ended with it), ended if
+/// patina is, with the caller's signal state.
+fn command(c: &Check) -> Command {
     let mut cmd = Command::new(&c.program);
     cmd.arg0(&c.words[0])
         .args(&c.words[1..])
-        .arg(&rundir)
         .current_dir(&c.dir)
-        .stdin(Stdio::null())
-        .stdout(out.try_clone().map_err(|e| e.to_string())?)
-        .stderr(err.try_clone().map_err(|e| e.to_string())?)
-        .env("PATINA_SEED", seed.to_string())
-        .env(
-            "PATINA_EXIT",
-            exit.map(|x| x.to_string()).unwrap_or_default(),
-        )
-        // Its own process group: what it leaves running is ended with it.
+        // The patina that runs it, for `patina log ...` on the run directory.
+        .env("PATINA", patina_exe())
+        .env_remove(SERVER_VAR)
+        .env_remove(SERVE_VAR)
         .process_group(0);
     unsafe {
         cmd.pre_exec(|| {
@@ -277,6 +274,401 @@ fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u6
         Some(k) => cmd.env(CASE_VAR, &k.text).env(CASE_NAME_VAR, &k.name),
         None => cmd.env_remove(CASE_VAR).env_remove(CASE_NAME_VAR),
     };
+    cmd
+}
+
+/// Run `c` on the run directory `rundir`: its seed, the program's exit status, at most
+/// `c.timeout` seconds. A serving checker (`--check-serve`) is asked through the sweep job's
+/// server (`SERVER_VAR`), or one started for this run alone.
+pub fn run(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>) -> Verdict {
+    let r = if c.serve {
+        serve_one(c, rundir, seed, exit)
+    } else {
+        run_inner(c, rundir, seed, exit, c.timeout)
+    };
+    match r {
+        Ok(v) => v,
+        Err(e) => Verdict::error(e),
+    }
+}
+
+/// `--check-serve`: the checker started once per sweep job, with `PATINA_CHECK_SERVE=1` and
+/// no run directory. For each run, one line on its stdin, `{"rundir": DIR, "env":
+/// {"PATINA_SEED": ..., "PATINA_EXIT": ..., "PATINA_CASE": ..., "PATINA_CASE_NAME": ...}}`, and
+/// one line back on its stdout: `pass`, `fail LABEL: detail`, or `skip REASON` (not judged).
+/// Anything else, end of output, or no answer within `--check-timeout` is `error`, and the
+/// server is killed (a sweep starts another for its next run). Bytes on its stdout before a
+/// request are an error too: a line answers only the request just written. What it writes to
+/// stderr while it answers goes to `check.out` after the answer.
+pub struct Server {
+    child: std::process::Child,
+    req: std::fs::File,
+    res: std::fs::File,
+    err: std::fs::File,
+}
+
+/// A sweep job's server, as a `patina run` it starts finds it: `REQ,RES,ERR,PGID`.
+pub const SERVER_VAR: &str = "PATINA_CHECK_SERVER";
+/// Set (to 1) for a serving checker.
+pub const SERVE_VAR: &str = "PATINA_CHECK_SERVE";
+
+impl Server {
+    pub fn start(c: &Check) -> Res<Server> {
+        let name = c"patina-check-serve-stderr";
+        let err =
+            crate::sys::cvt_i(unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) })
+                .map_err(|e| format!("memfd: {e}"))?;
+        let err = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(err) });
+        let mut cmd = command(c);
+        cmd.env(SERVE_VAR, "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(err.try_clone().map_err(|e| e.to_string())?);
+        let mut child = cmd.spawn().map_err(|e| {
+            format!(
+                "the checker {} could not be started: {e}",
+                c.program.display()
+            )
+        })?;
+        let req = std::fs::File::from(OwnedFd::from(child.stdin.take().unwrap()));
+        let res = std::fs::File::from(OwnedFd::from(child.stdout.take().unwrap()));
+        Ok(Server {
+            child,
+            req,
+            res,
+            err,
+        })
+    }
+
+    /// Whether it is still running. An ended one is not reaped here (`WNOWAIT`): its pid, the
+    /// group `end` kills, stays reserved until `end` has killed the group.
+    pub fn alive(&mut self) -> bool {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.child.id(),
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        r == 0 && unsafe { info.si_pid() } == 0
+    }
+
+    /// Lend it to the `patina run` that `cmd` starts: `SERVER_VAR`, and its descriptors kept
+    /// open across that exec (that process marks them close-on-exec again: `channel`).
+    pub fn lend(&self, cmd: &mut Command) {
+        let fds = [
+            self.req.as_raw_fd(),
+            self.res.as_raw_fd(),
+            self.err.as_raw_fd(),
+        ];
+        cmd.env(
+            SERVER_VAR,
+            format!("{},{},{},{}", fds[0], fds[1], fds[2], self.child.id()),
+        );
+        unsafe {
+            cmd.pre_exec(move || {
+                for fd in fds {
+                    libc::fcntl(fd, libc::F_SETFD, 0);
+                }
+                Ok(())
+            });
+        }
+    }
+
+    fn channel(&self) -> Channel {
+        Channel {
+            req: self.req.as_raw_fd(),
+            res: self.res.as_raw_fd(),
+            err: self.err.as_raw_fd(),
+            pgid: self.child.id() as i32,
+        }
+    }
+
+    /// End it: its process group killed, the process reaped.
+    pub fn end(mut self) {
+        unsafe { libc::kill(-(self.child.id() as i32), libc::SIGKILL) };
+        let _ = self.child.wait();
+    }
+}
+
+/// A server's descriptors and process group, as this process reaches them.
+#[derive(Clone, Copy)]
+struct Channel {
+    req: i32,
+    res: i32,
+    err: i32,
+    pgid: i32,
+}
+
+/// The sweep job's server this `patina run` was lent (`SERVER_VAR`), its descriptors made
+/// close-on-exec at once so that nothing this process starts inherits them. Read once.
+fn channel() -> Option<Channel> {
+    static CH: std::sync::OnceLock<Option<Channel>> = std::sync::OnceLock::new();
+    *CH.get_or_init(|| {
+        let v = std::env::var(SERVER_VAR).ok()?;
+        let n: Vec<i32> = v.split(',').filter_map(|x| x.parse().ok()).collect();
+        let [req, res, err, pgid] = n[..] else {
+            return None;
+        };
+        for fd in [req, res, err] {
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        Some(Channel {
+            req,
+            res,
+            err,
+            pgid,
+        })
+    })
+}
+
+/// Take a lent server's descriptors before anything is started (`main`).
+pub fn adopt_server() {
+    let _ = channel();
+}
+
+fn serve_one(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>) -> Res<Verdict> {
+    let rundir = std::path::absolute(rundir).unwrap_or_else(|_| rundir.to_path_buf());
+    let path = rundir.join(OUTPUT);
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut env = serde_json::Map::new();
+    env.insert("PATINA_SEED".into(), seed.to_string().into());
+    env.insert(
+        "PATINA_EXIT".into(),
+        exit.map(|x| x.to_string()).unwrap_or_default().into(),
+    );
+    if let Some(k) = &c.case {
+        env.insert(CASE_VAR.into(), k.text.clone().into());
+        env.insert(CASE_NAME_VAR.into(), k.name.clone().into());
+    }
+    let line = serde_json::json!({"rundir": rundir, "env": env}).to_string();
+    let (mut v, said, stderr) = match channel().map(|ch| (ch, idle(ch))) {
+        Some((ch, Idle::Yes)) => ask(ch, &line, c.timeout),
+        Some((ch, Idle::Wrote)) => {
+            unsafe { libc::kill(-ch.pgid, libc::SIGKILL) };
+            (
+                Verdict::error(
+                    "the checker server wrote to its stdout between requests: one line answers one request".into(),
+                ),
+                String::new(),
+                vec![],
+            )
+        }
+        // A run of its own (`patina run`, a replay), or the sweep job's server has ended
+        // since its last answer: a server for this one run.
+        _ => {
+            let s = Server::start(c)?;
+            let r = ask(s.channel(), &line, c.timeout);
+            s.end();
+            r
+        }
+    };
+    out.write_all(said.as_bytes())
+        .and_then(|_| out.write_all(&stderr))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if v.verdict == Kind::Fail {
+        // As for a checker's first line: the run directory's own path is RUNDIR.
+        v.detail = v
+            .detail
+            .map(|d| d.replace(&rundir.display().to_string(), "RUNDIR"));
+    }
+    Ok(v)
+}
+
+enum Idle {
+    Yes,
+    /// It wrote between requests: that would be taken as the next run's answer.
+    Wrote,
+    Ended,
+}
+
+/// Whether a lent server waits for a request, wrote out of turn, or has ended.
+fn idle(ch: Channel) -> Idle {
+    if !crate::sys::readable(ch.res, 0) {
+        return Idle::Yes;
+    }
+    let mut b = [0u8; 1];
+    match unsafe { libc::read(ch.res, b.as_mut_ptr().cast(), 1) } {
+        0 => Idle::Ended,
+        _ => Idle::Wrote,
+    }
+}
+
+/// One request and its answer: the verdict, the answer as received (for `check.out`), and what
+/// the server wrote to stderr meanwhile. A server that answers out of turn, not at all or
+/// with anything but a verdict line is killed: it cannot be trusted with the next run.
+fn ask(ch: Channel, line: &str, timeout: u64) -> (Verdict, String, Vec<u8>) {
+    let kill = || unsafe {
+        libc::kill(-ch.pgid, libc::SIGKILL);
+    };
+    let size = |fd: i32| -> u64 {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        unsafe { libc::fstat(fd, &mut st) };
+        st.st_size as u64
+    };
+    let from = size(ch.err);
+    let stderr = || -> Vec<u8> {
+        let to = size(ch.err);
+        let mut b = vec![0u8; to.saturating_sub(from) as usize];
+        let n = unsafe { libc::pread(ch.err, b.as_mut_ptr().cast(), b.len(), from as i64) };
+        b.truncate(n.max(0) as usize);
+        // Read once: its pages go (the size stays, so offsets do), or a server that logs
+        // would hold a sweep job's whole log in memory.
+        unsafe {
+            libc::fallocate(
+                ch.err,
+                libc::FALLOC_FL_PUNCH_HOLE | libc::FALLOC_FL_KEEP_SIZE,
+                0,
+                to as i64,
+            )
+        };
+        b
+    };
+    let fail = |m: String, said: Vec<u8>| {
+        kill();
+        (
+            Verdict::error(m),
+            String::from_utf8_lossy(&said).into_owned(),
+            stderr(),
+        )
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    // Written without blocking: a server that does not read is held to the same deadline.
+    unsafe {
+        let fl = libc::fcntl(ch.req, libc::F_GETFL);
+        libc::fcntl(ch.req, libc::F_SETFL, fl | libc::O_NONBLOCK);
+    }
+    let req = format!("{line}\n");
+    let mut at = 0;
+    while at < req.len() {
+        let n = unsafe { libc::write(ch.req, req[at..].as_ptr().cast(), req.len() - at) };
+        if n > 0 {
+            at += n as usize;
+            continue;
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(libc::EAGAIN) => match crate::sys::wait_fd_out(ch.req, deadline) {
+                crate::sys::Waited::Ready => {}
+                crate::sys::Waited::Timeout => {
+                    return fail(
+                        format!("the checker server did not read its request within --check-timeout ({timeout} s)"),
+                        vec![],
+                    )
+                }
+                crate::sys::Waited::Terminated => {
+                    kill();
+                    crate::sys::exit_terminated();
+                }
+            },
+            Some(libc::EINTR) => {}
+            _ => {
+                return fail(
+                    format!("the checker server does not take requests: {e}"),
+                    vec![],
+                )
+            }
+        }
+    }
+    let mut got: Vec<u8> = vec![];
+    loop {
+        match crate::sys::wait_fd(ch.res, deadline) {
+            crate::sys::Waited::Ready => {}
+            crate::sys::Waited::Timeout => {
+                return fail(
+                    format!(
+                        "the checker server did not answer within --check-timeout ({timeout} s)"
+                    ),
+                    got,
+                )
+            }
+            crate::sys::Waited::Terminated => {
+                kill();
+                crate::sys::exit_terminated();
+            }
+        }
+        let mut b = [0u8; 4096];
+        let n = unsafe { libc::read(ch.res, b.as_mut_ptr().cast(), b.len()) };
+        if n <= 0 {
+            return fail("the checker server ended without answering".into(), got);
+        }
+        got.extend_from_slice(&b[..n as usize]);
+        if let Some(i) = got.iter().position(|&x| x == b'\n') {
+            if i + 1 != got.len() {
+                return fail(
+                    "the checker server answered with more than one line".into(),
+                    got,
+                );
+            }
+            let said = String::from_utf8_lossy(&got).into_owned();
+            let v = verdict_line(said.trim_end_matches('\n'));
+            if v.verdict == Kind::Error {
+                kill();
+            }
+            return (v, said, stderr());
+        }
+    }
+}
+
+/// A server's answer: `pass`, `fail LABEL: detail`, `skip REASON`; anything else is `error`.
+fn verdict_line(l: &str) -> Verdict {
+    let (word, rest) = l.split_once(' ').unwrap_or((l, ""));
+    let rest = rest.trim();
+    match word {
+        "pass" if rest.is_empty() => Verdict::new(Kind::Pass),
+        "fail" if !rest.is_empty() => {
+            let (label, detail) = match rest.split_once(": ") {
+                Some((l, d)) => (l.to_string(), d.to_string()),
+                None => (rest.to_string(), String::new()),
+            };
+            Verdict {
+                label: Some(label),
+                detail: Some(detail),
+                ..Verdict::new(Kind::Fail)
+            }
+        }
+        "skip" => Verdict {
+            detail: Some(rest.to_string()),
+            ..Verdict::new(Kind::NotJudged)
+        },
+        _ => Verdict::error(format!(
+            "the checker server answered {l:?}, not pass, fail LABEL: detail, or skip REASON"
+        )),
+    }
+}
+
+fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u64) -> Res<Verdict> {
+    let rundir = std::path::absolute(rundir).unwrap_or_else(|_| rundir.to_path_buf());
+    let path = rundir.join(OUTPUT);
+    let mut out = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    // Stderr apart, appended after stdout: the first line of stdout names a finding.
+    let name = c"patina-check-stderr";
+    let err = crate::sys::cvt_i(unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) })
+        .map_err(|e| format!("memfd: {e}"))?;
+    let mut err = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(err) });
+    let mut cmd = command(c);
+    cmd.arg(&rundir)
+        .stdin(Stdio::null())
+        .stdout(out.try_clone().map_err(|e| e.to_string())?)
+        .stderr(err.try_clone().map_err(|e| e.to_string())?)
+        .env("PATINA_SEED", seed.to_string())
+        .env(
+            "PATINA_EXIT",
+            exit.map(|x| x.to_string()).unwrap_or_default(),
+        );
     let started = std::time::Instant::now();
     let mut child = match cmd.spawn() {
         Ok(ch) => ch,
@@ -329,7 +721,7 @@ fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u6
         .unwrap_or_default();
     if timed_out {
         return Ok(Verdict::error(format!(
-            "the checker ran longer than --timeout ({timeout} s){last}"
+            "the checker ran longer than --check-timeout ({timeout} s){last}"
         )));
     }
     // The run directory differs between a run, its replay and minimize's tries: a path in it

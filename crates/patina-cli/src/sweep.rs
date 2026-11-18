@@ -154,22 +154,124 @@ pub const CASE_FILE: &str = "case";
 /// Longest name a case's directory takes from the case (characters).
 const CASE_NAME_MAX: usize = 40;
 
+/// The run settings a case line may give before its command; every other setting is the
+/// sweep's.
+pub const CASE_FLAGS: [&str; 4] = ["--work", "--mount", "--env", "--stdin"];
+
 /// One line of a `--cases` file.
 struct Case {
-    /// The line as written.
+    /// The line as written: with its settings, what a resumed sweep compares (the `case` file).
     text: String,
+    /// The case as a checker gets it, a report shows it and a known pattern's `[CASE]` matches
+    /// it: the line after its settings (`case_shown`).
+    shown: String,
     /// Its line number in the file.
     line_no: usize,
     /// The command its run is given.
     cmd: Vec<String>,
     /// Its directory under `seed-N`: `K-NAME`, K its position among the cases.
     dir: String,
+    /// The settings the line gives (`CASE_FLAGS`), as flag and value, in order.
+    flags: Vec<(&'static str, String)>,
+}
+
+/// A case as a checker gets it and a report shows it: its line after the settings it gives
+/// (the text put in `{}`, or the command), so that a pattern written for the case still
+/// matches once the line gives settings. The whole line stays in the run's `case` file.
+pub fn case_shown(text: &str) -> String {
+    case_line(text)
+        .map(|l| l.rest.trim().to_string())
+        .unwrap_or_else(|_| text.to_string())
+}
+
+/// What a case line holds: its settings, a name it gives, and the rest of the line (the
+/// command, or the text put in `{}`).
+struct Line<'a> {
+    flags: Vec<(&'static str, String)>,
+    name: Option<String>,
+    rest: &'a str,
+}
+
+/// Split a case line: a line whose first word starts with `--` gives run settings up to a
+/// word `--` (`--work DIR[:GUEST]`, `--mount`, `--env`, `--stdin`, parsed as `patina run`
+/// parses them, and `--name NAME` for its directory), then its command.
+fn case_line(text: &str) -> Res<Line<'_>> {
+    let plain = Line {
+        flags: vec![],
+        name: None,
+        rest: text,
+    };
+    match next_word(text)? {
+        Some((w, _)) if w.starts_with("--") => {}
+        _ => return Ok(plain),
+    }
+    let mut set = vec![];
+    let mut rest = text;
+    loop {
+        match next_word(rest)? {
+            None => return Err(
+                "settings with no command: end them with a word -- and give the command after it"
+                    .into(),
+            ),
+            Some((w, r)) => {
+                rest = r;
+                if w == "--" {
+                    break;
+                }
+                set.push(w);
+            }
+        }
+    }
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Err("no command after --".into());
+    }
+    // --name is the sweep's own; the rest is parsed as `patina run` parses its flags.
+    let mut name = None;
+    let mut run = vec![];
+    let mut it = set.into_iter();
+    while let Some(w) = it.next() {
+        match w.strip_prefix("--name") {
+            Some("") => name = Some(it.next().ok_or("--name needs NAME")?),
+            Some(v) if v.starts_with('=') => name = Some(v[1..].to_string()),
+            _ => run.push(w),
+        }
+    }
+    let a = crate::cli::parse(crate::cli::Cmd::Run, &run).map_err(|e| {
+        match run.iter().find(|w| {
+            let n = w.split('=').next().unwrap_or("");
+            crate::cli::find_flag(n).is_some() && !CASE_FLAGS.contains(&n)
+        }) {
+            Some(w) => sweep_wide(w.split('=').next().unwrap_or("")),
+            None => e,
+        }
+    })?;
+    if let Some(p) = a.positional.first() {
+        return Err(format!(
+            "{p}: not a setting (a case line's settings end with a word --)"
+        ));
+    }
+    let mut flags = vec![];
+    for (f, vals) in &a.flags {
+        let Some(f) = CASE_FLAGS.iter().find(|c| *c == f) else {
+            return Err(sweep_wide(f));
+        };
+        flags.extend(vals.iter().map(|v| (*f, v.clone())));
+    }
+    Ok(Line { flags, name, rest })
+}
+
+fn sweep_wide(flag: &str) -> String {
+    format!(
+        "{flag} is a setting of the whole sweep, not of one case: give it to the sweep (a case line may set {} and --name)",
+        CASE_FLAGS.join(", ")
+    )
 }
 
 /// Read a cases file: one case per line; empty lines and lines starting with `#` are
-/// skipped. With a command (`cmd`), `{}` in it is replaced by the line; without one, the line
-/// is the whole command, its words split as a shell would (quotes and backslashes, no
-/// expansion).
+/// skipped. A line may start with run settings (`case_line`). With a command (`cmd`), `{}` in
+/// it is replaced by the rest of the line; without one, the rest is the whole command, its
+/// words split as a shell would (quotes and backslashes, no expansion).
 fn read_cases(f: &Path, cmd: &[String]) -> Res<Vec<Case>> {
     let at = f.display();
     let t = std::fs::read_to_string(f).map_err(|e| format!("--cases {at}: {e}"))?;
@@ -185,22 +287,25 @@ fn read_cases(f: &Path, cmd: &[String]) -> Res<Vec<Case>> {
         if text.is_empty() || text.starts_with('#') {
             continue;
         }
-        let w = words(&text);
+        let bad = |e: String| format!("--cases {at} line {}: {e}", n + 1);
+        let l = case_line(&text).map_err(bad)?;
         let run = if cmd.is_empty() {
-            match w {
-                Ok(w) => w,
-                Err(e) => return Err(format!("--cases {at} line {}: {e}", n + 1)),
-            }
+            words(l.rest).map_err(bad)?
         } else {
-            cmd.iter().map(|x| x.replace("{}", &text)).collect()
+            cmd.iter().map(|x| x.replace("{}", l.rest)).collect()
         };
-        let named =
-            words(&text).unwrap_or_else(|_| text.split_whitespace().map(String::from).collect());
+        let named = match &l.name {
+            Some(n) => vec![n.clone()],
+            None => words(l.rest)
+                .unwrap_or_else(|_| l.rest.split_whitespace().map(String::from).collect()),
+        };
         out.push(Case {
             dir: format!("{}-{}", out.len() + 1, case_name(&named)),
-            text,
             line_no: n + 1,
             cmd: run,
+            flags: l.flags,
+            shown: l.rest.trim().to_string(),
+            text,
         });
     }
     if out.is_empty() {
@@ -214,23 +319,33 @@ fn read_cases(f: &Path, cmd: &[String]) -> Res<Vec<Case>> {
 /// next character. Nothing is expanded.
 pub fn words(line: &str) -> Res<Vec<String>> {
     let mut out = vec![];
+    let mut rest = line;
+    while let Some((w, r)) = next_word(rest)? {
+        out.push(w);
+        rest = r;
+    }
+    Ok(out)
+}
+
+/// The first word of `line` (as `words` splits) and the text after it, or none if only
+/// whitespace is left.
+fn next_word(line: &str) -> Res<Option<(String, &str)>> {
     let mut cur = String::new();
     let mut word = false;
-    let mut it = line.chars();
-    while let Some(c) = it.next() {
+    let mut it = line.char_indices();
+    while let Some((at, c)) = it.next() {
         match c {
             c if c.is_whitespace() => {
                 if word {
-                    out.push(std::mem::take(&mut cur));
-                    word = false;
+                    return Ok(Some((cur, &line[at..])));
                 }
             }
             '\'' => {
                 word = true;
                 loop {
                     match it.next() {
-                        Some('\'') => break,
-                        Some(x) => cur.push(x),
+                        Some((_, '\'')) => break,
+                        Some((_, x)) => cur.push(x),
                         None => return Err("unterminated '".into()),
                     }
                 }
@@ -239,16 +354,16 @@ pub fn words(line: &str) -> Res<Vec<String>> {
                 word = true;
                 loop {
                     match it.next() {
-                        Some('"') => break,
-                        Some('\\') => match it.next() {
-                            Some(x) if "\"\\$`".contains(x) => cur.push(x),
-                            Some(x) => {
+                        Some((_, '"')) => break,
+                        Some((_, '\\')) => match it.next() {
+                            Some((_, x)) if "\"\\$`".contains(x) => cur.push(x),
+                            Some((_, x)) => {
                                 cur.push('\\');
                                 cur.push(x);
                             }
                             None => return Err("unterminated \"".into()),
                         },
-                        Some(x) => cur.push(x),
+                        Some((_, x)) => cur.push(x),
                         None => return Err("unterminated \"".into()),
                     }
                 }
@@ -256,7 +371,7 @@ pub fn words(line: &str) -> Res<Vec<String>> {
             '\\' => {
                 word = true;
                 match it.next() {
-                    Some(x) => cur.push(x),
+                    Some((_, x)) => cur.push(x),
                     None => return Err("a backslash at the end of the line".into()),
                 }
             }
@@ -266,22 +381,27 @@ pub fn words(line: &str) -> Res<Vec<String>> {
             }
         }
     }
-    if word {
-        out.push(cur);
-    }
-    Ok(out)
+    Ok(word.then_some((cur, "")))
 }
 
 /// A short name for a case's directory: its last word that is not an option (else its last
-/// word), after the last `/`, with every character but letters, digits, `.`, `_` and `-`
-/// made `_`.
+/// word), after the last `/` unless the word holds spaces, with every character but letters,
+/// digits, `.`, `_` and `-` made `_`.
 fn case_name(words: &[String]) -> String {
     let w = words
         .iter()
         .rev()
         .find(|w| !w.starts_with('-'))
         .or(words.last())
-        .map(|w| w.rsplit('/').next().unwrap_or(w))
+        // A path's last component; a word with spaces in it (a quoted script, JSON) is not
+        // a path: its start.
+        .map(|w| {
+            if w.contains(char::is_whitespace) {
+                w.as_str()
+            } else {
+                w.rsplit('/').next().unwrap_or(w)
+            }
+        })
         .unwrap_or("");
     let mut n = String::new();
     for c in w.chars() {
@@ -362,10 +482,14 @@ enum Then {
 /// job (and with `None` a few times a second), with the number running and the current width.
 /// On SIGINT or SIGTERM the running children are terminated and their jobs are not reported.
 /// Returns the number of jobs never started.
+/// With `serve` (`--check-serve`), each worker keeps one checker server and lends it to the
+/// runs it starts; one that died or was killed for a bad answer is started again for the next
+/// run, and each is ended with its worker.
 fn pool(
     jobs: Vec<Job>,
     width: usize,
     child: &(dyn Fn(&Job) -> Command + Sync),
+    serve: Option<&crate::check::Check>,
     mut event: impl FnMut(Option<Done>, usize, usize) -> Then,
 ) -> usize {
     let queue = Mutex::new(jobs.into_iter().collect::<VecDeque<_>>());
@@ -381,61 +505,87 @@ fn pool(
             let (tx, queue, running, stop, pending, now) =
                 (tx.clone(), &queue, &running, &stop, &pending, &now);
             let cpu = cpus[w * cpus.len() / width];
-            sc.spawn(move || loop {
-                if stop.load(SeqCst) || w >= now.load(SeqCst) {
-                    return;
-                }
-                let job = {
-                    let mut q = queue.lock().unwrap();
-                    let j = q.pop_front();
-                    if j.is_some() {
-                        pending.fetch_add(1, SeqCst);
-                    }
-                    j
-                };
-                let Some(job) = job else {
-                    if pending.load(SeqCst) == 0 {
+            sc.spawn(move || {
+                let mut server = Held(None);
+                loop {
+                    if stop.load(SeqCst) || w >= now.load(SeqCst) {
                         return;
                     }
-                    std::thread::sleep(Duration::from_millis(20));
-                    continue;
-                };
-                let mut cmd = child(&job);
-                cmd.stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped());
-                unsafe {
-                    use std::os::unix::process::CommandExt;
-                    cmd.pre_exec(move || {
-                        // One CPU: the run's own pinning picks it (launch::default_cpu).
-                        let mut set: libc::cpu_set_t = std::mem::zeroed();
-                        libc::CPU_SET(cpu, &mut set);
-                        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-                        Ok(())
-                    });
-                }
-                let (stdout, stderr) = match cmd.spawn() {
-                    Ok(c) => {
-                        let pid = c.id() as i32;
-                        running.lock().unwrap().push(pid);
-                        let o = c.wait_with_output();
-                        running.lock().unwrap().retain(|p| *p != pid);
-                        match o {
-                            Ok(o) => (o.stdout, o.stderr),
-                            Err(e) => (vec![], e.to_string().into_bytes()),
+                    let job = {
+                        let mut q = queue.lock().unwrap();
+                        let j = q.pop_front();
+                        if j.is_some() {
+                            pending.fetch_add(1, SeqCst);
+                        }
+                        j
+                    };
+                    let Some(job) = job else {
+                        if pending.load(SeqCst) == 0 {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(20));
+                        continue;
+                    };
+                    let mut cmd = child(&job);
+                    if let (Some(c), Job::Run { .. }) = (serve, &job) {
+                        if !server.0.as_mut().is_some_and(|s| s.alive()) {
+                            // A run that finds no server starts its own, and says why it failed.
+                            server = Held(crate::check::Server::start(c).ok());
+                        }
+                        if let Some(s) = &server.0 {
+                            s.lend(&mut cmd);
                         }
                     }
-                    Err(e) => (vec![], format!("spawn patina: {e}").into_bytes()),
-                };
-                if INTERRUPTED.load(SeqCst) {
-                    pending.fetch_sub(1, SeqCst);
-                    return;
+                    cmd.stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped());
+                    unsafe {
+                        use std::os::unix::process::CommandExt;
+                        cmd.pre_exec(move || {
+                            // One CPU: the run's own pinning picks it (launch::default_cpu).
+                            let mut set: libc::cpu_set_t = std::mem::zeroed();
+                            libc::CPU_SET(cpu, &mut set);
+                            libc::sched_setaffinity(
+                                0,
+                                std::mem::size_of::<libc::cpu_set_t>(),
+                                &set,
+                            );
+                            Ok(())
+                        });
+                    }
+                    let (stdout, stderr) = match cmd.spawn() {
+                        Ok(c) => {
+                            let pid = c.id() as i32;
+                            running.lock().unwrap().push(pid);
+                            let o = c.wait_with_output();
+                            running.lock().unwrap().retain(|p| *p != pid);
+                            match o {
+                                Ok(o) => (o.stdout, o.stderr),
+                                Err(e) => (vec![], e.to_string().into_bytes()),
+                            }
+                        }
+                        Err(e) => (vec![], format!("spawn patina: {e}").into_bytes()),
+                    };
+                    // A server whose run did not get a verdict from it (an error: the run killed
+                    // it; pending: the run was stopped while asking) is ended and reaped here, so
+                    // that no later run of this job meets it or a late answer of it.
+                    if let (Some(_), Job::Run { dir, .. }) = (&server.0, &job) {
+                        let r = read_json(&dir.join("result.json")).unwrap_or_default();
+                        let v = r["check"]["verdict"].as_str();
+                        if !matches!(v, None | Some("pass" | "fail" | "not-judged" | "not-run")) {
+                            server = Held(None);
+                        }
+                    }
+                    if INTERRUPTED.load(SeqCst) {
+                        pending.fetch_sub(1, SeqCst);
+                        return;
+                    }
+                    let _ = tx.send(Done {
+                        job,
+                        stdout,
+                        stderr,
+                    });
                 }
-                let _ = tx.send(Done {
-                    job,
-                    stdout,
-                    stderr,
-                });
             });
         }
         drop(tx);
@@ -470,6 +620,17 @@ fn pool(
         }
     });
     queue.into_inner().unwrap().len()
+}
+
+/// A worker's checker server, ended when the worker ends or replaces it.
+struct Held(Option<crate::check::Server>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        if let Some(s) = self.0.take() {
+            s.end();
+        }
+    }
 }
 
 /// Remove the logs (`inc-*`) and the checker's output of a run directory, keeping `run.json`
@@ -603,34 +764,64 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     };
     // Every program the runs start, resolved and hashed once: a run already in the sweep
-    // directory is kept only if it ran the same program.
+    // directory is kept only if it ran the same program. A case's own settings are checked
+    // here too (the sweep's, with the line's on top), and its mounts may hold its program.
     let mut programs: std::collections::BTreeMap<String, crate::config::Program> =
         Default::default();
     let list: Vec<Option<usize>> = match &cases {
         Some(c) => (0..c.len()).map(Some).collect(),
         None => vec![None],
     };
+    let mut program_of: Vec<String> = vec![];
+    let mut first_cfg = None;
     for &i in &list {
+        let at = |e: String| {
+            error(match (i, &cases) {
+                (Some(i), Some(c)) => format!("--cases line {}: {e}", c[i].line_no),
+                _ => e,
+            })
+        };
+        let ccfg = match (i, &cases) {
+            (Some(i), Some(c)) if !c[i].flags.is_empty() => {
+                let mut m = Args {
+                    flags: a.flags.clone(),
+                    positional: vec![],
+                    cmd: Some(c[i].cmd.clone()),
+                };
+                for (f, v) in &c[i].flags {
+                    let e = m.flags.entry(f).or_default();
+                    if !find_flag(f).is_some_and(|x| x.repeat) {
+                        e.clear();
+                    }
+                    e.push(v.clone());
+                }
+                crate::config::resolve_any(&m).map_err(at)?
+            }
+            _ => cfg.clone(),
+        };
         let cmd = cmd_of(i);
-        if !programs.contains_key(&cmd[0]) {
-            let p = crate::config::program(&cmd[0], &cfg.mounts).map_err(|e| {
-                error(match (i, &cases) {
-                    (Some(i), Some(c)) => format!("--cases line {}: {e}", c[i].line_no),
-                    _ => e,
-                })
-            })?;
-            programs.insert(cmd[0].clone(), p);
+        let key = format!(
+            "{}\n{}",
+            cmd[0],
+            serde_json::to_string(&ccfg.mounts).unwrap_or_default()
+        );
+        if !programs.contains_key(&key) {
+            let p = crate::config::program(&cmd[0], &ccfg.mounts).map_err(at)?;
+            programs.insert(key.clone(), p);
         }
+        if first_cfg.is_none() {
+            first_cfg = Some((ccfg, key.clone()));
+        }
+        program_of.push(key);
     }
     let probe_program = {
-        let mut probe = cfg.clone();
+        let (mut probe, key) = first_cfg.unwrap();
         probe.cmd = cmd_of(list[0]);
-        let o = probe
-            .opts_with(programs[&probe.cmd[0]].clone())
-            .map_err(error)?;
+        let o = probe.opts_with(programs[&key].clone()).map_err(error)?;
         crate::launch::preflight(&o).map_err(error)?;
         o.program
     };
+    let program_key = |case: Option<usize>| -> &String { &program_of[case.unwrap_or(0)] };
 
     let out = crate::absolute(PathBuf::from(a.last("--out").unwrap_or("patina-out/sweep")));
     if let Ok(rd) = std::fs::read_dir(&out) {
@@ -681,7 +872,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // The job for a run, or none when the directory already holds it (a resumed sweep).
     let fresh = |seed: u64, case: Option<usize>, point: Option<u64>| -> Result<Option<Job>, Fail> {
         let dir = run_dir(seed, case, point);
-        let sha = &programs[&cmd_of(case)[0]].sha256;
+        let sha = &programs[program_key(case)].sha256;
         if done_before(
             &dir,
             case.map(|i| cases.as_ref().unwrap()[i].text.as_str()),
@@ -752,11 +943,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                         _ => format!("{k}:0"),
                     });
                 }
+                // The case's own settings, after the sweep's: a later --work or --stdin
+                // replaces the sweep's, --mount and --env add to them.
+                if let (Some(i), Some(cs)) = (case, &cases) {
+                    for (f, v) in &cs[*i].flags {
+                        c.arg(f).arg(v);
+                    }
+                }
                 c.arg("--").args(cmd_of(*case));
                 // The case, for a checker (`check::CASE_VAR`).
                 match (case, &cases) {
                     (Some(i), Some(cs)) => c
-                        .env(crate::check::CASE_VAR, &cs[*i].text)
+                        .env(crate::check::CASE_VAR, &cs[*i].shown)
                         .env(crate::check::CASE_NAME_VAR, &cs[*i].dir),
                     _ => c
                         .env_remove(crate::check::CASE_VAR)
@@ -818,7 +1016,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             report::bytes(st.run_bytes)
         )));
     }
-    let mut not_started = pool(jobs, width, &child, |d, running, now| {
+    let serve = cfg.check.as_ref().filter(|k| k.serve);
+    let mut not_started = pool(jobs, width, &child, serve, |d, running, now| {
         st.event(d, running, now)
     });
     st.flush(true);
@@ -870,7 +1069,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         st.todo += children.len();
         // Children of all seeds run interleaved: announce each group as it is found.
         st.unfinished.clear();
-        not_started = pool(children, st.width, &child, |d, running, now| {
+        not_started = pool(children, st.width, &child, serve, |d, running, now| {
             st.event(d, running, now)
         });
         st.flush(true);
@@ -906,7 +1105,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // Replay the first seed of each finding once.
     let runs = report::collect(std::slice::from_ref(&out)).map_err(error)?;
     if !interrupted {
-        let (v, _) = report::build(&runs, &[], known.as_ref(), None);
+        let (v, _) = report::build(&runs, &[], known.as_ref(), None, "");
         let mut replays = vec![];
         for g in v["groups"].as_array().unwrap() {
             let finding = Outcome::ALL
@@ -926,7 +1125,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 "sweep: replaying the first seed of {}",
                 report::count(replays.len(), "finding")
             ));
-            pool(replays, st.width, &child, |d, _, _| {
+            pool(replays, st.width, &child, None, |d, _, _| {
                 if let Some(d) = d {
                     replayed(d);
                 }
@@ -956,7 +1155,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         lowered_to: Some(st.width).filter(|w| *w != width),
         stopped: st.stopped.clone(),
     };
-    let (v, text) = report::build(&runs, a.all("--allow-unmet"), known.as_ref(), Some(head));
+    let mut again = "patina report --group N".to_string();
+    if let Some(k) = a.last("--known") {
+        again.push_str(&format!(" --known {}", report::quote(k)));
+    }
+    again.push_str(&format!(" {}", report::quote(&out.display().to_string())));
+    let (v, text) = report::build(
+        &runs,
+        a.all("--allow-unmet"),
+        known.as_ref(),
+        Some(head),
+        &again,
+    );
     write_json(&out.join("report.json"), &v).map_err(error)?;
     if a.json() {
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
@@ -1148,6 +1358,7 @@ impl State<'_> {
         if let Some(c) = &case {
             let _ = std::fs::write(dir.join(CASE_FILE), format!("{c}\n"));
         }
+        let case = case.map(|c| case_shown(&c));
         let mut r = read_json(&dir.join("result.json")).unwrap_or_default();
         // A host limit shared by every sandbox of this user (the kernel's per-user pipe
         // accounting) says nothing about the guest: fewer runs at once, and this one again.
@@ -1216,7 +1427,7 @@ impl State<'_> {
         if finding
             && self
                 .known
-                .is_some_and(|k| k.id_of(case.as_deref(), &sig).is_some())
+                .is_some_and(|k| k.id_of(case.as_deref(), &r).is_some())
         {
             self.known_runs += 1;
             self.flush(false);
@@ -1303,6 +1514,36 @@ mod tests {
     }
 
     #[test]
+    fn a_case_line_gives_its_own_settings() {
+        let l = case_line("--work d:/srv --env A=1 --env B=2 --name x1 -- ./t 'a b'").unwrap();
+        assert_eq!(
+            l.flags,
+            vec![
+                ("--env", "A=1".to_string()),
+                ("--env", "B=2".to_string()),
+                ("--work", "d:/srv".to_string())
+            ]
+        );
+        assert_eq!((l.name.as_deref(), l.rest), (Some("x1"), "./t 'a b'"));
+        // No settings: the line is the command.
+        let l = case_line("./t --work d").unwrap();
+        assert!(l.flags.is_empty() && l.rest == "./t --work d");
+        // The sweep's own settings, unknown ones, and a line without its command are refused.
+        for bad in [
+            "--seed 3 -- ./t",
+            "--fault fs-error-permille=3 -- ./t",
+            "--bogus -- ./t",
+            "--work d ./t",
+            "--work d --",
+        ] {
+            assert!(case_line(bad).is_err(), "{bad}");
+        }
+        assert!(case_line("--crash machine -- ./t")
+            .err()
+            .is_some_and(|e| e.starts_with("--crash ")));
+    }
+
+    #[test]
     fn case_names_are_short_and_safe() {
         let n = |s: &str| case_name(&words(s).unwrap());
         assert_eq!(
@@ -1322,5 +1563,10 @@ mod tests {
             );
         }
         assert!(n(&"x".repeat(500)).len() <= CASE_NAME_MAX);
+        // A word with spaces (a script, JSON) is named by its start, not by its last `/`.
+        assert_eq!(
+            n(r#"/h/harness '{"script": "cat /rw/a", "dir": "/rw_"}'"#),
+            "_script_cat_rw_a_dir_rw_"
+        );
     }
 }

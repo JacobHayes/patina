@@ -61,7 +61,7 @@ is() {
 }
 
 # Beside the rest: a checker still running after --timeout.
-(run hang --timeout 2 --check chk/hang -- "$hello" >hang.rc) &
+(run hang --check-timeout 2 --check chk/hang -- "$hello" >hang.rc) &
 hang=$!
 
 # The kvlog sweep, and kvlog fixed.
@@ -268,6 +268,49 @@ found conf-other "violation check: outside-roots: mkdir /work/other"
 found conf-data none
 found mark-bug "violation check: ack-before-fsync: ack N (seq N)"
 found mark-fixed none
+
+# 5. A serving checker, case settings, faults in known patterns, the report's size.
+# chk/calc as a server (`--check-serve`): a line per run, its environment set from the line.
+printf '%s\n' '#!/bin/sh' 'while read -r l; do' \
+  '  eval "$(printf "%s" "$l" | jq -r ".env | to_entries[] | \"export \(.key)=\(.value | @sh)\"")"' \
+  '  out=$("$(dirname "$0")/calc" "$(printf "%s" "$l" | jq -r .rundir)") && echo pass || echo "fail $out"' \
+  'done' >chk/calc-serve
+printf '#!/bin/sh\nwhile read -r l; do echo maybe; done\n' >chk/serve-garbage
+printf '#!/bin/sh\nexit 0\n' >chk/serve-gone
+chmod +x chk/calc-serve chk/serve-garbage chk/serve-gone
+# calcs NAME FLAGS: the calc sweep with a checker given in FLAGS
+calcs() { n=$1; shift; rc=0; "$PATINA" sweep --seeds 1..2 -j 4 --cases calc.txt --mount "$RUNS/calc:/calc" --out "$n" "$@" >"$n.txt" 2>&1 || rc=$?; echo "$rc"; }
+rc=$(calcs calcs-serve --known known2 --check-serve chk/calc-serve)
+groups() { jq -c '[.groups[] | [.signature, (.cases | length), .count]]' "$1/report.json"; }
+[ "$rc" = 0 ] && [ "$(groups calcs-serve)" = "$(groups calcs)" ] || die "calc with --check-serve: exit $rc, groups $(groups calcs-serve), --check gave $(groups calcs)"
+# A server that answers anything but a verdict, or ends, judges nothing: every run is an error.
+for s in garbage gone; do
+  rc=$(calcs calcs-$s --check-serve chk/serve-$s)
+  [ "$rc" = 2 ] && [ "$(jq '.check.errors' calcs-$s/report.json)" = 18 ] && [ "$(jq '.check.passed' calcs-$s/report.json)" = 0 ] || die "a server that $s: exit $rc: $(jq -c .check calcs-$s/report.json)"
+done
+# The health note: every judged run passed and no !ID entry shows the check can fail.
+[ "$(jq '.check.unproven' conf-data/report.json)" = true ] && [ "$(jq '.check.unproven' calcs/report.json)" = false ] || die "check.unproven: conf-data $(jq .check.unproven conf-data/report.json), calcs $(jq .check.unproven calcs/report.json)"
+# --ok-exit any: every exit status, never a signal.
+is okany "$(run okany --ok-exit any -- /bin/sh -c 'exit 200')" 0 ok ok-exit
+is okanysig "$(run okanysig --ok-exit any -- /usr/bin/python3 -I -c 'import os; os.abort()')" 1 crash signal
+# Faults in a known pattern: fs-short fired in every upcase finding.
+printf '%s\n' 'calm violation check: wrong-output* {faults: -}' 'short violation check: wrong-output* {faults: *fs-short*}' >known-f
+[ "$("$PATINA" report --format json --known known-f up1 | jq -r '[.known.entries[] | "\(.id)=\(.count)"] | join(" ")')" = "calm=0 short=$(jq .findings up1/report.json)" ] || die "{faults: ...} in a known pattern"
+# Case lines with settings: their own --env and --work; [CASE] is the line after its settings.
+mkdir cw && echo from-work >cw/f
+printf '%s\n' "--env V=one -- /bin/sh -c 'echo \$V; cat /w/f; exit 1' a" "--work $RUNS/cw:/w --env V=two -- /bin/sh -c 'echo \$V; cat /w/f; exit 1' b" >cw.txt
+"$PATINA" sweep --seeds 1 --cases cw.txt --out cw-s >cw.out 2>&1 || true
+[ "$(cat cw-s/seed-1/1-a/inc-0/stdout | head -1) $(cat cw-s/seed-1/2-b/inc-0/stdout | paste -sd' ')" = "one two from-work" ] || die "case settings: $(cat cw-s/seed-1/*/inc-0/stdout)"
+[ "$(jq -r '[.groups[].runs[].case] | sort | join(",")' cw-s/report.json)" = "/bin/sh -c 'echo \$V; cat /w/f; exit 1' a,/bin/sh -c 'echo \$V; cat /w/f; exit 1' b" ] || die "the case of a line with settings: $(jq -c '[.groups[].runs[].case]' cw-s/report.json)"
+echo '--fault fs-error-permille=1 -- /bin/true' >cw-bad.txt
+rc=0
+"$PATINA" sweep --seeds 1 --cases cw-bad.txt --out cw-bad >cw-bad.out 2>&1 || rc=$?
+[ "$rc" = 2 ] && grep -q -- '--fault is a setting of the whole sweep' cw-bad.out && [ ! -e cw-bad/seed-1 ] || die "a sweep's flag on a case line: exit $rc: $(cat cw-bad.out)"
+# The report: a group in full by its number, and its runs listed in report.json.
+"$PATINA" report --group 2 calcs >g2.txt || true
+[ "$(head -1 g2.txt)" = "$(jq -r '.groups[1].signature' calcs/report.json)" ] && grep -q '^  replay: ' g2.txt || die "report --group 2: $(cat g2.txt)"
+[ "$(jq '[.groups[].runs | length] | add' calcs/report.json)" = "$(jq .findings calcs/report.json)" ] || die "report.json: groups do not list every finding's run"
+echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case settings, faults patterns, --group, --ok-exit any"
 
 wait "$hang" || true
 is hang "$(cat hang.rc)" 2 error check

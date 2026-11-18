@@ -47,6 +47,8 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     let rest = &args[1..];
+    // A checker server lent by a sweep (`--check-serve`): kept from what this process starts.
+    check::adopt_server();
     let hidden = match first.as_str() {
         "__sup" => Some(sup::main(rest)),
         "__insn-scan" => Some(insn::main(rest)),

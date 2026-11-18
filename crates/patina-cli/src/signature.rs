@@ -24,6 +24,9 @@ const PRIMARY_MAX: usize = 200;
 /// one message from another, short enough that context a program appends (state dumps,
 /// counters) does not split one bug.
 const DETAIL_MAX: usize = 64;
+/// A checker's detail is its whole first line, which its author wrote to name the finding
+/// (context goes on later lines, in `check.out`): cut only at the signature's length.
+const CHECK_DETAIL_MAX: usize = PRIMARY_MAX;
 /// Components an absolute path keeps (`checkout_free`).
 const PATH_KEEP: usize = 3;
 
@@ -57,8 +60,13 @@ fn primary(r: &Value, stderr: &str) -> String {
             } else {
                 &r["sdk"]["violation"]
             };
+            let max = if r["stop"] == "check" {
+                CHECK_DETAIL_MAX
+            } else {
+                DETAIL_MAX
+            };
             match v["label"].as_str() {
-                Some(l) => return violation(l, v["detail"].as_str().unwrap_or("")),
+                Some(l) => return violation(l, v["detail"].as_str().unwrap_or(""), max),
                 None => message.to_string(),
             }
         }
@@ -103,15 +111,13 @@ fn primary(r: &Value, stderr: &str) -> String {
     normalise(&p)
 }
 
-/// A violation's name: its label kept as written (but checkout-free), then the first line of
-/// its detail, normalised and cut, which tells apart bugs reported under one label.
-fn violation(label: &str, detail: &str) -> String {
+/// A violation's name: its label kept as written (but checkout-free; its digits are kept),
+/// then the first line of its detail, normalised and cut at `max` characters, which tells
+/// apart bugs reported under one label.
+fn violation(label: &str, detail: &str, max: usize) -> String {
     let mut p = checkout_free(label);
     let first = detail.lines().find(|x| !x.trim().is_empty()).unwrap_or("");
-    let d: String = normalise(&checkout_free(first))
-        .chars()
-        .take(DETAIL_MAX)
-        .collect();
+    let d: String = normalise(&checkout_free(first)).chars().take(max).collect();
     if !d.is_empty() {
         p = format!("{p}: {}", d.trim_end());
     }
@@ -133,7 +139,7 @@ pub fn names_its_bug(signature: &str) -> bool {
 /// finding's name as a signature gives it.
 pub fn check_key(c: &Value) -> (Value, String) {
     let line = match c["label"].as_str() {
-        Some(l) => violation(l, c["detail"].as_str().unwrap_or("")),
+        Some(l) => violation(l, c["detail"].as_str().unwrap_or(""), CHECK_DETAIL_MAX),
         None => normalise(c["detail"].as_str().unwrap_or("")),
     };
     (c["verdict"].clone(), line)
@@ -351,6 +357,16 @@ mod tests {
         let (a, c) = (sig(always, ""), sig(check, ""));
         assert_eq!(a.split_once(": ").unwrap().1, c.split_once(": ").unwrap().1);
         assert!(c.starts_with("violation check: acked-record-lost"), "{c}");
+        // A checker's first line is the name it chose: kept whole (an `always` detail is cut),
+        // its label's digits too.
+        let detail = format!("open db: {} (inc-2)", "x".repeat(80));
+        let check = json!({"outcome": "violation", "stop": "check", "message": "x",
+            "check": {"verdict": "fail", "label": "open-ps1", "detail": detail}});
+        let c = sig(check, "");
+        assert!(
+            c.starts_with("violation check: open-ps1: ") && c.ends_with("(inc-N)"),
+            "{c}"
+        );
     }
 
     #[test]

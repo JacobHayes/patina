@@ -108,6 +108,15 @@ pub enum Waited {
 
 /// Wait until `fd` is readable, `deadline` passes or SIGTERM comes (`term_fd`).
 pub fn wait_fd(fd: i32, deadline: std::time::Instant) -> Waited {
+    wait_for(fd, libc::POLLIN, deadline)
+}
+
+/// Wait until `fd` can be written, `deadline` passes or SIGTERM comes.
+pub fn wait_fd_out(fd: i32, deadline: std::time::Instant) -> Waited {
+    wait_for(fd, libc::POLLOUT, deadline)
+}
+
+fn wait_for(fd: i32, events: libc::c_short, deadline: std::time::Instant) -> Waited {
     let term = term_fd();
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -117,7 +126,7 @@ pub fn wait_fd(fd: i32, deadline: std::time::Instant) -> Waited {
         let mut p = [
             libc::pollfd {
                 fd,
-                events: libc::POLLIN,
+                events,
                 revents: 0,
             },
             libc::pollfd {

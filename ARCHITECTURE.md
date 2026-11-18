@@ -164,6 +164,22 @@ records its verdict (`check`), which can turn an ok run into a `violation` (stop
 signed as an `always` is) or an `error`. Its output is not in the logs or the digest. A
 replay whose logs equal the run's while the verdict differs ends `error`, stop
 `check-unstable`, not `nondeterministic`.
+A serving checker (`--check-serve`, `check::Server`) is started once per sweep job by the
+sweep's worker thread, which lends its pipes to each `patina run` it starts (`PATINA_CHECK_SERVER`:
+descriptors kept across that one exec, close-on-exec again at once in the child); the run
+writes one request line and reads one verdict line, so the verdict is still made, recorded and
+replayed by the run, as a per-run checker's is. A server that wrote out of turn, answered with
+anything but one verdict line, or not within `--check-timeout`, is killed and the run is an
+`error`; the worker starts another for its next run. A run with no lent server (`patina run`,
+a replay, minimize), or whose server ended after its last answer, starts one for itself. Sending each run's verdict through its own `patina
+run`, rather than judging in the sweep, keeps one code path for verdicts, `check.out` and
+`pending`. Its cost decided the design: a Python checker started per run costs 2 to 4 times
+the unchecked sweep, a server 1.0 to 1.2 times (docs/EVIDENCE.md, Oracles).
+A `--cases` line may give its own run settings before `--` (`sweep::case_line`, the flags of
+`CASE_FLAGS` parsed by `patina run`'s parser); they follow the sweep's on the run's command
+line. The whole line is the case's identity on resume (the `case` file); a checker, the report
+and a known pattern see the line after its settings (`sweep::case_shown`), so a pattern
+written for a case still matches once its line gains settings.
 `--ok-exit` (`Config::ok_exit`, in `run.json`) is an input of `outcome::classify`: a guest
 that exited with a listed status, not on a signal, ends `ok`, stop `ok-exit`, and the checker
 judges it; the logs and digest are those of the run without the flag. Each incarnation's

@@ -54,7 +54,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Report,
         name: "report",
-        usage: "patina report DIR...",
+        usage: "patina report [--known FILE] [--group N] DIR...",
         help: "summarise run directories (a sweep's, or any made by patina run --out)",
     },
     Command {
@@ -361,6 +361,13 @@ pub const FLAGS: &[Flag] = &[
         "findings already known: lines of ID PATTERN matched against [CASE] SIGNATURE (* any text, # comments); a known finding is counted and does not fail the sweep; an ID written !ID must match some run or the result is vacuous",
         &[Cmd::Sweep, Cmd::Report],
     ),
+    flag(
+        "--group",
+        "N",
+        "none",
+        "print group N of the report in full (its position in report.json's groups, from 1): its faults, rerun and replay commands",
+        &[Cmd::Report],
+    ),
     flag("--from", "SEQ", "0", "log dump, log events: first sequence number", &[Cmd::Log]),
     flag("--to", "SEQ", "last", "log dump, log events: last sequence number", &[Cmd::Log]),
     flag(
@@ -374,7 +381,7 @@ pub const FLAGS: &[Flag] = &[
         name: "--check",
         value: "'CMD ARGS'",
         default: "none",
-        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail, 77 not judged, else error; at most --timeout seconds",
+        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail, 77 not judged, else error",
         cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log],
         repeat: false,
         per: &[(
@@ -385,10 +392,24 @@ pub const FLAGS: &[Flag] = &[
         per_value: &[(Cmd::Log, "")],
     },
     flag(
-        "--ok-exit",
-        "N[,N...]",
+        "--check-serve",
+        "'CMD ARGS'",
         "none",
-        "guest exit statuses that end the run ok: the program failed cleanly, as it documents (a checker still judges it; PATINA_EXIT has the status); a signal never does",
+        "--check with one checker process per sweep job, not per run: CMD ARGS starts with PATINA_CHECK_SERVE=1, reads one JSON line per run on stdin ({\"rundir\": ..., \"env\": {PATINA_SEED, ...}}) and answers one line: pass, fail LABEL: detail, or skip REASON; anything else is error and the process is restarted",
+        &[Cmd::Run, Cmd::Verify, Cmd::Sweep],
+    ),
+    flag(
+        "--check-timeout",
+        "SECONDS",
+        "60",
+        "wall time after which the checker is stopped and the run ends error",
+        RUNLIKE,
+    ),
+    flag(
+        "--ok-exit",
+        "N[,N...]|any",
+        "none",
+        "guest exit statuses that end the run ok: the program failed cleanly, as it documents (a checker still judges it; PATINA_EXIT has the status); any: every status; a signal never does",
         RUNLIKE,
     ),
     flag(

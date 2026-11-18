@@ -244,7 +244,6 @@ pub fn run_one(
             out,
             o.cfg.seed,
             end.verdict.exit_status,
-            o.cfg.timeout,
         ));
         r = write(&end)?;
     }
