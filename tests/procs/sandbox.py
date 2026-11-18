@@ -4,7 +4,7 @@ run are inside its PID namespace (since sandbox hardening the guest's stdout rea
 the run; every guest process holds the boundary log, so it counts as a process of the run);
 then print, one per line, every namespace of the run's
 processes (those most of them share) that differs from this process's own (as /proc/PID/ns/* names it), and on stderr
-how many processes of the run are alive. Exit 1 if that does not happen within SECONDS."""
+how many processes of the run are alive. Exit 1 if that does not happen within SECONDS of polls."""
 import os
 import sys
 import time
@@ -31,8 +31,8 @@ def members():
     return r
 
 
-t0 = time.time()
-while time.time() - t0 < limit:
+# At most SECONDS of polls (more under load: the bound counts polls, not wall time).
+for _ in range(int(limit / 0.05)):
     try:
         up = procs is not None or marker in open(out + "inc-0/stdout", "rb").read()
     except OSError:

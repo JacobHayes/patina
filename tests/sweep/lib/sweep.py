@@ -238,7 +238,10 @@ out = os.path.join(RUNS, "interrupted")
 p = subprocess.Popen([PATINA, "sweep", "-j", "4", "--seeds", "1..400", "--out", out, "--",
                       "/bin/sh", "-c", "i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done"],
                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-time.sleep(1.5)
+# Interrupt once a run has finished, so the sweep is under way with runs in flight.
+while p.poll() is None and not any(os.path.exists(os.path.join(out, d, "result.json"))
+                                   for d in (os.listdir(out) if os.path.isdir(out) else []) if d.startswith("seed-")):
+    time.sleep(0.05)
 p.send_signal(signal.SIGINT)
 so, se = p.communicate(timeout=30)
 left = subprocess.run([sys.executable, "-I", os.path.join(HERE, "..", "..", "leftovers.py"), out],
@@ -247,7 +250,7 @@ partial = [d for d in os.listdir(out) if d.startswith("seed-") and not os.path.e
 if p.returncode != 2 or left.returncode != 0 or partial or not os.path.exists(os.path.join(out, "report.json")):
     die(f"interrupted: exit {p.returncode}, leftovers {left.stdout!r}, partial {partial}\n{se[-1000:]}")
 done = len([d for d in os.listdir(out) if d.startswith("seed-")])
-print(f"interrupted after 1.5 s: {done} runs finished and reported, none partial, no process left")
+print(f"interrupted after the first finished run: {done} runs finished and reported, none partial, no process left")
 
 # Minimize: a finding under --faults all (file errors raised to 40 per mille) keeps only the
 # file-error setting.

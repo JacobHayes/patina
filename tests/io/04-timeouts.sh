@@ -1,6 +1,7 @@
 # 4. Timeouts in virtual time: poll and epoll_wait with 10 s on a silent pipe return 0 after
-#    >= 10 virtual seconds and in less wall time than that (no real wait); a 1 s periodic timerfd read 100 times reports
-#    100 expirations at exact virtual times; SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s.
+#    >= 10 virtual seconds; a 1 s periodic timerfd read 100 times reports 100 expirations at
+#    exact virtual times; SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s. Together 122 virtual
+#    seconds, eight times this script's budget: a real wait fails it (no wall time is read).
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-timeouts; mkdir -p "$o"
@@ -17,7 +18,6 @@ S = 10**9
 for m in ("poll", "epoll"):
     r, ns = re.match(r"\S+ ret (-?\d+) elapsed_ns (\d+)", out(m)[0]).groups()
     assert int(r) == 0 and S * 10 <= int(ns) < S * 10 + 10**6, (m, r, ns)
-    assert wall(m) < 10_000, (m, wall(m))  # a real wait alone takes 10 s
     print(f"{m}: 0 after {int(ns)} virtual ns, {wall(m)} ms wall")
 lines = [l for l in out("timerfd") if l.startswith("read ")]
 assert len(lines) == 100

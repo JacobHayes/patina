@@ -5,12 +5,13 @@
 #  a. R: `ok`, stdout lines equal to a native run's after masking "~ " lines.
 #  b. D (seed 1, 3 runs, --vary cpu,load,aslr,sandbox), faults off and on (fs-error-permille=10).
 #  c. >= 5 distinct digests over 10 seeds.
-#  d. The 5 s tokio::time::timeout fires in virtual time: median wall of 3 runs < 1.5 s.
+#  d. The 5 s tokio::time::timeout fires (in virtual time: see the partition in g).
 #  e. F: injected file errors are seen by the program (spawn_blocking errors printed).
 #  g. TCP (tokio-mt net, the network wire): D faults off and on, at seed 5: the seed that diverged
 #     before the exit barrier (docs/EVIDENCE.md runtimes "exit versus a wire delivery"). F: net-reset seen
-#     as "ConnectionReset"; net-partition=1..10001: the 5 s read timeouts fire during it, then
-#     all 16 clients finish with correct data, quickly in wall time; net-chunk-max=1: all ok.
+#     as "ConnectionReset"; net-partition=1..100001: the 5 s read timeouts fire during it, then
+#     all 16 clients finish with correct data (two 100 s partitions: a real wait fails the
+#     budget); net-chunk-max=1: all ok.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 T=tokio-mt
@@ -37,16 +38,12 @@ d=$(digests tk-10)
 echo "W2: $d distinct digests over seeds 1-10 ($(count tk-10 ok) ok)"
 [ "$d" -ge 5 ] || fail "W2: $d distinct digests"
 
-echo "== d. the 5 s timeout in virtual time (3 runs one after the other)"
-: >"$RUNS/tk-wall.u"
+echo "== d. the 5 s timeout"
 for s in 1 2 3; do
     run $T "$RUNS/tk-t$s" "$s" -- /guest/tokio-mt local
     grep -q '^timeout 5s: fired, elapsed >= 5s: true$' "$RUNS/tk-t$s/inc-0/stdout" || fail "W2 seed $s: the 5 s timeout did not fire as expected"
-    field "$RUNS/tk-t$s/result.json" wall_ms >>"$RUNS/tk-wall.u"
+    echo "seed $s: wall $(field "$RUNS/tk-t$s/result.json" wall_ms) ms; native wall ${n_ms} ms"
 done
-med=$(sort -n "$RUNS/tk-wall.u" | sed -n 2p)
-echo "wall ms of the 3 runs: $(sort -n "$RUNS/tk-wall.u" | tr '\n' ' '); median $med; native wall ${n_ms} ms"
-[ "$med" -lt 1500 ] || fail "W2: median wall $med ms for a run containing the 5 s timeout"
 
 echo "== e. F"
 fs=0
@@ -64,15 +61,13 @@ verify_seeds $T tk-dn cpu,load,aslr,sandbox "5" -- /guest/tokio-mt net || fail "
 verify_seeds $T tk-dnf cpu,load,aslr,sandbox "5" $NETF -- /guest/tokio-mt net || fail "W2 D (tcp, network faults on)"
 echo "-- net-reset-permille=20"
 netf $T tk-reset 'error: ConnectionReset' "1 2 3" --fault net-reset-permille=20 -- /guest/tokio-mt net || fail "W2: no reset seen"
-echo "-- net-partition=1..10001 (ms)"
-netf $T tk-part '^echo (tcp): 16 of 16 clients ok' "1 2" --fault net-partition=1..10001 -- /guest/tokio-mt net >"$RUNS/tk-part.txt" || true
+echo "-- net-partition=1..100001 (ms)"
+netf $T tk-part '^echo (tcp): 16 of 16 clients ok' "1 2" --fault net-partition=1..100001 -- /guest/tokio-mt net >"$RUNS/tk-part.txt" || true
 cat "$RUNS/tk-part.txt"
 [ "$(grep -c ': class ok, .* 1 lines match' "$RUNS/tk-part.txt")" = 2 ] || fail "W2: not every client recovered after the partition"
 for s in 1 2; do
     n=$(sed -n 's/^timeouts during echo: //p' "$RUNS/tk-part-$s/inc-0/stdout")
-    [ "${n:-0}" -gt 0 ] || fail "W2 seed $s: no 5 s timeout fired during the 10 s partition"
-    w=$(field "$RUNS/tk-part-$s/result.json" wall_ms)
-    [ "$w" -lt 3000 ] || fail "W2 seed $s: $w ms wall across a 10 s virtual partition"
+    [ "${n:-0}" -gt 0 ] || fail "W2 seed $s: no 5 s timeout fired during the 100 s partition"
 done
 echo "-- net-chunk-max=1"
 netf $T tk-chunk '^echo (tcp): 16 of 16 clients ok' "1" --fault net-chunk-max=1 -- /guest/tokio-mt net || fail "W2: not every client ok under net-chunk-max=1"

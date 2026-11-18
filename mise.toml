@@ -25,5 +25,7 @@ run = [
   # The runtime is its own workspace, built for a bare target per architecture: both are
   # linted on every host.
   "cd crates/patina-rt && cargo fmt -- --check && cargo clippy --release --locked --target x86_64-unknown-none -- -D warnings && cargo clippy --release --locked --target aarch64-unknown-none-softfloat -- -D warnings",
+  # Wall-clock assertions, fixed sleeps and pinned seeds in the gate's scripts.
+  "python3 -I tests/lint.py",
   "./check quick",
 ]

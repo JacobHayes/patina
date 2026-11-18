@@ -7,7 +7,7 @@ G=$PATINA_GUESTS
 # expect NAME OUTCOME STOP [run options] -- CMD...
 expect() {
     n=$1 want=$2 stop=$3; shift 3
-    prun "$RUNS/$n" --seed 1 "$@"
+    prun "$RUNS/$n" --seed 1 "$@" # lint-allow: seed — each guest's outcome is fixed by the program (a barrier forces the deadlock), not by the seed
     [ -f "$RUNS/$n/result.json" ] || die "$n: no result.json ($(tail -2 "$RUNS/$n.txt"))"
     got=$(field "$RUNS/$n/result.json" outcome)/$(field "$RUNS/$n/result.json" stop)
     [ "$got" = "$want/$stop" ] || die "$n: $got, expected $want/$stop ($(field "$RUNS/$n/result.json" message))"

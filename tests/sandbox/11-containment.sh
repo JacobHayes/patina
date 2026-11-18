@@ -87,6 +87,7 @@ detail "$out/log-a" | grep -q "$addr" || die "log: the message does not name $ad
 echo "log: a store at offset $off: $(detail "$out/log-a")"
 # A clear-tid pointer at the published address: ignored, as by the kernel (join then waits).
 rm -rf "$out/tid"
+# lint-allow: seed — the join waits for ever on every seed (natively too)
 timeout 120 "$PATINA" run --seed 1 --out "$out/tid" --mount "$G12":/guest:copy -- /guest/tidptr >/dev/null 2>&1 || true
 [ "$(class "$out/tid")" = liveness ] || die "tidptr: $(class "$out/tid"): $(detail "$out/tid")"
 echo "tidptr: a clear-tid pointer into the runtime's region is ignored"

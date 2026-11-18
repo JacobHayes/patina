@@ -15,7 +15,7 @@ prun "$d/sh" --seed 1 --work "$d/init:/var/lib/app" -- /bin/sh -c 'pwd; cat seed
 echo "--work $d/init:/var/lib/app: the guest starts there, with seed"
 
 # The crash model: as tests/faults/09-failed-fsync.sh, at /work and at /var/lib/app.
-g() { timeout 60 "$PATINA" run --seed 1 --mount "$PATINA_GUESTS":/guest:copy --fault fsync-error-at=3 "$@" >/dev/null 2>&1 || true; }
+g() { timeout 60 "$PATINA" run --seed 1 --mount "$PATINA_GUESTS":/guest:copy --fault fsync-error-at=3 "$@" >/dev/null 2>&1 || true; } # lint-allow: seed — the fault is the 3rd fsync, on every seed
 g --out "$d/probe" -- /guest/ack-log retry
 set -- $(python3 -I "$(dirname "$0")/../faults/lib/faults.py" point-after "$d/probe/inc-0" Fsync acks 1)
 at=$1 aseq=$2

@@ -1,6 +1,7 @@
 # 4. F3 (flush worker dies on EIO, writers sleep forever). --time-limit 400: the outcome is
 # liveness, the parked thread is in a sleep whose deadline is within 100 ms of the limit (the
-# write-stall loop's 100 ms sleep), in bounded wall time. Seeds 1-100 are searched (a few
+# write-stall loop's 100 ms sleep); the 400 virtual seconds are many times this script's
+# budget, so a real wait fails it. Seeds 1-100 are searched (a few
 # percent reach it); the first liveness seed whose log shows the flush worker crash must
 # show all of that. The rate depends on the schedule and the guest build, so this is an area
 # check, not a quick one.
@@ -21,6 +22,4 @@ dl=$(echo "$d" | sed -n 's/.*wait=sleep deadline=\([0-9]*\).*/\1/p')
 [ -n "$dl" ] || die "F3: no sleeping thread in the detail: $d"
 limit=$(( (100 + 400) * 1000000000 ))
 [ "$dl" -gt "$limit" ] && [ "$dl" -le $((limit + 100000000)) ] || die "F3: sleep deadline $dl not within 100 ms past the limit"
-ms=$(field "$o/result.json" wall_ms)
-[ "$ms" -lt 60000 ] || die "F3: $ms ms wall"
-echo "F3: liveness seeds $(echo $seeds) of 1-100; seed $found: $d; $ms ms wall"
+echo "F3: liveness seeds $(echo $seeds) of 1-100; seed $found: $d; $(field "$o/result.json" wall_ms) ms wall"

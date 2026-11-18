@@ -4,6 +4,7 @@
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-deadlock; mkdir -p "$o"
 for rep in a b; do
+    # lint-allow: seed — no other thread is left to write the pipe, so every seed deadlocks
     timeout 120 "$PATINA" run --seed 1 --out "$o/$rep" --mount "$PATINA_GUESTS":/guest:copy -- /guest/iodead >/dev/null 2>&1 || [ -f "$o/$rep/result.json" ] || die "patina run: no result.json"
     [ "$(field "$o/$rep/result.json" outcome)/$(field "$o/$rep/result.json" stop)" = liveness/deadlock ] || die "outcome $(field "$o/$rep/result.json" outcome) $(field "$o/$rep/result.json" stop)"
 done
