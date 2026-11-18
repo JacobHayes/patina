@@ -150,6 +150,16 @@ that exited with a listed status, not on a signal, ends `ok`, stop `ok-exit`, an
 judges it; the logs and digest are those of the run without the flag. Each incarnation's
 final work tree is `inc-K/live.tree` (`durability::tree`); `patina log tree` writes it out.
 
+`patina log events RUNDIR` (`events.rs`) is the stable export of a run directory for checkers:
+one JSON line per boundary record, with each operation-log record after its call (same
+`seq`; an operation whose call has no record, as when a crash point fired between the two,
+goes before the first record later in virtual time) and named by replaying the namespace
+(create, link, rename, unlink) as the operations go by, so a path is the one the file had at
+that moment. An `Injected` record and its `Name` records become one `fault` event with the
+fields `faults.recent` shows (`launcher::attribution::injected`, shared). It streams both
+logs and keeps only the live names. Its fields are versioned (`v` in the header) and only
+added to; `log dump` and `log ops` stay the text forms.
+
 The logs of a run (this one and the operation log) are limited (`Config::log_limit`,
 `--log-limit`): the append that would pass the limit ends the run instead, so the cut depends
 on records, not time. The log file grows by `fallocate`, so a full host filesystem is a failed

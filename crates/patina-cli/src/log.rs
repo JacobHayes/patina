@@ -1,5 +1,6 @@
-//! `patina log dump|diff|ops|tree`: read a boundary log, compare two, list file operations,
-//! write out an incarnation's final work tree; and
+//! `patina log dump|diff|ops|tree|events`: read a boundary log, compare two, list file
+//! operations, write out an incarnation's final work tree, export a run as JSON lines
+//! (`crate::events`); and
 //! the record-by-record comparison of two run directories that replay and verify use.
 
 use crate::cli::{Args, Res};
@@ -88,6 +89,29 @@ pub fn cut(inc: &Path, keep: u64) -> Res<()> {
     )
 }
 
+/// The name of an emulated instruction (an `InsnEmulation` record's `nr`).
+pub fn insn_name(nr: u32) -> String {
+    match nr {
+        0x0f31 => "rdtsc".to_string(),
+        0x0f01f9 => "rdtscp".to_string(),
+        0x0fc706 => "rdrand".to_string(),
+        0x0fc707 => "rdseed".to_string(),
+        0xf30fc707 => "rdpid".to_string(),
+        // arm64: `mrs` with the target register cleared.
+        0xd53be040 => "mrs cntvct_el0".to_string(),
+        0xd53be0c0 => "mrs cntvctss_el0".to_string(),
+        0xd53be000 => "mrs cntfrq_el0".to_string(),
+        0xd53b2400 => "mrs rndr".to_string(),
+        0xd53b2420 => "mrs rndrrs".to_string(),
+        // arm64 pause points: the original word.
+        0xd503203f => "yield".to_string(),
+        0xd503205f => "wfe".to_string(),
+        0xd503207f => "wfi".to_string(),
+        0xd5033fdf => "isb".to_string(),
+        n => format!("{n:#x}"),
+    }
+}
+
 pub fn describe(r: &Rec) -> String {
     let kind = RecKind::from_u8(r.kind);
     let what = match kind {
@@ -95,25 +119,7 @@ pub fn describe(r: &Rec) -> String {
         Some(RecKind::SupDecision) => Op::from_u32(r.nr)
             .map(|o| o.name().to_string())
             .unwrap_or_else(|| format!("op{}", r.nr)),
-        Some(RecKind::InsnEmulation) => match r.nr {
-            0x0f31 => "rdtsc".to_string(),
-            0x0f01f9 => "rdtscp".to_string(),
-            0x0fc706 => "rdrand".to_string(),
-            0x0fc707 => "rdseed".to_string(),
-            0xf30fc707 => "rdpid".to_string(),
-            // arm64: `mrs` with the target register cleared.
-            0xd53be040 => "mrs cntvct_el0".to_string(),
-            0xd53be0c0 => "mrs cntvctss_el0".to_string(),
-            0xd53be000 => "mrs cntfrq_el0".to_string(),
-            0xd53b2400 => "mrs rndr".to_string(),
-            0xd53b2420 => "mrs rndrrs".to_string(),
-            // arm64 pause points: the original word.
-            0xd503203f => "yield".to_string(),
-            0xd503205f => "wfe".to_string(),
-            0xd503207f => "wfi".to_string(),
-            0xd5033fdf => "isb".to_string(),
-            n => format!("{n:#x}"),
-        },
+        Some(RecKind::InsnEmulation) => insn_name(r.nr),
         Some(RecKind::Preempt) => match r.nr {
             1 => "counter".to_string(),
             2 => "spin point".to_string(),
@@ -308,8 +314,21 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             tree(Path::new(arg(1, usage)?), Path::new(arg(2, usage)?))?;
             Ok(ExitCode::SUCCESS)
         }
+        Some("events") => {
+            let run = Path::new(arg(1, "log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]")?);
+            let sel = crate::events::Select::parse(
+                args.last("--types"),
+                args.num::<u64>("--from")?.unwrap_or(0),
+                args.num::<u64>("--to")?.unwrap_or(u64::MAX),
+            )?;
+            match crate::events::export(run, &sel, std::io::stdout().lock()) {
+                // A reader that stopped early (`| head`) is not an error.
+                Err(e) if e.contains("Broken pipe") => Ok(ExitCode::SUCCESS),
+                r => r.map(|()| ExitCode::SUCCESS),
+            }
+        }
         _ => Err(
-            "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR"
+            "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR | log events RUNDIR"
                 .into(),
         ),
     }

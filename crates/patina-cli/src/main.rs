@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod doctor;
 mod durability;
+mod events;
 mod faults;
 mod host;
 mod insn;

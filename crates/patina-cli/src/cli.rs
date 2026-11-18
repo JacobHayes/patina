@@ -66,8 +66,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Log,
         name: "log",
-        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR",
-        help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree",
+        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR | log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]",
+        help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree, export a run's events as JSON lines",
     },
     Command {
         cmd: Cmd::Table,
@@ -354,8 +354,15 @@ pub const FLAGS: &[Flag] = &[
         "findings already known: lines of ID PATTERN matched against [CASE] SIGNATURE (* any text, # comments); a known finding is counted and does not fail the sweep; an ID written !ID must match some run or the result is vacuous",
         &[Cmd::Sweep, Cmd::Report],
     ),
-    flag("--from", "SEQ", "0", "log dump: first record", &[Cmd::Log]),
-    flag("--to", "SEQ", "last", "log dump: last record", &[Cmd::Log]),
+    flag("--from", "SEQ", "0", "log dump, log events: first sequence number", &[Cmd::Log]),
+    flag("--to", "SEQ", "last", "log dump, log events: last sequence number", &[Cmd::Log]),
+    flag(
+        "--types",
+        "T,T",
+        "all",
+        "log events: only these event types (header, inc, cut, call, op, fault, crash, mark, sdk, signal, sigfault, sched, preempt, insn)",
+        &[Cmd::Log],
+    ),
     Flag {
         name: "--check",
         value: "'CMD ARGS'",

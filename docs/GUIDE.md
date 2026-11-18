@@ -562,6 +562,37 @@ incarnation's starting disk; a process crash loses nothing and has none) and `re
 `crashes[]`. It runs once, after the last incarnation. With `--cases`, each case's run has its
 own check; under `--branch` each base and each child is judged.
 
+A property of what the program did, rather than of what it left, reads the event stream
+([The event stream](#the-event-stream)): a few lines of `jq` over `patina log events RUNDIR`.
+Two examples ship beside `acked-kept`:
+
+- `examples/checks/confined ROOT... RUN`: every change to the work tree (`op` events other
+  than `close` and the syncs) is on a path under a root.
+- `examples/checks/synced-before-mark FILE RUN`: for a program that calls the SDK's `mark`
+  after it wrote and acknowledged a record, no write to `FILE` is unsynced at a mark. Mark
+  labels are not in the stream yet, so every mark counts as an acknowledgement.
+
+The core of `confined`, the first change outside the roots:
+
+```sh
+patina log events "$run" --types op | jq -rn --argjson roots '["/work/data"]' '
+  first(inputs | select(.op | IN("close", "fsync", "fsync-dir", "fsync-fail", "sync") | not)
+    | . as $e | (.path, .to) | strings | . as $p
+    | select(all($roots[]; . as $r | $p != $r and ($p | startswith($r + "/") | not)))
+    | "\($e.op) \($p) (seq \($e.seq))") // empty'
+```
+
+On a program that writes `data/f` and then `other/f`:
+
+```text
+$ patina sweep --seeds 1..4 --check 'examples/checks/confined /work/data' -- ./files other
+new: violation check: outside-roots: mkdir /work/other (seq N)   (seed 1: patina replay /tmp/files/patina-out/sweep/seed-1)
+sweep: replaying the first seed of 1 finding
+sweep: 42.8 KiB kept in /tmp/files/patina-out/sweep
+patina sweep: 4 runs, 4 findings in 1 group, 0 ok   (0.1s, 8 jobs)
+outcomes: violation 4
+```
+
 One `--check` per run: several checks are one script that runs them and prints the first
 failure. A slow checker sets a sweep's speed. In shell, `$( )` strips trailing newlines:
 compare files with `cmp`.
@@ -787,6 +818,54 @@ acklog run the record write to `data.log` (ino 2) has no fsync before the acknow
 names the first record where two logs differ. `patina log tree INCDIR DIR` writes the work
 tree an incarnation ended with into a new directory ([Faults off versus
 on](#faults-off-versus-on)).
+
+### The event stream
+
+`patina log events RUNDIR` prints a whole run as JSON lines, one object per line, for a
+checker (`--check`) or `jq` to read: every incarnation's boundary records in log order, each
+file operation after its call with the path it had at that moment, injected faults and
+crashes. It reads only the run directory, streams (a run at the default 1 GiB `--log-limit`
+takes about 5 s and a few MiB of memory), and the same directory gives the same bytes.
+`--types op,crash` keeps the types named (and the header) (piping 10 million lines through `jq` alone takes
+longer than writing them); `--from SEQ --to SEQ` keeps those sequence numbers.
+
+```text
+$ patina log events patina-out/run-2 --types inc,op,crash
+{"type":"header","v":1,"seed":2,"work":"/work","incarnations":2}
+{"type":"inc","inc":0,"records":98,"oplog":true}
+{"type":"op","inc":0,"seq":45,"t":100000040000,"pid":2,"op":"create","ino":2,"path":"/work/data.log","mode":420,"fmt":32768}
+{"type":"op","inc":0,"seq":47,"t":100000042000,"pid":2,"op":"fsync-dir","ino":1,"path":"/work"}
+{"type":"op","inc":0,"seq":50,"t":100000044000,"pid":2,"op":"write","ino":2,"path":"/work/data.log","off":0,"len":8}
+...
+{"type":"crash","inc":0,"seq":98,"t":100000090000,"slot":0,"kind":"machine","point":27,"lost":{"back":0,"changed":1,"missing":0,"paths":["/work/data.log"]}}
+{"type":"inc","inc":1,"records":95,"oplog":true}
+```
+
+Every line has `type`; all but the header have `inc` (the incarnation). Records have `seq`
+(taken when the event starts, so a call that waited, such as `wait4`, follows records with
+higher numbers: lines are in the order things finished), `t` (virtual ns) and `slot` (the
+thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 16 hex digits.
+
+| `type` | Fields beyond `inc`, `seq`, `t`, `slot` |
+|---|---|
+| `header` | first line: `v` (1), `seed`, `work` (the work tree's guest path), `incarnations` |
+| `inc` | an incarnation begins: `records` (its boundary records), `oplog` (false: a sweep removed its operation log) |
+| `cut` | a sweep kept only the head and tail of the log: `records`, `head`, `tail_from` (the records between are not printed; operations are) |
+| `call` | a system call: `name` (`nr` too when unknown), `args` (only the registers the call reads, as the program set them: an `int` may show its 32-bit value), `ret`, `disp` (`pass`, `virt`, `attempt`, `rewrite`, `place`, `deny`, `stop`), `in`, `out` (hashes of what it read and wrote; absent when none) |
+| `op` | a change to the work tree, after its call: `pid`, `op`, `ino`, `path` (absent for a file with no name left), and by `op`: `create` `mode` `fmt`; `mkdir` `mode`; `symlink` `target`; `unlink`, `rmdir` `left` (links); `rename` `to`, `replaced`, `flags`; `write`, `mmap-dirty`, `mmap-shared` `off` `len`; `truncate` `size`; `fallocate` `mode` `off` `len`; `setattr` `mode` `uid` `gid`; `xattr-set`, `xattr-remove` `name`; `fsync` `flags` (1 data only, 2 no commit, 4 msync); also `link`, `fsync-dir`, `fsync-fail`, `sync`, `close`. No `slot` |
+| `fault` | an injected fault, as `faults.recent` shows it (every one, not the last 20): `class`, `call`, `object`, `pid`, and `errno`, `count`, `bytes` or `delay_ns`; a path swap's `swap`, `target`, `after`, `after_seq`, `put_back`; a datagram's `datagram`, `from`, `to` |
+| `crash` | a crash point fired (`seq` is its call's): `kind` (`machine`, `process`), `point`, and for a machine crash `lost` (as `faults.recent`) |
+| `mark` | SDK `mark`: `len` (the label's bytes), `hash` (of the label: one label, one hash), `ret` |
+| `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, ...), `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never) |
+| `signal`, `sigfault` | a signal delivered (`sig`, `code`, `pc`); a synchronous fault forwarded to the program (`sig`, `code`, `addr`, `pc`) |
+| `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
+
+Not in it yet: mark and assertion labels in clear (a `mark` has its label's hash and length),
+the path and argument strings of calls (only their hashes, `in`), the process of a call (an
+`op` and a `fault` have `pid`; a `call` has its thread's `slot`, which is not a process id),
+buffer contents (read the trees: `patina log tree`, `post-crash/`). A run directory a sweep
+pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
+and fields are only ever added: a reader should ignore what it does not know.
 
 ## Replay and verify
 

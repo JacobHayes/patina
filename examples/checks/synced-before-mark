@@ -1,0 +1,16 @@
+#!/bin/sh
+# synced-before-mark FILE RUN: when the program marks a point (SDK `mark`, after it wrote and
+# acknowledged a record), no write to FILE (/work/data.log) is still unsynced. Reads the `op`
+# and `mark` events of `patina log events`. Mark labels are not in the stream yet, so every
+# mark counts as an acknowledgement. For `patina run --check`.
+set -eu
+file=$1 run=$2
+bad=$({ "${PATINA:-patina}" log events "$run" --types inc,op,mark || echo '"patina log events failed"'; } | jq -rn --arg f "$file" '
+  first(foreach (inputs | if type == "string" then error(.) else . end) as $e ({dirty: false, marks: 0};
+      if $e.type == "inc" then .dirty = false
+      elif $e.type == "op" and $e.path == $f and ($e.op | IN("write", "truncate", "fallocate", "mmap-dirty")) then .dirty = true
+      elif $e.type == "op" and (($e.path == $f and $e.op == "fsync" and ($e.flags / 2 | floor) % 2 == 0) or $e.op == "sync") then .dirty = false
+      elif $e.type == "mark" then .marks += 1 | .bad = (if .dirty then $e.seq else null end)
+      else .bad = null end;
+      select(.bad) | "mark \(.marks) (seq \(.bad))")) // empty')
+[ -z "$bad" ] || { echo "ack-before-fsync: $bad follows an unsynced write to $file"; exit 1; }

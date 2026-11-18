@@ -21,6 +21,10 @@
 #    still a failure, as is a listed status after an INVARIANT line, and a signal still a
 #    crash; the rerun line and run.json carry the list. `log tree` writes the tree the guest ended with (not the one it started from) and works
 #    on every incarnation of a crashed run.
+# 4. `patina log events`: a file created as a/x and renamed to b/y is named a/x before the
+#    rename and b/y after it, under --work's guest location; one line per trap record; two runs
+#    of one seed give the same bytes. examples/checks/confined and synced-before-mark, which
+#    read it, find their planted bugs over a seed range through --check and pass the fixes.
 #@ tier=quick budget=10 slots=4
 set -eu
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -239,6 +243,43 @@ done
 [ "$n" -gt 1 ] || die "the crashed run has one incarnation"
 echo "log tree: $n incarnations of $first"
 
+# 4. The event stream, and the example checks that read it.
+files=$PATINA_GUESTS/oracles-files marklog=$PATINA_GUESTS/oracles-marklog
+mkdir app
+(
+    for v in other data; do
+        "$PATINA" sweep --seeds 1..4 -j 2 --out conf-$v --check "$root/examples/checks/confined /work/data" -- "$files" $v >conf-$v.txt 2>&1 || true
+    done
+    for v in bug fixed; do
+        "$PATINA" sweep --seeds 1..4 -j 2 --out mark-$v --check "$root/examples/checks/synced-before-mark /work/data.log" -- "$marklog" $v >mark-$v.txt 2>&1 || true
+    done
+) &
+sweeps=$!
+for n in tour tour2; do is $n "$(run $n -- "$files" tour)" 0 ok exit; "$PATINA" log events $n >$n.jsonl; done
+is app "$(run app --work app:/var/lib/app -- "$files" tour)" 0 ok exit
+cmp -s tour.jsonl tour2.jsonl || die "two runs of one seed: the streams differ"
+jq -e -s '.[0].v == 1 and all(.[1:][]; (.type | type) == "string" and (.inc | type) == "number")' tour.jsonl >/dev/null || die "a line without type or inc"
+ops=$(jq -r 'select(.type == "op" and .op != "close") | "\(.op) \(.path)\(if .to then " " + .to else "" end)"' tour.jsonl | paste -sd,)
+[ "$ops" = "mkdir /work/a,mkdir /work/b,create /work/a/x,rename /work/a/x /work/b/y,write /work/b/y,fsync /work/b/y" ] || die "tour: ops: $ops"
+traps=$("$PATINA" log dump tour/inc-0/boundary.log | awk '$2 == "trap"' | wc -l)
+calls=$(jq -s 'map(select(.type | IN("call", "sdk", "mark"))) | length' tour.jsonl)
+[ "$calls" = "$traps" ] || die "tour: $calls calls for $traps trap records"
+app=$("$PATINA" log events app --types op | jq -r 'select(.type == "op") | .path' | sort -u | paste -sd,)
+[ "$app" = "/var/lib/app/a,/var/lib/app/a/x,/var/lib/app/b,/var/lib/app/b/y" ] || die "--work DIR:/var/lib/app: paths $app"
+wait "$sweeps"
+# found: GROUPS SIGNATURE-PREFIX (one group whose signature starts so), or none
+found() {
+    g=$(jq -r '[.groups[].signature] | join(" | ")' "$1/report.json")
+    case $2 in
+        none) [ -z "$g" ] && [ "$(jq .outcomes.ok "$1/report.json")" = 4 ] ;;
+        *) case $g in "$2"*) [ "$(jq '.groups | length' "$1/report.json")" = 1 ] ;; *) false ;; esac ;;
+    esac || die "$1: groups '$g', want $2: $(tail -3 "$1.txt")"
+}
+found conf-other "violation check: outside-roots: mkdir /work/other"
+found conf-data none
+found mark-bug "violation check: ack-before-fsync"
+found mark-fixed none
+
 wait "$hang" || true
 is hang "$(cat hang.rc)" 2 error check
-echo "ok: kvlog found, replayed and minimised; failing checkers are errors; the alternating one is check-unstable"
+echo "ok: kvlog found, replayed and minimised; failing checkers are errors; the alternating one is check-unstable; the event stream names paths at the moment; confined and synced-before-mark find their bugs"

@@ -123,86 +123,19 @@ impl Faults {
         let b = std::fs::read(inc.join("boundary.log")).unwrap_or_default();
         // Decoded as needed, never all at once: a log can be as large as --log-limit.
         let chunks = b.as_chunks::<REC_SIZE>().0;
+        let rec = |i: usize| chunks.get(i).map(|c| Rec::from_bytes(c));
         for (i, c) in chunks.iter().enumerate() {
             let r = &Rec::from_bytes(c);
             if r.kind != RecKind::Injected as u8 {
                 continue;
             }
-            let [kind, class, value, by, port, _] = r.args;
-            let fault = class_of(kind, class, by);
+            let (fault, mut e) = injected(r, rec(i + 1), rec(i + 2));
             if let Some(c) = fault {
                 *self.by_class.entry(c).or_default() += 1;
             }
-            let mut e = json!({
-                "incarnation": k,
-                "seq": r.seq,
-                "vtime_ms": r.vclock_ns / 1_000_000,
-                "fault": fault.unwrap_or(if kind == INJ_FSYNC_REPORT { "fsync-report" } else { "other" }),
-            });
-            let name = chunks
-                .get(i + 1)
-                .map(|c| Rec::from_bytes(c))
-                .filter(|n| n.kind == RecKind::Name as u8 && n.seq == r.seq);
-            match name {
-                Some(n) => {
-                    let (bytes, len, cut) = n.name_bytes();
-                    let s = String::from_utf8_lossy(&bytes[..len]);
-                    e["object"] = json!(if cut {
-                        format!("...{s}")
-                    } else {
-                        s.into_owned()
-                    });
-                    e["pid"] = json!(n.ret);
-                    e["thread"] = json!(r.slot);
-                    e["call"] = json!(proto::table::name(r.nr as u64));
-                }
-                // Datagram faults: the datagram, its source and destination ports.
-                None if (INJ_NET_DROP..=INJ_NET_PARTITION_DROP).contains(&kind) => {
-                    e["object"] = json!(format!("udp:{port}"));
-                    e["datagram"] = json!(by);
-                    e["from"] = json!(r.args[5]);
-                    e["to"] = json!(port);
-                    e["call"] = json!(proto::table::name(r.nr as u64));
-                }
-                // The wire's records: the connection's server port.
-                None => e["object"] = json!(format!("tcp:{port}")),
-            }
-            if kind == INJ_PATH_SWAP {
-                let target = chunks
-                    .get(i + 2)
-                    .map(|c| Rec::from_bytes(c))
-                    .filter(|n| n.kind == RecKind::Name as u8 && n.seq == r.seq)
-                    .map(|n| {
-                        let (bytes, len, _) = n.name_bytes();
-                        String::from_utf8_lossy(&bytes[..len]).into_owned()
-                    });
-                let (m, _, back) = proto::swap::decode(class);
-                e["swap"] = json!(match m {
-                    proto::swap::MUT_SYMLINK => "symlink",
-                    proto::swap::MUT_RENAME => "rename",
-                    _ => "remove",
-                });
-                e["target"] = json!(target);
-                e["after"] = json!(proto::table::name(r.args[4]));
-                e["after_seq"] = json!(r.args[5]);
-                e["put_back"] = json!(back);
-            }
-            match kind {
-                INJ_ERROR | INJ_FSYNC_REPORT => e["errno"] = json!(errno_name(value)),
-                INJ_FSYNC_EIO => e["errno"] = json!("EIO"),
-                INJ_SHORT => e["count"] = json!(value),
-                INJ_DELAY => e["delay_ns"] = json!(value),
-                INJ_ENOSPC if value == 0 => e["errno"] = json!("ENOSPC"),
-                INJ_ENOSPC => e["count"] = json!(value),
-                INJ_MEM_LIMIT => {
-                    e["errno"] = json!("ENOMEM");
-                    e["bytes"] = json!(value);
-                }
-                INJ_NET_CHUNK => e["bytes"] = json!(value),
-                INJ_NET_DROP | INJ_NET_DUP | INJ_NET_PARTITION_DROP => e["bytes"] = json!(value),
-                INJ_NET_REORDER => e["delay_ns"] = json!(value),
-                _ => {}
-            }
+            e["incarnation"] = json!(k);
+            e["seq"] = json!(r.seq);
+            e["vtime_ms"] = json!(r.vclock_ns / 1_000_000);
             self.push(e);
         }
     }
@@ -278,6 +211,75 @@ impl Faults {
             "recent": self.recent,
         })
     }
+}
+
+/// What an `Injected` record `r` did, as `recent` shows it apart from where it happened
+/// (`incarnation`, `seq`, `vtime_ms`): its class (`None`: a consequence, not an injection) and
+/// the event's fields. `n1` and `n2` are the records after it (its `Name` records, if any).
+pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static str>, Value) {
+    let [kind, class, value, by, port, _] = r.args;
+    let fault = class_of(kind, class, by);
+    let mut e = json!({
+        "fault": fault.unwrap_or(if kind == INJ_FSYNC_REPORT { "fsync-report" } else { "other" }),
+    });
+    let named = |n: Option<Rec>| n.filter(|n| n.kind == RecKind::Name as u8 && n.seq == r.seq);
+    match named(n1) {
+        Some(n) => {
+            let (bytes, len, cut) = n.name_bytes();
+            let s = String::from_utf8_lossy(&bytes[..len]);
+            e["object"] = json!(if cut {
+                format!("...{s}")
+            } else {
+                s.into_owned()
+            });
+            e["pid"] = json!(n.ret);
+            e["thread"] = json!(r.slot);
+            e["call"] = json!(proto::table::name(r.nr as u64));
+        }
+        // Datagram faults: the datagram, its source and destination ports.
+        None if (INJ_NET_DROP..=INJ_NET_PARTITION_DROP).contains(&kind) => {
+            e["object"] = json!(format!("udp:{port}"));
+            e["datagram"] = json!(by);
+            e["from"] = json!(r.args[5]);
+            e["to"] = json!(port);
+            e["call"] = json!(proto::table::name(r.nr as u64));
+        }
+        // The wire's records: the connection's server port.
+        None => e["object"] = json!(format!("tcp:{port}")),
+    }
+    if kind == INJ_PATH_SWAP {
+        let target = named(n2).map(|n| {
+            let (bytes, len, _) = n.name_bytes();
+            String::from_utf8_lossy(&bytes[..len]).into_owned()
+        });
+        let (m, _, back) = proto::swap::decode(class);
+        e["swap"] = json!(match m {
+            proto::swap::MUT_SYMLINK => "symlink",
+            proto::swap::MUT_RENAME => "rename",
+            _ => "remove",
+        });
+        e["target"] = json!(target);
+        e["after"] = json!(proto::table::name(r.args[4]));
+        e["after_seq"] = json!(r.args[5]);
+        e["put_back"] = json!(back);
+    }
+    match kind {
+        INJ_ERROR | INJ_FSYNC_REPORT => e["errno"] = json!(errno_name(value)),
+        INJ_FSYNC_EIO => e["errno"] = json!("EIO"),
+        INJ_SHORT => e["count"] = json!(value),
+        INJ_DELAY => e["delay_ns"] = json!(value),
+        INJ_ENOSPC if value == 0 => e["errno"] = json!("ENOSPC"),
+        INJ_ENOSPC => e["count"] = json!(value),
+        INJ_MEM_LIMIT => {
+            e["errno"] = json!("ENOMEM");
+            e["bytes"] = json!(value);
+        }
+        INJ_NET_CHUNK => e["bytes"] = json!(value),
+        INJ_NET_DROP | INJ_NET_DUP | INJ_NET_PARTITION_DROP => e["bytes"] = json!(value),
+        INJ_NET_REORDER => e["delay_ns"] = json!(value),
+        _ => {}
+    }
+    (fault, e)
 }
 
 /// What a machine crash did to `/work`: the paths whose post-crash state differs from the
