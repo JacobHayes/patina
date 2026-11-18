@@ -654,6 +654,8 @@ sweep: replaying the first seed of 1 finding
 sweep: 42.8 KiB kept in /tmp/files/patina-out/sweep
 patina sweep: 4 runs, 4 findings in 1 group, 0 ok   (0.1s, 8 jobs)
 outcomes: violation 4
+check: judged 4 of 4 runs: 0 passed, 4 failed
+...
 ```
 
 One `--check` per run: several checks are one script that runs them and prints the first
@@ -742,6 +744,7 @@ sweep: replaying the first seed of 1 finding
 sweep: 1.9 MiB kept in /tmp/upcase/patina-out/sweep
 patina sweep: 40 runs, 9 findings in 1 group, 31 ok (4 by --ok-exit)   (0.2s, 8 jobs)
 outcomes: ok 31, violation 9
+check: judged 36 of 40 runs: 27 passed, 9 failed; 4 not judged (exited N: a clean failure, not compared 4)
 
 violation check: wrong-output: Files want/out.txt and got/out.txt differ
   9 of 40 runs   first: seed 5   replayed: identical
@@ -770,6 +773,7 @@ without fsync-error-permille=0..3: still fails
 without fs-delay-permille=0..20: still fails
 fs-short-permille=0..20 -> fs-short-permille=0..10: no longer fails
 reduced: fs-short-permille=0..20 (from fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20); run directory /tmp/upcase/patina-out/sweep/seed-5/minimized
+patina run --seed 5 --fault fs-short-permille=0..20 --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
 $ patina log tree patina-out/run-5/inc-0 tree-5
 $ patina log tree patina-out/ref/inc-0 tree-ref
 $ wc -c tree-5/out.txt tree-ref/out.txt
