@@ -40,6 +40,12 @@ const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
 const FIOCLEX: u64 = 0x5451;
+/// Requests numbered among the terminal ones that are not terminal requests: the kernel
+/// answers them for any descriptor (`FIOASYNC`), files and directories (`FIOQSIZE`), or
+/// sockets (`TIOCOUTQ` is `SIOCOUTQ` there).
+const FIOASYNC: u64 = 0x5452;
+const FIOQSIZE: u64 = 0x5460;
+const TIOCOUTQ: u64 = 0x5411;
 const F_DUPFD: u64 = 0;
 const F_GETFD: u64 = 1;
 const F_SETFL: u64 = 4;
@@ -75,7 +81,11 @@ fn ioctl(call: &mut dyn Call) -> Action {
             set_class(call, Class::Pass);
             pass(call)
         }
-        _ if (req >> 8) & 0xff == TERMINAL_TYPE => {
+        _ if (req >> 8) & 0xff == TERMINAL_TYPE
+            && req != FIOASYNC
+            && req != FIOQSIZE
+            && !(req == TIOCOUTQ && super::unixsock::is_socket(call.arg(0))) =>
+        {
             // No terminal exists in the sandbox: a valid descriptor answers ENOTTY.
             let ok = unsafe { sc2(nr::FCNTL, call.arg(0), F_GETFD) };
             Action::Return(if ok < 0 { ok } else { -e::ENOTTY })

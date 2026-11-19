@@ -62,7 +62,7 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::EVENTFD, Pass, A, NEWFD),
     Row::new(G, nr::EVENTFD2, Pass, A, NEWFD),
     Row::new(G, nr::MEMFD_CREATE, Pass, A, "Creates an anonymous tmpfs file at the lowest free descriptor; the name is visible only to this process (as /memfd:name in /proc/self/fd links) and the inode number (a per-CPU host batch) is only ever shown virtualised.").ins(&[out(0, Len::CStr)]),
-    Row::new(G, nr::IOCTL, Virt, C, "There is no terminal: terminal requests answer ENOTTY. FIONBIO, FIOCLEX, FIONCLEX, FIONREAD, FICLONE, FICLONERANGE, FIDEDUPERANGE, FS_IOC_GETFLAGS, FS_IOC_FSGETXATTR and FIGETBSZ pass (answers are functions of the file). Any other request answers ENOTTY and is recorded as ioctl:0xREQ (deny by default).")
+    Row::new(G, nr::IOCTL, Virt, C, "There is no terminal: terminal requests answer ENOTTY (not FIOASYNC, FIOQSIZE, or TIOCOUTQ on a socket, which are not terminal requests). FIONBIO, FIOCLEX, FIONCLEX, FIONREAD, FICLONE, FICLONERANGE, FIDEDUPERANGE, FS_IOC_GETFLAGS, FS_IOC_FSGETXATTR and FIGETBSZ pass (answers are functions of the file). Any other request answers ENOTTY and is recorded as ioctl:0xREQ (deny by default).")
         .fd(0)
         .refs(&[out(2, Len::Command)]),
     Row::new(G, nr::POLL, Attempt, A, POLL).outs(&[out(0, Len::ArgTimes { arg: 1, size: 8 })]),

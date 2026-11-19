@@ -36,5 +36,9 @@ int main(void) {
     l = sizeof b; r("getsockopt SOL_IP 1", getsockopt(sp[0], 0, 1, b, &l));
     l = sizeof b; r("getsockopt SO_TYPE (listed)", getsockopt(sp[0], SOL_SOCKET, SO_TYPE, b, &l));
     l = sizeof b; r("getsockopt on a file (ENOTSOCK)", getsockopt(f, SOL_SOCKET, 57, b, &l));
+    /* Numbered among the terminal requests but not terminal requests. */
+    r("ioctl-generic FIOASYNC", ioctl(f, 0x5452, &one));
+    r("ioctl-generic FIOQSIZE", ioctl(f, 0x5460, &v));
+    r("ioctl-generic SIOCOUTQ", ioctl(sp[0], 0x5411, &v));
     return 0;
 }

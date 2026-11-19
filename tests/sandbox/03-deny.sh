@@ -1,5 +1,6 @@
 # Change 3: deny by default. Requests of ioctl, fcntl, prctl and socket options that no row
-# lists are refused with their documented errno and recorded; paths are resolved by the
+# lists are refused with their documented errno and recorded (also requests numbered among the
+# terminal ones that are not terminal requests: FIOASYNC, FIOQSIZE, SIOCOUTQ on a socket); paths are resolved by the
 # runtime before the policy decides (symlinks and relative names cannot walk into /proc,
 # /sys or /dev), and the determinism hardening checks after the call (by the mount of what was reached) are
 # gone. The determinism hardening reproducers of B7 (procescape) still pass.
@@ -14,7 +15,9 @@ d=$out/denyprobe/run-0
 awk '/^(ioctl FS|fcntl|prctl|getsockopt SO_[CPM]|setsockopt|getsockopt SOL_IP)/ { n++; if ($(NF-1) != "r=-1") bad++ }
      END { exit !(n == 13 && bad == 0) }' "$d/inc-0/stdout" || die "denyprobe: an unlisted request was not refused"
 grep -q '^getsockopt SO_TYPE (listed) *r=0' "$d/inc-0/stdout" || die "denyprobe: a listed option was refused"
-for k in '"ioctl:0x80087601"' '"fcntl:1024"' '"prctl:30"' '"sockopt:1:57"' '"sockopt:0:1"'; do
+awk '/^ioctl-generic/ { if ($(NF-1) != "r=-1" || $NF != "errno=25") bad++ } END { exit bad > 0 }' "$d/inc-0/stdout" ||
+    die "denyprobe: a non-terminal request in the terminal range did not answer ENOTTY"
+for k in '"ioctl:0x80087601"' '"fcntl:1024"' '"prctl:30"' '"sockopt:1:57"' '"sockopt:0:1"' '"ioctl:0x5452"' '"ioctl:0x5460"' '"ioctl:0x5411"'; do
     refused "$d" | grep -q "$k" || die "denyprobe: $k not recorded"
 done
 echo "denyprobe: 13 unlisted requests refused (ENOTTY, EINVAL, ENOPROTOOPT) and recorded; listed ones pass"
