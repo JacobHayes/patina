@@ -237,7 +237,8 @@ outcomes: failure 10, ok 10
 
 [python3 -m unittest test_store.Store.test_counter] failure exit: AssertionError: N != N; exit 1
   10 of 20 runs   first: seed 1, case 2   replayed: identical
-  rerun:  patina run --seed 1 --env PYTHONPATH=/guest --mount /tmp/casedemo:/guest -- python3 -m unittest test_store.Store.test_counter
+  example: AssertionError: 3 != 2
+  rerun:  patina run --seed 1 --config /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter/run.json -- python3 -m unittest test_store.Store.test_counter
   replay: patina replay /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
 ```
 
@@ -387,6 +388,7 @@ crash points: 328 of 328 tried
 
 violation always: acked-records-kept: N acknowledged, N stored
   164 of 330 runs   first: seed 1@8   replayed: identical
+  example: acked-records-kept: 1 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 1 --crash machine-at:8 -- /tmp/acklog/acklog
   replay: patina replay /tmp/acklog/patina-out/sweep/seed-1@8
@@ -507,6 +509,7 @@ A failing group says which fault classes were injected in every failing run, and
 ```text
 violation always: journal-intact: N bytes
   12 of 20 runs   first: seed 2   replayed: identical
+  example: journal-intact: 7088 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
 ```
 
@@ -1081,7 +1084,7 @@ report.json: allowed_unmet)`, so they stay in view (an exact label has no count)
 for a checkout). It needs Rust 1.85 or later (edition 2024):
 
 ```toml
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.13.0" }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.13.1" }
 ```
 
 ```rust
@@ -1099,7 +1102,7 @@ The feature `compute` is for code rebuilt with compute points
 PATINA_ALWAYS(acked <= stored, "acked-records-kept", detail);
 ```
 
-**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.13.0` (the
+**Go**: pure Go, no cgo: `go get github.com/JacobHayes/patina/go/patina@v0.13.1` (the
 module's tags are `go/patina/vX.Y.Z`; `@main` gives the current one).
 `examples/bank-go/go.mod` builds against its checkout with a `replace`.
 
@@ -1330,6 +1333,7 @@ compute points: /tmp/src/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
   8 of 20 runs   first: seed 2   replayed: identical
+  example: lost updates: 198 of 200 jobs counted
 ```
 
 The cost: an event takes under a nanosecond in C and Rust and about 2 ns in Go, natively or
@@ -1360,7 +1364,7 @@ With gcc 11 or older, build the hook file in a step of its own without the flag
 Rust, stable: the SDK with the feature `compute`, and the flags with `--target`:
 
 ```toml
-patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.13.0", features = ["compute"] }
+patina-dst = { git = "https://github.com/JacobHayes/patina", tag = "v0.13.1", features = ["compute"] }
 ```
 
 ```sh
@@ -1387,7 +1391,7 @@ import _ "github.com/JacobHayes/patina/go/patina/compute"
 ```
 
 ```sh
-go get github.com/JacobHayes/patina/go/patina@v0.13.0
+go get github.com/JacobHayes/patina/go/patina@v0.13.1
 CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer -o app .
 ```
 
@@ -1574,7 +1578,7 @@ jobs:
       - run: |
           sudo apt-get install -y bubblewrap
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.13.0/install.sh | sh -s -- --version 0.13.0
+      - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.13.1/install.sh | sh -s -- --version 0.13.1
       - run: cargo build && patina sweep --seeds 1..200 -- target/debug/myprog
 ```
 

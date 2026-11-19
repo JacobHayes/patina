@@ -78,6 +78,7 @@ outcomes: failure 14, ok 6
 
 failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101
   14 of 20 runs   first: seed 1   replayed: identical
+  example: panicked at src/main.rs:28:5: assertion `left == right` failed: results out of job order
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
 ```
@@ -95,6 +96,7 @@ thread 'main' (2) panicked at src/main.rs:28:5:
 assertion `left == right` failed: results out of job order
   left: [2, 1, 3]
  right: [1, 2, 3]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 ```
 
 `patina replay DIR` runs the seed again, into `DIR/replay`, and compares every system call
