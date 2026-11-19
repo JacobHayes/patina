@@ -108,7 +108,7 @@ pub struct Config {
     /// spin-probes`; only with `--preempt traps`).
     pub spin_probes: bool,
     pub pmu: Pmu,
-    /// Switch points from load-time plans (`--preempt points`, x86_64): stock code is
+    /// Switch points from load-time plans (`--preempt points`): stock code is
     /// rewritten as it is mapped (ARCHITECTURE.md, "Load-time rewriting").
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub points: bool,
@@ -1020,12 +1020,6 @@ impl Config {
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());
-        }
-        if self.points && !cfg!(target_arch = "x86_64") {
-            return Err(format!(
-                "--preempt points: load-time rewriting is x86_64 only for now, not {}; use --preempt traps, or rebuild the code with compute points (docs/GUIDE.md)",
-                std::env::consts::ARCH
-            ));
         }
         let p = &self.pmu;
         if p.short_permille > 1000 || p.short_max == 0 || p.short_max > 0xffff_ffff {

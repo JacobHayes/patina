@@ -3,9 +3,8 @@
 # byte-identical; the second from another directory on one CPU), the plan is checked by the
 # independent verifier and against objdump's decode, and a copy with the plan applied
 # (`__rewrite --standalone`) runs natively: its output equals the original's in each of RUNS_EACH
-# runs, and its counts do run (a copy whose cell starts at 1000 events stops on SIGILL). x86_64
-# only: elsewhere `__rewrite` and `patina run --preempt points` must refuse cleanly (exit 2, no
-# signal, nothing run) and the script says SKIP.
+# runs, and its counts do run (a copy whose cell starts at 1000 events stops on SIGILL). On x86_64
+# and arm64; each guest is built on the architecture it runs on.
 #@ tier=quick budget=60
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
@@ -13,18 +12,6 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 o=$RUNS/01-differential
 rm -rf "${o:?}"
 mkdir -p "$o/elsewhere"
-machine=$(uname -m)
-if [ "$machine" != x86_64 ]; then
-    st=0
-    "$PATINA" __rewrite "$PATINA_GUESTS/hello-static" >"$o/out" 2>"$o/err" || st=$?
-    [ "$st" = 2 ] || die "__rewrite on $machine: exit $st, not a clean refusal (2)"
-    st=0
-    "$PATINA" run --preempt points --out "$o/run" -- "$PATINA_GUESTS/hello-static" >"$o/out" 2>"$o/err" || st=$?
-    [ "$st" = 2 ] && [ ! -e "$o/run" ] ||
-        die "--preempt points on $machine: exit $st, not a clean refusal: $(head -2 "$o/err")"
-    echo "SKIP: the rewriter is x86_64 only (__rewrite and --preempt points refused cleanly on $machine)"
-    exit 0
-fi
 RUNS_EACH=5
 for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
     f=$PATINA_GUESTS/$g

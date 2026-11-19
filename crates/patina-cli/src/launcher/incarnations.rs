@@ -287,7 +287,6 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
 /// With `--preempt points`, the run's plans: made for the program and the libraries it names
 /// before the sandbox starts (on as many threads as the host offers, at most 8), the rest when
 /// the runtime asks (`launcher::plans`).
-#[cfg(target_arch = "x86_64")]
 fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
     if !o.cfg.points {
         return Ok(None);
@@ -296,12 +295,4 @@ fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planne
     let jobs = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
     crate::rewrite::cache::warm_all(&p, &o.program.host, jobs);
     Ok(Some(std::sync::Arc::new(p)))
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
-    match o.cfg.points {
-        true => Err("--preempt points: load-time rewriting is x86_64 only for now".into()),
-        false => Ok(None),
-    }
 }

@@ -241,7 +241,7 @@ pub const FLAGS: &[Flag] = &[
         "--preempt",
         "traps|branches|points",
         "traps",
-        "where threads are preempted: system calls and spin-waits; also after N branches (needs CAP_PERFMON and a supported CPU); or also at switch points written into stock x86_64 code as it loads (loops, backward calls, indirect jumps, atomics)",
+        "where threads are preempted: system calls and spin-waits; also after N branches (needs CAP_PERFMON and a supported CPU); or also at switch points written into stock code as it loads (loops, backward calls, indirect jumps, atomics)",
         RUNLIKE,
     ),
     flag(

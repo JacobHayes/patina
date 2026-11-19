@@ -480,8 +480,8 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
 - **A race with no system call in it.** Threads switch only at system calls, `pause`
   instructions and spin probes. Two threads that race on plain memory with none of these
   between the conflicting accesses always run them in the same order, whatever the seed.
-  Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code)); on
-  x86_64, `--preempt points` switches at the branches, calls and atomics of stock code
+  Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code));
+  `--preempt points` switches at the branches, calls and atomics of stock code
   ([Points in stock code](#points-in-stock-code---preempt-points)); branch counters
   (`--preempt branches`, AMD Zen 5 and Arm Neoverse N2 only) switch there too.
 - **A deadline that never comes.** In stock code virtual time advances by a fixed charge per
@@ -1466,7 +1466,7 @@ A thread that computes for 10 s of CPU time without reaching a scheduling point,
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
 no system call or `pause`. Rebuilt code, and Python under `python3 -m patina`, does not stall
-that way ([Deeper search](#deeper-search-rebuilt-code)), nor does stock code on x86_64 under
+that way ([Deeper search](#deeper-search-rebuilt-code)), nor does stock code under
 `--preempt points` ([Points in stock code](#points-in-stock-code---preempt-points)), except in
 code it leaves dark. `--preempt branches` also preempts after a
 seed-chosen number of branches; it needs an AMD Zen 5 or Arm Neoverse N2 CPU with its PMU exposed (not in most virtual machines;
@@ -1725,7 +1725,7 @@ can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `unsu
 
 ## Points in stock code: `--preempt points`
 
-On x86_64, `--preempt points` gives a stock program compute points without a rebuild: as the
+`--preempt points` gives a stock program compute points without a rebuild: as the
 program and each library it loads are mapped, Patina maps in a rewritten copy of their text
 with a count before every backward branch, backward call, indirect jump and atomic instruction
 it can patch. The counts are compute-point events: threads switch there at a seed-chosen
@@ -1775,7 +1775,7 @@ and for a planned file `sites`, `patches`, `covered_pct`, `back_edges_covered_pc
 
 | | Rebuilt code (compute points) | `--preempt points` | `--preempt branches` |
 |---|---|---|---|
-| Needs | the source and a rebuild | an x86_64 host | an AMD Zen 5 or Arm Neoverse N2 PMU and `CAP_PERFMON` |
+| Needs | the source and a rebuild | an x86_64 or arm64 host | an AMD Zen 5 or Arm Neoverse N2 PMU and `CAP_PERFMON` |
 | Covers | the rebuilt code: every edge, load and store | every file the program maps: libc, the Go runtime and prebuilt libraries too, at branches, calls and atomics | everything, every branch |
 | Seeds | repeat on any host | repeat on any host | repeat only on that CPU family |
 
@@ -1792,23 +1792,29 @@ The first run pays for making them: 0.5 s for ripgrep, 0.8 s for CPython and its
 14 s for headless Chromium (49 files); later runs read them (docs/EVIDENCE.md).
 
 **What is not covered.**
-- About 1 to 3% of sites in typical code (as many loop back-edges) have no patch that fits: a
-  count must go where the flags are dead, in place of one instruction of 5 bytes or more or of
-  a short run of straight-line instructions that no known branch enters.
+- On x86_64, about 1 to 3% of sites in typical code (as many loop back-edges) have no patch
+  that fits: a count must go where the flags are dead, in place of one instruction of 5 bytes
+  or more or of a short run of straight-line instructions that no known branch enters. On
+  arm64 every site is one 4-byte word and the count writes no flags; a site is left only
+  inside an exclusive pair (a load-exclusive up to its store-exclusive, where a count would
+  make the store fail every time), on the way from a failed store-exclusive back to its load (a
+  store-exclusive can fail with no other writer, and the loop goes round once more by run), at
+  a word whose address code takes (it may read it), or out of a branch's reach of its
+  trampoline (128 MiB) where no `x16` route fits.
   Text that no control flow or unwind entry reaches is *dark* and never patched (22% of
   Chromium's: code reached only through tables).
 - Code made at run time (JIT output, memory made executable after it was mapped) gets no
   points (counted `unplanned`). A program that writes, moves, unmaps or reprotects its own text
   gets that file's original pages back and no points there (counted `dropped`).
-- x86_64 only: elsewhere `--preempt points` is refused before the run starts.
 
 **What the program sees.** Faults, signal frames, records and unwinding name the original
 addresses, never a rewritten copy's. `/proc/self/maps` shows the original files; each library
 is followed by a gap where its copy's extra code lives, so libraries load at other addresses
 than without points. A program that reads its own code reads the rewritten bytes (a checksum
-of its text differs from native). A jump into the middle of a rewritten run of instructions
-from code Patina could not follow (a jump table, a computed goto) traps and goes on at that
-instruction, as unpatched (counted `interior`; no point, no virtual time). `cpuid` in planned
+of its text differs from native). On x86_64, a jump into the middle of a rewritten run of
+instructions from code Patina could not follow (a jump table, a computed goto) traps and goes
+on at that instruction, as unpatched (counted `interior`; no point, no virtual time); arm64
+rewrites single words only, so there is no such middle. `cpuid` in planned
 code answers the fields that name a core (APIC, node and compute-unit ids) as core 0's, so a
 run does not depend on the core it was given; a `cpuid` in dark or JIT code is the CPU's.
 
@@ -1850,6 +1856,11 @@ What differs on arm64:
   trap (a system call, usually) comes before its first preemption. With it, the exclusive load/store
   instructions are emulated (`patched_sites.exclusive` in `result.json`).
 - Rust compute points build with `--target aarch64-unknown-linux-gnu`.
+- `--preempt points` saves two registers 32 to 16 bytes below the stack pointer at each count
+  (arm64 has no flags-free memory decrement); a program that keeps data there, which a signal
+  frame would overwrite natively too, can see it change, and a hand-written loop that runs
+  with the stack pointer not 16-byte aligned gets `SIGBUS` at a count. Sites inside an
+  exclusive pair are left unpatched.
 - The system call table is the generic one: no `select`, `pause`, `alarm`, `fork` or
   `epoll_create`; libc uses `pselect6`, `clone` and `epoll_create1` instead.
 

@@ -683,6 +683,72 @@ Red/green: with the masking off, `02-points` d fails (`--vary cpu` differs); wit
 frames not translated (`shown`), `03-fidelity` b fails (the timer's address is in a
 trampoline).
 
+### On arm64
+
+The same scripts on GitHub `ubuntu-24.04-arm` runners (4 CPUs, Ubuntu 24.04, Linux 7.0),
+measured 2026-11-19. Every site is one word, so there are no groups and no interior entries.
+The plans, natively (`rewrite/evidence-corpus`, 351 s with 50 runs each and the census):
+
+| Program (rewritten with the shared libraries it loads) | Sites patched of found | Back-edges covered | Dark text | Rewrite | Plan | 50 runs |
+|---|---|---|---|---|---|---|
+| ripgrep 15.2.0, musl static release (3.1 MB text), a regex count over the Go sources | 42,409 / 42,560 | 99.5% | 4.0% | 0.08 s | 6 MB | identical output and exit |
+| gofmt, Go 1.27.3, static (1.2 MB), `-d -r` rewrite over `runtime` | 20,951 / 21,443 | 93.2% | 0.0% | 0.02 s | 3 MB | identical |
+| CPython 3.12 (3.0 MB) and 4 libraries, a dict, sort, regex and json workload | 89,851 / 89,851 | 100% | 4.8% | 0.07 s | 9 MB | identical |
+| clang 18 (a 0.1 MB executable) and 17 libraries (`libLLVM`: 967,258 of 967,270 sites, 100% of back-edges, 116 MB plan), compiling `diff.cc` at -O2 to assembly | 2,102 / 2,103 | 99.8% | 0.1% | 0.00 s | 0.4 MB | identical |
+| headless Chromium (Playwright's `chrome-headless-shell`, 166.9 MB) and 49 libraries, `--dump-dom` of a scripted page | 2,836,248 / 2,838,239 | 99.9% | 18.5% | 3.6 s | 346 MB | identical (the copy's plan: below) |
+| The quick tier's guests (C static and static-PIE, C++, Rust, Go): plan twice and compare, verify, objdump agrees on every patched word, 5 runs, and a copy with 1,000 events stops on its trap | | 89.2 to 99.8% | | | | identical |
+| Census: every ELF file in `/usr/bin` and the system library directory, planned and verified | 1,442 files; 0 rejected by the verifier; 12 refused (malformed headers) | | | | | not run |
+
+Back-edges not covered are almost all `exclusive`: the way back from a failed store-exclusive
+to its load (Go's and glibc's exclusive-pair fallbacks, unused where the CPU has LSE atomics;
+gofmt 490, ripgrep 151, Chromium 69). Chromium has 1,913 back-branches out of a branch's reach
+(`far`: its text spans 280 MiB, and these are more than 128 MiB from both ends). A rewritten copy cannot put
+trampolines below its image, so the native copy of Chromium carries the after-only plan:
+2,398,862 sites, 80.9% of back-edges (the rest out of reach). GNU objdump 2.42 aborts on
+Chromium; its words are checked against LLVM's decode instead. The CLI binary grows by
+110 kB stripped (+1.7%, x86_64 build): the word classifier is encoding masks, no decoder crate.
+
+Under Patina (`rewrite/evidence-points`), and the quick tier (`02-points`, `03-fidelity`,
+`04-interior`, all passing):
+
+| Program (with its libraries) | Output, same seed twice | Wall: without points / cold / warm | Plans made | Points taken | The program's sites patched, back-edges, dark | Files planned; unplanned, dropped |
+|---|---|---|---|---|---|---|
+| ripgrep, from `sh` | native; identical | 744 / 1,090 / 832 ms | 0.26 s | 160 | 99.6% of 42,560; 99.5%; 4.0% | 4 of 4; 0, 0 |
+| gofmt | native; identical | 1,264 / 1,744 / 1,675 ms | 0.07 s | 4,575 | 97.7% of 21,443; 93.2%; 0.0% | 4 of 4; 0, 0 |
+| CPython | native; identical | 195 / 638 / 243 ms | 0.38 s | 435 | 100% of 89,851; 100%; 4.8% | 9 of 9; 0, 0 |
+| headless Chromium | native; identical | 1,395 / 15,257 / 1,780 ms | 13.3 s | 324 | 99.9% of 2,838,239; 99.9%; 18.5% | 51 of 51; 4, 2 |
+
+| Check | Result |
+|---|---|
+| Determinism: `verify --vary cpu,load,aslr,sandbox,repeat`, C static, C static-PIE, C++, Rust, Go, 3 runs of seeds 1 and 2 (`02-points` a); `shlib-stock` and `rw-fid`, seed 3 | identical; seeds 1 and 2 differ |
+| ripgrep, 8 runs of seed 1 each (`--vary repeat`): one thread, from `sh`, and its own thread pool (8,221 switches a run) | identical |
+| Schedules reached (`02-points` b): `go-race-stock`, `rs-race-stock` | found on seeds 1 and 24; without points neither race window holds a switch |
+| A timer due inside a loop with no system call (`deadline-stock`, `02-points` c) | the handler runs at 10,003,027 virtual ns for a 10 ms timer |
+| Fidelity (`03-fidelity`): a fault in a relocated `ldaddal`, a timer at a point, fork, code copied to anonymous memory; `/proc/self/maps`; `mprotect` of the text; `dlclose` | as natively (the fault's address is the instruction's, `backtrace()` reaches `main`); 7 maps lines as natively; the plan dropped and the native bytes read; both closed libraries' plans dropped |
+| A program that maps over its trampolines (`04-interior` d) | the plan is dropped, native output |
+| Every run without the flag (the 90 cells of the stock workload ledger) | identical to the build before, on the runner |
+| x86_64 with the flag: the 11 guests of the rewrite checks, seeds 1 and 2, against the build before | the same digests and points; plans byte-identical but for the build id |
+| The verifier against planted corruption (`rewrite::a64::tests`) | 25 kinds rejected, and a count inside a pair, on a pair's retry, on a weak compare-and-swap's way back, at a call inside a pair, at a word whose address is taken, beside a refused word, and an `x16` row to a label in the caller's function |
+
+The runtime adds 34 lines of code (818 in all by the count above): the arm64 trap length,
+machine number and `PROT_BTI` on trampolines, the room past `ld.so`'s reservation, the
+allocator's cursor below trampolines before an image, and the site's original address from a
+trampoline's `b`. Chromium's 4 unplanned are memory it makes executable at run time.
+
+Red/green: without the way-back rule, ripgrep's musl build under points gave one seed two
+digests (a store-exclusive failing natively by run, the loop around it going round once more
+past a count); with it, 8 of 8 identical in each of the three workloads above. A copy of
+Chromium with trampolines before its image (entered through a stub at its entry) died of
+`SIGSEGV`: a library's constructor calls the executable's `malloc` before its entry runs; copies
+now carry after-only plans. Chromium under Patina exited 127 when the allocator's cursor was
+moved below its floor by an executable's trampolines (`libdl` could not be mapped); only
+trampolines above the floor move it now. Review found, and tests now cover: a call inside an
+exclusive pair (reached through a `b`) was patched, and the verifier, following pairs only in
+address order, took it; a word whose address `adr` takes (which code can read) was patched; an
+`x16` row for a call to a label inside the caller's own function, where `x16` may be live; the
+verifier did not taint the span around a refused word, and missed trampoline bytes over the
+image when the span started inside it.
+
 ## Branch counters on arm64
 
 Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`

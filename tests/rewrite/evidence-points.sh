@@ -4,10 +4,10 @@
 # digest; wall time without points, with points on a cold plan cache (each plan made and
 # verified in the run) and warm; the points taken; the jumps into the interior of a group
 # patch; the program's own coverage.
-# Programs: ripgrep 15.2.0 (the musl static-PIE release, fetched, checked by SHA-256), gofmt of
+# Programs: ripgrep 15.2.0 (the musl release for the host, fetched, checked by SHA-256), gofmt of
 # the Go toolchain on PATH, the system python3, and headless Chromium from Playwright's cache if
 # present (CHROMIUM=FILE overrides); PostgreSQL if `initdb` is installed.
-#@ tier=evidence budget=3600 arch=x86_64
+#@ tier=evidence budget=3600
 : "${PATINA:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -62,10 +62,15 @@ EOF
 GOROOT=$(go env GOROOT)
 # ripgrep: fetched
 rg_tgz=$o/rg.tgz
-curl -sSfL -o "$rg_tgz" https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz
-echo "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c  $rg_tgz" | sha256sum -c --quiet
+m=$(uname -m)
+curl -sSfL -o "$rg_tgz" "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-$m-unknown-linux-musl.tar.gz"
+case $m in
+    x86_64) sum=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c ;;
+    *) sum=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 ;;
+esac
+echo "$sum  $rg_tgz" | sha256sum -c --quiet
 tar -C "$o" -xzf "$rg_tgz"
-RG=$o/ripgrep-15.2.0-x86_64-unknown-linux-musl
+RG=$o/ripgrep-15.2.0-$m-unknown-linux-musl
 # Both search and rewrite the Go sources from their directory, so paths print relative.
 (cd "$GOROOT/src" && "$RG/rg" -c --sort path 'func.[A-Z]\w+\(.*error' .) >"$o/rg.want"
 row ripgrep rg "$o/rg.want" --mount "$RG:/rg" --mount "$GOROOT:/goroot" -- \
@@ -83,7 +88,7 @@ python3 -I "$HERE/lib/pywork.py" >"$o/py.want"
 row python "$(basename "$(readlink -f /usr/bin/python3)")" "$o/py.want" --mount "$HERE/lib:/lib-ev" -- /usr/bin/python3 -I /lib-ev/pywork.py
 
 # headless Chromium
-CH=${CHROMIUM:-$(find "$HOME/.cache/ms-playwright" -path '*chrome-headless-shell-linux64/chrome-headless-shell' 2>/dev/null | sort | tail -1)}
+CH=${CHROMIUM:-$(find "$HOME/.cache/ms-playwright" -path '*chrome-headless-shell-linux*/chrome-headless-shell' 2>/dev/null | sort | tail -1)}
 if [ -n "$CH" ]; then
     "$CH" --no-sandbox --disable-gpu --user-data-dir="$o/chromium-profile" --dump-dom "file://$HERE/lib/page.html" 2>/dev/null >"$o/chromium.want"
     row chromium chrome-headless-shell "$o/chromium.want" --mount "$(dirname "$CH"):/chrome" --mount "$HERE/lib:/page" -- \

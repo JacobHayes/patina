@@ -1,4 +1,4 @@
-//! The plan broker (`--preempt points`, x86_64): answers the runtime's request for the plan of
+//! The plan broker (`--preempt points`): answers the runtime's request for the plan of
 //! a file it is about to map executable (`proto::plan` has the protocol, `rewrite::cache` the
 //! answer). It runs in the launcher, outside the sandbox: the plan cache is never reachable
 //! from inside, and the runtime gets one read-only descriptor of a plan file at a time.
@@ -7,27 +7,8 @@
 //! on every host and in every run; making a plan costs wall time, never virtual time (the
 //! guest thread that asked holds the turn and waits).
 
-#[cfg(target_arch = "x86_64")]
 pub use crate::rewrite::cache::Planner;
 use proto::plan::*;
-
-/// Elsewhere `--preempt points` is refused before a run starts (`Config::check`).
-#[cfg(not(target_arch = "x86_64"))]
-pub struct Planner;
-#[cfg(not(target_arch = "x86_64"))]
-impl Planner {
-    pub fn images(&self) -> Vec<serde_json::Value> {
-        vec![]
-    }
-    fn answer(
-        &self,
-        _: &File,
-        _: u64,
-        _: &str,
-    ) -> Result<([u64; REPLY_WORDS], Option<File>), String> {
-        Err("load-time rewriting is x86_64 only".into())
-    }
-}
 use std::fs::File;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};

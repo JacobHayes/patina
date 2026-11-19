@@ -3,8 +3,15 @@
 //! read+execute `PT_LOAD` (which also holds the program headers, moved there to make room), and
 //! a private cell in a read+write `PT_LOAD` after it. The plan's counts address the one cell at
 //! a fixed address that the runtime will provide; here each count is re-encoded, same length, to
-//! address this image's own cell (`dec qword [rip+cell]; nop`), so the copy needs nothing
-//! mapped before its first instruction runs: executables and shared libraries alike.
+//! address this image's own cell (x86_64: `dec qword [rip+cell]; nop`; arm64: `adrp x16, cell`
+//! for the `movz`), so the copy needs nothing mapped before its first instruction runs:
+//! executables and shared libraries alike.
+//!
+//! arm64 trampolines before the image (a large image's lower half; DESIGN 2.6) cannot be a
+//! segment of the copy: a load segment's address is never below the image's first, and a
+//! program's code runs before its entry (a library's constructor calls a function the
+//! executable exports, `malloc` in Chromium). Such a plan is refused here; `__rewrite
+//! --standalone` plans an arm64 copy with its trampolines after the image only.
 //!
 //! A jump into a group's interior boundary traps (`int3`: `SIGTRAP`; the others: `SIGSEGV`).
 //! In Patina the runtime resumes it at the copy of that instruction; here an executable with
@@ -14,9 +21,10 @@
 //! own handler for either signal replaces this one, and a shared library's boundaries have no
 //! handler: there an unexpected entry ends the program with the signal.
 
-use super::elf::{u32_at, u64_at, Elf};
+use super::elf::{u32_at, u64_at, Elf, EM_AARCH64};
 use super::plan::{Plan, KIND_CPUID, KIND_INTERIOR, PAGE};
 use crate::cli::Res;
+use proto::plan::KIND_COND;
 
 /// Machine code with forward 32- and 8-bit displacements patched once the labels are known.
 struct Asm {
@@ -151,6 +159,14 @@ pub fn apply(data: &[u8], plan: &Plan, events: u64) -> Res<Vec<u8>> {
     if !plan.tramp_vaddr.is_multiple_of(PAGE) {
         return Err("trampolines not page-aligned".into());
     }
+    if plan.tramp_vaddr < elf.image_start()
+        || plan
+            .tramp_vaddr
+            .checked_add(plan.tramp.len() as u64)
+            .is_none()
+    {
+        return Err("trampolines before the image: a copy cannot place them".into());
+    }
     let mut out = data.to_vec();
     for p in &plan.pages {
         for (k, page) in p.bytes.chunks(PAGE as usize).enumerate() {
@@ -201,6 +217,17 @@ pub fn apply(data: &[u8], plan: &Plan, events: u64) -> Res<Vec<u8>> {
     abs.extend_from_slice(&(plan.cell as u32).to_le_bytes());
     for s in &plan.sites {
         let t = s.tramp as usize;
+        if elf.machine == EM_AARCH64 {
+            // `movz x16, #CELL >> 16, lsl #16` becomes `adrp x16, cell` (the cell is a page).
+            use super::a64::insn::{adrp, movz_hi, X16};
+            let at = t + if s.kind == KIND_COND { 8 } else { 0 } + 4;
+            if seg.get(at..at + 4) != Some(&movz_hi(X16, plan.cell).to_le_bytes()[..]) {
+                return Err(format!("site {:#x}: the trampoline does not count", s.addr));
+            }
+            let w = adrp(X16, plan.tramp_vaddr + at as u64, cell).ok_or("cell out of reach")?;
+            seg[at..at + 4].copy_from_slice(&w.to_le_bytes());
+            continue;
+        }
         if seg.get(t..t + 8) != Some(&abs[..]) {
             return Err(format!(
                 "site {:#x}: the trampoline does not start with the count",

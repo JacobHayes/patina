@@ -136,7 +136,7 @@ fn header(f: &File, len: u64, sha: &[u8; 32], build: &str) -> Res<([u64; REPLY_W
     let span = le(&h, 64, 8);
     if &h[..8] != MAGIC
         || le(&h, 8, 4) != VERSION as u64
-        || le(&h, 12, 4) != super::elf::EM_X86_64 as u64
+        || le(&h, 12, 4) != super::HOST_MACHINE as u64
         || h[16..48] != sha[..]
         || le(&h, 48, 8) != CELL
         || nb != build.len() as u64
@@ -217,14 +217,18 @@ fn read_counts(f: &File, from: u64, to: u64) -> Vec<(String, u64)> {
     out
 }
 
-/// The executable load segments of an ELF file: (link address, file offset, file size). Only
+/// The executable load segments of an ELF file of this host's machine: (link address, file offset, file size). Only
 /// those: a request is for an executable mapping, and the page it starts at can also hold the
 /// end of the read-only segment before (lld's layout).
 fn loads(f: &File) -> Option<Vec<(u64, u64, u64)>> {
     let mut eh = [0u8; 64];
     f.read_exact_at(&mut eh, 0).ok()?;
     let (phoff, phnum) = (le(&eh, 0x20, 8), le(&eh, 0x38, 2) as usize);
-    if &eh[..4] != b"\x7fELF" || le(&eh, 0x36, 2) != 56 || phnum > 4096 {
+    if &eh[..4] != b"\x7fELF"
+        || le(&eh, 0x12, 2) != super::HOST_MACHINE as u64
+        || le(&eh, 0x36, 2) != 56
+        || phnum > 4096
+    {
         return None;
     }
     let mut ph = vec![0u8; 56 * phnum];
@@ -337,7 +341,7 @@ impl Planner {
         if plan.sites.is_empty() && plan.entries.is_empty() {
             return Err((NONE_EMPTY, "no site".into()));
         }
-        let bad = super::verify::verify(data, &plan);
+        let bad = super::verify_plan(data, &plan);
         if let Some(b) = bad.first() {
             return Err((
                 NONE_UNVERIFIED,
@@ -578,12 +582,12 @@ fn tempfile_with(bytes: &[u8]) -> Res<File> {
 /// pre-pass plans before the sandbox starts, so a first run plans them in parallel. A file not
 /// found here is planned when the runtime asks for it.
 pub fn closure(program: &Path) -> Vec<PathBuf> {
-    const DIRS: [&str; 4] = [
-        "/lib/x86_64-linux-gnu",
-        "/usr/lib/x86_64-linux-gnu",
-        "/lib64",
-        "/usr/lib",
-    ];
+    #[cfg(target_arch = "x86_64")]
+    const MULTIARCH: &str = "x86_64-linux-gnu";
+    #[cfg(target_arch = "aarch64")]
+    const MULTIARCH: &str = "aarch64-linux-gnu";
+    let (lib, usr) = (format!("/lib/{MULTIARCH}"), format!("/usr/lib/{MULTIARCH}"));
+    let dirs: [&str; 4] = [&lib, &usr, "/lib64", "/usr/lib"];
     let mut out: Vec<PathBuf> = vec![];
     let mut todo = vec![program.to_path_buf()];
     while let Some(p) = todo.pop() {
@@ -609,7 +613,7 @@ pub fn closure(program: &Path) -> Vec<PathBuf> {
                 .iter()
                 .flat_map(|r| r.split(':'))
                 .map(|r| r.replace("$ORIGIN", &origin).replace("${ORIGIN}", &origin))
-                .chain(DIRS.iter().map(|s| s.to_string()));
+                .chain(dirs.iter().map(|s| s.to_string()));
             for dir in dirs {
                 let c = Path::new(&dir).join(&n);
                 if c.is_file() {
@@ -707,7 +711,7 @@ impl ImageReport {
     pub fn json(&self) -> serde_json::Value {
         let pct = |a: u64, b: u64| (1000.0 * a as f64 / b.max(1) as f64).round() / 10.0;
         let (mut found, mut covered) = (0, 0);
-        for c in super::points::Class::ALL {
+        for c in super::class::Class::ALL {
             let n = |o: &str| self.get(&format!("{}.{o}", c.name()));
             found += n("found");
             covered += n("in-place") + n("moved") + n("shared") + n("grouped");

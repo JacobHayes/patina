@@ -4,10 +4,10 @@
 # workload, every output equal to the original's. A row per program: sites found and covered,
 # back-edge coverage, dark text, rewrite time, plan size. Then a census: every ELF file in /usr/bin
 # and the system library directory planned and verified (not run).
-# Programs: ripgrep 15.2.0 (the musl static-PIE release, fetched, checked by SHA-256), gofmt of the
+# Programs: ripgrep 15.2.0 (the musl release for the host, fetched, checked by SHA-256), gofmt of the
 # Go toolchain on PATH, the system python3, clang if installed, and headless Chromium from
 # Playwright's cache if present (CHROMIUM=FILE overrides).
-#@ tier=evidence budget=3600 arch=x86_64
+#@ tier=evidence budget=3600
 : "${PATINA:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -16,13 +16,26 @@ o=$RUNS/evidence-corpus
 rm -rf "${o:?}"
 mkdir -p "$o"
 N=${RUNS_EACH:-50}
+# GNU objdump 2.42 stops on an assertion in some arm64 files (headless Chromium): there, LLVM's.
+LLVM_OBJDUMP=$(command -v llvm-objdump || ls /usr/bin/llvm-objdump-* 2>/dev/null | sort -V | tail -1)
+
+# check FILE DEST: every patched instruction against objdump's decode of FILE
+check() {
+    local st=0
+    objdump -d -w "$1" 2>"$2.objdump" | python3 -I "$HERE/lib/objdump_sites.py" "$2.sites" >"$2.check" || st=$?
+    if [ "$st" != 0 ] || grep -q assertion "$2.objdump"; then
+        [ -n "$LLVM_OBJDUMP" ] || die "$1: objdump fails ($(head -1 "$2.objdump")), and no llvm-objdump"
+        "$LLVM_OBJDUMP" -d -w "$1" | python3 -I "$HERE/lib/objdump_sites.py" "$2.sites" >"$2.check"
+    fi
+    rm "$2.objdump"
+}
 
 # rewrite FILE DEST: plan, verify, objdump check, and the rewritten copy at DEST
 rewrite() {
     "$PATINA" __rewrite "$1" --plan "$2.plan" >"$2.report"
     "$PATINA" __rewrite --verify "$1" "$2.plan" >"$2.verify" 2>&1 || die "$1: the verifier rejects the plan: $(head -3 "$2.verify")"
     "$PATINA" __rewrite --sites "$2.plan" >"$2.sites"
-    objdump -d -w "$1" | python3 -I "$HERE/lib/objdump_sites.py" "$2.sites" >"$2.check"
+    check "$1" "$2"
     grep -q ' disagree=0$' "$2.check" || die "$1: objdump decodes patched instructions otherwise: $(head -3 "$2.check")"
     "$PATINA" __rewrite --standalone "$1" "$2" >/dev/null
     rm "$2.sites" "$2.plan"
@@ -63,17 +76,22 @@ rows() { # NAME REPORT
         $1 == "rewrite" { for (i = 3; i <= NF; i++) { split($i, kv, "="); r[kv[1]] = kv[2] } }
         $1 == "sites" { for (i = 3; i < NF; i++) { split($i, kv, "="); t[kv[1]] += kv[2]; if ($2 == "back-branch") b[kv[1]] = kv[2] } }
         $1 == "plan" { for (i = 2; i <= NF; i++) { split($i, kv, "="); p[kv[1]] = kv[2] } }
-        END { printf "%s\t%.1f MB\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f%%\t%s\t%s s\t%.0f MB\t%d\t%d\n", n, r["text"] / 1e6, t["found"],
-                  t["in-place"] + t["moved"] + t["shared"] + t["grouped"], t["tainted"], t["flags-live"], t["no-room"], t["far"],
+        END { printf "%s\t%.1f MB\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f%%\t%s\t%s s\t%.0f MB\t%d\t%d\n", n, r["text"] / 1e6, t["found"],
+                  t["in-place"] + t["moved"] + t["shared"] + t["grouped"], t["tainted"], t["flags-live"], t["no-room"], t["exclusive"], t["far"],
                   100 * (b["in-place"] + b["moved"] + b["shared"] + b["grouped"]) / b["found"], r["dark"], p["seconds"], p["plan-bytes"] / 1e6, p["groups"], p["interiors"] }' "$2" >>"$o/rows.tsv"
 }
 
 # ripgrep: fetched
 rg_tgz=$o/rg.tgz
-curl -sSfL -o "$rg_tgz" https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-x86_64-unknown-linux-musl.tar.gz
-echo "33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c  $rg_tgz" | sha256sum -c --quiet
+m=$(uname -m)
+curl -sSfL -o "$rg_tgz" "https://github.com/BurntSushi/ripgrep/releases/download/15.2.0/ripgrep-15.2.0-$m-unknown-linux-musl.tar.gz"
+case $m in
+    x86_64) sum=33e15bcf1624b25cdd2a55813a47a2f95dbe126268203e76aa6a585d1e7b149c ;;
+    *) sum=800b1e7206afe799dfb5a6901f23147cfaabe0e52210538100f61e86e1740915 ;;
+esac
+echo "$sum  $rg_tgz" | sha256sum -c --quiet
 tar -C "$o" -xzf "$rg_tgz"
-RG=$o/ripgrep-15.2.0-x86_64-unknown-linux-musl/rg
+RG=$o/ripgrep-15.2.0-$m-unknown-linux-musl/rg
 GOROOT=$(go env GOROOT)
 rewrite "$RG" "$o/rg"
 rows ripgrep "$o/rg.report"
@@ -104,7 +122,7 @@ else
 fi
 
 # headless Chromium, if present: its directory copied, its binary and libraries rewritten
-CH=${CHROMIUM:-$(find "$HOME/.cache/ms-playwright" -path '*chrome-headless-shell-linux64/chrome-headless-shell' 2>/dev/null | sort | tail -1)}
+CH=${CHROMIUM:-$(find "$HOME/.cache/ms-playwright" -path '*chrome-headless-shell-linux*/chrome-headless-shell' 2>/dev/null | sort | tail -1)}
 if [ -n "$CH" ]; then
     cp -r "$(dirname "$CH")" "$o/chromium"
     rewrite "$CH" "$o/chromium/chrome-headless-shell"
@@ -118,12 +136,12 @@ else
     echo "chromium: not found"
 fi
 
-echo "== program	text	sites	covered	tainted	flags-live	no-room	far	back-edges	dark	rewrite	plan	groups	interiors"
+echo "== program	text	sites	covered	tainted	flags-live	no-room	exclusive	far	back-edges	dark	rewrite	plan	groups	interiors"
 cat "$o/rows.tsv"
 echo "== shared libraries rewritten and run: $(find "$o" -path '*-lib/*.report' | wc -l)"
 
 # The census: every ELF file of /usr/bin and the system library directory, planned and verified.
-find /usr/bin /usr/lib/x86_64-linux-gnu -maxdepth 1 -type f -size +0 2>/dev/null | sort >"$o/census.list"
+find /usr/bin "/usr/lib/$(uname -m)-linux-gnu" -maxdepth 1 -type f -size +0 2>/dev/null | sort >"$o/census.list"
 census() {
     f=$1
     [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' ')" = 7f454c46 ] || exit 0

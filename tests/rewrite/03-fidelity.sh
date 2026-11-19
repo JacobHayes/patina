@@ -1,7 +1,8 @@
 # 3. What a program sees of its patched code under `--preempt points` (rw-fid,
 # tests/guests/rewrite/fidelity.c, dynamic; ARCHITECTURE "Load-time rewriting"):
-#  a. its plan patches both routines the guest probes: the `lock xadd` (fid_xadd, run as a copy
-#     in a trampoline) and fid_spin's backward `jz` (aimed at a trampoline);
+#  a. its plan patches both routines the guest probes: the atomic add (fid_xadd: `lock xadd`,
+#     `ldaddal` on arm64; run as a copy in a trampoline) and fid_spin's backward branch (`jz`,
+#     `cbz`; aimed at a trampoline);
 #  b. `fault`, `timer`, `fork` and `jit` print what they print natively: a fault in the
 #     relocated instruction is reported at its original address and backtrace() from the
 #     handler reaches main; a timer signal taken at a point in fid_spin names an address in
@@ -16,7 +17,7 @@
 #     reads the native sum;
 #  f. shlib-stock (stock, with libraries; dlopen and dlclose twice) ends ok with its native
 #     line, every image planned (the dlopened one too), the dlclosed library's plans dropped.
-#@ tier=quick budget=30 slots=4 arch=x86_64
+#@ tier=quick budget=30 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
@@ -46,14 +47,15 @@ pts() { # OUT SEED ARGS...: one run under --preempt points; must end ok
 for sym in fid_xadd fid_spin; do
     a=$(nm "$F" | awk -v s="$sym" '$3 == s {print $1}')
     [ -n "$a" ] || die "a. no symbol $sym in rw-fid"
-    # fid_spin's jz is its third instruction: mov (2 bytes), test (2).
+    # fid_spin's branch is 4 bytes in: after mov (2 bytes) and test (2) on x86_64, after ldr on
+    # arm64.
     off=0
     [ "$sym" != fid_spin ] || off=4
     a=$(printf '%x' $((0x$a + off)))
     awk -v a="$a" '$1 == "site" {sub(/^0x0*/, "", $2); if ($2 == a) f = 1} END {exit !f}' "$o/sites" ||
         die "a. the plan does not patch $sym's probe at 0x$a"
 done
-echo "a. rw-fid's plan patches the lock xadd and the backward jz"
+echo "a. rw-fid's plan patches the atomic add and the backward branch"
 
 # b-e.
 for m in fault timer fork jit checksum maps; do

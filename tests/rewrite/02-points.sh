@@ -11,13 +11,14 @@
 #     `compute` in result.json);
 #  c. deadline-stock (a timer due inside a loop with no system call: compute-stall without
 #     points) ends ok: the timer fired inside the loop, 10 to 12 virtual ms after it was armed;
-#  d. go-race-stock seed 1 (compute-gap=8) repeats identical under --vary cpu: its runtime reads
-#     cpuid leaf 1 at start (the APIC id, which differs by core, is left in a register a point
-#     records), and the plan's cpuid sites answer core 0's;
+#  d. go-race-stock seed 1 (compute-gap=8) repeats identical under --vary cpu: on x86_64 its
+#     runtime reads cpuid leaf 1 at start (the APIC id, which differs by core, is left in a
+#     register a point records), and the plan's cpuid sites answer core 0's; on arm64 it reads
+#     the processor's identity registers, which the kernel answers;
 #  e. the plan cache: the first run makes the program's plan, the next hits it; a byte of the
 #     plan file changed (same size, its modification time put back) makes the next run rebuild
 #     it, with the first run's digest.
-#@ tier=quick budget=60 slots=4 arch=x86_64
+#@ tier=quick budget=60 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
@@ -92,8 +93,12 @@ echo "c. deadline-stock: $(tail -1 "$o/deadline/inc-0/stdout")"
 # d.
 "$PATINA" verify --preempt points --seed 1 --fault compute-gap=8 --runs 3 --vary cpu --out "$o/cpu" -- "$G/compute/go-race-stock" >"$o/cpu.txt" 2>&1 || true
 grep -q '^identical' "$o/cpu.txt" || die "d. go-race-stock under --vary cpu: $(grep -m1 -v '^run ' "$o/cpu.txt")"
-[ "$(field "$o/cpu/run-0/result.json" rewrite.cpuid)" -ge 1 ] || die "d. no cpuid answered"
-echo "d. go-race-stock identical on 3 cores ($(field "$o/cpu/run-0/result.json" rewrite.cpuid) cpuid answered)"
+if [ "$(uname -m)" = x86_64 ]; then
+    [ "$(field "$o/cpu/run-0/result.json" rewrite.cpuid)" -ge 1 ] || die "d. no cpuid answered"
+    echo "d. go-race-stock identical on 3 cores ($(field "$o/cpu/run-0/result.json" rewrite.cpuid) cpuid answered)"
+else
+    echo "d. go-race-stock identical on 3 cores"
+fi
 
 # e. rw-c's plan: made by a. (the cache is this script's), hit now, rebuilt after a change.
 cache() { python3 -I -c 'import json,sys

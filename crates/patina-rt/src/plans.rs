@@ -1,4 +1,4 @@
-//! Switch points from load-time plans (`--preempt points`, x86_64; ARCHITECTURE.md "Load-time
+//! Switch points from load-time plans (`--preempt points`; ARCHITECTURE.md "Load-time
 //! rewriting"). The launcher's broker answers the plan of a file this process maps executable
 //! (`proto::plan`); here the plan is mapped and its traps are answered. No instruction is
 //! decoded here.
@@ -22,7 +22,7 @@ use crate::raw::*;
 use crate::state::{config, ctl, proc};
 use crate::sys::procfs::hexv;
 use core::sync::atomic::Ordering::Relaxed;
-use proto::layout::{FD_PLAN, PAGE, RT_BASE, RT_REGION_END};
+use proto::layout::{FD_PLAN, MMAP_FLOOR, PAGE, RT_BASE, RT_REGION_END};
 use proto::plan::*;
 
 pub const MAX_IMAGES: usize = 64;
@@ -198,13 +198,34 @@ fn elf_dyn(fd: u64) -> bool {
     crate::insn::scan::pread(fd, &mut h, 0)
         && &h[..5] == b"\x7fELF\x02"
         && h[16] == 3
-        && h[18] == 62
+        && u16::from_le_bytes([h[18], h[19]]) == MACHINE
 }
+
+/// This machine's ELF number, the length of a trampoline's trap (`ud2`, `udf`) and the
+/// protection bits a trampoline keeps from its text (arm64: `PROT_BTI`, so that a copied
+/// indirect branch sets the same branch type as in place).
+#[cfg(target_arch = "x86_64")]
+const MACHINE: u16 = 62;
+#[cfg(target_arch = "x86_64")]
+const TRAP_LEN: u64 = 2;
+#[cfg(target_arch = "x86_64")]
+const KEEP: u64 = 0;
+#[cfg(target_arch = "aarch64")]
+const MACHINE: u16 = 183;
+#[cfg(target_arch = "aarch64")]
+const TRAP_LEN: u64 = 4;
+#[cfg(target_arch = "aarch64")]
+const KEEP: u64 = crate::arch::insn::PROT_BTI;
 
 /// Extra bytes to reserve after a mapping the program lets the runtime place: `ld.so`'s first
 /// mapping of a library (offset 0, the image's whole span), which is followed by its
-/// trampolines.
-pub fn room(len: u64, flags: u64, fd: u64, off: u64) -> u64 {
+/// trampolines. On arm64, where libraries' segments are aligned to more than a page, `ld.so`
+/// first reserves the span (`PROT_NONE`, anonymous) and maps the file inside it; the rewriter
+/// puts their trampolines past the reservation, within a branch's reach (128 MiB) of the text.
+pub fn room(len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+    if cfg!(target_arch = "aarch64") && on() && prot == 0 && flags & MAP_ANONYMOUS != 0 {
+        return 1 << 27;
+    }
     if !on() || off != 0 || flags & (MAP_ANONYMOUS | MAP_SHARED) != 0 || len == 0 || !elf_dyn(fd) {
         return 0;
     }
@@ -227,14 +248,14 @@ fn fstat_id(fd: u64) -> (u64, u64) {
 
 /// Map the first `n` trampoline runs of `plan` at `tramp`; when one cannot be, those before it
 /// are unmapped and the answer is false.
-fn tramps(tramp: u64, w: &[u64; REPLY_WORDS], plan: u64, n: u64) -> bool {
+fn tramps(tramp: u64, w: &[u64; REPLY_WORDS], plan: u64, n: u64, keep: u64) -> bool {
     let row = |k: u64| {
         let mut b = [0u8; RUN_BYTES];
         let ok = crate::insn::scan::pread(plan, &mut b, w[R_TRUNS] + k * RUN_BYTES as u64);
         let g = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
         ok.then(|| (tramp + g(0), g(8), g(16)))
     };
-    let x = PROT_READ | PROT_EXEC;
+    let x = PROT_READ | PROT_EXEC | keep;
     for k in 0..n {
         let mapped = row(k).is_some_and(|(a, len, off)| {
             mmap(a, len, x, MAP_PRIVATE | MAP_FIXED_NOREPLACE, plan, off)
@@ -322,15 +343,25 @@ fn apply(
             if tend == u64::MAX || (tramp < RT_REGION_END && tend > RT_BASE) {
                 return false;
             }
+            // Trampolines before an image the allocator placed (arm64), below its cursor: it
+            // goes on below them. (An executable's are below its fixed base, out of its range.)
+            let cursor = proc().mmap_cursor;
+            let low = if tramp < a && tramp >= MMAP_FLOOR {
+                tramp.min(cursor)
+            } else {
+                cursor
+            };
             // The original file, hidden, for putting its pages back.
             let orig_fd = unsafe { sc3(nr::FCNTL, fd, 1030, proto::layout::FD_RT_DYN as u64) };
             let fixed = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
-            if orig_fd < 0 || !tramps(tramp, w, plan, w[R_NTRUNS]) {
+            if orig_fd < 0 || !tramps(tramp, w, plan, w[R_NTRUNS], prot & KEEP) {
                 if orig_fd >= 0 {
                     unsafe { sc1(nr::CLOSE, orig_fd as u64) };
                 }
                 return false;
             }
+            proc().mmap_cursor = low;
+            let p = &mut proc().plans;
             let hdr = crate::state::priv_alloc(w[R_HDR], PAGE);
             if !mmap(hdr, w[R_HDR], PROT_READ, fixed, plan, 0) {
                 crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_SYSCALL);
@@ -502,14 +533,25 @@ pub fn shown(pc: u64) -> u64 {
     };
     let t = img.tramp + field::<u32>(row, SITE_TRAMP) as u64;
     let kind = field::<u8>(row, SITE_KIND);
+    let addr = field::<u64>(row, SITE_ADDR) + img.bias;
+    #[cfg(target_arch = "aarch64")]
+    {
+        // The row of a branch site is `b <target>`.
+        let copy = field::<u16>(row, SITE_COPY) as u64;
+        let b = crate::guest::get::<u32>(t + copy).unwrap_or(0);
+        let target = (t + copy).wrapping_add(((b << 6) as i32 >> 4) as i64 as u64);
+        proto::plan::shown_a64(addr, kind, copy, target, pc - t)
+    }
+    #[cfg(target_arch = "x86_64")]
     let target = if kind == KIND_JUMP {
         let rel = crate::guest::get::<i32>(t + JUMP_ROW + 1).unwrap_or(0);
         (t + JUMP_ROW + 5).wrapping_add(rel as i64 as u64)
     } else {
         0
     };
+    #[cfg(target_arch = "x86_64")]
     proto::plan::shown(
-        field::<u64>(row, SITE_ADDR) + img.bias,
+        addr,
         field::<u8>(row, SITE_LEN) as u64,
         kind,
         field::<u16>(row, SITE_COPY) as u64,
@@ -543,7 +585,7 @@ pub fn try_point(
     }
     count(proto::ctl::PLAN_POINTS);
     crate::compute::point(crate::state::thread(), frame, shown(pc));
-    frame.set_pc(pc + 2);
+    frame.set_pc(pc + TRAP_LEN);
     true
 }
 
@@ -665,14 +707,15 @@ impl Maps {
         let mm = crate::path::makedev(d.0, d.1);
         let ours = |m: &&Img| m.plan_dev == mm && m.plan_ino == i && mm != 0;
         let tramp = |m: &&Img| start >= m.tramp && start < m.tramp + m.tramp_len;
-        if imgs().iter().filter(ours).any(|m| tramp(&m)) {
-            return;
-        }
         let at = imgs().iter().filter(ours).find_map(|m| {
             patched(m)
                 .find(|p| p.0 <= start && start < p.1)
                 .map(|p| (m, p))
         });
+        // (arm64 trampolines before and after an image: its span holds the image)
+        if at.is_none() && imgs().iter().filter(ours).any(|m| tramp(&m)) {
+            return;
+        }
         if let Some((img, (s0, _, off0))) = at {
             let st = crate::sys::fs::fstat_raw(img.orig_fd);
             let n = fd_name(img.orig_fd as u64, &mut name);

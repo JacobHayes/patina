@@ -142,7 +142,7 @@ lists the limits.
 Deeper search: a program rebuilt with coverage flags and Patina's hook file (or a Python
 program run with `python3 -m patina`) also switches threads and moves the clock inside its own
 computation, so races with no system call in them are found. [The guide](docs/GUIDE.md#deeper-search-rebuilt-code) has the details.
-On x86_64, `--preempt points` does much of this for a stock program and every library it
+`--preempt points` does much of this for a stock program and every library it
 loads, without a rebuild, by rewriting their code as it is mapped
 ([the guide](docs/GUIDE.md#points-in-stock-code---preempt-points)).
 

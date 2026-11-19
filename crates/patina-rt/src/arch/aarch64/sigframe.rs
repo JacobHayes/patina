@@ -133,9 +133,12 @@ pub fn deliver(
     {
         si[2] = untagged(si[2]);
     }
+    // A stop in a load-time plan's trampoline shows the program's own address
+    // (`plans::shown`).
+    let pc = crate::plans::shown(frame.pc);
     let mut sf = Sigframe {
         info: if flags & SA_SIGINFO != 0 { si } else { [0; 16] },
-        uc: *frame,
+        uc: Frame { pc, ..*frame },
         fp: frame.regs[29],
         lr: frame.regs[30],
     };
@@ -172,7 +175,7 @@ pub fn deliver(
         );
         return;
     }
-    charge_delivery(sig, handler, f, &si, frame.pc, frame.sp);
+    charge_delivery(sig, handler, f, &si, pc, frame.sp);
     frame.regs[0] = sig;
     if flags & SA_SIGINFO != 0 {
         frame.regs[1] = f;

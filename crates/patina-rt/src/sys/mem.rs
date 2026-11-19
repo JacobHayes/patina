@@ -73,7 +73,7 @@ fn mmap_place(call: &mut dyn Call) -> i64 {
         }
     }
     // A library's first mapping: room after it for its plan's trampolines.
-    let room = crate::plans::room(len, flags, fd, off);
+    let room = crate::plans::room(len, prot, flags, fd, off);
     loop {
         let Some(a) = take(page_up(len) + room) else {
             return -e::ENOMEM;

@@ -31,25 +31,30 @@ pub const CELL: u64 = proto::plan::CELL;
 
 /// The trampoline counts, then jumps to the patched branch's or call's original target (the
 /// patched instruction now goes to the trampoline instead).
+#[cfg(target_arch = "x86_64")]
 pub const KIND_JUMP: u8 = proto::plan::KIND_JUMP;
 /// The trampoline counts, then runs a copy of the patched instructions, then jumps to the
 /// instruction after them (the patch is a jump to the trampoline).
+#[cfg(target_arch = "x86_64")]
 pub const KIND_BEFORE: u8 = proto::plan::KIND_BEFORE;
 /// Entries: a `cpuid` answered by the runtime (`proto::plan::KIND_CPUID`), and an interior
 /// boundary of a group, resumed at its copy (`proto::plan::KIND_INTERIOR`).
 pub const KIND_CPUID: u8 = proto::plan::KIND_CPUID;
 pub const KIND_INTERIOR: u8 = proto::plan::KIND_INTERIOR;
 /// `copy` of a site without a copied instruction.
+#[cfg(target_arch = "x86_64")]
 pub const NO_COPY: u16 = u16::MAX;
 /// The bytes that fault in 64-bit user mode whatever follows them, and that are not prefixes:
 /// `int3` (`SIGTRAP`), `hlt`, `cli`, `sti` and the port I/O instructions (`SIGSEGV`: a process
 /// has no I/O permission; the sandbox refuses `iopl` and `ioperm`). Every interior boundary of
 /// a group holds one.
+#[cfg(target_arch = "x86_64")]
 pub const TRAP_BYTES: [u8; 16] = [
     0x6c, 0x6d, 0x6e, 0x6f, 0xcc, 0xe4, 0xe5, 0xe6, 0xe7, 0xec, 0xed, 0xee, 0xef, 0xf4, 0xfa, 0xfb,
 ];
 /// The legacy prefix that pads a group's jump (`2e`, a segment override, ignored on a near
 /// `jmp` in 64-bit mode) when that moves its displacement's high byte off a boundary.
+#[cfg(target_arch = "x86_64")]
 pub const PAD_PREFIX: u8 = 0x2e;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,6 +89,8 @@ pub struct Pages {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
+    /// The file's ELF machine (`elf::EM_X86_64`, `elf::EM_AARCH64`).
+    pub machine: u16,
     pub sha256: [u8; 32],
     pub build: String,
     pub cell: u64,
@@ -122,7 +129,7 @@ impl Plan {
         let mut h = vec![];
         h.extend_from_slice(MAGIC);
         h.extend_from_slice(&VERSION.to_le_bytes());
-        h.extend_from_slice(&(super::elf::EM_X86_64 as u32).to_le_bytes());
+        h.extend_from_slice(&(self.machine as u32).to_le_bytes());
         h.extend_from_slice(&self.sha256);
         for v in [self.cell, self.tramp_vaddr, self.tramp.len() as u64] {
             h.extend_from_slice(&v.to_le_bytes());
@@ -190,7 +197,8 @@ impl Plan {
             return Err("not a plan file".into());
         }
         let (version, machine) = (r.u32()?, r.u32()?);
-        if version != VERSION || machine != super::elf::EM_X86_64 as u32 {
+        let known = [super::elf::EM_X86_64, super::elf::EM_AARCH64].map(u32::from);
+        if version != VERSION || !known.contains(&machine) {
             return Err(format!(
                 "plan version {version} for machine {machine}: not readable here"
             ));
@@ -278,6 +286,7 @@ impl Plan {
             return Err("plan: trailing bytes".into());
         }
         Ok(Plan {
+            machine: machine as u16,
             sha256,
             build,
             cell,

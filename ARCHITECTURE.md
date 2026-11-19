@@ -498,11 +498,12 @@ the order of asyncio tasks is the event loop's, which a point in one thread does
 
 ## Load-time rewriting
 
-Stock binaries get compute points without a rebuild (`--preempt points`, x86_64; elsewhere the
-flag is refused before a run starts): a plan, made on the host from the file alone, rewrites
-single instructions, or short runs of them, to jump to trampolines that count, and the runtime maps it over the file's
-text as the file is mapped. Without the flag nothing below runs and no run's behaviour or
-digest changes. The host side is `crates/patina-cli/src/rewrite/` (the `iced-x86` decoder; also
+Stock binaries get compute points without a rebuild (`--preempt points`, x86_64 and arm64): a
+plan, made on the host from the file alone, rewrites single instructions, or short runs of
+them, to jump to trampolines that count, and the runtime maps it over the file's text as the
+file is mapped. Without the flag nothing below runs and no run's behaviour or
+digest changes. The host side is `crates/patina-cli/src/rewrite/` (x86_64 files through the
+`iced-x86` decoder, built on x86_64 hosts only; arm64 files through `a64/`, below; also
 reachable through the hidden `patina __rewrite`); the runtime side is `crates/patina-rt/src/plans.rs`,
 which decodes no instruction.
 
@@ -576,6 +577,56 @@ which decodes no instruction.
   `SIGSEGV` handlers that resume interior entries from the plan's rows, so a program with
   handlers of its own, or a library, is checked under Patina instead); its output is compared
   with the original's.
+- **arm64** (`a64/`): every instruction is one 4-byte word, so the words are told apart by
+  their encoding masks (`a64/insn.rs`, no decoder crate; it is compiled on every host, so an
+  arm64 file can be planned and verified anywhere) and every patch is the one word of its site:
+  no group, no interior boundary, no entry row. Only proven code is patched (the assembler's
+  `$d` marks, literal loads and `adrp` pairs that read a found word are refusals that taint as
+  above), and no word whose address code takes (`adr`, an `adrp` pair), which it may read. A backward `b`/`bl` becomes `b T`/`bl T` (the call's link register is the program's
+  own return address); a backward `b.cond`, `cbz`, `cbnz`, `tbz` or `tbnz` becomes `b T`, where
+  T tests the same condition first (re-aimed; the untaken path is a `b` back to the next word,
+  uncounted); an indirect `br` (and its authenticating forms) or an LSE atomic (`cas`, `casp`,
+  `swp`, `ld<op>`) becomes `b T` and runs as a copy. No other word is copied, so no copy is
+  PC-relative. The count is `stp x16, x17, [sp, #-32]!; movz x16, #cell>>16, lsl 16;
+  ldr x17, [x16]; sub x17, x17, #1; str x17, [x16]; cbz x17, trap; ldp x16, x17, [sp], #32`,
+  then the row; `trap:` restores x16 and x17, then `udf #0x7074; b row`, so a point sees the
+  program's registers exactly. `sub` and `cbz` write no flags (no liveness rule); the save slot
+  is 32 to 16 bytes below the stack pointer (Linux arm64 has no red zone: the kernel writes a
+  signal frame there, so a handler sees the same; Go keeps a frame pointer in the 8 bytes just
+  below, which the slot leaves alone); the cell (`0x7fff0000`) is one `movz`. A `b` reaches
+  ±128 MiB. Trampolines go after the image, past `ld.so`'s reservation where segments are
+  aligned to more than a page (`ld.so` reserves the span with an anonymous `PROT_NONE`
+  mapping, maps the file inside it and unmaps the rest; under points the runtime leaves 128 MiB
+  of address space free after every anonymous `PROT_NONE` mapping it places, as it cannot tell
+  that one from a thread stack's or an allocator's reservation). In a file placed at load time whose sites are not all in reach
+  that way, those in the image's lower half get theirs below the image instead (the span
+  wraps around the image; its pages there are empty and not mapped). A backward call or jump
+  to another function's start (an anchor or a call's target, outside the site's function),
+  whose trampoline is in reach but whose target is not from it, ends `adrp x16; add x16; br x16` (`KIND_FAR`):
+  the procedure call standard lets a linker's veneer overwrite `x16` there; to a label inside a
+  function no veneer could stand, and `x16` may be live. In a file marked for BTI the target
+  must be a landing pad that accepts `br x16`. A site still out of reach is left (`far`). A
+  standalone copy is planned with its trampolines after the image only: no load segment lies
+  below an image's first, and a program's code runs before its entry (a library's
+  constructor calls `malloc`, which Chromium's executable exports). No landing pad (`bti`,
+  `paciasp`) is ever a site and none moves; a trampoline is entered by direct branches only,
+  so BTI never checks it, and its pages keep the text's `PROT_BTI`, so a copied `br` sets the
+  branch type it sets natively. Two limits of the save slot, in code no compiler emits: code
+  that keeps data below the stack pointer, which a signal frame overwrites natively too, can
+  lose the 16 bytes from 32 below it at a site; a loop that runs with the stack pointer not
+  16-byte aligned gets `SIGBUS` at a site (Linux checks its alignment on every access through
+  it). No site is inside an exclusive pair (from a load-exclusive along every path up to its
+  store-exclusive, a call's return included, at most 32 words, `proto::step`'s pair rule) or
+  branches into one: the count's stores would clear the monitor and the pair would fail on
+  every try. Nor is any site on the way from a failed store-exclusive back to its load (from
+  where its retry branch goes on failure, or the word after a store whose status is tested
+  later, every word within 512 that leads back to the load): a store-exclusive natively fails
+  now and then with no other writer (the host clears the monitor), so a retry, or the loop
+  around a weak compare-and-swap, goes round once more by run, which a count there would turn
+  into a different schedule for the same seed (ripgrep's musl build, inline exclusive pairs,
+  showed it under `verify`). The callee of a call on either is not looked into. The verifier
+  finds code, its own refusals and their spans, pairs (in order along fall-through, `b` and
+  calls) and the way back by its own rules, and spells the count's words itself.
 
 In a run (`--preempt points`):
 - **The broker** (`launcher/plans.rs`) runs in the launcher, outside the sandbox, on a thread
@@ -583,7 +634,7 @@ In a run (`--preempt points`):
   is read whole; the stall watchdog counts the time a thread waits for a plan as progress. The runtime sends it a descriptor of a file it is about to map
   executable and the file offset, on a socket the program cannot see (`FD_PLAN`, a hidden
   descriptor); it answers the plan's placement and run table and one read-only descriptor of
-  the plan file, or that the file has none (not ELF x86_64, no executable segment, refused by
+  the plan file, or that the file has none (not ELF of the host's machine, no executable segment, refused by
   the verifier: the file runs unpatched and the report names why). Before the program starts,
   the launcher plans the program and the libraries it names (in parallel); anything else (a
   `dlopen`, an `execve`) is planned when it is first mapped, while the asking thread holds the
@@ -600,9 +651,10 @@ In a run (`--preempt points`):
   text, both private and read-execute from the plan file; the plan's site rows are mapped
   read-only in the runtime's region. Anonymous or shared executable memory, and memory made
   executable later (`mprotect`, `pkey_mprotect`), gets no plan and is counted `unplanned`.
-- **A point**: a trampoline's `ud2` is a `SIGILL` in the runtime's fault entry, which finds
+- **A point**: a trampoline's `ud2` (arm64: `udf #0x7074`) is a `SIGILL` in the runtime's
+  fault entry, which finds
   the site by address and makes it a compute point (the record names the original address),
-  then resumes after the `ud2`. A `ud2` at a `cpuid` row is answered as above, with no record
+  then resumes after it. A `ud2` at a `cpuid` row is answered as above, with no record
   and no virtual time. A fault at an interior row's address (`SIGTRAP` just after its `int3`,
   or `SIGSEGV` from the kernel with no address at its other byte) resumes at the copy of that
   instruction with every register as it was: no record, no virtual time and no count (the
@@ -923,7 +975,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   preempted; code the scanner does not see (a JIT) keeps its native exclusive pairs, whose
   spurious failures can change the count (a hop walk that meets one gives up for that
   segment); more than 4,096 patched sites in one process stop the run.
-- **Load-time points** (`--preempt points`): x86_64 only; the points are at backward branches,
+- **Load-time points** (`--preempt points`): the points are at backward branches,
   backward calls, indirect jumps and atomics that a single-instruction patch can reach (most,
   not all: above), so a race between plain accesses with no such instruction between them
   is not split, as in stock code. Libraries load at other addresses than without points, and a
@@ -939,7 +991,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
   seed. Rebuilding the code with compute points switches inside it; so does
-  `--preempt branches`, on the CPUs checked exact, and on x86_64 `--preempt points` at the
+  `--preempt branches`, on the CPUs checked exact, and `--preempt points` at the
   branches, calls and atomics inside it. Compute points do not split an atomic
   read-modify-write (a `lock`-prefixed instruction; on arm64 an LSE instruction, an
   exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not

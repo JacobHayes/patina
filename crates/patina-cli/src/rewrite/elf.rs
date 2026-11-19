@@ -1,4 +1,4 @@
-//! The facts of an x86_64 ELF file that the rewriter and its verifier start from: the
+//! The facts of an x86_64 or arm64 ELF file that the rewriter and its verifier start from: the
 //! executable bytes, the load segments, and where functions start and end (the entry point,
 //! function symbols, unwind entries, relocated pointers). Facts only: what is code is decided in
 //! `code.rs` (the rewriter) and again, separately, in `verify.rs`.
@@ -8,8 +8,10 @@ use crate::cli::Res;
 use sha2::{Digest, Sha256};
 
 pub const EM_X86_64: u16 = 62;
+pub const EM_AARCH64: u16 = 183;
 const PT_LOAD: u32 = 1;
 const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
+const PT_GNU_PROPERTY: u32 = 0x6474_e553;
 const PF_X: u32 = 1;
 
 /// One `PT_LOAD`.
@@ -20,6 +22,8 @@ pub struct Load {
     pub off: u64,
     pub filesz: u64,
     pub flags: u32,
+    /// `p_align`.
+    pub align: u64,
 }
 
 /// An executable range of the file: a `SHF_EXECINSTR` section, or an executable segment when
@@ -34,6 +38,8 @@ pub struct Text {
 pub struct Elf<'a> {
     pub data: &'a [u8],
     pub sha256: [u8; 32],
+    /// `EM_X86_64` or `EM_AARCH64`.
+    pub machine: u16,
     pub phoff: usize,
     pub phnum: usize,
     /// `ET_EXEC`: loaded at its link-time addresses, so code may name its addresses absolutely.
@@ -45,6 +51,41 @@ pub struct Elf<'a> {
     pub anchors: Vec<u64>,
     /// Function extents `[start, end)` from unwind entries and sized symbols, sorted.
     pub extents: Vec<(u64, u64)>,
+    /// arm64: data inside text by the assembler's mapping symbols (`$d` up to the next `$x`
+    /// or `$d`, or the end of its section), sorted.
+    pub asm_data: Vec<(u64, u64)>,
+    /// arm64: the file's GNU property note asks for branch target identification (its
+    /// executable pages are mapped guarded).
+    pub bti: bool,
+}
+
+/// `GNU_PROPERTY_AARCH64_FEATURE_1_AND` with its BTI bit, in the `NT_GNU_PROPERTY_TYPE_0`
+/// note of a `PT_GNU_PROPERTY` segment.
+fn property_bti(d: &[u8], seg: &Load) -> bool {
+    let (mut o, end) = (
+        seg.off as usize,
+        seg.off.saturating_add(seg.filesz) as usize,
+    );
+    while o + 16 <= end {
+        let (Ok(nsz), Ok(dsz), Ok(typ)) = (u32_at(d, o), u32_at(d, o + 4), u32_at(d, o + 8)) else {
+            return false;
+        };
+        let desc = o + 12 + (nsz as usize).next_multiple_of(4);
+        if typ == 5 && d.get(o + 12..o + 16) == Some(b"GNU\0") {
+            let mut p = desc;
+            while p + 8 <= desc + dsz as usize {
+                let (Ok(pt), Ok(sz)) = (u32_at(d, p), u32_at(d, p + 4)) else {
+                    return false;
+                };
+                if pt == 0xc000_0000 {
+                    return u32_at(d, p + 8).is_ok_and(|f| f & 1 != 0);
+                }
+                p += 8 + (sz as usize).next_multiple_of(8);
+            }
+        }
+        o = desc + (dsz as usize).next_multiple_of(8);
+    }
+    false
 }
 
 fn get<const N: usize>(d: &[u8], o: usize) -> Res<[u8; N]> {
@@ -66,6 +107,7 @@ pub fn u64_at(d: &[u8], o: usize) -> Res<u64> {
 struct Section {
     name: u32,
     typ: u32,
+    link: u32,
     flags: u64,
     addr: u64,
     off: usize,
@@ -81,9 +123,9 @@ impl<'a> Elf<'a> {
             return Err("not a 64-bit little-endian ELF file".into());
         }
         let machine = u16_at(data, 0x12)?;
-        if machine != EM_X86_64 {
+        if machine != EM_X86_64 && machine != EM_AARCH64 {
             return Err(format!(
-                "unsupported architecture: ELF machine {machine}, not x86_64"
+                "unsupported architecture: ELF machine {machine}, not x86_64 or arm64"
             ));
         }
         let entry = u64_at(data, 0x18)?;
@@ -94,6 +136,7 @@ impl<'a> Elf<'a> {
         }
         let mut loads = vec![];
         let mut eh_hdr = None;
+        let mut bti = false;
         for i in 0..phnum {
             let p = phoff + i * 56;
             let (typ, flags) = (u32_at(data, p)?, u32_at(data, p + 4)?);
@@ -103,6 +146,7 @@ impl<'a> Elf<'a> {
                 filesz: u64_at(data, p + 0x20)?,
                 memsz: u64_at(data, p + 0x28)?,
                 flags,
+                align: u64_at(data, p + 0x30)?,
             };
             match typ {
                 PT_LOAD => {
@@ -116,6 +160,7 @@ impl<'a> Elf<'a> {
                     loads.push(l)
                 }
                 PT_GNU_EH_FRAME => eh_hdr = Some(l),
+                PT_GNU_PROPERTY if machine == EM_AARCH64 => bti = property_bti(data, &l),
                 _ => {}
             }
         }
@@ -123,6 +168,7 @@ impl<'a> Elf<'a> {
         let mut e = Elf {
             data,
             sha256: Sha256::digest(data).into(),
+            machine,
             phoff,
             phnum,
             exec: u16_at(data, 0x10)? == 2,
@@ -130,6 +176,8 @@ impl<'a> Elf<'a> {
             text: vec![],
             anchors: vec![],
             extents: vec![],
+            asm_data: vec![],
+            bti,
         };
         let secs = e.sections()?;
         let strtab = secs.get(u16_at(data, 0x3e)? as usize).map(|s| s.off);
@@ -172,14 +220,25 @@ impl<'a> Elf<'a> {
             return Err("overlapping executable sections".into());
         }
         let (mut anchors, mut extents) = (vec![entry], vec![]);
+        // arm64 mapping symbols: (address, is data).
+        let mut maps: Vec<(u64, bool)> = vec![];
         for s in &secs {
             match s.typ {
                 // SHT_SYMTAB, SHT_DYNSYM: STT_FUNC and STT_GNU_IFUNC, defined
                 2 | 11 => {
+                    let names = secs.get(s.link as usize).map(|t| t.off);
                     for k in 0..s.size / 24 {
                         let o = s.off + k * 24;
                         let (info, shndx) = (data[o + 4], u16_at(data, o + 6)?);
                         let (value, size) = (u64_at(data, o + 8)?, u64_at(data, o + 16)?);
+                        if machine == EM_AARCH64 && info & 0xf == 0 && shndx != 0 {
+                            let n = names
+                                .and_then(|t| t.checked_add(u32_at(data, o).ok()? as usize))
+                                .and_then(|n| data.get(n..n + 3));
+                            if let Some([b'$', c @ (b'd' | b'x'), 0 | b'.']) = n {
+                                maps.push((value, *c == b'd'));
+                            }
+                        }
                         if matches!(info & 0xf, 2 | 10) && shndx != 0 && value != 0 {
                             anchors.push(value);
                             if size > 0 {
@@ -202,6 +261,16 @@ impl<'a> Elf<'a> {
         if let Some((addr, off, size)) = eh {
             let bytes = data.get(off..off.saturating_add(size)).unwrap_or(&[]);
             eh_frame(bytes, addr, &mut anchors, &mut extents);
+        }
+        maps.sort_unstable();
+        maps.dedup();
+        for (k, &(a, d)) in maps.iter().enumerate() {
+            let Some(t) = e.text_at(a) else { continue };
+            let end = t.addr + t.len as u64;
+            let next = maps.get(k + 1).map_or(end, |n| n.0.min(end));
+            if d && a < next {
+                e.asm_data.push((a, next));
+            }
         }
         anchors.retain(|&a| e.in_text(a));
         anchors.sort_unstable();
@@ -234,6 +303,7 @@ impl<'a> Elf<'a> {
             out.push(Section {
                 name: u32_at(d, s)?,
                 typ,
+                link: u32_at(d, s + 0x28)?,
                 flags: u64_at(d, s + 8)?,
                 addr: u64_at(d, s + 0x10)?,
                 off,
@@ -248,6 +318,15 @@ impl<'a> Elf<'a> {
         let i = self.text.partition_point(|t| t.addr <= a).checked_sub(1)?;
         let t = &self.text[i];
         (a < t.addr + t.len as u64).then_some(t)
+    }
+
+    /// Whether `lo` and `hi` (`lo <= hi`) are in one function: one unwind entry or sized
+    /// symbol holds both, or none of the function starts `starts` (sorted) lies in `(lo, hi]`.
+    pub fn one_function(&self, starts: &[u64], lo: u64, hi: u64) -> bool {
+        let e = self.extents.partition_point(|&(s, _)| s <= lo);
+        let held = e > 0 && self.extents[e - 1].1 > hi;
+        let a = starts.partition_point(|&s| s <= hi);
+        held || a == 0 || starts[a - 1] <= lo
     }
 
     pub fn in_text(&self, a: u64) -> bool {
@@ -300,11 +379,17 @@ impl<'a> Elf<'a> {
         u64_at(self.data, o).ok()
     }
 
-    /// `R_X86_64_RELATIVE` and `R_X86_64_IRELATIVE`: the addend is a code or data address.
+    /// `R_X86_64_RELATIVE` and `R_X86_64_IRELATIVE` (arm64: `R_AARCH64_RELATIVE`,
+    /// `R_AARCH64_IRELATIVE`): the addend is a code or data address.
     fn rela(&self, off: usize, size: usize, out: &mut Vec<u64>) -> Res<()> {
+        let types: [u64; 2] = if self.machine == EM_AARCH64 {
+            [1027, 1032]
+        } else {
+            [8, 37]
+        };
         for k in 0..size / 24 {
             let o = off + k * 24;
-            if matches!(u64_at(self.data, o + 8)? & 0xffff_ffff, 8 | 37) {
+            if types.contains(&(u64_at(self.data, o + 8)? & 0xffff_ffff)) {
                 out.push(u64_at(self.data, o + 16)?);
             }
         }

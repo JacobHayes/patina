@@ -88,6 +88,15 @@ pub const KIND_CPUID: u8 = 3;
 /// there that the rewriter could not see traps; the runtime resumes at the copy of that
 /// instruction, the entry's trampoline offset.
 pub const KIND_INTERIOR: u8 = 4;
+/// arm64 only: a conditional branch (`b.cond`, `cbz`, `cbnz`, `tbz`, `tbnz`) became `b T`; the
+/// trampoline starts with the same condition aimed 8 bytes on and a `b` back to the next
+/// instruction (not taken), then counts and branches to the original target (taken).
+pub const KIND_COND: u8 = 5;
+/// arm64 only: a `bl` or `b` whose target a `b` from the trampoline does not reach (±128 MiB)
+/// became `bl T` or `b T`; after the count the row is `adrp x16, target; add x16, x16, #lo12;
+/// br x16`. Only where `x16` is free by the procedure call standard: a call, or a jump to a
+/// function's start.
+pub const KIND_FAR: u8 = 6;
 /// Offset of a `KIND_JUMP` trampoline's `jmp rel32` to the original target: after the count
 /// (`dec qword [abs32]`, 8 bytes) and its `jz` (2 bytes).
 pub const JUMP_ROW: u64 = 10;
@@ -95,6 +104,34 @@ pub const JUMP_ROW: u64 = 10;
 /// The count's cell with `--preempt points`: one word below 2 GiB, so a trampoline in any image
 /// reaches it with a 32-bit absolute operand (`dec qword [0x7fff0000]`).
 pub const CELL: u64 = 0x7fff_0000;
+
+/// arm64: a trampoline's trap, `udf #0x7074` (`SIGILL`): a compute point at its site.
+pub const A64_TRAP: u32 = 0x7074;
+/// arm64: bytes of a trampoline's count (`stp x16, x17, [sp, #-32]!`, the cell's address, load,
+/// subtract, store, `cbz` to the trap's restore, `ldp x16, x17, [sp], #32`). It starts the
+/// trampoline, or 8 bytes in for `KIND_COND`; `copy` of an arm64 site is the offset right after
+/// it, the row: `b <target>` (`KIND_JUMP`, `KIND_COND`) or the copied instruction and `b` back
+/// (`KIND_BEFORE`). After the row: `ldp x16, x17, [sp], #32`, the trap, `b` to the row.
+pub const A64_COUNT: u64 = 28;
+
+/// arm64's `shown`: where a stop at `off` bytes into a site's trampoline lands in the program.
+/// `KIND_COND` before its count: at its first word the condition is still to be tested (`addr`),
+/// at its second it was not taken (`addr + 4`). `KIND_BEFORE`: at the `b` back the next
+/// instruction, else the instruction itself (a handler that returns there enters the patch
+/// again: one more count, the same in every run). `KIND_FAR`: the branch or call itself (a
+/// handler that returns there makes it again, through one more count). Otherwise the branch was
+/// taken: `target`.
+/// The count leaves `x16`, `x17` and `sp` as they were wherever a stop can show the program
+/// a frame (the trap restores them first); only a fault inside the count itself (its stack slot,
+/// the cell) sees them changed, and that ends the program or the run.
+pub fn shown_a64(addr: u64, kind: u8, copy: u64, target: u64, off: u64) -> u64 {
+    match kind {
+        KIND_COND if off < 8 => addr + off.min(4),
+        KIND_BEFORE if off == copy + 4 => addr + 4,
+        KIND_BEFORE | KIND_FAR => addr,
+        _ => target,
+    }
+}
 
 /// Where a stop at `off` bytes into the trampoline of a site lands in the original program: the
 /// address a signal frame, a record or a message shows. `addr`, `len`, `kind` and `copy` are
@@ -141,5 +178,23 @@ mod tests {
         assert_eq!(g(20), 0x1006);
         assert_eq!(g(25), 0x1000);
         assert_eq!(shown(0x1000, 5, KIND_JUMP, 0, 15, 0x900, 17), 0x900);
+    }
+
+    #[test]
+    fn a_stop_in_an_arm64_trampoline_shows_the_original_place() {
+        // KIND_COND: cond (0), b back (4), count (8..36), b target (36), ldp, udf, b row.
+        let c = |off| shown_a64(0x1000, KIND_COND, 36, 0x900, off);
+        assert_eq!(
+            (c(0), c(4), c(8), c(36), c(44)),
+            (0x1000, 0x1004, 0x900, 0x900, 0x900)
+        );
+        // KIND_BEFORE: count (0..28), copy (28), b back (32), ldp, udf (40), b row.
+        let b = |off| shown_a64(0x1000, KIND_BEFORE, 28, 0, off);
+        assert_eq!(
+            (b(0), b(28), b(32), b(40)),
+            (0x1000, 0x1000, 0x1004, 0x1000)
+        );
+        assert_eq!(shown_a64(0x1000, KIND_JUMP, 28, 0x900, 32), 0x900);
+        assert_eq!(shown_a64(0x1000, KIND_FAR, 28, 0, 48), 0x1000);
     }
 }

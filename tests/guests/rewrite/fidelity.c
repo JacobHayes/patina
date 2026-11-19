@@ -1,8 +1,9 @@
 // What a program sees of its own code under --preempt points (tests/rewrite/03-fidelity). Two
-// small routines in assembly are planned the same in every build: fid_atomic, a `lock xadd`
-// with a 32-bit displacement (8 bytes, flags dead after it: its count goes before it, the
-// instruction runs as a copy in a trampoline), and fid_spin, a loop that waits for a flag with a
-// backward `jz rel32` (patched in place to its trampoline). Each mode prints what it found;
+// small routines in assembly are planned the same in every build: fid_atomic, an atomic add
+// (x86_64: `lock xadd` with a 32-bit displacement, 8 bytes, flags dead after it; arm64:
+// `ldaddal`) whose count goes before it, the instruction running as a copy in a trampoline, and
+// fid_spin, a loop that waits for a flag with a backward branch (x86_64: `jz rel32`; arm64:
+// `cbz`) patched in place to its trampoline. Each mode prints what it found;
 // natively and under Patina the lines are the same, except `checksum`.
 //   fault     fid_atomic on a bad address: the SIGSEGV handler's ucontext names the address of
 //             its `lock xadd` (fid_xadd), and backtrace() from the handler reaches main
@@ -31,6 +32,9 @@
 long fid_atomic(long *p, long v);
 void fid_spin(volatile int *flag);
 extern char fid_xadd[], fid_spin_end[];
+#if defined(__x86_64__)
+#define PC(uc) ((ucontext_t *)(uc))->uc_mcontext.gregs[REG_RIP]
+#define ATOMIC "lock xadd"
 __asm__(".text\n"
 	".globl fid_atomic\n.type fid_atomic,@function\n"
 	"fid_atomic:\n"
@@ -53,6 +57,35 @@ __asm__(".text\n"
 	"  .cfi_endproc\n"
 	".globl fid_spin_end\nfid_spin_end:\n"
 	".size fid_spin, .-fid_spin\n");
+// mov $42, %eax; ret
+static const unsigned char jit_code[] = {0xb8, 42, 0, 0, 0, 0xc3};
+#elif defined(__aarch64__)
+#define PC(uc) ((ucontext_t *)(uc))->uc_mcontext.pc
+#define ATOMIC "ldaddal"
+__asm__(".text\n"
+	".arch armv8.1-a\n"
+	".globl fid_atomic\n.type fid_atomic,%function\n"
+	"fid_atomic:\n"
+	"  .cfi_startproc\n"
+	"  add x2, x0, #0x1000\n"
+	".globl fid_xadd\nfid_xadd:\n"
+	"  ldaddal x1, x0, [x2]\n"
+	"  ret\n"
+	"  .cfi_endproc\n"
+	".size fid_atomic, .-fid_atomic\n"
+	".globl fid_spin\n.type fid_spin,%function\n"
+	".p2align 4\n"
+	"fid_spin:\n"
+	"  .cfi_startproc\n"
+	"1: ldr w1, [x0]\n"
+	"  cbz w1, 1b\n"
+	"  ret\n"
+	"  .cfi_endproc\n"
+	".globl fid_spin_end\nfid_spin_end:\n"
+	".size fid_spin, .-fid_spin\n");
+// mov w0, #42; ret
+static const unsigned char jit_code[] = {0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6};
+#endif
 
 static sigjmp_buf back;
 static volatile uintptr_t seen_pc;
@@ -61,7 +94,7 @@ static volatile int seen_main, flag;
 static void on_segv(int sig, siginfo_t *si, void *uc)
 {
 	(void)sig, (void)si;
-	seen_pc = ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
+	seen_pc = PC(uc);
 	void *f[32];
 	int n = backtrace(f, 32);
 	for (int i = 0; i < n; i++) {
@@ -75,7 +108,7 @@ static void on_segv(int sig, siginfo_t *si, void *uc)
 static void on_alarm(int sig, siginfo_t *si, void *uc)
 {
 	(void)sig, (void)si;
-	seen_pc = ((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
+	seen_pc = PC(uc);
 	flag = 1;
 }
 
@@ -92,7 +125,7 @@ static int fault(void)
 	handle(SIGSEGV, on_segv);
 	if (!sigsetjmp(back, 1))
 		fid_atomic((long *)8, 1);
-	printf("fault: at the lock xadd %s; backtrace reaches main %s\n",
+	printf("fault: at the " ATOMIC " %s; backtrace reaches main %s\n",
 	       seen_pc == (uintptr_t)fid_xadd ? "yes" : "no", seen_main ? "yes" : "no");
 	return 0;
 }
@@ -148,11 +181,11 @@ static int reprotect(void)
 
 static int jit(void)
 {
-	static const unsigned char code[] = {0xb8, 42, 0, 0, 0, 0xc3}; // mov $42, %eax; ret
 	void *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (m == MAP_FAILED)
 		return 1;
-	memcpy(m, code, sizeof code);
+	memcpy(m, jit_code, sizeof jit_code);
+	__builtin___clear_cache((char *)m, (char *)m + sizeof jit_code);
 	if (mprotect(m, 4096, PROT_READ | PROT_EXEC))
 		return 1;
 	printf("jit: %d\n", ((int (*)(void))m)());
