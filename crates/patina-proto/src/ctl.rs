@@ -765,12 +765,16 @@ pub enum Op {
 ///   or -errno; the outcome arrives in the socket's table entry.
 /// - `WireAccepted`: [connection id, index of the accepted socket, family]: reply 0 or -errno.
 /// - `WireSent`: [] the supervisor reads the marked hidden ends now (a step of its own).
-/// - `WireRenew`: [index, the descriptor it is open on]: a new connect on a socket whose last
-///   attempt failed. Reply -`EBUSY` when another descriptor (in any guest process) or an epoll
-///   set holds the real socket, else the port and address kind an explicit `bind` gave it
-///   (`port | kind << 16`; 0: none): the runtime puts a fresh real socket in its place.
+/// - `WireRenew`: [index, the descriptor it is open on, `RENEW_CONNECT`|`RENEW_STOP`]: the
+///   runtime puts a fresh real socket in place of the old one, for a new connect on a socket
+///   whose last attempt failed, or for a listener that `shutdown` stops (the supervisor stops
+///   treating it as listening and resets the connections waiting in its backlog). Reply
+///   -`EBUSY` when another descriptor (in any guest process) or an epoll set holds the real
+///   socket, else the port and address kind its `bind` gave it (`port | kind << 16`; 0: none).
 pub const WIRE_BIND: u64 = 0;
 pub const WIRE_LISTEN: u64 = 1;
+pub const RENEW_CONNECT: u64 = 0;
+pub const RENEW_STOP: u64 = 1;
 /// Decision codes of the wire (args documented in `patina/src/sup/wire.rs`).
 pub const DEC_WIRE_READ: u32 = 0x140;
 pub const DEC_WIRE_DELIVER: u32 = 0x141;

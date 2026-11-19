@@ -30,6 +30,9 @@ pub const WS_FAILED: u8 = 5;
 /// A failed connect whose error a later `connect` reported (the kernel's `SS_UNCONNECTED`
 /// after `sock_error`): another `connect` would be a new attempt.
 pub const WS_ABORTED: u8 = 6;
+/// A listener that `shutdown(SHUT_RD|SHUT_RDWR)` stopped (the kernel's `TCP_CLOSE`): `accept`
+/// fails `EINVAL`, its real socket is a fresh unconnected one (as `poll` should see it).
+pub const WS_STOPPED: u8 = 7;
 
 /// `WSock::flags`.
 pub const WF_SENT: u8 = 1;

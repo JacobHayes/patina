@@ -501,9 +501,11 @@ impl Sup {
         Next::Continue(r)
     }
 
-    /// A new connect on a socket whose last attempt failed (`Op::WireRenew`).
-    /// The real socket is the one on the caller's descriptor `a[1]`: its inode is the host's,
-    /// read here so that it never enters the request (which is recorded and compared).
+    /// A fresh real socket for socket `i` (`Op::WireRenew`): a new connect after a failed one,
+    /// or a listener that stops (`RENEW_STOP`), whose waiting connections are reset as the
+    /// kernel resets a closed listener's. The real socket is the one on the caller's
+    /// descriptor `a[1]`: its inode is the host's, read here so that it never enters the
+    /// request (which is recorded and compared).
     fn wire_renew(&mut self, idx: usize, a: [u64; 6]) -> i64 {
         let i = a[0] as usize;
         let tid = self.slot(idx).tid.load(Relaxed);
@@ -513,6 +515,22 @@ impl Sup {
         let pids: Vec<i32> = self.procs.map.keys().copied().collect();
         if super::proc::socket_holders(&pids, ino) != (1, 0) {
             return -(libc::EBUSY as i64);
+        }
+        if a[2] == RENEW_STOP {
+            if let Some(s) = self.wire.socks.get_mut(&i) {
+                s.listening = false;
+            }
+            let waiting: Vec<u32> = self
+                .wire
+                .conns
+                .iter()
+                .filter(|(_, c)| c.listener == Some(i) && c.established && c.server.idx.is_none())
+                .map(|(&id, _)| id)
+                .collect();
+            for id in waiting {
+                self.reset_side(id, false, RST_LISTENER_GONE);
+                self.reset_side(id, true, RST_LISTENER_GONE);
+            }
         }
         match self.wire.socks.get(&i) {
             Some(s) if s.port != 0 => s.port as i64 | (s.kind as i64) << 16,

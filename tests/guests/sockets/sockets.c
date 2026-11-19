@@ -24,6 +24,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -465,6 +466,52 @@ static void refused(void) {
     close(ul);
     unlink(u.sun_path);
     printf("unix: ENOENT, ECONNREFUSED, then connected\n");
+}
+
+static void *accept_einval(void *l) {
+    int r = accept(*(int *)l, NULL, NULL);
+    return r == -1 && errno == EINVAL ? l : NULL;
+}
+
+/// shutdown(SHUT_RD or SHUT_RDWR) of a listening socket (as a server stops): a connection
+/// waiting to be accepted is reset, accept answers EINVAL (also to a thread blocked in it),
+/// new connects are refused, and poll reports the socket hung up (and writable, as a closed
+/// TCP socket is).
+static void t_shutlisten(void) {
+    int port, l = listener(&port, 0);
+    int c1 = dial(port); // waits in l's backlog
+    sleep_ms(50);
+    int port2, l2 = listener(&port2, 0);
+    pthread_t t;
+    CHECK(pthread_create(&t, NULL, accept_einval, &l2) == 0, "pthread_create");
+    sleep_ms(100); // the thread is blocked in accept
+    CHECK(shutdown(l2, SHUT_RD) == 0, "shutdown SHUT_RD: %d", errno);
+    void *ok;
+    pthread_join(t, &ok);
+    CHECK(ok != NULL, "the blocked accept did not end with EINVAL");
+    printf("blocked accept: EINVAL\n");
+    CHECK(shutdown(l, SHUT_RDWR) == 0, "shutdown SHUT_RDWR: %d", errno);
+    int r = accept(l, NULL, NULL);
+    CHECK(r == -1 && errno == EINVAL, "accept after shutdown: %d %d", r, errno);
+    char b;
+    r = read(c1, &b, 1);
+    CHECK(r == -1 && errno == ECONNRESET, "the waiting connection: %d %d", r, errno);
+    printf("after shutdown: accept EINVAL, the waiting connection reset\n");
+    int c2 = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = loop4(port);
+    r = connect(c2, (void *)&a, sizeof a);
+    CHECK(r == -1 && errno == ECONNREFUSED, "connect after shutdown: %d %d", r, errno);
+    printf("new connect: ECONNREFUSED\n");
+    struct pollfd pf[2] = {{.fd = l, .events = POLLIN | POLLOUT | POLLRDHUP},
+                           {.fd = l2, .events = POLLIN | POLLOUT | POLLRDHUP}};
+    CHECK(poll(pf, 2, 0) == 2, "poll");
+    CHECK(pf[0].revents == (POLLOUT | POLLHUP) && pf[1].revents == pf[0].revents,
+          "revents 0x%x 0x%x", pf[0].revents, pf[1].revents);
+    printf("poll: hung up\n");
+    close(c1);
+    close(c2);
+    close(l);
+    close(l2);
 }
 
 // ---- semantic tests ----
@@ -1118,6 +1165,7 @@ int main(int argc, char **argv) {
         refused();
     } else if (!strcmp(m, "names")) t_names();
     else if (!strcmp(m, "refused")) refused();
+    else if (!strcmp(m, "shutlisten")) t_shutlisten();
     else if (!strcmp(m, "addrinuse")) t_addrinuse();
     else if (!strcmp(m, "halfclose")) t_halfclose();
     else if (!strcmp(m, "eof")) t_eof();

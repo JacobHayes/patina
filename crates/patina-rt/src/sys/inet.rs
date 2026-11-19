@@ -14,7 +14,7 @@
 
 use super::io::{self, Deadline, Got, IovCursor, Kind, Waiter, POLLERR, POLLHUP, POLLIN};
 use super::*;
-use proto::ctl::{Op, PARK_IN, PARK_OUT, WIRE_BIND, WIRE_LISTEN};
+use proto::ctl::{Op, PARK_IN, PARK_OUT, RENEW_CONNECT, RENEW_STOP, WIRE_BIND, WIRE_LISTEN};
 use proto::vfs::{VINO_BASE, VINO_CAP};
 use proto::wire::*;
 
@@ -311,16 +311,26 @@ fn bind_to(fd: i64, i: usize, port: u16, kind: u8) -> i64 {
 
 fn bind(call: &mut dyn Call, i: usize) -> i64 {
     let [fd, addr, len, ..] = args(call);
+    if sock(i).state == WS_STOPPED {
+        halt(call);
+    }
     let (port, kind) = match parse_addr(sock(i).family, addr, len, false) {
         Ok(v) => v,
         Err(e) => return e,
     };
-    bind_to(fd as i32 as i64, i, port, kind)
+    let r = bind_to(fd as i32 as i64, i, port, kind);
+    if r == 0 && port != 0 {
+        sock(i).flags |= WF_USER_PORT;
+    }
+    r
 }
 
 fn listen(call: &mut dyn Call, i: usize) -> i64 {
     let [fd, backlog, ..] = args(call);
     let fd = fd as i32 as i64;
+    if sock(i).state == WS_STOPPED {
+        halt(call);
+    }
     if sock(i).state == WS_NEW {
         let r = bind_to(fd, i, 0, ADDR_ANY);
         if r < 0 {
@@ -412,7 +422,8 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
             return if e != 0 { -(e as i64) } else { -ECONNABORTED };
         }
         // A new attempt, as the kernel makes one on a TCP socket whose connect failed.
-        WS_ABORTED => renew(call, fd, i),
+        WS_ABORTED => reconnect(call, fd, i),
+        WS_STOPPED => halt(call),
         _ => {}
     }
     let s = *sock(i);
@@ -498,17 +509,17 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
     w.finish(r)
 }
 
-/// A new connect on socket `i` (open on `fd`) after its last attempt failed: the real socket
-/// is still connected to its closed hidden end, so a fresh one takes its place, with its
-/// descriptor flags, its real options (timeouts, `SO_RCVLOWAT`), its virtual number and an
-/// explicit `bind`'s address; the socket is new or bound again, as the kernel leaves it. Only
-/// where nothing else holds the real socket (another descriptor, another process, an epoll
-/// set): the run ends unsupported otherwise.
-fn renew(call: &mut dyn Call, fd: i64, i: usize) {
+/// A fresh real socket in place of socket `i`'s (open on `fd`), with its descriptor flags, its
+/// real options (timeouts, `SO_RCVLOWAT`) and its virtual number (`why`: `RENEW_CONNECT`, a
+/// new connect after a failed one, whose real socket is still connected to its closed hidden
+/// end; `RENEW_STOP`, a listener that stops). Only where nothing else holds the real socket
+/// (another descriptor, another process, an epoll set): the run ends unsupported otherwise.
+/// Returns the port and address kind its `bind` gave it (`port | kind << 16`; 0: none).
+fn renew(call: &mut dyn Call, fd: i64, i: usize, why: u64) -> i64 {
     if crate::state::in_vfork_child() {
         halt(call);
     }
-    let bound = sup(Op::WireRenew, [i as u64, fd as u64, 0, 0, 0, 0]);
+    let bound = sup(Op::WireRenew, [i as u64, fd as u64, why, 0, 0, 0]);
     if bound < 0 {
         halt(call);
     }
@@ -562,6 +573,13 @@ fn renew(call: &mut dyn Call, fd: i64, i: usize) {
         crate::sup::host_error(r, nr::DUP3, proto::ctl::HE_SYSCALL);
     }
     unsafe { sc1(nr::CLOSE, new as u64) };
+    bound
+}
+
+/// A new connect on socket `i` after its last attempt failed: a fresh real socket, new or
+/// bound again to an explicit `bind`'s address, as the kernel leaves it.
+fn reconnect(call: &mut dyn Call, fd: i64, i: usize) {
+    let bound = renew(call, fd, i, RENEW_CONNECT);
     let s = sock(i);
     *s = WSock {
         family: s.family,
@@ -891,6 +909,26 @@ pub(super) fn getsockopt(call: &mut dyn Call, i: usize) -> i64 {
     }
 }
 
+/// `shutdown(SHUT_RD|SHUT_RDWR)` of a listener: it stops, as the kernel's `tcp_disconnect`
+/// leaves it (`TCP_CLOSE`): the connections waiting in its backlog are reset, `accept` fails
+/// `EINVAL` (also in threads blocked in it), new connects are refused, and its fresh real
+/// socket polls hung up and writable. A port the guest bound stays bound.
+fn stop(call: &mut dyn Call, i: usize) -> i64 {
+    let fd = call.arg(0) as i32 as i64;
+    let bound = renew(call, fd, i, RENEW_STOP);
+    let s = sock(i);
+    if s.flags & WF_USER_PORT != 0 && bound > 0 {
+        let b = real_bind(fd, bound as u16);
+        if b < 0 {
+            crate::sup::host_error(b, nr::BIND, proto::ctl::HE_SYSCALL);
+        }
+    }
+    let s = sock(i);
+    s.state = WS_STOPPED;
+    io::bump();
+    0
+}
+
 fn shutdown(call: &mut dyn Call, i: usize) -> i64 {
     let s = *sock(i);
     if call.arg(1) > 2 {
@@ -899,7 +937,7 @@ fn shutdown(call: &mut dyn Call, i: usize) -> i64 {
     match s.state {
         WS_CONNECTED => {}
         WS_LISTEN if call.arg(1) == 1 => return 0,
-        WS_LISTEN => halt(call),
+        WS_LISTEN => return stop(call, i),
         _ => return -ENOTCONN,
     }
     let r = raw(call);

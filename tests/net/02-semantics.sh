@@ -2,7 +2,7 @@
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-semantics; mkdir -p "$o"
-for m in names refused addrinuse halfclose eof rst epipe sigpipe-kill rcvtimeo peek waitall sendfile v6; do
+for m in names refused shutlisten addrinuse halfclose eof rst epipe sigpipe-kill rcvtimeo peek waitall sendfile v6; do
     run_ok "$o/$m" 1 -- /guest/sockets "$m"
     echo "$m: ok"
 done
