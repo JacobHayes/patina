@@ -85,6 +85,7 @@ fn ctl_field(off: usize) -> String {
             COMPUTE_TAB_SIZE,
             "compute-point image table",
         ),
+        (SCAN_TAB_OFFSET, SCAN_TAB_SIZE, "instruction scan table"),
     ];
     for (start, len, name) in tables {
         if (start..start + len).contains(&off) {

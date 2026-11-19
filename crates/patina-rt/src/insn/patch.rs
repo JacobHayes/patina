@@ -75,6 +75,11 @@ pub fn lookup(addr: u64) -> Option<Entry> {
     (i < t.n && t.e[i].addr == addr).then(|| t.e[i])
 }
 
+/// Sites this process's table can still take.
+pub fn room() -> usize {
+    CAP - table().n
+}
+
 fn insert(addr: u64, orig: [u8; 4], kind: u8, prot: u8) -> bool {
     let t = table();
     let i = lower(t, addr);

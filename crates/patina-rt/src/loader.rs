@@ -303,6 +303,7 @@ pub fn load(path: &[u8], dyn_base: u64, interp: bool) -> Image {
                             let file = crate::insn::scan::FileId {
                                 fd,
                                 off: p.offset - off_in_page,
+                                as_file: Some(if p.memsz > p.filesz { flen } else { fmap }),
                             };
                             crate::insn::scan::scan_exec(va, fmap, Some(file), true, prot);
                         }

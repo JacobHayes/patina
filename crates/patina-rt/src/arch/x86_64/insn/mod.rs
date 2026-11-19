@@ -8,10 +8,10 @@
 pub mod emulate;
 pub mod tsc;
 
-use crate::insn::bump;
 use crate::insn::scan::{pread, FileId};
+use crate::insn::{bump, REJECTED};
 use crate::state::ctl;
-use proto::insn::{candidates, sweep, SiteKind, Verdict};
+use proto::insn::{candidates, sweep, Site, SiteKind, Verdict};
 
 /// The bytes written over a site: `ud2`, over the two opcode bytes.
 pub const PATCH: &[u8] = &[0x0f, 0x0b];
@@ -34,7 +34,16 @@ const MAX_CANDS: usize = 256;
 
 /// Scan `[va, va + len)` (mapped, readable) and patch the confirmed sites. `writable`: the
 /// pages are writable now; else they are made writable for each patch and given `prot` back.
-pub fn scan_range(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: u64) {
+/// Each verdict is applied (`apply`) as it is made, so later sweeps decode the patched bytes,
+/// and then given to `note` (offset in the mapping, verdict code).
+pub fn scan_range(
+    va: u64,
+    len: u64,
+    file: Option<FileId>,
+    writable: bool,
+    prot: u64,
+    note: &mut dyn FnMut(u64, u8),
+) {
     let code = unsafe { core::slice::from_raw_parts(va as *const u8, len as usize) };
     // Candidates in batches: each batch looks up its sweep starts in the file's symbols once.
     let mut cands = [0usize; MAX_CANDS];
@@ -43,12 +52,12 @@ pub fn scan_range(va: u64, len: u64, file: Option<FileId>, writable: bool, prot:
         cands[n] = o;
         n += 1;
         if n == MAX_CANDS {
-            confirm_batch(code, va, file, writable, prot, &cands);
+            confirm_batch(code, va, file, writable, prot, &cands, note);
             n = 0;
         }
     });
     if n > 0 {
-        confirm_batch(code, va, file, writable, prot, &cands[..n]);
+        confirm_batch(code, va, file, writable, prot, &cands[..n], note);
     }
 }
 
@@ -59,14 +68,13 @@ fn confirm_batch(
     writable: bool,
     prot: u64,
     cands: &[usize],
+    note: &mut dyn FnMut(u64, u8),
 ) {
-    let c = ctl();
     let n = cands.len();
     let mut starts = [va; MAX_CANDS];
     if let Some(f) = file {
         symbol_starts(f, va, code.len() as u64, cands, &mut starts[..n]);
     }
-    let pause = crate::state::config().sched & proto::ctl::SCHED_PAUSE_POINTS != 0;
     // Candidates are in address order: one whose sweep starts where the last one's did
     // resumes that sweep instead of decoding the same bytes again.
     let (mut last_from, mut stop) = (usize::MAX, 0);
@@ -79,25 +87,37 @@ fn confirm_batch(
         };
         let (v, s) = sweep(code, at, cands[i]);
         (last_from, stop) = (from, s);
-        match v {
-            Verdict::Real(s) => match s.kind {
-                Some(k @ (SiteKind::Rdrand | SiteKind::Rdseed | SiteKind::Pause)) => {
-                    if k == SiteKind::Pause && !pause {
-                        continue;
-                    }
-                    let k = k as u8;
-                    if crate::insn::patch::patch(va + s.op as u64, k, writable, prot) {
-                        bump(&c.insn.patched[k as usize], 1);
-                    } else {
-                        bump(&c.insn.table_full, 1);
-                        bump(&c.insn.rejected_sites, 1);
-                    }
-                }
-                Some(SiteKind::Rdpid) => bump(&c.insn.counted_sites, 1),
-                None => {}
-            },
-            Verdict::Inside { .. } | Verdict::Skipped => bump(&c.insn.rejected_sites, 1),
-        }
+        let (off, k) = match v {
+            Verdict::Real(Site {
+                op, kind: Some(k), ..
+            }) => (op, k as u8),
+            Verdict::Real(_) => continue,
+            Verdict::Inside { .. } | Verdict::Skipped => (cands[i], REJECTED),
+        };
+        apply(va, off as u64, k, writable, prot);
+        note(off as u64, k);
+    }
+}
+
+/// The effect of the verdict `k` on the candidate at `va + off`: patch a site (unless it is a
+/// pause hint and pause points are off), count an `rdpid`, count a rejected candidate.
+pub fn apply(va: u64, off: u64, k: u8, writable: bool, prot: u64) {
+    let c = ctl();
+    if k == REJECTED {
+        return bump(&c.insn.rejected_sites, 1);
+    }
+    if k == SiteKind::Rdpid as u8 {
+        return bump(&c.insn.counted_sites, 1);
+    }
+    let pause = crate::state::config().sched & proto::ctl::SCHED_PAUSE_POINTS != 0;
+    if k == SiteKind::Pause as u8 && !pause {
+        return;
+    }
+    if crate::insn::patch::patch(va + off, k, writable, prot) {
+        bump(&c.insn.patched[k as usize], 1);
+    } else {
+        bump(&c.insn.table_full, 1);
+        bump(&c.insn.rejected_sites, 1);
     }
 }
 

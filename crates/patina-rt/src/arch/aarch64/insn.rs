@@ -24,8 +24,8 @@
 //! program's: a site whose saved `PSTATE.BTYPE` is not zero in a page mapped `PROT_BTI` is not
 //! emulated.
 
-use crate::insn::bump;
 use crate::insn::scan::{pread, FileId};
+use crate::insn::{bump, REJECTED};
 use crate::state::{config, ctl};
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use proto::insn::SiteKind;
@@ -91,41 +91,61 @@ pub fn rndr_on() -> bool {
 }
 
 /// Search the executable sections of `[va, va + len)` (mapped, readable; from `file` when
-/// it is a file mapping) and patch the sites.
-pub fn scan_range(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: u64) {
-    let c = ctl();
-    let pause = config().sched & proto::ctl::SCHED_PAUSE_POINTS != 0;
-    let rndr = rndr_on();
+/// it is a file mapping) and patch the sites. Each verdict is applied (`apply`) as it is
+/// made and then given to `note` (offset in the mapping, verdict code).
+pub fn scan_range(
+    va: u64,
+    len: u64,
+    file: Option<FileId>,
+    writable: bool,
+    prot: u64,
+    note: &mut dyn FnMut(u64, u8),
+) {
     let exclusive = config().pmu & proto::ctl::PMU_ON != 0;
-    let search = |a: u64, n: u64| {
+    let mut search = |a: u64, n: u64| {
         let words = unsafe { core::slice::from_raw_parts(a as *const u32, (n / 4) as usize) };
         proto::insn::sites_with(words, a, exclusive, |i, r| {
-            let k = match r {
-                Ok(SiteKind::Pacga) => return bump(&c.insn.counted_sites, 1),
-                Ok(SiteKind::Pause) if !pause => return,
-                Ok(SiteKind::Rndr | SiteKind::Rndrrs) if !rndr => return,
-                Ok(k) => k as u8,
-                // Data in text: a literal load reads the word.
-                Err(_) => return bump(&c.insn.rejected_sites, 1),
-            };
-            if crate::insn::patch::patch(a + 4 * i as u64, k, writable, prot) {
-                bump(&c.insn.patched[k as usize], 1);
-            } else if k == SiteKind::Exclusive as u8 {
-                // Under counters an exclusive access left native fails at random, and one half
-                // of a pair native and the other emulated never succeeds: the run stops.
-                crate::sup::capacity(
-                    proto::ctl::LIMIT_PATCH_SITES,
-                    crate::insn::patch::CAP as u64,
-                );
-            } else {
-                bump(&c.insn.table_full, 1);
-                bump(&c.insn.rejected_sites, 1);
-            }
+            // Err: data in text (a literal load reads the word).
+            let k = r.map_or(REJECTED, |k| k as u8);
+            let off = a + 4 * i as u64 - va;
+            apply(va, off, k, writable, prot);
+            note(off, k);
         });
     };
     match file {
         Some(f) => exec_sections(f, len, |o, n| search(va + o, n)),
         None => search(va, len),
+    }
+}
+
+/// The effect of the verdict `k` on the word at `va + off`: count a rejected word or a
+/// `pacga`, or patch the site (unless its kind is off in this run).
+pub fn apply(va: u64, off: u64, k: u8, writable: bool, prot: u64) {
+    let c = ctl();
+    let pause = config().sched & proto::ctl::SCHED_PAUSE_POINTS != 0;
+    if k == REJECTED {
+        return bump(&c.insn.rejected_sites, 1);
+    }
+    if k == SiteKind::Pacga as u8 {
+        return bump(&c.insn.counted_sites, 1);
+    }
+    if (k == SiteKind::Pause as u8 && !pause)
+        || ((k == SiteKind::Rndr as u8 || k == SiteKind::Rndrrs as u8) && !rndr_on())
+    {
+        return;
+    }
+    if crate::insn::patch::patch(va + off, k, writable, prot) {
+        bump(&c.insn.patched[k as usize], 1);
+    } else if k == SiteKind::Exclusive as u8 {
+        // Under counters an exclusive access left native fails at random, and one half
+        // of a pair native and the other emulated never succeeds: the run stops.
+        crate::sup::capacity(
+            proto::ctl::LIMIT_PATCH_SITES,
+            crate::insn::patch::CAP as u64,
+        );
+    } else {
+        bump(&c.insn.table_full, 1);
+        bump(&c.insn.rejected_sites, 1);
     }
 }
 

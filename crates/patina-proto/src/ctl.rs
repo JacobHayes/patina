@@ -350,12 +350,15 @@ pub const TM_MAIN_EXIT: usize = 3;
 pub const TM_FINISH: usize = 4;
 pub const TM_EXPORTED: usize = 5;
 
+/// Site kinds counted in `InsnCtl::patched` (index 0 unused).
+pub const INSN_KINDS: usize = 6;
+
 /// Instruction-channel counters, summed over every process of the run.
 #[repr(C)]
 pub struct InsnCtl {
     /// Sites patched, by `proto::insn::SiteKind` (x86_64: 1 rdrand, 2 rdseed, 4 pause; arm64:
     /// 1 rndr, 2 rndrrs, 4 pause, 5 exclusive).
-    pub patched: [AtomicU64; 6],
+    pub patched: [AtomicU64; INSN_KINDS],
     /// Emulated executions, by `INSN_*` index.
     pub emulated: [AtomicU64; 8],
     /// Executable mappings whose code the scanner could not see or vouch for: anonymous
@@ -430,9 +433,9 @@ const _: () = assert!(core::mem::size_of::<Ctl>() <= 4096);
 
 pub const CTL_HEADER_SIZE: usize = 4096;
 /// Header, slots, the shared filesystem state (`vfs`), the durability state (`oplog::Dur`),
-/// the network wire's table (`wire::WireTab`), the SDK's site table (`sdk::SdkTab`), then the
-/// compute-point image table (`ComputeTab`).
-pub const CTL_SIZE: usize = COMPUTE_TAB_OFFSET + COMPUTE_TAB_SIZE;
+/// the network wire's table (`wire::WireTab`), the SDK's site table (`sdk::SdkTab`), the
+/// compute-point image table (`ComputeTab`), then the instruction scans (`ScanTab`).
+pub const CTL_SIZE: usize = SCAN_TAB_OFFSET + SCAN_TAB_SIZE;
 
 /// Images listed in `ComputeTab`, and the bytes of each one's path kept (its end).
 pub const IMAGES_MAX: usize = 32;
@@ -517,6 +520,94 @@ impl ComputeTab {
 
     pub fn used(&self) -> &[ComputeImage] {
         &self.images[..(self.n as usize).min(IMAGES_MAX)]
+    }
+}
+
+/// Scans kept, and verdicts kept over all of them.
+pub const SCAN_ENTRIES: usize = 64;
+pub const SCAN_VERDICTS: usize = 16384;
+
+/// What a scan's bytes are a function of: the file (device and inode, on a read-only mount, so
+/// its bytes cannot change during the run), the part of it mapped (file offset, length) and
+/// where the mapping's bytes stop being the file's (`zero`: the loader zeroes the tail of an
+/// image's last file page before its `.bss`; the length when nothing was zeroed).
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ScanKey {
+    pub dev: u64,
+    pub ino: u64,
+    pub off: u64,
+    pub len: u64,
+    pub zero: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct ScanEntry {
+    pub key: ScanKey,
+    /// Its verdicts: `ScanTab::verdicts[first..first + n]`.
+    pub first: u32,
+    pub n: u32,
+}
+
+/// Scans of executable file mappings, shared by the processes of a run, so that a file each
+/// process maps (the program, its libraries) is scanned once. A scan's verdicts are a function
+/// of its key (`ScanKey`); each is an offset in the mapping and an architecture's verdict code
+/// (`(offset << 8) | code`), in the order the scan made them. Written by the runtime under the
+/// turn; a scan that does not fit is not kept (the next process scans again).
+#[repr(C)]
+pub struct ScanTab {
+    pub n: u64,
+    pub used: u64,
+    pub entries: [ScanEntry; SCAN_ENTRIES],
+    pub verdicts: [u64; SCAN_VERDICTS],
+}
+
+pub const SCAN_TAB_OFFSET: usize = (COMPUTE_TAB_OFFSET + COMPUTE_TAB_SIZE + 0xFFF) & !0xFFF;
+pub const SCAN_TAB_SIZE: usize = core::mem::size_of::<ScanTab>();
+
+impl ScanTab {
+    /// # Safety
+    /// `ctl_base` must point at a full control region of `CTL_SIZE` bytes.
+    #[allow(clippy::mut_from_ref)]
+    pub unsafe fn at<'a>(ctl_base: *mut u8) -> &'a mut ScanTab {
+        &mut *(ctl_base.add(SCAN_TAB_OFFSET) as *mut ScanTab)
+    }
+
+    /// The verdicts kept for `key`.
+    pub fn find(&self, key: &ScanKey) -> Option<&[u64]> {
+        let e = self.entries[..(self.n as usize).min(SCAN_ENTRIES)]
+            .iter()
+            .find(|e| e.key == *key)?;
+        self.verdicts
+            .get(e.first as usize..e.first as usize + e.n as usize)
+    }
+
+    /// Write the `k`-th verdict of a scan being made into the free space; false when it does
+    /// not fit (the scan is then not kept).
+    pub fn record(&mut self, k: usize, v: u64) -> bool {
+        match self.verdicts.get_mut(self.used as usize + k) {
+            Some(slot) => {
+                *slot = v;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Keep the `n` verdicts just recorded for `key`, if there is room.
+    pub fn commit(&mut self, key: ScanKey, n: usize) {
+        let used = self.used as usize;
+        if self.n as usize >= SCAN_ENTRIES || used + n > SCAN_VERDICTS {
+            return;
+        }
+        self.entries[self.n as usize] = ScanEntry {
+            key,
+            first: used as u32,
+            n: n as u32,
+        };
+        self.used += n as u64;
+        self.n += 1;
     }
 }
 

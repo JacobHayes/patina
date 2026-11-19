@@ -282,7 +282,10 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
 `rdtsc`, `rdrand` and `rdseed` (arm64: the counter-timer reads, `RNDR` and `RNDRRS`) are
 answered from virtual time and the seed. The counter faults wherever the code came from;
 code generated at run time (a JIT) is not scanned for the others, and such mappings are
-counted in `result.json` (`unscanned_exec_mappings`). `MADV_DONTNEED` over patched code drops
+counted in `result.json` (`unscanned_exec_mappings`). A mapping of a file on a read-only mount
+is scanned once per run: its verdicts are kept in the control region (`proto::ctl::ScanTab`),
+and another process that maps the same bytes the same way applies them, in the same order,
+without scanning (`insn/scan.rs`). `MADV_DONTNEED` over patched code drops
 the patched copy of the page; the runtime patches its sites again.
 
 On arm64 the scan is a compare under a mask of each aligned word of a file's executable

@@ -6,10 +6,11 @@
 //!   every occurrence faults, wherever the code came from).
 //! - `scan` + `patch`: sites in executable file mappings (`rdrand`/`rdseed`; `RNDR`/`RNDRRS`;
 //!   the pause hints) are found when the mapping appears (loader, `mmap`, `mprotect`) and
-//!   overwritten with an undefined instruction; `emulate` answers the SIGILL. Only addresses in
-//!   the side table are emulated: any other undefined instruction is the guest's own and goes to
-//!   its SIGILL disposition. Code that is not a scanned file mapping (anonymous memory made
-//!   executable) is counted, not scanned.
+//!   overwritten with an undefined instruction (a read-only file's mapping is scanned once per
+//!   run: its verdicts are kept for the run's other processes, `scan`); `emulate` answers the
+//!   SIGILL. Only addresses in the side table are emulated: any other undefined instruction is
+//!   the guest's own and goes to its SIGILL disposition. Code that is not a scanned file
+//!   mapping (anonymous memory made executable) is counted, not scanned.
 //!
 //! What differs by architecture (the rule, the emulators, the record codes) is
 //! `crate::arch::insn`; the mappings, the side table and the write are here.
@@ -25,6 +26,10 @@ pub use crate::arch::insn::{emulate, tsc};
 use crate::arch::Frame;
 use crate::state::ctl;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+/// The verdict code of a candidate the rule refused (inside another instruction, skipped by
+/// the sweep, data in text); the others are the site kinds (`proto::insn::SiteKind`).
+pub const REJECTED: u8 = 0xff;
 
 /// Add to a counter (only the thread holding the turn writes).
 pub fn bump(c: &AtomicU64, n: u64) {
