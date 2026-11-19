@@ -43,8 +43,11 @@ struct TimerFd {
 pub struct Io {
     waiters: BTreeSet<usize>,
     info: BTreeMap<usize, ParkInfo>,
-    /// Keyed by the eventfd's virtual inode number (the same in every process).
+    /// Keyed by a number handed out in creation order (every eventfd has the same inode, so
+    /// the file names no timer); the runtimes of every process and image use the key.
     timers: BTreeMap<u64, TimerFd>,
+    /// The last key handed out.
+    last_key: u64,
 }
 
 fn bump(ctl: &Ctl) {
@@ -171,20 +174,16 @@ impl Io {
                     Ok(fd) => fd,
                     Err(e) => return -(e.raw_os_error().unwrap_or(libc::EIO) as i64),
                 };
-                let holders = BTreeSet::from([pid]);
-                if let Some(old) = self.timers.insert(
-                    key,
-                    TimerFd {
-                        fd,
-                        next: None,
-                        interval: 0,
-                        event: None,
-                        holders,
-                    },
-                ) {
-                    release(sched, old);
-                }
-                0
+                self.last_key += 1;
+                let t = TimerFd {
+                    fd,
+                    next: None,
+                    interval: 0,
+                    event: None,
+                    holders: BTreeSet::from([pid]),
+                };
+                self.timers.insert(self.last_key, t);
+                self.last_key as i64
             }
             TFD_ARM => {
                 let Some(t) = self.timers.get_mut(&key) else {

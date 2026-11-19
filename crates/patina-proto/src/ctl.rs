@@ -755,9 +755,9 @@ pub enum Op {
     SigFd = 23,
     /// System V shared memory: args[0] = `SHMOP_*`, see below.
     Shm = 24,
-    /// timerfd. args[0] = sub-operation: `TFD_CREATE` [_, key, guest fd, clock],
-    /// `TFD_ARM` [_, key, first expiry ns (vclock) or 0 to disarm, interval ns],
-    /// `TFD_RELEASE` [_, key]. Reply 0 or -errno.
+    /// timerfd. args[0] = sub-operation: `TFD_CREATE` [_, 0, guest fd, clock] (reply: the
+    /// timer's key, > 0), `TFD_ARM` [_, key, first expiry ns (vclock) or 0 to disarm,
+    /// interval ns], `TFD_RELEASE` [_, key]. Reply 0 or -errno.
     TimerFdSet = 40,
     /// timerfd. args: [key, 0 = next expiry (vclock ns, 0 if disarmed) | 1 = interval ns].
     TimerFdGet = 41,

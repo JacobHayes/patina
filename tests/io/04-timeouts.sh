@@ -1,11 +1,12 @@
 # 4. Timeouts in virtual time: poll and epoll_wait with 10 s on a silent pipe return 0 after
 #    >= 10 virtual seconds; a 1 s periodic timerfd read 100 times reports 100 expirations at
-#    exact virtual times; SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s. Together 122 virtual
-#    seconds, eight times this script's budget: a real wait fails it (no wall time is read).
+#    exact virtual times; two timerfds armed at once fire at their own times (1 s, 3 s);
+#    SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s. Together 125 virtual seconds, eight times
+#    this script's budget: a real wait fails it (no wall time is read).
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-timeouts; mkdir -p "$o"
-for m in poll epoll timerfd rcvtimeo; do
+for m in poll epoll timerfd timerfd2 rcvtimeo; do
     run_ok "$o/$m" 1 -- /guest/timeouts "$m"
     echo "$m: wall_ms $(field "$o/$m/result.json" wall_ms); $(head -1 "$o/$m/inc-0/stdout")"
 done

@@ -2,8 +2,8 @@
 //! (non-semaphore mode, so `read` returns and resets an 8-byte count exactly as a timerfd
 //! does). The supervisor holds a duplicate, keeps the timer in its virtual-time event queue
 //! and writes the expiry count at expiry. settime/gettime are answered from supervisor
-//! state. Timers are keyed by the eventfd's virtual inode number, so every process and
-//! every duplicate names the same timer.
+//! state. The supervisor hands out each timer's key at creation (every eventfd has the same
+//! inode, so the file cannot name its timer); `fork` copies the keys with the memory.
 
 use super::io;
 use super::*;
@@ -90,14 +90,12 @@ fn create(clock: u64, flags: u64) -> i64 {
     if fd < 0 {
         return fd;
     }
-    let Some(key) = crate::vino::of_fd(fd) else {
-        return -e::EBADF;
-    };
-    let r = crate::sup::call_sup(Op::TimerFdSet, [TFD_CREATE, key, fd as u64, clock, 0, 0]).ret;
-    if r < 0 {
+    let key = crate::sup::call_sup(Op::TimerFdSet, [TFD_CREATE, 0, fd as u64, clock, 0, 0]).ret;
+    if key < 0 {
         unsafe { sc1(nr::CLOSE, fd as u64) };
-        return r;
+        return key;
     }
+    let key = key as u64;
     let Some(i) = idx(fd) else { return fd };
     marks().key[i] = key;
     marks().clock[i] = clock as u8;

@@ -43,6 +43,23 @@ int main(int argc, char **argv) {
         struct itimerspec cur;
         CHECK(timerfd_gettime(t, &cur) == 0, "gettime");
         printf("gettime interval %ld.%09ld\n", (long)cur.it_interval.tv_sec, cur.it_interval.tv_nsec);
+    } else if (strcmp(m, "timerfd2") == 0) {
+        // Two timers at once: each keeps its own setting and fires at its own time.
+        int a = timerfd_create(CLOCK_MONOTONIC, 0), b = timerfd_create(CLOCK_MONOTONIC, 0);
+        CHECK(a >= 0 && b >= 0, "timerfd_create");
+        struct itimerspec ia = {{0, 0}, {1, 0}}, ib = {{0, 0}, {3, 0}}, cur;
+        t0 = now_ns();
+        CHECK(timerfd_settime(a, 0, &ia, NULL) == 0 && timerfd_settime(b, 0, &ib, NULL) == 0, "settime");
+        CHECK(timerfd_gettime(a, &cur) == 0 && cur.it_value.tv_sec == 0 && cur.it_value.tv_nsec > 0, "gettime a");
+        CHECK(timerfd_gettime(b, &cur) == 0 && cur.it_value.tv_sec == 2, "gettime b");
+        uint64_t va, vb;
+        CHECK(read(a, &va, 8) == 8 && va == 1, "read a");
+        uint64_t da = now_ns() - t0;
+        CHECK(read(b, &vb, 8) == 8 && vb == 1, "read b");
+        uint64_t db = now_ns() - t0;
+        printf("timerfd2 a after %llu s, b after %llu s\n", (unsigned long long)(da / 1000000000ull),
+               (unsigned long long)(db / 1000000000ull));
+        CHECK(da >= 1000000000ull && db >= 3000000000ull, "expiry times");
     } else if (strcmp(m, "rcvtimeo") == 0) {
         int sv[2];
         CHECK(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
