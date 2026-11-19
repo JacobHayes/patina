@@ -498,6 +498,8 @@ impl Sup {
             Some(Op::VforkStart) => self.vfork_start(idx, a),
             Some(Op::Exec) => {
                 self.execed = true;
+                let pid = self.sched.entries[idx].pid;
+                self.io.timers_exec(&mut self.sched, pid);
                 self.exec(idx, a)
             }
             Some(Op::WaitPark) => self.wait_park(idx, a),

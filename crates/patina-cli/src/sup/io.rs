@@ -255,6 +255,36 @@ impl Io {
         }
     }
 
+    /// Process `pid` is about to `execve`: it stops holding the timers that no descriptor
+    /// the exec keeps (one without close-on-exec) names. Its descriptors are read from the
+    /// kernel, not from the runtime's marks, which a `vfork` child shares with its parent
+    /// (a `posix_spawn` file action moves descriptors without them). A process with no timer
+    /// costs nothing here.
+    pub fn timers_exec(&mut self, sched: &mut Sched, pid: i32) {
+        if !self.timers.values().any(|t| t.holders.contains(&pid)) {
+            return;
+        }
+        let kept = kept_fds(pid);
+        let me = std::process::id() as u64;
+        let gone: Vec<u64> = self
+            .timers
+            .iter_mut()
+            .filter_map(|(k, t)| {
+                let named = kept.iter().any(|&fd| unsafe {
+                    libc::syscall(libc::SYS_kcmp, me, pid, KCMP_FILE, t.fd, fd)
+                } == 0);
+                (t.holders.contains(&pid)
+                    && !named
+                    && t.holders.remove(&pid)
+                    && t.holders.is_empty())
+                .then_some(*k)
+            })
+            .collect();
+        for k in gone {
+            release(sched, self.timers.remove(&k).unwrap());
+        }
+    }
+
     /// `TimerFdGet`: next expiry (0 when disarmed), interval or clock.
     pub fn timer_get(&self, a: [u64; 6]) -> i64 {
         let Some(t) = self.timers.get(&a[0]) else {
@@ -298,6 +328,34 @@ impl Io {
 
 /// `kcmp` type: the two descriptors name one open file.
 const KCMP_FILE: u64 = 0;
+
+/// The guest descriptors of `pid` an `execve` keeps: those without close-on-exec, below the
+/// hidden ones. Only membership is used, so the order of the listing does not matter.
+fn kept_fds(pid: i32) -> Vec<i32> {
+    let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        return vec![];
+    };
+    let mut kept = vec![];
+    for e in dir.flatten() {
+        let Some(fd) = e.file_name().to_str().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        if fd >= proto::layout::FD_HIDDEN_MIN {
+            continue;
+        }
+        let Ok(info) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
+            continue;
+        };
+        let flags = info
+            .lines()
+            .find_map(|l| l.strip_prefix("flags:"))
+            .and_then(|v| u64::from_str_radix(v.trim(), 8).ok());
+        if flags.is_some_and(|f| f & libc::O_CLOEXEC as u64 == 0) {
+            kept.push(fd);
+        }
+    }
+    kept
+}
 
 fn release(sched: &mut Sched, t: TimerFd) {
     if let Some(id) = t.event {

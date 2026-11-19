@@ -196,37 +196,6 @@ pub fn handle(call: &mut dyn Call) -> i64 {
     }
 }
 
-/// `execve`: the timers named only by close-on-exec descriptors are released for this
-/// process; the others stay held, armed or not, and the new image finds them (`found`).
-pub fn before_exec() {
-    let m = marks();
-    let mut keep: [u64; 64] = [0; 64];
-    let mut nkeep = 0;
-    let mut drop: [u64; 64] = [0; 64];
-    let mut ndrop = 0;
-    for fd in 0..N {
-        let key = m.key[fd];
-        if key == 0 {
-            continue;
-        }
-        let fl = unsafe { sc2(nr::FCNTL, fd as u64, 1) };
-        let (set, n) = if fl >= 0 && fl & 1 == 0 {
-            (&mut keep, &mut nkeep)
-        } else {
-            (&mut drop, &mut ndrop)
-        };
-        if !set[..*n].contains(&key) && *n < set.len() {
-            set[*n] = key;
-            *n += 1;
-        }
-    }
-    for &key in &drop[..ndrop] {
-        if !keep[..nkeep].contains(&key) {
-            crate::sup::call_sup(Op::TimerFdSet, [TFD_RELEASE, key, 0, 0, 0, 0]);
-        }
-    }
-}
-
 /// (New image) `fd`, an eventfd the previous image left open, is a timerfd when the
 /// supervisor has a timer of this process on the same file.
 pub fn found(fd: i64) {

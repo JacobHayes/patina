@@ -1,4 +1,5 @@
-/* Timeouts in virtual time. argv[1] = poll | epoll | timerfd | timerfd2 | timerfd-exec | rcvtimeo. */
+/* Timeouts in virtual time. argv[1] = poll | epoll | timerfd | timerfd2 | timerfd-exec |
+ * timerfd-exec-many | rcvtimeo. */
 #include "common.h"
 #include <poll.h>
 #include <spawn.h>
@@ -57,6 +58,13 @@ int main(int argc, char **argv) {
     const char *m = argc > 1 ? argv[1] : "poll";
     if (strcmp(m, "timerfd-exec-child") == 0 && argc == 6)
         return exec_child(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]));
+    if (strcmp(m, "timerfd-many-child") == 0 && argc == 3) {
+        struct itimerspec cur;
+        CHECK(timerfd_gettime(atoi(argv[2]), &cur) == 0 && cur.it_interval.tv_sec == 1,
+              "the kept timer after exec");
+        printf("timerfd-exec-many ok\n");
+        return 0;
+    }
     if (strcmp(m, "timerfd-spawned") == 0 && argc == 3) {
         struct itimerspec cur;
         int t = atoi(argv[2]);
@@ -131,6 +139,29 @@ int main(int argc, char **argv) {
         int fds[4] = {t1, t2, t3, t4};
         for (int i = 0; i < 4; i++) snprintf(a[i], sizeof a[i], "%d", fds[i]);
         execl("/proc/self/exe", "timeouts", "timerfd-exec-child", a[0], a[1], a[2], a[3], (char *)NULL);
+        CHECK(0, "execl");
+    } else if (strcmp(m, "timerfd-exec-many") == 0) {
+        // 64 timers kept open, then one opened close-on-exec with a duplicate that is not:
+        // the duplicate keeps it across execve. And a spawned program whose file actions
+        // move a close-on-exec timerfd to another number gets it there.
+        struct itimerspec per = {{1, 0}, {1, 0}};
+        for (int i = 0; i < 64; i++) CHECK(timerfd_create(CLOCK_MONOTONIC, 0) >= 0, "timerfd_create");
+        int x = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+        int y = dup(x);
+        int z = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+        CHECK(x >= 0 && y >= 0 && z >= 0, "timerfd_create");
+        CHECK(timerfd_settime(x, 0, &per, NULL) == 0 && timerfd_settime(z, 0, &per, NULL) == 0, "settime");
+        posix_spawn_file_actions_t fa;
+        CHECK(posix_spawn_file_actions_init(&fa) == 0 && posix_spawn_file_actions_adddup2(&fa, z, 200) == 0,
+              "file actions");
+        char *sargs[] = {"/proc/self/exe", "timerfd-spawned", "200", NULL};
+        pid_t pid;
+        int st;
+        CHECK(posix_spawn(&pid, "/proc/self/exe", &fa, NULL, sargs, environ) == 0, "posix_spawn");
+        CHECK(waitpid(pid, &st, 0) == pid && WIFEXITED(st) && WEXITSTATUS(st) == 0, "spawned image");
+        char a[16];
+        snprintf(a, sizeof a, "%d", y);
+        execl("/proc/self/exe", "timeouts", "timerfd-many-child", a, (char *)NULL);
         CHECK(0, "execl");
     } else if (strcmp(m, "rcvtimeo") == 0) {
         int sv[2];

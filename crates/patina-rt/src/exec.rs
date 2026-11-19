@@ -628,7 +628,6 @@ pub fn execve(call: &mut dyn Call) -> Action {
     if crate::sys::signalfd::before_exec().is_err() {
         return stop_here(call);
     }
-    crate::sys::timerfd::before_exec();
     // Stores through shared `/work` mappings of this image are recorded now, as at exit.
     crate::oplog::on_exit();
     set_class(call, Class::Virt);
