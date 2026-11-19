@@ -292,14 +292,14 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
         crate::sup::containment(proto::ctl::CONTAIN_SYSCALL, insn, insn, false);
     }
     crate::pmu::enter(ts, Some(frame));
-    crate::spin::enter(ts, Some(frame));
+    crate::spin::enter(ts, Some(frame), true);
     crate::compute::enter(ts);
     if frame.nr() == proto::sdk::SYSCALL
         && frame.args()[0] == proto::sdk::OP_COMPUTE_POINT
         && crate::compute::active()
     {
         // Its events are already charged: no trap charge, no trap record (`compute::point`).
-        crate::compute::point(ts, frame, frame.pc());
+        crate::compute::point(ts, frame, frame.pc(), false);
         frame.set_ret(0);
         crate::sys::sig::trap_exit(frame, None);
         check_real_mask(frame_of(uc));

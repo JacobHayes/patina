@@ -1750,38 +1750,57 @@ patina sweep --seeds 1..20 --preempt points --fault compute-gap=2..64 --out pati
 ```
 
 ```text
-new: failure exit: exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/race/seed-2)
+new: failure exit: exit 1   (seed 8: patina replay /tmp/src/patina/patina-out/race/seed-8)
 sweep: replaying the first seed of 1 finding
 sweep: 7.2 MiB kept in /tmp/src/patina/patina-out/race
-patina sweep: 20 runs, 9 findings in 1 group, 11 ok   (0.4s, 8 jobs)
-outcomes: failure 9, ok 11
-load-time points: 55523 taken in 20 runs; 1 of 1 files planned
+patina sweep: 20 runs, 6 findings in 1 group, 14 ok   (0.4s, 8 jobs)
+outcomes: failure 6, ok 14
+load-time points: 57217 taken in 20 runs; 1 of 1 files planned
 
 failure exit: exit 1
-  9 of 20 runs   first: seed 2   replayed: identical
-  rerun:  patina run --seed 2 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
-  replay: patina replay /tmp/src/patina/patina-out/race/seed-2
+  6 of 20 runs   first: seed 8   replayed: identical
+  rerun:  patina run --seed 8 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
+  replay: patina replay /tmp/src/patina/patina-out/race/seed-8
 ```
 
 `patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
 share of its sites patched and of its text left dark, and anything left without points.
 `result.json`'s `rewrite` has the counts (`points`, `applied`, `dropped`, `unplanned`, `cpuid`,
-`interior`)
-and one entry per file the program mapped executable (`images`: `path`, `sha256`, `status`,
-and for a planned file `sites`, `patches`, `covered_pct`, `back_edges_covered_pct`,
-`dark_pct`, `cpuid_patched`, `cpuid_unpatched`, `cache`, `rewrite_ms`).
+`interior`; the walks' counts, below) and one entry per file the program mapped executable
+(`images`: `path`, `sha256`, `status`, and for a planned file `sites`, `patches`,
+`covered_pct`, `back_edges_covered_pct`, `dark_pct`, `cpuid_patched`, `cpuid_unpatched`,
+`cache`, `rewrite_ms`).
 
-**Which to use.**
+**Walks.** A window between two plain memory accesses with no branch, call or atomic between
+them (a counter loaded, changed and stored) holds no point. So under `--preempt points` a
+switch is sometimes taken a few instructions past its point: 2 switches in W are taken a drawn
+1 to W instructions on, the program single-stepped there, the rest at the point. W is drawn
+per seed, log-uniformly from 4 to 512 by default (`--fault compute-walk=W` or `A..B`; `0`
+takes every switch at its point). A walk ends, and its switch is not taken, where the
+program enters Patina (a system call, a fault, a spin hint); it never stops inside Patina's
+copied code, and switches before an x86_64 `pushf` or an arm64 exclusive load. The run's
+`load-time points:` line counts the switches taken after a walk (`result.json`: `walks`,
+`walk_steps`, `walks_cut`, and `walk_max`, the seed's W). A walk costs about one single-step
+per switch, whatever W is. On arm64 walks write breakpoints through `/proc/self/mem`; a host
+that refuses that ends the run `infra` (or set `compute-walk=0`).
 
-| | Rebuilt code (compute points) | `--preempt points` | `--preempt branches` |
+The lost update of `tests/guests/rewrite/races.c lms` (a load and a store through a pointer, in
+a loop) is found on about 1 in 10 seeds at the default gap with walks and on none without, and
+on half of them at `compute-gap=2..64`. One further from a point is found rarely:
+`examples/stats-c`'s lost update on 1 or 2 of 200 seeds. Rebuilt code puts a point at every
+load and store.
+
+**What each reaches, and when to use it.**
+
+| Mechanism | Threads switch | Reaches | Use it |
 |---|---|---|---|
-| Needs | the source and a rebuild | an x86_64 or arm64 host | an AMD Zen 5 or Arm Neoverse N2 PMU and `CAP_PERFMON` |
-| Covers | the rebuilt code: every edge, load and store | every file the program maps: libc, the Go runtime and prebuilt libraries too, at branches, calls and atomics | everything, every branch |
-| Seeds | repeat on any host | repeat on any host | repeat only on that CPU family |
-
-A race between two plain memory accesses with no branch, call or atomic between them (the
-lost update of `examples/stats-c`: a load and a store of a counter) has no point in its
-window: `--preempt points` does not find it (20 of 20 `ok`); a rebuild does.
+| System calls (always) | at every system call | races between calls: locks, files, sockets, channels | always on |
+| Spin hints and probes (always) | at `pause` (arm64 `yield`, `isb`, `wfe`, `wfi`), and in a loop found spinning after 20 ms of CPU | spin-waits hand over instead of stalling | always on |
+| `--preempt points` | before backward branches, backward calls, indirect jumps and atomics in every file the program maps | a window with one of those in it: check-then-act on atomics, loops, retries | stock programs and libraries you cannot rebuild, on any x86_64 or arm64 host |
+| Walks (with `--preempt points`) | 1 to W instructions past such a point | straight-line windows near a point: a load, a change and a store | on with points; raise W, or lower the gap, for a window further from a point |
+| `--preempt branches` | after a seed-chosen number of branches | every branch, in every file | on an AMD Zen 5 or Arm Neoverse N2 PMU with `CAP_PERFMON`; seeds repeat only on that CPU family |
+| Rebuilt code (compute points) | at every edge, load and store (Go: comparison) | every window in the rebuilt code, between any two accesses | code you can rebuild: the densest, and its seeds repeat on any host |
+| Python under `python3 -m patina` | between any two lines | races between Python lines | Python programs |
 
 **The plans.** A plan is made on the host from a file's bytes and the Patina build alone, so
 it is the same on every host; each is checked by an independent verifier before it is used,

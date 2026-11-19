@@ -228,6 +228,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 rewrite: planner.as_ref().map(|p| crate::result::RewriteReport {
                     images: p.images(),
                     plans,
+                    walk: o.plan.compute_walk,
                 }),
             });
         }

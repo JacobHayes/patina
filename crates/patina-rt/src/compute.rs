@@ -29,7 +29,7 @@
 use crate::arch::Frame;
 use crate::state::{config, ctl, proc, ThreadState};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE};
+use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE, REASON_SWITCH};
 use proto::layout::{COMPUTE_CELL, PAGE};
 
 /// The cell's address: with `--preempt points` the plans' (`proto::plan::CELL`, mapped at the
@@ -340,10 +340,11 @@ fn maps_hit(line: &[u8], pc: u64) -> Option<(u64, u64, &[u8])> {
 
 /// The trap of `COMPUTE_POINT` or of a plan's trampoline (after `enter`), with the program's
 /// registers in `frame`, at `pc` as the program sees it (`plans::shown`). Returns to the trap
-/// entry, which leaves through the normal trap exit.
-pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64) {
+/// entry, which leaves through the normal trap exit. At a plan's point (`walk`) a switch first
+/// walks a drawn number of instructions on (`proto::compute::walk`, `spin::walk`) and is taken
+/// there (`switch`).
+pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
     let p = &mut proc().compute;
-    let c = ctl();
     let reason = match p.mode {
         // The cell ran out by the runtime's own count (a stray store that zeroed it counts the
         // same): consult the supervisor, for the reason `exit` armed it with.
@@ -354,6 +355,29 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64) {
         // `exit` rewrites the cell on the way out.
         _ => return,
     };
+    if walk && reason == REASON_SWITCH && ts.vfork == 0 {
+        let c = ctl();
+        let key = proto::compute::key(c.seq.load(Relaxed), ts.slot, ts.compute_segs);
+        let n = proto::compute::walk(c.config.seed, c.config.compute_walk, key);
+        if n > 0 {
+            return crate::spin::walk(ts, n, [p.armed as u64, p.draw]);
+        }
+    }
+    switch(ts, frame, pc, reason, [p.armed as u64, p.draw], 0);
+}
+
+/// Take a compute point's stop at `pc` (as the program sees it): one `Preempt` record (`seg`:
+/// the segment's armed value and drawn gap; `walked`: the instructions walked past the site)
+/// and a yield.
+pub fn switch(
+    ts: &mut ThreadState,
+    frame: &Frame,
+    pc: u64,
+    reason: u64,
+    seg: [u64; 2],
+    walked: u64,
+) {
+    let c = ctl();
     ts.seq = c.seq.load(Relaxed) + 1;
     c.seq.store(ts.seq, Relaxed);
     if reason == REASON_DEADLINE {
@@ -372,7 +396,7 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64) {
         kind: proto::RecKind::Preempt as u8,
         class: 0,
         nr: PREEMPT_NR,
-        args: [pc, p.armed as u64, reason, p.events, p.draw, 0],
+        args: [pc, seg[0], reason, proc().compute.events, seg[1], walked],
         ret: 0,
         out_hash: proto::rec::hash_bytes(0, bytes),
         in_hash: 0,

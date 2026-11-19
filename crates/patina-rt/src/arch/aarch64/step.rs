@@ -157,6 +157,16 @@ pub fn step_arm(st: &mut Stepper, frame: &mut Frame, point: u64) -> Arm {
     Arm::Armed
 }
 
+/// A system call saves no flags in a register on arm64.
+#[inline(always)]
+pub fn syscall_flags(_frame: &mut Frame) {}
+
+/// Whether a walk stops before the instruction at `pc`: an exclusive load (a pair stepped
+/// could fail natively and retry, a different count by run).
+pub fn stop_before(pc: u64) -> bool {
+    crate::spin::peek(pc).is_some_and(proto::step::is_load_exclusive)
+}
+
 /// Take the step's breakpoints out (the step ended, or the probe did).
 pub fn step_disarm(st: &mut Stepper, _frame: &mut Frame) {
     for i in (0..st.n as usize).rev() {

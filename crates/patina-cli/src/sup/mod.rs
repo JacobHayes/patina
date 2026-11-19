@@ -674,6 +674,16 @@ impl Sup {
                         &format!("in {}", proto::table::name(nr)),
                     ));
                 }
+                if code == HE_WALK {
+                    self.finish(Verdict::new(
+                        "infra",
+                        format!(
+                            "--preempt points: this host does not let a walk single-step (errno {}, {}); --fault compute-walk=0 takes every switch at its point",
+                            -(errno as i64),
+                            if nr == 0 { "/proc/self/mem" } else { proto::table::name(nr) }
+                        ),
+                    ));
+                }
                 if code == HE_OUTSIDE_SIGNAL {
                     self.finish(Verdict::new(
                         "infra",

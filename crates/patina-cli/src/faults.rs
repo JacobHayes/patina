@@ -35,6 +35,9 @@ pub struct Plan {
     pub sdk: proto::sdk::SdkCfg,
     /// Compute points: the run's mean gap in events (`compute-gap`; 0: no compute switches).
     pub compute_gap: u64,
+    /// Load-time points: the longest walk of a switch past its site, in instructions
+    /// (`compute-walk`; 0: switches are taken at their sites).
+    pub compute_walk: u64,
     /// The resolved settings, in key order, as `result.json` and `run.json` show them: a
     /// number, a string, or `"off"` for a class `swarm` turned off.
     pub resolved: Vec<(String, Value)>,
@@ -62,7 +65,8 @@ enum Val {
     /// A position (the N-th call): may be a range, which searches positions across seeds;
     /// never swarmed.
     At,
-    /// `compute-gap`: `A..B` draws log-uniformly, not uniformly; never swarmed.
+    /// `compute-gap`, `compute-walk`: `A..B` draws log-uniformly, not uniformly; never
+    /// swarmed.
     Gap,
     /// A window `START+LENGTH[:PORT]` in milliseconds, START and LENGTH each a number or a
     /// range resolved like any other (LENGTH by the draw of `KEY:length`); a class `swarm`
@@ -264,6 +268,12 @@ pub const KEYS: &[Key] = &[
         "rebuilt code (compute points): mean events between switches, drawn log-uniformly per seed from A..B; 0 turns switches off [default: 64..65536]",
     ),
     key(
+        "compute-walk",
+        "W|A..B",
+        Val::Gap,
+        "--preempt points: 2 switches in W (in 4 when W is below 4) are taken 1..W instructions (uniform) past their point, single-stepped, the rest at it; W drawn log-uniformly per seed from A..B; 0 takes every switch at its point [default: 4..512]",
+    ),
+    key(
         "fs-error-at",
         "CLASS:N",
         Val::At,
@@ -381,10 +391,14 @@ fn resolve_num(seed: u64, k: &str, v: &str, max: u64) -> Res<u64> {
     Ok(a + plan_draw(seed, k) % (b - a + 1))
 }
 
-/// `compute-gap=G|A..B`: the run's mean gap, a range drawn log-uniformly by the key's own
-/// plan draw (`proto::compute::mean_gap`). `0` turns compute switches off.
+/// `compute-gap=G|A..B` (the run's mean gap) and `compute-walk=W|A..B` (its longest walk): a
+/// range drawn log-uniformly by the key's own plan draw (`proto::compute::mean_gap`). `0`
+/// turns compute switches, or walks, off.
 fn resolve_gap(seed: u64, k: &str, v: &str) -> Res<u64> {
-    let max = proto::compute::GAP_MAX;
+    let max = match k {
+        "compute-walk" => proto::compute::WALK_MAX,
+        _ => proto::compute::GAP_MAX,
+    };
     let (a, b) = match v.split_once("..") {
         Some((a, b)) => (num(k, a)?, num(k, b)?),
         None => {
@@ -400,7 +414,7 @@ fn resolve_gap(seed: u64, k: &str, v: &str) -> Res<u64> {
     }
     if a == 0 && b != 0 {
         return Err(format!(
-            "--fault {k}={v}: a range starts at 1 (0 alone turns switches off)"
+            "--fault {k}={v}: a range starts at 1 (0 alone turns it off)"
         ));
     }
     Ok(proto::compute::mean_gap(plan_draw(seed, k), a, b))
@@ -493,6 +507,7 @@ pub fn resolve(
     // The default is not part of the plan: a run that does not name the key resolves it the
     // same way every time, and a stock program's plan reads as before.
     let (lo, hi) = proto::compute::GAP_DEFAULT;
+    let (wlo, whi) = proto::compute::WALK_DEFAULT;
     let mut plan = Plan {
         faults: Default::default(),
         faults_in_recovery: true,
@@ -501,6 +516,7 @@ pub fn resolve(
         net: Default::default(),
         sdk: Default::default(),
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
+        compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
         resolved: vec![],
     };
     if swarm {
@@ -518,8 +534,12 @@ pub fn resolve(
             Val::Window => json!(resolve_window(seed, k, v)?),
             Val::At => json!(resolve_at(seed, k, v)?),
             Val::Gap => {
-                plan.compute_gap = resolve_gap(seed, k, v)?;
-                plan.resolved.push((k.clone(), json!(plan.compute_gap)));
+                let g = resolve_gap(seed, k, v)?;
+                match k.as_str() {
+                    "compute-walk" => plan.compute_walk = g,
+                    _ => plan.compute_gap = g,
+                }
+                plan.resolved.push((k.clone(), json!(g)));
                 continue;
             }
         };

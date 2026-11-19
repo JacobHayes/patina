@@ -21,8 +21,8 @@ pub const REFILL: u64 = 1 << 22;
 
 /// `Rec::nr` of a compute point's `Preempt` record (1 is a counter preemption, 2 a spin
 /// point): args [rip, the value the cell was armed with, reason, events of this process so
-/// far, the segment's drawn gap (0: switches off), 0]; `out_hash` hashes the general
-/// registers at the point.
+/// far, the segment's drawn gap (0: switches off), the instructions a load-time switch walked
+/// past its site]; `out_hash` hashes the general registers where it was taken.
 pub const PREEMPT_NR: u32 = 3;
 /// Reasons in a compute point's record: the drawn gap ran out (a switch), a deadline or the
 /// time limit fell due, or the longest run (`REFILL`) ran out.
@@ -63,6 +63,27 @@ pub fn gap(seed: u64, mean: u64, key: u64) -> Option<u64> {
     }
     let m = mean.min(GAP_MAX);
     Some(1 + draw(seed, Stream::Compute, key) % (2 * m - 1))
+}
+
+/// The longest walk's range when the run gives none (`--fault compute-walk`).
+pub const WALK_DEFAULT: (u64, u64) = (4, 512);
+/// The longest walk a run may ask for.
+pub const WALK_MAX: u64 = 1 << 16;
+
+/// The instructions a switch walks on before it is taken (`--preempt points`), for the
+/// switch keyed by `key`, `max` the run's longest walk: 2 switches in `max` (half of them when
+/// `max` is below 4) walk uniformly `1..=max`, the rest none. So a run steps about one
+/// instruction per switch whatever `max` is: the walk's cost is the switches', not its reach.
+pub fn walk(seed: u64, max: u64, key: u64) -> u64 {
+    let m = max.min(WALK_MAX);
+    if m == 0 {
+        return 0;
+    }
+    let d = draw(seed, Stream::Walk, key);
+    match d % m.max(4) {
+        0 | 1 => 1 + (d >> 32) % m,
+        _ => 0,
+    }
 }
 
 /// What the cell is armed with on a return to program code, and why it will run out: the

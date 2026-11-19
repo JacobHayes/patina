@@ -57,13 +57,15 @@ use crate::arch::Frame;
 use crate::raw::*;
 use crate::state::{config, ctl, thread, ThreadState};
 use crate::sys::sig::SigInfo;
-use core::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering::Relaxed};
 use proto::ctl::{Op, SCHED_SPIN_PROBE};
 use proto::layout::*;
 use proto::spin::{Checked, Step, Trace, TRACE_MAX};
 
 const PH_NONE: u64 = 0;
 const PH_TRACE: u64 = 1;
+/// A load-time point's switch walking on (`walk`).
+const PH_WALK: u64 = 2;
 
 const SI_TKILL: i32 = -6;
 
@@ -103,6 +105,12 @@ pub struct Spin {
     pub anchored: u8,
     /// The step in progress (`arch::step`).
     pub st: st::Stepper,
+    /// A walk: the program's instructions left and walked, whether the step in progress is
+    /// in a trampoline (not counted), and its segment's armed value and drawn gap.
+    pub left: u64,
+    pub walked: u64,
+    pub in_tramp: u8,
+    pub seg: [u64; 2],
 }
 
 impl Spin {
@@ -119,6 +127,10 @@ impl Spin {
             over: 0,
             anchored: 0,
             st: st::Stepper::new(),
+            left: 0,
+            walked: 0,
+            in_tramp: 0,
+            seg: [0; 2],
         }
     }
 }
@@ -141,6 +153,10 @@ static PAGEMAP: AtomicI32 = AtomicI32::new(-1);
 static TRACK: AtomicI32 = AtomicI32::new(-1);
 /// `/proc/self/maps`, for `PROCMAP_QUERY` (`vma`).
 static MAPS: AtomicI32 = AtomicI32::new(-1);
+/// The process `MEM` and `MAPS` were opened in for walks alone (`step_ready`).
+static STEP_OWNER: AtomicI32 = AtomicI32::new(0);
+/// A write to code through `MEM` failed: the kernel refuses them (`poke`).
+static POKE_FAILED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn open_hidden(path: &[u8], flags: u64) -> i32 {
     const F_DUPFD_CLOEXEC: u64 = 1030;
@@ -362,6 +378,7 @@ pub(crate) fn poke(a: u64, w: Word) -> bool {
     };
     if r < 0 {
         note_host(proto::ctl::SPIN_HOST_POKE, -r);
+        POKE_FAILED.store(true, Relaxed);
     }
     r == WORD as i64
 }
@@ -496,23 +513,31 @@ fn clear_dirty() -> bool {
 /// A runtime entry other than the spin point (`on_sigsys`, `on_fault`): a probe in progress
 /// ends without a trace, and the spin point stops being one.
 #[inline]
-pub fn enter(ts: &mut ThreadState, frame: Option<&mut Frame>) {
+pub fn enter(ts: &mut ThreadState, frame: Option<&mut Frame>, syscall: bool) {
     let s = &ts.spin;
     if s.phase == PH_NONE && s.point == 0 && s.over == 0 {
         return;
     }
-    enter_slow(ts, frame);
+    enter_slow(ts, frame, syscall);
 }
 
 #[inline(never)]
-fn enter_slow(ts: &mut ThreadState, frame: Option<&mut Frame>) {
+fn enter_slow(ts: &mut ThreadState, frame: Option<&mut Frame>, syscall: bool) {
     if let Some(f) = frame {
         if ts.spin.phase != PH_NONE || ts.spin.over != 0 {
             st::step_disarm(&mut ts.spin.st, f);
+            if syscall {
+                // The flags a system call saved (x86_64 r11) as the program's own.
+                st::syscall_flags(f);
+            }
         }
+    }
+    if ts.spin.phase == PH_WALK {
+        crate::plans::count(proto::ctl::PLAN_WALKS_CUT);
     }
     st::track_end();
     ts.spin.phase = PH_NONE;
+    ts.spin.in_tramp = 0;
     disarm(ts);
 }
 
@@ -576,6 +601,12 @@ pub fn on_sigtrap(info: &SigInfo, frame: &mut Frame) -> bool {
             st::step_disarm(&mut ts.spin.st, frame);
             ts.spin.over = 0;
             replant(ts);
+            return true;
+        }
+        if ts.spin.phase == PH_WALK {
+            st::step_disarm(&mut ts.spin.st, frame);
+            walked(ts);
+            walk_on(ts, frame);
             return true;
         }
         if ts.spin.phase != PH_NONE {
@@ -818,4 +849,113 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     } else {
         replant(ts);
     }
+}
+
+// ---------------------------------------------------------------------------------------
+// Walks: a load-time point's switch moved on into straight-line code.
+
+/// A switch at a load-time point (`compute::point`) is taken `n` of the program's instructions
+/// on: from the trap's exit (`walk_go`) the thread steps one instruction at a time, counting
+/// those outside trampolines, and yields where the count runs out (`walk_on`). The stop is a
+/// function of the program's execution alone: instructions are counted, never time. It is
+/// never inside a trampoline (the walk steps on to the first instruction out of it, where the
+/// program's registers are its own), and it comes before an instruction that would save the
+/// stepper's state where the program can read it (`st::stop_before`: x86_64 `pushf`; arm64 an
+/// exclusive load, where a stepped pair could fail natively and retry, a different count by
+/// run). Any runtime entry on the way (a system call, a fault, another point) ends the walk
+/// with no switch (`enter`; counted `walks_cut`), as does an instruction the stepper refuses
+/// for what it is. A host that cannot step (arm64: `/proc/self/mem` closed to the runtime)
+/// ends the run (`HE_WALK`), so a seed's walks never depend on the host.
+pub fn walk(ts: &mut ThreadState, n: u64, seg: [u64; 2]) {
+    let s = &mut ts.spin;
+    s.phase = PH_WALK;
+    s.left = n;
+    s.walked = 0;
+    s.seg = seg;
+}
+
+/// The trap of a point that began a walk has made its exit: take the first step.
+pub fn walk_go(ts: &mut ThreadState, frame: &mut Frame) {
+    // Every runtime entry ends a walk (`enter`), so one here is the point's own.
+    if ts.spin.phase == PH_WALK {
+        if !step_ready() {
+            crate::sup::host_error(0, 0, proto::ctl::HE_WALK);
+        }
+        walk_on(ts, frame);
+    }
+}
+
+/// What a walk needs to step: nothing on x86_64 (the trap flag is in the frame); on arm64
+/// `/proc/self/mem` (the breakpoints) and `/proc/self/maps` (where one may go), this process's.
+fn step_ready() -> bool {
+    if cfg!(target_arch = "x86_64") {
+        return true;
+    }
+    let pid = unsafe { sc0(nr::GETPID) } as i32;
+    let open = MEM.load(Relaxed) >= 0 && MAPS.load(Relaxed) >= 0;
+    if open && (OWNER.load(Relaxed) == pid || STEP_OWNER.load(Relaxed) == pid) {
+        return true;
+    }
+    for d in [&MEM, &MAPS] {
+        let fd = d.swap(-1, Relaxed);
+        if fd >= 0 {
+            unsafe { sc1(nr::CLOSE, fd as u64) };
+        }
+    }
+    let mem = open_hidden(b"/proc/self/mem\0", 2);
+    let maps = open_hidden(b"/proc/self/maps\0", 0);
+    MEM.store(mem, Relaxed);
+    MAPS.store(maps, Relaxed);
+    if mem < 0 || maps < 0 {
+        return false;
+    }
+    STEP_OWNER.store(pid, Relaxed);
+    true
+}
+
+/// One step of a walk is done: count it if it was the program's own instruction.
+fn walked(ts: &mut ThreadState) {
+    if ts.spin.in_tramp == 0 {
+        ts.spin.left = ts.spin.left.saturating_sub(1);
+        ts.spin.walked += 1;
+    }
+}
+
+/// Step on, or stop here and switch.
+fn walk_on(ts: &mut ThreadState, frame: &mut Frame) {
+    loop {
+        let pc = frame.pc();
+        let tramp = crate::plans::in_tramp(pc);
+        if !tramp && (ts.spin.left == 0 || st::stop_before(pc)) {
+            return walk_end(ts, frame);
+        }
+        ts.spin.in_tramp = tramp as u8;
+        match st::step_arm(&mut ts.spin.st, frame, 0) {
+            Arm::Armed => return,
+            Arm::Taken => walked(ts),
+            Arm::Refused => {
+                if POKE_FAILED.load(Relaxed) {
+                    crate::sup::host_error(0, 0, proto::ctl::HE_WALK);
+                }
+                ts.spin.phase = PH_NONE;
+                ts.spin.in_tramp = 0;
+                return crate::plans::count(proto::ctl::PLAN_WALKS_CUT);
+            }
+        }
+    }
+}
+
+/// The walk is over: the switch is taken here, as at a trap (`spin_yield`).
+fn walk_end(ts: &mut ThreadState, frame: &mut Frame) {
+    ts.spin.phase = PH_NONE;
+    ts.spin.in_tramp = 0;
+    crate::plans::count(proto::ctl::PLAN_WALKS);
+    crate::plans::count_n(proto::ctl::PLAN_WALK_STEPS, ts.spin.walked);
+    crate::compute::enter(ts);
+    let pc = crate::plans::shown(frame.pc());
+    let (seg, walked) = (ts.spin.seg, ts.spin.walked);
+    crate::compute::switch(ts, frame, pc, proto::compute::REASON_SWITCH, seg, walked);
+    crate::sys::sig::trap_exit(frame, None);
+    crate::entry::check_real_mask(frame);
+    crate::compute::exit(ts);
 }

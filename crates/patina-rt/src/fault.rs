@@ -61,7 +61,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
         crate::sup::host_error(sig as i64, pc, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
     }
     crate::pmu::enter(thread(), Some(frame));
-    crate::spin::enter(thread(), Some(frame));
+    crate::spin::enter(thread(), Some(frame), false);
     crate::compute::enter(thread());
     let info: SigInfo = unsafe { core::ptr::read(info) };
     for emu in EMULATORS {
@@ -70,6 +70,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
             crate::entry::check_real_mask(frame);
             crate::compute::exit(thread());
             crate::pmu::exit(thread(), frame.pc(), 0);
+            crate::spin::walk_go(thread(), frame);
             return;
         }
     }

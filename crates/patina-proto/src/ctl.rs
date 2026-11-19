@@ -45,6 +45,9 @@ pub struct Config {
     /// time is still charged, deadlines still cut, and the cell still yields every `REFILL`), and the virtual time one event costs.
     pub compute_gap: u64,
     pub compute_charge_ns: u64,
+    /// Load-time points: the longest walk of a switch past its site, in instructions
+    /// (`proto::compute::walk`; 0: a switch is taken at its site).
+    pub compute_walk: u64,
     /// The most bytes this incarnation's logs (the boundary log and the operation log) may
     /// hold (`--log-limit`, less what earlier incarnations wrote). The append that would pass
     /// it ends the run `log-limit` instead: a count of records, never of wall time, so a seed
@@ -141,6 +144,7 @@ impl Config {
             spin_charge_ns: 0,
             compute_gap: 0,
             compute_charge_ns: 0,
+            compute_walk: 0,
             log_limit: crate::layout::LOG_MAX,
             log_paths: 0,
             work: [0; WORK_PATH_MAX],
@@ -234,14 +238,16 @@ pub struct ComputeStats {
     /// unmapped, mapped over, moved or reprotected patched text, executable memory left
     /// unpatched (anonymous or shared memory, files without a plan, memory made executable
     /// later), patched `cpuid`s answered, and jumps into a group's interior boundary resumed
-    /// at the copy of its instruction.
+    /// at the copy of its instruction; switches taken after a walk, the instructions
+    /// walked, and walks a runtime entry or an instruction the stepper cannot step ended
+    /// without a switch.
     pub plan: [AtomicU64; PLAN_FIELDS],
     /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: the
     /// stall watchdog counts that wall time as progress (it costs no virtual time).
     pub planning: AtomicU64,
 }
 
-pub const PLAN_FIELDS: usize = 6;
+pub const PLAN_FIELDS: usize = 9;
 pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "points",
     "applied",
@@ -249,6 +255,9 @@ pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "unplanned",
     "cpuid",
     "interior",
+    "walks",
+    "walk_steps",
+    "walks_cut",
 ];
 pub const PLAN_POINTS: usize = 0;
 pub const PLAN_APPLIED: usize = 1;
@@ -256,6 +265,9 @@ pub const PLAN_DROPPED: usize = 2;
 pub const PLAN_UNPLANNED: usize = 3;
 pub const PLAN_CPUID: usize = 4;
 pub const PLAN_INTERIOR: usize = 5;
+pub const PLAN_WALKS: usize = 6;
+pub const PLAN_WALK_STEPS: usize = 7;
+pub const PLAN_WALKS_CUT: usize = 8;
 
 impl ComputeStats {
     pub fn plans(&self) -> [u64; PLAN_FIELDS] {
@@ -1081,6 +1093,11 @@ pub const HE_EXEC: u64 = 13;
 /// record, or a magic it does not know). args[0] = the record's magic. The run ends
 /// `unsupported`, stop `signal-context`.
 pub const HE_SIGNAL_CONTEXT: u64 = 14;
+/// A walk (`--preempt points`, `compute-walk`) could not step on this host: arm64's stepper
+/// could not open or write `/proc/self/mem`, or x86_64's could not read code
+/// (`process_vm_readv`). args[0] = the errno (0: open or write refused), args[1] = the call.
+/// The run ends `infra` rather than walk differently by host.
+pub const HE_WALK: u64 = 15;
 
 /// The name of an arm64 signal context record (`HE_SIGNAL_CONTEXT`), for its message.
 pub fn signal_context_name(magic: u64) -> &'static str {

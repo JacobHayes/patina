@@ -625,6 +625,7 @@ pub fn run_incarnation(
     cfg.cpu_count = c.cpus;
     cfg.spin_charge_ns = cfg.trap_charge_ns;
     cfg.compute_gap = o.plan.compute_gap;
+    cfg.compute_walk = o.plan.compute_walk;
     cfg.compute_charge_ns = proto::compute::CHARGE_NS;
     cfg.log_limit = (c.log_limit << 20).saturating_sub(start.log_used);
     cfg.log_paths = c.log_paths as u64;

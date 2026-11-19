@@ -23,6 +23,8 @@ pub enum Stream {
     Compute = 12,
     /// Datagrams: delay and faults, keyed by datagram id and a sub-key (`wire::DSUB_*`).
     Dgram = 13,
+    /// Load-time points: the instructions a switch walks past its site (`compute::walk`).
+    Walk = 14,
 }
 
 /// splitmix64 finaliser.

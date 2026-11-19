@@ -749,6 +749,80 @@ address order, took it; a word whose address `adr` takes (which code can read) w
 verifier did not taint the span around a refused word, and missed trampoline bytes over the
 image when the span started inside it.
 
+### Walks: switches inside straight-line code
+
+`--preempt points` switches only at its sites (backward branches and calls, indirect jumps,
+atomics), so a window between two plain accesses with none of those in it (a counter loaded,
+changed and stored) never holds a switch. Two ways to reach it were measured on x86_64 (the
+host above) and arm64 (`ubuntu-24.04-arm`, Neoverse N2), 2026-11-19: a *walk* (a switch taken
+a drawn number of instructions past its site, single-stepped: landed, ARCHITECTURE
+"Load-time rewriting") and *every-block* sites (a site at every forward conditional branch
+too: measured from a prototype, not landed). The guests: `races b` and `examples/stats-c`
+stock, the Go and Rust check-then-act races (`go-race-stock`, `rs-race-stock`), and three new
+stock C races (`tests/guests/rewrite/races.c`): `lms` (load, add, store through a pointer),
+`publish` (a pointer published before the struct is filled in) and `dcl` (a flag set one store
+before the data). Each cell is finds of 200 seeds and, in brackets, the CPU seconds of the
+seeds up to the first find, x86_64 / arm64 (every-block: x86_64 only).
+
+| Guest | points | points + walks | points + walks, W=16 | every-block |
+|---|---|---|---|---|
+| default gap (64 to 65,536): `lms` | 0 / 0 | 21 (0.17) / 15 (0.07) | | 0 |
+| `stats-c` | 0 / 0 | 0 / 1 (2.6) | | 0 |
+| `go-race-stock` | 2 (0.58) / 1 (5.1) | 0 / 1 (5.3) | | 4 (0.79) |
+| `races b`, `rs-race-stock`, `publish`, `dcl` | 0 / 0 | 0 / 0 | | 0 |
+| `compute-gap=2..64`: `lms` | 0 / 0 | 104 (0.25) / 101 (0.25) | 192 (0.03) / 175 (0.03) | 0 |
+| `stats-c` | 0 / 0 | 2 (55.5) / 1 (23.4) | 8 (33.1) / 4 (52.1) | 0 |
+| `go-race-stock` | 81 (0.15) / 76 (0.13) | 70 (0.40) / 73 (0.04) | 76 (0.25) / 68 (0.67) | 112 (0.27) |
+| `rs-race-stock` | 5 (0.26) / 5 (1.1) | 4 (5.2) / 7 (1.5) | 6 (1.3) / 5 (2.0) | 5 (6.3) |
+| `races b` | 0 / 0 | 0 / 0 | 1 (3.9) / 0 | 11 (0.37) |
+| `publish`, `dcl` | 0 / 0 | 0 / 0 | 0 / 0 | 0 |
+
+Walks reach what nothing else stock does: `lms`'s window is two instructions with no site
+(and the store a few instructions after the nearest one), found on half the seeds at small
+gaps and on 1 in 10 at the default; `stats-c`'s, further from a site, rarely. They cost the
+atomic races a little (a switch walked past the atomic's window): `go-race-stock` 81 to 70 and
+76 to 73. Every-block sites reach `races b` (its window holds a forward branch), which walks
+do not, but they double the points (and every plan changes), cost 1.1 to 2.6 times the corpus
+wall time, and find nothing in `lms`; with walks (an earlier walk at a higher rate, x86_64)
+they found `lms` 198, `go-race-stock` 103 and `races b` 7 of 200. `publish` and `dcl` were
+found by no mechanism here (their windows end in another thread's spin or a lock, which the
+seed seldom puts there); the default walk is 2 in W switches walking up to W instructions,
+W drawn from 4 to 512 per seed.
+
+The cost (warm plan cache, wall ms of seeds 1 and 2, x86_64 / arm64; seed 2 draws a small
+gap, so it is the point-heavy case):
+
+| Program | traps | points | points + walks |
+|---|---|---|---|
+| ripgrep | 388, 366 / 738, 739 | 406, 1,114 / 818, 1,579 | 396, 1,479 / 817, 2,082 |
+| gofmt | 1,058, 849 / 1,282, 1,262 | 1,113, 26,962 / 1,687, 18,364 | 1,074, 39,631 / 1,798, 26,298 |
+| CPython | 91, 85 / 199, 198 | 139, 4,382 / 245, 1,934 | 144, 7,133 / 249, 2,876 |
+| headless Chromium | 641, 574 / 1,386, 1,402 | 934, 3,321 / 1,760, 4,357 | 945, 4,726 / 1,772, 5,390 |
+
+Walks add about one single-step per switch (a walk of `1..=W` on 2 switches in W): at seed 1
+nothing measurable, at seed 2 1.2 to 1.6 times the points run (a step is a debug trap, 6.5
+µs on this KVM host). Every run's output is the native one; seed 1 twice gives one digest on
+both architectures.
+
+| Check | Result |
+|---|---|
+| Determinism (`05-walks` b, both architectures): `verify --runs 3 --vary cpu,load,aslr,sandbox,repeat` of `lms` with walks, and of the C, C++, Rust and Go differential guests with hundreds of walks each; `patina replay` of the Go run | identical |
+| Fidelity (`05-walks` c, both): a fault in a relocated atomic reached by walks from its count, a timer signal in a spin, fork and exec, system calls in a loop and a read that blocks (walks run into both and end there), `pushf`/`popf` (x86_64) | output as natively; walks taken in each, and cut by the fault and the system calls |
+| Red: the x86_64 walk without its stop before `pushf` | `rw-races flags` killed by `SIGTRAP` on 4 of 4 seeds (a saved trap flag restored by `popf` after the walk) |
+| Red: arm64 walks counting the whole span from an image's first trampoline to its last (Chromium has trampolines before and after its image) | a Chromium thread stepped for 10 s, `compute-stall`; walks now count only the mapped trampoline runs |
+| Every run without `--preempt points` (the 90 cells of the stock workload ledger) | identical to the build before, on both architectures |
+| With `--preempt points` | digests differ from the build before (walks change the schedule); with `--fault compute-walk=0` they are the build before's (`go-race-stock`, seed 3, x86_64) |
+
+The 2 plans headless Chromium drops on arm64 (the arm64 corpus table above) are both the
+executable's own, once in each process that starts V8. V8 moves its embedded builtins (2.1
+MiB of the executable's text) into its code range with `mremap(MREMAP_MAYMOVE | MREMAP_FIXED
+| MREMAP_DONTUNMAP)`, so that its generated code reaches them with short branches; a move of
+patched pages drops the image's plan (the original pages go back first, so the moved copy is
+the original code). Output stays native, but the rest of the executable has no points for the
+rest of the process. Putting back only the pages a change touches would keep them: on arm64
+every patch is one aligned instruction, so a page holds whole patches; on x86_64 a patch can
+cross a page, so the pages put back would have to grow to whole patches. Not done here.
+
 ## Branch counters on arm64
 
 Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`

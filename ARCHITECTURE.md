@@ -662,6 +662,31 @@ In a run (`--preempt points`):
   faults on the cell is `compute-cell`, as for rebuilt code. Plans are mapped before any of
   their code runs and never written while a thread may run it, so no thread sees a half-made
   patch.
+- **Walks** (`spin.rs`): a point whose drawn gap ran out (a switch, not a deadline or a
+  refill) draws a walk from its segment key (`proto::compute::walk`, `Stream::Walk`): 2
+  switches in W (W per seed from `compute-walk`; 2 in 4 below 4) go on 1 to W of the program's
+  instructions, the rest switch at the point. The thread returns to the program single-stepped
+  by the spin probes' stepper (x86_64 trap flag; arm64 a `brk` written past the next
+  instruction), one instruction a trap, and switches where the count reaches 0 (the record
+  carries the instructions walked). Instructions are counted, never time, and instructions in
+  trampolines are not counted, so a seed's walks are the same on every host and layout. A walk
+  never stops in a trampoline: one whose count runs out there steps on to the next original
+  instruction, so the switch's address is always an original one. It switches early, before an
+  instruction that would save the stepper's state where the program can read it: x86_64
+  `pushf` (a copy of the trap flag, which a later `popf` would set again; the bytes are read
+  with `process_vm_readv`, which fails cleanly where the program could not read either), and
+  arm64 an exclusive load (a step inside a pair would make its store fail). Any runtime entry
+  during a walk (a system call, a fault, a spin hint, a point) ends it without its switch
+  (counted `walks_cut`): the entry is a scheduling point of its own, so no signal is delivered
+  and no fault taken inside a walk that the program would not see natively; a system call made
+  while stepping gets its saved flags (x86_64 r11) without the trap flag. A host where the
+  stepper cannot work (arm64: `/proc/self/mem` cannot be opened or written) ends the run
+  `infra` (`HE_WALK`) rather than walk differently from another host. A walk never runs in the
+  runtime's code, and a `vfork` child (running on its parent's memory) draws none. As with
+  spin probes, a stall probe (a `SIGTRAP` sent by the supervisor) that is pending at the very
+  moment of an x86_64 step's trap merges with it, and that one step goes uncounted; walks are
+  short (the default W is at most 512, a few ms of steps) and probes come only after 20 ms of
+  CPU time without a scheduling point, so the window is narrow.
 - **Changes**: before the program unmaps, maps over, moves (`mremap`) or reprotects any
   patched page or mapped trampoline page of an image, the patched pages of every mapping the plan was applied to are
   mapped back from the original file (counted `dropped`), with the instruction channels'

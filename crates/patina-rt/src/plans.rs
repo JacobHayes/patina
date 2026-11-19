@@ -8,9 +8,10 @@
 //!   library `ld.so` maps), and its patched pages over the text, private and read-only, from
 //!   the plan file. Its page directory and site rows are mapped in the runtime's own region.
 //! - **A point**: a trampoline's `ud2` is a compute point (`compute::point`), then the program
-//!   goes on after it. A `ud2` written over a `cpuid` is answered with core 0's identity
-//!   (`cpuid`). A trap at an interior boundary of a group (a jump there from code the rewriter
-//!   could not see) resumes at the copy of that instruction (`entry`).
+//!   goes on after it; a switch first walks on (`spin::walk`). A `ud2` written over a `cpuid`
+//!   is answered with core 0's identity (`cpuid`). A trap at an interior boundary of a group
+//!   (a jump there from code the rewriter could not see) resumes at the copy of that
+//!   instruction (`entry`).
 //! - **What the program sees** (`shown`): a stop in a trampoline is reported at the original
 //!   address (signal frames, records); `/proc/self/maps` shows the original file for patched
 //!   pages and omits trampolines (`Maps`).
@@ -88,9 +89,13 @@ pub fn on() -> bool {
     config().sched & proto::ctl::SCHED_POINTS != 0
 }
 
-fn count(i: usize) {
+pub fn count(i: usize) {
+    count_n(i, 1);
+}
+
+pub fn count_n(i: usize, n: u64) {
     let a = &ctl().compute.plan[i];
-    a.store(a.load(Relaxed) + 1, Relaxed);
+    a.store(a.load(Relaxed) + n, Relaxed);
 }
 
 fn imgs() -> &'static mut [Img] {
@@ -409,6 +414,22 @@ fn apply(
     true
 }
 
+/// Whether `pc` is in an image's trampolines (where a walk does not stop: `spin::walk`), not
+/// counting trampolines the program changed (its own code now). The span from the first
+/// trampoline to the last holds the image itself when some are before it (arm64): only the
+/// mapped trampoline runs count.
+pub fn in_tramp(pc: u64) -> bool {
+    imgs().iter().any(|m| {
+        !m.tramp_gone
+            && pc >= m.tramp
+            && pc < m.tramp + m.tramp_len
+            && (0..m.w[R_NTRUNS]).any(|k| {
+                let (off, n, _) = run_in(m, R_TRUNS, k);
+                pc - m.tramp >= off && pc - m.tramp < off + n
+            })
+    })
+}
+
 /// The image and site row of a trampoline address.
 fn site_at(pc: u64) -> Option<(&'static Img, u64)> {
     let img = imgs()
@@ -584,7 +605,7 @@ pub fn try_point(
         return false;
     }
     count(proto::ctl::PLAN_POINTS);
-    crate::compute::point(crate::state::thread(), frame, shown(pc));
+    crate::compute::point(crate::state::thread(), frame, shown(pc), true);
     frame.set_pc(pc + TRAP_LEN);
     true
 }

@@ -48,6 +48,48 @@ pub fn step_arm(_st: &mut Stepper, frame: &mut Frame, _point: u64) -> Arm {
     Arm::Armed
 }
 
+/// A system call made while stepping saved the flags with the trap flag in r11: give the
+/// program the flags it would have natively.
+#[inline(always)]
+pub fn syscall_flags(frame: &mut Frame) {
+    frame.gregs[R11] &= !(TF | RF);
+}
+
+/// Whether a walk stops before the instruction at `pc`: a `pushf` would save the trap flag
+/// where the program can read it (and a later `popf` would set it). The bytes are read with
+/// `process_vm_readv`, which fails cleanly on memory the program cannot read either.
+pub fn stop_before(pc: u64) -> bool {
+    let mut b = [0u8; 15];
+    let split = (PAGE - (pc & (PAGE - 1))).min(b.len() as u64);
+    let local = [b.as_mut_ptr() as u64, b.len() as u64];
+    let remote = [pc, split, pc + split, b.len() as u64 - split];
+    let iovs = if split == b.len() as u64 { 1 } else { 2 };
+    let pid = unsafe { sc0(nr::GETPID) };
+    let r = unsafe {
+        sc6(
+            nr::PROCESS_VM_READV,
+            pid as u64,
+            local.as_ptr() as u64,
+            1,
+            remote.as_ptr() as u64,
+            iovs,
+            0,
+        )
+    };
+    if r < 0 && r != -e::EFAULT {
+        crate::sup::host_error(r, nr::PROCESS_VM_READV, proto::ctl::HE_WALK);
+    }
+    for &x in &b[..r.max(0) as usize] {
+        match x {
+            // Legacy and REX prefixes.
+            0x26 | 0x2e | 0x36 | 0x3e | 0x40..=0x4f | 0x64..=0x67 | 0xf0 | 0xf2 | 0xf3 => {}
+            0x9c => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// Disarm a step (taken or not).
 #[inline(always)]
 pub fn step_disarm(_st: &mut Stepper, frame: &mut Frame) {

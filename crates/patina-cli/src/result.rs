@@ -65,6 +65,8 @@ pub struct RunEnd {
 pub struct RewriteReport {
     pub images: Vec<Value>,
     pub plans: [u64; proto::ctl::PLAN_FIELDS],
+    /// The run's longest walk (`compute-walk`, drawn per seed).
+    pub walk: u64,
 }
 
 /// Compute points (`proto::ctl::ComputeStats`), summed over incarnations, and the run's mean gap.
@@ -411,6 +413,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     }
     if let Some(w) = &e.rewrite {
         let mut v = named(&proto::ctl::PLAN_NAMES, &w.plans);
+        v["walk_max"] = json!(w.walk);
         v["images"] = json!(w.images);
         r["rewrite"] = v;
     }
@@ -793,8 +796,8 @@ pub fn compute_line(c: &Value) -> Option<String> {
     Some(s)
 }
 
-/// The `patina run` line for result.json's `rewrite` (`--preempt points`): points taken, and
-/// per image rewritten the share of its sites patched and of its text left dark.
+/// The `patina run` line for result.json's `rewrite` (`--preempt points`): points taken, the
+/// switches that walked on (`compute-walk`), and per image rewritten the share of its sites patched and of its text left dark.
 pub fn rewrite_line(w: &Value) -> Option<String> {
     let images = w["images"].as_array()?;
     let n = |k: &str| w[k].as_u64().unwrap_or(0);
@@ -814,11 +817,15 @@ pub fn rewrite_line(w: &Value) -> Option<String> {
         })
         .collect();
     let all = images.iter().filter(|i| i["status"] == "planned").count();
-    let mut s = format!(
-        "load-time points: {} taken; {} rewritten",
-        commas(n("points")),
-        plural(all as u64, "image")
-    );
+    let mut s = format!("load-time points: {} taken", commas(n("points")));
+    if n("walks") > 0 {
+        s.push_str(&format!(
+            " ({} taken after a walk of {} instructions in all)",
+            plural(n("walks"), "switch"),
+            commas(n("walk_steps"))
+        ));
+    }
+    s.push_str(&format!("; {} rewritten", plural(all as u64, "image")));
     if !planned.is_empty() {
         s.push_str(&format!(" ({}", planned.join("; ")));
         if all > IMAGES_SHOWN {
