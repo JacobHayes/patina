@@ -63,6 +63,19 @@ pub fn clone_process(
     Action::Return(r)
 }
 
+/// Is `pid` (as a call's argument) a process of another node? Pids are unique in the run; a
+/// process of another node is not found, as on another machine.
+pub fn foreign_pid(pid: u64) -> bool {
+    let (pid, node) = (pid as i32, crate::state::proc().node as u64);
+    pid > 0
+        && (0..MAX_THREADS).any(|i| {
+            let s = unsafe { &*ctl().slot(i) };
+            s.state.load(SeqCst) != SLOT_FREE
+                && s.pid.load(Relaxed) == pid
+                && s.node.load(Relaxed) != node
+        })
+}
+
 fn reserve(slot: usize, vmask: u64) {
     let s = unsafe { &*ctl().slot(slot) };
     s.go.store(0, SeqCst);
@@ -71,6 +84,7 @@ fn reserve(slot: usize, vmask: u64) {
     s.vmask.store(vmask, Relaxed);
     s.sigpend.store(0, Relaxed);
     s.sched.store(super::sched::inherited(), Relaxed);
+    s.node.store(crate::state::proc().node as u64, Relaxed);
     s.state.store(SLOT_RESERVED, SeqCst);
 }
 
@@ -433,7 +447,8 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        // Process groups and sessions: the kernel's.
+        // Process groups and sessions: the kernel's, for the processes of the caller's node.
+        nr::SETPGID | nr::GETPGID | nr::GETSID if foreign_pid(call.arg(0)) => -e::ESRCH,
         nr::SETPGID | nr::GETPGRP | nr::SETSID | nr::GETPGID | nr::GETSID => raw(call),
         nr::FORK => return clone_process(call, SIGCHLD, 0, 0, 0, 0),
         nr::VFORK => return clone_process(call, CLONE_VM | CLONE_VFORK | SIGCHLD, 0, 0, 0, 0),

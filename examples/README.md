@@ -82,12 +82,12 @@ patina sweep --seeds 1..20 --faults disk --out patina-out/journal-py \
 
 ```text
 ...
-patina sweep: 20 runs, 12 findings in 1 group, 8 ok   (0.2s, 8 jobs)
-outcomes: ok 8, violation 12
+patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.2s, 8 jobs)
+outcomes: ok 9, violation 11
 
 violation always: journal-intact: N bytes
-  12 of 20 runs   first: seed 2   replayed: identical
-  example: journal-intact: 7088 bytes
+  11 of 20 runs   first: seed 2   replayed: identical
+  example: journal-intact: 7081 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/examples/journal-py:/guest --mount /tmp/patina/sdk/python:/sdk --faults disk -- python3 /guest/journal.py
   replay: patina replay /tmp/patina/patina-out/journal-py/seed-2

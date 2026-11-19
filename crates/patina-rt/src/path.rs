@@ -144,7 +144,9 @@ pub fn read_mounts() {
             dev: makedev(ma, mi),
             class,
             point: p,
-            work: point == crate::state::config().work_path(),
+            // A node's work tree is not crash-modelled (yet): only the driver's is the work
+            // tree, and the driver's tree is hidden under a node's own.
+            work: crate::state::proc().node == 0 && point == crate::state::config().work_path(),
         };
         t.n += 1;
     }

@@ -27,11 +27,17 @@ pub const MAX_DATA: usize = 8;
 pub const FD_USERNS: i32 = 3018;
 /// Launcher to keeper: the `Spec`, as JSON.
 pub const FD_SPEC: i32 = 3019;
+/// Launcher to keeper, in a run with nodes: node `k`'s stdin, stdout and stderr memfds at
+/// `FD_NODE_STDIO0 + 3 * (k - 1)` and the two after it (above every number the supervisor
+/// keeps, so its `close_inherited` closes them).
+pub const FD_NODE_STDIO0: i32 = 3030;
 const _: () = {
-    use proto::layout::{FD_PLAN, FD_PMU, FD_STDIN};
+    use proto::layout::{FD_NODES, FD_PLAN, FD_PMU, FD_RT_DYN, FD_STDIN};
     assert!(FD_PMU < FD_DATA0 && FD_PLAN < FD_DATA0);
     assert!(FD_DATA0 + MAX_DATA as i32 <= FD_USERNS);
     assert!(FD_USERNS < FD_SPEC && FD_SPEC < FD_STDIN);
+    assert!(FD_NODES < FD_NODE_STDIO0);
+    assert!(FD_NODE_STDIO0 + 3 * (proto::node::MAX_NODES as i32 - 1) <= FD_RT_DYN);
 };
 
 /// One step of the layout, applied in order (the order is the guest's mount table order).
@@ -104,6 +110,36 @@ pub struct Spec {
     /// The path executed (default `argv[0]`).
     pub exe: Option<String>,
     pub after: After,
+    /// A run with nodes: PID 1 keeps its end of the keeper's socket pair at `FD_NODES` for the
+    /// supervisor, and the keeper starts each node's first process when asked (`Nodes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<Nodes>,
+}
+
+/// The nodes of a run (1 upward; the driver is PID 1's command), as the keeper starts them.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Nodes {
+    pub nodes: Vec<NodeSpec>,
+    /// Bytes of each tmpfs of a node's view.
+    pub size: u64,
+    /// Paths that get an empty tmpfs of their own in every node's view besides the node's work
+    /// tree, `/tmp` and `/dev/shm` (the driver's work tree, where it is elsewhere).
+    pub hide: Vec<String>,
+    /// Mounts the nodes share with the driver that are read-only in a node's view (the root,
+    /// `/dev`, `/guest`, `:copy` mounts): one node's writes never reach another.
+    pub readonly: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct NodeSpec {
+    pub name: String,
+    /// The guest path of the node's work tree.
+    pub work: String,
+    /// Where the node's starting tree is bound (copied into its work tree), if it has one.
+    pub input: Option<String>,
+    /// The runtime's arguments (`rt EXE ARGV...`) and the whole environment.
+    pub argv: Vec<String>,
+    pub env: Vec<String>,
 }
 
 /// The keeper's command, `patina __sandbox`: in the child, `first`, then SIGCHLD at its
@@ -115,7 +151,7 @@ pub fn command(
     first: impl Fn() -> std::io::Result<()> + Send + Sync + 'static,
 ) -> std::process::Command {
     use std::os::unix::process::CommandExt;
-    assert!(place.len() <= 32);
+    assert!(place.len() <= 72);
     let mut cmd = std::process::Command::new("/proc/self/exe");
     cmd.arg0("patina")
         .args(["__sandbox", "--parent", &std::process::id().to_string()]);
@@ -129,7 +165,7 @@ pub fn command(
             lim.rlim_cur = lim.rlim_max;
             libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
             // Every source out of the target range first, then placed.
-            let mut tmp = [(0i32, 0i32); 32];
+            let mut tmp = [(0i32, 0i32); 72];
             for (i, &(src, dst)) in place.iter().enumerate() {
                 let t = libc::fcntl(src, libc::F_DUPFD_CLOEXEC, 3100);
                 if t < 0 {
@@ -240,6 +276,23 @@ fn set_attrs(path: &str, set: u64) -> Res<()> {
             libc::AT_FDCWD,
             p.as_ptr(),
             AT_RECURSIVE,
+            attr.as_ptr(),
+            std::mem::size_of_val(&attr),
+        )
+    };
+    sys(r, &format!("mount_setattr {path}"))
+}
+
+/// `set_attrs` for the one mount at `path`, not those under it.
+fn set_attr_one(path: &str, set: u64) -> Res<()> {
+    let attr = [set, 0u64, 0, 0];
+    let p = c(path);
+    let r = unsafe {
+        libc::syscall(
+            NR_MOUNT_SETATTR,
+            libc::AT_FDCWD,
+            p.as_ptr(),
+            0,
             attr.as_ptr(),
             std::mem::size_of_val(&attr),
         )
@@ -774,6 +827,8 @@ pub struct View<'a> {
     pub hostname: &'a str,
     pub tmpfs: &'a [&'a str],
     pub size: u64,
+    /// Mounts made read-only in this view (each one alone, not what is mounted under it).
+    pub readonly: &'a [&'a str],
 }
 
 impl Keeper {
@@ -808,6 +863,9 @@ impl Keeper {
                     "unshare view",
                 )?;
                 mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+                for p in v.readonly {
+                    set_attr_one(p, MOUNT_ATTR_RDONLY)?;
+                }
                 for p in v.tmpfs {
                     mount_tmpfs_at(p, v.size)?;
                 }
@@ -1014,6 +1072,9 @@ pub fn keeper_main(args: &[String]) -> Res<ExitCode> {
     if let After::Views { size } = spec.after {
         views_keeper(&keeper, ours.as_raw_fd(), size);
     }
+    if let Some(n) = &spec.nodes {
+        nodes_keeper(&keeper, ours.as_raw_fd(), n);
+    }
     Ok(ExitCode::from(exit_code(wait_pid(pid))))
 }
 
@@ -1055,6 +1116,14 @@ fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
         fail(e);
     }
     match &spec.after {
+        // With nodes, the supervisor asks the keeper to start them through PID 1's end.
+        After::Exec if spec.nodes.is_some() => {
+            if unsafe { libc::dup2(chan.as_raw_fd(), proto::layout::FD_NODES) }
+                != proto::layout::FD_NODES
+            {
+                fail(last_err("dup2 the nodes channel"));
+            }
+        }
         After::Exec => {}
         After::Native { copies, work } => {
             for (h, d) in copies {
@@ -1309,6 +1378,7 @@ fn views_keeper(k: &Keeper, chan: RawFd, size: u64) {
             hostname: name,
             tmpfs: &["/work", "/tmp", "/dev/shm"],
             size,
+            readonly: &[],
         };
         let r = k.view(&v, &keep, || {
             let _ = std::fs::write("/work/f", name);
@@ -1404,6 +1474,7 @@ pub fn minimal(after: After, argv: Vec<String>) -> Spec {
         argv,
         exe: None,
         after,
+        nodes: None,
     }
 }
 
@@ -1450,6 +1521,103 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
          \x20 include if exists <local/patina>\n\
          }}\n"
     ))
+}
+
+/// The keeper of a run with nodes: start node `k`'s first process each time the supervisor
+/// asks (one byte, `k`), answer `ok` or why not, until PID 1's end closes.
+fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
+    use proto::layout::*;
+    loop {
+        let mut b = [0u8; 1];
+        let r = unsafe { libc::recv(chan, b.as_mut_ptr().cast(), 1, 0) };
+        if r <= 0 {
+            return;
+        }
+        let i = b[0] as usize;
+        let res = match n.nodes.get(i.wrapping_sub(1)) {
+            None => Err(format!("no node {i}")),
+            Some(ns) => {
+                // The keeper's stderr (`sandbox.log`) until the node's own replaces it.
+                let mut keep = vec![2, FD_CTL, FD_LOG, FD_OPLOG_META, FD_OPLOG_DATA, FD_RT];
+                for fd in [FD_PMU, FD_PLAN] {
+                    if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
+                        keep.push(fd);
+                    }
+                }
+                let stdio = FD_NODE_STDIO0 + 3 * (i as i32 - 1);
+                keep.extend(stdio..stdio + 3);
+                let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
+                tmpfs.extend(n.hide.iter().map(String::as_str).filter(|h| *h != ns.work));
+                let readonly: Vec<&str> = n.readonly.iter().map(String::as_str).collect();
+                let v = View {
+                    hostname: &ns.name,
+                    tmpfs: &tmpfs,
+                    size: n.size,
+                    readonly: &readonly,
+                };
+                k.view(&v, &keep, || node_main(ns, stdio, n.size))
+            }
+        };
+        let reply = match res {
+            Ok(()) => "ok".to_string(),
+            Err(e) => e,
+        };
+        unsafe { libc::send(chan, reply.as_ptr().cast(), reply.len(), libc::MSG_NOSIGNAL) };
+    }
+}
+
+/// A node's first process, in its view: its starting tree, its stdio, the process state every
+/// guest inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime.
+fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64) -> i32 {
+    let fail = |e: String| -> i32 {
+        eprintln!("patina sandbox: node {}: {e}", ns.name);
+        126
+    };
+    if let Some(input) = &ns.input {
+        if let Err(e) = crate::sup::crash::copy_in(Path::new(input), Path::new(&ns.work)) {
+            return fail(e);
+        }
+    }
+    if let Err(e) = chdir(&ns.work) {
+        return fail(e);
+    }
+    for k in 0..3 {
+        if unsafe { libc::dup2(stdio + k, k) } != k {
+            return fail(last_err("dup2 stdio"));
+        }
+        unsafe { libc::close(stdio + k) };
+    }
+    // Joining the guests' namespace and dropping capabilities left the process undumpable, so
+    // its own /proc files are root's; the supervisor's own state was set after an exec.
+    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) } != 0 {
+        return fail(last_err("PR_SET_DUMPABLE"));
+    }
+    if let Err(e) = crate::sup::inherit::normalise(size) {
+        return fail(e);
+    }
+    let argv: Vec<CString> = ns.argv.iter().map(|a| c(a)).collect();
+    let env: Vec<CString> = ns.env.iter().map(|a| c(a)).collect();
+    let mut av: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
+    av.push(std::ptr::null());
+    let mut ev: Vec<*const libc::c_char> = env.iter().map(|a| a.as_ptr()).collect();
+    ev.push(std::ptr::null());
+    unsafe {
+        if !crate::sup::inherit::child() {
+            return fail("process state".into());
+        }
+        if libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) != 0 {
+            return fail(last_err("PR_SET_TSC"));
+        }
+        libc::syscall(
+            libc::SYS_execveat,
+            proto::layout::FD_RT,
+            c"".as_ptr(),
+            av.as_ptr(),
+            ev.as_ptr(),
+            libc::AT_EMPTY_PATH,
+        );
+    }
+    fail(last_err("execute the runtime"))
 }
 
 #[cfg(test)]

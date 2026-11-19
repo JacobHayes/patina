@@ -238,7 +238,9 @@ namespace, drops every capability, closes every descriptor but 0, 1, 2 and those
 names, and runs the caller's function, in the sandbox's PID and network namespaces, adopted by
 PID 1 when the helper exits. The helper, while it makes the view, is the one process of the
 sandbox's PID namespace other than the keeper with capabilities (the keeper's, in the outer
-user namespace); it executes nothing of the guest's. The helper and the process are not dumpable and hold only the
+user namespace); it executes nothing of the guest's. The helper and the process are not dumpable (a
+node's first process makes itself dumpable, without capabilities, to set its own process state
+just before it executes the runtime, as an exec would) and hold only the
 descriptors the view needs; the process gets a new session (no terminal), `/dev/null` for any
 standard descriptor not passed. The keeper must have one thread: the helper forks without
 executing. `patina __sandbox-views` checks it
@@ -292,6 +294,62 @@ wire and crash points are all supervisor state (`sup/`).
 Virtual time advances only by what the program does: each trap charges a fixed amount, and
 when every thread sleeps the clock jumps to the next deadline (`sup/time.rs`). A run of a
 program that sleeps an hour takes milliseconds.
+
+## Nodes
+
+A run with nodes (`[node.NAME]`, GUIDE "Several machines") is still one sandbox, one
+supervisor, one virtual clock, one log and one seed; the nodes are views inside it. Node 0 is
+the driver, the command after `--`, started as in a run without nodes; nodes 1 upward are the
+declared ones, in file order. A run without nodes takes the same path as before: no node table
+is written (`n == 0`), no record of any node is made, and its seeds and digests are unchanged.
+
+- **Start.** The launcher writes the node table (`proto::node::NodeTab`, after the scan
+  table in the control region: names; the supervisor's first pids, statuses and cut counters)
+  and passes each node's starting tree, program and environment to the keeper in the layout
+  (`sandbox::Nodes`), with each node's stdio memfds at `3030 + 3(k-1)`. PID 1 keeps a socket to
+  the keeper at `FD_NODES` (3024) and hands it to the supervisor. Boot is sequential and before
+  any guest runs: the driver says `Hello` and waits; for each node in order the supervisor
+  reserves the next slot, marks it with the node, asks the keeper to start the node
+  (`Keeper::view`: its own mount, UTS and IPC namespaces, tmpfs on its work tree, `/tmp` and
+  `/dev/shm`, the shared trees read-only, its hostname), and waits for its first process's
+  `Hello` from that slot (`DEC_NODE_START`). The process copies its starting tree in, takes its
+  stdio, sets the process state every guest inherits (`sup/inherit.rs`, as the supervisor's own
+  child does) and executes the runtime, which starts as for any program. One process is
+  starting at a time, so slots, pids and records come in one order. The shared trees (`/`,
+  `/guest`, `:copy` mounts) are the driver's: what the driver writes there a node sees (a file,
+  a path socket), read-only. That is a channel the driver has and nodes do not, as a shared
+  disk would be. A node whose first process fails before its `Hello` ends the run as `infra`
+  after the stall limit.
+- **Which node.** Every slot carries its node (`Slot::node`), set when the slot is reserved and
+  inherited by threads and children; the runtime installs its filter once per node
+  (`filter_installed` holds a bit per node). The supervisor writes `DEC_NODE_SLOT` when a slot
+  changes node, so a reader of the log knows each record's node. A process's view of other
+  processes is its node's: `kill`, `tgkill`, `setpgid`, `getpgid` and `getsid` of another node's
+  process answer `ESRCH`, as do process groups and `kill(-1)`, and `sched_*` see only the node's
+  threads. System V shared memory is one table per node (each node is its own IPC namespace).
+- **Addresses and ports.** A node's address is the wire's address kind `0x10 + k`
+  (`10.0.0.(k+1)`; the driver keeps `HOST4`, `10.0.0.1`). The wire keys ports, listeners and
+  connections by `(node, port)`: the listener's abstract name is `@patina-l-<node << 16 | port>`;
+  loopback is per node; a connection to another node's address is routed to that node. UDP
+  ports are per node and do not cross. Abstract `AF_UNIX` names are refused with nodes: the
+  kernel's network namespace, which holds them, is shared.
+- **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the node
+  table (`proto::node::parse`; the supervisor cannot read a node process's memory, which is not
+  its descendant), refuses `net` outside the driver's node (`EPERM`), and sends `Op::Net` [verb,
+  from set, to set, both]; the call is logged with its words as an SDK call is.
+- **Cuts.** The supervisor keeps a matrix of cut links. The wire consults it when it stamps a
+  delivery: an item on a cut direction is queued with no time (`HELD`) and the direction is
+  held; a heal re-stamps held items from the heal's time in order (`DEC_WIRE_HEAL`). A
+  direction held for 924.6 s resets its sender with `ETIMEDOUT`; a connect across a cut retries
+  on the kernel's SYN schedule and fails at 127 s (the cut is looked at when the SYN is sent and
+  retried; a cut made inside a handshake's delay does not stop it). No fault is drawn for a cut.
+- **End.** The driver's exit ends the run; the supervisor records each node that still has
+  processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
+  `node/NAME/inc-0/` and the node table to `result.json`'s `nodes`.
+
+Not yet: seed-drawn partitions and faults with nodes, node crash and restart, per-node disk
+faults and crash models (a node's work tree has no operation log), UDP between nodes, per-node
+clocks, and per-node abstract socket names.
 
 ## The boundary log
 
@@ -1199,8 +1257,10 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   the event where a deadline falls due; branch counters charge per branch.
 - **One thread runs at a time**, so weak-memory behaviours (a store another CPU sees late)
   never happen.
-- **One machine.** All processes of a run share one sandbox, one disk and one clock. There is
-  no simulation of several machines, and no network outside the run.
+- **One clock, one kernel.** All processes of a run share one sandbox, one kernel and one
+  virtual clock. Several machines are nodes inside it (above, "Nodes"): each has its own
+  files, hostname, IPC, ports and address, but no clock drift, no own kernel or OS image, no
+  IPv6 address, at most 15 besides the driver; and there is no network outside the run.
 - **TCP and UDP only.** Raw, packet and netlink sockets, and `SOCK_DGRAM` with a protocol
   other than UDP, are refused and listed in `result.json`'s `refused`; `patina run` prints
   them. On UDP: multicast and broadcast (and their membership options), ancillary data on send,

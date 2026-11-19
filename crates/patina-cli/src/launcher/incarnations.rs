@@ -215,6 +215,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                     walk: o.plan.compute_walk,
                 }),
                 self_check,
+                nodes: end.nodes.clone(),
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

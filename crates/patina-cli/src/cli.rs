@@ -18,6 +18,7 @@ pub enum Cmd {
     Report,
     Recheck,
     Minimize,
+    Ctl,
 }
 
 pub struct Command {
@@ -83,6 +84,12 @@ pub const COMMANDS: &[Command] = &[
         help: "the syscall table: every number, what Patina does with it, why",
     },
     Command {
+        cmd: Cmd::Ctl,
+        name: "ctl",
+        usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | mark LABEL",
+        help: "inside a run with nodes: act on the run's network (from the driver's node), or mark the log",
+    },
+    Command {
         cmd: Cmd::Doctor,
         name: "doctor",
         usage: "patina doctor [--print-apparmor-profile]",
@@ -136,6 +143,7 @@ const ALL: &[Cmd] = &[
     Cmd::Report,
     Cmd::Recheck,
     Cmd::Minimize,
+    Cmd::Ctl,
 ];
 
 const fn flag(

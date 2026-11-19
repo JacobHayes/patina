@@ -139,10 +139,10 @@ pub unsafe fn reset_signals() {
 /// FD_PATINA itself already closed, the counter and plan brokers' ends `FD_PMU` and `FD_PLAN`,
 /// which every guest runtime uses, and the shared memory carried across incarnations, `FD_SHM`):
 /// the sandbox's own descriptors (`sandbox::FD_DATA0..=FD_SPEC`) and the stdio ones, already
-/// moved to 0-2, go.
-pub unsafe fn close_inherited() {
+/// moved to 0-2, go. `FD_NODES`, the keeper's channel, stays in a run with nodes.
+pub unsafe fn close_inherited(nodes: bool) {
     const _: () = assert!(FD_PMU == FD_PATINA + 1 && FD_PLAN == FD_PMU + 1);
-    const _: () = assert!(FD_SHM > FD_PLAN + 1);
+    const _: () = assert!(FD_SHM > FD_PLAN + 1 && FD_NODES == FD_SHM + 1);
     libc::syscall(libc::SYS_close_range, 3u32, (FD_CTL - 1) as u32, 0u32);
     libc::syscall(
         libc::SYS_close_range,
@@ -156,7 +156,8 @@ pub unsafe fn close_inherited() {
         (FD_SHM - 1) as u32,
         0u32,
     );
-    libc::syscall(libc::SYS_close_range, (FD_SHM + 1) as u32, u32::MAX, 0u32);
+    let from = if nodes { FD_NODES + 1 } else { FD_SHM + 1 };
+    libc::syscall(libc::SYS_close_range, from as u32, u32::MAX, 0u32);
 }
 
 /// The supervisor's part, at its start: everything its guests inherit from it. `tmpfs_bytes`

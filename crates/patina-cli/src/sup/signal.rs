@@ -483,9 +483,11 @@ impl Sup {
                         }
                     }
                     SIGSEND_TGKILL | SIGSEND_TKILL => {
+                        let node = |p: i32| self.procs.map.get(&p).map_or(0, |p| p.node);
                         let target = match self.live_tid(tid) {
                             Some(s)
-                                if mode == SIGSEND_TKILL || self.sched.entries[s].pid == tpid =>
+                                if (mode == SIGSEND_TKILL || self.sched.entries[s].pid == tpid)
+                                    && node(self.sched.entries[s].pid) == node(pid) =>
                             {
                                 Target::Thread(s)
                             }

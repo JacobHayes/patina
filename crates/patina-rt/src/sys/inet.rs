@@ -135,11 +135,22 @@ pub(super) fn parse_addr(
     } else {
         -EADDRNOTAVAIL
     };
+    // With nodes, `10.0.0.(k + 1)` is node k's: a process may bind its own node's, and
+    // connect to any node's.
+    let me = crate::state::proc().node;
+    let nodes = (crate::state::config().nodes as usize).max(1);
     let kind4 = |a: [u8; 4]| -> Result<u8, i64> {
         match a {
             [0, 0, 0, 0] => Ok(ADDR_ANY),
             [127, 0, 0, 1] => Ok(ADDR_LOOP4),
-            [10, 0, 0, 1] => Ok(ADDR_HOST4),
+            [10, 0, 0, x] if x >= 1 && (x as usize) <= nodes => {
+                let k = x as usize - 1;
+                if !connect && k != me {
+                    Err(-EADDRNOTAVAIL)
+                } else {
+                    Ok(node_addr(k))
+                }
+            }
             _ => Err(unknown),
         }
     };
@@ -199,19 +210,19 @@ pub(super) fn put_addr(family: u16, kind: u8, port: u16, addr: u64, alen: u64) -
     let n = if family == AF_INET {
         out[0..2].copy_from_slice(&AF_INET.to_ne_bytes());
         out[2..4].copy_from_slice(&port.to_be_bytes());
-        out[4..8].copy_from_slice(&match kind {
-            ADDR_LOOP4 | ADDR_LOOP6 => [127, 0, 0, 1],
-            ADDR_HOST4 => [10, 0, 0, 1],
+        out[4..8].copy_from_slice(&match (kind, addr_octet(kind)) {
+            (ADDR_LOOP4 | ADDR_LOOP6, _) => [127, 0, 0, 1],
+            (_, Some(x)) => [10, 0, 0, x],
             _ => [0, 0, 0, 0],
         });
         16
     } else {
         out[0..2].copy_from_slice(&AF_INET6.to_ne_bytes());
         out[2..4].copy_from_slice(&port.to_be_bytes());
-        let a: [u8; 16] = match kind {
-            ADDR_LOOP6 => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
-            ADDR_LOOP4 => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1],
-            ADDR_HOST4 => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, 1],
+        let a: [u8; 16] = match (kind, addr_octet(kind)) {
+            (ADDR_LOOP6, _) => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            (ADDR_LOOP4, _) => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 127, 0, 0, 1],
+            (_, Some(x)) => [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 10, 0, 0, x],
             _ => [0; 16],
         };
         out[8..24].copy_from_slice(&a);
@@ -280,9 +291,12 @@ fn socket(call: &mut dyn Call) -> Action {
     Action::Return(fd)
 }
 
-/// Bind the real socket to `@patina-l-<port>`.
+/// Bind the real socket to `@patina-l-<n>` (`listen_n`: the port, and the node).
 fn real_bind(fd: i64, port: u16) -> i64 {
-    let (a, n) = abstract_addr(LISTEN_PREFIX, Some(port as u64));
+    let (a, n) = abstract_addr(
+        LISTEN_PREFIX,
+        Some(listen_n(crate::state::proc().node, port)),
+    );
     unsafe { sc3(nr::BIND, fd as u64, a.as_ptr() as u64, n as u64) }
 }
 
@@ -623,14 +637,19 @@ fn take_err(fd: i64, i: usize) -> u16 {
 }
 
 /// A reset not yet reported to the guest: report it once (TCP's `sk_err` = `ECONNRESET`).
-fn take_reset(fd: i64, i: usize) -> bool {
+/// The error is the one the wire left with it (`ETIMEDOUT`: a cut held the sender's data too
+/// long), else `ECONNRESET`.
+fn take_reset(fd: i64, i: usize) -> Option<i64> {
     let s = sock(i);
     if s.flags & WF_RESET == 0 {
-        return false;
+        return None;
     }
     s.flags &= !WF_RESET;
+    // A give-up (a cut held the data, runs with nodes) leaves `ETIMEDOUT` on a connected
+    // socket; a failed connect's error is on a socket that never connected.
+    let gave_up = s.state == WS_CONNECTED && s.err == e::ETIMEDOUT as u16;
     take_err(fd, i);
-    true
+    Some(if gave_up { -e::ETIMEDOUT } else { -ECONNRESET })
 }
 
 // ---- accept ----
@@ -879,8 +898,8 @@ pub(super) fn getsockopt(call: &mut dyn Call, i: usize) -> i64 {
             // SO_ERROR: the wire's pending error (a failed connect); a reset not yet reported.
             let e = if s.err != 0 {
                 take_err(fd, i) as i32
-            } else if take_reset(fd, i) {
-                ECONNRESET as i32
+            } else if let Some(e) = take_reset(fd, i) {
+                -e as i32
             } else {
                 take_err(fd, i);
                 0
@@ -968,13 +987,15 @@ fn send_check(fd: i64, i: usize) -> Option<i64> {
         WS_CONNECTED | WS_CONNECTING => {}
         _ => return Some(-EPIPE),
     }
-    take_reset(fd, i).then_some(-ECONNRESET)
+    take_reset(fd, i)
 }
 
 /// After a receive returned `r`: the end of the stream after a reset reports `ECONNRESET` once.
 fn received(fd: i64, i: usize, r: i64) -> i64 {
-    if (r == 0 || r == -ECONNRESET) && take_reset(fd, i) {
-        return -ECONNRESET;
+    if r == 0 || r == -ECONNRESET {
+        if let Some(e) = take_reset(fd, i) {
+            return e;
+        }
     }
     r
 }

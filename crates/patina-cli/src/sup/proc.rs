@@ -42,6 +42,8 @@ pub struct Process {
     pub ign: u64,
     /// Processes started and images executed (evidence).
     pub execs: u64,
+    /// The machine it belongs to (0: the driver's, or a run without nodes).
+    pub node: usize,
 }
 
 #[derive(Default)]
@@ -72,10 +74,10 @@ const CLD_KILLED: u64 = 2;
 
 impl Sup {
     fn proc_new(&mut self, pid: i32, ppid: i32, pidfd: i32, exit_signal: u64, from: Option<i32>) {
-        let (autoreap, ign) = from
+        let (autoreap, ign, node) = from
             .and_then(|p| self.procs.map.get(&p))
-            .map(|p| (p.autoreap, p.ign))
-            .unwrap_or((false, 0));
+            .map(|p| (p.autoreap, p.ign, p.node))
+            .unwrap_or((false, 0, 0));
         self.procs.map.insert(
             pid,
             Process {
@@ -90,6 +92,7 @@ impl Sup {
                 pdeathsig: 0,
                 ign,
                 execs: 0,
+                node,
             },
         );
         self.procs.created += 1;
@@ -125,6 +128,7 @@ impl Sup {
                 let ppid = self.sched.entries[parent].pid;
                 let asid = self.sched.entries[parent].asid; // the same memory as the parent
                 self.sched.add(idx, tid, pid, asid);
+                self.slot_node(idx, self.node_of(parent));
                 let s = self.slot(idx);
                 s.tid.store(tid, Relaxed);
                 s.pid.store(pid, Relaxed);
@@ -136,12 +140,27 @@ impl Sup {
                 Next::Continue(0)
             }
             HELLO_IMAGE if self.sched.entries[idx].state == State::Free => {
-                // The first guest.
+                // The first guest, or a node's first process (`nodes::boot`).
+                let node = self.slot(idx).node.load(Relaxed) as usize;
+                if node != 0 && self.nodes.booting != Some(idx) {
+                    self.finish(Verdict::new(
+                        "infra",
+                        format!("Hello of node {node} in slot {idx}, which no boot reserved"),
+                    ));
+                }
                 let asid = self.procs.new_asid();
                 self.sched.add(idx, tid, pid, asid);
+                self.slot_node(idx, node);
                 self.slot(idx).state.store(SLOT_LIVE, SeqCst);
-                self.procs.main = pid;
-                self.proc_new(pid, 1, self.pidfd, SIGCHLD_U, None);
+                let fd = if node == 0 {
+                    self.procs.main = pid;
+                    self.pidfd
+                } else {
+                    self.open_pidfd(pid)
+                };
+                self.proc_new(pid, 1, fd, SIGCHLD_U, None);
+                self.procs.map.get_mut(&pid).unwrap().node = node;
+                self.nodes.started(node, pid);
                 self.signal_thread_new(idx, pid);
                 Next::Continue(0)
             }
@@ -183,6 +202,7 @@ impl Sup {
         let asid = self.procs.new_asid();
         self.sched.free(child);
         self.sched.add(child, tid, pid, asid);
+        self.slot_node(child, self.node_of(idx));
         let s = self.slot(child);
         s.tid.store(tid, Relaxed);
         s.pid.store(pid, Relaxed);
@@ -190,6 +210,9 @@ impl Sup {
         let fd = self.open_pidfd(pid);
         self.proc_new(pid, ppid, fd, a[4], Some(ppid));
         self.shm.forked(ppid, pid);
+        for t in self.nodes.shm.values_mut() {
+            t.forked(ppid, pid);
+        }
         self.signal_thread_new(child, pid);
         Next::Continue(0)
     }
@@ -244,6 +267,9 @@ impl Sup {
         // The old image's shared memory attachments end.
         let now = self.now();
         self.shm.gone(pid, now);
+        for t in self.nodes.shm.values_mut() {
+            t.gone(pid, now);
+        }
         // Handled signals return to their default; ignored ones stay ignored.
         if let Some(p) = self.sig.procs.get_mut(&pid) {
             for (s, k) in p.kinds.iter_mut().enumerate().skip(1) {
@@ -370,6 +396,9 @@ impl Sup {
         self.io.timers_exited(&mut self.sched, pid);
         let now = self.now();
         self.shm.gone(pid, now);
+        for t in self.nodes.shm.values_mut() {
+            t.gone(pid, now);
+        }
         // The process's descriptors are closed now.
         self.ctl
             .io
@@ -394,6 +423,7 @@ impl Sup {
             [pid as u64, word as u64, vsig, ppid as u64, 0, 0],
             0,
         );
+        self.node_gone(pid, word);
         if pid == self.procs.main {
             return; // the caller ends the run
         }
@@ -508,7 +538,8 @@ impl Sup {
     }
 
     /// The first guest is gone: the run's verdict.
-    pub fn main_exit(&self, status: i64, sig: i64) -> ! {
+    pub fn main_exit(&mut self, status: i64, sig: i64) -> ! {
+        self.nodes_stop();
         let mut v = if sig != 0 {
             Verdict::new("failed", format!("killed by signal {sig}"))
         } else if status == 0 {
@@ -554,26 +585,24 @@ impl Sup {
 
     /// Target processes of a `kill` with a pid, a group, or -1, in pid order. None: no such
     /// process (`ESRCH`). PID 1 is never a target.
+    /// The processes `kill` reaches: those of the caller's node only (another node's pid is
+    /// not found, `kill(-1)` stays on the node).
     pub fn kill_targets(&self, mode: u64, id: i32, caller: i32) -> Option<Vec<(i32, PState)>> {
+        let node = self.procs.map.get(&caller).map_or(0, |p| p.node);
+        let mine = self.procs.map.iter().filter(|(_, p)| p.node == node);
         let v: Vec<(i32, PState)> = match mode {
             SIGSEND_PROC => {
                 if id == 1 {
                     return Some(vec![]);
                 }
-                let p = self.procs.map.get(&id)?;
+                let p = self.procs.map.get(&id).filter(|p| p.node == node)?;
                 vec![(id, p.state)]
             }
-            SIGSEND_PGRP => self
-                .procs
-                .map
-                .iter()
+            SIGSEND_PGRP => mine
                 .filter(|(k, _)| **k != 1 && unsafe { libc::getpgid(**k) } == id)
                 .map(|(k, p)| (*k, p.state))
                 .collect(),
-            _ => self
-                .procs
-                .map
-                .iter()
+            _ => mine
                 .filter(|(k, _)| **k != 1 && **k != caller)
                 .map(|(k, p)| (*k, p.state))
                 .collect(),

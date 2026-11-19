@@ -119,9 +119,15 @@ pub fn describe(r: &Rec) -> String {
     let kind = RecKind::from_u8(r.kind);
     let what = match kind {
         Some(RecKind::Trap) => format!("{} [{}]", name(r.nr as u64), Class::code_name(r.class)),
-        Some(RecKind::SupDecision) => Op::from_u32(r.nr)
-            .map(|o| o.name().to_string())
-            .unwrap_or_else(|| format!("op{}", r.nr)),
+        Some(RecKind::SupDecision) => match r.nr {
+            proto::ctl::DEC_NODE_START => "node start".to_string(),
+            proto::ctl::DEC_NODE_STOP => "node stop".to_string(),
+            proto::ctl::DEC_NODE_SLOT => "node slot".to_string(),
+            proto::ctl::DEC_WIRE_HEAL => "wire heal".to_string(),
+            _ => Op::from_u32(r.nr)
+                .map(|o| o.name().to_string())
+                .unwrap_or_else(|| format!("op{}", r.nr)),
+        },
         Some(RecKind::InsnEmulation) => insn_name(r.nr),
         Some(RecKind::Preempt) => match r.nr {
             1 => "counter".to_string(),
@@ -247,6 +253,54 @@ impl Str {
     }
 }
 
+/// With nodes, which node each record's thread belongs to: the run's node names (from
+/// `run.json` beside the log's incarnation) and each slot's node, as the log's `DEC_NODE_SLOT`
+/// records say it.
+pub struct Nodes {
+    names: Vec<String>,
+    slot: std::collections::HashMap<u16, usize>,
+}
+
+impl Nodes {
+    /// `None` for a run without nodes (or a log outside a run directory).
+    pub fn of_log(log: &Path) -> Option<Nodes> {
+        let run = log.parent()?.parent()?;
+        let cfg = crate::result::read_json(&run.join("run.json")).ok()?;
+        let ns = cfg["config"]["nodes"].as_array()?;
+        let names = std::iter::once("driver".to_string())
+            .chain(
+                ns.iter()
+                    .filter_map(|n| n["name"].as_str().map(str::to_string)),
+            )
+            .collect();
+        Some(Nodes {
+            names,
+            slot: Default::default(),
+        })
+    }
+
+    /// The next record in log order: ` node=NAME`.
+    pub fn see(&mut self, r: &Rec) -> String {
+        if r.kind == RecKind::SupDecision as u8 && r.nr == proto::ctl::DEC_NODE_SLOT {
+            self.slot.insert(r.args[0] as u16, r.args[1] as usize);
+        }
+        let k = self.slot.get(&r.slot).copied().unwrap_or(0);
+        format!(" node={}", self.names.get(k).map_or("?", |s| s.as_str()))
+    }
+
+    /// ` node=NAME` of record `i` of `recs`.
+    fn at(log: &Path, recs: &[Rec], i: usize) -> String {
+        let Some(mut n) = Nodes::of_log(log) else {
+            return String::new();
+        };
+        let mut s = String::new();
+        for r in recs.iter().take(i + 1) {
+            s = n.see(r);
+        }
+        s
+    }
+}
+
 /// Index and both versions of the first differing record, if any.
 pub fn first_difference(a: &[Rec], b: &[Rec]) -> Option<(usize, Option<Rec>, Option<Rec>)> {
     let n = a.len().max(b.len());
@@ -268,12 +322,12 @@ pub fn print_difference(pa: &str, pb: &str) -> Res<bool> {
                 a.len(),
                 b.len()
             );
-            let show = |r: Option<Rec>| {
-                r.map(|r| describe(&r))
+            let show = |r: Option<Rec>, p: &str, recs: &[Rec]| {
+                r.map(|r| describe(&r) + &Nodes::at(Path::new(p), recs, i))
                     .unwrap_or_else(|| "(end of log)".into())
             };
-            println!("  A: {}", show(x));
-            println!("  B: {}", show(y));
+            println!("  A: {}", show(x, pa, &a));
+            println!("  B: {}", show(y, pb, &b));
             Ok(true)
         }
     }
@@ -331,10 +385,16 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
         }
         let (x, y) = (load(&pa)?, load(&pb)?);
         if let Some((i, ra, rb)) = first_difference(&x, &y) {
+            let at = |p: &str, recs: &[Rec], r: Option<Rec>| match r {
+                Some(_) => Nodes::at(Path::new(p), recs, i),
+                None => String::new(),
+            };
             return Ok(Some(format!(
-                "inc-{k} record {i}: recorded {}; replayed {}",
+                "inc-{k} record {i}: recorded {}{}; replayed {}{}",
                 show(ra),
-                show(rb)
+                at(&pa, &x, ra),
+                show(rb),
+                at(&pb, &y, rb)
             )));
         }
     }
@@ -378,8 +438,12 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             let path = arg(1, "log dump LOG [--from SEQ] [--to SEQ]")?;
             let from = args.num::<u64>("--from")?.unwrap_or(0);
             let to = args.num::<u64>("--to")?.unwrap_or(u64::MAX);
-            for r in load(path)?.iter().filter(|r| r.seq >= from && r.seq <= to) {
-                println!("{}", describe(r));
+            let mut nodes = Nodes::of_log(Path::new(path));
+            for r in load(path)?.iter() {
+                let node = nodes.as_mut().map(|n| n.see(r)).unwrap_or_default();
+                if r.seq >= from && r.seq <= to {
+                    println!("{}{node}", describe(r));
+                }
             }
             Ok(ExitCode::SUCCESS)
         }

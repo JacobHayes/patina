@@ -61,6 +61,46 @@ pub struct RunEnd {
     /// replaying the log does not give the live tree (a Patina defect, reported next to the
     /// program's own outcome, never instead of it). None when it did not run.
     pub self_check: Option<Result<(), String>>,
+    /// A run with nodes: each node and the scripted network (`nodes_json`).
+    pub nodes: Option<Value>,
+}
+
+/// `result.json`'s `nodes`: each node (the driver first) with its address, its first process and
+/// how that ended (`running` when the run ended first), and the scripted network: cuts and heals
+/// served, connection directions a cut held, and the links still cut at the end.
+pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
+    let name = |k: usize| String::from_utf8_lossy(t.name(k)).into_owned();
+    let list: Vec<Value> = (0..t.count())
+        .map(|k| {
+            let mut v = json!({"name": name(k), "address": format!("10.0.0.{}", k + 1)});
+            if k > 0 {
+                let s = t.status[k];
+                v["pid"] = json!(t.first_pid[k]);
+                v["end"] = if t.first_pid[k] == 0 {
+                    json!("not started")
+                } else if s == proto::node::RUNNING {
+                    json!("running")
+                } else if s & 0x7f == 0 {
+                    json!({"exit": (s >> 8) & 0xff})
+                } else {
+                    json!({"signal": s & 0x7f})
+                };
+            }
+            v
+        })
+        .collect();
+    let mut cut = vec![];
+    for a in 0..t.count() {
+        for b in 0..t.count() {
+            if t.cut_at_end[a] & (1 << b) != 0 {
+                cut.push(json!([name(a), name(b)]));
+            }
+        }
+    }
+    json!({
+        "list": list,
+        "net": {"cuts": t.cuts, "heals": t.heals, "held": t.held, "cut_at_end": cut},
+    })
 }
 
 /// `result.json`'s `rewrite`: each file the runtime asked a plan for (`rewrite::cache`), and
@@ -430,6 +470,9 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some(k) = &e.check {
         r["check"] = serde_json::to_value(k).unwrap();
     }
+    if let Some(n) = &e.nodes {
+        r["nodes"] = n.clone();
+    }
     // `PACGA` reads a key the kernel redraws at every exec and that cannot be turned off: a
     // program that executes it differs run to run, so its sites are a label.
     if cfg!(target_arch = "aarch64") {
@@ -565,8 +608,13 @@ pub fn same_build(run: &Value, at: &Path) -> Res<()> {
 }
 
 /// `run.json`: the request, with the fault plan resolved from the seed (`faults`).
-pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> Res<Value> {
-    Ok(json!({
+pub fn run_json(
+    cfg: &Config,
+    program: &Program,
+    nodes: &[Program],
+    plan: &crate::faults::Plan,
+) -> Res<Value> {
+    let mut v = json!({
         "schema": RUN_SCHEMA,
         "patina": build()?,
         "seed": cfg.seed,
@@ -575,7 +623,12 @@ pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> 
         "program": program,
         "host": host_facts(),
         "inputs": crate::inputs::fingerprints(cfg),
-    }))
+    });
+    // Each node's program, as `program` (`cfg.nodes` order).
+    if !nodes.is_empty() {
+        v["node_programs"] = json!(nodes);
+    }
+    Ok(v)
 }
 
 /// The run's outcome: its own, or for a run that ended ok, the checker's finding or error.
@@ -658,6 +711,9 @@ pub fn print_human(r: &Value, dir: &Path) {
         println!("{l}");
     }
     if let Some(l) = rewrite_line(&r["rewrite"]) {
+        println!("{l}");
+    }
+    if let Some(l) = nodes_line(&r["nodes"]) {
         println!("{l}");
     }
     let ok = r["outcome"] == "ok";
@@ -829,6 +885,45 @@ pub fn compute_line(c: &Value) -> Option<String> {
 
 /// The `patina run` line for result.json's `rewrite` (`--preempt points`): points taken, the
 /// switches that walked on (`compute-walk`), and per image rewritten the share of its sites patched and of its text left dark.
+/// `nodes: primary 10.0.0.2 running, backup 10.0.0.3 exit 1; net: 2 cuts, 2 heals, 1 held,
+/// none cut at the end` (a run with nodes; each node's output is in `node/NAME/inc-K/`).
+pub fn nodes_line(n: &Value) -> Option<String> {
+    let list = n["list"].as_array()?;
+    let nodes: Vec<String> = list
+        .iter()
+        .skip(1)
+        .map(|v| {
+            let end = &v["end"];
+            let end = if let Some(x) = end["exit"].as_u64() {
+                format!("exit {x}")
+            } else if let Some(sig) = end["signal"].as_i64() {
+                format!("killed by {}", crate::outcome::signal_name(sig))
+            } else {
+                end.as_str().unwrap_or("running").to_string()
+            };
+            format!(
+                "{} {} {end}",
+                v["name"].as_str().unwrap_or("?"),
+                v["address"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    let net = &n["net"];
+    let cut = net["cut_at_end"].as_array().map_or(0, |a| a.len());
+    Some(format!(
+        "nodes: {}; net: {} cuts, {} heals, {} held, {}",
+        nodes.join(", "),
+        net["cuts"],
+        net["heals"],
+        net["held"],
+        if cut == 0 {
+            "none cut at the end".to_string()
+        } else {
+            format!("{cut} links cut at the end")
+        }
+    ))
+}
+
 pub fn rewrite_line(w: &Value) -> Option<String> {
     let images = w["images"].as_array()?;
     let n = |k: &str| w[k].as_u64().unwrap_or(0);

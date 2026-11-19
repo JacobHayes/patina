@@ -13,6 +13,7 @@
  *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--buggify)
  *   PATINA_DELAY("label", max_ns)          maybe sleep a seeded virtual time (0: default range)
  *   patina_mark(label), patina_setup_complete(), patina_is_simulated()
+ *   patina_control("net cut a b")          a control call: 0, or -errno (below)
  *
  * Labels of the macros are string literals: each expansion declares its site in the ELF section
  * `patina_sites` (so a site never reached is still reported) and keeps one static byte, so a
@@ -27,6 +28,15 @@
  * program rebuilt with coverage flags):
  *   8 COMPUTE_HELLO  arg = version 1 | kinds << 8 (1 edge, 2 access, 4 compare) -> cell address
  *   9 COMPUTE_POINT  arg = 0: the cell reached 0 -> 0, the cell refilled
+ * Op 10 CONTROL takes no header: the payload is the words, separated by blanks:
+ *   net cut A B                  both directions between the node sets A and B are cut
+ *   net cut --from A --to B      one direction: what A sends to B is held
+ *   net heal [A B | --from A --to B]   heal those links; no sets: every scripted cut
+ *   mark LABEL                   the same as patina_mark
+ * A set is node names joined by commas ("driver" is the command after --), or "rest": every
+ * node the other set does not name. Answers: 0; -EPERM when a process outside the driver's node
+ * acts on the network; -ENOENT for an unknown node; -EINVAL for other words or a run without
+ * nodes; -EOPNOTSUPP for words of a later feature; -ENOSYS outside Patina.
  */
 #ifndef PATINA_H
 #define PATINA_H
@@ -39,7 +49,7 @@
 #define PATINA_HELLO_BUGGIFY (1L << 16)
 
 enum { PATINA_OP_HELLO = 1, PATINA_OP_ASSERT, PATINA_OP_BUGGIFY, PATINA_OP_KNOB,
-       PATINA_OP_DELAY, PATINA_OP_MARK, PATINA_OP_DECLARE };
+       PATINA_OP_DELAY, PATINA_OP_MARK, PATINA_OP_DECLARE, PATINA_OP_CONTROL = 10 };
 enum { PATINA_KIND_ALWAYS = 1, PATINA_KIND_SOMETIMES, PATINA_KIND_REACHABLE,
        PATINA_KIND_BUGGIFY, PATINA_KIND_KNOB, PATINA_KIND_DELAY, PATINA_KIND_UNREACHABLE };
 
@@ -153,6 +163,14 @@ static inline void patina_mark(const char *label) {
         patina__call(PATINA_OP_MARK, PATINA_KIND_REACHABLE, 0, label, 0, 0, 0, 0);
 }
 static inline void patina_setup_complete(void) { patina_mark("setup-complete"); }
+
+/* A control call (the words above). Unlike the macros it is a call each time. */
+static inline long patina_control(const char *words) {
+    if (!patina_is_simulated()) return -38;
+    size_t n = strlen(words);
+    if (n > PATINA_TEXT_MAX) return -22;
+    return patina__sys(PATINA_OP_CONTROL, words, n);
+}
 
 /* Declare a site whose label is not a literal (the macros declare theirs in the ELF section). */
 static inline void patina_declare(int kind, const char *label, const char *where) {

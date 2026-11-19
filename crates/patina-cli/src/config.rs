@@ -130,7 +130,36 @@ pub struct Config {
     /// rerun from `run.json` is the same case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<RunCase>,
+    /// The machines besides the driver (`[node.NAME]`), in declaration order: node 1 upward.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<Node>,
 }
+
+/// One node of a run with several machines (`proto::node`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Node {
+    pub name: String,
+    pub cmd: Vec<String>,
+    /// `K=V`, added to the run's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+    /// The host directory copied into its work tree at its start, and the tree's guest path
+    /// (`work = "DIR[:GUEST]"`, as `--work`; no `GUEST`: `/work`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_at: Option<String>,
+}
+
+impl Node {
+    pub fn work_path(&self) -> &str {
+        self.work_at.as_deref().unwrap_or("/work")
+    }
+}
+
+/// The most nodes besides the driver.
+pub const MAX_NODES: usize = proto::node::MAX_NODES - 1;
 
 /// A sweep case, as its run records it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,6 +205,7 @@ impl Default for Config {
             ok_exit: vec![],
             known: None,
             case: None,
+            nodes: vec![],
         }
     }
 }
@@ -203,6 +233,8 @@ pub struct Opts {
     pub program: Program,
     pub plan: faults::Plan,
     pub fs_model: Model,
+    /// Each node's program (`cfg.nodes` order).
+    pub node_programs: Vec<Program>,
 }
 
 fn expand(base: &Path, p: &str) -> PathBuf {
@@ -747,6 +779,10 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
     let unknown = |k: &str| format!("{name}: unknown key {k}");
     for (sec, v) in &doc {
         let t = table(v, &format!("{name}: [{sec}]"))?;
+        if sec == "node" {
+            c.nodes = nodes(&text, t, &base, &name)?;
+            continue;
+        }
         for (k, v) in t {
             let at = format!("{name}: {sec}.{k}");
             match (sec.as_str(), k.as_str()) {
@@ -835,6 +871,57 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
         }
     }
     Ok(check)
+}
+
+/// `[node.NAME]` tables, in the order the file declares them (a TOML table's keys are not).
+fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>> {
+    let order: Vec<String> = match toml::de::DeTable::parse(text) {
+        Ok(d) => {
+            let mut keys: Vec<(usize, String)> = match d.get_ref().get("node").map(|v| v.get_ref())
+            {
+                Some(toml::de::DeValue::Table(n)) => n
+                    .keys()
+                    .map(|k| (k.span().start, k.get_ref().to_string()))
+                    .collect(),
+                _ => vec![],
+            };
+            keys.sort();
+            keys.into_iter().map(|k| k.1).collect()
+        }
+        Err(e) => return Err(format!("{file}: {e}")),
+    };
+    let mut out = vec![];
+    for n in order {
+        let at = format!("{file}: node.{n}");
+        let v = t.get(&n).ok_or_else(|| format!("{at}: not found"))?;
+        let mut node = Node {
+            name: n.clone(),
+            cmd: vec![],
+            env: vec![],
+            work: None,
+            work_at: None,
+        };
+        for (k, v) in table(v, &at)? {
+            let at = format!("{at}.{k}");
+            match k.as_str() {
+                "cmd" => node.cmd = strings(v, &at)?,
+                "env" => {
+                    for (ek, ev) in table(v, &at)? {
+                        node.env.push(format!("{ek}={}", string(ev, &at)?));
+                    }
+                }
+                "work" => (node.work, node.work_at) = work(base, &at, &string(v, &at)?)?,
+                "count" | "restart" | "ok-exit" | "max-incarnations" | "faults" => {
+                    return Err(format!(
+                        "{at}: not available yet (node crash and restart, per-node faults)"
+                    ))
+                }
+                _ => return Err(format!("{file}: unknown key node.{n}.{k}")),
+            }
+        }
+        out.push(node);
+    }
+    Ok(out)
 }
 
 /// The resolved configuration of `run` and `verify`.
@@ -1033,12 +1120,97 @@ impl Config {
                 "pmu-short-max is at most pmu-margin + 1024 (short slices are hopped)".into(),
             );
         }
+        let node_programs = self.check_nodes(&plan)?;
         Ok(Opts {
             cfg: self.clone(),
             program,
             plan,
             fs_model,
+            node_programs,
         })
+    }
+
+    /// Check the nodes of a run (`proto::node`) and resolve their programs.
+    fn check_nodes(&self, plan: &faults::Plan) -> Res<Vec<Program>> {
+        if self.nodes.is_empty() {
+            return Ok(vec![]);
+        }
+        if self.nodes.len() > MAX_NODES {
+            return Err(format!(
+                "[node.*]: at most {MAX_NODES} nodes besides the driver"
+            ));
+        }
+        if self.crash.is_some() {
+            return Err(
+                "--crash with nodes: not available yet (node crash and restart come later)".into(),
+            );
+        }
+        // The plan's settings beyond the compute points' are fault classes.
+        if let Some((k, _)) = plan
+            .resolved
+            .iter()
+            .find(|(k, _)| !k.starts_with("compute-"))
+        {
+            return Err(format!(
+                "--fault {k} with nodes: not available yet (per-node faults and seed-drawn \
+                 partitions come later)"
+            ));
+        }
+        let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
+        let at = crate::launch::GUEST_PATINA;
+        if let Some(m) = self.mounts.iter().find(|m| under(at, &m.dst)) {
+            return Err(format!(
+                "mount {} with nodes: patina ctl is at {at}, which it would cover",
+                m.dst
+            ));
+        }
+        let mut programs = vec![];
+        for n in &self.nodes {
+            let at = format!("node.{}", n.name);
+            if !proto::node::valid_name(n.name.as_bytes()) {
+                return Err(format!(
+                    "{at}: a node name is 1 to {} letters, digits and -, starting with a letter",
+                    proto::node::NAME_MAX
+                ));
+            }
+            if n.name.as_bytes() == proto::node::DRIVER {
+                return Err(format!(
+                    "{at}: driver is the name of node 0 (the command after --)"
+                ));
+            }
+            if let Some(why) = proto::node::RESERVED
+                .iter()
+                .find(|(r, _)| n.name.as_bytes() == *r)
+                .map(|(_, why)| why)
+            {
+                return Err(format!("{at}: the name is taken ({why})"));
+            }
+            if n.cmd.is_empty() {
+                return Err(format!("{at}: cmd is required"));
+            }
+            if let Some(e) = n.env.iter().find(|e| !e.contains('=')) {
+                return Err(format!("{at}: env {e}: expected K=V"));
+            }
+            let w = n.work_path();
+            if let Some(m) = self
+                .mounts
+                .iter()
+                .find(|m| under(&m.dst, w) || under(w, &m.dst))
+            {
+                return Err(format!(
+                    "{at}: the work tree is at {w}; mount {} cannot be in it or around it",
+                    m.dst
+                ));
+            }
+            if w != self.work_path() && (under(w, self.work_path()) || under(self.work_path(), w)) {
+                return Err(format!(
+                    "{at}: its work tree {w} is inside the driver's {} or holds it",
+                    self.work_path()
+                ));
+            }
+            programs.push(program(&n.cmd[0], &self.mounts).map_err(|e| format!("{at}: {e}"))?);
+        }
+        Ok(programs)
     }
 
     /// The work tree's guest path.

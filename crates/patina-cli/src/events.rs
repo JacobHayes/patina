@@ -29,9 +29,9 @@ use std::path::{Path, PathBuf};
 pub const VERSION: u32 = 1;
 
 /// Every event type, in the order the guide lists them.
-pub const TYPES: [&str; 14] = [
+pub const TYPES: [&str; 16] = [
     "header", "inc", "cut", "call", "op", "fault", "crash", "mark", "sdk", "signal", "sigfault",
-    "sched", "preempt", "insn",
+    "sched", "preempt", "insn", "node", "net",
 ];
 
 /// What to print: the types (`None`: all) and the sequence range of events that have one.
@@ -479,6 +479,7 @@ fn sdk_op(op: u64) -> &'static str {
         OP_DECLARE => "declare",
         OP_COMPUTE_HELLO => "compute-hello",
         OP_COMPUTE_POINT => "compute-point",
+        OP_CONTROL => "control",
         _ => "unknown",
     }
 }
@@ -489,19 +490,104 @@ struct Export<'a, W: Write> {
     sel: &'a Select,
     result: Option<Value>,
     work: String,
+    /// A run with nodes: their names (the driver first), each slot's node as the log says it
+    /// (`DEC_NODE_SLOT`), and the node of the record being exported.
+    nodes: Vec<String>,
+    slot_node: HashMap<u16, usize>,
+    node: Option<usize>,
 }
 
 impl<W: Write> Export<'_, W> {
-    fn emit(&mut self, ty: &str, seq: Option<u64>, line: Line) -> Res<()> {
+    fn emit(&mut self, ty: &str, seq: Option<u64>, mut line: Line) -> Res<()> {
         // The header is always printed: it says what the stream is.
         let wanted = ty == "header" || self.sel.wants(ty);
         if !wanted || seq.is_some_and(|s| !self.sel.in_range(s)) {
             return Ok(());
         }
+        // With nodes, an event of a thread names the thread's node.
+        if let Some(n) = self.node.and_then(|n| self.nodes.get(n)) {
+            line.str("node", &n.clone());
+        }
         writeln!(self.out, "{}", line.done()).map_err(|e| e.to_string())
     }
 
+    fn node_name(&self, k: u64) -> String {
+        self.nodes
+            .get(k as usize)
+            .cloned()
+            .unwrap_or_else(|| k.to_string())
+    }
+
+    /// Node names of a bit set (`Op::Net`).
+    fn node_set(&self, bits: u64) -> String {
+        let v: Vec<Value> = (0..64)
+            .filter(|b| bits & (1 << b) != 0)
+            .map(|b| self.node_name(b).into())
+            .collect();
+        Value::from(v).to_string()
+    }
+
+    /// The node events (`node`, `net`) of a decision record, if it is one.
+    fn node_record(&mut self, k: usize, r: &Rec) -> Option<Res<()>> {
+        if r.kind != RecKind::SupDecision as u8 || self.nodes.is_empty() {
+            return None;
+        }
+        let a = r.args;
+        let mut l;
+        let ty = match r.nr {
+            proto::ctl::DEC_NODE_SLOT => {
+                self.slot_node.insert(a[0] as u16, a[1] as usize);
+                return Some(Ok(()));
+            }
+            proto::ctl::DEC_NODE_START | proto::ctl::DEC_NODE_STOP => {
+                l = Line::at("node", k, r);
+                let start = r.nr == proto::ctl::DEC_NODE_START;
+                l.str("event", if start { "start" } else { "stop" })
+                    .str("name", &self.node_name(a[0]));
+                if start {
+                    l.num("pid", a[1]);
+                } else {
+                    l.num("live", a[1]);
+                }
+                "node"
+            }
+            n if n == Op::Net as u32 => {
+                l = Line::at("net", k, r);
+                let verb = match a[0] {
+                    proto::node::NET_CUT => "cut",
+                    proto::node::NET_HEAL => "heal",
+                    _ => "unknown",
+                };
+                l.str("event", verb)
+                    .raw("from", &self.node_set(a[1]))
+                    .raw("to", &self.node_set(a[2]))
+                    .raw("both", if a[3] != 0 { "true" } else { "false" })
+                    .num("ret", r.ret);
+                "net"
+            }
+            proto::ctl::DEC_WIRE_HEAL => {
+                l = Line::at("net", k, r);
+                l.str("event", "release")
+                    .num("conn", a[0])
+                    .num("dir", a[1])
+                    .num("until", a[2]);
+                "net"
+            }
+            _ => return None,
+        };
+        self.node = None;
+        Some(self.emit(ty, Some(r.seq), l))
+    }
+
+    /// Operations are the driver's work tree's (a node's work tree has no operation log yet).
     fn op(&mut self, k: usize, names: &mut Names, o: &OpEv) -> Res<()> {
+        self.node = (!self.nodes.is_empty()).then_some(0);
+        let r = self.op_of(k, names, o);
+        self.node = None;
+        r
+    }
+
+    fn op_of(&mut self, k: usize, names: &mut Names, o: &OpEv) -> Res<()> {
         let (path, to) = names.apply(o);
         let Some(kind) = o.kind else {
             return Ok(());
@@ -596,6 +682,18 @@ impl<W: Write> Export<'_, W> {
     }
 
     fn record(&mut self, k: usize, inc: &Path, recs: &mut Records, r: &Rec) -> Res<()> {
+        if !self.nodes.is_empty() {
+            self.node = Some(self.slot_node.get(&r.slot).copied().unwrap_or(0));
+        }
+        let res = match self.node_record(k, r) {
+            Some(res) => res,
+            None => self.record_of(k, inc, recs, r),
+        };
+        self.node = None;
+        res
+    }
+
+    fn record_of(&mut self, k: usize, inc: &Path, recs: &mut Records, r: &Rec) -> Res<()> {
         let a = r.args;
         match RecKind::from_u8(r.kind) {
             Some(RecKind::Trap) if r.nr as u64 == proto::sdk::SYSCALL => {
@@ -842,11 +940,26 @@ pub fn export(run: &Path, sel: &Select, out: impl Write) -> Res<()> {
         .as_ref()
         .and_then(|c| c["config"]["work-at"].as_str().map(str::to_string))
         .unwrap_or_else(|| "/work".to_string());
+    let nodes: Vec<String> = cfg
+        .as_ref()
+        .and_then(|c| c["config"]["nodes"].as_array())
+        .map(|ns| {
+            std::iter::once("driver".to_string())
+                .chain(
+                    ns.iter()
+                        .filter_map(|n| n["name"].as_str().map(str::to_string)),
+                )
+                .collect()
+        })
+        .unwrap_or_default();
     let mut x = Export {
         out: BufWriter::with_capacity(1 << 20, out),
         sel,
         result: crate::result::read_json(&run.join("result.json")).ok(),
         work,
+        nodes,
+        slot_node: HashMap::new(),
+        node: None,
     };
     let mut l = Line(format!("{{\"type\":\"header\",\"v\":{VERSION}"));
     if let Some(s) = cfg.as_ref().and_then(|c| c["config"]["seed"].as_u64()) {
@@ -854,6 +967,9 @@ pub fn export(run: &Path, sel: &Select, out: impl Write) -> Res<()> {
     }
     l.str("work", &x.work.clone())
         .num("incarnations", incs.len());
+    if !x.nodes.is_empty() {
+        l.raw("nodes", &Value::from(x.nodes.clone()).to_string());
+    }
     x.emit("header", None, l)?;
     for (k, inc) in incs.iter().enumerate() {
         x.incarnation(k, inc)?;

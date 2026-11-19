@@ -60,10 +60,14 @@ struct USock {
     order: u64,
     /// Packets the kernel did not take yet (its buffer was full).
     held: VecDeque<Vec<u8>>,
+    /// The node of the process that made it: datagrams stay on their node (`ADDR_HOST4` is
+    /// the node's own address here, `rt::sys::udp`).
+    node: usize,
 }
 
 struct Flight {
     src: usize,
+    node: usize,
     skind: u8,
     sport: u16,
     dkind: u8,
@@ -77,8 +81,9 @@ pub struct Udp {
     listen_fd: i32,
     pending: BTreeMap<usize, i32>,
     socks: BTreeMap<usize, USock>,
-    ports: BTreeMap<u16, Vec<usize>>,
-    next_port: u16,
+    /// Bound sockets by (node, port): every node has its own port space.
+    ports: BTreeMap<(usize, u16), Vec<usize>>,
+    next_port: BTreeMap<usize, u16>,
     next_id: u64,
     next_order: u64,
     flight: BTreeMap<u64, (Flight, EventId)>,
@@ -144,7 +149,6 @@ impl Udp {
         }
         self.host_sndbuf = got;
         self.listen_fd = fd;
-        self.next_port = PORT_FIRST;
         self.next_id = 1;
         self.sweep_at = 64;
         self.buf = vec![0u8; DGRAM_MAX6 + DGRAM_HDR + 64];
@@ -159,9 +163,9 @@ impl Udp {
 }
 
 impl Sup {
-    pub fn udp_op(&mut self, op: Op, a: [u64; 6]) -> Next {
+    pub fn udp_op(&mut self, op: Op, idx: usize, a: [u64; 6]) -> Next {
         let r = match op {
-            Op::UdpSocket => self.udp_socket(a[0] as usize, a[1] as u16),
+            Op::UdpSocket => self.udp_socket(a[0] as usize, a[1] as u16, self.node_of(idx)),
             Op::UdpBind => self.udp_bind(a[0] as usize, a[1] as u16, a[2] as u8, a[3]),
             // A shutdown of the read side: wake what waits for the socket to be readable.
             Op::UdpConnect if a[3] == 2 => {
@@ -173,9 +177,9 @@ impl Sup {
                     s.peer = (a[3] == 1).then_some((a[2] as u8, a[1] as u16));
                     s.kind = a[4] as u8;
                     if a[3] == 0 && a[5] == 0 && s.port != 0 {
-                        let p = s.port;
+                        let (p, node) = (s.port, s.node);
                         s.port = 0;
-                        self.udp_unport(a[0] as usize, p);
+                        self.udp_unport(a[0] as usize, node, p);
                     }
                 }
                 0
@@ -186,7 +190,7 @@ impl Sup {
         Next::Continue(r)
     }
 
-    fn udp_socket(&mut self, i: usize, family: u16) -> i64 {
+    fn udp_socket(&mut self, i: usize, family: u16, node: usize) -> i64 {
         if self.udp.host_sndbuf < 2 * DGRAM_BUF_MAX {
             self.finish(Verdict::new(
                 "infra",
@@ -246,6 +250,7 @@ impl Sup {
                 peer: None,
                 order: 0,
                 held: VecDeque::new(),
+                node,
             },
         );
         if self.udp.socks.len() >= self.udp.sweep_at {
@@ -279,23 +284,23 @@ impl Sup {
         unsafe { libc::close(s.fd) };
         self.udp.blocked.remove(&i);
         if s.port != 0 {
-            self.udp_unport(i, s.port);
+            self.udp_unport(i, s.node, s.port);
         }
         self.wire_decide(DEC_UDP_CLOSE, [i as u64, s.port as u64, 0, 0, 0, 0]);
     }
 
-    fn udp_unport(&mut self, i: usize, p: u16) {
-        if let Some(v) = self.udp.ports.get_mut(&p) {
+    fn udp_unport(&mut self, i: usize, node: usize, p: u16) {
+        if let Some(v) = self.udp.ports.get_mut(&(node, p)) {
             v.retain(|&x| x != i);
             if v.is_empty() {
-                self.udp.ports.remove(&p);
+                self.udp.ports.remove(&(node, p));
             }
         }
     }
 
-    /// Live sockets bound to `p`.
-    fn udp_on_port(&mut self, p: u16) -> Vec<usize> {
-        let v = self.udp.ports.get(&p).cloned().unwrap_or_default();
+    /// Live sockets of node `node` bound to `p`.
+    fn udp_on_port(&mut self, node: usize, p: u16) -> Vec<usize> {
+        let v = self.udp.ports.get(&(node, p)).cloned().unwrap_or_default();
         let mut out = vec![];
         for j in v {
             if self.udp.live(j) {
@@ -308,7 +313,7 @@ impl Sup {
     }
 
     fn udp_bind(&mut self, i: usize, port: u16, kind: u8, flags: u64) -> i64 {
-        let Some(family) = self.udp.socks.get(&i).map(|s| s.family) else {
+        let Some((family, node)) = self.udp.socks.get(&i).map(|s| (s.family, s.node)) else {
             return -(libc::EBADF as i64);
         };
         let v6only = flags & UDP_V6ONLY != 0;
@@ -316,9 +321,10 @@ impl Sup {
             let span = (PORT_LAST - PORT_FIRST) as u32 + 1;
             let mut got = None;
             for _ in 0..span {
-                let p = self.udp.next_port;
-                self.udp.next_port = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
-                if self.udp_on_port(p).is_empty() {
+                let next = self.udp.next_port.entry(node).or_insert(PORT_FIRST);
+                let p = *next;
+                *next = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
+                if self.udp_on_port(node, p).is_empty() {
                     got = Some(p);
                     break;
                 }
@@ -328,7 +334,7 @@ impl Sup {
                 None => return -(libc::EADDRINUSE as i64),
             }
         } else {
-            for j in self.udp_on_port(port) {
+            for j in self.udp_on_port(node, port) {
                 let o = &self.udp.socks[&j];
                 let ov6 = o.flags & UDP_V6ONLY != 0;
                 let overlap = [ADDR_LOOP4, ADDR_HOST4, ADDR_LOOP6]
@@ -349,7 +355,7 @@ impl Sup {
         s.kind = kind;
         s.flags = flags;
         s.order = order;
-        self.udp.ports.entry(p).or_default().push(i);
+        self.udp.ports.entry((node, p)).or_default().push(i);
         p as i64
     }
 
@@ -401,7 +407,7 @@ impl Sup {
                 format!("udp: send on unknown socket {i}"),
             ));
         };
-        let (fd, sport, skind) = (s.fd, s.port, s.kind);
+        let (fd, sport, skind, node) = (s.fd, s.port, s.kind, s.node);
         let r = unsafe {
             libc::recv(
                 fd,
@@ -449,6 +455,7 @@ impl Sup {
         let lost = fate & (UF_DROP | UF_PARTITION) != 0;
         let f = |dup| Flight {
             src: i,
+            node,
             skind,
             sport,
             dkind,
@@ -497,9 +504,16 @@ impl Sup {
     }
 
     /// The socket a datagram from (skind, sport) to (dkind, dport) reaches, if any.
-    fn udp_route(&mut self, skind: u8, sport: u16, dkind: u8, dport: u16) -> Option<usize> {
+    fn udp_route(
+        &mut self,
+        node: usize,
+        skind: u8,
+        sport: u16,
+        dkind: u8,
+        dport: u16,
+    ) -> Option<usize> {
         let mut best: Vec<(u64, u64, usize)> = vec![];
-        for j in self.udp_on_port(dport) {
+        for j in self.udp_on_port(node, dport) {
             let s = &self.udp.socks[&j];
             if !covers(s.family, s.kind, s.flags & UDP_V6ONLY != 0, dkind) {
                 continue;
@@ -539,7 +553,7 @@ impl Sup {
         let id = k >> 1;
         let len = f.data.len() as u64;
         let c = &tab(self.ctl).counters;
-        let Some(j) = self.udp_route(f.skind, f.sport, f.dkind, f.dport) else {
+        let Some(j) = self.udp_route(f.node, f.skind, f.sport, f.dkind, f.dport) else {
             WireTab::inc(&c.dgram_lost, 1);
             self.wire_decide(
                 DEC_UDP_DELIVER,

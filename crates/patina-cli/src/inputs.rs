@@ -14,10 +14,17 @@ const CAP: usize = 20_000;
 
 /// `[{"dst": guest path, "fp": hex or null}]`, one per mount, in the order given.
 pub fn fingerprints(cfg: &Config) -> Value {
+    // A node's starting tree is an input as a mount is (named `node.NAME work`).
+    let nodes = cfg.nodes.iter().filter_map(|n| {
+        n.work
+            .as_ref()
+            .map(|w| json!({"dst": format!("node.{} work", n.name), "fp": of(w)}))
+    });
     Value::Array(
         cfg.mounts
             .iter()
             .map(|m| json!({"dst": m.dst, "fp": of(&m.src)}))
+            .chain(nodes)
             .collect(),
     )
 }

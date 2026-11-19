@@ -38,13 +38,14 @@ import sys
 
 __all__ = [
     "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "BuggifyDelay", "Knob",
-    "mark", "setup_complete", "is_simulated", "compute",
+    "mark", "setup_complete", "is_simulated", "compute", "control",
 ]
 
 _SYSCALL = 0x7061
 _VERSION = 1
 _HELLO_BUGGIFY = 1 << 16
 _HELLO, _ASSERT, _BUGGIFY, _KNOB, _DELAY, _MARK, _DECLARE = range(1, 8)
+_CONTROL = 10
 _ALWAYS, _SOMETIMES, _REACHABLE, _POINT, _KNOBK, _DELAYK, _UNREACHABLE = range(1, 8)
 _NEVER = 2
 _LABEL_MAX = 255
@@ -240,6 +241,21 @@ def mark(label):
     """Name a point in the run's log."""
     if _get()[0]:
         _call(_MARK, _REACHABLE, False, label.encode("utf-8"))
+
+
+def control(words):
+    """A control call (the grammar is in ``patina.h``), e.g. ``control("net cut a b")``: raises
+    ``OSError`` with the errno Patina answered (``EPERM`` outside the driver's node, ``ENOENT``
+    for an unknown node, ``EINVAL`` for other words, ``EOPNOTSUPP`` for a later feature), or
+    ``ENOSYS`` outside Patina."""
+    if not _get()[0]:
+        raise OSError(38, "control: not inside a Patina run")
+    w = words.encode("utf-8")
+    if not 0 < len(w) <= _TEXT_MAX:
+        raise OSError(22, "control: expected 1 to %d bytes of words" % _TEXT_MAX)
+    r = _sys(_CONTROL, ctypes.create_string_buffer(w, len(w)))
+    if r < 0:
+        raise OSError(-r, "control %r: %s" % (words, os.strerror(-r)))
 
 
 def setup_complete():

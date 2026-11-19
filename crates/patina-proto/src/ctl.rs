@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 19;
+pub const LAYOUT_VERSION: u64 = 20;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -62,6 +62,9 @@ pub struct Config {
     /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
     /// NUL-padded; all zero is `/work`.
     pub work: [u8; WORK_PATH_MAX],
+    /// Machines of the run, the driver (node 0) included; 0 in a run without nodes
+    /// (`crate::node`).
+    pub nodes: u64,
 }
 
 /// The longest work tree path, with its NUL.
@@ -152,6 +155,7 @@ impl Config {
             log_limit: crate::layout::LOG_MAX,
             log_paths: 0,
             work: [0; WORK_PATH_MAX],
+            nodes: 0,
         }
     }
 }
@@ -195,11 +199,12 @@ pub struct Ctl {
     /// Which slot holds the current request.
     pub pending_slot: AtomicU32,
     pub stats: Stats,
-    /// Nonzero once the first guest process of this incarnation has installed the
-    /// runtime's seccomp filter. Every later guest process descends from it and inherits the
-    /// filter, so the runtime's entry after an `execve` must not stack a second one; an
-    /// inherited filter from outside the sandbox (a container's profile) is not a reason to
-    /// skip it, which is why `PR_GET_SECCOMP` cannot be the test.
+    /// Bit `1 << node` set once the first guest process of that node (of this incarnation)
+    /// has installed the runtime's seccomp filter. Every later guest process of the node
+    /// descends from it and inherits the filter, so the runtime's entry after an `execve`
+    /// must not stack a second one; an inherited filter from outside the sandbox (a
+    /// container's profile) is not a reason to skip it, which is why `PR_GET_SECCOMP` cannot
+    /// be the test. A node's first process descends from the keeper, not from the driver.
     pub filter_installed: AtomicU64,
     /// Operation-log bytes that do not count against `Config::log_limit`: the base records of
     /// the incarnation's starting work tree, written by the supervisor before the program runs.
@@ -512,8 +517,9 @@ const _: () = assert!(core::mem::size_of::<Ctl>() <= 4096);
 pub const CTL_HEADER_SIZE: usize = 4096;
 /// Header, slots, the shared filesystem state (`vfs`), the durability state (`oplog::Dur`),
 /// the network wire's table (`wire::WireTab`), the SDK's site table (`sdk::SdkTab`), the
-/// compute-point image table (`ComputeTab`), then the instruction scans (`ScanTab`).
-pub const CTL_SIZE: usize = SCAN_TAB_OFFSET + SCAN_TAB_SIZE;
+/// compute-point image table (`ComputeTab`), the instruction scans (`ScanTab`), then the node
+/// table (`node::NodeTab`).
+pub const CTL_SIZE: usize = crate::node::NODE_TAB_OFFSET + crate::node::NODE_TAB_SIZE;
 
 /// Images listed in `ComputeTab`, and the bytes of each one's path kept (its end).
 pub const IMAGES_MAX: usize = 32;
@@ -740,6 +746,10 @@ pub struct Slot {
     /// and `SCHED_RESET_ON_FORK` (bit 16); 0 is `SCHED_OTHER` at nice 0. Kept by the runtimes
     /// so that a get after a set answers what was set; they change nothing in the schedule.
     pub sched: AtomicU64,
+    /// The machine the thread belongs to (`crate::node`; 0: the driver, or a run without
+    /// nodes). Written by the supervisor when it reserves the slot; the runtime reads it at
+    /// `Hello`.
+    pub node: AtomicU64,
 }
 
 /// Reply flag: signal number to deliver before returning (0: none).
@@ -836,6 +846,10 @@ pub enum Op {
     /// The virtual time table is 3/4 full: drop the entries of inodes nothing can reach any
     /// more (`vfs::VtEntry::gone_dev`). Reply 0.
     VtReclaim = 61,
+    /// A control call's network words (`crate::node::Control`), from the driver's node:
+    /// [`NET_CUT`|`NET_HEAL`, from set, to set] (sets of node bits; a heal with both sets 0
+    /// heals every scripted cut). Reply 0.
+    Net = 62,
 }
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -866,6 +880,8 @@ pub const DEC_WIRE_FIN: u32 = 0x143;
 pub const DEC_WIRE_RST: u32 = 0x144;
 pub const DEC_WIRE_FAIL: u32 = 0x145;
 pub const DEC_WIRE_CLOSE: u32 = 0x146;
+/// A heal reached a direction a cut held (`node`): [conn, dir, the last held item's new time].
+pub const DEC_WIRE_HEAL: u32 = 0x14a;
 
 /// Datagram-socket requests (`patina/src/sup/udp.rs`). Socket indexes as for the wire.
 ///
@@ -922,7 +938,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 38] = [
+        const ALL: [Op; 39] = [
             Hello,
             Yield,
             Sleep,
@@ -961,6 +977,7 @@ impl Op {
             UdpSend,
             SdkViolation,
             VtReclaim,
+            Net,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -1005,6 +1022,7 @@ impl Op {
             UdpSend => "UdpSend",
             SdkViolation => "SdkViolation",
             VtReclaim => "VtReclaim",
+            Net => "Net",
         }
     }
 }
@@ -1217,6 +1235,14 @@ pub const SIGACT_PDEATHSIG: u64 = 100;
 pub const FUTEX_SHARED_BIT: u64 = 1 << 63;
 /// Decision code: a process passed its exit barrier (args: [pid, status word, virtual signal, parent]).
 pub const DEC_PROC_GONE: u32 = 0x130;
+/// Decision code: a node's first process said `Hello` at boot (args: [node, pid]).
+pub const DEC_NODE_START: u32 = 0x150;
+/// Decision code: the driver ended the run while node `node` still had processes (args:
+/// [node, live processes]); one per such node, in node order, before the run's end.
+pub const DEC_NODE_STOP: u32 = 0x151;
+/// In a run with nodes, slot [slot] now runs a thread of [node] (only when that changed; a
+/// slot's node is the driver's until a record says otherwise).
+pub const DEC_NODE_SLOT: u32 = 0x152;
 
 /// Signals whose default action is "ignore" (SIGCHLD, SIGCONT, SIGURG, SIGWINCH).
 pub const fn sig_default_ignored(sig: u64) -> bool {

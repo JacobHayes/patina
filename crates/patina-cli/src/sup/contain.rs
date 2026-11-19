@@ -86,6 +86,11 @@ fn ctl_field(off: usize) -> String {
             "compute-point image table",
         ),
         (SCAN_TAB_OFFSET, SCAN_TAB_SIZE, "instruction scan table"),
+        (
+            proto::node::NODE_TAB_OFFSET,
+            proto::node::NODE_TAB_SIZE,
+            "node table",
+        ),
     ];
     for (start, len, name) in tables {
         if (start..start + len).contains(&off) {
@@ -123,7 +128,7 @@ const CTL_FIELDS: &[(usize, usize, &str)] = fields!(Ctl:
 );
 
 const SLOT_FIELDS: &[(usize, usize, &str)] =
-    fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched);
+    fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched, node);
 
 #[cfg(test)]
 mod tests {

@@ -574,8 +574,8 @@ exit: 1
 -->
 ```text
 violation always: journal-intact: N bytes
-  12 of 20 runs   first: seed 2   replayed: identical
-  example: journal-intact: 7088 bytes
+  11 of 20 runs   first: seed 2   replayed: identical
+  example: journal-intact: 7081 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
 ```
 
@@ -1172,6 +1172,132 @@ version). Keep each in its own table and judge again as the tables grow:
 
 The checker of `tests/oracles/06-triage.sh` is such a checker, in eight lines of shell.
 
+## Several machines
+
+A run can hold several machines, called nodes. The command after `--` is the **driver**,
+node 0: it is never faulted, and the run ends with its exit status, as a run without nodes
+does. Each `[node.NAME]` table in `patina.toml` adds a node whose first process starts with
+the run:
+
+<!-- transcript nodes-kv
+dir: /tmp/nodes
+setup: mkdir g && cp "$GUESTS/kv.py" "$GUESTS/patina.py" g/
+setup: printf '[node.primary]\ncmd = ["python3", "/guest/kv.py", "primary"]\n\n[node.backup]\ncmd = ["python3", "/guest/kv.py", "backup"]\n' >patina.toml
+-->
+```text
+$ cat patina.toml
+[node.primary]
+cmd = ["python3", "/guest/kv.py", "primary"]
+
+[node.backup]
+cmd = ["python3", "/guest/kv.py", "backup"]
+$ patina run --mount g:/guest -- python3 /guest/kv.py driver
+ok (exit): the program exited 0
+guest: exit 0
+nodes: primary 10.0.0.2 running, backup 10.0.0.3 running; net: 1 cuts, 1 heals, 1 held, none cut at the end
+run directory: /tmp/nodes/patina-out/run-0
+replay: patina replay /tmp/nodes/patina-out/run-0
+$ cat patina-out/run-0/inc-0/stdout
+replicated: 3 keys
+cut: the SET waits for the backup
+cut: the backup is behind
+healed: converged on [('cut', 'v-cut'), ('k0', 'v0'), ('k1', 'v1'), ('k2', 'v2')]
+```
+
+`kv.py` (in `tests/guests/nodes`) is a key-value store whose primary sends each write to the
+backup and answers once the backup has acknowledged it. The driver writes and reads back from
+the backup, cuts the link between the two, sees the next write wait and the backup fall behind,
+heals the link, and checks that both sides agree. With the backup acknowledging before it
+applies, the read-back finds a stale value in most seeds (`tests/nodes/02-kv.sh`).
+
+A node's keys: `cmd` (required), `env` (a table, added to the run's), and `work = "DIR[:GUEST]"`
+(the host directory its work tree starts from, and the tree's guest path; default `/work`,
+empty). Nodes start in the order the file lists them, one after another, before the driver
+runs; up to 15. Their names are letters, digits and `-`, starting with a letter; `driver` is
+the driver's, and `rest`, `localhost` and `sim` are taken.
+
+**What a node has of its own.** A work tree, `/tmp` and `/dev/shm` (each an empty tmpfs, the
+work tree filled from `work`), its hostname (its name; the driver's is `driver`), System V
+shared memory, a TCP and UDP port space, a loopback, and the address `10.0.0.(k+1)`: the driver
+is `10.0.0.1`, the first node `10.0.0.2`. `/etc/hosts` names every node, so `primary` resolves
+on all of them. The rest of the sandbox (`/usr`, `/guest`, the mounts) is shared and read-only
+on the nodes (what the driver writes there, nodes see); the driver's work tree is not visible
+to them. A node's process sees only its own
+node's processes: another node's are `ESRCH` to `kill` and absent from `/proc`. Each node's
+first process starts with the driver's process state (umask, limits, signals) and the
+environment `PATINA_NODE=NAME` and `HOME` (its work tree). Its output is in
+`RUNDIR/node/NAME/inc-0/`, beside the driver's `inc-0/`.
+
+**Addresses.** A listener on `0.0.0.0` or the node's own address is reachable from every node
+at that address; one on `127.0.0.1` only from its own node. Connections show the nodes'
+addresses at both ends (`getsockname`, `getpeername`, `accept`). Binding another node's address
+answers `EADDRNOTAVAIL`. UDP stays inside a node: a datagram to another node's address is
+refused (`udp:other-node` in `refused`, `ENETUNREACH`). Abstract `AF_UNIX` names (and autobind)
+are refused in a run with nodes (`unix:abstract-with-nodes`), since they would cross nodes;
+`AF_UNIX` sockets at paths work, each in its node's own files.
+
+**Control from the driver.** The driver acts on the network with control calls: `patina ctl
+WORDS` in a script (`patina` is at `/opt/patina/bin/patina`, on the `PATH` of a run with
+nodes), `patina.control("WORDS")` in Python, `patina_control("WORDS")` in C (`patina.h`).
+Each is a call the log records (`mark` and `net` events below).
+
+| Words | |
+|---|---|
+| `net cut A B` | cut both directions between the node sets `A` and `B` |
+| `net cut --from A --to B` | cut one direction: what `A` sends to `B` is held |
+| `net heal A B`, `net heal --from A --to B` | heal those links |
+| `net heal` | heal every cut |
+| `mark LABEL` | as the SDK's `mark` (any node) |
+
+A set is node names joined by commas (`driver` included), or `rest`: every node the other set
+does not name. Only the driver's processes may use `net`; a node's get `EPERM` (`patina ctl`
+says why and exits 2). An unknown name is `ENOENT`, other words `EINVAL`.
+
+**What a cut does.** A node's traffic to itself is never cut. Across a cut link nothing is
+lost and nothing fails at once, as with a cable pulled out for a while: bytes and the closing
+of a connection that a cut direction carries are held; the receiver's reads wait, and the
+sender's writes go on until its buffer fills. A heal delivers what was held in order, each
+item after the link's delay from the heal. A direction still cut after 924.6 s of virtual time
+(the kernel's default retransmission limit) gives up: the sender's next call fails with
+`ETIMEDOUT` and the connection is reset. A connect across a cut (in either direction) retries
+at 1, 3, 7, 15, 31 and 63 s and fails with `ETIMEDOUT` at 127 s (the kernel's default SYN
+retries); healed in between, it completes at the next retry, refused then if nothing listens.
+`result.json`'s `nodes.net` counts the cuts, heals and held directions and lists the links still
+cut at the end.
+
+**In the logs.** `result.json` has `nodes`: `list` (each node's `name` and `address`; the
+others' first process `pid` and `end`: `running`, `{"exit": N}` or `{"signal": N}`) and `net`.
+`patina log events` names each thread's node (`node`) and has two more types, `node` and `net`
+(below); `patina log dump` ends each record with `node=NAME`; `patina report` says which nodes
+its runs had.
+
+<!-- transcript nodes-events
+dir: /tmp/nodes
+-->
+```text
+$ patina log events patina-out/run-0 --types node,net
+{"type":"header","v":1,"seed":0,"work":"/work","incarnations":1,"nodes":["driver","primary","backup"]}
+{"type":"node","inc":0,"seq":4,"t":100000000000,"slot":1,"event":"start","name":"primary","pid":4}
+{"type":"node","inc":0,"seq":7,"t":100000000000,"slot":2,"event":"start","name":"backup","pid":6}
+{"type":"net","inc":0,"seq":3310,"t":100052995313,"slot":0,"event":"cut","from":["primary"],"to":["backup"],"both":true,"ret":0}
+{"type":"net","inc":0,"seq":3512,"t":105053179766,"slot":0,"event":"release","conn":2,"dir":0,"until":105053210647}
+{"type":"net","inc":0,"seq":3513,"t":105053179766,"slot":0,"event":"heal","from":[],"to":[],"both":true,"ret":0}
+{"type":"node","inc":0,"seq":3768,"t":105053455623,"slot":0,"event":"stop","name":"primary","live":1}
+{"type":"node","inc":0,"seq":3769,"t":105053455623,"slot":0,"event":"stop","name":"backup","live":1}
+```
+
+Seeds, `verify` and `replay` work as for one machine: the nodes share the run's one scheduler,
+clock and log, so a seed is one interleaving of every node's threads, and another seed another.
+
+**Not available yet** (refused, naming what is missing): seed-drawn network faults and
+partitions with nodes (`--fault` and `--faults` take only the `compute-` settings), node
+crashes and restarts (`--crash`; a node's `restart`, `count`, `ok-exit`, `max-incarnations`,
+`faults`), per-node disk faults, UDP between nodes, a node's own clock (`clock ...`) and
+control of a node's processes (`node ...`, `EOPNOTSUPP`), `--node` on the command line, `patina
+__native` twins and `--check` reference runs of a run with nodes, and per-node abstract socket
+names. A node's work tree is not crash-modelled and has no operation log (`op` events are the
+driver's).
+
 ## The SDK
 
 Without the SDK, Patina finds what makes a program exit nonzero, die, hang or deadlock. The
@@ -1187,6 +1313,7 @@ production builds without flags.
 | `buggify(label)` | a fault point: true on seed-chosen evaluations under `--buggify` |
 | `knob(label, default, lo, hi)` | a seed-chosen value under `--buggify` |
 | `mark(label)` | a named point in the run's log, label in clear (up to 255 bytes, so it can carry data: `mark("ack 17")`); `setup_complete()` is `mark("setup-complete")` |
+| `control(words)` | Python and C (`patina_control`): a control call, such as `net cut a b` in a run with nodes ([Several machines](#several-machines)); raises (returns) the errno Patina answered |
 
 A mark records what the program promised, where it promised it; a checker decides whether
 the promise was backed. `patina log events` shows each mark's label, process and place among
@@ -1344,14 +1471,15 @@ $ patina log events patina-out/run-2 --types inc,op,crash
 ...
 ```
 
-Every line has `type`; all but the header have `inc` (the incarnation). Records have `seq`
+Every line has `type`; all but the header have `inc` (the incarnation). In a run with nodes, an
+event of a thread also has `node`, its node's name. Records have `seq`
 (taken when the event starts, so a call that waited, such as `wait4`, follows records with
 higher numbers: lines are in the order things finished), `t` (virtual ns) and `slot` (the
 thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 16 hex digits.
 
 | `type` | Fields beyond `inc`, `seq`, `t`, `slot` |
 |---|---|
-| `header` | first line: `v` (1), `seed`, `work` (the work tree's guest path), `incarnations` |
+| `header` | first line: `v` (1), `seed`, `work` (the work tree's guest path), `incarnations`; with nodes `nodes` (their names, the driver first) |
 | `inc` | an incarnation begins: `records` (its boundary records), `oplog` (false: a sweep removed its operation log) |
 | `cut` | a sweep kept only the head and tail of the log: `records`, `head`, `tail_from` (the records between are not printed; operations are) |
 | `call` | a system call: `name` (`nr` too when unknown), `args` (only the registers the call reads, as the program set them: an `int` may show its 32-bit value), `ret`, `disp` (`pass`, `virt`, `attempt`, `rewrite`, `place`, `deny`, `stop`), `in`, `out` (hashes of what it read and wrote; absent when none); with `--log-paths` (below): `pid`, `path`, `path2`, `resolved`, `resolved2`, `argv`, `argv_cut`, `path_cut` |
@@ -1359,9 +1487,11 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `fault` | an injected fault, as `faults.recent` shows it (every one, not the last 20): `class`, `call`, `object`, `pid`, and `errno`, `count`, `bytes` or `delay_ns`; a path swap's `swap`, `target`, `after`, `after_seq`, `put_back`; a datagram's `datagram`, `from`, `to` |
 | `crash` | a crash point fired (`seq` is its call's): `kind` (`machine`, `process`), `point`, and for a machine crash `lost` (as `faults.recent`) |
 | `mark` | SDK `mark`: `label`, `text` (when the mark has one; the SDKs send none), `pid` (the process), `len` (the payload's label and text bytes), `hash` (of the payload: one label, one hash), `ret` |
-| `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, ...), `label`, `pid`, `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never). An assertion's detail is in `result.json`, not here |
+| `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, `control`, ...), `label`, `pid`, `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never); a `control` has its words in `text`. An assertion's detail is in `result.json`, not here |
 | `signal`, `sigfault` | a signal delivered (`sig`, `code`, `pc`); a synchronous fault forwarded to the program (`sig`, `code`, `addr`, `pc`) |
 | `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
+| `node` | with nodes: a node's first process started (`event` `start`, `name`, `pid`), or the run ended while the node still had processes (`stop`, `name`, `live`) |
+| `net` | with nodes: a control call's `cut` or `heal` (`event`, `from` and `to` as node names, `both`, `ret`; a `heal` with both empty heals every cut), or a held direction a heal released (`release`, `conn`, `dir`, `until`: when its last held item arrives) |
 
 **Paths.** With `--log-paths` (`[run] log-paths = true`) a `call` also has its C-string
 arguments as the program passed them: `path` and `path2` (a path, a rename's new path; for

@@ -69,15 +69,22 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
         .map_err(|e| format!("{}: config: {e}", run_path.display()))?;
     let program: Program = serde_json::from_value(run["program"].clone())
         .map_err(|e| format!("{}: program: {e}", run_path.display()))?;
-    let now = sha256_file(&program.host)
-        .map_err(|e| format!("program {} is gone: {e}", program.host.display()))?;
-    if now != program.sha256 {
-        return Err(format!(
-            "program {} changed since the run (sha256 {} recorded, {} now)",
-            program.host.display(),
-            program.sha256,
-            now
-        ));
+    let nodes: Vec<Program> = match run.get("node_programs") {
+        Some(v) => serde_json::from_value(v.clone())
+            .map_err(|e| format!("{}: node_programs: {e}", run_path.display()))?,
+        None => vec![],
+    };
+    for p in std::iter::once(&program).chain(&nodes) {
+        let now = sha256_file(&p.host)
+            .map_err(|e| format!("program {} is gone: {e}", p.host.display()))?;
+        if now != p.sha256 {
+            return Err(format!(
+                "program {} changed since the run (sha256 {} recorded, {} now)",
+                p.host.display(),
+                p.sha256,
+                now
+            ));
+        }
     }
     if let Some(c) = &cfg.check {
         c.unchanged()?;

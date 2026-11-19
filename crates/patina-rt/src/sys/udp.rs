@@ -13,7 +13,31 @@
 //! State shared by every process (bound port, peer, pending error, queued charge) is the
 //! socket's `WSock` entry, flag `WF_DGRAM`.
 
-use super::inet::{parse_addr, put_addr, refuse, sock, sup};
+use super::inet::{put_addr, refuse, sock, sup};
+
+/// `inet::parse_addr` for a datagram socket. Datagrams do not cross nodes (yet): a node's own
+/// address is the supervisor's `ADDR_HOST4` in the node's port space, another node's address
+/// is unreachable (refused, recorded).
+fn parse_addr(family: u16, addr: u64, len: u64, connect: bool) -> Result<(u16, u8), i64> {
+    let (port, kind) = super::inet::parse_addr(family, addr, len, connect)?;
+    match addr_node(kind) {
+        Some(n) if n == crate::state::proc().node => Ok((port, ADDR_HOST4)),
+        Some(_) => {
+            refuse(b"udp:other-node");
+            Err(-ENETUNREACH)
+        }
+        None => Ok((port, kind)),
+    }
+}
+
+/// The address kind a datagram socket's guest sees for the supervisor's `kind`.
+fn shown(kind: u8) -> u8 {
+    if kind == ADDR_HOST4 {
+        node_addr(crate::state::proc().node)
+    } else {
+        kind
+    }
+}
 use super::io::{self, Deadline, Waiter};
 use super::*;
 use proto::ctl::{Op, PARK_IN, UDP_REUSEADDR, UDP_REUSEPORT, UDP_V6ONLY};
@@ -264,9 +288,9 @@ fn names(call: &mut dyn Call, i: usize, peer: bool) -> i64 {
         if s.state != WS_CONNECTED {
             return -ENOTCONN;
         }
-        put_addr(s.family, s.raddr, s.rport, addr, alen)
+        put_addr(s.family, shown(s.raddr), s.rport, addr, alen)
     } else {
-        put_addr(s.family, s.laddr, s.lport, addr, alen)
+        put_addr(s.family, shown(s.laddr), s.lport, addr, alen)
     }
 }
 
@@ -612,7 +636,7 @@ fn recvfrom(call: &mut dyn Call, i: usize) -> i64 {
     let mut w = receiver(fd, nr::RECVFROM, a[3]);
     let (r, got) = recv_iov(&mut w, fd, i, one.as_ptr() as u64, 1, a[3]);
     if r >= 0 && a[4] != 0 && a[5] != 0 {
-        let pr = put_addr(sock(i).family, got.kind, got.port, a[4], a[5]);
+        let pr = put_addr(sock(i).family, shown(got.kind), got.port, a[4], a[5]);
         if pr < 0 {
             return w.finish(pr);
         }
@@ -627,7 +651,7 @@ fn msg_out(i: usize, m: u64, got: &Got1) -> i64 {
         Err(e) => return e,
     };
     if name != 0 {
-        let r = put_addr(sock(i).family, got.kind, got.port, name, m + 8);
+        let r = put_addr(sock(i).family, shown(got.kind), got.port, name, m + 8);
         if r < 0 {
             return r;
         }

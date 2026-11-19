@@ -2202,3 +2202,48 @@ operation log and workload sweeps, `faults/evidence-crashes`, the per-call costs
 networking and spawning, `storage/evidence-branch` and `evidence-crash-enum`); `insn/04-cpuid`, `insn/05-rdpid` (x86_64
 instructions). Hosts not checked: bare-metal arm64, a host with 16 or 64 KiB pages, SVE above
 128 bits, a heterogeneous (big.LITTLE) machine, and any Mac VM product but Tart.
+
+## Several machines
+
+Nodes (`[node.NAME]`, GUIDE "Several machines"), measured 2026-11-19 on the host above and on
+a GitHub `ubuntu-24.04-arm` runner.
+
+**Runs without nodes are unchanged.** The digest ledger (90 cells: 15 guests and workloads,
+seeds 1-3, faults off and `--faults all`) of the commit before nodes and of the commit with
+them, on one guest set: identical on x86_64 (the host) and on arm64 (the runner, one run from
+a throwaway branch, both builds on the runner). On each, the `--faults all` cells that end
+`failure` or `liveness` (`sockets`, `shell`, `fork-exec`) end so in both builds.
+
+**Isolation** (`tests/nodes/01-isolation.sh`, a driver and node `b`): each node has its own
+hostname, work tree, `/tmp`, `/dev/shm`, System V shared memory and loopback; addresses are
+`10.0.0.1` and `10.0.0.2` at both ends of a connection; `b`'s first process inherits the
+driver's process state and has `PATINA_NODE=b`; `b`'s processes are `ESRCH` to the driver's
+`kill` and absent from its `/proc`; `b`'s control call is `EPERM`, from Python and from C;
+abstract `AF_UNIX` names are refused; `b` cannot change its view (`sethostname` is `EPERM`); a
+connect across a cut does not complete, and after the heal it does. `verify`: 3 identical
+runs. Crash, network faults, `restart` and the names `driver`, `rest` and `localhost` are
+refused before the run, each named.
+
+**A replicated store with a planted bug** (`tests/nodes/02-kv.sh`, `tests/guests/nodes/kv.py`):
+a primary node that replicates every `SET` to a backup node before answering, and a driver that
+writes three keys, cuts primary from backup, writes a fourth (the `SET` waits; the backup is
+behind), heals, and checks both converge. Correct: `ok` on seeds 1-4 with 4 distinct
+schedules; `verify` 3 identical runs. The planted bug (the primary answers before the backup
+applies, which applies in batches): a stale read from the backup in 8 of seeds 1-8; seed 1
+replays identically.
+
+**PostgreSQL 18.7** (built from the release tarball, `--without-icu --without-readline`): node
+`primary` and node `standby` (a streaming replica with `synchronous_standby_names`), each
+started from its own copy of a data directory; the driver, a bash script, uses `psql` across
+the node names and `patina ctl`.
+
+| Step | What the driver saw |
+|---|---|
+| boot | `pg_stat_replication`: `standby`, `10.0.0.3`, `sync` |
+| insert row 1 | the standby has row 1 |
+| `patina ctl net cut primary standby`, insert row 2 | after 5 s the commit is still waiting (`SyncRep`, 1 backend); the standby has row 1 only; primary at `0/30055E0`, standby replayed `0/3005530` |
+| `patina ctl net heal` | the commit returns; the standby has rows 1 and 2; both at the same position |
+
+Seed 1 twice: digest `9d2872311dda6eb0` both times; `verify` (cpu, load, aslr, sandbox,
+repeat): 3 identical runs; `replay` identical; seed 2: `60112f64f8c7c961`. About 0.4 s of
+wall time per run (the cut's 5 s are virtual).

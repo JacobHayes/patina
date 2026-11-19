@@ -75,6 +75,7 @@ pub mod futex;
 pub mod inherit;
 pub mod io;
 mod maps;
+mod nodes;
 pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
@@ -112,6 +113,8 @@ struct Sup {
     udp: udp::Udp,
     /// System V shared memory.
     shm: shm::Shm,
+    /// Nodes: their boot and the scripted cuts (a run with nodes).
+    nodes: nodes::Nodes,
     /// The program's path in the sandbox (the first image).
     exe: String,
     /// An `execve` has replaced an image: a runtime that cannot run its image now was handed
@@ -537,8 +540,15 @@ impl Sup {
         let id = a[1] as i32 as i64;
         let slot = unsafe { self.ctl.slot(idx) };
         let mut out = [0u64; 16];
+        // Each node is its own IPC namespace: its own table of segments.
+        let node = self.node_of(idx);
+        let shm = if node == 0 {
+            &mut self.shm
+        } else {
+            self.nodes.shm.entry(node).or_default()
+        };
         let r = match a[0] {
-            SHMOP_GET => self.shm.get(
+            SHMOP_GET => shm.get(
                 pid,
                 a[1] as i32,
                 a[2],
@@ -547,15 +557,15 @@ impl Sup {
                 now,
             ),
             _ if id < 0 => -(libc::EINVAL as i64),
-            SHMOP_AT => match self.shm.attach(pid, id, now) {
+            SHMOP_AT => match shm.attach(pid, id, now) {
                 Ok((size, fd)) => {
                     out[0] = fd as u64;
                     size as i64
                 }
                 Err(e) => e,
             },
-            SHMOP_DT => self.shm.detach(pid, id, now),
-            SHMOP_CTL => self.shm.ctl(id, a[2], [a[3], a[4], a[5]], now, &mut out),
+            SHMOP_DT => shm.detach(pid, id, now),
+            SHMOP_CTL => shm.ctl(id, a[2], [a[3], a[4], a[5]], now, &mut out),
             _ => -(libc::EINVAL as i64),
         };
         unsafe { std::ptr::write_volatile(&mut (*slot).siginfo, out) };
@@ -583,10 +593,16 @@ impl Sup {
     fn handle(&mut self, idx: usize, req: Request) -> Next {
         let a = req.args;
         let own_asid = self.sched.entries[idx].asid;
-        // Words in memory shared across processes are keyed globally.
+        // Words in memory shared across processes are keyed globally, per node: the same
+        // file or segment identity on two nodes is two objects.
+        let node = if self.node_count() > 0 {
+            self.node_of(idx) as u64
+        } else {
+            0
+        };
         let asid_of = |addr: u64| {
             if addr & FUTEX_SHARED_BIT != 0 {
-                u64::MAX
+                u64::MAX - node
             } else {
                 own_asid
             }
@@ -666,6 +682,7 @@ impl Sup {
                     ));
                 }
                 self.sched.add(child, tid, pid, asid);
+                self.slot_node(child, self.node_of(idx));
                 let s = self.slot(child);
                 s.tid.store(tid, Relaxed);
                 s.pid.store(pid, Relaxed);
@@ -884,6 +901,7 @@ impl Sup {
                 vtgc::reclaim(self.ctl);
                 Next::Continue(0)
             }
+            Some(Op::Net) => self.net_op(idx, a),
             Some(Op::CrashPoint) => {
                 // Every process ends here: what their shared mappings hold, then the end.
                 let pid = self.sched.entries[idx].pid as u32;
@@ -914,7 +932,7 @@ impl Sup {
                 | Op::WireRenew),
             ) => self.wire_op(op, idx, a),
             Some(op @ (Op::UdpSocket | Op::UdpBind | Op::UdpConnect | Op::UdpSend)) => {
-                self.udp_op(op, a)
+                self.udp_op(op, idx, a)
             }
             None => self.finish(Verdict::new("infra", format!("unknown request {}", req.op))),
         }
@@ -1028,6 +1046,8 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     // `HIDDEN:DST`: trees the launcher bound at a hidden place, copied to DST.
     let mut copies: Vec<(String, String)> = vec![];
     let mut exe: Option<String> = None;
+    // A run with nodes: the keeper's channel is at `FD_NODES`.
+    let mut nodes = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1037,6 +1057,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
                 copies.push((h.to_string(), d.to_string()));
             }
             "--exe" => exe = Some(it.next().ok_or("--exe needs PATH")?.clone()),
+            "--nodes" => nodes = true,
             "--env" => {
                 let kv = it.next().ok_or("--env needs K=V")?;
                 let k = kv.split('=').next().unwrap_or("");
@@ -1084,7 +1105,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             }
         }
         // Every other inherited descriptor, from the launcher's caller or the keeper.
-        inherit::close_inherited();
+        inherit::close_inherited(nodes);
     }
     let ctl_ptr = map_shared(FD_CTL, CTL_SIZE).map_err(|e| format!("map ctl: {e}"))?;
     let ctl: &'static Ctl = unsafe { Ctl::at(ctl_ptr) };
@@ -1119,6 +1140,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         wire: wire::Wire::default(),
         udp: udp::Udp::default(),
         shm: shm::Shm::default(),
+        nodes: nodes::Nodes::default(),
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
         execed: false,
         maps_ended: std::cell::Cell::new(false),
@@ -1195,6 +1217,9 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if unsafe { libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) } != 0 {
         sup.finish(Verdict::new("infra", "PR_SET_TSC failed in the supervisor"));
     }
+    if nodes != (ctl.config.nodes > 1) {
+        sup.finish(Verdict::new("infra", "--nodes and the node table disagree"));
+    }
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         sup.finish(Verdict::new("infra", "fork failed"));
@@ -1204,6 +1229,9 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             libc::close(FD_OUTCOME);
             libc::close(FD_EXPORT);
             libc::close(FD_SHM);
+            if nodes {
+                libc::close(FD_NODES);
+            }
             if !inherit::child() {
                 libc::_exit(126);
             }
@@ -1223,6 +1251,9 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         Ok(fd) => fd,
         Err(e) => sup.finish(Verdict::new("infra", format!("pidfd_open: {e}"))),
     };
+    if nodes {
+        sup.boot_nodes();
+    }
     sup.serve()
 }
 

@@ -4,6 +4,7 @@
 mod check;
 mod cli;
 mod config;
+mod ctl;
 mod doctor;
 mod durability;
 mod events;
@@ -85,6 +86,10 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    // Its words are the control call's, not options (`net cut --from A --to B`).
+    if first == "ctl" && !rest.iter().any(|a| a == "--help" || a == "-h") {
+        return ctl::main(rest);
+    }
     let Some(cmd) = cli::find_cmd(first) else {
         eprintln!("patina: unknown command {first}\n");
         eprint!("{}", cli::help_text(None));
@@ -119,6 +124,7 @@ fn main() -> ExitCode {
         Cmd::Report => report::main(&a).map_err(error),
         Cmd::Recheck => recheck::main(&a),
         Cmd::Minimize => minimize::main(&a),
+        Cmd::Ctl => Ok(ctl::main(&a.positional)),
     };
     r.unwrap_or_else(|Fail(o, e)| {
         // A full filesystem (ENOSPC, EDQUOT) is named, as the supervisor names it in a run.

@@ -1223,6 +1223,35 @@ pub fn build(
             "images": planned.iter().map(|(p, k)| json!({"path": p, "planned": k})).collect::<Vec<_>>(),
         });
     }
+    // Runs with nodes: their names, and what the scripted network did over them.
+    let with_nodes: Vec<&Value> = runs
+        .iter()
+        .map(|r| &r.result["nodes"])
+        .filter(|n| n.is_object())
+        .collect();
+    if !with_nodes.is_empty() {
+        let mut names: Vec<String> = vec![];
+        for n in &with_nodes {
+            for m in n["list"].as_array().into_iter().flatten() {
+                if let Some(x) = m["name"].as_str().filter(|x| !names.iter().any(|y| y == x)) {
+                    names.push(x.to_string());
+                }
+            }
+        }
+        let sum = |k: &str| -> u64 {
+            with_nodes
+                .iter()
+                .map(|n| n["net"][k].as_u64().unwrap_or(0))
+                .sum()
+        };
+        v["nodes"] = json!({
+            "runs": with_nodes.len(),
+            "names": names,
+            "cuts": sum("cuts"),
+            "heals": sum("heals"),
+            "held": sum("held"),
+        });
+    }
     if with_points > 0 {
         v["compute"] = json!({
             "images": images.iter().map(|(p, k)| json!({"path": p, "kinds": k})).collect::<Vec<_>>(),
@@ -1530,6 +1559,22 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             w["runs"],
             planned,
             images.len()
+        ));
+    }
+    if let Some(w) = v.get("nodes") {
+        let names: Vec<&str> = w["names"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str())
+            .collect();
+        s.push_str(&format!(
+            "nodes: {} in {} runs; net: {} cuts, {} heals, {} held over them\n",
+            names.join(", "),
+            w["runs"],
+            w["cuts"],
+            w["heals"],
+            w["held"]
         ));
     }
     let groups = v["groups"].as_array().unwrap();

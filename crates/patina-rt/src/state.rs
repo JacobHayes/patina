@@ -240,6 +240,9 @@ pub struct Proc {
     /// Reclaimed alternate stacks, reused before new ones are mapped.
     pub alt_free: [u64; proto::ctl::MAX_THREADS],
     pub nalt_free: usize,
+    /// The machine this process belongs to (`proto::node`; 0 in a run without nodes): read
+    /// from the slot at each image start; a fork child's copy is its parent's.
+    pub node: usize,
     /// Standard-format XSAVE component offsets and sizes (CPUID 0xD), filled on use.
     #[cfg(target_arch = "x86_64")]
     pub xsave_off: [u32; 64],
@@ -275,6 +278,7 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
     alt_of_slot: [0; proto::ctl::MAX_THREADS],
     alt_free: [0; proto::ctl::MAX_THREADS],
     nalt_free: 0,
+    node: 0,
     #[cfg(target_arch = "x86_64")]
     xsave_off: [0; 64],
     #[cfg(target_arch = "x86_64")]

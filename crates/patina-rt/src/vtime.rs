@@ -7,7 +7,7 @@
 
 use crate::state::ctl;
 use core::sync::atomic::Ordering::Relaxed;
-use proto::layout::{FILE_EPOCH_S, REALTIME_EPOCH_S, VCLOCK_BOOT_NS};
+use proto::layout::{FILE_EPOCH_S, REALTIME_EPOCH_S, VCLOCK_BOOT_NS, VDEV_MOUNT_BASE};
 use proto::vfs::{Vfs, VtEntry, VT_CAP};
 
 const NS: u64 = 1_000_000_000;
@@ -36,8 +36,12 @@ pub fn epoch() -> u64 {
     FILE_EPOCH_S * NS
 }
 
+/// The table's key of inode `ino` on the mount with virtual minor `vdev_minor` (below 256): a
+/// node's mounts are numbered in its own mount table, so the node is part of the key (0 for
+/// the driver, and in a run without nodes).
 pub fn key(vdev_minor: u64, ino: u64) -> u64 {
-    (vdev_minor << 48) | (ino & 0xffff_ffff_ffff)
+    const _: () = assert!(VDEV_MOUNT_BASE + crate::path::MAX_MOUNTS as u64 <= 0x100);
+    (crate::state::proc().node as u64) << 56 | (vdev_minor & 0xff) << 48 | (ino & 0xffff_ffff_ffff)
 }
 
 fn slot(key: u64, insert: bool) -> Option<&'static mut VtEntry> {

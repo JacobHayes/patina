@@ -92,6 +92,10 @@ pub const FD_PLAN: i32 = 3009;
 /// The supervisor's System V shared memory carried from one incarnation to the next after a
 /// process crash (`sup::shm`; a memfd the launcher makes once per run). Not given to guests.
 pub const FD_SHM: i32 = 3023;
+/// A run with nodes: PID 1's end of the socket pair to the sandbox's keeper, which starts each
+/// node's first process in its own view (`SOCK_SEQPACKET`; `cli::sandbox::NodeReq`). Kept by
+/// the supervisor, never given to guests. Absent in a run without nodes.
+pub const FD_NODES: i32 = 3024;
 /// Hidden descriptors the runtime makes for itself (counters, `/proc/self/mem`) are
 /// placed at the lowest free number from here.
 pub const FD_RT_DYN: i32 = 3100;

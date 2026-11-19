@@ -68,6 +68,12 @@ pub const COMPUTE_COMPARE: u64 = 4;
 /// that interprets, through libc, so the image noted is the program, not the image at the call.
 pub const COMPUTE_LINE: u64 = 8;
 pub const COMPUTE_KINDS: u64 = COMPUTE_EDGE | COMPUTE_ACCESS | COMPUTE_COMPARE | COMPUTE_LINE;
+/// A control call (`crate::node` has the grammar): `ptr`/`len` name the words alone, no
+/// header, 1 to `TEXT_MAX` bytes. Answers 0 or -errno; the trap record's strings are the label
+/// `control` and the words.
+pub const OP_CONTROL: u64 = 10;
+/// The label a control call's words are logged under.
+pub const CONTROL_LABEL: &[u8] = b"control";
 
 pub const KIND_ALWAYS: u8 = 1;
 pub const KIND_SOMETIMES: u8 = 2;

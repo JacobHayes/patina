@@ -117,9 +117,61 @@ pub fn handle(call: &mut dyn Call) -> Action {
             let pc = call.frame().map_or(0, |f| f.pc());
             crate::compute::hello(ptr, pc)
         }
+        OP_CONTROL => control(ptr, len),
         _ => -e::EINVAL,
     };
     Action::Return(r)
+}
+
+/// A control call (`proto::node`): the words are kept for the trap's records whatever the
+/// answer; a network action is the supervisor's (its decision record follows the trap's).
+fn control(ptr: u64, len: u64) -> i64 {
+    if len == 0 || len > TEXT_MAX as u64 {
+        return -e::EINVAL;
+    }
+    if ptr == 0 {
+        return -e::EFAULT;
+    }
+    let mut buf = [0u8; TEXT_MAX];
+    let words = &mut buf[..len as usize];
+    if let Err(e) = vm(nr::PROCESS_VM_READV, words.as_mut_ptr(), ptr, len as usize) {
+        return e;
+    }
+    let tab = unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) };
+    let r = match proto::node::parse(words, tab, crate::state::proc().node) {
+        Err(r) => -r.errno,
+        Ok(proto::node::Control::Mark(label)) => {
+            mark(label);
+            0
+        }
+        Ok(proto::node::Control::Net {
+            verb,
+            from,
+            to,
+            both,
+        }) => crate::sup::call_sup(Op::Net, [verb, from, to, both as u64, 0, 0]).ret,
+    };
+    keep(
+        proto::rec::hash_bytes(OP_CONTROL, words),
+        CONTROL_LABEL,
+        words,
+    );
+    r
+}
+
+/// A mark: `setup-complete` ends setup (`faults-after-setup`).
+fn mark(label: &[u8]) {
+    let t = tab();
+    if label == SETUP_COMPLETE && t.setup_seq == 0 {
+        let seq = thread().seq;
+        t.setup_seq = seq;
+        let f = core::ptr::addr_of!(ctl().faults.cfg.fault_after_seq) as *mut u64;
+        unsafe {
+            if core::ptr::read_volatile(f) == u64::MAX {
+                core::ptr::write_volatile(f, seq);
+            }
+        }
+    }
 }
 
 fn payload(ptr: u64, len: u64, buf: &mut [u8; MAX_LEN]) -> Result<Hdr, i64> {
@@ -159,16 +211,7 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         return -e::EINVAL;
     }
     if op == OP_MARK {
-        if label == SETUP_COMPLETE && t.setup_seq == 0 {
-            let seq = thread().seq;
-            t.setup_seq = seq;
-            let f = core::ptr::addr_of!(ctl().faults.cfg.fault_after_seq) as *mut u64;
-            unsafe {
-                if core::ptr::read_volatile(f) == u64::MAX {
-                    core::ptr::write_volatile(f, seq);
-                }
-            }
-        }
+        mark(label);
         return 0;
     }
     let cfg = t.cfg;

@@ -105,7 +105,20 @@ pub const GENERATED_ETC: [&str; 7] = [
     "/etc/alternatives",
 ];
 
-fn etc_files(home: &str) -> Vec<(&'static str, Vec<u8>)> {
+/// `/etc/hosts`: without nodes `sim` is the loopback's; with nodes every node is named at its
+/// address (`10.0.0.(k + 1)`, the driver first) and `localhost` is each node's own loopback.
+fn hosts(names: &[&str]) -> Vec<u8> {
+    if names.is_empty() {
+        return b"127.0.0.1 localhost sim\n::1 localhost\n".to_vec();
+    }
+    let mut h = String::from("127.0.0.1 localhost\n::1 localhost\n");
+    for (k, n) in names.iter().enumerate() {
+        h += &format!("10.0.0.{} {n}\n", k + 1);
+    }
+    h.into_bytes()
+}
+
+fn etc_files(home: &str, names: &[&str]) -> Vec<(&'static str, Vec<u8>)> {
     let (uid, gid) = (1000, 1000);
     vec![
         (
@@ -117,10 +130,7 @@ fn etc_files(home: &str) -> Vec<(&'static str, Vec<u8>)> {
             "/etc/group",
             format!("root:x:0:\nuser:x:{gid}:\n").into_bytes(),
         ),
-        (
-            "/etc/hosts",
-            b"127.0.0.1 localhost sim\n::1 localhost\n".to_vec(),
-        ),
+        ("/etc/hosts", hosts(names)),
         (
             "/etc/nsswitch.conf",
             b"passwd: files\ngroup: files\nhosts: files\n".to_vec(),
@@ -135,6 +145,8 @@ pub struct Layout {
     pub ops: Vec<Op>,
     pub data: Vec<Vec<u8>>,
     pub copies: Vec<String>,
+    /// A run with nodes: what the keeper needs to start each node (`sandbox::Nodes`).
+    pub nodes: Option<sandbox::Nodes>,
 }
 
 pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
@@ -155,8 +167,18 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         dst: d.into(),
         size,
     };
+    // With nodes the driver is one machine among several, named like the others.
+    let names: Vec<&str> = if c.nodes.is_empty() {
+        vec![]
+    } else {
+        std::iter::once("driver")
+            .chain(c.nodes.iter().map(|n| n.name.as_str()))
+            .collect()
+    };
     let mut ops = vec![
-        Op::Hostname { name: "sim".into() },
+        Op::Hostname {
+            name: if names.is_empty() { "sim" } else { "driver" }.into(),
+        },
         ro("/usr".into(), "/usr".into()),
     ];
     for (l, t) in [
@@ -177,7 +199,7 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     ops.push(tmpfs("/tmp"));
     // Generated /etc: the data files below, plus the host's ld.so.cache and localtime
     // naming UTC. The cache is a copy (a file on the sandbox's root tmpfs), not a bind.
-    let mut etc = etc_files(work);
+    let mut etc = etc_files(work, &names);
     if let Ok(cache) = fs::read("/etc/ld.so.cache") {
         etc.push(("/etc/ld.so.cache", cache));
     }
@@ -241,6 +263,11 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
             fs::canonicalize(root).map_err(|e| format!("/work from {}: {e}", root.display()))?;
         ops.push(ro(r.display().to_string(), "/.patina/in".into()));
     }
+    let nodes = if c.nodes.is_empty() {
+        None
+    } else {
+        Some(node_layout(o, &mut ops, &mut copies)?)
+    };
     assert!(etc.len() <= sandbox::MAX_DATA);
     for (i, (path, _)) in etc.iter().enumerate() {
         ops.push(Op::Data {
@@ -252,6 +279,124 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         ops,
         data: etc.into_iter().map(|e| e.1).collect(),
         copies,
+        nodes,
+    })
+}
+
+/// The guest path of `patina` itself in a run with nodes (`patina ctl`), and the `PATH` such a
+/// run starts with (the run's own `PATH`, if it sets one, replaces it).
+pub const GUEST_PATINA: &str = "/opt/patina/bin/patina";
+pub const NODES_PATH: &str = "PATH=/guest:/usr/local/bin:/usr/bin:/bin:/opt/patina/bin";
+
+/// The layout's part for nodes: each node's program and starting tree bound where the driver's
+/// are, its work tree's mount point, `patina` for `patina ctl`, and what the keeper needs to
+/// start each node in its own view.
+fn node_layout(o: &Opts, ops: &mut Vec<Op>, copies: &mut Vec<String>) -> Res<sandbox::Nodes> {
+    let c = &o.cfg;
+    let ro = |src: String, dst: String| Op::Bind {
+        src,
+        dst,
+        rw: false,
+        dev: false,
+    };
+    let mut progs: Vec<(String, PathBuf)> = vec![];
+    if o.program.copied {
+        progs.push((o.program.guest.clone(), o.program.host.clone()));
+    }
+    let mut specs = vec![];
+    for (k, (n, p)) in c.nodes.iter().zip(&o.node_programs).enumerate() {
+        let k = k + 1;
+        if p.copied {
+            match progs.iter().find(|(g, _)| *g == p.guest) {
+                Some((_, h)) if *h != p.host => {
+                    return Err(format!(
+                        "node.{}: its program {} and another program both run as {}",
+                        n.name,
+                        p.host.display(),
+                        p.guest
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    let name = p.guest.trim_start_matches("/guest/");
+                    ops.push(ro(
+                        p.host.display().to_string(),
+                        format!("/.patina/prog/{name}"),
+                    ));
+                    if !copies.iter().any(|cp| cp == "/.patina/prog:/guest") {
+                        copies.push("/.patina/prog:/guest".into());
+                    }
+                    progs.push((p.guest.clone(), p.host.clone()));
+                }
+            }
+        }
+        if let (Some(d), Some(g)) = (&p.dir, Path::new(&p.guest).parent()) {
+            let at = crate::config::guest_resolve(&g.display().to_string(), &c.mounts);
+            if !ops
+                .iter()
+                .any(|op| matches!(op, Op::Bind { dst, .. } if *dst == at))
+            {
+                ops.push(ro(d.display().to_string(), at));
+            }
+        }
+        let w = n.work_path();
+        if w != c.work_path() && !specs.iter().any(|s: &sandbox::NodeSpec| s.work == w) {
+            ops.push(Op::Dir { dst: w.into() });
+        }
+        let input = match &n.work {
+            Some(dir) => {
+                let r = fs::canonicalize(dir)
+                    .map_err(|e| format!("node.{}: work {}: {e}", n.name, dir.display()))?;
+                let at = format!("/.patina/node/{k}/in");
+                ops.push(ro(r.display().to_string(), at.clone()));
+                Some(at)
+            }
+            None => None,
+        };
+        let mut env: Vec<String> = crate::sup::BASE_ENV.iter().map(|s| s.to_string()).collect();
+        let set = |env: &mut Vec<String>, kv: &str| {
+            let key = kv.split('=').next().unwrap_or("");
+            env.retain(|e| e.split('=').next() != Some(key));
+            env.push(kv.to_string());
+        };
+        set(&mut env, &format!("HOME={w}"));
+        set(&mut env, NODES_PATH);
+        for kv in c.env.iter().chain(&n.env) {
+            set(&mut env, kv);
+        }
+        set(&mut env, &format!("PATINA_NODE={}", n.name));
+        let mut argv = vec![
+            "rt".to_string(),
+            p.guest.clone(),
+            if p.copied {
+                p.guest.clone()
+            } else {
+                n.cmd[0].clone()
+            },
+        ];
+        argv.extend(n.cmd[1..].iter().cloned());
+        specs.push(sandbox::NodeSpec {
+            name: n.name.clone(),
+            work: w.into(),
+            input,
+            argv,
+            env,
+        });
+    }
+    let exe = std::env::current_exe().map_err(|e| format!("own executable: {e}"))?;
+    ops.push(ro(exe.display().to_string(), GUEST_PATINA.into()));
+    let mut readonly: Vec<String> = vec!["/".into(), "/dev".into(), "/guest".into()];
+    for (i, m) in c.mounts.iter().enumerate() {
+        let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
+        if m.copy && !readonly.contains(&dst) {
+            readonly.push(dst);
+        }
+    }
+    Ok(sandbox::Nodes {
+        nodes: specs,
+        size: c.tmpfs_bytes,
+        hide: vec![c.work_path().into()],
+        readonly,
     })
 }
 
@@ -334,7 +479,7 @@ pub fn run_one(
     }
     crate::result::write_json(
         &out.join("run.json"),
-        &crate::result::run_json(&o.cfg, &o.program, &o.plan)?,
+        &crate::result::run_json(&o.cfg, &o.program, &o.node_programs, &o.plan)?,
     )?;
     let mut end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
     let write = |end: &RunEnd| -> Res<serde_json::Value> {
@@ -432,6 +577,8 @@ pub struct IncEnd {
     pub crash_points: u64,
     /// Bytes its boundary log and operation log hold.
     pub log_bytes: u64,
+    /// A run with nodes: `result.json`'s `nodes` (`result::nodes_json`).
+    pub nodes: Option<serde_json::Value>,
 }
 
 pub use proto::vfs::SANDBOX_ROOTS;
@@ -754,7 +901,15 @@ pub fn run_incarnation(
         cfg.pmu_margin = c.pmu.margin;
     }
     cfg.work[..c.work_path().len()].copy_from_slice(c.work_path().as_bytes());
+    if !c.nodes.is_empty() {
+        cfg.nodes = c.nodes.len() as u64 + 1;
+    }
     unsafe { Ctl::init(ctl_ptr as *mut Ctl, cfg) };
+    if !c.nodes.is_empty() {
+        unsafe { proto::node::NodeTab::at(ctl_ptr) }.set(
+            std::iter::once(proto::node::DRIVER).chain(c.nodes.iter().map(|n| n.name.as_bytes())),
+        );
+    }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_STEP, Relaxed);
     if start.k > 0 {
@@ -794,6 +949,13 @@ pub fn run_incarnation(
     for e in &c.env {
         argv.extend(["--env".into(), e.clone()]);
     }
+    if !c.nodes.is_empty() {
+        argv.push("--nodes".into());
+        argv.extend(["--env".into(), "PATINA_NODE=driver".into()]);
+        if !c.env.iter().any(|e| e.starts_with("PATH=")) {
+            argv.extend(["--env".into(), NODES_PATH.into()]);
+        }
+    }
     // Only restarted incarnations get it: incarnation 0 must match a run without --crash
     // byte for byte up to the crash (the environment shapes the initial stack).
     if start.k > 0 {
@@ -817,6 +979,7 @@ pub fn run_incarnation(
         argv,
         exe: None,
         after: sandbox::After::Exec,
+        nodes: lay.nodes,
     };
     let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
     let mut etc_fds = vec![];
@@ -845,6 +1008,22 @@ pub fn run_incarnation(
     place.push((spec_fd.as_raw_fd(), sandbox::FD_SPEC));
     if let Some(fd) = userns {
         place.push((fd, sandbox::FD_USERNS));
+    }
+    // Each node's stdio: memfds as the driver's (an empty stdin).
+    let mut node_stdio = vec![];
+    for (k, n) in c.nodes.iter().enumerate() {
+        let fds = [
+            stdio_memfd(&format!("patina-{}-stdin", n.name), Some(&[]))?,
+            stdio_memfd(&format!("patina-{}-stdout", n.name), None)?,
+            stdio_memfd(&format!("patina-{}-stderr", n.name), None)?,
+        ];
+        for (j, f) in fds.iter().enumerate() {
+            place.push((
+                f.as_raw_fd(),
+                sandbox::FD_NODE_STDIO0 + 3 * k as i32 + j as i32,
+            ));
+        }
+        node_stdio.push(fds);
     }
     // The counter broker's sandbox end.
     let (pmu_sandbox, pmu_ours) = match pmu_ev {
@@ -964,6 +1143,28 @@ pub fn run_incarnation(
             truncated.push(name);
         }
     }
+    // Each node's stdio: `node/NAME/inc-K/` beside the driver's `inc-K/`.
+    let inc_name = inc.file_name().map(|n| n.to_owned()).unwrap_or_default();
+    for (n, fds) in c.nodes.iter().zip(&node_stdio) {
+        let dir = inc
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("node")
+            .join(&n.name)
+            .join(&inc_name);
+        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        for (mem, name) in [(&fds[1], "stdout"), (&fds[2], "stderr")] {
+            let f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dir.join(name))
+                .map_err(|e| format!("create node {} {name}: {e}", n.name))?;
+            if copy_stdio(mem, &f, stdio_max).map_err(|e| format!("copy {name}: {e}"))? {
+                truncated.push(name);
+            }
+        }
+    }
+    drop(node_stdio);
 
     let mut verdict = Verdict::decode(&verdict_text).unwrap_or_else(|| {
         let err = fs::read_to_string(inc.join("stderr")).unwrap_or_default()
@@ -1055,6 +1256,8 @@ pub fn run_incarnation(
         eligible: std::array::from_fn(|i| ctl.faults.eligible[i].load(Relaxed)),
         crash_points: ctl.faults.crash_points.load(Relaxed),
         log_bytes: ctl.log_used(),
+        nodes: (!c.nodes.is_empty())
+            .then(|| crate::result::nodes_json(unsafe { proto::node::NodeTab::at(ctl_ptr) })),
     };
     if std::env::var_os("PATINA_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.
@@ -1215,6 +1418,9 @@ pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
     let a = crate::cli::parse(crate::cli::Cmd::Run, args)?;
     let o = crate::config::resolve(&a)?.opts()?;
     let c = &o.cfg;
+    if !c.nodes.is_empty() {
+        return Err("a native twin of a run with nodes: not available yet".into());
+    }
     let lay = layout(&o, c.work.as_deref())?;
     let mut env: Vec<String> = crate::sup::BASE_ENV.iter().map(|s| s.to_string()).collect();
     for kv in &c.env {
@@ -1241,6 +1447,7 @@ pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
         env,
         argv,
         exe: Some(o.program.guest.clone()),
+        nodes: None,
         after: sandbox::After::Native {
             copies,
             work: Some(c.work_path().into()),

@@ -26,6 +26,15 @@
 //! `DEC_WIRE_DELIVER` [conn, dir, bytes], `DEC_WIRE_ESTABLISH` [conn, server port, client port],
 //! `DEC_WIRE_FIN` [conn, dir, 0 queued | 1 delivered], `DEC_WIRE_RST` [conn, side, why],
 //! `DEC_WIRE_FAIL` [conn, errno], `DEC_WIRE_CLOSE` [conn]. Direction 0 is client to server.
+//!
+//! Nodes (`proto::node`): every node has its own port space and address; a connection joins a
+//! client node and a server node (the same one over loopback), and each direction is a link.
+//! A scripted cut of a link (`nodes::Sup::link_cut`) holds what is stamped on it: the item
+//! keeps its delay draw and no time (`HELD`) until a heal stamps it, at the heal's time plus
+//! that draw; a direction held for `GIVE_UP_NS` gives up, and its sender sees `ETIMEDOUT`. A
+//! connect across a cut link (either direction) does not establish: it retries at TCP's SYN
+//! retry times (`SYN_RETRY_NS`) and establishes at the first one after a heal, or fails
+//! `ETIMEDOUT` at the last.
 
 use super::{Next, Sup};
 use crate::outcome::Verdict;
@@ -46,11 +55,21 @@ const EV_CONNECT: u64 = 2;
 const ECONNREFUSED: u16 = 111;
 const ETIMEDOUT: u16 = 110;
 
+/// An item stamped on a cut link: no delivery time yet, its delay draw in the low bits.
+const HELD: u64 = 1 << 63;
+/// A direction held this long gives up (Linux's `tcp_retries2` = 15: about 924.6 s).
+const GIVE_UP_NS: u64 = 924_600_000_000;
+/// SYN retries from the connect, and the give-up (Linux's `tcp_syn_retries` = 6): 1, 3, 7, 15,
+/// 31 and 63 s, then `ETIMEDOUT` at 127 s.
+const SYN_RETRY_NS: [u64; 7] = [1, 3, 7, 15, 31, 63, 127];
+
 /// Why a RST was sent (`DEC_WIRE_RST` args[2]).
 const RST_CLOSE_UNREAD: u64 = 1;
 const RST_FAULT: u64 = 2;
 const RST_PEER_GONE: u64 = 3;
 const RST_LISTENER_GONE: u64 = 4;
+/// A direction held by a cut for `GIVE_UP_NS`: the sender gives up.
+const RST_GIVE_UP: u64 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fate {
@@ -89,6 +108,8 @@ struct Dir {
     throttled: bool,
     /// A FIN went out in this direction (its receiver is in `CLOSE_WAIT`).
     fin_done: bool,
+    /// The first item held by a cut, when it was stamped (`HELD` items wait for a heal).
+    held_since: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -122,6 +143,14 @@ struct Conn {
     /// The server side must report a reset when it is accepted.
     server_reset: bool,
     dirs: [Dir; 2],
+    /// The client's node and the server's (the same over loopback).
+    cnode: usize,
+    snode: usize,
+    /// When the connect was made, and the SYN retries a cut has cost it so far.
+    syn_at: u64,
+    syn_n: usize,
+    /// The give-up check of a held direction (an `EV_CONNECT` event once established).
+    give_up_ev: Option<super::sched::EventId>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -130,6 +159,8 @@ struct SockRec {
     port: u16,
     kind: u8,
     listening: bool,
+    /// The node of the process that made it.
+    node: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,8 +175,10 @@ pub struct Wire {
     /// Client hidden ends accepted on `@patina-wire`, by socket index, not yet claimed by a connect.
     pending: BTreeMap<usize, i32>,
     socks: BTreeMap<usize, SockRec>,
-    ports: BTreeMap<u16, PortUse>,
-    next_port: u16,
+    /// Ports in use, by (node, port): every node has its own port space.
+    ports: BTreeMap<(usize, u16), PortUse>,
+    /// The next ephemeral port of each node.
+    next_port: BTreeMap<usize, u16>,
     conns: BTreeMap<u32, Conn>,
     next_conn: u32,
     /// Socket index → connection and side (true: server).
@@ -200,13 +233,14 @@ fn close(fd: i32) {
     }
 }
 
-/// Is the abstract name `@patina-l-<port>` held by a live socket? (Bind a probe to it.)
-fn name_alive(port: u16) -> bool {
+/// Is node `node`'s listener name for `port` (`@patina-l-<n>`) held by a live socket? (Bind a
+/// probe to it.)
+fn name_alive(node: usize, port: u16) -> bool {
     let p = unix_socket();
     if p < 0 {
         return true;
     }
-    let r = sock_bind(p, LISTEN_PREFIX, Some(port as u64));
+    let r = sock_bind(p, LISTEN_PREFIX, Some(listen_n(node, port)));
     let e = errno();
     close(p);
     r != 0 && e == libc::EADDRINUSE
@@ -253,22 +287,21 @@ impl Wire {
             return Err(format!("wire listener: errno {}", errno()));
         }
         self.listen_fd = fd;
-        self.next_port = PORT_FIRST;
         self.next_conn = 1;
         self.buf = vec![0u8; READ_MAX];
         Ok(())
     }
 
-    fn port_free(&mut self, p: u16) -> bool {
-        match self.ports.get(&p) {
+    fn port_free(&mut self, node: usize, p: u16) -> bool {
+        match self.ports.get(&(node, p)) {
             None => true,
             Some(PortUse::Client(_)) => false,
             Some(PortUse::Bound(i)) => {
-                if name_alive(p) {
+                if name_alive(node, p) {
                     return false;
                 }
                 let i = *i;
-                self.ports.remove(&p);
+                self.ports.remove(&(node, p));
                 if let Some(s) = self.socks.get_mut(&i) {
                     if s.port == p {
                         s.listening = false;
@@ -279,12 +312,13 @@ impl Wire {
         }
     }
 
-    fn alloc_port(&mut self, u: PortUse) -> Option<u16> {
+    fn alloc_port(&mut self, node: usize, u: PortUse) -> Option<u16> {
         let span = (PORT_LAST - PORT_FIRST) as u32 + 1;
         for _ in 0..span {
-            let p = self.next_port;
-            self.next_port = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
-            if let std::collections::btree_map::Entry::Vacant(e) = self.ports.entry(p) {
+            let next = self.next_port.entry(node).or_insert(PORT_FIRST);
+            let p = *next;
+            *next = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
+            if let std::collections::btree_map::Entry::Vacant(e) = self.ports.entry((node, p)) {
                 e.insert(u);
                 return Some(p);
             }
@@ -292,9 +326,9 @@ impl Wire {
         None
     }
 
-    /// The live listener for a connection to `port` at address kind `kind`.
-    fn listener(&mut self, port: u16, kind: u8, ctl: &Ctl) -> Option<usize> {
-        let Some(PortUse::Bound(i)) = self.ports.get(&port).copied() else {
+    /// The live listener of node `node` for a connection to `port` at address kind `kind`.
+    fn listener(&mut self, node: usize, port: u16, kind: u8, ctl: &Ctl) -> Option<usize> {
+        let Some(PortUse::Bound(i)) = self.ports.get(&(node, port)).copied() else {
             return None;
         };
         let s = *self.socks.get(&i)?;
@@ -307,7 +341,7 @@ impl Wire {
             (AF_INET6, ADDR_ANY) => !v6only || kind == ADDR_LOOP6,
             (_, k) => k == kind,
         };
-        if !ok || !name_alive(port) {
+        if !ok || !name_alive(node, port) {
             return None;
         }
         Some(i)
@@ -409,22 +443,38 @@ impl Sup {
         (port_ok && t >= from && t < to).then_some(to)
     }
 
-    /// Stamp the next chunk of direction `dir`: never earlier than the previous one.
+    /// The link direction `dir` of connection `id` travels: (from node, to node).
+    fn link(c: &Conn, dir: usize) -> (usize, usize) {
+        if dir == 0 {
+            (c.cnode, c.snode)
+        } else {
+            (c.snode, c.cnode)
+        }
+    }
+
+    /// Stamp the next chunk of direction `dir`: never earlier than the previous one; on a cut
+    /// link, `HELD` with its draw (`wire_heal` stamps it).
     fn stamp(&mut self, id: u32, dir: usize, fin: bool) -> u64 {
         let now = self.now();
         let cfg = self.net_cfg();
-        let (n, last, sport, cport) = {
+        let (n, last, sport, cport, link) = {
             let c = self.wire.conns.get_mut(&id).unwrap();
             c.dirs[dir].n += 1;
-            (c.dirs[dir].n, c.dirs[dir].last_t, c.sport, c.cport)
+            let link = Self::link(c, dir);
+            (c.dirs[dir].n, c.dirs[dir].last_t, c.sport, c.cport, link)
         };
         let range = if fin && cfg.halfclose_set != 0 {
             (cfg.halfclose_min_ns, cfg.halfclose_max_ns)
         } else {
             self.delay_range()
         };
-        let mut t =
-            (now + self.net_delay(id, dir as u64 | if fin { 2 } else { 0 }, n, range)).max(last);
+        let d = self.net_delay(id, dir as u64 | if fin { 2 } else { 0 }, n, range);
+        let held = self.wire.conns[&id].dirs[dir].held_since.is_some();
+        if held || self.link_cut(link.0, link.1) {
+            self.hold(id, dir);
+            return HELD | d;
+        }
+        let mut t = (now + d).max(last);
         if let Some(to) = self.partition_hold(t, sport, cport) {
             t = to;
             WireTab::inc(&tab(self.ctl).counters.partitioned, 1);
@@ -447,6 +497,9 @@ impl Sup {
         let Some(t) = d.q.front().map(|i| i.t()) else {
             return;
         };
+        if t & HELD != 0 {
+            return;
+        }
         if let Some(ev) = d.ev {
             if ev.0 <= t {
                 return;
@@ -479,17 +532,19 @@ impl Sup {
         let r = match op {
             Op::WireSocket => {
                 let i = a[0] as usize;
+                let node = self.node_of(idx);
                 self.wire.socks.insert(
                     i,
                     SockRec {
                         family: a[1] as u16,
+                        node,
                         ..SockRec::default()
                     },
                 );
                 0
             }
             Op::WireBind => self.wire_bind(a),
-            Op::WireConnect => self.wire_connect(a),
+            Op::WireConnect => self.wire_connect(idx, a),
             Op::WireAccepted => self.wire_accepted(a),
             Op::WireSent => {
                 self.wire_step();
@@ -549,15 +604,15 @@ impl Sup {
             return s.port as i64;
         }
         let p = if port == 0 {
-            match self.wire.alloc_port(PortUse::Bound(i)) {
+            match self.wire.alloc_port(s.node, PortUse::Bound(i)) {
                 Some(p) => p,
                 None => return -(libc::EADDRINUSE as i64),
             }
         } else {
-            if !self.wire.port_free(port) {
+            if !self.wire.port_free(s.node, port) {
                 return -(libc::EADDRINUSE as i64);
             }
-            self.wire.ports.insert(port, PortUse::Bound(i));
+            self.wire.ports.insert((s.node, port), PortUse::Bound(i));
             port
         };
         s.port = p;
@@ -606,8 +661,11 @@ impl Sup {
         }
     }
 
-    fn wire_connect(&mut self, a: [u64; 6]) -> i64 {
+    fn wire_connect(&mut self, idx: usize, a: [u64; 6]) -> i64 {
         let (i, port, kind, pad) = (a[0] as usize, a[1] as u16, a[2] as u8, a[3]);
+        // Loopback stays on the caller's node; a node address leads to that node.
+        let cnode = self.node_of(idx);
+        let snode = addr_node(kind).unwrap_or(cnode);
         self.wire_accept_pending();
         let Some(cfd) = self.wire.pending.remove(&i) else {
             self.finish(Verdict::new(
@@ -621,7 +679,7 @@ impl Sup {
         let cport = if bound != 0 {
             bound
         } else {
-            match self.wire.alloc_port(PortUse::Client(id)) {
+            match self.wire.alloc_port(cnode, PortUse::Client(id)) {
                 Some(p) => p,
                 None => {
                     close(cfd);
@@ -630,7 +688,7 @@ impl Sup {
             }
         };
         let cfg = self.net_cfg();
-        let listener = self.wire.listener(port, kind, self.ctl);
+        let listener = self.wire.listener(snode, port, kind, self.ctl);
         let fate = if self.net_fault(cfg.refuse_permille, id, NSUB_REFUSE, 0) {
             self.wire_inject(INJ_NET_REFUSE, nr::CONNECT, ECONNREFUSED as u64, id);
             Fate::Refuse { injected: true }
@@ -643,11 +701,14 @@ impl Sup {
             Fate::Establish
         };
         let now = self.now();
+        // Across a cut link (either way) the handshake cannot complete: SYN retries.
+        let cut = self.link_cut(cnode, snode) || self.link_cut(snode, cnode);
         let mut t = match fate {
             Fate::Timeout => now + CONNECT_TIMEOUT_NS,
+            _ if cut => now + SYN_RETRY_NS[0] * 1_000_000_000,
             _ => now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.delay_range()),
         };
-        if fate != Fate::Timeout {
+        if fate != Fate::Timeout && !cut {
             if let Some(to) = self.partition_hold(t, port, cport) {
                 t = to;
                 WireTab::inc(&tab(self.ctl).counters.partitioned, 1);
@@ -684,14 +745,20 @@ impl Sup {
             retry: false,
             server_reset: false,
             dirs: [Dir::default(), Dir::default()],
+            cnode,
+            snode,
+            syn_at: now,
+            syn_n: (cut && fate != Fate::Timeout) as usize,
+            give_up_ev: None,
         };
         self.wire.conns.insert(id, conn);
         // A socket index may come back (a new socket in a reused inode): forget the old link.
         self.wire.by_idx.insert(i, (id, false));
+        let (laddr, _) = self.wire.conns[&id].addrs(false);
         let s = &mut tab(self.ctl).socks[i];
         s.state = WS_CONNECTING;
         s.lport = cport;
-        s.laddr = kind;
+        s.laddr = laddr;
         s.rport = port;
         s.raddr = kind;
         s.conn = id;
@@ -705,7 +772,9 @@ impl Sup {
             return -(libc::ECONNABORTED as i64);
         };
         c.server.idx = Some(i);
-        let (sport, cport, kind, reset) = (c.sport, c.cport, c.kind, c.server_reset);
+        let (sport, cport, kind, reset, snode) =
+            (c.sport, c.cport, c.kind, c.server_reset, c.snode);
+        let (laddr, raddr) = c.addrs(true);
         c.server_reset = false;
         self.wire.by_idx.insert(i, (id, true));
         let family = a[2] as u16;
@@ -716,14 +785,15 @@ impl Sup {
                 port: sport,
                 kind,
                 listening: false,
+                node: snode,
             },
         );
         let s = &mut tab(self.ctl).socks[i];
         s.state = WS_CONNECTED;
         s.lport = sport;
-        s.laddr = kind;
+        s.laddr = laddr;
         s.rport = cport;
-        s.raddr = kind;
+        s.raddr = raddr;
         s.conn = id;
         if reset {
             s.flags |= WF_RESET;
@@ -836,7 +906,16 @@ impl Sup {
                 }
                 _ => {
                     if let Some(c) = self.wire.conns.get_mut(&id) {
+                        if c.established {
+                            c.give_up_ev = None;
+                            self.give_up(id);
+                            continue;
+                        }
                         c.fate_ev = None;
+                        if c.syn_n > 0 && self.syn_retry(id) {
+                            continue;
+                        }
+                        let c = &self.wire.conns[&id];
                         match c.fate {
                             Fate::Establish => self.establish(id),
                             Fate::Refuse { .. } => self.connect_failed(id, ECONNREFUSED),
@@ -874,7 +953,8 @@ impl Sup {
             fix_bufs(sfd);
             self.wire.conns.get_mut(&id).unwrap().server.fd = sfd;
         }
-        let r = sock_connect(sfd, LISTEN_PREFIX, sport as u64);
+        let snode = self.wire.conns[&id].snode;
+        let r = sock_connect(sfd, LISTEN_PREFIX, listen_n(snode, sport));
         let e = errno();
         if r != 0 && e == libc::EAGAIN {
             self.wire.conns.get_mut(&id).unwrap().retry = true;
@@ -1297,11 +1377,11 @@ impl Sup {
             }
             self.note_queued(-(d.bytes as i64));
         }
-        if let Some(ev) = c.fate_ev {
+        for ev in [c.fate_ev, c.give_up_ev].into_iter().flatten() {
             self.sched.cancel(ev);
         }
-        if self.wire.ports.get(&c.cport) == Some(&PortUse::Client(id)) {
-            self.wire.ports.remove(&c.cport);
+        if self.wire.ports.get(&(c.cnode, c.cport)) == Some(&PortUse::Client(id)) {
+            self.wire.ports.remove(&(c.cnode, c.cport));
         }
         for i in [c.client.idx, c.server.idx].into_iter().flatten() {
             if self.wire.by_idx.get(&i).is_some_and(|&(k, _)| k == id) {
@@ -1322,6 +1402,164 @@ impl Sup {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
                 tab(self.ctl).counters.sup_hwm_kb.store(kb, Relaxed);
+            }
+        }
+    }
+}
+
+impl Conn {
+    /// The (local, peer) address kinds one side sees: both the address connected to, as the
+    /// one host saw them, unless the connection joins two nodes.
+    fn addrs(&self, server: bool) -> (u8, u8) {
+        if self.cnode == self.snode {
+            return (self.kind, self.kind);
+        }
+        let (c, s) = (node_addr(self.cnode), self.kind);
+        if server {
+            (s, c)
+        } else {
+            (c, s)
+        }
+    }
+}
+
+impl Sup {
+    /// Direction `dir` of `id` holds its first item: the give-up clock starts.
+    fn hold(&mut self, id: u32, dir: usize) {
+        let now = self.now();
+        let c = self.wire.conns.get_mut(&id).unwrap();
+        if c.dirs[dir].held_since.is_some() {
+            return;
+        }
+        c.dirs[dir].held_since = Some(now);
+        let tb = unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) };
+        tb.held += 1;
+        let t = now + GIVE_UP_NS;
+        if c.give_up_ev.is_some_and(|ev| ev.0 <= t) {
+            return;
+        }
+        if let Some(ev) = c.give_up_ev.take() {
+            self.sched.cancel(ev);
+        }
+        let ev = self.sched.schedule(
+            t,
+            super::sched::Event::Wire {
+                key: key(id, EV_CONNECT),
+            },
+        );
+        self.wire.conns.get_mut(&id).unwrap().give_up_ev = Some(ev);
+    }
+
+    /// The give-up check: a direction held for `GIVE_UP_NS` resets its sender, who sees
+    /// `ETIMEDOUT`; another still held is checked again at its own time.
+    fn give_up(&mut self, id: u32) {
+        let now = self.now();
+        for dir in 0..2 {
+            let Some(c) = self.wire.conns.get(&id) else {
+                return;
+            };
+            let Some(since) = c.dirs[dir].held_since else {
+                continue;
+            };
+            if now < since + GIVE_UP_NS {
+                continue;
+            }
+            // The sender of `dir` is the client for direction 0.
+            let sender = if dir == 0 { c.client.idx } else { c.server.idx };
+            if let Some(i) = sender {
+                tab(self.ctl).socks[i].err = ETIMEDOUT;
+            }
+            self.wire.conns.get_mut(&id).unwrap().dirs[dir].held_since = None;
+            self.reset_side(id, dir == 1, RST_GIVE_UP);
+        }
+        let next = self.wire.conns.get(&id).and_then(|c| {
+            c.dirs
+                .iter()
+                .filter_map(|d| d.held_since)
+                .min()
+                .map(|s| s + GIVE_UP_NS)
+        });
+        if let Some(t) = next {
+            let ev = self.sched.schedule(
+                t,
+                super::sched::Event::Wire {
+                    key: key(id, EV_CONNECT),
+                },
+            );
+            self.wire.conns.get_mut(&id).unwrap().give_up_ev = Some(ev);
+        }
+    }
+
+    /// A connect's SYN retry under a cut came: healed, the handshake's own delay from now (to
+    /// the listener there is now); still cut, the next retry, or after the last, `ETIMEDOUT`
+    /// at the give-up time. True when the connect waits again.
+    fn syn_retry(&mut self, id: u32) -> bool {
+        let now = self.now();
+        let c = &self.wire.conns[&id];
+        let (cnode, snode, at, n, port, kind) =
+            (c.cnode, c.snode, c.syn_at, c.syn_n, c.sport, c.kind);
+        let cut = self.link_cut(cnode, snode) || self.link_cut(snode, cnode);
+        let t = if !cut {
+            let l = self.wire.listener(snode, port, kind, self.ctl);
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            if c.fate == (Fate::Refuse { injected: false }) || c.fate == Fate::Establish {
+                c.listener = l;
+                c.fate = if l.is_some() {
+                    Fate::Establish
+                } else {
+                    Fate::Refuse { injected: false }
+                };
+            }
+            now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.delay_range())
+        } else if n < SYN_RETRY_NS.len() - 1 {
+            at + SYN_RETRY_NS[n] * 1_000_000_000
+        } else {
+            self.wire.conns.get_mut(&id).unwrap().fate = Fate::Timeout;
+            at + SYN_RETRY_NS[n] * 1_000_000_000
+        };
+        let ev = self.sched.schedule(
+            t,
+            super::sched::Event::Wire {
+                key: key(id, EV_CONNECT),
+            },
+        );
+        let c = self.wire.conns.get_mut(&id).unwrap();
+        c.fate_ev = Some(ev);
+        // Healed (or given up): the next event is the connect's fate, not another retry.
+        c.syn_n = if cut && c.fate != Fate::Timeout {
+            n + 1
+        } else {
+            0
+        };
+        true
+    }
+
+    /// Links opened by a heal: every item held on them is stamped now (its own draw from the
+    /// heal's time, never earlier than the item before it), and delivery resumes.
+    pub(super) fn wire_heal(&mut self, opened: &[(usize, usize)]) {
+        let now = self.now();
+        let ids: Vec<u32> = self.wire.conns.keys().copied().collect();
+        for id in ids {
+            for dir in 0..2 {
+                let c = self.wire.conns.get_mut(&id).unwrap();
+                if c.dirs[dir].held_since.is_none() || !opened.contains(&Self::link(c, dir)) {
+                    continue;
+                }
+                let d = &mut c.dirs[dir];
+                d.held_since = None;
+                let mut last = d.last_t;
+                for it in d.q.iter_mut() {
+                    let t = match it {
+                        Item::Data { t, .. } | Item::Fin { t } | Item::Rst { t, .. } => t,
+                    };
+                    if *t & HELD != 0 {
+                        *t = (now + (*t & !HELD)).max(last);
+                        last = *t;
+                    }
+                }
+                d.last_t = last;
+                self.wire_decide(DEC_WIRE_HEAL, [id as u64, dir as u64, last, 0, 0, 0]);
+                self.arm(id, dir);
             }
         }
     }
