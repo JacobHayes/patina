@@ -128,6 +128,9 @@ enum Next {
     Continue(i64),
     /// The caller parked, yielded or exited: pick who runs next.
     Pick,
+    /// The caller yielded at a load-time point the runtime drew as a switch
+    /// (`Op::Yield` with `YIELD_OTHER`): pick another runnable thread when there is one.
+    PickOther,
 }
 
 impl Sup {
@@ -281,6 +284,14 @@ impl Sup {
         self.ctl
             .next_deadline_ns
             .store(self.sched.next_deadline().unwrap_or(u64::MAX), Relaxed);
+        let pid = self.sched.entries[to].pid;
+        let quiet = self.sig.procs.get(&pid).is_none_or(|p| p.pending.set == 0);
+        let v = &self.ctl.view;
+        v.seq.store(self.ctl.seq.load(Relaxed), Relaxed);
+        v.slot.store(to as u64, Relaxed);
+        v.runnable
+            .store(self.sched.runnable().count() as u64, Relaxed);
+        v.quiet.store(quiet as u64, Relaxed);
         self.running = Some(to);
         let s = unsafe { &mut *self.ctl.slot(to) };
         unsafe { std::ptr::write_volatile(&mut s.rep, Reply { ret, flags }) };
@@ -333,6 +344,16 @@ impl Sup {
             })
             .collect();
         parts.join("; ")
+    }
+
+    /// Who runs next after `idx` yielded at a point drawn as a switch: the seeded pick among the
+    /// runnable threads other than `idx`; `choose` when there is none.
+    fn choose_other(&mut self, idx: usize) -> (usize, u64) {
+        let seq = self.ctl.seq.load(Relaxed) + 1;
+        match self.sched.pick_except(seq, idx) {
+            Some(to) => (to, seq),
+            None => self.choose(),
+        }
     }
 
     /// Who runs next: the seeded pick among runnable threads; with nothing runnable,
@@ -588,7 +609,11 @@ impl Sup {
             Some(Op::WaitPark) => self.wait_park(idx, a),
             Some(Op::Yield) => {
                 self.sched.entries[idx].reply = 0;
-                Next::Pick
+                if a[0] == YIELD_OTHER {
+                    Next::PickOther
+                } else {
+                    Next::Pick
+                }
             }
             Some(Op::Sleep) => {
                 let Some(ok) = self.may_block(idx) else {
@@ -969,8 +994,11 @@ impl Sup {
                     self.decide(req.op, idx, req.args, idx as i64);
                     idx
                 }
-                Next::Pick => {
-                    let (to, seq) = self.choose();
+                Next::Pick | Next::PickOther => {
+                    let (to, seq) = match next {
+                        Next::PickOther => self.choose_other(idx),
+                        _ => self.choose(),
+                    };
                     let got = self.decide(req.op, idx, req.args, to as i64);
                     debug_assert_eq!(got, seq);
                     to

@@ -153,7 +153,8 @@ fn redirect(at: u64, entry: u64, table: &[(u64, u64)]) -> (Vec<u8>, u64) {
 }
 
 /// The patched copy. Its cell starts at `events`: with enough, it runs as the original; with
-/// few, it stops on a trampoline's `ud2` once they run out (`SIGILL`).
+/// few, it stops on a trampoline's trap once they run out (x86_64 `hlt`: `SIGSEGV`; arm64
+/// `udf`: `SIGILL`).
 pub fn apply(data: &[u8], plan: &Plan, events: u64) -> Res<Vec<u8>> {
     let elf = Elf::parse(data)?;
     if !plan.tramp_vaddr.is_multiple_of(PAGE) {

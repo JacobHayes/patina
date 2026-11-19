@@ -3,7 +3,8 @@
 # byte-identical; the second from another directory on one CPU), the plan is checked by the
 # independent verifier and against objdump's decode, and a copy with the plan applied
 # (`__rewrite --standalone`) runs natively: its output equals the original's in each of RUNS_EACH
-# runs, and its counts do run (a copy whose cell starts at 1000 events stops on SIGILL). On x86_64
+# runs, and its counts do run (a copy whose cell starts at 1000 events stops on its trap: x86_64
+# `hlt`, SIGSEGV; arm64 `udf`, SIGILL). On x86_64
 # and arm64; each guest is built on the architecture it runs on.
 #@ tier=quick budget=60
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
@@ -13,6 +14,7 @@ o=$RUNS/01-differential
 rm -rf "${o:?}"
 mkdir -p "$o/elsewhere"
 RUNS_EACH=5
+arch=$(uname -m)
 for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
     f=$PATINA_GUESTS/$g
     [ -x "$f" ] || die "missing guest $f"
@@ -33,7 +35,9 @@ for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
     # The exit status of the copy, negative for a signal (python3: no shell job message).
     st=$(ulimit -c 0; timeout 60 python3 -I -c 'import subprocess as s, sys
 print(s.run(sys.argv[1:], stdout=s.DEVNULL, stderr=s.DEVNULL).returncode)' "$o/$g.few")
-    [ "$st" = -4 ] || die "$g: a copy with 1000 events ended with $st, not SIGILL: its counts did not run"
+    want=-11
+    [ "$arch" != aarch64 ] || want=-4
+    [ "$st" = "$want" ] || die "$g: a copy with 1000 events ended with $st, not $want (its trap's signal): its counts did not run"
     rm "$o/$g.rw" "$o/$g.few" "$o/$g.plan2"
     awk -v g="$g" '$1 == "sites" && $2 == "back-branch" {print g ": back-branches " $NF " (" $4 " " $5 " " $7 ")"}' "$o/$g.report"
 done

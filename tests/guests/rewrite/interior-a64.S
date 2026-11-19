@@ -133,7 +133,7 @@ e_atomic_after:
 
 // The dispatcher: for each row (offset of the address from `rows`, w0, w1) enter it as above
 // by the row's way (index & 3: 0 and 3 blr, 1 br, 2 ret), fold w0 into x19 (x19 * 1000003 +
-// w0); x20 counts the entries.
+// w0) and make a system call; x20 counts the entries.
     .globl _start
     .type _start, %function
 _start:
@@ -174,6 +174,10 @@ _start:
     movk x12, #15, lsl #16
     mul x19, x19, x12
     add x19, x19, w0, uxtw
+    // getppid between entries: the program is one thread, so under --preempt points a point
+    // is taken only at the first count after a system call (ARCHITECTURE "Compute points").
+    mov x8, #173
+    svc #0
     add x21, x21, #24
     b 2b
 9:  cmp x23, #2

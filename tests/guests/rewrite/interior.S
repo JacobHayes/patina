@@ -151,7 +151,7 @@ e_page_jnz:
 // The dispatcher: for each row (address, rdi, rsi), enter the address with rdi and rsi, the
 // row's index in rax, rdx and (its low two bits) rcx, no other register naming an address
 // the program's other routines read, and the flags of `test %esi, %esi` (a nonzero count: the routines' branches go back), by the
-// row's way, and fold eax into r12.
+// row's way, fold eax into r12, and make a system call.
     .globl _start
     .type _start, @function
 _start:
@@ -193,8 +193,13 @@ _start:
     push %r11
     test %esi, %esi
     ret
-6:  imul $1000003, %r12, %r12
-    mov %eax, %eax
+    // getppid between entries: the program is one thread, so under --preempt points a point
+    // is taken only at the first count after a system call (ARCHITECTURE "Compute points").
+6:  mov %eax, %r8d
+    mov $110, %eax
+    syscall
+    imul $1000003, %r12, %r12
+    mov %r8d, %eax
     add %rax, %r12
     add $24, %rbx
     jmp 2b

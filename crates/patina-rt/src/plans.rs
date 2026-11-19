@@ -7,7 +7,7 @@
 //!   the load bias plus their link address (after the image; `room` reserves the space for a
 //!   library `ld.so` maps), and its patched pages over the text, private and read-only, from
 //!   the plan file. Its page directory and site rows are mapped in the runtime's own region.
-//! - **A point**: a trampoline's `ud2` is a compute point (`compute::point`), then the program
+//! - **A point**: a trampoline's trap (`hlt`, arm64 `udf`) is a compute point (`compute::point`), then the program
 //!   goes on after it; a switch first walks on (`spin::walk`). A `ud2` written over a `cpuid`
 //!   is answered with core 0's identity (`cpuid`). A trap at an interior boundary of a group
 //!   (a jump there from code the rewriter could not see) resumes at the copy of that
@@ -206,19 +206,29 @@ fn elf_dyn(fd: u64) -> bool {
         && u16::from_le_bytes([h[18], h[19]]) == MACHINE
 }
 
-/// This machine's ELF number, the length of a trampoline's trap (`ud2`, `udf`) and the
+/// This machine's ELF number, its trampolines' trap (x86_64 `hlt`, a general protection
+/// fault in user mode: `SIGSEGV` from the kernel, at it, no address; arm64 `udf`: `SIGILL`)
+/// and its length, and the
 /// protection bits a trampoline keeps from its text (arm64: `PROT_BTI`, so that a copied
 /// indirect branch sets the same branch type as in place).
 #[cfg(target_arch = "x86_64")]
 const MACHINE: u16 = 62;
 #[cfg(target_arch = "x86_64")]
-const TRAP_LEN: u64 = 2;
+const TRAP_LEN: u64 = 1;
+#[cfg(target_arch = "x86_64")]
+fn is_trap(sig: i32, info: &crate::sys::sig::SigInfo) -> bool {
+    sig as u64 == crate::sys::sig::SIGSEGV && info[1] as u32 as i32 == 0x80 && info[2] == 0
+}
 #[cfg(target_arch = "x86_64")]
 const KEEP: u64 = 0;
 #[cfg(target_arch = "aarch64")]
 const MACHINE: u16 = 183;
 #[cfg(target_arch = "aarch64")]
 const TRAP_LEN: u64 = 4;
+#[cfg(target_arch = "aarch64")]
+fn is_trap(sig: i32, _: &crate::sys::sig::SigInfo) -> bool {
+    sig as u64 == crate::sys::sig::SIGILL
+}
 #[cfg(target_arch = "aarch64")]
 const KEEP: u64 = crate::arch::insn::PROT_BTI;
 
@@ -601,7 +611,7 @@ pub fn try_point(
     }
     let trap =
         img.tramp + field::<u32>(row, SITE_TRAMP) as u64 + field::<u16>(row, SITE_TRAP) as u64;
-    if sig as u64 != crate::sys::sig::SIGILL || pc != trap {
+    if !is_trap(sig, info) || pc != trap {
         return false;
     }
     count(proto::ctl::PLAN_POINTS);

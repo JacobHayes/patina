@@ -16,8 +16,9 @@ use proto::layout::*;
 /// An instruction emulator: returns true when it handled the fault (and advanced `pc`).
 pub type Emulator = fn(&mut Frame, i32, &SigInfo) -> bool;
 
-/// The emulators, tried in order: the timestamp counter (SIGSEGV under `PR_SET_TSC`), then
-/// patched sites (SIGILL at a `ud2` the runtime wrote).
+/// The emulators, tried in order: the timestamp counter (SIGSEGV under `PR_SET_TSC`), load-time
+/// points (a trampoline's trap, `plans::is_trap`), then patched sites (SIGILL at a `ud2` the
+/// runtime wrote).
 static EMULATORS: &[Emulator] = &[
     crate::insn::tsc::try_emulate,
     crate::plans::try_point,

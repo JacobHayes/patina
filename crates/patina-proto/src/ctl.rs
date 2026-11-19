@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 17;
+pub const LAYOUT_VERSION: u64 = 18;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -45,6 +45,9 @@ pub struct Config {
     /// time is still charged, deadlines still cut, and the cell still yields every `REFILL`), and the virtual time one event costs.
     pub compute_gap: u64,
     pub compute_charge_ns: u64,
+    /// Whether the switch budget applies to the mean gap (`crate::compute::budget`): 1 when
+    /// the gap was drawn by default, 0 when the fault plan names `compute-gap`.
+    pub compute_budget: u64,
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`proto::compute::walk`; 0: a switch is taken at its site).
     pub compute_walk: u64,
@@ -144,6 +147,7 @@ impl Config {
             spin_charge_ns: 0,
             compute_gap: 0,
             compute_charge_ns: 0,
+            compute_budget: 0,
             compute_walk: 0,
             log_limit: crate::layout::LOG_MAX,
             log_paths: 0,
@@ -203,7 +207,8 @@ pub struct Ctl {
     /// Address of the runtime's table of tracked shared mappings (`oplog::SharedMaps`), the
     /// same in every guest process; written by each image at its start.
     pub maps_table: AtomicU64,
-    pub _spare: [AtomicU64; 3],
+    /// What the supervisor left when it last gave the turn (`SchedView`).
+    pub view: SchedView,
     /// One bit per syscall number answered `Deny` at least once (`refused` in the outcome).
     pub denied: [AtomicU64; 8],
     /// Syscall number that ended the run with `Stop` (or u64::MAX).
@@ -225,6 +230,20 @@ pub struct Ctl {
     pub compute: ComputeStats,
 }
 
+/// The scheduler as the supervisor left it when it last gave the turn, written just before it
+/// does: the run's `seq` then, the slot it gave the turn to, how many threads were runnable
+/// (that one included), and whether that thread's process had no process-directed signal
+/// pending. With `--preempt points` the runtime arms the next segment from it while `seq` is
+/// still that value (`compute::exit`): nothing has happened since but the program's own
+/// computation, so the supervisor would make the same picks then as now.
+#[repr(C)]
+pub struct SchedView {
+    pub seq: AtomicU64,
+    pub slot: AtomicU64,
+    pub runnable: AtomicU64,
+    pub quiet: AtomicU64,
+}
+
 /// Compute points (`crate::compute`).
 #[repr(C)]
 pub struct ComputeStats {
@@ -243,14 +262,14 @@ pub struct ComputeStats {
     /// later), patched `cpuid`s answered, and jumps into a group's interior boundary resumed
     /// at the copy of its instruction; switches taken after a walk, the instructions
     /// walked, and walks a runtime entry or an instruction the stepper cannot step ended
-    /// without a switch.
+    /// without a switch; points drawn ahead that stayed with their thread (no trap: `stays`).
     pub plan: [AtomicU64; PLAN_FIELDS],
     /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: the
     /// stall watchdog counts that wall time as progress (it costs no virtual time).
     pub planning: AtomicU64,
 }
 
-pub const PLAN_FIELDS: usize = 9;
+pub const PLAN_FIELDS: usize = 10;
 pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "points",
     "applied",
@@ -261,6 +280,7 @@ pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "walks",
     "walk_steps",
     "walks_cut",
+    "stays",
 ];
 pub const PLAN_POINTS: usize = 0;
 pub const PLAN_APPLIED: usize = 1;
@@ -271,6 +291,7 @@ pub const PLAN_INTERIOR: usize = 5;
 pub const PLAN_WALKS: usize = 6;
 pub const PLAN_WALK_STEPS: usize = 7;
 pub const PLAN_WALKS_CUT: usize = 8;
+pub const PLAN_STAYS: usize = 9;
 
 impl ComputeStats {
     pub fn plans(&self) -> [u64; PLAN_FIELDS] {
@@ -726,6 +747,9 @@ pub const DEC_IDLE_JUMP: u32 = 0x100;
 /// An interval timer expired and raised its signal (args: [pid, expiry ns, interval ns]).
 pub const DEC_SIGNAL_TIMER: u32 = 0x120;
 
+/// `Yield`'s argument: pick another thread than the caller, if one is runnable.
+pub const YIELD_OTHER: u64 = 1;
+
 /// "No deadline" in request arguments.
 pub const NO_DEADLINE: u64 = u64::MAX;
 
@@ -735,6 +759,8 @@ pub const NO_DEADLINE: u64 = u64::MAX;
 ///
 /// Arguments:
 /// - `Hello`: [pid, tid, 1 if a thread created by `clone`]
+/// - `Yield`: [`YIELD_OTHER` or 0]: with it, the next thread is picked from the runnable threads
+///   other than the caller (a load-time point the runtime drew as a switch: `compute::chain`)
 /// - `Sleep`: [deadline ns of the virtual monotonic clock]
 /// - `FutexWait`: [address, value seen, deadline or `NO_DEADLINE`, bitset]; reply 0 or -ETIMEDOUT
 /// - `FutexWake`: [address, n, bitset, address2 or 0, n2]; reply: threads woken

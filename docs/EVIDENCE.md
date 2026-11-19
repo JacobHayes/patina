@@ -657,7 +657,7 @@ decoder.
 | `stats-c` built stock (a lost update: a load and a store with no branch, call or atomic between) | 0 of 20 at the default gap and at `compute-gap=1..8`: out of reach by design (a rebuild finds it) |
 | A timer due inside a loop with no system call (`deadline-stock`) | without points `compute-stall`; with them the handler runs at 10,003,018 virtual ns for a 10 ms timer |
 | `spinpoints count` (a spin-wait whose iterations change state) | `ok` (without points `compute-stall`) |
-| fork + execve of `/bin/true`, 300 in a run, per call (K5) | without points 0.73 to 0.79 ms; with warm plans 1.18 to 1.28 ms (0 to 2 points taken); seeds whose drawn gap is small take thousands of points (seed 3: 9,144, 1.7 ms per call): each point is a supervisor hand-off of about 17 µs, the search's cost, not the plans'. glibc's start runs `cpuid` 40 times per process, each answered in the runtime |
+| fork + execve of `/bin/true`, 300 in a run, per call (K5) | without points 0.73 to 0.79 ms; with warm plans 1.18 to 1.28 ms (0 to 2 points taken); seeds whose drawn gap is small took thousands of points (seed 3: 9,144, 1.7 ms per call): each point was a supervisor hand-off of about 17 µs, the search's cost, not the plans' (since, only points that can switch are taken: "The cost of a point", below). glibc's start runs `cpuid` 40 times per process, each answered in the runtime |
 | Every run without the flag (90 cells of the stock workload ledger: outcome and digest) | identical to the build before |
 
 Fidelity (`03-fidelity`, `rw-fid`, dynamic C): a fault in a relocated `lock xadd` is reported
@@ -822,6 +822,109 @@ the original code). Output stays native, but the rest of the executable has no p
 rest of the process. Putting back only the pages a change touches would keep them: on arm64
 every patch is one aligned instruction, so a page holds whole patches; on x86_64 a patch can
 cross a page, so the pages put back would have to grow to whole patches. Not done here.
+
+### The cost of a point
+
+Measured 2026-11-19 on the x86_64 host above (a KVM guest on a Ryzen 9 9950X, 24 CPUs) and on
+GitHub `ubuntu-24.04-arm` runners (Neoverse N2, 4 CPUs), with the corpus programs above. `perf`
+is not open to unprivileged users on the x86_64 host (`perf_event_paranoid` 4, left as it is),
+so the profile is from `getrusage`, `strace -c`, the run's own counts and microbenchmarks.
+
+**Before.** At seed 2 (mean gap 248 events), x86_64, warm plans:
+
+| Program | Wall | Points taken | Threads |
+|---|---|---|---|
+| gofmt | 40.2 s (stock under Patina 0.9 s) | 1,376,266 | 1.02 million switches: 74% of points switched |
+| CPython | 7.2 s (0.09 s) | 249,088 | one thread: 25 switches, every point a hand-over that picked the same thread |
+| ripgrep | 1.5 s (0.36 s) | 35,392 | one thread |
+| headless Chromium | 4.6 s (0.54 s) | 122,271 | 89,000 switches |
+
+Where it went (CPython, seed 2): 7.35 s with walks, 6.06 s of it system time; 4.48 s with
+`compute-walk=0`, so about 17 µs a point and 11 µs a walk's step. Each point was a trap (a
+`SIGILL` at `ud2`), a `preempt` record, a `Yield` to the supervisor and its decision: 4 futex
+calls, 2 clock reads by the supervisor, a `rt_sigreturn`, an `rt_sigpending` and about 2
+context switches. A trap of each kind, in a loop (a microbenchmark not in the repository, µs a
+round trip):
+
+| Host | `ud2` (`SIGILL`) | `int3` | `hlt` (`SIGSEGV`) | trap-flag step | futex ping-pong, one CPU |
+|---|---|---|---|---|---|
+| x86_64, this KVM host (AMD) | 5.5 to 5.8 | 0.62 to 0.66 | 0.65 to 0.69 | 6.4 | 1.3 |
+| x86_64, GitHub runner (EPYC 7763) | 2.83 | 2.86 | 3.05 | 3.85 | 6.1 |
+| arm64, GitHub runner (Neoverse N2) | `udf` 1.28 | `brk` 1.24 | | | 2.25 |
+
+KVM on AMD intercepts the invalid-opcode and debug exceptions, so `ud2` and the trap flag cost
+about 9 times `int3` or `hlt` there; elsewhere the trap kinds cost about the same.
+
+**What changed** (ARCHITECTURE "Compute points"): points that cannot switch are not taken (a
+thread alone arms to its next deadline; points whose draw keeps the thread are passed, counted
+`stays`); with the gap drawn by default, a run past 32,768 switches plus one per 8,192 events
+draws its gaps with a mean of at least 8,192; the x86_64 trampoline traps with `hlt`.
+
+**After.** Wall ms of seeds 1 to 5 (mean gaps 64,514, 248, 115, 34,864 and 514), warm plans,
+points with walks at the default settings. Traps and after: the least of 3 runs; before: one
+run of the build before (main at the sandbox landing). Points taken before → after:
+
+| Program | Seed | x86_64: traps / before / after (after ÷ traps) | points | arm64: traps / before / after (after ÷ traps) | points |
+|---|---|---|---|---|---|
+| ripgrep | 1 | 316 / 376 / 312 (1.0) | 88 → 76 | 737 / 860 / 809 (1.1) | 144 → 107 |
+| | 2 | 302 / 1,564 / 459 (1.5) | 35,392 → 10,015 | 741 / 2,196 / 1,037 (1.4) | 60,136 → 9,267 |
+| | 3 | 300 / 2,642 / 553 (1.8) | 80,540 → 17,162 | 743 / 3,674 / 1,133 (1.5) | 133,258 → 14,808 |
+| | 4 | 300 / 388 / 325 (1.1) | 177 → 119 | 739 / 852 / 804 (1.1) | 279 → 180 |
+| | 5 | 315 / 897 / 415 (1.3) | 16,140 → 5,870 | 730 / 1,494 / 966 (1.3) | 27,957 → 6,026 |
+| CPython | 1 | 87 / 148 / 115 (1.3) | 949 → 68 | 197 / 250 / 242 (1.2) | 457 → 57 |
+| | 2 | 85 / 7,228 / 122 (1.4) | 249,088 → 305 | 198 / 3,052 / 257 (1.3) | 130,920 → 602 |
+| | 3 | 86 / 14,682 / 122 (1.4) | 537,588 → 374 | 196 / 6,347 / 259 (1.3) | 281,711 → 788 |
+| | 4 | 88 / 186 / 115 (1.3) | 1,738 → 74 | 196 / 270 / 241 (1.2) | 908 → 80 |
+| | 5 | 84 / 3,386 / 125 (1.5) | 119,797 → 247 | 197 / 1,563 / 248 (1.3) | 62,740 → 419 |
+| headless Chromium | 1 | 518 / 899 / 937 (1.8) | 350 → 214 | 1,190 / 1,563 / 1,548 (1.3) | 150 → 145 |
+| | 2 | 538 / 4,588 / 1,656 (3.1) | 122,271 → 36,635 | 1,222 / 3,816 / 3,038 (2.5) | 60,185 → 32,313 |
+| | 3 | 531 / 8,841 / 1,606 (3.0) | 266,984 → 36,632 | 1,185 / 6,002 / 2,791 (2.4) | 132,510 → 34,708 |
+| | 4 | 531 / 894 / 951 (1.8) | 678 → 397 | 1,228 / 1,573 / 1,597 (1.3) | 291 → 264 |
+| | 5 | 523 / 2,607 / 1,301 (2.5) | 57,925 → 18,967 | 1,222 / 2,697 / 2,340 (1.9) | 27,928 → 15,789 |
+| gofmt | 1 | 1,037 / 1,373 / 1,003 (1.0) | 5,855 → 5,435 | 1,286 / 1,834 / 1,755 (1.4) | 5,228 → 4,462 |
+| | 2 | 897 / 40,843 / 2,034 (2.3) | 1,376,266 → 74,885 | 1,259 / 27,453 / 3,204 (2.5) | 1,158,055 → 67,474 |
+| | 3 | 1,110 / 83,083 / 2,015 (1.8) | 2,974,420 → 75,374 | 1,195 / 57,147 / 3,141 (2.6) | 2,480,834 → 67,754 |
+| | 4 | 1,208 / 1,238 / 1,081 (0.9) | 10,012 → 8,214 | 1,252 / 1,859 / 1,880 (1.5) | 8,776 → 7,387 |
+| | 5 | 960 / 20,169 / 2,024 (2.1) | 670,735 → 74,333 | 1,224 / 14,191 / 3,275 (2.7) | 555,653 → 67,689 |
+
+The x86_64 "before" column is the walks build (main before the sandbox landing), whose
+traps-mode runs took 360 to 380 ms for ripgrep, 85 to 92 for CPython, 532 to 568 for Chromium
+and 900 to 1,210 for gofmt. The costliest seeds are Chromium's at small gaps, about 3 times
+its traps-mode run on x86_64: its threads are in different processes, and a switch between
+them costs about 30 µs with its walk. Chromium's 1.7 to 1.8 at the large gaps is the plans
+themselves (the same before). ripgrep's points are switches with no runnable count: it emulates
+`rdtsc` and serves calls in the runtime between hand-overs, and the runtime then draws one gap
+as before (ARCHITECTURE).
+
+Without the budget (alone and stays only), gofmt at seed 2 took 16.6 s on x86_64; with the
+allowance at 65,536 and one switch per 4,096 events, 3.5 s. The allowance is set above the
+points any race guest below takes at the default gap (the most: 3,751).
+
+**Finds** (the walks table's guests, 200 seeds each, points with walks; before → after):
+
+| Guest | x86_64 default gap | x86_64 `compute-gap=2..64` | arm64 default gap | arm64 `compute-gap=2..64` |
+|---|---|---|---|---|
+| `lms` | 21 → 16 | 106 → 109 | 15 → 15 | 101 → 105 |
+| `stats-c` | 0 → 1 | 2 → 3 | 1 → 0 | 1 → 2 |
+| `go-race-stock` | 0 → 2 | 70 → 74 | 1 → 4 | 73 → 91 |
+| `rs-race-stock` | 0 → 0 | 7 → 3 | 0 → 0 | 7 → 4 |
+| `races b`, `publish`, `dcl` | 0 → 0 | 0 → 0 | 0 → 0 | 0 → 0 |
+| total | 206 → 208 | | 199 → 221 | |
+
+No run of these guests reaches the budget (a gap the plan names is exempt from it), so the
+differences are the schedules the stays draw. Over 4,000 seeds on x86_64, `lms` at the
+default gap was found 357 times before and 336 after (p about 0.4), and `rs-race-stock` at
+`2..64` 110 and 90 (p about 0.16): within chance, though `rs-race-stock` is lower on both
+architectures. These rates were measured with the allowance at 32,768 and one switch per
+4,096 events; the final constants (one per 8,192) change nothing below the allowance.
+
+**Digests.** Without `--preempt points` every digest is unchanged: the 90 cells of the stock
+workload ledger and 45 cells of compute-point guests (rebuilt code, with and without
+`compute-gap=8`) are identical to main on x86_64 (both builds on one guest set) and on arm64
+(a CI job). With it, digests change (fewer records, other schedules). `verify --vary
+cpu,load,aslr,sandbox,repeat`: gofmt seed 2 (the budget engaged) and Chromium seed 3
+identical on both architectures; the quick tier's `rewrite/02-points` and `05-walks` cover the
+C, C++, Rust and Go guests and `patina replay`.
 
 ## Branch counters on arm64
 

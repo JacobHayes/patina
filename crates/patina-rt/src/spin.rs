@@ -106,11 +106,11 @@ pub struct Spin {
     /// The step in progress (`arch::step`).
     pub st: st::Stepper,
     /// A walk: the program's instructions left and walked, whether the step in progress is
-    /// in a trampoline (not counted), and its segment's armed value and drawn gap.
+    /// in a trampoline (not counted), and its segment (`compute::Seg`).
     pub left: u64,
     pub walked: u64,
     pub in_tramp: u8,
-    pub seg: [u64; 2],
+    pub seg: crate::compute::Seg,
 }
 
 impl Spin {
@@ -130,7 +130,7 @@ impl Spin {
             left: 0,
             walked: 0,
             in_tramp: 0,
-            seg: [0; 2],
+            seg: crate::compute::Seg::NONE,
         }
     }
 }
@@ -866,7 +866,7 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
 /// with no switch (`enter`; counted `walks_cut`), as does an instruction the stepper refuses
 /// for what it is. A host that cannot step (arm64: `/proc/self/mem` closed to the runtime)
 /// ends the run (`HE_WALK`), so a seed's walks never depend on the host.
-pub fn walk(ts: &mut ThreadState, n: u64, seg: [u64; 2]) {
+pub fn walk(ts: &mut ThreadState, n: u64, seg: crate::compute::Seg) {
     let s = &mut ts.spin;
     s.phase = PH_WALK;
     s.left = n;

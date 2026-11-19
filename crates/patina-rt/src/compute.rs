@@ -62,6 +62,10 @@ pub struct Compute {
     pub handed: i64,
     pub draw: u64,
     pub cut: u64,
+    /// With `--preempt points`: the segment's points that stayed with the thread before the
+    /// one it ends at, and whether that one was drawn as a switch to another thread (`chain`).
+    pub stays: u64,
+    pub other: bool,
     /// Events charged in this process.
     pub events: u64,
 }
@@ -75,9 +79,40 @@ impl Compute {
             handed: 0,
             draw: 0,
             cut: 0,
+            stays: 0,
+            other: false,
             events: 0,
         }
     }
+
+    fn seg(&self) -> Seg {
+        Seg {
+            armed: self.armed as u64,
+            draw: self.draw,
+            stays: self.stays,
+            other: self.other,
+        }
+    }
+}
+
+/// What a point's record and its yield take from the segment it ends: the value the cell was
+/// armed with, the last gap drawn, the points that stayed before it, and whether it was drawn as
+/// a switch to another thread. Kept by a walk until its switch (`spin::walk`).
+#[derive(Clone, Copy)]
+pub struct Seg {
+    pub armed: u64,
+    pub draw: u64,
+    pub stays: u64,
+    pub other: bool,
+}
+
+impl Seg {
+    pub const NONE: Seg = Seg {
+        armed: 0,
+        draw: 0,
+        stays: 0,
+        other: false,
+    };
 }
 
 /// A hello in this image: `COMPUTE_POINT` is a compute point (otherwise an unknown SDK call).
@@ -144,26 +179,66 @@ pub fn exit(ts: &mut ThreadState) {
     exit_slow(ts);
 }
 
+/// With `--preempt points`, a segment armed right after the supervisor gave this thread the
+/// turn, with nothing since (`Ctl::view`: the run's `seq` is still the one it left), is armed
+/// knowing how many threads are runnable: the supervisor's state is the one it would answer a
+/// yield from, so the points that would stay with this thread are drawn here and not taken
+/// (`proto::compute::chain`); when it is alone there is none. Anything else since (a system
+/// call the runtime answered, a signal delivered, a record of any kind) moves `seq`, and the
+/// segment is armed with one gap, its point a yield the supervisor picks for as before. What
+/// this reads is the supervisor's (`view`, `seq`, the deadline) and the run's seed; a program
+/// that wrote there would change only when its own points come, as for its cell.
 #[inline(never)]
 fn exit_slow(ts: &mut ThreadState) {
     ts.compute_segs += 1;
     let c = ctl();
     let cfg = &c.config;
-    let key = proto::compute::key(c.seq.load(Relaxed), ts.slot, ts.compute_segs);
-    let draw = proto::compute::gap(cfg.seed, cfg.compute_gap, key);
+    let seq = c.seq.load(Relaxed);
     // The first event at or after the next deadline, or past the time limit, is a point.
     let due = c.next_deadline_ns.load(Relaxed).min(
         proto::layout::VCLOCK_BOOT_NS
             .saturating_add(cfg.vtime_limit_ns)
             .saturating_add(1),
     );
-    let (n, cut) = proto::compute::arm(draw, c.vclock_ns.load(Relaxed), due, cfg.compute_charge_ns);
+    let v = &c.view;
+    let runnable = if crate::plans::on()
+        && v.seq.load(Relaxed) == seq
+        && v.slot.load(Relaxed) == ts.slot as u64
+        && v.quiet.load(Relaxed) != 0
+    {
+        v.runnable.load(Relaxed).max(1)
+    } else {
+        0
+    };
+    let (slot, segs) = (ts.slot, ts.compute_segs);
+    let mean = if crate::plans::on() && cfg.compute_budget != 0 {
+        let s = &c.compute;
+        proto::compute::budget(
+            cfg.compute_gap,
+            s.switches.load(Relaxed),
+            s.events.load(Relaxed),
+        )
+    } else {
+        cfg.compute_gap
+    };
+    let ch = proto::compute::chain(
+        cfg.seed,
+        mean,
+        |k| proto::compute::key(seq, slot, segs + k),
+        runnable,
+        c.vclock_ns.load(Relaxed),
+        due,
+        cfg.compute_charge_ns,
+    );
+    ts.compute_segs += ch.gaps - 1;
     let p = &mut proc().compute;
-    p.armed = n as i64;
-    p.handed = n as i64;
-    p.draw = draw.unwrap_or(0);
-    p.cut = cut;
-    write_cell(n as i64);
+    p.armed = ch.armed as i64;
+    p.handed = ch.armed as i64;
+    p.draw = ch.draw;
+    p.cut = ch.reason;
+    p.stays = ch.stays;
+    p.other = runnable >= 2 && ch.reason == REASON_SWITCH;
+    write_cell(ch.armed as i64);
 }
 
 /// `COMPUTE_HELLO`: map the cell (first hook copy of this image), note the image and its kinds
@@ -360,23 +435,18 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
         let key = proto::compute::key(c.seq.load(Relaxed), ts.slot, ts.compute_segs);
         let n = proto::compute::walk(c.config.seed, c.config.compute_walk, key);
         if n > 0 {
-            return crate::spin::walk(ts, n, [p.armed as u64, p.draw]);
+            return crate::spin::walk(ts, n, p.seg());
         }
     }
-    switch(ts, frame, pc, reason, [p.armed as u64, p.draw], 0);
+    let seg = p.seg();
+    switch(ts, frame, pc, reason, seg, 0);
 }
 
 /// Take a compute point's stop at `pc` (as the program sees it): one `Preempt` record (`seg`:
-/// the segment's armed value and drawn gap; `walked`: the instructions walked past the site)
-/// and a yield.
-pub fn switch(
-    ts: &mut ThreadState,
-    frame: &Frame,
-    pc: u64,
-    reason: u64,
-    seg: [u64; 2],
-    walked: u64,
-) {
+/// the segment's armed value, drawn gap and the points that stayed before this one, in the
+/// reason's high half; `walked`: the instructions walked past the site) and a yield, to another
+/// thread when the point was drawn as a switch (`chain`).
+pub fn switch(ts: &mut ThreadState, frame: &Frame, pc: u64, reason: u64, seg: Seg, walked: u64) {
     let c = ctl();
     ts.seq = c.seq.load(Relaxed) + 1;
     c.seq.store(ts.seq, Relaxed);
@@ -396,11 +466,24 @@ pub fn switch(
         kind: proto::RecKind::Preempt as u8,
         class: 0,
         nr: PREEMPT_NR,
-        args: [pc, seg[0], reason, proc().compute.events, seg[1], walked],
+        args: [
+            pc,
+            seg.armed,
+            reason | seg.stays << 32,
+            proc().compute.events,
+            seg.draw,
+            walked,
+        ],
         ret: 0,
         out_hash: proto::rec::hash_bytes(0, bytes),
         in_hash: 0,
     };
     crate::log::append(&rec);
-    crate::sup::call_sup(proto::ctl::Op::Yield, [0; 6]);
+    crate::plans::count_n(proto::ctl::PLAN_STAYS, seg.stays);
+    let other = if seg.other {
+        proto::ctl::YIELD_OTHER
+    } else {
+        0
+    };
+    crate::sup::call_sup(proto::ctl::Op::Yield, [other, 0, 0, 0, 0, 0]);
 }

@@ -175,6 +175,21 @@ impl Sched {
         self.runnable.iter().nth(i as usize).copied()
     }
 
+    /// The picking rule without `except`: the other runnable threads in slot order,
+    /// `others[draw(Sched, seq) % len]`; None when there are none.
+    pub fn pick_except(&self, seq: u64, except: usize) -> Option<usize> {
+        let n = self.runnable.iter().filter(|&&s| s != except).count() as u64;
+        if n == 0 {
+            return None;
+        }
+        let i = draw(self.seed, Stream::Sched, seq) % n;
+        self.runnable
+            .iter()
+            .filter(|&&s| s != except)
+            .nth(i as usize)
+            .copied()
+    }
+
     /// Park `slot` on `wait`, with an optional virtual deadline. `MayPark` says no signal
     /// it would take is pending (`Sup::may_block`).
     pub fn park(&mut self, slot: usize, wait: Wait, deadline: Option<u64>, ok: MayPark) {
@@ -328,5 +343,18 @@ mod tests {
         s.park(0, Wait::Sleep, None, MayPark::for_test(0));
         s.park(2, Wait::Sleep, None, MayPark::for_test(2));
         assert_eq!(s.pick(1), None);
+    }
+
+    #[test]
+    fn pick_except_picks_among_the_others() {
+        let s = sched(5, 3);
+        for q in 0..100 {
+            let p = s.pick_except(q, 1).unwrap();
+            assert_eq!(p, [0, 2][(draw(5, Stream::Sched, q) % 2) as usize]);
+        }
+        let mut one = sched(5, 2);
+        one.park(0, Wait::Sleep, None, MayPark::for_test(0));
+        assert_eq!(one.pick_except(1, 1), None);
+        assert_eq!(one.pick_except(1, 0), Some(1));
     }
 }

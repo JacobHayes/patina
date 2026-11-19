@@ -11,9 +11,11 @@
 #     site and no e_* label is;
 #  b. a copy with the plan applied (`__rewrite --standalone`, which resumes interior entries
 #     itself) prints the native output, 5 runs;
-#  c. under --preempt points with a point on every count (compute-gap=1), seeds 1 and 2 each
-#     repeat identical under --vary cpu,load,aslr,sandbox,repeat, print the native output, take
-#     points, and (x86_64) resume at every interior entry the guest made (two per label);
+#  c. under --preempt points with a point on every count (compute-gap=1; the guest is one
+#     thread, so a point is taken at the first count after each of its system calls), seeds 1
+#     and 2 each repeat identical under --vary cpu,load,aslr,sandbox,repeat, print the native
+#     output, take points, and (x86_64) resume at every interior entry the guest made (two per
+#     label);
 #  d. with an argument the guest maps over the range past its image that holds the trampolines,
 #     then makes every entry again: under --preempt points the plan is dropped (its original
 #     pages back) and the output is the native one.

@@ -25,6 +25,9 @@ pub enum Stream {
     Dgram = 13,
     /// Load-time points: the instructions a switch walks past its site (`compute::walk`).
     Walk = 14,
+    /// Load-time points: whether a switch point the runtime draws ahead stays with its thread
+    /// (`compute::chain`).
+    Stay = 15,
 }
 
 /// splitmix64 finaliser.

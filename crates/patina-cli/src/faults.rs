@@ -35,6 +35,9 @@ pub struct Plan {
     pub sdk: proto::sdk::SdkCfg,
     /// Compute points: the run's mean gap in events (`compute-gap`; 0: no compute switches).
     pub compute_gap: u64,
+    /// Whether the switch budget applies (`proto::compute::budget`): only to a gap drawn by
+    /// default; a plan that names `compute-gap` gets that gap for the whole run.
+    pub compute_budget: bool,
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`compute-walk`; 0: switches are taken at their sites).
     pub compute_walk: u64,
@@ -516,6 +519,7 @@ pub fn resolve(
         net: Default::default(),
         sdk: Default::default(),
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
+        compute_budget: true,
         compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
         resolved: vec![],
     };
@@ -537,7 +541,7 @@ pub fn resolve(
                 let g = resolve_gap(seed, k, v)?;
                 match k.as_str() {
                     "compute-walk" => plan.compute_walk = g,
-                    _ => plan.compute_gap = g,
+                    _ => (plan.compute_gap, plan.compute_budget) = (g, false),
                 }
                 plan.resolved.push((k.clone(), json!(g)));
                 continue;
@@ -913,10 +917,11 @@ mod tests {
             let d = resolve(s, &[], &[], None).unwrap();
             let (lo, hi) = proto::compute::GAP_DEFAULT;
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
-            assert!(d.resolved.is_empty());
+            assert!(d.resolved.is_empty() && d.compute_budget);
             seen.insert(d.compute_gap);
             let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None).unwrap();
             assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
+            assert!(!p.compute_budget);
             let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None).unwrap();
             assert!((100..=200).contains(&r.compute_gap));
             assert_eq!(val(&r, "compute-gap"), json!(r.compute_gap));

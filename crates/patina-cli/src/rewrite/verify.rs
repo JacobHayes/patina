@@ -9,7 +9,7 @@
 //!     instruction of code found here, that no known branch enters, no code reads, and no other
 //!     decode overlaps or disagrees with;
 //!   - every patch is a jump, call or same-condition branch to its own trampoline, and every
-//!     trampoline counts, traps to its own `ud2`, and goes on to the original target, or runs an
+//!     trampoline counts, traps to its own `hlt`, and goes on to the original target, or runs an
 //!     exact copy of each patched instruction (same operand address; a closing direct branch to
 //!     the same target) and returns right after them;
 //!   - a group (a patch of several instructions): all straight-line but a last direct branch;
@@ -556,16 +556,16 @@ fn check_site(
         }
         k => return Err(format!("unknown kind {k}")),
     }
-    let ud2 = ti(row_end);
-    let back = ti(row_end + ud2.len());
+    let hlt = ti(row_end);
+    let back = ti(row_end + hlt.len());
     if row_end != s.trap as usize
-        || ud2.mnemonic() != Mnemonic::Ud2
+        || hlt.mnemonic() != Mnemonic::Hlt
         || back.mnemonic() != Mnemonic::Jmp
         || back.near_branch_target() != t + r as u64
     {
-        return Err("the trap is not `ud2` then a jump back to the row".into());
+        return Err("the trap is not `hlt` then a jump back to the row".into());
     }
-    if row_end + ud2.len() + back.len() != tb.len() {
+    if row_end + hlt.len() + back.len() != tb.len() {
         return Err("the trampoline's length is not its instructions'".into());
     }
     Ok(inner)

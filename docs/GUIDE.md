@@ -1756,23 +1756,23 @@ patina sweep --seeds 1..20 --preempt points --fault compute-gap=2..64 --out pati
 ```
 
 ```text
-new: failure exit: exit 1   (seed 8: patina replay /tmp/src/patina/patina-out/race/seed-8)
+new: failure exit: exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/race/seed-2)
 sweep: replaying the first seed of 1 finding
 sweep: 7.2 MiB kept in /tmp/src/patina/patina-out/race
-patina sweep: 20 runs, 6 findings in 1 group, 14 ok   (0.4s, 8 jobs)
-outcomes: failure 6, ok 14
-load-time points: 57217 taken in 20 runs; 1 of 1 files planned
+patina sweep: 20 runs, 8 findings in 1 group, 12 ok   (0.4s, 8 jobs)
+outcomes: failure 8, ok 12
+load-time points: 12683 taken in 20 runs; 1 of 1 files planned
 
 failure exit: exit 1
-  6 of 20 runs   first: seed 8   replayed: identical
-  rerun:  patina run --seed 8 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
-  replay: patina replay /tmp/src/patina/patina-out/race/seed-8
+  8 of 20 runs   first: seed 2   replayed: identical
+  rerun:  patina run --seed 2 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
+  replay: patina replay /tmp/src/patina/patina-out/race/seed-2
 ```
 
 `patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
 share of its sites patched and of its text left dark, and anything left without points.
-`result.json`'s `rewrite` has the counts (`points`, `applied`, `dropped`, `unplanned`, `cpuid`,
-`interior`; the walks' counts, below) and one entry per file the program mapped executable
+`result.json`'s `rewrite` has the counts (`points`, `stays`, `applied`, `dropped`, `unplanned`,
+`cpuid`, `interior`; the walks' counts, below) and one entry per file the program mapped executable
 (`images`: `path`, `sha256`, `status`, and for a planned file `sites`, `patches`,
 `covered_pct`, `back_edges_covered_pct`, `dark_pct`, `cpuid_patched`, `cpuid_unpatched`,
 `cache`, `rewrite_ms`).
@@ -1795,6 +1795,18 @@ a loop) is found on about 1 in 10 seeds at the default gap with walks and on non
 on half of them at `compute-gap=2..64`. One further from a point is found rarely:
 `examples/stats-c`'s lost update on 1 or 2 of 200 seeds. Rebuilt code puts a point at every
 load and store.
+
+**What it costs.** A point the program takes is a trap into Patina, and a switch there a
+hand-over through the supervisor (tens of microseconds with its walk, on the measured hosts). So
+Patina takes only the points that can switch: a thread with no other thread runnable counts to
+its next deadline without stopping, and where the seed's draw would keep the running thread at a
+point, the count runs on to the first point whose draw switches (the points passed are `stays`
+in `result.json`'s `rewrite`). Each decision is still drawn from the seed for the point it falls
+on; only the trap is skipped. With the gap drawn by default, a run takes about 32768 switches at
+its gap and then one per 8192 events: past that, its gaps are drawn with a mean of at least 8192
+until it is back within. That keeps a long program at a small gap within about 3 times its run
+without points (docs/EVIDENCE.md); a test of a race never reaches it. A gap the plan names
+(`compute-gap`) is used for the whole run.
 
 **What each reaches, and when to use it.**
 

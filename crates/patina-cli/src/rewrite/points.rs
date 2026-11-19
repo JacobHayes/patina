@@ -633,7 +633,7 @@ fn tramp_len(form: Form, ins: &Insns) -> u64 {
 /// T:  dec qword [CELL]     48 FF 0C 25 <abs32>
 ///     jz  S                74 <rel8>
 /// R:  the row: jmp <original target>, or <copies of the instructions>; jmp <next>
-/// S:  ud2                  0F 0B        a point: the runtime's fault entry
+/// S:  hlt                  F4           a point: the runtime's fault entry (`SIGSEGV`)
 ///     jmp R                EB <rel8>
 /// ```
 ///
@@ -681,7 +681,7 @@ fn trampoline(a: u64, ins: &Insns, form: Form, t: u64) -> Option<(Vec<u8>, Site)
     b.extend_from_slice(&rel32(t + b.len() as u64 + 4, back)?);
     let trap = b.len();
     b[r - 1] = (trap - r) as u8;
-    b.extend_from_slice(&[0x0f, 0x0b, 0xeb]);
+    b.extend_from_slice(&[0xf4, 0xeb]);
     b.push((r as isize - (b.len() as isize + 1)) as i8 as u8);
     let kind = if form == Form::Before {
         KIND_BEFORE

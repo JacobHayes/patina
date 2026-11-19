@@ -555,8 +555,38 @@ touched.
 There is no other way into the runtime: a point that switches needs a supervisor hand-off
 anyway, so a direct call would save nothing. With `--preempt branches` the cell is never armed
 and events charge nothing. With `--preempt points` the cell is the plans' (`proto::plan::CELL`,
-below), mapped at each image start rather than at a hello; arming, charging and the point are
-the same.
+below), mapped at each image start rather than at a hello; charging and the point are the same,
+and arming skips the points that could not switch (`proto::compute::chain`):
+
+- **Alone**: with no other thread runnable, the cell is armed to the next deadline (or
+  2^22): no gap is drawn, as no pick could switch.
+- **Stays**: otherwise the runtime draws ahead: each gap in turn, and at its end whether the
+  point stays with the thread (one chance in the runnable count, `Stream::Stay`) or switches;
+  the cell is armed with the sum up to the first that switches, cut at the deadline and 2^22
+  by the same rules. The switch then asks the supervisor for a thread other than the caller
+  (`YIELD_OTHER`), picked uniformly among the others by the scheduler's draw: together the
+  same chance for each runnable thread as one pick among all.
+- **What the runtime reads**: the supervisor publishes, at each hand-over, the record
+  sequence number, the slot it handed to, its runnable count and whether that thread's process
+  has a signal pending (`Ctl::view`, `proto::ctl::SchedView`). The runtime uses them only when
+  the sequence number and slot are its own turn's and no signal is pending, else it draws one
+  gap as for rebuilt code: after a record the runtime wrote alone (a call it served, an
+  emulated instruction) until the next hand-over, and while a signal is kept blocked and
+  pending. They live in the control region (not reachable from the program,
+  [Containment](#containment)) and are a function of the supervisor's state at that
+  record, so every decision and charge is a function of the seed and the execution. A point
+  that stays would change nothing the program or the supervisor sees (no signal, no timer
+  due, no other thread), so it records nothing; the switch's record counts the points it
+  passed (`args[2]` high half; `stays` in `result.json`), and the log stays complete: replay
+  arms the same chain from the same inputs.
+- **Budget**: with the gap drawn by default (`Config::compute_budget`; a gap the fault plan
+  names is exempt), once a run has taken 32768 switches plus one per 8192 events charged,
+  its gaps are drawn with a mean of at least 8192 until it is back within
+  (`proto::compute::budget`). The counts are the control region's, written under the turn.
+
+A point the program takes is a trap and a hand-over through the supervisor; skipping those
+that cannot switch is what keeps a long program at a small gap within a few times its run
+without points (docs/EVIDENCE.md, "The cost of a point").
 
 **Python** (3.12 and later) needs no rebuild: `python3 -m patina SCRIPT` runs the script with
 the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sys.monitoring`.
@@ -617,7 +647,7 @@ which decodes no instruction.
   so no address but its first byte changes meaning: `call f` becomes `call T` (the return
   address stays the program's), a backward `jmp`/`jcc` (rel32) is aimed at T, any other
   instruction becomes `jmp T` and runs as a copy in T. T is `dec qword [cell]; jz trap`, the
-  row, then `trap: ud2; jmp row`; it uses no register, stack or scratch memory. A short site's
+  row, then `trap: hlt; jmp row`; it uses no register, stack or scratch memory. A short site's
   count goes before a 5-byte instruction of its block, or for a loop of the loop head. The
   count writes OF, SF, ZF, AF and PF, so it goes only where a forward scan proves those dead
   (a return or a direct call of a function ends a path; a shift by `cl` and a `rep` compare
@@ -661,7 +691,7 @@ which decodes no instruction.
 - **The verifier** (`verify.rs`) checks a plan against its file without the rewriter's
   decisions: its own control flow and linear decodes, then that every changed byte is in a
   patched instruction that is one whole instruction of found code, that no known branch enters
-  and no code reads, and that each trampoline counts, traps to its own `ud2` and goes on to
+  and no code reads, and that each trampoline counts, traps to its own `hlt` and goes on to
   the original target or returns right after an exact copy; a group is straight-line found
   code ending at most in a direct branch, copied at the same offsets, each interior boundary a
   faulting byte that is no known target, and the plan's interior rows are exactly its groups'
@@ -747,17 +777,19 @@ In a run (`--preempt points`):
   text, both private and read-execute from the plan file; the plan's site rows are mapped
   read-only in the runtime's region. Anonymous or shared executable memory, and memory made
   executable later (`mprotect`, `pkey_mprotect`), gets no plan and is counted `unplanned`.
-- **A point**: a trampoline's `ud2` (arm64: `udf #0x7074`) is a `SIGILL` in the runtime's
-  fault entry, which finds
-  the site by address and makes it a compute point (the record names the original address),
-  then resumes after it. A `ud2` at a `cpuid` row is answered as above, with no record
-  and no virtual time. A fault at an interior row's address (`SIGTRAP` just after its `int3`,
-  or `SIGSEGV` from the kernel with no address at its other byte) resumes at the copy of that
-  instruction with every register as it was: no record, no virtual time and no count (the
-  group's count is at its start), counted `interior`, the same in every run. A count that
-  faults on the cell is `compute-cell`, as for rebuilt code. Plans are mapped before any of
-  their code runs and never written while a thread may run it, so no thread sees a half-made
-  patch.
+- **A point**: a trampoline's `hlt` is a general-protection fault in user mode, a `SIGSEGV` with
+  `SI_KERNEL` and no address (arm64: `udf #0x7074`, a `SIGILL`), in the runtime's fault entry,
+  which finds the site by address and makes it a compute point (the record names the original
+  address), then resumes after it. Any other such fault (a program's own `hlt` or privileged
+  instruction) is not at a trampoline's trap and goes on as natively. `hlt` rather than `ud2`:
+  under a hypervisor that intercepts invalid-opcode exceptions (KVM on AMD) a `ud2` costs
+  several times a `hlt` (docs/EVIDENCE.md). A `ud2` at a `cpuid` row is answered as above, with
+  no record and no virtual time. A fault at an interior row's address (`SIGTRAP` just after its
+  `int3`, or `SIGSEGV` from the kernel with no address at its other byte) resumes at the copy of
+  that instruction with every register as it was: no record, no virtual time and no count (the
+  group's count is at its start), counted `interior`, the same in every run. A count that faults
+  on the cell is `compute-cell`, as for rebuilt code. Plans are mapped before any of their code
+  runs and never written while a thread may run it, so no thread sees a half-made patch.
 - **Walks** (`spin.rs`): a point whose drawn gap ran out (a switch, not a deadline or a
   refill) draws a walk from its segment key (`proto::compute::walk`, `Stream::Walk`): 2
   switches in W (W per seed from `compute-walk`; 2 in 4 below 4) go on 1 to W of the program's
