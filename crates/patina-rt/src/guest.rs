@@ -98,6 +98,11 @@ fn reaches(nr: u64, b: &proto::table::Out, a: &[u64; 6]) -> bool {
         Arg(i) => in_region(p, a[i as usize]),
         Fixed(n) => in_region(p, n as u64),
         RetTimes { max, size } => in_region(p, a[max as usize].saturating_mul(size as u64)),
+        EpollEvents { max } => in_region(
+            p,
+            a[max as usize].saturating_mul(proto::abi::epoll::SIZE as u64),
+        ),
+        EpollEvent => in_region(p, proto::abi::epoll::SIZE as u64),
         ArgTimes { arg, size } => in_region(p, a[arg as usize].saturating_mul(size as u64)),
         CStr => cstr_reaches(p),
         IovRet { cnt } => iov_reaches(p, a[cnt as usize]),

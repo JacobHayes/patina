@@ -5,7 +5,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 out=${1:?output directory}
 mkdir -p "$out"
 cc=${CC:-gcc}
-for g in pipes atomic evloop timeouts ring iodead locks pipecost; do
+for g in pipes atomic evloop timeouts ring iodead locks pipecost epoll-pad; do
     $cc -O1 -pthread -Wall -o "$out/$g" "$here/$g.c"
 done
 rustc -O --edition 2021 -o "$out/rs-io" "$here/rs-io.rs"

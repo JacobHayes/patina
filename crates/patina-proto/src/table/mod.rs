@@ -119,6 +119,11 @@ pub enum Len {
     CStr,
     /// The return value times a record size; before the call, argument `max` records.
     RetTimes { max: u8, size: u32 },
+    /// `struct epoll_event`s (`abi::epoll`): as many as the return value; before the call,
+    /// argument `max` of them. The hash covers their fields, not the padding between them.
+    EpollEvents { max: u8 },
+    /// One `struct epoll_event` (`abi::epoll`), hashed as `EpollEvents`.
+    EpollEvent,
     /// The value of argument `arg` times a record size, when the call succeeded.
     ArgTimes { arg: u8, size: u32 },
     /// The argument is a `struct msghdr`; its iovec array covers `ret` bytes in total (before

@@ -11,11 +11,21 @@ pub const ELF_MACHINE: u16 = 62;
 #[cfg(target_arch = "aarch64")]
 pub const ELF_MACHINE: u16 = 183;
 
-/// Bytes of a `struct epoll_event`: packed (12) on x86_64, naturally aligned (16) elsewhere.
-#[cfg(target_arch = "x86_64")]
-pub const EPOLL_EVENT_SIZE: u32 = 12;
-#[cfg(target_arch = "aarch64")]
-pub const EPOLL_EVENT_SIZE: u32 = 16;
+/// `struct epoll_event`: `events` (4 bytes) at 0 and `data` (8 bytes) at `DATA`. Packed (12 bytes)
+/// on x86_64; naturally aligned (16) elsewhere, where bytes 4 to 8 are padding the kernel
+/// neither reads nor writes, so they hold whatever the program left there.
+pub mod epoll {
+    #[cfg(target_arch = "x86_64")]
+    pub const SIZE: u32 = 12;
+    #[cfg(target_arch = "x86_64")]
+    pub const DATA: u32 = 4;
+    #[cfg(target_arch = "aarch64")]
+    pub const SIZE: u32 = 16;
+    #[cfg(target_arch = "aarch64")]
+    pub const DATA: u32 = 8;
+    /// No padding: `data` follows `events` directly and ends the record.
+    pub const PACKED: bool = DATA == 4 && SIZE == DATA + 8;
+}
 
 /// `mmap`'s `MAP_32BIT` (a mapping below 2 GiB): x86_64 only (the generic kernel ignores that
 /// bit for a private mapping).

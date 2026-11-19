@@ -97,6 +97,30 @@ fn hash_guest(h: &mut Hasher, p: u64, n: u64) {
     }
 }
 
+/// Hash `n` `struct epoll_event`s at `p`: each one's `events` and `data`, never the padding
+/// between them (arm64), which the kernel neither reads nor writes. Packed records (x86_64)
+/// are their fields, hashed as one range.
+fn hash_epoll(h: &mut Hasher, p: u64, n: u64) {
+    use proto::abi::epoll::{DATA, PACKED, SIZE};
+    if PACKED {
+        return hash_guest(h, p, n * SIZE as u64);
+    }
+    for i in 0..n {
+        let e = p + i * SIZE as u64;
+        let (Ok(events), Ok(data)) = (
+            crate::guest::get::<[u8; 4]>(e),
+            crate::guest::get::<[u8; 8]>(e + DATA as u64),
+        ) else {
+            h.update(b"\0EFAULT");
+            return;
+        };
+        let mut b = [0u8; 12];
+        b[..4].copy_from_slice(&events);
+        b[4..].copy_from_slice(&data);
+        h.update(&b);
+    }
+}
+
 /// The C strings a call's inputs named, kept as the hash read them (`--log-paths`).
 struct Kept {
     s: [PathBuf; 2],
@@ -128,6 +152,8 @@ fn hash_keep(bufs: &[Out], args: &[u64; 6], ret: i64, mut keep: Option<&mut Kept
             Len::Arg(i) => hash_guest(&mut h, p, args[i as usize]),
             Len::Fixed(n) => hash_guest(&mut h, p, n as u64),
             Len::RetTimes { size, .. } => hash_guest(&mut h, p, ret as u64 * size as u64),
+            Len::EpollEvents { .. } => hash_epoll(&mut h, p, ret as u64),
+            Len::EpollEvent => hash_epoll(&mut h, p, 1),
             Len::ArgTimes { arg, size } => hash_guest(&mut h, p, args[arg as usize] * size as u64),
             Len::CStr => match (crate::guest::strlen(p, PATH_BYTES), keep.as_deref_mut()) {
                 (Ok(n), None) => hash_guest(&mut h, p, n as u64),
