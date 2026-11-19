@@ -707,8 +707,7 @@ anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
   queue may drop slightly earlier than Linux; an unreachable port gives `ECONNREFUSED` only to
   a connected sender, and makes the socket readable, not `POLLERR`.
 - Blocking-I/O gaps: `sendfile`/`copy_file_range`/`splice` with a socket or pipe side answer
-  `EINVAL`; `F_SETLKW` deadlock detection is absent; `ppoll`/`pselect6`/`epoll_pwait` masks
-  are not applied; `poll` restarts with the full timeout.
+  `EINVAL`; `F_SETLKW` deadlock detection is absent; `poll` restarts with the full timeout.
 - Processes: another process's `/proc/<pid>` is refused (`ps` sees nothing); `fork` or a thread
   `clone` inside a vfork child ends the run; `wait4` rusage is zero; unusual `clone` flag sets
   end the run.

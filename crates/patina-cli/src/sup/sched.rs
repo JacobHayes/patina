@@ -3,6 +3,7 @@
 //! virtual-time event queue (`time.rs`), the futex queues (`futex.rs`) and the I/O
 //! generation. It never reads a clock: the caller passes the virtual time.
 
+use super::signal::MayPark;
 use proto::{draw, Stream};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -174,8 +175,10 @@ impl Sched {
         self.runnable.iter().nth(i as usize).copied()
     }
 
-    /// Park `slot` on `wait`, with an optional virtual deadline.
-    pub fn park(&mut self, slot: usize, wait: Wait, deadline: Option<u64>) {
+    /// Park `slot` on `wait`, with an optional virtual deadline. `MayPark` says no signal
+    /// it would take is pending (`Sup::may_block`).
+    pub fn park(&mut self, slot: usize, wait: Wait, deadline: Option<u64>, ok: MayPark) {
+        assert_eq!(ok.slot(), slot, "leave to park was given for another slot");
         self.runnable.remove(&slot);
         if let Wait::Futex { key, .. } = wait {
             self.futex.entry(key).or_default().push_back(slot);
@@ -313,8 +316,8 @@ mod tests {
     #[test]
     fn pick_follows_slot_order_and_park_state() {
         let mut s = sched(3, 4);
-        s.park(1, Wait::Sleep, Some(100));
-        s.park(3, Wait::Sleep, Some(200));
+        s.park(1, Wait::Sleep, Some(100), MayPark::for_test(1));
+        s.park(3, Wait::Sleep, Some(200), MayPark::for_test(3));
         for q in 0..100 {
             let p = s.pick(q).unwrap();
             assert!(p == 0 || p == 2);
@@ -322,8 +325,8 @@ mod tests {
             let d = draw(3, Stream::Sched, q) % 2;
             assert_eq!(p, [0, 2][d as usize]);
         }
-        s.park(0, Wait::Sleep, None);
-        s.park(2, Wait::Sleep, None);
+        s.park(0, Wait::Sleep, None, MayPark::for_test(0));
+        s.park(2, Wait::Sleep, None, MayPark::for_test(2));
         assert_eq!(s.pick(1), None);
     }
 }

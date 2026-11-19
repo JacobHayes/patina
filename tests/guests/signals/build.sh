@@ -6,7 +6,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 out=${1:?output directory}
 mkdir -p "$out"
 cc=${CC:-gcc}
-for g in sig-basic sig-alt sig-ctx sig-fault sig-restart sig-mask sig-long; do
+for g in sig-basic sig-alt sig-ctx sig-fault sig-restart sig-mask sig-long sig-block; do
     $cc -O1 -pthread -o "$out/$g" "$here/$g.c"
 done
 # The guests in x86 assembly have arm64 twins, built under the same names.

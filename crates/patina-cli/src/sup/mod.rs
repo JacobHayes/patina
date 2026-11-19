@@ -326,6 +326,9 @@ impl Sup {
             if let Some(to) = self.sched.pick(seq) {
                 return (to, seq);
             }
+            if let Some(d) = self.lost_signal() {
+                self.finish(Verdict::new("infra", d));
+            }
             let old = self.now();
             // A jump past the liveness limit is reported before it wakes anyone, so
             // the detail shows what every thread was parked on (a sleep loop, a futex).
@@ -363,7 +366,7 @@ impl Sup {
         self.io.sync(&mut self.sched, self.ctl);
     }
 
-    fn describe_wait(w: Wait) -> String {
+    pub(super) fn describe_wait(w: Wait) -> String {
         match w {
             Wait::Futex {
                 key: (asid, addr),
@@ -450,7 +453,10 @@ impl Sup {
                 Next::Pick
             }
             Some(Op::Sleep) => {
-                self.sched.park(idx, Wait::Sleep, Some(a[0]));
+                let Some(ok) = self.may_block(idx) else {
+                    return Next::Continue(-(libc::EINTR as i64));
+                };
+                self.sched.park(idx, Wait::Sleep, Some(a[0]), ok);
                 Next::Pick
             }
             Some(Op::FutexWait) => {
@@ -459,8 +465,11 @@ impl Sup {
                 } else {
                     Some(a[2])
                 };
+                let Some(ok) = self.may_block(idx) else {
+                    return Next::Continue(-(libc::EINTR as i64));
+                };
                 self.sched
-                    .futex_wait(idx, (asid_of(a[0]), a[0]), a[3] as u32, deadline);
+                    .futex_wait(idx, (asid_of(a[0]), a[0]), a[3] as u32, deadline, ok);
                 Next::Pick
             }
             Some(Op::FutexWake) => {
@@ -517,8 +526,12 @@ impl Sup {
             }
             Some(Op::ProcExit) => self.proc_exit(Op::ProcExit, idx, a, a[0] as i64, a[1] as i64),
             Some(Op::Park) => {
+                // A signal the thread does not block came while it was runnable between two
+                // attempts (woken to re-check, or before its first): the wait ends now, as
+                // the kernel's would have, instead of parking past it (`Io::park`).
+                let ok = self.may_block(idx);
                 let now = self.now();
-                match self.io.park(&mut self.sched, self.ctl, idx, a, now) {
+                match self.io.park(&mut self.sched, self.ctl, idx, a, now, ok) {
                     Some(r) => Next::Continue(r),
                     None => Next::Pick,
                 }
@@ -785,7 +798,10 @@ impl Sup {
             self.sched.fire_due(now);
             self.fire_signal_timers();
             self.after_events();
+            let pid = self.sched.entries[idx].pid;
             let next = self.handle(idx, req);
+            // The request may have followed a mask change or a thread's exit.
+            self.retarget(pid);
             // What the request changed on the wire (a close by an exit, a connect) and
             // what that makes runnable.
             self.wire_step();

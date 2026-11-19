@@ -122,6 +122,34 @@ pub fn set_vmask(ts: &mut ThreadState, m: u64) {
     slot_of(ts).vmask.store(ts.vmask, Relaxed);
 }
 
+/// A signal the thread's current mask does not block is pending for it.
+pub fn unblocked_pending() -> bool {
+    let ts = thread();
+    slot_of(ts).sigpend.load(Relaxed) & !ts.vmask != 0
+}
+
+/// Wait under a temporary mask (`ppoll`, `pselect6`, `epoll_pwait`, `epoll_pwait2`): the
+/// kernel's `set_user_sigmask` and `restore_saved_sigmask_unless`. The old mask comes back
+/// at once unless the wait was interrupted; then the trap exit delivers under the temporary
+/// mask and the handler's frame saves the old one, as for `sigsuspend`.
+pub fn with_wait_mask(mask: Option<u64>, f: impl FnOnce() -> i64) -> i64 {
+    let Some(m) = mask else {
+        return f();
+    };
+    let ts = thread();
+    ts.saved_mask = ts.vmask;
+    ts.has_saved = 1;
+    set_vmask(ts, m);
+    let r = f();
+    let ts = thread();
+    if r != -e::EINTR && ts.has_saved != 0 {
+        ts.has_saved = 0;
+        let old = ts.saved_mask;
+        set_vmask(ts, old);
+    }
+    r
+}
+
 /// Change a disposition; tell the supervisor when its kind changed.
 pub fn set_action(sig: u64, act: [u64; 4]) {
     let t = crate::state::sigact();

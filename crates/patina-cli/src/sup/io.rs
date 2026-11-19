@@ -14,6 +14,7 @@
 //!   holds a duplicate (`pidfd_getfd`) and writes the expiry count at virtual expiry.
 
 use super::sched::{Event, EventId, Sched, State, Wait, WakeReason};
+use super::signal::MayPark;
 use proto::ctl::*;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::Ordering::*;
@@ -56,7 +57,8 @@ fn inc(c: &std::sync::atomic::AtomicU64) {
 
 impl Io {
     /// `Park` from `idx`. Returns `Some(ret)` when the caller continues at once (the
-    /// generation moved since its attempt, or the deadline has passed), None when parked.
+    /// generation moved since its attempt, or the deadline has passed: 0, re-attempt; no
+    /// leave to park, `ok` None: -EINTR), None when parked.
     pub fn park(
         &mut self,
         sched: &mut Sched,
@@ -64,6 +66,7 @@ impl Io {
         idx: usize,
         a: [u64; 6],
         now: u64,
+        ok: Option<MayPark>,
     ) -> Option<i64> {
         inc(&ctl.io.parks);
         let cur = ctl.io.gen.load(Relaxed);
@@ -78,7 +81,10 @@ impl Io {
         if deadline.is_some_and(|d| d <= now) {
             return Some(0);
         }
-        sched.park(idx, Wait::Io { gen: cur }, deadline);
+        let Some(ok) = ok else {
+            return Some(-4); // EINTR
+        };
+        sched.park(idx, Wait::Io { gen: cur }, deadline, ok);
         self.waiters.insert(idx);
         self.info.insert(
             idx,
@@ -313,11 +319,25 @@ mod tests {
         }
         // Parks at the generation it saw.
         assert_eq!(
-            io.park(&mut s, c, 1, [0, NO_DEADLINE, 5, PARK_IN, 0, 1], 100),
+            io.park(
+                &mut s,
+                c,
+                1,
+                [0, NO_DEADLINE, 5, PARK_IN, 0, 1],
+                100,
+                Some(MayPark::for_test(1))
+            ),
             None
         );
         assert_eq!(
-            io.park(&mut s, c, 2, [0, 500, 6, PARK_OUT, 1, 1], 100),
+            io.park(
+                &mut s,
+                c,
+                2,
+                [0, 500, 6, PARK_OUT, 1, 1],
+                100,
+                Some(MayPark::for_test(2))
+            ),
             None
         );
         io.refresh(&s, c);
@@ -334,12 +354,29 @@ mod tests {
         assert_eq!(c.io.waiters.load(Relaxed), 0);
         // A park carrying an old generation is not parked: it re-attempts at once.
         assert_eq!(
-            io.park(&mut s, c, 1, [0, NO_DEADLINE, 5, PARK_IN, 0, 1], 100),
+            io.park(
+                &mut s,
+                c,
+                1,
+                [0, NO_DEADLINE, 5, PARK_IN, 0, 1],
+                100,
+                Some(MayPark::for_test(1))
+            ),
             Some(0)
         );
         assert!(s.is_runnable(1));
         // A deadline wakes it with reply 0 (the runtime decides it timed out).
-        assert_eq!(io.park(&mut s, c, 2, [1, 500, 6, PARK_IN, 0, 1], 100), None);
+        assert_eq!(
+            io.park(
+                &mut s,
+                c,
+                2,
+                [1, 500, 6, PARK_IN, 0, 1],
+                100,
+                Some(MayPark::for_test(2))
+            ),
+            None
+        );
         s.fire_due(500);
         assert!(s.is_runnable(2));
         assert_eq!(s.entries[2].woke, Some(WakeReason::Timeout));

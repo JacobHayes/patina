@@ -3,10 +3,18 @@
 //! request is already atomic with the comparison; no kernel futex on guest memory.
 
 use super::sched::{FutexKey, Sched, Wait, WakeReason};
+use super::signal::MayPark;
 
 impl Sched {
-    pub fn futex_wait(&mut self, slot: usize, key: FutexKey, bitset: u32, deadline: Option<u64>) {
-        self.park(slot, Wait::Futex { key, bitset }, deadline);
+    pub fn futex_wait(
+        &mut self,
+        slot: usize,
+        key: FutexKey,
+        bitset: u32,
+        deadline: Option<u64>,
+        ok: MayPark,
+    ) {
+        self.park(slot, Wait::Futex { key, bitset }, deadline, ok);
     }
 
     /// Wake up to `n` waiters on `key` whose bitset intersects `bitset`, oldest first.
@@ -82,6 +90,7 @@ impl Sched {
 #[cfg(test)]
 mod tests {
     use super::super::sched::*;
+    use super::super::signal::MayPark;
 
     fn sched(n: usize) -> Sched {
         let mut s = Sched::new(1, 16);
@@ -96,7 +105,7 @@ mod tests {
         let mut s = sched(5);
         let k = (0, 0x1000);
         for slot in [3, 1, 4, 2] {
-            s.futex_wait(slot, k, u32::MAX, None);
+            s.futex_wait(slot, k, u32::MAX, None, MayPark::for_test(slot));
         }
         assert_eq!(s.futex_wake(k, 2, u32::MAX), 2);
         // The two oldest waiters, whatever their slot numbers.
@@ -114,8 +123,8 @@ mod tests {
     fn bitset_wake() {
         let mut s = sched(3);
         let k = (0, 0x2000);
-        s.futex_wait(0, k, 0b01, None);
-        s.futex_wait(1, k, 0b10, None);
+        s.futex_wait(0, k, 0b01, None, MayPark::for_test(0));
+        s.futex_wait(1, k, 0b10, None, MayPark::for_test(1));
         assert_eq!(s.futex_wake(k, 10, 0b10), 1);
         assert!(s.is_runnable(1) && !s.is_runnable(0));
     }
@@ -124,9 +133,9 @@ mod tests {
     fn requeue() {
         let mut s = sched(6);
         let (a, b) = ((0, 0x10), (0, 0x20));
-        s.futex_wait(5, b, u32::MAX, None);
+        s.futex_wait(5, b, u32::MAX, None, MayPark::for_test(5));
         for slot in [0, 1, 2, 3] {
-            s.futex_wait(slot, a, u32::MAX, None);
+            s.futex_wait(slot, a, u32::MAX, None, MayPark::for_test(slot));
         }
         assert_eq!(s.futex_requeue(a, b, 1, 2), (1, 2));
         assert!(s.is_runnable(0));
@@ -147,7 +156,7 @@ mod tests {
         // the waiter is woken (0) and its timer is cancelled.
         let mut s = sched(2);
         let k = (0, 0x30);
-        s.futex_wait(0, k, u32::MAX, Some(1_000));
+        s.futex_wait(0, k, u32::MAX, Some(1_000), MayPark::for_test(0));
         assert_eq!(s.fire_due(999), 0);
         assert_eq!(s.futex_wake(k, 1, u32::MAX), 1);
         assert_eq!(s.entries[0].reply, 0);
@@ -158,7 +167,7 @@ mod tests {
         // The deadline is due first (the supervisor fires due events before it handles
         // the next request): the waiter times out, and the later wake finds nobody.
         let mut s = sched(2);
-        s.futex_wait(0, k, u32::MAX, Some(1_000));
+        s.futex_wait(0, k, u32::MAX, Some(1_000), MayPark::for_test(0));
         assert_eq!(s.fire_due(1_000), 1);
         assert_eq!(s.futex_wake(k, 1, u32::MAX), 0);
         assert_eq!(s.entries[0].reply, -ETIMEDOUT);

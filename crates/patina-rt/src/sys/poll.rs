@@ -1,8 +1,9 @@
 //! poll, ppoll, select, pselect6, epoll_wait, epoll_pwait, epoll_pwait2: the same
 //! call with a zero timeout is the attempt; if nothing is ready the thread parks until the
 //! I/O generation moves or the virtual deadline passes (then 0). A zero timeout from the
-//! guest never parks (each such call is still charged: the poll churn rule). Signal masks
-//! given to ppoll/pselect6/epoll_pwait are not given to the kernel (the mask is virtual).
+//! guest never parks (each such call is still charged: the poll churn rule). The signal mask
+//! given to ppoll/pselect6/epoll_pwait/epoll_pwait2 is the thread's virtual mask for the wait
+//! (`sig::with_wait_mask`); the kernel never sees it.
 
 use super::io::{self, Deadline, Got, Waiter};
 use super::*;
@@ -39,6 +40,30 @@ fn timeval(p: u64) -> Result<Option<u64>, i64> {
 fn remaining(dl: Option<u64>) -> u64 {
     dl.map(|d| d.saturating_sub(super::time::now()))
         .unwrap_or(0)
+}
+
+/// The temporary mask a call names: None for a NULL pointer; EINVAL for a size other than
+/// a `sigset_t`'s, as the kernel checks it before anything else.
+fn wait_mask(p: u64, size: u64) -> Result<Option<u64>, i64> {
+    if p == 0 {
+        return Ok(None);
+    }
+    if size != 8 {
+        return Err(-e::EINVAL);
+    }
+    get::<u64>(p).map(Some)
+}
+
+/// poll and select answer EINTR rather than 0 when nothing was ready and a signal is
+/// pending, even with a zero timeout (`do_poll`, `core_sys_select`); only the temporary mask
+/// of ppoll/pselect6 can make one deliverable here (the pselect idiom of an empty mask and a
+/// zero timeout). epoll answers 0.
+fn nothing_or_eintr(mask: Option<u64>, r: i64) -> i64 {
+    if r == 0 && mask.is_some() && super::sig::unblocked_pending() {
+        -e::EINTR
+    } else {
+        r
+    }
 }
 
 /// Run `attempt` (returns > 0 when something is ready) under the waiting rules.
@@ -126,6 +151,14 @@ fn first_fd(fds: u64, n: u64) -> i64 {
 pub fn poll(call: &mut dyn Call) -> i64 {
     let a = args(call);
     let (fds, n) = (a[0], a[1]);
+    let mask = if call.nr() == nr::PPOLL {
+        match wait_mask(a[3], a[4]) {
+            Ok(m) => m,
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
     let (timeout, tsp) = if call.nr() == nr::POLL {
         let t = a[2] as i32;
         (
@@ -145,7 +178,9 @@ pub fn poll(call: &mut dyn Call) -> i64 {
     let mut w = Waiter::new(first_fd(fds, n), proto::ctl::PARK_IN, call.nr());
     w.nfds = n;
     let dl = timeout.map(|t| super::time::now().saturating_add(t));
-    let r = wait_ready(&mut w, timeout, || ppoll0(fds, n));
+    let r = super::sig::with_wait_mask(mask, || {
+        nothing_or_eintr(mask, wait_ready(&mut w, timeout, || ppoll0(fds, n)))
+    });
     if tsp != 0 && r >= 0 {
         let left = remaining(dl);
         let _ = put(tsp, [left / NS, left % NS]);
@@ -203,34 +238,46 @@ pub fn select(call: &mut dyn Call) -> i64 {
         Ok(t) => t,
         Err(e) => return e,
     };
+    // pselect6's sixth argument: { const sigset_t *ss; size_t ss_len }.
+    let mask = if pselect && a[5] != 0 {
+        match get::<[u64; 2]>(a[5]).and_then(|[p, len]| wait_mask(p, len)) {
+            Ok(m) => m,
+            Err(e) => return e,
+        }
+    } else {
+        None
+    };
     let first = (0..n).find(|&fd| {
         (0..3).any(|k| sets[k] != 0 && saved[k][fd as usize / 64] & (1 << (fd % 64)) != 0)
     });
     let mut w = Waiter::new(first.unwrap_or(-1), proto::ctl::PARK_IN, call.nr());
     w.nfds = n as u64;
     let dl = timeout.map(|t| super::time::now().saturating_add(t));
-    let r = wait_ready(&mut w, timeout, || {
-        for (k, &s) in sets.iter().enumerate() {
-            if s != 0 {
-                for (i, &w) in saved[k][..words].iter().enumerate() {
-                    // Read above; a set the kernel cannot write is its EFAULT below.
-                    let _ = put(s + i as u64 * 8, w);
+    let r = super::sig::with_wait_mask(mask, || {
+        let r = wait_ready(&mut w, timeout, || {
+            for (k, &s) in sets.iter().enumerate() {
+                if s != 0 {
+                    for (i, &w) in saved[k][..words].iter().enumerate() {
+                        // Read above; a set the kernel cannot write is its EFAULT below.
+                        let _ = put(s + i as u64 * 8, w);
+                    }
                 }
             }
-        }
-        let ts = [0u64; 2];
-        // pselect6 with a zero timespec and no mask: the attempt for both.
-        unsafe {
-            sc6(
-                nr::PSELECT6,
-                n as u64,
-                sets[0],
-                sets[1],
-                sets[2],
-                ts.as_ptr() as u64,
-                0,
-            )
-        }
+            let ts = [0u64; 2];
+            // pselect6 with a zero timespec and no mask: the attempt for both.
+            unsafe {
+                sc6(
+                    nr::PSELECT6,
+                    n as u64,
+                    sets[0],
+                    sets[1],
+                    sets[2],
+                    ts.as_ptr() as u64,
+                    0,
+                )
+            }
+        });
+        nothing_or_eintr(mask, r)
     });
     if a[4] != 0 && r >= 0 {
         let left = remaining(dl);
@@ -260,9 +307,19 @@ pub fn epoll_wait(call: &mut dyn Call) -> i64 {
             Some(t as u64 * 1_000_000)
         }
     };
+    let mask = if call.nr() == nr::EPOLL_WAIT {
+        None
+    } else {
+        match wait_mask(a[4], a[5]) {
+            Ok(m) => m,
+            Err(e) => return e,
+        }
+    };
     let mut w = Waiter::new(a[0] as i32 as i64, proto::ctl::PARK_IN, call.nr());
-    wait_ready(&mut w, timeout, || unsafe {
-        sc6(nr::EPOLL_PWAIT, a[0], a[1], a[2], 0, 0, 8)
+    super::sig::with_wait_mask(mask, || {
+        wait_ready(&mut w, timeout, || unsafe {
+            sc6(nr::EPOLL_PWAIT, a[0], a[1], a[2], 0, 0, 8)
+        })
     })
 }
 

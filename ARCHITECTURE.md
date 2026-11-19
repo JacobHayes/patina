@@ -98,6 +98,21 @@ Blocking calls are a non-blocking attempt plus a park on an I/O generation count
 runtime bumps after any call that can change readiness (`sys/io.rs`, `sys/poll.rs`). Pipe and
 socket buffer sizes are fixed at creation, so readiness is a function of the calls made.
 
+No thread parks while a signal it does not block is pending for it: the supervisor's park takes
+a `MayPark` that only `Sup::may_block` makes (`sup/signal.rs`), so a wait a signal reached
+while the thread was runnable (woken to check again, between two attempts) answers `EINTR` at
+once and the runtime's restart rules for that call apply, as the kernel checks
+`signal_pending` before each sleep. A signal sent later finds the thread parked and wakes it. A
+process-directed signal goes to the lowest thread that does not block it and is not a `vfork`
+parent (whose wait a signal does not end); when that thread
+blocks it or exits before taking it, the supervisor passes it on to a parked thread that can
+(`retarget`, as the kernel's `retarget_shared_pending`). `ppoll`, `pselect6` and
+`epoll_pwait(2)` wait under their own mask, restored at once unless the wait was interrupted
+(`ppoll` and `pselect6` answer `EINTR` instead of 0 when the mask let a pending signal in, even
+with a zero timeout).
+A detector checks the rule whenever nothing is runnable: a parked thread with a signal it would
+take ends the run `internal`, naming it.
+
 ## The sandbox
 
 bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a read-only

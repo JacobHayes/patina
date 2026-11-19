@@ -145,6 +145,28 @@ impl Signals {
     }
 }
 
+/// Leave for a thread to park. Only `Sup::may_block` makes one, and only when no signal the
+/// thread does not block is pending for it: the kernel's `signal_pending` check before every
+/// interruptible sleep. `Sched::park` takes one, for the slot it was given for, so no wait
+/// parks past a deliverable signal (a signal that comes later finds the thread parked and
+/// `send` wakes it). `vfork`'s wait is the one wait a signal does not end, as in the kernel.
+pub struct MayPark(usize);
+
+impl MayPark {
+    /// The `vfork` parent's wait: the kernel's is killable only; signals wait until the
+    /// child execs or exits.
+    pub(super) fn vfork(slot: usize) -> MayPark {
+        MayPark(slot)
+    }
+    #[cfg(test)]
+    pub fn for_test(slot: usize) -> MayPark {
+        MayPark(slot)
+    }
+    pub fn slot(&self) -> usize {
+        self.0
+    }
+}
+
 pub enum Target {
     Proc(i32),
     Thread(usize),
@@ -172,6 +194,69 @@ impl Sup {
     /// What `s` blocks right now: its mask, minus the set it waits for in `sigtimedwait`.
     fn blocked(&self, s: usize) -> u64 {
         self.vmask(s) & !self.sig.threads[s].wait_set.unwrap_or(0) & !UNBLOCKABLE
+    }
+
+    /// Leave for `s` to park now, or None when a signal it does not block is pending for it
+    /// (the caller answers `-EINTR`, the runtime's restart rules do the rest).
+    pub fn may_block(&self, s: usize) -> Option<MayPark> {
+        (self.deliverable(s) == 0).then_some(MayPark(s))
+    }
+
+    /// The pending signals `s` would take now.
+    fn deliverable(&self, s: usize) -> u64 {
+        self.slot(s).sigpend.load(Relaxed) & !self.blocked(s)
+    }
+
+    /// The detector of lost signals: a parked thread (not a `vfork` parent) with a signal
+    /// pending that it does not block. `send` wakes a parked receiver, `may_block` refuses to
+    /// park one, and a process-directed signal is passed on when its chosen thread blocks it
+    /// or exits (`retarget`); one found here was lost by Patina. Checked whenever nothing is
+    /// runnable, which a lost wakeup always reaches.
+    pub fn lost_signal(&self) -> Option<String> {
+        self.sched.parked().into_iter().find_map(|(s, e, w, _)| {
+            let d = self.deliverable(s);
+            (w != Wait::Vfork && d != 0).then(|| {
+                format!(
+                    "runtime invariant: slot {s} (tid {}) is parked ({}) with {} pending and not blocked",
+                    e.tid,
+                    Self::describe_wait(w),
+                    name(d.trailing_zeros() as u64 + 1)
+                )
+            })
+        })
+    }
+
+    /// Pass on process-directed signals of `pid` that no thread can take now: when no
+    /// runnable thread leaves one unblocked (the thread it was meant for blocked it, or
+    /// exited), a parked thread that does not block it is woken for it, as the kernel's
+    /// `retarget_shared_pending` does. Checked after every request of the process: a mask
+    /// changes only in the thread holding the turn, and nothing else runs before its next
+    /// request.
+    pub fn retarget(&mut self, pid: i32) {
+        let Some(p) = self.sig.procs.get(&pid) else {
+            return;
+        };
+        let mut set = p.pending.set;
+        if set == 0 {
+            return;
+        }
+        while set != 0 {
+            let sig = set.trailing_zeros() as u64 + 1;
+            set &= set - 1;
+            let threads = self.threads_of(pid);
+            // A runnable thread that can take it takes it at its trap exit.
+            if threads.iter().any(|&s| {
+                self.blocked(s) & bit(sig) == 0 && self.sched.entries[s].state == State::Runnable
+            }) {
+                continue;
+            }
+            if let Some(s) = threads.into_iter().find(|&s| {
+                self.blocked(s) & bit(sig) == 0
+                    && matches!(self.sched.entries[s].state, State::Parked { wait, .. } if wait != Wait::Vfork)
+            }) {
+                self.interrupt(s, sig);
+            }
+        }
     }
 
     /// Live threads of a process (not exiting), in slot order.
@@ -258,10 +343,19 @@ impl Sup {
         self.refresh_pending(pid);
         let chosen = match t {
             Target::Thread(s) => (self.blocked(s) & bit(sig) == 0).then_some(s),
-            // The lowest slot of the process that does not block it.
-            Target::Proc(_) => threads
-                .into_iter()
-                .find(|&s| self.blocked(s) & bit(sig) == 0),
+            // The lowest slot of the process that does not block it and can be woken: a
+            // `vfork` parent would hold it until the child execs or exits while another
+            // thread sleeps on (POSIX lets any thread that does not block it take it).
+            Target::Proc(_) => threads.into_iter().find(|&s| {
+                self.blocked(s) & bit(sig) == 0
+                    && !matches!(
+                        self.sched.entries[s].state,
+                        State::Parked {
+                            wait: Wait::Vfork,
+                            ..
+                        }
+                    )
+            }),
         };
         if let Some(s) = chosen {
             self.interrupt(s, sig);
@@ -419,19 +513,19 @@ impl Sup {
                     return Next::Continue(0);
                 }
                 // An unblocked signal that is already pending interrupts at once.
-                if self.slot(idx).sigpend.load(Relaxed) & !self.vmask(idx) != 0 {
+                let Some(ok) = self.may_block(idx) else {
                     return Next::Continue(-4);
-                }
+                };
                 self.sig.set_wait(idx, Some(set));
-                self.sched.park(idx, Wait::Signal, deadline);
+                self.sched.park(idx, Wait::Signal, deadline, ok);
                 Next::Pick
             }
             Op::SigSuspend => {
-                if self.slot(idx).sigpend.load(Relaxed) & !self.vmask(idx) != 0 {
+                let Some(ok) = self.may_block(idx) else {
                     return Next::Continue(-4);
-                }
+                };
                 self.sig.set_wait(idx, Some(0));
-                self.sched.park(idx, Wait::Signal, None);
+                self.sched.park(idx, Wait::Signal, None, ok);
                 Next::Pick
             }
             Op::TimerSet => {

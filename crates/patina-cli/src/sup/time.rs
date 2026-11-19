@@ -63,6 +63,7 @@ impl Sched {
 #[cfg(test)]
 mod tests {
     use super::super::sched::*;
+    use super::super::signal::MayPark;
 
     #[test]
     fn idle_jump_to_earliest_deadline() {
@@ -70,9 +71,9 @@ mod tests {
         for i in 0..3 {
             s.add(i, 10 + i as i32, 2, 0);
         }
-        s.park(0, Wait::Sleep, Some(5_000));
-        s.park(1, Wait::Sleep, Some(2_000));
-        s.park(2, Wait::Sleep, Some(9_000));
+        s.park(0, Wait::Sleep, Some(5_000), MayPark::for_test(0));
+        s.park(1, Wait::Sleep, Some(2_000), MayPark::for_test(1));
+        s.park(2, Wait::Sleep, Some(9_000), MayPark::for_test(2));
         assert_eq!(s.next_deadline(), Some(2_000));
         assert_eq!(s.idle_jump(1_000), Some(2_000));
         assert!(s.is_runnable(1) && !s.is_runnable(0) && !s.is_runnable(2));
@@ -80,12 +81,12 @@ mod tests {
         assert_eq!(s.entries[1].reply, 0); // a sleep returns 0
                                            // Something is runnable: no jump.
         assert_eq!(s.idle_jump(2_000), None);
-        s.park(1, Wait::Sleep, None);
+        s.park(1, Wait::Sleep, None, MayPark::for_test(1));
         assert_eq!(s.idle_jump(2_000), Some(5_000));
         assert!(s.is_runnable(0));
-        s.park(0, Wait::Sleep, None);
+        s.park(0, Wait::Sleep, None, MayPark::for_test(0));
         assert_eq!(s.idle_jump(5_000), Some(9_000));
-        s.park(2, Wait::Sleep, None);
+        s.park(2, Wait::Sleep, None, MayPark::for_test(2));
         // Nothing runnable, nothing pending: deadlock.
         assert_eq!(s.idle_jump(9_000), None);
         assert_eq!(s.parked().len(), 3);
@@ -97,9 +98,9 @@ mod tests {
         for i in 0..3 {
             s.add(i, 10 + i as i32, 2, 0);
         }
-        s.park(2, Wait::Sleep, Some(100));
-        s.park(0, Wait::Sleep, Some(100));
-        s.park(1, Wait::Sleep, Some(100));
+        s.park(2, Wait::Sleep, Some(100), MayPark::for_test(2));
+        s.park(0, Wait::Sleep, Some(100), MayPark::for_test(0));
+        s.park(1, Wait::Sleep, Some(100), MayPark::for_test(1));
         let order: Vec<_> = s
             .events
             .values()

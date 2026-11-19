@@ -214,7 +214,8 @@ impl Sup {
             self.procs.vfork_pending.insert(child, idx);
             // Not runnable until the child execs or exits; it keeps the turn until it blocks
             // in the kernel, which hands the turn to the child.
-            self.sched.park(idx, Wait::Vfork, None);
+            self.sched
+                .park(idx, Wait::Vfork, None, super::signal::MayPark::vfork(idx));
         } else {
             self.procs.vfork_pending.remove(&child);
             self.sched.make_runnable(idx, WakeReason::Woken);
@@ -265,11 +266,10 @@ impl Sup {
         match a[0] {
             WAIT_PARK => {
                 // A signal already deliverable interrupts at once.
-                let s = self.slot(idx);
-                if s.sigpend.load(Relaxed) & !s.vmask.load(Relaxed) != 0 {
+                let Some(ok) = self.may_block(idx) else {
                     return Next::Continue(-(libc::EINTR as i64));
-                }
-                self.sched.park(idx, Wait::Child, None);
+                };
+                self.sched.park(idx, Wait::Child, None, ok);
                 Next::Pick
             }
             WAIT_REAPED => {
