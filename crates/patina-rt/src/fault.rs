@@ -70,8 +70,10 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
             sig::trap_exit(frame, None);
             crate::entry::check_real_mask(frame);
             crate::compute::exit(thread());
-            crate::pmu::exit(thread(), frame.pc(), 0);
             crate::spin::walk_go(thread(), frame);
+            // Last: the counter read in `pmu::exit` starts the counted segment, so a branch
+            // after it would be counted as the program's.
+            crate::pmu::exit(thread(), frame.pc(), 0);
             return;
         }
     }

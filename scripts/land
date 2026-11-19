@@ -46,6 +46,19 @@ conflicted=$(jj log --no-graph -r "(main@origin..$rev) & conflicts()" -T 'commit
 [ -z "$conflicted" ] || die "the rebase onto main@origin conflicts: resolve, then run again"
 sha=$(id "$rev")
 mise run check || die "mise run check failed at $sha"
+# Counter exactness is checked only where the CPU is supported (CI's x86_64 runners are not):
+# a change to the runtime or the protocol runs the counters area here too, which says whether
+# this host could run it.
+if [ -n "$(jj diff --from main@origin --to "$sha" --name-only crates/patina-rt crates/patina-proto)" ]; then
+    say "the change touches the runtime: ./check counters"
+    log=$(mktemp)
+    ./check counters 2>&1 | tee "$log" || { rm -f "$log"; die "./check counters failed at $sha"; }
+    dir=$(sed -n 's/.*output in \(\/[^ ]*\)$/\1/p' "$log" | tail -1)
+    rm -f "$log"
+    [ -d "$dir" ] || die "./check counters printed no output directory"
+    skip=$(cat "$dir"/counters-*.out | sed -n 's/^SKIP: //p' | head -1)
+    if [ -n "$skip" ]; then say "counters: SKIPPED on this host ($skip)"; else say "counters: passed on this host"; fi
+fi
 jj bookmark set "$name" -r "$sha"
 jj git push --bookmark "$name"
 # From here a refusal also deletes the branch, so a run after "rebase and run again" starts afresh.
