@@ -438,6 +438,8 @@ fn file_size(fd: i64) -> u64 {
     fstat_raw(fd).map(|st| st.size()).unwrap_or(0)
 }
 
+/// A mapping's shadow: private anonymous memory that holds pages only where something was
+/// copied in (a sparse file mapped large costs what it holds, not what it spans).
 fn new_shadow(len: u64) -> u64 {
     let l = page_up(len);
     let a = crate::state::priv_alloc(l, PAGE);
@@ -447,7 +449,7 @@ fn new_shadow(len: u64) -> u64 {
             a,
             l,
             PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE,
             u64::MAX,
             0,
         )
@@ -461,6 +463,86 @@ fn new_shadow(len: u64) -> u64 {
 /// Bytes of the mapping that lie inside the file (reading beyond would fault).
 fn valid_len(m: &Map) -> u64 {
     m.len.min(file_size(m.fd).saturating_sub(m.off))
+}
+
+/// The first `v` bytes of mapping `m` as runs of whole pages, in order: `f(lo, hi, data)`,
+/// offsets in the mapping; `data` false for pages that lie wholly in a hole of the file. A
+/// hole is never read through the mapping: on tmpfs that would allocate its pages (charged to
+/// the file system and the process) and change the file's block count.
+fn page_runs(m: &Map, v: u64, mut f: impl FnMut(u64, u64, bool)) {
+    const SEEK_CUR: u64 = 1;
+    const SEEK_DATA: u64 = 3;
+    const SEEK_HOLE: u64 = 4;
+    let fd = m.fd as u64;
+    // The descriptor shares the program's file offset: put it back.
+    let cur = unsafe { sc3(nr::LSEEK, fd, 0, SEEK_CUR) };
+    let end = page_up(v);
+    let mut pos = 0;
+    while pos < end {
+        let d = unsafe { sc3(nr::LSEEK, fd, m.off + pos, SEEK_DATA) };
+        if d == -e::ENXIO {
+            f(pos, end, false);
+            break;
+        }
+        if d < 0 {
+            // No hole information: every page may hold data.
+            f(pos, end, true);
+            break;
+        }
+        let h = unsafe { sc3(nr::LSEEK, fd, d as u64, SEEK_HOLE) };
+        let dl = (d as u64 - m.off) & !(PAGE - 1);
+        let hl = if h < 0 {
+            end
+        } else {
+            page_up(h as u64 - m.off).min(end)
+        };
+        if dl >= end {
+            f(pos, end, false);
+            break;
+        }
+        if dl > pos {
+            f(pos, dl, false);
+        }
+        f(dl.max(pos), hl, true);
+        pos = hl.max(pos + PAGE);
+    }
+    if cur >= 0 {
+        unsafe { sc3(nr::LSEEK, fd, cur as u64, 0) };
+    }
+}
+
+/// Bring the shadow of `m` to the file's contents (a new mapping, after `mremap`): copy what
+/// the file holds; its holes read as the shadow's untouched zeros.
+fn fill_shadow(m: &Map) {
+    let v = valid_len(m);
+    page_runs(m, v, |lo, hi, data| {
+        let hi = hi.min(v);
+        if data && hi > lo {
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    (m.addr + lo) as *const u8,
+                    (m.shadow + lo) as *mut u8,
+                    (hi - lo) as usize,
+                )
+            };
+        }
+    });
+}
+
+/// Zero `[a, a + n)` of a shadow: the whole pages are given back (anonymous memory reads
+/// back as zeros), only the partial ones at the ends are written.
+fn zero_shadow(base: u64, a: u64, n: u64) {
+    const MADV_DONTNEED: u64 = 4;
+    let (lo, hi) = (page_up(a), (a + n) & !(PAGE - 1));
+    if lo >= hi {
+        unsafe { core::ptr::write_bytes((base + a) as *mut u8, 0, n as usize) };
+        return;
+    }
+    unsafe {
+        core::ptr::write_bytes((base + a) as *mut u8, 0, (lo - a) as usize);
+        core::ptr::write_bytes((base + hi) as *mut u8, 0, (a + n - hi) as usize);
+        sc3(nr::MADVISE, base + lo, hi - lo, MADV_DONTNEED);
+    }
 }
 
 const F_DUPFD_CLOEXEC: u64 = 1030;
@@ -504,19 +586,30 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
         shadow_len: page_up(len),
         fd: hfd,
     };
-    let v = valid_len(&m);
-    unsafe { core::ptr::copy_nonoverlapping(addr as *const u8, shadow as *mut u8, v as usize) };
+    fill_shadow(&m);
     t.m[t.n] = m;
     t.n += 1;
     append(OpKind::MmapShared, st.ino(), [off, len, 0, 0, 0, 0], &[], 0);
 }
 
 /// Record the pages of mapping `i` that differ from the tracker's view (`MmapDirty`), and
-/// take them into the view.
+/// take them into the view. Only pages that hold data are compared: a hole of the file reads
+/// as zeros, as the tracker's view of it does (a truncation or a punched hole zeroed it), so
+/// the shadow's pages there are given back.
 fn flush(i: usize) {
     let m = MAPS.get().m[i];
     let v = valid_len(&m);
-    let mut p = 0u64;
+    page_runs(&m, v, |lo, hi, data| {
+        if !data {
+            return zero_shadow(m.shadow, lo, hi - lo);
+        }
+        flush_run(i, &m, lo, hi.min(v));
+    });
+}
+
+/// `flush` over `[lo, v)` of mapping `i`, pages that may hold data.
+fn flush_run(i: usize, m: &Map, lo: u64, v: u64) {
+    let mut p = lo;
     while p < v {
         let n = PAGE.min(v - p);
         let differs = |q: u64, n: u64| unsafe {
@@ -577,9 +670,7 @@ fn maps_changed_except(ino: u64, off: u64, len: u64, how: Change, skip: usize) {
         }
         let (a, n) = (lo - m.off, hi - lo);
         match how {
-            Change::Zero => unsafe {
-                core::ptr::write_bytes((m.shadow + a) as *mut u8, 0, n as usize)
-            },
+            Change::Zero => zero_shadow(m.shadow, a, n),
             Change::Data => {
                 let v = valid_len(&m);
                 let n = n.min(v.saturating_sub(a));
@@ -694,8 +785,7 @@ pub fn on_mremap_after(new: u64, newlen: u64, prev: Option<(u64, u64, i64)>, ok:
         shadow_len: page_up(newlen),
         fd: hfd,
     };
-    let v = valid_len(&m);
-    unsafe { core::ptr::copy_nonoverlapping(new as *const u8, shadow as *mut u8, v as usize) };
+    fill_shadow(&m);
     t.m[t.n] = m;
     t.n += 1;
 }
