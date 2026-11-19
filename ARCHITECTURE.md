@@ -639,10 +639,11 @@ withstand.
 
 The network wire: a TCP socket in the guest is a real unix socket whose peer the supervisor
 holds (`sup/wire.rs`). The supervisor reads what each side sent, stamps it with a seeded
-delivery time, and delivers it in virtual time. Delays, splits, resets, refused connects and
-partitions are draws keyed by the connection and what they act on: a reset is drawn on each
-piece of data a guest sends (so a long-lived connection meets one), a refusal or timeout once
-per connect, a delay or split per delivery.
+delivery time, and delivers it in virtual time. Delays, splits, resets and refused connects
+are draws keyed by the connection and what they act on: a reset is drawn on each piece of
+data a guest sends (so a long-lived connection meets one), a refusal or timeout once per
+connect, a delay or split per delivery. A partition is one window of virtual time, its start
+and length resolved from the seed with the plan, in which deliveries are held.
 
 Datagrams (`sup/udp.rs`, `rt/sys/udp.rs`): a UDP socket in the guest is a real unix
 `SOCK_SEQPACKET` socket whose peer the supervisor holds, one per socket and never shared

@@ -539,7 +539,11 @@ long-lived (keep-alive) connection meets one; a refusal or timeout is drawn once
 Each datagram gets its own delivery time in the `net-delay-ms` range, so datagrams already
 arrive out of order within that jitter; `net-drop-permille`, `net-dup-permille` and
 `net-reorder-permille` (held back past later datagrams) are drawn per datagram, and a
-datagram due inside a `net-partition` window is lost. A receive queue past the socket's
+datagram due inside a `net-partition` window is lost. `net-partition=START+LENGTH[:PORT]`
+holds TCP deliveries and loses datagrams for LENGTH ms from START ms of virtual time (only
+those from or to PORT, if given); START and LENGTH are each a number or a range drawn per
+seed (`--fault net-partition=0..60000+1000..10000` puts a window of 1 to 10 s somewhere in
+the first minute). A receive queue past the socket's
 `SO_RCVBUF` drops datagrams with no fault, as Linux does. A request/response protocol with
 no retry, run with `--fault net-drop-permille=50`:
 

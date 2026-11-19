@@ -54,6 +54,10 @@ enum Val {
     At,
     /// `compute-gap`: `A..B` draws log-uniformly, not uniformly; never swarmed.
     Gap,
+    /// A window `START+LENGTH[:PORT]` in milliseconds, START and LENGTH each a number or a
+    /// range resolved like any other (LENGTH by the draw of `KEY:length`); a class `swarm`
+    /// may turn off.
+    Window,
 }
 
 /// One fault setting.
@@ -173,9 +177,9 @@ pub const KEYS: &[Key] = &[
     ),
     key(
         "net-partition",
-        "A..B[:PORT]",
-        Val::Own,
-        "from A to B ms of virtual time, hold TCP deliveries and lose datagrams (from or to PORT)",
+        "START+LENGTH[:PORT]",
+        Val::Window,
+        "for LENGTH ms of virtual time from START ms, hold TCP deliveries and lose datagrams (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
     ),
     key(
         "net-drop-permille",
@@ -393,6 +397,24 @@ fn resolve_size(seed: u64, k: &str, v: &str) -> Res<u64> {
     Ok(proto::pmu::log_uniform(plan_draw(seed, k), a, b))
 }
 
+/// `START+LENGTH[:PORT]`, each of START and LENGTH resolved like a number (LENGTH by the
+/// draw of `KEY:length`, so the two move independently): `S+L[:PORT]` in milliseconds.
+fn resolve_window(seed: u64, k: &str, v: &str) -> Res<String> {
+    let (w, port) = match v.split_once(':') {
+        Some((w, p)) => (w, Some(p)),
+        None => (v, None),
+    };
+    let (start, len) = w
+        .split_once('+')
+        .ok_or_else(|| format!("--fault {k}={v}: expected START+LENGTH[:PORT] (milliseconds)"))?;
+    let start = resolve_num(seed, k, start, u64::MAX / 4_000_000)?;
+    let len = resolve_num(seed, &format!("{k}:length"), len, u64::MAX / 4_000_000)?;
+    Ok(match port {
+        Some(p) => format!("{start}+{len}:{p}"),
+        None => format!("{start}+{len}"),
+    })
+}
+
 /// A position key's value (`N`, or `CLASS:N` for `fs-error-at`) with `N` resolved like any
 /// other number: a range searches positions across seeds.
 fn resolve_at(seed: u64, k: &str, v: &str) -> Res<String> {
@@ -464,6 +486,7 @@ pub fn resolve(
             Val::Flag => json!((num(k, v)? != 0) as u64),
             Val::Size => json!(resolve_size(seed, k, v)?),
             Val::Own | Val::Spread => json!(v),
+            Val::Window => json!(resolve_window(seed, k, v)?),
             Val::At => json!(resolve_at(seed, k, v)?),
             Val::Gap => {
                 plan.compute_gap = resolve_gap(seed, k, v)?;
@@ -471,7 +494,10 @@ pub fn resolve(
                 continue;
             }
         };
-        let class = matches!(info.val, Val::Permille | Val::Count | Val::Own | Val::Size);
+        let class = matches!(
+            info.val,
+            Val::Permille | Val::Count | Val::Own | Val::Size | Val::Window
+        );
         if swarm && class && plan_draw(seed, &format!("swarm:{k}")) & 1 == 1 {
             plan.resolved.push((k.clone(), json!("off")));
             continue;
@@ -625,7 +651,11 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
             if port > 65535 {
                 return Err(format!("--fault net-partition: port {port} out of range"));
             }
-            (c.partition_from_ns, c.partition_to_ns) = ms_range(k, range)?;
+            let (start, len) = range
+                .split_once('+')
+                .ok_or_else(|| format!("--fault {k}={v}: expected START+LENGTH"))?;
+            c.partition_from_ns = n(start)? * 1_000_000;
+            c.partition_to_ns = c.partition_from_ns + n(len)? * 1_000_000;
             c.partition_port = port;
             c.partition_set = 1;
         }

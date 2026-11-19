@@ -28,7 +28,7 @@ awk '/reset|ECONN|Connection/ && n++ < 3' "$o/reset-on/inc-0/stdout"
 pair refuse net-connect-refuse-permille=1000 connect refused
 pair timeout net-connect-timeout-permille=1000 connect timeout
 grep -h 'connect ->' "$o/timeout-on/inc-0/stdout"
-pair partition net-partition=5000..15000 partition partitioned
+pair partition net-partition=5000+10000 partition partitioned
 grep -h 'application timeout\|tick 05' "$o/partition-on/inc-0/stdout"
 pair halfclose net-halfclose-delay-ms=2000..2000 halfclose-delay 2000
 grep -h 'EOF reached' "$o/halfclose-on/inc-0/stdout"
