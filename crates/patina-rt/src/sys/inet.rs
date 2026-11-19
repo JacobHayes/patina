@@ -404,9 +404,16 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
         WS_CONNECTING => return -EALREADY,
         WS_CONNECTED => return -EISCONN,
         WS_LISTEN => return -e::EINVAL,
-        // The real socket is still connected to its closed hidden end: a second connect on
-        // the same socket after a failure is not supported.
-        WS_FAILED => halt(call),
+        // As the kernel: the connect after a failure reports it (the pending error, or
+        // ECONNABORTED once SO_ERROR has taken it) and leaves the socket unconnected.
+        WS_FAILED => {
+            let e = take_err(fd, i);
+            sock(i).state = WS_ABORTED;
+            return if e != 0 { -(e as i64) } else { -ECONNABORTED };
+        }
+        // The real socket is still connected to its closed hidden end: a new attempt on the
+        // same socket after a failure is not supported.
+        WS_ABORTED => halt(call),
         _ => {}
     }
     let (port, kind) = match parse_addr(s.family, addr, len, true) {
@@ -476,7 +483,10 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
     w.deadline = Deadline::SndTimeo;
     let g = w.run(|| match sock(i).state {
         WS_CONNECTED => Some(0),
-        WS_FAILED => Some(-(take_err(fd, i) as i64)),
+        WS_FAILED => {
+            sock(i).state = WS_ABORTED;
+            Some(-(take_err(fd, i) as i64))
+        }
         _ => None,
     });
     let r = match g {

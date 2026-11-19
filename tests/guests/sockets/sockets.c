@@ -388,6 +388,20 @@ static void refused(void) {
     e = -1;
     getsockopt(c, SOL_SOCKET, SO_ERROR, &e, &el);
     CHECK(e == 0, "SO_ERROR cleared: %d", e);
+    // The error taken, a second connect reports the failure as ECONNABORTED (the kernel's
+    // sock_error with no pending error).
+    r = connect(c, (void *)&a, sizeof a);
+    CHECK(r == -1 && errno == ECONNABORTED, "connect after SO_ERROR: %d %d", r, errno);
+    close(c);
+    // Learning the result by a second connect (hiredis): the pending error itself.
+    c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    r = connect(c, (void *)&a, sizeof a);
+    CHECK(r == -1 && errno == EINPROGRESS, "non-blocking connect: %d", r);
+    pf.fd = c;
+    CHECK(poll(&pf, 1, 5000) == 1, "poll");
+    r = connect(c, (void *)&a, sizeof a);
+    CHECK(r == -1 && errno == ECONNREFUSED, "second connect: %d %d", r, errno);
+    printf("second connect: ECONNREFUSED\n");
     close(c);
 }
 

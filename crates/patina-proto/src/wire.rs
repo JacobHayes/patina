@@ -27,6 +27,9 @@ pub const WS_CONNECTING: u8 = 3;
 pub const WS_CONNECTED: u8 = 4;
 /// A connect failed (refused or timed out): `err` holds the errno until `SO_ERROR` reads it.
 pub const WS_FAILED: u8 = 5;
+/// A failed connect whose error a later `connect` reported (the kernel's `SS_UNCONNECTED`
+/// after `sock_error`): another `connect` would be a new attempt.
+pub const WS_ABORTED: u8 = 6;
 
 /// `WSock::flags`.
 pub const WF_SENT: u8 = 1;
