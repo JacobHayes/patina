@@ -6,13 +6,14 @@
 //! When the thread holding the turn has computed for a while with no boundary event, the
 //! supervisor sends it a probe (a real `SIGTRAP` by `tgkill`; nothing else sends one). The
 //! probe arrives at an arbitrary instruction, which is not deterministic. What the probe
-//! looks for is:
+//! decides must not depend on that instruction (`proto::spin` states the invariant and tests
+//! it). What the probe looks for is:
 //!
 //! 1. **A periodic path.** Single steps from the arrival point record instruction
-//!    addresses until they repeat with a period `P` (the first return to the start whose
-//!    next `P` addresses equal the first `P`).
-//! 2. **A canonical point.** The least rotation of the `P` addresses names one position in
-//!    the cycle, the same whichever instruction the probe arrived at.
+//!    addresses; the least period of the trace so far is a candidate once the trace holds it
+//!    twice (candidates come in increasing order: an inner loop's before the loop around it).
+//! 2. **A canonical point.** The least rotation of the candidate's addresses names one
+//!    position in its cycle, the same whichever instruction the probe arrived at.
 //! 3. **A fixed point.** At that position, a full iteration later and another after that,
 //!    the registers (general, flags, the whole FPU/SIMD state) are equal, and so is every
 //!    page the iteration wrote (x86_64: soft-dirty bits; arm64: userfaultfd's asynchronous
@@ -20,6 +21,8 @@
 //!    The thread's next state is a function of its
 //!    state alone (no other thread runs, no system call is made), so equal states mean the
 //!    loop never ends by itself, and every later arrival at the point is in that same state.
+//!    A candidate whose state keeps changing (a bounded inner loop's counter) is rejected,
+//!    and the trace goes on to the loop around it.
 //!
 //! The state there is therefore the same in every run, however late the probe came: the
 //! thread yields there exactly as at a trap (a `preempt` record with `nr` 2, virtual time
@@ -36,7 +39,7 @@
 //! gets copies of the pages as they were before the plant.
 //!
 //! Not found: loops whose iterations change state (a counter in memory or a register), loops
-//! longer than the trace, and code the runtime cannot step (arm64: an exclusive pair the
+//! longer than `proto::spin::PERIOD_MAX` steps, and code the runtime cannot step (arm64: an exclusive pair the
 //! rule does not cover, an exception-generating instruction, an undecoded branch, code in a
 //! writable mapping; a wait inside a pair, `ldaxr` and a branch back to it while the value is
 //! held, never ends its step, so its probe never ends either and the run ends
@@ -57,27 +60,23 @@ use crate::sys::sig::SigInfo;
 use core::sync::atomic::{AtomicI32, AtomicU64, Ordering::Relaxed};
 use proto::ctl::{Op, SCHED_SPIN_PROBE};
 use proto::layout::*;
+use proto::spin::{Checked, Step, Trace, TRACE_MAX};
 
 const PH_NONE: u64 = 0;
 const PH_TRACE: u64 = 1;
-const PH_ALIGN: u64 = 2;
-const PH_CHECK: u64 = 3;
 
 const SI_TKILL: i32 = -6;
 
-/// Trace length (single steps) a probe may take to find the period.
-const TRACE_MAX: usize = 1 << 16;
 /// Pages an iteration may write.
 const COPY_PAGES: usize = 256;
-/// Iterations compared before a probe gives up.
-const CHECKS: u64 = 4;
 const FP_MAX: usize = 8192;
 const REGIONS: usize = 128;
 
 // Per-process scratch at the top of the runtime's private region, mapped on first use: the
-// trace, the saved state of the last checkpoint and its pages.
+// trace and its prefix function, the saved state of the last checkpoint and its pages.
 const TRACE_OFF: u64 = 0;
-const FP_OFF: u64 = TRACE_OFF + (TRACE_MAX as u64) * 8;
+const PREFIX_OFF: u64 = TRACE_OFF + (TRACE_MAX as u64) * 8;
+const FP_OFF: u64 = PREFIX_OFF + (TRACE_MAX as u64) * 4;
 const PAGES_LIST_OFF: u64 = FP_OFF + FP_MAX as u64;
 const COPY_OFF: u64 = PAGES_LIST_OFF + (COPY_PAGES as u64) * 8;
 const SCRATCH_SIZE: u64 = (COPY_OFF + (COPY_PAGES as u64) * PAGE + 0xfffff) & !0xfffff;
@@ -87,13 +86,8 @@ const SCRATCH: u64 = RT_PRIV + RT_PRIV_SIZE - SCRATCH_SIZE;
 #[repr(C)]
 pub struct Spin {
     pub phase: u64,
-    /// Steps taken (index into the trace), the candidate period, the period found, the step
-    /// index of the canonical position, checkpoints taken.
-    pub i: u64,
-    pub cand: u64,
-    pub period: u64,
-    pub target: u64,
-    pub checks: u64,
+    /// The trace's reading: its length, the candidate period and its checks.
+    pub tr: Trace,
     /// The last checkpoint's registers (`arch::step::state_words`) and how many pages it
     /// saved.
     pub regs: [u64; STATE_WORDS],
@@ -105,10 +99,8 @@ pub struct Spin {
     pub orig: Word,
     pub planted: u8,
     pub over: u8,
-    /// Whether the trace was restarted after the probe's first exclusive pair; restarts left
-    /// where the path leaves its cycle (from `arch::step::RETRACES`).
+    /// Whether the trace was restarted after the probe's first exclusive pair.
     pub anchored: u8,
-    pub retraces: u8,
     /// The step in progress (`arch::step`).
     pub st: st::Stepper,
 }
@@ -117,11 +109,7 @@ impl Spin {
     pub const fn new() -> Spin {
         Spin {
             phase: PH_NONE,
-            i: 0,
-            cand: 0,
-            period: 0,
-            target: 0,
-            checks: 0,
+            tr: Trace::new(),
             regs: [0; STATE_WORDS],
             npages: 0,
             fp_len: 0,
@@ -130,7 +118,6 @@ impl Spin {
             planted: 0,
             over: 0,
             anchored: 0,
-            retraces: 0,
             st: st::Stepper::new(),
         }
     }
@@ -349,8 +336,14 @@ pub(crate) fn plantable(a: u64) -> bool {
     }
 }
 
-fn trace() -> &'static mut [u64] {
-    unsafe { core::slice::from_raw_parts_mut((SCRATCH + TRACE_OFF) as *mut u64, TRACE_MAX) }
+/// The trace and its prefix function.
+fn trace() -> (&'static mut [u64], &'static mut [u32]) {
+    unsafe {
+        (
+            core::slice::from_raw_parts_mut((SCRATCH + TRACE_OFF) as *mut u64, TRACE_MAX),
+            core::slice::from_raw_parts_mut((SCRATCH + PREFIX_OFF) as *mut u32, TRACE_MAX),
+        )
+    }
 }
 
 const WORD: u64 = core::mem::size_of::<Word>() as u64;
@@ -629,14 +622,10 @@ fn start(ts: &mut ThreadState, frame: &mut Frame) {
         return;
     }
     let s = &mut ts.spin;
-    trace()[0] = frame.pc();
-    s.i = 0;
-    s.cand = 0;
-    s.period = 0;
-    s.checks = 0;
+    let (t, f) = trace();
+    s.tr.start(t, f, frame.pc(), st::RETRACES);
     s.npages = 0;
     s.anchored = 0;
-    s.retraces = st::RETRACES;
     s.phase = PH_TRACE;
     arm(ts, frame);
 }
@@ -654,29 +643,6 @@ fn arm(ts: &mut ThreadState, frame: &mut Frame) {
     }
 }
 
-/// Index of the least rotation of `s` (the two-pointer minimum-expression algorithm).
-fn least_rotation(s: &[u64]) -> usize {
-    let n = s.len();
-    let (mut i, mut j, mut k) = (0usize, 1usize, 0usize);
-    while i < n && j < n && k < n {
-        let (a, b) = (s[(i + k) % n], s[(j + k) % n]);
-        if a == b {
-            k += 1;
-            continue;
-        }
-        if a > b {
-            i += k + 1;
-        } else {
-            j += k + 1;
-        }
-        if i == j {
-            j += 1;
-        }
-        k = 0;
-    }
-    i.min(j)
-}
-
 /// A single step of a probe finished.
 fn step(ts: &mut ThreadState, frame: &mut Frame) {
     st::step_disarm(&mut ts.spin.st, frame);
@@ -687,85 +653,36 @@ fn step(ts: &mut ThreadState, frame: &mut Frame) {
 /// Start the trace again at `rip`, with nothing compared yet.
 fn retrace(ts: &mut ThreadState, rip: u64) {
     let s = &mut ts.spin;
-    trace()[0] = rip;
-    s.i = 0;
-    s.cand = 0;
-    s.period = 0;
-    s.checks = 0;
+    let (t, f) = trace();
+    s.tr.restart(t, f, rip);
     s.npages = 0;
-    s.phase = PH_TRACE;
 }
 
-/// Record the step that ended at `frame`: extend the trace, or compare at the canonical
+/// Record the step that ended at `frame`: extend the trace, and compare at the canonical
 /// position.
 fn record(ts: &mut ThreadState, frame: &mut Frame) {
     bump(&ctl().sched.spin_steps, 1);
     let rip = frame.pc();
-    let t = trace();
-    if st::step_was_pair(&ts.spin.st) && ts.spin.anchored == 0 && ts.spin.phase == PH_TRACE {
+    if st::step_was_pair(&ts.spin.st) && ts.spin.anchored == 0 && ts.spin.tr.period == 0 {
         // The first exclusive pair of the probe: the trace starts again after it. Stops are
         // never inside a pair from here on, but the probe may have arrived inside one, and
         // that address would not come round again.
         ts.spin.anchored = 1;
         return retrace(ts, rip);
     }
-    let s = &mut ts.spin;
-    s.i += 1;
-    let i = s.i as usize;
-    match s.phase {
-        PH_TRACE => {
-            if i >= TRACE_MAX {
-                return abort(ts, frame);
-            }
-            t[i] = rip;
-            let cand = s.cand as usize;
-            if cand == 0 {
-                if rip == t[0] {
-                    s.cand = i as u64;
-                }
-            } else if rip != t[i - cand] {
-                if s.retraces > 0 {
-                    // The path after the start was not the cycle (a store-exclusive that failed
-                    // once): start again here.
-                    s.retraces -= 1;
-                    return retrace(ts, rip);
-                }
-                s.cand = if rip == t[0] { i as u64 } else { 0 };
-            } else if i == 2 * cand {
-                let p = cand;
-                s.period = p as u64;
-                s.target = (2 * p + least_rotation(&t[..p])) as u64;
-                s.phase = PH_ALIGN;
-                if i as u64 == s.target {
-                    s.phase = PH_CHECK;
-                    checkpoint(ts, frame);
-                }
-            }
-        }
-        _ => {
-            let p = s.period as usize;
-            if rip != t[i % p] {
-                if s.retraces > 0 {
-                    s.retraces -= 1;
-                    return retrace(ts, rip);
-                }
-                return abort(ts, frame);
-            }
-            let at_check = if s.phase == PH_ALIGN {
-                i as u64 == s.target
-            } else {
-                (i as u64 - s.target).is_multiple_of(p as u64)
-            };
-            if at_check {
-                s.phase = PH_CHECK;
-                checkpoint(ts, frame);
-            }
-        }
+    let (t, f) = trace();
+    match ts.spin.tr.record(t, f, rip) {
+        Step::Go => {}
+        Step::Check => checkpoint(ts, frame),
+        // The path left a cycle the trace had come back to (a store-exclusive that failed
+        // once made the loop retry): start again here.
+        Step::Retrace => retrace(ts, rip),
+        Step::Abort => abort(ts, frame),
     }
 }
 
 /// The thread is at the canonical position. Compare with the last checkpoint; on a fixed
-/// point, yield; after `CHECKS` unequal ones, give up.
+/// point, yield; after `proto::spin::CHECKS` unequal ones, the candidate is rejected.
 fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
     let list = unsafe {
         core::slice::from_raw_parts_mut((SCRATCH + PAGES_LIST_OFF) as *mut u64, COPY_PAGES)
@@ -779,14 +696,17 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
         return abort(ts, frame);
     };
     let s = &mut ts.spin;
-    if s.checks > 0 {
-        let mut now = [0u64; COPY_PAGES];
-        let Some(n) = dirty_pages(&mut now) else {
+    let checks = s.tr.checks;
+    let mut now = [0u64; COPY_PAGES];
+    let mut n = 0;
+    let mut equal = false;
+    if checks > 0 {
+        let Some(k) = dirty_pages(&mut now) else {
             return abort(ts, frame);
         };
+        n = k;
         let prev = &list[..s.npages as usize];
-        let mut equal =
-            s.checks > 1 && regs == s.regs && st::fp_equal(fp, &saved_fp[..s.fp_len as usize]);
+        equal = checks > 1 && regs == s.regs && st::fp_equal(fp, &saved_fp[..s.fp_len as usize]);
         // Every page written in this iteration was written in the last one too (so its
         // contents then were saved) and holds the same bytes.
         let mut k = 0;
@@ -807,12 +727,13 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
                         )
                 };
         }
-        if equal {
-            return found(ts, frame);
-        }
-        if s.checks > CHECKS {
-            return abort(ts, frame);
-        }
+    }
+    match s.tr.checked(equal) {
+        Checked::Found => return found(ts, frame),
+        Checked::Rejected => return,
+        Checked::Again => {}
+    }
+    if checks > 0 {
         // Save this iteration's pages for the next comparison.
         list[..n].copy_from_slice(&now[..n]);
         for (j, &p) in now[..n].iter().enumerate() {
@@ -829,7 +750,6 @@ fn checkpoint(ts: &mut ThreadState, frame: &mut Frame) {
     s.regs = regs;
     saved_fp[..fp.len()].copy_from_slice(fp);
     s.fp_len = fp.len() as u64;
-    s.checks += 1;
     if !clear_dirty() {
         note_host(proto::ctl::SPIN_HOST_TRACK, 0);
         abort(ts, frame);
@@ -845,7 +765,7 @@ fn found(ts: &mut ThreadState, frame: &mut Frame) {
     // The last spin point, if still planted (this loop was reached from it without a runtime
     // entry), comes out: nothing stays planted across a yield.
     disarm(ts);
-    let period = ts.spin.period;
+    let period = ts.spin.tr.period as u64;
     spin_yield(ts, frame, period);
 }
 

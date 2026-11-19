@@ -6,6 +6,10 @@
  *   spinpoints memcount  the same, but each iteration leaves the registers as they were: only
  *                      the counter in memory changes (compute-stall; found only if a probe
  *                      missed the write)
+ *   spinpoints nested N  the flag wait with a bounded delay loop of N passes in each iteration
+ *                      (`while (!flag) for (i = 0; i < N; i++);`): the inner loop's counter
+ *                      changes, the outer loop's state does not, so a probe finds the outer
+ *                      loop wherever it arrives
  *   spinpoints text N  N rounds of the flag wait, each a new thread found by a probe; the
  *                      checksum of every executable segment (the program's and its
  *                      libraries') is taken before and after each round and must not change
@@ -39,7 +43,8 @@
 
 static volatile int flag, started;
 static volatile unsigned long count;
-static int mode; /* 0 flag, 1 count, 2 memcount */
+static int mode; /* 0 flag, 1 count, 2 memcount, 3 nested */
+static int inner;
 
 static volatile unsigned long acc;
 static __attribute__((noinline)) void wa(void) { acc += 1; }
@@ -78,6 +83,9 @@ static void *waiter(void *a)
 			__asm__ volatile("ldr x9, %0\n\tadd x9, x9, #1\n\tstr x9, %0\n\tmov x9, #0" : "+m"(count) : : "x9");
 #endif
 		}
+	else if (mode == 3)
+		while (!flag)
+			for (volatile int i = 0; i < inner; i++) {}
 	else
 		while (!flag) {}
 	return NULL;
@@ -199,6 +207,7 @@ int main(int argc, char **argv)
 	if (!strcmp(argv[1], "jit")) return jit_main();
 	if (!strcmp(argv[1], "count")) mode = 1;
 	else if (!strcmp(argv[1], "memcount")) mode = 2;
+	else if (!strcmp(argv[1], "nested")) mode = 3, inner = argc > 2 ? atoi(argv[2]) : 300;
 	else if (strcmp(argv[1], "flag")) return 2;
 	wait_once();
 	printf("done\n");

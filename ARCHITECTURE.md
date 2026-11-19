@@ -265,7 +265,12 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
 - **Spin probes.** A thread that runs 20 ms of CPU time without a point is single-stepped
   until its loop repeats with nothing changed (registers, vector state, written pages). Such
   a loop waits for another thread, and its state there is the same in every run, so it
-  yields there, and at each later arrival (`spin.rs`, `sup/stall.rs`). x86_64 steps with the
+  yields there, and at each later arrival (`spin.rs`, `sup/stall.rs`). What a probe decides
+  does not depend on the instruction it arrived at, which host timing picks
+  (`proto::spin`): candidate loops come shortest first, and one whose state keeps changing
+  (a bounded delay loop inside the wait) gives way to the loop around it; a loop is found
+  when one pass is at most 13,107 steps and leaves the state as it was, never when it is
+  longer. x86_64 steps with the
   trap flag, plants `int3` and finds written pages by soft-dirty bits. arm64 has neither a
   step bit a program may set nor soft-dirty bits: its stepper decodes the instruction's
   successor (the branches, with their conditions on the frame) and plants a `brk` there

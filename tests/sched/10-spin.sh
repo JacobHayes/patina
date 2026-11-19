@@ -20,6 +20,10 @@
 #  h. JIT-style code (spinpoints jit): a branch to itself in writable, executable memory,
 #     which the spinning thread's signal handler patches into a no-op: ok, the patch held (no
 #     breakpoint is planted in writable code, where restoring the old word would undo it).
+#  i. A flag wait with a bounded inner loop (spinpoints nested 300): the inner loop's counter
+#     changes, the outer loop's state does not. Where a probe arrives depends on the host's
+#     timing; what it decides must not: patina verify, 4 runs of seed 1 varying CPU, load and
+#     address randomization, all ok, one digest, a spin point found.
 #@ tier=quick budget=30 slots=5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-spin
@@ -45,6 +49,8 @@ wait
 arm64=""; [ "$(uname -m)" != aarch64 ] || arm64=yes # lint-allow: test-subst — uname -m does not fail
 one twice "$G" 1 "$on" -- /guest/spinpoints twice &
 one jit "$G" 1 "$on" --timeout 20 -- /guest/spinpoints jit &
+timeout 120 "$PATINA" verify --seed 1 --runs 4 --vary cpu,load,aslr --config "$on" --out "$o/nested" \
+    --mount "$G":/guest:copy -- /guest/spinpoints nested 300 >"$o/nested.txt" 2>&1 || true &
 [ -z "$arm64" ] || for m in xchg cas; do one "llsc-$m" "$G" 1 "$on" -- /guest/llsc-spin "$m" & done
 wait
 res() { echo "$(field "$o/$1/result.json" outcome)/$(field "$o/$1/result.json" stop): $(field "$o/$1/result.json" message)"; }
@@ -87,6 +93,16 @@ echo "f. two spin points in a row, then their code run again: ok"
     die "h. JIT code patched by its handler: $(res jit) $(cat "$o/jit/inc-0/stdout" 2>/dev/null)"
 [ "$(field "$o/jit/result.json" counters.sched.spin_found)" -ge 1 ] || die "h. jit: ok without a found spin"
 echo "h. JIT code patched by its signal handler while it spins: ok"
+
+grep -q '^identical: ' "$o/nested.txt" || die "i. nested spin: verify differed: $(tail -3 "$o/nested.txt")"
+for i in 0 1 2 3; do
+    r=$o/nested/run-$i
+    [ "$(field "$r/result.json" outcome)" = ok ] || die "i. nested spin, run $i: $(res "nested/run-$i")"
+    [ "$(field "$r/result.json" counters.sched.spin_found)" -gt 0 ] || die "i. nested spin, run $i: ok without a found spin"
+done
+n=$(for i in 0 1 2 3; do field "$o/nested/run-$i/result.json" digest; done | sort -u | wc -l)
+[ "$n" = 1 ] || die "i. nested spin: $n digests in 4 runs of one seed"
+echo "i. nested spin: 4 runs of seed 1 under verify ok with one digest"
 
 if [ "$arm64" ]; then
     for m in xchg cas; do
