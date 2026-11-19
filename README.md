@@ -128,7 +128,9 @@ Go, Python, shell scripts (run directly: `patina run -- ./script.sh`) and the pr
 UDP on localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
 that starts at the same time every run, an empty writable `/work` as its working directory.
 Headless Chromium runs with `--no-sandbox`; its own sandbox (namespaces, seccomp) is not
-supported.
+supported. PostgreSQL 18 built from its release source without changes runs unmodified
+(checked by hand on x86_64, not in CI): initdb, start, psql, stop, and 200 seeds each of a
+commit-durability workload under machine crashes and a SERIALIZABLE bank workload, all ok.
 
 What it does not do: network sockets other than TCP and UDP, multicast and broadcast (the
 call fails with an error, and `patina run` lists it under `refused:`), DNS beyond
