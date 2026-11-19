@@ -107,7 +107,10 @@ static inline long patina__call(long op, int kind, int cond, const char *label, 
     unsigned char buf[32 + PATINA_LABEL_MAX + PATINA_TEXT_MAX];
     size_t ll = strlen(label), tl = text ? strlen(text) : 0;
     if (ll > PATINA_LABEL_MAX) ll = PATINA_LABEL_MAX;
-    if (tl > PATINA_TEXT_MAX) tl = PATINA_TEXT_MAX;
+    if (tl > PATINA_TEXT_MAX) { /* cut on a UTF-8 character boundary */
+        tl = PATINA_TEXT_MAX;
+        while (tl > 0 && ((unsigned char)text[tl] & 0xC0) == 0x80) tl--;
+    }
     int64_t w[3] = {a ? *a : 0, b, c};
     uint16_t l16 = (uint16_t)ll;
     uint32_t t32 = (uint32_t)tl;

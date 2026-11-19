@@ -10,7 +10,8 @@
 # examples/checks/no-symlink-escape: a planted symlink out of public/ fails every seed, a path
 # swap the seeds where it was followed (one signature), the fix (openat2 beneath, no symlinks)
 # passes both; without --log-paths it does not judge. examples/checks/confined fails the open
-# with --log-paths and passes the same run's changes without it.
+# with --log-paths and passes the same run's changes without it; it allows the read-only open
+# of the work tree to fsync it after a create under the root, and not one of /tmp.
 #@ tier=area budget=30 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -66,4 +67,8 @@ rc=0
 conf=$root/examples/checks/confined
 [ "$(sweep conf "$conf /work/public" --log-paths -- "$paths" escape link)" = "1 20 violation check: outside-roots: open /etc/passwd (seq N)" ] || die "confined: $(tail -3 conf.txt)"
 [ "$(sweep confops "$conf /work/public" -- "$paths" escape link)" = "0 0 " ] || die "confined without --log-paths: $(tail -3 confops.txt)"
+# A read-only open of the directory above a root, to fsync it, is allowed; one of another is not.
+[ "$(sweep durable "$conf /work/public" --log-paths -- "$paths" durable)" = "0 0 " ] || die "confined, fsync of the parent: $(tail -3 durable.txt)"
+[ "$(sweep durtmp "$conf /work/public" --log-paths -- "$paths" durable /tmp)" = "1 20 violation check: outside-roots: open /tmp (seq N)" ] || die "confined, fsync of /tmp: $(tail -3 durtmp.txt)"
+[ "$(sweep durtmp2 "$conf /work/public" --log-paths -- "$paths" durable /tmp openat2)" = "1 20 violation check: outside-roots: open /tmp (seq N)" ] || die "confined, openat2 of /tmp: $(tail -3 durtmp2.txt)"
 echo "ok: paths as passed and resolved, argv, edges; off leaves no trace; replay and verify identical; escapes: swaps $(echo "$got" | cut -d' ' -f2) of 20, a planted link 20 of 20, fixes none"

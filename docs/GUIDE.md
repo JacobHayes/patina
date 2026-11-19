@@ -161,7 +161,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | Flag | Effect |
 |---|---|
 | `--seeds 1..200,250` | an inclusive range, a list, or both |
-| `-j N` | runs at once (default half the CPUs, at most 8) |
+| `-j N` | runs at once (default the CPUs, at most 8) |
 | `--out DIR` | where runs go (default `patina-out/sweep`) |
 | `--keep fail\|checked\|all\|none` | whose logs to keep: the findings', also those of every run a `--check` read (to judge them again, [below](#judging-again)), every run's, none; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
@@ -178,7 +178,9 @@ space falls below that, or when a run finds the filesystem full.
 
 A sweep directory holds one sweep. It records the program's SHA-256, the command and the
 resolved settings (`sweep.json`); the same sweep run again resumes, running only the runs it
-lacks (more seeds, or after an interrupt), and any other sweep replaces the directory. Edit,
+lacks (more seeds, or after an interrupt), and any other sweep replaces the directory, as does
+an older patina's output (one line says which). A non-empty `--out` that holds no patina output
+is refused, never deleted. Edit,
 rebuild and rerun the same command: the old runs never mix with the new. The checker is not
 part of that identity: a changed checker judges the runs again rather than running them
 ([Judging again](#judging-again)).
@@ -204,8 +206,10 @@ replay lines) and every other group on one line, numbered: `#7 [CASE] SIGNATURE 
 runs   first: seed 3   replayed: identical`; `patina report --group 7 DIR` prints one in full.
 `report.json` has every group in full, each with its runs (`runs`: seed, crash point, case,
 case id, directory) and `case` set only when all its runs share one. A group whose first run's
-message differs from its signature (numbers made `N`, a checker's detail left out) shows that
-message as written, `example:` (`example` in `report.json`), so one real instance is in view.
+message differs from its signature (numbers made `N`, a checker's detail left out, a panic or
+stderr line) shows that message or line as written, `example:` (`example` in `report.json`), so
+one real instance is in view. A signature is cut at 200 characters, and an `always` detail in it
+at 64, on a character boundary; an example at 240.
 
 ### Test suites
 
@@ -303,29 +307,42 @@ A pattern is matched against the whole of a finding's signature as the report pr
 when it starts with `[`, against `[CASE] SIGNATURE`. Each failing run is matched alone and the
 first line that matches names it. A known finding is counted and listed after the new ones,
 one line per ID and signature, and is not announced or replayed; only a new finding makes
-the exit status 1. Here `calc OP A B` gets subtraction below zero and multiplication by zero
-wrong, a checker names a wrong answer `wrong-OP`, and the 31 cases include one wrong by
-construction:
+the exit status 1, and the summary's `findings` counts only new ones. Here `calc OP A B` gets
+subtraction below zero and multiplication by zero wrong, a checker names a wrong answer
+`wrong-OP`, and the 28 cases include one wrong by construction:
 
 ```text
+$ cat known.txt
+# ID, then a pattern: * matches any text; a pattern starting with [ also matches the case.
+sub-clamps  violation check: wrong-sub: *
+!planted    [*planted*] violation check: wrong-*
+mul-zero    violation check: wrong-mul: got 1, want 0
 $ patina sweep --seeds 1..2 --cases cases.txt --mount /tmp/calc:/demo --check ./same-as-sh --known known.txt
-new: violation check: wrong-mul: got N, want N   (seed 1: patina replay /tmp/calc/patina-out/sweep/seed-1/9-0)
+new: violation check: wrong-mul: got N, want N   (seed 1: patina replay /tmp/calc/patina-out/sweep/seed-1/19-0)
 sweep: replaying the first seed of 1 finding
-sweep: 350.5 KiB kept in /tmp/calc/patina-out/sweep
-patina sweep: 62 runs, 18 findings in 3 groups, 44 ok   (0.2s, 8 jobs)
-outcomes: ok 44, violation 18
-check: judged 62 of 62 runs: 44 passed, 18 failed
-known: 12 of 18 findings (sub-clamps 10, planted 2); 6 new, in 1 group
+sweep: 306.8 KiB kept in /tmp/calc/patina-out/sweep
+patina sweep: 56 runs, 6 findings in 1 group, 8 known, 42 ok   (0.2s, 8 jobs)
+outcomes: ok 42, violation 14
+check: judged 56 of 56 runs: 42 passed, 14 failed
+known: 8 runs (sub-clamps 6, planted 2); 6 new, in 1 group
 
 violation check: wrong-mul: got N, want N
-  6 of 62 runs, 3 cases   first: seed 1, case 9 [/bin/sh /demo/calc mul 4 0]   replayed: identical
-  example: wrong-mul: got 4, want 0
-  rerun:  patina run --seed 1 --config /tmp/calc/patina-out/sweep/seed-1/9-0/run.json -- /bin/sh /demo/calc mul 4 0
-  replay: patina replay /tmp/calc/patina-out/sweep/seed-1/9-0
+  6 of 56 runs, 3 cases   first: seed 1, case 19 [/bin/sh /demo/calc mul 1 0]   replayed: identical
+  example: wrong-mul: got 1, want 0
+  rerun:  patina run --seed 1 --config /tmp/calc/patina-out/sweep/seed-1/19-0/run.json -- /bin/sh /demo/calc mul 1 0
+  replay: patina replay /tmp/calc/patina-out/sweep/seed-1/19-0
 
-known sub-clamps: violation check: wrong-sub: got N, want -N   (10 runs, 5 cases)
-known planted: violation check: wrong-planted: got , want N   (2 runs)
+known sub-clamps: violation check: wrong-sub: got N, want -N   (6 runs, 3 cases)
+known planted: violation check: wrong-planted: got , want wrong   (2 runs)
+
+known: mul-zero matched no run; with its numbers written as the signature writes them it matches "violation check: wrong-mul: got N, want N" (an exit status keeps its digits, other numbers are N)
 ```
+
+A pattern is matched against the signature, where a number other than an exit status is `N`:
+an entry that matches no run, but would with its numbers written that way (or a signature's
+`N` written as the entry's digits), says so and names the signature it nearly matched, as
+`mul-zero` does here. `[sweep] known = "FILE"` in `patina.toml` (relative to the file) is the
+default for `--known`.
 
 A pattern holding `{faults:` is matched with ` {faults: F}` after the signature, F the faults
 that fired in the run, sorted and joined by commas (the fault classes that injected, as
@@ -434,11 +451,35 @@ settings.
 | Preset | Settings |
 |---|---|
 | `--faults disk` | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
-| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
+| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-chunk-gap-us=1..10 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
 | `--faults all` | both, plus `mem-error-permille=0..2` |
 
 `--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --help`
-lists every key. Disk faults act on files under `/work`, pipes and unix sockets; an injected
+lists every key.
+
+A class a preset turned on that had nothing to act on in any run of a sweep (datagram faults
+for a program that only uses TCP, disk faults for one that writes nothing under `/work`) is
+listed on one line and does not make the sweep `vacuous`; a class you named with `--fault`
+(or a `[faults]` key) that never applied still does, since you asked for it:
+
+```text
+$ patina sweep --seeds 1..20 --faults net --out patina-out/tcp -- ./sockets chunk correct
+...
+faults: not applicable (a preset's, nothing to act on in any run): net-drop, net-dup, net-reorder
+```
+
+Over TCP, `net-chunk-max` splits each delivery into pieces of at most that many bytes (a
+range draws a size per seed, log-uniformly, so about one seed in four of `1..65536` delivers
+at most 16 bytes a piece, and one in 17 a byte at a time). `net-chunk-gap-us=A..B` sets the
+virtual time between the pieces of one delivery; without it each piece waits a whole
+`net-delay-ms` draw, as a link that slow would. The presets set a gap of 1 to 10 µs, so a
+seed's throughput over one connection in `--faults net` is about 180 kB/s at the least, a
+median of about 4 MB/s and 6 MB/s at the 90th percentile (256 KiB sent, docs/EVIDENCE.md,
+"Net preset shaping"); a protocol timeout shorter than its message takes at that rate is
+then a finding about the timeout. For the harsh link, name the keys: `--fault
+net-chunk-max=1 --fault net-delay-ms=10..50`. Since 0.13.0, a run with `--faults net` or `all`, or
+with a `net-chunk-max` range, has another digest than under 0.12 when it splits a TCP delivery
+(the chunk size and the gap are drawn anew); every other run keeps its digest. Disk faults act on files under `/work`, pipes and unix sockets; an injected
 error is one Linux can return for that call on that object. Network faults act on TCP
 connections and UDP datagrams: a reset is drawn on each piece of data a program sends, so a
 long-lived (keep-alive) connection meets one; a refusal or timeout is drawn once per connect.
@@ -572,8 +613,8 @@ the label (`SILENT-err7: ...`), not the detail. When the checker knows what tell
 apart, it says so with a key: `LABEL [KEY]: detail`, LABEL one word and KEY anything up to the
 `]`, groups by the label and key as written, and the detail does not enter the signature at all
 (`wrong-output [grep-basic]: got 3 lines, want 4` is the group `wrong-output [grep-basic]`,
-with that line as its `example:`). The detail is cut at 200 characters, keeping
-its end (a trailing `(inc-K)`). The run directory's own path in that line is written `RUNDIR`
+with that line as its `example:`). The signature keeps the first 200 characters of
+that line (an `always` detail: its first 64). The run directory's own path in that line is written `RUNDIR`
 (a replay's is elsewhere). One run is one finding: a checker that sees several problems prints
 the most specific first, and the rest go to `check.out`.
 The checker's stdout, then its stderr, are in `RUNDIR/check.out`; `result.json` has its
@@ -601,6 +642,20 @@ every run failed cleanly says so. Name only statuses the program documents as a 
 failure: a program that exits 1 both for an error it handled and for an uncaught exception
 passes both with `--ok-exit 1`; a checker can still fail such a run on its stderr. A Rust
 panic exits 101, so `--ok-exit 1` leaves panics findings.
+
+A status the program returns only for an error a fault caused can say so: `--ok-exit
+N:CLASS[,CLASS...]` (`[run] ok-exit = [2, "1:fs-error,fsync-error"]`) allows N only in a run
+where one of those fault classes injected (a class from `--faults`, `crash`, `path-swap`, or
+`point:LABEL` for an SDK fault point that fired); elsewhere N is a `failure` as before. The
+condition is kept in `run.json` and the rerun line. `examples/upcase-c` (below) exits 1 on any
+error:
+
+```text
+$ patina sweep --seeds 1..40 --faults disk --ok-exit 1:fs-error,fsync-error -- ./upcase
+sweep: 152.4 KiB kept in /tmp/upcase/patina-out/sweep
+patina sweep: 40 runs, 0 findings in 0 groups, 40 ok (4 by --ok-exit)   (0.1s, 8 jobs)
+outcomes: ok 40
+```
 
 `examples/kvlog-c` is an append-only log with no SDK in it: it prints `ack I` once record I
 is written, and never syncs it. `examples/checks/acked-kept` compares, after each machine
@@ -686,7 +741,8 @@ Two examples ship beside `acked-kept`:
 - `examples/checks/confined [-r PREFIX]... ROOT... RUN`: every change to the work tree (`op`
   events other than `close` and the syncs) is on a path under a root; in a run made with
   `--log-paths`, every file opened is too, or under a prefix it may read (`-r /usr -r /etc`
-  for a dynamically linked program), judged on the path the open walked.
+  for a dynamically linked program), judged on the path the open walked. A read-only open of
+  a directory above a root (to fsync it after a create or rename) is allowed.
 - `examples/checks/no-symlink-escape ROOT... RUN`: in a run made with `--log-paths`, every
   file opened resolves under a root, symlinks followed: a link planted in a directory the
   program serves, or one a path swap makes between a check and the open
@@ -997,7 +1053,10 @@ Under `--buggify` each point is active in about a quarter of runs and fires on a
 quarter of its evaluations; `--fault point:LABEL=PERMILLE` fixes one point's rate. A sweep in
 which a `sometimes` never held, a `reachable` was never hit, or (under `--buggify`) a
 `buggify` point never fired is `vacuous` unless the label is allowed with `--allow-unmet
-LABEL` (or `[sdk] allow-unmet` in `patina.toml`). A `*` in it matches any text: a library's
+LABEL` (or `[sdk] allow-unmet` in `patina.toml`). A `buggify` point that no run evaluated
+counts from 20 runs under `--buggify`, and one evaluated but never fired only when, at its
+rates and evaluation counts, missing every time had a chance under 1 in 1,000; a smaller miss is
+noted on one line (`sdk.buggify_unfired_noted` in `report.json`) and does not fail the sweep. A `*` in it matches any text: a library's
 labels share a prefix, so `--allow-unmet 'fjall-*'` allows the sites a program does not reach
 in a library it uses, and `--allow-unmet '*'` allows every label (when the oracle is a
 `--check`). The summary gives a count per kind and the first five labels; `report.json` lists
@@ -1016,7 +1075,7 @@ allow-unmet = ["fjall-*"]
 
 When most unmet labels share a prefix, the `vacuous` line suggests that entry; the allowed ones
 are counted on one line, `sdk: 12 sites unmet, allowed by --allow-unmet ('fjall-*' 12;
-report.json: allowed_unmet)`, so they stay in view.
+report.json: allowed_unmet)`, so they stay in view (an exact label has no count).
 
 **Rust**: in `Cargo.toml`, the SDK at the release's tag (or `path = "PATINA/crates/patina"`
 for a checkout). It needs Rust 1.85 or later (edition 2024):

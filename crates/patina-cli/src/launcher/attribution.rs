@@ -70,8 +70,31 @@ fn errno_name(e: u64) -> String {
     }
 }
 
+/// Every class `faults.counts` may name.
+pub const CLASSES: &[&str] = &[
+    "crash",
+    "enospc",
+    "fs-delay",
+    "fs-error",
+    "fs-short",
+    "fsync-error",
+    "mem-error",
+    "mem-limit",
+    "net-chunk",
+    "net-connect-refuse",
+    "net-connect-timeout",
+    "net-delay",
+    "net-drop",
+    "net-dup",
+    "net-halfclose",
+    "net-partition",
+    "net-reorder",
+    "net-reset",
+    "path-swap",
+];
+
 /// The plan class each setting belongs to.
-fn class_of_key(k: &str) -> Option<&'static str> {
+pub fn class_of_key(k: &str) -> Option<&'static str> {
     Some(match k {
         "fs-error-permille" | "fs-error-at" => "fs-error",
         "fs-short-permille" => "fs-short",

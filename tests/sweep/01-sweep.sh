@@ -3,7 +3,9 @@
 #    replayed identically, announced with its lowest seed; a replay does not add a run; the
 #    same sweep resumes and a changed argument or program replaces it; a run inside a sweep equals the
 #    same seed run alone; the bug-free guest exits 0; an unmet `sometimes` is vacuous unless
-#    allowed, as is a fault point that never fired under --buggify; --cases makes one run per
+#    allowed, as is a fault point no run of 20 reached under --buggify (in 4 runs, or forced
+#    off, noted); --faults net on TCP only is not vacuous, a datagram class named is; --ok-exit
+#    N:CLASS, [run] ok-exit and [sweep] known; an older --out is replaced, a foreign one refused; --cases makes one run per
 #    (case, seed), `report` over separate `patina run` directories gives the sweep's groups,
 #    and lines that are whole commands find the same; a host file changed before a replay makes
 #    it nondeterministic; a livelock ends log-limit at the same record twice, and a sweep of it

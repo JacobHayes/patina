@@ -122,10 +122,36 @@ fn identity(
     }))
 }
 
+/// Names that mark a directory as patina's output, which a sweep may replace: a sweep's (any
+/// version since 0.6), a run's (`patina run --out`), and an 0.5 campaign's.
+const PATINA_OUTPUT: [&str; 5] = [
+    SWEEP_FILE,
+    "report.json",
+    "result.json",
+    "run.json",
+    "campaign-state.json",
+];
+
+/// Other names a run directory holds beside `PATINA_OUTPUT` and `inc-K`.
+const RUN_OUTPUT: [&str; 6] = [
+    "check.out",
+    "replay",
+    "replay.json",
+    "minimized",
+    "case",
+    "sandbox.log",
+];
+
 /// Why the sweep recorded in `out` is not the one described by `ident`, if it is not.
 fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
     let Ok(old) = read_json(&out.join(SWEEP_FILE)) else {
-        return Some(format!("no {SWEEP_FILE}"));
+        return Some(if out.join("campaign-state.json").exists() {
+            "an older patina's campaign".into()
+        } else if out.join("result.json").exists() {
+            "a single run".into()
+        } else {
+            format!("no {SWEEP_FILE}: an older layout")
+        });
     };
     if old["patina"] != ident["patina"] {
         return Some("another patina build".into());
@@ -584,9 +610,9 @@ impl Judged {
     }
 }
 
-/// Default width: half the CPUs this process may use, at most 8.
+/// Default width: the CPUs this process may use, at most 8 (docs/EVIDENCE.md, "Sweep width").
 pub fn default_jobs() -> usize {
-    (crate::launch::allowed_cpus().len() / 2).clamp(1, 8)
+    crate::launch::allowed_cpus().len().clamp(1, 8)
 }
 
 enum Job {
@@ -901,7 +927,16 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         None => default_jobs(),
     };
     let max_findings = a.num::<usize>("--max-findings").map_err(error)?;
-    let known = report::known_flag(a).map_err(error)?;
+    // `--known FILE`, else `[sweep] known` in patina.toml.
+    let known_file = a
+        .last("--known")
+        .map(PathBuf::from)
+        .or_else(|| cfg.known.clone());
+    let known = known_file
+        .as_deref()
+        .map(report::Known::read)
+        .transpose()
+        .map_err(error)?;
     let budget = a.num::<u64>("--budget").map_err(error)?;
     let cmd_of = |case: Option<usize>| -> Vec<String> {
         match (case, &cases) {
@@ -992,15 +1027,35 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
-        if !names.is_empty()
-            && !names
+        // A sweep's own directory (`sweep.json`) is resumed or replaced as before, and an 0.5
+        // campaign's (`campaign-state.json`, beside stores of its own) is replaced. Anything
+        // else is replaced only when every entry in it is one patina writes (`run.json` alone
+        // is a common name); an entry of another kind is named and nothing is deleted.
+        let own = |n: &String| n == SWEEP_FILE || n == "campaign-state.json";
+        if !names.is_empty() && !names.iter().any(own) {
+            let ours = |n: &String| {
+                PATINA_OUTPUT.contains(&n.as_str())
+                    || RUN_OUTPUT.contains(&n.as_str())
+                    || n.starts_with("seed-")
+                    || n.strip_prefix("inc-")
+                        .is_some_and(|k| k.parse::<u32>().is_ok())
+            };
+            let marked = names
                 .iter()
-                .any(|n| n == "report.json" || n == SWEEP_FILE || n.starts_with("seed-"))
-        {
-            return Err(error(format!(
-                "{}: exists and is not a sweep directory; give another --out",
-                out.display()
-            )));
+                .any(|n| PATINA_OUTPUT.contains(&n.as_str()) || n.starts_with("seed-"));
+            if let Some(other) = names.iter().filter(|n| !ours(n)).min() {
+                return Err(error(format!(
+                    "{}: exists and holds {other:?}, which patina does not write; give another --out",
+                    out.display()
+                )));
+            }
+            if !marked {
+                return Err(error(format!(
+                    "{}: exists and holds no patina output (none of {}, seed-N); give another --out",
+                    out.display(),
+                    PATINA_OUTPUT.join(", ")
+                )));
+            }
         }
     }
     // With whole-command cases there is no one program: each run's is checked on resume.
@@ -1379,8 +1434,11 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         stopped: st.stopped.clone(),
     };
     let mut again = "patina report --group N".to_string();
-    if let Some(k) = a.last("--known") {
-        again.push_str(&format!(" --known {}", report::quote(k)));
+    if let Some(k) = &known_file {
+        again.push_str(&format!(
+            " --known {}",
+            report::quote(&k.display().to_string())
+        ));
     }
     again.push_str(&format!(" {}", report::quote(&out.display().to_string())));
     let (v, text) = report::build(

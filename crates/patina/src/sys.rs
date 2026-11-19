@@ -118,7 +118,11 @@ pub struct Text {
 
 impl fmt::Write for Text {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        let k = s.len().min(TEXT_MAX - self.n);
+        // Cut on a character boundary, as the report shows it.
+        let mut k = s.len().min(TEXT_MAX - self.n);
+        while !s.is_char_boundary(k) {
+            k -= 1;
+        }
         self.b[self.n..self.n + k].copy_from_slice(&s.as_bytes()[..k]);
         self.n += k;
         Ok(())

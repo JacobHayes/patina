@@ -221,6 +221,42 @@ fn fault_classes(r: &Value) -> (BTreeSet<String>, BTreeSet<String>, BTreeMap<Str
     (conf, inj, elig)
 }
 
+/// The fault classes a setting of their own named in some run (`--fault`, a `[faults]` key,
+/// `--crash`), and the classes of each preset the runs named (`run.json`).
+fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>) {
+    use crate::launcher::attribution::class_of_key;
+    let (mut named, mut by_preset) = (BTreeSet::new(), BTreeMap::<String, BTreeSet<String>>::new());
+    let strs = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect()
+    };
+    for r in runs {
+        let c = &r.run["config"];
+        for f in strs(&c["faults"]) {
+            if let Some(k) = class_of_key(f.split_once('=').map_or(f.as_str(), |x| x.0)) {
+                named.insert(k.to_string());
+            }
+        }
+        if c["crash"].is_string() {
+            named.insert("crash".to_string());
+        }
+        for p in strs(&c["faults-preset"]).iter().flat_map(|p| p.split(',')) {
+            if let Some((_, kv)) = crate::faults::PRESETS.iter().find(|x| x.0 == p) {
+                let e = by_preset.entry(p.to_string()).or_default();
+                e.extend(
+                    kv.iter()
+                        .filter_map(|(k, _)| class_of_key(k))
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+    (named, by_preset)
+}
+
 pub fn quote(s: &str) -> String {
     if !s.is_empty()
         && s.chars()
@@ -352,6 +388,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         if cfg.ok_exit == crate::config::ok_exit_any() {
             flag("--ok-exit", "any".into());
         } else if !cfg.ok_exit.is_empty() {
+            // Unconditional first (`config::normal`): the list reads back as written.
             let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
             flag("--ok-exit", l.join(","));
         }
@@ -528,6 +565,43 @@ impl Known {
             .map(|e| e.id.as_str())
     }
 
+    /// For an ID that matched no run: a run's text (`matched_text`) one of its patterns would
+    /// match with its numbers written the other way, digits for `N` or `N` for digits. A status
+    /// is kept as digits (`exit 5`) and other numbers become `N`, so a pattern can be wrong
+    /// either way.
+    fn near_miss(&self, id: &str, runs: &[Run]) -> Option<String> {
+        // Each run of digits as one `N`.
+        let n = |t: &str| {
+            let (mut out, mut digit) = (String::new(), false);
+            for c in t.chars() {
+                if !c.is_ascii_digit() {
+                    out.push(c);
+                } else if !digit {
+                    out.push('N');
+                }
+                digit = c.is_ascii_digit();
+            }
+            out
+        };
+        for e in self.entries.iter().filter(|e| e.id == id) {
+            for r in runs
+                .iter()
+                .filter(|r| is_finding(r.result["outcome"].as_str().unwrap_or("")))
+            {
+                let t = matched_text(
+                    &e.pattern,
+                    r.case.as_deref(),
+                    &signature_of(&r.result),
+                    &fired(&r.result),
+                );
+                if glob(&e.pattern, &n(&t)) || glob(&n(&e.pattern), &t) {
+                    return Some(t);
+                }
+            }
+        }
+        None
+    }
+
     /// Every ID once, in file order, with whether it must appear (any of its lines has `!`).
     fn ids(&self) -> Vec<(&str, bool)> {
         let mut out: Vec<(&str, bool)> = vec![];
@@ -592,13 +666,59 @@ fn shared_prefix(labels: &[String]) -> Option<(String, usize)> {
         .map(|(p, n)| (p.to_string(), n))
 }
 
+/// A `--buggify` sweep smaller than this is a smoke run: a fault point no run reached is noted,
+/// not vacuous.
+const SMOKE_RUNS: usize = 20;
+/// A fault point that never fired is vacuous when the chance of that at its rates was below this.
+const MISS_CHANCE: f64 = 0.001;
+
+/// The natural log of the chance that the fault point `label` fired at none of `evaluated`
+/// evaluations in one run with the resolved plan `plan`: active in `ACTIVATION_PERMILLE` of runs
+/// and then firing at `buggify-permille`, or always active at its own `point:LABEL` rate.
+fn miss_ln(plan: &Value, label: &str, evaluated: u64) -> f64 {
+    use proto::sdk::{ACTIVATION_PERMILLE, FIRE_PERMILLE};
+    let free = crate::signature::checkout_free;
+    let own = plan.as_object().into_iter().flatten().find_map(|(k, v)| {
+        k.strip_prefix("point:")
+            .filter(|l| free(l) == label)
+            .and_then(|_| v.as_u64())
+    });
+    let (active, rate) = match own {
+        Some(p) => (1.0, p as f64 / 1000.0),
+        None => (
+            ACTIVATION_PERMILLE as f64 / 1000.0,
+            plan["buggify-permille"].as_u64().unwrap_or(FIRE_PERMILLE) as f64 / 1000.0,
+        ),
+    };
+    let rate = rate.min(1.0);
+    ((1.0 - active) + active * (1.0 - rate).powf(evaluated as f64)).ln()
+}
+
 /// Characters of a finding's example the report shows.
 const EXAMPLE_MAX: usize = 240;
 
 /// One finding of a violation group as its run wrote it, before the signature normalised it
 /// (`0x0`, an exit status) or left the detail out (a checker's keyed label), or why a checker
 /// failed: `null` when the signature already says the same.
-fn example(signature: &str, result: &Value) -> Value {
+fn example(signature: &str, result: &Value, dir: &Path) -> Value {
+    // The stderr line the signature quotes (a panic or assertion, else the last line): as
+    // the guest wrote it, when the signature changed it.
+    if matches!(result["outcome"].as_str(), Some("failure" | "crash")) {
+        let inc = result["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
+        let stderr =
+            std::fs::read(dir.join(format!("inc-{inc}")).join("stderr")).unwrap_or_default();
+        let stderr = String::from_utf8_lossy(&stderr);
+        let line = crate::signature::guest_line_raw(&stderr).or_else(|| {
+            let m = result["message"].as_str().unwrap_or("");
+            (!m.starts_with("INVARIANT ")).then(|| crate::signature::last_line_raw(&stderr))?
+        });
+        return match line {
+            Some(l) if !signature.contains(&l) => {
+                Value::String(l.trim().chars().take(EXAMPLE_MAX).collect())
+            }
+            _ => Value::Null,
+        };
+    }
     let checker_error = result["outcome"] == "error" && result["stop"] == "check";
     if result["outcome"] != "violation" && !checker_error {
         return Value::Null;
@@ -698,24 +818,43 @@ pub fn build(
             *eligible.entry(k).or_default() += v;
         }
     }
-    let idle: Vec<String> = eligible
+    // A class only a preset turned on may have had nothing to act on: `--faults net` on a
+    // program with no datagram socket. Never eligible, it is not applicable, not vacuous, if its
+    // preset acted on something; a class a setting of its own named (`--fault`, a `[faults]`
+    // key, `--crash`) in any run, or one whose presets applied nowhere, stays vacuous.
+    let (named, by_preset) = fault_sources(runs);
+    let applied =
+        |cs: &BTreeSet<String>| cs.iter().any(|c| eligible.get(c).is_some_and(|n| *n > 0));
+    let lenient =
+        |c: &str| !named.contains(c) && by_preset.values().any(|cs| cs.contains(c) && applied(cs));
+    let (not_applicable, idle): (Vec<String>, Vec<String>) = eligible
         .iter()
         .filter(|(k, v)| **v == 0 && !allow.contains(*k))
         .map(|(k, _)| k.clone())
-        .collect();
+        .partition(|k| lenient(k));
     // The SDK fold, by checkout-free label. Fault points count only in runs that let them
     // fire (`--buggify`).
     let mut sites: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    // Per fault point: the natural log of the chance that it fired at none of its evaluations,
+    // at its rates (`miss_ln`).
+    let mut miss: BTreeMap<String, f64> = BTreeMap::new();
+    let mut buggify_runs = 0;
     for r in runs {
         let buggify = r.run["config"]["buggify"] == true;
+        buggify_runs += buggify as usize;
         for s in r.result["sdk"]["sites"].as_array().into_iter().flatten() {
             let kind = s["kind"].as_str().unwrap_or("");
             if kind == "buggify" && !buggify {
                 continue;
             }
-            let k = (kind.to_string(), free(s["label"].as_str().unwrap_or("")));
-            let e = sites.entry(k).or_default();
-            e.0 += s["evaluated"].as_u64().unwrap_or(0);
+            let label = free(s["label"].as_str().unwrap_or(""));
+            let evaluated = s["evaluated"].as_u64().unwrap_or(0);
+            if kind == "buggify" {
+                *miss.entry(label.clone()).or_default() +=
+                    miss_ln(&r.run["faults"], &label, evaluated);
+            }
+            let e = sites.entry((kind.to_string(), label)).or_default();
+            e.0 += evaluated;
             e.1 += s["held"].as_u64().unwrap_or(0);
         }
     }
@@ -736,7 +875,25 @@ pub fn build(
     };
     let never_held = unmet("sometimes", &|_, h| h == 0);
     let never_hit = unmet("reachable", &|_, h| h == 0);
-    let never_fired = unmet("buggify", &|_, h| h == 0);
+    // A fault point that never fired is chance, not vacuity, unless firing was all but
+    // certain: no run reached it in a sweep of `SMOKE_RUNS` or more, or it missed at every
+    // evaluation where the chance of that was below `MISS_CHANCE`. The rest are noted.
+    let mut noted_unfired: Vec<Value> = vec![];
+    let never_fired: Vec<String> = unmet("buggify", &|_, h| h == 0)
+        .into_iter()
+        .filter(|l| {
+            let evaluated = sites[&("buggify".to_string(), l.clone())].0;
+            let chance = miss.get(l).copied().unwrap_or(0.0).exp();
+            let certain = match evaluated {
+                0 => buggify_runs >= SMOKE_RUNS,
+                _ => chance < MISS_CHANCE,
+            };
+            if !certain {
+                noted_unfired.push(json!({"label": l, "evaluated": evaluated, "chance": chance}));
+            }
+            certain
+        })
+        .collect();
     let never_evaluated = unmet("always", &|e, _| e == 0);
     // Paths the sandbox lacks, by hint, with the runs that met them.
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
@@ -900,7 +1057,7 @@ pub fn build(
                 "seeds": g.runs.iter().map(|r| r.seed).collect::<Vec<_>>(),
                 "runs": g.runs.iter().map(|r| json!({"seed": r.seed, "point": r.point.filter(|p| *p > 0), "case": r.case, "case_id": r.case_id, "dir": r.dir})).collect::<Vec<_>>(),
                 "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "case_id": first.case_id, "dir": first.dir},
-                "example": example(&g.signature, &first.result),
+                "example": example(&g.signature, &first.result, &first.dir),
                 "replay": replay,
                 "faults": {"every": every, "none": none},
                 "rerun": rerun_command(&first.run, first.seed, &first.dir),
@@ -938,9 +1095,12 @@ pub fn build(
         .iter()
         .filter(|r| outcome_of(r.result["outcome"].as_str().unwrap_or("")).exit() == 1)
         .count();
+    // The summary's findings are what fails: a known finding is counted apart.
     let finding_groups = gj
         .iter()
-        .filter(|g| outcome_of(g["run_outcome"].as_str().unwrap_or("")).exit() == 1)
+        .filter(|g| {
+            g["known"].is_null() && outcome_of(g["run_outcome"].as_str().unwrap_or("")).exit() == 1
+        })
         .count();
     let mut v = json!({
         "schema": REPORT_SCHEMA,
@@ -953,9 +1113,10 @@ pub fn build(
             "sometimes_never_held": never_held,
             "reachable_never_hit": never_hit,
             "buggify_never_fired": never_fired,
+            "buggify_unfired_noted": noted_unfired,
             "always_never_evaluated": never_evaluated,
         },
-        "faults": {"configured": configured, "eligible_zero": idle},
+        "faults": {"configured": configured, "eligible_zero": idle, "not_applicable": not_applicable},
         "compute_stall": stalls,
         "missing": missing,
         "host_limits": limits,
@@ -988,7 +1149,15 @@ pub fn build(
             "file": k.file,
             "findings": matched,
             "new": findings - matched,
-            "entries": known_counts.iter().map(|(id, req, n)| json!({"id": id, "required": req, "count": n})).collect::<Vec<_>>(),
+            "entries": known_counts.iter().map(|(id, req, n)| {
+                let mut e = json!({"id": id, "required": req, "count": n});
+                if *n == 0 {
+                    if let Some(near) = k.near_miss(id, runs) {
+                        e["near"] = near.into();
+                    }
+                }
+                e
+            }).collect::<Vec<_>>(),
             "required_unseen": missing_required,
         });
     }
@@ -1125,11 +1294,17 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         0 => String::new(),
         k => format!(" ({k} by --ok-exit)"),
     };
+    let known = v["known"]["findings"].as_u64().unwrap_or(0);
     let what = format!(
-        "{}, {} in {}, {} ok{ok_exit}",
+        "{}, {} in {}{}, {} ok{ok_exit}",
         count(n("runs") as usize, "run"),
-        count(n("findings") as usize, "finding"),
+        count((n("findings") - known) as usize, "finding"),
         count(finding_groups, "group"),
+        if known > 0 {
+            format!(", {known} known")
+        } else {
+            String::new()
+        },
         ok
     );
     let mut s = match head {
@@ -1216,8 +1391,8 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             .filter(|g| g["known"].is_null() && is_finding(g["run_outcome"].as_str().unwrap_or("")))
             .count();
         s.push_str(&format!(
-            "known: {matched} of {}{}; {}\n",
-            count(n("findings") as usize, "finding"),
+            "known: {}{}; {}\n",
+            count(matched as usize, "run"),
             if by_id.is_empty() {
                 String::new()
             } else {
@@ -1225,7 +1400,11 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             },
             match new_groups {
                 0 => "none new".to_string(),
-                g => format!("{} new, in {}", k["new"], count(g, "group")),
+                g => format!(
+                    "{} new, in {}",
+                    k["new"].as_u64().unwrap_or(0),
+                    count(g, "group")
+                ),
             }
         ));
     }
@@ -1354,6 +1533,37 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         }
         tail.push(line);
     }
+    let noted = v["sdk"]["buggify_unfired_noted"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !noted.is_empty() {
+        let l: Vec<String> = noted
+            .iter()
+            .take(LABELS_SHOWN)
+            .map(|x| {
+                let label = x["label"].as_str().unwrap_or("");
+                match x["evaluated"].as_u64().unwrap_or(0) {
+                    0 => format!("{label} (not reached)"),
+                    e => format!(
+                        "{label} ({}, {:.0}% chance to miss)",
+                        count(e as usize, "evaluation"),
+                        x["chance"].as_f64().unwrap_or(1.0) * 100.0
+                    ),
+                }
+            })
+            .collect();
+        let more = noted.len().saturating_sub(LABELS_SHOWN);
+        tail.push(format!(
+            "sdk: `buggify` never fired, too few runs to tell from chance: {}{}",
+            l.join(", "),
+            if more > 0 {
+                format!(", and {more} more ({full})")
+            } else {
+                String::new()
+            }
+        ));
+    }
     // Unmet sites a pattern allowed: one line, by the pattern that allowed them, so that a
     // pattern as wide as '*' is seen hiding what it hides.
     let allowed_unmet = names(&v["allowed_unmet"]);
@@ -1369,9 +1579,13 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             }
         }
         by.sort_by_key(|(p, n)| (std::cmp::Reverse(*n), p.clone()));
+        // An exact label allows itself only: its count says nothing.
         let by: Vec<String> = by
             .iter()
-            .map(|(p, n)| format!("{} {n}", quote(p)))
+            .map(|(p, n)| match p.contains('*') {
+                true => format!("{} {n}", quote(p)),
+                false => quote(p),
+            })
             .collect();
         tail.push(format!(
             "sdk: {} unmet, allowed by --allow-unmet ({}; {full}: allowed_unmet)",
@@ -1381,6 +1595,13 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
     }
     for c in names(&v["faults"]["eligible_zero"]) {
         tail.push(format!("faults: {c} eligible 0 times: nothing to act on"));
+    }
+    let na = names(&v["faults"]["not_applicable"]);
+    if !na.is_empty() {
+        tail.push(format!(
+            "faults: not applicable (a preset's, nothing to act on in any run): {}",
+            na.join(", ")
+        ));
     }
     let miss = v["missing"].as_object().unwrap();
     for (l, k) in miss.iter().take(LABELS_SHOWN) {
@@ -1415,11 +1636,16 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 continue;
             }
             let id = e["id"].as_str().unwrap_or("");
+            if let Some(near) = e["near"].as_str() {
+                tail.push(format!(
+                    "known: {id} matched no run; with its numbers written as the signature writes them it matches {near:?} (an exit status keeps its digits, other numbers are N)"
+                ));
+            }
             if e["required"] == true {
                 tail.push(format!(
                     "vacuous: known !{id} matched no run: the check may be unable to fail"
                 ));
-            } else {
+            } else if e["near"].is_null() {
                 unmatched += 1;
             }
         }
@@ -1570,14 +1796,22 @@ mod tests {
         );
         let v = |m: &str| json!({"outcome": "violation", "stop": "check", "message": m});
         assert_eq!(
-            example("violation check: w [k]", &v("w [k]: got 0x0")),
+            example(
+                "violation check: w [k]",
+                &v("w [k]: got 0x0"),
+                Path::new("/")
+            ),
             json!("w [k]: got 0x0")
         );
-        assert_eq!(example("violation check: w: x", &v("w: x")), Value::Null);
+        assert_eq!(
+            example("violation check: w: x", &v("w: x"), Path::new("/")),
+            Value::Null
+        );
         assert_eq!(
             example(
                 "failure exit: exit 1",
-                &json!({"outcome": "failure", "message": "m"})
+                &json!({"outcome": "failure", "message": "m"}),
+                Path::new("/nonexistent")
             ),
             Value::Null
         );
@@ -1587,6 +1821,135 @@ mod tests {
             Some(("lib-".into(), 2))
         );
         assert_eq!(shared_prefix(&l(&["lib-a", "app-c"])), None);
+    }
+
+    /// An ok run with its `run.json` config and `result.json` fields.
+    fn run(seed: u64, config: Value, result: Value) -> Run {
+        let mut r = json!({"outcome": "ok", "seed": seed});
+        r.as_object_mut()
+            .unwrap()
+            .extend(result.as_object().unwrap().clone());
+        Run {
+            dir: PathBuf::from(format!("/nonexistent/seed-{seed}")),
+            seed,
+            case: None,
+            case_id: None,
+            case_pos: None,
+            result: r,
+            run: json!({"config": config, "faults": {}}),
+            replay: None,
+            point: None,
+        }
+    }
+
+    #[test]
+    fn a_class_only_a_preset_named_may_have_nothing_to_act_on() {
+        let counts = |drop: u64, chunk: u64| {
+            json!({"faults": {"counts": {
+                "net-drop": {"eligible": drop, "injected": 0},
+                "net-chunk": {"eligible": chunk, "injected": 0},
+            }}})
+        };
+        let faults = |r: &[Run]| build(r, &[], None, None, "").0;
+        let preset = json!({"faults-preset": ["net"], "faults": []});
+        // TCP only: the datagram class is not applicable, and the sweep is not vacuous.
+        let v = faults(&[run(1, preset.clone(), counts(0, 9))]);
+        assert_eq!(v["faults"]["not_applicable"], json!(["net-drop"]));
+        assert_eq!(
+            (v["faults"]["eligible_zero"].clone(), v["exit"].clone()),
+            (json!([]), json!(0))
+        );
+        // Named on its own (any run), the class stays strict.
+        let named = json!({"faults-preset": ["net"], "faults": ["net-drop-permille=5"]});
+        let v = faults(&[
+            run(1, preset.clone(), counts(0, 9)),
+            run(2, named, counts(0, 9)),
+        ]);
+        assert_eq!(
+            (v["faults"]["eligible_zero"].clone(), v["exit"].clone()),
+            (json!(["net-drop"]), json!(2))
+        );
+        // A preset that applied to nothing is vacuous, every class of it named.
+        let v = faults(&[run(1, preset.clone(), counts(0, 0))]);
+        assert_eq!(
+            v["faults"]["eligible_zero"],
+            json!(["net-chunk", "net-drop"])
+        );
+        assert_eq!(v["exit"], json!(2));
+        // A run without run.json is strict.
+        let v = faults(&[run(1, Value::Null, counts(0, 9))]);
+        assert_eq!(v["faults"]["eligible_zero"], json!(["net-drop"]));
+    }
+
+    #[test]
+    fn a_fault_point_that_never_fired_is_vacuous_only_when_that_is_not_chance() {
+        let site = |evaluated: u64| json!({"sdk": {"sites": [{"kind": "buggify", "label": "p", "evaluated": evaluated, "held": 0}]}});
+        let sweep = |n: u64, evaluated: u64, plan: Value| {
+            let runs: Vec<Run> = (1..=n)
+                .map(|s| {
+                    let mut r = run(s, json!({"buggify": true}), site(evaluated));
+                    r.run["faults"] = plan.clone();
+                    r
+                })
+                .collect();
+            let v = build(&runs, &[], None, None, "").0;
+            (
+                v["exit"].clone(),
+                v["sdk"]["buggify_unfired_noted"].as_array().unwrap().len(),
+            )
+        };
+        // Never reached: a smoke run notes it; a sweep of SMOKE_RUNS does not.
+        assert_eq!(sweep(4, 0, json!({})), (json!(0), 1));
+        assert_eq!(sweep(SMOKE_RUNS as u64, 0, json!({})), (json!(2), 0));
+        // Reached and missed: chance in a few runs, all but impossible at a rate of 1000.
+        assert_eq!(sweep(4, 3, json!({})), (json!(0), 1));
+        assert_eq!(sweep(2, 1, json!({"point:p": 1000})), (json!(2), 0));
+        // Forced off (rate 0): never firing is what was asked.
+        assert_eq!(sweep(40, 50, json!({"point:p": 0})), (json!(0), 1));
+        // The chance at the default rates: a quarter active, a quarter of evaluations firing.
+        let one = miss_ln(&json!({}), "p", 1).exp();
+        assert!((one - (0.75 + 0.25 * 0.75)).abs() < 1e-9, "{one}");
+    }
+
+    #[test]
+    fn a_known_entry_that_matched_nothing_names_what_it_nearly_matched() {
+        let r = |sig: &str| {
+            let mut x = run(1, json!({}), json!({}));
+            x.result = json!({"outcome": "failure", "signature": sig});
+            x
+        };
+        let runs = [
+            r("failure exit: exit 5"),
+            r("violation always: lost: entry N of N"),
+        ];
+        let k =
+            known("a failure exit: exit N\nb violation always: lost: entry 3 of 9\nc crash *\n");
+        assert_eq!(
+            k.near_miss("a", &runs).as_deref(),
+            Some("failure exit: exit 5")
+        );
+        assert_eq!(
+            k.near_miss("b", &runs).as_deref(),
+            Some("violation always: lost: entry N of N")
+        );
+        assert_eq!(k.near_miss("c", &runs), None);
+        // The summary counts a known finding apart from the findings.
+        let v = build(
+            &runs,
+            &[],
+            Some(&known("x failure exit: exit 5\n")),
+            None,
+            "",
+        )
+        .0;
+        assert_eq!(
+            (
+                v["findings"].clone(),
+                v["known"]["new"].clone(),
+                v["exit"].clone()
+            ),
+            (json!(2), json!(1), json!(1))
+        );
     }
 
     #[test]

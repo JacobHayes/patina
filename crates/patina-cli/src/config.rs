@@ -117,9 +117,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<crate::check::Check>,
     /// Guest exit statuses that end the run `ok` (`--ok-exit`, `[run] ok-exit`): the program
-    /// failed cleanly, as it documents. Never 0, never a signal.
+    /// failed cleanly, as it documents. Never 0, never a signal. Sorted, unconditional first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ok_exit: Vec<u8>,
+    pub ok_exit: Vec<OkExit>,
+    /// The sweep's known findings when `--known` is not given (`[sweep] known`): not a setting
+    /// of the run, so not in `run.json`.
+    #[serde(skip)]
+    pub known: Option<PathBuf>,
     /// The case of a sweep's `--cases` run (set by the sweep), kept so that a replay or a
     /// rerun from `run.json` is the same case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +173,7 @@ impl Default for Config {
             host_cpu: None,
             check: None,
             ok_exit: vec![],
+            known: None,
             case: None,
         }
     }
@@ -531,10 +536,130 @@ fn table<'a>(v: &'a toml::Value, at: &str) -> Res<&'a toml::Table> {
         .ok_or_else(|| format!("{at}: expected a table"))
 }
 
+/// One `--ok-exit` status: `N`, or `N:CLASS[,CLASS...]`, which ends a run `ok` only when one of
+/// the fault classes injected in it (`report::fired`: a class of `faults.counts`, or
+/// `point:LABEL`). Written in `run.json` as the number, or as that text.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct OkExit {
+    /// Empty: always. Sorted.
+    pub when: Vec<String>,
+    pub status: u8,
+}
+
+impl std::fmt::Display for OkExit {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.status)?;
+        if !self.when.is_empty() {
+            write!(f, ":{}", self.when.join(","))?;
+        }
+        Ok(())
+    }
+}
+
+impl Serialize for OkExit {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.when.is_empty() {
+            s.serialize_u8(self.status)
+        } else {
+            s.serialize_str(&self.to_string())
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OkExit {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<OkExit, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            N(u8),
+            S(String),
+        }
+        match Raw::deserialize(d)? {
+            Raw::N(n) => Ok(OkExit {
+                status: n,
+                when: vec![],
+            }),
+            Raw::S(t) => ok_exit_list(&t, "ok-exit").and_then(|l| match l.as_slice() {
+                [one] => Ok(one.clone()),
+                _ => Err(format!("ok-exit: {t:?} is not one status")),
+            }),
+        }
+        .map_err(serde::de::Error::custom)
+    }
+}
+
 /// `--ok-exit any`: every exit status (a reference sweep of a program whose failures are
 /// its output); a signal still ends a run `crash`.
-pub fn ok_exit_any() -> Vec<u8> {
-    (1..=255).collect()
+pub fn ok_exit_any() -> Vec<OkExit> {
+    (1..=255)
+        .map(|status| OkExit {
+            status,
+            when: vec![],
+        })
+        .collect()
+}
+
+/// `N[,N...]`, where an `N:CLASS` item makes N conditional and the names after it (up to the
+/// next number) are more classes of the same condition: `1,5:fs-error,fsync-error`.
+pub fn ok_exit_list(l: &str, at: &str) -> Res<Vec<OkExit>> {
+    let mut out: Vec<OkExit> = vec![];
+    for item in l.split(',').map(str::trim) {
+        // `N`, `N:CLASS`, or a CLASS extending the condition before it (`point:LABEL` too).
+        let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+        let (n, class) = match item.split_once(':') {
+            Some((n, c)) if digits(n.trim()) => (Some(n.trim()), Some(c.trim())),
+            _ if digits(item) => (Some(item), None),
+            _ => (None, Some(item)),
+        };
+        if let Some(n) = n {
+            out.push(OkExit {
+                status: exit_status(n, at)?,
+                when: vec![],
+            });
+        }
+        if let Some(c) = class {
+            match out.last_mut() {
+                Some(e) if n.is_some() || !e.when.is_empty() => e.when.push(fault_class(c, at)?),
+                _ => {
+                    return Err(format!(
+                        "{at}: {item:?}: a fault class follows N: (N:CLASS[,CLASS...])"
+                    ))
+                }
+            }
+        }
+    }
+    Ok(normal(out))
+}
+
+/// Sorted, unconditional statuses first (so the list reads back as written), each once; a
+/// status allowed always needs no condition.
+fn normal(mut l: Vec<OkExit>) -> Vec<OkExit> {
+    for e in &mut l {
+        e.when.sort();
+        e.when.dedup();
+    }
+    let always: Vec<u8> = l
+        .iter()
+        .filter(|e| e.when.is_empty())
+        .map(|e| e.status)
+        .collect();
+    l.retain(|e| e.when.is_empty() || !always.contains(&e.status));
+    l.sort();
+    l.dedup();
+    l
+}
+
+/// A fault class an `--ok-exit` condition may name: one `faults.counts` has, or `point:LABEL`.
+fn fault_class(c: &str, at: &str) -> Res<String> {
+    let known = crate::launcher::attribution::CLASSES;
+    if known.contains(&c) || c.strip_prefix("point:").is_some_and(|l| !l.is_empty()) {
+        Ok(c.to_string())
+    } else {
+        Err(format!(
+            "{at}: {c:?} is not a fault class ({}, point:LABEL)",
+            known.join(", ")
+        ))
+    }
 }
 
 /// An exit status `--ok-exit` may name: 1 to 255 (0 is `ok` already).
@@ -646,19 +771,22 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 ("run", "check-serve") => check = Some((string(v, &at)?, true)),
                 ("run", "ok-exit") if v.as_str() == Some("any") => c.ok_exit = ok_exit_any(),
                 ("run", "ok-exit") => {
-                    c.ok_exit = v
-                        .as_array()
-                        .ok_or_else(|| format!("{at}: expected an array of exit statuses"))?
-                        .iter()
-                        .map(|x| {
-                            exit_status(
-                                &x.as_integer()
-                                    .map(|i| i.to_string())
-                                    .unwrap_or_else(|| x.to_string()),
-                                &at,
-                            )
-                        })
-                        .collect::<Res<_>>()?
+                    let mut l = vec![];
+                    for x in v.as_array().ok_or_else(|| {
+                        format!("{at}: expected an array of exit statuses (N or \"N:CLASS,...\")")
+                    })? {
+                        let t = match (x.as_integer(), x.as_str()) {
+                            (Some(i), _) => i.to_string(),
+                            (_, Some(t)) if t.contains(':') => t.to_string(),
+                            _ => x.to_string(),
+                        };
+                        let one = ok_exit_list(&t, &at)?;
+                        if one.len() != 1 {
+                            return Err(format!("{at}: {t:?} is not one status"));
+                        }
+                        l.extend(one);
+                    }
+                    c.ok_exit = normal(l);
                 }
                 ("run", "emulate-rndr") if cfg!(target_arch = "aarch64") => {
                     c.emulate_rndr = boolean(v, &at)?
@@ -679,6 +807,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                         .ok_or_else(|| format!("{at}: expected true or false"))?
                 }
                 ("sdk", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
+                ("sweep", "known") => c.known = Some(base.join(string(v, &at)?)),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "stall-ms") => c.stall_ms = int(v, &at)?,
                 ("sched", "host-cpu") => c.host_cpu = Some(int(v, &at)? as usize),
@@ -701,7 +830,9 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 ("sched", "pmu-short-max") => c.pmu.short_max = int(v, &at)?,
                 ("sched", "pmu-charge-ps") => c.pmu.charge_ps = int(v, &at)?,
                 ("sched", "pmu-margin") => c.pmu.margin = int(v, &at)?,
-                ("run" | "sched" | "sdk", _) => return Err(unknown(&format!("{sec}.{k}"))),
+                ("run" | "sched" | "sdk" | "sweep", _) => {
+                    return Err(unknown(&format!("{sec}.{k}")))
+                }
                 _ => return Err(unknown(sec)),
             }
         }
@@ -797,13 +928,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         c.ok_exit = if l == "any" {
             ok_exit_any()
         } else {
-            l.split(',')
-                .map(|x| exit_status(x.trim(), "--ok-exit"))
-                .collect::<Res<_>>()?
+            ok_exit_list(l, "--ok-exit")?
         };
     }
-    c.ok_exit.sort_unstable();
-    c.ok_exit.dedup();
     // A checker is resolved where patina starts (one a run.json recorded, again from its own
     // directory): its SHA-256 is the file's now.
     c.check = match check {
@@ -929,6 +1056,62 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn ok_exit_takes_conditions_and_reads_back_as_written() {
+        let l = ok_exit_list(
+            "5:fsync-error, fs-error,1,7:point:drop,point:b,fs-error",
+            "--ok-exit",
+        )
+        .unwrap();
+        let shown: Vec<String> = l.iter().map(|o| o.to_string()).collect();
+        assert_eq!(
+            shown,
+            [
+                "1",
+                "5:fs-error,fsync-error",
+                "7:fs-error,point:b,point:drop"
+            ]
+        );
+        assert_eq!(ok_exit_list(&shown.join(","), "x").unwrap(), l);
+        let j = serde_json::to_value(&l).unwrap();
+        assert_eq!(
+            j,
+            serde_json::json!([1, "5:fs-error,fsync-error", "7:fs-error,point:b,point:drop"])
+        );
+        assert_eq!(serde_json::from_value::<Vec<OkExit>>(j).unwrap(), l);
+        // A status allowed always needs no condition.
+        assert_eq!(ok_exit_list("3:fs-error,3", "x").unwrap().len(), 1);
+        for bad in [
+            "5:nope",
+            "fs-error",
+            "point:x",
+            "1,fs-error",
+            "0:fs-error",
+            "5:",
+            "256",
+        ] {
+            assert!(ok_exit_list(bad, "x").is_err(), "{bad}");
+        }
+        // The same in patina.toml, with the sweep's known file beside it.
+        let dir = std::env::temp_dir().join(format!("patina-okx-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("patina.toml");
+        std::fs::write(
+            &f,
+            "[run]\nok-exit = [\"5:fsync-error,fs-error\", 1]\n[sweep]\nknown = \"k.txt\"\n",
+        )
+        .unwrap();
+        let mut c = Config::default();
+        apply_file(&mut c, &f).unwrap();
+        assert_eq!(
+            (c.ok_exit, c.known),
+            (l[..2].to_vec(), Some(dir.join("k.txt")))
+        );
+        std::fs::write(&f, "[sweep]\njobs = 2\n").unwrap();
+        assert!(apply_file(&mut Config::default(), &f).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     use super::*;
 
     #[test]

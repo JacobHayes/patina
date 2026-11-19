@@ -4,8 +4,9 @@
 # sees it (/work/data). In a run made with --log-paths, every file the program opened is also
 # under a ROOT or a PREFIX it may read (-r /usr), judged on the path the open walked (symlinks
 # followed): a dynamically linked program needs -r for what its loader and libraries open
-# (-r /usr -r /lib -r /etc -r /dev -r /proc, as it does). Reads `patina log events`. For
-# `patina run --check`.
+# (-r /usr -r /lib -r /etc -r /dev -r /proc, as it does). A read-only open of a directory
+# above a ROOT (to fsync it after a create or rename there) is allowed; a write or any other
+# open outside is not. Reads `patina log events`. For `patina run --check`.
 set -eu
 roots=; reads=
 while [ $# -gt 1 ]; do
@@ -20,11 +21,16 @@ run=$1
 list() { printf '%s' "$1" | jq -Rsc 'split("\n")[:-1] | map(if . == "/" then . else rtrimstr("/") end)'; }
 bad=$({ "${PATINA:-patina}" log events "$run" --types op,call || echo '"patina log events failed"'; } | jq -rn --argjson roots "$(list "$roots")" --argjson reads "$(list "$roots$reads")" '
   def outside($l): . as $p | all($l[]; . as $r | $p != $r and ($p | startswith($r + "/") | not));
+  def above($l): . as $p | any($l[]; startswith(if $p == "/" then "/" else $p + "/" end));
+  def bit($n; $b): ($n / $b | floor) % 2 == 1;
+  def readonly: [(if .name == "open" then .args[1] elif .name == "openat" then .args[2] else null end)
+    | numbers | . % 4 == 0 and (bit(.; 64) or bit(.; 512) | not)] | any;
   first(inputs | if type == "string" then error(.) else . end
     | if .type == "op" then
         select(.op | IN("close", "fsync", "fsync-dir", "fsync-fail", "sync") | not) | . as $e
         | (.path, .to) | strings | select(outside($roots)) | "\($e.op) \(.) (seq \($e.seq))"
       elif .type == "call" and (.name | IN("open", "openat", "openat2", "creat")) and .ret >= 0 then
-        . as $e | .resolved | strings | select(outside($reads)) | "open \(.) (seq \($e.seq))"
+        . as $e | ($e | readonly) as $ro | .resolved | strings | select(outside($reads))
+        | select($ro and above($roots) | not) | "open \(.) (seq \($e.seq))"
       else empty end) // empty')
 [ -z "$bad" ] || { echo "outside-roots: $bad"; exit 1; }

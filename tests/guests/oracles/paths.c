@@ -10,7 +10,10 @@
  *                  planted to /etc/passwd) five times each. The bug: it checks a name with
  *                  stat and then opens the name, following any symlink: the planted one, or
  *                  one a path swap makes between the two calls. `fixed` opens beneath
- *                  the working directory with no symlink (openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS). */
+ *                  the working directory with no symlink (openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS).
+ *   durable [DIR]  creates public/new.txt and fsyncs it, then opens DIR (default ".", the
+ *                  work tree) read-only as a directory and fsyncs it, as a durable create does;
+ *                  `durable DIR openat2` opens it with openat2 */
 #include <fcntl.h>
 #include <linux/openat2.h>
 #include <stdio.h>
@@ -122,6 +125,16 @@ int main(int argc, char **argv) {
         printf("%d served, %d refused\n", served, refused);
         return 0;
     }
-    fprintf(stderr, "usage: paths tour|opens N|escape [link] [fixed]\n");
+    if (!strcmp(m, "durable")) {
+        int fd = mkdir("public", 0755) ? -1 : open("public/new.txt", O_CREAT | O_WRONLY, 0644);
+        if (fd < 0 || write(fd, "x\n", 2) != 2 || fsync(fd) || close(fd)) return 2;
+        const char *dir = argc > 2 ? argv[2] : ".";
+        struct open_how how = {.flags = O_RDONLY | O_DIRECTORY};
+        int d = argc > 3 ? (int)syscall(SYS_openat2, AT_FDCWD, dir, &how, sizeof how)
+                         : open(dir, O_RDONLY | O_DIRECTORY);
+        if (d < 0 || fsync(d) || close(d)) return 2;
+        return 0;
+    }
+    fprintf(stderr, "usage: paths tour|opens N|escape [link] [fixed]|durable [DIR [openat2]]\n");
     return 2;
 }

@@ -70,6 +70,10 @@ if len(fs) != 1 or "fs-error" not in fs[0]["faults"]["every"]:
 # The fs-error bug prints a byte count that varies by seed: its runs still form one group.
 if fs[0]["count"] < 2:
     die(f"the fs-error bug did not collapse across seeds: {fs}")
+# Its example is the first run's line as written, with its own count.
+first_err = open(os.path.join(RUNS, "two", f"seed-{fs[0]['first']['seed']}", "inc-0", "stderr")).read().strip().splitlines()[-1]
+if fs[0].get("example") != first_err or not any(c.isdigit() for c in first_err):
+    die(f"the fs-error group's example {fs[0].get('example')!r}, its first run wrote {first_err!r}")
 # The `new:` lines name each group's first (lowest) seed, as the report does.
 for g in f:
     if f"seed {g['first']['seed']}:" not in text:
@@ -137,11 +141,69 @@ if (st, st2) != (0, 0):
 print("bug-free: exit 0; unmet sometimes: exit 2, allowed (flag or config): exit 0")
 
 # A fault class with nothing to act on makes the result vacuous, named: the net preset on a
-# guest without sockets.
+# guest without sockets. On a TCP-only guest the preset's datagram classes are not applicable
+# (exit 0); the same class named with --fault is vacuous.
 st, rep, _ = sweep("net", "--seeds", "1..4", "--faults", "net", "--", GUEST)
 if st != 2 or not rep["faults"]["eligible_zero"] or not all(c.startswith("net-") for c in rep["faults"]["eligible_zero"]):
     die(f"--faults net without sockets: exit {st} {rep['faults']}")
-print(f"--faults net without sockets: exit 2, eligible 0: {rep['faults']['eligible_zero']}")
+TCP = [os.path.join(os.environ["PATINA_GUESTS"], "sockets"), "chunk", "correct"]
+calm = ["--fault", "net-reset-permille=0", "--fault", "net-connect-refuse-permille=0"]
+st2, rep2, _ = sweep("net-tcp", "--seeds", "1..2", "--faults", "net", *calm, "--", *TCP)
+st3, rep3, _ = sweep("net-tcp-drop", "--seeds", "1..2", "--faults", "net", *calm, "--fault", "net-drop-permille=9", "--", *TCP)
+if (st2, rep2["faults"]["not_applicable"], st3, rep3["faults"]["eligible_zero"]) != (0, ["net-drop", "net-dup", "net-reorder"], 2, ["net-drop"]):
+    die(f"--faults net on TCP only: exit {st2} {rep2['faults']}; net-drop named: exit {st3} {rep3['faults']}")
+print(f"--faults net: without sockets exit 2, eligible 0: {rep['faults']['eligible_zero']}; TCP only: exit 0, not applicable: {rep2['faults']['not_applicable']}; net-drop named: exit 2")
+
+# --ok-exit N:CLASS: exit 3 is a clean failure only in runs where fs-error injected; under
+# another class's condition it is a finding. The same from patina.toml, with [sweep] known.
+# Known findings and runs --ok-exit allowed are counted apart from findings.
+okx = ["--seeds", "1..12", *FS, "--", GUEST, "fserr"]
+st, rep, _ = sweep("okx", "--ok-exit", "3:fs-error", *okx)
+st2, rep2, _ = sweep("okx-other", "--ok-exit", "3:mem-error", *okx)
+if (st, rep["findings"], st2) != (0, 0, 1) or rep.get("ok_exit", 0) < 1 or rep2["findings"] != rep["ok_exit"]:
+    die(f"--ok-exit 3:fs-error: exit {st} {rep['outcomes']}; 3:mem-error: exit {st2} {rep2['outcomes']}")
+rr = rep2["groups"][0]["rerun"]
+if "--ok-exit 3:mem-error" not in rr:
+    die(f"--ok-exit with a condition: the rerun line {rr}")
+kf = os.path.join(RUNS, "okx-known.txt")
+with open(kf, "w") as fh:
+    fh.write("noted failure exit:*\nnear failure exit: *exit N\n")
+cfg = os.path.join(RUNS, "okx.toml")
+with open(cfg, "w") as fh:
+    fh.write(f'[run]\nok-exit = ["3:mem-error"]\n[sweep]\nknown = "okx-known.txt"\n')
+st3, rep3, text3 = sweep("okx-toml", "--config", cfg, *okx)
+head = text3.split("patina sweep: ", 1)[-1].split("\n", 1)[0]
+near = [e.get("near") for e in rep3["known"]["entries"]]
+if st3 != 0 or rep3["known"]["findings"] != rep2["findings"] or " 0 findings" not in f" {head}" or near != [None, rep2["groups"][0]["signature"]]:
+    die(f"[run] ok-exit and [sweep] known: exit {st3}, {head!r}, known {rep3['known']}")
+print(f"--ok-exit 3:fs-error: {rep['ok_exit']} of 12 ok by it; 3:mem-error: {rep2['findings']} findings, as is the rerun line; from patina.toml with [sweep] known: {head}")
+
+# An --out directory of an older patina is replaced; one with no patina output is refused.
+old = os.path.join(RUNS, "old-layout")
+os.makedirs(os.path.join(old, "failures"))
+open(os.path.join(old, "campaign-state.json"), "w").close()
+st, rep, text = sweep("old-layout", "--seeds", "1..2", "--", GUEST)
+if st != 0 or os.path.exists(os.path.join(old, "failures")):
+    die(f"an 0.5 campaign directory: exit {st}\n{text}")
+mine = os.path.join(RUNS, "not-patina")
+os.makedirs(mine)
+open(os.path.join(mine, "notes.txt"), "w").close()
+st, so, se = patina("sweep", "--seeds", "1", "--out", mine, "--", GUEST)
+if st != 2 or os.listdir(mine) != ["notes.txt"]:
+    die(f"a directory with no patina output: exit {st}, {os.listdir(mine)}: {se}")
+# A run.json among files of the user's is not enough to make a directory patina's; a run's
+# own directory is replaced.
+open(os.path.join(mine, "run.json"), "w").close()
+st, so, se = patina("sweep", "--seeds", "1", "--out", mine, "--", GUEST)
+if st != 2 or sorted(os.listdir(mine)) != ["notes.txt", "run.json"]:
+    die(f"a directory with a run.json and a file of the user's: exit {st}, {os.listdir(mine)}: {se}")
+one = os.path.join(RUNS, "one-run")
+if patina("run", "--seed", "1", "--out", one, "--", GUEST)[0] != 0:
+    die("patina run for the one-run directory")
+st, rep, text = sweep("one-run", "--seeds", "1..2", "--", GUEST)
+if st != 0 or os.path.exists(os.path.join(one, "inc-0")):
+    die(f"a run's directory as --out: exit {st}\n{text}")
+print("an older patina's --out directory and a run's are replaced; one holding files patina does not write is refused, untouched")
 
 # Cases: three cases by four seeds is twelve runs, grouped by case; `report` over twelve
 # separate `patina run` directories gives the same groups.
@@ -184,14 +246,18 @@ if "running 0" not in text2 or rep2["groups"] != rep["groups"]:
     die(f"whole-command cases did not resume:\n{text2}")
 print(f"whole-command cases: 12 runs of two programs, groups {[(g['case'], g['count']) for g in rep['groups']]}; resumes")
 
-# A fault point that never fires in a sweep with --buggify is unmet, as a `sometimes` that never
-# holds is (exit 2, allowable); one that fires is not.
-st, rep, _ = sweep("quiet", "--seeds", "1..4", "--buggify", "--fault", "point:tried-point=0", "--", GUEST, "point")
-st2, rep2, _ = sweep("loud", "--seeds", "1..4", "--buggify", "--fault", "point:tried-point=1000", "--", GUEST, "point")
-st3, _ = report("--allow-unmet", "tried-point", os.path.join(RUNS, "quiet"))
-if (st, st2, st3) != (2, 0, 0) or rep["sdk"]["buggify_never_fired"] != ["tried-point"] or rep2["sdk"]["buggify_never_fired"]:
-    die(f"buggify never fired: exit {st} {rep['sdk']}; firing: exit {st2} {rep2['sdk']}; allowed: exit {st3}")
-print("a fault point that never fired under --buggify: exit 2, allowed: 0; one that fired: 0")
+# A fault point that never fires under --buggify is unmet, as a `sometimes` that never holds is
+# (exit 2, allowable), when that is not chance: no run of 20 or more reached it. Not reached in a
+# smoke run of 4, or forced off (point:LABEL=0), it is noted (exit 0); one that fires is neither.
+st, rep, _ = sweep("unreached", "--seeds", "1..20", "--buggify", "--", GUEST)
+st1, rep1, _ = sweep("smoke", "--seeds", "1..4", "--buggify", "--", GUEST)
+st2, rep2, _ = sweep("quiet", "--seeds", "1..4", "--buggify", "--fault", "point:tried-point=0", "--", GUEST, "point")
+st3, rep3, _ = sweep("loud", "--seeds", "1..4", "--buggify", "--fault", "point:tried-point=1000", "--", GUEST, "point")
+st4, _ = report("--allow-unmet", "tried-point", os.path.join(RUNS, "unreached"))
+noted = lambda r: [x["label"] for x in r["sdk"]["buggify_unfired_noted"]]
+if (st, st1, st2, st3, st4) != (2, 0, 0, 0, 0) or rep["sdk"]["buggify_never_fired"] != ["tried-point"] or noted(rep1) != noted(rep2) != ["tried-point"] or noted(rep3) or rep3["sdk"]["buggify_never_fired"]:
+    die(f"buggify never fired: 20 runs exit {st} {rep['sdk']}; smoke exit {st1}; forced off exit {st2} {rep2['sdk']}; firing exit {st3}; allowed exit {st4}")
+print("a fault point never reached in 20 runs under --buggify: exit 2, allowed: 0; in 4 runs, or forced off: noted, exit 0; one that fired: 0")
 
 # A host file that changes between the run and its replay: nondeterministic, not a finding.
 # Without the change (red/green), the same failure is a finding that replays identically.

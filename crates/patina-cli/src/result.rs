@@ -51,7 +51,7 @@ pub struct RunEnd {
     /// With `--check`, what the checker said (`not-run` when the run did not end ok).
     pub check: Option<crate::check::Verdict>,
     /// Exit statuses that end the run `ok` (`--ok-exit`).
-    pub ok_exit: Vec<u8>,
+    pub ok_exit: Vec<crate::config::OkExit>,
 }
 
 /// Compute points (`proto::ctl::ComputeStats`), summed over incarnations, and the run's mean gap.
@@ -527,8 +527,37 @@ pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> 
 }
 
 /// The run's outcome: its own, or for a run that ended ok, the checker's finding or error.
+/// A conditional `--ok-exit` status counts when one of its fault classes injected in the run.
 pub fn classified(e: &RunEnd) -> Classified {
-    with_check(classify(&e.verdict, &e.ok_exit), e.check.as_ref())
+    let fired = crate::report::fired(&json!({"faults": e.faults, "sdk": e.sdk.json()}));
+    let met = |o: &&crate::config::OkExit| o.when.iter().any(|c| fired.contains(c));
+    let ok: Vec<u8> = e
+        .ok_exit
+        .iter()
+        .filter(|o| o.when.is_empty() || met(o))
+        .map(|o| o.status)
+        .collect();
+    let mut own = classify(&e.verdict, &ok);
+    if own.stop == "ok-exit" {
+        if let Some(o) = e.ok_exit.iter().filter(met).find(|o| {
+            Some(i64::from(o.status)) == e.verdict.exit_status
+                && !e
+                    .ok_exit
+                    .iter()
+                    .any(|u| u.when.is_empty() && u.status == o.status)
+        }) {
+            let why: Vec<&String> = o.when.iter().filter(|c| fired.contains(*c)).collect();
+            own.message = format!(
+                "the program exited {}, a status --ok-exit allows when {} injected",
+                o.status,
+                why.iter()
+                    .map(|c| c.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    with_check(own, e.check.as_ref())
 }
 
 /// A run's outcome given its own and its checker's verdict.

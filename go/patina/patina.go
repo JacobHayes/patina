@@ -122,7 +122,12 @@ func call(op uintptr, kind uint8, cond bool, label, text string, a, b, c int64) 
 		label = label[:labelMax]
 	}
 	if len(text) > textMax {
-		text = text[:textMax]
+		// Cut on a character boundary, as the report shows it.
+		n := textMax
+		for n > 0 && !utf8.RuneStart(text[n]) {
+			n--
+		}
+		text = text[:n]
 	}
 	buf := make([]byte, hdrLen+len(label)+len(text))
 	buf[0] = kind

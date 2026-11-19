@@ -830,6 +830,46 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   deliveries and never wake its reader); `FIONREAD` leaves a pending `ECONNREFUSED` pending;
   `shutdown(SHUT_RD)` wakes a thread in `poll`.
 
+### Net preset shaping
+
+Does a gap between the pieces of one delivery, and a log-uniform chunk size, keep what
+`--faults net` finds while ending the slow-link artefact? 2026-11-19, this host, x86_64, 200
+seeds a line, `patina sweep --seeds 1..200 -j 6 --keep fail --faults net` under the shared
+evidence lock, `before` the 0.12.2 build and `after` the build with `net-chunk-gap-us=1..10`
+in the preset. tokio, pubsub and the throughput guest unwrap a reset or a refused connect, so
+they ran with `--fault net-reset-permille=0 --fault net-connect-refuse-permille=0`: the
+delivery shaping alone, which is what changed.
+
+| Guest | Before | After |
+|---|---|---|
+| `examples/bank-go` | 88 `balance-matches-deposits` | 88 |
+| `sockets chunk naive` (a reader that assumes one read is one message) | 25 `failure` | 99 |
+| `tokio-echo`, `tokio-mt net` | 0 (exit 2: the datagram classes never applied) | 0 (exit 0, those classes not applicable) |
+| pubsub (`testbeds/pubsub`), clean | 0 | 0 |
+| pubsub `drop-read-remainder` | 200 (179 `seq-gap`, 21 not converged) | 200 (132 `seq-gap`, 56 `malformed-frame`, 12 not converged) |
+| pubsub `stale-timeout`, `lost-wakeup` | 200, 200 | 200, 200 |
+
+Throughput over one connection, per seed (a C guest sends 256 KiB in 16 KiB writes to a
+reader; virtual time from accept to EOF; resets off):
+
+| | min | p1 | p5 | p10 | p25 | median | p90 |
+|---|---|---|---|---|---|---|---|
+| before | 10.5 kB/s | 16.0 kB/s | 143 kB/s | 283 kB/s | 811 kB/s | 1.74 MB/s | 3.50 MB/s |
+| after | 176 kB/s | 177 kB/s | 180 kB/s | 363 kB/s | 1.88 MB/s | 3.99 MB/s | 6.02 MB/s |
+
+Before, each piece of a split delivery waited a whole `net-delay-ms` draw, so a seed with
+small chunks ran at chunk/delay (a few kB/s at 1-byte chunks), and a protocol's own timeouts
+fired on that link rather than on the bug. A 48-seed pilot found the same 20 framing failures
+with a 10 to 50 µs gap as with 1 to 10 µs, at a minimum throughput of 33 kB/s against 180
+kB/s, so the preset takes 1..10. The log-uniform draw (`net-chunk-max=1..65536`: one seed in
+17 delivers byte by byte, about one in four at most 16 bytes a piece) keeps byte-at-a-time
+coverage, and `--fault net-chunk-max=1 --fault net-delay-ms=10..50` still gives the harsh
+link. `testbeds/pubsub/sim.sh` (explicit `net-chunk-max=16..4096`) finds the same with the
+0.12.2 build and this one: clean 0 of 200, `lost-wakeup` and `drop-read-remainder` 200,
+`stale-timeout` 167. `tests/net/05-faults.sh` checks the gap: 500 one-byte pieces at
+`net-delay-ms=10..10` end more than 4 virtual seconds sooner with `net-chunk-gap-us=1..1`, one
+read each (red on 0.12.2, which has no such key).
+
 ## Sweeps
 
 `./check evidence sweep` (`tests/sweep/evidence-throughput.sh`, 400 seeds per line, `--keep
@@ -854,6 +894,61 @@ file-error group names the injected class in every failing run. The 30 digests a
 `-j 4` and `-j 1`, and equal to the same seeds run alone. Red/green: adding the seed to the
 signature splits the race into one group per seed and fails the check; not acting on a
 replay's divergence turns a host file changing under the replay into a finding and fails it.
+
+**What a sweep counts against the program** (`tests/sweep/01-sweep.sh`, 2026-11-19, this
+host). `--faults net` over a TCP-only guest (`sockets chunk correct`, resets and refusals off)
+is exit 0 with `net-drop`, `net-dup` and `net-reorder` listed as not applicable; the same sweep
+with `net-drop-permille` named is exit 2. On the guest that exits 3 after a file error,
+`--ok-exit 3:fs-error` makes 7 of 12 runs `ok` by it and `3:mem-error` leaves those 7 findings,
+also through `[run] ok-exit` and `[sweep] known` in `patina.toml` (`12 runs, 0 findings in 0
+groups, 7 known, 5 ok`). An output directory of an older layout is replaced; one with no patina
+output in it is refused and left as it was. A fault point no run reached is vacuous over 20 runs
+under `--buggify`, noted in 4; one forced off is noted. A known entry written with the digits of
+a run (`got 1, want 0`) names the signature it nearly matched (`tests/oracles/01-checks.sh`
+calc, and `report.rs` unit tests); the failure group's `example:` is the first run's stderr
+line with its count (`store failed after 539 bytes`). Red/green, each breaking one rule and
+seeing the check fail: inverting the `--ok-exit` condition; renaming the old-layout marker the
+directory check looks for; counting known runs as findings; treating every preset class as
+named; requiring one firing at any count of runs; dropping the near-match search; drawing chunk
+sizes uniformly; the 0.12.2 build (no `not_applicable`, no `net-chunk-gap-us`). The
+change adds about 1 s of script time to `quick` (`./check quick` 214 s to 220 s of script time,
+39 s to 41 s wall, noise included).
+
+**Identity.** Runs that use none of the changed settings keep their digests: the x86 ledger
+(90 cells: 15 guests, seeds 1 to 3, faults off and `--faults all`) gives 87 of 90 equal to the
+0.12.2 build; the 3 others are `--faults all` cells that split a TCP delivery (`sockets` seed 2,
+`go-static` seeds 2 and 3), whose chunk size and gap are now drawn differently. Seeds 1 to 20 of
+`upcase --faults disk`, the file-error guest under `fs-error-permille=30`, `sockets all` with
+faults off, `kvlog --crash machine:10`, `bank` under `net-reset-permille=50` and `sockets chunk
+correct` under `net-chunk-max=1 net-delay-ms=10..10` (explicit single values) are equal, 120 of
+120.
+
+**Confined** (`tests/oracles/04-paths.sh`): a program that creates a file under its root and
+fsyncs the root's parent directory (`paths durable`) is judged `pass`; opening `/tmp` read-only
+is still `outside-roots: open /tmp`. Red: the 0.12.2 script fails the first with `open /work`.
+
+### Sweep width
+
+Which `-j` is fastest on four CPUs? 2026-11-19, three rounds interleaved, each line
+`patina sweep -j J --keep none` over 2,000 seeds of `hello-static` and 400 of the fjall harness
+(`tests/guests/fjall-harness`, release, `--buggify --env FJ_N=2000 --crash machine:1`); runs
+per second, the range over the rounds. This host under `taskset -c 0-3` (the evidence lock
+held); GitHub's `ubuntu-24.04` (AMD EPYC 7763, 4 vCPUs) and `ubuntu-24.04-arm` (Neoverse-N2,
+4 vCPUs) in a throwaway workflow, deleted after.
+
+| Host | Guest | `-j 2` | `-j 4` | `-j 5` | `-j 6` |
+|---|---|---|---|---|---|
+| this host, 4 CPUs | hello | 184-193 | 340-352 | 314-333 | 326-336 |
+| this host, 4 CPUs | fjall | 25.3-25.7 | 45.7-48.5 | 46.4-48.4 | 46.7-47.3 |
+| hosted x86 | hello | 65.5-65.8 | 87.7-88.6 | 87.9-88.6 | 89.4-89.8 |
+| hosted x86 | fjall | 8.6 | 12.2-12.3 | 12.2 | 12.3 |
+| hosted arm64 | hello | 95.8-101.4 | 143-160 | 147-160 | 153-157 |
+| hosted arm64 | fjall | 12.3-12.9 | 19.9-21.0 | 19.3-20.5 | 19.3 |
+
+One job per CPU is the fastest or within 2% of it everywhere; half the CPUs (the old default)
+gives 55 to 75% of it, and one or two jobs past the CPU count gain at most 2% (hosted x86) and
+lose up to 8% (arm64 fjall, this host's hello): the supervisor shares the CPUs and is not
+starved at that width. The default is the CPUs this process may use, at most 8.
 
 ## Checks from outside the program
 

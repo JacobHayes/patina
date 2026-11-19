@@ -88,7 +88,11 @@ def is_simulated():
 
 def _call(op, kind, cond, label, text=b"", a=0, b=0, c=0):
     label = label[:_LABEL_MAX]
-    text = text[:_TEXT_MAX]
+    if len(text) > _TEXT_MAX:  # cut on a character boundary: back off continuation bytes
+        n = _TEXT_MAX
+        while n > 0 and text[n] & 0xC0 == 0x80:
+            n -= 1
+        text = text[:n]
     buf = ctypes.create_string_buffer(
         _HDR.pack(kind, 1 if cond else 0, len(label), len(text), a, b, c) + label + text,
         _HDR.size + len(label) + len(text),

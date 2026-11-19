@@ -205,10 +205,15 @@ fn waits(detail: &str) -> String {
     w.join(",")
 }
 
-/// The guest's own first statement of what went wrong on stderr: a Rust panic (from
+/// The guest's own first statement of what went wrong on stderr (`guest_line_raw`), normalised.
+pub fn guest_line(stderr: &str) -> Option<String> {
+    guest_line_raw(stderr).map(|l| normalise(&l))
+}
+
+/// The guest's own first statement of what went wrong on stderr, as written: a Rust panic (from
 /// `panicked at`, with the message line that follows it), a Go `panic:`, a C `assert`, a
 /// Python exception after a traceback, or an `INVARIANT` line.
-pub fn guest_line(stderr: &str) -> Option<String> {
+pub fn guest_line_raw(stderr: &str) -> Option<String> {
     let lines: Vec<&str> = stderr.lines().collect();
     for (i, l) in lines.iter().enumerate() {
         let l = l.trim_end();
@@ -220,21 +225,21 @@ pub fn guest_line(stderr: &str) -> Option<String> {
                     s.push_str(next.trim());
                 }
             }
-            return Some(normalise(&s));
+            return Some(s);
         }
         if l.starts_with("panic: ")
             || l.starts_with("INVARIANT ")
             || l.contains("Assertion `")
             || l.contains("assertion failed")
         {
-            return Some(normalise(l));
+            return Some(l.to_string());
         }
         if l.starts_with("Traceback (most recent call last)") {
             if let Some(e) = lines[i + 1..]
                 .iter()
                 .find(|x| !x.is_empty() && !x.starts_with(char::is_whitespace))
             {
-                return Some(normalise(e));
+                return Some(e.to_string());
             }
         }
     }
@@ -244,11 +249,17 @@ pub fn guest_line(stderr: &str) -> Option<String> {
 /// The guest's last stderr line, normalised, when it says something: at least one word of
 /// three letters (not a bare number, address or punctuation).
 fn last_line(stderr: &str) -> Option<String> {
+    last_line_raw(stderr).map(|l| normalise(&l))
+}
+
+/// The last line of stderr with a word in it, as written: what a failure's signature quotes
+/// when the guest stated nothing `guest_line_raw` recognises.
+pub fn last_line_raw(stderr: &str) -> Option<String> {
     let l = stderr.lines().rev().find(|l| !l.trim().is_empty())?.trim();
     let wordy = l
         .split(|c: char| !c.is_ascii_alphabetic())
         .any(|w| w.len() >= 3);
-    wordy.then(|| normalise(l))
+    wordy.then(|| l.to_string())
 }
 
 /// Collapse what varies between seeds: `0x` hex to `0x_`, digit runs to `N`, other runs of
