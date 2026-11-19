@@ -20,6 +20,7 @@ pub type Emulator = fn(&mut Frame, i32, &SigInfo) -> bool;
 /// patched sites (SIGILL at a `ud2` the runtime wrote).
 static EMULATORS: &[Emulator] = &[
     crate::insn::tsc::try_emulate,
+    crate::plans::try_point,
     crate::insn::emulate::try_emulate,
 ];
 
@@ -83,7 +84,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     }
     let ts = thread();
     charge(ts);
-    crate::log::fault(sig, &info, pc);
+    crate::log::fault(sig, &info, crate::plans::shown(pc));
     // The kernel's force_sig: a blocked or ignored fault signal is unblocked and its
     // disposition reset to the default, so the process dies of it.
     sig::force(frame, ts, sig, &info, true);

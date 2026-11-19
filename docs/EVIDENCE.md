@@ -561,11 +561,13 @@ By hand, 3.14 unless noted:
 Red/green: the jump hook not holding the exception fails `compute/09-python` (c, `oneline`
 exit 1); the planted `PyDLL` above finds nothing in `cache` and runs `cpu` serially.
 
-## Load-time rewriting (host side)
+## Load-time rewriting
+
+### The plans, natively
 
 The rewriter (ARCHITECTURE.md, "Load-time rewriting"), its plans checked by the separate
 verifier, and each plan applied to a copy of its file (`patina __rewrite --standalone`) run
-natively against the original. Nothing here runs under Patina: no runtime maps plans yet.
+natively against the original, without Patina (under Patina: below).
 Measured 2026-11-19 on the host above (Ubuntu 26.04), by `rewrite/evidence-corpus` (`./check
 evidence evidence-corpus`, 216 s with 50 runs each) and `rewrite/01-differential` (quick).
 
@@ -592,6 +594,65 @@ interior of an instruction once went unseen (the unit test for a jump into a wou
 caught it); an absolute read of data in non-PIE text not ending extent decode fails the unit
 test for data in text. The verifier rejects every planted corruption in `rewrite::tests`, and
 the plan reader a page mapped twice.
+
+### Under Patina: `--preempt points`
+
+The runtime applying the plans of a program and every library it maps, measured 2026-11-19 on
+the host above by `rewrite/evidence-points` (`./check evidence evidence-points`) and the quick
+tier's `rewrite/02-points` and `03-fidelity`. Each program's output is compared with its
+native run's, and seed 1 is run twice with warm plans.
+
+| Program (with its libraries) | Output, same seed twice | Wall: without points / cold / warm | Plans made | Points taken | The program's sites patched, back-edges, dark | Files planned; unplanned, dropped; `cpuid` answered |
+|---|---|---|---|---|---|---|
+| ripgrep 15.2.0 (musl static-PIE, run from `sh`), a regex count over the Go sources | native; identical | 377 / 779 / 387 ms | 0.40 s | 40 | 88.9% of 56,500; 85.4%; 0.3% | 4 of 4; 0, 0; 47 |
+| gofmt (Go 1.27.3, static), `-d -r` over `runtime` | native; identical | 1,059 / 1,110 / 1,145 ms | 0.08 s | 4,827 | 94.4% of 22,072; 84.5%; 0.0% | 4 of 4; 0, 0; 49 |
+| CPython 3.14.4, dict, sort, regex and json | native; identical | 92 / 761 / 119 ms | 0.66 s | 742 | 89.7% of 112,768; 87.2%; 0.5% | 9 of 9; 0, 0; 49 |
+| headless Chromium, `--dump-dom` of a scripted page | native; identical | 531 / 12,062 / 715 ms | 11.4 s | 183 | 84.3% of 2,893,062; 74.9%; 22.5% | 49 of 49; 2, 0; 289 |
+| PostgreSQL 18 (built from source; by hand, not in the script): start, the SERIALIZABLE bank workload of 3 clients, stop | the bank checker passes; 5 runs under `--vary cpu,load,aslr,sandbox,repeat` identical, cold and warm one digest | 555 / 1,858 / 568 ms | 1.18 s | 53 | `postgres`: 91.7% of 144,087; 87.0%; 0.0% | 19 of 19; 0, 0; 2,880 |
+
+"Cold" makes and verifies every plan in the run (the files the program names before it
+starts, the others when they are mapped; wall time only, so the digest is the warm runs');
+"warm" reads them from the plan cache. Coverage is the program's own file. Chromium's
+unplanned are memory it makes executable at run time. PostgreSQL is not installed system-wide
+here, so the script skips it; its row is a build from source run by hand. The runtime adds
+734 lines of code (`plans.rs` and its call sites, comments and blank lines aside) and no
+decoder.
+
+| Check | Result |
+|---|---|
+| Determinism: `verify --vary cpu,load,aslr,sandbox,repeat`, C static, C static-PIE, C++, Rust (lld), Go, 5 runs (seed 5) and in the quick tier 3 runs of seeds 1 and 2 | identical; seeds 1 and 2 differ |
+| The same for the stock races `go-race-stock` (compute-gap 8, seeds 1-3, 6 runs) and `rs-race-stock` | identical |
+| Without the `cpuid` sites, `go-race-stock` under `--vary cpu` | differs at the first point: `rbx` 0x0c180800 against 0x01180800, leaf 1's initial APIC id, which Go's `rt0_go` leaves in a register (below) |
+| Schedules reached: `go-race-stock` (a check-then-act on atomics, no system call in the window), seeds 1-20 | without points 0 failures; points at the default gap 0; points with `compute-gap=2..64` 10 (GUIDE transcript) |
+| `rs-race-stock`, seeds 1-40 | 5 failures at gap 1-2, 4 at gap 4, 0 at gap 8 |
+| `stats-c` built stock (a lost update: a load and a store with no branch, call or atomic between) | 0 of 20 at the default gap and at `compute-gap=1..8`: out of reach by design (a rebuild finds it) |
+| A timer due inside a loop with no system call (`deadline-stock`) | without points `compute-stall`; with them the handler runs at 10,003,018 virtual ns for a 10 ms timer |
+| `spinpoints count` (a spin-wait whose iterations change state) | `ok` (without points `compute-stall`) |
+| fork + execve of `/bin/true`, 300 in a run, per call (K5) | without points 0.73 to 0.79 ms; with warm plans 1.18 to 1.28 ms (0 to 2 points taken); seeds whose drawn gap is small take thousands of points (seed 3: 9,144, 1.7 ms per call): each point is a supervisor hand-off of about 17 µs, the search's cost, not the plans'. glibc's start runs `cpuid` 40 times per process, each answered in the runtime |
+| Every run without the flag (90 cells of the stock workload ledger: outcome and digest) | identical to the build before |
+
+Fidelity (`03-fidelity`, `rw-fid`, dynamic C): a fault in a relocated `lock xadd` is reported
+at the instruction's address and `backtrace()` from the handler reaches `main`; a timer signal
+taken at a point in a spin loop names an address in the loop; `/proc/self/maps` lines (perms,
+offsets, paths) equal the native run's; a checksum of the program's own text differs from the
+native one (reads see the patch) and is the same on two seeds; `mprotect` of the text drops
+the plan and reads the native bytes; code copied into anonymous memory runs and is counted
+unplanned; a fork child that execs the program applies plans of its own. `shlib-stock`
+(`dlopen`/`dlclose` twice): every image planned, the closed library's plans dropped. Static,
+static-PIE, dynamic and Go programs all run their native output (above).
+
+**`cpuid`.** The register dump above led to a census on this host (Ryzen 9 9950X, 24 CPUs,
+no `cpuid` faulting): the leaves and sub-leaves `cpuid` answers, read on every CPU, differ only
+in leaf 1 `EBX[31:24]`, leaf 0xB `EDX` and leaf 0x8000001E `EAX`/`EBX`, each a core's id. A
+patched `cpuid` answers them as core 0's (and the other topology ids of Intel and AMD the
+same: ARCHITECTURE.md). The kernel's `cpuid` faulting (`ARCH_SET_CPUID`) would catch every
+`cpuid`, dark code's too, but this host does not offer it (no `cpuid_fault` flag), so it could
+not be tested here; plan sites work on every x86_64 host, and `cpuid_unpatched` reports the
+pairs they leave.
+
+Red/green: with the masking off, `02-points` d fails (`--vary cpu` differs); with signal
+frames not translated (`shown`), `03-fidelity` b fails (the timer's address is in a
+trampoline).
 
 ## Branch counters on arm64
 

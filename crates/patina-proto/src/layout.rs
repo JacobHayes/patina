@@ -86,6 +86,9 @@ pub const FD_STDOUT: i32 = 3021;
 pub const FD_STDERR: i32 = 3022;
 /// The counter broker: a `SOCK_SEQPACKET` end whose peer is the launcher (only with `--pmu`).
 pub const FD_PMU: i32 = 3008;
+/// The plan broker: a `SOCK_SEQPACKET` end whose peer is the launcher (only with `--preempt
+/// points`; `proto::plan` has the protocol).
+pub const FD_PLAN: i32 = 3019;
 /// The supervisor's System V shared memory carried from one incarnation to the next after a
 /// process crash (`sup::shm`; a memfd the launcher makes once per run). Not given to guests.
 pub const FD_SHM: i32 = 3023;

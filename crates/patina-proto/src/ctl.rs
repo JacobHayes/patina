@@ -86,6 +86,9 @@ pub const SCHED_PAUSE_POINTS: u64 = 1;
 /// `Config::sched`: the supervisor may probe a thread that computes without a boundary event
 /// for a spin-wait whose iterations leave its state unchanged (`rt::spin`).
 pub const SCHED_SPIN_PROBE: u64 = 2;
+/// `Config::sched`: switch points from load-time plans (`--preempt points`): the cell is at
+/// `plan::CELL` and armed from the image's start, and executable file mappings get their plans.
+pub const SCHED_POINTS: u64 = 8;
 /// `Config::sched`: spin probes were asked for and this host cannot make them work
 /// (`patina doctor`'s "spin probes"): they are off, and a `compute-stall` says why.
 pub const SCHED_SPIN_HOST_OFF: u64 = 4;
@@ -226,9 +229,29 @@ pub struct ComputeStats {
     pub events: AtomicU64,
     pub switches: AtomicU64,
     pub deadline_stops: AtomicU64,
+    /// With `--preempt points` (`PLAN_NAMES` order): trampoline traps taken (each a compute
+    /// point), image mappings a plan was applied to, plans dropped because the program
+    /// unmapped, mapped over, moved or reprotected patched text, executable memory left
+    /// unpatched (anonymous or shared memory, files without a plan, memory made executable
+    /// later), and patched `cpuid`s answered.
+    pub plan: [AtomicU64; PLAN_FIELDS],
+    /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: the
+    /// stall watchdog counts that wall time as progress (it costs no virtual time).
+    pub planning: AtomicU64,
 }
 
+pub const PLAN_FIELDS: usize = 5;
+pub const PLAN_NAMES: [&str; PLAN_FIELDS] = ["points", "applied", "dropped", "unplanned", "cpuid"];
+pub const PLAN_POINTS: usize = 0;
+pub const PLAN_APPLIED: usize = 1;
+pub const PLAN_DROPPED: usize = 2;
+pub const PLAN_UNPLANNED: usize = 3;
+pub const PLAN_CPUID: usize = 4;
+
 impl ComputeStats {
+    pub fn plans(&self) -> [u64; PLAN_FIELDS] {
+        core::array::from_fn(|i| self.plan[i].load(Ordering::Relaxed))
+    }
     /// [hellos, kinds, events, switches, deadline_stops].
     pub fn read(&self) -> [u64; 5] {
         let r = |a: &AtomicU64| a.load(Ordering::Relaxed);

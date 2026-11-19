@@ -18,6 +18,8 @@ use crate::cli::Res;
 use std::process::ExitCode;
 
 #[cfg(target_arch = "x86_64")]
+pub mod cache;
+#[cfg(target_arch = "x86_64")]
 mod code;
 #[cfg(target_arch = "x86_64")]
 mod elf;
@@ -40,7 +42,7 @@ pub fn main(_args: &[String]) -> Res<ExitCode> {
 }
 
 #[cfg(target_arch = "x86_64")]
-pub use x86::main;
+pub use x86::{main, make_plan};
 
 #[cfg(target_arch = "x86_64")]
 mod x86 {
@@ -59,7 +61,8 @@ mod x86 {
         let code = Code::analyze(&text, &elf.anchors, &elf.extents, elf.exec);
         let (choices, patches) = points::select(&code);
         let tramp_vaddr = elf.image_end().next_multiple_of(PAGE);
-        let em = points::emit(&code, &patches, tramp_vaddr);
+        let mut em = points::emit(&code, &patches, tramp_vaddr);
+        let cpuid = points::cpuid_sites(&code, &mut em);
         let blob_end = tramp_vaddr + em.tramp.len() as u64;
         if CELL < blob_end && elf.image_start() < CELL + 8 {
             return Err(format!(
@@ -104,7 +107,9 @@ mod x86 {
             ("refused-invalid", f.invalid),
             ("refused-extent", f.extent),
             ("refused-read", f.read),
-            ("patches", em.sites.len() as u64),
+            ("patches", em.sites.len() as u64 - cpuid.0),
+            ("cpuid-patched", cpuid.0),
+            ("cpuid-unpatched", cpuid.1),
             ("trampoline-bytes", em.tramp.len() as u64),
         ]
         .into_iter()

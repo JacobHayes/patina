@@ -1,0 +1,95 @@
+# 3. What a program sees of its patched code under `--preempt points` (rw-fid,
+# tests/guests/rewrite/fidelity.c, dynamic; ARCHITECTURE "Load-time rewriting"):
+#  a. its plan patches both routines the guest probes: the `lock xadd` (fid_xadd, run as a copy
+#     in a trampoline) and fid_spin's backward `jz` (aimed at a trampoline);
+#  b. `fault`, `timer`, `fork` and `jit` print what they print natively: a fault in the
+#     relocated instruction is reported at its original address and backtrace() from the
+#     handler reaches main; a timer signal taken at a point in fid_spin names an address in
+#     fid_spin, never a trampoline; a forked child that execs the program gets plans of its own
+#     (more images applied than one process maps); code copied into anonymous memory runs and is
+#     counted unplanned;
+#  c. /proc/self/maps shows the program's and the C library's lines as natively (permissions,
+#     offsets, paths): no trampoline, no plan file, patched pages joined to their file's line;
+#  d. `checksum` (the sum of fid_spin's bytes) differs from the native sum (reads see the
+#     patch) and is the same on seeds 1 and 2;
+#  e. `mprotect` (fid_spin's page made writable and back) drops the plan: the run counts it and
+#     reads the native sum;
+#  f. shlib-stock (stock, with libraries; dlopen and dlclose twice) ends ok with its native
+#     line, every image planned (the dlopened one too), the dlclosed library's plans dropped.
+#@ tier=quick budget=30 slots=4 arch=x86_64
+: "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
+die() { echo "FAIL: $*"; exit 1; }
+field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
+for k in sys.argv[2].split("."):
+    if not isinstance(v, dict) or k not in v: print("-"); sys.exit()
+    v=v[k]
+print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+res() { echo "$(field "$1/result.json" outcome)/$(field "$1/result.json" stop): $(field "$1/result.json" message)"; }
+G=$PATINA_GUESTS
+F=$G/rw-fid
+o=$RUNS/03-fidelity
+rm -rf "${o:?}"
+mkdir -p "$o"
+export XDG_CACHE_HOME=$o/cache
+pts() { # OUT SEED ARGS...: one run under --preempt points; must end ok
+    r=$1 s=$2; shift 2
+    "$PATINA" run --preempt points --seed "$s" --out "$r" -- "$@" >/dev/null 2>&1 || true
+    [ "$(field "$r/result.json" outcome)" = ok ] || die "${r##*/}: $(res "$r")"
+}
+
+# a.
+"$PATINA" __rewrite "$F" --plan "$o/fid.plan" >/dev/null
+"$PATINA" __rewrite --sites "$o/fid.plan" >"$o/sites"
+for sym in fid_xadd fid_spin; do
+    a=$(nm "$F" | awk -v s="$sym" '$3 == s {print $1}')
+    [ -n "$a" ] || die "a. no symbol $sym in rw-fid"
+    # fid_spin's jz is its third instruction: mov (2 bytes), test (2).
+    off=0
+    [ "$sym" != fid_spin ] || off=4
+    a=$(printf '%x' $((0x$a + off)))
+    awk -v a="$a" '$1 == "site" {sub(/^0x0*/, "", $2); if ($2 == a) f = 1} END {exit !f}' "$o/sites" ||
+        die "a. the plan does not patch $sym's probe at 0x$a"
+done
+echo "a. rw-fid's plan patches the lock xadd and the backward jz"
+
+# b-e.
+for m in fault timer fork jit checksum maps; do
+    "$F" "$m" | sort >"$o/$m.want"
+    pts "$o/$m" 1 "$F" "$m" &
+done
+pts "$o/checksum-2" 2 "$F" checksum &
+pts "$o/mprotect" 1 "$F" mprotect &
+pts "$o/shlib" 1 "$G/compute/shlib-stock" &
+wait
+for m in fault timer fork jit; do
+    sort "$o/$m/inc-0/stdout" | cmp -s "$o/$m.want" - || die "b. $m: $(head -2 "$o/$m/inc-0/stdout") (natively $(head -1 "$o/$m.want"))"
+done
+[ "$(field "$o/fork/result.json" rewrite.applied)" -gt "$(field "$o/fault/result.json" rewrite.applied)" ] ||
+    die "b. fork: the exec'd child applied no plans of its own ($(field "$o/fork/result.json" rewrite))"
+[ "$(field "$o/jit/result.json" rewrite.unplanned)" -ge 1 ] || die "b. jit: the copied code was not counted unplanned"
+echo "b. fault, timer, fork, jit as natively ($(head -1 "$o/fault/inc-0/stdout"))"
+
+cols() { awk '{print $2, $3, $6}' "$1"; }
+cols "$o/maps.want" >"$o/maps.cols"
+sort "$o/maps/inc-0/stdout" >"$o/maps.got"
+cols "$o/maps.got" | cmp -s "$o/maps.cols" - || die "c. /proc/self/maps differs from native: $(cols "$o/maps.got" | diff "$o/maps.cols" - | head -4)"
+echo "c. /proc/self/maps: $(wc -l <"$o/maps.cols") lines as natively"
+
+got=$(cat "$o/checksum/inc-0/stdout")
+want=$(cat "$o/checksum.want")
+[ -n "$got" ] && [ "$got" != "$want" ] || die "d. checksum: reads did not see the patch"
+cmp -s "$o/checksum/inc-0/stdout" "$o/checksum-2/inc-0/stdout" || die "d. checksum: seeds 1 and 2 differ"
+echo "d. checksum: $(cat "$o/checksum/inc-0/stdout") (natively $(cat "$o/checksum.want")) on both seeds"
+
+[ "$(field "$o/mprotect/result.json" rewrite.dropped)" -ge 1 ] || die "e. mprotect: no plan dropped"
+cmp -s "$o/mprotect/inc-0/stdout" "$o/checksum.want" || die "e. mprotect: $(cat "$o/mprotect/inc-0/stdout"), not the native sum"
+echo "e. mprotect: plan dropped, the native sum read"
+
+# f.
+tail -1 "$o/shlib/inc-0/stdout" | grep -q 'compdl=29992,29992 ok$' || die "f. shlib-stock printed $(tail -1 "$o/shlib/inc-0/stdout")"
+st=$(python3 -I -c 'import json,sys
+i=json.load(open(sys.argv[1]))["rewrite"]["images"]
+print(" ".join(sorted(set(e["status"] for e in i))), any(e["path"].endswith("/libcompdl.so") for e in i))' "$o/shlib/result.json")
+[ "$st" = "planned True" ] || die "f. shlib-stock images: $st (want all planned, libcompdl.so among them)"
+[ "$(field "$o/shlib/result.json" rewrite.dropped)" -ge 2 ] || die "f. shlib-stock: the dlclosed library's plans were not dropped"
+echo "f. shlib-stock: every image planned, $(field "$o/shlib/result.json" rewrite.dropped) plans dropped at dlclose"

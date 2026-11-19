@@ -46,6 +46,9 @@ fn mmap_place(call: &mut dyn Call) -> i64 {
         if hits_runtime(addr, page_up(len)) {
             return -e::ENOMEM;
         }
+        if flags & MAP_FIXED != 0 {
+            crate::plans::changing(addr, len);
+        }
         return raw(call);
     }
     // No address below 2 GiB is ever chosen.
@@ -69,8 +72,10 @@ fn mmap_place(call: &mut dyn Call) -> i64 {
             return r;
         }
     }
+    // A library's first mapping: room after it for its plan's trampolines.
+    let room = crate::plans::room(len, flags, fd, off);
     loop {
-        let Some(a) = take(len) else {
+        let Some(a) = take(page_up(len) + room) else {
             return -e::ENOMEM;
         };
         let r = unsafe { sc6(nr::MMAP, a, len, prot, f, fd, off) };
@@ -313,6 +318,11 @@ pub fn handle(call: &mut dyn Call) -> Action {
             if r >= 0 {
                 let a = args(call);
                 crate::oplog::on_mmap(r as u64, a[1], a[3], a[4] as i32 as i64, a[5]);
+                if a[2] & PROT_EXEC != 0 && a[3] & (MAP_ANONYMOUS | MAP_SHARED) == 0 {
+                    crate::plans::on_map(r as u64, a[1], a[2], a[2], a[4], a[5]);
+                } else if a[2] & PROT_EXEC != 0 {
+                    crate::plans::unplanned();
+                }
                 crate::insn::scan::on_mmap(r as u64, a[1], a[2], a[3], a[4], a[5]);
             }
             r
@@ -327,6 +337,12 @@ pub fn handle(call: &mut dyn Call) -> Action {
             } else {
                 crate::oplog::on_mremap_before(old, oldlen)
             };
+            if !hits_runtime(old, oldlen.max(1)) {
+                crate::plans::changing(old, oldlen.max(1));
+                if call.arg(3) & MREMAP_FIXED != 0 {
+                    crate::plans::changing(call.arg(4), call.arg(2));
+                }
+            }
             let r = mremap(call);
             crate::oplog::on_mremap_after(r as u64, call.arg(2), prev, r >= 0);
             if r >= 0 {
@@ -355,6 +371,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 if call.nr() == nr::MUNMAP {
                     crate::oplog::on_munmap(call.arg(0), call.arg(1));
                 }
+                crate::plans::changing(call.arg(0), call.arg(1));
                 let r = raw(call);
                 if r == 0 {
                     if call.nr() == nr::MUNMAP {
@@ -364,6 +381,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                     } else {
                         crate::insn::patch::reprotect(call.arg(0), call.arg(1), call.arg(2));
                         if call.arg(2) & PROT_EXEC != 0 {
+                            crate::plans::unplanned();
                             crate::insn::scan::on_mprotect_exec(
                                 call.arg(0),
                                 call.arg(1),
@@ -412,11 +430,13 @@ pub fn handle(call: &mut dyn Call) -> Action {
             if hits_runtime(call.arg(0), call.arg(1)) {
                 -e::ENOMEM
             } else {
+                crate::plans::changing(call.arg(0), call.arg(1));
                 let r = raw(call);
                 if r == 0 {
                     crate::insn::patch::reprotect(call.arg(0), call.arg(1), call.arg(2));
                 }
                 if r == 0 && call.arg(2) & PROT_EXEC != 0 {
+                    crate::plans::unplanned();
                     crate::insn::scan::on_mprotect_exec(call.arg(0), call.arg(1), call.arg(2));
                 }
                 r

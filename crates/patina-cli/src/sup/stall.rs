@@ -14,7 +14,8 @@
 //!   or a virtual-time event is due, the run ends `unsupported`, stop `compute-stall`
 //!   (verdict `stall`), naming the thread. A thread computing alone is left to run.
 //! - **Backstop.** A thread that neither makes progress nor runs (blocked in the kernel
-//!   outside any row) ends the run `internal` after ten times `stall_ms` of wall time.
+//!   outside any row) ends the run `internal` after ten times `stall_ms` of wall time. A
+//!   thread waiting for a load-time plan (`--preempt points`) is making progress.
 
 use crate::outcome::Verdict;
 
@@ -189,7 +190,13 @@ pub fn spin_host(ctl: &proto::ctl::Ctl) -> String {
     format!(" A spin probe could not run: {t}{errno}{doctor}.")
 }
 
-/// The other way out: branch counters.
+/// The other ways out: switch points written in as the code loads (x86_64), branch counters.
+#[cfg(target_arch = "x86_64")]
+const BRANCHES: &str =
+    "; or rerun with --preempt points (switch points written into the code as it loads; \
+     code it leaves dark, such as JIT output, stays without them), or with --preempt branches \
+     (needs CAP_PERFMON and a host PMU; see `patina doctor`).";
+#[cfg(not(target_arch = "x86_64"))]
 const BRANCHES: &str =
     "; or rerun with --preempt branches (needs CAP_PERFMON and a host PMU; see `patina doctor`).";
 

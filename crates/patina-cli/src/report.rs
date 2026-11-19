@@ -289,6 +289,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
     // differ from the defaults. Allow-unmet and the host CPU do not change the run.
     let mut rest = cfg.clone();
     rest.pmu.on = d.pmu.on;
+    rest.points = d.points;
     let (have, def) = (
         serde_json::to_value(&rest).unwrap(),
         serde_json::to_value(&d).unwrap(),
@@ -377,6 +378,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if cfg.pmu.on {
             flag("--preempt", "branches".into());
+        }
+        if cfg.points {
+            flag("--preempt", "points".into());
         }
         if let Some(k) = &cfg.check {
             let f = if k.serve { "--check-serve" } else { "--check" };
@@ -917,6 +921,10 @@ pub fn build(
         let Some(l) = r.result["compute"]["images"].as_array() else {
             continue;
         };
+        // A run under `--preempt points` has the section for its plans' cell alone.
+        if l.is_empty() && r.result["rewrite"].is_object() {
+            continue;
+        }
         with_points += 1;
         for i in l {
             let k = images
@@ -928,6 +936,23 @@ pub fn build(
                 }
             }
             k.sort_by_key(|x| crate::result::kind_rank(x));
+        }
+    }
+    // Load-time points (`--preempt points`): the points taken, and each file a run asked a plan
+    // for, with whether it had one.
+    let mut planned: BTreeMap<String, bool> = BTreeMap::new();
+    let (mut with_plans, mut taken) = (0, 0);
+    for r in runs {
+        let w = &r.result["rewrite"];
+        let Some(l) = w["images"].as_array() else {
+            continue;
+        };
+        with_plans += 1;
+        taken += w["points"].as_u64().unwrap_or(0);
+        for i in l {
+            *planned
+                .entry(i["path"].as_str().unwrap_or("").to_string())
+                .or_default() |= i["status"] == "planned";
         }
     }
     let mut limits: BTreeMap<String, usize> = BTreeMap::new();
@@ -1175,6 +1200,13 @@ pub fn build(
         .count();
     if ok_exit > 0 {
         v["ok_exit"] = ok_exit.into();
+    }
+    if with_plans > 0 {
+        v["rewrite"] = json!({
+            "runs": with_plans,
+            "points": taken,
+            "images": planned.iter().map(|(p, k)| json!({"path": p, "planned": k})).collect::<Vec<_>>(),
+        });
     }
     if with_points > 0 {
         v["compute"] = json!({
@@ -1459,6 +1491,17 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             } else {
                 String::new()
             }
+        ));
+    }
+    if let Some(w) = v.get("rewrite") {
+        let images = w["images"].as_array().map_or(&[][..], |a| &a[..]);
+        let planned = images.iter().filter(|i| i["planned"] == true).count();
+        s.push_str(&format!(
+            "load-time points: {} taken in {} runs; {} of {} files planned\n",
+            w["points"],
+            w["runs"],
+            planned,
+            images.len()
         ));
     }
     let groups = v["groups"].as_array().unwrap();

@@ -20,14 +20,16 @@ pub const VERSION: u32 = 1;
 pub const PAGE: u64 = 4096;
 /// The count's cell, which the runtime maps: one word below 2 GiB, so `dec qword [abs32]`
 /// reaches it from any image.
-pub const CELL: u64 = 0x7fff_0000;
+pub const CELL: u64 = proto::plan::CELL;
 
 /// The trampoline counts, then jumps to the patched branch's or call's original target (the
 /// patched instruction now goes to the trampoline instead).
-pub const KIND_JUMP: u8 = 1;
+pub const KIND_JUMP: u8 = proto::plan::KIND_JUMP;
 /// The trampoline counts, then runs a copy of the patched instruction, then jumps to the
 /// instruction after it (the patched instruction is a jump to the trampoline).
-pub const KIND_BEFORE: u8 = 2;
+pub const KIND_BEFORE: u8 = proto::plan::KIND_BEFORE;
+/// A `cpuid` answered by the runtime (`proto::plan::KIND_CPUID`).
+pub const KIND_CPUID: u8 = proto::plan::KIND_CPUID;
 /// `copy` of a site without a copied instruction.
 pub const NO_COPY: u16 = u16::MAX;
 

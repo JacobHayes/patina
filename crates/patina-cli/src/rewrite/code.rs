@@ -55,10 +55,14 @@ pub struct Census {
 }
 
 /// An instruction that compiled code does not contain, so that decoding it means the bytes are
-/// not code: privileged (control and debug registers, VMX) and port I/O instructions, far transfers, `int n`, and segment
+/// not code: privileged (control and debug registers, VMX) and port I/O instructions, far transfers, `int n`
+/// (but `int 3` in its two-byte form, which Go's assembler emits for a breakpoint), and segment
 /// overrides that 64-bit code has no use for.
 fn refused(i: &Instruction) -> bool {
     use Mnemonic::*;
+    if i.mnemonic() == Int && i.immediate8() == 3 {
+        return false;
+    }
     i.is_invalid()
         || matches!(
             i.mnemonic(),

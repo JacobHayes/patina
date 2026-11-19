@@ -124,6 +124,8 @@ pub fn process_init() {
 
 /// The number of words `Frame::regs_for_record` gives.
 pub const RECORD_WORDS: usize = 34;
+/// The program counter's word in `Frame::regs_for_record`.
+pub const RECORD_PC: usize = 32;
 
 /// The kernel's `ucontext` as delivered on the alternate stack (`uapi/asm/ucontext.h`,
 /// `sigcontext.h`): `uc_sigmask` at 40, `uc_mcontext` at 176, the records at 464.

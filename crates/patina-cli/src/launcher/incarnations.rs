@@ -116,6 +116,8 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut log_used = 0;
     let mut k = 0;
     let shm = shm_carrier()?;
+    let mut plans = [0u64; proto::ctl::PLAN_FIELDS];
+    let planner = planner(o)?;
     loop {
         let inc = out.join(format!("inc-{k}"));
         cfg.incarnation = k;
@@ -129,6 +131,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             deadline,
             log_used,
             shm: shm.as_raw_fd(),
+            planner: planner.clone(),
         };
         let end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
         faults.add_incarnation(&inc, k, &end);
@@ -154,6 +157,9 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             };
         }
         for (a, b) in sched.iter_mut().zip(end.sched) {
+            *a += b;
+        }
+        for (a, b) in plans.iter_mut().zip(end.plans) {
             *a += b;
         }
         images.add(end.compute_images);
@@ -219,6 +225,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 },
                 check: None,
                 ok_exit: o.cfg.ok_exit.clone(),
+                rewrite: planner.as_ref().map(|p| crate::result::RewriteReport {
+                    images: p.images(),
+                    plans,
+                }),
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)
@@ -270,5 +280,27 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             cfg.faults_off = 1;
         }
         k += 1;
+    }
+}
+
+/// With `--preempt points`, the run's plans: made for the program and the libraries it names
+/// before the sandbox starts (on as many threads as the host offers, at most 8), the rest when
+/// the runtime asks (`launcher::plans`).
+#[cfg(target_arch = "x86_64")]
+fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
+    if !o.cfg.points {
+        return Ok(None);
+    }
+    let p = crate::launcher::plans::Planner::new(crate::result::build()?);
+    let jobs = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
+    crate::rewrite::cache::warm_all(&p, &o.program.host, jobs);
+    Ok(Some(std::sync::Arc::new(p)))
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
+    match o.cfg.points {
+        true => Err("--preempt points: load-time rewriting is x86_64 only for now".into()),
+        false => Ok(None),
     }
 }

@@ -265,6 +265,8 @@ pub struct Start<'a> {
     /// System V shared memory a process crash carries to the next incarnation (`FD_SHM`):
     /// one memfd for the run.
     pub shm: std::os::fd::RawFd,
+    /// The run's plans, with `--preempt points` (`launcher::plans`).
+    pub planner: Option<std::sync::Arc<crate::launcher::plans::Planner>>,
 }
 
 /// The descriptor `Start::shm` names, made once per run.
@@ -306,6 +308,8 @@ pub struct IncEnd {
     pub sched: [u64; proto::ctl::SCHED_FIELDS],
     /// Compute points (`proto::ctl::ComputeStats::read`), and the image table.
     pub compute: [u64; 5],
+    /// Load-time plans (`proto::ctl::PLAN_NAMES`).
+    pub plans: [u64; proto::ctl::PLAN_FIELDS],
     pub compute_images: crate::result::ComputeImages,
     /// Calls eligible for each runtime fault class (`proto::faults::Kind`), and crash
     /// points passed.
@@ -630,6 +634,9 @@ pub fn run_incarnation(
     if c.emulate_rndr {
         cfg.insn |= proto::ctl::INSN_EMULATE_RNDR;
     }
+    if c.points {
+        cfg.sched |= proto::ctl::SCHED_POINTS;
+    }
     let pmu_ev = pmu_event(o)?;
     // Counter preemption stops a spinning thread itself.
     // Where the host cannot make spin probes work they are off (`host::spin_probes`).
@@ -814,6 +821,8 @@ pub fn run_incarnation(
         etc_fds.push(data_fd(data)?);
     }
     const ETC_FD0: i32 = 3010;
+    // bwrap's data descriptors sit between FD_USERNS and FD_PLAN.
+    assert!(ETC_FD0 + etc.len() as i32 <= FD_PLAN);
     for (i, (path, _)) in etc.iter().enumerate() {
         args.extend([
             "--ro-bind-data".into(),
@@ -876,6 +885,17 @@ pub fn run_incarnation(
     };
     if let Some(f) = &pmu_sandbox {
         place.push((f.as_raw_fd(), FD_PMU));
+    }
+    // The plan broker's sandbox end.
+    let (plan_sandbox, plan_ours) = match &start.planner {
+        Some(_) => {
+            let (a, b) = crate::launcher::pmu::pair()?;
+            (Some(a), Some(b))
+        }
+        None => (None, None),
+    };
+    if let Some(f) = &plan_sandbox {
+        place.push((f.as_raw_fd(), FD_PLAN));
     }
     let pmu_on = pmu_ev.is_some();
     assert!(place.len() <= 32);
@@ -952,6 +972,17 @@ pub fn run_incarnation(
     drop(outcome_w);
     drop(etc_fds);
     drop(pmu_sandbox);
+    drop(plan_sandbox);
+    let plan_broker = match (plan_ours, &start.planner) {
+        (Some(ours), Some(p)) => Some(crate::launcher::plans::Broker::start(
+            ours,
+            p.clone(),
+            cpu,
+            // The control region outlives the broker (`stop` below, before the unmap).
+            &unsafe { Ctl::at(ctl_ptr) }.compute.planning,
+        )?),
+        _ => None,
+    };
     let broker = match (pmu_ours, pmu_ev) {
         (Some(ours), Some(ev)) => Some(crate::launcher::pmu::Broker::start(
             ours,
@@ -986,6 +1017,9 @@ pub fn run_incarnation(
         .encode();
     }
     if let Some(b) = broker {
+        b.stop();
+    }
+    if let Some(b) = plan_broker {
         b.stop();
     }
     let t_waited = mono_ns();
@@ -1073,6 +1107,7 @@ pub fn run_incarnation(
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         sched: ctl.sched.read(),
         compute: ctl.compute.read(),
+        plans: ctl.compute.plans(),
         compute_images: crate::result::ComputeImages::read(unsafe {
             proto::ctl::ComputeTab::at(ctl_ptr)
         }),

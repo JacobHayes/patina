@@ -55,6 +55,16 @@ pub struct RunEnd {
     pub check: Option<crate::check::Verdict>,
     /// Exit statuses that end the run `ok` (`--ok-exit`).
     pub ok_exit: Vec<crate::config::OkExit>,
+    /// With `--preempt points`: what the plans did.
+    pub rewrite: Option<RewriteReport>,
+}
+
+/// `result.json`'s `rewrite`: each file the runtime asked a plan for (`rewrite::cache`), and
+/// the runtime's counts (`proto::ctl::PLAN_NAMES`), summed over incarnations.
+#[derive(Clone, Debug)]
+pub struct RewriteReport {
+    pub images: Vec<Value>,
+    pub plans: [u64; proto::ctl::PLAN_FIELDS],
 }
 
 /// Compute points (`proto::ctl::ComputeStats`), summed over incarnations, and the run's mean gap.
@@ -387,7 +397,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "sched": {
             "traps": e.traps,
             "switches": e.switches,
-            "mode": if e.pmu.is_some() { "branches" } else { "traps" },
+            "mode": if e.pmu.is_some() { "branches" } else if e.rewrite.is_some() { "points" } else { "traps" },
             "pause_sites": e.sched.pause_sites,
             "pause_points": e.sched.get("pause_points"),
             "preemptions": preemptions,
@@ -398,6 +408,11 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     });
     if let Some(cp) = e.compute.json(e.pmu.is_some()) {
         r["compute"] = cp;
+    }
+    if let Some(w) = &e.rewrite {
+        let mut v = named(&proto::ctl::PLAN_NAMES, &w.plans);
+        v["images"] = json!(w.images);
+        r["rewrite"] = v;
     }
     if let Some(k) = &e.check {
         r["check"] = serde_json::to_value(k).unwrap();
@@ -608,6 +623,9 @@ pub fn print_human(r: &Value, dir: &Path) {
     if let Some(l) = compute_line(&r["compute"]) {
         println!("{l}");
     }
+    if let Some(l) = rewrite_line(&r["rewrite"]) {
+        println!("{l}");
+    }
     let ok = r["outcome"] == "ok";
     if !ok {
         let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
@@ -740,8 +758,11 @@ pub fn compute_line(c: &Value) -> Option<String> {
         "compute points: {}",
         compute_images(&c["images"], "result.json")
     );
-    if images.is_empty() {
+    if images.is_empty() && n("images_dropped") > 0 {
         s.push_str("(none listed)");
+    } else if images.is_empty() {
+        // `--preempt points` alone: no image was built with them.
+        s.push_str("none built in");
     }
     if n("images_dropped") > 0 {
         s.push_str(&format!(
@@ -767,6 +788,61 @@ pub fn compute_line(c: &Value) -> Option<String> {
         s.push_str(&format!(
             ", {}",
             plural(n("deadline_stops"), "deadline stop")
+        ));
+    }
+    Some(s)
+}
+
+/// The `patina run` line for result.json's `rewrite` (`--preempt points`): points taken, and
+/// per image rewritten the share of its sites patched and of its text left dark.
+pub fn rewrite_line(w: &Value) -> Option<String> {
+    let images = w["images"].as_array()?;
+    let n = |k: &str| w[k].as_u64().unwrap_or(0);
+    let planned: Vec<String> = images
+        .iter()
+        .filter(|i| i["status"] == "planned")
+        .take(IMAGES_SHOWN)
+        .map(|i| {
+            let name = i["path"].as_str().unwrap_or("");
+            format!(
+                "{} {}% of {} sites, {}% dark",
+                name.rsplit('/').next().unwrap_or(name),
+                i["covered_pct"],
+                commas(i["sites"].as_u64().unwrap_or(0)),
+                i["dark_pct"]
+            )
+        })
+        .collect();
+    let all = images.iter().filter(|i| i["status"] == "planned").count();
+    let mut s = format!(
+        "load-time points: {} taken; {} rewritten",
+        commas(n("points")),
+        plural(all as u64, "image")
+    );
+    if !planned.is_empty() {
+        s.push_str(&format!(" ({}", planned.join("; ")));
+        if all > IMAGES_SHOWN {
+            s.push_str(&format!("; and {} more in result.json", all - IMAGES_SHOWN));
+        }
+        s.push(')');
+    }
+    let other = images.len() - all;
+    if other > 0 {
+        s.push_str(&format!(
+            "; {} without a plan",
+            plural(other as u64, "file")
+        ));
+    }
+    if n("unplanned") > 0 {
+        s.push_str(&format!(
+            "; {} unpatched (JIT, shared or unplanned memory: no points there)",
+            plural(n("unplanned"), "executable mapping")
+        ));
+    }
+    if n("dropped") > 0 {
+        s.push_str(&format!(
+            "; {} dropped (the program wrote, moved or unmapped its text)",
+            plural(n("dropped"), "plan")
         ));
     }
     Some(s)

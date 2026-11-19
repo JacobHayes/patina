@@ -178,6 +178,16 @@ pub fn reprotect(a: u64, len: u64, prot: u64) {
     }
 }
 
+/// `[a, a + len)` was mapped again from its file (`plans::changing` putting back a plan's
+/// pages, with protection `prot`): the patches there are written again.
+pub fn rewrite(a: u64, len: u64, prot: u64) {
+    let t = table();
+    let (i, j) = (lower(t, a), lower(t, page_end(a, len)));
+    for e in &t.e[i..j] {
+        write(e.addr, false, prot);
+    }
+}
+
 const PAGE: u64 = 4096;
 
 /// The end of `[a, a + len)` rounded up to a page, as `munmap` and `mprotect` take it.

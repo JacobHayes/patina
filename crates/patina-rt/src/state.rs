@@ -253,6 +253,8 @@ pub struct Proc {
     pub nshared: usize,
     /// Compute points of this address space (`compute.rs`).
     pub compute: crate::compute::Compute,
+    /// Images with load-time plans (`plans.rs`).
+    pub plans: crate::plans::Plans,
 }
 
 pub struct Global<T>(UnsafeCell<T>);
@@ -286,6 +288,7 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
     }; MAX_SHARED],
     nshared: 0,
     compute: crate::compute::Compute::new(),
+    plans: crate::plans::Plans::new(),
 }));
 
 #[allow(clippy::mut_from_ref)]

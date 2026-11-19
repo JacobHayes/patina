@@ -299,6 +299,14 @@ pub fn load(path: &[u8], dyn_base: u64, interp: bool) -> Image {
                             );
                         }
                         if prot & PROT_EXEC != 0 {
+                            crate::plans::on_map(
+                                va,
+                                fmap,
+                                prot,
+                                prot | PROT_WRITE,
+                                fd,
+                                p.offset - off_in_page,
+                            );
                             // instruction channels: patch rdrand/rdseed while the segment is still writable.
                             let file = crate::insn::scan::FileId {
                                 fd,
@@ -435,6 +443,7 @@ pub fn start(k: &KernelStart) -> ! {
     p.guest_path_len = path.len();
 
     crate::sys::fs::read_mounts();
+    crate::compute::start_points();
     // What runs, resolved as `execve` resolves it (`exec::resolve`): an image this runtime
     // loads, or a script's `#!` interpreters down to one. (After an `execve`, `path` is the
     // image that call resolved.) A program that cannot run ends the run `error`.

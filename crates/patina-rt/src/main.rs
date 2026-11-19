@@ -16,6 +16,7 @@ mod loader;
 mod log;
 mod oplog;
 mod path;
+mod plans;
 #[cfg(target_arch = "x86_64")]
 mod pmu;
 #[cfg(target_arch = "aarch64")]

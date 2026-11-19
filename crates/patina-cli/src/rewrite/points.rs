@@ -14,9 +14,9 @@
 //!                that starts at the branch target.
 //! Indirect jumps are never patched in place: flags at their targets are unknown.
 
-use super::code::{direct_target, Code, TAINT, TARGET};
+use super::code::{direct_target, Code, ADDR, READ, TAINT, TARGET};
 use super::flags::dead_at;
-use super::plan::{Site, CELL, KIND_BEFORE, KIND_JUMP, NO_COPY};
+use super::plan::{Site, CELL, KIND_BEFORE, KIND_CPUID, KIND_JUMP, NO_COPY};
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -304,6 +304,56 @@ pub fn emit(code: &Code, patches: &BTreeMap<u64, Form>, tramp_vaddr: u64) -> Emi
         }
     }
     e
+}
+
+/// Every `cpuid` in eligible code becomes `ud2`, a `KIND_CPUID` site the runtime answers, merged
+/// into `em`'s sites in address order (its trampoline offset is the next trampoline's, so the
+/// offsets stay in row order). Returns the count patched, and the `0F A2` byte pairs left
+/// elsewhere in the text: an upper bound on the `cpuid`s in dark or tainted code, which run
+/// unanswered.
+pub fn cpuid_sites(code: &Code, em: &mut Emitted) -> (u64, u64) {
+    let mut found = vec![];
+    for a in code.starts() {
+        // As for every patch: untainted, its bytes not read as data, no address taken inside.
+        let clean =
+            code.flags(a) & (TAINT | READ) == 0 && code.flags(a + 1) & (READ | ADDR | TARGET) == 0;
+        if clean
+            && code
+                .insn(a)
+                .is_some_and(|i| i.mnemonic() == Mnemonic::Cpuid)
+        {
+            found.push(a);
+        }
+    }
+    let mut unpatched = 0;
+    for r in &code.regions {
+        for (o, w) in r.bytes.windows(2).enumerate() {
+            if w == [0x0f, 0xa2] && found.binary_search(&(r.addr + o as u64)).is_err() {
+                unpatched += 1;
+            }
+        }
+    }
+    let mut sites = Vec::with_capacity(em.sites.len() + found.len());
+    let mut jumps = std::mem::take(&mut em.sites).into_iter().peekable();
+    for &a in &found {
+        while let Some(s) = jumps.next_if(|s| s.addr < a) {
+            sites.push(s);
+        }
+        let next = jumps.peek().map_or(em.tramp.len() as u32, |s| s.tramp);
+        sites.push(Site {
+            addr: a,
+            len: 2,
+            kind: KIND_CPUID,
+            tramp: next,
+            tramp_len: 0,
+            trap: 0,
+            copy: NO_COPY,
+        });
+        em.patched.push((a, vec![0x0f, 0x0b]));
+    }
+    sites.extend(jumps);
+    em.sites = sites;
+    (found.len() as u64, unpatched)
 }
 
 /// One trampoline at `t`:

@@ -33,6 +33,8 @@ output of its last command (the others' output is not shown; they must still suc
   command  a `text` fence with no `$` line is an excerpt of this command's output.
   exact-only  REASON: the block runs only where the numbers are compared exactly (below): what
            it shows depends on one seed's run (a pinned `--seed`, a run directory of a seed).
+  arch     MACHINE: the block runs only on this `uname -m` (a feature of one architecture);
+           elsewhere it is listed, not run.
 
 The docs' numbers (seeds, counts, digests, sequence numbers) are one kind of host's: they depend
 on the architecture, the CPU, the kernel and the host's libraries and interpreters that a program
@@ -97,7 +99,7 @@ class Block:
         self.path, self.line, self.name = path, line, name
         self.dir, self.setup, self.skip, self.exits, self.command = "/tmp/patina", [], 0, None, None
         self.cmds = []      # [(command, expected output lines, their doc line numbers)]
-        self.no_run = self.exact_only = None
+        self.no_run = self.exact_only = self.arch = None
 
     def where(self):
         return f"{self.path}:{self.line} [{self.name}]"
@@ -209,6 +211,8 @@ def parse(path):
                 b.exits = [int(x) for x in val.split()]
             elif key == "exact-only":
                 b.exact_only = val
+            elif key == "arch":
+                b.arch = val
             elif key == "command":
                 b.command = val
             else:
@@ -429,7 +433,8 @@ def main():
         print(f"== host kind {kind}, the docs' numbers are {REFERENCE}'s: numbers compared as N; "
               "exact-only blocks not run")
     norun = [b for b in blocks if b.no_run]
-    held = [b for b in blocks if not b.no_run and b.exact_only and not exact]
+    machine = platform.machine()
+    held = [b for b in blocks if not b.no_run and ((b.exact_only and not exact) or (b.arch and b.arch != machine))]
     runnable = [b for b in blocks if not b.no_run and b not in held]
     scenes = {}
     for b in runnable:
@@ -442,7 +447,8 @@ def main():
         for line in report:
             print("    " + line)
     for title, bs, why in (("no-run", norun, lambda b: b.no_run),
-                           ("exact-only, not run on this kind of host", held, lambda b: b.exact_only)):
+                           ("exact-only or another architecture's, not run on this kind of host", held,
+                            lambda b: b.exact_only or f"{b.arch} only")):
         print(f"== {title} ({len(bs)}):")
         for b in bs:
             print(f"   {b.where()}: {why(b)}")
@@ -450,7 +456,7 @@ def main():
     for b, _, _ in results:
         per[b.path] = per.get(b.path, 0) + 1
     print(f"== transcripts: {len(results)} run ({', '.join(f'{p} {n}' for p, n in per.items())}), "
-          f"{'exactly' if exact else 'numbers as N'}; {len(failed)} failed; {len(held)} exact-only not run; "
+          f"{'exactly' if exact else 'numbers as N'}; {len(failed)} failed; {len(held)} not run here; "
           f"{len(norun)} no-run; {len(errors)} marking errors")
     if not results and not want:
         print("FAIL: no transcript ran")

@@ -18,7 +18,7 @@
 //! trampoline.
 
 use super::elf::{Elf, Text};
-use super::plan::{Plan, CELL, KIND_BEFORE, KIND_JUMP, NO_COPY, PAGE};
+use super::plan::{Plan, CELL, KIND_BEFORE, KIND_CPUID, KIND_JUMP, NO_COPY, PAGE};
 use iced_x86::{
     Code as Op, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
 };
@@ -238,6 +238,12 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
             ));
         }
         ranges.push((s.addr, end));
+        if s.kind == KIND_CPUID {
+            if let Err(e) = check_cpuid(&f, plan, s) {
+                bad.push(format!("site {:#x}: {e}", s.addr));
+            }
+            continue;
+        }
         let (t0, t1) = (s.tramp as u64, s.tramp as u64 + s.tramp_len as u64);
         if t1 > plan.tramp.len() as u64 || s.trap as u64 + 2 > s.tramp_len as u64 {
             bad.push(format!("site {:#x}: trampoline outside the blob", s.addr));
@@ -278,13 +284,24 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
     bad
 }
 
-fn check_site(
-    f: &Finder,
-    plan: &Plan,
-    a: u64,
-    n: usize,
-    s: &super::plan::Site,
-) -> Result<(), String> {
+/// A `KIND_CPUID` site: a `cpuid` found as code, now `ud2` in place, with no trampoline.
+fn check_cpuid(f: &Finder, plan: &Plan, s: &super::plan::Site) -> Result<(), String> {
+    check_place(f, s.addr, s.len as usize)?;
+    if f.insn(s.addr).map(|i| i.mnemonic()) != Some(Mnemonic::Cpuid) || s.len != 2 {
+        return Err("a cpuid site that is not a cpuid".into());
+    }
+    if plan_bytes(plan, s.addr, 2) != Some(&[0x0f, 0x0b][..]) {
+        return Err("the cpuid is not replaced by ud2".into());
+    }
+    if s.tramp_len != 0 || s.trap != 0 || s.copy != NO_COPY {
+        return Err("a cpuid site with a trampoline".into());
+    }
+    Ok(())
+}
+
+/// The patched instruction at `a`, `n` bytes, is one found as code, and nothing else decodes,
+/// branches into, reads or takes an address inside it.
+fn check_place(f: &Finder, a: u64, n: usize) -> Result<(), String> {
     let (i, o) = f.at(a).ok_or("not in an executable section")?;
     let seen = &f.seen[i];
     if o + n > seen.t.len {
@@ -311,6 +328,19 @@ fn check_site(
     if (o..o + n).any(|p| seen.mark[p] & 2 != 0) || (o + 1..o + n).any(|p| seen.mark[p] & 4 != 0) {
         return Err("code reads the patched bytes or takes an address inside them".into());
     }
+    Ok(())
+}
+
+fn check_site(
+    f: &Finder,
+    plan: &Plan,
+    a: u64,
+    n: usize,
+    s: &super::plan::Site,
+) -> Result<(), String> {
+    check_place(f, a, n)?;
+    let (i, o) = f.at(a).ok_or("not in an executable section")?;
+    let seen = &f.seen[i];
     let orig = f.insn(a).ok_or("undecodable")?;
     let patched = plan_bytes(plan, a, n).ok_or("patched bytes not in the plan's pages")?;
     let pi = decode(patched, a);

@@ -111,6 +111,10 @@ pub struct Config {
     /// spin-probes`; only with `--preempt traps`).
     pub spin_probes: bool,
     pub pmu: Pmu,
+    /// Switch points from load-time plans (`--preempt points`, x86_64): stock code is
+    /// rewritten as it is mapped (ARCHITECTURE.md, "Load-time rewriting").
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub points: bool,
     /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
     /// chosen by process id). Does not reach the guest.
     pub host_cpu: Option<usize>,
@@ -171,6 +175,7 @@ impl Default for Config {
             emulate_rndr: false,
             spin_probes: true,
             pmu: Pmu::default(),
+            points: false,
             host_cpu: None,
             check: None,
             ok_exit: vec![],
@@ -696,12 +701,14 @@ fn boolean(v: &toml::Value, at: &str) -> Res<bool> {
         .ok_or_else(|| format!("{at}: expected true or false"))
 }
 
-/// `traps` or `branches`: whether counter preemption is on.
-fn preempt(v: &str, at: &str) -> Res<bool> {
+/// `traps`, `branches` or `points`: whether counter preemption is on, whether load-time plans
+/// are.
+fn preempt(v: &str, at: &str) -> Res<(bool, bool)> {
     match v {
-        "traps" => Ok(false),
-        "branches" => Ok(true),
-        _ => Err(format!("{at}: expected traps or branches, not {v}")),
+        "traps" => Ok((false, false)),
+        "branches" => Ok((true, false)),
+        "points" => Ok((false, true)),
+        _ => Err(format!("{at}: expected traps, branches or points, not {v}")),
     }
 }
 
@@ -812,7 +819,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "stall-ms") => c.stall_ms = int(v, &at)?,
                 ("sched", "host-cpu") => c.host_cpu = Some(int(v, &at)? as usize),
-                ("sched", "preempt") => c.pmu.on = preempt(&string(v, &at)?, &at)?,
+                ("sched", "preempt") => (c.pmu.on, c.points) = preempt(&string(v, &at)?, &at)?,
                 ("sched", "pause-points") => c.pause_points = boolean(v, &at)?,
                 ("sched", "spin-probes") => c.spin_probes = boolean(v, &at)?,
                 // The race-hunting policy: every segment short, stops close to traps.
@@ -890,7 +897,7 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         c.cpus = n;
     }
     if let Some(p) = a.last("--preempt") {
-        c.pmu.on = preempt(p, "--preempt")?;
+        (c.pmu.on, c.points) = preempt(p, "--preempt")?;
     }
     if let Some(n) = a.num("--time-limit")? {
         c.time_limit = n;
@@ -1028,6 +1035,12 @@ impl Config {
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());
+        }
+        if self.points && !cfg!(target_arch = "x86_64") {
+            return Err(format!(
+                "--preempt points: load-time rewriting is x86_64 only for now, not {}; use --preempt traps, or rebuild the code with compute points (docs/GUIDE.md)",
+                std::env::consts::ARCH
+            ));
         }
         let p = &self.pmu;
         if p.short_permille > 1000 || p.short_max == 0 || p.short_max > 0xffff_ffff {

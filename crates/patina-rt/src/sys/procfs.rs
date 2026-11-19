@@ -86,28 +86,35 @@ fn scratch() -> u64 {
     *b
 }
 
-struct W {
+pub(crate) struct W {
     p: *mut u8,
-    n: usize,
+    pub n: usize,
     cap: usize,
 }
 
 impl W {
-    fn s(&mut self, b: &[u8]) -> &mut W {
+    pub fn new(b: &mut [u8]) -> W {
+        W {
+            p: b.as_mut_ptr(),
+            n: 0,
+            cap: b.len(),
+        }
+    }
+    pub fn s(&mut self, b: &[u8]) -> &mut W {
         let k = b.len().min(self.cap - self.n);
         unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), self.p.add(self.n), k) };
         self.n += k;
         self
     }
-    fn c(&mut self, ch: u8) -> &mut W {
+    pub fn c(&mut self, ch: u8) -> &mut W {
         self.s(&[ch])
     }
-    fn u(&mut self, v: u64) -> &mut W {
+    pub fn u(&mut self, v: u64) -> &mut W {
         let mut t = [0u8; 20];
         let n = fmt_dec(&mut t, v);
         self.s(&t[..n])
     }
-    fn hex(&mut self, v: u64, width: usize) -> &mut W {
+    pub fn hex(&mut self, v: u64, width: usize) -> &mut W {
         let mut t = [b'0'; 16];
         let mut n = 0;
         let mut x = v;
@@ -120,7 +127,7 @@ impl W {
         let start = 16 - n;
         self.s(&t[start..])
     }
-    fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         unsafe { core::slice::from_raw_parts(self.p, self.n) }
     }
 }
@@ -200,7 +207,7 @@ fn maps_line(w: &mut W, line: &[u8]) -> bool {
     true
 }
 
-fn hexv(s: &[u8]) -> u64 {
+pub(crate) fn hexv(s: &[u8]) -> u64 {
     let mut v = 0u64;
     for &c in s {
         let d = match c {
@@ -217,10 +224,7 @@ fn maps(w: &mut W, smaps: bool) {
     let base = scratch() + SCRATCH / 2;
     let real = unsafe { core::slice::from_raw_parts_mut(base as *mut u8, (SCRATCH / 2) as usize) };
     let n = read_real(b"/proc/self/maps\0", real);
-    for line in real[..n].split(|&c| c == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
+    let mut emit = |line: &[u8]| {
         if maps_line(w, line) && smaps {
             let dash = line.iter().position(|&c| c == b'-').unwrap_or(0);
             let sp = line.iter().position(|&c| c == b' ').unwrap_or(0);
@@ -257,7 +261,15 @@ fn maps(w: &mut W, smaps: bool) {
             }
             w.s(b"THPeligible:    0\nVmFlags: rd wr mr mw me\n");
         }
+    };
+    // With load-time plans: the original file's lines (`plans::Maps`).
+    let mut fix = crate::plans::Maps::new();
+    for line in real[..n].split(|&c| c == b'\n') {
+        if !line.is_empty() {
+            fix.feed(line, &mut emit);
+        }
     }
+    fix.flush(&mut emit);
 }
 
 /// mountinfo with virtual ids (index + 1, as `statx` reports) and device numbers.

@@ -32,6 +32,17 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE};
 use proto::layout::{COMPUTE_CELL, PAGE};
 
+/// The cell's address: with `--preempt points` the plans' (`proto::plan::CELL`, mapped at the
+/// image's start), otherwise `COMPUTE_CELL` (mapped at the first hello).
+#[inline]
+fn cell() -> u64 {
+    if crate::plans::on() {
+        proto::plan::CELL
+    } else {
+        COMPUTE_CELL
+    }
+}
+
 /// No hello yet in this image: every function here is one test of `mode`.
 pub const OFF: u64 = 0;
 /// Counting, charging and switching.
@@ -80,19 +91,19 @@ fn bump(a: &AtomicU64, n: u64) {
 }
 
 /// The program unmapped, protected or mapped over the cell: the run ends `unsupported`.
-fn cell_lost(errno: i64, mapping: bool) -> ! {
+pub fn cell_lost(errno: i64, mapping: bool) -> ! {
     crate::sup::host_error(errno, mapping as u64, proto::ctl::HE_COMPUTE_CELL)
 }
 
 fn read_cell() -> i64 {
-    match crate::guest::get::<i64>(COMPUTE_CELL) {
+    match crate::guest::get::<i64>(cell()) {
         Ok(v) => v,
         Err(e) => cell_lost(e, false),
     }
 }
 
 fn write_cell(v: i64) {
-    if let Err(e) = crate::guest::put(COMPUTE_CELL, v) {
+    if let Err(e) = crate::guest::put(cell(), v) {
         cell_lost(e, false)
     }
 }
@@ -170,21 +181,7 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
     let p = &mut proc().compute;
     let start = p.mode == OFF;
     if start {
-        use crate::raw::*;
-        let r = unsafe {
-            sc6(
-                nr::MMAP,
-                COMPUTE_CELL,
-                PAGE,
-                PROT_READ | PROT_WRITE,
-                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
-                u64::MAX,
-                0,
-            )
-        };
-        if r as u64 != COMPUTE_CELL {
-            cell_lost(r.min(0), true);
-        }
+        map_cell();
         if config().pmu & proto::ctl::PMU_ON != 0 {
             p.mode = COUNTERS;
             write_cell(NO_LIMIT);
@@ -210,7 +207,36 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
     c.compute
         .kinds
         .store(c.compute.kinds.load(Relaxed) | kinds, Relaxed);
-    COMPUTE_CELL as i64
+    cell() as i64
+}
+
+fn map_cell() {
+    use crate::raw::*;
+    let r = unsafe {
+        sc6(
+            nr::MMAP,
+            cell(),
+            PAGE,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+            u64::MAX,
+            0,
+        )
+    };
+    if r as u64 != cell() {
+        cell_lost(r.min(0), true);
+    }
+}
+
+/// An image's start with `--preempt points`: the cell is there before the first instruction,
+/// since every trampoline counts in it; `exit` arms it on the way into the program.
+pub fn start_points() {
+    if crate::plans::on() {
+        map_cell();
+        let p = &mut proc().compute;
+        p.mode = ON;
+        p.handed = 0;
+    }
 }
 
 /// The path of the file mapped at `pc`, read from the kernel's map into `out`; None (the
@@ -231,7 +257,21 @@ fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
     }
     let mut buf = [0u8; 8192];
     let (mut have, mut hit) = (0usize, None);
-    'read: loop {
+    // As the program sees the map: a page a plan patched names the original file.
+    let mut maps = crate::plans::Maps::new();
+    let mut take = |line: &[u8]| {
+        if hit.is_some() {
+            return;
+        }
+        if let Some((dev, ino, path)) = maps_hit(line, pc) {
+            hit = Some((0, 0, 0));
+            if ino != 0 && path.first() == Some(&b'/') && path.len() <= out.len() {
+                out[..path.len()].copy_from_slice(path);
+                hit = Some((dev, ino, path.len()));
+            }
+        }
+    };
+    loop {
         let r = unsafe {
             sc3(
                 nr::READ,
@@ -248,13 +288,7 @@ fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
         while let Some(nl) = buf[used..have].iter().position(|&c| c == b'\n') {
             let line = &buf[used..used + nl];
             used += nl + 1;
-            if let Some((dev, ino, path)) = maps_hit(line, pc) {
-                if ino != 0 && path.first() == Some(&b'/') && path.len() <= out.len() {
-                    out[..path.len()].copy_from_slice(path);
-                    hit = Some((dev, ino, path.len()));
-                }
-                break 'read;
-            }
+            maps.feed(line, &mut take);
         }
         if used == 0 && have == buf.len() {
             break; // a line longer than the buffer
@@ -262,8 +296,9 @@ fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
         buf.copy_within(used..have, 0);
         have -= used;
     }
+    maps.flush(&mut take);
     unsafe { sc1(nr::CLOSE, fd as u64) };
-    let (dev, ino, n) = hit?;
+    let (dev, ino, n) = hit.filter(|h| h.2 > 0)?;
     let me = crate::sys::fs::fstatat_raw(-100, proc().guest_path.as_ptr() as u64, 0);
     (!me.is_some_and(|st| st.dev() == dev && st.ino() == ino)).then_some(n)
 }
@@ -295,9 +330,10 @@ fn maps_hit(line: &[u8], pc: u64) -> Option<(u64, u64, &[u8])> {
     ))
 }
 
-/// The trap of `COMPUTE_POINT` (after `enter`), with the program's registers in `frame`.
-/// Returns to the trap entry, which leaves through the normal trap exit.
-pub fn point(ts: &mut ThreadState, frame: &Frame) {
+/// The trap of `COMPUTE_POINT` or of a plan's trampoline (after `enter`), with the program's
+/// registers in `frame`, at `pc` as the program sees it (`plans::shown`). Returns to the trap
+/// entry, which leaves through the normal trap exit.
+pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64) {
     let p = &mut proc().compute;
     let c = ctl();
     let reason = match p.mode {
@@ -317,7 +353,8 @@ pub fn point(ts: &mut ThreadState, frame: &Frame) {
     } else {
         bump(&c.compute.switches, 1);
     }
-    let words = frame.regs_for_record();
+    let mut words = frame.regs_for_record();
+    words[crate::arch::RECORD_PC] = pc;
     let bytes =
         unsafe { core::slice::from_raw_parts(words.as_ptr() as *const u8, words.len() * 8) };
     let rec = proto::Rec {
@@ -327,7 +364,7 @@ pub fn point(ts: &mut ThreadState, frame: &Frame) {
         kind: proto::RecKind::Preempt as u8,
         class: 0,
         nr: PREEMPT_NR,
-        args: [frame.pc(), p.armed as u64, reason, p.events, p.draw, 0],
+        args: [pc, p.armed as u64, reason, p.events, p.draw, 0],
         ret: 0,
         out_hash: proto::rec::hash_bytes(0, bytes),
         in_hash: 0,

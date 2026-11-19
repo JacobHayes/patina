@@ -480,13 +480,15 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
 - **A race with no system call in it.** Threads switch only at system calls, `pause`
   instructions and spin probes. Two threads that race on plain memory with none of these
   between the conflicting accesses always run them in the same order, whatever the seed.
-  Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code));
-  branch counters (`--preempt branches`, AMD Zen 5 and Arm Neoverse N2 only) switch there too.
+  Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code)); on
+  x86_64, `--preempt points` switches at the branches, calls and atomics of stock code
+  ([Points in stock code](#points-in-stock-code---preempt-points)); branch counters
+  (`--preempt branches`, AMD Zen 5 and Arm Neoverse N2 only) switch there too.
 - **A deadline that never comes.** In stock code virtual time advances by a fixed charge per
   system call and when every thread sleeps, not with computation, so neither `--time-limit`
   nor the program's own deadline cuts a CPU-bound loop; `--timeout` (wall seconds) does, as
-  `timeout`. Rebuilt code is charged 1 ns per event and is cut where the deadline falls due;
-  `--preempt branches` charges time per branch.
+  `timeout`. Rebuilt code, and stock code under `--preempt points`, is charged 1 ns per event
+  and is cut where the deadline falls due; `--preempt branches` charges time per branch.
 
 ## Faults
 
@@ -1445,7 +1447,9 @@ A thread that computes for 10 s of CPU time without reaching a scheduling point,
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
 no system call or `pause`. Rebuilt code, and Python under `python3 -m patina`, does not stall
-that way ([Deeper search](#deeper-search-rebuilt-code)). `--preempt branches` also preempts after a
+that way ([Deeper search](#deeper-search-rebuilt-code)), nor does stock code on x86_64 under
+`--preempt points` ([Points in stock code](#points-in-stock-code---preempt-points)), except in
+code it leaves dark. `--preempt branches` also preempts after a
 seed-chosen number of branches; it needs an AMD Zen 5 or Arm Neoverse N2 CPU with its PMU exposed (not in most virtual machines;
 GitHub's `ubuntu-24.04-arm` runners expose theirs) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
@@ -1699,6 +1703,91 @@ can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `unsu
   happen, and a `lock`-prefixed read-modify-write is never split.
 - With `--preempt branches` the hooks do nothing (Python's is not registered); branch
   counters switch instead.
+
+## Points in stock code: `--preempt points`
+
+On x86_64, `--preempt points` gives a stock program compute points without a rebuild: as the
+program and each library it loads are mapped, Patina maps in a rewritten copy of their text
+with a count before every backward branch, backward call, indirect jump and atomic instruction
+it can patch. The counts are compute-point events: threads switch there at a seed-chosen
+event, virtual time advances 1 ns per event, and a timer or `--time-limit` cuts a CPU-bound
+loop where it falls due. Nothing about the program changes on disk.
+
+The check-then-act race of `tests/guests/compute/go/race` (two goroutines read a balance with
+an atomic load, then withdraw with an atomic add; no system call between), built stock, ends
+`ok` on all 20 seeds without points. With them, at the small gaps short programs need
+([The gap](#the-gap)):
+
+<!-- transcript race-points
+dir: /tmp/src/patina
+arch: x86_64
+skip: 1
+setup: cp "$GUESTS/compute/go-race-stock" race
+exit: 1
+-->
+```sh
+go build -C tests/guests/compute/go -o "$PWD/race" ./race
+patina sweep --seeds 1..20 --preempt points --fault compute-gap=2..64 --out patina-out/race -- ./race
+```
+
+```text
+new: failure exit: exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/race/seed-2)
+sweep: replaying the first seed of 1 finding
+sweep: 7.2 MiB kept in /tmp/src/patina/patina-out/race
+patina sweep: 20 runs, 10 findings in 1 group, 10 ok   (0.4s, 8 jobs)
+outcomes: failure 10, ok 10
+load-time points: 45031 taken in 20 runs; 1 of 1 files planned
+
+failure exit: exit 1
+  10 of 20 runs   first: seed 2   replayed: identical
+  rerun:  patina run --seed 2 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
+  replay: patina replay /tmp/src/patina/patina-out/race/seed-2
+```
+
+`patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
+share of its sites patched and of its text left dark, and anything left without points.
+`result.json`'s `rewrite` has the counts (`points`, `applied`, `dropped`, `unplanned`, `cpuid`)
+and one entry per file the program mapped executable (`images`: `path`, `sha256`, `status`,
+and for a planned file `sites`, `patches`, `covered_pct`, `back_edges_covered_pct`,
+`dark_pct`, `cpuid_patched`, `cpuid_unpatched`, `cache`, `rewrite_ms`).
+
+**Which to use.**
+
+| | Rebuilt code (compute points) | `--preempt points` | `--preempt branches` |
+|---|---|---|---|
+| Needs | the source and a rebuild | an x86_64 host | an AMD Zen 5 or Arm Neoverse N2 PMU and `CAP_PERFMON` |
+| Covers | the rebuilt code: every edge, load and store | every file the program maps: libc, the Go runtime and prebuilt libraries too, at branches, calls and atomics | everything, every branch |
+| Seeds | repeat on any host | repeat on any host | repeat only on that CPU family |
+
+A race between two plain memory accesses with no branch, call or atomic between them (the
+lost update of `examples/stats-c`: a load and a store of a counter) has no point in its
+window: `--preempt points` does not find it (20 of 20 `ok`); a rebuild does.
+
+**The plans.** A plan is made on the host from a file's bytes and the Patina build alone, so
+it is the same on every host; each is checked by an independent verifier before it is used,
+and kept in `~/.cache/patina/plans/` (`$XDG_CACHE_HOME`; at most 4 GiB, the least recently used
+removed first; deleting it costs only time). Patina plans the program and the libraries it
+names before the run starts, and any other file (a `dlopen`, an `execve`) when it is mapped.
+The first run pays for making them: 0.4 s for ripgrep, 0.6 s for CPython and its libraries,
+11 s for headless Chromium (49 files); later runs read them (docs/EVIDENCE.md).
+
+**What is not covered.**
+- About 15% of sites in typical code (13 to 27% of loop back-edges) have no patch that fits: a
+  count must replace one whole instruction of 5 bytes or more where the flags are dead.
+  Text that no control flow or unwind entry reaches is *dark* and never patched (22% of
+  Chromium's: code reached only through tables).
+- Code made at run time (JIT output, memory made executable after it was mapped) gets no
+  points (counted `unplanned`). A program that writes, moves, unmaps or reprotects its own text
+  gets that file's original pages back and no points there (counted `dropped`).
+- x86_64 only: elsewhere `--preempt points` is refused before the run starts.
+
+**What the program sees.** Faults, signal frames, records and unwinding name the original
+addresses, never a rewritten copy's. `/proc/self/maps` shows the original files; each library
+is followed by a gap where its copy's extra code lives, so libraries load at other addresses
+than without points. A program that reads its own code reads the rewritten bytes (a checksum
+of its text differs from native). `cpuid` in planned code answers the fields that name a core
+(APIC, node and compute-unit ids) as core 0's, so a run does not depend on the core it was
+given; a `cpuid` in dark or JIT code is the CPU's.
 
 ## Hosts
 

@@ -40,6 +40,17 @@ pub fn apply(data: &[u8], plan: &Plan, events: u64) -> Res<Vec<u8>> {
     let mut abs = vec![0x48, 0xff, 0x0c, 0x25];
     abs.extend_from_slice(&(plan.cell as u32).to_le_bytes());
     for s in &plan.sites {
+        if s.kind == super::plan::KIND_CPUID {
+            // Nothing answers a `cpuid` site natively: the original instruction stays.
+            let l = elf
+                .loads
+                .iter()
+                .find(|l| l.flags & 1 != 0 && s.addr >= l.vaddr && s.addr + 2 <= l.vaddr + l.filesz)
+                .ok_or_else(|| format!("cpuid site {:#x} outside the text", s.addr))?;
+            let o = (l.off + (s.addr - l.vaddr)) as usize;
+            out[o..o + 2].copy_from_slice(&[0x0f, 0xa2]);
+            continue;
+        }
         let t = s.tramp as usize;
         if seg.get(t..t + 8) != Some(&abs[..]) {
             return Err(format!(

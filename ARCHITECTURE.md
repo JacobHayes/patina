@@ -454,7 +454,9 @@ touched.
 
 There is no other way into the runtime: a point that switches needs a supervisor hand-off
 anyway, so a direct call would save nothing. With `--preempt branches` the cell is never armed
-and events charge nothing.
+and events charge nothing. With `--preempt points` the cell is the plans' (`proto::plan::CELL`,
+below), mapped at each image start rather than at a hello; arming, charging and the point are
+the same.
 
 **Python** (3.12 and later) needs no rebuild: `python3 -m patina SCRIPT` runs the script with
 the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sys.monitoring`.
@@ -490,13 +492,15 @@ the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sy
 A generator or coroutine resuming gets no point of its own: its next line or jump has one, and
 the order of asyncio tasks is the event loop's, which a point in one thread does not change.
 
-## Load-time rewriting (host side only)
+## Load-time rewriting
 
-Stock binaries can get compute points without a rebuild: a plan, made on the host from the file
-alone, rewrites single instructions to jump to trampolines that count. Only the host side
-exists: no run maps a plan yet, so no run's behaviour or digest depends on it. It is reachable
-through the hidden `patina __rewrite` (x86_64; elsewhere it refuses) and the tests
-(`crates/patina-cli/src/rewrite/`, the `iced-x86` decoder; the runtime gains no decoder).
+Stock binaries get compute points without a rebuild (`--preempt points`, x86_64; elsewhere the
+flag is refused before a run starts): a plan, made on the host from the file alone, rewrites
+single instructions to jump to trampolines that count, and the runtime maps it over the file's
+text as the file is mapped. Without the flag nothing below runs and no run's behaviour or
+digest changes. The host side is `crates/patina-cli/src/rewrite/` (the `iced-x86` decoder; also
+reachable through the hidden `patina __rewrite`); the runtime side is `crates/patina-rt/src/plans.rs`,
+which decodes no instruction.
 
 - **What is code** (`code.rs`): *proven* code is what control flow reaches from function starts
   (the entry, function symbols, unwind entries, relocated pointers into text unless the file
@@ -505,7 +509,7 @@ through the hidden `patina __rewrite` (x86_64; elsewhere it refuses) and the tes
   (RIP-relative, or in a non-PIE file also an absolute operand or immediate). A refusal (an undecodable or
   privileged instruction, two decodes that overlap, an extent branch that misses an
   instruction, code that reads instruction bytes) taints the span between the neighbouring
-  function starts. Everything else is *dark*: counted, never patched. Jump tables are not
+  function starts. `int3` (`cd 03`, Go's breakpoint) is not a refusal: it traps as natively. Everything else is *dark*: counted, never patched. Jump tables are not
   followed and data is not scanned for code pointers: both found code that was not.
 - **Sites and counts** (`points.rs`, `flags.rs`): backward branches, backward calls, indirect
   jumps and atomic instructions. Each patch replaces one whole instruction of 5 bytes or more,
@@ -517,6 +521,16 @@ through the hidden `patina __rewrite` (x86_64; elsewhere it refuses) and the tes
   count writes OF, SF, ZF, AF and PF, so it goes only where a forward scan proves those dead
   (a return or a direct call of a function ends a path; a shift by `cl` and a `rep` compare
   write nothing for certain).
+- **`cpuid`** in found, untainted code that nothing reads or branches into is a site of its
+  own: its two bytes become `ud2` in place, no trampoline. The runtime answers it from the host
+  CPU with the fields that name a core set to core 0's (leaf 1 `EBX[31:24]`, the APIC id; the
+  x2APIC id of leaves 0xB and 0x1F; leaf 0x1A's core type; leaf 0x8000001E's APIC, compute
+  unit and node ids; leaf 0x80000026's): a thread placed on another core reads the same
+  values, which a Go program keeps in registers a point records. Natively those differ by core;
+  the rest is the host's, as without points. A `cpuid` the plan does not cover (dark, tainted,
+  JIT) answers the core's own (`cpuid_unpatched` counts the `0f a2` pairs left, an upper
+  bound). Hosts with `cpuid` faulting are not used for this: one mechanism on every x86_64
+  host.
 - **The plan** (`plan.rs`): the patched text pages, the trampoline blob (placed after the
   image), and a row per patched instruction (its address and length, its trampoline, the
   trap's offset, the copy's offset); counts for a report. It records the file's SHA-256, the
@@ -527,14 +541,61 @@ through the hidden `patina __rewrite` (x86_64; elsewhere it refuses) and the tes
   decisions: its own control flow and linear decodes, then that every changed byte is in a
   patched instruction that is one whole instruction of found code, that no known branch enters
   and no code reads, and that each trampoline counts, traps to its own `ud2` and goes on to
-  the original target or returns right after an exact copy.
+  the original target or returns right after an exact copy; a `cpuid` row is a `ud2` over a
+  `cpuid`, with no trampoline.
 - **The differential** (`standalone.rs`, `tests/rewrite`): `__rewrite --standalone` writes a
   copy of the file with the plan applied that runs natively (its counts address a private cell
   in an added segment); its output is compared with the original's.
 
-Not covered: code made at run time (JIT) and dark code keep today's behaviour (spin probes,
-`compute-stall`). Group patches (a short site merged with its neighbours) are not made: a
-branch from dark code into a merged instruction's start runs garbage.
+In a run (`--preempt points`):
+- **The broker** (`launcher/plans.rs`) runs in the launcher, outside the sandbox, on a thread
+  pinned to the run's CPU. Only a 64-bit ELF file with executable segments, of at most 1 GiB,
+  is read whole; the stall watchdog counts the time a thread waits for a plan as progress. The runtime sends it a descriptor of a file it is about to map
+  executable and the file offset, on a socket the program cannot see (`FD_PLAN`, a hidden
+  descriptor); it answers the plan's placement and run table and one read-only descriptor of
+  the plan file, or that the file has none (not ELF x86_64, no executable segment, refused by
+  the verifier: the file runs unpatched and the report names why). Before the program starts,
+  the launcher plans the program and the libraries it names (in parallel); anything else (a
+  `dlopen`, an `execve`) is planned when it is first mapped, while the asking thread holds the
+  turn: wall time, never virtual time.
+- **The plan cache** (`rewrite/cache.rs`): `$XDG_CACHE_HOME/patina/plans/`, keyed by the file's
+  SHA-256 and the patina build, on the host only. A hit checks the header and the plan file's
+  identity (inode, size, change time) against the record written after it was verified; a
+  changed identity rehashes it, and bytes that are not the verified ones make the plan again.
+  At most 4 GiB, least recently used removed first.
+- **Applying** (`plans.rs`): when the loader or `mmap` maps a private, read-only executable
+  file mapping, the runtime asks for its plan, maps the trampolines after the image
+  (`MAP_FIXED_NOREPLACE`; `ld.so`'s first mapping of a library is given that much room after
+  it, so libraries sit at other addresses than without points) and the patched pages over the
+  text, both private and read-execute from the plan file; the plan's site rows are mapped
+  read-only in the runtime's region. Anonymous or shared executable memory, and memory made
+  executable later (`mprotect`, `pkey_mprotect`), gets no plan and is counted `unplanned`.
+- **A point**: a trampoline's `ud2` is a `SIGILL` in the runtime's fault entry, which finds
+  the site by address and makes it a compute point (the record names the original address),
+  then resumes after the `ud2`. A `ud2` at a `cpuid` row is answered as above, with no record
+  and no virtual time. A count that faults on the cell is `compute-cell`, as for rebuilt code.
+- **Changes**: before the program unmaps, maps over, moves (`mremap`) or reprotects any
+  patched page of an image, the patched pages of every mapping the plan was applied to are
+  mapped back from the original file (counted `dropped`), with the instruction channels'
+  patches written again, and nothing else is touched; its
+  trampolines stay mapped for a thread stopped in one. A program that writes or reprotects
+  its own text (a JIT patching its own code, a hot-patcher) runs that file without points
+  until it maps the file again; trampolines the program changed are never the plan's again
+  (no address there is translated or taken as a point). Trampolines are never placed in the
+  runtime's region.
+- **What the program sees**: a signal frame, a fault record and a backtrace through a
+  trampoline name the original instruction (`proto::plan::shown`: a stop in a copy maps to
+  the same offset of the original, a stop at a count to the instruction it precedes), so
+  unwinding works from the original addresses. `/proc/self/maps` (`plans::Maps`) shows the
+  original file for patched pages, joins them to its lines and leaves out trampolines and the
+  plan file. A read of the program's own text reads the patched bytes; `cpuid` in planned code
+  answers as above. A fork child inherits the mappings and the plan table; an `execve` starts
+  over with the new image's plans.
+
+Not covered: code made at run time (JIT), dark code and dropped plans keep today's behaviour
+(spin probes, `compute-stall`). Group patches (a short site merged with its neighbours) are
+not made: a branch from dark code into a merged instruction's start would run garbage, and
+without them about 13 to 27% of loop back-edges in typical code have no point.
 
 ## The fault plan
 
@@ -734,6 +795,14 @@ Enforced:
   lexical `..` departs from Linux only where the kernel would fail (`/proc/cpuinfo/..` is
   `/proc`, not `ENOTDIR`). Their link counts are computed (`/proc/self/task`: 2 + the
   threads). Regression `sandbox/12-procgaps`.
+- **Load-time plans** (`--preempt points`). The trampolines and patched pages are program
+  memory (read-execute; a program that remaps or reprotects them gets its original pages back,
+  above); the plan cell is program memory with the consequences of the compute-point cell
+  (below). What the runtime trusts of a plan (its placement and site rows) is mapped read-only
+  in the runtime's region. The broker's socket is a hidden descriptor; the plan cache is
+  reachable only by the launcher, outside the sandbox; a cache entry changed on disk is
+  detected and made again. The plan is made and verified on the host, from untrusted file
+  bytes, in safe Rust; the seccomp filter is unchanged (the trampolines make no system call).
 - **The compute-point cell** is program memory outside the runtime's region, read and written
   by the runtime only through its fault-safe guest copy. A program that writes it changes only
   when its own process's next compute point comes and how many events it is charged (at most
@@ -757,6 +826,9 @@ Out of scope (a deliberate attack):
   writable because the kernel writes signal frames there): they sit at fixed addresses no
   program is given. Reading the runtime's text and data with the program's own loads is not
   detected (a system call cannot read them for it: above).
+- A file built to make the rewriter or verifier fail on the host (with `--preempt points`):
+  a panic there ends the launcher, so the run ends without a result, never with the file
+  partly planned.
 - Pointing the stack pointer into the runtime's region before jumping to the stub, or
   `rt_sigreturn` through the stub with a forged frame.
 
@@ -812,12 +884,24 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   preempted; code the scanner does not see (a JIT) keeps its native exclusive pairs, whose
   spurious failures can change the count (a hop walk that meets one gives up for that
   segment); more than 4,096 patched sites in one process stop the run.
+- **Load-time points** (`--preempt points`): x86_64 only; the points are at backward branches,
+  backward calls, indirect jumps and atomics that a single-instruction patch can reach (most,
+  not all: above), so a race between plain accesses with no such instruction between them
+  is not split, as in stock code. Libraries load at other addresses than without points, and a
+  program reading its own text reads the patch. `cpuid`'s core ids are core 0's, but on a
+  hybrid CPU the leaves that differ by core type (caches, TLBs) are the core's, so seeds there
+  repeat only on one kind of core. A plan is found by the file's identity (device, inode, size,
+  change time): a file the program rewrites in place at the same size, on a filesystem whose
+  change times are coarse, can keep the old plan for a moment. At most 64 planned images per
+  process (more run without points, counted `unplanned`). Seeds found without points do not replay with
+  them, or the reverse.
 - **compute-stall**: in stock code without branch counters, a spin-wait whose iterations
   change state ends the run (above).
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
   seed. Rebuilding the code with compute points switches inside it; so does
-  `--preempt branches`, on the CPUs checked exact. Compute points do not split an atomic
+  `--preempt branches`, on the CPUs checked exact, and on x86_64 `--preempt points` at the
+  branches, calls and atomics inside it. Compute points do not split an atomic
   read-modify-write (a `lock`-prefixed instruction; on arm64 an LSE instruction, an
   exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not
   rebuilt), gcc gives edges only, and code not rebuilt (libc, the Go runtime,
@@ -827,7 +911,8 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   operation (`dict.setdefault`, `list.append`) is never split, and C extensions and the
   interpreter's own C code have none.
 - **Stock computation does not advance virtual time**: a CPU-bound loop cannot be cut by
-  `--time-limit` or a program's own deadline, only by `--timeout` (wall time). A loop that
+  `--time-limit` or a program's own deadline, only by `--timeout` (wall time), unless it runs
+  with `--preempt points` and the loop has a point. A loop that
   makes any system call (a clock read) advances it by the per-trap charge. Rebuilt code is
   charged 1 ns per event (Python under `python3 -m patina`, 15 ns per line and jump) and cut at
   the event where a deadline falls due; branch counters charge per branch.

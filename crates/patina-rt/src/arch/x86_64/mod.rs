@@ -65,6 +65,8 @@ pub fn feature_hidden(_w: &[u8]) -> bool {
 
 /// The number of words `Frame::regs_for_record` gives.
 pub const RECORD_WORDS: usize = 18;
+/// The program counter's word in `Frame::regs_for_record`.
+pub const RECORD_PC: usize = 16;
 
 /// x86_64 kernel `ucontext` as delivered on the alternate stack.
 #[derive(Clone, Copy)]

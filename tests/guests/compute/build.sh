@@ -13,7 +13,8 @@
 #   cellpoke          writes into, then unmaps, its own cell
 #   loop, loop-stock  a loop between two clock reads, instrumented and not
 #   mixed             threads, then stock and instrumented children (fork, vfork, exec)
-#   deadline          a timer that falls due inside a loop; an endless loop; CPU clocks
+#   deadline          a timer that falls due inside a loop; an endless loop; CPU clocks;
+#                     deadline-stock the same built without the flags (tests/rewrite/02-points)
 #   rs-race           an atomics check-then-act (Rust, cargo with the flags; Cargo.toml);
 #                     rs-race-stock the same built without them
 #   rs-deadline       a loop that ends when a sleeping thread sets a flag (Rust)
@@ -75,6 +76,7 @@ clang -O2 $cp -o "$out/loop" "$here/loop.c" "$hook"
 clang -O2 -g -o "$out/loop-stock" "$here/loop.c"
 clang -O2 $cp -o "$out/mixed" "$here/mixed.c" "$hook"
 clang -O2 $cp -o "$out/deadline" "$here/deadline.c" "$hook"
+clang -O2 -g -o "$out/deadline-stock" "$here/deadline.c"
 gp="-g -pthread -fsanitize-coverage=trace-pc"
 gcc -O2 -c -o "$out/hook-gcc.o" "$hook"
 gcc -O1 $gp -o "$out/races-gcc" "$g/counters/races.c" "$out/hook-gcc.o"

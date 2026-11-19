@@ -239,9 +239,9 @@ pub const FLAGS: &[Flag] = &[
     flag("--cpus", "N", "4", "CPU count the guest sees (1 to 64)", RUNLIKE),
     flag(
         "--preempt",
-        "traps|branches",
+        "traps|branches|points",
         "traps",
-        "where threads are preempted: system calls and spin-waits, or also after N branches (needs CAP_PERFMON and a supported CPU)",
+        "where threads are preempted: system calls and spin-waits; also after N branches (needs CAP_PERFMON and a supported CPU); or also at switch points written into stock x86_64 code as it loads (loops, backward calls, indirect jumps, atomics)",
         RUNLIKE,
     ),
     flag(

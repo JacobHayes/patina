@@ -821,6 +821,10 @@ impl Sup {
                     });
                     let running = self.running;
                     let sched = &self.sched;
+                    // A plan being made for the holder: wall time only, progress here.
+                    if self.ctl.compute.planning.load(Relaxed) != 0 {
+                        dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+                    }
                     match dog.poll(self.ctl.seq.load(Relaxed), now_ns(), holder, || {
                         sched.waiting_besides(running)
                     }) {

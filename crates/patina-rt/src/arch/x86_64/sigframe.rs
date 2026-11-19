@@ -275,7 +275,14 @@ pub fn deliver(
         );
         return;
     };
-    charge_delivery(sig, handler, f, info, frame.gregs[RIP], frame.gregs[RSP]);
+    charge_delivery(
+        sig,
+        handler,
+        f,
+        info,
+        crate::plans::shown(frame.gregs[RIP]),
+        frame.gregs[RSP],
+    );
     if frame.fpstate != 0 {
         unsafe { fp_init(frame.fpstate) };
     }
@@ -350,6 +357,8 @@ fn write_frame(
         sigmask: mask,
     };
     uc.gregs[OLDMASK] = mask;
+    let pc = uc.gregs[RIP];
+    uc.gregs[RIP] = crate::plans::shown(pc);
     if !fault {
         uc.gregs[ERR] = 0;
         uc.gregs[TRAPNO] = 0;
@@ -361,7 +370,14 @@ fn write_frame(
         // The kernel writes siginfo only for SA_SIGINFO handlers (the bytes are otherwise
         // whatever the stack held; here they are zero).
         info: if flags & SA_SIGINFO != 0 {
-            *info
+            // A fault's address that is the instruction's (SIGILL, SIGFPE, a fetch) is shown
+            // as the instruction is.
+            let mut i = *info;
+            let (signo, code) = (i[0] as u32, i[1] as u32 as i32);
+            if matches!(signo, 4 | 5 | 7 | 8 | 11) && code > 0 && i[2] == pc {
+                i[2] = uc.gregs[RIP];
+            }
+            i
         } else {
             [0; 16]
         },
