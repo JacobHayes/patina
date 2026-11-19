@@ -89,29 +89,35 @@ echo "execve inside a guest answers as the native kernel for $(wc -l <"$d/native
 
 # The same files as the top-level program: what runs prints what it prints natively; what the
 # kernel refuses is `error`, stop `exec`, naming its errno.
-errname() { python3 -I -c 'import errno,sys; print(errno.errorcode[int(sys.argv[1])])' "$1"; }
+# One interpreter start per run (most of the script's time is interpreters starting): the
+# outcome and stop, the name of the errno the native kernel gave (or -), then the message.
+summary() { python3 -I -c 'import errno,json,sys
+r = json.load(open(sys.argv[1]))
+e = sys.argv[2]
+print(r.get("outcome"), r.get("stop"), errno.errorcode[int(e)] if e else "-")
+print(r.get("message"))' "$1" "$2"; }
+error_exit=$(exit_of error)
 nok=0 nerr=0
 for n in $names elf32; do
     want=$(sed -n "s|^$n: ||p" "$d/native.txt")
     prun "$r/top-$n" --seed 1 -- "$d/$n" "x y"
-    o=$(field "$r/top-$n/result.json" outcome)
+    case $want in "errno "*) wn=${want#errno } ;; *) wn= ;; esac
+    v=$(summary "$r/top-$n/result.json" "$wn")
+    read -r o stop en <<<"${v%%$'\n'*}"
+    msg=${v#*$'\n'}
     if [ "$n" = elf32 ]; then
         # The kernel runs it as a 32-bit program; Patina does not.
-        [ "$o:$(field "$r/top-$n/result.json" stop)" = unsupported:exec ] ||
-            die "elf32: want unsupported/exec, got $o: $(field "$r/top-$n/result.json" message)"
+        [ "$o:$stop" = unsupported:exec ] || die "elf32: want unsupported/exec, got $o: $msg"
         continue
     fi
     case $want in
         "errno "*)
-            en=$(errname "${want#errno }")
-            [ "$o:$(field "$r/top-$n/result.json" stop)" = error:exec ] ||
-                die "$n: want error/exec ($en), got $o: $(field "$r/top-$n/result.json" message)"
-            field "$r/top-$n/result.json" message | grep -qw "$en" ||
-                die "$n: the message does not name $en: $(field "$r/top-$n/result.json" message)"
-            [ "$st" = "$(exit_of error)" ] || die "$n: exit $st"
+            [ "$o:$stop" = error:exec ] || die "$n: want error/exec ($en), got $o: $msg"
+            grep -qw "$en" <<<"$msg" || die "$n: the message does not name $en: $msg"
+            [ "$st" = "$error_exit" ] || die "$n: exit $st"
             nerr=$((nerr + 1)) ;;
         *)
-            [ "$o" = ok ] || die "$n: $o: $(field "$r/top-$n/result.json" message)"
+            [ "$o" = ok ] || die "$n: $o: $msg"
             [ "$(tr -d '\n' <"$r/top-$n/inc-0/stdout")" = "$want" ] ||
                 die "$n: stdout $(cat "$r/top-$n/inc-0/stdout"), natively $want"
             nok=$((nok + 1)) ;;
@@ -147,7 +153,7 @@ echo "an interpreter outside the sandbox is named with $e to mount; mounted, the
 cp "$d/ok.sh" "$d/unreadable" && chmod 0111 "$d/unreadable"
 for n in dir unreadable; do
     prun "$r/pre-$n" --seed 1 -- "$d/$n"
-    [ "$st" = "$(exit_of error)" ] && [ ! -e "$r/pre-$n/result.json" ] || die "$n: exit $st"
+    [ "$st" = "$error_exit" ] && [ ! -e "$r/pre-$n/result.json" ] || die "$n: exit $st"
 done
 echo "a directory and an unreadable file are refused before the run"
 
