@@ -25,7 +25,10 @@ for k in sys.argv[2].split("."):
     v=v[k]
 print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
 res() { echo "$(field "$1/result.json" outcome)/$(field "$1/result.json" stop): $(field "$1/result.json" message)"; }
-G=$PATINA_GUESTS
+# The guests by their resolved path: the sandbox binds the program's directory at the path it
+# is given, so through a symlink Patina's maps (with points or without) name that path where the
+# native run's name the resolved one.
+G=$(realpath "$PATINA_GUESTS")
 F=$G/rw-fid
 o=$RUNS/03-fidelity
 rm -rf "${o:?}"
