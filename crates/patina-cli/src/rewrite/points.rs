@@ -506,11 +506,16 @@ pub fn emit(code: &Code, patches: &BTreeMap<u64, (Form, u8)>, tramp_vaddr: u64) 
         // touch are few (only pages holding a trampoline are stored).
         let place = |x: u64| {
             let mut t = fit(tramp_vaddr + x, end, mask);
-            let k = 7 - mask.leading_zeros() as u64;
-            let stripe = |t: u64| (t - end) >> (8 * k);
-            if mask & 0b110 != 0 && stripe(t) != stripe(tramp_vaddr + x) {
-                while TRAP_BYTES.contains(&(stripe(t) as u8).wrapping_add(1)) {
-                    t += 1 << (8 * k);
+            if mask & 0b110 != 0 {
+                // The displacement's highest constrained byte (the mask is not 0 here), and
+                // the displacement as `fit` takes it: modulo 2^64, a trampoline below its
+                // site included.
+                let k = 7 - mask.leading_zeros() as u64;
+                let stripe = |t: u64| t.wrapping_sub(end) >> (8 * k);
+                if stripe(t) != stripe(tramp_vaddr + x) {
+                    while TRAP_BYTES.contains(&(stripe(t) as u8).wrapping_add(1)) {
+                        t += 1 << (8 * k);
+                    }
                 }
             }
             t - tramp_vaddr

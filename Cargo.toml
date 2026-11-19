@@ -10,6 +10,15 @@ resolver = "2"
 panic = "abort"
 debug = 1
 
+# Our own arithmetic overflows stop the binary (and fail the unit tests, which run in release)
+# instead of wrapping silently; intended wrapping is written `wrapping_*`.
+[profile.release.package.patina-cli]
+overflow-checks = true
+[profile.release.package.patina-proto]
+overflow-checks = true
+[profile.release.package.patina-dst]
+overflow-checks = true
+
 [workspace.package]
 version = "0.15.0"
 edition = "2024"
