@@ -125,6 +125,7 @@ fn main() -> ExitCode {
         Cmd::Recheck => recheck::main(&a),
         Cmd::Minimize => minimize::main(&a),
         Cmd::Ctl => Ok(ctl::main(&a.positional)),
+        Cmd::Cache => rewrite::cache::main(&a).map_err(error),
     };
     r.unwrap_or_else(|Fail(o, e)| {
         // A full filesystem (ENOSPC, EDQUOT) is named, as the supervisor names it in a run.

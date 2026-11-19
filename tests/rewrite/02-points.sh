@@ -17,7 +17,10 @@
 #     the processor's identity registers, which the kernel answers;
 #  e. the plan cache: the first run makes the program's plan, the next hits it; a byte of the
 #     plan file changed (same size, its modification time put back) makes the next run rebuild
-#     it, with the first run's digest.
+#     it, with the first run's digest;
+#  f. a plan is made once across processes: two cold runs of one program that both find its
+#     entry held wait for it, and one of them makes the plan, the other uses it; a cold sweep
+#     makes its program's plans before its runs start, so none of its runs makes one.
 #@ tier=quick budget=60 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
@@ -115,3 +118,37 @@ d1=$(field "$o/rw-c-1/run-0/result.json" digest)
 d2=$(field "$o/changed/result.json" digest)
 [ "$d1" != - ] && [ "$d1" = "$d2" ] || die "e. the rebuilt plan's run differs from the first"
 echo "e. plan cache: made, hit, a changed entry rebuilt (same digest)"
+
+# f. In a fresh cache, this script holds rw-c's entry lock (its name: the plan made above) while
+#    two runs start, until both wait on it.
+base=$(basename "$plan" .plan)
+fresh=$o/cache-f
+mkdir -p "$fresh/patina/plans"
+made() { python3 -I -c 'import json,sys
+print(sum(i["cache"] == "made" for d in sys.argv[1:] for i in json.load(open(d + "/result.json"))["rewrite"]["images"]))' "$@"; }
+exec 9>"$fresh/patina/plans/$base.lock"
+flock 9
+inode=$(stat -c %i "$fresh/patina/plans/$base.lock")
+# The runs do not inherit the held lock (descriptor 9).
+XDG_CACHE_HOME=$fresh pts --seed 1 --out "$o/lock-1" -- "$G/rw-c" 9>&- &
+p1=$!
+XDG_CACHE_HOME=$fresh pts --seed 1 --out "$o/lock-2" -- "$G/rw-c" 9>&- &
+p2=$!
+waiting=0
+for _ in $(seq 600); do
+    waiting=$(awk -v i=":$inode " 'index($0, "->") && index($0, i) { n++ } END { print n + 0 }' /proc/locks)
+    [ "$waiting" -lt 2 ] || break
+    kill -0 "$p1" 2>/dev/null || kill -0 "$p2" 2>/dev/null || break
+    sleep 0.1
+done
+exec 9>&-
+wait "$p1" "$p2"
+[ "$waiting" -ge 2 ] || die "f. the two runs did not both wait on the entry ($waiting waiting)"
+[ "$(made "$o/lock-1" "$o/lock-2")" = 1 ] || die "f. two runs that waited on one entry made its plan $(made "$o/lock-1" "$o/lock-2") times"
+XDG_CACHE_HOME=$o/cache-sweep "$PATINA" sweep --preempt points --seeds 1..4 -j 4 --keep all \
+    --out "$o/sweep" -- "$G/rw-c" >"$o/sweep.txt" 2>&1 || true
+runs=$(find "$o/sweep" -name result.json -path '*seed-*' -printf '%h\n' | sort)
+[ -n "$runs" ] || die "f. the sweep left no run: $(tail -3 "$o/sweep.txt")"
+# shellcheck disable=SC2086
+[ "$(made $runs)" = 0 ] || die "f. runs of a cold sweep made $(made $runs) plans"
+echo "f. a plan made once: two cold runs, one makes it; a cold sweep's runs make none"

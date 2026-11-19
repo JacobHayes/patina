@@ -272,14 +272,16 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
 }
 
 /// With `--preempt points`, the run's plans: made for the program and the libraries it names
-/// before the sandbox starts (on as many threads as the host offers, at most 8), the rest when
-/// the runtime asks (`launcher::plans`).
+/// before the sandbox starts (on the CPUs this process may use, at most 8), the rest when the
+/// runtime asks (`launcher::plans`).
 fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
     if !o.cfg.points {
         return Ok(None);
     }
-    let p = crate::launcher::plans::Planner::new(crate::result::build()?);
-    let jobs = std::thread::available_parallelism().map_or(1, |n| n.get().min(8));
-    crate::rewrite::cache::warm_all(&p, &o.program.host, jobs);
+    let p = crate::launcher::plans::Planner::new(
+        crate::result::build()?,
+        crate::rewrite::default_threads(),
+    );
+    crate::rewrite::cache::warm_all(&p, &o.program.host);
     Ok(Some(std::sync::Arc::new(p)))
 }

@@ -583,8 +583,9 @@ evidence evidence-corpus`, 622 s with 50 runs each and the census) and `rewrite/
 | Census: every ELF file in `/usr/bin` and the system library directory, planned and verified | 1,142 files; 0 rejected by the verifier; 9 refused (relocatable objects) | | | | | | not run |
 
 "Dark" is text no control flow or unwind extent reaches: Chromium's is mostly code reached only
-through tables (no jump-table following, by design). Rewrite time is one thread with verification
-excluded; Chromium's peak memory was 1.1 GB. A site not patched is flags live (no point in its
+through tables (no jump-table following, by design). Rewrite time is one thread with
+verification excluded, before plans were made on several ("Making plans on several threads",
+below); Chromium's peak memory was 1.1 GB. A site not patched is flags live (no point in its
 block or run where the flags are dead), no room (no run of 5 bytes or more that no known branch
 enters), or tainted (a span with a refusal). The CLI binary grows by 324 kB stripped (+5.4%)
 with `iced-x86` (decoder and instruction info only); its clean build takes 2.3 to 2.8 s.
@@ -748,6 +749,44 @@ address order, took it; a word whose address `adr` takes (which code can read) w
 `x16` row for a call to a label inside the caller's own function, where `x16` may be live; the
 verifier did not taint the span around a refused word, and missed trampoline bytes over the
 image when the span started inside it.
+
+### Making plans on several threads
+
+The first run under `--preempt points` makes the plans of every file it maps (above: the
+"cold" column). Plans are now made on up to 8 threads, with the same bytes. Measured
+2026-11-19 on the host above and on a GitHub `ubuntu-24.04-arm` runner (4 CPUs), by hand:
+`patina run --preempt points` with an empty plan cache, then again warm; wall seconds, the
+least of 3 (the runs above: ripgrep, CPython, headless Chromium; clang compiling `diff.cc`),
+before and after the change.
+
+| Program | x86_64 cold, before / after (warm) | arm64 cold, before / after (warm) |
+|---|---|---|
+| ripgrep 15.2.0 | 1.39 / 0.70 s (0.54) | 0.33 / 0.17 s (0.06) |
+| CPython (3.14 here, 3.12 on the runner) and 8 libraries | 0.96 / 0.54 s (0.13) | 0.72 / 0.53 s (0.26) |
+| clang (21 here, 18 on the runner) and its libraries (7 files; 19) | 8.77 / 3.81 s (0.68) | 6.90 / 4.68 s (2.71) |
+| headless Chromium (49 files; 57) | 16.60 / 6.62 s (1.75) | 22.10 / 7.67 s (3.40) |
+| A cold sweep, `-j 8`, seeds 1..3, of Chromium: wall; plans its runs made | 17.6 / 6.9 s; 93 / 3 (46 before them) | 41.0 / 11.2 s; 59 / 6 (the rest before them) |
+| The same of `rw-c` (x86_64), ripgrep (arm64) | 0.31 / 0.26 s; 3 / 0 (1 before them) | 0.59 / 0.28 s; 3 / 0 (1 before them) |
+
+Same digests before and after in every row, and for `rw-cxx`, `rw-go`, `rw-rs` and `rw-races`
+(seeds 1 and 2). Chromium's own plan (x86_64, 167 MB, 2.74 million patches) took 13.2 s on
+one thread before: the rewriter's analysis 1.9 s, site selection 2.4, emission 1.9, `cpuid`
+sites 1.3, the census 1.2, the verifier 4.0, and the file hashed up to five times and read
+twice. Now 4.3 s in the run: selection, emission, the census and the verifier's checks run in
+parts; the verifier's decodes run while the plan is made; the file is read and hashed once.
+What stays on one thread is the analysis's control-flow descent (about 1.2 s) and patch
+placement (0.4 s). A sweep made each plan once per run before (each run pinned to one CPU);
+it now makes the programs' plans once on its job count before the runs start, and a file a
+run meets later (a `dlopen`) is made by the first run to meet it while the others wait for it
+(`rewrite/02-points` f).
+
+Byte identity: Chromium's plan on 8 threads, on one, and from the build before are the same
+bytes but for the build string in the header (x86_64 here; arm64's 282 MB headless shell on
+the runner with 4 threads and one, and here); `rewrite/01-differential` plans every guest on 8
+threads and on one and compares. Red/green: accepting a part's speculative choice without
+checking the patches before it fails `01-differential` (`rw-c`'s two plans differ); without
+the entry lock `02-points` f fails (the two runs do not wait); without the sweep's planning
+first, its runs make plans.
 
 ### Walks: switches inside straight-line code
 

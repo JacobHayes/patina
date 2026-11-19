@@ -3,19 +3,24 @@
 
 use super::code::{Code, TAINT};
 use super::flags::dead_at;
+use super::par::Par;
 use super::plan::{Plan, KIND_BEFORE, KIND_INTERIOR, KIND_JUMP, PAGE, TRAP_BYTES};
 use super::points::{self, relocatable, Class, Outcome};
 use super::verify::verify;
-use super::x86::make_plan;
+
+/// The plan of the file `f` on one thread.
+fn make_plan(f: &[u8], build: &str) -> crate::cli::Res<Plan> {
+    super::x86::make_plan(&super::elf::Elf::parse(f)?, build, &Par::one())
+}
 
 const BASE: u64 = 0x40_1000;
 
 fn analyze<'a>(code: &'a [u8], anchors: &[u64], extents: &[(u64, u64)]) -> Code<'a> {
-    Code::analyze(&[(BASE, code)], anchors, extents, true)
+    Code::analyze(&[(BASE, code)], anchors, extents, true, &Par::one())
 }
 
 fn outcome(code: &Code, at: u64) -> Option<Outcome> {
-    points::select(code)
+    points::select(code, &Par::one())
         .0
         .into_iter()
         .find(|c| c.addr == at)
@@ -92,8 +97,8 @@ fn bytes_no_control_flow_reaches_are_dark_and_not_patched() {
     let code = program();
     let c = analyze(&code, &[BASE], &[]);
     assert!(c.len_at(BASE + 0x20).is_none());
-    assert!(c.census().dark > 0);
-    assert!(points::select(&c)
+    assert!(c.census(&Par::one()).dark > 0);
+    assert!(points::select(&c, &Par::one())
         .0
         .iter()
         .all(|ch| ch.addr < BASE + 0x1f || ch.addr >= BASE + 0x40));
@@ -162,7 +167,7 @@ fn a_jump_into_a_would_be_patch_taints_it() {
     let c = analyze(&code, &[BASE], &[]);
     assert!(c.refusals.conflict > 0);
     assert_eq!(outcome(&c, BASE + 0xa), Some(Outcome::Tainted));
-    assert!(points::select(&c).1.is_empty());
+    assert!(points::select(&c, &Par::one()).1.is_empty());
 }
 
 /// Short backward branches: the count moves to a 5-byte instruction of the block, or of the
@@ -208,7 +213,8 @@ fn a_count_is_not_placed_where_flags_are_live() {
 }
 
 fn dead(code: &[u8]) -> bool {
-    dead_at(&analyze(code, &[BASE], &[]), BASE)
+    let c = analyze(code, &[BASE], &[]);
+    dead_at(&c, &mut c.dec(), BASE)
 }
 
 #[test]

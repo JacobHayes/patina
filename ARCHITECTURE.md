@@ -744,8 +744,14 @@ which decodes no instruction.
   address the runtime answers in place (a `cpuid`, an interior boundary and its copy); counts
   for a report. It records the file's SHA-256, the
   patina build and the cell address (`0x7fff0000`, reachable from any image by a 32-bit
-  absolute operand). It is a pure function of the file and the build: one thread, ordered
-  maps, no host input.
+  absolute operand). It is a pure function of the file and the build: ordered maps, no host
+  input, and the same bytes on any number of threads (`par.rs`: the work is cut into parts of
+  the input whose results merge in input order; one thread runs the parts in order, the
+  sequential algorithm itself). Greedy site selection, where each choice depends on the patches
+  before it, is chosen for each part from no patches and then checked in order: a part's choice
+  stands while every earlier choice of that part stood and the lowest address it looked at is
+  past the end of every patch of the parts before it; otherwise it is chosen again on the real
+  state. `rewrite/01-differential` compares 8 threads with one.
 - **The verifier** (`verify.rs`) checks a plan against its file without the rewriter's
   decisions: its own control flow and linear decodes, then that every changed byte is in a
   patched instruction that is one whole instruction of found code, that no known branch enters
@@ -754,7 +760,8 @@ which decodes no instruction.
   code ending at most in a direct branch, copied at the same offsets, each interior boundary a
   faulting byte that is no known target, and the plan's interior rows are exactly its groups'
   boundaries, each naming its own copy; a `cpuid` row is a `ud2` over a `cpuid`, with no
-  trampoline.
+  trampoline. Its decodes need no plan, so they run while the plan is made; the checks of
+  sites and pages run in parts, their findings in address order.
 - **The differential** (`standalone.rs`, `tests/rewrite`): `__rewrite --standalone` writes a
   copy of the file with the plan applied that runs natively (its counts address a private cell
   in an added segment; when it has groups, a stub before its entry installs `SIGTRAP` and
@@ -827,7 +834,12 @@ In a run (`--preempt points`):
   SHA-256 and the patina build, on the host only. A hit checks the header and the plan file's
   identity (inode, size, change time) against the record written after it was verified; a
   changed identity rehashes it, and bytes that are not the verified ones make the plan again.
-  At most 4 GiB, least recently used removed first.
+  At most 4 GiB, least recently used removed first. A miss is made under an exclusive
+  `flock` on the entry's `.lock` file and looked up again once the lock is held, so processes
+  that meet one file at once make it once; a sweep with `--preempt points` makes its programs'
+  plans before its runs start (each run is pinned to one CPU, the sweep has the job count).
+  Planning that takes longer than a second (ten when stderr is not a terminal) prints one line
+  on stderr; `patina cache` shows the directory, `patina cache clear` empties it.
 - **Applying** (`plans.rs`): when the loader or `mmap` maps a private, read-only executable
   file mapping, the runtime asks for its plan, maps the trampolines after the image
   (`MAP_FIXED_NOREPLACE`; `ld.so`'s first mapping of a library is given that much room after

@@ -1955,8 +1955,19 @@ it is the same on every host; each is checked by an independent verifier before 
 and kept in `~/.cache/patina/plans/` (`$XDG_CACHE_HOME`; at most 4 GiB, the least recently used
 removed first; deleting it costs only time). Patina plans the program and the libraries it
 names before the run starts, and any other file (a `dlopen`, an `execve`) when it is mapped.
-The first run pays for making them: 0.5 s for ripgrep, 0.8 s for CPython and its libraries,
-14 s for headless Chromium (49 files); later runs read them (docs/EVIDENCE.md).
+The first run pays for making them, on up to 8 threads (the plan is the same bytes on any
+number): 0.2 s for ripgrep, 0.4 s for CPython and its libraries, 3 s for clang, 5 s for
+headless Chromium (49 files); later runs read them (docs/EVIDENCE.md). A sweep makes them once,
+before its runs start, and runs or sweeps that meet one file at once make it once between
+them. When planning takes longer than a second, one line on stderr says so:
+
+<!-- no-run planning-notice: printed while a cold run plans headless Chromium; the directory is the host's -->
+```text
+patina: --preempt points: planning chrome-headless-shell and 45 more files, once: plans are kept in ~/.cache/patina/plans
+```
+
+`patina cache` prints where the plans are, how many and how large; `patina cache clear`
+deletes them.
 
 **What is not covered.**
 - On x86_64, about 1 to 3% of sites in typical code (as many loop back-edges) have no patch

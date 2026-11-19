@@ -10,6 +10,7 @@ mod tests;
 pub mod verify;
 
 use super::elf::Elf;
+use super::par::Par;
 use super::plan::{Pages, Plan, CELL, PAGE};
 use crate::cli::Res;
 use points::{Outcome, Place};
@@ -56,13 +57,13 @@ pub fn pages(elf: &Elf, patched: &[(u64, Vec<u8>)]) -> Res<Vec<Pages>> {
     Ok(runs)
 }
 
-pub fn make_plan(elf: &Elf, build: &str) -> Res<Plan> {
-    plan_placed(elf, build, !elf.exec)
+pub fn make_plan(elf: &Elf, build: &str, par: &Par) -> Res<Plan> {
+    plan_placed(elf, build, !elf.exec, par)
 }
 
 /// The plan, with trampolines before the image allowed or not (`below`): a standalone copy
 /// cannot place them there.
-pub fn plan_placed(elf: &Elf, build: &str, below: bool) -> Res<Plan> {
+pub fn plan_placed(elf: &Elf, build: &str, below: bool, par: &Par) -> Res<Plan> {
     let text: Vec<(u64, &[u8])> = elf.text.iter().map(|t| (t.addr, elf.bytes(t))).collect();
     if text.iter().any(|(a, _)| a % 4 != 0) {
         return Err("an executable section that is not word-aligned".into());
@@ -80,14 +81,7 @@ pub fn plan_placed(elf: &Elf, build: &str, below: bool) -> Res<Plan> {
             && (!elf.bti || code.word(to).is_some_and(insn::x16_pad))
     };
     let after = tramp_vaddr(elf);
-    let mut em = points::emit(
-        &code,
-        Place {
-            after,
-            before: None,
-        },
-        &far,
-    );
+    let emit = |before| points::emit(&code, Place { after, before }, &far);
     let unreached = |e: &points::Emitted| {
         e.choices
             .iter()
@@ -96,7 +90,9 @@ pub fn plan_placed(elf: &Elf, build: &str, below: bool) -> Res<Plan> {
     };
     // Sites out of reach of trampolines after the image: those in its lower half get theirs
     // before it instead (only where the image is placed at load time, so below it is free).
-    if below && unreached(&em) > 0 {
+    // Both placements are made at once when there is a thread for it, and the second is used
+    // only where the first leaves sites out of reach, as in order.
+    let both = below.then(|| {
         let start = elf.image_start() & !(PAGE - 1);
         let gap = elf.loads.iter().map(|l| l.align).max().unwrap_or(0);
         let gap = if gap > PAGE {
@@ -105,14 +101,17 @@ pub fn plan_placed(elf: &Elf, build: &str, below: bool) -> Res<Plan> {
             0
         };
         let split = start + (elf.image_end() - start) / 2;
-        let both = points::emit(
-            &code,
-            Place {
-                after,
-                before: Some((start.wrapping_sub(gap), split)),
-            },
-            &far,
-        );
+        (start.wrapping_sub(gap), split)
+    });
+    let (mut em, ahead) = match both {
+        Some(b) if par.threads() > 1 => {
+            let (em, both) = par.join(|| emit(None), || emit(Some(b)));
+            (em, Some(both))
+        }
+        _ => (emit(None), None),
+    };
+    if let Some(b) = both.filter(|_| unreached(&em) > 0) {
+        let both = ahead.unwrap_or_else(|| emit(Some(b)));
         if unreached(&both) < unreached(&em) {
             em = both;
         }

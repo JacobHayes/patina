@@ -27,8 +27,9 @@
 //! and none may be on the prefixes, the opcode or d3. The plan lists each interior boundary
 //! (`KIND_INTERIOR`) with the copy of its instruction, where the runtime resumes a jump there.
 
-use super::code::{direct_target, Code, ADDR, READ, TAINT, TARGET};
+use super::code::{direct_target, Code, Dec, ADDR, READ, TAINT, TARGET};
 use super::flags::dead_at;
+use super::par::Par;
 use super::plan::{
     Entry, Site, CELL, KIND_BEFORE, KIND_CPUID, KIND_INTERIOR, KIND_JUMP, NO_COPY, PAD_PREFIX,
     PAGE, TRAP_BYTES,
@@ -185,19 +186,51 @@ pub fn fit(t0: u64, e: u64, mask: u8) -> u64 {
 
 struct Select<'c, 'a> {
     code: &'c Code<'a>,
-    /// Each patch by its first byte: its form and length.
+    dec: Dec<'a>,
+    /// Each patch by its first byte: its form and length. Patches never overlap.
     patches: BTreeMap<u64, (Form, u8)>,
+    /// Since `start`: the lowest address whose patch was asked for, and the patch placed.
+    lo: std::cell::Cell<u64>,
+    put: Option<(u64, Form, u8)>,
 }
 
-impl Select<'_, '_> {
-    /// The patch whose bytes hold `x`.
+impl<'c, 'a> Select<'c, 'a> {
+    fn new(code: &'c Code<'a>) -> Select<'c, 'a> {
+        Select {
+            code,
+            dec: code.dec(),
+            patches: BTreeMap::new(),
+            lo: std::cell::Cell::new(u64::MAX),
+            put: None,
+        }
+    }
+
+    /// The patch whose bytes hold `x` (the one patch that covers it: they never overlap).
     fn owner(&self, x: u64) -> Option<u64> {
+        self.lo.set(self.lo.get().min(x));
         let (&a, &(_, n)) = self.patches.range(..=x).next_back()?;
         (x < a + n as u64).then_some(a)
     }
 
     fn counts_at(&self, x: u64) -> bool {
+        self.lo.set(self.lo.get().min(x));
         matches!(self.patches.get(&x), Some((Form::Before, _)))
+    }
+
+    fn insert(&mut self, x: u64, form: Form, n: u8) {
+        self.patches.insert(x, (form, n));
+        self.put = Some((x, form, n));
+    }
+
+    /// Where the count of the site at `a` goes: the patch it is in already, or its own choice;
+    /// what it asked of the patches placed (`lo`) and placed (`put`).
+    fn choose(&mut self, a: u64, i: &Instruction, class: Class) -> Outcome {
+        self.lo.set(u64::MAX);
+        self.put = None;
+        match self.owner(a) {
+            Some(x) => Outcome::Shared(x),
+            None => self.site(a, i, class),
+        }
     }
 
     /// A count before the instruction at `x`: `Some(true)` placed or already there,
@@ -206,7 +239,7 @@ impl Select<'_, '_> {
         if self.counts_at(x) {
             return Some(true);
         }
-        let i = self.code.insn(x)?;
+        let i = self.code.insn_in(&mut self.dec, x)?;
         if i.len() < 5
             || !relocatable(&i)
             || self.code.flags(x) & TAINT != 0
@@ -214,10 +247,10 @@ impl Select<'_, '_> {
         {
             return None;
         }
-        if !dead_at(self.code, x) {
+        if !dead_at(self.code, &mut self.dec, x) {
             return Some(false);
         }
-        self.patches.insert(x, (Form::Before, i.len() as u8));
+        self.insert(x, Form::Before, i.len() as u8);
         Some(true)
     }
 
@@ -243,7 +276,7 @@ impl Select<'_, '_> {
         'start: for i in (0..seq.len()).rev() {
             let (mut n, mut bounds) = (0usize, vec![]);
             for &x in &seq[i..] {
-                let Some(ins) = self.code.insn(x) else {
+                let Some(ins) = self.code.insn_in(&mut self.dec, x) else {
                     continue 'start;
                 };
                 let raw = self.code.bytes(x, ins.len()).unwrap_or(&[]);
@@ -266,11 +299,11 @@ impl Select<'_, '_> {
             if n < 5 || bounds.is_empty() || layout(&bounds, n).is_none() {
                 continue;
             }
-            if !dead_at(self.code, seq[i]) {
+            if !dead_at(self.code, &mut self.dec, seq[i]) {
                 *live = true;
                 continue;
             }
-            self.patches.insert(seq[i], (Form::Before, n as u8));
+            self.insert(seq[i], Form::Before, n as u8);
             return Some(seq[i]);
         }
         None
@@ -278,11 +311,11 @@ impl Select<'_, '_> {
 
     /// The straight-line run that ends at `s`, nearest first: no branch target between it and
     /// `s`, so every arrival at `s` passed it.
-    fn block_before(&self, s: u64) -> Vec<u64> {
+    fn block_before(&mut self, s: u64) -> Vec<u64> {
         let (mut out, mut b) = (vec![], s);
         while out.len() < 16 && self.code.flags(b) & TARGET == 0 {
             let Some(p) = self.code.prev(b) else { break };
-            match self.code.insn(p) {
+            match self.code.insn_in(&mut self.dec, p) {
                 Some(i)
                     if i.flow_control() == FlowControl::Next && i.mnemonic() != Mnemonic::Hlt => {}
                 _ => break,
@@ -294,10 +327,12 @@ impl Select<'_, '_> {
     }
 
     /// The straight-line run from `l`: every pass through `l` runs all of it.
-    fn run_from(&self, mut l: u64, max: usize) -> Vec<u64> {
+    fn run_from(&mut self, mut l: u64, max: usize) -> Vec<u64> {
         let mut out = vec![];
         while out.len() < max {
-            let Some(i) = self.code.insn(l) else { break };
+            let Some(i) = self.code.insn_in(&mut self.dec, l) else {
+                break;
+            };
             out.push(l);
             if i.flow_control() != FlowControl::Next || i.mnemonic() == Mnemonic::Hlt {
                 break;
@@ -325,12 +360,12 @@ impl Select<'_, '_> {
         match in_place {
             // The flags are dead at a function's entry.
             Some(Form::Call) => {
-                self.patches.insert(s, (Form::Call, 5));
+                self.insert(s, Form::Call, 5);
                 return Outcome::InPlace(s);
             }
             Some(f @ (Form::Jmp | Form::Jcc)) => {
-                if dead_at(self.code, i.near_branch_target()) {
-                    self.patches.insert(s, (f, raw.len() as u8));
+                if dead_at(self.code, &mut self.dec, i.near_branch_target()) {
+                    self.insert(s, f, raw.len() as u8);
                     return Outcome::InPlace(s);
                 }
                 live = true;
@@ -379,24 +414,61 @@ impl Select<'_, '_> {
 
 /// Every site, in address order, with where its count goes; and the patches that places (by
 /// first byte: form and length).
-pub fn select(code: &Code) -> (Vec<Choice>, BTreeMap<u64, (Form, u8)>) {
-    let mut s = Select {
-        code,
-        patches: BTreeMap::new(),
+///
+/// A site's choice depends on the choices before it only through the patches it asks about
+/// (`owner`, `counts_at`), all at or above the lowest address it asks about. On several
+/// threads, each part of the sites is chosen at once from no patches; then in order, a site
+/// whose part placed the same patches as the whole order did so far, and that asks about
+/// nothing below the end of every patch the parts before it placed, would choose the same and
+/// is taken as it is; any other is chosen again on the whole order's patches (and once one
+/// such places otherwise, the rest of its part too).
+pub fn select(code: &Code, par: &Par) -> (Vec<Choice>, BTreeMap<u64, (Form, u8)>) {
+    // Finding the sites is per instruction; choosing where their counts go is in order.
+    let sites = code.starts_with(par, |d, a| {
+        let i = code.insn_in(d, a)?;
+        classify(&i).map(|class| (i, class))
+    });
+    let mut s = Select::new(code);
+    let choice = |a: u64, class: Class, outcome: Outcome| Choice {
+        class,
+        addr: a,
+        outcome,
     };
-    let mut out = vec![];
-    for a in code.starts() {
-        let Some(i) = code.insn(a) else { continue };
-        if let Some(class) = classify(&i) {
-            let outcome = match s.owner(a) {
-                Some(x) => Outcome::Shared(x),
-                None => s.site(a, &i, class),
+    if par.threads() == 1 {
+        let out = sites
+            .iter()
+            .map(|&(a, (ref i, class))| choice(a, class, s.choose(a, i, class)))
+            .collect();
+        return (out, s.patches);
+    }
+    let bounds = par.parts(sites.len(), |part| part);
+    let ahead = par.each(&bounds, |_, part| {
+        let mut p = Select::new(code);
+        sites[part.clone()]
+            .iter()
+            .map(|&(a, (ref i, class))| (p.choose(a, i, class), p.lo.get(), p.put))
+            .collect::<Vec<_>>()
+    });
+    let mut out = Vec::with_capacity(sites.len());
+    let mut end = 0;
+    for (part, ahead) in bounds.into_iter().zip(ahead) {
+        let below = end;
+        let mut same = true;
+        for (&(a, (ref i, class)), (o, lo, put)) in sites[part].iter().zip(ahead) {
+            let (o, put) = if same && lo >= below {
+                if let Some((x, f, n)) = put {
+                    s.patches.insert(x, (f, n));
+                }
+                (o, put)
+            } else {
+                let again = s.choose(a, i, class);
+                same &= again == o && s.put == put;
+                (again, s.put)
             };
-            out.push(Choice {
-                class,
-                addr: a,
-                outcome,
-            });
+            if let Some((x, _, n)) = put {
+                end = end.max(x + n as u64);
+            }
+            out.push(choice(a, class, o));
         }
     }
     (out, s.patches)
@@ -436,34 +508,38 @@ const SMALLEST: u64 = 19;
 impl Space {
     fn take(&mut self, lo: u64, len: u64, place: impl Fn(u64) -> u64) -> u64 {
         let first = self.free.range(..=lo).next_back().map_or(lo, |(&s, _)| s);
-        let cand: Vec<(u64, u64)> = self
+        let (s, e, x) = self
             .free
             .range(first..)
             .take(64)
             .chain(self.free.iter().next_back())
-            .map(|(&s, &e)| (s, e))
-            .collect();
-        for (s, e) in cand {
-            let x = place(s.max(lo));
-            if x.checked_add(len).is_some_and(|end| end <= e) {
-                self.free.remove(&s);
-                if x - s >= SMALLEST {
-                    self.free.insert(s, x);
-                }
-                if e - (x + len) >= SMALLEST || e == u64::MAX {
-                    self.free.insert(x + len, e);
-                }
-                return x;
-            }
+            .find_map(|(&s, &e)| {
+                let x = place(s.max(lo));
+                x.checked_add(len)
+                    .is_some_and(|end| end <= e)
+                    .then_some((s, e, x))
+            })
+            .expect("the top interval is unbounded");
+        self.free.remove(&s);
+        if x - s >= SMALLEST {
+            self.free.insert(s, x);
         }
-        unreachable!("the top interval is unbounded")
+        if e - (x + len) >= SMALLEST || e == u64::MAX {
+            self.free.insert(x + len, e);
+        }
+        x
     }
 }
 
 /// One patch's instructions: address, decode, original bytes.
 type Insns<'a> = Vec<(u64, Instruction, &'a [u8])>;
 
-pub fn emit(code: &Code, patches: &BTreeMap<u64, (Form, u8)>, tramp_vaddr: u64) -> Emitted {
+pub fn emit(
+    code: &Code,
+    patches: &BTreeMap<u64, (Form, u8)>,
+    tramp_vaddr: u64,
+    par: &Par,
+) -> Emitted {
     let mut e = Emitted {
         sites: vec![],
         entries: vec![],
@@ -475,27 +551,46 @@ pub fn emit(code: &Code, patches: &BTreeMap<u64, (Form, u8)>, tramp_vaddr: u64) 
     };
     // Each patch's instructions and layout; those whose trampoline's address is constrained
     // are placed first, then the rest fill around them.
-    let mut work = vec![];
-    for (&a, &(form, n)) in patches {
-        let mut ins: Insns = vec![];
-        let mut x = a;
-        while x < a + n as u64 {
-            let Some(i) = code.insn(x) else { break };
-            ins.push((x, i, code.bytes(x, i.len()).unwrap()));
-            x += i.len() as u64;
+    let patches: Vec<(u64, Form, u8)> = patches.iter().map(|(&a, &(f, n))| (a, f, n)).collect();
+    let laid = par.parts(patches.len(), |part| {
+        let (mut out, mut d) = (vec![], code.dec());
+        for &(a, form, n) in &patches[part] {
+            let mut ins: Insns = vec![];
+            let mut x = a;
+            while x < a + n as u64 {
+                let Some(i) = code.insn_in(&mut d, x) else {
+                    break;
+                };
+                ins.push((x, i, code.bytes(x, i.len()).unwrap()));
+                x += i.len() as u64;
+            }
+            let bounds: Vec<usize> = ins[1..].iter().map(|&(x, ..)| (x - a) as usize).collect();
+            out.push(
+                match layout(&bounds, n as usize).filter(|_| x == a + n as u64) {
+                    Some((p, mask)) => Ok((mask == 0, a, form, n, ins, p, mask)),
+                    None => Err(a),
+                },
+            );
         }
-        let bounds: Vec<usize> = ins[1..].iter().map(|&(x, ..)| (x - a) as usize).collect();
-        let Some((p, mask)) = layout(&bounds, n as usize).filter(|_| x == a + n as u64) else {
-            e.far.insert(a);
-            continue;
-        };
-        work.push((mask == 0, a, form, n, ins, p, mask));
+        out
+    });
+    let mut work = vec![];
+    for w in laid.into_iter().flatten() {
+        match w {
+            Ok(w) => work.push(w),
+            Err(a) => {
+                e.far.insert(a);
+            }
+        }
     }
     work.sort_by_key(|w| (w.0, w.1));
     let mut space = Space {
         free: BTreeMap::from([(0, u64::MAX)]),
     };
-    let (mut top, mut cursor, mut next) = (0, 0, None);
+    // Where each goes, in order (each place depends on the ones before); then the trampolines
+    // themselves, each a function of its own place.
+    let (mut cursor, mut next) = (0, None);
+    let mut placed = Vec::with_capacity(work.len());
     for (_, a, form, n, ins, p, mask) in work {
         let len = tramp_len(form, &ins);
         let end = a + p as u64 + 5;
@@ -531,29 +626,42 @@ pub fn emit(code: &Code, patches: &BTreeMap<u64, (Form, u8)>, tramp_vaddr: u64) 
         } else {
             next.unwrap_or(x)
         });
-        let t = tramp_vaddr + x;
-        let Some((b, mut site)) = trampoline(a, &ins, form, t) else {
-            e.far.insert(a);
-            continue;
-        };
-        let mut patch = match form {
-            Form::Call => vec![0xe8],
-            Form::Jmp | Form::Before => vec![PAD_PREFIX; p].into_iter().chain([0xe9]).collect(),
-            Form::Jcc => vec![0x0f, ins[0].2[1]],
-        };
-        let Some(d) = rel32(a + patch.len() as u64 + 4, t) else {
-            e.far.insert(a);
-            continue;
-        };
-        patch.extend_from_slice(&d);
-        patch.resize(n as usize, 0xcc);
-        if ins[1..]
+        placed.push((x, a, form, n, ins, p));
+    }
+    let made = par.parts(placed.len(), |part| {
+        placed[part]
             .iter()
-            .any(|&(y, ..)| !TRAP_BYTES.contains(&patch[(y - a) as usize]))
-        {
-            unreachable!("fit places every interior boundary on a trapping byte");
-        }
-        site.tramp = x as u32;
+            .map(|&(x, a, form, n, ref ins, p)| {
+                let t = tramp_vaddr + x;
+                let (b, mut site) = trampoline(a, ins, form, t)?;
+                let mut patch = match form {
+                    Form::Call => vec![0xe8],
+                    Form::Jmp | Form::Before => {
+                        vec![PAD_PREFIX; p].into_iter().chain([0xe9]).collect()
+                    }
+                    Form::Jcc => vec![0x0f, ins[0].2[1]],
+                };
+                let d = rel32(a + patch.len() as u64 + 4, t)?;
+                patch.extend_from_slice(&d);
+                patch.resize(n as usize, 0xcc);
+                if ins[1..]
+                    .iter()
+                    .any(|&(y, ..)| !TRAP_BYTES.contains(&patch[(y - a) as usize]))
+                {
+                    unreachable!("fit places every interior boundary on a trapping byte");
+                }
+                site.tramp = x as u32;
+                Some((b, site, patch))
+            })
+            .collect::<Vec<_>>()
+    });
+    let mut top = 0;
+    for ((x, a, _, _, ins, _), m) in placed.iter().zip(made.into_iter().flatten()) {
+        let (x, a) = (*x, *a);
+        let Some((b, site, patch)) = m else {
+            e.far.insert(a);
+            continue;
+        };
         top = top.max(x + b.len() as u64);
         if e.tramp.len() < top as usize {
             e.tramp.resize(top as usize, 0);
@@ -581,27 +689,42 @@ pub fn emit(code: &Code, patches: &BTreeMap<u64, (Form, u8)>, tramp_vaddr: u64) 
 /// Every `cpuid` in eligible code becomes `ud2`, a `KIND_CPUID` entry the runtime answers.
 /// Returns the count patched, and the `0F A2` byte pairs left elsewhere in the text: an upper
 /// bound on the `cpuid`s in dark or tainted code, which run unanswered.
-pub fn cpuid_sites(code: &Code, em: &mut Emitted) -> (u64, u64) {
-    let mut found = vec![];
-    for a in code.starts() {
-        // As for every patch: untainted, its bytes not read as data, no address taken inside.
-        let clean =
-            code.flags(a) & (TAINT | READ) == 0 && code.flags(a + 1) & (READ | ADDR | TARGET) == 0;
-        if clean
-            && code
-                .insn(a)
-                .is_some_and(|i| i.mnemonic() == Mnemonic::Cpuid)
-        {
-            found.push(a);
-        }
-    }
+pub fn cpuid_sites(code: &Code, em: &mut Emitted, par: &Par) -> (u64, u64) {
+    // `cpuid` is `0f a2` with no operand: an instruction whose last two bytes are not that is
+    // no `cpuid`, and is not decoded again.
+    let found: Vec<u64> = code
+        .starts_with(par, |d, a| {
+            // As for every patch: untainted, its bytes not read as data, no address taken inside.
+            let clean = code.flags(a) & (TAINT | READ) == 0
+                && code.flags(a + 1) & (READ | ADDR | TARGET) == 0;
+            let n = code.len_at(a)?;
+            let tail = (n >= 2).then(|| code.bytes(a + n as u64 - 2, 2)).flatten();
+            (clean
+                && tail == Some(&[0x0f, 0xa2][..])
+                && code
+                    .insn_in(d, a)
+                    .is_some_and(|i| i.mnemonic() == Mnemonic::Cpuid))
+            .then_some(())
+        })
+        .into_iter()
+        .map(|(a, ())| a)
+        .collect();
     let mut unpatched = 0;
     for r in &code.regions {
-        for (o, w) in r.bytes.windows(2).enumerate() {
-            if w == [0x0f, 0xa2] && found.binary_search(&(r.addr + o as u64)).is_err() {
-                unpatched += 1;
-            }
-        }
+        let pairs = r.bytes.len().saturating_sub(1);
+        unpatched += par
+            .parts(pairs, |part| {
+                let mut n = 0u64;
+                for o in part {
+                    let a = r.addr + o as u64;
+                    if r.bytes[o..o + 2] == [0x0f, 0xa2] && found.binary_search(&a).is_err() {
+                        n += 1;
+                    }
+                }
+                n
+            })
+            .iter()
+            .sum::<u64>();
     }
     for &a in &found {
         em.entries.push(Entry {

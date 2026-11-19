@@ -6,6 +6,7 @@
 //! between the neighbouring function starts. Only untainted proven or extent code is eligible
 //! for a patch; dark code is counted, never patched.
 
+use super::par::Par;
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
 
 /// Per-byte state: 0 not decoded, 1..=15 the start of an instruction of that length, else the
@@ -43,7 +44,7 @@ pub struct Refusals {
     pub read: u64,
 }
 
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Census {
     pub text: u64,
     pub proven: u64,
@@ -146,6 +147,19 @@ fn ends_flow(i: &Instruction) -> bool {
     ) || i.mnemonic() == Mnemonic::Hlt
 }
 
+/// A decoder per region, kept: making a decoder costs about as much as one decode. Decoding
+/// at an offset of the whole region is decoding the bytes from that offset to the region's end.
+pub struct Dec<'a>(Vec<Decoder<'a>>);
+
+impl Dec<'_> {
+    fn at(&mut self, i: usize, o: usize, ip: u64) -> Instruction {
+        let d = &mut self.0[i];
+        d.set_position(o).expect("an offset inside the region");
+        d.set_ip(ip);
+        d.decode()
+    }
+}
+
 pub fn decode_at(bytes: &[u8], base: u64, pos: usize) -> Instruction {
     let mut d = Decoder::with_ip(64, &bytes[pos..], base + pos as u64, DecoderOptions::NONE);
     d.decode()
@@ -159,6 +173,7 @@ impl<'a> Code<'a> {
         anchors: &[u64],
         extents: &[(u64, u64)],
         absolute: bool,
+        par: &Par,
     ) -> Code<'a> {
         let regions = text
             .iter()
@@ -187,7 +202,7 @@ impl<'a> Code<'a> {
                 break;
             }
         }
-        c.check_extent_branches(&mut bad);
+        c.check_extent_branches(&mut bad, par);
         c.check_reads(&mut bad);
         c.taint(&bad);
         c
@@ -220,12 +235,20 @@ impl<'a> Code<'a> {
         (1..=15).contains(&s).then_some(s as usize)
     }
 
-    /// The decoded instruction at `a`, an instruction start.
-    pub fn insn(&self, a: u64) -> Option<Instruction> {
+    /// Decoders for this code's regions (`insn_in`).
+    pub fn dec(&self) -> Dec<'a> {
+        Dec(self
+            .regions
+            .iter()
+            .map(|r| Decoder::with_ip(64, r.bytes, r.addr, DecoderOptions::NONE))
+            .collect())
+    }
+
+    /// `insn`, with the decoders `d`.
+    pub fn insn_in(&self, d: &mut Dec<'a>, a: u64) -> Option<Instruction> {
         self.len_at(a)?;
         let (i, o) = self.find(a)?;
-        let r = &self.regions[i];
-        Some(decode_at(r.bytes, r.addr, o))
+        Some(d.at(i, o, a))
     }
 
     /// The original bytes of `len` bytes at `a`.
@@ -246,23 +269,78 @@ impl<'a> Code<'a> {
         ((1..=15).contains(&l) && s + l == o + 1).then(|| self.regions[i].addr + s as u64)
     }
 
-    /// Every decoded instruction start, in address order.
-    pub fn starts(&self) -> impl Iterator<Item = u64> + '_ {
-        self.regions.iter().flat_map(|r| {
-            let mut o = 0;
-            std::iter::from_fn(move || {
-                while o < r.st.len() {
+    /// A walk over region `i`'s offsets from its first, where `step(o, acc)` adds what offset
+    /// `o` gives to `acc` and returns the next offset (past `o`): what each part of the region
+    /// gave, in order. On several threads each part is walked from a decoded instruction start
+    /// at once; a part the walk enters at another offset (a padding run, say, ran past its
+    /// start) is walked again from there, so the result is the one walk's on any thread count.
+    pub fn walk<T: Send>(
+        &self,
+        i: usize,
+        par: &Par,
+        init: impl Fn() -> T + Sync,
+        step: impl Fn(usize, &mut T) -> usize + Sync,
+    ) -> Vec<T> {
+        let r = &self.regions[i];
+        let n = r.bytes.len();
+        let mut cuts: Vec<usize> = par
+            .parts(n, |p| p.start)
+            .into_iter()
+            .map(|mut o| {
+                while o > 0 && o < n && !(1..=15).contains(&r.st[o]) {
+                    o += 1;
+                }
+                o
+            })
+            .chain([n])
+            .collect();
+        cuts.dedup();
+        let span = |a: usize, b: usize| {
+            let (mut acc, mut o) = (init(), a);
+            while o < b {
+                o = step(o, &mut acc);
+            }
+            (acc, o)
+        };
+        let parts: Vec<(usize, usize)> = cuts.windows(2).map(|w| (w[0], w[1])).collect();
+        let ahead = par.each(&parts, |_, &(a, b)| span(a, b));
+        let mut at = 0;
+        let mut out = vec![];
+        for ((a, b), (acc, end)) in parts.into_iter().zip(ahead) {
+            let (acc, end) = if at == a { (acc, end) } else { span(at, b) };
+            out.push(acc);
+            at = end;
+        }
+        out
+    }
+
+    /// Every decoded instruction start of region `i` that `keep` keeps, with what it gives, in
+    /// address order.
+    pub fn starts_with<T: Send>(
+        &self,
+        par: &Par,
+        keep: impl Fn(&mut Dec<'a>, u64) -> Option<T> + Sync,
+    ) -> Vec<(u64, T)> {
+        let mut out = vec![];
+        for i in 0..self.regions.len() {
+            let r = &self.regions[i];
+            let parts = self.walk(
+                i,
+                par,
+                || (vec![], self.dec()),
+                |o, (acc, d): &mut (Vec<(u64, T)>, Dec<'a>)| {
                     let s = r.st[o];
                     if (1..=15).contains(&s) {
                         let a = r.addr + o as u64;
-                        o += s as usize;
-                        return Some(a);
+                        acc.extend(keep(d, a).map(|t| (a, t)));
+                        return o + s as usize;
                     }
-                    o += 1;
-                }
-                None
-            })
-        })
+                    o + 1
+                },
+            );
+            out.extend(parts.into_iter().flat_map(|p| p.0));
+        }
+        out
     }
 
     /// The start of the instruction whose interior holds byte `o` of region `i`.
@@ -331,6 +409,8 @@ impl<'a> Code<'a> {
             let Some((i, mut o)) = self.find(a) else {
                 continue;
             };
+            let (bytes, base) = (self.regions[i].bytes, self.regions[i].addr);
+            let mut d = Decoder::with_ip(64, bytes, base, DecoderOptions::NONE);
             loop {
                 let r = &self.regions[i];
                 if o >= r.bytes.len() || (1..=15).contains(&r.st[o]) {
@@ -342,7 +422,9 @@ impl<'a> Code<'a> {
                     bad.extend([ip, self.covering(i, o)]);
                     break;
                 }
-                let ins = decode_at(r.bytes, r.addr, o);
+                d.set_position(o).expect("inside the region");
+                d.set_ip(ip);
+                let ins = d.decode();
                 let n = ins.len();
                 if refused(&ins) || o + n > r.bytes.len() {
                     self.refusals.invalid += 1;
@@ -415,17 +497,17 @@ impl<'a> Code<'a> {
     }
 
     /// Every direct branch of extent code lands on a decoded instruction.
-    fn check_extent_branches(&mut self, bad: &mut Vec<u64>) {
-        let starts: Vec<u64> = self.starts().collect();
-        for a in starts {
+    fn check_extent_branches(&mut self, bad: &mut Vec<u64>, par: &Par) {
+        let missed = self.starts_with(par, |d, a| {
             if self.flags(a) & EXTENT == 0 {
-                continue;
+                return None;
             }
-            let t = self.insn(a).as_ref().and_then(direct_target);
-            if let Some(t) = t.filter(|&t| self.find(t).is_some() && self.len_at(t).is_none()) {
-                self.refusals.extent += 1;
-                bad.extend([a, t]);
-            }
+            let t = self.insn_in(d, a).as_ref().and_then(direct_target);
+            t.filter(|&t| self.find(t).is_some() && self.len_at(t).is_none())
+        });
+        for (a, t) in missed {
+            self.refusals.extent += 1;
+            bad.extend([a, t]);
         }
     }
 
@@ -471,39 +553,54 @@ impl<'a> Code<'a> {
     }
 
     /// Bytes by kind: proven, extent, padding (undecoded `int3`, `nop` forms or zero), dark.
-    pub fn census(&self) -> Census {
+    pub fn census(&self, par: &Par) -> Census {
         let mut c = Census::default();
-        for r in &self.regions {
+        for (i, r) in self.regions.iter().enumerate() {
             c.text += r.bytes.len() as u64;
-            c.tainted += r.fl.iter().filter(|&&f| f & TAINT != 0).count() as u64;
-            let mut o = 0;
-            while o < r.bytes.len() {
-                let s = r.st[o];
-                if (1..=15).contains(&s) {
-                    c.instructions += 1;
-                    if r.fl[o] & EXTENT != 0 {
-                        c.extent += s as u64;
-                    } else {
-                        c.proven += s as u64;
+            c.tainted += par
+                .parts(r.fl.len(), |p| {
+                    r.fl[p].iter().filter(|&&f| f & TAINT != 0).count() as u64
+                })
+                .iter()
+                .sum::<u64>();
+            let parts = self.walk(
+                i,
+                par,
+                || (Census::default(), self.dec()),
+                |o, (c, d): &mut (Census, Dec<'a>)| {
+                    let s = r.st[o];
+                    if (1..=15).contains(&s) {
+                        c.instructions += 1;
+                        if r.fl[o] & EXTENT != 0 {
+                            c.extent += s as u64;
+                        } else {
+                            c.proven += s as u64;
+                        }
+                        return o + s as usize;
                     }
-                    o += s as usize;
-                    continue;
-                }
-                let ins = decode_at(r.bytes, r.addr, o);
-                let n = if matches!(r.bytes[o], 0xcc | 0x00) {
-                    1
-                } else if !ins.is_invalid() && ins.mnemonic() == Mnemonic::Nop {
-                    ins.len().min(r.bytes.len() - o)
-                } else {
-                    0
-                };
-                if n > 0 {
-                    c.padding += n as u64;
-                    o += n;
-                } else {
-                    c.dark += 1;
-                    o += 1;
-                }
+                    let ins = d.at(i, o, r.addr + o as u64);
+                    let n = if matches!(r.bytes[o], 0xcc | 0x00) {
+                        1
+                    } else if !ins.is_invalid() && ins.mnemonic() == Mnemonic::Nop {
+                        ins.len().min(r.bytes.len() - o)
+                    } else {
+                        0
+                    };
+                    if n > 0 {
+                        c.padding += n as u64;
+                        o + n
+                    } else {
+                        c.dark += 1;
+                        o + 1
+                    }
+                },
+            );
+            for (p, _) in parts {
+                c.proven += p.proven;
+                c.extent += p.extent;
+                c.padding += p.padding;
+                c.dark += p.dark;
+                c.instructions += p.instructions;
             }
         }
         c

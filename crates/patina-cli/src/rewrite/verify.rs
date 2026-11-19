@@ -23,6 +23,7 @@
 //! trampoline.
 
 use super::elf::{Elf, Text};
+use super::par::Par;
 use super::plan::{
     Entry, Plan, CELL, KIND_BEFORE, KIND_CPUID, KIND_INTERIOR, KIND_JUMP, NO_COPY, PAD_PREFIX,
     PAGE, TRAP_BYTES,
@@ -47,12 +48,12 @@ fn decode(bytes: &[u8], ip: u64) -> Instruction {
     Decoder::with_ip(64, bytes, ip, DecoderOptions::NONE).decode()
 }
 
-struct Finder<'a> {
+pub struct Found<'a> {
     elf: &'a Elf<'a>,
     seen: Vec<Seen>,
 }
 
-impl Finder<'_> {
+impl Found<'_> {
     fn mark(&mut self, a: u64, m: u8) {
         if let Some((i, o)) = self.at(a) {
             self.seen[i].mark[o] |= m;
@@ -60,7 +61,7 @@ impl Finder<'_> {
     }
 }
 
-impl Finder<'_> {
+impl<'a> Found<'a> {
     fn at(&self, a: u64) -> Option<(usize, usize)> {
         let i = self
             .seen
@@ -68,6 +69,24 @@ impl Finder<'_> {
             .checked_sub(1)?;
         let o = a.wrapping_sub(self.seen[i].t.addr) as usize;
         (o < self.seen[i].t.len).then_some((i, o))
+    }
+
+    /// `insn` with a decoder per text range kept (`decoders`): making a decoder costs about
+    /// as much as one decode.
+    fn insn_in(&self, decs: &mut [Decoder], a: u64) -> Option<Instruction> {
+        let (i, o) = self.at(a)?;
+        let d = &mut decs[i];
+        d.set_position(o).ok()?;
+        d.set_ip(a);
+        let i = d.decode();
+        (!i.is_invalid()).then_some(i)
+    }
+
+    fn decoders(&self) -> Vec<Decoder<'a>> {
+        self.seen
+            .iter()
+            .map(|s| Decoder::with_ip(64, self.elf.bytes(&s.t), s.t.addr, DecoderOptions::NONE))
+            .collect()
     }
 
     fn insn(&self, a: u64) -> Option<Instruction> {
@@ -112,7 +131,7 @@ impl Finder<'_> {
     }
 
     /// Control flow from `work`; a decode that would overlap one already made stops.
-    fn flow(&mut self, mut work: Vec<u64>) {
+    fn flow(&mut self, mut work: Vec<u64>, decs: &mut [Decoder]) {
         for &a in &work {
             if let Some((i, o)) = self.at(a) {
                 self.seen[i].mark[o] |= 1;
@@ -123,7 +142,9 @@ impl Finder<'_> {
                 if self.seen[i].flow[o] != 0 {
                     break;
                 }
-                let Some(ins) = self.insn(a) else { break };
+                let Some(ins) = self.insn_in(decs, a) else {
+                    break;
+                };
                 let n = ins.len();
                 let s = &self.seen[i];
                 let lo = o.saturating_sub(14);
@@ -153,7 +174,7 @@ impl Finder<'_> {
 
     /// Each extent decoded linearly from its start to its end or an invalid instruction; the
     /// direct targets of what it decoded.
-    fn linear(&mut self) -> Vec<u64> {
+    fn linear(&mut self, decs: &mut [Decoder]) -> Vec<u64> {
         let mut targets = vec![];
         for k in 0..self.elf.extents.len() {
             let (mut a, hi) = self.elf.extents[k];
@@ -163,7 +184,9 @@ impl Finder<'_> {
                 if s.flow[o] == 0 && s.mark[o] & 6 != 0 {
                     break;
                 }
-                let Some(ins) = self.insn(a) else { break };
+                let Some(ins) = self.insn_in(decs, a) else {
+                    break;
+                };
                 let n = ins.len();
                 if o + n > self.seen[i].t.len {
                     break;
@@ -179,23 +202,61 @@ impl Finder<'_> {
     }
 }
 
-/// The bytes of `len` at `vaddr` as the plan maps them.
+/// The bytes of `len` at `vaddr` as the plan maps them (its page runs are in address order,
+/// as `Plan::from_bytes` checks).
 fn plan_bytes(plan: &Plan, vaddr: u64, len: usize) -> Option<&[u8]> {
-    let p = plan
+    let k = plan
         .pages
-        .iter()
-        .find(|p| vaddr >= p.vaddr && vaddr + len as u64 <= p.vaddr + p.bytes.len() as u64)?;
+        .partition_point(|p| p.vaddr <= vaddr)
+        .checked_sub(1)?;
+    let p = &plan.pages[k];
+    if vaddr + len as u64 > p.vaddr + p.bytes.len() as u64 {
+        return None;
+    }
     let o = (vaddr - p.vaddr) as usize;
     Some(&p.bytes[o..o + len])
 }
 
+impl<'a> Found<'a> {
+    /// The code of `elf` by this verifier's own rules: control flow from the anchors, each
+    /// extent linearly, control flow from what those reach. Needs no plan, so it runs while
+    /// the plan is made.
+    pub fn new(elf: &'a Elf<'a>) -> Found<'a> {
+        let mut f = Found {
+            elf,
+            seen: elf
+                .text
+                .iter()
+                .map(|&t| Seen {
+                    t,
+                    flow: vec![0; t.len],
+                    linear: vec![0; t.len],
+                    mark: vec![0; t.len],
+                })
+                .collect(),
+        };
+        let mut decs = f.decoders();
+        f.flow(elf.anchors.clone(), &mut decs);
+        let more = f.linear(&mut decs);
+        f.flow(more, &mut decs);
+        f
+    }
+}
+
 /// Every way `plan` fails to be a sound plan for `data`; empty when it is one.
+#[cfg(test)]
 pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
+    match Elf::parse(data) {
+        Ok(elf) => check(&Found::new(&elf), plan, &Par::one()),
+        Err(e) => vec![e],
+    }
+}
+
+/// Every way `plan` fails to be a sound plan for the file whose code `f` found; empty when it
+/// is one. Sites and pages are checked in parts on `par`'s threads, the findings in order.
+pub fn check(f: &Found, plan: &Plan, par: &Par) -> Vec<String> {
     let mut bad = vec![];
-    let elf = match Elf::parse(data) {
-        Ok(e) => e,
-        Err(e) => return vec![e],
-    };
+    let elf = f.elf;
     if plan.sha256 != elf.sha256 {
         return vec!["the plan is for another file (SHA-256 differs)".into()];
     }
@@ -217,23 +278,14 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
             plan.cell
         ));
     }
-    let mut f = Finder {
-        elf: &elf,
-        seen: elf
-            .text
-            .iter()
-            .map(|&t| Seen {
-                t,
-                flow: vec![0; t.len],
-                linear: vec![0; t.len],
-                mark: vec![0; t.len],
-            })
-            .collect(),
-    };
-    f.flow(elf.anchors.clone());
-    let more = f.linear();
-    f.flow(more);
 
+    if plan
+        .pages
+        .windows(2)
+        .any(|w| w[0].vaddr + w[0].bytes.len() as u64 > w[1].vaddr)
+    {
+        bad.push("the page runs are not in address order".into());
+    }
     // The site table: in order of the trampolines, disjoint, inside the plan; the entries in
     // address order, each a cpuid or an interior boundary some group has.
     let mut ranges: Vec<(u64, u64)> = vec![];
@@ -242,18 +294,30 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
     if plan.sites.windows(2).any(|w| w[0].tramp > w[1].tramp) {
         bad.push("the site rows are not in order of their trampolines".into());
     }
-    for s in &plan.sites {
+    let checked = par.parts(plan.sites.len(), |part| {
+        plan.sites[part]
+            .iter()
+            .map(|s| {
+                let t1 = s.tramp as u64 + s.tramp_len as u64;
+                if t1 > plan.tramp.len() as u64 || s.trap as u64 + 2 > s.tramp_len as u64 {
+                    return Err(None);
+                }
+                check_site(f, plan, s.addr, s.len as usize, s).map_err(Some)
+            })
+            .collect::<Vec<_>>()
+    });
+    for (s, c) in plan.sites.iter().zip(checked.into_iter().flatten()) {
         ranges.push((s.addr, s.addr.saturating_add(s.len as u64)));
         let (t0, t1) = (s.tramp as u64, s.tramp as u64 + s.tramp_len as u64);
-        if t1 > plan.tramp.len() as u64 || s.trap as u64 + 2 > s.tramp_len as u64 {
-            bad.push(format!("site {:#x}: trampoline outside the span", s.addr));
-            continue;
+        match c {
+            Err(None) => {
+                bad.push(format!("site {:#x}: trampoline outside the span", s.addr));
+                continue;
+            }
+            Ok(inner) => interiors.extend(inner),
+            Err(Some(e)) => bad.push(format!("site {:#x}: {e}", s.addr)),
         }
         tramps.push((t0, t1));
-        match check_site(&f, plan, s.addr, s.len as usize, s) {
-            Ok(inner) => interiors.extend(inner),
-            Err(e) => bad.push(format!("site {:#x}: {e}", s.addr)),
-        }
     }
     if plan.entries.windows(2).any(|w| w[0].addr >= w[1].addr) {
         bad.push("the entries are not in address order".into());
@@ -264,7 +328,7 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
         match n.kind {
             KIND_CPUID => {
                 ranges.push((n.addr, n.addr.saturating_add(2)));
-                if let Err(e) = check_cpuid(&f, plan, n) {
+                if let Err(e) = check_cpuid(f, plan, n) {
                     bad.push(format!("entry {:#x}: {e}", n.addr));
                 }
             }
@@ -288,9 +352,19 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
     }
 
     // Every changed byte lies in a patched instruction.
-    for p in &plan.pages {
-        for (k, page) in p.bytes.chunks(PAGE as usize).enumerate() {
-            let v = p.vaddr + k as u64 * PAGE;
+    let pages: Vec<(u64, &[u8])> = plan
+        .pages
+        .iter()
+        .flat_map(|p| {
+            p.bytes
+                .chunks(PAGE as usize)
+                .enumerate()
+                .map(|(k, page)| (p.vaddr + k as u64 * PAGE, page))
+        })
+        .collect();
+    let paged = par.parts(pages.len(), |part| {
+        let mut bad = vec![];
+        for &(v, page) in &pages[part] {
             let Some(orig) = elf.original_page(v) else {
                 bad.push(format!("page {v:#x}: not in an executable segment"));
                 continue;
@@ -308,12 +382,14 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
                 }
             }
         }
-    }
+        bad
+    });
+    bad.extend(paged.into_iter().flatten());
     bad
 }
 
 /// A `KIND_CPUID` entry: a `cpuid` found as code, now `ud2` in place.
-fn check_cpuid(f: &Finder, plan: &Plan, n: &Entry) -> Result<(), String> {
+fn check_cpuid(f: &Found, plan: &Plan, n: &Entry) -> Result<(), String> {
     check_place(f, n.addr, 2)?;
     if f.insn(n.addr).map(|i| i.mnemonic()) != Some(Mnemonic::Cpuid) {
         return Err("a cpuid entry that is not a cpuid".into());
@@ -355,7 +431,7 @@ fn straight(i: &Instruction) -> bool {
 
 /// The patched instruction at `a`, `n` bytes, is one found as code, and nothing else decodes,
 /// branches into, reads or takes an address inside it.
-fn check_place(f: &Finder, a: u64, n: usize) -> Result<(), String> {
+fn check_place(f: &Found, a: u64, n: usize) -> Result<(), String> {
     let (i, o) = f.at(a).ok_or("not in an executable section")?;
     let seen = &f.seen[i];
     if o + n > seen.t.len {
@@ -388,7 +464,7 @@ fn check_place(f: &Finder, a: u64, n: usize) -> Result<(), String> {
 /// A site's patch and trampoline; for a group, its interior entries as they must be listed
 /// (address, trampoline offset of the copy).
 fn check_site(
-    f: &Finder,
+    f: &Found,
     plan: &Plan,
     a: u64,
     n: usize,

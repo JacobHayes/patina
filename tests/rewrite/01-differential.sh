@@ -1,6 +1,7 @@
 # 1. The rewriter's differential (ARCHITECTURE "Load-time rewriting"). Each static guest of
 # tests/guests/rewrite (C static and static-PIE, C++, Rust, Go) is planned twice (the plans must be
-# byte-identical; the second from another directory on one CPU), the plan is checked by the
+# byte-identical; the first on 8 threads, the second on one thread from another directory on one
+# CPU: the parallel parts merge to the sequential order's bytes), the plan is checked by the
 # independent verifier and against objdump's decode, and a copy with the plan applied
 # (`__rewrite --standalone`) runs natively: its output equals the original's in each of RUNS_EACH
 # runs, and its counts do run (a copy whose cell starts at 1000 events stops on its trap: x86_64
@@ -18,9 +19,9 @@ arch=$(uname -m)
 for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
     f=$PATINA_GUESTS/$g
     [ -x "$f" ] || die "missing guest $f"
-    "$PATINA" __rewrite "$f" --plan "$o/$g.plan" >"$o/$g.report"
-    (cd "$o/elsewhere" && taskset -c 0 "$PATINA" __rewrite "$f" --plan "$o/$g.plan2" >/dev/null)
-    cmp -s "$o/$g.plan" "$o/$g.plan2" || die "$g: two plans of one file differ"
+    "$PATINA" __rewrite "$f" --plan "$o/$g.plan" --threads 8 >"$o/$g.report"
+    (cd "$o/elsewhere" && taskset -c 0 "$PATINA" __rewrite "$f" --plan "$o/$g.plan2" --threads 1 >/dev/null)
+    cmp -s "$o/$g.plan" "$o/$g.plan2" || die "$g: two plans of one file differ (8 threads, 1 thread)"
     "$PATINA" __rewrite --verify "$f" "$o/$g.plan" >"$o/$g.verify" 2>&1 || die "$g: the verifier rejects the plan ($(head -3 "$o/$g.verify"))"
     "$PATINA" __rewrite --sites "$o/$g.plan" >"$o/$g.sites"
     objdump -d -w "$f" | python3 -I "$HERE/lib/objdump_sites.py" "$o/$g.sites" >"$o/$g.check"

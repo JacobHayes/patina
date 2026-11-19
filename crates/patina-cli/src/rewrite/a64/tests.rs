@@ -324,7 +324,7 @@ fn a_call_to_a_target_out_of_reach_goes_through_x16() {
     let p = bytes(&[0x1400_0002, 0xd65f_03c0, 0x97ff_ffff, 0xd65f_03c0]);
     let f = elf(&p);
     let e = crate::rewrite::elf::Elf::parse(&f).unwrap();
-    let good = super::make_plan(&e, "test").unwrap();
+    let good = super::make_plan(&e, "test", &crate::rewrite::par::Par::one()).unwrap();
     assert_eq!(verify(&f, &good), Vec::<String>::new());
     let got = verify(
         &f,
@@ -373,12 +373,20 @@ fn trampolines_before_the_image() {
 #[test]
 fn plans_are_deterministic_and_round_trip() {
     let f = elf(&program());
-    let a = super::make_plan(&crate::rewrite::elf::Elf::parse(&f).unwrap(), "test")
-        .unwrap()
-        .to_bytes();
-    let b = super::make_plan(&crate::rewrite::elf::Elf::parse(&f).unwrap(), "test")
-        .unwrap()
-        .to_bytes();
+    let a = super::make_plan(
+        &crate::rewrite::elf::Elf::parse(&f).unwrap(),
+        "test",
+        &crate::rewrite::par::Par::one(),
+    )
+    .unwrap()
+    .to_bytes();
+    let b = super::make_plan(
+        &crate::rewrite::elf::Elf::parse(&f).unwrap(),
+        "test",
+        &crate::rewrite::par::Par::one(),
+    )
+    .unwrap()
+    .to_bytes();
     assert_eq!(a, b);
     let p = Plan::from_bytes(&a).unwrap();
     assert_eq!(p.to_bytes(), a);
@@ -390,7 +398,12 @@ fn plans_are_deterministic_and_round_trip() {
 #[test]
 fn the_verifier_rejects_corrupted_plans() {
     let f = elf(&program());
-    let good = super::make_plan(&crate::rewrite::elf::Elf::parse(&f).unwrap(), "test").unwrap();
+    let good = super::make_plan(
+        &crate::rewrite::elf::Elf::parse(&f).unwrap(),
+        "test",
+        &crate::rewrite::par::Par::one(),
+    )
+    .unwrap();
     assert_eq!(verify(&f, &good), Vec::<String>::new());
     assert_eq!(good.sites.len(), 4);
     let find = |k: u8| good.sites.iter().position(|s| s.kind == k).unwrap();
@@ -552,7 +565,12 @@ fn the_verifier_rejects_a_count_inside_an_exclusive_pair_or_on_its_retry() {
         0xd65f_03c0,
     ]);
     let f = elf(&p);
-    let good = super::make_plan(&crate::rewrite::elf::Elf::parse(&f).unwrap(), "test").unwrap();
+    let good = super::make_plan(
+        &crate::rewrite::elf::Elf::parse(&f).unwrap(),
+        "test",
+        &crate::rewrite::par::Par::one(),
+    )
+    .unwrap();
     assert_eq!(verify(&f, &good), Vec::<String>::new());
     assert!(good.sites.is_empty());
     // A plan whose one site is the `cbz` inside the pair, or the retry `cbnz`.
@@ -624,7 +642,12 @@ fn no_count_on_the_way_back_from_a_failed_store_exclusive() {
         ]
     );
     let f = elf(&p);
-    let good = super::make_plan(&crate::rewrite::elf::Elf::parse(&f).unwrap(), "test").unwrap();
+    let good = super::make_plan(
+        &crate::rewrite::elf::Elf::parse(&f).unwrap(),
+        "test",
+        &crate::rewrite::par::Par::one(),
+    )
+    .unwrap();
     assert_eq!(verify(&f, &good), Vec::<String>::new());
     let got = verify(
         &f,
@@ -651,7 +674,12 @@ fn no_count_on_the_way_back_from_a_failed_store_exclusive() {
         ]
     );
     let f = elf(&p);
-    let good = super::make_plan(&crate::rewrite::elf::Elf::parse(&f).unwrap(), "test").unwrap();
+    let good = super::make_plan(
+        &crate::rewrite::elf::Elf::parse(&f).unwrap(),
+        "test",
+        &crate::rewrite::par::Par::one(),
+    )
+    .unwrap();
     assert_eq!(verify(&f, &good), Vec::<String>::new());
     assert_eq!(good.sites.len(), 1);
 }
@@ -730,7 +758,7 @@ fn no_count_on_a_call_in_a_pair_a_word_whose_address_is_taken_or_beside_data() {
         let mut f = elf(p);
         f[0x18..0x20].copy_from_slice(&entry.to_le_bytes());
         let e = crate::rewrite::elf::Elf::parse(&f).unwrap();
-        let good = super::make_plan(&e, "test").unwrap();
+        let good = super::make_plan(&e, "test", &crate::rewrite::par::Par::one()).unwrap();
         assert_eq!(verify(&f, &good), Vec::<String>::new());
         assert!(good.sites.iter().all(|s| s.addr != a));
         let got = verify(&f, &one_site(&f, &good, a, w, kind, target));

@@ -2,7 +2,7 @@
 //! ZF, AF and PF (not CF); it goes only where those five are dead: on every path forward from
 //! the point, each is written before anything reads it.
 
-use super::code::{direct_target, Code, FUNC, TAINT};
+use super::code::{direct_target, Code, Dec, FUNC, TAINT};
 use iced_x86::{FlowControl, Instruction, Mnemonic, OpKind, Register, RflagsBits};
 
 /// The flags a count writes.
@@ -45,7 +45,7 @@ pub fn writes(i: &Instruction) -> u32 {
 /// followed through fall-through and direct branches; a path ends well at a return or at a
 /// direct call of a function (flags are dead across both in every ABI in use); anything else
 /// (an indirect jump, a trap, `syscall`, code not decoded or tainted, the budget) is live.
-pub fn dead_at(code: &Code, at: u64) -> bool {
+pub fn dead_at<'a>(code: &Code<'a>, d: &mut Dec<'a>, at: u64) -> bool {
     let mut work = vec![(at, COUNT_FLAGS)];
     let mut seen: Vec<(u64, u32)> = vec![];
     let mut steps = 0;
@@ -58,7 +58,9 @@ pub fn dead_at(code: &Code, at: u64) -> bool {
         if steps > BUDGET || code.flags(a) & TAINT != 0 {
             return false;
         }
-        let Some(i) = code.insn(a) else { return false };
+        let Some(i) = code.insn_in(d, a) else {
+            return false;
+        };
         if i.rflags_read() & need != 0 {
             return false;
         }

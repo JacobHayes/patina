@@ -19,6 +19,7 @@ pub enum Cmd {
     Recheck,
     Minimize,
     Ctl,
+    Cache,
 }
 
 pub struct Command {
@@ -90,6 +91,12 @@ pub const COMMANDS: &[Command] = &[
         help: "inside a run with nodes: act on the run's network (from the driver's node), or mark the log",
     },
     Command {
+        cmd: Cmd::Cache,
+        name: "cache",
+        usage: "patina cache [clear]",
+        help: "the plans --preempt points keeps: where, how many, how large; clear deletes them",
+    },
+    Command {
         cmd: Cmd::Doctor,
         name: "doctor",
         usage: "patina doctor [--print-apparmor-profile]",
@@ -144,6 +151,7 @@ const ALL: &[Cmd] = &[
     Cmd::Recheck,
     Cmd::Minimize,
     Cmd::Ctl,
+    Cmd::Cache,
 ];
 
 const fn flag(

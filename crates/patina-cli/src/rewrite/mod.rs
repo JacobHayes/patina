@@ -15,6 +15,9 @@
 //!                                           natively with the plan applied (the differential);
 //!                                           its cell starts at N (default 2^62)
 //! ```
+//!
+//! Each takes `--threads N` (default: the CPUs this process may use, at most 8): a plan is the
+//! same bytes on any number.
 
 use crate::cli::Res;
 use std::process::ExitCode;
@@ -27,6 +30,7 @@ mod code;
 mod elf;
 #[cfg(target_arch = "x86_64")]
 mod flags;
+pub mod par;
 mod plan;
 #[cfg(target_arch = "x86_64")]
 mod points;
@@ -37,6 +41,7 @@ mod tests;
 mod verify;
 
 use class::Class;
+
 use plan::{Plan, KIND_CPUID, KIND_INTERIOR};
 
 /// The ELF machine of the host: the files a run can apply plans to.
@@ -45,27 +50,61 @@ pub const HOST_MACHINE: u16 = elf::EM_X86_64;
 #[cfg(target_arch = "aarch64")]
 pub const HOST_MACHINE: u16 = elf::EM_AARCH64;
 
-/// The plan for the file `data`, made by patina build `build`. A pure function of both. An
-/// x86_64 file is planned on an x86_64 host (its decoder is built there only); an arm64 file
-/// on any host.
-pub fn make_plan(data: &[u8], build: &str) -> Res<Plan> {
-    match elf::u16_at(data, 0x12) {
+/// The plan for the file `elf`, made by patina build `build`. A pure function of both: the
+/// same bytes on any number of threads (`par`). An x86_64 file is planned on an x86_64 host
+/// (its decoder is built there only); an arm64 file on any host.
+pub fn make_plan(elf: &elf::Elf, build: &str, par: &par::Par) -> Res<Plan> {
+    match elf.machine {
         #[cfg(target_arch = "x86_64")]
-        Ok(elf::EM_X86_64) => x86::make_plan(data, build),
-        Ok(elf::EM_AARCH64) => a64::make_plan(&elf::Elf::parse(data)?, build),
-        _ => elf::Elf::parse(data).and(Err(
-            "unsupported architecture: x86_64 files are planned on x86_64 hosts".into(),
-        )),
+        elf::EM_X86_64 => x86::make_plan(elf, build, par),
+        elf::EM_AARCH64 => a64::make_plan(elf, build, par),
+        _ => Err("unsupported architecture: x86_64 files are planned on x86_64 hosts".into()),
+    }
+}
+
+/// The plan for `elf`, its bytes, and every way it fails to be a sound plan for it (the
+/// independent verifier of its architecture; empty when it is one). The verifier finds code
+/// its own way while the plan is made, then checks the plan while it is written out.
+pub fn plan_verified(
+    elf: &elf::Elf,
+    build: &str,
+    par: &par::Par,
+) -> Res<(Plan, Vec<u8>, Vec<String>)> {
+    match elf.machine {
+        #[cfg(target_arch = "x86_64")]
+        elf::EM_X86_64 => {
+            let (plan, found) = par.join(|| make_plan(elf, build, par), || verify::Found::new(elf));
+            let plan = plan?;
+            let (bytes, bad) = par.join(|| plan.to_bytes(), || verify::check(&found, &plan, par));
+            Ok((plan, bytes, bad))
+        }
+        elf::EM_AARCH64 => {
+            let (plan, found) = par.join(
+                || make_plan(elf, build, par),
+                || a64::verify::Found::new(elf),
+            );
+            let plan = plan?;
+            let (bytes, bad) = par.join(
+                || plan.to_bytes(),
+                || a64::verify::check(&found, &plan, par),
+            );
+            Ok((plan, bytes, bad))
+        }
+        _ => Err("unsupported architecture: x86_64 files are planned on x86_64 hosts".into()),
     }
 }
 
 /// Every way `plan` fails to be a sound plan for `data` (the independent verifier of its
 /// architecture); empty when it is one.
-pub fn verify_plan(data: &[u8], plan: &Plan) -> Vec<String> {
+pub fn verify_plan(data: &[u8], plan: &Plan, par: &par::Par) -> Vec<String> {
+    let elf = match elf::Elf::parse(data) {
+        Ok(e) => e,
+        Err(e) => return vec![e],
+    };
     match plan.machine {
         #[cfg(target_arch = "x86_64")]
-        elf::EM_X86_64 => verify::verify(data, plan),
-        elf::EM_AARCH64 => a64::verify::verify(data, plan),
+        elf::EM_X86_64 => verify::check(&verify::Found::new(&elf), plan, par),
+        elf::EM_AARCH64 => a64::verify::check(&a64::verify::Found::new(&elf), plan, par),
         m => vec![format!("no verifier for ELF machine {m} on this host")],
     }
 }
@@ -146,8 +185,8 @@ fn write(p: &str, b: &[u8]) -> Res<()> {
     std::fs::write(p, b).map_err(|e| format!("{p}: {e}"))
 }
 
-fn verified(data: &[u8], plan: &Plan) -> Res<()> {
-    let bad = verify_plan(data, plan);
+fn verified(data: &[u8], plan: &Plan, par: &par::Par) -> Res<()> {
+    let bad = verify_plan(data, plan, par);
     for b in bad.iter().take(20) {
         eprintln!("verify: {b}");
     }
@@ -157,24 +196,41 @@ fn verified(data: &[u8], plan: &Plan) -> Res<()> {
     }
 }
 
+/// The threads a plan uses by default: the CPUs this process may use, at most 8.
+pub fn default_threads() -> usize {
+    crate::launch::allowed_cpus().len().clamp(1, 8)
+}
+
 pub fn main(args: &[String]) -> Res<ExitCode> {
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let mut threads = default_threads();
+    if let Some(k) = a.iter().position(|&x| x == "--threads") {
+        let n = a.get(k + 1).ok_or("--threads needs N")?;
+        threads = match n.parse() {
+            Ok(n) if n > 0 => n,
+            _ => return Err(format!("--threads {n}: a number of at least 1")),
+        };
+        a.drain(k..k + 2);
+    }
+    let par = par::Par::new(threads);
     let build = || crate::result::build().map(str::to_string);
     match a.as_slice() {
         ["--verify", file, plan] => {
             let plan = Plan::from_bytes(&read(plan)?)?;
-            verified(&read(file)?, &plan)?;
+            verified(&read(file)?, &plan, &par)?;
             println!("verify\t{file}\tok\tsites={}", plan.sites.len());
         }
         ["--sites", plan] => {
             let plan = Plan::from_bytes(&read(plan)?)?;
             let mut rows: Vec<(u64, u64)> = vec![];
+            // The entries are in address order.
             for s in &plan.sites {
                 let (a, end) = (s.addr, s.addr + s.len as u64);
-                let inner = plan
-                    .entries
+                let from = plan.entries.partition_point(|n| n.addr <= a);
+                let inner = plan.entries[from..]
                     .iter()
-                    .filter(|n| n.kind == KIND_INTERIOR && n.addr > a && n.addr < end);
+                    .take_while(|n| n.addr < end)
+                    .filter(|n| n.kind == KIND_INTERIOR);
                 let mut at = a;
                 for n in inner {
                     rows.push((at, n.addr - at));
@@ -190,10 +246,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
                 println!("site\t{a:#x}\t{n}");
             }
             for n in plan.entries.iter().filter(|n| n.kind == KIND_INTERIOR) {
-                let b = plan
-                    .pages
-                    .iter()
-                    .find(|p| n.addr >= p.vaddr && n.addr < p.vaddr + p.bytes.len() as u64)
+                let p = plan.pages.partition_point(|p| p.vaddr <= n.addr);
+                let b = p
+                    .checked_sub(1)
+                    .map(|p| &plan.pages[p])
+                    .filter(|p| n.addr < p.vaddr + p.bytes.len() as u64)
                     .map_or(0, |p| p.bytes[(n.addr - p.vaddr) as usize]);
                 println!("interior\t{:#x}\t{b:02x}", n.addr);
             }
@@ -211,11 +268,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             let e = elf::Elf::parse(&data)?;
             // arm64: no trampolines before the image (the copy cannot place them there).
             let plan = match e.machine {
-                elf::EM_AARCH64 => a64::plan_placed(&e, &build()?, false)?,
-                _ => make_plan(&data, &build()?)?,
+                elf::EM_AARCH64 => a64::plan_placed(&e, &build()?, false, &par)?,
+                _ => make_plan(&e, &build()?, &par)?,
             };
             let secs = t0.elapsed().as_secs_f64();
-            verified(&data, &plan)?;
+            verified(&data, &plan, &par)?;
             write(out, &standalone::apply(&data, &plan, events)?)?;
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(out, std::fs::Permissions::from_mode(0o755))
@@ -225,7 +282,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         [file] | [file, "--plan", _] if !file.starts_with('-') => {
             let data = read(file)?;
             let t0 = std::time::Instant::now();
-            let plan = make_plan(&data, &build()?)?;
+            let plan = make_plan(&elf::Elf::parse(&data)?, &build()?, &par)?;
             let bytes = plan.to_bytes();
             let secs = t0.elapsed().as_secs_f64();
             if let [_, _, out] = a.as_slice() {
@@ -235,7 +292,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         }
         _ => {
             return Err(
-                "usage: patina __rewrite FILE [--plan OUT] | --verify FILE PLAN | --sites PLAN | --standalone FILE OUT [--events N]"
+                "usage: patina __rewrite FILE [--plan OUT] | --verify FILE PLAN | --sites PLAN | --standalone FILE OUT [--events N]; each with [--threads N]"
                     .into(),
             );
         }
@@ -247,21 +304,21 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
 mod x86 {
     use super::code::Code;
     use super::elf::Elf;
+    use super::par::Par;
     use super::plan::CELL;
     use super::plan::{Pages, Plan, PAGE};
     use super::points::{self, Class, Outcome};
     use super::*;
     use std::collections::{btree_map::Entry, BTreeMap};
 
-    /// The plan for the file `data`, made by patina build `build`. A pure function of both.
-    pub fn make_plan(data: &[u8], build: &str) -> Res<Plan> {
-        let elf = Elf::parse(data)?;
+    /// The plan for the file `elf`, made by patina build `build`. A pure function of both.
+    pub fn make_plan(elf: &Elf, build: &str, par: &Par) -> Res<Plan> {
         let text: Vec<(u64, &[u8])> = elf.text.iter().map(|t| (t.addr, elf.bytes(t))).collect();
-        let code = Code::analyze(&text, &elf.anchors, &elf.extents, elf.exec);
-        let (choices, patches) = points::select(&code);
+        let code = Code::analyze(&text, &elf.anchors, &elf.extents, elf.exec, par);
+        let (choices, patches) = points::select(&code, par);
         let tramp_vaddr = elf.image_end().next_multiple_of(PAGE);
-        let mut em = points::emit(&code, &patches, tramp_vaddr);
-        let cpuid = points::cpuid_sites(&code, &mut em);
+        let mut em = points::emit(&code, &patches, tramp_vaddr, par);
+        let cpuid = points::cpuid_sites(&code, &mut em, par);
         let blob_end = tramp_vaddr + em.tramp.len() as u64;
         if CELL < blob_end && elf.image_start() < CELL + 8 {
             return Err(format!(
@@ -271,16 +328,20 @@ mod x86 {
         // The patched pages: each the original page of the executable segment, patched.
         let mut pages: BTreeMap<u64, Vec<u8>> = BTreeMap::new();
         for (a, bytes) in &em.patched {
-            for (k, &b) in bytes.iter().enumerate() {
-                let v = a + k as u64;
+            let mut v = *a;
+            let end = a + bytes.len() as u64;
+            while v < end {
                 let p = v & !(PAGE - 1);
+                let to = end.min(p + PAGE);
                 let page = match pages.entry(p) {
                     Entry::Occupied(e) => e.into_mut(),
                     Entry::Vacant(e) => e.insert(elf.original_page(p).ok_or_else(|| {
                         format!("patch at {p:#x} outside every executable segment")
                     })?),
                 };
-                page[(v - p) as usize] = b;
+                page[(v - p) as usize..(to - p) as usize]
+                    .copy_from_slice(&bytes[(v - a) as usize..(to - a) as usize]);
+                v = to;
             }
         }
         let mut runs: Vec<Pages> = vec![];
@@ -290,7 +351,7 @@ mod x86 {
                 _ => runs.push(Pages { vaddr: p, bytes }),
             }
         }
-        let c = code.census();
+        let c = code.census(par);
         let f = code.refusals;
         let mut counts: Vec<(String, u64)> = [
             ("text-bytes", c.text),

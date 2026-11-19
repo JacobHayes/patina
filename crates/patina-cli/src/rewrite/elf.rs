@@ -116,6 +116,11 @@ struct Section {
 
 impl<'a> Elf<'a> {
     pub fn parse(data: &'a [u8]) -> Res<Elf<'a>> {
+        Elf::parse_hashed(data, Sha256::digest(data).into())
+    }
+
+    /// `parse`, with the SHA-256 of `data` already known.
+    pub fn parse_hashed(data: &'a [u8], sha256: [u8; 32]) -> Res<Elf<'a>> {
         if data.len() < 64 || &data[..4] != b"\x7fELF" {
             return Err("not an ELF file".into());
         }
@@ -167,7 +172,7 @@ impl<'a> Elf<'a> {
         loads.sort_by_key(|l| l.vaddr);
         let mut e = Elf {
             data,
-            sha256: Sha256::digest(data).into(),
+            sha256,
             machine,
             phoff,
             phnum,

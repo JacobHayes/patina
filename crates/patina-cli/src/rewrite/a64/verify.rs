@@ -22,6 +22,7 @@
 //!     the trap, a `b` back to the row; and the site row's offsets name those places.
 use super::insn::{self, Flow, Ind, PcRel};
 use crate::rewrite::elf::Elf;
+use crate::rewrite::par::Par;
 use crate::rewrite::plan::{Plan, Site, CELL, PAGE};
 use proto::plan::{A64_COUNT, A64_TRAP, KIND_BEFORE, KIND_COND, KIND_FAR, KIND_JUMP};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,18 +32,66 @@ type Way = (Vec<u64>, Option<(u64, u32)>);
 
 /// Words found by control flow; what code reads, what it takes the address of, the words
 /// where control flow found what is not code, and the function starts (anchors and calls).
-struct Found<'a> {
+pub struct Found<'a> {
     elf: &'a Elf<'a>,
-    code: BTreeMap<u64, u32>,
-    read: BTreeSet<u64>,
-    addr: BTreeSet<u64>,
+    /// Per executable range of `elf`, per word: `CODE`, `READ`, `ADDR`.
+    marks: Vec<Vec<u8>>,
     refused: Vec<u64>,
     funcs: BTreeSet<u64>,
     /// `funcs` in order, once found.
     starts: Vec<u64>,
+    /// The words inside exclusive pairs, those on the way back from a failed store-exclusive,
+    /// and the tainted spans (`tainted`) as a sorted union of disjoint spans.
+    pairs: BTreeSet<u64>,
+    retries: BTreeSet<u64>,
+    tainted: Vec<(u64, u64)>,
 }
 
+/// A word found by control flow; one code reads; one whose address code takes.
+const CODE: u8 = 1;
+const READ: u8 = 2;
+const ADDR: u8 = 4;
+
 impl Found<'_> {
+    /// The executable range holding the word at `a` (a multiple of 4), and its index there.
+    fn slot(&self, a: u64) -> Option<(usize, usize)> {
+        let i = self
+            .elf
+            .text
+            .partition_point(|t| t.addr <= a)
+            .checked_sub(1)?;
+        let t = &self.elf.text[i];
+        (a < t.addr + t.len as u64).then_some((i, ((a - t.addr) / 4) as usize))
+    }
+
+    fn has(&self, a: u64, m: u8) -> bool {
+        self.slot(a).is_some_and(|(i, k)| self.marks[i][k] & m != 0)
+    }
+
+    fn set(&mut self, a: u64, m: u8) {
+        if let Some((i, k)) = self.slot(a) {
+            self.marks[i][k] |= m;
+        }
+    }
+
+    /// The words found by control flow, in address order.
+    fn code(&self) -> impl Iterator<Item = (u64, u32)> + '_ {
+        self.elf
+            .text
+            .iter()
+            .zip(&self.marks)
+            .flat_map(move |(t, m)| {
+                let first = t.addr.next_multiple_of(4);
+                m.iter()
+                    .enumerate()
+                    .filter(|(_, &f)| f & CODE != 0)
+                    .map(move |(k, _)| {
+                        let a = first + 4 * k as u64;
+                        (a, self.word(a).expect("a word found is in the file"))
+                    })
+            })
+    }
+
     fn word(&self, a: u64) -> Option<u32> {
         let t = self.elf.text_at(a)?;
         let o = (a - t.addr) as usize;
@@ -51,25 +100,31 @@ impl Found<'_> {
             .then(|| u32::from_le_bytes(b.try_into().unwrap()))
     }
 
+    /// Is any byte of the word at `a` in data the assembler marked (`asm_data`: sorted,
+    /// disjoint)?
     fn data(&self, a: u64) -> bool {
-        self.elf
-            .asm_data
+        let d = &self.elf.asm_data;
+        let k = d.partition_point(|&(lo, _)| lo < a + 4);
+        d[..k]
             .iter()
-            .any(|&(lo, hi)| a + 4 > lo && a < hi)
+            .rev()
+            .take_while(|&&(_, hi)| hi > a)
+            .next()
+            .is_some()
     }
 
     fn walk(&mut self) {
         let mut work: Vec<u64> = self.elf.anchors.clone();
         self.funcs.extend(work.iter().copied());
         while let Some(mut a) = work.pop() {
-            while !self.code.contains_key(&a) {
+            while !self.has(a, CODE) {
                 let Some(w) = self.word(a) else { break };
                 let f = insn::flow(a, w);
                 if f == Flow::Refused || self.data(a) {
                     self.refused.push(a);
                     break;
                 }
-                self.code.insert(a, w);
+                self.set(a, CODE);
                 let pc = match insn::pc_rel(a, w) {
                     Some(PcRel::Page { page, rd }) => {
                         self.word(a + 4).and_then(|n| insn::paired(page, rd, n))
@@ -80,12 +135,12 @@ impl Found<'_> {
                     Some(PcRel::Read { at, len }) => {
                         let mut y = at & !3;
                         while y < at + len {
-                            self.read.insert(y);
+                            self.set(y, READ);
                             y += 4;
                         }
                     }
                     Some(PcRel::Addr(x)) => {
-                        self.addr.insert(x & !3);
+                        self.set(x & !3, ADDR);
                     }
                     _ => {}
                 }
@@ -108,9 +163,9 @@ impl Found<'_> {
             }
         }
         let read: Vec<u64> = self
-            .read
-            .intersection(&self.code.keys().copied().collect())
-            .copied()
+            .code()
+            .map(|(a, _)| a)
+            .filter(|&a| self.has(a, READ))
             .collect();
         self.refused.extend(read);
         self.starts = self.funcs.iter().copied().collect();
@@ -174,7 +229,7 @@ impl Found<'_> {
     /// The words inside exclusive pairs.
     fn pairs(&self) -> BTreeSet<u64> {
         let mut out = BTreeSet::new();
-        for (&p, &w) in &self.code {
+        for (p, w) in self.code() {
             if insn::is_load_exclusive(w) {
                 if let Some((way, _)) = self.pair(p) {
                     out.extend(way);
@@ -193,7 +248,7 @@ impl Found<'_> {
         /// No more than the rewriter's bound: a smaller search finds no more words.
         const RETRY_DEPTH: usize = 512;
         let mut out = BTreeSet::new();
-        for (&l, &w) in &self.code {
+        for (l, w) in self.code() {
             if !insn::is_load_exclusive(w) {
                 continue;
             }
@@ -251,21 +306,70 @@ impl Found<'_> {
     }
 }
 
+/// The word at `a` as the plan maps it (its page runs are in address order: `check`).
 fn plan_word(plan: &Plan, a: u64) -> Option<u32> {
-    let p = plan
+    let k = plan
         .pages
-        .iter()
-        .find(|p| a >= p.vaddr && a + 4 <= p.vaddr + p.bytes.len() as u64)?;
+        .partition_point(|p| p.vaddr <= a)
+        .checked_sub(1)?;
+    let p = &plan.pages[k];
+    if a + 4 > p.vaddr + p.bytes.len() as u64 {
+        return None;
+    }
     let o = (a - p.vaddr) as usize;
     Some(u32::from_le_bytes(p.bytes[o..o + 4].try_into().unwrap()))
 }
 
+impl<'a> Found<'a> {
+    /// The code of `elf` by this verifier's own rules (control flow from the anchors), its
+    /// exclusive pairs, retry ways and tainted spans. Needs no plan, so it runs while the plan
+    /// is made.
+    pub fn new(elf: &'a Elf<'a>) -> Found<'a> {
+        let mut f = Found {
+            elf,
+            marks: elf.text.iter().map(|t| vec![0; t.len / 4 + 1]).collect(),
+            refused: vec![],
+            funcs: BTreeSet::new(),
+            starts: vec![],
+            pairs: BTreeSet::new(),
+            retries: BTreeSet::new(),
+            tainted: vec![],
+        };
+        f.walk();
+        f.pairs = f.pairs();
+        f.retries = f.retries();
+        let mut spans = f.tainted();
+        spans.sort_unstable();
+        for (lo, hi) in spans {
+            match f.tainted.last_mut() {
+                Some(l) if lo <= l.1 => l.1 = l.1.max(hi),
+                _ => f.tainted.push((lo, hi)),
+            }
+        }
+        f
+    }
+
+    /// Is `a` in a tainted span?
+    fn in_tainted(&self, a: u64) -> bool {
+        let k = self.tainted.partition_point(|&(lo, _)| lo <= a);
+        k > 0 && a < self.tainted[k - 1].1
+    }
+}
+
+/// Every way `plan` fails to be a sound plan for `data`; empty when it is one.
+#[cfg(test)]
 pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
+    match Elf::parse(data) {
+        Ok(elf) => check(&Found::new(&elf), plan, &Par::one()),
+        Err(e) => vec![e],
+    }
+}
+
+/// Every way `plan` fails to be a sound plan for the file whose code `f` found; empty when it
+/// is one. Sites and pages are checked in parts on `par`'s threads, the findings in order.
+pub fn check(f: &Found, plan: &Plan, par: &Par) -> Vec<String> {
     let mut bad = vec![];
-    let elf = match Elf::parse(data) {
-        Ok(e) => e,
-        Err(e) => return vec![e],
-    };
+    let elf = f.elf;
     if plan.sha256 != elf.sha256 || plan.machine != elf.machine {
         return vec!["the plan is for another file (SHA-256 or machine differs)".into()];
     }
@@ -308,50 +412,56 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
     if !plan.entries.is_empty() {
         bad.push("an arm64 plan with entry rows".into());
     }
-    let mut f = Found {
-        elf: &elf,
-        code: BTreeMap::new(),
-        read: BTreeSet::new(),
-        addr: BTreeSet::new(),
-        refused: vec![],
-        funcs: BTreeSet::new(),
-        starts: vec![],
-    };
-    f.walk();
-    let pairs = f.pairs();
-    let retries = f.retries();
-    let tainted = f.tainted();
+    if plan
+        .pages
+        .windows(2)
+        .any(|w| w[0].vaddr + w[0].bytes.len() as u64 > w[1].vaddr)
+    {
+        bad.push("the page runs are not in address order".into());
+    }
     let mut sites: Vec<u64> = vec![];
     let mut tramps: Vec<(u64, u64)> = vec![];
     if plan.sites.windows(2).any(|w| w[0].tramp > w[1].tramp) {
         bad.push("the site rows are not in order of their trampolines".into());
     }
-    for s in &plan.sites {
+    let checked = par.parts(plan.sites.len(), |part| {
+        plan.sites[part]
+            .iter()
+            .map(|s| {
+                let mut bad = vec![];
+                let (t0, t1) = (s.tramp as u64, s.tramp as u64 + s.tramp_len as u64);
+                if t1 > span.1 || s.tramp_len % 4 != 0 || t0 % 4 != 0 {
+                    bad.push(format!("site {:#x}: trampoline outside the span", s.addr));
+                    return (false, bad);
+                }
+                if in_image(plan.tramp_vaddr.wrapping_add(t0), t1 - t0) {
+                    bad.push(format!("site {:#x}: trampoline over the image", s.addr));
+                }
+                if f.in_tainted(s.addr) {
+                    bad.push(format!(
+                        "site {:#x}: between the function starts around a word that is not code",
+                        s.addr
+                    ));
+                }
+                if f.retries.contains(&s.addr) {
+                    bad.push(format!(
+                        "site {:#x}: on the way back from a failed store-exclusive",
+                        s.addr
+                    ));
+                }
+                if let Err(e) = check_site(f, &f.pairs, plan, s) {
+                    bad.push(format!("site {:#x}: {e}", s.addr));
+                }
+                (true, bad)
+            })
+            .collect::<Vec<_>>()
+    });
+    for (s, (inside, b)) in plan.sites.iter().zip(checked.into_iter().flatten()) {
         sites.push(s.addr);
-        let (t0, t1) = (s.tramp as u64, s.tramp as u64 + s.tramp_len as u64);
-        if t1 > span.1 || s.tramp_len % 4 != 0 || t0 % 4 != 0 {
-            bad.push(format!("site {:#x}: trampoline outside the span", s.addr));
-            continue;
+        if inside {
+            tramps.push((s.tramp as u64, s.tramp as u64 + s.tramp_len as u64));
         }
-        tramps.push((t0, t1));
-        if in_image(plan.tramp_vaddr.wrapping_add(t0), t1 - t0) {
-            bad.push(format!("site {:#x}: trampoline over the image", s.addr));
-        }
-        if tainted.iter().any(|&(lo, hi)| lo <= s.addr && s.addr < hi) {
-            bad.push(format!(
-                "site {:#x}: between the function starts around a word that is not code",
-                s.addr
-            ));
-        }
-        if retries.contains(&s.addr) {
-            bad.push(format!(
-                "site {:#x}: on the way back from a failed store-exclusive",
-                s.addr
-            ));
-        }
-        if let Err(e) = check_site(&f, &pairs, plan, s) {
-            bad.push(format!("site {:#x}: {e}", s.addr));
-        }
+        bad.extend(b);
     }
     sites.sort_unstable();
     if sites.windows(2).any(|w| w[0] + 4 > w[1]) {
@@ -362,9 +472,19 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
         bad.push("two trampolines overlap".into());
     }
     // Every changed word is a site's.
-    for p in &plan.pages {
-        for (k, page) in p.bytes.chunks(PAGE as usize).enumerate() {
-            let v = p.vaddr + k as u64 * PAGE;
+    let pages: Vec<(u64, &[u8])> = plan
+        .pages
+        .iter()
+        .flat_map(|p| {
+            p.bytes
+                .chunks(PAGE as usize)
+                .enumerate()
+                .map(|(k, page)| (p.vaddr + k as u64 * PAGE, page))
+        })
+        .collect();
+    let paged = par.parts(pages.len(), |part| {
+        let mut bad = vec![];
+        for &(v, page) in &pages[part] {
             let Some(orig) = elf.original_page(v) else {
                 bad.push(format!("page {v:#x}: not in an executable segment"));
                 continue;
@@ -377,17 +497,23 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
                 }
             }
         }
-    }
+        bad
+    });
+    bad.extend(paged.into_iter().flatten());
     bad
 }
 
 fn check_site(f: &Found, pairs: &BTreeSet<u64>, plan: &Plan, s: &Site) -> Result<(), String> {
     let a = s.addr;
-    let orig = *f.code.get(&a).ok_or("not a word found by control flow")?;
+    let orig = f
+        .has(a, CODE)
+        .then(|| f.word(a))
+        .flatten()
+        .ok_or("not a word found by control flow")?;
     if s.len != 4 || !a.is_multiple_of(4) {
         return Err("not one word".into());
     }
-    if f.read.contains(&a) || f.addr.contains(&a) || f.data(a) || insn::landing_pad(orig) {
+    if f.has(a, READ | ADDR) || f.data(a) || insn::landing_pad(orig) {
         return Err(
             "code reads it or takes its address, it is marked data, or it is a landing pad".into(),
         );

@@ -16,24 +16,30 @@
 //!   if its bytes are still the ones verified; otherwise it is made again.
 //! - A miss makes the plan (`make_plan`) and runs the independent verifier on it before it is
 //!   written; a plan the verifier rejects is not used (the file runs unpatched, named in the
-//!   report). Files that get no plan have a `.none` entry with the reason.
+//!   report). Files that get no plan have a `.none` entry with the reason. A miss holds the
+//!   entry's `.lock` (`flock`) while it makes the entry: another process that misses the same
+//!   file waits for it and then finds the entry, so concurrent runs (a sweep's) make each plan
+//!   once. A plan is made on up to the planner's threads (`par`), the same bytes on any number.
 //! - The SHA-256 of a file is kept under its identity (device, inode, size, change time) in
 //!   `$XDG_CACHE_HOME/patina/sha256/`, as for programs (`config::sha256_file`).
 //! - Size: at most `CACHE_MAX` bytes of plans; writing one that passes it removes the least
 //!   recently used plans (by their `.ok`'s modification time, renewed at each use) down to
-//!   three quarters of it.
+//!   three quarters of it, and any partly written plan whose writer is gone.
+//! - Making plans that takes more than a moment says so once on stderr (`Notice`).
 
 use super::elf::Elf;
+use super::par::Par;
 use super::plan::{CELL, MAGIC, PAGE, VERSION};
 use crate::cli::Res;
 use proto::plan::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 /// The plan cache's size bound.
 pub const CACHE_MAX: u64 = 4 << 30;
@@ -99,6 +105,8 @@ fn key(m: &fs::Metadata) -> Key {
 pub struct Planner {
     dir: PathBuf,
     build: String,
+    par: Par,
+    notice: Arc<Notice>,
     known: Mutex<HashMap<Key, Entry>>,
     /// Files the runtime asked for, in the order first asked.
     reported: Mutex<Vec<ImageReport>>,
@@ -250,11 +258,193 @@ fn vaddr_of(loads: &[(u64, u64, u64)], off: u64) -> u64 {
         .map_or(u64::MAX, |&(v, o, _)| v.wrapping_sub(o).wrapping_add(off))
 }
 
+/// The plan cache's directory.
+pub fn dir() -> PathBuf {
+    crate::launch::cache_dir().join("plans")
+}
+
+/// An exclusive `flock` on the file `p` (created), held until it is dropped; `None` if it
+/// cannot be had (no cache directory). `wait` is called once before blocking on another
+/// holder. A lock file is only removed by a holder of it (`unlink_held`), so a lock had on a
+/// file that is no longer `p` is let go and `p` locked again.
+fn lock(p: &Path, wait: impl FnOnce()) -> Option<File> {
+    let mut wait = Some(wait);
+    loop {
+        let f = File::options()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(p)
+            .ok()?;
+        let fd = f.as_raw_fd();
+        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            if let Some(w) = wait.take() {
+                w();
+            }
+            while unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+                if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                    return None;
+                }
+            }
+        }
+        if still(&f, p) {
+            return Some(f);
+        }
+    }
+}
+
+/// Is the open file `f` still the file at `p`?
+fn still(f: &File, p: &Path) -> bool {
+    match (f.metadata(), fs::metadata(p)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
+/// An exclusive `flock` on the file `p` (created) if no one holds it now.
+fn lock_now(p: &Path) -> Option<File> {
+    let f = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(p)
+        .ok()?;
+    let held = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    (held && still(&f, p)).then_some(f)
+}
+
+/// Remove the lock file `p` while holding it (a process waiting on it then locks the new one).
+fn unlink_held(p: &Path, _held: &File) {
+    let _ = fs::remove_file(p);
+}
+
+/// A file's part of a planning period: begun at most once, ended when dropped.
+struct BusyGuard<'a> {
+    notice: &'a Arc<Notice>,
+    begun: std::cell::Cell<bool>,
+}
+
+impl<'a> BusyGuard<'a> {
+    fn new(notice: &'a Arc<Notice>) -> BusyGuard<'a> {
+        BusyGuard {
+            notice,
+            begun: std::cell::Cell::new(false),
+        }
+    }
+
+    fn begin(&self, path: &str, dir: &Path) {
+        if !self.begun.replace(true) {
+            self.notice.begin(path, dir);
+        }
+    }
+}
+
+impl Drop for BusyGuard<'_> {
+    fn drop(&mut self) {
+        if self.begun.get() {
+            self.notice.end();
+        }
+    }
+}
+
+/// The one line that says plans are being made, once a planning period has lasted `after`:
+/// a second on a terminal, else ten (a log gets it only for a long wait). Printed at most
+/// once per process, to stderr only, and never after the plans it names are made.
+struct Notice {
+    state: Mutex<NoticeState>,
+    done: Condvar,
+}
+
+#[derive(Default)]
+struct NoticeState {
+    /// Files being made (or waited for) now; files begun in this period; the first's name.
+    busy: usize,
+    files: usize,
+    first: String,
+    said: bool,
+    /// Planning periods begun: a watcher stops when its own has ended.
+    period: u64,
+}
+
+impl Notice {
+    fn after() -> Duration {
+        use std::io::IsTerminal;
+        if std::io::stderr().is_terminal() {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(10)
+        }
+    }
+
+    /// A file's plan is being made (or waited for) until `end`.
+    fn begin(self: &Arc<Self>, path: &str, dir: &Path) {
+        let mut st = self.state.lock().unwrap();
+        st.busy += 1;
+        st.files += 1;
+        if st.busy > 1 || st.said {
+            return;
+        }
+        st.files = 1;
+        st.period += 1;
+        let period = st.period;
+        st.first = Path::new(path)
+            .file_name()
+            .map_or(path.to_string(), |n| n.to_string_lossy().to_string());
+        let (me, dir) = (self.clone(), dir.to_path_buf());
+        let deadline = Instant::now() + Notice::after();
+        // A period with nothing more to say ends its watcher at once: the line is never
+        // printed after the plans are made.
+        let _ = std::thread::Builder::new()
+            .name("patina-plan-note".into())
+            .spawn(move || {
+                let mut st = me.state.lock().unwrap();
+                loop {
+                    if st.busy == 0 || st.said || st.period != period {
+                        return;
+                    }
+                    let now = Instant::now();
+                    if now >= deadline {
+                        break;
+                    }
+                    st = me.done.wait_timeout(st, deadline - now).unwrap().0;
+                }
+                st.said = true;
+                let more = match st.files {
+                    1 => String::new(),
+                    n => format!(
+                        " and {} more {}",
+                        n - 1,
+                        if n == 2 { "file" } else { "files" }
+                    ),
+                };
+                eprintln!(
+                    "patina: --preempt points: planning {}{more}, once: plans are kept in {}",
+                    st.first,
+                    dir.display()
+                );
+            });
+    }
+
+    fn end(&self) {
+        let mut st = self.state.lock().unwrap();
+        st.busy -= 1;
+        if st.busy == 0 {
+            self.done.notify_all();
+        }
+    }
+}
+
 impl Planner {
-    pub fn new(build: &str) -> Planner {
+    /// Plans made on up to `threads` threads at once (more: sooner, never other bytes).
+    pub fn new(build: &str, threads: usize) -> Planner {
         Planner {
-            dir: crate::launch::cache_dir().join("plans"),
+            dir: dir(),
             build: build.to_string(),
+            par: Par::new(threads).on(crate::launch::allowed_cpus()),
+            notice: Arc::new(Notice {
+                state: Mutex::new(NoticeState::default()),
+                done: Condvar::new(),
+            }),
             known: Mutex::new(HashMap::new()),
             reported: Mutex::new(vec![]),
             seen: Mutex::new(Default::default()),
@@ -266,8 +456,9 @@ impl Planner {
         self.dir.join(format!("{sha}-{b}"))
     }
 
-    /// The SHA-256 of the file `f` (identity `m`), kept under its identity.
-    fn sha(&self, f: &File, m: &fs::Metadata) -> Res<[u8; 32]> {
+    /// The SHA-256 of the file `f` (identity `m`), kept under its identity; and its bytes, if
+    /// they were read for it.
+    fn sha(&self, f: &File, m: &fs::Metadata) -> Res<([u8; 32], Option<Vec<u8>>)> {
         let at = crate::launch::cache_dir()
             .join("sha256")
             .join(format!("{}-{}", m.dev(), m.ino()));
@@ -280,7 +471,7 @@ impl Planner {
             for (i, o) in out.iter_mut().enumerate() {
                 *o = u8::from_str_radix(&h[2 * i..2 * i + 2], 16).map_err(|e| e.to_string())?;
             }
-            return Ok(out);
+            return Ok((out, None));
         }
         let mut data = vec![0u8; m.size() as usize];
         f.read_exact_at(&mut data, 0).map_err(|e| e.to_string())?;
@@ -289,7 +480,7 @@ impl Planner {
         let _ = fs::create_dir_all(at.parent().unwrap())
             .and_then(|_| fs::write(&tmp, format!("{k} {}", hex(&h))))
             .and_then(|_| fs::rename(&tmp, &at));
-        Ok(h)
+        Ok((h, Some(data)))
     }
 
     /// The cached plan at `base`, if its entry is sound.
@@ -334,14 +525,14 @@ impl Planner {
         let _ = fs::write(&tmp, line).and_then(|_| fs::rename(&tmp, base.with_extension("ok")));
     }
 
-    /// Make, verify and keep the plan of `data`; the plan file, opened read-only.
-    fn make(&self, base: &Path, data: &[u8]) -> Result<(File, u128), (u64, String)> {
+    /// Make, verify and keep the plan of `elf`; the plan file, opened read-only.
+    fn make(&self, base: &Path, elf: &Elf) -> Result<(File, u128), (u64, String)> {
         let t0 = Instant::now();
-        let plan = super::make_plan(data, &self.build).map_err(|e| (NONE_REFUSED, e))?;
+        let (plan, bytes, bad) =
+            super::plan_verified(elf, &self.build, &self.par).map_err(|e| (NONE_REFUSED, e))?;
         if plan.sites.is_empty() && plan.entries.is_empty() {
             return Err((NONE_EMPTY, "no site".into()));
         }
-        let bad = super::verify_plan(data, &plan);
         if let Some(b) = bad.first() {
             return Err((
                 NONE_UNVERIFIED,
@@ -351,15 +542,20 @@ impl Planner {
                 ),
             ));
         }
-        let bytes = plan.to_bytes();
-        let ms = t0.elapsed().as_millis();
-        let digest = hex(&Sha256::digest(&bytes));
+        drop(plan);
         let tmp = tmp_name(base, "plan");
+        let (written, digest) = self.par.join(
+            || {
+                fs::create_dir_all(&self.dir)
+                    .and_then(|_| fs::write(&tmp, &bytes))
+                    .and_then(|_| File::open(&tmp))
+            },
+            || hex(&Sha256::digest(&bytes)),
+        );
+        let ms = t0.elapsed().as_millis();
         // The `.ok` after the rename (which moves the change time): until it is there, the
         // entry is not used.
-        let kept = fs::create_dir_all(&self.dir)
-            .and_then(|_| fs::write(&tmp, &bytes))
-            .and_then(|_| File::open(&tmp))
+        let kept = written
             .and_then(|f| fs::rename(&tmp, base.with_extension("plan")).map(|_| f))
             .inspect(|f| self.seal(base, f, &digest));
         let file = match kept {
@@ -385,7 +581,23 @@ impl Planner {
             .flatten()
             .filter_map(|e| {
                 let p = e.path();
-                (p.extension()? == "plan").then_some(())?;
+                let ext = p.extension()?.to_str()?;
+                if ext != "plan" {
+                    // A plan being written (`tmp_name`) whose entry no writer holds: left by
+                    // a process that was killed.
+                    if ext.starts_with("plan")
+                        && ext[4..].bytes().all(|b| b.is_ascii_digit() || b == b'-')
+                    {
+                        let l = p.with_extension("lock");
+                        if let Some(held) = lock_now(&l) {
+                            let _ = fs::remove_file(&p);
+                            if !p.with_extension("plan").exists() {
+                                unlink_held(&l, &held);
+                            }
+                        }
+                    }
+                    return None;
+                }
                 let n = e.metadata().ok()?.len();
                 let used = fs::metadata(p.with_extension("ok"))
                     .and_then(|m| m.modified())
@@ -405,10 +617,16 @@ impl Planner {
             if p == keep.with_extension("plan") {
                 continue;
             }
+            // An entry another process is making or sealing is left to it.
+            let l = p.with_extension("lock");
+            let Some(held) = lock_now(&l) else {
+                continue;
+            };
             let _ = fs::remove_file(p.with_extension("ok"));
             if fs::remove_file(&p).is_ok() {
                 total -= n;
             }
+            unlink_held(&l, &held);
         }
     }
 
@@ -416,9 +634,9 @@ impl Planner {
         // Nothing is read whole before the file is a 64-bit ELF file with executable load
         // segments, of a size the host reads.
         let loads = loads(f).filter(|l| !l.is_empty() && m.size() <= FILE_MAX);
-        let sha = match loads {
+        let (sha, read) = match loads {
             Some(_) => self.sha(f, m)?,
-            None => [0; 32],
+            None => ([0; 32], None),
         };
         let mut report = ImageReport {
             path: path.to_string(),
@@ -446,14 +664,32 @@ impl Planner {
             return Ok(none(NONE_NOT_ELF, why, report));
         };
         let base = self.base(&report.sha256);
-        if let Ok(t) = fs::read_to_string(base.with_extension("none")) {
-            if let Some((w, text)) = t.split_once(' ') {
-                if let Ok(w) = w.parse() {
-                    return Ok(none(w, text.trim_end().to_string(), report));
-                }
+        let known = |report: &ImageReport| -> Option<Res<Entry>> {
+            let t = fs::read_to_string(base.with_extension("none")).ok()?;
+            let (w, text) = t.split_once(' ')?;
+            let w = w.parse().ok()?;
+            Some(Ok(none(w, text.trim_end().to_string(), report.clone())))
+        };
+        if let Some(e) = known(&report) {
+            return e;
+        }
+        let mut found = self.cached(&base, &sha);
+        // A miss: made here while this process holds the entry's lock, unless another process
+        // that held it first made it meanwhile.
+        let mut _held = None;
+        let busy = BusyGuard::new(&self.notice);
+        if found.is_none() {
+            let _ = fs::create_dir_all(&self.dir);
+            _held = lock(&base.with_extension("lock"), || busy.begin(path, &self.dir));
+            if let Some(e) = known(&report) {
+                return e;
+            }
+            found = self.cached(&base, &sha);
+            if found.is_none() {
+                busy.begin(path, &self.dir);
             }
         }
-        let (file, hdr, counts) = match self.cached(&base, &sha) {
+        let (file, hdr, counts) = match found {
             Some(c) => c,
             None => {
                 if base.with_extension("plan").exists() {
@@ -461,15 +697,22 @@ impl Planner {
                 } else {
                     report.cache = "made";
                 }
-                let mut data = vec![0u8; m.size() as usize];
-                f.read_exact_at(&mut data, 0).map_err(|e| e.to_string())?;
-                if Sha256::digest(&data)[..] != sha[..] {
-                    return Err(format!("{path}: changed while being planned"));
-                }
-                if let Err(e) = Elf::parse(&data) {
-                    return Ok(none(NONE_NOT_ELF, e, report));
-                }
-                match self.make(&base, &data) {
+                let data = match read {
+                    Some(d) => d,
+                    None => {
+                        let mut data = vec![0u8; m.size() as usize];
+                        f.read_exact_at(&mut data, 0).map_err(|e| e.to_string())?;
+                        if Sha256::digest(&data)[..] != sha[..] {
+                            return Err(format!("{path}: changed while being planned"));
+                        }
+                        data
+                    }
+                };
+                let elf = match Elf::parse_hashed(&data, sha) {
+                    Ok(e) => e,
+                    Err(e) => return Ok(none(NONE_NOT_ELF, e, report)),
+                };
+                match self.make(&base, &elf) {
                     Ok((file, ms)) => {
                         report.ms = ms as u64;
                         let len = file.metadata().map_err(|e| e.to_string())?.len();
@@ -746,17 +989,71 @@ impl ImageReport {
     }
 }
 
-/// Plan the files of `closure(program)` on up to `jobs` threads.
-pub fn warm_all(planner: &Planner, program: &Path, jobs: usize) {
-    let files = closure(program);
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    std::thread::scope(|s| {
-        for _ in 0..jobs.clamp(1, files.len().max(1)) {
-            s.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(f) = files.get(i) else { return };
-                planner.warm(f);
-            });
+/// `patina cache [clear]`: where the plans are, how many and how large (of `CACHE_MAX`); with
+/// `clear`, delete them (a plan is only a cache: the next run makes it again).
+pub fn main(a: &crate::cli::Args) -> Res<std::process::ExitCode> {
+    let d = dir();
+    let clear = match a.positional.as_slice() {
+        [] => false,
+        [c] if c == "clear" => true,
+        other => return Err(format!("patina cache: unexpected {}", other.join(" "))),
+    };
+    let (mut plans, mut bytes, mut freed) = (0u64, 0u64, 0u64);
+    for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+        let p = e.path();
+        let n = e.metadata().map_or(0, |m| m.len());
+        let lockfile = p.extension().is_some_and(|x| x == "lock");
+        if p.extension().is_some_and(|x| x == "plan") {
+            plans += 1;
+            bytes += n;
         }
-    });
+        if clear && !lockfile && fs::remove_file(&p).is_ok() {
+            freed += n;
+        }
+    }
+    // The lock files last, each while held: one a process holds stays (its plan, being made,
+    // lands after the clear).
+    if clear {
+        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if p.extension().is_some_and(|x| x == "lock") {
+                if let Some(held) = lock_now(&p) {
+                    unlink_held(&p, &held);
+                }
+            }
+        }
+    }
+    let size = crate::report::bytes;
+    if a.json() {
+        let mut v = serde_json::json!({
+            "dir": d,
+            "plans": plans,
+            "bytes": bytes,
+            "max_bytes": CACHE_MAX,
+        });
+        if clear {
+            v["cleared_bytes"] = freed.into();
+        }
+        println!("{v}");
+    } else if clear {
+        println!("cleared {}: {plans} plans, {}", d.display(), size(freed));
+    } else {
+        println!(
+            "{}: {plans} plans, {} (at most {}, the least recently used removed first)",
+            d.display(),
+            size(bytes),
+            size(CACHE_MAX)
+        );
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+/// Plan the files of `closure(program)`, the largest first, on the planner's threads.
+pub fn warm_all(planner: &Planner, program: &Path) {
+    let mut files: Vec<(u64, PathBuf)> = closure(program)
+        .into_iter()
+        .map(|p| (fs::metadata(&p).map_or(0, |m| m.len()), p))
+        .collect();
+    files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    planner.par.each(&files, |_, (_, f)| planner.warm(f));
 }

@@ -981,6 +981,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         list.retain(|i| i.is_some_and(|i| ids.contains(&c[i].id.as_str())));
     }
     let mut program_of: Vec<String> = vec![];
+    // The programs run with `--preempt points`: planned here once before the runs start.
+    let mut planned: std::collections::BTreeSet<String> = Default::default();
     let mut first_cfg = None;
     for &i in &list {
         let at = |e: String| {
@@ -1016,6 +1018,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         if !programs.contains_key(&key) {
             let p = crate::config::program(&cmd[0], &ccfg.mounts).map_err(at)?;
             programs.insert(key.clone(), p);
+        }
+        if ccfg.points {
+            planned.insert(key.clone());
         }
         if first_cfg.is_none() {
             first_cfg = Some((ccfg, key.clone()));
@@ -1280,6 +1285,19 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             report::bytes(free),
             report::bytes(st.run_bytes)
         )));
+    }
+    // With `--preempt points`, the plans of each program and the libraries it names, made
+    // once here on the sweep's width before its runs start, each pinned to one CPU, find them
+    // in the plan cache (a run that meets a file not planned yet waits for the one that plans
+    // it: `rewrite::cache`).
+    if todo > 0 && !planned.is_empty() {
+        let p = crate::rewrite::cache::Planner::new(
+            crate::result::build().map_err(error)?,
+            width.min(crate::rewrite::default_threads()),
+        );
+        for key in &planned {
+            crate::rewrite::cache::warm_all(&p, &programs[key].host);
+        }
     }
     let serve = cfg.check.as_ref().filter(|k| k.serve);
     // Runs judged again count as finished runs: pruned or cut by --keep, their findings
