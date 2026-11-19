@@ -104,6 +104,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut insn = crate::result::InsnCounts::default();
     let mut net = [0u64; crate::result::NET_FIELDS];
     let mut unix_sockets = 0;
+    let mut tmpfs_full = 0;
     let mut pmu = [0u64; proto::ctl::PMU_FIELDS];
     let mut sdk = crate::result::SdkReport::default();
     let mut sched = [0u64; proto::ctl::SCHED_FIELDS];
@@ -141,6 +142,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         insn.add(&end.insn);
         crate::result::net_add(&mut net, &end.net);
         unix_sockets += end.unix_sockets;
+        tmpfs_full += end.tmpfs_full;
         sdk.add(end.sdk);
         // A `setup-complete` mark holds for the incarnations after it.
         cfg.fault_after_seq = end.fault_after_seq;
@@ -200,6 +202,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 insn,
                 net,
                 unix_sockets,
+                tmpfs: [o.cfg.tmpfs_bytes, tmpfs_full],
                 pmu: o.cfg.pmu.on.then_some(pmu),
                 sdk,
                 sched: crate::result::SchedCounts {

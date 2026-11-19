@@ -83,6 +83,7 @@ pub struct Config {
     /// Path and argument strings in the boundary log (`--log-paths`, `[run] log-paths`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub log_paths: bool,
+    /// Size of each sandbox tmpfs (`--tmpfs-bytes`, `[run] tmpfs-bytes`).
     pub tmpfs_bytes: u64,
     /// Fault presets (`--faults`, `[faults] preset`).
     pub faults_preset: Vec<String>,
@@ -900,6 +901,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--log-limit")? {
         c.log_limit = n;
     }
+    if let Some(n) = a.num("--tmpfs-bytes")? {
+        c.tmpfs_bytes = n;
+    }
     if a.has("--log-paths") {
         c.log_paths = true;
     }
@@ -1018,6 +1022,9 @@ impl Config {
         let max_log = proto::layout::LOG_MAX >> 20;
         if self.log_limit == 0 || self.log_limit > max_log {
             return Err(format!("--log-limit is 1 to {max_log} (MiB)"));
+        }
+        if self.tmpfs_bytes < 1 << 20 {
+            return Err("--tmpfs-bytes is at least 1048576 (1 MiB)".into());
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());

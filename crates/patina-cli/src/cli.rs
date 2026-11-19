@@ -293,6 +293,13 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag(
+        "--tmpfs-bytes",
+        "BYTES",
+        "268435456",
+        "size of each sandbox tmpfs (/work, /tmp, copied mounts): a write past it answers ENOSPC",
+        RUNLIKE,
+    ),
+    flag(
         "--log-paths",
         "",
         "off",

@@ -308,6 +308,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "timeout",
         "log-limit",
         "log-paths",
+        "tmpfs-bytes",
         "buggify",
         "allow-unmet",
         "host-cpu",
@@ -370,6 +371,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if cfg.log_limit != d.log_limit {
             flag("--log-limit", cfg.log_limit.to_string());
+        }
+        if cfg.tmpfs_bytes != d.tmpfs_bytes {
+            flag("--tmpfs-bytes", cfg.tmpfs_bytes.to_string());
         }
         if cfg.pmu.on {
             flag("--preempt", "branches".into());

@@ -64,6 +64,11 @@ else of the host is visible unless you give it:
 | `--stdin FILE` | standard input |
 | `--env K=V` | one environment variable (the rest is fixed: `PATH`, `HOME`, `LANG`, `TZ`, `PATINA=1`) |
 | `--cpus N` | the CPU count it sees (default 4, whatever the host has) |
+| `--tmpfs-bytes N` | the size of each of its filesystems (`/work`, `/tmp`, copied mounts), all memory-backed tmpfs (`[run] tmpfs-bytes`, default 268435456, 256 MiB) |
+
+A write past that size answers `ENOSPC`, as a full disk does; when one did, `patina run`
+names the setting (`sandbox tmpfs full: ...`) and `result.json`'s `tmpfs.enospc` counts the
+calls.
 
 When the program runs, opens or looks for a host path the sandbox lacks, `patina run` names it
 once and the directory to mount, and a sweep's summary counts the runs that met it:

@@ -45,6 +45,17 @@ fn log_write_verdict(errno: i32, what: &str) -> Verdict {
     }
 }
 
+/// For a copy into a sandbox tmpfs that failed with `ENOSPC`: the size that bounds it.
+fn tmpfs_hint(ctl: &Ctl, e: &str) -> String {
+    if !e.contains("(os error 28)") {
+        return String::new();
+    }
+    format!(
+        " (each sandbox tmpfs holds {} bytes: --tmpfs-bytes, [run] tmpfs-bytes)",
+        ctl.config.tmpfs_bytes
+    )
+}
+
 /// The guest's fixed environment; `--env` adds to it. `PATINA=1` tells a program it runs
 /// under Patina.
 const BASE_ENV: [&str; 5] = [
@@ -996,14 +1007,17 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     // The program and the `:copy` mounts: copies on sandbox tmpfs, not binds of the host's.
     for (h, d) in &copies {
         if let Err(e) = inherit::copy_tree(Path::new(h), Path::new(d)) {
-            sup.finish(Verdict::new("infra", format!("copying into {d}: {e}")));
+            sup.finish(Verdict::new(
+                "infra",
+                format!("copying into {d}: {e}{}", tmpfs_hint(ctl, &e)),
+            ));
         }
     }
     if Path::new("/.patina/in").is_dir() {
         if let Err(e) = crash::copy_in(Path::new("/.patina/in"), &work_dir(ctl)) {
             sup.finish(Verdict::new(
                 "infra",
-                format!("copying /in to the work tree: {e}"),
+                format!("copying /in to the work tree: {e}{}", tmpfs_hint(ctl, &e)),
             ));
         }
     }

@@ -100,6 +100,14 @@ fn passed(call: &mut dyn Call, row: &'static Row) -> Action {
     if matches!(act, Action::Return(r) if r == -e::ENOENT) {
         crate::resolve::note_missing(call);
     }
+    if matches!(act, Action::Return(r) if r == -e::ENOSPC)
+        && post.is_none()
+        && matches!(row.group, Group::Fs | Group::Fd)
+    {
+        // Every writable filesystem of the sandbox is a tmpfs of `tmpfs-bytes`: name it.
+        let n = &ctl().stats.tmpfs_full;
+        n.store(n.load(Relaxed) + 1, Relaxed);
+    }
     if matches!(act, Action::Return(r) if r == -e::EFBIG) && host_fsize_limited() {
         // The launcher's RLIMIT_FSIZE is inherited and enforced by the kernel; the
         // guest's own limit is virtual. Reaching the host's is not a sandbox answer.

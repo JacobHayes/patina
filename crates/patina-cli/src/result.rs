@@ -39,6 +39,9 @@ pub struct RunEnd {
     pub net: [u64; NET_FIELDS],
     /// AF_UNIX sockets sent in SCM_RIGHTS, summed over incarnations.
     pub unix_sockets: u64,
+    /// The size of each sandbox tmpfs (`tmpfs-bytes`) and the file calls a full one answered
+    /// `ENOSPC`, summed over incarnations.
+    pub tmpfs: [u64; 2],
     /// With `--preempt branches`, the counters in `proto::ctl::PMU_NAMES` order (summed;
     /// `max_skid` is a maximum).
     pub pmu: Option<[u64; proto::ctl::PMU_FIELDS]>,
@@ -376,6 +379,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "sdk": e.sdk.json(),
         "refused": e.refused,
         "missing": e.missing,
+        "tmpfs": { "bytes": e.tmpfs[0], "enospc": e.tmpfs[1] },
         "labels": {
             "unscanned_exec_mappings": e.insn.unscanned_exec_mappings,
             "unix_sockets_in_flight": e.unix_sockets,
@@ -663,6 +667,9 @@ pub fn print_human(r: &Value, dir: &Path) {
     for m in r["missing"].as_array().into_iter().flatten() {
         println!("{}", missing_line(m));
     }
+    if let Some(l) = tmpfs_line(r) {
+        println!("{l}");
+    }
     let check = &r["check"];
     if check.is_object() && check["verdict"] != "not-run" {
         match check["verdict"].as_str() {
@@ -789,6 +796,21 @@ fn big(n: u64) -> String {
         1_000_000..=999_949_999 => format!("{:.1} M", n as f64 / 1e6),
         _ => format!("{:.1} G", n as f64 / 1e9),
     }
+}
+
+/// The hint for a sandbox tmpfs the guest filled, or nothing.
+pub fn tmpfs_line(r: &Value) -> Option<String> {
+    let n = r["tmpfs"]["enospc"].as_u64().filter(|&n| n > 0)?;
+    let b = r["tmpfs"]["bytes"].as_u64().unwrap_or(0);
+    Some(format!(
+        "sandbox tmpfs full: {n} file call{} answered ENOSPC; /work, /tmp and copied mounts hold {} each (--tmpfs-bytes, [run] tmpfs-bytes)",
+        if n == 1 { "" } else { "s" },
+        if b.is_multiple_of(1 << 20) {
+            format!("{} MiB", b >> 20)
+        } else {
+            format!("{b} bytes")
+        }
+    ))
 }
 
 /// The hint for one path the guest could not find in the sandbox (`launch::not_in_sandbox`).

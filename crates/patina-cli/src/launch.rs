@@ -294,6 +294,8 @@ pub struct IncEnd {
     pub net: [u64; crate::result::NET_FIELDS],
     /// AF_UNIX sockets sent in SCM_RIGHTS.
     pub unix_sockets: u64,
+    /// File calls a full sandbox tmpfs answered `ENOSPC`.
+    pub tmpfs_full: u64,
     /// Counter preemption counters (`proto::ctl::PMU_NAMES`).
     pub pmu: [u64; proto::ctl::PMU_FIELDS],
     /// The SDK's site table.
@@ -1065,6 +1067,7 @@ pub fn run_incarnation(
         insn: crate::result::InsnCounts::read(&ctl.insn),
         net: crate::result::net_read(unsafe { &proto::wire::WireTab::at(ctl_ptr).counters }),
         unix_sockets: ctl.stats.unix_sockets_sent.load(Relaxed),
+        tmpfs_full: ctl.stats.tmpfs_full.load(Relaxed),
         pmu: ctl.pmu.read(),
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,

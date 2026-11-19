@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 15;
+pub const LAYOUT_VERSION: u64 = 16;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -158,6 +158,9 @@ pub struct Stats {
     /// cycle of in-flight descriptors, which the kernel releases from its garbage-collector worker
     /// at a time of its choosing (bucket D). A run with a non-zero count is labelled.
     pub unix_sockets_sent: AtomicU64,
+    /// File calls a sandbox tmpfs answered `ENOSPC` (not injected): it is full at
+    /// `Config::tmpfs_bytes`.
+    pub tmpfs_full: AtomicU64,
 }
 
 /// First page of the control region.

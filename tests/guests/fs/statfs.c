@@ -1,7 +1,9 @@
 /* statfs, fstatfs and statvfs on every kind of mount the sandbox has: one line per call with
  * every field, so a field taken from the host (its RAM, a superblock's random id, a host
- * disk's free space) shows as a difference between runs. Then 1 MiB written to /dev/shm. */
+ * disk's free space) shows as a difference between runs. Then 1 MiB written to /dev/shm.
+ * `statfs fill`: write /tmp full, then show the bytes written, the error and /tmp's statfs. */
 #define _GNU_SOURCE
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -36,8 +38,23 @@ static void fd(const char *what, int f) {
     show(what, fstatfs(f, &s), &s);
 }
 
-int main(void) {
+static int fill(void) {
+    static char buf[1 << 16];
+    memset(buf, 'x', sizeof buf);
+    int f = open("/tmp/fill", O_CREAT | O_WRONLY, 0644);
+    long n = 0;
+    ssize_t r;
+    while ((r = write(f, buf, sizeof buf)) > 0)
+        n += r;
+    printf("filled %ld errno=%d\n", n, r < 0 ? errno : 0);
+    path("/tmp");
+    return 0;
+}
+
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 1 << 16);
+    if (argc > 1 && strcmp(argv[1], "fill") == 0)
+        return fill();
     const char *mounts[] = {"/", "/dev", "/dev/shm", "/dev/pts", "/work", "/tmp", "/guest", "/proc", "/usr"};
     for (size_t i = 0; i < sizeof mounts / sizeof *mounts; i++)
         path(mounts[i]);
