@@ -438,11 +438,36 @@ fn file_size(fd: i64) -> u64 {
     fstat_raw(fd).map(|st| st.size()).unwrap_or(0)
 }
 
+/// Address space of shadows given back, by address, adjacent ranges joined: a new shadow
+/// takes the first that fits before taking fresh address space. A range that finds the list
+/// full is given up (its memory is unmapped all the same).
+struct FreeShadows {
+    r: [(u64, u64); MAX_FREE],
+    n: usize,
+}
+const MAX_FREE: usize = 64;
+static FREE: Global<FreeShadows> = Global::new(FreeShadows {
+    r: [(0, 0); MAX_FREE],
+    n: 0,
+});
+
 /// A mapping's shadow: private anonymous memory that holds pages only where something was
 /// copied in (a sparse file mapped large costs what it holds, not what it spans).
 fn new_shadow(len: u64) -> u64 {
     let l = page_up(len);
-    let a = crate::state::priv_alloc(l, PAGE);
+    let f = FREE.get();
+    let a = match (0..f.n).find(|&i| f.r[i].1 >= l) {
+        Some(i) => {
+            let a = f.r[i].0;
+            f.r[i] = (a + l, f.r[i].1 - l);
+            if f.r[i].1 == 0 {
+                f.r.copy_within(i + 1..f.n, i);
+                f.n -= 1;
+            }
+            a
+        }
+        None => crate::state::priv_alloc(l, PAGE),
+    };
     let r = unsafe {
         sc6(
             nr::MMAP,
@@ -458,6 +483,33 @@ fn new_shadow(len: u64) -> u64 {
         crate::sup::host_error(r, nr::MMAP, proto::ctl::HE_SYSCALL);
     }
     a
+}
+
+/// Give back `[a, a + l)` of a shadow: its memory and its address space.
+fn free_shadow(a: u64, l: u64) {
+    if l == 0 {
+        return;
+    }
+    unsafe { sc2(nr::MUNMAP, a, l) };
+    let f = FREE.get();
+    let i = (0..f.n).find(|&i| f.r[i].0 > a).unwrap_or(f.n);
+    let joins_prev = i > 0 && f.r[i - 1].0 + f.r[i - 1].1 == a;
+    let joins_next = i < f.n && a + l == f.r[i].0;
+    match (joins_prev, joins_next) {
+        (true, true) => {
+            f.r[i - 1].1 += l + f.r[i].1;
+            f.r.copy_within(i + 1..f.n, i);
+            f.n -= 1;
+        }
+        (true, false) => f.r[i - 1].1 += l,
+        (false, true) => f.r[i] = (a, l + f.r[i].1),
+        (false, false) if f.n < MAX_FREE => {
+            f.r.copy_within(i..f.n, i + 1);
+            f.r[i] = (a, l);
+            f.n += 1;
+        }
+        (false, false) => {}
+    }
 }
 
 /// Bytes of the mapping that lie inside the file (reading beyond would fault).
@@ -693,10 +745,8 @@ fn overlaps(m: &Map, addr: u64, len: u64) -> bool {
 fn drop_map(i: usize) {
     let t = MAPS.get();
     let m = t.m[i];
-    unsafe {
-        sc2(nr::MUNMAP, m.shadow, m.shadow_len);
-        sc1(nr::CLOSE, m.fd as u64);
-    }
+    free_shadow(m.shadow, m.shadow_len);
+    unsafe { sc1(nr::CLOSE, m.fd as u64) };
     t.m[i] = t.m[t.n - 1];
     t.n -= 1;
 }
@@ -704,6 +754,9 @@ fn drop_map(i: usize) {
 /// Before `munmap(addr, len)`: flush the mappings it touches and stop tracking them
 /// (a partial unmap keeps the remaining part tracked).
 pub fn on_munmap(addr: u64, len: u64) {
+    if addr & (PAGE - 1) != 0 {
+        return; // the kernel refuses it: nothing is unmapped
+    }
     let len = page_up(len);
     let mut i = 0;
     while i < MAPS.get().n {
@@ -718,10 +771,12 @@ pub fn on_munmap(addr: u64, len: u64) {
             drop_map(i);
             continue;
         }
+        // The shadow of the unmapped part goes with it.
         let t = MAPS.get();
         if lo == m.addr {
             // the head goes: keep the tail
             let cut = hi - m.addr;
+            free_shadow(m.shadow, cut);
             t.m[i].addr = hi;
             t.m[i].len -= cut;
             t.m[i].off += cut;
@@ -731,7 +786,10 @@ pub fn on_munmap(addr: u64, len: u64) {
             // keep the head; a hole in the middle splits the mapping in two
             t.m[i].len = lo - m.addr;
             t.m[i].shadow_len = lo - m.addr;
-            if hi < m.addr + m.len && t.n < MAX_MAPS {
+            let split = hi < m.addr + m.len && t.n < MAX_MAPS;
+            let gone_to = if split { hi - m.addr } else { m.shadow_len };
+            free_shadow(m.shadow + (lo - m.addr), gone_to - (lo - m.addr));
+            if split {
                 let cut = hi - m.addr;
                 let hfd = unsafe { sc3(nr::FCNTL, m.fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
                 let n = t.n;

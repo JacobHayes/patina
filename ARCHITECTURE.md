@@ -935,7 +935,9 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   socket is replaced). A stopped listener cannot be bound, listened on or connected again.
 - **Fixed tables.** The runtime keeps some state in fixed tables shared by the run: virtual
   inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
-  work-tree mappings (128 per process), shared mappings (256 per process), injected fsync
+  work-tree mappings (128 per process; the runtime's copy of each takes its length from 32 GiB
+  of address space per process, given back as the mapping is unmapped), shared mappings (256
+  per process), injected fsync
   failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
   The table of changed files' times drops the entries of deleted files nothing holds open
   (`sup/vtgc.rs`), so only files still reachable count against it (65,536).
