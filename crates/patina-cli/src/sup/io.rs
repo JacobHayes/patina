@@ -37,6 +37,8 @@ struct TimerFd {
     event: Option<EventId>,
     /// Processes holding a descriptor of it (`fork` copies descriptors).
     holders: BTreeSet<i32>,
+    /// `CLOCK_*` it was created on.
+    clock: u64,
 }
 
 #[derive(Default)]
@@ -181,6 +183,7 @@ impl Io {
                     interval: 0,
                     event: None,
                     holders: BTreeSet::from([pid]),
+                    clock: a[3],
                 };
                 self.timers.insert(self.last_key, t);
                 self.last_key as i64
@@ -214,6 +217,19 @@ impl Io {
                 }
                 0
             }
+            TFD_FIND => {
+                // A new image of `pid` looks for the timer its descriptor a[2] is a copy of.
+                let me = std::process::id() as u64;
+                self.timers
+                    .iter()
+                    .find(|(_, t)| {
+                        t.holders.contains(&pid)
+                            && unsafe {
+                                libc::syscall(libc::SYS_kcmp, me, pid, KCMP_FILE, t.fd, a[2])
+                            } == 0
+                    })
+                    .map_or(-(libc::ENOENT as i64), |(k, _)| *k as i64)
+            }
             _ => -(libc::EINVAL as i64),
         }
     }
@@ -239,14 +255,15 @@ impl Io {
         }
     }
 
-    /// `TimerFdGet`: next expiry (0 when disarmed) or interval.
+    /// `TimerFdGet`: next expiry (0 when disarmed), interval or clock.
     pub fn timer_get(&self, a: [u64; 6]) -> i64 {
         let Some(t) = self.timers.get(&a[0]) else {
             return -(libc::EINVAL as i64);
         };
         match a[1] {
             0 => t.next.unwrap_or(0) as i64,
-            _ => t.interval as i64,
+            1 => t.interval as i64,
+            _ => t.clock as i64,
         }
     }
 
@@ -278,6 +295,9 @@ impl Io {
         done
     }
 }
+
+/// `kcmp` type: the two descriptors name one open file.
+const KCMP_FILE: u64 = 0;
 
 fn release(sched: &mut Sched, t: TimerFd) {
     if let Some(id) = t.event {
@@ -400,6 +420,7 @@ mod tests {
                 interval: 0,
                 event: None,
                 holders: BTreeSet::from([0]),
+                clock: 1,
             },
         );
         assert_eq!(io.timer_set(&mut s, 0, [TFD_ARM, 7, 1_000, 100, 0, 0]), 0);

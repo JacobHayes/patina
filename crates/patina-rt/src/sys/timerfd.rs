@@ -8,7 +8,7 @@
 use super::io;
 use super::*;
 use core::cell::UnsafeCell;
-use proto::ctl::{Op, TFD_ARM, TFD_CREATE, TFD_RELEASE};
+use proto::ctl::{Op, TFD_ARM, TFD_CREATE, TFD_FIND, TFD_RELEASE};
 use proto::layout::FD_HIDDEN_MIN;
 
 const NS: u64 = 1_000_000_000;
@@ -196,28 +196,46 @@ pub fn handle(call: &mut dyn Call) -> i64 {
     }
 }
 
-/// `execve`: the timer keys of close-on-exec descriptors are released for this process.
-/// A timerfd that survives the exec would lose its mark in the new image: the run stops.
-pub fn before_exec() -> Result<(), ()> {
+/// `execve`: the timers named only by close-on-exec descriptors are released for this
+/// process; the others stay held, armed or not, and the new image finds them (`found`).
+pub fn before_exec() {
     let m = marks();
     let mut keep: [u64; 64] = [0; 64];
     let mut nkeep = 0;
+    let mut drop: [u64; 64] = [0; 64];
+    let mut ndrop = 0;
     for fd in 0..N {
         let key = m.key[fd];
         if key == 0 {
             continue;
         }
         let fl = unsafe { sc2(nr::FCNTL, fd as u64, 1) };
-        if fl >= 0 && fl & 1 == 0 {
-            return Err(());
-        }
-        if !keep[..nkeep].contains(&key) && nkeep < keep.len() {
-            keep[nkeep] = key;
-            nkeep += 1;
+        let (set, n) = if fl >= 0 && fl & 1 == 0 {
+            (&mut keep, &mut nkeep)
+        } else {
+            (&mut drop, &mut ndrop)
+        };
+        if !set[..*n].contains(&key) && *n < set.len() {
+            set[*n] = key;
+            *n += 1;
         }
     }
-    for &key in &keep[..nkeep] {
-        crate::sup::call_sup(Op::TimerFdSet, [TFD_RELEASE, key, 0, 0, 0, 0]);
+    for &key in &drop[..ndrop] {
+        if !keep[..nkeep].contains(&key) {
+            crate::sup::call_sup(Op::TimerFdSet, [TFD_RELEASE, key, 0, 0, 0, 0]);
+        }
     }
-    Ok(())
+}
+
+/// (New image) `fd`, an eventfd the previous image left open, is a timerfd when the
+/// supervisor has a timer of this process on the same file.
+pub fn found(fd: i64) {
+    let Some(i) = idx(fd) else { return };
+    let key = crate::sup::call_sup(Op::TimerFdSet, [TFD_FIND, 0, fd as u64, 0, 0, 0]).ret;
+    if key <= 0 {
+        return;
+    }
+    let clock = crate::sup::call_sup(Op::TimerFdGet, [key as u64, 2, 0, 0, 0, 0]).ret;
+    marks().key[i] = key as u64;
+    marks().clock[i] = clock as u8;
 }

@@ -625,9 +625,10 @@ pub fn execve(call: &mut dyn Call) -> Action {
         return stop_here(call);
     }
     // Point of no return. Descriptor marks the new image cannot rebuild end the run.
-    if crate::sys::timerfd::before_exec().is_err() || crate::sys::signalfd::before_exec().is_err() {
+    if crate::sys::signalfd::before_exec().is_err() {
         return stop_here(call);
     }
+    crate::sys::timerfd::before_exec();
     // Stores through shared `/work` mappings of this image are recorded now, as at exit.
     crate::oplog::on_exit();
     set_class(call, Class::Virt);
@@ -656,7 +657,8 @@ pub fn execve(call: &mut dyn Call) -> Action {
 }
 
 /// (New image) Descriptor marks the previous image kept in its own memory: entropy
-/// descriptors and synthesised `/proc` files are found again by name.
+/// descriptors and synthesised `/proc` files are found again by name, timerfds by asking the
+/// supervisor about each eventfd.
 pub fn rescan_marks() {
     let fd = unsafe {
         sc4(
@@ -695,6 +697,8 @@ pub fn rescan_marks() {
                         let s = lp.as_bytes();
                         if s == b"/dev/urandom" || s == b"/dev/random" {
                             proc().set_urandom(d, true);
+                        } else if s == b"anon_inode:[eventfd]" {
+                            crate::sys::timerfd::found(d);
                         } else if let Some(k) = s.strip_prefix(b"/memfd:patina-proc:") {
                             if k.len() >= 3 && k[..3].iter().all(|c| c.is_ascii_digit()) {
                                 crate::sys::procfs::mark(

@@ -757,9 +757,12 @@ pub enum Op {
     Shm = 24,
     /// timerfd. args[0] = sub-operation: `TFD_CREATE` [_, 0, guest fd, clock] (reply: the
     /// timer's key, > 0), `TFD_ARM` [_, key, first expiry ns (vclock) or 0 to disarm,
-    /// interval ns], `TFD_RELEASE` [_, key]. Reply 0 or -errno.
+    /// interval ns], `TFD_RELEASE` [_, key], `TFD_FIND` [_, 0, guest fd] (a new image: the
+    /// key of the timer of the caller's process that the descriptor names, or -ENOENT).
+    /// Reply 0 or -errno.
     TimerFdSet = 40,
-    /// timerfd. args: [key, 0 = next expiry (vclock ns, 0 if disarmed) | 1 = interval ns].
+    /// timerfd. args: [key, 0 = next expiry (vclock ns, 0 if disarmed) | 1 = interval ns |
+    /// 2 = clock].
     TimerFdGet = 41,
     /// Wire, see `WIRE_*` below.
     WireSocket = 50,
@@ -849,6 +852,7 @@ pub const SHMCTL_STAT: u64 = 2;
 pub const TFD_CREATE: u64 = 0;
 pub const TFD_ARM: u64 = 1;
 pub const TFD_RELEASE: u64 = 2;
+pub const TFD_FIND: u64 = 3;
 
 /// `Park` args: [I/O generation seen before the attempt, deadline or `NO_DEADLINE`,
 /// descriptor or -1, `PARK_IN`/`PARK_OUT`/`PARK_LOCK`/`PARK_OPEN`, syscall number, descriptor count].
