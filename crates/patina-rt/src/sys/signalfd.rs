@@ -138,11 +138,20 @@ pub fn create(call: &mut dyn Call) -> i64 {
         // Every eventfd has the same inode: the kernel's comparison of open files says
         // which descriptors name this one.
         let pid = unsafe { sc0(nr::GETPID) } as u64;
+        // Only equality is used (kcmp's order compares kernel addresses); a host where kcmp
+        // fails cannot tell, and the run ends there.
         for i in 0..N {
-            if marks().mask[i] != 0
-                && (i == fd as usize
-                    || unsafe { sc6(nr::KCMP, pid, pid, KCMP_FILE, fd as u64, i as u64, 0) } == 0)
-            {
+            if marks().mask[i] == 0 {
+                continue;
+            }
+            let same = i == fd as usize || {
+                let r = unsafe { sc6(nr::KCMP, pid, pid, KCMP_FILE, fd as u64, i as u64, 0) };
+                if r < 0 {
+                    crate::sup::host_error(r, nr::KCMP, proto::ctl::HE_SYSCALL);
+                }
+                r == 0
+            };
+            if same {
                 set(i, stored);
             }
         }

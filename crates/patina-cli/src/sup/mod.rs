@@ -499,7 +499,12 @@ impl Sup {
             Some(Op::Exec) => {
                 self.execed = true;
                 let pid = self.sched.entries[idx].pid;
-                self.io.timers_exec(&mut self.sched, pid);
+                if let Err(e) = self.io.timers_exec(&mut self.sched, pid) {
+                    self.finish(Verdict::new(
+                        "infra",
+                        format!("host error: errno {e} in kcmp (timers kept across execve)"),
+                    ));
+                }
                 self.exec(idx, a)
             }
             Some(Op::WaitPark) => self.wait_park(idx, a),

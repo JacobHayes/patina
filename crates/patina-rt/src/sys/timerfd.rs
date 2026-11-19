@@ -201,8 +201,12 @@ pub fn handle(call: &mut dyn Call) -> i64 {
 pub fn found(fd: i64) {
     let Some(i) = idx(fd) else { return };
     let key = crate::sup::call_sup(Op::TimerFdSet, [TFD_FIND, 0, fd as u64, 0, 0, 0]).ret;
-    if key <= 0 {
+    if key == -e::ENOENT {
         return;
+    }
+    if key < 0 {
+        // The supervisor's kcmp failed: which timer this is cannot be told.
+        crate::sup::host_error(key, nr::KCMP, proto::ctl::HE_SYSCALL);
     }
     let clock = crate::sup::call_sup(Op::TimerFdGet, [key as u64, 2, 0, 0, 0, 0]).ret;
     marks().key[i] = key as u64;

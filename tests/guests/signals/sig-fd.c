@@ -6,7 +6,7 @@
 //   buffer smaller than a record is EINVAL; reading consumes (sigpending no longer shows it);
 //   a signal outside the mask is not read.
 // - flags: SFD_NONBLOCK, SFD_CLOEXEC; a mask update on an existing descriptor changes that
-//   file's mask only, not another signalfd's.
+//   file's mask (a duplicate's too), not another signalfd's.
 // - readiness: poll, select, level-triggered epoll; edge-triggered epoll reports a new signal
 //   once, and again only for another one.
 // - wake-ups: a blocking read, poll and epoll_wait in one thread end when a second process
@@ -108,10 +108,13 @@ static void basic(void) {
     // A mask update: now SIGUSR2 (pending) is read. Another signalfd (and the duplicate of
     // neither) keeps its own mask.
     int other = signalfd(-1, &m, SFD_NONBLOCK);
-    CHECK(other >= 0, "second signalfd");
+    int dupfd = dup(fd);
+    CHECK(other >= 0 && dupfd >= 0, "second signalfd, duplicate");
     sigset_t m2 = set_of(SIGUSR2, 0);
     CHECK(signalfd(fd, &m2, 0) == fd, "mask update");
     CHECK(!readable(other), "the update reached another signalfd");
+    CHECK(readable(dupfd), "the update did not reach the duplicate");
+    close(dupfd);
     CHECK(readable(fd) && rd(fd, &si) == SIGUSR2, "SIGUSR2 after the update");
     kill(getpid(), SIGUSR1);
     CHECK(!readable(fd) && readable(other) && rd(other, &si) == SIGUSR1, "SIGUSR1 through the other");

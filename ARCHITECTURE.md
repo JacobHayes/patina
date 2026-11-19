@@ -122,7 +122,11 @@ runtime makes every signalfd of the process readable exactly while a signal of i
 pending for the calling thread, writing it again when one became pending since the last look
 (the edge `EPOLLET` reports). A read dequeues with `SigWait` and a passed deadline; the
 supervisor moves the I/O generation when a signal of a mask the process holds becomes pending
-(`Op::SigFd` carries the union of the masks), so a waiter checks again.
+(`Op::SigFd` carries the union of the masks), so a waiter checks again. Every eventfd has
+one inode, so which descriptors name one signalfd (for a mask update) or one timerfd (across an
+`execve`) is asked of the kernel with `kcmp`, its equality only (its order compares
+kernel addresses); on a host where `kcmp` fails (a kernel built without it, a container's
+seccomp profile) such a run ends `internal`, naming it.
 
 System V shared memory is one table for the run in the supervisor (`sup/shm.rs`), with ids as
 a fresh IPC namespace makes them and virtual times. A segment's memory is a memfd the

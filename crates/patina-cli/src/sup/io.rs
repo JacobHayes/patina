@@ -219,16 +219,19 @@ impl Io {
             }
             TFD_FIND => {
                 // A new image of `pid` looks for the timer its descriptor a[2] is a copy of.
+                // On a kcmp error the runtime ends the run.
                 let me = std::process::id() as u64;
-                self.timers
-                    .iter()
-                    .find(|(_, t)| {
-                        t.holders.contains(&pid)
-                            && unsafe {
-                                libc::syscall(libc::SYS_kcmp, me, pid, KCMP_FILE, t.fd, a[2])
-                            } == 0
-                    })
-                    .map_or(-(libc::ENOENT as i64), |(k, _)| *k as i64)
+                for (k, t) in &self.timers {
+                    if !t.holders.contains(&pid) {
+                        continue;
+                    }
+                    match kcmp_file(me, pid, t.fd, a[2] as i32) {
+                        Err(e) => return -(e as i64),
+                        Ok(true) => return *k as i64,
+                        Ok(false) => {}
+                    }
+                }
+                -(libc::ENOENT as i64)
             }
             _ => -(libc::EINVAL as i64),
         }
@@ -260,29 +263,33 @@ impl Io {
     /// kernel, not from the runtime's marks, which a `vfork` child shares with its parent
     /// (a `posix_spawn` file action moves descriptors without them). A process with no timer
     /// costs nothing here.
-    pub fn timers_exec(&mut self, sched: &mut Sched, pid: i32) {
+    /// Err: kcmp's errno (the host cannot compare open files; the run ends).
+    pub fn timers_exec(&mut self, sched: &mut Sched, pid: i32) -> Result<(), i32> {
         if !self.timers.values().any(|t| t.holders.contains(&pid)) {
-            return;
+            return Ok(());
         }
         let kept = kept_fds(pid);
         let me = std::process::id() as u64;
-        let gone: Vec<u64> = self
-            .timers
-            .iter_mut()
-            .filter_map(|(k, t)| {
-                let named = kept.iter().any(|&fd| unsafe {
-                    libc::syscall(libc::SYS_kcmp, me, pid, KCMP_FILE, t.fd, fd)
-                } == 0);
-                (t.holders.contains(&pid)
-                    && !named
-                    && t.holders.remove(&pid)
-                    && t.holders.is_empty())
-                .then_some(*k)
-            })
-            .collect();
+        let mut gone = vec![];
+        for (k, t) in self.timers.iter_mut() {
+            if !t.holders.contains(&pid) {
+                continue;
+            }
+            let mut named = false;
+            for &fd in &kept {
+                if kcmp_file(me, pid, t.fd, fd)? {
+                    named = true;
+                    break;
+                }
+            }
+            if !named && t.holders.remove(&pid) && t.holders.is_empty() {
+                gone.push(*k);
+            }
+        }
         for k in gone {
             release(sched, self.timers.remove(&k).unwrap());
         }
+        Ok(())
     }
 
     /// `TimerFdGet`: next expiry (0 when disarmed), interval or clock.
@@ -328,6 +335,19 @@ impl Io {
 
 /// `kcmp` type: the two descriptors name one open file.
 const KCMP_FILE: u64 = 0;
+
+/// Whether the supervisor's descriptor `mine` and `pid`'s `theirs` name one open file. Only
+/// kcmp's equality is used (its order compares kernel addresses). Err: its errno, on a host
+/// where it fails (a kernel without it, a container's seccomp profile), which cannot tell.
+fn kcmp_file(me: u64, pid: i32, mine: i32, theirs: i32) -> Result<bool, i32> {
+    let r = unsafe { libc::syscall(libc::SYS_kcmp, me, pid, KCMP_FILE, mine, theirs) };
+    if r < 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EIO));
+    }
+    Ok(r == 0)
+}
 
 /// The guest descriptors of `pid` an `execve` keeps: those without close-on-exec, below the
 /// hidden ones. Only membership is used, so the order of the listing does not matter.

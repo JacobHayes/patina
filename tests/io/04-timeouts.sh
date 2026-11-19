@@ -4,7 +4,8 @@
 #    timerfds kept open across execve and a posix_spawn keep their setting, clock and
 #    duplicates, a close-on-exec one is closed (timerfd-exec checks each as Linux has it), one
 #    kept by a duplicate beside 64 other timers, or moved by a spawn's file action, is kept
-#    (timerfd-exec-many);
+#    (timerfd-exec-many); where kcmp fails (tests/no-kcmp.py) a timerfd kept across execve
+#    cannot be told from another eventfd: the run ends internal;
 #    SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s. Together about 130 virtual seconds, eight times
 #    this script's budget: a real wait fails it (no wall time is read).
 #@ tier=quick
@@ -14,6 +15,11 @@ for m in poll epoll timerfd timerfd2 timerfd-exec timerfd-exec-many rcvtimeo; do
     run_ok "$o/$m" 1 -- /guest/timeouts "$m"
     echo "$m: wall_ms $(field "$o/$m/result.json" wall_ms); $(head -1 "$o/$m/inc-0/stdout")"
 done
+python3 -I "$(dirname "$0")/../no-kcmp.py" "$PATINA" run --seed 1 --out "$o/nokcmp" \
+    --mount "$PATINA_GUESTS":/guest:copy -- /guest/timeouts timerfd-exec >/dev/null 2>&1 || [ -f "$o/nokcmp/result.json" ]
+[ "$(field "$o/nokcmp/result.json" outcome)" = internal ] ||
+    die "timerfd-exec without kcmp: $(field "$o/nokcmp/result.json" outcome): $(field "$o/nokcmp/result.json" message)"
+echo "timerfd-exec without kcmp: internal"
 python3 -I - "$o" <<'PY'
 import json, re, sys
 o = sys.argv[1]
