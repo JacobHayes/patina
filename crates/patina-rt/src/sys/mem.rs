@@ -375,6 +375,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 let r = raw(call);
                 if r == 0 {
                     if call.nr() == nr::MUNMAP {
+                        crate::oplog::on_munmap_done(call.arg(0), call.arg(1));
                         crate::insn::patch::forget(call.arg(0), call.arg(1));
                         forget_shared(call.arg(0), page_up(call.arg(1)));
                         super::shm::unmapped(call.arg(0), call.arg(1));

@@ -7,6 +7,9 @@
 #     a 16 MiB mapping cut into pieces 32 times keeps the largest resident set under 160 MiB
 #     (it reached 298 MiB when the cut parts stayed); and its address space is reused: 48
 #     mappings of 1 GiB, one after another, end ok (past half the runtime's 64 GiB region).
+#     munmaps the kernel refuses (length 0) change nothing Patina tracks: 200 of them inside one
+#     mapping, then its tail written and another file mapped, end ok and
+#     the operation log replays to the live tree.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/12-sparsemap
@@ -16,8 +19,10 @@ mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --se
     die "sparsemap: $(field "$o/result.json" outcome) $(field "$o/result.json" message) $(cat "$o/inc-0/stdout" 2>/dev/null)"
 [ "$mb" -lt 256 ] || die "sparsemap: largest resident set $mb MiB"
 echo "sparsemap: ok, largest resident set $mb MiB, $(grep allocated "$o/inc-0/stdout")"
-for m in cuts many; do
-    mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --seed 1 --out "$o-$m" \
+for m in cuts many refused; do
+    crash=()
+    [ "$m" != refused ] || crash=(--crash machine-at:1000000)
+    mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --seed 1 "${crash[@]}" --out "$o-$m" \
         --mount "$PATINA_GUESTS":/guest:copy -- /guest/sparsemap "$m")
     [ "$(field "$o-$m/result.json" outcome)" = ok ] && grep -qx "$m ok" "$o-$m/inc-0/stdout" ||
         die "sparsemap $m: $(field "$o-$m/result.json" outcome) $(field "$o-$m/result.json" message)"

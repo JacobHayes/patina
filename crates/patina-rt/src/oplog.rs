@@ -751,12 +751,23 @@ fn drop_map(i: usize) {
     t.n -= 1;
 }
 
-/// Before `munmap(addr, len)`: flush the mappings it touches and stop tracking them
-/// (a partial unmap keeps the remaining part tracked).
+/// Before `munmap(addr, len)`: flush the mappings it may unmap (harmless when the kernel
+/// then refuses the call).
 pub fn on_munmap(addr: u64, len: u64) {
     if addr & (PAGE - 1) != 0 {
         return; // the kernel refuses it: nothing is unmapped
     }
+    for i in 0..MAPS.get().n {
+        if overlaps(&MAPS.get().m[i], addr, len) {
+            flush(i);
+        }
+    }
+}
+
+/// After a `munmap(addr, len)` the kernel made (only then: one it refuses, as of length 0,
+/// unmaps nothing): stop tracking the mappings it removed (a partial unmap keeps the remaining
+/// part tracked) and give their copies back.
+pub fn on_munmap_done(addr: u64, len: u64) {
     let len = page_up(len);
     let mut i = 0;
     while i < MAPS.get().n {
@@ -765,7 +776,6 @@ pub fn on_munmap(addr: u64, len: u64) {
             i += 1;
             continue;
         }
-        flush(i);
         let (lo, hi) = (addr.max(m.addr), (addr + len).min(m.addr + m.len));
         if lo == m.addr && hi == m.addr + m.len {
             drop_map(i);

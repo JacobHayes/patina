@@ -8,6 +8,8 @@
 // it holds every page) and unmapped in pieces: the head, a hole in the middle, then the two
 // pieces left; the data reads back through each piece first.
 // sparsemap many: 48 times a 1 GiB file mapped MAP_SHARED, one page written, unmapped.
+// sparsemap refused: a 1 MiB file mapped MAP_SHARED, then 200 munmaps of length 0 inside it,
+// which the kernel refuses; the mapping stays whole: a page written through its tail reads back with pread, and another file maps.
 #define _GNU_SOURCE
 #include <fcntl.h>
 #include <stdio.h>
@@ -59,7 +61,30 @@ static int many(void) {
     return 0;
 }
 
+static int refused(void) {
+    int fd = open("refused", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0 || ftruncate(fd, 1 << 20)) return fail("refused: create");
+    char *m = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) return fail("refused: mmap");
+    for (int i = 1; i <= 200; i++) {
+        char *a = m + (i % 255 + 1) * 4096;
+        if (munmap(a, 0) == 0) return fail("refused: munmap succeeded");
+    }
+    memcpy(m + (1 << 20) - 4096, "tail", 4);
+    char b[4];
+    if (pread(fd, b, 4, (1 << 20) - 4096) != 4 || memcmp(b, "tail", 4)) return fail("refused: tail");
+    int fd2 = open("refused2", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd2 < 0 || ftruncate(fd2, 4096)) return fail("refused: create 2");
+    char *m2 = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd2, 0);
+    if (m2 == MAP_FAILED) return fail("refused: mmap 2");
+    m2[0] = 'y';
+    if (munmap(m2, 4096) || munmap(m, 1 << 20)) return fail("refused: munmap");
+    printf("refused ok\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[1], "refused")) return refused();
     if (argc > 1 && !strcmp(argv[1], "cuts")) return cuts();
     if (argc > 1 && !strcmp(argv[1], "many")) return many();
     int fd = open("db", O_RDWR | O_CREAT | O_TRUNC, 0600);
