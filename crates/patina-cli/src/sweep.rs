@@ -809,12 +809,14 @@ impl Drop for Held {
     }
 }
 
-/// Remove the logs (`inc-*`) and the checker's output of a run directory, keeping `run.json`
-/// and `result.json`.
+/// Remove the logs (`inc-*`, and the nodes' output in `node/`) and the checker's output of a run
+/// directory, keeping `run.json` and `result.json`.
 fn prune(dir: &Path) {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
-            if e.file_name().to_string_lossy().starts_with("inc-") {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("inc-") || name == "node" {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }

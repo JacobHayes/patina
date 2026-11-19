@@ -198,6 +198,10 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
             }
             (None, _) => Classified::new(Failure, "exit", d),
         },
+        // A node's command (`proto::node`): an exit outside its `ok-exit`, or a signal Patina
+        // did not send. The detail names the node.
+        "node-failed" => Classified::new(Failure, "exit", d),
+        "node-crash" => Classified::new(Crash, "signal", d),
         "violation" => Classified::new(Violation, "always", d),
         "deadlock" => Classified::new(
             Liveness,

@@ -123,6 +123,9 @@ pub fn describe(r: &Rec) -> String {
             proto::ctl::DEC_NODE_START => "node start".to_string(),
             proto::ctl::DEC_NODE_STOP => "node stop".to_string(),
             proto::ctl::DEC_NODE_SLOT => "node slot".to_string(),
+            proto::ctl::DEC_NODE_DOWN => {
+                format!("node down {}", proto::node::down_name(r.args[2]))
+            }
             proto::ctl::DEC_WIRE_HEAL => "wire heal".to_string(),
             proto::ctl::DEC_NET_PART => format!(
                 "partition {} {}",

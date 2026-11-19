@@ -396,6 +396,11 @@ impl Sup {
     }
 
     pub(super) fn faults_on(&self) -> bool {
+        self.setup_done() && !self.nodes_quiet()
+    }
+
+    /// Past setup (`faults-after-setup`): faults may act.
+    pub(super) fn setup_done(&self) -> bool {
         self.ctl.seq.load(Relaxed) >= self.ctl.faults.cfg.fault_after_seq
     }
 

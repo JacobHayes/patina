@@ -1232,7 +1232,7 @@ node's processes: another node's are `ESRCH` to `kill`, `getsid`, `getpgid` and 
 pid, and absent from `/proc`. Each node's
 first process starts with the driver's process state (umask, limits, signals) and the
 environment `PATINA_NODE=NAME` and `HOME` (its work tree). Its output is in
-`RUNDIR/node/NAME/inc-0/`, beside the driver's `inc-0/`.
+`RUNDIR/node/NAME/inc-0/`, beside the driver's `inc-0/` (`inc-K/` for its K-th restart, below).
 
 **Addresses.** A listener on `0.0.0.0` or the node's own address is reachable from every node
 at that address; one on `127.0.0.1` only from its own node. Connections show the nodes'
@@ -1257,11 +1257,13 @@ Each is a call the log records (`mark` and `net` events below).
 | `net cut --from A --to B` | cut one direction: what `A` sends to `B` is held |
 | `net heal A B`, `net heal --from A --to B` | heal those links |
 | `net heal` | heal every cut |
+| `node kill NAME --process` | kill every process of node `NAME` (below) |
+| `node start NAME` | start the command of node `NAME`, which is down, again |
 | `mark LABEL` | as the SDK's `mark` (any node) |
 
 A set is node names joined by commas (`driver` included), or `rest`: every node the other set
-does not name. Only the driver's processes may use `net`; a node's get `EPERM` (`patina ctl`
-says why and exits 2). An unknown name is `ENOENT`, other words `EINVAL`.
+does not name. Only the driver's processes may use `net` and `node`; a node's get `EPERM`
+(`patina ctl` says why and exits 2). An unknown name is `ENOENT`, other words `EINVAL`.
 
 **What a cut does.** A node's traffic to itself is never cut. Across a cut link no TCP data is
 lost and nothing fails at once, as with a cable pulled out for a while: bytes and the closing
@@ -1371,12 +1373,119 @@ same way (`tests/nodes/04-quorum-bugs.sh`); without a bug the same sweep is clea
 `patina minimize` treats `partition-gap-ms` as a rate: it tries dropping it, then doubles the
 gap while the run still fails the same way.
 
-**Not available yet** (refused, naming what is missing): node crashes and restarts (`--crash`;
-a node's `restart`, `count`, `ok-exit`, `max-incarnations`, `faults`), per-node disk and memory
-faults, a node's own clock (`clock ...`) and control of a node's processes (`node ...`,
-`EOPNOTSUPP`), `--branch` (it forces crash points), `patina __native` twins and `--check`
-reference runs of a run with nodes. A node's work tree is not crash-modelled and has no
-operation log (`op` events are the driver's).
+### Killing and restarting a node
+
+A node's processes can be killed and its command started again, by the driver or by the seed.
+This is a process kill, as `kill -9` of everything the node runs; a crash of the node's
+machine, which also loses what it had not synced, is not available yet.
+
+`patina ctl node kill NAME --process` (or `patina.control("node kill NAME --process")`) kills
+every process of node `NAME` at once; `node start NAME` starts its command again. A kill of a
+node that is down answers `EALREADY` (and cancels a restart it had coming); so does a start
+of one that is up or already starting, and a start past the 64th incarnation answers `EAGAIN`. What the node's peers see is what they see when a machine's processes are
+killed: its connections end (a peer reads end of file, or `ECONNRESET` if data was in
+flight), its listeners are gone, so a connect to it is refused while it is down, and the
+datagrams sent to it are lost. Its work tree, `/tmp` and `/dev/shm` stay as its processes left
+them: the restarted command finds them, starts in the same hostname and addresses, and has
+`PATINA_INCARNATION=K` in its environment (K counts its starts from 0; the first start has
+none). Each start's output is in `RUNDIR/node/NAME/inc-K/`.
+
+<!-- transcript nodes-kill
+dir: /tmp/kill
+setup: mkdir g && cp "$GUESTS/kill.py" "$GUESTS/patina.py" g/
+setup: printf '[node.b]\ncmd = ["python3", "/guest/kill.py", "b"]\n' >patina.toml
+-->
+```text
+$ patina run --mount g:/guest -- python3 /guest/kill.py driver 3
+ok (exit): the program exited 0
+guest: exit 0
+nodes: b 10.0.0.2 running after 3 downs, 4 incarnations; net: 0 cuts, 0 heals, 0 held, none cut at the end
+run directory: /tmp/kill/patina-out/run-0
+replay: patina replay /tmp/kill/patina-out/run-0
+$ cat patina-out/run-0/inc-0/stdout patina-out/run-0/node/b/inc-3/stdout
+ok 3 cycles: connections ended at each kill, connects refused while down
+ok each restart found the work tree of the last: start 4, incarnation 3
+b: start 4, incarnation 3
+```
+
+`kill.py` (in `tests/guests/nodes`) serves two ports from node b, one from its first process
+and one from a child; the driver kills b, checks that both connections end and that connects
+are refused, starts it again and reads the count of starts b keeps in its work tree
+(`tests/nodes/05-kill.sh` does it 50 times).
+
+**The seed's kills.** `--crash process` kills nodes at times the seed draws, and restarts
+them (a kill or restart that falls while a process or thread is being created waits until it
+exists, so a new child is killed with its parent): every node but the driver (`--crash process@a,b` only those). After each start of a
+node, `crash-gap-ms=A..B` (default `5000..60000`) is the virtual time to its next kill; after
+a kill, `down-ms=A..B` (default `1000..61000`) the time it stays down before its restart.
+`max-incarnations=N` stops the kills once a node has started N times (each node counts its
+own), and `faults-in-recovery=0` turns the network's faults and partitions off after the
+first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this; `--crash machine` and
+`restart-gap-ms` are refused, and the driver is never killed. A kill ahead does not keep a
+run alive: if every thread waits with no deadline and only a kill is to come, the run is
+deadlocked, as it would be without kills.
+
+**A node's own end.** A node is up while its first process runs. When that process ends by
+itself, the node's other processes are killed and the node is down: an exit status outside
+the node's `ok-exit` (default `0`) ends the run `failure`, and a death by a signal Patina did
+not send ends it `crash`, both naming the node (`result.json`'s `node_end`, and its stderr in
+the summary). An exit within `ok-exit` only stops the node. A node's `restart` key says what
+follows its downs: `crash` (the default: restarted after a seed's kill), `always` (also after
+an exit within `ok-exit`) or `never`; a script's kill is never followed by a restart but the
+script's own `node start`. A node's keys for this: `restart`, `ok-exit` (a status or a list),
+`max-incarnations` (1 to 64, the most a node starts by the seed's kills and its restarts;
+the script's `node start` goes up to 64) and `count = N`, which makes N nodes of
+one table, named `NAME1` to `NAMEN`:
+
+```toml
+[node.replica]
+cmd = ["python3", "/guest/q3.py"]
+restart = "always"
+ok-exit = [0, 3]
+count = 3
+```
+
+<!-- transcript nodes-kills
+exact-only: which seeds lose a write, and when the nodes go down, are the seeds' runs
+dir: /tmp/q3k
+setup: mkdir g && cp "$GUESTS/q3.py" "$GUESTS/patina.py" g/
+setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "amnesia"]\n\n' $n $n; done >patina.toml
+exit: 1 0
+-->
+```text
+$ patina sweep --seeds 1..8 -j 4 --mount g:/guest --crash process --fault crash-gap-ms=3000..15000 --fault down-ms=500..3000 -- python3 /guest/q3.py driver 60
+...
+patina sweep: 8 runs, 5 findings in 1 group, 3 ok   (5.3s, 4 jobs)
+outcomes: failure 5, ok 3
+nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 0 held over them
+node downs: 49 killed; 48 restarts
+
+failure exit: exit 1
+  5 of 8 runs   first: seed 3   replayed: identical
+  faults in every failing run: crash      in none: -
+  rerun:  patina run --seed 3 --config /tmp/q3k/patina-out/sweep/seed-3/run.json -- python3 /guest/q3.py driver 60
+  replay: patina replay /tmp/q3k/patina-out/sweep/seed-3
+$ grep FAIL patina-out/sweep/seed-3/inc-0/stdout
+FAIL: lost write: k2 read 0 in view 0; 80 was seen before (ack in view 0; views up to 0)
+```
+
+Every kill and restart is in the logs: `result.json`'s `nodes.list` gives each node its
+`incarnations` and `downs` (each with its `incarnation`, `how`: `killed`, `killed by script`,
+`exited`, `failed` or `crashed`, `at_ms`, `up_ms`, `down_ms` until its restart or `null`, and
+the `exit` or `signal` of a node's own end), `faults.counts.crash` counts the seed's kills, and
+`patina log events` has `node` events `kill` (`by` `seed` or `script`), `exit` and `crash`,
+each with the processes it `killed` and its `restart_in_ms`, and a `start` with its
+`incarnation` for each restart. With `amnesia`, a node of `q3.py` keeps its view but not its
+log across a restart, and a write the cluster acknowledged is lost after the seed kills the
+nodes that had it (`tests/nodes/06-quorum-kills.sh`); without it, the same sweep is clean.
+
+**Not available yet** (refused, naming what is missing): a crash of a node's machine
+(`--crash machine`, `node kill NAME` without `--process`, and the loss of what a node had not
+synced), per-node faults (`faults` in a node's table) and disk and memory faults with nodes,
+pausing a node (`node pause`, `node resume`), a node's own clock (`clock ...`), `--branch` (it
+forces crash points), `patina __native` twins and `--check` reference runs of a run with
+nodes. A node's work tree is not crash-modelled and has no operation log (`op` events are the
+driver's).
 
 ## The SDK
 

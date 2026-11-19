@@ -139,8 +139,14 @@ impl Sup {
                 self.signal_thread_new(idx, pid);
                 Next::Continue(0)
             }
-            HELLO_IMAGE if self.sched.entries[idx].state == State::Free => {
-                // The first guest, or a node's first process (`nodes::boot`).
+            HELLO_IMAGE
+                if self.sched.entries[idx].state == State::Free
+                    || self.nodes.booting == Some(idx) =>
+            {
+                // The first guest, or a node's first process (`nodes::start_node`). A restart's
+                // slot may be one an exited thread left (`SLOT_FREE` once its process reaped
+                // it, its entry still `exiting`): the kernel thread is gone, the entry is
+                // replaced.
                 let node = self.slot(idx).node.load(Relaxed) as usize;
                 if node != 0 && self.nodes.booting != Some(idx) {
                     self.finish(Verdict::new(
@@ -336,6 +342,11 @@ impl Sup {
         } else {
             Next::Continue(p.pdeathsig as i64)
         }
+    }
+
+    /// A vfork child is starting (reserved by `VforkStart`, not yet registered by its `Hello`).
+    pub fn vfork_in_flight(&self) -> bool {
+        !self.procs.vfork_pending.is_empty()
     }
 
     /// SIGCHLD's disposition changed: is auto-reaping on?

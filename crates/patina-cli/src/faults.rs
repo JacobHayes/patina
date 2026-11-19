@@ -17,6 +17,8 @@ use serde_json::{json, Value};
 pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
 /// `restart-gap-ms` when not given: 1 s to 61 s.
 pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
+/// `crash-gap-ms` when not given: 5 s to 60 s.
+pub const CRASH_GAP_DEFAULT: (u64, u64) = (5_000_000_000, 60_000_000_000);
 
 /// The fault plan of a run.
 #[derive(Clone, Debug)]
@@ -29,6 +31,11 @@ pub struct Plan {
     /// `restart-gap-ms=A..B`: virtual time from a crash to the restart, drawn per restart in
     /// [A, B) ns (A when A = B).
     pub restart_gap_ns: (u64, u64),
+    /// With nodes: `crash-gap-ms` and `down-ms` (ns), and the nodes the seed kills
+    /// (`--crash process[@NODE,...]`; bit `k` for node `k`).
+    pub crash_gap_ns: (u64, u64),
+    pub down_ns: (u64, u64),
+    pub node_crash: u64,
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
     /// `--buggify`, `buggify-permille=N`, `point:LABEL=N` (`proto::sdk`).
@@ -300,7 +307,19 @@ pub const KEYS: &[Key] = &[
         "max-incarnations",
         "N",
         Val::Param,
-        "at most N incarnations: no crash in the N-th, so a run restarts at most N-1 times [default: 4]",
+        "at most N incarnations: no crash in the N-th, so a run restarts at most N-1 times (with nodes: each node's boots, as its own max-incarnations) [default: 4]",
+    ),
+    key(
+        "crash-gap-ms",
+        "A..B",
+        Val::Spread,
+        "with nodes and --crash process: virtual time from a node's start to the seed's kill of its processes, a draw in A..B ms for each boot [default: 5000..60000]",
+    ),
+    key(
+        "down-ms",
+        "A..B",
+        Val::Spread,
+        "with nodes: virtual time a node stays down before its restart, a draw in A..B ms for each restart [default: 1000..61000]",
     ),
     key(
         "compute-gap",
@@ -657,10 +676,10 @@ pub fn resolve(
         ));
     }
     if nodes == 0 {
-        if let Some(e) = given
-            .iter()
-            .find(|e| e.0.starts_with("partition-") || e.0 == "net-links")
-        {
+        if let Some(e) = given.iter().find(|e| {
+            e.0.starts_with("partition-")
+                || matches!(e.0.as_str(), "net-links" | "crash-gap-ms" | "down-ms")
+        }) {
             return Err(format!("--fault {}: only in a run with nodes", e.0));
         }
     }
@@ -681,6 +700,9 @@ pub fn resolve(
         faults_in_recovery: true,
         max_incarnations: MAX_INCARNATIONS_DEFAULT,
         restart_gap_ns: RESTART_GAP_DEFAULT,
+        crash_gap_ns: CRASH_GAP_DEFAULT,
+        down_ns: RESTART_GAP_DEFAULT,
+        node_crash: 0,
         net: Default::default(),
         sdk: Default::default(),
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
@@ -802,6 +824,17 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         }
         "restart-gap-ms" => {
             o.restart_gap_ns = ms_range(k, v)?;
+            return Ok(());
+        }
+        "crash-gap-ms" => {
+            o.crash_gap_ns = ms_range(k, v)?;
+            return Ok(());
+        }
+        "down-ms" => {
+            o.down_ns = ms_range(k, v)?;
+            if o.down_ns.1 == 0 {
+                return Err(format!("--fault {k}={v}: B is at least 1"));
+            }
             return Ok(());
         }
         "max-incarnations" => {

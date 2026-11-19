@@ -150,9 +150,31 @@ pub struct Node {
     pub work: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_at: Option<String>,
+    /// `restart`: `crash` (`None`), `always` or `never`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart: Option<String>,
+    /// `ok-exit`: exit statuses of its command that stop it without a finding (none: `[0]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ok_exit: Option<Vec<u8>>,
+    /// `max-incarnations`: its boots (none: the run's `max-incarnations`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_incarnations: Option<u64>,
 }
 
 impl Node {
+    pub fn new(name: String, cmd: Vec<String>) -> Node {
+        Node {
+            name,
+            cmd,
+            env: vec![],
+            work: None,
+            work_at: None,
+            restart: None,
+            ok_exit: None,
+            max_incarnations: None,
+        }
+    }
+
     pub fn work_path(&self) -> &str {
         self.work_at.as_deref().unwrap_or("/work")
     }
@@ -894,13 +916,8 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
     for n in order {
         let at = format!("{file}: node.{n}");
         let v = t.get(&n).ok_or_else(|| format!("{at}: not found"))?;
-        let mut node = Node {
-            name: n.clone(),
-            cmd: vec![],
-            env: vec![],
-            work: None,
-            work_at: None,
-        };
+        let mut node = Node::new(n.clone(), vec![]);
+        let mut count = None;
         for (k, v) in table(v, &at)? {
             let at = format!("{at}.{k}");
             match k.as_str() {
@@ -911,15 +928,64 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
                     }
                 }
                 "work" => (node.work, node.work_at) = work(base, &at, &string(v, &at)?)?,
-                "count" | "restart" | "ok-exit" | "max-incarnations" | "faults" => {
+                "restart" => {
+                    let s = string(v, &at)?;
+                    if !matches!(s.as_str(), "crash" | "always" | "never") {
+                        return Err(format!("{at}: crash, always or never, not {s}"));
+                    }
+                    node.restart = Some(s);
+                }
+                "ok-exit" => {
+                    let l: Vec<i64> = match v {
+                        toml::Value::Array(a) => a
+                            .iter()
+                            .map(|x| x.as_integer().ok_or(()))
+                            .collect::<Result<_, _>>()
+                            .map_err(|_| format!("{at}: a list of exit statuses"))?,
+                        toml::Value::Integer(i) => vec![*i],
+                        _ => return Err(format!("{at}: a list of exit statuses")),
+                    };
+                    if let Some(x) = l.iter().find(|x| !(0..=255).contains(*x)) {
+                        return Err(format!("{at}: {x} is not an exit status (0 to 255)"));
+                    }
+                    node.ok_exit = Some(l.iter().map(|x| *x as u8).collect());
+                }
+                "max-incarnations" => {
+                    let n_: u64 = int(v, &at)?;
+                    if n_ == 0 || n_ > proto::node::BOOTS_MAX as u64 {
+                        return Err(format!(
+                            "{at}: 1 to {} (a node boots at most that often)",
+                            proto::node::BOOTS_MAX
+                        ));
+                    }
+                    node.max_incarnations = Some(n_);
+                }
+                "count" => {
+                    let c: u64 = int(v, &at)?;
+                    if c == 0 || c > MAX_NODES as u64 {
+                        return Err(format!("{at}: 1 to {MAX_NODES}"));
+                    }
+                    count = Some(c);
+                }
+                "faults" => {
                     return Err(format!(
-                        "{at}: not available yet (node crash and restart, per-node faults)"
+                        "{at}: not available yet (per-node fault settings come later)"
                     ))
                 }
                 _ => return Err(format!("{file}: unknown key node.{n}.{k}")),
             }
         }
-        out.push(node);
+        // `count = N`: nodes NAME1..NAMEN in its place, each with this table.
+        match count {
+            Some(c) => {
+                for i in 1..=c {
+                    let mut x = node.clone();
+                    x.name = format!("{n}{i}");
+                    out.push(x);
+                }
+            }
+            None => out.push(node),
+        }
     }
     Ok(out)
 }
@@ -967,13 +1033,10 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         if c.nodes.iter().any(|x| x.name == name) {
             return Err(format!("--node {name}: the run already has a node {name}"));
         }
-        c.nodes.push(Node {
-            name: name.to_string(),
-            cmd: crate::sweep::words(cmd).map_err(|e| format!("--node {name}: {e}"))?,
-            env: vec![],
-            work: None,
-            work_at: None,
-        });
+        c.nodes.push(Node::new(
+            name.to_string(),
+            crate::sweep::words(cmd).map_err(|e| format!("--node {name}: {e}"))?,
+        ));
     }
     for m in a.all("--mount") {
         c.mounts.push(mount(&cwd, m)?);
@@ -1084,11 +1147,13 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
 impl Config {
     /// Check every setting and build the launcher's plan around an already resolved program.
     pub fn opts_with(&self, program: Program) -> Res<Opts> {
+        // With nodes, `--crash` names the nodes the seed kills (`check_nodes`), not a crash
+        // plane of the driver's disk.
         let mut plan = faults::resolve(
             self.seed,
             &self.faults_preset,
             &self.faults,
-            self.crash.as_deref(),
+            self.crash.as_deref().filter(|_| self.nodes.is_empty()),
             self.nodes.len(),
         )?;
         plan.sdk.buggify = self.buggify as _;
@@ -1136,7 +1201,7 @@ impl Config {
                 "pmu-short-max is at most pmu-margin + 1024 (short slices are hopped)".into(),
             );
         }
-        let node_programs = self.check_nodes(&plan)?;
+        let node_programs = self.check_nodes(&mut plan)?;
         Ok(Opts {
             cfg: self.clone(),
             program,
@@ -1147,7 +1212,7 @@ impl Config {
     }
 
     /// Check the nodes of a run (`proto::node`) and resolve their programs.
-    fn check_nodes(&self, plan: &faults::Plan) -> Res<Vec<Program>> {
+    fn check_nodes(&self, plan: &mut faults::Plan) -> Res<Vec<Program>> {
         if self.nodes.is_empty() {
             return Ok(vec![]);
         }
@@ -1156,23 +1221,37 @@ impl Config {
                 "[node.*]: at most {MAX_NODES} nodes besides the driver"
             ));
         }
-        if self.crash.is_some() {
-            return Err(
-                "--crash with nodes: not available yet (node crash and restart come later)".into(),
-            );
+        if let Some(c) = &self.crash {
+            plan.node_crash = self.crash_nodes(c)?;
+            plan.resolved.push(("crash".into(), serde_json::json!(c)));
         }
-        // Link faults and partitions act between nodes; a node's own disk and memory have no
-        // fault plane yet.
+        // Link faults, partitions and node kills act between nodes; a node's own disk and
+        // memory have no fault plane yet.
         let between = |k: &str| {
             k.starts_with("compute-")
                 || k.starts_with("net-")
                 || k.starts_with("partition-")
-                || matches!(k, "swarm" | "faults-after-setup")
+                || matches!(
+                    k,
+                    "swarm"
+                        | "faults-after-setup"
+                        | "crash"
+                        | "crash-gap-ms"
+                        | "down-ms"
+                        | "max-incarnations"
+                        | "faults-in-recovery"
+                )
         };
+        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "restart-gap-ms") {
+            return Err(format!(
+                "--fault {k} with nodes: a node's down time is down-ms (a run with nodes has no \
+                 machine crash yet)"
+            ));
+        }
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
             return Err(format!(
                 "--fault {k} with nodes: not available yet (a node's disk and memory faults come \
-                 later; the net- and partition- settings work)"
+                 later; the net-, partition- and node kill settings work)"
             ));
         }
         let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
@@ -1230,6 +1309,45 @@ impl Config {
             programs.push(program(&n.cmd[0], &self.mounts).map_err(|e| format!("{at}: {e}"))?);
         }
         Ok(programs)
+    }
+
+    /// `--crash process[@NODE,...]` in a run with nodes: the nodes the seed kills (bit `k` for
+    /// node `k`; no `@`: every node but the driver).
+    fn crash_nodes(&self, c: &str) -> Res<u64> {
+        let (kind, at) = c.split_once('@').map_or((c, None), |(k, a)| (k, Some(a)));
+        match kind {
+            "process" => {}
+            k if k.starts_with("machine") => {
+                return Err(format!(
+                    "--crash {c} with nodes: a machine crash is not available yet (--crash \
+                     process[@NODE,...] kills a node's processes)"
+                ))
+            }
+            _ => {
+                return Err(format!(
+                    "--crash {c} with nodes: expected process[@NODE,...] (kills at seed-drawn \
+                     times, crash-gap-ms)"
+                ))
+            }
+        }
+        let Some(at) = at else {
+            return Ok(((1u64 << (self.nodes.len() + 1)) - 1) & !1);
+        };
+        let mut m = 0;
+        for n in at.split(',') {
+            if n == "driver" {
+                return Err(format!(
+                    "--crash {c}: the driver is never killed (it runs the run's checks)"
+                ));
+            }
+            let k = self
+                .nodes
+                .iter()
+                .position(|x| x.name == n)
+                .ok_or_else(|| format!("--crash {c}: the run has no node {n}"))?;
+            m |= 1 << (k + 1);
+        }
+        Ok(m)
     }
 
     /// The work tree's guest path.
@@ -1333,6 +1451,44 @@ mod tests {
         assert_eq!((c.cpus, c.stall_ms), (2, 500));
         assert_eq!(c.env, vec!["A=1".to_string()]);
         assert_eq!(c.faults, vec!["fs-error-permille=5".to_string()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn node_tables_take_their_restart_keys_and_crash_names_nodes() {
+        let dir = std::env::temp_dir().join(format!("patina-nodes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("patina.toml");
+        std::fs::write(
+            &f,
+            "[node.w]\ncmd = [\"/bin/true\"]\nrestart = \"always\"\nok-exit = [0, 3]\n\
+             max-incarnations = 4\ncount = 3\n[node.db]\ncmd = [\"/bin/true\"]\n",
+        )
+        .unwrap();
+        let mut c = Config::default();
+        apply_file(&mut c, &f).unwrap();
+        let names: Vec<&str> = c.nodes.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, ["w1", "w2", "w3", "db"]);
+        assert!(c.nodes[..3]
+            .iter()
+            .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_incarnations == Some(4)));
+        assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
+        // `--crash process` covers every node but the driver; `@` names some.
+        assert_eq!(c.crash_nodes("process").unwrap(), 0b11110);
+        assert_eq!(c.crash_nodes("process@w2,db").unwrap(), 0b10100);
+        for bad in ["machine", "process@driver", "process@nope", "fs"] {
+            assert!(c.crash_nodes(bad).is_err(), "{bad}");
+        }
+        for bad in [
+            "restart = \"sometimes\"",
+            "ok-exit = 256",
+            "max-incarnations = 0",
+            "count = 16",
+            "faults = \"net\"",
+        ] {
+            std::fs::write(&f, format!("[node.w]\ncmd = [\"/bin/true\"]\n{bad}\n")).unwrap();
+            assert!(apply_file(&mut Config::default(), &f).is_err(), "{bad}");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

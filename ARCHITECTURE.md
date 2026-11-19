@@ -348,8 +348,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   counter name under the prefix. Without nodes none of this runs.
 - **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the node
   table (`proto::node::parse`; the supervisor cannot read a node process's memory, which is not
-  its descendant), refuses `net` outside the driver's node (`EPERM`), and sends `Op::Net` [verb,
-  from set, to set, both]; the call is logged with its words as an SDK call is.
+  its descendant), refuses `net` and `node` outside the driver's node (`EPERM`), and sends
+  `Op::Net` [verb, from set, to set, both] or `Op::Node` [verb, node]; the call is logged with
+  its words as an SDK call is.
 - **Cuts.** The supervisor keeps two matrices of cut links (`sup/link.rs`): the script's
   (`net cut`) and the seed's (partitions); a link is cut while either says so, and `net heal`
   clears the script's only. The wire consults them when it stamps a delivery: an item on a cut
@@ -379,12 +380,47 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   without partitions; an end is strong, since it may release held traffic. A start that falls
   while faults are off makes no partition. The node table keeps the first 64 partitions (shape,
   sides, times, whether a cut link held, lost or kept back anything) for `result.json`.
+- **Kill and restart.** A node is up from its first process's `Hello` until it goes down
+  (`DEC_NODE_DOWN` [node, incarnation, how, status, processes killed, down time]): the seed
+  kills it (`--crash process`: a weak node event `crash-gap-ms` after each start, keyed on
+  `Stream::Node` by node, incarnation and try, with an `Injected` record `INJ_NODE_KILL`
+  counted as `crash`), the driver does (`node kill NAME --process`, `Op::Node`), or its first
+  process ends by itself. A kill `SIGKILL`s every live process of the node through the
+  supervisor's own kill (`kill_now`, with its exit barrier: the kernel has closed every
+  descriptor before anything else happens); a socket's end is then
+  the kernel's and the wire's ordinary one (FIN or RST to its peers, a listener whose name the
+  next connect finds gone, `ECONNREFUSED`). A first process's own end kills the node's others
+  the same way and classifies the end: an exit within `ok-exit` (`NodeConf`) stops the node;
+  another exit ends the run (`node-failed`, outcome `failure`), a signal Patina did not send
+  too (`node-crash`, outcome `crash`). The node table keeps each incarnation's pid, times, how
+  it ended and the stdio offsets where its output starts (`Boot`, at most 64 incarnations).
+  Node events act only where no request is in flight that they could disturb (`node_actions`:
+  before the turn holder's request is handled, or at an idle jump, after which the wire is
+  stepped and I/O waiters woken, so peers see a kill at once); a kill that ends the turn
+  holder's process leaves its request unserved, and a turn holder ending its own process
+  (`ProcExit`) ends first. A kill or a restart waits while any slot is reserved for a process
+  or thread the runtime is creating (its `Forked` not yet served) or a vfork child has not
+  said `Hello`: until then the new task is in no table, and a kill would miss it. A restart (a
+  strong event `down-ms` after a down its `restart` policy follows, or the driver's `node
+  start`) waits for the next such point after a kill in the same one, takes the lowest free slot (one an exited
+  thread left is replaced), clears the node's `filter_installed` bit (a new process tree needs
+  the filter) and asks the keeper for incarnation K: the keeper keeps every node's mount, UTS
+  and IPC namespaces from its first start (`sandbox::Saved`, received from the view's helper)
+  and starts the new process in them (`Place::Again`), without the starting tree's copy and with
+  `PATINA_INCARNATION=K`; its memfd stdio continues where the last left off, and the launcher
+  splits it per incarnation by the offsets the keeper reported. Everything is in the turn's
+  order, so kills, restarts and their records are the same in every run of a seed. The work
+  tree, `/tmp` and `/dev/shm` are kept whole across a kill, as a process kill keeps the page
+  cache: what a node's processes stored through a shared mapping is in the tmpfs pages, which
+  is all a process kill needs. A node's tree has no operation log, so there is nothing to
+  flush to one (the driver's shared mappings reach its log as without nodes), and the loss of
+  unsynced data on a node is not modelled.
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
-  `node/NAME/inc-0/` and the node table to `result.json`'s `nodes`.
+  `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
-Not yet: node crash and restart, per-node disk faults and crash models (a node's work tree has
-no operation log), and per-node clocks.
+Not yet: a node's machine crash (the loss of what it had not synced; per-node operation logs
+and crash models), per-node disk faults, pausing a node, and per-node clocks.
 
 ## The boundary log
 

@@ -40,15 +40,29 @@ pub fn of(r: &Value, dir: &Path) -> Value {
     if outcome == "ok" || outcome.is_empty() {
         return Value::Null;
     }
-    let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
-    let stderr = std::fs::read(dir.join(format!("inc-{inc}")).join("stderr"))
+    // A node's own end (`node_end`): its stderr, its exit or signal, and its name, which
+    // tells it from the same end of another node's command.
+    let (stderr_at, at) = match r["node_end"]["node"].as_str() {
+        Some(n) => (
+            dir.join("node").join(n).join(format!(
+                "inc-{}",
+                r["node_end"]["incarnation"].as_u64().unwrap_or(0)
+            )),
+            format!(" [node {n}]"),
+        ),
+        None => {
+            let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
+            (dir.join(format!("inc-{inc}")), String::new())
+        }
+    };
+    let stderr = std::fs::read(stderr_at.join("stderr"))
         .map(|b| String::from_utf8_lossy(&b).into_owned())
         .unwrap_or_default();
     let p = primary(r, &stderr);
     Value::String(if p.is_empty() {
-        format!("{outcome} {stop}")
+        format!("{outcome} {stop}{at}")
     } else {
-        format!("{outcome} {stop}: {p}")
+        format!("{outcome} {stop}{at}: {p}")
     })
 }
 
@@ -86,7 +100,11 @@ fn primary(r: &Value, stderr: &str) -> String {
             } else if let Some(l) = last_line(stderr) {
                 parts.push(l);
             }
-            let g = &r["guest"];
+            let g = if r["node_end"].is_object() {
+                &r["node_end"]
+            } else {
+                &r["guest"]
+            };
             match (g["signal"].as_i64(), g["exit"].as_i64()) {
                 (Some(sig), _) => parts.push(crate::outcome::signal_name(sig)),
                 (None, Some(x)) => parts.push(format!("exit {x}")),

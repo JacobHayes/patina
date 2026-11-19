@@ -44,10 +44,11 @@ refused() {
     grep -q -- "$what" "$o/refused.err" || die "$what: the refusal does not name it: $(cat "$o/refused.err")"
     echo "refused: $what"
 }
-refused --crash --config "$o/iso.toml" --crash process
+refused "--crash machine" --config "$o/iso.toml" --crash machine
+refused restart-gap-ms --config "$o/iso.toml" --fault restart-gap-ms=1000..2000
 refused fs-error-permille --config "$o/iso.toml" --fault fs-error-permille=10
-printf '[node.c]\ncmd = ["/bin/true"]\nrestart = true\n' >"$o/restart.toml"
-refused restart --config "$o/restart.toml"
+printf '[node.c]\ncmd = ["/bin/true"]\nfaults = "net"\n' >"$o/faults.toml"
+refused node.c.faults --config "$o/faults.toml"
 for taken in driver rest localhost; do
     printf '[node.%s]\ncmd = ["/bin/true"]\n' "$taken" >"$o/taken.toml"
     refused "node.$taken" --config "$o/taken.toml"

@@ -908,9 +908,36 @@ pub fn run_incarnation(
     }
     unsafe { Ctl::init(ctl_ptr as *mut Ctl, cfg) };
     if !c.nodes.is_empty() {
-        unsafe { proto::node::NodeTab::at(ctl_ptr) }.set(
+        let t = unsafe { proto::node::NodeTab::at(ctl_ptr) };
+        t.set(
             std::iter::once(proto::node::DRIVER).chain(c.nodes.iter().map(|n| n.name.as_bytes())),
         );
+        // Each node's restart policy, boots and ok-exit statuses, and the run's kill and
+        // down-time settings (`sup::nodes`).
+        let p = &o.plan;
+        for (i, n) in c.nodes.iter().enumerate() {
+            let k = i + 1;
+            let mut ok_exit = [0u64; 4];
+            for s in n.ok_exit.as_deref().unwrap_or(&[0]) {
+                ok_exit[(*s / 64) as usize] |= 1 << (s % 64);
+            }
+            t.conf[k] = proto::node::NodeConf {
+                restart: match n.restart.as_deref() {
+                    Some("always") => proto::node::RESTART_ALWAYS,
+                    Some("never") => proto::node::RESTART_NEVER,
+                    _ => proto::node::RESTART_CRASH,
+                },
+                max_boots: n
+                    .max_incarnations
+                    .unwrap_or(p.max_incarnations)
+                    .min(proto::node::BOOTS_MAX as u64),
+                crash: (p.node_crash >> k) & 1,
+                ok_exit,
+            };
+        }
+        (t.crash_gap_min_ns, t.crash_gap_max_ns) = p.crash_gap_ns;
+        (t.down_min_ns, t.down_max_ns) = p.down_ns;
+        t.recovery_off = (!p.faults_in_recovery) as u64;
     }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_STEP, Relaxed);
@@ -1145,24 +1172,44 @@ pub fn run_incarnation(
             truncated.push(name);
         }
     }
-    // Each node's stdio: `node/NAME/inc-K/` beside the driver's `inc-K/`.
-    let inc_name = inc.file_name().map(|n| n.to_owned()).unwrap_or_default();
-    for (n, fds) in c.nodes.iter().zip(&node_stdio) {
-        let dir = inc
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("node")
-            .join(&n.name)
-            .join(&inc_name);
-        fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-        for (mem, name) in [(&fds[1], "stdout"), (&fds[2], "stderr")] {
-            let f = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(dir.join(name))
-                .map_err(|e| format!("create node {} {name}: {e}", n.name))?;
-            if copy_stdio(mem, &f, stdio_max).map_err(|e| format!("copy {name}: {e}"))? {
-                truncated.push(name);
+    // Each node's stdio: `node/NAME/inc-K/` for its boot K (the driver's is `inc-0/`), each
+    // the part of the node's output from where the boot started to where the next did.
+    let tab: Option<&proto::node::NodeTab> =
+        (!c.nodes.is_empty()).then(|| &*unsafe { proto::node::NodeTab::at(ctl_ptr) });
+    for (i, (n, fds)) in c.nodes.iter().zip(&node_stdio).enumerate() {
+        let k = i + 1;
+        let boots = tab.map_or(1, |t| {
+            (t.boots[k] as usize).clamp(1, proto::node::BOOTS_MAX)
+        });
+        for b in 0..boots {
+            let dir = inc
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join("node")
+                .join(&n.name)
+                .join(format!("inc-{b}"));
+            fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+            let off = |b: usize, j: usize| -> u64 {
+                match tab {
+                    Some(t) if b < boots => [t.boot[k][b].out_off, t.boot[k][b].err_off][j],
+                    _ if b == 0 => 0,
+                    _ => u64::MAX,
+                }
+            };
+            for (j, (mem, name)) in [(&fds[1], "stdout"), (&fds[2], "stderr")]
+                .into_iter()
+                .enumerate()
+            {
+                let f = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(dir.join(name))
+                    .map_err(|e| format!("create node {} {name}: {e}", n.name))?;
+                if copy_stdio_part(mem, &f, off(b, j), off(b + 1, j), stdio_max)
+                    .map_err(|e| format!("copy {name}: {e}"))?
+                {
+                    truncated.push(name);
+                }
             }
         }
     }
@@ -1320,12 +1367,25 @@ fn stdio_memfd(name: &str, stdin: Option<&[u8]>) -> Res<OwnedFd> {
 /// huge size leaves a sparse file, not a disk full of zeros), at most `max` bytes. Returns
 /// whether it was cut short.
 fn copy_stdio(mem: &OwnedFd, to: &File, max: u64) -> std::io::Result<bool> {
+    copy_stdio_part(mem, to, 0, u64::MAX, max)
+}
+
+/// `copy_stdio` of the bytes `from..until` of `mem` (a node's boot's part of its output).
+fn copy_stdio_part(
+    mem: &OwnedFd,
+    to: &File,
+    from: u64,
+    until: u64,
+    max: u64,
+) -> std::io::Result<bool> {
     let fd = mem.as_raw_fd();
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     cvt_i(unsafe { libc::fstat(fd, &mut st) })?;
-    let size = st.st_size as u64;
-    let end = size.min(max);
-    let mut off = 0u64;
+    let all = (st.st_size as u64).min(until);
+    let from = from.min(all);
+    let size = all - from;
+    let end = from + size.min(max);
+    let mut off = from;
     let mut buf = vec![0u8; 1 << 20];
     while off < end {
         let d = unsafe { libc::lseek(fd, off as i64, libc::SEEK_DATA) };
@@ -1349,7 +1409,7 @@ fn copy_stdio(mem: &OwnedFd, to: &File, max: u64) -> std::io::Result<bool> {
                     to.as_raw_fd(),
                     buf.as_ptr() as *const _,
                     r as usize,
-                    p as i64,
+                    (p - from) as i64,
                 )
             };
             if w != r {
@@ -1359,7 +1419,7 @@ fn copy_stdio(mem: &OwnedFd, to: &File, max: u64) -> std::io::Result<bool> {
         }
         off = h;
     }
-    to.set_len(end)?;
+    to.set_len(end - from)?;
     Ok(size > max)
 }
 

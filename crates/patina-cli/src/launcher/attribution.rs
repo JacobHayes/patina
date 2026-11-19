@@ -53,6 +53,7 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_NET_REORDER => "net-reorder",
         INJ_NET_BLACKOUT_DROP => "net-blackout",
         INJ_NET_CUT => "partition",
+        proto::node::INJ_NODE_KILL => "crash",
         _ => return None,
     })
 }
@@ -189,6 +190,13 @@ impl Faults {
                 e["a"] = names(r.args[3]);
                 e["b"] = names(r.args[4]);
             }
+            if r.args[0] == proto::node::INJ_NODE_KILL {
+                let k = r.args[1] as usize;
+                e["object"] = json!(format!(
+                    "node {}",
+                    self.nodes.get(k).cloned().unwrap_or_else(|| k.to_string())
+                ));
+            }
             if let Some(c) = fault {
                 *self.by_class.entry(c).or_default() += 1;
             }
@@ -242,7 +250,8 @@ impl Faults {
                 None => (net[0], net[2], net[11], net[12], net[13]),
             };
             let (eligible, injected) = match c {
-                "crash" => (self.crash_points, self.crashes),
+                // Machine crashes at crash points; node kills (by the seed) at drawn times.
+                "crash" => (self.crash_points + got(c), self.crashes + got(c)),
                 // One delay per TCP delivery and per datagram sent.
                 "net-delay" => (chunks + datagrams, chunks + datagrams),
                 "net-halfclose" => (fins, fins),
@@ -319,6 +328,11 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
             e["partition"] = json!(value);
             e["shape"] = json!(proto::node::shape_name(class));
             e["length_ms"] = json!(r.args[5] / 1_000_000);
+        }
+        // A node's processes killed by the seed (named by the caller): the incarnation it ended.
+        None if kind == proto::node::INJ_NODE_KILL => {
+            e["kind"] = json!("process");
+            e["node_incarnation"] = json!(value);
         }
         // The wire's records: the connection's server port.
         None => e["object"] = json!(format!("tcp:{port}")),

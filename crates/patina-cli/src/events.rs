@@ -546,8 +546,42 @@ impl<W: Write> Export<'_, W> {
                     .str("name", &self.node_name(a[0]));
                 if start {
                     l.num("pid", a[1]);
+                    // A restart's incarnation (the run's first start of every node is 0).
+                    if a[2] > 0 {
+                        l.num("incarnation", a[2]);
+                    }
                 } else {
                     l.num("live", a[1]);
+                }
+                "node"
+            }
+            // [node, incarnation, how, exit status or signal, processes killed, down ns].
+            proto::ctl::DEC_NODE_DOWN => {
+                use proto::node::*;
+                l = Line::at("node", k, r);
+                let (event, by) = match a[2] {
+                    DOWN_KILL_SEED => ("kill", Some("seed")),
+                    DOWN_KILL_SCRIPT => ("kill", Some("script")),
+                    DOWN_SIGNAL => ("crash", None),
+                    _ => ("exit", None),
+                };
+                l.str("event", event)
+                    .str("name", &self.node_name(a[0]))
+                    .num("incarnation", a[1]);
+                match (by, a[2]) {
+                    (Some(by), _) => {
+                        l.str("by", by);
+                    }
+                    (None, DOWN_SIGNAL) => {
+                        l.num("signal", a[3]);
+                    }
+                    _ => {
+                        l.num("exit", a[3]);
+                    }
+                }
+                l.num("killed", a[4]);
+                if a[5] > 0 {
+                    l.num("restart_in_ms", a[5] / 1_000_000);
                 }
                 "node"
             }

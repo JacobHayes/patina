@@ -29,6 +29,9 @@ use std::sync::atomic::Ordering::Relaxed;
 /// Kinds of node events, in the low bits of their key (`Event::Node`).
 pub const EVK_PART_START: u64 = 0;
 pub const EVK_PART_END: u64 = 1;
+/// The seed's kill of a node's processes (weak), and a node's restart.
+pub const EVK_NODE_KILL: u64 = 2;
+pub const EVK_NODE_START: u64 = 3;
 const EVK_BITS: u64 = 4;
 
 pub fn ev_key(kind: u64, node: usize) -> u64 {

@@ -713,6 +713,11 @@ fn umount(p: &str) -> Res<()> {
 }
 
 fn send_fd(sock: RawFd, fd: RawFd) -> Res<()> {
+    send_fds(sock, &[fd])
+}
+
+/// Send `fds` (at most 4) in one message of one byte.
+fn send_fds(sock: RawFd, fds: &[RawFd]) -> Res<()> {
     unsafe {
         // A cmsghdr is read and written in place: the buffer is aligned for it.
         let mut space = [0u64; 8];
@@ -721,22 +726,30 @@ fn send_fd(sock: RawFd, fd: RawFd) -> Res<()> {
             iov_base: byte.as_mut_ptr().cast(),
             iov_len: 1,
         };
+        let len = 4 * fds.len() as u32;
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = space.as_mut_ptr().cast();
-        msg.msg_controllen = libc::CMSG_SPACE(4) as _;
+        msg.msg_controllen = libc::CMSG_SPACE(len) as _;
         let cm = libc::CMSG_FIRSTHDR(&msg);
         (*cm).cmsg_level = libc::SOL_SOCKET;
         (*cm).cmsg_type = libc::SCM_RIGHTS;
-        (*cm).cmsg_len = libc::CMSG_LEN(4) as _;
-        std::ptr::write_unaligned(libc::CMSG_DATA(cm) as *mut i32, fd);
-        sys(libc::sendmsg(sock, &msg, 0) as _, "send descriptor")
+        (*cm).cmsg_len = libc::CMSG_LEN(len) as _;
+        for (i, &fd) in fds.iter().enumerate() {
+            std::ptr::write_unaligned((libc::CMSG_DATA(cm) as *mut i32).add(i), fd);
+        }
+        sys(libc::sendmsg(sock, &msg, 0) as _, "send descriptors")
     }
 }
 
 /// A descriptor sent with `send_fd`, or `None` at end of file.
 fn recv_fd(sock: RawFd) -> Option<OwnedFd> {
+    recv_fds(sock).into_iter().next()
+}
+
+/// The descriptors of one message sent with `send_fds`: none at end of file.
+fn recv_fds(sock: RawFd) -> Vec<OwnedFd> {
     unsafe {
         // A cmsghdr is read and written in place: the buffer is aligned for it.
         let mut space = [0u64; 8];
@@ -751,15 +764,20 @@ fn recv_fd(sock: RawFd) -> Option<OwnedFd> {
         msg.msg_control = space.as_mut_ptr().cast();
         msg.msg_controllen = std::mem::size_of_val(&space) as _;
         if libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) <= 0 {
-            return None;
+            return vec![];
         }
         let cm = libc::CMSG_FIRSTHDR(&msg);
         if cm.is_null() || (*cm).cmsg_type != libc::SCM_RIGHTS {
-            return None;
+            return vec![];
         }
-        Some(OwnedFd::from_raw_fd(std::ptr::read_unaligned(
-            libc::CMSG_DATA(cm) as *const i32,
-        )))
+        let n = ((*cm).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / 4;
+        (0..n)
+            .map(|i| {
+                OwnedFd::from_raw_fd(std::ptr::read_unaligned(
+                    (libc::CMSG_DATA(cm) as *const i32).add(i),
+                ))
+            })
+            .collect()
     }
 }
 
@@ -833,17 +851,41 @@ pub struct View<'a> {
     pub readonly: &'a [&'a str],
 }
 
+/// How `Keeper::view` places its process: in a view it makes, or again in one it made before.
+pub enum Place<'a> {
+    New(&'a View<'a>),
+    Again(&'a Saved),
+}
+
+/// The mount, UTS and IPC namespaces of a view `Keeper::view` made: held, they keep its tmpfs
+/// trees and System V objects while no process is in it.
+pub struct Saved {
+    ns: Vec<OwnedFd>,
+}
+
+const VIEW_NS: [(&str, i32); 3] = [
+    ("mnt", libc::CLONE_NEWNS),
+    ("uts", libc::CLONE_NEWUTS),
+    ("ipc", libc::CLONE_NEWIPC),
+];
+
 impl Keeper {
-    /// Make `v` and run `f` in a process of it: in the sandbox's PID and network namespaces,
+    /// Make `v` (or enter a view made before, `Place::Again`) and run `f` in a process of it: in the sandbox's PID and network namespaces,
     /// the guests' user namespace, with no capability and `no_new_privs`, its parent PID 1
     /// (it is adopted once the helper that made the view exits), in a new session, with the
     /// descriptors in `keep` and nothing else (0, 1 and 2 not in `keep` are `/dev/null`).
     /// Returns when the process exists (its result is PID 1's to reap). The helper runs only
-    /// this code and opens the mount points without following symbolic links.
-    pub fn view(&self, v: &View, keep: &[RawFd], f: impl FnOnce() -> i32) -> Res<()> {
+    /// this code and opens the mount points without following symbolic links. A new view's
+    /// namespaces are returned, for `Place::Again`.
+    pub fn view(&self, at: Place, keep: &[RawFd], f: impl FnOnce() -> i32) -> Res<Option<Saved>> {
         // Forked without exec: only sound while the keeper has one thread (its /proc is the
         // sandbox's, where it is not, so this cannot be checked here).
         let (rd, wr) = pipe()?;
+        let (ns_rd, ns_wr) = seqpacket()?;
+        let name = match at {
+            Place::New(v) => v.hostname,
+            Place::Again(_) => "again",
+        };
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             return Err(last_err("fork"));
@@ -854,28 +896,57 @@ impl Keeper {
             // in the sandbox's PID namespace, where guests could see it.
             unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) };
             let userns = self.guests_userns.as_raw_fd();
+            drop(ns_rd);
             let mut held: Vec<RawFd> = keep.to_vec();
-            held.extend([wr.as_raw_fd(), userns]);
+            held.extend([wr.as_raw_fd(), userns, ns_wr.as_raw_fd()]);
+            if let Place::Again(s) = &at {
+                held.extend(s.ns.iter().map(|f| f.as_raw_fd()));
+            }
             close_others(&held);
             let r = (|| -> Res<()> {
-                sys(
-                    unsafe {
-                        libc::unshare(libc::CLONE_NEWNS | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC)
-                    } as _,
-                    "unshare view",
-                )?;
-                mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
-                for p in v.readonly {
-                    set_attr_one(p, MOUNT_ATTR_RDONLY)?;
+                match &at {
+                    Place::New(v) => {
+                        sys(
+                            unsafe {
+                                libc::unshare(
+                                    libc::CLONE_NEWNS | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC,
+                                )
+                            } as _,
+                            "unshare view",
+                        )?;
+                        mount(None, "/", None, libc::MS_REC | libc::MS_PRIVATE, None)?;
+                        for p in v.readonly {
+                            set_attr_one(p, MOUNT_ATTR_RDONLY)?;
+                        }
+                        for p in v.tmpfs {
+                            mount_tmpfs_at(p, v.size)?;
+                        }
+                        let n = c(v.hostname);
+                        sys(
+                            unsafe { libc::sethostname(n.as_ptr(), v.hostname.len()) } as _,
+                            "sethostname",
+                        )?;
+                        let mut ns = vec![];
+                        for (k, _) in VIEW_NS {
+                            let p = c(&format!("/proc/self/ns/{k}"));
+                            let fd =
+                                unsafe { libc::open(p.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+                            sys(fd as _, &format!("open the view's {k} namespace"))?;
+                            ns.push(unsafe { OwnedFd::from_raw_fd(fd) });
+                        }
+                        let raw: Vec<RawFd> = ns.iter().map(|f| f.as_raw_fd()).collect();
+                        send_fds(ns_wr.as_raw_fd(), &raw)
+                    }
+                    Place::Again(s) => {
+                        for (f, (k, t)) in s.ns.iter().zip(VIEW_NS) {
+                            sys(
+                                unsafe { libc::setns(f.as_raw_fd(), t) } as _,
+                                &format!("enter the view's {k} namespace"),
+                            )?;
+                        }
+                        Ok(())
+                    }
                 }
-                for p in v.tmpfs {
-                    mount_tmpfs_at(p, v.size)?;
-                }
-                let n = c(v.hostname);
-                sys(
-                    unsafe { libc::sethostname(n.as_ptr(), v.hostname.len()) } as _,
-                    "sethostname",
-                )
             })();
             if let Err(e) = r {
                 let _ = crate::sys::write_fd(wr.as_raw_fd(), e.as_bytes());
@@ -909,24 +980,53 @@ impl Keeper {
                     unsafe { libc::_exit(1) };
                 }
                 drop(wr);
+                drop(ns_wr);
+                if let Place::Again(s) = &at {
+                    for f in &s.ns {
+                        unsafe { libc::close(f.as_raw_fd()) };
+                    }
+                }
                 let code = f();
                 unsafe { libc::_exit(code) };
             }
             unsafe { libc::_exit(if g < 0 { 1 } else { 0 }) };
         }
         drop(wr);
+        drop(ns_wr);
         let mut err = vec![];
         let _ = std::io::Read::read_to_end(&mut std::fs::File::from(rd), &mut err);
         let st = wait_pid(pid);
         if !err.is_empty() || st != 0 {
-            return Err(format!(
-                "view {}: {}",
-                v.hostname,
-                String::from_utf8_lossy(&err)
-            ));
+            return Err(format!("view {name}: {}", String::from_utf8_lossy(&err)));
         }
-        Ok(())
+        Ok(match at {
+            Place::New(_) => {
+                // Sent before the helper forked; every other end is closed by now.
+                let ns = recv_fds(ns_rd.as_raw_fd());
+                if ns.len() != VIEW_NS.len() {
+                    return Err(format!("view {name}: its namespaces were not sent"));
+                }
+                Some(Saved { ns })
+            }
+            Place::Again(_) => None,
+        })
     }
+}
+
+fn seqpacket() -> Res<(OwnedFd, OwnedFd)> {
+    let mut p = [0i32; 2];
+    sys(
+        unsafe {
+            libc::socketpair(
+                libc::AF_UNIX,
+                libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                0,
+                p.as_mut_ptr(),
+            )
+        } as _,
+        "socketpair",
+    )?;
+    Ok(unsafe { (OwnedFd::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) })
 }
 
 fn pipe() -> Res<(OwnedFd, OwnedFd)> {
@@ -1382,7 +1482,7 @@ fn views_keeper(k: &Keeper, chan: RawFd, size: u64) {
             size,
             readonly: &[],
         };
-        let r = k.view(&v, &keep, || {
+        let r = k.view(Place::New(&v), &keep, || {
             let _ = std::fs::write("/work/f", name);
             let _ = std::fs::write("/tmp/mark", name);
             println!("{{\"view\":\"{name}\",{}}}", view_facts());
@@ -1394,7 +1494,7 @@ fn views_keeper(k: &Keeper, chan: RawFd, size: u64) {
             0
         });
         match r {
-            Ok(()) => unsafe {
+            Ok(_) => unsafe {
                 libc::read(ready_r.as_raw_fd(), b.as_mut_ptr().cast(), 1);
             },
             Err(e) => eprintln!("patina sandbox: {e}"),
@@ -1525,17 +1625,27 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
     ))
 }
 
-/// The keeper of a run with nodes: start node `k`'s first process each time the supervisor
-/// asks (one byte, `k`), answer `ok` or why not, until PID 1's end closes.
+/// The keeper of a run with nodes: start a process of node `k` each time the supervisor asks
+/// (two bytes, `k` and its incarnation), answer `ok OUT ERR` (where the node's stdout and
+/// stderr are up to) or why not, until PID 1's end closes. Incarnation 0 makes the node's
+/// view; a later one starts in the same view again, whose namespaces the keeper holds.
 fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
     use proto::layout::*;
+    let mut saved: Vec<Option<Saved>> = (0..n.nodes.len()).map(|_| None).collect();
     loop {
-        let mut b = [0u8; 1];
-        let r = unsafe { libc::recv(chan, b.as_mut_ptr().cast(), 1, 0) };
+        let mut b = [0u8; 2];
+        let r = unsafe { libc::recv(chan, b.as_mut_ptr().cast(), 2, 0) };
         if r <= 0 {
             return;
         }
-        let i = b[0] as usize;
+        let (i, boot) = (b[0] as usize, b[1] as u64);
+        let stdio = FD_NODE_STDIO0 + 3 * (i as i32 - 1);
+        let size = |fd: RawFd| {
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            unsafe { libc::fstat(fd, &mut st) };
+            st.st_size
+        };
+        let at = (size(stdio + 1), size(stdio + 2));
         let res = match n.nodes.get(i.wrapping_sub(1)) {
             None => Err(format!("no node {i}")),
             Some(ns) => {
@@ -1546,36 +1656,44 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
                         keep.push(fd);
                     }
                 }
-                let stdio = FD_NODE_STDIO0 + 3 * (i as i32 - 1);
                 keep.extend(stdio..stdio + 3);
-                let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
-                tmpfs.extend(n.hide.iter().map(String::as_str).filter(|h| *h != ns.work));
-                let readonly: Vec<&str> = n.readonly.iter().map(String::as_str).collect();
-                let v = View {
-                    hostname: &ns.name,
-                    tmpfs: &tmpfs,
-                    size: n.size,
-                    readonly: &readonly,
-                };
-                k.view(&v, &keep, || node_main(ns, stdio, n.size))
+                let run = || node_main(ns, stdio, n.size, boot);
+                match (&saved[i - 1], boot) {
+                    (None, 0) => {
+                        let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
+                        tmpfs.extend(n.hide.iter().map(String::as_str).filter(|h| *h != ns.work));
+                        let readonly: Vec<&str> = n.readonly.iter().map(String::as_str).collect();
+                        let v = View {
+                            hostname: &ns.name,
+                            tmpfs: &tmpfs,
+                            size: n.size,
+                            readonly: &readonly,
+                        };
+                        k.view(Place::New(&v), &keep, run).map(|s| saved[i - 1] = s)
+                    }
+                    (Some(s), b) if b > 0 => k.view(Place::Again(s), &keep, run).map(|_| ()),
+                    _ => Err(format!("node {}: incarnation {boot} out of turn", ns.name)),
+                }
             }
         };
         let reply = match res {
-            Ok(()) => "ok".to_string(),
+            Ok(()) => format!("ok {} {}", at.0, at.1),
             Err(e) => e,
         };
         unsafe { libc::send(chan, reply.as_ptr().cast(), reply.len(), libc::MSG_NOSIGNAL) };
     }
 }
 
-/// A node's first process, in its view: its starting tree, its stdio, the process state every
-/// guest inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime.
-fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64) -> i32 {
+/// A node's first process, in its view: its starting tree (on its first start only: a restart
+/// finds the tree its last incarnation left), its stdio, the process state every guest
+/// inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime. A
+/// restart's environment adds `PATINA_INCARNATION`.
+fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64, boot: u64) -> i32 {
     let fail = |e: String| -> i32 {
         eprintln!("patina sandbox: node {}: {e}", ns.name);
         126
     };
-    if let Some(input) = &ns.input {
+    if let Some(input) = ns.input.as_ref().filter(|_| boot == 0) {
         if let Err(e) = crate::sup::crash::copy_in(Path::new(input), Path::new(&ns.work)) {
             return fail(e);
         }
@@ -1598,7 +1716,10 @@ fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64) -> i32 {
         return fail(e);
     }
     let argv: Vec<CString> = ns.argv.iter().map(|a| c(a)).collect();
-    let env: Vec<CString> = ns.env.iter().map(|a| c(a)).collect();
+    let mut env: Vec<CString> = ns.env.iter().map(|a| c(a)).collect();
+    if boot > 0 {
+        env.push(c(&format!("PATINA_INCARNATION={boot}")));
+    }
     let mut av: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     av.push(std::ptr::null());
     let mut ev: Vec<*const libc::c_char> = env.iter().map(|a| a.as_ptr()).collect();

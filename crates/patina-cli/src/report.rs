@@ -1274,6 +1274,23 @@ pub fn build(
         if drawn > 0 {
             v["nodes"]["partitions"] = json!({"drawn": drawn, "acted": acted, "shapes": shapes});
         }
+        // Each time a node went down, by how (`result.json`'s `downs`), and its restarts.
+        let mut downs = serde_json::Map::new();
+        let mut restarts = 0u64;
+        for n in &with_nodes {
+            for m in n["list"].as_array().into_iter().flatten() {
+                restarts += m["incarnations"].as_u64().unwrap_or(1).saturating_sub(1);
+                for d in m["downs"].as_array().into_iter().flatten() {
+                    let k = d["how"].as_str().unwrap_or("?").to_string();
+                    let c = downs.get(&k).and_then(|c| c.as_u64()).unwrap_or(0);
+                    downs.insert(k, json!(c + 1));
+                }
+            }
+        }
+        if !downs.is_empty() {
+            v["nodes"]["downs"] = json!(downs);
+            v["nodes"]["restarts"] = json!(restarts);
+        }
     }
     if with_points > 0 {
         v["compute"] = json!({
@@ -1612,6 +1629,14 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 p["drawn"],
                 shapes.join(", "),
                 p["acted"]
+            ));
+        }
+        if let Some(d) = w["downs"].as_object() {
+            let hows: Vec<String> = d.iter().map(|(k, n)| format!("{n} {k}")).collect();
+            s.push_str(&format!(
+                "node downs: {}; {} restarts\n",
+                hows.join(", "),
+                w["restarts"]
             ));
         }
     }

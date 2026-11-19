@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 22;
+pub const LAYOUT_VERSION: u64 = 23;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -204,7 +204,8 @@ pub struct Ctl {
     /// descends from it and inherits the filter, so the runtime's entry after an `execve`
     /// must not stack a second one; an inherited filter from outside the sandbox (a
     /// container's profile) is not a reason to skip it, which is why `PR_GET_SECCOMP` cannot
-    /// be the test. A node's first process descends from the keeper, not from the driver.
+    /// be the test. A node's first process descends from the keeper, not from the driver; the
+    /// supervisor clears the node's bit when it starts one (a restart's is a new tree).
     pub filter_installed: AtomicU64,
     /// Operation-log bytes that do not count against `Config::log_limit`: the base records of
     /// the incarnation's starting work tree, written by the supervisor before the program runs.
@@ -860,6 +861,11 @@ pub enum Op {
     /// The shadow store's table is full: free the slots of inodes no process maps
     /// (`oplog::Shadows`). Reply 0.
     ShadowReclaim = 65,
+    /// A control call's node words (`crate::node::Control::Node`), from the driver's node:
+    /// [`NODE_KILL`|`NODE_START`, node]. Reply 0, `-EALREADY` (a start of a node that is up or
+    /// whose start is queued, a kill of one that is down, which cancels its restart) or
+    /// `-EAGAIN` (a start past `node::BOOTS_MAX` incarnations).
+    Node = 66,
 }
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -948,7 +954,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 42] = [
+        const ALL: [Op; 43] = [
             Hello,
             Yield,
             Sleep,
@@ -991,6 +997,7 @@ impl Op {
             PidNode,
             MapsSync,
             ShadowReclaim,
+            Node,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -1039,6 +1046,7 @@ impl Op {
             PidNode => "PidNode",
             MapsSync => "MapsSync",
             ShadowReclaim => "ShadowReclaim",
+            Node => "Node",
         }
     }
 }
@@ -1252,7 +1260,8 @@ pub const SIGACT_PDEATHSIG: u64 = 100;
 pub const FUTEX_SHARED_BIT: u64 = 1 << 63;
 /// Decision code: a process passed its exit barrier (args: [pid, status word, virtual signal, parent]).
 pub const DEC_PROC_GONE: u32 = 0x130;
-/// Decision code: a node's first process said `Hello` at boot (args: [node, pid]).
+/// Decision code: a node's first process said `Hello` at boot (args: [node, pid, boot]; the
+/// boot is 0 at the run's start and counts restarts).
 pub const DEC_NODE_START: u32 = 0x150;
 /// Decision code: the driver ended the run while node `node` still had processes (args:
 /// [node, live processes]); one per such node, in node order, before the run's end.
@@ -1265,6 +1274,10 @@ pub const DEC_NODE_SLOT: u32 = 0x152;
 pub const DEC_NET_PART: u32 = 0x153;
 /// The seed's partition [ordinal] ends: its links open (a link a script cut stays cut).
 pub const DEC_NET_PART_END: u32 = 0x154;
+/// Node [node] is down (`proto::node::DOWN_*`): [node, boot, how, exit status or signal,
+/// processes killed, down time ns until its restart (0: none queued)]. A kill writes it before
+/// it kills; the end of a node's first process after it.
+pub const DEC_NODE_DOWN: u32 = 0x155;
 
 /// Signals whose default action is "ignore" (SIGCHLD, SIGCONT, SIGURG, SIGWINCH).
 pub const fn sig_default_ignored(sig: u64) -> bool {

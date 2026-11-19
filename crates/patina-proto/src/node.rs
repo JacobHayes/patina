@@ -15,12 +15,16 @@
 //! net heal                     every scripted cut
 //! net heal A B                 both directions between A and B
 //! net heal --from A --to B     one direction
+//! node kill NAME --process     kill every process of the node; it stays down (EALREADY: down)
+//! node start NAME              start a node that is down, as at a restart (EALREADY: up or
+//!                              starting; EAGAIN: past 64 incarnations)
 //! mark LABEL                   the SDK's mark (any node)
 //! ```
 //!
 //! A set is node names joined by commas, or `rest`: every node not in the other set. Only the
-//! driver's node may use `net` (elsewhere `EPERM`); an unknown name is `ENOENT`, other words
-//! `EINVAL`, and words of a later feature (`node ...`, `clock ...`) `EOPNOTSUPP`.
+//! driver's node may use `net` and `node` (elsewhere `EPERM`); an unknown name is `ENOENT`,
+//! other words `EINVAL`, and words of a later feature (`node kill NAME` without `--process`, a
+//! machine crash; `node pause`, `node resume`; `clock ...`) `EOPNOTSUPP`.
 
 /// The driver and at most 15 nodes.
 pub const MAX_NODES: usize = 16;
@@ -61,7 +65,103 @@ pub struct NodeTab {
     /// The link faults' chances on the links they act on (`net-links`), by `ELIG_*`: what a
     /// run with nodes reports as their eligible counts.
     pub elig: [u64; ELIG_N],
+    /// Written by the launcher: each node's restart policy, boots and ok-exit statuses, and the
+    /// run's node kill and down-time settings.
+    pub conf: [NodeConf; MAX_NODES],
+    /// `crash-gap-ms` and `down-ms` (ns); `faults-in-recovery=0` as 1.
+    pub crash_gap_min_ns: u64,
+    pub crash_gap_max_ns: u64,
+    pub down_min_ns: u64,
+    pub down_max_ns: u64,
+    pub recovery_off: u64,
+    /// Written by the supervisor: 1 once the seed killed a node under `faults-in-recovery=0`
+    /// (the link faults and partitions stop).
+    pub quiet: u64,
+    /// Each node's boots so far, and the first `BOOTS_MAX` of them.
+    pub boots: [u64; MAX_NODES],
+    pub boot: [[Boot; BOOTS_MAX]; MAX_NODES],
+    /// The node (plus 1) whose end ended the run (0: none did).
+    pub ended_by: u64,
 }
+
+/// Boots a node may have at most (`max-incarnations` is capped by it, and so is `node start`).
+pub const BOOTS_MAX: usize = 64;
+
+/// A node's settings (`[node.NAME]`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NodeConf {
+    /// `RESTART_*`.
+    pub restart: u64,
+    /// `max-incarnations`: boots the seed's kills and `restart` may give it; the last has no
+    /// seed-drawn kill.
+    pub max_boots: u64,
+    /// 1: the seed kills its processes (`--crash process`, scoped by `@NODE`).
+    pub crash: u64,
+    /// Exit statuses of its command that stop the node without a finding: bit `s` of
+    /// `ok_exit[s / 64]`.
+    pub ok_exit: [u64; 4],
+}
+
+impl NodeConf {
+    pub fn ok(&self, status: u64) -> bool {
+        status < 256 && self.ok_exit[(status / 64) as usize] & (1 << (status % 64)) != 0
+    }
+}
+
+/// `restart`: start the node again after the seed killed it (`crash`, the default), also
+/// after its command exits with a status of its `ok-exit` (`always`), or never.
+pub const RESTART_CRASH: u64 = 0;
+pub const RESTART_ALWAYS: u64 = 1;
+pub const RESTART_NEVER: u64 = 2;
+
+/// One boot of a node.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Boot {
+    /// Its first process, and the virtual time it started and went down (0: still up).
+    pub pid: u64,
+    pub start_ns: u64,
+    pub end_ns: u64,
+    /// How it went down (`DOWN_*`), and the exit status or signal.
+    pub how: u64,
+    pub value: u64,
+    /// The down time drawn for its restart (0: none queued).
+    pub down_ns: u64,
+    /// Where its output starts in the node's stdout and stderr.
+    pub out_off: u64,
+    pub err_off: u64,
+}
+
+/// How a boot of a node ended (`Boot::how`, `DEC_NODE_DOWN`): its processes killed by the
+/// seed or by a control call, its command exited with a status of its `ok-exit` or another,
+/// or died on a signal Patina did not send.
+pub const DOWN_KILL_SEED: u64 = 1;
+pub const DOWN_KILL_SCRIPT: u64 = 2;
+pub const DOWN_EXIT: u64 = 3;
+pub const DOWN_FAILED: u64 = 4;
+pub const DOWN_SIGNAL: u64 = 5;
+
+pub fn down_name(how: u64) -> &'static str {
+    match how {
+        DOWN_KILL_SEED => "killed",
+        DOWN_KILL_SCRIPT => "killed by script",
+        DOWN_EXIT => "exited",
+        DOWN_FAILED => "failed",
+        DOWN_SIGNAL => "crashed",
+        _ => "running",
+    }
+}
+
+/// The `Injected` record of a seed-drawn node kill: [`INJ_NODE_KILL`, node, boot, 0, 0, 0]
+/// (class `crash`).
+pub const INJ_NODE_KILL: u64 = 40;
+
+/// Sub-keys of `draw(Stream::Node, node << 24 | boot << 16 | try << 8 | sub)`: the time from a
+/// boot to the seed's kill (`try` counts kills that came while faults were off, each drawn
+/// again), and a down time.
+pub const NSUB_KILL: u64 = 1;
+pub const NSUB_DOWN: u64 = 2;
 
 /// `NodeTab::elig`: connections, deliveries, FINs, reads of sent data, datagrams.
 pub const ELIG_CONNECTIONS: usize = 0;
@@ -215,6 +315,9 @@ pub fn valid_name(s: &[u8]) -> bool {
 /// `Op::Net` verbs.
 pub const NET_CUT: u64 = 1;
 pub const NET_HEAL: u64 = 2;
+/// `Op::Node` verbs.
+pub const NODE_KILL: u64 = 1;
+pub const NODE_START: u64 = 2;
 
 const EPERM: i64 = 1;
 const ENOENT: i64 = 2;
@@ -231,6 +334,11 @@ pub enum Control<'a> {
         from: u64,
         to: u64,
         both: bool,
+    },
+    /// `NODE_KILL` (its processes) or `NODE_START`, of node `node`.
+    Node {
+        verb: u64,
+        node: usize,
     },
     Mark(&'a [u8]),
 }
@@ -314,10 +422,43 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
                 both,
             })
         }
-        [b"node", ..] => Err(no(
-            EOPNOTSUPP,
-            "node: not available yet (node crash, restart and pause come later)",
-        )),
+        [b"node", rest @ ..] => {
+            let (verb, name) = match rest {
+                [b"kill", name, b"--process"] => (NODE_KILL, *name),
+                [b"kill", _] => {
+                    return Err(no(
+                        EOPNOTSUPP,
+                        "node kill: a machine crash is not available yet (node kill NAME \
+                         --process kills the node's processes)",
+                    ))
+                }
+                [b"start", name] => (NODE_START, *name),
+                [b"pause" | b"resume", _] => {
+                    return Err(no(EOPNOTSUPP, "node pause/resume: not available yet"))
+                }
+                _ => {
+                    return Err(no(
+                        EINVAL,
+                        "expected: node kill NAME --process, or node start NAME",
+                    ))
+                }
+            };
+            if tab.count() == 0 {
+                return Err(no(EINVAL, "node: the run has no nodes"));
+            }
+            if node != 0 {
+                return Err(no(EPERM, "node: only the driver's node may act on nodes"));
+            }
+            match tab.find(name) {
+                Some(0) => Err(no(
+                    EINVAL,
+                    "node: the driver is not a node to kill or start",
+                )),
+                Some(k) => Ok(Control::Node { verb, node: k }),
+                None if valid_name(name) => Err(no(ENOENT, "node: no node of that name")),
+                None => Err(no(EINVAL, "node: not a node name")),
+            }
+        }
         [b"clock", ..] => Err(no(
             EOPNOTSUPP,
             "clock: not available yet (per-node clocks come later)",
@@ -366,6 +507,16 @@ mod tests {
             parts: [Part::default(); PARTS_MAX],
             parts_acted: 0,
             elig: [0; ELIG_N],
+            conf: [NodeConf::default(); MAX_NODES],
+            crash_gap_min_ns: 0,
+            crash_gap_max_ns: 0,
+            down_min_ns: 0,
+            down_max_ns: 0,
+            recovery_off: 0,
+            quiet: 0,
+            boots: [0; MAX_NODES],
+            boot: [[Boot::default(); BOOTS_MAX]; MAX_NODES],
+            ended_by: 0,
         };
         t.set(names.iter().map(|n| n.as_bytes()));
         t
@@ -431,6 +582,25 @@ mod tests {
             assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
         }
         assert_eq!(errno(b"node kill a", 0), EOPNOTSUPP);
+        assert_eq!(errno(b"node pause a", 0), EOPNOTSUPP);
+        assert_eq!(errno(b"node kill a --process", 1), EPERM);
+        assert_eq!(errno(b"node start zed", 0), ENOENT);
+        assert_eq!(errno(b"node start driver", 0), EINVAL);
+        assert_eq!(errno(b"node stop a", 0), EINVAL);
+        assert_eq!(
+            parse(b"node kill b --process", &t, 0),
+            Ok(Control::Node {
+                verb: NODE_KILL,
+                node: 2
+            })
+        );
+        assert_eq!(
+            parse(b"node start a", &t, 0),
+            Ok(Control::Node {
+                verb: NODE_START,
+                node: 1
+            })
+        );
         assert_eq!(errno(b"clock step a +90s", 0), EOPNOTSUPP);
         // Without nodes there is no network to act on; a mark still works.
         let none = tab(&[]);

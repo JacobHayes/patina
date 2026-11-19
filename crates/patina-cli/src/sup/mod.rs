@@ -400,6 +400,12 @@ impl Sup {
                     self.check_liveness(None);
                     self.fire_signal_timers();
                     self.after_events();
+                    // A kill closed sockets and ended waits: the wire and the waiters see it now,
+                    // not at the next event.
+                    if self.node_count() > 0 && !self.node_actions().is_empty() {
+                        self.wire_step();
+                        self.io.sync(&mut self.sched, self.ctl);
+                    }
                 }
                 None => self.deadlock(),
             }
@@ -939,6 +945,7 @@ impl Sup {
                 shadows::reclaim(self.ctl, &work_dir(self.ctl));
                 Next::Continue(0)
             }
+            Some(Op::Node) => self.node_op(idx, a),
             Some(Op::CrashPoint) => {
                 // Every process ends here: what their shared mappings hold, then the end.
                 let pid = self.sched.entries[idx].pid as u32;
@@ -1041,6 +1048,21 @@ impl Sup {
             self.fire_signal_timers();
             self.after_events();
             let pid = self.sched.entries[idx].pid;
+            // Not while the turn holder is ending its process (`ProcExit`, a last thread's
+            // `ThreadExit`): its own end is its node's, not a kill's.
+            let ending = req.op == Op::ProcExit as u32
+                || (req.op == Op::ThreadExit as u32 && self.sched.live_in(pid) <= 1);
+            if self.node_count() > 0 && !ending && self.node_actions().contains(&pid) {
+                // A node kill ended the process that asked: its request is not served.
+                self.wire_step();
+                self.io.sync(&mut self.sched, self.ctl);
+                let (to, _) = self.choose();
+                self.decide(req.op, idx, req.args, to as i64);
+                dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+                self.io.refresh(&self.sched, self.ctl);
+                self.reply(idx, to);
+                continue;
+            }
             let next = self.handle(idx, req);
             // The request may have followed a mask change or a thread's exit.
             self.retarget(pid);

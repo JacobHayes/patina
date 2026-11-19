@@ -150,6 +150,9 @@ fn control(ptr: u64, len: u64) -> i64 {
             to,
             both,
         }) => crate::sup::call_sup(Op::Net, [verb, from, to, both as u64, 0, 0]).ret,
+        Ok(proto::node::Control::Node { verb, node }) => {
+            crate::sup::call_sup(Op::Node, [verb, node as u64, 0, 0, 0, 0]).ret
+        }
     };
     keep(
         proto::rec::hash_bytes(OP_CONTROL, words),

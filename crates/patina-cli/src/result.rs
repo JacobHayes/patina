@@ -88,6 +88,32 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                 } else {
                     json!({"signal": s & 0x7f})
                 };
+                // Each time it went down (kills, its command's ends) and the restarts.
+                let boots = t.boots[k] as usize;
+                v["incarnations"] = json!(boots);
+                let downs: Vec<Value> = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, b)| b.how != 0)
+                    .map(|(i, b)| {
+                        let mut d = json!({
+                            "incarnation": i,
+                            "how": proto::node::down_name(b.how),
+                            "at_ms": b.end_ns / 1_000_000,
+                            "up_ms": b.end_ns.saturating_sub(b.start_ns) / 1_000_000,
+                            "down_ms": if b.down_ns == 0 { Value::Null } else { json!(b.down_ns / 1_000_000) },
+                        });
+                        match b.how {
+                            proto::node::DOWN_EXIT | proto::node::DOWN_FAILED => d["exit"] = json!(b.value),
+                            proto::node::DOWN_SIGNAL => d["signal"] = json!(b.value),
+                            _ => {}
+                        }
+                        d
+                    })
+                    .collect();
+                if !downs.is_empty() {
+                    v["downs"] = json!(downs);
+                }
             }
             v
         })
@@ -139,6 +165,9 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
             "datagrams": t.elig[proto::node::ELIG_DATAGRAMS],
         },
     });
+    if t.ended_by > 0 {
+        v["ended_by"] = json!(name(t.ended_by as usize - 1));
+    }
     if t.parts_n > 0 {
         v["partitions"] = json!(parts);
         v["partitions_drawn"] = json!(t.parts_n);
@@ -502,7 +531,11 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "stop": c.stop,
         "message": c.message,
         "exit": c.outcome.exit(),
-        "guest": { "exit": v.exit_status, "signal": v.signal },
+        "guest": if v.class.starts_with("node-") {
+            json!({ "exit": null, "signal": null })
+        } else {
+            json!({ "exit": v.exit_status, "signal": v.signal })
+        },
         "seed": e.seed,
         "digest": e.digest,
         "incarnations": e.incarnations,
@@ -549,6 +582,25 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     }
     if let Some(n) = &e.nodes {
         r["nodes"] = n.clone();
+        // A node's own end ended the run: which node, which of its boots, and how.
+        if let Some(name) = n["ended_by"]
+            .as_str()
+            .filter(|_| v.class.starts_with("node-"))
+        {
+            let boots = n["list"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|x| x["name"] == name)
+                .and_then(|x| x["incarnations"].as_u64())
+                .unwrap_or(1);
+            r["node_end"] = json!({
+                "node": name,
+                "incarnation": boots.max(1) - 1,
+                "exit": v.exit_status,
+                "signal": v.signal,
+            });
+        }
     }
     // `PACGA` reads a key the kernel redraws at every exec and that cannot be turned off: a
     // program that executes it differs run to run, so its sites are a label.
@@ -974,15 +1026,32 @@ pub fn nodes_line(n: &Value) -> Option<String> {
         .skip(1)
         .map(|v| {
             let end = &v["end"];
-            let end = if let Some(x) = end["exit"].as_u64() {
+            let downs = v["downs"].as_array().map_or(&[][..], |d| d.as_slice());
+            let incs = v["incarnations"].as_u64().unwrap_or(1);
+            // Down at the end: its last incarnation ended (a kill, or an `ok-exit` exit).
+            let last = downs
+                .last()
+                .filter(|d| d["incarnation"].as_u64() == Some(incs.saturating_sub(1)));
+            let end = if let Some(d) = last.filter(|d| d["exit"].is_null() && d["signal"].is_null())
+            {
+                format!("down ({})", d["how"].as_str().unwrap_or("?"))
+            } else if let Some(x) = end["exit"].as_u64() {
                 format!("exit {x}")
             } else if let Some(sig) = end["signal"].as_i64() {
                 format!("killed by {}", crate::outcome::signal_name(sig))
             } else {
                 end.as_str().unwrap_or("running").to_string()
             };
+            let restarts = match downs.len() {
+                0 => String::new(),
+                n => format!(
+                    " after {n} down{}, {incs} incarnation{}",
+                    if n == 1 { "" } else { "s" },
+                    if incs == 1 { "" } else { "s" }
+                ),
+            };
             format!(
-                "{} {} {end}",
+                "{} {} {end}{restarts}",
                 v["name"].as_str().unwrap_or("?"),
                 v["address"].as_str().unwrap_or("?")
             )
