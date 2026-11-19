@@ -9,6 +9,8 @@ const G: Group = Group::Sig;
 const SEND: &str = "A SigSend request: the supervisor marks the signal pending (standard signals coalesce, real-time signals queue) and wakes the receiving thread if it is parked; delivery happens at that thread's trap exit. Never a kernel signal.";
 const ITIMER: &str = "ITIMER_REAL is a supervisor event in virtual time that raises SIGALRM (SI_KERNEL); ITIMER_VIRTUAL and ITIMER_PROF end the run.";
 
+const SIGFD: &str = "Virtual signalfd: the descriptor is an eventfd made by the runtime, readable while a signal of its mask is pending for the calling thread (set before every poll, select and epoll attempt; a new signal writes it again, the edge for EPOLLET); read dequeues signals through the supervisor as signalfd_siginfo records, waiting on the I/O generation when blocking. The mask is per process.";
+
 pub const ROWS: &[Row] = &[
     Row::new(G, nr::RT_SIGACTION, Virt, C, "Dispositions are virtual, kept by the runtime per process; the supervisor is told the kind (default, ignore, handler) when it changes. The kernel's handlers stay the runtime's own.")
         .outs(&[out(2, Len::Fixed(32))])
@@ -36,6 +38,6 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::SETITIMER, Virt, C, ITIMER).outs(&[out(2, Len::Fixed(32))]).refs(&[out(1, Len::Fixed(32))]),
     Row::new(G, nr::GETITIMER, Virt, C, ITIMER).outs(&[out(1, Len::Fixed(32))]),
     Row::new(G, nr::RESTART_SYSCALL, Virt, C, "Continues a sleep or futex wait interrupted by a signal that ran no handler, with its original virtual deadline (the kernel's restart block)."),
-    Row::new(G, nr::SIGNALFD, Deny(errno::ENOSYS), C, "signalfd is refused."),
-    Row::new(G, nr::SIGNALFD4, Deny(errno::ENOSYS), C, "signalfd is refused."),
+    Row::new(G, nr::SIGNALFD, Virt, C, SIGFD).fd(0).refs(&[out(1, Len::Fixed(8))]),
+    Row::new(G, nr::SIGNALFD4, Virt, C, SIGFD).fd(0).refs(&[out(1, Len::Fixed(8))]),
 ];

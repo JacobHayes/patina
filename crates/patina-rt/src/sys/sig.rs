@@ -656,6 +656,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::ALARM => alarm(a[0]),
         nr::GETITIMER | nr::SETITIMER => itimer(call),
         nr::RESTART_SYSCALL => restart_syscall(call),
+        nr::SIGNALFD | nr::SIGNALFD4 => super::signalfd::create(call),
         _ => return stop_here(call),
     };
     if r == i64::MIN {

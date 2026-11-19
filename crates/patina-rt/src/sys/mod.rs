@@ -16,6 +16,7 @@ pub mod procfs;
 pub mod sched;
 pub mod sdk;
 pub mod sig;
+pub mod signalfd;
 pub mod thread;
 pub mod time;
 pub mod timerfd;

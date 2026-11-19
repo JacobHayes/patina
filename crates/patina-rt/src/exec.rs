@@ -558,7 +558,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
         return Action::Return(-e::E2BIG);
     }
     // Point of no return. Descriptor marks the new image cannot rebuild end the run.
-    if crate::sys::timerfd::before_exec().is_err() {
+    if crate::sys::timerfd::before_exec().is_err() || crate::sys::signalfd::before_exec().is_err() {
         return stop_here(call);
     }
     // Stores through shared `/work` mappings of this image are recorded now, as at exit.

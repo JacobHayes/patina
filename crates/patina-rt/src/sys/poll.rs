@@ -179,7 +179,13 @@ pub fn poll(call: &mut dyn Call) -> i64 {
     w.nfds = n;
     let dl = timeout.map(|t| super::time::now().saturating_add(t));
     let r = super::sig::with_wait_mask(mask, || {
-        nothing_or_eintr(mask, wait_ready(&mut w, timeout, || ppoll0(fds, n)))
+        nothing_or_eintr(
+            mask,
+            wait_ready(&mut w, timeout, || {
+                super::signalfd::sync();
+                ppoll0(fds, n)
+            }),
+        )
     });
     if tsp != 0 && r >= 0 {
         let left = remaining(dl);
@@ -255,6 +261,7 @@ pub fn select(call: &mut dyn Call) -> i64 {
     let dl = timeout.map(|t| super::time::now().saturating_add(t));
     let r = super::sig::with_wait_mask(mask, || {
         let r = wait_ready(&mut w, timeout, || {
+            super::signalfd::sync();
             for (k, &s) in sets.iter().enumerate() {
                 if s != 0 {
                     for (i, &w) in saved[k][..words].iter().enumerate() {
@@ -317,8 +324,9 @@ pub fn epoll_wait(call: &mut dyn Call) -> i64 {
     };
     let mut w = Waiter::new(a[0] as i32 as i64, proto::ctl::PARK_IN, call.nr());
     super::sig::with_wait_mask(mask, || {
-        wait_ready(&mut w, timeout, || unsafe {
-            sc6(nr::EPOLL_PWAIT, a[0], a[1], a[2], 0, 0, 8)
+        wait_ready(&mut w, timeout, || {
+            super::signalfd::sync();
+            unsafe { sc6(nr::EPOLL_PWAIT, a[0], a[1], a[2], 0, 0, 8) }
         })
     })
 }

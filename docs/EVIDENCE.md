@@ -708,6 +708,9 @@ anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
   a connected sender, and makes the socket readable, not `POLLERR`.
 - Blocking-I/O gaps: `sendfile`/`copy_file_range`/`splice` with a socket or pipe side answer
   `EINVAL`; `F_SETLKW` deadlock detection is absent; `poll` restarts with the full timeout.
+- signalfd: the mask belongs to the process (a mask update through one process is not seen by
+  another holding the same file); its `/proc/self/fd` link and `fdinfo` are an eventfd's; more
+  than 7 signalfds kept open across one `execve` end the run.
 - Processes: another process's `/proc/<pid>` is refused (`ps` sees nothing); `fork` or a thread
   `clone` inside a vfork child ends the run; `wait4` rusage is zero; unusual `clone` flag sets
   end the run.

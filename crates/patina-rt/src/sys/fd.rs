@@ -98,6 +98,7 @@ fn copy_marks(src: i64, dst: i64) {
     proc().set_urandom(dst, u);
     super::procfs::mark(dst, super::procfs::kind_of(src));
     super::timerfd::copy(src, dst);
+    super::signalfd::copy(src, dst);
     crate::oplog::dup_fd(src, dst);
 }
 
@@ -105,6 +106,7 @@ fn clear_marks(fd: i64) {
     proc().set_urandom(fd, false);
     super::procfs::mark(fd, None);
     super::timerfd::closed(fd);
+    super::signalfd::closed(fd);
 }
 
 fn dup_like(call: &mut dyn Call) -> i64 {
@@ -381,6 +383,10 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::EPOLL_CTL => super::poll::epoll_ctl(call),
         nr::TIMERFD_CREATE | nr::TIMERFD_SETTIME | nr::TIMERFD_GETTIME => {
             super::timerfd::handle(call)
+        }
+        nr::READ | nr::READV if super::signalfd::is_signalfd(fd) => super::signalfd::read(call, fd),
+        nr::PREADV2 if super::signalfd::is_signalfd(fd) && call.arg(3) as i64 == -1 => {
+            super::signalfd::read(call, fd)
         }
         nr::READ | nr::WRITE | nr::READV | nr::WRITEV | nr::PREADV2 | nr::PWRITEV2
             if super::io::can_block(super::io::kind_of(fd)) =>

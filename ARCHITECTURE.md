@@ -113,6 +113,14 @@ with a zero timeout).
 A detector checks the rule whenever nothing is runnable: a parked thread with a signal it would
 take ends the run `internal`, naming it.
 
+A signalfd is an eventfd the runtime makes and uses as a readiness flag (`sys/signalfd.rs`):
+signals stay in the supervisor's pending sets. Before each poll, select and epoll attempt the
+runtime makes every signalfd of the process readable exactly while a signal of its mask is
+pending for the calling thread, writing it again when one became pending since the last look
+(the edge `EPOLLET` reports). A read dequeues with `SigWait` and a passed deadline; the
+supervisor moves the I/O generation when a signal of a mask the process holds becomes pending
+(`Op::SigFd` carries the union of the masks), so a waiter checks again.
+
 ## The sandbox
 
 bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a read-only

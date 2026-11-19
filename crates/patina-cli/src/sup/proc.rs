@@ -8,7 +8,7 @@
 //! zombie, the virtual death signal of each zombie, and the pidfd of the exit barrier.
 
 use super::sched::{State, Wait, WakeReason};
-use super::signal::{SigProc, Target};
+use super::signal::Target;
 use super::{Next, Sup};
 use crate::outcome::Verdict;
 use crate::sys::*;
@@ -95,8 +95,8 @@ impl Sup {
         self.procs.created += 1;
         // Signal state of a child: the parent's dispositions, nothing pending, no timer.
         if let Some(p) = from {
-            let kinds = self.sproc_kinds(p);
-            self.sig.procs.insert(pid, SigProc::with_kinds(kinds));
+            let child = self.sproc_forked(p);
+            self.sig.procs.insert(pid, child);
             self.io.timers_forked(p, pid);
         }
     }

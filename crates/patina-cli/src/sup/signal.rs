@@ -85,15 +85,19 @@ pub struct SigProc {
     pub pending: Pending,
     /// `ITIMER_REAL`: the scheduled expiry and the interval.
     pub timer: Option<(EventId, u64)>,
+    /// The union of the masks of the signalfds the process holds (`Op::SigFd`).
+    pub sigfd: u64,
 }
 
 impl SigProc {
-    /// A forked child's signal state: the parent's dispositions, nothing pending, no timer.
-    pub fn with_kinds(kinds: [u64; NSIG]) -> SigProc {
+    /// A forked child's signal state: the parent's dispositions and signalfds, nothing
+    /// pending, no timer.
+    pub fn forked(parent: &SigProc) -> SigProc {
         SigProc {
-            kinds,
+            kinds: parent.kinds,
             pending: Pending::default(),
             timer: None,
+            sigfd: parent.sigfd,
         }
     }
     fn new() -> SigProc {
@@ -107,6 +111,7 @@ impl SigProc {
             kinds,
             pending: Pending::default(),
             timer: None,
+            sigfd: 0,
         }
     }
 }
@@ -173,9 +178,9 @@ pub enum Target {
 }
 
 impl Sup {
-    /// Dispositions (kinds) of process `pid`.
-    pub fn sproc_kinds(&mut self, pid: i32) -> [u64; NSIG] {
-        self.sproc(pid).kinds
+    /// A forked child's signal state, from process `pid`'s.
+    pub fn sproc_forked(&mut self, pid: i32) -> SigProc {
+        SigProc::forked(self.sproc(pid))
     }
 
     /// Send from the supervisor (SIGCHLD, parent-death signals).
@@ -341,6 +346,11 @@ impl Sup {
             return;
         }
         self.refresh_pending(pid);
+        if self.sproc(pid).sigfd & bit(sig) != 0 {
+            // A signalfd of the process may now be readable: its waiters check again.
+            let g = &self.ctl.io.gen;
+            g.store(g.load(Relaxed) + 1, Relaxed);
+        }
         let chosen = match t {
             Target::Thread(s) => (self.blocked(s) & bit(sig) == 0).then_some(s),
             // The lowest slot of the process that does not block it and can be woken: a
@@ -552,6 +562,10 @@ impl Sup {
                         self.sproc(pid).timer = Some((id, interval));
                     }
                 }
+                Next::Continue(0)
+            }
+            Op::SigFd => {
+                self.sproc(pid).sigfd = a[0];
                 Next::Continue(0)
             }
             Op::SigAction => {

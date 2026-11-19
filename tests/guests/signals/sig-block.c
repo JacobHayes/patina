@@ -10,8 +10,9 @@
 //
 // W checks Linux's rules for the interrupted call (signal(7)): with SA_RESTART a restartable
 // call (read, write, accept, connect, recv, flock, fcntl F_OFD_SETLKW, open of a FIFO,
-// futex wait without a timeout, wait4, waitid) never answers EINTR; every call returns once
-// the handler ran. W exits 0 when they held, 3 when one did not (naming it); the parent
+// futex wait without a timeout, wait4, waitid, read of a signalfd) never answers EINTR; every
+// call returns once the handler ran. (For "signalfd" the handler raises the SIGUSR2 the
+// signalfd reads.) W exits 0 when they held, 3 when one did not (naming it); the parent
 // exits with W's status. A signal lost by the system leaves W blocked: the run never ends.
 //
 // CLASS "pselect0"/"ppoll0": the pselect idiom, a zero timeout under an empty mask while
@@ -42,6 +43,7 @@
 #include <sys/epoll.h>
 #include <sys/file.h>
 #include <sys/select.h>
+#include <sys/signalfd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -98,6 +100,8 @@ static void on_usr1(int s) {
         if (w < 0 || write(w, "x", 1) != 1) _exit(4);
     } else if (!strcmp(cls, "wait4") || !strcmp(cls, "waitid")) {
         kill(child, SIGKILL);
+    } else if (!strcmp(cls, "signalfd")) {
+        syscall(SYS_tgkill, getpid(), gettid(), SIGUSR2); // to the waiting thread itself
     }
     errno = e;
 }
@@ -133,7 +137,7 @@ static void mask(int how, int sig) {
 // One result of the call: EINTR is allowed unless the call is restartable under SA_RESTART;
 // any other error is a failure.
 static int restartable(void) {
-    static const char *r[] = {"read", "write", "accept", "connect", "recv", "flock", "ofdlock", "fifo", "futex", "wait4", "waitid", 0};
+    static const char *r[] = {"read", "write", "accept", "connect", "recv", "flock", "ofdlock", "fifo", "futex", "wait4", "waitid", "signalfd", 0};
     for (int i = 0; r[i]; i++)
         if (!strcmp(cls, r[i])) return 1;
     return 0;
@@ -179,6 +183,8 @@ static void setup(void) {
     } else if (!strcmp(cls, "fifo")) {
         snprintf(fifo, sizeof fifo, "/tmp/sig-block-%d", getpid());
         if (mkfifo(fifo, 0600)) _exit(2);
+    } else if (!strcmp(cls, "signalfd")) {
+        mask(SIG_BLOCK, SIGUSR2); // inherited by the worker thread
     } else if (!strcmp(cls, "wait4") || !strcmp(cls, "waitid")) {
         pid_t c = fork();
         if (c == 0) {
@@ -214,6 +220,15 @@ static void wait_once(void) {
         while ((r = fcntl(lfd[1], F_OFD_SETLKW, &fl)) != 0) interrupted("fcntl", r, errno);
     } else if (!strcmp(cls, "fifo")) {
         while ((r = open(fifo, O_RDONLY)) < 0) interrupted("open", r, errno);
+    } else if (!strcmp(cls, "signalfd")) {
+        // A blocking read of a signalfd for SIGUSR2 (blocked since setup), which the
+        // handler raises.
+        sigset_t s;
+        sigemptyset(&s);
+        sigaddset(&s, SIGUSR2);
+        int fd = signalfd(-1, &s, 0);
+        struct signalfd_siginfo si;
+        while ((r = read(fd, &si, sizeof si)) != sizeof si) interrupted("read", r, errno);
     } else if (!strcmp(cls, "epoll")) {
         int ep = epoll_create1(0);
         struct epoll_event ev = {.events = EPOLLIN}, out;

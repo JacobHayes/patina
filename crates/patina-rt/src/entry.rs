@@ -242,6 +242,7 @@ fn hello() {
         }
     }
     crate::exec::rescan_marks();
+    crate::sys::signalfd::after_exec();
 }
 
 /// Charge a boundary event: next seq, virtual time.

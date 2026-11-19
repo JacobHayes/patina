@@ -455,7 +455,7 @@ pub fn read_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) ->
 
 /// write, writev, pwritev2(offset -1) on a pipe, socket or anonymous object.
 pub fn write_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) -> i64 {
-    if kind == Kind::Anon && super::timerfd::is_timerfd(fd) {
+    if kind == Kind::Anon && (super::timerfd::is_timerfd(fd) || super::signalfd::is_signalfd(fd)) {
         return -e::EINVAL;
     }
     let mut w = Waiter::new(fd, PARK_OUT, nr);

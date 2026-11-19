@@ -720,7 +720,8 @@ impl Sup {
                 | Op::SigSuspend
                 | Op::TimerSet
                 | Op::SigTake
-                | Op::SigAction),
+                | Op::SigAction
+                | Op::SigFd),
             ) => self.signal_op(op, idx, a),
             Some(
                 op @ (Op::WireSocket

@@ -629,6 +629,10 @@ pub enum Op {
     SigTake = 21,
     /// signals: a disposition changed its kind. args: [signal, kind (`SIGK_*`)].
     SigAction = 22,
+    /// signalfd: the union of the masks of the signalfds the caller's process holds changed.
+    /// args: [union]. A signal of it that becomes pending for the process moves the I/O
+    /// generation (a signalfd may now be readable). Reply 0.
+    SigFd = 23,
     /// timerfd. args[0] = sub-operation: `TFD_CREATE` [_, key, guest fd, clock],
     /// `TFD_ARM` [_, key, first expiry ns (vclock) or 0 to disarm, interval ns],
     /// `TFD_RELEASE` [_, key]. Reply 0 or -errno.
@@ -716,7 +720,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 36] = [
+        const ALL: [Op; 37] = [
             Hello,
             Yield,
             Sleep,
@@ -739,6 +743,7 @@ impl Op {
             HostError,
             SigTake,
             SigAction,
+            SigFd,
             TimerFdSet,
             TimerFdGet,
             WireSocket,
@@ -781,6 +786,7 @@ impl Op {
             HostError => "HostError",
             SigTake => "SigTake",
             SigAction => "SigAction",
+            SigFd => "SigFd",
             TimerFdSet => "TimerFdSet",
             TimerFdGet => "TimerFdGet",
             WireSocket => "WireSocket",
