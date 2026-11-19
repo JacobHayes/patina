@@ -21,6 +21,7 @@ for g in bti-dyn bti-static; do
 done
 bti=0
 grep -qw bti /proc/cpuinfo && bti=1
+[ $bti = 1 ] || echo "SKIP: this host has no BTI: the branch-target faults are not exercised, only that the same calls run"
 # check NAME WANT-ON-BTI-HOST WANT-STDOUT-ELSEWHERE -- CMD...
 check() {
     n=$1 want=$2 expect=$3

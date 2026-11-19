@@ -4,6 +4,7 @@
 #    hash, and its two epoll_wait calls, into buffers prefilled differently, one output hash.
 #@ tier=quick budget=10
 . "$(dirname "$0")/lib.inc"
+case $(uname -m) in x86_64) echo "SKIP: x86_64's struct epoll_event has no padding: the hashes are equal by layout" ;; esac
 o=$RUNS/09-epoll-pad
 run_ok "$o" 1 -- /guest/epoll-pad
 [ "$(cat "$o/inc-0/stdout")" = "ok 1 1" ] || die "guest: $(cat "$o/inc-0/stdout")"
