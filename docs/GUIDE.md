@@ -1435,6 +1435,12 @@ identical: 3 runs in /tmp/patina/patina-out/verify-3
 violation (always): acked-records-kept: 23 acknowledged, 0 stored
 ```
 
+`--vary` also takes `sandbox` (host counters moved between runs), `parallel` (runs at once),
+`env` and `time`. `time` waits before the second run, so a host clock that leaks into the
+run reads differently there; the host's clock cannot be moved without privilege, so the wait
+is the variation. It waits `PATINA_TIME_GAP_S` seconds, 61 by default
+(past a minute boundary: a leak at second or minute resolution shows).
+
 ## Scheduling
 
 One thread of the program runs at a time; the seed picks the next one at each scheduling

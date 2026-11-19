@@ -241,10 +241,12 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
             1
         };
         if vary("time") && i == 1 {
+            // The host's clock cannot be moved without privilege: the variation is a wait. 61 s
+            // crosses a minute boundary, so a leak at second or minute resolution differs.
             let gap: u64 = std::env::var("PATINA_TIME_GAP_S")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(600);
+                .unwrap_or(61);
             println!("time: waiting {gap} s of wall time before run 1");
             std::thread::sleep(std::time::Duration::from_secs(gap));
         }
