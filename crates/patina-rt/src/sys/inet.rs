@@ -68,21 +68,21 @@ pub(super) fn idx_of(fd: i64) -> Option<usize> {
     (i < VINO_CAP).then_some(i)
 }
 
-/// Index of the wire socket open on `fd`, if it is one.
-pub fn wire_idx(fd: i64) -> Option<usize> {
-    idx_of(fd).filter(|&i| sock(i).family != 0)
-}
-
-/// Index of the UDP socket open on `fd`, if it is one. Allocates no virtual inode number
+/// Index of the wire socket open on `fd`, if it is one. Allocates no virtual inode number
 /// (a wire socket has had one since it was made), so asking about any other descriptor
-/// leaves the run as it was.
-pub fn dgram_idx(fd: i64) -> Option<usize> {
+/// (a unix socket at each close) leaves the run as it was.
+pub fn wire_idx(fd: i64) -> Option<usize> {
     let st = super::fs::fstat_raw(fd)?;
     if st.mode() & 0o170000 != 0o140000 {
         return None;
     }
     let i = (crate::vino::find(st.dev(), st.ino())? - VINO_BASE) as usize;
-    (i < VINO_CAP && sock(i).family != 0 && is_dgram(i)).then_some(i)
+    (i < VINO_CAP && sock(i).family != 0).then_some(i)
+}
+
+/// Index of the UDP socket open on `fd`, if it is one (as `wire_idx`, allocating nothing).
+pub fn dgram_idx(fd: i64) -> Option<usize> {
+    wire_idx(fd).filter(|&i| is_dgram(i))
 }
 
 /// Is wire socket `i` a datagram (UDP) socket?

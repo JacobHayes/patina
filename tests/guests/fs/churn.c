@@ -3,7 +3,10 @@
  * runtime's table of changed inodes holds, so its entries for the removed ones must be
  * reclaimed; the held file's times must survive that. Exit 0, or 1 naming what differed.
  * churn pipes N: create, fstat and close N pipes (each gets a virtual inode number, which
- * the runtime does not reclaim: past its table, a named limit). */
+ * the runtime does not reclaim: past its table, a named limit).
+ * churn socks N: create N unix socket pairs, pass a byte, close them (never asking for their
+ * inode numbers, so none is given). */
+#include <sys/socket.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +14,18 @@
 #include <unistd.h>
 
 int main(int argc, char **argv) {
+    if (argc > 2 && argv[1][0] == 's') {
+        long n = atol(argv[2]);
+        for (long i = 0; i < n; i++) {
+            int sv[2];
+            char c = 'x';
+            if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) return 2;
+            if (write(sv[0], &c, 1) != 1 || read(sv[1], &c, 1) != 1) return 2;
+            close(sv[0]);
+            close(sv[1]);
+        }
+        return 0;
+    }
     if (argc > 2 && argv[1][0] == 'p') {
         long n = atol(argv[2]);
         for (long i = 0; i < n; i++) {
