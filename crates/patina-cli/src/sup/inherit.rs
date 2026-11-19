@@ -136,8 +136,8 @@ pub unsafe fn reset_signals() {
 }
 
 /// Close every descriptor but 0-2 and the hidden ones the supervisor keeps (`FD_CTL..FD_PATINA`,
-/// FD_PATINA itself already closed, and the counter broker's end `FD_PMU`, which every
-/// guest runtime uses).
+/// FD_PATINA itself already closed, the counter broker's end `FD_PMU`, which every
+/// guest runtime uses, and the shared memory carried across incarnations, `FD_SHM`).
 pub unsafe fn close_inherited() {
     const _: () = assert!(FD_PMU > FD_PATINA);
     libc::syscall(libc::SYS_close_range, 3u32, (FD_CTL - 1) as u32, 0u32);
@@ -147,7 +147,14 @@ pub unsafe fn close_inherited() {
         (FD_PMU - 1) as u32,
         0u32,
     );
-    libc::syscall(libc::SYS_close_range, (FD_PMU + 1) as u32, u32::MAX, 0u32);
+    const _: () = assert!(FD_SHM > FD_PMU + 1);
+    libc::syscall(
+        libc::SYS_close_range,
+        (FD_PMU + 1) as u32,
+        (FD_SHM - 1) as u32,
+        0u32,
+    );
+    libc::syscall(libc::SYS_close_range, (FD_SHM + 1) as u32, u32::MAX, 0u32);
 }
 
 /// The supervisor's part, at its start: everything its guests inherit from it. `tmpfs_bytes`

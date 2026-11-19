@@ -121,6 +121,14 @@ pending for the calling thread, writing it again when one became pending since t
 supervisor moves the I/O generation when a signal of a mask the process holds becomes pending
 (`Op::SigFd` carries the union of the masks), so a waiter checks again.
 
+System V shared memory is one table for the run in the supervisor (`sup/shm.rs`), with ids as
+a fresh IPC namespace makes them and virtual times. A segment's memory is a memfd the
+supervisor holds; `shmat` opens it as `/proc/1/fd/N` and maps it where the runtime chooses
+(`sys/shm.rs`), and the futex key of the mapping is the segment's, so every process names one
+queue. Attachments follow `fork`, `execve` and exit in the supervisor. At the end of an
+incarnation a process crash writes the table and the memory to `FD_SHM`, a memfd the launcher
+keeps for the run, and the next supervisor starts from it; any other end leaves it empty.
+
 ## The sandbox
 
 bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a read-only

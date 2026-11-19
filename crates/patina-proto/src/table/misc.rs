@@ -8,7 +8,7 @@ const NO_AIO: &str = "POSIX/Linux AIO completes on kernel threads at times the k
 const NO_NOTIFY: &str =
     "File change notification is delivered asynchronously; a kernel without it answers ENOSYS.";
 const NO_IPC: &str =
-    "System V IPC and POSIX message queues are not offered; a kernel without them answers ENOSYS.";
+    "System V semaphores and message queues and POSIX message queues are not offered; a kernel without them answers ENOSYS (System V shared memory is offered).";
 const NO_KEYS: &str =
     "Kernel keyrings are host-global state; a kernel without them answers ENOSYS.";
 const PRIV: &str =
@@ -59,10 +59,6 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::INOTIFY_RM_WATCH, Deny(errno::ENOSYS), C, NO_NOTIFY),
     Row::new(G, nr::FANOTIFY_INIT, Deny(errno::ENOSYS), C, NO_NOTIFY),
     Row::new(G, nr::FANOTIFY_MARK, Deny(errno::ENOSYS), C, NO_NOTIFY),
-    Row::new(G, nr::SHMGET, Deny(errno::ENOSYS), C, NO_IPC),
-    Row::new(G, nr::SHMAT, Deny(errno::ENOSYS), C, NO_IPC),
-    Row::new(G, nr::SHMCTL, Deny(errno::ENOSYS), C, NO_IPC),
-    Row::new(G, nr::SHMDT, Deny(errno::ENOSYS), C, NO_IPC),
     Row::new(G, nr::SEMGET, Deny(errno::ENOSYS), C, NO_IPC),
     Row::new(G, nr::SEMOP, Deny(errno::ENOSYS), C, NO_IPC),
     Row::new(G, nr::SEMCTL, Deny(errno::ENOSYS), C, NO_IPC),

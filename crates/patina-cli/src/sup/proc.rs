@@ -189,6 +189,7 @@ impl Sup {
         s.state.store(SLOT_LIVE, SeqCst);
         let fd = self.open_pidfd(pid);
         self.proc_new(pid, ppid, fd, a[4], Some(ppid));
+        self.shm.forked(ppid, pid);
         self.signal_thread_new(child, pid);
         Next::Continue(0)
     }
@@ -240,6 +241,9 @@ impl Sup {
             self.sched.entries[idx].tid = pid;
             self.slot(idx).tid.store(pid, Relaxed);
         }
+        // The old image's shared memory attachments end.
+        let now = self.now();
+        self.shm.gone(pid, now);
         // Handled signals return to their default; ignored ones stay ignored.
         if let Some(p) = self.sig.procs.get_mut(&pid) {
             for (s, k) in p.kinds.iter_mut().enumerate().skip(1) {
@@ -364,6 +368,8 @@ impl Sup {
             }
         }
         self.io.timers_exited(&mut self.sched, pid);
+        let now = self.now();
+        self.shm.gone(pid, now);
         // The process's descriptors are closed now.
         self.ctl
             .io

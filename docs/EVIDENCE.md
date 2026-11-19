@@ -679,7 +679,8 @@ exclusive emulation were also run there with a software event standing in for th
 ## Known limits
 
 Not implemented (run ends `unsupported` or the call is refused): `timer_create`,
-`ITIMER_VIRTUAL`/`ITIMER_PROF`; raw, netlink and packet sockets, UDP multicast and broadcast;
+`ITIMER_VIRTUAL`/`ITIMER_PROF`; System V semaphores and message queues and POSIX message
+queues (`ENOSYS`); raw, netlink and packet sockets, UDP multicast and broadcast;
 anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
@@ -708,6 +709,9 @@ anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
   a connected sender, and makes the socket readable, not `POLLERR`.
 - Blocking-I/O gaps: `sendfile`/`copy_file_range`/`splice` with a socket or pipe side answer
   `EINVAL`; `F_SETLKW` deadlock detection is absent; `poll` restarts with the full timeout.
+- System V shared memory: permission bits are kept but not checked; `SHM_STAT`, `IPC_INFO` and
+  `SHM_INFO` answer `EINVAL`; an `munmap` of part of an attachment does not end it; `shmat` in a
+  vfork child ends the run.
 - signalfd: the mask belongs to the process (a mask update through one process is not seen by
   another holding the same file); its `/proc/self/fd` link and `fdinfo` are an eventfd's; more
   than 7 signalfds kept open across one `execve` end the run.

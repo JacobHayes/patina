@@ -67,6 +67,7 @@ pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
 mod sdk;
+pub mod shm;
 pub mod signal;
 mod stall;
 #[allow(dead_code)]
@@ -97,6 +98,8 @@ struct Sup {
     wire: wire::Wire,
     /// Datagram sockets.
     udp: udp::Udp,
+    /// System V shared memory.
+    shm: shm::Shm,
     /// The program's path in the sandbox (the first image).
     exe: String,
     /// An `execve` has replaced an image: a runtime that cannot run its image now was handed
@@ -391,8 +394,15 @@ impl Sup {
             let mut st = 0;
             while libc::waitpid(-1, &mut st, 0) > 0 {}
         }
-        // Every guest is dead: the live tree is final.
+        // Every guest is dead: the live tree is final, and so is the shared memory a process
+        // crash leaves to the next incarnation (any other end leaves none).
         crash::export(&work_dir(self.ctl));
+        let carried = if v.class == "crash" && v.detail.starts_with("process ") {
+            self.shm.save(self.now())
+        } else {
+            vec![]
+        };
+        write_shm_state(&carried);
         self.wire_note_hwm();
         self.ctl.timing[TM_EXPORTED].store(now_ns(), Relaxed);
         let _ = write_fd(FD_OUTCOME, v.encode().as_bytes());
@@ -408,6 +418,38 @@ impl Sup {
         } else {
             (libc::WEXITSTATUS(st) as i64, 0)
         }
+    }
+
+    /// A System V shared memory request (`Op::Shm`).
+    fn shm_op(&mut self, idx: usize, a: [u64; 6]) -> i64 {
+        let pid = self.sched.entries[idx].pid;
+        let now = self.now();
+        let id = a[1] as i32 as i64;
+        let slot = unsafe { self.ctl.slot(idx) };
+        let mut out = [0u64; 16];
+        let r = match a[0] {
+            SHMOP_GET => self.shm.get(
+                pid,
+                a[1] as i32,
+                a[2],
+                a[3],
+                (a[4] as u32, (a[4] >> 32) as u32),
+                now,
+            ),
+            _ if id < 0 => -(libc::EINVAL as i64),
+            SHMOP_AT => match self.shm.attach(pid, id, now) {
+                Ok((size, fd)) => {
+                    out[0] = fd as u64;
+                    size as i64
+                }
+                Err(e) => e,
+            },
+            SHMOP_DT => self.shm.detach(pid, id, now),
+            SHMOP_CTL => self.shm.ctl(id, a[2], [a[3], a[4], a[5]], now, &mut out),
+            _ => -(libc::EINVAL as i64),
+        };
+        unsafe { std::ptr::write_volatile(&mut (*slot).siginfo, out) };
+        r
     }
 
     /// The process of `idx` is ending (`exit_group`, a fatal signal, or the exit of its
@@ -548,6 +590,7 @@ impl Sup {
                 Next::Continue(r)
             }
             Some(Op::TimerFdGet) => Next::Continue(self.io.timer_get(a)),
+            Some(Op::Shm) => Next::Continue(self.shm_op(idx, a)),
             Some(Op::Stop) => {
                 self.decide(Op::Stop as u32, idx, a, 0);
                 self.finish(Verdict::new("unsupported", proto::table::name(a[0])));
@@ -935,6 +978,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         procs: proc::Procs::default(),
         wire: wire::Wire::default(),
         udp: udp::Udp::default(),
+        shm: shm::Shm::default(),
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
         execed: false,
     };
@@ -947,6 +991,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     }
     if let Err(e) = sup.udp.init() {
         sup.finish(Verdict::new("infra", e));
+    }
+    // Shared memory a process crash left for this incarnation.
+    match read_all_fd(FD_SHM).and_then(|b| shm::Shm::restore(&b)) {
+        Ok(s) => sup.shm = s,
+        Err(e) => sup.finish(Verdict::new("infra", format!("shared memory state: {e}"))),
     }
 
     // The program and the `:copy` mounts: copies on sandbox tmpfs, not binds of the host's.
@@ -1010,6 +1059,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         unsafe {
             libc::close(FD_OUTCOME);
             libc::close(FD_EXPORT);
+            libc::close(FD_SHM);
             if !inherit::child() {
                 libc::_exit(126);
             }
@@ -1033,6 +1083,56 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
 }
 
 /// The work tree's guest path (`--work DIR:GUEST`).
+/// The whole of descriptor `fd` (a regular file or memfd; absent: empty).
+fn read_all_fd(fd: i32) -> Result<Vec<u8>, String> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Ok(vec![]);
+    }
+    let mut b = vec![0u8; st.st_size as usize];
+    let mut done = 0;
+    while done < b.len() {
+        let r = unsafe {
+            libc::pread(
+                fd,
+                b[done..].as_mut_ptr() as *mut _,
+                b.len() - done,
+                done as i64,
+            )
+        };
+        if r <= 0 {
+            return Err(format!(
+                "reading descriptor {fd}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        done += r as usize;
+    }
+    Ok(b)
+}
+
+/// Replace what `FD_SHM` holds (absent when the launcher passed none).
+fn write_shm_state(b: &[u8]) {
+    unsafe {
+        if libc::ftruncate(FD_SHM, 0) != 0 {
+            return;
+        }
+        let mut done = 0;
+        while done < b.len() {
+            let r = libc::pwrite(
+                FD_SHM,
+                b[done..].as_ptr() as *const _,
+                b.len() - done,
+                done as i64,
+            );
+            if r <= 0 {
+                return;
+            }
+            done += r as usize;
+        }
+    }
+}
+
 fn work_dir(ctl: &Ctl) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt;
     Path::new(std::ffi::OsStr::from_bytes(ctl.config.work_path())).to_path_buf()

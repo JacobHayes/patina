@@ -633,6 +633,8 @@ pub enum Op {
     /// args: [union]. A signal of it that becomes pending for the process moves the I/O
     /// generation (a signalfd may now be readable). Reply 0.
     SigFd = 23,
+    /// System V shared memory: args[0] = `SHMOP_*`, see below.
+    Shm = 24,
     /// timerfd. args[0] = sub-operation: `TFD_CREATE` [_, key, guest fd, clock],
     /// `TFD_ARM` [_, key, first expiry ns (vclock) or 0 to disarm, interval ns],
     /// `TFD_RELEASE` [_, key]. Reply 0 or -errno.
@@ -701,6 +703,21 @@ pub const DEC_UDP_SEND: u32 = 0x147;
 pub const DEC_UDP_DELIVER: u32 = 0x148;
 pub const DEC_UDP_CLOSE: u32 = 0x149;
 
+/// `Shm` sub-operations (`patina/src/sup/shm.rs`):
+/// - `SHMOP_GET` [_, key, size, flags, uid | gid << 32]: reply the id or -errno.
+/// - `SHMOP_AT` [_, id]: reply the segment's size or -errno; the supervisor's descriptor of
+///   its memory in the slot's `siginfo[0]` (the runtime opens `/proc/1/fd/N`).
+/// - `SHMOP_DT` [_, id]: one attachment of the caller's process ends. Reply 0 or -EINVAL.
+/// - `SHMOP_CTL` [_, id, `SHMCTL_*`, uid, gid, mode]: reply 0 or -errno; for `SHMCTL_STAT` the
+///   segment's fields in `siginfo` (`sup::shm::stat_words`).
+pub const SHMOP_GET: u64 = 0;
+pub const SHMOP_AT: u64 = 1;
+pub const SHMOP_DT: u64 = 2;
+pub const SHMOP_CTL: u64 = 3;
+pub const SHMCTL_RMID: u64 = 0;
+pub const SHMCTL_SET: u64 = 1;
+pub const SHMCTL_STAT: u64 = 2;
+
 /// `TimerFdSet` sub-operations.
 pub const TFD_CREATE: u64 = 0;
 pub const TFD_ARM: u64 = 1;
@@ -720,7 +737,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 37] = [
+        const ALL: [Op; 38] = [
             Hello,
             Yield,
             Sleep,
@@ -744,6 +761,7 @@ impl Op {
             SigTake,
             SigAction,
             SigFd,
+            Shm,
             TimerFdSet,
             TimerFdGet,
             WireSocket,
@@ -787,6 +805,7 @@ impl Op {
             SigTake => "SigTake",
             SigAction => "SigAction",
             SigFd => "SigFd",
+            Shm => "Shm",
             TimerFdSet => "TimerFdSet",
             TimerFdGet => "TimerFdGet",
             WireSocket => "WireSocket",

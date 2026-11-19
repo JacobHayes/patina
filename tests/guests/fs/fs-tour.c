@@ -446,7 +446,7 @@ int main(void) {
     // ---- refused interfaces (virtual by design) ----
     V("io_setup", syscall(SYS_io_setup, 1, &(long){0}));
     V("inotify_init1", syscall(SYS_inotify_init1, 0));
-    V("shmget", syscall(SYS_shmget, 0, 4096, 0600));
+    V("semget", syscall(SYS_semget, 0, 1, 0600));
     V("personality", syscall(SYS_personality, 0xffffffff));
     V("unshare", syscall(SYS_unshare, 0));
     V("mount", syscall(SYS_mount, "none", "/work", "tmpfs", 0, NULL));

@@ -262,6 +262,17 @@ pub struct Start<'a> {
     pub deadline: std::time::Instant,
     /// Bytes the earlier incarnations' logs hold (they count against `--log-limit`).
     pub log_used: u64,
+    /// System V shared memory a process crash carries to the next incarnation (`FD_SHM`):
+    /// one memfd for the run.
+    pub shm: std::os::fd::RawFd,
+}
+
+/// The descriptor `Start::shm` names, made once per run.
+pub fn shm_carrier() -> Res<OwnedFd> {
+    let n = CString::new("patina-shm-state").unwrap();
+    let fd = cvt_i(unsafe { libc::memfd_create(n.as_ptr(), libc::MFD_CLOEXEC) })
+        .map_err(|e| format!("memfd patina-shm-state: {e}"))?;
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// What one incarnation left behind.
@@ -845,6 +856,7 @@ pub fn run_incarnation(
         (stdin_mem.as_raw_fd(), FD_STDIN),
         (stdout_mem.as_raw_fd(), FD_STDOUT),
         (stderr_mem.as_raw_fd(), FD_STDERR),
+        (start.shm, FD_SHM),
     ];
     for (i, f) in etc_fds.iter().enumerate() {
         place.push((f.as_raw_fd(), ETC_FD0 + i as i32));
@@ -882,7 +894,7 @@ pub fn run_incarnation(
             // child (its children are reaped by the kernel). The other dispositions the guests
             // see are set by sup::inherit.
             libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-            // Room for the fixed descriptor numbers (3000-3022): the soft limit is raised to
+            // Room for the fixed descriptor numbers (3000-3023): the soft limit is raised to
             // the hard one here; the supervisor sets the limit the guests run under.
             let mut lim: libc::rlimit = std::mem::zeroed();
             libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim);

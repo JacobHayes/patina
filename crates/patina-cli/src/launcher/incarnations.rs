@@ -21,10 +21,11 @@ use crate::config::Opts;
 use crate::durability::log::OpLog;
 use crate::durability::materialise::{materialise, replay, unlogged_pages};
 use crate::durability::tree::Tree;
-use crate::launch::{run_incarnation, Start};
+use crate::launch::{run_incarnation, shm_carrier, Start};
 use crate::result::RunEnd;
 use proto::faults::{CRASH_MACHINE, CRASH_NONE};
 use serde_json::json;
+use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Instant;
 
@@ -113,6 +114,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut root = o.cfg.work.clone();
     let mut log_used = 0;
     let mut k = 0;
+    let shm = shm_carrier()?;
     loop {
         let inc = out.join(format!("inc-{k}"));
         cfg.incarnation = k;
@@ -125,6 +127,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             faults: cfg,
             deadline,
             log_used,
+            shm: shm.as_raw_fd(),
         };
         let end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
         faults.add_incarnation(&inc, k, &end);

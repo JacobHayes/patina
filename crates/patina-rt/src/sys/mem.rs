@@ -21,13 +21,13 @@ fn page_up(x: u64) -> u64 {
 /// ENOMEM, `mremap` to it EINVAL), nothing is there to change (`mprotect`, `madvise`,
 /// `msync`, `mlock` ENOMEM, `mremap` from it EFAULT, `munmap` EINVAL), and a pointer into it
 /// is `EFAULT` (`guest::names_runtime`).
-fn hits_runtime(a: u64, len: u64) -> bool {
+pub(super) fn hits_runtime(a: u64, len: u64) -> bool {
     let end = a.saturating_add(len);
     len != 0 && end > RT_BASE && a < RT_REGION_END
 }
 
 /// Next address from the top-down cursor (never reused within an image).
-fn take(len: u64) -> Option<u64> {
+pub(super) fn take(len: u64) -> Option<u64> {
     let p = proc();
     let len = page_up(len);
     let a = p.mmap_cursor.checked_sub(len)?;
@@ -168,6 +168,9 @@ fn mmap(call: &mut dyn Call) -> i64 {
         // A private mapping over a shared one: the shared record goes.
         forget_shared(r as u64, page_up(len));
     }
+    if r >= 0 && flags & MAP_FIXED != 0 {
+        super::shm::unmapped(r as u64, len);
+    }
     if r >= 0 && flags & 3 != 0 && flags & 3 != 2 {
         // MAP_SHARED or MAP_SHARED_VALIDATE
         let _ = MAP_SHARED;
@@ -200,7 +203,7 @@ fn mmap(call: &mut dyn Call) -> i64 {
 /// there can be waited on but never changed by this process); a writable one ends the run,
 /// since a process-shared futex in it would be keyed as private and miss the other processes'
 /// wakes.
-fn record_shared(addr: u64, len: u64, id: u64, off: u64, writable: bool) {
+pub(super) fn record_shared(addr: u64, len: u64, id: u64, off: u64, writable: bool) {
     forget_shared(addr, len);
     let p = proc();
     if p.nshared == p.shared.len() {
@@ -214,7 +217,7 @@ fn record_shared(addr: u64, len: u64, id: u64, off: u64, writable: bool) {
 }
 
 /// `[addr, addr+len)` is no longer mapped as it was: trim or drop overlapping records.
-fn forget_shared(addr: u64, len: u64) {
+pub(super) fn forget_shared(addr: u64, len: u64) {
     let p = proc();
     let end = addr.saturating_add(len);
     let mut i = 0;
@@ -315,6 +318,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             r
         }
         nr::BRK => brk(call),
+        nr::SHMGET | nr::SHMAT | nr::SHMDT | nr::SHMCTL => super::shm::handle(call),
         nr::MREMAP => {
             let (old, oldlen) = (call.arg(0), call.arg(1));
             let was = shared_at(old);
@@ -356,6 +360,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                     if call.nr() == nr::MUNMAP {
                         crate::insn::patch::forget(call.arg(0), call.arg(1));
                         forget_shared(call.arg(0), page_up(call.arg(1)));
+                        super::shm::unmapped(call.arg(0), call.arg(1));
                     } else {
                         crate::insn::patch::reprotect(call.arg(0), call.arg(1), call.arg(2));
                         if call.arg(2) & PROT_EXEC != 0 {
