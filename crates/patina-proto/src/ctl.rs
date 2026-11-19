@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 20;
+pub const LAYOUT_VERSION: u64 = 21;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -850,6 +850,9 @@ pub enum Op {
     /// [`NET_CUT`|`NET_HEAL`, from set, to set] (sets of node bits; a heal with both sets 0
     /// heals every scripted cut). Reply 0.
     Net = 62,
+    /// In a run with nodes, the node of process [pid] as the supervisor's process table has
+    /// it (zombies included): reply the node, or `-ESRCH` when the run has no such process.
+    PidNode = 63,
 }
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -938,7 +941,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 39] = [
+        const ALL: [Op; 40] = [
             Hello,
             Yield,
             Sleep,
@@ -978,6 +981,7 @@ impl Op {
             SdkViolation,
             VtReclaim,
             Net,
+            PidNode,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -1023,6 +1027,7 @@ impl Op {
             SdkViolation => "SdkViolation",
             VtReclaim => "VtReclaim",
             Net => "Net",
+            PidNode => "PidNode",
         }
     }
 }
@@ -1243,6 +1248,11 @@ pub const DEC_NODE_STOP: u32 = 0x151;
 /// In a run with nodes, slot [slot] now runs a thread of [node] (only when that changed; a
 /// slot's node is the driver's until a record says otherwise).
 pub const DEC_NODE_SLOT: u32 = 0x152;
+/// A partition the seed drew starts (`node`): [ordinal, shape, side A, side B (node bits),
+/// length ns, the bridge node (bits; 0 but for `bridge`)]. Its links are cut until `DEC_NET_PART_END`.
+pub const DEC_NET_PART: u32 = 0x153;
+/// The seed's partition [ordinal] ends: its links open (a link a script cut stays cut).
+pub const DEC_NET_PART_END: u32 = 0x154;
 
 /// Signals whose default action is "ignore" (SIGCHLD, SIGCONT, SIGURG, SIGWINCH).
 pub const fn sig_default_ignored(sig: u64) -> bool {

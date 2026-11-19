@@ -300,6 +300,17 @@ pub fn proc() -> &'static mut Proc {
     unsafe { &mut *PROC.0.get() }
 }
 
+/// The node (machine) this process belongs to: 0 in a run without nodes, and for the driver.
+/// Every reader goes through here (`Proc::node` is set at each image start, `entry`).
+pub fn node() -> usize {
+    proc().node
+}
+
+/// Does the run have nodes (`config().nodes`: the driver and the declared nodes, or 0)?
+pub fn with_nodes() -> bool {
+    config().nodes > 0
+}
+
 impl Proc {
     pub fn guest_path(&self) -> &[u8] {
         &self.guest_path[..self.guest_path_len]

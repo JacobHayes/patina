@@ -7,7 +7,7 @@
 #  e. fs-error-permille=5 over 20 seeds: every run `ok` or `failure` with exit status 1, never a
 #     signal, never unsupported/internal; at least one run shows the program seeing an error.
 #  f. Network: D (seed 1) with network faults on; net-reset-permille seen as a
-#     ConnectionReset/Aborted error, a 15 s net-partition seen as the client's 10 s socket
+#     ConnectionReset/Aborted error, a 15 s net-blackout seen as the client's 10 s socket
 #     timeout, net-chunk-max=1 with every reply still whole.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
@@ -66,8 +66,8 @@ echo "== f. network"
 verify_seeds $P py-dn cpu,load,aslr,sandbox "1" $NETF -- $CMD || fail "W5 D (network faults on)"
 echo "-- net-reset-permille=100"
 netf $P py-reset 'tcp .*error: Connection' "1 2 3 4 5" --fault net-reset-permille=100 -- $NET || fail "W5: no reset seen"
-echo "-- net-partition=1+15000 (ms)"
-netf $P py-part 'tcp client .*TimeoutError' "1" --fault net-partition=1+15000 -- $NET || fail "W5: the socket timeout did not fire during the partition"
+echo "-- net-blackout=1+15000 (ms)"
+netf $P py-part 'tcp client .*TimeoutError' "1" --fault net-blackout=1+15000 -- $NET || fail "W5: the socket timeout did not fire during the partition"
 echo "-- net-chunk-max=1"
 netf $P py-chunk "tcp echo: \['MSG0', 'MSG1', 'MSG2', 'MSG3'\]" "1" --fault net-chunk-max=1 -- $NET || fail "W5: a reply was not whole under net-chunk-max=1"
 finish

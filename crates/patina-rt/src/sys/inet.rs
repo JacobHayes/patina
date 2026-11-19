@@ -137,7 +137,7 @@ pub(super) fn parse_addr(
     };
     // With nodes, `10.0.0.(k + 1)` is node k's: a process may bind its own node's, and
     // connect to any node's.
-    let me = crate::state::proc().node;
+    let me = crate::state::node();
     let nodes = (crate::state::config().nodes as usize).max(1);
     let kind4 = |a: [u8; 4]| -> Result<u8, i64> {
         match a {
@@ -293,10 +293,7 @@ fn socket(call: &mut dyn Call) -> Action {
 
 /// Bind the real socket to `@patina-l-<n>` (`listen_n`: the port, and the node).
 fn real_bind(fd: i64, port: u16) -> i64 {
-    let (a, n) = abstract_addr(
-        LISTEN_PREFIX,
-        Some(listen_n(crate::state::proc().node, port)),
-    );
+    let (a, n) = abstract_addr(LISTEN_PREFIX, Some(listen_n(crate::state::node(), port)));
     unsafe { sc3(nr::BIND, fd as u64, a.as_ptr() as u64, n as u64) }
 }
 

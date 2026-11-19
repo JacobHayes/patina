@@ -295,7 +295,7 @@ fn own_slot() -> &'static Slot {
 /// The live threads of the caller's node: another node's are not found (`ESRCH`), as on
 /// another machine.
 fn slots() -> impl Iterator<Item = &'static Slot> {
-    let node = crate::state::proc().node as u64;
+    let node = crate::state::node() as u64;
     (0..MAX_THREADS)
         .map(|i| unsafe { &*ctl().slot(i) })
         .filter(move |s| s.state.load(Acquire) == SLOT_LIVE && s.node.load(Relaxed) == node)

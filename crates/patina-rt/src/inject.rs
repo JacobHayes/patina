@@ -84,7 +84,7 @@ fn fd_obj(fd: u64) -> Option<Obj> {
 /// Does `(dirfd, path)` name something under `/work`? Lexical, after normalisation; a
 /// relative path is judged by the directory it is relative to.
 pub fn path_on_work(dirfd: i64, p: u64) -> bool {
-    if p == 0 || crate::state::proc().node != 0 {
+    if p == 0 || crate::state::node() != 0 {
         return false;
     }
     let s = unsafe { crate::loader::cstr(p as *const u8) };

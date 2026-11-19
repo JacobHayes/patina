@@ -1,5 +1,5 @@
 //! The SDK test guest in Rust: the script of guest.c (modes script [two], fail, unreach, coin,
-//! loop, marks).
+//! loop, marks), and the control call (control [node]).
 use std::io::Read;
 
 fn script(two: bool, argc: usize) {
@@ -56,6 +56,23 @@ fn main() {
             patina_dst::mark!("ack 1");
             std::fs::write("marked", "x").unwrap();
             patina_dst::mark!("ack 2");
+        }
+        // A run with nodes: the control call from the driver (`control`) and from a node
+        // (`control node`), each answer as `WORDS: ok` or `WORDS: errno N`.
+        "control" => {
+            let node = args.get(2).is_some_and(|a| a == "node");
+            let words: &[&str] = if node {
+                &["net heal"]
+            } else {
+                &["net cut driver c", "net heal", "net cut driver nobody"]
+            };
+            for w in words {
+                match patina_dst::control(w) {
+                    Ok(()) => println!("{w}: ok"),
+                    Err(e) => println!("{w}: errno {e}"),
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1)); // virtual: the node runs
         }
         m => {
             eprintln!("unknown mode {m}");

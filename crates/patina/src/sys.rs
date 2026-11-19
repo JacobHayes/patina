@@ -14,6 +14,7 @@ const OP_BUGGIFY: u64 = 3;
 const OP_KNOB: u64 = 4;
 const OP_DELAY: u64 = 5;
 const OP_MARK: u64 = 6;
+const OP_CONTROL: u64 = 10;
 
 pub const KIND_ALWAYS: u8 = 1;
 pub const KIND_SOMETIMES: u8 = 2;
@@ -163,6 +164,20 @@ fn call(
 pub fn mark(label: &str) {
     if state() & ON != 0 {
         call(OP_MARK, KIND_REACHABLE, false, label, b"", &mut 0, 0, 0);
+    }
+}
+
+/// A control call (`sdk/c/patina.h` has the words): `Ok(())`, or the errno Patina answered.
+pub fn control(words: &str) -> Result<(), i32> {
+    if state() & ON == 0 {
+        return Err(38); // ENOSYS: not inside a Patina run
+    }
+    if words.is_empty() || words.len() > TEXT_MAX {
+        return Err(22);
+    }
+    match sys(OP_CONTROL, words.as_ptr(), words.len()) {
+        r if r < 0 => Err(-r as i32),
+        _ => Ok(()),
     }
 }
 

@@ -87,28 +87,12 @@ fn socketpair(call: &mut dyn Call) -> Action {
 }
 
 /// bind: an autobind request (the address is the family only) gets "\0" + five hex digits
-/// from a run counter instead of the kernel's random choice.
+/// from a run counter instead of the kernel's random choice (in a run with nodes, under the
+/// node's prefix: `unixname`).
 fn bind(call: &mut dyn Call) -> i64 {
     let [fd, addr, len, ..] = args(call);
     if len == 2 && crate::guest::get::<u16>(addr) == Ok(AF_UNIX as u16) {
-        let io = &ctl().io;
-        loop {
-            let n = io.autobind_next.load(Relaxed);
-            if n > 0xfffff {
-                return -ENOSPC;
-            }
-            io.autobind_next.store(n + 1, Relaxed);
-            let mut sa = [0u8; 8];
-            sa[0] = AF_UNIX as u8;
-            for i in 0..5 {
-                let d = ((n >> (4 * (4 - i))) & 0xf) as u8;
-                sa[3 + i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
-            }
-            let r = unsafe { sc3(nr::BIND, fd, sa.as_ptr() as u64, 8) };
-            if r != -EADDRINUSE {
-                return r;
-            }
-        }
+        return autobind(fd as i64);
     }
     let r = raw(call);
     // A path name (not abstract, not autobind) makes a socket node in the filesystem: it is a
@@ -120,6 +104,34 @@ fn bind(call: &mut dyn Call) -> i64 {
         super::fs::created_elsewhere(p.as_ptr() as u64);
     }
     r
+}
+
+/// Bind `fd` to the next counter name.
+pub(super) fn autobind(fd: i64) -> i64 {
+    let io = &ctl().io;
+    loop {
+        let n = io.autobind_next.load(Relaxed);
+        if n > 0xfffff {
+            return -ENOSPC;
+        }
+        io.autobind_next.store(n + 1, Relaxed);
+        let r = if crate::state::with_nodes() {
+            let mut nm = super::unixname::Name::new();
+            super::unixname::autobind_name(n, &mut nm);
+            unsafe { sc3(nr::BIND, fd as u64, nm.sa.as_ptr() as u64, nm.len as u64) }
+        } else {
+            let mut sa = [0u8; 8];
+            sa[0] = AF_UNIX as u8;
+            for i in 0..5 {
+                let d = ((n >> (4 * (4 - i))) & 0xf) as u8;
+                sa[3 + i] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            }
+            unsafe { sc3(nr::BIND, fd as u64, sa.as_ptr() as u64, 8) }
+        };
+        if r != -EADDRINUSE {
+            return r;
+        }
+    }
 }
 
 fn accept(call: &mut dyn Call) -> i64 {

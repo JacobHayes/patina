@@ -52,6 +52,116 @@ pub struct NodeTab {
     pub cut_at_end: [u64; MAX_NODES],
     /// Connection directions a cut held (each counted once per hold).
     pub held: u64,
+    /// The seed's partitions (`partition-*`), in order: how many were drawn, and the first
+    /// `PARTS_MAX` of them.
+    pub parts_n: u64,
+    pub parts: [Part; PARTS_MAX],
+    /// Partitions that acted on traffic, listed or not.
+    pub parts_acted: u64,
+    /// The link faults' chances on the links they act on (`net-links`), by `ELIG_*`: what a
+    /// run with nodes reports as their eligible counts.
+    pub elig: [u64; ELIG_N],
+}
+
+/// `NodeTab::elig`: connections, deliveries, FINs, reads of sent data, datagrams.
+pub const ELIG_CONNECTIONS: usize = 0;
+pub const ELIG_CHUNKS: usize = 1;
+pub const ELIG_FINS: usize = 2;
+pub const ELIG_SENDS: usize = 3;
+pub const ELIG_DATAGRAMS: usize = 4;
+pub const ELIG_N: usize = 5;
+
+/// Partitions `NodeTab::parts` keeps (later ones are counted, not listed).
+pub const PARTS_MAX: usize = 64;
+
+/// One partition the seed drew.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Part {
+    /// Its ordinal (1 upward), its shape (`SHAPE_*`), and its two sides (node bits).
+    pub n: u64,
+    pub shape: u64,
+    pub a: u64,
+    pub b: u64,
+    /// Virtual time it started and ended (`to_ns` 0: in force when the run ended).
+    pub from_ns: u64,
+    pub to_ns: u64,
+    /// Whether a cut link of it held or lost traffic, or kept a connect from completing.
+    pub acted: u64,
+    /// A bridge's node, which keeps its links to both sides.
+    pub bridge: u64,
+}
+
+/// Partition shapes (`partition-shape`), as bits of `NetCfg::part_shapes`. Each cuts the links
+/// between two sides A and B of the faultable nodes: `split` both ways, `isolate` one node (A)
+/// from all the others both ways, `oneway` only from A to B, and `bridge` both ways but for
+/// one node of B that still reaches both sides.
+pub const SHAPE_SPLIT: u64 = 1;
+pub const SHAPE_ISOLATE: u64 = 2;
+pub const SHAPE_ONEWAY: u64 = 3;
+pub const SHAPE_BRIDGE: u64 = 4;
+pub const SHAPES: [(u64, &str); 4] = [
+    (SHAPE_SPLIT, "split"),
+    (SHAPE_ISOLATE, "isolate"),
+    (SHAPE_ONEWAY, "oneway"),
+    (SHAPE_BRIDGE, "bridge"),
+];
+
+pub fn shape_name(s: u64) -> &'static str {
+    SHAPES.iter().find(|x| x.0 == s).map_or("unknown", |x| x.1)
+}
+
+/// The fewest faultable nodes a shape needs (a bridge needs one node besides two sides).
+pub const fn shape_min_nodes(s: u64) -> usize {
+    if s == SHAPE_BRIDGE {
+        3
+    } else {
+        2
+    }
+}
+
+/// Sub-keys of `draw(Stream::Partition, ordinal << 16 | sub << 8 | i)`.
+pub const PSUB_GAP: u64 = 1;
+pub const PSUB_LEN: u64 = 2;
+pub const PSUB_SHAPE: u64 = 3;
+/// The shuffle of the faultable nodes that makes the sides (`i`: the position).
+pub const PSUB_ORDER: u64 = 4;
+/// How many nodes side A gets.
+pub const PSUB_SIZE: u64 = 5;
+
+/// The sides of a partition: from `nodes` (the faultable ones, in order) and a draw function
+/// `d(sub, i)`, the shape's (A, B, bridge) node bit sets; `None` when the nodes are too few.
+/// `isolate` puts one node in A; `bridge` takes one node out of B, which keeps both sides.
+pub fn sides(shape: u64, nodes: &[usize], d: impl Fn(u64, u64) -> u64) -> Option<(u64, u64, u64)> {
+    let n = nodes.len();
+    if n < shape_min_nodes(shape) || n > MAX_NODES {
+        return None;
+    }
+    // A keyed Fisher-Yates shuffle: position i draws among the ones not yet placed.
+    let mut order = [0usize; MAX_NODES];
+    order[..n].copy_from_slice(nodes);
+    for i in (1..n).rev() {
+        let j = (d(PSUB_ORDER, i as u64) % (i as u64 + 1)) as usize;
+        order.swap(i, j);
+    }
+    let order = &order[..n];
+    let (bridge, rest) = if shape == SHAPE_BRIDGE {
+        (Some(order[n - 1]), &order[..n - 1])
+    } else {
+        (None, order)
+    };
+    let m = rest.len();
+    let size = if shape == SHAPE_ISOLATE {
+        1
+    } else {
+        1 + (d(PSUB_SIZE, 0) % (m as u64 - 1)) as usize
+    };
+    let bits = |s: &[usize]| s.iter().fold(0u64, |b, &k| b | 1 << k);
+    Some((
+        bits(&rest[..size]),
+        bits(&rest[size..]),
+        bridge.map_or(0, |k| 1 << k),
+    ))
 }
 
 /// `NodeTab::status` of a node whose first process had not ended when the run did.
@@ -252,6 +362,10 @@ mod tests {
             heals: 0,
             cut_at_end: [0; MAX_NODES],
             held: 0,
+            parts_n: 0,
+            parts: [Part::default(); PARTS_MAX],
+            parts_acted: 0,
+            elig: [0; ELIG_N],
         };
         t.set(names.iter().map(|n| n.as_bytes()));
         t
@@ -322,6 +436,37 @@ mod tests {
         let none = tab(&[]);
         assert_eq!(parse(b"net heal", &none, 0).unwrap_err().errno, EINVAL);
         assert!(parse(b"mark m", &none, 0).is_ok());
+    }
+
+    #[test]
+    fn sides_are_never_empty_and_follow_the_draws() {
+        let nodes = [1, 2, 3, 4];
+        for shape in [SHAPE_SPLIT, SHAPE_ISOLATE, SHAPE_ONEWAY, SHAPE_BRIDGE] {
+            let (mut seen, mut ns) = ([(0u64, 0u64); 64], 0);
+            for seed in 0..64u64 {
+                let d = |sub: u64, i: u64| crate::draw::mix64(seed << 16 | sub << 8 | i);
+                let (a, b, x) = sides(shape, &nodes, d).unwrap();
+                assert!(
+                    a != 0 && b != 0 && a & b == 0 && (a | b) & x == 0,
+                    "{shape} {seed}"
+                );
+                assert_eq!(a | b | x, 0b11110);
+                if shape == SHAPE_ISOLATE {
+                    assert_eq!(a.count_ones(), 1);
+                }
+                assert_eq!((x != 0), shape == SHAPE_BRIDGE);
+                assert_eq!(sides(shape, &nodes, d), Some((a, b, x)));
+                if !seen[..ns].contains(&(a, b)) {
+                    seen[ns] = (a, b);
+                    ns += 1;
+                }
+            }
+            assert!(ns > 3, "{shape}: {ns}");
+        }
+        let d = |_: u64, _: u64| 0;
+        assert_eq!(sides(SHAPE_BRIDGE, &[1, 2], d), None);
+        assert_eq!(sides(SHAPE_SPLIT, &[1], d), None);
+        assert!(sides(SHAPE_SPLIT, &[0, 1], d).is_some());
     }
 
     #[test]

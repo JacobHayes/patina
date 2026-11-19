@@ -9,7 +9,7 @@
 #  e. F: injected file errors are seen by the program (spawn_blocking errors printed).
 #  g. TCP (tokio-mt net, the network wire): D faults off and on, at seed 5: the seed that diverged
 #     before the exit barrier (docs/EVIDENCE.md runtimes "exit versus a wire delivery"). F: net-reset seen
-#     as "ConnectionReset"; net-partition=1+100000: the 5 s read timeouts fire during it, then
+#     as "ConnectionReset"; net-blackout=1+100000: the 5 s read timeouts fire during it, then
 #     all 16 clients finish with correct data (two 100 s partitions: a real wait fails the
 #     budget); net-chunk-max=1: all ok.
 #@ tier=area budget=60 slots=4
@@ -61,8 +61,8 @@ verify_seeds $T tk-dn cpu,load,aslr,sandbox "5" -- /guest/tokio-mt net || fail "
 verify_seeds $T tk-dnf cpu,load,aslr,sandbox "5" $NETF -- /guest/tokio-mt net || fail "W2 D (tcp, network faults on)"
 echo "-- net-reset-permille=20"
 netf $T tk-reset 'error: ConnectionReset' "1 2 3" --fault net-reset-permille=20 -- /guest/tokio-mt net || fail "W2: no reset seen"
-echo "-- net-partition=1+100000 (ms)"
-netf $T tk-part '^echo (tcp): 16 of 16 clients ok' "1 2" --fault net-partition=1+100000 -- /guest/tokio-mt net >"$RUNS/tk-part.txt" || true
+echo "-- net-blackout=1+100000 (ms)"
+netf $T tk-part '^echo (tcp): 16 of 16 clients ok' "1 2" --fault net-blackout=1+100000 -- /guest/tokio-mt net >"$RUNS/tk-part.txt" || true
 cat "$RUNS/tk-part.txt"
 [ "$(grep -c ': class ok, .* 1 lines match' "$RUNS/tk-part.txt")" = 2 ] || fail "W2: not every client recovered after the partition"
 for s in 1 2; do

@@ -239,6 +239,12 @@ pub const FLAGS: &[Flag] = &[
     ),
     many("--env", "K=V", "add to the guest environment", RUNLIKE),
     many(
+        "--node",
+        "NAME='CMD ARGS'",
+        "another machine in the run: node NAME runs CMD ARGS (split into words as a --check line is), after any [node.NAME] tables of patina.toml",
+        RUNLIKE,
+    ),
+    many(
         "--mount",
         "SRC:DST[:copy]",
         "host file or directory, read-only in the guest; :copy copies a directory in at start",

@@ -75,6 +75,8 @@ enum Val {
     /// range resolved like any other (LENGTH by the draw of `KEY:length`); a class `swarm`
     /// may turn off.
     Window,
+    /// A word or a list of words, as given: never drawn, never swarmed.
+    Word,
 }
 
 /// One fault setting.
@@ -193,10 +195,46 @@ pub const KEYS: &[Key] = &[
         "time out a TCP connect",
     ),
     key(
-        "net-partition",
+        "net-blackout",
         "START+LENGTH[:PORT]",
         Val::Window,
-        "for LENGTH ms of virtual time from START ms, hold TCP deliveries and lose datagrams (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
+        "for LENGTH ms of virtual time from START ms, hold TCP deliveries and lose datagrams on every link the link faults act on, loopback included (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
+    ),
+    key(
+        "net-syn-retries",
+        "N",
+        Val::Param,
+        "a TCP connect that gets no answer (across a cut link, or net-connect-timeout) retries its SYN N times, after 1, 3, 7, 15, ... s, and fails ETIMEDOUT after the last (in a run with nodes a socket's TCP_SYNCNT, when set, is its own) [default: 6, ETIMEDOUT at 127 s]",
+    ),
+    key(
+        "net-give-up-ms",
+        "N",
+        Val::Param,
+        "a TCP direction whose data a cut link has held for N ms resets its sender, who sees ETIMEDOUT (in a run with nodes a socket's TCP_USER_TIMEOUT, when set, is its own limit) [default: 924600]",
+    ),
+    key(
+        "net-links",
+        "nodes|driver|all",
+        Val::Word,
+        "in a run with nodes, the links the net- faults and partitions act on: between two nodes other than the driver; also the driver's; also every node's loopback (partitions never cut loopback) [default: nodes]",
+    ),
+    key(
+        "partition-gap-ms",
+        "A..B",
+        Val::Own,
+        "in a run with nodes, seed-drawn partitions: virtual time from the start of the run (or setup-complete), then from each partition's end, to the next one's start, a draw in A..B ms each time",
+    ),
+    key(
+        "partition-ms",
+        "A..B",
+        Val::Spread,
+        "how long each partition lasts: a draw in A..B ms [default: 1000..30000]",
+    ),
+    key(
+        "partition-shape",
+        "SHAPE[,SHAPE]",
+        Val::Word,
+        "the shapes partitions are drawn from: split (two sides, both ways), isolate (one node from the rest), oneway (two sides, one direction), bridge (two sides, one node still reaches both) [default: all four]",
     ),
     key(
         "net-drop-permille",
@@ -348,10 +386,41 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
+/// What `--faults net` (and `all`, which includes it) adds in a run with at least two nodes
+/// the link faults act on: seed-drawn partitions. Without them a preset sets none of these,
+/// so a one-machine run's plan is what it was.
+pub const NODE_PRESETS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "net",
+        &[
+            ("partition-gap-ms", "5000..60000"),
+            ("partition-ms", "500..20000"),
+        ],
+    ),
+    (
+        "all",
+        &[
+            ("partition-gap-ms", "5000..60000"),
+            ("partition-ms", "500..20000"),
+        ],
+    ),
+];
+/// `partition-ms` when partitions are on and it is not given.
+const PARTITION_MS_DEFAULT: &str = "1000..30000";
+
 /// The crash rate `--crash KIND` takes when none is given (per mille, at each crash point).
 pub const CRASH_DEFAULT_PERMILLE: u64 = 3;
 /// `fs-delay-max-ms` when not given.
 const DELAY_MAX_MS_DEFAULT: u64 = 10;
+
+/// The words a renamed key is refused with (no alias: a plan means one thing).
+fn renamed(k: &str) -> Option<String> {
+    (k == "net-partition").then(|| {
+        "--fault net-partition: renamed net-blackout (a partition is now a cut between nodes, \
+         partition-gap-ms)"
+            .to_string()
+    })
+}
 
 fn find(k: &str) -> Option<&'static Key> {
     let name = if k.starts_with("point:") {
@@ -362,8 +431,17 @@ fn find(k: &str) -> Option<&'static Key> {
     KEYS.iter().find(|x| x.name == name)
 }
 
-/// The draw that resolves the setting `name`: its own stream, keyed by the name only.
+/// The draw that resolves the setting `name`: its own stream, keyed by the name only. A
+/// renamed key keeps drawing under its old name (`net-blackout` was `net-partition`), so a
+/// rename moves no draw.
 pub fn plan_draw(seed: u64, name: &str) -> u64 {
+    let old;
+    let name = if name.contains("net-blackout") {
+        old = name.replace("net-blackout", "net-partition");
+        old.as_str()
+    } else {
+        name
+    };
     proto::draw(
         seed,
         proto::Stream::FaultPlan,
@@ -471,36 +549,123 @@ fn resolve_at(seed: u64, k: &str, v: &str) -> Res<String> {
     })
 }
 
+/// The links the net- faults act on, by `net-links`'s word.
+fn links(v: &str) -> Res<u64> {
+    use proto::wire::{LINKS_ALL, LINKS_DRIVER, LINKS_NODES};
+    match v {
+        "nodes" => Ok(LINKS_NODES),
+        "driver" => Ok(LINKS_DRIVER),
+        "all" => Ok(LINKS_ALL),
+        _ => Err(format!(
+            "--fault net-links={v}: expected nodes, driver or all"
+        )),
+    }
+}
+
+/// The nodes the link faults act on (`net-links`, the last one given): partitions need two.
+fn faultable_nodes(nodes: usize, settings: &[String]) -> Res<usize> {
+    let scope = match settings
+        .iter()
+        .rev()
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| *k == "net-links")
+    {
+        Some((_, v)) => links(v)?,
+        None => proto::wire::LINKS_NODES,
+    };
+    Ok(if nodes == 0 {
+        0
+    } else {
+        nodes + (scope >= proto::wire::LINKS_DRIVER) as usize
+    })
+}
+
+/// The keys of preset `p` in a run with `faultable` nodes the link faults act on: its own,
+/// and its node keys (`NODE_PRESETS`) when there are two such nodes.
+pub fn preset_keys(p: &str, faultable: usize) -> Res<Vec<(&'static str, &'static str)>> {
+    let (_, kv) = PRESETS.iter().find(|x| x.0 == p).ok_or_else(|| {
+        let names: Vec<&str> = PRESETS.iter().map(|x| x.0).collect();
+        format!("--faults: unknown preset {p} ({})", names.join(", "))
+    })?;
+    let mut out: Vec<(&str, &str)> = kv.to_vec();
+    if faultable >= 2 {
+        for (_, kv) in NODE_PRESETS.iter().filter(|x| x.0 == p) {
+            out.extend(kv.iter().copied());
+        }
+    }
+    Ok(out)
+}
+
+/// A preset expanded into its settings, as `resolve` would apply them for this run: `minimize`
+/// replaces a preset with them (settings given beside it win).
+pub fn preset_settings(p: &str, nodes: usize, settings: &[String]) -> Res<Vec<(String, String)>> {
+    let f = faultable_nodes(nodes, settings)?;
+    Ok(preset_keys(p, f)?
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect())
+}
+
 /// Resolve presets, settings (later ones replace earlier ones of the same key, settings
-/// replace presets) and `--crash` against `seed`.
+/// replace presets) and `--crash` against `seed`. `nodes` is the run's nodes besides the
+/// driver (0: a run without nodes).
 pub fn resolve(
     seed: u64,
     presets: &[String],
     settings: &[String],
     crash: Option<&str>,
+    nodes: usize,
 ) -> Res<Plan> {
     let mut given: Vec<(String, String)> = vec![];
-    let mut set = |k: &str, v: &str| match given.iter_mut().find(|e| e.0 == k) {
-        Some(e) => e.1 = v.to_string(),
-        None => given.push((k.to_string(), v.to_string())),
-    };
-    for p in presets.iter().flat_map(|p| p.split(',')) {
-        let (_, kv) = PRESETS.iter().find(|x| x.0 == p).ok_or_else(|| {
-            let names: Vec<&str> = PRESETS.iter().map(|x| x.0).collect();
-            format!("--faults: unknown preset {p} ({})", names.join(", "))
-        })?;
-        for (k, v) in kv.iter() {
-            set(k, v);
+    fn set(given: &mut Vec<(String, String)>, k: &str, v: &str) {
+        match given.iter_mut().find(|e| e.0 == k) {
+            Some(e) => e.1 = v.to_string(),
+            None => given.push((k.to_string(), v.to_string())),
         }
     }
+    let mut named = vec![];
     for kv in settings {
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| format!("--fault {kv}: expected KEY=VALUE"))?;
+        if let Some(e) = renamed(k) {
+            return Err(e);
+        }
         if find(k).is_none() {
             return Err(format!("--fault: unknown key {k}"));
         }
-        set(k, v);
+        named.push((k, v));
+    }
+    let faultable = faultable_nodes(nodes, settings)?;
+    for p in presets.iter().flat_map(|p| p.split(',')) {
+        for (k, v) in preset_keys(p, faultable)? {
+            set(&mut given, k, v);
+        }
+    }
+    for (k, v) in named {
+        set(&mut given, k, v);
+    }
+    let parts = given.iter().any(|e| e.0 == "partition-gap-ms");
+    if parts && faultable < 2 {
+        return Err(format!(
+            "--fault partition-gap-ms: partitions need two nodes the link faults act on ({})",
+            if nodes == 0 {
+                "the run has no nodes".to_string()
+            } else {
+                format!("the run has {nodes}; net-links=driver adds the driver")
+            }
+        ));
+    }
+    if nodes == 0 {
+        if let Some(e) = given
+            .iter()
+            .find(|e| e.0.starts_with("partition-") || e.0 == "net-links")
+        {
+            return Err(format!("--fault {}: only in a run with nodes", e.0));
+        }
+    }
+    if parts && !given.iter().any(|e| e.0 == "partition-ms") {
+        set(&mut given, "partition-ms", PARTITION_MS_DEFAULT);
     }
     given.sort();
     let swarm = match given.iter().position(|e| e.0 == "swarm") {
@@ -534,7 +699,7 @@ pub fn resolve(
             Val::Count | Val::Param => json!(resolve_num(seed, k, v, u64::MAX / 2)?),
             Val::Flag => json!((num(k, v)? != 0) as u64),
             Val::Size => json!(resolve_size(seed, k, v)?),
-            Val::Own | Val::Spread => json!(v),
+            Val::Own | Val::Spread | Val::Word => json!(v),
             Val::Window => json!(resolve_window(seed, k, v)?),
             Val::At => json!(resolve_at(seed, k, v)?),
             Val::Gap => {
@@ -569,6 +734,18 @@ pub fn resolve(
     if let Some(c) = crash {
         let s = crash_plan(seed, &mut plan.faults, c)?;
         plan.resolved.push(("crash".into(), json!(s)));
+    }
+    let shapes = plan.net.part_shapes;
+    if parts
+        && shapes != 0
+        && !proto::node::SHAPES
+            .iter()
+            .any(|s| shapes & (1 << s.0) != 0 && proto::node::shape_min_nodes(s.0) <= faultable)
+    {
+        return Err(format!(
+            "--fault partition-shape: no shape it names fits {faultable} nodes the link faults act \
+             on (bridge needs 3)"
+        ));
     }
     Ok(plan)
 }
@@ -644,6 +821,37 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             return Ok(());
         }
         _ if k.starts_with("point:") => return point(&mut o.sdk, &k["point:".len()..], n(v)?),
+        "partition-gap-ms" => {
+            (o.net.part_gap_min_ns, o.net.part_gap_max_ns) = ms_range(k, v)?;
+            if o.net.part_gap_min_ns == 0 {
+                return Err(format!("--fault {k}={v}: A is at least 1"));
+            }
+            if o.net.part_shapes == 0 {
+                o.net.part_shapes = proto::node::SHAPES.iter().fold(0, |b, s| b | 1 << s.0);
+            }
+            return Ok(());
+        }
+        "partition-ms" => {
+            (o.net.part_min_ns, o.net.part_max_ns) = ms_range(k, v)?;
+            if o.net.part_min_ns == 0 {
+                return Err(format!("--fault {k}={v}: A is at least 1"));
+            }
+            return Ok(());
+        }
+        "partition-shape" => {
+            let mut bits = 0;
+            for w in v.split(',') {
+                let s = proto::node::SHAPES
+                    .iter()
+                    .find(|s| s.1 == w)
+                    .ok_or_else(|| {
+                        format!("--fault {k}: unknown shape {w} (split, isolate, oneway, bridge)")
+                    })?;
+                bits |= 1 << s.0;
+            }
+            o.net.part_shapes = bits;
+            return Ok(());
+        }
         _ if k.starts_with("net-") => return net_fault(&mut o.net, k, v),
         _ => return Err(format!("--fault: unknown key {k}")),
     }
@@ -711,22 +919,40 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
         "net-reset-permille" => c.reset_permille = n(v)?,
         "net-connect-refuse-permille" => c.refuse_permille = n(v)?,
         "net-connect-timeout-permille" => c.timeout_permille = n(v)?,
-        "net-partition" => {
+        "net-blackout" => {
             let (range, port) = match v.split_once(':') {
                 Some((r, p)) => (r, n(p)?),
                 None => (v, 0),
             };
             if port > 65535 {
-                return Err(format!("--fault net-partition: port {port} out of range"));
+                return Err(format!("--fault net-blackout: port {port} out of range"));
             }
             let (start, len) = range
                 .split_once('+')
                 .ok_or_else(|| format!("--fault {k}={v}: expected START+LENGTH"))?;
-            c.partition_from_ns = n(start)? * 1_000_000;
-            c.partition_to_ns = c.partition_from_ns + n(len)? * 1_000_000;
-            c.partition_port = port;
-            c.partition_set = 1;
+            c.blackout_from_ns = n(start)? * 1_000_000;
+            c.blackout_to_ns = c.blackout_from_ns + n(len)? * 1_000_000;
+            c.blackout_port = port;
+            c.blackout_set = 1;
         }
+        "net-syn-retries" => {
+            c.syn_retries = n(v)?;
+            if c.syn_retries == 0 || c.syn_retries > proto::wire::SYN_RETRIES_MAX {
+                return Err(format!(
+                    "--fault {k}: 1 to {} (the kernel's least is 1)",
+                    proto::wire::SYN_RETRIES_MAX
+                ));
+            }
+            c.syn_retries_set = 1;
+        }
+        "net-give-up-ms" => {
+            c.give_up_ns = n(v)?.saturating_mul(1_000_000);
+            if c.give_up_ns == 0 {
+                return Err(format!("--fault {k}: at least 1"));
+            }
+            c.give_up_set = 1;
+        }
+        "net-links" => c.links = links(v)?,
         "net-chunk-gap-us" => {
             (c.chunk_gap_min_ns, c.chunk_gap_max_ns) = span(k, v, 1000, "microseconds")?;
             c.chunk_gap_set = 1;
@@ -822,12 +1048,12 @@ mod tests {
     #[test]
     fn ranges_resolve_from_the_seed_and_only_from_it() {
         let disk = v(&["disk"]);
-        let a = resolve(1, &disk, &[], None).unwrap();
-        let b = resolve(1, &disk, &[], None).unwrap();
+        let a = resolve(1, &disk, &[], None, 0).unwrap();
+        let b = resolve(1, &disk, &[], None, 0).unwrap();
         assert_eq!(a.json(), b.json());
         let rates: std::collections::BTreeSet<u64> = (0..64)
             .map(|s| {
-                let p = resolve(s, &disk, &[], None).unwrap();
+                let p = resolve(s, &disk, &[], None, 0).unwrap();
                 val(&p, "fs-short-permille").as_u64().unwrap()
             })
             .collect();
@@ -841,7 +1067,7 @@ mod tests {
     fn one_setting_never_moves_another() {
         let disk = v(&["disk"]);
         for s in 0..32 {
-            let a = resolve(s, &disk, &[], Some("machine:0..5")).unwrap();
+            let a = resolve(s, &disk, &[], Some("machine:0..5"), 0).unwrap();
             let b = resolve(
                 s,
                 &disk,
@@ -851,6 +1077,7 @@ mod tests {
                     "mem-limit-mb=10..20",
                 ]),
                 Some("machine:0..5"),
+                0,
             )
             .unwrap();
             for (k, x) in &a.resolved {
@@ -864,17 +1091,17 @@ mod tests {
 
     #[test]
     fn settings_replace_presets_and_unknowns_are_named() {
-        let p = resolve(3, &v(&["disk"]), &v(&["fs-error-permille=7"]), None).unwrap();
+        let p = resolve(3, &v(&["disk"]), &v(&["fs-error-permille=7"]), None, 0).unwrap();
         assert_eq!(p.faults.fs_error_permille, 7);
-        assert!(resolve(0, &v(&["dsk"]), &[], None)
+        assert!(resolve(0, &v(&["dsk"]), &[], None, 0)
             .unwrap_err()
             .contains("dsk"));
-        assert!(resolve(0, &[], &v(&["nope=1"]), None)
+        assert!(resolve(0, &[], &v(&["nope=1"]), None, 0)
             .unwrap_err()
             .contains("nope"));
-        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), None).is_err());
-        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), None).is_err());
-        let c = resolve(0, &[], &[], Some("machine")).unwrap();
+        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), None, 0).is_err());
+        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), None, 0).is_err());
+        let c = resolve(0, &[], &[], Some("machine"), 0).unwrap();
         assert_eq!(c.faults.crash_permille, CRASH_DEFAULT_PERMILLE);
     }
 
@@ -887,8 +1114,8 @@ mod tests {
         ]);
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let p = resolve(s, &[], &at, Some("machine-at:10..20")).unwrap();
-            let q = resolve(s, &[], &at, Some("machine-at:10..20")).unwrap();
+            let p = resolve(s, &[], &at, Some("machine-at:10..20"), 0).unwrap();
+            let q = resolve(s, &[], &at, Some("machine-at:10..20"), 0).unwrap();
             assert_eq!(p.json(), q.json());
             let f = p.faults;
             assert!(
@@ -906,35 +1133,35 @@ mod tests {
             seen.insert(f.fsync_error_at);
         }
         assert!(seen.len() > 1, "{seen:?}");
-        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None).is_err());
-        assert!(resolve(0, &[], &[], Some("machine-at:x")).is_err());
+        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None, 0).is_err());
+        assert!(resolve(0, &[], &[], Some("machine-at:x"), 0).is_err());
     }
 
     #[test]
     fn compute_gap_is_drawn_per_seed_and_never_swarmed() {
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let d = resolve(s, &[], &[], None).unwrap();
+            let d = resolve(s, &[], &[], None, 0).unwrap();
             let (lo, hi) = proto::compute::GAP_DEFAULT;
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
             assert!(d.resolved.is_empty() && d.compute_budget);
             seen.insert(d.compute_gap);
-            let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None).unwrap();
+            let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None, 0).unwrap();
             assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
             assert!(!p.compute_budget);
-            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None).unwrap();
+            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None, 0).unwrap();
             assert!((100..=200).contains(&r.compute_gap));
             assert_eq!(val(&r, "compute-gap"), json!(r.compute_gap));
         }
         assert!(seen.len() > 8, "{seen:?}");
         assert_eq!(
-            resolve(0, &[], &v(&["compute-gap=0"]), None)
+            resolve(0, &[], &v(&["compute-gap=0"]), None, 0)
                 .unwrap()
                 .compute_gap,
             0
         );
         for bad in ["compute-gap=0..8", "compute-gap=9..8", "compute-gap=x"] {
-            assert!(resolve(0, &[], &v(&[bad]), None).is_err(), "{bad}");
+            assert!(resolve(0, &[], &v(&[bad]), None, 0).is_err(), "{bad}");
         }
     }
 
@@ -943,7 +1170,7 @@ mod tests {
         let mut small = 0;
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..256 {
-            let p = resolve(s, &v(&["net"]), &[], None).unwrap();
+            let p = resolve(s, &v(&["net"]), &[], None, 0).unwrap();
             let c = p.net.chunk_max;
             assert!(
                 (1..=65536).contains(&c) && val(&p, "net-chunk-max") == json!(c),
@@ -951,7 +1178,7 @@ mod tests {
             );
             small += (c <= 16) as u32;
             seen.insert(c);
-            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), None).unwrap();
+            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), None, 0).unwrap();
             assert_eq!(one.net.chunk_max, 7);
         }
         // Log-uniform: about a quarter of seeds at 16 bytes or less (uniform: one in 4096).
@@ -960,8 +1187,8 @@ mod tests {
             "{small} {}",
             seen.len()
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None).is_err());
-        let g = resolve(0, &[], &v(&["net-chunk-gap-us=1..10"]), None).unwrap();
+        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None, 0).is_err());
+        let g = resolve(0, &[], &v(&["net-chunk-gap-us=1..10"]), None, 0).unwrap();
         assert_eq!(
             (
                 g.net.chunk_gap_set,
@@ -970,7 +1197,48 @@ mod tests {
             ),
             (1, 1000, 10_000)
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-gap-us=5"]), None).is_err());
+        assert!(resolve(0, &[], &v(&["net-chunk-gap-us=5"]), None, 0).is_err());
+    }
+
+    #[test]
+    fn partitions_come_with_two_nodes_and_never_without() {
+        let net = v(&["net"]);
+        // Without nodes, and with one node the faults act on, `net` is what it always was.
+        for nodes in [0, 1] {
+            for s in 0..8 {
+                let p = resolve(s, &net, &[], None, nodes).unwrap();
+                let q = resolve(s, &net, &[], None, 0).unwrap();
+                assert_eq!(p.json(), q.json());
+                assert_eq!(p.net, q.net);
+            }
+        }
+        let p = resolve(5, &net, &[], None, 2).unwrap();
+        assert!(p.net.part_gap_max_ns >= p.net.part_gap_min_ns && p.net.part_gap_min_ns > 0);
+        assert!(p.net.part_shapes != 0 && p.net.part_min_ns > 0);
+        // One node and the driver's links: two nodes to cut between.
+        let d = resolve(5, &net, &v(&["net-links=driver"]), None, 1).unwrap();
+        assert!(d.net.part_gap_max_ns > 0);
+        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), None, 1).is_err());
+        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), None, 0).is_err());
+        assert!(resolve(0, &[], &v(&["net-links=driver"]), None, 0).is_err());
+        let one = resolve(
+            0,
+            &[],
+            &v(&["partition-gap-ms=10..20", "partition-shape=oneway,bridge"]),
+            None,
+            3,
+        )
+        .unwrap();
+        assert_eq!(one.net.part_gap_min_ns, 10_000_000);
+        assert_eq!(
+            one.net.part_shapes,
+            1 << proto::node::SHAPE_ONEWAY | 1 << proto::node::SHAPE_BRIDGE
+        );
+        // The default length.
+        assert_eq!(one.net.part_min_ns, 1_000_000_000);
+        assert!(resolve(0, &[], &v(&["partition-shape=ring"]), None, 3).is_err());
+        let e = resolve(0, &[], &v(&["net-partition=1+2"]), None, 0).unwrap_err();
+        assert!(e.contains("net-blackout"), "{e}");
     }
 
     #[test]
@@ -978,7 +1246,7 @@ mod tests {
         let all = v(&["all"]);
         let offs: std::collections::BTreeSet<usize> = (0..32)
             .map(|s| {
-                let p = resolve(s, &all, &v(&["swarm=1"]), None).unwrap();
+                let p = resolve(s, &all, &v(&["swarm=1"]), None, 0).unwrap();
                 p.resolved.iter().filter(|e| e.1 == json!("off")).count()
             })
             .collect();

@@ -317,39 +317,74 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   child does) and executes the runtime, which starts as for any program. One process is
   starting at a time, so slots, pids and records come in one order. The shared trees (`/`,
   `/guest`, `:copy` mounts) are the driver's: what the driver writes there a node sees (a file,
-  a path socket), read-only. That is a channel the driver has and nodes do not, as a shared
-  disk would be. A node whose first process fails before its `Hello` ends the run as `infra`
-  after the stall limit.
+  a path socket), read-only. That is a deliberate channel the driver has and nodes do not, as a
+  shared disk would be. A node whose first process fails before its `Hello` ends the run as
+  `infra` after the stall limit; one whose command cannot be loaded ends it as `exec`, naming
+  the node (the runtime's host error, `HE_EXEC`, from a process that has not executed: the
+  supervisor keeps the pids that have, `execed`).
 - **Which node.** Every slot carries its node (`Slot::node`), set when the slot is reserved and
   inherited by threads and children; the runtime installs its filter once per node
   (`filter_installed` holds a bit per node). The supervisor writes `DEC_NODE_SLOT` when a slot
-  changes node, so a reader of the log knows each record's node. A process's view of other
-  processes is its node's: `kill`, `tgkill`, `setpgid`, `getpgid` and `getsid` of another node's
-  process answer `ESRCH`, as do process groups and `kill(-1)`, and `sched_*` see only the node's
-  threads. System V shared memory is one table per node (each node is its own IPC namespace).
+  changes node, so a reader of the log knows each record's node. The runtime reads its node in
+  one place (`state::node()`, from the slot at each image start). A process's view of other
+  processes is its node's: `kill`, `tgkill`, `setpgid`, `getpgid`, `getsid` and `capget` of
+  another node's process answer `ESRCH`, as do process groups and `kill(-1)` (the supervisor's
+  process table answers which node a pid is on, zombies included: `Op::PidNode`), and `sched_*`
+  see only the node's threads. System V shared memory is one table per node (each node is its own IPC namespace).
 - **Addresses and ports.** A node's address is the wire's address kind `0x10 + k`
   (`10.0.0.(k+1)`; the driver keeps `HOST4`, `10.0.0.1`). The wire keys ports, listeners and
   connections by `(node, port)`: the listener's abstract name is `@patina-l-<node << 16 | port>`;
   loopback is per node; a connection to another node's address is routed to that node. UDP
-  ports are per node and do not cross. Abstract `AF_UNIX` names are refused with nodes: the
-  kernel's network namespace, which holds them, is shared.
+  ports are per node; in UDP's address kinds a node's own address is `HOST4` and another
+  node `j`'s `0x10 + j` (the driver's `0x10`), which the supervisor routes to node `j`'s `HOST4`
+  from `0x10 + sender` (`sup/udp.rs`, `rt::sys::udp`). Abstract `AF_UNIX` names live in the
+  kernel's one network namespace, which every node shares: the runtime gives the kernel each
+  name a node binds, connects or sends to under the node's prefix `patina-n<k>-` (under the
+  reserved `patina-` names, which a guest cannot give) and takes it off every name read back
+  (`rt::sys::unixname`), so a node's names are its own. Message headers are copied to runtime
+  memory with the name replaced, never written in place: a guest's header may be read-only or
+  shared by threads. An autobind, and the kernel's random one for an unbound socket with
+  `SO_PASSCRED` (made explicit before a connect, or a datagram socket's send), is the runtime's
+  counter name under the prefix. Without nodes none of this runs.
 - **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the node
   table (`proto::node::parse`; the supervisor cannot read a node process's memory, which is not
   its descendant), refuses `net` outside the driver's node (`EPERM`), and sends `Op::Net` [verb,
   from set, to set, both]; the call is logged with its words as an SDK call is.
-- **Cuts.** The supervisor keeps a matrix of cut links. The wire consults it when it stamps a
-  delivery: an item on a cut direction is queued with no time (`HELD`) and the direction is
-  held; a heal re-stamps held items from the heal's time in order (`DEC_WIRE_HEAL`). A
-  direction held for 924.6 s resets its sender with `ETIMEDOUT`; a connect across a cut retries
-  on the kernel's SYN schedule and fails at 127 s (the cut is looked at when the SYN is sent and
-  retried; a cut made inside a handshake's delay does not stop it). No fault is drawn for a cut.
+- **Cuts.** The supervisor keeps two matrices of cut links (`sup/link.rs`): the script's
+  (`net cut`) and the seed's (partitions); a link is cut while either says so, and `net heal`
+  clears the script's only. The wire consults them when it stamps a delivery: an item on a cut
+  direction is queued with no time (`HELD`) and the direction is held; when a layer opens a
+  link, held items are re-stamped from that time in order (`DEC_WIRE_HEAL`). A direction held
+  for `net-give-up-ms` (924.6 s; the sender's `TCP_USER_TIMEOUT` if set) resets its sender with
+  `ETIMEDOUT`; a connect across a cut retries on the kernel's SYN schedule (`syn_retry_s`, for
+  `net-syn-retries` or the socket's `TCP_SYNCNT`) and fails after the last retry (the cut is
+  looked at when the SYN is sent and retried; a cut made inside a handshake's delay does not
+  stop it). A datagram sent on a cut link is lost (`UF_CUT`). No fault is drawn for a cut.
+- **Link faults.** A link fault (`net-*`) is drawn only on the links `net-links` names
+  (`Sup::link_faulted`: between nodes other than the driver, by default); on the others an item
+  gets the default delay range and no draw at all, so turning a class on draws nothing on
+  them. The draws are keyed by connection or datagram as without nodes, so each direction of a
+  pair of nodes has its own. With nodes an injection's record names its link (`args[1]`,
+  `proto::wire::inj_link`) and its eligible counts are those of the faulted links
+  (`NodeTab::elig`, `result.json`'s `nodes.faulted_links`).
+- **Partitions.** `partition-gap-ms` starts a chain of node events (`Event::Node`): a start
+  draws a shape and two sides of the nodes the link faults act on (`proto::node::sides`, a
+  keyed shuffle), sets the seed's matrix (one direction for `oneway`; `bridge` keeps one node's
+  links), records `DEC_NET_PART` and an `Injected` record (`INJ_NET_CUT`), and schedules its end
+  after a drawn length; the end opens the links the script does not cut, records
+  `DEC_NET_PART_END`, re-stamps what was held and schedules the next start. Every draw is on
+  `Stream::Partition`, keyed by the partition's ordinal and a sub-key, so turning partitions on
+  moves no other decision and no draw depends on traffic. A start is a weak event: a run whose
+  threads all wait and that has only a partition start ahead is deadlocked, as it would be
+  without partitions; an end is strong, since it may release held traffic. A start that falls
+  while faults are off makes no partition. The node table keeps the first 64 partitions (shape,
+  sides, times, whether a cut link held, lost or kept back anything) for `result.json`.
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-0/` and the node table to `result.json`'s `nodes`.
 
-Not yet: seed-drawn partitions and faults with nodes, node crash and restart, per-node disk
-faults and crash models (a node's work tree has no operation log), UDP between nodes, per-node
-clocks, and per-node abstract socket names.
+Not yet: node crash and restart, per-node disk faults and crash models (a node's work tree has
+no operation log), and per-node clocks.
 
 ## The boundary log
 

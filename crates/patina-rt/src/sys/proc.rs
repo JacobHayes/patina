@@ -64,16 +64,15 @@ pub fn clone_process(
 }
 
 /// Is `pid` (as a call's argument) a process of another node? Pids are unique in the run; a
-/// process of another node is not found, as on another machine.
+/// process of another node is not found, as on another machine. The supervisor's process
+/// table answers (`Op::PidNode`), zombies included; without nodes there is no other node.
 pub fn foreign_pid(pid: u64) -> bool {
-    let (pid, node) = (pid as i32, crate::state::proc().node as u64);
-    pid > 0
-        && (0..MAX_THREADS).any(|i| {
-            let s = unsafe { &*ctl().slot(i) };
-            s.state.load(SeqCst) != SLOT_FREE
-                && s.pid.load(Relaxed) == pid
-                && s.node.load(Relaxed) != node
-        })
+    let pid = pid as i32;
+    if pid <= 0 || !crate::state::with_nodes() {
+        return false;
+    }
+    let r = crate::sup::call_sup(Op::PidNode, [pid as u64, 0, 0, 0, 0, 0]).ret;
+    r >= 0 && r as usize != crate::state::node()
 }
 
 fn reserve(slot: usize, vmask: u64) {
@@ -84,7 +83,7 @@ fn reserve(slot: usize, vmask: u64) {
     s.vmask.store(vmask, Relaxed);
     s.sigpend.store(0, Relaxed);
     s.sched.store(super::sched::inherited(), Relaxed);
-    s.node.store(crate::state::proc().node as u64, Relaxed);
+    s.node.store(crate::state::node() as u64, Relaxed);
     s.state.store(SLOT_RESERVED, SeqCst);
 }
 

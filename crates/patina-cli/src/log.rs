@@ -124,6 +124,12 @@ pub fn describe(r: &Rec) -> String {
             proto::ctl::DEC_NODE_STOP => "node stop".to_string(),
             proto::ctl::DEC_NODE_SLOT => "node slot".to_string(),
             proto::ctl::DEC_WIRE_HEAL => "wire heal".to_string(),
+            proto::ctl::DEC_NET_PART => format!(
+                "partition {} {}",
+                r.args[0],
+                proto::node::shape_name(r.args[1])
+            ),
+            proto::ctl::DEC_NET_PART_END => format!("partition {} end", r.args[0]),
             _ => Op::from_u32(r.nr)
                 .map(|o| o.name().to_string())
                 .unwrap_or_else(|| format!("op{}", r.nr)),

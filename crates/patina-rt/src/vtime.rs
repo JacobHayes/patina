@@ -41,7 +41,7 @@ pub fn epoch() -> u64 {
 /// the driver, and in a run without nodes).
 pub fn key(vdev_minor: u64, ino: u64) -> u64 {
     const _: () = assert!(VDEV_MOUNT_BASE + crate::path::MAX_MOUNTS as u64 <= 0x100);
-    (crate::state::proc().node as u64) << 56 | (vdev_minor & 0xff) << 48 | (ino & 0xffff_ffff_ffff)
+    (crate::state::node() as u64) << 56 | (vdev_minor & 0xff) << 48 | (ino & 0xffff_ffff_ffff)
 }
 
 fn slot(key: u64, insert: bool) -> Option<&'static mut VtEntry> {

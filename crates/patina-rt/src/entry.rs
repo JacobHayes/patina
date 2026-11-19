@@ -166,7 +166,7 @@ fn install_filter() {
         filter: f.as_ptr(),
     };
     unsafe {
-        let bit = 1u64 << proc().node;
+        let bit = 1u64 << crate::state::node();
         if ctl()
             .filter_installed
             .load(core::sync::atomic::Ordering::Acquire)

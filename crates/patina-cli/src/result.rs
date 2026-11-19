@@ -97,9 +97,82 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
             }
         }
     }
-    json!({
+    let bits = |b: u64| -> Vec<String> {
+        (0..t.count())
+            .filter(|k| b & (1 << k) != 0)
+            .map(name)
+            .collect()
+    };
+    // Virtual time as events and `faults.recent` give it.
+    let ms = |ns: u64| ns / 1_000_000;
+    let parts: Vec<Value> = t.parts[..(t.parts_n as usize).min(proto::node::PARTS_MAX)]
+        .iter()
+        .map(|p| {
+            let mut v = json!({
+                "n": p.n,
+                "shape": proto::node::shape_name(p.shape),
+                "a": bits(p.a),
+                "b": bits(p.b),
+                "from_ms": ms(p.from_ns),
+                "to_ms": if p.to_ns == 0 { Value::Null } else { json!(ms(p.to_ns)) },
+                "acted": p.acted != 0,
+            });
+            if p.shape == proto::node::SHAPE_BRIDGE {
+                let all = (1u64 << t.count()) - 1;
+                v["bridge"] = json!(bits(p.bridge & all));
+            }
+            v
+        })
+        .collect();
+    let mut v = json!({
         "list": list,
         "net": {"cuts": t.cuts, "heals": t.heals, "held": t.held, "cut_at_end": cut},
+        // What the link faults had a chance at, on the links they act on (`net-links`).
+        "faulted_links": {
+            "connections": t.elig[proto::node::ELIG_CONNECTIONS],
+            "chunks": t.elig[proto::node::ELIG_CHUNKS],
+            "fins": t.elig[proto::node::ELIG_FINS],
+            "sends": t.elig[proto::node::ELIG_SENDS],
+            "datagrams": t.elig[proto::node::ELIG_DATAGRAMS],
+        },
+    });
+    if t.parts_n > 0 {
+        v["partitions"] = json!(parts);
+        v["partitions_drawn"] = json!(t.parts_n);
+        v["partitions_acted"] = json!(t.parts_acted);
+    }
+    v
+}
+
+/// The partition a run with nodes ended in, if one was in force (`in force at the end:
+/// partition N SHAPE {A} | {B} since t=Tms`), else the last one the run had (`last partition:
+/// ... t=T1..T2ms`).
+pub fn partition_line(nodes: &Value) -> Option<String> {
+    let p = nodes["partitions"].as_array()?.last()?;
+    let side = |k: &str| {
+        let v: Vec<&str> = p[k]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str())
+            .collect();
+        format!("{{{}}}", v.join(","))
+    };
+    let arrow = if p["shape"] == "oneway" { "->" } else { "|" };
+    let what = format!(
+        "partition {} {} {} {arrow} {}",
+        p["n"],
+        p["shape"].as_str().unwrap_or(""),
+        side("a"),
+        side("b"),
+    );
+    Some(if p["to_ms"].is_null() {
+        format!("in force at the end: {what} since t={}ms", p["from_ms"])
+    } else {
+        format!(
+            "last partition: {what} at t={}..{}ms",
+            p["from_ms"], p["to_ms"]
+        )
     })
 }
 
@@ -260,7 +333,7 @@ pub const NET_NAMES: [&str; NET_FIELDS] = [
     "bytes",
     "chunks",
     "resets",
-    "partitioned",
+    "blacked_out",
     "refused",
     "timeouts",
     "unknown_opts",
@@ -281,7 +354,7 @@ pub fn net_read(c: &proto::wire::NetCounters) -> [u64; NET_FIELDS] {
         c.bytes.load(Relaxed),
         c.chunks.load(Relaxed),
         c.resets.load(Relaxed),
-        c.partitioned.load(Relaxed),
+        c.blacked_out.load(Relaxed),
         c.refused.load(Relaxed),
         c.timeouts.load(Relaxed),
         c.unknown_opts.load(Relaxed),
@@ -717,6 +790,9 @@ pub fn print_human(r: &Value, dir: &Path) {
         println!("{l}");
     }
     let ok = r["outcome"] == "ok";
+    if let Some(p) = partition_line(&r["nodes"]).filter(|_| !ok) {
+        println!("{p}");
+    }
     if !ok {
         let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
         let path = dir.join(format!("inc-{inc}")).join("stderr");
@@ -910,8 +986,12 @@ pub fn nodes_line(n: &Value) -> Option<String> {
         .collect();
     let net = &n["net"];
     let cut = net["cut_at_end"].as_array().map_or(0, |a| a.len());
+    let parts = match n["partitions_drawn"].as_u64() {
+        Some(p) => format!("; {p} partitions drawn"),
+        None => String::new(),
+    };
     Some(format!(
-        "nodes: {}; net: {} cuts, {} heals, {} held, {}",
+        "nodes: {}; net: {} cuts, {} heals, {} held, {}{parts}",
         nodes.join(", "),
         net["cuts"],
         net["heals"],

@@ -15,27 +15,27 @@
 
 use super::inet::{put_addr, refuse, sock, sup};
 
-/// `inet::parse_addr` for a datagram socket. Datagrams do not cross nodes (yet): a node's own
-/// address is the supervisor's `ADDR_HOST4` in the node's port space, another node's address
-/// is unreachable (refused, recorded).
+/// `inet::parse_addr` for a datagram socket. A node's own address is the supervisor's
+/// `ADDR_HOST4`, in the node's port space; another node `j`'s is `ADDR_NODE + j` (the driver's
+/// included: `ADDR_NODE`), which the supervisor routes to node `j`'s `ADDR_HOST4`. Without
+/// nodes there is no other node, and nothing changes.
 fn parse_addr(family: u16, addr: u64, len: u64, connect: bool) -> Result<(u16, u8), i64> {
     let (port, kind) = super::inet::parse_addr(family, addr, len, connect)?;
     match addr_node(kind) {
-        Some(n) if n == crate::state::proc().node => Ok((port, ADDR_HOST4)),
-        Some(_) => {
-            refuse(b"udp:other-node");
-            Err(-ENETUNREACH)
-        }
+        Some(n) if n == crate::state::node() => Ok((port, ADDR_HOST4)),
+        Some(n) => Ok((port, ADDR_NODE + n as u8)),
         None => Ok((port, kind)),
     }
 }
 
 /// The address kind a datagram socket's guest sees for the supervisor's `kind`.
 fn shown(kind: u8) -> u8 {
-    if kind == ADDR_HOST4 {
-        node_addr(crate::state::proc().node)
-    } else {
-        kind
+    match kind {
+        ADDR_HOST4 => node_addr(crate::state::node()),
+        k if k >= ADDR_NODE && k < ADDR_NODE + proto::node::MAX_NODES as u8 => {
+            node_addr((k - ADDR_NODE) as usize)
+        }
+        k => k,
     }
 }
 use super::io::{self, Deadline, Waiter};
@@ -229,7 +229,7 @@ fn dest(i: usize, addr: u64, len: u64) -> Result<(u16, u8), i64> {
     if s.family == AF_INET && kind == ADDR_LOOP6 {
         return Err(-EAFNOSUPPORT);
     }
-    if s.flags & WF_V6ONLY != 0 && matches!(kind, ADDR_LOOP4 | ADDR_HOST4) {
+    if s.flags & WF_V6ONLY != 0 && (matches!(kind, ADDR_LOOP4 | ADDR_HOST4) || kind >= ADDR_NODE) {
         return Err(-ENETUNREACH);
     }
     Ok((port, kind))

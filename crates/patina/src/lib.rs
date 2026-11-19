@@ -65,6 +65,14 @@ pub mod compute;
 
 pub use sys::{is_simulated, mark as mark_label};
 
+/// A control call in a run with several machines, e.g. `control("net cut a b")`: `Err` holds
+/// the errno Patina answered (`EPERM` outside the driver's node, `ENOENT` for an unknown node,
+/// `EINVAL` for other words, `EOPNOTSUPP` for a later feature), or `ENOSYS` outside Patina.
+/// The words are those of `patina ctl` (`sdk/c/patina.h` in the Patina repository).
+pub fn control(words: &str) -> Result<(), i32> {
+    sys::control(words)
+}
+
 /// Mark the end of setup: with `faults-after-setup`, no fault fires before this call.
 pub fn setup_complete() {
     sys::mark("setup-complete");

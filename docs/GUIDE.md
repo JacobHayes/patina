@@ -545,11 +545,12 @@ long-lived (keep-alive) connection meets one; a refusal or timeout is drawn once
 Each datagram gets its own delivery time in the `net-delay-ms` range, so datagrams already
 arrive out of order within that jitter; `net-drop-permille`, `net-dup-permille` and
 `net-reorder-permille` (held back past later datagrams) are drawn per datagram, and a
-datagram due inside a `net-partition` window is lost. `net-partition=START+LENGTH[:PORT]`
+datagram due inside a `net-blackout` window is lost. `net-blackout=START+LENGTH[:PORT]`
 holds TCP deliveries and loses datagrams for LENGTH ms from START ms of virtual time (only
 those from or to PORT, if given); START and LENGTH are each a number or a range drawn per
-seed (`--fault net-partition=0..60000+1000..10000` puts a window of 1 to 10 s somewhere in
-the first minute). A receive queue past the socket's
+seed (`--fault net-blackout=0..60000+1000..10000` puts a window of 1 to 10 s somewhere in
+the first minute). Before 0.16 it was `net-partition`, a name that is refused now: a partition
+is a cut between nodes ("Several machines"). A receive queue past the socket's
 `SO_RCVBUF` drops datagrams with no fault, as Linux does. A request/response protocol with
 no retry, run with `--fault net-drop-permille=50`:
 
@@ -1212,7 +1213,10 @@ applies, the read-back finds a stale value in most seeds (`tests/nodes/02-kv.sh`
 
 A node's keys: `cmd` (required), `env` (a table, added to the run's), and `work = "DIR[:GUEST]"`
 (the host directory its work tree starts from, and the tree's guest path; default `/work`,
-empty). Nodes start in the order the file lists them, one after another, before the driver
+empty). For a quick case, `--node NAME='CMD ARGS'` on the command line adds a node with just
+a command (split into words as a `--check` line is: quotes, no expansion), after the file's:
+`patina run --node db='redis-server --bind 0.0.0.0' -- ./test.sh`. A node whose command cannot
+run ends the run at once (`exec`, naming the node). Nodes start in the order the file lists them, one after another, before the driver
 runs; up to 15. Their names are letters, digits and `-`, starting with a letter; `driver` is
 the driver's, and `rest`, `localhost` and `sim` are taken.
 
@@ -1221,9 +1225,11 @@ work tree filled from `work`), its hostname (its name; the driver's is `driver`)
 shared memory, a TCP and UDP port space, a loopback, and the address `10.0.0.(k+1)`: the driver
 is `10.0.0.1`, the first node `10.0.0.2`. `/etc/hosts` names every node, so `primary` resolves
 on all of them. The rest of the sandbox (`/usr`, `/guest`, the mounts) is shared and read-only
-on the nodes (what the driver writes there, nodes see); the driver's work tree is not visible
-to them. A node's process sees only its own
-node's processes: another node's are `ESRCH` to `kill` and absent from `/proc`. Each node's
+on the nodes: what the driver writes there, nodes see, a deliberate channel from the driver to
+the nodes and the only one besides the network. The driver's work tree is not visible to
+them. A node's process sees only its own
+node's processes: another node's are `ESRCH` to `kill`, `getsid`, `getpgid` and the other calls that take a
+pid, and absent from `/proc`. Each node's
 first process starts with the driver's process state (umask, limits, signals) and the
 environment `PATINA_NODE=NAME` and `HOME` (its work tree). Its output is in
 `RUNDIR/node/NAME/inc-0/`, beside the driver's `inc-0/`.
@@ -1231,14 +1237,18 @@ environment `PATINA_NODE=NAME` and `HOME` (its work tree). Its output is in
 **Addresses.** A listener on `0.0.0.0` or the node's own address is reachable from every node
 at that address; one on `127.0.0.1` only from its own node. Connections show the nodes'
 addresses at both ends (`getsockname`, `getpeername`, `accept`). Binding another node's address
-answers `EADDRNOTAVAIL`. UDP stays inside a node: a datagram to another node's address is
-refused (`udp:other-node` in `refused`, `ENETUNREACH`). Abstract `AF_UNIX` names (and autobind)
-are refused in a run with nodes (`unix:abstract-with-nodes`), since they would cross nodes;
+answers `EADDRNOTAVAIL`. UDP works between nodes as on one machine (unicast; a datagram
+shows its sender's node address); broadcast and multicast are refused as without nodes.
+Abstract `AF_UNIX` names are each node's own: two nodes may bind the same name, and a node
+connects only to its own (the kernel holds each under a prefix that names the node, which
+names read back never show; an abstract name is 11 bytes shorter at most). An autobind, and
+the one the kernel makes for an unbound socket with `SO_PASSCRED`, is a name of its node too.
 `AF_UNIX` sockets at paths work, each in its node's own files.
 
 **Control from the driver.** The driver acts on the network with control calls: `patina ctl
 WORDS` in a script (`patina` is at `/opt/patina/bin/patina`, on the `PATH` of a run with
-nodes), `patina.control("WORDS")` in Python, `patina_control("WORDS")` in C (`patina.h`).
+nodes), `patina.control("WORDS")` in Python, `patina_control("WORDS")` in C (`patina.h`),
+`patina_dst::control("WORDS")` in Rust and `patina.Control("WORDS")` in Go.
 Each is a call the log records (`mark` and `net` events below).
 
 | Words | |
@@ -1253,15 +1263,17 @@ A set is node names joined by commas (`driver` included), or `rest`: every node 
 does not name. Only the driver's processes may use `net`; a node's get `EPERM` (`patina ctl`
 says why and exits 2). An unknown name is `ENOENT`, other words `EINVAL`.
 
-**What a cut does.** A node's traffic to itself is never cut. Across a cut link nothing is
+**What a cut does.** A node's traffic to itself is never cut. Across a cut link no TCP data is
 lost and nothing fails at once, as with a cable pulled out for a while: bytes and the closing
 of a connection that a cut direction carries are held; the receiver's reads wait, and the
-sender's writes go on until its buffer fills. A heal delivers what was held in order, each
-item after the link's delay from the heal. A direction still cut after 924.6 s of virtual time
-(the kernel's default retransmission limit) gives up: the sender's next call fails with
-`ETIMEDOUT` and the connection is reset. A connect across a cut (in either direction) retries
-at 1, 3, 7, 15, 31 and 63 s and fails with `ETIMEDOUT` at 127 s (the kernel's default SYN
-retries); healed in between, it completes at the next retry, refused then if nothing listens.
+sender's writes go on until its buffer fills. A heal delivers what was held in order, each item after the link's
+delay from the heal. A direction still cut after 924.6 s of virtual time (the kernel's default
+retransmission limit; `net-give-up-ms`, or the sender's `TCP_USER_TIMEOUT`) gives up: the
+sender's next call fails with `ETIMEDOUT` and the connection is reset. A connect across a cut
+(in either direction) retries at 1, 3, 7, 15, 31 and 63 s and fails with `ETIMEDOUT` at 127 s
+(the kernel's default 6 SYN retries; `net-syn-retries`, or the socket's `TCP_SYNCNT`); healed in
+between, it completes at the next retry, refused then if nothing listens. A datagram sent while
+its link is cut is lost.
 `result.json`'s `nodes.net` counts the cuts, heals and held directions and lists the links still
 cut at the end.
 
@@ -1279,9 +1291,9 @@ $ patina log events patina-out/run-0 --types node,net
 {"type":"header","v":1,"seed":0,"work":"/work","incarnations":1,"nodes":["driver","primary","backup"]}
 {"type":"node","inc":0,"seq":4,"t":100000000000,"slot":1,"event":"start","name":"primary","pid":4}
 {"type":"node","inc":0,"seq":7,"t":100000000000,"slot":2,"event":"start","name":"backup","pid":6}
-{"type":"net","inc":0,"seq":3310,"t":100052995313,"slot":0,"event":"cut","from":["primary"],"to":["backup"],"both":true,"ret":0}
+{"type":"net","inc":0,"seq":3310,"t":100052995313,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
 {"type":"net","inc":0,"seq":3512,"t":105053179766,"slot":0,"event":"release","conn":2,"dir":0,"until":105053210647}
-{"type":"net","inc":0,"seq":3513,"t":105053179766,"slot":0,"event":"heal","from":[],"to":[],"both":true,"ret":0}
+{"type":"net","inc":0,"seq":3513,"t":105053179766,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
 {"type":"node","inc":0,"seq":3768,"t":105053455623,"slot":0,"event":"stop","name":"primary","live":1}
 {"type":"node","inc":0,"seq":3769,"t":105053455623,"slot":0,"event":"stop","name":"backup","live":1}
 ```
@@ -1289,14 +1301,82 @@ $ patina log events patina-out/run-0 --types node,net
 Seeds, `verify` and `replay` work as for one machine: the nodes share the run's one scheduler,
 clock and log, so a seed is one interleaving of every node's threads, and another seed another.
 
-**Not available yet** (refused, naming what is missing): seed-drawn network faults and
-partitions with nodes (`--fault` and `--faults` take only the `compute-` settings), node
-crashes and restarts (`--crash`; a node's `restart`, `count`, `ok-exit`, `max-incarnations`,
-`faults`), per-node disk faults, UDP between nodes, a node's own clock (`clock ...`) and
-control of a node's processes (`node ...`, `EOPNOTSUPP`), `--node` on the command line, `patina
-__native` twins and `--check` reference runs of a run with nodes, and per-node abstract socket
-names. A node's work tree is not crash-modelled and has no operation log (`op` events are the
-driver's).
+### Faults between nodes
+
+The network's faults act between nodes, drawn by the seed as on one machine. The link faults
+(`net-delay-ms`, `net-reset-permille`, `net-connect-refuse-permille`, `net-chunk-max`,
+`net-drop-permille` and the rest, `net-blackout` included) act on a link, a direction between
+two nodes, as `net-links` says: `nodes` (the default) the links between nodes other than the
+driver, `driver` also the driver's, `all` also each node's traffic to itself. A link they do not
+act on carries the default delay and nothing else, so by default the driver is a client and
+health checker the network never fails. Each draw is keyed by its connection or datagram, so a
+direction of a pair of nodes gets its own.
+
+**Partitions** are the seed's cuts. `partition-gap-ms=A..B` turns them on: after a gap drawn
+from `A..B` the seed draws a shape and two sides of the nodes the link faults act on, cuts the
+links between them for `partition-ms` (a range, default `1000..30000`), heals them, and draws
+the next gap. A cut is a script's cut: held, not lost, but for datagrams. The shapes
+(`partition-shape`, any of them joined by commas; default all):
+
+| Shape | Cuts |
+|---|---|
+| `split` | both directions between two sides, each of one node or more |
+| `isolate` | both directions between one node and all the others |
+| `oneway` | only what one side sends to the other |
+| `bridge` | both directions between two sides, but for one node that still reaches both (three nodes or more) |
+
+`--faults net` (and `all`) adds `partition-gap-ms=5000..60000` and `partition-ms=500..20000` in
+a run with at least two nodes the link faults act on; a run without nodes gets what it got
+before. A partition key in a run without two such nodes is refused. A partition that a sweep's
+preset turned on and that never held, lost or kept back any traffic is `not applicable` in the
+report, as other classes with nothing to act on are.
+
+Every cut and heal is in the logs: `result.json`'s `nodes.partitions` (each partition's ordinal,
+shape, sides, `from_ms` and `to_ms` in the virtual time events use, `null` while in force at
+the end, and whether it `acted` on traffic), a `net` event with `by` `seed` (or `script` for a
+control call), and a `partition` fault in `faults.counts`. A failing run's summary says which
+partition was in force at the end, or the last one. `patina report` counts them over a sweep:
+
+<!-- transcript nodes-partitions
+exact-only: which of the seeds find the bug, and how often partitions act, are the seeds' runs
+dir: /tmp/q3
+setup: mkdir g && cp "$GUESTS/q3.py" "$GUESTS/patina.py" g/
+setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "nolease"]\n\n' $n $n; done >patina.toml
+exit: 1
+-->
+```text
+$ patina sweep --seeds 1..8 -j 4 --mount g:/guest --faults net --fault partition-gap-ms=1000..8000 --fault partition-ms=1000..8000 -- python3 /guest/q3.py driver 90
+...
+patina sweep: 8 runs, 7 findings in 1 group, 1 ok   (8.9s, 4 jobs)
+outcomes: failure 7, ok 1
+nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 80 held over them
+partitions: 47 drawn (10 bridge, 13 isolate, 9 oneway, 15 split), 45 acted on traffic
+
+failure exit: exit 1
+  7 of 8 runs   first: seed 1   replayed: identical
+  faults in every failing run: net-delay, net-reset, partition      in none: net-drop, net-dup, net-reorder
+  rerun:  patina run --seed 1 --config /tmp/q3/patina-out/sweep/seed-1/run.json -- python3 /guest/q3.py driver 90
+  replay: patina replay /tmp/q3/patina-out/sweep/seed-1
+
+faults: not applicable (a preset's, nothing to act on in any run): net-drop, net-dup, net-reorder
+```
+
+`q3.py` (in `tests/guests/nodes`) is a store on three nodes: a primary that answers a write
+once one of two backups has it, reads under a lease, and a view change that moves the primary
+when the backups stop hearing from it and fences the old one. With `nolease` the primary
+answers reads without its lease, and after a partition that cuts it off, a read from it returns
+a value the new primary has replaced. Its other planted bugs (`early`, `nofence`) are found the
+same way (`tests/nodes/04-quorum-bugs.sh`); without a bug the same sweep is clean.
+
+`patina minimize` treats `partition-gap-ms` as a rate: it tries dropping it, then doubles the
+gap while the run still fails the same way.
+
+**Not available yet** (refused, naming what is missing): node crashes and restarts (`--crash`;
+a node's `restart`, `count`, `ok-exit`, `max-incarnations`, `faults`), per-node disk and memory
+faults, a node's own clock (`clock ...`) and control of a node's processes (`node ...`,
+`EOPNOTSUPP`), `--branch` (it forces crash points), `patina __native` twins and `--check`
+reference runs of a run with nodes. A node's work tree is not crash-modelled and has no
+operation log (`op` events are the driver's).
 
 ## The SDK
 

@@ -36,59 +36,100 @@ pub fn handle(call: &mut dyn Call) -> Action {
                     Err(e) => return Action::Return(e),
                 }
             }
-            if let Some(a) = abstract_with_nodes(call, name) {
-                return a;
+            if crate::state::with_nodes() {
+                return node_names(call);
             }
         }
     }
     super::unixsock::handle(call)
 }
 
-/// In a run with nodes, abstract `AF_UNIX` names (and autobind, which makes one) are refused:
-/// they live in the kernel's one network namespace, which every node shares, so one node could
-/// reach another's. Path names are in each node's own view. Per-node abstract names come later.
-fn abstract_with_nodes(call: &mut dyn Call, name: Option<(u64, u64)>) -> Option<Action> {
-    let tab = unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) };
-    if tab.count() == 0 {
-        return None;
+/// An `AF_UNIX` call in a run with nodes: its abstract names under the node's prefix
+/// (`unixname`).
+fn node_names(call: &mut dyn Call) -> Action {
+    use super::unixname::{name_in, passcred_autobind, Msgs, Name, Out, MMSG_MAX};
+    let fd = call.arg(0);
+    if !super::unixsock::is_socket(fd) {
+        return super::unixsock::handle(call);
     }
-    // `sendmmsg`: every message's name (at most `UIO_MAXIOV` of them are sent).
-    let (first, count, stride) = match call.nr() {
-        nr::SENDMSG => (call.arg(1), 1, 0),
-        nr::SENDMMSG => (call.arg(1), call.arg(2).min(1024), 64),
-        _ => (0, 1, 0),
+    let fail = |e: i64| Action::Return(e);
+    let mut name = Name::new();
+    let mut out = Out::new();
+    let mut msgs = Msgs::new();
+    let mut copied = false;
+    let mut gives = false;
+    let nr = call.nr();
+    if matches!(nr, nr::CONNECT | nr::SENDTO | nr::SENDMSG | nr::SENDMMSG) {
+        passcred_autobind(fd, nr != nr::CONNECT);
+    }
+    match nr {
+        nr::BIND | nr::CONNECT => match name_in(call.arg(1), call.arg(2), &mut name) {
+            Ok(true) => {
+                call.set_arg(1, name.sa.as_ptr() as u64);
+                call.set_arg(2, name.len as u64);
+            }
+            Ok(false) => {}
+            Err(e) => return fail(e),
+        },
+        nr::SENDTO => match name_in(call.arg(4), call.arg(5), &mut name) {
+            Ok(true) => {
+                call.set_arg(4, name.sa.as_ptr() as u64);
+                call.set_arg(5, name.len as u64);
+            }
+            Ok(false) => {}
+            Err(e) => return fail(e),
+        },
+        nr::ACCEPT | nr::ACCEPT4 | nr::GETSOCKNAME | nr::GETPEERNAME => {
+            match Out::take(call, 1, &mut out) {
+                Ok(g) => gives = g,
+                Err(e) => return fail(e),
+            }
+        }
+        nr::RECVFROM => match Out::take(call, 4, &mut out) {
+            Ok(g) => gives = g,
+            Err(e) => return fail(e),
+        },
+        nr::SENDMSG | nr::RECVMSG | nr::SENDMMSG | nr::RECVMMSG => {
+            let one = matches!(nr, nr::SENDMSG | nr::RECVMSG);
+            let recv = matches!(nr, nr::RECVMSG | nr::RECVMMSG);
+            let n = if one {
+                1
+            } else {
+                let n = (call.arg(2) as usize).min(MMSG_MAX);
+                call.set_arg(2, n as u64);
+                n
+            };
+            match msgs.take(call.arg(1), n, if one { 56 } else { 64 }, recv) {
+                Ok(true) => {
+                    call.set_arg(1, msgs.ptr());
+                    copied = true;
+                }
+                Ok(false) => {}
+                Err(e) => return fail(e),
+            }
+        }
+        _ => {}
+    }
+    let a = super::unixsock::handle(call);
+    let ok = match a {
+        Action::Return(r) => r >= 0,
+        _ => false,
     };
-    let autobind = call.nr() == nr::BIND;
-    for i in 0..count {
-        let n = match call.nr() {
-            nr::SENDMSG | nr::SENDMMSG => msg_name(first + i * stride),
-            _ => name,
+    // Messages the call handled: `sendmsg` and `recvmsg` one, the `mmsg` calls their count.
+    if copied {
+        let count = match (nr, &a) {
+            (nr::SENDMSG | nr::RECVMSG, Action::Return(r)) if *r >= 0 => 1,
+            (nr::SENDMMSG | nr::RECVMMSG, Action::Return(r)) if *r > 0 => *r as usize,
+            _ => 0,
         };
-        let Some((addr, len)) = n else { continue };
-        if addr == 0 || len < 2 {
-            continue;
-        }
-        let mut sa = [0u8; 3];
-        let n = (len as usize).min(3);
-        if let Err(e) = crate::guest::read(addr, &mut sa[..n]) {
-            return Some(Action::Return(e));
-        }
-        if u16::from_ne_bytes([sa[0], sa[1]]) != 1 {
-            continue;
-        }
-        if (len == 2 && autobind) || (len >= 3 && sa[2] == 0) {
-            super::inet::refuse(b"unix:abstract-with-nodes");
-            return Some(Action::Return(-EOPNOTSUPP));
+        if let Err(e) = msgs.done(count) {
+            return fail(e);
         }
     }
-    None
-}
-
-/// The name of a `msghdr` (of the first message of a `sendmmsg`): its address and length.
-fn msg_name(msg: u64) -> Option<(u64, u64)> {
-    let mut h = [0u8; 12];
-    crate::guest::read(msg, &mut h).ok()?;
-    let addr = u64::from_ne_bytes(h[..8].try_into().unwrap());
-    let len = u32::from_ne_bytes(h[8..12].try_into().unwrap()) as u64;
-    Some((addr, len))
+    if gives && ok {
+        if let Err(e) = out.give() {
+            return fail(e);
+        }
+    }
+    a
 }

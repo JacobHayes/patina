@@ -74,6 +74,7 @@ pub mod crash;
 pub mod futex;
 pub mod inherit;
 pub mod io;
+mod link;
 mod maps;
 mod nodes;
 pub mod proc;
@@ -113,13 +114,16 @@ struct Sup {
     udp: udp::Udp,
     /// System V shared memory.
     shm: shm::Shm,
-    /// Nodes: their boot and the scripted cuts (a run with nodes).
+    /// Nodes: their boot and end (a run with nodes).
     nodes: nodes::Nodes,
+    /// Links between nodes: the cuts of a script and of the seed.
+    links: link::Links,
     /// The program's path in the sandbox (the first image).
     exe: String,
-    /// An `execve` has replaced an image: a runtime that cannot run its image now was handed
-    /// one an `execve` resolved, not the program.
-    execed: bool,
+    /// Processes in which an `execve` has replaced an image (pids are unique in a run): a
+    /// runtime there that cannot run its image was handed one an `execve` resolved, not the
+    /// program (or a node's command).
+    execed: std::collections::BTreeSet<i32>,
     /// The shared mappings of the processes still alive were logged for the end of the run
     /// (`end_maps`): a crash point did it before its `Crash` record.
     maps_ended: std::cell::Cell<bool>,
@@ -372,6 +376,10 @@ impl Sup {
                 self.finish(Verdict::new("infra", d));
             }
             let old = self.now();
+            // Nothing pending but a partition or a kill to come: deadlock, now.
+            if self.sched.only_weak() {
+                self.deadlock();
+            }
             // A jump past the liveness limit is reported before it wakes anyone, so
             // the detail shows what every thread was parked on (a sleep loop, a futex).
             if self
@@ -403,6 +411,10 @@ impl Sup {
         let now = self.now();
         for (key, count) in self.io.deliver_timers(&mut self.sched, self.ctl, now) {
             self.decide(DEC_TIMERFD, 0, [key, count, 0, 0, 0, 0], 0);
+        }
+        // Node events first: a heal re-stamps what the wire then delivers.
+        for key in std::mem::take(&mut self.sched.fired_node) {
+            self.node_event(key);
         }
         self.wire_step();
         self.io.sync(&mut self.sched, self.ctl);
@@ -612,8 +624,8 @@ impl Sup {
             Some(Op::Hello) => self.hello(idx, a),
             Some(Op::VforkStart) => self.vfork_start(idx, a),
             Some(Op::Exec) => {
-                self.execed = true;
                 let pid = self.sched.entries[idx].pid;
+                self.execed.insert(pid);
                 if let Err(e) = self.io.timers_exec(&mut self.sched, pid) {
                     self.finish(Verdict::new(
                         "infra",
@@ -754,7 +766,7 @@ impl Sup {
                 }
                 if code == HE_EXEC {
                     let why = proto::exec::Why::from_code(nr);
-                    if self.execed {
+                    if self.execed.contains(&self.sched.entries[idx].pid) {
                         // The image an `execve` resolved (and the guest left) does not resolve
                         // again in the new runtime: Patina's failure, not the program's.
                         self.finish(Verdict::new(
@@ -768,7 +780,14 @@ impl Sup {
                             ),
                         ));
                     }
-                    let d = exec_failure(&self.exe, errno, why, a[3] as usize);
+                    // A node's first image: its command (the launcher checked it on the host).
+                    let node = self.node_of(idx);
+                    let d = if node > 0 {
+                        let what = format!("node {}'s command", self.node_name(node));
+                        exec_failure(&what, errno, why, 0)
+                    } else {
+                        exec_failure(&self.exe, errno, why, a[3] as usize)
+                    };
                     // What the kernel would run and Patina does not load is not the request's
                     // fault.
                     let class = match why {
@@ -902,6 +921,7 @@ impl Sup {
                 Next::Continue(0)
             }
             Some(Op::Net) => self.net_op(idx, a),
+            Some(Op::PidNode) => self.pid_node(a),
             Some(Op::CrashPoint) => {
                 // Every process ends here: what their shared mappings hold, then the end.
                 let pid = self.sched.entries[idx].pid as u32;
@@ -1141,8 +1161,9 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         udp: udp::Udp::default(),
         shm: shm::Shm::default(),
         nodes: nodes::Nodes::default(),
+        links: link::Links::default(),
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
-        execed: false,
+        execed: Default::default(),
         maps_ended: std::cell::Cell::new(false),
     };
     // The rest of the process state guests inherit from the supervisor.
@@ -1362,6 +1383,7 @@ fn exec_failure(exe: &str, errno: u64, why: proto::exec::Why, depth: usize) -> S
         reason
     };
     match chain.as_slice() {
+        [] if exe.starts_with("node ") => format!("cannot run {exe}: {reason} ({errno})"),
         [] => format!("cannot run the program {exe}: {reason} ({errno})"),
         c => format!(
             "cannot run the program {exe}: its #! interpreter {}: {reason} ({errno})",

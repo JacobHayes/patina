@@ -25,8 +25,6 @@ pub struct Nodes {
     pub booting: Option<usize>,
     /// Each node's first process (0: none yet).
     first: [i32; MAX_NODES],
-    /// Scripted cuts: bit `to` of `cut[from]`.
-    cut: [u64; MAX_NODES],
     /// System V shared memory of the nodes besides the driver's (`Sup::shm`): each node is
     /// its own IPC namespace.
     pub shm: std::collections::BTreeMap<usize, super::shm::Shm>,
@@ -107,6 +105,7 @@ impl Sup {
             }
             self.boot_hello(slot, node);
         }
+        self.partitions_begin();
         // The driver's `Hello` was answered with its reply kept: it runs first.
         self.reply(0, 0);
     }
@@ -185,12 +184,12 @@ impl Sup {
                 return;
             }
             let bit = 1u64 << b;
-            let was = self.nodes.cut[a] & bit != 0;
+            let was = self.link_cut(a, b);
             if verb == NET_CUT {
-                self.nodes.cut[a] |= bit;
+                self.links.script[a] |= bit;
             } else {
-                self.nodes.cut[a] &= !bit;
-                if was {
+                self.links.script[a] &= !bit;
+                if was && !self.link_cut(a, b) {
                     opened.push((a, b));
                 }
             }
@@ -205,17 +204,23 @@ impl Sup {
                 }
             }
         }
-        self.node_tab().cut_at_end = self.nodes.cut;
+        self.node_tab().cut_at_end = self.links.script;
         if !opened.is_empty() {
             self.wire_heal(&opened);
         }
         Next::Continue(0)
     }
 
-    /// Is the link from node `from` to node `to` cut (a node's own traffic never is)?
-    pub(super) fn link_cut(&self, from: usize, to: usize) -> bool {
-        from != to && from < MAX_NODES && self.nodes.cut[from] & (1 << to) != 0
+    /// `Op::PidNode` [pid]: the node of a process of the run (zombies included), or `ESRCH`.
+    pub(super) fn pid_node(&self, a: [u64; 6]) -> Next {
+        match self.procs.map.get(&(a[0] as i32)) {
+            Some(p) => Next::Continue(p.node as i64),
+            None => Next::Continue(-(libc::ESRCH as i64)),
+        }
     }
+
+    /// More kinds of node events (node kills and restarts).
+    pub(super) fn node_event_more(&mut self, _kind: u64, _node: usize) {}
 
     /// A process ended: if it was a node's first, its status is the node's.
     pub(super) fn node_gone(&mut self, pid: i32, word: i64) {

@@ -244,10 +244,18 @@ fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<S
             named.insert("crash".to_string());
         }
         for p in strs(&c["faults-preset"]).iter().flat_map(|p| p.split(',')) {
+            // A run with nodes also has the preset's node classes (partitions), whether or not
+            // it had the nodes to draw them over: one without has nothing for them to act on.
+            let with_nodes = c["nodes"].as_array().is_some_and(|n| !n.is_empty());
+            let node_kv = crate::faults::NODE_PRESETS
+                .iter()
+                .filter(|x| x.0 == p && with_nodes)
+                .flat_map(|x| x.1.iter());
             if let Some((_, kv)) = crate::faults::PRESETS.iter().find(|x| x.0 == p) {
                 let e = by_preset.entry(p.to_string()).or_default();
                 e.extend(
                     kv.iter()
+                        .chain(node_kv)
                         .filter_map(|(k, _)| class_of_key(k))
                         .map(str::to_string),
                 );
@@ -1244,6 +1252,18 @@ pub fn build(
                 .map(|n| n["net"][k].as_u64().unwrap_or(0))
                 .sum()
         };
+        // The seed's partitions: drawn, those that acted on traffic, and the shapes drawn.
+        let mut shapes = serde_json::Map::new();
+        let (mut drawn, mut acted) = (0u64, 0u64);
+        for n in &with_nodes {
+            drawn += n["partitions_drawn"].as_u64().unwrap_or(0);
+            acted += n["partitions_acted"].as_u64().unwrap_or(0);
+            for p in n["partitions"].as_array().into_iter().flatten() {
+                let k = p["shape"].as_str().unwrap_or("?").to_string();
+                let c = shapes.get(&k).and_then(|c| c.as_u64()).unwrap_or(0);
+                shapes.insert(k, json!(c + 1));
+            }
+        }
         v["nodes"] = json!({
             "runs": with_nodes.len(),
             "names": names,
@@ -1251,6 +1271,9 @@ pub fn build(
             "heals": sum("heals"),
             "held": sum("held"),
         });
+        if drawn > 0 {
+            v["nodes"]["partitions"] = json!({"drawn": drawn, "acted": acted, "shapes": shapes});
+        }
     }
     if with_points > 0 {
         v["compute"] = json!({
@@ -1576,6 +1599,21 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             w["heals"],
             w["held"]
         ));
+        let p = &w["partitions"];
+        if p.is_object() {
+            let shapes: Vec<String> = p["shapes"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, n)| format!("{n} {k}"))
+                .collect();
+            s.push_str(&format!(
+                "partitions: {} drawn ({}), {} acted on traffic\n",
+                p["drawn"],
+                shapes.join(", "),
+                p["acted"]
+            ));
+        }
     }
     let groups = v["groups"].as_array().unwrap();
     let faulted = !v["faults"]["configured"].as_array().unwrap().is_empty();

@@ -85,6 +85,11 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut vclock0 = 0;
     let mut crashes = vec![];
     let mut faults = Faults::default();
+    if !o.cfg.nodes.is_empty() {
+        faults.nodes = std::iter::once("driver".to_string())
+            .chain(o.cfg.nodes.iter().map(|n| n.name.clone()))
+            .collect();
+    }
     let mut digests = vec![];
     let (mut traps, mut switches) = (0, 0);
     let mut io = [0u64; 5];

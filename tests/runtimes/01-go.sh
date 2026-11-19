@@ -11,7 +11,7 @@
 #  f. go-spin: a goroutine computing without a trap for less than stall-ms is `ok`; a 20 s
 #     spin under stall-ms = 1000 ends as `unsupported` (compute-stall) (after 1 s, not 20).
 #  g. Network: D with network faults; net-reset-permille seen as "connection reset
-#     by peer", a 10 s net-partition seen as the http.Client's 5 s timeout, net-chunk-max=1
+#     by peer", a 10 s net-blackout seen as the http.Client's 5 s timeout, net-chunk-max=1
 #     with all 16 responses correct.
 #@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
@@ -75,8 +75,8 @@ echo "== g. network"
 verify_seeds $G go-dn cpu,load,aslr,sandbox "1" $NETF -- /guest/go-static net || fail "W4 D (network faults on)"
 echo "-- net-reset-permille=50"
 netf $G go-reset 'connection reset by peer' "1 2 3" --fault net-reset-permille=50 -- /guest/go-static net || fail "W4: no reset seen"
-echo "-- net-partition=1+10000 (ms)"
-netf $G go-part 'Client.Timeout exceeded' "1" --fault net-partition=1+10000 -- /guest/go-static net || fail "W4: the client timeout did not fire during the partition"
+echo "-- net-blackout=1+10000 (ms)"
+netf $G go-part 'Client.Timeout exceeded' "1" --fault net-blackout=1+10000 -- /guest/go-static net || fail "W4: the client timeout did not fire during the partition"
 echo "-- net-chunk-max=1"
 netf $G go-chunk '^net: 16 of 16 responses correct' "1" --fault net-chunk-max=1 -- /guest/go-static net || fail "W4: responses not all correct under net-chunk-max=1"
 finish

@@ -95,7 +95,7 @@ netf() {
         run "$wl" "$o" "$s" "$@"
         c=$(field "$o/result.json" outcome)
         k=$(grep -c -- "$pat" "$o/inc-0/stdout") || [ $? = 1 ]
-        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,partitioned}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || [ $? = 1 ])"
+        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,blacked_out}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || [ $? = 1 ])"
         [ "$c" = ok ] && [ "$k" -gt 0 ] && seen=$((seen + 1))
     done
     [ "$seen" -gt 0 ]

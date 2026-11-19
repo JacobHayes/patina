@@ -40,10 +40,18 @@ impl Sched {
                 Event::SigTimer { pid } => self.due_timers.push((pid, id.0)),
                 Event::TimerFd { key } => self.fired_timers.push(key),
                 Event::Wire { key } => self.fired_wire.push(key),
+                Event::Node { key, .. } => self.fired_node.push(key),
             }
             n += 1;
         }
         n
+    }
+
+    /// Every pending event is weak (or none is pending): nothing will ever wake anyone.
+    pub fn only_weak(&self) -> bool {
+        self.events
+            .values()
+            .all(|e| matches!(e, Event::Node { weak: true, .. }))
     }
 
     /// Nothing runnable: move the clock to the earliest event and fire everything due
@@ -51,6 +59,9 @@ impl Sched {
     /// (deadlock) or something is runnable (no jump needed).
     pub fn idle_jump(&mut self, now: u64) -> Option<u64> {
         if !self.runnable.is_empty() {
+            return None;
+        }
+        if self.only_weak() {
             return None;
         }
         let at = self.next_deadline()?;
@@ -107,7 +118,9 @@ mod tests {
             .map(|e| match e {
                 Event::Timeout { slot } => *slot,
                 Event::SigTimer { .. } => usize::MAX,
-                Event::TimerFd { .. } | Event::Wire { .. } => unreachable!(),
+                Event::TimerFd { .. } | Event::Wire { .. } | Event::Node { .. } => {
+                    unreachable!()
+                }
             })
             .collect();
         assert_eq!(order, vec![2, 0, 1]);

@@ -18,9 +18,17 @@ use std::process::ExitCode;
 /// The most runs one minimisation makes.
 pub const MAX_RUNS: usize = 30;
 
-/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, `KIND:N` for a crash rate.
+/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, `KIND:N` for a crash rate, and
+/// the gap between partitions (`partition-gap-ms`) doubled, up to an hour.
 fn halve(v: &str) -> Option<String> {
     let h = |x: &str| x.parse::<u64>().ok().filter(|n| *n > 1).map(|n| n / 2);
+    if let Some(val) = v.strip_prefix("partition-gap-ms=") {
+        let d = |x: &str| x.parse::<u64>().ok().map(|n| n.max(1) * 2);
+        let (a, b) = val.split_once("..").unwrap_or((val, val));
+        let (a2, b2) = (d(a)?, d(b)?);
+        // Always a range: the key takes nothing else.
+        return (b2 <= 3_600_000).then(|| format!("partition-gap-ms={a2}..{b2}"));
+    }
     if let Some((k, val)) = v.split_once('=') {
         if !k.ends_with("-permille") {
             return None;
@@ -147,12 +155,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let mut cfg = cfg;
     let mut expanded: Vec<String> = vec![];
     for p in cfg.faults_preset.iter().flat_map(|p| p.split(',')) {
-        let (_, kv) = crate::faults::PRESETS
-            .iter()
-            .find(|x| x.0 == p)
-            .ok_or_else(|| error(format!("--faults: unknown preset {p}")))?;
-        for (k, v) in kv.iter() {
-            let given = |x: &String| x.split_once('=').is_some_and(|(xk, _)| xk == *k);
+        let kv = crate::faults::preset_settings(p, cfg.nodes.len(), &cfg.faults).map_err(error)?;
+        for (k, v) in kv {
+            let given = |x: &String| x.split_once('=').is_some_and(|(xk, _)| xk == k);
             if !cfg.faults.iter().any(given) && !expanded.iter().any(given) {
                 expanded.push(format!("{k}={v}"));
             }
@@ -297,5 +302,14 @@ mod tests {
         assert_eq!(halve("machine-at:300"), None);
         assert_eq!(halve("fs-error-at=write:3"), None);
         assert_eq!(halve("net-delay-ms=0..50"), None);
+        assert_eq!(
+            halve("partition-gap-ms=5000..60000").as_deref(),
+            Some("partition-gap-ms=10000..120000")
+        );
+        assert_eq!(halve("partition-gap-ms=3000000"), None);
+        assert_eq!(
+            halve("partition-gap-ms=4000..4000").as_deref(),
+            Some("partition-gap-ms=8000..8000")
+        );
     }
 }

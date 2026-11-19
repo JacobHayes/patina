@@ -1,11 +1,16 @@
 # 1. Nodes: isolation and scripted cuts. The driver and node b (tests/guests/nodes/iso.py) each
 # see their own work tree, /tmp, /dev/shm, System V shared memory and hostname; b's loopback
 # listener is not on its address; b's processes are ESRCH to the driver's kill and absent from
-# its /proc; b gets EPERM for a control call and cannot change its view; abstract AF_UNIX names
-# are refused; b's first process starts with the driver's process state; a cut stops a connect
-# and a heal lets it through. Identical under verify --vary cpu,load,aslr,sandbox,repeat.
+# its /proc, and getsid/getpgid do not find them; b gets EPERM for a control call and cannot
+# change its view; each node has its own abstract AF_UNIX names, and names read back carry no
+# prefix; UDP between nodes carries the nodes' addresses; b's first process starts with the
+# driver's process state; a cut stops a connect and loses a datagram, and a heal lets both
+# through; a socket's TCP_SYNCNT and TCP_USER_TIMEOUT set its own limits across a cut. The link faults leave the
+# driver's links alone unless net-links says otherwise. A node given with --node whose command
+# cannot run ends the run at once, naming the node. Identical under verify --vary cpu,load,aslr,sandbox,repeat.
 # What is not available yet is refused, naming the feature; without nodes `net` is EINVAL and
-# a control mark works. The C SDK's control call answers the driver and gives a node EPERM.
+# a control mark works. The C, Rust and Go SDKs' control calls answer the driver and give a
+# node EPERM.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-isolation; mkdir -p "$o"
@@ -17,8 +22,19 @@ r=$o/iso/run-0
 [ "$(field "$r/result.json" nodes.list.1.address)" = 10.0.0.2 ] || die "result.json: b's address"
 [ "$(field "$r/result.json" nodes.net.heals)" -ge 1 ] || die "result.json: no heal counted"
 [ -f "$r/node/b/inc-0/stdout" ] || die "no stdout for node b"
-grep -q '^unix:abstract-with-nodes$' <(field "$r/result.json" refused | tr -d '[]" ' | tr , '\n') ||
-    die "the abstract name is not among the refused"
+
+# The link faults act between nodes other than the driver (net-links=nodes): on the driver's
+# links nothing is drawn; with net-links=driver they act there too.
+run_ok "$o/links" 1 --config "$o/iso.toml" --fault net-reset-permille=1 -- python3 /guest/iso.py driver
+[ "$(field "$o/links/result.json" faults.counts.net-reset.eligible)" = 0 ] || die "net-reset drawn on the driver's links"
+run_ok "$o/links-driver" 1 --config "$o/iso.toml" --fault net-reset-permille=1 --fault net-links=driver -- python3 /guest/iso.py driver
+e=$(field "$o/links-driver/result.json" faults.counts.net-reset.eligible)
+[ "$e" -gt 0 ] || die "net-links=driver: net-reset not drawn on the driver's links"
+echo "link faults: none drawn on the driver's links by default, $e reads with net-links=driver"
+c=$(run "$o/noexec" 1 --node a=/etc/hostname -- /bin/true)
+stop=$(field "$o/noexec/result.json" stop); m=$(field "$o/noexec/result.json" message)
+[ "$c" = error ] && [ "$stop" = exec ] && grep -q 'node a' <<<"$m" || die "a node that cannot run: $c ($stop): $m"
+echo "--node a=/etc/hostname: $c ($stop): $m"
 
 # Not available yet: each refused before the run, naming what it asked for.
 refused() {
@@ -29,7 +45,7 @@ refused() {
     echo "refused: $what"
 }
 refused --crash --config "$o/iso.toml" --crash process
-refused net-drop-permille --config "$o/iso.toml" --fault net-drop-permille=10
+refused fs-error-permille --config "$o/iso.toml" --fault fs-error-permille=10
 printf '[node.c]\ncmd = ["/bin/true"]\nrestart = true\n' >"$o/restart.toml"
 refused restart --config "$o/restart.toml"
 for taken in driver rest localhost; do
@@ -64,3 +80,16 @@ node kill c: EOPNOTSUPP"
 [ "$n" = "net heal: EPERM
 mark from-a-node: ok" ] || die "C control from a node: $n"
 echo "C control: the driver's answered, a node's EPERM"
+
+# The Rust and Go SDKs' control calls: the same answers (errno 2 ENOENT, 1 EPERM).
+for sdk in rs go; do
+    rm -f "$o/ctl-$sdk.toml"
+    conf "$o/ctl-$sdk.toml" c /guest/sdk-$sdk control node
+    run_ok "$o/ctl-$sdk" 1 --config "$o/ctl-$sdk.toml" -- /guest/sdk-$sdk control
+    d=$(cat "$o/ctl-$sdk/inc-0/stdout"); n=$(cat "$o/ctl-$sdk/node/c/inc-0/stdout")
+    [ "$d" = "net cut driver c: ok
+net heal: ok
+net cut driver nobody: errno 2" ] || die "$sdk control from the driver: $d"
+    [ "$n" = "net heal: errno 1" ] || die "$sdk control from a node: $n"
+done
+echo "Rust and Go control: the driver's answered, a node's EPERM"

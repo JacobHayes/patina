@@ -559,10 +559,31 @@ impl<W: Write> Export<'_, W> {
                     _ => "unknown",
                 };
                 l.str("event", verb)
+                    .str("by", "script")
                     .raw("from", &self.node_set(a[1]))
                     .raw("to", &self.node_set(a[2]))
                     .raw("both", if a[3] != 0 { "true" } else { "false" })
                     .num("ret", r.ret);
+                "net"
+            }
+            // The seed's partitions (`sup::link`): [ordinal, shape, A, B, length, bridge].
+            proto::ctl::DEC_NET_PART => {
+                l = Line::at("net", k, r);
+                l.str("event", "cut")
+                    .str("by", "seed")
+                    .num("n", a[0])
+                    .str("shape", proto::node::shape_name(a[1]))
+                    .raw("a", &self.node_set(a[2]))
+                    .raw("b", &self.node_set(a[3]))
+                    .num("length_ms", a[4] / 1_000_000);
+                if a[1] == proto::node::SHAPE_BRIDGE {
+                    l.raw("bridge", &self.node_set(a[5]));
+                }
+                "net"
+            }
+            proto::ctl::DEC_NET_PART_END => {
+                l = Line::at("net", k, r);
+                l.str("event", "heal").str("by", "seed").num("n", a[0]);
                 "net"
             }
             proto::ctl::DEC_WIRE_HEAL => {
@@ -797,7 +818,12 @@ impl<W: Write> Export<'_, W> {
             }
             Some(RecKind::Injected) => {
                 let (n1, n2) = (recs.peek(0)?, recs.peek(1)?);
-                let (_, e) = crate::launcher::attribution::injected(r, n1, n2);
+                let (_, mut e) = crate::launcher::attribution::injected(r, n1, n2);
+                crate::launcher::attribution::name_link(&mut e, &self.nodes);
+                // The network's faults are the supervisor's, on a link: no thread's node.
+                if (proto::wire::INJ_NET_RESET..=proto::wire::INJ_NET_CUT).contains(&r.args[0]) {
+                    self.node = None;
+                }
                 let mut l = Line::at("fault", k, r);
                 // `faults.recent`'s fields; its `fault` is the class, its `thread` the slot.
                 if let Value::Object(m) = e {

@@ -131,8 +131,8 @@ pub struct NetCounters {
     /// Writes into a receiver's hidden end (deliveries).
     pub chunks: AtomicU64,
     pub resets: AtomicU64,
-    /// Chunks held back by `net-partition`.
-    pub partitioned: AtomicU64,
+    /// Chunks held back by `net-blackout`.
+    pub blacked_out: AtomicU64,
     pub refused: AtomicU64,
     pub timeouts: AtomicU64,
     /// Socket options answered `ENOPROTOOPT`.
@@ -151,7 +151,7 @@ pub struct NetCounters {
     pub datagrams: AtomicU64,
     /// Datagrams put into a receiver's queue (duplicates included).
     pub dgram_delivered: AtomicU64,
-    /// Datagrams lost: injected drops, partitions, a full receive buffer, no receiver.
+    /// Datagrams lost: injected drops, blackouts, cut links, a full receive buffer, no receiver.
     pub dgram_lost: AtomicU64,
 }
 
@@ -282,8 +282,28 @@ pub fn parse_abstract(a: &[u8], len: usize, prefix: &[u8]) -> Option<u64> {
 /// Port range of automatic allocation (port 0, client ports).
 pub const PORT_FIRST: u16 = 32768;
 pub const PORT_LAST: u16 = 60999;
-/// Virtual connect timeout (Linux: 6 SYN retransmissions, about 127 s).
-pub const CONNECT_TIMEOUT_NS: u64 = 127_000_000_000;
+/// SYN retransmissions before a connect gives up (Linux's `tcp_syn_retries`): retries at 1, 3,
+/// 7, 15, 31 and 63 s, `ETIMEDOUT` at 127 s (`net-syn-retries`).
+pub const SYN_RETRIES_DEFAULT: u64 = 6;
+/// The most `net-syn-retries` takes (the kernel's own limit, 127).
+pub const SYN_RETRIES_MAX: u64 = 127;
+/// A direction holding unacknowledged data this long gives up (Linux's `tcp_retries2` = 15:
+/// about 924.6 s; `net-give-up-ms`).
+pub const GIVE_UP_DEFAULT_NS: u64 = 924_600_000_000;
+
+/// Seconds from a connect to its `n`-th SYN retry (from 0; the last one is the give-up), with
+/// the kernel's doubling backoff from 1 s: 1, 3, 7, 15, ... (capped at 120 s between retries).
+pub const fn syn_retry_s(n: u64) -> u64 {
+    let mut t = 0u64;
+    let mut gap = 1u64;
+    let mut i = 0;
+    while i <= n {
+        t += gap;
+        gap = if gap * 2 > 120 { 120 } else { gap * 2 };
+        i += 1;
+    }
+    t
+}
 /// Default delivery delay when `net-delay-ms` is not set (loopback-like), ns.
 pub const DEFAULT_DELAY_NS: (u64, u64) = (10_000, 50_000);
 /// Bytes the supervisor holds per direction before it stops reading the sender's end.
@@ -302,11 +322,11 @@ pub struct NetCfg {
     pub reset_permille: u64,
     pub refuse_permille: u64,
     pub timeout_permille: u64,
-    /// 1 when `net-partition` is set: [from, to) virtual ns since boot, optional port (0: all).
-    pub partition_set: u64,
-    pub partition_from_ns: u64,
-    pub partition_to_ns: u64,
-    pub partition_port: u64,
+    /// 1 when `net-blackout` is set: [from, to) virtual ns since boot, optional port (0: all).
+    pub blackout_set: u64,
+    pub blackout_from_ns: u64,
+    pub blackout_to_ns: u64,
+    pub blackout_port: u64,
     pub halfclose_set: u64,
     pub halfclose_min_ns: u64,
     pub halfclose_max_ns: u64,
@@ -319,6 +339,54 @@ pub struct NetCfg {
     pub chunk_gap_set: u64,
     pub chunk_gap_min_ns: u64,
     pub chunk_gap_max_ns: u64,
+    /// 1 when `net-syn-retries` is set: SYN retries before a connect gives up (otherwise
+    /// `SYN_RETRIES_DEFAULT`).
+    pub syn_retries_set: u64,
+    pub syn_retries: u64,
+    /// 1 when `net-give-up-ms` is set: how long a direction holds data before its sender
+    /// gives up (otherwise `GIVE_UP_DEFAULT_NS`).
+    pub give_up_set: u64,
+    pub give_up_ns: u64,
+    /// A run with nodes: which links the link faults act on (`LINKS_*`).
+    pub links: u64,
+    /// A run with nodes: the seed's partitions (`partition-*`): the gap from one's end to the
+    /// next one's start and each one's length, drawn in [min, max] ns, and the shapes drawn
+    /// from (`node::SHAPE_*` bits). Off when `part_gap_max_ns` is 0.
+    pub part_gap_min_ns: u64,
+    pub part_gap_max_ns: u64,
+    pub part_min_ns: u64,
+    pub part_max_ns: u64,
+    pub part_shapes: u64,
+}
+
+/// `NetCfg::links`: in a run with nodes, link faults act on links between two nodes other than
+/// the driver; also on the driver's links; also on every node's loopback. Without nodes there
+/// is only loopback, and they act on it.
+pub const LINKS_NODES: u64 = 0;
+pub const LINKS_DRIVER: u64 = 1;
+pub const LINKS_ALL: u64 = 2;
+
+impl NetCfg {
+    /// SYN retries of a connect (`net-syn-retries`).
+    pub const fn syn_retries(&self) -> u64 {
+        if self.syn_retries_set != 0 {
+            self.syn_retries
+        } else {
+            SYN_RETRIES_DEFAULT
+        }
+    }
+    /// From a connect to its give-up when no answer comes (Linux, 6 retries: 127 s).
+    pub const fn connect_timeout_ns(&self) -> u64 {
+        syn_retry_s(self.syn_retries()) * 1_000_000_000
+    }
+    /// How long a direction holds data before its sender gives up (`net-give-up-ms`).
+    pub const fn give_up_ns(&self) -> u64 {
+        if self.give_up_set != 0 {
+            self.give_up_ns
+        } else {
+            GIVE_UP_DEFAULT_NS
+        }
+    }
 }
 
 /// Sub-keys of `draw(Stream::FaultNet, key)`.
@@ -335,7 +403,8 @@ pub const NSUB_CHUNK: u64 = 8;
 pub const INJ_NET_RESET: u64 = 20;
 pub const INJ_NET_REFUSE: u64 = 21;
 pub const INJ_NET_TIMEOUT: u64 = 22;
-pub const INJ_NET_PARTITION: u64 = 23;
+/// A delivery held by `net-blackout` (value: the window's end).
+pub const INJ_NET_BLACKOUT: u64 = 23;
 /// A delivery split by `net-chunk-max` (value: bytes of the piece delivered).
 pub const INJ_NET_CHUNK: u64 = 24;
 /// Datagram faults: `args` = [kind, 0, bytes, datagram id, destination port, source port].
@@ -343,8 +412,26 @@ pub const INJ_NET_DROP: u64 = 25;
 pub const INJ_NET_DUP: u64 = 26;
 /// value: the extra delay (ns).
 pub const INJ_NET_REORDER: u64 = 27;
-/// A datagram due inside a `net-partition` window is lost.
-pub const INJ_NET_PARTITION_DROP: u64 = 28;
+/// A datagram due inside a `net-blackout` window is lost.
+pub const INJ_NET_BLACKOUT_DROP: u64 = 28;
+/// A partition the seed drew between nodes (`partition-*`): `args` = [kind, shape, ordinal,
+/// side A (node bits), side B, length ns]; supervisor records of slot 0.
+pub const INJ_NET_CUT: u64 = 29;
+
+/// `args[1]` of a wire or datagram `Injected` record in a run with nodes: the link it acted on
+/// (`from`, `to`: nodes); 0 without nodes.
+pub const fn inj_link(from: usize, to: usize) -> u64 {
+    1 | (from as u64) << 8 | (to as u64) << 16
+}
+
+/// The link of an `Injected` record's `args[1]` (`inj_link`), if it names one.
+pub const fn inj_link_of(a1: u64) -> Option<(usize, usize)> {
+    if a1 & 1 == 0 {
+        None
+    } else {
+        Some(((a1 >> 8 & 0xff) as usize, (a1 >> 16 & 0xff) as usize))
+    }
+}
 
 // ---- datagrams (UDP) ----
 
@@ -397,3 +484,15 @@ pub const DSUB_DUP: u64 = 2;
 pub const DSUB_REORDER: u64 = 3;
 pub const DSUB_HOLD: u64 = 4;
 pub const DSUB_DUP_DELAY: u64 = 5;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn syn_retries_follow_the_kernels_backoff() {
+        let t: [u64; 7] = core::array::from_fn(|n| super::syn_retry_s(n as u64));
+        assert_eq!(t, [1, 3, 7, 15, 31, 63, 127]);
+        // The gap stops doubling at TCP_RTO_MAX (120 s).
+        assert_eq!(super::syn_retry_s(8) - super::syn_retry_s(7), 120);
+        assert_eq!(super::syn_retry_s(9) - super::syn_retry_s(8), 120);
+    }
+}

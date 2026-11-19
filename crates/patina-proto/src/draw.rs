@@ -28,6 +28,12 @@ pub enum Stream {
     /// Load-time points: whether a switch point the runtime draws ahead stays with its thread
     /// (`compute::chain`).
     Stay = 15,
+    /// Nodes: the seed's partition schedule, keyed by the partition's ordinal and a sub-key
+    /// (`node::PSUB_*`), so that no draw depends on traffic or on another class.
+    Partition = 16,
+    /// Nodes: each node's own draws (kill times, down times), keyed by node, boot and a
+    /// sub-key (`node::NSUB_*`).
+    Node = 17,
 }
 
 /// splitmix64 finaliser.

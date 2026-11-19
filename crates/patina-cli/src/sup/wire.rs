@@ -29,12 +29,14 @@
 //!
 //! Nodes (`proto::node`): every node has its own port space and address; a connection joins a
 //! client node and a server node (the same one over loopback), and each direction is a link.
-//! A scripted cut of a link (`nodes::Sup::link_cut`) holds what is stamped on it: the item
-//! keeps its delay draw and no time (`HELD`) until a heal stamps it, at the heal's time plus
-//! that draw; a direction held for `GIVE_UP_NS` gives up, and its sender sees `ETIMEDOUT`. A
-//! connect across a cut link (either direction) does not establish: it retries at TCP's SYN
-//! retry times (`SYN_RETRY_NS`) and establishes at the first one after a heal, or fails
-//! `ETIMEDOUT` at the last.
+//! A cut link (`link::Sup::link_cut`, a script's or the seed's) holds what is stamped on it:
+//! the item keeps its delay draw and no time (`HELD`) until a heal stamps it, at the heal's
+//! time plus that draw; a direction held for `net-give-up-ms` (or its sender's
+//! `TCP_USER_TIMEOUT`) gives up, and its sender sees `ETIMEDOUT`. A connect across a cut link
+//! (either direction) does not establish: it retries at TCP's SYN retry times
+//! (`net-syn-retries`, or the socket's `TCP_SYNCNT`) and establishes at the first one after a
+//! heal, or fails `ETIMEDOUT` after the last. The link faults (`net-*`) act on the links
+//! `link_faulted` names; the others carry the default delay and nothing else.
 
 use super::{Next, Sup};
 use crate::outcome::Verdict;
@@ -57,18 +59,16 @@ const ETIMEDOUT: u16 = 110;
 
 /// An item stamped on a cut link: no delivery time yet, its delay draw in the low bits.
 const HELD: u64 = 1 << 63;
-/// A direction held this long gives up (Linux's `tcp_retries2` = 15: about 924.6 s).
-const GIVE_UP_NS: u64 = 924_600_000_000;
-/// SYN retries from the connect, and the give-up (Linux's `tcp_syn_retries` = 6): 1, 3, 7, 15,
-/// 31 and 63 s, then `ETIMEDOUT` at 127 s.
-const SYN_RETRY_NS: [u64; 7] = [1, 3, 7, 15, 31, 63, 127];
+/// Recorded socket options (`WSock::opts` keys): `TCP_SYNCNT`, `TCP_USER_TIMEOUT`.
+const OPT_TCP_SYNCNT: i32 = 6 << 16 | 7;
+const OPT_TCP_USER_TIMEOUT: i32 = 6 << 16 | 18;
 
 /// Why a RST was sent (`DEC_WIRE_RST` args[2]).
 const RST_CLOSE_UNREAD: u64 = 1;
 const RST_FAULT: u64 = 2;
 const RST_PEER_GONE: u64 = 3;
 const RST_LISTENER_GONE: u64 = 4;
-/// A direction held by a cut for `GIVE_UP_NS`: the sender gives up.
+/// A direction held by a cut for its give-up time (`give_up_ns`): the sender gives up.
 const RST_GIVE_UP: u64 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -360,6 +360,11 @@ impl Sup {
         let seq = self.ctl.seq.load(Relaxed) + 1;
         self.ctl.seq.store(seq, Relaxed);
         let port = self.wire.conns.get(&conn).map_or(0, |c| c.sport as u64);
+        // With nodes, the link: the client's node to the server's.
+        let link = match self.wire.conns.get(&conn) {
+            Some(c) if self.node_count() > 0 => inj_link(c.cnode, c.snode),
+            _ => 0,
+        };
         let rec = proto::Rec {
             seq,
             vclock_ns: self.now(),
@@ -367,7 +372,7 @@ impl Sup {
             kind: proto::RecKind::Injected as u8,
             class: 0,
             nr: nr as u32,
-            args: [kind, 0, value, conn as u64, port, 0],
+            args: [kind, link, value, conn as u64, port, 0],
             ret: 0,
             out_hash: 0,
             in_hash: 0,
@@ -426,21 +431,31 @@ impl Sup {
         }
     }
 
-    /// `net-partition`: a delivery due at `t` on a connection between `sport` and `cport`
-    /// waits for the end of the window.
-    pub(super) fn partition_hold(&self, t: u64, sport: u16, cport: u16) -> Option<u64> {
+    /// `net-blackout`: a delivery due at `t` on a connection between `sport` and `cport`
+    /// waits for the end of the window (on a link the link faults act on).
+    pub(super) fn blackout_hold(&self, t: u64, sport: u16, cport: u16) -> Option<u64> {
         let c = self.net_cfg();
-        if c.partition_set == 0 {
+        if c.blackout_set == 0 {
             return None;
         }
         let (from, to) = (
-            proto::layout::VCLOCK_BOOT_NS + c.partition_from_ns,
-            proto::layout::VCLOCK_BOOT_NS + c.partition_to_ns,
+            proto::layout::VCLOCK_BOOT_NS + c.blackout_from_ns,
+            proto::layout::VCLOCK_BOOT_NS + c.blackout_to_ns,
         );
-        let port_ok = c.partition_port == 0
-            || c.partition_port == sport as u64
-            || c.partition_port == cport as u64;
+        let port_ok = c.blackout_port == 0
+            || c.blackout_port == sport as u64
+            || c.blackout_port == cport as u64;
         (port_ok && t >= from && t < to).then_some(to)
+    }
+
+    /// The delay range of a link: the configured one where the link faults act, the default
+    /// (loopback-like) one elsewhere.
+    pub(super) fn link_delay_range(&self, from: usize, to: usize) -> (u64, u64) {
+        if self.link_faulted(from, to) {
+            self.delay_range()
+        } else {
+            DEFAULT_DELAY_NS
+        }
     }
 
     /// The link direction `dir` of connection `id` travels: (from node, to node).
@@ -463,22 +478,24 @@ impl Sup {
             let link = Self::link(c, dir);
             (c.dirs[dir].n, c.dirs[dir].last_t, c.sport, c.cport, link)
         };
-        let range = if fin && cfg.halfclose_set != 0 {
+        let faulted = self.link_faulted(link.0, link.1);
+        let range = if fin && cfg.halfclose_set != 0 && faulted {
             (cfg.halfclose_min_ns, cfg.halfclose_max_ns)
         } else {
-            self.delay_range()
+            self.link_delay_range(link.0, link.1)
         };
         let d = self.net_delay(id, dir as u64 | if fin { 2 } else { 0 }, n, range);
         let held = self.wire.conns[&id].dirs[dir].held_since.is_some();
         if held || self.link_cut(link.0, link.1) {
+            self.cut_acted(link.0, link.1);
             self.hold(id, dir);
             return HELD | d;
         }
         let mut t = (now + d).max(last);
-        if let Some(to) = self.partition_hold(t, sport, cport) {
+        if let Some(to) = self.blackout_hold(t, sport, cport).filter(|_| faulted) {
             t = to;
-            WireTab::inc(&tab(self.ctl).counters.partitioned, 1);
-            self.wire_inject(INJ_NET_PARTITION, nr::SENDTO, t, id);
+            WireTab::inc(&tab(self.ctl).counters.blacked_out, 1);
+            self.wire_inject(INJ_NET_BLACKOUT, nr::SENDTO, t, id);
         }
         self.wire.conns.get_mut(&id).unwrap().dirs[dir].last_t = t;
         t
@@ -689,10 +706,11 @@ impl Sup {
         };
         let cfg = self.net_cfg();
         let listener = self.wire.listener(snode, port, kind, self.ctl);
-        let fate = if self.net_fault(cfg.refuse_permille, id, NSUB_REFUSE, 0) {
+        let faulted = self.link_faulted(cnode, snode);
+        let fate = if faulted && self.net_fault(cfg.refuse_permille, id, NSUB_REFUSE, 0) {
             self.wire_inject(INJ_NET_REFUSE, nr::CONNECT, ECONNREFUSED as u64, id);
             Fate::Refuse { injected: true }
-        } else if self.net_fault(cfg.timeout_permille, id, NSUB_TIMEOUT, 0) {
+        } else if faulted && self.net_fault(cfg.timeout_permille, id, NSUB_TIMEOUT, 0) {
             self.wire_inject(INJ_NET_TIMEOUT, nr::CONNECT, ETIMEDOUT as u64, id);
             Fate::Timeout
         } else if listener.is_none() {
@@ -703,16 +721,20 @@ impl Sup {
         let now = self.now();
         // Across a cut link (either way) the handshake cannot complete: SYN retries.
         let cut = self.link_cut(cnode, snode) || self.link_cut(snode, cnode);
+        if cut {
+            self.cut_acted(cnode, snode);
+            self.cut_acted(snode, cnode);
+        }
         let mut t = match fate {
-            Fate::Timeout => now + CONNECT_TIMEOUT_NS,
-            _ if cut => now + SYN_RETRY_NS[0] * 1_000_000_000,
-            _ => now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.delay_range()),
+            Fate::Timeout => now + self.syn_retry_ns(i, self.syn_retries(i)),
+            _ if cut => now + self.syn_retry_ns(i, 0),
+            _ => now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.link_delay_range(cnode, snode)),
         };
-        if fate != Fate::Timeout && !cut {
-            if let Some(to) = self.partition_hold(t, port, cport) {
+        if fate != Fate::Timeout && !cut && faulted {
+            if let Some(to) = self.blackout_hold(t, port, cport) {
                 t = to;
-                WireTab::inc(&tab(self.ctl).counters.partitioned, 1);
-                self.wire_inject(INJ_NET_PARTITION, nr::CONNECT, t, id);
+                WireTab::inc(&tab(self.ctl).counters.blacked_out, 1);
+                self.wire_inject(INJ_NET_BLACKOUT, nr::CONNECT, t, id);
             }
         }
         let ev = self.sched.schedule(
@@ -763,6 +785,9 @@ impl Sup {
         s.raddr = kind;
         s.conn = id;
         WireTab::inc(&tab(self.ctl).counters.connections, 1);
+        if faulted {
+            self.link_elig(proto::node::ELIG_CONNECTIONS);
+        }
         0
     }
 
@@ -1076,7 +1101,14 @@ impl Sup {
                 let cfg = self.net_cfg();
                 let k = self.wire.conns[&id].dirs[dir].n;
                 WireTab::inc(&tab(self.ctl).counters.sends, 1);
-                if self.net_fault(cfg.reset_permille, id, NSUB_RESET | (dir as u64) << 3, k) {
+                let (from, to) = Self::link(&self.wire.conns[&id], dir);
+                let faulted = self.link_faulted(from, to);
+                if faulted {
+                    self.link_elig(proto::node::ELIG_SENDS);
+                }
+                if faulted
+                    && self.net_fault(cfg.reset_permille, id, NSUB_RESET | (dir as u64) << 3, k)
+                {
                     self.wire_inject(INJ_NET_RESET, nr::SENDTO, r as u64, id);
                     self.reset_both(id);
                     break;
@@ -1143,7 +1175,16 @@ impl Sup {
     /// Deliver what is due in direction `dir`.
     fn deliver(&mut self, id: u32, dir: usize) {
         let now = self.now();
-        let chunk_max = self.net_cfg().chunk_max as usize;
+        let (from, to) = match self.wire.conns.get(&id) {
+            Some(c) => Self::link(c, dir),
+            None => return,
+        };
+        let faulted = self.link_faulted(from, to);
+        let chunk_max = if faulted {
+            self.net_cfg().chunk_max as usize
+        } else {
+            0
+        };
         loop {
             let Some(c) = self.wire.conns.get_mut(&id) else {
                 return;
@@ -1190,6 +1231,9 @@ impl Sup {
                         let cnt = &tab(self.ctl).counters;
                         WireTab::inc(&cnt.bytes, r as u64);
                         WireTab::inc(&cnt.chunks, 1);
+                        if faulted {
+                            self.link_elig(proto::node::ELIG_CHUNKS);
+                        }
                         self.bump_gen();
                         let split = chunk_max > 0 && !done;
                         if split {
@@ -1215,7 +1259,7 @@ impl Sup {
                             };
                             let delay = self.net_delay(id, NSUB_CHUNK | dir as u64, n, gap);
                             let mut nt = now + delay.max(1);
-                            if let Some(to) = self.partition_hold(nt, sport, cport) {
+                            if let Some(to) = self.blackout_hold(nt, sport, cport) {
                                 nt = to;
                             }
                             let c = self.wire.conns.get_mut(&id).unwrap();
@@ -1280,6 +1324,9 @@ impl Sup {
                         unsafe { libc::shutdown(dst_fd, libc::SHUT_WR) };
                     }
                     WireTab::inc(&tab(self.ctl).counters.fins, 1);
+                    if faulted {
+                        self.link_elig(proto::node::ELIG_FINS);
+                    }
                     self.bump_gen();
                     self.wire_decide(DEC_WIRE_FIN, [id as u64, dir as u64, 1, 0, 0, 0]);
                 }
@@ -1424,9 +1471,58 @@ impl Conn {
 }
 
 impl Sup {
+    /// The SYN retries of a connect from socket `i`: its `TCP_SYNCNT`, else `net-syn-retries`.
+    /// SYN retries of socket `i`: its `TCP_SYNCNT` in a run with nodes (without nodes a socket
+    /// option changes nothing, as before), else `net-syn-retries`.
+    fn syn_retries(&self, i: usize) -> u64 {
+        if self.node_count() == 0 {
+            return self.net_cfg().syn_retries();
+        }
+        match tab(self.ctl)
+            .socks
+            .get(i)
+            .and_then(|s| s.opt(OPT_TCP_SYNCNT))
+        {
+            Some(n) if n > 0 => n as u64,
+            _ => self.net_cfg().syn_retries(),
+        }
+    }
+
+    /// From a connect to its `n`-th SYN retry (`n` = the retries: the give-up), in ns.
+    fn syn_retry_ns(&self, _i: usize, n: u64) -> u64 {
+        syn_retry_s(n) * 1_000_000_000
+    }
+
+    /// How long direction `dir` of `id` may hold data before its sender gives up: the
+    /// sender's `TCP_USER_TIMEOUT` when set in a run with nodes, else `net-give-up-ms`.
+    fn give_up_ns(&self, id: u32, dir: usize) -> u64 {
+        if self.node_count() == 0 {
+            return self.net_cfg().give_up_ns();
+        }
+        let c = &self.wire.conns[&id];
+        let sender = if dir == 0 { c.client.idx } else { c.server.idx };
+        match sender.and_then(|i| {
+            tab(self.ctl)
+                .socks
+                .get(i)
+                .and_then(|s| s.opt(OPT_TCP_USER_TIMEOUT))
+        }) {
+            Some(ms) if ms > 0 => ms as u64 * 1_000_000,
+            _ => self.net_cfg().give_up_ns(),
+        }
+    }
+
+    /// One more chance a link fault had on a link it acts on (`proto::node::ELIG_*`).
+    fn link_elig(&self, k: usize) {
+        if self.node_count() > 0 {
+            unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) }.elig[k] += 1;
+        }
+    }
+
     /// Direction `dir` of `id` holds its first item: the give-up clock starts.
     fn hold(&mut self, id: u32, dir: usize) {
         let now = self.now();
+        let limit = self.give_up_ns(id, dir);
         let c = self.wire.conns.get_mut(&id).unwrap();
         if c.dirs[dir].held_since.is_some() {
             return;
@@ -1434,7 +1530,7 @@ impl Sup {
         c.dirs[dir].held_since = Some(now);
         let tb = unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) };
         tb.held += 1;
-        let t = now + GIVE_UP_NS;
+        let t = now + limit;
         if c.give_up_ev.is_some_and(|ev| ev.0 <= t) {
             return;
         }
@@ -1450,7 +1546,7 @@ impl Sup {
         self.wire.conns.get_mut(&id).unwrap().give_up_ev = Some(ev);
     }
 
-    /// The give-up check: a direction held for `GIVE_UP_NS` resets its sender, who sees
+    /// The give-up check: a direction held for its give-up time resets its sender, who sees
     /// `ETIMEDOUT`; another still held is checked again at its own time.
     fn give_up(&mut self, id: u32) {
         let now = self.now();
@@ -1461,7 +1557,7 @@ impl Sup {
             let Some(since) = c.dirs[dir].held_since else {
                 continue;
             };
-            if now < since + GIVE_UP_NS {
+            if now < since + self.give_up_ns(id, dir) {
                 continue;
             }
             // The sender of `dir` is the client for direction 0.
@@ -1473,11 +1569,9 @@ impl Sup {
             self.reset_side(id, dir == 1, RST_GIVE_UP);
         }
         let next = self.wire.conns.get(&id).and_then(|c| {
-            c.dirs
-                .iter()
-                .filter_map(|d| d.held_since)
+            (0..2)
+                .filter_map(|d| c.dirs[d].held_since.map(|s| s + self.give_up_ns(id, d)))
                 .min()
-                .map(|s| s + GIVE_UP_NS)
         });
         if let Some(t) = next {
             let ev = self.sched.schedule(
@@ -1510,12 +1604,13 @@ impl Sup {
                     Fate::Refuse { injected: false }
                 };
             }
-            now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.delay_range())
-        } else if n < SYN_RETRY_NS.len() - 1 {
-            at + SYN_RETRY_NS[n] * 1_000_000_000
+            now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.link_delay_range(cnode, snode))
         } else {
-            self.wire.conns.get_mut(&id).unwrap().fate = Fate::Timeout;
-            at + SYN_RETRY_NS[n] * 1_000_000_000
+            let i = self.wire.conns[&id].client.idx.unwrap_or(usize::MAX);
+            if n as u64 >= self.syn_retries(i) {
+                self.wire.conns.get_mut(&id).unwrap().fate = Fate::Timeout;
+            }
+            at + self.syn_retry_ns(i, n as u64)
         };
         let ev = self.sched.schedule(
             t,

@@ -10,7 +10,10 @@
 //! for that datagram alone, so datagrams may overtake one another inside the drawn latency, as
 //! UDP allows. Faults are draws keyed by the datagram id and their own sub-key
 //! (`Stream::Dgram`): drop, duplicate (the copy has its own delay), reorder (an extra hold), and
-//! `net-partition` (a datagram due inside the window is lost). At its time (an event in the
+//! `net-blackout` (a datagram due inside the window is lost). With nodes, a datagram to another
+//! node's address (`ADDR_NODE + j`, `rt::sys::udp`) goes to node `j`'s own address and arrives
+//! from `ADDR_NODE + sender`; the link faults act on it as `net-links` says, and one sent
+//! while its link is cut (`link::Sup::link_cut`) is lost. At its time (an event in the
 //! scheduler's queue) the datagram is routed by its destination as Linux's lookup does
 //! (connected and specific sockets first; a `SO_REUSEPORT` group by a hash of the source;
 //! otherwise the most recently bound) and written to the receiver's hidden end behind a header
@@ -40,7 +43,8 @@ const ECONNREFUSED: u64 = 111;
 const UF_DROP: u64 = 1;
 const UF_DUP: u64 = 2;
 const UF_REORDER: u64 = 4;
-const UF_PARTITION: u64 = 8;
+const UF_BLACKOUT: u64 = 8;
+const UF_CUT: u64 = 16;
 /// `DEC_UDP_DELIVER` outcomes.
 const UD_DELIVERED: u64 = 0;
 const UD_NO_RECEIVER: u64 = 1;
@@ -67,7 +71,9 @@ struct USock {
 
 struct Flight {
     src: usize,
+    /// The node it is routed in, and the destination kind as its sender named it.
     node: usize,
+    named: u8,
     skind: u8,
     sport: u16,
     dkind: u8,
@@ -370,8 +376,19 @@ impl Sup {
         lo + draw(self.ctl.config.seed, Stream::Dgram, id << 4 | sub) % (hi - lo + 1)
     }
 
-    /// An injected datagram fault: `args` = [kind, 0, value, id, destination port, source port].
-    fn dgram_inject(&mut self, kind: u64, nr: u32, value: u64, id: u64, dport: u16, sport: u16) {
+    /// An injected datagram fault: `args` = [kind, link (`inj_link`, with nodes), value, id,
+    /// destination port, source port].
+    #[allow(clippy::too_many_arguments)]
+    fn dgram_inject(
+        &mut self,
+        kind: u64,
+        nr: u32,
+        value: u64,
+        id: u64,
+        dport: u16,
+        sport: u16,
+        link: u64,
+    ) {
         let seq = self.ctl.seq.load(Relaxed) + 1;
         self.ctl.seq.store(seq, Relaxed);
         let rec = proto::Rec {
@@ -381,7 +398,7 @@ impl Sup {
             kind: proto::RecKind::Injected as u8,
             class: 0,
             nr,
-            args: [kind, 0, value, id, dport as u64, sport as u64],
+            args: [kind, link, value, id, dport as u64, sport as u64],
             ret: 0,
             out_hash: 0,
             in_hash: 0,
@@ -428,34 +445,64 @@ impl Sup {
         let data = self.udp.buf[..len].to_vec();
         let id = self.udp.next_id;
         self.udp.next_id += 1;
-        let skind = if skind == ADDR_ANY { dkind } else { skind };
+        // Another node's address: routed to that node's own, from the sender's.
+        let named = dkind;
+        let (dnode, dkind, skind) = match dkind {
+            k if k >= ADDR_NODE => ((k - ADDR_NODE) as usize, ADDR_HOST4, ADDR_NODE + node as u8),
+            k => (node, k, if skind == ADDR_ANY { k } else { skind }),
+        };
         let c = &tab(self.ctl).counters;
         WireTab::inc(&c.datagrams, 1);
         let cfg = tab(self.ctl).cfg;
         let now = self.now();
-        let range = self.delay_range();
+        let faulted = self.link_faulted(node, dnode);
+        if faulted {
+            self.dgram_elig();
+        }
+        let link = if self.node_count() > 0 {
+            inj_link(node, dnode)
+        } else {
+            0
+        };
+        let range = self.link_delay_range(node, dnode);
         let mut fate = 0;
         let mut t = now + self.dgram_draw(id, DSUB_DELAY, range);
-        if self.dgram_fault(cfg.drop_permille, id, DSUB_DROP) {
-            fate |= UF_DROP;
-            self.dgram_inject(INJ_NET_DROP, nr, len as u64, id, dport, sport);
+        if self.link_cut(node, dnode) {
+            fate |= UF_CUT;
+            self.cut_acted(node, dnode);
         }
-        if fate == 0 && self.dgram_fault(cfg.reorder_permille, id, DSUB_REORDER) {
+        if fate == 0 && faulted && self.dgram_fault(cfg.drop_permille, id, DSUB_DROP) {
+            fate |= UF_DROP;
+            self.dgram_inject(INJ_NET_DROP, nr, len as u64, id, dport, sport, link);
+        }
+        if fate == 0 && faulted && self.dgram_fault(cfg.reorder_permille, id, DSUB_REORDER) {
             // Held back past the jitter so that datagrams sent after it can arrive first.
             let hold = self.dgram_draw(id, DSUB_HOLD, (range.1.max(1), 4 * range.1 + 1_000_000));
             t += hold;
             fate |= UF_REORDER;
-            self.dgram_inject(INJ_NET_REORDER, nr, hold, id, dport, sport);
+            self.dgram_inject(INJ_NET_REORDER, nr, hold, id, dport, sport, link);
         }
-        if fate & UF_DROP == 0 && self.partition_hold(t, sport, dport).is_some() {
-            fate |= UF_PARTITION;
-            WireTab::inc(&c.partitioned, 1);
-            self.dgram_inject(INJ_NET_PARTITION_DROP, nr, len as u64, id, dport, sport);
+        if fate & (UF_DROP | UF_CUT) == 0
+            && faulted
+            && self.blackout_hold(t, sport, dport).is_some()
+        {
+            fate |= UF_BLACKOUT;
+            WireTab::inc(&c.blacked_out, 1);
+            self.dgram_inject(
+                INJ_NET_BLACKOUT_DROP,
+                nr,
+                len as u64,
+                id,
+                dport,
+                sport,
+                link,
+            );
         }
-        let lost = fate & (UF_DROP | UF_PARTITION) != 0;
+        let lost = fate & (UF_DROP | UF_BLACKOUT | UF_CUT) != 0;
         let f = |dup| Flight {
             src: i,
-            node,
+            node: dnode,
+            named,
             skind,
             sport,
             dkind,
@@ -468,11 +515,11 @@ impl Sup {
         } else {
             WireTab::inc(&c.dgram_lost, 1);
         }
-        if self.dgram_fault(cfg.dup_permille, id, DSUB_DUP) {
+        if fate & UF_CUT == 0 && faulted && self.dgram_fault(cfg.dup_permille, id, DSUB_DUP) {
             let t2 = now + self.dgram_draw(id, DSUB_DUP_DELAY, range);
             fate |= UF_DUP;
-            self.dgram_inject(INJ_NET_DUP, nr, len as u64, id, dport, sport);
-            if self.partition_hold(t2, sport, dport).is_none() {
+            self.dgram_inject(INJ_NET_DUP, nr, len as u64, id, dport, sport, link);
+            if self.blackout_hold(t2, sport, dport).is_none() {
                 self.udp_schedule(id, t2, f(true));
             } else {
                 WireTab::inc(&c.dgram_lost, 1);
@@ -490,6 +537,14 @@ impl Sup {
             ],
         );
         0
+    }
+
+    /// One more datagram the link faults act on (`proto::node::ELIG_DATAGRAMS`).
+    fn dgram_elig(&self) {
+        if self.node_count() > 0 {
+            unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) }.elig
+                [proto::node::ELIG_DATAGRAMS] += 1;
+        }
     }
 
     fn udp_schedule(&mut self, id: u64, t: u64, f: Flight) {
@@ -561,7 +616,7 @@ impl Sup {
             );
             // Port unreachable: an error for a sender connected to that address.
             let to_sender =
-                self.udp.live(f.src) && self.udp.socks[&f.src].peer == Some((f.dkind, f.dport));
+                self.udp.live(f.src) && self.udp.socks[&f.src].peer == Some((f.named, f.dport));
             if to_sender && (f.src) < VINO_CAP {
                 tab(self.ctl).socks[f.src].err = ECONNREFUSED as u16;
                 self.udp_mark(f.src);

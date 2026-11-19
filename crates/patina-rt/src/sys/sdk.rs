@@ -138,7 +138,7 @@ fn control(ptr: u64, len: u64) -> i64 {
         return e;
     }
     let tab = unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) };
-    let r = match proto::node::parse(words, tab, crate::state::proc().node) {
+    let r = match proto::node::parse(words, tab, crate::state::node()) {
         Err(r) => -r.errno,
         Ok(proto::node::Control::Mark(label)) => {
             mark(label);

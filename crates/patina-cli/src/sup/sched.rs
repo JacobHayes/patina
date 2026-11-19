@@ -48,6 +48,11 @@ pub enum Event {
     TimerFd { key: u64 },
     /// A network wire event: collected in `fired_wire` for the supervisor's wire.
     Wire { key: u64 },
+    /// A node event (`nodes`: a partition's start or end, a node's kill or restart):
+    /// collected in `fired_node`. `weak` events do not keep a run alive: with nothing else
+    /// pending, a run waiting only for them is deadlocked (a partition to come, a kill to
+    /// come, never wakes anyone).
+    Node { key: u64, weak: bool },
 }
 
 /// Identity of a scheduled event: (time, insertion number). Unique and totally ordered.
@@ -114,6 +119,8 @@ pub struct Sched {
     pub fired_timers: Vec<u64>,
     /// Wire event keys that fired, in firing order.
     pub fired_wire: Vec<u64>,
+    /// Node event keys that fired, in firing order.
+    pub fired_node: Vec<u64>,
 }
 
 impl Sched {
@@ -140,6 +147,7 @@ impl Sched {
             due_timers: Vec::new(),
             fired_timers: Vec::new(),
             fired_wire: Vec::new(),
+            fired_node: Vec::new(),
         }
     }
 

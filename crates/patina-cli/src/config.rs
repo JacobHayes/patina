@@ -960,6 +960,21 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         }
         c.env.push(e.clone());
     }
+    for n in a.all("--node") {
+        let (name, cmd) = n
+            .split_once('=')
+            .ok_or_else(|| format!("--node {n}: expected NAME='CMD ARGS'"))?;
+        if c.nodes.iter().any(|x| x.name == name) {
+            return Err(format!("--node {name}: the run already has a node {name}"));
+        }
+        c.nodes.push(Node {
+            name: name.to_string(),
+            cmd: crate::sweep::words(cmd).map_err(|e| format!("--node {name}: {e}"))?,
+            env: vec![],
+            work: None,
+            work_at: None,
+        });
+    }
     for m in a.all("--mount") {
         c.mounts.push(mount(&cwd, m)?);
     }
@@ -1074,6 +1089,7 @@ impl Config {
             &self.faults_preset,
             &self.faults,
             self.crash.as_deref(),
+            self.nodes.len(),
         )?;
         plan.sdk.buggify = self.buggify as _;
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
@@ -1145,15 +1161,18 @@ impl Config {
                 "--crash with nodes: not available yet (node crash and restart come later)".into(),
             );
         }
-        // The plan's settings beyond the compute points' are fault classes.
-        if let Some((k, _)) = plan
-            .resolved
-            .iter()
-            .find(|(k, _)| !k.starts_with("compute-"))
-        {
+        // Link faults and partitions act between nodes; a node's own disk and memory have no
+        // fault plane yet.
+        let between = |k: &str| {
+            k.starts_with("compute-")
+                || k.starts_with("net-")
+                || k.starts_with("partition-")
+                || matches!(k, "swarm" | "faults-after-setup")
+        };
+        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
             return Err(format!(
-                "--fault {k} with nodes: not available yet (per-node faults and seed-drawn \
-                 partitions come later)"
+                "--fault {k} with nodes: not available yet (a node's disk and memory faults come \
+                 later; the net- and partition- settings work)"
             ));
         }
         let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));

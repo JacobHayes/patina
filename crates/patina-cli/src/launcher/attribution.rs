@@ -20,7 +20,7 @@ use crate::result::NET_FIELDS;
 use proto::faults::*;
 use proto::rec::{Rec, RecKind, REC_SIZE};
 use proto::wire::{
-    INJ_NET_CHUNK, INJ_NET_DROP, INJ_NET_DUP, INJ_NET_PARTITION, INJ_NET_PARTITION_DROP,
+    INJ_NET_BLACKOUT, INJ_NET_BLACKOUT_DROP, INJ_NET_CHUNK, INJ_NET_CUT, INJ_NET_DROP, INJ_NET_DUP,
     INJ_NET_REFUSE, INJ_NET_REORDER, INJ_NET_RESET, INJ_NET_TIMEOUT,
 };
 use serde_json::{json, Value};
@@ -46,12 +46,13 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_NET_RESET => "net-reset",
         INJ_NET_REFUSE => "net-connect-refuse",
         INJ_NET_TIMEOUT => "net-connect-timeout",
-        INJ_NET_PARTITION => "net-partition",
+        INJ_NET_BLACKOUT => "net-blackout",
         INJ_NET_CHUNK => "net-chunk",
         INJ_NET_DROP => "net-drop",
         INJ_NET_DUP => "net-dup",
         INJ_NET_REORDER => "net-reorder",
-        INJ_NET_PARTITION_DROP => "net-partition",
+        INJ_NET_BLACKOUT_DROP => "net-blackout",
+        INJ_NET_CUT => "partition",
         _ => return None,
     })
 }
@@ -80,6 +81,7 @@ pub const CLASSES: &[&str] = &[
     "fsync-error",
     "mem-error",
     "mem-limit",
+    "net-blackout",
     "net-chunk",
     "net-connect-refuse",
     "net-connect-timeout",
@@ -87,9 +89,9 @@ pub const CLASSES: &[&str] = &[
     "net-drop",
     "net-dup",
     "net-halfclose",
-    "net-partition",
     "net-reorder",
     "net-reset",
+    "partition",
     "path-swap",
 ];
 
@@ -109,7 +111,8 @@ pub fn class_of_key(k: &str) -> Option<&'static str> {
         "net-reset-permille" => "net-reset",
         "net-connect-refuse-permille" => "net-connect-refuse",
         "net-connect-timeout-permille" => "net-connect-timeout",
-        "net-partition" => "net-partition",
+        "net-blackout" => "net-blackout",
+        "partition-gap-ms" => "partition",
         "net-halfclose-delay-ms" => "net-halfclose",
         "net-drop-permille" => "net-drop",
         "net-dup-permille" => "net-dup",
@@ -127,6 +130,13 @@ pub struct Faults {
     eligible: [u64; NKIND],
     crash_points: u64,
     crashes: u64,
+    /// A run with nodes: their names (the driver first), and the seed's partitions that acted
+    /// on traffic.
+    pub nodes: Vec<String>,
+    parts_acted: u64,
+    /// With nodes: the link faults' chances on the links they act on (`faulted_links`), which
+    /// replace the run-wide counters as their eligible counts.
+    link_elig: Option<[u64; 5]>,
 }
 
 impl Faults {
@@ -147,12 +157,38 @@ impl Faults {
         // Decoded as needed, never all at once: a log can be as large as --log-limit.
         let chunks = b.as_chunks::<REC_SIZE>().0;
         let rec = |i: usize| chunks.get(i).map(|c| Rec::from_bytes(c));
+        if let Some(n) = end.nodes.as_ref() {
+            self.parts_acted += n["partitions_acted"].as_u64().unwrap_or(0);
+        }
+        if let Some(f) = end.nodes.as_ref().map(|n| &n["faulted_links"]) {
+            if f.is_object() {
+                let e = self.link_elig.get_or_insert([0; 5]);
+                for (i, k) in ["connections", "chunks", "fins", "sends", "datagrams"]
+                    .iter()
+                    .enumerate()
+                {
+                    e[i] += f[k].as_u64().unwrap_or(0);
+                }
+            }
+        }
         for (i, c) in chunks.iter().enumerate() {
             let r = &Rec::from_bytes(c);
             if r.kind != RecKind::Injected as u8 {
                 continue;
             }
             let (fault, mut e) = injected(r, rec(i + 1), rec(i + 2));
+            name_link(&mut e, &self.nodes);
+            if r.args[0] == INJ_NET_CUT {
+                // The sides by name.
+                let names = |bits: u64| -> Value {
+                    (0..64)
+                        .filter(|b| bits & (1 << b) != 0)
+                        .map(|b| self.nodes.get(b).cloned().unwrap_or_else(|| b.to_string()))
+                        .collect()
+                };
+                e["a"] = names(r.args[3]);
+                e["b"] = names(r.args[4]);
+            }
             if let Some(c) = fault {
                 *self.by_class.entry(c).or_default() += 1;
             }
@@ -201,8 +237,10 @@ impl Faults {
                 continue;
             }
             let kind = KIND_NAMES.iter().position(|n| *n == c);
-            let (connections, chunks, fins, sends) = (net[0], net[2], net[11], net[12]);
-            let datagrams = net[13];
+            let (connections, chunks, fins, sends, datagrams) = match self.link_elig {
+                Some(e) => (e[0], e[1], e[2], e[3], e[4]),
+                None => (net[0], net[2], net[11], net[12], net[13]),
+            };
             let (eligible, injected) = match c {
                 "crash" => (self.crash_points, self.crashes),
                 // One delay per TCP delivery and per datagram sent.
@@ -211,7 +249,9 @@ impl Faults {
                 // Drawn for every read of data a guest sent, not once per connection.
                 "net-reset" => (sends, got(c)),
                 "net-chunk" => (chunks, got(c)),
-                "net-partition" => (chunks + datagrams, got(c)),
+                "net-blackout" => (chunks + datagrams, got(c)),
+                // Partitions drawn, and those that held, lost or kept back something.
+                "partition" => (self.parts_acted, got(c)),
                 // Drawn once for every datagram sent.
                 "net-drop" | "net-dup" | "net-reorder" => (datagrams, got(c)),
                 _ if c.starts_with("net-") => (connections, got(c)),
@@ -242,6 +282,12 @@ impl Faults {
 pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static str>, Value) {
     let [kind, class, value, by, port, _] = r.args;
     let fault = class_of(kind, class, by);
+    // A wire or datagram fault in a run with nodes: the link, as node numbers (named by the
+    // caller, `name_link`).
+    let link = (INJ_NET_RESET..INJ_NET_CUT)
+        .contains(&kind)
+        .then(|| proto::wire::inj_link_of(class))
+        .flatten();
     let mut e = json!({
         "fault": fault.unwrap_or(if kind == INJ_FSYNC_REPORT { "fsync-report" } else { "other" }),
     });
@@ -260,12 +306,19 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
             e["call"] = json!(proto::table::name(r.nr as u64));
         }
         // Datagram faults: the datagram, its source and destination ports.
-        None if (INJ_NET_DROP..=INJ_NET_PARTITION_DROP).contains(&kind) => {
+        None if (INJ_NET_DROP..=INJ_NET_BLACKOUT_DROP).contains(&kind) => {
             e["object"] = json!(format!("udp:{port}"));
             e["datagram"] = json!(by);
             e["from"] = json!(r.args[5]);
             e["to"] = json!(port);
             e["call"] = json!(proto::table::name(r.nr as u64));
+        }
+        // A partition: its ordinal, shape and length (the sides are named by the caller).
+        None if kind == INJ_NET_CUT => {
+            e["object"] = json!("net");
+            e["partition"] = json!(value);
+            e["shape"] = json!(proto::node::shape_name(class));
+            e["length_ms"] = json!(r.args[5] / 1_000_000);
         }
         // The wire's records: the connection's server port.
         None => e["object"] = json!(format!("tcp:{port}")),
@@ -286,6 +339,9 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
         e["after_seq"] = json!(r.args[5]);
         e["put_back"] = json!(back);
     }
+    if let Some((from, to)) = link {
+        e["link"] = json!([from, to]);
+    }
     match kind {
         INJ_ERROR | INJ_FSYNC_REPORT => e["errno"] = json!(errno_name(value)),
         INJ_FSYNC_EIO => e["errno"] = json!("EIO"),
@@ -298,11 +354,25 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
             e["bytes"] = json!(value);
         }
         INJ_NET_CHUNK => e["bytes"] = json!(value),
-        INJ_NET_DROP | INJ_NET_DUP | INJ_NET_PARTITION_DROP => e["bytes"] = json!(value),
+        INJ_NET_DROP | INJ_NET_DUP | INJ_NET_BLACKOUT_DROP => e["bytes"] = json!(value),
         INJ_NET_REORDER => e["delay_ns"] = json!(value),
         _ => {}
     }
     (fault, e)
+}
+
+/// An event's `link` (node numbers, `injected`) by the nodes' names.
+pub fn name_link(e: &mut Value, nodes: &[String]) {
+    if let Some(l) = e["link"].as_array() {
+        let n: Vec<Value> = l
+            .iter()
+            .map(|k| {
+                let k = k.as_u64().unwrap_or(0) as usize;
+                json!(nodes.get(k).cloned().unwrap_or_else(|| k.to_string()))
+            })
+            .collect();
+        e["link"] = json!(n);
+    }
 }
 
 /// What a machine crash did to `/work`: the paths whose post-crash state differs from the
@@ -358,7 +428,7 @@ pub fn line(f: &Value) -> String {
             Some("net-drop") => "dropped",
             Some("net-dup") => "duplicated",
             Some("net-reorder") => "held back",
-            _ => "lost in a partition:",
+            _ => "lost in a blackout:",
         };
         out = format!(
             "seq {} t={}ms {} {what} datagram {d} from :{} to :{}",
@@ -375,6 +445,27 @@ pub fn line(f: &Value) -> String {
             out.push_str(&format!(" by {n} ns"));
         }
         return out;
+    }
+    if let Some(n) = s("partition") {
+        let side = |k: &str| {
+            let v: Vec<&str> = f[k]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|x| x.as_str())
+                .collect();
+            format!("{{{}}}", v.join(","))
+        };
+        let arrow = if f["shape"] == "oneway" { "->" } else { "|" };
+        return format!(
+            "seq {} t={}ms partition {n} {} {} {arrow} {} for {}ms",
+            s("seq").unwrap_or_default(),
+            s("vtime_ms").unwrap_or_default(),
+            s("shape").unwrap_or_default(),
+            side("a"),
+            side("b"),
+            s("length_ms").unwrap_or_default(),
+        );
     }
     if let Some(m) = s("swap") {
         // A path swap reads as what happened to the path between the two calls.

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/JacobHayes/patina/go/patina"
 )
@@ -98,6 +100,20 @@ func main() {
 			os.Exit(2)
 		}
 		patina.Mark("ack 2")
+	case "control":
+		// A run with nodes: the control call from the driver, and from a node ("control node").
+		words := []string{"net cut driver c", "net heal", "net cut driver nobody"}
+		if len(os.Args) > 2 && os.Args[2] == "node" {
+			words = []string{"net heal"}
+		}
+		for _, w := range words {
+			if err := patina.Control(w); err != nil {
+				fmt.Printf("%s: errno %d\n", w, int(err.(syscall.Errno)))
+			} else {
+				fmt.Printf("%s: ok\n", w)
+			}
+		}
+		time.Sleep(time.Second) // virtual: the node runs meanwhile
 	default:
 		fmt.Fprintln(os.Stderr, "unknown mode", mode)
 		os.Exit(2)

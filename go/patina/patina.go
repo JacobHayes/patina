@@ -51,6 +51,7 @@ const (
 	opDelay   = 5
 	opMark    = 6
 	opDeclare = 7
+	opControl = 10
 
 	kindAlways    = 1
 	kindSometimes = 2
@@ -373,6 +374,23 @@ func Mark(label string) {
 	if get()&stOn != 0 {
 		call(opMark, kindReachable, false, label, "", 0, 0, 0)
 	}
+}
+
+// Control makes a control call in a run with several machines, e.g. Control("net cut a b"),
+// with the words of patina ctl: nil, or the errno Patina answered (EPERM outside the driver's
+// node, ENOENT for an unknown node, EINVAL for other words, EOPNOTSUPP for a later feature),
+// or ENOSYS outside Patina.
+func Control(words string) error {
+	if get()&stOn == 0 {
+		return syscall.ENOSYS
+	}
+	if len(words) == 0 || len(words) > textMax {
+		return syscall.EINVAL
+	}
+	if r := sys(opControl, []byte(words)); r < 0 {
+		return syscall.Errno(-r)
+	}
+	return nil
 }
 
 // SetupComplete marks the end of setup: with faults-after-setup, no fault fires before it.
