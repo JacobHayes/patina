@@ -11,13 +11,13 @@ special linking, any language.
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
 needs `bwrap` (bubblewrap) and unprivileged user namespaces.
 
-Changes in 0.13: a fault class a preset turned on that had nothing to act on in any run of a
-sweep is listed as not applicable instead of making the sweep vacuous; `--ok-exit N:CLASS`
-allows a status only in runs where that fault class injected; the `net` preset draws TCP chunk
-sizes log-uniformly with a 1 to 10 µs gap between the pieces of a delivery
-([the guide](docs/GUIDE.md#faults)). In 0.12: triage of a checker's findings
-(`LABEL [KEY]: detail`, `patina recheck`, `--only-case`), branch counters on arm64, and a
-`#!` script runs as the program.
+Changes in 0.14: stock PostgreSQL 18 and headless Chromium (`--no-sandbox`) run; `signalfd`,
+System V shared memory, scheduling-priority calls and `/proc`, `/proc/self` and its `fd` and
+`task` as directories are supported; a signal sent while a thread was about to block is no
+longer lost, which moves the digests of programs that block with a signal pending. Run
+directories from 0.13 are refused. In 0.13: a fault class a preset turned on that had nothing
+to act on is listed as not applicable, `--ok-exit N:CLASS`, and log-uniform TCP chunk sizes
+in the `net` preset ([the guide](docs/GUIDE.md#faults)).
 
 ## Install
 
