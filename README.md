@@ -11,12 +11,13 @@ special linking, any language.
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
 needs `bwrap` (bubblewrap) and unprivileged user namespaces.
 
-Changes in 0.12.2: a `#!` script runs as the program, as `execve` runs it
-(`patina run -- ./script.sh`; [the guide](docs/GUIDE.md#running-a-program)). In 0.12: triage
-of a checker's findings, and branch counters on arm64. A finding can
-carry its grouping key (`LABEL [KEY]: detail`), `patina recheck` judges kept runs again with an
-edited checker, and `--only-case` runs one case
-([the guide](docs/GUIDE.md#judging-again)); `--preempt branches` works on the Arm Neoverse N2.
+Changes in 0.13: a fault class a preset turned on that had nothing to act on in any run of a
+sweep is listed as not applicable instead of making the sweep vacuous; `--ok-exit N:CLASS`
+allows a status only in runs where that fault class injected; the `net` preset draws TCP chunk
+sizes log-uniformly with a 1 to 10 µs gap between the pieces of a delivery
+([the guide](docs/GUIDE.md#faults)). In 0.12: triage of a checker's findings
+(`LABEL [KEY]: detail`, `patina recheck`, `--only-case`), branch counters on arm64, and a
+`#!` script runs as the program.
 
 ## Install
 

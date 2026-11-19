@@ -11,4 +11,4 @@ dependencies = [
 
 [[package]]
 name = "patina-dst"
-version = "0.12.2"
+version = "0.13.0"
