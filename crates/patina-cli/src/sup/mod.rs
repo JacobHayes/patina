@@ -74,6 +74,7 @@ pub mod crash;
 pub mod futex;
 pub mod inherit;
 pub mod io;
+mod maps;
 pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
@@ -116,6 +117,9 @@ struct Sup {
     /// An `execve` has replaced an image: a runtime that cannot run its image now was handed
     /// one an `execve` resolved, not the program.
     execed: bool,
+    /// The shared mappings of the processes still alive were logged for the end of the run
+    /// (`end_maps`): a crash point did it before its `Crash` record.
+    maps_ended: std::cell::Cell<bool>,
 }
 
 /// What a request does with the turn.
@@ -398,8 +402,82 @@ impl Sup {
         self.finish(Verdict::new("deadlock", self.parked_detail()))
     }
 
+    /// Log what the shared mappings of `pids` hold that the log does not: they end without
+    /// their runtime (`maps`).
+    fn flush_maps(&self, pids: &[i32], seq: u64) -> Result<(), String> {
+        let mut pass = maps::Pass::new(self.ctl, &work_dir(self.ctl), seq);
+        for &pid in pids {
+            pass.process(pid)?;
+        }
+        Ok(())
+    }
+
+    /// The end of the run (a finish, a crash point): log the shared mappings of every process
+    /// still alive, once, in pid order, with sequence number `seq`. Not a vfork child's (its
+    /// mappings are its parent's, logged with it). Only a stall ends the run while a thread
+    /// runs guest code (the turn's holder): its process is stopped first (`stop_holder`), so
+    /// nothing changes while the files are read; where it stopped depends on the host, as
+    /// does a stall itself.
+    fn end_maps(&self, seq: u64) -> Result<(), String> {
+        if self.maps_ended.replace(true) {
+            return Ok(());
+        }
+        if let Some(i) = self.running {
+            if !self.stop_holder(i) {
+                return Err("the thread holding the turn did not stop".into());
+            }
+        }
+        let pids: Vec<i32> = self
+            .procs
+            .map
+            .iter()
+            .filter(|(_, p)| p.state == proc::PState::Live && p.vfork_parent.is_none())
+            .map(|(pid, _)| *pid)
+            .collect();
+        self.flush_maps(&pids, seq)
+    }
+
+    /// Stop the process of slot `i`'s thread, which runs guest code, with `SIGSTOP`, and wait
+    /// (at most a second) until that thread is stopped. Whether it did.
+    fn stop_holder(&self, i: usize) -> bool {
+        let (pid, tid) = (
+            self.slot(i).pid.load(Relaxed),
+            self.slot(i).tid.load(Relaxed),
+        );
+        if unsafe { libc::kill(pid, libc::SIGSTOP) } != 0 {
+            return false;
+        }
+        for _ in 0..1000 {
+            let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/stat")) else {
+                return true; // gone: nothing runs
+            };
+            // The state follows the command's closing parenthesis.
+            if let Some('T' | 't' | 'Z' | 'X') =
+                s.rsplit_once(") ").and_then(|(_, r)| r.chars().next())
+            {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
+    }
+
+    /// A failure to log shared mappings: a full disk is named as for the other logs.
+    fn maps_verdict(e: String) -> Verdict {
+        if ["(os error 28)", "(os error 122)"]
+            .iter()
+            .any(|c| e.contains(c))
+        {
+            log_write_verdict(libc::ENOSPC, "logging shared mappings")
+        } else {
+            Verdict::new("infra", e)
+        }
+    }
+
     fn finish(&self, v: Verdict) -> ! {
         self.ctl.timing[TM_FINISH].store(now_ns(), Relaxed);
+        // The run ends whatever this finds: a failure shows in the operation log's check.
+        let _ = self.end_maps(self.ctl.seq.load(Relaxed));
         unsafe {
             libc::kill(-1, libc::SIGKILL);
             let mut st = 0;
@@ -782,6 +860,14 @@ impl Sup {
                 Next::Continue(0)
             }
             Some(Op::CrashPoint) => {
+                // Every process ends here: what their shared mappings hold, then the end.
+                let pid = self.sched.entries[idx].pid as u32;
+                if let Err(e) = self
+                    .end_maps(a[1])
+                    .and_then(|_| crash::append_crash(self.ctl, a[0], a[1], pid))
+                {
+                    self.finish(Self::maps_verdict(e));
+                }
                 self.decide(Op::CrashPoint as u32, idx, a, 0);
                 self.finish(crash::crash_verdict(a, self.now()))
             }
@@ -1007,6 +1093,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         shm: shm::Shm::default(),
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
         execed: false,
+        maps_ended: std::cell::Cell::new(false),
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {

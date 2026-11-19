@@ -19,7 +19,7 @@ use super::attribution::{lost, Faults};
 use crate::cli::Res;
 use crate::config::Opts;
 use crate::durability::log::OpLog;
-use crate::durability::materialise::{materialise, replay, unlogged_pages};
+use crate::durability::materialise::materialise;
 use crate::durability::tree::Tree;
 use crate::launch::{run_incarnation, shm_carrier, Start};
 use crate::result::RunEnd;
@@ -40,7 +40,7 @@ fn crash_detail(d: &str) -> Option<(String, u64, u64)> {
 
 /// Replay every incarnation's operation log and compare it with the live tree it exported
 /// (`durability::check`). `PATINA_TEST_OPLOG_CORRUPT=1` inverts the bytes of incarnation
-/// 0's logged data first, so a test can show a mismatch ends the run `internal`.
+/// 0's logged data first, so a test can show how a mismatch is reported.
 fn self_check(run: &Path) -> Res<()> {
     if std::env::var_os("PATINA_TEST_OPLOG_CORRUPT").is_some() {
         let p = run.join("inc-0/oplog.data");
@@ -70,20 +70,7 @@ pub fn next_tree(
         return Tree::read_archive(&inc.join("live.tree"));
     }
     let log = OpLog::load(inc)?;
-    // Unlogged pages of shared mappings can exist only for inodes with a `MmapShared`
-    // record; without one the live tree and a full replay are not needed.
-    let extra = if log
-        .ops
-        .iter()
-        .any(|o| o.kind == proto::oplog::OpKind::MmapShared)
-    {
-        let live = Tree::read_archive(&inc.join("live.tree"))?;
-        let replayed = replay(&log)?;
-        unlogged_pages(&log, &replayed, &live)
-    } else {
-        vec![]
-    };
-    materialise(&log, u64::MAX, seed, key, model, &extra)
+    materialise(&log, u64::MAX, seed, key, model)
 }
 
 pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<RunEnd> {
@@ -179,13 +166,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         }
         if end.verdict.class != "crash" {
             // With crashes on, the operation log checks itself: replaying it must give the
-            // live tree of every incarnation. A difference is a tracker bug.
-            let mut verdict = end.verdict;
-            if o.plan.faults.crash_kind != CRASH_NONE {
-                if let Err(e) = self_check(out) {
-                    verdict = crate::outcome::Verdict::new("infra", e);
-                }
-            }
+            // live tree of every incarnation. A difference is a tracker bug, reported next to
+            // the run's outcome (`result::run_exit`), which stays the program's own.
+            let verdict = end.verdict;
+            let self_check = (o.plan.faults.crash_kind != CRASH_NONE).then(|| self_check(out));
             let digest = if digests.len() == 1 {
                 format!("{:016x}", digests[0])
             } else {
@@ -230,6 +214,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                     plans,
                     walk: o.plan.compute_walk,
                 }),
+                self_check,
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

@@ -1730,10 +1730,12 @@ impl State<'_> {
         // A run the checker ran on keeps its logs under --keep checked; a sweep with it has a
         // checker, which runs on every run that ended ok.
         let checked = self.keep == Keep::Checked && r["check"]["verdict"] != "not-run";
-        if outcome == "ok" && self.keep != Keep::All && !checked {
+        // A run whose self-check failed keeps its logs: they show Patina's defect.
+        let defect = crate::result::self_check_failed(r);
+        if outcome == "ok" && self.keep != Keep::All && !checked && !defect {
             prune(dir);
         }
-        if (outcome != "ok" || checked) && self.keep != Keep::All {
+        if (outcome != "ok" || checked || defect) && self.keep != Keep::All {
             let before = bytes_under(dir);
             cut(dir);
             self.cut |= bytes_under(dir) < before;

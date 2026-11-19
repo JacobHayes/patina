@@ -516,7 +516,7 @@ pub fn crash_point() {
     if !fire {
         return;
     }
-    crate::oplog::append_crash(cfg.crash_kind);
+    // The supervisor logs what every process's shared mappings hold, then the `Crash` record.
     crate::sup::call_sup(Op::CrashPoint, [cfg.crash_kind, ts.seq, k, 0, 0, 0]);
     crate::sup::hang()
 }

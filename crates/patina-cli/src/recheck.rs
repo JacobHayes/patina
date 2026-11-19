@@ -113,7 +113,7 @@ pub fn rejudge(dir: &Path, check: Option<&Check>, server: Option<&Server>) -> Re
         r["outcome"] = c.outcome.name().into();
         r["stop"] = c.stop.into();
         r["message"] = c.message.into();
-        r["exit"] = c.outcome.exit().into();
+        r["exit"] = crate::result::run_exit(c.outcome, r).into();
         match v {
             Some(v) => r["check"] = serde_json::to_value(v).unwrap(),
             None => {

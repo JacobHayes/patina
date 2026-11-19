@@ -83,11 +83,6 @@ impl OpLog {
         }
     }
 
-    /// The `Crash` record that ends a crashed incarnation's log, if any.
-    pub fn crash(&self) -> Option<&Op> {
-        self.ops.iter().rev().find(|o| o.kind == OpKind::Crash)
-    }
-
     pub fn bytes(&self) -> (usize, usize) {
         (
             self.ops.len() * OPREC_SIZE,

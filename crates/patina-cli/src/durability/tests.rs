@@ -138,7 +138,7 @@ impl B {
 }
 
 fn mat(log: &OpLog, seed: u64, m: Model) -> Tree {
-    materialise(log, u64::MAX, seed, 0, m, &[]).unwrap()
+    materialise(log, u64::MAX, seed, 0, m).unwrap()
 }
 
 fn file(t: &Tree, p: &str) -> Option<Vec<u8>> {
@@ -157,7 +157,7 @@ fn ext4_uncommitted_create_is_absent() {
         .create(ROOT, "a", 10)
         .write(10, 0, b"hello")
         .crash();
-    let t = model_ext4::materialise_at(&log, None, 0, 0, &[]).unwrap();
+    let t = model_ext4::materialise_at(&log, None, 0, 0).unwrap();
     assert_eq!(file(&t, "a"), None);
     // Over seeds both outcomes are legal; the minimum is reached.
     let ts = all(&log, Model::Ext4Ordered);
@@ -376,16 +376,16 @@ fn ext4_five_second_commit() {
         .at(6_000 * MS)
         .create(ROOT, "b", 11)
         .crash();
-    let t = model_ext4::materialise_at(&log, None, 0, 0, &[]).unwrap();
+    let t = model_ext4::materialise_at(&log, None, 0, 0).unwrap();
     assert!(file(&t, "a").is_some());
     assert!(file(&t, "b").is_none());
     // Observed at the crash too.
     let log = B::new().create(ROOT, "a", 10).at(6_000 * MS).crash();
-    let t = model_ext4::materialise_at(&log, None, 0, 0, &[]).unwrap();
+    let t = model_ext4::materialise_at(&log, None, 0, 0).unwrap();
     assert!(file(&t, "a").is_some());
     // Under 5 s: no commit.
     let log = B::new().create(ROOT, "a", 10).at(4_000 * MS).crash();
-    let t = model_ext4::materialise_at(&log, None, 0, 0, &[]).unwrap();
+    let t = model_ext4::materialise_at(&log, None, 0, 0).unwrap();
     assert!(file(&t, "a").is_none());
 }
 
@@ -748,9 +748,9 @@ fn ext4_single_pass_equals_full_replay_with_the_cut() {
         for key in 0..6 {
             let (f, k) = model_ext4::cut_for(&log.ops, s, key).unwrap();
             let full =
-                model_ext4::materialise_at(&log, if k == f { None } else { Some(k) }, s, key, &[])
+                model_ext4::materialise_at(&log, if k == f { None } else { Some(k) }, s, key)
                     .unwrap();
-            let fast = materialise(&log, u64::MAX, s, key, Model::Ext4Ordered, &[]).unwrap();
+            let fast = materialise(&log, u64::MAX, s, key, Model::Ext4Ordered).unwrap();
             assert!(
                 full == fast,
                 "seed {s} key {key}: {:?}",
@@ -762,7 +762,7 @@ fn ext4_single_pass_equals_full_replay_with_the_cut() {
         // posix-strict runs on the same logs (its equivalence with the pre-crash materialiser code is checked
         // against that build by tests/durability).
         for key in 0..3 {
-            materialise(&log, u64::MAX, s, key, Model::PosixStrict, &[]).unwrap();
+            materialise(&log, u64::MAX, s, key, Model::PosixStrict).unwrap();
         }
     }
     // The logs exercise spontaneous cuts and give many different trees.

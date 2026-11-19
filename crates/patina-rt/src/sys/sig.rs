@@ -752,6 +752,7 @@ fn resolve_without_handler(frame: &mut Frame, nr: u64, arg0: u64) {
 
 /// End the process as killed by `sig` (default action "terminate").
 pub fn die(sig: u64) -> ! {
+    crate::oplog::on_exit();
     crate::sup::call_sup_noreply(Op::ProcExit, [128 + sig, sig, 0, 0, 0, 0]);
     unsafe {
         sc1(nr::EXIT_GROUP, 128 + sig);

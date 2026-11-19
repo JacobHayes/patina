@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 16;
+pub const LAYOUT_VERSION: u64 = 17;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -200,7 +200,10 @@ pub struct Ctl {
     /// Operation-log bytes that do not count against `Config::log_limit`: the base records of
     /// the incarnation's starting work tree, written by the supervisor before the program runs.
     pub log_exempt: AtomicU64,
-    pub _spare: [AtomicU64; 4],
+    /// Address of the runtime's table of tracked shared mappings (`oplog::SharedMaps`), the
+    /// same in every guest process; written by each image at its start.
+    pub maps_table: AtomicU64,
+    pub _spare: [AtomicU64; 3],
     /// One bit per syscall number answered `Deny` at least once (`refused` in the outcome).
     pub denied: [AtomicU64; 8],
     /// Syscall number that ended the run with `Stop` (or u64::MAX).

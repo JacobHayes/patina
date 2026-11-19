@@ -57,6 +57,10 @@ pub struct RunEnd {
     pub ok_exit: Vec<crate::config::OkExit>,
     /// With `--preempt points`: what the plans did.
     pub rewrite: Option<RewriteReport>,
+    /// With `--crash`, the operation log's self-check: Err with the first difference when
+    /// replaying the log does not give the live tree (a Patina defect, reported next to the
+    /// program's own outcome, never instead of it). None when it did not run.
+    pub self_check: Option<Result<(), String>>,
 }
 
 /// `result.json`'s `rewrite`: each file the runtime asked a plan for (`rewrite::cache`), and
@@ -408,6 +412,12 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "signature": null,
         "wall_ms": e.wall_ms,
     });
+    match &e.self_check {
+        Some(Ok(())) => r["self_check"] = json!({"verdict": "pass"}),
+        Some(Err(d)) => r["self_check"] = json!({"verdict": "fail", "detail": d}),
+        None => {}
+    }
+    r["exit"] = run_exit(c.outcome, &r).into();
     if let Some(cp) = e.compute.json(e.pmu.is_some()) {
         r["compute"] = cp;
     }
@@ -426,6 +436,21 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         r["labels"]["pacga_sites"] = json!(e.insn.counted_sites);
     }
     r
+}
+
+/// Did the run's operation-log self-check fail (`result.json`'s `self_check`)?
+pub fn self_check_failed(r: &Value) -> bool {
+    r["self_check"]["verdict"] == "fail"
+}
+
+/// A run's exit status: its outcome's, and at least 2 when the self-check failed: the outcome
+/// stands, and the run still says that Patina found a defect of its own.
+pub fn run_exit(outcome: Outcome, r: &Value) -> u8 {
+    if self_check_failed(r) {
+        outcome.exit().max(2)
+    } else {
+        outcome.exit()
+    }
 }
 
 /// A result without a run (a request that could not be carried out).
@@ -616,6 +641,12 @@ const LINE_MAX: usize = 240;
 pub fn print_human(r: &Value, dir: &Path) {
     let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
     println!("{} ({}): {}", s("outcome"), s("stop"), s("message"));
+    if self_check_failed(r) {
+        println!(
+            "self-check failed (a Patina defect; the outcome above is the program's own): {}",
+            r["self_check"]["detail"].as_str().unwrap_or("")
+        );
+    }
     let g = &r["guest"];
     if let Some(x) = g["exit"].as_i64() {
         match g["signal"].as_i64() {

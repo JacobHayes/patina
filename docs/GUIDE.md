@@ -147,7 +147,13 @@ work tree does (the operation log keeps it for crashes).
 
 A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A guest process killed
 by SIGKILL from outside the run (the host's out-of-memory killer, or a kill sent on the host) ends
-it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. A table of the
+it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. With `--crash`, a run ends by
+checking its operation log: replaying it must give the work tree each incarnation left. A
+difference is a Patina defect, never the program's: the run keeps its own outcome (a
+violation keeps its label and signature) and says `self-check failed (a Patina defect; ...)`
+under it, `result.json` has `self_check` (`verdict` `fail` and the first difference in
+`detail`; `pass` when it held) and the exit status is 2. A sweep counts such runs on a line of
+their own, keeps their logs, and exits 2 unless a new finding makes it 1. A table of the
 runtime's that the program fills with objects it still uses (open descriptors, shared
 mappings, files changed and still reachable) ends it `unsupported`, stop `capacity`, naming
 the table.

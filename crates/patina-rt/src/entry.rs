@@ -224,6 +224,7 @@ fn hello() {
     // A new image keeps the thread's virtual mask (in its slot) and the ignored
     // dispositions (the supervisor's record, in the reply) across execve.
     ts.vmask = unsafe { &*c.slot(i) }.vmask.load(Relaxed);
+    crate::oplog::publish_maps();
     let ign = crate::sup::call_sup(
         Op::Hello,
         [

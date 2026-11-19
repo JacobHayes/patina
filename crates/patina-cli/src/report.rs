@@ -1115,9 +1115,16 @@ pub fn build(
     let not_ok = gj
         .iter()
         .any(|g| outcome_of(g["outcome"].as_str().unwrap_or("")).exit() == 2);
+    // Runs whose operation-log self-check failed: a Patina defect, reported beside the
+    // outcomes (each stays its program's own) and never passed as clean.
+    let mut defects: Vec<&Run> = runs
+        .iter()
+        .filter(|r| crate::result::self_check_failed(&r.result))
+        .collect();
+    defects.sort_by_key(|r| (r.seed, r.point, r.case_pos, r.dir.clone()));
     let exit = if finding {
         1
-    } else if not_ok || vacuous {
+    } else if not_ok || vacuous || !defects.is_empty() {
         2
     } else {
         0
@@ -1158,6 +1165,14 @@ pub fn build(
     });
     if let Some(b) = branch {
         v["branch"] = b;
+    }
+    if let Some(first) = defects.first() {
+        v["self_check_failed"] = json!({
+            "runs": defects.len(),
+            "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "dir": first.dir},
+            "detail": first.result["self_check"]["detail"],
+            "replay_command": format!("patina replay {}", quote(&first.dir.display().to_string())),
+        });
     }
     if checked {
         // Nothing shows that the check can fail: it judged runs, passed every one, and no
@@ -1366,6 +1381,19 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         .map(|(k, n)| format!("{k} {n}"))
         .collect();
     s.push_str(&format!("outcomes: {}\n", classes.join(", ")));
+    if let Some(d) = v.get("self_check_failed") {
+        let f = &d["first"];
+        let at = match f["point"].as_u64() {
+            Some(p) => format!("{}@{p}", f["seed"]),
+            None => f["seed"].to_string(),
+        };
+        s.push_str(&format!(
+            "self-check failed in {} (a Patina defect; the outcomes are the programs' own): first seed {at}: {}\n  replay: {}\n",
+            count(d["runs"].as_u64().unwrap_or(0) as usize, "run"),
+            d["detail"].as_str().unwrap_or(""),
+            d["replay_command"].as_str().unwrap_or("")
+        ));
+    }
     if let Some(c) = v.get("check") {
         let judged = c["judged"].as_u64().unwrap_or(0);
         let mut line = format!(
@@ -1889,6 +1917,41 @@ mod tests {
             replay: None,
             point: None,
         }
+    }
+
+    #[test]
+    fn a_failed_self_check_is_reported_beside_the_outcomes() {
+        let failed = json!({"self_check": {"verdict": "fail", "detail": "d"}});
+        let report = |r: &[Run]| build(r, &[], None, None, "").0;
+        // An ok run whose self-check failed stays ok, and the report is not clean.
+        let v = report(&[
+            run(1, Value::Null, json!({})),
+            run(2, Value::Null, failed.clone()),
+        ]);
+        assert_eq!(v["outcomes"], json!({"ok": 2}));
+        assert_eq!(v["self_check_failed"]["runs"], json!(1));
+        assert_eq!(v["self_check_failed"]["first"]["seed"], json!(2));
+        assert_eq!(v["exit"], json!(2));
+        // A violation keeps its group and its signature; a new finding still exits 1.
+        let mut viol = failed.clone();
+        viol["outcome"] = json!("violation");
+        viol["signature"] = json!("violation always: label");
+        let v = report(&[run(3, Value::Null, viol)]);
+        assert_eq!(
+            v["groups"][0]["signature"],
+            json!("violation always: label")
+        );
+        assert_eq!(v["groups"][0]["outcome"], json!("violation"));
+        assert_eq!(v["self_check_failed"]["runs"], json!(1));
+        assert_eq!(v["exit"], json!(1));
+        // Without a failed self-check nothing is said.
+        let v = report(&[run(
+            4,
+            Value::Null,
+            json!({"self_check": {"verdict": "pass"}}),
+        )]);
+        assert!(v.get("self_check_failed").is_none());
+        assert_eq!(v["exit"], json!(0));
     }
 
     #[test]

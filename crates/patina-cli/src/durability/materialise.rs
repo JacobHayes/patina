@@ -498,59 +498,14 @@ pub fn replay(log: &OpLog) -> Result<Fs, String> {
     Ok(fs)
 }
 
-/// Pages of shared mappings the log does not explain: for each inode with a `MmapShared`
-/// record, the 4 KiB pages where the exported live tree differs from the replay. These are
-/// stores through a mapping that nothing synced or unmapped before the crash. Returned as
-/// (inode, offset, bytes).
-pub fn unlogged_pages(log: &OpLog, replayed: &Fs, live: &Tree) -> Vec<(u64, u64, Vec<u8>)> {
-    let mapped: std::collections::BTreeSet<u64> = log
-        .ops
-        .iter()
-        .filter(|o| o.kind == OpKind::MmapShared)
-        .map(|o| o.ino)
-        .collect();
-    let mut out = vec![];
-    if mapped.is_empty() {
-        return out;
-    }
-    let mut seen = std::collections::BTreeSet::new();
-    for n in live.nodes.values() {
-        if !mapped.contains(&n.ino) || !seen.insert(n.ino) || n.kind != Kind::File {
-            continue;
-        }
-        let Some(i) = replayed.inodes.get(&n.ino) else {
-            continue;
-        };
-        let (a, b) = (&n.data, &i.data);
-        let len = a.len().min(b.len());
-        // Only blocks stored in either image can differ (absent blocks are zeros in both).
-        let blocks: BTreeSet<u64> = a
-            .blocks()
-            .map(|(x, _)| x)
-            .chain(b.blocks().map(|(x, _)| x))
-            .filter(|x| x * BLOCK < len)
-            .collect();
-        for blk in blocks {
-            let (p, e) = (blk * BLOCK, len.min((blk + 1) * BLOCK));
-            let (x, y) = (a.read(p, e), b.read(p, e));
-            if x != y {
-                out.push((n.ino, p, x));
-            }
-        }
-    }
-    out
-}
-
 /// The post-crash tree for the log prefix `seq <= upto` under `model`. `key` separates
-/// crash points and variants (the crash materialiser); `extra` are the unlogged mapping pages
-/// (`unlogged_pages`), treated as unsynced writes made at the crash.
+/// crash points and variants (the crash materialiser).
 pub fn materialise(
     log: &OpLog,
     upto: u64,
     seed: u64,
     key: u64,
     model: Model,
-    extra: &[(u64, u64, Vec<u8>)],
 ) -> Result<Tree, String> {
     let owned;
     let prefix = if log.ops.iter().all(|o| o.seq <= upto) {
@@ -560,8 +515,8 @@ pub fn materialise(
         &owned
     };
     match model {
-        Model::Ext4Ordered => super::model_ext4::materialise(prefix, seed, key, extra),
-        Model::PosixStrict => super::model_posix::materialise(prefix, seed, key, extra),
+        Model::Ext4Ordered => super::model_ext4::materialise(prefix, seed, key),
+        Model::PosixStrict => super::model_posix::materialise(prefix, seed, key),
     }
 }
 

@@ -139,12 +139,7 @@ pub fn fates(ops: &[Op]) -> Vec<Fate> {
     out
 }
 
-pub fn materialise(
-    log: &OpLog,
-    seed: u64,
-    key: u64,
-    extra: &[(u64, u64, Vec<u8>)],
-) -> Result<super::tree::Tree, String> {
+pub fn materialise(log: &OpLog, seed: u64, key: u64) -> Result<super::tree::Tree, String> {
     let ops = &log.ops;
     let f = fates(ops);
     // For each record: is there a later Sync, or a later full Fsync of its inode (all such
@@ -198,12 +193,6 @@ pub fn materialise(
                     fs = trial;
                 }
             }
-        }
-    }
-    // Unlogged pages of shared mappings: unsynced writes, each kept by draw.
-    for (n, (ino, off, bytes)) in extra.iter().enumerate() {
-        if fs.has(*ino) && torn(seed, key, u64::MAX - n as u64, 2) & 1 == 1 {
-            fs.write(*ino, *off, bytes)?;
         }
     }
     Ok(fs.to_tree())

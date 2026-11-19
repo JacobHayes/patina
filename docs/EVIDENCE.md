@@ -1060,7 +1060,28 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   `verify`, and a 2 MiB `malloc` then returns NULL with `ENOMEM`. Red/green: disabling the
   check maps all 100 MiB.
 - **Self-check** (`tests/faults/16-counts.sh`): a crash-enabled run whose operation log the
-  test hook corrupts ends `internal`; red/green: without the end-of-run check it ends `ok`.
+  test hook corrupts keeps its outcome (`ok`; `violation` with its label and signature for
+  `mapends violation`) and reports `self_check` `fail` with exit status 2; red/green: without
+  the end-of-run check its `self_check` is absent and it exits 0 (1 for the violation).
+- **Shared mappings at a process's end** (`tests/faults/18-mapends.sh`; 2026-11-19): a
+  store through a `MAP_SHARED` work-file mapping (two pages and a partial one), then its
+  process killed by `SIGKILL` (one that made the mapping, and one that inherited it by fork)
+  or `SIGTERM`, left running at the end of the run, killed by its own vfork child, or the run
+  ended by a violation (with and without `msync` first), the time limit, `munmap` or `exit`,
+  or a `MAP_FIXED` mapping made over it: with no crash plane, `--crash machine` and `--crash
+  process`, each ends as it should, its self-check passes, `patina log ops --check` passes,
+  and the file reads as natively; branch sweeps of seeds 1..2 (every crash point) of the
+  durability case (child stores and is killed, parent fsyncs the file and the directory, then
+  a synced marker), of kill, the inherited mapping, vfork and orphan, and of the `MAP_FIXED`
+  case (a flush of two records, cut between them by a crash point) under both crash kinds: no
+  finding. Red/green: on the build before (main at `9196aa8b`) every mode but `msync`,
+  `unmap`, `exit` and the inherited mapping (its parent's exit logs the child's stores too)
+  fails `log ops --check` and ends `internal` under either crash plane (the violation and the
+  liveness lost), and the durability sweep has 1 violation (`synced-store-kept`: the fsynced
+  store lost) and 2 `internal` of 28 runs. The issue's own durability reproducer, seeds 1..3,
+  `--branch --crash machine`: 94 failures and 3 `internal` of 222 runs before, 222 `ok` after.
+  An `mremap` of the mapping's second page, then a store through it, now ends the run
+  `unsupported`; before, the runtime faulted (`internal`, signal 11).
 - **Path swaps** (`examples/serve-c`, `tests/examples/01-examples.sh`): the `lstat`-then-`open`
   server under `path-swap-permille=300` is caught on 5 of seeds 1..20 (first seed 4, replayed
   `identical`, `faults in every failing run: path-swap`) and 10 of seeds 1..40; at 200 and 500

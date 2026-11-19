@@ -889,11 +889,39 @@ sync; each is counted (its ordinal is what `-at:N` names and what `crashes[].poi
 and the crash draw is used only when it fires, so a run is identical to the run without
 `--crash` up to the crash.
 
+Stores through a `MAP_SHARED` mapping of a work file are in the page cache at once and reach
+the log as `MmapDirty` records when their process unmaps, syncs or ends: the runtime
+compares each tracked mapping with its shadow (its copy of what the log holds) at `munmap`,
+`mremap`, `msync`, the sync calls, `execve`, an `mmap` with `MAP_FIXED` over it, and every
+way the runtime sees a process end (`exit`, `exit_group`, a thread's `exit`, a signal's
+default action). An `mremap` of part of a tracked mapping, a copy of one (`old_size` 0) or a
+move that keeps it mapped (`MREMAP_DONTUNMAP`) ends the run `unsupported` rather than leave
+stores untracked. A process that ends without its runtime, killed by `SIGKILL` from another
+guest, still running at the end of the run, or at a crash point, keeps its stores, as Linux
+keeps them in the page cache for a later `fsync` to make durable: the supervisor logs them at
+that point, before the kill (`sup/maps.rs`), from the table of tracked mappings each runtime
+publishes (`proto::oplog::SharedMaps`). It holds the turn, so no guest code runs while it
+reads, and the records land at the kill's place in the order, the same in every run (a stall,
+the one end while guest code runs, stops that process first). The table is the program's
+memory, so it only chooses what is compared: each file is the process's own open file
+(`pidfd_getfd`, nothing is reopened) and must be the work file the entry names, and the bytes
+logged are the file's. A crash point logs every process's mappings before its `Crash` record,
+so the log of every incarnation is complete. The table is read with `process_vm_readv` (the
+supervisor is every guest's ancestor, as Yama's `ptrace_scope` 1 asks); a host that refuses it
+ends a kill or a crash `internal`, naming it, and at the end of the run leaves the outcome as
+it is, with the self-check reporting what the log lacks. One limit remains: each process
+compares with its own shadow, so a page another process changed since (through its own
+mapping or `write`) and this one stored back to what its shadow holds is not logged again,
+which the self-check reports.
+
 A process crash restarts the program on `/work` as it was. A machine crash restarts it on
 what a filesystem would have kept: a pure function of the operation log, the seed and the
 model, `ext4-ordered` (the default) or `posix-strict` (`durability/`). Every run with
-`--crash` ends by replaying its whole operation log against the live tree; a difference ends
-the run `internal`. `patina log ops` prints the log.
+`--crash` ends by replaying its whole operation log against the live tree of each
+incarnation, with no exception: a difference is a Patina defect. The run keeps its own
+outcome and reports the failed self-check beside it (`result.json`'s `self_check`, exit
+status 2; a sweep counts such runs apart and keeps their logs). `patina log ops` prints the
+log.
 
 ## The SDK channel
 

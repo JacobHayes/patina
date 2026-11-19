@@ -468,17 +468,24 @@ impl Sup {
     }
 
     /// Kill process `pid` for real (`SIGKILL`): every thread of it sleeps in the runtime or,
-    /// for a vfork parent, in the kernel; none holds the turn unless it is the sender.
+    /// for a vfork parent, in the kernel; none holds the turn unless it is the sender. What
+    /// its shared mappings hold is logged first, at this point of the run, as its runtime
+    /// would at an exit (`maps`); a vfork child's are its parent's, which keeps them.
     pub fn kill_now(&mut self, pid: i32) {
-        let Some(fd) = self
+        let Some((fd, vfork_child)) = self
             .procs
             .map
             .get(&pid)
             .filter(|p| p.state == PState::Live)
-            .map(|p| p.pidfd)
+            .map(|p| (p.pidfd, p.vfork_parent.is_some()))
         else {
             return;
         };
+        if !vfork_child {
+            if let Err(e) = self.flush_maps(&[pid], self.ctl.seq.load(Relaxed)) {
+                self.finish(Self::maps_verdict(e));
+            }
+        }
         let r = unsafe {
             libc::syscall(
                 libc::SYS_pidfd_send_signal,

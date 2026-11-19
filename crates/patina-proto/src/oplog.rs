@@ -156,6 +156,38 @@ impl OpRec {
     }
 }
 
+/// Shared mappings of `/work` files a process tracks (`MAP_SHARED`, opened for writing).
+pub const MAX_SHARED_MAPS: usize = 128;
+
+/// One tracked shared mapping, in the runtime's memory: the mapped range, the file and the
+/// shadow (the runtime's copy of what the log holds for the range).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SharedMap {
+    pub addr: u64,
+    pub len: u64,
+    pub ino: u64,
+    /// File offset of `addr`.
+    pub off: u64,
+    pub shadow: u64,
+    pub shadow_len: u64,
+    /// The runtime's hidden duplicate of the mapped file's descriptor.
+    pub fd: i64,
+}
+
+/// A process's tracked shared mappings. The runtime keeps one at the address it publishes in
+/// `Ctl::maps_table` (the same in every process); the supervisor reads a process's table with
+/// `process_vm_readv` when the process ends without its runtime (a `SIGKILL`, teardown, a
+/// crash) and logs what its mappings hold that the log does not (`sup::maps`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SharedMaps {
+    pub m: [SharedMap; MAX_SHARED_MAPS],
+    pub n: usize,
+}
+
+pub const SHARED_MAPS_SIZE: usize = core::mem::size_of::<SharedMaps>();
+
 /// Shared durability state after the virtual-time region: the writeback error generation
 /// of each inode (failed fsync is reported once per descriptor generation).
 pub const ERRGEN_CAP: usize = 4096;

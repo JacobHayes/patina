@@ -1,14 +1,12 @@
 //! `patina log ops --check RUN`: for every incarnation, replaying the complete operation log onto
 //! its base must give exactly the live tree the supervisor exported (`live.tree`): names,
 //! kinds, modes, owners, link structure (inode numbers), contents, extended attributes.
-//! A difference means the tracker missed a way of changing a file.
-//!
-//! The one explained difference: an incarnation that ended in a crash was killed without
-//! flushing its shared mappings, so pages of inodes with a `MmapShared` record may differ.
-//! Those pages are counted and reported, then applied before comparing.
+//! A difference means the tracker missed a way of changing a file. There is no exception:
+//! stores through shared mappings are logged however their process ends, by its runtime or,
+//! for a `SIGKILL`, the end of the run or a crash, by the supervisor (`sup::maps`).
 
 use super::log::OpLog;
-use super::materialise::{replay, unlogged_pages};
+use super::materialise::replay;
 use super::tree::{diff, Tree};
 use std::path::{Path, PathBuf};
 
@@ -28,18 +26,7 @@ pub fn incarnations(run: &Path) -> Vec<PathBuf> {
 pub fn check_inc(dir: &Path) -> Result<String, String> {
     let log = OpLog::load(dir)?;
     let live = Tree::read_archive(&dir.join("live.tree"))?;
-    let mut fs = replay(&log)?;
-    let mut note = String::new();
-    if log.crash().is_some() {
-        let pages = unlogged_pages(&log, &fs, &live);
-        if !pages.is_empty() {
-            note = format!(", {} unlogged mapping pages at the crash", pages.len());
-        }
-        for (ino, off, b) in &pages {
-            fs.write(*ino, *off, b)?;
-        }
-    }
-    let replayed = fs.to_tree();
+    let replayed = replay(&log)?.to_tree();
     if let Some(d) = diff(&replayed, &live, true) {
         return Err(format!(
             "{}: replay differs from the live tree: {d} (first tree: replay)",
@@ -48,7 +35,7 @@ pub fn check_inc(dir: &Path) -> Result<String, String> {
     }
     let (m, b) = log.bytes();
     Ok(format!(
-        "{}: ok ({} records, {} + {} bytes, {} paths{note})",
+        "{}: ok ({} records, {} + {} bytes, {} paths)",
         dir.display(),
         log.ops.len(),
         m,

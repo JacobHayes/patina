@@ -169,12 +169,6 @@ fn append(kind: OpKind, ino: u64, a: [u64; 6], pieces: &[Src], len_hint: u64) {
     crate::inject::crash_point();
 }
 
-/// The `Crash` record that ends the log of a crashed incarnation (no crash point after it).
-pub fn append_crash(kind: u64) {
-    let d = (ctl().opdata_len.load(Relaxed), 0);
-    put_rec(OpKind::Crash, 0, [kind, 0, 0, 0, 0, 0], d);
-}
-
 /// The tracker's input: called by `sys::fs::after_mutation` for each successful mutating
 /// call on `/work`.
 pub fn record(op: &FsOp) {
@@ -396,25 +390,8 @@ pub fn dup_fd(src: i64, dst: i64) {
 
 // ---- shared file mappings ----
 
-const MAX_MAPS: usize = 128;
-
-#[derive(Clone, Copy)]
-struct Map {
-    addr: u64,
-    len: u64,
-    ino: u64,
-    off: u64,
-    /// Runtime copy of what the tracker has recorded for the mapped range.
-    shadow: u64,
-    shadow_len: u64,
-    /// Hidden duplicate of the descriptor (for the current file size).
-    fd: i64,
-}
-
-struct Maps {
-    m: [Map; MAX_MAPS],
-    n: usize,
-}
+const MAX_MAPS: usize = MAX_SHARED_MAPS;
+type Map = SharedMap;
 
 const NOMAP: Map = Map {
     addr: 0,
@@ -425,10 +402,19 @@ const NOMAP: Map = Map {
     shadow_len: 0,
     fd: -1,
 };
-static MAPS: Global<Maps> = Global::new(Maps {
+/// The process's tracked mappings; the supervisor reads them when the process ends without
+/// this runtime (`proto::oplog::SharedMaps`).
+static MAPS: Global<SharedMaps> = Global::new(SharedMaps {
     m: [NOMAP; MAX_MAPS],
     n: 0,
 });
+
+/// Tell the supervisor where this image keeps its tracked mappings (at each image's start).
+pub fn publish_maps() {
+    ctl()
+        .maps_table
+        .store(MAPS.get() as *const SharedMaps as u64, Relaxed);
+}
 
 fn page_up(x: u64) -> u64 {
     (x + PAGE - 1) & !(PAGE - 1)
@@ -796,7 +782,11 @@ pub fn on_munmap_done(addr: u64, len: u64) {
             // keep the head; a hole in the middle splits the mapping in two
             t.m[i].len = lo - m.addr;
             t.m[i].shadow_len = lo - m.addr;
-            let split = hi < m.addr + m.len && t.n < MAX_MAPS;
+            let split = hi < m.addr + m.len;
+            if split && t.n == MAX_MAPS {
+                // The tail would go untracked and its stores unlogged.
+                crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
+            }
             let gone_to = if split { hi - m.addr } else { m.shadow_len };
             free_shadow(m.shadow + (lo - m.addr), gone_to - (lo - m.addr));
             if split {
@@ -819,9 +809,21 @@ pub fn on_munmap_done(addr: u64, len: u64) {
     }
 }
 
-/// `mremap`: flush and stop tracking the old range; track the new one.
-pub fn on_mremap_before(addr: u64, len: u64) -> Option<(u64, u64, i64)> {
+/// `mremap` (`flags`): flush and stop tracking the old range; track the new one. Only a
+/// whole tracked mapping is moved or resized: a part of one (which would leave the rest
+/// untracked, or the tracked range stale), a copy (`old_size` 0) or a move that keeps the old
+/// range mapped (`MREMAP_DONTUNMAP`) ends the run `unsupported` rather than lose its stores.
+pub fn on_mremap_before(addr: u64, len: u64, flags: u64) -> Option<(u64, u64, i64)> {
+    const MREMAP_DONTUNMAP: u64 = 4;
     let t = MAPS.get();
+    let part = (0..t.n).any(|i| {
+        let m = &t.m[i];
+        overlaps(m, addr, len.max(1))
+            && (addr != m.addr || page_up(len) != page_up(m.len) || flags & MREMAP_DONTUNMAP != 0)
+    });
+    if part && addr & (PAGE - 1) == 0 {
+        crate::sup::stop(nr::MREMAP, addr);
+    }
     let i = (0..t.n).find(|&i| t.m[i].addr == addr)?;
     flush(i);
     let m = t.m[i];
@@ -840,9 +842,6 @@ pub fn on_mremap_after(new: u64, newlen: u64, prev: Option<(u64, u64, i64)>, ok:
         return;
     }
     let t = MAPS.get();
-    if t.n == MAX_MAPS {
-        return;
-    }
     let shadow = new_shadow(newlen);
     let m = Map {
         addr: new,
@@ -1061,9 +1060,11 @@ pub fn closed(ino: u64) {
     });
 }
 
-/// The process is exiting: record what its shared mappings still hold unrecorded.
-/// Also before `execve` (the image's mappings go away). Not in a vfork child: the tracked
-/// mappings are the parent's, which keeps them.
+/// The process is exiting (`exit`, `exit_group`, a thread's `exit`, a signal's default
+/// action): record what its shared mappings still hold unrecorded. Also before `execve` (the
+/// image's mappings go away). Not in a vfork child: the tracked mappings are the parent's,
+/// which keeps them. An end the runtime does not see (a `SIGKILL`, the end of the run, a
+/// crash) is logged by the supervisor from the same table (`sup::maps`).
 pub fn on_exit() {
     if crate::state::in_vfork_child() {
         return;

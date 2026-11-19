@@ -29,8 +29,7 @@
 //! forced commit, which writes back everything first (`data=ordered`: a commit carries the
 //! data its metadata refers to, and the kernel may have flushed any file by then).
 //!
-//! At the crash: unlogged pages of shared mappings join the page cache as dirty data; then
-//! every dirty block that is written in place (allocated at the last commit, not freed)
+//! At the crash: every dirty block that is written in place (allocated at the last commit, not freed)
 //! survives as old or new by one draw per block. Bytes of a failed writeback never reach
 //! `disk`.
 //!
@@ -587,12 +586,7 @@ pub fn cut_for(ops: &[Op], seed: u64, key: u64) -> Result<(usize, usize), String
     Ok((f.min(n), draw_cut(ops, f, seed, key)))
 }
 
-pub fn materialise(
-    log: &super::log::OpLog,
-    seed: u64,
-    key: u64,
-    extra: &[(u64, u64, Vec<u8>)],
-) -> Result<Tree, String> {
+pub fn materialise(log: &super::log::OpLog, seed: u64, key: u64) -> Result<Tree, String> {
     let ops = &log.ops;
     let t0 = std::time::Instant::now();
     // One replay without a cut, keeping a state at or before the last forced commit.
@@ -614,7 +608,7 @@ pub fn materialise(
         m = state;
     }
     let t2 = std::time::Instant::now();
-    let tree = finish(m, ops, seed, key, extra)?;
+    let tree = finish(m, ops, seed, key)?;
     if std::env::var_os("PATINA_TIMING").is_some() {
         eprintln!(
             "patina-timing materialise records={} base={nbase} last_forced={f} cut={k} resumed_at={} replay_us={} tail_us={} crash_us={}",
@@ -636,29 +630,15 @@ pub fn materialise_at(
     cut: Option<usize>,
     seed: u64,
     key: u64,
-    extra: &[(u64, u64, Vec<u8>)],
 ) -> Result<Tree, String> {
     let ops = &log.ops;
     let (m, _) = run(ops, cut)?;
-    finish(m, ops, seed, key, extra)
+    finish(m, ops, seed, key)
 }
 
-/// The crash itself: the 5-second rule at the crash time, unlogged mapping pages, tears.
-fn finish(
-    mut m: Ext4,
-    ops: &[Op],
-    seed: u64,
-    key: u64,
-    extra: &[(u64, u64, Vec<u8>)],
-) -> Result<Tree, String> {
+/// The crash itself: the 5-second rule at the crash time, tears.
+fn finish(mut m: Ext4, ops: &[Op], seed: u64, key: u64) -> Result<Tree, String> {
     m.timer(crash_time(ops));
-    for (ino, off, bytes) in extra {
-        if m.live.has(*ino) {
-            m.live.write(*ino, *off, bytes)?;
-            m.data(*ino).dirty.set(*off, off + bytes.len() as u64);
-            m.dirty_inos.insert(*ino);
-        }
-    }
     // Tear: each dirty block written in place is old or new.
     let inos: Vec<u64> = m.dirty_inos.iter().copied().collect();
     for ino in inos {

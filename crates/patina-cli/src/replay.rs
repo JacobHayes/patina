@@ -124,6 +124,16 @@ fn replay_into(
                 result["digest"]
             ))
         }
+        // The self-check reads the exported work trees, which the logs do not hold (a run
+        // recorded without one has nothing to compare).
+        None if !recorded["self_check"].is_null()
+            && recorded["self_check"]["verdict"] != result["self_check"]["verdict"] =>
+        {
+            Some(format!(
+                "logs equal, but the operation log's self-check differs: recorded {}, replayed {}",
+                recorded["self_check"]["verdict"], result["self_check"]["verdict"]
+            ))
+        }
         None => None,
     };
     let key = |r: &serde_json::Value| crate::signature::check_key(&r["check"]);

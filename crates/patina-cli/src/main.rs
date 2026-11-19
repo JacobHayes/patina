@@ -217,5 +217,5 @@ fn replay(a: &Args) -> Result<ExitCode, Fail> {
         }
         result::print_human(&r.result, &r.dir);
     }
-    Ok(ExitCode::from(c.outcome.exit()))
+    Ok(ExitCode::from(r.result["exit"].as_u64().unwrap_or(2) as u8))
 }

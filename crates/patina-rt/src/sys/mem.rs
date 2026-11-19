@@ -314,7 +314,17 @@ pub fn handle(call: &mut dyn Call) -> Action {
     let r = match call.nr() {
         nr::MMAP => {
             // Shared writable mappings of /work files are tracked by the durability log.
+            // MAP_FIXED replaces what was mapped there: its stores are logged first, as for
+            // munmap.
+            let fixed = call.arg(3) & (MAP_FIXED | MAP_FIXED_NOREPLACE) == MAP_FIXED
+                && !hits_runtime(call.arg(0), page_up(call.arg(1)));
+            if fixed {
+                crate::oplog::on_munmap(call.arg(0), call.arg(1));
+            }
             let r = mmap(call);
+            if r >= 0 && fixed {
+                crate::oplog::on_munmap_done(r as u64, call.arg(1));
+            }
             if r >= 0 {
                 let a = args(call);
                 crate::oplog::on_mmap(r as u64, a[1], a[3], a[4] as i32 as i64, a[5]);
@@ -335,7 +345,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             let prev = if hits_runtime(old, oldlen.max(1)) {
                 None
             } else {
-                crate::oplog::on_mremap_before(old, oldlen)
+                crate::oplog::on_mremap_before(old, oldlen, call.arg(3))
             };
             if !hits_runtime(old, oldlen.max(1)) {
                 crate::plans::changing(old, oldlen.max(1));

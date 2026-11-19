@@ -4,7 +4,8 @@
 //!   links, symlinks, FIFOs, modes and user xattrs (inode numbers then follow that order).
 //! - `write_base`: the initial `/work` as base records (`seq` 0, durable) at the head of the
 //!   operation log, so the log alone determines every post-crash tree.
-//! - `crash_verdict`: `Op::CrashPoint` ends the incarnation; the caller kills every guest
+//! - `crash_verdict`: `Op::CrashPoint` ends the incarnation; the caller logs every process's
+//!   shared mappings (`maps`) and the `Crash` record (`append_crash`), then kills every guest
 //!   process (`finish` kills the whole PID namespace, which holds for any number of
 //!   processes) and then exports the live tree.
 //! - `export`: the live `/work` as a tree archive on descriptor 3006, at every finish, after
@@ -49,31 +50,50 @@ fn pwrite_all(fd: i32, mut off: u64, b: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Append one operation record (with its bytes) at the end of the log, as the runtime does
+/// (`rt::oplog::put_rec`): `seq` and `pid` say where in the run it belongs (0, 0 for the base).
+pub fn append(
+    ctl: &Ctl,
+    kind: OpKind,
+    ino: u64,
+    a: [u64; 6],
+    data: &[u8],
+    seq: u64,
+    pid: u32,
+) -> Result<(), String> {
+    let doff = ctl.opdata_len.load(Relaxed);
+    pwrite_all(FD_OPLOG_DATA, doff, data)?;
+    ctl.opdata_len.store(doff + data.len() as u64, Relaxed);
+    let r = OpRec {
+        seq,
+        vclock_ns: ctl.vclock_ns.load(Relaxed),
+        kind: kind as u32,
+        pid,
+        ino,
+        a,
+        data_off: doff,
+        data_len: data.len() as u64,
+    };
+    let off = ctl.oplog_len.load(Relaxed);
+    pwrite_all(FD_OPLOG_META, off, r.as_bytes())?;
+    ctl.oplog_len
+        .store(off + r.as_bytes().len() as u64, Relaxed);
+    Ok(())
+}
+
+/// The `Crash` record that ends the log of a crashed incarnation (`kind`: `CRASH_*`), after
+/// the shared mappings of every process were logged (`maps`).
+pub fn append_crash(ctl: &Ctl, kind: u64, seq: u64, pid: u32) -> Result<(), String> {
+    append(ctl, OpKind::Crash, 0, [kind, 0, 0, 0, 0, 0], &[], seq, pid)
+}
+
 struct Writer<'a> {
     ctl: &'a Ctl,
 }
 
 impl Writer<'_> {
     fn rec(&self, kind: OpKind, ino: u64, a: [u64; 6], data: &[u8]) -> Result<(), String> {
-        let doff = self.ctl.opdata_len.load(Relaxed);
-        pwrite_all(FD_OPLOG_DATA, doff, data)?;
-        self.ctl.opdata_len.store(doff + data.len() as u64, Relaxed);
-        let r = OpRec {
-            seq: 0,
-            vclock_ns: self.ctl.vclock_ns.load(Relaxed),
-            kind: kind as u32,
-            pid: 0,
-            ino,
-            a,
-            data_off: doff,
-            data_len: data.len() as u64,
-        };
-        let off = self.ctl.oplog_len.load(Relaxed);
-        pwrite_all(FD_OPLOG_META, off, r.as_bytes())?;
-        self.ctl
-            .oplog_len
-            .store(off + r.as_bytes().len() as u64, Relaxed);
-        Ok(())
+        append(self.ctl, kind, ino, a, data, 0, 0)
     }
 }
 
