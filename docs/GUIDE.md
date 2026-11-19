@@ -1753,19 +1753,20 @@ patina sweep --seeds 1..20 --preempt points --fault compute-gap=2..64 --out pati
 new: failure exit: exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/race/seed-2)
 sweep: replaying the first seed of 1 finding
 sweep: 7.2 MiB kept in /tmp/src/patina/patina-out/race
-patina sweep: 20 runs, 10 findings in 1 group, 10 ok   (0.4s, 8 jobs)
-outcomes: failure 10, ok 10
-load-time points: 45031 taken in 20 runs; 1 of 1 files planned
+patina sweep: 20 runs, 9 findings in 1 group, 11 ok   (0.4s, 8 jobs)
+outcomes: failure 9, ok 11
+load-time points: 55523 taken in 20 runs; 1 of 1 files planned
 
 failure exit: exit 1
-  10 of 20 runs   first: seed 2   replayed: identical
+  9 of 20 runs   first: seed 2   replayed: identical
   rerun:  patina run --seed 2 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
   replay: patina replay /tmp/src/patina/patina-out/race/seed-2
 ```
 
 `patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
 share of its sites patched and of its text left dark, and anything left without points.
-`result.json`'s `rewrite` has the counts (`points`, `applied`, `dropped`, `unplanned`, `cpuid`)
+`result.json`'s `rewrite` has the counts (`points`, `applied`, `dropped`, `unplanned`, `cpuid`,
+`interior`)
 and one entry per file the program mapped executable (`images`: `path`, `sha256`, `status`,
 and for a planned file `sites`, `patches`, `covered_pct`, `back_edges_covered_pct`,
 `dark_pct`, `cpuid_patched`, `cpuid_unpatched`, `cache`, `rewrite_ms`).
@@ -1787,12 +1788,13 @@ it is the same on every host; each is checked by an independent verifier before 
 and kept in `~/.cache/patina/plans/` (`$XDG_CACHE_HOME`; at most 4 GiB, the least recently used
 removed first; deleting it costs only time). Patina plans the program and the libraries it
 names before the run starts, and any other file (a `dlopen`, an `execve`) when it is mapped.
-The first run pays for making them: 0.4 s for ripgrep, 0.6 s for CPython and its libraries,
-11 s for headless Chromium (49 files); later runs read them (docs/EVIDENCE.md).
+The first run pays for making them: 0.5 s for ripgrep, 0.8 s for CPython and its libraries,
+14 s for headless Chromium (49 files); later runs read them (docs/EVIDENCE.md).
 
 **What is not covered.**
-- About 15% of sites in typical code (13 to 27% of loop back-edges) have no patch that fits: a
-  count must replace one whole instruction of 5 bytes or more where the flags are dead.
+- About 1 to 3% of sites in typical code (as many loop back-edges) have no patch that fits: a
+  count must go where the flags are dead, in place of one instruction of 5 bytes or more or of
+  a short run of straight-line instructions that no known branch enters.
   Text that no control flow or unwind entry reaches is *dark* and never patched (22% of
   Chromium's: code reached only through tables).
 - Code made at run time (JIT output, memory made executable after it was mapped) gets no
@@ -1804,9 +1806,11 @@ The first run pays for making them: 0.4 s for ripgrep, 0.6 s for CPython and its
 addresses, never a rewritten copy's. `/proc/self/maps` shows the original files; each library
 is followed by a gap where its copy's extra code lives, so libraries load at other addresses
 than without points. A program that reads its own code reads the rewritten bytes (a checksum
-of its text differs from native). `cpuid` in planned code answers the fields that name a core
-(APIC, node and compute-unit ids) as core 0's, so a run does not depend on the core it was
-given; a `cpuid` in dark or JIT code is the CPU's.
+of its text differs from native). A jump into the middle of a rewritten run of instructions
+from code Patina could not follow (a jump table, a computed goto) traps and goes on at that
+instruction, as unpatched (counted `interior`; no point, no virtual time). `cpuid` in planned
+code answers the fields that name a core (APIC, node and compute-unit ids) as core 0's, so a
+run does not depend on the core it was given; a `cpuid` in dark or JIT code is the CPU's.
 
 ## Hosts
 

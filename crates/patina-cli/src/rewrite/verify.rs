@@ -5,12 +5,17 @@
 //! refusals) and checks that
 //!   - the plan is for this file, its cell is the runtime's, and its trampolines lie outside
 //!     the image;
-//!   - every byte the plan changes lies in a patched instruction, and every patched instruction
-//!     is one whole instruction of code found here, that no known branch enters, no code reads,
-//!     and no other decode overlaps or disagrees with;
+//!   - every byte the plan changes lies in a patch, and every patched instruction is one whole
+//!     instruction of code found here, that no known branch enters, no code reads, and no other
+//!     decode overlaps or disagrees with;
 //!   - every patch is a jump, call or same-condition branch to its own trampoline, and every
 //!     trampoline counts, traps to its own `ud2`, and goes on to the original target, or runs an
-//!     exact copy of the instruction (same operand address) and returns right after it;
+//!     exact copy of each patched instruction (same operand address; a closing direct branch to
+//!     the same target) and returns right after them;
+//!   - a group (a patch of several instructions): all straight-line but a last direct branch;
+//!     at every interior boundary (each instruction start but the first) a byte that faults
+//!     whatever follows it, no known branch target and no address taken, and an entry that
+//!     resumes at the copy of that instruction; no other entry;
 //!   - no site table entry points outside the plan.
 //!
 //! The rewriter's flag liveness and its taint are not re-checked here (its unit tests cover
@@ -18,7 +23,10 @@
 //! trampoline.
 
 use super::elf::{Elf, Text};
-use super::plan::{Plan, CELL, KIND_BEFORE, KIND_CPUID, KIND_JUMP, NO_COPY, PAGE};
+use super::plan::{
+    Entry, Plan, CELL, KIND_BEFORE, KIND_CPUID, KIND_INTERIOR, KIND_JUMP, NO_COPY, PAD_PREFIX,
+    PAGE, TRAP_BYTES,
+};
 use iced_x86::{
     Code as Op, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
 };
@@ -226,33 +234,53 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
     let more = f.linear();
     f.flow(more);
 
-    // The site table: in order, disjoint, inside the plan.
+    // The site table: in order of the trampolines, disjoint, inside the plan; the entries in
+    // address order, each a cpuid or an interior boundary some group has.
     let mut ranges: Vec<(u64, u64)> = vec![];
     let mut tramps: Vec<(u64, u64)> = vec![];
+    let mut interiors: Vec<(u64, u32)> = vec![];
+    if plan.sites.windows(2).any(|w| w[0].tramp > w[1].tramp) {
+        bad.push("the site rows are not in order of their trampolines".into());
+    }
     for s in &plan.sites {
-        let end = s.addr.saturating_add(s.len as u64);
-        if ranges.last().is_some_and(|&(_, e)| e > s.addr) {
-            bad.push(format!(
-                "site {:#x}: out of order or overlapping the previous one",
-                s.addr
-            ));
-        }
-        ranges.push((s.addr, end));
-        if s.kind == KIND_CPUID {
-            if let Err(e) = check_cpuid(&f, plan, s) {
-                bad.push(format!("site {:#x}: {e}", s.addr));
-            }
-            continue;
-        }
+        ranges.push((s.addr, s.addr.saturating_add(s.len as u64)));
         let (t0, t1) = (s.tramp as u64, s.tramp as u64 + s.tramp_len as u64);
         if t1 > plan.tramp.len() as u64 || s.trap as u64 + 2 > s.tramp_len as u64 {
-            bad.push(format!("site {:#x}: trampoline outside the blob", s.addr));
+            bad.push(format!("site {:#x}: trampoline outside the span", s.addr));
             continue;
         }
         tramps.push((t0, t1));
-        if let Err(e) = check_site(&f, plan, s.addr, s.len as usize, s) {
-            bad.push(format!("site {:#x}: {e}", s.addr));
+        match check_site(&f, plan, s.addr, s.len as usize, s) {
+            Ok(inner) => interiors.extend(inner),
+            Err(e) => bad.push(format!("site {:#x}: {e}", s.addr)),
         }
+    }
+    if plan.entries.windows(2).any(|w| w[0].addr >= w[1].addr) {
+        bad.push("the entries are not in address order".into());
+    }
+    interiors.sort_unstable();
+    let mut listed = vec![];
+    for n in &plan.entries {
+        match n.kind {
+            KIND_CPUID => {
+                ranges.push((n.addr, n.addr.saturating_add(2)));
+                if let Err(e) = check_cpuid(&f, plan, n) {
+                    bad.push(format!("entry {:#x}: {e}", n.addr));
+                }
+            }
+            KIND_INTERIOR => listed.push((n.addr, n.to)),
+            k => bad.push(format!("entry {:#x}: unknown kind {k}", n.addr)),
+        }
+    }
+    if listed != interiors {
+        bad.push(
+            "the interior entries are not exactly the groups' interior boundaries and copies"
+                .into(),
+        );
+    }
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|w| w[0].1 > w[1].0) {
+        bad.push("two patches overlap".into());
     }
     tramps.sort_unstable();
     if tramps.windows(2).any(|w| w[0].1 > w[1].0) {
@@ -284,19 +312,45 @@ pub fn verify(data: &[u8], plan: &Plan) -> Vec<String> {
     bad
 }
 
-/// A `KIND_CPUID` site: a `cpuid` found as code, now `ud2` in place, with no trampoline.
-fn check_cpuid(f: &Finder, plan: &Plan, s: &super::plan::Site) -> Result<(), String> {
-    check_place(f, s.addr, s.len as usize)?;
-    if f.insn(s.addr).map(|i| i.mnemonic()) != Some(Mnemonic::Cpuid) || s.len != 2 {
-        return Err("a cpuid site that is not a cpuid".into());
+/// A `KIND_CPUID` entry: a `cpuid` found as code, now `ud2` in place.
+fn check_cpuid(f: &Finder, plan: &Plan, n: &Entry) -> Result<(), String> {
+    check_place(f, n.addr, 2)?;
+    if f.insn(n.addr).map(|i| i.mnemonic()) != Some(Mnemonic::Cpuid) {
+        return Err("a cpuid entry that is not a cpuid".into());
     }
-    if plan_bytes(plan, s.addr, 2) != Some(&[0x0f, 0x0b][..]) {
+    if plan_bytes(plan, n.addr, 2) != Some(&[0x0f, 0x0b][..]) {
         return Err("the cpuid is not replaced by ud2".into());
     }
-    if s.tramp_len != 0 || s.trap != 0 || s.copy != NO_COPY {
-        return Err("a cpuid site with a trampoline".into());
+    if n.to != 0 {
+        return Err("a cpuid entry with a trampoline".into());
     }
     Ok(())
+}
+
+/// Instructions that fault in 64-bit user mode before they do anything.
+fn faults(i: &Instruction) -> bool {
+    use Mnemonic::*;
+    matches!(
+        i.mnemonic(),
+        Int3 | Hlt | Cli | Sti | In | Out | Insb | Insw | Insd | Outsb | Outsw | Outsd
+    )
+}
+
+/// May `i` run as a copy in a trampoline: straight-line, not a landing pad marker or `hlt`,
+/// and none of the instructions the runtime answers or patches in place.
+fn straight(i: &Instruction) -> bool {
+    use Mnemonic::*;
+    i.flow_control() == FlowControl::Next
+        && !matches!(
+            i.mnemonic(),
+            Hlt | Endbr64 | Endbr32 | Cpuid | Rdrand | Rdseed | Rdpid | Pause | Rdtsc | Rdtscp
+        )
+        // An x87 instruction records its own address (`fnstenv`, `fxsave` and a signal
+        // frame's state show the last one's): a copy's would be the trampoline's.
+        && !i.cpuid_features().iter().any(|f| {
+            use iced_x86::CpuidFeature::*;
+            matches!(f, FPU | FPU287 | FPU287XL_ONLY | FPU387 | FPU387SL_ONLY)
+        })
 }
 
 /// The patched instruction at `a`, `n` bytes, is one found as code, and nothing else decodes,
@@ -331,17 +385,18 @@ fn check_place(f: &Finder, a: u64, n: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// A site's patch and trampoline; for a group, its interior entries as they must be listed
+/// (address, trampoline offset of the copy).
 fn check_site(
     f: &Finder,
     plan: &Plan,
     a: u64,
     n: usize,
     s: &super::plan::Site,
-) -> Result<(), String> {
-    check_place(f, a, n)?;
+) -> Result<Vec<(u64, u32)>, String> {
     let (i, o) = f.at(a).ok_or("not in an executable section")?;
     let seen = &f.seen[i];
-    let orig = f.insn(a).ok_or("undecodable")?;
+    let ob = f.elf.bytes(&seen.t);
     let patched = plan_bytes(plan, a, n).ok_or("patched bytes not in the plan's pages")?;
     let pi = decode(patched, a);
     let t = plan.tramp_vaddr + s.tramp as u64;
@@ -360,10 +415,13 @@ fn check_site(
         return Err("the count does not branch to the site's trap".into());
     }
     let r = dec.len() + je.len();
+    let mut inner = vec![];
     // The row, then S: ud2; jmp R, ending the trampoline.
     let mut row_end = r;
     match s.kind {
         KIND_JUMP => {
+            check_place(f, a, n)?;
+            let orig = f.insn(a).ok_or("undecodable")?;
             let same = pi.len() == n && pi.code() == orig.code();
             let branch = matches!(
                 orig.flow_control(),
@@ -391,47 +449,110 @@ fn check_site(
             row_end += j.len();
         }
         KIND_BEFORE => {
-            let pad = matches!(orig.mnemonic(), Mnemonic::Endbr64 | Mnemonic::Endbr32);
-            if orig.flow_control() != FlowControl::Next || orig.mnemonic() == Mnemonic::Hlt || pad {
-                return Err("the copied instruction is not straight-line".into());
+            // The patched instructions, decoded here: each found as code and not entered,
+            // together exactly the patch.
+            let mut ins = vec![];
+            let mut k = 0;
+            while k < n {
+                let x = a + k as u64;
+                let i = f.insn(x).ok_or("undecodable")?;
+                check_place(f, x, i.len())?;
+                ins.push((k, i));
+                k += i.len();
             }
+            if k != n {
+                return Err("the patch does not end at an instruction boundary".into());
+            }
+            let last = ins.len() - 1;
+            for (j, &(k, ref i)) in ins.iter().enumerate() {
+                let raw = &ob[o + k..o + k + i.len()];
+                let plain = matches!(
+                    raw,
+                    [0x70..=0x7f | 0xeb, _] | [0x0f, 0x80..=0x8f, _, _, _, _] | [0xe9, _, _, _, _]
+                );
+                if !(straight(i) || (j == last && plain)) {
+                    return Err("a copied instruction is not straight-line".into());
+                }
+            }
+            // The patch: `2e` prefixes, a jump to the trampoline, `int3` filler.
+            let p = patched.iter().take_while(|&&b| b == PAD_PREFIX).count();
             if pi.code() != Op::Jmp_rel32_64
-                || pi.len() != 5
+                || pi.len() != p + 5
                 || pi.near_branch_target() != t
-                || patched[5..].iter().any(|&b| b != 0xcc)
+                || patched[p + 5..].iter().any(|&b| b != 0xcc)
             {
                 return Err("the patch is not a jump to its trampoline padded with int3".into());
             }
             if s.copy as usize != r {
                 return Err("the copy is not where the site table says".into());
             }
-            let c = ti(r);
-            let ob = f.elf.bytes(&seen.t);
-            let (cb, obytes) = (&tb[r..(r + n).min(tb.len())], &ob[o..o + n]);
-            let disp = if orig.is_ip_rel_memory_operand() {
-                let mut d = Decoder::with_ip(64, obytes, a, DecoderOptions::NONE);
-                let x = d.decode();
-                let k = d.get_constant_offsets(&x);
-                Some(k.displacement_offset()..k.displacement_offset() + k.displacement_size())
-            } else {
-                None
-            };
-            let differs = (0..n).any(|k| {
-                cb.get(k) != Some(&obytes[k]) && !disp.as_ref().is_some_and(|d| d.contains(&k))
-            });
-            if c.len() != n || c.code() != orig.code() || differs {
-                return Err("the copy differs from the instruction".into());
+            // Each interior boundary: a byte that faults, no known entry, an entry row.
+            for &(k, _) in &ins[1..] {
+                let at = decode(&patched[k..], a + k as u64);
+                if !TRAP_BYTES.contains(&patched[k]) || !faults(&at) {
+                    return Err(format!(
+                        "interior boundary {:#x} holds {:#04x}, which does not fault",
+                        a + k as u64,
+                        patched[k]
+                    ));
+                }
+                if seen.mark[o + k] & 5 != 0 {
+                    return Err(format!(
+                        "a known branch or address names interior boundary {:#x}",
+                        a + k as u64
+                    ));
+                }
+                inner.push((a + k as u64, s.tramp + (r + k) as u32));
             }
-            if orig.is_ip_rel_memory_operand()
-                && c.ip_rel_memory_address() != orig.ip_rel_memory_address()
-            {
-                return Err("the copy addresses other memory than the instruction".into());
+            // The copies, each at its offset in the patch; a closing branch in its rel32 form.
+            let mut end = r;
+            for &(k, ref orig) in &ins {
+                let at = r + k;
+                let c = ti(at);
+                let obytes = &ob[o + k..o + k + orig.len()];
+                if orig.flow_control() != FlowControl::Next {
+                    let cb = &tb[at..(at + 2).min(tb.len())];
+                    let form = matches!(cb, [0xe9, _] | [0x0f, 0x80..=0x8f]);
+                    if !form
+                        || c.mnemonic() != orig.mnemonic()
+                        || c.condition_code() != orig.condition_code()
+                        || c.op0_kind() != OpKind::NearBranch64
+                        || c.near_branch_target() != orig.near_branch_target()
+                    {
+                        return Err("the copied branch differs from the instruction".into());
+                    }
+                    end = at + c.len();
+                    continue;
+                }
+                let cb = &tb[at..(at + orig.len()).min(tb.len())];
+                let disp = if orig.is_ip_rel_memory_operand() {
+                    let mut d = Decoder::with_ip(64, obytes, a + k as u64, DecoderOptions::NONE);
+                    let x = d.decode();
+                    let ko = d.get_constant_offsets(&x);
+                    Some(
+                        ko.displacement_offset()..ko.displacement_offset() + ko.displacement_size(),
+                    )
+                } else {
+                    None
+                };
+                let differs = (0..orig.len()).any(|q| {
+                    cb.get(q) != Some(&obytes[q]) && !disp.as_ref().is_some_and(|d| d.contains(&q))
+                });
+                if c.len() != orig.len() || c.code() != orig.code() || differs {
+                    return Err("the copy differs from the instruction".into());
+                }
+                if orig.is_ip_rel_memory_operand()
+                    && c.ip_rel_memory_address() != orig.ip_rel_memory_address()
+                {
+                    return Err("the copy addresses other memory than the instruction".into());
+                }
+                end = at + c.len();
             }
-            let j = ti(r + n);
+            let j = ti(end);
             if j.mnemonic() != Mnemonic::Jmp || j.near_branch_target() != a + n as u64 {
-                return Err("the trampoline does not return right after the instruction".into());
+                return Err("the trampoline does not return right after the patch".into());
             }
-            row_end += n + j.len();
+            row_end = end + j.len();
         }
         k => return Err(format!("unknown kind {k}")),
     }
@@ -447,5 +568,5 @@ fn check_site(
     if row_end + ud2.len() + back.len() != tb.len() {
         return Err("the trampoline's length is not its instructions'".into());
     }
-    Ok(())
+    Ok(inner)
 }

@@ -48,6 +48,6 @@ for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
 print(s.run(sys.argv[1:], stdout=s.DEVNULL, stderr=s.DEVNULL).returncode)' "$o/$g.few")
     [ "$st" = -4 ] || die "$g: a copy with 1000 events ended with $st, not SIGILL: its counts did not run"
     rm "$o/$g.rw" "$o/$g.few" "$o/$g.plan2"
-    awk -v g="$g" '$1 == "sites" && $2 == "back-branch" {print g ": back-branches " $NF " (" $4 " " $5 ")"}' "$o/$g.report"
+    awk -v g="$g" '$1 == "sites" && $2 == "back-branch" {print g ": back-branches " $NF " (" $4 " " $5 " " $7 ")"}' "$o/$g.report"
 done
 echo "$RUNS_EACH runs each: identical output"

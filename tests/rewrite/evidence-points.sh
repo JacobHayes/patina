@@ -2,7 +2,8 @@
 # larger stock programs run under Patina with the runtime applying their plans and their
 # libraries'. Per program: the output equals the native run's; the same seed twice gives one
 # digest; wall time without points, with points on a cold plan cache (each plan made and
-# verified in the run) and warm; the points taken; the program's own coverage.
+# verified in the run) and warm; the points taken; the jumps into the interior of a group
+# patch; the program's own coverage.
 # Programs: ripgrep 15.2.0 (the musl static-PIE release, fetched, checked by SHA-256), gofmt of
 # the Go toolchain on PATH, the system python3, and headless Chromium from Playwright's cache if
 # present (CHROMIUM=FILE overrides); PostgreSQL if `initdb` is installed.
@@ -52,7 +53,7 @@ me = next(i for i in im if i["path"].rsplit("/", 1)[1] == image)
 planned = sum(i["status"] == "planned" for i in im)
 rw = warm["rewrite"]
 print("\t".join(str(x) for x in [name, "ok", "identical", f"{off} ms", f"{c} ms", f"{w} ms", f"{made} ms",
-      rw["points"], f"{me.get('covered_pct')}% of {me.get('sites')} sites, back-edges {me.get('back_edges_covered_pct')}%, dark {me.get('dark_pct')}%",
+      rw["points"], rw["interior"], f"{me.get('covered_pct')}% of {me.get('sites')} sites, back-edges {me.get('back_edges_covered_pct')}%, dark {me.get('dark_pct')}%",
       f"{planned} of {len(im)} images planned, {rw['unplanned']} unplanned, {rw['dropped']} dropped, {rw['cpuid']} cpuid"]))
 EOF
     tail -1 "$o/rows.tsv"
@@ -97,5 +98,5 @@ else
     echo "postgresql: not installed (skipped)"
 fi
 
-echo "== program	output	same seed	wall off	points cold	points warm	plans made	points	coverage (program)	images"
+echo "== program	output	same seed	wall off	points cold	points warm	plans made	points	interior entries	coverage (program)	images"
 cat "$o/rows.tsv"

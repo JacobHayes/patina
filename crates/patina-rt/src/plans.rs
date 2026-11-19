@@ -9,7 +9,8 @@
 //!   the plan file. Its page directory and site rows are mapped in the runtime's own region.
 //! - **A point**: a trampoline's `ud2` is a compute point (`compute::point`), then the program
 //!   goes on after it. A `ud2` written over a `cpuid` is answered with core 0's identity
-//!   (`cpuid`).
+//!   (`cpuid`). A trap at an interior boundary of a group (a jump there from code the rewriter
+//!   could not see) resumes at the copy of that instruction (`entry`).
 //! - **What the program sees** (`shown`): a stop in a trampoline is reported at the original
 //!   address (signal frames, records); `/proc/self/maps` shows the original file for patched
 //!   pages and omits trampolines (`Maps`).
@@ -224,10 +225,39 @@ fn fstat_id(fd: u64) -> (u64, u64) {
     crate::sys::fs::fstat_raw(fd as i64).map_or((0, 0), |st| (st.dev(), st.ino()))
 }
 
-fn run(img: &Img, k: u64) -> (u64, u64, u64) {
-    let r = img.hdr + img.w[R_RUNS] + k * RUN_BYTES as u64;
+/// Map the first `n` trampoline runs of `plan` at `tramp`; when one cannot be, those before it
+/// are unmapped and the answer is false.
+fn tramps(tramp: u64, w: &[u64; REPLY_WORDS], plan: u64, n: u64) -> bool {
+    let row = |k: u64| {
+        let mut b = [0u8; RUN_BYTES];
+        let ok = crate::insn::scan::pread(plan, &mut b, w[R_TRUNS] + k * RUN_BYTES as u64);
+        let g = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        ok.then(|| (tramp + g(0), g(8), g(16)))
+    };
+    let x = PROT_READ | PROT_EXEC;
+    for k in 0..n {
+        let mapped = row(k).is_some_and(|(a, len, off)| {
+            mmap(a, len, x, MAP_PRIVATE | MAP_FIXED_NOREPLACE, plan, off)
+        });
+        if !mapped {
+            for (a, len, _) in (0..k).filter_map(row) {
+                unsafe { sc2(nr::MUNMAP, a, len) };
+            }
+            return false;
+        }
+    }
+    true
+}
+
+/// Row `k` of the page directory (`R_RUNS`) or the trampoline directory (`R_TRUNS`).
+fn run_in(img: &Img, dir: usize, k: u64) -> (u64, u64, u64) {
+    let r = img.hdr + img.w[dir] + k * RUN_BYTES as u64;
     let g = |o| unsafe { core::ptr::read_unaligned((r + o) as *const u64) };
     (g(0), g(8), g(16))
+}
+
+fn run(img: &Img, k: u64) -> (u64, u64, u64) {
+    run_in(img, R_RUNS, k)
 }
 
 /// `[a, a + len)` of `fd` at file offset `off` was just mapped executable with `prot` (and
@@ -295,8 +325,7 @@ fn apply(
             // The original file, hidden, for putting its pages back.
             let orig_fd = unsafe { sc3(nr::FCNTL, fd, 1030, proto::layout::FD_RT_DYN as u64) };
             let fixed = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
-            let x = PROT_READ | PROT_EXEC;
-            if orig_fd < 0 || !mmap(tramp, w[R_TRAMP_LEN], x, fixed, plan, w[R_TRAMP_OFF]) {
+            if orig_fd < 0 || !tramps(tramp, w, plan, w[R_NTRUNS]) {
                 if orig_fd >= 0 {
                     unsafe { sc1(nr::CLOSE, orig_fd as u64) };
                 }
@@ -357,42 +386,71 @@ fn site_at(pc: u64) -> Option<(&'static Img, u64)> {
     let off = (pc - img.tramp) as u32;
     let rows = img.hdr + img.w[R_SITES];
     let at = |k: u64| rows + k * SITE_BYTES as u64;
-    let tramp =
-        |k: u64| unsafe { core::ptr::read_unaligned((at(k) + SITE_TRAMP as u64) as *const u32) };
-    // The last row whose trampoline starts at or before `off` (trampolines are in row order).
+    // The last row whose trampoline starts at or before `off` (rows are in trampoline order).
     let (mut lo, mut hi) = (0, img.w[R_NSITES]);
     while lo < hi {
         let mid = (lo + hi) / 2;
-        if tramp(mid) <= off {
+        if field::<u32>(at(mid), SITE_TRAMP) <= off {
             lo = mid + 1;
         } else {
             hi = mid;
         }
     }
-    (lo > 0)
-        .then(|| (img, at(lo - 1)))
-        .filter(|&(_, r)| field::<u8>(r, SITE_KIND) != KIND_CPUID)
+    let row = at(lo.checked_sub(1)?);
+    let end = field::<u32>(row, SITE_TRAMP) + field::<u16>(row, SITE_TRAMP_LEN) as u32;
+    (off < end).then_some((img, row))
 }
 
-/// The `KIND_CPUID` site at `pc`, in an image whose plan is in force.
-fn cpuid_at(pc: u64) -> bool {
-    imgs().iter().filter(|m| !m.dropped).any(|img| {
+/// The entry row for `pc` of kind `kind`, in an image whose plan is in force.
+fn entry_at(pc: u64, kind: u8) -> Option<(&'static Img, u64)> {
+    imgs().iter().filter(|m| !m.dropped).find_map(|img| {
         let a = pc.wrapping_sub(img.bias);
-        let rows = img.hdr + img.w[R_SITES];
-        let at = |k: u64| rows + k * SITE_BYTES as u64;
-        let (mut lo, mut hi) = (0, img.w[R_NSITES]);
+        let rows = img.hdr + img.w[R_ENTRIES];
+        let at = |k: u64| rows + k * ENTRY_BYTES as u64;
+        let (mut lo, mut hi) = (0, img.w[R_NENTRIES]);
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if field::<u64>(at(mid), SITE_ADDR) < a {
+            if field::<u64>(at(mid), ENTRY_ADDR) < a {
                 lo = mid + 1;
             } else {
                 hi = mid;
             }
         }
-        lo < img.w[R_NSITES]
-            && field::<u64>(at(lo), SITE_ADDR) == a
-            && field::<u8>(at(lo), SITE_KIND) == KIND_CPUID
+        (lo < img.w[R_NENTRIES]
+            && field::<u64>(at(lo), ENTRY_ADDR) == a
+            && field::<u8>(at(lo), ENTRY_KIND) == kind)
+            .then(|| (img, at(lo)))
     })
+}
+
+/// A trap the plan answers in place: a `cpuid` (`SIGILL` at its `ud2`), or a jump into an
+/// interior boundary of a group (from the kernel: `int3` a `SIGTRAP` after it, the others a
+/// `SIGSEGV` at it with no address), which resumes at the copy of that instruction in the
+/// trampoline with every register as it was: the program goes on as unpatched. Neither is a
+/// scheduling event (no record, no virtual time); each is counted.
+fn entry(frame: &mut crate::arch::Frame, sig: i32, info: &crate::sys::sig::SigInfo) -> bool {
+    use crate::sys::sig::{SIGILL, SIGSEGV, SIGTRAP};
+    const SI_KERNEL: i32 = 0x80;
+    let (pc, code) = (frame.pc(), info[1] as u32 as i32);
+    let (at, kind) = match sig as u64 {
+        SIGILL => (pc, KIND_CPUID),
+        SIGTRAP if code == SI_KERNEL => (pc.wrapping_sub(1), KIND_INTERIOR),
+        SIGSEGV if code == SI_KERNEL && info[2] == 0 => (pc, KIND_INTERIOR),
+        _ => return false,
+    };
+    let Some((img, row)) = entry_at(at, kind) else {
+        return false;
+    };
+    if kind == KIND_CPUID {
+        cpuid(frame);
+        frame.set_pc(pc + 2);
+    } else if img.tramp_gone {
+        return false;
+    } else {
+        frame.set_pc(img.tramp + field::<u32>(row, ENTRY_TO) as u64);
+        count(proto::ctl::PLAN_INTERIOR);
+    }
+    true
 }
 
 /// A patched `cpuid` (`KIND_CPUID`): the host's answer, with the fields that name the core
@@ -462,7 +520,7 @@ pub fn shown(pc: u64) -> u64 {
 }
 
 /// A fault in program code: the trap of a trampoline is a compute point; a trampoline's count
-/// that cannot reach the cell is the program's doing (`compute-cell`).
+/// that cannot reach the cell is the program's doing (`compute-cell`); else `entry`.
 pub fn try_point(
     frame: &mut crate::arch::Frame,
     sig: i32,
@@ -473,12 +531,7 @@ pub fn try_point(
         return false;
     }
     let Some((img, row)) = site_at(pc) else {
-        if sig as u64 == crate::sys::sig::SIGILL && cpuid_at(pc) {
-            cpuid(frame);
-            frame.set_pc(pc + 2);
-            return true;
-        }
-        return false;
+        return entry(frame, sig, info);
     };
     if sig as u64 == crate::sys::sig::SIGSEGV && info[2] & !(PAGE - 1) == CELL {
         crate::compute::cell_lost(-e::EFAULT, false);
@@ -495,14 +548,18 @@ pub fn try_point(
 }
 
 /// Before the program changes `[a, a + len)` (unmaps, maps over, moves, reprotects): an image
-/// whose patched pages or trampolines that touches goes back to the original file's pages.
+/// whose patched pages or mapped trampolines that touches goes back to the original file's
+/// pages (a page of the trampolines' span that holds none is not the plan's).
 pub fn changing(a: u64, len: u64) {
     let end = a.saturating_add(len);
     for img in imgs().iter_mut() {
-        if !img.tramp_gone && a < img.tramp + img.tramp_len && img.tramp < end {
-            img.tramp_gone = true;
-        }
-        if img.dropped || !patched(img).any(|(s, e, _)| a < e && s < end) {
+        let tramps = !img.tramp_gone
+            && (0..img.w[R_NTRUNS]).any(|k| {
+                let (off, n, _) = run_in(img, R_TRUNS, k);
+                a < img.tramp + off + n && img.tramp + off < end
+            });
+        img.tramp_gone |= tramps;
+        if img.dropped || !(tramps || patched(img).any(|(s, e, _)| a < e && s < end)) {
             continue;
         }
         for (s, e, off) in patched(img) {

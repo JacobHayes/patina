@@ -63,9 +63,9 @@ rows() { # NAME REPORT
         $1 == "rewrite" { for (i = 3; i <= NF; i++) { split($i, kv, "="); r[kv[1]] = kv[2] } }
         $1 == "sites" { for (i = 3; i < NF; i++) { split($i, kv, "="); t[kv[1]] += kv[2]; if ($2 == "back-branch") b[kv[1]] = kv[2] } }
         $1 == "plan" { for (i = 2; i <= NF; i++) { split($i, kv, "="); p[kv[1]] = kv[2] } }
-        END { printf "%s\t%.1f MB\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f%%\t%s\t%s s\t%.0f MB\n", n, r["text"] / 1e6, t["found"],
-                  t["in-place"] + t["moved"] + t["shared"], t["tainted"], t["flags-live"], t["no-room"], t["far"],
-                  100 * (b["in-place"] + b["moved"] + b["shared"]) / b["found"], r["dark"], p["seconds"], p["plan-bytes"] / 1e6 }' "$2" >>"$o/rows.tsv"
+        END { printf "%s\t%.1f MB\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f%%\t%s\t%s s\t%.0f MB\t%d\t%d\n", n, r["text"] / 1e6, t["found"],
+                  t["in-place"] + t["moved"] + t["shared"] + t["grouped"], t["tainted"], t["flags-live"], t["no-room"], t["far"],
+                  100 * (b["in-place"] + b["moved"] + b["shared"] + b["grouped"]) / b["found"], r["dark"], p["seconds"], p["plan-bytes"] / 1e6, p["groups"], p["interiors"] }' "$2" >>"$o/rows.tsv"
 }
 
 # ripgrep: fetched
@@ -118,7 +118,7 @@ else
     echo "chromium: not found"
 fi
 
-echo "== program	text	sites	covered	tainted	flags-live	no-room	far	back-edges	dark	rewrite	plan"
+echo "== program	text	sites	covered	tainted	flags-live	no-room	far	back-edges	dark	rewrite	plan	groups	interiors"
 cat "$o/rows.tsv"
 echo "== shared libraries rewritten and run: $(find "$o" -path '*-lib/*.report' | wc -l)"
 

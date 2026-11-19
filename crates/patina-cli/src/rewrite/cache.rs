@@ -116,9 +116,9 @@ fn le(d: &[u8], o: usize, n: usize) -> u64 {
 }
 
 /// The fixed part of a plan's header: magic 8, version 4, machine 4, SHA-256 32, cell,
-/// trampoline address and length 8 each, then the counts of page runs, sites, counts and the
-/// build's bytes, 4 each.
-const FIXED: usize = 88;
+/// trampolines' address and span 8 each, then the counts of page runs, trampoline runs, sites,
+/// entries, counts and the build's bytes, 4 each.
+const FIXED: usize = 96;
 
 /// Check the header of the plan file `f` (length `len`) for the file `sha` and build `build`,
 /// and find what the runtime needs: the reply's words but `R_STATUS` and `R_VADDR`, and where
@@ -126,40 +126,61 @@ const FIXED: usize = 88;
 fn header(f: &File, len: u64, sha: &[u8; 32], build: &str) -> Res<([u64; REPLY_WORDS], u64)> {
     let mut h = [0u8; FIXED];
     f.read_exact_at(&mut h, 0).map_err(|e| e.to_string())?;
-    let (np, ns, nb) = (le(&h, 72, 4), le(&h, 76, 4), le(&h, 84, 4));
+    let (np, nt, ns, ne, nb) = (
+        le(&h, 72, 4),
+        le(&h, 76, 4),
+        le(&h, 80, 4),
+        le(&h, 84, 4),
+        le(&h, 92, 4),
+    );
+    let span = le(&h, 64, 8);
     if &h[..8] != MAGIC
         || le(&h, 8, 4) != VERSION as u64
         || le(&h, 12, 4) != super::elf::EM_X86_64 as u64
         || h[16..48] != sha[..]
         || le(&h, 48, 8) != CELL
         || nb != build.len() as u64
-        || np > len / PAGE
+        || np + nt > len / PAGE
         || ns > len
+        || ne > len
+        || !span.is_multiple_of(PAGE)
     {
         return Err("header".into());
     }
-    let mut rest = vec![0u8; nb as usize + RUN_BYTES * np as usize];
+    let mut rest = vec![0u8; nb as usize + RUN_BYTES * (np + nt) as usize];
     f.read_exact_at(&mut rest, FIXED as u64)
         .map_err(|e| e.to_string())?;
     if &rest[..nb as usize] != build.as_bytes() {
         return Err("build".into());
     }
     let runs = FIXED as u64 + nb;
-    let sites = runs + (RUN_BYTES as u64) * np;
-    let counts = sites + (SITE_BYTES as u64) * ns;
-    let mut end = counts.next_multiple_of(PAGE);
+    let truns = runs + (RUN_BYTES as u64) * np;
+    let sites = truns + (RUN_BYTES as u64) * nt;
+    let entries = sites + (SITE_BYTES as u64) * ns;
+    let counts = entries + (ENTRY_BYTES as u64) * ne;
+    let mut end = counts;
     let mut hdr = None;
-    for k in 0..np as usize {
+    let mut tlast = 0;
+    for k in 0..(np + nt) as usize {
         let r = &rest[nb as usize + RUN_BYTES * k..];
         let (va, n, off) = (le(r, 0, 8), le(r, 8, 8), le(r, 16, 8));
-        if off % PAGE != 0 || va % PAGE != 0 || n % PAGE != 0 || off < end || n == 0 {
+        let tramp = k >= np as usize;
+        if off % PAGE != 0
+            || va % PAGE != 0
+            || n % PAGE != 0
+            || off < end
+            || n == 0
+            || (tramp && (va < tlast || va.saturating_add(n) > span))
+        {
             return Err("page directory".into());
         }
+        if tramp {
+            tlast = va + n;
+        }
         hdr.get_or_insert(off);
-        end = (off + n).next_multiple_of(PAGE);
+        end = off + n;
     }
-    let tramp_len = le(&h, 64, 8);
-    if end.checked_add(tramp_len) != Some(len) {
+    if end != len {
         return Err("length".into());
     }
     let mut w = [0u64; REPLY_WORDS];
@@ -169,8 +190,11 @@ fn header(f: &File, len: u64, sha: &[u8; 32], build: &str) -> Res<([u64; REPLY_W
     w[R_SITES] = sites;
     w[R_NSITES] = ns;
     w[R_TRAMP_VADDR] = le(&h, 56, 8);
-    w[R_TRAMP_OFF] = end;
-    w[R_TRAMP_LEN] = tramp_len;
+    w[R_TRAMP_LEN] = span;
+    w[R_TRUNS] = truns;
+    w[R_NTRUNS] = nt;
+    w[R_ENTRIES] = entries;
+    w[R_NENTRIES] = ne;
     Ok((w, counts))
 }
 
@@ -310,7 +334,7 @@ impl Planner {
     fn make(&self, base: &Path, data: &[u8]) -> Result<(File, u128), (u64, String)> {
         let t0 = Instant::now();
         let plan = super::make_plan(data, &self.build).map_err(|e| (NONE_REFUSED, e))?;
-        if plan.sites.is_empty() {
+        if plan.sites.is_empty() && plan.entries.is_empty() {
             return Err((NONE_EMPTY, "no site".into()));
         }
         let bad = super::verify::verify(data, &plan);
@@ -686,7 +710,7 @@ impl ImageReport {
         for c in super::points::Class::ALL {
             let n = |o: &str| self.get(&format!("{}.{o}", c.name()));
             found += n("found");
-            covered += n("in-place") + n("moved") + n("shared");
+            covered += n("in-place") + n("moved") + n("shared") + n("grouped");
         }
         let n = |o: &str| self.get(&format!("back-branch.{o}"));
         let mut v = serde_json::json!({
@@ -704,8 +728,11 @@ impl ImageReport {
             v["sites"] = found.into();
             v["patches"] = self.get("patches").into();
             v["covered_pct"] = pct(covered, found).into();
-            v["back_edges_covered_pct"] =
-                pct(n("in-place") + n("moved") + n("shared"), n("found")).into();
+            v["back_edges_covered_pct"] = pct(
+                n("in-place") + n("moved") + n("shared") + n("grouped"),
+                n("found"),
+            )
+            .into();
             v["cpuid_patched"] = self.get("cpuid-patched").into();
             v["cpuid_unpatched"] = self.get("cpuid-unpatched").into();
             v["cache"] = self.cache.into();

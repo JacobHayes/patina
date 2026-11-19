@@ -1,13 +1,15 @@
 //! `patina __rewrite`: the load-time rewriter's host side (ARCHITECTURE.md, "Load-time rewriting"; x86_64 only). It
 //! reads an ELF file and makes a plan: the patched text pages, trampolines and a site table
 //! that put a count (a switch point) at backward branches, backward calls, indirect jumps and
-//! atomic instructions. Nothing runs a plan yet; this is reachable only from this hidden
-//! command and the tests.
+//! atomic instructions. The launcher's broker (`cache.rs`) makes plans for `--preempt points`;
+//! this hidden command is for the tests and the evidence.
 //!
 //! ```text
 //! patina __rewrite FILE [--plan OUT]        plan FILE (OUT: write the plan); print its report
 //! patina __rewrite --verify FILE PLAN       check PLAN against FILE independently
-//! patina __rewrite --sites PLAN             list PLAN's patched instructions (address, length)
+//! patina __rewrite --sites PLAN             list PLAN's patched instructions (address, length;
+//!                                           each of a group's, then `interior` with the byte
+//!                                           at each interior boundary)
 //! patina __rewrite --standalone FILE OUT [--events N]
 //!                                           plan, verify, and write a copy of FILE that runs
 //!                                           natively with the plan applied (the differential);
@@ -49,7 +51,7 @@ mod x86 {
     use super::code::Code;
     use super::elf::Elf;
     use super::plan::CELL;
-    use super::plan::{Pages, Plan, PAGE};
+    use super::plan::{Pages, Plan, KIND_CPUID, KIND_INTERIOR, PAGE};
     use super::points::{self, Class, Outcome};
     use super::*;
     use std::collections::{btree_map::Entry, BTreeMap};
@@ -107,25 +109,29 @@ mod x86 {
             ("refused-invalid", f.invalid),
             ("refused-extent", f.extent),
             ("refused-read", f.read),
-            ("patches", em.sites.len() as u64 - cpuid.0),
+            ("patches", em.sites.len() as u64),
+            ("groups", em.groups),
+            ("group-interiors", em.entries.len() as u64 - cpuid.0),
             ("cpuid-patched", cpuid.0),
             ("cpuid-unpatched", cpuid.1),
-            ("trampoline-bytes", em.tramp.len() as u64),
+            ("trampoline-bytes", em.used),
+            ("trampoline-span", em.tramp.len() as u64),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
         for class in Class::ALL {
-            let mut n = [0u64; 8];
+            let mut n = [0u64; OUTCOMES.len()];
             for ch in choices.iter().filter(|ch| ch.class == class) {
                 let k = match ch.outcome {
-                    _ if ch.count_at().is_some_and(|x| em.far.contains(&x)) => 7,
+                    _ if ch.count_at().is_some_and(|x| em.far.contains(&x)) => 8,
                     Outcome::InPlace(_) => 1,
                     Outcome::Moved(_) => 2,
                     Outcome::Shared(_) => 3,
-                    Outcome::Tainted => 4,
-                    Outcome::FlagsLive => 5,
-                    Outcome::NoRoom => 6,
+                    Outcome::Grouped(_) => 4,
+                    Outcome::Tainted => 5,
+                    Outcome::FlagsLive => 6,
+                    Outcome::NoRoom => 7,
                 };
                 n[0] += 1;
                 n[k] += 1;
@@ -142,15 +148,17 @@ mod x86 {
             tramp_vaddr,
             tramp: em.tramp,
             sites: em.sites,
+            entries: em.entries,
             counts,
         })
     }
 
-    const OUTCOMES: [&str; 8] = [
+    const OUTCOMES: [&str; 9] = [
         "found",
         "in-place",
         "moved",
         "shared",
+        "grouped",
         "tainted",
         "flags-live",
         "no-room",
@@ -178,7 +186,7 @@ mod x86 {
         for class in Class::ALL {
             let c = class.name();
             let n: Vec<u64> = OUTCOMES.iter().map(|o| get(&format!("{c}.{o}"))).collect();
-            let covered = n[1] + n[2] + n[3];
+            let covered = n[1] + n[2] + n[3] + n[4];
             let cells: Vec<String> = OUTCOMES
                 .iter()
                 .zip(&n)
@@ -191,9 +199,12 @@ mod x86 {
             );
         }
         println!(
-            "plan\tpatches={}\ttrampoline-bytes={}\tplan-bytes={plan_bytes}\tseconds={secs:.2}",
+            "plan\tpatches={}\tgroups={}\tinteriors={}\ttrampoline-bytes={}\ttrampoline-span={}\tplan-bytes={plan_bytes}\tseconds={secs:.2}",
             get("patches"),
+            get("groups"),
+            get("group-interiors"),
             get("trampoline-bytes"),
+            get("trampoline-span"),
         );
     }
 
@@ -226,8 +237,35 @@ mod x86 {
                 println!("verify\t{file}\tok\tsites={}", plan.sites.len());
             }
             ["--sites", plan] => {
-                for s in Plan::from_bytes(&read(plan)?)?.sites {
-                    println!("site\t{:#x}\t{}", s.addr, s.len);
+                let plan = Plan::from_bytes(&read(plan)?)?;
+                let mut rows: Vec<(u64, u64)> = vec![];
+                for s in &plan.sites {
+                    let (a, end) = (s.addr, s.addr + s.len as u64);
+                    let inner = plan
+                        .entries
+                        .iter()
+                        .filter(|n| n.kind == KIND_INTERIOR && n.addr > a && n.addr < end);
+                    let mut at = a;
+                    for n in inner {
+                        rows.push((at, n.addr - at));
+                        at = n.addr;
+                    }
+                    rows.push((at, end - at));
+                }
+                for n in plan.entries.iter().filter(|n| n.kind == KIND_CPUID) {
+                    rows.push((n.addr, 2));
+                }
+                rows.sort_unstable();
+                for (a, n) in rows {
+                    println!("site\t{a:#x}\t{n}");
+                }
+                for n in plan.entries.iter().filter(|n| n.kind == KIND_INTERIOR) {
+                    let b = plan
+                        .pages
+                        .iter()
+                        .find(|p| n.addr >= p.vaddr && n.addr < p.vaddr + p.bytes.len() as u64)
+                        .map_or(0, |p| p.bytes[(n.addr - p.vaddr) as usize]);
+                    println!("interior\t{:#x}\t{b:02x}", n.addr);
                 }
             }
             ["--standalone", file, out, more @ ..] => {

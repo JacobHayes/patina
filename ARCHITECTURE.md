@@ -496,7 +496,7 @@ the order of asyncio tasks is the event loop's, which a point in one thread does
 
 Stock binaries get compute points without a rebuild (`--preempt points`, x86_64; elsewhere the
 flag is refused before a run starts): a plan, made on the host from the file alone, rewrites
-single instructions to jump to trampolines that count, and the runtime maps it over the file's
+single instructions, or short runs of them, to jump to trampolines that count, and the runtime maps it over the file's
 text as the file is mapped. Without the flag nothing below runs and no run's behaviour or
 digest changes. The host side is `crates/patina-cli/src/rewrite/` (the `iced-x86` decoder; also
 reachable through the hidden `patina __rewrite`); the runtime side is `crates/patina-rt/src/plans.rs`,
@@ -521,6 +521,24 @@ which decodes no instruction.
   count writes OF, SF, ZF, AF and PF, so it goes only where a forward scan proves those dead
   (a return or a direct call of a function ends a path; a shift by `cl` and a `rep` compare
   write nothing for certain).
+- **Group patches** (`points.rs`), only where no single instruction can carry a site's count:
+  a run of 5 bytes or more of straight-line instructions (the shortest that ends the site's
+  block, else the loop head's run, or the run after an atomic), only the last of which may be
+  a direct `jmp`/`jcc`, becomes `2e`×p `jmp T` and `int3` filler, with the count at its start
+  and every instruction copied into T at its own offset (a short branch as rel32). No known
+  branch target, taken address or read byte is inside it, and it copies no `endbr`,
+  `cpuid`, `hlt`, `pause`, x87 instruction (it records its own address, which `fnstenv` and a
+  signal frame show), or instruction that reads a clock or random numbers. A jump the rewriter cannot see (a jump table,
+  a computed goto, a handler that returns there) can still land on an *interior boundary*,
+  the start of an instruction of the run other than its first, so each holds a byte that
+  faults in user mode whatever follows it: `int3`, or `hlt`, `cli`, `sti` or port I/O (a
+  general protection fault: the runtime drops any I/O permission inherited across `execve`
+  and the sandbox refuses `iopl` and `ioperm`). A group is the shortest run that reaches 5
+  bytes, so each boundary is 1 to 4 bytes in, on the jump: one at 4 (the displacement's high
+  byte, zero) is moved off by `2e` prefixes; the others are on its low bytes, so the trampoline
+  is placed where those bytes are such bytes (each is 0x6c or more: several MiB past the
+  image, which is why the trampolines' span is sparse). The plan lists each interior boundary with its copy, where the runtime
+  resumes (below); natively the program would have run the same instruction there.
 - **`cpuid`** in found, untainted code that nothing reads or branches into is a site of its
   own: its two bytes become `ud2` in place, no trampoline. The runtime answers it from the host
   CPU with the fields that name a core set to core 0's (leaf 1 `EBX[31:24]`, the APIC id; the
@@ -531,9 +549,11 @@ which decodes no instruction.
   JIT) answers the core's own (`cpuid_unpatched` counts the `0f a2` pairs left, an upper
   bound). Hosts with `cpuid` faulting are not used for this: one mechanism on every x86_64
   host.
-- **The plan** (`plan.rs`): the patched text pages, the trampoline blob (placed after the
-  image), and a row per patched instruction (its address and length, its trampoline, the
-  trap's offset, the copy's offset); counts for a report. It records the file's SHA-256, the
+- **The plan** (`plan.rs`): the patched text pages, the trampolines (a span after the image, of
+  which only the pages holding a trampoline are stored and mapped), a row per patch (its
+  address and length, its trampoline, the trap's offset, the copies' offset), a row per
+  address the runtime answers in place (a `cpuid`, an interior boundary and its copy); counts
+  for a report. It records the file's SHA-256, the
   patina build and the cell address (`0x7fff0000`, reachable from any image by a 32-bit
   absolute operand). It is a pure function of the file and the build: one thread, ordered
   maps, no host input.
@@ -541,11 +561,17 @@ which decodes no instruction.
   decisions: its own control flow and linear decodes, then that every changed byte is in a
   patched instruction that is one whole instruction of found code, that no known branch enters
   and no code reads, and that each trampoline counts, traps to its own `ud2` and goes on to
-  the original target or returns right after an exact copy; a `cpuid` row is a `ud2` over a
-  `cpuid`, with no trampoline.
+  the original target or returns right after an exact copy; a group is straight-line found
+  code ending at most in a direct branch, copied at the same offsets, each interior boundary a
+  faulting byte that is no known target, and the plan's interior rows are exactly its groups'
+  boundaries, each naming its own copy; a `cpuid` row is a `ud2` over a `cpuid`, with no
+  trampoline.
 - **The differential** (`standalone.rs`, `tests/rewrite`): `__rewrite --standalone` writes a
   copy of the file with the plan applied that runs natively (its counts address a private cell
-  in an added segment); its output is compared with the original's.
+  in an added segment; when it has groups, a stub before its entry installs `SIGTRAP` and
+  `SIGSEGV` handlers that resume interior entries from the plan's rows, so a program with
+  handlers of its own, or a library, is checked under Patina instead); its output is compared
+  with the original's.
 
 In a run (`--preempt points`):
 - **The broker** (`launcher/plans.rs`) runs in the launcher, outside the sandbox, on a thread
@@ -573,9 +599,15 @@ In a run (`--preempt points`):
 - **A point**: a trampoline's `ud2` is a `SIGILL` in the runtime's fault entry, which finds
   the site by address and makes it a compute point (the record names the original address),
   then resumes after the `ud2`. A `ud2` at a `cpuid` row is answered as above, with no record
-  and no virtual time. A count that faults on the cell is `compute-cell`, as for rebuilt code.
+  and no virtual time. A fault at an interior row's address (`SIGTRAP` just after its `int3`,
+  or `SIGSEGV` from the kernel with no address at its other byte) resumes at the copy of that
+  instruction with every register as it was: no record, no virtual time and no count (the
+  group's count is at its start), counted `interior`, the same in every run. A count that
+  faults on the cell is `compute-cell`, as for rebuilt code. Plans are mapped before any of
+  their code runs and never written while a thread may run it, so no thread sees a half-made
+  patch.
 - **Changes**: before the program unmaps, maps over, moves (`mremap`) or reprotects any
-  patched page of an image, the patched pages of every mapping the plan was applied to are
+  patched page or mapped trampoline page of an image, the patched pages of every mapping the plan was applied to are
   mapped back from the original file (counted `dropped`), with the instruction channels'
   patches written again, and nothing else is touched; its
   trampolines stay mapped for a thread stopped in one. A program that writes or reprotects
@@ -586,16 +618,18 @@ In a run (`--preempt points`):
 - **What the program sees**: a signal frame, a fault record and a backtrace through a
   trampoline name the original instruction (`proto::plan::shown`: a stop in a copy maps to
   the same offset of the original, a stop at a count to the instruction it precedes), so
-  unwinding works from the original addresses. `/proc/self/maps` (`plans::Maps`) shows the
+  unwinding works from the original addresses; a handler that returns to an instruction inside
+  a group enters it as an interior entry. `/proc/self/maps` (`plans::Maps`) shows the
   original file for patched pages, joins them to its lines and leaves out trampolines and the
   plan file. A read of the program's own text reads the patched bytes; `cpuid` in planned code
   answers as above. A fork child inherits the mappings and the plan table; an `execve` starts
   over with the new image's plans.
 
 Not covered: code made at run time (JIT), dark code and dropped plans keep today's behaviour
-(spin probes, `compute-stall`). Group patches (a short site merged with its neighbours) are
-not made: a branch from dark code into a merged instruction's start would run garbage, and
-without them about 13 to 27% of loop back-edges in typical code have no point.
+(spin probes, `compute-stall`). Inside a hardware transaction (`xbegin`), an interior entry,
+like a point, aborts it (the program's fallback path runs). A loop back-edge still has no point when the flags stay live
+across every run that could carry its count, or its block holds a refusal (EVIDENCE.md has
+the coverage per program).
 
 ## The fault plan
 

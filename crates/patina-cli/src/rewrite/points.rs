@@ -1,6 +1,5 @@
-//! Switch points (DESIGN 2.3): `select` chooses where counts go, `emit` writes the patches and
-//! trampolines. Only single-instruction patches: one instruction of at least 5 bytes becomes a
-//! jump or call to its trampoline, so no address but the patch's first byte changes meaning.
+//! Switch points (DESIGN 2.3, 2.4): `select` chooses where counts go, `emit` writes the patches
+//! and trampolines.
 //!
 //! Sites are backward direct branches, backward direct calls, indirect jumps and atomic
 //! instructions. A site's count goes, in order of preference:
@@ -11,12 +10,29 @@
 //!   in its block before a relocatable instruction of 5 bytes or more of the straight-line run
 //!                that ends at the site (no branch target in between), flags dead there;
 //!   at the loop head (backward branches): before such an instruction of the straight-line run
-//!                that starts at the branch target.
+//!                that starts at the branch target;
+//!   in a group:  the same two runs (the block's with the site itself, and for an atomic the
+//!                straight-line instructions after it), several neighbouring instructions of
+//!                5 bytes or more together, the last of which may be a direct branch: they
+//!                become one `jmp T` and run as copies in T.
 //! Indirect jumps are never patched in place: flags at their targets are unknown.
+//!
+//! A single instruction's patch has one entry, its first byte. A group's other instruction
+//! starts (its interior boundaries) now hold bytes of the jump, and code the rewriter cannot see
+//! (a jump-table case block that is dark, an indirect jump) may still jump there. So a group is
+//! made only when no known branch target, address taken or landing pad is at an interior
+//! boundary, and when every interior boundary can hold a byte that faults (`plan::TRAP_BYTES`):
+//! the jump is `2e`×p `e9` d0 d1 d2 d3 then `int3` filler (`layout`), a boundary in the filler is
+//! `int3`, one on d0, d1 or d2 gets a trapping byte by where the trampoline is placed (`fit`),
+//! and none may be on the prefixes, the opcode or d3. The plan lists each interior boundary
+//! (`KIND_INTERIOR`) with the copy of its instruction, where the runtime resumes a jump there.
 
 use super::code::{direct_target, Code, ADDR, READ, TAINT, TARGET};
 use super::flags::dead_at;
-use super::plan::{Site, CELL, KIND_BEFORE, KIND_CPUID, KIND_JUMP, NO_COPY};
+use super::plan::{
+    Entry, Site, CELL, KIND_BEFORE, KIND_CPUID, KIND_INTERIOR, KIND_JUMP, NO_COPY, PAD_PREFIX,
+    PAGE, TRAP_BYTES,
+};
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,7 +61,7 @@ impl Class {
     }
 }
 
-/// How a patched instruction changes.
+/// How a patch changes the code.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Form {
     /// `call rel32` → `call T`; T counts and jumps to the original target.
@@ -54,7 +70,8 @@ pub enum Form {
     Jmp,
     /// `jcc rel32` → `jcc T` (same condition), likewise on the taken path.
     Jcc,
-    /// The instruction → `jmp T` and `int3` padding; T counts, runs a copy, jumps back.
+    /// The instruction, or a group of them → `jmp T` and `int3` filler; T counts, runs a copy
+    /// of each, jumps back.
     Before,
 }
 
@@ -65,6 +82,8 @@ pub enum Outcome {
     Moved(u64),
     /// Its count is one an earlier site's choice already placed.
     Shared(u64),
+    /// A group patch starting at this address holds its count.
+    Grouped(u64),
     Tainted,
     FlagsLive,
     NoRoom,
@@ -84,7 +103,9 @@ impl Choice {
     /// Where the site's count is, if it has one.
     pub fn count_at(&self) -> Option<u64> {
         match self.outcome {
-            Outcome::InPlace(x) | Outcome::Moved(x) | Outcome::Shared(x) => Some(x),
+            Outcome::InPlace(x) | Outcome::Moved(x) | Outcome::Shared(x) | Outcome::Grouped(x) => {
+                Some(x)
+            }
             _ => None,
         }
     }
@@ -111,52 +132,169 @@ pub fn classify(i: &Instruction) -> Option<Class> {
 }
 
 /// Can `i` be copied into a trampoline and run there? Straight-line, not a landing pad
-/// marker, not a trap, not `hlt`.
+/// marker, not a trap, not `hlt`, and none of the instructions the runtime answers or patches
+/// where they are (`cpuid`, `rdrand`, `rdseed`, `rdpid`, `pause`, the timestamp counter).
 pub fn relocatable(i: &Instruction) -> bool {
+    use Mnemonic::*;
     i.flow_control() == FlowControl::Next
         && !matches!(
             i.mnemonic(),
-            Mnemonic::Hlt | Mnemonic::Endbr64 | Mnemonic::Endbr32
+            Hlt | Endbr64 | Endbr32 | Cpuid | Rdrand | Rdseed | Rdpid | Pause | Rdtsc | Rdtscp
         )
+        // An x87 instruction records its own address (`fnstenv`, `fxsave` and a signal
+        // frame's state show the last one's): a copy's would be the trampoline's.
+        && !i.cpuid_features().iter().any(|f| {
+            use iced_x86::CpuidFeature::*;
+            matches!(f, FPU | FPU287 | FPU287XL_ONLY | FPU387 | FPU387SL_ONLY)
+        })
+}
+
+/// A direct `jcc` or `jmp` with no prefix (`7x`/`eb` rel8, `0f 8x`/`e9` rel32): the one branch
+/// a group may end with, copied as the rel32 form.
+pub fn plain_branch(raw: &[u8]) -> bool {
+    matches!(
+        raw,
+        [0x70..=0x7f | 0xeb, _] | [0x0f, 0x80..=0x8f, _, _, _, _] | [0xe9, _, _, _, _]
+    )
+}
+
+/// How a group's jump fits over its interior boundaries `bounds` (offsets from its start,
+/// ascending) in `n` bytes: `p` prefix bytes, then `jmp rel32`; the displacement bytes (of
+/// d0..d2) that hold a boundary, as a mask; every boundary past the jump is `int3` filler. None
+/// when no `p` keeps every boundary off the prefixes, the opcode and the displacement's high
+/// byte. The cheapest mask wins (a constraint on d2 places the trampoline in one 64 KiB stripe
+/// of sixteen per 16 MiB, on d1 in one 256-byte stripe of sixteen per 64 KiB).
+pub fn layout(bounds: &[usize], n: usize) -> Option<(usize, u8)> {
+    (0..=n.saturating_sub(5))
+        .filter_map(|p| {
+            let mut mask = 0u8;
+            for &b in bounds {
+                if b <= p || b == p + 4 {
+                    return None;
+                }
+                if b <= p + 3 {
+                    mask |= 1 << (b - p - 1);
+                }
+            }
+            Some((p, mask))
+        })
+        .min_by_key(|&(p, mask)| (mask, p))
+}
+
+/// The smallest `t >= t0` such that a jump ending at `e` to `t` has a trapping byte
+/// (`TRAP_BYTES`) at each of its displacement's low three bytes that `mask` names.
+pub fn fit(t0: u64, e: u64, mask: u8) -> u64 {
+    let mut t = t0;
+    'again: loop {
+        let d = t.wrapping_sub(e);
+        for k in (0..3).rev() {
+            let unit = 1u64 << (8 * k);
+            let b = (d >> (8 * k)) as u8;
+            if mask & (1 << k) == 0 || TRAP_BYTES.contains(&b) {
+                continue;
+            }
+            // The next value of this byte that traps, every byte below it zero.
+            let high = d & !(unit * 256 - 1);
+            let nd = match TRAP_BYTES.iter().find(|&&x| x > b) {
+                Some(&x) => high + x as u64 * unit,
+                None => high + unit * 256 + TRAP_BYTES[0] as u64 * unit,
+            };
+            t = t.wrapping_add(nd - d);
+            continue 'again;
+        }
+        return t;
+    }
 }
 
 struct Select<'c, 'a> {
     code: &'c Code<'a>,
-    patches: BTreeMap<u64, Form>,
+    /// Each patch by its first byte: its form and length.
+    patches: BTreeMap<u64, (Form, u8)>,
 }
 
 impl Select<'_, '_> {
+    /// The patch whose bytes hold `x`.
+    fn owner(&self, x: u64) -> Option<u64> {
+        let (&a, &(_, n)) = self.patches.range(..=x).next_back()?;
+        (x < a + n as u64).then_some(a)
+    }
+
+    fn counts_at(&self, x: u64) -> bool {
+        matches!(self.patches.get(&x), Some((Form::Before, _)))
+    }
+
     /// A count before the instruction at `x`: `Some(true)` placed or already there,
     /// `Some(false)` room but flags live, `None` no room.
     fn before(&mut self, x: u64) -> Option<bool> {
-        if self.patches.get(&x) == Some(&Form::Before) {
+        if self.counts_at(x) {
             return Some(true);
         }
         let i = self.code.insn(x)?;
         if i.len() < 5
             || !relocatable(&i)
             || self.code.flags(x) & TAINT != 0
-            || self.patches.contains_key(&x)
+            || self.owner(x).is_some()
         {
             return None;
         }
         if !dead_at(self.code, x) {
             return Some(false);
         }
-        self.patches.insert(x, Form::Before);
+        self.patches.insert(x, (Form::Before, i.len() as u8));
         Some(true)
     }
 
     /// Try the instructions of `run` in order: the first that takes the count, and whether
     /// an earlier choice had already placed one there.
-    fn first(&mut self, run: Vec<u64>, live: &mut bool) -> Option<(u64, bool)> {
-        for x in run {
-            let shared = self.patches.get(&x) == Some(&Form::Before);
+    fn first(&mut self, run: &[u64], live: &mut bool) -> Option<(u64, bool)> {
+        for &x in run {
+            let shared = self.counts_at(x);
             match self.before(x) {
                 Some(true) => return Some((x, shared)),
                 Some(false) => *live = true,
                 None => {}
             }
+        }
+        None
+    }
+
+    /// A group over consecutive instructions of `seq` (a straight-line run in address order):
+    /// from the start nearest its end, the shortest of 5 bytes or more whose instructions are
+    /// free and untainted, all relocatable but a last plain branch, with no known branch
+    /// target or address taken at an interior boundary and a layout; flags dead at its start.
+    fn group(&mut self, seq: &[u64], live: &mut bool) -> Option<u64> {
+        'start: for i in (0..seq.len()).rev() {
+            let (mut n, mut bounds) = (0usize, vec![]);
+            for &x in &seq[i..] {
+                let Some(ins) = self.code.insn(x) else {
+                    continue 'start;
+                };
+                let raw = self.code.bytes(x, ins.len()).unwrap_or(&[]);
+                let branch = plain_branch(raw);
+                if self.code.flags(x) & TAINT != 0
+                    || self.owner(x).is_some()
+                    || !(relocatable(&ins) || branch)
+                    || (n > 0 && self.code.flags(x) & (TARGET | ADDR) != 0)
+                {
+                    continue 'start;
+                }
+                if n > 0 {
+                    bounds.push(n);
+                }
+                n += ins.len();
+                if n >= 5 || branch {
+                    break;
+                }
+            }
+            if n < 5 || bounds.is_empty() || layout(&bounds, n).is_none() {
+                continue;
+            }
+            if !dead_at(self.code, seq[i]) {
+                *live = true;
+                continue;
+            }
+            self.patches.insert(seq[i], (Form::Before, n as u8));
+            return Some(seq[i]);
         }
         None
     }
@@ -179,9 +317,9 @@ impl Select<'_, '_> {
     }
 
     /// The straight-line run from `l`: every pass through `l` runs all of it.
-    fn run_from(&self, mut l: u64) -> Vec<u64> {
+    fn run_from(&self, mut l: u64, max: usize) -> Vec<u64> {
         let mut out = vec![];
-        while out.len() < 8 {
+        while out.len() < max {
             let Some(i) = self.code.insn(l) else { break };
             out.push(l);
             if i.flow_control() != FlowControl::Next || i.mnemonic() == Mnemonic::Hlt {
@@ -210,12 +348,12 @@ impl Select<'_, '_> {
         match in_place {
             // The flags are dead at a function's entry.
             Some(Form::Call) => {
-                self.patches.insert(s, Form::Call);
+                self.patches.insert(s, (Form::Call, 5));
                 return Outcome::InPlace(s);
             }
             Some(f @ (Form::Jmp | Form::Jcc)) => {
                 if dead_at(self.code, i.near_branch_target()) {
-                    self.patches.insert(s, f);
+                    self.patches.insert(s, (f, raw.len() as u8));
                     return Outcome::InPlace(s);
                 }
                 live = true;
@@ -227,21 +365,44 @@ impl Select<'_, '_> {
             },
             None => {}
         }
-        let mut found = self.first(self.block_before(s), &mut live);
-        if found.is_none() && class == Class::BackBranch {
-            found = self.first(self.run_from(i.near_branch_target()), &mut live);
+        let block = self.block_before(s);
+        let head = (class == Class::BackBranch).then(|| self.run_from(i.near_branch_target(), 8));
+        let mut found = self.first(&block, &mut live);
+        if let (None, Some(head)) = (found, &head) {
+            found = self.first(head, &mut live);
         }
         match found {
-            Some((x, true)) => Outcome::Shared(x),
-            Some((x, false)) => Outcome::Moved(x),
+            Some((x, true)) => return Outcome::Shared(x),
+            Some((x, false)) => return Outcome::Moved(x),
+            None => {}
+        }
+        // A group: the block's run with the site (and, for an atomic, what follows it), then
+        // the loop head's.
+        let mut seq: Vec<u64> = block.into_iter().rev().collect();
+        seq.push(s);
+        if class == Class::Atomic {
+            let after = self.run_from(s + i.len() as u64, 4);
+            let free = after
+                .iter()
+                .take_while(|&&x| self.code.flags(x) & TARGET == 0)
+                .count();
+            seq.extend(&after[..free]);
+        }
+        let mut grouped = self.group(&seq, &mut live);
+        if let (None, Some(head)) = (grouped, &head) {
+            grouped = self.group(head, &mut live);
+        }
+        match grouped {
+            Some(x) => Outcome::Grouped(x),
             None if live => Outcome::FlagsLive,
             None => Outcome::NoRoom,
         }
     }
 }
 
-/// Every site, in address order, with where its count goes; and the patches that places.
-pub fn select(code: &Code) -> (Vec<Choice>, BTreeMap<u64, Form>) {
+/// Every site, in address order, with where its count goes; and the patches that places (by
+/// first byte: form and length).
+pub fn select(code: &Code) -> (Vec<Choice>, BTreeMap<u64, (Form, u8)>) {
     let mut s = Select {
         code,
         patches: BTreeMap::new(),
@@ -250,10 +411,9 @@ pub fn select(code: &Code) -> (Vec<Choice>, BTreeMap<u64, Form>) {
     for a in code.starts() {
         let Some(i) = code.insn(a) else { continue };
         if let Some(class) = classify(&i) {
-            let outcome = if s.patches.get(&a) == Some(&Form::Before) {
-                Outcome::Shared(a)
-            } else {
-                s.site(a, &i, class)
+            let outcome = match s.owner(a) {
+                Some(x) => Outcome::Shared(x),
+                None => s.site(a, &i, class),
             };
             out.push(Choice {
                 class,
@@ -271,46 +431,174 @@ fn rel32(from_end: u64, to: u64) -> Option<[u8; 4]> {
         .map(i32::to_le_bytes)
 }
 
-/// The trampolines and patched bytes for `patches`, the blob placed at `tramp_vaddr`. A patch
-/// whose jumps or copied operand would not reach is dropped and returned in `far`.
+/// The trampolines and patched bytes for `patches`, in a span placed at `tramp_vaddr`. A patch
+/// whose jumps or copied operands would not reach is dropped and returned in `far`.
 pub struct Emitted {
+    /// In order of their trampolines.
     pub sites: Vec<Site>,
+    /// In address order.
+    pub entries: Vec<Entry>,
     pub patched: Vec<(u64, Vec<u8>)>,
+    /// The span, a multiple of the page size.
     pub tramp: Vec<u8>,
+    /// Bytes of trampolines in it.
+    pub used: u64,
     pub far: BTreeSet<u64>,
+    pub groups: u64,
 }
 
-pub fn emit(code: &Code, patches: &BTreeMap<u64, Form>, tramp_vaddr: u64) -> Emitted {
-    let mut e = Emitted {
-        sites: vec![],
-        patched: vec![],
-        tramp: vec![],
-        far: BTreeSet::new(),
-    };
-    for (&a, &form) in patches {
-        let Some(i) = code.insn(a) else { continue };
-        let n = i.len();
-        let raw = code.bytes(a, n).unwrap();
-        match trampoline(a, &i, raw, form, tramp_vaddr + e.tramp.len() as u64) {
-            Some((t, mut site, patch)) => {
-                site.tramp = e.tramp.len() as u32;
-                e.tramp.extend_from_slice(&t);
-                e.sites.push(site);
-                e.patched.push((a, patch));
-            }
-            None => {
-                e.far.insert(a);
+/// Free room of the trampolines' span: offset → end. Placement is first fit among the first
+/// intervals at or after the lowest offset that suits, then the top; leftovers shorter than
+/// any trampoline are dropped.
+struct Space {
+    free: BTreeMap<u64, u64>,
+}
+
+const SMALLEST: u64 = 19;
+
+impl Space {
+    fn take(&mut self, lo: u64, len: u64, place: impl Fn(u64) -> u64) -> u64 {
+        let first = self.free.range(..=lo).next_back().map_or(lo, |(&s, _)| s);
+        let cand: Vec<(u64, u64)> = self
+            .free
+            .range(first..)
+            .take(64)
+            .chain(self.free.iter().next_back())
+            .map(|(&s, &e)| (s, e))
+            .collect();
+        for (s, e) in cand {
+            let x = place(s.max(lo));
+            if x.checked_add(len).is_some_and(|end| end <= e) {
+                self.free.remove(&s);
+                if x - s >= SMALLEST {
+                    self.free.insert(s, x);
+                }
+                if e - (x + len) >= SMALLEST || e == u64::MAX {
+                    self.free.insert(x + len, e);
+                }
+                return x;
             }
         }
+        unreachable!("the top interval is unbounded")
     }
+}
+
+/// One patch's instructions: address, decode, original bytes.
+type Insns<'a> = Vec<(u64, Instruction, &'a [u8])>;
+
+pub fn emit(code: &Code, patches: &BTreeMap<u64, (Form, u8)>, tramp_vaddr: u64) -> Emitted {
+    let mut e = Emitted {
+        sites: vec![],
+        entries: vec![],
+        patched: vec![],
+        tramp: vec![],
+        used: 0,
+        far: BTreeSet::new(),
+        groups: 0,
+    };
+    // Each patch's instructions and layout; those whose trampoline's address is constrained
+    // are placed first, then the rest fill around them.
+    let mut work = vec![];
+    for (&a, &(form, n)) in patches {
+        let mut ins: Insns = vec![];
+        let mut x = a;
+        while x < a + n as u64 {
+            let Some(i) = code.insn(x) else { break };
+            ins.push((x, i, code.bytes(x, i.len()).unwrap()));
+            x += i.len() as u64;
+        }
+        let bounds: Vec<usize> = ins[1..].iter().map(|&(x, ..)| (x - a) as usize).collect();
+        let Some((p, mask)) = layout(&bounds, n as usize).filter(|_| x == a + n as u64) else {
+            e.far.insert(a);
+            continue;
+        };
+        work.push((mask == 0, a, form, n, ins, p, mask));
+    }
+    work.sort_by_key(|w| (w.0, w.1));
+    let mut space = Space {
+        free: BTreeMap::from([(0, u64::MAX)]),
+    };
+    let (mut top, mut cursor, mut next) = (0, 0, None);
+    for (_, a, form, n, ins, p, mask) in work {
+        let len = tramp_len(form, &ins);
+        let end = a + p as u64 + 5;
+        // Constrained trampolines go up from a cursor, in address order: each next one's
+        // displacement is smaller, so where one had to skip ahead it goes to the top stripe
+        // of that run of trapping values and the ones after it fit right behind it. The rest
+        // fill the gaps between them in address order, then go on past them: the pages they
+        // touch are few (only pages holding a trampoline are stored).
+        let place = |x: u64| {
+            let mut t = fit(tramp_vaddr + x, end, mask);
+            let k = 7 - mask.leading_zeros() as u64;
+            let stripe = |t: u64| (t - end) >> (8 * k);
+            if mask & 0b110 != 0 && stripe(t) != stripe(tramp_vaddr + x) {
+                while TRAP_BYTES.contains(&(stripe(t) as u8).wrapping_add(1)) {
+                    t += 1 << (8 * k);
+                }
+            }
+            t - tramp_vaddr
+        };
+        let x = space.take(
+            if mask == 0 { next.unwrap_or(0) } else { cursor },
+            len,
+            place,
+        );
+        cursor = cursor.max(x + len);
+        next = Some(if mask == 0 {
+            x + len
+        } else {
+            next.unwrap_or(x)
+        });
+        let t = tramp_vaddr + x;
+        let Some((b, mut site)) = trampoline(a, &ins, form, t) else {
+            e.far.insert(a);
+            continue;
+        };
+        let mut patch = match form {
+            Form::Call => vec![0xe8],
+            Form::Jmp | Form::Before => vec![PAD_PREFIX; p].into_iter().chain([0xe9]).collect(),
+            Form::Jcc => vec![0x0f, ins[0].2[1]],
+        };
+        let Some(d) = rel32(a + patch.len() as u64 + 4, t) else {
+            e.far.insert(a);
+            continue;
+        };
+        patch.extend_from_slice(&d);
+        patch.resize(n as usize, 0xcc);
+        if ins[1..]
+            .iter()
+            .any(|&(y, ..)| !TRAP_BYTES.contains(&patch[(y - a) as usize]))
+        {
+            unreachable!("fit places every interior boundary on a trapping byte");
+        }
+        site.tramp = x as u32;
+        top = top.max(x + b.len() as u64);
+        if e.tramp.len() < top as usize {
+            e.tramp.resize(top as usize, 0);
+        }
+        e.tramp[x as usize..x as usize + b.len()].copy_from_slice(&b);
+        e.used += b.len() as u64;
+        for &(y, ..) in &ins[1..] {
+            e.entries.push(Entry {
+                addr: y,
+                to: x as u32 + site.copy as u32 + (y - a) as u32,
+                kind: KIND_INTERIOR,
+            });
+        }
+        e.groups += (ins.len() > 1) as u64;
+        e.sites.push(site);
+        e.patched.push((a, patch));
+    }
+    e.tramp
+        .resize(e.tramp.len().next_multiple_of(PAGE as usize), 0);
+    e.sites.sort_by_key(|s| s.tramp);
+    e.entries.sort_by_key(|n| n.addr);
     e
 }
 
-/// Every `cpuid` in eligible code becomes `ud2`, a `KIND_CPUID` site the runtime answers, merged
-/// into `em`'s sites in address order (its trampoline offset is the next trampoline's, so the
-/// offsets stay in row order). Returns the count patched, and the `0F A2` byte pairs left
-/// elsewhere in the text: an upper bound on the `cpuid`s in dark or tainted code, which run
-/// unanswered.
+/// Every `cpuid` in eligible code becomes `ud2`, a `KIND_CPUID` entry the runtime answers.
+/// Returns the count patched, and the `0F A2` byte pairs left elsewhere in the text: an upper
+/// bound on the `cpuid`s in dark or tainted code, which run unanswered.
 pub fn cpuid_sites(code: &Code, em: &mut Emitted) -> (u64, u64) {
     let mut found = vec![];
     for a in code.starts() {
@@ -333,27 +621,33 @@ pub fn cpuid_sites(code: &Code, em: &mut Emitted) -> (u64, u64) {
             }
         }
     }
-    let mut sites = Vec::with_capacity(em.sites.len() + found.len());
-    let mut jumps = std::mem::take(&mut em.sites).into_iter().peekable();
     for &a in &found {
-        while let Some(s) = jumps.next_if(|s| s.addr < a) {
-            sites.push(s);
-        }
-        let next = jumps.peek().map_or(em.tramp.len() as u32, |s| s.tramp);
-        sites.push(Site {
+        em.entries.push(Entry {
             addr: a,
-            len: 2,
+            to: 0,
             kind: KIND_CPUID,
-            tramp: next,
-            tramp_len: 0,
-            trap: 0,
-            copy: NO_COPY,
         });
         em.patched.push((a, vec![0x0f, 0x0b]));
     }
-    sites.extend(jumps);
-    em.sites = sites;
+    em.entries.sort_by_key(|n| n.addr);
     (found.len() as u64, unpatched)
+}
+
+/// The length of an instruction's copy: a short branch is copied as its rel32 form.
+fn copy_len(i: &Instruction, raw: &[u8]) -> usize {
+    match raw {
+        [0x70..=0x7f, _] => 6,
+        [0xeb, _] => 5,
+        _ => i.len(),
+    }
+}
+
+fn tramp_len(form: Form, ins: &Insns) -> u64 {
+    let row = match form {
+        Form::Before => ins.iter().map(|(_, i, r)| copy_len(i, r)).sum::<usize>() + 5,
+        _ => 5,
+    };
+    (10 + row + 4) as u64
 }
 
 /// One trampoline at `t`:
@@ -361,39 +655,50 @@ pub fn cpuid_sites(code: &Code, em: &mut Emitted) -> (u64, u64) {
 /// ```text
 /// T:  dec qword [CELL]     48 FF 0C 25 <abs32>
 ///     jz  S                74 <rel8>
-/// R:  the row: jmp <original target>, or <copy of the instruction>; jmp <next>
+/// R:  the row: jmp <original target>, or <copies of the instructions>; jmp <next>
 /// S:  ud2                  0F 0B        a point: the runtime's fault entry
 ///     jmp R                EB <rel8>
 /// ```
-fn trampoline(
-    a: u64,
-    i: &Instruction,
-    raw: &[u8],
-    form: Form,
-    t: u64,
-) -> Option<(Vec<u8>, Site, Vec<u8>)> {
-    let n = raw.len();
-    let next = a + n as u64;
+///
+/// A copy is byte for byte but for a RIP-relative displacement (recomputed) and a closing
+/// branch (its rel32 form, to the same target).
+fn trampoline(a: u64, ins: &Insns, form: Form, t: u64) -> Option<(Vec<u8>, Site)> {
     let mut b = vec![0x48, 0xff, 0x0c, 0x25];
     b.extend_from_slice(&(CELL as u32).to_le_bytes());
     b.extend_from_slice(&[0x74, 0]);
     let r = b.len();
     let mut copy = NO_COPY;
-    let back = if form == Form::Before {
+    let (n, back) = if form == Form::Before {
         copy = r as u16;
-        let mut c = raw.to_vec();
-        if i.is_ip_rel_memory_operand() {
-            let mut d = Decoder::with_ip(64, raw, a, DecoderOptions::NONE);
-            let ins = d.decode();
-            let off = d.get_constant_offsets(&ins);
-            let at = off.displacement_offset();
-            let new_end = t + (r + n) as u64;
-            c[at..at + 4].copy_from_slice(&rel32(new_end, i.ip_rel_memory_address())?);
+        for &(x, ref i, raw) in ins {
+            let at = t + b.len() as u64;
+            if plain_branch(raw) {
+                let op = match raw {
+                    [0xeb | 0xe9, ..] => vec![0xe9],
+                    [0x0f, c, ..] => vec![0x0f, *c],
+                    [c, _] => vec![0x0f, 0x80 | (c & 0x0f)],
+                    _ => return None,
+                };
+                let end = at + op.len() as u64 + 4;
+                b.extend_from_slice(&op);
+                b.extend_from_slice(&rel32(end, i.near_branch_target())?);
+                continue;
+            }
+            let mut c = raw.to_vec();
+            if i.is_ip_rel_memory_operand() {
+                let mut d = Decoder::with_ip(64, raw, x, DecoderOptions::NONE);
+                let ins = d.decode();
+                let off = d.get_constant_offsets(&ins);
+                let o = off.displacement_offset();
+                c[o..o + 4]
+                    .copy_from_slice(&rel32(at + raw.len() as u64, i.ip_rel_memory_address())?);
+            }
+            b.extend_from_slice(&c);
         }
-        b.extend_from_slice(&c);
-        next
+        let n: usize = ins.iter().map(|(_, i, _)| i.len()).sum();
+        (n, a + n as u64)
     } else {
-        i.near_branch_target()
+        (ins[0].1.len(), ins[0].1.near_branch_target())
     };
     b.push(0xe9);
     b.extend_from_slice(&rel32(t + b.len() as u64 + 4, back)?);
@@ -401,13 +706,6 @@ fn trampoline(
     b[r - 1] = (trap - r) as u8;
     b.extend_from_slice(&[0x0f, 0x0b, 0xeb]);
     b.push((r as isize - (b.len() as isize + 1)) as i8 as u8);
-    let mut patch = match form {
-        Form::Call => vec![0xe8],
-        Form::Jmp | Form::Before => vec![0xe9],
-        Form::Jcc => vec![0x0f, raw[1]],
-    };
-    patch.extend_from_slice(&rel32(a + patch.len() as u64 + 4, t)?);
-    patch.resize(n, 0xcc);
     let kind = if form == Form::Before {
         KIND_BEFORE
     } else {
@@ -422,5 +720,5 @@ fn trampoline(
         trap: trap as u16,
         copy,
     };
-    Some((b, site, patch))
+    Some((b, site))
 }

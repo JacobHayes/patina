@@ -3,7 +3,7 @@
 
 use super::code::{Code, TAINT};
 use super::flags::dead_at;
-use super::plan::{Plan, KIND_BEFORE, KIND_JUMP, PAGE};
+use super::plan::{Plan, KIND_BEFORE, KIND_INTERIOR, KIND_JUMP, PAGE, TRAP_BYTES};
 use super::points::{self, relocatable, Class, Outcome};
 use super::verify::verify;
 use super::x86::make_plan;
@@ -166,7 +166,7 @@ fn a_jump_into_a_would_be_patch_taints_it() {
 }
 
 /// Short backward branches: the count moves to a 5-byte instruction of the block, or of the
-/// loop head; with none of 5 bytes, there is no room.
+/// loop head; with none of 5 bytes, a group; with fewer than 5 bytes in all, there is no room.
 #[test]
 fn a_short_branch_moves_its_count_or_has_no_room() {
     // L: add eax, 1; cmp eax, 16 (3d imm32); jl L (rel8)
@@ -180,21 +180,31 @@ fn a_short_branch_moves_its_count_or_has_no_room() {
     ];
     let c = analyze(&code, &[BASE], &[]);
     assert_eq!(outcome(&c, BASE + 0xa), Some(Outcome::Moved(BASE)));
-    // L: add eax, 1; cmp eax, ebx; jl L: nothing of 5 bytes
+    // L: add eax, 1; cmp eax, ebx; jl L: nothing of 5 bytes, but the add and the cmp together
     let code = [0x83, 0xc0, 0x01, 0x39, 0xd8, 0x7c, 0xf9, 0xc3];
     let c = analyze(&code, &[BASE], &[]);
-    assert_eq!(outcome(&c, BASE + 5), Some(Outcome::NoRoom));
+    assert_eq!(outcome(&c, BASE + 5), Some(Outcome::Grouped(BASE)));
+    // L: inc ecx; jl L: 4 bytes in all
+    let code = [0xff, 0xc1, 0x7c, 0xfc, 0xc3];
+    let c = analyze(&code, &[BASE], &[]);
+    assert_eq!(outcome(&c, BASE + 2), Some(Outcome::NoRoom));
 }
 
-/// L: add eax, 1; cmp eax, ebx; mov ecx, 5; jl L — the only 5-byte instruction sits between
-/// the `cmp` and the `jl` that reads its flags.
+/// A count goes only where the flags are dead.
 #[test]
 fn a_count_is_not_placed_where_flags_are_live() {
+    // L: add eax, 1; cmp eax, ebx; mov ecx, 5; jl L — the only 5-byte instruction sits between
+    // the `cmp` and the `jl` that reads its flags; a group from the `cmp` holds it.
     let code = [
         0x83, 0xc0, 0x01, 0x39, 0xd8, 0xb9, 5, 0, 0, 0, 0x7c, 0xf4, 0xc3,
     ];
     let c = analyze(&code, &[BASE], &[]);
-    assert_eq!(outcome(&c, BASE + 0xa), Some(Outcome::FlagsLive));
+    assert_eq!(outcome(&c, BASE + 0xa), Some(Outcome::Grouped(BASE + 3)));
+    // cmp eax, ebx; L: lea ecx, [rcx+1]; mov edx, ecx; jl L — the loop reads flags set before
+    // it, so no count fits in it.
+    let code = [0x39, 0xd8, 0x8d, 0x49, 0x01, 0x89, 0xca, 0x7c, 0xf9, 0xc3];
+    let c = analyze(&code, &[BASE], &[]);
+    assert_eq!(outcome(&c, BASE + 7), Some(Outcome::FlagsLive));
 }
 
 fn dead(code: &[u8]) -> bool {
@@ -235,6 +245,9 @@ fn landing_pads_and_traps_are_never_relocated() {
     assert!(!relocatable(&i(&[0xf4])));
     assert!(!relocatable(&i(&[0xe8, 0, 0, 0, 0])));
     assert!(relocatable(&i(&[0xb8, 0, 0, 0, 0])));
+    // x87: `fstp st(0)`, `fld qword [rax]`.
+    assert!(!relocatable(&i(&[0xdd, 0xd8])));
+    assert!(!relocatable(&i(&[0xdd, 0x00])));
 }
 
 #[test]
@@ -403,4 +416,191 @@ fn site_classes() {
     assert_eq!(points::classify(&i(&[0x87, 0x07])), Some(Class::Atomic));
     assert_eq!(points::classify(&i(&[0x87, 0xc3])), None);
     assert_eq!(points::classify(&i(&[0x0f, 0x05])), None);
+}
+
+/// Where a group's jump goes for each set of interior boundaries: never a boundary on a prefix,
+/// the opcode or the displacement's high byte; the cheapest displacement bytes to constrain.
+#[test]
+fn group_layouts() {
+    use points::layout;
+    // 3 + 2: d2 holds the boundary
+    assert_eq!(layout(&[3], 5), Some((0, 0b100)));
+    // 4 + 2: one prefix moves d3 off the boundary, d2 holds it
+    assert_eq!(layout(&[4], 6), Some((1, 0b100)));
+    assert_eq!(layout(&[4], 5), None);
+    // 2 + 2 + 2: one prefix, d0 and d2
+    assert_eq!(layout(&[2, 4], 6), Some((1, 0b101)));
+    // 3 + 3: one prefix, d1 (cheaper than d2)
+    assert_eq!(layout(&[3], 6), Some((1, 0b010)));
+    // 1 + 3 + 2: the boundary at 1 needs no prefix, the one at 4 one
+    assert_eq!(layout(&[1, 4], 6), None);
+    // 5 + 2: the boundary is in the int3 filler
+    assert_eq!(layout(&[5], 7), Some((0, 0)));
+    // 1 + 1 + 1 + 2: d0, d1, d2
+    assert_eq!(layout(&[1, 2, 3], 5), Some((0, 0b111)));
+}
+
+/// `fit` finds the nearest trampoline address whose displacement traps where asked, and every
+/// one before it does not.
+#[test]
+fn trampolines_are_placed_where_the_jump_traps() {
+    use super::plan::TRAP_BYTES;
+    let traps = |d: u64, mask: u8| {
+        (0..3).all(|k| mask & (1 << k) == 0 || TRAP_BYTES.contains(&((d >> (8 * k)) as u8)))
+    };
+    let e = 0x40_1234;
+    for mask in 0..8u8 {
+        for t0 in [0x50_0000u64, 0x50_00ff, 0x5c_6c00, 0x1_0000_0000] {
+            let t = points::fit(t0, e, mask);
+            assert!(
+                t >= t0 && traps(t - e, mask),
+                "mask {mask:#b} from {t0:#x}: {t:#x}"
+            );
+            if mask & 0b100 == 0 {
+                assert!((t0..t).all(|x| !traps(x - e, mask)));
+            }
+        }
+    }
+}
+
+/// `xor edi, edi; test edx, edx; js L` (2 + 2 + 2), the loop's only instructions: one group,
+/// its jump after one `2e` prefix, both interior boundaries on trapping bytes, each listed with
+/// the copy of its instruction; the `js` copied as `js rel32` to the same target.
+///
+/// ```text
+/// 401000  31 ff        L: xor edi, edi
+/// 401002  85 d2           test edx, edx
+/// 401004  78 fa           js L
+/// 401006  c3              ret
+/// ```
+#[test]
+fn a_group_traps_at_every_interior_boundary() {
+    let code = [0x31, 0xff, 0x85, 0xd2, 0x78, 0xfa, 0xc3];
+    let c = analyze(&code, &[BASE], &[]);
+    assert_eq!(outcome(&c, BASE + 4), Some(Outcome::Grouped(BASE)));
+    let f = elf(&code);
+    let plan = make_plan(&f, "test").unwrap();
+    assert_eq!(verify(&f, &plan), Vec::<String>::new());
+    let [site] = &plan.sites[..] else {
+        panic!("one site: {:?}", plan.sites)
+    };
+    assert_eq!((site.addr, site.len, site.kind), (BASE, 6, KIND_BEFORE));
+    let patch = &plan.pages[0].bytes[0..6];
+    assert_eq!(patch[..2], [0x2e, 0xe9]);
+    let t = plan.tramp_vaddr + site.tramp as u64;
+    assert_eq!(
+        BASE + 6 + i32::from_le_bytes(patch[2..6].try_into().unwrap()) as u64,
+        t
+    );
+    let inner: Vec<(u64, u32, u8)> = plan
+        .entries
+        .iter()
+        .map(|n| (n.addr, n.to, n.kind))
+        .collect();
+    let copy = site.tramp + site.copy as u32;
+    assert_eq!(
+        inner,
+        [
+            (BASE + 2, copy + 2, KIND_INTERIOR),
+            (BASE + 4, copy + 4, KIND_INTERIOR)
+        ]
+    );
+    for b in [2, 4] {
+        assert!(
+            TRAP_BYTES.contains(&patch[b]),
+            "boundary {b}: {:#x}",
+            patch[b]
+        );
+    }
+    let js = super::code::decode_at(&plan.tramp, plan.tramp_vaddr, copy as usize + 4);
+    assert_eq!((js.len(), js.near_branch_target()), (6, BASE));
+    // Each copy is the instruction at the same offset.
+    for (b, n) in [(0, 2), (2, 2)] {
+        let o = (copy + b) as usize;
+        assert_eq!(plan.tramp[o..o + n], code[b as usize..b as usize + n]);
+    }
+}
+
+/// A branch the rewriter sees into what would be a group's interior boundary: no group there.
+///
+/// ```text
+/// 401000  83 c0 01     L: add eax, 1
+/// 401003  39 d8        M: cmp eax, ebx
+/// 401005  7c f9           jl L
+/// 401007  85 c9           test ecx, ecx
+/// 401009  75 f8           jnz M
+/// 40100b  c3              ret
+/// ```
+#[test]
+fn no_group_over_a_known_branch_target() {
+    let code = [
+        0x83, 0xc0, 0x01, 0x39, 0xd8, 0x7c, 0xf9, 0x85, 0xc9, 0x75, 0xf8, 0xc3,
+    ];
+    let c = analyze(&code, &[BASE], &[]);
+    assert_eq!(outcome(&c, BASE + 5), Some(Outcome::NoRoom));
+    let f = elf(&code);
+    let plan = make_plan(&f, "test").unwrap();
+    assert!(plan
+        .sites
+        .iter()
+        .all(|s| !(s.addr < BASE + 3 && BASE + 3 < s.addr + s.len as u64)));
+    assert_eq!(verify(&f, &plan), Vec::<String>::new());
+}
+
+/// Every unsound change to a group is a verification failure.
+#[test]
+fn the_verifier_rejects_unsound_groups() {
+    let code = [0x31, 0xff, 0x85, 0xd2, 0x78, 0xfa, 0xc3];
+    let f = elf(&code);
+    let good = make_plan(&f, "test").unwrap();
+    assert_eq!(verify(&f, &good), Vec::<String>::new());
+    type Corrupt = Box<dyn Fn(&mut Plan)>;
+    let cases: Vec<(&str, Corrupt)> = vec![
+        (
+            "an interior boundary on a byte that does not fault",
+            Box::new(|p| {
+                // the boundary at +4 is d2 of the jump: aim it 64 KiB further
+                p.pages[0].bytes[4] = 0x90;
+            }),
+        ),
+        (
+            "an interior entry missing",
+            Box::new(|p| {
+                p.entries.pop();
+            }),
+        ),
+        (
+            "an interior entry resuming at the wrong copy",
+            Box::new(|p| p.entries[0].to += 2),
+        ),
+        (
+            "an interior entry no group has",
+            Box::new(|p| {
+                p.entries.push(super::plan::Entry {
+                    addr: BASE + 6,
+                    to: 0,
+                    kind: KIND_INTERIOR,
+                })
+            }),
+        ),
+        (
+            "a copied branch to another target",
+            Box::new(|p| {
+                let s = &p.sites[0];
+                p.tramp[(s.tramp + s.copy as u32) as usize + 6] ^= 1;
+            }),
+        ),
+        (
+            "a group one instruction short",
+            Box::new(|p| {
+                p.sites[0].len = 4;
+                p.entries.pop();
+            }),
+        ),
+    ];
+    for (what, corrupt) in cases {
+        let mut p = good.clone();
+        corrupt(&mut p);
+        assert!(!verify(&f, &p).is_empty(), "accepted: {what}");
+    }
 }

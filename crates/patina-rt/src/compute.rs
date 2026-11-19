@@ -232,6 +232,14 @@ fn map_cell() {
 /// since every trampoline counts in it; `exit` arms it on the way into the program.
 pub fn start_points() {
     if crate::plans::on() {
+        // An interior boundary of a group traps only while port I/O does (`plans::entry`):
+        // no I/O permission inherited across execve (lowering it needs no privilege).
+        #[cfg(target_arch = "x86_64")]
+        unsafe {
+            use crate::raw::*;
+            sc1(nr::IOPL, 0);
+            sc3(nr::IOPERM, 0, 65536, 0);
+        }
         map_cell();
         let p = &mut proc().compute;
         p.mode = ON;

@@ -569,23 +569,24 @@ The rewriter (ARCHITECTURE.md, "Load-time rewriting"), its plans checked by the 
 verifier, and each plan applied to a copy of its file (`patina __rewrite --standalone`) run
 natively against the original, without Patina (under Patina: below).
 Measured 2026-11-19 on the host above (Ubuntu 26.04), by `rewrite/evidence-corpus` (`./check
-evidence evidence-corpus`, 216 s with 50 runs each) and `rewrite/01-differential` (quick).
+evidence evidence-corpus`, 622 s with 50 runs each and the census) and `rewrite/01-differential`
+(quick). Back-edges before groups (single-instruction patches only) in parentheses.
 
-| Program (rewritten with the shared libraries it loads) | Sites patched of found | Back-edges covered | Dark text | Rewrite | Plan | 50 runs |
-|---|---|---|---|---|---|---|
-| ripgrep 15.2.0, musl static-PIE release (3.7 MB text), a regex count over the Go sources | 50,236 / 56,500 | 85.4% | 0.3% | 0.12 s | 6 MB | identical output and exit |
-| gofmt, Go 1.27.3, static (1.3 MB), `-d -r` rewrite over `runtime` | 20,839 / 22,070 | 84.5% | 0.0% | 0.04 s | 2 MB | identical |
-| CPython 3.14.4 (3.7 MB, non-PIE) and 4 libraries, a dict, sort, regex and json workload | 101,176 / 112,768 | 87.2% | 0.0% | 0.17 s | 8 MB | identical |
-| clang 21 (86.1 MB) and 5 libraries, compiling `diff.cc` at -O2 to assembly | 1,272,289 / 1,468,196 | 72.8% | 0.0% | 3.1 s | 136 MB | identical |
-| headless Chromium (Playwright's `chrome-headless-shell`, 170 MB) and 44 libraries, `--dump-dom` of a scripted page | 2,439,543 / 2,893,062 | 74.9% | 22.4% | 6.8 s | 248 MB | identical |
-| The quick tier's guests (C static and static-PIE, C++, Rust, Go): plan twice and compare, verify, objdump agrees on every patched instruction, 5 runs, and a copy with 1,000 events stops on its trap (`SIGILL`) | | 84.3 to 85.0% | | | | identical |
-| Census: every ELF file in `/usr/bin` and the system library directory, planned and verified | 1,142 files, 8,548,317 sites; 0 rejected by the verifier; 9 refused (relocatable objects) | | | | | not run |
+| Program (rewritten with the shared libraries it loads) | Sites patched of found | Back-edges covered | Groups (interior boundaries) | Dark text | Rewrite | Plan (before groups) | 50 runs |
+|---|---|---|---|---|---|---|---|
+| ripgrep 15.2.0, musl static-PIE release (3.7 MB text), a regex count over the Go sources | 55,868 / 56,500 | 98.9% (85.4%) | 4,974 (5,333) | 0.3% | 0.26 s | 7 MB (6) | identical output and exit |
+| gofmt, Go 1.27.3, static (1.3 MB), `-d -r` rewrite over `runtime` | 21,960 / 22,072 | 99.4% (84.5%) | 1,082 (1,099) | 0.0% | 0.06 s | 2 MB (2) | identical |
+| CPython 3.14.4 (3.7 MB, non-PIE) and 4 libraries, a dict, sort, regex and json workload | 109,120 / 112,768 | 97.0% (87.2%) | 7,114 (7,887) | 0.0% | 0.24 s | 9 MB (8) | identical |
+| clang 21 (86.1 MB) and 5 libraries, compiling `diff.cc` at -O2 to assembly | 1,452,922 / 1,468,196 | 98.2% (72.8%) | 162,395 (167,033) | 0.0% | 5.2 s | 176 MB (136) | identical |
+| headless Chromium (Playwright's `chrome-headless-shell`, 170 MB) and 44 libraries, `--dump-dom` of a scripted page | 2,841,295 / 2,893,062 | 97.6% (74.9%) | 336,403 (366,270) | 22.4% | 9.7 s | 325 MB (248) | identical; 200 more runs identical, no crash |
+| The quick tier's guests (C static and static-PIE, C++, Rust, Go): plan twice and compare, verify, objdump agrees on every patched instruction, 5 runs, and a copy with 1,000 events stops on its trap (`SIGILL`) | | 98.0 to 99.2% | | | | | identical |
+| Census: every ELF file in `/usr/bin` and the system library directory, planned and verified | 1,142 files; 0 rejected by the verifier; 9 refused (relocatable objects) | | | | | | not run |
 
 "Dark" is text no control flow or unwind extent reaches: Chromium's is mostly code reached only
-through tables (no jump-table following, by design). Sites not patched are flags live (no dead
-point for the count), no room (a short branch with no 5-byte instruction in its block or at the
-loop head), or tainted (a span with a refusal). Rewrite time is one thread with verification
-excluded; Chromium's peak memory was 1.1 GB. The CLI binary grows by 324 kB stripped (+5.4%)
+through tables (no jump-table following, by design). Rewrite time is one thread with verification
+excluded; Chromium's peak memory was 1.1 GB. A site not patched is flags live (no point in its
+block or run where the flags are dead), no room (no run of 5 bytes or more that no known branch
+enters), or tainted (a span with a refusal). The CLI binary grows by 324 kB stripped (+5.4%)
 with `iced-x86` (decoder and instruction info only); its clean build takes 2.3 to 2.8 s.
 
 Red/green: a Jcc patch with its condition inverted is rejected by the verifier; with the
@@ -595,6 +596,33 @@ caught it); an absolute read of data in non-PIE text not ending extent decode fa
 test for data in text. The verifier rejects every planted corruption in `rewrite::tests`, and
 the plan reader a page mapped twice.
 
+### Group patches
+
+A short site with no single instruction to carry its count is merged with its straight-line
+neighbours (ARCHITECTURE.md, "Group patches"); every interior boundary holds a faulting byte
+and the runtime resumes a jump there at the instruction's copy. Measured 2026-11-19 on the host
+above.
+
+| Check | Result |
+|---|---|
+| `rewrite/04-interior` (quick): `rw-interior`, static and static-PIE assembly that enters every interior boundary of its 7 groups (12 boundaries, `int3` and port I/O bytes, one group across a page, one with a prefixed jump, one with a RIP-relative copy) through a table the rewriter does not read, by `call`, `jmp` and `ret` | the plan's interior boundaries are exactly the guest's labels; native, the rewritten copy and Patina print the same; seeds 1 and 2 identical under `--vary cpu,load,aslr,sandbox,repeat` with a point on every count; 24 interior entries resumed of 24 made |
+| The same guest after mapping over the 64 MiB past its image (where its trampolines are) | the plan is dropped, native output |
+| Chromium natively, the rewritten copy and its 44 libraries | 200 runs: output and exit identical to the original, no crash |
+| Chromium under `--preempt points`, seeds 1 to 100 (warm plans) | 100 runs: output identical to native, no crash; 325 to 380,592 points a run (60,689 mean); seed 1 twice one digest; 49 of 49 images planned |
+| Interior entries in the corpus runs | none in any run above (Patina's `interior` count, and natively `strace -f` of 3 Chromium runs shows no `SI_KERNEL` trap) |
+| Direct branches into an interior boundary (objdump's linear sweep of Chromium's whole text against its 366,270 boundaries) | 3, each from code the rewriter does not reach (a case block reached through a table, as in the design's traced fault): `jmp`/`je` in font and allocator code at 0x268a81d, 0x5df6aed, 0x7c166d3. Each would trap and resume; none ran in these workloads |
+| Cost of an interior entry (200,000 jumps into a group, against 200,000 entries at its start) | natively 0.6 µs each (a signal and `rt_sigreturn`); under Patina 0.66 µs each (the runtime's fault entry) |
+| CPU time natively, 20 runs (user + sys; original / single-instruction plans / groups) | ripgrep 0.072 / 0.054 / 0.057 s; CPython 0.061 / 0.082 / 0.084 s; clang 0.391 / 0.501 / 0.550 s; Chromium 0.074 / 0.091 / 0.098 s. gofmt natively is 1.3 / 33.5 / 40.8 s: its threads contend for the one count cell (a cache line), which never happens under Patina (one thread at a time) |
+| Plan size | +5 to +31% (trampolines whose address a boundary constrains sit 5 to 8 MiB past the image; only pages holding a trampoline are stored) |
+| Runtime | 50 more lines of code (784 in all, below): the interior lookup and resume, the sparse trampoline mapping, a change to mapped trampolines dropping the plan, dropping inherited I/O permission; no decoder |
+
+Red/green: with the runtime's resume disabled, `04-interior` c fails (output differs: the
+guest dies at its first interior entry). Review found two defects, both fixed: a copied x87
+instruction recorded the trampoline's address as its own (`fnstenv` showed it; x87
+instructions are no longer copied), and a program mapping over its trampolines alone kept
+patches that jumped into the new mapping and died of `SIGSEGV` (that now drops the plan;
+`04-interior` d).
+
 ### Under Patina: `--preempt points`
 
 The runtime applying the plans of a program and every library it maps, measured 2026-11-19 on
@@ -602,20 +630,21 @@ the host above by `rewrite/evidence-points` (`./check evidence evidence-points`)
 tier's `rewrite/02-points` and `03-fidelity`. Each program's output is compared with its
 native run's, and seed 1 is run twice with warm plans.
 
-| Program (with its libraries) | Output, same seed twice | Wall: without points / cold / warm | Plans made | Points taken | The program's sites patched, back-edges, dark | Files planned; unplanned, dropped; `cpuid` answered |
-|---|---|---|---|---|---|---|
-| ripgrep 15.2.0 (musl static-PIE, run from `sh`), a regex count over the Go sources | native; identical | 377 / 779 / 387 ms | 0.40 s | 40 | 88.9% of 56,500; 85.4%; 0.3% | 4 of 4; 0, 0; 47 |
-| gofmt (Go 1.27.3, static), `-d -r` over `runtime` | native; identical | 1,059 / 1,110 / 1,145 ms | 0.08 s | 4,827 | 94.4% of 22,072; 84.5%; 0.0% | 4 of 4; 0, 0; 49 |
-| CPython 3.14.4, dict, sort, regex and json | native; identical | 92 / 761 / 119 ms | 0.66 s | 742 | 89.7% of 112,768; 87.2%; 0.5% | 9 of 9; 0, 0; 49 |
-| headless Chromium, `--dump-dom` of a scripted page | native; identical | 531 / 12,062 / 715 ms | 11.4 s | 183 | 84.3% of 2,893,062; 74.9%; 22.5% | 49 of 49; 2, 0; 289 |
-| PostgreSQL 18 (built from source; by hand, not in the script): start, the SERIALIZABLE bank workload of 3 clients, stop | the bank checker passes; 5 runs under `--vary cpu,load,aslr,sandbox,repeat` identical, cold and warm one digest | 555 / 1,858 / 568 ms | 1.18 s | 53 | `postgres`: 91.7% of 144,087; 87.0%; 0.0% | 19 of 19; 0, 0; 2,880 |
+| Program (with its libraries) | Output, same seed twice | Wall: without points / cold / warm | Plans made | Points taken | Interior entries | The program's sites patched, back-edges, dark | Files planned; unplanned, dropped; `cpuid` answered |
+|---|---|---|---|---|---|---|---|
+| ripgrep 15.2.0 (musl static-PIE, run from `sh`), a regex count over the Go sources | native; identical | 378 / 835 / 389 ms | 0.46 s | 89 | 0 | 98.9% of 56,500; 98.9%; 0.3% | 4 of 4; 0, 0; 47 |
+| gofmt (Go 1.27.3, static), `-d -r` over `runtime` | native; identical | 1,068 / 1,183 / 1,095 ms | 0.09 s | 6,227 | 0 | 99.5% of 22,072; 99.4%; 0.0% | 4 of 4; 0, 0; 49 |
+| CPython 3.14.4, dict, sort, regex and json | native; identical | 90 / 920 / 150 ms | 0.80 s | 944 | 0 | 96.8% of 112,768; 97.0%; 0.5% | 9 of 9; 0, 0; 49 |
+| headless Chromium, `--dump-dom` of a scripted page | native; identical | 563 / 15,188 / 898 ms | 14.1 s | 339 | 0 | 98.2% of 2,893,062; 97.6%; 22.5% | 49 of 49; 2, 0; 289 |
+| PostgreSQL 18 (built from source; by hand, not in the script): start, the SERIALIZABLE bank workload of 3 clients, stop | the bank checker passes; 5 runs under `--vary cpu,load,aslr,sandbox,repeat` identical, cold and warm one digest | 555 / 1,858 / 568 ms | 1.18 s | 53 | - | `postgres`: 91.7% of 144,087; 87.0%; 0.0% | 19 of 19; 0, 0; 2,880 |
 
 "Cold" makes and verifies every plan in the run (the files the program names before it
 starts, the others when they are mapped; wall time only, so the digest is the warm runs');
 "warm" reads them from the plan cache. Coverage is the program's own file. Chromium's
 unplanned are memory it makes executable at run time. PostgreSQL is not installed system-wide
-here, so the script skips it; its row is a build from source run by hand. The runtime adds
-734 lines of code (`plans.rs` and its call sites, comments and blank lines aside) and no
+here, so the script skips it; its row is a build from source run by hand, before group
+patches. The runtime adds
+784 lines of code (`plans.rs` and its call sites, comments and blank lines aside) and no
 decoder.
 
 | Check | Result |
@@ -623,7 +652,7 @@ decoder.
 | Determinism: `verify --vary cpu,load,aslr,sandbox,repeat`, C static, C static-PIE, C++, Rust (lld), Go, 5 runs (seed 5) and in the quick tier 3 runs of seeds 1 and 2 | identical; seeds 1 and 2 differ |
 | The same for the stock races `go-race-stock` (compute-gap 8, seeds 1-3, 6 runs) and `rs-race-stock` | identical |
 | Without the `cpuid` sites, `go-race-stock` under `--vary cpu` | differs at the first point: `rbx` 0x0c180800 against 0x01180800, leaf 1's initial APIC id, which Go's `rt0_go` leaves in a register (below) |
-| Schedules reached: `go-race-stock` (a check-then-act on atomics, no system call in the window), seeds 1-20 | without points 0 failures; points at the default gap 0; points with `compute-gap=2..64` 10 (GUIDE transcript) |
+| Schedules reached: `go-race-stock` (a check-then-act on atomics, no system call in the window), seeds 1-20 | without points 0 failures; points at the default gap 0; points with `compute-gap=2..64` 9 (GUIDE transcript) |
 | `rs-race-stock`, seeds 1-40 | 5 failures at gap 1-2, 4 at gap 4, 0 at gap 8 |
 | `stats-c` built stock (a lost update: a load and a store with no branch, call or atomic between) | 0 of 20 at the default gap and at `compute-gap=1..8`: out of reach by design (a rebuild finds it) |
 | A timer due inside a loop with no system call (`deadline-stock`) | without points `compute-stall`; with them the handler runs at 10,003,018 virtual ns for a 10 ms timer |

@@ -233,20 +233,29 @@ pub struct ComputeStats {
     /// point), image mappings a plan was applied to, plans dropped because the program
     /// unmapped, mapped over, moved or reprotected patched text, executable memory left
     /// unpatched (anonymous or shared memory, files without a plan, memory made executable
-    /// later), and patched `cpuid`s answered.
+    /// later), patched `cpuid`s answered, and jumps into a group's interior boundary resumed
+    /// at the copy of its instruction.
     pub plan: [AtomicU64; PLAN_FIELDS],
     /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: the
     /// stall watchdog counts that wall time as progress (it costs no virtual time).
     pub planning: AtomicU64,
 }
 
-pub const PLAN_FIELDS: usize = 5;
-pub const PLAN_NAMES: [&str; PLAN_FIELDS] = ["points", "applied", "dropped", "unplanned", "cpuid"];
+pub const PLAN_FIELDS: usize = 6;
+pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
+    "points",
+    "applied",
+    "dropped",
+    "unplanned",
+    "cpuid",
+    "interior",
+];
 pub const PLAN_POINTS: usize = 0;
 pub const PLAN_APPLIED: usize = 1;
 pub const PLAN_DROPPED: usize = 2;
 pub const PLAN_UNPLANNED: usize = 3;
 pub const PLAN_CPUID: usize = 4;
+pub const PLAN_INTERIOR: usize = 5;
 
 impl ComputeStats {
     pub fn plans(&self) -> [u64; PLAN_FIELDS] {
