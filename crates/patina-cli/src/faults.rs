@@ -39,6 +39,11 @@ enum Val {
     Count,
     /// A count; may be a range; a parameter of another class.
     Param,
+    /// A size in bytes; a range `A..B` (A at least 1) draws log-uniformly, since sizes span
+    /// orders of magnitude; a class `swarm` may turn off.
+    Size,
+    /// The key's own grammar, like `Own`, for a parameter of another class: never swarmed.
+    Spread,
     /// 0 or 1.
     Flag,
     /// The key's own grammar (`A..B` milliseconds are the per-event spread, not a plan
@@ -139,8 +144,14 @@ pub const KEYS: &[Key] = &[
     key(
         "net-chunk-max",
         "N",
-        Val::Count,
-        "TCP deliveries are split into pieces of at most N bytes",
+        Val::Size,
+        "TCP deliveries are split into pieces of at most N bytes (a range A..B draws log-uniformly per seed)",
+    ),
+    key(
+        "net-chunk-gap-us",
+        "A..B",
+        Val::Spread,
+        "the pieces of a split delivery follow each other by a draw in A..B microseconds [default: each piece is delayed as a delivery is, by net-delay-ms]",
     ),
     key(
         "net-reset-permille",
@@ -264,6 +275,7 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
+            ("net-chunk-gap-us", "1..10"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
             ("net-drop-permille", "0..50"),
@@ -280,6 +292,7 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("fs-delay-permille", "0..20"),
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
+            ("net-chunk-gap-us", "1..10"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
             ("net-drop-permille", "0..50"),
@@ -361,6 +374,25 @@ fn resolve_gap(seed: u64, k: &str, v: &str) -> Res<u64> {
     Ok(proto::compute::mean_gap(plan_draw(seed, k), a, b))
 }
 
+/// A size or a range `A..B` of sizes, resolved: a range draws log-uniformly
+/// (`proto::pmu::log_uniform`) by the key's own plan draw.
+fn resolve_size(seed: u64, k: &str, v: &str) -> Res<u64> {
+    let (a, b) = match v.split_once("..") {
+        Some((a, b)) => (num(k, a)?, num(k, b)?),
+        None => return num(k, v),
+    };
+    if a > b {
+        return Err(format!("--fault {k}={v}: A is larger than B"));
+    }
+    if a == 0 || b > u64::MAX / 4 {
+        return Err(format!(
+            "--fault {k}={v}: a range is from 1 to {}",
+            u64::MAX / 4
+        ));
+    }
+    Ok(proto::pmu::log_uniform(plan_draw(seed, k), a, b))
+}
+
 /// A position key's value (`N`, or `CLASS:N` for `fs-error-at`) with `N` resolved like any
 /// other number: a range searches positions across seeds.
 fn resolve_at(seed: u64, k: &str, v: &str) -> Res<String> {
@@ -430,7 +462,8 @@ pub fn resolve(
             Val::Permille => json!(resolve_num(seed, k, v, 1000)?),
             Val::Count | Val::Param => json!(resolve_num(seed, k, v, u64::MAX / 2)?),
             Val::Flag => json!((num(k, v)? != 0) as u64),
-            Val::Own => json!(v),
+            Val::Size => json!(resolve_size(seed, k, v)?),
+            Val::Own | Val::Spread => json!(v),
             Val::At => json!(resolve_at(seed, k, v)?),
             Val::Gap => {
                 plan.compute_gap = resolve_gap(seed, k, v)?;
@@ -438,7 +471,7 @@ pub fn resolve(
                 continue;
             }
         };
-        let class = matches!(info.val, Val::Permille | Val::Count | Val::Own);
+        let class = matches!(info.val, Val::Permille | Val::Count | Val::Own | Val::Size);
         if swarm && class && plan_draw(seed, &format!("swarm:{k}")) & 1 == 1 {
             plan.resolved.push((k.clone(), json!("off")));
             continue;
@@ -548,14 +581,22 @@ fn point(c: &mut proto::sdk::SdkCfg, label: &str, p: u64) -> Res<()> {
 
 /// `A..B` (milliseconds) as nanoseconds.
 fn ms_range(k: &str, v: &str) -> Res<(u64, u64)> {
+    span(k, v, 1_000_000, "milliseconds")
+}
+
+/// `A..B` in units of `ns` nanoseconds, as nanoseconds.
+fn span(k: &str, v: &str, ns: u64, unit: &str) -> Res<(u64, u64)> {
     let (a, b) = v
         .split_once("..")
-        .ok_or_else(|| format!("--fault {k}={v}: expected A..B (milliseconds)"))?;
+        .ok_or_else(|| format!("--fault {k}={v}: expected A..B ({unit})"))?;
     let (a, b) = (num(k, a)?, num(k, b)?);
     if a > b {
         return Err(format!("--fault {k}={v}: A is larger than B"));
     }
-    Ok((a * 1_000_000, b * 1_000_000))
+    match (a.checked_mul(ns), b.checked_mul(ns)) {
+        (Some(a), Some(b)) => Ok((a, b)),
+        _ => Err(format!("--fault {k}={v}: too large")),
+    }
 }
 
 /// One `net-*` key, resolved. They act on the supervisor's wire only, so they do not switch
@@ -587,6 +628,10 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
             (c.partition_from_ns, c.partition_to_ns) = ms_range(k, range)?;
             c.partition_port = port;
             c.partition_set = 1;
+        }
+        "net-chunk-gap-us" => {
+            (c.chunk_gap_min_ns, c.chunk_gap_max_ns) = span(k, v, 1000, "microseconds")?;
+            c.chunk_gap_set = 1;
         }
         "net-halfclose-delay-ms" => {
             (c.halfclose_min_ns, c.halfclose_max_ns) = ms_range(k, v)?;
@@ -702,7 +747,11 @@ mod tests {
             let b = resolve(
                 s,
                 &disk,
-                &v(&["net-chunk-max=1..4", "mem-limit-mb=10..20"]),
+                &v(&[
+                    "net-chunk-max=1..4",
+                    "net-chunk-gap-us=1..10",
+                    "mem-limit-mb=10..20",
+                ]),
                 Some("machine:0..5"),
                 true,
             )
@@ -789,6 +838,41 @@ mod tests {
         for bad in ["compute-gap=0..8", "compute-gap=9..8", "compute-gap=x"] {
             assert!(resolve(0, &[], &v(&[bad]), None, true).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn a_size_range_draws_log_uniformly_and_a_size_stays_put() {
+        let mut small = 0;
+        let mut seen = std::collections::BTreeSet::new();
+        for s in 0..256 {
+            let p = resolve(s, &v(&["net"]), &[], None, true).unwrap();
+            let c = p.net.chunk_max;
+            assert!(
+                (1..=65536).contains(&c) && val(&p, "net-chunk-max") == json!(c),
+                "{c}"
+            );
+            small += (c <= 16) as u32;
+            seen.insert(c);
+            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), None, true).unwrap();
+            assert_eq!(one.net.chunk_max, 7);
+        }
+        // Log-uniform: about a quarter of seeds at 16 bytes or less (uniform: one in 4096).
+        assert!(
+            (32..=100).contains(&small) && seen.len() > 64,
+            "{small} {}",
+            seen.len()
+        );
+        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None, true).is_err());
+        let g = resolve(0, &[], &v(&["net-chunk-gap-us=1..10"]), None, true).unwrap();
+        assert_eq!(
+            (
+                g.net.chunk_gap_set,
+                g.net.chunk_gap_min_ns,
+                g.net.chunk_gap_max_ns
+            ),
+            (1, 1000, 10_000)
+        );
+        assert!(resolve(0, &[], &v(&["net-chunk-gap-us=5"]), None, true).is_err());
     }
 
     #[test]

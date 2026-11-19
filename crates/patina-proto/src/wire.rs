@@ -271,6 +271,11 @@ pub struct NetCfg {
     pub drop_permille: u64,
     pub dup_permille: u64,
     pub reorder_permille: u64,
+    /// 1 when `net-chunk-gap-us` is set: the time between the pieces of a split delivery;
+    /// otherwise each piece takes a delivery delay.
+    pub chunk_gap_set: u64,
+    pub chunk_gap_min_ns: u64,
+    pub chunk_gap_max_ns: u64,
 }
 
 /// Sub-keys of `draw(Stream::FaultNet, key)`.

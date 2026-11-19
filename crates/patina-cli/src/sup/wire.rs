@@ -1097,8 +1097,13 @@ impl Sup {
                                 c.dirs[dir].pieces += 1;
                                 c.dirs[dir].pieces
                             };
-                            let delay =
-                                self.net_delay(id, NSUB_CHUNK | dir as u64, n, self.delay_range());
+                            let cfg = self.net_cfg();
+                            let gap = if cfg.chunk_gap_set != 0 {
+                                (cfg.chunk_gap_min_ns, cfg.chunk_gap_max_ns)
+                            } else {
+                                self.delay_range()
+                            };
+                            let delay = self.net_delay(id, NSUB_CHUNK | dir as u64, n, gap);
                             let mut nt = now + delay.max(1);
                             if let Some(to) = self.partition_hold(nt, sport, cport) {
                                 nt = to;
