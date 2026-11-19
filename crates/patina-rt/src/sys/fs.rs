@@ -399,6 +399,20 @@ const RDEV_TTY: u64 = 5 << 8;
 const RDEV_CONSOLE: u64 = (5 << 8) | 1;
 const RDEV_PTMX: u64 = (5 << 8) | 2;
 
+fn open_synth(call: &mut dyn Call, s: path::Synth, flags: u64) -> i64 {
+    set_class(call, Class::Virt);
+    if s.is_dir() && (flags & O_ACCMODE != 0 || flags & O_CREAT != 0) {
+        return -e::EISDIR;
+    }
+    if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC) != 0 {
+        return -e::EACCES;
+    }
+    if flags & O_DIRECTORY != 0 && !s.is_dir() {
+        return -e::ENOTDIR;
+    }
+    super::procfs::open(s, flags & O_CLOEXEC != 0)
+}
+
 fn open(call: &mut dyn Call) -> i64 {
     let nr = call.nr();
     let mut a = args(call);
@@ -426,15 +440,10 @@ fn open(call: &mut dyn Call) -> i64 {
     let k = path::classify(dirfd, a[pi], &mut norm);
     match k {
         Kind::Hidden | Kind::NoPty | Kind::NoTty => return deny_policy(k, &norm),
-        Kind::Synth(s) => {
-            set_class(call, Class::Virt);
-            if flags & O_ACCMODE != 0 || flags & (O_CREAT | O_TRUNC) != 0 {
-                return -e::EACCES;
-            }
-            if flags & O_DIRECTORY != 0 && s != path::Synth::Task {
-                return -e::ENOTDIR;
-            }
-            return super::procfs::open(s, flags & O_CLOEXEC != 0);
+        Kind::Synth(s) => return open_synth(call, s, flags),
+        // `/proc/self/fd/N` of a directory the policy handed out: that directory again.
+        Kind::SelfFd(n) if super::procfs::kind_of(n).is_some_and(|s| s.is_dir()) => {
+            return open_synth(call, super::procfs::kind_of(n).unwrap(), flags);
         }
         Kind::SelfFd(n) if n >= FD_HIDDEN_MIN as i64 => return -e::ENOENT,
         Kind::SelfExe => {
@@ -717,12 +726,12 @@ fn stat_call(call: &mut dyn Call) -> i64 {
     } else {
         path::classify(dirfd, a[pi.unwrap()], &mut norm)
     };
-    let synth = if empty {
-        super::procfs::kind_of(dirfd)
-    } else if let Kind::Synth(s) = k {
-        Some(s)
-    } else {
-        None
+    let synth = match k {
+        _ if empty => super::procfs::kind_of(dirfd),
+        Kind::Synth(s) => Some(s),
+        // `/proc/self/fd/N` of a synthesised file or directory: the same answer as `fstat(N)`.
+        Kind::SelfFd(n) if flags & AT_SYMLINK_NOFOLLOW == 0 => super::procfs::kind_of(n),
+        _ => None,
     };
     if let Some(s) = synth {
         set_class(call, Class::Virt);
@@ -907,6 +916,27 @@ fn readlink(call: &mut dyn Call) -> i64 {
 
 // ---- access, xattr reads, chdir ----
 
+/// A directory the policy hands out never becomes the working directory (relative names are
+/// policed only by their descriptor, `path::dir_base`): `EACCES`, recorded; a file, `ENOTDIR`.
+/// The descriptor is of something under `/proc` by its real path.
+fn under_proc(fd: i64) -> bool {
+    let mut p = PathBuf::new();
+    path::full(fd, b"", &mut p) && {
+        let b = p.as_bytes();
+        b == b"/proc" || b.starts_with(b"/proc/")
+    }
+}
+
+fn chdir_refused(k: Kind) -> i64 {
+    match k {
+        Kind::Synth(s) if s.is_dir() => {
+            path::refuse(s.path());
+            -e::EACCES
+        }
+        _ => -e::ENOTDIR,
+    }
+}
+
 fn read_path_call(call: &mut dyn Call, di: Option<usize>, pi: usize) -> i64 {
     let nr = call.nr();
     let mut a = args(call);
@@ -920,15 +950,22 @@ fn read_path_call(call: &mut dyn Call, di: Option<usize>, pi: usize) -> i64 {
                 // access: readable, nothing else
                 nr::ACCESS | nr::FACCESSAT | nr::FACCESSAT2 => {
                     let mode = a[pi + 1];
-                    if mode & 3 != 0 {
+                    let deny = match k {
+                        Kind::Synth(s) if s.is_dir() => 2, // W_OK; X_OK is search
+                        _ => 3,
+                    };
+                    if mode & deny != 0 {
                         -e::EACCES
                     } else {
                         0
                     }
                 }
-                nr::CHDIR => -e::ENOTDIR,
+                nr::CHDIR => chdir_refused(k),
                 _ => -e::EOPNOTSUPP,
             };
+        }
+        Kind::SelfFd(n) if nr == nr::CHDIR && super::procfs::kind_of(n).is_some() => {
+            return chdir_refused(Kind::Synth(super::procfs::kind_of(n).unwrap()));
         }
         Kind::SelfExe => {
             set_class(call, Class::Virt);
@@ -1388,24 +1425,37 @@ pub fn handle(call: &mut dyn Call) -> Action {
         | nr::SETXATTRAT
         | nr::REMOVEXATTRAT => mutate(call),
         nr::GETDENTS64 | nr::GETDENTS => {
-            let r = raw(call);
-            host_check(call, r);
-            if r > 0 && super::procfs::kind_of(call.arg(0) as i32 as i64).is_some() {
-                set_class(call, Class::Rewrite);
-                super::procfs::rewrite_dents(call.arg(1), r, call.nr() == nr::GETDENTS);
+            let (fd, old) = (call.arg(0) as i32 as i64, call.nr() == nr::GETDENTS);
+            match super::procfs::kind_of(fd) {
+                Some(path::Synth::FdDir) => {
+                    set_class(call, Class::Rewrite);
+                    super::procfs::getdents_fds(fd, call.arg(1), call.arg(2), old)
+                }
+                Some(k) if k.is_dir() => {
+                    set_class(call, Class::Virt);
+                    super::procfs::getdents_listed(k, fd, call.arg(1), call.arg(2), old)
+                }
+                _ => {
+                    let r = raw(call);
+                    host_check(call, r);
+                    r
+                }
             }
-            r
         }
-        // `/proc/self/task` is handed out as a directory, never as the working directory:
-        // relative names are policed only by their descriptor (`path::absolute`).
-        nr::FCHDIR
-            if super::procfs::kind_of(call.arg(0) as i32 as i64)
-                == Some(crate::path::Synth::Task) =>
-        {
-            crate::path::refuse(b"/proc/self/task");
-            -e::EACCES
-        }
-        nr::GETCWD | nr::FCHDIR | nr::UMASK => {
+        nr::FCHDIR => match super::procfs::kind_of(call.arg(0) as i32 as i64) {
+            Some(k) => chdir_refused(Kind::Synth(k)),
+            // No working directory under /proc, whatever the descriptor.
+            None if under_proc(call.arg(0) as i32 as i64) => {
+                path::refuse(b"/proc");
+                -e::EACCES
+            }
+            None => {
+                let r = raw(call);
+                host_check(call, r);
+                r
+            }
+        },
+        nr::GETCWD | nr::UMASK => {
             let r = raw(call);
             host_check(call, r);
             r

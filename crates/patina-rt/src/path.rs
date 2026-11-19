@@ -198,13 +198,28 @@ pub enum Synth {
     ThpShmem,
     NgroupsMax,
     Filesystems,
-    /// The directory `/proc/self/task`: the real one, with inode numbers virtualised.
+    /// The directory `/proc/self/task`: the run's threads of this process.
     Task,
     /// `/proc/sys/net/core/somaxconn` (Go reads it for its listen backlog).
     Somaxconn,
+    /// The directory `/proc`: the files the policy lists, `self` and this process's id.
+    ProcDir,
+    /// The directory `/proc/self` (also `/proc/<own pid>`): the files the policy lists.
+    SelfDir,
+    /// The directory `/proc/self/fd`: the program's own descriptors.
+    FdDir,
 }
 
 impl Synth {
+    /// A directory the policy hands out (`sys::procfs`): its relative names are policed as the
+    /// paths they name (`dir_base`), it lists only what the policy allows, and it never
+    /// becomes the working directory.
+    pub fn is_dir(self) -> bool {
+        matches!(
+            self,
+            Synth::Task | Synth::ProcDir | Synth::SelfDir | Synth::FdDir
+        )
+    }
     pub fn from_u8(v: u8) -> Option<Synth> {
         SYNTH_PATHS
             .iter()
@@ -222,7 +237,7 @@ impl Synth {
 }
 
 /// Files under `/proc/self/` (also `/proc/<own pid>/`).
-const SELF_SYNTH: &[(&[u8], Synth)] = &[
+pub const SELF_SYNTH: &[(&[u8], Synth)] = &[
     (b"maps", Synth::Maps),
     (b"smaps", Synth::Smaps),
     (b"stat", Synth::Stat),
@@ -235,11 +250,12 @@ const SELF_SYNTH: &[(&[u8], Synth)] = &[
     (b"environ", Synth::Environ),
     (b"comm", Synth::Comm),
     (b"task", Synth::Task),
+    (b"fd", Synth::FdDir),
 ];
 
 /// Absolute paths of the global synthesised files (the first entry per kind
 /// is the name shown by readlink).
-const SYNTH_PATHS: &[(&[u8], Synth)] = &[
+pub const SYNTH_PATHS: &[(&[u8], Synth)] = &[
     (b"/proc/self/maps", Synth::Maps),
     (b"/proc/self/smaps", Synth::Smaps),
     (b"/proc/self/stat", Synth::Stat),
@@ -252,6 +268,9 @@ const SYNTH_PATHS: &[(&[u8], Synth)] = &[
     (b"/proc/self/environ", Synth::Environ),
     (b"/proc/self/comm", Synth::Comm),
     (b"/proc/self/task", Synth::Task),
+    (b"/proc/self/fd", Synth::FdDir),
+    (b"/proc/self", Synth::SelfDir),
+    (b"/proc", Synth::ProcDir),
     (b"/proc/mounts", Synth::Mounts),
     (b"/proc/cpuinfo", Synth::Cpuinfo),
     (b"/proc/meminfo", Synth::Meminfo),
@@ -389,7 +408,7 @@ pub fn fmt_dec(out: &mut [u8], mut v: u64) -> usize {
 }
 
 /// Lexically normalise `p` (absolute) into `out`: no `.`, `..` or repeated `/`.
-fn normalise(p: &[u8], out: &mut PathBuf) {
+pub fn normalise(p: &[u8], out: &mut PathBuf) {
     out.n = 0;
     for comp in p.split(|&c| c == b'/') {
         match comp {
@@ -435,25 +454,40 @@ fn has_dotdot(p: &[u8]) -> bool {
     p.split(|&c| c == b'/').any(|c| c == b"..")
 }
 
+/// The policy path of `dirfd` when it is a directory the policy handed out (`Synth::is_dir`):
+/// a name relative to it is policed as that path joined with the name.
+pub fn dir_base(dirfd: i64) -> Option<&'static [u8]> {
+    if dirfd == AT_FDCWD {
+        return None;
+    }
+    crate::sys::procfs::kind_of(dirfd)
+        .filter(|k| k.is_dir())
+        .map(|k| k.path())
+}
+
 /// The normalised absolute path for `(dirfd, p)`, when it can be policy-relevant.
 /// Relative paths without `..` stay relative to a directory the guest could only
-/// have opened outside `/proc` and `/sys`: the one directory there handed out,
-/// `/proc/self/task`, names its entries by its own path (so `<tid>/mem` is policed as
-/// `/proc/self/task/<tid>/mem`), and it can never be the working directory (`fchdir`).
+/// have opened outside `/proc` and `/sys`: a directory handed out there names its entries by
+/// its own policy path (`dir_base`: `<tid>/mem` from `/proc/self/task` is policed as
+/// `/proc/self/task/<tid>/mem`), and none can be the working directory (`chdir`, `fchdir`).
+/// `resolve` gives handlers such names already joined, with `AT_FDCWD`.
 pub fn absolute(dirfd: i64, p: &[u8], out: &mut PathBuf) -> bool {
     if p.first() == Some(&b'/') {
         normalise(p, out);
         return true;
     }
-    if dirfd != AT_FDCWD && crate::sys::procfs::kind_of(dirfd) == Some(Synth::Task) {
+    if p.is_empty() {
+        return false;
+    }
+    if let Some(d) = dir_base(dirfd) {
         let mut base = PathBuf::new();
-        if !(base.push(b"/proc/self/task/") && base.push(p)) {
+        if !(base.push(d) && base.push(b"/") && base.push(p)) {
             return false;
         }
         normalise(base.as_bytes(), out);
         return true;
     }
-    if p.is_empty() || !has_dotdot(p) {
+    if !has_dotdot(p) {
         return false;
     }
     let mut base = PathBuf::new();
@@ -505,6 +539,9 @@ pub fn policy(s: &[u8]) -> Kind {
         return Kind::Plain;
     }
     if let Some(rest) = proc_self_rest(s) {
+        if rest.is_empty() {
+            return Kind::Synth(Synth::SelfDir);
+        }
         if rest == b"exe" {
             return Kind::SelfExe;
         }

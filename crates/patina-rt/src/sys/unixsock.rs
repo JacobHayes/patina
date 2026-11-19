@@ -220,8 +220,8 @@ fn note_unix_in_flight(fd: i64) {
     }
 }
 
-/// A hidden descriptor named in SCM_RIGHTS answers EBADF; a header or control block the
-/// guest copy cannot read, EFAULT (the kernel is not asked to read it either).
+/// A hidden descriptor or a policy directory named in SCM_RIGHTS answers EBADF; a header or
+/// control block the guest copy cannot read, EFAULT (the kernel is not asked to read it either).
 fn hidden_rights(msg: u64) -> Result<bool, i64> {
     if msg == 0 {
         return Ok(false);
@@ -243,6 +243,12 @@ fn hidden_rights(msg: u64) -> Result<bool, i64> {
             for i in 0..(len - 16) / 4 {
                 let fd = crate::guest::get::<i32>(h + 16 + i * 4)?;
                 if fd >= FD_HIDDEN_MIN {
+                    return Ok(true);
+                }
+                // A directory the policy handed out stays in its process (another one's
+                // runtime could not police names relative to it): refused as hidden, recorded.
+                if let Some(k) = super::procfs::kind_of(fd as i64).filter(|k| k.is_dir()) {
+                    crate::path::refuse(k.path());
                     return Ok(true);
                 }
                 note_unix_in_flight(fd as i64);

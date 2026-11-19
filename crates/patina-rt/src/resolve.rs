@@ -204,6 +204,30 @@ fn prepare_into(
         // is not the path the call walks, so the log has none.
         let log = log && resolve_flags & RESOLVE_IN_ROOT == 0;
         let out = &mut paths.bufs[k];
+        // A directory the policy handed out (`/proc`, `/proc/self/fd`...): a name relative to
+        // it is the path it names from `/`, policed and walked as that path; the kernel never
+        // walks from the descriptor. With openat2's own resolve flags a relative name (or an
+        // absolute one under RESOLVE_IN_ROOT) is refused.
+        if let Some(base) = arg.di.and_then(|_| crate::path::dir_base(dirfd)) {
+            if check_only && (s[0] != b'/' || resolve_flags & RESOLVE_IN_ROOT != 0) {
+                crate::path::refuse(base);
+                return Err(-e::ENOENT);
+            }
+            if s[0] != b'/' {
+                let mut j = PathBuf::new();
+                if !(push(&mut j, base) && push(&mut j, b"/") && push(&mut j, s)) {
+                    return Err(-e::ENAMETOOLONG);
+                }
+                walk(AT_FDCWD, j.as_bytes(), arg.follow, out)?;
+                if log {
+                    paths.logged[k] = arg.pi as u8;
+                }
+                set[*ns] = (arg.pi, out.b.as_ptr() as u64);
+                set[*ns + 1] = (arg.di.unwrap(), AT_FDCWD as u64);
+                *ns += 2;
+                continue;
+            }
+        }
         match resolve(dirfd, s, arg.follow, out)? {
             Resolved::Same => {
                 // Nothing to change for the handler; the log gets the lexical absolute path,
@@ -414,6 +438,15 @@ fn policy_ground(p: &[u8], next: &[u8]) -> bool {
     under(b"/dev") && !under(b"/dev/shm")
 }
 
+/// A whole normalised path on the policy's ground.
+fn on_ground(p: &[u8]) -> bool {
+    let under = |q: &[u8]| p == q || (p.len() > q.len() && p.starts_with(q) && p[q.len()] == b'/');
+    under(b"/proc")
+        || under(b"/sys")
+        || under(b"/.patina")
+        || (under(b"/dev") && p != b"/dev" && !under(b"/dev/shm"))
+}
+
 fn is_dir(p: &PathBuf) -> Result<bool, i64> {
     let mut st = proto::abi::stat::Stat::zeroed();
     let r = unsafe {
@@ -519,7 +552,22 @@ fn walk(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<(), i64
             if !last && !(push(out, b"/") && push(out, &rest[j..len])) {
                 return Err(-e::ENAMETOOLONG);
             }
-            break;
+            // The policy decides on the lexical path, so the kernel is given that path, never
+            // one whose `..` it would resolve differently (after a magic link, or out of the
+            // ground and through a symlink there). A path whose `..` leave the ground is
+            // walked on from where they lead.
+            let mut n = crate::path::PathBuf::new();
+            crate::path::normalise(out.as_bytes(), &mut n);
+            if on_ground(n.as_bytes()) {
+                out.n = 0;
+                push(out, n.as_bytes());
+                break;
+            }
+            len = n.n;
+            rest[..len].copy_from_slice(n.as_bytes());
+            at = 0;
+            out.n = 0;
+            continue;
         }
         if last && !follow && !trailing_slash {
             break;

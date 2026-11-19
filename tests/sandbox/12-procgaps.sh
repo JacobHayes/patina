@@ -5,12 +5,17 @@
 #   (default SCHED_OTHER, nice 0), a thread, a fork child and an exec inherit it, a lower nice
 #   value, a real-time or deadline policy and leaving SCHED_IDLE are refused.
 # - clone: CLONE_NEWUSER and every other CLONE_NEW* flag answer EPERM and are recorded.
+# - nlink: /proc/self/task's link count is 2 + the threads, by stat, fstat and statx.
+# - proc: /proc, /proc/self and /proc/self/fd open as directories; a name relative to one
+#   reaches exactly what the absolute path reaches (`..`, magic links, another pid,
+#   thread-self, runtime descriptors); listings show only what the policy allows, in a fixed
+#   order; none becomes the working directory or travels by SCM_RIGHTS; exec keeps them policed.
 #@ tier=quick budget=15 slots=4
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/procgaps
 mkdir -p "$out"
 refused() { jq -c '.refused' "$1/result.json"; }
-for part in sched clone; do
+for part in sched clone nlink proc; do
     vfy "$part" 2 repeat "$G17" -- /guest/procgaps "$part"
     r=$out/$part/run-0
     [ "$(class "$r")" = ok ] || die "$part: $(class "$r"): $(detail "$r"); $(grep -m3 FAIL "$r/inc-0/stdout")"

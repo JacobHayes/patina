@@ -575,9 +575,8 @@ Enforced:
   for every range. A parent-tid pointer of `clone` there is ignored, as the kernel ignores
   one it cannot write. The SDK channel's own copies (`process_vm_readv`/`writev` on itself)
   refuse the region the same way; the program's `process_vm_*`, `ptrace`, `userfaultfd`,
-  `io_uring`, `shmat` and `rseq` are refused, and no `mem` file under `/proc` is reachable,
-  by path or through the `/proc/self/task` directory (names relative to it are policed as
-  `/proc/self/task/...`, and it cannot become the working directory: `fchdir` to it EACCES).
+  `io_uring`, `shmat` and `rseq` are refused, and no `mem` file under `/proc` is reachable
+  (below, "`/proc` directories").
   A signal frame that would land in the region (an alternate stack placed there) is SIGSEGV,
   as for a frame the kernel cannot write. The runtime's own reads and writes of program memory go through its guest
   copy (`guest.rs`), which refuses the region too, except reads of the calling thread's
@@ -585,6 +584,30 @@ Enforced:
   reaches those, since the check refused the call first. Cost: a few comparisons per pointer,
   and for iovecs and `msghdr`s one fault-safe read per entry; a call with no pointer pays a
   slice-length test (`costs getppid` and `costs pipe` within run-to-run spread, EVIDENCE).
+- **`/proc` directories.** The invariant: no path reachable through a `/proc` directory
+  descriptor is refused by absolute path, and no runtime descriptor is visible or reachable
+  through `/proc/self/fd`. The policy (`path.rs`) is lexical, so the runtime keeps it lexical
+  everywhere a path could leave it. `/proc`, `/proc/self` (`/proc/<own pid>`), `/proc/self/fd`
+  and `/proc/self/task` open as directories (`O_DIRECTORY`, `O_PATH`), marked on the descriptor
+  (`procfs::mark`; copied by `dup`, rebuilt after `exec`). A `vfork` child shares its parent's
+  marks but not its descriptors, so there opening, duplicating or reopening one through
+  `/proc/self/fd/N` is refused (`EACCES`). A name relative to a marked descriptor is
+  joined to the directory's policy path and resolved as that absolute path (`resolve.rs`), so
+  it reaches exactly what the absolute path reaches; with `openat2`'s resolve flags a relative
+  name answers `ENOENT`. Symlinks are resolved before the policy, and the walk stops where the
+  policy takes over: what remains of the path is normalised lexically there, so `..` after a
+  `/work` symlink or a `/proc/self/fd/N` link into `/proc` is policed as the path it spells,
+  never followed by the kernel into another process's `/proc/PID` (the supervisor's). Their
+  listings are written by the runtime: `/proc` lists the files the policy synthesises, `self`
+  and the process's own pid; `/proc/self` its synthesised entries, `fd`, `task` and `exe`;
+  `/proc/self/task` the process's threads from the supervisor's slots; `/proc/self/fd` is the
+  kernel's listing without the runtime's descriptors (numbers from `FD_HIDDEN_MIN`), ascending.
+  Each lists the calling process's (after a `fork`, the child's), as its names resolve. No
+  directory under `/proc` can become the working directory (`chdir`, `fchdir`, also through a
+  `/proc/self/fd/N` link: `EACCES`), and none can be passed in `SCM_RIGHTS` (`EBADF`). The
+  lexical `..` departs from Linux only where the kernel would fail (`/proc/cpuinfo/..` is
+  `/proc`, not `ENOTDIR`). Their link counts are computed (`/proc/self/task`: 2 + the
+  threads). Regression `sandbox/12-procgaps`.
 - **The compute-point cell** is program memory outside the runtime's region, read and written
   by the runtime only through its fault-safe guest copy. A program that writes it changes only
   when its own process's next compute point comes and how many events it is charged (at most

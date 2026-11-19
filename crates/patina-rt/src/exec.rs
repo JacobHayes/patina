@@ -596,7 +596,7 @@ pub fn rescan_marks() {
             nr::OPENAT,
             AT_FDCWD as u64,
             c"/proc/self/fd".as_ptr() as u64,
-            0o2200000,
+            proto::abi::open::O_DIRECTORY | 0o2000000, // O_CLOEXEC
             0,
         )
     };
@@ -634,6 +634,13 @@ pub fn rescan_marks() {
                                     d,
                                     path::Synth::from_u8(path::dec(&k[..3]) as u8),
                                 );
+                            }
+                        } else if let Some(k) = crate::sys::procfs::dir_kind(s) {
+                            // A directory the policy handed out before the exec.
+                            let mut st = proto::abi::stat::Stat::zeroed();
+                            let r = unsafe { sc2(nr::FSTAT, d as u64, st.as_mut_ptr() as u64) };
+                            if r == 0 && st.mode() & 0o170000 == 0o040000 {
+                                crate::sys::procfs::mark(d, Some(k));
                             }
                         }
                     }

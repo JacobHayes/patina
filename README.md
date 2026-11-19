@@ -127,6 +127,8 @@ Any Linux executable built for the host (x86_64 or arm64): static or dynamic, Ru
 Go, Python, shell scripts (run directly: `patina run -- ./script.sh`) and the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals and TCP and
 UDP on localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
 that starts at the same time every run, an empty writable `/work` as its working directory.
+Headless Chromium runs with `--no-sandbox`; its own sandbox (namespaces, seccomp) is not
+supported.
 
 What it does not do: network sockets other than TCP and UDP, multicast and broadcast (the
 call fails with an error, and `patina run` lists it under `refused:`), DNS beyond

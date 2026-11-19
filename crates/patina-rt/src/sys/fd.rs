@@ -109,6 +109,9 @@ fn clear_marks(fd: i64) {
 
 fn dup_like(call: &mut dyn Call) -> i64 {
     let src = call.arg(0) as i32 as i64;
+    if super::procfs::vfork_dir(src) {
+        return -e::EACCES;
+    }
     // dup2/dup3 over a wire socket may close its last reference.
     let over = if call.nr() != nr::DUP && call.arg(0) != call.arg(1) {
         super::inet::wire_idx(call.arg(1) as i32 as i64)
@@ -145,6 +148,9 @@ fn fcntl(call: &mut dyn Call) -> i64 {
             // The kernel takes the lowest number as an `int`.
             if arg as i32 >= FD_HIDDEN_MIN {
                 return -e::EINVAL;
+            }
+            if super::procfs::vfork_dir(fd as i32 as i64) {
+                return -e::EACCES;
             }
             let r = raw(call);
             host_check(call, r);

@@ -8,7 +8,7 @@ const STAT_W: &str = "Passed, then rewritten: st_dev of every sandbox-created (m
 const STATX_W: &str = "As newfstatat, plus birth time from the virtual time table, and the mount id becomes the mount's index (+1) with the unique mount id withheld (host-global counters).";
 const STATFS_W: &str = "Passed; f_fsid is zeroed (random per superblock). On the sandbox tmpfs the used counts are a function of the guest's writes and pass, and the totals are fixed (the configured tmpfs size, 2^20 inodes) whatever the mount's own limits, which the host's RAM sets for `/` and `/dev`; on host and kernel filesystems the free counts change outside the sandbox and are replaced by constants.";
 const LINK_R: &str = "Passed for sandbox and host paths. /proc/self/exe names the guest image; /proc/self/fd/N names a synthesised file by its /proc path and rewrites pipe:[n] and socket:[n] to virtual inode numbers; hidden descriptors read as ENOENT. A path that reaches a /proc or /sys object through a /work symlink or .. is refused with ENOENT and recorded (it named the supervisor's links).";
-const DIRS: &str = "Directory order on tmpfs is a function of creation and removal order and d_off values are per-directory counters; read-only mounts are host-stable. Directories under /proc and /sys are never handed out.";
+const DIRS: &str = "Directory order on tmpfs is a function of creation and removal order and d_off values are per-directory counters; read-only mounts are host-stable. /proc, /proc/self, /proc/self/fd and /proc/self/task are listed by the runtime: what the policy allows, the own pid and threads, the descriptors without the runtime's, in a fixed order; no other directory under /proc and /sys is handed out.";
 const ACCESS: &str = "Permission check against sandbox or host-stable files; synthesised /proc files are readable only.";
 const CREATE: &str = "Creates a name on the sandbox tmpfs: inode numbers follow creation order, space is a function of the guest's own writes. Stamps the new inode (all four times) and its directory (mtime, ctime) in the virtual time table; on /work reports the operation to the durability hook.";
 const REMOVE: &str = "Removes a name on the sandbox tmpfs; tmpfs has no deferred work. The directory's mtime and ctime, and the inode's ctime if links remain, are stamped in the virtual time table; on /work reported to the durability hook.";
@@ -19,7 +19,7 @@ const TIMES: &str = "Passed for validation and permission checks; the named time
 const XATTR_R: &str = "Extended attributes on tmpfs are sandbox history (user.* in insertion order); on host files host-stable.";
 const XATTR_W: &str =
     "Sets or removes an extended attribute on tmpfs (user.*); ctime is stamped; on /work reported.";
-const CWD: &str = "Working directory and umask are per-process kernel state changed only by the process; the guest starts with umask 022 whatever the launcher's umask.";
+const CWD: &str = "Working directory and umask are per-process kernel state changed only by the process; the guest starts with umask 022 whatever the launcher's umask. A /proc directory cannot become the working directory (EACCES).";
 const TRUNC: &str = "Size change on the sandbox tmpfs: a function of the guest's writes. mtime and ctime are stamped; on /work reported.";
 
 const STAT_OUT: &[Out] = &[out(1, Len::Fixed(crate::abi::stat::SIZE))];
