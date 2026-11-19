@@ -122,7 +122,7 @@ const CTL_FIELDS: &[(usize, usize, &str)] = fields!(Ctl:
 );
 
 const SLOT_FIELDS: &[(usize, usize, &str)] =
-    fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo);
+    fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched);
 
 #[cfg(test)]
 mod tests {

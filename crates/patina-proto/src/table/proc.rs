@@ -5,7 +5,7 @@ const G: Group = Group::Proc;
 
 const PIDS: &str = "PIDs are allocated sequentially in a fresh PID namespace and creations are serialised, so they are a function of creation order.";
 const CREDS: &str = "Fixed by the user namespace mapping.";
-const RLIM: &str = "Answered from a fixed table (stack 8 MiB, nofile 1024/2048, others unlimited); sets are accepted and not enforced. The limits the kernel enforces underneath are set by the supervisor to fixed values, and a host hard limit below them ends the run as infra before the guest starts; reaching one (EFBIG, a refused clone) also ends it as infra.";
+const RLIM: &str = "Answered from a fixed table (stack 8 MiB, nofile 1024/2048, nice and rtprio 0, others unlimited); sets are accepted and not enforced. The limits the kernel enforces underneath are set by the supervisor to fixed values, and a host hard limit below them ends the run as infra before the guest starts; reaching one (EFBIG, a refused clone) also ends it as infra.";
 
 pub const ROWS: &[Row] = &[
     Row::new(G, nr::GETPID, Pass, A, PIDS),

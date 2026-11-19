@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 14;
+pub const LAYOUT_VERSION: u64 = 15;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -566,6 +566,11 @@ pub struct Slot {
     /// A kernel `siginfo_t` (128 bytes): written by a sender before `SigSend`, by the
     /// supervisor in the reply to `SigTake`/`SigWait`, and the old timer by `TimerSet`.
     pub siginfo: [u64; 16],
+    /// The scheduling attributes the thread last set (`setpriority`, `sched_setscheduler`,
+    /// `sched_setattr`): the nice value (low byte, two's complement), the policy (next byte)
+    /// and `SCHED_RESET_ON_FORK` (bit 16); 0 is `SCHED_OTHER` at nice 0. Kept by the runtimes
+    /// so that a get after a set answers what was set; they change nothing in the schedule.
+    pub sched: AtomicU64,
 }
 
 /// Reply flag: signal number to deliver before returning (0: none).

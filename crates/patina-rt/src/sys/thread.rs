@@ -165,6 +165,7 @@ pub fn clone_vm(
     // The child inherits the virtual mask; its pending word is set by the supervisor at `Forked`.
     s.vmask.store(parent_vmask, Relaxed);
     s.sigpend.store(0, Relaxed);
+    s.sched.store(super::sched::inherited(), Relaxed);
     s.state.store(SLOT_RESERVED, SeqCst);
     let kflags = (flags & !(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) | CLONE_CHILD_CLEARTID;
     let ktid = unsafe { &(*(alt as *const ThreadState)).ktid } as *const u32 as u64;

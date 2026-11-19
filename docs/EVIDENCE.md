@@ -680,8 +680,7 @@ exclusive emulation were also run there with a software event standing in for th
 
 Not implemented (run ends `unsupported` or the call is refused): `timer_create`,
 `ITIMER_VIRTUAL`/`ITIMER_PROF`; raw, netlink and packet sockets, UDP multicast and broadcast;
-`sched_*` policy calls
-and `get`/`setpriority`; anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
+anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
   counter, a timestamp it computes itself) ends `compute-stall` without `--preempt

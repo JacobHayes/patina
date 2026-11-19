@@ -70,6 +70,7 @@ fn reserve(slot: usize, vmask: u64) {
     s.pid.store(0, Relaxed);
     s.vmask.store(vmask, Relaxed);
     s.sigpend.store(0, Relaxed);
+    s.sched.store(super::sched::inherited(), Relaxed);
     s.state.store(SLOT_RESERVED, SeqCst);
 }
 
@@ -378,12 +379,17 @@ fn waitid(call: &mut dyn Call) -> i64 {
 const RLIM_INFINITY: u64 = u64::MAX;
 const RLIMIT_STACK: u64 = 3;
 const RLIMIT_NOFILE: u64 = 7;
+const RLIMIT_NICE: u64 = 13;
+const RLIMIT_RTPRIO: u64 = 14;
 const RLIM_NLIMITS: u64 = 16;
 
 fn rlimit(res: u64) -> Result<[u64; 2], i64> {
     match res {
         RLIMIT_STACK => Ok([8 << 20, RLIM_INFINITY]),
         RLIMIT_NOFILE => Ok([1024, 2048]),
+        // An unprivileged process may neither lower its nice value nor take a real-time
+        // policy (`sys::sched`).
+        RLIMIT_NICE | RLIMIT_RTPRIO => Ok([0, 0]),
         r if r < RLIM_NLIMITS => Ok([RLIM_INFINITY, RLIM_INFINITY]),
         _ => Err(-e::EINVAL),
     }

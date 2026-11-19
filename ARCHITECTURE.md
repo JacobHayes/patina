@@ -697,5 +697,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
   The table of changed files' times drops the entries of deleted files nothing holds open
   (`sup/vtgc.rs`), so only files still reachable count against it (65,536).
-- Not modelled: `timer_create`, scheduling policy calls, `io_uring`; another process's
-  `/proc/PID`. docs/EVIDENCE.md has the full list.
+- Not modelled: `timer_create`, `io_uring`; another process's `/proc/PID`. docs/EVIDENCE.md
+  has the full list. Scheduling attributes (`setpriority`, `sched_setscheduler`,
+  `sched_setattr` and their getters) are kept and read back but change nothing in the
+  schedule; what the kernel refuses an unprivileged process is refused.
