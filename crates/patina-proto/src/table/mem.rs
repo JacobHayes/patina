@@ -36,6 +36,7 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::REMAP_FILE_PAGES, Deny(errno::ENOSYS), C, "Deprecated; a kernel without it answers ENOSYS."),
     Row::new(G, nr::PROCESS_MADVISE, Deny(errno::ENOSYS), C, "Acts on another process's memory by pidfd; refused."),
     Row::new(G, nr::MSEAL, Deny(errno::ENOSYS), C, "A kernel without memory sealing answers ENOSYS; sealing would also pin runtime decisions."),
+    Row::new(G, nr::MEMBARRIER, Deny(errno::ENOSYS), C, "Refused as by a kernel built without it; programs fall back to other barriers."),
     Row::new(G, nr::PKEY_ALLOC, Deny(errno::ENOSYS), C, "Protection keys are a per-CPU hardware feature; a kernel without them answers ENOSYS."),
     Row::new(G, nr::PKEY_FREE, Deny(errno::ENOSYS), C, "Protection keys are not offered."),
     Row::new(G, nr::MEMFD_SECRET, Deny(errno::ENOSYS), C, "A kernel without secret memory answers ENOSYS."),

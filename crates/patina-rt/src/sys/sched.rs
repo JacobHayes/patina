@@ -582,6 +582,14 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 .unwrap_or(0)
         }
         nr::FUTEX => futex(call),
+        nr::SCHED_GET_PRIORITY_MAX | nr::SCHED_GET_PRIORITY_MIN => {
+            match call.arg(0) as i32 as i64 as u64 {
+                SCHED_FIFO | SCHED_RR if call.nr() == nr::SCHED_GET_PRIORITY_MAX => 99,
+                SCHED_FIFO | SCHED_RR => 1,
+                SCHED_OTHER | SCHED_BATCH | SCHED_IDLE | SCHED_DEADLINE => 0,
+                _ => -e::EINVAL,
+            }
+        }
         nr::GETPRIORITY
         | nr::SETPRIORITY
         | nr::SCHED_GETSCHEDULER

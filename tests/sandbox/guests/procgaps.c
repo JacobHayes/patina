@@ -88,6 +88,12 @@ static void sched_part(void) {
     EXPECT("sched_getattr (flags): EINVAL", 0, EINVAL, syscall(SYS_sched_getattr, 0, &a, 56, 1));
     EXPECT("getpriority of no thread: ESRCH", 0, ESRCH, getprio(99999));
     EXPECT("getpriority bad which: EINVAL", 0, EINVAL, syscall(SYS_getpriority, 7, 0));
+    EXPECT("sched_get_priority_max FIFO", 99, 0, sched_get_priority_max(SCHED_FIFO));
+    EXPECT("sched_get_priority_min RR", 1, 0, sched_get_priority_min(SCHED_RR));
+    EXPECT("sched_get_priority_max OTHER", 0, 0, sched_get_priority_max(SCHED_OTHER));
+    EXPECT("sched_get_priority_min DEADLINE", 0, 0, sched_get_priority_min(6));
+    EXPECT("sched_get_priority_max 4: EINVAL", 0, EINVAL, sched_get_priority_max(4));
+    EXPECT("membarrier query: ENOSYS", 0, ENOSYS, syscall(SYS_membarrier, 0, 0, 0));
     EXPECT("setpriority 5", 0, 0, setpriority(PRIO_PROCESS, 0, 5));
     EXPECT("getpriority: nice 5", 15, 0, getprio(0));
     EXPECT("setpriority 3 (lower): EACCES", 0, EACCES, setpriority(PRIO_PROCESS, 0, 3));
