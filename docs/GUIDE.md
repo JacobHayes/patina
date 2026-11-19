@@ -664,6 +664,9 @@ What survives a machine crash follows `ext4-ordered` by default; `[faults] fs-mo
 
 A run starts at most 4 incarnations: the last one never crashes, so a program restarts at
 most 3 times. `--fault max-incarnations=N` (`[faults] max-incarnations = N`) changes that.
+Each restart begins 1 to 61 s of virtual time after the crash, drawn from the seed;
+`--fault restart-gap-ms=A..B` draws it in A..B ms instead (`5000..5000` for exactly 5 s), for
+a program whose recovery depends on how long it was down (leases, timeouts).
 The other faults stay on in the incarnations after a crash, so recovery code meets them
 too; `--fault faults-in-recovery=0` turns them off after the first crash, to see whether a
 program recovers from the crash alone.

@@ -15,6 +15,8 @@ use serde_json::{json, Value};
 
 /// Incarnations a run may start when `max-incarnations` is not given.
 pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
+/// `restart-gap-ms` when not given: 1 s to 61 s.
+pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
 
 /// The fault plan of a run.
 #[derive(Clone, Debug)]
@@ -24,6 +26,9 @@ pub struct Plan {
     pub faults_in_recovery: bool,
     /// `max-incarnations=N`: crashes stop once the run has started N incarnations.
     pub max_incarnations: u64,
+    /// `restart-gap-ms=A..B`: virtual time from a crash to the restart, drawn per restart in
+    /// [A, B) ns (A when A = B).
+    pub restart_gap_ns: (u64, u64),
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
     /// `--buggify`, `buggify-permille=N`, `point:LABEL=N` (`proto::sdk`).
@@ -239,6 +244,12 @@ pub const KEYS: &[Key] = &[
         "0|1",
         Val::Flag,
         "after a crash, the other faults stay on (1) or go off for the rest of the run (0) [default: 1]",
+    ),
+    key(
+        "restart-gap-ms",
+        "A..B",
+        Val::Spread,
+        "virtual time from a crash to the restart: a draw in A..B ms for each restart [default: 1000..61000]",
     ),
     key(
         "max-incarnations",
@@ -486,6 +497,7 @@ pub fn resolve(
         faults: Default::default(),
         faults_in_recovery: true,
         max_incarnations: MAX_INCARNATIONS_DEFAULT,
+        restart_gap_ns: RESTART_GAP_DEFAULT,
         net: Default::default(),
         sdk: Default::default(),
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
@@ -585,6 +597,10 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         }
         "faults-in-recovery" => {
             o.faults_in_recovery = n(v)? != 0;
+            return Ok(());
+        }
+        "restart-gap-ms" => {
+            o.restart_gap_ns = ms_range(k, v)?;
             return Ok(());
         }
         "max-incarnations" => {

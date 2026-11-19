@@ -268,8 +268,9 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         // The next incarnation.
         root = Some(post);
         seq0 = end.seq;
-        let gap = 1_000_000_000
-            + proto::draw(o.cfg.seed, proto::Stream::Crash, 0x7265_626f_6f74 ^ k) % 60_000_000_000;
+        let (lo, hi) = o.plan.restart_gap_ns;
+        let draw = proto::draw(o.cfg.seed, proto::Stream::Crash, 0x7265_626f_6f74 ^ k);
+        let gap = lo + if hi > lo { draw % (hi - lo) } else { 0 };
         vclock0 = end.vclock_ns.max(vclock) + gap;
         if cfg.crash_at != 0 {
             // An `-at` crash fires once.
