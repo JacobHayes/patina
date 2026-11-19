@@ -1,0 +1,12 @@
+# Elixir/BEAM: 2000 processes passing messages, a gen_tcp echo server with 10 clients, ETS, Task.async_stream.
+parent = self()
+pids = for i <- 1..2000, do: spawn(fn -> receive do {:ping, from} -> send(from, {:pong, i}) end end)
+Enum.each(pids, &send(&1, {:ping, parent}))
+s = Enum.reduce(1..2000, 0, fn _, acc -> receive do {:pong, i} -> acc + i end end)
+IO.puts("pongs #{s}")
+{:ok, l} = :gen_tcp.listen(41100, [:binary, packet: :line, active: false, reuseaddr: true, ip: {127, 0, 0, 1}])
+spawn(fn -> Stream.repeatedly(fn -> {:ok, c} = :gen_tcp.accept(l); pid = spawn(fn -> receive do :go -> :ok end; Stream.repeatedly(fn -> :gen_tcp.recv(c, 0) end) |> Enum.reduce_while(0, fn {:ok, d}, a -> :gen_tcp.send(c, String.upcase(d)); {:cont, a}; _, a -> {:halt, a} end) end); :gen_tcp.controlling_process(c, pid); send(pid, :go) end) |> Stream.run() end)
+n = 1..10 |> Task.async_stream(fn k -> {:ok, c} = :gen_tcp.connect({127, 0, 0, 1}, 41100, [:binary, packet: :line, active: false]); r = for i <- 1..10, do: (:ok = :gen_tcp.send(c, "c#{k} m#{i}\n"); {:ok, _} = :gen_tcp.recv(c, 0)); :gen_tcp.close(c); length(r) end, max_concurrency: 10) |> Enum.reduce(0, fn {:ok, x}, a -> a + x end)
+IO.puts("replies #{n}")
+t = :ets.new(:t, [:set, :public]); for i <- 1..1000, do: :ets.insert(t, {i, i * i}); IO.puts("ets #{:ets.info(t, :size)}")
+File.write!("f.txt", String.duplicate("a", 10000)); IO.puts("file #{byte_size(File.read!("f.txt"))}")
