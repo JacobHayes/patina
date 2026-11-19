@@ -61,6 +61,11 @@ arm runner (`check-arm64`).
   An expected failure is written out (`if ! cmd`, `cmd || [ $? = 1 ]`, `st=0; cmd || st=$?`);
   `tests/lint.py` rejects what strict mode cannot see: `|| true` on a pipe or a captured value,
   a negated pipe, `$(...)` that `[ ]` passes on failure, `rm -r "$VAR"` without `:?`, plain `sh`.
+- **Doc transcripts are checked.** A fenced block in README.md, docs/GUIDE.md or
+  examples/README.md that shows what a command prints carries `<!-- transcript NAME ... -->`
+  (or `<!-- no-run NAME: REASON -->`) and runs in the quick tier: exactly on the kind of host
+  its numbers were written on, with numbers as N elsewhere (`tests/docs/transcripts.py` says
+  how to mark one). A doc change that shows output passes `./check docs`.
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
@@ -82,7 +87,7 @@ find it, never retry it.
   silent pass-through to the host.
 - **Structure before tests.** Make the bad state unrepresentable first; then a lint; then a
   behavioural test. Never scan or patch source text in a test, and never assert wording or
-  counts of docs.
+  counts of docs (the one exception: `./check docs`, our docs' transcripts against our tool).
 - **Enforcement earns its cost.** Every test and gate is code to maintain; protect what is
   likely, costly and silent, with the smallest mechanism.
 - **Detection before fixes.** A new bug class gets a check that fires before the fix lands.

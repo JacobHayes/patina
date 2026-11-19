@@ -52,6 +52,11 @@ From a checkout instead, with Rust (rustup reads the pinned toolchain from
 Give Patina any program and its arguments after `--`. `examples/quickstart` is a small Rust
 program that runs three jobs on threads and checks their results come back in job order.
 
+<!-- transcript first-run
+dir: /tmp/patina/examples/quickstart
+setup: mkdir -p target/debug && cp "$GUESTS/examples/jobs" target/debug/
+skip: 2
+-->
 ```sh
 git clone https://github.com/JacobHayes/patina /tmp/patina
 cd /tmp/patina/examples/quickstart && cargo build
@@ -68,11 +73,18 @@ replay: patina replay /tmp/patina/examples/quickstart/patina-out/run-0
 The program's own output is in the run directory: `patina-out/run-0/inc-0/stdout` and
 `stderr`. Now run 20 seeds of the version with the bug:
 
+<!-- transcript first-sweep
+dir: /tmp/patina/examples/quickstart
+exit: 1
+-->
 ```sh
 patina sweep --seeds 1..20 -- target/debug/jobs
 ```
 
 ```text
+new: failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101   (seed 1: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1)
+sweep: replaying the first seed of 1 finding
+sweep: 312.3 KiB kept in /tmp/patina/examples/quickstart/patina-out/sweep
 patina sweep: 20 runs, 14 findings in 1 group, 6 ok   (0.2s, 8 jobs)
 outcomes: failure 14, ok 6
 
@@ -87,11 +99,16 @@ Each group is one bug: its signature, how many runs hit it, and the lowest seed 
 Patina already replayed that seed once and got the same run. `patina run --seed 1 -- target/debug/jobs`
 prints the outcome with the tail of the program's stderr; the run directory holds all of it:
 
+<!-- transcript first-stderr
+dir: /tmp/patina/examples/quickstart
+exact-only: the stderr of seed 1, a finding on this kind of host
+-->
 ```sh
 cat patina-out/sweep/seed-1/inc-0/stderr
 ```
 
 ```text
+
 thread 'main' (2) panicked at src/main.rs:28:5:
 assertion `left == right` failed: results out of job order
   left: [2, 1, 3]

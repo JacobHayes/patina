@@ -1,0 +1,8 @@
+#!/bin/sh
+# calc OP A B: prints A OP B. Two bugs: a difference below zero prints 0, and a product with
+# a zero factor prints 1.
+case $1 in
+add) echo $(($2 + $3)) ;;
+sub) r=$(($2 - $3)); [ "$r" -ge 0 ] || r=0; echo "$r" ;;
+mul) if [ "$2" = 0 ] || [ "$3" = 0 ]; then echo 1; else echo $(($2 * $3)); fi ;;
+esac

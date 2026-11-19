@@ -167,17 +167,27 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
         });
     }
     if old["config"] != ident["config"] {
-        let keys: Vec<&String> = ident["config"]
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(k, v)| old["config"].get(k.as_str()) != Some(v))
-            .map(|(k, _)| k)
-            .collect();
-        let keys: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+        let keys = changed_settings(&old["config"], &ident["config"]);
         return Some(format!("other settings: {}", keys.join(", ")));
     }
     None
+}
+
+/// The settings whose values differ between two recorded configs, sorted: those either side
+/// has that the other lacks too (a flag given before and dropped now).
+fn changed_settings(old: &serde_json::Value, new: &serde_json::Value) -> Vec<String> {
+    let names = |c: &serde_json::Value| -> Vec<String> {
+        c.as_object()
+            .into_iter()
+            .flatten()
+            .map(|(k, _)| k.clone())
+            .collect()
+    };
+    let all: std::collections::BTreeSet<String> =
+        names(old).into_iter().chain(names(new)).collect();
+    all.into_iter()
+        .filter(|k| old.get(k.as_str()) != new.get(k.as_str()))
+        .collect()
 }
 
 /// A case run's directory holds its case's text in this file.
@@ -1819,6 +1829,21 @@ mod tests {
             missed_point(&serde_json::json!({"outcome": "internal"}), 5, 9),
             None
         );
+    }
+
+    #[test]
+    fn a_dropped_setting_is_named_as_a_changed_one() {
+        let old = serde_json::json!({"cmd": ["./p"], "ok-exit": [1], "seed-env": 2});
+        let new = serde_json::json!({"cmd": ["./p"], "seed-env": 3, "cpus": 2});
+        assert_eq!(
+            changed_settings(&old, &new),
+            v(&["cpus", "ok-exit", "seed-env"])
+        );
+        assert_eq!(
+            changed_settings(&new, &old),
+            v(&["cpus", "ok-exit", "seed-env"])
+        );
+        assert!(changed_settings(&old, &old).is_empty());
     }
 
     #[test]

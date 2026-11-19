@@ -1,0 +1,2 @@
+python3 -m unittest test_store.Store.test_write
+python3 -m unittest test_store.Store.test_counter

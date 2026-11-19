@@ -1,0 +1,17 @@
+#!/bin/sh
+# same-as-sh RUNDIR: the run of `calc OP A B` printed what the shell's arithmetic gives; the op
+# `planted` is wrong by construction.
+set -eu
+run=$1
+set -- $PATINA_CASE
+op=$3
+case $op in
+add) want=$(($4 + $5)) ;;
+sub) want=$(($4 - $5)) ;;
+mul) want=$(($4 * $5)) ;;
+*) want=wrong ;;
+esac
+got=$(cat "$run/inc-0/stdout")
+[ "$got" = "$want" ] && exit 0
+echo "wrong-$op: got $got, want $want"
+exit 1

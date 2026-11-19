@@ -1,0 +1,4 @@
+# ID, then a pattern: * matches any text; a pattern starting with [ also matches the case.
+sub-clamps  violation check: wrong-sub: *
+!planted    [*planted*] violation check: wrong-*
+mul-zero    violation check: wrong-mul: got 1, want 0

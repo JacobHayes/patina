@@ -1,0 +1,3 @@
+echo -e 'a\tb'
+printf '%s\n' one two
+x=3; echo $((x << 2))
