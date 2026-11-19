@@ -2,7 +2,8 @@
 /* The exec matrix. For every target and every method (fork+execve, vfork+execve,
  * posix_spawn) start the target with descriptor 5 inherited (not close-on-exec) and
  * descriptor 6 close-on-exec, EXEC_SHOW_ENV=<method>:<target> in the environment, wait for it and
- * print its status. Then the failures: each method reports the errno the kernel gives.
+ * print its status. Then the failures: each method reports the errno the kernel gives (also
+ * E2BIG for an argument longer than the kernel copies and for vectors past its total bound).
  * Output lines: "== <method> <target>" then the child's own lines, then "status <n>";
  * "fail <method> <case> <errno name>". */
 #include <errno.h>
@@ -33,9 +34,17 @@ static const char *ename(int e) {
     case ENOENT: return "ENOENT";
     case EACCES: return "EACCES";
     case ENOEXEC: return "ENOEXEC";
+    case E2BIG: return "E2BIG";
     default: return strerror(e);
     }
 }
+
+/* One string of MAX_ARG_STRLEN bytes (past the kernel's per-string bound), and one of 120000
+ * bytes repeated 64 times (each within it, together past any total bound: at most 6 MiB). */
+static char longarg[32 * 4096 + 1];
+static char bigarg[120000 + 1];
+static char *longav[] = {"x", longarg, NULL};
+static char *bigav[66];
 
 static volatile int vfork_errno;
 
@@ -105,16 +114,24 @@ int main(int argc, char **argv) {
             printf("status %d\n", st);
         }
     }
-    for (size_t f = 0; f < sizeof fails / sizeof *fails; f++) {
+    memset(longarg, 'a', sizeof longarg - 1);
+    memset(bigarg, 'b', sizeof bigarg - 1);
+    bigav[0] = "x";
+    for (int i = 1; i < 65; i++) bigav[i] = bigarg;
+    for (size_t f = 0; f < sizeof fails / sizeof *fails + 2; f++) {
+        int big = f >= sizeof fails / sizeof *fails;
+        const char *name = !big ? fails[f][0] : f == sizeof fails / sizeof *fails ? "longarg" : "bigvec";
+        const char *path = !big ? fails[f][1] : "/guest/exec-show-static";
         for (int m = 0; m < 3; m++) {
             char *av[] = {"x", NULL};
-            int c = start(methods[m], fails[f][1], av, environ);
+            char **use = !big ? av : name[0] == 'l' ? longav : bigav;
+            int c = start(methods[m], path, use, environ);
             if (c >= 0) {
                 int st;
                 waitpid(c, &st, 0);
-                printf("fail %s %s started status %d\n", methods[m], fails[f][0], st);
+                printf("fail %s %s started status %d\n", methods[m], name, st);
             } else {
-                printf("fail %s %s %s\n", methods[m], fails[f][0], ename(-c));
+                printf("fail %s %s %s\n", methods[m], name, ename(-c));
             }
         }
     }

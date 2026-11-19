@@ -1,4 +1,4 @@
-# 2. Exec matrix: 8 targets x {fork+execve, vfork+execve, posix_spawn} and 4 failures x 3
+# 2. Exec matrix: 8 targets x {fork+execve, vfork+execve, posix_spawn} and 6 failures x 3
 # methods. stdout equals a native run of the same guest (bwrap with the same /guest layout and
 # a fresh PID namespace), and the derived values are right: the image each child saw, its argv,
 # its environment variable, inherited descriptors 0,1,2,5 (5 inherited, 6 close-on-exec gone),

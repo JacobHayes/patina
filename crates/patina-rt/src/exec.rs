@@ -3,7 +3,8 @@
 //! The runtime resolves what will run, so that every failure is reported to the caller as
 //! the kernel would report it: the path walk (`ENOENT`, `ENOTDIR`, `ELOOP`, `ENAMETOOLONG`),
 //! no execute permission or not a regular file (`EACCES`), neither ELF nor `#!` (`ENOEXEC`),
-//! a missing ELF interpreter (`ENOENT`). `#!` lines are read as the kernel reads them
+//! a missing ELF interpreter (`ENOENT`), argument and environment vectors past the kernel's
+//! bounds (`E2BIG`). `#!` lines are read as the kernel reads them
 //! (`proto::exec::parse`), at most `proto::exec::MAX_DEPTH` deep (`ELOOP` beyond). Then it sends
 //! `Exec` and re-executes itself from descriptor 3004 with the resolved image as its argument;
 //! the new runtime instance starts in the same task, holding the turn. A failure of that last
@@ -458,12 +459,12 @@ fn hidden_target(fd: i64) -> bool {
 /// The kernel's limit on one argument or environment string.
 const MAX_ARG_STRLEN: usize = 32 * 4096;
 
-/// The number of strings in a NULL-terminated vector.
-fn count(v: u64) -> Result<usize, i64> {
+/// The number of strings in a NULL-terminated vector, and their bytes with the NULs.
+fn count(v: u64) -> Result<(usize, usize), i64> {
     if v == 0 {
-        return Ok(0);
+        return Ok((0, 0));
     }
-    let mut n = 0;
+    let (mut n, mut bytes) = (0, 0);
     // Every string is checked readable here, before the point of no return: the kernel's
     // EFAULT for one it cannot read must be the guest's answer, not a failed re-execution.
     loop {
@@ -471,13 +472,28 @@ fn count(v: u64) -> Result<usize, i64> {
         if s == 0 {
             break;
         }
-        crate::guest::strlen(s, MAX_ARG_STRLEN)?;
+        // No NUL within `MAX_ARG_STRLEN` bytes: longer than the kernel copies.
+        let len = crate::guest::strlen(s, MAX_ARG_STRLEN)?;
+        if len == MAX_ARG_STRLEN {
+            return Err(-e::E2BIG);
+        }
+        bytes += len + 1;
         n += 1;
         if n > MAX_ARGS {
             return Err(-e::E2BIG);
         }
     }
-    Ok(n)
+    Ok((n, bytes))
+}
+
+/// The kernel's bound on the strings and pointers `execve` copies (`bprm_stack_limits`): a
+/// quarter of the stack limit the guest sees (`sys::proc`), between 128 KiB and 6 MiB. The
+/// guest gets `E2BIG` for vectors the kernel would refuse, instead of the run failing when
+/// the runtime re-executes itself.
+fn too_big(path_len: usize, nargs: usize, nenv: usize, bytes: usize) -> bool {
+    let limit = (crate::sys::proc::STACK_LIMIT as usize / 4).clamp(128 << 10, 6 << 20);
+    let ptrs = (nargs.max(1) + nenv) * 8;
+    ptrs >= limit || bytes + path_len + 1 > limit - ptrs
 }
 
 /// `execve(path, argv, envp)` and `execveat(dirfd, path, argv, envp, flags)`.
@@ -522,10 +538,13 @@ pub fn execve(call: &mut dyn Call) -> Action {
             return Action::Return(r);
         }
     }
-    let (nargs, nenv) = match (count(argv), count(envp)) {
+    let ((nargs, abytes), (nenv, ebytes)) = match (count(argv), count(envp)) {
         (Ok(a), Ok(e)) => (a, e),
         (Err(r), _) | (_, Err(r)) => return Action::Return(r),
     };
+    if too_big(path.len(), nargs, nenv, abytes + ebytes) {
+        return Action::Return(-e::E2BIG);
+    }
     // The new argument vector: [rt, image, (#! prefix, innermost interpreter first), argv[1..]].
     let mut v = [0u64; MAX_ARGS + 4 + 2 * MAX_DEPTH];
     let mut n = 0;

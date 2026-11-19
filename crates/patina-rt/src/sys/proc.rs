@@ -383,9 +383,12 @@ const RLIMIT_NICE: u64 = 13;
 const RLIMIT_RTPRIO: u64 = 14;
 const RLIM_NLIMITS: u64 = 16;
 
+/// The soft stack limit guests see (`execve` bounds its vectors by it, as the kernel does).
+pub const STACK_LIMIT: u64 = 8 << 20;
+
 fn rlimit(res: u64) -> Result<[u64; 2], i64> {
     match res {
-        RLIMIT_STACK => Ok([8 << 20, RLIM_INFINITY]),
+        RLIMIT_STACK => Ok([STACK_LIMIT, RLIM_INFINITY]),
         RLIMIT_NOFILE => Ok([1024, 2048]),
         // An unprivileged process may neither lower its nice value nor take a real-time
         // policy (`sys::sched`).

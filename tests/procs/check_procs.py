@@ -49,7 +49,7 @@ if mode == "matrix":
         need(f.get("fds") == "0,1,2,5,", f"{method} {target}: fds {f.get('fds')}")
         need(f.get("hidden", "").startswith("-1,Bad file descriptor"), f"{method} {target}: hidden {f.get('hidden')}")
         need(f.get("status") == "0", f"{method} {target}: status {f.get('status')}")
-    want = {"missing": "ENOENT", "noexec": "EACCES", "plain": "ENOEXEC", "directory": "EACCES"}
+    want = {"missing": "ENOENT", "noexec": "EACCES", "plain": "ENOEXEC", "directory": "EACCES", "longarg": "E2BIG", "bigvec": "E2BIG"}
     got = {}
     for l in fails:
         _, method, case, res = l.split(None, 3)
