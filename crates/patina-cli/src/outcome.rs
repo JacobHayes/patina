@@ -5,7 +5,7 @@
 /// What the supervisor (or the launcher) decided. Sent as
 /// `class \t exit_status \t signal \t detail \n`. `class` is the engine's own token
 /// (`ok`, `failed`, `deadlock`, `liveness`, `stall`, `containment`, `unsupported`, `capacity`,
-/// `log-limit`, `disk-full`, `infra`, `exec`, `exec-unsupported`, `timeout`, `crash` between incarnations); `classify` maps it to an [`Outcome`].
+/// `log-limit`, `disk-full`, `killed`, `infra`, `exec`, `exec-unsupported`, `timeout`, `crash` between incarnations); `classify` maps it to an [`Outcome`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub class: String,
@@ -220,6 +220,8 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
         "timeout" => Classified::new(Timeout, "timeout", d),
         "disk-full" => Classified::new(Internal, "disk-full", d),
         "infra" => Classified::new(Internal, "internal", d),
+        // A guest process killed by SIGKILL from outside the run (the host's OOM killer).
+        "killed" => Classified::new(Internal, "killed", d),
         // The program cannot run, as `execve` would refuse it: the request is wrong.
         "exec" => Classified::new(Error, "exec", d),
         // An image the kernel would run that Patina does not load (a 32-bit program).

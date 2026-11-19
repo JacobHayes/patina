@@ -515,6 +515,7 @@ impl Sup {
     }
 
     /// A live process's pidfd became readable without its exit going through the runtime.
+    /// A guest process that ended without telling the supervisor (its pidfd is readable).
     pub fn unexpected_death(&self) -> Option<i32> {
         let live: Vec<(i32, i32)> = self
             .procs
@@ -595,4 +596,119 @@ pub fn sig_info(sig: u64, code: i32, pid: i32, _uid: u32) -> [u64; 16] {
     i[1] = code as u32 as u64;
     i[2] = pid as u32 as u64 | uid << 32;
     i
+}
+
+/// A process's name (`/proc/PID/comm`; a zombie keeps it), or empty.
+pub fn comm(pid: i32) -> String {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The wait status of `pid`, a zombie not the supervisor's child, as (status, signal) the
+/// way `Sup::reap` gives them: the kernel's `exit_code` (field 52 of `/proc/PID/stat`). None
+/// when its parent has reaped it already.
+pub fn zombie_status(pid: i32) -> Option<(i64, i64)> {
+    let t = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &t[t.rfind(')')? + 1..];
+    // Fields from 3 (state) on: exit_code is field 52.
+    let w: i64 = rest.split_whitespace().nth(52 - 3)?.parse().ok()?;
+    Some(wait_pair(w))
+}
+
+/// A raw wait status as (status, signal): 128 + the signal for a process a signal ended.
+fn wait_pair(w: i64) -> (i64, i64) {
+    match w & 0x7f {
+        0 => ((w >> 8) & 0xff, 0),
+        sig => (128 + sig, sig),
+    }
+}
+
+/// The verdict for a guest process that ended without telling the supervisor: the runtime
+/// tells it of every exit, so the process was killed outright, by SIGKILL from outside the
+/// run (the host's out-of-memory killer, or a kill sent on the host: `killed`), or the
+/// runtime failed (`infra`). `st`: its wait status, when it could be read.
+pub fn death_verdict(pid: i32, name: &str, st: Option<(i64, i64)>) -> Verdict {
+    let who = if name.is_empty() {
+        format!("guest process {pid}")
+    } else {
+        format!("guest process {pid} ({name})")
+    };
+    let mut v = match st {
+        Some((_, 9)) => Verdict::new(
+            "killed",
+            format!(
+                "{who} was killed by SIGKILL from outside the run: the host's out-of-memory killer \
+                 (a memory limit on the run's processes or on the host), or a kill sent on the host"
+            ),
+        ),
+        Some((_, sig)) if sig != 0 => Verdict::new(
+            "infra",
+            format!(
+                "{who} ended on signal {sig} ({}) without telling the supervisor",
+                crate::outcome::signal_name(sig)
+            ),
+        ),
+        Some((status, _)) => Verdict::new(
+            "infra",
+            format!("{who} exited with status {status} without telling the supervisor"),
+        ),
+        None => Verdict::new(
+            "infra",
+            format!("{who} ended without telling the supervisor (its wait status was taken by its parent)"),
+        ),
+    };
+    if let Some((status, sig)) = st {
+        v.exit_status = Some(status);
+        v.signal = (sig != 0).then_some(sig);
+    }
+    v
+}
+
+#[cfg(test)]
+mod death_tests {
+    use super::*;
+    use crate::outcome::{classify, Outcome};
+
+    #[test]
+    fn a_process_killed_from_outside_is_named_with_its_wait_status() {
+        // Raw statuses as the kernel keeps them: SIGKILL, SIGSEGV with a core, exit 3.
+        assert_eq!(wait_pair(9), (137, 9));
+        assert_eq!(wait_pair(11 | 0x80), (139, 11));
+        assert_eq!(wait_pair(3 << 8), (3, 0));
+        let v = death_verdict(7, "db", Some(wait_pair(9)));
+        assert_eq!((v.exit_status, v.signal), (Some(137), Some(9)));
+        let c = classify(&v, &[]);
+        assert_eq!((c.outcome, c.stop.as_str()), (Outcome::Internal, "killed"));
+        let v = death_verdict(7, "db", Some(wait_pair(11)));
+        assert_eq!((v.exit_status, v.signal), (Some(139), Some(11)));
+        assert_eq!(classify(&v, &[]).stop, "internal");
+    }
+
+    #[test]
+    fn a_zombies_wait_status_is_read_from_proc() {
+        // A child of this test process that a signal ends: its status, read before reaping,
+        // is the one waitpid then gives.
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            unsafe {
+                libc::raise(libc::SIGKILL);
+                libc::_exit(0)
+            }
+        }
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // Wait for it to end without reaping it.
+        unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as u32,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(zombie_status(pid), Some((137, 9)));
+        let mut st = 0;
+        unsafe { libc::waitpid(pid, &mut st, 0) };
+        assert_eq!(zombie_status(pid), None);
+    }
 }

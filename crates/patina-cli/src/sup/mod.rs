@@ -795,18 +795,13 @@ impl Sup {
                 futex_wait_ms(&self.ctl.sup_word as *const _ as *const u32, 0, slice);
                 if self.ctl.sup_word.load(SeqCst) == 0 {
                     if let Some(pid) = self.unexpected_death() {
-                        let (status, sig) = if pid == self.child {
-                            self.reap()
+                        let name = proc::comm(pid);
+                        let st = if pid == self.child {
+                            Some(self.reap())
                         } else {
-                            (0, 0)
+                            proc::zombie_status(pid)
                         };
-                        let mut v = Verdict::new(
-                            "infra",
-                            format!("guest process {pid} ended without telling the supervisor (status {status})"),
-                        );
-                        v.exit_status = Some(status);
-                        v.signal = if sig != 0 { Some(sig) } else { None };
-                        self.finish(v);
+                        self.finish(proc::death_verdict(pid, &name, st));
                     }
                     let holder = self.running.map(|i| stall::Holder {
                         slot: i,

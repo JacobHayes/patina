@@ -140,7 +140,9 @@ replay: patina replay /tmp/patina/patina-out/run-1
 The starting work tree (`--work`) does not count against it; what the program writes to the
 work tree does (the operation log keeps it for crashes).
 
-A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A table of the
+A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A guest process killed
+by SIGKILL from outside the run (the host's out-of-memory killer, or a kill sent on the host) ends
+it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. A table of the
 runtime's that the program fills with objects it still uses (open descriptors, shared
 mappings, files changed and still reachable) ends it `unsupported`, stop `capacity`, naming
 the table.

@@ -11,7 +11,7 @@ $cc -O1 -o "$out/exec-show-dyn" "$here/exec-show.c"
 rustc -O --edition 2021 -o "$out/exec-show-rs" "$here/exec-show.rs"
 gocache=$PATINA_BUILD_DIR/gocache
 (cd "$here/exec-show-go" && GOCACHE=$gocache GOTOOLCHAIN=local CGO_ENABLED=0 go build -o "$out/exec-show-go" .)
-for g in exec-matrix fork-exec exit-order zombies xsig daemons shm sysv-shm spawn-cost; do
+for g in exec-matrix fork-exec exit-order zombies xsig daemons shm sysv-shm spawn-cost spinchild; do
     $cc -O1 -pthread -o "$out/$g" "$here/$g.c"
 done
 # Files the exec matrix runs: scripts, and the failure cases.
