@@ -33,7 +33,7 @@
 #define SYS_readlink SYS_readlinkat, AT_FDCWD
 #define SYS_access SYS_faccessat, AT_FDCWD
 #define SYS_chmod SYS_fchmodat, AT_FDCWD
-#define SYS_eventfd SYS_eventfd2
+#define EVENTFD(n) syscall(SYS_eventfd2, n, 0)
 #define SYMLINK(t, l) syscall(SYS_symlinkat, t, AT_FDCWD, l)
 #define LINK(a, b) syscall(SYS_linkat, AT_FDCWD, a, AT_FDCWD, b, 0)
 #define STAT(p, b) syscall(SYS_newfstatat, AT_FDCWD, p, b, 0)
@@ -47,6 +47,7 @@
 #define PIPE(p) syscall(SYS_pipe2, p, 0)
 #else
 #define CREAT_FLAGS
+#define EVENTFD(n) syscall(SYS_eventfd, n)
 #define SYMLINK(t, l) syscall(SYS_symlink, t, l)
 #define LINK(a, b) syscall(SYS_link, a, b)
 #define STAT(p, b) syscall(SYS_stat, p, b)
@@ -315,7 +316,7 @@ int main(void) {
     R("pipe", PIPE(p2));
     st("fstat-pipe2", syscall(SYS_fstat, p2[1], sb), sb);
     long efd = R("eventfd2", syscall(SYS_eventfd2, 3, EFD_CLOEXEC));
-    long efd1 = R("eventfd", syscall(SYS_eventfd, 0));
+    long efd1 = R("eventfd", EVENTFD(0));
     R("close-eventfd", syscall(SYS_close, efd1));
     long mfd = R("memfd_create", syscall(SYS_memfd_create, "tour", 0));
     R("write-memfd", syscall(SYS_write, mfd, "memfd", 5));
@@ -351,6 +352,11 @@ int main(void) {
     // ---- memory ----
     long a1 = syscall(SYS_mmap, 0, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     printf("addr mmap-anon %lx\n", a1);
+#ifndef __x86_64__
+    // 0x40 is MAP_32BIT on x86_64 only: the generic kernel ignores the bit for a private mapping.
+    long a40 = syscall(SYS_mmap, 0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | 0x40, -1, 0);
+    R("mmap-0x40", a40 < 0 ? a40 : 0);
+#endif
     memset((void *)a1, 7, 1 << 20);
     R("mprotect", syscall(SYS_mprotect, a1, 4096, PROT_READ));
     R("madvise-dontneed", syscall(SYS_madvise, a1 + 8192, 8192, MADV_DONTNEED));

@@ -2,8 +2,8 @@
 //! runtime and the supervisor use from the kernel's ABI (`statx`, `statfs`, `dirent64`,
 //! `sigaction`, `siginfo`, `stack_t`, `struct flock`, `msghdr`, `iovec`, `sockaddr`, `rlimit`,
 //! `rusage`, `sysinfo`, `timespec`, errno and signal numbers, `ioctl`, `fcntl`, socket and `mmap`
-//! constants) has one layout and one value on x86_64 and arm64; `files/03-differential`,
-//! `files/09-efault` and `net/*` compare with the native kernel on each.
+//! constants but `MAP_32BIT`) has one layout and one value on x86_64 and arm64;
+//! `files/03-differential`, `files/09-efault` and `net/*` compare with the native kernel on each.
 
 /// `e_machine` of this architecture's executables: `EM_X86_64`, `EM_AARCH64`.
 #[cfg(target_arch = "x86_64")]
@@ -16,6 +16,13 @@ pub const ELF_MACHINE: u16 = 183;
 pub const EPOLL_EVENT_SIZE: u32 = 12;
 #[cfg(target_arch = "aarch64")]
 pub const EPOLL_EVENT_SIZE: u32 = 16;
+
+/// `mmap`'s `MAP_32BIT` (a mapping below 2 GiB): x86_64 only (the generic kernel ignores that
+/// bit for a private mapping).
+#[cfg(target_arch = "x86_64")]
+pub const MAP_32BIT: Option<u64> = Some(0x40);
+#[cfg(target_arch = "aarch64")]
+pub const MAP_32BIT: Option<u64> = None;
 
 /// The least alternate signal stack `sigaltstack` accepts (the kernel's `MINSIGSTKSZ`).
 #[cfg(target_arch = "x86_64")]

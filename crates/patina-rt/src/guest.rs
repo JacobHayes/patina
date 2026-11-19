@@ -15,7 +15,8 @@ pub use crate::arch::fixup;
 
 /// Past the user address space? On arm64, above 48 bits: there a data access ignores the top
 /// byte (a tagged pointer), so a value outside the runtime's region as a number can be inside
-/// it as an address; the kernel answers `EFAULT` to such a pointer.
+/// it as an address; the kernel answers `EFAULT` to such a pointer. A host whose programs get a
+/// wider (52-bit) address space is refused (patina-cli `host::VA_BITS_MAX`).
 #[cfg(target_arch = "aarch64")]
 fn past_user(end: u64) -> bool {
     end > 1 << 48

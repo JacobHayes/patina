@@ -698,9 +698,12 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   anything else at every image start (`arch/aarch64`): the kernel enables and redraws them at
   each exec. `PR_SET_TSC` makes the counter-timer reads (`CNTVCT_EL0`, `CNTVCTSS_EL0`,
   `CNTFRQ_EL0`) fault, answered from virtual time; `CNTPCT_EL0` raises `SIGILL` natively and
-  under Patina alike. CPU features reach the program as the host has them (`AT_HWCAP`,
-  `AT_HWCAP2`, `AT_MINSIGSTKSZ`, the `Features` of `/proc/cpuinfo`), as `cpuid` does on x86_64:
-  two hosts of the same kind give the same run. Three are hidden: `PACGA` (its key cannot be turned off and
+  under Patina alike. CPU features reach the program as the host has them (`AT_HWCAP` to
+  `AT_HWCAP4`, `AT_MINSIGSTKSZ`, the `Features` of `/proc/cpuinfo`), as `cpuid` does on x86_64:
+  two hosts of the same kind give the same run. A feature bit a later kernel adds passes too
+  (state it lets a program enable stops the run at its first signal, `signal-context`); an
+  auxiliary vector entry the loader does not list is not given (`proto::hwcap`). Three are
+  hidden: `PACGA` (its key cannot be turned off and
   is redrawn at each exec; a program that executes it anyway is labelled, `pacga_sites`);
   SME (with its ZA storage and streaming mode), so a program that asks before using a feature
   never enters SME state, whose contents and vector length are host-dependent; and `CPUID`,

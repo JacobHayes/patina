@@ -4,7 +4,6 @@ use super::*;
 use crate::state::{ctl, proc};
 use proto::layout::*;
 
-const MAP_32BIT: u64 = 0x40;
 const MREMAP_MAYMOVE: u64 = 1;
 const MREMAP_FIXED: u64 = 2;
 const MADV_DONTNEED: u64 = 4;
@@ -49,7 +48,8 @@ fn mmap_place(call: &mut dyn Call) -> i64 {
         }
         return raw(call);
     }
-    if flags & MAP_32BIT != 0 {
+    // No address below 2 GiB is ever chosen.
+    if proto::abi::MAP_32BIT.is_some_and(|b| flags & b != 0) {
         return -e::ENOMEM;
     }
     let f = flags | MAP_FIXED_NOREPLACE;

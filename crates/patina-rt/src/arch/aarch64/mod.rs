@@ -30,42 +30,23 @@ pub fn clone_args(a: [u64; 6]) -> [u64; 5] {
 }
 
 /// The value the program sees for an auxiliary vector entry copied from the kernel's: the
-/// host's (host-stable facts), less three features, plus `HWCAP2_RNG` when `RNDR` is answered
-/// from the seed on a host without it (`insn::rndr_on`, a test of that path).
-/// - `HWCAP_PACG`: the generic key cannot be disabled, so `PACGA` would give a different value
-///   in every run (the scan counts the program's sites, `insn`).
-/// - SME (`HWCAP2_SME` and every SME sub-feature, some in `AT_HWCAP`): with it hidden,
-///   libraries that choose code by the auxiliary vector (glibc, language runtimes) never turn
-///   on streaming mode or the ZA array, whose contents and vector length are the host's.
-///   Instructions are not checked: a program that executes SME anyway computes
-///   deterministically on that host. (The kernel's signal frames and `AT_MINSIGSTKSZ` still
-///   carry the SME records on an SME host: seeds and digests are per kind of host.)
-/// - `HWCAP_CPUID`: the kernel emulates `mrs` of the ID registers, and `MIDR_EL1` answers
-///   for the core the thread runs on, which on a host with two kinds of core changes between
-///   runs. glibc reads it only when the bit is set (to choose `memcpy`).
+/// host's (host-stable facts), less the features `proto::hwcap` hides, plus `HWCAP2_RNG` when
+/// `RNDR` is answered from the seed on a host without it (`insn::rndr_on`, a test of that path).
+/// (The kernel's signal frames and `AT_MINSIGSTKSZ` still carry the SME records on an SME host:
+/// seeds and digests are per kind of host.)
 pub fn aux_value(t: u64, v: u64) -> u64 {
-    const AT_HWCAP: u64 = 16;
-    const AT_HWCAP2: u64 = 26;
-    const HWCAP_CPUID: u64 = 1 << 11;
-    const HWCAP_PACG: u64 = 1 << 31;
-    // HWCAP_SME2P2, SME_SBITPERM, SME_AES, SME_SFEXPA, SME_STMOP, SME_SMOP4.
-    const HWCAP_SME: u64 = 0x3f << 42;
-    match t {
-        AT_HWCAP => v & !(HWCAP_PACG | HWCAP_CPUID | HWCAP_SME),
-        AT_HWCAP2 if insn::rndr_on() => v & !HWCAP2_SME_ALL | insn::HWCAP2_RNG,
-        AT_HWCAP2 => v & !HWCAP2_SME_ALL,
-        _ => v,
+    let v = v & !proto::hwcap::hidden(t);
+    if t == proto::hwcap::AT_HWCAP2 && insn::rndr_on() {
+        v | insn::HWCAP2_RNG
+    } else {
+        v
     }
 }
 
-/// `HWCAP2_SME` and its sub-features: bits 23-30 (SME .. SME_FA64), 37-42 (SME2 ..
-/// SME_F16F16) and 57-62 (SME_LUTV2 .. SME_SF8DP2).
-const HWCAP2_SME_ALL: u64 = 0xff << 23 | 0x3f << 37 | 0x3f << 57;
-
-/// Whether `/proc/cpuinfo`'s `Features` line leaves out the word `w`: the features
-/// `aux_value` hides.
+/// Whether `/proc/cpuinfo`'s `Features` line leaves out the word `w`: the features `aux_value`
+/// hides.
 pub fn feature_hidden(w: &[u8]) -> bool {
-    w == b"pacg" || w == b"cpuid" || w.starts_with(b"sme")
+    proto::hwcap::feature_hidden(w)
 }
 
 /// `sigaction` flags Patina keeps beyond the generic ones (`sys::sig`'s `SA_KNOWN`):

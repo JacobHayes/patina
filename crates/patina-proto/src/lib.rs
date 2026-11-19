@@ -11,6 +11,7 @@ pub mod ctl;
 pub mod draw;
 pub mod exec;
 pub mod faults;
+pub mod hwcap;
 pub mod insn;
 pub mod layout;
 pub mod nr;

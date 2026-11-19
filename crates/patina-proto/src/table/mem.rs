@@ -9,7 +9,7 @@ const SHM: &str = "System V shared memory: one table of segments for the run, ke
 const NUMA: &str = "NUMA placement has no guest-visible effect in a one-core sandbox; a kernel without NUMA support answers ENOSYS.";
 
 pub const ROWS: &[Row] = &[
-    Row::new(G, nr::MMAP, Place, C, "The runtime chooses every address without MAP_FIXED: the guest's hint when that range is free, else a top-down cursor below 0x5f00_0000_0000 that is never reused. Fresh anonymous memory is zero. Fixed mappings into the runtime's region are refused.")
+    Row::new(G, nr::MMAP, Place, C, "The runtime chooses every address without MAP_FIXED: the guest's hint when that range is free, else a top-down cursor below 0x5f00_0000_0000 that is never reused (MAP_32BIT, x86_64: ENOMEM). Fresh anonymous memory is zero. Fixed mappings into the runtime's region are refused.")
         .fd(4),
     Row::new(G, nr::BRK, Place, C, "Emulated over a 64 GiB reservation at 0x5800_0000_0000: growth makes pages accessible, shrinking replaces them with fresh ones."),
     Row::new(G, nr::MUNMAP, Place, C, RANGE),

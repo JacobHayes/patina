@@ -51,6 +51,10 @@ pub enum SpinStep {
 
 /// The layout (`proto::layout`) ends below `STACK_TOP`: a 47-bit address space holds it.
 pub const VA_BITS_NEEDED: u32 = 47;
+/// arm64: the runtime's guest copy refuses addresses at or above `1 << 48` (where a tagged
+/// pointer could alias the runtime's region, `patina-rt` `guest::past_user`), so a wider
+/// address space (52 bits) would let a program map memory no system call can reach.
+pub const VA_BITS_MAX: u32 = 48;
 /// The largest SVE vector length whose full register record, with every other record the
 /// runtime builds, fits in a signal frame's 4,096 bytes (`arch/aarch64/sigframe.rs`).
 pub const SVE_VL_MAX: u64 = 64;
@@ -113,11 +117,10 @@ impl Facts {
             sve_vl: if arm && hwcap & HWCAP_SVE != 0 {
                 const PR_SVE_GET_VL: i32 = 51;
                 let r = unsafe { libc::prctl(PR_SVE_GET_VL, 0, 0, 0, 0) };
-                if r < 0 {
-                    0
-                } else {
-                    r as u64 & 0xffff
-                }
+                let default = std::fs::read_to_string("/proc/sys/abi/sve_default_vector_length")
+                    .ok()
+                    .and_then(|s| s.trim().parse().ok());
+                exec_sve_vl(r, default)
             } else {
                 0
             },
@@ -266,16 +269,33 @@ fn page_size(f: &Facts) -> Result<String, (String, String)> {
 }
 
 fn address_space(f: &Facts) -> Result<String, (String, String)> {
-    if f.va_bits >= VA_BITS_NEEDED {
-        return Ok(format!("{}-bit or more user address space", f.va_bits));
+    if (VA_BITS_NEEDED..=VA_BITS_MAX).contains(&f.va_bits) {
+        return Ok(format!("{}-bit user address space", f.va_bits));
     }
     Err((
         format!(
-            "this kernel gives programs a {}-bit address space; Patina needs {VA_BITS_NEEDED} or more",
+            "this kernel gives programs a {}-bit address space; Patina needs {VA_BITS_NEEDED} to {VA_BITS_MAX}",
             f.va_bits
         ),
         "a kernel built with 48-bit virtual addresses (CONFIG_ARM64_VA_BITS_48)".into(),
     ))
+}
+
+/// The SVE vector length a program exec'd by this process starts with (the kernel's
+/// `fpsimd_flush_thread`): this process's own (`PR_SVE_GET_VL`'s answer `get_vl`) when it is
+/// set to be inherited, else the system's default (`default`, from
+/// `/proc/sys/abi/sve_default_vector_length`). The runtime and the program are such execs.
+fn exec_sve_vl(get_vl: i32, default: Option<u64>) -> u64 {
+    const PR_SVE_VL_INHERIT: i32 = 1 << 17;
+    if get_vl < 0 {
+        return 0;
+    }
+    let own = get_vl as u64 & 0xffff;
+    if get_vl & PR_SVE_VL_INHERIT != 0 {
+        own
+    } else {
+        default.unwrap_or(own)
+    }
 }
 
 /// `0-3,6`: CPU numbers as ranges.
@@ -382,12 +402,12 @@ fn midr(cpu: usize) -> Option<u64> {
     u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()
 }
 
-/// The widest user address space of those Patina's layout and common kernels use: the
-/// highest `n` in 39..=48 for which the page below `1 << n` can be reserved (or is mapped).
+/// The widest user address space of those arm64 kernels use: the highest `n` in 39..=52 for
+/// which the page below `1 << n` can be reserved (or is mapped).
 fn probe_va_bits() -> u32 {
     let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as u64;
     let mut best = 0;
-    for n in [39u32, 42, 47, 48] {
+    for n in [39u32, 42, 47, 48, 52] {
         let a = (1u64 << n) - 2 * page;
         let p = unsafe {
             libc::mmap(
@@ -730,6 +750,13 @@ mod tests {
                 },
             ),
             (
+                "address space",
+                Facts {
+                    va_bits: 52,
+                    ..runner()
+                },
+            ),
+            (
                 "counter-timer trap",
                 Facts {
                     kernel: "6.8.0-48-generic".into(),
@@ -808,6 +835,19 @@ mod tests {
         ] {
             assert!(failing(&f).is_empty(), "{f:?}: {:?}", checks(&f));
         }
+    }
+
+    #[test]
+    fn sve_length_is_the_one_an_exec_gets() {
+        const INHERIT: i32 = 1 << 17;
+        // Not inherited: an exec starts at the system's default, whatever this process has.
+        assert_eq!(exec_sve_vl(16, Some(256)), 256);
+        assert_eq!(exec_sve_vl(256, Some(16)), 16);
+        // Inherited: this process's own.
+        assert_eq!(exec_sve_vl(16 | INHERIT, Some(256)), 16);
+        // No default to read, no SVE.
+        assert_eq!(exec_sve_vl(32, None), 32);
+        assert_eq!(exec_sve_vl(-1, Some(16)), 0);
     }
 
     #[test]
