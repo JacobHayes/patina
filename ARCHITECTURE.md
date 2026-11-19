@@ -90,7 +90,9 @@ options, paths under `/proc`, `/sys`, `/dev`) are refused unless listed; the com
 `ioctl`, `fcntl`, `prctl` and `arch_prctl` are listed with the arguments each reads
 (`proto::table::cmds`), so none is let through without saying what it reads. Path arguments are
 checked against that policy before any handler runs (`resolve.rs`, `path.rs`). Host values
-are replaced: inode numbers, file times, `/proc` contents, the CPU count (`--cpus`).
+are replaced: inode numbers, file times, `/proc` contents, the CPU count (`--cpus`), the
+sizes `statfs` reports (every sandbox tmpfs reports the configured tmpfs size, also `/` and
+`/dev`, which the host's RAM sizes).
 
 Blocking calls are a non-blocking attempt plus a park on an I/O generation counter that the
 runtime bumps after any call that can change readiness (`sys/io.rs`, `sys/poll.rs`). Pipe and

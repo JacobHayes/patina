@@ -807,9 +807,19 @@ fn statfs_call(call: &mut dyn Call) -> i64 {
             *w.add(5) = 1 << 22;
             *w.add(6) = 1 << 21;
         } else {
-            // tmpfs without nr_inodes= sizes its inode limit from the host's RAM, which a
-            // ballooned VM changes between runs: keep the used count, fix the limit.
+            // A tmpfs without size= and nr_inodes= (the sandbox's `/` and `/dev`, so
+            // `/dev/shm`) sizes both limits from the host's RAM, which a ballooned VM changes
+            // between runs. Every sandbox tmpfs reports the configured size (`tmpfs-bytes`,
+            // what the launcher gives the mounts it sizes) and a fixed inode limit; the used
+            // counts are the guest's history and stay.
             const FILES: u64 = 1 << 20;
+            let blocks = crate::state::config()
+                .tmpfs_bytes
+                .div_ceil((*w.add(1)).max(1));
+            let used = (*w.add(2)).saturating_sub(*w.add(3));
+            *w.add(2) = blocks;
+            *w.add(3) = blocks.saturating_sub(used);
+            *w.add(4) = blocks.saturating_sub(used);
             let used = (*w.add(5)).saturating_sub(*w.add(6));
             *w.add(5) = FILES;
             *w.add(6) = FILES.saturating_sub(used);
