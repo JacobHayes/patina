@@ -18,6 +18,7 @@ mod recheck;
 mod replay;
 mod report;
 mod result;
+mod rewrite;
 mod signature;
 mod sup;
 mod sweep;
@@ -53,6 +54,7 @@ fn main() -> ExitCode {
     let hidden = match first.as_str() {
         "__sup" => Some(sup::main(rest)),
         "__insn-scan" => Some(insn::main(rest)),
+        "__rewrite" => Some(rewrite::main(rest)),
         _ => None,
     };
     if let Some(r) = hidden {

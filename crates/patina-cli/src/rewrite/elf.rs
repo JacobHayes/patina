@@ -1,0 +1,507 @@
+//! The facts of an x86_64 ELF file that the rewriter and its verifier start from: the
+//! executable bytes, the load segments, and where functions start and end (the entry point,
+//! function symbols, unwind entries, relocated pointers). Facts only: what is code is decided in
+//! `code.rs` (the rewriter) and again, separately, in `verify.rs`.
+
+use super::plan::PAGE;
+use crate::cli::Res;
+use sha2::{Digest, Sha256};
+
+pub const EM_X86_64: u16 = 62;
+const PT_LOAD: u32 = 1;
+const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
+const PF_X: u32 = 1;
+
+/// One `PT_LOAD`.
+#[derive(Clone, Copy, Debug)]
+pub struct Load {
+    pub vaddr: u64,
+    pub memsz: u64,
+    pub off: u64,
+    pub filesz: u64,
+    pub flags: u32,
+}
+
+/// An executable range of the file: a `SHF_EXECINSTR` section, or an executable segment when
+/// the file has no section headers.
+#[derive(Clone, Copy, Debug)]
+pub struct Text {
+    pub addr: u64,
+    pub off: usize,
+    pub len: usize,
+}
+
+pub struct Elf<'a> {
+    pub data: &'a [u8],
+    pub sha256: [u8; 32],
+    pub phoff: usize,
+    pub phnum: usize,
+    /// `ET_EXEC`: loaded at its link-time addresses, so code may name its addresses absolutely.
+    pub exec: bool,
+    pub loads: Vec<Load>,
+    /// Sorted by address, not overlapping.
+    pub text: Vec<Text>,
+    /// Function starts inside `text`, sorted, without duplicates.
+    pub anchors: Vec<u64>,
+    /// Function extents `[start, end)` from unwind entries and sized symbols, sorted.
+    pub extents: Vec<(u64, u64)>,
+}
+
+fn get<const N: usize>(d: &[u8], o: usize) -> Res<[u8; N]> {
+    o.checked_add(N)
+        .and_then(|e| d.get(o..e))
+        .map(|s| s.try_into().unwrap())
+        .ok_or_else(|| format!("truncated ELF file (offset {o:#x})"))
+}
+pub fn u16_at(d: &[u8], o: usize) -> Res<u16> {
+    get::<2>(d, o).map(u16::from_le_bytes)
+}
+pub fn u32_at(d: &[u8], o: usize) -> Res<u32> {
+    get::<4>(d, o).map(u32::from_le_bytes)
+}
+pub fn u64_at(d: &[u8], o: usize) -> Res<u64> {
+    get::<8>(d, o).map(u64::from_le_bytes)
+}
+
+struct Section {
+    name: u32,
+    typ: u32,
+    flags: u64,
+    addr: u64,
+    off: usize,
+    size: usize,
+}
+
+impl<'a> Elf<'a> {
+    pub fn parse(data: &'a [u8]) -> Res<Elf<'a>> {
+        if data.len() < 64 || &data[..4] != b"\x7fELF" {
+            return Err("not an ELF file".into());
+        }
+        if data[4] != 2 || data[5] != 1 {
+            return Err("not a 64-bit little-endian ELF file".into());
+        }
+        let machine = u16_at(data, 0x12)?;
+        if machine != EM_X86_64 {
+            return Err(format!(
+                "unsupported architecture: ELF machine {machine}, not x86_64"
+            ));
+        }
+        let entry = u64_at(data, 0x18)?;
+        let phoff = u64_at(data, 0x20)? as usize;
+        let (phentsize, phnum) = (u16_at(data, 0x36)? as usize, u16_at(data, 0x38)? as usize);
+        if phentsize != 56 {
+            return Err("unexpected program header size".into());
+        }
+        let mut loads = vec![];
+        let mut eh_hdr = None;
+        for i in 0..phnum {
+            let p = phoff + i * 56;
+            let (typ, flags) = (u32_at(data, p)?, u32_at(data, p + 4)?);
+            let l = Load {
+                off: u64_at(data, p + 8)?,
+                vaddr: u64_at(data, p + 0x10)?,
+                filesz: u64_at(data, p + 0x20)?,
+                memsz: u64_at(data, p + 0x28)?,
+                flags,
+            };
+            match typ {
+                PT_LOAD => {
+                    if l.off
+                        .checked_add(l.filesz)
+                        .is_none_or(|e| e > data.len() as u64)
+                        || l.filesz > l.memsz
+                    {
+                        return Err("a PT_LOAD outside the file".into());
+                    }
+                    loads.push(l)
+                }
+                PT_GNU_EH_FRAME => eh_hdr = Some(l),
+                _ => {}
+            }
+        }
+        loads.sort_by_key(|l| l.vaddr);
+        let mut e = Elf {
+            data,
+            sha256: Sha256::digest(data).into(),
+            phoff,
+            phnum,
+            exec: u16_at(data, 0x10)? == 2,
+            loads,
+            text: vec![],
+            anchors: vec![],
+            extents: vec![],
+        };
+        let secs = e.sections()?;
+        let strtab = secs.get(u16_at(data, 0x3e)? as usize).map(|s| s.off);
+        let name = |s: &Section| -> &[u8] {
+            let Some(o) = strtab.and_then(|t| t.checked_add(s.name as usize)) else {
+                return b"";
+            };
+            let n = data.get(o..).unwrap_or(&[]);
+            &n[..n.iter().position(|&b| b == 0).unwrap_or(n.len())]
+        };
+        // SHF_ALLOC | SHF_EXECINSTR, SHT_PROGBITS
+        for s in &secs {
+            if s.typ == 1 && s.flags & 6 == 6 && s.size > 0 && s.off + s.size <= data.len() {
+                e.text.push(Text {
+                    addr: s.addr,
+                    off: s.off,
+                    len: s.size,
+                });
+            }
+        }
+        // Without section headers, the executable segments; their relocated pointers are not
+        // anchors then (below), as the segments may hold read-only data too.
+        if secs.is_empty() {
+            for l in &e.loads {
+                if l.flags & PF_X != 0 && l.filesz > 0 {
+                    let t = Text {
+                        addr: l.vaddr,
+                        off: l.off as usize,
+                        len: l.filesz as usize,
+                    };
+                    e.text.push(t);
+                }
+            }
+        }
+        e.text.sort_by_key(|t| t.addr);
+        if e.text
+            .windows(2)
+            .any(|w| w[0].addr + w[0].len as u64 > w[1].addr)
+        {
+            return Err("overlapping executable sections".into());
+        }
+        let (mut anchors, mut extents) = (vec![entry], vec![]);
+        for s in &secs {
+            match s.typ {
+                // SHT_SYMTAB, SHT_DYNSYM: STT_FUNC and STT_GNU_IFUNC, defined
+                2 | 11 => {
+                    for k in 0..s.size / 24 {
+                        let o = s.off + k * 24;
+                        let (info, shndx) = (data[o + 4], u16_at(data, o + 6)?);
+                        let (value, size) = (u64_at(data, o + 8)?, u64_at(data, o + 16)?);
+                        if matches!(info & 0xf, 2 | 10) && shndx != 0 && value != 0 {
+                            anchors.push(value);
+                            if size > 0 {
+                                extents.push((value, value.saturating_add(size)));
+                            }
+                        }
+                    }
+                }
+                // SHT_RELA, SHT_RELR, loaded
+                4 if s.flags & 2 != 0 => e.rela(s.off, s.size, &mut anchors)?,
+                19 if s.flags & 2 != 0 => e.relr(s.off, s.size, &mut anchors)?,
+                _ => {}
+            }
+        }
+        // The unwind entries: the `.eh_frame` section, else through `PT_GNU_EH_FRAME`.
+        let eh = match secs.iter().find(|s| name(s) == b".eh_frame") {
+            Some(s) => Some((s.addr, s.off, s.size)),
+            None => eh_hdr.and_then(|h| e.eh_frame_from_hdr(h)),
+        };
+        if let Some((addr, off, size)) = eh {
+            let bytes = data.get(off..off.saturating_add(size)).unwrap_or(&[]);
+            eh_frame(bytes, addr, &mut anchors, &mut extents);
+        }
+        anchors.retain(|&a| e.in_text(a));
+        anchors.sort_unstable();
+        anchors.dedup();
+        extents.retain(|&(lo, hi)| lo < hi && e.in_text(lo));
+        extents.sort_unstable();
+        extents.dedup();
+        e.anchors = anchors;
+        e.extents = extents;
+        Ok(e)
+    }
+
+    fn sections(&self) -> Res<Vec<Section>> {
+        let d = self.data;
+        let shoff = u64_at(d, 0x28)? as usize;
+        let (shentsize, shnum) = (u16_at(d, 0x3a)? as usize, u16_at(d, 0x3c)? as usize);
+        if shoff == 0 || shnum == 0 || shentsize != 64 {
+            return Ok(vec![]);
+        }
+        let mut out = vec![];
+        for i in 0..shnum {
+            let s = shoff + i * 64;
+            let typ = u32_at(d, s + 4)?;
+            let (off, size) = (u64_at(d, s + 0x18)? as usize, u64_at(d, s + 0x20)? as usize);
+            // SHT_NOBITS holds no file bytes
+            let size = if typ == 8 { 0 } else { size };
+            if off.checked_add(size).is_none_or(|e| e > d.len()) {
+                return Err(format!("section {i} outside the file"));
+            }
+            out.push(Section {
+                name: u32_at(d, s)?,
+                typ,
+                flags: u64_at(d, s + 8)?,
+                addr: u64_at(d, s + 0x10)?,
+                off,
+                size,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The text range holding `a`.
+    pub fn text_at(&self, a: u64) -> Option<&Text> {
+        let i = self.text.partition_point(|t| t.addr <= a).checked_sub(1)?;
+        let t = &self.text[i];
+        (a < t.addr + t.len as u64).then_some(t)
+    }
+
+    pub fn in_text(&self, a: u64) -> bool {
+        self.text_at(a).is_some()
+    }
+
+    pub fn bytes(&self, t: &Text) -> &'a [u8] {
+        &self.data[t.off..t.off + t.len]
+    }
+
+    /// The file offset of the loaded byte at `vaddr`, when the file holds it.
+    pub fn file_offset(&self, vaddr: u64) -> Option<usize> {
+        let l = self
+            .loads
+            .iter()
+            .find(|l| vaddr >= l.vaddr && vaddr - l.vaddr < l.filesz)?;
+        Some((l.off + (vaddr - l.vaddr)) as usize)
+    }
+
+    /// The page at `vaddr` (page-aligned) as an executable segment maps it from the file.
+    pub fn original_page(&self, vaddr: u64) -> Option<Vec<u8>> {
+        let l = self.loads.iter().find(|l| {
+            l.flags & PF_X != 0
+                && vaddr.saturating_add(PAGE) > l.vaddr
+                && vaddr < l.vaddr + l.filesz
+        })?;
+        let off = usize::try_from(l.off.checked_add(vaddr)?.checked_sub(l.vaddr)?).ok()?;
+        let mut page = vec![0; PAGE as usize];
+        let src = self.data.get(off..)?;
+        let n = src.len().min(PAGE as usize);
+        page[..n].copy_from_slice(&src[..n]);
+        Some(page)
+    }
+
+    /// The end of the highest load segment in memory.
+    pub fn image_end(&self) -> u64 {
+        self.loads
+            .iter()
+            .map(|l| l.vaddr + l.memsz)
+            .max()
+            .unwrap_or(0)
+    }
+
+    pub fn image_start(&self) -> u64 {
+        self.loads.iter().map(|l| l.vaddr).min().unwrap_or(0)
+    }
+
+    fn word(&self, vaddr: u64) -> Option<u64> {
+        let o = self.file_offset(vaddr)?;
+        u64_at(self.data, o).ok()
+    }
+
+    /// `R_X86_64_RELATIVE` and `R_X86_64_IRELATIVE`: the addend is a code or data address.
+    fn rela(&self, off: usize, size: usize, out: &mut Vec<u64>) -> Res<()> {
+        for k in 0..size / 24 {
+            let o = off + k * 24;
+            if matches!(u64_at(self.data, o + 8)? & 0xffff_ffff, 8 | 37) {
+                out.push(u64_at(self.data, o + 16)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// Packed relative relocations: the address is in place, in the word relocated.
+    fn relr(&self, off: usize, size: usize, out: &mut Vec<u64>) -> Res<()> {
+        let mut base = 0u64;
+        for k in 0..size / 8 {
+            let e = u64_at(self.data, off + k * 8)?;
+            if e & 1 == 0 {
+                out.extend(self.word(e));
+                base = e.wrapping_add(8);
+            } else {
+                for bit in 0..63 {
+                    if (e >> (bit + 1)) & 1 != 0 {
+                        out.extend(self.word(base.wrapping_add(8 * bit)));
+                    }
+                }
+                base = base.wrapping_add(63 * 8);
+            }
+        }
+        Ok(())
+    }
+
+    /// `.eh_frame_hdr`'s `eh_frame_ptr`: the `.eh_frame` section's address; its size is up to
+    /// the end of the segment holding it (the walk stops at the terminator).
+    fn eh_frame_from_hdr(&self, h: Load) -> Option<(u64, usize, usize)> {
+        let o = h.off as usize;
+        let hdr = self.data.get(o..o + 4)?;
+        let mut r = Reader {
+            d: self.data,
+            pos: o + 4,
+            vaddr: h.vaddr - o as u64,
+        };
+        let addr = r.encoded(hdr[1])?;
+        let off = self.file_offset(addr)?;
+        let l = self
+            .loads
+            .iter()
+            .find(|l| addr >= l.vaddr && addr - l.vaddr < l.filesz)?;
+        Some((addr, off, (l.off + l.filesz) as usize - off))
+    }
+}
+
+/// A cursor over bytes whose file offset `pos` sits at address `vaddr + pos`.
+struct Reader<'a> {
+    d: &'a [u8],
+    pos: usize,
+    vaddr: u64,
+}
+
+impl Reader<'_> {
+    fn u8(&mut self) -> Option<u8> {
+        let b = *self.d.get(self.pos)?;
+        self.pos += 1;
+        Some(b)
+    }
+    fn fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
+        let b = self.d.get(self.pos..self.pos + N)?.try_into().ok()?;
+        self.pos += N;
+        Some(b)
+    }
+    fn uleb(&mut self) -> Option<u64> {
+        let (mut v, mut shift) = (0u64, 0);
+        loop {
+            let b = self.u8()?;
+            if shift < 64 {
+                v |= ((b & 0x7f) as u64) << shift;
+            }
+            shift += 7;
+            if b & 0x80 == 0 {
+                return Some(v);
+            }
+        }
+    }
+    fn sleb(&mut self) -> Option<i64> {
+        let (mut v, mut shift) = (0i64, 0);
+        loop {
+            let b = self.u8()?;
+            if shift < 64 {
+                v |= ((b & 0x7f) as i64) << shift;
+            }
+            shift += 7;
+            if b & 0x80 == 0 {
+                if shift < 64 && b & 0x40 != 0 {
+                    v |= -1i64 << shift;
+                }
+                return Some(v);
+            }
+        }
+    }
+    /// A `DW_EH_PE_*` encoded pointer: absolute or PC-relative (the encodings `.eh_frame`
+    /// uses for addresses); any other application is refused.
+    fn encoded(&mut self, enc: u8) -> Option<u64> {
+        if enc == 0xff {
+            return None;
+        }
+        let at = self.vaddr.wrapping_add(self.pos as u64);
+        let v = match enc & 0x0f {
+            0x00 | 0x04 | 0x0c => u64::from_le_bytes(self.fixed()?),
+            0x01 => self.uleb()?,
+            0x02 => u16::from_le_bytes(self.fixed()?) as u64,
+            0x03 => u32::from_le_bytes(self.fixed()?) as u64,
+            0x09 => self.sleb()? as u64,
+            0x0a => i16::from_le_bytes(self.fixed()?) as i64 as u64,
+            0x0b => i32::from_le_bytes(self.fixed()?) as i64 as u64,
+            _ => return None,
+        };
+        // Not DW_EH_PE_indirect (0x80): the pointer would be at the address, not be it.
+        match enc & 0xf0 {
+            0x00 => Some(v),
+            0x10 => Some(v.wrapping_add(at)),
+            _ => None,
+        }
+    }
+}
+
+/// The pointer encoding of a CIE's FDEs (augmentation `R`; absolute without one).
+fn cie_encoding(r: &mut Reader) -> Option<u8> {
+    let version = r.u8()?;
+    let aug_start = r.pos;
+    while r.u8()? != 0 {}
+    let aug = r.d[aug_start..r.pos - 1].to_vec();
+    if aug.starts_with(b"eh") {
+        r.pos += 8;
+    }
+    r.uleb()?;
+    r.sleb()?;
+    if version == 1 {
+        r.u8()?;
+    } else {
+        r.uleb()?;
+    }
+    let mut enc = 0;
+    if aug.first() == Some(&b'z') {
+        r.uleb()?;
+        for &c in &aug[1..] {
+            match c {
+                b'R' => enc = r.u8()?,
+                b'L' => {
+                    r.u8()?;
+                }
+                b'P' => {
+                    let pe = r.u8()?;
+                    r.encoded(pe & 0x7f)?;
+                }
+                b'S' | b'B' | b'G' => {}
+                _ => return None,
+            }
+        }
+    }
+    Some(enc)
+}
+
+/// Every FDE of an `.eh_frame` section at `addr`: its start is an anchor and its range an
+/// extent. An entry that cannot be read ends the walk (what was read stays).
+fn eh_frame(d: &[u8], addr: u64, anchors: &mut Vec<u64>, extents: &mut Vec<(u64, u64)>) {
+    let mut encs = std::collections::BTreeMap::new();
+    let mut pos = 0usize;
+    while pos + 4 <= d.len() {
+        let len32 = u32::from_le_bytes(d[pos..pos + 4].try_into().unwrap());
+        if len32 == 0 {
+            break;
+        }
+        let (len, hdr) = if len32 == 0xffff_ffff {
+            let Some(l) = d.get(pos + 4..pos + 12) else {
+                break;
+            };
+            (u64::from_le_bytes(l.try_into().unwrap()) as usize, 12)
+        } else {
+            (len32 as usize, 4)
+        };
+        let start = pos + hdr;
+        let Some(end) = start.checked_add(len).filter(|&e| e <= d.len() && len >= 4) else {
+            break;
+        };
+        let body = &d[..end];
+        let id = u32::from_le_bytes(d[start..start + 4].try_into().unwrap()) as usize;
+        let mut r = Reader {
+            d: body,
+            pos: start + 4,
+            vaddr: addr,
+        };
+        if id == 0 {
+            if let Some(enc) = cie_encoding(&mut r) {
+                encs.insert(pos, enc);
+            }
+        } else if let Some(&enc) = start.checked_sub(id).and_then(|c| encs.get(&c)) {
+            let begin = r.encoded(enc);
+            let range = r.encoded(enc & 0x0f);
+            if let (Some(b), Some(n)) = (begin, range) {
+                anchors.push(b);
+                extents.push((b, b.saturating_add(n)));
+            }
+        }
+        pos = end;
+    }
+}

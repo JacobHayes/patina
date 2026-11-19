@@ -561,6 +561,38 @@ By hand, 3.14 unless noted:
 Red/green: the jump hook not holding the exception fails `compute/09-python` (c, `oneline`
 exit 1); the planted `PyDLL` above finds nothing in `cache` and runs `cpu` serially.
 
+## Load-time rewriting (host side)
+
+The rewriter (ARCHITECTURE.md, "Load-time rewriting"), its plans checked by the separate
+verifier, and each plan applied to a copy of its file (`patina __rewrite --standalone`) run
+natively against the original. Nothing here runs under Patina: no runtime maps plans yet.
+Measured 2026-11-19 on the host above (Ubuntu 26.04), by `rewrite/evidence-corpus` (`./check
+evidence evidence-corpus`, 216 s with 50 runs each) and `rewrite/01-differential` (quick).
+
+| Program (rewritten with the shared libraries it loads) | Sites patched of found | Back-edges covered | Dark text | Rewrite | Plan | 50 runs |
+|---|---|---|---|---|---|---|
+| ripgrep 15.2.0, musl static-PIE release (3.7 MB text), a regex count over the Go sources | 50,236 / 56,500 | 85.4% | 0.3% | 0.12 s | 6 MB | identical output and exit |
+| gofmt, Go 1.27.3, static (1.3 MB), `-d -r` rewrite over `runtime` | 20,839 / 22,070 | 84.5% | 0.0% | 0.04 s | 2 MB | identical |
+| CPython 3.14.4 (3.7 MB, non-PIE) and 4 libraries, a dict, sort, regex and json workload | 101,176 / 112,768 | 87.2% | 0.0% | 0.17 s | 8 MB | identical |
+| clang 21 (86.1 MB) and 5 libraries, compiling `diff.cc` at -O2 to assembly | 1,272,289 / 1,468,196 | 72.8% | 0.0% | 3.1 s | 136 MB | identical |
+| headless Chromium (Playwright's `chrome-headless-shell`, 170 MB) and 44 libraries, `--dump-dom` of a scripted page | 2,439,543 / 2,893,062 | 74.9% | 22.4% | 6.8 s | 248 MB | identical |
+| The quick tier's guests (C static and static-PIE, C++, Rust, Go): plan twice and compare, verify, objdump agrees on every patched instruction, 5 runs, and a copy with 1,000 events stops on its trap (`SIGILL`) | | 84.3 to 85.0% | | | | identical |
+| Census: every ELF file in `/usr/bin` and the system library directory, planned and verified | 1,142 files, 8,548,317 sites; 0 rejected by the verifier; 9 refused (relocatable objects) | | | | | not run |
+
+"Dark" is text no control flow or unwind extent reaches: Chromium's is mostly code reached only
+through tables (no jump-table following, by design). Sites not patched are flags live (no dead
+point for the count), no room (a short branch with no 5-byte instruction in its block or at the
+loop head), or tainted (a span with a refusal). Rewrite time is one thread with verification
+excluded; Chromium's peak memory was 1.1 GB. The CLI binary grows by 324 kB stripped (+5.4%)
+with `iced-x86` (decoder and instruction info only); its clean build takes 2.3 to 2.8 s.
+
+Red/green: a Jcc patch with its condition inverted is rejected by the verifier; with the
+verifier skipped, the same plan's copy fails the differential (`SIGSEGV`). A branch into the
+interior of an instruction once went unseen (the unit test for a jump into a would-be patch
+caught it); an absolute read of data in non-PIE text not ending extent decode fails the unit
+test for data in text. The verifier rejects every planted corruption in `rewrite::tests`, and
+the plan reader a page mapped twice.
+
 ## Branch counters on arm64
 
 Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`

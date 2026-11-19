@@ -1,0 +1,13 @@
+<!doctype html><html><body><div id="out"></div><script>
+// The rewriter's evidence page for headless Chromium (--dump-dom): JavaScript loops, a sort, a
+// regular expression and 300 DOM nodes; the dumped DOM is the same on every run.
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+let s = 0;
+const m = new Map();
+for (let i = 0; i < 200000; i++) { m.set('k' + (i % 977), (m.get('k' + (i % 977)) || 0) + i); s = (s * 31 + i) >>> 0; }
+const a = Array.from({length: 50000}, (_, i) => (i * 2654435761) >>> 0).sort((x, y) => x - y);
+const r = ('abc123def456'.repeat(1000).match(/[a-z]+\d+/g) || []).length;
+const out = document.getElementById('out');
+for (let i = 0; i < 300; i++) { const d = document.createElement('p'); d.textContent = 'row ' + i + ' ' + (a[i] % 1000); out.appendChild(d); }
+out.setAttribute('data-sum', s + ':' + fib(22) + ':' + m.size + ':' + r + ':' + a[0] + ':' + a[a.length - 1]);
+</script></body></html>

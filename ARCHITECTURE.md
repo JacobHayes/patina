@@ -453,6 +453,52 @@ the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sy
 A generator or coroutine resuming gets no point of its own: its next line or jump has one, and
 the order of asyncio tasks is the event loop's, which a point in one thread does not change.
 
+## Load-time rewriting (host side only)
+
+Stock binaries can get compute points without a rebuild: a plan, made on the host from the file
+alone, rewrites single instructions to jump to trampolines that count. Only the host side
+exists: no run maps a plan yet, so no run's behaviour or digest depends on it. It is reachable
+through the hidden `patina __rewrite` (x86_64; elsewhere it refuses) and the tests
+(`crates/patina-cli/src/rewrite/`, the `iced-x86` decoder; the runtime gains no decoder).
+
+- **What is code** (`code.rs`): *proven* code is what control flow reaches from function starts
+  (the entry, function symbols, unwind entries, relocated pointers into text unless the file
+  has no section headers, direct call targets); *extent* code is the rest of an unwind entry's
+  or sized symbol's range, decoded linearly up to any byte code reads or takes the address of
+  (RIP-relative, or in a non-PIE file also an absolute operand or immediate). A refusal (an undecodable or
+  privileged instruction, two decodes that overlap, an extent branch that misses an
+  instruction, code that reads instruction bytes) taints the span between the neighbouring
+  function starts. Everything else is *dark*: counted, never patched. Jump tables are not
+  followed and data is not scanned for code pointers: both found code that was not.
+- **Sites and counts** (`points.rs`, `flags.rs`): backward branches, backward calls, indirect
+  jumps and atomic instructions. Each patch replaces one whole instruction of 5 bytes or more,
+  so no address but its first byte changes meaning: `call f` becomes `call T` (the return
+  address stays the program's), a backward `jmp`/`jcc` (rel32) is aimed at T, any other
+  instruction becomes `jmp T` and runs as a copy in T. T is `dec qword [cell]; jz trap`, the
+  row, then `trap: ud2; jmp row`; it uses no register, stack or scratch memory. A short site's
+  count goes before a 5-byte instruction of its block, or for a loop of the loop head. The
+  count writes OF, SF, ZF, AF and PF, so it goes only where a forward scan proves those dead
+  (a return or a direct call of a function ends a path; a shift by `cl` and a `rep` compare
+  write nothing for certain).
+- **The plan** (`plan.rs`): the patched text pages, the trampoline blob (placed after the
+  image), and a row per patched instruction (its address and length, its trampoline, the
+  trap's offset, the copy's offset); counts for a report. It records the file's SHA-256, the
+  patina build and the cell address (`0x7fff0000`, reachable from any image by a 32-bit
+  absolute operand). It is a pure function of the file and the build: one thread, ordered
+  maps, no host input.
+- **The verifier** (`verify.rs`) checks a plan against its file without the rewriter's
+  decisions: its own control flow and linear decodes, then that every changed byte is in a
+  patched instruction that is one whole instruction of found code, that no known branch enters
+  and no code reads, and that each trampoline counts, traps to its own `ud2` and goes on to
+  the original target or returns right after an exact copy.
+- **The differential** (`standalone.rs`, `tests/rewrite`): `__rewrite --standalone` writes a
+  copy of the file with the plan applied that runs natively (its counts address a private cell
+  in an added segment); its output is compared with the original's.
+
+Not covered: code made at run time (JIT) and dark code keep today's behaviour (spin probes,
+`compute-stall`). Group patches (a short site merged with its neighbours) are not made: a
+branch from dark code into a merged instruction's start runs garbage.
+
 ## The fault plan
 
 `--faults`, `--fault` and `--crash` give the plan (`faults.rs`). A value given as a range is
