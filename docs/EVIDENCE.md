@@ -664,8 +664,8 @@ Fidelity (`03-fidelity`, `rw-fid`, dynamic C): a fault in a relocated `lock xadd
 at the instruction's address and `backtrace()` from the handler reaches `main`; a timer signal
 taken at a point in a spin loop names an address in the loop; `/proc/self/maps` lines (perms,
 offsets, paths) equal the native run's; a checksum of the program's own text differs from the
-native one (reads see the patch) and is the same on two seeds; `mprotect` of the text drops
-the plan and reads the native bytes; code copied into anonymous memory runs and is counted
+native one (reads see the patch) and is the same on two seeds; `mprotect` of the text puts
+that page back and reads the native bytes; code copied into anonymous memory runs and is counted
 unplanned; a fork child that execs the program applies plans of its own. `shlib-stock`
 (`dlopen`/`dlclose` twice): every image planned, the closed library's plans dropped. Static,
 static-PIE, dynamic and Go programs all run their native output (above).
@@ -813,15 +813,34 @@ both architectures.
 | Every run without `--preempt points` (the 90 cells of the stock workload ledger) | identical to the build before, on both architectures |
 | With `--preempt points` | digests differ from the build before (walks change the schedule); with `--fault compute-walk=0` they are the build before's (`go-race-stock`, seed 3, x86_64) |
 
-The 2 plans headless Chromium drops on arm64 (the arm64 corpus table above) are both the
+The 2 plans headless Chromium dropped on arm64 (the arm64 corpus table above) were both the
 executable's own, once in each process that starts V8. V8 moves its embedded builtins (2.1
 MiB of the executable's text) into its code range with `mremap(MREMAP_MAYMOVE | MREMAP_FIXED
-| MREMAP_DONTUNMAP)`, so that its generated code reaches them with short branches; a move of
-patched pages drops the image's plan (the original pages go back first, so the moved copy is
-the original code). Output stays native, but the rest of the executable has no points for the
-rest of the process. Putting back only the pages a change touches would keep them: on arm64
-every patch is one aligned instruction, so a page holds whole patches; on x86_64 a patch can
-cross a page, so the pages put back would have to grow to whole patches. Not done here.
+| MREMAP_DONTUNMAP)`, so that its generated code reaches them with short branches. A move of
+patched pages dropped the image's plan (the original pages went back first, so the moved copy
+was the original code), and the rest of the executable had no points for the rest of the
+process. Since, a change puts back only the patched pages it touches (ARCHITECTURE
+"Load-time rewriting", "Changes"; on x86_64 grown to whole patches) and the rest keeps its
+points. Headless Chromium on arm64 (`ubuntu-24.04-arm`, points with walks, warm plans; the
+build before → after; the x86_64 Chromium moves nothing: 0 dropped, 0 restored in both):
+
+| Seed | Plans dropped | Changes that put back part of a plan | Points taken | Wall ms |
+|---|---|---|---|---|
+| 1 | 2 → 0 | 0 → 2 | 145 → 200 | 1,611 → 1,647 |
+| 2 | 2 → 0 | 0 → 2 | 32,313 → 35,462 | 3,058 → 3,232 |
+| 3 | 2 → 0 | 0 → 2 | 34,708 → 35,476 | 2,814 → 2,874 |
+| 4 | 2 → 0 | 0 → 2 | 264 → 388 | 1,594 → 1,648 |
+| 5 | 2 → 0 | 0 → 2 | 15,789 → 19,123 | 2,404 → 2,685 |
+
+Output is native in every run; `verify --vary cpu,load,aslr,sandbox,repeat` of seed 2 is
+identical. Seeds 2 and 3 are held near the switch budget, so they gain fewer points.
+`rewrite/06-textmove` (a static guest that moves one page of its text with the same `mremap`
+flags, makes one page read-only and back, unmaps it, or unmaps it and maps it again from the
+file, then computes in two threads) checks the native output, that part of the plan was put
+back and none dropped, a point taken after the change in a page it did not touch (in the page
+mapped again, for the last), and `--vary` identity, on both architectures. Red: with the range
+marked but not mapped back, the moved copy (still patched, its jumps aimed at trampolines it
+does not reach) dies of `SIGSEGV`, and `04-interior` d and `03-fidelity` e fail too.
 
 ### The cost of a point
 

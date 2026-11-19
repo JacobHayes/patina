@@ -11,6 +11,8 @@
 #                     (tests/rewrite/03-fidelity)
 #   rw-races          races.c, dynamic: races whose window is straight-line code
 #                     (tests/rewrite/05-walks)
+#   rw-textmove       textmove.c, static, not PIE: changes one page of its own text
+#                     (tests/rewrite/06-textmove)
 #   rw-interior       interior.S (x86_64) or interior-a64.S (arm64), static and static-PIE
 #                     (rw-interior-pie), no C library: jumps the rewriter cannot see into and
 #                     around its patches (tests/rewrite/04-interior)
@@ -25,6 +27,7 @@ ${CXX:-g++} -O2 -static -pthread -o "$out/rw-cxx" "$here/diff.cc"
 rustc -O --edition 2021 -C target-feature=+crt-static -o "$out/rw-rs" "$here/diff.rs"
 $cc -O1 -rdynamic -o "$out/rw-fid" "$here/fidelity.c"
 $cc -O2 -pthread -o "$out/rw-races" "$here/races.c"
+$cc -O2 -static -no-pie -fno-toplevel-reorder -pthread -o "$out/rw-textmove" "$here/textmove.c"
 interior=$here/interior.S
 [ "$(uname -m)" = x86_64 ] || interior=$here/interior-a64.S
 $cc -nostdlib -static -no-pie -o "$out/rw-interior" "$interior"

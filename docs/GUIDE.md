@@ -1771,11 +1771,11 @@ failure exit: exit 1
 
 `patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
 share of its sites patched and of its text left dark, and anything left without points.
-`result.json`'s `rewrite` has the counts (`points`, `stays`, `applied`, `dropped`, `unplanned`,
-`cpuid`, `interior`; the walks' counts, below) and one entry per file the program mapped executable
-(`images`: `path`, `sha256`, `status`, and for a planned file `sites`, `patches`,
-`covered_pct`, `back_edges_covered_pct`, `dark_pct`, `cpuid_patched`, `cpuid_unpatched`,
-`cache`, `rewrite_ms`).
+`result.json`'s `rewrite` has the counts (`points`, `stays`, `applied`, `dropped`, `restored`,
+`unplanned`, `cpuid`, `interior`; the walks' counts, below) and one entry per file the program
+mapped executable (`images`: `path`, `sha256`, `status`, and for a planned file `sites`,
+`patches`, `covered_pct`, `back_edges_covered_pct`, `dark_pct`, `cpuid_patched`,
+`cpuid_unpatched`, `cache`, `rewrite_ms`).
 
 **Walks.** A window between two plain memory accesses with no branch, call or atomic between
 them (a counter loaded, changed and stored) holds no point. So under `--preempt points` a
@@ -1841,8 +1841,10 @@ The first run pays for making them: 0.5 s for ripgrep, 0.8 s for CPython and its
   Text that no control flow or unwind entry reaches is *dark* and never patched (22% of
   Chromium's: code reached only through tables).
 - Code made at run time (JIT output, memory made executable after it was mapped) gets no
-  points (counted `unplanned`). A program that writes, moves, unmaps or reprotects its own text
-  gets that file's original pages back and no points there (counted `dropped`).
+  points (counted `unplanned`). A program that writes, moves, unmaps or reprotects part of its
+  own text gets the original pages back there and no points in them (counted `restored`, or
+  `dropped` when none of the file's rewritten pages is left); the rest of the file keeps its
+  points, and mapping the file there again brings them back.
 
 **What the program sees.** Faults, signal frames, records and unwinding name the original
 addresses, never a rewritten copy's. `/proc/self/maps` shows the original files; each library

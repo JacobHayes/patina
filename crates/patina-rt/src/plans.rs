@@ -16,8 +16,11 @@
 //!   address (signal frames, records); `/proc/self/maps` shows the original file for patched
 //!   pages and omits trampolines (`Maps`).
 //! - **Changes** (`changing`): before the program unmaps, maps over, moves or reprotects
-//!   patched text or a trampoline, the image's patched pages are mapped back from the original
-//!   file (counted `dropped`). Its trampolines stay, for a thread stopped in one.
+//!   patched text, the patched pages it touches (grown to whole patches) are mapped back from
+//!   the original file and leave the plan (counted `restored`, or `dropped` when none is left);
+//!   the rest keep their points. A change to a trampoline puts back every patched page. The
+//!   trampolines stay, for a thread stopped in one. A later mapping of the file at the same
+//!   place takes the plan again for what it covers.
 
 use crate::raw::*;
 use crate::state::{config, ctl, proc};
@@ -48,12 +51,17 @@ pub struct Img {
     /// offset. Only their patched pages are ever put back.
     maps: [(u64, u64, u64); MAX_MAPS],
     nmaps: usize,
-    /// Patched pages put back; trampolines changed by the program (no longer the plan's).
-    dropped: bool,
+    /// Ranges whose patched pages were put back (sorted, disjoint, page-aligned; `ALL` when
+    /// every one was): no longer the plan's, so neither put back again nor answered by its
+    /// entries. Trampolines changed by the program (no longer the plan's).
+    restored: [(u64, u64); MAX_RESTORED],
+    nrestored: usize,
     tramp_gone: bool,
 }
 
 const MAX_MAPS: usize = 4;
+const MAX_RESTORED: usize = 16;
+const ALL: (u64, u64) = (0, u64::MAX);
 
 pub struct Plans {
     imgs: [Img; MAX_IMAGES],
@@ -74,7 +82,8 @@ impl Plans {
             prot: 0,
             maps: [(0, 0, 0); MAX_MAPS],
             nmaps: 0,
-            dropped: false,
+            restored: [(0, 0); MAX_RESTORED],
+            nrestored: 0,
             tramp_gone: false,
         };
         Plans {
@@ -338,14 +347,14 @@ fn apply(
         .iter()
         .position(|m| m.bias == bias && m.plan_dev == plan_dev && m.plan_ino == plan_ino)
     {
-        // Mapped again after its plan was dropped: applied afresh while its trampolines stand.
-        Some(i) if p.imgs[i].tramp_gone || (p.imgs[i].nmaps == MAX_MAPS && !p.imgs[i].dropped) => {
-            return false;
-        }
+        // Mapped again (after a change put pages back, or another part of the file): the plan
+        // applies to the new mapping while its trampolines stand.
+        Some(i) if p.imgs[i].tramp_gone => return false,
         Some(i) => {
-            if p.imgs[i].dropped {
-                p.imgs[i].dropped = false;
-                p.imgs[i].nmaps = 0;
+            prune(&mut p.imgs[i]);
+            let m = &p.imgs[i];
+            if !covers(m, a, len, off) && m.nmaps == MAX_MAPS {
+                return false;
             }
             i
         }
@@ -393,7 +402,8 @@ fn apply(
                 prot: prot & !PROT_WRITE,
                 maps: [(0, 0, 0); MAX_MAPS],
                 nmaps: 0,
-                dropped: false,
+                restored: [(0, 0); MAX_RESTORED],
+                nrestored: 0,
                 tramp_gone: false,
             };
             p.n += 1;
@@ -401,25 +411,41 @@ fn apply(
         }
     };
     let img = &mut p.imgs[i];
-    img.maps[img.nmaps] = (a, len, off);
-    img.nmaps += 1;
+    if !covers(img, a, len, off) {
+        img.maps[img.nmaps] = (a, len, off);
+        img.nmaps += 1;
+    }
+    // What the new mapping covers is the plan's again, but for a patch that would be cut by a
+    // page left original beside it (x86_64: a patch can cross a page): those pages of the new
+    // mapping keep the original code and are marked put back.
+    let (a0, a1) = (a & !(PAGE - 1), (a + len + PAGE - 1) & !(PAGE - 1));
+    let (lo, hi) = revived(&*img, a0, a1);
+    let ok = if lo < hi {
+        (a0 == lo || mark(img, a0, lo)) && (hi == a1 || mark(img, hi, a1)) && unrestore(img, lo, hi)
+    } else {
+        mark(img, a0, a1)
+    };
+    if !ok {
+        // No room to track what stays put back: every patched page goes back.
+        restore(img, ALL.0, ALL.1);
+        return true;
+    }
     let img = *img;
     for k in 0..w[R_NRUNS] {
         let (va, n, poff) = run(&img, k);
         let (s, e) = (bias.wrapping_add(va), bias.wrapping_add(va + n));
-        let (lo, hi) = (s.max(a), e.min(a + len));
-        if lo < hi
-            && !mmap(
+        live(&img, s.max(lo), e.min(hi), &mut |lo, hi| {
+            if !mmap(
                 lo,
                 hi - lo,
                 prot,
                 MAP_PRIVATE | MAP_FIXED,
                 plan,
                 poff + (lo - s),
-            )
-        {
-            crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_SYSCALL);
-        }
+            ) {
+                crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_SYSCALL);
+            }
+        });
     }
     true
 }
@@ -463,9 +489,9 @@ fn site_at(pc: u64) -> Option<(&'static Img, u64)> {
     (off < end).then_some((img, row))
 }
 
-/// The entry row for `pc` of kind `kind`, in an image whose plan is in force.
+/// The entry row for `pc` of kind `kind`, in an image whose plan is in force there.
 fn entry_at(pc: u64, kind: u8) -> Option<(&'static Img, u64)> {
-    imgs().iter().filter(|m| !m.dropped).find_map(|img| {
+    imgs().iter().filter(|m| !restored(m, pc)).find_map(|img| {
         let a = pc.wrapping_sub(img.bias);
         let rows = img.hdr + img.w[R_ENTRIES];
         let at = |k: u64| rows + k * ENTRY_BYTES as u64;
@@ -620,52 +646,284 @@ pub fn try_point(
     true
 }
 
-/// Before the program changes `[a, a + len)` (unmaps, maps over, moves, reprotects): an image
-/// whose patched pages or mapped trampolines that touches goes back to the original file's
-/// pages (a page of the trampolines' span that holds none is not the plan's).
+/// Before the program changes `[a, a + len)` (unmaps, maps over, moves, reprotects): the patched
+/// pages of each image that the range touches, grown to whole patches, go back to the original
+/// file's pages and leave the plan; all of them when it touches mapped trampolines (a page of
+/// the trampolines' span that holds none is not the plan's). Nothing else is mapped: a page
+/// that was not patched, or was already put back, is left as it is.
 pub fn changing(a: u64, len: u64) {
-    let end = a.saturating_add(len);
+    let lo = a & !(PAGE - 1);
+    let hi = a.saturating_add(len).saturating_add(PAGE - 1) & !(PAGE - 1);
     for img in imgs().iter_mut() {
         let tramps = !img.tramp_gone
             && (0..img.w[R_NTRUNS]).any(|k| {
                 let (off, n, _) = run_in(img, R_TRUNS, k);
-                a < img.tramp + off + n && img.tramp + off < end
+                lo < img.tramp + off + n && img.tramp + off < hi
             });
         img.tramp_gone |= tramps;
-        if img.dropped || !(tramps || patched(img).any(|(s, e, _)| a < e && s < end)) {
+        let (lo, hi) = if tramps { ALL } else { (lo, hi) };
+        let mut touched = false;
+        for_patched(img, &mut |s, e, _| touched |= s < hi && lo < e);
+        if !touched {
             continue;
         }
-        for (s, e, off) in patched(img) {
+        let (lo, hi) = if tramps { ALL } else { grown(img, lo, hi) };
+        restore(img, lo, hi);
+        let mut left = false;
+        for_patched(img, &mut |_, _, _| left = true);
+        count(if left {
+            proto::ctl::PLAN_RESTORED
+        } else {
+            proto::ctl::PLAN_DROPPED
+        });
+    }
+}
+
+/// Map the original file's pages over the patched pages of `img` in `[lo, hi)` and mark the
+/// range put back; past `MAX_RESTORED` ranges, every patched page.
+fn restore(img: &mut Img, lo: u64, hi: u64) {
+    let (prot, fd) = (img.prot, img.orig_fd as u64);
+    let put = |img: &Img, lo: u64, hi: u64| {
+        for_patched(img, &mut |s, e, off| {
+            let (s2, e2) = (s.max(lo), e.min(hi));
+            // (A plan is applied only to the program's own mappings, never in the runtime's
+            // region; checked again before anything is mapped over.)
+            if s2 >= e2 || (s2 < RT_REGION_END && e2 > RT_BASE) {
+                return;
+            }
             if !mmap(
-                s,
-                e - s,
-                img.prot,
+                s2,
+                e2 - s2,
+                prot,
                 MAP_PRIVATE | MAP_FIXED,
-                img.orig_fd as u64,
-                off,
+                fd,
+                off + (s2 - s),
             ) {
                 crate::sup::host_error(-e::ENOMEM, nr::MMAP, proto::ctl::HE_SYSCALL);
             }
             // The instruction channels' patches there (`rdrand`...) are written again.
-            crate::insn::patch::rewrite(s, e - s, img.prot);
-        }
-        img.dropped = true;
-        count(proto::ctl::PLAN_DROPPED);
+            crate::insn::patch::rewrite(s2, e2 - s2, prot);
+        });
+    };
+    put(img, lo, hi);
+    if !mark(img, lo, hi) {
+        put(img, ALL.0, ALL.1);
+        img.restored[0] = ALL;
+        img.nrestored = 1;
     }
 }
 
-/// The patched pages of `img` as mapped: start, end, and the original file's offset there.
-fn patched(img: &Img) -> impl Iterator<Item = (u64, u64, u64)> + '_ {
-    img.maps[..img.nmaps]
+/// Whether a mapping of `img` already holds `[a, a + len)` at file offset `off`.
+fn covers(img: &Img, a: u64, len: u64, off: u64) -> bool {
+    img.maps[..img.nmaps].iter().any(|&(ma, ml, mo)| {
+        ma <= a && a + len <= ma + ml && mo.wrapping_sub(ma) == off.wrapping_sub(a)
+    })
+}
+
+/// Whether `x` is in a range of `img` put back.
+fn restored(img: &Img, x: u64) -> bool {
+    img.restored[..img.nrestored]
         .iter()
-        .flat_map(move |&(a, len, off)| {
-            (0..img.w[R_NRUNS]).filter_map(move |k| {
-                let (va, n, _) = run(img, k);
-                let (s, e) = (img.bias.wrapping_add(va), img.bias.wrapping_add(va + n));
-                let (lo, hi) = (s.max(a), e.min(a + len));
-                (lo < hi).then_some((lo, hi, off + (lo - a)))
-            })
-        })
+        .any(|&(s, e)| s <= x && x < e)
+}
+
+/// The parts of `[s, e)` not put back, in order.
+fn live(img: &Img, s: u64, e: u64, f: &mut dyn FnMut(u64, u64)) {
+    let mut at = s;
+    for &(rs, re) in &img.restored[..img.nrestored] {
+        if at >= e {
+            return;
+        }
+        if re <= at || rs >= e {
+            continue;
+        }
+        if rs > at {
+            f(at, rs);
+        }
+        at = at.max(re);
+    }
+    if at < e {
+        f(at, e);
+    }
+}
+
+/// The patched pages of `img` as mapped and still the plan's: start, end, and the original
+/// file's offset there.
+fn for_patched(img: &Img, f: &mut dyn FnMut(u64, u64, u64)) {
+    for &(a, len, off) in &img.maps[..img.nmaps] {
+        for k in 0..img.w[R_NRUNS] {
+            let (va, n, _) = run(img, k);
+            let (s, e) = (img.bias.wrapping_add(va), img.bias.wrapping_add(va + n));
+            live(img, s.max(a), e.min(a + len), &mut |lo, hi| {
+                f(lo, hi, off + (lo - a))
+            });
+        }
+    }
+}
+
+/// The patched page piece holding `x`, if it is still the plan's.
+fn patched_at(img: &Img, x: u64) -> Option<(u64, u64, u64)> {
+    let mut at = None;
+    for_patched(img, &mut |s, e, off| {
+        if at.is_none() && s <= x && x < e {
+            at = Some((s, e, off));
+        }
+    });
+    at
+}
+
+/// Add `[lo, hi)` to the ranges put back, merged with those it meets; false, changing nothing,
+/// when they would pass `MAX_RESTORED`.
+fn mark(img: &mut Img, lo: u64, hi: u64) -> bool {
+    let mut out = [(0u64, 0u64); MAX_RESTORED + 1];
+    let (mut n, mut cur) = (0, Some((lo, hi)));
+    for &(s, e) in &img.restored[..img.nrestored] {
+        match cur {
+            Some((l, h)) if e >= l && s <= h => cur = Some((l.min(s), h.max(e))),
+            Some((l, h)) if s > h => {
+                out[n] = (l, h);
+                n += 1;
+                cur = None;
+                out[n] = (s, e);
+                n += 1;
+            }
+            _ => {
+                out[n] = (s, e);
+                n += 1;
+            }
+        }
+        if n > MAX_RESTORED {
+            return false;
+        }
+    }
+    if let Some(r) = cur {
+        if n == MAX_RESTORED {
+            return false;
+        }
+        out[n] = r;
+        n += 1;
+    }
+    img.restored[..n].copy_from_slice(&out[..n]);
+    img.nrestored = n;
+    true
+}
+
+/// Take `[lo, hi)` out of the ranges put back (it is mapped afresh); false, changing nothing,
+/// when the ranges left would pass `MAX_RESTORED`.
+fn unrestore(img: &mut Img, lo: u64, hi: u64) -> bool {
+    let mut out = [(0u64, 0u64); MAX_RESTORED];
+    let mut n = 0;
+    for &(s, e) in &img.restored[..img.nrestored] {
+        for (s2, e2) in [(s, e.min(lo)), (s.max(hi), e)] {
+            if s2 < e2 {
+                if n == MAX_RESTORED {
+                    return false;
+                }
+                out[n] = (s2, e2);
+                n += 1;
+            }
+        }
+    }
+    img.restored[..n].copy_from_slice(&out[..n]);
+    img.nrestored = n;
+    true
+}
+
+/// Mappings of `img` whose patched pages were all put back hold nothing of the plan: forgotten,
+/// so that a mapping again has room.
+fn prune(img: &mut Img) {
+    let mut k = 0;
+    while k < img.nmaps {
+        let mut one = *img;
+        one.maps[0] = img.maps[k];
+        one.nmaps = 1;
+        let mut left = false;
+        for_patched(&one, &mut |_, _, _| left = true);
+        if left {
+            k += 1;
+        } else {
+            img.maps.copy_within(k + 1..img.nmaps, k);
+            img.nmaps -= 1;
+        }
+    }
+}
+
+/// The patches of `img` (sites, and `cpuid`s written in place) that cross the page boundary
+/// `b`: the lowest start and the highest end among them, or none.
+fn crossing(img: &Img, b: u64) -> Option<(u64, u64)> {
+    let mut r: Option<(u64, u64)> = None;
+    let mut see = |s: u64, n: u64| {
+        if s < b && b < s + n {
+            r = Some(r.map_or((s, s + n), |(lo, hi)| (lo.min(s), hi.max(s + n))));
+        }
+    };
+    let sites = img.hdr + img.w[R_SITES];
+    for k in 0..img.w[R_NSITES] {
+        let row = sites + k * SITE_BYTES as u64;
+        see(
+            img.bias.wrapping_add(field::<u64>(row, SITE_ADDR)),
+            field::<u8>(row, SITE_LEN) as u64,
+        );
+    }
+    let entries = img.hdr + img.w[R_ENTRIES];
+    for k in 0..img.w[R_NENTRIES] {
+        let row = entries + k * ENTRY_BYTES as u64;
+        if field::<u8>(row, ENTRY_KIND) == KIND_CPUID {
+            see(img.bias.wrapping_add(field::<u64>(row, ENTRY_ADDR)), 2);
+        }
+    }
+    r
+}
+
+/// `[lo, hi)` grown to whole patches: a patch that crosses its edge from a patched page on the
+/// other side takes that page too, so no patch is ever half put back. On arm64 every patch is
+/// one aligned word, and nothing grows.
+fn grown(img: &Img, mut lo: u64, mut hi: u64) -> (u64, u64) {
+    if cfg!(target_arch = "aarch64") {
+        return (lo, hi);
+    }
+    let both = |b: u64| patched_at(img, b - 1).is_some() && patched_at(img, b).is_some();
+    loop {
+        let (l0, h0) = (lo, hi);
+        if lo >= PAGE && both(lo) {
+            if let Some((s, _)) = crossing(img, lo) {
+                lo = s & !(PAGE - 1);
+            }
+        }
+        if hi < u64::MAX - PAGE && both(hi) {
+            if let Some((_, e)) = crossing(img, hi) {
+                hi = (e + PAGE - 1) & !(PAGE - 1);
+            }
+        }
+        if (lo, hi) == (l0, h0) {
+            return (lo, hi);
+        }
+    }
+}
+
+/// `[lo, hi)` (what a new mapping covers) shrunk so that no patch crosses its edge into a page
+/// that stays put back: such a page keeps its original code, and so must the patch's other page.
+fn revived(img: &Img, mut lo: u64, mut hi: u64) -> (u64, u64) {
+    if cfg!(target_arch = "aarch64") {
+        return (lo, hi);
+    }
+    while lo < hi {
+        let (l0, h0) = (lo, hi);
+        if lo >= PAGE && restored(img, lo - 1) {
+            if let Some((_, e)) = crossing(img, lo) {
+                lo = (e + PAGE - 1) & !(PAGE - 1);
+            }
+        }
+        if lo < hi && restored(img, hi) {
+            if let Some((s, _)) = crossing(img, hi) {
+                hi = s & !(PAGE - 1);
+            }
+        }
+        if (lo, hi) == (l0, h0) {
+            break;
+        }
+    }
+    (lo, hi)
 }
 
 /// Memory made executable that has no plan (anonymous or shared, or made executable after it
@@ -738,11 +996,10 @@ impl Maps {
         let mm = crate::path::makedev(d.0, d.1);
         let ours = |m: &&Img| m.plan_dev == mm && m.plan_ino == i && mm != 0;
         let tramp = |m: &&Img| start >= m.tramp && start < m.tramp + m.tramp_len;
-        let at = imgs().iter().filter(ours).find_map(|m| {
-            patched(m)
-                .find(|p| p.0 <= start && start < p.1)
-                .map(|p| (m, p))
-        });
+        let at = imgs()
+            .iter()
+            .filter(ours)
+            .find_map(|m| patched_at(m, start).map(|p| (m, p)));
         // (arm64 trampolines before and after an image: its span holds the image)
         if at.is_none() && imgs().iter().filter(ours).any(|m| tramp(&m)) {
             return;

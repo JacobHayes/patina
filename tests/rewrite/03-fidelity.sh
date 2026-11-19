@@ -13,8 +13,8 @@
 #     offsets, paths): no trampoline, no plan file, patched pages joined to their file's line;
 #  d. `checksum` (the sum of fid_spin's bytes) differs from the native sum (reads see the
 #     patch) and is the same on seeds 1 and 2;
-#  e. `mprotect` (fid_spin's page made writable and back) drops the plan: the run counts it and
-#     reads the native sum;
+#  e. `mprotect` (fid_spin's page made writable and back) puts that page back (`restored`, or
+#     `dropped` when it was the plan's only patched page): the run reads the native sum;
 #  f. shlib-stock (stock, with libraries; dlopen and dlclose twice) ends ok with its native
 #     line, every image planned (the dlopened one too), the dlclosed library's plans dropped.
 #@ tier=quick budget=30 slots=4
@@ -86,9 +86,10 @@ want=$(cat "$o/checksum.want")
 cmp -s "$o/checksum/inc-0/stdout" "$o/checksum-2/inc-0/stdout" || die "d. checksum: seeds 1 and 2 differ"
 echo "d. checksum: $(cat "$o/checksum/inc-0/stdout") (natively $(cat "$o/checksum.want")) on both seeds"
 
-[ "$(field "$o/mprotect/result.json" rewrite.dropped)" -ge 1 ] || die "e. mprotect: no plan dropped"
+[ $(($(field "$o/mprotect/result.json" rewrite.restored) + $(field "$o/mprotect/result.json" rewrite.dropped))) -ge 1 ] ||
+    die "e. mprotect: no part of the plan put back"
 cmp -s "$o/mprotect/inc-0/stdout" "$o/checksum.want" || die "e. mprotect: $(cat "$o/mprotect/inc-0/stdout"), not the native sum"
-echo "e. mprotect: plan dropped, the native sum read"
+echo "e. mprotect: fid_spin's page put back, the native sum read"
 
 # f.
 tail -1 "$o/shlib/inc-0/stdout" | grep -q 'compdl=29992,29992 ok$' || die "f. shlib-stock printed $(tail -1 "$o/shlib/inc-0/stdout")"

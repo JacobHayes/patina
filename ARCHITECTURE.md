@@ -815,15 +815,23 @@ In a run (`--preempt points`):
   moment of an x86_64 step's trap merges with it, and that one step goes uncounted; walks are
   short (the default W is at most 512, a few ms of steps) and probes come only after 20 ms of
   CPU time without a scheduling point, so the window is narrow.
-- **Changes**: before the program unmaps, maps over, moves (`mremap`) or reprotects any
-  patched page or mapped trampoline page of an image, the patched pages of every mapping the plan was applied to are
-  mapped back from the original file (counted `dropped`), with the instruction channels'
-  patches written again, and nothing else is touched; its
-  trampolines stay mapped for a thread stopped in one. A program that writes or reprotects
-  its own text (a JIT patching its own code, a hot-patcher) runs that file without points
-  until it maps the file again; trampolines the program changed are never the plan's again
-  (no address there is translated or taken as a point). Trampolines are never placed in the
-  runtime's region.
+- **Changes** (`changing`): before the program unmaps, maps over, moves (`mremap`) or
+  reprotects part of an image's patched text, the patched pages in that range are mapped back
+  from the original file, with the instruction channels' patches written again, and leave the
+  plan: nothing else is mapped, so a page that was not patched (or was put back before, and
+  may hold anything since) is never mapped over. On arm64 every patch is one aligned word, so
+  the range's pages are exactly what goes back. On x86_64 a patch can cross a page, so the
+  range grows to whole patches: a site or `cpuid` patch that crosses its edge takes the page
+  beyond too. The pages put back go first, so a moved copy is original code. The rest of the
+  image keeps its points (counted `restored`; `dropped` when nothing of the plan is left). Its
+  entries (the `cpuid` and interior rows) stop answering in the ranges put back and still
+  answer elsewhere; its trampolines stay mapped, for a thread stopped in one, and a stop there
+  is still shown at its original address. A change that touches a mapped trampoline page puts
+  every patched page back; trampolines the program changed are never the plan's again (no
+  address there is translated or taken as a point). A later mapping of the file at the same
+  load bias takes the plan again for what it covers, shrunk so that no patch is left half on
+  a page that stays original. An image tracks at most 16 ranges put back; past that, all of
+  it goes back. Trampolines are never placed in the runtime's region.
 - **What the program sees**: a signal frame, a fault record and a backtrace through a
   trampoline name the original instruction (`proto::plan::shown`: a stop in a copy maps to
   the same offset of the original, a stop at a count to the instruction it precedes), so
@@ -834,7 +842,7 @@ In a run (`--preempt points`):
   answers as above. A fork child inherits the mappings and the plan table; an `execve` starts
   over with the new image's plans.
 
-Not covered: code made at run time (JIT), dark code and dropped plans keep today's behaviour
+Not covered: code made at run time (JIT), dark code and pages put back keep today's behaviour
 (spin probes, `compute-stall`). Inside a hardware transaction (`xbegin`), an interior entry,
 like a point, aborts it (the program's fallback path runs). A loop back-edge still has no point when the flags stay live
 across every run that could carry its count, or its block holds a refusal (EVIDENCE.md has
@@ -1069,7 +1077,8 @@ Enforced:
   threads). Regression `sandbox/12-procgaps`.
 - **Load-time plans** (`--preempt points`). The trampolines and patched pages are program
   memory (read-execute; a program that remaps or reprotects them gets its original pages back,
-  above); the plan cell is program memory with the consequences of the compute-point cell
+  above: only pages of the program's own mappings that hold the plan's patched pages are ever
+  mapped over, and never a page of the runtime's region); the plan cell is program memory with the consequences of the compute-point cell
   (below). What the runtime trusts of a plan (its placement and site rows) is mapped read-only
   in the runtime's region. The broker's socket is a hidden descriptor; the plan cache is
   reachable only by the launcher, outside the sandbox; a cache entry changed on disk is

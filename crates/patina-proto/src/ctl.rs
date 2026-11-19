@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 18;
+pub const LAYOUT_VERSION: u64 = 19;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -257,19 +257,21 @@ pub struct ComputeStats {
     pub deadline_stops: AtomicU64,
     /// With `--preempt points` (`PLAN_NAMES` order): trampoline traps taken (each a compute
     /// point), image mappings a plan was applied to, plans dropped because the program
-    /// unmapped, mapped over, moved or reprotected patched text, executable memory left
+    /// unmapped, mapped over, moved or reprotected all their patched text (or a trampoline),
+    /// executable memory left
     /// unpatched (anonymous or shared memory, files without a plan, memory made executable
     /// later), patched `cpuid`s answered, and jumps into a group's interior boundary resumed
     /// at the copy of its instruction; switches taken after a walk, the instructions
     /// walked, and walks a runtime entry or an instruction the stepper cannot step ended
-    /// without a switch; points drawn ahead that stayed with their thread (no trap: `stays`).
+    /// without a switch; points drawn ahead that stayed with their thread (no trap: `stays`);
+    /// changes that put back part of a plan's patched text and left the rest (`restored`).
     pub plan: [AtomicU64; PLAN_FIELDS],
     /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: the
     /// stall watchdog counts that wall time as progress (it costs no virtual time).
     pub planning: AtomicU64,
 }
 
-pub const PLAN_FIELDS: usize = 10;
+pub const PLAN_FIELDS: usize = 11;
 pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "points",
     "applied",
@@ -281,6 +283,7 @@ pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "walk_steps",
     "walks_cut",
     "stays",
+    "restored",
 ];
 pub const PLAN_POINTS: usize = 0;
 pub const PLAN_APPLIED: usize = 1;
@@ -292,6 +295,7 @@ pub const PLAN_WALKS: usize = 6;
 pub const PLAN_WALK_STEPS: usize = 7;
 pub const PLAN_WALKS_CUT: usize = 8;
 pub const PLAN_STAYS: usize = 9;
+pub const PLAN_RESTORED: usize = 10;
 
 impl ComputeStats {
     pub fn plans(&self) -> [u64; PLAN_FIELDS] {

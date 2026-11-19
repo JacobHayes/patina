@@ -883,6 +883,12 @@ pub fn rewrite_line(w: &Value) -> Option<String> {
             plural(n("dropped"), "plan")
         ));
     }
+    if n("restored") > 0 {
+        s.push_str(&format!(
+            "; {} put back part of a plan (the rest keeps its points)",
+            plural(n("restored"), "change")
+        ));
+    }
     Some(s)
 }
 
