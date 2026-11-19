@@ -30,12 +30,13 @@ const SSI: usize = 128;
 /// siginfo word 0 while marks are carried across `execve` (a signal number is at most 64).
 const EXEC_MAGIC: u64 = 0x5346_445f_4558_4543;
 const EXEC_MAX: usize = 7;
+/// `kcmp` type: the two descriptors name one open file.
+const KCMP_FILE: u64 = 0;
 
-/// Per-process: the mask of each signalfd descriptor (0: not one), the file it names (its
-/// virtual inode), and the signals of the mask last made visible by `sync`.
+/// Per-process: the mask of each signalfd descriptor (0: not one) and the signals of the
+/// mask last made visible by `sync`.
 struct Marks {
     mask: [u64; N],
-    key: [u64; N],
     seen: [u64; N],
     count: usize,
     /// The union last sent to the supervisor (`Op::SigFd`).
@@ -45,7 +46,6 @@ struct G(UnsafeCell<Marks>);
 unsafe impl Sync for G {}
 static MARKS: G = G(UnsafeCell::new(Marks {
     mask: [0; N],
-    key: [0; N],
     seen: [0; N],
     count: 0,
     sent: 0,
@@ -63,7 +63,7 @@ pub fn is_signalfd(fd: i64) -> bool {
     idx(fd).is_some_and(|i| marks().mask[i] != 0)
 }
 
-fn set(i: usize, mask: u64, key: u64) {
+fn set(i: usize, mask: u64) {
     let m = marks();
     match (m.mask[i] != 0, mask != 0) {
         (false, true) => m.count += 1,
@@ -71,7 +71,6 @@ fn set(i: usize, mask: u64, key: u64) {
         _ => {}
     }
     m.mask[i] = mask;
-    m.key[i] = key;
     m.seen[i] = 0;
 }
 
@@ -97,8 +96,7 @@ pub fn copy(src: i64, dst: i64) {
     if m.mask[s] == 0 && m.mask[d] == 0 {
         return;
     }
-    let (mask, key) = (m.mask[s], m.key[s]);
-    set(d, mask, key);
+    set(d, m.mask[s]);
     publish();
 }
 
@@ -109,7 +107,7 @@ pub fn closed(fd: i64) {
     }
     if let Some(i) = idx(fd) {
         if marks().mask[i] != 0 {
-            set(i, 0, 0);
+            set(i, 0);
             publish();
         }
     }
@@ -137,10 +135,15 @@ pub fn create(call: &mut dyn Call) -> i64 {
         if !is_signalfd(fd) {
             return -e::EINVAL;
         }
-        let key = marks().key[fd as usize];
+        // Every eventfd has the same inode: the kernel's comparison of open files says
+        // which descriptors name this one.
+        let pid = unsafe { sc0(nr::GETPID) } as u64;
         for i in 0..N {
-            if marks().mask[i] != 0 && marks().key[i] == key {
-                set(i, stored, key);
+            if marks().mask[i] != 0
+                && (i == fd as usize
+                    || unsafe { sc6(nr::KCMP, pid, pid, KCMP_FILE, fd as u64, i as u64, 0) } == 0)
+            {
+                set(i, stored);
             }
         }
         publish();
@@ -156,9 +159,8 @@ pub fn create(call: &mut dyn Call) -> i64 {
         unsafe { sc1(nr::CLOSE, fd as u64) };
         return -24; // EMFILE: never, the lowest free number is below the hidden ones
     };
-    let key = crate::vino::of_fd(fd).unwrap_or(fd as u64);
     if !crate::state::in_vfork_child() {
-        set(i, stored, key);
+        set(i, stored);
         publish();
     }
     sync();
@@ -354,7 +356,7 @@ pub fn before_exec() -> Result<(), ()> {
         let fl = unsafe { sc2(nr::FCNTL, i as u64, 1) };
         if fl < 0 || fl & 1 != 0 {
             if !crate::state::in_vfork_child() {
-                set(i, 0, 0);
+                set(i, 0);
             }
             continue;
         }
@@ -395,8 +397,7 @@ pub fn after_exec() {
     for k in 0..(w[1] as usize).min(EXEC_MAX) {
         let (fd, mask) = (w[2 + 2 * k] as i64, w[3 + 2 * k]);
         if let Some(i) = idx(fd) {
-            let key = crate::vino::of_fd(fd).unwrap_or(fd as u64);
-            set(i, mask, key);
+            set(i, mask);
             u |= mask & !(1 << 63);
         }
     }

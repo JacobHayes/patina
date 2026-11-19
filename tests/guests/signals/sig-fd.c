@@ -5,7 +5,8 @@
 //   value), SIGCHLD (pid, status); several records in one read, real-time signals queued; a
 //   buffer smaller than a record is EINVAL; reading consumes (sigpending no longer shows it);
 //   a signal outside the mask is not read.
-// - flags: SFD_NONBLOCK, SFD_CLOEXEC; a mask update on an existing descriptor.
+// - flags: SFD_NONBLOCK, SFD_CLOEXEC; a mask update on an existing descriptor changes that
+//   file's mask only, not another signalfd's.
 // - readiness: poll, select, level-triggered epoll; edge-triggered epoll reports a new signal
 //   once, and again only for another one.
 // - wake-ups: a blocking read, poll and epoll_wait in one thread end when a second process
@@ -104,10 +105,17 @@ static void basic(void) {
     CHECK(many[1].ssi_signo == (unsigned)SIGRTMIN && many[1].ssi_code == SI_QUEUE && many[1].ssi_int == 42 &&
               many[2].ssi_int == 43,
           "queued %u %d %d %d", many[1].ssi_signo, many[1].ssi_code, many[1].ssi_int, many[2].ssi_int);
-    // A mask update: now SIGUSR2 (pending) is read.
+    // A mask update: now SIGUSR2 (pending) is read. Another signalfd (and the duplicate of
+    // neither) keeps its own mask.
+    int other = signalfd(-1, &m, SFD_NONBLOCK);
+    CHECK(other >= 0, "second signalfd");
     sigset_t m2 = set_of(SIGUSR2, 0);
     CHECK(signalfd(fd, &m2, 0) == fd, "mask update");
+    CHECK(!readable(other), "the update reached another signalfd");
     CHECK(readable(fd) && rd(fd, &si) == SIGUSR2, "SIGUSR2 after the update");
+    kill(getpid(), SIGUSR1);
+    CHECK(!readable(fd) && readable(other) && rd(other, &si) == SIGUSR1, "SIGUSR1 through the other");
+    close(other);
     sigset_t bad;
     CHECK(signalfd(0, &m2, 0) < 0 && errno == EINVAL, "update of a descriptor that is not one");
     CHECK(syscall(SYS_signalfd4, -1, &m2, 4, 0) < 0 && errno == EINVAL, "mask size");
