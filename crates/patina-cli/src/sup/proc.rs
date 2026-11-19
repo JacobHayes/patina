@@ -665,6 +665,49 @@ pub fn death_verdict(pid: i32, name: &str, st: Option<(i64, i64)>) -> Verdict {
     v
 }
 
+/// The inode of the socket open on task `tid`'s descriptor `fd`.
+pub fn socket_ino(tid: i32, fd: u64) -> Option<u64> {
+    let link = std::fs::read_link(format!("/proc/{tid}/fd/{fd}")).ok()?;
+    let link = link.to_str()?;
+    link.strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
+}
+
+/// How many descriptors of the guest processes `pids` hold the socket with real inode `ino`,
+/// and how many epoll sets watch it (`/proc/PID/fd`, `/proc/PID/fdinfo`).
+pub fn socket_holders(pids: &[i32], ino: u64) -> (usize, usize) {
+    let name = format!("socket:[{ino}]");
+    let watched = format!(" ino:{ino:x} ");
+    let (mut fds, mut watches) = (0, 0);
+    for pid in pids {
+        let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            continue;
+        };
+        for e in dir.flatten() {
+            let Ok(link) = std::fs::read_link(e.path()) else {
+                continue;
+            };
+            let link = link.to_string_lossy();
+            if link == name {
+                fds += 1;
+            } else if link == "anon_inode:[eventpoll]" {
+                let info = std::fs::read_to_string(format!(
+                    "/proc/{pid}/fdinfo/{}",
+                    e.file_name().to_string_lossy()
+                ))
+                .unwrap_or_default();
+                watches += info
+                    .lines()
+                    .filter(|l| l.starts_with("tfd:") && format!("{l} ").contains(&watched))
+                    .count();
+            }
+        }
+    }
+    (fds, watches)
+}
+
 #[cfg(test)]
 mod death_tests {
     use super::*;

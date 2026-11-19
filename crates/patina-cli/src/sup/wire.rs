@@ -475,7 +475,7 @@ impl Sup {
 
     // ---- requests ----
 
-    pub fn wire_op(&mut self, op: Op, a: [u64; 6]) -> Next {
+    pub fn wire_op(&mut self, op: Op, idx: usize, a: [u64; 6]) -> Next {
         let r = match op {
             Op::WireSocket => {
                 let i = a[0] as usize;
@@ -495,17 +495,29 @@ impl Sup {
                 self.wire_step();
                 0
             }
-            Op::WireQuery => {
-                let i = a[0] as usize;
-                if i < VINO_CAP {
-                    tab(self.ctl).socks[i].state as i64
-                } else {
-                    -(libc::EINVAL as i64)
-                }
-            }
+            Op::WireRenew => self.wire_renew(idx, a),
             _ => -(libc::ENOSYS as i64),
         };
         Next::Continue(r)
+    }
+
+    /// A new connect on a socket whose last attempt failed (`Op::WireRenew`).
+    /// The real socket is the one on the caller's descriptor `a[1]`: its inode is the host's,
+    /// read here so that it never enters the request (which is recorded and compared).
+    fn wire_renew(&mut self, idx: usize, a: [u64; 6]) -> i64 {
+        let i = a[0] as usize;
+        let tid = self.slot(idx).tid.load(Relaxed);
+        let Some(ino) = super::proc::socket_ino(tid, a[1]) else {
+            return -(libc::EBADF as i64);
+        };
+        let pids: Vec<i32> = self.procs.map.keys().copied().collect();
+        if super::proc::socket_holders(&pids, ino) != (1, 0) {
+            return -(libc::EBUSY as i64);
+        }
+        match self.wire.socks.get(&i) {
+            Some(s) if s.port != 0 => s.port as i64 | (s.kind as i64) << 16,
+            _ => 0,
+        }
     }
 
     fn wire_bind(&mut self, a: [u64; 6]) -> i64 {

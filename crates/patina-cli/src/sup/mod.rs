@@ -772,8 +772,8 @@ impl Sup {
                 | Op::WireConnect
                 | Op::WireAccepted
                 | Op::WireSent
-                | Op::WireQuery),
-            ) => self.wire_op(op, a),
+                | Op::WireRenew),
+            ) => self.wire_op(op, idx, a),
             Some(op @ (Op::UdpSocket | Op::UdpBind | Op::UdpConnect | Op::UdpSend)) => {
                 self.udp_op(op, a)
             }

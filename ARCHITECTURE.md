@@ -806,6 +806,9 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   to a UDP socket are refused; a receive carries no ancillary data and `MSG_ERRQUEUE` finds
   nothing.
   `recvmmsg` returns once at least one datagram is there. Names resolve from `/etc/hosts` only.
+  A TCP connect after a failed one is a new attempt, as in the kernel, where nothing else holds
+  the socket; one that a duplicate descriptor, another process or an epoll set also holds ends
+  the run `unsupported` (its real socket is replaced for the new attempt).
 - **Fixed tables.** The runtime keeps some state in fixed tables shared by the run: virtual
   inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
   work-tree mappings (128 per process), shared mappings (256 per process), injected fsync

@@ -411,11 +411,11 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
             sock(i).state = WS_ABORTED;
             return if e != 0 { -(e as i64) } else { -ECONNABORTED };
         }
-        // The real socket is still connected to its closed hidden end: a new attempt on the
-        // same socket after a failure is not supported.
-        WS_ABORTED => halt(call),
+        // A new attempt, as the kernel makes one on a TCP socket whose connect failed.
+        WS_ABORTED => renew(call, fd, i),
         _ => {}
     }
+    let s = *sock(i);
     let (port, kind) = match parse_addr(s.family, addr, len, true) {
         Ok(v) => v,
         Err(e) => return e,
@@ -496,6 +496,91 @@ fn connect(call: &mut dyn Call, i: usize) -> i64 {
         Got::WouldBlock => -EINPROGRESS,
     };
     w.finish(r)
+}
+
+/// A new connect on socket `i` (open on `fd`) after its last attempt failed: the real socket
+/// is still connected to its closed hidden end, so a fresh one takes its place, with its
+/// descriptor flags, its real options (timeouts, `SO_RCVLOWAT`), its virtual number and an
+/// explicit `bind`'s address; the socket is new or bound again, as the kernel leaves it. Only
+/// where nothing else holds the real socket (another descriptor, another process, an epoll
+/// set): the run ends unsupported otherwise.
+fn renew(call: &mut dyn Call, fd: i64, i: usize) {
+    if crate::state::in_vfork_child() {
+        halt(call);
+    }
+    let bound = sup(Op::WireRenew, [i as u64, fd as u64, 0, 0, 0, 0]);
+    if bound < 0 {
+        halt(call);
+    }
+    let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // F_GETFL
+    let cloexec = unsafe { sc2(nr::FCNTL, fd as u64, 1) } & 1 != 0; // F_GETFD
+    let nonblock = fl >= 0 && fl as u64 & SOCK_NONBLOCK != 0;
+    let ty = SOCK_STREAM
+        | if nonblock { SOCK_NONBLOCK } else { 0 }
+        | if cloexec { SOCK_CLOEXEC } else { 0 };
+    let new = unsafe { sc3(nr::SOCKET, AF_UNIX, ty, 0) };
+    if new < 0 {
+        crate::sup::host_error(new, nr::SOCKET, proto::ctl::HE_SYSCALL);
+    }
+    super::unixsock::fix_bufs(new);
+    // SO_RCVLOWAT, SO_RCVTIMEO, SO_SNDTIMEO live on the real socket.
+    for name in [18u64, 20, 21] {
+        let mut v = [0u64; 2];
+        let mut l: u32 = 16;
+        let r = unsafe {
+            sc6(
+                nr::GETSOCKOPT,
+                fd as u64,
+                SOL_SOCKET as u64,
+                name,
+                v.as_mut_ptr() as u64,
+                &mut l as *mut u32 as u64,
+                0,
+            )
+        };
+        if r == 0 {
+            unsafe {
+                sc6(
+                    nr::SETSOCKOPT,
+                    new as u64,
+                    SOL_SOCKET as u64,
+                    name,
+                    v.as_ptr() as u64,
+                    l as u64,
+                    0,
+                )
+            };
+        }
+    }
+    let Some(st) = super::fs::fstat_raw(new) else {
+        crate::sup::host_error(-e::EIO, nr::FSTAT, proto::ctl::HE_RUNTIME_ASSERT);
+    };
+    crate::vino::rebind(i as u64 + VINO_BASE, st.dev(), st.ino());
+    let flags = if cloexec { SOCK_CLOEXEC } else { 0 };
+    let r = unsafe { sc3(nr::DUP3, new as u64, fd as u64, flags) };
+    if r < 0 {
+        crate::sup::host_error(r, nr::DUP3, proto::ctl::HE_SYSCALL);
+    }
+    unsafe { sc1(nr::CLOSE, new as u64) };
+    let s = sock(i);
+    *s = WSock {
+        family: s.family,
+        nopts: s.nopts,
+        opts: s.opts,
+        state: WS_NEW,
+        ..WSock::default()
+    };
+    if bound > 0 {
+        let (port, kind) = (bound as u16, (bound >> 16) as u8);
+        let b = real_bind(fd, port);
+        if b < 0 {
+            crate::sup::host_error(b, nr::BIND, proto::ctl::HE_SYSCALL);
+        }
+        let s = sock(i);
+        s.state = WS_BOUND;
+        s.lport = port;
+        s.laddr = kind;
+    }
 }
 
 /// The pending error of socket `i` (cleared), and the real socket's (also cleared).

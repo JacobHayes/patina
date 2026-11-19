@@ -31,6 +31,12 @@ pub fn of(dev: u64, ino: u64) -> u64 {
     VINO_BASE + n as u64
 }
 
+/// Give virtual number `vino` to the object `(dev, ino)` instead of the one it named (a socket
+/// whose real object the runtime replaced keeps its number).
+pub fn rebind(vino: u64, dev: u64, ino: u64) {
+    vfs().vino[(vino - VINO_BASE) as usize] = VinoEntry { dev, ino };
+}
+
 /// The virtual number of `(dev, ino)` if it has one; allocates nothing.
 pub fn find(dev: u64, ino: u64) -> Option<u64> {
     let v = vfs();

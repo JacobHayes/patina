@@ -34,6 +34,7 @@
 #include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -402,7 +403,68 @@ static void refused(void) {
     r = connect(c, (void *)&a, sizeof a);
     CHECK(r == -1 && errno == ECONNREFUSED, "second connect: %d %d", r, errno);
     printf("second connect: ECONNREFUSED\n");
+    // A third connect is a new attempt (the kernel's TCP socket is closed and unconnected
+    // again), and fails the same way.
+    struct stat st0, st1;
+    CHECK(fstat(c, &st0) == 0, "fstat");
+    r = connect(c, (void *)&a, sizeof a);
+    CHECK(r == -1 && errno == EINPROGRESS, "third connect: %d %d", r, errno);
+    CHECK(poll(&pf, 1, 5000) == 1, "poll");
+    r = connect(c, (void *)&a, sizeof a);
+    CHECK(r == -1 && errno == ECONNREFUSED, "fourth connect: %d %d", r, errno);
+    CHECK(fstat(c, &st1) == 0 && st1.st_ino == st0.st_ino, "the socket's inode changed");
+    printf("third connect: EINPROGRESS, then ECONNREFUSED\n");
     close(c);
+    // A blocking client probing for a server on one socket: refused twice, then the server
+    // listens and the same socket connects.
+    c = socket(AF_INET, SOCK_STREAM, 0);
+    for (int k = 0; k < 2; k++) {
+        r = connect(c, (void *)&a, sizeof a);
+        CHECK(r == -1 && errno == ECONNREFUSED, "probe %d: %d %d", k, r, errno);
+    }
+    int one = 1;
+    l = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) == 0, "SO_REUSEADDR");
+    CHECK(bind(l, (void *)&a, sizeof a) == 0 && listen(l, 8) == 0, "listen again");
+    CHECK(connect(c, (void *)&a, sizeof a) == 0, "probe connect: %d", errno);
+    int sv = accept(l, NULL, NULL);
+    CHECK(sv >= 0 && write(c, "x", 1) == 1, "accept and write");
+    char ch = 0;
+    CHECK(read(sv, &ch, 1) == 1 && ch == 'x', "read");
+    close(sv);
+    close(c);
+    printf("probe loop: refused twice, then connected\n");
+    // An explicitly bound client keeps its port across attempts.
+    int bport, b = listener(&bport, 0);
+    close(b);
+    c = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in ba = loop4(bport);
+    CHECK(bind(c, (void *)&ba, sizeof ba) == 0, "client bind");
+    close(l); // nobody listens now
+    for (int k = 0; k < 3; k++) {
+        r = connect(c, (void *)&a, sizeof a);
+        CHECK(r == -1 && errno == ECONNREFUSED, "bound probe %d: %d %d", k, r, errno);
+    }
+    CHECK(port_of(c) == bport, "bound port %d after attempts, was %d", port_of(c), bport);
+    close(c);
+    printf("bound client: port kept over three attempts\n");
+    // Unix sockets: a missing path, then a refused one, then a listener; one socket throughout.
+    struct sockaddr_un u = {.sun_family = AF_UNIX};
+    snprintf(u.sun_path, sizeof u.sun_path, "/tmp/refused-%d.sock", getpid());
+    unlink(u.sun_path);
+    c = socket(AF_UNIX, SOCK_STREAM, 0);
+    r = connect(c, (void *)&u, sizeof u);
+    CHECK(r == -1 && errno == ENOENT, "unix connect, no file: %d %d", r, errno);
+    int ul = socket(AF_UNIX, SOCK_STREAM, 0);
+    CHECK(bind(ul, (void *)&u, sizeof u) == 0, "unix bind");
+    r = connect(c, (void *)&u, sizeof u);
+    CHECK(r == -1 && errno == ECONNREFUSED, "unix connect, not listening: %d %d", r, errno);
+    CHECK(listen(ul, 8) == 0, "unix listen");
+    CHECK(connect(c, (void *)&u, sizeof u) == 0, "unix connect: %d", errno);
+    close(c);
+    close(ul);
+    unlink(u.sun_path);
+    printf("unix: ENOENT, ECONNREFUSED, then connected\n");
 }
 
 // ---- semantic tests ----
