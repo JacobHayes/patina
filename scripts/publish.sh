@@ -30,7 +30,7 @@ if [ "$mode" = execute ]; then
   tags_here=$(jj log -r '@- & tags()' --no-graph -T 'tags.map(|t| t.name()).join("\n")')
   refuse=
   [ -z "$dirty" ] || refuse="the working copy is not clean"
-  printf '%s\n' "$tags_here" | grep -qx "$tag" || refuse="${refuse:+$refuse; }tag $tag is not on @-"
+  grep -qx "$tag" <<<"$tags_here" || refuse="${refuse:+$refuse; }tag $tag is not on @-"
   if [ -n "$refuse" ]; then
     printf 'publish.sh: refusing to publish %s: %s\n' "$tag" "$refuse" >&2
     exit 1
@@ -39,7 +39,7 @@ fi
 
 files=$(cargo package -p patina-dst --no-verify --allow-dirty --list)
 printf '%s\n' "$files" | sed 's/^/   /'
-printf '%s\n' "$files" | grep -qx LICENSE-APACHE \
+grep -qx LICENSE-APACHE <<<"$files" \
   || { printf 'publish.sh: the package lacks LICENSE-APACHE\n' >&2; exit 1; }
 
 if [ "$mode" = dry-run ]; then

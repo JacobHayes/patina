@@ -65,8 +65,8 @@ repo=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 first=$(gh api "repos/$repo/actions/runs/$run/attempts/1/jobs" -q '.jobs[] | "\(.name) \(.conclusion)"')
 last=$(gh run view "$run" --json jobs -q '.jobs[] | "\(.name) \(.conclusion)"')
 for j in $REQUIRED; do
-    echo "$last" | grep -qx "$j success" || die "CI job $j did not pass at $sha: $url"
-    if ! echo "$first" | grep -qx "$j success"; then
+    grep -qx "$j success" <<<"$last" || die "CI job $j did not pass at $sha: $url"
+    if ! grep -qx "$j success" <<<"$first"; then
         [ -n "$accept" ] || die "CI job $j passed only on a re-run: fix the flaky test; $url"
         echo "land: !!! ACCEPTED A RE-RUN of $j: $accept"
     fi
