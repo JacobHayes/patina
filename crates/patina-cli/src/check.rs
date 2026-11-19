@@ -140,7 +140,9 @@ impl Check {
             .map_err(|e| format!("checker {} is gone: {e}", self.program.display()))?;
         if now != self.sha256 {
             return Err(format!(
-                "checker {} changed since the run (sha256 {} recorded, {} now)",
+                "checker {} changed since the run (sha256 {} recorded, {} now): a replay judges \
+                 with the recorded checker; put it back to replay, or judge the run with the new \
+                 one (`patina recheck RUNDIR`, or run the same sweep again)",
                 self.program.display(),
                 self.sha256,
                 now
