@@ -41,7 +41,9 @@ Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), unprivileged user na
 (`patina doctor` says what is missing, and on Ubuntu 24.04 and later prints the AppArmor
 profile command). rustup installs the pinned toolchain; mise
 supplies Go. arm64 changes are developed against a Linux arm64 VM and accepted on the hosted
-arm runner (`check-arm64`).
+arm runner (`check-arm64`). On hosts that restrict unprivileged user namespaces, dev builds need
+a profile for the paths they run from (`patina doctor` prints it); a copy run from elsewhere
+(a scratch directory, an install prefix) is refused there until its path has one.
 
 ## Checks and landing
 
