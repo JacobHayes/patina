@@ -20,7 +20,7 @@ native() { # [-s N] WANT PROG ARGS...: natively, exit 0 (or N) and the last line
     [ "$st" = 0 ] || [ "$st" = "$may" ] || die "a. $*: natively: exit $st: $out"
     echo "$out" | grep -q "$want" || die "a. $*: natively printed $out"
 }
-native '^balance=0 withdrawn=100 ok$' "$C/races" b
+native -s 1 '^balance=-\?[0-9]* withdrawn=[0-9]* \(ok\|DOUBLE-SPEND\)$' "$C/races" b  # its race may show natively
 native -s 1 'LOST-UPDATE\|ok$' "$C/pool"  # its race, when it shows natively, exits 1
 native '^done$' "$C/spinpoints" count
 native 'counter=4000$' "$C/spinwait" own-spin
