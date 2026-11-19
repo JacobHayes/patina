@@ -1,4 +1,4 @@
-# 3. Differential: fs-tour natively (bwrap, tmpfs) and under patina give the same output once
+# 3. Differential: fs-tour natively (the sandbox, no runtime) and under patina give the same output once
 #    timestamps, device numbers and anonymous-object inode numbers are masked.
 #@ tier=quick
 . "$(dirname "$0")/lib/common.inc"

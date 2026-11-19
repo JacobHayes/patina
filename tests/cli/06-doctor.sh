@@ -1,7 +1,8 @@
-# 6. `patina doctor` exits 0 on this host with every required check ok; with no bwrap on PATH
-#    it exits with the `error` status and names the package that provides it. On arm64, a host
-#    with 16 KiB pages (faked: PATINA_TEST_PAGE_SIZE) fails the page-size check, and the
-#    launcher refuses a run with `error` before any sandbox.
+# 6. `patina doctor` exits 0 on this host with every required check ok. The AppArmor profile it
+#    prints admits this binary by its canonical path and nothing else, and, where the parser is
+#    installed, parses (offline, nothing loaded). On arm64, a host with 16 KiB pages (faked:
+#    PATINA_TEST_PAGE_SIZE) fails the page-size check, and the launcher refuses a run with
+#    `error` before any sandbox.
 #@ tier=quick,release budget=10
 . "$(dirname "$0")/lib.inc"
 st=0
@@ -15,13 +16,18 @@ bad = [c for c in checks if c["required"] and not c["ok"]]
 assert d["ok"] and checks and not bad, bad
 print("doctor:", ", ".join(f"{c['name']} {'ok' if c['ok'] else 'missing'}" for c in checks))
 PY
-empty=$RUNS/empty-path
-mkdir -p "$empty"
-st=0
-timeout 60 env PATH="$empty" "$PATINA" doctor >"$RUNS/nobwrap.txt" 2>&1 || st=$?
-[ "$st" = "$(exit_of error)" ] || die "no bwrap: exit $st"
-grep -q bubblewrap "$RUNS/nobwrap.txt" || die "no bwrap: package not named: $(cat "$RUNS/nobwrap.txt")"
-echo "no bwrap: exit $st: $(grep -m1 bubblewrap "$RUNS/nobwrap.txt")"
+exe=$(realpath "$PATINA")
+timeout 60 "$PATINA" doctor --print-apparmor-profile >"$RUNS/profile" || die "profile: exit $?"
+grep -qF "profile patina \"$exe\" flags=(unconfined)" "$RUNS/profile" || die "profile: not for $exe: $(cat "$RUNS/profile")"
+grep -qx '  userns,' "$RUNS/profile" || die "profile: no userns rule"
+for parser in /usr/sbin/apparmor_parser /sbin/apparmor_parser; do
+    if [ -x "$parser" ]; then
+        "$parser" -Q -K -T "$RUNS/profile" || die "profile: $parser rejects it"
+        echo "profile: parsed by $parser"
+        break
+    fi
+done
+echo "profile: for $exe"
 
 if [ "$(uname -m)" = aarch64 ]; then
     st=0

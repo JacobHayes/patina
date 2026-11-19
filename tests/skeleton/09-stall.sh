@@ -9,7 +9,7 @@ out=$RUNS/09-stall
 ms=$(python3 -I "$(dirname "$0")/../cpu-ms.py" timeout 120 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" stall-ms=500)" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinpoints count)
 [ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = unsupported/compute-stall ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 [ "$ms" -ge 500 ] && [ "$ms" -le 3000 ] || die "used $ms ms of CPU time"
-# No process of this run is left (launcher, bwrap, supervisor or guest; see tests/leftovers.py).
+# No process of this run is left (launcher, sandbox keeper, supervisor or guest; see tests/leftovers.py).
 rc=0; left=$(python3 -I "$(dirname "$0")/../leftovers.py" "$out") || rc=$?
 [ -z "$left" ] || die "processes left: $left"
 [ "$rc" = 0 ] || die "leftovers.py failed (exit $rc)"

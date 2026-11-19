@@ -1,8 +1,9 @@
 # 2. Exec matrix: 8 targets x {fork+execve, vfork+execve, posix_spawn} and 6 failures x 3
-# methods. stdout equals a native run of the same guest (bwrap with the same /guest layout and
-# a fresh PID namespace), and the derived values are right: the image each child saw, its argv,
-# its environment variable, inherited descriptors 0,1,2,5 (5 inherited, 6 close-on-exec gone),
-# the hidden descriptor EBADF, and the kernel's error for each failure (posix_spawn returns it).
+# methods. stdout equals a native run of the same guest (the sandbox without the runtime: the
+# same /guest layout and a fresh PID namespace), and the derived values are right: the image each
+# child saw, its argv, its environment variable, inherited descriptors 0,1,2,5 (5 inherited, 6
+# close-on-exec gone), the hidden descriptor EBADF, and the kernel's error for each failure
+# (posix_spawn returns it).
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-exec-matrix

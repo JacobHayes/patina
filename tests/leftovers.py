@@ -3,7 +3,7 @@ belongs to a run under DIR, and exit 1 if there is any.
 
 A process belongs to a run if it has a descriptor, a mapping or its working directory under
 DIR. Every process of a run qualifies while it lives: the launcher (its run directory's files),
-bwrap and the supervisor (the run's boundary log at a fixed descriptor), and every guest process
+the sandbox's keeper and the supervisor (the run's boundary log at a fixed descriptor), and every guest process
 (the runtime holds the boundary log at a hidden descriptor and maps it), so this finds what a
 run left behind without looking at other runs on the host. Command lines are not used: a shell
 merely mentioning DIR (someone watching the run) is not part of it. With --ns (a namespace

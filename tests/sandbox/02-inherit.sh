@@ -1,7 +1,7 @@
 # Change 2: the process state a run inherits from its caller is set to fixed values
 # (patina/src/sup/inherit.rs lists every item). `--vary env` changes, in its odd runs, the
 # launcher's working directory, environment, umask, ignored and blocked signals and soft
-# limits, and in the launcher's child before bwrap: a leaked descriptor, a new session with a
+# limits, and in the launcher's child before the sandbox: a leaked descriptor, a new session with a
 # controlling terminal, the persona, nice, IO priority, scheduling policy, timer slack, THP,
 # OOM adjustment and every soft limit. A hard limit too low to honour ends the run as internal.
 #@ tier=quick budget=30 slots=4

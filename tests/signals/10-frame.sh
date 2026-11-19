@@ -11,7 +11,7 @@
 o=$RUNS/10-frame
 mkdir -p "$o"
 # Natively as uid/gid 1000, the ids the sandbox gives the guest (si_uid is in the frame).
-(cd "$o" && bwrap --dev-bind / / --unshare-user --uid 1000 --gid 1000 --die-with-parent -- "$PATINA_GUESTS/sig-frame" >native.txt)
+(cd "$o" && "$PATINA" __native --mount "$PATINA_GUESTS:/guest" -- /guest/sig-frame >native.txt)
 patina_run "$o/patina" 1 sig-frame
 [ "$(field "$o/patina/result.json" outcome)" = ok ] || die "patina run: $(field "$o/patina/result.json" outcome)"
 cp "$o/patina/inc-0/stdout" "$o/patina.txt"

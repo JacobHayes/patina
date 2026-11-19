@@ -3,12 +3,13 @@
 //! `perf_event_open` needs `CAP_PERFMON` in the initial user namespace (this host also has
 //! `perf_event_paranoid` 4); nothing inside the sandbox has it. The launcher does, when its
 //! executable carries the file capability (`setcap cap_perfmon+ep` on a copy of `patina`) or it
-//! runs as root. Capabilities never reach the sandbox: `exec` of bwrap (no file capabilities)
-//! drops them, ambient ones are cleared first, and bwrap sets no_new_privs.
+//! runs as root. Capabilities never reach the sandbox: the launcher's child clears ambient
+//! ones and sets no_new_privs before it executes the sandbox's keeper (so no file capability
+//! takes effect), and the keeper's user namespace leaves no capability of the initial one.
 //!
 //! Protocol, on a `SOCK_SEQPACKET` pair whose sandbox end is descriptor `FD_PMU`: the runtime
 //! sends 8 bytes and a thread pidfd (`SCM_RIGHTS`); the broker reads the host tid from the
-//! pidfd's fdinfo, checks that the task descends from this incarnation's bwrap, opens the one
+//! pidfd's fdinfo, checks that the task descends from this incarnation's keeper, opens the one
 //! event it ever opens for that task, and answers 8 bytes (0 or -errno) with the counter.
 
 use std::io;
@@ -285,7 +286,7 @@ pub struct Broker {
     thread: Option<JoinHandle<()>>,
 }
 
-/// The pair: (the sandbox end, to place at `FD_PMU`; our end, served once bwrap runs).
+/// The pair: (the sandbox end, to place at `FD_PMU`; our end, served once the keeper runs).
 pub fn pair() -> Result<(OwnedFd, OwnedFd), String> {
     let mut fds = [0i32; 2];
     if unsafe {
@@ -303,7 +304,7 @@ pub fn pair() -> Result<(OwnedFd, OwnedFd), String> {
 }
 
 impl Broker {
-    /// Serve requests from tasks under `root` (the bwrap child's host pid).
+    /// Serve requests from tasks under `root` (the keeper's host pid).
     pub fn start(ours: OwnedFd, event: u64, root: i32) -> Result<Broker, String> {
         let fd = ours.as_raw_fd();
         let thread = std::thread::Builder::new()

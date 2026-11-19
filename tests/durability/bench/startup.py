@@ -3,17 +3,17 @@
 marks of its own and of the supervisor (Ctl::timing). REPS runs each, median [min..max] ms:
 
   launcher setup       launch -> spawn        run directory, logs, control memfd, /etc files
-  bwrap + sup exec     spawn -> sup_start     namespaces, mounts, exec of the supervisor
+  sandbox + sup exec   spawn -> sup_start     namespaces, mounts, exec of the supervisor
   sup start, /in copy  sup_start -> copied    wire init, stdio ids, /in copy, base records
   runtime start        copied -> first_hello  fork, exec of the runtime, its start-up
   load + guest         first_hello -> main_exit  image load (scan) and the guest's own run
   exit barrier         main_exit -> finish
   kill + export        finish -> exported     kill(-1), reap, live-tree export
-  teardown             exported -> waited     verdict write, bwrap and namespaces exit
+  teardown             exported -> waited     verdict write, sandbox and namespaces exit
   launcher finish      waited -> done, plus the rest of the process (result.json)
   total (process)      wall of the patina process
 
-Native for comparison: the same program pinned, exec'd directly and inside bwrap (native.sh).
+Native for comparison: the same program pinned, exec'd directly and in the sandbox (native.sh).
 """
 import os
 import re
@@ -30,7 +30,7 @@ progs = {
     "dynamic true": ["/usr/bin/true"],
     "python3 -c pass": ["/usr/bin/python3", "-c", "pass"],
 }
-phases = [("launcher setup", "launch", "spawn"), ("bwrap + sup exec", "spawn", "sup_start"),
+phases = [("launcher setup", "launch", "spawn"), ("sandbox + sup exec", "spawn", "sup_start"),
           ("sup start, /in copy", "sup_start", "copied"), ("runtime start", "copied", "first_hello"),
           ("load + guest", "first_hello", "main_exit"), ("exit barrier", "main_exit", "finish"),
           ("kill + export", "finish", "exported"), ("teardown", "exported", "waited"),
@@ -58,11 +58,11 @@ for name, argv in progs.items():
         traps = o["sched"]["traps"]
     nat_direct = [native_run(f"{OUT}/nd", [a if not a.startswith("/guest/") else GUESTS + a[6:] for a in argv],
                              sandbox=False)[0] for _ in range(REPS)]
-    nat_bwrap = [native_run(f"{OUT}/nb", argv)[0] for _ in range(REPS)]
+    nat_sandbox = [native_run(f"{OUT}/nb", argv)[0] for _ in range(REPS)]
     r = {p: stats(v) for p, v in rows.items()}
     r["total (process)"] = stats(tot)
     r["native exec"] = stats(nat_direct)
-    r["native in bwrap"] = stats(nat_bwrap)
+    r["native in sandbox"] = stats(nat_sandbox)
     r["traps"] = traps
     res[name] = r
     log(f"== {name} ({traps} traps)")

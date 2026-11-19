@@ -2,7 +2,7 @@
 with the workload's fault configuration; traps (syscalls seen) and switches per run alongside.
 
 REPS runs of each (median [min..max]), seed = rep number (1..REPS), pinned to CPU. Native is
-the same command in a bwrap sandbox shaped like patina's (tests/files/lib/native.sh), pinned to the
+the same command natively in the sandbox a run gets (tests/files/lib/native.sh), pinned to the
 same core (Go then sees one CPU). One extra native run per workload under strace -f -c gives
 the native system-call count. Usage: e2e.py [W...]
 """

@@ -28,12 +28,21 @@ try_install() {
     PATH="$d/bin:$PATH" PATINA_RELEASE_URL="file://$d/dist" ${ish:-sh} "$root/install.sh" --prefix "$d/$1-$2" \
         >"$d/$1-$2.txt" 2>&1 || st=$?
 }
+# Where this host restricts user namespaces, install.sh also asks the binary for its AppArmor
+# profile, between the two.
+restricted=0
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ] && [ -d /etc/apparmor.d ]; then
+    restricted=1
+fi
 for case in x86_64:x86_64-unknown-linux-musl aarch64:aarch64-unknown-linux-musl arm64:aarch64-unknown-linux-musl; do
     m=${case%%:*} t=${case#*:}
     try_install Linux "$m"
     [ "$st" = 0 ] || die "Linux/$m: exit $st: $(cat "$d/Linux-$m.txt")"
     # The installed binary is the archive's: it answered --version, then doctor.
-    [ "$(cat "$d/calls")" = "$(printf '%s --version\n%s doctor' "$t" "$t")" ] ||
+    want=$(printf '%s --version\n' "$t")
+    [ "$restricted" = 0 ] || want=$(printf '%s\n%s doctor --print-apparmor-profile' "$want" "$t")
+    want=$(printf '%s\n%s doctor' "$want" "$t")
+    [ "$(cat "$d/calls")" = "$want" ] ||
         die "Linux/$m: installed the wrong binary or ran the wrong commands: $(cat "$d/calls")"
     echo "Linux/$m: installed patina-$t.tar.gz, then ran its doctor"
 done

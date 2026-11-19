@@ -8,7 +8,7 @@ part names the module that implements it. Measured results are in
 
 ```
 patina (patina-cli)
- ├─ launcher        one bwrap sandbox per incarnation; fixed process state; restart after a crash
+ ├─ launcher        one sandbox per incarnation; fixed process state; restart after a crash
  └─ supervisor      PID 1 in the sandbox: the turn, virtual time, signals, the network wire,
      │              crash points; answers the runtime over a shared control region
      └─ guest processes, each with the runtime (patina-rt) loaded first
@@ -138,17 +138,113 @@ keeps for the run, and the next supervisor starts from it; any other end leaves 
 
 ## The sandbox
 
-bwrap with every namespace unshared, uid and gid 1000, no capabilities. `/usr` is a read-only
-bind; `/work` (or the path `--work DIR:GUEST` gives, `Config::work`) and `/tmp` are tmpfs;
-`/etc` is generated; the program's directory is a read-only bind at the path it was given by
-(`config::program`), and `:copy` mounts are copies (`sup/mod.rs`). A path the guest ran, opened
-or looked for and found missing is kept in the control region; the launcher names those the host
-has (`launch::not_in_sandbox`). The launcher fixes every piece of process state a child inherits
-(umask, rlimits, signal dispositions, the CPU it is pinned to, address randomization off;
-`sup/inherit.rs` lists each). As root, the launcher makes the user namespace and bwrap joins it
-(`launch::userns`): uid and gid 1000 are the user sudo was run by, else `nobody`, and nothing
-else is mapped, as in bwrap's own namespace for an ordinary user. Left to bwrap, root would be
-mapped in and parts of /proc covered, and the guest would see who started the run.
+Patina makes the sandbox itself (`sandbox.rs`): every namespace but the time namespace
+unshared, uid and gid 1000, no capabilities. `/usr` is a read-only bind; `/work` (or the path `--work DIR:GUEST` gives,
+`Config::work`) and `/tmp` are tmpfs; `/etc` is generated; the program's directory is a
+read-only bind at the path it was given by (`config::program`), and `:copy` mounts are copies
+(`sup/mod.rs`). `launch::layout` lists the mounts in order; the order is the guest's mount
+table's. A path the guest ran, opened or looked for and found missing is kept in the control
+region; the launcher names those the host has (`launch::not_in_sandbox`). The launcher fixes
+every piece of process state a child inherits (umask, rlimits, signal dispositions, the CPU it
+is pinned to, address randomization off; `sup/inherit.rs` lists each).
+
+Three processes make it. The launcher's child sets that state, places the descriptors (the
+layout as JSON at `FD_SPEC`, each generated file in a memfd), clears the ambient set, sets
+`no_new_privs`, drops every capability unless it is root, and executes `patina __sandbox`, the
+keeper. In order:
+
+1. The keeper enters a user namespace: a new one mapping uid and gid 0 to the caller's own
+   (`setgroups` denied), or, as root, the one the launcher made (`launch::userns`: 0 is the
+   user sudo was run by, else `nobody`, and nothing else is mapped), after dropping its
+   supplementary groups. It sets its parent-death signal, checking the launcher is still its
+   parent, then unshares the mount, PID, network, IPC, UTS and cgroup namespaces, moves to `/`,
+   and forks PID 1. A socket pair joins them.
+2. PID 1 brings `lo` up (127.0.0.1/8, by netlink) and resolves the bind sources in the host's
+   tree. It makes every mount a slave (`MS_SLAVE`, recursive), so nothing it mounts reaches the
+   host, mounts a setup tmpfs on `/tmp`, binds a `newroot` directory there to itself and
+   pivots the root to the setup tmpfs, the host's tree under `oldroot`.
+3. The layout, each step under `newroot` with its parents made 0755 and `umask` 0: binds from
+   `oldroot` (recursive; `nosuid`, `nodev` unless a device, `ro` unless writable, set on every
+   mount under it with `mount_setattr`), `/dev` (a tmpfs with null, zero, full, random,
+   urandom and tty bound from the host, a new devpts instance, `shm`, the usual links),
+   `/proc` (mounted by PID 1, so it is the new PID namespace's, while the host's `/proc` is
+   still attached, as the kernel requires; `sys`, `sysrq-trigger`, `irq`, `bus` bound
+   read-only over themselves when writable), tmpfs (mode 0755, the size given), directories,
+   links, and generated files (written 0600 on the setup tmpfs, bound read-only, unlinked).
+4. The host's tree is made private, then detached (`MNT_DETACH`); the root pivots onto
+   `newroot` and the setup tmpfs is detached from under it, and every mount is made private.
+   No process of the sandbox has a path back to the host's tree, and nothing the host mounts
+   later arrives. The generated files' descriptors are closed.
+5. PID 1 makes the guests' user namespace, nested in the keeper's, uid and gid 1000 mapping 0
+   (written while PID 1 is dumpable: as root, the keeper's change of uid left it not),
+   drops the bounding set and sends the keeper a descriptor of it. Nothing in it owns a
+   namespace: a guest cannot mount, change the hostname or the network, or make a namespace
+   that does.
+6. PID 1 drops every capability (`capset` 0, ambient cleared, `no_new_privs`) and checks that
+   none is left, in any set or the bounding set. It restores the umask, moves to the work path,
+   starts a session, sets its parent-death signal (last, since a change of credentials clears
+   it), checking the keeper is still there, and executes the supervisor with `PWD` set.
+7. The keeper waits for PID 1 and exits with its status. Ending PID 1 ends every process of
+   the PID namespace (`launch::end_sandbox`).
+
+What holds, and the tests that check it:
+
+- No process of the sandbox other than the keeper has a capability, in any user namespace,
+  after step 6, and none can gain one: the bounding set is empty, `no_new_privs` is set, and
+  its uid is not 0 in its own namespace (`sandbox/14-views.sh` reads PID 1's sets as it
+  executes the supervisor, and each view's). The keeper holds the capabilities of the outer
+  user namespace only: it starts with none in the host's namespaces unless it is root, and a
+  user namespace grants capabilities only in itself and the namespaces it owns, so once in
+  one (step 1) it has none in the host's.
+- No mount, unmount or remount made in the sandbox propagates to the host: every mount is a
+  slave or private before the first is made, and private once the layout is done.
+- The sandbox has no reference to the host's tree once step 4 is done: the old root is
+  detached, the keeper's root and working directory moved with the pivots, and bind sources
+  are resolved before it.
+- A file the host offers only through a bind or generated file is read-only to the guest
+  unless the layout says writable; the only device nodes are the six named and the sandbox's
+  own devpts instance.
+- The sandbox dies with its parent: the keeper with the launcher, PID 1 with the keeper (a
+  parent-death signal each, checked after it is set), and every guest with PID 1.
+- The order of the mounts is the order of the layout, so the guest's mount table, and every
+  digest that reads it, is what it was before Patina made its own sandbox: the guest ledger
+  gives identical digests.
+- Nothing is admitted by joining a user namespace another program made: the keeper either
+  makes its own or, as root, joins the one its launcher made (it refuses to make one as root,
+  which would map the guests' user to the host's root).
+- A guest cannot make a namespace: the runtime answers `unshare` and namespace `clone` flags
+  with `EPERM` (`patina-rt` `sys/sched.rs`). The root of the tree and `/dev` are writable
+  tmpfs with no size limit, as they were before: a limit would change the guest's mount table,
+  and so every digest.
+
+Not covered, as before: bind sources are resolved by path once and bound by path, so a
+process of the host that can change a source between the two can redirect it (only the user
+or root can).
+
+Where AppArmor restricts unprivileged user namespaces (Ubuntu 24.04 and later), the kernel
+admits the keeper's and PID 1's namespaces only for an executable with a profile that allows
+`userns` (`patina doctor --print-apparmor-profile`); root, and an unrestricted host, need none.
+The profile admits whatever file is at its path, so it belongs on a path only root can write
+(`install.sh` says so when the path or a directory above it is the user's). Every process of
+the sandbox runs under it, guests too: a guest's `unshare` is refused by the runtime, and a
+namespace a native command (`patina __native`) makes is nested in the guests' user namespace
+and owns nothing outside it.
+
+Another view (`Keeper::view`): the part a node of a multi-machine run builds on. From the
+keeper, a helper unshares a mount, UTS and IPC namespace, makes every mount private, mounts a
+new tmpfs (`fsopen`, onto a directory opened without following links) on each path given (the
+work path, `/tmp`, `/dev/shm`) and sets the hostname; its child joins the guests' user
+namespace, drops every capability, closes every descriptor but 0, 1, 2 and those the caller
+names, and runs the caller's function, in the sandbox's PID and network namespaces, adopted by
+PID 1 when the helper exits. The helper, while it makes the view, is the one process of the
+sandbox's PID namespace other than the keeper with capabilities (the keeper's, in the outer
+user namespace); it executes nothing of the guest's. The helper and the process are not dumpable and hold only the
+descriptors the view needs; the process gets a new session (no terminal), `/dev/null` for any
+standard descriptor not passed. The keeper must have one thread: the helper forks without
+executing. `patina __sandbox-views` checks it
+(`sandbox/14-views.sh`): two views, each with its own mounts, hostname, IPC, work tree and
+`/tmp`, none seeing another's files, sharing the PID, network and user namespaces, with no
+capability.
 
 ### Host-provided files
 
@@ -953,8 +1049,8 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
 
 ## Limits
 
-- **Linux x86_64 and arm64.** No macOS. bwrap and unprivileged user namespaces
-  are required. arm64 needs Linux 6.12 or later (the counter-timer trap), 4 KiB pages, a
+- **Linux x86_64 and arm64.** No macOS. Unprivileged user namespaces are required (on
+  Ubuntu 24.04 and later, an AppArmor profile for the executable, or the restriction lifted). arm64 needs Linux 6.12 or later (the counter-timer trap), 4 KiB pages, a
   48-bit address space and one CPU model among the CPUs a run may use; `patina doctor`
   refuses a host without them. Also refused there: an SVE vector length above 512 bits, and a
   run that uses SME's streaming mode or ZA (`signal-context`). A program cannot enable MTE or

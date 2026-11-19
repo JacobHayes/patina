@@ -77,7 +77,7 @@ pub const FD_RT: i32 = 3004;
 pub const FD_OUTCOME: i32 = 3005;
 /// Supervisor only.
 pub const FD_EXPORT: i32 = 3006;
-/// Launcher to bwrap only: the `patina` executable, run inside the sandbox as `/proc/self/fd/3007 __sup`.
+/// Launcher to the sandbox only: the `patina` executable, run inside the sandbox as `/proc/self/fd/3007 __sup`.
 pub const FD_PATINA: i32 = 3007;
 /// Launcher to supervisor only: the guest's stdio memfds, which the supervisor moves to
 /// 0, 1 and 2 (for itself and so for every guest process) before anything else.
@@ -88,7 +88,7 @@ pub const FD_STDERR: i32 = 3022;
 pub const FD_PMU: i32 = 3008;
 /// The plan broker: a `SOCK_SEQPACKET` end whose peer is the launcher (only with `--preempt
 /// points`; `proto::plan` has the protocol).
-pub const FD_PLAN: i32 = 3019;
+pub const FD_PLAN: i32 = 3009;
 /// The supervisor's System V shared memory carried from one incarnation to the next after a
 /// process crash (`sup::shm`; a memfd the launcher makes once per run). Not given to guests.
 pub const FD_SHM: i32 = 3023;

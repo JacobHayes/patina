@@ -1,6 +1,6 @@
 # Evidence: wall time per run, native against patina, with syscalls (traps) and switches per run,
 # for all four runtimes. Median (min-max) of 5 runs each; patina runs are seeds 1-5, faults off;
-# native runs are the same command in a bwrap sandbox shaped like patina's (lib.inc `native`), not
+# native runs are the same command in the sandbox a run gets (lib.inc `native`), not
 # pinned. Runs that do not end ok are reported, not timed.
 #@ tier=evidence budget=600 slots=8
 . "$(dirname "$0")/lib.inc"

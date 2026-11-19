@@ -1,12 +1,13 @@
-//! The launcher: one sandbox per incarnation, descriptors inherited at the
-//! hidden numbers, pinning and `ADDR_NO_RANDOMIZE` set before bwrap. `PR_SET_TSC` is set by the
-//! runtime, not here: the host's glibc executes `rdtsc` at start-up, so bwrap and the supervisor
-//! would die of SIGSEGV if it were set before them.
+//! The launcher: one sandbox per incarnation (`sandbox`), descriptors inherited at the hidden
+//! numbers, pinning and `ADDR_NO_RANDOMIZE` set before the sandbox's keeper starts. `PR_SET_TSC`
+//! is set by the runtime, not here: the host's glibc executes `rdtsc` at start-up, so the
+//! supervisor would die of SIGSEGV if it were set before it.
 
 use crate::cli::Res;
 use crate::config::Opts;
 use crate::outcome::Verdict;
 use crate::result::RunEnd;
+use crate::sandbox::{self, Op};
 use crate::sys::*;
 use proto::ctl::{
     Config, Ctl, CTL_SIZE, TM_COPIED, TM_EXPORTED, TM_FINISH, TM_FIRST_HELLO, TM_MAIN_EXIT,
@@ -18,9 +19,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::Ordering::*;
 
 /// The in-guest runtime, built by `build.rs`.
@@ -43,7 +43,7 @@ pub fn cache_dir() -> PathBuf {
 /// The runtime the sandbox executes: the file `PATINA_RT` names (runtime development), else
 /// the embedded copy written once to `$XDG_CACHE_HOME/patina/rt-<hash>` (default
 /// `~/.cache`, else the temporary directory) and checked against the embedded bytes on every
-/// open. A file, not a memfd: AppArmor's bwrap profile (Ubuntu) refuses to execute a memfd.
+/// open. A file, not a memfd: some LSM policies refuse to execute a memfd.
 pub fn rt_file() -> Res<File> {
     if let Some(p) = std::env::var_os("PATINA_RT") {
         return File::open(&p)
@@ -94,18 +94,6 @@ pub fn default_cpu() -> usize {
     a[std::process::id() as usize % a.len()]
 }
 
-/// A descriptor bwrap reads a generated file from (`--ro-bind-data`): a memfd at offset 0.
-fn data_fd(data: &[u8]) -> Res<OwnedFd> {
-    let name = CString::new("patina-etc").unwrap();
-    let fd = cvt_i(unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC) })
-        .map_err(|e| format!("memfd: {e}"))?;
-    write_fd(fd, data).map_err(|e| format!("memfd write: {e}"))?;
-    if unsafe { libc::lseek(fd, 0, libc::SEEK_SET) } != 0 {
-        return Err("memfd seek".into());
-    }
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
-}
-
 /// The files and directories under /etc the sandbox makes (`etc_files` and the links below).
 pub const GENERATED_ETC: [&str; 7] = [
     "/etc/passwd",
@@ -140,12 +128,139 @@ fn etc_files(home: &str) -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
+/// The sandbox's layout for a run of `o` (`root`: the incarnation's `/in`): the steps in the
+/// order the guest's mount table lists their mounts, the generated files' contents
+/// (`Op::Data`), and the trees the supervisor copies in (`HIDDEN:DST`).
+pub struct Layout {
+    pub ops: Vec<Op>,
+    pub data: Vec<Vec<u8>>,
+    pub copies: Vec<String>,
+}
+
+pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
+    let c = &o.cfg;
+    let work = c.work_path();
+    let size = c.tmpfs_bytes;
+    let ro = |src: String, dst: String| Op::Bind {
+        src,
+        dst,
+        rw: false,
+        dev: false,
+    };
+    let link = |t: &str, l: &str| Op::Symlink {
+        target: t.into(),
+        dst: l.into(),
+    };
+    let tmpfs = |d: &str| Op::Tmpfs {
+        dst: d.into(),
+        size,
+    };
+    let mut ops = vec![
+        Op::Hostname { name: "sim".into() },
+        ro("/usr".into(), "/usr".into()),
+    ];
+    for (l, t) in [
+        ("/bin", "usr/bin"),
+        ("/lib", "usr/lib"),
+        ("/lib64", "usr/lib64"),
+        ("/sbin", "usr/sbin"),
+    ] {
+        ops.push(link(t, l));
+    }
+    ops.push(Op::Dev { dst: "/dev".into() });
+    ops.push(Op::Proc {
+        dst: "/proc".into(),
+    });
+    // /work and /tmp: sandbox tmpfs (fresh, sequential inode numbers, their own virtual
+    // times); programs expect /tmp for temporary files. Not durable.
+    ops.push(tmpfs(work));
+    ops.push(tmpfs("/tmp"));
+    // Generated /etc: the data files below, plus the host's ld.so.cache and localtime
+    // naming UTC. The cache is a copy (a file on the sandbox's root tmpfs), not a bind.
+    let mut etc = etc_files(work);
+    if let Ok(cache) = fs::read("/etc/ld.so.cache") {
+        etc.push(("/etc/ld.so.cache", cache));
+    }
+    ops.push(link("/usr/share/zoneinfo/UTC", "/etc/localtime"));
+    // Debian's alternatives (`/usr/bin/awk` -> `/etc/alternatives/awk` -> gawk); without them
+    // `awk` is "not found". Recreated as symlinks on the root tmpfs, in name order, instead of
+    // a bind of the host directory.
+    if let Ok(rd) = fs::read_dir("/etc/alternatives") {
+        let mut links: Vec<(String, String)> = vec![];
+        for e in rd.flatten() {
+            if let (Ok(t), Some(n)) = (fs::read_link(e.path()), e.file_name().to_str()) {
+                links.push((n.to_string(), t.display().to_string()));
+            }
+        }
+        links.sort();
+        ops.push(Op::Dir {
+            dst: "/etc/alternatives".into(),
+        });
+        for (n, t) in links {
+            ops.push(link(&t, &format!("/etc/alternatives/{n}")));
+        }
+    }
+    // The program, the `:copy` mounts and the incarnation's /in are bound at a hidden place,
+    // and the supervisor copies them into sandbox tmpfs (/guest, the mount points, /work)
+    // before the guest starts: what the guest reads there has the sandbox's own metadata
+    // (inode numbers in copy order, virtual times, tmpfs blocks), not the host's. Other
+    // mounts are read-only binds.
+    let mut copies: Vec<String> = vec![];
+    ops.push(tmpfs("/guest"));
+    // The program's directory, read-only where its path as given leads (no mount covers it),
+    // then the mounts, each where its path leads through the mounts before it.
+    if let (Some(d), Some(g)) = (&o.program.dir, Path::new(&o.program.guest).parent()) {
+        ops.push(ro(
+            d.display().to_string(),
+            crate::config::guest_resolve(&g.display().to_string(), &c.mounts),
+        ));
+    }
+    for (i, m) in c.mounts.iter().enumerate() {
+        let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
+        if !m.copy {
+            ops.push(ro(m.src.display().to_string(), dst));
+            continue;
+        }
+        let hidden = format!("/.patina/copy/{i}");
+        ops.push(ro(m.src.display().to_string(), hidden.clone()));
+        if dst != "/guest" {
+            ops.push(tmpfs(&dst));
+        }
+        copies.push(format!("{hidden}:{dst}"));
+    }
+    if o.program.copied {
+        let name = o.program.guest.trim_start_matches("/guest/");
+        ops.push(ro(
+            o.program.host.display().to_string(),
+            format!("/.patina/prog/{name}"),
+        ));
+        copies.push("/.patina/prog:/guest".into());
+    }
+    if let Some(root) = root {
+        let r =
+            fs::canonicalize(root).map_err(|e| format!("/work from {}: {e}", root.display()))?;
+        ops.push(ro(r.display().to_string(), "/.patina/in".into()));
+    }
+    assert!(etc.len() <= sandbox::MAX_DATA);
+    for (i, (path, _)) in etc.iter().enumerate() {
+        ops.push(Op::Data {
+            index: i,
+            dst: path.to_string(),
+        });
+    }
+    Ok(Layout {
+        ops,
+        data: etc.into_iter().map(|e| e.1).collect(),
+        copies,
+    })
+}
+
 /// Set by `patina verify --vary env` for its changed runs: the launcher's child changes
-/// the process state bwrap and the supervisor inherit before it is normalised (state a caller
+/// the process state the sandbox and the supervisor inherit before it is normalised (state a caller
 /// such as `nice`, `ionice`, `setarch`, `prlimit`, a terminal or a leaked descriptor leaves).
 pub static PERTURB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The perturbation itself, in the launcher's child before bwrap (async-signal-safe).
+/// The perturbation itself, in the launcher's child before the keeper (async-signal-safe).
 unsafe fn perturb_child() {
     // A controlling terminal: a new session that opens a pseudo-terminal.
     libc::setsid();
@@ -453,11 +568,11 @@ fn closed_to_others(p: &Path) -> Option<String> {
     None
 }
 
-/// Run as root, the user namespace bwrap joins (`--userns`), made once per process: the
-/// sandbox's uid and gid 1000 are the host user `root_user` names and nothing else is mapped,
-/// as bwrap's own namespace for an ordinary user is. Without it bwrap, seeing root, would map
-/// host root into the sandbox and cover parts of /proc, and the guest would see who started
-/// the run. `None` for an ordinary user.
+/// Run as root, the user namespace the sandbox's keeper joins (`sandbox::Spec::join_userns`),
+/// made once per process: its uid and gid 0 are the host user `root_user` names and nothing else
+/// is mapped, as in the namespace an ordinary user's keeper makes for itself. The guests' own
+/// namespace, nested in it, is the same for both, so the guest sees the same thing either way
+/// and nothing of who started the run. `None` for an ordinary user.
 pub fn userns() -> Res<Option<i32>> {
     static NS: std::sync::OnceLock<Result<OwnedFd, String>> = std::sync::OnceLock::new();
     let Some((uid, gid)) = root_user() else {
@@ -514,9 +629,9 @@ fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
         let w = |f: &str, v: String| {
             fs::write(format!("/proc/{pid}/{f}"), v).map_err(|e| format!("{f}: {e}"))
         };
-        w("uid_map", format!("1000 {uid} 1\n"))?;
+        w("uid_map", format!("0 {uid} 1\n"))?;
         w("setgroups", "deny".into())?;
-        w("gid_map", format!("1000 {gid} 1\n"))?;
+        w("gid_map", format!("0 {gid} 1\n"))?;
         File::open(format!("/proc/{pid}/ns/user"))
             .map(OwnedFd::from)
             .map_err(|e| format!("ns/user: {e}"))
@@ -526,25 +641,6 @@ fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
         unsafe { libc::waitpid(pid, std::ptr::null_mut(), 0) };
     }
     res
-}
-
-/// bwrap's namespace arguments: every namespace new, the user one made by bwrap, or, as root,
-/// joined from `userns` (descriptor `fd` in bwrap).
-pub fn namespace_args(userns_fd: Option<i32>) -> Vec<String> {
-    match userns_fd {
-        None => vec!["--unshare-all".into()],
-        Some(fd) => [
-            "--userns",
-            &fd.to_string(),
-            "--unshare-ipc",
-            "--unshare-pid",
-            "--unshare-net",
-            "--unshare-uts",
-            "--unshare-cgroup-try",
-        ]
-        .map(String::from)
-        .to_vec(),
-    }
 }
 
 /// The counter event with `--preempt branches`, or why counters cannot be used here: an
@@ -596,7 +692,7 @@ pub fn run_incarnation(
     // guest's own writes (no host filesystem, no preallocation or writeback, no host times),
     // and the guest cannot truncate, chmod, lock or grow a host file through them. The
     // launcher keeps its own references and copies the contents into the run directory when
-    // the sandbox is gone. bwrap's own stdout and stderr (and anything printed before the
+    // the sandbox is gone. The keeper's own stdout and stderr (and anything printed before the
     // supervisor starts) go to `sandbox.log`.
     let stdin_data = match &o.cfg.stdin {
         Some(p) => fs::read(p).map_err(|e| format!("--stdin {}: {e}", p.display()))?,
@@ -686,174 +782,46 @@ pub fn run_incarnation(
         .map_err(|e| format!("pipe: {e}"))?;
     let (outcome_r, outcome_w) = unsafe { (File::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) };
 
-    // Generated /etc files, passed to bwrap as --ro-bind-data descriptors.
+    // The supervisor, executed by the sandbox's PID 1 from the descriptor placed at FD_PATINA.
     let work = c.work_path();
-    let mut etc = etc_files(work);
-
-    // As root, the user namespace is joined from a descriptor at FD_USERNS (closed by the
-    // supervisor with every other one it does not keep).
-    const FD_USERNS: i32 = 3009;
-    let userns = userns()?;
-    let mut args = namespace_args(userns.map(|_| FD_USERNS));
-    args.extend([
-        "--as-pid-1".into(),
-        "--die-with-parent".into(),
-        "--hostname".into(),
-        "sim".into(),
-        // Fixed ids in the user namespace (the launcher's would show), and no
-        // controlling terminal or session of the caller's.
-        "--uid".into(),
-        "1000".into(),
-        "--gid".into(),
-        "1000".into(),
-        "--new-session".into(),
-        "--ro-bind".into(),
-        "/usr".into(),
-        "/usr".into(),
-    ]);
-    for (l, t) in [
-        ("/bin", "usr/bin"),
-        ("/lib", "usr/lib"),
-        ("/lib64", "usr/lib64"),
-        ("/sbin", "usr/sbin"),
-    ] {
-        args.extend([String::from("--symlink"), t.into(), l.into()]);
+    let lay = layout(o, start.root)?;
+    let mut argv = vec![format!("/proc/self/fd/{FD_PATINA}"), "__sup".to_string()];
+    for cp in &lay.copies {
+        argv.extend(["--copy".into(), cp.clone()]);
     }
-    args.extend(["--dev", "/dev", "--proc", "/proc", "--size"].map(String::from));
-    args.push(c.tmpfs_bytes.to_string());
-    args.extend(["--tmpfs".into(), work.into()]);
-    // /tmp: a second sandbox tmpfs (same argument as /work: fresh, sequential inode numbers,
-    // its own virtual times); programs expect it for temporary files. Not durable.
-    args.extend([
-        "--size".into(),
-        c.tmpfs_bytes.to_string(),
-        "--tmpfs".into(),
-        "/tmp".into(),
-    ]);
-    // Generated /etc: the data files below, plus the host's ld.so.cache and localtime
-    // naming UTC. The cache is a copy (a file on the sandbox's root tmpfs), not a bind.
-    if let Ok(cache) = fs::read("/etc/ld.so.cache") {
-        etc.push(("/etc/ld.so.cache", cache));
-    }
-    args.extend([
-        "--symlink".into(),
-        "/usr/share/zoneinfo/UTC".into(),
-        "/etc/localtime".into(),
-    ]);
-    // language runtimes: Debian's alternatives (`/usr/bin/awk` -> `/etc/alternatives/awk` -> gawk); without
-    // them `awk` is "not found". Recreated as symlinks on the root tmpfs, in name order,
-    // instead of a bind of the host directory.
-    if let Ok(rd) = fs::read_dir("/etc/alternatives") {
-        let mut links: Vec<(String, String)> = vec![];
-        for e in rd.flatten() {
-            if let (Ok(t), Some(n)) = (fs::read_link(e.path()), e.file_name().to_str()) {
-                links.push((n.to_string(), t.display().to_string()));
-            }
-        }
-        links.sort();
-        args.extend(["--dir".into(), "/etc/alternatives".into()]);
-        for (n, t) in links {
-            args.extend(["--symlink".into(), t, format!("/etc/alternatives/{n}")]);
-        }
-    }
-    // The program, the `:copy` mounts and the incarnation's /in are bound at a hidden place,
-    // and the supervisor copies them into sandbox tmpfs (/guest, the mount points, /work)
-    // before the guest starts: what the guest reads there has the sandbox's own metadata
-    // (inode numbers in copy order, virtual times, tmpfs blocks), not the host's. Other
-    // mounts are read-only binds.
-    let mut copies: Vec<String> = vec![];
-    args.extend([
-        "--size".into(),
-        c.tmpfs_bytes.to_string(),
-        "--tmpfs".into(),
-        "/guest".into(),
-    ]);
-    // The program's directory, read-only where its path as given leads (no mount covers it),
-    // then the mounts, each where its path leads through the mounts before it.
-    if let (Some(d), Some(g)) = (&o.program.dir, Path::new(&o.program.guest).parent()) {
-        args.extend([
-            "--ro-bind".into(),
-            d.display().to_string(),
-            crate::config::guest_resolve(&g.display().to_string(), &c.mounts),
-        ]);
-    }
-    for (i, m) in c.mounts.iter().enumerate() {
-        let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
-        if !m.copy {
-            args.extend(["--ro-bind".into(), m.src.display().to_string(), dst]);
-            continue;
-        }
-        let hidden = format!("/.patina/copy/{i}");
-        args.extend([
-            "--ro-bind".into(),
-            m.src.display().to_string(),
-            hidden.clone(),
-        ]);
-        if dst != "/guest" {
-            args.extend([
-                "--size".into(),
-                c.tmpfs_bytes.to_string(),
-                "--tmpfs".into(),
-                dst.clone(),
-            ]);
-        }
-        copies.push(format!("{hidden}:{dst}"));
-    }
-    if o.program.copied {
-        let name = o.program.guest.trim_start_matches("/guest/");
-        args.extend([
-            "--ro-bind".into(),
-            o.program.host.display().to_string(),
-            format!("/.patina/prog/{name}"),
-        ]);
-        copies.push("/.patina/prog:/guest".into());
-    }
-    if let Some(root) = start.root {
-        let r =
-            fs::canonicalize(root).map_err(|e| format!("/work from {}: {e}", root.display()))?;
-        args.extend([
-            "--ro-bind".into(),
-            r.display().to_string(),
-            "/.patina/in".into(),
-        ]);
-    }
-    let mut etc_fds = vec![];
-    for (_, data) in &etc {
-        etc_fds.push(data_fd(data)?);
-    }
-    const ETC_FD0: i32 = 3010;
-    // bwrap's data descriptors sit between FD_USERNS and FD_PLAN.
-    assert!(ETC_FD0 + etc.len() as i32 <= FD_PLAN);
-    for (i, (path, _)) in etc.iter().enumerate() {
-        args.extend([
-            "--ro-bind-data".into(),
-            (ETC_FD0 + i as i32).to_string(),
-            path.to_string(),
-        ]);
-    }
-    args.extend(["--clearenv".into(), "--chdir".into(), work.into()]);
-    args.push(format!("/proc/self/fd/{FD_PATINA}"));
-    args.push("__sup".into());
-    for cp in copies {
-        args.extend(["--copy".into(), cp]);
-    }
-    args.extend(["--exe".into(), o.program.guest.clone()]);
+    argv.extend(["--exe".into(), o.program.guest.clone()]);
     for e in &c.env {
-        args.extend(["--env".into(), e.clone()]);
+        argv.extend(["--env".into(), e.clone()]);
     }
     // Only restarted incarnations get it: incarnation 0 must match a run without --crash
     // byte for byte up to the crash (the environment shapes the initial stack).
     if start.k > 0 {
-        args.extend(["--env".into(), format!("PATINA_INCARNATION={}", start.k)]);
+        argv.extend(["--env".into(), format!("PATINA_INCARNATION={}", start.k)]);
     }
-    args.push("--".into());
+    argv.push("--".into());
     // argv[0]: a copied program is named by where it runs from.
-    args.push(if o.program.copied {
+    argv.push(if o.program.copied {
         o.program.guest.clone()
     } else {
         c.cmd[0].clone()
     });
-    args.extend(c.cmd[1..].iter().cloned());
+    argv.extend(c.cmd[1..].iter().cloned());
+    // As root, the user namespace is joined from a descriptor at FD_USERNS.
+    let userns = userns()?;
+    let spec = sandbox::Spec {
+        ops: lay.ops,
+        join_userns: userns.is_some(),
+        chdir: work.into(),
+        env: vec![],
+        argv,
+        exe: None,
+        after: sandbox::After::Exec,
+    };
+    let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
+    let mut etc_fds = vec![];
+    for d in &lay.data {
+        etc_fds.push(sandbox::data_fd(d)?);
+    }
 
     // Descriptors to place at fixed numbers in the child.
     let mut place: Vec<(i32, i32)> = vec![
@@ -871,10 +839,11 @@ pub fn run_incarnation(
         (start.shm, FD_SHM),
     ];
     for (i, f) in etc_fds.iter().enumerate() {
-        place.push((f.as_raw_fd(), ETC_FD0 + i as i32));
+        place.push((f.as_raw_fd(), sandbox::FD_DATA0 + i as i32));
     }
+    place.push((spec_fd.as_raw_fd(), sandbox::FD_SPEC));
     if let Some(fd) = userns {
-        place.push((fd, FD_USERNS));
+        place.push((fd, sandbox::FD_USERNS));
     }
     // The counter broker's sandbox end.
     let (pmu_sandbox, pmu_ours) = match pmu_ev {
@@ -898,80 +867,38 @@ pub fn run_incarnation(
     if let Some(f) = &plan_sandbox {
         place.push((f.as_raw_fd(), FD_PLAN));
     }
-    let pmu_on = pmu_ev.is_some();
-    assert!(place.len() <= 32);
     let personality = !no_personality;
     let perturb = PERTURB.load(Relaxed);
 
-    let mut cmd = Command::new("bwrap");
-    cmd.args(&args)
-        .stdin(Stdio::null())
+    let mut cmd = sandbox::command(place, move || unsafe {
+        if perturb {
+            perturb_child();
+        }
+        // The whole persona is set, not a flag added to the caller's (setarch -R/-X
+        // and friends are inherited). umask, limits, signals and the rest: sup::inherit.
+        let pers = if personality {
+            libc::ADDR_NO_RANDOMIZE as libc::c_ulong
+        } else {
+            0
+        };
+        if libc::personality(pers) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut set: libc::cpu_set_t = std::mem::zeroed();
+        libc::CPU_SET(cpu, &mut set);
+        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    });
+    cmd.stdin(Stdio::null())
         .stdout(sandbox_log.try_clone().map_err(|e| e.to_string())?)
         .stderr(sandbox_log.try_clone().map_err(|e| e.to_string())?);
-    unsafe {
-        cmd.pre_exec(move || {
-            if perturb {
-                perturb_child();
-            }
-            // An ignored SIGCHLD, inherited across exec, makes bwrap 0.9 wait forever for its
-            // child (its children are reaped by the kernel). The other dispositions the guests
-            // see are set by sup::inherit.
-            libc::signal(libc::SIGCHLD, libc::SIG_DFL);
-            // Room for the fixed descriptor numbers (3000-3023): the soft limit is raised to
-            // the hard one here; the supervisor sets the limit the guests run under.
-            let mut lim: libc::rlimit = std::mem::zeroed();
-            libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim);
-            lim.rlim_cur = lim.rlim_max;
-            libc::setrlimit(libc::RLIMIT_NOFILE, &lim);
-            // Move every source out of the target range first, then place.
-            let mut tmp = [(0i32, 0i32); 32];
-            for (i, &(src, dst)) in place.iter().enumerate() {
-                let t = libc::fcntl(src, libc::F_DUPFD_CLOEXEC, 3100);
-                if t < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                tmp[i] = (t, dst);
-            }
-            for &(t, dst) in &tmp[..place.len()] {
-                if libc::dup2(t, dst) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-            }
-            // No capability may follow bwrap into the sandbox (file capabilities are
-            // not inherited by exec; ambient ones would be).
-            if pmu_on
-                && libc::prctl(
-                    libc::PR_CAP_AMBIENT,
-                    libc::PR_CAP_AMBIENT_CLEAR_ALL,
-                    0,
-                    0,
-                    0,
-                ) != 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            // The whole persona is set, not a flag added to the caller's (setarch -R/-X
-            // and friends are inherited). umask, limits, signals and the rest: sup::inherit.
-            let pers = if personality {
-                libc::ADDR_NO_RANDOMIZE as libc::c_ulong
-            } else {
-                0
-            };
-            if libc::personality(pers) < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            let mut set: libc::cpu_set_t = std::mem::zeroed();
-            libc::CPU_SET(cpu, &mut set);
-            if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
     let t_spawn = mono_ns();
-    let mut child = cmd.spawn().map_err(|e| format!("bwrap: {e}"))?;
+    let mut child = cmd.spawn().map_err(|e| format!("sandbox: {e}"))?;
     drop(outcome_w);
     drop(etc_fds);
+    drop(spec_fd);
     drop(pmu_sandbox);
     drop(plan_sandbox);
     let plan_broker = match (plan_ours, &start.planner) {
@@ -1002,7 +929,9 @@ pub fn run_incarnation(
         let _ = outcome_r.read_to_string(&mut verdict_text);
     }
     let t_verdict = mono_ns();
-    let status = child.wait().map_err(|e| format!("wait bwrap: {e}"))?;
+    let status = child
+        .wait()
+        .map_err(|e| format!("wait for the sandbox: {e}"))?;
     if waited == Waited::Terminated {
         // Stopped (a sweep interrupted): the sandbox is gone; no result is written.
         exit_terminated();
@@ -1046,7 +975,17 @@ pub fn run_incarnation(
             .to_string();
         Verdict::new(
             "infra",
-            format!("no verdict from the supervisor (bwrap {status}): {last}"),
+            format!(
+                "no verdict from the supervisor (sandbox {status}): {last}{}",
+                // The keeper's or PID 1's own refusal: the host's to fix.
+                if last.starts_with("patina")
+                    && (last.contains("(os error 1)") || last.contains("(os error 13)"))
+                {
+                    " (`patina doctor` says what this host needs)"
+                } else {
+                    ""
+                }
+            ),
         )
     });
     if verdict.class == "failed" {
@@ -1229,11 +1168,11 @@ pub(crate) fn mono_ns() -> u64 {
 
 /// Wait until `f` is readable (the supervisor's verdict, or its end) or `deadline` passes.
 /// False when the deadline passed.
-/// End a sandbox so that its processes are gone when bwrap is reaped: kill its PID 1 (the
-/// supervisor, bwrap's child), not bwrap. The kernel ends every process of a PID namespace whose
-/// first process exits, and that process's exit completes only once they are all gone; bwrap,
-/// its parent, reaps it and exits. Killing bwrap instead leaves the supervisor to its
-/// parent-death signal, and the guests dying after `wait` returned.
+/// End a sandbox so that its processes are gone when its keeper is reaped: kill its PID 1 (the
+/// supervisor, the keeper's child), not the keeper. The kernel ends every process of a PID
+/// namespace whose first process exits, and that process's exit completes only once they are all
+/// gone; the keeper, its parent, reaps it and exits. Killing the keeper instead leaves the
+/// supervisor to its parent-death signal, and the guests dying after `wait` returned.
 fn end_sandbox(child: &mut std::process::Child) {
     let pid = child.id();
     for _ in 0..2500 {
@@ -1247,7 +1186,7 @@ fn end_sandbox(child: &mut std::process::Child) {
                 }
                 return;
             }
-            // bwrap has not started its child yet: look again.
+            // The keeper has not started PID 1 yet: look again.
             Ok(_) => std::thread::sleep(std::time::Duration::from_millis(2)),
             Err(_) => break,
         }
@@ -1267,3 +1206,51 @@ pub fn replay_perturb() -> u64 {
 
 /// Set by `replay` when `PATINA_TEST_REPLAY_PERTURB` is set.
 pub static PERTURB_DRAWS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `patina __native [run options] -- CMD ARGS...`: CMD run natively (no runtime, no supervisor)
+/// in the sandbox a run with those options gets, after the copies the supervisor would make and
+/// with its environment: the twin a check compares a run against. Exits with CMD's status.
+pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
+    let a = crate::cli::parse(crate::cli::Cmd::Run, args)?;
+    let o = crate::config::resolve(&a)?.opts()?;
+    let c = &o.cfg;
+    let lay = layout(&o, c.work.as_deref())?;
+    let mut env: Vec<String> = crate::sup::BASE_ENV.iter().map(|s| s.to_string()).collect();
+    for kv in &c.env {
+        let k = kv.split('=').next().unwrap_or("");
+        env.retain(|e| e.split('=').next() != Some(k));
+        env.push(kv.clone());
+    }
+    let mut argv = vec![if o.program.copied {
+        o.program.guest.clone()
+    } else {
+        c.cmd[0].clone()
+    }];
+    argv.extend(c.cmd[1..].iter().cloned());
+    let copies = lay
+        .copies
+        .iter()
+        .filter_map(|cp| cp.split_once(':'))
+        .map(|(h, d)| (h.to_string(), d.to_string()))
+        .collect();
+    let spec = sandbox::Spec {
+        ops: lay.ops,
+        join_userns: false,
+        chdir: c.work_path().into(),
+        env,
+        argv,
+        exe: Some(o.program.guest.clone()),
+        after: sandbox::After::Native {
+            copies,
+            work: Some(c.work_path().into()),
+        },
+    };
+    // The supervisor's umask, whatever the caller's.
+    let r = sandbox::ready(spec, &lay.data, || {
+        unsafe { libc::umask(0o022) };
+        Ok(())
+    })?;
+    let mut cmd = r.cmd;
+    let st = cmd.status().map_err(|e| format!("sandbox: {e}"))?;
+    Ok(std::process::ExitCode::from(st.code().unwrap_or(1) as u8))
+}

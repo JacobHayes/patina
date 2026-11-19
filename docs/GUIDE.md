@@ -1844,7 +1844,7 @@ per requirement, and prints the fix for anything missing:
 
 | `patina doctor` line | x86_64 | arm64 |
 |---|---|---|
-| `bwrap`, `user namespaces`, `seccomp`, `personality`, `sandbox run` | bubblewrap on `PATH` and unprivileged user namespaces | the same |
+| `user namespaces`, `seccomp`, `personality`, `sandbox run` | unprivileged user namespaces (below) | the same |
 | the clock trap | `rdtsc trap` | `counter-timer trap`: Linux 6.12 or newer |
 | `page size`, `address space` | | 4 KiB pages, 48-bit addresses |
 | `one CPU model` | | every CPU a run may use is one model (on a big.LITTLE machine, choose them with `taskset`) |
@@ -1852,6 +1852,24 @@ per requirement, and prints the fix for anything missing:
 | `pointer authentication` | | its keys are disabled for programs under Patina |
 | `spin probes` (not required) | code writes through `/proc/self/mem`; soft-dirty bits | code writes through `/proc/self/mem`; userfaultfd write protection |
 | `branch counters` (optional) | AMD Zen 5 with its PMU exposed, and `CAP_PERFMON` | not supported |
+
+Patina makes its own sandbox (ARCHITECTURE.md, "The sandbox"), so it needs no other program,
+only a kernel that lets an ordinary user make a user namespace:
+
+| Host | What it needs |
+|---|---|
+| Debian 11 and later, Fedora, Arch, most others | nothing |
+| Ubuntu 24.04 and later | an AppArmor profile for the patina executable, once, as root: `patina doctor` prints the command; the Debian package and `install.sh` (when you agree) install it. Or `sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`, which lifts the restriction for every program |
+| Ubuntu 23.10 and earlier | nothing |
+| an older kernel with `kernel.unprivileged_userns_clone=0` | that sysctl set to 1 |
+| root | nothing |
+| a Docker or Podman container | three options (below); and if the host is Ubuntu 24.04 or later and patina runs as an ordinary user in the container, the host's fix too: the profile installed on the host for the path patina has in the container, or the host's sysctl |
+| GitHub's `ubuntu-24.04` and `ubuntu-24.04-arm` runners | the sysctl line ([CI](#ci-on-github-actions)) |
+
+The profile attaches to one path (`patina doctor --print-apparmor-profile` prints it for the
+executable that runs it). It admits whatever file is at that path, so install patina where only
+root can write, such as `/usr/local/bin` (`install.sh --prefix /usr/local`, run as root) or the
+package's `/usr/bin`, rather than under your home directory.
 
 Where `spin probes` is off, programs still run; a spin-wait with no hint instruction in its loop
 ends `compute-stall`, and the stall's message says why the probe was off.
@@ -1902,8 +1920,8 @@ pages) and Ubuntu 24.04's original 6.8 kernel are refused.
 
 ## CI on GitHub Actions
 
-Patina runs on the `ubuntu-24.04` runner after two setup lines. A job that sweeps a Rust
-program:
+Patina runs on the `ubuntu-24.04` runner after one setup line, which lets programs make
+user namespaces. A job that sweeps a Rust program:
 
 ```yaml
 jobs:
@@ -1911,9 +1929,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - run: |
-          sudo apt-get install -y bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: curl -fsSL https://github.com/JacobHayes/patina/releases/download/v0.15.0/install.sh | sh -s -- --version 0.15.0
       - run: cargo build && patina sweep --seeds 1..200 -- target/debug/myprog
 ```
@@ -1922,27 +1938,28 @@ The install ends with `patina doctor`; on that runner it prints (in part):
 
 <!-- no-run doctor-x86_64-runner: printed on the hosted ubuntu-24.04 runner; its CPU, kernel and times are that host's -->
 ```text
-ok    bwrap                              /usr/bin/bwrap (bubblewrap 0.9.0)
-ok    user namespaces                    bwrap creates the sandbox (user, pid, net, mount namespaces; tmpfs)
-ok    sandbox run                        a run of /usr/bin/true is ok (166 ms)
-off   branch counters (pmu, optional)    not supported on this CPU, GenuineIntel family 0x6 model 0xad (supported: AMD Zen 5)
+ok    user namespaces                    patina makes the sandbox (user, pid, net, mount, IPC, UTS namespaces; tmpfs)
+ok    sandbox run                        a run of /usr/bin/true is ok (12 ms)
+off   branch counters (pmu, optional)    not supported on this CPU, GenuineIntel family 0x6 model 0xad (supported: AMD family 0x1a (Zen 5) and Arm Neoverse N2)
 info  cpu_model                          Intel(R) Xeon(R) 6975P-C
 info  kernel                             7.0.0-1014-aws
 this host can run patina
 ```
 
-On arm64 (from 0.9.0, the first release with an arm64 binary), `runs-on: ubuntu-24.04-arm`
-takes the same two setup lines; `ubuntu-26.04-arm` needs neither (its bubblewrap is installed
-and allowed). On `ubuntu-24.04-arm`, `patina doctor` prints (in part):
+Instead of the sysctl, installing the release's Debian package (`sudo apt-get install -y
+./patina_X.Y.Z_amd64.deb`) installs `/usr/bin/patina` with its AppArmor profile, and the
+restriction can stay on. On arm64 (from 0.9.0, the first release with an arm64 binary),
+`runs-on: ubuntu-24.04-arm` takes the same setup line. On `ubuntu-24.04-arm`, `patina doctor`
+prints (in part):
 
 <!-- no-run doctor-arm64-runner: printed on the hosted ubuntu-24.04-arm runner; its CPU, kernel and times are that host's -->
 ```text
 ok    counter-timer trap                 PR_SET_TSC makes the counter-timer registers fault
 ok    one CPU model                      cpus 0-3: MIDR 0x410fd490
 ok    signal context                     records: FP/SIMD, SVE
-ok    sandbox run                        a run of /usr/bin/true is ok (47 ms)
+ok    sandbox run                        a run of /usr/bin/true is ok (16 ms)
 ok    spin probes                        code writes through /proc/self/mem; userfaultfd write protection tracks written pages
-off   branch counters (pmu, optional)    not supported on arm64
+off   branch counters (pmu, optional)    supported, but needs CAP_PERFMON: perf_event_open: Permission denied (os error 13)
 info  kernel                             7.0.0-1017-azure
 this host can run patina
 ```
@@ -1957,19 +1974,28 @@ Run as root, Patina gives the sandbox's user the uid of the user sudo was run by
 `nobody`): the guest sees what it sees run as that user, with the same digest. A program or
 mount the sandbox's user cannot read is refused before the run, naming the path.
 
-A container's default profile blocks the namespaces bwrap needs, as root or not. In Docker
-(debian:12 with bubblewrap), `patina doctor` there says:
+A container's default profile blocks the namespaces Patina makes, as root or not. In Docker
+(debian:12), `patina doctor` there says:
 
 <!-- no-run doctor-container: needs Docker and root -->
 ```text
 FAIL  user namespaces                    running as root, the sandbox's user namespace cannot be made (unshare: Operation not permitted (os error 1))
-                                         fix: in a container: run it with --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined (or --privileged)
+                                         fix: in a container: run it with --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined
 FAIL  personality                        errno 1 (Operation not permitted (os error 1))
                                          fix: the process runs under a restrictive seccomp profile: in Docker, --security-opt seccomp=unconfined
 ```
 
 With those three options, root and an ordinary user in the container both pass `patina doctor`
-and get the same digest; `seccomp=unconfined` alone still fails at bwrap's mounts.
+and get the same digest; `seccomp=unconfined` alone still fails at the sandbox's mounts.
+
+On a host running Ubuntu 24.04 or later, the host's AppArmor restriction applies inside the
+container too: root in the container passes with the three options, an ordinary user does not.
+For an ordinary user, fix it on the host:
+install the profile there for the path patina has inside the container (`patina doctor
+--print-apparmor-profile` in the container prints it; copy it to the host's
+`/etc/apparmor.d/patina` and load it with `sudo apparmor_parser -r /etc/apparmor.d/patina`), or
+set the host's `kernel.apparmor_restrict_unprivileged_userns=0`. `patina doctor` in the
+container names both.
 
 ## Moving from 0.5
 

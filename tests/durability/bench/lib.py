@@ -72,7 +72,7 @@ def patina_run(out, args, guest=GUESTS, opts=(), env=None, rt=None, timeout=900,
 
 
 def native_run(out, args, guest=GUESTS, sandbox=True, env=None, timeout=900):
-    """One native run, pinned to CPU; in a bwrap sandbox shaped like patina's unless sandbox=False.
+    """One native run, pinned to CPU; in the sandbox a run gets (native.sh) unless sandbox=False.
     Returns (wall ms, exit status)."""
     shutil.rmtree(out, ignore_errors=True)
     os.makedirs(out, exist_ok=True)

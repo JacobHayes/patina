@@ -104,16 +104,13 @@ netf() {
 # stats RUN: per-run numbers from result.json and the boundary log (lib/stats.py).
 stats() { python3 -I "$HERE/lib/stats.py" "$PATINA" "$@"; }
 
-# native OUT cmd...: the same command outside patina, in a bwrap sandbox shaped like patina's (the
-# guest directory at /guest, /usr, a fresh PID namespace, empty /tmp and /work, cwd /work).
-# stdout to OUT, stderr to OUT.err. Prints the wall time in ms.
+# native OUT GUESTDIR cmd...: the same command outside the runtime, in the sandbox a run gets
+# (`patina __native`, GUESTDIR at /guest). stdout to OUT, stderr to OUT.err. Prints the wall
+# time in ms.
 native() {
     out=$1; guest=$2; shift 2
     t0=$(date +%s%N)
-    timeout 300 bwrap --tmpfs / --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
-        --symlink usr/lib64 /lib64 --symlink usr/sbin /sbin --ro-bind /etc /etc --ro-bind "$guest" /guest \
-        --proc /proc --dev /dev --tmpfs /tmp --tmpfs /work --chdir /work --unshare-pid --die-with-parent \
-        --setenv HOME /work -- "$@" >"$out" 2>"$out.err" || echo "native exit $?" >>"$out.err"
+    timeout 300 "$PATINA" __native --mount "$guest:/guest" -- "$@" >"$out" 2>"$out.err" || echo "native exit $?" >>"$out.err"
     t1=$(date +%s%N)
     echo $(((t1 - t0) / 1000000))
 }

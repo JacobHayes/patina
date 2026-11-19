@@ -85,7 +85,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Doctor,
         name: "doctor",
-        usage: "patina doctor",
+        usage: "patina doctor [--print-apparmor-profile]",
         help: "check the host; say what is missing and the command that fixes it",
     },
 ];
@@ -447,6 +447,13 @@ pub const FLAGS: &[Flag] = &[
         "text",
         "output format (default from PATINA_FORMAT); json prints result.json",
         ALL,
+    ),
+    flag(
+        "--print-apparmor-profile",
+        "",
+        "",
+        "print the AppArmor profile that lets this patina executable make its sandbox where Ubuntu restricts user namespaces (install it as root)",
+        &[Cmd::Doctor],
     ),
     flag("--help", "", "", "this help", ALL),
 ];

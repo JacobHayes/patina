@@ -58,7 +58,7 @@ fn tmpfs_hint(ctl: &Ctl, e: &str) -> String {
 
 /// The guest's fixed environment; `--env` adds to it. `PATINA=1` tells a program it runs
 /// under Patina.
-const BASE_ENV: [&str; 5] = [
+pub(crate) const BASE_ENV: [&str; 5] = [
     "PATH=/guest:/usr/local/bin:/usr/bin:/bin",
     "HOME=/work",
     "LANG=C.UTF-8",
@@ -72,7 +72,7 @@ mod contain;
 pub mod crash;
 #[allow(dead_code)]
 pub mod futex;
-mod inherit;
+pub mod inherit;
 pub mod io;
 pub mod proc;
 #[allow(dead_code)]
@@ -942,12 +942,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if cmd.is_empty() {
         return Err("__sup: no command".into());
     }
-    // Containment when the launcher is killed: die with the parent (bwrap outside the
-    // PID namespace, which dies with the launcher); the kernel then kills every process of the
-    // namespace. bwrap's --die-with-parent does not reach this process (measured: after a
-    // SIGKILL of the launcher, the supervisor and its guests lived on, reparented to the host's
-    // init). If the launcher was already gone before the prctl, the outcome pipe says so (its
-    // only reader is the launcher; a pipe's write end polls POLLERR without readers).
+    // Containment when the launcher is killed: die with the parent (the sandbox's keeper,
+    // outside the PID namespace, which dies with the launcher); the kernel then kills every
+    // process of the namespace. PID 1 set the same signal before executing this (`sandbox`);
+    // set again here, where it is seen. If the launcher was already gone, the outcome pipe says
+    // so (its only reader is the launcher; a pipe's write end polls POLLERR without readers).
     unsafe {
         libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL, 0, 0, 0);
         let mut p = libc::pollfd {
@@ -961,7 +960,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     }
     unsafe {
         // The guest's stdio memfds become 0, 1 and 2 of the supervisor, and so of every
-        // guest process (bwrap's own stdio, a host file, is dropped here).
+        // guest process (the keeper's stdio, a host file, is dropped here).
         for (from, to) in [(FD_STDIN, 0), (FD_STDOUT, 1), (FD_STDERR, 2)] {
             if libc::dup2(from, to) != to {
                 return Err(format!(
@@ -970,7 +969,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
                 ));
             }
         }
-        // Every other inherited descriptor, from the launcher's caller or bwrap.
+        // Every other inherited descriptor, from the launcher's caller or the keeper.
         inherit::close_inherited();
     }
     let ctl_ptr = map_shared(FD_CTL, CTL_SIZE).map_err(|e| format!("map ctl: {e}"))?;

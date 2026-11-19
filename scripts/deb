@@ -1,0 +1,62 @@
+#!/bin/sh
+# scripts/deb BINARY VERSION OUTDIR: a Debian package of the static patina BINARY, for Debian
+# and Ubuntu: /usr/bin/patina, and /etc/apparmor.d/patina, the profile that lets that path make
+# its sandbox's user namespace where Ubuntu restricts them (24.04 and later), loaded on install
+# where AppArmor is enabled. Prints the package's path. The release workflow runs it.
+set -eu
+[ $# = 3 ] || { echo "usage: scripts/deb BINARY VERSION OUTDIR" >&2; exit 2; }
+bin=$1; v=${2#v}; out=$3
+case $v in *[!0-9A-Za-z.+~-]* | '') echo "deb: not a version: $2" >&2; exit 2 ;; esac
+case $(file -b "$bin") in
+  *x86-64*) arch=amd64 ;;
+  *aarch64*) arch=arm64 ;;
+  *) echo "deb: $bin is not an x86-64 or aarch64 executable" >&2; exit 1 ;;
+esac
+root=$(cd "$(dirname "$0")/.." && pwd)
+stage=$(mktemp -d)
+trap 'rm -rf "${stage:?}"' EXIT
+pkg=$stage/pkg
+mkdir -p "$pkg/DEBIAN" "$pkg/usr/bin" "$pkg/etc/apparmor.d" "$pkg/usr/share/doc/patina"
+install -m 755 "$bin" "$pkg/usr/bin/patina"
+# The profile the binary prints for itself, for the path it is installed at.
+here=$(realpath "$pkg/usr/bin/patina")
+"$pkg/usr/bin/patina" doctor --print-apparmor-profile >"$stage/profile"
+grep -qF "\"$here\"" "$stage/profile" || { echo "deb: the profile does not name $here" >&2; exit 1; }
+awk -v from="$here" -v to=/usr/bin/patina '{ o = ""; while ((i = index($0, from))) { o = o substr($0, 1, i - 1) to; $0 = substr($0, i + length(from)) } print o $0 }' \
+  "$stage/profile" >"$pkg/etc/apparmor.d/patina"
+cp "$root/LICENSE-APACHE" "$pkg/usr/share/doc/patina/copyright"
+cat >"$pkg/DEBIAN/control" <<CONTROL
+Package: patina
+Version: $v
+Architecture: $arch
+Maintainer: Jacob Hayes <jrh@jacobhayes.dev>
+Section: devel
+Priority: optional
+Homepage: https://github.com/JacobHayes/patina
+Installed-Size: $(du -sk "$pkg/usr" | cut -f1)
+Description: deterministic simulation testing for Linux programs
+ Runs an unmodified Linux program on a deterministic schedule, clock and
+ environment, so a failure found once replays exactly.
+CONTROL
+echo /etc/apparmor.d/patina >"$pkg/DEBIAN/conffiles"
+cat >"$pkg/DEBIAN/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+if [ "$1" = configure ] && [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+  apparmor_parser -r -T -W /etc/apparmor.d/patina || echo "patina: could not load /etc/apparmor.d/patina; run patina doctor" >&2
+fi
+POSTINST
+cat >"$pkg/DEBIAN/postrm" <<'POSTRM'
+#!/bin/sh
+set -e
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+  if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+    printf 'profile patina {}\n' | apparmor_parser -R 2>/dev/null || true
+  fi
+fi
+POSTRM
+chmod 755 "$pkg/DEBIAN/postinst" "$pkg/DEBIAN/postrm"
+mkdir -p "$out"
+deb=$out/patina_${v}_$arch.deb
+dpkg-deb --root-owner-group -Zxz --build "$pkg" "$deb" >/dev/null
+echo "$deb"

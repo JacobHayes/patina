@@ -3,17 +3,17 @@
 //! Everything a process passes to a child across fork and execve, enumerated from fork(2)
 //! ("the child inherits"), execve(2) ("preserved"), credentials(7), capabilities(7),
 //! sched(7), prctl(2) (settings documented as inherited) and proc(5) (per-process files a
-//! process can write). Each item is either set here, set by the launcher or bwrap, checked
+//! process can write). Each item is either set here, set by the launcher or the sandbox, checked
 //! (a value that cannot be honoured ends the run as `infra`), not inherited through the
-//! launcher's fork and bwrap's exec, or only able to change timing (which is virtual) with
+//! launcher's fork and the keeper's exec, or only able to change timing (which is virtual) with
 //! the guest's view of it fixed by its row.
 //!
 //! | item                               | treatment                                                 |
 //! |------------------------------------|-----------------------------------------------------------|
 //! | open descriptors                   | supervisor closes all but 0-2 and the hidden 3000-3006    |
 //! | stdin, stdout, stderr              | sandbox memfds (launcher)                                 |
-//! | environment                        | bwrap `--clearenv`; the supervisor's fixed list           |
-//! | working directory                  | bwrap `--chdir /work`                                     |
+//! | environment                        | `PWD` only (sandbox); the supervisor's fixed list         |
+//! | working directory                  | the work path (sandbox)                                   |
 //! | umask                              | 022 (here)                                                |
 //! | signal dispositions, mask          | default, empty (here and in the first guest's fork child) |
 //! | pending signals, itimers, alt stack| not inherited by fork / cleared by execve                 |
@@ -25,15 +25,15 @@
 //! | THP disable                        | 0 (here)                                                  |
 //! | KSM merge, MDWE                    | checked: must be off                                      |
 //! | seccomp filters                    | an outer one is kept; the runtime's filter stacks on it   |
-//! | uid, gid                           | 1000/1000 in the user namespace (bwrap `--uid`/`--gid`)   |
+//! | uid, gid                           | 1000/1000 in the guests' user namespace (sandbox)         |
 //! | the launcher's own uid             | as root, made by the launcher (`launch::userns`)          |
 //! | supplementary groups               | cannot be dropped: getgroups is virtual                   |
-//! | capabilities, ambient, bounding    | bwrap; cleared in the first guest's fork child, checked   |
-//! | securebits, no_new_privs           | checked 0; no_new_privs set by bwrap and the fork child   |
-//! | session, process group, terminal   | bwrap `--new-session`; no controlling terminal (checked)  |
-//! | hostname, domain name              | "sim" (bwrap); the domain name reads "(none)" (uname row) |
+//! | capabilities, ambient, bounding    | none (sandbox); cleared in the first guest's fork child   |
+//! | securebits, no_new_privs           | checked 0; no_new_privs set by the sandbox and fork child |
+//! | session, process group, terminal   | new session (sandbox); no controlling terminal (checked)  |
+//! | hostname, domain name              | "sim" (sandbox); the domain name reads "(none)" (uname)   |
 //! | OOM score adjustment               | 1000 (here)                                               |
-//! | namespaces, cgroup                 | new namespaces (bwrap); the cgroup's limits are the host's|
+//! | namespaces, cgroup                 | new namespaces (sandbox); the cgroup's limits: the host's |
 //! | LSM labels, Landlock domains       | not observable but as refusals; not normalised (residual) |
 //! | speculation control, IO flusher    | timing only                                               |
 //! | keyrings                           | keyctl, add_key, request_key are denied                   |
@@ -137,21 +137,17 @@ pub unsafe fn reset_signals() {
 
 /// Close every descriptor but 0-2 and the hidden ones the supervisor keeps (`FD_CTL..FD_PATINA`,
 /// FD_PATINA itself already closed, the counter and plan brokers' ends `FD_PMU` and `FD_PLAN`,
-/// which every guest runtime uses, and the shared memory carried across incarnations, `FD_SHM`).
+/// which every guest runtime uses, and the shared memory carried across incarnations, `FD_SHM`):
+/// the sandbox's own descriptors (`sandbox::FD_DATA0..=FD_SPEC`) and the stdio ones, already
+/// moved to 0-2, go.
 pub unsafe fn close_inherited() {
-    const _: () = assert!(FD_PMU > FD_PATINA);
+    const _: () = assert!(FD_PMU == FD_PATINA + 1 && FD_PLAN == FD_PMU + 1);
+    const _: () = assert!(FD_SHM > FD_PLAN + 1);
     libc::syscall(libc::SYS_close_range, 3u32, (FD_CTL - 1) as u32, 0u32);
     libc::syscall(
         libc::SYS_close_range,
         FD_PATINA as u32,
-        (FD_PMU - 1) as u32,
-        0u32,
-    );
-    const _: () = assert!(FD_PLAN > FD_PMU + 1 && FD_SHM > FD_PLAN + 1);
-    libc::syscall(
-        libc::SYS_close_range,
-        (FD_PMU + 1) as u32,
-        (FD_PLAN - 1) as u32,
+        FD_PATINA as u32,
         0u32,
     );
     libc::syscall(
@@ -233,7 +229,7 @@ pub fn normalise(tmpfs_bytes: u64) -> Result<(), String> {
         if sb != 0 {
             return Err(format!("inherited securebits {sb:#x}"));
         }
-        // No controlling terminal (bwrap --new-session).
+        // No controlling terminal (the sandbox starts a new session).
         let t = libc::open(
             c"/dev/tty".as_ptr(),
             libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
@@ -247,7 +243,7 @@ pub fn normalise(tmpfs_bytes: u64) -> Result<(), String> {
 }
 
 /// The first guest's fork child, before it runs the runtime (async-signal-safe): signal state
-/// as a new process's, no capabilities and no way to gain any (checked: bwrap gives none, and
+/// as a new process's, no capabilities and no way to gain any (checked: the sandbox gives none, and
 /// its user namespace is nested, so none would reach the sandbox's namespaces anyway).
 pub unsafe fn child() -> bool {
     reset_signals();

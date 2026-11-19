@@ -317,8 +317,8 @@ fn mountinfo(w: &mut W, plain: bool) {
             source = b"host";
             sopts = b"rw";
         }
-        // The root column of a bind names a host path (or bwrap's randomly named temporary
-        // file): show the mount point instead.
+        // The root column of a bind names a host path (or a file on the sandbox's setup
+        // tmpfs): show the mount point instead.
         let root = if fields[3] == b"/" || fields[4] == b"/" {
             &b"/"[..]
         } else {

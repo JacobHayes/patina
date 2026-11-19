@@ -98,7 +98,7 @@ fn read(p: &Path) -> Vec<u8> {
 /// `env`: the launcher's own process state, changed for odd runs and put back for even
 /// ones: working directory, environment variables, umask, ignored and blocked signals,
 /// `RLIMIT_STACK`/`RLIMIT_CORE` soft limits and the `RLIMIT_NOFILE` hard limit. None of it may
-/// reach the guest. Also the state set in the launcher's child before bwrap
+/// reach the guest. Also the state set in the launcher's child before the sandbox
 /// (`launch::PERTURB`): a leaked descriptor, a controlling terminal and session, the persona,
 /// nice, IO priority, scheduling policy, timer slack, THP, OOM adjustment, every soft limit
 /// and more ignored signals.

@@ -21,103 +21,93 @@ fn sysctl(name: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-fn on_path(exe: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH").and_then(|p| {
-        std::env::split_paths(&p)
-            .map(|d| d.join(exe))
-            .find(|f| f.is_file())
-    })
+/// Patina's own executable, as AppArmor names it (the path a profile attaches to).
+fn exe() -> std::path::PathBuf {
+    std::fs::canonicalize("/proc/self/exe").unwrap_or_else(|_| "/proc/self/exe".into())
 }
 
-fn bwrap_found() -> Result<String, (String, String)> {
-    let Some(p) = on_path("bwrap") else {
-        return Err((
-            "bwrap is not on PATH".into(),
-            "install the bubblewrap package (Debian, Ubuntu: sudo apt-get install bubblewrap)"
-                .into(),
-        ));
-    };
-    let v = Command::new(&p)
-        .arg("--version")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
-    Ok(format!("{} ({v})", p.display()))
-}
-
-fn bwrap_sandbox() -> Result<String, (String, String)> {
-    // As root, the user namespace the launcher makes (`launch::userns`).
-    let userns = crate::launch::userns().map_err(|e| {
+/// Make the smallest sandbox and run `true` in it.
+fn sandbox_check() -> Result<String, (String, String)> {
+    let spec = crate::sandbox::minimal(
+        crate::sandbox::After::Native {
+            copies: vec![],
+            work: None,
+        },
+        vec!["/usr/bin/true".into()],
+    );
+    let r = crate::sandbox::ready(spec, &[], || Ok(())).map_err(|e| {
         let e = e.split(": `patina doctor`").next().unwrap_or_default();
         (e.to_string(), namespace_fix())
     })?;
-    let ns = crate::launch::namespace_args(userns);
-    let mut args: Vec<&str> = ns.iter().map(String::as_str).collect();
-    args.extend([
-        "--uid",
-        "1000",
-        "--gid",
-        "1000",
-        "--new-session",
-        "--die-with-parent",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-    ]);
-    for (l, t) in [
-        ("/bin", "usr/bin"),
-        ("/lib", "usr/lib"),
-        ("/lib64", "usr/lib64"),
-    ] {
-        args.extend(["--symlink", t, l]);
-    }
-    args.extend([
-        "--proc", "/proc", "--dev", "/dev", "--size", "1048576", "--tmpfs", "/tmp", "true",
-    ]);
-    let mut cmd = Command::new("bwrap");
-    cmd.args(&args).stdin(Stdio::null());
-    if let Some(fd) = userns {
-        use std::os::unix::process::CommandExt;
-        // bwrap reads the namespace from the descriptor: kept across exec.
-        unsafe {
-            cmd.pre_exec(move || {
-                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
+    let mut cmd = r.cmd;
     let out = cmd
+        .stdin(Stdio::null())
         .output()
-        .map_err(|e| (format!("bwrap: {e}"), "install bubblewrap".to_string()))?;
+        .map_err(|e| (format!("sandbox: {e}"), String::new()))?;
     if out.status.success() {
-        return Ok("bwrap creates the sandbox (user, pid, net, mount namespaces; tmpfs)".into());
+        return Ok(
+            "patina makes the sandbox (user, pid, net, mount, IPC, UTS namespaces; tmpfs)".into(),
+        );
     }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err((format!("bwrap failed: {err}"), namespace_fix()))
+    let err = String::from_utf8_lossy(&out.stderr);
+    let err = err.lines().last().unwrap_or("no message").trim();
+    let err = err.strip_prefix("patina sandbox: ").unwrap_or(err);
+    let err = err.strip_prefix("patina: ").unwrap_or(err);
+    // Only a refusal (EPERM, EACCES) is the host's to fix; anything else is Patina's to report.
+    let refused = err.contains("(os error 1)") || err.contains("(os error 13)");
+    let fix = if refused {
+        namespace_fix()
+    } else {
+        String::new()
+    };
+    Err((err.to_string(), fix))
 }
 
-/// What lets bwrap make its namespaces here.
+/// The command that installs the AppArmor profile for this executable.
+fn profile_fix() -> String {
+    format!(
+        "{} doctor --print-apparmor-profile | sudo tee /etc/apparmor.d/patina >/dev/null \
+         && sudo apparmor_parser -r /etc/apparmor.d/patina",
+        exe().display()
+    )
+}
+
+/// What lets Patina make its namespaces here.
 fn namespace_fix() -> String {
+    let restricted = sysctl("kernel.apparmor_restrict_unprivileged_userns").as_deref() == Some("1");
     // A container's default profile denies them (seccomp, AppArmor) and masks parts of /proc,
-    // which keeps a new /proc from being mounted.
+    // which keeps a new /proc from being mounted. On a host that restricts user namespaces
+    // (Ubuntu 24.04 and later), the host must also let patina make one.
     if ["/.dockerenv", "/run/.containerenv"]
         .iter()
         .any(|p| std::path::Path::new(p).exists())
     {
-        return "in a container: run it with --security-opt seccomp=unconfined \
-                --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
-                (or --privileged)"
-            .into();
+        let host = if restricted {
+            format!(
+                "; and on the host, which restricts user namespaces: an AppArmor profile for {} \
+                 (`patina doctor --print-apparmor-profile`, installed on the host), or \
+                 sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0",
+                exe().display()
+            )
+        } else {
+            String::new()
+        };
+        return format!(
+            "in a container: run it with --security-opt seccomp=unconfined \
+             --security-opt apparmor=unconfined --security-opt systempaths=unconfined{host}"
+        );
     }
-    if sysctl("kernel.apparmor_restrict_unprivileged_userns").as_deref() == Some("1") {
-        "AppArmor restricts unprivileged user namespaces and bwrap has no profile here: \
-         sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0, \
-         or install an AppArmor profile for /usr/bin/bwrap (Ubuntu's apparmor package ships bwrap-userns-restrict)"
-            .into()
+    if restricted {
+        format!(
+            "AppArmor restricts unprivileged user namespaces and {} has no profile: {} \
+             (or, for every program: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)",
+            exe().display(),
+            profile_fix()
+        )
     } else if sysctl("kernel.unprivileged_userns_clone").as_deref() == Some("0") {
         "sudo sysctl -w kernel.unprivileged_userns_clone=1".into()
+    } else if sysctl("user.max_user_namespaces").as_deref() == Some("0") {
+        "sudo sysctl -w user.max_user_namespaces=65536".into()
     } else {
         "unprivileged user namespaces are unavailable".into()
     }
@@ -257,6 +247,10 @@ fn cpu() -> (String, String) {
 }
 
 pub fn doctor(args: &Args) -> Res<ExitCode> {
+    if args.has("--print-apparmor-profile") {
+        print!("{}", crate::sandbox::apparmor_profile(&exe())?);
+        return Ok(ExitCode::SUCCESS);
+    }
     let facts = crate::host::Facts::probe(None);
     let (name, result) = crate::host::platform(&facts);
     let mut checks = vec![Check {
@@ -264,24 +258,10 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         required: true,
         result,
     }];
-    let bwrap = bwrap_found();
-    let have_bwrap = bwrap.is_ok();
-    checks.push(Check {
-        name: "bwrap",
-        required: true,
-        result: bwrap,
-    });
     checks.push(Check {
         name: "user namespaces",
         required: true,
-        result: if have_bwrap {
-            bwrap_sandbox()
-        } else {
-            Err((
-                "not tried: no bwrap".into(),
-                "install bubblewrap first".into(),
-            ))
-        },
+        result: sandbox_check(),
     });
     let child = |f: fn() -> i32, ok: &str| -> Result<String, (String, String)> {
         in_child(f)

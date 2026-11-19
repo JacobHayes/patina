@@ -421,7 +421,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
         | nr::GETGID
         | nr::GETEGID => raw(call),
         // The UTS namespace starts as a copy of the host's: its NIS domain name reads as
-        // a fixed "(none)" (the sandbox cannot set it: bwrap's user namespace is nested, so the
+        // a fixed "(none)" (the sandbox cannot set it: its user namespace is nested, so the
         // UTS namespace is not the sandbox's to change).
         nr::UNAME => {
             let r = raw(call);

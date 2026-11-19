@@ -6,7 +6,7 @@
 //! directories through a symlink in `/work` with file faults on, so injected-fault records name
 //! such calls. No value of any record may fall inside the runtime's region. The first runs
 //! with `--log-paths`: the path strings are the program's own (`/bin/true` as it named it),
-//! not the runtime's rewritten paths. Needs what `patina run` needs (bwrap, user namespaces)
+//! not the runtime's rewritten paths. Needs what `patina run` needs (user namespaces)
 //! and the host's python3.
 
 use proto::layout::{RT_BASE, RT_REGION_END};

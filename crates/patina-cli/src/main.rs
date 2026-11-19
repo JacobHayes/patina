@@ -1,4 +1,5 @@
-//! `patina`: the command line, the launcher, the supervisor (hidden `__sup`) and the tools.
+//! `patina`: the command line, the launcher, the sandbox's keeper (hidden `__sandbox`), the
+//! supervisor (hidden `__sup`) and the tools.
 
 mod check;
 mod cli;
@@ -20,6 +21,7 @@ mod replay;
 mod report;
 mod result;
 mod rewrite;
+mod sandbox;
 mod signature;
 mod sup;
 mod sweep;
@@ -54,6 +56,9 @@ fn main() -> ExitCode {
     check::adopt_server();
     let hidden = match first.as_str() {
         "__sup" => Some(sup::main(rest)),
+        "__sandbox" => Some(sandbox::keeper_main(rest)),
+        "__native" => Some(launch::native_main(rest)),
+        "__sandbox-views" => Some(sandbox::views_main()),
         "__insn-scan" => Some(insn::main(rest)),
         "__rewrite" => Some(rewrite::main(rest)),
         _ => None,

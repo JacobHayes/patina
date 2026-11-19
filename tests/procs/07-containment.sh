@@ -38,7 +38,7 @@ echo "(b) while running: $(cat "$o/b.alive"); namespaces: $(tr '\n' ' ' <"$o/b.n
 kill -KILL "$launcher"
 wait "$launcher" || true
 set -- --started-before "$seen"; while read -r ns; do set -- "$@" --ns "$ns"; done <"$o/b.ns"
-# Teardown after the launcher's death is asynchronous (bwrap's parent-death signal, then the
+# Teardown after the launcher's death is asynchronous (the sandbox keeper's parent-death signal, then the
 # PID namespace's end); give it up to 10 s.
 i=0
 while ! python3 -I "$HERE/../leftovers.py" "$o/b" "$@" >"$o/b.left"; do

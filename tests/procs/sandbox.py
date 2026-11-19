@@ -41,7 +41,7 @@ for _ in range(int(limit / 0.05)):
         m = members()
         inside = [ns for _, ns in m if ns["pid"] != mine["pid"]]
         if inside and (procs is None or len(inside) >= procs):
-            # The namespaces most of them share (a process caught while bwrap is still setting
+            # The namespaces most of them share (a process caught while the sandbox is still being set
             # up can be in the new PID namespace and an older mount namespace).
             sup = dict(Counter(tuple(sorted(ns.items())) for ns in inside).most_common(1)[0][0])
             for n, v in sorted(sup.items()):

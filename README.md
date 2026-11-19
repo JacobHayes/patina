@@ -9,7 +9,8 @@ seed you can replay as often as you like. Your program runs unmodified: no rebui
 special linking, any language.
 
 Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
-needs `bwrap` (bubblewrap) and unprivileged user namespaces.
+makes its own sandbox and needs unprivileged user namespaces; Ubuntu 24.04 and later admit them
+for a program only with an AppArmor profile, installed once as root (below).
 
 Changes in 0.15: `--preempt points` (x86_64) gives stock programs and their libraries switch
 points without a rebuild ([the guide](docs/GUIDE.md#points-in-stock-code---preempt-points));
@@ -28,12 +29,21 @@ curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install
 
 This installs one static binary, `~/.local/bin/patina` (`--prefix DIR` for another place),
 and runs `patina doctor`, which checks the host and prints the fix for anything missing. The
-last line should read `this host can run patina`. On Ubuntu 24.04 the two fixes are:
+last line should read `this host can run patina`. Debian, Fedora and Arch need nothing more.
+
+Ubuntu 24.04 and later restrict unprivileged user namespaces to programs with an AppArmor
+profile. The installer then prints the one root command that installs a profile for the
+installed path, and runs it with sudo only if you say yes (or pass `--apparmor-profile`):
 
 ```sh
-sudo apt-get install -y bubblewrap
-sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+patina doctor --print-apparmor-profile | sudo tee /etc/apparmor.d/patina >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/patina
 ```
+
+The profile admits whatever file is at that path, so install to a root-owned place for it:
+`curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sudo sh
+-s -- --prefix /usr/local`. The release's Debian package (`patina_X.Y.Z_amd64.deb`, `_arm64`)
+installs `/usr/bin/patina` with its profile. Without a profile, `sudo sysctl -w
+kernel.apparmor_restrict_unprivileged_userns=0` lifts the restriction for every program.
 
 Its first line names the release it installs. A release's own copy
 (`releases/download/vX.Y.Z/install.sh`) installs that release; `--version X.Y.Z` picks any.

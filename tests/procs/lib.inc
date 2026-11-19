@@ -35,17 +35,15 @@ verify_ok() {
     echo "seed $seed: $runs identical runs ($vary), digest $(field "$out/run-0/result.json" digest)"
 }
 
-# native OUT cmd...: the same command outside patina, in a bwrap sandbox shaped like patina's (the
-# guest directory at /guest, /usr, a fresh PID namespace, an empty /tmp, and the 4 CPUs a guest
-# sees by default: a program that sizes itself by the CPU count, as GNU sort starts a thread per
-# CPU, uses as many PIDs as under patina whatever the host has). stdout to OUT.
+# native OUT cmd...: the same command outside the runtime, in the sandbox a run gets (`patina
+# __native`, the guests at /guest), on the 4 CPUs a guest sees by default: a program that sizes
+# itself by the CPU count, as GNU sort starts a thread per CPU, uses as many PIDs as under
+# patina whatever the host has. stdout to OUT.
 native() {
     out=$1; shift
     cpus=$(python3 -I -c 'import os; c = sorted(os.sched_getaffinity(0)); print(",".join(map(str, c[:4])) if len(c) >= 4 else "")')
     [ -n "$cpus" ] || die "native: needs 4 CPUs to run as the guest sees them"
-    timeout 300 taskset -c "$cpus" bwrap --tmpfs / --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib \
-        --symlink usr/lib64 /lib64 --symlink usr/sbin /sbin --ro-bind /etc /etc --ro-bind "$PATINA_GUESTS" /guest \
-        --proc /proc --dev /dev --tmpfs /tmp --chdir /tmp --unshare-pid --die-with-parent -- "$@" >"$out" 2>"$out.err"
+    timeout 300 taskset -c "$cpus" "$PATINA" __native --mount "$PATINA_GUESTS:/guest" -- "$@" >"$out" 2>"$out.err"
 }
 
 # counts RUN: processes created and execs, from the boundary log (main + Forked records of

@@ -2,10 +2,10 @@ name: Release
 
 # A `v*` tag runs the release tier (`./check release`, tests/run.py) on both architectures and
 # builds the release artifacts, one static Linux `patina` per architecture with the
-# runtime embedded, each natively on a runner of its architecture; checks each names the tag's
-# version; installs each from its archive with install.sh, on its runner and in a bare
-# ubuntu:24.04 container; runs the adopter smoke on both; merges the archives under one
-# SHA256SUMS; and only then pushes the Go SDK's tag and publishes the release. A manual run does
+# runtime embedded, each natively on a runner of its architecture, as an archive and a Debian
+# package; checks each names the tag's version; installs the package with user namespaces
+# restricted, and the archive with install.sh, on its runner and in a bare ubuntu:24.04
+# container; runs the adopter smoke on both; merges the files under one SHA256SUMS; and only then pushes the Go SDK's tag and publishes the release. A manual run does
 # all of that except publish, and ends by installing the latest published release with the
 # documented one-liner on both architectures (`published: false` skips that, for a dry run
 # before the first release that has both). Nothing here publishes to crates.io.
@@ -68,11 +68,6 @@ jobs:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v7
-      - name: Host setup for the sandbox
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq bubblewrap
       - uses: ./.github/actions/setup-toolchain
       - run: rustup target add "$TARGET"
       - name: Build
@@ -82,20 +77,37 @@ jobs:
       - name: A release tag names the version it builds
         if: github.ref_type == 'tag'
         run: test "$(target/$TARGET/release/patina --version)" = "patina ${GITHUB_REF_NAME#v}"
-      # This architecture's archive with a SHA256SUMS of its own, for the installs below.
+      # This architecture's archive with a SHA256SUMS of its own, for the installs below, and
+      # its Debian package (scripts/deb).
       - name: Package
         run: |
           mkdir dist
           tar -czf "dist/patina-$TARGET.tar.gz" -C "target/$TARGET/release" patina -C "$PWD" LICENSE-APACHE
           cp install.sh dist/
           (cd dist && sha256sum "patina-$TARGET.tar.gz" >SHA256SUMS && cat SHA256SUMS)
-      # No Rust, no C compiler: only bubblewrap and curl, and the three options a container needs.
+          v=$(target/$TARGET/release/patina --version)
+          scripts/deb "target/$TARGET/release/patina" "${v#patina }" dist
+          ls -l dist
+      # The runner restricts unprivileged user namespaces as Ubuntu 24.10 and later do: the
+      # package's AppArmor profile alone admits the sandbox.
+      - name: Install the Debian package, user namespaces restricted
+        run: |
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 1
+          sudo apt-get install -y -qq ./dist/patina_*.deb
+          /usr/bin/patina doctor
+          /usr/bin/patina run --out "$RUNNER_TEMP/deb-run" -- /bin/sh -c "echo hello from the sandbox"
+          sudo apt-get remove -y -qq patina
+          if /usr/bin/patina --version 2>/dev/null; then exit 1; fi
+      # The installs below run without the profile.
+      - name: Host setup for the sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # No Rust, no C compiler: only curl, and the three options a container needs.
       - name: Install in a bare ubuntu:24.04 container
         run: |
           docker run --rm -v "$PWD/dist:/dist:ro" \
             --security-opt seccomp=unconfined --security-opt apparmor=unconfined --security-opt systempaths=unconfined \
             ubuntu:24.04 sh -euc '
-              apt-get update -qq && apt-get install -y -qq bubblewrap curl >/dev/null
+              apt-get update -qq && apt-get install -y -qq curl >/dev/null
               PATINA_RELEASE_URL=file:///dist sh /dist/install.sh --prefix /usr/local
               patina run -- /bin/sh -c "echo hello from the sandbox"'
       - name: Install from the archive and run the adopter smoke
@@ -110,10 +122,12 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: archive-${{ matrix.target }}
-          path: dist/patina-${{ matrix.target }}.tar.gz
+          path: |
+            dist/patina-${{ matrix.target }}.tar.gz
+            dist/patina_*.deb
           if-no-files-found: error
 
-  # The release's files: both archives, one SHA256SUMS listing both, install.sh (a tag's
+  # The release's files: both archives and packages, one SHA256SUMS listing them, install.sh (a tag's
   # installs that tag's version unless given --version).
   dist:
     needs: build
@@ -132,8 +146,8 @@ jobs:
           else
             cp install.sh dist/
           fi
-          (cd dist && sha256sum patina-*.tar.gz >SHA256SUMS && cat SHA256SUMS)
-          test "$(wc -l <dist/SHA256SUMS)" = 2
+          (cd dist && sha256sum patina-*.tar.gz patina_*.deb >SHA256SUMS && cat SHA256SUMS)
+          test "$(wc -l <dist/SHA256SUMS)" = 4
       - uses: actions/upload-artifact@v7
         with:
           name: dist
@@ -160,7 +174,7 @@ jobs:
         run: |
           git push origin "HEAD:refs/tags/go/patina/$GITHUB_REF_NAME"
           gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes \
-            dist/patina-*.tar.gz dist/SHA256SUMS dist/install.sh
+            dist/patina-*.tar.gz dist/patina_*.deb dist/SHA256SUMS dist/install.sh
 
   # Install the published release as the README says, on a fresh runner of each architecture,
   # and run the smoke.
@@ -177,8 +191,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           path: patina-checkout
-      - run: |
-          sudo apt-get install -y bubblewrap
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - run: curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
       - run: patina-checkout/scripts/install-smoke.sh

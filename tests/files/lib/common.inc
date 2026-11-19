@@ -19,7 +19,7 @@ verify_ok() {
     [ "$(field "$out/run-0/result.json" outcome)" = ok ] || die "$*: class $(field "$out/run-0/result.json" outcome) $(field "$out/run-0/result.json" message)"
 }
 
-# native OUT [--work DIR] -- cmd...: the same command in a bwrap twin of the sandbox, no runtime.
+# native OUT [--work DIR] -- cmd...: the same command natively in the sandbox (native.sh).
 native() { timeout 600 "$LIB/native.sh" "$@"; }
 
 # tree DIR: the deterministic input tree (built once per check run).
