@@ -49,7 +49,8 @@ mise run check || die "mise run check failed at $sha"
 # Counter exactness is checked only where the CPU is supported (CI's x86_64 runners are not):
 # a change to the runtime or the protocol runs the counters area here too, which says whether
 # this host could run it.
-if [ -n "$(jj diff --from main@origin --to "$sha" --name-only crates/patina-rt crates/patina-proto)" ]; then
+touched=$(jj diff --from main@origin --to "$sha" --name-only crates/patina-rt crates/patina-proto)
+if [ -n "$touched" ]; then
     say "the change touches the runtime: ./check counters"
     log=$(mktemp)
     ./check counters 2>&1 | tee "$log" || { rm -f "$log"; die "./check counters failed at $sha"; }

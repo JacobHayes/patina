@@ -801,7 +801,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 }
                 ("run", "work") => (c.work, c.work_at) = work(&base, &at, &string(v, &at)?)?,
                 ("run", "stdin") => c.stdin = Some(existing(&base, &at, &string(v, &at)?)?),
-                ("run", "time-limit") => c.time_limit = int(v, &at)?,
+                ("run", "time-limit") => c.time_limit = time_limit(int(v, &at)?, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
                 ("run", "log-paths") => c.log_paths = boolean(v, &at)?,
@@ -976,7 +976,7 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         (c.pmu.on, c.points) = preempt(p, "--preempt")?;
     }
     if let Some(n) = a.num("--time-limit")? {
-        c.time_limit = n;
+        c.time_limit = time_limit(n, "--time-limit")?;
     }
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
@@ -1223,6 +1223,14 @@ impl Config {
         let program = program(&self.cmd[0], &self.mounts)?;
         self.opts_with(program)
     }
+}
+
+/// A time limit in seconds whose nanoseconds, past the virtual clock's boot time, fit in a u64.
+fn time_limit(s: u64, what: &str) -> Res<u64> {
+    s.checked_mul(1_000_000_000)
+        .and_then(|ns| ns.checked_add(proto::layout::VCLOCK_BOOT_NS + 1))
+        .map(|_| s)
+        .ok_or_else(|| format!("{what} {s}: too large"))
 }
 
 #[cfg(test)]
