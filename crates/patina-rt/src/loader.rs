@@ -308,7 +308,8 @@ pub fn load(path: &[u8], dyn_base: u64, interp: bool) -> Image {
                             crate::insn::scan::scan_exec(va, fmap, Some(file), true, prot);
                         }
                         if prot & PROT_WRITE == 0 {
-                            sc3(nr::MPROTECT, va, fmap, prot);
+                            let kept = crate::insn::scan::kept_prot(va, fmap, prot);
+                            sc3(nr::MPROTECT, va, fmap, kept);
                         }
                     }
                     let anon_start = va + if p.filesz > 0 { fmap } else { 0 };

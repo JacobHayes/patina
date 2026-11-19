@@ -295,7 +295,9 @@ is scanned once per run: its verdicts are kept in the control region (`proto::ct
 and another process that maps the same bytes the same way applies them, in the same order,
 without scanning (`insn/scan.rs`; counted in `result.json` as `scan.reused_mappings`).
 `MADV_DONTNEED` over patched code drops
-the patched copy of the page; the runtime patches its sites again.
+the patched copy of the page; the runtime patches its sites again. Execute-only code (a segment
+or mapping with `PROT_EXEC` alone) that holds a patched site is left readable: the trap entry
+reads the patched instruction to emulate it.
 
 On arm64 the scan is a compare under a mask of each aligned word of a file's executable
 sections (`proto/src/insn/aarch64.rs`), and a site becomes `udf #0x7061`. A word that a

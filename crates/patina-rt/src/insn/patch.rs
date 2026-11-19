@@ -134,6 +134,13 @@ pub fn repatch(a: u64, len: u64) {
 }
 
 /// Drop every entry in `[a, a + len)` (the range was unmapped or replaced).
+/// A site is patched in `[a, a + len)`.
+pub fn any_in(a: u64, len: u64) -> bool {
+    let t = table();
+    let i = lower(t, a);
+    i < t.n && t.e[i].addr < a.saturating_add(len)
+}
+
 pub fn forget(a: u64, len: u64) {
     let t = table();
     if t.n == 0 {

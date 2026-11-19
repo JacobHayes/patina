@@ -20,6 +20,20 @@ case $(uname -m) in
         $cc -O1 -o "$out/insn-jit" "$here/insn-jit-a64.c"
         ;;
 esac
+# insn-xonly: its executable segment execute-only (the read flag of every R+X PT_LOAD cleared).
+$cc -O1 -static -o "$out/insn-xonly" "$here/xonly.c"
+python3 -I -c '
+import struct, sys
+f = open(sys.argv[1], "r+b")
+e = f.read(64)
+phoff, phentsize, phnum = struct.unpack_from("<Q", e, 32)[0], *struct.unpack_from("<HH", e, 54)
+for i in range(phnum):
+    f.seek(phoff + i * phentsize)
+    typ, flags = struct.unpack("<II", f.read(8))
+    if typ == 1 and flags == 5:
+        f.seek(phoff + i * phentsize + 4)
+        f.write(struct.pack("<I", 1))
+' "$out/insn-xonly"
 ${CXX:-g++} -O1 -o "$out/insn-rand-cpp" "$here/rand-cpp.cc"
 $cc -O1 -o "$out/insn-rand-ssl" "$here/rand-ssl.c" -lcrypto
 gocache=$PATINA_BUILD_DIR/gocache

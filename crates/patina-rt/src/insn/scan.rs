@@ -55,6 +55,16 @@ fn replayable(vs: &[u64], len: u64) -> bool {
 /// A mapping of a read-only file holding its bytes whose scan another process of the run made
 /// already takes that scan's verdicts, applied in the same order (`ScanKey` says what they are
 /// a function of); otherwise the scan is made, and kept when it may be asked again.
+/// The protection execute-only memory keeps after a scan: readable where a site was patched,
+/// since the SIGILL entry reads the patched instruction (its prefixes, its word) to emulate it.
+pub fn kept_prot(va: u64, len: u64, prot: u64) -> u64 {
+    if prot & PROT_EXEC != 0 && prot & PROT_READ == 0 && super::patch::any_in(va, len) {
+        prot | PROT_READ
+    } else {
+        prot
+    }
+}
+
 pub fn scan_exec(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: u64) {
     let c = ctl();
     let st = file.and_then(|f| crate::sys::fs::fstat_raw(f.fd as i64).map(|st| (f, st)));
@@ -79,10 +89,12 @@ pub fn scan_exec(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: 
         })
     });
     // Execute-only memory (the kernel backs PROT_EXEC alone with an access-disabled pkey) cannot
-    // be read: make it readable for the scan (and for a patch, which reads the bytes it covers).
+    // be read: make it readable for the scan (and for a patch, which reads the bytes it covers),
+    // keeping it writable where it is now (the loader's segments: a patch writes it as it is).
+    let now = prot | if writable { PROT_WRITE } else { 0 };
     let unreadable = prot & PROT_READ == 0;
     if unreadable {
-        unsafe { sc3(nr::MPROTECT, va, len, prot | PROT_READ) };
+        unsafe { sc3(nr::MPROTECT, va, len, now | PROT_READ) };
     }
     let kept = key
         .and_then(|k| scans().find(&k))
@@ -123,7 +135,7 @@ pub fn scan_exec(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: 
         }
     }
     if unreadable {
-        unsafe { sc3(nr::MPROTECT, va, len, prot) };
+        unsafe { sc3(nr::MPROTECT, va, len, kept_prot(va, len, now)) };
     }
     if let (Some(key), true) = (key, fits) {
         scans().commit(key, n);
