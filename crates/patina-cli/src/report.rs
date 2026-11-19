@@ -1036,6 +1036,8 @@ pub fn build(
                 Some(v) if v["result"] == "nondeterministic" => "nondeterministic".to_string(),
                 // A finding its checker does not repeat is not evidence about the program.
                 Some(v) if v["result"] == "check-unstable" => "error".to_string(),
+                // Nor is one whose mounted inputs changed before its replay.
+                Some(v) if v["result"] == "inputs-changed" => "error".to_string(),
                 _ => outcome.clone(),
             };
             let classes: Vec<_> = g.runs.iter().map(|r| fault_classes(&r.result).1).collect();

@@ -63,6 +63,12 @@ pub mod stat {
     const UID32: usize = 6;
     const GID32: usize = UID32 + 1;
 
+    /// Word offsets of the size, the block size (a word on x86_64; a 32-bit field then
+    /// padding on arm64) and the 512-byte block count.
+    pub const SIZE_W: usize = 6;
+    pub const BLKSIZE: usize = 7;
+    pub const BLOCKS: usize = 8;
+
     /// Word offsets of the access, modification and change times (seconds; nanoseconds follow).
     pub const ATIME: usize = 9;
     pub const MTIME: usize = 11;
@@ -154,6 +160,36 @@ pub mod stat {
                 st[t] = secs;
             }
             Stat(st)
+        }
+    }
+
+    /// Set the link count of the `struct stat` at `p` (memory the kernel just filled).
+    ///
+    /// # Safety
+    /// `p` points to a writable `struct stat`.
+    pub unsafe fn set_nlink(p: *mut u64, n: u32) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            *p.add(2) = n as u64;
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            *p.add(2) = (*p.add(2) & 0xffff_ffff) | (n as u64) << 32;
+        }
+    }
+
+    /// The file type and permission bits of the `struct stat` at `p`.
+    ///
+    /// # Safety
+    /// `p` points to a `struct stat`.
+    pub unsafe fn mode_at(p: *const u64) -> u32 {
+        #[cfg(target_arch = "x86_64")]
+        {
+            *p.add(3) as u32
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            *p.add(2) as u32
         }
     }
 

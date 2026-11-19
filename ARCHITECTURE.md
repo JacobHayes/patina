@@ -146,6 +146,41 @@ has (`launch::not_in_sandbox`). The launcher fixes every piece of process state 
 else is mapped, as in bwrap's own namespace for an ordinary user. Left to bwrap, root would be
 mapped in and parts of /proc covered, and the guest would see who started the run.
 
+### Host-provided files
+
+A host-provided file is any file not on a sandbox tmpfs: `/usr` and the host libraries, the
+program's directory, `--mount` binds. Invariant: nothing about a host-provided file reaches the
+guest except its path, type, mode, size, content, inode number and modification time. The
+modification time stands for the content: it changes when the content does, and programs
+depend on it (Python takes a cached `.pyc` only when its source's time matches the one it
+recorded; a fixed time would make every run compile the standard library again). The rest of
+its metadata is the host's history (a hard link made elsewhere, a `chmod`, a read, the
+filesystem's allocation), so `stat`, `fstat`, `newfstatat` and `statx` report
+(`sys/fs.rs::rewrite_stat`, `rewrite_statx`):
+
+| Field | Reported |
+|---|---|
+| type, permission bits, size of a non-directory, `rdev` | the host's |
+| inode number | the host's: the file's identity (the dynamic loader and `find` compare it), unchanged by a touch or a link; it changes when the file is replaced |
+| device | the mount's index (`makedev(0, VDEV_MOUNT_BASE + i)`) |
+| mtime | the host's |
+| atime, ctime, btime | the mtime; `statx` always reports btime |
+| link count | 1, directories too (what a filesystem that does not count subdirectories reports) |
+| size of a directory | 4096 |
+| block size, blocks | 4096, the size in whole 4 KiB blocks |
+| owner | the overflow id (65534), whoever launched the run |
+| `statx` attributes, direct-I/O alignment, subvolume | not reported (mount root kept) |
+
+A program comparing the times of host files (`make`, a cache) compares their modification
+times, as natively. A `touch` of a host file the program reads, or a file added to or removed
+from a directory it lists (which moves the directory's modification time), is a change of the
+program's inputs, as an edit is; a hard link made elsewhere, a `chmod`, or a read is not.
+`patina replay` tells the two apart for `--mount` sources (`inputs.rs`).
+
+`getdents` on a host directory is the kernel's: the order and offsets are the filesystem's,
+the same for an unchanged directory on one host, not across hosts. `statfs` reports fixed
+free counts for host filesystems.
+
 ## The supervisor
 
 One sequential program that owns the turn: exactly one guest thread runs at a time, until it

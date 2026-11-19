@@ -575,13 +575,13 @@ pub const VDEV_ANON: u64 = VDEV_MOUNT_BASE - 2;
 pub struct Ident {
     pub dev: u64,
     pub ino: u64,
-    /// None: host-stable, pass the kernel's times.
+    /// None: a host-provided file, whose metadata is normalised (`rewrite_stat`).
     pub times: Option<proto::vfs::VtEntry>,
 }
 
 pub fn ident(dev: u64, ino: u64) -> Ident {
     match path::mount_index(dev) {
-        Some(i) if path::dev_major(dev) == 0 => {
+        Some(i) if path::dev_major(dev) == 0 && path::mounts().m[i].class != MountClass::HostRo => {
             let m = &path::mounts().m[i];
             let vminor = VDEV_MOUNT_BASE + i as u64;
             let ino = if m.class == MountClass::Proc {
@@ -600,9 +600,9 @@ pub fn ident(dev: u64, ino: u64) -> Ident {
                 times: Some(times),
             }
         }
-        // A host filesystem bound into the sandbox (/usr): its device number is the host
-        // disk's, so it reads as the mount's index too; inode numbers and times are the
-        // host files' (host-stable, A), atime as mtime (see `rewrite_stat`).
+        // A host filesystem bound into the sandbox (/usr, a `--mount`): its device number is
+        // the host disk's, so it reads as the mount's index too; inode numbers are the host
+        // files', the rest of their metadata is normalised (`rewrite_stat`).
         Some(i) => Ident {
             dev: path::makedev(0, VDEV_MOUNT_BASE + i as u64),
             ino,
@@ -640,16 +640,45 @@ pub fn rewrite_stat(p: u64) {
                 *w.add(k + 1) = v % NS;
             }
         } else {
-            // Host file: its atime is not host-stable (reading it moves it, `relatime`
-            // at most once a day), so it reads as the mtime.
-            *w.add(stat::ATIME) = *w.add(stat::MTIME);
-            *w.add(stat::ATIME + 1) = *w.add(stat::MTIME + 1);
+            // Host file: only its type, mode and size (and its inode number) are its own.
+            let dir = stat::mode_at(w) & S_IFMT == S_IFDIR;
+            let size = if dir {
+                HOST_DIR_SIZE
+            } else {
+                *w.add(stat::SIZE_W)
+            };
+            *w.add(stat::SIZE_W) = size;
+            *w.add(stat::BLKSIZE) = HOST_BLOCK;
+            *w.add(stat::BLOCKS) = host_blocks(size);
+            stat::set_nlink(w, 1);
+            for k in [stat::ATIME, stat::CTIME] {
+                *w.add(k) = *w.add(stat::MTIME);
+                *w.add(k + 1) = *w.add(stat::MTIME + 1);
+            }
             // Its owner: the user namespace shows the launcher's own uid and gid as the
             // sandbox's 1000 and every other id as the overflow id, so which host files read
             // as 1000 depends on who launched the run. Every host file reads as the overflow id.
             stat::set_owner(p as *mut u8, OVERFLOW_ID, OVERFLOW_ID);
         }
     }
+}
+
+// What a host-provided file (any file not on a sandbox tmpfs: the read-only mounts, `/usr`,
+// the host libraries) shows of itself: its path, type, mode, size, content, inode number and
+// modification time. The modification time stands for its content (Python checks a cached
+// `.pyc` against its source's, `make` compares them) and changes with it; the other times,
+// the link count, block counts and a directory's size are the host's history (a hard link
+// made elsewhere, a `chmod`, a read, the filesystem's allocation), so they read as fixed or
+// derived values: every other time as the modification time, one link (what a filesystem
+// that does not count subdirectories reports, so `find` assumes nothing from it), blocks for
+// the size in whole 4 KiB blocks, a directory 4096 bytes. The inode number is the file's
+// identity (the dynamic loader and `find` compare it), unchanged by a touch or a link.
+// `ARCHITECTURE.md`, "Host-provided files".
+const HOST_BLOCK: u64 = 4096;
+const HOST_DIR_SIZE: u64 = 4096;
+
+fn host_blocks(size: u64) -> u64 {
+    size.div_ceil(HOST_BLOCK) * (HOST_BLOCK / 512)
 }
 
 /// The id an unmapped uid or gid reads as in a user namespace (`/proc/sys/kernel/overflowuid`).
@@ -682,11 +711,29 @@ pub fn rewrite_statx(p: u64) {
             *mask = (*mask & !STATX_MNT_ID_UNIQUE) | if idx != 0 { STATX_MNT_ID } else { 0 };
         }
         if id.times.is_none() {
-            // Host file: atime reads as the mtime, owner as the overflow id (see `rewrite_stat`).
-            *(b.add(64) as *mut u64) = *(b.add(112) as *const u64);
-            *(b.add(72) as *mut u32) = *(b.add(120) as *const u32);
+            // Host file: as `rewrite_stat`, and every time (birth too, always reported) the
+            // modification time; the filesystem's own details (attributes such as compressed, direct
+            // I/O alignment, subvolume) are not reported.
+            const STATX_ATTR_MOUNT_ROOT: u64 = 0x2000;
+            const BASIC: u32 = 0x7ff;
+            let dir = *(b.add(28) as *const u16) as u32 & S_IFMT == S_IFDIR;
+            let size = b.add(40) as *mut u64;
+            if dir {
+                *size = HOST_DIR_SIZE;
+            }
+            *(b.add(48) as *mut u64) = host_blocks(*size);
+            *(b.add(4) as *mut u32) = HOST_BLOCK as u32;
+            *(b.add(16) as *mut u32) = 1;
             *(b.add(20) as *mut u32) = OVERFLOW_ID;
             *(b.add(24) as *mut u32) = OVERFLOW_ID;
+            *(b.add(8) as *mut u64) &= STATX_ATTR_MOUNT_ROOT;
+            *(b.add(56) as *mut u64) &= STATX_ATTR_MOUNT_ROOT;
+            core::ptr::write_bytes(b.add(152), 0, 256 - 152);
+            *mask = (*mask & (BASIC | STATX_MNT_ID)) | STATX_BTIME;
+            for off in [64usize, 80, 96] {
+                *(b.add(off) as *mut u64) = *(b.add(112) as *const u64);
+                *(b.add(off + 8) as *mut u32) = *(b.add(120) as *const u32);
+            }
         }
         if let Some(t) = id.times {
             for (off, v) in [

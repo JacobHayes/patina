@@ -259,7 +259,7 @@ if (st, st1, st2, st3, st4) != (2, 0, 0, 0, 0) or rep["sdk"]["buggify_never_fire
     die(f"buggify never fired: 20 runs exit {st} {rep['sdk']}; smoke exit {st1}; forced off exit {st2} {rep2['sdk']}; firing exit {st3}; allowed exit {st4}")
 print("a fault point never reached in 20 runs under --buggify: exit 2, allowed: 0; in 4 runs, or forced off: noted, exit 0; one that fired: 0")
 
-# A host file that changes between the run and its replay: nondeterministic, not a finding.
+# A host file that changes between the run and its replay: inputs-changed, not a finding.
 # Without the change (red/green), the same failure is a finding that replays identically.
 host = os.path.join(RUNS, "host")
 os.makedirs(host)
@@ -273,7 +273,7 @@ with open(val, "w") as fh:
     fh.write("1")
 st, so, se = patina("replay", "--format", "json", rep["groups"][0]["first"]["dir"])
 r = json.loads(so or "{}")
-if st != 2 or r.get("outcome") != "nondeterministic":
+if st != 2 or r.get("outcome") != "error" or r.get("stop") != "inputs-changed":
     die(f"host file changed before the replay: exit {st} {r.get('outcome')} {se[-500:]}")
 print(f"host file changed before the replay: {r['outcome']} ({r['message'][:80]}); steady: finding, identical")
 

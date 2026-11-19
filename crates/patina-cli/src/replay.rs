@@ -127,7 +127,22 @@ fn replay_into(
         None => None,
     };
     let key = |r: &serde_json::Value| crate::signature::check_key(&r["check"]);
+    // A difference after a mounted source changed is the program reading other inputs.
+    let changed = match &diverged {
+        Some(_) => read_json(&rundir.join("run.json"))
+            .map(|run| crate::inputs::changed(&run, &cfg))
+            .unwrap_or_default(),
+        None => Vec::new(),
+    };
     let classified = match diverged {
+        Some(d) if !changed.is_empty() => Some(Classified::new(
+            Outcome::Error,
+            "inputs-changed",
+            format!(
+                "the mounted {} changed since the run (an entry added, removed or modified): the replay read other inputs, so a difference is expected, not a Patina bug; first difference: {d}",
+                changed.join(", ")
+            ),
+        )),
         Some(d) => Some(Classified::new(Outcome::Nondeterministic, "divergence", d)),
         // The same run, judged otherwise: the checker reads something besides the run
         // directory. Not a Patina divergence.

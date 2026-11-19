@@ -8,6 +8,7 @@ mod durability;
 mod events;
 mod faults;
 mod host;
+mod inputs;
 mod insn;
 mod launch;
 mod launcher;
@@ -204,8 +205,8 @@ fn replay(a: &Args) -> Result<ExitCode, Fail> {
     } else {
         if c.outcome == Outcome::Nondeterministic {
             println!("nondeterministic: {}", c.message);
-        } else if c.stop == "check-unstable" {
-            println!("check-unstable: {}", c.message);
+        } else if c.stop == "check-unstable" || c.stop == "inputs-changed" {
+            println!("{}: {}", c.stop, c.message);
         } else {
             println!("identical: the replay's log equals the run's");
         }

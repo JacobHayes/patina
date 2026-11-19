@@ -1402,7 +1402,12 @@ by another Patina build (another version, or another binary of one): install tha
 reproduced exactly; a difference ends `nondeterministic` and names the first differing
 record, which is a Patina bug unless the host's files changed: the program is the file the
 command names (a `#!` script itself), and what it runs from the host (a script's interpreter,
-shared libraries, anything under `/usr`) is not recorded.
+shared libraries, anything under `/usr`) is not recorded. A run notes what each `--mount`
+source held (its entries' names, types, modes, sizes and modification times; up to 20000
+entries); a difference after one of them changed ends `error`, stop `inputs-changed`, naming
+the mount: the program read other inputs. Of a host file's metadata the program sees its type,
+mode, size and modification time (and inode number): its other times read as the modification
+time and its link count as 1, so a hard link made elsewhere or a `chmod` changes nothing it sees.
 
 A replay refuses a rebuilt program; to check a fix, run the finding's `rerun:` line instead.
 It names the program by path and carries the seed, the faults, the checker and the case (with
@@ -1421,9 +1426,9 @@ exact-only: one seed's run
 -->
 ```text
 $ patina verify --seed 3 --runs 3 --vary cpu,aslr,load --crash machine -- ./acklog
-run 0: cpu 23 aslr off load on env base violation b7315379183f3bd1 switches 0
-run 1: cpu 12 aslr on load on env base violation b7315379183f3bd1 switches 0
-run 2: cpu 1 aslr off load on env base violation b7315379183f3bd1 switches 0
+run 0: cpu 23 aslr off load on env base violation b0d7bd9186765280 switches 0
+run 1: cpu 12 aslr on load on env base violation b0d7bd9186765280 switches 0
+run 2: cpu 1 aslr off load on env base violation b0d7bd9186765280 switches 0
 identical: 3 runs in /tmp/patina/patina-out/verify-3
 violation (always): acked-records-kept: 23 acknowledged, 0 stored
 ```

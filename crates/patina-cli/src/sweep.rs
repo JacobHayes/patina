@@ -1481,8 +1481,8 @@ fn replayed(d: Done) {
         Ok(r) if r["outcome"] == "nondeterministic" => {
             serde_json::json!({"result": "nondeterministic", "message": r["message"], "dir": out})
         }
-        Ok(r) if r["stop"] == "check-unstable" => {
-            serde_json::json!({"result": "check-unstable", "message": r["message"], "dir": out})
+        Ok(r) if r["stop"] == "check-unstable" || r["stop"] == "inputs-changed" => {
+            serde_json::json!({"result": r["stop"], "message": r["message"], "dir": out})
         }
         Ok(_) => serde_json::json!({"result": "identical", "message": ""}),
         Err(_) => serde_json::json!({"result": "error", "message": tail(&d.stderr)}),

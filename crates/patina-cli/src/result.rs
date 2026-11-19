@@ -531,6 +531,7 @@ pub fn run_json(cfg: &Config, program: &Program, plan: &crate::faults::Plan) -> 
         "faults": plan.json(),
         "program": program,
         "host": host_facts(),
+        "inputs": crate::inputs::fingerprints(cfg),
     }))
 }
 
