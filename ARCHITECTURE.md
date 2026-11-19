@@ -59,13 +59,16 @@ layout with its contents normalised to the registers, not to the kernel's histor
 fault code or address from an earlier fault (on arm64 the counter-timer reads and the
 runtime's own faults leave none), unused fields and the tail zeroed. `rt_sigreturn` is
 emulated: the runtime checks the frame the program hands back as the kernel does, and a
-frame it would refuse ends in `SIGSEGV`, never in a fault of the runtime. On arm64 the frame
+frame it would refuse ends in `SIGSEGV`, never in a fault of the runtime; the runtime reads and
+writes the program's frames only through its guest copy (`guest.rs`), so a frame it cannot
+write is the kernel's failed delivery (`SIGSEGV`) too. On arm64 the frame
 carries the records the host's kernel writes (FP/SIMD, the fault syndrome, SVE, `TPIDR2`, the
 ZA header, `FPMR`, `POR_EL0`; `proto/src/sigrec.rs`); one Patina does not build (SME's
 streaming mode or ZA contents, ZT, GCS, the extra record) ends the run `unsupported`, stop
 `signal-context`, naming it. The
-handler returns through a fixed page holding `rt_sigreturn` unless it gives its own restorer,
-and is entered with `BTYPE` set for a branch-target host. The runtime has no thread-local
+handler returns through its own restorer; on x86_64 a handler installed without
+`SA_RESTORER` is a failed delivery, as the kernel has it; on arm64 it returns through a fixed
+page holding `rt_sigreturn`, and is entered with `BTYPE` set for a branch-target host. The runtime has no thread-local
 storage; each thread's state sits at the base of its alternate signal stack.
 
 ## The syscall table

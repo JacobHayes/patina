@@ -9,6 +9,7 @@ cc=${CC:-gcc}
 for g in sig-basic sig-alt sig-ctx sig-fault sig-restart sig-mask sig-long sig-block sig-fd; do
     $cc -O1 -pthread -o "$out/$g" "$here/$g.c"
 done
+$cc -O1 -static -o "$out/forge" "$here/forge.c"
 # The guests in x86 assembly have arm64 twins, built under the same names.
 case $(uname -m) in
     x86_64)

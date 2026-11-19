@@ -67,6 +67,7 @@ pub fn feature_hidden(_w: &[u8]) -> bool {
 pub const RECORD_WORDS: usize = 18;
 
 /// x86_64 kernel `ucontext` as delivered on the alternate stack.
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct Frame {
     pub uc_flags: u64,
