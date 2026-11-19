@@ -89,8 +89,6 @@ pub struct Config {
     pub faults_preset: Vec<String>,
     /// `KEY=VALUE` fault settings, in order; they replace a preset's.
     pub faults: Vec<String>,
-    /// `[faults] faults-in-recovery = false`: no faults other than crashes after a crash.
-    pub faults_in_recovery: bool,
     pub crash: Option<String>,
     /// Let SDK fault points fire (`--buggify`, `[sdk] buggify`).
     pub buggify: bool,
@@ -98,7 +96,6 @@ pub struct Config {
     /// result vacuous (`[sdk] allow-unmet`).
     pub allow_unmet: Vec<String>,
     pub fs_model: String,
-    pub max_incarnations: u64,
     pub preempt_permille: u64,
     pub stall_ms: u64,
     /// Every executed pause hint (`pause`; on arm64 `yield`, `wfe`, `wfi`, `isb`) is a
@@ -163,12 +160,10 @@ impl Default for Config {
             tmpfs_bytes: 256 << 20,
             faults_preset: vec![],
             faults: vec![],
-            faults_in_recovery: true,
             crash: None,
             buggify: false,
             allow_unmet: vec![],
             fs_model: Model::Ext4Ordered.name().into(),
-            max_incarnations: 4,
             preempt_permille: 100,
             stall_ms: 10_000,
             pause_points: true,
@@ -801,13 +796,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 }
                 ("faults", "crash") => c.crash = Some(string(v, &at)?),
                 ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
-                ("faults", "faults-in-recovery") => {
-                    c.faults_in_recovery = v
-                        .as_bool()
-                        .ok_or_else(|| format!("{at}: expected true or false"))?
-                }
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
-                ("faults", "max-incarnations") => c.max_incarnations = int(v, &at)?,
                 ("faults", _) => c.faults.push(format!("{k}={}", scalar(v, &at)?)),
                 ("sdk", "buggify") => {
                     c.buggify = v
@@ -998,7 +987,6 @@ impl Config {
             &self.faults_preset,
             &self.faults,
             self.crash.as_deref(),
-            self.faults_in_recovery,
         )?;
         plan.sdk.buggify = self.buggify as _;
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
@@ -1019,9 +1007,6 @@ impl Config {
                 m.src.display(),
                 m.dst
             ));
-        }
-        if self.max_incarnations == 0 {
-            return Err("max-incarnations is at least 1".into());
         }
         if self.cpus == 0 || self.cpus > MAX_CPUS {
             return Err(format!("--cpus is 1 to {MAX_CPUS}"));

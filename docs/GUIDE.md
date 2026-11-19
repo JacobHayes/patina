@@ -662,6 +662,12 @@ replay: patina replay /tmp/acklog/patina-out/run-3
 What survives a machine crash follows `ext4-ordered` by default; `[faults] fs-model =
 "posix-strict"` allows everything POSIX allows, which loses more.
 
+A run starts at most 4 incarnations: the last one never crashes, so a program restarts at
+most 3 times. `--fault max-incarnations=N` (`[faults] max-incarnations = N`) changes that.
+The other faults stay on in the incarnations after a crash, so recovery code meets them
+too; `--fault faults-in-recovery=0` turns them off after the first crash, to see whether a
+program recovers from the crash alone.
+
 ## Checks from outside the program
 
 A program that exits 0 can still be wrong: it acknowledged a record a crash then lost, or

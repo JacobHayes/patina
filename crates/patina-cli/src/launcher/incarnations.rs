@@ -92,7 +92,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         return Err(format!("{} already holds a run", out.display()));
     }
     let deadline = t0 + std::time::Duration::from_secs(o.cfg.timeout);
-    let max = o.cfg.max_incarnations.max(1);
+    let max = o.plan.max_incarnations.max(1);
     let mut cfg = o.plan.faults;
     let mut seq0 = 0;
     let mut vclock0 = 0;

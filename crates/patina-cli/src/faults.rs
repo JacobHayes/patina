@@ -13,12 +13,17 @@ use crate::cli::Res;
 use proto::faults::{FClass, CRASH_MACHINE, CRASH_PROCESS};
 use serde_json::{json, Value};
 
+/// Incarnations a run may start when `max-incarnations` is not given.
+pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
+
 /// The fault plan of a run.
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub faults: proto::faults::FaultCfg,
-    /// `faults-in-recovery = false`: no faults other than crashes after the first crash.
+    /// `faults-in-recovery=0`: no faults other than crashes after the first crash.
     pub faults_in_recovery: bool,
+    /// `max-incarnations=N`: crashes stop once the run has started N incarnations.
+    pub max_incarnations: u64,
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
     /// `--buggify`, `buggify-permille=N`, `point:LABEL=N` (`proto::sdk`).
@@ -230,6 +235,18 @@ pub const KEYS: &[Key] = &[
         "no fault until the guest's SDK marks setup-complete",
     ),
     key(
+        "faults-in-recovery",
+        "0|1",
+        Val::Flag,
+        "after a crash, the other faults stay on (1) or go off for the rest of the run (0) [default: 1]",
+    ),
+    key(
+        "max-incarnations",
+        "N",
+        Val::Param,
+        "at most N incarnations: no crash in the N-th, so a run restarts at most N-1 times [default: 4]",
+    ),
+    key(
         "compute-gap",
         "G|A..B",
         Val::Gap,
@@ -433,7 +450,6 @@ pub fn resolve(
     presets: &[String],
     settings: &[String],
     crash: Option<&str>,
-    faults_in_recovery: bool,
 ) -> Res<Plan> {
     let mut given: Vec<(String, String)> = vec![];
     let mut set = |k: &str, v: &str| match given.iter_mut().find(|e| e.0 == k) {
@@ -468,7 +484,8 @@ pub fn resolve(
     let (lo, hi) = proto::compute::GAP_DEFAULT;
     let mut plan = Plan {
         faults: Default::default(),
-        faults_in_recovery,
+        faults_in_recovery: true,
+        max_incarnations: MAX_INCARNATIONS_DEFAULT,
         net: Default::default(),
         sdk: Default::default(),
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
@@ -564,6 +581,17 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         "mem-limit-mb" => {
             // A limit, not a draw: it holds whether or not other faults are active.
             f.mem_limit_bytes = n(v)?.saturating_mul(1 << 20);
+            return Ok(());
+        }
+        "faults-in-recovery" => {
+            o.faults_in_recovery = n(v)? != 0;
+            return Ok(());
+        }
+        "max-incarnations" => {
+            o.max_incarnations = n(v)?;
+            if o.max_incarnations == 0 {
+                return Err("--fault max-incarnations: at least 1".into());
+            }
             return Ok(());
         }
         // The `setup-complete` mark lowers it to its own sequence number.
@@ -754,12 +782,12 @@ mod tests {
     #[test]
     fn ranges_resolve_from_the_seed_and_only_from_it() {
         let disk = v(&["disk"]);
-        let a = resolve(1, &disk, &[], None, true).unwrap();
-        let b = resolve(1, &disk, &[], None, true).unwrap();
+        let a = resolve(1, &disk, &[], None).unwrap();
+        let b = resolve(1, &disk, &[], None).unwrap();
         assert_eq!(a.json(), b.json());
         let rates: std::collections::BTreeSet<u64> = (0..64)
             .map(|s| {
-                let p = resolve(s, &disk, &[], None, true).unwrap();
+                let p = resolve(s, &disk, &[], None).unwrap();
                 val(&p, "fs-short-permille").as_u64().unwrap()
             })
             .collect();
@@ -773,7 +801,7 @@ mod tests {
     fn one_setting_never_moves_another() {
         let disk = v(&["disk"]);
         for s in 0..32 {
-            let a = resolve(s, &disk, &[], Some("machine:0..5"), true).unwrap();
+            let a = resolve(s, &disk, &[], Some("machine:0..5")).unwrap();
             let b = resolve(
                 s,
                 &disk,
@@ -783,7 +811,6 @@ mod tests {
                     "mem-limit-mb=10..20",
                 ]),
                 Some("machine:0..5"),
-                true,
             )
             .unwrap();
             for (k, x) in &a.resolved {
@@ -797,17 +824,17 @@ mod tests {
 
     #[test]
     fn settings_replace_presets_and_unknowns_are_named() {
-        let p = resolve(3, &v(&["disk"]), &v(&["fs-error-permille=7"]), None, true).unwrap();
+        let p = resolve(3, &v(&["disk"]), &v(&["fs-error-permille=7"]), None).unwrap();
         assert_eq!(p.faults.fs_error_permille, 7);
-        assert!(resolve(0, &v(&["dsk"]), &[], None, true)
+        assert!(resolve(0, &v(&["dsk"]), &[], None)
             .unwrap_err()
             .contains("dsk"));
-        assert!(resolve(0, &[], &v(&["nope=1"]), None, true)
+        assert!(resolve(0, &[], &v(&["nope=1"]), None)
             .unwrap_err()
             .contains("nope"));
-        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), None, true).is_err());
-        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), None, true).is_err());
-        let c = resolve(0, &[], &[], Some("machine"), true).unwrap();
+        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), None).is_err());
+        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), None).is_err());
+        let c = resolve(0, &[], &[], Some("machine")).unwrap();
         assert_eq!(c.faults.crash_permille, CRASH_DEFAULT_PERMILLE);
     }
 
@@ -820,8 +847,8 @@ mod tests {
         ]);
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let p = resolve(s, &[], &at, Some("machine-at:10..20"), true).unwrap();
-            let q = resolve(s, &[], &at, Some("machine-at:10..20"), true).unwrap();
+            let p = resolve(s, &[], &at, Some("machine-at:10..20")).unwrap();
+            let q = resolve(s, &[], &at, Some("machine-at:10..20")).unwrap();
             assert_eq!(p.json(), q.json());
             let f = p.faults;
             assert!(
@@ -839,34 +866,34 @@ mod tests {
             seen.insert(f.fsync_error_at);
         }
         assert!(seen.len() > 1, "{seen:?}");
-        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None, true).is_err());
-        assert!(resolve(0, &[], &[], Some("machine-at:x"), true).is_err());
+        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None).is_err());
+        assert!(resolve(0, &[], &[], Some("machine-at:x")).is_err());
     }
 
     #[test]
     fn compute_gap_is_drawn_per_seed_and_never_swarmed() {
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let d = resolve(s, &[], &[], None, true).unwrap();
+            let d = resolve(s, &[], &[], None).unwrap();
             let (lo, hi) = proto::compute::GAP_DEFAULT;
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
             assert!(d.resolved.is_empty());
             seen.insert(d.compute_gap);
-            let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None, true).unwrap();
+            let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None).unwrap();
             assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
-            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None, true).unwrap();
+            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None).unwrap();
             assert!((100..=200).contains(&r.compute_gap));
             assert_eq!(val(&r, "compute-gap"), json!(r.compute_gap));
         }
         assert!(seen.len() > 8, "{seen:?}");
         assert_eq!(
-            resolve(0, &[], &v(&["compute-gap=0"]), None, true)
+            resolve(0, &[], &v(&["compute-gap=0"]), None)
                 .unwrap()
                 .compute_gap,
             0
         );
         for bad in ["compute-gap=0..8", "compute-gap=9..8", "compute-gap=x"] {
-            assert!(resolve(0, &[], &v(&[bad]), None, true).is_err(), "{bad}");
+            assert!(resolve(0, &[], &v(&[bad]), None).is_err(), "{bad}");
         }
     }
 
@@ -875,7 +902,7 @@ mod tests {
         let mut small = 0;
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..256 {
-            let p = resolve(s, &v(&["net"]), &[], None, true).unwrap();
+            let p = resolve(s, &v(&["net"]), &[], None).unwrap();
             let c = p.net.chunk_max;
             assert!(
                 (1..=65536).contains(&c) && val(&p, "net-chunk-max") == json!(c),
@@ -883,7 +910,7 @@ mod tests {
             );
             small += (c <= 16) as u32;
             seen.insert(c);
-            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), None, true).unwrap();
+            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), None).unwrap();
             assert_eq!(one.net.chunk_max, 7);
         }
         // Log-uniform: about a quarter of seeds at 16 bytes or less (uniform: one in 4096).
@@ -892,8 +919,8 @@ mod tests {
             "{small} {}",
             seen.len()
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None, true).is_err());
-        let g = resolve(0, &[], &v(&["net-chunk-gap-us=1..10"]), None, true).unwrap();
+        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None).is_err());
+        let g = resolve(0, &[], &v(&["net-chunk-gap-us=1..10"]), None).unwrap();
         assert_eq!(
             (
                 g.net.chunk_gap_set,
@@ -902,7 +929,7 @@ mod tests {
             ),
             (1, 1000, 10_000)
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-gap-us=5"]), None, true).is_err());
+        assert!(resolve(0, &[], &v(&["net-chunk-gap-us=5"]), None).is_err());
     }
 
     #[test]
@@ -910,7 +937,7 @@ mod tests {
         let all = v(&["all"]);
         let offs: std::collections::BTreeSet<usize> = (0..32)
             .map(|s| {
-                let p = resolve(s, &all, &v(&["swarm=1"]), None, true).unwrap();
+                let p = resolve(s, &all, &v(&["swarm=1"]), None).unwrap();
                 p.resolved.iter().filter(|e| e.1 == json!("off")).count()
             })
             .collect();

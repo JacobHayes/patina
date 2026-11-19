@@ -4,7 +4,8 @@
 # (ack-log, --faults disk --crash machine:0..30) leaves every other resolved value and the whole
 # boundary log equal. A net-partition window given as ranges (START 0..60000, LENGTH
 # 1000..10000 ms) is drawn per seed within them: seeds 1-4 resolve windows inside the ranges,
-# not all the same.
+# not all the same. max-incarnations on the command line bounds the restarts: a crash at
+# every crash point gives 4 incarnations by default and 2 with --fault max-incarnations=2.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/15
@@ -48,3 +49,9 @@ for s in 1 2 3 4; do
 done
 [ "$(printf '%s\n' $wins | sort -u | wc -l)" -gt 1 ] || die "net-partition: one window for every seed:$wins"
 echo "net-partition=0..60000+1000..10000 resolved per seed:$wins"
+for m in "" 2; do
+    run "$d/inc-$m" 1 --crash process:1000 ${m:+--fault max-incarnations=$m} -- /guest/ack-log correct
+    echo "max-incarnations ${m:-default}: $(field "$d/inc-$m/result.json" incarnations) incarnations"
+done
+[ "$(field "$d/inc-/result.json" incarnations)" = 4 ] && [ "$(field "$d/inc-2/result.json" incarnations)" = 2 ] ||
+    die "max-incarnations: $(field "$d/inc-/result.json" incarnations) by default, $(field "$d/inc-2/result.json" incarnations) with 2"
