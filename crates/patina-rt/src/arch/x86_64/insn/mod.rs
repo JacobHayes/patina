@@ -1,9 +1,9 @@
 //! x86_64's instruction rule and emulators (`crate::insn` holds the portable part).
 //!
 //! The rule is `proto::insn`: byte candidates (`0F C7 /6|/7` register forms, `F3 90`), each
-//! confirmed by a linear sweep from the nearest function symbol of the file (`.symtab`,
-//! `.dynsym`) or from the start of the mapping. A site is patched by overwriting its two
-//! opcode bytes with `ud2`.
+//! confirmed by a linear sweep from the nearest function start of the file (a `.symtab` or
+//! `.dynsym` function symbol, or a function the `.eh_frame_hdr` table lists) or from the start
+//! of the mapping. A site is patched by overwriting its two opcode bytes with `ud2`.
 
 pub mod emulate;
 pub mod tsc;
@@ -101,9 +101,9 @@ fn confirm_batch(
     }
 }
 
-/// For each candidate, the nearest function symbol at or before it inside the mapping (run-time
-/// address), from the file's `.symtab` and `.dynsym`. Leaves `starts` alone when the file has no
-/// usable headers.
+/// For each candidate, the nearest function start at or before it inside the mapping (run-time
+/// address): a function symbol of the file's `.symtab` and `.dynsym`, or a function its
+/// `.eh_frame_hdr` table lists. Leaves `starts` alone when the file has no usable headers.
 fn symbol_starts(f: FileId, va: u64, len: u64, cands: &[usize], starts: &mut [u64]) {
     let mut eh = [0u8; 64];
     if !pread(f.fd, &mut eh, 0) || &eh[..4] != b"\x7fELF" || eh[4] != 2 {
@@ -112,6 +112,8 @@ fn symbol_starts(f: FileId, va: u64, len: u64, cands: &[usize], starts: &mut [u6
     // Load bias: the PT_LOAD that holds the mapping's file offset gives link address -> va.
     let (phoff, phentsize, phnum) = (le64(&eh, 0x20), le16(&eh, 0x36), le16(&eh, 0x38));
     let mut bias = None;
+    // The unwind table's header: file offset and link-time address.
+    let mut hdr = None;
     let mut ph = [0u8; 56];
     for i in 0..phnum.min(64) {
         if !pread(f.fd, &mut ph, phoff + i * phentsize) {
@@ -119,19 +121,62 @@ fn symbol_starts(f: FileId, va: u64, len: u64, cands: &[usize], starts: &mut [u6
         }
         let (typ, off, vaddr, filesz) =
             (le32(&ph, 0), le64(&ph, 8), le64(&ph, 0x10), le64(&ph, 0x20));
-        if typ == 1 && f.off >= off && f.off < off + filesz.max(1) {
+        if typ == 1 && bias.is_none() && f.off >= off && f.off < off + filesz.max(1) {
             bias = Some(va.wrapping_sub(vaddr.wrapping_add(f.off - off)));
-            break;
+        }
+        if typ == proto::insn::PT_GNU_EH_FRAME as u64 && hdr.is_none() {
+            hdr = Some((off, vaddr));
         }
     }
     let Some(bias) = bias else { return };
-    let (shoff, shentsize, shnum) = (le64(&eh, 0x28), le16(&eh, 0x3a), le16(&eh, 0x3c));
-    if shoff == 0 || shentsize != 64 {
-        return;
-    }
-    let mut sh = [0u8; 64];
-    let mut buf = [0u8; 24 * 170];
     let end = va + len;
+    // A function start starts the sweep of every candidate at or after it: note it at the
+    // first such candidate; the prefix maximum at the end carries it forward.
+    let mut note = |link: u64| {
+        let a = link.wrapping_add(bias);
+        if a < va || a >= end {
+            return;
+        }
+        let j = cands.partition_point(|&c| va + (c as u64) < a);
+        if j < cands.len() && starts[j] < a {
+            starts[j] = a;
+        }
+    };
+    let mut buf = [0u8; 24 * 170];
+    if let Some((off, vaddr)) = hdr {
+        let mut h = [0u8; 12];
+        if let Some((table, n)) = pread(f.fd, &mut h, off)
+            .then(|| proto::insn::eh_frame_table(&h))
+            .flatten()
+        {
+            let (mut done, size) = (0, n * 8);
+            while done < size {
+                let chunk = (size - done).min(buf.len() as u64) / 8 * 8;
+                if chunk == 0 || !pread(f.fd, &mut buf[..chunk as usize], off + table + done) {
+                    break;
+                }
+                for e in buf[..chunk as usize].as_chunks::<8>().0 {
+                    note(proto::insn::fde_start(vaddr, e));
+                }
+                done += chunk;
+            }
+        }
+    }
+    let (shoff, shentsize, shnum) = (le64(&eh, 0x28), le16(&eh, 0x3a), le16(&eh, 0x3c));
+    if shoff != 0 && shentsize == 64 {
+        section_symbols(f, shoff, shnum, &mut buf, &mut note);
+    }
+    // Candidates are in address order: each starts at the nearest function start before it.
+    for j in 1..cands.len() {
+        if starts[j] < starts[j - 1] {
+            starts[j] = starts[j - 1];
+        }
+    }
+}
+
+/// Every function symbol's link-time address in the file's `.symtab` and `.dynsym`.
+fn section_symbols(f: FileId, shoff: u64, shnum: u64, buf: &mut [u8], note: &mut impl FnMut(u64)) {
+    let mut sh = [0u8; 64];
     for i in 0..shnum.min(256) {
         if !pread(f.fd, &mut sh, shoff + i * 64) {
             return;
@@ -156,27 +201,11 @@ fn symbol_starts(f: FileId, va: u64, len: u64, cands: &[usize], starts: &mut [u6
                     continue; // STT_FUNC only
                 }
                 let v = le64(e, 8);
-                if v == 0 {
-                    continue;
-                }
-                let a = v.wrapping_add(bias);
-                if a < va || a >= end {
-                    continue;
-                }
-                // The symbol starts the sweep of every candidate at or after it: note it at
-                // the first such candidate; the prefix maximum below carries it forward.
-                let j = cands.partition_point(|&c| va + (c as u64) < a);
-                if j < cands.len() && starts[j] < a {
-                    starts[j] = a;
+                if v != 0 {
+                    note(v);
                 }
             }
             done += chunk;
-        }
-    }
-    // Candidates are in address order: each starts at the nearest symbol at or before it.
-    for j in 1..cands.len() {
-        if starts[j] < starts[j - 1] {
-            starts[j] = starts[j - 1];
         }
     }
 }

@@ -5,7 +5,8 @@
 //! The rule: a candidate is the byte pair `0F C7` followed by a register ModRM (mod = 3) whose
 //! reg field is 6 or 7 (`rdrand`, `rdseed`, and with an `F3` prefix `rdpid`), or the pair
 //! `F3 90` (`pause`). It is accepted only when a linear sweep, started at a known instruction
-//! boundary at or before it (the nearest function symbol, else the start of the mapping),
+//! boundary at or before it (the nearest function start: a function symbol of `.symtab` or
+//! `.dynsym`, or a function `.eh_frame_hdr`'s table lists; else the start of the mapping),
 //! lands on an instruction whose opcode bytes are exactly the candidate (for `pause`: an
 //! instruction that starts at the `F3` and is those two bytes). Bytes that sit inside another
 //! instruction (an immediate, a displacement) or that the sweep skips are rejected and counted.
@@ -359,9 +360,32 @@ pub fn candidates(code: &[u8], mut f: impl FnMut(usize)) {
     }
 }
 
-/// Where the sweep for a candidate at `cand` starts: the nearest function symbol at or before
-/// it inside the mapping that starts at `seg`, else `seg` itself. Symbols are run-time
-/// addresses (any order).
+/// `PT_GNU_EH_FRAME`: the program header type of `.eh_frame_hdr`.
+pub const PT_GNU_EH_FRAME: u32 = 0x6474_e550;
+
+/// The search table of an `.eh_frame_hdr` whose first 12 bytes are `h`: the offset of its
+/// first entry from the header and the number of entries. Each entry is 8 bytes, its first 4 a
+/// function's start relative to the header (`fde_start`). Only the encoding every toolchain
+/// writes is read (version 1, a 4-byte `eh_frame_ptr`, `udata4` count, `datarel|sdata4`
+/// table); any other answers None and the sweep starts are the symbols alone.
+pub fn eh_frame_table(h: &[u8; 12]) -> Option<(u64, u64)> {
+    let size4 = matches!(h[1] & 0x0f, 0x03 | 0x0b);
+    if h[0] != 1 || !size4 || h[2] != 0x03 || h[3] != 0x3b {
+        return None;
+    }
+    Some((12, u32::from_le_bytes([h[8], h[9], h[10], h[11]]) as u64))
+}
+
+/// The function start (link-time address) of a search-table entry of the `.eh_frame_hdr` at
+/// link-time address `hdr`.
+pub fn fde_start(hdr: u64, entry: &[u8; 8]) -> u64 {
+    hdr.wrapping_add(i32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]) as i64 as u64)
+}
+
+/// Where the sweep for a candidate at `cand` starts: the nearest function start at or before
+/// it inside the mapping that starts at `seg`, else `seg` itself. Function starts (a function
+/// symbol, or the start of a function the unwind table describes) are run-time addresses (any
+/// order).
 pub fn sweep_start(cand: u64, seg: u64, syms: impl Iterator<Item = u64>) -> u64 {
     let mut best = seg;
     for s in syms {

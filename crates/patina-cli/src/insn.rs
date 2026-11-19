@@ -20,10 +20,33 @@ fn u64_at(d: &[u8], o: usize) -> u64 {
     u64::from_le_bytes(d[o..o + 8].try_into().unwrap())
 }
 
-/// Function symbol addresses (link-time) from `.symtab` and `.dynsym`.
+/// Function starts (link-time): the function symbols of `.symtab` and `.dynsym`, and the
+/// functions the `.eh_frame_hdr` table lists (the runtime's sweep starts).
 #[cfg(target_arch = "x86_64")]
 pub fn func_symbols(d: &[u8]) -> Vec<u64> {
     let mut out = vec![];
+    let phoff = u64_at(d, 0x20) as usize;
+    let (phentsize, phnum) = (u16_at(d, 0x36) as usize, u16_at(d, 0x38) as usize);
+    for i in 0..phnum.min(64) {
+        let p = phoff + i * phentsize;
+        if p + 56 > d.len() || u32_at(d, p) != proto::insn::PT_GNU_EH_FRAME as u64 {
+            continue;
+        }
+        let (off, vaddr) = (u64_at(d, p + 8) as usize, u64_at(d, p + 0x10));
+        let Some(h) = d.get(off..off + 12) else { break };
+        if let Some((table, n)) = proto::insn::eh_frame_table(h.try_into().unwrap()) {
+            let t = off + table as usize;
+            for e in d
+                .get(t..t + 8 * n as usize)
+                .unwrap_or(&[])
+                .as_chunks::<8>()
+                .0
+            {
+                out.push(proto::insn::fde_start(vaddr, e));
+            }
+        }
+        break;
+    }
     let shoff = u64_at(d, 0x28) as usize;
     let (shentsize, shnum) = (u16_at(d, 0x3a) as usize, u16_at(d, 0x3c) as usize);
     if shoff == 0 || shoff + shnum * shentsize > d.len() {

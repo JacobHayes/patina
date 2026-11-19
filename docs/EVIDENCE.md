@@ -673,6 +673,7 @@ exclusive emulation were also run there with a software event standing in for th
 | W9 with crashes and filesystem faults | 38.9 ms per run, 148.6 runs/s (1.92x no-fault) |
 | Crash materialisation | ~3 ms per MB of log |
 | `fork`+`execve`+`wait` of a dynamic program | 1.5 ms (native 0.38 ms; mostly the instruction scan) |
+| Instruction scan, x86_64, of a stripped 170 MB text (headless Chromium, `--dump-dom` of a small page: 4 processes map it) | sweeps from the symbols alone 373 ms per mapping, the run 2.04 s; with the `.eh_frame_hdr` function starts too 54 ms, the run 0.77 s (2026-11-19). Verdicts of the two rules on every candidate of 3,405 x86_64 ELF files of this host (`/usr`, the toolchains, the guest set, Chromium; 18,239 candidates): identical; the guest ledger's 90 digests: identical |
 | `--preempt branches` | 9.7 µs per trap, 1.7-2.3 ms per preemption, W1-W9 wall x0.6 to x6.5 (W1 x6.5, W2 x4.4, the rest under x2); arm64 (runner): 1.3 µs per trap, 2.6-3.4 ms per preemption, W1-W9 x0.66 to x2.0 |
 | `--mount DIR:/guest:copy` copy into tmpfs | ~0.3 ms per MB |
 
