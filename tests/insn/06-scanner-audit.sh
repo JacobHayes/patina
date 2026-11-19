@@ -37,5 +37,5 @@ echo "== decoder lengths vs objdump"
 for f in $files; do
     r=$(objdump -d -w -z "$f" | "$PATINA" __insn-scan --decode-check | tail -1)
     echo "  $f $r"
-    echo "$r" | grep -q 'mismatches=0' || die "decoder: $r"
+    grep -q 'mismatches=0' <<<"$r" || die "decoder: $r"
 done

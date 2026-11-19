@@ -23,7 +23,8 @@ grep -q '^cpus 4$' "$s" || die "CPU count: $(grep '^cpus' "$s")"
 awk '/^[0-9]+ [0-9]+ [0-9]+:[0-9]+ / { split($3, d, ":"); if (d[1] != 0 || ($6 != "ro" && $6 != "rw") || $0 ~ /[ ,][ug]id=/) { print; bad = 1 } }
      END { exit bad }' "$s" >"$out/mountinfo.bad" || die "mount table: $(head -2 "$out/mountinfo.bad")"
 "$PATINA" log dump "$out/plain/inc-0/boundary.log" >"$out/plain.dump"
-grep ' getppid ' "$out/plain.dump" | grep -q 'args=\[0x0, 0x0, 0x0, 0x0, 0x0, 0x0\]' ||
+grep ' getppid ' "$out/plain.dump" >"$out/getppid.txt"
+grep -q 'args=\[0x0, 0x0, 0x0, 0x0, 0x0, 0x0\]' "$out/getppid.txt" ||
     die "getppid recorded with leftover registers: $(grep ' getppid ' "$out/plain.dump" | head -1)"
 run wrapped "$G17/seccomp-wrap"
 lhs=$(digest "$out/wrapped"); rhs=$(digest "$out/plain")

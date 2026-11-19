@@ -20,7 +20,7 @@ native() { # [-s N] WANT PROG ARGS...: natively, exit 0 (or N) and the output ma
     st=0; timeout 20 "$@" >"$o/native.out" 2>&1 || st=$?
     out=$(tail -3 "$o/native.out" | paste -sd'|')
     [ "$st" = 0 ] || [ "$st" = "$may" ] || die "a. $*: natively: exit $st: $out"
-    echo "$out" | grep -q "$want" || die "a. $*: natively printed $out"
+    grep -q "$want" <<<"$out" || die "a. $*: natively printed $out"
 }
 native 'balance=0 withdrawn=100 ok$' "$C/races-gcc" b
 # pool's race (unsynchronised counters) can show natively too, as in 03-inert: then it exits 1.
@@ -29,7 +29,7 @@ for p in cxx cxx-gcc; do native '^ctor ok|total=6000 caught=60 ok|dtor ok$' "$C/
 for p in shlib shlib-stock; do native 'compdl=29992,29992 ok$' "$C/$p"; done
 for f in "$C"/libcomp.so "$C"/libcompdl.so "$C"/shlib "$C"/cxx "$C"/cxx-gcc; do
     syms=$(readelf -W --dyn-syms "$f")
-    case $syms in *__sanitizer_cov*) die "a. $f exports a hook: $(printf '%s\n' "$syms" | grep -m1 __sanitizer_cov)" ;; esac
+    case $syms in *__sanitizer_cov*) die "a. $f exports a hook: $(grep -m1 __sanitizer_cov <<<"$syms")" ;; esac
 done
 echo "a. the guests run natively with their normal output; no image exports a hook"
 

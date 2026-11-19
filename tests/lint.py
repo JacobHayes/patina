@@ -23,6 +23,9 @@ install.sh, examples/checks/):
               [ "$(A)" = "$(B)" ] (both fail: both empty), [ "$(A | wc -l)" = 0 ] (or -le, -lt):
               [ ] does not see A's status, even under pipefail. Assign it first (n=$(A)), where
               strict mode sees it.
+  echo-grep   `echo "$x" | grep -q PAT` (or printf, or grep -m): grep exits at its first match while
+              echo may still be writing; echo dies of SIGPIPE and pipefail fails the check now and
+              then. Use a here-string: `grep -q PAT <<<"$x"`.
   subst-status  local/export/readonly/declare x=$(cmd): the builtin's status hides cmd's.
   cd          an unguarded cd in a function: a caller's `if f`/`f ||` turns -e off inside it.
   rm-var      rm -r of a path that starts with a variable without ${VAR:?}: empty, it is /.
@@ -39,8 +42,8 @@ to helpers positionally, `timeout N` used as a bound, a finding asserted more th
 its run, and clock values passed through files or function output; `|| true` after one command
 (mostly `patina run ... || true`, whose outcome is read from result.json next), a function whose
 failure a caller tests (`f || die`: -e is off inside f, so f must return its own status), a
-reader that stops early (head, grep -q, awk exit) before a writer that is still writing (pipefail
-then fails it: red, not silent), and backquotes. Prints FILE:LINE: RULE: text.
+reader that stops early (head, grep -q, awk exit) before a writer other than echo that is still
+writing (pipefail then fails it: red, not silent), and backquotes. Prints FILE:LINE: RULE: text.
 """
 import ast
 import os
@@ -166,6 +169,7 @@ TEST = re.compile(r"(?<![\w\]\[])\[ (?:[^]\n]|\$\([^\n]*?\))*? \]")
 VACUOUS = re.compile(r"-z \"?\$\(|\$\([^\n]*\)\"? != |!= \"?\$\(|\$\((?![(]|printf |echo )[^\n]*\)\"? = \"?\$\((?![(]|printf |echo )")
 VACUOUS_NUM = re.compile(r"\)\"? (?:-le|-lt|-ne|(?:=|-eq) \"?0\"? )")
 NEGATED = re.compile(r"(?:^|[;&|(]|\b(?:then|do|else|if|while|until)\b)[ \t]*(?P<neg>!)[ \t]|&&\s*(?:die|fail)\b", re.M)
+ECHOGREP = re.compile(r"(?:^|[;&|({]|\b(?:then|do|else|if|while|until)\b)\s*(?:echo|printf)\s[^;&|\n]*\|(?!\|)\s*grep\s(?:[^;&|\n]*\s)?(?:-[A-Za-z]*[qm]|--(?:quiet|silent|max-count))")
 SETOFF = re.compile(r"\bset\s+\+(?:[a-z]*[eu][a-z]*\b|o\s+(?:pipefail|errexit|nounset)\b)|\bshopt\s+-u\s+inherit_errexit\b")
 PLAINSH = re.compile(r"(?:^|[;&|(]|\b(?:then|do|else|exec)\b|\bxargs\b[^;&|'\"]*?)\s*(?:\w+=\S*\s+)*\bsh\s+(?=-c\b|[\"$\w./])")
 
@@ -222,6 +226,8 @@ def shell_lint(path, own):
             found.append((i, "subst-status"))
         if SETOFF.search(line):
             found.append((i, "set-off"))
+        if ECHOGREP.search(line):
+            found.append((i, "echo-grep"))
         if PLAINSH.search(line):
             found.append((i, "plain-sh"))
         m = RM.search(lines[i])

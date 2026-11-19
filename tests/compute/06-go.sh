@@ -23,11 +23,11 @@ grep -q libfuzzerTrace "$C/go-deadline" || die "a. go-deadline has no hook"
 echo "a. the guests build; the flag without the package does not link; the package without the flag adds no hook"
 
 out=$(timeout 20 "$C/go-race" | tail -1) || true
-echo "$out" | grep -q '^rounds=16 \(ok$\|.*DOUBLE-SPEND$\)' || die "b. go-race natively printed $out"
+grep -q '^rounds=16 \(ok$\|.*DOUBLE-SPEND$\)' <<<"$out" || die "b. go-race natively printed $out"
 out=$(timeout 20 "$C/go-race" boolspin | tail -1) || true
 [ "$out" = "boolspin ok" ] || die "b. go-race boolspin natively printed $out"
 out=$(timeout 20 "$C/go-deadline" 134217728 | tail -1) || true
-echo "$out" | grep -q ' deadline$' || die "b. go-deadline natively printed $out"
+grep -q ' deadline$' <<<"$out" || die "b. go-deadline natively printed $out"
 echo "b. the guests run natively with their normal output"
 
 # At most 2^27 iterations: 2^28 events, about 5 times what reaching the deadline takes.

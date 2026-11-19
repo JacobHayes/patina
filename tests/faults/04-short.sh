@@ -8,7 +8,7 @@ for mode in correct naive; do
     out=$(cat "$o/run-0/inc-0/stdout")
     echo "$mode: $out ($(field "$o/run-0/result.json" faults.injected) short transfers injected)"
     case $mode in
-        correct) echo "$out" | grep -q "^copy OK" || die "correct loops: $out" ;;
-        naive) echo "$out" | grep -q "^copy BAD" || die "naive code not detected: $out" ;;
+        correct) grep -q "^copy OK" <<<"$out" || die "correct loops: $out" ;;
+        naive) grep -q "^copy BAD" <<<"$out" || die "naive code not detected: $out" ;;
     esac
 done

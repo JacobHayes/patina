@@ -18,9 +18,9 @@ for n in $(seq 1 24); do
     seen="$seen$f"
 done
 for k in 0 1 2 3 4; do
-    echo "$seen" | grep -q "step $k mmap ENOMEM" || die "mmap step $k never saw ENOMEM"
+    grep -q "step $k mmap ENOMEM" <<<"$seen" || die "mmap step $k never saw ENOMEM"
 done
-echo "$seen" | grep -q "step 10 thread EAGAIN" || die "thread creation never failed with EAGAIN"
+grep -q "step 10 thread EAGAIN" <<<"$seen" || die "thread creation never failed with EAGAIN"
 # The order: the failing mmap step follows N.
 prev=-1
 for n in $(seq 1 24); do

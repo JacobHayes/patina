@@ -37,5 +37,5 @@ print(f"{n} (command, flag) pairs parse; {len(h['commands'])} commands")
 PY
 # --version: exit 0, `patina X.Y.Z[-pre]` (the release workflow reads it).
 v=$("$PATINA" --version) || die "--version: exit $?"
-echo "$v" | grep -Eq '^patina [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || die "--version: $v"
+grep -Eq '^patina [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' <<<"$v" || die "--version: $v"
 echo "--version: $v"

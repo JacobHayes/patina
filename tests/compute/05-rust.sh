@@ -17,9 +17,9 @@ o=$RUNS/05-rust
 mkdir -p "$o"
 C=$G/compute
 out=$(timeout 20 "$C/rs-race" 2>&1) || true
-echo "$out" | grep -Eq '^balance=-?[0-9]+ withdrawn=[0-9]+ (ok|DOUBLE-SPEND)$' || die "a. rs-race natively: $out"
+grep -Eq '^balance=-?[0-9]+ withdrawn=[0-9]+ (ok|DOUBLE-SPEND)$' <<<"$out" || die "a. rs-race natively: $out"
 out=$(timeout 20 "$C/rs-deadline" 2>&1) || true
-echo "$out" | grep -q '^deadline after [0-9.]* ms, [0-9]* rounds' || die "a. rs-deadline natively: $out"
+grep -q '^deadline after [0-9.]* ms, [0-9]* rounds' <<<"$out" || die "a. rs-deadline natively: $out"
 echo "a. rs-race and rs-deadline run natively with their normal output"
 
 hunt "$o" race 40 --fault compute-gap=2 -- /guest/compute/rs-race
