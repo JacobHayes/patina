@@ -90,6 +90,7 @@ pub fn scan_exec(va: u64, len: u64, file: Option<FileId>, writable: bool, prot: 
     let (mut n, mut fits) = (0, key.is_some() && kept.is_none());
     match kept {
         Some(vs) => {
+            bump(&c.insn.reused_mappings, 1);
             for &v in vs {
                 crate::arch::insn::apply(va, v >> 8, v as u8, writable, prot | PROT_READ);
             }

@@ -261,6 +261,7 @@ pub struct InsnCounts {
     pub counted_sites: u64,
     pub scanned_mappings: u64,
     pub scanned_bytes: u64,
+    pub reused_mappings: u64,
     pub table_full: u64,
 }
 
@@ -279,6 +280,7 @@ impl InsnCounts {
         o.counted_sites = c.counted_sites.load(Relaxed);
         o.scanned_mappings = c.scanned_mappings.load(Relaxed);
         o.scanned_bytes = c.scanned_bytes.load(Relaxed);
+        o.reused_mappings = c.reused_mappings.load(Relaxed);
         o.table_full = c.table_full.load(Relaxed);
         o
     }
@@ -294,6 +296,7 @@ impl InsnCounts {
         self.counted_sites += b.counted_sites;
         self.scanned_mappings += b.scanned_mappings;
         self.scanned_bytes += b.scanned_bytes;
+        self.reused_mappings += b.reused_mappings;
         self.table_full += b.table_full;
     }
     fn json(&self) -> Value {
@@ -318,6 +321,7 @@ impl InsnCounts {
             "scan": {
                 "mappings": self.scanned_mappings,
                 "bytes": self.scanned_bytes,
+                "reused_mappings": self.reused_mappings,
                 "rejected_sites": self.rejected_sites,
                 counted: self.counted_sites,
                 "table_full": self.table_full,

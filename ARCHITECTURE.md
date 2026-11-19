@@ -288,7 +288,8 @@ code generated at run time (a JIT) is not scanned for the others, and such mappi
 counted in `result.json` (`unscanned_exec_mappings`). A mapping of a file on a read-only mount
 is scanned once per run: its verdicts are kept in the control region (`proto::ctl::ScanTab`),
 and another process that maps the same bytes the same way applies them, in the same order,
-without scanning (`insn/scan.rs`). `MADV_DONTNEED` over patched code drops
+without scanning (`insn/scan.rs`; counted in `result.json` as `scan.reused_mappings`).
+`MADV_DONTNEED` over patched code drops
 the patched copy of the page; the runtime patches its sites again.
 
 On arm64 the scan is a compare under a mask of each aligned word of a file's executable

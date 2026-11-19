@@ -374,6 +374,9 @@ pub struct InsnCtl {
     /// Executable file mappings scanned, and their bytes.
     pub scanned_mappings: AtomicU64,
     pub scanned_bytes: AtomicU64,
+    /// Of the scanned mappings, those that took the verdicts of an earlier scan of the same
+    /// bytes in the run (`ScanTab`) instead of decoding them again.
+    pub reused_mappings: AtomicU64,
     /// Sites that could not be recorded because the side table was full (also rejected).
     pub table_full: AtomicU64,
 }
