@@ -55,7 +55,8 @@ Compared line by line, exactly, after these, applied to both sides:
   `again in 0.0s`         a recheck's wall time
   `cpu 23` in verify      the host CPU a verify run was placed on
   `(seed 1: ...seed-1)`   in a `new:` line, the run of the new group that finished first
-and, where the numbers are not compared: a 16-digit hash is H, every number N, and a word after
+and a sweep's progress line (`sweep: 3/8 runs, ...`, printed every 10 s of wall time when not on
+a terminal) is dropped from the command's output; where the numbers are not compared: a 16-digit hash is H, every number N, and a word after
 a number loses a plural `s` (`1 group`, `3 groups`).
 Trailing spaces are ignored. A mismatch prints the file, the block, its line and a diff.
 """
@@ -84,6 +85,9 @@ HOST = [
     # not always the same one (the group's `first:` below is its lowest seed).
     (re.compile(r"^(new.*   \(seed )\S+(: patina replay \S+/seed-)\S+\)$"), r"\1S\2S)"),
 ]
+# A sweep's status line, printed every 10 s of wall time off a terminal: on a slow host, also
+# in a doc's command.
+PROGRESS = re.compile(r"^sweep: \d+/\d+ runs, .* running, \d+\.\d+ runs/s, ")
 # The kind of host the docs' numbers are from (the hash host_kind() prints).
 REFERENCE = "3a30419beb30fdd4"
 
@@ -242,6 +246,8 @@ def norm(lines, structure):
     out = []
     for line in lines:
         line = line.rstrip()
+        if PROGRESS.match(line):
+            continue
         if line != "...":
             for pat, rep in HOST:
                 line = pat.sub(rep, line)
