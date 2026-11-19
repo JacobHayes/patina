@@ -173,7 +173,7 @@ fn command_reaches(u: proto::table::cmds::Use, p: u64) -> bool {
 }
 
 /// `execve`'s limits: strings per vector (beyond: E2BIG first) and bytes per string.
-const MAX_STRINGS: u64 = 1 << 16;
+const MAX_STRINGS: u64 = crate::exec::MAX_STRINGS as u64 + 1;
 const MAX_ARG_STRLEN: u64 = 32 * 4096;
 
 /// A path-length string (at most 4096 bytes) that runs into the region before it ends.

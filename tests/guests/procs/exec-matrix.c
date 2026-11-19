@@ -4,6 +4,8 @@
  * descriptor 6 close-on-exec, EXEC_SHOW_ENV=<method>:<target> in the environment, wait for it and
  * print its status. Then the failures: each method reports the errno the kernel gives (also
  * E2BIG for an argument longer than the kernel copies and for vectors past its total bound).
+ * Then 40000 short arguments (within the kernel's bound in bytes) by each method, and 300000
+ * (whose pointers alone pass it).
  * Output lines: "== <method> <target>" then the child's own lines, then "status <n>";
  * "fail <method> <case> <errno name>". */
 #include <errno.h>
@@ -45,6 +47,11 @@ static char longarg[32 * 4096 + 1];
 static char bigarg[120000 + 1];
 static char *longav[] = {"x", longarg, NULL};
 static char *bigav[66];
+/* MANY short strings fit any host's bound (a quarter of an 8 MiB stack limit); TOO_MANY's
+ * pointers alone (8 MB) are past the most any host allows (6 MiB, whatever the stack limit). */
+#define MANY 40000
+#define TOO_MANY 1000000
+static char *manyav[TOO_MANY + 1];
 
 static volatile int vfork_errno;
 
@@ -134,6 +141,24 @@ int main(int argc, char **argv) {
                 printf("fail %s %s %s\n", methods[m], name, ename(-c));
             }
         }
+    }
+    for (int i = 0; i < TOO_MANY; i++) manyav[i] = i < MANY ? "a" : "";
+    for (int m = 0; m < 3; m++) {
+        char *ev[] = {"PATH=/usr/bin:/bin", NULL};
+        manyav[MANY] = NULL;
+        printf("== %s many\n", methods[m]);
+        int c = start(methods[m], "/guest/exec-show-static", manyav, ev);
+        if (c < 0) {
+            printf("start failed %s\n", ename(-c));
+        } else {
+            int st;
+            waitpid(c, &st, 0);
+            printf("status %d\n", st);
+        }
+        manyav[MANY] = "";
+        c = start(methods[m], "/guest/exec-show-static", manyav, ev);
+        printf("fail %s toomany %s\n", methods[m], c < 0 ? ename(-c) : "started");
+        if (c >= 0) waitpid(c, NULL, 0);
     }
     return 0;
 }

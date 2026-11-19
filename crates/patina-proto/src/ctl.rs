@@ -980,7 +980,6 @@ setup_steps! {
     PhdrNotLoaded = "program headers are not inside a loaded segment",
     Brk = "cannot reserve brk",
     Stack = "cannot map the guest stack",
-    TooManyArgs = "too many arguments or environment strings",
     AltStack = "cannot map alternate stack",
     CtlMap = "cannot map control region (descriptor 3000)",
     CtlCheck = "control region magic or layout mismatch",

@@ -20,8 +20,17 @@ def kv(line):
 
 if mode == "matrix":
     blocks = re.split(r"^== ", text, flags=re.M)[1:]
-    fails = [l for l in blocks[-1].splitlines() if l.startswith("fail ")] if blocks else []
+    fails = [l for l in text.splitlines() if l.startswith("fail ")]
+    many = [b for b in blocks if b.split()[1] == "many"]
+    blocks = [b for b in blocks if b.split()[1] != "many"]
     need(len(blocks) == 24, f"{len(blocks)} started children, expected 24")
+    need(len(many) == 3, f"{len(many)} children with many arguments, expected 3")
+    for b in many:
+        f = kv(b)
+        n = 40000
+        need(f.get("argc") == str(n) and f.get("cmdline") == str(n) and f.get("bytes") == str(2 * n),
+             f"many arguments: {b.splitlines()[:2]}")
+        need("status 0" in b.splitlines(), f"many arguments: {b.splitlines()}")
     for b in blocks:
         lines = b.splitlines()
         method, target = lines[0].split()
@@ -49,7 +58,7 @@ if mode == "matrix":
         need(f.get("fds") == "0,1,2,5,", f"{method} {target}: fds {f.get('fds')}")
         need(f.get("hidden", "").startswith("-1,Bad file descriptor"), f"{method} {target}: hidden {f.get('hidden')}")
         need(f.get("status") == "0", f"{method} {target}: status {f.get('status')}")
-    want = {"missing": "ENOENT", "noexec": "EACCES", "plain": "ENOEXEC", "directory": "EACCES", "longarg": "E2BIG", "bigvec": "E2BIG"}
+    want = {"missing": "ENOENT", "noexec": "EACCES", "plain": "ENOEXEC", "directory": "EACCES", "longarg": "E2BIG", "bigvec": "E2BIG", "toomany": "E2BIG"}
     got = {}
     for l in fails:
         _, method, case, res = l.split(None, 3)

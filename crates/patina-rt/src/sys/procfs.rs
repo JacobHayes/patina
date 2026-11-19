@@ -49,27 +49,13 @@ pub fn mark(fd: i64, k: Option<Synth>) {
 
 // ---- the guest's arguments and environment (for cmdline/environ) ----
 
-const MAX_STRS: usize = 4096;
-struct Strs {
-    args: [u64; MAX_STRS],
-    nargs: usize,
-    env: [u64; MAX_STRS],
-    nenv: usize,
-}
-static STRS: Global<Strs> = Global::new(Strs {
-    args: [0; MAX_STRS],
-    nargs: 0,
-    env: [0; MAX_STRS],
-    nenv: 0,
-});
+/// Where the loader placed the argument and environment strings: [low, high, count] each,
+/// the first string at the top, each below the one before (`loader::start`).
+static STRS: Global<[[u64; 3]; 2]> = Global::new([[0; 3]; 2]);
 
 /// Called by the loader: where the guest's argument and environment strings are.
-pub fn note_strings(args: &[u64], env: &[u64]) {
-    let s = STRS.get();
-    s.nargs = args.len().min(MAX_STRS);
-    s.args[..s.nargs].copy_from_slice(&args[..s.nargs]);
-    s.nenv = env.len().min(MAX_STRS);
-    s.env[..s.nenv].copy_from_slice(&env[..s.nenv]);
+pub fn note_strings(args: [u64; 3], env: [u64; 3]) {
+    *STRS.get() = [args, env];
 }
 
 // ---- output buffer ----
@@ -404,11 +390,21 @@ fn tmpfs_opts(w: &mut W, sopts: &[u8], point: &[u8]) {
     }
 }
 
-fn strings(w: &mut W, v: &[u64]) {
-    for &p in v {
-        if p != 0 {
-            w.s(unsafe { crate::loader::cstr(p as *const u8) }).c(0);
+/// The strings of one block (`note_strings`), first to last, as they are now in memory.
+fn strings(w: &mut W, [lo, hi, n]: [u64; 3]) {
+    let byte = |a: u64| unsafe { *(a as *const u8) };
+    let mut end = hi; // one past the NUL of the next string
+    for _ in 0..n {
+        if end <= lo {
+            break;
         }
+        let mut s = end - 1;
+        while s > lo && byte(s - 1) != 0 {
+            s -= 1;
+        }
+        w.s(unsafe { core::slice::from_raw_parts(s as *const u8, (end - 1 - s) as usize) })
+            .c(0);
+        end = s;
     }
 }
 
@@ -566,8 +562,8 @@ fn content(k: Synth, w: &mut W) {
         }
         Synth::Mountinfo => mountinfo(w, false),
         Synth::Mounts => mountinfo(w, true),
-        Synth::Cmdline => strings(w, &s.args[..s.nargs]),
-        Synth::Environ => strings(w, &s.env[..s.nenv]),
+        Synth::Cmdline => strings(w, s[0]),
+        Synth::Environ => strings(w, s[1]),
         Synth::Comm => {
             comm(w);
             w.c(b'\n');

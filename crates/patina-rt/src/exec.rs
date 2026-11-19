@@ -27,8 +27,22 @@ const AT_SYMLINK_NOFOLLOW: u64 = 0x100;
 const X_OK: u64 = 1;
 const AT_EACCESS: u64 = 0x200;
 const O_RDONLY_CLOEXEC: u64 = 0o2000000;
-/// The loader takes at most this many arguments and environment strings.
-const MAX_ARGS: usize = 4096;
+/// The kernel's bound on the strings and pointers `execve` copies (`bprm_stack_limits`): a
+/// quarter of the stack limit the guest sees (`sys::proc`), between 128 KiB and 6 MiB.
+pub const ARG_BYTES: usize = {
+    let q = crate::sys::proc::STACK_LIMIT as usize / 4;
+    if q < 128 << 10 {
+        128 << 10
+    } else if q > 6 << 20 {
+        6 << 20
+    } else {
+        q
+    }
+};
+/// More strings than this in the two vectors together: their pointers alone pass `ARG_BYTES`.
+pub const MAX_STRINGS: usize = ARG_BYTES / 8;
+/// The runtime's own argument vector: [rt, image, the `#!` prefix, the guest's arguments].
+const VEC_LEN: usize = MAX_STRINGS + 4 + 2 * MAX_DEPTH;
 
 /// What `execve` will run: the ELF image's canonical path and the `#!` prefix of the
 /// argument vector (outermost script first: interpreter, optional argument; then the script
@@ -479,21 +493,45 @@ fn count(v: u64) -> Result<(usize, usize), i64> {
         }
         bytes += len + 1;
         n += 1;
-        if n > MAX_ARGS {
+        if n > MAX_STRINGS {
             return Err(-e::E2BIG);
         }
     }
     Ok((n, bytes))
 }
 
-/// The kernel's bound on the strings and pointers `execve` copies (`bprm_stack_limits`): a
-/// quarter of the stack limit the guest sees (`sys::proc`), between 128 KiB and 6 MiB. The
-/// guest gets `E2BIG` for vectors the kernel would refuse, instead of the run failing when
-/// the runtime re-executes itself.
+/// Vectors past `ARG_BYTES` (the guest gets `E2BIG` for vectors the kernel would refuse,
+/// instead of the run failing when the runtime re-executes itself).
 fn too_big(path_len: usize, nargs: usize, nenv: usize, bytes: usize) -> bool {
-    let limit = (crate::sys::proc::STACK_LIMIT as usize / 4).clamp(128 << 10, 6 << 20);
     let ptrs = (nargs.max(1) + nenv) * 8;
-    ptrs >= limit || bytes + path_len + 1 > limit - ptrs
+    ptrs >= ARG_BYTES || bytes + path_len + 1 > ARG_BYTES - ptrs
+}
+
+/// The memory of the runtime's argument vector (`VEC_LEN` words, mapped once per process and
+/// touched as far as used; the runtime's stack does not hold it).
+fn vec_scratch() -> &'static mut [u64] {
+    static AT: crate::path::Global<u64> = crate::path::Global::new(0);
+    let at = AT.get();
+    let size = ((VEC_LEN * 8) as u64 + 4095) & !4095;
+    if *at == 0 {
+        let a = crate::state::priv_alloc(size, 4096);
+        let r = unsafe {
+            sc6(
+                nr::MMAP,
+                a,
+                size,
+                PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE,
+                u64::MAX,
+                0,
+            )
+        };
+        if r as u64 != a {
+            crate::sup::host_error(r, nr::MMAP, proto::ctl::HE_SYSCALL);
+        }
+        *at = a;
+    }
+    unsafe { core::slice::from_raw_parts_mut(*at as *mut u64, VEC_LEN) }
 }
 
 /// `execve(path, argv, envp)` and `execveat(dirfd, path, argv, envp, flags)`.
@@ -546,7 +584,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
         return Action::Return(-e::E2BIG);
     }
     // The new argument vector: [rt, image, (#! prefix, innermost interpreter first), argv[1..]].
-    let mut v = [0u64; MAX_ARGS + 4 + 2 * MAX_DEPTH];
+    let v = vec_scratch();
     let mut n = 0;
     v[n] = c"rt".as_ptr() as u64;
     n += 1;
@@ -573,8 +611,18 @@ pub fn execve(call: &mut dyn Call) -> Action {
         }
     }
     v[n] = 0;
-    if n - 2 > MAX_ARGS || nenv > MAX_ARGS {
-        return Action::Return(-e::E2BIG);
+    // The runtime's own exec copies the image's path and the `#!` prefix besides: past the
+    // host's bound (the same `ARG_BYTES`) where the guest's vector was within it, the run
+    // cannot go on as the kernel would.
+    let mut vbytes = 3 + t.elf.as_bytes().len() + 1 + abytes;
+    t.prefix(|s| vbytes += s.len() + 1);
+    if t.depth > 0 && nargs > 0 {
+        // The script's own argv[0] is replaced by the prefix.
+        let a0 = crate::guest::get::<u64>(argv).unwrap_or(0);
+        vbytes -= crate::guest::strlen(a0, MAX_ARG_STRLEN).unwrap_or(0) + 1;
+    }
+    if too_big(32, n, nenv, vbytes + ebytes) {
+        return stop_here(call);
     }
     // Point of no return. Descriptor marks the new image cannot rebuild end the run.
     if crate::sys::timerfd::before_exec().is_err() || crate::sys::signalfd::before_exec().is_err() {

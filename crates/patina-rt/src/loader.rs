@@ -406,7 +406,12 @@ impl StackBuilder {
     }
 }
 
-const MAX_ARGS: usize = 4096;
+/// Push the string `s` and write its address at `*slot`, the next pointer of a table.
+fn place(sb: &mut StackBuilder, slot: &mut u64, s: &[u8]) {
+    let p = sb.push_cstr(s);
+    unsafe { *(*slot as *mut u64) = p };
+    *slot += 8;
+}
 
 /// Load the guest named on the command line and enter it.
 pub fn start(k: &KernelStart) -> ! {
@@ -516,29 +521,6 @@ pub fn start(k: &KernelStart) -> ! {
     let base_platform = k
         .aux(AT_BASE_PLATFORM)
         .map(|v| sb.push_cstr(unsafe { cstr(v as *const u8) }));
-    // A script's argument vector: its `#!` prefix (interpreters, their arguments, the script's
-    // name), then the program's argv[1..] (`exec::Target::prefix`).
-    let mut argp = [0u64; MAX_ARGS];
-    let mut nargs = 0;
-    t.prefix(|s| {
-        if nargs < MAX_ARGS {
-            argp[nargs] = sb.push_cstr(s);
-        }
-        nargs += 1;
-    });
-    let from = if t.depth > 0 { 3 } else { 2 };
-    if nargs + (k.argc - from) > MAX_ARGS || k.nenv > MAX_ARGS {
-        crate::fatal(Setup::TooManyArgs, 0);
-    }
-    for i in from..k.argc {
-        argp[nargs] = sb.push_cstr(k.arg(i));
-        nargs += 1;
-    }
-    let mut envp = [0u64; MAX_ARGS];
-    for (i, e) in envp.iter_mut().enumerate().take(k.nenv) {
-        *e = sb.push_cstr(unsafe { cstr(*k.envp.add(i)) });
-    }
-    crate::sys::procfs::note_strings(&argp[..nargs], &envp[..k.nenv]);
     // auxv
     let mut aux = [[0u64; 2]; 32];
     let mut na = 0;
@@ -570,31 +552,58 @@ pub fn start(k: &KernelStart) -> ! {
     let _ = (AT_RSEQ_FEATURE_SIZE, AT_RSEQ_ALIGN, AT_SYSINFO_EHDR);
     put(AT_NULL, 0);
 
-    let words = 1 + nargs + 1 + k.nenv + 1 + 2 * na;
-    sb.sp &= !15;
-    if words % 2 == 1 {
-        sb.sp -= 8;
+    // A script's argument vector: its `#!` prefix (interpreters, their arguments, the script's
+    // name), then the program's argv[1..] (`exec::Target::prefix`). The strings go below the
+    // ones above, then the pointer table: sized first, so that each string's pointer is
+    // written into the table as the string is placed (no bound on their number but the
+    // kernel's, in bytes: `exec::ARG_BYTES`).
+    let from = if t.depth > 0 { 3 } else { 2 };
+    let env = |i: usize| unsafe { cstr(*k.envp.add(i)) };
+    let (mut nargs, mut bytes) = (0, 0);
+    t.prefix(|s| {
+        nargs += 1;
+        bytes += s.len() + 1;
+    });
+    for i in from..k.argc {
+        nargs += 1;
+        bytes += k.arg(i).len() + 1;
     }
-    sb.sp -= (words * 8) as u64;
-    let start_sp = sb.sp;
+    for i in 0..k.nenv {
+        bytes += env(i).len() + 1;
+    }
+    let args_hi = sb.sp;
+    let words = 1 + nargs + 1 + k.nenv + 1 + 2 * na;
+    let mut start_sp = (sb.sp - bytes as u64) & !15;
+    if words % 2 == 1 {
+        start_sp -= 8;
+    }
+    start_sp -= (words * 8) as u64;
+    let argp = start_sp + 8;
+    let envp = argp + 8 * (nargs as u64 + 1);
+    let mut ap = argp;
+    t.prefix(|s| place(&mut sb, &mut ap, s));
+    for j in from..k.argc {
+        place(&mut sb, &mut ap, k.arg(j));
+    }
+    let args_lo = sb.sp;
+    let mut ep = envp;
+    for j in 0..k.nenv {
+        place(&mut sb, &mut ep, env(j));
+    }
+    crate::sys::procfs::note_strings(
+        [args_lo, args_hi, nargs as u64],
+        [sb.sp, args_lo, k.nenv as u64],
+    );
     unsafe {
-        let mut w = start_sp as *mut u64;
-        let mut put_w = |v: u64| {
-            *w = v;
-            w = w.add(1);
-        };
-        put_w(nargs as u64);
-        for a in &argp[..nargs] {
-            put_w(*a);
-        }
-        put_w(0);
-        for e in &envp[..k.nenv] {
-            put_w(*e);
-        }
-        put_w(0);
+        let w = start_sp as *mut u64;
+        *w = nargs as u64;
+        *w.add(1 + nargs) = 0;
+        *w.add(2 + nargs + k.nenv) = 0;
+        let mut x = w.add(3 + nargs + k.nenv);
         for a in &aux[..na] {
-            put_w(a[0]);
-            put_w(a[1]);
+            *x = a[0];
+            *x.add(1) = a[1];
+            x = x.add(2);
         }
     }
     let _ = sb.top;
