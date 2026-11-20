@@ -2179,6 +2179,100 @@ the program's own memory is not in the log, and the story cannot show its cause;
 one it pruned (compared by its digest), and, like `replay`, refuses a run of another Patina
 build.
 
+### Stopping the world there: `patina debug`
+
+`patina debug RUNDIR` replays the run and stops the whole simulated world just before one event,
+explain's stop event unless `--at` names another, then starts gdb attached to the process about
+to act, with a helper that gives gdb the program's symbols (Patina's runtime loads the program,
+so gdb cannot find them itself). Every other thread and process is parked, as it is between
+turns of any run. The acklog run of seed 3, stopped at its failed assertion:
+
+<!-- no-run debug-session: an interactive gdb session on a terminal; tests/debug drives the same
+sessions with gdb in batch mode and checks what they show -->
+```text
+$ patina debug patina-out/run-3
+stopped before seq 204: sdk assert acked-records-kept (main) (it has not run)
+  the turn: pid 2 (acklog) thread 2 [host pid 2036162, thread 2036162]; other threads parked: 0; processes: 1
+  exact, the recorded run: reading (bt, print, x, info registers), breakpoints, watchpoints, continue, step, next, stepi, finish
+  another run from there: writing memory or registers, calling a function, a signal; the end names where the session left the run
+  the world runs on when the debugger continues, detaches or quits; Ctrl-C stops this process at its next request to Patina
+gdb: gdb -x patina-out/run-3/debug/patina-gdb.py
+patina: stopped before seq 204: sdk assert acked-records-kept (main)
+0x000060000005f88a in patina_syscall ()
+patina: symbols for acklog, ld-linux-x86-64.so.2, libc.so.6
+#9  0x00005555555512ac in patina.sys ()
+(gdb) bt
+#0  0x000060000005f88a in patina_syscall ()
+...
+#7  patina_rt::entry::on_sigsys () at src/entry.rs:351
+#8  <signal handler called>
+#9  0x00005555555512ac in patina.sys ()
+#10 0x00005555555515c4 in patina.call ()
+#11 0x0000555555551690 in patina.assert ()
+#12 0x00005555555518ea in main ()
+...
+(gdb) continue
+Continuing.
+
+Program terminated with signal SIGKILL, Killed.
+The program no longer exists.
+(gdb) quit
+violation (always): acked-records-kept: 23 acknowledged, 0 stored
+identical: the session was the recorded run
+```
+
+Frames 0 to 8 are Patina's runtime: every system call of the program is a signal to it, and the
+stop is inside that signal's handler; gdb starts in the program's frame under it. The event
+has not happened: the assertion's call is about to be made.
+
+`--at` takes a sequence number (as `explain` and `log events` print them) or a name for one:
+`stop` (the default), `end` (the last event of a program), `crash` (the last crash),
+`call:NAME[:NODE][:K]` (the K-th call of that name, of one node; K from 1, or from the end when
+negative; the last when left out), `mark:LABEL[:K]`, `sdk:LABEL[:K]` and `fault:K` (the K-th
+injected fault). The banner names the process and thread at the stop: the one whose turn it is,
+or for the supervisor's own events (a fault, a partition, a crash) the last one to ask it
+something.
+
+What the session may do and still be the recorded run: read anything (backtraces, variables,
+memory, registers), set breakpoints and watchpoints, step and continue. The world goes on when
+gdb continues, detaches or quits, and the replay runs to the end. Its logs are then compared
+with the run's, as `patina replay` compares them: `identical`, or `the session left the
+recorded run at seq M`, where M is the first record that differs, with what the session did
+that changed it (it wrote memory or a register, or called a function in the program).
+Everything after M is another run, which no seed reproduces. The same verdict is in
+`RUNDIR/debug/session.json` (`identical`, `left_at`, `did`), for scripts; exit status 0 when
+identical, 2 otherwise.
+
+Ctrl-C in gdb stops the process at its next request to Patina: gdb reports a `SIGTRAP` in the
+runtime (`patina: interrupted (Ctrl-C)`), and continuing goes on as before. If gdb crashes or
+is killed, the world goes on (a process gdb left stopped is continued) and the replay runs to
+its end; a breakpoint gdb had inserted stays in the program and makes that another run, which
+the end says. If `patina debug` itself is killed, the sandbox dies with it, as with any run.
+
+In a run with several processes or nodes, gdb is attached to the one about to act. `patina
+procs` in gdb lists the others with their sandbox and host pids and nodes, `patina attach PID`
+(a sandbox pid) moves gdb to one of them, and `patina where` repeats the stop. The world stays
+parked while gdb moves.
+
+`--no-gdb` prints the stop and how to attach (gdb with the helper, or any debugger by host
+pid), and the world goes on when Enter is pressed (without a terminal: when the file the
+banner names is created) or a debugger started with the helper continues, detaches or quits.
+Without gdb on `PATH` (or `PATINA_GDB`), it does the same. The helper needs gdb 12 or later.
+Attaching needs a host that lets a user debug their own processes: `kernel.yama.ptrace_scope`
+0 or 1 (Ubuntu's default is 1; the sandbox's processes are in a user namespace you own, so no
+privilege is needed), and a container that allows `ptrace`. `patina doctor` checks it
+(`debugger attach`). In this version `patina debug` runs on x86_64, and does not take a run
+with `--preempt points` or `branches`, or one whose threads yielded at spin points: those
+come of single steps and breakpoints the runtime takes with `SIGTRAP`, as gdb does. A spin
+probe the supervisor sends while gdb holds the program (a thread that ran 20 ms of CPU time
+without a system call) stops gdb (`patina: a spin probe ...`); continuing drops it, which
+changes nothing unless the program was spinning.
+
+The debugger is yours and can change the program as it runs: that is why a session that writes
+says where it left the run. Nothing about the sandbox is different in an ordinary run: the
+stop, and what the runtime does with gdb's signals, exist only in a `patina debug` replay
+([ARCHITECTURE.md, "Debugging a run"](../ARCHITECTURE.md#debugging-a-run)).
+
 ## Replay and verify
 
 `patina replay RUNDIR` runs the program again with the run's settings, into `RUNDIR/replay`,

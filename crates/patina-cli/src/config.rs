@@ -87,6 +87,10 @@ pub struct Config {
     /// digest (`proto::ctl::Config::observe`). Never part of a run's settings or `run.json`.
     #[serde(skip)]
     pub observe: bool,
+    /// `patina debug`'s replay: the sequence number to stop the world before
+    /// (`proto::ctl::Config::debug`). Never part of a run's settings or `run.json`.
+    #[serde(skip)]
+    pub debug_at: Option<u64>,
     /// Size of each sandbox tmpfs (`--tmpfs-bytes`, `[run] tmpfs-bytes`).
     pub tmpfs_bytes: u64,
     /// Fault presets (`--faults`, `[faults] preset`).
@@ -224,6 +228,7 @@ impl Default for Config {
             log_limit: DEFAULT_LOG_LIMIT_MIB,
             log_paths: false,
             observe: false,
+            debug_at: None,
             tmpfs_bytes: 256 << 20,
             faults_preset: vec![],
             faults: vec![],

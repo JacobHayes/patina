@@ -130,7 +130,8 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
 `patina replay DIR` runs the seed again, into `DIR/replay`, and compares every system call
 with the recorded one; `patina explain DIR` tells the run as a short story (who sent what to
-whom, the faults, how it ended) and names the event to stop at. Fix the code, rebuild, and run the same sweep command: a sweep
+whom, the faults, how it ended) and names the event to stop at; `patina debug DIR` stops the
+whole run just before that event, with gdb attached to the process about to act. Fix the code, rebuild, and run the same sweep command: a sweep
 directory (`--out`, default `patina-out/sweep`) holds one sweep, so a changed program or
 setting replaces it, and the same sweep with more seeds runs only the new ones.
 

@@ -18,10 +18,14 @@ global_asm!(
     "patina_boot_stack_top:",
     ".popsection",
     ".text",
-    ".globl patina_restorer",
-    "patina_restorer:",
+    // The name debuggers know a signal trampoline by (gdb's and lldb's `__restore_rt`): an
+    // attached debugger unwinds through the runtime's handler frames into the program's.
+    ".globl __restore_rt",
+    ".type __restore_rt,@function",
+    "__restore_rt:",
     "  mov eax, {rt_sigreturn}",
     "  jmp patina_syscall",
+    ".size __restore_rt, .-__restore_rt",
     // switch_stack(top, ksp, f): run f(ksp) on a new stack
     ".globl patina_switch_stack",
     "patina_switch_stack:",
@@ -43,14 +47,14 @@ global_asm!(
 );
 
 extern "C" {
-    fn patina_restorer();
+    fn __restore_rt();
     fn patina_switch_stack(top: u64, ksp: u64, f: extern "C" fn(u64) -> !) -> !;
     fn patina_enter_guest(sp: u64, entry: u64) -> !;
 }
 
 /// The runtime's signal restorer (`SA_RESTORER`): `rt_sigreturn` through the stub.
 pub fn restorer() -> u64 {
-    patina_restorer as *const () as u64
+    __restore_rt as *const () as u64
 }
 
 /// Run `f(ksp)` on the stack whose top is `top`.

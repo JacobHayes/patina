@@ -47,11 +47,48 @@ pub fn outside_check() {
         };
     let mut set: u64 = 0;
     let r = unsafe { sc2(nr::RT_SIGPENDING, &mut set as *mut u64 as u64, 8) };
-    let set = set & !SIGCHLD_BIT & !held;
+    let mut set = set & !SIGCHLD_BIT & !held;
+    if crate::state::config().debug != 0 {
+        set = debugger_signals(set);
+    }
     if r == 0 && set != 0 {
         let sig = set.trailing_zeros() as u64 + 1;
         host_error(sig as i64, 0, proto::ctl::HE_OUTSIDE_SIGNAL);
     }
+}
+
+/// A debug session's rules for signals from outside (`Config::debug`), which the user's
+/// debugger sends: the `SIGSTOP` of its attach and a `SIGCONT` after it are its own business,
+/// and a `SIGINT` (its interrupt, Ctrl-C) is taken from the queue and becomes a `SIGTRAP` this
+/// thread sends itself, which the debugger's helper stops on and does not pass on (a
+/// `SIGSTOP` would outlive a detach and stop the process for good). The run sees neither.
+/// Returns the rest of `set`.
+fn debugger_signals(set: u64) -> u64 {
+    const SIGINT: u64 = 2;
+    const SIGSTOP: u64 = 19;
+    const SIGCONT: u64 = 18;
+    const SIGTRAP: u64 = 5;
+    let bit = |s: u64| 1u64 << (s - 1);
+    let take = set & (bit(SIGINT) | bit(SIGCONT));
+    if take != 0 {
+        let zero = [0u64; 2];
+        let mut info = [0u64; 16];
+        let ts = thread();
+        unsafe {
+            while sc4(
+                nr::RT_SIGTIMEDWAIT,
+                &take as *const u64 as u64,
+                info.as_mut_ptr() as u64,
+                zero.as_ptr() as u64,
+                8,
+            ) > 0
+            {}
+            if take & bit(SIGINT) != 0 {
+                sc3(nr::TGKILL, ts.pid as u64, ts.tid as u64, SIGTRAP);
+            }
+        }
+    }
+    set & !bit(SIGINT) & !bit(SIGSTOP) & !bit(SIGCONT)
 }
 
 fn call_sup_raw(op: Op, args: [u64; 6]) -> Reply {

@@ -69,6 +69,11 @@ pub struct Config {
     /// Machines of the run, the driver (node 0) included; 0 in a run without nodes
     /// (`crate::node`).
     pub nodes: u64,
+    /// `patina debug`'s replay: the sequence number to stop the world before (`DebugCtl`).
+    /// 0: off, in every other run. The rules of a debug session (the gate, a debugger's
+    /// `SIGINT` and `SIGCONT` taken by the runtime, the backstop waiting while the debugger
+    /// holds the world) hold only when this is not 0.
+    pub debug: u64,
 }
 
 /// The longest work tree path, with its NUL.
@@ -161,6 +166,7 @@ impl Config {
             observe: 0,
             work: [0; WORK_PATH_MAX],
             nodes: 0,
+            debug: 0,
         }
     }
 }
@@ -240,6 +246,29 @@ pub struct Ctl {
     pub sched: SchedStats,
     /// Compute points, summed over every process of the run.
     pub compute: ComputeStats,
+    /// `patina debug`'s stop (`Config::debug`).
+    pub debug: DebugCtl,
+}
+
+/// The stop of a debug session: whoever takes sequence number `Config::debug` (a guest thread
+/// in its runtime, or the supervisor for its own event) parks before the event, with nothing
+/// recorded, no sequence number taken and no virtual time charged; every other thread is
+/// already parked waiting for the turn. The launcher sees `stopped`, lets the user's debugger
+/// attach, and releases the gate with `go`. Never logged.
+#[repr(C)]
+pub struct DebugCtl {
+    /// The sequence number of the event the world stopped before (0: not stopped).
+    pub stopped: AtomicU64,
+    /// The thread at the gate: its slot + 1.
+    pub slot: AtomicU64,
+    /// Futex word: 0 parked, 1 released (written by the launcher).
+    pub go: AtomicU32,
+    /// 1: the supervisor's own event; `slot` is then the thread whose request it was serving.
+    pub sup: AtomicU32,
+    /// 1 while a debugger holds the world (from the stop until gdb exits; without gdb, until
+    /// the release): the supervisor's stall backstop waits meanwhile (launcher).
+    pub held: AtomicU32,
+    pub _pad: u32,
 }
 
 /// The scheduler as the supervisor left it when it last gave the turn, written just before it

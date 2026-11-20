@@ -448,8 +448,7 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
 /// thread when the point was drawn as a switch (`chain`).
 pub fn switch(ts: &mut ThreadState, frame: &Frame, pc: u64, reason: u64, seg: Seg, walked: u64) {
     let c = ctl();
-    ts.seq = c.seq.load(Relaxed) + 1;
-    c.seq.store(ts.seq, Relaxed);
+    crate::entry::next_seq(ts);
     if reason == REASON_DEADLINE {
         bump(&c.compute.deadline_stops, 1);
     } else {

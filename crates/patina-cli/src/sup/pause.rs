@@ -218,8 +218,7 @@ impl Sup {
 
     /// The seed's pause as a fault: an `Injected` record, counted under `pause`.
     fn pause_inject(&mut self, k: usize, len: u64) {
-        let seq = self.ctl.seq.load(Relaxed) + 1;
-        self.ctl.seq.store(seq, Relaxed);
+        let seq = self.next_seq();
         let t = self.node_tab();
         let rec = proto::Rec {
             seq,

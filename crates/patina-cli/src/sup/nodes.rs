@@ -733,8 +733,7 @@ impl Sup {
 
     /// The seed's kill as a fault: an `Injected` record, counted under `crash`.
     fn kill_inject(&mut self, k: usize, b: u64, machine: u64, point: u64) {
-        let seq = self.ctl.seq.load(Relaxed) + 1;
-        self.ctl.seq.store(seq, Relaxed);
+        let seq = self.next_seq();
         let rec = proto::Rec {
             seq,
             vclock_ns: self.now(),

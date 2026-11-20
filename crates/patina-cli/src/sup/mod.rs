@@ -212,10 +212,29 @@ impl Sup {
             .store(chain(self.ctl.log_hash.load(Relaxed), rec), Relaxed);
     }
 
+    /// Take the next sequence number for an event of the supervisor's own: the one place it
+    /// does. In a debug session (`Config::debug`) the supervisor parks before the stop's
+    /// event, as the runtime does before a thread's (`proto::ctl::DebugCtl`); no guest thread
+    /// runs meanwhile.
+    fn next_seq(&mut self) -> u64 {
+        let seq = self.ctl.seq.load(Relaxed) + 1;
+        if self.ctl.config.debug == seq {
+            let d = &self.ctl.debug;
+            d.sup.store(1, Relaxed);
+            d.slot
+                .store(self.ctl.pending_slot.load(Relaxed) as u64 + 1, Relaxed);
+            d.stopped.store(seq, SeqCst);
+            while d.go.load(SeqCst) == 0 {
+                crate::sys::futex_wait_ms(&d.go as *const _ as *const u32, 0, 1000);
+            }
+        }
+        self.ctl.seq.store(seq, Relaxed);
+        seq
+    }
+
     /// A supervisor decision is a boundary event of its own.
     fn decide(&mut self, code: u32, slot: usize, args: [u64; 6], ret: i64) -> u64 {
-        let seq = self.ctl.seq.load(Relaxed) + 1;
-        self.ctl.seq.store(seq, Relaxed);
+        let seq = self.next_seq();
         let s = &self.ctl.stats.decisions;
         s.store(s.load(Relaxed) + 1, Relaxed);
         let rec = Rec {
@@ -1073,6 +1092,13 @@ impl Sup {
                     }) {
                         stall::Poll::Quiet => {}
                         stall::Poll::Probe { tid, pid } => stall::probe(pid, tid),
+                        // A debug session waits as long as its debugger holds the world:
+                        // a thread at a stop or a breakpoint makes no progress.
+                        stall::Poll::End(v)
+                            if v.class == "infra" && self.ctl.debug.held.load(Relaxed) != 0 =>
+                        {
+                            dog.progress(self.ctl.seq.load(Relaxed), now_ns());
+                        }
                         stall::Poll::End(mut v) => {
                             if v.class == "stall" {
                                 v.detail += &stall::spin_host(self.ctl);

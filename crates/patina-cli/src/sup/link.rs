@@ -266,8 +266,7 @@ impl Sup {
 
     /// The partition's `Injected` record: what the seed did, counted as a fault.
     fn part_inject(&mut self, k: u64, shape: u64, a: u64, b: u64, len: u64) {
-        let seq = self.ctl.seq.load(Relaxed) + 1;
-        self.ctl.seq.store(seq, Relaxed);
+        let seq = self.next_seq();
         let rec = proto::Rec {
             seq,
             vclock_ns: self.now(),

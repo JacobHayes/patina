@@ -855,8 +855,7 @@ fn stop(ts: &mut ThreadState, frame: &mut Frame) {
     ts.pmu.stepping = 0;
     let c = ctl();
     let n = ts.pmu.n;
-    ts.seq = c.seq.load(Relaxed) + 1;
-    c.seq.store(ts.seq, Relaxed);
+    crate::entry::next_seq(ts);
     let t = c.vclock_ns.load(Relaxed) + n * c.config.pmu_charge_ps / 1000;
     c.vclock_ns.store(t, Relaxed);
     bump(&c.pmu.preempts, 1);

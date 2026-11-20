@@ -876,6 +876,7 @@ pub fn run_incarnation(
     cfg.log_limit = (c.log_limit << 20).saturating_sub(start.log_used);
     cfg.log_paths = c.log_paths as u64;
     cfg.observe = c.observe as u64;
+    cfg.debug = c.debug_at.unwrap_or(0);
     if c.pause_points {
         cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
     }
@@ -1145,9 +1146,20 @@ pub fn run_incarnation(
         )?),
         _ => None,
     };
+    // `patina debug`: the stop, the user's debugger, the release (`debug::Watch`).
+    let watch = c.debug_at.map(|_| {
+        crate::debug::Watch::start(
+            ctl_ptr as usize,
+            child.id() as i32,
+            inc.parent().unwrap_or(Path::new(".")),
+        )
+    });
     let mut verdict_text = String::new();
     let mut outcome_r = outcome_r;
     let waited = wait_fd(outcome_r.as_raw_fd(), start.deadline);
+    if let Some(w) = watch {
+        w.finish(waited == Waited::Ready);
+    }
     let timed_out = waited != Waited::Ready;
     if timed_out {
         end_sandbox(&mut child);

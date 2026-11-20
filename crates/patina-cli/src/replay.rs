@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 /// What a replay concluded, and the replay's directory.
 pub struct Replayed {
     pub classified: Classified,
+    /// How the replayed run itself ended, before it was compared with the run.
+    pub own: Classified,
     pub result: serde_json::Value,
     pub dir: PathBuf,
 }
@@ -181,6 +183,7 @@ pub fn replay_into(
         )),
         None => None,
     };
+    let own = mine.clone();
     let classified = match classified {
         Some(c) => {
             result = result_json(&end, &c);
@@ -192,6 +195,7 @@ pub fn replay_into(
     };
     Ok(Replayed {
         classified,
+        own,
         result,
         dir: out,
     })

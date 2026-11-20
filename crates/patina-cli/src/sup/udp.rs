@@ -393,8 +393,7 @@ impl Sup {
         sport: u16,
         link: u64,
     ) {
-        let seq = self.ctl.seq.load(Relaxed) + 1;
-        self.ctl.seq.store(seq, Relaxed);
+        let seq = self.next_seq();
         let rec = proto::Rec {
             seq,
             vclock_ns: self.now(),

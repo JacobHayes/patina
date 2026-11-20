@@ -180,6 +180,47 @@ fn personality_child() -> i32 {
     0
 }
 
+/// Whether a debugger the user starts can attach to a run's processes (`patina debug`): Yama
+/// allows it, and `ptrace` itself is not refused (a container's seccomp profile), tried on a
+/// child of this process.
+fn debugger_attach() -> Result<String, (String, String)> {
+    if let Some(why) = crate::debug::ptrace_refused() {
+        return Err((
+            why,
+            "patina debug still stops a run and prints the process to attach as root".into(),
+        ));
+    }
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        unsafe {
+            libc::pause();
+            libc::_exit(0)
+        };
+    }
+    if pid < 0 {
+        return Err((
+            format!("fork: {}", std::io::Error::last_os_error()),
+            String::new(),
+        ));
+    }
+    let r = unsafe { libc::ptrace(libc::PTRACE_SEIZE, pid, 0, 0) };
+    let e = std::io::Error::last_os_error();
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+        libc::waitpid(pid, std::ptr::null_mut(), 0);
+    }
+    match r {
+        0 => Ok(
+            "a debugger can attach to a run's processes (gdb, with the helper patina debug writes)"
+                .into(),
+        ),
+        _ => Err((
+            format!("ptrace is refused here: {e}"),
+            CONTAINER_FIX.to_string(),
+        )),
+    }
+}
+
 pub const CONTAINER_FIX: &str =
     "the process runs under a restrictive seccomp profile: in Docker, --security-opt seccomp=unconfined";
 
@@ -338,6 +379,11 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
                     ),
                 })
         },
+    });
+    checks.push(Check {
+        name: "debugger attach (patina debug, optional)",
+        required: false,
+        result: debugger_attach(),
     });
     // Counter preemption's broker reads a thread's pidfd.
     {

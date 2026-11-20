@@ -417,8 +417,7 @@ impl Sup {
     /// An injected network fault: a boundary record of kind `Injected` written by the
     /// supervisor; `args[4]` is the connection's server port (the object, `tcp:PORT`).
     fn wire_inject(&mut self, kind: u64, nr: u64, value: u64, conn: u32) {
-        let seq = self.ctl.seq.load(Relaxed) + 1;
-        self.ctl.seq.store(seq, Relaxed);
+        let seq = self.next_seq();
         let port = self.wire.conns.get(&conn).map_or(0, |c| c.sport as u64);
         // With nodes, the link: the client's node to the server's.
         let link = match self.wire.conns.get(&conn) {

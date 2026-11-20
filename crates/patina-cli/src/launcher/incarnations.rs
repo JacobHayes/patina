@@ -163,7 +163,12 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     if out.join("result.json").exists() || out.join("inc-0").exists() {
         return Err(format!("{} already holds a run", out.display()));
     }
-    let deadline = t0 + std::time::Duration::from_secs(o.cfg.timeout);
+    // A debug session waits as long as its user does (`patina debug`).
+    let timeout = match o.cfg.debug_at {
+        Some(_) => crate::debug::NO_TIMEOUT,
+        None => o.cfg.timeout,
+    };
+    let deadline = t0 + std::time::Duration::from_secs(timeout);
     let max = o.plan.max_incarnations.max(1);
     let mut cfg = o.plan.faults;
     let mut seq0 = 0;

@@ -262,11 +262,39 @@ fn hello() {
     crate::sys::signalfd::after_exec();
 }
 
+/// Take the next sequence number for a boundary event of `ts`: the one place the runtime
+/// does. In a debug session (`Config::debug`) the thread that takes the stop's number parks
+/// first (`debug_gate`), once: a call the debugger makes into the program at the stop passes.
+pub fn next_seq(ts: &mut ThreadState) {
+    let c = ctl();
+    let mut seq = c.seq.load(Relaxed) + 1;
+    if c.config.debug == seq && c.debug.stopped.load(SeqCst) == 0 {
+        debug_gate(ts, seq);
+        // A call the debugger made into the program at the stop has taken numbers since:
+        // the session has left the run, and this event comes after them.
+        seq = c.seq.load(Relaxed) + 1;
+    }
+    ts.seq = seq;
+    c.seq.store(seq, Relaxed);
+}
+
+/// The stop of a debug session (`proto::ctl::DebugCtl`): park before event `seq`, with nothing
+/// recorded, no sequence number taken and no virtual time charged, until the launcher
+/// releases the gate. Every other thread is parked already, waiting for the turn.
+#[inline(never)]
+fn debug_gate(ts: &ThreadState, seq: u64) {
+    let d = &ctl().debug;
+    d.slot.store(ts.slot as u64 + 1, Relaxed);
+    d.stopped.store(seq, SeqCst);
+    while d.go.load(SeqCst) == 0 {
+        unsafe { crate::raw::futex_wait(&d.go as *const _ as *const u32, 0) };
+    }
+}
+
 /// Charge a boundary event: next seq, virtual time.
 pub fn charge(ts: &mut ThreadState) {
     let c = ctl();
-    ts.seq = c.seq.load(Relaxed) + 1;
-    c.seq.store(ts.seq, Relaxed);
+    next_seq(ts);
     let t = c.vclock_ns.load(Relaxed) + c.config.trap_charge_ns;
     c.vclock_ns.store(t, Relaxed);
     c.stats

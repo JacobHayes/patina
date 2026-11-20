@@ -6,6 +6,7 @@ mod check;
 mod cli;
 mod config;
 mod ctl;
+mod debug;
 mod doctor;
 mod durability;
 mod events;
@@ -117,6 +118,7 @@ fn main() -> ExitCode {
         Cmd::Verify => verify(&a),
         Cmd::Replay => replay(&a),
         Cmd::Explain => explain::main(&a),
+        Cmd::Debug => debug::main(&a),
         Cmd::Log => log::main(&a).map_err(error),
         Cmd::Table => {
             table::print();

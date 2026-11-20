@@ -72,6 +72,15 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     }
 }
 
+/// The event the story stops at (`stop at:`): its sequence number, from the observed replay.
+pub fn stop_event(rundir: &Path) -> Result<Option<u64>, Fail> {
+    let dir = observed(rundir)?;
+    let recorded = crate::result::read_json(&rundir.join("result.json"))
+        .map_err(|e| Fail(Outcome::Error, e))?;
+    let st = Story::read(&dir, &recorded).map_err(|e| Fail(Outcome::Internal, e))?;
+    Ok(st.stop_at.map(|i| st.lines[i].seq))
+}
+
 /// The observed replay of `rundir`, made once and checked against the run: `RUNDIR/explain`.
 fn observed(rundir: &Path) -> Result<PathBuf, Fail> {
     let err = |e: String| Fail(Outcome::Error, e);

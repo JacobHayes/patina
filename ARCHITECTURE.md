@@ -1454,6 +1454,64 @@ measured record, with the fourteen differences found and closed, is in
 [docs/EVIDENCE.md](docs/EVIDENCE.md). New kinds of difference were still appearing when the
 last matrix ran, so a difference is a Patina bug to report, not noise.
 
+## Debugging a run
+
+`patina debug` (`cli/src/debug.rs`) is a replay with one more word in the configuration:
+`Config::debug`, the sequence number to stop before (0, the default, in every other run). The
+gate is where sequence numbers are taken, the runtime's `entry::next_seq` and the
+supervisor's `next_seq`: whoever takes that number first parks on `Ctl::debug` (`DebugCtl`):
+it publishes its slot and the number in `stopped`, and waits on the futex `go`. Nothing is
+recorded at the gate (no record, no sequence number, no virtual time), and every other guest
+thread is already parked, waiting for the turn, so the whole world is stopped before the event
+and the run goes on from there as recorded. For the supervisor's own events (a fault, a
+partition, a crash) it is the supervisor that parks, and `sup` says so; while it is parked its
+watchdog's stall backstop is off, since a stopped world makes no progress.
+
+The launcher watches `stopped` (`debug::Watch`). At the stop it finds the processes of the
+sandbox on the host (the keeper's child is the pid namespace's init; host pids from `NSpid`),
+writes the stop's facts (`RUNDIR/debug/debug.json`) and a gdb helper beside them, and starts gdb
+in its own process group, which gets the terminal. The helper loads each image's symbols at its
+load address from `/proc/PID/maps` (the kernel's view is of the runtime, which loaded the
+program), lets the runtime's signals through (`SIGSYS`, the faulting signals), and opens the
+gate (a file the launcher polls) when gdb continues, detaches or exits. The launcher opens it
+too when gdb exits by any means, and when the session is interrupted, so no world stays
+parked. The x86_64 signal restorer is named `__restore_rt`, the name gdb's signal-frame
+unwinder recognises, so a backtrace reaches the program's frames under the runtime's handler.
+At the end the replay's boundary logs are compared with the run's as `patina replay` compares
+them; the first differing record is where the session left the run. What gdb did that writes
+(gdb's `memory_changed`, `register_changed` and `inferior_call` events) is noted by the helper
+and named with it.
+
+Debug-only rules, active only while `Config::debug` is nonzero:
+- **The debugger's signals.** gdb's `SIGINT` (Ctrl-C), pending at a trap exit, is taken by
+  the runtime (`sup::debugger_signals`) and turned into a `SIGTRAP` the thread sends itself,
+  which gdb stops on and does not pass on; the `SIGSTOP` of its attach and a `SIGCONT` are its
+  own. None reaches the program's virtual signals (in another run, a signal from outside ends
+  it `error`). (A stop signal instead of the `SIGTRAP` would outlive gdb's detach and leave
+  the process stopped.)
+- **No time limit, and the backstop waits.** The run's wall-clock timeout is lifted, and while
+  a debugger holds the world (`DebugCtl::held`, the launcher's: from the stop until gdb exits)
+  the supervisor's stall backstop does not end the run. After gdb exits, the launcher
+  continues any guest process left stopped.
+- **A call at the stop.** A function gdb calls in the program at the stop runs with the world
+  still held (the helper does not release it for the call) and passes the gate, which parks
+  once: its events take the stop's sequence number and those after it, the event at the gate
+  takes the next one after them (`entry::next_seq`), and the session has left the run there.
+
+gdb keeps every `SIGTRAP` it did not cause (the helper's `handle SIGTRAP nopass`), so the
+runtime's own uses of it, the spin probes' steps and breakpoints and the `--preempt points`
+and `branches` mechanisms, are not available in a session: runs that relied on them are
+refused, and a probe sent during a session is dropped (it finds nothing in a program that was
+not spinning, so nothing recorded changes).
+
+The word is the launcher's, set from its own command line: it is in `Config`, which the
+runtime reads from the control region, and the program has neither the region's address nor
+any call that writes it (Containment). A program cannot turn the gate or the signal rules on.
+The user's debugger, which ptrace lets do anything to the program, is outside the sandbox's
+guarantees by design: it is the user's own tool on their own replay, and a session that writes
+says where it left the run. An ordinary run is unchanged: the gate is one comparison per
+sequence number against 0.
+
 ## Containment
 
 The runtime shares a process with the program, so program code can reach the runtime's
@@ -1580,6 +1638,11 @@ Enforced:
   writes it (a `read` into it) is such a write. The arm64 signal restorer page is program
   memory too (read-execute, listed in `/proc/self/maps`): a call reading it reads its two
   instructions, one writing it gets `EFAULT` as for any read-only page.
+
+- **The debug word** (`Config::debug`, "Debugging a run") is in the control region's
+  configuration, written by the launcher before the program starts: what holds for the control
+  region holds for it, and its rules (the gate, the debugger's signals taken by the runtime)
+  exist only in a `patina debug` replay.
 
 Detected:
 - A program access that faults in the runtime's region (at a published address, in an unmapped

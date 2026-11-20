@@ -47,8 +47,7 @@ pub fn count_emulated(i: usize) {
 pub fn pause_point(frame: &mut Frame, pc: u64, len: u64, code: u32) -> bool {
     let ts = crate::state::thread();
     let c = ctl();
-    ts.seq = c.seq.load(Relaxed) + 1;
-    c.seq.store(ts.seq, Relaxed);
+    crate::entry::next_seq(ts);
     let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
     c.vclock_ns.store(t, Relaxed);
     bump(&c.sched.pause_points, 1);

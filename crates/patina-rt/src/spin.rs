@@ -814,8 +814,7 @@ fn spin_yield(ts: &mut ThreadState, frame: &mut Frame, period: u64) {
     // A spin point is a runtime entry at a state that is the same in every run (it was found
     // as a fixed point, or arrived at again): charge compute events here, as at a trap.
     crate::compute::enter(ts);
-    ts.seq = c.seq.load(Relaxed) + 1;
-    c.seq.store(ts.seq, Relaxed);
+    crate::entry::next_seq(ts);
     let t = c.vclock_ns.load(Relaxed) + c.config.spin_charge_ns;
     c.vclock_ns.store(t, Relaxed);
     let g = st::state_words(frame);
