@@ -3,7 +3,9 @@
 Environment from ./check: PATINA (unprivileged build), PATINA_RT, PATINA_GUESTS, PATINA_WORKLOADS, RUNS.
 Counter runs use a copy of $PATINA with CAP_PERFMON (lib/mkcap.sh: content-keyed, one recorded
 sudo use per new build). Quick and area scripts print SKIP and pass where it cannot be made
-(a host without sudo or PMU); evidence scripts fail."""
+(a host without sudo or PMU); evidence scripts fail. That SKIP is `SKIP: host: REASON`: the
+host cannot run counters at all (scripts/land says so only then), unlike a script's own SKIP
+(a tool it lacks)."""
 import json
 import os
 import subprocess
@@ -63,7 +65,7 @@ def ppatina(required=True):
         why = "cannot make the CAP_PERFMON copy of patina: " + r.stderr.strip()
     if required:
         die(why)
-    print("SKIP: " + why)
+    print("SKIP: host: " + why)
     sys.exit(0)
 
 

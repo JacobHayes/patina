@@ -62,8 +62,20 @@ if [ -n "$touched" ]; then
     dir=$(sed -n 's/.*output in \(\/[^ ]*\)$/\1/p' "$log" | tail -1)
     rm -f "$log"
     [ -d "$dir" ] || die "./check counters printed no output directory"
-    skip=$(cat "$dir"/counters-*.out | sed -n 's/^SKIP: //p' | head -1)
-    if [ -n "$skip" ]; then say "counters: SKIPPED on this host ($skip)"; else say "counters: passed on this host"; fi
+    # Each script passed (./check failed otherwise); one that printed `SKIP: REASON` skipped its
+    # work. The host cannot run counters only when the capability check says so (`SKIP: host:`,
+    # tests/counters/lib/counters.py), not when one script lacks a tool of its own.
+    passed=0 skipped=0 why="" host=""
+    for f in "$dir"/counters-*.out; do
+        [ -f "$f" ] || die "./check counters left no script output in $dir"
+        s=$(sed -n '/^SKIP: /{s///p;q}' "$f")
+        n=$(basename "$f" .out)
+        if [ -z "$s" ]; then passed=$((passed + 1)); continue; fi
+        skipped=$((skipped + 1)) why="$why${why:+; }${n#counters-}: $s"
+        case $s in host:*) host=${s#host: } ;; esac
+    done
+    counts="passed $passed, skipped $skipped${why:+ ($why)}"
+    if [ -n "$host" ]; then say "counters: SKIPPED on this host ($host); $counts"; else say "counters: $counts"; fi
 fi
 jj bookmark set "$name" -r "$sha"
 jj git push --bookmark "$name"
