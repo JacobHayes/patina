@@ -15,8 +15,8 @@
 # (`--branch`, a machine crash): the program that writes, starts write-back with a WRITE-only
 # sync_file_range, reopens, fsyncs and acknowledges only on success never loses an
 # acknowledged file; the planted bug that retries a failed fsync on a new descriptor and then
-# acknowledges does, in both filesystem models.
-# Expected on the arm64 runner: about 15 s.
+# acknowledges does (in the quick tier under ext4-ordered; ./check faults also posix-strict).
+# Expected on the arm64 runner: about 10 s (16 to 18 s measured with both models).
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/22
@@ -41,7 +41,9 @@ expect dir "fsync-dir EIO;fsync-dir-again 0;"
 expect syncfs "syncfs EIO;syncfs-again 0;syncfs-before EIO;syncfs-after 0;fsync-file EIO;"
 expect osync "write-dsync EIO;fsync 0;"
 expect badfd "$("$PATINA_GUESTS/errseq" badfd "$d/native" | tr '\n' ';')"
-for model in ext4-ordered posix-strict; do
+models=ext4-ordered
+[ "${CHECK_TIER:-}" = quick ] || models="ext4-ordered posix-strict"
+for model in $models; do
     for m in pg pg-retry; do
         o=$d/$m-$model
         st=0
