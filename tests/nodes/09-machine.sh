@@ -4,7 +4,8 @@
 # write is untouched by a's crashes; an established connection to a sees nothing once the
 # kill returns (no end of file, no reset, unlike `node kill a --process` in 05-kill), a
 # connect to a while it is down times out rather than being refused, and after the restart
-# the old connection gets a reset at its next send. Every disk passes the self-check. The same
+# the old connection gets a reset at its next send. Every disk passes the self-check, also one
+# that holds a Unix socket's synced file at the crash (a restarted node's tree has none). The same
 # seed is identical under verify, and a run replays identically.
 #@ tier=quick budget=60 slots=2
 . "$(dirname "$0")/lib.inc"
@@ -17,6 +18,10 @@ lost=$(sed -n 's/^unsynced lost in \([0-9]*\) of .*/\1/p' "$o/crash/inc-0/stdout
 [ "${lost:-0}" -ge 1 ] || die "no unsynced write was lost in 5 machine crashes"
 n=$("$PATINA" log events "$o/crash" --types node | grep -c '"event":"machine-crash","name":"a".*"by":"script"')
 [ "$n" = 5 ] || die "machine-crash events of a: $n"
+rm -f "$o/s.toml"; conf "$o/s.toml" b python3 -c "import os, socket, time; socket.socket(socket.AF_UNIX).bind('/work/sock'); os.fsync(os.open('/work', os.O_RDONLY)); time.sleep(30)"
+run_ok "$o/sock" 1 --config "$o/s.toml" -- python3 -c "import sys, time; sys.path.insert(0, '/guest'); import patina; time.sleep(1); patina.control('node kill b'); patina.control('node start b'); time.sleep(1)"
+[ "$(field "$o/sock/result.json" self_check.verdict)" = pass ] || die "self-check with a socket's file: $(field "$o/sock/result.json" self_check)"
+echo "a machine crash with a Unix socket's file in the tree: self-check pass"
 verify_ok "$o/verify" 2 3 --config "$o/d.toml" -- python3 /guest/disk.py driver 3
 st=0; timeout 300 "$PATINA" replay "$o/crash" >"$o/replay.txt" 2>&1 || st=$?
 grep -q '^identical' "$o/replay.txt" || die "replay: exit $st: $(head -3 "$o/replay.txt")"

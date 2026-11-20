@@ -216,11 +216,13 @@ impl Sup {
     /// pending that it does not block. `send` wakes a parked receiver, `may_block` refuses to
     /// park one, and a process-directed signal is passed on when its chosen thread blocks it
     /// or exits (`retarget`); one found here was lost by Patina. Checked whenever nothing is
-    /// runnable, which a lost wakeup always reaches.
+    /// runnable, which a lost wakeup always reaches. Not a frozen thread (a paused node's): a
+    /// process-directed signal waits for a runnable thread of its process that is frozen too,
+    /// and the check sees the thread again once its node resumes.
     pub fn lost_signal(&self) -> Option<String> {
         self.sched.parked().into_iter().find_map(|(s, e, w, _)| {
             let d = self.deliverable(s);
-            (w != Wait::Vfork && d != 0).then(|| {
+            (w != Wait::Vfork && d != 0 && !self.sched.is_frozen(s)).then(|| {
                 format!(
                     "runtime invariant: slot {s} (tid {}) is parked ({}) with {} pending and not blocked",
                     e.tid,

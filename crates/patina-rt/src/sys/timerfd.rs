@@ -18,17 +18,67 @@ const TFD_TIMER_CANCEL_ON_SET: u64 = 2;
 const TFD_NONBLOCK: u64 = 0o4000;
 const TFD_CLOEXEC: u64 = 0o2000000;
 
-/// Per-process: the timer key (0: not a timerfd) and clock of each descriptor.
+/// Per-process: the timer key (0: not a timerfd) and clock of each descriptor, and for an
+/// absolute realtime timer set with `TFD_TIMER_CANCEL_ON_SET` the count of its node's clock
+/// steps it last saw, plus 1 (0: not cancelable).
 struct Marks {
     key: [u64; N],
     clock: [u8; N],
+    cancel: [u64; N],
 }
 struct G(UnsafeCell<Marks>);
 unsafe impl Sync for G {}
 static MARKS: G = G(UnsafeCell::new(Marks {
     key: [0; N],
     clock: [0; N],
+    cancel: [0; N],
 }));
+
+/// This node's clock steps so far (`NodeTab::clock_sets`; the driver's clock is never
+/// stepped).
+fn clock_sets() -> u64 {
+    match crate::state::node() {
+        0 => 0,
+        k => {
+            unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) }.clock_sets
+                [k.min(proto::node::MAX_NODES - 1)]
+        }
+    }
+}
+
+/// A read of timerfd `fd`: `ECANCELED` once after a step of the node's clock when it is an
+/// absolute realtime timer set with `TFD_TIMER_CANCEL_ON_SET`, its count reset, as the
+/// kernel answers; None otherwise.
+pub fn canceled(fd: i64) -> Option<i64> {
+    let i = idx(fd)?;
+    let m = marks();
+    if m.key[i] == 0 || m.cancel[i] == 0 {
+        return None;
+    }
+    let now = clock_sets() + 1;
+    if m.cancel[i] == now {
+        return None;
+    }
+    for c in m.cancel.iter_mut().zip(m.key) {
+        if c.1 == m.key[i] {
+            *c.0 = now;
+        }
+    }
+    let mut v = 0u64;
+    let iov = [&mut v as *mut u64 as u64, 8];
+    unsafe {
+        sc6(
+            nr::PREADV2,
+            fd as u64,
+            iov.as_ptr() as u64,
+            1,
+            u64::MAX,
+            u64::MAX,
+            io::RWF_NOWAIT,
+        )
+    };
+    Some(-e::ECANCELED)
+}
 
 fn marks() -> &'static mut Marks {
     unsafe { &mut *MARKS.0.get() }
@@ -56,6 +106,7 @@ pub fn copy(src: i64, dst: i64) {
     }
     m.key[d] = m.key[s];
     m.clock[d] = m.clock[s];
+    m.cancel[d] = m.cancel[s];
 }
 
 /// `fd` was closed: when no other descriptor of this process names the timer, the
@@ -72,6 +123,7 @@ pub fn closed(fd: i64) {
         return;
     }
     m.key[i] = 0;
+    m.cancel[i] = 0;
     if !m.key.contains(&key) {
         crate::sup::call_sup(Op::TimerFdSet, [TFD_RELEASE, key, 0, 0, 0, 0]);
     }
@@ -99,6 +151,7 @@ fn create(clock: u64, flags: u64) -> i64 {
     let Some(i) = idx(fd) else { return fd };
     marks().key[i] = key;
     marks().clock[i] = clock as u8;
+    marks().cancel[i] = 0;
     fd
 }
 
@@ -177,7 +230,30 @@ fn settime(fd: i64, flags: u64, new: u64, old: u64) -> i64 {
     } else {
         super::time::now().saturating_add(value)
     };
-    crate::sup::call_sup(Op::TimerFdSet, [TFD_ARM, key, first, interval, 0, 0]).ret
+    // An absolute realtime timer moves with a step of the node's clock; with
+    // `TFD_TIMER_CANCEL_ON_SET` a step also cancels its next read (`canceled`).
+    let rt_abs = clock == 0 && flags & TFD_TIMER_ABSTIME != 0;
+    let cancel = rt_abs && flags & TFD_TIMER_CANCEL_ON_SET != 0;
+    let mark = if cancel { clock_sets() + 1 } else { 0 };
+    let m = marks();
+    for (c, k) in m.cancel.iter_mut().zip(m.key) {
+        if k == key {
+            *c = mark;
+        }
+    }
+    let f = if rt_abs && value != 0 {
+        proto::ctl::CLK_REALTIME_ABS
+    } else {
+        0
+    } | if cancel {
+        proto::ctl::CLK_CANCEL_ON_SET
+    } else {
+        0
+    };
+    crate::state::clock_flags(f);
+    let r = crate::sup::call_sup(Op::TimerFdSet, [TFD_ARM, key, first, interval, 0, 0]).ret;
+    crate::state::clock_flags(0);
+    r
 }
 
 fn gettime(fd: i64, cur: u64) -> i64 {

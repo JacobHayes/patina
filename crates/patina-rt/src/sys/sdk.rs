@@ -153,6 +153,10 @@ fn control(ptr: u64, len: u64) -> i64 {
         Ok(proto::node::Control::Node { verb, node }) => {
             crate::sup::call_sup(Op::Node, [verb, node as u64, 0, 0, 0, 0]).ret
         }
+        Ok(proto::node::Control::Clock { node, delta }) => {
+            let v = proto::node::CLOCK_STEP;
+            crate::sup::call_sup(Op::Node, [v, node as u64, delta as u64, 0, 0, 0]).ret
+        }
     };
     keep(
         proto::rec::hash_bytes(OP_CONTROL, words),

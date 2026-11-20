@@ -54,6 +54,7 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_NET_BLACKOUT_DROP => "net-blackout",
         INJ_NET_CUT => "partition",
         proto::node::INJ_NODE_KILL => "crash",
+        proto::node::INJ_NODE_PAUSE => "pause",
         _ => return None,
     })
 }
@@ -74,6 +75,7 @@ fn errno_name(e: u64) -> String {
 
 /// Every class `faults.counts` may name.
 pub const CLASSES: &[&str] = &[
+    "clock",
     "crash",
     "enospc",
     "fs-delay",
@@ -94,6 +96,7 @@ pub const CLASSES: &[&str] = &[
     "net-reset",
     "partition",
     "path-swap",
+    "pause",
 ];
 
 /// The plan class each setting belongs to.
@@ -119,6 +122,8 @@ pub fn class_of_key(k: &str) -> Option<&'static str> {
         "net-dup-permille" => "net-dup",
         "net-reorder-permille" => "net-reorder",
         "crash" => "crash",
+        "pause-gap-ms" => "pause",
+        "clock-skew-ms" => "clock",
         _ => return None,
     })
 }
@@ -137,6 +142,8 @@ pub struct Faults {
     /// on traffic.
     pub nodes: Vec<String>,
     parts_acted: u64,
+    /// Realtime reads on nodes with `clock-skew-ms`, and those under an offset (`clock`).
+    clock_reads: (u64, u64),
     /// With nodes: the link faults' chances on the links they act on (`faulted_links`), which
     /// replace the run-wide counters as their eligible counts.
     link_elig: Option<[u64; 5]>,
@@ -162,6 +169,8 @@ impl Faults {
         let rec = |i: usize| chunks.get(i).map(|c| Rec::from_bytes(c));
         if let Some(n) = end.nodes.as_ref() {
             self.parts_acted += n["partitions_acted"].as_u64().unwrap_or(0);
+            self.clock_reads.0 += n["clock_reads"].as_u64().unwrap_or(0);
+            self.clock_reads.1 += n["clock_reads_offset"].as_u64().unwrap_or(0);
         }
         if let Some(f) = end.nodes.as_ref().map(|n| &n["faulted_links"]) {
             if f.is_object() {
@@ -192,9 +201,11 @@ impl Faults {
                 e["a"] = names(r.args[3]);
                 e["b"] = names(r.args[4]);
             }
-            if r.args[0] == proto::node::INJ_NODE_KILL {
+            if r.args[0] == proto::node::INJ_NODE_KILL || r.args[0] == proto::node::INJ_NODE_PAUSE {
                 let k = r.args[1] as usize;
                 e["node"] = json!(self.nodes.get(k).cloned().unwrap_or_else(|| k.to_string()));
+            }
+            if r.args[0] == proto::node::INJ_NODE_KILL {
                 self.point_kills += (r.args[4] != 0) as u64;
             }
             if let Some(c) = fault {
@@ -287,6 +298,10 @@ impl Faults {
                 "net-blackout" => (chunks + datagrams, got(c)),
                 // Partitions drawn, and those that held, lost or kept back something.
                 "partition" => (self.parts_acted, got(c)),
+                // Every pause the seed made.
+                "pause" => (got(c), got(c)),
+                // Realtime clock reads on the nodes with a skew, and those it moved.
+                "clock" => self.clock_reads,
                 // Drawn once for every datagram sent.
                 "net-drop" | "net-dup" | "net-reorder" => (datagrams, got(c)),
                 _ if c.starts_with("net-") => (connections, got(c)),
@@ -365,6 +380,13 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
             }
         }
         // The wire's records: the connection's server port.
+        // A node paused by the seed (named by the caller): its incarnation, the pause's
+        // ordinal on the node, and its length.
+        None if kind == proto::node::INJ_NODE_PAUSE => {
+            e["node_incarnation"] = json!(value);
+            e["pause"] = json!(by);
+            e["length_ms"] = json!(port / 1_000_000);
+        }
         None => e["object"] = json!(format!("tcp:{port}")),
     }
     if kind == INJ_PATH_SWAP {
@@ -536,7 +558,17 @@ pub fn line(f: &Value) -> String {
         return out;
     }
     for k in [
-        "node", "kind", "point", "call", "object", "errno", "count", "bytes", "delay_ns",
+        "node",
+        "kind",
+        "point",
+        "pause",
+        "length_ms",
+        "call",
+        "object",
+        "errno",
+        "count",
+        "bytes",
+        "delay_ns",
     ] {
         if let Some(v) = s(k) {
             out.push_str(&format!(" {k}={v}"));

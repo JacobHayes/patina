@@ -39,6 +39,14 @@ struct TimerFd {
     holders: BTreeSet<i32>,
     /// `CLOCK_*` it was created on.
     clock: u64,
+    /// The node of the process that created it; whether it is armed on an absolute realtime
+    /// time (a step of the node's clock moves it), and with `TFD_TIMER_CANCEL_ON_SET` (a step
+    /// makes it readable and cancels its next read).
+    node: usize,
+    rt_abs: bool,
+    cancel: bool,
+    /// Expiries a step of the clock passed over beyond `next` (delivered with it).
+    extra: u64,
 }
 
 #[derive(Default)]
@@ -167,8 +175,21 @@ impl Io {
         }
     }
 
-    /// `TimerFdSet` from a thread of process `pid`.
-    pub fn timer_set(&mut self, sched: &mut Sched, pid: i32, a: [u64; 6]) -> i64 {
+    /// `TimerFdSet` from a thread of process `pid` of node `node`, its `Slot::clock_flags`
+    /// `flags`.
+    /// The node of timer `key`'s creator.
+    pub fn timer_node(&self, key: u64) -> Option<usize> {
+        self.timers.get(&key).map(|t| t.node)
+    }
+
+    pub fn timer_set(
+        &mut self,
+        sched: &mut Sched,
+        pid: i32,
+        node: usize,
+        flags: u64,
+        a: [u64; 6],
+    ) -> i64 {
         let key = a[1];
         match a[0] {
             TFD_CREATE => {
@@ -184,6 +205,10 @@ impl Io {
                     event: None,
                     holders: BTreeSet::from([pid]),
                     clock: a[3],
+                    node,
+                    rt_abs: false,
+                    cancel: false,
+                    extra: 0,
                 };
                 self.timers.insert(self.last_key, t);
                 self.last_key as i64
@@ -197,6 +222,9 @@ impl Io {
                 }
                 t.interval = a[3];
                 t.next = if a[2] == 0 { None } else { Some(a[2]) };
+                t.rt_abs = flags & proto::ctl::CLK_REALTIME_ABS != 0;
+                t.cancel = flags & proto::ctl::CLK_CANCEL_ON_SET != 0;
+                t.extra = 0;
                 if let Some(at) = t.next {
                     t.event = Some(sched.schedule(at, Event::TimerFd { key }));
                 }
@@ -304,6 +332,55 @@ impl Io {
         }
     }
 
+    /// Node `k`'s realtime clock moved by `delta` ns: its absolute realtime timers move with
+    /// it (one now past is due now, with the expiries it passed counted), and those set with
+    /// `TFD_TIMER_CANCEL_ON_SET` become readable (the runtime answers their next read
+    /// `ECANCELED`).
+    pub fn timers_clock_set(
+        &mut self,
+        sched: &mut Sched,
+        ctl: &Ctl,
+        k: usize,
+        delta: i64,
+        now: u64,
+    ) {
+        let mut readable = false;
+        for (&key, t) in self.timers.iter_mut() {
+            if t.node != k {
+                continue;
+            }
+            if t.cancel {
+                let v = 1u64.to_ne_bytes();
+                unsafe { libc::write(t.fd, v.as_ptr() as *const _, 8) };
+                readable = true;
+            }
+            if !t.rt_abs {
+                continue;
+            }
+            let Some(next) = t.next else { continue };
+            if let Some(id) = t.event.take() {
+                sched.cancel(id);
+            }
+            // In i128: a step ahead may put the expiry before virtual time 0.
+            let at = next as i128 - delta as i128;
+            let at = if at >= now as i128 {
+                at as u64
+            } else if t.interval == 0 {
+                now
+            } else {
+                // The last expiry at or before now; the ones before it are overruns.
+                let periods = (now as i128 - at) / t.interval as i128;
+                t.extra += periods as u64;
+                (at + periods * t.interval as i128) as u64
+            };
+            t.next = Some(at);
+            t.event = Some(sched.schedule(at.max(now), Event::TimerFd { key }));
+        }
+        if readable {
+            bump(ctl);
+        }
+    }
+
     /// Deliver the timer expiries that fired by `now`: add the expiry count (with overruns
     /// of periodic timers) to the eventfd, re-arm periodic timers, move the generation.
     /// Returns (key, count) per delivery, in firing order, for the decision records.
@@ -316,11 +393,12 @@ impl Io {
             let Some(next) = t.next else { continue };
             t.event = None;
             let late = now.saturating_sub(next);
-            let count = late.checked_div(t.interval).map_or(1, |n| n + 1);
+            let periods = late.checked_div(t.interval).map_or(1, |n| n + 1);
+            let count = periods + std::mem::take(&mut t.extra);
             let v = count.to_ne_bytes();
             unsafe { libc::write(t.fd, v.as_ptr() as *const _, 8) };
             if t.interval > 0 {
-                let at = next + count * t.interval;
+                let at = next + periods * t.interval;
                 t.next = Some(at);
                 t.event = Some(sched.schedule(at, Event::TimerFd { key }));
             } else {
@@ -499,9 +577,16 @@ mod tests {
                 event: None,
                 holders: BTreeSet::from([0]),
                 clock: 1,
+                node: 0,
+                rt_abs: false,
+                cancel: false,
+                extra: 0,
             },
         );
-        assert_eq!(io.timer_set(&mut s, 0, [TFD_ARM, 7, 1_000, 100, 0, 0]), 0);
+        assert_eq!(
+            io.timer_set(&mut s, 0, 0, 0, [TFD_ARM, 7, 1_000, 100, 0, 0]),
+            0
+        );
         assert_eq!(s.next_deadline(), Some(1_000));
         s.fire_due(1_000);
         assert_eq!(io.deliver_timers(&mut s, c, 1_000), vec![(7, 1)]);
@@ -519,10 +604,64 @@ mod tests {
         assert_eq!(u64::from_ne_bytes(buf[..8].try_into().unwrap()), 1);
         assert_eq!(u64::from_ne_bytes(buf[8..].try_into().unwrap()), 3);
         // Disarm: no event left.
-        assert_eq!(io.timer_set(&mut s, 0, [TFD_ARM, 7, 0, 0, 0, 0]), 0);
+        assert_eq!(io.timer_set(&mut s, 0, 0, 0, [TFD_ARM, 7, 0, 0, 0, 0]), 0);
         assert_eq!(s.next_deadline(), None);
         assert_eq!(io.timer_get([7, 0, 0, 0, 0, 0]), 0);
         unsafe { libc::close(p[0]) };
-        io.timer_set(&mut s, 0, [TFD_RELEASE, 7, 0, 0, 0, 0]);
+        io.timer_set(&mut s, 0, 0, 0, [TFD_RELEASE, 7, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn a_clock_step_moves_absolute_realtime_timers_of_its_node() {
+        let mem = ctl();
+        let c = unsafe { Ctl::at(mem.as_ptr() as *mut u8) };
+        let mut s = Sched::new(1, 8);
+        let mut io = Io::default();
+        let mut p = [0i32; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        let t = |node| TimerFd {
+            fd: p[1],
+            next: None,
+            interval: 0,
+            event: None,
+            holders: BTreeSet::from([0]),
+            clock: 0,
+            node,
+            rt_abs: false,
+            cancel: false,
+            extra: 0,
+        };
+        io.timers.insert(1, t(2));
+        io.timers.insert(2, t(2));
+        io.timers.insert(3, t(3));
+        let abs = proto::ctl::CLK_REALTIME_ABS;
+        let cancel = abs | proto::ctl::CLK_CANCEL_ON_SET;
+        // Node 2: an absolute timer at 10_000 (period 1_000) and a relative one; node 3's
+        // absolute one is another machine's.
+        io.timer_set(&mut s, 0, 2, cancel, [TFD_ARM, 1, 10_000, 1_000, 0, 0]);
+        io.timer_set(&mut s, 0, 2, 0, [TFD_ARM, 2, 10_000, 0, 0, 0]);
+        io.timer_set(&mut s, 0, 3, abs, [TFD_ARM, 3, 10_000, 0, 0, 0]);
+        // Node 2's clock steps 12_500 ahead at 1_000: its absolute timer's expiry, 10_000 of
+        // the old clock, is 3_500 past (at -2_500 of the new): 4 expiries are due.
+        io.timers_clock_set(&mut s, c, 2, 12_500, 1_000);
+        assert_eq!(io.timer_get([1, 0, 0, 0, 0, 0]), 500);
+        s.fire_due(1_000);
+        let d = io.deliver_timers(&mut s, c, 1_000);
+        assert_eq!(d, vec![(1, 4)]);
+        assert_eq!(io.timer_get([2, 0, 0, 0, 0, 0]), 10_000);
+        assert_eq!(io.timer_get([3, 0, 0, 0, 0, 0]), 10_000);
+        // The cancel-on-set timer was made readable (1), then delivered its 4 expiries.
+        let mut buf = [0u8; 16];
+        assert_eq!(
+            unsafe { libc::read(p[0], buf.as_mut_ptr() as *mut _, 16) },
+            16
+        );
+        assert_eq!(u64::from_ne_bytes(buf[..8].try_into().unwrap()), 1);
+        assert_eq!(u64::from_ne_bytes(buf[8..].try_into().unwrap()), 4);
+        // A step back moves the next expiry (500 + 1_000) later by as much.
+        io.timers_clock_set(&mut s, c, 2, -4_000, 1_000);
+        assert_eq!(io.timer_get([1, 0, 0, 0, 0, 0]), 5_500);
+        unsafe { libc::close(p[0]) };
+        unsafe { libc::close(p[1]) };
     }
 }

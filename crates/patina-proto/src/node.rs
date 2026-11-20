@@ -20,13 +20,17 @@
 //! node kill NAME --process     kill every process of the node; it stays down (EALREADY: down)
 //! node start NAME              start a node that is down, as at a restart (EALREADY: up or
 //!                              starting; EAGAIN: past 64 incarnations)
+//! node pause NAME              freeze every thread of the node until `node resume` (EALREADY:
+//!                              paused; EAGAIN: down or starting)
+//! node resume NAME             end its pause (EALREADY: not paused)
+//! clock step NAME +90s         move the node's realtime clock (+Ns, -Ns, +Nms, -Nms; at
+//!                              most a year): its absolute realtime timers move with it
 //! mark LABEL                   the SDK's mark (any node)
 //! ```
 //!
 //! A set is node names joined by commas, or `rest`: every node not in the other set. Only the
-//! driver's node may use `net` and `node` (elsewhere `EPERM`); an unknown name is `ENOENT`,
-//! other words `EINVAL`, and words of a later feature (`node pause`, `node resume`; `clock ...`)
-//! `EOPNOTSUPP`.
+//! driver's node may use `net`, `node` and `clock` (elsewhere `EPERM`); an unknown name is
+//! `ENOENT`, other words `EINVAL`.
 
 /// The driver and at most 15 nodes.
 pub const MAX_NODES: usize = 16;
@@ -95,6 +99,68 @@ pub struct NodeTab {
     /// Each node's disk and memory faults: its settings (written by the launcher) and its
     /// counters. The driver's are the run's (`Ctl::faults`); entry 0 is unused.
     pub faults: [crate::faults::FaultCtl; MAX_NODES],
+    /// Written by the supervisor: each node's pauses so far, the first `PAUSES_MAX` of them,
+    /// and the virtual time it spent paused.
+    pub pauses: [u64; MAX_NODES],
+    pub pause: [[Pause; PAUSES_MAX]; MAX_NODES],
+    pub paused_ns: [u64; MAX_NODES],
+    /// Written by the supervisor: each node's realtime clock offset (ns, two's complement):
+    /// its boot's skew (`clock-skew-ms`) plus the script's steps (`clock step`) so far; the
+    /// runtime adds it to every realtime time the node reads or sets. The driver's is 0.
+    pub clock_off: [u64; MAX_NODES],
+    /// The script's steps of each node's clock: how many, and their sum (ns, two's
+    /// complement). A timerfd with `TFD_TIMER_CANCEL_ON_SET` compares the count.
+    pub clock_sets: [u64; MAX_NODES],
+    pub clock_stepped: [u64; MAX_NODES],
+    /// Written by the runtime, on a node with `clock-skew-ms`: its realtime clock reads, and
+    /// those under an offset other than 0 (the `clock` class's eligible and injected counts).
+    pub clock_reads: [core::sync::atomic::AtomicU64; MAX_NODES],
+    pub clock_reads_off: [core::sync::atomic::AtomicU64; MAX_NODES],
+}
+
+impl NodeTab {
+    /// Node `k`'s realtime clock offset (ns).
+    pub fn clock_offset(&self, k: usize) -> i64 {
+        if k == 0 || k >= MAX_NODES {
+            return 0;
+        }
+        // Written by the supervisor while no guest thread runs.
+        unsafe { core::ptr::read_volatile(&self.clock_off[k]) as i64 }
+    }
+}
+
+/// Pauses `NodeTab::pause` keeps per node (later ones are counted, not listed).
+pub const PAUSES_MAX: usize = 32;
+
+/// One pause of a node.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pause {
+    /// Virtual time it began and ended (`to_ns` 0: in force when the run ended).
+    pub from_ns: u64,
+    pub to_ns: u64,
+    /// Who paused it (`BY_SEED`, `BY_SCRIPT`), and how it ended (`PEND_*`).
+    pub by: u64,
+    pub end: u64,
+}
+
+/// Who acted (`Pause::by`, `DEC_NODE_PAUSE`).
+pub const BY_SEED: u64 = 1;
+pub const BY_SCRIPT: u64 = 2;
+/// How a pause ended (`Pause::end`, `DEC_NODE_RESUME`): its drawn length ran out, the
+/// script's `node resume`, or the node went down (a kill or a machine crash of a paused node).
+pub const PEND_SEED: u64 = 1;
+pub const PEND_SCRIPT: u64 = 2;
+pub const PEND_DOWN: u64 = 3;
+
+/// A pause's end as events and `result.json` name it (`in force`: the run ended first).
+pub fn pause_end_name(end: u64) -> &'static str {
+    match end {
+        PEND_SEED => "seed",
+        PEND_SCRIPT => "script",
+        PEND_DOWN => "down",
+        _ => "in force",
+    }
 }
 
 /// Boots a node may have at most (`max-incarnations` is capped by it, and so is `node start`).
@@ -116,6 +182,16 @@ pub struct NodeConf {
     /// Exit statuses of its command that stop the node without a finding: bit `s` of
     /// `ok_exit[s / 64]`.
     pub ok_exit: [u64; 4],
+    /// The seed's pauses (`pause-gap-ms`, `pause-ms`, ns; gap 0: none): the time from the
+    /// run's start, and from each pause's end, to the next pause, and each pause's length.
+    pub pause_gap_min_ns: u64,
+    pub pause_gap_max_ns: u64,
+    pub pause_min_ns: u64,
+    pub pause_max_ns: u64,
+    /// `clock-skew-ms` (ns; max 0: none): each boot's realtime clock offset is a draw in
+    /// min..max, ahead or behind.
+    pub skew_min_ns: u64,
+    pub skew_max_ns: u64,
 }
 
 impl NodeConf {
@@ -155,6 +231,8 @@ pub struct Boot {
     /// point its machine crashed at (0: it did not crash at one).
     pub points: u64,
     pub point: u64,
+    /// The skew drawn for it (ns, two's complement; `clock-skew-ms`).
+    pub skew_ns: u64,
 }
 
 /// How a boot of a node ended (`Boot::how`, `DEC_NODE_DOWN`): its processes killed by the
@@ -192,6 +270,16 @@ pub const INJ_NODE_KILL: u64 = 40;
 /// again), and a down time.
 pub const NSUB_KILL: u64 = 1;
 pub const NSUB_DOWN: u64 = 2;
+/// Sub-keys of `draw(Stream::Node, node << 24 | n << 8 | sub)` for the node's `n`-th pause (`n`
+/// from 1, below 2^16): the gap before it and its length.
+pub const NSUB_PAUSE_GAP: u64 = 3;
+pub const NSUB_PAUSE_LEN: u64 = 4;
+/// A boot's clock skew: keyed `node << 24 | boot << 8 | NSUB_SKEW`.
+pub const NSUB_SKEW: u64 = 7;
+
+/// The `Injected` record of a seed-drawn pause: [`INJ_NODE_PAUSE`, node, boot, ordinal, length
+/// ns, 0] (class `pause`).
+pub const INJ_NODE_PAUSE: u64 = 41;
 
 /// `NodeTab::elig`: connections, deliveries, FINs, reads of sent data, datagrams.
 pub const ELIG_CONNECTIONS: usize = 0;
@@ -360,11 +448,20 @@ pub const NODE_KILL: u64 = 1;
 pub const NODE_START: u64 = 2;
 /// A crash of the node's machine.
 pub const NODE_CRASH: u64 = 3;
+/// Freeze every thread of the node, and end that.
+pub const NODE_PAUSE: u64 = 4;
+pub const NODE_RESUME: u64 = 5;
+/// `clock step NAME DELTA`: `Op::Node` [`CLOCK_STEP`, node, delta ns (two's complement)].
+pub const CLOCK_STEP: u64 = 6;
+/// `DEC_NODE_CLOCK`'s how: a boot's skew, or the script's step.
+pub const CLK_SKEW: u64 = 1;
+pub const CLK_STEP: u64 = 2;
+/// A step's limit either way (one year).
+pub const CLOCK_STEP_MAX_NS: u64 = 366 * 86_400 * 1_000_000_000;
 
 const EPERM: i64 = 1;
 const ENOENT: i64 = 2;
 const EINVAL: i64 = 22;
-const EOPNOTSUPP: i64 = 95;
 
 /// A parsed control call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -377,10 +474,16 @@ pub enum Control<'a> {
         to: u64,
         both: bool,
     },
-    /// `NODE_KILL` (its processes), `NODE_CRASH` (its machine) or `NODE_START`, of node `node`.
+    /// `NODE_KILL` (its processes), `NODE_CRASH` (its machine), `NODE_START`, `NODE_PAUSE` or
+    /// `NODE_RESUME`, of node `node`.
     Node {
         verb: u64,
         node: usize,
+    },
+    /// `clock step`: node `node`'s realtime clock moves by `delta` ns.
+    Clock {
+        node: usize,
+        delta: i64,
     },
     Mark(&'a [u8]),
 }
@@ -465,20 +568,19 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
             })
         }
         [b"node", rest @ ..] => {
-            let (verb, name) = match rest {
-                [b"kill", name, b"--process"] => (NODE_KILL, *name),
-                [b"kill", name] => (NODE_CRASH, *name),
-                [b"start", name] => (NODE_START, *name),
-                [b"pause" | b"resume", _] => {
-                    return Err(no(EOPNOTSUPP, "node pause/resume: not available yet"))
-                }
-                _ => {
-                    return Err(no(
+            let (verb, name) =
+                match rest {
+                    [b"kill", name, b"--process"] => (NODE_KILL, *name),
+                    [b"kill", name] => (NODE_CRASH, *name),
+                    [b"start", name] => (NODE_START, *name),
+                    [b"pause", name] => (NODE_PAUSE, *name),
+                    [b"resume", name] => (NODE_RESUME, *name),
+                    _ => return Err(no(
                         EINVAL,
-                        "expected: node kill NAME [--process], or node start NAME",
-                    ))
-                }
-            };
+                        "expected: node kill NAME [--process], node start NAME, node pause NAME \
+                         or node resume NAME",
+                    )),
+                };
             if tab.count() == 0 {
                 return Err(no(EINVAL, "node: the run has no nodes"));
             }
@@ -488,19 +590,60 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
             match tab.find(name) {
                 Some(0) => Err(no(
                     EINVAL,
-                    "node: the driver is not a node to kill or start",
+                    "node: the driver is not a node to kill, start or pause",
                 )),
                 Some(k) => Ok(Control::Node { verb, node: k }),
                 None if valid_name(name) => Err(no(ENOENT, "node: no node of that name")),
                 None => Err(no(EINVAL, "node: not a node name")),
             }
         }
-        [b"clock", ..] => Err(no(
-            EOPNOTSUPP,
-            "clock: not available yet (per-node clocks come later)",
-        )),
+        [b"clock", rest @ ..] => {
+            let [b"step", name, d] = rest else {
+                return Err(no(EINVAL, "expected: clock step NAME +Ns|-Ns|+Nms|-Nms"));
+            };
+            let delta = step(d).ok_or(no(
+                EINVAL,
+                "clock step: the change is a whole number of s or ms, signed, at most a year",
+            ))?;
+            if tab.count() == 0 {
+                return Err(no(EINVAL, "clock: the run has no nodes"));
+            }
+            if node != 0 {
+                return Err(no(EPERM, "clock: only the driver's node may set a clock"));
+            }
+            match tab.find(name) {
+                Some(0) => Err(no(
+                    EINVAL,
+                    "clock: the driver's clock is the run's virtual time; it is not stepped",
+                )),
+                Some(k) => Ok(Control::Clock { node: k, delta }),
+                None if valid_name(name) => Err(no(ENOENT, "clock: no node of that name")),
+                None => Err(no(EINVAL, "clock: not a node name")),
+            }
+        }
         _ => Err(no(EINVAL, "expected: net ..., or mark LABEL")),
     }
+}
+
+/// A clock step's change: `+90s`, `-5s`, `250ms` (no sign: ahead), in ns, at most
+/// `CLOCK_STEP_MAX_NS` either way.
+fn step(d: &[u8]) -> Option<i64> {
+    let (neg, d) = match d.split_first()? {
+        (b'-', r) => (true, r),
+        (b'+', r) => (false, r),
+        _ => (false, d),
+    };
+    let (num, unit) = if let Some(n) = d.strip_suffix(b"ms") {
+        (n, 1_000_000u64)
+    } else {
+        (d.strip_suffix(b"s")?, 1_000_000_000)
+    };
+    if num.is_empty() || num.len() > 15 || !num.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let n = num.iter().fold(0u64, |a, c| a * 10 + (c - b'0') as u64);
+    let ns = n.checked_mul(unit).filter(|&v| v <= CLOCK_STEP_MAX_NS)? as i64;
+    Some(if neg { -ns } else { ns })
 }
 
 /// A set of nodes: names joined by commas, or `rest` (every node not in `other`; `None` while
@@ -595,7 +738,22 @@ mod tests {
             assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
         }
         assert_eq!(errno(b"node kill a", 1), EPERM);
-        assert_eq!(errno(b"node pause a", 0), EOPNOTSUPP);
+        assert_eq!(errno(b"node pause driver", 0), EINVAL);
+        assert_eq!(errno(b"node resume a", 1), EPERM);
+        assert_eq!(
+            parse(b"node pause a", &t, 0),
+            Ok(Control::Node {
+                verb: NODE_PAUSE,
+                node: 1
+            })
+        );
+        assert_eq!(
+            parse(b"node resume b", &t, 0),
+            Ok(Control::Node {
+                verb: NODE_RESUME,
+                node: 2
+            })
+        );
         assert_eq!(errno(b"node kill a --process", 1), EPERM);
         assert_eq!(errno(b"node start zed", 0), ENOENT);
         assert_eq!(errno(b"node start driver", 0), EINVAL);
@@ -621,7 +779,25 @@ mod tests {
                 node: 1
             })
         );
-        assert_eq!(errno(b"clock step a +90s", 0), EOPNOTSUPP);
+        assert_eq!(errno(b"clock step driver +90s", 0), EINVAL);
+        assert_eq!(errno(b"clock step a +90s", 1), EPERM);
+        assert_eq!(errno(b"clock step a 1.5s", 0), EINVAL);
+        assert_eq!(errno(b"clock step a +9999999d", 0), EINVAL);
+        assert_eq!(errno(b"clock skew a", 0), EINVAL);
+        assert_eq!(
+            parse(b"clock step a -5s", &t, 0),
+            Ok(Control::Clock {
+                node: 1,
+                delta: -5_000_000_000
+            })
+        );
+        assert_eq!(
+            parse(b"clock step b 250ms", &t, 0),
+            Ok(Control::Clock {
+                node: 2,
+                delta: 250_000_000
+            })
+        );
         // Without nodes there is no network to act on; a mark still works.
         let none = tab(&[]);
         assert_eq!(parse(b"net heal", &none, 0).unwrap_err().errno, EINVAL);

@@ -341,11 +341,13 @@ fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<S
             .iter()
             .flat_map(|p| crate::faults::split_scope(p).0.split(','))
         {
-            // A run with nodes also has the preset's node classes (partitions), whether or not
-            // it had the nodes to draw them over: one without has nothing for them to act on.
+            // A run with nodes also has the preset's node classes (partitions, pauses, clock
+            // skew), whether or not it had the nodes to draw them over: one without has nothing
+            // for them to act on; `cluster`'s machine crashes when `--crash` names none.
             let with_nodes = c["nodes"].as_array().is_some_and(|n| !n.is_empty());
             let node_kv = crate::faults::NODE_PRESETS
                 .iter()
+                .chain(crate::faults::MACHINE_PRESETS)
                 .filter(|x| x.0 == p && with_nodes)
                 .flat_map(|x| x.1.iter());
             if let Some((_, kv)) = crate::faults::PRESETS.iter().find(|x| x.0 == p) {
@@ -356,6 +358,9 @@ fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<S
                         .filter_map(|(k, _)| class_of_key(k))
                         .map(str::to_string),
                 );
+                if p == "cluster" && with_nodes && !c["crash"].is_string() {
+                    e.insert("crash".to_string());
+                }
             }
         }
     }
@@ -1417,6 +1422,31 @@ pub fn build(
             v["nodes"]["downs"] = json!(downs);
             v["nodes"]["restarts"] = json!(restarts);
         }
+        // Pauses (by who made them) and the virtual time paused; clock steps, and the largest
+        // offset a node's clock had at the end.
+        let (mut pauses, mut paused_ms) = (serde_json::Map::new(), 0u64);
+        let (mut steps, mut skew_max) = (0u64, None::<i64>);
+        for n in &with_nodes {
+            for m in n["list"].as_array().into_iter().flatten() {
+                for p in m["pause"].as_array().into_iter().flatten() {
+                    let k = p["by"].as_str().unwrap_or("?").to_string();
+                    let c = pauses.get(&k).and_then(|c| c.as_u64()).unwrap_or(0);
+                    pauses.insert(k, json!(c + 1));
+                }
+                paused_ms += m["paused_ms"].as_u64().unwrap_or(0);
+                steps += m["clock"]["steps"].as_u64().unwrap_or(0);
+                for s in m["clock"]["skew_ms"].as_array().into_iter().flatten() {
+                    let s = s.as_i64().unwrap_or(0).abs();
+                    skew_max = Some(skew_max.map_or(s, |m| m.max(s)));
+                }
+            }
+        }
+        if !pauses.is_empty() {
+            v["nodes"]["pauses"] = json!({"by": pauses, "paused_ms": paused_ms});
+        }
+        if steps > 0 || skew_max.is_some() {
+            v["nodes"]["clock"] = json!({"steps": steps, "skew_max_ms": skew_max});
+        }
     }
     if with_points > 0 {
         v["compute"] = json!({
@@ -1873,6 +1903,22 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 hows.join(", "),
                 w["restarts"]
             ));
+        }
+        if let Some(p) = w["pauses"]["by"].as_object() {
+            let by: Vec<String> = p.iter().map(|(k, n)| format!("{n} by {k}")).collect();
+            s.push_str(&format!(
+                "node pauses: {}; {} ms paused\n",
+                by.join(", "),
+                w["pauses"]["paused_ms"]
+            ));
+        }
+        if w["clock"].is_object() {
+            let c = &w["clock"];
+            let skew = c["skew_max_ms"]
+                .as_i64()
+                .map(|m| format!("skews up to {m} ms"))
+                .unwrap_or_else(|| "no skew".into());
+            s.push_str(&format!("node clocks: {skew}; {} steps\n", c["steps"]));
         }
     }
     let groups = v["groups"].as_array().unwrap();

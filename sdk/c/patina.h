@@ -37,12 +37,15 @@
  *   node kill NAME --process     kill every process of node NAME (-EALREADY: it is down)
  *   node start NAME              start node NAME's command again (-EALREADY: it is up or
  *                                starting; -EAGAIN: past 64 incarnations)
+ *   node pause NAME              freeze node NAME's machine (-EALREADY: paused; -EAGAIN: down
+ *                                or starting)
+ *   node resume NAME             let it run again (-EALREADY: not paused)
+ *   clock step NAME +90s         move node NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
  *   mark LABEL                   the same as patina_mark
  * A set is node names joined by commas ("driver" is the command after --), or "rest": every
  * node the other set does not name. Answers: 0; -EPERM when a process outside the driver's node
- * acts on the network or a node; -ENOENT for an unknown node; -EINVAL for other words or a run
- * without nodes; -EOPNOTSUPP for words of a later feature (node pause, node resume, clock);
- * -ENOSYS outside Patina.
+ * acts on the network, a node or a clock; -ENOENT for an unknown node; -EINVAL for other words
+ * or a run without nodes; -ENOSYS outside Patina.
  */
 #ifndef PATINA_H
 #define PATINA_H

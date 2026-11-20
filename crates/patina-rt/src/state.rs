@@ -314,6 +314,40 @@ pub fn work_path() -> &'static [u8] {
     }
 }
 
+/// This process's node's realtime clock offset (ns; `NodeTab::clock_off`): 0 for the driver
+/// and in a run without nodes.
+pub fn clock_offset() -> i64 {
+    match node() {
+        0 => 0,
+        k => unsafe { proto::node::NodeTab::at(ctl_base()) }.clock_offset(k),
+    }
+}
+
+/// A read of the realtime clock under offset `off`: on a node with `clock-skew-ms`, counted
+/// for the `clock` class (`NodeTab::clock_reads`).
+pub fn clock_read(off: i64) {
+    let k = node();
+    if k == 0 || k >= proto::node::MAX_NODES {
+        return;
+    }
+    let t = unsafe { proto::node::NodeTab::at(ctl_base()) };
+    if t.conf[k].skew_max_ns == 0 {
+        return;
+    }
+    t.clock_reads[k].fetch_add(1, Relaxed);
+    if off != 0 {
+        t.clock_reads_off[k].fetch_add(1, Relaxed);
+    }
+}
+
+/// What the deadline of this thread's next `Sleep`, `FutexWait` or `TimerFdSet` is on
+/// (`Slot::clock_flags`).
+pub fn clock_flags(f: u64) {
+    unsafe { &*ctl().slot(thread().slot as usize) }
+        .clock_flags
+        .store(f, Relaxed);
+}
+
 /// This process's disk and memory faults: the driver's are the run's (`Ctl::faults`), another
 /// node's its own (`NodeTab::faults`).
 pub fn faults() -> &'static proto::faults::FaultCtl {

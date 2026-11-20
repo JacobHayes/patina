@@ -60,7 +60,7 @@ impl Sched {
     /// then. Returns the new time, or None when nothing is runnable and nothing is pending
     /// (deadlock) or something is runnable (no jump needed).
     pub fn idle_jump(&mut self, now: u64, setup: bool) -> Option<u64> {
-        if !self.runnable.is_empty() {
+        if self.eligible().next().is_some() {
             return None;
         }
         if self.only_weak(setup) {

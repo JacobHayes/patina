@@ -54,6 +54,7 @@ pub mod e {
     pub const ENOTDIR: i64 = 20;
     pub const EOPNOTSUPP: i64 = 95;
     pub const ETIMEDOUT: i64 = 110;
+    pub const ECANCELED: i64 = 125;
     pub const EINTR: i64 = 4;
     pub const ESRCH: i64 = 3;
     pub const E2BIG: i64 = 7;

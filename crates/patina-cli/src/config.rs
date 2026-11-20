@@ -1188,6 +1188,13 @@ impl Config {
             {
                 return Err(format!("{s}: @NODE names nodes, and the run has none"));
             }
+            if let Some(s) = self
+                .faults
+                .iter()
+                .find(|s| faults::node_only(s.split_once('=').map_or(s.as_str(), |x| x.0)))
+            {
+                return Err(format!("--fault {s}: only in a run with nodes"));
+            }
             (self.faults_preset.clone(), self.faults.clone())
         } else {
             (vec![], self.run_settings()?)
@@ -1268,8 +1275,8 @@ impl Config {
                     }
                     if scope.is_some() {
                         return Err(format!(
-                            "--faults {p}: {name} sets {k}, which is the run's (only disk and \
-                             memory keys take @NODE)"
+                            "--faults {p}: {name} sets {k}, which is the run's (only disk, \
+                             memory, pause and clock keys take @NODE)"
                         ));
                     }
                     out.push(format!("{k}={v}"));
@@ -1284,7 +1291,8 @@ impl Config {
             }
             if scope.is_some() {
                 return Err(format!(
-                    "--fault {s}: {k} is the run's (only disk and memory keys take @NODE)"
+                    "--fault {s}: {k} is the run's (only disk, memory, pause and clock keys \
+                     take @NODE)"
                 ));
             }
             out.push(kv.to_string());
@@ -1377,12 +1385,28 @@ impl Config {
             } else {
                 self.nodes[k - 1].name.as_str()
             };
+            if k == 0 {
+                if let Some(s) = given
+                    .iter()
+                    .find(|s| faults::node_only(s.split_once('=').map_or(s.as_str(), |x| x.0)))
+                {
+                    return Err(format!(
+                        "--fault {s}@driver: a node's own key (the driver is never paused, its \
+                         clock is the run's virtual time)"
+                    ));
+                }
+            }
             let seed = node_seed(self.seed, k);
             let sub = faults::resolve(seed, &[], &given, None, 0)
                 .map_err(|e| format!("node {name}: {e}"))?;
             match k {
                 0 => faults::set_node_keys(&mut plan.faults, &sub.faults),
-                _ => faults::set_node_keys(&mut plan.node_faults[k], &sub.faults),
+                _ => {
+                    faults::set_node_keys(&mut plan.node_faults[k], &sub.faults);
+                    let (g, l) = (sub.pause_gap_ns, sub.pause_ns);
+                    plan.node_pause[k] = [g.0, g.1, l.0, l.1];
+                    plan.node_skew[k] = sub.skew_ns;
+                }
             }
             for (key, v) in sub.resolved.into_iter().filter(|(k, _)| k != "swarm") {
                 plan.resolved.push((format!("{key}@{name}"), v));
@@ -1401,7 +1425,10 @@ impl Config {
                 "[node.*]: at most {MAX_NODES} nodes besides the driver"
             ));
         }
-        if let Some(c) = &self.crash {
+        // `--faults cluster` crashes every node's machine at drawn times unless `--crash`
+        // says otherwise.
+        let cluster = faults::names_cluster(&self.faults_preset).then_some(faults::CLUSTER_CRASH);
+        if let Some(c) = self.crash.as_deref().or(cluster) {
             let r = self.crash_nodes(c, plan)?;
             plan.resolved.push(("crash".into(), serde_json::json!(r)));
         }

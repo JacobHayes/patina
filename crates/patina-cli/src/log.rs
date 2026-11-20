@@ -126,6 +126,23 @@ pub fn describe(r: &Rec) -> String {
             proto::ctl::DEC_NODE_DOWN => {
                 format!("node down {}", proto::node::down_name(r.args[2]))
             }
+            proto::ctl::DEC_NODE_PAUSE => format!("node pause {}", r.args[0]),
+            proto::ctl::DEC_NODE_RESUME => format!(
+                "node resume {} {}",
+                r.args[0],
+                proto::node::pause_end_name(r.args[2])
+            ),
+            proto::ctl::DEC_NODE_CLOCK => format!(
+                "node clock {} {} {} ns, offset {} ns",
+                r.args[0],
+                if r.args[2] == proto::node::CLK_SKEW {
+                    "skew"
+                } else {
+                    "step"
+                },
+                r.args[3] as i64,
+                r.args[4] as i64
+            ),
             proto::ctl::DEC_WIRE_HEAL => "wire heal".to_string(),
             proto::ctl::DEC_WIRE_DEAD => format!("wire dead {}", r.args[0]),
             proto::ctl::DEC_WIRE_PROBE => format!("wire probe {} unanswered", r.args[0]),

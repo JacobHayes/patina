@@ -127,6 +127,43 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                         .collect();
                     v["crash_points"] = json!(p);
                 }
+                // Its pauses (the seed's and the script's), and the virtual time it spent
+                // paused in all.
+                if t.pauses[k] > 0 {
+                    let n = (t.pauses[k] as usize).min(proto::node::PAUSES_MAX);
+                    let p: Vec<Value> = t.pause[k][..n]
+                        .iter()
+                        .map(|p| {
+                            json!({
+                                "by": if p.by == proto::node::BY_SEED { "seed" } else { "script" },
+                                "at_ms": p.from_ns / 1_000_000,
+                                "ms": if p.to_ns == 0 { Value::Null } else { json!((p.to_ns - p.from_ns) / 1_000_000) },
+                                "end": proto::node::pause_end_name(p.end),
+                            })
+                        })
+                        .collect();
+                    v["pauses"] = json!(t.pauses[k]);
+                    v["pause"] = json!(p);
+                    v["paused_ms"] = json!(t.paused_ns[k] / 1_000_000);
+                }
+                // Its realtime clock: the offset at the end, each boot's skew, the steps.
+                let skewed = t.conf[k].skew_max_ns > 0;
+                if skewed || t.clock_sets[k] > 0 {
+                    let ms = |ns: u64| json!(ns as i64 / 1_000_000);
+                    let mut c = json!({
+                        "offset_ms": ms(t.clock_off[k]),
+                        "steps": t.clock_sets[k],
+                        "stepped_ms": ms(t.clock_stepped[k]),
+                    });
+                    if skewed {
+                        c["skew_ms"] = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
+                            .iter()
+                            .map(|b| ms(b.skew_ns))
+                            .collect();
+                        c["reads"] = json!(t.clock_reads[k].load(std::sync::atomic::Ordering::Relaxed));
+                    }
+                    v["clock"] = c;
+                }
             }
             v
         })
@@ -180,6 +217,15 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
     });
     if t.ended_by > 0 {
         v["ended_by"] = json!(name(t.ended_by as usize - 1));
+    }
+    if (1..t.count()).any(|k| t.conf[k].skew_max_ns > 0) {
+        let sum = |c: &[std::sync::atomic::AtomicU64]| -> u64 {
+            c.iter()
+                .map(|x| x.load(std::sync::atomic::Ordering::Relaxed))
+                .sum()
+        };
+        v["clock_reads"] = json!(sum(&t.clock_reads));
+        v["clock_reads_offset"] = json!(sum(&t.clock_reads_off));
     }
     if t.parts_n > 0 {
         v["partitions"] = json!(parts);

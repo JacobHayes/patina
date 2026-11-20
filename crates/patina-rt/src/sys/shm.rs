@@ -222,7 +222,9 @@ fn realtime_s(t: u64) -> u64 {
     if t == 0 {
         0
     } else {
-        (t.saturating_sub(VCLOCK_BOOT_NS)) / 1_000_000_000 + REALTIME_EPOCH_S
+        ((t.saturating_sub(VCLOCK_BOOT_NS)) + REALTIME_EPOCH_S * 1_000_000_000)
+            .saturating_add_signed(crate::state::clock_offset())
+            / 1_000_000_000
     }
 }
 

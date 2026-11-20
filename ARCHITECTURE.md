@@ -479,12 +479,65 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   the next disk, and counts what it lost against the disk's live tree (`downs[].lost`, the
   `crash` event). A node's points count only its own disk's changes and syncs, so its N-th
   point stays at the same place in its own work when another node's crashes change.
+- **Pause.** `node pause NAME` / `node resume NAME` (`Op::Node`, `NODE_PAUSE`,
+  `NODE_RESUME`) and the seed's pauses (`pause-gap-ms`, `pause-ms`, each node's own:
+  `NodeConf::pause_*`) freeze a node's machine (`sup/pause.rs`). The scheduler keeps a set of
+  frozen slots beside the runnable one (`Sched::frozen`); a frozen slot keeps its state, its
+  wake and its place in the event queue but is never picked, and the idle jump and the
+  deadlock check count only eligible slots, so with nothing frozen the picks and their draws
+  are those of a run without pauses. Every slot whose `Slot::node` is paused is frozen
+  (`refreeze`; a slot a paused node gains, `slot_node`); a turn holder of a paused node has
+  its request served as at the pause and is frozen before its reply is read (`serve`, a
+  `Continue` of a frozen slot chooses another). Clocks are not stopped: deadlines fall due as
+  they would, and the threads they wake run at the resume. A fourth link layer
+  (`Links::paused`) cuts every link to and from the node, so the wire holds what a peer sends
+  (its give-up clock runs); `wire_pause` re-holds what was in flight to the node with the rest
+  of its delay and sends handshakes either way into SYN retries; a datagram arriving at a
+  paused node is lost (`UD_PAUSED`); keepalive timers are re-armed (`ka_arm_all`), so probes
+  either way go unanswered. A resume opens the links nothing else cuts
+  (`wire_heal`). A pause takes effect at a node action point, as kills do; a kill or machine
+  crash of a paused node ends the pause first (`pause_down`). The seed's chain is node events
+  (`EVK_PAUSE_START`, `Live::No`; `EVK_PAUSE_END`, `Live::Yes`) drawn on `Stream::Node` keyed
+  by node, the pause's ordinal and a sub-key (`NSUB_PAUSE_*`), with an `Injected` record
+  `INJ_NODE_PAUSE` counted as `pause`; a start skips while faults may not act, while the node
+  is down or while a script has paused it. Each pause and resume is a decision record
+  (`DEC_NODE_PAUSE` [node, boot, by, ordinal, length], `DEC_NODE_RESUME` [node, boot, how,
+  ordinal, ns paused]); the node table keeps the first 32 of each node for `result.json`. With
+  no eligible slot, a pending event that can only wake a frozen slot (its sleep's end, a
+  paused node's timerfd or signal timer) keeps nothing alive (`only_frozen`): a paused node's
+  interval timer would otherwise fire forever. The lost-signal check skips frozen slots (a
+  process-directed signal waits for a runnable thread of the process that is frozen too). A
+  deadlock's detail names the paused nodes.
+- **Clocks.** One virtual time serves every node; a node's realtime clock is it plus the
+  node's offset (`NodeTab::clock_off`, `sup/clock.rs`), which the runtime adds wherever it
+  answers a realtime time (`sys::time`'s clocks, `vtime::now` for the times a node stamps on
+  its files, System V shared memory times, `/proc/stat`'s `btime`) and subtracts where it
+  converts an absolute realtime deadline to virtual time (`realtime_to_vclock`). The driver's
+  offset is 0. Monotonic and boot-time clocks have none, and no clock has a rate of its own.
+  The offset is each boot's skew (`clock-skew-ms`, drawn when the boot starts on
+  `Stream::Node` keyed by node, boot and `NSUB_SKEW`) plus the driver's steps (`clock step`,
+  `Op::Node` `CLOCK_STEP` with the change as its third argument), each a decision record
+  (`DEC_NODE_CLOCK` [node, boot, how, change, offset]); a node without either writes none. A
+  step moves the node's absolute realtime deadlines: the runtime says which deadline is one in
+  `Slot::clock_flags` before a `Sleep`, `FutexWait` or `TimerFdSet` (outside the request, so
+  the log does not change; the supervisor clears it as it reads it), the scheduler keeps it (`Entry::rt_abs`) and `retime` moves it
+  (one now past wakes as a timeout), and a timerfd armed so moves too (`timers_clock_set`);
+  one armed with `TFD_TIMER_CANCEL_ON_SET` gets a count written so it is readable, and the
+  runtime answers its next read `ECANCELED` when its node's step count (`NodeTab::clock_sets`)
+  moved since it was armed. Relative deadlines, on any clock, are virtual times and do not
+  move, as the kernel keeps relative realtime timers on the monotonic base. Not modelled: a
+  realtime futex wait that a stop signal interrupted resumes (`restart_syscall`) with its
+  virtual deadline, so a step while it was stopped does not move it; a timerfd's
+  `ECANCELED` is kept per process, not per open file, so after a fork each process holding it
+  reads it once. On a node with a
+  skew the runtime counts its realtime reads, and those under an offset, for the `clock`
+  class (`NodeTab::clock_reads`).
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
-Not yet: a process kill at a crash point (`process-at:N` with nodes), the SDK's fault keys
-with nodes, pausing a node, and per-node clocks.
+Not yet: a process kill at a crash point (`process-at:N` with nodes) and the SDK's fault keys
+with nodes.
 
 ## The boundary log
 
@@ -1559,7 +1612,8 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   never happen.
 - **One clock, one kernel.** All processes of a run share one sandbox, one kernel and one
   virtual clock. Several machines are nodes inside it (above, "Nodes"): each has its own
-  files, hostname, IPC, ports and address, but no clock drift, no own kernel or OS image, no
+  files, hostname, IPC, ports, address and realtime clock offset, but no clock drift (a
+  clock's rate is the run's), no own kernel or OS image, no
   IPv6 address, at most 15 besides the driver; and there is no network outside the run.
 - **TCP and UDP only.** Raw, packet and netlink sockets, and `SOCK_DGRAM` with a protocol
   other than UDP, are refused and listed in `result.json`'s `refused`; `patina run` prints

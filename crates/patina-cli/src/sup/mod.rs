@@ -68,6 +68,7 @@ pub(crate) const BASE_ENV: [&str; 5] = [
 
 // Parts of the scheduler's interface (`Wait::Io`, `WakeReason::Signal`, `io_generation`,
 // `cancel`, ...) are for blocking I/O and signals; unit tests use the rest.
+mod clock;
 mod contain;
 pub mod crash;
 mod disks;
@@ -78,6 +79,7 @@ pub mod io;
 mod link;
 mod maps;
 mod nodes;
+mod pause;
 pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
@@ -120,6 +122,8 @@ struct Sup {
     nodes: nodes::Nodes,
     /// Links between nodes: the cuts of a script and of the seed.
     links: link::Links,
+    /// Paused nodes.
+    pauses: pause::Pauses,
     /// The program's path in the sandbox (the first image).
     exe: String,
     /// Processes in which an `execve` has replaced an image (pids are unique in a run): a
@@ -301,7 +305,7 @@ impl Sup {
         v.seq.store(self.ctl.seq.load(Relaxed), Relaxed);
         v.slot.store(to as u64, Relaxed);
         v.runnable
-            .store(self.sched.runnable().count() as u64, Relaxed);
+            .store(self.sched.eligible().count() as u64, Relaxed);
         v.quiet.store(quiet as u64, Relaxed);
         self.running = Some(to);
         let s = unsafe { &mut *self.ctl.slot(to) };
@@ -385,7 +389,7 @@ impl Sup {
             }
             // Nothing pending that can wake anyone (a partition to come, or a kill before
             // faults may act): deadlock, now.
-            if self.sched.only_weak(self.setup_done()) {
+            if self.sched.only_weak(self.setup_done()) || self.only_frozen() {
                 self.deadlock();
             }
             // A jump past the liveness limit is reported before it wakes anyone, so
@@ -449,7 +453,15 @@ impl Sup {
     }
 
     fn deadlock(&self) -> ! {
-        self.finish(Verdict::new("deadlock", self.parked_detail()))
+        let paused = if self.node_count() > 0 {
+            self.paused_detail()
+        } else {
+            String::new()
+        };
+        self.finish(Verdict::new(
+            "deadlock",
+            format!("{}{paused}", self.parked_detail()),
+        ))
     }
 
     /// Log what the shared mappings of `pids` hold that the log does not: they end without
@@ -668,13 +680,16 @@ impl Sup {
                 }
             }
             Some(Op::Sleep) => {
+                let clk = self.slot(idx).clock_flags.swap(0, Relaxed);
                 let Some(ok) = self.may_block(idx) else {
                     return Next::Continue(-(libc::EINTR as i64));
                 };
                 self.sched.park(idx, Wait::Sleep, Some(a[0]), ok);
+                self.park_clock(idx, clk);
                 Next::Pick
             }
             Some(Op::FutexWait) => {
+                let clk = self.slot(idx).clock_flags.swap(0, Relaxed);
                 let deadline = if a[2] == NO_DEADLINE {
                     None
                 } else {
@@ -685,6 +700,7 @@ impl Sup {
                 };
                 self.sched
                     .futex_wait(idx, (asid_of(a[0]), a[0]), a[3] as u32, deadline, ok);
+                self.park_clock(idx, clk);
                 Next::Pick
             }
             Some(Op::FutexWake) => {
@@ -754,7 +770,9 @@ impl Sup {
             }
             Some(Op::TimerFdSet) => {
                 let pid = self.sched.entries[idx].pid;
-                let r = self.io.timer_set(&mut self.sched, pid, a);
+                let node = self.node_of(idx);
+                let flags = self.slot(idx).clock_flags.swap(0, Relaxed);
+                let r = self.io.timer_set(&mut self.sched, pid, node, flags, a);
                 // An expiry already due (an absolute time in the past) is delivered before
                 // the call returns, as the kernel does.
                 let now = self.now();
@@ -1099,6 +1117,15 @@ impl Sup {
             self.wire_step();
             self.io.sync(&mut self.sched, self.ctl);
             let to = match next {
+                // A caller whose node was paused before its request was served finishes the
+                // call, and waits with its reply until the resume.
+                Next::Continue(ret) if self.sched.is_frozen(idx) => {
+                    self.sched.entries[idx].reply = ret;
+                    let (to, seq) = self.choose();
+                    let got = self.decide(req.op, idx, req.args, to as i64);
+                    debug_assert_eq!(got, seq);
+                    to
+                }
                 Next::Continue(ret) => {
                     self.sched.entries[idx].reply = ret;
                     self.decide(req.op, idx, req.args, idx as i64);
@@ -1234,6 +1261,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         shm: shm::Shm::default(),
         nodes: nodes::Nodes::default(),
         links: link::Links::default(),
+        pauses: pause::Pauses::default(),
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
         execed: Default::default(),
         maps_ended: std::cell::Cell::new(false),

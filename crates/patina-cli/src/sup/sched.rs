@@ -96,6 +96,9 @@ pub struct Entry {
     pub reply: i64,
     /// Why it last became runnable after a park.
     pub woke: Option<WakeReason>,
+    /// Its deadline is an absolute realtime time of its node (`Slot::clock_flags`): a step
+    /// of the node's clock moves it (`retime`).
+    pub rt_abs: bool,
 }
 
 impl Entry {
@@ -108,6 +111,7 @@ impl Entry {
             timer: None,
             reply: 0,
             woke: None,
+            rt_abs: false,
         }
     }
 }
@@ -135,6 +139,10 @@ pub struct Sched {
     pub fired_wire: Vec<u64>,
     /// Node event keys that fired, in firing order.
     pub fired_node: Vec<u64>,
+    /// Slots of a paused node's threads (`nodes`): never picked, whether runnable or not. A
+    /// thread keeps its state while frozen: a wake makes it runnable, and it runs once its
+    /// slot leaves this set.
+    pub(super) frozen: BTreeSet<usize>,
 }
 
 impl Sched {
@@ -142,9 +150,31 @@ impl Sched {
     /// whether a virtual-time event is queued.
     pub fn waiting_besides(&self, holder: Option<usize>) -> super::stall::Others {
         super::stall::Others {
-            runnable: self.runnable.iter().filter(|&&i| Some(i) != holder).count(),
+            runnable: self.eligible().filter(|&i| Some(i) != holder).count(),
             timed: !self.events.is_empty(),
         }
+    }
+
+    /// The runnable threads the scheduler may pick: those of no paused node, in slot order.
+    /// Without a pause, every runnable thread.
+    pub fn eligible(&self) -> impl Iterator<Item = usize> + '_ {
+        self.runnable
+            .iter()
+            .copied()
+            .filter(|s| !self.frozen.contains(s))
+    }
+
+    /// Slot `slot` belongs to a paused node: it is not picked until `thaw`.
+    pub fn freeze(&mut self, slot: usize) {
+        self.frozen.insert(slot);
+    }
+
+    pub fn thaw(&mut self, slot: usize) {
+        self.frozen.remove(&slot);
+    }
+
+    pub fn is_frozen(&self, slot: usize) -> bool {
+        self.frozen.contains(&slot)
     }
 }
 
@@ -162,11 +192,14 @@ impl Sched {
             fired_timers: Vec::new(),
             fired_wire: Vec::new(),
             fired_node: Vec::new(),
+            frozen: BTreeSet::new(),
         }
     }
 
-    /// A new thread (or process image) in `slot`, runnable.
+    /// A new thread (or process image) in `slot`, runnable (and not frozen: the caller
+    /// freezes it if its node is paused).
     pub fn add(&mut self, slot: usize, tid: i32, pid: i32, asid: u64) {
+        self.frozen.remove(&slot);
         self.entries[slot] = Entry {
             state: State::Runnable,
             tid,
@@ -175,6 +208,7 @@ impl Sched {
             timer: None,
             reply: 0,
             woke: None,
+            rt_abs: false,
         };
         self.runnable.insert(slot);
     }
@@ -187,29 +221,25 @@ impl Sched {
         self.runnable.iter().copied()
     }
 
-    /// The picking rule: the runnable set in slot order, `runnable[draw(Sched, seq) % len]`.
+    /// The picking rule: the eligible set in slot order, `eligible[draw(Sched, seq) % len]`.
     pub fn pick(&self, seq: u64) -> Option<usize> {
-        let n = self.runnable.len() as u64;
+        let n = self.eligible().count() as u64;
         if n == 0 {
             return None;
         }
         let i = draw(self.seed, Stream::Sched, seq) % n;
-        self.runnable.iter().nth(i as usize).copied()
+        self.eligible().nth(i as usize)
     }
 
-    /// The picking rule without `except`: the other runnable threads in slot order,
+    /// The picking rule without `except`: the other eligible threads in slot order,
     /// `others[draw(Sched, seq) % len]`; None when there are none.
     pub fn pick_except(&self, seq: u64, except: usize) -> Option<usize> {
-        let n = self.runnable.iter().filter(|&&s| s != except).count() as u64;
+        let n = self.eligible().filter(|&s| s != except).count() as u64;
         if n == 0 {
             return None;
         }
         let i = draw(self.seed, Stream::Sched, seq) % n;
-        self.runnable
-            .iter()
-            .filter(|&&s| s != except)
-            .nth(i as usize)
-            .copied()
+        self.eligible().filter(|&s| s != except).nth(i as usize)
     }
 
     /// Park `slot` on `wait`, with an optional virtual deadline. `MayPark` says no signal
@@ -225,6 +255,33 @@ impl Sched {
         e.state = State::Parked { wait, deadline };
         e.timer = timer;
         e.woke = None;
+        e.rt_abs = false;
+    }
+
+    /// Move the deadline of parked `slot` to `at` (a step of its node's realtime clock): a
+    /// deadline now past wakes it at once, as a timeout.
+    pub fn retime(&mut self, slot: usize, at: u64, now: u64) {
+        let State::Parked {
+            wait,
+            deadline: Some(_),
+        } = self.entries[slot].state
+        else {
+            return;
+        };
+        if at <= now {
+            self.make_runnable(slot, WakeReason::Timeout);
+            return;
+        }
+        if let Some(id) = self.entries[slot].timer.take() {
+            self.events.remove(&id);
+        }
+        let timer = self.schedule(at, Event::Timeout { slot });
+        let e = &mut self.entries[slot];
+        e.state = State::Parked {
+            wait,
+            deadline: Some(at),
+        };
+        e.timer = Some(timer);
     }
 
     /// Wake a parked thread. Returns false if it was not parked. Sets the reply its
@@ -285,6 +342,7 @@ impl Sched {
     /// `slot` is gone for good (its process passed the exit barrier).
     pub fn free(&mut self, slot: usize) {
         self.detach(slot);
+        self.frozen.remove(&slot);
         self.entries[slot] = Entry::free();
     }
 
@@ -365,6 +423,41 @@ mod tests {
         s.park(0, Wait::Sleep, None, MayPark::for_test(0));
         s.park(2, Wait::Sleep, None, MayPark::for_test(2));
         assert_eq!(s.pick(1), None);
+    }
+
+    #[test]
+    fn a_frozen_thread_is_never_picked_and_keeps_its_wake() {
+        let (mut s, plain) = (sched(4, 4), sched(4, 4));
+        s.freeze(1);
+        s.freeze(3);
+        for q in 0..100 {
+            let d = draw(4, Stream::Sched, q) % 2;
+            assert_eq!(s.pick(q), Some([0, 2][d as usize]));
+            assert_eq!(s.pick_except(q, 0), Some(2));
+        }
+        // A frozen thread woken stays unpicked; thawed, it is a candidate again, and the
+        // picks are those of a scheduler that never froze anything.
+        s.park(1, Wait::Sleep, Some(10), MayPark::for_test(1));
+        assert_eq!(s.idle_jump(0, true), None); // 0 and 2 are runnable
+        s.park(0, Wait::Sleep, None, MayPark::for_test(0));
+        s.park(2, Wait::Sleep, None, MayPark::for_test(2));
+        assert_eq!(s.pick(7), None);
+        assert_eq!(s.idle_jump(0, true), Some(10));
+        assert!(s.is_runnable(1));
+        assert_eq!(s.pick(8), None);
+        s.thaw(1);
+        s.thaw(3);
+        let mut p = plain;
+        p.park(0, Wait::Sleep, None, MayPark::for_test(0));
+        p.park(2, Wait::Sleep, None, MayPark::for_test(2));
+        for q in 0..100 {
+            assert_eq!(s.pick(q), p.pick(q));
+        }
+        // A slot reused by a new thread is not frozen.
+        s.freeze(3);
+        s.free(3);
+        s.add(3, 99, 9, 0);
+        assert!(!s.is_frozen(3));
     }
 
     #[test]

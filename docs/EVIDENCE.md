@@ -2645,6 +2645,103 @@ an `acked-lost` run identical, as was every failing group's own replay. About 0.
 
 No PostgreSQL bug was found; nothing was filed.
 
+### Pausing a node, each node's clock
+
+Measured 2026-11-20 on the same host, x86_64, at the commit that adds them.
+
+`tests/nodes/17-lease.sh` sweeps seeds 1-16 of two guests (`tests/guests/nodes`). `lease.py`
+is a primary/backup service with a lease: a store that grants it and fences writes, and two
+replicas that measure it on their monotonic clock with a margin. `lww.py` is a
+last-writer-wins register on two nodes, stamped by a hybrid logical clock. Each planted bug is
+found by its own fault class only:
+
+| Sweep | Faults | Result |
+|---|---|---|
+| `lease.py`, correct | the seed's pauses of both replicas (gaps 1-8 s, 0.1-4 s long) | 16 of 16 ok |
+| `lease.py`, correct | partitions, and the driver stepping a replica's clock back 2-6 s every 2-5 s | 16 of 16 ok |
+| `nofence` (the store does not fence) | pauses | stale write in 16 of 16; without pauses in none |
+| `realtime` (the lease measured on `time.time()`) | partitions and steps | stale read in 13 of 16; partitions without steps in none |
+| `lww.py`, correct | `clock-skew-ms=0..2000` | 16 of 16 ok |
+| `wallclock` (each node stamps with its own clock) | skew | lost update in 13 of 16; without skew in none |
+
+Each failing sweep's first run replays identically. `tests/nodes/18-clock.sh` steps a node's
+clock by +5 s and then -5 s (`clockstep.c`). Absolute realtime sleeps, condition-variable waits
+and timerfds move with each step. Relative ones on any clock do not. A timerfd armed with
+`TFD_TIMER_CANCEL_ON_SET` reads `ECANCELED` at the step. All of this is what
+`clock_nanosleep(2)` and `timerfd_create(2)` describe. `tests/nodes/16-pause.sh` and
+`tests/nodes/15-keepalive.sh` show what a pause looks like from inside and outside the node:
+- a connection to a paused node survives;
+- the node answers nothing until the resume, then at once;
+- a peer's `TCP_USER_TIMEOUT` and keepalive fire as across a cut of the same length.
+
+Runs with the seed's pauses, with skew and with steps are identical under `verify --vary
+cpu,load,aslr,sandbox,repeat` and replay identically.
+
+**Runs that do not use the new options are unchanged.** Both builds, at the commit before this
+one and at this change, ran the same cells, each architecture on one guest build:
+- **The 90-cell ledger** (no nodes): identical on x86_64 and on the hosted arm64 runner.
+- **52 cells with nodes** (partitions, the net preset, process kills and machine crashes by
+  the seed and by the script, disk faults, `swarm`): identical on both architectures except
+  two groups.
+  - The cells that ask for `--faults all` (12 cells; 11 changed). With nodes, `all` now adds
+    pauses and skew, so it draws differently.
+  - `iso.py` (4 cells). It runs `patina ctl` inside a node, and that binary's bytes are a run
+    input. The records of every other process and every output are the same.
+
+**Quick tier.** On the arm64 runner, `16-pause` takes about 6 s, `18-clock` about 8 s, and the
+keepalive script's two pause cases about 1 s. `17-lease` (about 100 s there, 25 s here) is in
+the area and release tiers.
+
+### PostgreSQL on two nodes under pauses
+
+Measured 2026-11-20 on the same host, at the commit that adds pausing a node.
+
+The pair, agent, driver and checker of the section above, unchanged but for one more failover
+cause: the old primary was paused (frozen, its machine up) in the 6 s before the decision. A
+pause is what a long garbage collection or a stalled host does to a primary: its connections
+stay open and nothing answers. The driver's health check sees two failures in a row and fails
+over: it fences the old primary (`node kill`, which ends the pause and crashes its machine),
+promotes the standby and starts the old primary again, which rejoins with `pg_rewind`. The
+seed's pauses are `--fault pause-gap-ms=3000..15000 --fault pause-ms=200..8000` (each node its
+own chain; `$PZ` below), with `--env DUR=30`; every sweep `-j 6 --keep none` (a rerun by seed
+gives any run again).
+
+| Sweep (seeds) | Pauses | Failovers by cause | Findings |
+|---|---|---|---|
+| pauses, `synchronous_commit = on` (1-300) | 1,597 (5,799 s paused; 288 ended by the fence) | 362: paused 351, other 10, standby view 1; runs: none 73, paused 111, several 109 | none; 0 of 150,393 acknowledged commits lost; timelines 1-5 |
+| pauses and the seed's machine crashes (`--crash machine --fault crash-gap-ms=5000..20000 --fault down-ms=500..4000`; 1-150) | 908 (278 ended by a crash or the fence) | 217: machine crash 126, paused 85, standby view 4, other 2 | none; 0 of 52,654 lost; both nodes down at once in 76 runs |
+| no faults (1-60) | 0 | 0 | none; 0 of 54,000 lost |
+
+**Controls:**
+
+| Control (seeds) | Fired |
+|---|---|
+| no fencing, synchronous (1-60) | nothing: a resumed old primary still takes writes, but every commit waits for a synchronous standby it no longer has, and the agent turns it into a standby of the new primary at its next ask; 0 of 28,527 lost |
+| no fencing, asynchronous (1-60) | acked-lost in 21 (1,023 commits), split-brain in 9 (99 acknowledgements from the resumed old primary) |
+| asynchronous replication, fenced (1-60) | acked-lost in 15 (1,080 commits) |
+
+Unlike a machine crash, a pause leaves the old primary running: with fencing it is killed, and
+without fencing and with asynchronous replication it acknowledges commits after the standby's
+promotion that the new timeline never has. With synchronous replication those commits never
+return, so the no-fencing control loses nothing; the two-primaries oracle of the section above
+did not fire because the resumed node, unlike a restarted one, asks the driver at once and is
+demoted.
+
+**Determinism.** Seeds 1-100 of the first sweep run again: 100 identical digests. `verify`
+under `--vary cpu,load,aslr,sandbox,repeat`, 4 identical runs each with the sweep's digest: a
+run with only pause failovers (seed 9), one with pause and crash failovers (seed 9 of the
+second sweep), and an `acked-lost` run of the asynchronous no-fencing control (seed 2), which
+also replays identically. About 0.8 runs/s at `-j 6` (median 7 s of wall time per run).
+
+**Patina.** Every run with a machine crash of a node failed the operation log's self-check (the
+outcomes were the programs' own): PostgreSQL's Unix socket file `.s.PGSQL.5432`, in a synced
+directory, is in the tree the crash leaves but not in the tree the next boot starts from, as a
+work tree cannot hold a socket's inode and the restart drops it. The check now leaves such
+inodes out of the comparison (`tests/nodes/09-machine.sh`); the commit before this one fails it
+on any machine crash with a socket's synced file.
+
+No PostgreSQL bug was found; nothing was filed.
+
 ### Every crash point of every node
 
 `patina sweep --branch --crash machine` on runs with nodes: each seed once with crash points

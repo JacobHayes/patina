@@ -12,6 +12,9 @@
                machine without the connection, whose RST gives ECONNRESET before the budget
       short    the link is cut both ways for 3 s: nothing happens, and a second line echoes
       long     the link is cut both ways for 10 s: ETIMEDOUT at the budget, on b's side too
+      pause-short, pause-long
+               b is paused (`node pause b`) for 3 s or 10 s: a probe to a paused machine goes
+               unanswered as across a cut, so the same
 
 Times are virtual. It prints `ok MODE: ...` or `FAIL: ...` and exits 1.
 """
@@ -109,20 +112,24 @@ def driver(mode):
     elif mode in ("short", "long"):
         patina.control("net cut driver b")
         th = later(3 if mode == "short" else 10, "net heal")
+    elif mode in ("pause-short", "pause-long"):
+        patina.control("node pause b")
+        th = later(3 if mode == "pause-short" else 10, "node resume b")
     else:
         fail(f"mode {mode}")
-    if mode == "short":
+    if mode in ("short", "pause-short"):
         th.join()
         time.sleep(BUDGET)
         c.sendall(b"two\n")
         what, dt = ending(c)
         if what != "data b'two\\n'":
-            fail(f"short: after the heal: {what}")
-        print(f"ok short: the connection survived a 3 s cut; a line echoed after it")
+            fail(f"{mode}: after the end: {what}")
+        print(f"ok {mode}: the connection survived 3 s; a line echoed after it")
         return
     what, dt = ending(c)
-    want = {"crash": "ETIMEDOUT", "ut": "ETIMEDOUT", "long": "ETIMEDOUT", "restart": "ECONNRESET"}[mode]
-    at = {"crash": BUDGET, "ut": 4, "long": BUDGET}.get(mode)
+    want = {"crash": "ETIMEDOUT", "ut": "ETIMEDOUT", "long": "ETIMEDOUT", "pause-long": "ETIMEDOUT",
+            "restart": "ECONNRESET"}[mode]
+    at = {"crash": BUDGET, "ut": 4, "long": BUDGET, "pause-long": BUDGET}.get(mode)
     print(f"{mode}: {what} {dt:.3f} s after the echo", flush=True)
     if what != want:
         fail(f"{mode}: {what}, Linux gives {want}")

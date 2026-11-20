@@ -9,13 +9,19 @@ pub fn now() -> u64 {
     ctl().vclock_ns.load(Relaxed)
 }
 
+/// The realtime clock: virtual time from the epoch, plus the node's offset (`clock-skew-ms`,
+/// `clock step`; 0 for the driver).
 fn realtime_ns() -> u64 {
-    now() - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * NS
+    let off = crate::state::clock_offset();
+    crate::state::clock_read(off);
+    (now() - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * NS).saturating_add_signed(off)
 }
 
-/// An absolute `CLOCK_REALTIME` time as a virtual monotonic time (0 if before boot).
+/// An absolute `CLOCK_REALTIME` time of this node as a virtual monotonic time (0 if before
+/// boot). A step of the node's clock moves it (`Slot::clock_flags`).
 pub fn realtime_to_vclock(ns: u64) -> u64 {
-    (ns + VCLOCK_BOOT_NS).saturating_sub(REALTIME_EPOCH_S * NS)
+    (ns.saturating_add_signed(crate::state::clock_offset().saturating_neg()) + VCLOCK_BOOT_NS)
+        .saturating_sub(REALTIME_EPOCH_S * NS)
 }
 
 /// A guest `timespec` as nanoseconds (EINVAL for a negative or malformed value).
@@ -32,15 +38,30 @@ fn sleep_until(deadline: u64) -> i64 {
     crate::sup::call_sup(proto::ctl::Op::Sleep, [deadline, 0, 0, 0, 0, 0]).ret
 }
 
+/// Sleep until `deadline`, an absolute realtime time converted: a step of the node's clock
+/// moves it.
+fn sleep_until_realtime(deadline: u64) -> i64 {
+    crate::state::clock_flags(proto::ctl::CLK_REALTIME_ABS);
+    let r = sleep_until(deadline);
+    crate::state::clock_flags(0);
+    r
+}
+
 fn nanosleep(req: u64, rem: u64) -> Result<i64, i64> {
     let ns = read_timespec(req)?;
     let deadline = now().saturating_add(ns);
-    Ok(interruptible(deadline, rem, false))
+    Ok(interruptible(deadline, rem, false, false))
 }
 
-/// A sleep that a signal may interrupt (remaining time and restart block).
-fn interruptible(deadline: u64, rem: u64, absolute: bool) -> i64 {
-    match sleep_until(deadline) {
+/// A sleep that a signal may interrupt (remaining time and restart block). `realtime`: an
+/// absolute realtime deadline.
+fn interruptible(deadline: u64, rem: u64, absolute: bool, realtime: bool) -> i64 {
+    let r = if realtime {
+        sleep_until_realtime(deadline)
+    } else {
+        sleep_until(deadline)
+    };
+    match r {
         r if r == -e::EINTR => super::sig::sleep_interrupted(deadline, rem, absolute),
         r => r,
     }
@@ -55,7 +76,13 @@ fn clock_nanosleep(clk: i64, flags: u64, req: u64, rem: u64) -> Result<i64, i64>
         (0 | 1 | 7 | 11, false) => now().saturating_add(t),
         _ => return Err(-e::EINVAL),
     };
-    Ok(interruptible(deadline, rem, flags & TIMER_ABSTIME != 0))
+    let abs = flags & TIMER_ABSTIME != 0;
+    Ok(interruptible(
+        deadline,
+        rem,
+        abs,
+        abs && matches!(clk, 0 | 11),
+    ))
 }
 
 fn cpu_ns(call: &mut dyn Call) -> u64 {
@@ -65,7 +92,7 @@ fn cpu_ns(call: &mut dyn Call) -> u64 {
 fn clock(call: &mut dyn Call, id: i64) -> Result<u64, i64> {
     Ok(match id {
         0 | 5 | 8 => realtime_ns(), // REALTIME, REALTIME_COARSE, REALTIME_ALARM
-        11 => realtime_ns() + 37 * NS, // TAI
+        11 => realtime_ns() + 37 * NS, // TAI (the node's offset included)
         1 | 4 | 6 | 7 | 9 => now(), // MONOTONIC, _RAW, _COARSE, BOOTTIME, BOOTTIME_ALARM
         2 | 3 => cpu_ns(call),      // PROCESS_CPUTIME_ID, THREAD_CPUTIME_ID
         _ => return Err(-e::EINVAL),

@@ -27,9 +27,11 @@ fn vfs() -> &'static mut Vfs {
     unsafe { Vfs::at(crate::state::ctl_base()) }
 }
 
-/// Virtual realtime, nanoseconds since 1970.
+/// Virtual realtime, nanoseconds since 1970: the node's own (its clock offset added), as the
+/// times a node writes on its files are.
 pub fn now() -> u64 {
-    ctl().vclock_ns.load(Relaxed) - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * NS
+    (ctl().vclock_ns.load(Relaxed) - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * NS)
+        .saturating_add_signed(crate::state::clock_offset())
 }
 
 pub fn epoch() -> u64 {

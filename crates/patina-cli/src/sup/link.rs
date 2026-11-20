@@ -1,9 +1,10 @@
 //! Links between nodes (`proto::node`): the cut matrix, which links the link faults act on,
 //! and the seed's partition schedule.
 //!
-//! A link is an ordered pair of nodes. It is cut while any of three layers says so: a
-//! script's `net cut` (`Op::Net`, `nodes::Sup::net_op`), a partition the seed drew, or a
-//! machine crash of either node (until the node is back, `nodes::Sup::node_crash`). The wire
+//! A link is an ordered pair of nodes. It is cut while any of four layers says so: a script's
+//! `net cut` (`Op::Net`, `nodes::Sup::net_op`), a partition the seed drew, a machine crash of
+//! either node (until the node is back, `nodes::Sup::node_crash`), or a pause of either node
+//! (until its resume, `pause`). The wire
 //! asks `link_cut` when it stamps a delivery, and re-stamps what a cut held when a layer opens
 //! a link (`wire_heal`); `net heal` clears scripted cuts only.
 //!
@@ -34,6 +35,9 @@ pub const EVK_PART_END: u64 = 1;
 /// The seed's kill of a node's processes, and a node's restart.
 pub const EVK_NODE_KILL: u64 = 2;
 pub const EVK_NODE_START: u64 = 3;
+/// The seed's pause of a node, and its end.
+pub const EVK_PAUSE_START: u64 = 4;
+pub const EVK_PAUSE_END: u64 = 5;
 const EVK_BITS: u64 = 4;
 
 pub fn ev_key(kind: u64, node: usize) -> u64 {
@@ -47,6 +51,8 @@ pub struct Links {
     pub seed: [u64; MAX_NODES],
     /// Nodes whose machine is down (bit `k`): every link from or to one is cut.
     pub down: u64,
+    /// Nodes that are paused (bit `k`): every link from or to one is cut.
+    pub paused: u64,
     /// Partitions started (the ordinal of the last), and the one in force.
     k: u64,
     active: Option<u64>,
@@ -66,7 +72,10 @@ impl Sup {
         from != to
             && from < MAX_NODES
             && ((self.links.script[from] | self.links.seed[from]) & (1 << to) != 0
-                || (self.links.down >> from | self.links.down >> to) & 1 != 0)
+                || ((self.links.down | self.links.paused) >> from
+                    | (self.links.down | self.links.paused) >> to)
+                    & 1
+                    != 0)
     }
 
     /// A cut link held, lost or kept back something: the partition in force acted, if the
@@ -154,6 +163,9 @@ impl Sup {
         match key & ((1 << EVK_BITS) - 1) {
             EVK_PART_START => self.part_start(),
             EVK_PART_END => self.part_end(),
+            k @ (EVK_PAUSE_START | EVK_PAUSE_END) => {
+                self.pause_event(k, (key >> EVK_BITS) as usize)
+            }
             k => self.node_event_more(k, (key >> EVK_BITS) as usize),
         }
     }

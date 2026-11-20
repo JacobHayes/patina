@@ -86,11 +86,18 @@ fn futex(call: &mut dyn Call) -> i64 {
                 return -e::ETIMEDOUT;
             }
             let key = super::mem::futex_key(uaddr);
+            let rt_abs = realtime && cmd != FUTEX_WAIT && deadline != NO_DEADLINE;
+            if rt_abs {
+                crate::state::clock_flags(proto::ctl::CLK_REALTIME_ABS);
+            }
             let r = crate::sup::call_sup(
                 Op::FutexWait,
                 [key, val as u32 as u64, deadline, bitset as u64, 0, 0],
             )
             .ret;
+            if rt_abs {
+                crate::state::clock_flags(0);
+            }
             if r == -e::EINTR {
                 return super::sig::futex_interrupted(
                     uaddr,

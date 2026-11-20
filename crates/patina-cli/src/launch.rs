@@ -939,6 +939,12 @@ pub fn run_incarnation(
                     0
                 },
                 ok_exit,
+                pause_gap_min_ns: p.node_pause[k][0],
+                pause_gap_max_ns: p.node_pause[k][1],
+                pause_min_ns: p.node_pause[k][2],
+                pause_max_ns: p.node_pause[k][3],
+                skew_min_ns: p.node_skew[k].0,
+                skew_max_ns: p.node_skew[k].1,
             };
         }
         t.fs_model = (o.fs_model == crate::durability::materialise::Model::PosixStrict) as u64;

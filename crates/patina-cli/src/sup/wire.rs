@@ -1875,6 +1875,62 @@ impl Sup {
         self.bump_gen();
     }
 
+    /// Node `k` is paused (its links are cut, `Links::paused`): what is on its way to it and not
+    /// yet delivered is held from now with the rest of its delay, so the sender's give-up clock
+    /// runs; a handshake with it, either way, waits for its SYN retries (each looks at the
+    /// link). What the node sent before the pause still arrives.
+    pub(super) fn wire_pause(&mut self, k: usize) {
+        let now = self.now();
+        let ids: Vec<u32> = self.wire.conns.keys().copied().collect();
+        for id in ids {
+            let c = &self.wire.conns[&id];
+            if c.cnode == c.snode || (c.cnode != k && c.snode != k) {
+                continue;
+            }
+            if !c.established {
+                if c.fate != Fate::Timeout && c.syn_n == 0 {
+                    let i = c.client.idx.unwrap_or(usize::MAX);
+                    let t = (c.syn_at + self.syn_retry_ns(i, 0)).max(now);
+                    let c = self.wire.conns.get_mut(&id).unwrap();
+                    c.syn_n = 1;
+                    c.retry = false;
+                    if let Some(ev) = c.fate_ev.take() {
+                        self.sched.cancel(ev);
+                    }
+                    let ev = self.sched.schedule(
+                        t,
+                        super::sched::Event::Wire {
+                            key: key(id, EV_CONNECT),
+                        },
+                    );
+                    self.wire.conns.get_mut(&id).unwrap().fate_ev = Some(ev);
+                }
+                continue;
+            }
+            // Direction 0 goes to the server.
+            let into = (c.snode != k) as usize;
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            let d = &mut c.dirs[into];
+            let mut any = false;
+            for it in d.q.iter_mut() {
+                let t = match it {
+                    Item::Data { t, .. } | Item::Fin { t } | Item::Rst { t, .. } => t,
+                };
+                if *t & HELD == 0 {
+                    *t = HELD | t.saturating_sub(now);
+                }
+                any = true;
+            }
+            if let Some(ev) = d.ev.take() {
+                self.sched.cancel(ev);
+            }
+            self.wire.blocked.remove(&(id, into));
+            if any {
+                self.hold(id, into);
+            }
+        }
+    }
+
     /// Links opened by a heal: every item held on them is stamped now (its own draw from the
     /// heal's time, never earlier than the item before it), and delivery resumes.
     pub(super) fn wire_heal(&mut self, opened: &[(usize, usize)]) {

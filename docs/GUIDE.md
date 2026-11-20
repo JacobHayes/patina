@@ -519,6 +519,7 @@ settings.
 | `--faults disk` | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
 | `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-chunk-gap-us=1..10 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
 | `--faults all` | both, plus `mem-error-permille=0..2` |
+| `--faults cluster` | with nodes only: `net`'s keys, partitions, pauses, clock skew and machine crashes ([Several machines](#several-machines)) |
 
 `--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --help`
 lists every key.
@@ -1280,11 +1281,14 @@ of what it did.
 | `node kill NAME` | crash node `NAME`'s machine (below) |
 | `node kill NAME --process` | kill every process of node `NAME` (below) |
 | `node start NAME` | start the command of node `NAME`, which is down, again |
+| `node pause NAME`, `node resume NAME` | freeze node `NAME`'s machine, and let it run again ([Pausing a node](#pausing-a-node)) |
+| `clock step NAME +90s` | move node `NAME`'s realtime clock (`+Ns`, `-Ns`, `+Nms`, `-Nms`; [Each node's clock](#each-nodes-clock)) |
 | `mark LABEL` | as the SDK's `mark` (any node) |
 
 A set is node names joined by commas (`driver` included), or `rest`: every node the other set
 does not name. Only the driver's processes may use `net` and `node`; a node's get `EPERM`
-(`patina ctl` says why and exits 2). An unknown name is `ENOENT`, other words `EINVAL`.
+(`patina ctl` says why and exits 2); so may `clock`. An unknown name is `ENOENT`, other words
+`EINVAL`.
 
 **What a cut does.** A node's traffic to itself is never cut. Across a cut link no TCP data is
 lost and nothing fails at once, as with a cable pulled out for a while: bytes and the closing
@@ -1355,9 +1359,9 @@ the next gap. A cut is a script's cut: held, not lost, but for datagrams. The sh
 | `oneway` | only what one side sends to the other |
 | `bridge` | both directions between two sides, but for one node that still reaches both (three nodes or more) |
 
-`--faults net` (and `all`) adds `partition-gap-ms=5000..60000` and `partition-ms=500..20000` in
-a run with at least two nodes the link faults act on; a run without nodes gets what it got
-before. A partition key in a run without two such nodes is refused. A partition that a sweep's
+`--faults net` (and `all` and `cluster`) adds `partition-gap-ms=5000..60000` and
+`partition-ms=500..20000` in a run with at least two nodes the link faults act on; a run
+without nodes gets what it got before. A partition key in a run without two such nodes is refused. A partition that a sweep's
 preset turned on and that never held, lost or kept back any traffic is `not applicable` in the
 report, as other classes with nothing to act on are.
 
@@ -1644,7 +1648,8 @@ to `--crash machine-at:8@b` and nothing else (`tests/nodes/14-points-sweep.sh`).
 ### Disk faults per node
 
 The disk and memory keys (`fs-*`, `fsync-*`, `enospc-after-bytes`, `mem-*`, `path-swap-*`)
-are each node's. Given without a scope they act on every node but the driver; `@NODE,...` after
+are each node's, as are the pause and clock keys (`pause-*`, `clock-skew-ms`, which only a
+node has). Given without a scope they act on every node but the driver; `@NODE,...` after
 the value names the nodes (`driver` among them, if wanted); a node's `[node.NAME.faults]` table
 sets its own, replacing the run's:
 
@@ -1669,10 +1674,120 @@ errors, `acklog`'s `retry` mode (retry a failed `fsync`, then acknowledge) loses
 acknowledged record once the crash drops the write the failure took
 (`tests/nodes/12-disk-faults.sh`).
 
-**Not available yet** (refused, naming what is missing): the SDK's fault keys with nodes,
-pausing a node (`node pause`, `node resume`), a node's own clock (`clock ...`), a process
-kill at a crash point (`process-at:N`), `patina __native` twins and `--check` reference runs
-of a run with nodes.
+### Pausing a node
+
+A paused node is a frozen machine, as a VM paused by its host, a process stopped by a long
+garbage collection or a stalled disk would make it: none of its threads runs, but its sockets
+stay open and its peers see a live machine that does not answer.
+
+`patina ctl node pause NAME` freezes node `NAME`; `node resume NAME` lets it run again. A
+pause of a node that is down or starting answers `EAGAIN`, of one already paused `EALREADY`;
+a resume of a node not paused `EALREADY`; the driver cannot be paused (`EINVAL`). The seed
+pauses nodes with `pause-gap-ms=A..B`, a node's own key (`@NODE` scopes it; refused without
+nodes and for the driver): after a gap drawn from `A..B` the node is paused for a length drawn
+from `pause-ms` (default `100..15000`), then the next gap is drawn from the pause's end.
+
+```sh
+patina run --config cluster.toml --fault pause-gap-ms=1000..8000@p1 --fault pause-ms=100..4000@p1 -- python3 driver.py
+```
+
+What a pause does:
+
+- **Threads.** None of the node's threads is picked while it is paused, whatever it waits
+  for. A thread inside a call when the pause takes effect finishes that call as at that
+  instant and stops before it returns to its program; a thread holding a lock keeps it. A
+  process the node forks while the pause is taking effect is frozen too.
+- **Clocks.** The node's clocks are not stopped (the machine is frozen, not its clock): a
+  sleep, futex timeout, timerfd or interval timer that falls due while it is paused is due at
+  its time, and its thread runs at the resume, all of them in the scheduler's order. A
+  program reading its monotonic clock after a resume sees the time that passed.
+- **Network.** What a peer sends to the node is held, as across a cut: the peer's writes go
+  on until its buffer fills, its reads wait, and a peer that has data the node has not
+  acknowledged gives up after its `TCP_USER_TIMEOUT` (or `net-give-up-ms`), its next call
+  failing with `ETIMEDOUT`. Data on its way to the node when the pause began is held too, with
+  the rest of its delay; data the node sent before the pause arrives. A connect to or from the
+  node waits for its SYN retries. A datagram to a paused node is lost. The node's own TCP
+  timers run too (its clocks do): its keepalive probes go unanswered, so a pause longer than
+  its keepalive budget times out its side as well, which its threads see at the resume (a
+  host's VM pause would stop them). The node's traffic to itself is not affected. At the resume, every link that nothing else cuts carries what was
+  held.
+- **Kills and crashes.** A paused node can be killed or its machine crashed, by the script or
+  the seed: the pause ends first, then the node goes down as it would.
+- **What keeps a run alive.** A pause's end does (the node's threads run again); a pause's
+  start does not, nor does a timer of a paused node (an interval timer fires on while it is
+  paused and wakes no thread that runs). A script's pause with no resume, with every other
+  thread waiting with no deadline, ends the run `liveness`, and the message names the paused node and how many of
+  its threads would run.
+
+`result.json` lists each node's `pauses` (how many), `pause` (each one's `by`, `at_ms`, `ms`,
+`null` while in force at the end, and `end`: `seed`, `script`, `down` or `in force`) and
+`paused_ms`; `patina log events` has `node` events `pause` and `resume`; `faults.counts.pause`
+counts the seed's pauses. With `nofence`, the lease-based service of `lease.py` (in
+`tests/guests/nodes`) writes as a stale primary when a replica paused after checking its
+lease resumes after another took it; with fencing at the store the same sweep is clean
+(`tests/nodes/17-lease.sh`).
+
+### Each node's clock
+
+The run has one virtual time. A node's monotonic and boot-time clocks, and every timeout,
+sleep and relative timer, are that time, on every node at the same rate. A node's realtime
+clock (`CLOCK_REALTIME` and what derives from it: `gettimeofday`, `time`, the times the node
+writes on its files, `/proc/stat`'s `btime`) is that time plus the node's offset; the
+driver's offset is always 0, so the driver's clock is the run's reference. No clock runs fast
+or slow.
+
+`clock-skew-ms=A..B` (a node's own key: `@NODE` scopes it; refused without nodes and for the
+driver) gives each boot of a node an offset drawn in `A..B` ms, ahead or behind.
+`patina ctl clock step NAME +90s` (or `-5s`, `+250ms`; at most a year, and `EINVAL` for one
+that would put the node's clock before 1970) moves node `NAME`'s
+clock, as setting the clock on a machine does; a step stays across the node's restarts, and
+a node's offset is its boot's skew plus the steps so far. A step does what Linux does when the
+clock is set: an absolute `CLOCK_REALTIME` deadline (`clock_nanosleep` with `TIMER_ABSTIME`,
+`pthread_cond_timedwait` on a realtime condition variable, a timerfd armed with
+`TFD_TIMER_ABSTIME`) moves with the clock, and one now past is due at once; a relative one, on
+any clock, does not move; a realtime timerfd armed with `TFD_TIMER_ABSTIME |
+TFD_TIMER_CANCEL_ON_SET` becomes readable and its next read fails with `ECANCELED`.
+`adjtimex`, `clock_settime` and `settimeofday` are refused as on one machine: only the driver
+moves a clock.
+
+```sh
+patina run --config cluster.toml --fault clock-skew-ms=0..2000 -- python3 driver.py
+patina ctl clock step p1 -5s     # in the driver
+```
+
+`result.json` shows each node's `clock` (`offset_ms` at the end, `skew_ms` of each boot,
+`steps`, `stepped_ms`); `patina log events` has `node` events `clock` (`by` `seed`, with
+`skew_ms`, or `script`, with `step_ms`, and the `offset_ms` that followed); event times stay
+the run's virtual time. `faults.counts.clock` counts the realtime reads of the nodes with a
+skew (eligible) and those the skew moved (injected), so a sweep whose nodes never read the
+realtime clock lists `clock` as not applicable. With `wallclock`, `lww.py` (a last-writer-wins
+register on two nodes, in `tests/guests/nodes`) stamps each put with the node's own clock and
+loses a later put when one node's clock is behind the other's; with a hybrid logical clock it
+keeps every put. With `realtime`, a replica of `lease.py` that measures its lease on
+`time.time()` answers stale reads after the driver steps its clock back while a partition
+cuts it off from the store; on its monotonic clock it does not (`tests/nodes/17-lease.sh`).
+
+### The cluster preset
+
+`--faults cluster` (only in a run with nodes) is the faults a cluster meets:
+
+| | Settings |
+|---|---|
+| link faults | `net`'s keys (on the links `net-links` names) |
+| partitions | `partition-gap-ms=5000..60000 partition-ms=500..20000` (two nodes or more) |
+| pauses | `pause-gap-ms=10000..120000 pause-ms=100..15000`, each node its own |
+| clock skew | `clock-skew-ms=0..2000`, each node its own |
+| machine crashes | `--crash machine` at `crash-gap-ms=30000..300000`, every node; a `--crash` given replaces it |
+
+`--faults all` in a run with nodes is the disk, memory and network faults, partitions (two
+nodes or more), pauses and clock skew: `cluster` without the machine crashes, which a run
+asks for with `--crash`, as on one machine. A class the preset turned on that had nothing to
+act on (no pause drawn in a short run, no realtime read on a skewed node) is `not
+applicable`. `patina report` adds a line for the nodes' pauses and one for their clocks.
+
+**Not available yet** (refused, naming what is missing): the SDK's fault keys with nodes, a
+process kill at a crash point (`process-at:N`), `patina __native` twins and `--check`
+reference runs of a run with nodes.
 
 ## The SDK
 

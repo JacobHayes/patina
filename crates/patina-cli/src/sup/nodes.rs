@@ -105,10 +105,15 @@ impl Sup {
     }
 
     /// Slot `slot` now runs a thread of node `node`: a record when that is news, so that the
-    /// log says which node each record's slot belongs to (`patina log`). None without nodes.
+    /// log says which node each record's slot belongs to (`patina log`), and frozen if the node
+    /// is paused (a thread or process its turn holder made as the pause came). None without
+    /// nodes.
     pub(super) fn slot_node(&mut self, slot: usize, node: usize) {
         if self.node_count() == 0 {
             return;
+        }
+        if self.paused(node) {
+            self.sched.freeze(slot);
         }
         let was = self.nodes.slot_node.get(&slot).copied().unwrap_or(0);
         if was != node {
@@ -142,6 +147,7 @@ impl Sup {
             self.start_node(node, node);
         }
         self.partitions_begin();
+        self.pauses_begin();
         // The driver's `Hello` was answered with its reply kept: it runs first.
         self.reply(0, 0);
     }
@@ -195,6 +201,7 @@ impl Sup {
             };
         }
         t.boots[node] = b + 1;
+        self.clock_boot(node, b);
         self.nodes.up[node] = true;
         self.nodes.kill_try[node] = 0;
         self.kill_next(node);
@@ -551,9 +558,16 @@ impl Sup {
             .collect()
     }
 
+    /// Whether node `k` is up (its first process started, and it is not down).
+    pub(super) fn node_is_up(&self, k: usize) -> bool {
+        k < MAX_NODES && self.nodes.up[k]
+    }
+
     /// Node `k` is down (`how`, with an exit status or signal `value`): the record, its boot's
-    /// end, its other processes killed (`others`), and its restart queued after `down` ns.
+    /// end, its other processes killed (`others`), and its restart queued after `down` ns. A
+    /// pause of it ends first.
     fn node_down(&mut self, k: usize, how: u64, value: u64, others: &[i32], down: u64) {
+        self.pause_down(k);
         let t = self.node_tab();
         let b = t.boots[k].saturating_sub(1);
         if let Some(e) = self.nodes.kill_ev[k].take() {
@@ -746,6 +760,15 @@ impl Sup {
                 let up = self.nodes.up[k];
                 self.node_crash(k, DOWN_CRASH_SCRIPT, 0);
                 Next::Continue(if up { 0 } else { -(libc::EALREADY as i64) })
+            }
+            CLOCK_STEP => self.clock_step(k, a[2] as i64),
+            NODE_PAUSE | NODE_RESUME => {
+                // A starting node cannot be paused yet (and is not paused: a resume of it is
+                // `EALREADY`, `pause_op`).
+                if a[0] == NODE_PAUSE && self.nodes.pending.contains(&(EVK_NODE_START, k)) {
+                    return Next::Continue(-(libc::EAGAIN as i64));
+                }
+                self.pause_op(a[0], k)
             }
             NODE_START => {
                 let queued = self.nodes.pending.contains(&(EVK_NODE_START, k));

@@ -81,7 +81,13 @@ want="net cut driver c: ok
 net heal --from driver --to c: ok
 net cut driver nobody: ENOENT
 net sever driver c: EINVAL
-node pause c: EOPNOTSUPP"
+node pause c: ok
+node pause c: EALREADY
+node resume c: ok
+node resume c: EALREADY
+node pause driver: EINVAL
+clock step c +1s: ok
+clock step driver +1s: EINVAL"
 [ "$d" = "$want" ] || die "C control from the driver: $d"
 [ "$n" = "net heal: EPERM
 mark from-a-node: ok" ] || die "C control from a node: $n"

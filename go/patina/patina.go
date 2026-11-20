@@ -378,8 +378,8 @@ func Mark(label string) {
 
 // Control makes a control call in a run with several machines, e.g. Control("net cut a b"),
 // with the words of patina ctl: nil, or the errno Patina answered (EPERM outside the driver's
-// node, ENOENT for an unknown node, EINVAL for other words, EOPNOTSUPP for a later feature),
-// or ENOSYS outside Patina.
+// node, ENOENT for an unknown node, EINVAL for other words, EALREADY or EAGAIN for a node in
+// the wrong state), or ENOSYS outside Patina.
 func Control(words string) error {
 	if get()&stOn == 0 {
 		return syscall.ENOSYS

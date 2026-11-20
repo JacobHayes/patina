@@ -3,13 +3,14 @@
 # give up after idle + 3 x interval with nothing heard): a peer whose machine crashed and stays
 # down times out at that budget (with TCP_USER_TIMEOUT 3500 ms, at the first probe past it); one
 # that comes back within it answers a probe with a RST (ECONNRESET); a cut shorter than the
-# budget changes nothing, a longer one times out both sides. A run replays identically.
-# Expected on the arm64 runner: about 15 s.
+# budget changes nothing, a longer one times out both sides; a pause of b (`node pause b`)
+# shorter or longer than the budget acts as a cut of that length. A run replays identically.
+# Expected on the arm64 runner: about 3 s.
 #@ tier=quick budget=60 slots=2
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/15-keepalive; mkdir -p "$o"
 rm -f "$o/b.toml"; conf "$o/b.toml" b python3 /guest/ka.py b
-for m in crash ut restart short long; do
+for m in crash ut restart short long pause-short pause-long; do
     run_ok "$o/$m" 1 --config "$o/b.toml" -- python3 /guest/ka.py driver $m
     sed 's/^/    /' "$o/$m/inc-0/stdout"
 done

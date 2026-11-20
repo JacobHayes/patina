@@ -52,6 +52,8 @@ const UD_RCVBUF_FULL: u64 = 2;
 const UD_HELD: u64 = 3;
 /// Its node's machine crashed while it was in flight: lost, and no error comes back.
 const UD_MACHINE_DOWN: u64 = 4;
+/// Its node was paused when it arrived: lost, as on a cut link.
+const UD_PAUSED: u64 = 5;
 
 struct USock {
     /// The hidden end.
@@ -616,6 +618,13 @@ impl Sup {
                 DEC_UDP_DELIVER,
                 [id, 0, len, UD_MACHINE_DOWN, f.dup as u64, 0],
             );
+            return;
+        }
+        // A datagram from another node (its sender's socket may have closed since).
+        let from_other = self.udp.socks.get(&f.src).is_none_or(|s| s.node != f.node);
+        if f.node < 64 && self.links.paused >> f.node & 1 != 0 && from_other {
+            WireTab::inc(&c.dgram_lost, 1);
+            self.wire_decide(DEC_UDP_DELIVER, [id, 0, len, UD_PAUSED, f.dup as u64, 0]);
             return;
         }
         let Some(j) = self.udp_route(f.node, f.skind, f.sport, f.dkind, f.dport) else {

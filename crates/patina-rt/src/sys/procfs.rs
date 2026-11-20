@@ -598,7 +598,9 @@ fn content(k: Synth, w: &mut W) {
                 w.s(b"cpu").u(c).s(b" 0 0 0 0 0 0 0 0 0 0\n");
             }
             w.s(b"intr 0\nctxt 0\nbtime ")
-                .u(REALTIME_EPOCH_S - VCLOCK_BOOT_NS / 1_000_000_000);
+                .u((REALTIME_EPOCH_S * 1_000_000_000 - VCLOCK_BOOT_NS)
+                    .saturating_add_signed(crate::state::clock_offset())
+                    / 1_000_000_000);
             w.s(b"\nprocesses 1\nprocs_running 1\nprocs_blocked 0\nsoftirq 0\n");
         }
         Synth::Uptime => {

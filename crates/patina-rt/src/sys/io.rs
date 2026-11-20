@@ -430,6 +430,11 @@ pub fn read_iov(nr: u64, fd: i64, kind: Kind, iov: u64, cnt: u64, flags: u64) ->
         w.nonblock = Some(true);
     }
     let g = w.run(|| {
+        if kind == Kind::Anon {
+            if let Some(r) = super::timerfd::canceled(fd) {
+                return Some(r);
+            }
+        }
         let mut r = unsafe {
             sc6(
                 nr::PREADV2,

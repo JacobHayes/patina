@@ -118,12 +118,21 @@ fn node_crashes(
             };
             let (seq, boot) = (c.seq, c.a[1]);
             let tree = materialise(&log, u64::MAX, seed, seq, model)?;
-            // The next boot's disk began with that tree (its base records): a difference is a
-            // Patina defect.
+            // The next boot's disk began with that tree (its base records), less what a work
+            // tree cannot hold as a file (a Unix socket's inode: `Tree::write_dir` drops it,
+            // as a restarted server makes its socket again): a difference is a Patina defect.
             let next = disk.with_file_name(format!("inc-{}", boot + 1));
             if next.join("oplog.meta").exists() {
                 let base = crate::durability::materialise::replay(&OpLog::load(&next)?.upto(0))?;
-                if let Some(d) = crate::durability::tree::diff(&tree, &base.to_tree(), false) {
+                let mut kept = tree.clone();
+                kept.nodes.retain(|_, n| {
+                    !matches!(
+                        n.kind,
+                        crate::durability::tree::Kind::Socket
+                            | crate::durability::tree::Kind::Other
+                    )
+                });
+                if let Some(d) = crate::durability::tree::diff(&kept, &base.to_tree(), false) {
                     return Err(format!(
                         "node {name}: the tree after its machine crash in boot {boot} is not the \
                          one its next boot started from: {d}"

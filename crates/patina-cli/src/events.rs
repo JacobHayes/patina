@@ -599,6 +599,46 @@ impl<W: Write> Export<'_, W> {
                 }
                 "node"
             }
+            // [node, incarnation, by, ordinal, length ns (0: until a resume), 0].
+            proto::ctl::DEC_NODE_PAUSE => {
+                use proto::node::*;
+                l = Line::at("node", k, r);
+                l.str("event", "pause")
+                    .str("name", &self.node_name(a[0]))
+                    .num("incarnation", a[1])
+                    .str("by", if a[2] == BY_SEED { "seed" } else { "script" })
+                    .num("n", a[3]);
+                if a[4] > 0 {
+                    l.num("length_ms", a[4] / 1_000_000);
+                }
+                "node"
+            }
+            // [node, incarnation, how (`PEND_*`), ordinal, ns paused, 0].
+            proto::ctl::DEC_NODE_RESUME => {
+                l = Line::at("node", k, r);
+                l.str("event", "resume")
+                    .str("name", &self.node_name(a[0]))
+                    .num("incarnation", a[1])
+                    .str("by", proto::node::pause_end_name(a[2]))
+                    .num("n", a[3])
+                    .num("paused_ms", a[4] / 1_000_000);
+                "node"
+            }
+            // [node, incarnation, how (`CLK_*`), change ns, offset ns, 0] (two's complement).
+            proto::ctl::DEC_NODE_CLOCK => {
+                l = Line::at("node", k, r);
+                let skew = a[2] == proto::node::CLK_SKEW;
+                l.str("event", "clock")
+                    .str("name", &self.node_name(a[0]))
+                    .num("incarnation", a[1])
+                    .str("by", if skew { "seed" } else { "script" })
+                    .raw(
+                        if skew { "skew_ms" } else { "step_ms" },
+                        &(a[3] as i64 / 1_000_000).to_string(),
+                    )
+                    .raw("offset_ms", &(a[4] as i64 / 1_000_000).to_string());
+                "node"
+            }
             n if n == Op::Net as u32 => {
                 l = Line::at("net", k, r);
                 let verb = match a[0] {

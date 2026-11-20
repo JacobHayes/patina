@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 26;
+pub const LAYOUT_VERSION: u64 = 28;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -755,7 +755,18 @@ pub struct Slot {
     /// nodes). Written by the supervisor when it reserves the slot; the runtime reads it at
     /// `Hello`.
     pub node: AtomicU64,
+    /// What the deadline of the runtime's next `Sleep`, `FutexWait` or `TimerFdSet` is on
+    /// (`CLK_*`): written by the runtime before it asks, read and cleared by the supervisor
+    /// (so a call made in a signal handler before the runtime clears it does not see it),
+    /// which moves a realtime deadline when the node's clock is stepped. Not part of the request:
+    /// the log is the same whatever it says.
+    pub clock_flags: AtomicU64,
 }
+
+/// `Slot::clock_flags`: an absolute `CLOCK_REALTIME` deadline, and a timerfd's
+/// `TFD_TIMER_CANCEL_ON_SET`.
+pub const CLK_REALTIME_ABS: u64 = 1;
+pub const CLK_CANCEL_ON_SET: u64 = 2;
 
 /// Reply flag: signal number to deliver before returning (0: none).
 pub const REP_DELIVER_MASK: u64 = 0xff;
@@ -1289,6 +1300,15 @@ pub const DEC_NET_PART_END: u32 = 0x154;
 /// processes killed, down time ns until its restart (0: none queued)]. A kill writes it before
 /// it kills; the end of a node's first process after it.
 pub const DEC_NODE_DOWN: u32 = 0x155;
+/// Node [node] is paused: none of its threads runs and its links hold until `DEC_NODE_RESUME`:
+/// [node, boot, by (`proto::node::BY_*`), the node's pause ordinal, length ns (0: until a
+/// script resumes it)].
+pub const DEC_NODE_PAUSE: u32 = 0x156;
+/// Node [node]'s pause ends: [node, boot, how (`proto::node::PEND_*`), ordinal, ns it lasted].
+pub const DEC_NODE_RESUME: u32 = 0x157;
+/// Node [node]'s realtime clock offset changed: [node, boot, how (`proto::node::CLK_*`), the
+/// change ns, the new offset ns (both two's complement), 0].
+pub const DEC_NODE_CLOCK: u32 = 0x158;
 
 /// Signals whose default action is "ignore" (SIGCHLD, SIGCONT, SIGURG, SIGWINCH).
 pub const fn sig_default_ignored(sig: u64) -> bool {

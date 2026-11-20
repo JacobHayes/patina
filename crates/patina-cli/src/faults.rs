@@ -22,6 +22,8 @@ pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
 pub const DOWN_DEFAULT: (u64, u64) = (1_000_000_000, 5_000_000_000);
 /// `crash-gap-ms` when not given: 5 s to 60 s.
 pub const CRASH_GAP_DEFAULT: (u64, u64) = (5_000_000_000, 60_000_000_000);
+/// `pause-ms` when pauses are on and it is not given.
+const PAUSE_MS_DEFAULT: &str = "100..15000";
 
 /// The fault plan of a run.
 #[derive(Clone, Debug)]
@@ -56,6 +58,15 @@ pub struct Plan {
     /// With nodes: each node's disk and memory settings (`NodeTab::faults`; the driver's are
     /// in `faults`, entry 0 unused).
     pub node_faults: [proto::faults::FaultCfg; proto::node::MAX_NODES],
+    /// `pause-gap-ms` and `pause-ms` (ns; gap (0, 0): no pauses): a node's own, resolved with
+    /// its seed, and each node's (`node_pause`, entry 0 unused: the driver is never paused).
+    pub pause_gap_ns: (u64, u64),
+    pub pause_ns: (u64, u64),
+    pub node_pause: [[u64; 4]; proto::node::MAX_NODES],
+    /// `clock-skew-ms` (ns; max 0: none): a node's own, and each node's (entry 0 unused: the
+    /// driver's clock is the run's virtual time).
+    pub skew_ns: (u64, u64),
+    pub node_skew: [(u64, u64); proto::node::MAX_NODES],
     /// The resolved settings, in key order, as `result.json` and `run.json` show them: a
     /// number, a string, or `"off"` for a class `swarm` turned off.
     pub resolved: Vec<(String, Value)>,
@@ -252,6 +263,24 @@ pub const KEYS: &[Key] = &[
         "the shapes partitions are drawn from: split (two sides, both ways), isolate (one node from the rest), oneway (two sides, one direction), bridge (two sides, one node still reaches both) [default: all four]",
     ),
     key(
+        "pause-gap-ms",
+        "A..B",
+        Val::Own,
+        "in a run with nodes, seed-drawn pauses of each node (all its threads stop; its links hold): virtual time from the run's start (or setup-complete), then from each pause's end, to the node's next pause, a draw in A..B ms each time; each node's own (@NODE scopes it)",
+    ),
+    key(
+        "pause-ms",
+        "A..B",
+        Val::Spread,
+        "how long each pause lasts: a draw in A..B ms [default: 100..15000]",
+    ),
+    key(
+        "clock-skew-ms",
+        "A..B",
+        Val::Own,
+        "in a run with nodes, each boot of a node draws its realtime clock's offset: A..B ms, ahead or behind (monotonic clocks have none); each node's own (@NODE scopes it)",
+    ),
+    key(
         "net-drop-permille",
         "P",
         Val::Permille,
@@ -411,6 +440,22 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("mem-error-permille", "0..2"),
         ],
     ),
+    // Only in a run with nodes (`resolve` refuses it without): the link faults here, the
+    // partitions, pauses, clock skew and machine crashes in `NODE_PRESETS` and
+    // `MACHINE_PRESETS` (the crashes: `cluster_crash`).
+    (
+        "cluster",
+        &[
+            ("net-delay-ms", "0..50"),
+            ("net-chunk-max", "1..65536"),
+            ("net-chunk-gap-us", "1..10"),
+            ("net-reset-permille", "5..50"),
+            ("net-connect-refuse-permille", "0..10"),
+            ("net-drop-permille", "0..50"),
+            ("net-dup-permille", "0..20"),
+            ("net-reorder-permille", "0..50"),
+        ],
+    ),
 ];
 
 /// What `--faults net` (and `all`, which includes it) adds in a run with at least two nodes
@@ -431,7 +476,47 @@ pub const NODE_PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("partition-ms", "500..20000"),
         ],
     ),
+    (
+        "cluster",
+        &[
+            ("partition-gap-ms", "5000..60000"),
+            ("partition-ms", "500..20000"),
+        ],
+    ),
 ];
+
+/// What `--faults cluster` and `all` add in a run with nodes (one or more): each node's
+/// pauses and clock skew (node keys: each node draws its own), and for `cluster` the time
+/// between the seed's machine crashes of every node (`cluster_crash`).
+pub const MACHINE_PRESETS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "all",
+        &[
+            ("pause-gap-ms", "10000..120000"),
+            ("pause-ms", "100..15000"),
+            ("clock-skew-ms", "0..2000"),
+        ],
+    ),
+    (
+        "cluster",
+        &[
+            ("pause-gap-ms", "10000..120000"),
+            ("pause-ms", "100..15000"),
+            ("clock-skew-ms", "0..2000"),
+            ("crash-gap-ms", "30000..300000"),
+        ],
+    ),
+];
+
+/// `--crash` a run with nodes has when it names none and `cluster` is among its presets:
+/// every node's machine crashes at drawn times (`crash-gap-ms`).
+pub const CLUSTER_CRASH: &str = "machine";
+
+/// Whether presets `p` (as given: `NAME,...[@NODE,...]`) name `cluster`.
+pub fn names_cluster(p: &[String]) -> bool {
+    p.iter()
+        .any(|p| split_scope(p).0.split(',').any(|n| n == "cluster"))
+}
 /// `partition-ms` when partitions are on and it is not given.
 const PARTITION_MS_DEFAULT: &str = "1000..30000";
 
@@ -615,6 +700,13 @@ pub fn node_scoped(k: &str) -> bool {
         || k.starts_with("mem-")
         || k.starts_with("path-swap-")
         || k == "enospc-after-bytes"
+        || node_only(k)
+}
+
+/// A node's own key that only a node has (the driver is never paused): refused in a run
+/// without nodes, and for the driver.
+pub fn node_only(k: &str) -> bool {
+    k.starts_with("pause-") || k.starts_with("clock-")
 }
 
 /// `SETTING@NODE,...`: the setting and the nodes it names (`None`: no scope). A setting's
@@ -644,15 +736,24 @@ pub fn set_node_keys(dst: &mut proto::faults::FaultCfg, src: &proto::faults::Fau
 }
 
 /// The keys of preset `p` in a run with `faultable` nodes the link faults act on: its own,
-/// and its node keys (`NODE_PRESETS`) when there are two such nodes.
+/// its partition keys (`NODE_PRESETS`) when there are two such nodes, and its machine keys
+/// (`MACHINE_PRESETS`) when there is one. `cluster` without nodes is refused.
 pub fn preset_keys(p: &str, faultable: usize) -> Res<Vec<(&'static str, &'static str)>> {
     let (_, kv) = PRESETS.iter().find(|x| x.0 == p).ok_or_else(|| {
         let names: Vec<&str> = PRESETS.iter().map(|x| x.0).collect();
         format!("--faults: unknown preset {p} ({})", names.join(", "))
     })?;
+    if p == "cluster" && faultable == 0 {
+        return Err("--faults cluster: only in a run with nodes".into());
+    }
     let mut out: Vec<(&str, &str)> = kv.to_vec();
     if faultable >= 2 {
         for (_, kv) in NODE_PRESETS.iter().filter(|x| x.0 == p) {
+            out.extend(kv.iter().copied());
+        }
+    }
+    if faultable >= 1 {
+        for (_, kv) in MACHINE_PRESETS.iter().filter(|x| x.0 == p) {
             out.extend(kv.iter().copied());
         }
     }
@@ -730,6 +831,9 @@ pub fn resolve(
     if parts && !given.iter().any(|e| e.0 == "partition-ms") {
         set(&mut given, "partition-ms", PARTITION_MS_DEFAULT);
     }
+    if given.iter().any(|e| e.0 == "pause-gap-ms") && !given.iter().any(|e| e.0 == "pause-ms") {
+        set(&mut given, "pause-ms", PAUSE_MS_DEFAULT);
+    }
     given.sort();
     let swarm = match given.iter().position(|e| e.0 == "swarm") {
         Some(i) => num("swarm", &given.remove(i).1)? != 0,
@@ -754,6 +858,11 @@ pub fn resolve(
         compute_budget: true,
         compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
         node_faults: Default::default(),
+        pause_gap_ns: (0, 0),
+        pause_ns: (0, 0),
+        node_pause: Default::default(),
+        skew_ns: (0, 0),
+        node_skew: Default::default(),
         resolved: vec![],
     };
     if swarm {
@@ -907,6 +1016,27 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             }
             if o.net.part_shapes == 0 {
                 o.net.part_shapes = proto::node::SHAPES.iter().fold(0, |b, s| b | 1 << s.0);
+            }
+            return Ok(());
+        }
+        "clock-skew-ms" => {
+            o.skew_ns = ms_range(k, v)?;
+            if o.skew_ns.1 > proto::node::CLOCK_STEP_MAX_NS {
+                return Err(format!("--fault {k}={v}: at most a year"));
+            }
+            return Ok(());
+        }
+        "pause-gap-ms" => {
+            o.pause_gap_ns = ms_range(k, v)?;
+            if o.pause_gap_ns.0 == 0 {
+                return Err(format!("--fault {k}={v}: A is at least 1"));
+            }
+            return Ok(());
+        }
+        "pause-ms" => {
+            o.pause_ns = ms_range(k, v)?;
+            if o.pause_ns.0 == 0 {
+                return Err(format!("--fault {k}={v}: A is at least 1"));
             }
             return Ok(());
         }
