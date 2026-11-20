@@ -10,6 +10,7 @@ for g in io-errors short delay randops closedir; do
     $cc -O1 -Wall -o "$out/$g" "$here/$g.c"
 done
 $cc -O1 -Wall -o "$out/ack-log" "$here/acklog.c"
+$cc -O1 -Wall -o "$out/errseq" "$here/errseq.c"
 $cc -O1 -Wall -I "$here/../../../sdk/c" -o "$out/window" "$here/window.c"
 $cc -O1 -Wall -I "$here/../../../sdk/c" -o "$out/mapends" "$here/mapends.c"
 $cc -O1 -Wall -I "$here/../../../sdk/c" -o "$out/mapshare" "$here/mapshare.c"

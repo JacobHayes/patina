@@ -460,6 +460,26 @@ fn failed_fsync_data_never_durable() {
 }
 
 #[test]
+fn failed_fsync_rewritten_data_durable() {
+    // Error at fsync 1, the program writes the same bytes again, fsync 2 succeeds: the
+    // rewrite is durable (the page is dirty again), as on Linux.
+    for m in BOTH {
+        let log = B::new()
+            .create(ROOT, "f", 10)
+            .fsync_dir(ROOT)
+            .fsync(10)
+            .write(10, 0, b"AAAA")
+            .fail(10)
+            .write(10, 0, b"AAAA")
+            .fsync(10)
+            .crash();
+        for t in all(&log, m) {
+            assert_eq!(file(&t, "f").as_deref(), Some(&b"AAAA"[..]), "{m:?}");
+        }
+    }
+}
+
+#[test]
 fn failed_fsync_report_does_not_commit() {
     // An fsync that reports an earlier error (NO_COMMIT) makes nothing durable in posix.
     let log = B::new()

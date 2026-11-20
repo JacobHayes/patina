@@ -188,6 +188,8 @@ pub const SUB_SWAP_HOW: u64 = 10;
 /// The component swapped, and the sibling a rename or a symlink takes.
 pub const SUB_SWAP_PICK: u64 = 11;
 pub const SUB_SWAP_SIBLING: u64 = 12;
+/// `fs-error` at the sync an `O_SYNC`/`O_DSYNC` write makes (the write drew `SUB_ERR_FIRE`).
+pub const SUB_WSYNC_ERR_FIRE: u64 = 13;
 
 /// Injected-fault kinds (`Rec::args[0]` of an `Injected` boundary record).
 pub const INJ_ERROR: u64 = 1;

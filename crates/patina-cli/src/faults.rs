@@ -141,7 +141,7 @@ pub const KEYS: &[Key] = &[
         "fsync-error-permille",
         "P",
         Val::Permille,
-        "fail an fsync: reported once, the unsynced data never becomes durable",
+        "fail the write-back of a sync call (fsync, fdatasync, msync, syncfs, sync_file_range, an O_SYNC write): its unsynced data never becomes durable; the error is reported as Linux reports it, once to each open file description, an unseen one also to a later opener",
     ),
     key(
         "enospc-after-bytes",
@@ -351,7 +351,7 @@ pub const KEYS: &[Key] = &[
         "fsync-error-at",
         "N",
         Val::At,
-        "fail exactly the N-th fsync",
+        "fail exactly the N-th sync call (as fsync-error-permille)",
     ),
     key(
         "mem-error-at",

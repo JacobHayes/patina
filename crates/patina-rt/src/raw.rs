@@ -46,6 +46,7 @@ pub mod e {
     pub const EEXIST: i64 = 17;
     pub const EINVAL: i64 = 22;
     pub const ENOTTY: i64 = 25;
+    pub const ESPIPE: i64 = 29;
     pub const ENOSYS: i64 = 38;
     pub const ENXIO: i64 = 6;
     pub const EAGAIN: i64 = 11;

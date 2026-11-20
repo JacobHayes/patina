@@ -167,6 +167,9 @@ fn append(kind: OpKind, ino: u64, a: [u64; 6], pieces: &[Src], len_hint: u64) {
     };
     put_rec(kind, ino, a, data);
     shadow_apply(kind, ino, &a, data);
+    if effect(kind, &a) == Effect::New && dur().new_inode(skey(ino)).is_none() {
+        crate::sup::capacity(proto::ctl::LIMIT_FSYNC_FAILURES, ERRGEN_CAP as u64);
+    }
     crate::inject::crash_point();
 }
 
@@ -326,45 +329,157 @@ pub fn record(op: &FsOp) {
     }
 }
 
-// ---- per-process descriptor state: the writeback error generation each descriptor has seen ----
+// ---- per-process descriptor state: each descriptor's open file description ----
+//
+// Linux keeps a write-back error sample in each open file description (`struct file`), which
+// `dup` and `fork` share. The runtime names a description by a key it gives at open (shared by
+// the run, `Dur::new_desc`), keeps per descriptor the key and the samples taken at open, and a
+// description that reports writes its advanced samples to `Dur::descs`, where every descriptor
+// of it (in this process or another) reads them. Hidden duplicates the runtime keeps for
+// tracked mappings carry their description too, so `msync` reports to the mapping's.
 
-struct Fds {
-    seen: [u32; FD_HIDDEN_MIN as usize],
-    sync_seen: u64,
+#[derive(Clone, Copy)]
+struct Desc {
+    /// The description's key (0: none).
+    key: u64,
+    /// The inode key it is open on (a stale entry names another).
+    ino: u64,
+    /// The samples of the inode's and the disk's error sequences taken at open.
+    file: u64,
+    disk: u64,
 }
 
-static FDS: Global<Fds> = Global::new(Fds {
-    seen: [0; FD_HIDDEN_MIN as usize],
-    sync_seen: 0,
-});
+const NODESC: Desc = Desc {
+    key: 0,
+    ino: 0,
+    file: 0,
+    disk: 0,
+};
 
-fn seen(fd: i64) -> Option<&'static mut u32> {
-    (0..FD_HIDDEN_MIN as i64)
+static FDS: Global<[Desc; FD_LIMIT as usize]> = Global::new([NODESC; FD_LIMIT as usize]);
+
+fn slot_fd(fd: i64) -> Option<&'static mut Desc> {
+    (0..FD_LIMIT as i64)
         .contains(&fd)
-        .then(|| &mut FDS.get().seen[fd as usize])
+        .then(|| &mut FDS.get()[fd as usize])
 }
 
-/// A `/work` file was opened at `fd`: it sees only errors that happen from now on
-/// (Linux samples the mapping's error sequence at open).
+/// A new description on work inode `ino`, sampled as an opener samples.
+fn new_desc(ino: u64) -> Desc {
+    let k = skey(ino);
+    let d = dur();
+    Desc {
+        key: d.new_desc(crate::state::node()),
+        ino: k,
+        file: d.sample(k),
+        disk: d.sb_sample(crate::state::node()),
+    }
+}
+
+/// A `/work` file or directory was opened at `fd`: a new description, which reports an error
+/// nobody has seen yet and none that was seen (Linux 4.16 and later sample the mapping's
+/// error sequence at open as 0 while it is unseen).
 pub fn opened(fd: i64, ino: u64) {
     if crate::state::in_vfork_child() {
         return; // the table is the parent's; the child's image after execve starts fresh
     }
-    if let Some(s) = seen(fd) {
-        *s = dur().gen(skey(ino)) as u32;
+    if let Some(s) = slot_fd(fd) {
+        *s = new_desc(ino);
     }
 }
 
-/// `dup` family: the duplicate starts with what its source has seen (each reports once:
-/// the documented deviation from per-description reporting).
+/// `dup` family (and the runtime's hidden duplicates): the same description. A work file or
+/// directory the runtime did not see opened is taken as opened now, so both name one.
 pub fn dup_fd(src: i64, dst: i64) {
     if crate::state::in_vfork_child() {
         return;
     }
-    let v = seen(src).map(|s| *s).unwrap_or(0);
-    if let Some(d) = seen(dst) {
+    let mut v = slot_fd(src).map(|s| *s).unwrap_or(NODESC);
+    if v.key == 0 {
+        if let Some(st) = fstat_raw(src) {
+            if path::is_work(st.dev()) && matches!(st.mode() as u64 & S_IFMT, S_IFREG | S_IFDIR) {
+                v = desc_at(src, st.ino());
+            }
+        }
+    }
+    if let Some(d) = slot_fd(dst) {
         *d = v;
     }
+}
+
+/// `fd` was closed.
+pub fn closed_fd(fd: i64) {
+    if crate::state::in_vfork_child() {
+        return;
+    }
+    if let Some(d) = slot_fd(fd) {
+        *d = NODESC;
+    }
+}
+
+/// The description at `fd`, open on work inode `ino`. A descriptor the runtime did not see
+/// opened (one inherited across `execve`, or received in a message) is taken as opened now.
+fn desc_at(fd: i64, ino: u64) -> Desc {
+    match slot_fd(fd) {
+        Some(d) if d.key != 0 && d.ino == skey(ino) => *d,
+        _ => {
+            let d = new_desc(ino);
+            if !crate::state::in_vfork_child() {
+                if let Some(s) = slot_fd(fd) {
+                    *s = d;
+                }
+            }
+            d
+        }
+    }
+}
+
+/// `file_check_and_advance_wb_err`: does the inode's error sequence differ from what the
+/// description at `fd` has seen? If so, it is reported now: the description advances and
+/// the value is seen.
+fn report_file(fd: i64, ino: u64) -> bool {
+    let mut d = desc_at(fd, ino);
+    let dd = dur();
+    let shared = dd.desc(d.key);
+    let v = dd.seq(d.ino);
+    if d.file.max(shared[0]) == v {
+        return false;
+    }
+    if dd.mark_seen(d.ino).is_none() {
+        crate::sup::capacity(proto::ctl::LIMIT_FSYNC_FAILURES, ERRGEN_CAP as u64);
+    }
+    d.file = v;
+    d.disk = d.disk.max(shared[1]);
+    dd.set_desc(d.key, [d.file, d.disk]);
+    keep(fd, d);
+    true
+}
+
+/// Store the description at `fd` back (its samples advanced).
+fn keep(fd: i64, d: Desc) {
+    if !crate::state::in_vfork_child() {
+        if let Some(s) = slot_fd(fd) {
+            *s = d;
+        }
+    }
+}
+
+/// `syncfs`'s `errseq_check_and_advance` on the disk's sequence, for the description at `fd`.
+fn report_disk(fd: i64, ino: u64) -> bool {
+    let mut d = desc_at(fd, ino);
+    let node = crate::state::node();
+    let dd = dur();
+    let shared = dd.desc(d.key);
+    let v = dd.sb_seq(node);
+    if d.disk.max(shared[1]) == v {
+        return false;
+    }
+    dd.sb_mark_seen(node);
+    d.file = d.file.max(shared[0]);
+    d.disk = v;
+    dd.set_desc(d.key, [d.file, d.disk]);
+    keep(fd, d);
+    true
 }
 
 // ---- the shadow store: what the log holds of each mapped work file ----
@@ -811,6 +926,8 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     if hfd < 0 {
         crate::sup::host_error(hfd, nr::FCNTL, proto::ctl::HE_SYSCALL);
     }
+    desc_at(fd, st.ino());
+    dup_fd(fd, hfd);
     track(addr, len, st.ino(), off, hfd);
     append(OpKind::MmapShared, st.ino(), [off, len, 0, 0, 0, 0], &[], 0);
 }
@@ -887,6 +1004,7 @@ pub fn on_munmap_done(addr: u64, len: u64) {
                 if hfd < 0 {
                     crate::sup::host_error(hfd, nr::FCNTL, proto::ctl::HE_SYSCALL);
                 }
+                dup_fd(m.fd, hfd);
                 let n = t.n;
                 t.m[n] = Map {
                     addr: hi,
@@ -1024,15 +1142,23 @@ pub fn on_madv_remove(addr: u64, len: u64) {
 }
 
 /// `msync(addr, len, flags)` after the kernel validated it: record the dirty pages; with
-/// `MS_SYNC` the data of each file is synced (a sync-class call, which can fail).
+/// `MS_SYNC` each mapped file is synced (`vfs_fsync_range` on the mapping's description, in
+/// address order, stopping at the first error), which can fail and reports a pending error.
 pub fn on_msync(addr: u64, len: u64, flags: u64) -> i64 {
     const MS_SYNC: u64 = 4;
-    let mut inos = [0u64; 8];
+    // (description, inode, the mapping's hidden descriptor), one per description, in the
+    // order the mappings were made.
+    let mut files = [(0u64, 0u64, 0i64); 8];
     let mut ni = 0;
     let t = MAPS.get();
     for i in 0..t.n {
-        if overlaps(&t.m[i], addr, len) && ni < inos.len() && !inos[..ni].contains(&t.m[i].ino) {
-            inos[ni] = t.m[i].ino;
+        let m = t.m[i];
+        if !overlaps(&m, addr, len) {
+            continue;
+        }
+        let key = desc_at(m.fd, m.ino).key;
+        if ni < files.len() && !files[..ni].iter().any(|f| f.0 == key) {
+            files[ni] = (key, m.ino, m.fd);
             ni += 1;
         }
     }
@@ -1050,8 +1176,7 @@ pub fn on_msync(addr: u64, len: u64, flags: u64) -> i64 {
     if flags & MS_SYNC == 0 {
         return 0;
     }
-    let mut r = 0;
-    for &ino in &inos[..ni] {
+    for &(_, ino, hfd) in &files[..ni] {
         if let Some(by) = crate::inject::sync_fails() {
             fail(
                 ino,
@@ -1059,33 +1184,51 @@ pub fn on_msync(addr: u64, len: u64, flags: u64) -> i64 {
                 crate::inject::Who::Kind(proto::faults::Obj::File),
                 by,
             );
-            r = -e::EIO;
-        } else {
+            report_file(hfd, ino);
+            return -e::EIO;
+        }
+        if report_file(hfd, ino) {
+            reported(
+                nr::MSYNC,
+                ino,
+                crate::inject::Who::Kind(proto::faults::Obj::File),
+            );
             append(
                 OpKind::Fsync,
                 ino,
-                [FSYNC_DATA_ONLY | FSYNC_MSYNC, 0, 0, 0, 0, 0],
+                [FSYNC_DATA_ONLY | FSYNC_NO_COMMIT, 0, 0, 0, 0, 0],
                 &[],
                 0,
             );
+            return -e::EIO;
         }
+        append(
+            OpKind::Fsync,
+            ino,
+            [FSYNC_DATA_ONLY | FSYNC_MSYNC, 0, 0, 0, 0, 0],
+            &[],
+            0,
+        );
     }
-    r
+    0
 }
 
 const AT_FDCWD_: i64 = -100;
 
-/// An injected writeback failure on `ino` (0: everything, for `syncfs`), named by `who`,
-/// caused by the class `by` (`proto::faults::SYNC_BY_*`).
+/// An injected write-back failure on `ino` (0: the whole disk, for `syncfs`), named by `who`,
+/// caused by the class `by` (`proto::faults::SYNC_BY_*`): the pages it held fail
+/// (`FsyncFail`: never durable unless written again) and the error waits in the inode's
+/// error sequence (and the disk's) for the calls that report it.
 fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
     let d = dur();
-    if ino != 0 && d.bump(skey(ino)).is_none() {
+    if ino == 0 {
+        d.fail_wide(crate::state::node());
+    } else if d.fail(skey(ino)).is_none() {
         crate::sup::capacity(
             proto::ctl::LIMIT_FSYNC_FAILURES,
             proto::oplog::ERRGEN_CAP as u64,
         );
     }
-    d.sync_gen[sync_slot()] += 1;
     crate::inject::note(
         nr,
         proto::faults::INJ_FSYNC_EIO,
@@ -1097,16 +1240,34 @@ fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
     append(OpKind::FsyncFail, ino, [0; 6], &[], 0);
 }
 
-/// This process's node's entry of `Dur::sync_gen`.
-fn sync_slot() -> usize {
-    crate::state::node().min(proto::node::MAX_NODES - 1)
+/// An earlier write-back failure reported now (an `Injected` record of kind
+/// `INJ_FSYNC_REPORT`).
+fn reported(nr: u64, ino: u64, who: crate::inject::Who) {
+    crate::inject::note(
+        nr,
+        proto::faults::INJ_FSYNC_REPORT,
+        proto::faults::FClass::Sync as u64,
+        ino,
+        0,
+        who,
+    );
 }
+
+const S_IFMT: u64 = 0o170000;
+const S_IFREG: u64 = 0o100000;
+const S_IFDIR: u64 = 0o040000;
+const S_IFLNK: u64 = 0o120000;
+const S_IFBLK: u64 = 0o060000;
+const SYNC_FILE_RANGE_WAIT_BEFORE: u64 = 1;
+const SYNC_FILE_RANGE_WRITE: u64 = 2;
+const SYNC_FILE_RANGE_WAIT_AFTER: u64 = 4;
 
 /// The fsync family: durability is the tracker's; the kernel is never asked (on tmpfs it
 /// would do nothing). `fsync`/`fdatasync` on a `/work` file or directory, `sync_file_range`,
-/// `sync`, `syncfs`.
+/// `sync`, `syncfs`. Which call may be given the injected failure, which reports a pending
+/// one, and what each records: ARCHITECTURE.md, "The fsync-error model".
 pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
-    const F_GETFD: u64 = 1;
+    const F_GETFL: u64 = 3;
     if nr == nr::SYNC {
         // sync(2) reports nothing.
         crate::inject::crash_point();
@@ -1115,73 +1276,126 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
         return 0;
     }
     let fd = a[0] as i32 as i64;
-    if unsafe { sc2(nr::FCNTL, fd as u64, F_GETFD) } < 0 {
+    // `fdget`: a closed descriptor or an `O_PATH` one is EBADF.
+    let fl = unsafe { sc2(nr::FCNTL, fd as u64, F_GETFL) };
+    if fl < 0 || fl & O_PATH != 0 {
         return -e::EBADF;
     }
-    if nr == nr::SYNC_FILE_RANGE && a[3] & !7 != 0 {
-        return -e::EINVAL;
-    }
-    if nr == nr::SYNCFS {
-        crate::inject::crash_point();
-        flush_everything();
-        if let Some(by) = crate::inject::sync_fails() {
-            fail(0, nr, crate::inject::Who::At(AT_FDCWD_, work_cstr()), by);
-            FDS.get().sync_seen = dur().sync_gen[sync_slot()];
-            return -e::EIO;
+    if nr == nr::SYNC_FILE_RANGE {
+        let (off, n) = (a[1] as i64, a[2] as i64);
+        let end = off.wrapping_add(n);
+        if a[3] & !7 != 0 || off < 0 || end < 0 || end < off {
+            return -e::EINVAL;
         }
-        let g = dur().sync_gen[sync_slot()];
-        let report = FDS.get().sync_seen < g;
-        FDS.get().sync_seen = g;
-        append(OpKind::Sync, 0, [0; 6], &[], 0);
-        return if report { -e::EIO } else { 0 };
     }
     let Some(st) = fstat_raw(fd) else {
         return -e::EBADF;
     };
-    if !path::is_work(st.dev()) {
+    let fmt = st.mode() as u64 & S_IFMT;
+    let work = path::is_work(st.dev());
+    let ino = st.ino();
+    if nr == nr::SYNCFS {
+        if !work {
+            return 0;
+        }
+        crate::inject::crash_point();
+        flush_everything();
+        let failed = if let Some(by) = crate::inject::sync_fails() {
+            fail(0, nr, crate::inject::Who::At(AT_FDCWD_, work_cstr()), by);
+            true
+        } else {
+            append(OpKind::Sync, 0, [0; 6], &[], 0);
+            false
+        };
+        // `sync_filesystem`'s error first; the disk's sequence is checked and advanced either way.
+        let pending = report_disk(fd, ino);
+        if pending && !failed {
+            reported(nr, 0, crate::inject::Who::At(AT_FDCWD_, work_cstr()));
+        }
+        return if failed || pending { -e::EIO } else { 0 };
+    }
+    if nr == nr::SYNC_FILE_RANGE {
+        if !matches!(fmt, S_IFREG | S_IFDIR | S_IFLNK | S_IFBLK) {
+            return -e::ESPIPE;
+        }
+    } else if !matches!(fmt, S_IFREG | S_IFDIR | S_IFBLK) {
+        // A pipe, socket, character device or anonymous inode has no `fsync`.
+        return -e::EINVAL;
+    }
+    if !work {
         return 0;
     }
-    let ino = st.ino();
-    let dir = st.mode() & 0o170000 == 0o040000;
+    let dir = fmt == S_IFDIR;
+    let obj = if dir {
+        proto::faults::Obj::Path
+    } else {
+        proto::faults::Obj::File
+    };
+    let who = crate::inject::Who::Fd(fd, obj);
+    if nr == nr::SYNC_FILE_RANGE {
+        let flags = a[3];
+        if flags & SYNC_FILE_RANGE_WAIT_BEFORE != 0 && report_file(fd, ino) {
+            reported(nr, ino, who);
+            return -e::EIO;
+        }
+        if flags & SYNC_FILE_RANGE_WRITE != 0 {
+            // Starts write-back and, without WAIT_AFTER, does not wait for it: a failure of
+            // that write-back is recorded on the inode and reported by a later call that waits.
+            crate::inject::crash_point();
+            if !dir {
+                flush_whole(fd, ino);
+            }
+            if let Some(by) = crate::inject::sync_fails() {
+                fail(ino, nr, who, by);
+            } else if !dir {
+                append(
+                    OpKind::Fsync,
+                    ino,
+                    [FSYNC_DATA_ONLY | FSYNC_NO_COMMIT, 0, 0, 0, 0, 0],
+                    &[],
+                    0,
+                );
+            }
+        }
+        if flags & SYNC_FILE_RANGE_WAIT_AFTER != 0 && report_file(fd, ino) {
+            reported(nr, ino, who);
+            return -e::EIO;
+        }
+        return 0;
+    }
     crate::inject::crash_point();
     if !dir {
         flush_whole(fd, ino);
     }
     if let Some(by) = crate::inject::sync_fails() {
-        let o = if dir {
+        fail(ino, nr, who, by);
+        report_file(fd, ino);
+        return -e::EIO;
+    }
+    fsync_rest(
+        nr,
+        fd,
+        ino,
+        dir,
+        if nr == nr::FDATASYNC {
+            FSYNC_DATA_ONLY
+        } else {
+            0
+        },
+    )
+}
+
+/// `fsync`/`fdatasync` once write-back succeeded: report a pending error (the pages are
+/// written back, nothing is committed), else commit.
+fn fsync_rest(nr: u64, fd: i64, ino: u64, dir: bool, data_only: u64) -> i64 {
+    if report_file(fd, ino) {
+        let obj = if dir {
             proto::faults::Obj::Path
         } else {
             proto::faults::Obj::File
         };
-        fail(ino, nr, crate::inject::Who::Fd(fd, o), by);
-        if let Some(s) = seen(fd) {
-            *s = dur().gen(skey(ino)) as u32;
-        }
-        return -e::EIO;
-    }
-    if dir {
-        append(OpKind::FsyncDir, ino, [0; 6], &[], 0);
-        return 0;
-    }
-    let data_only = if nr == nr::FDATASYNC {
-        FSYNC_DATA_ONLY
-    } else {
-        0
-    };
-    let g = dur().gen(skey(ino)) as u32;
-    if let Some(s) = seen(fd) {
-        if *s < g {
-            // An earlier failed writeback, not yet reported to this descriptor: report it
-            // once. The pages written since were written back; nothing is committed.
-            *s = g;
-            crate::inject::note(
-                nr,
-                proto::faults::INJ_FSYNC_REPORT,
-                proto::faults::FClass::Sync as u64,
-                ino,
-                0,
-                crate::inject::Who::Fd(fd, proto::faults::Obj::File),
-            );
+        reported(nr, ino, crate::inject::Who::Fd(fd, obj));
+        if !dir {
             append(
                 OpKind::Fsync,
                 ino,
@@ -1189,16 +1403,50 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
                 &[],
                 0,
             );
-            return -e::EIO;
         }
+        return -e::EIO;
     }
-    let flags = if nr == nr::SYNC_FILE_RANGE {
-        FSYNC_DATA_ONLY | FSYNC_NO_COMMIT
+    if dir {
+        append(OpKind::FsyncDir, ino, [0; 6], &[], 0);
     } else {
-        data_only
-    };
-    append(OpKind::Fsync, ino, [flags, 0, 0, 0, 0, 0], &[], 0);
+        append(OpKind::Fsync, ino, [data_only, 0, 0, 0, 0, 0], &[], 0);
+    }
     0
+}
+
+/// After a write of `len > 0` bytes to the work file `ino` at `fd` through a description with
+/// `O_SYNC`/`O_DSYNC` (`fl`, from `F_GETFL`) or with `RWF_SYNC`/`RWF_DSYNC` (`rwf`): the
+/// kernel's `generic_write_sync` syncs what was written (as `fsync` or `fdatasync`); a
+/// failure is the call's result.
+pub fn write_sync(call_nr: u64, fd: i64, ino: u64, fl: i64, rwf: u64) -> i64 {
+    const O_DSYNC: i64 = 0o10000;
+    const O_SYNC_ONLY: i64 = 0o4000000; // __O_SYNC
+    const RWF_DSYNC: u64 = 2;
+    const RWF_SYNC: u64 = 4;
+    let dsync = fl & O_DSYNC != 0 || rwf & (RWF_DSYNC | RWF_SYNC) != 0;
+    if !dsync {
+        return 0;
+    }
+    let full = fl & O_SYNC_ONLY != 0 || rwf & RWF_SYNC != 0;
+    crate::inject::crash_point();
+    flush_whole(fd, ino);
+    if let Some(by) = crate::inject::sync_fails_sub(proto::faults::SUB_WSYNC_ERR_FIRE) {
+        fail(
+            ino,
+            call_nr,
+            crate::inject::Who::Fd(fd, proto::faults::Obj::File),
+            by,
+        );
+        report_file(fd, ino);
+        return -e::EIO;
+    }
+    fsync_rest(
+        call_nr,
+        fd,
+        ino,
+        false,
+        if full { 0 } else { FSYNC_DATA_ONLY },
+    )
 }
 
 /// Before `close(fd)`: the inode, when it is a `/work` regular file.

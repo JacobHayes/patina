@@ -387,6 +387,12 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
 /// which class (`SYNC_BY_FSYNC_ERROR` or `SYNC_BY_FS_ERROR`)? Counts the call for
 /// `fsync-error-at` and `fs-error-at=sync:N`, and as eligible for both classes.
 pub fn sync_fails() -> Option<u64> {
+    sync_fails_sub(SUB_ERR_FIRE)
+}
+
+/// `sync_fails` with `fs-error` drawn from `err_sub` (a write's own sync: the write drew
+/// `SUB_ERR_FIRE` at the same sequence number).
+pub fn sync_fails_sub(err_sub: u64) -> Option<u64> {
     let f = crate::state::faults();
     let cfg = &f.cfg;
     if !cfg.faults_active() || !after_start() {
@@ -402,7 +408,7 @@ pub fn sync_fails() -> Option<u64> {
     {
         Some(SYNC_BY_FSYNC_ERROR)
     } else if (cfg.fs_error_at_class == FClass::Sync as u64 + 1 && cfg.fs_error_at_n == cn)
-        || permille(cfg.fs_error_permille, SUB_ERR_FIRE)
+        || permille(cfg.fs_error_permille, err_sub)
     {
         Some(SYNC_BY_FS_ERROR)
     } else {

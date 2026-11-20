@@ -213,17 +213,40 @@ pub struct SharedMaps {
 
 pub const SHARED_MAPS_SIZE: usize = core::mem::size_of::<SharedMaps>();
 
-/// Shared durability state after the virtual-time region: the writeback error generation
-/// of each inode (failed fsync is reported once per descriptor generation) and the shadow
-/// store's table.
+/// Shared durability state after the virtual-time region: the write-back error sequences
+/// (ARCHITECTURE.md, "The fsync-error model") and the shadow store's table.
+///
+/// Each inode has an error sequence, as Linux keeps one per file mapping (`errseq_t`): its
+/// value is the failures injected on the inode plus those of its whole disk (`wide`) since the
+/// inode was made, and it is *seen* when its current value was reported to some open file description. A description
+/// samples the sequence when it is opened: the current value if seen, else 0, so an error
+/// nobody has seen is reported to a later opener too. A call that reports compares the
+/// description's sample with the value, returns the error when they differ, and advances the
+/// sample and marks the value seen. Each node's disk has one such sequence for `syncfs` (`sb`:
+/// every failure on the node). Descriptions are named by keys the runtime gives at open
+/// (`node << 56 | n`, from `next_desc`); a description that reported keeps its samples in
+/// `descs`, which every descriptor of it (a duplicate, a fork's copy, a mapping) reads.
 pub const ERRGEN_CAP: usize = 4096;
+/// Descriptions that reported an error at once (`Dur::descs`).
+pub const DESC_CAP: usize = 4096;
 
 #[repr(C)]
 pub struct Dur {
-    /// Open addressing by inode number: `(ino, generation)`; ino 0 is empty.
-    pub errgen: [[u64; 2]; ERRGEN_CAP],
-    /// Generation of the "any inode" error reported by `syncfs`, per node (each its own disk).
-    pub sync_gen: [u64; crate::node::MAX_NODES],
+    /// Open addressing by inode key (`node_key`): `[key, failures, seen, base]`, where `seen`
+    /// is the value of the inode's sequence last reported and `base` the node's `wide` when the
+    /// inode was made; key 0 is empty.
+    pub errgen: [[u64; 4]; ERRGEN_CAP],
+    /// Failures of a whole disk (an injected `syncfs` failure), per node: they count in every
+    /// inode's sequence of that node.
+    pub wide: [u64; crate::node::MAX_NODES],
+    /// The disk's sequence per node, `[value, seen]`: every failure on the node's disk.
+    pub sb: [[u64; 2]; crate::node::MAX_NODES],
+    /// Description key → `[key, file sample, disk sample]`, one entry per slot (direct-mapped:
+    /// a description whose slot another takes falls back to its descriptors' own samples, and
+    /// may report an error once more).
+    pub descs: [[u64; 3]; DESC_CAP],
+    /// The last description key given (`new_desc`).
+    pub next_desc: u64,
     pub shadows: Shadows,
 }
 
@@ -332,40 +355,135 @@ impl Dur {
     pub unsafe fn at<'a>(ctl_base: *mut u8) -> &'a mut Dur {
         &mut *(ctl_base.add(DUR_OFFSET) as *mut Dur)
     }
-    fn slot(&self, ino: u64) -> Option<usize> {
-        let mut i = (crate::draw::mix64(ino) as usize) % ERRGEN_CAP;
+    fn slot(&self, key: u64) -> Option<usize> {
+        let mut i = (crate::draw::mix64(key) as usize) % ERRGEN_CAP;
         for _ in 0..ERRGEN_CAP {
-            if self.errgen[i][0] == ino || self.errgen[i][0] == 0 {
+            if self.errgen[i][0] == key || self.errgen[i][0] == 0 {
                 return Some(i);
             }
             i = (i + 1) % ERRGEN_CAP;
         }
         None
     }
-    pub fn gen(&self, ino: u64) -> u64 {
-        match self.slot(ino) {
-            Some(i) if self.errgen[i][0] == ino => self.errgen[i][1],
-            _ => 0,
+    fn entry(&self, key: u64) -> [u64; 4] {
+        match self.slot(key) {
+            Some(i) if self.errgen[i][0] == key => self.errgen[i],
+            _ => [key, 0, 0, 0],
         }
     }
-    /// Node `node`'s disk is gone (a machine crash): its inodes' generations and its `syncfs`
-    /// generation read 0 again, so its next disk starts with none. The keys stay,
-    /// holding their place in the probe chains.
-    pub fn forget_node(&mut self, node: usize) {
-        if node != 0 && node < crate::node::MAX_NODES {
-            self.sync_gen[node] = 0;
+    fn node_of(key: u64) -> usize {
+        ((key >> 56) as usize).min(crate::node::MAX_NODES - 1)
+    }
+    /// The current value of the error sequence of inode `key` (`node_key`).
+    pub fn seq(&self, key: u64) -> u64 {
+        let [_, n, _, base] = self.entry(key);
+        n + self.wide[Self::node_of(key)] - base
+    }
+    /// What a description opened now on inode `key` samples: the value if it was seen, else 0.
+    pub fn sample(&self, key: u64) -> u64 {
+        let [_, _, seen, _] = self.entry(key);
+        let v = self.seq(key);
+        if seen == v {
+            v
+        } else {
+            0
         }
+    }
+    /// A write-back failure of inode `key`; None when the table is full.
+    pub fn fail(&mut self, key: u64) -> Option<()> {
+        let i = self.slot(key)?;
+        self.errgen[i][0] = key;
+        self.errgen[i][1] += 1;
+        self.sb[Self::node_of(key)][0] += 1;
+        Some(())
+    }
+    /// A write-back failure of node `node`'s whole disk (`syncfs`).
+    pub fn fail_wide(&mut self, node: usize) {
+        let n = node.min(crate::node::MAX_NODES - 1);
+        self.wide[n] += 1;
+        self.sb[n][0] += 1;
+    }
+    /// Inode `key` was made (a file, directory or symlink, maybe at a number a deleted inode
+    /// had): it starts with no error. None when the table is full.
+    pub fn new_inode(&mut self, key: u64) -> Option<()> {
+        let w = self.wide[Self::node_of(key)];
+        if w == 0 && self.entry(key) == [key, 0, 0, 0] {
+            return Some(()); // nothing to forget, nothing to start from
+        }
+        let i = self.slot(key)?;
+        self.errgen[i] = [key, 0, 0, w];
+        Some(())
+    }
+    /// The value of inode `key`'s sequence was reported: it is seen. None when the table is full.
+    pub fn mark_seen(&mut self, key: u64) -> Option<()> {
+        let v = self.seq(key);
+        if self.entry(key)[2] == v {
+            return Some(());
+        }
+        let i = self.slot(key)?;
+        self.errgen[i][0] = key;
+        self.errgen[i][2] = v;
+        Some(())
+    }
+    /// The disk sequence of `node`: its value, and what an opener samples.
+    pub fn sb_seq(&self, node: usize) -> u64 {
+        self.sb[node.min(crate::node::MAX_NODES - 1)][0]
+    }
+    pub fn sb_sample(&self, node: usize) -> u64 {
+        let [v, seen] = self.sb[node.min(crate::node::MAX_NODES - 1)];
+        if seen == v {
+            v
+        } else {
+            0
+        }
+    }
+    pub fn sb_mark_seen(&mut self, node: usize) {
+        let n = node.min(crate::node::MAX_NODES - 1);
+        self.sb[n][1] = self.sb[n][0];
+    }
+    /// A new description key for a descriptor opened on node `node`.
+    pub fn new_desc(&mut self, node: usize) -> u64 {
+        self.next_desc += 1;
+        (self.next_desc & ((1 << 56) - 1)) | ((node.min(crate::node::MAX_NODES - 1) as u64) << 56)
+    }
+    fn desc_slot(key: u64) -> usize {
+        (crate::draw::mix64(key) as usize) % DESC_CAP
+    }
+    /// The samples description `key` advanced to when it last reported (`[file, disk]`;
+    /// zeros if it never did, or its slot was taken since).
+    pub fn desc(&self, key: u64) -> [u64; 2] {
+        let e = self.descs[Self::desc_slot(key)];
+        if key != 0 && e[0] == key {
+            [e[1], e[2]]
+        } else {
+            [0, 0]
+        }
+    }
+    /// Description `key` reported: its samples are now `s`.
+    pub fn set_desc(&mut self, key: u64, s: [u64; 2]) {
+        self.descs[Self::desc_slot(key)] = [key, s[0], s[1]];
+    }
+    /// Node `node`'s disk is gone (a machine crash, its processes dead): its inodes' sequences,
+    /// its disk sequence and its descriptions' samples read 0 again, so its next disk starts
+    /// with none. The keys stay, holding their place in the probe chains.
+    pub fn forget_node(&mut self, node: usize) {
+        if node == 0 || node >= crate::node::MAX_NODES {
+            return;
+        }
+        self.wide[node] = 0;
+        self.sb[node] = [0, 0];
         for e in self.errgen.iter_mut() {
-            if node != 0 && e[0] != 0 && e[0] >> 56 == node as u64 {
+            if e[0] != 0 && e[0] >> 56 == node as u64 {
                 e[1] = 0;
+                e[2] = 0;
+                e[3] = 0;
             }
         }
-    }
-    /// Bump the generation of `ino`; returns the new one (None when the table is full).
-    pub fn bump(&mut self, ino: u64) -> Option<u64> {
-        let i = self.slot(ino)?;
-        self.errgen[i][0] = ino;
-        self.errgen[i][1] += 1;
-        Some(self.errgen[i][1])
+        for e in self.descs.iter_mut() {
+            if e[0] != 0 && e[0] >> 56 == node as u64 {
+                e[1] = 0;
+                e[2] = 0;
+            }
+        }
     }
 }

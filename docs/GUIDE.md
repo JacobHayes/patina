@@ -541,7 +541,11 @@ then a finding about the timeout. For the harsh link, name the keys: `--fault
 net-chunk-max=1 --fault net-delay-ms=10..50`. Since 0.13.0, a run with `--faults net` or `all`, or
 with a `net-chunk-max` range, has another digest than under 0.12 when it splits a TCP delivery
 (the chunk size and the gap are drawn anew); every other run keeps its digest. Disk faults act on files under `/work`, pipes and unix sockets; an injected
-error is one Linux can return for that call on that object. Network faults act on TCP
+error is one Linux can return for that call on that object. A failed write-back
+(`fsync-error-*`) is reported as Linux reports one: once to each open file description,
+also to a descriptor opened after it if nobody was told yet, never by a `sync_file_range`
+that does not wait; the data it held is lost to a machine crash even if a later `fsync`
+succeeds (ARCHITECTURE.md, "The fsync-error model"). Network faults act on TCP
 connections and UDP datagrams: a reset is drawn on each piece of data a program sends, so a
 long-lived (keep-alive) connection meets one; a refusal or timeout is drawn once per connect.
 Each datagram gets its own delivery time in the `net-delay-ms` range, so datagrams already

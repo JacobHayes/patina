@@ -1204,6 +1204,65 @@ outcome and reports the failed self-check beside it (`result.json`'s `self_check
 status 2; a sweep counts such runs apart and keeps their logs). `patina log ops` prints the
 log.
 
+## The fsync-error model
+
+`fsync-error-permille` and `fsync-error-at` (and `fs-error` at a sync call) fail a write-back
+(`patina-rt/src/oplog.rs`, `proto::oplog::Dur`). The model is Linux's `errseq_t` (lib/errseq.c,
+mm/filemap.c, fs/sync.c, include/linux/pagemap.h), with one invariant: **a call returns a
+write-back error exactly when Linux's would for the same history, and a page whose write-back
+failed is durable only once it is written again and synced.** So a program that treats a
+clean `fsync` as durable never loses data a crash model did not lose, and one that retries a
+failed `fsync` and then trusts it does.
+
+- A failure is drawn at a call that starts write-back (below). The pages the file held
+  unsynced fail (`FsyncFail`: the materialiser never makes them durable; a later write of the
+  same bytes makes them dirty again), and the error goes into the inode's error sequence and
+  its disk's. An injected `syncfs` failure fails every file of the disk (`FsyncFail` of inode
+  0) and counts in the sequence of every inode that exists then, so each of those files
+  reports it (a file created after it does not).
+- Each open file description samples the inode's sequence when it is opened: its current value
+  if some description was already told of it, else 0, so an error nobody has seen is reported
+  to a later opener too (Linux 4.16 and later). A call that reports compares its description's
+  sample with the sequence; if they differ it returns `EIO` once, advances the sample and
+  marks the value seen, and a later opener samples it as seen. `syncfs` does the same with the
+  disk's sequence (Linux 5.8 and later).
+- A description is what `dup`, `fcntl(F_DUPFD)` and `fork` share: the runtime names each one by
+  a key given at `open` (`Dur::new_desc`), carried by duplicates, by a fork's copy of the table
+  and by the hidden duplicate behind a tracked mapping (so `msync` reports to the mapping's
+  description); a description that reported keeps its advanced samples in `Dur::descs` (a
+  direct-mapped table), which every descriptor of it reads.
+- A failure is never reported by the call that drew it unless that call waits; a pending error
+  makes `fsync` write back what it holds and commit nothing (`Fsync` with `FSYNC_NO_COMMIT`).
+
+| call | may be given the failure | reports a pending error | marks it seen |
+|---|---|---|---|
+| `fsync`, `fdatasync` of a work file or directory | yes (then reports it; a directory's is a model choice: ext4 would shut the filesystem down) | yes | yes |
+| `sync_file_range` with `WRITE` | yes, not reported by it (it does not wait) | only with `WAIT_AFTER` | with `WAIT_AFTER` |
+| `sync_file_range` with `WAIT_BEFORE` | no | yes, before writing | yes |
+| `msync(MS_SYNC)` of a tracked mapping | yes, one draw for the call, to the first description in the order the mappings were made | yes, per description in that order; the first error ends it | yes |
+| `write` family through an `O_SYNC`/`O_DSYNC` description, or with `RWF_SYNC`/`RWF_DSYNC` | yes (the write's result is the error) | yes | yes |
+| `syncfs` | yes (the whole disk fails) | yes, the disk's sequence | the disk's |
+| `sync` | no (it reports nothing) | no | no |
+| `close`, `msync(MS_ASYNC)`, `open` | no | no | no |
+| any of these on an `O_PATH` descriptor | no: `EBADF` | | |
+| `fsync` of a pipe, socket or other non-file; `sync_file_range` of one | no: `EINVAL`; `ESPIPE` | | |
+| `fsync` of a block device or of a file outside the work directories (procfs, a mount) | no: 0 | no | no |
+
+Calls are counted for `fsync-error-at` and drawn for `fsync-error-permille` at each "may be
+given" cell. Per-node: every key and sequence is the node's (`proto::oplog::node_key`), and a
+machine crash of a node forgets its sequences and descriptions' samples with its disk. Where
+it differs from Linux: a descriptor the runtime did not see opened (inherited across `execve`,
+received over a unix socket) is taken as opened at its first sync call or `dup`;
+`sync_file_range` and an `O_DSYNC` write write back the whole file rather than their range; an
+injected `syncfs` failure fails every file of the disk, clean or not, where Linux fails only
+those with dirty pages; a description pushed out of `Dur::descs` by another with the same slot
+may report an error it already reported once more; a write-back the kernel would start by
+itself (the flusher, memory pressure) never fails; `msync` of a mapping that is not tracked
+(read-only, private) reports nothing; and a process crash (`--crash process`, unlike a node's
+`kill`) starts its next incarnation with no pending errors, where Linux would keep the page
+cache's. Tests: `tests/faults/22-errseq.sh` (each row against the kernel's sources, and the
+durability consequence under every crash point), `09-failed-fsync.sh`, `nodes/12-disk-faults.sh`.
+
 ## The SDK channel
 
 The SDKs make one reserved system call, `0x7061`. Outside Patina the kernel answers `ENOSYS`
@@ -1461,8 +1520,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
   work-tree mappings (128 per process, of 64 files at once in the run; the shadow of each
   file holds its data, as sparse as the file), shared mappings (256 per process), injected
-  fsync
-  failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
+  fsync failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
   The table of changed files' times drops the entries of deleted files nothing holds open
   (`sup/vtgc.rs`), so only files still reachable count against it (65,536).
 - Not modelled: `timer_create`, `io_uring`; another process's `/proc/PID`. docs/EVIDENCE.md

@@ -508,7 +508,7 @@ fn open(call: &mut dyn Call) -> i64 {
             super::procfs::mark(r, Some(sk));
         }
     }
-    if on_work(&st) && st.is_some_and(|s| mode_of(&s) & S_IFMT == S_IFREG) {
+    if on_work(&st) && st.is_some_and(|s| matches!(mode_of(&s) & S_IFMT, S_IFREG | S_IFDIR)) {
         crate::oplog::opened(r, st.unwrap().ino());
     }
     // Timestamps and the operation record.

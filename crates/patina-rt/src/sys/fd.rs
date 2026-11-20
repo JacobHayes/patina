@@ -113,6 +113,7 @@ fn copy_marks(src: i64, dst: i64) {
 }
 
 fn clear_marks(fd: i64) {
+    crate::oplog::closed_fd(fd);
     proc().set_urandom(fd, false);
     super::procfs::mark(fd, None);
     super::timerfd::closed(fd);
@@ -223,42 +224,57 @@ fn close_range(call: &mut dyn Call) -> i64 {
 }
 
 /// After a successful write-like call on `fd`: file times and the operation record.
-fn wrote(fd: i64, offset: Option<u64>, len: i64, data: Data) {
-    wrote_ex(fd, offset, len, data, None)
+fn wrote(call_nr: u64, fd: i64, offset: Option<u64>, len: i64, data: Data) -> i64 {
+    wrote_ex(call_nr, fd, offset, len, data, None, 0)
 }
 
 /// `append`: Some(true) the call wrote at the end (`RWF_APPEND`), Some(false) at its offset
-/// (`RWF_NOAPPEND`), None as the descriptor's `O_APPEND` says.
-fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: Option<bool>) {
+/// (`RWF_NOAPPEND`), None as the descriptor's `O_APPEND` says. `rwf`: `pwritev2`'s flags.
+/// Returns 0, or the error of the sync an `O_SYNC`/`O_DSYNC` description (or `RWF_SYNC`,
+/// `RWF_DSYNC`) makes after the write, which is then the call's result.
+fn wrote_ex(
+    call_nr: u64,
+    fd: i64,
+    offset: Option<u64>,
+    len: i64,
+    data: Data,
+    append: Option<bool>,
+    rwf: u64,
+) -> i64 {
     if len <= 0 {
-        return;
+        return 0;
     }
-    let Some(st) = fstat_raw(fd) else { return };
+    let Some(st) = fstat_raw(fd) else { return 0 };
     if let Some(k) = vkey(&st) {
         vtime::touch(k, Which::Modify);
         vtime::names(k, if st.nlink() == 0 { st.dev() } else { 0 });
     }
-    if crate::path::is_work(st.dev()) {
-        // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.
-        const O_APPEND: i64 = 0o2000;
-        let append =
-            append.unwrap_or_else(|| unsafe { sc2(nr::FCNTL, fd as u64, 3) } & O_APPEND != 0);
-        let offset = if append {
-            Some((st.size() as i64 - len).max(0) as u64)
-        } else {
-            offset
-        };
-        let off = offset.unwrap_or_else(|| {
-            let pos = unsafe { sc3(nr::LSEEK, fd as u64, 0, 1) }; // lseek(fd, 0, SEEK_CUR)
-            (pos - len).max(0) as u64
-        });
-        after_mutation(&FsOp::Write {
-            ino: st.ino(),
-            offset: off,
-            len: len as u64,
-            data,
-        });
+    if !crate::path::is_work(st.dev()) {
+        return 0;
     }
+    // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.
+    const O_APPEND: i64 = 0o2000;
+    let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // F_GETFL
+    let append = append.unwrap_or(fl >= 0 && fl & O_APPEND != 0);
+    let offset = if append {
+        Some((st.size() as i64 - len).max(0) as u64)
+    } else {
+        offset
+    };
+    let off = offset.unwrap_or_else(|| {
+        let pos = unsafe { sc3(nr::LSEEK, fd as u64, 0, 1) }; // lseek(fd, 0, SEEK_CUR)
+        (pos - len).max(0) as u64
+    });
+    after_mutation(&FsOp::Write {
+        ino: st.ino(),
+        offset: off,
+        len: len as u64,
+        data,
+    });
+    if st.mode() & 0o170000 != 0o100000 {
+        return 0;
+    }
+    crate::oplog::write_sync(call_nr, fd, st.ino(), fl.max(0), rwf)
 }
 
 const RWF_NOWAIT: u64 = 8;
@@ -319,17 +335,19 @@ fn write_call(call: &mut dyn Call) -> i64 {
     }
     let r = unsafe { sc6(nr, a[0], a[1], a[2], a[3], a[4], a[5]) };
     host_check(call, r);
-    match nr {
-        nr::WRITE => wrote(fd, None, r, Data::Buf(a[1])),
-        nr::PWRITE64 => wrote(fd, Some(a[3]), r, Data::Buf(a[1])),
-        nr::WRITEV => wrote(fd, None, r, Data::Iov(a[1], a[2])),
-        nr::PWRITEV => wrote(fd, Some(a[3]), r, Data::Iov(a[1], a[2])),
+    let synced = match nr {
+        nr::WRITE => wrote(nr, fd, None, r, Data::Buf(a[1])),
+        nr::PWRITE64 => wrote(nr, fd, Some(a[3]), r, Data::Buf(a[1])),
+        nr::WRITEV => wrote(nr, fd, None, r, Data::Iov(a[1], a[2])),
+        nr::PWRITEV => wrote(nr, fd, Some(a[3]), r, Data::Iov(a[1], a[2])),
         nr::PWRITEV2 => wrote_ex(
+            nr,
             fd,
             if a[3] as i64 == -1 { None } else { Some(a[3]) },
             r,
             Data::Iov(a[1], a[2]),
             v2_append,
+            a[5],
         ),
         // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)
         nr::COPY_FILE_RANGE => {
@@ -338,13 +356,23 @@ fn write_call(call: &mut dyn Call) -> i64 {
             } else {
                 None
             };
-            wrote(a[2] as i32 as i64, off, r, Data::InFile(a[2] as i32 as i64))
+            wrote(
+                nr,
+                a[2] as i32 as i64,
+                off,
+                r,
+                Data::InFile(a[2] as i32 as i64),
+            )
         }
         // sendfile(out_fd, in_fd, offset, count)
-        nr::SENDFILE => wrote(fd, None, r, Data::InFile(fd)),
-        _ => {}
+        nr::SENDFILE => wrote(nr, fd, None, r, Data::InFile(fd)),
+        _ => 0,
+    };
+    if synced < 0 {
+        synced
+    } else {
+        r
     }
-    r
 }
 
 /// copy_file_range and sendfile pass between files that cannot block; with a pipe,
@@ -386,7 +414,10 @@ fn splice(call: &mut dyn Call) -> i64 {
             None
         };
         if fstat_raw(out).is_some_and(|st| st.mode() & 0o170000 == 0o100000) {
-            wrote(out, off, r, Data::InFile(out));
+            let synced = wrote(nr::SPLICE, out, off, r, Data::InFile(out));
+            if synced < 0 {
+                return synced;
+            }
         }
     }
     r
