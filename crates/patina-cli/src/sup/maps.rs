@@ -1,14 +1,18 @@
 //! Shared mappings of processes that end without their runtime: a `SIGKILL` (`kill_now`), the
-//! end of the run (`finish`) and a crash point (`Op::CrashPoint`).
+//! end of the run (`finish`) and a crash point (`Op::CrashPoint`); and of every process at a
+//! `sync` or `syncfs` (`Op::MapsSync`).
 //!
 //! The runtime logs the stores made through a process's `MAP_SHARED` mappings of work-tree
 //! files when the process unmaps, syncs or exits (`rt::oplog`, `MmapDirty`). A process that
 //! ends otherwise leaves its stores in the page cache, as on Linux, where a later `fsync` by
 //! another process makes them durable; so they reach the log at the point it ends, here,
-//! from the table of tracked mappings the runtime keeps (`proto::oplog::SharedMaps`).
+//! from the table of tracked mappings the runtime keeps (`proto::oplog::SharedMaps`): each
+//! mapped page of the file is compared with its window in the shadow store (`shadows`), what
+//! the log holds of it, and a page that differs is logged with the file's bytes (which keeps
+//! the window, `crash::append`).
 //!
 //! Determinism: the supervisor holds the turn, so no guest code runs (the one exception, a
-//! stall with guest code holding the turn, skips that process): the table, the shadows and
+//! stall with guest code holding the turn, skips that process): the table, the windows and
 //! the files do not change while they are read, and the records land at this point of the
 //! global order, with the current sequence number, the same in every run.
 //!
@@ -16,28 +20,25 @@
 //! It only chooses what is compared. Each entry's file is the target's own open file
 //! (`pidfd_getfd` of its descriptor: no reopen, so no permission check, no open of a device or
 //! a FIFO), and must be a regular file of the work tree with the entry's inode; what is read is
-//! bounded by the file's size and the entry's shadow; a page's shadow (read from the target)
-//! only decides whether the page is logged, and the bytes logged are the file's, read through
-//! a description the program itself opened. A damaged table can add or omit records of the
-//! target's own work files, with their true contents, and nothing else.
+//! bounded by the file's size; the bytes logged are the file's, read
+//! through a description the program itself opened. A damaged table can add or omit records
+//! of the target's own work files, with their true contents, and nothing else.
 
 use proto::ctl::Ctl;
 use proto::layout::{PAGE, RT_BASE, RT_REGION_END};
 use proto::oplog::{OpKind, SharedMap, SharedMaps, MAX_SHARED_MAPS, SHARED_MAPS_SIZE};
-use std::collections::BTreeSet;
 use std::sync::atomic::Ordering::Relaxed;
 
 /// Pages compared per read, and at most per record: a long run is logged as several
 /// records, so what the supervisor holds in memory is bounded.
 const CHUNK: u64 = 64 * PAGE;
 
-/// One pass over processes that end together: a page logged once (its file's bytes) is not
-/// logged again for another mapping of the same file.
+/// One pass over processes that end together (a page logged for one mapping is in its window
+/// for the next).
 pub struct Pass<'a> {
     ctl: &'a Ctl,
     work_dev: Result<u64, String>,
     seq: u64,
-    done: BTreeSet<(u64, u64)>,
 }
 
 /// Read `buf.len()` bytes of process `pid` at `addr`.
@@ -103,7 +104,6 @@ impl<'a> Pass<'a> {
                 .map(|m| m.dev())
                 .map_err(|e| format!("{}: {e}", work.display())),
             seq,
-            done: BTreeSet::new(),
         }
     }
 
@@ -183,18 +183,21 @@ impl<'a> Pass<'a> {
         {
             return Ok(());
         }
-        // Past its shadow a page has nothing to be compared with: the runtime's shadow covers
-        // the whole mapping, so only a damaged entry stops short.
-        let v = m
-            .len
-            .min(m.shadow_len)
-            .min((st.st_size as u64).saturating_sub(m.off));
+        // A tracked mapping's inode has a slot (slots are freed only when nothing maps the
+        // inode); only a damaged entry has none.
+        let Some(k) = super::shadows::slot_of(self.ctl, m.ino) else {
+            return Ok(());
+        };
+        let end = m.off.saturating_add(m.len).min(st.st_size as u64);
+        if m.off >= end {
+            return Ok(());
+        }
         // A run of differing pages not yet logged: its file offset and bytes.
         let mut run: Option<(u64, Vec<u8>)> = None;
         let mut fbuf = vec![0u8; CHUNK as usize];
         let mut sbuf = vec![0u8; CHUNK as usize];
-        for (lo, hi) in data_runs(fd, m.off, page_up(v)) {
-            let hi = hi.min(v);
+        for (lo, hi) in data_runs(fd, m.off, page_up(end - m.off)) {
+            let hi = hi.min(end - m.off);
             let mut p = lo;
             while p < hi {
                 let n = CHUNK.min(hi - p);
@@ -205,17 +208,13 @@ impl<'a> Pass<'a> {
                 if got != n as isize {
                     break; // the file is shorter than its size said: nothing more in this run
                 }
-                // A shadow that cannot be read holds nothing the log is known to have.
-                let shadow = read_mem(pid, m.shadow.wrapping_add(p), s).is_ok();
+                super::shadows::read(k, m.off + p, s)?;
                 let mut q = 0;
                 while q < n {
                     let k = PAGE.min(n - q) as usize;
                     let at = m.off + p + q;
                     let r = q as usize..q as usize + k;
-                    let differs = (!shadow || f[r.clone()] != s[r.clone()])
-                        && !self.done.contains(&(m.ino, at));
-                    if differs {
-                        self.done.insert((m.ino, at));
+                    if f[r.clone()] != s[r.clone()] {
                         match &mut run {
                             Some((start, b))
                                 if *start + b.len() as u64 == at && (b.len() as u64) < CHUNK =>

@@ -383,6 +383,10 @@ impl Sup {
                 format!("exit barrier: process {pid} did not finish exiting"),
             ));
         }
+        // Its mappings are gone with it: the slots of files nothing maps any more go.
+        if super::shadows::in_use(self.ctl) {
+            super::shadows::reclaim(self.ctl, &super::work_dir(self.ctl));
+        }
         for s in self.sched.slots_of(pid) {
             self.sched.free(s);
             self.signal_thread_gone(s);

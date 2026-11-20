@@ -1036,10 +1036,41 @@ and the crash draw is used only when it fires, so a run is identical to the run 
 
 Stores through a `MAP_SHARED` mapping of a work file are in the page cache at once and reach
 the log as `MmapDirty` records when their process unmaps, syncs or ends: the runtime
-compares each tracked mapping with its shadow (its copy of what the log holds) at `munmap`,
-`mremap`, `msync`, the sync calls, `execve`, an `mmap` with `MAP_FIXED` over it, and every
-way the runtime sees a process end (`exit`, `exit_group`, a thread's `exit`, a signal's
-default action). An `mremap` of part of a tracked mapping, a copy of one (`old_size` 0) or a
+compares each tracked mapping with the file's shadow at `munmap`, `mremap`, `msync`, the sync
+calls, `execve`, an `mmap` with `MAP_FIXED` over it, and every way the runtime sees a process
+end (`exit`, `exit_group`, a thread's `exit`, a signal's default action), and logs each run of
+pages that differ.
+
+The shadows are one store for the whole run (`proto::oplog::Shadows`), with one invariant: a
+file's shadow is the replay of the operation log onto that file. A slot is a sparse memfd at a
+hidden descriptor (`FD_SHADOWS`, the top 64 numbers below the sandbox's `RLIMIT_NOFILE`),
+made by the supervisor at each incarnation's start and inherited by every guest; the table of
+which inode each slot holds is in the control region. The store is kept in one place: every
+record appended to the log, by a runtime (`rt::oplog::append`) or by the supervisor
+(`sup/crash.rs`), changes its file's shadow as it changes the file, before the crash point
+that follows it (a `write` or `MmapDirty` writes its bytes, a truncation, hole punch or zeroed
+range zeroes, a new file at the inode empties the slot). A slot is filled when a file is first
+mapped shared and writable with no slot, from the file's data runs (`SEEK_DATA`), at the
+store's own offsets: a store is never larger than the file, so `RLIMIT_FSIZE` never refuses
+one, and a sparse file's shadow is as sparse. So a page another process changed (through its
+own mapping or `write`) and this one stored back is compared with the log, not with what this
+process last saw, and is logged. A slot is freed when no process maps its inode, as the
+kernel reports it (every guest thread's `/proc/PID/task/TID/maps`, read by the supervisor at
+a process's death, at the next request after an `munmap`, and when the table is full): the
+file then holds what the log holds. Which slots are freed when changes no record, so it moves
+no digest. More than 64 files mapped at once end the run `unsupported`, stop `capacity`.
+`fork` shares the store; `execve` flushes the image's mappings first. `result.json`'s
+`shadow_bytes` is the most the store held at once.
+
+A write-family call (`write`, `pwrite`, `writev`, `copy_file_range`, `sendfile`) to a file
+with a shadow first logs whole the pages it writes that differ from the shadow: the page
+cache already held those stores, and writeback writes a page with every store on it, so the
+crash model never keeps the write without them. Replay matches the live tree without it; the
+crash states would not. A `sync` or `syncfs` compares each file the caller maps whole (the
+file holds every process's stores), or, while a file the caller does not map has a shadow,
+asks the supervisor to log every process's mappings first (`MapsSync`); `fsync` and
+`fdatasync` log what the file holds that its shadow lacks, whichever process stored it; `madvise(MADV_REMOVE)` is a
+hole punch. An `mremap` of part of a tracked mapping, a copy of one (`old_size` 0) or a
 move that keeps it mapped (`MREMAP_DONTUNMAP`) ends the run `unsupported` rather than leave
 stores untracked. A process that ends without its runtime, killed by `SIGKILL` from another
 guest, still running at the end of the run, or at a crash point, keeps its stores, as Linux
@@ -1054,10 +1085,8 @@ logged are the file's. A crash point logs every process's mappings before its `C
 so the log of every incarnation is complete. The table is read with `process_vm_readv` (the
 supervisor is every guest's ancestor, as Yama's `ptrace_scope` 1 asks); a host that refuses it
 ends a kill or a crash `internal`, naming it, and at the end of the run leaves the outcome as
-it is, with the self-check reporting what the log lacks. One limit remains: each process
-compares with its own shadow, so a page another process changed since (through its own
-mapping or `write`) and this one stored back to what its shadow holds is not logged again,
-which the self-check reports.
+it is, with the self-check reporting what the log lacks. The supervisor compares with the
+same shadows.
 
 A process crash restarts the program on `/work` as it was. A machine crash restarts it on
 what a filesystem would have kept: a pure function of the operation log, the seed and the
@@ -1323,9 +1352,9 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   socket is replaced). A stopped listener cannot be bound, listened on or connected again.
 - **Fixed tables.** The runtime keeps some state in fixed tables shared by the run: virtual
   inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
-  work-tree mappings (128 per process; the runtime's copy of each takes its length from 32 GiB
-  of address space per process, given back as the mapping is unmapped), shared mappings (256
-  per process), injected fsync
+  work-tree mappings (128 per process, of 64 files at once in the run; the shadow of each
+  file holds its data, as sparse as the file), shared mappings (256 per process), injected
+  fsync
   failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
   The table of changed files' times drops the entries of deleted files nothing holds open
   (`sup/vtgc.rs`), so only files still reachable count against it (65,536).

@@ -97,8 +97,7 @@ pub type R = Result<(), String>;
 
 const RENAME_EXCHANGE: u64 = 2;
 const FALLOC_KEEP_SIZE: u64 = 1;
-const FALLOC_PUNCH_HOLE: u64 = 2;
-const FALLOC_ZERO_RANGE: u64 = 0x10;
+use proto::oplog::{FALLOC_PUNCH_HOLE, FALLOC_ZERO_RANGE};
 
 impl Fs {
     fn mark(&mut self, ino: u64) {

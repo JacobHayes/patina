@@ -1119,8 +1119,9 @@ anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 - Per-user pipe accounting is shared by every sandbox of the uid: 9 parallel guests with 500
   pipes each end `internal`.
 - The virtual inode table holds 16,384 objects; the next ends `internal`. The virtual
-  `RLIMIT_NOFILE` is not enforced (`EMFILE` at the real limit, 4,091). A launcher
-  `RLIMIT_FSIZE` below the boundary log's size kills `patina` with no outcome.
+  `RLIMIT_NOFILE` is not enforced (`EMFILE` at the real limit: 4,027 descriptors of the
+  program, the shadow stores holding the top 64). A launcher `RLIMIT_FSIZE` below the
+  boundary log's size kills `patina` with no outcome.
 - Stdio are held in memory up to `PATINA_STDIO_MAX` each (1 GiB).
 - Busy many-waiter workloads re-attempt often (16-thread ring: 7.4 attempts per blocking call).
 - Bad guest pointers in path strings and futex words are a runtime fault (`internal`), not
@@ -1243,6 +1244,25 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   `--branch --crash machine`: 94 failures and 3 `internal` of 222 runs before, 222 `ok` after.
   An `mremap` of the mapping's second page, then a store through it, now ends the run
   `unsupported`; before, the runtime faulted (`internal`, signal 11).
+- **Shared mappings of two processes** (`tests/faults/19-mapshare.sh`): a store undone by
+  another process's store (the first ended by exit or `SIGKILL`), two processes storing in turn,
+  a store then another process's `pwrite` or `writev` on the page and a `pwrite` then a store, a
+  truncation and extension under another's mapping, and 100 files mapped one after another: with
+  no crash plane, `--crash machine` and `--crash process`, each ends `ok`, its self-check
+  passes, `patina log ops --check` passes, and the file reads as natively. Branch sweeps (every
+  crash point) under machine crashes: the store-then-`pwrite` case, seeds 1..20, never keeps the
+  write without the stores; a store fsynced by another process before a synced marker, seeds
+  1..2, always keeps it and loses a later unsynced one after some crash, and so does a store to
+  the second page synced with `sync(2)` by a process mapping only the first. 65 files mapped at
+  once end `unsupported`, stop `capacity`. Red/green: on the build before (main at `f516828f`)
+  every mode of the first list but the store-then-write ones fails the self-check and `log ops
+  --check` under both crash planes, and the fsync sweep has a violation (`synced-store-kept`).
+  Without the flush before a write, the store-then-`pwrite` case keeps the write without the
+  stores at 10 of 60 seeds; comparing only the caller's mapped range at `sync`, the `sync(2)`
+  sweep loses the synced store (`synced-store-kept`, seed 2@12). `shadow_bytes`
+  (`tests/files/12-sparsemap.sh`): 12 KiB for a 1 GiB sparse file with two pages written through
+  a 2 GiB mapping, 4 KiB for a 1 GiB file mapped 48 times one after another. The x86_64 digest
+  ledger (90 cells) is unchanged.
 - **Path swaps** (`examples/serve-c`, `tests/examples/01-examples.sh`): the `lstat`-then-`open`
   server under `path-swap-permille=300` is caught on 5 of seeds 1..20 (first seed 4, replayed
   `identical`, `faults in every failing run: path-swap`) and 10 of seeds 1..40; at 200 and 500

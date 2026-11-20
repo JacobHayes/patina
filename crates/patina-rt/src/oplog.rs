@@ -166,6 +166,7 @@ fn append(kind: OpKind, ino: u64, a: [u64; 6], pieces: &[Src], len_hint: u64) {
         put_data(pieces, len_hint)
     };
     put_rec(kind, ino, a, data);
+    shadow_apply(kind, ino, &a, data);
     crate::inject::crash_point();
 }
 
@@ -280,23 +281,16 @@ pub fn record(op: &FsOp) {
             f.work_bytes
                 .store(f.work_bytes.load(Relaxed) + len, Relaxed);
             append(OpKind::Write, ino, [offset, len, 0, 0, 0, 0], &[src], len);
-            maps_changed(ino, offset, len, Change::Data);
         }
         FsOp::Truncate { ino, size } => {
-            append(OpKind::Truncate, ino, [size, 0, 0, 0, 0, 0], &[], 0);
-            maps_changed(ino, size, u64::MAX, Change::Zero);
+            append(OpKind::Truncate, ino, [size, 0, 0, 0, 0, 0], &[], 0)
         }
         FsOp::Fallocate {
             ino,
             mode,
             offset,
             len,
-        } => {
-            append(OpKind::Fallocate, ino, [mode, offset, len, 0, 0, 0], &[], 0);
-            if mode & 2 != 0 {
-                maps_changed(ino, offset, len, Change::Zero);
-            }
-        }
+        } => append(OpKind::Fallocate, ino, [mode, offset, len, 0, 0, 0], &[], 0),
         FsOp::SetAttr { ino, what } => match what {
             Attr::Meta { mode, uid, gid } => append(
                 OpKind::SetAttr,
@@ -318,21 +312,6 @@ pub fn record(op: &FsOp) {
             // Times live in the virtual time table; they are neither compared nor modelled.
             Attr::Times => {}
         },
-        FsOp::MmapDirty {
-            ino,
-            offset,
-            len,
-            data,
-        } => {
-            let s = unsafe { core::slice::from_raw_parts(data as *const u8, len as usize) };
-            append(
-                OpKind::MmapDirty,
-                ino,
-                [offset, len, 0, 0, 0, 0],
-                &[Src::Bytes(s)],
-                0,
-            );
-        }
         FsOp::Fsync { ino, data_only } => append(
             OpKind::Fsync,
             ino,
@@ -388,6 +367,371 @@ pub fn dup_fd(src: i64, dst: i64) {
     }
 }
 
+// ---- the shadow store: what the log holds of each mapped work file ----
+
+fn shadows() -> &'static mut Shadows {
+    &mut dur().shadows
+}
+
+const SEEK_SET: u64 = 0;
+const SEEK_CUR: u64 = 1;
+const SEEK_DATA: u64 = 3;
+const SEEK_HOLE: u64 = 4;
+const FALLOC_FL_KEEP_SIZE: u64 = 1;
+const O_PATH: i64 = 0o10000000;
+
+/// Bytes compared or copied per read. Only one thread runs runtime code at a time; a flush's
+/// buffers and a copy's are apart because a flush appends records, which copy.
+const CHUNK: usize = 64 << 10;
+static FILE_BUF: Global<[u8; CHUNK]> = Global::new([0; CHUNK]);
+static WIN_BUF: Global<[u8; CHUNK]> = Global::new([0; CHUNK]);
+static COPY_BUF: Global<[u8; CHUNK]> = Global::new([0; CHUNK]);
+
+fn page_up(x: u64) -> u64 {
+    (x + PAGE - 1) & !(PAGE - 1)
+}
+
+fn file_size(fd: i64) -> u64 {
+    fstat_raw(fd).map(|st| st.size()).unwrap_or(0)
+}
+
+/// Read `b.len()` bytes of `fd` at `off`; a file that ends first or a failed read is a host
+/// error (no record is ever made of bytes that were not read).
+fn pread_exact(fd: i64, b: &mut [u8], off: u64) {
+    let mut done = 0usize;
+    while done < b.len() {
+        let r = unsafe {
+            sc4(
+                nr::PREAD64,
+                fd as u64,
+                b.as_mut_ptr() as u64 + done as u64,
+                (b.len() - done) as u64,
+                off + done as u64,
+            )
+        };
+        if r <= 0 {
+            crate::sup::host_error(r, nr::PREAD64, proto::ctl::HE_RUNTIME_ASSERT);
+        }
+        done += r as usize;
+    }
+}
+
+/// Slot `k`'s store (`proto::oplog::Shadows`).
+fn store(k: usize) -> u64 {
+    (FD_SHADOWS as usize + k) as u64
+}
+
+fn store_write(k: usize, off: u64, s: &[u8]) {
+    let mut done = 0usize;
+    while done < s.len() {
+        let r = unsafe {
+            sc4(
+                nr::PWRITE64,
+                store(k),
+                s.as_ptr() as u64 + done as u64,
+                (s.len() - done) as u64,
+                off + done as u64,
+            )
+        };
+        if r <= 0 {
+            crate::sup::host_error(r, nr::PWRITE64, proto::ctl::HE_SYSCALL);
+        }
+        done += r as usize;
+    }
+}
+
+/// `b.len()` bytes of slot `k`'s store at `off`: zeros past its end.
+fn store_read(k: usize, b: &mut [u8], off: u64) {
+    let mut done = 0usize;
+    while done < b.len() {
+        let r = unsafe {
+            sc4(
+                nr::PREAD64,
+                store(k),
+                b.as_mut_ptr() as u64 + done as u64,
+                (b.len() - done) as u64,
+                off + done as u64,
+            )
+        };
+        if r < 0 {
+            crate::sup::host_error(r, nr::PREAD64, proto::ctl::HE_SYSCALL);
+        }
+        if r == 0 {
+            b[done..].fill(0);
+            return;
+        }
+        done += r as usize;
+    }
+}
+
+/// What slot `k`'s store holds now, for the table's count.
+fn store_note(k: usize) {
+    if let Some(st) = fstat_raw(store(k) as i64) {
+        shadows().held(k, st.blocks() * 512);
+    }
+}
+
+/// `[off, off + len)` of slot `k`'s store reads as zeros: cut where it reaches the end, else
+/// punched. Neither extends the store.
+fn store_zero(k: usize, off: u64, len: u64) {
+    let Some(st) = fstat_raw(store(k) as i64) else {
+        crate::sup::host_error(-e::EBADF, nr::FSTAT, proto::ctl::HE_SYSCALL)
+    };
+    let size = st.size();
+    if off >= size {
+        return;
+    }
+    let (r, n) = if off.saturating_add(len) >= size {
+        (unsafe { sc2(nr::FTRUNCATE, store(k), off) }, nr::FTRUNCATE)
+    } else {
+        let r = unsafe {
+            sc4(
+                nr::FALLOCATE,
+                store(k),
+                FALLOC_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                off,
+                len,
+            )
+        };
+        (r, nr::FALLOCATE)
+    };
+    if r < 0 {
+        crate::sup::host_error(r, n, proto::ctl::HE_SYSCALL);
+    }
+    store_note(k);
+}
+
+/// `[from, from + len)` of `fd` into slot `k`'s store at `to`.
+fn store_copy(fd: i64, from: u64, k: usize, to: u64, len: u64) {
+    let b = COPY_BUF.get();
+    let mut done = 0;
+    while done < len {
+        let n = (len - done).min(CHUNK as u64) as usize;
+        pread_exact(fd, &mut b[..n], from + done);
+        store_write(k, to + done, &b[..n]);
+        done += n as u64;
+    }
+    store_note(k);
+}
+
+fn free_slot(k: usize) {
+    let s = shadows();
+    s.ino[k] = 0;
+    s.used -= 1;
+    store_zero(k, 0, u64::MAX);
+}
+
+/// After a record was appended for `ino` (its bytes at `data` in `oplog.data`): its store
+/// follows (`proto::oplog::Shadows`, the invariant; the supervisor's appends do the same).
+fn shadow_apply(kind: OpKind, ino: u64, a: &[u64; 6], data: (u64, u64)) {
+    let Some(k) = shadows().slot_of(ino) else {
+        return;
+    };
+    match effect(kind, a) {
+        Effect::None => {}
+        Effect::New => free_slot(k),
+        Effect::Zero { off, len } => store_zero(k, off, len),
+        Effect::Data { off, .. } => store_copy(FD_OPLOG_DATA as i64, data.0, k, off, data.1),
+    }
+}
+
+/// The data runs of `[lo, hi)` of the file open at `fd` (page-aligned file offsets): `f(a, b)`
+/// for each, in order, page-aligned. A hole is never read: on tmpfs that would allocate its
+/// pages (charged to the file system and the process) and change the file's block count. A
+/// file system without hole information is all data. `fd` may be the program's descriptor: its
+/// offset is put back.
+fn data_runs(fd: i64, lo: u64, hi: u64, mut f: impl FnMut(u64, u64)) {
+    let fd_ = fd as u64;
+    let cur = unsafe { sc3(nr::LSEEK, fd_, 0, SEEK_CUR) };
+    let mut pos = lo;
+    while pos < hi {
+        let d = unsafe { sc3(nr::LSEEK, fd_, pos, SEEK_DATA) };
+        if d == -e::ENXIO {
+            break;
+        }
+        if d < 0 {
+            f(pos, hi);
+            break;
+        }
+        let d = (d as u64 & !(PAGE - 1)).max(pos);
+        if d >= hi {
+            break;
+        }
+        let h = unsafe { sc3(nr::LSEEK, fd_, d, SEEK_HOLE) };
+        let end = if h < 0 { hi } else { page_up(h as u64).min(hi) };
+        let end = end.max(d + PAGE).min(hi);
+        f(d, end);
+        pos = end;
+    }
+    if cur >= 0 {
+        unsafe { sc3(nr::LSEEK, fd_, cur as u64, SEEK_SET) };
+    }
+}
+
+/// Record the pages of `[lo, hi)` of the work inode `ino` (slot `k`, open for reading at `fd`;
+/// `lo` page-aligned) whose bytes differ from what the log holds: one `MmapDirty` per run of
+/// differing pages within a run of the file's data, with the file's bytes. Every process's
+/// stores through a `MAP_SHARED` mapping are the file's bytes (the page cache), so this logs
+/// them whichever process made them.
+fn flush_file(fd: i64, k: usize, ino: u64, lo: u64, hi: u64) {
+    let v = hi.min(file_size(fd));
+    if lo >= v {
+        return;
+    }
+    data_runs(fd, lo, page_up(v), |a, b| {
+        let b = b.min(v);
+        let (fb, wb) = (FILE_BUF.get(), WIN_BUF.get());
+        let mut run: Option<u64> = None;
+        let mut p = a;
+        while p < b {
+            let n = (b - p).min(CHUNK as u64) as usize;
+            pread_exact(fd, &mut fb[..n], p);
+            store_read(k, &mut wb[..n], p);
+            let mut q = 0;
+            while q < n {
+                let m = (PAGE as usize).min(n - q);
+                let differs = fb[q..q + m] != wb[q..q + m];
+                let at = p + q as u64;
+                match (differs, run) {
+                    (true, None) => run = Some(at),
+                    (false, Some(s)) => {
+                        dirty(fd, ino, s, at);
+                        run = None;
+                    }
+                    _ => {}
+                }
+                q += m;
+            }
+            p += n as u64;
+        }
+        if let Some(s) = run {
+            dirty(fd, ino, s, b);
+        }
+    });
+}
+
+fn dirty(fd: i64, ino: u64, lo: u64, hi: u64) {
+    append(
+        OpKind::MmapDirty,
+        ino,
+        [lo, hi - lo, 0, 0, 0, 0],
+        &[Src::File(fd, lo)],
+        hi - lo,
+    );
+}
+
+/// A tracked mapping of `ino` (open at `fd`) is being made: its slot, made and filled from the
+/// file when it has none. No slot means no process maps the inode (slots are freed only when
+/// none does), so the file holds what the log holds.
+fn slot_for(ino: u64, fd: i64) -> usize {
+    if let Some(k) = shadows().slot_of(ino) {
+        return k;
+    }
+    let k = match shadows().free_slot() {
+        Some(k) => k,
+        None => {
+            crate::sup::call_sup(proto::ctl::Op::ShadowReclaim, [0; 6]);
+            shadows().free_slot().unwrap_or_else(|| {
+                crate::sup::capacity(proto::ctl::LIMIT_MAPPED_FILES, SHADOW_SLOTS as u64)
+            })
+        }
+    };
+    // A free slot's store is empty (freed by truncation); made so again, as the fill writes
+    // only the file's data runs.
+    store_zero(k, 0, u64::MAX);
+    let s = shadows();
+    s.ino[k] = ino;
+    s.used += 1;
+    let size = file_size(fd);
+    data_runs(fd, 0, page_up(size), |a, b| {
+        let b = b.min(size);
+        if b > a {
+            store_copy(fd, a, k, a, b - a);
+        }
+    });
+    k
+}
+
+/// `fd` if it can be read, else a new read-only descriptor of the same file (closed with
+/// `done`); None for an `O_PATH` descriptor, which reads nothing.
+fn reader(fd: i64) -> Option<i64> {
+    let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // F_GETFL
+    (fl >= 0 && fl & O_PATH == 0).then(|| readable(fd))
+}
+
+fn done(fd: i64, rfd: i64) {
+    if rfd != fd {
+        unsafe { sc1(nr::CLOSE, rfd as u64) };
+    }
+}
+
+/// Whether any work file has a shadow: the write-family calls look at nothing else when none
+/// does.
+pub fn shadows_in_use() -> bool {
+    shadows().used != 0
+}
+
+/// Before a call that writes `count` bytes to `fd` at `off` (its position when None). `append`:
+/// Some(true) writes at the end (`RWF_APPEND`), Some(false) at `off` (`RWF_NOAPPEND`), None
+/// as the descriptor's `O_APPEND` says. The pages it will write that hold stores not yet logged
+/// (any process's, through a mapping) are logged first, whole, so the log has them before the
+/// write's record, as the page cache had them before the write. Logged after it, a page would
+/// carry the write's bytes and the crash model could keep the write without the stores, a
+/// state Linux cannot reach (writeback writes whole pages).
+pub fn before_write(fd: i64, off: Option<u64>, count: u64, append: Option<bool>) {
+    if shadows().used == 0 || count == 0 {
+        return;
+    }
+    let Some(st) = fstat_raw(fd) else { return };
+    if !path::is_work(st.dev()) || st.mode() & 0o170000 != 0o100000 {
+        return;
+    }
+    let Some(k) = shadows().slot_of(st.ino()) else {
+        return;
+    };
+    const O_APPEND: i64 = 0o2000;
+    let append = append.unwrap_or_else(|| unsafe { sc2(nr::FCNTL, fd as u64, 3) } & O_APPEND != 0);
+    let lo = if append {
+        st.size()
+    } else {
+        match off {
+            Some(o) => o,
+            None => {
+                let pos = unsafe { sc3(nr::LSEEK, fd as u64, 0, SEEK_CUR) };
+                if pos < 0 {
+                    return;
+                }
+                pos as u64
+            }
+        }
+    };
+    let Some(rfd) = reader(fd) else { return };
+    // Whole pages: writeback writes a page with every store on it.
+    flush_file(
+        rfd,
+        k,
+        st.ino(),
+        lo & !(PAGE - 1),
+        page_up(lo.saturating_add(count)),
+    );
+    done(fd, rfd);
+}
+
+/// Bytes an iovec array of the program's (`iov`, `cnt` entries) describes, read before the
+/// kernel has looked at it: None when the kernel will refuse it (more than `IOV_MAX` entries,
+/// or an entry that cannot be read).
+pub fn iov_bytes(iov: u64, cnt: u64) -> Option<u64> {
+    if cnt > 1024 {
+        return None;
+    }
+    let mut t = 0u64;
+    for i in 0..cnt {
+        let [_, l] = crate::guest::get::<[u64; 2]>(iov.wrapping_add(i * 16)).ok()?;
+        t = t.saturating_add(l);
+    }
+    Some(t)
+}
+
 // ---- shared file mappings ----
 
 const MAX_MAPS: usize = MAX_SHARED_MAPS;
@@ -398,8 +742,6 @@ const NOMAP: Map = Map {
     len: 0,
     ino: 0,
     off: 0,
-    shadow: 0,
-    shadow_len: 0,
     fd: -1,
 };
 /// The process's tracked mappings; the supervisor reads them when the process ends without
@@ -410,181 +752,35 @@ static MAPS: Global<SharedMaps> = Global::new(SharedMaps {
 });
 
 /// Tell the supervisor where this image keeps its tracked mappings (at each image's start).
+/// The image before it, if any, had its own mappings: whatever slots they kept are looked at
+/// before the next request.
 pub fn publish_maps() {
     ctl()
         .maps_table
         .store(MAPS.get() as *const SharedMaps as u64, Relaxed);
-}
-
-fn page_up(x: u64) -> u64 {
-    (x + PAGE - 1) & !(PAGE - 1)
-}
-
-fn file_size(fd: i64) -> u64 {
-    fstat_raw(fd).map(|st| st.size()).unwrap_or(0)
-}
-
-/// Address space of shadows given back, by address, adjacent ranges joined: a new shadow
-/// takes the first that fits before taking fresh address space. A range that finds the list
-/// full is given up (its memory is unmapped all the same).
-struct FreeShadows {
-    r: [(u64, u64); MAX_FREE],
-    n: usize,
-}
-const MAX_FREE: usize = 64;
-static FREE: Global<FreeShadows> = Global::new(FreeShadows {
-    r: [(0, 0); MAX_FREE],
-    n: 0,
-});
-
-/// A mapping's shadow: private anonymous memory that holds pages only where something was
-/// copied in (a sparse file mapped large costs what it holds, not what it spans).
-fn new_shadow(len: u64) -> u64 {
-    let l = page_up(len);
-    let f = FREE.get();
-    let a = match (0..f.n).find(|&i| f.r[i].1 >= l) {
-        Some(i) => {
-            let a = f.r[i].0;
-            f.r[i] = (a + l, f.r[i].1 - l);
-            if f.r[i].1 == 0 {
-                f.r.copy_within(i + 1..f.n, i);
-                f.n -= 1;
-            }
-            a
-        }
-        None => crate::state::priv_alloc(l, PAGE),
-    };
-    let r = unsafe {
-        sc6(
-            nr::MMAP,
-            a,
-            l,
-            PROT_READ | PROT_WRITE,
-            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE | MAP_NORESERVE,
-            u64::MAX,
-            0,
-        )
-    };
-    if r as u64 != a {
-        crate::sup::host_error(r, nr::MMAP, proto::ctl::HE_SYSCALL);
-    }
-    a
-}
-
-/// Give back `[a, a + l)` of a shadow: its memory and its address space.
-fn free_shadow(a: u64, l: u64) {
-    if l == 0 {
-        return;
-    }
-    unsafe { sc2(nr::MUNMAP, a, l) };
-    let f = FREE.get();
-    let i = (0..f.n).find(|&i| f.r[i].0 > a).unwrap_or(f.n);
-    let joins_prev = i > 0 && f.r[i - 1].0 + f.r[i - 1].1 == a;
-    let joins_next = i < f.n && a + l == f.r[i].0;
-    match (joins_prev, joins_next) {
-        (true, true) => {
-            f.r[i - 1].1 += l + f.r[i].1;
-            f.r.copy_within(i + 1..f.n, i);
-            f.n -= 1;
-        }
-        (true, false) => f.r[i - 1].1 += l,
-        (false, true) => f.r[i] = (a, l + f.r[i].1),
-        (false, false) if f.n < MAX_FREE => {
-            f.r.copy_within(i..f.n, i + 1);
-            f.r[i] = (a, l);
-            f.n += 1;
-        }
-        (false, false) => {}
-    }
-}
-
-/// Bytes of the mapping that lie inside the file (reading beyond would fault).
-fn valid_len(m: &Map) -> u64 {
-    m.len.min(file_size(m.fd).saturating_sub(m.off))
-}
-
-/// The first `v` bytes of mapping `m` as runs of whole pages, in order: `f(lo, hi, data)`,
-/// offsets in the mapping; `data` false for pages that lie wholly in a hole of the file. A
-/// hole is never read through the mapping: on tmpfs that would allocate its pages (charged to
-/// the file system and the process) and change the file's block count.
-fn page_runs(m: &Map, v: u64, mut f: impl FnMut(u64, u64, bool)) {
-    const SEEK_CUR: u64 = 1;
-    const SEEK_DATA: u64 = 3;
-    const SEEK_HOLE: u64 = 4;
-    let fd = m.fd as u64;
-    // The descriptor shares the program's file offset: put it back.
-    let cur = unsafe { sc3(nr::LSEEK, fd, 0, SEEK_CUR) };
-    let end = page_up(v);
-    let mut pos = 0;
-    while pos < end {
-        let d = unsafe { sc3(nr::LSEEK, fd, m.off + pos, SEEK_DATA) };
-        if d == -e::ENXIO {
-            f(pos, end, false);
-            break;
-        }
-        if d < 0 {
-            // No hole information: every page may hold data.
-            f(pos, end, true);
-            break;
-        }
-        let h = unsafe { sc3(nr::LSEEK, fd, d as u64, SEEK_HOLE) };
-        let dl = (d as u64 - m.off) & !(PAGE - 1);
-        let hl = if h < 0 {
-            end
-        } else {
-            page_up(h as u64 - m.off).min(end)
-        };
-        if dl >= end {
-            f(pos, end, false);
-            break;
-        }
-        if dl > pos {
-            f(pos, dl, false);
-        }
-        f(dl.max(pos), hl, true);
-        pos = hl.max(pos + PAGE);
-    }
-    if cur >= 0 {
-        unsafe { sc3(nr::LSEEK, fd, cur as u64, 0) };
-    }
-}
-
-/// Bring the shadow of `m` to the file's contents (a new mapping, after `mremap`): copy what
-/// the file holds; its holes read as the shadow's untouched zeros.
-fn fill_shadow(m: &Map) {
-    let v = valid_len(m);
-    page_runs(m, v, |lo, hi, data| {
-        let hi = hi.min(v);
-        if data && hi > lo {
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    (m.addr + lo) as *const u8,
-                    (m.shadow + lo) as *mut u8,
-                    (hi - lo) as usize,
-                )
-            };
-        }
-    });
-}
-
-/// Zero `[a, a + n)` of a shadow: the whole pages are given back (anonymous memory reads
-/// back as zeros), only the partial ones at the ends are written.
-fn zero_shadow(base: u64, a: u64, n: u64) {
-    const MADV_DONTNEED: u64 = 4;
-    let (lo, hi) = (page_up(a), (a + n) & !(PAGE - 1));
-    if lo >= hi {
-        unsafe { core::ptr::write_bytes((base + a) as *mut u8, 0, n as usize) };
-        return;
-    }
-    unsafe {
-        core::ptr::write_bytes((base + a) as *mut u8, 0, (lo - a) as usize);
-        core::ptr::write_bytes((base + hi) as *mut u8, 0, (a + n - hi) as usize);
-        sc3(nr::MADVISE, base + lo, hi - lo, MADV_DONTNEED);
+    if shadows().used != 0 {
+        shadows().reclaim = 1;
     }
 }
 
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const HIDDEN_DUP_BASE: u64 = 3100;
+
+fn track(addr: u64, len: u64, ino: u64, off: u64, hfd: i64) {
+    let t = MAPS.get();
+    if t.n == MAX_MAPS {
+        crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
+    }
+    slot_for(ino, hfd);
+    t.m[t.n] = Map {
+        addr,
+        len,
+        ino,
+        off,
+        fd: hfd,
+    };
+    t.n += 1;
+}
 
 /// After a successful `mmap`: track `MAP_SHARED` mappings of `/work` regular files opened
 /// for writing (`mprotect` can add `PROT_WRITE` later), and record `MmapShared`.
@@ -606,121 +802,19 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     if fl < 0 || fl & 3 != 2 {
         return; // not O_RDWR: the mapping can never be written
     }
-    let t = MAPS.get();
-    if t.n == MAX_MAPS {
-        crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
-    }
     let hfd = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
     if hfd < 0 {
         crate::sup::host_error(hfd, nr::FCNTL, proto::ctl::HE_SYSCALL);
     }
-    let shadow = new_shadow(len);
-    let m = Map {
-        addr,
-        len,
-        ino: st.ino(),
-        off,
-        shadow,
-        shadow_len: page_up(len),
-        fd: hfd,
-    };
-    fill_shadow(&m);
-    t.m[t.n] = m;
-    t.n += 1;
+    track(addr, len, st.ino(), off, hfd);
     append(OpKind::MmapShared, st.ino(), [off, len, 0, 0, 0, 0], &[], 0);
 }
 
-/// Record the pages of mapping `i` that differ from the tracker's view (`MmapDirty`), and
-/// take them into the view. Only pages that hold data are compared: a hole of the file reads
-/// as zeros, as the tracker's view of it does (a truncation or a punched hole zeroed it), so
-/// the shadow's pages there are given back.
+/// Record the pages of mapping `i` that differ from what the log holds (`MmapDirty`).
 fn flush(i: usize) {
     let m = MAPS.get().m[i];
-    let v = valid_len(&m);
-    page_runs(&m, v, |lo, hi, data| {
-        if !data {
-            return zero_shadow(m.shadow, lo, hi - lo);
-        }
-        flush_run(i, &m, lo, hi.min(v));
-    });
-}
-
-/// `flush` over `[lo, v)` of mapping `i`, pages that may hold data.
-fn flush_run(i: usize, m: &Map, lo: u64, v: u64) {
-    let mut p = lo;
-    while p < v {
-        let n = PAGE.min(v - p);
-        let differs = |q: u64, n: u64| unsafe {
-            core::slice::from_raw_parts((m.addr + q) as *const u8, n as usize)
-                != core::slice::from_raw_parts((m.shadow + q) as *const u8, n as usize)
-        };
-        if !differs(p, n) {
-            p += n;
-            continue;
-        }
-        // A run of differing pages.
-        let start = p;
-        while p < v && differs(p, PAGE.min(v - p)) {
-            p += PAGE.min(v - p);
-        }
-        let len = p - start;
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                (m.addr + start) as *const u8,
-                (m.shadow + start) as *mut u8,
-                len as usize,
-            )
-        };
-        record(&FsOp::MmapDirty {
-            ino: m.ino,
-            offset: m.off + start,
-            len,
-            data: m.addr + start,
-        });
-        maps_changed_except(m.ino, m.off + start, len, Change::Data, i);
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Change {
-    /// New bytes in the file: copy them from the mapping (it shows the page cache).
-    Data,
-    /// Truncation or hole: the range reads as zeros.
-    Zero,
-}
-
-fn maps_changed(ino: u64, off: u64, len: u64, how: Change) {
-    maps_changed_except(ino, off, len, how, usize::MAX)
-}
-
-/// Bring every tracked view of `ino` up to date for a change the log already holds.
-fn maps_changed_except(ino: u64, off: u64, len: u64, how: Change, skip: usize) {
-    let t = MAPS.get();
-    for i in 0..t.n {
-        let m = t.m[i];
-        if i == skip || m.ino != ino {
-            continue;
-        }
-        let lo = off.max(m.off);
-        let hi = off.saturating_add(len).min(m.off + m.len);
-        if lo >= hi {
-            continue;
-        }
-        let (a, n) = (lo - m.off, hi - lo);
-        match how {
-            Change::Zero => zero_shadow(m.shadow, a, n),
-            Change::Data => {
-                let v = valid_len(&m);
-                let n = n.min(v.saturating_sub(a));
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        (m.addr + a) as *const u8,
-                        (m.shadow + a) as *mut u8,
-                        n as usize,
-                    )
-                };
-            }
-        }
+    if let Some(k) = shadows().slot_of(m.ino) {
+        flush_file(m.fd, k, m.ino, m.off, m.off.saturating_add(m.len));
     }
 }
 
@@ -728,13 +822,14 @@ fn overlaps(m: &Map, addr: u64, len: u64) -> bool {
     addr < m.addr + m.len && addr.saturating_add(len) > m.addr
 }
 
+/// Stop tracking mapping `i`: its slot is looked at before the next request (another process
+/// may still map the file).
 fn drop_map(i: usize) {
     let t = MAPS.get();
-    let m = t.m[i];
-    free_shadow(m.shadow, m.shadow_len);
-    unsafe { sc1(nr::CLOSE, m.fd as u64) };
+    unsafe { sc1(nr::CLOSE, t.m[i].fd as u64) };
     t.m[i] = t.m[t.n - 1];
     t.n -= 1;
+    shadows().reclaim = 1;
 }
 
 /// Before `munmap(addr, len)`: flush the mappings it may unmap (harmless when the kernel
@@ -752,7 +847,7 @@ pub fn on_munmap(addr: u64, len: u64) {
 
 /// After a `munmap(addr, len)` the kernel made (only then: one it refuses, as of length 0,
 /// unmaps nothing): stop tracking the mappings it removed (a partial unmap keeps the remaining
-/// part tracked) and give their copies back.
+/// part tracked).
 pub fn on_munmap_done(addr: u64, len: u64) {
     let len = page_up(len);
     let mut i = 0;
@@ -767,39 +862,32 @@ pub fn on_munmap_done(addr: u64, len: u64) {
             drop_map(i);
             continue;
         }
-        // The shadow of the unmapped part goes with it.
         let t = MAPS.get();
         if lo == m.addr {
             // the head goes: keep the tail
             let cut = hi - m.addr;
-            free_shadow(m.shadow, cut);
             t.m[i].addr = hi;
             t.m[i].len -= cut;
             t.m[i].off += cut;
-            t.m[i].shadow += cut;
-            t.m[i].shadow_len -= cut;
         } else {
             // keep the head; a hole in the middle splits the mapping in two
             t.m[i].len = lo - m.addr;
-            t.m[i].shadow_len = lo - m.addr;
-            let split = hi < m.addr + m.len;
-            if split && t.n == MAX_MAPS {
-                // The tail would go untracked and its stores unlogged.
-                crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
-            }
-            let gone_to = if split { hi - m.addr } else { m.shadow_len };
-            free_shadow(m.shadow + (lo - m.addr), gone_to - (lo - m.addr));
-            if split {
+            if hi < m.addr + m.len {
+                if t.n == MAX_MAPS {
+                    // The tail would go untracked and its stores unlogged.
+                    crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
+                }
                 let cut = hi - m.addr;
                 let hfd = unsafe { sc3(nr::FCNTL, m.fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
+                if hfd < 0 {
+                    crate::sup::host_error(hfd, nr::FCNTL, proto::ctl::HE_SYSCALL);
+                }
                 let n = t.n;
                 t.m[n] = Map {
                     addr: hi,
                     len: m.len - cut,
                     ino: m.ino,
                     off: m.off + cut,
-                    shadow: m.shadow + cut,
-                    shadow_len: m.shadow_len - cut,
                     fd: hfd,
                 };
                 t.n += 1;
@@ -809,11 +897,20 @@ pub fn on_munmap_done(addr: u64, len: u64) {
     }
 }
 
+/// What `on_mremap_before` set aside: the old mapping, its descriptor kept.
+pub struct Remap {
+    addr: u64,
+    len: u64,
+    ino: u64,
+    off: u64,
+    fd: i64,
+}
+
 /// `mremap` (`flags`): flush and stop tracking the old range; track the new one. Only a
 /// whole tracked mapping is moved or resized: a part of one (which would leave the rest
 /// untracked, or the tracked range stale), a copy (`old_size` 0) or a move that keeps the old
 /// range mapped (`MREMAP_DONTUNMAP`) ends the run `unsupported` rather than lose its stores.
-pub fn on_mremap_before(addr: u64, len: u64, flags: u64) -> Option<(u64, u64, i64)> {
+pub fn on_mremap_before(addr: u64, len: u64, flags: u64) -> Option<Remap> {
     const MREMAP_DONTUNMAP: u64 = 4;
     let t = MAPS.get();
     let part = (0..t.n).any(|i| {
@@ -827,47 +924,91 @@ pub fn on_mremap_before(addr: u64, len: u64, flags: u64) -> Option<(u64, u64, i6
     let i = (0..t.n).find(|&i| t.m[i].addr == addr)?;
     flush(i);
     let m = t.m[i];
-    let hfd = unsafe { sc3(nr::FCNTL, m.fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
-    let _ = len;
-    drop_map(i);
-    Some((m.off, m.ino, hfd))
+    // The entry goes; its descriptor stays for the mapping's new (or, on failure, old) place.
+    t.m[i] = t.m[t.n - 1];
+    t.n -= 1;
+    Some(Remap {
+        addr: m.addr,
+        len: m.len,
+        ino: m.ino,
+        off: m.off,
+        fd: m.fd,
+    })
 }
 
-pub fn on_mremap_after(new: u64, newlen: u64, prev: Option<(u64, u64, i64)>, ok: bool) {
-    let Some((off, ino, hfd)) = prev else { return };
-    if !ok || hfd < 0 {
-        if hfd >= 0 {
-            unsafe { sc1(nr::CLOSE, hfd as u64) };
-        }
-        return;
+/// After the `mremap`: track the mapping where it now is (where it was, when the call failed).
+pub fn on_mremap_after(new: u64, newlen: u64, prev: Option<Remap>, ok: bool) {
+    let Some(r) = prev else { return };
+    if ok {
+        track(new, newlen, r.ino, r.off, r.fd);
+    } else {
+        track(r.addr, r.len, r.ino, r.off, r.fd);
     }
-    let t = MAPS.get();
-    let shadow = new_shadow(newlen);
-    let m = Map {
-        addr: new,
-        len: newlen,
-        ino,
-        off,
-        shadow,
-        shadow_len: page_up(newlen),
-        fd: hfd,
-    };
-    fill_shadow(&m);
-    t.m[t.n] = m;
-    t.n += 1;
 }
 
-/// Flush every tracked mapping (process exit, `sync`).
+/// Flush every tracked mapping (process exit).
 pub fn flush_all() {
     for i in 0..MAPS.get().n {
         flush(i);
     }
 }
 
-fn flush_ino(ino: u64) {
-    for i in 0..MAPS.get().n {
-        if MAPS.get().m[i].ino == ino {
-            flush(i);
+/// `sync`, `syncfs`: every shadowed file's unlogged stores are logged. When the caller maps
+/// every shadowed file it compares each whole file itself (the file is every process's
+/// stores); else the supervisor compares every process's mappings (`Op::MapsSync`), as at a
+/// crash point.
+fn flush_everything() {
+    let s = shadows();
+    let t = MAPS.get();
+    let others = s
+        .ino
+        .iter()
+        .any(|&ino| ino != 0 && !t.m[..t.n].iter().any(|m| m.ino == ino));
+    if others {
+        crate::sup::call_sup(proto::ctl::Op::MapsSync, [thread().seq, 0, 0, 0, 0, 0]);
+        return;
+    }
+    // Each file this process maps, whole: another process may map (and have stored to) a
+    // part of it this one does not.
+    for i in 0..t.n {
+        let m = t.m[i];
+        if t.m[..i].iter().any(|p| p.ino == m.ino) {
+            continue;
+        }
+        if let Some(k) = s.slot_of(m.ino) {
+            flush_file(m.fd, k, m.ino, 0, u64::MAX);
+        }
+    }
+}
+
+/// `fsync` family on the work file `ino` open at `fd`: whatever any process stored through a
+/// mapping of it is logged before the sync.
+fn flush_whole(fd: i64, ino: u64) {
+    let Some(k) = shadows().slot_of(ino) else {
+        return;
+    };
+    let Some(rfd) = reader(fd) else { return };
+    flush_file(rfd, k, ino, 0, u64::MAX);
+    done(fd, rfd);
+}
+
+/// After a successful `madvise(MADV_REMOVE)`: the range of each tracked mapping it covers is a
+/// hole punched in the file (`Fallocate`).
+pub fn on_madv_remove(addr: u64, len: u64) {
+    let t = MAPS.get();
+    for i in 0..t.n {
+        let m = t.m[i];
+        let (lo, hi) = (
+            addr.max(m.addr),
+            addr.saturating_add(page_up(len)).min(m.addr + m.len),
+        );
+        if lo < hi {
+            record(&FsOp::Fallocate {
+                ino: m.ino,
+                mode: FALLOC_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                offset: m.off + (lo - m.addr),
+                len: hi - lo,
+            });
         }
     }
 }
@@ -954,7 +1095,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     if nr == nr::SYNC {
         // sync(2) reports nothing.
         crate::inject::crash_point();
-        flush_all();
+        flush_everything();
         append(OpKind::Sync, 0, [0; 6], &[], 0);
         return 0;
     }
@@ -967,7 +1108,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     }
     if nr == nr::SYNCFS {
         crate::inject::crash_point();
-        flush_all();
+        flush_everything();
         if let Some(by) = crate::inject::sync_fails() {
             fail(0, nr, crate::inject::Who::At(AT_FDCWD_, work_cstr()), by);
             FDS.get().sync_seen = dur().sync_gen;
@@ -989,7 +1130,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     let dir = st.mode() & 0o170000 == 0o040000;
     crate::inject::crash_point();
     if !dir {
-        flush_ino(ino);
+        flush_whole(fd, ino);
     }
     if let Some(by) = crate::inject::sync_fails() {
         let o = if dir {

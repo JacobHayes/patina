@@ -86,7 +86,8 @@ const LIMITS: [(i32, &str, Lim); 16] = [
     (CORE, "core", Lim::Fixed(0)),
     (RSS, "rss", Lim::Hard(0)),
     (NPROC, "nproc", Lim::Hard(4096)),
-    (NOFILE, "nofile", Lim::Fixed(4096)),
+    // The shadow stores sit at the top of the range (`FD_SHADOWS`).
+    (NOFILE, "nofile", Lim::Fixed(FD_LIMIT as u64)),
     (MEMLOCK, "memlock", Lim::Hard(0)),
     (AS, "as", Lim::Fixed(INF)),
     (LOCKS, "locks", Lim::Hard(0)),
@@ -143,6 +144,8 @@ pub unsafe fn reset_signals() {
 pub unsafe fn close_inherited(nodes: bool) {
     const _: () = assert!(FD_PMU == FD_PATINA + 1 && FD_PLAN == FD_PMU + 1);
     const _: () = assert!(FD_SHM > FD_PLAN + 1 && FD_NODES == FD_SHM + 1);
+    // The shadow stores are made after this, above everything it keeps.
+    const _: () = assert!(FD_SHADOWS > FD_NODES);
     libc::syscall(libc::SYS_close_range, 3u32, (FD_CTL - 1) as u32, 0u32);
     libc::syscall(
         libc::SYS_close_range,

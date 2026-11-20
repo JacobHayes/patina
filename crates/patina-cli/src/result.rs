@@ -42,6 +42,9 @@ pub struct RunEnd {
     /// The size of each sandbox tmpfs (`tmpfs-bytes`) and the file calls a full one answered
     /// `ENOSPC`, summed over incarnations.
     pub tmpfs: [u64; 2],
+    /// The most bytes the shadow store held (`proto::oplog::Shadows`; the largest over
+    /// incarnations): what the operation log holds of the work files mapped shared.
+    pub shadow_bytes: u64,
     /// With `--preempt branches`, the counters in `proto::ctl::PMU_NAMES` order (summed;
     /// `max_skid` is a maximum).
     pub pmu: Option<[u64; proto::ctl::PMU_FIELDS]>,
@@ -509,6 +512,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "refused": e.refused,
         "missing": e.missing,
         "tmpfs": { "bytes": e.tmpfs[0], "enospc": e.tmpfs[1] },
+        "shadow_bytes": e.shadow_bytes,
         "labels": {
             "unscanned_exec_mappings": e.insn.unscanned_exec_mappings,
             "unix_sockets_in_flight": e.unix_sockets,

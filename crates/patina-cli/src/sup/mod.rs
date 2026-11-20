@@ -81,6 +81,7 @@ pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
 mod sdk;
+mod shadows;
 pub mod shm;
 pub mod signal;
 mod stall;
@@ -463,14 +464,19 @@ impl Sup {
                 return Err("the thread holding the turn did not stop".into());
             }
         }
-        let pids: Vec<i32> = self
-            .procs
+        let pids = self.mapping_pids();
+        self.flush_maps(&pids, seq)
+    }
+
+    /// Every live process with mappings of its own, in pid order: not a vfork child (its
+    /// mappings are its parent's, logged with it).
+    fn mapping_pids(&self) -> Vec<i32> {
+        self.procs
             .map
             .iter()
             .filter(|(_, p)| p.state == proc::PState::Live && p.vfork_parent.is_none())
             .map(|(pid, _)| *pid)
-            .collect();
-        self.flush_maps(&pids, seq)
+            .collect()
     }
 
     /// Stop the process of slot `i`'s thread, which runs guest code, with `SIGSTOP`, and wait
@@ -922,6 +928,17 @@ impl Sup {
             }
             Some(Op::Net) => self.net_op(idx, a),
             Some(Op::PidNode) => self.pid_node(a),
+            Some(Op::MapsSync) => {
+                let pids = self.mapping_pids();
+                if let Err(e) = self.flush_maps(&pids, a[0]) {
+                    self.finish(Self::maps_verdict(e));
+                }
+                Next::Continue(0)
+            }
+            Some(Op::ShadowReclaim) => {
+                shadows::reclaim(self.ctl, &work_dir(self.ctl));
+                Next::Continue(0)
+            }
             Some(Op::CrashPoint) => {
                 // Every process ends here: what their shared mappings hold, then the end.
                 let pid = self.sched.entries[idx].pid as u32;
@@ -1012,6 +1029,11 @@ impl Sup {
             let req = unsafe { std::ptr::read_volatile(&(*self.ctl.slot(idx)).req) };
             self.running = None;
             self.exit_barrier_first(idx, req.op);
+            // A runtime dropped a tracked mapping or started an image: slots of files nothing
+            // maps any more go.
+            if shadows::reclaim_asked(self.ctl) {
+                shadows::reclaim(self.ctl, &work_dir(self.ctl));
+            }
             self.check_liveness(Some((idx, req)));
             // Timers due by now fire before the request is handled (their seq order).
             let now = self.now();
@@ -1168,6 +1190,10 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
+        sup.finish(Verdict::new("infra", e));
+    }
+    // This incarnation's shadow stores, which every guest the supervisor starts inherits.
+    if let Err(e) = shadows::create() {
         sup.finish(Verdict::new("infra", e));
     }
     if let Err(e) = sup.wire.init() {

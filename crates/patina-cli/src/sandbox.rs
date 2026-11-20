@@ -32,11 +32,13 @@ pub const FD_SPEC: i32 = 3019;
 /// keeps, so its `close_inherited` closes them).
 pub const FD_NODE_STDIO0: i32 = 3030;
 const _: () = {
-    use proto::layout::{FD_NODES, FD_PLAN, FD_PMU, FD_RT_DYN, FD_STDIN};
+    use proto::layout::{FD_NODES, FD_PLAN, FD_PMU, FD_RT_DYN, FD_SHADOWS, FD_STDIN};
     assert!(FD_PMU < FD_DATA0 && FD_PLAN < FD_DATA0);
     assert!(FD_DATA0 + MAX_DATA as i32 <= FD_USERNS);
     assert!(FD_USERNS < FD_SPEC && FD_SPEC < FD_STDIN);
     assert!(FD_NODES < FD_NODE_STDIO0);
+    // The keeper's descriptors are closed before the supervisor makes the shadow stores.
+    assert!(FD_NODE_STDIO0 + 3 * (proto::node::MAX_NODES as i32 - 1) < FD_SHADOWS);
     assert!(FD_NODE_STDIO0 + 3 * (proto::node::MAX_NODES as i32 - 1) <= FD_RT_DYN);
 };
 

@@ -558,6 +558,8 @@ pub struct IncEnd {
     pub unix_sockets: u64,
     /// File calls a full sandbox tmpfs answered `ENOSPC`.
     pub tmpfs_full: u64,
+    /// The most bytes the shadow store held.
+    pub shadow_bytes: u64,
     /// Counter preemption counters (`proto::ctl::PMU_NAMES`).
     pub pmu: [u64; proto::ctl::PMU_FIELDS],
     /// The SDK's site table.
@@ -1244,6 +1246,7 @@ pub fn run_incarnation(
         net: crate::result::net_read(unsafe { &proto::wire::WireTab::at(ctl_ptr).counters }),
         unix_sockets: ctl.stats.unix_sockets_sent.load(Relaxed),
         tmpfs_full: ctl.stats.tmpfs_full.load(Relaxed),
+        shadow_bytes: unsafe { proto::oplog::Dur::at(ctl_ptr).shadows.peak },
         pmu: ctl.pmu.read(),
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,

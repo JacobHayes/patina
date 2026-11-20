@@ -51,7 +51,8 @@ fn pwrite_all(fd: i32, mut off: u64, b: &[u8]) -> Result<(), String> {
 }
 
 /// Append one operation record (with its bytes) at the end of the log, as the runtime does
-/// (`rt::oplog::put_rec`): `seq` and `pid` say where in the run it belongs (0, 0 for the base).
+/// (`rt::oplog::put_rec`), and keep its inode's window in the shadow store (`shadows`): `seq`
+/// and `pid` say where in the run it belongs (0, 0 for the base).
 pub fn append(
     ctl: &Ctl,
     kind: OpKind,
@@ -78,7 +79,7 @@ pub fn append(
     pwrite_all(FD_OPLOG_META, off, r.as_bytes())?;
     ctl.oplog_len
         .store(off + r.as_bytes().len() as u64, Relaxed);
-    Ok(())
+    super::shadows::apply(ctl, kind, ino, &a, data)
 }
 
 /// The `Crash` record that ends the log of a crashed incarnation (`kind`: `CRASH_*`), after

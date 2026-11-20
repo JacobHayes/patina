@@ -96,6 +96,10 @@ pub mod stat {
         pub fn size(&self) -> u64 {
             self.0[6]
         }
+        /// Allocated 512-byte blocks.
+        pub fn blocks(&self) -> u64 {
+            self.0[BLOCKS]
+        }
         #[cfg(target_arch = "x86_64")]
         pub fn mode(&self) -> u32 {
             self.0[3] as u32

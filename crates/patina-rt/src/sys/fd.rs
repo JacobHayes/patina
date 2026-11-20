@@ -224,10 +224,12 @@ fn close_range(call: &mut dyn Call) -> i64 {
 
 /// After a successful write-like call on `fd`: file times and the operation record.
 fn wrote(fd: i64, offset: Option<u64>, len: i64, data: Data) {
-    wrote_ex(fd, offset, len, data, false)
+    wrote_ex(fd, offset, len, data, None)
 }
 
-fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
+/// `append`: Some(true) the call wrote at the end (`RWF_APPEND`), Some(false) at its offset
+/// (`RWF_NOAPPEND`), None as the descriptor's `O_APPEND` says.
+fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: Option<bool>) {
     if len <= 0 {
         return;
     }
@@ -239,7 +241,8 @@ fn wrote_ex(fd: i64, offset: Option<u64>, len: i64, data: Data, append: bool) {
     if crate::path::is_work(st.dev()) {
         // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.
         const O_APPEND: i64 = 0o2000;
-        let append = append || unsafe { sc2(nr::FCNTL, fd as u64, 3) } & O_APPEND != 0;
+        let append =
+            append.unwrap_or_else(|| unsafe { sc2(nr::FCNTL, fd as u64, 3) } & O_APPEND != 0);
         let offset = if append {
             Some((st.size() as i64 - len).max(0) as u64)
         } else {
@@ -267,24 +270,67 @@ fn write_call(call: &mut dyn Call) -> i64 {
         // preadv2/pwritev2: RWF_NOWAIT from the guest would expose page-cache state.
         a[5] &= !RWF_NOWAIT;
     }
+    let fd = a[0] as i32 as i64;
+    // Stores another process (or this one) made through a mapping of the pages written are
+    // logged before the write's own record. The program's iovecs and offset are read
+    // fault-safe, as the kernel has not checked them yet; one it will refuse writes nothing.
+    const RWF_APPEND: u64 = 0x10;
+    const RWF_NOAPPEND: u64 = 0x20;
+    let v2_append = if a[5] & RWF_APPEND != 0 {
+        Some(true)
+    } else if a[5] & RWF_NOAPPEND != 0 {
+        Some(false)
+    } else {
+        None
+    };
+    if crate::oplog::shadows_in_use() {
+        use crate::oplog::{before_write, iov_bytes};
+        match nr {
+            nr::WRITE => before_write(fd, None, a[2], None),
+            nr::PWRITE64 => before_write(fd, Some(a[3]), a[2], None),
+            nr::WRITEV => {
+                if let Some(n) = iov_bytes(a[1], a[2]) {
+                    before_write(fd, None, n, None)
+                }
+            }
+            nr::PWRITEV => {
+                if let Some(n) = iov_bytes(a[1], a[2]) {
+                    before_write(fd, Some(a[3]), n, None)
+                }
+            }
+            nr::PWRITEV2 => {
+                if let Some(n) = iov_bytes(a[1], a[2]) {
+                    before_write(fd, (a[3] as i64 != -1).then_some(a[3]), n, v2_append)
+                }
+            }
+            nr::COPY_FILE_RANGE => {
+                let off = if a[3] == 0 {
+                    Some(None)
+                } else {
+                    crate::guest::get::<u64>(a[3]).ok().map(Some)
+                };
+                if let Some(off) = off {
+                    before_write(a[2] as i32 as i64, off, a[4], None)
+                }
+            }
+            nr::SENDFILE => before_write(fd, None, a[3], None),
+            _ => {}
+        }
+    }
     let r = unsafe { sc6(nr, a[0], a[1], a[2], a[3], a[4], a[5]) };
     host_check(call, r);
-    let fd = a[0] as i32 as i64;
     match nr {
         nr::WRITE => wrote(fd, None, r, Data::Buf(a[1])),
         nr::PWRITE64 => wrote(fd, Some(a[3]), r, Data::Buf(a[1])),
         nr::WRITEV => wrote(fd, None, r, Data::Iov(a[1], a[2])),
         nr::PWRITEV => wrote(fd, Some(a[3]), r, Data::Iov(a[1], a[2])),
-        nr::PWRITEV2 => {
-            const RWF_APPEND: u64 = 0x10;
-            wrote_ex(
-                fd,
-                if a[3] as i64 == -1 { None } else { Some(a[3]) },
-                r,
-                Data::Iov(a[1], a[2]),
-                a[5] & RWF_APPEND != 0,
-            )
-        }
+        nr::PWRITEV2 => wrote_ex(
+            fd,
+            if a[3] as i64 == -1 { None } else { Some(a[3]) },
+            r,
+            Data::Iov(a[1], a[2]),
+            v2_append,
+        ),
         // copy_file_range(fd_in, off_in, fd_out, off_out, len, flags)
         nr::COPY_FILE_RANGE => {
             let off = if a[3] != 0 {

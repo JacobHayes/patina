@@ -96,6 +96,15 @@ pub const FD_SHM: i32 = 3023;
 /// node's first process in its own view (`SOCK_SEQPACKET`; `cli::sandbox::NodeReq`). Kept by
 /// the supervisor, never given to guests. Absent in a run without nodes.
 pub const FD_NODES: i32 = 3024;
+/// The shadow stores (`oplog::Shadows`): `oplog::SHADOW_SLOTS` sparse memfds from here, which
+/// the supervisor makes at each incarnation's start and every guest process it starts
+/// inherits. Read and written by the runtime and the supervisor only; never mapped. At the top
+/// of the descriptor range (the sandbox's `RLIMIT_NOFILE` is `FD_LIMIT`), far above the
+/// runtime's own (`FD_RT_DYN`).
+pub const FD_SHADOWS: i32 = FD_LIMIT - crate::oplog::SHADOW_SLOTS as i32;
+/// The sandbox's `RLIMIT_NOFILE`: one more than the highest descriptor number.
+pub const FD_LIMIT: i32 = 4096;
+const _: () = assert!(FD_SHADOWS > FD_RT_DYN + 512);
 /// Hidden descriptors the runtime makes for itself (counters, `/proc/self/mem`) are
 /// placed at the lowest free number from here.
 pub const FD_RT_DYN: i32 = 3100;

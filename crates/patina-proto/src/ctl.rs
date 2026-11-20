@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 21;
+pub const LAYOUT_VERSION: u64 = 22;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -853,6 +853,13 @@ pub enum Op {
     /// In a run with nodes, the node of process [pid] as the supervisor's process table has
     /// it (zombies included): reply the node, or `-ESRCH` when the run has no such process.
     PidNode = 63,
+    /// A `sync` or `syncfs` while a work file the caller does not map has a shadow: log what
+    /// every live process's tracked mappings hold that the log does not, as at a crash point
+    /// (`sup::maps`). args: [the caller's sequence number]. Reply 0.
+    MapsSync = 64,
+    /// The shadow store's table is full: free the slots of inodes no process maps
+    /// (`oplog::Shadows`). Reply 0.
+    ShadowReclaim = 65,
 }
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -941,7 +948,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 40] = [
+        const ALL: [Op; 42] = [
             Hello,
             Yield,
             Sleep,
@@ -982,6 +989,8 @@ impl Op {
             VtReclaim,
             Net,
             PidNode,
+            MapsSync,
+            ShadowReclaim,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -1028,6 +1037,8 @@ impl Op {
             VtReclaim => "VtReclaim",
             Net => "Net",
             PidNode => "PidNode",
+            MapsSync => "MapsSync",
+            ShadowReclaim => "ShadowReclaim",
         }
     }
 }
@@ -1187,8 +1198,9 @@ limits! {
     LIMIT_FSYNC_FAILURES = 4: "files given an injected fsync failure",
     LIMIT_DESCRIPTORS = 5: "open file descriptors (the runtime needs a few of its own)",
     LIMIT_SHARED = 6: "shared mappings in one process, a writable one among them (the runtime keys process-shared futexes by them)",
-    LIMIT_RUNTIME_MEMORY = 7: "bytes of runtime memory used over one process's life (a copy of each shared, writable work-tree mapping, and the threads' stacks)",
+    LIMIT_RUNTIME_MEMORY = 7: "bytes of runtime memory used over one process's life (the threads' stacks and the runtime's own tables)",
     LIMIT_PATCH_SITES = 8: "patched instruction sites in one process (under branch counters on arm64 every exclusive load and store is one, and none may run natively)",
+    LIMIT_MAPPED_FILES = 9: "work-tree files with a shared, writable mapping at once in the run (the copy of what the operation log holds of each)",
 }
 
 /// Signal requests.

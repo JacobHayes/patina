@@ -7,6 +7,7 @@ use proto::layout::*;
 const MREMAP_MAYMOVE: u64 = 1;
 const MREMAP_FIXED: u64 = 2;
 const MADV_DONTNEED: u64 = 4;
+const MADV_REMOVE: u64 = 9;
 const MADV_FREE: u64 = 8;
 const MADV_DONTNEED_LOCKED: u64 = 24;
 const MADV_COLLAPSE: u64 = 25;
@@ -468,6 +469,10 @@ pub fn handle(call: &mut dyn Call) -> Action {
                     advice = MADV_DONTNEED;
                 }
                 let r = unsafe { sc3(nr::MADVISE, a, len, advice) };
+                if r == 0 && advice == MADV_REMOVE {
+                    // A hole punched in the file through its mapping.
+                    crate::oplog::on_madv_remove(a, len);
+                }
                 if r == 0 && matches!(advice, MADV_DONTNEED | MADV_DONTNEED_LOCKED) {
                     // Patched private copies of code are dropped: the file's bytes are back.
                     crate::insn::patch::repatch(a, len);

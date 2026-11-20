@@ -124,12 +124,6 @@ pub enum FsOp<'a> {
         ino: u64,
         what: Attr<'a>,
     },
-    MmapDirty {
-        ino: u64,
-        offset: u64,
-        len: u64,
-        data: u64,
-    },
     Fsync {
         ino: u64,
         data_only: bool,
