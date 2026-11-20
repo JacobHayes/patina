@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "patina-dst"
-version = "0.17.0"
+version = "0.18.0"
 
 [[package]]
 name = "pin-project-lite"

@@ -12,15 +12,13 @@ Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 Ki
 makes its own sandbox and needs unprivileged user namespaces; Ubuntu 24.04 and later admit them
 for a program only with an AppArmor profile, installed once as root (below).
 
-Changes in 0.17: each node is a machine ([nodes](docs/GUIDE.md#several-machines)): its own
-disk with an operation log and the self-check, machine crashes that lose what it had not
-synced (`--crash machine`, `node kill`, at its crash points, `sweep --branch` over every
-node's points), disk and memory faults of its own, pauses, its own clock (skew and steps) and
-the `cluster` preset; TCP keepalive on the virtual wire; a failed `fsync` is reported per open
-file description, as Linux does; branch-counter preemption stops exactly or fails closed
-(`pmu-late`). Run directories from 0.16 are refused. In 0.16: several machines in one run (a
-virtual network with scripted cuts, partitions, link faults and node kills); Patina makes its
-own sandbox, without bubblewrap; `--preempt points` on arm64.
+Changes in 0.18: `patina explain RUNDIR` tells a run as a short story and names the event to
+stop at, and `patina debug RUNDIR` stops a replay just before it with gdb attached ([reading a
+failing run](docs/GUIDE.md#reading-a-failing-run)); `sweep --branch-max` samples crash points
+and `--branch-pairs` crashes a second node after each first crash; `--crash
+process-at:N@NODE`; the descriptor numbers a program sees no longer depend on host timing.
+Run directories from 0.17 are refused. In 0.17: each node is a machine (its own disk, machine
+crashes, faults, pauses and clock; the `cluster` preset); TCP keepalive on the virtual wire.
 
 ## Install
 

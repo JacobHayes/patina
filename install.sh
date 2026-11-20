@@ -2,7 +2,7 @@
 # Install the patina tool from a GitHub release.
 #
 #   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
-#   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.17.0
+#   curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh -s -- --version 0.18.0
 #
 # The copy attached to a release installs that release unless given --version (the release
 # workflow writes its version into `default_version`, scripts/stamp-install); this one, the
@@ -47,7 +47,7 @@ prefix=
 profile_ok=
 while [ $# -gt 0 ]; do
   case "$1" in
-    --version) [ $# -ge 2 ] || fail "--version takes a release, such as 0.17.0"; version=$2; shift 2 ;;
+    --version) [ $# -ge 2 ] || fail "--version takes a release, such as 0.18.0"; version=$2; shift 2 ;;
     --prefix) [ $# -ge 2 ] || fail "--prefix takes a directory"; prefix=$2; shift 2 ;;
     --apparmor-profile) profile_ok=yes; shift ;;
     -h|--help) usage; exit 0 ;;
