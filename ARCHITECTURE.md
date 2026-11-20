@@ -579,7 +579,36 @@ takes one more branch and writes what it wrote before.
 
 Replay runs the program again and compares record by record
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
-while changing the host and compares (`verify.rs`).
+while changing the host and compares (`verify.rs`). A run a sweep pruned kept no logs: its
+replay is compared by digest and outcome alone.
+
+Observation (`Config::observe`, set only by `patina explain` on its replay, never in
+`run.json`) keeps the first `proto::rec::OBS_BYTES` (128) bytes of each data call that moved
+any (read, write, their `p` and `v` forms, send, receive) for the story `explain.rs` tells.
+After the call's record is written and chained, `log::observe` appends `Observe` records
+(`proto::rec::observed`: a head with the descriptor, its file type, and for a socket the
+connection and addresses, then the bytes 64 per record) with `log::append_unchained`: not in
+the hash chain and counted in `log_exempt`, so neither the digest nor the log limit sees them.
+The bytes come from the buffer the call's own record hashed, within the length the program
+gave, read through the same checked copy (`guest::read`: a page the program unmapped is a short read, never a fault), from memory
+the call has already read or written; nothing about the program's state changes and no draw
+is taken. An observation is written only while the log's mapping (`LOG_MAX`) keeps room for the
+whole log limit and 1 MiB (what a run's last trap and the supervisor write past the limit)
+besides it, so the observations never take the place of a record and a run
+that ends on its limit ends at the same record (with `--log-limit` at its maximum there is no
+room, and the story shows sizes without bytes). The runtime code that observes runs between
+two segments of program code, so no counter preemption counts its branches. When an incarnation ends
+the launcher moves the `Observe` records out of `boundary.log` into `inc-K/observe.log`
+(`log::take_observations`), outside the sandbox, so the stored log is the run's byte for byte;
+`explain` then compares the replay with the run as `replay` does (records, digest, outcome)
+and tells nothing when they differ. Proof that observation changes nothing is that comparison
+on every replay, and `tests/cli/14-explain-cases.sh` runs it over every run of three sweeps.
+`explain.rs` reads `observe.log` as untrusted: a record that does not parse is skipped, a
+length is capped at what the head says and at `OBS_BYTES`, the records read are bounded, and
+every payload byte is shown escaped; names, paths and labels from the program reach the
+terminal with control and direction-changing characters escaped. It reuses an earlier replay
+only when its marker and its own `result.json` both carry the run's digest, and refuses an
+`explain` entry that is not a directory (a link would put the replay elsewhere).
 
 A `--check` command (`check.rs`) runs after a run that ended ok, on the host and outside the
 sandbox, with the run directory as its argument; it is never part of the run. `run.json`

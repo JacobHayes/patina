@@ -92,7 +92,7 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
     Ok((cfg, program))
 }
 
-fn replay_into(
+pub fn replay_into(
     rundir: &Path,
     out: &Path,
     cfg: Config,
@@ -120,7 +120,14 @@ fn replay_into(
             r["outcome"].clone()
         }
     };
-    let diverged = match crate::log::first_run_difference(rundir, &out)? {
+    // A run a sweep pruned kept no logs: its digest, the hash of every record, is the
+    // comparison.
+    let pruned = crate::durability::check::incarnations(rundir).is_empty();
+    let first = match pruned {
+        true => None,
+        false => crate::log::first_run_difference(rundir, &out)?,
+    };
+    let diverged = match first {
         Some(d) => Some(d),
         None if own(recorded) != own(&result) || recorded["digest"] != result["digest"] => {
             Some(format!(

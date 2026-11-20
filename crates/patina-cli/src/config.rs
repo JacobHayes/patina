@@ -83,6 +83,10 @@ pub struct Config {
     /// Path and argument strings in the boundary log (`--log-paths`, `[run] log-paths`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub log_paths: bool,
+    /// `patina explain`'s replay: observations of data calls beside the log, outside the
+    /// digest (`proto::ctl::Config::observe`). Never part of a run's settings or `run.json`.
+    #[serde(skip)]
+    pub observe: bool,
     /// Size of each sandbox tmpfs (`--tmpfs-bytes`, `[run] tmpfs-bytes`).
     pub tmpfs_bytes: u64,
     /// Fault presets (`--faults`, `[faults] preset`).
@@ -219,6 +223,7 @@ impl Default for Config {
             timeout: 600,
             log_limit: DEFAULT_LOG_LIMIT_MIB,
             log_paths: false,
+            observe: false,
             tmpfs_bytes: 256 << 20,
             faults_preset: vec![],
             faults: vec![],

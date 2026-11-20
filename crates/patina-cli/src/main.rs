@@ -8,6 +8,7 @@ mod ctl;
 mod doctor;
 mod durability;
 mod events;
+mod explain;
 mod faults;
 mod host;
 mod inputs;
@@ -114,6 +115,7 @@ fn main() -> ExitCode {
         Cmd::Run => run(&a),
         Cmd::Verify => verify(&a),
         Cmd::Replay => replay(&a),
+        Cmd::Explain => explain::main(&a),
         Cmd::Log => log::main(&a).map_err(error),
         Cmd::Table => {
             table::print();

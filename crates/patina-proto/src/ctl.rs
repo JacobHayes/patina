@@ -59,6 +59,10 @@ pub struct Config {
     /// `--log-paths`: each call's path arguments (as passed, and the path the call walks) and
     /// `execve`'s arguments follow its trap record in clear (`rec::STR_PATH` ...). 0: off.
     pub log_paths: u64,
+    /// `patina explain`'s replay: each data call's first bytes, its descriptor and peer follow
+    /// its records as an observation (`rec::RecKind::Observe`), outside the digest and the log
+    /// limit. 0: off (every run but that replay).
+    pub observe: u64,
     /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
     /// NUL-padded; all zero is `/work`.
     pub work: [u8; WORK_PATH_MAX],
@@ -154,6 +158,7 @@ impl Config {
             compute_walk: 0,
             log_limit: crate::layout::LOG_MAX,
             log_paths: 0,
+            observe: 0,
             work: [0; WORK_PATH_MAX],
             nodes: 0,
         }
@@ -207,8 +212,9 @@ pub struct Ctl {
     /// be the test. A node's first process descends from the keeper, not from the driver; the
     /// supervisor clears the node's bit when it starts one (a restart's is a new tree).
     pub filter_installed: AtomicU64,
-    /// Operation-log bytes that do not count against `Config::log_limit`: the base records of
-    /// the incarnation's starting work tree, written by the supervisor before the program runs.
+    /// Log bytes that do not count against `Config::log_limit`: the base records of the
+    /// incarnation's starting work tree, written by the supervisor before the program runs, and
+    /// observations (`Config::observe`).
     pub log_exempt: AtomicU64,
     /// Address of the runtime's table of tracked shared mappings (`oplog::SharedMaps`), the
     /// same in every guest process; written by each image at its start.

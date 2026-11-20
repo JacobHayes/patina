@@ -10,6 +10,7 @@ pub type Res<T> = Result<T, String>;
 pub enum Cmd {
     Run,
     Replay,
+    Explain,
     Verify,
     Log,
     Table,
@@ -41,6 +42,12 @@ pub const COMMANDS: &[Command] = &[
         name: "replay",
         usage: "patina replay RUNDIR [--out DIR]",
         help: "run again from a run directory and compare with its log",
+    },
+    Command {
+        cmd: Cmd::Explain,
+        name: "explain",
+        usage: "patina explain RUNDIR [--from SEQ] [--to SEQ] [--last N] [--grep TEXT] [--full]",
+        help: "the story of a run: who sent what to whom, what the seed did, what the program printed, how it ended, and the event to stop at (replays it once into RUNDIR/explain to see its data)",
     },
     Command {
         cmd: Cmd::Verify,
@@ -142,6 +149,7 @@ const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
 const ALL: &[Cmd] = &[
     Cmd::Run,
     Cmd::Replay,
+    Cmd::Explain,
     Cmd::Verify,
     Cmd::Log,
     Cmd::Table,
@@ -412,8 +420,41 @@ pub const FLAGS: &[Flag] = &[
         "print group N of the report in full (its position in report.json's groups, from 1): its faults, rerun and replay commands",
         &[Cmd::Report],
     ),
-    flag("--from", "SEQ", "0", "log dump, log events: first sequence number", &[Cmd::Log]),
-    flag("--to", "SEQ", "last", "log dump, log events: last sequence number", &[Cmd::Log]),
+    flag(
+        "--from",
+        "SEQ",
+        "0",
+        "log dump, log events, explain: first sequence number",
+        &[Cmd::Log, Cmd::Explain],
+    ),
+    flag(
+        "--to",
+        "SEQ",
+        "last",
+        "log dump, log events, explain: last sequence number",
+        &[Cmd::Log, Cmd::Explain],
+    ),
+    flag(
+        "--last",
+        "N",
+        "40",
+        "explain: show the last N story lines of those selected (all with --from, --to or --full)",
+        &[Cmd::Explain],
+    ),
+    flag(
+        "--grep",
+        "TEXT[|TEXT...]",
+        "none",
+        "explain: only story lines that contain one of the texts (plain text, not a pattern), and what the seed did and how actors ended",
+        &[Cmd::Explain],
+    ),
+    flag(
+        "--full",
+        "",
+        "off",
+        "explain: every story line, nothing folded",
+        &[Cmd::Explain],
+    ),
     flag(
         "--post-crash",
         "",
@@ -474,7 +515,7 @@ pub const FLAGS: &[Flag] = &[
         "--format",
         "text|json",
         "text",
-        "output format (default from PATINA_FORMAT); json prints result.json",
+        "output format (default from PATINA_FORMAT); json prints result.json (explain: the story, one line per object)",
         ALL,
     ),
     flag(

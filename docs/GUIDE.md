@@ -2039,13 +2039,88 @@ buffer contents (read the trees: `patina log tree`, `--post-crash`). A run direc
 pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
 and fields are only ever added: a reader should ignore what it does not know.
 
+## Reading a failing run
+
+`patina explain RUNDIR` tells a run as a short story: who sent what to whom, what reached the
+disk, what the seed did (faults, partitions, crashes, node events), what the program printed
+and how it ended, with each line's event number and virtual time since the run began. It ends
+with the event worth stopping at. The acklog run of seed 3 above:
+
+<!-- transcript explain
+dir: /tmp/acklog
+exact-only: the run of seed 3 above
+-->
+```text
+$ patina explain patina-out/run-3
+violation (always): acked-records-kept: 23 acknowledged, 0 stored
+seed 3: 281 events, 31 story lines; showing all 10
+data: the first 128 bytes of each read, write, send and receive, from a replay identical to the run (patina-out/run-3/explain)
+
+      44  +      0.040 ms  main  disk: create /work/data.log, create /work/acks.log, fsync the directory /work
+      51  +      0.047 ms  main  assert acked-records-kept
+      52  +      0.048 ms  main  disk: write /work/data.log (8 bytes at 0), write /work/acks.log (8 bytes at 0), fsync /work/acks.log
+     121  +      0.114 ms        ... the line above, 23 times in all, until here
+     124  +      0.117 ms  main  disk: write /work/data.log (8 bytes at 184)
+     124  +      0.117 ms        at the crash /work/data.log had 24 writes not followed by an fsync (24 writes, 0 fsyncs in all)
+     124  +      0.117 ms        CRASH machine at crash point 97; lost: 1 changed (/work/data.log)
+     124  +      0.117 ms        the machine starts again (incarnation 1)
+     172  +  14761.100 ms  main  disk: fsync the directory /work
+     204  +  14761.127 ms  main  assert acked-records-kept
+stop at: event 204 (main assert acked-records-kept); its record: patina log events patina-out/run-3 --from 204 --to 204
+```
+
+A record's write, its acknowledgement's write and an fsync are one disk line, 23 times: the
+fsync is of `acks.log`, never of `data.log`, so at the crash every record was still unsynced.
+
+The boundary log holds no buffer contents, only their hashes. To show what a program sent and
+printed, `explain` replays the run once (into `RUNDIR/explain`) with observation on: the
+runtime keeps the first 128 bytes of each read, write, send and receive in
+`RUNDIR/explain/inc-K/observe.log`, beside the log and outside it, so the replay's log, digest
+and outcome must equal the run's, and are checked as `patina replay` checks them. A replay that
+differs ends `nondeterministic` with the first difference, and there is no story. The payload
+heads stay in the run directory: delete `RUNDIR/explain` before sharing one whose program
+handles secrets. A second `explain` of the run reuses that replay. Bytes are shown as text,
+escaped (`\n`, `\"`, `\xNN` for the rest), at most 64 characters with `...` after.
+
+Who: the node's name in a run with nodes (`driver` for the driver); on one machine `main` and
+`t1`, `t2`, ... for the threads in the order they started. With several threads on one
+machine, each turn of a thread is a line: its calls, the threads and processes it started,
+which threads it woke and how the turn ended (switched out by the seed, waiting for a lock, for
+I/O, sleeping, ending). A message is `-> PEER "bytes"`; between processes over a pipe or a
+socket pair, the peer is found when one read returns what one write sent.
+
+What is left out and folded: calls with nothing to show, a run of disk changes of one actor
+merged into one line until it repeats, a turn of only calls in which nothing started or ended
+(when the story is longer than its window), and repeats: up to 12 lines that come back at
+least 3 times in a row, numbers aside, are kept once with `... N times in all, until here`.
+Faults, partitions, crashes and node events before the window are listed first, folded by kind.
+By default the last 40 lines are shown; `--last N`, `--from SEQ`/`--to SEQ` (event numbers),
+`--grep TEXT[|TEXT...]` (lines that contain one of the texts, with what the seed did and how
+actors ended) and `--full` (every line, nothing folded) choose others. `--format json` prints
+one JSON object per line: the outcome, then each line (`kind`, `who`, `text`, `seq`, `t` in
+virtual nanoseconds, and `to` for a message whose receiver is known), then the stop line.
+
+The stop event: for a failed assertion, the assertion. Otherwise the actor that failed (the
+node that ended the run, or the thread whose exit or signal ended it) and, before its failure's
+output, the last message that reached it or the last error or fault it met; else that output.
+`patina log events RUNDIR --from N --to N` prints its record. Of a run that passed the story is
+told the same way, without a stop. Under `--preempt points`, a run whose threads exchanged
+nothing through the log before the failure and were preempted in computation says so: a race in
+the program's own memory is not in the log, and the story cannot show its cause;
+`patina log events RUNDIR --types preempt,call` lists where the threads switched.
+
+`explain` works on a run directory a sweep kept (cut logs and compressed trees included) and on
+one it pruned (compared by its digest), and, like `replay`, refuses a run of another Patina
+build.
+
 ## Replay and verify
 
 `patina replay RUNDIR` runs the program again with the run's settings, into `RUNDIR/replay`,
 and compares every boundary record. It refuses a program whose SHA-256 changed, and a run made
 by another Patina build (another version, or another binary of one): install that version
 (`install.sh --version VERSION`) or run the seed again. `identical` means the bug is
-reproduced exactly; a difference ends `nondeterministic` and names the first differing
+reproduced exactly (of a run a sweep pruned, which kept no logs, the digest, a hash of every
+record, is compared); a difference ends `nondeterministic` and names the first differing
 record, which is a Patina bug unless the host's files changed: the program is the file the
 command names (a `#!` script itself), and what it runs from the host (a script's interpreter,
 shared libraries, anything under `/usr`) is not recorded. A run notes what each `--mount`

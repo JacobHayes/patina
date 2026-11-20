@@ -875,6 +875,7 @@ pub fn run_incarnation(
     cfg.compute_charge_ns = proto::compute::CHARGE_NS;
     cfg.log_limit = (c.log_limit << 20).saturating_sub(start.log_used);
     cfg.log_paths = c.log_paths as u64;
+    cfg.observe = c.observe as u64;
     if c.pause_points {
         cfg.sched |= proto::ctl::SCHED_PAUSE_POINTS;
     }
@@ -1288,6 +1289,9 @@ pub fn run_incarnation(
     let log_len = ctl.log_len.load(Relaxed);
     log.set_len(log_len)
         .map_err(|e| format!("truncate boundary.log: {e}"))?;
+    if c.observe {
+        crate::log::take_observations(&inc)?;
+    }
     let mut refused: Vec<String> = ctl
         .denied_nrs()
         .map(|n| proto::table::name(n).to_string())

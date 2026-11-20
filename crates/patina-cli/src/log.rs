@@ -92,6 +92,49 @@ pub fn cut(inc: &Path, keep: u64) -> Res<()> {
     )
 }
 
+/// The observations of `patina explain`'s replay (`RecKind::Observe`), moved out of the
+/// incarnation's `boundary.log` into `observe.log`: what stays is the log the run would have
+/// written without them, record for record, which the replay comparison then checks.
+pub fn take_observations(inc: &Path) -> Res<()> {
+    use std::io::{BufReader, BufWriter, Read, Write};
+    let log = inc.join("boundary.log");
+    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let kept = inc.join("boundary.log.kept");
+    let obs = inc.join(OBSERVE_LOG);
+    let r = BufReader::with_capacity(
+        1 << 20,
+        std::fs::File::open(&log).map_err(|e| err(&log, e))?,
+    );
+    let mut k = BufWriter::with_capacity(
+        1 << 20,
+        std::fs::File::create(&kept).map_err(|e| err(&kept, e))?,
+    );
+    let mut o = BufWriter::new(std::fs::File::create(&obs).map_err(|e| err(&obs, e))?);
+    // Never more than the log's mapping holds, whatever length the run's control block says.
+    let mut r = r.take(proto::layout::LOG_MAX);
+    let mut b = [0u8; REC_SIZE];
+    loop {
+        match r.read_exact(&mut b) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(err(&log, e)),
+        }
+        let to = if Rec::from_bytes(&b).kind == RecKind::Observe as u8 {
+            &mut o
+        } else {
+            &mut k
+        };
+        to.write_all(&b).map_err(|e| err(&kept, e))?;
+    }
+    k.flush().map_err(|e| err(&kept, e))?;
+    o.flush().map_err(|e| err(&obs, e))?;
+    drop(k);
+    std::fs::rename(&kept, &log).map_err(|e| err(&log, e))
+}
+
+/// An incarnation's observations (`take_observations`).
+pub const OBSERVE_LOG: &str = "observe.log";
+
 /// The name of an emulated instruction (an `InsnEmulation` record's `nr`).
 pub fn insn_name(nr: u32) -> String {
     match nr {

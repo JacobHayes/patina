@@ -68,6 +68,18 @@ pub(super) fn idx_of(fd: i64) -> Option<usize> {
     (i < VINO_CAP).then_some(i)
 }
 
+/// The connection of the wire socket open on `fd`, for an observation (`log::observe`): its
+/// id, both ends' address kinds and `lport << 16 | rport`. Reads the table only.
+pub fn observed(fd: i64) -> Option<[u64; 4]> {
+    let s = sock(wire_idx(fd)?);
+    Some([
+        s.conn as u64,
+        s.laddr as u64,
+        s.raddr as u64,
+        (s.lport as u64) << 16 | s.rport as u64,
+    ])
+}
+
 /// Index of the wire socket open on `fd`, if it is one. Allocates no virtual inode number
 /// (a wire socket has had one since it was made), so asking about any other descriptor
 /// (a unix socket at each close) leaves the run as it was.

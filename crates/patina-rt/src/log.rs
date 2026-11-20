@@ -238,11 +238,22 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     // Only the registers the call reads (`proto::table::nargs`): the others are zero here, in
     // the record and for the hashes (a pointer the call ignores names nothing).
     let args = &proto::table::nargs::used_args(nr, &call.guest_args());
-    let ts = crate::state::thread();
     let c = ctl();
     if c.config.log_paths != 0 && row.group != proto::table::Group::Sdk {
-        return trap_paths(row, call, ret, args);
+        trap_paths(row, call, ret, args);
+    } else {
+        trap_plain(row, call, ret, args);
     }
+    if c.config.observe != 0 {
+        observe(row, nr, args, ret);
+    }
+}
+
+/// `trap` without `--log-paths`: the record, and an SDK call's strings.
+fn trap_plain(row: &Row, call: &dyn crate::trap::Call, ret: i64, args: &[u64; 6]) {
+    let nr = call.nr();
+    let ts = crate::state::thread();
+    let c = ctl();
     // Inputs are read only when the kernel did not report the pointer bad.
     let in_hash = if row.group == proto::table::Group::Sdk {
         crate::sys::sdk::take_hash()
@@ -267,6 +278,138 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     if row.group == proto::table::Group::Sdk {
         crate::sys::sdk::log_strings();
     }
+}
+
+/// `patina explain`'s observation (`Config::observe`) of a data call that moved bytes: after
+/// its records, the first `OBS_BYTES` it moved, its descriptor, the descriptor's file type and,
+/// for a socket on the wire, its connection and ends (`Rec::observed`). Read through the guest
+/// copy from the buffer the call's hash just read (fault-safe, bounded; an unreadable buffer
+/// keeps no bytes), so it reads nothing the record did not; a `fstat` of the descriptor and a
+/// look at the wire's table change nothing the program can see. Appended without entering the
+/// hash chain, exempt from the log limit, and only while the window has room for every record
+/// the limit still allows: an observation never changes which record a run ends at.
+#[inline(never)]
+fn observe(row: &Row, nr: u64, args: &[u64; 6], ret: i64) {
+    use proto::rec::{OBS_BYTES, OBS_RECS};
+    if ret <= 0
+        || !matches!(
+            nr,
+            nr::READ
+                | nr::WRITE
+                | nr::PREAD64
+                | nr::PWRITE64
+                | nr::READV
+                | nr::WRITEV
+                | nr::PREADV
+                | nr::PWRITEV
+                | nr::PREADV2
+                | nr::PWRITEV2
+                | nr::SENDTO
+                | nr::SENDMSG
+                | nr::RECVFROM
+                | nr::RECVMSG
+        )
+    {
+        return;
+    }
+    let c = ctl();
+    // One observation, and slack for what a run's last trap and the supervisor write past the
+    // limit (`Str` records of the call that reaches it, the end records).
+    let room = OBS_RECS as u64 * REC_SIZE as u64 + OBS_SLACK;
+    if c.log_len.load(Relaxed) + room + c.config.log_limit > proto::layout::LOG_MAX {
+        return;
+    }
+    // The moved bytes: argument 1 of every data call, its input (a write) or output (a read).
+    let Some(b) = row.ins.iter().chain(row.outs).find(|b| {
+        b.arg == 1 && matches!(b.len, Len::Ret { .. } | Len::IovRet { .. } | Len::MsgIovRet)
+    }) else {
+        return;
+    };
+    let mut buf = [0u8; OBS_BYTES];
+    let want = (ret as u64).min(OBS_BYTES as u64) as usize;
+    let kept = head(b, args, want, &mut buf);
+    let fd = args[0] as i64;
+    let ftype = crate::sys::fs::fstat_raw(fd).map_or(0, |st| (st.mode() >> 12) as u64 & 0xf);
+    let wire = crate::sys::inet::observed(fd).unwrap_or_default();
+    let ts = crate::state::thread();
+    let head = [args[0], ftype, wire[0], wire[1], wire[2], wire[3]];
+    for r in Rec::observed(
+        ts.seq,
+        c.vclock_ns.load(Relaxed),
+        ts.slot as u16,
+        ts.pid as i64,
+        head,
+        &buf[..kept],
+        ret as usize > kept,
+    ) {
+        append_unchained(&r);
+    }
+}
+
+/// Up to `want` bytes of the buffer `b` describes into `out`, as the hash reads them; the bytes
+/// copied (0 when the buffer cannot be read).
+fn head(b: &Out, args: &[u64; 6], want: usize, out: &mut [u8]) -> usize {
+    let p = args[b.arg as usize];
+    let mut n = 0usize;
+    let mut take = |base: u64, len: u64| -> bool {
+        let k = (len as usize).min(want - n);
+        if k == 0 {
+            return true;
+        }
+        if crate::guest::read(base, &mut out[n..n + k]).is_err() {
+            return false;
+        }
+        n += k;
+        n < want
+    };
+    match b.len {
+        // Not past the buffer the program gave (a datagram `recvfrom` with `MSG_TRUNC`
+        // returns more than it holds).
+        Len::Ret { max } => {
+            take(p, (want as u64).min(args[max as usize]));
+        }
+        Len::IovRet { .. } | Len::MsgIovRet => {
+            let (iov, cnt) = match b.len {
+                Len::IovRet { cnt } => (p, args[cnt as usize]),
+                _ => match (
+                    crate::guest::get::<u64>(p + 16),
+                    crate::guest::get::<u64>(p + 24),
+                ) {
+                    (Ok(iov), Ok(cnt)) => (iov, cnt),
+                    _ => return 0,
+                },
+            };
+            for i in 0..cnt.min(1024) {
+                let Ok([base, len]) = crate::guest::get::<[u64; 2]>(iov + i * 16) else {
+                    break;
+                };
+                if !take(base, len) {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    }
+    n
+}
+
+/// Room an observation leaves in the log's mapping beyond the log limit and itself.
+const OBS_SLACK: u64 = 1 << 20;
+
+/// Append a record outside the hash chain and the log limit (an observation).
+fn append_unchained(rec: &Rec) {
+    let c = ctl();
+    let off = c.log_len.load(Relaxed);
+    ensure(off + REC_SIZE as u64);
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            rec.as_bytes().as_ptr(),
+            (crate::state::log_base() + off) as *mut u8,
+            REC_SIZE,
+        );
+    }
+    c.log_len.store(off + REC_SIZE as u64, Relaxed);
+    c.log_exempt.fetch_add(REC_SIZE as u64, Relaxed);
 }
 
 /// `trap` with `--log-paths`: the record, then each C string the call read (as the hash read

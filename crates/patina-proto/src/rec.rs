@@ -28,7 +28,22 @@ pub enum RecKind {
     /// (zero past the end). A string of N bytes is N / `STR_BYTES` records, rounded up (one
     /// for an empty string), one after another under the same turn.
     Str = 10,
+    /// An observation of a data call (`Config::observe`, set only for `patina explain`'s
+    /// replay), right after its call's records: never chained into the digest, not counted
+    /// against the log limit, and moved out of `boundary.log` into `observe.log` by the
+    /// launcher when the incarnation ends (`Rec::observed`).
+    Observe = 11,
 }
+
+/// Bytes of a data call an observation keeps: its first `OBS_BYTES`.
+pub const OBS_BYTES: usize = 128;
+/// `class` of an observation's first record; `STR_CUT` with it when the call moved more bytes
+/// than were kept.
+pub const OBS_HEAD: u8 = 1;
+/// `class` of an observation's byte records, `STR_BYTES` each.
+pub const OBS_DATA: u8 = 2;
+/// Records one observation takes at most.
+pub const OBS_RECS: usize = 1 + OBS_BYTES / STR_BYTES;
 
 /// Name bytes one `Name` record carries.
 pub const NAME_BYTES: usize = 64;
@@ -151,6 +166,44 @@ impl Rec {
     pub fn str_bytes(&self) -> [u8; STR_BYTES] {
         unpack(self)
     }
+
+    /// The records of an observation (`RecKind::Observe`) of the call stamped `seq`,
+    /// `vclock_ns`, `slot`: a head record (`OBS_HEAD`, with `STR_CUT` when `cut`; `nr` the bytes
+    /// kept, `ret` the process id, `args` what `head` holds: the descriptor, its file type and
+    /// for a socket on the wire its connection and ends), then the bytes, `STR_BYTES` per
+    /// record (`OBS_DATA`, zero past the end).
+    pub fn observed(
+        seq: u64,
+        vclock_ns: u64,
+        slot: u16,
+        pid: i64,
+        head: [u64; 6],
+        bytes: &[u8],
+        cut: bool,
+    ) -> impl Iterator<Item = Rec> + '_ {
+        let bytes = &bytes[..bytes.len().min(OBS_BYTES)];
+        let n = bytes.len().div_ceil(STR_BYTES);
+        let rec = move |class: u8, args, out_hash, in_hash| Rec {
+            seq,
+            vclock_ns,
+            slot,
+            kind: RecKind::Observe as u8,
+            class,
+            nr: bytes.len() as u32,
+            args,
+            ret: pid,
+            out_hash,
+            in_hash,
+        };
+        let first = rec(OBS_HEAD | if cut { STR_CUT } else { 0 }, head, 0, 0);
+        core::iter::once(first).chain((0..n).map(move |i| {
+            let part = &bytes[i * STR_BYTES..((i + 1) * STR_BYTES).min(bytes.len())];
+            let mut b = [0u8; STR_BYTES];
+            b[..part.len()].copy_from_slice(part);
+            let (args, out_hash, in_hash) = pack(&b);
+            rec(OBS_DATA, args, out_hash, in_hash)
+        }))
+    }
 }
 
 impl RecKind {
@@ -167,6 +220,7 @@ impl RecKind {
             Preempt,
             Name,
             Str,
+            Observe,
         ]
         .into_iter()
         .find(|k| *k as u8 == v)
@@ -183,6 +237,7 @@ impl RecKind {
             RecKind::Preempt => "preempt",
             RecKind::Name => "name",
             RecKind::Str => "str",
+            RecKind::Observe => "observe",
         }
     }
 }

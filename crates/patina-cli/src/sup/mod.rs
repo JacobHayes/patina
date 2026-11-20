@@ -237,16 +237,23 @@ impl Sup {
     /// The run's logs reached `--log-limit`: what they hold, and which records filled them.
     fn log_limit_verdict(&mut self) -> Verdict {
         let c = self.ctl;
-        let len = c.log_len.load(Relaxed);
-        self.ensure_log(len);
-        let n = (len / REC_SIZE as u64) as usize;
-        let recs = unsafe { std::slice::from_raw_parts(self.log_base, n * REC_SIZE) };
-        // Counted by (kind, nr), named once.
+        let all = c.log_len.load(Relaxed);
+        self.ensure_log(all);
+        let recs = unsafe {
+            std::slice::from_raw_parts(self.log_base, (all as usize / REC_SIZE) * REC_SIZE)
+        };
+        // Counted by (kind, nr), named once; an observation (`patina explain`'s replay) is not
+        // the run's.
         let mut kinds: std::collections::HashMap<(u8, u32), u64> = Default::default();
+        let mut n = 0usize;
         for r in recs.as_chunks::<REC_SIZE>().0 {
             let r = Rec::from_bytes(r);
-            *kinds.entry((r.kind, r.nr)).or_default() += 1;
+            if r.kind != RecKind::Observe as u8 {
+                *kinds.entry((r.kind, r.nr)).or_default() += 1;
+                n += 1;
+            }
         }
+        let len = (n * REC_SIZE) as u64;
         let mut named: std::collections::BTreeMap<String, u64> = Default::default();
         for ((kind, nr), v) in kinds {
             let r = Rec {
