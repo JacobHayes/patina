@@ -1608,7 +1608,7 @@ form; `paths`). `patina log events` merges each node's operations with the drive
 
 `patina sweep --branch --crash machine[@NODE,...]` runs each seed once with crashes on and
 never firing, counting every named node's points, then once per point of each node, crashing
-that node's machine there (`machine-at:P@NODE`, in `seed-S@NODE:P`); each child reruns the
+that node's machine there (`machine-at:P@NODE`, in `seed-S@NODE.P`); each child reruns the
 whole run. `ack2.py` (in `tests/guests/nodes`) is a store of two nodes: a forwards each put to
 b and acknowledges it once b answers; with `early`, b answers before its `fsync`:
 
@@ -1628,11 +1628,11 @@ nodes: driver, a, b in 31 runs; net: 0 cuts, 0 heals, 11 held over them
 node downs: 30 machine crash; 30 restarts
 
 failure exit: FAIL: acknowledged put lost on b; exit 1
-  6 of 31 runs   first: seed 1@b:1   replayed: identical
+  6 of 31 runs   first: seed 1@b.1   replayed: identical
   faults in every failing run: crash      in none: -
   nodes: a down in 0, b down in 6 (lost on its disk in 6; crash points 1, 2, 3, 8, 9, 12)
-  rerun:  patina run --seed 1 --config /tmp/ack2/patina-out/sweep/seed-1@b:1/run.json -- python3 /guest/ack2.py driver 3
-  replay: patina replay /tmp/ack2/patina-out/sweep/seed-1@b:1
+  rerun:  patina run --seed 1 --config /tmp/ack2/patina-out/sweep/seed-1@b.1/run.json -- python3 /guest/ack2.py driver 3
+  replay: patina replay /tmp/ack2/patina-out/sweep/seed-1@b.1
 ```
 
 A group's `nodes:` line says, for its failing runs, in how many each node went down, in how many

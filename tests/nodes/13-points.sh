@@ -50,6 +50,9 @@ sw() { rm -rf "${o:?}/sw-$1"; st=0; timeout 300 "$PATINA" sweep --seeds $s --bra
 sw early fail
 [ "$st" = 1 ] || die "branch sweep of early: exit $st: $(tail -5 "$o/sw-early.txt")"
 grep -q '^  nodes: a down in 0, b down in [1-9]' "$o/sw-early.txt" || die "group's nodes line: $(cat "$o/sw-early.txt")"
+# Every name the sweep wrote is one a CI artifact upload takes (no ", :, <, >, |, *, ?).
+bad=$(find "$o/sw-early" -name '*[":<>|*?]*' | head -3)
+[ -z "$bad" ] || die "names an artifact upload refuses: $bad"
 python3 -I - "$o/sw-early" <<'PY' || die "branch sweep of early"
 import json, os, sys
 d = sys.argv[1]

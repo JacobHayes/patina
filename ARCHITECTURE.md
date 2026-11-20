@@ -474,7 +474,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
   point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
   (`crash_points`, `downs[].point`) and `sweep --branch` reads to make one child per point of
-  each node (`seed-S@NODE:P`, `machine-at:P@NODE`). After the run the launcher writes each
+  each node (`seed-S@NODE.P`, `machine-at:P@NODE`). After the run the launcher writes each
   crashed disk's materialised tree to `node/NAME/inc-K/post-crash/`, checks it is the base of
   the next disk, and counts what it lost against the disk's live tree (`downs[].lost`, the
   `crash` event). A node's points count only its own disk's changes and syncs, so its N-th

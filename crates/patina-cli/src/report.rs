@@ -57,7 +57,8 @@ impl Run {
 
 /// A run's place in a `--branch` sweep: a base (`n` 0, `seed-N`), or the child crashing at
 /// crash point `n` (`seed-N@P`), of node `node`'s first boot in a run with nodes
-/// (`seed-N@NODE:P`; `node` empty: the one machine). Ordered by point, then node.
+/// (`seed-N@NODE.P`; `node` empty: the one machine). Ordered by point, then node. A label
+/// is a portable file name: no `:` (GitHub's artifact upload refuses one, as Windows does).
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
     pub n: u64,
@@ -72,18 +73,19 @@ impl Point {
         }
     }
 
-    /// `P` or `NODE:P`, as a directory name and a run's name have it after `@`.
+    /// `P` or `NODE.P`, as a directory name and a run's name have it after `@` (a node's name
+    /// has no `.`).
     pub fn label(&self) -> String {
         if self.node.is_empty() {
             self.n.to_string()
         } else {
-            format!("{}:{}", self.node, self.n)
+            format!("{}.{}", self.node, self.n)
         }
     }
 
-    /// A label read back (`P`, `NODE:P` with P > 0).
+    /// A label read back (`P`, `NODE.P` with P > 0).
     pub fn parse(s: &str) -> Option<Point> {
-        let (node, n) = s.rsplit_once(':').unwrap_or(("", s));
+        let (node, n) = s.rsplit_once('.').unwrap_or(("", s));
         let n = n.parse::<u64>().ok().filter(|n| *n > 0)?;
         (node.is_empty() || proto::node::valid_name(node.as_bytes())).then(|| Point::child(n, node))
     }
@@ -134,7 +136,7 @@ pub fn base_points(r: &Value, run: &Value) -> Vec<(String, u64)> {
     }
 }
 
-/// How a run is named: `seed 3`, or `seed 3@120` (`3@b:120` on node b) for a branch child.
+/// How a run is named: `seed 3`, or `seed 3@120` (`3@b.120` on node b) for a branch child.
 pub fn run_name(seed: u64, point: Option<&Point>) -> String {
     match point {
         Some(p) if p.n > 0 => format!("{seed}@{}", p.label()),
@@ -2173,6 +2175,23 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_child_label_is_a_portable_name_and_reads_back() {
+        // What GitHub's artifact upload refuses in a path, and what Windows file systems do.
+        let bad = |s: &str| s.contains(['"', ':', '<', '>', '|', '*', '?', '\\', '\r', '\n']);
+        for p in [
+            Point::child(12, ""),
+            Point::child(12, "b"),
+            Point::child(3, "db-1"),
+        ] {
+            let l = p.label();
+            assert!(!bad(&l), "{l}");
+            assert_eq!(Point::parse(&l), Some(p));
+        }
+        assert_eq!(Point::parse("0"), None);
+        assert_eq!(Point::parse("b.x"), None);
+    }
 
     #[test]
     fn a_star_matches_any_text_and_the_rest_matches_whole() {
