@@ -84,6 +84,15 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
 - **Budgets are fixed by cutting.** Over budget, shrink a script or move it to `area`. Never
   raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
+  `tests/run.py` scales budgets and the ceiling by a calibration factor in [1x, 3x] measured
+  at the start of a tier (1x on an unloaded runner or a faster host; printed in the summary);
+  land's soft ceiling is not scaled.
+- **A planted bug is searched for, not counted.** How many seeds of a fixed range find a bug
+  moves with the build, the host's interpreters and the seeds, so no test asserts a find rate
+  or a mid-range count over seeds. Search seeds until the first finding within a generous
+  bound (`find_bug` in `tests/nodes/lib.inc`, `--max-findings 1`), then assert facts about that
+  run (its class, an identical replay); or assert at least one of N where a miss is
+  astronomically unlikely; and the correct version is clean on every seed it runs.
 - Every script declares `#@ tier=TIER[,TIER] budget=SECONDS slots=N` (and `arch=MACHINE` when
   it runs on one architecture only) and must fail on a planted break: show it red, then green.
 - **No wall clock, fixed sleeps or pinned seeds in tests** (`tests/lint.py`): assert virtual

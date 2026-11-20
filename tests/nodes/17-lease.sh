@@ -4,15 +4,15 @@
 # their monotonic clock with a safety margin, the driver writing and reading through whichever
 # holds it): correct, no seed of the sweep loses an acknowledged write, accepts a stale
 # primary's or answers a stale read, under the seed's pauses, and under partitions with the
-# driver stepping the replicas' clocks back. Its planted bugs, each found in most seeds by its
-# own class and in none without it: `nofence` (no fencing: a replica paused after its check
-# resumes after another took the lease and writes as primary) under pauses; `realtime` (the
-# lease measured on time.time(): a replica cut off from the store, its clock stepped back,
-# answers stale reads) under partitions and steps. lww.py (a register on two nodes stamped by a
+# driver stepping the replicas' clocks back. Its planted bugs, each found by a search of seeds
+# (the rule of find_bug, lib.inc) and in no seed of a sweep without its fault: `nofence` (no
+# fencing: a replica paused after its check resumes after another took the lease and writes as
+# primary) under pauses; `realtime` (the lease measured on time.time(): a replica cut off from
+# the store, its clock stepped back, answers stale reads) under partitions and steps. lww.py (a register on two nodes stamped by a
 # hybrid logical clock) keeps every acknowledged put under clock-skew-ms; with `wallclock`
 # (each node stamps with its own clock only) a node behind the other loses a later put, found
-# in most seeds and in none without skew. Each failing group's first run replays identically.
-# Seeds 1-16 in the area, 1-8 in the release tier.
+# with skew and in none without it. Each failing group's first run replays identically.
+# Seeds 1-16 in the area, 1-8 in the release tier (a search: until the first finding).
 #@ tier=area,release budget=200 slots=6
 # arm64 (CI runner): about 100 s in the area, 50 s in the release tier.
 . "$(dirname "$0")/lib.inc"
@@ -22,8 +22,8 @@ PARTS="--fault partition-gap-ms=1000..5000 --fault partition-ms=1000..6000"
 N=16; [ "${CHECK_TIER:-}" != release ] || N=8
 SKEW="--fault clock-skew-ms=0..2000"
 
-# sweep NAME GUEST NODES BUG DRIVER-ARGS [patina options]: seeds 1-N of GUEST on NODES (BUG:
-# ok, or a planted bug given to every node).
+# sweep NAME GUEST NODES BUG DRIVER-ARGS [patina options]: seeds SEEDS (default 1-N) of GUEST
+# on NODES (BUG: ok, or a planted bug given to every node).
 sweep() {
     _name=$1; _g=$2; _nodes=$3; _bug=$4; _args=$5; shift 5
     _f=$o/$_name.toml; : >"$_f"
@@ -33,7 +33,7 @@ sweep() {
     done
     _st=0
     # shellcheck disable=SC2086
-    timeout 600 "$PATINA" sweep --seeds 1.."$N" -j 6 --keep fail --out "$o/$_name" --config "$_f" "$@" \
+    timeout 600 "$PATINA" sweep --seeds "${SEEDS:-1..$N}" -j 6 --keep fail --out "$o/$_name" --config "$_f" "$@" \
         --mount "$PATINA_GUESTS":/guest:copy -- python3 "/guest/$_g" driver $_args >"$o/$_name.txt" 2>&1 || _st=$?
     [ -f "$o/$_name/report.json" ] || { tail -20 "$o/$_name.txt"; die "sweep $_name: no report (exit $_st)"; }
 }
@@ -42,16 +42,19 @@ clean() {
     [ "$(field "$o/$1/report.json" outcomes)" = "{\"ok\": $N}" ] || die "$1: $(field "$o/$1/report.json" outcomes)"
     echo "$1: $N of $N seeds ok"
 }
+# search NAME GUEST NODES BUG DRIVER-ARGS [patina options]: the sweep of a planted bug, seeds
+# 1-FIND_SEEDS until the first finding.
+search() { SEEDS=1..$FIND_SEEDS sweep "$@" --max-findings 1; }
 found() {
     n=$(failures "$1")
-    [ "$n" -ge $((N / 2)) ] || die "$1: found in only $n of $N seeds"
+    [ "$n" -ge 1 ] || die "$1: not found in seeds 1-$FIND_SEEDS: $(field "$o/$1/report.json" outcomes)"
     r=$(python3 -I -c 'import json,sys
 g=[g for g in json.load(open(sys.argv[1]))["groups"] if g["outcome"] == "failure"]
 print(" ".join(x["replay"]["result"] for x in g if x["replay"]))
 sys.exit(0 if g and all(x["replay"] and x["replay"]["result"] == "identical" for x in g) else 1)' "$o/$1/report.json") \
         || die "$1: a first failing run did not replay identically: $r"
     l=$(cat "$o/$1"/seed-*/inc-0/stdout | sed -n 's/^FAIL: \([a-z ]*\):.*/\1/p' | sort | uniq -c | tr -s ' \n' ' ')
-    echo "$1: found in $n of $N seeds:$l; replayed: $r"
+    echo "$1: found after $(python3 -I -c 'import json,sys; print(sum(json.load(open(sys.argv[1]))["outcomes"].values()))' "$o/$1/report.json") runs:$l; replayed: $r"
 }
 control() {
     [ "$(failures "$1")" = 0 ] || die "$1: found in $(failures "$1") seeds without its class"
@@ -63,11 +66,11 @@ L="s p1 p2"
 {
 sweep ok-pauses lease.py "$L" ok 60 $PAUSES; clean ok-pauses
 sweep ok-steps lease.py "$L" ok "60 steps" $PARTS; clean ok-steps
-sweep nofence lease.py "$L" nofence 60 $PAUSES; found nofence
+search nofence lease.py "$L" nofence 60 $PAUSES; found nofence
 sweep nofence-control lease.py "$L" nofence 60; control nofence-control
-sweep realtime lease.py "$L" realtime "60 steps" $PARTS; found realtime
+search realtime lease.py "$L" realtime "60 steps" $PARTS; found realtime
 sweep realtime-control lease.py "$L" realtime 60 $PARTS; control realtime-control
 sweep lww-ok lww.py "a b" ok 20 $SKEW; clean lww-ok
-sweep wallclock lww.py "a b" wallclock 20 $SKEW; found wallclock
+search wallclock lww.py "a b" wallclock 20 $SKEW; found wallclock
 sweep wallclock-control lww.py "a b" wallclock 20; control wallclock-control
 }

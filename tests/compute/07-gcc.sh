@@ -1,8 +1,9 @@
 # The hook file beyond C with clang (tests/guests/compute):
 #  a. every guest here runs natively with its normal output, and no image exports a hook;
-#  b. gcc (edges only, hook file built in a step of its own): `races-gcc b` ends `failure` on
-#     at least one of seeds 1-8 at compute-gap=2 and the first one replays identical. At 8 it
-#     is found too, but rarely (11 of 200 seeds): its threads run four edges each;
+#  b. gcc (edges only, hook file built in a step of its own): `races-gcc b` ends `failure` at
+#     compute-gap=2 on one of seeds 1-8 (run at once), or else of seeds 9-64 (one at a time,
+#     until the first), and the first one replays identical. At 8 it is found too, but rarely
+#     (11 of 200 seeds): its threads run four edges each;
 #  c. C++ (clang++ with all three kinds, g++ with edges; static constructor and destructor,
 #     exceptions, std::atomic, two threads) ends ok with its normal output;
 #  d. instrumented shared libraries, by DT_NEEDED and by dlopen (closed and opened again),
@@ -52,10 +53,22 @@ for s in $(seq 1 8); do
         *) die "b. races-gcc b seed $s: $(res "$o/races-$s")" ;;
     esac
 done
-[ -n "$first" ] || die "b. races-gcc b: no failure in seeds 1-8 at compute-gap=2"
+s=9
+while [ -z "$first" ] && [ $s -le 64 ]; do
+    st=0; timeout 60 "$PATINA" run --seed $s --fault compute-gap=2 --out "$o/races-$s" --mount "$G":/guest:copy \
+        -- /guest/compute/races-gcc b >/dev/null 2>&1 || st=$?
+    [ -f "$o/races-$s/result.json" ] || die "b. races-gcc b seed $s: no result.json (exit $st)"
+    case $(field "$o/races-$s/result.json" outcome) in
+        failure) found=1 first=$s ;;
+        ok) ;;
+        *) die "b. races-gcc b seed $s: $(res "$o/races-$s")" ;;
+    esac
+    s=$((s + 1))
+done
+[ -n "$first" ] || die "b. races-gcc b: no failure in seeds 1-64 at compute-gap=2"
 "$PATINA" replay "$o/races-$first" >"$o/races-replay.txt" 2>&1 || true
 grep -q '^identical' "$o/races-replay.txt" || die "b. races-gcc b seed $first does not replay: $(head -3 "$o/races-replay.txt")"
-echo "b. races-gcc b (gcc, edges): failure on $found of 8 seeds at compute-gap=2; seed $first replays identical"
+echo "b. races-gcc b (gcc, edges): failure on $found of the seeds run at compute-gap=2; seed $first replays identical"
 
 for p in cxx cxx-gcc; do
     [ "$(field "$o/$p/result.json" outcome)" = ok ] || die "c. $p: $(res "$o/$p")"

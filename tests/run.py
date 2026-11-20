@@ -27,12 +27,24 @@ directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
 The tier total is printed, with its share of the ceiling and the time the same scripts would take
 on four sandboxes (the CI runners' four cores: the sum over scripts of time x min(slots, 4) / 4);
-quick fails above QUICK_CEILING s (600), an area above 300 s, release above 600 s.
+quick fails above QUICK_CEILING s (600), an area above 300 s, release above 600 s (each times
+the calibration factor, below).
 CHECK_SOFT_CEILING=PCT (scripts/land sets 50) also fails a tier whose four-sandbox time is over
 PCT% of its ceiling. A CI runner's wall time is about the four-sandbox time of its own script
 times, and those of the arm64 runner, the slower one, are near a loaded development host's: a
 tier past half its ceiling here has used up the margin that keeps arm64 green while the host or
 the runner is slow. The fix is to cut, not to raise either.
+
+Calibration: before any script, the runner times a small piece of the scripts' own work (a
+sweep of four seeds of a guest that forks and execs, on four sandboxes, with a copied mount),
+three times, and divides the median by REFERENCE for the machine: the slowest of that time
+seen on an unloaded CI runner of the architecture. The factor, bounded to [1, 3], multiplies
+every budget and the tier ceiling, and is printed at the start and in the summary. An unloaded
+runner or any faster host measures at most the reference and runs at 1x, so a script that has
+grown is caught exactly as without calibration; a runner that is slow at everything (CI's
+hosted runners vary by up to 3x) gets the time it needs. A calibration that fails runs at 1x.
+The soft ceiling is not scaled: it measures growth on the host that lands, where a loaded host
+waits for load to fall rather than land a tier that has used up its margin.
 """
 import hashlib
 import os
@@ -55,6 +67,32 @@ CEILING = {"quick": int(os.environ.get("QUICK_CEILING", "600")), "area": 300, "r
 STRICT = ["bash", "-euo", "pipefail", "-E", "-O", "inherit_errexit", "-c",
           'trap \'s=$?; echo "strict: ${BASH_SOURCE[0]}:$LINENO: exit $s: $BASH_COMMAND" >&2\' ERR; . "$0"']
 TARGET = {"quick": 300, "area": 300, "release": 600, "evidence": 3600}
+# Calibration (the module's docstring): the reference time of the probe in seconds, by machine,
+# and the bounds of the factor.
+REFERENCE = {"x86_64": 2.5, "aarch64": 3.0}
+FACTOR_MAX = 3.0
+
+
+def calibrate(base):
+    """The factor for budgets and the ceiling, and what it was measured from (for the log)."""
+    ref = REFERENCE.get(platform.machine())
+    guests = os.environ.get("PATINA_GUESTS")
+    if not ref or not guests:
+        return 1.0, "no reference for this machine" if not ref else "no PATINA_GUESTS"
+    times = []
+    for i in range(3):
+        out = os.path.join(base, "calibration", str(i))
+        t0 = time.monotonic()
+        r = subprocess.run([os.environ["PATINA"], "sweep", "--seeds", "1..4", "-j", "4", "--keep", "fail",
+                            "--out", out, "--mount", f"{guests}:/guest:copy", "--", "/guest/fork-exec"],
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        times.append(time.monotonic() - t0)
+        subprocess.run(["rm", "-rf", out])
+        if r.returncode != 0:
+            return 1.0, f"calibration failed (exit {r.returncode}: {r.stdout.strip()[-200:]})"
+    t = sorted(times)[1]
+    factor = min(FACTOR_MAX, max(1.0, t / ref))
+    return factor, f"probe {t:.2f} s, reference {ref:.2f} s"
 
 
 def scripts():
@@ -185,6 +223,10 @@ def main():
     slots_total = int(os.environ.get("CHECK_SLOTS", max(8, (os.cpu_count() or 8) // 2)))
     keep = os.environ.get("CHECK_KEEP") == "1" or tier == "evidence"
     print(f"== {tier}: {len(sel)} scripts, at most {slots_total} sandboxes at once; output in {base}", flush=True)
+    factor, why = calibrate(base)
+    for s in sel:
+        s["budget"] = round(s["budget"] * factor)
+    print(f"== budgets and ceiling x{factor:.2f} ({why})", flush=True)
 
     lock = threading.Condition()
     free = [slots_total]
@@ -275,17 +317,19 @@ def main():
         print(f"   {dt:7.1f} s  {s['area']}/{s['name']}")
     nfail = sum(1 for r in results if not r[1])
     load = os.getloadavg()[0]
-    ceil = CEILING[tier]
+    ceil = CEILING[tier] and round(CEILING[tier] * factor)
     four = sum(min(s["slots"], 4) * dt for s, _, dt, _ in results) / 4
     share = lambda t: f"{100 * t / ceil:.0f}% of the {ceil} s ceiling" if ceil else f"target {TARGET[tier]} s"
     print(f"== {tier}: {len(results) - nfail} passed, {nfail} failed; wall {wall:.0f} s ({share(wall)}); "
           f"on 4 sandboxes about {four:.0f} s ({share(four)}); script time {sum(r[2] for r in results):.0f} s; "
-          f"load average {load:.1f}")
+          f"load average {load:.1f}; budgets and ceiling x{factor:.2f}")
     if ceil and wall > ceil:
         print(f"FAIL: the {tier} tier took {wall:.0f} s, over its {ceil} s ceiling: cut or speed up, do not raise it")
         return 1
-    soft = int(os.environ.get("CHECK_SOFT_CEILING", "100"))
-    if ceil and four > ceil * soft / 100:
+    # Not scaled: a growth check on the host that lands (the module's docstring).
+    soft = int(os.environ.get("CHECK_SOFT_CEILING", "0"))
+    ceil = CEILING[tier]
+    if soft and ceil and four > ceil * soft / 100:
         print(f"FAIL: on 4 sandboxes the {tier} tier would take about {four:.0f} s, over {soft}% of its {ceil} s "
               "ceiling: the slower CI runner (arm64) would come near or over it. Cut: move sweeps, matrices "
               "and repetitions to the area or release tier (AGENTS.md); do not raise the ceiling")

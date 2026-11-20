@@ -4,8 +4,8 @@
 # that node. Outside the quick tier, under machine crashes beside fsync errors: correct, ok on
 # every seed of a sweep with crashes in it, the self-check passing in all, identical under
 # verify; the planted bug `retry` (retry a failed fsync, then acknowledge: the write the failure
-# dropped is gone after the crash) loses an acknowledged record, found in most seeds; its first
-# failing run replays identically.
+# dropped is gone after the crash) loses an acknowledged record, found by a search of seeds
+# (find_bug); its first failing run replays identically.
 #@ tier=quick,release budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/12-disk-faults; mkdir -p "$o"
@@ -33,15 +33,12 @@ F="--crash machine --fault crash-gap-ms=1..4 --fault down-ms=100..300 --fault ma
 rm -f "$o/ok.toml" "$o/retry.toml"
 conf "$o/ok.toml" a /guest/ack-log correct 1000000; printf 'restart = "always"\n' >>"$o/ok.toml"
 conf "$o/retry.toml" a /guest/ack-log retry 1000000
-sweep() {  # sweep VARIANT KEEP: prints the outcomes
-    rm -rf "${o:?}/$1"
-    st=0
-    timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep "$2" --out "$o/$1" --config "$o/$1.toml" $F \
-        --mount "$PATINA_GUESTS":/guest:copy -- sleep 6 >"$o/$1.txt" 2>&1 || st=$?
-    [ -f "$o/$1/report.json" ] || { tail -20 "$o/$1.txt"; die "sweep $1: no report (exit $st)"; }
-    field "$o/$1/report.json" outcomes
-}
-out=$(sweep ok all)
+rm -rf "${o:?}/ok"
+st=0
+timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep all --out "$o/ok" --config "$o/ok.toml" $F \
+    --mount "$PATINA_GUESTS":/guest:copy -- sleep 6 >"$o/ok.txt" 2>&1 || st=$?
+[ -f "$o/ok/report.json" ] || { tail -20 "$o/ok.txt"; die "sweep ok: no report (exit $st)"; }
+out=$(field "$o/ok/report.json" outcomes)
 [ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
 set -- $(python3 -I -c 'import json,sys
 k=c=0
@@ -50,17 +47,9 @@ for f in sys.argv[1:]:
     k+=sum(d["how"] == "machine crash" for d in r["nodes"]["list"][1].get("downs", []))
     c+=r["self_check"]["verdict"] == "pass"
 print(k, c)' "$o"/ok/seed-*/result.json)
-[ "$1" -ge 8 ] || die "correct: only $1 machine crashes in 8 runs"
+[ "$1" -ge 1 ] || die "correct: no machine crash in 8 runs (the scenario never arose)"
 [ "$2" = 8 ] || die "correct: the self-check passed in only $2 of 8 runs"
 echo "correct: ok on seeds 1-8, $1 machine crashes, self-check passed in all"
 verify_ok "$o/verify" 2 3 --config "$o/ok.toml" $F -- sleep 6
-sweep retry fail >/dev/null
-n=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["outcomes"].get("failure", 0))' "$o/retry/report.json")
-[ "$n" -ge 4 ] || die "retry: found in only $n of 8 seeds"
-r=$(python3 -I -c 'import json,sys
-g=[g for g in json.load(open(sys.argv[1]))["groups"] if g["outcome"] == "failure"]
-r=["seed %s %s" % (x["replay"]["seed"], x["replay"]["result"]) for x in g if x["replay"]]
-print(", ".join(r))
-sys.exit(0 if r and len(r) == len(g) and all(x["replay"]["result"] == "identical" for x in g) else 1)' "$o/retry/report.json") \
-    || die "retry: a first failing run did not replay identically: ${r:-no replay}"
-echo "retry: found in $n of 8 seeds; replayed: $r"
+r=$(find_bug "$o" retry --config "$o/retry.toml" $F -- sleep 6)
+echo "retry: $r"

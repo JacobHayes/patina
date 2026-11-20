@@ -38,10 +38,16 @@ for p, want in [("1000", "1" * 20), ("0", "0" * 20)]:
         die(f"point:point-a={p}: {bits(r)} {r.site('point-a')}")
 print("point:point-a=1000 fires 20 of 20, =0 none")
 
-held = {s: run(f"02/coin-{s}", s, C, "coin").site("coin")["held"] for s in range(1, 9)}
-if not any(held.values()) or all(held.values()):
-    die(f"coin over seeds 1-8: held {held}")
-print(f"sometimes(coin) held on seeds {[s for s, h in held.items() if h]} of 1-8")
+# A coin: held on some seeds, not on others. Seeds from 1 until both are seen (at most 64: a
+# search, not a rate).
+held = {}
+for s in range(1, 65):
+    held[s] = run(f"02/coin-{s}", s, C, "coin").site("coin")["held"]
+    if any(held.values()) and not all(held.values()):
+        break
+else:
+    die(f"coin over seeds 1-64: held on {[s for s, h in held.items() if h]}")
+print(f"sometimes(coin) held on seeds {[s for s, h in held.items() if h]} of 1-{s}")
 
 r = run("02/fork", 1, EXTRA, "fork")
 for label in ["forked-child", "exec-child", "parent-done"]:

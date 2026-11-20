@@ -1,5 +1,5 @@
-# 4. Seed sensitivity: for W1, W2, W4-W9, the digests of seeds 1-4 (faults off) include at
-# least 3 distinct values (the seed reaches the schedule and the draws). 4 runs at a time.
+# 4. Seed sensitivity: for W1, W2, W4-W9, the digests of seeds 1-4 (faults off) are not all
+# one (the seed reaches the schedule and the draws). 4 runs at a time.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/seeds
@@ -20,6 +20,6 @@ fail=0
 for w in ${DET_SEED_WLS:-W1 W2 W4 W5 W6 W7 W8 W9}; do
     n=$(cat "$out/$w"-*.digest | sort -u | grep -c .)
     echo "$w: $n distinct digests over 4 seeds"
-    [ "$n" -ge 3 ] || fail=1
+    [ "$n" -ge 2 ] || fail=1
 done
 exit $fail

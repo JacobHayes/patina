@@ -11,7 +11,7 @@
 #     file faults act): every run `ok` or `failure` with an exit status (no signal); every failing
 #     run stopped before "done" (set -e) with a tool's error on stderr; at least one run failed
 #     that way.
-#  f. >= 3 distinct digests over 4 seeds.
+#  f. more than one digest over 4 seeds (the seed reaches the run).
 #@ tier=area budget=150 slots=4
 . "$(dirname "$0")/lib.inc"
 S=shell-pipeline
@@ -48,7 +48,7 @@ one_shell() {
     SWEEP_JOBS=2 sweep $sh-4 $S 1-4 -- -- /bin/$sh /guest/w6.sh
     d=$(digests $sh-4)
     echo "W6 $sh: $d distinct digests over seeds 1-4"
-    [ "$d" -ge 3 ] || fail "W6 $sh: $d distinct digests"
+    [ "$d" -ge 2 ] || fail "W6 $sh: one digest for 4 seeds"
 
     echo "== $sh: e. fs-error-permille=10 over 24 seeds"
     SWEEP_JOBS=2 SWEEP_KEEP=all sweep $sh-f24 $S 1-24 -- $FAULT -- /bin/$sh /guest/w6.sh

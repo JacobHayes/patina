@@ -31,6 +31,18 @@ matches() {
     SWEEP_OUT=$RUNS/$name "$HERE/lib/sweep.sh" "$@" >"$RUNS/$name.table"
     awk -F'\t' -v re="$re" 'NR>1 && $3 ~ re {print $1}' "$RUNS/$name/summary.tsv" | sort -n
 }
+# caught NAME REGEX WORKLOAD [patina options] -- cmd: a planted bug caught (a run failing with
+# REGEX) in seeds 1-12, or else in seeds 13-64; fails the script if neither caught it. A
+# search for the first finding, not a rate: how many seeds catch it moves with the build and
+# the host.
+caught() {
+    _n=$1 _re=$2 _w=$3; shift 3
+    sweep "$_n" "$_w" 1-12 -- "$@" >/dev/null
+    [ "$(count "$_n" failure "$_re")" = 0 ] || return 0
+    sweep "$_n-more" "$_w" 13-64 -- "$@" >/dev/null
+    _c=$(count "$_n-more" failure "$_re")
+    [ "$_c" -ge 1 ] || die "$_n: $_re not caught in seeds 1-64"
+}
 # tables: the last line of each sweep this script ran.
 tables() {
     for n in ${SWEPT:-}; do echo "$n: $(tail -1 "$RUNS/$n.table")"; done

@@ -59,3 +59,32 @@ conf() {
     for a in "$@"; do printf '%s"%s"' "$sep" "$a" >>"$f"; sep=", "; done
     printf ']\n' >>"$f"
 }
+
+# Finding a planted bug: a search, not a rate. How often a bug shows over a fixed range of
+# seeds depends on the build, the host's interpreters and libraries, and the seeds, so a
+# threshold on that count fails without any defect. A planted bug is instead searched for over
+# seeds 1-FIND_SEEDS, stopping at the first finding; then facts about that run are asserted.
+FIND_SEEDS=64
+# find_bug DIR VARIANT [sweep options] -- CMD...: a sweep of seeds 1-FIND_SEEDS in DIR/VARIANT
+# that stops launching runs at the first finding (`--max-findings 1`); asserts a failure was
+# found and that every failing group's first run replayed identically (the sweep's own replay);
+# prints the seeds it needed and the replays. The failing runs are kept.
+find_bug() {
+    _d=$1/$2; shift 2
+    rm -rf "${_d:?}"
+    _st=0
+    timeout 900 "$PATINA" sweep --seeds 1..$FIND_SEEDS -j 4 --max-findings 1 --keep fail --out "$_d" \
+        --mount "$PATINA_GUESTS":/guest:copy "$@" >"$_d.txt" 2>&1 || _st=$?
+    [ -f "$_d/report.json" ] || { tail -20 "$_d.txt"; die "sweep $_d: no report (exit $_st)"; }
+    python3 -I -c 'import json,sys
+r=json.load(open(sys.argv[1]))
+n=r["outcomes"].get("failure", 0)
+runs=sum(r["outcomes"].values())
+g=[g for g in r["groups"] if g["outcome"] == "failure"]
+p=["seed %s %s" % (x["replay"]["seed"], x["replay"]["result"]) for x in g if x["replay"]]
+if not n:
+    sys.exit("FAIL: not found in seeds 1-%s: %s" % (sys.argv[2], json.dumps(r["outcomes"])))
+if not p or len(p) != len(g) or any(x["replay"]["result"] != "identical" for x in g):
+    sys.exit("FAIL: a first failing run did not replay identically: %s" % (", ".join(p) or "no replay"))
+print("found after %d runs of seeds 1-%s; replayed: %s" % (runs, sys.argv[2], ", ".join(p)))' "$_d/report.json" "$FIND_SEEDS"
+}
