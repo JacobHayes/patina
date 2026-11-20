@@ -106,6 +106,7 @@ impl Broker {
     ) -> Result<Broker, String> {
         let fd = ours.as_raw_fd();
         let mut cpu = Some(cpu);
+        let mut token = 0u64;
         let thread = std::thread::Builder::new()
             .name("patina-plans".into())
             .spawn(move || loop {
@@ -128,7 +129,14 @@ impl Broker {
                     reply(fd, &w, None);
                     continue;
                 };
-                busy.store(1, std::sync::atomic::Ordering::Relaxed);
+                // How long the asking thread's wait counts as progress (`sup::stall::Planning`).
+                token += 1;
+                let size = file.metadata().map_or(0, |m| m.len());
+                let budget = crate::rewrite::cache::planning_budget(size).as_secs();
+                busy.store(
+                    crate::sup::stall::planning_word(token, budget),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 let answer = planner.answer(&file, off, &path);
                 busy.store(0, std::sync::atomic::Ordering::Relaxed);
                 match answer {

@@ -19,7 +19,11 @@
 //!   report). Files that get no plan have a `.none` entry with the reason. A miss holds the
 //!   entry's `.lock` (`flock`) while it makes the entry: another process that misses the same
 //!   file waits for it and then finds the entry, so concurrent runs (a sweep's) make each plan
-//!   once. A plan is made on up to the planner's threads (`par`), the same bytes on any number.
+//!   once. The wait is bounded (`wait_bound`): a holder that is stopped, stuck or far slower
+//!   than planning that file should be is named on stderr with the lock, and the waiter makes
+//!   the plan itself, outside the cache (`bypassed`): the same bytes, written nowhere, so the
+//!   entry has one writer. A plan is made on up to the planner's threads (`par`), the same
+//!   bytes on any number.
 //! - The SHA-256 of a file is kept under its identity (device, inode, size, change time) in
 //!   `$XDG_CACHE_HOME/patina/sha256/`, as for programs (`config::sha256_file`).
 //! - Size: at most `CACHE_MAX` bytes of plans; writing one that passes it removes the least
@@ -65,7 +69,8 @@ pub struct ImageReport {
     /// The plan's counts (`rewrite --plan`'s report): bytes of text, proven, extent and dark
     /// code, sites found and patched per class.
     pub counts: Vec<(String, u64)>,
-    /// `hit`, `made`, or `rebuilt` (an entry was found changed and made again).
+    /// `hit`, `made`, `rebuilt` (an entry was found changed and made again), or `bypassed`
+    /// (made here, outside the cache: another process held the entry past `wait_bound`).
     pub cache: &'static str,
     /// Wall time of making the plan (0 for a hit).
     pub ms: u64,
@@ -263,34 +268,144 @@ pub fn dir() -> PathBuf {
     crate::launch::cache_dir().join("plans")
 }
 
-/// An exclusive `flock` on the file `p` (created), held until it is dropped; `None` if it
-/// cannot be had (no cache directory). `wait` is called once before blocking on another
-/// holder. A lock file is only removed by a holder of it (`unlink_held`), so a lock had on a
-/// file that is no longer `p` is let go and `p` locked again.
-fn lock(p: &Path, wait: impl FnOnce()) -> Option<File> {
+/// Making a plan is assumed to take at most a second per this many bytes of the file (on one
+/// thread, Chromium's 167 MB took 13 s before plans were made in parallel: docs/EVIDENCE.md).
+const PLAN_RATE: u64 = 2 << 20;
+
+/// How long a process waits for another that holds a file's entry (`size` bytes) before it
+/// makes the plan itself, outside the cache: five seconds and a second per `PLAN_RATE` bytes,
+/// several times what planning that file takes, and long enough for processes started together
+/// to meet at the lock. Waiting longer could only be a holder that is stopped, stuck or
+/// starved; ending sooner costs only the time of a plan made twice.
+pub fn wait_bound(size: u64) -> Duration {
+    Duration::from_secs(5 + size / PLAN_RATE)
+}
+
+/// How long a guest thread's wait for the plan of a file of `size` bytes counts as progress
+/// for the stall watchdog: `wait_bound`, then making the plan here at a quarter of
+/// `PLAN_RATE`, and 30 s. Past it the watchdog's backstop applies again.
+pub fn planning_budget(size: u64) -> Duration {
+    wait_bound(size) + Duration::from_secs(30 + 4 * size / PLAN_RATE)
+}
+
+/// What `lock` got.
+enum Lock {
+    Held(File),
+    /// No lock can be had (no cache directory).
+    None,
+    /// Another process held it past the bound.
+    Busy,
+}
+
+/// An exclusive `flock` on the file `p` (created), held until it is dropped. `wait` is called
+/// once before blocking on another holder; after `bound` the wait ends (`Lock::Busy`), and
+/// stderr has named the holder and the lock (`name`: the file planned). A lock file is only
+/// removed by a holder of it (`unlink_held`), so a lock had on a file that is no longer `p` is
+/// let go and `p` locked again.
+fn lock(p: &Path, bound: Duration, name: &str, wait: impl FnOnce()) -> Lock {
+    let t0 = Instant::now();
     let mut wait = Some(wait);
+    let mut said = false;
     loop {
-        let f = File::options()
+        let Ok(f) = File::options()
             .create(true)
             .truncate(false)
             .write(true)
             .open(p)
-            .ok()?;
-        let fd = f.as_raw_fd();
-        if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            if let Some(w) = wait.take() {
-                w();
+        else {
+            return Lock::None;
+        };
+        if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            if still(&f, p) {
+                return Lock::Held(f);
             }
-            while unsafe { libc::flock(fd, libc::LOCK_EX) } != 0 {
+            continue;
+        }
+        if let Some(w) = wait.take() {
+            w();
+        }
+        // Blocked on a thread of its own, so that the wait can end: a stopped holder keeps its
+        // lock. Given up on, the thread lets the lock go as soon as it has it.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let blocked = std::thread::Builder::new()
+            .name("patina-plan-lock".into())
+            .spawn(move || loop {
+                if unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                    let _ = tx.send(Some(f));
+                    return;
+                }
                 if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
-                    return None;
+                    let _ = tx.send(None);
+                    return;
+                }
+            });
+        if blocked.is_err() {
+            return Lock::None;
+        }
+        let got = loop {
+            let at = t0.elapsed();
+            if at >= bound {
+                break Err(());
+            }
+            let note = Notice::after();
+            let until = if !said && note < bound { note } else { bound };
+            match rx.recv_timeout(until.saturating_sub(at)) {
+                Ok(r) => break Ok(r),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break Ok(None),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if !said && t0.elapsed() >= note {
+                        said = true;
+                        eprintln!(
+                            "patina: --preempt points: waiting for the plan of {name}: {} holds {} \
+                             (after {} s in all, {name} is planned here, without the cache)",
+                            holder(p),
+                            p.display(),
+                            bound.as_secs()
+                        );
+                    }
                 }
             }
-        }
-        if still(&f, p) {
-            return Some(f);
+        };
+        match got {
+            Ok(Some(f)) if still(&f, p) => return Lock::Held(f),
+            Ok(Some(_)) => {}
+            Ok(None) => return Lock::None,
+            Err(()) => {
+                eprintln!(
+                    "patina: --preempt points: {} has held {} for {} s; planning {name} here, \
+                     without the cache",
+                    holder(p),
+                    p.display(),
+                    t0.elapsed().as_secs()
+                );
+                return Lock::Busy;
+            }
         }
     }
+}
+
+/// Who holds the `flock` on `p`, as `/proc/locks` says: "process PID", or "another process".
+fn holder(p: &Path) -> String {
+    let pid = (|| {
+        let m = fs::metadata(p).ok()?;
+        let d = m.dev();
+        let (major, minor) = (
+            ((d >> 32) & 0xffff_f000) | ((d >> 8) & 0xfff),
+            ((d >> 12) & 0xffff_ff00) | (d & 0xff),
+        );
+        let id = format!("{major:02x}:{minor:02x}:{}", m.ino());
+        // `N: FLOCK ADVISORY WRITE PID MAJ:MIN:INODE 0 EOF`; a waiter's line has `->` after `N:`.
+        fs::read_to_string("/proc/locks")
+            .ok()?
+            .lines()
+            .find_map(|l| {
+                let f: Vec<&str> = l.split_whitespace().collect();
+                (f.get(1) == Some(&"FLOCK") && f.get(5) == Some(&id.as_str()))
+                    .then(|| f[4].parse::<i32>().ok())
+                    .flatten()
+            })
+    })();
+    pid.map_or("another process".into(), |p| format!("process {p}"))
 }
 
 /// Is the open file `f` still the file at `p`?
@@ -525,8 +640,9 @@ impl Planner {
         let _ = fs::write(&tmp, line).and_then(|_| fs::rename(&tmp, base.with_extension("ok")));
     }
 
-    /// Make, verify and keep the plan of `elf`; the plan file, opened read-only.
-    fn make(&self, base: &Path, elf: &Elf) -> Result<(File, u128), (u64, String)> {
+    /// Make, verify and (with `keep`, under the entry's lock) keep the plan of `elf`; the plan
+    /// file, opened read-only.
+    fn make(&self, base: &Path, elf: &Elf, keep: bool) -> Result<(File, u128), (u64, String)> {
         let t0 = Instant::now();
         let (plan, bytes, bad) =
             super::plan_verified(elf, &self.build, &self.par).map_err(|e| (NONE_REFUSED, e))?;
@@ -543,6 +659,10 @@ impl Planner {
             ));
         }
         drop(plan);
+        if !keep {
+            let file = tempfile_with(&bytes).map_err(|e| (NONE_REFUSED, e))?;
+            return Ok((file, t0.elapsed().as_millis()));
+        }
         let tmp = tmp_name(base, "plan");
         let (written, digest) = self.par.join(
             || {
@@ -677,10 +797,24 @@ impl Planner {
         // A miss: made here while this process holds the entry's lock, unless another process
         // that held it first made it meanwhile.
         let mut _held = None;
+        let mut keep = true;
         let busy = BusyGuard::new(&self.notice);
         if found.is_none() {
             let _ = fs::create_dir_all(&self.dir);
-            _held = lock(&base.with_extension("lock"), || busy.begin(path, &self.dir));
+            let name = Path::new(path)
+                .file_name()
+                .map_or(path.into(), |n| n.to_string_lossy());
+            match lock(
+                &base.with_extension("lock"),
+                wait_bound(m.size()),
+                &name,
+                || busy.begin(path, &self.dir),
+            ) {
+                Lock::Held(f) => _held = Some(f),
+                Lock::None => {}
+                // Made here and kept nowhere: the entry is its holder's to write.
+                Lock::Busy => keep = false,
+            }
             if let Some(e) = known(&report) {
                 return e;
             }
@@ -692,7 +826,9 @@ impl Planner {
         let (file, hdr, counts) = match found {
             Some(c) => c,
             None => {
-                if base.with_extension("plan").exists() {
+                if !keep {
+                    report.cache = "bypassed";
+                } else if base.with_extension("plan").exists() {
                     report.cache = "rebuilt";
                 } else {
                     report.cache = "made";
@@ -712,7 +848,7 @@ impl Planner {
                     Ok(e) => e,
                     Err(e) => return Ok(none(NONE_NOT_ELF, e, report)),
                 };
-                match self.make(&base, &elf) {
+                match self.make(&base, &elf, keep) {
                     Ok((file, ms)) => {
                         report.ms = ms as u64;
                         let len = file.metadata().map_err(|e| e.to_string())?.len();
@@ -721,9 +857,11 @@ impl Planner {
                         (file, hdr, counts)
                     }
                     Err((why, text)) => {
-                        let _ = fs::create_dir_all(&self.dir).and_then(|_| {
-                            fs::write(base.with_extension("none"), format!("{why} {text}\n"))
-                        });
+                        if keep {
+                            let _ = fs::create_dir_all(&self.dir).and_then(|_| {
+                                fs::write(base.with_extension("none"), format!("{why} {text}\n"))
+                            });
+                        }
                         return Ok(none(why, text, report));
                     }
                 }

@@ -15,7 +15,9 @@
 //!   (verdict `stall`), naming the thread. A thread computing alone is left to run.
 //! - **Backstop.** A thread that neither makes progress nor runs (blocked in the kernel
 //!   outside any row) ends the run `internal` after ten times `stall_ms` of wall time. A
-//!   thread waiting for a load-time plan (`--preempt points`) is making progress.
+//!   thread waiting for a load-time plan (`--preempt points`) is making progress for the
+//!   budget the broker gives that plan (`Planning`); past it the backstop applies, and its
+//!   verdict says what the thread was waiting for.
 
 use crate::outcome::Verdict;
 
@@ -138,6 +140,49 @@ impl Watchdog {
     }
 }
 
+/// The word the plan broker writes to `ctl.compute.planning` while it makes a plan: the
+/// request's token (high half) and its budget in seconds (low half, at least 1, so nonzero).
+pub fn planning_word(token: u64, budget_s: u64) -> u64 {
+    (token << 32) | budget_s.clamp(1, u32::MAX as u64)
+}
+
+/// The plan the turn holder waits for, as the supervisor sees it: since when (its own clock,
+/// from the first poll that saw the request) and for how long that counts as progress.
+#[derive(Default)]
+pub struct Planning {
+    word: u64,
+    since: u64,
+}
+
+impl Planning {
+    /// Does the plan being made (`word` from `ctl.compute.planning`, 0 for none) count as
+    /// progress at `now`?
+    pub fn counts(&mut self, word: u64, now: u64) -> bool {
+        if word != self.word {
+            self.word = word;
+            self.since = now;
+        }
+        word != 0 && now.saturating_sub(self.since) < self.budget_ns()
+    }
+
+    fn budget_ns(&self) -> u64 {
+        (self.word & 0xffff_ffff) * 1_000_000_000
+    }
+
+    /// For a verdict while a plan is past its budget: what the thread was waiting for.
+    pub fn overdue(&self, now: u64) -> Option<String> {
+        let waited = now.saturating_sub(self.since);
+        (self.word != 0 && waited >= self.budget_ns()).then(|| {
+            format!(
+                "; it was waiting for a load-time plan (--preempt points) for {} s, past that \
+                 plan's bound of {} s (the launcher's stderr names the file)",
+                waited / 1_000_000_000,
+                self.budget_ns() / 1_000_000_000
+            )
+        })
+    }
+}
+
 fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
     let name = std::fs::read_to_string(format!("/proc/{}/comm", h.tid))
         .map(|s| s.trim().to_string())
@@ -212,4 +257,29 @@ fn thread_cpu_ns(tid: i32) -> Option<u64> {
 /// Send the turn holder a spin probe.
 pub fn probe(pid: i32, tid: i32) {
     unsafe { libc::syscall(libc::SYS_tgkill, pid, tid, libc::SIGTRAP) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const S: u64 = 1_000_000_000;
+
+    #[test]
+    fn planning_counts_for_its_budget_only() {
+        let mut p = Planning::default();
+        assert!(!p.counts(0, 0));
+        let a = planning_word(1, 5);
+        assert!(p.counts(a, 10 * S));
+        assert!(p.counts(a, 14 * S));
+        assert!(p.overdue(14 * S).is_none());
+        assert!(!p.counts(a, 15 * S));
+        assert!(p.overdue(15 * S).is_some());
+        // The next request (another token, the same budget) has a budget of its own.
+        let b = planning_word(2, 5);
+        assert!(p.counts(b, 16 * S));
+        assert!(p.counts(b, 20 * S));
+        assert!(!p.counts(0, 21 * S));
+        assert!(p.overdue(21 * S).is_none());
+    }
 }

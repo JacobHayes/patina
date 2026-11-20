@@ -307,8 +307,9 @@ pub struct ComputeStats {
     /// without a switch; points drawn ahead that stayed with their thread (no trap: `stays`);
     /// changes that put back part of a plan's patched text and left the rest (`restored`).
     pub plan: [AtomicU64; PLAN_FIELDS],
-    /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: the
-    /// stall watchdog counts that wall time as progress (it costs no virtual time).
+    /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: a
+    /// token for the request and the seconds of that wall time the stall watchdog counts as
+    /// progress (it costs no virtual time; the supervisor's `stall::Planning`).
     pub planning: AtomicU64,
 }
 

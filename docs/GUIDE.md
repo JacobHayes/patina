@@ -2651,7 +2651,7 @@ share of its sites patched and of its text left dark, and anything left without 
 `unplanned`, `cpuid`, `interior`; the walks' counts, below) and one entry per file the program
 mapped executable (`images`: `path`, `sha256`, `status`, and for a planned file `sites`,
 `patches`, `covered_pct`, `back_edges_covered_pct`, `dark_pct`, `cpuid_patched`,
-`cpuid_unpatched`, `cache`, `rewrite_ms`).
+`cpuid_unpatched`, `cache`: `hit`, `made`, `rebuilt` or `bypassed`, and `rewrite_ms`).
 
 **Walks.** A window between two plain memory accesses with no branch, call or atomic between
 them (a counter loaded, changed and stored) holds no point. So under `--preempt points` a
@@ -2705,7 +2705,10 @@ The first run pays for making them, on up to 8 threads (the plan is the same byt
 number): 0.2 s for ripgrep, 0.4 s for CPython and its libraries, 3 s for clang, 5 s for
 headless Chromium (49 files); later runs read them (docs/EVIDENCE.md). A sweep makes them once,
 before its runs start, and runs or sweeps that meet one file at once make it once between
-them. When planning takes longer than a second, one line on stderr says so:
+them. A run waits for another process's plan of a file at most 5 s and a second per 2 MiB of
+the file: past that, stderr names the process and its lock file, and the run makes the plan
+itself without keeping it (`bypassed`; the same plan, so the same digest). When planning takes
+longer than a second, one line on stderr says so:
 
 <!-- no-run planning-notice: printed while a cold run plans headless Chromium; the directory is the host's -->
 ```text

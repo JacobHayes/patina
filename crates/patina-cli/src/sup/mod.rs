@@ -87,7 +87,7 @@ mod sdk;
 mod shadows;
 pub mod shm;
 pub mod signal;
-mod stall;
+pub(crate) mod stall;
 #[allow(dead_code)]
 pub mod time;
 pub mod udp;
@@ -1063,6 +1063,7 @@ impl Sup {
             self.ctl.seq.load(Relaxed),
             now_ns(),
         );
+        let mut planning = stall::Planning::default();
         loop {
             if self.ctl.sup_word.load(SeqCst) == 0 {
                 futex_wait_ms(&self.ctl.sup_word as *const _ as *const u32, 0, slice);
@@ -1083,8 +1084,9 @@ impl Sup {
                     });
                     let running = self.running;
                     let sched = &self.sched;
-                    // A plan being made for the holder: wall time only, progress here.
-                    if self.ctl.compute.planning.load(Relaxed) != 0 {
+                    // A plan being made for the holder: wall time only, progress here for
+                    // the budget the broker gave it.
+                    if planning.counts(self.ctl.compute.planning.load(Relaxed), now_ns()) {
                         dog.progress(self.ctl.seq.load(Relaxed), now_ns());
                     }
                     match dog.poll(self.ctl.seq.load(Relaxed), now_ns(), holder, || {
@@ -1102,6 +1104,9 @@ impl Sup {
                         stall::Poll::End(mut v) => {
                             if v.class == "stall" {
                                 v.detail += &stall::spin_host(self.ctl);
+                            }
+                            if let Some(w) = planning.overdue(now_ns()) {
+                                v.detail += &w;
                             }
                             self.finish(v)
                         }

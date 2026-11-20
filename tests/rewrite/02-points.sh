@@ -20,7 +20,11 @@
 #     it, with the first run's digest;
 #  f. a plan is made once across processes: two cold runs of one program that both find its
 #     entry held wait for it, and one of them makes the plan, the other uses it; a cold sweep
-#     makes its program's plans before its runs start, so none of its runs makes one.
+#     makes its program's plans before its runs start, so none of its runs makes one;
+#  g. a held entry whose holder is stopped (it keeps its flock) is waited for at most its bound
+#     (5 s for rw-c), not to the run's timeout: the run names the holder's pid and the lock on
+#     stderr, makes the plan itself outside the cache (`bypassed`, the entry left unwritten) and
+#     has a.'s digest. About 6 s on the arm64 runner, nearly all of it the bound.
 #@ tier=quick,release budget=60 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
@@ -153,3 +157,31 @@ runs=$(find "$o/sweep" -name result.json -path '*seed-*' -printf '%h\n' | sort)
 # shellcheck disable=SC2086
 [ "$(made $runs)" = 0 ] || die "f. runs of a cold sweep made $(made $runs) plans"
 echo "f. a plan made once: two cold runs, one makes it; a cold sweep's runs make none"
+
+# g. A helper takes rw-c's entry lock in a fresh cache and stops itself holding it (continued,
+#    it exits).
+held=$o/cache-g
+mkdir -p "$held/patina/plans"
+lockf=$held/patina/plans/$base.lock
+python3 -I -c 'import fcntl,os,signal,sys
+f=open(sys.argv[1],"w"); fcntl.flock(f, fcntl.LOCK_EX); os.kill(os.getpid(), signal.SIGSTOP)' "$lockf" &
+holder=$!
+for _ in $(seq 600); do
+    state=$(ps -o state= -p "$holder")
+    [ "$state" != T ] || break
+    sleep 0.1
+done
+[ "$state" = T ] || die "g. the helper did not stop holding the lock"
+st=0
+XDG_CACHE_HOME=$held "$PATINA" run --preempt points --seed 1 --out "$o/held" -- "$G/rw-c" >/dev/null 2>"$o/held.err" || st=$?
+kill -CONT "$holder"
+wait "$holder"
+[ "$(field "$o/held/result.json" outcome)" = ok ] || die "g. a run behind a stopped holder (exit $st): $(res "$o/held"); $(cat "$o/held.err")"
+[ "$(cache "$o/held")" = bypassed ] || die "g. a run behind a stopped holder: rw-c's plan $(cache "$o/held"), not bypassed"
+grep -q "process $holder " "$o/held.err" && grep -qF "$lockf" "$o/held.err" ||
+    die "g. stderr names neither the holder ($holder) nor the lock: $(cat "$o/held.err")"
+[ ! -e "$held/patina/plans/$base.plan" ] || die "g. the run wrote the entry another process holds"
+d1=$(field "$o/rw-c-1/run-0/result.json" digest)
+d2=$(field "$o/held/result.json" digest)
+[ "$d1" != - ] && [ "$d1" = "$d2" ] || die "g. the plan made outside the cache gives another digest than a."
+echo "g. a stopped holder: the run planned rw-c itself after the bound, same digest"

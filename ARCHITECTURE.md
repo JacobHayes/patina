@@ -1085,7 +1085,11 @@ which decodes no instruction.
 In a run (`--preempt points`):
 - **The broker** (`launcher/plans.rs`) runs in the launcher, outside the sandbox, on a thread
   pinned to the run's CPU. Only a 64-bit ELF file with executable segments, of at most 1 GiB,
-  is read whole; the stall watchdog counts the time a thread waits for a plan as progress. The runtime sends it a descriptor of a file it is about to map
+  is read whole; the stall watchdog counts the time a thread waits for a plan as progress, for
+  a budget the broker gives each request (`launcher/plans.rs` writes it to
+  `ctl.compute.planning`: `rewrite::cache::planning_budget`, from the file's size; `sup/stall.rs`
+  `Planning`), after which its backstop applies again and its verdict says the thread was
+  waiting for a plan. The runtime sends it a descriptor of a file it is about to map
   executable and the file offset, on a socket the program cannot see (`FD_PLAN`, a hidden
   descriptor); it answers the plan's placement and run table and one read-only descriptor of
   the plan file, or that the file has none (not ELF of the host's machine, no executable segment, refused by
@@ -1101,6 +1105,13 @@ In a run (`--preempt points`):
   `flock` on the entry's `.lock` file and looked up again once the lock is held, so processes
   that meet one file at once make it once; a sweep with `--preempt points` makes its programs'
   plans before its runs start (each run is pinned to one CPU, the sweep has the job count).
+  The wait for a lock is bounded (`wait_bound`: 5 s and a second per 2 MiB of the file, several
+  times what planning it takes): a holder that is stopped (it keeps its lock), stuck or starved
+  is named on stderr with the lock, and the waiter makes the plan itself without the cache
+  (`bypassed` in the report): the same bytes, in a sealed memory file, with no entry written,
+  so an entry only ever has its lock's holder as writer. Which process made a plan, and how
+  long it took, reaches no record: the bytes are the same, the plan file's lines in
+  `/proc/self/maps` are the original file's (`plans::Maps`), and planning is wall time only.
   Planning that takes longer than a second (ten when stderr is not a terminal) prints one line
   on stderr; `patina cache` shows the directory, `patina cache clear` empties it.
 - **Applying** (`plans.rs`): when the loader or `mmap` maps a private, read-only executable
