@@ -8,18 +8,21 @@
 # (the rule of find_bug, lib.inc) and in no seed of a sweep without its fault: `nofence` (no
 # fencing: a replica paused after its check resumes after another took the lease and writes as
 # primary) under pauses; `realtime` (the lease measured on time.time(): a replica cut off from
-# the store, its clock stepped back, answers stale reads) under partitions and steps. lww.py (a register on two nodes stamped by a
-# hybrid logical clock) keeps every acknowledged put under clock-skew-ms; with `wallclock`
-# (each node stamps with its own clock only) a node behind the other loses a later put, found
-# with skew and in none without it. Each failing group's first run replays identically.
-# Seeds 1-16 in the area, 1-8 in the release tier (a search: until the first finding).
-#@ tier=area,release budget=200 slots=6
-# arm64 (CI runner): about 100 s in the area, 50 s in the release tier.
+# the store, its clock stepped back, answers stale reads) under partitions and steps. lww.py
+# (a register on two nodes stamped by a hybrid logical clock) keeps every acknowledged put
+# under clock-skew-ms; with `wallclock` (each node stamps with its own clock only) a node
+# behind the other loses a later put, found with skew and in none without it. Each failing
+# group's first run replays identically. Seeds 1-12 in the area, 1-6 in the release tier (a
+# planted bug: a search until the first finding).
+#@ tier=area,release budget=120 slots=6
+# Hosted runners, seeds 1-8 of the release tier with every sweep running all its seeds: arm64
+# 54-56 s, x86_64 24-35 s; so on arm64, the slower, at most about 42 s for the release tier's
+# 1-6 and 83 s for the area's 1-12.
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/17-lease; mkdir -p "$o"
 PAUSES="--fault pause-gap-ms=1000..8000@p1 --fault pause-gap-ms=1000..8000@p2 --fault pause-ms=100..4000@p1 --fault pause-ms=100..4000@p2"
 PARTS="--fault partition-gap-ms=1000..5000 --fault partition-ms=1000..6000"
-N=16; [ "${CHECK_TIER:-}" != release ] || N=8
+N=12; [ "${CHECK_TIER:-}" != release ] || N=6
 SKEW="--fault clock-skew-ms=0..2000"
 
 # sweep NAME GUEST NODES BUG DRIVER-ARGS [patina options]: seeds SEEDS (default 1-N) of GUEST
