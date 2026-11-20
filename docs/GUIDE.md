@@ -1457,8 +1457,8 @@ seldom all down at once) the time it stays down before its restart.
 own), and `faults-in-recovery=0` turns the network's faults, partitions and every node's
 disk and memory faults off after the first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means this, its machine form
 (`--crash machine[@a,b]`, next section) or a machine crash at a node's crash points
-([At a node's crash points](#at-a-nodes-crash-points)); `process-at:N` and `restart-gap-ms` are
-refused, and the driver is never killed.
+([At a node's crash points](#at-a-nodes-crash-points)); `restart-gap-ms` is refused, and the
+driver is never killed.
 
 **What keeps a run alive.** When every thread waits with no deadline, the run goes on to the
 next event that can wake one: a node's kill by the seed (its peers see its connections end),
@@ -1596,7 +1596,10 @@ every boot until its `max-incarnations`. Without `@`, every node but the driver 
 with `faults = false`); `N` and `PERMILLE` may be ranges (`A..B`), each node drawing its own
 from a seed of its own. The
 crash is the one above: the node's maps are flushed, the disk ends with its `Crash` record, the
-node goes silent and boots again after `down-ms`. There are no crashes at drawn times then, so
+node goes silent and boots again after `down-ms`. `--crash process-at:N@NODE` kills node
+`NODE`'s processes at that point instead, as the seed's kill does (a process kill, the previous
+section): its disk is kept whole, and its command starts again after `down-ms`; `downs[].how`
+is `killed`, with the `point`. There are no crashes at drawn times then, so
 `crash-gap-ms` is refused beside it.
 
 After any machine crash of a node (at a point, at a drawn time or by a script), the crashed
@@ -1794,9 +1797,9 @@ asks for with `--crash`, as on one machine. A class the preset turned on that ha
 act on (no pause drawn in a short run, no realtime read on a skewed node) is `not
 applicable`. `patina report` adds a line for the nodes' pauses and one for their clocks.
 
-**Not available yet** (refused, naming what is missing): the SDK's fault keys with nodes, a
-process kill at a crash point (`process-at:N`), `patina __native` twins and `--check`
-reference runs of a run with nodes.
+**Not available yet** (refused, naming what is missing): the SDK's fault keys
+(`buggify-permille`, `point:LABEL`) with nodes, which would need each node's own SDK settings
+in the runtime, `patina __native` twins and `--check` reference runs of a run with nodes.
 
 ## The SDK
 

@@ -449,8 +449,10 @@ impl Sup {
 
     /// `Op::CrashPoint` [kind, seq, k] from a process of node `k` > 0: its machine crashes
     /// here, at its `crash_points`-th point, as a crash at a drawn time does (`node_crash`,
-    /// with the point in its `Crash` and `Injected` records), the caller among the processes
-    /// killed; the run goes on. An `-at` crash fires once. A process or thread being created
+    /// with the point in its `Crash` and `Injected` records), or under `process-at:N` its
+    /// processes are killed as the seed's kill does (`node_kill`, the point in its `Injected`
+    /// record), the caller among the processes killed; the run goes on. An `-at` crash fires
+    /// once. A process or thread being created
     /// on the node (a reserved slot of it, a vfork child of it that has not said `Hello`) is in
     /// no table yet, so a crash then could not kill it: the run stops `unsupported` rather than
     /// leave it. Another node's creations do not matter: the crash does not touch them.
@@ -471,15 +473,12 @@ impl Sup {
             ));
         }
         let f = &self.node_tab().faults[k];
-        if f.cfg.crash_kind != proto::faults::CRASH_MACHINE {
+        let kind = f.cfg.crash_kind;
+        if kind != proto::faults::CRASH_MACHINE && kind != proto::faults::CRASH_PROCESS {
             // `Config::crash_nodes` sets no other kind for a node's points.
             self.finish(Verdict::new(
                 "internal",
-                format!(
-                    "node {}: a crash point of kind {}",
-                    self.node_name(k),
-                    f.cfg.crash_kind
-                ),
+                format!("node {}: a crash point of kind {kind}", self.node_name(k)),
             ));
         }
         let point = f.crash_points.load(Relaxed);
@@ -493,7 +492,19 @@ impl Sup {
                 );
             }
         }
-        self.node_crash(k, DOWN_CRASH_SEED, point);
+        if kind == proto::faults::CRASH_PROCESS {
+            // `process-at:N`: its processes killed, as the seed's kill at a drawn time; its
+            // disk goes on.
+            let b = self.node_tab().boots[k].saturating_sub(1);
+            self.nodes.point = point;
+            self.node_kill(k, DOWN_KILL_SEED);
+            self.nodes.point = 0;
+            if let Some(e) = self.node_tab().boot[k].get_mut(b as usize) {
+                e.point = point;
+            }
+        } else {
+            self.node_crash(k, DOWN_CRASH_SEED, point);
+        }
         Next::Pick
     }
 

@@ -291,7 +291,7 @@ pub const FLAGS: &[Flag] = &[
         "--crash",
         "KIND[:VALUE]",
         "off",
-        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B; with nodes, process or machine at drawn times, or machine:PERMILLE, machine-at:N at each node's own crash points, each [@NODE,...]",
+        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B; with nodes, process or machine at drawn times, or machine:PERMILLE, machine-at:N, process-at:N at each node's own crash points, each [@NODE,...]",
         RUNLIKE,
     ),
     flag(

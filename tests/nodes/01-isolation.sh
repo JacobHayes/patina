@@ -44,7 +44,7 @@ refused() {
     grep -q -- "$what" "$o/refused.err" || die "$what: the refusal does not name it: $(cat "$o/refused.err")"
     echo "refused: $what"
 }
-refused "--crash process-at:3" --config "$o/iso.toml" --crash process-at:3
+refused "--crash process:5" --config "$o/iso.toml" --crash process:5
 refused restart-gap-ms --config "$o/iso.toml" --fault restart-gap-ms=1000..2000
 refused buggify-permille --config "$o/iso.toml" --fault buggify-permille=10
 # Only the disk and memory keys are a node's own; a scope names nodes of the run.

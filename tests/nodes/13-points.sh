@@ -44,6 +44,21 @@ out = open(os.path.join(d, "inc-0/stdout")).read()
 assert "b holds 3" in out, out
 PY
 echo "crash at point $p of a's $n: a down once, b untouched"
+# A process kill at the same point: a's processes killed there and restarted on its disk as it
+# was (no crash of its disk), b untouched.
+run_ok "$o/pk" $s --config "$o/ok.toml" --crash process-at:$p@a -- $D
+python3 -I - "$o/pk" "$p" <<'PY' || die "process kill at point $p of a"
+import json, os, sys
+d, p = sys.argv[1], int(sys.argv[2])
+r = json.load(open(os.path.join(d, "result.json")))
+a, b = r["nodes"]["list"][1], r["nodes"]["list"][2]
+down = a["downs"][0]
+assert (down["how"], down["point"], a["incarnations"]) == ("killed", p, 2), a
+assert "lost" not in down and not os.path.exists(os.path.join(d, "node/a/inc-0/post-crash")), down
+assert b["incarnations"] == 1 and not b.get("downs"), b
+assert r["self_check"]["verdict"] == "pass", r["self_check"]
+PY
+echo "process kill at point $p of a: a killed there once and restarted on its disk, b untouched"
 # Branch over every point of each node.
 sw() { rm -rf "${o:?}/sw-$1"; st=0; timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep "$2" --out "$o/sw-$1" \
     --config "$o/$1.toml" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/sw-$1.txt" 2>&1 || st=$?; }

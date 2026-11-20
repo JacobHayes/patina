@@ -1530,18 +1530,25 @@ impl Config {
     /// and `machine-at:N` (each `@NODE,...` as before): a machine crash at the node's crash
     /// points, set in each such node's `FaultCfg` (`state::faults` in the runtime): at each
     /// point with that chance, or at the N-th point of its first boot, N drawn from the node's
-    /// own seed when a range; no kills at drawn times then. Returns the resolved form.
+    /// own seed when a range; `process-at:N`: a kill of the node's processes there, its disk
+    /// kept; no kills at drawn times then. Returns the resolved form.
     fn crash_nodes(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
         let (kind, at) = c.split_once('@').map_or((c, None), |(k, a)| (k, Some(a)));
         let timed = match kind {
             "process" => Some(proto::node::CRASH_NODE_PROCESS),
             "machine" => Some(proto::node::CRASH_NODE_MACHINE),
-            k if k.starts_with("machine:") || k.starts_with("machine-at:") => None,
+            k if k.starts_with("machine:")
+                || k.starts_with("machine-at:")
+                || k.starts_with("process-at:") =>
+            {
+                None
+            }
             _ => {
                 return Err(format!(
                     "--crash {c} with nodes: expected process[@NODE,...] or machine[@NODE,...] \
-                     (at seed-drawn times, crash-gap-ms), or machine:PERMILLE[@NODE,...] or \
-                     machine-at:N[@NODE,...] (at a node's crash points)"
+                     (at seed-drawn times, crash-gap-ms), or machine:PERMILLE[@NODE,...], \
+                     machine-at:N[@NODE,...] or process-at:N[@NODE,...] (at a node's crash \
+                     points)"
                 ))
             }
         };
@@ -1729,6 +1736,7 @@ mod tests {
             .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_incarnations == Some(4)));
         assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
         // `--crash process` covers every node but the driver; `@` names some.
+        use proto::faults::{CRASH_NONE, CRASH_PROCESS};
         use proto::node::{CRASH_NODE_MACHINE, CRASH_NODE_PROCESS};
         let crash = |c: &Config, x: &str| {
             let mut p = faults::resolve(0, &[], &[], None, c.nodes.len()).unwrap();
@@ -1748,7 +1756,13 @@ mod tests {
         assert_eq!(at, [0, 3, 0, 0]);
         let p = crash(&c, "machine:5").unwrap();
         assert!(p.node_faults[1..5].iter().all(|f| f.crash_permille == 5));
-        for bad in ["process-at:3", "process@driver", "machine@nope", "fs"] {
+        // A process kill at a point: the node's own kind, its point.
+        let p = crash(&c, "process-at:4@w1").unwrap();
+        assert_eq!(p.node_crash, 0);
+        let w1 = &p.node_faults[1];
+        assert_eq!((w1.crash_kind, w1.crash_at), (CRASH_PROCESS, 4));
+        assert_eq!(p.node_faults[2].crash_kind, CRASH_NONE);
+        for bad in ["process:5", "process@driver", "machine@nope", "fs"] {
             assert!(crash(&c, bad).is_err(), "{bad}");
         }
         for bad in [

@@ -468,7 +468,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   of that boot. A point that fires is the runtime's `CrashPoint` request; for a node the
   supervisor answers it with `node_point_crash`, the same `node_crash` as above with the point
   in its `Crash` record and its `INJ_NODE_KILL` (`machine-at` then turns itself off: it fires
-  once, in the node's first boot). A point's per-mille draw is the runtime's, keyed by the
+  once, in the node's first boot); under `process-at:N@NODE` (`CRASH_PROCESS`) it answers with
+  `node_kill` instead, the seed's process kill, the point in its `INJ_NODE_KILL`, the disk going
+  on. A point's per-mille draw is the runtime's, keyed by the
   record's sequence number as for one machine; the node's seed resolves only a range. A
   process or thread of the node being created when its point fires ends the run
   `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
@@ -536,8 +538,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
-Not yet: a process kill at a crash point (`process-at:N` with nodes) and the SDK's fault keys
-with nodes.
+Not yet: the SDK's fault keys with nodes (`buggify-permille`, `point:LABEL`): the runtime reads
+one `SdkCfg` for the run (`proto::sdk::SdkTab`), so scoping them per node needs a node's own
+copy beside its `FaultCtl`.
 
 ## The boundary log
 
