@@ -3,6 +3,7 @@
 
 pub mod check;
 pub mod content;
+pub mod kept;
 pub mod log;
 pub mod materialise;
 pub mod model_ext4;

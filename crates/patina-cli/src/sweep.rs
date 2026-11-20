@@ -829,20 +829,26 @@ fn prune(dir: &Path) {
 const CUT_OVER: u64 = 4 << 20;
 const CUT_KEEP: u64 = (1 << 20) / proto::rec::REC_SIZE as u64 * proto::rec::REC_SIZE as u64;
 
-/// Cut the large logs of a kept run (`crate::log::Cut`); the operation log of an incarnation
-/// over the size goes whole (`patina log ops` needs all of it).
-fn cut(dir: &Path) {
+/// Shrink a kept run, its result `r`: its work trees packed (`durability::kept`, lossless;
+/// `post-crash/` stays whole in a run a checker reads), its large logs cut (`crate::log::Cut`;
+/// the operation log of an incarnation over the size goes whole: `patina log ops` needs all
+/// of it). Whether a log was cut.
+fn cut(dir: &Path, r: &serde_json::Value) -> bool {
+    crate::durability::kept::pack_run(dir, !crate::recheck::checkable(r));
+    let mut cut = false;
     // The driver's incarnations and every node's disks.
     for inc in crate::durability::check::disks(dir) {
         let size = |f: &str| std::fs::metadata(inc.join(f)).map(|m| m.len()).unwrap_or(0);
         if size("boundary.log") > CUT_OVER {
-            let _ = crate::log::cut(&inc, CUT_KEEP);
+            cut |= crate::log::cut(&inc, CUT_KEEP).is_ok();
         }
         if size("oplog.meta") + size("oplog.data") > CUT_OVER {
             let _ = std::fs::remove_file(inc.join("oplog.meta"));
             let _ = std::fs::remove_file(inc.join("oplog.data"));
+            cut = true;
         }
     }
+    cut
 }
 
 /// Bytes of the files under `dir`.
@@ -1802,9 +1808,7 @@ impl State<'_> {
             prune(dir);
         }
         if (outcome != "ok" || checked || defect) && self.keep != Keep::All {
-            let before = bytes_under(dir);
-            cut(dir);
-            self.cut |= bytes_under(dir) < before;
+            self.cut |= cut(dir, r);
         }
         if r["stop"] == "disk-full" && self.stopped.is_none() {
             self.stopped = Some(format!("seed {seed} found the filesystem full"));

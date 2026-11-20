@@ -412,18 +412,29 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
     Ok(None)
 }
 
-/// `log tree INCDIR DIR`: write the work tree the incarnation ended with (`INCDIR/live.tree`)
-/// into `DIR`, which must not exist or be empty: names, kinds, modes, contents, symlinks, hard
-/// links and user xattrs, as `Tree::write_dir` does.
-fn tree(inc: &Path, dir: &Path) -> Res<()> {
-    let live = inc.join("live.tree");
-    if !live.is_file() {
-        return Err(format!(
-            "{}: no such file: an incarnation's final tree is kept only with its run's logs; a sweep prunes the logs of ok runs unless given --keep all",
-            live.display()
-        ));
-    }
-    let t = crate::durability::tree::Tree::read_archive(&live)?;
+/// `log tree INCDIR DIR [--post-crash]`: write the work tree the incarnation ended with
+/// (`INCDIR/live.tree`, or the `live.tree.zst` a sweep keeps), or with `--post-crash` the
+/// tree its crash left (`post-crash/`, or `post-crash.tree.zst`), into `DIR`, which must not
+/// exist or be empty: names, kinds, modes, contents, symlinks, hard links and user xattrs, as
+/// `Tree::write_dir` does.
+fn tree(inc: &Path, dir: &Path, post: bool) -> Res<()> {
+    use crate::durability::kept;
+    let t = if post {
+        kept::post_crash(inc)?.ok_or_else(|| {
+            format!(
+                "{}: no tree a crash left: the incarnation did not end in a crash, or its run's logs were pruned (a sweep prunes the logs of ok runs unless given --keep all)",
+                inc.display()
+            )
+        })?
+    } else {
+        if !kept::has_live(inc) {
+            return Err(format!(
+                "{}: no such file: an incarnation's final tree is kept only with its run's logs; a sweep prunes the logs of ok runs unless given --keep all",
+                inc.join(kept::LIVE).display()
+            ));
+        }
+        kept::live(inc)?
+    };
     let err = |e: std::io::Error| format!("{}: {e}", dir.display());
     match std::fs::read_dir(dir) {
         Ok(mut rd) => {
@@ -476,8 +487,12 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some("tree") => {
-            let usage = "log tree INCDIR DIR";
-            tree(Path::new(arg(1, usage)?), Path::new(arg(2, usage)?))?;
+            let usage = "log tree INCDIR DIR [--post-crash]";
+            tree(
+                Path::new(arg(1, usage)?),
+                Path::new(arg(2, usage)?),
+                args.has("--post-crash"),
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         Some("events") => {
@@ -494,7 +509,7 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             }
         }
         _ => Err(
-            "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR | log events RUNDIR"
+            "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR [--post-crash] | log events RUNDIR"
                 .into(),
         ),
     }

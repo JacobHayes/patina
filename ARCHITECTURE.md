@@ -565,6 +565,13 @@ written for a case still matches once its line gains settings.
 that exited with a listed status, not on a signal, ends `ok`, stop `ok-exit`, and the checker
 judges it; the logs and digest are those of the run without the flag. Each incarnation's
 final work tree is `inc-K/live.tree` (`durability::tree`); `patina log tree` writes it out.
+A sweep keeps a run's trees compressed (`durability::kept`, from `sweep::cut`, after the run
+and its checker are done with them): `live.tree.zst`, and `post-crash.tree.zst` in a run no
+checker reads (`recheck::checkable`: a checker's input stays as the checker saw it, for
+`recheck` and for a checker run by hand), zstd frames of the archive (`ruzstd`: pure Rust, as
+the static release binary needs), checked to read back before the original goes. Every
+reader takes either form (`kept::live`, `kept::post_crash`). `patina run` and `--keep all`
+keep the trees whole.
 
 `patina log events RUNDIR` (`events.rs`) is the stable export of a run directory for checkers:
 one JSON line per boundary record, with each operation-log record after its call (same

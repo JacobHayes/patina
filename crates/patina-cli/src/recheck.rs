@@ -60,6 +60,11 @@ pub fn case_of(dir: &Path, run: &Value) -> Option<crate::check::Case> {
     })
 }
 
+/// Whether a checker reads the run: it ended ok on its own (a checker judged it, or would).
+pub fn checkable(r: &Value) -> bool {
+    own(r).outcome == Outcome::Ok
+}
+
 /// Whether the run ended ok on its own and its logs are gone: a checker has nothing to read.
 pub fn pruned(dir: &Path, r: &Value) -> bool {
     own(r).outcome == Outcome::Ok && !dir.join("inc-0").is_dir()

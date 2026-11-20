@@ -9,7 +9,6 @@
 
 use crate::cli::Res;
 use crate::durability::check::incarnations;
-use crate::durability::tree::Tree;
 use crate::log::{Cut, Str};
 use proto::ctl::Op;
 use proto::oplog::{OpKind, OpRec, OPREC_SIZE};
@@ -777,9 +776,9 @@ impl<W: Write> Export<'_, W> {
             l.num("point", p);
         }
         // What a machine crash did to the work tree, as `faults.recent` shows it.
-        let (live, post) = (inc.join("live.tree"), inc.join("post-crash"));
-        if kind == "machine" && live.is_file() && post.is_dir() {
-            if let (Ok(live), Ok(post)) = (Tree::read_archive(&live), Tree::from_dir(&post)) {
+        if kind == "machine" {
+            use crate::durability::kept;
+            if let (Ok(live), Ok(Some(post))) = (kept::live(inc), kept::post_crash(inc)) {
                 let lost = crate::launcher::attribution::lost(&live, &post, &self.work);
                 l.raw("lost", &lost.to_string());
             }

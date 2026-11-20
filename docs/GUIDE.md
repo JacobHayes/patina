@@ -202,9 +202,16 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 
 A run kept by `--keep fail` or `checked` whose log is over 4 MiB keeps its first and last MiB
 (`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
-gives the whole log again. The sweep prints the bytes it kept, does not start while `-j` runs
-at `--log-limit` could fill the filesystem under `--out`, and stops launching runs when free
-space falls below that, or when a run finds the filesystem full.
+gives the whole log again. A kept run's work trees, most of its size when its program keeps
+much on disk, are kept compressed, a few times to tens of times smaller: each incarnation's
+(and each node disk's) `live.tree` as `live.tree.zst`, and in a run no checker reads (one that
+did not end `ok` on its own) a crash's `post-crash/` as `post-crash.tree.zst`. `patina log
+tree` (`--post-crash` for the tree a crash left), `log ops --check` and `log events` read
+them as the run left them; a checker, run again or by hand, reads `post-crash/` as it was.
+`--keep all` keeps every run as `patina run` leaves it. The sweep prints the bytes it kept,
+does not start while `-j` runs at `--log-limit` could fill the filesystem under `--out`, and
+stops launching runs when free space falls below that, or when a run finds the filesystem
+full.
 
 A sweep directory holds one sweep. It records the program's SHA-256, the command and the
 resolved settings (`sweep.json`); the same sweep run again resumes, running only the runs it
@@ -1013,9 +1020,9 @@ faults-off run is the reference: a run of a seed with faults equals the faults-o
 seed up to the first fault injected, so for a program whose output does not depend on the
 schedule one reference run serves every seed; otherwise sweep the reference over the same
 seeds with `--keep all`, and the checker reads `REF/seed-$PATINA_SEED`. `patina log tree INCDIR
-DIR` writes the work tree an incarnation ended with (`INCDIR/live.tree`) into the new or empty
-directory `DIR`: names, kinds, modes, contents, symlinks. `examples/checks/same-tree` compares
-the two runs' trees with it, and does not judge a run that failed cleanly (exit 77).
+DIR` writes the work tree an incarnation ended with (`INCDIR/live.tree`, or the
+`live.tree.zst` of a run a sweep kept) into the new or empty directory `DIR`: names, kinds,
+modes, contents, symlinks. `examples/checks/same-tree` compares the two runs' trees with it, and does not judge a run that failed cleanly (exit 77).
 
 `examples/upcase-c` writes a text in upper case to `out.txt`. Every error ends it with a
 message and exit 1, but it checks `write` for -1 only: a short write loses the rest of the
@@ -1106,7 +1113,8 @@ $ wc -c tree-5/out.txt tree-ref/out.txt
 --ok-exit)`. A sweep keeps the work tree of the runs it keeps: `patina log tree` of a run a
 sweep pruned (an `ok` run, without `--keep all`) is an error. After crashes, `inc-K/live.tree`
 is each incarnation's tree as it ran, before the crash lost anything; `inc-K/post-crash/` is
-what the crash left.
+what the crash left (`patina log tree --post-crash INCDIR DIR` writes it out, also where a
+sweep keeps it compressed).
 
 ### Against a reference
 
@@ -1563,10 +1571,10 @@ first, and a write the cluster acknowledged is lost when the machines that had i
 before it reached their disks (`tests/nodes/10-quorum-machine.sh`).
 
 Each disk has its own operation log: `RUNDIR/node/NAME/inc-K/` holds `oplog.meta`,
-`oplog.data` and `live.tree` for the disk that began with boot K (a disk lasts across process
-kills and ends at a machine crash, its log closed by a `Crash` record). `patina log ops` reads
-one, and every run with nodes ends with the self-check on every disk (`result.json`'s
-`self_check` names the disk that differs). The driver's disk is `inc-0/` as without nodes.
+`oplog.data` and `live.tree` (`live.tree.zst` in a run a sweep kept) for the disk that began
+with boot K (a disk lasts across process kills and ends at a machine crash, its log closed by
+a `Crash` record). `patina log ops` reads one, and every run with nodes ends with the
+self-check on every disk (`result.json`'s `self_check` names the disk that differs). The driver's disk is `inc-0/` as without nodes.
 
 `wal.py` recovers a log of checksummed records after each machine crash: a record the crash
 caught before it reached the disk can survive as zeros or cut short, and recovery that trusts
@@ -1809,8 +1817,8 @@ exact-only: the run of seed 3 above
 
 `patina log dump LOG --from SEQ --to SEQ` prints the boundary log; `patina log diff A B`
 names the first record where two logs differ. `patina log tree INCDIR DIR` writes the work
-tree an incarnation ended with into a new directory ([Faults off versus
-on](#faults-off-versus-on)).
+tree an incarnation ended with (with `--post-crash`, the one its crash left) into a new
+directory ([Faults off versus on](#faults-off-versus-on)).
 
 ### The event stream
 
@@ -1908,7 +1916,7 @@ whose strings a sweep's cut log or the log limit left out (a reader should allow
 Not in it: without `--log-paths`, the path and argument strings of calls (only their hashes,
 `in`) and the process of a call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its
 thread's `slot`, which is not a process id),
-buffer contents (read the trees: `patina log tree`, `post-crash/`). A run directory a sweep
+buffer contents (read the trees: `patina log tree`, `--post-crash`). A run directory a sweep
 pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
 and fields are only ever added: a reader should ignore what it does not know.
 

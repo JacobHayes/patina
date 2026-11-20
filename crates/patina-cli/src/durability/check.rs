@@ -1,5 +1,6 @@
 //! `patina log ops --check RUN`: for every incarnation, replaying the complete operation log onto
-//! its base must give exactly the live tree the supervisor exported (`live.tree`): names,
+//! its base must give exactly the live tree the supervisor exported (`live.tree`, or the
+//! `live.tree.zst` a sweep keeps: `kept`): names,
 //! kinds, modes, owners, link structure (inode numbers), contents, extended attributes.
 //! A difference means the tracker missed a way of changing a file. There is no exception:
 //! stores through shared mappings are logged however their process ends, by its runtime or,
@@ -7,7 +8,7 @@
 
 use super::log::OpLog;
 use super::materialise::replay;
-use super::tree::{diff, Tree};
+use super::tree::diff;
 use std::path::{Path, PathBuf};
 
 pub fn incarnations(run: &Path) -> Vec<PathBuf> {
@@ -43,7 +44,7 @@ pub fn disks(run: &Path) -> Vec<PathBuf> {
 /// Check one incarnation directory. Ok(summary) or Err(first difference).
 pub fn check_inc(dir: &Path) -> Result<String, String> {
     let log = OpLog::load(dir)?;
-    let live = Tree::read_archive(&dir.join("live.tree"))?;
+    let live = super::kept::live(dir)?;
     let replayed = replay(&log)?.to_tree();
     if let Some(d) = diff(&replayed, &live, true) {
         return Err(format!(

@@ -67,7 +67,8 @@ for x in g["runs"]:
     b = r["nodes"]["list"][2]
     assert b["downs"][0]["point"] == x["point"], (x, b["downs"])
     l = b["downs"][0]["lost"]
-    lost += l["missing"] + l["changed"] > 0 and os.path.isdir(os.path.join(x["dir"], "node/b/inc-0/post-crash"))
+    # The sweep keeps a failure's post-crash tree packed.
+    lost += l["missing"] + l["changed"] > 0 and os.path.isfile(os.path.join(x["dir"], "node/b/inc-0/post-crash.tree.zst"))
 assert lost > 0, "no failing child lost anything on b's disk"
 print("early: %d of %d points (a %d, b %d) fail, all on b" % (g["count"], br["points"], *[x["points"] for x in br["nodes"]]))
 PY

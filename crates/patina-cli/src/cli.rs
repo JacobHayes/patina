@@ -75,8 +75,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Log,
         name: "log",
-        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR | log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]",
-        help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree, export a run's events as JSON lines",
+        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR [--post-crash] | log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]",
+        help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree (or the one its crash left), export a run's events as JSON lines",
     },
     Command {
         cmd: Cmd::Table,
@@ -368,7 +368,7 @@ pub const FLAGS: &[Flag] = &[
         "--keep",
         "fail|checked|all|none",
         "fail",
-        "whose logs to keep (run.json and result.json are always kept); checked: also every run the checker ran on, logs over 4 MiB cut as a failure's, for patina recheck",
+        "whose logs to keep (run.json and result.json are always kept); a kept run's work trees are compressed (post-crash/ only in a run no checker reads) and its logs over 4 MiB cut; checked: also every run the checker ran on, for patina recheck; all: every run whole, as patina run leaves it",
         &[Cmd::Sweep],
     ),
     flag(
@@ -414,6 +414,13 @@ pub const FLAGS: &[Flag] = &[
     ),
     flag("--from", "SEQ", "0", "log dump, log events: first sequence number", &[Cmd::Log]),
     flag("--to", "SEQ", "last", "log dump, log events: last sequence number", &[Cmd::Log]),
+    flag(
+        "--post-crash",
+        "",
+        "off",
+        "log tree: the tree the incarnation's crash left (the next incarnation started from), not the one it ended with",
+        &[Cmd::Log],
+    ),
     flag(
         "--types",
         "T,T",

@@ -17,6 +17,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 toml = "1.2.1"
 sha2 = "0.11.1"
+# The compressed work trees a sweep keeps (`durability::kept`): pure Rust, as the static
+# release binary needs.
+ruzstd = "0.9.1"
 
 # The load-time rewriter (`patina __rewrite`, src/rewrite/): x86_64 only, host side only. Decoding
 # and the instruction facts it needs (flow control, flags read and written); no encoder,
