@@ -1314,8 +1314,10 @@ The network's faults act between nodes, drawn by the seed as on one machine. The
 two nodes, as `net-links` says: `nodes` (the default) the links between nodes other than the
 driver, `driver` also the driver's, `all` also each node's traffic to itself. A link they do not
 act on carries the default delay and nothing else, so by default the driver is a client and
-health checker the network never fails. Each draw is keyed by its connection or datagram, so a
-direction of a pair of nodes gets its own.
+health checker the network never fails; with `net-links=driver` it is one the network can cut
+off, partitions included. The driver's control calls are not network traffic: they answer
+inside a partition that cuts the driver off. Each draw is keyed by its connection or datagram,
+so a direction of a pair of nodes gets its own.
 
 **Partitions** are the seed's cuts. `partition-gap-ms=A..B` turns them on: after a gap drawn
 from `A..B` the seed draws a shape and two sides of the nodes the link faults act on, cuts the
@@ -1420,13 +1422,21 @@ are refused, starts it again and reads the count of starts b keeps in its work t
 them (a kill or restart that falls while a process or thread is being created waits until it
 exists, so a new child is killed with its parent): every node but the driver (`--crash process@a,b` only those). After each start of a
 node, `crash-gap-ms=A..B` (default `5000..60000`) is the virtual time to its next kill; after
-a kill, `down-ms=A..B` (default `1000..61000`) the time it stays down before its restart.
+a kill, `down-ms=A..B` (default `1000..5000`, short beside the gap, so that several nodes are
+seldom all down at once) the time it stays down before its restart.
 `max-incarnations=N` stops the kills once a node has started N times (each node counts its
 own), and `faults-in-recovery=0` turns the network's faults and partitions off after the
 first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this; `--crash machine` and
-`restart-gap-ms` are refused, and the driver is never killed. A kill ahead does not keep a
-run alive: if every thread waits with no deadline and only a kill is to come, the run is
-deadlocked, as it would be without kills.
+`restart-gap-ms` are refused, and the driver is never killed.
+
+**What keeps a run alive.** When every thread waits with no deadline, the run goes on to the
+next event that can wake one: a node's kill by the seed (its peers see its connections end),
+a node's restart, a partition's heal (it delivers what the cut held). A partition's start
+cannot: with every thread waiting and nothing else ahead, no traffic is in flight, so the cut
+holds nothing and its heal leaves the links as they were. With only partition starts ahead
+the run is deadlocked, as it would be without partitions; with another event ahead too, the
+partitions that fall before it happen. A kill counts once faults may act: before
+`setup-complete` under `faults-after-setup=1` it would only be drawn again, so it does not.
 
 **A node's own end.** A node is up while its first process runs. When that process ends by
 itself, the node's other processes are killed and the node is down: an exit status outside

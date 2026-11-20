@@ -2,7 +2,7 @@
 //! two events due at the same virtual time fire in the order they were scheduled.
 //! Nothing here reads a clock: the supervisor owns `vclock_ns` and passes it in.
 
-use super::sched::{Event, EventId, Sched, WakeReason};
+use super::sched::{Event, EventId, Live, Sched, WakeReason};
 
 impl Sched {
     /// Schedule `ev` at virtual time `at_ns`.
@@ -47,21 +47,23 @@ impl Sched {
         n
     }
 
-    /// Every pending event is weak (or none is pending): nothing will ever wake anyone.
-    pub fn only_weak(&self) -> bool {
-        self.events
-            .values()
-            .all(|e| matches!(e, Event::Node { weak: true, .. }))
+    /// No pending event keeps the run alive (or none is pending): nothing will ever wake
+    /// anyone. `setup`: faults may act (`Live::AfterSetup`).
+    pub fn only_weak(&self, setup: bool) -> bool {
+        self.events.values().all(|e| match e {
+            Event::Node { live, .. } => *live == Live::No || (*live == Live::AfterSetup && !setup),
+            _ => false,
+        })
     }
 
     /// Nothing runnable: move the clock to the earliest event and fire everything due
     /// then. Returns the new time, or None when nothing is runnable and nothing is pending
     /// (deadlock) or something is runnable (no jump needed).
-    pub fn idle_jump(&mut self, now: u64) -> Option<u64> {
+    pub fn idle_jump(&mut self, now: u64, setup: bool) -> Option<u64> {
         if !self.runnable.is_empty() {
             return None;
         }
-        if self.only_weak() {
+        if self.only_weak(setup) {
             return None;
         }
         let at = self.next_deadline()?;
@@ -86,20 +88,20 @@ mod tests {
         s.park(1, Wait::Sleep, Some(2_000), MayPark::for_test(1));
         s.park(2, Wait::Sleep, Some(9_000), MayPark::for_test(2));
         assert_eq!(s.next_deadline(), Some(2_000));
-        assert_eq!(s.idle_jump(1_000), Some(2_000));
+        assert_eq!(s.idle_jump(1_000, true), Some(2_000));
         assert!(s.is_runnable(1) && !s.is_runnable(0) && !s.is_runnable(2));
         assert_eq!(s.entries[1].woke, Some(WakeReason::Timeout));
         assert_eq!(s.entries[1].reply, 0); // a sleep returns 0
                                            // Something is runnable: no jump.
-        assert_eq!(s.idle_jump(2_000), None);
+        assert_eq!(s.idle_jump(2_000, true), None);
         s.park(1, Wait::Sleep, None, MayPark::for_test(1));
-        assert_eq!(s.idle_jump(2_000), Some(5_000));
+        assert_eq!(s.idle_jump(2_000, true), Some(5_000));
         assert!(s.is_runnable(0));
         s.park(0, Wait::Sleep, None, MayPark::for_test(0));
-        assert_eq!(s.idle_jump(5_000), Some(9_000));
+        assert_eq!(s.idle_jump(5_000, true), Some(9_000));
         s.park(2, Wait::Sleep, None, MayPark::for_test(2));
         // Nothing runnable, nothing pending: deadlock.
-        assert_eq!(s.idle_jump(9_000), None);
+        assert_eq!(s.idle_jump(9_000, true), None);
         assert_eq!(s.parked().len(), 3);
     }
 
@@ -127,6 +129,44 @@ mod tests {
         assert_eq!(s.fire_due(99), 0);
         assert_eq!(s.fire_due(100), 3);
         assert_eq!(s.runnable().collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn only_some_node_events_keep_a_run_alive() {
+        let mut s = Sched::new(1, 8);
+        s.add(0, 10, 2, 0);
+        s.park(0, Wait::Sleep, None, MayPark::for_test(0));
+        let start = s.schedule(
+            100,
+            Event::Node {
+                key: 0,
+                live: Live::No,
+            },
+        );
+        assert!(s.only_weak(true));
+        assert_eq!(s.idle_jump(0, true), None);
+        // A kill: once faults may act.
+        let kill = s.schedule(
+            200,
+            Event::Node {
+                key: 2,
+                live: Live::AfterSetup,
+            },
+        );
+        assert!(s.only_weak(false) && !s.only_weak(true));
+        assert!(s.cancel(kill));
+        // A restart or a partition's end, always.
+        s.schedule(
+            300,
+            Event::Node {
+                key: 3,
+                live: Live::Yes,
+            },
+        );
+        assert!(!s.only_weak(false));
+        // The jump goes to the earliest event, the start too.
+        assert_eq!(s.idle_jump(0, false), Some(100));
+        assert!(!s.events.contains_key(&start) && s.fired_node == vec![0]);
     }
 
     #[test]

@@ -49,10 +49,24 @@ pub enum Event {
     /// A network wire event: collected in `fired_wire` for the supervisor's wire.
     Wire { key: u64 },
     /// A node event (`nodes`: a partition's start or end, a node's kill or restart):
-    /// collected in `fired_node`. `weak` events do not keep a run alive: with nothing else
-    /// pending, a run waiting only for them is deadlocked (a partition to come, a kill to
-    /// come, never wakes anyone).
-    Node { key: u64, weak: bool },
+    /// collected in `fired_node`. `live` says whether it keeps a run alive whose threads all
+    /// wait with no deadline.
+    Node { key: u64, live: Live },
+}
+
+/// Whether a pending node event keeps a run alive whose threads all wait with no deadline
+/// (`Sched::only_weak`): with only events that do not, the run is deadlocked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Live {
+    /// It may wake someone: a partition's end (held traffic goes on), a node's restart.
+    Yes,
+    /// It cannot: a partition's start. Every thread waits with no deadline and nothing else is
+    /// ahead, so no traffic is in flight: a cut holds nothing, and its heal leaves the links
+    /// as they were.
+    No,
+    /// The seed's kill of a node: once faults may act (`faults-after-setup`), since before
+    /// then it is only drawn again.
+    AfterSetup,
 }
 
 /// Identity of a scheduled event: (time, insertion number). Unique and totally ordered.

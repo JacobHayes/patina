@@ -375,14 +375,17 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   after a drawn length; the end opens the links the script does not cut, records
   `DEC_NET_PART_END`, re-stamps what was held and schedules the next start. Every draw is on
   `Stream::Partition`, keyed by the partition's ordinal and a sub-key, so turning partitions on
-  moves no other decision and no draw depends on traffic. A start is a weak event: a run whose
-  threads all wait and that has only a partition start ahead is deadlocked, as it would be
-  without partitions; an end is strong, since it may release held traffic. A start that falls
+  moves no other decision and no draw depends on traffic. A start does not keep a run alive
+  (`sched::Live::No`): a run whose threads all wait and that has only a partition start ahead
+  is deadlocked, as it would be without partitions (nothing is in flight, so the cut holds
+  nothing and its heal changes nothing); an end does (`Live::Yes`), since it may release held
+  traffic. A start that falls
   while faults are off makes no partition. The node table keeps the first 64 partitions (shape,
   sides, times, whether a cut link held, lost or kept back anything) for `result.json`.
 - **Kill and restart.** A node is up from its first process's `Hello` until it goes down
   (`DEC_NODE_DOWN` [node, incarnation, how, status, processes killed, down time]): the seed
-  kills it (`--crash process`: a weak node event `crash-gap-ms` after each start, keyed on
+  kills it (`--crash process`: a node event `crash-gap-ms` after each start that keeps a run
+  alive once faults may act (`Live::AfterSetup`; before then it is only drawn again), keyed on
   `Stream::Node` by node, incarnation and try, with an `Injected` record `INJ_NODE_KILL`
   counted as `crash`), the driver does (`node kill NAME --process`, `Op::Node`), or its first
   process ends by itself. A kill `SIGKILL`s every live process of the node through the
@@ -400,9 +403,10 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   holder's process leaves its request unserved, and a turn holder ending its own process
   (`ProcExit`) ends first. A kill or a restart waits while any slot is reserved for a process
   or thread the runtime is creating (its `Forked` not yet served) or a vfork child has not
-  said `Hello`: until then the new task is in no table, and a kill would miss it. A restart (a
-  strong event `down-ms` after a down its `restart` policy follows, or the driver's `node
-  start`) waits for the next such point after a kill in the same one, takes the lowest free slot (one an exited
+  said `Hello`: until then the new task is in no table, and a kill would miss it. A restart (an
+  event that keeps a run alive, `down-ms` after a down its `restart` policy follows, or the
+  driver's `node start`) waits for the next such point after a kill in the same one (with
+  nothing runnable, at once: `node_actions_idle`), takes the lowest free slot (one an exited
   thread left is replaced), clears the node's `filter_installed` bit (a new process tree needs
   the filter) and asks the keeper for incarnation K: the keeper keeps every node's mount, UTS
   and IPC namespaces from its first start (`sandbox::Saved`, received from the view's helper)

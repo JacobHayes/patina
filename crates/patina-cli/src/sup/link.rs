@@ -13,12 +13,13 @@
 //! a sub-key (`proto::node::PSUB_*`), so turning partitions on moves no other decision and no
 //! draw depends on traffic. A start falls while faults are off (before `setup-complete`, or
 //! after a crash with `faults-in-recovery=0`) makes no partition; the next is drawn. A start
-//! is a weak event: a run that waits only for it is deadlocked.
+//! does not keep a run alive (`Live::No`): a run that waits only for it is deadlocked. An end
+//! does, since it may release held traffic.
 //!
 //! Records: `DEC_NET_PART` [ordinal, shape, side A, side B, length, bridge] and an `Injected`
 //! record (`INJ_NET_CUT`) at a start; `DEC_NET_PART_END` [ordinal] at an end.
 
-use super::sched::{Event, EventId};
+use super::sched::{Event, EventId, Live};
 use super::Sup;
 use proto::ctl::*;
 use proto::node::*;
@@ -29,7 +30,7 @@ use std::sync::atomic::Ordering::Relaxed;
 /// Kinds of node events, in the low bits of their key (`Event::Node`).
 pub const EVK_PART_START: u64 = 0;
 pub const EVK_PART_END: u64 = 1;
-/// The seed's kill of a node's processes (weak), and a node's restart.
+/// The seed's kill of a node's processes, and a node's restart.
 pub const EVK_NODE_KILL: u64 = 2;
 pub const EVK_NODE_START: u64 = 3;
 const EVK_BITS: u64 = 4;
@@ -139,7 +140,7 @@ impl Sup {
             t,
             Event::Node {
                 key: ev_key(EVK_PART_START, 0),
-                weak: true,
+                live: Live::No,
             },
         ));
     }
@@ -214,7 +215,7 @@ impl Sup {
             now + len,
             Event::Node {
                 key: ev_key(EVK_PART_END, 0),
-                weak: false,
+                live: Live::Yes,
             },
         ));
     }

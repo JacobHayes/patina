@@ -31,7 +31,7 @@
 
 use super::link::{ev_key, EVK_NODE_KILL, EVK_NODE_START};
 use super::proc::PState;
-use super::sched::{Event, EventId};
+use super::sched::{Event, EventId, Live};
 use super::{Next, Sup};
 use crate::outcome::Verdict;
 use proto::ctl::*;
@@ -292,6 +292,22 @@ impl Sup {
         self.nodes.pending.push_back((kind, node));
     }
 
+    /// Nothing is runnable (`choose`): act on the node kills and restarts that came due but
+    /// waited (a restart after a kill in the same call), as at an idle jump. Whether one acted.
+    pub(super) fn node_actions_idle(&mut self) -> bool {
+        if self.nodes.pending.is_empty() {
+            return false;
+        }
+        let before = self.nodes.pending.len();
+        let killed = self.node_actions();
+        if killed.is_empty() && self.nodes.pending.len() == before {
+            return false;
+        }
+        self.wire_step();
+        self.io.sync(&mut self.sched, self.ctl);
+        true
+    }
+
     /// Act on the node kills and restarts that came due, where nothing in flight can be
     /// disturbed (`serve`, before the request it handles; `choose`, at an idle jump). Returns
     /// the processes killed.
@@ -359,7 +375,7 @@ impl Sup {
             self.now() + gap,
             Event::Node {
                 key: ev_key(EVK_NODE_KILL, k),
-                weak: true,
+                live: Live::AfterSetup,
             },
         ));
     }
@@ -432,7 +448,7 @@ impl Sup {
                 now + down,
                 Event::Node {
                     key: ev_key(EVK_NODE_START, k),
-                    weak: false,
+                    live: Live::Yes,
                 },
             ));
         }

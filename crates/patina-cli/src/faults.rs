@@ -17,6 +17,9 @@ use serde_json::{json, Value};
 pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
 /// `restart-gap-ms` when not given: 1 s to 61 s.
 pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
+/// `down-ms` when not given: 1 s to 5 s. Short beside `crash-gap-ms`, so that with several
+/// nodes the seed's kills seldom leave every node down at once.
+pub const DOWN_DEFAULT: (u64, u64) = (1_000_000_000, 5_000_000_000);
 /// `crash-gap-ms` when not given: 5 s to 60 s.
 pub const CRASH_GAP_DEFAULT: (u64, u64) = (5_000_000_000, 60_000_000_000);
 
@@ -319,7 +322,7 @@ pub const KEYS: &[Key] = &[
         "down-ms",
         "A..B",
         Val::Spread,
-        "with nodes: virtual time a node stays down before its restart, a draw in A..B ms for each restart [default: 1000..61000]",
+        "with nodes: virtual time a node stays down before its restart, a draw in A..B ms for each restart [default: 1000..5000]",
     ),
     key(
         "compute-gap",
@@ -701,7 +704,7 @@ pub fn resolve(
         max_incarnations: MAX_INCARNATIONS_DEFAULT,
         restart_gap_ns: RESTART_GAP_DEFAULT,
         crash_gap_ns: CRASH_GAP_DEFAULT,
-        down_ns: RESTART_GAP_DEFAULT,
+        down_ns: DOWN_DEFAULT,
         node_crash: 0,
         net: Default::default(),
         sdk: Default::default(),
@@ -1272,6 +1275,17 @@ mod tests {
         assert!(resolve(0, &[], &v(&["partition-shape=ring"]), None, 3).is_err());
         let e = resolve(0, &[], &v(&["net-partition=1+2"]), None, 0).unwrap_err();
         assert!(e.contains("net-blackout"), "{e}");
+    }
+
+    #[test]
+    fn a_node_is_down_briefly_by_default() {
+        let p = resolve(3, &[], &[], Some("process"), 3).unwrap();
+        let s = 1_000_000_000;
+        assert!(p.down_ns.0 >= s && p.down_ns.1 <= 5 * s, "{:?}", p.down_ns);
+        assert!(p.down_ns.1 <= p.crash_gap_ns.0, "{:?}", p.down_ns);
+        // The restart gap of a run without nodes is its own.
+        let one = resolve(3, &[], &[], Some("machine"), 0).unwrap();
+        assert_eq!(one.restart_gap_ns, (s, 61 * s));
     }
 
     #[test]

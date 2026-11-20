@@ -377,8 +377,12 @@ impl Sup {
                 self.finish(Verdict::new("infra", d));
             }
             let old = self.now();
-            // Nothing pending but a partition or a kill to come: deadlock, now.
-            if self.sched.only_weak() {
+            if self.node_count() > 0 && self.node_actions_idle() {
+                continue;
+            }
+            // Nothing pending that can wake anyone (a partition to come, or a kill before
+            // faults may act): deadlock, now.
+            if self.sched.only_weak(self.setup_done()) {
                 self.deadlock();
             }
             // A jump past the liveness limit is reported before it wakes anyone, so
@@ -393,7 +397,7 @@ impl Sup {
                     .store(VCLOCK_BOOT_NS + self.ctl.config.vtime_limit_ns + 1, Relaxed);
                 self.check_liveness(None);
             }
-            match self.sched.idle_jump(old) {
+            match self.sched.idle_jump(old, self.setup_done()) {
                 Some(t) => {
                     self.ctl.vclock_ns.store(t, Relaxed);
                     self.decide(DEC_IDLE_JUMP, 0, [old, t, 0, 0, 0, 0], 0);
