@@ -127,8 +127,7 @@ const CTL_FIELDS: &[(usize, usize, &str)] = fields!(Ctl:
     denied, stop_nr, io, faults, insn, timing, pmu, sched, compute,
 );
 
-const SLOT_FIELDS: &[(usize, usize, &str)] =
-    fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched, node, clock_flags);
+const SLOT_FIELDS: &[(usize, usize, &str)] = fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched, node, clock_flags, nofile_hard);
 
 #[cfg(test)]
 mod tests {

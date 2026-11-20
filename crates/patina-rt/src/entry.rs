@@ -75,6 +75,7 @@ extern "C" fn rt_main(ksp: u64) -> ! {
     // is installed already (no system call is made while finding it).
     claim_slot();
     install_filter();
+    crate::fdlim::start();
     hello();
     crate::pmu::open(thread());
     let k = crate::loader::KernelStart::parse(ksp);

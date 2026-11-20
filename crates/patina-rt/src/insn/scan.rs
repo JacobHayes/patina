@@ -216,7 +216,7 @@ pub fn on_mprotect_exec(a: u64, len: u64, prot: u64) {
             continue;
         }
         p[..path.len()].copy_from_slice(path);
-        let fd = unsafe {
+        let fd = crate::fdlim::transient(|| unsafe {
             sc4(
                 nr::OPENAT,
                 (-100i64) as u64,
@@ -224,7 +224,7 @@ pub fn on_mprotect_exec(a: u64, len: u64, prot: u64) {
                 0o2000000,
                 0,
             )
-        };
+        });
         let file = (fd >= 0).then(|| FileId {
             fd: fd as u64,
             off: hex(offs) + (lo - s),

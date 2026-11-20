@@ -319,7 +319,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
         0,
         RESOLVE_NO_SYMLINKS,
     ];
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT2,
             dirfd as u64,
@@ -327,7 +327,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
             how.as_ptr() as u64,
             24,
         )
-    };
+    });
     let plain = if fd >= 0 {
         unsafe { sc1(nr::CLOSE, fd as u64) };
         true
@@ -338,7 +338,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
             Some(i) => {
                 c[i] = 0;
                 let how = [O_PATH | O_CLOEXEC, 0, RESOLVE_NO_SYMLINKS];
-                let fd = unsafe {
+                let fd = crate::fdlim::transient(|| unsafe {
                     sc4(
                         nr::OPENAT2,
                         dirfd as u64,
@@ -346,7 +346,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
                         how.as_ptr() as u64,
                         24,
                     )
-                };
+                });
                 if fd >= 0 {
                     unsafe { sc1(nr::CLOSE, fd as u64) };
                 }

@@ -158,9 +158,10 @@ static STEP_OWNER: AtomicI32 = AtomicI32::new(0);
 /// A write to code through `MEM` failed: the kernel refuses them (`poke`).
 static POKE_FAILED: AtomicBool = AtomicBool::new(false);
 
-pub(crate) fn open_hidden(path: &[u8], flags: u64) -> i32 {
-    const F_DUPFD_CLOEXEC: u64 = 1030;
-    let fd = unsafe {
+/// Open `path` (close-on-exec) as a hidden descriptor: at `at`, or with `None` at the lowest
+/// free number from `FD_RT_DYN`. -1 if it cannot be opened.
+pub(crate) fn open_hidden(path: &[u8], flags: u64, at: Option<i32>) -> i32 {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             (-100i64) as u64,
@@ -168,13 +169,19 @@ pub(crate) fn open_hidden(path: &[u8], flags: u64) -> i32 {
             flags | 0x80000,
             0,
         )
-    };
+    });
     if fd < 0 {
         return -1;
     }
-    let h = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, FD_RT_DYN as u64) };
-    unsafe { sc1(nr::CLOSE, fd as u64) };
-    h as i32
+    let h = match at {
+        Some(n) => crate::fdlim::place(fd, n),
+        None => crate::fdlim::hide(fd, FD_RT_DYN),
+    };
+    if h < 0 {
+        -1
+    } else {
+        h as i32
+    }
 }
 
 /// Make the scratch and descriptors ready for this process. False if they cannot be (the
@@ -205,10 +212,10 @@ fn resources() -> bool {
     if r as u64 != SCRATCH && r != -e::EEXIST {
         return false;
     }
-    let mem = open_hidden(b"/proc/self/mem\0", 2);
-    let pm = open_hidden(b"/proc/self/pagemap\0", 0);
-    let maps = open_hidden(b"/proc/self/maps\0", 0);
-    let cl = st::track_open(open_hidden);
+    let mem = open_hidden(b"/proc/self/mem\0", 2, Some(FD_PROBE_MEM));
+    let pm = open_hidden(b"/proc/self/pagemap\0", 0, Some(FD_PROBE_PAGEMAP));
+    let maps = open_hidden(b"/proc/self/maps\0", 0, Some(FD_PROBE_MAPS));
+    let cl = st::track_open(|p, f| open_hidden(p, f, Some(FD_PROBE_TRACK)));
     MEM.store(mem, Relaxed);
     PAGEMAP.store(pm, Relaxed);
     MAPS.store(maps, Relaxed);
@@ -902,8 +909,8 @@ fn step_ready() -> bool {
             unsafe { sc1(nr::CLOSE, fd as u64) };
         }
     }
-    let mem = open_hidden(b"/proc/self/mem\0", 2);
-    let maps = open_hidden(b"/proc/self/maps\0", 0);
+    let mem = open_hidden(b"/proc/self/mem\0", 2, Some(FD_PROBE_MEM));
+    let maps = open_hidden(b"/proc/self/maps\0", 0, Some(FD_PROBE_MAPS));
     MEM.store(mem, Relaxed);
     MAPS.store(maps, Relaxed);
     if mem < 0 || maps < 0 {

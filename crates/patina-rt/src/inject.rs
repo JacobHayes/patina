@@ -445,7 +445,7 @@ pub fn mem_limit_refuses(nr: u64, grow: u64) -> bool {
 
 /// The `data` field of `/proc/self/statm`, in bytes.
 fn statm_data_bytes() -> u64 {
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             AT_FDCWD as u64,
@@ -453,7 +453,7 @@ fn statm_data_bytes() -> u64 {
             0o2000000,
             0,
         )
-    };
+    });
     if fd < 0 {
         crate::sup::host_error(fd, nr::OPENAT, proto::ctl::HE_SYSCALL);
     }

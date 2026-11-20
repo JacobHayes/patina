@@ -127,6 +127,8 @@ pub struct ThreadState {
     pub vfork: u64,
     /// A vfork child's own dispositions (copied from the parent at the clone).
     pub vf_sigact: [[u64; 4]; 65],
+    /// A vfork child's own hard `RLIMIT_NOFILE` (`fdlim`; copied at the clone).
+    pub vf_nofile_hard: u64,
     /// Counter preemption (`pmu.rs`).
     pub pmu: crate::pmu::Pmu,
     /// Spin probes and the spin point (`spin.rs`).
@@ -163,6 +165,7 @@ impl ThreadState {
             restart: [0; 5],
             vfork: 0,
             vf_sigact: [[0; 4]; 65],
+            vf_nofile_hard: 0,
             pmu: crate::pmu::Pmu::new(),
             spin: crate::spin::Spin::new(),
             compute_events: 0,
@@ -258,6 +261,8 @@ pub struct Proc {
     pub compute: crate::compute::Compute,
     /// Images with load-time plans (`plans.rs`).
     pub plans: crate::plans::Plans,
+    /// The hard `RLIMIT_NOFILE` the program is shown (`fdlim`; its soft one is the real one).
+    pub nofile_hard: u64,
 }
 
 pub struct Global<T>(UnsafeCell<T>);
@@ -293,6 +298,7 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
     nshared: 0,
     compute: crate::compute::Compute::new(),
     plans: crate::plans::Plans::new(),
+    nofile_hard: proto::layout::NOFILE_HARD,
 }));
 
 #[allow(clippy::mut_from_ref)]

@@ -552,7 +552,8 @@ fn renew(call: &mut dyn Call, fd: i64, i: usize, why: u64) -> i64 {
     let ty = SOCK_STREAM
         | if nonblock { SOCK_NONBLOCK } else { 0 }
         | if cloexec { SOCK_CLOEXEC } else { 0 };
-    let new = unsafe { sc3(nr::SOCKET, AF_UNIX, ty, 0) };
+    // Moved onto the program's number below: open only for this call.
+    let new = crate::fdlim::transient(|| unsafe { sc3(nr::SOCKET, AF_UNIX, ty, 0) });
     if new < 0 {
         crate::sup::host_error(new, nr::SOCKET, proto::ctl::HE_SYSCALL);
     }

@@ -4,7 +4,7 @@ use super::fs::{after_mutation, fstat_raw, vkey, Data, FsOp};
 use super::*;
 use crate::state::proc;
 use crate::vtime::{self, Which};
-use proto::layout::FD_HIDDEN_MIN;
+use proto::layout::{FD_HIDDEN_MIN, FD_NEVER};
 
 fn entropy(call: &mut dyn Call, buf: u64, len: u64) -> i64 {
     set_class(call, Class::Virt);
@@ -35,7 +35,21 @@ fn readv_entropy(call: &mut dyn Call) -> i64 {
     total as i64
 }
 
+/// A descriptor number a call reads as a value or from a structure (no table row marks it):
+/// a hidden one becomes `FD_NEVER`, which no descriptor has, so the kernel answers as for any
+/// closed number, in its own order of checks. The kernel takes it as an `int`.
+pub fn unhidden(v: u64) -> u64 {
+    if v as i32 >= FD_HIDDEN_MIN {
+        FD_NEVER as u64
+    } else {
+        v
+    }
+}
+
 const TERMINAL_TYPE: u64 = 0x54; // 'T'
+const FICLONE: u64 = 0x4004_9409;
+const FICLONERANGE: u64 = 0x4020_940d;
+const FIDEDUPERANGE: u64 = 0xc018_9436;
 const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
@@ -53,6 +67,7 @@ const F_SETLK: u64 = 6;
 const F_SETLKW: u64 = 7;
 const F_OFD_SETLK: u64 = 37;
 const F_OFD_SETLKW: u64 = 38;
+const F_DUPFD_QUERY: u64 = 1027;
 const F_DUPFD_CLOEXEC: u64 = 1030;
 const F_SETPIPE_SZ: u64 = 1031;
 /// Pipe capacity set at creation, so the host's pipe limits are not an input.
@@ -73,6 +88,12 @@ fn ioctl(call: &mut dyn Call) -> Action {
         FIONREAD if super::inet::dgram_idx(fd).is_some() => {
             let i = super::inet::dgram_idx(fd).unwrap();
             Action::Return(super::udp::fionread(fd, i, call.arg(2)))
+        }
+        // The source descriptor of a clone and the destinations of a dedupe are values (in a
+        // register or a structure) the table row does not mark.
+        FICLONE | FICLONERANGE | FIDEDUPERANGE => {
+            set_class(call, Class::Pass);
+            Action::Return(clone_like(call, req))
         }
         // The requests listed with their arguments (`proto::table::cmds::IOCTL`): FIONREAD,
         // FIONBIO, FIONCLEX, FIOCLEX, and those whose answer is a function of the file on a
@@ -100,6 +121,67 @@ fn ioctl(call: &mut dyn Call) -> Action {
             Action::Return(refuse_request(call, b"ioctl", req, true, -e::ENOTTY))
         }
     }
+}
+
+/// `FICLONE`, `FICLONERANGE`, `FIDEDUPERANGE` with each descriptor they read `unhidden`. A
+/// clone checks its source right after reading it (the kernel's `ioctl_file_clone`), so a
+/// hidden one is `EBADF` there; a dedupe answers each destination in its own status, so a
+/// hidden one is set to `FD_NEVER` for the call and put back after it (the kernel copies the
+/// whole structure back). A structure the program cannot read is left to the kernel's `EFAULT`.
+fn clone_like(call: &mut dyn Call, req: u64) -> i64 {
+    let [fd, _, arg, ..] = args(call);
+    let r = match req {
+        FICLONE => unsafe { sc3(nr::IOCTL, fd, req, unhidden(arg)) },
+        // `struct file_clone_range`: `src_fd` first.
+        FICLONERANGE => match get::<u64>(arg) {
+            Ok(v) if unhidden(v) != v => {
+                // The destination is checked first (an `EBADF` too, for a closed one).
+                let ok = unsafe { sc2(nr::FCNTL, fd, F_GETFD) };
+                if ok < 0 {
+                    ok
+                } else {
+                    -e::EBADF
+                }
+            }
+            _ => unsafe { sc3(nr::IOCTL, fd, req, arg) },
+        },
+        _ => {
+            // `struct file_dedupe_range`: `dest_count` at 16, then 32-byte records from 24,
+            // each starting with `dest_fd`; the kernel takes at most a page of them.
+            // A structure it cannot write back is the kernel's `EFAULT` too, after the work:
+            // that is answered without the call.
+            let mut at = [(0u64, 0u64); 128];
+            let mut n = 0;
+            let mut fault = false;
+            let count = get::<u16>(arg + 16).map_or(0, |c| c as u64);
+            for i in 0..count.min(at.len() as u64) {
+                let p = arg + 24 + 32 * i;
+                match get::<u64>(p) {
+                    Ok(v) if unhidden(v) != v => {
+                        if put(p, unhidden(v)).is_err() {
+                            fault = true;
+                            break;
+                        }
+                        at[n] = (p, v);
+                        n += 1;
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+            let r = if fault {
+                -e::EFAULT
+            } else {
+                unsafe { sc3(nr::IOCTL, fd, req, arg) }
+            };
+            for &(p, v) in &at[..n] {
+                let _ = put(p, v);
+            }
+            r
+        }
+    };
+    host_check(call, r);
+    r
 }
 
 /// Carry the per-descriptor marks (entropy, synthesised /proc file) to a duplicate.
@@ -172,6 +254,13 @@ fn fcntl(call: &mut dyn Call) -> i64 {
             }
             r
         }
+        // Its argument is another descriptor, a value the table row does not mark: a hidden one
+        // is closed to the program.
+        F_DUPFD_QUERY => {
+            let r = unsafe { sc3(nr::FCNTL, fd, cmd, unhidden(arg)) };
+            host_check(call, r);
+            r
+        }
         F_SETFL if arg & O_DIRECT != 0 => {
             crate::path::refuse(b"O_DIRECT");
             unsafe { sc3(nr::FCNTL, fd, cmd, arg & !O_DIRECT) }
@@ -191,7 +280,7 @@ fn fcntl(call: &mut dyn Call) -> i64 {
             r
         }
         // The others: descriptor and status flags, F_GETLK, F_OFD_GETLK, pipe size, seals,
-        // write-life hints, F_DUPFD_QUERY.
+        // write-life hints.
         _ => {
             let r = raw(call);
             host_check(call, r);

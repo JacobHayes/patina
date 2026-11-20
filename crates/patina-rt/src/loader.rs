@@ -157,13 +157,15 @@ fn gnu_property(fd: u64, ph: &[Phdr], pr_type: u32) -> u32 {
 /// Map an ELF image. `path` must be NUL-terminated. `interp`: this is the interpreter.
 pub fn load(path: &[u8], dyn_base: u64, interp: bool) -> Image {
     unsafe {
-        let fd = sc4(
-            nr::OPENAT,
-            (-100i64) as u64,
-            path.as_ptr() as u64,
-            0o2000000,
-            0,
-        ); // O_RDONLY|O_CLOEXEC
+        let fd = crate::fdlim::transient(|| {
+            sc4(
+                nr::OPENAT,
+                (-100i64) as u64,
+                path.as_ptr() as u64,
+                0o2000000,
+                0,
+            )
+        }); // O_RDONLY|O_CLOEXEC
         if fd < 0 {
             fail(Setup::OpenImage, fd);
         }
@@ -660,13 +662,15 @@ fn hex(s: &[u8]) -> u64 {
 /// Read a whole (small) file with the runtime's own syscalls.
 pub fn read_file(path: &[u8], buf: &mut [u8]) -> usize {
     unsafe {
-        let fd = sc4(
-            nr::OPENAT,
-            (-100i64) as u64,
-            path.as_ptr() as u64,
-            0o2000000,
-            0,
-        );
+        let fd = crate::fdlim::transient(|| {
+            sc4(
+                nr::OPENAT,
+                (-100i64) as u64,
+                path.as_ptr() as u64,
+                0o2000000,
+                0,
+            )
+        });
         if fd < 0 {
             return 0;
         }

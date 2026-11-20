@@ -221,7 +221,7 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
     let mut z = [0u8; PATH_MAX + 1];
     z[..p.n].copy_from_slice(p.as_bytes());
     let how = [O_PATH | O_RDONLY_DIR, 0, RESOLVE_NO_SYMLINKS];
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT2,
             AT_FDCWD as u64,
@@ -229,7 +229,7 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
             how.as_ptr() as u64,
             24,
         )
-    };
+    });
     if fd < 0 {
         return None;
     }
@@ -245,7 +245,7 @@ fn open_parent(p: &PathBuf) -> Option<i64> {
 /// The entry of `pfd` other than `not` (and the swap's own names) that the draw picks, in an
 /// order that does not depend on the directory's.
 fn sibling(pfd: i64, not: &Name) -> Option<Name> {
-    let dfd = unsafe {
+    let dfd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             pfd as u64,
@@ -253,7 +253,7 @@ fn sibling(pfd: i64, not: &Name) -> Option<Name> {
             O_RDONLY_DIR,
             0,
         )
-    };
+    });
     if dfd < 0 {
         return None;
     }

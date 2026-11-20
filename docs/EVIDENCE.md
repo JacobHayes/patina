@@ -30,7 +30,7 @@ The list of difference kinds did not plateau: new kinds appeared up to the last 
 the protocol again after any change to the engine, kernel, host or filesystem. A sweep
 runs each seed once; repeating runs buys nothing per run.
 
-### The thirteen differences found, and how each ended
+### The fourteen differences found, and how each ended
 
 | | What differed | Kind | Ended |
 |---|---|---|---|
@@ -47,6 +47,7 @@ runs each seed once; repeating runs buys nothing per run.
 | B11 | stdout extent count by writeback timing | deferred kernel work | stdio are memfds |
 | B12 | `MADV_COLLAPSE` 0 or `EAGAIN` by huge-page availability | host resource | answers `EINVAL`, recorded |
 | B13 | wire step read sockets of a process the kernel was still tearing down | async kernel work read before its barrier (engine bug) | exit barrier first in the step |
+| B14 | descriptor numbers past the shown `RLIMIT_NOFILE` moved by a spin probe's descriptors (found on a slow CI runner, not by the matrix) | host timing through the runtime's own descriptors (engine bug) | the shown soft limit is the kernel's; runtime descriptors from 3000, a probe's at fixed numbers (`sandbox/15-fdspace`) |
 
 ### Bucket D: detected only on replay, by design
 
@@ -1196,10 +1197,8 @@ anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 - `preempt-permille = 0` livelocks Go (it polls the clock forever).
 - Per-user pipe accounting is shared by every sandbox of the uid: 9 parallel guests with 500
   pipes each end `internal`.
-- The virtual inode table holds 16,384 objects; the next ends `internal`. The virtual
-  `RLIMIT_NOFILE` is not enforced (`EMFILE` at the real limit: 4,027 descriptors of the
-  program, the shadow stores holding the top 64). A launcher `RLIMIT_FSIZE` below the
-  boundary log's size kills `patina` with no outcome.
+- The virtual inode table holds 16,384 objects; the next ends `internal`. A launcher
+  `RLIMIT_FSIZE` below the boundary log's size kills `patina` with no outcome.
 - Stdio are held in memory up to `PATINA_STDIO_MAX` each (1 GiB).
 - Busy many-waiter workloads re-attempt often (16-thread ring: 7.4 attempts per blocking call).
 - Bad guest pointers in path strings and futex words are a runtime fault (`internal`), not

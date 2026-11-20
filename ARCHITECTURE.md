@@ -1316,7 +1316,7 @@ pages that differ.
 
 The shadows are one store for the whole run (`proto::oplog::Shadows`), with one invariant: a
 file's shadow is the replay of the operation log onto that file. A slot is a sparse memfd at a
-hidden descriptor (`FD_SHADOWS`, the top 64 numbers below the sandbox's `RLIMIT_NOFILE`),
+hidden descriptor (`FD_SHADOWS`, the top 64 numbers below the sandbox's real `RLIMIT_NOFILE`),
 made by the supervisor at each incarnation's start and inherited by every guest; the table of
 which inode each slot holds is in the control region. The store is kept in one place: every
 record appended to the log, by a runtime (`rt::oplog::append`) or by the supervisor
@@ -1450,7 +1450,7 @@ deterministic.
 By test: whether everything observable really passes through the table is checked, not
 proved. `patina verify` repeats a seed while moving it across CPUs, under load, with address
 randomization on and in another sandbox; a sweep replays the first seed of each finding. The
-measured record, with the thirteen differences found and closed, is in
+measured record, with the fourteen differences found and closed, is in
 [docs/EVIDENCE.md](docs/EVIDENCE.md). New kinds of difference were still appearing when the
 last matrix ran, so a difference is a Patina bug to report, not noise.
 
@@ -1517,6 +1517,28 @@ Enforced:
   reaches those, since the check refused the call first. Cost: a few comparisons per pointer,
   and for iovecs and `msghdr`s one fault-safe read per entry; a call with no pointer pays a
   slice-length test (`costs getppid` and `costs pipe` within run-to-run spread, EVIDENCE).
+- **Descriptors.** The invariant: the program's descriptors are the numbers below the soft
+  `RLIMIT_NOFILE` it is shown (1024 at the start, raised or lowered as on Linux, never above
+  its hard limit of at most 2048), and every descriptor of the runtime, the supervisor and the
+  launcher is at 3000 (`FD_HIDDEN_MIN`) or above, so nothing the program sees depends on which
+  of them exist. The kernel enforces it (`fdlim.rs`): the process's real soft limit is the
+  program's, kept by the kernel across `fork` and `execve`, so every allocation the program
+  makes (the open family, `dup`, `F_DUPFD`, sockets, pipes, `SCM_RIGHTS`) and every target it
+  names (`dup2`, `dup3`) answers `EMFILE`, `EBADF` or `EINVAL` exactly where Linux would. The
+  real hard limit is the sandbox's 4096; the runtime lifts the soft limit to it around its own
+  allocations and puts it back, and retries a descriptor it holds for a moment with the range
+  open when the program's table is full, so the program's count never makes a runtime step
+  fail. A hidden number the program names answers `EBADF` (`poll`: `POLLNVAL`; a `select` set:
+  `EBADF`), `close_range` stops below them, and `/proc/self/fd` leaves them out. A descriptor
+  a call reads as a value or from a structure, which no table row marks (`F_DUPFD_QUERY`'s
+  argument, `waitid`'s `P_PIDFD` id, a clone's source, a dedupe's destinations), is passed as
+  2999 (`FD_NEVER`) when hidden: no descriptor ever has that number, so the kernel answers as
+  for any closed one. A spin probe's descriptors sit at fixed numbers (`FD_PROBE_*`), so one
+  that host timing starts moves no other number. One difference from Linux remains, the same
+  on every run: Linux cuts `select`'s count to its table's size (64 for a small table), and
+  here the table always reaches past 3000, so an unopened number in a set past that size is
+  `EBADF` here and ignored there. Regression `sandbox/15-fdspace` (against native Linux, and
+  with a spin probe against none).
 - **`/proc` directories.** The invariant: no path reachable through a `/proc` directory
   descriptor is refused by absolute path, and no runtime descriptor is visible or reachable
   through `/proc/self/fd`. The policy (`path.rs`) is lexical, so the runtime keeps it lexical

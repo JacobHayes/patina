@@ -9,6 +9,7 @@ mod compute;
 mod entry;
 mod exec;
 mod fault;
+mod fdlim;
 mod guest;
 mod inject;
 mod insn;

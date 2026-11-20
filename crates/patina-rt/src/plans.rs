@@ -165,15 +165,16 @@ fn ask(fd: u64, off: u64) -> Option<([u64; REPLY_WORDS], u64)> {
         controllen: 24,
         flags: 0,
     };
-    // MSG_CMSG_CLOEXEC
-    let r = unsafe {
+    // MSG_CMSG_CLOEXEC. The plan arrives at the lowest free number, closed before the
+    // program runs again: any number, whatever the program's limit.
+    let r = crate::fdlim::raised(|| unsafe {
         sc3(
             nr::RECVMSG,
             FD_PLAN as u64,
             &mut rm as *mut MsgHdr as u64,
             0x4000_0000,
         )
-    };
+    });
     if r != 8 * REPLY_WORDS as i64 || w[R_STATUS] as i64 > (NONE_EMPTY as i64) {
         crate::sup::host_error(r.min(0), w[R_STATUS], proto::ctl::HE_SYSCALL);
     }
@@ -376,7 +377,9 @@ fn apply(
                 cursor
             };
             // The original file, hidden, for putting its pages back.
-            let orig_fd = unsafe { sc3(nr::FCNTL, fd, 1030, proto::layout::FD_RT_DYN as u64) };
+            let orig_fd = crate::fdlim::raised(|| unsafe {
+                sc3(nr::FCNTL, fd, 1030, proto::layout::FD_RT_DYN as u64)
+            });
             let fixed = MAP_PRIVATE | MAP_FIXED_NOREPLACE;
             if orig_fd < 0 || !tramps(tramp, w, plan, w[R_NTRUNS], prot & KEEP) {
                 if orig_fd >= 0 {

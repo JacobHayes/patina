@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 28;
+pub const LAYOUT_VERSION: u64 = 29;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -767,6 +767,9 @@ pub struct Slot {
     /// which moves a realtime deadline when the node's clock is stepped. Not part of the request:
     /// the log is the same whatever it says.
     pub clock_flags: AtomicU64,
+    /// The process's hard `RLIMIT_NOFILE` as the program sees it, across `execve`: written by
+    /// the runtime just before the call, read by the new image at its start (0: the default).
+    pub nofile_hard: AtomicU64,
 }
 
 /// `Slot::clock_flags`: an absolute `CLOCK_REALTIME` deadline, and a timerfd's
@@ -1145,6 +1148,7 @@ setup_steps! {
     PacKeys = "PR_PAC_SET_ENABLED_KEYS",
     RestorerPage = "cannot map the signal restorer page",
     Counters = "branch counters are not supported on this architecture",
+    Rlimit = "cannot set the program's RLIMIT_NOFILE",
 }
 /// A real signal from outside the sandbox is pending (args[0] = the signal number).
 pub const HE_OUTSIDE_SIGNAL: u64 = 4;

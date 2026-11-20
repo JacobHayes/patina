@@ -21,7 +21,7 @@ pub fn memfd() -> u64 {
         return fd as u64;
     }
     let path = b"/proc/self/mem\0";
-    let r = unsafe {
+    let r = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             (-100i64) as u64,
@@ -29,7 +29,7 @@ pub fn memfd() -> u64 {
             2 | 0x80000,
             0,
         )
-    };
+    });
     if r < 0 {
         fail(PMU_E_OPEN, (-r) as u64);
     }
@@ -40,9 +40,7 @@ pub fn memfd() -> u64 {
 
 /// Move a descriptor to the runtime's hidden range (close-on-exec).
 pub fn hide(fd: i64) -> i64 {
-    const F_DUPFD_CLOEXEC: u64 = 1030;
-    let h = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, FD_RT_DYN as u64) };
-    unsafe { sc1(nr::CLOSE, fd as u64) };
+    let h = crate::fdlim::hide(fd, FD_RT_DYN);
     if h < 0 {
         fail(PMU_E_OPEN, (-h) as u64);
     }
@@ -65,7 +63,8 @@ struct MsgHdr {
 /// Ask the launcher for a counter on this thread: send a thread pidfd, get the counter.
 pub fn broker_open(tid: i32) -> i64 {
     const PIDFD_THREAD: u64 = 0x80;
-    let pidfd = unsafe { sc2(nr::PIDFD_OPEN, tid as u64, PIDFD_THREAD) };
+    let pidfd =
+        crate::fdlim::transient(|| unsafe { sc2(nr::PIDFD_OPEN, tid as u64, PIDFD_THREAD) });
     if pidfd < 0 {
         return pidfd;
     }
@@ -110,14 +109,15 @@ pub fn broker_open(tid: i32) -> i64 {
         flags: 0,
         _p2: 0,
     };
-    let r = unsafe {
+    // The counter arrives at the lowest free number: any, as it is hidden at once.
+    let r = crate::fdlim::raised(|| unsafe {
         sc3(
             nr::RECVMSG,
             FD_PMU as u64,
             &mut rm as *mut MsgHdr as u64,
             0x4000_0000,
         )
-    };
+    });
     if r < 8 {
         return if r < 0 { r } else { -e::EIO };
     }

@@ -196,7 +196,7 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, (i64, Why)> {
         }
         l += path::fmt_dec(&mut lp.b[l..], dirfd as u64);
         lp.b[l] = 0;
-        unsafe {
+        crate::fdlim::transient(|| unsafe {
             sc4(
                 nr::OPENAT,
                 AT_FDCWD as u64,
@@ -204,14 +204,16 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, (i64, Why)> {
                 O_RDONLY_CLOEXEC,
                 0,
             )
-        }
+        })
     } else {
         let nofollow = if flags & AT_SYMLINK_NOFOLLOW != 0 {
             proto::abi::open::O_NOFOLLOW
         } else {
             0
         };
-        unsafe { sc4(nr::OPENAT, dirfd as u64, ap, O_RDONLY_CLOEXEC | nofollow, 0) }
+        crate::fdlim::transient(|| unsafe {
+            sc4(nr::OPENAT, dirfd as u64, ap, O_RDONLY_CLOEXEC | nofollow, 0)
+        })
     };
     if fd == -e::EISDIR || fd == -e::ENXIO {
         return Err((-e::EACCES, Why::NotRegular));
@@ -290,7 +292,7 @@ fn check_elf(fd: i64, head: &[u8]) -> Result<(), (i64, Why)> {
 /// the kernel's errors: `EIO` for a header it cannot read whole, `ELIBBAD` for one that is not
 /// a 64-bit ELF image of this architecture or whose program headers are cut off.
 fn interp_image(ip: &PathBuf) -> Result<(), (i64, Why)> {
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             AT_FDCWD as u64,
@@ -298,7 +300,7 @@ fn interp_image(ip: &PathBuf) -> Result<(), (i64, Why)> {
             O_RDONLY_CLOEXEC,
             0,
         )
-    };
+    });
     if fd < 0 {
         return Err((fd, Why::ElfInterpBad));
     }
@@ -640,6 +642,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
             ign |= 1 << (s - 1);
         }
     }
+    crate::fdlim::before_exec();
     crate::sup::call_sup(Op::Exec, [ign, 0, 0, 0, 0, 0]);
     let r = unsafe {
         sc6(
@@ -659,7 +662,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
 /// descriptors and synthesised `/proc` files are found again by name, timerfds by asking the
 /// supervisor about each eventfd.
 pub fn rescan_marks() {
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             AT_FDCWD as u64,
@@ -667,7 +670,7 @@ pub fn rescan_marks() {
             proto::abi::open::O_DIRECTORY | 0o2000000, // O_CLOEXEC
             0,
         )
-    };
+    });
     if fd < 0 {
         return;
     }

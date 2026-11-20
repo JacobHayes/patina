@@ -754,7 +754,7 @@ pub fn open(k: Synth, cloexec: bool) -> i64 {
     l += fmt_dec(&mut lp[l..], fd as u64);
     lp[l] = 0;
     const O_CLOEXEC: u64 = 0o2000000;
-    let ro = unsafe {
+    let ro = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             (-100i64) as u64,
@@ -762,7 +762,7 @@ pub fn open(k: Synth, cloexec: bool) -> i64 {
             if cloexec { O_CLOEXEC } else { 0 },
             0,
         )
-    };
+    });
     if ro < 0 {
         crate::sup::host_error(ro, nr::OPENAT, proto::ctl::HE_SYSCALL);
     }
@@ -1008,7 +1008,7 @@ pub fn getdents_fds(fd: i64, buf: u64, len: u64, old: bool) -> i64 {
     // The calling process's descriptors (after a fork the inherited descriptor still names
     // the parent's): a fresh `/proc/self/fd`, at a runtime number, read from the descriptor's
     // position (the kernel's position in such a listing is the next descriptor number + 2).
-    let fresh = crate::spin::open_hidden(b"/proc/self/fd\0", proto::abi::open::O_DIRECTORY);
+    let fresh = crate::spin::open_hidden(b"/proc/self/fd\0", proto::abi::open::O_DIRECTORY, None);
     if fresh < 0 {
         return -e::EIO;
     }

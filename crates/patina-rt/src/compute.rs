@@ -326,7 +326,7 @@ pub fn start_points() {
 /// program is named) for the program itself, anonymous memory, or a map that cannot be read.
 fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
     use crate::raw::*;
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             (-100i64) as u64,
@@ -334,7 +334,7 @@ fn image_at(pc: u64, out: &mut [u8; 4096]) -> Option<usize> {
             0o2000000,
             0,
         )
-    };
+    });
     if fd < 0 {
         return None;
     }

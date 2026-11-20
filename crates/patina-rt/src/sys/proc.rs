@@ -207,6 +207,7 @@ fn vfork(call: &mut dyn Call, flags: u64, stack: u64, ptid: u64, ctid: u64) -> i
         t.vfork = 1;
         t.valt = valt; // CLONE_VM|CLONE_VFORK keeps the alternate stack
         t.vf_sigact = proc().sigact;
+        t.vf_nofile_hard = crate::fdlim::hard();
         t.clear_tid = if flags & CLONE_CHILD_CLEARTID != 0 {
             ctid
         } else {
@@ -329,6 +330,13 @@ fn wait4(call: &mut dyn Call) -> i64 {
 
 fn waitid(call: &mut dyn Call) -> i64 {
     let [idtype, id, infop, options, urusage, ..] = args(call);
+    // `P_PIDFD`'s id is a descriptor, a value the table row does not mark.
+    const P_PIDFD: u64 = 3;
+    let id = if idtype == P_PIDFD {
+        super::fd::unhidden(id)
+    } else {
+        id
+    };
     loop {
         let mut info = [0u64; 16];
         let r = unsafe {
@@ -402,7 +410,7 @@ pub const STACK_LIMIT: u64 = 8 << 20;
 fn rlimit(res: u64) -> Result<[u64; 2], i64> {
     match res {
         RLIMIT_STACK => Ok([STACK_LIMIT, RLIM_INFINITY]),
-        RLIMIT_NOFILE => Ok([1024, 2048]),
+        RLIMIT_NOFILE => Ok(crate::fdlim::get()),
         // An unprivileged process may neither lower its nice value nor take a real-time
         // policy (`sys::sched`).
         RLIMIT_NICE | RLIMIT_RTPRIO => Ok([0, 0]),
@@ -471,26 +479,44 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         }
         nr::PRLIMIT64 => {
-            let [pid, res, _new, old, ..] = args(call);
+            let [pid, res, new, old, ..] = args(call);
             let own = call.thread().pid as u64;
             if pid != 0 && pid != own {
                 crate::sys::stop_here(call);
             }
-            match rlimit(res) {
-                Ok(v) => {
-                    if old != 0 {
-                        put(old, v).map(|_| 0).unwrap_or_else(|e| e)
-                    } else {
-                        0
-                    }
+            // The kernel's order: the new limits read, the resource checked, the new limits
+            // checked and set, the old ones written. Only the descriptor limit is enforced.
+            let set = if res == RLIMIT_NOFILE && new != 0 {
+                match get::<[u64; 2]>(new) {
+                    Ok(n) => Some(n),
+                    Err(e) => return Action::Return(e),
                 }
-                Err(e) => e,
+            } else {
+                None
+            };
+            let v = match rlimit(res) {
+                Ok(v) => v,
+                Err(e) => return Action::Return(e),
+            };
+            if let Some(n) = set {
+                let r = crate::fdlim::set(n);
+                if r != 0 {
+                    return Action::Return(r);
+                }
+            }
+            if old != 0 {
+                put(old, v).map(|_| 0).unwrap_or_else(|e| e)
+            } else {
+                0
             }
         }
         nr::GETRLIMIT => rlimit(call.arg(0))
             .and_then(|v| put(call.arg(1), v))
             .map(|_| 0)
             .unwrap_or_else(|e| e),
+        nr::SETRLIMIT if call.arg(0) == RLIMIT_NOFILE => {
+            get::<[u64; 2]>(call.arg(1)).map_or_else(|e| e, crate::fdlim::set)
+        }
         nr::SETRLIMIT => rlimit(call.arg(0)).map(|_| 0).unwrap_or_else(|e| e),
         // The codes listed with their arguments (`proto::table::cmds::ARCH_PRCTL`): the FS and
         // GS bases.

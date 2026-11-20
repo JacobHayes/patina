@@ -127,7 +127,7 @@ fn map(sfd: u64, addr: u64, len: u64, flags: u64) -> i64 {
     p[..pre.len()].copy_from_slice(pre);
     let n = crate::path::fmt_dec(&mut p[pre.len()..], sfd);
     p[pre.len() + n] = 0;
-    let fd = unsafe {
+    let fd = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             -100i64 as u64, // AT_FDCWD
@@ -135,7 +135,7 @@ fn map(sfd: u64, addr: u64, len: u64, flags: u64) -> i64 {
             if ro { 0 } else { 2 } | 0o2000000, // O_RDONLY or O_RDWR, O_CLOEXEC
             0,
         )
-    };
+    });
     if fd < 0 {
         crate::sup::host_error(fd, nr::SHMAT, proto::ctl::HE_SYSCALL);
     }

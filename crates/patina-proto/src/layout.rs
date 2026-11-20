@@ -66,8 +66,21 @@ pub const ALT_SIZE: u64 = 256 << 10;
 
 pub const PAGE: u64 = 4096;
 
-/// Hidden descriptors. The guest sees `EBADF` for any number `>= FD_HIDDEN_MIN`.
+/// Hidden descriptors: every descriptor of the runtime, the supervisor and the launcher in a
+/// guest process is at `FD_HIDDEN_MIN` or above. The program's own are below the soft
+/// `RLIMIT_NOFILE` it is shown, which the kernel enforces and which can never exceed
+/// `NOFILE_HARD` (`patina-rt`'s `fdlim`); a number from here named by the program is `EBADF`.
 pub const FD_HIDDEN_MIN: i32 = 3000;
+/// The `RLIMIT_NOFILE` a program starts with (soft, hard). The hard limit is the most it can
+/// ever be shown or set, below every hidden descriptor.
+pub const NOFILE_SOFT: u64 = 1024;
+pub const NOFILE_HARD: u64 = 2048;
+const _: () = assert!(NOFILE_SOFT <= NOFILE_HARD && NOFILE_HARD <= FD_HIDDEN_MIN as u64);
+/// A number no descriptor ever has (at or above every limit a program can set, below the
+/// hidden ones): a hidden number a call reads as a value or from a structure, not from an
+/// argument its table row marks, is passed as this, so the kernel answers as for any closed one.
+pub const FD_NEVER: i32 = FD_HIDDEN_MIN - 1;
+const _: () = assert!(NOFILE_HARD <= FD_NEVER as u64);
 pub const FD_CTL: i32 = 3000;
 pub const FD_LOG: i32 = 3001;
 pub const FD_OPLOG_META: i32 = 3002;
@@ -105,9 +118,18 @@ pub const FD_SHADOWS: i32 = FD_LIMIT - crate::oplog::SHADOW_SLOTS as i32;
 /// The sandbox's `RLIMIT_NOFILE`: one more than the highest descriptor number.
 pub const FD_LIMIT: i32 = 4096;
 const _: () = assert!(FD_SHADOWS > FD_RT_DYN + 512);
-/// Hidden descriptors the runtime makes for itself (counters, `/proc/self/mem`) are
+/// Hidden descriptors the runtime makes for itself (counters, mappings' duplicates) are
 /// placed at the lowest free number from here.
 pub const FD_RT_DYN: i32 = 3100;
+/// A spin probe's descriptors, at fixed numbers: a probe starts when host timing says, so what
+/// it opens must not move the numbers of anything opened after it. `/proc/self/mem`,
+/// `/proc/self/pagemap`, `/proc/self/maps`, the written-page tracker (x86_64:
+/// `/proc/self/clear_refs`; arm64: a userfaultfd).
+pub const FD_PROBE_MEM: i32 = 3090;
+pub const FD_PROBE_PAGEMAP: i32 = 3091;
+pub const FD_PROBE_MAPS: i32 = 3092;
+pub const FD_PROBE_TRACK: i32 = 3093;
+const _: () = assert!(FD_PROBE_TRACK < FD_RT_DYN && FD_PROBE_MEM > FD_NODES);
 /// A thread's counter page is mapped at this offset in its alternate stack (after the
 /// thread state, far below where the stack grows down to).
 pub const PMU_PAGE_OFF: u64 = 4096;

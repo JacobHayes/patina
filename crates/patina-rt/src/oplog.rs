@@ -71,7 +71,7 @@ fn readable(fd: i64) -> i64 {
     let digits = 24 - i;
     p.copy_within(i..24, 14);
     p[14 + digits] = 0;
-    let r = unsafe {
+    let r = crate::fdlim::transient(|| unsafe {
         sc4(
             nr::OPENAT,
             (-100i64) as u64,
@@ -79,7 +79,7 @@ fn readable(fd: i64) -> i64 {
             0o2000000,
             0,
         )
-    }; // O_RDONLY|O_CLOEXEC
+    }); // O_RDONLY|O_CLOEXEC
     if r < 0 {
         crate::sup::host_error(r, nr::OPENAT, proto::ctl::HE_RUNTIME_ASSERT);
     }
@@ -884,7 +884,7 @@ pub fn publish_maps() {
 }
 
 const F_DUPFD_CLOEXEC: u64 = 1030;
-const HIDDEN_DUP_BASE: u64 = 3100;
+const HIDDEN_DUP_BASE: u64 = proto::layout::FD_RT_DYN as u64;
 
 fn track(addr: u64, len: u64, ino: u64, off: u64, hfd: i64) {
     let t = MAPS.get();
@@ -922,7 +922,9 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
     if fl < 0 || fl & 3 != 2 {
         return; // not O_RDWR: the mapping can never be written
     }
-    let hfd = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
+    let hfd = crate::fdlim::raised(|| unsafe {
+        sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE)
+    });
     if hfd < 0 {
         crate::sup::host_error(hfd, nr::FCNTL, proto::ctl::HE_SYSCALL);
     }
@@ -1000,7 +1002,9 @@ pub fn on_munmap_done(addr: u64, len: u64) {
                     crate::sup::capacity(proto::ctl::LIMIT_SHARED_MAPS, MAX_MAPS as u64);
                 }
                 let cut = hi - m.addr;
-                let hfd = unsafe { sc3(nr::FCNTL, m.fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE) };
+                let hfd = crate::fdlim::raised(|| unsafe {
+                    sc3(nr::FCNTL, m.fd as u64, F_DUPFD_CLOEXEC, HIDDEN_DUP_BASE)
+                });
                 if hfd < 0 {
                     crate::sup::host_error(hfd, nr::FCNTL, proto::ctl::HE_SYSCALL);
                 }

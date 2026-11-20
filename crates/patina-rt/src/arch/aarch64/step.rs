@@ -309,13 +309,13 @@ fn register(pagemap: i32) -> bool {
     const WP_ASYNC: u64 = 1 << 15;
     const MODE_WP: u64 = 2;
     const WRITABLE: u64 = 2;
-    const F_DUPFD_CLOEXEC: u64 = 1030;
-    let fd = unsafe { sc1(nr::USERFAULTFD, O_CLOEXEC | UFFD_USER_MODE_ONLY) };
+    let fd = crate::fdlim::transient(|| unsafe {
+        sc1(nr::USERFAULTFD, O_CLOEXEC | UFFD_USER_MODE_ONLY)
+    });
     if fd < 0 {
         return false;
     }
-    let h = unsafe { sc3(nr::FCNTL, fd as u64, F_DUPFD_CLOEXEC, FD_RT_DYN as u64) };
-    unsafe { sc1(nr::CLOSE, fd as u64) };
+    let h = crate::fdlim::place(fd, proto::layout::FD_PROBE_TRACK);
     if h < 0 {
         return false;
     }
