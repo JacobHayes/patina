@@ -84,6 +84,8 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
 - **Budgets are fixed by cutting.** Over budget, shrink a script or move it to `area`. Never
   raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
+  A script killed over its budget leaves `hang.txt` in its kept run directory (`tests/hang.py`:
+  its processes and threads at the kill, and the last records of each run it left unfinished).
   `tests/run.py` scales budgets and the ceiling by a calibration factor in [1x, 3x] measured
   at the start of a tier (1x on an unloaded runner or a faster host; printed in the summary);
   land's soft ceiling is not scaled.

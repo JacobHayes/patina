@@ -21,7 +21,8 @@ second; it sees the tier it runs for in CHECK_TIER. Scripts run in
 parallel, at most CHECK_SLOTS sandboxes at once (default half the CPUs, at least 8), longest
 budget first. Each gets a
 private RUNS directory; a script still running at its budget is killed with its whole session
-and fails, as does one that leaves a process behind (tests/leftovers.py on its RUNS; those are
+and fails (first tests/hang.py writes RUNS/hang.txt: its processes and threads, what each was
+doing, and the last records of every run it left unfinished), as does one that leaves a process behind (tests/leftovers.py on its RUNS; those are
 killed too, so a failed script's directory is quiet when it is kept or uploaded). Passing scripts' run
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
@@ -196,6 +197,14 @@ def kill_session(sid):
         time.sleep(0.05)
 
 
+def hang(args):
+    """tests/hang.py: what a script killed over its budget was doing, into RUNS/hang.txt."""
+    try:
+        subprocess.run([sys.executable, "-I", os.path.join(HERE, "hang.py")] + args, timeout=300)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def main():
     args = sys.argv[1:]
     if not args:
@@ -252,6 +261,7 @@ def main():
                 rc = p.wait(timeout=s["budget"])
                 why = "" if rc == 0 else f"exit {rc}"
             except subprocess.TimeoutExpired:
+                hang(["snapshot", str(p.pid), runs])
                 kill_session(p.pid)
                 p.wait()
                 why = f"over budget ({s['budget']} s), killed"
@@ -280,6 +290,9 @@ def main():
                 left = r.stdout.strip()
                 if not left:
                     break
+        if why.startswith("over budget"):
+            hang(["logs", runs])
+            why += f"; what it was doing: {os.path.join(runs, 'hang.txt')}"
         ok = not why
         if ok and not keep:
             subprocess.run(["rm", "-rf", runs])
