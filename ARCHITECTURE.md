@@ -1129,6 +1129,35 @@ data a guest sends (so a long-lived connection meets one), a refusal or timeout 
 connect, a delay or split per delivery. A partition is one window of virtual time, its start
 and length resolved from the seed with the plan, in which deliveries are held.
 
+TCP keepalive (`Sup::ka_fire`, `sup/wire.rs`) follows the kernel's `tcp_keepalive_timer` per
+side of a connection. With `SO_KEEPALIVE` on, a side that has heard nothing from its peer for
+`TCP_KEEPIDLE` (default 7,200 s) sends a probe, then one every `TCP_KEEPINTVL` (75 s); any
+segment delivered to it (and, when the way back is open, any it sent that was delivered)
+resets the count. After `TCP_KEEPCNT` (9) unanswered probes, or with `TCP_USER_TIMEOUT` set
+once that long has passed since it last heard and a probe went unanswered, it gives up: its
+socket reports `ETIMEDOUT`, and its RST reaches the peer if the peer can be reached then (else
+the peer's next segment or probe is answered with one). A side with unacknowledged data of
+its own sends no probes. Turning keepalive on starts the first probe one idle time later;
+changing the idle time counts it from when the side last heard (or now). A probe is a wire
+event: it goes unanswered across a cut either way, to a machine that is down, and in a
+`net-blackout` window (on loopback too); a peer whose machine came back without the
+connection, or whose side gave up across a cut, answers with a RST (`ECONNRESET`); otherwise
+it is answered after the link's delay both ways. The options read back as set (the kernel's
+ranges, `EINVAL` outside them), and an accepted socket starts with its listener's.
+
+Determinism and cost: the timer is a virtual-clock event that exists only while the peer may
+not answer (a cut either way or a machine down when a cut begins or the timer is set, a
+blackout window ahead). Answered probes are not modelled one by one: they change only when
+the first unanswered one comes ("Limits"). So an idle connection with a reachable peer costs
+no event and no record for any length of time (an idle hour at `TCP_KEEPIDLE` 1 s: none).
+Each unanswered probe is a `DEC_WIRE_PROBE` record [conn, side, count] (`patina log events`:
+`"event":"probe"`), one per `TCP_KEEPINTVL` while an outage lasts, until the side gives up. A
+`setsockopt` of one of the options on a connected socket marks it, as a send does, and the
+supervisor sets the timer at its next step; nothing is recorded for it, so a run whose probes
+are all answered (Go's default keepalive, a database client's) keeps the digest it had before
+keepalive was modelled, and only one with an unanswered probe or a keepalive reset has a new
+one.
+
 Datagrams (`sup/udp.rs`, `rt/sys/udp.rs`): a UDP socket in the guest is a real unix
 `SOCK_SEQPACKET` socket whose peer the supervisor holds, one per socket and never shared
 between sockets. Ports, addresses, connection state and options live in the shared socket
@@ -1538,6 +1567,15 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   are refused), as in the kernel, where nothing else holds the socket; one that a duplicate
   descriptor, another process or an epoll set also holds ends the run `unsupported` (its real
   socket is replaced). A stopped listener cannot be bound, listened on or connected again.
+  Keepalive: answered probes are not modelled one by one, so the time of the first
+  unanswered one assumes they came every `max(TCP_KEEPINTVL, TCP_KEEPIDLE)` with no round
+  trip (Linux's drift by each round trip is left out), and a change of `TCP_KEEPIDLE` while a
+  side is probing takes effect after it; a peer that closed answers probes for ever (Linux's
+  orphaned socket answers for `tcp_fin_timeout`, 60 s, then resets); data delivered while the
+  way back is cut counts as unacknowledged (no probes), but its retransmissions do not time
+  out (Linux's would after `tcp_retries2`); a connection not yet accepted that gives up is
+  reported `ECONNRESET` at its accept; an accepted socket starts with its listener's keepalive
+  options and no other (Linux copies them all, `TCP_USER_TIMEOUT` included).
 - **Fixed tables.** The runtime keeps some state in fixed tables shared by the run: virtual
   inode numbers of pipes, sockets and timers (16,384 per run, never reused), shared writable
   work-tree mappings (128 per process, of 64 files at once in the run; the shadow of each

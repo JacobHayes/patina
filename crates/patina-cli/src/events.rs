@@ -537,9 +537,12 @@ impl<W: Write> Export<'_, W> {
         Value::from(v).to_string()
     }
 
-    /// The node events (`node`, `net`) of a decision record, if it is one.
+    /// The node events (`node`, `net`) of a decision record, if it is one (an unanswered
+    /// keepalive probe also in a run without nodes).
     fn node_record(&mut self, k: usize, r: &Rec) -> Option<Res<()>> {
-        if r.kind != RecKind::SupDecision as u8 || self.nodes.is_empty() {
+        if r.kind != RecKind::SupDecision as u8
+            || self.nodes.is_empty() && r.nr != proto::ctl::DEC_WIRE_PROBE
+        {
             return None;
         }
         let a = r.args;
@@ -638,6 +641,15 @@ impl<W: Write> Export<'_, W> {
                     .num("conn", a[0])
                     .str("side", if a[1] != 0 { "server" } else { "client" })
                     .str("name", &self.node_name(a[2]));
+                "net"
+            }
+            // An unanswered keepalive probe (`sup::wire`): [conn, side, probes so far].
+            proto::ctl::DEC_WIRE_PROBE => {
+                l = Line::at("net", k, r);
+                l.str("event", "probe")
+                    .num("conn", a[0])
+                    .str("side", if a[1] != 0 { "server" } else { "client" })
+                    .num("unanswered", a[2]);
                 "net"
             }
             proto::ctl::DEC_WIRE_HEAL => {

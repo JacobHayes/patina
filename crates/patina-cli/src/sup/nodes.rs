@@ -326,6 +326,9 @@ impl Sup {
         if !opened.is_empty() {
             self.wire_heal(&opened);
         }
+        if verb == NET_CUT {
+            self.ka_arm_all();
+        }
         Next::Continue(0)
     }
 

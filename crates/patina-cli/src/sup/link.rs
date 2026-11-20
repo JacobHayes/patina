@@ -215,6 +215,8 @@ impl Sup {
         }
         self.links.active = Some(k);
         self.links.acted = false;
+        // Keepalive probes across the cut now go unanswered.
+        self.ka_arm_all();
         self.links.ev = Some(self.sched.schedule(
             now + len,
             Event::Node {

@@ -395,6 +395,8 @@ pub const NSUB_TIMEOUT: u64 = 2;
 pub const NSUB_RESET: u64 = 3;
 pub const NSUB_HANDSHAKE: u64 = 4;
 pub const NSUB_FIN: u64 = 5;
+/// A keepalive probe's round trip (`sup::wire`).
+pub const NSUB_KEEPALIVE: u64 = 6;
 /// Pieces of `net-chunk-max` (8 | direction).
 pub const NSUB_CHUNK: u64 = 8;
 

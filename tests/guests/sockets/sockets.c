@@ -17,6 +17,8 @@
 //   sockets chaos CLIENTS MSGS  fault-tolerant traffic (for runs with mixed network faults)
 //   sockets pingpong N          N one-byte round trips between two processes (cost)
 //   sockets forkserver | execinherit | exitclose [MIN_MS]      (processes)
+//   sockets keepalive opts|alive|closed     TCP keepalive; the same output natively
+//   sockets keepalive cut|survive|peer-rst|cadence  under `net-blackout` (see ka_blackout, ka_peer)
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -1148,6 +1150,178 @@ static void exitclose(long long min_ms) {
     wait_child(p);
 }
 
+// ---- keepalive ----
+
+static int geti(int fd, int level, int name) {
+    int v = -1;
+    socklen_t l = sizeof v;
+    CHECK(getsockopt(fd, level, name, &v, &l) == 0, "getsockopt %d %d", level, name);
+    return v;
+}
+
+static int seti(int fd, int level, int name, int v) {
+    return setsockopt(fd, level, name, &v, sizeof v) == 0 ? 0 : errno;
+}
+
+/// Keepalive on `fd`: idle, interval, count (seconds, probes).
+static void keepalive(int fd, int idle, int intvl, int cnt) {
+    CHECK(seti(fd, SOL_SOCKET, SO_KEEPALIVE, 1) == 0, "SO_KEEPALIVE");
+    CHECK(seti(fd, IPPROTO_TCP, TCP_KEEPIDLE, idle) == 0, "TCP_KEEPIDLE");
+    CHECK(seti(fd, IPPROTO_TCP, TCP_KEEPINTVL, intvl) == 0, "TCP_KEEPINTVL");
+    CHECK(seti(fd, IPPROTO_TCP, TCP_KEEPCNT, cnt) == 0, "TCP_KEEPCNT");
+}
+
+/// What a socket's pending error and a zero-timeout poll show: "quiet", or what is there.
+static const char *state(int fd) {
+    static char b[64];
+    struct pollfd p = {fd, POLLIN, 0};
+    int n = poll(&p, 1, 0);
+    int e = geti(fd, SOL_SOCKET, SO_ERROR);
+    if (n == 0 && e == 0) return "quiet";
+    snprintf(b, sizeof b, "revents 0x%x error %s", n ? p.revents : 0, e ? strerrorname_np(e) : "0");
+    return b;
+}
+
+static void ka_opts(void) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(s >= 0, "socket");
+    printf("defaults: keepalive %d idle %d intvl %d cnt %d user-timeout %d\n",
+           geti(s, SOL_SOCKET, SO_KEEPALIVE), geti(s, IPPROTO_TCP, TCP_KEEPIDLE),
+           geti(s, IPPROTO_TCP, TCP_KEEPINTVL), geti(s, IPPROTO_TCP, TCP_KEEPCNT),
+           geti(s, IPPROTO_TCP, TCP_USER_TIMEOUT));
+    seti(s, SOL_SOCKET, SO_KEEPALIVE, 5);
+    seti(s, IPPROTO_TCP, TCP_KEEPIDLE, 30);
+    seti(s, IPPROTO_TCP, TCP_KEEPINTVL, 7);
+    seti(s, IPPROTO_TCP, TCP_KEEPCNT, 4);
+    seti(s, IPPROTO_TCP, TCP_USER_TIMEOUT, 2500);
+    printf("set: keepalive %d idle %d intvl %d cnt %d user-timeout %d\n",
+           geti(s, SOL_SOCKET, SO_KEEPALIVE), geti(s, IPPROTO_TCP, TCP_KEEPIDLE),
+           geti(s, IPPROTO_TCP, TCP_KEEPINTVL), geti(s, IPPROTO_TCP, TCP_KEEPCNT),
+           geti(s, IPPROTO_TCP, TCP_USER_TIMEOUT));
+    int bad[][3] = {{TCP_KEEPIDLE, 0, 0}, {TCP_KEEPIDLE, 32768, 0}, {TCP_KEEPINTVL, 0, 0},
+                    {TCP_KEEPCNT, 128, 0}, {TCP_USER_TIMEOUT, -1, 0}};
+    for (unsigned i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        int e = seti(s, IPPROTO_TCP, bad[i][0], bad[i][1]);
+        printf("option %d = %d: %s\n", bad[i][0], bad[i][1], e ? strerrorname_np(e) : "0");
+    }
+    // An accepted socket inherits the listener's.
+    int port, l = listener(&port, 0);
+    keepalive(l, 11, 3, 2);
+    int c = dial(port);
+    int a = accept(l, 0, 0);
+    CHECK(a >= 0, "accept");
+    printf("accepted: keepalive %d idle %d intvl %d cnt %d\n", geti(a, SOL_SOCKET, SO_KEEPALIVE),
+           geti(a, IPPROTO_TCP, TCP_KEEPIDLE), geti(a, IPPROTO_TCP, TCP_KEEPINTVL),
+           geti(a, IPPROTO_TCP, TCP_KEEPCNT));
+    close(a);
+    close(c);
+    close(l);
+    close(s);
+}
+
+/// A connected pair whose peer answers every probe (alive) or has closed (closed): after
+/// three times the budget (idle 1 s, interval 1 s, 1 probe) nothing has happened.
+static void ka_quiet(int closed) {
+    int port, l = listener(&port, 0);
+    int c = dial(port);
+    int a = accept(l, 0, 0);
+    CHECK(a >= 0, "accept");
+    keepalive(c, 1, 1, 1);
+    keepalive(a, 1, 1, 1);
+    if (closed) close(a);
+    sleep_ms(3000);
+    printf("client after 3 s: %s\n", state(c));
+    if (closed) {
+        char b[4];
+        ssize_t r = read(c, b, sizeof b);
+        printf("client read: %s\n", r == 0 ? "end of file" : r < 0 ? strerrorname_np(errno) : "data");
+        CHECK(r == 0, "end of file");
+    } else {
+        printf("server after 3 s: %s\n", state(a));
+        CHECK(write(c, "x", 1) == 1, "write");
+        char b;
+        CHECK(read(a, &b, 1) == 1, "read");
+        printf("still connected\n");
+    }
+}
+
+/// Under `net-blackout` from 1 s: both sides keep alive (idle 2 s, interval 1 s, 3 probes:
+/// a 5 s budget). `cut` (a window longer than the budget): each side's read fails ETIMEDOUT
+/// at the budget. `survive` (a shorter one): the server's line sent at 8 s arrives.
+/// Under `net-blackout` from 1 s for 10 s (`peer-rst`) or from 25 s for 40 s (`cadence`):
+/// `peer-rst`: the client (idle 2 s, interval 1 s, 3 probes) gives up inside the window, its
+/// RST lost; the server (idle 20 s) probes after it and gets the client host's RST. `cadence`:
+/// the client (idle 1 s, interval 10 s, 2 probes) has probed every 10 s since 1 s, the probe
+/// at 31 s is the first unanswered: it gives up at 51 s.
+static void ka_peer(int cadence) {
+    int port, l = listener(&port, 0);
+    int c = dial(port);
+    int a = accept(l, 0, 0);
+    CHECK(a >= 0, "accept");
+    if (cadence) keepalive(c, 1, 10, 2);
+    else {
+        keepalive(c, 2, 1, 3);
+        keepalive(a, 20, 1, 3);
+    }
+    CHECK(write(c, "x", 1) == 1, "write");
+    char b[4];
+    CHECK(read(a, b, 1) == 1, "read");
+    long long t0 = now_ms();
+    pid_t p = fork();
+    if (p == 0) {
+        close(c);
+        if (cadence) {
+            sleep_ms(100000);
+            _exit(0);
+        }
+        ssize_t r = read(a, b, sizeof b);
+        long long dt = now_ms() - t0;
+        printf("server: read %s after %lld ms\n", r < 0 ? strerrorname_np(errno) : "returned", dt);
+        _exit(r < 0 && errno == ECONNRESET && dt >= 19900 && dt < 20100 ? 0 : 1);
+    }
+    close(a);
+    ssize_t r = read(c, b, sizeof b);
+    long long dt = now_ms() - t0;
+    printf("client: read %s after %lld ms\n", r < 0 ? strerrorname_np(errno) : "returned", dt);
+    long long at = cadence ? 51000 : 5000;
+    CHECK(r < 0 && errno == ETIMEDOUT && dt >= at - 100 && dt < at + 100, "ETIMEDOUT at %lld ms", at);
+    if (cadence) kill(p, SIGKILL);
+    CHECK(wait_child(p) == (cadence ? 128 + SIGKILL : 0), "the server's end");
+}
+
+static void ka_blackout(int cut) {
+    int port, l = listener(&port, 0);
+    int c = dial(port);
+    int a = accept(l, 0, 0);
+    CHECK(a >= 0, "accept");
+    keepalive(c, 2, 1, 3);
+    keepalive(a, 2, 1, 3);
+    CHECK(write(c, "x", 1) == 1, "write");
+    char b[4];
+    CHECK(read(a, b, 1) == 1, "read");
+    long long t0 = now_ms();
+    pid_t p = fork();
+    if (p == 0) {
+        close(c);
+        if (!cut) {
+            sleep_ms(8000);
+            CHECK(write(a, "late", 4) == 4, "late write");
+            sleep_ms(1000);
+            _exit(0);
+        }
+        ssize_t r = read(a, b, sizeof b);
+        printf("server: read %s after %lld ms\n", r < 0 ? strerrorname_np(errno) : "returned", now_ms() - t0);
+        _exit(r < 0 && errno == ETIMEDOUT ? 0 : 1);
+    }
+    close(a);
+    ssize_t r = read_full(c, b, 4);
+    long long dt = now_ms() - t0;
+    printf("client: read %s after %lld ms\n", r < 0 ? strerrorname_np(errno) : r == 4 ? "the line" : "short", dt);
+    if (cut) CHECK(r < 0 && errno == ETIMEDOUT && dt >= 4900 && dt < 5100, "ETIMEDOUT at the budget");
+    else CHECK(r == 4 && dt >= 8000, "the late line");
+    CHECK(wait_child(p) == 0, "the server's end");
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, 0, _IOLBF, 0);
     if (argc < 2) return 2;
@@ -1218,6 +1392,14 @@ int main(int argc, char **argv) {
     else if (!strcmp(m, "halfclose-delay")) halfclose_delay(argc > 2 ? atoll(argv[2]) : 0);
     else if (!strcmp(m, "pingpong")) pingpong(atoi(argv[2]));
     else if (!strcmp(m, "chaos")) chaos(atoi(argv[2]), atoi(argv[3]));
+    else if (!strcmp(m, "keepalive") && argc > 2) {
+        const char *k = argv[2];
+        if (!strcmp(k, "opts")) ka_opts();
+        else if (!strcmp(k, "alive") || !strcmp(k, "closed")) ka_quiet(!strcmp(k, "closed"));
+        else if (!strcmp(k, "cut") || !strcmp(k, "survive")) ka_blackout(!strcmp(k, "cut"));
+        else if (!strcmp(k, "peer-rst") || !strcmp(k, "cadence")) ka_peer(!strcmp(k, "cadence"));
+        else return 2;
+    }
     else if (!strcmp(m, "forkserver")) forkserver();
     else if (!strcmp(m, "execinherit")) execinherit(argv[0]);
     else if (!strcmp(m, "exitclose")) exitclose(argc > 2 ? atoll(argv[2]) : 1000);

@@ -698,6 +698,12 @@ fn accept(call: &mut dyn Call, i: usize) -> i64 {
         family,
         ..WSock::default()
     };
+    // The keepalive settings are the listener's, as the kernel's clone of it has them.
+    for k in [key(SOL_SOCKET, 9), key(6, 4), key(6, 5), key(6, 6)] {
+        if let Some(v) = sock(i).opt(k) {
+            sock(n).set_opt(k, v);
+        }
+    }
     let q = sup(Op::WireAccepted, [id, n as u64, family as u64, 0, 0, 0]);
     io::bump();
     if q < 0 {
@@ -849,8 +855,23 @@ pub(super) fn setsockopt(call: &mut dyn Call, i: usize) -> i64 {
             s.flags &= !WF_V6ONLY;
         }
     }
+    // Keepalive: SO_KEEPALIVE reads back as 0 or 1; the timers' ranges are the kernel's.
+    let ka = matches!((level, name), (SOL_SOCKET, 9) | (6, 4 | 5 | 6 | 18));
+    let v = match (level, name) {
+        _ if dgram => v,
+        (SOL_SOCKET, 9) => (v != 0) as i32,
+        (6, 4 | 5) if !(1..=32767).contains(&v) => return -e::EINVAL, // MAX_TCP_KEEPIDLE/INTVL
+        (6, 6) if !(1..=127).contains(&v) => return -e::EINVAL,       // MAX_TCP_KEEPCNT
+        (6, 18) if v < 0 => return -e::EINVAL,
+        _ => v,
+    };
     if !sock(i).set_opt(key(level, name), v) {
         return unknown_opt(level, name);
+    }
+    if ka && !dgram && sock(i).state == WS_CONNECTED {
+        // The wire's keepalive timer of this connection may move: it looks at the next step
+        // (`sup::wire`), as at a send.
+        mark(i);
     }
     let _ = fd;
     0

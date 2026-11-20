@@ -905,6 +905,9 @@ pub const DEC_WIRE_HEAL: u32 = 0x14a;
 /// A machine crash took a connection's end (`node`): [conn, side (1: the server's), node]. Its
 /// peer is not told; what reaches the end once its node is back is answered with a RST.
 pub const DEC_WIRE_DEAD: u32 = 0x14b;
+/// A keepalive probe went unanswered (a cut link, a machine that is down, a blackout):
+/// [conn, side (1: the server's), probes unanswered so far].
+pub const DEC_WIRE_PROBE: u32 = 0x14c;
 
 /// Datagram-socket requests (`patina/src/sup/udp.rs`). Socket indexes as for the wire.
 ///

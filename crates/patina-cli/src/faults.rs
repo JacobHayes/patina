@@ -213,7 +213,7 @@ pub const KEYS: &[Key] = &[
         "net-blackout",
         "START+LENGTH[:PORT]",
         Val::Window,
-        "for LENGTH ms of virtual time from START ms, hold TCP deliveries and lose datagrams on every link the link faults act on, loopback included (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
+        "for LENGTH ms of virtual time from START ms, hold TCP deliveries, lose datagrams and leave keepalive probes unanswered on every link the link faults act on, loopback included (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
     ),
     key(
         "net-syn-retries",
@@ -225,7 +225,7 @@ pub const KEYS: &[Key] = &[
         "net-give-up-ms",
         "N",
         Val::Param,
-        "a TCP direction whose data a cut link has held for N ms resets its sender, who sees ETIMEDOUT (in a run with nodes a socket's TCP_USER_TIMEOUT, when set, is its own limit) [default: 924600]",
+        "a TCP direction whose data a cut link has held for N ms resets its sender, who sees ETIMEDOUT (in a run with nodes a socket's TCP_USER_TIMEOUT, when set, is its own limit); keepalive (SO_KEEPALIVE) has its own budget [default: 924600]",
     ),
     key(
         "net-links",

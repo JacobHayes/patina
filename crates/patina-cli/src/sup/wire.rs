@@ -25,7 +25,8 @@
 //! Decision records (all `slot` 0): `DEC_WIRE_READ` [conn, dir, bytes, delivery time],
 //! `DEC_WIRE_DELIVER` [conn, dir, bytes], `DEC_WIRE_ESTABLISH` [conn, server port, client port],
 //! `DEC_WIRE_FIN` [conn, dir, 0 queued | 1 delivered], `DEC_WIRE_RST` [conn, side, why],
-//! `DEC_WIRE_FAIL` [conn, errno], `DEC_WIRE_CLOSE` [conn]. Direction 0 is client to server.
+//! `DEC_WIRE_FAIL` [conn, errno], `DEC_WIRE_CLOSE` [conn], `DEC_WIRE_PROBE` [conn, side,
+//! unanswered] (keepalive, `Sup::ka_fire`). Direction 0 is client to server.
 //!
 //! Nodes (`proto::node`): every node has its own port space and address; a connection joins a
 //! client node and a server node (the same one over loopback), and each direction is a link.
@@ -59,9 +60,19 @@ const ETIMEDOUT: u16 = 110;
 
 /// An item stamped on a cut link: no delivery time yet, its delay draw in the low bits.
 const HELD: u64 = 1 << 63;
-/// Recorded socket options (`WSock::opts` keys): `TCP_SYNCNT`, `TCP_USER_TIMEOUT`.
+/// Recorded socket options (`WSock::opts` keys): `TCP_SYNCNT`, `TCP_USER_TIMEOUT`, and the
+/// keepalive ones.
 const OPT_TCP_SYNCNT: i32 = 6 << 16 | 7;
 const OPT_TCP_USER_TIMEOUT: i32 = 6 << 16 | 18;
+const OPT_SO_KEEPALIVE: i32 = 1 << 16 | 9;
+const OPT_TCP_KEEPIDLE: i32 = 6 << 16 | 4;
+const OPT_TCP_KEEPINTVL: i32 = 6 << 16 | 5;
+const OPT_TCP_KEEPCNT: i32 = 6 << 16 | 6;
+/// Linux's defaults (`net.ipv4.tcp_keepalive_time`, `_intvl`, `_probes`).
+const KEEPALIVE_DEFAULT: (u64, u64, u64) = (7200, 75, 9);
+/// A keepalive timer's event: an `EV_CONNECT` key with this bit, the side (1: the server's)
+/// in the bit above it.
+const EV_KA: u64 = 1 << 40;
 
 /// Why a RST was sent (`DEC_WIRE_RST` args[2]).
 const RST_CLOSE_UNREAD: u64 = 1;
@@ -72,6 +83,9 @@ const RST_LISTENER_GONE: u64 = 4;
 const RST_GIVE_UP: u64 = 5;
 /// A segment reached an end whose machine crashed since: the node answers it with a RST.
 const RST_UNKNOWN: u64 = 6;
+/// A side's keepalive probes went unanswered for its budget: it gives up (`ETIMEDOUT`) and
+/// sends a RST its peer gets if it can reach it.
+const RST_KEEPALIVE: u64 = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fate {
@@ -155,6 +169,48 @@ struct Conn {
     syn_n: usize,
     /// The give-up check of a held direction (an `EV_CONNECT` event once established).
     give_up_ev: Option<super::sched::EventId>,
+    /// Each side's keepalive timer (0: the client's).
+    ka: [Ka; 2],
+}
+
+/// One side's keepalive state (`Sup::ka_fire`): when it last heard from its peer, the probes
+/// unanswered since, and its timer, which is set only while the peer may not answer.
+#[derive(Debug, Default)]
+struct Ka {
+    heard: u64,
+    probes: u64,
+    /// Probes answered (the key of their round trip's delay draw).
+    answered: u64,
+    ev: Option<super::sched::EventId>,
+    /// The settings last seen, and the earliest first probe they allow (`ka_arm`: as the
+    /// kernel resets the timer when keepalive is turned on or its idle time changes).
+    seen: Option<KaCfg>,
+    anchor: u64,
+    /// This side's socket went without telling its peer (its give-up across a cut): the
+    /// peer's next probe gets a RST.
+    rst: bool,
+    /// Data it sent was delivered while the way back was cut: unacknowledged, so no probes
+    /// (TCP's retransmission timer owns the connection), until it hears from its peer.
+    unacked: bool,
+}
+
+/// What a keepalive probe gets back (`Sup::ka_reach`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    Answer,
+    /// The peer's machine came back without the connection: its node answers with a RST.
+    Rst,
+    /// Lost: a cut either way, the peer's machine down, a blackout.
+    Nothing,
+}
+
+/// A side's keepalive settings, in ns (`ut`: `TCP_USER_TIMEOUT`, 0 when unset).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KaCfg {
+    idle: u64,
+    intvl: u64,
+    cnt: u64,
+    ut: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -783,6 +839,7 @@ impl Sup {
             syn_at: now,
             syn_n: (cut && fate != Fate::Timeout) as usize,
             give_up_ev: None,
+            ka: Default::default(),
         };
         self.wire.conns.insert(id, conn);
         // A socket index may come back (a new socket in a reused inode): forget the old link.
@@ -834,6 +891,7 @@ impl Sup {
         if reset {
             s.flags |= WF_RESET;
         }
+        self.ka_arm(id, true);
         0
     }
 
@@ -899,6 +957,8 @@ impl Sup {
         }
         for (id, server) in sides {
             self.read_side(id, server);
+            // A keepalive option may have changed (`setsockopt` marks the socket).
+            self.ka_arm(id, server);
         }
         // Datagram sockets whose last descriptor may have closed.
         if all {
@@ -931,6 +991,10 @@ impl Sup {
         // 3. Events.
         for k in std::mem::take(&mut self.sched.fired_wire) {
             let id = (k >> 2) as u32;
+            if k & 3 == EV_CONNECT && k & EV_KA != 0 {
+                self.ka_fire(id, k & EV_KA << 1 != 0);
+                continue;
+            }
             match k & 3 {
                 super::udp::EV_UDP => self.udp_fire(k >> 2),
                 EV_DIR0 | EV_DIR1 => {
@@ -1021,6 +1085,7 @@ impl Sup {
             }
             left -= r as usize;
         }
+        let now = self.now();
         let c = self.wire.conns.get_mut(&id).unwrap();
         c.established = true;
         c.retry = false;
@@ -1028,11 +1093,16 @@ impl Sup {
         if let Some(ci) = ci {
             tab(self.ctl).socks[ci].state = WS_CONNECTED;
         }
+        for k in &mut c.ka {
+            k.heard = now;
+        }
         self.bump_gen();
         self.wire_decide(
             DEC_WIRE_ESTABLISH,
             [id as u64, sport as u64, cport as u64, 0, 0, 0],
         );
+        self.ka_arm(id, false);
+        self.ka_arm(id, true);
         // Bytes the client wrote meanwhile (after the padding) are waiting.
         self.read_side(id, false);
     }
@@ -1284,6 +1354,7 @@ impl Sup {
                             DEC_WIRE_DELIVER,
                             [id as u64, dir as u64, r as u64, 0, 0, 0],
                         );
+                        self.ka_heard(id, dir);
                         if split {
                             // One piece per step: the rest is a chunk in flight of its own,
                             // timed from the pieces' own draw stream.
@@ -1370,6 +1441,7 @@ impl Sup {
                     }
                     self.bump_gen();
                     self.wire_decide(DEC_WIRE_FIN, [id as u64, dir as u64, 1, 0, 0, 0]);
+                    self.ka_heard(id, dir);
                 }
                 Item::Rst { why, .. } => {
                     let why = *why;
@@ -1404,6 +1476,12 @@ impl Sup {
         let dropped: usize = c.dirs[into].bytes;
         c.dirs[into].q.clear();
         c.dirs[into].bytes = 0;
+        if let Some(ev) = c.ka[server as usize].ev.take() {
+            self.sched.cancel(ev);
+        }
+        let Some(c) = self.wire.conns.get_mut(&id) else {
+            return;
+        };
         let e = if server { &mut c.server } else { &mut c.client };
         let (fd, idx) = (e.fd, e.idx);
         e.fd = -1;
@@ -1465,7 +1543,10 @@ impl Sup {
             }
             self.note_queued(-(d.bytes as i64));
         }
-        for ev in [c.fate_ev, c.give_up_ev].into_iter().flatten() {
+        for ev in [c.fate_ev, c.give_up_ev, c.ka[0].ev, c.ka[1].ev]
+            .into_iter()
+            .flatten()
+        {
             self.sched.cancel(ev);
         }
         if self.wire.ports.get(&(c.cnode, c.cport)) == Some(&PortUse::Client(id)) {
@@ -1606,8 +1687,12 @@ impl Sup {
             if let Some(i) = sender {
                 tab(self.ctl).socks[i].err = ETIMEDOUT;
             }
-            self.wire.conns.get_mut(&id).unwrap().dirs[dir].held_since = None;
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            c.dirs[dir].held_since = None;
+            c.ka[dir].rst = true;
             self.reset_side(id, dir == 1, RST_GIVE_UP);
+            // Its peer's probes now get a RST (none while a cut holds them).
+            self.ka_arm(id, dir == 0);
         }
         let next = self.wire.conns.get(&id).and_then(|c| {
             (0..2)
@@ -1775,6 +1860,16 @@ impl Sup {
                 self.hold(id, into);
             }
             self.wire_decide(DEC_WIRE_DEAD, [id as u64, server as u64, k as u64, 0, 0, 0]);
+            if let Some(ev) = self
+                .wire
+                .conns
+                .get_mut(&id)
+                .and_then(|c| c.ka[own].ev.take())
+            {
+                self.sched.cancel(ev);
+            }
+            // Its peer's probes now go unanswered (or, once the node is back, get a RST).
+            self.ka_arm(id, !server);
             self.maybe_free(id);
         }
         self.bump_gen();
@@ -1807,6 +1902,359 @@ impl Sup {
                 self.wire_decide(DEC_WIRE_HEAL, [id as u64, dir as u64, last, 0, 0, 0]);
                 self.arm(id, dir);
             }
+            // A side whose delivered data was not acknowledged: its retransmission gets the
+            // acknowledgement now.
+            for side in 0..2 {
+                let c = self.wire.conns.get_mut(&id).unwrap();
+                let back = Self::link(c, side ^ 1);
+                if c.ka[side].unacked && opened.contains(&back) {
+                    let k = &mut c.ka[side];
+                    k.unacked = false;
+                    k.heard = now;
+                    k.probes = 0;
+                    self.ka_arm(id, side == 1);
+                }
+            }
+        }
+    }
+}
+
+/// The keepalive timer key of one side of connection `id`.
+fn ka_key(id: u32, server: bool) -> u64 {
+    key(id, EV_CONNECT) | EV_KA | (server as u64) << 41
+}
+
+/// The first probe at or after `from` of a side whose peer answers until then: the first at
+/// `first`, then one every `max(intvl, idle)` (the kernel's timer after an answered probe:
+/// `intvl`, or the rest of `idle` from the answer; the answers' round trips are left out).
+fn ka_grid(first: u64, cfg: &KaCfg, from: u64) -> u64 {
+    let period = cfg.intvl.max(cfg.idle);
+    if from <= first {
+        first
+    } else {
+        first + (from - first).div_ceil(period) * period
+    }
+}
+
+/// TCP keepalive (`SO_KEEPALIVE`, `TCP_KEEPIDLE`, `TCP_KEEPINTVL`, `TCP_KEEPCNT`,
+/// `TCP_USER_TIMEOUT`), as the kernel's `tcp_keepalive_timer`: a side that has heard nothing
+/// from its peer for `idle` probes it, then every `intvl`; an answer (any segment) resets the
+/// count; after `cnt` unanswered probes (with a user timeout: once that long has passed since
+/// it last heard and a probe went unanswered) it gives up: its socket reports `ETIMEDOUT` and
+/// it sends a RST. A probe a peer answers changes nothing a guest can see, so the timer is
+/// an event only while the peer may not answer (a cut either way, its machine down or back
+/// without the connection, a `net-blackout` ahead): an idle connection whose peer is
+/// reachable costs no event and no record. Every unanswered probe is a `DEC_WIRE_PROBE`
+/// record.
+impl Sup {
+    /// Side `server` of `id` holds a guest socket that can probe (established, not closed,
+    /// its machine up).
+    fn ka_alive(c: &Conn, server: bool) -> bool {
+        let e = if server { &c.server } else { &c.client };
+        c.established && e.fd >= 0 && !e.gone && !e.dead
+    }
+
+    /// The side's keepalive settings, if keepalive is on (the server's, before `accept`,
+    /// from its listener: an accepted socket inherits them).
+    fn ka_cfg(&self, id: u32, server: bool) -> Option<KaCfg> {
+        let c = self.wire.conns.get(&id)?;
+        let (i, own) = match (server, c.server.idx) {
+            (true, Some(i)) => (i, true),
+            (true, None) => (c.listener?, false),
+            (false, _) => (c.client.idx?, true),
+        };
+        let s = tab(self.ctl).socks.get(i)?;
+        if s.opt(OPT_SO_KEEPALIVE).unwrap_or(0) == 0 {
+            return None;
+        }
+        let get = |k: i32, d: u64| s.opt(k).filter(|&v| v > 0).map_or(d, |v| v as u64);
+        let (idle, intvl, cnt) = KEEPALIVE_DEFAULT;
+        Some(KaCfg {
+            idle: get(OPT_TCP_KEEPIDLE, idle) * 1_000_000_000,
+            intvl: get(OPT_TCP_KEEPINTVL, intvl) * 1_000_000_000,
+            cnt: get(OPT_TCP_KEEPCNT, cnt),
+            // A user timeout is not inherited at accept here (`ARCHITECTURE.md`, "Limits").
+            ut: if own {
+                get(OPT_TCP_USER_TIMEOUT, 0) * 1_000_000
+            } else {
+                0
+            },
+        })
+    }
+
+    /// The (this side's, peer's) nodes.
+    fn ka_nodes(c: &Conn, server: bool) -> (usize, usize) {
+        if server {
+            (c.snode, c.cnode)
+        } else {
+            (c.cnode, c.snode)
+        }
+    }
+
+    /// The `net-blackout` window `[from, to)` on this connection, if one acts on it.
+    fn ka_blackout(&self, c: &Conn, server: bool) -> Option<(u64, u64)> {
+        let b = self.net_cfg();
+        let (me, peer) = Self::ka_nodes(c, server);
+        let port_ok = b.blackout_port == 0
+            || b.blackout_port == c.sport as u64
+            || b.blackout_port == c.cport as u64;
+        (b.blackout_set != 0 && port_ok && self.link_faulted(me, peer)).then_some((
+            proto::layout::VCLOCK_BOOT_NS + b.blackout_from_ns,
+            proto::layout::VCLOCK_BOOT_NS + b.blackout_to_ns,
+        ))
+    }
+
+    /// What a probe from side `server` at `t` gets back.
+    fn ka_reach(&self, id: u32, server: bool, t: u64) -> Reach {
+        let c = &self.wire.conns[&id];
+        let (me, peer) = Self::ka_nodes(c, server);
+        if self.link_cut(me, peer) || self.link_cut(peer, me) {
+            return Reach::Nothing;
+        }
+        if self
+            .ka_blackout(c, server)
+            .is_some_and(|(from, to)| t >= from && t < to)
+        {
+            return Reach::Nothing;
+        }
+        let p = if server { &c.client } else { &c.server };
+        if p.dead || c.ka[!server as usize].rst {
+            Reach::Rst
+        } else {
+            Reach::Answer
+        }
+    }
+
+    /// (Re)set side `server`'s timer: the first probe the peer may not answer, if any. A side
+    /// already probing keeps its schedule.
+    fn ka_arm(&mut self, id: u32, server: bool) {
+        let s = server as usize;
+        if !self.wire.conns.contains_key(&id) {
+            return;
+        }
+        let cfg = self.ka_cfg(id, server);
+        let now = self.now();
+        let c = self.wire.conns.get_mut(&id).unwrap();
+        let k = &mut c.ka[s];
+        if cfg != k.seen {
+            match (k.seen, cfg) {
+                // Turned on: the first probe one idle time from now (`tcp_set_keepalive`).
+                (None, Some(n)) => k.anchor = now + n.idle,
+                // A new idle time counts from when it last heard, or now if that is past.
+                (Some(o), Some(n)) if o.idle != n.idle => k.anchor = now,
+                _ => {}
+            }
+            k.seen = cfg;
+        }
+        if k.probes > 0 && k.ev.is_some() {
+            return;
+        }
+        if let Some(ev) = c.ka[s].ev.take() {
+            self.sched.cancel(ev);
+        }
+        let c = &self.wire.conns[&id];
+        if !Self::ka_alive(c, server) {
+            return;
+        }
+        let Some(cfg) = cfg else {
+            return;
+        };
+        if c.ka[s].unacked {
+            return;
+        }
+        let first = (c.ka[s].heard + cfg.idle).max(c.ka[s].anchor);
+        let t = if self.ka_reach(id, server, now) != Reach::Answer {
+            ka_grid(first, &cfg, now)
+        } else if let Some((from, to)) = self.ka_blackout(c, server).filter(|w| w.1 > now) {
+            let g = ka_grid(first, &cfg, from.max(now));
+            if g >= to {
+                return;
+            }
+            g
+        } else {
+            return;
+        };
+        self.ka_at(id, server, t);
+    }
+
+    fn ka_at(&mut self, id: u32, server: bool, t: u64) {
+        let ev = self.sched.schedule(
+            t,
+            super::sched::Event::Wire {
+                key: ka_key(id, server),
+            },
+        );
+        self.wire.conns.get_mut(&id).unwrap().ka[server as usize].ev = Some(ev);
+    }
+
+    /// Every connection's timers: a cut began.
+    pub(super) fn ka_arm_all(&mut self) {
+        let ids: Vec<u32> = self.wire.conns.keys().copied().collect();
+        for id in ids {
+            self.ka_arm(id, false);
+            self.ka_arm(id, true);
+        }
+    }
+
+    /// A segment of direction `dir` was delivered: its receiver heard from its peer, and so
+    /// does the sender when the receiver's acknowledgement can get back.
+    fn ka_heard(&mut self, id: u32, dir: usize) {
+        let now = self.now();
+        let Some(c) = self.wire.conns.get(&id) else {
+            return;
+        };
+        let (from, to) = Self::link(c, dir);
+        let back = !self.link_cut(to, from);
+        let blackout = self.net_cfg().blackout_set != 0;
+        for (side, yes) in [(dir ^ 1, true), (dir, back)] {
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            if !yes {
+                // The sender's data is not acknowledged.
+                c.ka[side].unacked = true;
+                if let Some(ev) = c.ka[side].ev.take() {
+                    self.sched.cancel(ev);
+                }
+                continue;
+            }
+            let k = &mut c.ka[side];
+            k.heard = now;
+            k.probes = 0;
+            let rearm = k.ev.is_some() || k.unacked || blackout && k.seen.is_some();
+            k.unacked = false;
+            if rearm {
+                self.ka_arm(id, side == 1);
+            }
+        }
+    }
+
+    /// Side `server`'s keepalive timer fired.
+    fn ka_fire(&mut self, id: u32, server: bool) {
+        let now = self.now();
+        let s = server as usize;
+        let Some(c) = self.wire.conns.get_mut(&id) else {
+            return;
+        };
+        c.ka[s].ev = None;
+        if !Self::ka_alive(c, server) {
+            return;
+        }
+        let Some(cfg) = self.ka_cfg(id, server) else {
+            self.wire.conns.get_mut(&id).unwrap().ka[s].probes = 0;
+            return;
+        };
+        let c = &self.wire.conns[&id];
+        let (heard, probes) = (c.ka[s].heard, c.ka[s].probes);
+        // Data of its own in flight: no probes (its give-up owns the connection); looked at
+        // again an idle time later only while the peer may not answer.
+        if !c.dirs[s].q.is_empty() || c.ka[s].unacked {
+            if self.ka_reach(id, server, now) != Reach::Answer {
+                self.ka_at(id, server, now + cfg.idle);
+            }
+            return;
+        }
+        if probes == 0 && now < (heard + cfg.idle).max(c.ka[s].anchor) {
+            self.ka_arm(id, server);
+            return;
+        }
+        let dies = if cfg.ut > 0 {
+            now.saturating_sub(heard) >= cfg.ut && probes > 0
+        } else {
+            probes >= cfg.cnt
+        };
+        if dies {
+            self.ka_die(id, server);
+            return;
+        }
+        match self.ka_reach(id, server, now) {
+            Reach::Answer => {
+                // There and back, each way with its link's delay.
+                let c = &self.wire.conns[&id];
+                let (me, peer) = Self::ka_nodes(c, server);
+                let n = c.ka[s].answered << 1 | s as u64;
+                let rtt = self.net_delay(id, NSUB_KEEPALIVE, n, self.link_delay_range(me, peer))
+                    + self.net_delay(
+                        id,
+                        NSUB_KEEPALIVE,
+                        n | 1 << 26,
+                        self.link_delay_range(peer, me),
+                    );
+                let k = &mut self.wire.conns.get_mut(&id).unwrap().ka[s];
+                k.answered += 1;
+                k.probes = 0;
+                k.heard = now + rtt;
+                self.ka_arm(id, server);
+            }
+            Reach::Rst => {
+                // As a segment to an end whose machine crashed since (`deliver`).
+                let into = s ^ 1;
+                let c = self.wire.conns.get_mut(&id).unwrap();
+                if server {
+                    c.client.dead = false;
+                } else {
+                    c.server.dead = false;
+                }
+                c.ka[into].rst = false;
+                let t = self.stamp(id, into, false);
+                self.wire.conns.get_mut(&id).unwrap().dirs[into]
+                    .q
+                    .push_back(Item::Rst {
+                        t,
+                        why: RST_UNKNOWN,
+                    });
+                self.wire_decide(DEC_WIRE_RST, [id as u64, into as u64, RST_UNKNOWN, t, 0, 0]);
+                self.arm(id, into);
+            }
+            Reach::Nothing => {
+                let c = &self.wire.conns[&id];
+                let (me, peer) = Self::ka_nodes(c, server);
+                self.cut_acted(me, peer);
+                self.cut_acted(peer, me);
+                let k = &mut self.wire.conns.get_mut(&id).unwrap().ka[s];
+                k.probes += 1;
+                let p = k.probes;
+                self.wire_decide(DEC_WIRE_PROBE, [id as u64, s as u64, p, 0, 0, 0]);
+                self.ka_at(id, server, now + cfg.intvl);
+            }
+        }
+    }
+
+    /// Side `server` gave up: its socket reports `ETIMEDOUT`; its RST reaches the peer if
+    /// the peer can be reached now, else the peer's next segment is answered with one.
+    fn ka_die(&mut self, id: u32, server: bool) {
+        let now = self.now();
+        let c = &self.wire.conns[&id];
+        if let Some(i) = if server { c.server.idx } else { c.client.idx } {
+            tab(self.ctl).socks[i].err = ETIMEDOUT;
+        }
+        let reach = self.ka_reach(id, server, now);
+        self.reset_side(id, server, RST_KEEPALIVE);
+        let Some(c) = self.wire.conns.get_mut(&id) else {
+            return;
+        };
+        let peer_alive = Self::ka_alive(c, !server);
+        if reach == Reach::Answer && peer_alive {
+            let own = server as usize;
+            let t = self.stamp(id, own, false);
+            self.wire.conns.get_mut(&id).unwrap().dirs[own]
+                .q
+                .push_back(Item::Rst {
+                    t,
+                    why: RST_KEEPALIVE,
+                });
+            self.wire_decide(
+                DEC_WIRE_RST,
+                [id as u64, own as u64, RST_KEEPALIVE, t, 0, 0],
+            );
+            self.arm(id, own);
+        } else if peer_alive {
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            if server {
+                c.server.dead = true;
+            } else {
+                c.client.dead = true;
+            }
+            // The peer's next probe gets the RST.
+            self.ka_arm(id, !server);
         }
     }
 }

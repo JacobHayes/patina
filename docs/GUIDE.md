@@ -556,7 +556,7 @@ arrive out of order within that jitter; `net-drop-permille`, `net-dup-permille` 
 `net-reorder-permille` (held back past later datagrams) are drawn per datagram, and a
 datagram due inside a `net-blackout` window is lost. `net-blackout=START+LENGTH[:PORT]`
 holds TCP deliveries and loses datagrams for LENGTH ms from START ms of virtual time (only
-those from or to PORT, if given); START and LENGTH are each a number or a range drawn per
+those from or to PORT, if given), and keepalive probes go unanswered in it, as across a cut; START and LENGTH are each a number or a range drawn per
 seed (`--fault net-blackout=0..60000+1000..10000` puts a window of 1 to 10 s somewhere in
 the first minute). Before 0.16 it was `net-partition`, a name that is refused now: a partition
 is a cut between nodes ("Several machines"). A receive queue past the socket's
@@ -1284,7 +1284,12 @@ of a connection that a cut direction carries are held; the receiver's reads wait
 sender's writes go on until its buffer fills. A heal delivers what was held in order, each item after the link's
 delay from the heal. A direction still cut after 924.6 s of virtual time (the kernel's default
 retransmission limit; `net-give-up-ms`, or the sender's `TCP_USER_TIMEOUT`) gives up: the
-sender's next call fails with `ETIMEDOUT` and the connection is reset. A connect across a cut
+sender's next call fails with `ETIMEDOUT` and the connection is reset. A connection with
+`SO_KEEPALIVE` probes as Linux does (`TCP_KEEPIDLE`, `TCP_KEEPINTVL`, `TCP_KEEPCNT`, default
+7200, 75 and 9 s and probes): a side whose probes go unanswered across a cut for its budget
+(idle + count x interval, or `TCP_USER_TIMEOUT`) fails with `ETIMEDOUT`, even if it only
+reads; a cut shorter than that changes nothing. Each unanswered probe is a `probe` event. A
+connect across a cut
 (in either direction) retries at 1, 3, 7, 15, 31 and 63 s and fails with `ETIMEDOUT` at 127 s
 (the kernel's default 6 SYN retries; `net-syn-retries`, or the socket's `TCP_SYNCNT`); healed in
 between, it completes at the next retry, refused then if nothing listens. A datagram sent while
@@ -1522,7 +1527,10 @@ draws for its kills, with the same `crash-gap-ms`, `down-ms`, `max-incarnations`
   start empty, as after a reboot.
 - **Silence.** The node sends nothing as it goes down: no FIN, no RST. A peer learns of it only
   from its own timeouts: what it sends to the node is held, and its connection fails with
-  `ETIMEDOUT` after its `TCP_USER_TIMEOUT` (or `net-give-up-ms`); a peer that only reads waits.
+  `ETIMEDOUT` after its `TCP_USER_TIMEOUT` (or `net-give-up-ms`); a peer that only reads waits,
+  unless it keeps the connection alive (`SO_KEEPALIVE`): its probes go unanswered and it fails
+  with `ETIMEDOUT` after idle + count x interval, or with `ECONNRESET` if a probe reaches the
+  node once it is back.
   A connect to the node while it is down retries its SYN and times out; it is not refused.
   Datagrams to it are lost. Once the node is back, it answers a segment of a connection it no
   longer has with a RST: the peer's next send resets its connection.
