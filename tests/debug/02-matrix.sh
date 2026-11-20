@@ -9,7 +9,7 @@
 #    attach` moves gdb to another process and back to the stopped thread. A memory write leaves
 #    the run at the first record where the session's events and the run's differ (`log events`
 #    of both), and says it wrote memory. `--at call:NAME:K` names the K-th such call.
-#@ tier=area budget=60 arch=x86_64
+#@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
 E=$PATINA_GUESTS/examples
 # seq_of RUNDIR PYTHON-EXPR: the sequence number of the first event (dict e) the expression holds for

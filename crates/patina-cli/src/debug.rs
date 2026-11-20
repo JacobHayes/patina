@@ -36,6 +36,9 @@ struct Session {
     gdb: Option<PathBuf>,
     /// Why there is no gdb to start (`--no-gdb`, none found, the host forbids attaching).
     no_gdb: String,
+    /// `--preempt points` or `branches`: the runtime's own breakpoints and single steps share
+    /// `SIGTRAP` with the debugger's, so gdb passes every `SIGTRAP` on and stepping is refused.
+    sigtrap_pass: bool,
 }
 
 static SESSION: OnceLock<Session> = OnceLock::new();
@@ -58,14 +61,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             rundir.display()
         )));
     }
-    if cfg!(not(target_arch = "x86_64")) {
-        return Err(err(
-            "patina debug runs on x86_64 only in this version".into()
-        ));
-    }
-    if cfg.points || cfg.pmu.on {
+    if cfg!(target_arch = "aarch64") && (cfg.points || cfg.pmu.on) {
         return Err(err(format!(
-            "{}: patina debug does not take a run with --preempt points or branches in this version",
+            "{}: patina debug does not take a run with --preempt points or branches on arm64 in this version",
             rundir.display()
         )));
     }
@@ -103,7 +101,13 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         ),
         (_, None, Some(g)) => (Some(g), String::new()),
     };
-    let _ = SESSION.set(Session { event, gdb, no_gdb });
+    let sigtrap_pass = cfg.points || cfg.pmu.on;
+    let _ = SESSION.set(Session {
+        event,
+        gdb,
+        no_gdb,
+        sigtrap_pass,
+    });
     cfg.debug_at = Some(at);
     let r = crate::replay::replay_into(&rundir, &out, cfg, program, &recorded)
         .map_err(|e| Fail(Outcome::Internal, e))?;
@@ -473,6 +477,70 @@ struct Proc {
     threads: Vec<(i32, i32)>,
 }
 
+/// What gdb needs of process `host` and cannot find itself (the kernel's exe and auxv are
+/// Patina's runtime, which loads the program): each ELF file it maps but the runtime, as
+/// [its path, the file to read (through the process's root when the host's path is another
+/// file), its load bias]; and with `--preempt points` each trampoline, from the plans it
+/// maps, as [start, end, the original instructions' address, their length, the offset of
+/// their copy] in the process's addresses.
+fn images(host: i32) -> Value {
+    use std::os::unix::fs::MetadataExt;
+    let maps = std::fs::read_to_string(format!("/proc/{host}/maps")).unwrap_or_default();
+    let exe = std::fs::read_link(format!("/proc/{host}/exe")).unwrap_or_default();
+    let (mut images, mut bias, mut plans) = (vec![], std::collections::HashMap::new(), vec![]);
+    for line in maps.lines() {
+        let w: Vec<&str> = line.splitn(6, ' ').collect();
+        let path = w.get(5).map_or("", |p| p.trim_start());
+        if !path.starts_with('/') || path.ends_with(" (deleted)") {
+            continue;
+        }
+        if path.ends_with(".plan") {
+            plans.push(path.to_string());
+            continue;
+        }
+        let start = w[0]
+            .split('-')
+            .next()
+            .and_then(|a| u64::from_str_radix(a, 16).ok());
+        if w[2] != "00000000"
+            || Path::new(path) == exe
+            || images.iter().any(|i: &Value| i[0] == path)
+        {
+            continue;
+        }
+        let inside = format!("/proc/{host}/root{path}");
+        let id = |p: &str| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+        let file = match id(path).is_some() && id(path) == id(&inside) {
+            true => path.to_string(),
+            false => inside,
+        };
+        let found = std::fs::read(&file)
+            .ok()
+            .and_then(|d| crate::rewrite::image_start(&d).ok());
+        if let (Some((sha, lo)), Some(start)) = (found, start) {
+            bias.insert(sha, start.wrapping_sub(lo));
+            images.push(json!([path, file, start.wrapping_sub(lo)]));
+        }
+    }
+    let mut tramps = vec![];
+    for p in plans.iter().filter_map(|p| std::fs::read(p).ok()) {
+        if let Ok((sha, ts)) = crate::rewrite::trampolines(&p) {
+            let Some(&b) = bias.get(&sha) else { continue };
+            tramps.extend(ts.iter().map(|t| {
+                [
+                    t[0].wrapping_add(b),
+                    t[1].wrapping_add(b),
+                    t[2].wrapping_add(b),
+                    t[3],
+                    t[4],
+                ]
+            }));
+        }
+    }
+    tramps.sort();
+    json!({"images": images, "tramps": tramps})
+}
+
 /// The innermost pid of a `/proc` status file's `NSpid` line.
 fn ns_pid(status: &str) -> Option<i32> {
     status
@@ -607,10 +675,10 @@ fn stopped(
         "host_pid": p.host,
         "host_tid": host_tid,
         "pidns": pidns,
-        "patina": std::env::current_exe().map_err(|e| e.to_string())?,
+        "sigtrap_pass": s.sigtrap_pass,
         "release": release,
         "notes": out.join("notes"),
-        "procs": procs.iter().map(|q| json!({"pid": q.pid, "host": q.host, "comm": q.comm, "node": q.node, "threads": q.threads.len()})).collect::<Vec<_>>(),
+        "procs": procs.iter().map(|q| json!({"pid": q.pid, "host": q.host, "comm": q.comm, "node": q.node, "threads": q.threads.len(), "maps": images(q.host)})).collect::<Vec<_>>(),
     });
     crate::result::write_json(&out.join("debug.json"), &facts)?;
     // Whole or not there: a script may start gdb as soon as the helper exists.
@@ -644,15 +712,22 @@ fn stopped(
         p.host,
         procs.len()
     );
-    let exact = "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, step, next, stepi, finish";
+    let exact = match s.sigtrap_pass {
+        true => "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, finish; no stepping in this run (its scheduling points share SIGTRAP with the debugger)",
+        false => "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, step, next, stepi, finish",
+    };
     let _ = writeln!(o, "  exact, the recorded run: {exact}");
     let _ = writeln!(
         o,
         "  another run from there: writing memory or registers, calling a function, a signal; the end names where the session left the run"
     );
+    let interrupt = match s.sigtrap_pass {
+        true => "Ctrl-C does not interrupt this run (set a breakpoint first)",
+        false => "Ctrl-C stops this process at its next request to Patina",
+    };
     let _ = writeln!(
         o,
-        "  the world runs on when the debugger continues, detaches or quits; Ctrl-C stops this process at its next request to Patina"
+        "  the world runs on when the debugger continues, detaches or quits; {interrupt}"
     );
     let attach = format!("gdb -x {}", helper.display());
     match &s.gdb {

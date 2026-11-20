@@ -201,6 +201,31 @@ pub fn default_threads() -> usize {
     crate::launch::allowed_cpus().len().clamp(1, 8)
 }
 
+/// For a debugger (`patina debug`): an ELF file's SHA-256 and the lowest address of its
+/// loadable segments (its load bias is where that is mapped, less it).
+pub fn image_start(data: &[u8]) -> Res<([u8; 32], u64)> {
+    let e = elf::Elf::parse(data)?;
+    Ok((e.sha256, e.image_start()))
+}
+
+/// For a debugger (`patina debug`): the SHA-256 of the file a plan is for, and each of its
+/// trampolines as (start, end, the original instructions' address, their length, the offset
+/// of their copy), in the file's addresses.
+pub fn trampolines(plan: &[u8]) -> Res<([u8; 32], Vec<[u64; 5]>)> {
+    let plan = Plan::from_bytes(plan)?;
+    let t = |s: &plan::Site| {
+        let lo = plan.tramp_vaddr + s.tramp as u64;
+        [
+            lo,
+            lo + s.tramp_len as u64,
+            s.addr,
+            s.len as u64,
+            s.copy as u64,
+        ]
+    };
+    Ok((plan.sha256, plan.sites.iter().map(t).collect()))
+}
+
 pub fn main(args: &[String]) -> Res<ExitCode> {
     let mut a: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut threads = default_threads();

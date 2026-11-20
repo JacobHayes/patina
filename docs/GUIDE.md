@@ -2261,12 +2261,18 @@ Without gdb on `PATH` (or `PATINA_GDB`), it does the same. The helper needs gdb 
 Attaching needs a host that lets a user debug their own processes: `kernel.yama.ptrace_scope`
 0 or 1 (Ubuntu's default is 1; the sandbox's processes are in a user namespace you own, so no
 privilege is needed), and a container that allows `ptrace`. `patina doctor` checks it
-(`debugger attach`). In this version `patina debug` runs on x86_64, and does not take a run
-with `--preempt points` or `branches`, or one whose threads yielded at spin points: those
-come of single steps and breakpoints the runtime takes with `SIGTRAP`, as gdb does. A spin
-probe the supervisor sends while gdb holds the program (a thread that ran 20 ms of CPU time
-without a system call) stops gdb (`patina: a spin probe ...`); continuing drops it, which
-changes nothing unless the program was spinning.
+(`debugger attach`). In this version `patina debug` does not take a run whose threads
+yielded at spin points: those come of single steps and breakpoints the runtime takes with
+`SIGTRAP`, as gdb does. A spin probe the supervisor sends while gdb holds the program (a thread
+that ran 20 ms of CPU time without a system call) stops gdb (`patina: a spin probe ...`);
+continuing drops it, which changes nothing unless the program was spinning.
+
+A `--preempt points` or `branches` run takes `SIGTRAP` for its scheduling points too. There
+reading, breakpoints, watchpoints, `finish` and continuing are as exact as in any run, but gdb
+refuses stepping (`step`, `next`, `stepi` and the like are errors, and the run is unchanged):
+set a breakpoint and continue instead. On arm64 `patina debug` does not take such a run in
+this version. Ctrl-C does not interrupt such a run. Code the plan
+moved shows as the program's own in `bt` (`patina: N trampolines mapped ...`).
 
 The debugger is yours and can change the program as it runs: that is why a session that writes
 says where it left the run. Nothing about the sandbox is different in an ordinary run: the

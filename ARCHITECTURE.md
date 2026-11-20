@@ -1498,11 +1498,27 @@ Debug-only rules, active only while `Config::debug` is nonzero:
   once: its events take the stop's sequence number and those after it, the event at the gate
   takes the next one after them (`entry::next_seq`), and the session has left the run there.
 
-gdb keeps every `SIGTRAP` it did not cause (the helper's `handle SIGTRAP nopass`), so the
-runtime's own uses of it, the spin probes' steps and breakpoints and the `--preempt points`
-and `branches` mechanisms, are not available in a session: runs that relied on them are
-refused, and a probe sent during a session is dropped (it finds nothing in a program that was
-not spinning, so nothing recorded changes).
+In an ordinary run gdb keeps every `SIGTRAP` it did not cause (the helper's `handle SIGTRAP
+nopass`), so the spin probes' steps and breakpoints are not available in a session: a run whose
+threads yielded at spin points is refused, and a probe sent during a session is dropped (it
+finds nothing in a program that was not spinning, so nothing recorded changes).
+
+A `--preempt points` or `branches` run takes `SIGTRAP` for its scheduling points (a plan's
+`int3` or `brk`, the counter's single steps), which gdb cannot tell from its own. There the
+helper passes on every `SIGTRAP` gdb did not cause (`handle SIGTRAP pass`), and the runtime
+drops one that is neither its own nor a plan's (`fault::debugger_passes`): a trap gdb left
+behind (a watchpoint's, after it was deleted) never reaches the program. gdb's own steps would
+be among the runtime's, so the helper refuses stepping (`step`, `next`, `stepi`, `nexti`,
+`until`, `advance` are errors). On arm64 such a run is refused in this version: an arm64
+watchpoint traps before the access and gdb steps over it, and a breakpoint gdb sets in code
+the plan moved is not hit there. Ctrl-C's `SIGTRAP` is passed on and dropped, so it does not
+interrupt such a run. A breakpoint instruction of the program's own is dropped too: such a
+session leaves the run, and its end says where. Code the plan moved runs in trampolines no
+symbol file covers: the launcher lists each process's trampolines with the original
+instructions each stands for (from the plans the process maps), and the helper's unwinder
+gives a trampoline frame the original address, so `bt` and breakpoints read as the program's.
+On arm64 the runtime's signal restorer is not the kernel's instruction pair gdb knows, and the
+same unwinder reads its signal frame.
 
 The word is the launcher's, set from its own command line: it is in `Config`, which the
 runtime reads from the control region, and the program has neither the region's address nor

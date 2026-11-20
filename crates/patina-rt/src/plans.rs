@@ -514,6 +514,15 @@ fn entry_at(pc: u64, kind: u8) -> Option<(&'static Img, u64)> {
     })
 }
 
+/// Whether a `SIGTRAP` at `pc` is a plan's own: a jump onto an interior boundary's `int3`
+/// (`entry`). Reads only.
+pub fn owns_sigtrap(pc: u64, info: &crate::sys::sig::SigInfo) -> bool {
+    const SI_KERNEL: i32 = 0x80;
+    info[1] as u32 as i32 == SI_KERNEL
+        && proc().plans.n != 0
+        && entry_at(pc.wrapping_sub(1), KIND_INTERIOR).is_some_and(|(img, _)| !img.tramp_gone)
+}
+
 /// A trap the plan answers in place: a `cpuid` (`SIGILL` at its `ud2`), or a jump into an
 /// interior boundary of a group (from the kernel: `int3` a `SIGTRAP` after it, the others a
 /// `SIGSEGV` at it with no address), which resumes at the copy of that instruction in the
