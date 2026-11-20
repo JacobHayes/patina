@@ -313,7 +313,13 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         result: {
             use crate::launcher::pmu::Unavailable as U;
             crate::launcher::pmu::available()
-                .map(|ev| format!("supported: event {ev:#x} opens"))
+                .map(|ev| {
+                    format!(
+                        "supported: event {ev:#x} opens; stops are exact, and a run whose \
+                         overflow interrupt comes later than [sched] pmu-margin (seen on \
+                         virtual machines) ends `internal`, stop `pmu-late`"
+                    )
+                })
                 .map_err(|e| match e {
                     U::Cpu(m) => (
                         format!(

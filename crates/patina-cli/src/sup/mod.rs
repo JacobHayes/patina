@@ -863,11 +863,22 @@ impl Sup {
                     ));
                 }
                 if code == HE_PMU {
+                    if errno == PMU_E_OVERSHOOT {
+                        // A late overflow interrupt: the stop is behind, it cannot be reached.
+                        self.finish(Verdict::new(
+                            "pmu-late",
+                            format!(
+                                "pmu: the overflow interrupt came {} branches after the stop, \
+                                 later than the margin of {} branches it is aimed ahead of it \
+                                 (seen on virtual machines, whose PMU interrupts can come \
+                                 late); raise [sched] pmu-margin",
+                                nr as i64, self.ctl.config.pmu_margin
+                            ),
+                        ));
+                    }
                     let what = match errno {
-                        PMU_E_OVERSHOOT => {
-                            "overshoot (overflow skid past the margin; raise --pmu-margin)"
-                        }
                         PMU_E_MISSED => "missed overflow",
+                        PMU_E_BACKWARDS => "the count went backwards",
                         PMU_E_DECODE => "cannot decode guest code",
                         PMU_E_OPEN => "cannot open a counter",
                         PMU_E_PAGE => "counter page or period",

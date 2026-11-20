@@ -170,6 +170,47 @@ def preempts(logpath):
     return len(out), out
 
 
+def sample_rate():
+    """The kernel's perf_event_max_sample_rate (it throttles an event above it per tick, and
+    lowers it when its interrupts take long, as on a loaded virtual machine)."""
+    try:
+        return open("/proc/sys/kernel/perf_event_max_sample_rate").read().strip()
+    except OSError:
+        return "?"
+
+
+def late(o):
+    """A run that failed closed because an overflow interrupt came later than the margin."""
+    return o.get("outcome") == "internal" and o.get("stop") == "pmu-late"
+
+
+def exact(patina, out, n, mh, mc, cmd, opts=()):
+    """The same fixed N reached by hops only (margin mh: every branch counted by the runtime, the
+    definition of the stop) and through the counter (margin mc). Returns (verdict, hops result,
+    counter result, preempt records of the hops run): verdict "equal", "late" (the counter run
+    failed closed: stop pmu-late), "not ok" or "DIFFERS". A difference keeps both runs' logs and
+    returns the first differing record (`patina log diff`) as the verdict's second line; other
+    logs are pruned."""
+    base = ["pmu-short-permille=0", f"pmu-slice={n}..{n}", "pmu-short-max=1", "stall-ms=600000"] + list(opts)
+    a = run(patina, f"{out}-hops", 1, GU, base + [f"pmu-margin={mh}"], cmd, keep=True)
+    b = run(patina, f"{out}-counter", 1, GU, base + [f"pmu-margin={mc}"], cmd, keep=True)
+    ca, _ = preempts(f"{out}-hops/inc-0/boundary.log")
+    if a["outcome"] != "ok" or (b["outcome"] != "ok" and not late(b)):
+        v = "not ok"
+    elif late(b):
+        v = "late"
+    elif a["digest"] == b["digest"]:
+        v = "equal"
+    else:
+        r = subprocess.run([patina, "log", "diff", f"{out}-hops/inc-0/boundary.log", f"{out}-counter/inc-0/boundary.log"],
+                           capture_output=True, text=True)
+        v = "DIFFERS (logs kept: " + out + "-hops, -counter)\n" + "\n".join((r.stdout + r.stderr).strip().splitlines()[:3])
+    if not v.startswith("DIFFERS"):
+        prune(f"{out}-hops")
+        prune(f"{out}-counter")
+    return v, a, b, ca
+
+
 def native(cmd, timeout=600):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     ls = [l.strip() for l in r.stdout.splitlines() if l.strip()]

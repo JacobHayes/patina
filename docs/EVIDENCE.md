@@ -1084,6 +1084,84 @@ What differs from the Apple VM (Tart, Apple M4): no PMU is exposed to the guest,
 exclusive emulation were also run there with a software event standing in for the counter
 (not shipped).
 
+## Branch counters under host load
+
+Measured 2026-11-20 on the KVM guest (Linux 7.0, `perf_event_max_sample_rate` 6,000 at HZ
+1,000: the kernel had lowered it from 100,000 after interrupts that took long, so it throttles
+an event after 6 overflow interrupts in a tick). Each run is one N = 3,000 counter run of a
+`tests/guests/counters/compute` program compared with its hops-only run (`05-exact`'s method;
+8 runs at a time); load is busy loops started for the batch, the host's own load average was
+2 to 10 besides. No bare-metal host was measured.
+
+**Before** (the overflow entry had 3 conditional branches before its `rdpmc`; pmu-margin 512):
+
+| Condition | Runs | Differ | Overshoot (fail closed) |
+|---|---|---|---|
+| quiet, load 1.5 | 200 | 2 | 4 |
+| 16 busy loops at nice 19, load 6.4 | 200 | 1 | 0 |
+| 24 busy loops at nice 0, load 13 | 200 | 0 | 0 |
+
+Every difference was a stop exactly 3 branches late, at the same place in each (the first
+preemption, in `ld.so`), so a run that differed gave the same wrong digest each time. A
+scratch build that counted overflows whose counter had not moved since the interrupt found 5
+in 400 runs and 10 in 600, each such run's stop 3 branches late. The cause: while a segment's
+short period was left armed during runtime work, the runtime's own branches overflowed it
+more than 6 times in a tick; the kernel throttled the event, stopping the counter at the next
+overflow until its next tick, but still sent the signal, so the handler's first 3 branches
+went uncounted. The arm64 runner's twice-repeated wrong digest (`05`, 3000-recur) fits the
+same cause (2 branches before the read there) but was not reproduced: on the runners below
+the rate stayed at 40,000 or more, no overflow found its counter stopped, and 440 runs of
+the old build gave no difference.
+
+Late interrupts, the other failure, are not load: branches from the programmed overflow to
+the interrupted instruction, the largest per run: median 142 to 195 and 99th percentile 465
+to 514 over batches with no added load, lower with busy loops on other CPUs (median 83 to
+142, 99th percentile 242 to 324); the largest seen 704, with the runs on one CPU shared with
+4 busy loops. The late ones come at the same instructions run after run (in `recur`, the
+page faults that grow the stack): the interrupt waits for the next exit to the hypervisor.
+
+**After** (no branch before the read, and the period programmed again at every overflow,
+the long one while hopping):
+
+| Condition | Runs | Equal | `pmu-late` | Overflows found stopped |
+|---|---|---|---|---|
+| margin 1024, four programs, no added load | 200 | 200 | 0 | 0 |
+| the same, 16 loops at nice 10 | 200 | 200 | 0 | 0 |
+| the same, runs pinned to one CPU with 4 loops on it | 200 | 200 | 0 | 0 |
+| the same, 24 loops at nice 0, load 20 | 200 | 200 | 0 | 0 |
+| margin 1024, `recur`, no added load | 1,000 | 1,000 | 0 | 0 |
+| the same, 16 loops at nice 10, load 23 | 1,000 | 1,000 | 0 | 0 |
+| the same, pinned to one CPU with 4 loops on it | 400 | 400 | 0 | 0 |
+| margin 512, `recur`, no added load | 1,000 | 983 | 17 | 0 |
+| bursts (N = 2,100), no added load | 200 | 200 | 0 | 8,264 |
+| bursts, 16 loops at nice 10 | 200 | 200 | 0 | 10 |
+
+`bursts` (an overflow every few microseconds) is where throttling happens now; fewer are found
+stopped under load, as each switch of the CPU restarts the counter. At margin 512 the 17
+late runs ended `internal`, stop `pmu-late`, 3 to 152 branches past the stop; the default and
+the scripts' counter margin is 1,024.
+
+arm64 (GitHub `ubuntu-24.04-arm`, Neoverse N2, `perf_event_max_sample_rate` 100,000 falling
+to 40,000 during the job; one job per build, 4 runs at a time, "loaded" is 4 busy loops at
+nice 10): `counters` passes with the change, with no overflow found stopped in `05` and
+`08-load`, bursts included. Late interrupts happen there too, later than on x86_64:
+
+| `recur`, N = 3,000 | Before | After |
+|---|---|---|
+| margin 512 | 118/120 equal, 2 overshoot (178 and 1,374 past the stop) | 118/120 equal, 2 `pmu-late` (127 and 513 past) |
+| margin 1024 | 120/120 equal | 119/120 equal, 1 `pmu-late` (812 past: 1,836 after the overflow) |
+| margin 1024, loaded | 120/120 equal | 120/120 equal |
+| bursts, quiet and loaded | 80/80 equal | 80/80 equal, 0 stopped |
+
+Red/green: with the old entry planted back (3 branches before the read, subtracted as
+before), `05-exact` and `08-load` fail on bursts (the first differing record printed:
+`preempt` at the same instruction with other registers: another pass of the loop, at record
+304 and 625), and
+pass with the change. On arm64 a planted branch before the read changed nothing on the runner:
+no overflow was throttled there. The arm64 cost: with no branch before the read, every
+SIGTRAP makes the read, a hop's breakpoint included (a failing `read()` there); `06-migrate`
+took 149 s against 138 s before on the runner.
+
 ## Costs
 
 | What | Cost |

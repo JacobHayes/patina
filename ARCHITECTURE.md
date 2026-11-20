@@ -643,7 +643,34 @@ configuration (`launcher/pmu.rs`). Capabilities never enter the sandbox.
 A segment is the program code between two runtime entries; each segment draws a fresh N. The
 counter overflows a little before N; the runtime then walks forward itself, planting `int3`
 at the next control transfer and emulating it, counting branches by hand until N is exact
-(`patina-rt/src/pmu.rs`). An overshoot past N cannot be repaired and ends the run `internal`.
+(`patina-rt/src/pmu.rs`). The overflow is aimed `[sched] pmu-margin` branches (1024 by
+default) ahead of N; an overflow interrupt that comes later than that lands past N, which
+cannot be repaired: the run ends `internal`, stop `pmu-late`.
+
+**What is exact.** On the CPUs accepted, a stop is where counting every branch by hand would
+put it (same instruction, same registers), or the run fails closed (`pmu-late`); it is never
+elsewhere silently. Two host behaviours work against that, both measured on a virtual machine
+under load (docs/EVIDENCE.md, "Branch counters under host load"):
+
+- Throttling. The kernel stops an event that interrupts more often than
+  `perf_event_max_sample_rate` allows per tick (the kernel lowers that rate itself when its
+  interrupts take long, as on a loaded virtual machine), at the overflow, until its next tick,
+  a context switch or a period change, and still sends the signal. So the overflow handler
+  reads the counter before any branch the counter would count (x86_64: the dispatch is a
+  `cmov` and an indirect jump, and the only conditional branch before the read is a retry
+  of it, taken only when the kernel changed the event's page during the read (the
+  runtime counts it); arm64: the `read()` comes first), and a stopped counter and a running one
+  read the same; every overflow then programs the period
+  again, which restarts it, before program code runs. Overflows found stopped are counted
+  (`stopped` in the run's counters). A branch before the read would be lost whenever the
+  counter was stopped, and the stop would come that much late, at the same place each time:
+  a wrong digest that repeats.
+- Late interrupts. On the x86_64 virtual machine measured, the overflow interrupt came a
+  median of about 150 and up to about 700 branches after the overflow, at the same places
+  run after run, such as page faults (the interrupt waits for the next exit to the
+  hypervisor); on GitHub's arm64 runners up to about 1,900. Within the margin
+  that costs hops only; past it the run ends `pmu-late`, and the remedy is a larger margin.
+  `patina doctor` says this on its `branch counters` line.
 
 Most draws are long (about 1 to 4 million branches); 2% are short (up to 256), which lands
 stops just after a system call, where check-then-act windows sit. `[sched] branches = "hunt"`
@@ -663,7 +690,8 @@ differences from x86_64:
   a host setting and, on the hosts measured, traps to the hypervisor at the same cost). Each
   read the count depends on is in assembly a fixed number of branches from program code: at
   the return to the program (the signal restorer and `sigreturn_to`, which read only when a
-  segment asks and then `rt_sigreturn`) and at the head of the overflow handler. The kernel
+  segment asks and then `rt_sigreturn`) and as the overflow handler's first act, before any
+  branch (`arch/aarch64/stub.rs`). The kernel
   writes the value into the thread state, so no branch follows the read to keep it.
 - No overflow is taken inside the runtime: with counters on, every runtime handler blocks
   SIGTRAP, so an overflow that comes while runtime code runs waits until `rt_sigreturn`

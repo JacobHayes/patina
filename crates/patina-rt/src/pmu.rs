@@ -13,8 +13,17 @@
 //!   lands within the margin by switching to hops for the last branches.
 //!
 //! `x` is the runtime's own branches inside measured windows: the overflow handler reads the
-//! counter in assembly before any branch whose count is not fixed and again just before it
-//! returns (`patina_sigtrap`), so its work never reaches `g`.
+//! counter in assembly before any conditional branch (one per retry of the read aside) and
+//! again just before it returns (`patina_sigtrap`), so its work never reaches `g`.
+//!
+//! Throttling. The kernel stops an event that interrupts more often than
+//! `perf_event_max_sample_rate` allows per tick (on a loaded virtual machine that rate falls
+//! as interrupts take long), at the overflow, until its next tick, a context switch or a
+//! period change. Nothing is lost while the counter is stopped only between the interrupted
+//! instruction and the handler's read: no conditional branch runs there. The handler then
+//! programs the period again before program code runs (`alarm`), and a segment's first window
+//! that counted no more than the runtime's own branches counts 0: its overflow came while the
+//! runtime ran, and was delivered at the program's first instruction.
 //!
 //! Races. The overflow signal (SIGTRAP) is sent by kernel task work, which runs before the
 //! kernel dequeues signals: a seccomp SIGSYS or a fault signal raised by the same instruction
@@ -56,6 +65,9 @@ pub struct Pmu {
     /// This segment's N, the counter at its start, and the runtime branches inside it.
     pub n: u64,
     pub r_exit: u64,
+    /// The branches added to the read at the segment's start to make `r_exit` (the runtime's
+    /// own, after the read).
+    pub lead: u64,
     pub x: u64,
     /// Branches counted so far while hopping.
     pub g_soft: u64,
@@ -84,6 +96,7 @@ impl Pmu {
             armed: 0,
             n: 0,
             r_exit: 0,
+            lead: 0,
             x: 0,
             g_soft: 0,
             period: 0,
@@ -102,18 +115,25 @@ const _: () = assert!(core::mem::size_of::<ThreadState>() as u64 <= PMU_PAGE_OFF
 const OFF_PAGE: usize = core::mem::offset_of!(ThreadState, pmu) + core::mem::offset_of!(Pmu, page);
 
 // The overflow entry. SIGTRAP arrives here (registered only with counter preemption on).
-// Until the first `rdpmc`, exactly 2 conditional branches (plus the read's own, see
-// `patina_pmu_read`), whatever the path: they are part of the constant `HEAD`.
+// No conditional branch comes before the `rdpmc` that is used, except one per retry of the
+// read (`patina_pmu_read`): the dispatch to the plain path is a `cmov` and an indirect jump.
+// So the guest's count does not depend on whether the counter ran between the interrupted
+// instruction and the read: the kernel stops an event it throttles at the overflow, and only
+// starts it again at its next tick, a context switch or a period change (module comment).
 global_asm!(
     ".globl patina_sigtrap",
     "patina_sigtrap:",
     "  mov rax, rsp",
     "  and rax, {altmask}",
     "  mov rax, [rax + {off}]",
-    "  test rax, rax",
-    "  jz 8f",
+    "  lea r10, [rip + 7f]",
+    "  lea r11, [rip + 8f]",
     "  cmp dword ptr [rsi + 8], 6", // si_code == TRAP_PERF
-    "  jne 8f",
+    "  cmovne r10, r11",
+    "  test rax, rax", // a counter
+    "  cmovz r10, r11",
+    "  jmp r10",
+    "7:",
     "  push rbx",
     "  push r12",
     "  push r13",
@@ -145,7 +165,8 @@ global_asm!(
     "8:",
     "  jmp {plain}",
     // patina_pmu_read(page) -> (rax = count, rdx = retries); count u64::MAX if the counter is
-    // not active. Branches before the rdpmc that is used: 1 + 2 x retries; after it: 1.
+    // not active (index 0: counter 0 is read and the value dropped, by `cmov`). Conditional
+    // branches before the rdpmc that is used: one per retry (the `jne` taken); after it: 1.
     ".globl patina_pmu_read",
     "patina_pmu_read:",
     "  xor r9d, r9d",
@@ -153,15 +174,18 @@ global_asm!(
     "  mov r8d, dword ptr [rdi + 8]",
     "  mov ecx, dword ptr [rdi + 12]",
     "  mov r10, qword ptr [rdi + 16]",
-    "  test ecx, ecx",
-    "  jz 4f",
-    "  dec ecx",
+    "  mov r11d, ecx",
+    "  sub ecx, 1",
+    "  cmovb ecx, r11d",
     "  rdpmc",
     "  shl rdx, 32",
     "  or rax, rdx",
     "  shl rax, 16",
     "  sar rax, 16",
     "  add rax, r10",
+    "  mov rdx, -1",
+    "  test r11d, r11d",
+    "  cmovz rax, rdx",
     "  cmp r8d, dword ptr [rdi + 8]",
     "  jne 3f",
     "  mov rdx, r9",
@@ -169,10 +193,6 @@ global_asm!(
     "3:",
     "  inc r9",
     "  jmp 2b",
-    "4:",
-    "  mov rax, -1",
-    "  mov rdx, r9",
-    "  ret",
     altmask = const !(ALT_SIZE - 1),
     off = const OFF_PAGE,
     alarm = sym alarm,
@@ -183,9 +203,9 @@ extern "C" {
     fn patina_sigtrap();
 }
 
-/// Read the counter: (value, retries).
+/// Read the counter: (value, retries); u64::MAX if it is not active.
 #[inline(always)]
-fn read(page: u64) -> (u64, u64) {
+fn read_raw(page: u64) -> (u64, u64) {
     let v: u64;
     let r: u64;
     unsafe {
@@ -194,9 +214,16 @@ fn read(page: u64) -> (u64, u64) {
             in("rdi") page,
             lateout("rax") v,
             lateout("rdx") r,
-            out("rcx") _, out("r8") _, out("r9") _, out("r10") _,
+            out("rcx") _, out("r8") _, out("r9") _, out("r10") _, out("r11") _,
         )
     };
+    (v, r)
+}
+
+/// Read the counter: (value, retries).
+#[inline(always)]
+fn read(page: u64) -> (u64, u64) {
+    let (v, r) = read_raw(page);
     if v == u64::MAX {
         crate::sup::host_error(PMU_E_PAGE as i64, 0, HE_PMU);
     }
@@ -376,6 +403,13 @@ fn exit_slow(ts: &mut ThreadState, rip: u64, tail: u64) {
     p.target = 0;
     bump(&c.pmu.segments, 1);
     let m = mode(cfg, n);
+    // The mode first: an overflow signal that arrives on the period's return keeps a Mid
+    // segment's period (`alarm`).
+    p.mode = match m {
+        Mode::Hop => M_HOPPING,
+        Mode::Mid => M_MID,
+        Mode::Long => M_LONG,
+    };
     // Every segment programs its period, hops included: a short period left from a segment
     // that ended before its overflow would raise an overflow every few branches while hopping
     // (the runtime's own branches count too), and the kernel throttles (stops) an event that
@@ -389,24 +423,26 @@ fn exit_slow(ts: &mut ThreadState, rip: u64, tail: u64) {
     }
     match m {
         Mode::Hop => {
-            p.mode = M_HOPPING;
             p.g_soft = 0;
             walk(ts, rip, None);
         }
         Mode::Mid | Mode::Long => {
-            p.mode = if m == Mode::Mid { M_MID } else { M_LONG };
             bump(&c.pmu.reads, 1);
             let page = p.page;
             let (v, _) = read(page);
             // After the rdpmc: the read loop's `jne`, `read`'s failure check, the caller's tail.
             p.r_exit = v + 2 + tail;
+            p.lead = 2 + tail;
             p.armed = 1;
         }
     }
 }
 
+/// Program the period, which also starts a counter the kernel throttled. `period` is set
+/// before the call: an overflow signal that arrives on its return restarts the counter with it.
 fn set_period(p: &mut Pmu, period: u64) {
     const PERF_EVENT_IOC_PERIOD: u64 = 0x4008_2404;
+    p.period = period;
     let r = unsafe {
         sc3(
             nr::IOCTL,
@@ -418,11 +454,13 @@ fn set_period(p: &mut Pmu, period: u64) {
     if r < 0 {
         fail(PMU_E_PAGE, (-r) as u64);
     }
-    p.period = period;
 }
 
 /// The overflow handler (from `patina_sigtrap`, after the first read). Returns the address of
 /// `x` when the window must be accounted (the stub adds the second read to it), else 0.
+///
+/// Every overflow programs the period again before it returns, so a counter the kernel stopped
+/// at this overflow (throttling) counts again before any more program code runs.
 extern "C" fn alarm(_info: *const u8, uc: *mut Frame, r_a: u64, retries: u64) -> u64 {
     let ts = thread();
     let frame = unsafe { &mut *uc };
@@ -433,28 +471,54 @@ extern "C" fn alarm(_info: *const u8, uc: *mut Frame, r_a: u64, retries: u64) ->
         frame.gregs[RIP] -= 2;
         bump(&c.pmu.races, 1);
     }
+    // Stopped: no branch counted since the first read, though the read's own `jne` ran since.
+    if r_a != u64::MAX && read_raw(ts.pmu.page).0 == r_a {
+        bump(&c.pmu.stopped, 1);
+    }
     if ts.pmu.armed == 0 {
+        // No measured segment: between segments, or hopping. A short period left by a segment
+        // would interrupt the runtime's own code every few branches; the segment that starts
+        // next sets what it needs (it sets the mode first, so its period is kept).
+        let p = &mut ts.pmu;
+        let keep = if p.mode == M_MID { p.period } else { PERIOD };
+        set_period(p, keep);
         return 0;
     }
     if r_a == u64::MAX {
         fail(PMU_E_PAGE, 0);
     }
     ts.pmu.armed = 0;
-    // Branches between the interrupted instruction and the read: the stub's 2, the read's.
-    let head = 3 + 2 * retries;
+    // Branches between the interrupted instruction and the read: one per retry of the read.
+    let head = retries;
     let m = c.config.pmu_margin;
     let rip = frame.gregs[RIP];
     if !in_runtime(rip) {
         let p = &mut ts.pmu;
-        let g = r_a
+        let mut g = r_a
             .wrapping_sub(head)
             .wrapping_sub(p.r_exit)
             .wrapping_sub(p.x);
+        if p.x == 0 && g as i64 <= 0 && g as i64 >= -(p.lead as i64) {
+            // The segment's first window counted no more than the runtime's own branches: the
+            // overflow came while the runtime ran, and its signal waited until the return to
+            // the program, at the program's first instruction. The counter may have stopped at
+            // that overflow (throttled) before the runtime's last branches; none is the program's.
+            // Less than that is a count that went backwards: it fails below.
+            g = 0;
+        }
         bump(&c.pmu.alarms, 1);
-        if g as i64 >= p.n as i64 || (g as i64) < 0 {
-            fail(PMU_E_OVERSHOOT, g.wrapping_sub(p.n));
+        if (g as i64) < 0 {
+            fail(PMU_E_BACKWARDS, g);
+        }
+        if g >= p.n {
+            fail(PMU_E_OVERSHOOT, g - p.n);
         }
         let r = p.n - g;
+        if p.mode == M_MID && p.x == 0 {
+            // Branches past the programmed overflow (N - margin, programmed just before the
+            // segment's first read: a few of the runtime's branches come after it).
+            p.target = p.r_exit.wrapping_add(p.n - m);
+        }
         if p.target != 0 {
             // Branches between the programmed overflow and the interrupted instruction.
             let skid = r_a.wrapping_sub(head).wrapping_sub(p.target);
@@ -466,9 +530,7 @@ extern "C" fn alarm(_info: *const u8, uc: *mut Frame, r_a: u64, retries: u64) ->
         if r <= m || r - m < MIN_REARM {
             // Within reach: hop the last r branches.
             bump(&c.pmu.landings, 1);
-            if p.period != PERIOD {
-                set_period(p, PERIOD);
-            }
+            set_period(p, PERIOD);
             p.mode = M_HOPPING;
             p.g_soft = g;
             walk(ts, rip, Some(frame));
@@ -479,7 +541,13 @@ extern "C" fn alarm(_info: *const u8, uc: *mut Frame, r_a: u64, retries: u64) ->
             let (c0, _) = read(p.page);
             p.target = c0 + (r - m);
             bump(&c.pmu.rearms, 1);
+        } else {
+            set_period(p, PERIOD);
         }
+    } else {
+        let p = &mut ts.pmu;
+        let keep = p.period;
+        set_period(p, keep);
     }
     let p = &mut ts.pmu;
     p.x = p.x.wrapping_sub(r_a).wrapping_add(head + 1);

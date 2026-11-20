@@ -384,8 +384,10 @@ pub struct PmuStats {
     pub races: AtomicU64,
     /// Largest overflow skid seen (branches past the programmed point, at a landing).
     pub max_skid: AtomicU64,
+    /// Overflows after which the counter was found stopped (the kernel throttled the event).
+    pub stopped: AtomicU64,
 }
-pub const PMU_FIELDS: usize = 13;
+pub const PMU_FIELDS: usize = 14;
 pub const PMU_NAMES: [&str; PMU_FIELDS] = [
     "opened",
     "preempts",
@@ -400,6 +402,7 @@ pub const PMU_NAMES: [&str; PMU_FIELDS] = [
     "landings",
     "races",
     "max_skid",
+    "stopped",
 ];
 
 impl PmuStats {
@@ -419,6 +422,7 @@ impl PmuStats {
             r(&self.landings),
             r(&self.races),
             r(&self.max_skid),
+            r(&self.stopped),
         ]
     }
 }
@@ -1138,6 +1142,7 @@ pub const PMU_E_MISSED: u64 = 2;
 pub const PMU_E_DECODE: u64 = 3;
 pub const PMU_E_OPEN: u64 = 4;
 pub const PMU_E_PAGE: u64 = 5;
+pub const PMU_E_BACKWARDS: u64 = 6;
 /// Program code reached into the runtime: args[0] = `CONTAIN_*`, args[1] = the address,
 /// args[3] = the program's instruction pointer, args[4] = 1 for a store.
 pub const HE_CONTAINMENT: u64 = 8;

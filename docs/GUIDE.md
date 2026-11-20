@@ -145,7 +145,9 @@ replay: patina replay /tmp/patina/patina-out/run-1
 The starting work tree (`--work`) does not count against it; what the program writes to the
 work tree does (the operation log keeps it for crashes).
 
-A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A guest process killed
+A full filesystem under `--out` ends the run `internal`, stop `disk-full`. Under `--preempt
+branches`, an overflow interrupt from the branch counter that comes later than `[sched]
+pmu-margin` ends it `internal`, stop `pmu-late` ([Scheduling](#scheduling)). A guest process killed
 by SIGKILL from outside the run (the host's out-of-memory killer, or a kill sent on the host) ends
 it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. With `--crash`, a run ends by
 checking its operation log: replaying it must give the work tree each incarnation left. A
@@ -1897,6 +1899,16 @@ GitHub's `ubuntu-24.04-arm` runners expose theirs) and
 `CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
 only on that CPU family. `patina doctor` says which of the three is missing.
 
+Its stops are exact: a run stops at the branch counting every branch by hand would, with the
+same registers, or it fails closed. The counter's overflow interrupt is aimed 1024 branches
+(`[sched] pmu-margin`) ahead of the stop and the rest is counted by hand; on a virtual
+machine the interrupt can come later than that (up to about 700 branches after the overflow
+on the x86_64 one measured, 1,900 on GitHub's arm64 runners), and the run then ends
+`internal`, stop `pmu-late`,
+rather than stop past its branch: raise `pmu-margin` (each stop then counts more branches by
+hand). The kernel's throttling of a counter that interrupts too often, which a loaded virtual
+machine makes more likely, does not change where a run stops.
+
 ## Deeper search: rebuilt code
 
 A stock program switches threads only where it makes a system call or spins. Rebuilt with a
@@ -2299,7 +2311,7 @@ per requirement, and prints the fix for anything missing:
 | `signal context` | | FP/SIMD, SVE up to 512 bits, FPMR and POE records; a run that uses SME's streaming mode or ZA stops `signal-context` |
 | `pointer authentication` | | its keys are disabled for programs under Patina |
 | `spin probes` (not required) | code writes through `/proc/self/mem`; soft-dirty bits | code writes through `/proc/self/mem`; userfaultfd write protection |
-| `branch counters` (optional) | AMD Zen 5 with its PMU exposed, and `CAP_PERFMON` | not supported |
+| `branch counters` (optional) | AMD Zen 5 with its PMU exposed, and `CAP_PERFMON` | Arm Neoverse N2 with its PMU exposed, and `CAP_PERFMON` |
 
 Patina makes its own sandbox (ARCHITECTURE.md, "The sandbox"), so it needs no other program,
 only a kernel that lets an ordinary user make a user namespace:

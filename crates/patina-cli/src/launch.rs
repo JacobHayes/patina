@@ -1267,7 +1267,9 @@ pub fn run_incarnation(
         }
     }
 
-    if !truncated.is_empty() && verdict.class != "infra" && verdict.class != "disk-full" {
+    if !truncated.is_empty()
+        && !matches!(verdict.class.as_str(), "infra" | "disk-full" | "pmu-late")
+    {
         // More output than the run directory takes: the comparison would miss the rest.
         verdict = Verdict::new(
             "output-limit",

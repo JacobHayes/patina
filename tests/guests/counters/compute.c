@@ -12,6 +12,10 @@
  *               compute (handlers compute too), and an interval timer (SIGALRM)
  *     threads   16 threads computing, combining results under a mutex
  *     traps     SCALE x 100000 getppid calls (per-trap cost)
+ *     bursts    SCALE x 2000 bursts of loop iterations, nine short (1150) then one long (2600),
+ *               a getppid after each: with N between the two and the period just under the
+ *               short ones, an overflow every few microseconds, more than the kernel lets
+ *               through per tick before it throttles (stops) the event
  */
 #define _GNU_SOURCE
 #include <math.h>
@@ -195,6 +199,21 @@ static uint64_t signals(long n)
 	return h;
 }
 
+static uint64_t bursts(long n)
+{
+	uint64_t h = 1, x = 88172645463325252ULL;
+	for (long i = 0; i < n; i++) {
+		/* nine short bursts, then a long one (about one branch per iteration) */
+		int k = i % 10 == 9 ? 2600 : 1150;
+		for (int j = 0; j < k; j++) {
+			x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+			h += x;
+		}
+		h += (uint64_t)syscall(SYS_getppid);
+	}
+	return h;
+}
+
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t total;
 static void *tw(void *a)
@@ -227,6 +246,7 @@ int main(int argc, char **argv)
 	else if (!strcmp(m, "fp")) h = fp(scale * 60 / wdiv);
 	else if (!strcmp(m, "signals")) h = signals(scale * 3000 / wdiv);
 	else if (!strcmp(m, "threads")) h = threads();
+	else if (!strcmp(m, "bursts")) h = bursts(scale * 2000 / wdiv);
 	else if (!strcmp(m, "traps")) { h = 0; for (long i = 0; i < scale * 100000; i++) h += syscall(SYS_getppid); }
 	else { fprintf(stderr, "unknown mode %s\n", m); return 2; }
 	printf("%s %016llx\n", m, (unsigned long long)h);
