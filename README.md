@@ -12,14 +12,15 @@ Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 Ki
 makes its own sandbox and needs unprivileged user namespaces; Ubuntu 24.04 and later admit them
 for a program only with an AppArmor profile, installed once as root (below).
 
-Changes in 0.15: `--preempt points` (x86_64) gives stock programs and their libraries switch
-points without a rebuild ([the guide](docs/GUIDE.md#points-in-stock-code---preempt-points));
-MySQL, etcd and Erlang/Elixir run; `--tmpfs-bytes`; a host file shows the guest only its type,
-mode, size, content, inode number and modification time, which moves the digests of nearly
-every dynamically linked program; `net-partition` is `START+LENGTH[:PORT]`, drawn per seed.
-Run directories from 0.14 are refused. In 0.14: stock PostgreSQL 18 and headless Chromium
-(`--no-sandbox`) run; `signalfd`, System V shared memory and `/proc` directories are supported;
-a signal sent while a thread was about to block is no longer lost.
+Changes in 0.16: several machines in one run ([nodes](docs/GUIDE.md#several-machines): a
+virtual network with scripted cuts, partitions drawn by the seed, link faults and node kills
+and restarts); no bubblewrap: Patina makes its own sandbox, and Ubuntu 24.04 and later need an
+AppArmor profile for its path, the `.deb` (which has one) or a sysctl (below); `--preempt points`
+on arm64, with walks past a point; stores through shared file mappings reach the operation log
+however their process ends. Run directories from 0.15 are refused. In 0.15: `--preempt points`
+(x86_64) gives stock programs and their libraries switch points without a rebuild; MySQL, etcd
+and Erlang/Elixir run; a host file shows the guest only its type, mode, size, content, inode
+number and modification time.
 
 ## Install
 
