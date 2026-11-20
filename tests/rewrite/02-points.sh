@@ -1,7 +1,7 @@
 # 2. `--preempt points`: the runtime applies plans to stock programs (ARCHITECTURE "Load-time
 # rewriting"), with a plan cache of its own under RUNS.
-#  a. each differential guest (C static and static-PIE, C++ and Rust static, Go) prints its
-#     native output; its plan was applied and points were taken; seeds 1 and 2 each repeat
+#  a. each differential guest (C static and static-PIE, C++ and Rust static, Go; in the quick
+#     tier C static and Go) prints its native output; its plan was applied and points were taken; seeds 1 and 2 each repeat
 #     identical under --vary cpu,load,aslr,sandbox,repeat, and their digests differ (the points
 #     move the schedule);
 #  b. go-race-stock (compute-gap=8) and rs-race-stock (compute-gap=2), stock builds of a
@@ -21,7 +21,7 @@
 #  f. a plan is made once across processes: two cold runs of one program that both find its
 #     entry held wait for it, and one of them makes the plan, the other uses it; a cold sweep
 #     makes its program's plans before its runs start, so none of its runs makes one.
-#@ tier=quick budget=60 slots=4
+#@ tier=quick,release budget=60 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
@@ -38,14 +38,15 @@ export XDG_CACHE_HOME=$o/cache
 pts() { "$PATINA" run --preempt points "$@" >/dev/null 2>&1 || true; }
 
 # a. Four verifies at a time.
-for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
+guests="rw-c rw-c-spie rw-cxx rw-rs rw-go"; [ "${CHECK_TIER:-}" != quick ] || guests="rw-c rw-go"
+for g in $guests; do
     "$G/$g" >"$o/$g.want"
     printf '%s 1\n%s 2\n' "$g" "$g" >>"$o/a.jobs"
 done
 export PATINA G o
 xargs -P 4 -L 1 bash -euo pipefail -c '"$PATINA" verify --preempt points --seed "$2" --runs 3 \
     --vary cpu,load,aslr,sandbox,repeat --out "$o/$1-$2" -- "$G/$1" >"$o/$1-$2.txt" 2>&1 || true' sh <"$o/a.jobs"
-for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
+for g in $guests; do
     for s in 1 2; do
         grep -q '^identical' "$o/$g-$s.txt" || die "a. $g seed $s: $(grep -m1 -v '^run ' "$o/$g-$s.txt")"
         cmp -s "$o/$g.want" "$o/$g-$s/run-0/inc-0/stdout" || die "a. $g seed $s: output differs from the native run"
@@ -56,7 +57,7 @@ for g in rw-c rw-c-spie rw-cxx rw-rs rw-go; do
     d2=$(field "$o/$g-2/run-0/result.json" digest)
     [ "$d1" != - ] && [ "$d1" != "$d2" ] || die "a. $g: seeds 1 and 2 have one digest"
 done
-echo "a. 5 guests: native output, identical under --vary cpu,load,aslr,sandbox,repeat, seeds 1 and 2 differ (rw-go seed 1: $(field "$o/rw-go-1/run-0/result.json" rewrite.points) points)"
+echo "a. $guests: native output, identical under --vary cpu,load,aslr,sandbox,repeat, seeds 1 and 2 differ (rw-go seed 1: $(field "$o/rw-go-1/run-0/result.json" rewrite.points) points)"
 
 # b. Four runs at a time, stopping at the first group of four with a failure.
 hunt() {

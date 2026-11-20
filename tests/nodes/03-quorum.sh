@@ -5,7 +5,7 @@
 # planted bug of reads without the lease (`nolease`: a stale read from the old primary after a
 # one-way or isolating cut) is found in most seeds of a sweep, and its first failing run replays
 # identically. The other planted bugs are 04-quorum-bugs's.
-#@ tier=quick budget=90 slots=4
+#@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-quorum; mkdir -p "$o"
 

@@ -650,7 +650,7 @@ decoder.
 
 | Check | Result |
 |---|---|
-| Determinism: `verify --vary cpu,load,aslr,sandbox,repeat`, C static, C static-PIE, C++, Rust (lld), Go, 5 runs (seed 5) and in the quick tier 3 runs of seeds 1 and 2 | identical; seeds 1 and 2 differ |
+| Determinism: `verify --vary cpu,load,aslr,sandbox,repeat`, C static, C static-PIE, C++, Rust (lld), Go, 5 runs (seed 5) and in the release tier 3 runs of seeds 1 and 2 (the quick tier: C static and Go) | identical; seeds 1 and 2 differ |
 | The same for the stock races `go-race-stock` (compute-gap 8, seeds 1-3, 6 runs) and `rs-race-stock` | identical |
 | Without the `cpuid` sites, `go-race-stock` under `--vary cpu` | differs at the first point: `rbx` 0x0c180800 against 0x01180800, leaf 1's initial APIC id, which Go's `rt0_go` leaves in a register (below) |
 | Schedules reached: `go-race-stock` (a check-then-act on atomics, no system call in the window), seeds 1-20 | without points 0 failures; points at the default gap 0; points with `compute-gap=2..64` 9 (GUIDE transcript) |
@@ -981,7 +981,7 @@ workload ledger and 45 cells of compute-point guests (rebuilt code, with and wit
 `compute-gap=8`) are identical to main on x86_64 (both builds on one guest set) and on arm64
 (a CI job). With it, digests change (fewer records, other schedules). `verify --vary
 cpu,load,aslr,sandbox,repeat`: gofmt seed 2 (the budget engaged) and Chromium seed 3
-identical on both architectures; the quick tier's `rewrite/02-points` and `05-walks` cover the
+identical on both architectures; the release tier's `rewrite/02-points` and `05-walks` cover the
 C, C++, Rust and Go guests and `patina replay`.
 
 ## Branch counters on arm64

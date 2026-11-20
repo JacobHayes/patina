@@ -47,10 +47,16 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
 
 ## Checks and landing
 
-- **Tiers**: `quick` gates every landing (budget 5 minutes, fails above 10); `./check AREA` runs
-  an area's quick and `area` scripts while working on it; `release` gates a release and runs
-  nightly (examples at 200 seeds, a determinism matrix, F2, pubsub, install, doctor, replay;
-  fails above 10 minutes); `evidence` is by hand. `./check list` shows every script.
+- **Tiers**: `quick` gates every landing (target 5 minutes on the arm64 runner, fails above 10;
+  `scripts/land` fails it past half that on four sandboxes here); `./check AREA` runs an area's
+  quick and `area` scripts while working on it; `release` gates a release and runs nightly
+  (examples at 200 seeds, a determinism matrix, F2, pubsub, the node, signal, mapping and
+  rewrite sweeps, install, doctor, replay; fails above 10 minutes); `evidence` is by hand.
+  `./check list` shows every script; each tier run ends with its time and share of the ceiling.
+- **Quick scripts are smoke checks of seconds**: per area the cheapest check that catches a gross
+  break, on a seed or two. Sweeps over many seeds, planted-bug matrices and `verify --vary`
+  repetitions go in `area` or `release` (or run fuller there: scripts see `CHECK_TIER`). A new
+  quick script states its expected time on the arm64 runner in its header.
 - **The gate is `mise run check`**: fmt, clippy `-D warnings`, `tests/lint.py`, `./check quick`;
   CI runs it on x86_64 (`check`) and arm64 (`check-arm64`). **Land with `scripts/land BRANCH`**
   (`--dry-run` first): it rebases, runs the gate, pushes BRANCH, needs both jobs green on the
@@ -69,9 +75,10 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   a negated pipe, `$(...)` that `[ ]` passes on failure, `rm -r "$VAR"` without `:?`, plain `sh`.
 - **Doc transcripts are checked.** A fenced block in README.md, docs/GUIDE.md or
   examples/README.md that shows what a command prints carries `<!-- transcript NAME ... -->`
-  (or `<!-- no-run NAME: REASON -->`) and runs in the quick tier: exactly on the kind of host
-  its numbers were written on, with numbers as N elsewhere (`tests/docs/transcripts.py` says
-  how to mark one). A doc change that shows output passes `./check docs`.
+  (or `<!-- no-run NAME: REASON -->`) and runs in the quick tier (a sweep of many runs is
+  `release-only`): exactly on the kind of host its numbers were written on, with numbers as N
+  elsewhere (`tests/docs/transcripts.py` says how to mark one). A doc change that shows output
+  passes `./check docs` (`./check release` for a release-only block).
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.

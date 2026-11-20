@@ -35,6 +35,8 @@ output of its last command (the others' output is not shown; they must still suc
            it shows depends on one seed's run (a pinned `--seed`, a run directory of a seed).
   arch     MACHINE: the block runs only on this `uname -m` (a feature of one architecture);
            elsewhere it is listed, not run.
+  release-only  REASON: the block runs only in the release tier (`./check release`): a sweep
+           of many runs, too slow for the landing gate; elsewhere it is listed, not run.
 
 The docs' numbers (seeds, counts, digests, sequence numbers) are one kind of host's: they depend
 on the architecture, the CPU, the kernel and the host's libraries and interpreters that a program
@@ -99,7 +101,7 @@ class Block:
         self.path, self.line, self.name = path, line, name
         self.dir, self.setup, self.skip, self.exits, self.command = "/tmp/patina", [], 0, None, None
         self.cmds = []      # [(command, expected output lines, their doc line numbers)]
-        self.no_run = self.exact_only = self.arch = None
+        self.no_run = self.exact_only = self.arch = self.release_only = None
 
     def where(self):
         return f"{self.path}:{self.line} [{self.name}]"
@@ -213,6 +215,8 @@ def parse(path):
                 b.exact_only = val
             elif key == "arch":
                 b.arch = val
+            elif key == "release-only":
+                b.release_only = val
             elif key == "command":
                 b.command = val
             else:
@@ -434,7 +438,9 @@ def main():
               "exact-only blocks not run")
     norun = [b for b in blocks if b.no_run]
     machine = platform.machine()
-    held = [b for b in blocks if not b.no_run and ((b.exact_only and not exact) or (b.arch and b.arch != machine))]
+    release = os.environ.get("CHECK_TIER") == "release"
+    held = [b for b in blocks if not b.no_run and ((b.exact_only and not exact) or (b.arch and b.arch != machine)
+                                                   or (b.release_only and not release))]
     runnable = [b for b in blocks if not b.no_run and b not in held]
     scenes = {}
     for b in runnable:
@@ -447,8 +453,9 @@ def main():
         for line in report:
             print("    " + line)
     for title, bs, why in (("no-run", norun, lambda b: b.no_run),
-                           ("exact-only or another architecture's, not run on this kind of host", held,
-                            lambda b: b.exact_only or f"{b.arch} only")):
+                           ("exact-only, release-only or another architecture's, not run here", held,
+                            lambda b: (not exact and b.exact_only)
+                            or (b.arch and b.arch != machine and f"{b.arch} only") or b.release_only)):
         print(f"== {title} ({len(bs)}):")
         for b in bs:
             print(f"   {b.where()}: {why(b)}")

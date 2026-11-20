@@ -25,8 +25,14 @@ and fails, as does one that leaves a process behind (tests/leftovers.py on its R
 killed too, so a failed script's directory is quiet when it is kept or uploaded). Passing scripts' run
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
-The tier total is printed; quick fails above QUICK_CEILING s (600), an area above 300 s, release
-above 600 s.
+The tier total is printed, with its share of the ceiling and the time the same scripts would take
+on four sandboxes (the CI runners' four cores: the sum over scripts of time x min(slots, 4) / 4);
+quick fails above QUICK_CEILING s (600), an area above 300 s, release above 600 s.
+CHECK_SOFT_CEILING=PCT (scripts/land sets 50) also fails a tier whose four-sandbox time is over
+PCT% of its ceiling. A CI runner's wall time is about the four-sandbox time of its own script
+times, and those of the arm64 runner, the slower one, are near a loaded development host's: a
+tier past half its ceiling here has used up the margin that keeps arm64 green while the host or
+the runner is slow. The fix is to cut, not to raise either.
 """
 import hashlib
 import os
@@ -85,7 +91,8 @@ def select(args, allsc):
     for a in areas:
         if not os.path.isdir(os.path.join(HERE, a)):
             sys.exit(f"no area tests/{a}")
-    return "area", [s for s in allsc if s["area"] in areas and {"quick", "area"} & set(s["tiers"])]
+    return "area", [dict(s, budget=s["budgets"].get("area", s["budget"])) for s in allsc
+                    if s["area"] in areas and {"quick", "area"} & set(s["tiers"])]
 
 
 def build_under_test():
@@ -268,11 +275,20 @@ def main():
         print(f"   {dt:7.1f} s  {s['area']}/{s['name']}")
     nfail = sum(1 for r in results if not r[1])
     load = os.getloadavg()[0]
-    print(f"== {tier}: {len(results) - nfail} passed, {nfail} failed; wall {wall:.0f} s (target {TARGET[tier]} s), "
-          f"script time {sum(r[2] for r in results):.0f} s; load average {load:.1f}")
     ceil = CEILING[tier]
+    four = sum(min(s["slots"], 4) * dt for s, _, dt, _ in results) / 4
+    share = lambda t: f"{100 * t / ceil:.0f}% of the {ceil} s ceiling" if ceil else f"target {TARGET[tier]} s"
+    print(f"== {tier}: {len(results) - nfail} passed, {nfail} failed; wall {wall:.0f} s ({share(wall)}); "
+          f"on 4 sandboxes about {four:.0f} s ({share(four)}); script time {sum(r[2] for r in results):.0f} s; "
+          f"load average {load:.1f}")
     if ceil and wall > ceil:
         print(f"FAIL: the {tier} tier took {wall:.0f} s, over its {ceil} s ceiling: cut or speed up, do not raise it")
+        return 1
+    soft = int(os.environ.get("CHECK_SOFT_CEILING", "100"))
+    if ceil and four > ceil * soft / 100:
+        print(f"FAIL: on 4 sandboxes the {tier} tier would take about {four:.0f} s, over {soft}% of its {ceil} s "
+              "ceiling: the slower CI runner (arm64) would come near or over it. Cut: move sweeps, matrices "
+              "and repetitions to the area or release tier (AGENTS.md); do not raise the ceiling")
         return 1
     return 1 if nfail else 0
 

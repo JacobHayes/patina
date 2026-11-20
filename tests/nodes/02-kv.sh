@@ -2,9 +2,10 @@
 # replication on two nodes. The driver writes and reads back from the backup, cuts the link
 # between them with `patina.control`, sees the next write wait and the backup fall behind, heals,
 # and checks that the write completes and both sides converge. Correct: ok on seeds 1-4, each
-# with its own schedule (distinct digests), and identical under verify. Planted bug (the backup
+# with its own schedule (distinct digests), and identical under verify. The cut held the
+# replication: `nodes.net.held` counts it. Outside the quick tier, the planted bug (the backup
 # acknowledges before it applies): a stale read in most of seeds 1-8, and the first replays
-# identically. The cut held the replication: `nodes.net.held` counts it.
+# identically.
 #@ tier=quick budget=30 slots=2
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-kv; mkdir -p "$o"
@@ -22,6 +23,7 @@ n=$(for s in 1 2 3 4; do field "$o/ok-$s/result.json" digest; done | sort -u | w
 [ "$n" = 4 ] || die "seeds 1-4: $n distinct digests"
 echo "correct: ok on seeds 1-4, $n distinct schedules"
 verify_ok "$o/verify" 1 3 --config "$o/ok.toml" -- python3 /guest/kv.py driver
+[ "${CHECK_TIER:-}" != quick ] || exit 0
 
 stale=0; first=""
 for s in 1 2 3 4 5 6 7 8; do

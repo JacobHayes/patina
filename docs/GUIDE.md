@@ -1347,6 +1347,7 @@ partition was in force at the end, or the last one. `patina report` counts them 
 
 <!-- transcript nodes-partitions
 exact-only: which of the seeds find the bug, and how often partitions act, are the seeds' runs
+release-only: a sweep of eight runs of 90 virtual seconds
 dir: /tmp/q3
 setup: mkdir g && cp "$GUESTS/q3.py" "$GUESTS/patina.py" g/
 setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "nolease"]\n\n' $n $n; done >patina.toml
@@ -1463,6 +1464,7 @@ count = 3
 
 <!-- transcript nodes-kills
 exact-only: which seeds lose a write, and when the nodes go down, are the seeds' runs
+release-only: a sweep of eight runs of 60 virtual seconds
 dir: /tmp/q3k
 setup: mkdir g && cp "$GUESTS/q3.py" "$GUESTS/patina.py" g/
 setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "amnesia"]\n\n' $n $n; done >patina.toml

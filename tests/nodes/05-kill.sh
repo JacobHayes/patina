@@ -1,5 +1,6 @@
 # 5. Nodes: a node's processes killed and started again (tests/guests/nodes/kill.py). The
-# driver kills node b with `node kill b --process` and starts it with `node start b`, 50 times:
+# driver kills node b with `node kill b --process` and starts it with `node start b`, 50 times
+# (10 in the quick tier):
 # each kill ends both of b's connections (its first process's and its child's), a connect to
 # either port is refused while b is down, a kill of a node that is down and a start of one that
 # is up are refused, and each restart finds the work tree the last one left and its own
@@ -12,20 +13,21 @@
 o=$RUNS/05-kill; mkdir -p "$o"
 rm -f "$o/b.toml"; conf "$o/b.toml" b python3 /guest/kill.py b
 
-run_ok "$o/kill" 1 --config "$o/b.toml" -- python3 /guest/kill.py driver 50
+k=50; [ "${CHECK_TIER:-}" != quick ] || k=10
+run_ok "$o/kill" 1 --config "$o/b.toml" -- python3 /guest/kill.py driver $k
 sed 's/^/    /' "$o/kill/inc-0/stdout"
-[ "$(field "$o/kill/result.json" nodes.list.1.incarnations)" = 51 ] || die "b: $(field "$o/kill/result.json" nodes.list.1)"
+[ "$(field "$o/kill/result.json" nodes.list.1.incarnations)" = $((k + 1)) ] || die "b: $(field "$o/kill/result.json" nodes.list.1)"
 hows=$(python3 -I -c 'import json,sys; print(" ".join(sorted({d["how"] for d in json.load(open(sys.argv[1]))["nodes"]["list"][1]["downs"]})))' "$o/kill/result.json")
 [ "$hows" = "killed by script" ] || die "b's downs: $hows"
 n=$("$PATINA" log events "$o/kill" --types node | grep -c '"event":"kill","name":"b".*"by":"script"')
-[ "$n" = 50 ] || die "kill events of b: $n"
+[ "$n" = $k ] || die "kill events of b: $n"
 n=$("$PATINA" log events "$o/kill" --types node | grep -c '"event":"start","name":"b".*"incarnation"')
-[ "$n" = 50 ] || die "restart events of b: $n"
-for k in 0 49 50; do
-    grep -q "^b: start $((k + 1)), incarnation $k\$" "$o/kill/node/b/inc-$k/stdout" \
-        || die "node/b/inc-$k/stdout: $(cat "$o/kill/node/b/inc-$k/stdout")"
+[ "$n" = $k ] || die "restart events of b: $n"
+for i in 0 $((k - 1)) $k; do
+    grep -q "^b: start $((i + 1)), incarnation $i\$" "$o/kill/node/b/inc-$i/stdout" \
+        || die "node/b/inc-$i/stdout: $(cat "$o/kill/node/b/inc-$i/stdout")"
 done
-echo "b: 51 incarnations, one directory each, $(field "$o/kill/result.json" faults.injected) faults injected"
+echo "b: $((k + 1)) incarnations, one directory each, $(field "$o/kill/result.json" faults.injected) faults injected"
 verify_ok "$o/verify" 2 3 --config "$o/b.toml" -- python3 /guest/kill.py driver 10
 
 # A node's own end.

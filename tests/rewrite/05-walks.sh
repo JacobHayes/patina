@@ -4,15 +4,15 @@
 #     loses an update on some seed of 1-8 with walks, and on none of them without: a plain
 #     point stops before the load or after the store, never between;
 #  b. the first such seed repeats identical under --vary cpu,load,aslr,sandbox,repeat, and so
-#     do the differential guests in C, C++, Rust and Go with many walks (identical, walks
-#     taken); `patina replay` of a run with walks is identical;
+#     do the differential guests in C, C++, Rust and Go (in the quick tier Go only) with many
+#     walks (identical, walks taken); `patina replay` of a run with walks is identical;
 #  c. rw-fid with walks of 1 or 2 instructions on half the switches: a fault in the relocated
 #     atomic (a point at every site: a walk from its count runs into the fault), a timer signal
 #     in fid_spin and fork print what they print natively, and so does rw-races sys with walks
 #     of up to 16 (system calls in a loop, then a read that blocks: walks run into both); walks
 #     were taken in each and some cut by a runtime entry (the fault, a system call); and
 #     rw-races flags (x86_64 `pushf` and a later `popf`): no saved copy has the trap flag.
-#@ tier=quick budget=60 slots=4
+#@ tier=quick,release budget=60 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
@@ -50,20 +50,21 @@ grep -q LOST-UPDATE "$o/w-$first/inc-0/stdout" || die "a. lms seed $first: $(cat
 echo "a. lms: lost update first on seed $first with walks ($(field "$o/w-$first/result.json" rewrite.walks) walks), none in seeds 1-8 without"
 
 # b.
-printf '%s\n' "rw-races $first lms" "rw-c 3" "rw-cxx 3" "rw-rs 3" "rw-go 3" >"$o/b.jobs"
+guests="rw-c rw-cxx rw-rs rw-go"; [ "${CHECK_TIER:-}" != quick ] || guests=rw-go
+{ echo "rw-races $first lms"; for g in $guests; do echo "$g 3"; done; } >"$o/b.jobs"
 export PATINA G o
 xargs -P 4 -L 1 bash -euo pipefail -c 'n=$1 s=$2; shift 2
     w="--fault compute-gap=2..64 --fault compute-walk=16"
     [ "$n" = rw-races ] || w="--fault compute-gap=64..256 --fault compute-walk=32"
     "$PATINA" verify --preempt points --seed "$s" $w --runs 3 --vary cpu,load,aslr,sandbox,repeat \
         --out "$o/v-$n" -- "$G/$n" "$@" >"$o/v-$n.txt" 2>&1 || true' sh <"$o/b.jobs"
-for n in rw-races rw-c rw-cxx rw-rs rw-go; do
+for n in rw-races $guests; do
     grep -q '^identical' "$o/v-$n.txt" || die "b. $n: $(grep -m1 -v '^run ' "$o/v-$n.txt")"
     [ "$(field "$o/v-$n/run-0/result.json" rewrite.walks)" -ge 1 ] || die "b. $n: no walk taken"
 done
 "$PATINA" replay "$o/v-rw-go/run-0" >"$o/replay.txt" 2>&1 || true
 grep -q '^identical' "$o/replay.txt" || die "b. replay: $(head -1 "$o/replay.txt")"
-echo "b. lms seed $first, rw-c, rw-cxx, rw-rs, rw-go identical under --vary cpu,load,aslr,sandbox,repeat (rw-go: $(field "$o/v-rw-go/run-0/result.json" rewrite.walks) walks); replay identical"
+echo "b. lms seed $first, $guests identical under --vary cpu,load,aslr,sandbox,repeat (rw-go: $(field "$o/v-rw-go/run-0/result.json" rewrite.walks) walks); replay identical"
 
 # c.
 c_cmd() { case $1 in sys | flags) echo "$G/rw-races $1" ;; *) echo "$G/rw-fid $1" ;; esac; }

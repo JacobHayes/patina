@@ -1,18 +1,18 @@
 # 12. Nodes: disk faults per node (tests/guests/faults/acklog.c as a node: append a record, fsync
 # it, acknowledge it; an fsync error stops it without acknowledging). An unscoped disk key
 # acts on every node but the driver; `@NODE` on the named nodes only; `[node.NAME.faults]` on
-# that node. Under machine crashes beside fsync errors: correct, ok on every seed of a sweep
-# with crashes in it, the self-check passing in all, identical under verify; the planted bug
-# `retry` (retry a failed fsync, then acknowledge: the write the failure dropped is gone after
-# the crash) loses an acknowledged record, found in most seeds; its first failing run replays
-# identically.
-#@ tier=quick budget=60 slots=4
+# that node. Outside the quick tier, under machine crashes beside fsync errors: correct, ok on
+# every seed of a sweep with crashes in it, the self-check passing in all, identical under
+# verify; the planted bug `retry` (retry a failed fsync, then acknowledge: the write the failure
+# dropped is gone after the crash) loses an acknowledged record, found in most seeds; its first
+# failing run replays identically.
+#@ tier=quick,release budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/12-disk-faults; mkdir -p "$o"
 # err RUN NODE: whether NODE's first boot saw an fsync error.
 err() { if grep -q '^fsync E' "$1/$2/inc-0/stdout"; then echo yes; else echo no; fi; }
 rm -f "$o/ab.toml" "$o/b.toml"
-conf "$o/ab.toml" a /guest/ack-log correct 1000000; conf "$o/ab.toml" b /guest/ack-log correct 1000000
+conf "$o/ab.toml" a /guest/ack-log correct 3000; conf "$o/ab.toml" b /guest/ack-log correct 3000
 cp "$o/ab.toml" "$o/b.toml"; printf '[node.b.faults]\nfsync-error-permille = 5\n' >>"$o/b.toml"
 # The driver stops at its own first fsync error; it then waits, so that the run does not end
 # before the nodes have made as many fsyncs.
@@ -27,6 +27,7 @@ run_ok "$o/scoped" 1 --config "$o/ab.toml" --fault fsync-error-permille=5@a,driv
 check scoped yes yes no
 run_ok "$o/table" 1 --config "$o/b.toml" -- sh -c "/guest/ack-log correct 2000; sleep 2"  # lint-allow: sleep — the guest's, in virtual time
 check table no no yes
+[ "${CHECK_TIER:-}" != quick ] || exit 0
 # Machine crashes beside fsync errors: seeds 1-8 of correct (restarted after it stops) and retry.
 F="--crash machine --fault crash-gap-ms=1..4 --fault down-ms=100..300 --fault max-incarnations=8 --fault fsync-error-permille=1"
 rm -f "$o/ok.toml" "$o/retry.toml"

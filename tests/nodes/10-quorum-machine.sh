@@ -4,7 +4,7 @@
 # in most runs; identical under verify. Planted bug: nodes that answer without syncing
 # (`nosync`) lose an acknowledged write when the machines holding it crash before it reached
 # their disks, found in most seeds; its first failing run replays identically.
-#@ tier=quick budget=90 slots=4
+#@ tier=area,release budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-quorum-machine; mkdir -p "$o"
 Q3_FAULTS="--crash machine --fault crash-gap-ms=1000..4000 --fault down-ms=200..1000 --faults net --fault partition-gap-ms=1000..6000 --fault partition-ms=1000..6000"

@@ -5,7 +5,7 @@
 # tail dropped in some, the self-check passing in all. Planted bug: recovery that trusts each
 # record's length (`nocheck`) recovers a record no node wrote, found in most seeds; its first
 # failing run replays identically.
-#@ tier=quick budget=60 slots=4
+#@ tier=area,release budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/11-wal; mkdir -p "$o"
 W_FAULTS="--crash machine --fault crash-gap-ms=300..1500 --fault down-ms=100..300 --fault max-incarnations=12"

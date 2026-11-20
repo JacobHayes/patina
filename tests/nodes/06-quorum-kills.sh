@@ -4,7 +4,7 @@
 # restarts in every run; identical under verify. Planted bug: a node that forgets its log when
 # it restarts (`amnesia`) loses acknowledged writes, found in most seeds; its first failing run
 # replays identically.
-#@ tier=quick budget=90 slots=4
+#@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-quorum-kills; mkdir -p "$o"
 Q3_FAULTS="--crash process --fault crash-gap-ms=2000..10000 --fault down-ms=500..3000"
