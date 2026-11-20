@@ -7,7 +7,9 @@
 # acknowledged put on b, in children of b only, with b's crash losing it on b's disk, and the
 # report's group names b's crash points; the correct store is ok at every point of both nodes;
 # a child's rerun line gives its digest again. `--branch-max` runs a sample with each node in it
-# and says how many of how many it tried. One seed, a few puts: about 10 s on the arm64 runner.
+# and says how many of how many it tried; `--branch-pairs` crashes the other node at its next
+# points after each first crash, the correct store ok at each pair, a pair's rerun line giving
+# its digest again. One seed, a few puts: about 10 s on the arm64 runner.
 #@ tier=quick budget=30 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/13-points; mkdir -p "$o"
@@ -119,3 +121,21 @@ assert all(x["tried"] > 0 for x in br["nodes"]), br["nodes"]
 print("--branch-max 4: %d of %d tried (%s)" % (br["tried"], br["points"], ", ".join("%s %d" % (x["node"], x["tried"]) for x in br["nodes"])))
 PY
 grep -q "^crash points: 4 of " "$o/max.txt" || die "--branch-max: $(cat "$o/max.txt")"
+# Pairs: after each first crash whose child ended ok, the other node's next 2 points.
+sw2 pairs --branch-pairs 2
+[ "$st" = 0 ] || die "--branch-pairs: exit $st: $(tail -5 "$o/pairs.txt")"
+python3 -I - "$o/pairs/report.json" <<'PY' || die "--branch-pairs 2"
+import json, sys
+rep = json.load(open(sys.argv[1]))
+pr = rep["branch"]["pairs"]
+assert pr["pairs"] > 0 and pr["tried"] == pr["pairs"] and rep["groups"] == [], rep["branch"]
+print("--branch-pairs 2: ok at all %d pairs" % pr["tried"])
+PY
+grep -q "^crash pairs: [1-9][0-9]* of " "$o/pairs.txt" || die "--branch-pairs: $(cat "$o/pairs.txt")"
+# A pair's rerun line reproduces it (its run.json names both crashes).
+c=$(find "$o/pairs" -maxdepth 1 -name 'seed-*+*' | sort | head -1)
+[ -n "$c" ] || die "no pair's directory in $o/pairs"
+st=0; timeout 120 "$PATINA" run --seed $s --config "$c/run.json" --out "$o/rerun2" -- $D >/dev/null 2>&1 || st=$?
+d1=$(field "$o/rerun2/result.json" digest) d2=$(field "$c/result.json" digest)
+[ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"
+echo "pair rerun ($(basename "$c")): same digest"

@@ -397,7 +397,14 @@ pub const FLAGS: &[Flag] = &[
         "--branch-max",
         "N",
         "every point",
-        "with --branch: at most N children of each seed, a seeded sample by node and kind of operation at the point",
+        "with --branch: at most N children of each seed (and each level of --branch-pairs), a seeded sample by node and kind of operation at the point",
+        &[Cmd::Sweep],
+    ),
+    flag(
+        "--branch-pairs",
+        "K",
+        "off",
+        "with --branch and nodes: then, from each child that ended ok, crash a second node at each of its next K points after the first crash",
         &[Cmd::Sweep],
     ),
     flag(

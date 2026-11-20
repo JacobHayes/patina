@@ -1531,8 +1531,37 @@ impl Config {
     /// points, set in each such node's `FaultCfg` (`state::faults` in the runtime): at each
     /// point with that chance, or at the N-th point of its first boot, N drawn from the node's
     /// own seed when a range; `process-at:N`: a kill of the node's processes there, its disk
-    /// kept; no kills at drawn times then. Returns the resolved form.
+    /// kept; no kills at drawn times then. Settings at crash points joined by `+` act on
+    /// nodes of their own each (`machine-at:5@a+machine-at:9@b`: a crash of a's and one of
+    /// b's, as `sweep --branch-pairs` gives its children). Returns the resolved form.
     fn crash_nodes(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
+        if !c.contains('+') {
+            return self.crash_nodes_one(c, plan);
+        }
+        let mut shown = vec![];
+        let mut set = 0u64;
+        for part in c.split('+') {
+            if matches!(part.split('@').next(), Some("process" | "machine")) {
+                return Err(format!(
+                    "--crash {c}: only settings at crash points join with + (machine:PERMILLE, \
+                     machine-at:N, process-at:N), not {part}"
+                ));
+            }
+            shown.push(self.crash_nodes_one(part, plan)?);
+            let now = (1..plan.node_faults.len())
+                .filter(|&k| plan.node_faults[k].crash_kind != proto::faults::CRASH_NONE)
+                .fold(0u64, |m, k| m | 1 << k);
+            if now.count_ones() != set.count_ones() + part_nodes(part, self) {
+                return Err(format!(
+                    "--crash {c}: {part} names a node another setting of it names"
+                ));
+            }
+            set = now;
+        }
+        Ok(shown.join(" "))
+    }
+
+    fn crash_nodes_one(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
         let (kind, at) = c.split_once('@').map_or((c, None), |(k, a)| (k, Some(a)));
         let timed = match kind {
             "process" => Some(proto::node::CRASH_NODE_PROCESS),
@@ -1613,6 +1642,14 @@ impl Config {
     pub fn opts(&self) -> Res<Opts> {
         let program = program(&self.cmd[0], &self.mounts)?;
         self.opts_with(program)
+    }
+}
+
+/// How many nodes a crash setting at points names: its `@NODE,...`, or every node with faults.
+fn part_nodes(part: &str, c: &Config) -> u32 {
+    match part.split_once('@') {
+        Some((_, at)) => at.split(',').count() as u32,
+        None => c.nodes.iter().filter(|n| !n.no_faults).count() as u32,
     }
 }
 
@@ -1736,7 +1773,7 @@ mod tests {
             .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_incarnations == Some(4)));
         assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
         // `--crash process` covers every node but the driver; `@` names some.
-        use proto::faults::{CRASH_NONE, CRASH_PROCESS};
+        use proto::faults::{CRASH_MACHINE, CRASH_NONE, CRASH_PROCESS};
         use proto::node::{CRASH_NODE_MACHINE, CRASH_NODE_PROCESS};
         let crash = |c: &Config, x: &str| {
             let mut p = faults::resolve(0, &[], &[], None, c.nodes.len()).unwrap();
@@ -1762,6 +1799,28 @@ mod tests {
         let w1 = &p.node_faults[1];
         assert_eq!((w1.crash_kind, w1.crash_at), (CRASH_PROCESS, 4));
         assert_eq!(p.node_faults[2].crash_kind, CRASH_NONE);
+        // Settings at points joined by +: each its own nodes.
+        let p = crash(&c, "machine-at:5@w1+machine:0@w2,db+process-at:2@w3").unwrap();
+        let k: Vec<(u64, u64, u64)> = p.node_faults[1..5]
+            .iter()
+            .map(|f| (f.crash_kind, f.crash_at, f.crash_permille))
+            .collect();
+        assert_eq!(
+            k,
+            [
+                (CRASH_MACHINE, 5, 0),
+                (CRASH_MACHINE, 0, 0),
+                (CRASH_PROCESS, 2, 0),
+                (CRASH_MACHINE, 0, 0)
+            ]
+        );
+        for bad in [
+            "machine-at:5@w1+machine-at:6@w1",
+            "machine-at:5@w1+machine:0",
+            "machine@w1+machine-at:3@w2",
+        ] {
+            assert!(crash(&c, bad).is_err(), "{bad}");
+        }
         for bad in ["process:5", "process@driver", "machine@nope", "fs"] {
             assert!(crash(&c, bad).is_err(), "{bad}");
         }

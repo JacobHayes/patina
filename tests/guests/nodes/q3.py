@@ -35,6 +35,7 @@ carries the view it was given in. Findings (`FAIL: LABEL: detail`, exit 1):
 """
 import json
 import os
+import random
 import socket
 import sys
 import threading
@@ -112,6 +113,11 @@ class Node:
         self.lock = threading.Lock()
         self.view, self.log, self.normal = 0, [], True
         self.heard = now()
+        # When a backup whose election failed asks again: its own clock, apart from `heard`
+        # (a node trying to lead still grants a higher view when its primary is quiet; one
+        # that counted its own tries as hearing from a primary granted none, and two such
+        # nodes waiting on a primary that forgot its view never elected one).
+        self.retry = 0.0
         self.lease = 0.0
         self.load()
 
@@ -231,7 +237,7 @@ class Node:
     def watch(self):
         """A backup that has not heard from its primary asks for the next view it leads."""
         with self.lock:
-            if now() <= self.heard + GRACE:
+            if now() <= self.heard + GRACE or now() < self.retry:
                 return
             v = self.view + 1
             while self.primary(v) != self.me:
@@ -252,7 +258,9 @@ class Node:
                 self.sync(v, log)
                 return
         with self.lock:
-            self.heard = now()  # try again after another grace period
+            # Try again after another grace period, a random part longer: two candidates
+            # do not keep asking at once.
+            self.retry = now() + GRACE * (1 + random.random())
 
     # Clients.
     def client(self, c):

@@ -476,7 +476,15 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
   point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
   (`crash_points`, `downs[].point`) and `sweep --branch` reads to make one child per point of
-  each node (`seed-S@NODE.P`, `machine-at:P@NODE`). After the run the launcher writes each
+  each node (`seed-S@NODE.P`, `machine-at:P@NODE`). `Config::crash_nodes` joins settings with
+  `+`, each for its own nodes (`machine-at:I@A+machine-at:J@B`). Under `--branch-pairs K` a
+  first crash's child also counts the other nodes' points (`+machine:0@B,...`), and one that
+  ended ok gives each other node's next K points after A's `Crash` record by sequence number
+  (`branch::window`, each with the number of B's records before it); each is a pair's child
+  (`seed-S@A.I+B.J`), the first child's run up to B's J-th point, which B counts from its first
+  boot as before, so B crashes where the first child reached that point. A pair whose B
+  crashed after another number of its records is `nondeterministic`. After the run the
+  launcher writes each
   crashed disk's materialised tree to `node/NAME/inc-K/post-crash/`, checks it is the base of
   the next disk, and counts what it lost against the disk's live tree (`downs[].lost`, the
   `crash` event). A node's points count only its own disk's changes and syncs, so its N-th
@@ -1285,18 +1293,19 @@ and the crash draw is used only when it fires, so a run is identical to the run 
 "Crash points per node").
 
 `sweep --branch` places each point from a base's operation log (`patina-cli/src/branch.rs`),
-written per base as `points.json` before the sweep prunes the run's logs: the runtime's records
+written per run as `points.json` before the sweep prunes the run's logs: the runtime's records
 in order (not the supervisor's, which offer no point), for each call that recorded a sync a
 point before its records, then one after each record. The places are used only when their
-number is the runtime's count (`crash_points`); otherwise the sample has one kind per node.
-`--branch-max N` takes the first N of an order stratified by node, then by the kind of record
-at the point (`branch::sample_order`): seeded by the seed and case, and nested, so a larger N
-adds children to those run. No point is left out as the same as another, even a point before
-a sync right after the record of the point before (nothing ran between them, the disk is the
-same): a crash there takes the next sequence number, so every draw keyed by one after it
-differs, including what the crash keeps; stores through a shared mapping made between the two
-calls are logged at the later point only; on `ack2.py` such a pair of points gives different
-outcomes.
+number is the runtime's count (`crash_points`); otherwise the sample has one kind per node
+(and no pair is taken after the node's points). `--branch-max N` takes the first N of an order
+stratified by node, then by the kind of record at the point (`branch::sample_order`): seeded by
+the seed and case, and for the first crashes nested, so a larger N adds children to those run
+(the pairs to sample from depend on the first crashes run). No point is left out as the same
+as another, even a point before a sync right after the record of the point before (nothing ran
+between them, the disk is the same): a crash there takes the next sequence number, so every
+draw keyed by one after it differs, including what the crash keeps; stores through a shared
+mapping made between the two calls are logged at the later point only; on `ack2.py` such a
+pair of points gives different outcomes.
 
 Stores through a `MAP_SHARED` mapping of a work file are in the page cache at once and reach
 the log as `MmapDirty` records when their process unmaps, syncs or ends: the runtime

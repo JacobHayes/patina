@@ -1,7 +1,8 @@
 //! What `sweep --branch` knows of a run's crash points besides their count: each point's
 //! place, read back from the run's operation log (one disk's, `oplog.meta`), so that a sweep
-//! can sample them by node and kind of operation (`--branch-max`). Written per base as
-//! `points.json` before a sweep prunes the run's logs.
+//! can sample them by node and kind of operation (`--branch-max`) and find a second node's
+//! points after a first crash (`--branch-pairs`). Written per run as `points.json` before a
+//! sweep prunes the run's logs.
 //!
 //! The runtime offers a crash point after each record it appends to a disk's log and before
 //! each sync call (`rt::oplog`, `inject::crash_point`); the supervisor's own records (the base,
@@ -9,7 +10,7 @@
 //! the order of its records (`places`): for each system call (one sequence number) that
 //! recorded a sync, one before its records, then one after each record. The places are used
 //! only when their number is the count the runtime made (`crash_points`); otherwise the run's
-//! points are `placed: false`: sampled by node alone.
+//! points are `placed: false`: sampled by node alone, and no pair is taken after them.
 //!
 //! No point is left out as the same as another: a point before a sync right after a write has
 //! the disk of the point before it, but a crash there takes the next sequence number, so every
@@ -25,12 +26,14 @@ use std::path::Path;
 /// The file a run directory holds it in.
 pub const FILE: &str = "points.json";
 
-/// One crash point: the sequence number of its system call and the kind of operation at it
-/// (the record it follows, or `before-KIND` for the one before a sync).
+/// One crash point: the sequence number of its system call, the kind of operation at it (the
+/// record it follows, or `before-KIND` for the one before a sync), and how many of the
+/// runtime's records come before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Place {
     pub seq: u64,
     pub kind: String,
+    pub records: usize,
 }
 
 fn is_sync(k: OpKind) -> bool {
@@ -64,12 +67,14 @@ pub fn places(recs: &[(u64, OpKind)]) -> Vec<Place> {
             out.push(Place {
                 seq,
                 kind: format!("before-{}", s.1.name()),
+                records: i,
             });
         }
-        for r in call {
+        for (k, r) in call.iter().enumerate() {
             out.push(Place {
                 seq,
                 kind: r.1.name().to_string(),
+                records: i + k + 1,
             });
         }
         i += n;
@@ -111,6 +116,65 @@ pub fn describe(run: &Path, points: &[(String, u64)]) -> Value {
         nodes.insert(n.clone(), v);
     }
     json!({ "nodes": nodes })
+}
+
+/// A first crash's child (node `a` crashed at a point; `others` counted theirs): for each other
+/// node, its first `k` points after the crash, each with its kind and the runtime's records
+/// before it: `{"after": {"b": [[J, KIND, RECORDS], ...]}, "placed": {"b": true}}`. A node whose points cannot
+/// be placed, or a crash whose `Crash` record is not found, gives none.
+pub fn window(run: &Path, a: &str, others: &[(String, u64)], k: usize) -> Value {
+    let crash = crash_seq(run, a);
+    let mut after = serde_json::Map::new();
+    let mut placed = serde_json::Map::new();
+    for (b, count) in others {
+        let p = crash.and_then(|c| Some((c, read_places(&disk(run, b), *count)?)));
+        placed.insert(b.clone(), json!(p.is_some()));
+        let w: Vec<Value> = p
+            .map(|(c, p)| {
+                (1u64..)
+                    .zip(p)
+                    .filter(|(_, x)| x.seq > c)
+                    .take(k)
+                    .map(|(j, x)| json!([j, x.kind, x.records]))
+                    .collect()
+            })
+            .unwrap_or_default();
+        after.insert(b.clone(), Value::Array(w));
+    }
+    json!({"after": after, "placed": placed})
+}
+
+fn crash_seq(run: &Path, node: &str) -> Option<u64> {
+    let meta = std::fs::read(disk(run, node).join("oplog.meta")).ok()?;
+    meta.as_chunks::<OPREC_SIZE>()
+        .0
+        .iter()
+        .map(|c| OpRec::from_bytes(c))
+        .find(|r| OpKind::from_u32(r.kind & KIND_MASK) == Some(OpKind::Crash))
+        .map(|r| r.seq)
+}
+
+/// How many of the runtime's records the disk of `node`'s first boot in `run` holds before its
+/// first `Crash` record, leaving out the shared mappings the crash itself logged just before
+/// it (`None`: no crash).
+pub fn records_before_crash(run: &Path, node: &str) -> Option<usize> {
+    let meta = std::fs::read(disk(run, node).join("oplog.meta")).ok()?;
+    let recs: Vec<OpRec> = meta
+        .as_chunks::<OPREC_SIZE>()
+        .0
+        .iter()
+        .map(|c| OpRec::from_bytes(c))
+        .collect();
+    let kind = |r: &OpRec| OpKind::from_u32(r.kind & KIND_MASK);
+    let c = recs.iter().position(|r| kind(r) == Some(OpKind::Crash))?;
+    let mut before: Vec<&OpRec> = recs[..c].iter().filter(|r| r.pid != 0).collect();
+    while before
+        .last()
+        .is_some_and(|r| kind(r) == Some(OpKind::MmapDirty))
+    {
+        before.pop();
+    }
+    Some(before.len())
 }
 
 /// SplitMix64: the sweep's own seeded order, the same on every host and run.
@@ -249,6 +313,9 @@ mod tests {
         );
         let seqs: Vec<u64> = p.iter().map(|x| x.seq).collect();
         assert_eq!(seqs, [5, 5, 9, 10, 10, 20, 21, 21, 21]);
+        // The records before each point: a point before a sync comes before its call's.
+        let records: Vec<usize> = p.iter().map(|x| x.records).collect();
+        assert_eq!(records, [0, 1, 2, 2, 3, 4, 4, 5, 6]);
     }
 
     #[test]

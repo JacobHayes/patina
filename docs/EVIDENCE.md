@@ -2801,6 +2801,45 @@ fsync that follows does not. The sweep tries every point; `--branch-max` is the 
 points (pg1 5,139, pg2 4,563) for 30 s of virtual time, and each child is a full run of about
 7 s, about 19 CPU-hours per seed; `--branch-max N` bounds a seed to N children (N times 7 s).
 
+### Two crashes: pairs of crash points
+
+`patina sweep --branch --branch-pairs K` runs, from each first crash's child that ended ok, a
+child crashing another node at each of its next K points after the first crash.
+`tests/quorum/evidence-pairs.sh` (`./check evidence evidence-pairs`, under the evidence lock):
+`q3.py` (three replicas, 2 s), seeds 1-2, `--branch-pairs 3 --branch-max 400`, `-j 6 --keep
+fail`, run once, measured 2026-11-20 on x86_64:
+
+| Variant | Crash points | First crashes tried | Pairs tried | Runs | Wall | Failing |
+|---|---|---|---|---|---|---|
+| correct | 1,576 | 800 | 800 of 4,059 | 1,602 | 65 s | 0 |
+| `nosync` (a node answers before it syncs) | 788 | 788 | 800 of 3,984 | 1,590 | 65 s | 249 pairs, no first crash: `lost write` |
+| `early` (the primary answers before a backup has the update) | 1,576 | 800 | 800 of 4,221 | 1,602 | 66 s | 0 |
+
+`nosync` needs two crashes, the two nodes holding a write it acknowledged: no single crash
+finds it (the section above), the pairs find it in 249 of 800. An earlier build, whose sample
+cap missed the pairs, ran every pair after the same 800 first crashes: correct 0 failing of
+4,083, `nosync` 1,202 of 3,984, `early` 0 of 4,218.
+
+`early` is not found by crashes in 2 s: its loss needs a primary that acknowledges while no
+longer the primary, which a partition makes (`tests/quorum/02-quorum-bugs.sh`) and a machine
+crash does not, since a crashed node is down for 1 to 5 s; a restarted old primary is fenced by
+its first heartbeat. With `down-ms=1100..1400` and 3 s, 400 first crashes and 400 pairs found
+nothing either.
+
+**A bug in the correct store.** The first pairs sweep of the correct `q3.py` failed 12 of 60
+pairs (seed 1, `--branch-max 60`): `no primary`, no read answered at the end. Node B asked for
+a view it would lead, one node granted it, and B crashed before it saved the new view; after
+the restarts two nodes were in a view whose primary did not know it, each asking for a higher
+view of its own, and each refused the other, as a node counted its own failed asks as hearing
+from a primary. The fix (`tests/guests/nodes/q3.py`): a failed ask waits on a clock of its own,
+a random part of a grace period longer, and a node grants a higher view when its primary is
+quiet, whether or not it is asking itself. With it, 0 of 60, and 0 of 4,059 above; the store's
+other tests and transcripts were run again on it.
+
+**Determinism.** A pair's rerun line gives its digest again (`tests/nodes/13-points.sh`,
+`tests/quorum/05-quorum-pairs.sh`), and every pair crashed its second node after the same
+records of its disk as the first crash's child had at that point (the sweep checks it).
+
 ### Minimizing to one node's crash
 
 `patina minimize` turns a failing run's crashes at crash points into one node's crash alone

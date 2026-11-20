@@ -35,10 +35,11 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 14] = [
+const OWN: [&str; 15] = [
     "--seeds",
     "--branch",
     "--branch-max",
+    "--branch-pairs",
     "--jobs",
     "--cases",
     "--only-case",
@@ -107,6 +108,7 @@ fn identity(
     cfg: &crate::config::Config,
     program: Option<&String>,
     branch: bool,
+    pairs: Option<usize>,
 ) -> Res<serde_json::Value> {
     let mut c = cfg.clone();
     c.seed = 0;
@@ -120,6 +122,7 @@ fn identity(
         "program": program,
         "config": c,
         "branch": branch,
+        "pairs": pairs,
     }))
 }
 
@@ -167,6 +170,9 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
         } else {
             "a sweep with --branch".into()
         });
+    }
+    if old["pairs"] != ident["pairs"] {
+        return Some("another --branch-pairs".into());
     }
     if old["config"] != ident["config"] {
         let keys = changed_settings(&old["config"], &ident["config"]);
@@ -930,11 +936,32 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         None
     };
     let branch_max = a.num::<usize>("--branch-max").map_err(error)?;
-    if branch_max.is_some() && kind.is_none() {
-        return Err(error("--branch-max goes with --branch".into()));
+    let pairs = a.num::<usize>("--branch-pairs").map_err(error)?;
+    if (branch_max.is_some() || pairs.is_some()) && kind.is_none() {
+        return Err(error(
+            "--branch-max and --branch-pairs go with --branch".into(),
+        ));
     }
-    if branch_max == Some(0) {
-        return Err(error("--branch-max is at least 1".into()));
+    if branch_max == Some(0) || pairs == Some(0) {
+        return Err(error(
+            "--branch-max and --branch-pairs are at least 1".into(),
+        ));
+    }
+    // The nodes a branch crashes (its `@NODE,...`, else every node with faults): under
+    // --branch-pairs a first crash's child counts the others' points.
+    let scope_nodes: Vec<String> = match &scope {
+        Some(s) => s.split(',').map(str::to_string).collect(),
+        None => cfg
+            .nodes
+            .iter()
+            .filter(|n| !n.no_faults)
+            .map(|n| n.name.clone())
+            .collect(),
+    };
+    if pairs.is_some() && scope_nodes.len() < 2 {
+        return Err(error(
+            "--branch-pairs crashes two nodes: it needs a run with nodes and --crash machine on two or more".into(),
+        ));
     }
     let cases: Option<Vec<Case>> = match a.last("--cases") {
         None => None,
@@ -1108,6 +1135,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         &cfg,
         (!cfg.cmd.is_empty()).then_some(&probe_program.sha256),
         kind.is_some(),
+        pairs,
     )
     .map_err(error)?;
     if out.is_dir() {
@@ -1241,8 +1269,25 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 if let Some(k) = &kind {
                     let at = |s: &str| format!("@{s}");
                     c.arg("--crash").arg(match point {
+                        Some(p) if p.n2 > 0 => {
+                            format!("{k}-at:{}@{}+{k}-at:{}@{}", p.n, p.node, p.n2, p.node2)
+                        }
                         Some(p) if p.n > 0 && !p.node.is_empty() => {
-                            format!("{k}-at:{}{}", p.n, at(&p.node))
+                            // Under --branch-pairs the other nodes count their points too.
+                            let others: Vec<&str> = scope_nodes
+                                .iter()
+                                .filter(|n| **n != p.node)
+                                .map(String::as_str)
+                                .collect();
+                            match pairs {
+                                Some(_) => format!(
+                                    "{k}-at:{}{}+{k}:0@{}",
+                                    p.n,
+                                    at(&p.node),
+                                    others.join(",")
+                                ),
+                                None => format!("{k}-at:{}{}", p.n, at(&p.node)),
+                            }
                         }
                         Some(p) if p.n > 0 => format!("{k}-at:{}", p.n),
                         _ => format!("{k}:0{}", scope.as_deref().map(at).unwrap_or_default()),
@@ -1310,6 +1355,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         cut: false,
         bases: Default::default(),
         branch: kind.is_some(),
+        pairs,
     };
     if todo < total {
         st.say(&format!(
@@ -1384,7 +1430,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let sample = |items: &[(report::Point, String)], key: u64| -> Vec<report::Point> {
             let mut o: Vec<usize> = match branch_max {
                 Some(m) => {
-                    // By node, then the kind of operation at the point.
+                    // By node (a pair's two nodes), then the kind of operation at the point.
                     let mut o = crate::branch::sample_order(items, key, |x| {
                         let (g, k) = x.1.rsplit_once('/').unwrap_or(("", &x.1));
                         (g.to_string(), k.to_string())
@@ -1431,48 +1477,93 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 String::new()
             }
         ));
-        // Points ascending, seeds (and cases) round-robin; with nodes, each node's points
-        // of a seed in turn at each ordinal.
-        level.sort_by(|x, y| (x.2.n, x.0, x.1, &x.2).cmp(&(y.2.n, y.0, y.1, &y.2)));
-        let mut children = vec![];
-        let mut have = 0;
-        for (seed, case, p) in &level {
-            match fresh(*seed, *case, Some(p.clone()))? {
-                Fresh::Run(j, stale) => {
-                    judged_again.rerun += stale as usize;
-                    children.push(j)
+        // Level 1, the first crashes; level 2 (--branch-pairs), a second node's crash at each
+        // of its next points after a first crash whose child ended ok.
+        for depth in 1..=(1 + pairs.is_some() as u64) {
+            if depth == 2 {
+                if st.stopped.is_some() || INTERRUPTED.load(SeqCst) {
+                    break;
                 }
-                Fresh::Kept => have += 1,
-                Fresh::Rejudge(j) => {
-                    have += 1;
-                    judged_again.jobs.push(j)
+                // Each base's first crashes, whatever order they ran in.
+                let mut firsts: std::collections::BTreeMap<_, Vec<report::Point>> =
+                    Default::default();
+                for (seed, case, p) in std::mem::take(&mut level) {
+                    firsts.entry((seed, case)).or_default().push(p);
+                }
+                let mut all = 0;
+                for ((seed, case), ps) in firsts {
+                    let mut items = vec![];
+                    for a in ps {
+                        let d = run_dir(seed, case, Some(&a));
+                        let w = read_json(&d.join(crate::branch::FILE)).unwrap_or_default();
+                        for (b, l) in w["after"].as_object().into_iter().flatten() {
+                            for x in l.as_array().into_iter().flatten() {
+                                if let Some(j) = x[0].as_u64() {
+                                    let kind = x[1].as_str().unwrap_or("");
+                                    items.push((a.then(j, b), format!("{}/{b}/{kind}", a.node)));
+                                }
+                            }
+                        }
+                    }
+                    all += items.len();
+                    for p in sample(&items, crate::branch::sample_key(seed, case, 2)) {
+                        level.push((seed, case, p));
+                    }
+                }
+                st.say(&format!(
+                    "sweep: {} after a first crash{}",
+                    report::count(all, "pair"),
+                    if level.len() < all {
+                        format!(", a sample of {} (--branch-max)", level.len())
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+            // Points ascending, seeds (and cases) round-robin; with nodes, each node's points
+            // of a seed in turn at each ordinal.
+            level.sort_by(|x, y| (x.2.n, x.0, x.1, &x.2).cmp(&(y.2.n, y.0, y.1, &y.2)));
+            let mut children = vec![];
+            let mut have = 0;
+            for (seed, case, p) in &level {
+                match fresh(*seed, *case, Some(p.clone()))? {
+                    Fresh::Run(j, stale) => {
+                        judged_again.rerun += stale as usize;
+                        children.push(j)
+                    }
+                    Fresh::Kept => have += 1,
+                    Fresh::Rejudge(j) => {
+                        have += 1;
+                        judged_again.jobs.push(j)
+                    }
                 }
             }
-        }
-        let again = judged_again.settle(cfg.check.as_ref(), st.width)?;
-        have -= again.len();
-        children.extend(again);
-        judged_again.say(&out);
-        if have > 0 {
-            st.say(&format!(
-                "sweep: {have} of {} children already in {}; running {}",
-                level.len(),
-                out.display(),
+            let again = judged_again.settle(cfg.check.as_ref(), st.width)?;
+            have -= again.len();
+            children.extend(again);
+            judged_again.say(&out);
+            if have > 0 {
+                st.say(&format!(
+                    "sweep: {have} of {} {} already in {}; running {}",
+                    level.len(),
+                    if depth == 1 { "children" } else { "pairs" },
+                    out.display(),
+                    children.len()
+                ));
+            }
+            st.todo += children.len();
+            // Children of all seeds run interleaved: announce each group as it is found.
+            st.unfinished.clear();
+            st.rejudged(std::mem::take(&mut judged_again.done));
+            not_started = if st.stopped.is_some() {
                 children.len()
-            ));
+            } else {
+                pool(children, st.width, &child, serve, |d, running, now| {
+                    st.event(d, running, now)
+                })
+            };
+            st.flush(true);
         }
-        st.todo += children.len();
-        // Children of all seeds run interleaved: announce each group as it is found.
-        st.unfinished.clear();
-        st.rejudged(std::mem::take(&mut judged_again.done));
-        not_started = if st.stopped.is_some() {
-            children.len()
-        } else {
-            pool(children, st.width, &child, serve, |d, running, now| {
-                st.event(d, running, now)
-            })
-        };
-        st.flush(true);
     }
     let interrupted = INTERRUPTED.load(SeqCst);
     if interrupted {
@@ -1648,6 +1739,9 @@ struct State<'k> {
     /// A `--branch` sweep: each base writes where its points are (`branch::describe`) before
     /// its logs are pruned.
     branch: bool,
+    /// `--branch-pairs K`: each first crash's child that ended ok writes the next K points of
+    /// each other node after its crash (`branch::window`).
+    pairs: Option<usize>,
 }
 
 /// A `--branch` base: its crash points per node (`""`: the one machine) and its directory.
@@ -1788,7 +1882,39 @@ impl State<'_> {
             self.bases.get(&(*seed, *case_index)),
         ) {
             let n = pts.iter().find(|x| x.0 == p.node).map_or(0, |x| x.1);
-            let why = missed_point(&r, p, n);
+            // A pair's second crash is at a point its first crash's child reached.
+            let why = missed_point(&r, &p.first(), n).or_else(|| {
+                (p.n2 > 0)
+                    .then(|| missed_point(&r, &report::Point::child(p.n2, &p.node2), u64::MAX))
+                    .flatten()
+                    .map(|w| format!("{w} of {}", p.node2))
+            });
+            // And at the place it had in that child: after the same records of its disk.
+            let why = why.or_else(|| {
+                let first = |name: String| match case_index {
+                    Some(_) => dir.parent()?.parent().map(|o| {
+                        o.join(name).join(dir.file_name().unwrap_or_default())
+                    }),
+                    None => dir.parent().map(|o| o.join(name)),
+                };
+                let f = first(format!("seed-{seed}@{}", p.first().label()))
+                    .filter(|_| p.n2 > 0)?;
+                let w = read_json(&f.join(crate::branch::FILE)).ok()?;
+                let want = w["after"][p.node2.as_str()]
+                    .as_array()?
+                    .iter()
+                    .find(|x| x[0].as_u64() == Some(p.n2))?[2]
+                    .as_u64()?;
+                let got = crate::branch::records_before_crash(dir, &p.node2)? as u64;
+                (got != want).then(|| {
+                    format!(
+                        "{} crashed after {got} records of its disk, where its point {} came after {want} in {}",
+                        p.node2,
+                        p.n2,
+                        f.display()
+                    )
+                })
+            });
             if let Some(why) = why {
                 let was = r.clone();
                 r["outcome"] = "nondeterministic".into();
@@ -1814,7 +1940,14 @@ impl State<'_> {
         if let Some(p) = point.as_ref().filter(|_| self.branch) {
             let run = read_json(&dir.join("run.json")).unwrap_or_default();
             let pts = report::base_points(&r, &run);
-            let v = (p.n == 0).then(|| crate::branch::describe(dir, &pts));
+            let v = match self.pairs {
+                _ if p.n == 0 => Some(crate::branch::describe(dir, &pts)),
+                Some(k) if p.n2 == 0 && r["outcome"] == "ok" => {
+                    let others: Vec<_> = pts.into_iter().filter(|x| x.0 != p.node).collect();
+                    Some(crate::branch::window(dir, &p.node, &others, k))
+                }
+                _ => None,
+            };
             if let Some(v) = v {
                 let _ = write_json(&dir.join(crate::branch::FILE), &v);
             }

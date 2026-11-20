@@ -57,12 +57,16 @@ impl Run {
 
 /// A run's place in a `--branch` sweep: a base (`n` 0, `seed-N`), or the child crashing at
 /// crash point `n` (`seed-N@P`), of node `node`'s first boot in a run with nodes
-/// (`seed-N@NODE.P`; `node` empty: the one machine). Ordered by point, then node. A label
-/// is a portable file name: no `:` (GitHub's artifact upload refuses one, as Windows does).
+/// (`seed-N@NODE.P`; `node` empty: the one machine); under `--branch-pairs`, a pair's child
+/// crashes node `node2` at its point `n2` after that (`seed-N@A.I+B.J`). Ordered by point, then
+/// node. A label is a portable file name: no `:` (GitHub's artifact upload refuses one, as
+/// Windows does).
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
     pub n: u64,
     pub node: String,
+    pub n2: u64,
+    pub node2: String,
 }
 
 impl Point {
@@ -70,32 +74,70 @@ impl Point {
         Point {
             n,
             node: node.to_string(),
+            ..Default::default()
         }
     }
 
-    /// `P` or `NODE.P`, as a directory name and a run's name have it after `@` (a node's name
-    /// has no `.`).
+    /// The pair's child: `self`'s crash, then node `node`'s at its point `n`.
+    pub fn then(&self, n: u64, node: &str) -> Point {
+        Point {
+            n2: n,
+            node2: node.to_string(),
+            ..self.clone()
+        }
+    }
+
+    /// Its first crash alone (the child of the first level a pair branched from).
+    pub fn first(&self) -> Point {
+        Point::child(self.n, &self.node)
+    }
+
+    /// `P`, `NODE.P` or `A.I+B.J`, as a directory name and a run's name have it after `@` (a
+    /// node's name has no `.` or `+`).
     pub fn label(&self) -> String {
-        if self.node.is_empty() {
-            self.n.to_string()
-        } else {
-            format!("{}.{}", self.node, self.n)
+        let one = |n: u64, node: &str| {
+            if node.is_empty() {
+                n.to_string()
+            } else {
+                format!("{node}.{n}")
+            }
+        };
+        let mut l = one(self.n, &self.node);
+        if self.n2 > 0 {
+            l = format!("{l}+{}", one(self.n2, &self.node2));
+        }
+        l
+    }
+
+    /// A label read back (`P`, `NODE.P`, `A.I+B.J`, each point > 0).
+    pub fn parse(s: &str) -> Option<Point> {
+        let one = |s: &str| -> Option<(u64, String)> {
+            let (node, n) = s.rsplit_once('.').unwrap_or(("", s));
+            let n = n.parse::<u64>().ok().filter(|n| *n > 0)?;
+            (node.is_empty() || proto::node::valid_name(node.as_bytes()))
+                .then(|| (n, node.to_string()))
+        };
+        match s.split_once('+') {
+            None => one(s).map(|(n, node)| Point::child(n, &node)),
+            Some((a, b)) => {
+                let ((n, node), (n2, node2)) = (one(a)?, one(b)?);
+                (!node.is_empty() && !node2.is_empty() && node != node2)
+                    .then(|| Point::child(n, &node).then(n2, &node2))
+            }
         }
     }
 
-    /// A label read back (`P`, `NODE.P` with P > 0).
-    pub fn parse(s: &str) -> Option<Point> {
-        let (node, n) = s.rsplit_once('.').unwrap_or(("", s));
-        let n = n.parse::<u64>().ok().filter(|n| *n > 0)?;
-        (node.is_empty() || proto::node::valid_name(node.as_bytes())).then(|| Point::child(n, node))
-    }
-
-    /// A child's fields in `report.json`: its `point`, and its `node` when it has one.
+    /// A child's fields in `report.json`: its `point`, its `node` when it has one, and a
+    /// pair's `point2` and `node2`.
     fn json(p: Option<&Point>, v: &mut Value) {
         if let Some(p) = p.filter(|p| p.n > 0) {
             v["point"] = json!(p.n);
             if !p.node.is_empty() {
                 v["node"] = json!(p.node);
+            }
+            if p.n2 > 0 {
+                v["point2"] = json!(p.n2);
+                v["node2"] = json!(p.node2);
             }
         } else {
             v["point"] = Value::Null;
@@ -105,7 +147,11 @@ impl Point {
     /// The child a `report.json` entry names (`Point::json`).
     pub fn of(v: &Value) -> Option<Point> {
         let n = v["point"].as_u64().filter(|n| *n > 0)?;
-        Some(Point::child(n, v["node"].as_str().unwrap_or("")))
+        let p = Point::child(n, v["node"].as_str().unwrap_or(""));
+        Some(match v["point2"].as_u64() {
+            Some(n2) => p.then(n2, v["node2"].as_str().unwrap_or("")),
+            None => p,
+        })
     }
 }
 
@@ -1073,52 +1119,72 @@ pub fn build(
             *limits.entry(l).or_default() += 1;
         }
     }
-    // A branch sweep: each base's crash points and the children run of them; with nodes,
-    // each node's too.
-    let mut bases: BTreeMap<(u64, Option<String>), (u64, u64)> = BTreeMap::new();
+    // A branch sweep: each base's crash points and the children run of them; with nodes, each
+    // node's too; under --branch-pairs, the pairs after the first crashes (each first crash's
+    // `points.json`) and those run.
+    #[derive(Default, Clone, Copy)]
+    struct Tally {
+        points: u64,
+        tried: u64,
+    }
+    let mut bases: BTreeMap<(u64, Option<String>), Tally> = BTreeMap::new();
     // In the order the nodes are configured (the bases' node tables), not by name.
-    let mut per_node: Vec<(String, (u64, u64))> = vec![];
-    fn node(per_node: &mut Vec<(String, (u64, u64))>, n: &str) -> usize {
+    let mut per_node: Vec<(String, Tally)> = vec![];
+    fn node(per_node: &mut Vec<(String, Tally)>, n: &str) -> usize {
         match per_node.iter().position(|x| x.0 == n) {
             Some(i) => i,
             None => {
-                per_node.push((n.to_string(), (0, 0)));
+                per_node.push((n.to_string(), Tally::default()));
                 per_node.len() - 1
             }
         }
     }
+    let (mut pairs, mut pairs_tried) = (0u64, 0u64);
+    let file = |r: &Run| read_json(&r.dir.join(crate::branch::FILE)).unwrap_or_default();
     for r in runs {
         match &r.point {
             Some(p) if p.n == 0 => {
                 let pts = base_points(&r.result, &r.run);
-                bases.entry((r.seed, r.case.clone())).or_default().0 =
+                bases.entry((r.seed, r.case.clone())).or_default().points =
                     pts.iter().map(|x| x.1).sum();
                 for (n, k) in pts.into_iter().filter(|x| !x.0.is_empty()) {
                     let i = node(&mut per_node, &n);
-                    per_node[i].1 .0 += k;
+                    per_node[i].1.points += k;
                 }
             }
+            Some(p) if p.n2 > 0 => pairs_tried += 1,
             Some(p) => {
-                bases.entry((r.seed, r.case.clone())).or_default().1 += 1;
+                bases.entry((r.seed, r.case.clone())).or_default().tried += 1;
                 if !p.node.is_empty() {
                     let i = node(&mut per_node, &p.node);
-                    per_node[i].1 .1 += 1;
+                    per_node[i].1.tried += 1;
                 }
+                let f = file(r);
+                pairs += f["after"]
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|x| x.1.as_array().map_or(0, |a| a.len()) as u64)
+                    .sum::<u64>();
             }
             None => {}
         }
     }
     let branch = (!bases.is_empty()).then(|| {
+        let sum = |f: fn(&Tally) -> u64| bases.values().map(f).sum::<u64>();
         let mut b = json!({
-            "points": bases.values().map(|b| b.0).sum::<u64>(),
-            "tried": bases.values().map(|b| b.1).sum::<u64>(),
-            "seeds": bases.iter().map(|((s, c), (p, t))| json!({"seed": s, "case": c, "points": p, "tried": t})).collect::<Vec<_>>(),
+            "points": sum(|t| t.points),
+            "tried": sum(|t| t.tried),
+            "seeds": bases.iter().map(|((s, c), t)| json!({"seed": s, "case": c, "points": t.points, "tried": t.tried})).collect::<Vec<_>>(),
         });
         if !per_node.is_empty() {
             b["nodes"] = per_node
                 .iter()
-                .map(|(n, (p, t))| json!({"node": n, "points": p, "tried": t}))
+                .map(|(n, t)| json!({"node": n, "points": t.points, "tried": t.tried}))
                 .collect();
+        }
+        if pairs > 0 || pairs_tried > 0 {
+            b["pairs"] = json!({"pairs": pairs, "tried": pairs_tried});
         }
         b
     });
@@ -1816,6 +1882,12 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 format!(" ({})", nodes.join(", "))
             }
         ));
+        if let Some(x) = b.get("pairs") {
+            s.push_str(&format!(
+                "crash pairs: {} of {} tried (a second node's crash after a first)\n",
+                x["tried"], x["pairs"]
+            ));
+        }
         if t < p {
             let seeds = b["seeds"].as_array().unwrap();
             let mut l: Vec<String> = seeds
@@ -2184,6 +2256,7 @@ mod tests {
             Point::child(12, ""),
             Point::child(12, "b"),
             Point::child(3, "db-1"),
+            Point::child(3, "a").then(40, "db-1"),
         ] {
             let l = p.label();
             assert!(!bad(&l), "{l}");
@@ -2191,6 +2264,8 @@ mod tests {
         }
         assert_eq!(Point::parse("0"), None);
         assert_eq!(Point::parse("b.x"), None);
+        assert_eq!(Point::parse("a.3+a.4"), None);
+        assert_eq!(Point::parse("3+b.4"), None);
     }
 
     #[test]
