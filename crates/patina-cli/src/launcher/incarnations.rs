@@ -38,8 +38,8 @@ fn crash_detail(d: &str) -> Option<(String, u64, u64)> {
     Some((kind, seq, vclock))
 }
 
-/// Replay every incarnation's operation log and compare it with the live tree it exported
-/// (`durability::check`). `PATINA_TEST_OPLOG_CORRUPT=1` inverts the bytes of incarnation
+/// Replay every disk's operation log (each incarnation's, each node's) and compare it with
+/// the live tree it exported (`durability::check`). `PATINA_TEST_OPLOG_CORRUPT=1` inverts the bytes of incarnation
 /// 0's logged data first, so a test can show how a mismatch is reported.
 fn self_check(run: &Path) -> Res<()> {
     if std::env::var_os("PATINA_TEST_OPLOG_CORRUPT").is_some() {
@@ -51,7 +51,7 @@ fn self_check(run: &Path) -> Res<()> {
             .collect();
         std::fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()))?;
     }
-    for inc in crate::durability::check::incarnations(run) {
+    for inc in crate::durability::check::disks(run) {
         crate::durability::check::check_inc(&inc)
             .map_err(|e| format!("operation log self-check: {e}"))?;
     }
@@ -176,7 +176,8 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             // live tree of every incarnation. A difference is a tracker bug, reported next to
             // the run's outcome (`result::run_exit`), which stays the program's own.
             let verdict = end.verdict;
-            let self_check = (o.plan.faults.crash_kind != CRASH_NONE).then(|| self_check(out));
+            let self_check = (o.plan.faults.crash_kind != CRASH_NONE || !o.cfg.nodes.is_empty())
+                .then(|| self_check(out));
             let digest = if digests.len() == 1 {
                 format!("{:016x}", digests[0])
             } else {

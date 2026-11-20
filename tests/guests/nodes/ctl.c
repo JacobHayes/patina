@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     ask("net heal --from driver --to c");
     ask("net cut driver nobody");
     ask("net sever driver c");
-    ask("node kill c");
+    ask("node pause c");
     sleep(1); /* virtual: the node runs meanwhile */
     return 0;
 }

@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 23;
+pub const LAYOUT_VERSION: u64 = 24;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -898,6 +898,9 @@ pub const DEC_WIRE_FAIL: u32 = 0x145;
 pub const DEC_WIRE_CLOSE: u32 = 0x146;
 /// A heal reached a direction a cut held (`node`): [conn, dir, the last held item's new time].
 pub const DEC_WIRE_HEAL: u32 = 0x14a;
+/// A machine crash took a connection's end (`node`): [conn, side (1: the server's), node]. Its
+/// peer is not told; what reaches the end once its node is back is answered with a RST.
+pub const DEC_WIRE_DEAD: u32 = 0x14b;
 
 /// Datagram-socket requests (`patina/src/sup/udp.rs`). Socket indexes as for the wire.
 ///

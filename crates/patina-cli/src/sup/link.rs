@@ -1,8 +1,9 @@
 //! Links between nodes (`proto::node`): the cut matrix, which links the link faults act on,
 //! and the seed's partition schedule.
 //!
-//! A link is an ordered pair of nodes. It is cut while either of two layers says so: a
-//! script's `net cut` (`Op::Net`, `nodes::Sup::net_op`) or a partition the seed drew. The wire
+//! A link is an ordered pair of nodes. It is cut while any of three layers says so: a
+//! script's `net cut` (`Op::Net`, `nodes::Sup::net_op`), a partition the seed drew, or a
+//! machine crash of either node (until the node is back, `nodes::Sup::node_crash`). The wire
 //! asks `link_cut` when it stamps a delivery, and re-stamps what a cut held when a layer opens
 //! a link (`wire_heal`); `net heal` clears scripted cuts only.
 //!
@@ -44,6 +45,8 @@ pub struct Links {
     /// Scripted cuts and the seed's: bit `to` of `x[from]`.
     pub script: [u64; MAX_NODES],
     pub seed: [u64; MAX_NODES],
+    /// Nodes whose machine is down (bit `k`): every link from or to one is cut.
+    pub down: u64,
     /// Partitions started (the ordinal of the last), and the one in force.
     k: u64,
     active: Option<u64>,
@@ -62,7 +65,8 @@ impl Sup {
     pub(super) fn link_cut(&self, from: usize, to: usize) -> bool {
         from != to
             && from < MAX_NODES
-            && (self.links.script[from] | self.links.seed[from]) & (1 << to) != 0
+            && ((self.links.script[from] | self.links.seed[from]) & (1 << to) != 0
+                || (self.links.down >> from | self.links.down >> to) & 1 != 0)
     }
 
     /// A cut link held, lost or kept back something: the partition in force acted, if the
@@ -225,15 +229,17 @@ impl Sup {
         let Some(k) = self.links.active.take() else {
             return;
         };
+        let seed = std::mem::take(&mut self.links.seed);
+        // What the seed cut and nothing else still cuts (a script's cut, a machine that is
+        // down).
         let mut opened = vec![];
-        for i in 0..MAX_NODES {
+        for (i, cut) in seed.iter().enumerate() {
             for j in 0..MAX_NODES {
-                if self.links.seed[i] & (1 << j) != 0 && self.links.script[i] & (1 << j) == 0 {
+                if cut & (1 << j) != 0 && !self.link_cut(i, j) {
                     opened.push((i, j));
                 }
             }
         }
-        self.links.seed = [0; MAX_NODES];
         if let Some(i) = self.links.slot.take() {
             self.tab().parts[i].to_ns = self.now();
         }

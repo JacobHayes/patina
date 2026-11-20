@@ -1260,6 +1260,7 @@ of what it did.
 | `net cut --from A --to B` | cut one direction: what `A` sends to `B` is held |
 | `net heal A B`, `net heal --from A --to B` | heal those links |
 | `net heal` | heal every cut |
+| `node kill NAME` | crash node `NAME`'s machine (below) |
 | `node kill NAME --process` | kill every process of node `NAME` (below) |
 | `node start NAME` | start the command of node `NAME`, which is down, again |
 | `mark LABEL` | as the SDK's `mark` (any node) |
@@ -1354,16 +1355,16 @@ exit: 1
 ```text
 $ patina sweep --seeds 1..8 -j 4 --mount g:/guest --faults net --fault partition-gap-ms=1000..8000 --fault partition-ms=1000..8000 -- python3 /guest/q3.py driver 90
 ...
-patina sweep: 8 runs, 7 findings in 1 group, 1 ok   (8.9s, 4 jobs)
-outcomes: failure 7, ok 1
-nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 80 held over them
-partitions: 47 drawn (10 bridge, 13 isolate, 9 oneway, 15 split), 45 acted on traffic
+patina sweep: 8 runs, 6 findings in 1 group, 2 ok   (8.9s, 4 jobs)
+outcomes: failure 6, ok 2
+nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 93 held over them
+partitions: 57 drawn (13 bridge, 16 isolate, 12 oneway, 16 split), 54 acted on traffic
 
 failure exit: exit 1
-  7 of 8 runs   first: seed 1   replayed: identical
+  6 of 8 runs   first: seed 2   replayed: identical
   faults in every failing run: net-delay, net-reset, partition      in none: net-drop, net-dup, net-reorder
-  rerun:  patina run --seed 1 --config /tmp/q3/patina-out/sweep/seed-1/run.json -- python3 /guest/q3.py driver 90
-  replay: patina replay /tmp/q3/patina-out/sweep/seed-1
+  rerun:  patina run --seed 2 --config /tmp/q3/patina-out/sweep/seed-2/run.json -- python3 /guest/q3.py driver 90
+  replay: patina replay /tmp/q3/patina-out/sweep/seed-2
 
 faults: not applicable (a preset's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
@@ -1382,7 +1383,7 @@ gap while the run still fails the same way.
 
 A node's processes can be killed and its command started again, by the driver or by the seed.
 This is a process kill, as `kill -9` of everything the node runs; a crash of the node's
-machine, which also loses what it had not synced, is not available yet.
+machine, which also loses what it had not synced, is the next section's.
 
 `patina ctl node kill NAME --process` (or `patina.control("node kill NAME --process")`) kills
 every process of node `NAME` at once; `node start NAME` starts its command again. A kill of a
@@ -1426,8 +1427,10 @@ a kill, `down-ms=A..B` (default `1000..5000`, short beside the gap, so that seve
 seldom all down at once) the time it stays down before its restart.
 `max-incarnations=N` stops the kills once a node has started N times (each node counts its
 own), and `faults-in-recovery=0` turns the network's faults and partitions off after the
-first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this; `--crash machine` and
-`restart-gap-ms` are refused, and the driver is never killed.
+first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this
+or its machine form (`--crash machine[@a,b]`, next section); a crash point
+(`--crash machine-at:N`, `machine:PERMILLE`) and `restart-gap-ms` are refused, and the driver
+is never killed.
 
 **What keeps a run alive.** When every thread waits with no deadline, the run goes on to the
 next event that can wake one: a node's kill by the seed (its peers see its connections end),
@@ -1484,21 +1487,74 @@ FAIL: lost write: k2 read 0 in view 0; 80 was seen before (ack in view 0; views 
 
 Every kill and restart is in the logs: `result.json`'s `nodes.list` gives each node its
 `incarnations` and `downs` (each with its `incarnation`, `how`: `killed`, `killed by script`,
-`exited`, `failed` or `crashed`, `at_ms`, `up_ms`, `down_ms` until its restart or `null`, and
+`machine crash`, `machine crash by script`, `exited`, `failed` or `crashed`, `at_ms`, `up_ms`, `down_ms` until its restart or `null`, and
 the `exit` or `signal` of a node's own end), `faults.counts.crash` counts the seed's kills, and
-`patina log events` has `node` events `kill` (`by` `seed` or `script`), `exit` and `crash`,
+`patina log events` has `node` events `kill` and `machine-crash` (`by` `seed` or `script`),
+`exit` and `crash`,
 each with the processes it `killed` and its `restart_in_ms`, and a `start` with its
 `incarnation` for each restart. With `amnesia`, a node of `q3.py` keeps its view but not its
 log across a restart, and a write the cluster acknowledged is lost after the seed kills the
 nodes that had it (`tests/nodes/06-quorum-kills.sh`); without it, the same sweep is clean.
 
-**Not available yet** (refused, naming what is missing): a crash of a node's machine
-(`--crash machine`, `node kill NAME` without `--process`, and the loss of what a node had not
-synced), per-node faults (`faults` in a node's table) and disk and memory faults with nodes,
-pausing a node (`node pause`, `node resume`), a node's own clock (`clock ...`), `--branch` (it
-forces crash points), `patina __native` twins and `--check` reference runs of a run with
-nodes. A node's work tree is not crash-modelled and has no operation log (`op` events are the
-driver's).
+### Crashing a node's machine
+
+`patina ctl node kill NAME` (without `--process`) crashes node `NAME`'s machine, and
+`--crash machine` has the seed do it (`--crash machine@a,b`: only those nodes), at the times it
+draws for its kills, with the same `crash-gap-ms`, `down-ms`, `max-incarnations`, `restart` and
+`faults-in-recovery`. A machine crash differs from a process kill in three ways.
+
+- **The disk.** Each node's work tree is a disk of its own. What the node had not synced may be
+  lost: its next boot starts on what a file system would have kept, drawn from the seed under
+  the run's `fs-model`, as for a single machine's crash ([Crashes](#crashes)); what it synced
+  (`fsync`, `fdatasync`, `sync`, a synced directory) is kept, stores through a shared mapping
+  included. No other node's disk is touched. `/tmp`, `/dev/shm` and System V shared memory
+  start empty, as after a reboot.
+- **Silence.** The node sends nothing as it goes down: no FIN, no RST. A peer learns of it only
+  from its own timeouts: what it sends to the node is held, and its connection fails with
+  `ETIMEDOUT` after its `TCP_USER_TIMEOUT` (or `net-give-up-ms`); a peer that only reads waits.
+  A connect to the node while it is down retries its SYN and times out; it is not refused.
+  Datagrams to it are lost. Once the node is back, it answers a segment of a connection it no
+  longer has with a RST: the peer's next send resets its connection.
+- **The restart.** After the down time the node's command runs again on that tree, with the
+  next `PATINA_INCARNATION`; a script's crash is followed only by its own `node start`.
+
+<!-- transcript nodes-machine
+dir: /tmp/disk
+setup: mkdir g && cp "$GUESTS/disk.py" "$GUESTS/patina.py" g/
+setup: for n in a b; do printf '[node.%s]\ncmd = ["python3", "/guest/disk.py", "%s"]\n' $n $n; done >patina.toml
+-->
+```text
+$ patina run --mount g:/guest -- python3 /guest/disk.py driver 3
+ok (exit): the program exited 0
+guest: exit 0
+nodes: a 10.0.0.2 running after 3 downs, 4 incarnations, b 10.0.0.3 running; net: 0 cuts, 0 heals, 0 held, none cut at the end
+run directory: /tmp/disk/patina-out/run-0
+replay: patina replay /tmp/disk/patina-out/run-0
+$ cat patina-out/run-0/inc-0/stdout
+ok 3 machine crashes: fsynced writes kept, the other node untouched, connections silent until a reset after the restart, connects timed out
+unsynced lost in 2 of 3 crashes
+```
+
+`disk.py` (in `tests/guests/nodes`) has node a write one file with `fsync` and one without;
+the driver crashes a's machine, checks that a held connection shows nothing, that a connect
+times out, that node b's unsynced file is untouched, starts a again, and reads what the new
+boot found (`tests/nodes/09-machine.sh`). With `--crash machine`, `q3.py`'s nodes keep every
+acknowledged write, since each syncs its state before it answers; with `nosync` they answer
+first, and a write the cluster acknowledged is lost when the machines that had it crash
+before it reached their disks (`tests/nodes/10-quorum-machine.sh`).
+
+Each disk has its own operation log: `RUNDIR/node/NAME/inc-K/` holds `oplog.meta`,
+`oplog.data` and `live.tree` for the disk that began with boot K (a disk lasts across process
+kills and ends at a machine crash, its log closed by a `Crash` record). `patina log ops` reads
+one, and every run with nodes ends with the self-check on every disk (`result.json`'s
+`self_check` names the disk that differs). The driver's disk is `inc-0/` as without nodes.
+
+**Not available yet** (refused, naming what is missing): a node's crash at a crash point
+(`--crash machine-at:N`, `machine:PERMILLE`), per-node faults (`faults` in a node's table) and
+disk and memory faults with nodes, pausing a node (`node pause`, `node resume`), a node's own
+clock (`clock ...`), `--branch` (it forces crash points), `patina __native` twins and `--check`
+reference runs of a run with nodes. `op` events in `patina log events` are the driver's; a
+node's operations are in its disks' logs.
 
 ## The SDK
 

@@ -133,7 +133,7 @@ pub struct Swap {
 pub fn before(call: &dyn Call) -> Option<Swap> {
     let nr = call.nr();
     let role = role(nr)?;
-    let root = crate::state::config().work_path();
+    let root = crate::state::work_path();
     let (args, n) = path_args(nr);
     let ts = thread();
     let mut noted: [Option<Seen>; 2] = [None, None];

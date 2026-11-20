@@ -13,7 +13,6 @@ use proto::ctl::Ctl;
 use proto::layout::FD_SHADOWS;
 use proto::oplog::{effect, Dur, Effect, OpKind, Shadows, FALLOC_PUNCH_HOLE, SHADOW_SLOTS};
 use std::collections::HashSet;
-use std::os::unix::fs::MetadataExt;
 
 /// The stores: a memfd per slot at `FD_SHADOWS + k`, inherited by the guests (not
 /// close-on-exec).
@@ -126,15 +125,17 @@ pub fn read(k: usize, off: u64, buf: &mut [u8]) -> Result<(), String> {
     Ok(())
 }
 
-pub fn slot_of(ctl: &Ctl, ino: u64) -> Option<usize> {
-    table(ctl).slot_of(ino)
+/// The slot of the inode of key `key` (`proto::oplog::node_key`).
+pub fn slot_of(ctl: &Ctl, key: u64) -> Option<usize> {
+    table(ctl).slot_of(key)
 }
 
-/// A record the supervisor appended (`crash::append`): its inode's store follows, as for the
-/// runtime's records (`rt::oplog::shadow_apply`).
-pub fn apply(ctl: &Ctl, kind: OpKind, ino: u64, a: &[u64; 6], data: &[u8]) -> Result<(), String> {
+/// A record the supervisor appended (`crash::append`) for the inode of key `key`
+/// (`proto::oplog::node_key`): its store follows, as for the runtime's records
+/// (`rt::oplog::shadow_apply`).
+pub fn apply(ctl: &Ctl, key: u64, kind: OpKind, a: &[u64; 6], data: &[u8]) -> Result<(), String> {
     let s = table(ctl);
-    let Some(k) = s.slot_of(ino) else {
+    let Some(k) = s.slot_of(key) else {
         return Ok(());
     };
     match effect(kind, a) {
@@ -165,10 +166,11 @@ pub fn apply(ctl: &Ctl, kind: OpKind, ino: u64, a: &[u64; 6], data: &[u8]) -> Re
     }
 }
 
-/// Inodes of the work tree (`work_dev`) some process of the sandbox maps shared, from every
-/// thread's `/proc/PID/task/TID/maps` (a process whose first thread has exited shows no
-/// mappings at `/proc/PID`); None when one could not be read.
-fn mapped(work_dev: u64) -> Option<HashSet<u64>> {
+/// Keys (`proto::oplog::node_key`) of the work inodes (on the work devices `devs`, each with
+/// its node) some process of the sandbox maps shared, from every thread's
+/// `/proc/PID/task/TID/maps` (a process whose first thread has exited shows no mappings at
+/// `/proc/PID`); None when one could not be read.
+fn mapped(devs: &[(u64, usize)]) -> Option<HashSet<u64>> {
     let me = std::process::id().to_string();
     let gone =
         |e: &std::io::Error| matches!(e.raw_os_error(), Some(libc::ENOENT) | Some(libc::ESRCH));
@@ -209,8 +211,9 @@ fn mapped(work_dev: u64) -> Option<HashSet<u64>> {
                 ) else {
                     continue;
                 };
-                if libc::makedev(ma, mi) == work_dev {
-                    out.insert(ino);
+                let dev = libc::makedev(ma, mi);
+                if let Some(&(_, node)) = devs.iter().find(|(d, _)| *d == dev) {
+                    out.insert(proto::oplog::node_key(ino, node));
                 }
             }
         }
@@ -223,16 +226,32 @@ fn mapped(work_dev: u64) -> Option<HashSet<u64>> {
 /// makes the pass free nothing. Every guest is stopped at a boundary or in the kernel: the
 /// mappings do not change while they are read. Which slots are freed when changes no record
 /// (only how much memory the store holds, and when a full table is reported).
-pub fn reclaim(ctl: &Ctl, work: &std::path::Path) {
+/// Node `node`'s disk is gone (a machine crash, its processes dead): its slots are freed and
+/// its fsync error generations forgotten, so its next disk, whose files may reuse its inode
+/// numbers, starts with none of them.
+pub fn forget_node(ctl: &Ctl, node: usize) -> Result<(), String> {
+    unsafe { Dur::at(ctl as *const Ctl as *mut u8).forget_node(node) };
+    let s = table(ctl);
+    for k in 0..SHADOW_SLOTS {
+        let key = s.ino[k];
+        if node != 0 && key != 0 && key >> 56 == node as u64 {
+            free(s, k)?;
+        }
+    }
+    Ok(())
+}
+
+pub fn reclaim(ctl: &Ctl, disks: &super::disks::Disks) {
     let s = table(ctl);
     s.reclaim = 0;
     if s.used == 0 {
         return;
     }
-    let Ok(work_dev) = std::fs::metadata(work).map(|m| m.dev()) else {
+    let devs = disks.devs();
+    if devs.first().is_none_or(|&(_, node)| node != 0) {
         return;
-    };
-    let Some(held) = mapped(work_dev) else {
+    }
+    let Some(held) = mapped(&devs) else {
         return;
     };
     for k in 0..SHADOW_SLOTS {

@@ -832,14 +832,8 @@ const CUT_KEEP: u64 = (1 << 20) / proto::rec::REC_SIZE as u64 * proto::rec::REC_
 /// Cut the large logs of a kept run (`crate::log::Cut`); the operation log of an incarnation
 /// over the size goes whole (`patina log ops` needs all of it).
 fn cut(dir: &Path) {
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for inc in rd.flatten() {
-        if !inc.file_name().to_string_lossy().starts_with("inc-") {
-            continue;
-        }
-        let inc = inc.path();
+    // The driver's incarnations and every node's disks.
+    for inc in crate::durability::check::disks(dir) {
         let size = |f: &str| std::fs::metadata(inc.join(f)).map(|m| m.len()).unwrap_or(0);
         if size("boundary.log") > CUT_OVER {
             let _ = crate::log::cut(&inc, CUT_KEEP);

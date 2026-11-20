@@ -146,7 +146,7 @@ fn put_rec(kind: OpKind, ino: u64, a: [u64; 6], data: (u64, u64)) {
     let rec = OpRec {
         seq: ts.seq,
         vclock_ns: c.vclock_ns.load(Relaxed),
-        kind: kind as u32,
+        kind: proto::oplog::tag_kind(kind as u32, crate::state::node()),
         pid: ts.pid as u32,
         ino,
         a,
@@ -351,7 +351,7 @@ pub fn opened(fd: i64, ino: u64) {
         return; // the table is the parent's; the child's image after execve starts fresh
     }
     if let Some(s) = seen(fd) {
-        *s = dur().gen(ino) as u32;
+        *s = dur().gen(skey(ino)) as u32;
     }
 }
 
@@ -371,6 +371,11 @@ pub fn dup_fd(src: i64, dst: i64) {
 
 fn shadows() -> &'static mut Shadows {
     &mut dur().shadows
+}
+
+/// The shadow table's key of this process's work inode `ino` (`proto::oplog::node_key`).
+fn skey(ino: u64) -> u64 {
+    proto::oplog::node_key(ino, crate::state::node())
 }
 
 const SEEK_SET: u64 = 0;
@@ -524,7 +529,7 @@ fn free_slot(k: usize) {
 /// After a record was appended for `ino` (its bytes at `data` in `oplog.data`): its store
 /// follows (`proto::oplog::Shadows`, the invariant; the supervisor's appends do the same).
 fn shadow_apply(kind: OpKind, ino: u64, a: &[u64; 6], data: (u64, u64)) {
-    let Some(k) = shadows().slot_of(ino) else {
+    let Some(k) = shadows().slot_of(skey(ino)) else {
         return;
     };
     match effect(kind, a) {
@@ -624,7 +629,7 @@ fn dirty(fd: i64, ino: u64, lo: u64, hi: u64) {
 /// file when it has none. No slot means no process maps the inode (slots are freed only when
 /// none does), so the file holds what the log holds.
 fn slot_for(ino: u64, fd: i64) -> usize {
-    if let Some(k) = shadows().slot_of(ino) {
+    if let Some(k) = shadows().slot_of(skey(ino)) {
         return k;
     }
     let k = match shadows().free_slot() {
@@ -640,7 +645,7 @@ fn slot_for(ino: u64, fd: i64) -> usize {
     // only the file's data runs.
     store_zero(k, 0, u64::MAX);
     let s = shadows();
-    s.ino[k] = ino;
+    s.ino[k] = skey(ino);
     s.used += 1;
     let size = file_size(fd);
     data_runs(fd, 0, page_up(size), |a, b| {
@@ -686,7 +691,7 @@ pub fn before_write(fd: i64, off: Option<u64>, count: u64, append: Option<bool>)
     if !path::is_work(st.dev()) || st.mode() & 0o170000 != 0o100000 {
         return;
     }
-    let Some(k) = shadows().slot_of(st.ino()) else {
+    let Some(k) = shadows().slot_of(skey(st.ino())) else {
         return;
     };
     const O_APPEND: i64 = 0o2000;
@@ -813,7 +818,7 @@ pub fn on_mmap(addr: u64, len: u64, flags: u64, fd: i64, off: u64) {
 /// Record the pages of mapping `i` that differ from what the log holds (`MmapDirty`).
 fn flush(i: usize) {
     let m = MAPS.get().m[i];
-    if let Some(k) = shadows().slot_of(m.ino) {
+    if let Some(k) = shadows().slot_of(skey(m.ino)) {
         flush_file(m.fd, k, m.ino, m.off, m.off.saturating_add(m.len));
     }
 }
@@ -963,7 +968,12 @@ fn flush_everything() {
     let others = s
         .ino
         .iter()
-        .any(|&ino| ino != 0 && !t.m[..t.n].iter().any(|m| m.ino == ino));
+        // Only this node's files: another machine's page cache is not this one's to sync.
+        .any(|&key| {
+            key != 0
+                && key >> 56 == crate::state::node() as u64
+                && !t.m[..t.n].iter().any(|m| skey(m.ino) == key)
+        });
     if others {
         crate::sup::call_sup(proto::ctl::Op::MapsSync, [thread().seq, 0, 0, 0, 0, 0]);
         return;
@@ -975,7 +985,7 @@ fn flush_everything() {
         if t.m[..i].iter().any(|p| p.ino == m.ino) {
             continue;
         }
-        if let Some(k) = s.slot_of(m.ino) {
+        if let Some(k) = s.slot_of(skey(m.ino)) {
             flush_file(m.fd, k, m.ino, 0, u64::MAX);
         }
     }
@@ -984,7 +994,7 @@ fn flush_everything() {
 /// `fsync` family on the work file `ino` open at `fd`: whatever any process stored through a
 /// mapping of it is logged before the sync.
 fn flush_whole(fd: i64, ino: u64) {
-    let Some(k) = shadows().slot_of(ino) else {
+    let Some(k) = shadows().slot_of(skey(ino)) else {
         return;
     };
     let Some(rfd) = reader(fd) else { return };
@@ -1069,7 +1079,7 @@ const AT_FDCWD_: i64 = -100;
 /// caused by the class `by` (`proto::faults::SYNC_BY_*`).
 fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
     let d = dur();
-    if ino != 0 && d.bump(ino).is_none() {
+    if ino != 0 && d.bump(skey(ino)).is_none() {
         crate::sup::capacity(
             proto::ctl::LIMIT_FSYNC_FAILURES,
             proto::oplog::ERRGEN_CAP as u64,
@@ -1140,7 +1150,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
         };
         fail(ino, nr, crate::inject::Who::Fd(fd, o), by);
         if let Some(s) = seen(fd) {
-            *s = dur().gen(ino) as u32;
+            *s = dur().gen(skey(ino)) as u32;
         }
         return -e::EIO;
     }
@@ -1153,7 +1163,7 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     } else {
         0
     };
-    let g = dur().gen(ino) as u32;
+    let g = dur().gen(skey(ino)) as u32;
     if let Some(s) = seen(fd) {
         if *s < g {
             // An earlier failed writeback, not yet reported to this descriptor: report it
@@ -1215,10 +1225,11 @@ pub fn on_exit() {
 
 /// The work tree's path as a C string (the launcher leaves room for the NUL).
 fn work_cstr() -> u64 {
-    let w = &crate::state::config().work;
-    if w[0] == 0 {
+    let w = crate::state::work_path();
+    if w == b"/work" {
         c"/work".as_ptr() as u64
     } else {
+        // NUL-padded in the control region (`Config::work`, `NodeTab::work`).
         w.as_ptr() as u64
     }
 }

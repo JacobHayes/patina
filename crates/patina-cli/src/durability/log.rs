@@ -29,6 +29,21 @@ impl Op {
             data,
         }
     }
+    /// Record `i`, `r`, with its bytes.
+    pub fn from_rec(i: usize, r: &OpRec, data: Vec<u8>) -> Result<Op, String> {
+        let kind = OpKind::from_u32(r.kind)
+            .ok_or_else(|| format!("oplog record {i}: unknown kind {}", r.kind))?;
+        Ok(Op {
+            seq: r.seq,
+            vclock_ns: r.vclock_ns,
+            kind,
+            pid: r.pid,
+            ino: r.ino,
+            a: r.a,
+            data,
+        })
+    }
+
     /// A base record (part of the initial tree: durable at seq 0)?
     pub fn is_base(&self) -> bool {
         self.seq == 0
@@ -57,21 +72,11 @@ impl OpLog {
                 return Err(format!("oplog.meta: partial record {i}"));
             }
             let r = OpRec::from_bytes(c);
-            let kind = OpKind::from_u32(r.kind)
-                .ok_or_else(|| format!("oplog record {i}: unknown kind {}", r.kind))?;
             let (o, l) = (r.data_off as usize, r.data_len as usize);
             if o + l > data.len() {
                 return Err(format!("oplog record {i}: data beyond oplog.data"));
             }
-            ops.push(Op {
-                seq: r.seq,
-                vclock_ns: r.vclock_ns,
-                kind,
-                pid: r.pid,
-                ino: r.ino,
-                a: r.a,
-                data: data[o..o + l].to_vec(),
-            });
+            ops.push(Op::from_rec(i, &r, data[o..o + l].to_vec())?);
         }
         Ok(OpLog { ops })
     }
@@ -89,6 +94,83 @@ impl OpLog {
             self.ops.iter().map(|o| o.data.len()).sum(),
         )
     }
+}
+
+/// Split the shared operation log of a run with nodes, `inc/oplog.*`, whose kinds carry their
+/// node (`proto::oplog::tag_kind`), into one log per disk: node `k`'s records (`k` > 0) go to
+/// `disk(k, b)/oplog.*`, where `b` is the boot its disk began with (0, or the boot after a
+/// machine crash), and the live tree record that ends each disk (`KIND_LIVE_TREE`, at a
+/// machine crash or at the end of the run) to `disk(k, b)/live.tree`; the driver's stay in
+/// `inc/oplog.*`. Every log is then plain, with its records' bytes in its own `oplog.data`, in
+/// the shared log's order. A log without a tagged record is left as it is.
+pub fn split_nodes(
+    inc: &Path,
+    disk: impl Fn(usize, u64) -> Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    use proto::oplog::{kind_node, KIND_LIVE_TREE, KIND_MASK};
+    use std::collections::BTreeMap;
+    let meta = read_all(&inc.join("oplog.meta"))?;
+    let recs: Vec<OpRec> = meta
+        .as_chunks::<OPREC_SIZE>()
+        .0
+        .iter()
+        .map(|c| OpRec::from_bytes(c))
+        .collect();
+    if recs.iter().all(|r| kind_node(r.kind) == 0) {
+        return Ok(());
+    }
+    let data = read_all(&inc.join("oplog.data"))?;
+    // Per disk (node, first boot): its meta, its data, its live tree.
+    type Disk = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
+    let mut out: BTreeMap<(usize, u64), Disk> = BTreeMap::new();
+    out.entry((0, 0)).or_default();
+    // Each node's disk now, and the boot its next disk begins with (after a machine crash).
+    let mut cur: BTreeMap<usize, u64> = BTreeMap::new();
+    let mut next: BTreeMap<usize, u64> = BTreeMap::new();
+    for (i, r) in recs.iter().enumerate() {
+        let (o, l) = (r.data_off as usize, r.data_len as usize);
+        let bytes = data
+            .get(o..o + l)
+            .ok_or_else(|| format!("oplog record {i}: data beyond oplog.data"))?;
+        let k = kind_node(r.kind);
+        let b = *cur.entry(k).or_insert(0);
+        let e = out.entry((k, b)).or_default();
+        let kind = r.kind & KIND_MASK;
+        if kind == KIND_LIVE_TREE {
+            e.2 = Some(bytes.to_vec());
+            if let Some(n) = next.remove(&k) {
+                cur.insert(k, n);
+            }
+            continue;
+        }
+        if k > 0 && kind == OpKind::Crash as u32 && r.a[0] == proto::faults::CRASH_MACHINE {
+            next.insert(k, r.a[1] + 1);
+        }
+        let plain = OpRec {
+            kind,
+            data_off: e.1.len() as u64,
+            ..*r
+        };
+        e.0.extend_from_slice(plain.as_bytes());
+        e.1.extend_from_slice(bytes);
+    }
+    let write = |p: std::path::PathBuf, b: &[u8]| {
+        fs::write(&p, b).map_err(|e| format!("{}: {e}", p.display()))
+    };
+    for ((k, b), (m, d, tree)) in out {
+        let dir = if k == 0 {
+            inc.to_path_buf()
+        } else {
+            disk(k, b).ok_or_else(|| format!("oplog: records of node {k}, which the run lacks"))?
+        };
+        fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        write(dir.join("oplog.meta"), &m)?;
+        write(dir.join("oplog.data"), &d)?;
+        if let Some(t) = tree {
+            write(dir.join("live.tree"), &t)?;
+        }
+    }
+    Ok(())
 }
 
 /// The whole file, read into a buffer of its size (no regrowth).

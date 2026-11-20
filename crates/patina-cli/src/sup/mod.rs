@@ -70,6 +70,7 @@ pub(crate) const BASE_ENV: [&str; 5] = [
 // `cancel`, ...) are for blocking I/O and signals; unit tests use the rest.
 mod contain;
 pub mod crash;
+mod disks;
 #[allow(dead_code)]
 pub mod futex;
 pub mod inherit;
@@ -128,6 +129,8 @@ struct Sup {
     /// The shared mappings of the processes still alive were logged for the end of the run
     /// (`end_maps`): a crash point did it before its `Crash` record.
     maps_ended: std::cell::Cell<bool>,
+    /// Each node's work tree.
+    disks: disks::Disks,
 }
 
 /// What a request does with the turn.
@@ -451,10 +454,10 @@ impl Sup {
 
     /// Log what the shared mappings of `pids` hold that the log does not: they end without
     /// their runtime (`maps`).
-    fn flush_maps(&self, pids: &[i32], seq: u64) -> Result<(), String> {
-        let mut pass = maps::Pass::new(self.ctl, &work_dir(self.ctl), seq);
-        for &pid in pids {
-            pass.process(pid)?;
+    fn flush_maps(&self, pids: &[(i32, usize)], seq: u64) -> Result<(), String> {
+        let mut pass = maps::Pass::new(self.ctl, &self.disks, seq);
+        for &(pid, node) in pids {
+            pass.process(pid, node)?;
         }
         Ok(())
     }
@@ -478,14 +481,14 @@ impl Sup {
         self.flush_maps(&pids, seq)
     }
 
-    /// Every live process with mappings of its own, in pid order: not a vfork child (its
-    /// mappings are its parent's, logged with it).
-    fn mapping_pids(&self) -> Vec<i32> {
+    /// Every live process with mappings of its own, and its node, in pid order: not a vfork
+    /// child (its mappings are its parent's, logged with it).
+    fn mapping_pids(&self) -> Vec<(i32, usize)> {
         self.procs
             .map
             .iter()
             .filter(|(_, p)| p.state == proc::PState::Live && p.vfork_parent.is_none())
-            .map(|(pid, _)| *pid)
+            .map(|(pid, p)| (*pid, p.node))
             .collect()
     }
 
@@ -538,6 +541,11 @@ impl Sup {
         // Every guest is dead: the live tree is final, and so is the shared memory a process
         // crash leaves to the next incarnation (any other end leaves none).
         crash::export(&work_dir(self.ctl));
+        for node in self.disks.nodes() {
+            if let Some(p) = self.disks.path(node) {
+                let _ = crash::export_node(self.ctl, node, &p);
+            }
+        }
         let carried = if v.class == "crash" && v.detail.starts_with("process ") {
             self.shm.save(self.now())
         } else {
@@ -939,14 +947,17 @@ impl Sup {
             Some(Op::Net) => self.net_op(idx, a),
             Some(Op::PidNode) => self.pid_node(a),
             Some(Op::MapsSync) => {
-                let pids = self.mapping_pids();
+                // A sync reaches the caller's machine only.
+                let node = self.node_of(idx);
+                let mut pids = self.mapping_pids();
+                pids.retain(|&(_, n)| n == node);
                 if let Err(e) = self.flush_maps(&pids, a[0]) {
                     self.finish(Self::maps_verdict(e));
                 }
                 Next::Continue(0)
             }
             Some(Op::ShadowReclaim) => {
-                shadows::reclaim(self.ctl, &work_dir(self.ctl));
+                shadows::reclaim(self.ctl, &self.disks);
                 Next::Continue(0)
             }
             Some(Op::Node) => self.node_op(idx, a),
@@ -955,7 +966,7 @@ impl Sup {
                 let pid = self.sched.entries[idx].pid as u32;
                 if let Err(e) = self
                     .end_maps(a[1])
-                    .and_then(|_| crash::append_crash(self.ctl, a[0], a[1], pid))
+                    .and_then(|_| crash::append_crash(self.ctl, 0, a[0], a[1], pid))
                 {
                     self.finish(Self::maps_verdict(e));
                 }
@@ -1043,7 +1054,7 @@ impl Sup {
             // A runtime dropped a tracked mapping or started an image: slots of files nothing
             // maps any more go.
             if shadows::reclaim_asked(self.ctl) {
-                shadows::reclaim(self.ctl, &work_dir(self.ctl));
+                shadows::reclaim(self.ctl, &self.disks);
             }
             self.check_liveness(Some((idx, req)));
             // Timers due by now fire before the request is handled (their seq order).
@@ -1213,6 +1224,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
         execed: Default::default(),
         maps_ended: std::cell::Cell::new(false),
+        disks: disks::Disks::new(work_dir(ctl)),
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
@@ -1251,7 +1263,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             ));
         }
     }
-    if let Err(e) = crash::write_base(ctl, &work_dir(ctl)) {
+    if let Err(e) = crash::write_base(ctl, 0, &work_dir(ctl)) {
         if ["(os error 28)", "(os error 122)"]
             .iter()
             .any(|c| e.contains(c))

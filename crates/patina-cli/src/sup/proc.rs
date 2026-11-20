@@ -396,7 +396,7 @@ impl Sup {
         }
         // Its mappings are gone with it: the slots of files nothing maps any more go.
         if super::shadows::in_use(self.ctl) {
-            super::shadows::reclaim(self.ctl, &super::work_dir(self.ctl));
+            super::shadows::reclaim(self.ctl, &self.disks);
         }
         for s in self.sched.slots_of(pid) {
             self.sched.free(s);
@@ -517,17 +517,17 @@ impl Sup {
     /// its shared mappings hold is logged first, at this point of the run, as its runtime
     /// would at an exit (`maps`); a vfork child's are its parent's, which keeps them.
     pub fn kill_now(&mut self, pid: i32) {
-        let Some((fd, vfork_child)) = self
+        let Some((fd, vfork_child, node)) = self
             .procs
             .map
             .get(&pid)
             .filter(|p| p.state == PState::Live)
-            .map(|p| (p.pidfd, p.vfork_parent.is_some()))
+            .map(|p| (p.pidfd, p.vfork_parent.is_some(), p.node))
         else {
             return;
         };
-        if !vfork_child {
-            if let Err(e) = self.flush_maps(&[pid], self.ctl.seq.load(Relaxed)) {
+        if !vfork_child && !self.nodes.crashing {
+            if let Err(e) = self.flush_maps(&[(pid, node)], self.ctl.seq.load(Relaxed)) {
                 self.finish(Self::maps_verdict(e));
             }
         }

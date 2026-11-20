@@ -52,10 +52,34 @@ fn pwrite_all(fd: i32, mut off: u64, b: &[u8]) -> Result<(), String> {
 
 /// Append one operation record (with its bytes) at the end of the log, as the runtime does
 /// (`rt::oplog::put_rec`), and keep its inode's window in the shadow store (`shadows`): `seq`
-/// and `pid` say where in the run it belongs (0, 0 for the base).
+/// and `pid` say where in the run it belongs (0, 0 for the base); `node` is the node whose
+/// work tree it is about.
+#[allow(clippy::too_many_arguments)]
 pub fn append(
     ctl: &Ctl,
+    node: usize,
     kind: OpKind,
+    ino: u64,
+    a: [u64; 6],
+    data: &[u8],
+    seq: u64,
+    pid: u32,
+) -> Result<(), String> {
+    put(
+        ctl,
+        proto::oplog::tag_kind(kind as u32, node),
+        ino,
+        a,
+        data,
+        seq,
+        pid,
+    )?;
+    super::shadows::apply(ctl, proto::oplog::node_key(ino, node), kind, &a, data)
+}
+
+fn put(
+    ctl: &Ctl,
+    kind: u32,
     ino: u64,
     a: [u64; 6],
     data: &[u8],
@@ -68,7 +92,7 @@ pub fn append(
     let r = OpRec {
         seq,
         vclock_ns: ctl.vclock_ns.load(Relaxed),
-        kind: kind as u32,
+        kind,
         pid,
         ino,
         a,
@@ -79,22 +103,32 @@ pub fn append(
     pwrite_all(FD_OPLOG_META, off, r.as_bytes())?;
     ctl.oplog_len
         .store(off + r.as_bytes().len() as u64, Relaxed);
-    super::shadows::apply(ctl, kind, ino, &a, data)
+    Ok(())
 }
 
 /// The `Crash` record that ends the log of a crashed incarnation (`kind`: `CRASH_*`), after
 /// the shared mappings of every process were logged (`maps`).
-pub fn append_crash(ctl: &Ctl, kind: u64, seq: u64, pid: u32) -> Result<(), String> {
-    append(ctl, OpKind::Crash, 0, [kind, 0, 0, 0, 0, 0], &[], seq, pid)
+pub fn append_crash(ctl: &Ctl, node: usize, kind: u64, seq: u64, pid: u32) -> Result<(), String> {
+    append(
+        ctl,
+        node,
+        OpKind::Crash,
+        0,
+        [kind, 0, 0, 0, 0, 0],
+        &[],
+        seq,
+        pid,
+    )
 }
 
 struct Writer<'a> {
     ctl: &'a Ctl,
+    node: usize,
 }
 
 impl Writer<'_> {
     fn rec(&self, kind: OpKind, ino: u64, a: [u64; 6], data: &[u8]) -> Result<(), String> {
-        append(self.ctl, kind, ino, a, data, 0, 0)
+        append(self.ctl, self.node, kind, ino, a, data, 0, 0)
     }
 }
 
@@ -109,10 +143,11 @@ fn fmt_bits(k: Kind) -> u64 {
     }
 }
 
-/// Base records for the tree now in `/work`. Returns the number of records.
-pub fn write_base(ctl: &Ctl, work: &Path) -> Result<usize, String> {
+/// Base records for the tree now in node `node`'s work tree `work`. Returns the number of
+/// records.
+pub fn write_base(ctl: &Ctl, node: usize, work: &Path) -> Result<usize, String> {
     let t = Tree::from_dir(work).map_err(|e| format!("reading {}: {e}", work.display()))?;
-    let w = Writer { ctl };
+    let w = Writer { ctl, node };
     let root = t.nodes.get(&b""[..]).ok_or("no root")?;
     let owner = (root.uid, root.gid);
     w.rec(
@@ -209,6 +244,65 @@ pub fn crash_verdict(a: [u64; 6], vclock_ns: u64) -> Verdict {
         "crash",
         format!("{} {} {} {}", crash_name(a[0]), a[1], vclock_ns, a[2]),
     )
+}
+
+/// Node `node`'s live work tree `work` as a record of the log (`KIND_LIVE_TREE`), after the
+/// guests are dead: the launcher makes it the node's `live.tree`.
+pub fn export_node(ctl: &Ctl, node: usize, work: &Path) -> Result<(), String> {
+    let bytes = Tree::from_dir(work)
+        .map_err(|e| format!("live tree export: {e}"))?
+        .encode();
+    let kind = proto::oplog::tag_kind(proto::oplog::KIND_LIVE_TREE, node);
+    let len = |c: &Ctl| c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed);
+    let before = len(ctl);
+    let r = put(ctl, kind, 0, [0; 6], &bytes, ctl.seq.load(Relaxed), 0);
+    // The archive is the check's input, not the guest's output: exempt from `--log-limit`.
+    ctl.log_exempt.fetch_add(len(ctl) - before, Relaxed);
+    r
+}
+
+/// The log of node `node`'s disk so far: its records in the shared log from `at` (bytes of
+/// `oplog.meta`, where the disk's base records begin), plain.
+pub fn disk_log(ctl: &Ctl, node: usize, at: u64) -> Result<crate::durability::log::OpLog, String> {
+    use proto::oplog::{kind_node, KIND_LIVE_TREE, KIND_MASK, OPREC_SIZE};
+    let read = |fd: i32, off: u64, len: usize| -> Result<Vec<u8>, String> {
+        let mut b = vec![0u8; len];
+        let mut done = 0;
+        while done < len {
+            let r = unsafe {
+                libc::pread(
+                    fd,
+                    b[done..].as_mut_ptr() as *mut _,
+                    len - done,
+                    (off + done as u64) as i64,
+                )
+            };
+            if r <= 0 {
+                return Err(format!(
+                    "operation log read: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            done += r as usize;
+        }
+        Ok(b)
+    };
+    let end = ctl.oplog_len.load(Relaxed);
+    let meta = read(FD_OPLOG_META, at, end.saturating_sub(at) as usize)?;
+    let mut ops = vec![];
+    for (i, c) in meta.as_chunks::<OPREC_SIZE>().0.iter().enumerate() {
+        let r = OpRec::from_bytes(c);
+        if kind_node(r.kind) != node || r.kind & KIND_MASK == KIND_LIVE_TREE {
+            continue;
+        }
+        let data = read(FD_OPLOG_DATA, r.data_off, r.data_len as usize)?;
+        let plain = OpRec {
+            kind: r.kind & KIND_MASK,
+            ..r
+        };
+        ops.push(crate::durability::log::Op::from_rec(i, &plain, data)?);
+    }
+    Ok(crate::durability::log::OpLog { ops })
 }
 
 /// Export the live `/work` to descriptor 3006 (absent when the launcher passed none).

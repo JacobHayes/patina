@@ -32,6 +32,8 @@
  *   net cut A B                  both directions between the node sets A and B are cut
  *   net cut --from A --to B      one direction: what A sends to B is held
  *   net heal [A B | --from A --to B]   heal those links; no sets: every scripted cut
+ *   node kill NAME               crash node NAME's machine: what it had not synced may be lost,
+ *                                its peers are not told (-EALREADY: it is down)
  *   node kill NAME --process     kill every process of node NAME (-EALREADY: it is down)
  *   node start NAME              start node NAME's command again (-EALREADY: it is up or
  *                                starting; -EAGAIN: past 64 incarnations)
@@ -39,8 +41,8 @@
  * A set is node names joined by commas ("driver" is the command after --), or "rest": every
  * node the other set does not name. Answers: 0; -EPERM when a process outside the driver's node
  * acts on the network or a node; -ENOENT for an unknown node; -EINVAL for other words or a run
- * without nodes; -EOPNOTSUPP for words of a later feature (node kill without --process, a
- * machine crash; node pause); -ENOSYS outside Patina.
+ * without nodes; -EOPNOTSUPP for words of a later feature (node pause, node resume, clock);
+ * -ENOSYS outside Patina.
  */
 #ifndef PATINA_H
 #define PATINA_H

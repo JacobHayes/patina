@@ -11,8 +11,8 @@ heartbeat. A backup that has not heard from its primary for `GRACE` (longer than
 asks the other nodes to move to the next view it would lead; one that grants hands over its
 log and takes no `SYNC` from a lower view after that, so an old primary can get no quorum (the
 fence). The new primary keeps the longer of the two logs (by the view of its last entry, then
-its length) and syncs it to both. With `PERSIST`, each node keeps its view and log in its work
-tree and reads them back when it starts again.
+its length) and syncs it to both. Each node keeps its view and log in its work tree, synced
+before it answers (`state.json`), and reads them back when it starts again.
 
 Planted bugs (any of them as extra words):
 
@@ -20,6 +20,8 @@ Planted bugs (any of them as extra words):
     nolease     the primary answers reads without checking its lease
     nofence     a primary whose backups do not answer answers OK on its own
     amnesia     a node keeps its view in its work tree but not its log (it restarts empty)
+    nosync      a node answers without syncing its work tree (a machine crash may lose what
+                it acknowledged)
 
 The driver sends each request to the nodes in turn, following a redirect to the primary a node
 names. It is the only writer, with increasing values, so a read must return the last value
@@ -125,10 +127,19 @@ class Node:
         self.log = [] if "amnesia" in self.bugs else [tuple(e) for e in s["log"]]
 
     def save(self):
+        # Durable before the node answers: the new file synced, renamed, the directory synced
+        # (without `nosync`, which a machine crash can make lose what it acknowledged).
         s = {"view": self.view, "log": [] if "amnesia" in self.bugs else self.log}
         with open("state.json.tmp", "w") as f:
             json.dump(s, f)
+            if "nosync" not in self.bugs:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace("state.json.tmp", "state.json")
+        if "nosync" not in self.bugs:
+            d = os.open(".", os.O_RDONLY)
+            os.fsync(d)
+            os.close(d)
 
     def primary(self, v=None):
         return NODES[(self.view if v is None else v) % 3]

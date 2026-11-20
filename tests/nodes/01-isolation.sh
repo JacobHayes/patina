@@ -44,7 +44,7 @@ refused() {
     grep -q -- "$what" "$o/refused.err" || die "$what: the refusal does not name it: $(cat "$o/refused.err")"
     echo "refused: $what"
 }
-refused "--crash machine" --config "$o/iso.toml" --crash machine
+refused "--crash machine-at:3" --config "$o/iso.toml" --crash machine-at:3
 refused restart-gap-ms --config "$o/iso.toml" --fault restart-gap-ms=1000..2000
 refused fs-error-permille --config "$o/iso.toml" --fault fs-error-permille=10
 printf '[node.c]\ncmd = ["/bin/true"]\nfaults = "net"\n' >"$o/faults.toml"
@@ -76,7 +76,7 @@ want="net cut driver c: ok
 net heal --from driver --to c: ok
 net cut driver nobody: ENOENT
 net sever driver c: EINVAL
-node kill c: EOPNOTSUPP"
+node pause c: EOPNOTSUPP"
 [ "$d" = "$want" ] || die "C control from the driver: $d"
 [ "$n" = "net heal: EPERM
 mark from-a-node: ok" ] || die "C control from a node: $n"

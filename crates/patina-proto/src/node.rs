@@ -15,6 +15,8 @@
 //! net heal                     every scripted cut
 //! net heal A B                 both directions between A and B
 //! net heal --from A --to B     one direction
+//! node kill NAME               crash the node's machine: its unsynced writes may be lost, it
+//!                              stays down, silent (EALREADY: down)
 //! node kill NAME --process     kill every process of the node; it stays down (EALREADY: down)
 //! node start NAME              start a node that is down, as at a restart (EALREADY: up or
 //!                              starting; EAGAIN: past 64 incarnations)
@@ -23,8 +25,8 @@
 //!
 //! A set is node names joined by commas, or `rest`: every node not in the other set. Only the
 //! driver's node may use `net` and `node` (elsewhere `EPERM`); an unknown name is `ENOENT`,
-//! other words `EINVAL`, and words of a later feature (`node kill NAME` without `--process`, a
-//! machine crash; `node pause`, `node resume`; `clock ...`) `EOPNOTSUPP`.
+//! other words `EINVAL`, and words of a later feature (`node pause`, `node resume`; `clock ...`)
+//! `EOPNOTSUPP`.
 
 /// The driver and at most 15 nodes.
 pub const MAX_NODES: usize = 16;
@@ -82,6 +84,14 @@ pub struct NodeTab {
     pub boot: [[Boot; BOOTS_MAX]; MAX_NODES],
     /// The node (plus 1) whose end ended the run (0: none did).
     pub ended_by: u64,
+    /// Written by the launcher: each node's work tree, NUL-padded (the driver's is
+    /// `Config::work`).
+    pub work: [[u8; crate::ctl::WORK_PATH_MAX]; MAX_NODES],
+    /// Written by the launcher: the file system model of a machine crash (`fs-model`; 0
+    /// `ext4-ordered`, 1 `posix-strict`).
+    pub fs_model: u64,
+    /// Written by the supervisor: each node's machine crashes so far.
+    pub crashes: [u64; MAX_NODES],
 }
 
 /// Boots a node may have at most (`max-incarnations` is capped by it, and so is `node start`).
@@ -96,7 +106,9 @@ pub struct NodeConf {
     /// `max-incarnations`: boots the seed's kills and `restart` may give it; the last has no
     /// seed-drawn kill.
     pub max_boots: u64,
-    /// 1: the seed kills its processes (`--crash process`, scoped by `@NODE`).
+    /// The seed's kills (scoped by `@NODE`): `CRASH_NODE_PROCESS` kills its processes
+    /// (`--crash process`), `CRASH_NODE_MACHINE` crashes its machine (`--crash machine`); 0:
+    /// none.
     pub crash: u64,
     /// Exit statuses of its command that stop the node without a finding: bit `s` of
     /// `ok_exit[s / 64]`.
@@ -108,6 +120,10 @@ impl NodeConf {
         status < 256 && self.ok_exit[(status / 64) as usize] & (1 << (status % 64)) != 0
     }
 }
+
+/// `NodeConf::crash`.
+pub const CRASH_NODE_PROCESS: u64 = 1;
+pub const CRASH_NODE_MACHINE: u64 = 2;
 
 /// `restart`: start the node again after the seed killed it (`crash`, the default), also
 /// after its command exits with a status of its `ok-exit` (`always`), or never.
@@ -141,6 +157,9 @@ pub const DOWN_KILL_SCRIPT: u64 = 2;
 pub const DOWN_EXIT: u64 = 3;
 pub const DOWN_FAILED: u64 = 4;
 pub const DOWN_SIGNAL: u64 = 5;
+/// Its machine crashed, by the seed (`--crash machine`) or by a control call (`node kill NAME`).
+pub const DOWN_CRASH_SEED: u64 = 6;
+pub const DOWN_CRASH_SCRIPT: u64 = 7;
 
 pub fn down_name(how: u64) -> &'static str {
     match how {
@@ -149,12 +168,14 @@ pub fn down_name(how: u64) -> &'static str {
         DOWN_EXIT => "exited",
         DOWN_FAILED => "failed",
         DOWN_SIGNAL => "crashed",
+        DOWN_CRASH_SEED => "machine crash",
+        DOWN_CRASH_SCRIPT => "machine crash by script",
         _ => "running",
     }
 }
 
-/// The `Injected` record of a seed-drawn node kill: [`INJ_NODE_KILL`, node, boot, 0, 0, 0]
-/// (class `crash`).
+/// The `Injected` record of a seed-drawn node kill: [`INJ_NODE_KILL`, node, boot, machine, 0,
+/// 0] (`machine` 1 for a machine crash; class `crash`).
 pub const INJ_NODE_KILL: u64 = 40;
 
 /// Sub-keys of `draw(Stream::Node, node << 24 | boot << 16 | try << 8 | sub)`: the time from a
@@ -283,6 +304,16 @@ impl NodeTab {
         (self.n as usize).min(MAX_NODES)
     }
 
+    /// Node `i`'s work tree (`i` > 0; the launcher leaves room for a NUL).
+    pub fn work_path(&self, i: usize) -> &[u8] {
+        let w = &self.work[i.min(MAX_NODES - 1)];
+        match &w[..w.iter().position(|&c| c == 0).unwrap_or(w.len())] {
+            // Never empty: an empty work path would put every path on the work tree.
+            b"" => b"/work",
+            p => p,
+        }
+    }
+
     pub fn name(&self, i: usize) -> &[u8] {
         &self.names[i][..(self.name_len[i] as usize).min(NAME_MAX)]
     }
@@ -318,6 +349,8 @@ pub const NET_HEAL: u64 = 2;
 /// `Op::Node` verbs.
 pub const NODE_KILL: u64 = 1;
 pub const NODE_START: u64 = 2;
+/// A crash of the node's machine.
+pub const NODE_CRASH: u64 = 3;
 
 const EPERM: i64 = 1;
 const ENOENT: i64 = 2;
@@ -335,7 +368,7 @@ pub enum Control<'a> {
         to: u64,
         both: bool,
     },
-    /// `NODE_KILL` (its processes) or `NODE_START`, of node `node`.
+    /// `NODE_KILL` (its processes), `NODE_CRASH` (its machine) or `NODE_START`, of node `node`.
     Node {
         verb: u64,
         node: usize,
@@ -425,13 +458,7 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
         [b"node", rest @ ..] => {
             let (verb, name) = match rest {
                 [b"kill", name, b"--process"] => (NODE_KILL, *name),
-                [b"kill", _] => {
-                    return Err(no(
-                        EOPNOTSUPP,
-                        "node kill: a machine crash is not available yet (node kill NAME \
-                         --process kills the node's processes)",
-                    ))
-                }
+                [b"kill", name] => (NODE_CRASH, *name),
                 [b"start", name] => (NODE_START, *name),
                 [b"pause" | b"resume", _] => {
                     return Err(no(EOPNOTSUPP, "node pause/resume: not available yet"))
@@ -439,7 +466,7 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
                 _ => {
                     return Err(no(
                         EINVAL,
-                        "expected: node kill NAME --process, or node start NAME",
+                        "expected: node kill NAME [--process], or node start NAME",
                     ))
                 }
             };
@@ -517,6 +544,9 @@ mod tests {
             boots: [0; MAX_NODES],
             boot: [[Boot::default(); BOOTS_MAX]; MAX_NODES],
             ended_by: 0,
+            work: [[0; crate::ctl::WORK_PATH_MAX]; MAX_NODES],
+            fs_model: 0,
+            crashes: [0; MAX_NODES],
         };
         t.set(names.iter().map(|n| n.as_bytes()));
         t
@@ -581,7 +611,7 @@ mod tests {
         ] {
             assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
         }
-        assert_eq!(errno(b"node kill a", 0), EOPNOTSUPP);
+        assert_eq!(errno(b"node kill a", 1), EPERM);
         assert_eq!(errno(b"node pause a", 0), EOPNOTSUPP);
         assert_eq!(errno(b"node kill a --process", 1), EPERM);
         assert_eq!(errno(b"node start zed", 0), ENOENT);
@@ -591,6 +621,13 @@ mod tests {
             parse(b"node kill b --process", &t, 0),
             Ok(Control::Node {
                 verb: NODE_KILL,
+                node: 2
+            })
+        );
+        assert_eq!(
+            parse(b"node kill b", &t, 0),
+            Ok(Control::Node {
+                verb: NODE_CRASH,
                 node: 2
             })
         );

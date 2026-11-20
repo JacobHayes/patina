@@ -306,6 +306,19 @@ pub fn node() -> usize {
     proc().node
 }
 
+/// This process's work tree: the driver's (`Config::work`), or its node's (`NodeTab::work`).
+pub fn work_path() -> &'static [u8] {
+    match node() {
+        0 => config().work_path(),
+        k => unsafe { proto::node::NodeTab::at(ctl_base()) }.work_path(k),
+    }
+}
+
+/// Is `p` this process's work tree or under it?
+pub fn on_work(p: &[u8]) -> bool {
+    proto::vfs::under(p, work_path())
+}
+
 /// Does the run have nodes (`config().nodes`: the driver and the declared nodes, or 0)?
 pub fn with_nodes() -> bool {
     config().nodes > 0

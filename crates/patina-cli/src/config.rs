@@ -1222,7 +1222,7 @@ impl Config {
             ));
         }
         if let Some(c) = &self.crash {
-            plan.node_crash = self.crash_nodes(c)?;
+            (plan.node_crash, plan.node_crash_kind) = self.crash_nodes(c)?;
             plan.resolved.push(("crash".into(), serde_json::json!(c)));
         }
         // Link faults, partitions and node kills act between nodes; a node's own disk and
@@ -1244,8 +1244,8 @@ impl Config {
         };
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "restart-gap-ms") {
             return Err(format!(
-                "--fault {k} with nodes: a node's down time is down-ms (a run with nodes has no \
-                 machine crash yet)"
+                "--fault {k} with nodes: a node's down time is down-ms, after a process kill \
+                 or a machine crash"
             ));
         }
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
@@ -1311,27 +1311,29 @@ impl Config {
         Ok(programs)
     }
 
-    /// `--crash process[@NODE,...]` in a run with nodes: the nodes the seed kills (bit `k` for
-    /// node `k`; no `@`: every node but the driver).
-    fn crash_nodes(&self, c: &str) -> Res<u64> {
+    /// `--crash process|machine[@NODE,...]` in a run with nodes: the nodes the seed kills (bit
+    /// `k` for node `k`; no `@`: every node but the driver) and what a kill does
+    /// (`proto::node::CRASH_NODE_*`).
+    fn crash_nodes(&self, c: &str) -> Res<(u64, u64)> {
         let (kind, at) = c.split_once('@').map_or((c, None), |(k, a)| (k, Some(a)));
-        match kind {
-            "process" => {}
+        let kind = match kind {
+            "process" => proto::node::CRASH_NODE_PROCESS,
+            "machine" => proto::node::CRASH_NODE_MACHINE,
             k if k.starts_with("machine") => {
                 return Err(format!(
-                    "--crash {c} with nodes: a machine crash is not available yet (--crash \
-                     process[@NODE,...] kills a node's processes)"
+                    "--crash {c} with nodes: a node's machine crash comes at seed-drawn times \
+                     (crash-gap-ms), not at a crash point: expected machine[@NODE,...]"
                 ))
             }
             _ => {
                 return Err(format!(
-                    "--crash {c} with nodes: expected process[@NODE,...] (kills at seed-drawn \
-                     times, crash-gap-ms)"
+                    "--crash {c} with nodes: expected process[@NODE,...] or machine[@NODE,...] \
+                     (kills at seed-drawn times, crash-gap-ms)"
                 ))
             }
-        }
+        };
         let Some(at) = at else {
-            return Ok(((1u64 << (self.nodes.len() + 1)) - 1) & !1);
+            return Ok((((1u64 << (self.nodes.len() + 1)) - 1) & !1, kind));
         };
         let mut m = 0;
         for n in at.split(',') {
@@ -1347,7 +1349,7 @@ impl Config {
                 .ok_or_else(|| format!("--crash {c}: the run has no node {n}"))?;
             m |= 1 << (k + 1);
         }
-        Ok(m)
+        Ok((m, kind))
     }
 
     /// The work tree's guest path.
@@ -1474,9 +1476,26 @@ mod tests {
             .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_incarnations == Some(4)));
         assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
         // `--crash process` covers every node but the driver; `@` names some.
-        assert_eq!(c.crash_nodes("process").unwrap(), 0b11110);
-        assert_eq!(c.crash_nodes("process@w2,db").unwrap(), 0b10100);
-        for bad in ["machine", "process@driver", "process@nope", "fs"] {
+        use proto::node::{CRASH_NODE_MACHINE, CRASH_NODE_PROCESS};
+        assert_eq!(
+            c.crash_nodes("process").unwrap(),
+            (0b11110, CRASH_NODE_PROCESS)
+        );
+        assert_eq!(
+            c.crash_nodes("process@w2,db").unwrap(),
+            (0b10100, CRASH_NODE_PROCESS)
+        );
+        assert_eq!(
+            c.crash_nodes("machine@w1").unwrap(),
+            (0b10, CRASH_NODE_MACHINE)
+        );
+        for bad in [
+            "machine-at:3",
+            "machine:5",
+            "process@driver",
+            "machine@nope",
+            "fs",
+        ] {
             assert!(c.crash_nodes(bad).is_err(), "{bad}");
         }
         for bad in [

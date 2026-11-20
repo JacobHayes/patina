@@ -717,14 +717,19 @@ fn send_fd(sock: RawFd, fd: RawFd) -> Res<()> {
 }
 
 /// Send `fds` (at most 4) in one message of one byte.
-fn send_fds(sock: RawFd, fds: &[RawFd]) -> Res<()> {
+pub(crate) fn send_fds(sock: RawFd, fds: &[RawFd]) -> Res<()> {
+    send_with(sock, &[0], fds)
+}
+
+/// `data` with `fds` (at most `FDS_MAX`) as one message.
+pub(crate) fn send_with(sock: RawFd, data: &[u8], fds: &[RawFd]) -> Res<()> {
+    assert!(fds.len() <= FDS_MAX && !data.is_empty());
     unsafe {
         // A cmsghdr is read and written in place: the buffer is aligned for it.
-        let mut space = [0u64; 8];
-        let mut byte = [0u8; 1];
+        let mut space = [0u64; CMSG_WORDS];
         let mut iov = libc::iovec {
-            iov_base: byte.as_mut_ptr().cast(),
-            iov_len: 1,
+            iov_base: data.as_ptr() as *mut _,
+            iov_len: data.len(),
         };
         let len = 4 * fds.len() as u32;
         let mut msg: libc::msghdr = std::mem::zeroed();
@@ -739,9 +744,16 @@ fn send_fds(sock: RawFd, fds: &[RawFd]) -> Res<()> {
         for (i, &fd) in fds.iter().enumerate() {
             std::ptr::write_unaligned((libc::CMSG_DATA(cm) as *mut i32).add(i), fd);
         }
-        sys(libc::sendmsg(sock, &msg, 0) as _, "send descriptors")
+        sys(
+            libc::sendmsg(sock, &msg, libc::MSG_NOSIGNAL) as _,
+            "send descriptors",
+        )
     }
 }
+
+/// Descriptors one message may carry (`send_with`): the shadow stores.
+pub(crate) const FDS_MAX: usize = proto::oplog::SHADOW_SLOTS;
+const CMSG_WORDS: usize = FDS_MAX / 2 + 4;
 
 /// A descriptor sent with `send_fd`, or `None` at end of file.
 fn recv_fd(sock: RawFd) -> Option<OwnedFd> {
@@ -750,34 +762,41 @@ fn recv_fd(sock: RawFd) -> Option<OwnedFd> {
 
 /// The descriptors of one message sent with `send_fds`: none at end of file.
 fn recv_fds(sock: RawFd) -> Vec<OwnedFd> {
+    recv_with(sock, &mut [0u8; 1]).1
+}
+
+/// One message sent with `send_with` (or plain): its length (0 at end of file, negative on
+/// an error) and its descriptors.
+fn recv_with(sock: RawFd, buf: &mut [u8]) -> (isize, Vec<OwnedFd>) {
     unsafe {
         // A cmsghdr is read and written in place: the buffer is aligned for it.
-        let mut space = [0u64; 8];
-        let mut byte = [0u8; 1];
+        let mut space = [0u64; CMSG_WORDS];
         let mut iov = libc::iovec {
-            iov_base: byte.as_mut_ptr().cast(),
-            iov_len: 1,
+            iov_base: buf.as_mut_ptr().cast(),
+            iov_len: buf.len(),
         };
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
         msg.msg_control = space.as_mut_ptr().cast();
         msg.msg_controllen = std::mem::size_of_val(&space) as _;
-        if libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC) <= 0 {
-            return vec![];
+        let n = libc::recvmsg(sock, &mut msg, libc::MSG_CMSG_CLOEXEC);
+        if n <= 0 {
+            return (n, vec![]);
         }
         let cm = libc::CMSG_FIRSTHDR(&msg);
         if cm.is_null() || (*cm).cmsg_type != libc::SCM_RIGHTS {
-            return vec![];
+            return (n, vec![]);
         }
-        let n = ((*cm).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / 4;
-        (0..n)
+        let k = ((*cm).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / 4;
+        let fds = (0..k)
             .map(|i| {
                 OwnedFd::from_raw_fd(std::ptr::read_unaligned(
                     (libc::CMSG_DATA(cm) as *const i32).add(i),
                 ))
             })
-            .collect()
+            .collect();
+        (n, fds)
     }
 }
 
@@ -1625,6 +1644,9 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
     ))
 }
 
+/// The one-byte message that carries the shadow stores to the keeper (a start is two bytes).
+pub const SHADOWS_MSG: u8 = 0xff;
+
 /// The keeper of a run with nodes: start a process of node `k` each time the supervisor asks
 /// (two bytes, `k` and its incarnation), answer `ok OUT ERR` (where the node's stdout and
 /// stderr are up to) or why not, until PID 1's end closes. Incarnation 0 makes the node's
@@ -1632,13 +1654,36 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
 fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
     use proto::layout::*;
     let mut saved: Vec<Option<Saved>> = (0..n.nodes.len()).map(|_| None).collect();
+    let mut shadows = false;
     loop {
-        let mut b = [0u8; 2];
-        let r = unsafe { libc::recv(chan, b.as_mut_ptr().cast(), 2, 0) };
+        let mut b = [0u8; 3];
+        let (r, fds) = recv_with(chan, &mut b);
         if r <= 0 {
             return;
         }
+        // The supervisor's shadow stores, before the first start (`sup::nodes::boot_nodes`):
+        // every node's processes share them, at the numbers the supervisor's have.
+        if r == 1 && b[0] == SHADOWS_MSG {
+            if fds.len() != proto::oplog::SHADOW_SLOTS {
+                eprintln!(
+                    "patina: node keeper: {} shadow stores, expected {}",
+                    fds.len(),
+                    proto::oplog::SHADOW_SLOTS
+                );
+                return;
+            }
+            for (k, fd) in fds.iter().enumerate() {
+                if unsafe { libc::dup2(fd.as_raw_fd(), FD_SHADOWS + k as i32) } < 0 {
+                    return;
+                }
+            }
+            shadows = true;
+            continue;
+        }
+        // A start: [node, boot], or [node, boot, 1] with a machine crash's next tree (a tree
+        // archive): a new view, as a machine's restart has, its work tree that tree.
         let (i, boot) = (b[0] as usize, b[1] as u64);
+        let tree = fds.into_iter().next();
         let stdio = FD_NODE_STDIO0 + 3 * (i as i32 - 1);
         let size = |fd: RawFd| {
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -1657,9 +1702,14 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
                     }
                 }
                 keep.extend(stdio..stdio + 3);
-                let run = || node_main(ns, stdio, n.size, boot);
+                if shadows {
+                    keep.extend(FD_SHADOWS..FD_SHADOWS + proto::oplog::SHADOW_SLOTS as i32);
+                }
+                // Close-on-exec: read before the runtime starts.
+                keep.extend(tree.as_ref().map(|t| t.as_raw_fd()));
+                let run = || node_main(ns, stdio, n.size, boot, tree.as_ref());
                 match (&saved[i - 1], boot) {
-                    (None, 0) => {
+                    (None, 0) | (Some(_), _) if boot == 0 || tree.is_some() => {
                         let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
                         tmpfs.extend(n.hide.iter().map(String::as_str).filter(|h| *h != ns.work));
                         let readonly: Vec<&str> = n.readonly.iter().map(String::as_str).collect();
@@ -1684,16 +1734,31 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
     }
 }
 
-/// A node's first process, in its view: its starting tree (on its first start only: a restart
-/// finds the tree its last incarnation left), its stdio, the process state every guest
+/// A node's first process, in its view: its starting tree (on its first start; after a
+/// machine crash the tree `tree` holds; a restart after a process kill finds the tree its
+/// last incarnation left), its stdio, the process state every guest
 /// inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime. A
 /// restart's environment adds `PATINA_INCARNATION`.
-fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64, boot: u64) -> i32 {
+fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64, boot: u64, tree: Option<&OwnedFd>) -> i32 {
     let fail = |e: String| -> i32 {
         eprintln!("patina sandbox: node {}: {e}", ns.name);
         126
     };
-    if let Some(input) = ns.input.as_ref().filter(|_| boot == 0) {
+    if let Some(fd) = tree {
+        let fill = || -> Result<(), String> {
+            use std::io::Read;
+            let mut b = vec![];
+            std::fs::File::from(fd.try_clone().map_err(|e| e.to_string())?)
+                .read_to_end(&mut b)
+                .map_err(|e| e.to_string())?;
+            crate::durability::tree::Tree::decode(&b)?
+                .fill(Path::new(&ns.work), 0)
+                .map_err(|e| e.to_string())
+        };
+        if let Err(e) = fill() {
+            return fail(format!("the tree after its machine crash: {e}"));
+        }
+    } else if let Some(input) = ns.input.as_ref().filter(|_| boot == 0) {
         if let Err(e) = crate::sup::crash::copy_in(Path::new(input), Path::new(&ns.work)) {
             return fail(e);
         }

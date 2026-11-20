@@ -50,6 +50,8 @@ const UD_DELIVERED: u64 = 0;
 const UD_NO_RECEIVER: u64 = 1;
 const UD_RCVBUF_FULL: u64 = 2;
 const UD_HELD: u64 = 3;
+/// Its node's machine crashed while it was in flight: lost, and no error comes back.
+const UD_MACHINE_DOWN: u64 = 4;
 
 struct USock {
     /// The hidden end.
@@ -608,6 +610,14 @@ impl Sup {
         let id = k >> 1;
         let len = f.data.len() as u64;
         let c = &tab(self.ctl).counters;
+        if f.node < 64 && self.links.down >> f.node & 1 != 0 {
+            WireTab::inc(&c.dgram_lost, 1);
+            self.wire_decide(
+                DEC_UDP_DELIVER,
+                [id, 0, len, UD_MACHINE_DOWN, f.dup as u64, 0],
+            );
+            return;
+        }
         let Some(j) = self.udp_route(f.node, f.skind, f.sport, f.dkind, f.dport) else {
             WireTab::inc(&c.dgram_lost, 1);
             self.wire_decide(

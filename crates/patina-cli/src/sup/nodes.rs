@@ -47,6 +47,9 @@ pub struct Nodes {
     pending: VecDeque<(u64, usize)>,
     /// The supervisor is killing a node's processes: their ends are not the node's own.
     killing: bool,
+    /// The node's machine is crashing: its stores were flushed before its `Crash` record, and
+    /// nothing of its may follow that record on its disk.
+    pub crashing: bool,
     /// Whether each node is up, its seed kill and its restart to come, and how many kills of
     /// its boot came while faults were off (each drawn again).
     up: [bool; MAX_NODES],
@@ -62,6 +65,10 @@ pub struct Nodes {
     pub shm: std::collections::BTreeMap<usize, super::shm::Shm>,
     /// The node each slot was last said to belong to (`DEC_NODE_SLOT`; absent: the driver's).
     slot_node: std::collections::BTreeMap<usize, usize>,
+    /// Where each node's disk begins in the shared operation log (`oplog.meta` bytes), and
+    /// the tree its next boot starts from after a machine crash (a tree archive).
+    disk_at: [u64; MAX_NODES],
+    next_tree: [Option<Vec<u8>>; MAX_NODES],
 }
 
 impl Nodes {
@@ -115,6 +122,17 @@ impl Sup {
     /// The driver has said `Hello` and waits; start every node, in order, then give the
     /// driver the turn (`main`, only in a run with nodes).
     pub(super) fn boot_nodes(&mut self) {
+        // Every node's processes keep their work files' shadows in the same stores.
+        let stores: Vec<i32> = (0..proto::oplog::SHADOW_SLOTS as i32)
+            .map(|k| proto::layout::FD_SHADOWS + k)
+            .collect();
+        if let Err(e) = crate::sandbox::send_with(FD_NODES, &[crate::sandbox::SHADOWS_MSG], &stores)
+        {
+            self.finish(Verdict::new(
+                "infra",
+                format!("shadow stores to the keeper: {e}"),
+            ));
+        }
         self.boot_hello(0, 0, 0);
         for node in 1..self.node_count() {
             // Every slot but the driver's is free before any guest runs.
@@ -141,7 +159,18 @@ impl Sup {
         self.ctl.filter_installed.fetch_and(!(1u64 << node), SeqCst);
         self.nodes.booting = Some(slot);
         let b = self.node_tab().boots[node];
-        let (out, err) = match keeper_start(node, b) {
+        let tree = self.nodes.next_tree[node].take();
+        if tree.is_some() {
+            // Back after a machine crash: its links open again; what they held is delivered
+            // (to a connection the node has no more: a RST back).
+            self.links.down &= !(1u64 << node);
+            let opened: Vec<(usize, usize)> = (0..self.node_count())
+                .flat_map(|j| [(node, j), (j, node)])
+                .filter(|&(a, b)| a != b && !self.link_cut(a, b))
+                .collect();
+            self.wire_heal(&opened);
+        }
+        let (out, err) = match keeper_start(node, b, tree.as_deref()) {
             Ok(x) => x,
             Err(e) => self.finish(Verdict::new(
                 "infra",
@@ -205,6 +234,10 @@ impl Sup {
         self.decide(req.op, idx, req.args, idx as i64);
         if node > 0 {
             let pid = self.sched.entries[idx].pid;
+            // A first boot, or the first after a machine crash: a new disk.
+            if self.disks.dev(node).is_err() {
+                self.disk_start(node, pid);
+            }
             self.node_tab().first_pid[node] = pid as u64;
             self.node_tab().status[node] = RUNNING;
             self.decide(
@@ -214,6 +247,30 @@ impl Sup {
                 0,
             );
         }
+    }
+
+    /// Node `node`'s disk starts (the first process of its first boot, or of its first after a
+    /// machine crash, `pid`, said `Hello`, before it runs): its
+    /// work tree is reached and its base records written, exempt from `--log-limit` as the
+    /// driver's are.
+    fn disk_start(&mut self, node: usize, pid: i32) {
+        let work = self.node_tab().work_path(node).to_vec();
+        let len = |c: &proto::ctl::Ctl| c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed);
+        let before = len(self.ctl);
+        self.nodes.disk_at[node] = self.ctl.oplog_len.load(Relaxed);
+        let r = self.disks.open(node, pid, &work).and_then(|()| {
+            let p = self.disks.path(node).ok_or("no work tree")?;
+            super::crash::write_base(self.ctl, node, &p)
+        });
+        if let Err(e) = r {
+            self.finish(Verdict::new(
+                "infra",
+                format!("node {}: base records: {e}", self.node_name(node)),
+            ));
+        }
+        self.ctl
+            .log_exempt
+            .fetch_add(len(self.ctl) - before, Relaxed);
     }
 
     /// `Op::Net` [verb, from set, to set, both] from the driver's node (the runtime checked).
@@ -326,7 +383,11 @@ impl Sup {
                 EVK_NODE_START if !killed.is_empty() => later.push_back((kind, k)),
                 EVK_NODE_KILL if self.nodes.up[k] => {
                     if self.setup_done() {
-                        killed.extend(self.node_kill(k, DOWN_KILL_SEED));
+                        killed.extend(if self.node_tab().conf[k].crash == CRASH_NODE_MACHINE {
+                            self.node_crash(k, DOWN_CRASH_SEED)
+                        } else {
+                            self.node_kill(k, DOWN_KILL_SEED)
+                        });
                     } else {
                         self.kill_next(k);
                     }
@@ -386,7 +447,7 @@ impl Sup {
         let t = self.node_tab();
         let c = t.conf[k];
         let restart = match how {
-            DOWN_KILL_SEED => c.restart != RESTART_NEVER,
+            DOWN_KILL_SEED | DOWN_CRASH_SEED => c.restart != RESTART_NEVER,
             DOWN_EXIT => c.restart == RESTART_ALWAYS,
             _ => false,
         };
@@ -432,8 +493,8 @@ impl Sup {
         if let Some(e) = self.node_tab().boot[k].get_mut(b as usize) {
             (e.end_ns, e.how, e.value, e.down_ns) = (now, how, value, down);
         }
-        if how == DOWN_KILL_SEED {
-            self.kill_inject(k, b);
+        if how == DOWN_KILL_SEED || how == DOWN_CRASH_SEED {
+            self.kill_inject(k, b, (how == DOWN_CRASH_SEED) as u64);
             if self.node_tab().recovery_off != 0 {
                 self.node_tab().quiet = 1;
             }
@@ -472,8 +533,89 @@ impl Sup {
         pids
     }
 
+    /// Crash node `k`'s machine (`DOWN_CRASH_SEED` or `DOWN_CRASH_SCRIPT`), silently: what its
+    /// processes' shared mappings hold is logged, then a `Crash` record ends its disk's log;
+    /// the wire forgets its ends (no FIN, no RST) and its links are down until it is back, so
+    /// a peer learns of the crash only from its own timeouts, or from the RST the node answers
+    /// with once back; its processes are killed; its live tree is logged and its next tree
+    /// materialised from its disk's log (`fs-model`, drawn from the seed and the crash's
+    /// sequence number); its System V shared memory goes. A crash by the seed queues its
+    /// restart; a script's of a node that is down cancels it. Returns the processes killed.
+    pub(super) fn node_crash(&mut self, k: usize, how: u64) -> Vec<i32> {
+        if let Some(e) = self.nodes.start_ev[k].take() {
+            self.sched.cancel(e);
+        }
+        self.nodes.pending.retain(|&(_, n)| n != k);
+        if !self.nodes.up[k] {
+            return vec![];
+        }
+        let pids = self.node_pids(k);
+        let b = self.node_tab().boots[k].saturating_sub(1);
+        let down = self.down_time(k, b, how);
+        let seq = self.ctl.seq.load(Relaxed);
+        let mapping: Vec<(i32, usize)> = self
+            .mapping_pids()
+            .into_iter()
+            .filter(|&(_, n)| n == k)
+            .collect();
+        let crash = [proto::faults::CRASH_MACHINE, b, 0, 0, 0, 0];
+        if let Err(e) = self.flush_maps(&mapping, seq).and_then(|()| {
+            super::crash::append(
+                self.ctl,
+                k,
+                proto::oplog::OpKind::Crash,
+                0,
+                crash,
+                &[],
+                seq,
+                0,
+            )
+        }) {
+            self.finish(Self::maps_verdict(e));
+        }
+        self.links.down |= 1 << k;
+        self.wire_machine_down(k);
+        self.nodes.crashing = true;
+        self.node_down(k, how, 0, &pids, down);
+        self.nodes.crashing = false;
+        self.node_tab().crashes[k] += 1;
+        let next = self.disk_end(k, seq);
+        match next {
+            Ok(t) => self.nodes.next_tree[k] = Some(t),
+            Err(e) => self.finish(Verdict::new(
+                "infra",
+                format!("node {}: its machine crash: {e}", self.node_name(k)),
+            )),
+        }
+        self.nodes.shm.remove(&k);
+        pids
+    }
+
+    /// Node `k`'s disk ends at a machine crash at sequence number `seq` (its processes are
+    /// dead): its live tree is logged, and the tree its next boot starts from returned.
+    fn disk_end(&mut self, k: usize, seq: u64) -> Result<Vec<u8>, String> {
+        let p = self.disks.path(k).ok_or("its work tree was not reached")?;
+        super::crash::export_node(self.ctl, k, &p)?;
+        self.disks.close(k);
+        super::shadows::forget_node(self.ctl, k)?;
+        let log = super::crash::disk_log(self.ctl, k, self.nodes.disk_at[k])?;
+        let model = if self.node_tab().fs_model == 1 {
+            crate::durability::materialise::Model::PosixStrict
+        } else {
+            crate::durability::materialise::Model::Ext4Ordered
+        };
+        let t = crate::durability::materialise::materialise(
+            &log,
+            u64::MAX,
+            self.ctl.config.seed,
+            seq,
+            model,
+        )?;
+        Ok(t.encode())
+    }
+
     /// The seed's kill as a fault: an `Injected` record, counted under `crash`.
-    fn kill_inject(&mut self, k: usize, b: u64) {
+    fn kill_inject(&mut self, k: usize, b: u64, machine: u64) {
         let seq = self.ctl.seq.load(Relaxed) + 1;
         self.ctl.seq.store(seq, Relaxed);
         let rec = proto::Rec {
@@ -483,7 +625,7 @@ impl Sup {
             kind: proto::RecKind::Injected as u8,
             class: 0,
             nr: 0,
-            args: [INJ_NODE_KILL, k as u64, b, 0, 0, 0],
+            args: [INJ_NODE_KILL, k as u64, b, machine, 0, 0],
             ret: 0,
             out_hash: 0,
             in_hash: 0,
@@ -506,6 +648,11 @@ impl Sup {
             NODE_KILL => {
                 let up = self.nodes.up[k];
                 self.node_kill(k, DOWN_KILL_SCRIPT);
+                Next::Continue(if up { 0 } else { -(libc::EALREADY as i64) })
+            }
+            NODE_CRASH => {
+                let up = self.nodes.up[k];
+                self.node_crash(k, DOWN_CRASH_SCRIPT);
                 Next::Continue(if up { 0 } else { -(libc::EALREADY as i64) })
             }
             NODE_START => {
@@ -602,14 +749,24 @@ impl Sup {
 
 /// Ask the keeper to start boot `boot` of node `node` (its first process); returns once it
 /// exists, with where its output starts in the node's stdout and stderr.
-fn keeper_start(node: usize, boot: u64) -> Result<(u64, u64), String> {
-    let b = [node as u8, boot as u8];
-    let r = unsafe { libc::send(FD_NODES, b.as_ptr().cast(), 2, libc::MSG_NOSIGNAL) };
-    if r != 2 {
-        return Err(format!(
-            "asking the keeper to start it: {}",
-            std::io::Error::last_os_error()
-        ));
+fn keeper_start(node: usize, boot: u64, tree: Option<&[u8]>) -> Result<(u64, u64), String> {
+    let asked = match tree {
+        None => {
+            let b = [node as u8, boot as u8];
+            let r = unsafe { libc::send(FD_NODES, b.as_ptr().cast(), 2, libc::MSG_NOSIGNAL) };
+            if r == 2 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error().to_string())
+            }
+        }
+        Some(t) => tree_fd(t).and_then(|fd| {
+            use std::os::fd::AsRawFd;
+            crate::sandbox::send_with(FD_NODES, &[node as u8, boot as u8, 1], &[fd.as_raw_fd()])
+        }),
+    };
+    if let Err(e) = asked {
+        return Err(format!("asking the keeper to start it: {e}"));
     }
     let mut buf = [0u8; 4096];
     let n = unsafe { libc::recv(FD_NODES, buf.as_mut_ptr().cast(), buf.len(), 0) };
@@ -631,4 +788,19 @@ fn keeper_start(node: usize, boot: u64) -> Result<(u64, u64), String> {
             }
         }
     }
+}
+
+/// A memfd holding `tree`, read from its start.
+fn tree_fd(tree: &[u8]) -> Result<std::os::fd::OwnedFd, String> {
+    use std::io::{Seek, Write};
+    use std::os::fd::FromRawFd;
+    let fd = unsafe { libc::memfd_create(c"patina-tree".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("memfd: {}", std::io::Error::last_os_error()));
+    }
+    let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+    f.write_all(tree)
+        .and_then(|()| f.rewind())
+        .map_err(|e| format!("the tree: {e}"))?;
+    Ok(f.into())
 }

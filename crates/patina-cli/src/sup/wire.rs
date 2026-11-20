@@ -70,6 +70,8 @@ const RST_PEER_GONE: u64 = 3;
 const RST_LISTENER_GONE: u64 = 4;
 /// A direction held by a cut for its give-up time (`give_up_ns`): the sender gives up.
 const RST_GIVE_UP: u64 = 5;
+/// A segment reached an end whose machine crashed since: the node answers it with a RST.
+const RST_UNKNOWN: u64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fate {
@@ -122,6 +124,8 @@ struct End {
     eof: bool,
     /// The guest closed every reference.
     gone: bool,
+    /// Its node's machine crashed (`wire_machine_down`): what reaches it is answered with a RST.
+    dead: bool,
 }
 
 #[derive(Debug)]
@@ -754,12 +758,14 @@ impl Sup {
                 idx: Some(i),
                 eof: false,
                 gone: false,
+                dead: false,
             },
             server: End {
                 fd: -1,
                 idx: None,
                 eof: false,
                 gone: false,
+                dead: false,
             },
             sport: port,
             cport,
@@ -1201,6 +1207,36 @@ impl Sup {
             if front.t() > now {
                 break;
             }
+            let dead = if dir == 0 {
+                c.server.dead
+            } else {
+                c.client.dead
+            };
+            if dead && !matches!(front, Item::Rst { .. }) {
+                // Its node is back without the connection: the segment gets a RST, and the
+                // rest in flight to it goes.
+                let dropped = d.bytes;
+                d.q.clear();
+                d.bytes = 0;
+                self.note_queued(-(dropped as i64));
+                let c = self.wire.conns.get_mut(&id).unwrap();
+                if dir == 0 {
+                    c.server.dead = false;
+                } else {
+                    c.client.dead = false;
+                }
+                let back = 1 - dir;
+                let t = self.stamp(id, back, false);
+                self.wire.conns.get_mut(&id).unwrap().dirs[back]
+                    .q
+                    .push_back(Item::Rst {
+                        t,
+                        why: RST_UNKNOWN,
+                    });
+                self.wire_decide(DEC_WIRE_RST, [id as u64, back as u64, RST_UNKNOWN, t, 0, 0]);
+                self.arm(id, back);
+                break;
+            }
             match front {
                 Item::Data { buf, off, .. } => {
                     if dst_fd < 0 {
@@ -1632,6 +1668,116 @@ impl Sup {
             0
         };
         true
+    }
+
+    /// Node `k`'s machine crashed (before its processes are killed): the wire forgets its
+    /// ends without a FIN or RST to their peers. A connection within the node goes; a connect
+    /// from it goes; a connect to it retries its SYN (the link is down, `link_cut`). An
+    /// established connection keeps its peer's end: what the peer has in flight to the node,
+    /// or sends later, is held (its give-up clock runs) until the node is back, where it gets a
+    /// RST; what the node had stamped before the crash still arrives, what it held goes.
+    pub(super) fn wire_machine_down(&mut self, k: usize) {
+        let ids: Vec<u32> = self.wire.conns.keys().copied().collect();
+        for id in ids {
+            let c = &self.wire.conns[&id];
+            let (on_c, on_s) = (c.cnode == k, c.snode == k);
+            if !on_c && !on_s {
+                continue;
+            }
+            if on_c && on_s || (!c.established && on_c) {
+                self.free_conn(id);
+                continue;
+            }
+            if !c.established {
+                // A connect to the node: its SYN goes unanswered from here. One already
+                // retrying keeps its schedule (each retry checks the link); else its first
+                // retry comes at the first retry time, as for a connect across a cut.
+                if c.fate != Fate::Timeout && c.syn_n == 0 {
+                    let i = c.client.idx.unwrap_or(usize::MAX);
+                    let t = (c.syn_at + self.syn_retry_ns(i, 0)).max(self.now());
+                    let c = self.wire.conns.get_mut(&id).unwrap();
+                    c.syn_n = 1;
+                    // A connect waiting for room in the backlog waits no more.
+                    c.retry = false;
+                    if let Some(ev) = c.fate_ev.take() {
+                        self.sched.cancel(ev);
+                    }
+                    let ev = self.sched.schedule(
+                        t,
+                        super::sched::Event::Wire {
+                            key: key(id, EV_CONNECT),
+                        },
+                    );
+                    self.wire.conns.get_mut(&id).unwrap().fate_ev = Some(ev);
+                }
+                continue;
+            }
+            let server = on_s;
+            let own = server as usize; // the direction the dead end sends in
+            let into = own ^ 1;
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            let (cnode, cport) = (c.cnode, c.cport);
+            let e = if server { &mut c.server } else { &mut c.client };
+            let (fd, idx) = (e.fd, e.idx.take());
+            if server {
+                // Not an unaccepted connection of the listener its index may name again.
+                c.listener = None;
+            }
+            let e = if server { &mut c.server } else { &mut c.client };
+            e.fd = -1;
+            e.eof = true;
+            e.gone = true;
+            e.dead = true;
+            // What it held (in its machine's buffers) goes; what it stamped is on the wire.
+            let d = &mut c.dirs[own];
+            let held: usize =
+                d.q.iter()
+                    .filter(|i| i.t() & HELD != 0)
+                    .map(|i| match i {
+                        Item::Data { buf, off, .. } => buf.len() - off,
+                        _ => 0,
+                    })
+                    .sum();
+            d.q.retain(|i| i.t() & HELD == 0);
+            d.bytes -= held;
+            d.held_since = None;
+            if fd >= 0 {
+                drain(fd, &mut self.wire.buf);
+                close(fd);
+            }
+            self.note_queued(-(held as i64));
+            if let Some(i) = idx {
+                if self.wire.by_idx.get(&i).is_some_and(|&(x, _)| x == id) {
+                    self.wire.by_idx.remove(&i);
+                }
+            }
+            if !server && self.wire.ports.get(&(cnode, cport)) == Some(&PortUse::Client(id)) {
+                self.wire.ports.remove(&(cnode, cport));
+            }
+            // In flight to it: held from now, as on a cut link.
+            let c = self.wire.conns.get_mut(&id).unwrap();
+            let d = &mut c.dirs[into];
+            let mut any = false;
+            for it in d.q.iter_mut() {
+                let t = match it {
+                    Item::Data { t, .. } | Item::Fin { t } | Item::Rst { t, .. } => t,
+                };
+                if *t & HELD == 0 {
+                    *t = HELD | 1;
+                }
+                any = true;
+            }
+            if let Some(ev) = d.ev.take() {
+                self.sched.cancel(ev);
+            }
+            self.wire.blocked.remove(&(id, into));
+            if any {
+                self.hold(id, into);
+            }
+            self.wire_decide(DEC_WIRE_DEAD, [id as u64, server as u64, k as u64, 0, 0, 0]);
+            self.maybe_free(id);
+        }
+        self.bump_gen();
     }
 
     /// Links opened by a heal: every item held on them is stamped now (its own draw from the

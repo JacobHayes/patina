@@ -562,6 +562,8 @@ impl<W: Write> Export<'_, W> {
                 let (event, by) = match a[2] {
                     DOWN_KILL_SEED => ("kill", Some("seed")),
                     DOWN_KILL_SCRIPT => ("kill", Some("script")),
+                    DOWN_CRASH_SEED => ("machine-crash", Some("seed")),
+                    DOWN_CRASH_SCRIPT => ("machine-crash", Some("script")),
                     DOWN_SIGNAL => ("crash", None),
                     _ => ("exit", None),
                 };
@@ -620,6 +622,14 @@ impl<W: Write> Export<'_, W> {
                 l.str("event", "heal").str("by", "seed").num("n", a[0]);
                 "net"
             }
+            proto::ctl::DEC_WIRE_DEAD => {
+                l = Line::at("net", k, r);
+                l.str("event", "forget")
+                    .num("conn", a[0])
+                    .str("side", if a[1] != 0 { "server" } else { "client" })
+                    .str("name", &self.node_name(a[2]));
+                "net"
+            }
             proto::ctl::DEC_WIRE_HEAL => {
                 l = Line::at("net", k, r);
                 l.str("event", "release")
@@ -634,7 +644,8 @@ impl<W: Write> Export<'_, W> {
         Some(self.emit(ty, Some(r.seq), l))
     }
 
-    /// Operations are the driver's work tree's (a node's work tree has no operation log yet).
+    /// Operations are the driver's work tree's (each node's are in its disks' own logs,
+    /// `node/NAME/inc-K/`, read with `patina log ops`).
     fn op(&mut self, k: usize, names: &mut Names, o: &OpEv) -> Res<()> {
         self.node = (!self.nodes.is_empty()).then_some(0);
         let r = self.op_of(k, names, o);

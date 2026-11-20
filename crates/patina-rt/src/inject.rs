@@ -84,13 +84,13 @@ fn fd_obj(fd: u64) -> Option<Obj> {
 /// Does `(dirfd, path)` name something under `/work`? Lexical, after normalisation; a
 /// relative path is judged by the directory it is relative to.
 pub fn path_on_work(dirfd: i64, p: u64) -> bool {
-    if p == 0 || crate::state::node() != 0 {
+    if p == 0 {
         return false;
     }
     let s = unsafe { crate::loader::cstr(p as *const u8) };
     let mut norm = PathBuf::new();
     if path::absolute(dirfd, s, &mut norm) {
-        return crate::state::config().on_work(norm.as_bytes());
+        return crate::state::on_work(norm.as_bytes());
     }
     if dirfd == AT_FDCWD {
         let mut buf = [0u8; 256];
@@ -99,7 +99,7 @@ pub fn path_on_work(dirfd: i64, p: u64) -> bool {
             return false;
         }
         let c = &buf[..(r as usize).saturating_sub(1)];
-        return crate::state::config().on_work(c);
+        return crate::state::on_work(c);
     }
     fstat_raw(dirfd).is_some_and(|st| path::is_work(st.dev()))
 }

@@ -415,16 +415,49 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   splits it per incarnation by the offsets the keeper reported. Everything is in the turn's
   order, so kills, restarts and their records are the same in every run of a seed. The work
   tree, `/tmp` and `/dev/shm` are kept whole across a kill, as a process kill keeps the page
-  cache: what a node's processes stored through a shared mapping is in the tmpfs pages, which
-  is all a process kill needs. A node's tree has no operation log, so there is nothing to
-  flush to one (the driver's shared mappings reach its log as without nodes), and the loss of
-  unsynced data on a node is not modelled.
+  cache: what a node's processes stored through a shared mapping is in the tmpfs pages and,
+  through the kill's own flush, in its disk's log.
+- **Disks.** Each node's work tree is a disk: the runtime marks a node's own work mount as
+  the work tree (`state::work_path`, from `NodeTab::work`), so everything the crash model
+  records for the driver's tree it records for a node's, in the one shared operation log,
+  each record's kind tagged with its node (`proto::oplog::tag_kind`; node 0's kinds are plain,
+  so a run without nodes writes the same bytes). The shadow table and the writeback-error
+  generations are shared, keyed by node and inode (`node_key`); the 64 shadow memfds go to the
+  keeper once (`SHADOWS_MSG`) and every node process inherits them at `FD_SHADOWS`. The
+  supervisor reaches a node's tree through its first process's root (`sup/disks.rs`, an
+  `O_PATH` descriptor of `/proc/PID/root/WORK` opened at that process's `Hello`) and writes
+  its base records there, before it runs; reclaim and the mapping flush find each mapping's
+  node by its device, and a `sync` flushes the caller's node's mappings only. At the end of the
+  run every node's live tree is a record of the log (`KIND_LIVE_TREE`), and the launcher splits
+  the log into one plain log per disk (`durability::log::split_nodes`: `node/NAME/inc-K/`, K
+  the boot the disk began with), which `patina log ops`, the self-check (`check::disks`, run
+  for every run with nodes) and `materialise` read as a single machine's.
+- **Machine crash.** `node kill NAME` (`NODE_CRASH`) or the seed under `--crash machine`
+  (`NodeConf::crash` `CRASH_NODE_MACHINE`, drawn as the process kills are) runs
+  `nodes::node_crash` at a node action point: the node's mappings are flushed and a `Crash`
+  record (`[CRASH_MACHINE, boot]`, tagged) ends its disk's log; its links are cut by a third
+  layer (`Links::down`) until it is back; the wire forgets its ends (`wire_machine_down`:
+  their descriptors closed without a FIN or RST, `End::dead`, a `DEC_WIRE_DEAD` record), holds
+  what was in flight to them so the senders' give-up clocks run, drops what the node itself
+  held, frees connections within the node and connects from it, and sends a connect to it
+  into SYN retries; then its processes are killed as above (their ends reach no peer). Its
+  live tree is logged, its disk closed, and the tree of its next boot materialised in the
+  supervisor from its disk's records in the shared log (`crash::disk_log`, `materialise` with
+  the run's seed, the crash's sequence number as the key and `NodeTab::fs_model`), a pure
+  function of the log as for a single machine; its System V shared memory goes. Its restart
+  sends the keeper that tree (`[node, boot, 1]` and a memfd): the keeper makes a new view
+  (`Place::New`: new tmpfs work tree, `/tmp`, `/dev/shm`, IPC namespace) and fills the work
+  tree from it before the runtime starts, and the first `Hello` of the new boot opens the new
+  disk. The links open again then (`wire_heal`), and an item that reaches a dead end resets its
+  sender (`RST_UNKNOWN`), as a rebooted host answers a segment of a connection it does not
+  know.
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
-Not yet: a node's machine crash (the loss of what it had not synced; per-node operation logs
-and crash models), per-node disk faults, pausing a node, and per-node clocks.
+Not yet: a node's crash at a crash point (`machine-at:N`, `machine:PERMILLE` with nodes) and
+so `--branch` over a node's crash points, per-node disk faults (disk faults with nodes are
+refused), pausing a node, and per-node clocks.
 
 ## The boundary log
 

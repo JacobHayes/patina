@@ -39,6 +39,8 @@ pub struct Plan {
     pub crash_gap_ns: (u64, u64),
     pub down_ns: (u64, u64),
     pub node_crash: u64,
+    /// What the seed's kills of those nodes do (`proto::node::CRASH_NODE_*`).
+    pub node_crash_kind: u64,
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
     /// `--buggify`, `buggify-permille=N`, `point:LABEL=N` (`proto::sdk`).
@@ -706,6 +708,7 @@ pub fn resolve(
         crash_gap_ns: CRASH_GAP_DEFAULT,
         down_ns: DOWN_DEFAULT,
         node_crash: 0,
+        node_crash_kind: 0,
         net: Default::default(),
         sdk: Default::default(),
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,

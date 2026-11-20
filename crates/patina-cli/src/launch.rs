@@ -917,6 +917,8 @@ pub fn run_incarnation(
         let p = &o.plan;
         for (i, n) in c.nodes.iter().enumerate() {
             let k = i + 1;
+            let w = n.work_path().as_bytes();
+            t.work[k][..w.len()].copy_from_slice(w);
             let mut ok_exit = [0u64; 4];
             for s in n.ok_exit.as_deref().unwrap_or(&[0]) {
                 ok_exit[(*s / 64) as usize] |= 1 << (s % 64);
@@ -931,10 +933,15 @@ pub fn run_incarnation(
                     .max_incarnations
                     .unwrap_or(p.max_incarnations)
                     .min(proto::node::BOOTS_MAX as u64),
-                crash: (p.node_crash >> k) & 1,
+                crash: if (p.node_crash >> k) & 1 != 0 {
+                    p.node_crash_kind
+                } else {
+                    0
+                },
                 ok_exit,
             };
         }
+        t.fs_model = (o.fs_model == crate::durability::materialise::Model::PosixStrict) as u64;
         (t.crash_gap_min_ns, t.crash_gap_max_ns) = p.crash_gap_ns;
         (t.down_min_ns, t.down_max_ns) = p.down_ns;
         t.recovery_off = (!p.faults_in_recovery) as u64;
@@ -1214,6 +1221,16 @@ pub fn run_incarnation(
         }
     }
     drop(node_stdio);
+    // Each node's disks: their parts of the shared operation log (`node/NAME/inc-K/`, K the
+    // boot a disk began with).
+    if !c.nodes.is_empty() {
+        let run = inc.parent().unwrap_or(Path::new("."));
+        crate::durability::log::split_nodes(&inc, |k, b| {
+            c.nodes
+                .get(k.wrapping_sub(1))
+                .map(|n| run.join("node").join(&n.name).join(format!("inc-{b}")))
+        })?;
+    }
 
     let mut verdict = Verdict::decode(&verdict_text).unwrap_or_else(|| {
         let err = fs::read_to_string(inc.join("stderr")).unwrap_or_default()

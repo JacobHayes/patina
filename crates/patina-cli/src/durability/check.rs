@@ -22,6 +22,24 @@ pub fn incarnations(run: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// Every disk's directory of a run, the ones `check_inc` checks: each incarnation's (the
+/// driver's), then each node's (`node/NAME/inc-K/` holding an operation log), by name.
+pub fn disks(run: &Path) -> Vec<PathBuf> {
+    let mut v = incarnations(run);
+    let mut names: Vec<PathBuf> = std::fs::read_dir(run.join("node"))
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    names.sort();
+    for n in names {
+        v.extend(
+            incarnations(&n)
+                .into_iter()
+                .filter(|d| d.join("oplog.meta").exists()),
+        );
+    }
+    v
+}
+
 /// Check one incarnation directory. Ok(summary) or Err(first difference).
 pub fn check_inc(dir: &Path) -> Result<String, String> {
     let log = OpLog::load(dir)?;
@@ -45,7 +63,7 @@ pub fn check_inc(dir: &Path) -> Result<String, String> {
 }
 
 pub fn check(run: &Path) -> Result<(), String> {
-    let incs = incarnations(run);
+    let incs = disks(run);
     if incs.is_empty() {
         return Err(format!("{}: no incarnations", run.display()));
     }

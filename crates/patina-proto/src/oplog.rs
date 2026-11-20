@@ -125,6 +125,34 @@ pub const FSYNC_NO_COMMIT: u64 = 2;
 /// `msync(MS_SYNC)`.
 pub const FSYNC_MSYNC: u64 = 4;
 
+/// `OpRec::kind` of a run with nodes: the low 16 bits are the `OpKind`, the next 8 the node
+/// whose work tree the record is about (0: the driver's, so a run without nodes has plain
+/// kinds). The launcher splits such a log into one log per node (`launcher::disks`), whose
+/// kinds are plain again; nothing else reads a tagged log.
+pub const KIND_MASK: u32 = 0xffff;
+pub const KIND_NODE_SHIFT: u32 = 16;
+
+pub fn tag_kind(kind: u32, node: usize) -> u32 {
+    kind | ((node as u32 & 0xff) << KIND_NODE_SHIFT)
+}
+
+/// The raw kind of a record of a tagged log holding its node's live work tree, as a tree
+/// archive (the supervisor's, at the end of the run): the launcher makes it that node's
+/// `live.tree`. Not an `OpKind`.
+pub const KIND_LIVE_TREE: u32 = KIND_MASK;
+
+/// The node of a tagged kind (`tag_kind`).
+pub fn kind_node(kind: u32) -> usize {
+    ((kind >> KIND_NODE_SHIFT) & 0xff) as usize
+}
+
+/// The key of a node's inode in the tables shared by every node (`Shadows`, `Dur::errgen`):
+/// its inode number with the node in the top byte (node 0's keys are its inode numbers).
+/// Work inode numbers are tmpfs's, far below 2^56.
+pub fn node_key(ino: u64, node: usize) -> u64 {
+    ino ^ ((node as u64) << 56)
+}
+
 /// One operation record.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -318,6 +346,16 @@ impl Dur {
         match self.slot(ino) {
             Some(i) if self.errgen[i][0] == ino => self.errgen[i][1],
             _ => 0,
+        }
+    }
+    /// Node `node`'s disk is gone (a machine crash): its inodes' generations read 0 again, so
+    /// a file of its next disk that reuses an inode number starts with none. The keys stay,
+    /// holding their place in the probe chains.
+    pub fn forget_node(&mut self, node: usize) {
+        for e in self.errgen.iter_mut() {
+            if node != 0 && e[0] != 0 && e[0] >> 56 == node as u64 {
+                e[1] = 0;
+            }
         }
     }
     /// Bump the generation of `ino`; returns the new one (None when the table is full).

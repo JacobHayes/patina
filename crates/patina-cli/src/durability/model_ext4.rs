@@ -588,7 +588,11 @@ pub fn cut_for(ops: &[Op], seed: u64, key: u64) -> Result<(usize, usize), String
 
 pub fn materialise(log: &super::log::OpLog, seed: u64, key: u64) -> Result<Tree, String> {
     let ops = &log.ops;
-    let t0 = std::time::Instant::now();
+    // Timed only when asked: the supervisor, which materialises a node's machine crash, reads
+    // no clock through the vDSO (`rdtsc` faults there).
+    let timing = std::env::var_os("PATINA_TIMING").is_some();
+    let now = || timing.then(std::time::Instant::now);
+    let t0 = now();
     // One replay without a cut, keeping a state at or before the last forced commit.
     let (mut m, nbase) = init(ops)?;
     let mut snap = Snap {
@@ -598,7 +602,7 @@ pub fn materialise(log: &super::log::OpLog, seed: u64, key: u64) -> Result<Tree,
     let f = replay_from(&mut m, ops, nbase, None, Some(&mut snap))?;
     let n = ops.len() - ops.last().is_some_and(|o| o.kind == OpKind::Crash) as usize;
     let k = draw_cut(ops, f, seed, key);
-    let t1 = std::time::Instant::now();
+    let t1 = now();
     let snap_pos = snap.pos;
     if k != f.min(n) {
         // A spontaneous commit at k >= F: replay the tail from the kept state with it.
@@ -607,9 +611,9 @@ pub fn materialise(log: &super::log::OpLog, seed: u64, key: u64) -> Result<Tree,
         replay_from(&mut state, ops, pos, Some(k), None)?;
         m = state;
     }
-    let t2 = std::time::Instant::now();
+    let t2 = now();
     let tree = finish(m, ops, seed, key)?;
-    if std::env::var_os("PATINA_TIMING").is_some() {
+    if let (Some(t0), Some(t1), Some(t2)) = (t0, t1, t2) {
         eprintln!(
             "patina-timing materialise records={} base={nbase} last_forced={f} cut={k} resumed_at={} replay_us={} tail_us={} crash_us={}",
             ops.len(),
