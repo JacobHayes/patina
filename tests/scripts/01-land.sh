@@ -1,6 +1,7 @@
 # 1. scripts/land in a scratch jj repository with a local origin, `mise` and `gh` stubbed (no
-#    network, no check, no CI): it refuses a working copy with changes, an undescribed commit and
-#    the bookmark main; a required job that passed only on a re-run, unless --accept-rerun; and
+#    network, no check, no CI): it refuses a working copy with changes, an undescribed commit, the
+#    bookmark main and a revision that is not the working copy's parent (the gate would check
+#    another tree); a required job that passed only on a re-run, unless --accept-rerun; and
 #    main having moved while CI ran. Each refusal leaves main@origin off the commit and no branch
 #    on origin; otherwise main@origin is fast-forwarded to the commit and the branch is gone.
 #@ tier=quick budget=15
@@ -55,6 +56,9 @@ jj commit --quiet -m one
 refused main
 echo 2 >f; jj commit --quiet -m ''
 refused topic
+jj abandon --quiet @-
+echo 3 >h; jj commit --quiet -m two
+refused -r @-- topic
 jj abandon --quiet @-
 FIRST="check failure,check-arm64 success" refused topic
 WHILE_CI="cd $s/seed && jj git fetch --quiet && echo m >g && jj commit --quiet -m moved && jj bookmark set --quiet main -r @- && jj git push --quiet --bookmark main" refused topic

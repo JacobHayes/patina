@@ -1,7 +1,8 @@
 #!/bin/bash
 # scripts/land [--dry-run] [--accept-rerun REASON] [-r REV] BOOKMARK: land REV (default @-) on main.
 #
-# Refuses unless the working copy has no changes and every commit to land is described. Then:
+# Refuses unless the working copy has no changes, its parent is REV (the gate runs on the working
+# copy's tree) and every commit to land is described. Then:
 # fetch; rebase REV onto main@origin; `mise run check` (its quick tier held to half its ceiling);
 # push REV to the branch BOOKMARK (never main); wait for the CI run of that exact commit, whose
 # required jobs must have passed on their first attempt; fast-forward main to REV (forward only:
@@ -23,14 +24,15 @@ while [ $# -gt 0 ]; do
         *) [ -z "${name:-}" ] || die "one bookmark only"; name=$1; shift ;;
     esac
 done
-[ -n "${name:-}" ] || { sed -n '2,11p' "$0" >&2; exit 2; }
+[ -n "${name:-}" ] || { sed -n '2,12p' "$0" >&2; exit 2; }
 [ "$name" != main ] || die "the branch bookmark cannot be main"
 cd "$(jj workspace root)"
 id() { jj log --no-graph -r "$1" -T 'commit_id ++ "\n"'; }
 changes=$(jj diff -r @ --summary)
 [ -z "$changes" ] || die "the working copy has changes: commit them (jj commit) or set them aside"
-this=$(id "$rev"); at=$(id @)
-[ "$this" != "$at" ] || die "$rev is the working-copy commit: land a committed revision (jj commit, then -r @-)"
+# The gate and the counters check run on the working copy's tree, so REV must be its parent.
+this=$(id "$rev"); parent=$(id @-)
+[ "$this" = "$parent" ] || die "$rev is not the working copy's parent: the gate checks the working copy's tree (jj new $rev, then run again)"
 jj git fetch
 [ -n "$(jj log --no-graph -r "main@origin..$rev" -T 'commit_id')" ] || die "nothing to land: $rev is already on main"
 undescribed=$(jj log --no-graph -r "(main@origin..$rev) & description(exact:'')" -T 'commit_id')
