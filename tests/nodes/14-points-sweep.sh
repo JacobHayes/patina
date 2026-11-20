@@ -8,6 +8,8 @@
 # kept at a point is b's (`machine-at:N@b`), and every fault setting left was tried without
 # and no longer failed. Which settings a failure needs depends on its seed, and the failing
 # seed found depends on the host: on the reference host it is the crash alone (docs/GUIDE.md).
+# In the area, a failing seed is reduced to one of b's later crashes alone, at its place in a
+# first boot (the first crash alone, tried first, did not fail).
 # A node with `faults = false` is left out of `--crash machine` given without a scope.
 #@ tier=area,release budget=120 slots=6
 . "$(dirname "$0")/lib.inc"
@@ -82,6 +84,34 @@ for f in faults:
     assert t and not t[-1]["still_fails"], (f, m["tries"])
 print("minimize: reduced to %s (from %s)" % (m["to"], m["from"]))
 PY
+# In the area: a failure that a node's first crash alone does not give is reduced to one of its
+# later crashes alone. Among the first failing seeds, one where minimize's crash alone that kept
+# the failure is not the first it tried for that node.
+if [ "${CHECK_TIER:-}" = area ]; then
+    later=""; tried=0
+    for s in $(seq 1 100); do
+        [ "$(run "$o/l" $s $F -- $D)" = failure ] || continue
+        tried=$((tried + 1))
+        st=0; timeout 300 "$PATINA" minimize "$o/l" --format json >"$o/l.json" 2>"$o/l.err" || st=$?
+        [ "$st" = 0 ] || die "minimize seed $s: exit $st: $(tail -3 "$o/l.err")"
+        if python3 -I - "$o/l.json" <<'PY'
+import json, re, sys
+m = json.load(open(sys.argv[1]))
+seen = {}
+for t in m["tries"]:
+    x = re.search(r"-> machine-at:\d+@(\S+)$", t["change"])
+    if x:
+        seen[x[1]] = seen.get(x[1], 0) + 1
+        if t["still_fails"]:
+            sys.exit(0 if seen[x[1]] > 1 else 1)
+sys.exit(1)
+PY
+        then later="seed $s: $(python3 -I -c 'import json,sys; m=json.load(open(sys.argv[1])); print("%s, from %s" % (m["to"], m["from"]))' "$o/l.json")"; break; fi
+        [ "$tried" -lt 12 ] || break
+    done
+    [ -n "$later" ] || die "no failing seed of the first $tried reduced to a node's later crash alone"
+    echo "minimize: a later crash alone: $later"
+fi
 # faults = false: an unscoped --crash leaves the node out.
 { cat "$o/ok.toml"; printf 'faults = false\n'; } >"$o/free.toml"
 run_ok "$o/free" 1 --config "$o/free.toml" --crash machine:300 -- $D

@@ -2785,3 +2785,24 @@ x86_64, seeds 1-16 of that cell differ in 4 with `swarm` and in none without it.
 **PostgreSQL** (the pair of the section above) was not swept: one base run counts 9,702 crash
 points (pg1 5,139, pg2 4,563) for 30 s of virtual time, and each child is a full run of about
 7 s, about 19 CPU-hours per seed.
+
+### Minimizing to one node's crash
+
+`patina minimize` turns a failing run's crashes at crash points into one node's crash alone
+(`--crash machine-at:N@NODE`). Before, it tried only each node's first crash; now each node's
+first crash, then its later crashes at their places in a first boot that never crashed (the
+points of the boots before plus its own, and either side), the most recent first, at most 6
+per node within its 30 runs. `tests/nodes/evidence-minimize.sh` (`./check evidence
+evidence-minimize`, under the evidence lock): seeds 1-200 of `ack2.py early` under crashes of
+both nodes at 60 per mille, net delays and duplicates and disk delays, each failing run
+minimized; measured 2026-11-20 on x86_64, the binaries before and after the change on one
+guest build, run once each.
+
+| Build | Failing seeds | Reduced to one crash | Minimize runs (mean, most) |
+|---|---|---|---|
+| before | 59 | 46 | 6.9, 12 |
+| after | 59 | 58 | 7.4, 16 |
+
+The seeds that reduced before reduce to the same crash with the same runs (every node's first
+crash is still tried first). The one seed left keeps the crash at points: no single crash at
+the places tried gives its failure.

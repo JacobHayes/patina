@@ -2,8 +2,9 @@
 //! signature. First each fault setting (each `--fault` key, each node's scoped one `KEY=V@NODE`
 //! as its own, `--crash`, `--buggify`) is dropped in turn, keeping a removal when the signature
 //! is unchanged. With nodes, a machine crash at crash points that is kept then becomes one
-//! node's first crash alone (`machine-at:N@NODE`), tried node by node, and the settings left
-//! are dropped once more; failing that it is
+//! node's crash alone (`machine-at:N@NODE`): each node's first crash, then its later ones at
+//! their places in a first boot (`single_points`), and the settings left are dropped once
+//! more; failing that it is
 //! narrowed to fewer nodes, one dropped at a time. Then each remaining rate is halved (a gap
 //! between partitions or node crashes doubled) for as long as that holds. The seed and every
 //! scheduling setting stay as they were. At most `MAX_RUNS` runs, one at a time; the smallest
@@ -65,6 +66,40 @@ fn halve_unscoped(v: &str) -> Option<String> {
     let (kind, n) = v.split_once(':')?;
     matches!(kind, "machine" | "process").then_some(())?;
     Some(format!("{kind}:{}", h(n)?))
+}
+
+/// The most single crashes tried for one node (`single_points`).
+const SINGLE_TRIES: usize = 6;
+
+/// Where to try a node's one crash (`machine-at:P@NODE`, a point of its first boot) in place of
+/// its crashes at points of a failing run, `points` being the point each boot crashed at. First
+/// the first crash's own point, which is the same place in a run without the later crashes.
+/// Then each later crash, the most recent first (the failure followed it): with no crash
+/// before it, the node's first boot runs on through the work of the boots that crashed, so the
+/// place is about the points of the boots before it plus its own, give or take the work a crash
+/// undid and the next boot did again (the points either side). Last, the points either side of
+/// the first crash's. At most `SINGLE_TRIES`: each is
+/// a run of minimize's `MAX_RUNS`, which the settings dropped and halved after it share.
+fn single_points(points: &[u64]) -> Vec<u64> {
+    let mut out: Vec<u64> = points.first().copied().into_iter().collect();
+    let mut before = 0;
+    let at: Vec<u64> = points
+        .iter()
+        .map(|p| {
+            before += p;
+            before
+        })
+        .collect();
+    // Last, the points either side of the first crash's.
+    for &c in at.iter().skip(1).rev().chain(at.first()) {
+        for p in [c, c - 1, c + 1] {
+            if p > 0 && !out.contains(&p) {
+                out.push(p);
+            }
+        }
+    }
+    out.truncate(SINGLE_TRIES);
+    out
 }
 
 struct Search<'a> {
@@ -241,27 +276,42 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 .map(|n| n.name.clone())
                 .collect(),
         };
-        let first = |n: &str| -> Option<u64> {
-            r["nodes"]["list"]
-                .as_array()?
-                .iter()
-                .find(|x| x["name"] == n)?["downs"][0]["point"]
-                .as_u64()
+        // The points the node crashed at, boot by boot (its downs at a crash point).
+        let points = |n: &str| -> Vec<u64> {
+            let node = r["nodes"]["list"]
+                .as_array()
+                .and_then(|l| l.iter().find(|x| x["name"] == n));
+            node.and_then(|x| x["downs"].as_array())
+                .into_iter()
+                .flatten()
+                .map_while(|d| d["point"].as_u64().filter(|p| *p > 0))
+                .collect()
         };
         if kind.starts_with("machine:") {
-            for n in names {
-                let Some(p) = first(&n) else { continue };
-                let at = format!("machine-at:{p}@{n}");
-                let mut c = cur.clone();
-                c.crash = Some(at.clone());
-                if keep(&mut s, c, &mut cur, format!("--crash {cr} -> {at}"))? {
-                    // Other settings may have been needed only for the other crashes.
-                    for f in cur.faults.clone() {
-                        let mut c = cur.clone();
-                        c.faults.retain(|x| *x != f);
-                        keep(&mut s, c, &mut cur, format!("without {f}"))?;
+            // Each node's first try, then each node's second, and so on: a node's first crash
+            // alone, the likeliest, is tried for every node before a later crash of any.
+            let tries: Vec<(String, Vec<u64>)> = names
+                .into_iter()
+                .map(|n| {
+                    let p = single_points(&points(&n));
+                    (n, p)
+                })
+                .collect();
+            'ranks: for k in 0..SINGLE_TRIES {
+                for (n, ps) in &tries {
+                    let Some(p) = ps.get(k) else { continue };
+                    let at = format!("machine-at:{p}@{n}");
+                    let mut c = cur.clone();
+                    c.crash = Some(at.clone());
+                    if keep(&mut s, c, &mut cur, format!("--crash {cr} -> {at}"))? {
+                        // Other settings may have been needed only for the other crashes.
+                        for f in cur.faults.clone() {
+                            let mut c = cur.clone();
+                            c.faults.retain(|x| *x != f);
+                            keep(&mut s, c, &mut cur, format!("without {f}"))?;
+                        }
+                        break 'ranks;
                     }
-                    break;
                 }
             }
         }
@@ -392,7 +442,18 @@ fn finish(
 
 #[cfg(test)]
 mod tests {
-    use super::halve;
+    use super::{halve, single_points};
+
+    #[test]
+    fn a_later_crash_is_tried_where_a_first_boot_would_reach_it() {
+        // The first crash's point, then each later crash at its place over the boots, most
+        // recent first, with the points either side, then either side of the first's.
+        assert_eq!(single_points(&[4, 7]), vec![4, 11, 10, 12, 3, 5]);
+        assert_eq!(single_points(&[9]), vec![9, 8, 10]);
+        assert_eq!(single_points(&[1]), vec![1, 2]);
+        assert_eq!(single_points(&[6, 2, 7]), vec![6, 15, 14, 16, 8, 7]);
+        assert!(single_points(&[]).is_empty());
+    }
 
     #[test]
     fn rates_halve_and_other_settings_do_not() {

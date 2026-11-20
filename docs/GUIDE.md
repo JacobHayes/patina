@@ -1642,12 +1642,17 @@ partition was in force at the end. Without `early` the same sweep is ok at all 3
 
 `patina minimize` of a run with nodes takes each node's scoped setting (`KEY=V@NODE`) as one
 of its own, doubles `crash-gap-ms` as it does `partition-gap-ms`, turns a kept crash at crash
-points into one node's first crash alone (`machine-at:N@NODE`, node by node, then drops the
-other settings again), and otherwise narrows the crash's `@NODE,...` one node at a time. A
-failure planted under crashes of both nodes, net delays and duplicates and disk delays reduces
-to `--crash machine-at:8@b` and nothing else (`tests/nodes/14-points-sweep.sh`, its first
-failing seed on the reference host). In another seed the loss can need a net or disk delay, or
-a crash of b's after its first: minimize keeps that setting, or the crash at points.
+points into one node's crash alone (`machine-at:N@NODE`, then drops the other settings again),
+and otherwise narrows the crash's `@NODE,...` one node at a time. The crash alone is tried
+first at each node's first crash; then at each later crash, the most recent first, where the
+node's first boot would reach it with no crash before (the points of the boots before it plus
+its own, and the points either side, since the work a crash undid is done again); at most 6
+places per node, each a run of minimize's 30. A failure planted under crashes of both nodes,
+net delays and duplicates and disk delays reduces to `--crash machine-at:8@b` and nothing else
+(`tests/nodes/14-points-sweep.sh`, its first failing seed on the reference host). Over seeds
+1 to 200 of that mix, 58 of the 59 failing seeds reduce to one crash, where the first crash
+alone reduced 46; in the others the loss needs a net or disk delay as well, and minimize keeps
+it.
 
 ### Disk faults per node
 
