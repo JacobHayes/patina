@@ -1284,6 +1284,20 @@ and the crash draw is used only when it fires, so a run is identical to the run 
 `--crash` up to the crash. With nodes each node counts its own, on its own disk ([Nodes](#nodes),
 "Crash points per node").
 
+`sweep --branch` places each point from a base's operation log (`patina-cli/src/branch.rs`),
+written per base as `points.json` before the sweep prunes the run's logs: the runtime's records
+in order (not the supervisor's, which offer no point), for each call that recorded a sync a
+point before its records, then one after each record. The places are used only when their
+number is the runtime's count (`crash_points`); otherwise the sample has one kind per node.
+`--branch-max N` takes the first N of an order stratified by node, then by the kind of record
+at the point (`branch::sample_order`): seeded by the seed and case, and nested, so a larger N
+adds children to those run. No point is left out as the same as another, even a point before
+a sync right after the record of the point before (nothing ran between them, the disk is the
+same): a crash there takes the next sequence number, so every draw keyed by one after it
+differs, including what the crash keeps; stores through a shared mapping made between the two
+calls are logged at the later point only; on `ack2.py` such a pair of points gives different
+outcomes.
+
 Stores through a `MAP_SHARED` mapping of a work file are in the page cache at once and reach
 the log as `MmapDirty` records when their process unmaps, syncs or ends: the runtime
 compares each tracked mapping with the file's shadow at `munmap`, `mremap`, `msync`, the sync

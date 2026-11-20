@@ -394,6 +394,13 @@ pub const FLAGS: &[Flag] = &[
         &[Cmd::Sweep],
     ),
     flag(
+        "--branch-max",
+        "N",
+        "every point",
+        "with --branch: at most N children of each seed, a seeded sample by node and kind of operation at the point",
+        &[Cmd::Sweep],
+    ),
+    flag(
         "--budget",
         "SECONDS",
         "no limit",

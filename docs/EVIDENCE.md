@@ -2782,9 +2782,24 @@ run with nodes, `--faults disk` and `swarm`. With `swarm`, a node's disk and mem
 are now turned off by its own seed, so such a run draws differently once its faults fire: on
 x86_64, seeds 1-16 of that cell differ in 4 with `swarm` and in none without it.
 
+**A sample, and why no point is left out.** `--branch-max N` runs a seeded sample of N
+children per seed, stratified by node and then by the kind of operation at the point. `wal.py
+nocheck`, seeds 1-2, `--branch-max 300`: 600 of 5,044 points tried, 602 runs, 12 s wall, the
+torn record found in both seeds (44 runs), where the full sweep took 106 s.
+
+Leaving out points that cannot differ was built and measured, then dropped. The candidates
+were points before a sync right after the record of the point before, nothing run between them
+(the next sequence number): 812 of `wal.py`'s 5,044 points (16%), 168 of `q3.py`'s 1,576, 74
+of `ack2.py`'s 368, 71 of `acklog`'s 328; without them every finding of the table above was
+still found, in the same seeds. But such a point can differ: a crash there takes the next
+sequence number, so what the crash keeps, and every later draw keyed by a sequence number, is
+drawn again; stores through a shared mapping between the two calls are logged at one point
+only. On `ack2.py early`, seed 1, a crash after b's write loses the put and one before the
+fsync that follows does not. The sweep tries every point; `--branch-max` is the cut.
+
 **PostgreSQL** (the pair of the section above) was not swept: one base run counts 9,702 crash
 points (pg1 5,139, pg2 4,563) for 30 s of virtual time, and each child is a full run of about
-7 s, about 19 CPU-hours per seed.
+7 s, about 19 CPU-hours per seed; `--branch-max N` bounds a seed to N children (N times 7 s).
 
 ### Minimizing to one node's crash
 

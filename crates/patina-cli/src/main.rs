@@ -1,6 +1,7 @@
 //! `patina`: the command line, the launcher, the sandbox's keeper (hidden `__sandbox`), the
 //! supervisor (hidden `__sup`) and the tools.
 
+mod branch;
 mod check;
 mod cli;
 mod config;

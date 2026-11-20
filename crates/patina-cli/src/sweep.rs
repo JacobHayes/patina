@@ -35,9 +35,10 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 13] = [
+const OWN: [&str; 14] = [
     "--seeds",
     "--branch",
+    "--branch-max",
     "--jobs",
     "--cases",
     "--only-case",
@@ -133,8 +134,9 @@ const PATINA_OUTPUT: [&str; 5] = [
 ];
 
 /// Other names a run directory holds beside `PATINA_OUTPUT` and `inc-K`.
-const RUN_OUTPUT: [&str; 6] = [
+const RUN_OUTPUT: [&str; 7] = [
     "check.out",
+    crate::branch::FILE,
     "replay",
     "replay.json",
     "minimized",
@@ -927,6 +929,13 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     } else {
         None
     };
+    let branch_max = a.num::<usize>("--branch-max").map_err(error)?;
+    if branch_max.is_some() && kind.is_none() {
+        return Err(error("--branch-max goes with --branch".into()));
+    }
+    if branch_max == Some(0) {
+        return Err(error("--branch-max is at least 1".into()));
+    }
     let cases: Option<Vec<Case>> = match a.last("--cases") {
         None => None,
         Some(f) => Some(read_cases(Path::new(f), &cfg.cmd).map_err(error)?),
@@ -1111,7 +1120,11 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     std::fs::create_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
-    write_json(&out.join(SWEEP_FILE), &ident).map_err(error)?;
+    // `--branch-max` is a stopping rule, not part of the sweep's identity (a larger one adds
+    // to the children run): recorded for the report.
+    let mut recorded = ident.clone();
+    recorded["branch_max"] = serde_json::json!(branch_max);
+    write_json(&out.join(SWEEP_FILE), &recorded).map_err(error)?;
 
     let run_dir = |seed: u64, case: Option<usize>, point: Option<&report::Point>| -> PathBuf {
         let mut dir = out.join(match point {
@@ -1296,6 +1309,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         run_bytes: (cfg.log_limit << 20) + (64 << 20),
         cut: false,
         bases: Default::default(),
+        branch: kind.is_some(),
     };
     if todo < total {
         st.say(&format!(
@@ -1365,8 +1379,42 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             .filter(|x| !x.0.is_empty())
             .map(|(n, k)| format!("{n} {k}"))
             .collect();
+        // Each base's children: its points, or with --branch-max a sample by node and kind of
+        // operation (`branch::places`).
+        let sample = |items: &[(report::Point, String)], key: u64| -> Vec<report::Point> {
+            let mut o: Vec<usize> = match branch_max {
+                Some(m) => {
+                    // By node, then the kind of operation at the point.
+                    let mut o = crate::branch::sample_order(items, key, |x| {
+                        let (g, k) = x.1.rsplit_once('/').unwrap_or(("", &x.1));
+                        (g.to_string(), k.to_string())
+                    });
+                    o.truncate(m);
+                    o
+                }
+                None => (0..items.len()).collect(),
+            };
+            o.sort();
+            o.into_iter().map(|i| items[i].0.clone()).collect()
+        };
+        let mut level: Vec<(u64, Option<usize>, report::Point)> = vec![];
+        for (&(seed, case), (pts, b)) in &st.bases {
+            let d = read_json(&b.join(crate::branch::FILE))
+                .unwrap_or_else(|_| crate::branch::describe(b, pts));
+            let mut items = vec![];
+            for (n, k) in pts {
+                let d = &d["nodes"][n.as_str()];
+                for p in 1..=*k {
+                    let kind = d["kinds"][(p - 1) as usize].as_str().unwrap_or("");
+                    items.push((report::Point::child(p, n), format!("{n}/{kind}")));
+                }
+            }
+            for p in sample(&items, crate::branch::sample_key(seed, case, 1)) {
+                level.push((seed, case, p));
+            }
+        }
         st.say(&format!(
-            "sweep: {}, {}{}",
+            "sweep: {}, {}{}{}",
             report::count(
                 st.bases.len(),
                 if cases.is_some() { "base" } else { "seed" }
@@ -1376,32 +1424,28 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 String::new()
             } else {
                 format!(" ({})", by_node.join(", "))
+            },
+            if level.len() < points as usize {
+                format!(", a sample of {} (--branch-max)", level.len())
+            } else {
+                String::new()
             }
         ));
+        // Points ascending, seeds (and cases) round-robin; with nodes, each node's points
+        // of a seed in turn at each ordinal.
+        level.sort_by(|x, y| (x.2.n, x.0, x.1, &x.2).cmp(&(y.2.n, y.0, y.1, &y.2)));
         let mut children = vec![];
         let mut have = 0;
-        for p in 1..=most {
-            for &seed in &seeds {
-                for &case in &list {
-                    let nodes: Vec<String> = st.bases[&(seed, case)]
-                        .0
-                        .iter()
-                        .filter(|x| p <= x.1)
-                        .map(|x| x.0.clone())
-                        .collect();
-                    for node in nodes {
-                        match fresh(seed, case, Some(report::Point::child(p, &node)))? {
-                            Fresh::Run(j, stale) => {
-                                judged_again.rerun += stale as usize;
-                                children.push(j)
-                            }
-                            Fresh::Kept => have += 1,
-                            Fresh::Rejudge(j) => {
-                                have += 1;
-                                judged_again.jobs.push(j)
-                            }
-                        }
-                    }
+        for (seed, case, p) in &level {
+            match fresh(*seed, *case, Some(p.clone()))? {
+                Fresh::Run(j, stale) => {
+                    judged_again.rerun += stale as usize;
+                    children.push(j)
+                }
+                Fresh::Kept => have += 1,
+                Fresh::Rejudge(j) => {
+                    have += 1;
+                    judged_again.jobs.push(j)
                 }
             }
         }
@@ -1411,7 +1455,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         judged_again.say(&out);
         if have > 0 {
             st.say(&format!(
-                "sweep: {have} of {points} children already in {}; running {}",
+                "sweep: {have} of {} children already in {}; running {}",
+                level.len(),
                 out.display(),
                 children.len()
             ));
@@ -1600,6 +1645,9 @@ struct State<'k> {
     /// Under `--branch`, once the bases ran: each (seed, case)'s crash points (with nodes, each
     /// node's; `report::base_points`) and base directory.
     bases: std::collections::BTreeMap<(u64, Option<usize>), Base>,
+    /// A `--branch` sweep: each base writes where its points are (`branch::describe`) before
+    /// its logs are pruned.
+    branch: bool,
 }
 
 /// A `--branch` base: its crash points per node (`""`: the one machine) and its directory.
@@ -1740,7 +1788,8 @@ impl State<'_> {
             self.bases.get(&(*seed, *case_index)),
         ) {
             let n = pts.iter().find(|x| x.0 == p.node).map_or(0, |x| x.1);
-            if let Some(why) = missed_point(&r, p, n) {
+            let why = missed_point(&r, p, n);
+            if let Some(why) = why {
                 let was = r.clone();
                 r["outcome"] = "nondeterministic".into();
                 r["exit"] = Outcome::Nondeterministic.exit().into();
@@ -1758,6 +1807,16 @@ impl State<'_> {
                     "base": base,
                 });
                 let _ = write_json(&dir.join("result.json"), &r);
+            }
+        }
+        // Where a base's points are, and a first crash's next points of the other nodes, read
+        // from the logs before `account` prunes them.
+        if let Some(p) = point.as_ref().filter(|_| self.branch) {
+            let run = read_json(&dir.join("run.json")).unwrap_or_default();
+            let pts = report::base_points(&r, &run);
+            let v = (p.n == 0).then(|| crate::branch::describe(dir, &pts));
+            if let Some(v) = v {
+                let _ = write_json(&dir.join(crate::branch::FILE), &v);
             }
         }
         self.done += 1;

@@ -5,17 +5,20 @@
 #   answers before a backup has the update), seeds 1..2, 2 s of virtual time;
 # - wal.py (one node recovering its log; `nocheck`: recovery trusts each record's length),
 #   seeds 1..2, 15 s of virtual time.
-# Each line: crash points per node over the seeds, runs, wall seconds, failing runs, groups.
+# Each line: crash points per node over the seeds, children tried, runs, wall seconds, failing
+# runs, groups. Then wal.py's `nocheck` again with `--branch-max 300` (a sample of 300 children
+# per seed).
 #@ tier=evidence budget=1200 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/evidence-branch; mkdir -p "$o"
 # sw NAME SEEDS CONFIG DRIVER...: one branch sweep into $o/NAME; prints its line.
 sw() {
     n=$1 seeds=$2 cfg=$3; shift 3
+    max=""; case $n in *-max) max="--branch-max 300" ;; esac
     rm -rf "${o:?}/$n"
     t0=$(date +%s)
     st=0
-    timeout 1100 "$PATINA" sweep --seeds "$seeds" --branch --crash machine -j 6 --keep fail --out "$o/$n" \
+    timeout 1100 "$PATINA" sweep --seeds "$seeds" --branch $max --crash machine -j 6 --keep fail --out "$o/$n" \
         --config "$cfg" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >"$o/$n.txt" 2>&1 || st=$?
     [ -f "$o/$n/report.json" ] || die "$n: no report (exit $st): $(tail -3 "$o/$n.txt")"
     python3 -I - "$o/$n/report.json" "$n" "$seeds" "$(( $(date +%s) - t0 ))" <<'PY'
@@ -25,7 +28,7 @@ b = rep["branch"]
 per = ", ".join("%s %d" % (x["node"], x["points"]) for x in b["nodes"])
 fail = sum(g["count"] for g in rep["groups"])
 groups = "; ".join("%s (%d)" % (g["signature"], g["count"]) for g in rep["groups"]) or "-"
-print("%-10s seeds %s: points %d (%s), tried %d, %d runs, %s s wall, %d failing; %s"
+print("%-14s seeds %s: points %d (%s), tried %d, %d runs, %s s wall, %d failing; %s"
       % (name, seeds, b["points"], per, b["tried"], rep["runs"], wall, fail, groups))
 PY
 }
@@ -51,3 +54,4 @@ for v in ok nocheck; do
     mk "$o/wal-$v.toml" wal.py "$b" a
     sw "wal-$v" 1..2 "$o/wal-$v.toml" python3 /guest/wal.py driver 15
 done
+sw wal-nocheck-max 1..2 "$o/wal-nocheck.toml" python3 /guest/wal.py driver 15

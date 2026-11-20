@@ -6,8 +6,8 @@
 # `--branch` sweep crashes each point of each node in turn: on `early` it finds the lost
 # acknowledged put on b, in children of b only, with b's crash losing it on b's disk, and the
 # report's group names b's crash points; the correct store is ok at every point of both nodes;
-# a child's rerun line gives its digest again. One seed, a few puts: about 10 s on the arm64
-# runner.
+# a child's rerun line gives its digest again. `--branch-max` runs a sample with each node in it
+# and says how many of how many it tried. One seed, a few puts: about 10 s on the arm64 runner.
 #@ tier=quick budget=30 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/13-points; mkdir -p "$o"
@@ -106,3 +106,16 @@ st=0; timeout 120 "$PATINA" run --seed $s --config "$c/run.json" --out "$o/rerun
 d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 [ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"
 echo "rerun: same digest"
+# A sample: at most 4 children, both nodes among them, and the report says how many of how many.
+sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep none \
+    --out "$o/$n" --config "$o/ok.toml" "$@" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/$n.txt" 2>&1 || st=$?; }
+sw2 max --branch-max 4
+[ "$st" = 0 ] || die "--branch-max: exit $st: $(tail -5 "$o/max.txt")"
+python3 -I - "$o/max/report.json" "$o/sw-ok/report.json" <<'PY' || die "--branch-max 4"
+import json, sys
+br, full = json.load(open(sys.argv[1]))["branch"], json.load(open(sys.argv[2]))["branch"]
+assert br["tried"] == 4 and br["points"] == full["points"], (br, full)
+assert all(x["tried"] > 0 for x in br["nodes"]), br["nodes"]
+print("--branch-max 4: %d of %d tried (%s)" % (br["tried"], br["points"], ", ".join("%s %d" % (x["node"], x["tried"]) for x in br["nodes"])))
+PY
+grep -q "^crash points: 4 of " "$o/max.txt" || die "--branch-max: $(cat "$o/max.txt")"

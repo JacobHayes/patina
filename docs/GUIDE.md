@@ -198,6 +198,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--cases FILE` | one run per line of FILE per seed (below) |
 | `--only-case ID[,ID...]` | with `--cases`: only these cases ([below](#test-suites)) |
 | `--branch` | with `--crash machine` or `process`: every crash point of each seed (below) |
+| `--branch-max N` | with `--branch`: at most N children of each seed, a seeded sample by node and kind of operation (below) |
 | `--known FILE` | findings already known: counted, and they do not fail the sweep ([below](#known-findings)) |
 
 A run kept by `--keep fail` or `checked` whose log is over 4 MiB keeps its first and last MiB
@@ -459,10 +460,20 @@ violation always: acked-records-kept: N acknowledged, N stored
 A run forced to crash at point N that does not crash there ran another prefix than its seed's
 first run: the sweep reports it `nondeterministic`, naming both directories.
 
+`--branch-max N` caps the children of each seed at N: a seeded sample in which every node, and
+every kind of operation at a point (a write, a rename, the point before an `fsync`, read from
+the seed's operation log into its `points.json`), comes up before any comes up twice, and the
+rest in proportion. The report says how many of how many it tried; the same command with a
+larger N runs only the children the smaller one did not. A run whose points the sweep cannot
+place in its log (one whose points count from `setup-complete`) is sampled by node alone. To
+branch only over the work after a setup, end the setup with the SDK's `setup_complete()` and
+add `--fault faults-after-setup=1`: crash points then count from there.
+
 Each point is tried once, with one draw of what the crash keeps, and "every crash point tried"
 covers only the seeds swept. Seeds differ widely in their count (fjall's harness: 4,069 to
-23,932 points over three seeds, about 130 ms a run), so give large ones a `--budget`. Use it
-when a crash must land in a narrow window and plain crash sweeps find nothing: on fjall's F2
+23,932 points over three seeds, about 130 ms a run), so give large ones a `--budget` or a
+`--branch-max`. Use it when a crash must land in a narrow window and plain crash sweeps find
+nothing: on fjall's F2
 it finds the window at 4.5 to 7 times a plain sweep's rate per CPU-second, and early windows
 (F1, acklog-c) at once. Keep plain sweeps for findings that need variety across seeds, such
 as fault plans or a failed fsync at a chosen call: there it finds 5 times less (F3) or
