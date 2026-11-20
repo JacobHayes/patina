@@ -2403,8 +2403,8 @@ identical runs. About 0.7 s of wall time for the 50 cycles. A node's own end: an
 `ok-exit = 3`, `restart = "always"`, `max-incarnations = 3` and `count = 2`, nodes `w1` and
 `w2` each print incarnations 0, 1 and 2.
 
-**The quorum store under the seed's kills** (`tests/nodes/06-quorum-kills.sh`, the three-node
-store of `03-quorum.sh` with `--crash process`, `crash-gap-ms=2000..10000`,
+**The quorum store under the seed's kills** (`tests/quorum/03-quorum-kills.sh`, the three-node
+store of `01-quorum.sh` with `--crash process`, `crash-gap-ms=2000..10000`,
 `down-ms=500..3000` beside the partitions): correct, seeds 1-16 with a 40 s driver: 16 ok, 16
 distinct digests, 91 partitions, 144 kills and 144 restarts; `verify` of seeds 4 and 11 under
 `--vary cpu,load,aslr,sandbox,repeat`: 4 identical runs each. The planted bug `amnesia` (a node

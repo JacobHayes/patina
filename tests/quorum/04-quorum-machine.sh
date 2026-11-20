@@ -1,4 +1,4 @@
-# 10. Nodes: the three-node store of 03-quorum (tests/guests/nodes/q3.py, each node syncing its
+# 4. Quorum: the three-node store of 01-quorum (tests/guests/nodes/q3.py, each node syncing its
 # view and log before it answers) under the seed's machine crashes (`--crash machine`) and
 # partitions. Correct: ok on every seed of a sweep, every node's machine crashed and restarted
 # in most runs; identical under verify. Planted bug: nodes that answer without syncing
@@ -6,7 +6,7 @@
 # their disks, found in most seeds; its first failing run replays identically.
 #@ tier=area,release budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
-o=$RUNS/10-quorum-machine; mkdir -p "$o"
+o=$RUNS/04-quorum-machine; mkdir -p "$o"
 Q3_FAULTS="--crash machine --fault crash-gap-ms=1000..4000 --fault down-ms=200..1000 --faults net --fault partition-gap-ms=1000..6000 --fault partition-ms=1000..6000"
 Q3_SECONDS=40
 out=$(q3_sweep "$o" ok all)

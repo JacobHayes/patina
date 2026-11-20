@@ -1390,6 +1390,7 @@ partitions: 57 drawn (13 bridge, 16 isolate, 12 oneway, 16 split), 54 acted on t
 failure exit: exit 1
   6 of 8 runs   first: seed 2   replayed: identical
   faults in every failing run: net-delay, net-reset, partition      in none: net-drop, net-dup, net-reorder
+  nodes: n1 down in 0, n2 down in 0, n3 down in 0, partitioned at the end in 2
   rerun:  patina run --seed 2 --config /tmp/q3/patina-out/sweep/seed-2/run.json -- python3 /guest/q3.py driver 90
   replay: patina replay /tmp/q3/patina-out/sweep/seed-2
 
@@ -1401,7 +1402,7 @@ once one of two backups has it, reads under a lease, and a view change that move
 when the backups stop hearing from it and fences the old one. With `nolease` the primary
 answers reads without its lease, and after a partition that cuts it off, a read from it returns
 a value the new primary has replaced. Its other planted bugs (`early`, `nofence`) are found the
-same way (`tests/nodes/04-quorum-bugs.sh`); without a bug the same sweep is clean.
+same way (`tests/quorum/02-quorum-bugs.sh`); without a bug the same sweep is clean.
 
 `patina minimize` treats `partition-gap-ms` as a rate: it tries dropping it, then doubles the
 gap while the run still fails the same way.
@@ -1507,6 +1508,7 @@ node downs: 49 killed; 48 restarts
 failure exit: exit 1
   5 of 8 runs   first: seed 3   replayed: identical
   faults in every failing run: crash      in none: -
+  nodes: n1 down in 5, n2 down in 4, n3 down in 4
   rerun:  patina run --seed 3 --config /tmp/q3k/patina-out/sweep/seed-3/run.json -- python3 /guest/q3.py driver 60
   replay: patina replay /tmp/q3k/patina-out/sweep/seed-3
 $ grep FAIL patina-out/sweep/seed-3/inc-0/stdout
@@ -1522,7 +1524,7 @@ the `exit` or `signal` of a node's own end), `faults.counts.crash` counts the se
 each with the processes it `killed` and its `restart_in_ms`, and a `start` with its
 `incarnation` for each restart. With `amnesia`, a node of `q3.py` keeps its view but not its
 log across a restart, and a write the cluster acknowledged is lost after the seed kills the
-nodes that had it (`tests/nodes/06-quorum-kills.sh`); without it, the same sweep is clean.
+nodes that had it (`tests/quorum/03-quorum-kills.sh`); without it, the same sweep is clean.
 
 ### Crashing a node's machine
 
@@ -1572,7 +1574,7 @@ times out, that node b's unsynced file is untouched, starts a again, and reads w
 boot found (`tests/nodes/09-machine.sh`). With `--crash machine`, `q3.py`'s nodes keep every
 acknowledged write, since each syncs its state before it answers; with `nosync` they answer
 first, and a write the cluster acknowledged is lost when the machines that had it crash
-before it reached their disks (`tests/nodes/10-quorum-machine.sh`).
+before it reached their disks (`tests/quorum/04-quorum-machine.sh`).
 
 Each disk has its own operation log: `RUNDIR/node/NAME/inc-K/` holds `oplog.meta`,
 `oplog.data` and `live.tree` (`live.tree.zst` in a run a sweep kept) for the disk that began
@@ -1643,7 +1645,9 @@ of its own, doubles `crash-gap-ms` as it does `partition-gap-ms`, turns a kept c
 points into one node's first crash alone (`machine-at:N@NODE`, node by node, then drops the
 other settings again), and otherwise narrows the crash's `@NODE,...` one node at a time. A
 failure planted under crashes of both nodes, net delays and duplicates and disk delays reduces
-to `--crash machine-at:8@b` and nothing else (`tests/nodes/14-points-sweep.sh`).
+to `--crash machine-at:8@b` and nothing else (`tests/nodes/14-points-sweep.sh`, its first
+failing seed on the reference host). In another seed the loss can need a net or disk delay, or
+a crash of b's after its first: minimize keeps that setting, or the crash at points.
 
 ### Disk faults per node
 

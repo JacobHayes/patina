@@ -12,15 +12,17 @@
 # hybrid logical clock) keeps every acknowledged put under clock-skew-ms; with `wallclock`
 # (each node stamps with its own clock only) a node behind the other loses a later put, found
 # in most seeds and in none without skew. Each failing group's first run replays identically.
+# Seeds 1-16 in the area, 1-8 in the release tier.
 #@ tier=area,release budget=200 slots=6
-# arm64 (CI runner): about 100 s.
+# arm64 (CI runner): about 100 s in the area, 50 s in the release tier.
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/17-lease; mkdir -p "$o"
 PAUSES="--fault pause-gap-ms=1000..8000@p1 --fault pause-gap-ms=1000..8000@p2 --fault pause-ms=100..4000@p1 --fault pause-ms=100..4000@p2"
 PARTS="--fault partition-gap-ms=1000..5000 --fault partition-ms=1000..6000"
+N=16; [ "${CHECK_TIER:-}" != release ] || N=8
 SKEW="--fault clock-skew-ms=0..2000"
 
-# sweep NAME GUEST NODES BUG DRIVER-ARGS [patina options]: seeds 1-16 of GUEST on NODES (BUG:
+# sweep NAME GUEST NODES BUG DRIVER-ARGS [patina options]: seeds 1-N of GUEST on NODES (BUG:
 # ok, or a planted bug given to every node).
 sweep() {
     _name=$1; _g=$2; _nodes=$3; _bug=$4; _args=$5; shift 5
@@ -31,29 +33,29 @@ sweep() {
     done
     _st=0
     # shellcheck disable=SC2086
-    timeout 600 "$PATINA" sweep --seeds 1..16 -j 6 --keep fail --out "$o/$_name" --config "$_f" "$@" \
+    timeout 600 "$PATINA" sweep --seeds 1.."$N" -j 6 --keep fail --out "$o/$_name" --config "$_f" "$@" \
         --mount "$PATINA_GUESTS":/guest:copy -- python3 "/guest/$_g" driver $_args >"$o/$_name.txt" 2>&1 || _st=$?
     [ -f "$o/$_name/report.json" ] || { tail -20 "$o/$_name.txt"; die "sweep $_name: no report (exit $_st)"; }
 }
 failures() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["outcomes"].get("failure", 0))' "$o/$1/report.json"; }
 clean() {
-    [ "$(field "$o/$1/report.json" outcomes)" = '{"ok": 16}' ] || die "$1: $(field "$o/$1/report.json" outcomes)"
-    echo "$1: 16 of 16 seeds ok"
+    [ "$(field "$o/$1/report.json" outcomes)" = "{\"ok\": $N}" ] || die "$1: $(field "$o/$1/report.json" outcomes)"
+    echo "$1: $N of $N seeds ok"
 }
 found() {
     n=$(failures "$1")
-    [ "$n" -ge 8 ] || die "$1: found in only $n of 16 seeds"
+    [ "$n" -ge $((N / 2)) ] || die "$1: found in only $n of $N seeds"
     r=$(python3 -I -c 'import json,sys
 g=[g for g in json.load(open(sys.argv[1]))["groups"] if g["outcome"] == "failure"]
 print(" ".join(x["replay"]["result"] for x in g if x["replay"]))
 sys.exit(0 if g and all(x["replay"] and x["replay"]["result"] == "identical" for x in g) else 1)' "$o/$1/report.json") \
         || die "$1: a first failing run did not replay identically: $r"
     l=$(cat "$o/$1"/seed-*/inc-0/stdout | sed -n 's/^FAIL: \([a-z ]*\):.*/\1/p' | sort | uniq -c | tr -s ' \n' ' ')
-    echo "$1: found in $n of 16 seeds:$l; replayed: $r"
+    echo "$1: found in $n of $N seeds:$l; replayed: $r"
 }
 control() {
     [ "$(failures "$1")" = 0 ] || die "$1: found in $(failures "$1") seeds without its class"
-    echo "$1: found in none of 16 seeds"
+    echo "$1: found in none of $N seeds"
 }
 
 L="s p1 p2"

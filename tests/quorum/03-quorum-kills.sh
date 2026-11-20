@@ -1,4 +1,4 @@
-# 6. Nodes: the three-node store of 03-quorum (tests/guests/nodes/q3.py, each node keeping its
+# 3. Quorum: the three-node store of 01-quorum (tests/guests/nodes/q3.py, each node keeping its
 # view and log in its work tree) under the seed's node kills (`--crash process`), each node
 # restarted after a drawn down time. Correct: ok on every seed of a sweep, with kills and
 # restarts in every run; identical under verify. Planted bug: a node that forgets its log when
@@ -6,7 +6,7 @@
 # replays identically.
 #@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
-o=$RUNS/06-quorum-kills; mkdir -p "$o"
+o=$RUNS/03-quorum-kills; mkdir -p "$o"
 Q3_FAULTS="--crash process --fault crash-gap-ms=2000..10000 --fault down-ms=500..3000"
 Q3_SECONDS=40
 

@@ -1,13 +1,13 @@
-# 3. Nodes: a three-node replicated store with failover (tests/guests/nodes/q3.py: a primary,
+# 1. Quorum: a three-node replicated store with failover (tests/guests/nodes/q3.py: a primary,
 # two backups, quorum writes, leased reads, view changes that fence the old primary) under the
 # seed's partitions and the net preset. Correct: ok on every seed of a sweep, with failovers in
 # some (a view above 0), partitions drawn and acting on traffic; identical under verify. The
 # planted bug of reads without the lease (`nolease`: a stale read from the old primary after a
 # one-way or isolating cut) is found in most seeds of a sweep, and its first failing run replays
-# identically. The other planted bugs are 04-quorum-bugs's.
+# identically. The other planted bugs are 02-quorum-bugs's.
 #@ tier=area budget=90 slots=4
 . "$(dirname "$0")/lib.inc"
-o=$RUNS/03-quorum; mkdir -p "$o"
+o=$RUNS/01-quorum; mkdir -p "$o"
 
 out=$(q3_sweep "$o" ok all)
 [ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
