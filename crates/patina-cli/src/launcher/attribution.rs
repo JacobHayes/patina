@@ -240,7 +240,10 @@ impl Faults {
         let mut counts = serde_json::Map::new();
         let got = |c: &str| self.by_class.get(c).copied().unwrap_or(0);
         for (k, v) in &plan.resolved {
-            let Some(c) = class_of_key(k) else { continue };
+            // A node's own setting (`KEY@NODE`) counts under its key's class.
+            let Some(c) = class_of_key(crate::faults::split_scope(k).0) else {
+                continue;
+            };
             if *v == "off" || counts.contains_key(c) {
                 continue;
             }

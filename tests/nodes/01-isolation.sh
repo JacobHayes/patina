@@ -46,7 +46,12 @@ refused() {
 }
 refused "--crash machine-at:3" --config "$o/iso.toml" --crash machine-at:3
 refused restart-gap-ms --config "$o/iso.toml" --fault restart-gap-ms=1000..2000
-refused fs-error-permille --config "$o/iso.toml" --fault fs-error-permille=10
+refused buggify-permille --config "$o/iso.toml" --fault buggify-permille=10
+# Only the disk and memory keys are a node's own; a scope names nodes of the run.
+refused net-drop-permille --config "$o/iso.toml" --fault net-drop-permille=10@b
+refused "no node nope" --config "$o/iso.toml" --fault fs-error-permille=10@nope
+printf '[node.c]\ncmd = ["/bin/true"]\n[node.c.faults]\nnet-drop-permille = 5\n' >"$o/own.toml"
+refused node.c.faults.net-drop-permille --config "$o/own.toml"
 printf '[node.c]\ncmd = ["/bin/true"]\nfaults = "net"\n' >"$o/faults.toml"
 refused node.c.faults --config "$o/faults.toml"
 for taken in driver rest localhost; do

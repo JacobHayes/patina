@@ -159,6 +159,10 @@ pub struct Node {
     /// `max-incarnations`: its boots (none: the run's `max-incarnations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_incarnations: Option<u64>,
+    /// `[node.NAME.faults]`: its own disk and memory settings, `KEY=VALUE` (`preset=NAME` for
+    /// a preset's), in order; they replace the run's for this node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub faults: Vec<String>,
 }
 
 impl Node {
@@ -172,6 +176,7 @@ impl Node {
             restart: None,
             ok_exit: None,
             max_incarnations: None,
+            faults: vec![],
         }
     }
 
@@ -968,9 +973,18 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
                     count = Some(c);
                 }
                 "faults" => {
-                    return Err(format!(
-                        "{at}: not available yet (per-node fault settings come later)"
-                    ))
+                    for (fk, fv) in table(v, &at)? {
+                        let at = format!("{at}.{fk}");
+                        let ok = fk == "preset" || crate::faults::node_scoped(fk);
+                        if !ok {
+                            return Err(format!(
+                                "{at}: a node's own settings are its disk and memory keys \
+                                 (fs-*, fsync-*, enospc-after-bytes, mem-*, path-swap-*) and \
+                                 preset; the other keys are the run's"
+                            ));
+                        }
+                        node.faults.push(format!("{fk}={}", scalar(fv, &at)?));
+                    }
                 }
                 _ => return Err(format!("{file}: unknown key node.{n}.{k}")),
             }
@@ -1149,10 +1163,25 @@ impl Config {
     pub fn opts_with(&self, program: Program) -> Res<Opts> {
         // With nodes, `--crash` names the nodes the seed kills (`check_nodes`), not a crash
         // plane of the driver's disk.
+        // With nodes, the disk and memory keys are each node's (`check_nodes`): the run's plan
+        // resolves the others, presets expanded into settings.
+        let (presets, settings) = if self.nodes.is_empty() {
+            if let Some(s) = self
+                .faults_preset
+                .iter()
+                .chain(&self.faults)
+                .find(|s| faults::split_scope(s).1.is_some())
+            {
+                return Err(format!("{s}: @NODE names nodes, and the run has none"));
+            }
+            (self.faults_preset.clone(), self.faults.clone())
+        } else {
+            (vec![], self.run_settings()?)
+        };
         let mut plan = faults::resolve(
             self.seed,
-            &self.faults_preset,
-            &self.faults,
+            &presets,
+            &settings,
             self.crash.as_deref().filter(|_| self.nodes.is_empty()),
             self.nodes.len(),
         )?;
@@ -1211,6 +1240,132 @@ impl Config {
         })
     }
 
+    /// The run's own fault settings in a run with nodes: its presets' keys and its settings
+    /// (in that order, a later one replacing an earlier one), without the disk and memory
+    /// keys, which are each node's (`node_settings`). Only those take `@NODE`.
+    fn run_settings(&self) -> Res<Vec<String>> {
+        let mut out = vec![];
+        for p in &self.faults_preset {
+            let (names, scope) = faults::split_scope(p);
+            for name in names.split(',') {
+                for (k, v) in faults::preset_settings(name, self.nodes.len(), &self.faults)? {
+                    if faults::node_scoped(&k) {
+                        continue;
+                    }
+                    if scope.is_some() {
+                        return Err(format!(
+                            "--faults {p}: {name} sets {k}, which is the run's (only disk and \
+                             memory keys take @NODE)"
+                        ));
+                    }
+                    out.push(format!("{k}={v}"));
+                }
+            }
+        }
+        for s in &self.faults {
+            let (kv, scope) = faults::split_scope(s);
+            let k = kv.split_once('=').map_or(kv, |x| x.0);
+            if faults::node_scoped(k) {
+                continue;
+            }
+            if scope.is_some() {
+                return Err(format!(
+                    "--fault {s}: {k} is the run's (only disk and memory keys take @NODE)"
+                ));
+            }
+            out.push(kv.to_string());
+        }
+        Ok(out)
+    }
+
+    /// Node `k`'s disk and memory settings (`k` 0: the driver): the run's presets' and
+    /// settings' that apply to it (unscoped: every node but the driver; `@NODE,...`: the
+    /// nodes named), then its own `[node.NAME.faults]`.
+    fn node_settings(&self, k: usize) -> Res<Vec<String>> {
+        let name = if k == 0 {
+            "driver"
+        } else {
+            self.nodes[k - 1].name.as_str()
+        };
+        let applies = |scope: Option<&str>, what: &str| -> Res<bool> {
+            let Some(l) = scope else {
+                return Ok(k != 0);
+            };
+            for n in l.split(',') {
+                if n != "driver" && !self.nodes.iter().any(|x| x.name == n) {
+                    return Err(format!("{what}: no node {n}"));
+                }
+            }
+            Ok(l.split(',').any(|n| n == name))
+        };
+        let preset = |p: &str, out: &mut Vec<String>| -> Res<()> {
+            for (key, v) in faults::preset_settings(p, self.nodes.len(), &self.faults)? {
+                if faults::node_scoped(&key) {
+                    out.push(format!("{key}={v}"));
+                }
+            }
+            Ok(())
+        };
+        let mut out = vec![];
+        for p in &self.faults_preset {
+            let (names, scope) = faults::split_scope(p);
+            if applies(scope, &format!("--faults {p}"))? {
+                for n in names.split(',') {
+                    preset(n, &mut out)?;
+                }
+            }
+        }
+        for s in &self.faults {
+            let (kv, scope) = faults::split_scope(s);
+            let key = kv.split_once('=').map_or(kv, |x| x.0);
+            if faults::node_scoped(key) && applies(scope, &format!("--fault {s}"))? {
+                out.push(kv.to_string());
+            }
+        }
+        if k > 0 {
+            // Its presets first, then its keys, whatever the table's order.
+            let own = &self.nodes[k - 1].faults;
+            for p in own.iter().filter_map(|s| s.strip_prefix("preset=")) {
+                for n in p.split(',') {
+                    preset(n, &mut out)?;
+                }
+            }
+            out.extend(own.iter().filter(|s| !s.starts_with("preset=")).cloned());
+        }
+        Ok(out)
+    }
+
+    /// Each node's disk and memory faults, resolved with a seed of its own: the driver's into
+    /// the run's `faults`, the others' into `node_faults`; `result.json` shows them as
+    /// `KEY@NODE`.
+    fn node_faults(&self, plan: &mut faults::Plan) -> Res<()> {
+        for k in 0..=self.nodes.len() {
+            let given = self.node_settings(k)?;
+            if given.is_empty() {
+                continue;
+            }
+            let name = if k == 0 {
+                "driver"
+            } else {
+                self.nodes[k - 1].name.as_str()
+            };
+            let seed = match k {
+                0 => self.seed,
+                _ => proto::draw::mix64(self.seed ^ (k as u64) << 56),
+            };
+            let sub = faults::resolve(seed, &[], &given, None, 0)
+                .map_err(|e| format!("node {name}: {e}"))?;
+            match k {
+                0 => faults::set_node_keys(&mut plan.faults, &sub.faults),
+                _ => faults::set_node_keys(&mut plan.node_faults[k], &sub.faults),
+            }
+            for (key, v) in sub.resolved {
+                plan.resolved.push((format!("{key}@{name}"), v));
+            }
+        }
+        Ok(())
+    }
+
     /// Check the nodes of a run (`proto::node`) and resolve their programs.
     fn check_nodes(&self, plan: &mut faults::Plan) -> Res<Vec<Program>> {
         if self.nodes.is_empty() {
@@ -1250,10 +1405,11 @@ impl Config {
         }
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
             return Err(format!(
-                "--fault {k} with nodes: not available yet (a node's disk and memory faults come \
-                 later; the net-, partition- and node kill settings work)"
+                "--fault {k} with nodes: not available yet (the disk, memory, net-, partition- \
+                 and node kill settings work)"
             ));
         }
+        self.node_faults(plan)?;
         let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
         let at = crate::launch::GUEST_PATINA;
         if let Some(m) = self.mounts.iter().find(|m| under(at, &m.dst)) {

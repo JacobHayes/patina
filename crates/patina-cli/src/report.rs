@@ -243,7 +243,10 @@ fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<S
         if c["crash"].is_string() {
             named.insert("crash".to_string());
         }
-        for p in strs(&c["faults-preset"]).iter().flat_map(|p| p.split(',')) {
+        for p in strs(&c["faults-preset"])
+            .iter()
+            .flat_map(|p| crate::faults::split_scope(p).0.split(','))
+        {
             // A run with nodes also has the preset's node classes (partitions), whether or not
             // it had the nodes to draw them over: one without has nothing for them to act on.
             let with_nodes = c["nodes"].as_array().is_some_and(|n| !n.is_empty());

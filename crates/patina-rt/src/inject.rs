@@ -204,7 +204,7 @@ pub fn note(nr: u64, kind: u64, class: u64, value: u64, a0: u64, who: Who) {
 /// Count one injected fault.
 pub fn count_injected() {
     let c = ctl();
-    let f = &c.faults;
+    let f = crate::state::faults();
     f.injected.store(f.injected.load(Relaxed) + 1, Relaxed);
     c.stats
         .faults_injected
@@ -213,7 +213,7 @@ pub fn count_injected() {
 
 /// Faults are active and the run is past `faults-after-setup`.
 pub fn active() -> bool {
-    ctl().faults.cfg.faults_active() && after_start()
+    crate::state::faults().cfg.faults_active() && after_start()
 }
 
 fn after_start() -> bool {
@@ -222,7 +222,7 @@ fn after_start() -> bool {
 
 /// Phase 1: the delay, if one is drawn. Phase 2 (`decide`): error or short transfer.
 fn delay(obj: Obj) -> Option<u64> {
-    let f = &ctl().faults;
+    let f = crate::state::faults();
     let cfg = &f.cfg;
     if obj == Obj::Mem {
         return None;
@@ -235,7 +235,7 @@ fn delay(obj: Obj) -> Option<u64> {
 }
 
 fn decide(call: &dyn Call, c: FClass, obj: Obj) -> Decision {
-    let f = &ctl().faults;
+    let f = crate::state::faults();
     let cfg = &f.cfg;
     let nr = call.nr();
     if c == FClass::Sync {
@@ -319,7 +319,7 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
         ret: None,
         post: None,
     };
-    if !ctl().faults.cfg.faults_active() || !after_start() {
+    if !crate::state::faults().cfg.faults_active() || !after_start() {
         return none;
     }
     let Some((obj, who)) = target(call) else {
@@ -387,7 +387,7 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
 /// which class (`SYNC_BY_FSYNC_ERROR` or `SYNC_BY_FS_ERROR`)? Counts the call for
 /// `fsync-error-at` and `fs-error-at=sync:N`, and as eligible for both classes.
 pub fn sync_fails() -> Option<u64> {
-    let f = &ctl().faults;
+    let f = crate::state::faults();
     let cfg = &f.cfg;
     if !cfg.faults_active() || !after_start() {
         return None;
@@ -416,7 +416,7 @@ pub fn sync_fails() -> Option<u64> {
 /// mapping. Past the limit the call answers `ENOMEM` and an `Injected` record names it.
 /// Holds from the start, whatever `faults-after-setup` says: it is a limit, not a draw.
 pub fn mem_limit_refuses(nr: u64, grow: u64) -> bool {
-    let f = &ctl().faults;
+    let f = crate::state::faults();
     let limit = f.cfg.mem_limit_bytes;
     if limit == 0 || grow == 0 {
         return false;

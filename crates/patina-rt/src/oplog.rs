@@ -277,7 +277,7 @@ pub fn record(op: &FsOp) {
                 Data::Iov(iov, cnt) => Src::Iov(iov, cnt),
                 Data::InFile(fd) => Src::File(fd, offset),
             };
-            let f = &ctl().faults;
+            let f = crate::state::faults();
             f.work_bytes
                 .store(f.work_bytes.load(Relaxed) + len, Relaxed);
             append(OpKind::Write, ino, [offset, len, 0, 0, 0, 0], &[src], len);
@@ -1085,7 +1085,7 @@ fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
             proto::oplog::ERRGEN_CAP as u64,
         );
     }
-    d.sync_gen += 1;
+    d.sync_gen[sync_slot()] += 1;
     crate::inject::note(
         nr,
         proto::faults::INJ_FSYNC_EIO,
@@ -1095,6 +1095,11 @@ fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
         who,
     );
     append(OpKind::FsyncFail, ino, [0; 6], &[], 0);
+}
+
+/// This process's node's entry of `Dur::sync_gen`.
+fn sync_slot() -> usize {
+    crate::state::node().min(proto::node::MAX_NODES - 1)
 }
 
 /// The fsync family: durability is the tracker's; the kernel is never asked (on tmpfs it
@@ -1121,10 +1126,10 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
         flush_everything();
         if let Some(by) = crate::inject::sync_fails() {
             fail(0, nr, crate::inject::Who::At(AT_FDCWD_, work_cstr()), by);
-            FDS.get().sync_seen = dur().sync_gen;
+            FDS.get().sync_seen = dur().sync_gen[sync_slot()];
             return -e::EIO;
         }
-        let g = dur().sync_gen;
+        let g = dur().sync_gen[sync_slot()];
         let report = FDS.get().sync_seen < g;
         FDS.get().sync_seen = g;
         append(OpKind::Sync, 0, [0; 6], &[], 0);

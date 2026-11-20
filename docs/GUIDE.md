@@ -1426,8 +1426,8 @@ node, `crash-gap-ms=A..B` (default `5000..60000`) is the virtual time to its nex
 a kill, `down-ms=A..B` (default `1000..5000`, short beside the gap, so that several nodes are
 seldom all down at once) the time it stays down before its restart.
 `max-incarnations=N` stops the kills once a node has started N times (each node counts its
-own), and `faults-in-recovery=0` turns the network's faults and partitions off after the
-first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this
+own), and `faults-in-recovery=0` turns the network's faults, partitions and every node's
+disk and memory faults off after the first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this
 or its machine form (`--crash machine[@a,b]`, next section); a crash point
 (`--crash machine-at:N`, `machine:PERMILLE`) and `restart-gap-ms` are refused, and the driver
 is never killed.
@@ -1549,10 +1549,37 @@ kills and ends at a machine crash, its log closed by a `Crash` record). `patina 
 one, and every run with nodes ends with the self-check on every disk (`result.json`'s
 `self_check` names the disk that differs). The driver's disk is `inc-0/` as without nodes.
 
+`wal.py` recovers a log of checksummed records after each machine crash: a record the crash
+caught before it reached the disk can survive as zeros or cut short, and recovery that trusts
+each record's length (`nocheck`) keeps one no node wrote (`tests/nodes/11-wal.sh`).
+
+### Disk faults per node
+
+The disk and memory keys (`fs-*`, `fsync-*`, `enospc-after-bytes`, `mem-*`, `path-swap-*`)
+are each node's. Given without a scope they act on every node but the driver; `@NODE,...` after
+the value names the nodes (`driver` among them, if wanted); a node's `[node.NAME.faults]` table
+sets its own, replacing the run's:
+
+```sh
+patina run --faults disk ...                              # every node but the driver
+patina run --fault fsync-error-permille=5@a,driver ...    # a and the driver only
+```
+
+```toml
+[node.b.faults]
+fsync-error-permille = 5
+```
+
+Each node draws a range from a seed of its own and counts its own calls (`fs-error-at`,
+`fsync-error-at`, `enospc-after-bytes`) over all its boots; `result.json` shows each node's settings as
+`KEY@NODE`; `swarm` leaves them as given. The other keys are the run's and take no scope. With machine crashes beside fsync
+errors, `acklog`'s `retry` mode (retry a failed `fsync`, then acknowledge) loses an
+acknowledged record once the crash drops the write the failure took
+(`tests/nodes/12-disk-faults.sh`).
+
 **Not available yet** (refused, naming what is missing): a node's crash at a crash point
-(`--crash machine-at:N`, `machine:PERMILLE`), per-node faults (`faults` in a node's table) and
-disk and memory faults with nodes, pausing a node (`node pause`, `node resume`), a node's own
-clock (`clock ...`), `--branch` (it forces crash points), `patina __native` twins and `--check`
+(`--crash machine-at:N`, `machine:PERMILLE`), the SDK's fault keys with nodes, pausing a node (`node pause`, `node resume`), a node's own clock
+(`clock ...`), `--branch` (it forces crash points), `patina __native` twins and `--check`
 reference runs of a run with nodes. `op` events in `patina log events` are the driver's; a
 node's operations are in its disks' logs.
 

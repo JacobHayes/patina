@@ -302,7 +302,7 @@ fn anon_growth(call: &dyn Call) -> u64 {
 }
 
 pub fn handle(call: &mut dyn Call) -> Action {
-    if ctl().faults.cfg.mem_limit_bytes != 0
+    if crate::state::faults().cfg.mem_limit_bytes != 0
         && matches!(call.nr(), nr::MMAP | nr::BRK | nr::MREMAP)
         && crate::inject::mem_limit_refuses(call.nr(), anon_growth(call))
     {

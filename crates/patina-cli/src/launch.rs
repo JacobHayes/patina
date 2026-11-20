@@ -945,6 +945,9 @@ pub fn run_incarnation(
         (t.crash_gap_min_ns, t.crash_gap_max_ns) = p.crash_gap_ns;
         (t.down_min_ns, t.down_max_ns) = p.down_ns;
         t.recovery_off = (!p.faults_in_recovery) as u64;
+        for (f, cfg) in t.faults.iter_mut().zip(p.node_faults).skip(1) {
+            unsafe { std::ptr::write_volatile(std::ptr::addr_of_mut!(f.cfg), cfg) };
+        }
     }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_STEP, Relaxed);
@@ -1320,7 +1323,15 @@ pub fn run_incarnation(
         compute_images: crate::result::ComputeImages::read(unsafe {
             proto::ctl::ComputeTab::at(ctl_ptr)
         }),
-        eligible: std::array::from_fn(|i| ctl.faults.eligible[i].load(Relaxed)),
+        // Every node's eligible calls with the driver's (a run without nodes has none).
+        eligible: std::array::from_fn(|i| {
+            let t = unsafe { proto::node::NodeTab::at(ctl_ptr) };
+            ctl.faults.eligible[i].load(Relaxed)
+                + t.faults
+                    .iter()
+                    .map(|f| f.eligible[i].load(Relaxed))
+                    .sum::<u64>()
+        }),
         crash_points: ctl.faults.crash_points.load(Relaxed),
         log_bytes: ctl.log_used(),
         nodes: (!c.nodes.is_empty())

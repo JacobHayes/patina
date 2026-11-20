@@ -154,12 +154,24 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // each key resolves from the seed alone, so the expanded run is the same run.
     let mut cfg = cfg;
     let mut expanded: Vec<String> = vec![];
-    for p in cfg.faults_preset.iter().flat_map(|p| p.split(',')) {
-        let kv = crate::faults::preset_settings(p, cfg.nodes.len(), &cfg.faults).map_err(error)?;
-        for (k, v) in kv {
-            let given = |x: &String| x.split_once('=').is_some_and(|(xk, _)| xk == k);
-            if !cfg.faults.iter().any(given) && !expanded.iter().any(given) {
-                expanded.push(format!("{k}={v}"));
+    // A preset's scope (`disk@a`) goes with each of its keys.
+    for (names, scope) in cfg
+        .faults_preset
+        .iter()
+        .map(|p| crate::faults::split_scope(p))
+    {
+        let at = scope.map(|s| format!("@{s}")).unwrap_or_default();
+        for p in names.split(',') {
+            let kv =
+                crate::faults::preset_settings(p, cfg.nodes.len(), &cfg.faults).map_err(error)?;
+            for (k, v) in kv {
+                let given = |x: &String| {
+                    let (x, xs) = crate::faults::split_scope(x);
+                    xs == scope && x.split_once('=').is_some_and(|(xk, _)| xk == k)
+                };
+                if !cfg.faults.iter().any(given) && !expanded.iter().any(given) {
+                    expanded.push(format!("{k}={v}{at}"));
+                }
             }
         }
     }

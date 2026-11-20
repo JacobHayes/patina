@@ -92,6 +92,9 @@ pub struct NodeTab {
     pub fs_model: u64,
     /// Written by the supervisor: each node's machine crashes so far.
     pub crashes: [u64; MAX_NODES],
+    /// Each node's disk and memory faults: its settings (written by the launcher) and its
+    /// counters. The driver's are the run's (`Ctl::faults`); entry 0 is unused.
+    pub faults: [crate::faults::FaultCtl; MAX_NODES],
 }
 
 /// Boots a node may have at most (`max-incarnations` is capped by it, and so is `node start`).
@@ -520,34 +523,8 @@ mod tests {
     use super::*;
 
     fn tab(names: &[&str]) -> NodeTab {
-        let mut t = NodeTab {
-            n: 0,
-            name_len: [0; MAX_NODES],
-            names: [[0; NAME_MAX]; MAX_NODES],
-            first_pid: [0; MAX_NODES],
-            status: [0; MAX_NODES],
-            cuts: 0,
-            heals: 0,
-            cut_at_end: [0; MAX_NODES],
-            held: 0,
-            parts_n: 0,
-            parts: [Part::default(); PARTS_MAX],
-            parts_acted: 0,
-            elig: [0; ELIG_N],
-            conf: [NodeConf::default(); MAX_NODES],
-            crash_gap_min_ns: 0,
-            crash_gap_max_ns: 0,
-            down_min_ns: 0,
-            down_max_ns: 0,
-            recovery_off: 0,
-            quiet: 0,
-            boots: [0; MAX_NODES],
-            boot: [[Boot::default(); BOOTS_MAX]; MAX_NODES],
-            ended_by: 0,
-            work: [[0; crate::ctl::WORK_PATH_MAX]; MAX_NODES],
-            fs_model: 0,
-            crashes: [0; MAX_NODES],
-        };
+        // Every field is plain data or an atomic: all zeros is an empty table.
+        let mut t: NodeTab = unsafe { core::mem::zeroed() };
         t.set(names.iter().map(|n| n.as_bytes()));
         t
     }

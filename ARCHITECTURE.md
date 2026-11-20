@@ -451,13 +451,19 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   disk. The links open again then (`wire_heal`), and an item that reaches a dead end resets its
   sender (`RST_UNKNOWN`), as a rebooted host answers a segment of a connection it does not
   know.
+- **Faults per node.** The disk and memory keys are each node's: the config resolves each
+  node's settings (the run's unscoped ones for every node but the driver, `@NODE` scopes,
+  `[node.NAME.faults]`) with a seed of its own (`Config::node_faults`), the driver's into the
+  run's `FaultCfg` and the others' into `NodeTab::faults`, a `FaultCtl` (settings and
+  counters) per node. The runtime reaches its node's through `state::faults()`; the draws stay
+  keyed by sequence number, `faults-after-setup` stays the run's.
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
 Not yet: a node's crash at a crash point (`machine-at:N`, `machine:PERMILLE` with nodes) and
-so `--branch` over a node's crash points, per-node disk faults (disk faults with nodes are
-refused), pausing a node, and per-node clocks.
+so `--branch` over a node's crash points, the SDK's fault keys with nodes, pausing a node,
+and per-node clocks.
 
 ## The boundary log
 

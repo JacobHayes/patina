@@ -2335,6 +2335,38 @@ acknowledges a write before it is on its disk, so a kill and restart lose it): `
 `replay` of another failing seed are identical. In CI the script takes 44-55 s of its 90 s
 budget.
 
+### Node disks and machine crashes
+
+Measured 2026-11-20 on the same host and runner.
+
+**Runs without nodes are unchanged.** The 90-cell ledger, built at the commit before node disks
+and at each of the two commits that add them (disks and machine crashes; disk and memory faults
+per node): identical on x86_64 and on arm64, no cell without a result.
+
+**A machine crash by the script** (`tests/nodes/09-machine.sh`, `tests/guests/nodes/disk.py`):
+every fsynced write kept, node b's unsynced write untouched by a's crashes, an established
+connection silent until the restart and then reset at its next send, a connect while down timed
+out; the unsynced write lost in some crashes and kept in others, as the seed draws. `verify`
+of seed 4 (3 crashes) under `--vary cpu,load,aslr,sandbox,repeat`: 6 identical runs; `replay`
+identical. Planted breaks, each red then green with the fix: the shadow table keyed by inode
+alone (four nodes storing through shared mappings: the self-check fails on 4 of 4 seeds);
+the wrong node's tree reverted at a crash (`disk.py` reports a lost fsynced write).
+
+**Under the seed's crashes** (each with `--crash machine`, `down-ms=100..300` or `200..1000`):
+
+| Workload | Correct | Planted bug |
+|---|---|---|
+| `q3.py` (three nodes, partitions beside the crashes, `crash-gap-ms=1000..4000`, 40 s) | ok on seeds 1-8, every node crashed in each run (72 crashes), self-check passed in all | `nosync` (answer before syncing): an acknowledged write lost in 7 of seeds 1-8 |
+| `wal.py` (one node appending checksummed records, `crash-gap-ms=300..1500`, 12 boots) | ok on seeds 1-100, 1,100 crashes, a torn tail cut off in some boots | `nocheck` (recovery trusts each record's length): a record no node wrote, in 75 of seeds 1-100 |
+| `ack-log` as a node with `fsync-error-permille=1` (`crash-gap-ms=1..4`, 8 boots) | ok on seeds 1-100 (268 crashes; restarted after it stops at an fsync error) | `retry` (retry a failed fsync, then acknowledge): an acknowledged record lost in 88 of seeds 1-100 |
+
+Every failing group's first run replayed identically. `verify` of `q3.py` seed 2 with crashes
+and partitions: 4 identical runs under the same `--vary`.
+
+**Disk faults per node** (`tests/nodes/12-disk-faults.sh`): an unscoped `fsync-error-permille`
+fails fsyncs on nodes a and b and never the driver's; `@a,driver` on a and the driver only;
+`[node.b.faults]` on b only.
+
 ### PostgreSQL 18: failover under partitions and kills
 
 PostgreSQL 18.7, built from the release tarball (`--without-icu --without-readline`), no

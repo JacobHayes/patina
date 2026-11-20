@@ -61,7 +61,7 @@ pub fn dispatch(call: &mut dyn Call, row: &'static Row) -> Action {
             ts.call_row = row as *const Row as u64;
             ts.call_args = guest;
             // A path swap is made before the paths are resolved, so the walk sees it.
-            let cfg = &ctl().faults.cfg;
+            let cfg = &crate::state::faults().cfg;
             let swap = if cfg.any != 0 && cfg.path_swap() {
                 crate::swap::before(call)
             } else {
@@ -88,7 +88,7 @@ fn passed(call: &mut dyn Call, row: &'static Row) -> Action {
     }
     // Faults are decided before the call.
     let mut post = None;
-    if ctl().faults.cfg.any != 0 {
+    if crate::state::faults().cfg.any != 0 {
         if let Some(c) = proto::faults::class_of(call.nr()) {
             let g = crate::inject::before(call, c);
             if let Some(r) = g.ret {

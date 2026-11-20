@@ -496,7 +496,16 @@ impl Sup {
         if how == DOWN_KILL_SEED || how == DOWN_CRASH_SEED {
             self.kill_inject(k, b, (how == DOWN_CRASH_SEED) as u64);
             if self.node_tab().recovery_off != 0 {
+                // `faults-in-recovery = false`: the links' faults and every node's disk and
+                // memory faults stop.
                 self.node_tab().quiet = 1;
+                let off = |c: &proto::faults::FaultCfg| unsafe {
+                    std::ptr::write_volatile(std::ptr::addr_of!(c.faults_off) as *mut u64, 1)
+                };
+                off(&self.ctl.faults.cfg);
+                for f in self.node_tab().faults.iter() {
+                    off(&f.cfg);
+                }
             }
         }
         self.nodes.killing = true;

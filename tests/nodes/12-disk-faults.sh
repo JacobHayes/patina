@@ -1,0 +1,65 @@
+# 12. Nodes: disk faults per node (tests/guests/faults/acklog.c as a node: append a record, fsync
+# it, acknowledge it; an fsync error stops it without acknowledging). An unscoped disk key
+# acts on every node but the driver; `@NODE` on the named nodes only; `[node.NAME.faults]` on
+# that node. Under machine crashes beside fsync errors: correct, ok on every seed of a sweep
+# with crashes in it, the self-check passing in all, identical under verify; the planted bug
+# `retry` (retry a failed fsync, then acknowledge: the write the failure dropped is gone after
+# the crash) loses an acknowledged record, found in most seeds; its first failing run replays
+# identically.
+#@ tier=quick budget=60 slots=4
+. "$(dirname "$0")/lib.inc"
+o=$RUNS/12-disk-faults; mkdir -p "$o"
+# err RUN NODE: whether NODE's first boot saw an fsync error.
+err() { if grep -q '^fsync E' "$1/$2/inc-0/stdout"; then echo yes; else echo no; fi; }
+rm -f "$o/ab.toml" "$o/b.toml"
+conf "$o/ab.toml" a /guest/ack-log correct 1000000; conf "$o/ab.toml" b /guest/ack-log correct 1000000
+cp "$o/ab.toml" "$o/b.toml"; printf '[node.b.faults]\nfsync-error-permille = 5\n' >>"$o/b.toml"
+# The driver stops at its own first fsync error; it then waits, so that the run does not end
+# before the nodes have made as many fsyncs.
+check() {  # check NAME DRIVER A B
+    [ "$(err "$o/$1" .)" = "$2" ] && [ "$(err "$o/$1" node/a)" = "$3" ] && [ "$(err "$o/$1" node/b)" = "$4" ] \
+        || die "$1: fsync errors on driver, a, b: $(err "$o/$1" .) $(err "$o/$1" node/a) $(err "$o/$1" node/b), expected $2 $3 $4"
+    echo "$1: fsync errors on driver $2, a $3, b $4"
+}
+run_ok "$o/all" 1 --config "$o/ab.toml" --fault fsync-error-permille=5 -- sh -c "/guest/ack-log correct 2000; sleep 2"  # lint-allow: sleep — the guest's, in virtual time
+check all no yes yes
+run_ok "$o/scoped" 1 --config "$o/ab.toml" --fault fsync-error-permille=5@a,driver -- sh -c "/guest/ack-log correct 2000; sleep 2"  # lint-allow: sleep — the guest's, in virtual time
+check scoped yes yes no
+run_ok "$o/table" 1 --config "$o/b.toml" -- sh -c "/guest/ack-log correct 2000; sleep 2"  # lint-allow: sleep — the guest's, in virtual time
+check table no no yes
+# Machine crashes beside fsync errors: seeds 1-8 of correct (restarted after it stops) and retry.
+F="--crash machine --fault crash-gap-ms=1..4 --fault down-ms=100..300 --fault max-incarnations=8 --fault fsync-error-permille=1"
+rm -f "$o/ok.toml" "$o/retry.toml"
+conf "$o/ok.toml" a /guest/ack-log correct 1000000; printf 'restart = "always"\n' >>"$o/ok.toml"
+conf "$o/retry.toml" a /guest/ack-log retry 1000000
+sweep() {  # sweep VARIANT KEEP: prints the outcomes
+    rm -rf "${o:?}/$1"
+    st=0
+    timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep "$2" --out "$o/$1" --config "$o/$1.toml" $F \
+        --mount "$PATINA_GUESTS":/guest:copy -- sleep 6 >"$o/$1.txt" 2>&1 || st=$?
+    [ -f "$o/$1/report.json" ] || { tail -20 "$o/$1.txt"; die "sweep $1: no report (exit $st)"; }
+    field "$o/$1/report.json" outcomes
+}
+out=$(sweep ok all)
+[ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
+set -- $(python3 -I -c 'import json,sys
+k=c=0
+for f in sys.argv[1:]:
+    r=json.load(open(f))
+    k+=sum(d["how"] == "machine crash" for d in r["nodes"]["list"][1].get("downs", []))
+    c+=r["self_check"]["verdict"] == "pass"
+print(k, c)' "$o"/ok/seed-*/result.json)
+[ "$1" -ge 8 ] || die "correct: only $1 machine crashes in 8 runs"
+[ "$2" = 8 ] || die "correct: the self-check passed in only $2 of 8 runs"
+echo "correct: ok on seeds 1-8, $1 machine crashes, self-check passed in all"
+verify_ok "$o/verify" 2 3 --config "$o/ok.toml" $F -- sleep 6
+sweep retry fail >/dev/null
+n=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["outcomes"].get("failure", 0))' "$o/retry/report.json")
+[ "$n" -ge 4 ] || die "retry: found in only $n of 8 seeds"
+r=$(python3 -I -c 'import json,sys
+g=[g for g in json.load(open(sys.argv[1]))["groups"] if g["outcome"] == "failure"]
+r=["seed %s %s" % (x["replay"]["seed"], x["replay"]["result"]) for x in g if x["replay"]]
+print(", ".join(r))
+sys.exit(0 if r and len(r) == len(g) and all(x["replay"]["result"] == "identical" for x in g) else 1)' "$o/retry/report.json") \
+    || die "retry: a first failing run did not replay identically: ${r:-no replay}"
+echo "retry: found in $n of 8 seeds; replayed: $r"

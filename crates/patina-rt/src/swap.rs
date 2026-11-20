@@ -186,7 +186,7 @@ fn decide(nr: u64, a0: u64, checked: &[u8], root: &[u8], chk: Seen) -> Option<Sw
     if !crate::inject::active() {
         return None;
     }
-    let f = &ctl().faults;
+    let f = crate::state::faults();
     let cfg = &f.cfg;
     f.eligible(Kind::PathSwap);
     let at = f.eligible[Kind::PathSwap as usize].load(Relaxed);

@@ -314,6 +314,18 @@ pub fn work_path() -> &'static [u8] {
     }
 }
 
+/// This process's disk and memory faults: the driver's are the run's (`Ctl::faults`), another
+/// node's its own (`NodeTab::faults`).
+pub fn faults() -> &'static proto::faults::FaultCtl {
+    match node() {
+        0 => &ctl().faults,
+        k => {
+            &unsafe { proto::node::NodeTab::at(ctl_base()) }.faults
+                [k.min(proto::node::MAX_NODES - 1)]
+        }
+    }
+}
+
 /// Is `p` this process's work tree or under it?
 pub fn on_work(p: &[u8]) -> bool {
     proto::vfs::under(p, work_path())

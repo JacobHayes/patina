@@ -53,6 +53,9 @@ pub struct Plan {
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`compute-walk`; 0: switches are taken at their sites).
     pub compute_walk: u64,
+    /// With nodes: each node's disk and memory settings (`NodeTab::faults`; the driver's are
+    /// in `faults`, entry 0 unused).
+    pub node_faults: [proto::faults::FaultCfg; proto::node::MAX_NODES],
     /// The resolved settings, in key order, as `result.json` and `run.json` show them: a
     /// number, a string, or `"off"` for a class `swarm` turned off.
     pub resolved: Vec<(String, Value)>,
@@ -604,6 +607,42 @@ fn faultable_nodes(nodes: usize, settings: &[String]) -> Res<usize> {
     })
 }
 
+/// A key each node has its own value of (DESIGN 2.4): the disk and memory keys. In a run with
+/// nodes the run's value applies to every node but the driver, and `@NODE,...` scopes it.
+pub fn node_scoped(k: &str) -> bool {
+    k.starts_with("fs-")
+        || k.starts_with("fsync-")
+        || k.starts_with("mem-")
+        || k.starts_with("path-swap-")
+        || k == "enospc-after-bytes"
+}
+
+/// `SETTING@NODE,...`: the setting and the nodes it names (`None`: no scope). A setting's
+/// scope follows its value (`KEY=VALUE@NODE`): an `@` in the key (`point:LABEL`) is the key's.
+pub fn split_scope(s: &str) -> (&str, Option<&str>) {
+    let from = s.find('=').map_or(0, |i| i + 1);
+    match s[from..].rfind('@') {
+        Some(j) => (&s[..from + j], Some(&s[from + j + 1..])),
+        None => (s, None),
+    }
+}
+
+/// Copy the node-scoped settings of `src` into `dst` (the rest of `dst` stays).
+pub fn set_node_keys(dst: &mut proto::faults::FaultCfg, src: &proto::faults::FaultCfg) {
+    dst.fs_error_permille = src.fs_error_permille;
+    (dst.fs_error_at_class, dst.fs_error_at_n) = (src.fs_error_at_class, src.fs_error_at_n);
+    dst.fs_eintr = src.fs_eintr;
+    dst.short_permille = src.short_permille;
+    dst.fsync_error_permille = src.fsync_error_permille;
+    dst.fsync_error_at = src.fsync_error_at;
+    dst.enospc_after_bytes = src.enospc_after_bytes;
+    (dst.delay_permille, dst.delay_max_ns) = (src.delay_permille, src.delay_max_ns);
+    (dst.mem_error_permille, dst.mem_error_at) = (src.mem_error_permille, src.mem_error_at);
+    dst.mem_limit_bytes = src.mem_limit_bytes;
+    (dst.path_swap_permille, dst.path_swap_at) = (src.path_swap_permille, src.path_swap_at);
+    dst.any |= src.any;
+}
+
 /// The keys of preset `p` in a run with `faultable` nodes the link faults act on: its own,
 /// and its node keys (`NODE_PRESETS`) when there are two such nodes.
 pub fn preset_keys(p: &str, faultable: usize) -> Res<Vec<(&'static str, &'static str)>> {
@@ -714,6 +753,7 @@ pub fn resolve(
         compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
         compute_budget: true,
         compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
+        node_faults: Default::default(),
         resolved: vec![],
     };
     if swarm {
@@ -1289,6 +1329,20 @@ mod tests {
         // The restart gap of a run without nodes is its own.
         let one = resolve(3, &[], &[], Some("machine"), 0).unwrap();
         assert_eq!(one.restart_gap_ns, (s, 61 * s));
+    }
+
+    #[test]
+    fn a_scope_follows_the_value() {
+        assert_eq!(
+            split_scope("fs-error-permille=5@a,b"),
+            ("fs-error-permille=5", Some("a,b"))
+        );
+        assert_eq!(split_scope("disk@a"), ("disk", Some("a")));
+        assert_eq!(split_scope("point:db@retry=5"), ("point:db@retry=5", None));
+        assert_eq!(
+            split_scope("fs-error-permille=5"),
+            ("fs-error-permille=5", None)
+        );
     }
 
     #[test]

@@ -270,13 +270,13 @@ pub const FLAGS: &[Flag] = &[
         "--faults",
         "NAME",
         "off",
-        "fault preset: disk, net, all (or several: disk,net); its rates are ranges the seed resolves",
+        "fault preset: disk, net, all (or several: disk,net); its rates are ranges the seed resolves; with nodes, disk@NODE,... scopes it",
         RUNLIKE,
     ),
     many(
         "--fault",
         "KEY=VALUE",
-        "one fault setting; replaces the preset's (keys below)",
+        "one fault setting; replaces the preset's (keys below); with nodes, a disk or memory key's KEY=VALUE@NODE,... scopes it",
         RUNLIKE,
     ),
     flag(

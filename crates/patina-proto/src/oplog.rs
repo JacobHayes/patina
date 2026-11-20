@@ -222,8 +222,8 @@ pub const ERRGEN_CAP: usize = 4096;
 pub struct Dur {
     /// Open addressing by inode number: `(ino, generation)`; ino 0 is empty.
     pub errgen: [[u64; 2]; ERRGEN_CAP],
-    /// Generation of the "any inode" error reported by `sync`/`syncfs`.
-    pub sync_gen: u64,
+    /// Generation of the "any inode" error reported by `syncfs`, per node (each its own disk).
+    pub sync_gen: [u64; crate::node::MAX_NODES],
     pub shadows: Shadows,
 }
 
@@ -348,10 +348,13 @@ impl Dur {
             _ => 0,
         }
     }
-    /// Node `node`'s disk is gone (a machine crash): its inodes' generations read 0 again, so
-    /// a file of its next disk that reuses an inode number starts with none. The keys stay,
+    /// Node `node`'s disk is gone (a machine crash): its inodes' generations and its `syncfs`
+    /// generation read 0 again, so its next disk starts with none. The keys stay,
     /// holding their place in the probe chains.
     pub fn forget_node(&mut self, node: usize) {
+        if node != 0 && node < crate::node::MAX_NODES {
+            self.sync_gen[node] = 0;
+        }
         for e in self.errgen.iter_mut() {
             if node != 0 && e[0] != 0 && e[0] >> 56 == node as u64 {
                 e[1] = 0;
