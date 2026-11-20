@@ -2527,3 +2527,120 @@ seed 16 and of a two-primaries run identical, as was every sweep group's own rep
   oracle fails; the run replays identically.
 
 No PostgreSQL bug was found; nothing was filed.
+
+### PostgreSQL on two nodes under machine crashes
+
+Measured 2026-11-20 on the same host, at the commit that adds disk and memory faults per node.
+
+PostgreSQL 18.7 from the release tarball (checksum checked, `--without-icu --without-readline`,
+data checksums on, as `initdb` now defaults), no changes. Node `pg1` starts as the primary,
+`pg2` as its synchronous standby (`synchronous_standby_names = '*'`), each from its own data
+directory and on its own disk, with `fsync`, `full_page_writes` and `wal_log_hints` on. Each
+node's first process is an agent that starts again at every boot: it removes the stale
+`postmaster.pid` an operator would after a power loss (an empty one, from a crash while the
+postmaster wrote it, turned up too), then asks the driver every second what to be: a primary
+(crash recovery, then promote if still a standby), a standby of the other (a standby starts as
+it was; a former primary is rewound with `pg_rewind`, or rebuilt with `pg_basebackup` when that
+fails or a crash cut a rejoin short), or finished (clean stop, `pg_checksums`). The driver is
+never faulted. It is the clients (three, over `host=pg1,pg2 target_session_attrs=read-write`,
+committing two-row transactions for 30 s of virtual time, every call with a deadline, as a
+crashed machine never answers), the health check (each second; two failures in a row fail
+over) and the failover manager: fence the old primary with `node kill` (its machine's power),
+`pg_promote()`, `node start` it again. Then it settles (both up, the standby streaming and
+replayed past a `pg_log_standby_snapshot()` position, no commit waiting) and reads both nodes'
+rows, `pg_amcheck --heapallindexed` (the primary also `--parent-check --rootdescend`) and
+`pg_checksums`. Faults start after setup (`faults-after-setup=1`); the seed's machine crashes
+are `--crash machine --fault crash-gap-ms=5000..20000 --fault down-ms=500..4000`; each node's
+tmpfs is 768 MiB. Each sweep: `patina sweep --seeds 1..1700 -j 6 --keep fail --config nodes.toml
+--tmpfs-bytes 805306368 --log-limit 2048 --mount PG --mount HARNESS:/g --fault
+faults-after-setup=1 --check 'check.py --stats DIR' --env DUR=30 --crash machine --fault
+crash-gap-ms=5000..20000 --fault down-ms=500..4000 -- python3 /g/driver.py`, with the scenario
+(`--env SCEN=both|churn|rejoin|promote|ckpt`), the synchronous level (`--env SYNC=...`) and the
+leg's faults added.
+
+An outside checker judges each run with the oracles of the section above (acked-lost,
+split-brain, two-primaries, divergence, partial-txn, phantom, not-settled) and also:
+acked-missing (an acknowledged commit missing on the caught-up standby), checksum-fail
+(`pg_checksums` finds a bad page), amcheck-fail (`pg_amcheck` exits 2), recovery-failed (a
+node's last start failed), no-primary-content. It also records the cause of each failover:
+the old primary's machine crash or process kill by the seed in the 6 s before the decision, a
+partition (old primary alive), the driver's scenario, or other.
+
+| Sweep (seeds) | Failovers | Findings |
+|---|---|---|
+| machine crashes, `synchronous_commit = on` (1-1700) | none 480 runs, crash 683, several 537 (1,871) | none; 0 of 939,277 acknowledged commits lost; 842 runs had both nodes down at once; timelines 1-5 |
+| the same, `remote_apply` (1-300) | none 94, crash 116, several 90 | none; 0 of 166,919 lost |
+| both machines crash within 50 ms (1-300) | 465 | none; 0 of 156,182 lost; both down in every run |
+| a standby crashing 3-8 times (1-120) | 80 | none |
+| a crash 0-80 ms into a rejoin's `pg_rewind` or `pg_basebackup` (1-120) | 181 | none |
+| a crash of the node being promoted, 0-150 ms in (1-120) | 131 | 1 not-settled (below) |
+| explicit checkpoints, 40% with a crash 0-6 ms in (1-150) | 120 | none |
+| crashes and `--faults net`, partitions every 5-30 s for 1-8 s (1-200) | none 75, crash 94, partition 27, several 3, other 1 | 1 not-settled (below) |
+| the same with `net-links=driver` (1-200) | none 62, crash 103, partition 25, several 6, other 4 | 5 no-primary-content, a harness bug (below) |
+| process kills, `--faults net`, `net-links=driver` (1-150) | none 33, kill 86, partition 12, several 16, other 3 | none |
+| `fsync-error-permille=1..5@pg1` (1-150) | 167 | 0 of 39,377 lost; recovery-failed 93, amcheck-fail 7 (below) |
+| `fsync-error-permille=1..5@pg2` (1-100) | 49 | 0 lost; recovery-failed 35 |
+| `--faults disk@pg2` (1-60) | 6 | 0 lost; recovery-failed 34, amcheck-fail 11 (below) |
+| `enospc-after-bytes=20000000..120000000@pg2` (1-60) | 58 | 0 lost; not-settled 13, recovery-failed 10 (the disk stays full) |
+
+**Controls**, each oracle seen to fail:
+
+| Control (seeds) | Fired |
+|---|---|
+| `fsync = off` on `pg1`, down 200-1500 ms (1-60) | 51 runs: acked-lost 31 (2,328 commits), checksum-fail 11, amcheck-fail 4, divergence 2, recovery-failed 1 |
+| `synchronous_commit = off` (1-30) | acked-lost in 30 (478 commits) |
+| asynchronous replication (1-60) | acked-lost in 31 (843 commits) |
+| no fencing, synchronous (1-60) | two-primaries in 40; nothing lost or split |
+| no fencing, asynchronous (1-60) | split-brain in 39 (14,292 acknowledgements), acked-lost in 40, two-primaries in 40 |
+| `full_page_writes = off`, timed checkpoints, 60 s (1-150) | recovery-failed in 1 (`invalid page in block 2 ... WAL redo`) |
+| `remote_write`, both machines crash (1-250); with slow disks (260 more) | 0 |
+| a recorded run's final rows changed (one txn row, an unattempted txn, a row off the standby) | partial-txn, phantom, acked-missing, once each |
+
+`remote_write` and `full_page_writes = off` lose data only to a crash between a standby's reply
+and its fsync, or inside a checkpoint's writes. Every system call costs about 1 µs of virtual
+time, so those windows are microseconds wide against crash gaps of seconds: of A-on's 8,157
+crashes, 273 found the server in a checkpoint and 14 came right after a WAL write. Slowing the
+disk instead (`fs-delay-permille`) made the standby too slow to fail over to.
+
+**Determinism.** Seeds 1-300 of the first sweep run again: 300 identical digests, 206 with a
+failover. `verify` under `--vary cpu,load,aslr,sandbox,repeat`, 4 identical runs each with the
+sweep's digest: no failover, a crash, several, both crashing, a partition with the driver's
+links faulted, a process kill, the asynchronous control and an `amcheck-fail` run. `replay` of
+an `acked-lost` run identical, as was every failing group's own replay. About 0.7 runs/s at
+`-j 6` (median 8 s of wall time per run), 0.2-0.35 at `-j 4` under disk faults.
+
+**Triage**, in the order harness, Patina, configuration, documented behaviour, PostgreSQL:
+
+- *Harness.* With fsync errors on `pg1` an old primary's `pg_rewind` failed at its last fsync
+  after rewriting the directory, and the agent ran it again: `no rewind required`, as the
+  second run's single-user recovery finished the first's work and wrote a shutdown checkpoint
+  of `pg1`'s own on the source's timeline. `pg1` then streamed as the synchronous standby, so
+  the primary acknowledged commits `pg1` flushed but could never replay past its own record;
+  promoted later, it ended recovery there: 3 acknowledged commits lost in each of 2 of 150
+  runs. PostgreSQL's documentation says a `pg_rewind` that fails leaves the target unusable and
+  a fresh backup is needed; the agent now rebuilds, and the same 150 seeds lose nothing. Also
+  fixed: a rebuild given up when its source was only unreachable; final reads that met a
+  partition right after the settle (the 5 no-primary-content).
+- *Patina.* A `sync_file_range(..., SYNC_FILE_RANGE_WRITE)` gets the fsync-error fault: it
+  returns `EIO` and the failure counts as reported, so the `fsync` that follows on a new
+  descriptor returns 0 while the data stays not durable. `pg_basebackup` (as `SyncDataDirectory`)
+  calls exactly that before fsyncing every file and ignores its error; it reported success, and
+  after a machine crash relation files were empty (the 7 amcheck-fail with `fsync-error@pg1`:
+  `read only 0 of 8192 bytes`). On Linux a write-only `sync_file_range` does not wait, so it
+  cannot see a write-back error, and an unseen error is reported to a descriptor opened later:
+  the fsync returns `EIO` and `pg_basebackup` fails. Not fixed here. Also: TCP keepalive probes
+  are not modelled (a `recv` on a crashed peer's connection with `SO_KEEPALIVE` at 2/1/3 s
+  never fails; Linux: `ETIMEDOUT` after about 5 s); this driver uses deadlines instead.
+- *Configuration, under faults that stay.* `fsync` errors make PostgreSQL PANIC
+  (`data_sync_retry = off`) at every restart while the fault keeps firing (recovery-failed);
+  a full disk stops `postmaster.pid` and rebuilds. The 11 amcheck-fail with `--faults disk`
+  are the injected faults themselves: 4 read errors, and 7 short reads of a relation file,
+  which PostgreSQL 18's default asynchronous read path treats as a failed read (Linux local
+  filesystems do not return such short reads).
+- *Documented behaviour.* The 2 not-settled runs: a walreceiver that had just connected when
+  its source's machine crashed waits for the server's answer with no timeout
+  (`connect_timeout` covers the TCP connect, `wal_receiver_timeout` only streaming), and a
+  silent crash sends no reset. The same holds for a `pg_basebackup` whose source crashed, very
+  likely the unexplained seed 73 of the section above.
+
+No PostgreSQL bug was found; nothing was filed.
