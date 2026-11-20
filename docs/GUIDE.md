@@ -1249,7 +1249,10 @@ the one the kernel makes for an unbound socket with `SO_PASSCRED`, is a name of 
 WORDS` in a script (`patina` is at `/opt/patina/bin/patina`, on the `PATH` of a run with
 nodes), `patina.control("WORDS")` in Python, `patina_control("WORDS")` in C (`patina.h`),
 `patina_dst::control("WORDS")` in Rust and `patina.Control("WORDS")` in Go.
-Each is a call the log records (`mark` and `net` events below).
+Each is a call the log records: `patina log events` shows it as an `sdk` event with `op`
+`control` and the words in `text` (`mark` words included: they do what the SDK's `mark`
+does, but the event is this one, not a `mark` event), followed by the `net` or `node` event
+of what it did.
 
 | Words | |
 |---|---|

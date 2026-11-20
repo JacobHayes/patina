@@ -2306,3 +2306,114 @@ the node names and `patina ctl`.
 Seed 1 twice: digest `9d2872311dda6eb0` both times; `verify` (cpu, load, aslr, sandbox,
 repeat): 3 identical runs; `replay` identical; seed 2: `60112f64f8c7c961`. About 0.4 s of
 wall time per run (the cut's 5 s are virtual).
+
+### Killing and restarting nodes
+
+Measured 2026-11-20 on the same host and runner.
+
+**Runs without nodes are unchanged.** The same 90-cell ledger, built at the commit before
+kill and restart and at the commit with them: identical on x86_64 and on arm64.
+
+**Kill and restart by the script** (`tests/nodes/05-kill.sh`, `tests/guests/nodes/kill.py`): 50
+cycles of `node kill b --process` and `node start b`. Each kill ends both of `b`'s connections
+(its first process's and a forked child's), connects to either port are refused while `b` is
+down, a second kill and a start of a running node answer `EALREADY`, and each restart finds the
+work tree the last left and its own `PATINA_INCARNATION`: 51 incarnations, one
+`node/b/inc-K/` each, 50 `kill` and 50 restarting `start` events. `verify` (10 cycles): 3
+identical runs. About 0.7 s of wall time for the 50 cycles. A node's own end: an exit outside
+`ok-exit` ends the run `failure` and a `SIGSEGV` ends it `crash`, both naming the node; with
+`ok-exit = 3`, `restart = "always"`, `max-incarnations = 3` and `count = 2`, nodes `w1` and
+`w2` each print incarnations 0, 1 and 2.
+
+**The quorum store under the seed's kills** (`tests/nodes/06-quorum-kills.sh`, the three-node
+store of `03-quorum.sh` with `--crash process`, `crash-gap-ms=2000..10000`,
+`down-ms=500..3000` beside the partitions): correct, seeds 1-16 with a 40 s driver: 16 ok, 16
+distinct digests, 91 partitions, 144 kills and 144 restarts; `verify` of seeds 4 and 11 under
+`--vary cpu,load,aslr,sandbox,repeat`: 4 identical runs each. The planted bug `amnesia` (a node
+acknowledges a write before it is on its disk, so a kill and restart lose it): `failure` in
+12 of seeds 1-16 and 20 of seeds 9-32; the sweep's replay of the group and an explicit
+`replay` of another failing seed are identical. In CI the script takes 44-55 s of its 90 s
+budget.
+
+### PostgreSQL 18: failover under partitions and kills
+
+PostgreSQL 18.7, built from the release tarball (`--without-icu --without-readline`), no
+changes. Nodes `pg1` (primary) and `pg2` (a streaming standby of `pg1`,
+`synchronous_standby_names = '*'`, `synchronous_commit = on`), each from its own copy of a
+data directory made natively (`initdb`, then `pg_basebackup`). Each node's command is a small
+agent: at its first start it starts its server as the data directory says; restarted, it
+starts nothing and waits for the driver to say what it is. The driver (Python, libpq over
+`ctypes`) is the clients, the health checker and the failover manager:
+
+- three clients keep a connection open over `host=pg1,pg2` with
+  `target_session_attrs=read-write` and commit two-row transactions for 30 s of virtual time;
+- each second the driver asks the primary `select pg_is_in_recovery()`, and asks the standby
+  whether its WAL receiver is streaming (a standby that answers but does not stream counts
+  as a failure: the network between the two is faulted); two failures in a row fail over to
+  the standby if it answers as one: fence the old primary (`node kill OLD --process`, the
+  power switch), `pg_promote()`, `node start OLD`, and tell its agent to rejoin;
+- a rejoining node that was a standby starts as it was; one that was a primary is rewound
+  from the new primary with `pg_rewind` (a fresh `pg_basebackup` if that fails, since a
+  failed rewind leaves the data directory unusable) and starts as its standby;
+- after 30 s the clients stop and the driver settles: both nodes up, the standby replayed
+  up to the primary's position, no commit waiting for it, then both nodes' contents.
+
+Faults, after setup (`faults-after-setup=1`): `--faults net` with resets off and chunks of
+1448 to 65536 bytes; partitions every 5-30 s for 1-8 s; `--crash process` (`crash-gap-ms`
+10-60 s, `down-ms` 1-5 s, at most 3 kills a node). Each node's tmpfs is 1 GiB. The driver is
+never faulted: partitions and link faults act between `pg1` and `pg2`. An outside checker
+judges each run:
+
+| Oracle | Fails when |
+|---|---|
+| acked-lost | a commit acknowledged without a warning is missing on the final primary |
+| split-brain | a node acknowledged a commit sent after the other's promotion was decided, while no longer the harness's primary |
+| two-primaries | both nodes accept writes at the end |
+| divergence | the standby caught up, yet its rows differ from the primary's |
+| partial-txn, phantom | a transaction with one row, or one no client attempted |
+| not-settled | no settled moment within 120 s of virtual time |
+
+Each failover's cause comes from the run's events: `kill` (the old primary was down after the
+seed's kill) or `standby-view` (it was up; the standby had stopped streaming from it).
+
+| Sweep (seeds) | Failovers | Findings |
+|---|---|---|
+| synchronous, fenced (1-300) | none 160 runs, kill 105, standby-view 26, several 9 (119 kill, 30 standby-view) | 1 not-settled; 0 of 118,957 acknowledged commits lost; no split-brain, divergence, partial or phantom transaction |
+| the same with the primary checked only directly (1-300) | none 180, kill 113, several 7 (all 128 kill) | 1 not-settled; 0 of 120,537 lost |
+| control: asynchronous (1-100) | none 59, kill 39, several 2 | acked-lost in 15 runs, 1,869 commits |
+| control: no fencing, synchronous (1-100) | none 51, kill 39, standby-view 8, several 2 | two-primaries in 7 runs; no acknowledged commit lost or split, as synchronous replication blocks the old primary's commits |
+| control: no fencing, asynchronous (1-100) | none 51, kill 40, standby-view 9 | acked-lost in 22 runs (3,711 commits), 1,371 split-brain acknowledgements, two-primaries in 1 |
+
+The fenced 300 had 448 partitions, 357 kills by the seed and 30 fencing kills, and 387
+restarts; 300 distinct digests, about 170 s of wall time at `-j 6`. **Determinism:** the whole
+300 run again gave the same digest for every seed, the 140 with a failover included; `verify`
+of seeds 4 (kill), 36 (standby-view) and 16 (several) under `--vary
+cpu,load,aslr,sandbox,repeat`: 4 identical runs each, with the sweep's digest; `replay` of
+seed 16 and of a two-primaries run identical, as was every sweep group's own replay.
+
+**Triage**, in the order harness, Patina, configuration, documented behaviour, PostgreSQL:
+
+- *Harness.* The first agent rewound every rejoining node. `pg_rewind` finishes a crashed
+  target's recovery in single-user mode, which refuses standby mode, so the agent removed
+  `standby.signal` first; that recovery then ended as a primary's and wrote WAL of its own
+  where the primary's next records went, which the standby, restarted, reported as flushed.
+  The oracles caught it: in the first 300 seeds, 3 acknowledged commits lost (seed 297) and
+  14 divergences. A standby that went down now starts again as it was.
+- *Harness.* After that, 11 runs (12 in the final sweep) first read the standby without
+  commits the primary had: a hot standby that starts from a running-transactions record
+  listing commits that still waited for it treats them as running until the next such record.
+  The driver now logs one (`pg_log_standby_snapshot()`) and reads again; the rows are there
+  every time. PostgreSQL's hot-standby design, not lost data.
+- *Patina.* A control call's `mark` words are recorded as an `sdk` event (`op` `control`), not
+  a `mark` event; the GUIDE said otherwise and now says this. `patina sweep --keep fail` kept
+  the nodes' output of the runs it pruned; it now removes it with their logs.
+- *Configuration.* With the default 256 MiB tmpfs and `wal_keep_size = 256MB`, recovery ran
+  out of space (`ENOSPC`); the tmpfs is 1 GiB and `wal_keep_size` 64 MB. The net preset's
+  resets (5 to 50 per 1000 chunks) end almost every `pg_basebackup` and `pg_rewind` of the data
+  directory, so a rejoin never completes: resets are off. Chunks of a few bytes make a
+  settle's large result fill the default 1 GiB log limit (the sweeps allow 2 GiB): chunks are 1448 bytes or more.
+- *Not explained:* seed 73, in every synchronous sweep: the old primary's `pg_basebackup`
+  from the new one does not finish within the agent's 120 s, so the run never settles. No data
+  oracle fails; the run replays identically.
+
+No PostgreSQL bug was found; nothing was filed.
