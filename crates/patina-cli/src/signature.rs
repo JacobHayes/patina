@@ -16,6 +16,12 @@
 //! ids, counts and durations vary by seed and build while the bug stays the same. Absolute
 //! paths keep their last three components (`checkout_free`), so a label made from a source
 //! file's path is the same in every checkout.
+//!
+//! The rule for nodes: a node's own end (`node_end`) is named `[node NAME]` with NAME's
+//! digits collapsed, so replicas numbered alike (`n1`, `n2`, `n3`) that end the same way are
+//! one bug while nodes named for their roles (`primary`, `backup`) stay apart. Which node
+//! crashed, and where, is a fault setting's effect and not part of it: a lost write found by
+//! the driver after b's crash and after a's has one name.
 
 use serde_json::Value;
 use std::path::Path;
@@ -41,14 +47,14 @@ pub fn of(r: &Value, dir: &Path) -> Value {
         return Value::Null;
     }
     // A node's own end (`node_end`): its stderr, its exit or signal, and its name, which
-    // tells it from the same end of another node's command.
+    // tells it from the same end of another node's command (digits collapsed: replicas).
     let (stderr_at, at) = match r["node_end"]["node"].as_str() {
         Some(n) => (
             dir.join("node").join(n).join(format!(
                 "inc-{}",
                 r["node_end"]["incarnation"].as_u64().unwrap_or(0)
             )),
-            format!(" [node {n}]"),
+            format!(" [node {}]", normalise(n)),
         ),
         None => {
             let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
@@ -389,6 +395,34 @@ mod tests {
         assert!(s.ends_with("exit 101") && !s.contains("10:9"), "{s}");
         // Ok has none.
         assert!(of(&json!({"outcome": "ok"}), Path::new("/nonexistent")).is_null());
+    }
+
+    #[test]
+    fn a_node_end_names_its_node_with_digits_collapsed() {
+        let end = |node: &str| {
+            let dir =
+                std::env::temp_dir().join(format!("patina-sig-node-{}-{node}", std::process::id()));
+            let inc = dir.join("node").join(node).join("inc-0");
+            std::fs::create_dir_all(&inc).unwrap();
+            std::fs::write(inc.join("stderr"), "replica diverged at 41\n").unwrap();
+            let r = json!({"outcome": "failure", "stop": "node-exit", "message": "x",
+                "node_end": {"node": node, "incarnation": 0, "exit": 3, "signal": null}});
+            let s = of(&r, &dir);
+            std::fs::remove_dir_all(&dir).unwrap();
+            s.as_str().unwrap_or("").to_string()
+        };
+        // Replicas numbered alike: one bug.
+        assert_eq!(end("n1"), end("n3"));
+        // Nodes named for their roles: apart, and apart from the driver's end.
+        assert_ne!(end("primary"), end("backup"));
+        assert!(
+            end("primary")
+                != sig(
+                    json!({"outcome": "failure", "stop": "node-exit",
+            "message": "x", "incarnations": 1, "guest": {"exit": 3, "signal": null}}),
+                    "replica diverged at 41\n"
+                )
+        );
     }
 
     #[test]

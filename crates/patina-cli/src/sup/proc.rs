@@ -349,6 +349,14 @@ impl Sup {
         !self.procs.vfork_pending.is_empty()
     }
 
+    /// A vfork child of node `k` has not said `Hello` yet.
+    pub fn vfork_on(&self, k: usize) -> bool {
+        self.procs
+            .vfork_pending
+            .values()
+            .any(|parent| self.node_of(*parent) == k)
+    }
+
     /// SIGCHLD's disposition changed: is auto-reaping on?
     pub fn note_autoreap(&mut self, pid: i32, on: bool) {
         if let Some(p) = self.procs.map.get_mut(&pid) {

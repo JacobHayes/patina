@@ -103,6 +103,9 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                             "up_ms": b.end_ns.saturating_sub(b.start_ns) / 1_000_000,
                             "down_ms": if b.down_ns == 0 { Value::Null } else { json!(b.down_ns / 1_000_000) },
                         });
+                        if b.point != 0 {
+                            d["point"] = json!(b.point);
+                        }
                         match b.how {
                             proto::node::DOWN_EXIT | proto::node::DOWN_FAILED => d["exit"] = json!(b.value),
                             proto::node::DOWN_SIGNAL => d["signal"] = json!(b.value),
@@ -113,6 +116,16 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                     .collect();
                 if !downs.is_empty() {
                     v["downs"] = json!(downs);
+                }
+                // With crashes at its crash points: those each boot passed (the first's are
+                // what `machine-at:N@NAME` counts, and `--branch` tries).
+                let c = &t.faults[k].cfg;
+                if c.crash_kind != proto::faults::CRASH_NONE || c.crash_at != 0 {
+                    let p: Vec<u64> = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
+                        .iter()
+                        .map(|b| b.points)
+                        .collect();
+                    v["crash_points"] = json!(p);
                 }
             }
             v

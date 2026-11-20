@@ -435,7 +435,8 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
 - **Machine crash.** `node kill NAME` (`NODE_CRASH`) or the seed under `--crash machine`
   (`NodeConf::crash` `CRASH_NODE_MACHINE`, drawn as the process kills are) runs
   `nodes::node_crash` at a node action point: the node's mappings are flushed and a `Crash`
-  record (`[CRASH_MACHINE, boot]`, tagged) ends its disk's log; its links are cut by a third
+  record (`[CRASH_MACHINE, boot, point]`, tagged; point 0 for a crash at a drawn time or a
+  script's) ends its disk's log; its links are cut by a third
   layer (`Links::down`) until it is back; the wire forgets its ends (`wire_machine_down`:
   their descriptors closed without a FIN or RST, `End::dead`, a `DEC_WIRE_DEAD` record), holds
   what was in flight to them so the senders' give-up clocks run, drops what the node itself
@@ -452,18 +453,38 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   sender (`RST_UNKNOWN`), as a rebooted host answers a segment of a connection it does not
   know.
 - **Faults per node.** The disk and memory keys are each node's: the config resolves each
-  node's settings (the run's unscoped ones for every node but the driver, `@NODE` scopes,
-  `[node.NAME.faults]`) with a seed of its own (`Config::node_faults`), the driver's into the
-  run's `FaultCfg` and the others' into `NodeTab::faults`, a `FaultCtl` (settings and
+  node's settings (the run's unscoped ones for every node but the driver and a node with
+  `faults = false`, `@NODE` scopes, `[node.NAME.faults]`) with a seed of its own
+  (`Config::node_faults`; under `swarm` that seed turns the node's classes off), the driver's
+  into the run's `FaultCfg` and the others' into `NodeTab::faults`, a `FaultCtl` (settings and
   counters) per node. The runtime reaches its node's through `state::faults()`; the draws stay
   keyed by sequence number, `faults-after-setup` stays the run's.
+- **Crash points per node.** The runtime's crash point (`inject::crash_point`) reads its own
+  node's `FaultCtl`: each node counts its points in its own `crash_points`, and `--crash
+  machine-at:N@NODE` or `machine:PERMILLE@NODE` (`Config::crash_nodes`, `faults::crash_plan`
+  with the node's seed) sets that node's `crash_at` or `crash_permille`. At each start of a
+  boot the supervisor arms the node's points (`Nodes::arm_points`: the counter from 0,
+  `crash_enabled` while the node has boots left, `incarnation` the boot), so the N-th point is
+  of that boot. A point that fires is the runtime's `CrashPoint` request; for a node the
+  supervisor answers it with `node_point_crash`, the same `node_crash` as above with the point
+  in its `Crash` record and its `INJ_NODE_KILL` (`machine-at` then turns itself off: it fires
+  once, in the node's first boot). A point's per-mille draw is the runtime's, keyed by the
+  record's sequence number as for one machine; the node's seed resolves only a range. A
+  process or thread of the node being created when its point fires ends the run
+  `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
+  point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
+  (`crash_points`, `downs[].point`) and `sweep --branch` reads to make one child per point of
+  each node (`seed-S@NODE:P`, `machine-at:P@NODE`). After the run the launcher writes each
+  crashed disk's materialised tree to `node/NAME/inc-K/post-crash/`, checks it is the base of
+  the next disk, and counts what it lost against the disk's live tree (`downs[].lost`, the
+  `crash` event). A node's points count only its own disk's changes and syncs, so its N-th
+  point stays at the same place in its own work when another node's crashes change.
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
-Not yet: a node's crash at a crash point (`machine-at:N`, `machine:PERMILLE` with nodes) and
-so `--branch` over a node's crash points, the SDK's fault keys with nodes, pausing a node,
-and per-node clocks.
+Not yet: a process kill at a crash point (`process-at:N` with nodes), the SDK's fault keys
+with nodes, pausing a node, and per-node clocks.
 
 ## The boundary log
 
@@ -1139,7 +1160,8 @@ The runtime records every change to `/work` with its data in an operation log, a
 every sync (`patina-proto/src/oplog.rs`). Crash points follow each change and precede each
 sync; each is counted (its ordinal is what `-at:N` names and what `crashes[].point` reports)
 and the crash draw is used only when it fires, so a run is identical to the run without
-`--crash` up to the crash.
+`--crash` up to the crash. With nodes each node counts its own, on its own disk ([Nodes](#nodes),
+"Crash points per node").
 
 Stores through a `MAP_SHARED` mapping of a work file are in the page cache at once and reach
 the log as `MmapDirty` records when their process unmaps, syncs or ends: the runtime

@@ -73,6 +73,82 @@ pub fn next_tree(
     materialise(&log, u64::MAX, seed, key, model)
 }
 
+/// A run with nodes: each node disk a machine crash ended (`node/NAME/inc-K/`, its log closed
+/// by a `Crash` record [`CRASH_MACHINE`, boot, point]) gets `post-crash/`, the tree its next
+/// boot started from (materialised again from that disk's log, the run's seed and the crash's
+/// sequence number: the same pure function the supervisor ran), and its crash what it lost
+/// (`attribution::lost`, live tree against that tree): in the node's `downs` entry and in the
+/// crash's `faults.recent` event; the crash points they came at count as the class's eligible
+/// calls.
+fn node_crashes(
+    run: &Path,
+    nodes: &mut serde_json::Value,
+    works: &[&str],
+    faults: &mut Faults,
+    seed: u64,
+    model: crate::durability::materialise::Model,
+) -> Res<()> {
+    let names: Vec<String> = nodes["list"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|n| n["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    for (k, name) in names.iter().enumerate().skip(1) {
+        let n = &mut nodes["list"][k];
+        faults.add_points(
+            n["crash_points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|p| p.as_u64())
+                .sum(),
+        );
+        for disk in crate::durability::check::incarnations(&run.join("node").join(name)) {
+            if !disk.join("oplog.meta").exists() {
+                continue;
+            }
+            let log = OpLog::load(&disk)?;
+            let Some(c) = log
+                .ops
+                .last()
+                .filter(|o| o.kind == proto::oplog::OpKind::Crash && o.a[0] == CRASH_MACHINE)
+            else {
+                continue;
+            };
+            let (seq, boot) = (c.seq, c.a[1]);
+            let tree = materialise(&log, u64::MAX, seed, seq, model)?;
+            // The next boot's disk began with that tree (its base records): a difference is a
+            // Patina defect.
+            let next = disk.with_file_name(format!("inc-{}", boot + 1));
+            if next.join("oplog.meta").exists() {
+                let base = crate::durability::materialise::replay(&OpLog::load(&next)?.upto(0))?;
+                if let Some(d) = crate::durability::tree::diff(&tree, &base.to_tree(), false) {
+                    return Err(format!(
+                        "node {name}: the tree after its machine crash in boot {boot} is not the \
+                         one its next boot started from: {d}"
+                    ));
+                }
+            }
+            let post = disk.join("post-crash");
+            tree.write_dir(&post)
+                .map_err(|e| format!("{}: {e}", post.display()))?;
+            let live = Tree::read_archive(&disk.join("live.tree"))?;
+            let what = lost(&live, &tree, works.get(k - 1).copied().unwrap_or("/work"));
+            if let Some(d) = n["downs"]
+                .as_array_mut()
+                .into_iter()
+                .flatten()
+                .find(|d| d["incarnation"] == boot)
+            {
+                d["lost"] = what.clone();
+            }
+            faults.node_lost(k, boot, what);
+        }
+    }
+    Ok(())
+}
+
 pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<RunEnd> {
     let t0 = Instant::now();
     if out.join("result.json").exists() || out.join("inc-0").exists() {
@@ -90,6 +166,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             .chain(o.cfg.nodes.iter().map(|n| n.name.clone()))
             .collect();
     }
+    let mut crash_check: Option<String> = None;
     let mut digests = vec![];
     let (mut traps, mut switches) = (0, 0);
     let mut io = [0u64; 5];
@@ -126,8 +203,16 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             shm: shm.as_raw_fd(),
             planner: planner.clone(),
         };
-        let end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
+        let mut end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
         faults.add_incarnation(&inc, k, &end);
+        if let Some(n) = end.nodes.as_mut() {
+            let works: Vec<&str> = o.cfg.nodes.iter().map(|n| n.work_path()).collect();
+            // A post-crash tree that is not the next boot's is a Patina defect: reported as
+            // the self-check's failure, beside the run's own outcome.
+            if let Err(e) = node_crashes(out, n, &works, &mut faults, o.cfg.seed, o.fs_model) {
+                crash_check.get_or_insert(e);
+            }
+        }
         log_used += end.log_bytes;
         digests.push(end.digest);
         traps += end.traps;
@@ -177,7 +262,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             // the run's outcome (`result::run_exit`), which stays the program's own.
             let verdict = end.verdict;
             let self_check = (o.plan.faults.crash_kind != CRASH_NONE || !o.cfg.nodes.is_empty())
-                .then(|| self_check(out));
+                .then(|| match crash_check.take() {
+                    Some(e) => Err(format!("operation log self-check: {e}")),
+                    None => self_check(out),
+                });
             let digest = if digests.len() == 1 {
                 format!("{:016x}", digests[0])
             } else {

@@ -972,6 +972,8 @@ impl Sup {
                 Next::Continue(0)
             }
             Some(Op::Node) => self.node_op(idx, a),
+            // A node's machine crash at its crash point: the node goes down, the run goes on.
+            Some(Op::CrashPoint) if self.node_of(idx) != 0 => self.node_point_crash(idx),
             Some(Op::CrashPoint) => {
                 // Every process ends here: what their shared mappings hold, then the end.
                 let pid = self.sched.entries[idx].pid as u32;

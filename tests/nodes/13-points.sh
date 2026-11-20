@@ -1,0 +1,89 @@
+# 13. Nodes: a node's machine crash at its crash points (tests/guests/nodes/ack2.py: a forwards
+# each put to b and acknowledges once b answers; b answers after its fsync, or with `early`
+# before it). `--crash machine-at:N@a` in the middle of a's points crashes a's machine there:
+# one crash event naming a and the point, a's crashed disk kept as post-crash with what it lost
+# counted, a restarted, and b untouched (one boot, no post-crash, every put on its disk). A
+# `--branch` sweep crashes each point of each node in turn: on `early` it finds the lost
+# acknowledged put on b, in children of b only, with b's crash losing it on b's disk, and the
+# report's group names b's crash points; the correct store is ok at every point of both nodes;
+# a child's rerun line gives its digest again. One seed, a few puts: about 10 s on the arm64
+# runner.
+#@ tier=quick budget=30 slots=4
+. "$(dirname "$0")/lib.inc"
+o=$RUNS/13-points; mkdir -p "$o"
+for v in ok early; do
+    rm -f "$o/$v.toml"
+    conf "$o/$v.toml" a python3 /guest/ack2.py a
+    if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
+done
+D="python3 /guest/ack2.py driver 3"
+s=1
+# a's points in a run that counts them and never crashes; then a crash at the middle one.
+run_ok "$o/base" $s --config "$o/ok.toml" --crash machine:0@a -- $D
+n=$(field "$o/base/result.json" nodes.list.1.crash_points.0)
+[ "$n" -ge 2 ] || die "a counted $n crash points"
+p=$((n / 2))
+run_ok "$o/at" $s --config "$o/ok.toml" --crash machine-at:$p@a -- $D
+"$PATINA" log events "$o/at" --types crash | grep '"type":"crash"' >"$o/at.crash" || die "no crash event"
+[ "$(wc -l <"$o/at.crash")" = 1 ] || die "crash events: $(cat "$o/at.crash")"
+python3 -I - "$o/at" "$p" <<'PY' || die "crash at point $p of a"
+import json, os, sys
+d, p = sys.argv[1], int(sys.argv[2])
+r = json.load(open(os.path.join(d, "result.json")))
+a, b = r["nodes"]["list"][1], r["nodes"]["list"][2]
+e = [json.loads(l) for l in open(d + ".crash")][0]
+assert (e["node"], e["kind"], e["point"]) == ("a", "machine", p), e
+down = a["downs"][0]
+assert down["point"] == p and a["incarnations"] == 2, a
+assert set(down["lost"]) >= {"missing", "changed", "back"}, down
+assert os.path.isdir(os.path.join(d, "node/a/inc-0/post-crash")), "no post-crash for a"
+assert b["incarnations"] == 1 and not b.get("downs"), b
+assert not os.path.exists(os.path.join(d, "node/b/inc-0/post-crash")), "b has a post-crash"
+assert not os.path.exists(os.path.join(d, "node/b/inc-1")), "b booted again"
+out = open(os.path.join(d, "inc-0/stdout")).read()
+assert "b holds 3" in out, out
+PY
+echo "crash at point $p of a's $n: a down once, b untouched"
+# Branch over every point of each node.
+sw() { rm -rf "${o:?}/sw-$1"; st=0; timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep "$2" --out "$o/sw-$1" \
+    --config "$o/$1.toml" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/sw-$1.txt" 2>&1 || st=$?; }
+sw early fail
+[ "$st" = 1 ] || die "branch sweep of early: exit $st: $(tail -5 "$o/sw-early.txt")"
+grep -q '^  nodes: a down in 0, b down in [1-9]' "$o/sw-early.txt" || die "group's nodes line: $(cat "$o/sw-early.txt")"
+python3 -I - "$o/sw-early" <<'PY' || die "branch sweep of early"
+import json, os, sys
+d = sys.argv[1]
+rep = json.load(open(os.path.join(d, "report.json")))
+br = rep["branch"]
+assert br["tried"] == br["points"] and [x["node"] for x in br["nodes"]] == ["a", "b"], br
+assert all(x["points"] > 0 and x["tried"] == x["points"] for x in br["nodes"]), br
+assert len(rep["groups"]) == 1, [g["signature"] for g in rep["groups"]]
+g = rep["groups"][0]
+assert "lost on b" in g["signature"], g["signature"]
+assert all(x["node"] == "b" for x in g["runs"]), g["runs"]
+lost = 0
+for x in g["runs"]:
+    r = json.load(open(os.path.join(x["dir"], "result.json")))
+    b = r["nodes"]["list"][2]
+    assert b["downs"][0]["point"] == x["point"], (x, b["downs"])
+    l = b["downs"][0]["lost"]
+    lost += l["missing"] + l["changed"] > 0 and os.path.isdir(os.path.join(x["dir"], "node/b/inc-0/post-crash"))
+assert lost > 0, "no failing child lost anything on b's disk"
+print("early: %d of %d points (a %d, b %d) fail, all on b" % (g["count"], br["points"], *[x["points"] for x in br["nodes"]]))
+PY
+sw ok none
+[ "$st" = 0 ] || die "branch sweep of ok: exit $st: $(tail -5 "$o/sw-ok.txt")"
+python3 -I - "$o/sw-ok" <<'PY' || die "branch sweep of ok"
+import json, os, sys
+rep = json.load(open(os.path.join(sys.argv[1], "report.json")))
+br = rep["branch"]
+assert rep["groups"] == [] and rep["outcomes"] == {"ok": rep["runs"]}, rep["outcomes"]
+assert br["tried"] == br["points"] and all(x["tried"] == x["points"] > 0 for x in br["nodes"]), br
+print("ok: ok at all %d points" % br["points"])
+PY
+# A failing child's rerun line reproduces it.
+c=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["dir"])' "$o/sw-early/report.json")
+st=0; timeout 120 "$PATINA" run --seed $s --config "$c/run.json" --out "$o/rerun" -- $D >/dev/null 2>&1 || st=$?
+d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
+[ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"
+echo "rerun: same digest"

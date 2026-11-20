@@ -1051,7 +1051,7 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
 /// `--crash machine|process[:PERMILLE] | machine-at:N | process-at:N`, where PERMILLE and N
 /// may be a range `A..B`. N is a crash point's ordinal in the first incarnation. Returns the
 /// resolved form.
-fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String> {
+pub fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String> {
     let (k, v) = s.split_once(':').unwrap_or((s, ""));
     let (kind, at) = match k {
         "machine" => (CRASH_MACHINE, false),

@@ -283,7 +283,7 @@ pub const FLAGS: &[Flag] = &[
         "--crash",
         "KIND[:VALUE]",
         "off",
-        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B",
+        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B; with nodes, process or machine at drawn times, or machine:PERMILLE, machine-at:N at each node's own crash points, each [@NODE,...]",
         RUNLIKE,
     ),
     flag(
@@ -382,7 +382,7 @@ pub const FLAGS: &[Flag] = &[
         "--branch",
         "",
         "off",
-        "run each seed once without a crash, then once per crash point, crashing there (needs --crash machine or process, without a rate)",
+        "run each seed once without a crash, then once per crash point, crashing there (needs --crash machine or process, without a rate; with nodes, --crash machine[@NODE,...]: once per point of each node)",
         &[Cmd::Sweep],
     ),
     flag(

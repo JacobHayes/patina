@@ -150,6 +150,11 @@ pub struct Boot {
     /// Where its output starts in the node's stdout and stderr.
     pub out_off: u64,
     pub err_off: u64,
+    /// With crashes at its crash points (`machine:PERMILLE`, `machine-at:N`): the points it
+    /// passed (its `FaultCtl::crash_points` when it went down or the run ended), and the
+    /// point its machine crashed at (0: it did not crash at one).
+    pub points: u64,
+    pub point: u64,
 }
 
 /// How a boot of a node ended (`Boot::how`, `DEC_NODE_DOWN`): its processes killed by the
@@ -177,8 +182,9 @@ pub fn down_name(how: u64) -> &'static str {
     }
 }
 
-/// The `Injected` record of a seed-drawn node kill: [`INJ_NODE_KILL`, node, boot, machine, 0,
-/// 0] (`machine` 1 for a machine crash; class `crash`).
+/// The `Injected` record of a seed-drawn node kill: [`INJ_NODE_KILL`, node, boot, machine,
+/// point, 0] (`machine` 1 for a machine crash; `point` the crash point it came at, 0 for one
+/// at a drawn time; class `crash`).
 pub const INJ_NODE_KILL: u64 = 40;
 
 /// Sub-keys of `draw(Stream::Node, node << 24 | boot << 16 | try << 8 | sub)`: the time from a

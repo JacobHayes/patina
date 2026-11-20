@@ -2644,3 +2644,47 @@ an `acked-lost` run identical, as was every failing group's own replay. About 0.
   likely the unexplained seed 73 of the section above.
 
 No PostgreSQL bug was found; nothing was filed.
+
+### Every crash point of every node
+
+`patina sweep --branch --crash machine` on runs with nodes: each seed once with crash points
+counted and never firing, then once per point of each node, crashing that node's machine
+there (`--crash machine-at:P@NODE`; each child reruns the whole run).
+`tests/nodes/evidence-branch.sh` (`./check evidence evidence-branch`, under the evidence lock),
+measured 2026-11-20 on the same host, x86_64, every sweep `-j 6 --keep fail`, run once; the
+wall time is the sweep's.
+
+| Workload | Seeds | Crash points (per node) | Runs | Wall | Correct | Planted bug |
+|---|---|---|---|---|---|---|
+| `ack2.py` (two nodes, 5 puts) | 1-8 | 368 (a 184, b 184) | 376 | 8 s | 0 failing | `early` (b answers before its fsync): an acknowledged put lost on b in 66 runs, all children of b, in every seed |
+| `q3.py` (three nodes, 2 s) | 1-2 | 1,576 (n1 312, n2 632, n3 632) | 1,578 | 65 s | 0 failing | `nosync` (788 points, 32 s) and `early` (1,576 points, 63 s): 0 failing |
+| `wal.py` (one node, 15 s) | 1-2 | 5,044 (a 5,044) | 5,046 | 106 s | 0 failing | `nocheck` (recovery trusts each record's length): a torn record recovered in 352 runs |
+
+One crash per run finds what one crash can lose: b's unsynced acknowledgement, a's torn
+record. `q3.py`'s planted bugs need more than one: a write two nodes acknowledged survives the
+crash of any one of them (the others hold it), and `early`'s window needs the primary to lose
+its quorum besides; the seed's repeated crashes find `nosync` (section above). Every point of every node was tried, and the correct versions are ok at all of
+them. The two runs of the script, a binary apart (before and after the review fixes), gave the
+same table.
+
+**Determinism.** `tests/nodes/14-points-sweep.sh`: a run crashing both nodes at their points
+(`machine:60`) is identical under `verify --vary cpu,load,aslr,sandbox,repeat` and replays
+identically; every node disk passes `log ops --check`. A branch child's rerun line gives its
+digest again (`tests/nodes/13-points.sh`). `minimize` of a failure under crashes of both
+nodes at their points, net delays and duplicates and disk delays reduces to
+`--crash machine-at:8@b` alone.
+
+**Runs that do not use the new options are unchanged.** The 90-cell ledger (no crashes), and
+52 more cells: one machine's `--crash machine:20`, `machine-at:3`, `process:30`,
+`machine-at:1..20`, `ack-log` with disk faults; and runs with nodes under partitions and the
+net preset, the seed's process kills, the seed's machine crashes (`q3.py nosync`, `wal.py`,
+`ack-log` as a node), the script's machine crashes and kills, and disk faults with `swarm`:
+built at the commit before and at this change, each architecture on one guest build:
+identical on every cell on x86_64; on the hosted arm64 runner identical but for one cell, a
+run with nodes, `--faults disk` and `swarm`. With `swarm`, a node's disk and memory classes
+are now turned off by its own seed, so such a run draws differently once its faults fire: on
+x86_64, seeds 1-16 of that cell differ in 4 with `swarm` and in none without it.
+
+**PostgreSQL** (the pair of the section above) was not swept: one base run counts 9,702 crash
+points (pg1 5,139, pg2 4,563) for 30 s of virtual time, and each child is a full run of about
+7 s, about 19 CPU-hours per seed.

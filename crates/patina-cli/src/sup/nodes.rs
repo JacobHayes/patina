@@ -50,6 +50,9 @@ pub struct Nodes {
     /// The node's machine is crashing: its stores were flushed before its `Crash` record, and
     /// nothing of its may follow that record on its disk.
     pub crashing: bool,
+    /// The crash point the crashing node's machine crashes at (0: a crash at a drawn time or
+    /// by script).
+    point: u64,
     /// Whether each node is up, its seed kill and its restart to come, and how many kills of
     /// its boot came while faults were off (each drawn again).
     up: [bool; MAX_NODES],
@@ -170,6 +173,7 @@ impl Sup {
                 .collect();
             self.wire_heal(&opened);
         }
+        self.arm_points(node, b);
         let (out, err) = match keeper_start(node, b, tree.as_deref()) {
             Ok(x) => x,
             Err(e) => self.finish(Verdict::new(
@@ -384,7 +388,7 @@ impl Sup {
                 EVK_NODE_KILL if self.nodes.up[k] => {
                     if self.setup_done() {
                         killed.extend(if self.node_tab().conf[k].crash == CRASH_NODE_MACHINE {
-                            self.node_crash(k, DOWN_CRASH_SEED)
+                            self.node_crash(k, DOWN_CRASH_SEED, 0)
                         } else {
                             self.node_kill(k, DOWN_KILL_SEED)
                         });
@@ -411,6 +415,76 @@ impl Sup {
         }
         self.nodes.pending = later;
         killed
+    }
+
+    /// Boot `b` of node `k` starts: its crash points (`machine:PERMILLE`, `machine-at:N`,
+    /// in its `FaultCfg`) count from 0, and fire in no boot past its last permitted one
+    /// (`max-incarnations`), as a single machine's incarnations do. An `-at` crash fired once
+    /// is off (`node_point_crash`).
+    fn arm_points(&mut self, k: usize, b: u64) {
+        let t = self.node_tab();
+        let max_boots = t.conf[k].max_boots;
+        let f = &mut t.faults[k];
+        // `machine-at:N` names a point of the first boot only.
+        let on = f.cfg.crash_kind != proto::faults::CRASH_NONE
+            && b + 1 < max_boots
+            && (f.cfg.crash_at == 0 || b == 0);
+        // The runtimes read these: written as shared memory is.
+        unsafe {
+            std::ptr::write_volatile(std::ptr::addr_of_mut!(f.cfg.crash_enabled), on as u64);
+            std::ptr::write_volatile(std::ptr::addr_of_mut!(f.cfg.incarnation), b);
+        }
+        f.crash_points.store(0, Relaxed);
+    }
+
+    /// `Op::CrashPoint` [kind, seq, k] from a process of node `k` > 0: its machine crashes
+    /// here, at its `crash_points`-th point, as a crash at a drawn time does (`node_crash`,
+    /// with the point in its `Crash` and `Injected` records), the caller among the processes
+    /// killed; the run goes on. An `-at` crash fires once. A process or thread being created
+    /// on the node (a reserved slot of it, a vfork child of it that has not said `Hello`) is in
+    /// no table yet, so a crash then could not kill it: the run stops `unsupported` rather than
+    /// leave it. Another node's creations do not matter: the crash does not touch them.
+    pub(super) fn node_point_crash(&mut self, idx: usize) -> Next {
+        let k = self.node_of(idx);
+        let creating = (0..MAX_THREADS).any(|i| {
+            let s = self.slot(i);
+            i != idx && s.state.load(SeqCst) == SLOT_RESERVED && s.node.load(Relaxed) == k as u64
+        }) || self.vfork_on(k);
+        if creating {
+            self.finish(Verdict::new(
+                "unsupported",
+                format!(
+                    "node {}: a crash point while a process or thread of the node was being \
+                     created",
+                    self.node_name(k)
+                ),
+            ));
+        }
+        let f = &self.node_tab().faults[k];
+        if f.cfg.crash_kind != proto::faults::CRASH_MACHINE {
+            // `Config::crash_nodes` sets no other kind for a node's points.
+            self.finish(Verdict::new(
+                "internal",
+                format!(
+                    "node {}: a crash point of kind {}",
+                    self.node_name(k),
+                    f.cfg.crash_kind
+                ),
+            ));
+        }
+        let point = f.crash_points.load(Relaxed);
+        if f.cfg.crash_at != 0 {
+            let f = &mut self.node_tab().faults[k];
+            unsafe {
+                std::ptr::write_volatile(std::ptr::addr_of_mut!(f.cfg.crash_enabled), 0);
+                std::ptr::write_volatile(
+                    std::ptr::addr_of_mut!(f.cfg.crash_kind),
+                    proto::faults::CRASH_NONE,
+                );
+            }
+        }
+        self.node_crash(k, DOWN_CRASH_SEED, point);
+        Next::Pick
     }
 
     /// Draw the seed's kill of `node`'s current boot (`--crash process`, `crash-gap-ms`): none
@@ -490,11 +564,12 @@ impl Sup {
             0,
         );
         let now = self.now();
+        let points = self.node_tab().faults[k].crash_points.load(Relaxed);
         if let Some(e) = self.node_tab().boot[k].get_mut(b as usize) {
-            (e.end_ns, e.how, e.value, e.down_ns) = (now, how, value, down);
+            (e.end_ns, e.how, e.value, e.down_ns, e.points) = (now, how, value, down, points);
         }
         if how == DOWN_KILL_SEED || how == DOWN_CRASH_SEED {
-            self.kill_inject(k, b, (how == DOWN_CRASH_SEED) as u64);
+            self.kill_inject(k, b, (how == DOWN_CRASH_SEED) as u64, self.nodes.point);
             if self.node_tab().recovery_off != 0 {
                 // `faults-in-recovery = false`: the links' faults and every node's disk and
                 // memory faults stop.
@@ -550,7 +625,7 @@ impl Sup {
     /// materialised from its disk's log (`fs-model`, drawn from the seed and the crash's
     /// sequence number); its System V shared memory goes. A crash by the seed queues its
     /// restart; a script's of a node that is down cancels it. Returns the processes killed.
-    pub(super) fn node_crash(&mut self, k: usize, how: u64) -> Vec<i32> {
+    pub(super) fn node_crash(&mut self, k: usize, how: u64, point: u64) -> Vec<i32> {
         if let Some(e) = self.nodes.start_ev[k].take() {
             self.sched.cancel(e);
         }
@@ -567,7 +642,7 @@ impl Sup {
             .into_iter()
             .filter(|&(_, n)| n == k)
             .collect();
-        let crash = [proto::faults::CRASH_MACHINE, b, 0, 0, 0, 0];
+        let crash = [proto::faults::CRASH_MACHINE, b, point, 0, 0, 0];
         if let Err(e) = self.flush_maps(&mapping, seq).and_then(|()| {
             super::crash::append(
                 self.ctl,
@@ -585,8 +660,13 @@ impl Sup {
         self.links.down |= 1 << k;
         self.wire_machine_down(k);
         self.nodes.crashing = true;
+        self.nodes.point = point;
         self.node_down(k, how, 0, &pids, down);
+        self.nodes.point = 0;
         self.nodes.crashing = false;
+        if let Some(e) = self.node_tab().boot[k].get_mut(b as usize) {
+            e.point = point;
+        }
         self.node_tab().crashes[k] += 1;
         let next = self.disk_end(k, seq);
         match next {
@@ -624,7 +704,7 @@ impl Sup {
     }
 
     /// The seed's kill as a fault: an `Injected` record, counted under `crash`.
-    fn kill_inject(&mut self, k: usize, b: u64, machine: u64) {
+    fn kill_inject(&mut self, k: usize, b: u64, machine: u64, point: u64) {
         let seq = self.ctl.seq.load(Relaxed) + 1;
         self.ctl.seq.store(seq, Relaxed);
         let rec = proto::Rec {
@@ -634,7 +714,7 @@ impl Sup {
             kind: proto::RecKind::Injected as u8,
             class: 0,
             nr: 0,
-            args: [INJ_NODE_KILL, k as u64, b, machine, 0, 0],
+            args: [INJ_NODE_KILL, k as u64, b, machine, point, 0],
             ret: 0,
             out_hash: 0,
             in_hash: 0,
@@ -661,7 +741,7 @@ impl Sup {
             }
             NODE_CRASH => {
                 let up = self.nodes.up[k];
-                self.node_crash(k, DOWN_CRASH_SCRIPT);
+                self.node_crash(k, DOWN_CRASH_SCRIPT, 0);
                 Next::Continue(if up { 0 } else { -(libc::EALREADY as i64) })
             }
             NODE_START => {
@@ -743,6 +823,14 @@ impl Sup {
     /// The driver ended the run: a record for each node that still has processes.
     pub(super) fn nodes_stop(&mut self) {
         for k in 1..self.node_count() {
+            if self.nodes.up[k] {
+                let t = self.node_tab();
+                let b = t.boots[k].saturating_sub(1) as usize;
+                let points = t.faults[k].crash_points.load(Relaxed);
+                if let Some(e) = t.boot[k].get_mut(b) {
+                    e.points = points;
+                }
+            }
             let live = self
                 .procs
                 .map

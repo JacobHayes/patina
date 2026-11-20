@@ -163,6 +163,11 @@ pub struct Node {
     /// a preset's), in order; they replace the run's for this node.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub faults: Vec<String>,
+    /// `faults = false`: no seed faults of its own, as the driver: a setting given without a
+    /// scope (`--faults`, `--fault`, `--crash`) leaves it out, and a scope may not name it.
+    /// Links to it and partitions, which are the run's, still act on it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_faults: bool,
 }
 
 impl Node {
@@ -177,6 +182,7 @@ impl Node {
             ok_exit: None,
             max_incarnations: None,
             faults: vec![],
+            no_faults: false,
         }
     }
 
@@ -972,6 +978,14 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
                     }
                     count = Some(c);
                 }
+                "faults" if matches!(v, toml::Value::Boolean(_)) => {
+                    if v.as_bool() == Some(true) {
+                        return Err(format!(
+                            "{at}: false (no seed faults of its own), or a table of its settings"
+                        ));
+                    }
+                    node.no_faults = true;
+                }
                 "faults" => {
                     for (fk, fv) in table(v, &at)? {
                         let at = format!("{at}.{fk}");
@@ -1287,13 +1301,17 @@ impl Config {
         } else {
             self.nodes[k - 1].name.as_str()
         };
+        let free = k > 0 && self.nodes[k - 1].no_faults;
         let applies = |scope: Option<&str>, what: &str| -> Res<bool> {
             let Some(l) = scope else {
-                return Ok(k != 0);
+                return Ok(k != 0 && !free);
             };
             for n in l.split(',') {
                 if n != "driver" && !self.nodes.iter().any(|x| x.name == n) {
                     return Err(format!("{what}: no node {n}"));
+                }
+                if self.nodes.iter().any(|x| x.name == n && x.no_faults) {
+                    return Err(format!("{what}: node {n} has faults = false"));
                 }
             }
             Ok(l.split(',').any(|n| n == name))
@@ -1322,6 +1340,11 @@ impl Config {
                 out.push(kv.to_string());
             }
         }
+        if free && !self.nodes[k - 1].faults.is_empty() {
+            return Err(format!(
+                "[node.{name}]: faults = false and a [node.{name}.faults] table"
+            ));
+        }
         if k > 0 {
             // Its presets first, then its keys, whatever the table's order.
             let own = &self.nodes[k - 1].faults;
@@ -1337,29 +1360,31 @@ impl Config {
 
     /// Each node's disk and memory faults, resolved with a seed of its own: the driver's into
     /// the run's `faults`, the others' into `node_faults`; `result.json` shows them as
-    /// `KEY@NODE`.
+    /// `KEY@NODE`. With `swarm`, each node's classes are turned off by its own seed, as a run
+    /// without nodes turns off its own.
     fn node_faults(&self, plan: &mut faults::Plan) -> Res<()> {
+        let swarm = plan.resolved.iter().any(|(k, v)| k == "swarm" && *v == 1);
         for k in 0..=self.nodes.len() {
-            let given = self.node_settings(k)?;
+            let mut given = self.node_settings(k)?;
             if given.is_empty() {
                 continue;
+            }
+            if swarm {
+                given.push("swarm=1".into());
             }
             let name = if k == 0 {
                 "driver"
             } else {
                 self.nodes[k - 1].name.as_str()
             };
-            let seed = match k {
-                0 => self.seed,
-                _ => proto::draw::mix64(self.seed ^ (k as u64) << 56),
-            };
+            let seed = node_seed(self.seed, k);
             let sub = faults::resolve(seed, &[], &given, None, 0)
                 .map_err(|e| format!("node {name}: {e}"))?;
             match k {
                 0 => faults::set_node_keys(&mut plan.faults, &sub.faults),
                 _ => faults::set_node_keys(&mut plan.node_faults[k], &sub.faults),
             }
-            for (key, v) in sub.resolved {
+            for (key, v) in sub.resolved.into_iter().filter(|(k, _)| k != "swarm") {
                 plan.resolved.push((format!("{key}@{name}"), v));
             }
         }
@@ -1377,8 +1402,8 @@ impl Config {
             ));
         }
         if let Some(c) = &self.crash {
-            (plan.node_crash, plan.node_crash_kind) = self.crash_nodes(c)?;
-            plan.resolved.push(("crash".into(), serde_json::json!(c)));
+            let r = self.crash_nodes(c, plan)?;
+            plan.resolved.push(("crash".into(), serde_json::json!(r)));
         }
         // Link faults, partitions and node kills act between nodes; a node's own disk and
         // memory have no fault plane yet.
@@ -1467,45 +1492,77 @@ impl Config {
         Ok(programs)
     }
 
-    /// `--crash process|machine[@NODE,...]` in a run with nodes: the nodes the seed kills (bit
-    /// `k` for node `k`; no `@`: every node but the driver) and what a kill does
-    /// (`proto::node::CRASH_NODE_*`).
-    fn crash_nodes(&self, c: &str) -> Res<(u64, u64)> {
+    /// `--crash` in a run with nodes. `process|machine[@NODE,...]`: the nodes the seed kills
+    /// at drawn times (`crash-gap-ms`; bit `k` for node `k`; no `@`: every node but the
+    /// driver) and what a kill does (`proto::node::CRASH_NODE_*`), returned. `machine:PERMILLE`
+    /// and `machine-at:N` (each `@NODE,...` as before): a machine crash at the node's crash
+    /// points, set in each such node's `FaultCfg` (`state::faults` in the runtime): at each
+    /// point with that chance, or at the N-th point of its first boot, N drawn from the node's
+    /// own seed when a range; no kills at drawn times then. Returns the resolved form.
+    fn crash_nodes(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
         let (kind, at) = c.split_once('@').map_or((c, None), |(k, a)| (k, Some(a)));
-        let kind = match kind {
-            "process" => proto::node::CRASH_NODE_PROCESS,
-            "machine" => proto::node::CRASH_NODE_MACHINE,
-            k if k.starts_with("machine") => {
-                return Err(format!(
-                    "--crash {c} with nodes: a node's machine crash comes at seed-drawn times \
-                     (crash-gap-ms), not at a crash point: expected machine[@NODE,...]"
-                ))
-            }
+        let timed = match kind {
+            "process" => Some(proto::node::CRASH_NODE_PROCESS),
+            "machine" => Some(proto::node::CRASH_NODE_MACHINE),
+            k if k.starts_with("machine:") || k.starts_with("machine-at:") => None,
             _ => {
                 return Err(format!(
                     "--crash {c} with nodes: expected process[@NODE,...] or machine[@NODE,...] \
-                     (kills at seed-drawn times, crash-gap-ms)"
+                     (at seed-drawn times, crash-gap-ms), or machine:PERMILLE[@NODE,...] or \
+                     machine-at:N[@NODE,...] (at a node's crash points)"
                 ))
             }
         };
-        let Some(at) = at else {
-            return Ok((((1u64 << (self.nodes.len() + 1)) - 1) & !1, kind));
-        };
-        let mut m = 0;
-        for n in at.split(',') {
-            if n == "driver" {
-                return Err(format!(
-                    "--crash {c}: the driver is never killed (it runs the run's checks)"
-                ));
+        let mut m = 0u64;
+        match at {
+            None => {
+                for (i, n) in self.nodes.iter().enumerate() {
+                    m |= u64::from(!n.no_faults) << (i + 1);
+                }
+                if m == 0 {
+                    return Err(format!("--crash {c}: every node has faults = false"));
+                }
             }
-            let k = self
-                .nodes
-                .iter()
-                .position(|x| x.name == n)
-                .ok_or_else(|| format!("--crash {c}: the run has no node {n}"))?;
-            m |= 1 << (k + 1);
+            Some(at) => {
+                for n in at.split(',') {
+                    if n == "driver" {
+                        return Err(format!(
+                            "--crash {c}: the driver is never killed (it runs the run's checks)"
+                        ));
+                    }
+                    let k = self
+                        .nodes
+                        .iter()
+                        .position(|x| x.name == n)
+                        .ok_or_else(|| format!("--crash {c}: the run has no node {n}"))?;
+                    if self.nodes[k].no_faults {
+                        return Err(format!("--crash {c}: node {n} has faults = false"));
+                    }
+                    m |= 1 << (k + 1);
+                }
+            }
         }
-        Ok((m, kind))
+        if let Some(t) = timed {
+            (plan.node_crash, plan.node_crash_kind) = (m, t);
+            return Ok(c.to_string());
+        }
+        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "crash-gap-ms") {
+            return Err(format!(
+                "--fault {k} with --crash {c}: the crash comes at the nodes' crash points, not \
+                 at drawn times"
+            ));
+        }
+        let mut shown = vec![];
+        for (i, n) in self.nodes.iter().enumerate() {
+            let k = i + 1;
+            if m & (1 << k) == 0 {
+                continue;
+            }
+            let f = &mut plan.node_faults[k];
+            let r = faults::crash_plan(node_seed(self.seed, k), f, kind)?;
+            shown.push(format!("{r}@{}", n.name));
+        }
+        Ok(shown.join(" "))
     }
 
     /// The work tree's guest path.
@@ -1517,6 +1574,14 @@ impl Config {
     pub fn opts(&self) -> Res<Opts> {
         let program = program(&self.cmd[0], &self.mounts)?;
         self.opts_with(program)
+    }
+}
+
+/// The seed node `k`'s own settings resolve from (the driver's: the run's).
+fn node_seed(seed: u64, k: usize) -> u64 {
+    match k {
+        0 => seed,
+        _ => proto::draw::mix64(seed ^ (k as u64) << 56),
     }
 }
 
@@ -1633,26 +1698,26 @@ mod tests {
         assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
         // `--crash process` covers every node but the driver; `@` names some.
         use proto::node::{CRASH_NODE_MACHINE, CRASH_NODE_PROCESS};
-        assert_eq!(
-            c.crash_nodes("process").unwrap(),
-            (0b11110, CRASH_NODE_PROCESS)
-        );
-        assert_eq!(
-            c.crash_nodes("process@w2,db").unwrap(),
-            (0b10100, CRASH_NODE_PROCESS)
-        );
-        assert_eq!(
-            c.crash_nodes("machine@w1").unwrap(),
-            (0b10, CRASH_NODE_MACHINE)
-        );
-        for bad in [
-            "machine-at:3",
-            "machine:5",
-            "process@driver",
-            "machine@nope",
-            "fs",
-        ] {
-            assert!(c.crash_nodes(bad).is_err(), "{bad}");
+        let crash = |c: &Config, x: &str| {
+            let mut p = faults::resolve(0, &[], &[], None, c.nodes.len()).unwrap();
+            c.crash_nodes(x, &mut p).map(|_| p)
+        };
+        let timed = |x: &str| {
+            let p = crash(&c, x).unwrap();
+            (p.node_crash, p.node_crash_kind)
+        };
+        assert_eq!(timed("process"), (0b11110, CRASH_NODE_PROCESS));
+        assert_eq!(timed("process@w2,db"), (0b10100, CRASH_NODE_PROCESS));
+        assert_eq!(timed("machine@w1"), (0b10, CRASH_NODE_MACHINE));
+        // At crash points: set in the scoped nodes' own settings, none at drawn times.
+        let p = crash(&c, "machine-at:3@w2").unwrap();
+        assert_eq!(p.node_crash, 0);
+        let at: Vec<u64> = p.node_faults[1..5].iter().map(|f| f.crash_at).collect();
+        assert_eq!(at, [0, 3, 0, 0]);
+        let p = crash(&c, "machine:5").unwrap();
+        assert!(p.node_faults[1..5].iter().all(|f| f.crash_permille == 5));
+        for bad in ["process-at:3", "process@driver", "machine@nope", "fs"] {
+            assert!(crash(&c, bad).is_err(), "{bad}");
         }
         for bad in [
             "restart = \"sometimes\"",
@@ -1665,6 +1730,72 @@ mod tests {
             assert!(apply_file(&mut Config::default(), &f).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_node_without_faults_is_left_out_as_the_driver_is() {
+        let dir = std::env::temp_dir().join(format!("patina-nofaults-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("patina.toml");
+        std::fs::write(
+            &f,
+            "[node.a]\ncmd = [\"/bin/true\"]\n[node.m]\ncmd = [\"/bin/true\"]\nfaults = false\n",
+        )
+        .unwrap();
+        let mut c = Config::default();
+        apply_file(&mut c, &f).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!c.nodes[0].no_faults && c.nodes[1].no_faults);
+        c.faults = vec!["fs-error-permille=7".into()];
+        let plan = |c: &Config| {
+            let mut p = faults::resolve(0, &[], &[], None, c.nodes.len()).unwrap();
+            c.node_faults(&mut p).map(|_| p)
+        };
+        // Unscoped: a has it, m does not.
+        let p = plan(&c).unwrap();
+        assert_eq!(p.node_faults[1].fs_error_permille, 7);
+        assert_eq!(p.node_faults[2].fs_error_permille, 0);
+        let mut p = faults::resolve(0, &[], &[], None, 2).unwrap();
+        c.crash_nodes("machine", &mut p).unwrap();
+        assert_eq!(p.node_crash, 0b010);
+        // A scope may not name it.
+        c.faults = vec!["fs-error-permille=7@m".into()];
+        assert!(plan(&c).is_err());
+        let mut p = faults::resolve(0, &[], &[], None, 2).unwrap();
+        assert!(c.crash_nodes("machine:5@m", &mut p).is_err());
+    }
+
+    #[test]
+    fn swarm_turns_a_nodes_classes_off_by_its_own_seed() {
+        let mut c = Config {
+            nodes: vec![
+                Node::new("a".into(), vec!["/bin/true".into()]),
+                Node::new("b".into(), vec!["/bin/true".into()]),
+            ],
+            faults: vec!["fs-error-permille=7".into(), "swarm=1".into()],
+            ..Config::default()
+        };
+        let mut off = [false; 2];
+        let mut on = [false; 2];
+        for seed in 0..64 {
+            c.seed = seed;
+            let mut p = faults::resolve(seed, &[], &["swarm=1".into()], None, 2).unwrap();
+            c.node_faults(&mut p).unwrap();
+            for k in 0..2 {
+                let x = p.node_faults[k + 1].fs_error_permille;
+                off[k] |= x == 0;
+                on[k] |= x == 7;
+            }
+        }
+        assert_eq!((off, on), ([true; 2], [true; 2]));
+        // Each node by its own seed: a's and b's differ for some seed.
+        let differ = (0..64).any(|seed| {
+            c.seed = seed;
+            let mut p = faults::resolve(seed, &[], &["swarm=1".into()], None, 2).unwrap();
+            c.node_faults(&mut p).unwrap();
+            p.node_faults[1].fs_error_permille != p.node_faults[2].fs_error_permille
+        });
+        assert!(differ);
     }
 
     #[test]

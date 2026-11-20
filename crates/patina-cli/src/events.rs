@@ -365,6 +365,14 @@ struct Names {
 const RENAME_EXCHANGE: u64 = 2;
 
 impl Names {
+    fn new(at: String) -> Names {
+        Names {
+            at,
+            root: 0,
+            links: HashMap::new(),
+        }
+    }
+
     fn path(&self, ino: u64) -> Option<String> {
         let mut parts: Vec<&[u8]> = vec![];
         let mut i = ino;
@@ -493,6 +501,8 @@ struct Export<'a, W: Write> {
     /// A run with nodes: their names (the driver first), each slot's node as the log says it
     /// (`DEC_NODE_SLOT`), and the node of the record being exported.
     nodes: Vec<String>,
+    /// Each node's work tree (`work` of its `[node.NAME]`; the driver's is `work`).
+    node_work: Vec<String>,
     slot_node: HashMap<u16, usize>,
     node: Option<usize>,
 }
@@ -644,10 +654,9 @@ impl<W: Write> Export<'_, W> {
         Some(self.emit(ty, Some(r.seq), l))
     }
 
-    /// Operations are the driver's work tree's (each node's are in its disks' own logs,
-    /// `node/NAME/inc-K/`, read with `patina log ops`).
-    fn op(&mut self, k: usize, names: &mut Names, o: &OpEv) -> Res<()> {
-        self.node = (!self.nodes.is_empty()).then_some(0);
+    /// An operation of a disk of node `node` (0: the driver's; with nodes, `node` names it).
+    fn op(&mut self, k: usize, node: usize, names: &mut Names, o: &OpEv) -> Res<()> {
+        self.node = (!self.nodes.is_empty()).then_some(node);
         let r = self.op_of(k, names, o);
         self.node = None;
         r
@@ -728,6 +737,25 @@ impl<W: Write> Export<'_, W> {
             .num("slot", r.slot);
         let kind = crate::sup::crash::crash_name(r.args[0]);
         l.str("kind", kind);
+        // A node's machine crash at its crash point: its point and what it lost are its
+        // `downs` entry's (the run goes on; `node` names it).
+        if let Some(n) = self.node.filter(|n| *n > 0) {
+            let d = self.result.as_ref().and_then(|v| {
+                v["nodes"]["list"][n]["downs"]
+                    .as_array()?
+                    .iter()
+                    .find(|d| d["at_ms"] == r.vclock_ns / 1_000_000 && d["point"].is_u64())
+                    .cloned()
+            });
+            if let Some(d) = d {
+                l.num("ninc", d["incarnation"].as_u64().unwrap_or(0))
+                    .num("point", d["point"].as_u64().unwrap_or(0));
+                if d["lost"].is_object() {
+                    l.raw("lost", &d["lost"].to_string());
+                }
+            }
+            return self.emit("crash", Some(r.args[1]), l);
+        }
         let c = self
             .result
             .as_ref()
@@ -869,6 +897,10 @@ impl<W: Write> Export<'_, W> {
                 if (proto::wire::INJ_NET_RESET..=proto::wire::INJ_NET_CUT).contains(&r.args[0]) {
                     self.node = None;
                 }
+                // A node's kill or machine crash by the seed: that node's.
+                if r.args[0] == proto::node::INJ_NODE_KILL {
+                    self.node = Some(r.args[1] as usize);
+                }
                 let mut l = Line::at("fault", k, r);
                 // `faults.recent`'s fields; its `fault` is the class, its `thread` the slot.
                 if let Value::Object(m) = e {
@@ -926,7 +958,7 @@ impl<W: Write> Export<'_, W> {
 
     fn incarnation(&mut self, k: usize, inc: &Path) -> Res<()> {
         let mut recs = Records::open(inc)?;
-        let mut ops = Ops::open(inc)?;
+        let ops = Ops::open(inc)?;
         let records = std::fs::metadata(inc.join("boundary.log"))
             .map(|m| m.len() / REC_SIZE as u64)
             .unwrap_or(0);
@@ -938,11 +970,26 @@ impl<W: Write> Export<'_, W> {
         l.num("records", records)
             .raw("oplog", if ops.is_some() { "true" } else { "false" });
         self.emit("inc", None, l)?;
-        let mut names = Names {
-            at: self.work.clone(),
-            root: 0,
-            links: HashMap::new(),
-        };
+        // The driver's disk, then each node's disks one after another (`node/NAME/inc-K/`):
+        // their operations merged in the log's order.
+        let mut streams = vec![Stream::new(0, ops.into_iter().collect(), self.work.clone())];
+        if k == 0 {
+            let run = inc.parent().unwrap_or(Path::new("."));
+            for (n, name) in self.nodes.iter().enumerate().skip(1) {
+                let mut disks = vec![];
+                for d in crate::durability::check::incarnations(&run.join("node").join(name)) {
+                    if let Some(o) = Ops::open(&d)? {
+                        disks.push(o);
+                    }
+                }
+                let at = self
+                    .node_work
+                    .get(n)
+                    .cloned()
+                    .unwrap_or_else(|| "/work".into());
+                streams.push(Stream::new(n, disks, at));
+            }
+        }
         while let Some(item) = recs.next()? {
             let r = match item {
                 Item::Cut(c) => {
@@ -959,35 +1006,89 @@ impl<W: Write> Export<'_, W> {
             // come before the first record after them in virtual time; a crash comes after
             // every operation before it.
             let crash = r.kind == RecKind::SupDecision as u8 && r.nr == Op::CrashPoint as u32;
-            if let Some(o) = &mut ops {
-                while let Some(n) = &o.next {
-                    let before =
-                        n.r.vclock_ns < r.vclock_ns || (crash && n.r.vclock_ns == r.vclock_ns);
-                    if !before || n.r.seq == r.seq {
-                        break;
-                    }
-                    let n = o.take()?.unwrap();
-                    self.op(k, &mut names, &n)?;
-                }
+            // A node's operation of an earlier call comes before it too: its machine crash at
+            // a crash point has records at the same time as the operation before it. (The
+            // driver's operations keep their order as without nodes.)
+            while let Some(i) = first(&streams, |node, n| {
+                (n.r.vclock_ns < r.vclock_ns
+                    || (crash && n.r.vclock_ns == r.vclock_ns)
+                    || (node > 0 && n.r.seq < r.seq))
+                    && n.r.seq != r.seq
+            }) {
+                self.take_op(k, &mut streams[i])?;
             }
             self.record(k, inc, &mut recs, &r)?;
             // A call's operations follow it.
             if r.kind == RecKind::Trap as u8 {
-                if let Some(o) = &mut ops {
-                    while o.next.as_ref().is_some_and(|n| n.r.seq == r.seq) {
-                        let n = o.take()?.unwrap();
-                        self.op(k, &mut names, &n)?;
-                    }
+                while let Some(i) = first(&streams, |_, n| n.r.seq == r.seq) {
+                    self.take_op(k, &mut streams[i])?;
                 }
             }
         }
-        if let Some(o) = &mut ops {
-            while let Some(n) = o.take()? {
-                self.op(k, &mut names, &n)?;
-            }
+        while let Some(i) = first(&streams, |_, _| true) {
+            self.take_op(k, &mut streams[i])?;
         }
         Ok(())
     }
+
+    fn take_op(&mut self, k: usize, s: &mut Stream) -> Res<()> {
+        let n = s.take()?.unwrap();
+        self.op(k, s.node, &mut s.names, &n)
+    }
+}
+
+/// One node's disks' operation logs, read one after another (a disk's names are its own).
+struct Stream {
+    node: usize,
+    disks: VecDeque<Ops>,
+    names: Names,
+    at: String,
+    /// The disk before ended: its names go before the next disk's first operation (not
+    /// before its own last one is named).
+    ended: bool,
+}
+
+impl Stream {
+    fn new(node: usize, disks: Vec<Ops>, at: String) -> Stream {
+        Stream {
+            node,
+            // A disk with no operation would stall the ones after it.
+            disks: disks.into_iter().filter(|o| o.next.is_some()).collect(),
+            names: Names::new(at.clone()),
+            at,
+            ended: false,
+        }
+    }
+
+    fn next(&self) -> Option<&OpEv> {
+        self.disks.front().and_then(|o| o.next.as_ref())
+    }
+
+    fn take(&mut self) -> Res<Option<OpEv>> {
+        if std::mem::take(&mut self.ended) {
+            self.names = Names::new(self.at.clone());
+        }
+        let Some(o) = self.disks.front_mut() else {
+            return Ok(None);
+        };
+        let n = o.take()?;
+        if o.next.is_none() {
+            self.disks.pop_front();
+            self.ended = true;
+        }
+        Ok(n)
+    }
+}
+
+/// The stream whose next operation comes first in the log (virtual time, then sequence
+/// number) among those `ok` admits.
+fn first(streams: &[Stream], ok: impl Fn(usize, &OpEv) -> bool) -> Option<usize> {
+    streams
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| s.next().filter(|n| ok(s.node, n)).map(|n| (i, n)))
+        .min_by_key(|(i, n)| (n.r.vclock_ns, n.r.seq, *i))
+        .map(|(i, _)| i)
 }
 
 /// Print the stream of the run directory `run` to `out`.
@@ -1023,12 +1124,22 @@ pub fn export(run: &Path, sel: &Select, out: impl Write) -> Res<()> {
                 .collect()
         })
         .unwrap_or_default();
+    let node_work: Vec<String> = std::iter::once(work.clone())
+        .chain(
+            cfg.as_ref()
+                .and_then(|c| c["config"]["nodes"].as_array())
+                .into_iter()
+                .flatten()
+                .map(|n| n["work_at"].as_str().unwrap_or("/work").to_string()),
+        )
+        .collect();
     let mut x = Export {
         out: BufWriter::with_capacity(1 << 20, out),
         sel,
         result: crate::result::read_json(&run.join("result.json")).ok(),
         work,
         nodes,
+        node_work,
         slot_node: HashMap::new(),
         node: None,
     };

@@ -1,8 +1,13 @@
 //! `patina minimize RUNDIR`: rerun a failing run with less fault injection while it keeps its
-//! signature. First each fault setting (each `--fault` key, `--crash`, `--buggify`) is dropped
-//! in turn, keeping a removal when the signature is unchanged; then each remaining rate is
-//! halved for as long as that holds. The seed and every scheduling setting stay as they were.
-//! At most `MAX_RUNS` runs, one at a time; the smallest run found is written to `--out`.
+//! signature. First each fault setting (each `--fault` key, each node's scoped one `KEY=V@NODE`
+//! as its own, `--crash`, `--buggify`) is dropped in turn, keeping a removal when the signature
+//! is unchanged. With nodes, a machine crash at crash points that is kept then becomes one
+//! node's first crash alone (`machine-at:N@NODE`), tried node by node, and the settings left
+//! are dropped once more; failing that it is
+//! narrowed to fewer nodes, one dropped at a time. Then each remaining rate is halved (a gap
+//! between partitions or node crashes doubled) for as long as that holds. The seed and every
+//! scheduling setting stay as they were. At most `MAX_RUNS` runs, one at a time; the smallest
+//! run found is written to `--out`.
 
 use crate::cli::Args;
 use crate::config::{Config, Program};
@@ -18,16 +23,31 @@ use std::process::ExitCode;
 /// The most runs one minimisation makes.
 pub const MAX_RUNS: usize = 30;
 
-/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, `KIND:N` for a crash rate, and
-/// the gap between partitions (`partition-gap-ms`) doubled, up to an hour.
+/// A crash at one crash point (`machine-at:N`, `process-at:N`): nothing in it to narrow.
+fn c_at(c: &Config) -> bool {
+    c.crash.as_deref().is_some_and(|x| x.contains("-at:"))
+}
+
+/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, `KIND:N` for a crash rate (with
+/// its `@NODE,...` scope), and the gap between partitions or between a node's crashes
+/// (`partition-gap-ms`, `crash-gap-ms`) doubled, up to an hour; a node scope (`@NODE,...`)
+/// stays.
 fn halve(v: &str) -> Option<String> {
+    let (v, scope) = crate::faults::split_scope(v);
+    let at = scope.map(|s| format!("@{s}")).unwrap_or_default();
+    halve_unscoped(v).map(|h| format!("{h}{at}"))
+}
+
+fn halve_unscoped(v: &str) -> Option<String> {
     let h = |x: &str| x.parse::<u64>().ok().filter(|n| *n > 1).map(|n| n / 2);
-    if let Some(val) = v.strip_prefix("partition-gap-ms=") {
-        let d = |x: &str| x.parse::<u64>().ok().map(|n| n.max(1) * 2);
-        let (a, b) = val.split_once("..").unwrap_or((val, val));
-        let (a2, b2) = (d(a)?, d(b)?);
-        // Always a range: the key takes nothing else.
-        return (b2 <= 3_600_000).then(|| format!("partition-gap-ms={a2}..{b2}"));
+    for key in ["partition-gap-ms", "crash-gap-ms"] {
+        if let Some(val) = v.strip_prefix(key).and_then(|x| x.strip_prefix('=')) {
+            let d = |x: &str| x.parse::<u64>().ok().map(|n| n.max(1) * 2);
+            let (a, b) = val.split_once("..").unwrap_or((val, val));
+            let (a2, b2) = (d(a)?, d(b)?);
+            // Always a range: the keys take nothing else.
+            return (b2 <= 3_600_000).then(|| format!("{key}={a2}..{b2}"));
+        }
     }
     if let Some((k, val)) = v.split_once('=') {
         if !k.ends_with("-permille") {
@@ -179,12 +199,12 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     cfg.faults = expanded;
     cfg.faults_preset.clear();
     let mut cur = cfg.clone();
-    let mut best: Option<PathBuf> = None;
-    let mut keep =
+    let best: std::cell::RefCell<Option<PathBuf>> = Default::default();
+    let keep =
         |s: &mut Search, cand: Config, cur: &mut Config, change: String| -> Result<bool, Fail> {
             match s.attempt(&cand, change)? {
                 Some(d) => {
-                    if let Some(old) = best.replace(d) {
+                    if let Some(old) = best.borrow_mut().replace(d) {
                         let _ = std::fs::remove_dir_all(old);
                     }
                     *cur = cand;
@@ -203,6 +223,81 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         let mut c = cur.clone();
         c.crash = None;
         keep(&mut s, c, &mut cur, format!("without --crash {cr}"))?;
+    }
+    // With nodes, a crash at crash points becomes one node's first crash alone
+    // (`machine-at:N@NODE`, N its point in the run that last kept the signature), tried node
+    // by node: a node's crash points count its own oplog records and syncs, so its crash lands
+    // at the same place in its work when other nodes no longer crash.
+    if let Some(cr) = cur.crash.clone().filter(|_| !cur.nodes.is_empty()) {
+        let (kind, scope) = crate::faults::split_scope(&cr);
+        let d = best.borrow().clone().unwrap_or_else(|| rundir.clone());
+        let r = read_json(&d.join("result.json")).unwrap_or_default();
+        let names: Vec<String> = match scope {
+            Some(s) => s.split(',').map(str::to_string).collect(),
+            None => cur
+                .nodes
+                .iter()
+                .filter(|n| !n.no_faults)
+                .map(|n| n.name.clone())
+                .collect(),
+        };
+        let first = |n: &str| -> Option<u64> {
+            r["nodes"]["list"]
+                .as_array()?
+                .iter()
+                .find(|x| x["name"] == n)?["downs"][0]["point"]
+                .as_u64()
+        };
+        if kind.starts_with("machine:") {
+            for n in names {
+                let Some(p) = first(&n) else { continue };
+                let at = format!("machine-at:{p}@{n}");
+                let mut c = cur.clone();
+                c.crash = Some(at.clone());
+                if keep(&mut s, c, &mut cur, format!("--crash {cr} -> {at}"))? {
+                    // Other settings may have been needed only for the other crashes.
+                    for f in cur.faults.clone() {
+                        let mut c = cur.clone();
+                        c.faults.retain(|x| *x != f);
+                        keep(&mut s, c, &mut cur, format!("without {f}"))?;
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    // With nodes: the crash on fewer nodes, one dropped at a time while more than one is left.
+    if let Some(cr) = cur
+        .crash
+        .clone()
+        .filter(|_| !cur.nodes.is_empty() && !c_at(&cur))
+    {
+        let (kind, scope) = crate::faults::split_scope(&cr);
+        let mut on: Vec<String> = match scope {
+            Some(s) => s.split(',').map(str::to_string).collect(),
+            None => cur
+                .nodes
+                .iter()
+                .filter(|n| !n.no_faults)
+                .map(|n| n.name.clone())
+                .collect(),
+        };
+        for n in on.clone() {
+            if on.len() < 2 {
+                break;
+            }
+            let rest: Vec<String> = on.iter().filter(|x| **x != n).cloned().collect();
+            let mut c = cur.clone();
+            c.crash = Some(format!("{kind}@{}", rest.join(",")));
+            if keep(
+                &mut s,
+                c,
+                &mut cur,
+                format!("--crash {kind} without node {n}"),
+            )? {
+                on = rest;
+            }
+        }
     }
     if cur.buggify {
         let mut c = cur.clone();
@@ -229,7 +324,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     let budget_spent = s.runs >= MAX_RUNS;
-    let result = match best {
+    let result = match best.into_inner() {
         Some(d) => {
             std::fs::rename(&d, &out).map_err(|e| internal(format!("{}: {e}", out.display())))?;
             Ok(())
@@ -322,6 +417,17 @@ mod tests {
         assert_eq!(
             halve("partition-gap-ms=4000..4000").as_deref(),
             Some("partition-gap-ms=8000..8000")
+        );
+        // A node scope stays; a node's crash gap doubles.
+        assert_eq!(
+            halve("fs-error-permille=8@a,b").as_deref(),
+            Some("fs-error-permille=4@a,b")
+        );
+        assert_eq!(halve("machine:10@b").as_deref(), Some("machine:5@b"));
+        assert_eq!(halve("machine-at:3@b"), None);
+        assert_eq!(
+            halve("crash-gap-ms=1000..4000").as_deref(),
+            Some("crash-gap-ms=2000..8000")
         );
     }
 }

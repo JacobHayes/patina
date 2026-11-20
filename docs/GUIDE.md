@@ -225,7 +225,10 @@ made from a source path is the same in every checkout). With `--cases`, a findin
 label (an `always`, a `--check` finding) or by an `INVARIANT` line is one group over every case
 it appears in; any other is grouped per case, since an exit status, a signal, a blocked wait
 or a runtime's panic text (Go's `index out of range`, an `assert_eq!` without a message) is
-the same for unrelated failures. A sweep announces each new group as soon as one of its runs ends (with several jobs, not
+the same for unrelated failures. A node's own end (a node's command that fails or crashes, not
+the driver's) adds `[node NAME]`, with the name's digits made `N` as well: replicas `n1`, `n2`,
+`n3` that fail the same way are one group, while `primary` and `backup` stay two. Which node
+crashed, and where, is the faults' doing and not part of a signature. A sweep announces each new group as soon as one of its runs ends (with several jobs, not
 always the run of its lowest seed) and replays its lowest seed once; a replay that differs makes the group
 `nondeterministic`. `patina report DIR...` prints the same summary for any run directories and
 writes `report.json`. A replay or a minimized run is written inside the run it comes from, so it
@@ -1434,10 +1437,10 @@ a kill, `down-ms=A..B` (default `1000..5000`, short beside the gap, so that seve
 seldom all down at once) the time it stays down before its restart.
 `max-incarnations=N` stops the kills once a node has started N times (each node counts its
 own), and `faults-in-recovery=0` turns the network's faults, partitions and every node's
-disk and memory faults off after the first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means only this
-or its machine form (`--crash machine[@a,b]`, next section); a crash point
-(`--crash machine-at:N`, `machine:PERMILLE`) and `restart-gap-ms` are refused, and the driver
-is never killed.
+disk and memory faults off after the first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means this, its machine form
+(`--crash machine[@a,b]`, next section) or a machine crash at a node's crash points
+([At a node's crash points](#at-a-nodes-crash-points)); `process-at:N` and `restart-gap-ms` are
+refused, and the driver is never killed.
 
 **What keeps a run alive.** When every thread waits with no deadline, the run goes on to the
 next event that can wake one: a node's kill by the seed (its peers see its connections end),
@@ -1561,6 +1564,67 @@ one, and every run with nodes ends with the self-check on every disk (`result.js
 caught before it reached the disk can survive as zeros or cut short, and recovery that trusts
 each record's length (`nocheck`) keeps one no node wrote (`tests/nodes/11-wal.sh`).
 
+#### At a node's crash points
+
+A node's crash points are its own: each node counts them on its own disk, after each record of
+its operation log and before each sync, from 0 at each boot. `--crash machine-at:N@NODE`
+crashes node `NODE`'s machine at the N-th point of its first boot (once); `--crash
+machine:PERMILLE@NODE,...` crashes each named node at each of its points with that chance, in
+every boot until its `max-incarnations`. Without `@`, every node but the driver (and a node
+with `faults = false`); `N` and `PERMILLE` may be ranges (`A..B`), each node drawing its own
+from a seed of its own. The
+crash is the one above: the node's maps are flushed, the disk ends with its `Crash` record, the
+node goes silent and boots again after `down-ms`. There are no crashes at drawn times then, so
+`crash-gap-ms` is refused beside it.
+
+After any machine crash of a node (at a point, at a drawn time or by a script), the crashed
+disk's tree is written to `RUNDIR/node/NAME/inc-K/post-crash/`, the tree boot K+1 started from, and what the crash lost there is counted in `downs[].lost` and the `crash` event
+(`missing`, `changed`, `back`: written and not kept, kept in another form, reverted to an older
+form; `paths`). `patina log events` merges each node's operations with the driver's, each
+`op` naming its `node`, and its `crash` events name the node and the `point`.
+`result.json` gives each down its `point`, and each node its `crash_points` per boot.
+
+`patina sweep --branch --crash machine[@NODE,...]` runs each seed once with crashes on and
+never firing, counting every named node's points, then once per point of each node, crashing
+that node's machine there (`machine-at:P@NODE`, in `seed-S@NODE:P`); each child reruns the
+whole run. `ack2.py` (in `tests/guests/nodes`) is a store of two nodes: a forwards each put to
+b and acknowledges it once b answers; with `early`, b answers before its `fsync`:
+
+<!-- transcript nodes-branch
+release-only: a sweep of a seed's 30 crash points
+exact-only: which points lose the put depend on the seed's run
+dir: /tmp/ack2
+setup: mkdir g && cp "$GUESTS/ack2.py" "$GUESTS/patina.py" g/
+setup: printf '[node.a]\ncmd = ["python3", "/guest/ack2.py", "a"]\n[node.b]\ncmd = ["python3", "/guest/ack2.py", "b", "early"]\n' >patina.toml
+exit: 1
+-->
+```text
+$ patina sweep --seeds 1 --branch --crash machine -j 4 --mount g:/guest -- python3 /guest/ack2.py driver 3
+...
+crash points: 30 of 30 tried (a 15 of 15, b 15 of 15)
+nodes: driver, a, b in 31 runs; net: 0 cuts, 0 heals, 11 held over them
+node downs: 30 machine crash; 30 restarts
+
+failure exit: FAIL: acknowledged put lost on b; exit 1
+  6 of 31 runs   first: seed 1@b:1   replayed: identical
+  faults in every failing run: crash      in none: -
+  nodes: a down in 0, b down in 6 (lost on its disk in 6; crash points 1, 2, 3, 8, 9, 12)
+  rerun:  patina run --seed 1 --config /tmp/ack2/patina-out/sweep/seed-1@b:1/run.json -- python3 /guest/ack2.py driver 3
+  replay: patina replay /tmp/ack2/patina-out/sweep/seed-1@b:1
+```
+
+A group's `nodes:` line says, for its failing runs, in how many each node went down, in how many
+its crash lost something on its disk, the crash points it crashed at, and in how many a
+partition was in force at the end. Without `early` the same sweep is ok at all 30 points
+(`tests/nodes/13-points.sh`, `14-points-sweep.sh`).
+
+`patina minimize` of a run with nodes takes each node's scoped setting (`KEY=V@NODE`) as one
+of its own, doubles `crash-gap-ms` as it does `partition-gap-ms`, turns a kept crash at crash
+points into one node's first crash alone (`machine-at:N@NODE`, node by node, then drops the
+other settings again), and otherwise narrows the crash's `@NODE,...` one node at a time. A
+failure planted under crashes of both nodes, net delays and duplicates and disk delays reduces
+to `--crash machine-at:8@b` and nothing else (`tests/nodes/14-points-sweep.sh`).
+
 ### Disk faults per node
 
 The disk and memory keys (`fs-*`, `fsync-*`, `enospc-after-bytes`, `mem-*`, `path-swap-*`)
@@ -1580,16 +1644,19 @@ fsync-error-permille = 5
 
 Each node draws a range from a seed of its own and counts its own calls (`fs-error-at`,
 `fsync-error-at`, `enospc-after-bytes`) over all its boots; `result.json` shows each node's settings as
-`KEY@NODE`; `swarm` leaves them as given. The other keys are the run's and take no scope. With machine crashes beside fsync
+`KEY@NODE`; with `swarm`, each node turns its classes off by its own seed. The other keys are
+the run's and take no scope. A node with `faults = false` in its table gets none of its own:
+like the driver, it is left out of `--faults`, `--fault` and `--crash` given without a scope,
+and a scope may not name it; the links to it and the partitions, which are the run's, still
+act on it. With machine crashes beside fsync
 errors, `acklog`'s `retry` mode (retry a failed `fsync`, then acknowledge) loses an
 acknowledged record once the crash drops the write the failure took
 (`tests/nodes/12-disk-faults.sh`).
 
-**Not available yet** (refused, naming what is missing): a node's crash at a crash point
-(`--crash machine-at:N`, `machine:PERMILLE`), the SDK's fault keys with nodes, pausing a node (`node pause`, `node resume`), a node's own clock
-(`clock ...`), `--branch` (it forces crash points), `patina __native` twins and `--check`
-reference runs of a run with nodes. `op` events in `patina log events` are the driver's; a
-node's operations are in its disks' logs.
+**Not available yet** (refused, naming what is missing): the SDK's fault keys with nodes,
+pausing a node (`node pause`, `node resume`), a node's own clock (`clock ...`), a process
+kill at a crash point (`process-at:N`), `patina __native` twins and `--check` reference runs
+of a run with nodes.
 
 ## The SDK
 

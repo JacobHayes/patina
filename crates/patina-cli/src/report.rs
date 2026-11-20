@@ -38,15 +38,106 @@ pub struct Run {
     pub run: Value,
     /// `replay.json`, written by a sweep that replayed this run.
     pub replay: Option<Value>,
-    /// In a `--branch` sweep: 0 for a base (`seed-N`), P for the child crashing at point P
-    /// (`seed-N@P`).
-    pub point: Option<u64>,
+    /// In a `--branch` sweep: where it crashes (`Point`).
+    pub point: Option<Point>,
 }
 
-/// How a run is named: `seed 3`, or `seed 3@120` for a branch child.
-pub fn run_name(seed: u64, point: Option<u64>) -> String {
+impl Run {
+    /// Where the run is, as `report.json` names a run: its seed, branch point, case (and
+    /// `case_id` with `id`) and directory.
+    fn at(&self, id: bool) -> Value {
+        let mut v = json!({"seed": self.seed, "case": self.case, "dir": self.dir});
+        if id {
+            v["case_id"] = json!(self.case_id);
+        }
+        Point::json(self.point.as_ref(), &mut v);
+        v
+    }
+}
+
+/// A run's place in a `--branch` sweep: a base (`n` 0, `seed-N`), or the child crashing at
+/// crash point `n` (`seed-N@P`), of node `node`'s first boot in a run with nodes
+/// (`seed-N@NODE:P`; `node` empty: the one machine). Ordered by point, then node.
+#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Point {
+    pub n: u64,
+    pub node: String,
+}
+
+impl Point {
+    pub fn child(n: u64, node: &str) -> Point {
+        Point {
+            n,
+            node: node.to_string(),
+        }
+    }
+
+    /// `P` or `NODE:P`, as a directory name and a run's name have it after `@`.
+    pub fn label(&self) -> String {
+        if self.node.is_empty() {
+            self.n.to_string()
+        } else {
+            format!("{}:{}", self.node, self.n)
+        }
+    }
+
+    /// A label read back (`P`, `NODE:P` with P > 0).
+    pub fn parse(s: &str) -> Option<Point> {
+        let (node, n) = s.rsplit_once(':').unwrap_or(("", s));
+        let n = n.parse::<u64>().ok().filter(|n| *n > 0)?;
+        (node.is_empty() || proto::node::valid_name(node.as_bytes())).then(|| Point::child(n, node))
+    }
+
+    /// A child's fields in `report.json`: its `point`, and its `node` when it has one.
+    fn json(p: Option<&Point>, v: &mut Value) {
+        if let Some(p) = p.filter(|p| p.n > 0) {
+            v["point"] = json!(p.n);
+            if !p.node.is_empty() {
+                v["node"] = json!(p.node);
+            }
+        } else {
+            v["point"] = Value::Null;
+        }
+    }
+
+    /// The child a `report.json` entry names (`Point::json`).
+    pub fn of(v: &Value) -> Option<Point> {
+        let n = v["point"].as_u64().filter(|n| *n > 0)?;
+        Some(Point::child(n, v["node"].as_str().unwrap_or("")))
+    }
+}
+
+/// The crash points a `--branch` base counted: with nodes, each node's whose crashes were
+/// at its crash points (`nodes.list[].crash_points`, its first boot's), by name; otherwise
+/// the one machine's (`""`, the `crash` class's eligible calls).
+pub fn base_points(r: &Value, run: &Value) -> Vec<(String, u64)> {
+    // A run with nodes counts no points of the one machine, even when it ended before its
+    // result had a node table.
+    let nodes = run["config"]["nodes"]
+        .as_array()
+        .is_some_and(|n| !n.is_empty());
+    match r["nodes"]["list"].as_array() {
+        None if nodes => vec![],
+        Some(l) => l
+            .iter()
+            .filter_map(|n| {
+                let p = n["crash_points"].get(0)?.as_u64()?;
+                Some((n["name"].as_str()?.to_string(), p))
+            })
+            .collect(),
+        None => vec![(
+            String::new(),
+            r["faults"]["counts"]["crash"]["eligible"]
+                .as_u64()
+                .unwrap_or(0),
+        )],
+    }
+}
+
+/// How a run is named: `seed 3`, or `seed 3@120` (`3@b:120` on node b) for a branch child.
+pub fn run_name(seed: u64, point: Option<&Point>) -> String {
     match point {
-        Some(p) if p > 0 => format!("{seed}@{p}"),
+        Some(p) if p.n > 0 => format!("{seed}@{}", p.label()),
         _ => seed.to_string(),
     }
 }
@@ -120,7 +211,7 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         let seed_dir = |n: &str| {
             n == format!("seed-{seed}")
                 || n.strip_prefix(&format!("seed-{seed}@"))
-                    .is_some_and(|p| p.parse::<u64>().is_ok())
+                    .is_some_and(|p| Point::parse(p).is_some())
         };
         let case = match (&parent, name(&dir)) {
             (Some(p), Some(n)) if seed_dir(p) => written.or(Some(n)),
@@ -130,8 +221,11 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         let point = own
             .as_deref()
             .and_then(|n| n.strip_prefix(&format!("seed-{seed}@")))
-            .and_then(|p| p.parse::<u64>().ok())
-            .or((branch && own.as_deref() == Some(format!("seed-{seed}").as_str())).then_some(0));
+            .and_then(Point::parse)
+            .or(
+                (branch && own.as_deref() == Some(format!("seed-{seed}").as_str()))
+                    .then(Point::default),
+            );
         let replay = read_json(&dir.join("replay.json")).ok();
         let case_pos = case
             .as_ref()
@@ -825,7 +919,7 @@ pub fn build(
     }
     for g in &mut groups {
         g.runs
-            .sort_by_key(|r| (r.seed, r.point, r.case_pos, r.dir.clone()));
+            .sort_by_key(|r| (r.seed, r.point.clone(), r.case_pos, r.dir.clone()));
     }
     // Faults: configured classes over the whole set, eligible counts.
     let mut configured = BTreeSet::new();
@@ -972,26 +1066,54 @@ pub fn build(
             *limits.entry(l).or_default() += 1;
         }
     }
-    // A branch sweep: each base's crash points and the children run of them.
+    // A branch sweep: each base's crash points and the children run of them; with nodes,
+    // each node's too.
     let mut bases: BTreeMap<(u64, Option<String>), (u64, u64)> = BTreeMap::new();
-    for r in runs {
-        match r.point {
-            Some(0) => {
-                bases.entry((r.seed, r.case.clone())).or_default().0 = r.result["faults"]["counts"]
-                    ["crash"]["eligible"]
-                    .as_u64()
-                    .unwrap_or(0)
+    // In the order the nodes are configured (the bases' node tables), not by name.
+    let mut per_node: Vec<(String, (u64, u64))> = vec![];
+    fn node(per_node: &mut Vec<(String, (u64, u64))>, n: &str) -> usize {
+        match per_node.iter().position(|x| x.0 == n) {
+            Some(i) => i,
+            None => {
+                per_node.push((n.to_string(), (0, 0)));
+                per_node.len() - 1
             }
-            Some(_) => bases.entry((r.seed, r.case.clone())).or_default().1 += 1,
+        }
+    }
+    for r in runs {
+        match &r.point {
+            Some(p) if p.n == 0 => {
+                let pts = base_points(&r.result, &r.run);
+                bases.entry((r.seed, r.case.clone())).or_default().0 =
+                    pts.iter().map(|x| x.1).sum();
+                for (n, k) in pts.into_iter().filter(|x| !x.0.is_empty()) {
+                    let i = node(&mut per_node, &n);
+                    per_node[i].1 .0 += k;
+                }
+            }
+            Some(p) => {
+                bases.entry((r.seed, r.case.clone())).or_default().1 += 1;
+                if !p.node.is_empty() {
+                    let i = node(&mut per_node, &p.node);
+                    per_node[i].1 .1 += 1;
+                }
+            }
             None => {}
         }
     }
     let branch = (!bases.is_empty()).then(|| {
-        json!({
+        let mut b = json!({
             "points": bases.values().map(|b| b.0).sum::<u64>(),
             "tried": bases.values().map(|b| b.1).sum::<u64>(),
             "seeds": bases.iter().map(|((s, c), (p, t))| json!({"seed": s, "case": c, "points": p, "tried": t})).collect::<Vec<_>>(),
-        })
+        });
+        if !per_node.is_empty() {
+            b["nodes"] = per_node
+                .iter()
+                .map(|(n, (p, t))| json!({"node": n, "points": p, "tried": t}))
+                .collect();
+        }
+        b
     });
     let no_points = branch.as_ref().is_some_and(|b| b["points"] == 0);
     // The check: what the checker said of each run it ran after (`check.verdict`).
@@ -1097,11 +1219,12 @@ pub fn build(
                 "cases": cases,
                 "count": g.runs.len(),
                 "seeds": g.runs.iter().map(|r| r.seed).collect::<Vec<_>>(),
-                "runs": g.runs.iter().map(|r| json!({"seed": r.seed, "point": r.point.filter(|p| *p > 0), "case": r.case, "case_id": r.case_id, "dir": r.dir})).collect::<Vec<_>>(),
-                "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "case_id": first.case_id, "dir": first.dir},
+                "runs": g.runs.iter().map(|r| r.at(true)).collect::<Vec<_>>(),
+                "first": first.at(true),
                 "example": example(&g.signature, &first.result, &first.dir),
                 "replay": replay,
                 "faults": {"every": every, "none": none},
+                "nodes": node_causes(&g.runs),
                 "rerun": rerun_command(&first.run, first.seed, &first.dir),
                 "replay_command": format!("patina replay {}", quote(&first.dir.display().to_string())),
             })
@@ -1132,7 +1255,7 @@ pub fn build(
         .iter()
         .filter(|r| crate::result::self_check_failed(&r.result))
         .collect();
-    defects.sort_by_key(|r| (r.seed, r.point, r.case_pos, r.dir.clone()));
+    defects.sort_by_key(|r| (r.seed, r.point.clone(), r.case_pos, r.dir.clone()));
     let exit = if finding {
         1
     } else if not_ok || vacuous || !defects.is_empty() {
@@ -1180,7 +1303,7 @@ pub fn build(
     if let Some(first) = defects.first() {
         v["self_check_failed"] = json!({
             "runs": defects.len(),
-            "first": {"seed": first.seed, "point": first.point.filter(|p| *p > 0), "case": first.case, "dir": first.dir},
+            "first": first.at(false),
             "detail": first.result["self_check"]["detail"],
             "replay_command": format!("patina replay {}", quote(&first.dir.display().to_string())),
         });
@@ -1308,6 +1431,94 @@ pub fn build(
     (v, text)
 }
 
+/// With nodes: what happened to each node in a group's runs: in how many it went down, in how
+/// many a crash of its machine lost something on its disk (`downs[].lost`), and the crash
+/// points it crashed at (a `--branch` sweep's children and `machine:P` runs); and in how many a
+/// partition was in force at the end. `null` without nodes.
+fn node_causes(runs: &[&Run]) -> Value {
+    let Some(list) = runs[0].result["nodes"]["list"].as_array() else {
+        return Value::Null;
+    };
+    let nodes: Vec<Value> = list
+        .iter()
+        .filter_map(|n| n["name"].as_str())
+        .filter(|n| *n != "driver")
+        .map(|name| {
+            let (mut down, mut lost, mut points) = (0, 0, BTreeSet::new());
+            for r in runs {
+                let Some(n) = r.result["nodes"]["list"]
+                    .as_array()
+                    .and_then(|l| l.iter().find(|x| x["name"] == name))
+                else {
+                    continue;
+                };
+                let downs = n["downs"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+                down += usize::from(!downs.is_empty());
+                lost += usize::from(downs.iter().any(|d| {
+                    d["lost"]["missing"].as_u64().unwrap_or(0)
+                        + d["lost"]["changed"].as_u64().unwrap_or(0)
+                        > 0
+                }));
+                points.extend(downs.iter().filter_map(|d| d["point"].as_u64()));
+            }
+            json!({"node": name, "down": down, "lost": lost, "points": points})
+        })
+        .collect();
+    let partitioned = runs
+        .iter()
+        .filter(|r| {
+            r.result["nodes"]["partitions"]
+                .as_array()
+                .and_then(|p| p.last())
+                .is_some_and(|p| p["to_ms"].is_null())
+        })
+        .count();
+    json!({"list": nodes, "partitioned_at_end": partitioned})
+}
+
+/// `nodes: b down in 10 (lost on its disk in 10; crash points 1, 2), a down in 0`, and the
+/// runs that ended partitioned; `None` when no node went down and none did.
+fn node_causes_line(g: &Value) -> Option<String> {
+    let n = &g["nodes"];
+    let list = n["list"].as_array()?;
+    let part = n["partitioned_at_end"].as_u64().unwrap_or(0);
+    if part == 0 && list.iter().all(|x| x["down"] == 0) {
+        return None;
+    }
+    let mut each: Vec<String> = list
+        .iter()
+        .map(|x| {
+            let mut why = vec![];
+            if x["lost"].as_u64().unwrap_or(0) > 0 {
+                why.push(format!("lost on its disk in {}", x["lost"]));
+            }
+            let pts: Vec<String> = x["points"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| p.to_string())
+                .collect();
+            if !pts.is_empty() {
+                why.push(format!("crash points {}", pts.join(", ")));
+            }
+            let why = if why.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", why.join("; "))
+            };
+            format!(
+                "{} down in {}{why}",
+                x["node"].as_str().unwrap_or(""),
+                x["down"]
+            )
+        })
+        .collect();
+    if part > 0 {
+        each.push(format!("partitioned at the end in {part}"));
+    }
+    Some(format!("  nodes: {}\n", each.join(", ")))
+}
+
 /// Groups a report prints in full; the others get one line (`patina report --group N`).
 const GROUPS_SHOWN: usize = 3;
 
@@ -1351,7 +1562,7 @@ fn group_runs(g: &Value, runs: u64) -> String {
         g["count"],
         run_name(
             g["first"]["seed"].as_u64().unwrap_or(0),
-            g["first"]["point"].as_u64()
+            Point::of(&g["first"]).as_ref()
         )
     )
 }
@@ -1382,6 +1593,9 @@ fn group_text(g: &Value, runs: u64, faulted: bool) -> String {
             list("every"),
             list("none")
         ));
+    }
+    if let Some(l) = node_causes_line(g) {
+        s.push_str(&l);
     }
     s.push_str(&format!("  rerun:  {}\n", st("rerun")));
     s.push_str(&format!("  replay: {}\n", st("replay_command")));
@@ -1455,10 +1669,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
     s.push_str(&format!("outcomes: {}\n", classes.join(", ")));
     if let Some(d) = v.get("self_check_failed") {
         let f = &d["first"];
-        let at = match f["point"].as_u64() {
-            Some(p) => format!("{}@{p}", f["seed"]),
-            None => f["seed"].to_string(),
-        };
+        let at = run_name(f["seed"].as_u64().unwrap_or(0), Point::of(f).as_ref());
         s.push_str(&format!(
             "self-check failed in {} (a Patina defect; the outcomes are the programs' own): first seed {at}: {}\n  replay: {}\n",
             count(d["runs"].as_u64().unwrap_or(0) as usize, "run"),
@@ -1551,7 +1762,28 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             b["points"].as_u64().unwrap_or(0),
             b["tried"].as_u64().unwrap_or(0),
         );
-        s.push_str(&format!("crash points: {t} of {p} tried\n"));
+        // With nodes: each node's points and children (`b 120 of 120`).
+        let nodes: Vec<String> = b["nodes"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|n| {
+                format!(
+                    "{} {} of {}",
+                    n["node"].as_str().unwrap_or(""),
+                    n["tried"],
+                    n["points"]
+                )
+            })
+            .collect();
+        s.push_str(&format!(
+            "crash points: {t} of {p} tried{}\n",
+            if nodes.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", nodes.join(", "))
+            }
+        ));
         if t < p {
             let seeds = b["seeds"].as_array().unwrap();
             let mut l: Vec<String> = seeds

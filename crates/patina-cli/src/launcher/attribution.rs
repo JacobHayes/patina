@@ -131,6 +131,8 @@ pub struct Faults {
     eligible: [u64; NKIND],
     crash_points: u64,
     crashes: u64,
+    /// Nodes' machine crashes at a crash point (counted among `crash_points` already).
+    point_kills: u64,
     /// A run with nodes: their names (the driver first), and the seed's partitions that acted
     /// on traffic.
     pub nodes: Vec<String>,
@@ -192,10 +194,8 @@ impl Faults {
             }
             if r.args[0] == proto::node::INJ_NODE_KILL {
                 let k = r.args[1] as usize;
-                e["object"] = json!(format!(
-                    "node {}",
-                    self.nodes.get(k).cloned().unwrap_or_else(|| k.to_string())
-                ));
+                e["node"] = json!(self.nodes.get(k).cloned().unwrap_or_else(|| k.to_string()));
+                self.point_kills += (r.args[4] != 0) as u64;
             }
             if let Some(c) = fault {
                 *self.by_class.entry(c).or_default() += 1;
@@ -204,6 +204,26 @@ impl Faults {
             e["seq"] = json!(r.seq);
             e["vtime_ms"] = json!(r.vclock_ns / 1_000_000);
             self.push(e);
+        }
+    }
+
+    /// Crash points the nodes passed (`nodes.list[].crash_points`): the `crash` class's
+    /// eligible calls, as a single machine's are.
+    pub fn add_points(&mut self, n: u64) {
+        self.crash_points += n;
+    }
+
+    /// What node `k`'s machine crash at the end of its boot `boot` did to its disk: on the
+    /// crash's event, as a single machine's crash has it.
+    pub fn node_lost(&mut self, k: usize, boot: u64, lost: Value) {
+        let name = self.nodes.get(k).cloned().unwrap_or_default();
+        if let Some(e) = self.recent.iter_mut().find(|e| {
+            e["node"] == name.as_str() && e["node_incarnation"] == boot && e["kind"] == "machine"
+        }) {
+            if let Some(p) = lost["paths"].get(0) {
+                e["object"] = p.clone();
+            }
+            e["lost"] = lost;
         }
     }
 
@@ -254,7 +274,10 @@ impl Faults {
             };
             let (eligible, injected) = match c {
                 // Machine crashes at crash points; node kills (by the seed) at drawn times.
-                "crash" => (self.crash_points + got(c), self.crashes + got(c)),
+                "crash" => (
+                    self.crash_points + got(c) - self.point_kills,
+                    self.crashes + got(c),
+                ),
                 // One delay per TCP delivery and per datagram sent.
                 "net-delay" => (chunks + datagrams, chunks + datagrams),
                 "net-halfclose" => (fins, fins),
@@ -332,10 +355,14 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
             e["shape"] = json!(proto::node::shape_name(class));
             e["length_ms"] = json!(r.args[5] / 1_000_000);
         }
-        // A node's processes killed by the seed (named by the caller): the incarnation it ended.
+        // A node's processes killed or its machine crashed by the seed (named by the caller):
+        // the incarnation it ended, and the crash point it came at.
         None if kind == proto::node::INJ_NODE_KILL => {
-            e["kind"] = json!("process");
+            e["kind"] = json!(if by == 1 { "machine" } else { "process" });
             e["node_incarnation"] = json!(value);
+            if port != 0 {
+                e["point"] = json!(port);
+            }
         }
         // The wire's records: the connection's server port.
         None => e["object"] = json!(format!("tcp:{port}")),
@@ -509,7 +536,7 @@ pub fn line(f: &Value) -> String {
         return out;
     }
     for k in [
-        "kind", "point", "call", "object", "errno", "count", "bytes", "delay_ns",
+        "node", "kind", "point", "call", "object", "errno", "count", "bytes", "delay_ns",
     ] {
         if let Some(v) = s(k) {
             out.push_str(&format!(" {k}={v}"));

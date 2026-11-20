@@ -482,21 +482,23 @@ struct CrashSub {
 static SUB: path::Global<CrashSub> = path::Global::new(CrashSub { seq: 0, sub: 0 });
 
 /// A crash point: the tracker's state changed (a record was appended) or a sync-class call is
-/// about to be made. Counts the point (`crash_points`: its ordinal in this incarnation), then
-/// either fires at the `crash_at`-th point or draws `draw(Crash, seq * 16 + k)` (k counts the
-/// points of this trap). When it fires it appends the `Crash` record and hands the crash to
-/// the supervisor, which kills every guest process. Never returns in that case. A point that
-/// does not fire changes nothing but the count, so a run's prefix is the same whatever the
-/// crash setting.
+/// about to be made. Counts the point (`crash_points`: its ordinal in this incarnation, or in
+/// a node's this boot: the settings and counter are the caller's node's, `state::faults`),
+/// then either fires at the `crash_at`-th point or draws `draw(Crash, seq * 16 + k)` (k counts
+/// the points of this trap). When it fires it hands the crash to the supervisor, which logs
+/// the `Crash` record and kills every guest process (a node's: that node's, which it then
+/// restarts in the run). Never returns in that case. A point that does not fire changes
+/// nothing but the count, so a run's prefix is the same whatever the crash setting.
+/// `faults-after-setup` is the run's.
 pub fn crash_point() {
     let c = ctl();
-    let f = &c.faults;
+    let f = crate::state::faults();
     let cfg = &f.cfg;
     if cfg.crash_kind == CRASH_NONE || cfg.crash_enabled == 0 {
         return;
     }
     let ts = thread();
-    if ts.seq < cfg.fault_after_seq {
+    if ts.seq < c.faults.cfg.fault_after_seq {
         return;
     }
     let s = SUB.get();
