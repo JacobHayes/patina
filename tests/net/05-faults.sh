@@ -14,32 +14,42 @@ run_fails "$o/chunk-naive-on" 1 --fault net-chunk-max=1 -- /guest/sockets chunk 
 run_ok "$o/chunk-naive-off" 1 -- /guest/sockets chunk naive
 run_ok "$o/chunk-correct-on" 1 --fault net-chunk-max=1 -- /guest/sockets chunk correct
 echo "net-chunk-max=1: naive receiver fails, passes without; correct receiver: $(grep 'correct receiver' "$o/chunk-correct-on/inc-0/stdout")"
-# The pieces of a split delivery follow each other by microseconds, not each by a delivery
-# delay: 500 one-byte pieces at net-delay-ms=10..10 take well under 500 x 10 ms, one read each.
-run_ok "$o/gap" 1 --fault net-chunk-max=1 --fault net-delay-ms=10..10 -- /guest/sockets chunk correct
-span=$("$PATINA" log events "$o/gap" | jq -s 'map(select(.t)) | last.t - first.t')
-grep -q ' in 500 reads' "$o/gap/inc-0/stdout" && [ "$span" -lt 1000000000 ] || die "split delivery: $span ns; $(cat "$o/gap/inc-0/stdout")"
-echo "net-chunk-max=1 at net-delay-ms=10..10: 500 one-byte reads in $((span / 1000000)) ms of virtual time"
-[ "$(net "$o/chunk-correct-on" chunks)" -ge 500 ] || die "chunks"
-pair reset net-reset-permille=200 reset reset
-awk '/reset|ECONN|Connection/ && n++ < 3' "$o/reset-on/inc-0/stdout"
+# Splitting is bounded: the head of each write is cut into at most four pieces and the rest
+# arrives whole, so 5 messages of 100 bytes take 25 reads, and 4 MiB at one-byte pieces costs
+# a few deliveries per write, not one per byte.
+grep -q ' in 25 reads' "$o/chunk-correct-on/inc-0/stdout" || die "split: $(cat "$o/chunk-correct-on/inc-0/stdout")"
+run_ok "$o/xfer" 1 --fault net-chunk-max=1 -- /guest/sockets xfer 4096
+c=$(net "$o/xfer" chunks)
+[ "$c" -lt 10000 ] || die "4 MiB at net-chunk-max=1: $c deliveries"
+echo "net-chunk-max=1: 4 MiB in $c deliveries"
+# A reset is drawn once per connection, at a drawn send: at 1000 per mille a seed of 1-10
+# resets the streaming client's connection mid-stream; without the fault that seed is clean.
+s=0
+for t in $(seq 1 10); do
+    run "$o/reset-on-$t" "$t" --fault net-reset-permille=1000 -- /guest/sockets reset reset >/dev/null
+    [ "$(field "$o/reset-on-$t/result.json" outcome)" = ok ] && { s=$t; break; }
+done
+[ "$s" != 0 ] || die "net-reset-permille=1000: no seed of 1-10 reset the stream"
+run_fails "$o/reset-off" "$s" -- /guest/sockets reset reset
+awk '/reset|ECONN|Connection/ && n++ < 3' "$o/reset-on-$s/inc-0/stdout"
 pair refuse net-connect-refuse-permille=1000 connect refused
 pair timeout net-connect-timeout-permille=1000 connect timeout
 grep -h 'connect ->' "$o/timeout-on/inc-0/stdout"
 pair blackout net-blackout=5000+10000 partition partitioned
 grep -h 'application timeout\|tick 05' "$o/blackout-on/inc-0/stdout"
-# net-reset's attribution counts what it is drawn on (each read of sent data), so over a seed
-# range injected / eligible is near the rate (500 permille), not one reset per connection.
-for s in $(seq 1 20); do run "$o/rate-$s" "$s" --fault net-reset-permille=500 -- /guest/sockets all >/dev/null; done
+# net-reset is drawn once per connection, so its attribution counts connections, and no
+# connection is reset twice: at 1000 per mille, injected never exceeds eligible.
+for s in $(seq 1 20); do run "$o/rate-$s" "$s" --fault net-reset-permille=1000 -- /guest/sockets all >/dev/null; done
 python3 -I - "$o"/rate-*/result.json <<'PY' || exit 1
 import json, sys
 inj = elig = 0
 for p in sys.argv[1:]:
-    c = json.load(open(p))["faults"]["counts"]["net-reset"]
-    if c["injected"] > c["eligible"]:
+    r = json.load(open(p))
+    c = r["faults"]["counts"]["net-reset"]
+    if not c["injected"] <= c["eligible"] == r["counters"]["net"]["connections"]:
         sys.exit("FAIL: %s: net-reset %s" % (p, c))
     inj, elig = inj + c["injected"], elig + c["eligible"]
-print("net-reset over 20 seeds: %d injected of %d eligible" % (inj, elig))
-if not (inj >= 10 and 0.3 <= inj / elig <= 0.7):
-    sys.exit("FAIL: net-reset injected %d of %d eligible at 500 permille" % (inj, elig))
+print("net-reset over 20 seeds: %d injected of %d connections" % (inj, elig))
+if inj < 10:
+    sys.exit("FAIL: net-reset injected %d times over 20 seeds at 1000 per mille" % inj)
 PY

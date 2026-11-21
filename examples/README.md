@@ -197,7 +197,8 @@ The same sweep without `--ok-exit` and `--check` reports only the clean failures
 
 An HTTP server and its client in one program. The client retries a deposit whose connection
 was reset; the server may already have applied it. `--faults net` finds it too, on about
-10 of 20 seeds; `--fault net-reset-permille=50` below fixes the reset rate.
+3 of 20 seeds; `--fault net-reset-permille=1000` below resets every connection, each at a
+drawn send.
 
 <!-- transcript bank
 setup: cp "$GUESTS/examples/bank" .
@@ -206,21 +207,21 @@ exit: 1
 -->
 ```sh
 go build -C examples/bank-go -o "$PWD/bank"
-patina sweep --seeds 1..20 --fault net-reset-permille=50 --out patina-out/bank -- ./bank
+patina sweep --seeds 1..20 --fault net-reset-permille=1000 --out patina-out/bank -- ./bank
 ```
 
 ```text
 ...
-patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.3s, 8 jobs)
-outcomes: ok 9, violation 11
+patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (0.3s, 8 jobs)
+outcomes: ok 7, violation 13
 
 violation always: balance-matches-deposits: balance N, deposits N
-  11 of 20 runs   first: seed 2   replayed: identical
-  example: balance-matches-deposits: balance 23, deposits 20
+  13 of 20 runs   first: seed 4   replayed: identical
+  example: balance-matches-deposits: balance 21, deposits 20
   faults in every failing run: net-reset      in none: -
-  rerun:  patina run --seed 2 --fault net-reset-permille=50 -- /tmp/patina/bank
-  replay: patina replay /tmp/patina/patina-out/bank/seed-2
-  explain: patina explain /tmp/patina/patina-out/bank/seed-2
+  rerun:  patina run --seed 4 --fault net-reset-permille=1000 -- /tmp/patina/bank
+  replay: patina replay /tmp/patina/patina-out/bank/seed-4
+  explain: patina explain /tmp/patina/patina-out/bank/seed-4
 ```
 
 ## stats-c (C, compute points): a race with no system call in it

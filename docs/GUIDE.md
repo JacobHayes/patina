@@ -550,7 +550,7 @@ each range, so one sweep covers gentle and harsh settings.
 | Class | What the seed does | Settings it turns on |
 |---|---|---|
 | `disk` | errors, short transfers, failed write-backs and delays on `/work` files, pipes, unix sockets | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
-| `net` | delays, split deliveries, resets and refused connects; datagram drops, duplicates, reordering | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
+| `net` | delays, split deliveries, resets and refused connects; datagram drops, duplicates, reordering | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=50..300 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
 | `mem` | `ENOMEM` from memory requests, `EAGAIN` from thread creation | `mem-error-permille=0..2` |
 | `buggify` | the program's own fault points fire ([The SDK](#the-sdk)) | each point active in a quarter of seeds, firing on a quarter of its evaluations |
 | `crash` | the machine crashes and restarts on what reached the disk ([Crashes](#crashes)) | `crash-permille=3` at each crash point; with nodes, at drawn times |
@@ -652,7 +652,7 @@ listed on one line and does not make the sweep `vacuous`; one you named with `--
 <!-- transcript not-applicable
 dir: /tmp/sockets
 setup: cp "$GUESTS/sockets" .
-exit: 1
+exit: 0
 -->
 ```text
 $ patina sweep --seeds 1..20 --faults net --out patina-out/tcp -- ./sockets chunk correct
@@ -660,14 +660,15 @@ $ patina sweep --seeds 1..20 --faults net --out patina-out/tcp -- ./sockets chun
 faults: not applicable (a class's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
 
-Over TCP, `net-chunk-max` splits each delivery into pieces of at most that many bytes (a
-range draws a size per seed, log-uniformly, so about one seed in four of `1..65536` delivers
-at most 16 bytes a piece, and one in 17 a byte at a time). The pieces of one delivery follow
-each other by 1 to 10 µs of virtual time, so a seed's throughput over one connection in `--faults net` is about 180 kB/s at the least, a
-median of about 4 MB/s and 6 MB/s at the 90th percentile (256 KiB sent, docs/EVIDENCE.md,
-"Net preset shaping"); a protocol timeout shorter than its message takes at that rate is
-then a finding about the timeout. For the harsh link, name the keys: `--fault
-net-chunk-max=1 --fault net-delay-ms=10..50`. Disk faults act on files under `/work`, pipes and unix sockets; an injected
+Over TCP, `net-chunk-max` splits the head of each delivery (a sender's write, as the wire
+read it) into at most four pieces of at most that many bytes, 1 to 10 µs of virtual time
+apart; the rest arrives whole. A range draws a size per seed, log-uniformly, so about one seed
+in four of `1..65536` cuts pieces of 16 bytes or less, and one in 17 single bytes: every
+message is met by a short read at its start, and a transfer costs a few deliveries per write
+whatever the size. `net-reset-permille` is drawn once per connection: a reset connection is
+reset at one send, drawn log-uniformly among its first 1023 sends, so a short exchange is
+reset less often than a long one and most connections of a run survive.
+`--fault net-reset-permille=1000` resets every connection that reaches its drawn send. Disk faults act on files under `/work`, pipes and unix sockets; an injected
 error is one Linux can return for that call on that object. A failed write-back
 (`fsync-error-*`) is reported as Linux reports one: once to each open file description,
 also to a descriptor opened after it if nobody was told yet, never by a `sync_file_range`
@@ -1549,13 +1550,13 @@ $ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --faults net --fault part
 ...
 patina sweep: 8 runs, 8 findings in 1 group, 0 ok   (9.2s, 4 jobs)
 outcomes: failure 8
-nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 44 held over them
+nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 59 held over them
 partitions: 37 drawn (9 bridge, 11 isolate, 5 oneway, 12 split), 34 acted on traffic
 
 failure exit: exit 1
   8 of 8 runs   first: seed 1   replayed: identical
   faults in every failing run: net-delay, net-reset, partition      in none: net-drop, net-dup, net-reorder
-  nodes: n1 down in 0, n2 down in 0, n3 down in 0, partitioned at the end in 5
+  nodes: n1 down in 0, n2 down in 0, n3 down in 0, partitioned at the end in 4
   rerun:  patina run --seed 1 --config /tmp/q3/patina-out/sweep/seed-1/run.json -- python3 /guest/q3.py driver 90
   replay: patina replay /tmp/q3/patina-out/sweep/seed-1
   explain: patina explain /tmp/q3/patina-out/sweep/seed-1

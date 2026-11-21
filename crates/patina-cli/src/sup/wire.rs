@@ -50,6 +50,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::Ordering::Relaxed;
 
 const READ_MAX: usize = 64 << 10;
+/// `net-chunk-max` splits at most this many pieces off one delivery (a sender's write, as read
+/// by the wire); the rest arrives whole. A split read is met at the head of every message, and
+/// a tiny chunk size costs a few logged deliveries per write, not one per few bytes.
+const CHUNK_CUTS: u8 = 4;
 /// Event kinds in the low bits of an event key: delivery in direction 0 or 1, the connect fate.
 const EV_DIR0: u64 = 0;
 const EV_DIR1: u64 = 1;
@@ -96,9 +100,20 @@ enum Fate {
 
 #[derive(Debug)]
 enum Item {
-    Data { t: u64, buf: Vec<u8>, off: usize },
-    Fin { t: u64 },
-    Rst { t: u64, why: u64 },
+    /// `cuts`: the pieces `net-chunk-max` split off it so far ([`CHUNK_CUTS`] at most).
+    Data {
+        t: u64,
+        buf: Vec<u8>,
+        off: usize,
+        cuts: u8,
+    },
+    Fin {
+        t: u64,
+    },
+    Rst {
+        t: u64,
+        why: u64,
+    },
 }
 
 impl Item {
@@ -470,6 +485,23 @@ impl Sup {
                 (id as u64) << 32 | sub << 28 | (n & 0x0fff_ffff),
             ) % 1000
                 < permille
+    }
+
+    /// `net-reset-permille`: whether connection `id` is reset, drawn once for it, and if so
+    /// the send that meets the reset (its number among the connection's sends and FINs, both
+    /// directions): log-uniform in [0, 1023), so a short connection is reset less often than
+    /// a long one, and a long one at most once.
+    fn reset_at(&self, permille: u64, id: u32) -> Option<u64> {
+        if !self.net_fault(permille, id, NSUB_RESET, 0) {
+            return None;
+        }
+        let d = draw(
+            self.ctl.config.seed,
+            Stream::FaultNet,
+            (id as u64) << 32 | NSUB_RESET << 28 | 1,
+        );
+        let e = d % 10;
+        Some((1 << e) - 1 + (d >> 8) % (1 << e))
     }
 
     /// A delivery delay drawn in [min, max].
@@ -1171,16 +1203,17 @@ impl Sup {
                 moved = true;
                 let r = r as usize;
                 let cfg = self.net_cfg();
-                let k = self.wire.conns[&id].dirs[dir].n;
+                let k = {
+                    let d = &self.wire.conns[&id].dirs;
+                    d[0].n + d[1].n
+                };
                 WireTab::inc(&tab(self.ctl).counters.sends, 1);
                 let (from, to) = Self::link(&self.wire.conns[&id], dir);
                 let faulted = self.link_faulted(from, to);
                 if faulted {
                     self.link_elig(proto::node::ELIG_SENDS);
                 }
-                if faulted
-                    && self.net_fault(cfg.reset_permille, id, NSUB_RESET | (dir as u64) << 3, k)
-                {
+                if faulted && self.reset_at(cfg.reset_permille, id) == Some(k) {
                     self.wire_inject(INJ_NET_RESET, nr::SENDTO, r as u64, id);
                     self.reset_both(id);
                     break;
@@ -1188,7 +1221,12 @@ impl Sup {
                 let t = self.stamp(id, dir, false);
                 let buf = self.wire.buf[..r].to_vec();
                 let c = self.wire.conns.get_mut(&id).unwrap();
-                c.dirs[dir].q.push_back(Item::Data { t, buf, off: 0 });
+                c.dirs[dir].q.push_back(Item::Data {
+                    t,
+                    buf,
+                    off: 0,
+                    cuts: 0,
+                });
                 c.dirs[dir].bytes += r;
                 self.note_queued(r as i64);
                 self.wire_decide(DEC_WIRE_READ, [id as u64, dir as u64, r as u64, t, 0, 0]);
@@ -1299,7 +1337,7 @@ impl Sup {
                 break;
             }
             match front {
-                Item::Data { buf, off, .. } => {
+                Item::Data { buf, off, cuts, .. } => {
                     if dst_fd < 0 {
                         let left = buf.len() - *off;
                         d.bytes -= left;
@@ -1308,11 +1346,8 @@ impl Sup {
                         continue;
                     }
                     let want = buf.len() - *off;
-                    let n = if chunk_max > 0 {
-                        want.min(chunk_max)
-                    } else {
-                        want
-                    };
+                    let cut = chunk_max > 0 && *cuts < CHUNK_CUTS;
+                    let n = if cut { want.min(chunk_max) } else { want };
                     let r = unsafe {
                         libc::send(
                             dst_fd,
@@ -1326,6 +1361,10 @@ impl Sup {
                         *off += r;
                         d.bytes -= r;
                         let done = *off == buf.len();
+                        let split = cut && !done;
+                        if split {
+                            *cuts += 1;
+                        }
                         if done {
                             d.q.pop_front();
                         }
@@ -1337,7 +1376,6 @@ impl Sup {
                             self.link_elig(proto::node::ELIG_CHUNKS);
                         }
                         self.bump_gen();
-                        let split = chunk_max > 0 && !done;
                         if split {
                             self.wire_inject(INJ_NET_CHUNK, nr::SENDTO, r as u64, id);
                         }

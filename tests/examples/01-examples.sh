@@ -40,7 +40,7 @@ example quickstart 'failure exit: panicked at src/main.rs:N:N: assertion `left =
 example ledger 'violation always: ledger-sorted: after N' 1 --faults buggify -- "$E/ledger"
 example journal-py 'violation always: journal-intact: N bytes' 1 --faults disk --mount "$E":/guest -- python3 /guest/journal.py
 example acklog-c 'violation always: acked-records-kept: N acknowledged, N stored' 1 --faults crash -- "$E/acklog"
-example bank-go 'violation always: balance-matches-deposits: balance N, deposits N' 1 --fault net-reset-permille=50 -- "$E/bank"
+example bank-go 'violation always: balance-matches-deposits: balance N, deposits N' 1 --fault net-reset-permille=1000 -- "$E/bank"
 example serve-c 'violation always: served-only-public: N bytes' 1 --fault path-swap-permille=300 -- "$E/serve"
 # stats-c rebuilt with compute points: its race is found by the points it was rebuilt with.
 all=$N

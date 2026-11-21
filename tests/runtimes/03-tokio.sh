@@ -59,8 +59,8 @@ done
 echo "== g. TCP"
 verify_seeds $T tk-dn cpu,load,aslr,sandbox "5" -- /guest/tokio-mt net || fail "W2 D (tcp, faults off)"
 verify_seeds $T tk-dnf cpu,load,aslr,sandbox "5" $NETF -- /guest/tokio-mt net || fail "W2 D (tcp, network faults on)"
-echo "-- net-reset-permille=20"
-netf $T tk-reset 'error: ConnectionReset' "1 2 3" --fault net-reset-permille=20 -- /guest/tokio-mt net || fail "W2: no reset seen"
+echo "-- net-reset-permille=1000"
+netf $T tk-reset 'error: ConnectionReset' "1 2 3" --fault net-reset-permille=1000 -- /guest/tokio-mt net || fail "W2: no reset seen"
 echo "-- net-blackout=1+100000 (ms)"
 netf $T tk-part '^echo (tcp): 16 of 16 clients ok' "1 2" --fault net-blackout=1+100000 -- /guest/tokio-mt net >"$RUNS/tk-part.txt" || true
 cat "$RUNS/tk-part.txt"

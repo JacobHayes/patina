@@ -70,8 +70,8 @@ restart). Start the program twice in one run: `--mount DIR:/app -- /bin/sh -c '/
 ## Network: `--faults net`
 
 Delays, chunked deliveries, resets, refused connects, and for UDP drops, duplicates and
-reordering, on loopback and between nodes. A reset is drawn on each piece of data sent, so a
-retrying client meets one; one key alone: `--fault net-reset-permille=50`.
+reordering, on loopback and between nodes. A reset is drawn once per connection, at a drawn
+send, so most connections survive; to reset (nearly) every one: `--fault net-reset-permille=1000`.
 `--fault net-blackout=0..60000+1000..10000` holds traffic for a while, as across a cut cable.
 Memory errors (`--faults mem`: `ENOMEM`, failed thread creation) are for a program that handles
 allocation failure.

@@ -138,7 +138,7 @@ background sweeper polling an idle heap does not; spin probes find it.
 | Spin table, 7 spin-waits, system calls only (`pause-points = false`, `spin-probes = false`) | glibc spin lock, C spin lock and Rust spin lock (each with a call inside) `compute-stall` 20/20; the 4 others `ok` |
 | Spin table, pause points only | 140/140 `ok` |
 | Spin table, default | 140/140 `ok` |
-| W1-W9, default, with their faults | no `compute-stall`; W8 `sockets all` fails 20/20 on an injected reset (its faults draw `net-reset-permille=30` for every send, so every seed resets a connection, and the guest exits on `ECONNRESET`); W9 seed 5 failed on an injected `ENFILE` after a crash, which the harness judged a finding (fixed; `storage/11-unjudged`); W6 (`fs-error-permille=20`) `failure` on 18 of 20 seeds, where an injected file-system error makes a command of the pipeline exit nonzero (no pause point or probe in it); the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
+| W1-W9, default, with their faults | no `compute-stall`; W9 seed 5 failed on an injected `ENFILE` after a crash, which the harness judged a finding (fixed; `storage/11-unjudged`); W6 (`fs-error-permille=20`) `failure` on 18 of 20 seeds, where an injected file-system error makes a command of the pipeline exit nonzero (no pause point or probe in it); the rest `ok`; W4: 26,265 pause points, 1,956 spin preemptions |
 | W4 (stock Go), 100 seeds, spin probes off / on | `compute-stall` 92/100 / 0/100 |
 | go-sweep, 100 seeds, spin probes off / on | 99/100 / 0/100 |
 | go-sweep at 24 CPUs, 100 seeds, spin probes off / on | 97/100 / 0/100 |
@@ -1472,46 +1472,6 @@ Host: the development VM (kernel 7.0.0-43-generic), 2026-11-16.
   per refused datagram (a sender ignoring 2,000 refusals could fill the hidden end, hold later
   deliveries and never wake its reader); `FIONREAD` leaves a pending `ECONNREFUSED` pending;
   `shutdown(SHUT_RD)` wakes a thread in `poll`.
-
-### Net preset shaping
-
-Does a gap between the pieces of one delivery, and a log-uniform chunk size, keep what
-`--faults net` finds while ending the slow-link artefact? 2026-11-19, this host, x86_64, 200
-seeds a line, `patina sweep --seeds 1..200 -j 6 --keep fail --faults net` under the shared
-evidence lock, `before` the 0.12.2 build and `after` the build with `net-chunk-gap-us=1..10`
-in the preset. tokio, pubsub and the throughput guest unwrap a reset or a refused connect, so
-they ran with `--fault net-reset-permille=0 --fault net-connect-refuse-permille=0`: the
-delivery shaping alone, which is what changed.
-
-| Guest | Before | After |
-|---|---|---|
-| `examples/bank-go` | 88 `balance-matches-deposits` | 88 |
-| `sockets chunk naive` (a reader that assumes one read is one message) | 25 `failure` | 99 |
-| `tokio-echo`, `tokio-mt net` | 0 (exit 2: the datagram classes never applied) | 0 (exit 0, those classes not applicable) |
-| pubsub (`testbeds/pubsub`), clean | 0 | 0 |
-| pubsub `drop-read-remainder` | 200 (179 `seq-gap`, 21 not converged) | 200 (132 `seq-gap`, 56 `malformed-frame`, 12 not converged) |
-| pubsub `stale-timeout`, `lost-wakeup` | 200, 200 | 200, 200 |
-
-Throughput over one connection, per seed (a C guest sends 256 KiB in 16 KiB writes to a
-reader; virtual time from accept to EOF; resets off):
-
-| | min | p1 | p5 | p10 | p25 | median | p90 |
-|---|---|---|---|---|---|---|---|
-| before | 10.5 kB/s | 16.0 kB/s | 143 kB/s | 283 kB/s | 811 kB/s | 1.74 MB/s | 3.50 MB/s |
-| after | 176 kB/s | 177 kB/s | 180 kB/s | 363 kB/s | 1.88 MB/s | 3.99 MB/s | 6.02 MB/s |
-
-Before, each piece of a split delivery waited a whole `net-delay-ms` draw, so a seed with
-small chunks ran at chunk/delay (a few kB/s at 1-byte chunks), and a protocol's own timeouts
-fired on that link rather than on the bug. A 48-seed pilot found the same 20 framing failures
-with a 10 to 50 µs gap as with 1 to 10 µs, at a minimum throughput of 33 kB/s against 180
-kB/s, so the preset takes 1..10. The log-uniform draw (`net-chunk-max=1..65536`: one seed in
-17 delivers byte by byte, about one in four at most 16 bytes a piece) keeps byte-at-a-time
-coverage, and `--fault net-chunk-max=1 --fault net-delay-ms=10..50` still gives the harsh
-link. `testbeds/pubsub/sim.sh` (explicit `net-chunk-max=16..4096`) finds the same with the
-0.12.2 build and this one: clean 0 of 200, `lost-wakeup` and `drop-read-remainder` 200,
-`stale-timeout` 167. `tests/net/05-faults.sh` checks the gap: 500 one-byte pieces at
-`net-delay-ms=10..10` end more than 4 virtual seconds sooner with `net-chunk-gap-us=1..1`, one
-read each (red on 0.12.2, which has no such key).
 
 ## Sweeps
 

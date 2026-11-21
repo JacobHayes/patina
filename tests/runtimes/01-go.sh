@@ -75,8 +75,8 @@ echo "20 s spin, stall-ms 1000: class $(field "$RUNS/spin-20s/result.json" outco
 
 echo "== g. network"
 verify_seeds $G go-dn cpu,load,aslr,sandbox "1" $NETF -- /guest/go-static net || fail "W4 D (network faults on)"
-echo "-- net-reset-permille=50"
-netf $G go-reset 'connection reset by peer' "1 2 3" --fault net-reset-permille=50 -- /guest/go-static net || fail "W4: no reset seen"
+echo "-- net-reset-permille=1000"
+netf $G go-reset 'connection reset by peer' "1 2 3" --fault net-reset-permille=1000 -- /guest/go-static net || fail "W4: no reset seen"
 echo "-- net-blackout=1+10000 (ms)"
 netf $G go-part 'Client.Timeout exceeded' "1" --fault net-blackout=1+10000 -- /guest/go-static net || fail "W4: the client timeout did not fire during the partition"
 echo "-- net-chunk-max=1"

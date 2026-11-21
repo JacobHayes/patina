@@ -274,7 +274,7 @@ impl Faults {
                 continue;
             }
             let kind = KIND_NAMES.iter().position(|n| *n == c);
-            let (connections, chunks, _fins, sends, datagrams) = match self.link_elig {
+            let (connections, chunks, _fins, _sends, datagrams) = match self.link_elig {
                 Some(e) => (e[0], e[1], e[2], e[3], e[4]),
                 None => (net[0], net[2], net[11], net[12], net[13]),
             };
@@ -286,8 +286,6 @@ impl Faults {
                 ),
                 // One delay per TCP delivery and per datagram sent.
                 "net-delay" => (chunks + datagrams, chunks + datagrams),
-                // Drawn for every read of data a guest sent, not once per connection.
-                "net-reset" => (sends, got(c)),
                 "net-chunk" => (chunks, got(c)),
                 "net-blackout" => (chunks + datagrams, got(c)),
                 // Partitions drawn, and those that held, lost or kept back something.

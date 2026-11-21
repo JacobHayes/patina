@@ -145,7 +145,7 @@ pub struct NetCounters {
     pub steps: AtomicU64,
     /// FINs delivered.
     pub fins: AtomicU64,
-    /// Reads of data a guest sent, each one `net-reset-permille` draw.
+    /// Reads of data a guest sent.
     pub sends: AtomicU64,
     /// Datagrams sent (each one draw of every datagram fault class).
     pub datagrams: AtomicU64,

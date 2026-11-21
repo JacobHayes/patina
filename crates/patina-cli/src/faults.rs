@@ -176,13 +176,13 @@ pub const KEYS: &[Key] = &[
         "net-chunk-max",
         "N",
         Val::Size,
-        "TCP deliveries are split into pieces of at most N bytes (a range A..B draws log-uniformly per seed)",
+        "the first pieces of each TCP delivery (4 at most; the rest arrives whole) are at most N bytes (a range A..B draws log-uniformly per seed)",
     ),
     key(
         "net-reset-permille",
         "P",
         Val::Permille,
-        "reset a TCP connection, drawn for each piece of data a guest sends on it (so a long-lived connection meets one)",
+        "reset P of each 1000 TCP connections, each at a send drawn log-uniformly among its first 1023 (a shorter one may end first)",
     ),
     key(
         "net-connect-refuse-permille",
@@ -321,9 +321,9 @@ pub const KEYS: &[Key] = &[
 /// The fault classes (`--faults CLASS`): each turns on its keys, every value a range the seed
 /// resolves. `buggify`, `crash` and `kill` have none of their own: they turn on every fault
 /// point, and a crash of their kind (`CRASH_DEFAULT_PERMILLE` at each crash point on one
-/// machine, at drawn times with nodes). `net-reset-permille` is drawn for each send, so its
-/// rate is high enough that a connection carrying a few dozen sends (a keep-alive client's)
-/// meets a reset in a good share of seeds. `partition`, `pause` and `clock` act on nodes.
+/// machine, at drawn times with nodes). `net-reset-permille` is drawn once per connection, with
+/// the send that meets it, so most connections of a run, long transfers included, survive.
+/// `partition`, `pause` and `clock` act on nodes.
 pub const CLASSES: &[(&str, &[(&str, &str)])] = &[
     (
         "disk",
@@ -339,7 +339,7 @@ pub const CLASSES: &[(&str, &[(&str, &str)])] = &[
         &[
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
-            ("net-reset-permille", "5..50"),
+            ("net-reset-permille", "50..300"),
             ("net-connect-refuse-permille", "0..10"),
             ("net-drop-permille", "0..50"),
             ("net-dup-permille", "0..20"),

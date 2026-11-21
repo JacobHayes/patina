@@ -52,7 +52,7 @@ sweep() {
     [ -f "$out/report.json" ] || die "sweep $out: no report (exit $st)"
 }
 for e in jobs acklog bank ledger serve stats-cp upcase kvlog; do
-    sweep "$RUNS/sw-$e" --seeds 1..3 --faults crash --fault net-reset-permille=50 -- "$G/examples/$e"
+    sweep "$RUNS/sw-$e" --seeds 1..3 --faults crash --fault net-reset-permille=1000 -- "$G/examples/$e"
 done
 for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s"]\n' $n $n; done >"$RUNS/kv-ok.toml"
 sweep "$RUNS/sw-kv" --seeds 1..3 --config "$RUNS/kv-ok.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver

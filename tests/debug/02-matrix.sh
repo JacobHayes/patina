@@ -94,7 +94,7 @@ echo "memory write: left the run at seq $m, where the events first differ"
 
 # Go: a breakpoint in the program's handler.
 r=$RUNS/bank
-prun "$r" --seed 1 --fault net-reset-permille=50 -- "$E/bank"
+prun "$r" --seed 1 --fault net-reset-permille=1000 -- "$E/bank"
 cat >"$RUNS/go.gdb" <<'EOF'
 break main.main.func1
 continue
