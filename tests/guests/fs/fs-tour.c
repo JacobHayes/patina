@@ -361,8 +361,9 @@ int main(void) {
     R("mprotect", syscall(SYS_mprotect, a1, 4096, PROT_READ));
     R("madvise-dontneed", syscall(SYS_madvise, a1 + 8192, 8192, MADV_DONTNEED));
     printf("after-dontneed %d\n", ((char *)a1)[8192]);
-    R("madvise-free", syscall(SYS_madvise, a1 + 65536, 65536, MADV_FREE));
-    printf("virt after-free %d\n", ((char *)a1)[65536]); // MADV_FREE is DONTNEED
+    // MADV_FREE is refused under patina (EINVAL, the pages as they were); natively 0.
+    printf("virt madvise-free %ld\n", syscall(SYS_madvise, a1 + 65536, 65536, MADV_FREE));
+    printf("virt after-free %d\n", ((char *)a1)[65536]);
     R("mprotect-back", syscall(SYS_mprotect, a1, 4096, PROT_READ | PROT_WRITE));
     long a2 = syscall(SYS_mremap, a1, 1 << 20, 4 << 20, MREMAP_MAYMOVE);
     printf("addr mremap %lx\n", a2);

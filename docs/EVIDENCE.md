@@ -1091,7 +1091,8 @@ before), and runs natively. Redis's own start-up check for the arm64 copy-on-wri
 (a page freed with `MADV_FREE` and written again, then read in a forked child) reports the bug
 under Patina and the server exits ("Redis will now exit to prevent data corruption"); the
 runtime passes `MADV_FREE` as `MADV_DONTNEED` (the call table, `madvise`), the likely reason,
-not confirmed. It is not a matter of preemption and is left as found. Under `-j 6`
+not confirmed. It is not a matter of preemption and is left as found (resolved since: "MADV_FREE and
+Redis on arm64", below). Under `-j 6`
 the slowest Chromium seeds took 4.3 and 4.7 times traps on x86_64, by contention: the same
 seeds alone take 2.0. JIT runtimes run correctly with their generated code unpatched; the run
 says so: "load-time points: 5,287 taken (mean gap 3,074, 161 after a walk); 11 files
@@ -1162,6 +1163,31 @@ refused (it traps before the access and gdb steps over it), the session `identic
 independent review found the same loop again where gdb goes on from a breakpoint by itself
 (a condition, an ignore count, another thread's, a `dprintf`) and after a call into the
 program; the first kind is disabled with a message, the second turns passing off.
+
+**MADV_FREE and Redis on arm64** (2026-11-21; this host, the arm64 VM, the GitHub runners). A
+small C program replaying Redis's check (`checkLinuxMadvFreeForkBug`: a page freed with
+`MADV_FREE`, written again, its `Shared_Dirty` read from `/proc/self/smaps` in a forked
+child) reports no bug natively on both architectures (4 kB dirty) and the bug under Patina
+(0 kB): the runtime rewrote `MADV_FREE` to `MADV_DONTNEED`, and its synthesized `smaps` reads 0
+for every counter. `files/15-madvise` runs every advice value from 0 to 26 (and `MADV_FREE`
+with the register's upper half set) on private and shared, anonymous and file mappings,
+natively and under Patina: every value but `MADV_FREE` (8) and `MADV_COLLAPSE` (25, refused
+before) matched on both architectures. `MADV_FREE` differed on all four:
+
+| Mapping | Linux | Patina before | Patina now |
+|---|---|---|---|
+| private anonymous | 0, pages kept or zeroed at the kernel's choice | 0, pages zeroed | EINVAL, pages kept |
+| shared anonymous | EINVAL | 0, pages zeroed | EINVAL |
+| private file | EINVAL | 0, written pages put back from the file | EINVAL |
+| shared file | EINVAL | 0 | EINVAL |
+
+`MADV_FREE` now answers EINVAL everywhere, as a kernel without it does, recorded as refused;
+Go, jemalloc and mimalloc fall back to `MADV_DONTNEED`.
+Redis 8.10.3 (`scripts/corpus`, `survey.sh redis native same sweep`, seeds 1 to 20): on the
+arm64 runner every seed ended `failure` with the build before and `ok` with this one, its
+output the native run's; on x86_64 `ok` before and after. The x86_64 ledger, under traps and
+at the default, moves only in `fs-tour`, whose tour now calls `MADV_FREE` and prints its
+EINVAL (6 cells).
 
 **First run.** With an empty plan cache, `patina sweep` of Chromium prints once, before any
 seed: "patina: rewriting chrome-headless-shell and 45 more files so that threads can switch

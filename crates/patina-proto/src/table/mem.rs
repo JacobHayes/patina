@@ -16,7 +16,7 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::MPROTECT, Place, C, RANGE),
     Row::new(G, nr::PKEY_MPROTECT, Place, C, "As mprotect; protection keys cannot be allocated (pkey_alloc is refused), so the key is always -1."),
     Row::new(G, nr::MREMAP, Place, C, "In-place resize is passed; a move goes to an address the runtime chooses (MREMAP_FIXED at its cursor)."),
-    Row::new(G, nr::MADVISE, Place, C, "Passed, with MADV_FREE rewritten to MADV_DONTNEED (the kernel frees MADV_FREE pages when it chooses, so later reads would depend on memory pressure); DONTNEED on private anonymous memory zeroes deterministically. MADV_COLLAPSE answers EINVAL (as without transparent huge pages) and is recorded: whether a collapse succeeds depends on the host's free huge pages. The runtime's region is refused."),
+    Row::new(G, nr::MADVISE, Place, C, "Passed; DONTNEED on private anonymous memory zeroes deterministically. MADV_FREE answers EINVAL (as by a kernel without it, and natively on a file or shared mapping; the allocators that use it fall back to DONTNEED) and is recorded: the kernel frees its pages when it chooses, so later reads would depend on memory pressure, and the memory counters that tell (smaps) are not the host's here. MADV_COLLAPSE answers EINVAL (as without transparent huge pages) and is recorded: whether a collapse succeeds depends on the host's free huge pages. The runtime's region is refused."),
     Row::new(G, nr::MSYNC, Pass, A, "On tmpfs and anonymous memory the kernel call only validates its arguments (tmpfs writeback is a no-op); durability is the tracker's. The runtime's region is refused."),
     Row::new(G, nr::MLOCK, Virt, C, LOCK),
     Row::new(G, nr::MUNLOCK, Virt, C, LOCK),

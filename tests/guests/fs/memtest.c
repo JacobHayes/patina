@@ -1,5 +1,5 @@
 // files memory: 100k mmap/munmap of mixed sizes, mremap growth, brk grow and shrink,
-// MADV_DONTNEED and MADV_FREE reading zeros. Prints every address so that runs with and
+// MADV_DONTNEED reading zeros and MADV_FREE refused. Prints every address so that runs with and
 // without ASLR can be compared, and a hash over all of them.
 #define _GNU_SOURCE
 #include <stdint.h>
@@ -80,7 +80,8 @@ int main(void) {
     printf("addr brk-regrow %p byte %d\n", b1, b1[100]);
 
     // madvise: anonymous private pages read zero after DONTNEED; after FREE they read either
-    // the old data or zero (the kernel decides under memory pressure); print what is seen.
+    // the old data or zero natively (the kernel decides under memory pressure), and under
+    // patina FREE is refused (EINVAL) and they keep the old data; print what is seen.
     char *d = mmap(0, pg * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     memset(d, 7, pg * 4);
     printf("madvise dontneed %d", madvise(d, pg * 2, MADV_DONTNEED));

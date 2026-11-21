@@ -455,8 +455,20 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
         }
         nr::MADVISE => {
-            let [a, len, mut advice, ..] = args(call);
-            if hits_runtime(a, len) {
+            let [a, len, advice, ..] = args(call);
+            // The kernel reads the advice as an int: its upper half is ignored.
+            let advice = advice as u32 as u64;
+            if advice == MADV_FREE {
+                // A lazy free: the kernel frees the pages when it chooses, so what a later read
+                // sees would depend on the host's memory pressure, and the memory counters that
+                // would tell (`smaps`) are not the host's here: Redis's arm64 check reads them
+                // after a MADV_FREE. Answered as by a kernel without it, before the range is
+                // looked at; the allocators that use it (Go, jemalloc, mimalloc) fall back to
+                // MADV_DONTNEED. Natively a file or shared mapping gets EINVAL too. A reason to
+                // revisit if smaps ever reports counters.
+                crate::path::refuse(b"madvise:free");
+                -e::EINVAL
+            } else if hits_runtime(a, len) {
                 -e::ENOMEM
             } else if advice == MADV_COLLAPSE {
                 // Whether a synchronous collapse into huge pages succeeds (0) or not
@@ -465,9 +477,6 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 crate::path::refuse(b"madvise:collapse");
                 -e::EINVAL
             } else {
-                if advice == MADV_FREE {
-                    advice = MADV_DONTNEED;
-                }
                 let r = unsafe { sc3(nr::MADVISE, a, len, advice) };
                 if r == 0 && advice == MADV_REMOVE {
                     // A hole punched in the file through its mapping.
