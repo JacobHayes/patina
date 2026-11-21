@@ -691,10 +691,13 @@ fn userns_allowed() -> Res<()> {
     if !on("kernel/apparmor_restrict_unprivileged_userns") {
         return Ok(());
     }
-    // The child: a new user namespace, then the write the sandbox makes first in it.
+    // The child: a new user namespace, then the write the sandbox makes first in it, dumpable
+    // as the sandbox is then (a patina with file capabilities starts undumpable: its /proc/self
+    // files would be root's).
     let pid = unsafe { libc::fork() };
     if pid == 0 {
         unsafe {
+            libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
             let e = if libc::unshare(libc::CLONE_NEWUSER) != 0 {
                 *libc::__errno_location()
             } else {
