@@ -337,16 +337,21 @@ fn ensure_file(path: &str, mode: u32) -> Res<()> {
     Ok(())
 }
 
-/// The parents of `path` that are missing, made with `mode` (not `path` itself).
-fn parents(path: &str, mode: u32) -> Res<()> {
+/// The parents of `path` that are missing, made with `mode` (not `path` itself). `seen`: the
+/// paths found or made by earlier calls and not since hidden by a mount, not looked up again.
+fn parents(path: &str, mode: u32, seen: &mut std::collections::HashSet<String>) -> Res<()> {
     let mut at = String::new();
     let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     for p in &parts[..parts.len().saturating_sub(1)] {
         at.push('/');
         at.push_str(p);
+        if seen.contains(&at) {
+            continue;
+        }
         if std::fs::symlink_metadata(&at).is_err() {
             mkdir(&at, mode)?;
         }
+        seen.insert(at.clone());
     }
     Ok(())
 }
@@ -394,7 +399,7 @@ const OLD: &str = "/oldroot";
 
 /// One op, with the old root at `/oldroot` and the new one at `/newroot`. The working
 /// directory is the setup tmpfs's root.
-fn apply(op: &Op, data_seq: &mut usize) -> Res<()> {
+fn apply(op: &Op, data_seq: &mut usize, seen: &mut std::collections::HashSet<String>) -> Res<()> {
     let at = |d: &str| format!("{NEW}{d}");
     let dst = match op {
         Op::Hostname { name } => {
@@ -412,7 +417,12 @@ fn apply(op: &Op, data_seq: &mut usize) -> Res<()> {
         | Op::Symlink { dst, .. }
         | Op::Data { dst, .. } => at(dst),
     };
-    parents(&dst, 0o755)?;
+    parents(&dst, 0o755, seen)?;
+    if let Op::Bind { .. } | Op::Dev { .. } | Op::Proc { .. } | Op::Tmpfs { .. } = op {
+        // A mount hides what was below it: a later op looks up those parents again.
+        let under = format!("{dst}/");
+        seen.retain(|s| s.as_str() != dst && !s.starts_with(&under));
+    }
     match op {
         Op::Hostname { .. } => unreachable!(),
         Op::Bind { src, rw, dev, .. } => {
@@ -1336,9 +1346,9 @@ fn setup(spec: &Spec, chan: &OwnedFd) -> Res<()> {
     mkdir("oldroot", 0o755)?;
     pivot_root("/tmp", "oldroot")?;
     chdir("/")?;
-    let mut seq = 0;
+    let (mut seq, mut seen) = (0, Default::default());
     for op in &ops {
-        apply(op, &mut seq)?;
+        apply(op, &mut seq, &mut seen)?;
     }
     // Detach the host's tree: private first, so the unmount reaches no other namespace.
     mount(
