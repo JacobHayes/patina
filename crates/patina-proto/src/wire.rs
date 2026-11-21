@@ -325,9 +325,6 @@ pub struct NetCfg {
     pub blackout_from_ns: u64,
     pub blackout_to_ns: u64,
     pub blackout_port: u64,
-    pub halfclose_set: u64,
-    pub halfclose_min_ns: u64,
-    pub halfclose_max_ns: u64,
     /// Datagram faults (per mille, drawn per datagram).
     pub drop_permille: u64,
     pub dup_permille: u64,

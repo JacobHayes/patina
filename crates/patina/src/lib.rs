@@ -10,7 +10,7 @@
 //!
 //! ```
 //! fn commit(ledger: &mut Vec<u64>, entry: u64) {
-//!     // A rare path, taken on seed-chosen evaluations under `patina run --buggify`.
+//!     // A rare path, taken on seed-chosen evaluations under `patina run --faults buggify`.
 //!     if patina_dst::buggify!("batch-commit") && !ledger.is_empty() {
 //!         ledger.insert(ledger.len() - 1, entry);
 //!     } else {
@@ -33,13 +33,14 @@
 //!   `always` with a label computed at run time.
 //! - [`sometimes!`], [`reachable!`]: coverage oracles, reported per run and folded by a sweep.
 //! - [`buggify!`]: a fault point. False unless the run has
-//!   `--buggify`; then a point is active in a quarter of runs and an active point fires on a
+//!   `--faults buggify`; then a point is active in a quarter of runs and an active point fires on a
 //!   quarter of its evaluations, decided from the seed and the label alone. `--fault
 //!   buggify:LABEL=PERMILLE` forces one point's rate (`0`: off).
 //! - [`buggify_knob!`]: a seed-chosen integer in a range; [`buggify_delay!`]: maybe sleep a
 //!   seeded virtual time.
-//! - [`mark!`] names a point in the run's log; [`setup_complete`] marks the end of setup (with
-//!   `faults-after-setup`, no fault fires before it). [`is_simulated`].
+//! - [`mark!`] names a point in the run's log; [`setup_complete`] marks the end of setup (no
+//!   fault acts before it) and [`faults_done`] the end of the faults (none acts after it).
+//!   [`is_simulated`].
 //!
 //! # Labels and sites
 //!
@@ -74,9 +75,16 @@ pub fn control(words: &str) -> Result<(), i32> {
     sys::control(words)
 }
 
-/// Mark the end of setup: with `faults-after-setup`, no fault fires before this call.
+/// Mark the end of setup: in a run with faults, no fault acts before this call (the run
+/// starts again from the beginning with faults held until it).
 pub fn setup_complete() {
     sys::mark("setup-complete");
+}
+
+/// Mark the end of the faults: no fault acts after this call (cut links heal, paused nodes
+/// resume, down nodes come back). Call it before the final checks.
+pub fn faults_done() {
+    sys::mark("faults-done");
 }
 
 /// Report a failed invariant under a label computed at run time. The label is not declared
@@ -186,7 +194,7 @@ macro_rules! reachable {
     }};
 }
 
-/// A fault point: true on seed-chosen evaluations of a run with `--buggify`, else false. It
+/// A fault point: true on seed-chosen evaluations of a run with `--faults buggify`, else false. It
 /// takes a path the real system can take there (a short write, an error, an early flush).
 ///
 /// ```
@@ -202,7 +210,7 @@ macro_rules! buggify {
     }};
 }
 
-/// A tunable: `default` outside Patina or without `--buggify`; with it, an active point's value
+/// A tunable: `default` outside Patina or without the `buggify` class; with it, an active point's value
 /// is a seed-chosen `i64` in `[lo, hi]`, fixed for the run.
 ///
 /// ```

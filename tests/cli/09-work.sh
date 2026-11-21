@@ -20,7 +20,7 @@ g --out "$d/probe" -- /guest/ack-log retry
 set -- $(python3 -I "$(dirname "$0")/../faults/lib/faults.py" point-after "$d/probe/inc-0" Fsync acks 1)
 at=$1 aseq=$2
 for w in /work /var/lib/app; do
-    g --out "$d/crash$(echo "$w" | tr / -)" --work ":$w" --crash machine-at:"$at" -- /guest/ack-log retry
+    g --out "$d/crash$(echo "$w" | tr / -)" --work ":$w" --fault crash-at="$at" -- /guest/ack-log retry
 done
 a=$d/crash-work b=$d/crash-var-lib-app
 for o in "$a" "$b"; do

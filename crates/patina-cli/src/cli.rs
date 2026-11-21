@@ -87,7 +87,7 @@ pub const COMMANDS: &[Command] = &[
         cmd: Cmd::Ctl,
         name: "ctl",
         usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | node crash NAME | node kill NAME | node start NAME | node pause NAME | node resume NAME | clock step NAME +90s | mark LABEL",
-        help: "inside a run: act on its network, nodes and clocks, or mark the log",
+        help: "inside a run: act on its network, nodes and clocks; mark setup-complete, faults-done",
     },
     Command {
         cmd: Cmd::Doctor,
@@ -252,31 +252,16 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
-    flag(
+    many(
         "--faults",
-        "NAME",
-        "off",
-        "fault presets: disk, net, all (disk,net; disk@NODE)",
+        "CLASS[,...][@NODE]",
+        "disk, net, crash, ...; all: no crash/kill (--fault help)",
         RUNLIKE,
     ),
     many(
         "--fault",
-        "KEY=VALUE",
-        "one fault key, over the preset's (--fault help: the keys)",
-        RUNLIKE,
-    ),
-    flag(
-        "--crash",
-        "KIND[:VALUE]",
-        "off",
-        "machine|process[:PERMILLE] or machine-at|process-at:N",
-        RUNLIKE,
-    ),
-    flag(
-        "--buggify",
-        "",
-        "off",
-        "let SDK fault points fire (--fault buggify:LABEL=N)",
+        "KEY=VALUE[@NODE]",
+        "one fault key, over its class's (--fault help: the keys)",
         RUNLIKE,
     ),
     flag(
@@ -320,13 +305,6 @@ pub const FLAGS: &[Flag] = &[
         "FILE",
         "none",
         "one case per line: a whole command, or fills {} in CMD",
-        &[Cmd::Sweep],
-    ),
-    flag(
-        "--only-case",
-        "ID[,ID...]",
-        "every case",
-        "only these cases (line --name or line number)",
         &[Cmd::Sweep],
     ),
     flag(

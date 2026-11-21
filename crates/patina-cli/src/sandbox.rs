@@ -142,6 +142,8 @@ pub struct NodeSpec {
     /// The runtime's arguments (`rt EXE ARGV...`) and the whole environment.
     pub argv: Vec<String>,
     pub env: Vec<String>,
+    /// The size of each of its tmpfs.
+    pub size: u64,
 }
 
 /// The keeper's command, `patina __sandbox`: in the child, `first`, then SIGCHLD at its
@@ -1715,7 +1717,7 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
                 }
                 // Close-on-exec: read before the runtime starts.
                 keep.extend(tree.as_ref().map(|t| t.as_raw_fd()));
-                let run = || node_main(ns, stdio, n.size, boot, tree.as_ref());
+                let run = || node_main(ns, stdio, ns.size, boot, tree.as_ref());
                 match (&saved[i - 1], boot) {
                     (None, 0) | (Some(_), _) if boot == 0 || tree.is_some() => {
                         let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
@@ -1724,7 +1726,7 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
                         let v = View {
                             hostname: &ns.name,
                             tmpfs: &tmpfs,
-                            size: n.size,
+                            size: ns.size,
                             readonly: &readonly,
                         };
                         k.view(Place::New(&v), &keep, run).map(|s| saved[i - 1] = s)

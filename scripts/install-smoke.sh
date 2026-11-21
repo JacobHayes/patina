@@ -28,5 +28,5 @@ sweep() {
         || { echo "install-smoke: $name: the replay of $first differs" >&2; exit 1; }
 }
 sweep quickstart -- quickstart/target/debug/jobs
-sweep acklog --crash machine -- ./acklog
+sweep acklog --faults crash -- ./acklog
 echo "install-smoke: ok"

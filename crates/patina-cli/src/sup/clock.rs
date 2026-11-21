@@ -40,6 +40,12 @@ impl Sup {
         if c.skew_max_ns == 0 {
             return;
         }
+        // After `faults-done` a boot draws no skew: its clock is the steps alone.
+        if self.ctl.faults.cfg.fault_until_seq != 0 {
+            let t = self.node_tab();
+            t.clock_off[k] = t.clock_stepped[k];
+            return;
+        }
         let d = proto::draw(
             self.ctl.config.seed,
             proto::Stream::Node,

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::path::Global;
-use crate::state::{config, thread};
+use crate::state::thread;
 use proto::ctl::Op;
 use proto::layout::PAGE;
 use proto::rec::{STR_LABEL, STR_TEXT};
@@ -67,6 +67,17 @@ fn tab() -> &'static mut SdkTab {
     unsafe { SdkTab::at(crate::state::ctl_base()) }
 }
 
+/// This machine's fault-point settings: the run's (the driver's), or the node's own.
+fn cfg() -> SdkCfg {
+    match crate::state::node() {
+        0 => tab().cfg,
+        k => {
+            unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) }.sdk
+                [k.min(proto::node::MAX_NODES - 1)]
+        }
+    }
+}
+
 /// Copy guest memory with the kernel's checks: a bad pointer is `EFAULT`, never a fault in the
 /// runtime.
 fn vm(nr: u64, local: *mut u8, remote: u64, len: usize) -> Result<(), i64> {
@@ -91,7 +102,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
     let (op, ptr, len) = (call.arg(0), call.arg(1), call.arg(2));
     let r = match op {
         OP_HELLO => {
-            let b = if tab().cfg.buggify != 0 {
+            let b = if cfg().buggify != BUGGIFY_OFF {
                 HELLO_BUGGIFY
             } else {
                 0
@@ -166,18 +177,34 @@ fn control(ptr: u64, len: u64) -> i64 {
     r
 }
 
-/// A mark: `setup-complete` ends setup (`faults-after-setup`).
+/// A mark. The lifecycle marks: `setup-complete` (the first) starts the faults of a run held
+/// until setup, and ends a pass whose faults acted from the start (the launcher runs it again
+/// held: `ctl::LIFE_RESTART`); `faults-done` (the first) ends every fault, the supervisor's
+/// too (`ctl::LIFE_FAULTS_DONE`).
 fn mark(label: &[u8]) {
     let t = tab();
+    let seq = thread().seq;
+    let f = &ctl().faults.cfg;
     if label == SETUP_COMPLETE && t.setup_seq == 0 {
-        let seq = thread().seq;
         t.setup_seq = seq;
-        let f = core::ptr::addr_of!(ctl().faults.cfg.fault_after_seq) as *mut u64;
+        if f.restart_at_setup != 0 {
+            crate::sup::call_sup(Op::Lifecycle, [proto::ctl::LIFE_RESTART, seq, 0, 0, 0, 0]);
+            crate::sup::hang()
+        }
+        let p = core::ptr::addr_of!(f.fault_after_seq) as *mut u64;
         unsafe {
-            if core::ptr::read_volatile(f) == u64::MAX {
-                core::ptr::write_volatile(f, seq);
+            if core::ptr::read_volatile(p) == u64::MAX {
+                core::ptr::write_volatile(p, seq);
             }
         }
+    }
+    if label == FAULTS_DONE && f.fault_until_seq == 0 {
+        let p = core::ptr::addr_of!(f.fault_until_seq) as *mut u64;
+        unsafe { core::ptr::write_volatile(p, seq) };
+        crate::sup::call_sup(
+            Op::Lifecycle,
+            [proto::ctl::LIFE_FAULTS_DONE, seq, 0, 0, 0, 0],
+        );
     }
 }
 
@@ -192,16 +219,16 @@ fn payload(ptr: u64, len: u64, buf: &mut [u8; MAX_LEN]) -> Result<Hdr, i64> {
     Hdr::parse(&buf[..], len as usize).ok_or(-e::EINVAL)
 }
 
-/// Fault points stay quiet before `setup-complete` when the run asks for faults after setup
-/// (the mark lowers `fault_after_seq` to its own sequence number).
+/// Fault points stay quiet outside the run's fault window (before `setup-complete` in a run
+/// held until setup, after `faults-done`).
 fn quiet() -> bool {
-    thread().seq < ctl().faults.cfg.fault_after_seq
+    !ctl().faults.cfg.in_window(thread().seq)
 }
 
 fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64 {
     let (label, text) = buf[HDR_LEN..].split_at(h.label_len);
     let t = tab();
-    let seed = config().seed;
+    let node = crate::state::node() as u8;
     let want = match op {
         OP_ASSERT => matches!(
             h.kind,
@@ -219,8 +246,8 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         mark(label);
         return 0;
     }
-    let cfg = t.cfg;
-    let Some(s) = t.site(h.kind, label) else {
+    let cfg = cfg();
+    let Some(s) = t.site_on(h.kind, label, node) else {
         // Table full (counted): the call is still answered.
         return match op {
             OP_ASSERT if fails(h) => violation(call, label, text),
@@ -244,15 +271,15 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
             let n = s.evaluated;
             s.evaluated += 1;
             let asked = if op == OP_BUGGIFY { h.a } else { -1 };
-            let Some(rate) = cfg.rate(seed, s.label_hash, asked) else {
+            let Some(rate) = cfg.rate(s.label_hash, asked) else {
                 return NEVER;
             };
-            if quiet() || !cfg.fires(seed, s.label_hash, rate, n) {
+            if quiet() || !cfg.fires(s.label_hash, rate, n) {
                 return 0;
             }
             s.held += 1;
             if op == OP_DELAY {
-                let d = cfg.delay_ns(seed, s.label_hash, n, h.a.max(0) as u64);
+                let d = cfg.delay_ns(s.label_hash, n, h.a.max(0) as u64);
                 let now = ctl().vclock_ns.load(Relaxed);
                 crate::sup::call_sup(Op::Sleep, [now.saturating_add(d), 0, 0, 0, 0, 0]);
             }
@@ -260,7 +287,7 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         }
         OP_KNOB => {
             s.evaluated += 1;
-            let v = cfg.knob(seed, s.label_hash, h.a, h.b, h.c);
+            let v = cfg.knob(s.label_hash, h.a, h.b, h.c);
             s.value = v;
             buf[8..16].copy_from_slice(&v.to_le_bytes());
             match vm(nr::PROCESS_VM_WRITEV, buf[8..16].as_mut_ptr(), ptr + 8, 8) {

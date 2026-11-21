@@ -2674,7 +2674,6 @@ partition (old primary alive), the driver's scenario, or other.
 | `fsync-error-permille=1..5@pg1` (1-150) | 167 | 0 of 39,377 lost; recovery-failed 93, amcheck-fail 7 (below) |
 | `fsync-error-permille=1..5@pg2` (1-100) | 49 | 0 lost; recovery-failed 35 |
 | `--faults disk@pg2` (1-60) | 6 | 0 lost; recovery-failed 34, amcheck-fail 11 (below) |
-| `enospc-after-bytes=20000000..120000000@pg2` (1-60) | 58 | 0 lost; not-settled 13, recovery-failed 10 (the disk stays full) |
 
 **Controls**, each oracle seen to fail:
 

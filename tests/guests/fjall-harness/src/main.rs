@@ -24,7 +24,7 @@
 //!   failure prints `INVARIANT label: detail` to stderr and exits 1.
 //! - Two fault points, `persist-now` (persist and acknowledge early) and `manual-flush`
 //!   (rotate keyspace a's memtable), are `patina_dst::buggify!`: they fire only under
-//!   `patina run --buggify`.
+//!   `patina run --faults buggify`.
 //! - An open that fails with an error that was not an injected I/O error violates
 //!   `open-after-crash` when recovering after a crash, `reopen-failed` in the checks after
 //!   writing; an iteration error violates `iterate-failed`.

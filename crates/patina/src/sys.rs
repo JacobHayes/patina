@@ -160,7 +160,7 @@ fn call(
     r
 }
 
-/// A named point in the run's log; `setup-complete` ends setup (`faults-after-setup`).
+/// A named point in the run's log; `setup-complete` and `faults-done` bound the faults.
 pub fn mark(label: &str) {
     if state() & ON != 0 {
         call(OP_MARK, KIND_REACHABLE, false, label, b"", &mut 0, 0, 0);
@@ -278,7 +278,7 @@ impl Site {
     }
 }
 
-/// A knob: `default` outside Patina or without `--buggify`, else the run's value in `[lo, hi]`.
+/// A knob: `default` outside Patina or without the `buggify` class, else the run's value in `[lo, hi]`.
 pub fn knob(label: &str, default: i64, lo: i64, hi: i64) -> i64 {
     if state() & BUGGIFY == 0 {
         return default;

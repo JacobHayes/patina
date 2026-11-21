@@ -9,8 +9,8 @@
 #   command without it runs only the missing children, and the report's outcomes and groups
 #   then count every run in the directory, the cut sweep's and the resumed one's.
 # - With two seeds and two cases, the children are each base's crash points, per base.
-# - --crash-points without --crash, or with a rate, is refused and runs nothing; a plain sweep and a
-#   branch sweep into one directory replace each other.
+# - --crash-points with a crash rate or a fixed crash point is refused and runs nothing; a plain
+#   sweep and a branch sweep into one directory replace each other.
 # - examples/acklog-c: the sweep finds acked-records-kept.
 #@ tier=quick budget=15 slots=4
 . "$(dirname "$0")/../cli/lib.inc"
@@ -38,16 +38,16 @@ PY
 # The guest's unsynced record starts a new block, so a crash in its window loses it in every
 # seed: the base's own window says where.
 s=1
-timeout 60 "$PATINA" run --seed $s --crash machine:0 --out "$d/base" --mount "$PATINA_GUESTS":/guest:copy -- $W >/dev/null 2>&1 || true
+timeout 60 "$PATINA" run --seed $s --fault crash-permille=0 --out "$d/base" --mount "$PATINA_GUESTS":/guest:copy -- $W >/dev/null 2>&1 || true
 set -- $(window "$d/base")
 [ $# = 2 ] || die "the base acknowledges no record before its sync"
 lo=$1 hi=$2
 # Cut, then resumed: the resumed sweep is the whole one.
-sw full --seeds $s --crash-points --crash machine --max-findings 1 -- $W
+sw full --seeds $s --crash-points --faults crash --max-findings 1 -- $W
 grep -q '^crash points: [0-9]* of [0-9]* tried' "$d/full.txt" || die "cut: $(cat "$d/full.txt")"
 tried=$(field "$d/full/report.json" crash_points.tried) all=$(field "$d/full/report.json" crash_points.points)
 [ "$tried" -lt "$all" ] || die "--max-findings 1 tried $tried of $all"
-sw full --seeds $s --crash-points --crash machine -- $W
+sw full --seeds $s --crash-points --faults crash -- $W
 [ "$st" = 1 ] || die "branch sweep of seed $s: exit $st ($(tail -3 "$d/full.txt"))"
 grep -q "^sweep: $tried of $all children already in" "$d/full.txt" || die "resume: $(head -3 "$d/full.txt")"
 rerun=$(python3 -I - "$d" "$s" "$lo" "$hi" <<'PY'
@@ -89,7 +89,7 @@ echo "cut at $tried of $all points; resumed, the report counts every run; rerun 
 
 # Two seeds, two cases: one base per pair, one child per point of each.
 printf '/guest/hello-static\n/guest/hello-static x\n' >"$d/lines"
-sw cases --seeds 1..2 --cases "$d/lines" --crash-points --crash process
+sw cases --seeds 1..2 --cases "$d/lines" --crash-points --faults kill
 [ "$st" = 0 ] || die "cases: exit $st ($(tail -3 "$d/cases.txt"))"
 python3 -I - "$d/cases/report.json" <<'PY' || exit 1
 import json, sys
@@ -101,20 +101,20 @@ print("2 seeds x 2 cases: %d runs, %s" % (r["runs"], [(s["seed"], s["case"], s["
 PY
 
 # Refusals; plain and branch sweeps replace each other.
-for c in "" "--crash machine:5" "--crash machine-at:3"; do
+for c in "--fault crash-permille=5" "--fault crash-at=3"; do
     sw refused --seeds 1 --crash-points $c -- /guest/hello-static
     [ "$st" = "$(exit_of error)" ] && [ ! -e "$d/refused" ] || die "--crash-points $c: exit $st, $(ls "$d/refused" 2>&1 | head -2)"
-    echo "--crash-points ${c:-without --crash}: $(tail -1 "$d/refused.txt")"
+    echo "--crash-points $c: $(tail -1 "$d/refused.txt")"
 done
-sw swap --seeds 1 --crash machine -- /guest/hello-static
-sw swap --seeds 1 --crash-points --crash machine -- /guest/hello-static
+sw swap --seeds 1 --faults crash -- /guest/hello-static
+sw swap --seeds 1 --crash-points --faults crash -- /guest/hello-static
 ls "$d/swap" >"$d/swap.ls"
 grep -q 'replacing it' "$d/swap.txt" && grep -q '^seed-1@' "$d/swap.ls" || die "branch over plain: $(head -2 "$d/swap.txt")"
-sw swap --seeds 1 --crash machine -- /guest/hello-static
+sw swap --seeds 1 --faults crash -- /guest/hello-static
 ls "$d/swap" >"$d/swap.ls"
 grep -q 'replacing it' "$d/swap.txt" && ! grep -q '^seed-1@' "$d/swap.ls" || die "plain over branch: $(head -2 "$d/swap.txt")"
 echo "a branch sweep and a plain sweep replace each other"
 
-sw acklog --seeds 1 --crash-points --crash machine --max-findings 1 -- /guest/examples/acklog
+sw acklog --seeds 1 --crash-points --faults crash --max-findings 1 -- /guest/examples/acklog
 [ "$st" = 1 ] && grep -q 'acked-records-kept' "$d/acklog.txt" || die "acklog: exit $st ($(tail -3 "$d/acklog.txt"))"
 echo "examples/acklog-c: $(grep -m1 '^violation' "$d/acklog.txt")"

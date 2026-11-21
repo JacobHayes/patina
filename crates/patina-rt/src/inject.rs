@@ -32,8 +32,6 @@ pub enum Decision {
     Shorten(u64),
     /// Return this value without making the call (`brk` fails by returning the old break).
     Ret(i64),
-    /// `enospc-after-bytes`: `None` = no room left (ENOSPC), `Some(n)` = write the n that fit.
-    Enospc(Option<u64>),
 }
 
 pub fn d(sub: u64) -> u64 {
@@ -211,13 +209,13 @@ pub fn count_injected() {
         .store(c.stats.faults_injected.load(Relaxed) + 1, Relaxed);
 }
 
-/// Faults are active and the run is past `faults-after-setup`.
+/// Faults are active and the run is in its fault window (after setup, before `faults-done`).
 pub fn active() -> bool {
     crate::state::faults().cfg.faults_active() && after_start()
 }
 
 fn after_start() -> bool {
-    thread().seq >= ctl().faults.cfg.fault_after_seq
+    ctl().faults.cfg.in_window(thread().seq)
 }
 
 /// Phase 1: the delay, if one is drawn. Phase 2 (`decide`): error or short transfer.
@@ -275,19 +273,6 @@ fn decide(call: &dyn Call, c: FClass, obj: Obj) -> Decision {
             return Decision::Error(base[i] as i64);
         }
     }
-    if c == FClass::Write && obj == Obj::File {
-        f.eligible(Kind::Enospc);
-        if cfg.enospc_after_bytes != 0 {
-            let used = f.work_bytes.load(Relaxed);
-            let left = cfg.enospc_after_bytes.saturating_sub(used);
-            if left == 0 {
-                return Decision::Enospc(None);
-            }
-            if matches!(nr, nr::WRITE | nr::PWRITE64) && call.arg(2) > left {
-                return Decision::Enospc(Some(left));
-            }
-        }
-    }
     if matches!(nr, nr::READ | nr::PREAD64 | nr::WRITE | nr::PWRITE64)
         && call.arg(2) >= 2
         && short_ok(obj)
@@ -342,18 +327,6 @@ pub fn before(call: &mut dyn Call, c: FClass) -> Gate {
                 ret: Some(v),
                 post: None,
             }
-        }
-        Decision::Enospc(None) => {
-            note(nr, INJ_ENOSPC, c as u64, 0, a0, who);
-            Gate {
-                ret: Some(-28),
-                post: None,
-            }
-        }
-        Decision::Enospc(Some(n)) => {
-            note(nr, INJ_ENOSPC, c as u64, n, a0, who);
-            call.set_arg(2, n);
-            none
         }
         Decision::Error(errno) => {
             note(nr, INJ_ERROR, c as u64, errno as u64, a0, who);
@@ -414,7 +387,7 @@ pub fn sync_fails_sub(err_sub: u64) -> Option<u64> {
 /// kernel's own count of the process's private writable memory (`/proc/self/statm` data,
 /// what `RLIMIT_DATA` limits), a function of the calls made, since the runtime places every
 /// mapping. Past the limit the call answers `ENOMEM` and an `Injected` record names it.
-/// Holds from the start, whatever `faults-after-setup` says: it is a limit, not a draw.
+/// Holds from the start, whatever the fault window: it is a limit, not a draw.
 pub fn mem_limit_refuses(nr: u64, grow: u64) -> bool {
     let f = crate::state::faults();
     let limit = f.cfg.mem_limit_bytes;
@@ -483,7 +456,7 @@ static SUB: path::Global<CrashSub> = path::Global::new(CrashSub { seq: 0, sub: 0
 /// the `Crash` record and kills every guest process (a node's: that node's, which it then
 /// restarts in the run). Never returns in that case. A point that does not fire changes
 /// nothing but the count, so a run's prefix is the same whatever the crash setting.
-/// `faults-after-setup` is the run's.
+/// The fault window (`setup-complete` to `faults-done`) is the run's.
 pub fn crash_point() {
     let c = ctl();
     let f = crate::state::faults();
@@ -492,7 +465,7 @@ pub fn crash_point() {
         return;
     }
     let ts = thread();
-    if ts.seq < c.faults.cfg.fault_after_seq {
+    if !c.faults.cfg.in_window(ts.seq) {
         return;
     }
     let s = SUB.get();

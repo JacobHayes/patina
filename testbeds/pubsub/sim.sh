@@ -45,7 +45,7 @@ leg() {
     fi
 }
 
-net="--fault net-delay-ms=0..40 --fault net-chunk-max=16..4096 --fault net-halfclose-delay-ms=0..20"
+net="--fault net-delay-ms=0..40 --fault net-chunk-max=16..4096"
 # shellcheck disable=SC2086
 leg clean clean $net -- "$bin"
 leg lost-wakeup "failure exit: PUBSUB_FAILURE not-converged" -- "$bin" --bug lost-wakeup --timeout-secs 10

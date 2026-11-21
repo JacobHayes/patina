@@ -94,6 +94,11 @@ impl Sup {
     /// is only loopback, and they do; with nodes, by `net-links`: between two nodes other than
     /// the driver, also the driver's links, also each node's loopback.
     pub(super) fn link_faulted(&self, from: usize, to: usize) -> bool {
+        // Outside the fault window (before setup-complete in a run that waits for it, after
+        // faults-done) no link is faulted.
+        if !self.faults_on() {
+            return false;
+        }
         if self.node_count() == 0 {
             return true;
         }
@@ -262,6 +267,19 @@ impl Sup {
             self.wire_heal(&opened);
         }
         self.part_next(k + 1);
+    }
+
+    /// `faults-done`: the seed's partition in force heals now, and no other is drawn.
+    pub(super) fn partitions_done(&mut self) {
+        if let Some(e) = self.links.ev.take() {
+            self.sched.cancel(e);
+        }
+        if self.links.active.is_some() {
+            self.part_end();
+            if let Some(e) = self.links.ev.take() {
+                self.sched.cancel(e);
+            }
+        }
     }
 
     /// The partition's `Injected` record: what the seed did, counted as a fault.

@@ -2,7 +2,7 @@
 # (`early`: b answers before its fsync) under the planted mix of 14-points-sweep (crashes at both
 # nodes' points at 60 per mille, net delays and duplicates, disk delays), 6 at a time; each
 # failing run minimized. Prints the failing seeds, how many reduced to one node's crash alone
-# (`machine-at:N@NODE`), and the runs minimize made (mean, most).
+# (`crash-at=N@NODE`), and the runs minimize made (mean, most).
 #@ tier=evidence budget=900 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/evidence-minimize; mkdir -p "$o"
@@ -13,7 +13,7 @@ export o PATINA PATINA_GUESTS
 one() {
     d=$o/s$1; rm -rf "${d:?}"
     timeout 300 "$PATINA" run --seed "$1" --out "$d" --mount "$PATINA_GUESTS":/guest:copy --config "$o/early.toml" \
-        --crash machine:60 --fault net-delay-ms=0..20 --fault net-dup-permille=10 --fault fs-delay-permille=20 \
+        --fault crash-permille=60 --fault net-delay-ms=0..20 --fault net-dup-permille=10 --fault fs-delay-permille=20 \
         -- python3 /guest/ack2.py driver 4 >/dev/null 2>&1 || [ -f "$d/result.json" ] || { echo "$1 no-result"; return; }
     c=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["outcome"])' "$d/result.json")
     if [ "$c" = failure ]; then
@@ -32,7 +32,7 @@ rows = [l.split() for l in open(sys.argv[1])]
 bad = [r for r in rows if r[1] in ("no-result", "minimize-failed")]
 assert not bad, bad
 f = [r for r in rows if r[1] == "failure"]
-single = [r for r in f if "machine-at:" in r[3]]
+single = [r for r in f if "crash-at=" in r[3]]
 runs = [int(r[2]) for r in f]
 print("seeds 1-200: %d failing, %d reduced to one node's crash alone; minimize runs mean %.1f, most %d"
       % (len(f), len(single), sum(runs) / len(runs), max(runs)))

@@ -4,7 +4,7 @@ Patina v0.5.0 is built from the tag in a temporary workspace (PATINA = its `pati
 the guests are built with `patina build` from the same sources (PGUESTS: w1 from
 tests/guests/rust-threads-files/main.rs, fj from the trial harness against v0.5.0's SDK and the
 same fjall checkout). W9 is the same harness ported to environment variables.
-Knobs: patina `--crash machine:5` against Patina `--machine-crash-permille 5` (both: a seeded
+Knobs: patina `--fault crash-permille=5` against Patina `--machine-crash-permille 5` (both: a seeded
 machine crash at 5 per mille of eligible points), patina `--fault fs-error-permille=2` against
 `--fs-error-permille 2`. The eligible points differ (patina: after every operation-log record and
 before every sync-class call; Patina: its own operation list), so crash counts per run differ.
@@ -28,10 +28,10 @@ W = os.environ["PATINA_WORKLOADS"]
 cases = {
     "W1 off": ((W + "/rust-threads-files", ["/guest/rust-threads-files", "correct"], []),
                (PG + "/w1", ["correct"], [])),
-    "W1 crash": ((W + "/rust-threads-files", ["/guest/rust-threads-files", "correct"], ["--crash", "machine:5"]),
+    "W1 crash": ((W + "/rust-threads-files", ["/guest/rust-threads-files", "correct"], ["--fault", "crash-permille=5"]),
                  (PG + "/w1", ["correct"], ["--machine-crash-permille", "5"])),
     "W9 off": ((W + "/fjall-harness", ["/guest/fjall-harness-release"], []), (PG + "/fj", [], [])),
-    "W9 crash+fs": ((W + "/fjall-harness", ["/guest/fjall-harness-release"], ["--crash", "machine:5", "--fault", "fs-error-permille=2"]),
+    "W9 crash+fs": ((W + "/fjall-harness", ["/guest/fjall-harness-release"], ["--fault", "crash-permille=5", "--fault", "fs-error-permille=2"]),
                     (PG + "/fj", [], ["--machine-crash-permille", "5", "--fs-error-permille", "2"])),
 }
 

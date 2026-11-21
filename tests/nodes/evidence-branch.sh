@@ -18,7 +18,7 @@ sw() {
     rm -rf "${o:?}/$n"
     t0=$(date +%s)
     st=0
-    timeout 1100 "$PATINA" sweep --seeds "$seeds" --crash-points $max --crash machine -j 6 --keep fail --out "$o/$n" \
+    timeout 1100 "$PATINA" sweep --seeds "$seeds" --crash-points $max --faults crash -j 6 --keep fail --out "$o/$n" \
         --config "$cfg" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >"$o/$n.txt" 2>&1 || st=$?
     [ -f "$o/$n/report.json" ] || die "$n: no report (exit $st): $(tail -3 "$o/$n.txt")"
     python3 -I - "$o/$n/report.json" "$n" "$seeds" "$(( $(date +%s) - t0 ))" <<'PY'

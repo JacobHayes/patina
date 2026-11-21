@@ -1,7 +1,8 @@
 # 6. Triage with a checker that consults a table, against a reference implementation (bash
 #    against dash, the cases a {} corpus):
 #    - Case ids: a line's --name or its line number, in PATINA_CASE_ID, run.json, report.json
-#      and the run's directory; --only-case runs the cases it names; the report's rerun line runs.
+#      and the run's directory; a cases file with the other lines turned into comments runs
+#      just those cases under the same ids; the report's rerun line runs.
 #    - Keyed findings (LABEL [KEY]: detail) group by the key; reasons not to judge count by
 #      their class (CLASS: detail).
 #    - `patina report --recheck` after an edit of the checker's table judges the kept runs
@@ -65,9 +66,10 @@ rerun=$(jq -r '.groups[0].rerun' sh/report.json)
 rc=0
 eval "\"\$PATINA\" run --out rerun --format json ${rerun#patina run }" >rerun.json 2>/dev/null || rc=$?
 [ "$rc $(jq -r .signature rerun.json)" = "1 violation check: wrong-output [4]" ] || die "the rerun line ($rerun): exit $rc"
-# Selected cases need not be the file's first.
-rc=$(sweep only --cases cases.txt --only-case readf,5 --check "chk/diff ref" -- /bin/bash -c {})
-[ "$rc" = 0 ] && [ "$(cd only && ls -d seed-*/* | paste -sd,)" = "seed-1/2-readf,seed-1/5-2,seed-2/2-readf,seed-2/5-2" ] || die "--only-case readf,5: exit $rc: $(cd only && ls -d seed-*/*; tail -3 only.txt)"
+# Selected cases need not be the file's first: the other lines made comments keep the ids.
+sed -e '3,4s/.*/# not selected/' cases.txt >cases-only.txt
+rc=$(sweep only --cases cases-only.txt --check "chk/diff ref" -- /bin/bash -c {})
+[ "$rc" = 0 ] && [ "$(cd only && ls -d seed-*/* | paste -sd,)" = "seed-1/2-readf,seed-1/5-2,seed-2/2-readf,seed-2/5-2" ] || die "cases readf,5 only: exit $rc: $(cd only && ls -d seed-*/*; tail -3 only.txt)"
 echo "ids: $ids; group $(jq -r '.groups[0].signature' sh/report.json), e.g. $(jq -r '.groups[0].example' sh/report.json)"
 
 # The table names the case: a recheck judges every kept run again, and only the check changes.

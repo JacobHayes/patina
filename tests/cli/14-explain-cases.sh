@@ -1,5 +1,5 @@
 # 14. `patina explain` on four kinds of failure, each the first failing seed of 1-64: a race
-#    between threads (the jobs example), crash consistency (acklog under `--crash machine`), a
+#    between threads (the jobs example), crash consistency (acklog under `--faults crash`), a
 #    two-node bug (tests/guests/nodes/kv.py, the backup acknowledging before it applies) and a
 #    three-node split brain (tests/guests/nodes/q3.py nofence under partitions). Which seed fails
 #    first depends on the host, so what is asserted holds for every failing seed: each story is
@@ -34,13 +34,13 @@ check() { python3 -I "$(dirname "$0")/explain-facts.py" "$1" "$2" "$PATINA" || d
 
 first "$RUNS/jobs" "$(seq 1 64)" failure -- "$G/examples/jobs"
 story "$RUNS/jobs"; check "$RUNS/jobs" thread
-first "$RUNS/acklog" "$(seq 1 64)" violation --crash machine -- "$G/examples/acklog"
+first "$RUNS/acklog" "$(seq 1 64)" violation --faults crash -- "$G/examples/acklog"
 story "$RUNS/acklog"; check "$RUNS/acklog" crash
 for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s", "bug"]\n' $n $n; done >"$RUNS/kv.toml"
 first "$RUNS/kv" "$(seq 1 64)" failure --config "$RUNS/kv.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver
 story "$RUNS/kv"; check "$RUNS/kv" nodes
 for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "nofence"]\n' $n $n; done >"$RUNS/q3.toml"
-first "$RUNS/q3" "$(seq 1 64)" failure --config "$RUNS/q3.toml" --faults net --fault partition-gap-ms=1000..6000 \
+first "$RUNS/q3" "$(seq 1 64)" failure --config "$RUNS/q3.toml" --faults net,partition --fault partition-gap-ms=1000..6000 \
     --fault partition-ms=1000..6000 --mount "$G":/guest:copy -- python3 /guest/q3.py driver 60
 story "$RUNS/q3"; check "$RUNS/q3" partition
 
@@ -52,7 +52,7 @@ sweep() {
     [ -f "$out/report.json" ] || die "sweep $out: no report (exit $st)"
 }
 for e in jobs acklog bank ledger serve stats-cp upcase kvlog; do
-    sweep "$RUNS/sw-$e" --seeds 1..3 --crash machine --fault net-reset-permille=50 -- "$G/examples/$e"
+    sweep "$RUNS/sw-$e" --seeds 1..3 --faults crash --fault net-reset-permille=50 -- "$G/examples/$e"
 done
 for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s"]\n' $n $n; done >"$RUNS/kv-ok.toml"
 sweep "$RUNS/sw-kv" --seeds 1..3 --config "$RUNS/kv-ok.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver

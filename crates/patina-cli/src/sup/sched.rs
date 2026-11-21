@@ -64,8 +64,8 @@ pub enum Live {
     /// ahead, so no traffic is in flight: a cut holds nothing, and its heal leaves the links
     /// as they were.
     No,
-    /// The seed's kill of a node: once faults may act (`faults-after-setup`), since before
-    /// then it is only drawn again.
+    /// The seed's kill of a node: while faults may act (`FaultCfg::in_window`), since outside
+    /// the window it is only drawn again.
     AfterSetup,
 }
 

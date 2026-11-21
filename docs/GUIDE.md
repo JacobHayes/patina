@@ -69,7 +69,9 @@ file](#a-configuration-file)). Its filesystems (`/work`, `/tmp`, copied mounts) 
 memory-backed tmpfs of 256 MiB each (`[run] disk-mb`). A write past that size answers
 `ENOSPC`, as a full disk does; when one did, `patina run`
 names the setting (`sandbox tmpfs full: ...`) and `result.json`'s `tmpfs.enospc` counts the
-calls.
+calls. To test running out of space, make the disk small: the write that fills it fails as it
+would on a full disk, at the same place in every run of a seed and after a crash too (a node's
+`disk-mb` may be a range, `"20..120"`, drawn per seed within the run's).
 
 When the program runs, opens or looks for a host path the sandbox lacks, `patina run` names it
 once and the directory to mount, and a sweep's summary counts the runs that met it:
@@ -152,7 +154,7 @@ work tree does (the operation log keeps it for crashes).
 
 A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A guest process killed
 by SIGKILL from outside the run (the host's out-of-memory killer, or a kill sent on the host) ends
-it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. With `--crash`, a run ends by
+it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. With crashes on, a run ends by
 checking its operation log: replaying it must give the work tree each incarnation left. A
 difference is a Patina defect, never the program's: the run keeps its own outcome (a
 violation keeps its label and signature) and says `self-check failed (a Patina defect; ...)`
@@ -185,8 +187,8 @@ cmd = ["./acklog"]
 cpus = 2
 
 [faults]
-crash = "machine:10"
-preset = "disk"
+faults = ["disk", "crash"]
+crash-permille = 10
 fsync-error-permille = 0
 ```
 
@@ -199,7 +201,7 @@ A sweep runs many seeds, in parallel, each a normal `patina run`, and groups the
 by what failed.
 
 ```sh
-patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
+patina sweep --seeds 1..200 --faults crash --out patina-out/acklog -- ./acklog
 ```
 
 | Flag | Effect |
@@ -210,8 +212,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--keep fail\|all` | whose logs to keep: those of each group's first three runs and, with `--check`, of every run the checker read (to judge them again, [below](#judging-again)); or every run's; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
-| `--only-case ID[,ID...]` | with `--cases`: only these cases ([below](#test-suites)) |
-| `--crash-points[=N]` | with `--crash machine` or `process`: every crash point of each seed, or at most N of them, a seeded sample by node and kind of operation (below) |
+| `--crash-points[=N]` | crashes on (`kill` too, if named): every crash point of each seed, or at most N of them, a seeded sample by node and kind of operation (below) |
 | `--known FILE` | findings already known: counted, and they do not fail the sweep ([below](#known-findings)) |
 
 `--keep fail` keeps the logs of a group's first three runs (its lowest seeds, the first of them
@@ -323,9 +324,7 @@ sweep runs again.
 
 A case's id is its `--name`, or else its line number: it is `PATINA_CASE_ID` for the checker,
 `config.case` in `run.json` (with the whole line, so a replay and `--config run.json` keep
-it), `case_id` in `report.json`, and the summary's `first: seed 1, case 2`. `--only-case
-ID[,ID...]` runs only those cases, as the same sweep would have run them; an id no line has
-is an error. A name is letters, digits, `.`, `_` and `-`, at most 64 characters, not
+it), `case_id` in `report.json`, and the summary's `first: seed 1, case 2`. A name is letters, digits, `.`, `_` and `-`, at most 64 characters, not
 starting with `.` or `-`, not a number, and unique in the file. A line number moves when a
 line is added above it; a `--name` does not, so a corpus that grows names its cases.
 
@@ -448,9 +447,10 @@ every entry's count under `known`.
 
 ### Every crash point of a seed
 
-`--crash-points` with `--crash machine` (or `process`) runs each seed once with crashes on and
-never firing, which counts its crash points, then once per crash point with the crash forced
-there (`--crash machine-at:N` into `OUT/seed-S@N`), points ascending and seeds in turn. A run
+`--crash-points` runs each seed once with crashes on and never firing, which counts its crash
+points, then once per crash point with the crash forced there (`--fault crash-at=N` into
+`OUT/seed-S@N`), points ascending and seeds in turn. It crashes the machine, or kills the
+processes with `--faults kill`. A run
 crashed at point N is the same as its seed's run up to N, so the sweep tries every place a
 crash could fall in that seed's schedule. `--budget` and `--max-findings` stop it; the same
 command again runs only the points not tried yet.
@@ -462,7 +462,7 @@ exit: 1
 release-only: a sweep of 328 crash points
 -->
 ```text
-$ patina sweep --seeds 1..2 --crash-points --crash machine -- ./acklog
+$ patina sweep --seeds 1..2 --crash-points -- ./acklog
 sweep: 2 seeds, 328 crash points
 new: violation always: acked-records-kept: N acknowledged, N stored   (seed 1@8: patina replay /tmp/acklog/patina-out/sweep/seed-1@8)
 sweep: replaying the first seed of 1 finding
@@ -475,7 +475,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   161 of 330 runs   first: seed 1@8   replayed: identical
   example: acked-records-kept: 1 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 1 --crash machine-at:8 -- /tmp/acklog/acklog
+  rerun:  patina run --seed 1 --fault crash-at=8 -- /tmp/acklog/acklog
   replay: patina replay /tmp/acklog/patina-out/sweep/seed-1@8
   explain: patina explain /tmp/acklog/patina-out/sweep/seed-1@8
 ```
@@ -489,8 +489,8 @@ the seed's operation log into its `points.json`), comes up before any comes up t
 rest in proportion. The report says how many of how many it tried; the same command with a
 larger N runs only the children the smaller one did not. A run whose points the sweep cannot
 place in its log (one whose points count from `setup-complete`) is sampled by node alone. To
-branch only over the work after a setup, end the setup with the SDK's `setup_complete()` and
-add `--fault faults-after-setup=1`: crash points then count from there.
+branch only over the work after a setup, end the setup with the SDK's `setup_complete()`:
+crash points then count from there, and they stop at `faults_done()`.
 
 Each point is tried once, with one draw of what the crash keeps, and "every crash point tried"
 covers only the seeds swept. Seeds differ widely in their count (fjall's harness: 4,069 to
@@ -505,7 +505,7 @@ nothing (F4) in the same time (docs/EVIDENCE.md, "Crash-point enumeration").
 ### If a sweep finds nothing
 
 A sweep that ends all `ok` has looked at as many runs as it had seeds, each one schedule and,
-under `--crash`, usually one crash. In order of what helped most on the storage findings
+with crashes on, usually one crash. In order of what helped most on the storage findings
 (docs/EVIDENCE.md, "Search quality: fjall F2 and F6"):
 
 - **More seeds.** A crash that must land in a short window (a few crash points out of
@@ -514,15 +514,15 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
 - **Every crash point** (`--crash-points`, above): a few seeds with each crash point tried once,
   instead of one crash in each of many seeds. It reaches every window of the seeds it runs:
   the first thing to try for a crash window, not for a fault that must vary across seeds.
-- **`--buggify`**, and for a fault point that must fire at one particular moment,
+- **`--faults buggify`**, and for a fault point that must fire at one particular moment,
   `--fault buggify:LABEL=1000`: the point is on in every run and fires at every evaluation,
   instead of on in a quarter of runs and firing on a quarter of evaluations.
-- **The crash position.** `--crash machine:N` crashes at each crash point with probability
-  N per mille, so most runs crash early; a lower N reaches later points and a higher one
-  earlier points. To search a region you know (from the `point` of a crash near it, or
-  `faults.counts.crash.eligible` of a run without crashes), give the position as a range:
-  `--crash machine-at:A..B`.
-- **The fault rates**: a preset's ranges (`--faults disk`) and a key's own range.
+- **The crash position.** `--fault crash-permille=N` crashes at each crash point with
+  probability N per mille, so most runs crash early; a lower N reaches later points and a
+  higher one earlier points. To search a region you know (from the `point` of a crash near
+  it, or `faults.counts.crash.eligible` of a run without crashes), give the position as a
+  range: `--fault crash-at=A..B`.
+- **The fault rates**: a class's ranges (`--faults disk`) and a key's own range.
 - **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
   system call switches threads; `[run] cpus` (default 4) is the CPU count the program sees,
   which sizes its thread pools. Each changes every seed's schedule, so the same seeds then show other
@@ -540,24 +540,114 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
 
 ## Faults
 
-Faults are drawn from the seed like everything else. A preset turns on a class with rates
-that are ranges; each seed picks a value in each range, so one sweep covers gentle and harsh
-settings.
+Faults are drawn from the seed like everything else. You name the kinds of fault, the
+classes; each class turns on settings whose values are ranges, and each seed picks a value in
+each range, so one sweep covers gentle and harsh settings.
 
-| Preset | Settings |
-|---|---|
-| `--faults disk` | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
-| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
-| `--faults all` | both, plus `mem-error-permille=0..2` |
-| `--faults cluster` | with nodes only: `net`'s keys, partitions, pauses, clock skew and machine crashes ([Several machines](#several-machines)) |
+    --faults CLASS[,CLASS...][@NODE,...]     repeatable; [faults] faults = ["CLASS", ...]
+    --fault  KEY=VALUE[@NODE,...]            repeatable; [faults] KEY = VALUE
 
-`--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --fault
-help` lists every key.
+| Class | What the seed does | Settings it turns on |
+|---|---|---|
+| `disk` | errors, short transfers, failed write-backs and delays on `/work` files, pipes, unix sockets | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
+| `net` | delays, split deliveries, resets and refused connects; datagram drops, duplicates, reordering | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
+| `mem` | `ENOMEM` from memory requests, `EAGAIN` from thread creation | `mem-error-permille=0..2` |
+| `buggify` | the program's own fault points fire ([The SDK](#the-sdk)) | each point active in a quarter of seeds, firing on a quarter of its evaluations |
+| `crash` | the machine crashes and restarts on what reached the disk ([Crashes](#crashes)) | `crash-permille=3` at each crash point; with nodes, at drawn times |
+| `kill` | the program's processes are killed and restarted, the disk kept | as `crash` |
+| `partition` | cuts between nodes ([Several machines](#several-machines)) | `partition-gap-ms=5000..60000 partition-ms=500..20000` |
+| `pause` | a node stops for a while | `pause-gap-ms=10000..120000 pause-ms=100..15000` |
+| `clock` | a node's realtime clock is off by a seed-drawn amount, each boot | `clock-skew-ms=0..2000` |
+| `all` | every class above that applies to the run, but `crash` and `kill` | |
 
-A class a preset turned on that had nothing to act on in any run of a sweep (datagram faults
+`net` never cuts nodes apart: partitions are the `partition` class (`--faults net,partition`).
+`all` never crashes or kills: add `crash` or `kill` by name (`--faults all,crash`).
+
+The rules, all of them:
+
+1. **A class turns on its settings; a key sets one.** `--fault KEY=VALUE` replaces its
+   class's value of KEY, or turns on just that one thing without its class: `--fault
+   fs-short-permille=20`, `--fault crash-at=8`, `--fault buggify:LABEL=1000` (that fault point
+   alone). Any number or position may be a range `A..B`, resolved per seed. `patina run
+   --fault help` lists every class and key.
+2. **`all` is every class that applies, except `crash` and `kill`.** `partition`, `pause` and
+   `clock` act on nodes: `all` leaves them out of a run without nodes, and naming one there is
+   an error. A class with nothing to act on in a sweep (datagram faults for a TCP program) is
+   not applicable, below. Surviving a restart is something you assert about your program, so
+   `crash` and `kill` are named: `--faults all,crash`.
+3. **Crashes.** `crash` crashes the machine, `kill` kills its processes; a run has one of the
+   two. Where: at crash points, at rate `crash-permille`, or at exactly the N-th with
+   `crash-at=N`; with nodes, at seed-drawn times (`crash-gap-ms`) unless a crash key names
+   the nodes. A crash key alone means `crash`. `patina sweep --crash-points` means `crash`
+   too, and places one crash at each point.
+4. **Nodes.** Without `@`, a class or key acts on every node but the driver (and nodes with
+   `faults = false`); `@NODE,...` names nodes, `driver` included for `disk`, `mem` and
+   `buggify`. `disk`, `mem`, `buggify`, `crash`, `kill`, `pause`, `clock` and their keys are
+   each node's own, drawn from the node's own seed. `net` and `partition` act on the links
+   (`net-links` says which) and take no `@`.
+5. **When.** Faults act from the start of the run, or from the program's `setup-complete`
+   mark if it makes one, and stop at its `faults-done` mark. A program whose file, or a script
+   its command names, calls `setup-complete` runs with faults held until the mark (and again
+   without the hold if the mark never comes); another runs without the hold, and if it marks
+   after all, runs again held from the start, which Patina then remembers for it. Only a mark
+   made from a file the command does not name (a module a script imports) can let a fault fail
+   a setup, and only before its first run that reaches the mark (`run.json` records
+   `faults-held`; `result.json`'s `faults.window` gives the sequence numbers the faults could
+   act between). Crash points count only inside that window.
+
+`patina.toml` takes the same words:
+
+```toml
+[faults]
+faults = ["disk", "crash"]
+fsync-error-permille = 0
+fs-model = "posix-strict"
+```
+
+### Setup and faults-done
+
+Most programs have a setup that is not under test (create the schema, start the cluster,
+load the fixture) and final checks that should see a quiet system (read everything back,
+compare replicas). Mark both ends:
+
+| | Rust, Python | C | Go | shell (`patina ctl`) |
+|---|---|---|---|---|
+| setup done | `setup_complete()` | `patina_setup_complete()` | `SetupComplete()` | `patina ctl mark setup-complete` |
+| faults done | `faults_done()` | `patina_faults_done()` | `FaultsDone()` | `patina ctl mark faults-done` |
+
+After `faults-done` nothing more is injected: no fault on a call, a send or a fault point, no
+crash point counted. A partition in force heals at once and no new one is drawn; a paused node
+resumes; the seed kills no more nodes, and a node that is down comes back when its restart
+policy says (its drawn down time); a node booting after the mark has no clock skew. What was
+already drawn before the mark still lands: a delivery already delayed, a datagram already held
+for reordering, data held by a blackout, the clock offset of a node already booted. Each of
+these is a record of the run's log, so a replay is the same run.
+
+With several machines the pattern is: put the system under test on nodes, and let the driver
+be the harness. It waits for the system, marks `setup-complete`, drives the workload, marks
+`faults-done`, and checks:
+
+```text
+patina sweep --seeds 1..200 --faults all,crash --node db='./db --listen :7000' -- ./harness
+```
+
+```sh
+#!/bin/sh
+# harness: the driver
+until nc -z db 7000; do sleep 0.1; done
+patina ctl mark setup-complete
+./workload db:7000
+patina ctl mark faults-done
+./verify db:7000
+```
+
+A one-node run like this is as cheap as a run without nodes: one more sandbox, no other
+cost.
+
+A fault a class turned on that had nothing to act on in any run of a sweep (datagram faults
 for a program that only uses TCP, disk faults for one that writes nothing under `/work`) is
-listed on one line and does not make the sweep `vacuous`; a class you named with `--fault`
-(or a `[faults]` key) that never applied still does, since you asked for it:
+listed on one line and does not make the sweep `vacuous`; one you named with `--fault` (or a
+`[faults]` key) that never applied still does, since you asked for it:
 
 <!-- transcript not-applicable
 dir: /tmp/sockets
@@ -567,7 +657,7 @@ exit: 1
 ```text
 $ patina sweep --seeds 1..20 --faults net --out patina-out/tcp -- ./sockets chunk correct
 ...
-faults: not applicable (a preset's, nothing to act on in any run): net-drop, net-dup, net-reorder
+faults: not applicable (a class's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
 
 Over TCP, `net-chunk-max` splits each delivery into pieces of at most that many bytes (a
@@ -618,7 +708,7 @@ exit: 1
 ```text
 violation always: journal-intact: N bytes
   14 of 20 runs   first: seed 2   replayed: identical
-  example: journal-intact: 7081 bytes
+  example: journal-intact: 6999 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
 ```
 
@@ -644,10 +734,9 @@ before the use, at rate P per such use:
 
 The original goes to `.patina-swap-SEQ` in its directory, and half the swaps are put back right
 after the use (as far as the use left them; never after an `exec`). A swap is made as a process
-with the program's uid would make it, only inside the work tree. `path-swap-at=N` swaps at the
-N-th eligible use (`A..B` searches a range).
+with the program's uid would make it, only inside the work tree.
 
-Path swaps are in no preset. A program that owns its directory is entitled to assume nobody
+Path swaps are in no class. A program that owns its directory is entitled to assume nobody
 else renames things in it, so a finding is a bug only where the program must withstand another
 writer: a server reading a shared directory, a tool that enforces which paths a user may touch.
 `examples/serve-c` checks a file with `lstat` and then opens it by name:
@@ -676,22 +765,22 @@ ops` lists its renames and symlinks at the use's seq.
 
 ### Crashes
 
-`--crash machine` crashes the whole program at a seed-chosen point and starts it again with
+`--faults crash` crashes the whole program at a seed-chosen point and starts it again with
 the same arguments, on what had reached the disk: data never synced may be gone, renames and
-creations may be undone. `--crash process` kills the processes but keeps what they wrote, as
+creations may be undone. `--faults kill` kills the processes but keeps what they wrote, as
 an operating system does when a program dies. The default rate is 3 per mille per crash
-point (`--crash machine:10` for 10); `machine-at:N` crashes at the N-th crash point of the
-first run (counted from the `setup-complete` mark under `faults-after-setup`). Crash points
-follow each change to `/work` and precede each sync, so one call can hold several (an
-`fsync`: before it and after it). A run with `machine-at:N` is the same as the run without
-it up to that point. `crashes[].point` in `result.json` (and `point=` in `last injected:`)
+point (`--fault crash-permille=10` for 10); `--fault crash-at=N` crashes at the N-th crash
+point of the first run (counted from the `setup-complete` mark, if the program makes one).
+Crash points follow each change to `/work` and precede each sync, so one call can hold
+several (an `fsync`: before it and after it). A run with `crash-at=N` is the same as the run
+without it up to that point. `crashes[].point` in `result.json` (and `point=` in `last injected:`)
 is a crash's ordinal within its incarnation, so a crash of incarnation 0 that a sweep found
-can be moved one point earlier or later with `-at`. Like the other `-at` settings (`fsync-error-at=N`,
+can be moved one point earlier or later with `crash-at`. Like the other `-at` settings (`fsync-error-at=N`,
 `fs-error-at=CLASS:N`, `mem-error-at=N`), N may be a range `A..B`: each seed picks its own
 point in it, so a sweep searches the region. An N past the run's last crash point never
 fires: the run ends as it would without the crash, with `faults.counts.crash.injected` 0.
 
-A program under `--crash` must be restartable: on start, it recovers its state from `/work`
+A program under `crash` or `kill` must be restartable: on start, it recovers its state from `/work`
 and checks it. `PATINA_INCARNATION=K` is set after the K-th restart. `examples/acklog-c`
 shows the shape:
 
@@ -702,7 +791,7 @@ exit: 1
 exact-only: one seed's run
 -->
 ```text
-$ patina run --seed 3 --crash machine -- ./acklog
+$ patina run --seed 3 --faults crash -- ./acklog
 violation (always): acked-records-kept: 21 acknowledged, 0 stored
 faults injected: 1 (crash 1)
 last injected:
@@ -738,7 +827,7 @@ POSIX promises, not a state ext4 produces.
 A restart starts the program as a new boot would, with the arguments and environment it had
 (plus `PATINA_INCARNATION`). What carries over:
 
-| | after `--crash process` | after `--crash machine` |
+| | after `kill` | after `crash` |
 |---|---|---|
 | `/work` | as it was | what the model keeps |
 | a file's modification time | as it was | as it was at the crash, whatever data the model keeps |
@@ -852,7 +941,7 @@ exit: 0 1
 -->
 ```text
 $ cc -o kvlog examples/kvlog-c/kvlog.c
-$ patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
+$ patina sweep --seeds 1..30 --fault crash-permille=10 --check examples/checks/acked-kept -- ./kvlog
 new: violation check: acked-record-lost: acknowledged N, N stored after the crash   (seed 5: patina replay /tmp/kvlog/patina-out/sweep/seed-5)
 sweep: replaying the first seed of 1 finding
 sweep: 301.3 KiB kept in /tmp/kvlog/patina-out/sweep
@@ -864,7 +953,7 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
   7 of 30 runs   first: seed 5   replayed: identical
   example: acked-record-lost: acknowledged 7, 6 stored after the crash
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 5 --crash machine:10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
+  rerun:  patina run --seed 5 --fault crash-permille=10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
   replay: patina replay /tmp/kvlog/patina-out/sweep/seed-5
   explain: patina explain /tmp/kvlog/patina-out/sweep/seed-5
 ```
@@ -875,7 +964,7 @@ written (`no-reference: seed-4 has no run`, `expected: case 12 differs by design
 counts under the whole line with its numbers made `N`. The line shows the three most common
 and sums the rest (`5 more in 2 classes`); `report.json` has every class under
 `check.not_judged`. A sweep with a check that judged no run is `vacuous` (exit 2): the same
-sweep without `--crash` has nothing for `acked-kept` to look at. `--allow-unmet check`
+sweep without crashes has nothing for `acked-kept` to look at. `--allow-unmet check`
 allows that. A check under which every judged run passed, with no `--known` `!ID` entry
 (below) to show it can fail, gets one more line, `check: every judged run passed and no
 --known !ID entry shows that this check can fail` (`check.unproven` in `report.json`): a
@@ -889,7 +978,7 @@ exit: 1
 exact-only: one seed's run
 -->
 ```text
-$ patina run --seed 5 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
+$ patina run --seed 5 --fault crash-permille=10 --check examples/checks/acked-kept -- ./kvlog
 violation (check): acked-record-lost: acknowledged 7, 6 stored after the crash
 guest: exit 0
 faults injected: 1 (crash 1)
@@ -913,11 +1002,11 @@ exact-only: the run of seed 5 above
 -->
 ```text
 $ patina minimize patina-out/run-5
-without --crash machine:10: no longer fails
---crash machine:10 -> machine:5: still fails
---crash machine:5 -> machine:2: no longer fails
-reduced: crash machine:5 (from crash machine:10); run directory /tmp/kvlog/patina-out/run-5/minimized
-patina run --seed 5 --crash machine:5 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
+without crash-permille=10: no longer fails
+crash-permille=10 -> crash-permille=5: still fails
+crash-permille=5 -> crash-permille=2: no longer fails
+reduced: crash-permille=5 (from crash-permille=10); run directory /tmp/kvlog/patina-out/run-5/minimized
+patina run --seed 5 --fault crash-permille=5 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
 ```
 
 A checker must be a function of the run directory and of files that do not change. One that
@@ -1399,11 +1488,11 @@ $ patina log events patina-out/run-0 --types node,net
 {"type":"header","v":1,"seed":0,"work":"/work","incarnations":1,"nodes":["driver","primary","backup"]}
 {"type":"node","inc":0,"seq":4,"t":100000000000,"slot":1,"event":"start","name":"primary","pid":4}
 {"type":"node","inc":0,"seq":7,"t":100000000000,"slot":2,"event":"start","name":"backup","pid":6}
-{"type":"net","inc":0,"seq":10426,"t":100065031097,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
-{"type":"net","inc":0,"seq":10626,"t":105065238728,"slot":0,"event":"release","conn":2,"dir":0,"until":105065269609}
-{"type":"net","inc":0,"seq":10627,"t":105065238728,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
-{"type":"node","inc":0,"seq":10980,"t":105066553935,"slot":0,"event":"stop","name":"primary","live":1}
-{"type":"node","inc":0,"seq":10981,"t":105066553935,"slot":0,"event":"stop","name":"backup","live":1}
+{"type":"net","inc":0,"seq":10418,"t":100064774228,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
+{"type":"net","inc":0,"seq":10624,"t":105064968035,"slot":0,"event":"release","conn":2,"dir":0,"until":105064998916}
+{"type":"net","inc":0,"seq":10625,"t":105064968035,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
+{"type":"node","inc":0,"seq":10945,"t":105066283311,"slot":0,"event":"stop","name":"primary","live":1}
+{"type":"node","inc":0,"seq":10946,"t":105066283311,"slot":0,"event":"stop","name":"backup","live":1}
 ```
 
 Seeds, `verify` and `replay` work as for one machine: the nodes share the run's one scheduler,
@@ -1435,11 +1524,11 @@ from those the nodes fit:
 | `oneway` | only what one side sends to the other |
 | `bridge` | both directions between two sides, but for one node that still reaches both (three nodes or more) |
 
-`--faults net` (and `all` and `cluster`) adds `partition-gap-ms=5000..60000` and
-`partition-ms=500..20000` in a run with at least two nodes the link faults act on; a run
-without nodes gets what it got before. A partition key in a run without two such nodes is refused. A partition that a sweep's
-preset turned on and that never held, lost or kept back any traffic is `not applicable` in the
-report, as other classes with nothing to act on are.
+`--faults partition` (and `all`) turns on `partition-gap-ms=5000..60000` and
+`partition-ms=500..20000` in a run with at least two nodes the link faults act on; `all`
+leaves it out of a run without two such nodes, and naming it or a partition key there is
+refused. A partition that a sweep's class turned on and that never held, lost or kept back
+any traffic is `not applicable` in the report, as other faults with nothing to act on are.
 
 Every cut and heal is in the logs: `result.json`'s `nodes.partitions` (each partition's ordinal,
 shape, sides, `from_ms` and `to_ms` in the virtual time events use, `null` while in force at
@@ -1471,7 +1560,7 @@ failure exit: exit 1
   replay: patina replay /tmp/q3/patina-out/sweep/seed-1
   explain: patina explain /tmp/q3/patina-out/sweep/seed-1
 
-faults: not applicable (a preset's, nothing to act on in any run): net-drop, net-dup, net-reorder
+faults: not applicable (a class's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
 
 `q3.py` (in `tests/guests/nodes`) is a store on three nodes: a primary that answers a write
@@ -1510,7 +1599,7 @@ setup: printf '[node.b]\ncmd = ["python3", "/guest/kill.py", "b"]\n' >patina.tom
 $ patina run --mount g:/guest:copy -- python3 /guest/kill.py driver 3
 ok (exit): the program exited 0
 guest: exit 0
-nodes: b 10.0.0.2 running after 3 downs, 4 incarnations; net: 0 cuts, 0 heals, 0 held, none cut at the end
+nodes: b 10.0.0.2 running after 3 downs, 4 incarnations
 run directory: /tmp/kill/patina-out/run-0
 replay: patina replay /tmp/kill/patina-out/run-0
 $ cat patina-out/run-0/inc-0/stdout patina-out/run-0/node/b/inc-3/stdout
@@ -1524,16 +1613,17 @@ and one from a child; the driver kills b, checks that both connections end and t
 are refused, starts it again and reads the count of starts b keeps in its work tree
 (`tests/nodes/05-kill.sh` does it 50 times).
 
-**The seed's kills.** `--crash process` kills nodes at times the seed draws, and restarts
+**The seed's kills.** `--faults kill` kills nodes at times the seed draws, and restarts
 them (a kill or restart that falls while a process or thread is being created waits until it
-exists, so a new child is killed with its parent): every node but the driver (`--crash process@a,b` only those). After each start of a
+exists, so a new child is killed with its parent): every node but the driver (`--faults kill@a,b` only those). After each start of a
 node, `crash-gap-ms=A..B` (default `5000..60000`) is the virtual time to its next kill; after
 a kill, `down-ms=A..B` (default `1000..5000`, short beside the gap, so that several nodes are
 seldom all down at once) the time it stays down before its restart.
 `max-incarnations=N` stops the kills once a node has started N times (each node counts its
-own). In a run with nodes `--crash` means this, its machine form
-(`--crash machine[@a,b]`, next section) or a machine crash at a node's crash points
-([At a node's crash points](#at-a-nodes-crash-points)), and the driver is never killed.
+own). `--fault crash-gap-ms=A..B` alone means `--faults crash`. The machine form
+(`--faults crash[@a,b]`, next section) has the same timing, a crash at a node's crash points
+([At a node's crash points](#at-a-nodes-crash-points)) has none, and the driver is never
+killed.
 
 **What keeps a run alive.** When every thread waits with no deadline, the run goes on to the
 next event that can wake one: a node's kill by the seed (its peers see its connections end),
@@ -1541,8 +1631,9 @@ a node's restart, a partition's heal (it delivers what the cut held). A partitio
 cannot: with every thread waiting and nothing else ahead, no traffic is in flight, so the cut
 holds nothing and its heal leaves the links as they were. With only partition starts ahead
 the run is deadlocked, as it would be without partitions; with another event ahead too, the
-partitions that fall before it happen. A kill counts once faults may act: before
-`setup-complete` under `faults-after-setup=1` it would only be drawn again, so it does not.
+partitions that fall before it happen. A kill counts only while faults may act: before a
+`setup-complete` the run waits for, or after `faults-done`, it would only be drawn again, so
+it does not.
 
 **A node's own end.** A node is up while its first process runs. When that process ends by
 itself, the node's other processes are killed and the node is down: an exit status outside
@@ -1553,7 +1644,8 @@ follows its downs: `crash` (the default: restarted after a seed's kill), `always
 an exit within `ok-exit`) or `never`; a script's kill is never followed by a restart but the
 script's own `node start`. A node's keys for this: `restart`, `ok-exit` (a status or a list),
 `max-incarnations` (1 to 64, the most a node starts by the seed's kills and its restarts;
-the script's `node start` goes up to 64) and `count = N`, which makes N nodes of
+the script's `node start` goes up to 64), `disk-mb` (its filesystems' size, `N` or a range
+`"A..B"` drawn per seed, at most the run's) and `count = N`, which makes N nodes of
 one table, named `NAME1` to `NAMEN`:
 
 ```toml
@@ -1573,7 +1665,7 @@ setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py"
 exit: 1 0
 -->
 ```text
-$ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --crash process --fault crash-gap-ms=3000..15000 --fault down-ms=500..3000 -- python3 /guest/q3.py driver 60
+$ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --faults kill --fault crash-gap-ms=3000..15000 --fault down-ms=500..3000 -- python3 /guest/q3.py driver 60
 ...
 patina sweep: 8 runs, 5 findings in 1 group, 3 ok   (6.1s, 4 jobs)
 outcomes: failure 5, ok 3
@@ -1605,7 +1697,7 @@ nodes that had it (`tests/quorum/03-quorum-kills.sh`); without it, the same swee
 ### Crashing a node's machine
 
 `patina ctl node crash NAME` crashes node `NAME`'s machine, and
-`--crash machine` has the seed do it (`--crash machine@a,b`: only those nodes), at the times it
+`--faults crash` has the seed do it (`--faults crash@a,b`: only those nodes), at the times it
 draws for its kills, with the same `crash-gap-ms`, `down-ms`, `max-incarnations` and `restart`.
 A machine crash differs from a process kill in three ways.
 
@@ -1636,7 +1728,7 @@ setup: for n in a b; do printf '[node.%s]\ncmd = ["python3", "/guest/disk.py", "
 $ patina run --mount g:/guest:copy -- python3 /guest/disk.py driver 3
 ok (exit): the program exited 0
 guest: exit 0
-nodes: a 10.0.0.2 running after 3 downs, 4 incarnations, b 10.0.0.3 running; net: 0 cuts, 0 heals, 0 held, none cut at the end
+nodes: a 10.0.0.2 running after 3 downs, 4 incarnations, b 10.0.0.3 running
 run directory: /tmp/disk/patina-out/run-0
 replay: patina replay /tmp/disk/patina-out/run-0
 $ cat patina-out/run-0/inc-0/stdout
@@ -1647,7 +1739,7 @@ unsynced lost in 1 of 3 crashes
 `disk.py` (in `tests/guests/nodes`) has node a write one file with `fsync` and one without;
 the driver crashes a's machine, checks that a held connection shows nothing, that a connect
 times out, that node b's unsynced file is untouched, starts a again, and reads what the new
-boot found (`tests/nodes/09-machine.sh`). With `--crash machine`, `q3.py`'s nodes keep every
+boot found (`tests/nodes/09-machine.sh`). With `--faults crash`, `q3.py`'s nodes keep every
 acknowledged write, since each syncs its state before it answers; with `nosync` they answer
 first, and a write the cluster acknowledged is lost when the machines that had it crash
 before it reached their disks (`tests/quorum/04-quorum-machine.sh`).
@@ -1669,18 +1761,18 @@ each record's length (`nocheck`) keeps one no node wrote (`tests/nodes/11-wal.sh
 #### At a node's crash points
 
 A node's crash points are its own: each node counts them on its own disk, after each record of
-its operation log and before each sync, from 0 at each boot. `--crash machine-at:N@NODE`
-crashes node `NODE`'s machine at the N-th point of its first boot (once); `--crash
-machine:PERMILLE@NODE,...` crashes each named node at each of its points with that chance, in
+its operation log and before each sync, from 0 at each boot. `--fault crash-at=N@NODE`
+crashes node `NODE`'s machine at the N-th point of its first boot (once); `--fault
+crash-permille=P@NODE,...` crashes each named node at each of its points with that chance, in
 every boot until its `max-incarnations`. Without `@`, every node but the driver (and a node
-with `faults = false`); `N` and `PERMILLE` may be ranges (`A..B`), each node drawing its own
-from a seed of its own. The
+with `faults = false`); `N` and `P` may be ranges (`A..B`), each node drawing its own from a
+seed of its own. Only the nodes a crash key names crash: a run has crashes at points or at
+drawn times, not both, so `crash-gap-ms` is refused beside them. The
 crash is the one above: the node's maps are flushed, the disk ends with its `Crash` record, the
-node goes silent and boots again after `down-ms`. `--crash process-at:N@NODE` kills node
-`NODE`'s processes at that point instead, as the seed's kill does (a process kill, the previous
-section): its disk is kept whole, and its command starts again after `down-ms`; `downs[].how`
-is `killed`, with the `point`. There are no crashes at drawn times then, so
-`crash-gap-ms` is refused beside it.
+node goes silent and boots again after `down-ms`. With `--faults kill@NODE` the node's
+processes are killed at that point instead, as the seed's kill does (a process kill, the
+previous section): its disk is kept whole, and its command starts again after `down-ms`;
+`downs[].how` is `killed`, with the `point`.
 
 After any machine crash of a node (at a point, at a drawn time or by a script), the crashed
 disk's tree is written to `RUNDIR/node/NAME/inc-K/post-crash/`, the tree boot K+1 started from, and what the crash lost there is counted in `downs[].lost` and the `crash` event
@@ -1689,9 +1781,10 @@ form; `paths`). `patina log events` merges each node's operations with the drive
 `op` naming its `node`, and its `crash` events name the node and the `point`.
 `result.json` gives each down its `point`, and each node its `crash_points` per boot.
 
-`patina sweep --crash-points --crash machine[@NODE,...]` runs each seed once with crashes on and
-never firing, counting every named node's points, then once per point of each node, crashing
-that node's machine there (`machine-at:P@NODE`, in `seed-S@NODE.P`); each child reruns the
+`patina sweep --crash-points [--faults crash@NODE,...]` runs each seed once with crashes on and
+never firing, counting every named node's points (no `@`: every node but the driver), then
+once per point of each node, crashing that node's machine there (`crash-at=P@NODE`, in
+`seed-S@NODE.P`); each child reruns the
 whole run. `ack2.py` (in `tests/guests/nodes`) is a store of two nodes: a forwards each put to
 b and acknowledges it once b answers; with `early`, b answers before its `fsync`:
 
@@ -1704,7 +1797,7 @@ setup: printf '[node.a]\ncmd = ["python3", "/guest/ack2.py", "a"]\n[node.b]\ncmd
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1 --crash-points --crash machine -j 4 --mount g:/guest:copy -- python3 /guest/ack2.py driver 3
+$ patina sweep --seeds 1 --crash-points -j 4 --mount g:/guest:copy -- python3 /guest/ack2.py driver 3
 ...
 crash points: 30 of 30 tried (a 15 of 15, b 15 of 15)
 nodes: driver, a, b in 31 runs; net: 0 cuts, 0 heals, 11 held over them
@@ -1727,8 +1820,7 @@ partition was in force at the end. Without `early` the same sweep is ok at all 3
 **Two crashes.** `[sweep] crash-pairs = K` adds a second level: each first crash's child (node A at
 its point I) also counts the other nodes' points, and from each that ended ok the sweep takes,
 for each other node B, B's next K points after A's crash, and runs each pair as a child
-crashing both (`--crash
-machine-at:I@A+machine-at:J@B`, in `seed-S@A.I+B.J`). The pair's run is the first child's up to
+crashing both (`--fault crash-at=I@A --fault crash-at=J@B`, in `seed-S@A.I+B.J`). The pair's run is the first child's up to
 B's J-th point, so each pair crashes B at a point the first child reached (after the same
 records of B's disk; a pair that does not is reported `nondeterministic`). `--crash-points=N`
 caps each level of each seed at N (the pairs sampled by the two nodes, then the kind of
@@ -1747,7 +1839,7 @@ setup: printf '[sweep]\ncrash-pairs = 3\n' >>patina.toml
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1 --crash-points=60 --crash machine -j 4 --mount g:/guest:copy -- python3 /guest/q3.py driver 2
+$ patina sweep --seeds 1 --crash-points=60 -j 4 --mount g:/guest:copy -- python3 /guest/q3.py driver 2
 sweep: 1 seed, 400 crash points (n1 80, n2 160, n3 160), a sample of 60 (--crash-points=N)
 sweep: 306 pairs after a first crash, a sample of 60 (--crash-points=N)
 ...
@@ -1774,13 +1866,13 @@ large runs a `--crash-points=N`.
 
 `patina minimize` of a run with nodes takes each node's scoped setting (`KEY=V@NODE`) as one
 of its own, doubles `crash-gap-ms` as it does `partition-gap-ms`, turns a kept crash at crash
-points into one node's crash alone (`machine-at:N@NODE`, then drops the other settings again),
-and otherwise narrows the crash's `@NODE,...` one node at a time. The crash alone is tried
+points into one node's crash alone (`crash-at=N@NODE`, then drops the other settings again),
+and otherwise narrows the crash class's `@NODE,...` one node at a time. The crash alone is tried
 first at each node's first crash; then at each later crash, the most recent first, where the
 node's first boot would reach it with no crash before (the points of the boots before it plus
 its own, and the points either side, since the work a crash undid is done again); at most 6
 places per node, each a run of minimize's 30. A failure planted under crashes of both nodes,
-net delays and duplicates and disk delays reduces to `--crash machine-at:8@b` and nothing else
+net delays and duplicates and disk delays reduces to `--fault crash-at=8@b` and nothing else
 (`tests/nodes/14-points-sweep.sh`, its first failing seed on the reference host). A failure
 built so that b's first crash comes before it serves anything and its second loses an
 acknowledged put reduces, on any seed, to that second crash alone at its place in a first
@@ -1790,27 +1882,29 @@ it.
 
 ### Disk faults per node
 
-The disk and memory keys (`fs-*`, `fsync-*`, `enospc-after-bytes`, `mem-*`, `path-swap-*`)
-are each node's, as are the pause and clock keys (`pause-*`, `clock-skew-ms`, which only a
-node has). Given without a scope they act on every node but the driver; `@NODE,...` after
-the value names the nodes (`driver` among them, if wanted); a node's `[node.NAME.faults]` table
-sets its own, replacing the run's:
+The disk and memory keys (`fs-*`, `fsync-*`, `mem-*`, `path-swap-*`)
+are each node's, as are the fault points (`buggify:LABEL`), the crash points (`crash-*` but
+`crash-gap-ms`) and the pause and clock keys (`pause-*`, `clock-skew-ms`, which only a node
+has). Given without a scope they act on every node but the driver; `@NODE,...` after the
+value (or after a class) names the nodes, `driver` among them for disk, memory and fault
+points:
 
 ```sh
 patina run --faults disk ...                              # every node but the driver
-patina run --fault fsync-error-permille=5@a,driver ...    # a and the driver only
+patina run --faults disk@a,driver ...                     # a and the driver only
+patina run --fault fsync-error-permille=5@a,driver ...    # one key, a and the driver
 ```
 
 ```toml
-[node.b.faults]
-fsync-error-permille = 5
+[faults]
+faults = ["disk@b"]
+fsync-error-permille = "5@b"
 ```
 
 Each node draws a range from a seed of its own and counts its own calls (`fs-error-at`,
-`fsync-error-at`, `enospc-after-bytes`) over all its boots; `result.json` shows each node's settings as
-`KEY@NODE`. The other keys are
-the run's and take no scope. A node with `faults = false` in its table gets none of its own:
-like the driver, it is left out of `--faults`, `--fault` and `--crash` given without a scope,
+`fsync-error-at`) over all its boots; `result.json` shows each node's settings as
+`KEY@NODE`. The other keys are the run's and take no scope. A node with `faults = false` in its table gets none of its own:
+like the driver, it is left out of `--faults` and `--fault` given without a scope,
 and a scope may not name it; the links to it and the partitions, which are the run's, still
 act on it. With machine crashes beside fsync
 errors, `acklog`'s `retry` mode (retry a failed `fsync`, then acknowledge) loses an
@@ -1910,27 +2004,17 @@ keeps every put. With `realtime`, a replica of `lease.py` that measures its leas
 `time.time()` answers stale reads after the driver steps its clock back while a partition
 cuts it off from the store; on its monotonic clock it does not (`tests/nodes/17-lease.sh`).
 
-### The cluster preset
+### Every fault on nodes
 
-`--faults cluster` (only in a run with nodes) is the faults a cluster meets:
-
-| | Settings |
-|---|---|
-| link faults | `net`'s keys (on the links `net-links` names) |
-| partitions | `partition-gap-ms=5000..60000 partition-ms=500..20000` (two nodes or more) |
-| pauses | `pause-gap-ms=10000..120000 pause-ms=100..15000`, each node its own |
-| clock skew | `clock-skew-ms=0..2000`, each node its own |
-| machine crashes | `--crash machine` at `crash-gap-ms=30000..300000`, every node; a `--crash` given replaces it |
-
-`--faults all` in a run with nodes is the disk, memory and network faults, partitions (two
-nodes or more), pauses and clock skew: `cluster` without the machine crashes, which a run
-asks for with `--crash`, as on one machine. A class the preset turned on that had nothing to
+`--faults all` in a run with nodes is the disk, memory and network faults, every fault point,
+partitions (two nodes or more), pauses and clock skew; `--faults all,crash` adds machine
+crashes at drawn times (`crash-gap-ms`, default 5 to 60 s per node; `--fault
+crash-gap-ms=30000..300000` for rarer ones). A fault a class turned on that had nothing to
 act on (no pause drawn in a short run, no realtime read on a skewed node) is `not
 applicable`. `patina report` adds a line for the nodes' pauses and one for their clocks.
 
-**Not available yet** (refused, naming what is missing): the SDK's fault keys
-(`buggify-permille`, `buggify:LABEL`) with nodes, which would need each node's own SDK settings
-in the runtime, `patina __native` twins and `--check` reference runs of a run with nodes.
+**Not available yet** (refused, naming what is missing): `patina __native` twins and
+`--check` reference runs of a run with nodes.
 
 ## The SDK
 
@@ -1944,9 +2028,9 @@ production builds without flags.
 | `always(cond, label)` | must hold; a false one ends the run `violation` |
 | `unreachable(label)` | must not be reached; reaching it ends the run `violation` |
 | `sometimes(cond, label)`, `reachable(label)` | should hold or be reached in some run of a sweep |
-| `buggify(label)` | a fault point: true on seed-chosen evaluations under `--buggify` |
-| `knob(label, default, lo, hi)` | a seed-chosen value under `--buggify` |
-| `mark(label)` | a named point in the run's log, label in clear (up to 255 bytes, so it can carry data: `mark("ack 17")`); `setup_complete()` is `mark("setup-complete")` |
+| `buggify(label)` | a fault point: true on seed-chosen evaluations under `--faults buggify` |
+| `knob(label, default, lo, hi)` | a seed-chosen value under `--faults buggify` |
+| `mark(label)` | a named point in the run's log, label in clear (up to 255 bytes, so it can carry data: `mark("ack 17")`); `setup_complete()` is `mark("setup-complete")`, `faults_done()` is `mark("faults-done")` ([Setup and faults-done](#setup-and-faults-done)) |
 | `control(words)` | a control call (C: `patina_control`), such as `net cut a b` in a run with nodes ([Several machines](#several-machines)); raises (returns) the errno Patina answered |
 
 A mark records what the program promised, where it promised it; a checker decides whether
@@ -1957,12 +2041,14 @@ few lines of `jq` that find the bug in every run, crash or not
 program](#checks-from-outside-the-program)). Every SDK call's label is in the log in clear, so
 a run that makes SDK calls changes its digest when a label changes.
 
-Under `--buggify` each point is active in about a quarter of runs and fires on about a
-quarter of its evaluations; `--fault buggify:LABEL=PERMILLE` fixes one point's rate. A sweep in
-which a `sometimes` never held, a `reachable` was never hit, or (under `--buggify`) a
+Under `--faults buggify` each point is active in about a quarter of runs and fires on about a
+quarter of its evaluations; `--fault buggify:LABEL=PERMILLE` fixes one point's rate (without
+the class, only the points so named fire). With nodes each node draws its own points from its
+own seed (`--faults buggify@a`, `--fault buggify:LABEL=P@a`). A sweep in
+which a `sometimes` never held, a `reachable` was never hit, or (under `--faults buggify`) a
 `buggify` point never fired is `vacuous` unless the label is allowed with `--allow-unmet
 LABEL` (or `[sweep] allow-unmet` in `patina.toml`). A `buggify` point that no run evaluated
-counts from 20 runs under `--buggify`, and one evaluated but never fired only when, at its
+counts from 20 runs under `--faults buggify`, and one evaluated but never fired only when, at its
 rates and evaluation counts, missing every time had a chance under 1 in 1,000; a smaller miss is
 noted on one line (`sdk.buggify_unfired_noted` in `report.json`) and does not fail the sweep. A `*` in it matches any text: a library's
 labels share a prefix, so `--allow-unmet 'fjall-*'` allows the sites a program does not reach
@@ -2400,7 +2486,7 @@ exit: 1
 exact-only: one seed's run
 -->
 ```text
-$ patina verify --seed 3 --runs 3 --crash machine -- ./acklog
+$ patina verify --seed 3 --runs 3 --faults crash -- ./acklog
 run 0: cpu 8 aslr off load on env base violation 0c145dab17715f9e switches 0
 run 1: cpu 16 aslr on load on env base violation 0c145dab17715f9e switches 0
 run 2: cpu 0 aslr off load on env base violation 0c145dab17715f9e switches 0

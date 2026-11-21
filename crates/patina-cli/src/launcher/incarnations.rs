@@ -241,8 +241,9 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         tmpfs_full += end.tmpfs_full;
         shadow_bytes = shadow_bytes.max(end.shadow_bytes);
         sdk.add(end.sdk);
-        // A `setup-complete` mark holds for the incarnations after it.
+        // The lifecycle marks hold for the incarnations after them.
         cfg.fault_after_seq = end.fault_after_seq;
+        cfg.fault_until_seq = end.fault_until_seq;
         for (a, b) in sched.iter_mut().zip(end.sched) {
             *a += b;
         }
@@ -291,7 +292,19 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 missing: crate::launch::not_in_sandbox(o, &missing),
                 wall_ms: t0.elapsed().as_millis() as u64,
                 crashes,
-                faults: faults.json(&o.plan, &net),
+                faults: {
+                    let mut f = faults.json(&o.plan, &net);
+                    // Where faults could act: from setup-complete (0: the start; none: the
+                    // mark never came) to faults-done (none: to the end).
+                    if crate::faults::injects(&o.plan) {
+                        let seq = |s: u64| (s != u64::MAX).then_some(s);
+                        f["window"] = serde_json::json!({
+                            "from_seq": seq(cfg.fault_after_seq),
+                            "to_seq": (cfg.fault_until_seq != 0).then_some(cfg.fault_until_seq),
+                        });
+                    }
+                    f
+                },
                 io,
                 insn,
                 net,

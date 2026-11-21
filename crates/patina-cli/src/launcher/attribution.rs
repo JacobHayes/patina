@@ -39,7 +39,6 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_ERROR => "fs-error",
         INJ_SHORT => "fs-short",
         INJ_DELAY => "fs-delay",
-        INJ_ENOSPC => "enospc",
         INJ_FSYNC_EIO => "fsync-error",
         INJ_MEM_LIMIT => "mem-limit",
         INJ_PATH_SWAP => "path-swap",
@@ -77,7 +76,6 @@ fn errno_name(e: u64) -> String {
 pub const CLASSES: &[&str] = &[
     "clock",
     "crash",
-    "enospc",
     "fs-delay",
     "fs-error",
     "fs-short",
@@ -91,7 +89,6 @@ pub const CLASSES: &[&str] = &[
     "net-delay",
     "net-drop",
     "net-dup",
-    "net-halfclose",
     "net-reorder",
     "net-reset",
     "partition",
@@ -106,10 +103,9 @@ pub fn class_of_key(k: &str) -> Option<&'static str> {
         "fs-short-permille" => "fs-short",
         "fs-delay-permille" => "fs-delay",
         "fsync-error-permille" | "fsync-error-at" => "fsync-error",
-        "enospc-after-bytes" => "enospc",
         "mem-error-permille" | "mem-error-at" => "mem-error",
         "mem-limit-mb" => "mem-limit",
-        "path-swap-permille" | "path-swap-at" => "path-swap",
+        "path-swap-permille" => "path-swap",
         "net-delay-ms" => "net-delay",
         "net-chunk-max" => "net-chunk",
         "net-reset-permille" => "net-reset",
@@ -117,11 +113,10 @@ pub fn class_of_key(k: &str) -> Option<&'static str> {
         "net-connect-timeout-permille" => "net-connect-timeout",
         "net-blackout" => "net-blackout",
         "partition-gap-ms" => "partition",
-        "net-halfclose-delay-ms" => "net-halfclose",
         "net-drop-permille" => "net-drop",
         "net-dup-permille" => "net-dup",
         "net-reorder-permille" => "net-reorder",
-        "crash" => "crash",
+        "crash" | "crash-permille" | "crash-at" => "crash",
         "pause-gap-ms" => "pause",
         "clock-skew-ms" => "clock",
         _ => return None,
@@ -279,7 +274,7 @@ impl Faults {
                 continue;
             }
             let kind = KIND_NAMES.iter().position(|n| *n == c);
-            let (connections, chunks, fins, sends, datagrams) = match self.link_elig {
+            let (connections, chunks, _fins, sends, datagrams) = match self.link_elig {
                 Some(e) => (e[0], e[1], e[2], e[3], e[4]),
                 None => (net[0], net[2], net[11], net[12], net[13]),
             };
@@ -291,7 +286,6 @@ impl Faults {
                 ),
                 // One delay per TCP delivery and per datagram sent.
                 "net-delay" => (chunks + datagrams, chunks + datagrams),
-                "net-halfclose" => (fins, fins),
                 // Drawn for every read of data a guest sent, not once per connection.
                 "net-reset" => (sends, got(c)),
                 "net-chunk" => (chunks, got(c)),
@@ -413,8 +407,6 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
         INJ_FSYNC_EIO => e["errno"] = json!("EIO"),
         INJ_SHORT => e["count"] = json!(value),
         INJ_DELAY => e["delay_ns"] = json!(value),
-        INJ_ENOSPC if value == 0 => e["errno"] = json!("ENOSPC"),
-        INJ_ENOSPC => e["count"] = json!(value),
         INJ_MEM_LIMIT => {
             e["errno"] = json!("ENOMEM");
             e["bytes"] = json!(value);

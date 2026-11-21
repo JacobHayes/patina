@@ -1,6 +1,6 @@
-# 17. `--crash machine-at:N` crashes at the N-th crash point. A base run (`--crash machine:0`)
+# 17. `--fault crash-at=N` crashes at the N-th crash point. A base run (`--fault crash-permille=0`)
 # of the window guest counts its points; one child per point 1..count+1, all compared with a
-# run without `--crash`:
+# run without a crash:
 # - each child reports `crashes[0].point` N; two points of one call (an fsync's, before and
 #   after it) are both reached, and the later one's operation log is longer;
 # - a child's boundary log equals the run without `--crash` up to its CrashPoint record, and
@@ -16,12 +16,12 @@
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/17
 run "$d/ref" 1 -- /guest/window
-run "$d/base" 1 --crash machine:0 -- /guest/window
+run "$d/base" 1 --fault crash-permille=0 -- /guest/window
 n=$(field "$d/base/result.json" faults.counts.crash.eligible)
 [ "$n" -gt 2 ] || die "the base has $n crash points"
 export PATINA PATINA_GUESTS d
 seq 1 $((n + 1)) | xargs -P 4 -I{} bash -euo pipefail -O inherit_errexit -c '
-    st=0; timeout 60 "$PATINA" run --seed 1 --crash machine-at:$1 --out "$d/c-$1" --mount "$PATINA_GUESTS":/guest:copy -- /guest/window >/dev/null 2>&1 || st=$?
+    st=0; timeout 60 "$PATINA" run --seed 1 --fault crash-at=$1 --out "$d/c-$1" --mount "$PATINA_GUESTS":/guest:copy -- /guest/window >/dev/null 2>&1 || st=$?
     [ -f "$d/c-$1/result.json" ] || echo "child $1: no result.json (exit $st)"' sh {} >"$d/children.txt"
 [ ! -s "$d/children.txt" ] || die "a child did not run: $(head -3 "$d/children.txt")"
 mid=$((n / 2)) late=$((n * 3 / 4))
@@ -34,11 +34,11 @@ first() {
 cp_at() { "$PATINA" log dump "$1/inc-0/boundary.log" | awk '/ CrashPoint / && !n {n = NR} END {print n}'; }
 for c in "$mid" "$late"; do
     i=$(($(cp_at "$d/c-$c") - 1))
-    [ "$(first "$d/ref" "$d/c-$c")" = "$i" ] || die "child $c: first differs from the run without --crash at record $(first "$d/ref" "$d/c-$c"), its CrashPoint is record $i"
+    [ "$(first "$d/ref" "$d/c-$c")" = "$i" ] || die "child $c: first differs from the run without a crash at record $(first "$d/ref" "$d/c-$c"), its CrashPoint is record $i"
 done
 i=$(($(cp_at "$d/c-$mid") - 1))
 [ "$(first "$d/c-$mid" "$d/c-$late")" = "$i" ] || die "children $mid and $late first differ at record $(first "$d/c-$mid" "$d/c-$late"), not at $mid's CrashPoint ($i)"
-echo "children $mid and $late equal the run without --crash up to their CrashPoint records, and each other up to $mid's"
+echo "children $mid and $late equal the run without a crash up to their CrashPoint records, and each other up to $mid's"
 python3 -I - "$d" "$n" "$LIB" <<'PY' || exit 1
 import json, os, sys
 d, n = sys.argv[1], int(sys.argv[2])
@@ -84,13 +84,13 @@ if not multi:
 past = res("c-%d" % (n + 1))
 for name, r in (("the base", base), ("the child past the last point", past)):
     if r["crashes"] or r["faults"]["counts"]["crash"]["injected"] != 0 or r["digest"] != ref["digest"]:
-        sys.exit("FAIL: %s: %s, digest %s (without --crash %s)" % (name, r["crashes"], r["digest"], ref["digest"]))
+        sys.exit("FAIL: %s: %s, digest %s (without a crash %s)" % (name, r["crashes"], r["digest"], ref["digest"]))
 # The window's points, for the seed search below.
 pts = faults.points(ops)
 inw = [p for p, o in zip(pts, ops) if p and win[0] <= o["seq"] <= win[1]]
 open(os.path.join(d, "window"), "w").write(" ".join(map(str, range(min(inw), max(inw) + 1))))
 open(os.path.join(d, "found"), "w").write("1" if viol else "")
-print("%d points: each child crashed at its own; %d calls hold two points; violation at points %s, seqs %s, window %s; the base and point %d end as the run without --crash (%s)" % (
+print("%d points: each child crashed at its own; %d calls hold two points; violation at points %s, seqs %s, window %s; the base and point %d end as the run without a crash (%s)" % (
     n, multi, viol, [seqs[p] for p in viol], win, n + 1, ref["digest"]))
 PY
 # What survives a crash is the seed's draw: search later seeds at the window's points.
@@ -99,7 +99,7 @@ while [ ! -s "$d/found" ]; do
     s=$((s + 1))
     [ "$s" -le 20 ] || die "no child of seeds 1-20 ends violation acked-records-stored (window points $(cat "$d/window"))"
     for p in $(cat "$d/window"); do
-        run "$d/s$s-$p" "$s" --crash machine-at:$p -- /guest/window
+        run "$d/s$s-$p" "$s" --fault crash-at=$p -- /guest/window
         if [ "$(class "$d/s$s-$p")" = violation ]; then
             field "$d/s$s-$p/result.json" message | grep -q acked-records-stored || die "seed $s point $p: $(field "$d/s$s-$p/result.json" message)"
             echo "seed $s point $p: $(field "$d/s$s-$p/result.json" message)"; echo 1 >"$d/found"; break

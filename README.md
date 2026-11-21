@@ -183,7 +183,7 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 | `timeout` | 2 | the wall-time limit passed |
 | `nondeterministic` | 2 | a replay differed from its run: a Patina bug, please report it |
 | `internal` | 2 | Patina failed, or the host refused a resource |
-| `vacuous` | 2 | a sweep's fault (one you named; a preset's is listed as not applicable), SDK check or `--check` never had anything to act on, or a finding a known file requires (`!ID`) did not appear |
+| `vacuous` | 2 | a sweep's fault (one you named; a class's is listed as not applicable), SDK check or `--check` never had anything to act on, or a finding a known file requires (`!ID`) did not appear |
 | `error` | 2 | the command could not be carried out: the program cannot run, as `execve` would refuse it (stop `exec`: not executable, a `#!` interpreter missing, not an image of this architecture), or the `--check` command failed (stop `check`) or answered otherwise on replay (`check-unstable`) |
 
 ## Where next

@@ -13,7 +13,7 @@
 H=/guest/fjall-harness-debug
 FJ="--mount $W/fjall-harness:/guest:copy"
 AK="--mount $PATINA_GUESTS/examples:/guest:copy"
-F3="--env FJ_N=1000 --buggify --env FJ_LOG=1 --env FJ_WIPE_PARTIAL=1 --config $("$PATINA_CFG" time-limit=400) --fault fs-error-permille=3"
+F3="--env FJ_N=1000 --faults buggify --env FJ_LOG=1 --env FJ_WIPE_PARTIAL=1 --config $("$PATINA_CFG" time-limit=400) --fault fs-error-permille=3"
 # sw NAME ARGS...: one sweep into $RUNS/NAME (its text in NAME.txt).
 sw() {
     n=$1; shift
@@ -46,39 +46,39 @@ PY
 }
 
 echo "== E1: F2 and F6 under --crash-points"
-sw f2 --seeds 1..3 --crash-points --crash machine --buggify --env FJ_N=2000 --budget 200 $FJ -- $H
+sw f2 --seeds 1..3 --crash-points --faults crash --faults buggify --env FJ_N=2000 --budget 200 $FJ -- $H
 stats f2 'journal/entry.rs'
 stats f2 'batch-atomic-across-keyspaces'
 stats f2 'open-after-crash'
-sw f6 --seeds 1..3 --crash-points --crash machine --buggify --env FJ_N=2000 --fault buggify:manual-flush=1000 --budget 200 $FJ -- $H
+sw f6 --seeds 1..3 --crash-points --faults crash --faults buggify --env FJ_N=2000 --fault buggify:manual-flush=1000 --budget 200 $FJ -- $H
 stats f6 'batch-atomic-across-keyspaces'
 stats f6 'journal/entry.rs'
 
 echo "== E2: plain sweeps (the acceptance commands)"
-sw f1p --seeds 1..300 --crash machine:3 $FJ -- $H
+sw f1p --seeds 1..300 --fault crash-permille=3 $FJ -- $H
 stats f1p 'open-after-crash'
-sw f3p --seeds 1..600 $F3 --crash machine:2 $FJ -- $H
+sw f3p --seeds 1..600 $F3 --fault crash-permille=2 $FJ -- $H
 stats f3p 'liveness|parked'
-sw f4p --seeds 1..1000 --fault fsync-error-at=1..100 --crash machine $FJ -- $H
+sw f4p --seeds 1..1000 --fault fsync-error-at=1..100 --faults crash $FJ -- $H
 stats f4p 'batch-atomic-across-keyspaces'
 sw f5p --seeds 1..100 --fault fs-short-permille=20 $FJ -- $H
 stats f5p 'iterate-failed|reopen-failed'
-sw akp --seeds 1..20 --crash machine $AK -- /guest/acklog
+sw akp --seeds 1..20 --faults crash $AK -- /guest/acklog
 stats akp 'acked-records-kept'
 
 echo "== E2: the same findings under --crash-points"
-sw f1b --seeds 1..3 --crash-points --crash machine --max-findings 1 $FJ -- $H
+sw f1b --seeds 1..3 --crash-points --faults crash --max-findings 1 $FJ -- $H
 stats f1b 'open-after-crash'
-sw akb --seeds 1 --crash-points --crash machine $AK -- /guest/acklog
+sw akb --seeds 1 --crash-points --faults crash $AK -- /guest/acklog
 stats akb 'acked-records-kept'
-sw f3b --seeds 1..3 --crash-points --crash machine $F3 --budget 120 $FJ -- $H
+sw f3b --seeds 1..3 --crash-points --faults crash $F3 --budget 120 $FJ -- $H
 stats f3b 'liveness|parked'
-sw f4b --seeds 1..10 --crash-points --crash machine --fault fsync-error-at=1..100 --budget 120 $FJ -- $H
+sw f4b --seeds 1..10 --crash-points --faults crash --fault fsync-error-at=1..100 --budget 120 $FJ -- $H
 stats f4b 'batch-atomic-across-keyspaces'
 
 echo "== E4: cost of the F2 branch sweep"
 for s in 1 2 3; do
-    "$PATINA" run --seed $s --crash machine:0 --buggify --env FJ_N=2000 --out "$RUNS/base-$s" $FJ -- $H >/dev/null 2>&1 || true
+    "$PATINA" run --seed $s --fault crash-permille=0 --faults buggify --env FJ_N=2000 --out "$RUNS/base-$s" $FJ -- $H >/dev/null 2>&1 || true
     "$PATINA" log dump "$RUNS/base-$s/inc-0/boundary.log" | tail -1 | sed -n 's/^seq=\([0-9]*\) .*/\1/p' >"$RUNS/base-$s.last"
 done
 python3 -I - "$RUNS" <<'PY'

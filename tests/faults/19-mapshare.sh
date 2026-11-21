@@ -4,7 +4,7 @@
 # a store then another process's pwrite or writev on the page, and a pwrite then a store of
 # the old byte; a truncation and extension by one process under another's mapping; more files
 # mapped one after another than Patina keeps shadows of at once): each mode with no crash
-# plane, --crash machine and (in the area tier) --crash process ends ok, its self-check
+# plane, --faults crash and (in the area tier) --faults kill ends ok, its self-check
 # passes, `patina log ops --check` passes, and what the file holds (read(2)) at the end of the last incarnation is
 # what a native run prints. Then a pwrite on a page another process stored to through its
 # mapping: the page is logged whole before the write. More files mapped at once than Patina
@@ -21,7 +21,7 @@ for m in back back-kill alternate store-write store-writev write-store trunc fil
     for plane in $planes; do
         o=$d/$m-$plane
         c=()
-        [ $plane = none ] || c=(--crash "$plane")
+        [ $plane = none ] || c=(--faults "$([ $plane = process ] && echo kill || echo crash)")
         run "$o" 1 "${c[@]}" -- /guest/mapshare "$m"
         got=$(class "$o")
         [ "$got" = ok ] || die "$m, crash plane $plane: $got $(field "$o/result.json" message)"
@@ -50,9 +50,9 @@ run "$d/held" 1 -- /guest/mapshare held
 [ "$(field "$d/held/result.json" outcome) $(field "$d/held/result.json" stop)" = "unsupported capacity" ] ||
     die "held: $(field "$d/held/result.json" outcome) $(field "$d/held/result.json" stop), want unsupported capacity"
 echo "held: unsupported (capacity)"
-run "$d/again" 1 --crash machine -- /guest/mapshare back-kill
+run "$d/again" 1 --faults crash -- /guest/mapshare back-kill
 a=$(field "$d/again/result.json" digest)
 b=$(field "$d/back-kill-machine/result.json" digest)
-[ -n "$a" ] && [ "$a" = "$b" ] || die "back-kill under --crash machine: a repeat of the seed differs"
-verify "$d/verify" 1 2 "" --crash process -- /guest/mapshare alternate
+[ -n "$a" ] && [ "$a" = "$b" ] || die "back-kill under --faults crash: a repeat of the seed differs"
+verify "$d/verify" 1 2 "" --faults kill -- /guest/mapshare alternate
 echo "same seed identical; verify identical"

@@ -1,5 +1,5 @@
 # 16. Attribution counts and the operation log's self-check. A configured class with nothing
-# to act on shows eligible 0 (the net preset on a guest without sockets), while the disk
+# to act on shows eligible 0 (the net class on a guest without sockets), while the disk
 # classes on the same guest count eligible calls and every injected fault. With crashes on,
 # a run whose operation log was corrupted (test hook PATINA_TEST_OPLOG_CORRUPT) reports the
 # failed self-check next to its own outcome, which stands (ok, or a violation with its label
@@ -19,8 +19,8 @@ if not net or any(v["eligible"] != 0 or v["injected"] != 0 for v in net.values()
 fs = c.get("fs-error")
 if not fs or fs["eligible"] == 0 or fs["injected"] == 0 or fs["injected"] > fs["eligible"]:
     sys.exit("FAIL: fs-error counts %s" % fs)
-# every class but the per-delivery spreads (net-delay, net-halfclose) counts injected records
-total = sum(v["injected"] for k, v in c.items() if k not in ("net-delay", "net-halfclose"))
+# every class but the per-delivery spreads (net-delay) counts injected records
+total = sum(v["injected"] for k, v in c.items() if k not in ("net-delay",))
 if total != f["injected"]:
     sys.exit("FAIL: counts sum to %d, injected %d" % (total, f["injected"]))
 if any(not e.get("object") for e in f["recent"]):
@@ -33,7 +33,7 @@ for g in "ack-log correct" "mapends violation"; do
     read -r -a argv <<<"$g"
     st=0
     # reproducer: any seed; the corruption is planted and mapends's violation fails on every seed
-    PATINA_TEST_OPLOG_CORRUPT=1 "$PATINA" run --seed 1 --out "$o" --mount "$PATINA_GUESTS":/guest:copy --crash machine:0 -- "/guest/${argv[0]}" "${argv[@]:1}" >/dev/null 2>&1 || st=$?
+    PATINA_TEST_OPLOG_CORRUPT=1 "$PATINA" run --seed 1 --out "$o" --mount "$PATINA_GUESTS":/guest:copy --fault crash-permille=0 -- "/guest/${argv[0]}" "${argv[@]:1}" >/dev/null 2>&1 || st=$?
     python3 -I - "$o/result.json" "$st" "$g" <<'PY' || exit 1
 import json, sys
 r, st, g = json.load(open(sys.argv[1])), int(sys.argv[2]), sys.argv[3]
@@ -46,5 +46,5 @@ if want == "violation" and "mapends-planted" not in r["signature"]:
 print("corrupted operation log, %s: %s (%s), self-check %s: %s" % (g, r["outcome"], r["signature"] or "-", sc["verdict"], sc["detail"][:60]))
 PY
 done
-run "$d/clean" 1 --crash machine:0 -- /guest/ack-log correct
+run "$d/clean" 1 --fault crash-permille=0 -- /guest/ack-log correct
 [ "$(class "$d/clean")" = ok ] || die "self-check on a clean run: $(class "$d/clean") $(field "$d/clean/result.json" message)"

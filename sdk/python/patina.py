@@ -20,7 +20,7 @@ Sites are declared once, at module level, so a run knows every site before it is
 Under Patina an ``Always`` that sees false ends the run with outcome ``violation`` and the
 message ``label: detail``. A passing check reports only the first time it is evaluated in a
 process (a ``Sometimes`` also the first time it holds). A fault point fires only with
-``patina run --buggify``, on evaluations chosen by the seed and its label alone.
+``patina run --faults buggify``, on evaluations chosen by the seed and its label alone.
 
 Compute points (Python 3.12 or later): ``python3 -m patina SCRIPT ARGS...`` (or ``-m MODULE``)
 runs the program with a scheduling point and virtual time at every line and every pass of a
@@ -38,7 +38,7 @@ import sys
 
 __all__ = [
     "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "BuggifyDelay", "Knob",
-    "mark", "setup_complete", "is_simulated", "compute", "control",
+    "mark", "setup_complete", "faults_done", "is_simulated", "compute", "control",
 ]
 
 _SYSCALL = 0x7061
@@ -204,7 +204,7 @@ class Buggify(_Site):
     _kind = _POINT
 
     def fires(self):
-        """Whether the point fires now: never outside Patina or without --buggify."""
+        """Whether the point fires now: never outside Patina or without the buggify class."""
         return self._point(_BUGGIFY, -1)
 
 
@@ -220,7 +220,7 @@ class BuggifyDelay(_Site):
 
 
 class Knob(_Site):
-    """A tunable: ``default``, or under ``--buggify`` a seed-chosen value in [low, high]."""
+    """A tunable: ``default``, or under ``--faults buggify`` a seed-chosen value in [low, high]."""
 
     _kind = _KNOBK
 
@@ -257,8 +257,13 @@ def control(words):
 
 
 def setup_complete():
-    """The end of setup: with faults-after-setup, no fault fires before it."""
+    """The end of setup: no fault acts before it."""
     mark("setup-complete")
+
+
+def faults_done():
+    """The end of the faults: none acts after it (call it before the final checks)."""
+    mark("faults-done")
 
 
 # Compute points (ARCHITECTURE.md, "Compute points"): `python3 -m patina SCRIPT ARGS...` runs
@@ -293,8 +298,6 @@ def compute():
         return False
     cell = memoryview((ctypes.c_ubyte * 8).from_address(addr)).cast("B").cast("q")
     _compute_on = True
-    if cell[0] == (1 << 63) - 1:
-        return True  # nothing arms a cell with no limit now; kept: removing it moves every run's schedule
     tool = next((i for i in (4, 3) if mon.get_tool(i) is None), None)
     if tool is None:
         raise RuntimeError("patina: compute points need a free sys.monitoring tool id (3 or 4)")

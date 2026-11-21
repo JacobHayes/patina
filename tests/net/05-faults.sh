@@ -28,8 +28,6 @@ pair timeout net-connect-timeout-permille=1000 connect timeout
 grep -h 'connect ->' "$o/timeout-on/inc-0/stdout"
 pair blackout net-blackout=5000+10000 partition partitioned
 grep -h 'application timeout\|tick 05' "$o/blackout-on/inc-0/stdout"
-pair halfclose net-halfclose-delay-ms=2000..2000 halfclose-delay 2000
-grep -h 'EOF reached' "$o/halfclose-on/inc-0/stdout"
 # net-reset's attribution counts what it is drawn on (each read of sent data), so over a seed
 # range injected / eligible is near the rate (500 permille), not one reset per connection.
 for s in $(seq 1 20); do run "$o/rate-$s" "$s" --fault net-reset-permille=500 -- /guest/sockets all >/dev/null; done

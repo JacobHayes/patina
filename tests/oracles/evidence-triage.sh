@@ -8,7 +8,7 @@
 #   same sweep run afresh (wall time, groups); the disk --keep fail takes with and without a
 #   checker, and --keep all.
 # - The reference guard: the reference made with another work tree; then --relax work.
-# - The fjall harness under --buggify (seed 1, seeds 1-4): exit status and the sdk lines, by
+# - The fjall harness under --faults buggify (seed 1, seeds 1-4): exit status and the sdk lines, by
 #   this build and, when OLD_PATINA names one, by an earlier build.
 #@ tier=evidence budget=600 slots=8
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_WORKLOADS:?}"
@@ -115,14 +115,14 @@ echo "  $(jq -r '[.groups[] | select(.outcome == "error")][0].example' guard/rep
 set -- $(sweep relax --seeds 1 --work t1 --check "$root/examples/checks/same-output --relax work ref-t2" -- /bin/sh /c/calc {})
 echo "--relax work: exit $1: $(grep '^check: judged' relax.txt)"
 
-# The fjall harness under --buggify: the unmet-sites rule.
+# The fjall harness under --faults buggify: the unmet-sites rule.
 for b in new old; do
     if [ $b = old ]; then P=${OLD_PATINA:-}; else P=$PATINA; fi
     [ -n "$P" ] || continue
     for s in 1 1..4; do
         rc=0
-        PATINA_TEST_KEEP_NONE=1 "$P" sweep -j 8 --seeds $s --buggify --out "fj-$b-$s" --mount "$PATINA_WORKLOADS/fjall-harness:/guest:copy" -- /guest/fjall-harness-release >"fj-$b-$s.txt" 2>&1 || rc=$?
-        echo "fjall --buggify --seeds $s, $b build: exit $rc"
+        PATINA_TEST_KEEP_NONE=1 "$P" sweep -j 8 --seeds $s --faults buggify --out "fj-$b-$s" --mount "$PATINA_WORKLOADS/fjall-harness:/guest:copy" -- /guest/fjall-harness-release >"fj-$b-$s.txt" 2>&1 || rc=$?
+        echo "fjall --faults buggify --seeds $s, $b build: exit $rc"
         awk '/^sdk/ { print "  " $0 }' "fj-$b-$s.txt"
     done
 done

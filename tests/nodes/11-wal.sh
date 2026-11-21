@@ -9,7 +9,7 @@
 #@ tier=area,release budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/11-wal; mkdir -p "$o"
-W_FAULTS="--crash machine --fault crash-gap-ms=300..1500 --fault down-ms=100..300 --fault max-incarnations=12"
+W_FAULTS="--faults crash --fault crash-gap-ms=300..1500 --fault down-ms=100..300 --fault max-incarnations=12"
 # The correct version: seeds 1-8, every run kept.
 rm -f "$o/ok.toml"; conf "$o/ok.toml" a python3 /guest/wal.py a
 rm -rf "${o:?}/ok"

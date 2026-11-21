@@ -8,8 +8,8 @@
 # (nodes/14-points-sweep).
 q3_traps() { printf '[sched]\npreempt = "traps"\n' >>"$1"; }
 
-# The three-node store (tests/guests/nodes/q3.py) under the seed's partitions and the net preset.
-Q3_FAULTS="--faults net --fault partition-gap-ms=1000..6000 --fault partition-ms=1000..6000"
+# The three-node store (tests/guests/nodes/q3.py) under the seed's partitions and the net class.
+Q3_FAULTS="--faults net,partition --fault partition-gap-ms=1000..6000 --fault partition-ms=1000..6000"
 Q3_SECONDS=60
 # q3_sweep DIR VARIANT KEEP: seeds 1-8 of VARIANT (ok) in DIR/VARIANT, the driver running
 # Q3_SECONDS of virtual time; prints the report's outcomes.

@@ -1,4 +1,4 @@
-//! Path swaps (`path-swap-permille`, `path-swap-at`; `proto::swap`): before a call uses a
+//! Path swaps (`path-swap-permille`; `proto::swap`): before a call uses a
 //! path that the same process named in one of its last `WINDOW` checks, the runtime may
 //! change one component of the checked path in the work tree, as another process with the
 //! same uid could between the two calls: it becomes a symlink, another entry of its directory
@@ -180,8 +180,7 @@ pub fn before(call: &dyn Call) -> Option<Swap> {
     out
 }
 
-/// An eligible use of `checked` (a path below `root`): count it, and swap when the draw (or
-/// `path-swap-at`) says so.
+/// An eligible use of `checked` (a path below `root`): count it, and swap when the draw says so.
 fn decide(nr: u64, a0: u64, checked: &[u8], root: &[u8], chk: Seen) -> Option<Swap> {
     if !crate::inject::active() {
         return None;
@@ -189,8 +188,7 @@ fn decide(nr: u64, a0: u64, checked: &[u8], root: &[u8], chk: Seen) -> Option<Sw
     let f = crate::state::faults();
     let cfg = &f.cfg;
     f.eligible(Kind::PathSwap);
-    let at = f.eligible[Kind::PathSwap as usize].load(Relaxed);
-    if !(cfg.path_swap_at == at || crate::inject::permille(cfg.path_swap_permille, SUB_SWAP_FIRE)) {
+    if !crate::inject::permille(cfg.path_swap_permille, SUB_SWAP_FIRE) {
         return None;
     }
     // The component: uniform over those below the root.

@@ -8,10 +8,10 @@
  *   PATINA_SOMETIMES(cond, "label")        should hold on some runs
  *   PATINA_REACHABLE("label")              should be reached on some runs
  *   PATINA_UNREACHABLE("label", detail)    must not be reached: reaching it is a violation
- *   PATINA_BUGGIFY("label")                fault point: 1 on seed-chosen evaluations (--buggify)
- *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--buggify)
+ *   PATINA_BUGGIFY("label")                fault point: 1 on seed-chosen evaluations (--faults buggify)
+ *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--faults buggify)
  *   PATINA_DELAY("label", max_ns)          maybe sleep a seeded virtual time (0: default range)
- *   patina_mark(label), patina_setup_complete(), patina_is_simulated()
+ *   patina_mark(label), patina_setup_complete(), patina_faults_done(), patina_is_simulated()
  *   patina_control("net cut a b")          a control call: 0, or -errno (below)
  *
  * Labels of the macros are string literals: each expansion declares its site in the ELF section
@@ -165,12 +165,14 @@ static inline int64_t patina__knob(const char *label, int64_t def, int64_t lo, i
     return patina__call(PATINA_OP_KNOB, PATINA_KIND_KNOB, 0, label, 0, &v, lo, hi) == 0 ? v : def;
 }
 
-/* A named point in the run's log; "setup-complete" ends setup (faults-after-setup). */
+/* A named point in the run's log; "setup-complete" (no fault acts before it) and "faults-done"
+ * (none acts after it) bound the faults. */
 static inline void patina_mark(const char *label) {
     if (patina_is_simulated())
         patina__call(PATINA_OP_MARK, PATINA_KIND_REACHABLE, 0, label, 0, 0, 0, 0);
 }
 static inline void patina_setup_complete(void) { patina_mark("setup-complete"); }
+static inline void patina_faults_done(void) { patina_mark("faults-done"); }
 
 /* A control call (the words above). Unlike the macros it is a call each time. */
 static inline long patina_control(const char *words) {

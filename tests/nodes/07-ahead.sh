@@ -5,8 +5,8 @@
 # A partition's heal ahead: the request the cut held is delivered and answered. With
 # net-links=driver the seed's partition separates the driver from a node, and the driver's own
 # control calls (`patina ctl`, `patina.control`) still answer inside it. Only a partition's
-# start ahead, or a kill before faults may act (faults-after-setup, setup never marked): the run
-# is deadlocked.
+# start ahead, or a kill after the driver marked faults-done: the run is deadlocked. A
+# faults-done mark inside a partition heals it at once.
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-ahead; mkdir -p "$o"
@@ -19,7 +19,7 @@ deadlock() {
     [ "$r" = liveness/deadlock ] || die "$2: $r: $(field "$1/result.json" message)"
 }
 
-run_ok "$o/kill" 1 --config "$o/b.toml" --crash process --fault crash-gap-ms=2000..3000 -- python3 /guest/ahead.py driver kill
+run_ok "$o/kill" 1 --config "$o/b.toml" --faults kill --fault crash-gap-ms=2000..3000 -- python3 /guest/ahead.py driver kill
 [ "$(cat "$o/kill/inc-0/stdout")" = "kill: the connection ended" ] || die "kill: $(cat "$o/kill/inc-0/stdout")"
 d=$(field "$o/kill/result.json" nodes.list.1.downs.0)
 python3 -I -c 'import json,sys; d=json.loads(sys.argv[1]); sys.exit(not (d["how"] == "killed" and 1000 <= d["down_ms"] < 5000))' "$d" \
@@ -40,8 +40,12 @@ n=$("$PATINA" log events "$o/heal" --types sdk | grep -c '"op":"control"')
 [ "$n" = 3 ] || die "heal: $n control calls in the events"
 echo "a heal ahead: the held ping answered; the seed's partition $p; the driver's control calls answered inside it"
 
+run_ok "$o/done" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py driver done
+[ "$(cat "$o/done/inc-0/stdout")" = "done: pong" ] || die "done: $(cat "$o/done/inc-0/stdout")"
+echo "faults-done inside a partition: healed at once"
+
 run "$o/cut" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py driver kill >/dev/null
 deadlock "$o/cut" "only a partition's start ahead"
-run "$o/setup" 1 --config "$o/b.toml" --crash process --fault crash-gap-ms=2000..3000 --fault faults-after-setup=1 -- python3 /guest/ahead.py driver kill >/dev/null
-deadlock "$o/setup" "a kill before faults may act"
-echo "only a partition's start ahead, or a kill before faults may act: deadlock"
+run "$o/quiet" 1 --config "$o/b.toml" --faults kill --fault crash-gap-ms=2000..3000 -- python3 /guest/ahead.py driver quiet >/dev/null
+deadlock "$o/quiet" "a kill after faults-done"
+echo "only a partition's start ahead, or a kill after faults-done: deadlock"

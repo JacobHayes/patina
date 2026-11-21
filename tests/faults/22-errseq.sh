@@ -47,7 +47,7 @@ for model in $models; do
     for m in pg pg-retry; do
         o=$d/$m-$model
         st=0
-        PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds 1..1 --crash-points --crash machine --fault fsync-error-at=1 \
+        PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds 1..1 --crash-points --faults crash --fault fsync-error-at=1 \
             --config "$("$PATINA_CFG" fs-model=$model)" --out "$o" \
             --mount "$PATINA_GUESTS":/guest:copy -- /guest/errseq "$m" >"$o.txt" 2>&1 || st=$?
         [ -f "$o/report.json" ] || die "$m $model: no report (exit $st): $(tail -3 "$o.txt")"

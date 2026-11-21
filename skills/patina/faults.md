@@ -32,11 +32,11 @@ cleanly. One key alone: `--fault fs-short-permille=20`. `--fault path-swap-permi
 changes a path between a check and its use: only for a program that must withstand another
 writer in its directory.
 
-## Crashes: `--crash machine`, `--crash process`
+## Crashes: `--faults crash`, `--faults kill`
 
-`machine` crashes the whole program at a seed-chosen crash point (after each change to
+`crash` crashes the whole program at a seed-chosen crash point (after each change to
 `/work`, before each sync) and starts it again with the same arguments on what had reached the
-disk; `process` kills it but keeps what it wrote. The program must recover on start: read its
+disk; `kill` kills it but keeps what it wrote. The program must recover on start: read its
 state from `/work`, check it, carry on (`PATINA_INCARNATION=K` is set after the K-th restart).
 Up to 3 restarts per run. The oracle compares what the program promised before the crash with
 what it recovered: an `always` in recovery, or a check over `inc-K/stdout` and
@@ -51,7 +51,7 @@ setup: cp "$GUESTS/examples/acklog" .
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1..2 --crash-points=40 --crash machine -- ./acklog
+$ patina sweep --seeds 1..2 --crash-points=40 -- ./acklog
 sweep: 2 seeds, 328 crash points, a sample of 80 (--crash-points=N)
 ...
 crash points: 80 of 328 tried
@@ -60,7 +60,7 @@ crash points: 80 of 328 tried
 ```
 
 `--crash-points=N` samples N points per seed; the same command with a larger N runs only the new
-ones. `--crash machine-at:N` (or `A..B`) crashes at a chosen point; `patina explain` of a run
+ones. `--fault crash-at=N` (or `A..B`) crashes at a chosen point; `patina explain` of a run
 shows which operation each crash point followed.
 
 A promise about "the next start" also holds without a crash (a save that failed halfway, then a
@@ -73,7 +73,9 @@ Delays, chunked deliveries, resets, refused connects, and for UDP drops, duplica
 reordering, on loopback and between nodes. A reset is drawn on each piece of data sent, so a
 retrying client meets one; one key alone: `--fault net-reset-permille=50`.
 `--fault net-blackout=0..60000+1000..10000` holds traffic for a while, as across a cut cable.
-`--faults all` is disk and net together, with memory errors: only after each alone.
+Memory errors (`--faults mem`: `ENOMEM`, failed thread creation) are for a program that handles
+allocation failure.
+`--faults all` is every class that applies except `crash` and `kill` (add them: `--faults all,crash`): only after each alone.
 
 ## Several machines: nodes
 
@@ -84,19 +86,41 @@ From the driver, `patina ctl net cut a b`, `net heal`, `node crash NAME` (machin
 `node kill NAME`, `node start NAME`, `node pause NAME` script a scenario; the seed
 does the same with:
 
-- `--faults net`: link faults, and partitions between nodes (`--fault partition-gap-ms=A..B`).
-- `--crash machine` or `--crash process`: kills or machine crashes at seed-drawn times
-  (`--fault crash-gap-ms=2000..10000` for short runs), each followed by a restart.
-- `--faults cluster`: link faults, partitions, pauses, clock skew and machine crashes together.
-- `--crash-points --crash machine`: every crash point of each node; `[sweep] crash-pairs = K` also
+- `--faults net`: link faults. `--faults partition` cuts links between nodes
+  (`--fault partition-gap-ms=A..B`).
+- `--faults pause` and `--faults clock`: a node stops for a while; a node's clock is off.
+- `--faults crash` or `--faults kill`: machine crashes or kills at seed-drawn times
+  (`--fault crash-gap-ms=2000..10000` for short runs), each followed by a restart. Name a node
+  to fault only it: `--faults crash@db`.
+- `--crash-points`: every crash point of each node; `[sweep] crash-pairs = K` also
   crashes a second node after each first crash; give large runs a `--crash-points=N`.
+
+To test a distributed system, put the system under test on a node and let the driver be the
+harness: it waits for the system, marks `setup-complete`, drives the workload, marks
+`faults-done`, and checks.
+
+<!-- no-run sweep: needs a database to test, which the repo does not ship -->
+```sh
+patina sweep --seeds 1..200 --faults all,crash --node sut='./db --listen :7000' -- ./harness
+```
+
+<!-- no-run harness: the driver script the sweep above runs -->
+```sh
+#!/bin/sh
+# harness: the driver
+until nc -z sut 7000; do sleep 0.1; done
+patina ctl mark setup-complete
+./workload sut:7000
+patina ctl mark faults-done
+./verify sut:7000
+```
 
 See [recipes.md](recipes.md) for a replicated store.
 
 ## If a sweep finds nothing
 
 In order of what helps most: more seeds (a narrow window is one seed in thousands); `--crash-points`
-for crash windows; `--buggify`, or `--fault buggify:LABEL=1000` to fire one fault point every
-time; a lower crash rate (`--crash machine:1`) to reach later points; a rebuild with compute
+for crash windows; `--faults buggify`, or `--fault buggify:LABEL=1000` to fire one fault point every
+time; a lower crash rate (`--fault crash-permille=1`) to reach later points; a rebuild with compute
 points for races between plain accesses far from any loop, call or atomic. Then say what was
 tried, and that the oracle is what decides what clean means.

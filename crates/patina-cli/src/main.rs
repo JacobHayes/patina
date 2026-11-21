@@ -112,7 +112,7 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    // `--fault help`: the presets and every fault key, in place of a run.
+    // `--fault help`: the classes and every fault key, in place of a run.
     if a.all("--fault").iter().any(|v| v == "help") {
         print!("{}", faults::help_text());
         return ExitCode::SUCCESS;

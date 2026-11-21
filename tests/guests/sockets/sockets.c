@@ -13,7 +13,7 @@
 //   (fault scenarios; the argument is what the run expects, so the same mode fails when the
 //   fault is off)
 //   sockets chunk naive|correct, reset [reset], connect [connected|refused|timeout],
-//           partition [partitioned], halfclose-delay [MIN_MS]
+//           partition [partitioned]
 //   sockets chaos CLIENTS MSGS  fault-tolerant traffic (for runs with mixed network faults)
 //   sockets pingpong N          N one-byte round trips between two processes (cost)
 //   sockets forkserver | execinherit | exitclose [MIN_MS]      (processes)
@@ -934,33 +934,6 @@ static void partition(int want_partition) {
     else CHECK(in_window > 0, "deliveries inside the window");
 }
 
-/// The client closes; the server writes in the meantime and notes when EOF arrives.
-static void halfclose_delay(long long min_ms) {
-    int port, l = listener(&port, 0);
-    signal(SIGPIPE, SIG_IGN);
-    int c = dial(port);
-    int s = accept(l, 0, 0);
-    CHECK(shutdown(c, SHUT_WR) == 0, "shutdown");
-    long long t0 = now_ms();
-    int ok_writes = 0;
-    for (;;) {
-        char b[4];
-        ssize_t r = recv(s, b, 4, MSG_DONTWAIT);
-        if (r == 0) break;
-        CHECK(r < 0 && errno == EAGAIN, "server recv %zd", r);
-        if (write(s, "abcd", 4) == 4) ok_writes++;
-        sleep_ms(100);
-    }
-    long long dt = now_ms() - t0;
-    printf("EOF reached the server %lld virtual ms after the client's shutdown; %d server writes went through meanwhile\n", dt, ok_writes);
-    close(s);
-    char b[4096];
-    ssize_t r = read_full(c, b, sizeof b);
-    printf("the half-closed client still read %zd bytes\n", r);
-    CHECK(r == 4L * ok_writes, "the half-closed client reads every server write");
-    CHECK(dt >= min_ms, "EOF after %lld ms, wanted at least %lld", dt, min_ms);
-}
-
 /// N one-byte request/reply round trips between two processes.
 static void pingpong(int n) {
     int port, l = listener(&port, 0);
@@ -1389,7 +1362,6 @@ int main(int argc, char **argv) {
     else if (!strcmp(m, "reset")) reset(argc > 2 && !strcmp(argv[2], "reset"));
     else if (!strcmp(m, "connect")) connect_fault(argc > 2 ? argv[2] : "connected");
     else if (!strcmp(m, "partition")) partition(argc > 2 && !strcmp(argv[2], "partitioned"));
-    else if (!strcmp(m, "halfclose-delay")) halfclose_delay(argc > 2 ? atoll(argv[2]) : 0);
     else if (!strcmp(m, "pingpong")) pingpong(atoi(argv[2]));
     else if (!strcmp(m, "chaos")) chaos(atoi(argv[2]), atoi(argv[3]));
     else if (!strcmp(m, "keepalive") && argc > 2) {

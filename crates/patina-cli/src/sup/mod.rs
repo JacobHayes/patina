@@ -82,7 +82,7 @@ mod pause;
 pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
-mod sdk;
+pub(crate) mod sdk;
 mod shadows;
 pub mod shm;
 pub mod signal;
@@ -414,7 +414,7 @@ impl Sup {
             }
             // Nothing pending that can wake anyone (a partition to come, or a kill before
             // faults may act): deadlock, now.
-            if self.sched.only_weak(self.setup_done()) || self.only_frozen() {
+            if self.sched.only_weak(self.faults_on()) || self.only_frozen() {
                 self.deadlock();
             }
             // A jump past the liveness limit is reported before it wakes anyone, so
@@ -429,7 +429,7 @@ impl Sup {
                     .store(VCLOCK_BOOT_NS + self.ctl.config.vtime_limit_ns + 1, Relaxed);
                 self.check_liveness(None);
             }
-            match self.sched.idle_jump(old, self.setup_done()) {
+            match self.sched.idle_jump(old, self.faults_on()) {
                 Some(t) => {
                     self.ctl.vclock_ns.store(t, Relaxed);
                     self.decide(DEC_IDLE_JUMP, 0, [old, t, 0, 0, 0, 0], 0);
@@ -991,6 +991,7 @@ impl Sup {
                 Next::Continue(0)
             }
             Some(Op::Node) => self.node_op(idx, a),
+            Some(Op::Lifecycle) => self.lifecycle(idx, a),
             // A node's machine crash at its crash point: the node goes down, the run goes on.
             Some(Op::CrashPoint) if self.node_of(idx) != 0 => self.node_point_crash(idx),
             Some(Op::CrashPoint) => {

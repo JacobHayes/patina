@@ -5,7 +5,7 @@
 # action, still running at the end of the run, a vfork child ending its parent, a violation, an
 # msync then a violation, the time limit, munmap, exit with the mapping, a MAP_FIXED mapping over
 # it; mremap of a part of it ends the run unsupported): each mode with no crash plane, --crash
-# machine and (in the area tier) --crash process ends as it should (a violation and the time
+# machine and (in the area tier) --faults kill ends as it should (a violation and the time
 # limit keep their outcome), its self-check passes, `patina log ops --check` passes, and what the file
 # holds (read(2)) is what a native run prints. A same-seed repeat is identical and `patina
 # verify` is identical. The branch sweeps of these modes are 20-mapends-branch's.
@@ -32,7 +32,7 @@ for m in kill forked term orphan vfork violation msync hang unmap exit fixed rem
     for plane in $planes; do
         o=$d/$m-$plane
         c=()
-        [ $plane = none ] || c=(--crash "$plane")
+        [ $plane = none ] || c=(--faults "$([ $plane = process ] && echo kill || echo crash)")
         run "$o" 1 --config "$("$PATINA_CFG" time-limit=5)" "${c[@]}" -- /guest/mapends "$m"
         got=$(class "$o")
         [ "$got" = "$(want "$m")" ] || die "$m, crash plane $plane: $got $(field "$o/result.json" message)"
@@ -46,9 +46,9 @@ for m in kill forked term orphan vfork violation msync hang unmap exit fixed rem
     done
     echo "$m: $(want "$m") with every crash plane; operation log check ok${native:+; $native as natively}"
 done
-run "$d/again" 1 --config "$("$PATINA_CFG" time-limit=5)" --crash machine -- /guest/mapends kill
+run "$d/again" 1 --config "$("$PATINA_CFG" time-limit=5)" --faults crash -- /guest/mapends kill
 a=$(field "$d/again/result.json" digest)
 b=$(field "$d/kill-machine/result.json" digest)
-[ -n "$a" ] && [ "$a" = "$b" ] || die "kill under --crash machine: a repeat of the seed differs"
-verify "$d/verify" 1 2 "" --crash process -- /guest/mapends orphan
+[ -n "$a" ] && [ "$a" = "$b" ] || die "kill under --faults crash: a repeat of the seed differs"
+verify "$d/verify" 1 2 "" --faults kill -- /guest/mapends orphan
 echo "same seed identical; verify identical"

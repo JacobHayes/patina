@@ -15,8 +15,8 @@ exit: 0 1 1
 -->
 ```sh
 cc -o kvlog examples/kvlog-c/kvlog.c
-patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept --out patina-out/kvlog -- ./kvlog
-patina sweep --seeds 1..2 --crash-points=50 --crash machine --check examples/checks/acked-kept --out patina-out/kvlog-branch -- ./kvlog
+patina sweep --seeds 1..30 --fault crash-permille=10 --check examples/checks/acked-kept --out patina-out/kvlog -- ./kvlog
+patina sweep --seeds 1..2 --crash-points=50 --check examples/checks/acked-kept --out patina-out/kvlog-branch -- ./kvlog
 ```
 
 The first finds the lost record in some seeds; `--crash-points` tries crash points one by one. The
@@ -99,10 +99,10 @@ exit: 1
 release-only: a sweep of eight runs of a three-node cluster
 -->
 ```sh
-patina sweep --seeds 1..8 --mount g:/guest --faults cluster --fault crash-gap-ms=2000..10000 -- python3 /guest/q3.py driver 30
+patina sweep --seeds 1..8 --mount g:/guest --faults net,partition,pause,clock,crash --fault crash-gap-ms=2000..10000 -- python3 /guest/q3.py driver 30
 ```
 
-`--faults cluster` adds link faults, partitions, pauses, clock skew and machine crashes
+The classes add link faults, partitions, pauses, clock skew and machine crashes
 (seldom in a short run: `crash-gap-ms` makes them frequent). Without `nosync` the same sweep is
 clean. A group's `nodes:` line says which nodes were down or partitioned in its failing runs.
 The driver here prints its `FAIL:` line to stdout, so the signature is only `exit 1`: a driver

@@ -25,12 +25,12 @@ check_disks() {
 run_ok "$o/plain" 1 --config "$o/m.toml" -- sleep 2
 check_disks "$o/plain"
 if [ "${CHECK_TIER:-}" != quick ]; then
-    run_ok "$o/process" 2 --config "$o/loop.toml" --crash process --fault crash-gap-ms=5..50 --fault down-ms=10..50 -- sleep 0.25
+    run_ok "$o/process" 2 --config "$o/loop.toml" --faults kill --fault crash-gap-ms=5..50 --fault down-ms=10..50 -- sleep 0.25
     check_disks "$o/process"
 fi
 # The quick tier's run is shorter: fewer crashes, each still ending a disk.
 t=0.25; [ "${CHECK_TIER:-}" != quick ] || t=0.15
-run_ok "$o/machine" 3 --config "$o/loop.toml" --crash machine --fault crash-gap-ms=5..50 --fault down-ms=10..50 -- sleep $t
+run_ok "$o/machine" 3 --config "$o/loop.toml" --faults crash --fault crash-gap-ms=5..50 --fault down-ms=10..50 -- sleep $t
 check_disks "$o/machine"
 disks=$(ls -d "$o"/machine/node/*/inc-* | while read -r d; do [ -f "$d/oplog.meta" ] && echo "$d"; done | wc -l)
 ended=$(for d in "$o"/machine/node/*/inc-*; do [ -f "$d/oplog.meta" ] && "$PATINA" log ops "$d" | tail -1; done | grep -c ' Crash ')

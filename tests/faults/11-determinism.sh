@@ -8,7 +8,7 @@ verify "$RUNS/11/errors" $seed 3 cpu,load,sandbox --fault fs-error-permille=100 
 e=$!
 verify "$RUNS/11/short" $seed 3 cpu,load,sandbox --fault fs-short-permille=200 -- /guest/short correct >"$RUNS/11-short.txt" &
 s=$!
-verify "$RUNS/11/crash" $seed 3 cpu,load,sandbox --crash machine:20 -- /guest/ack-log correct >"$RUNS/11-crash.txt" &
+verify "$RUNS/11/crash" $seed 3 cpu,load,sandbox --fault crash-permille=20 -- /guest/ack-log correct >"$RUNS/11-crash.txt" &
 c=$!
 for p in $e $s $c; do wait $p || { cat "$RUNS"/11-*.txt; exit 1; }; done
 echo "seed $seed: errors $(field "$RUNS/11/errors/run-0/result.json" digest)," \

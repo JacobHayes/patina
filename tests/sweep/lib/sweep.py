@@ -150,8 +150,8 @@ if (st, st2) != (0, 0):
     die(f"allow-unmet: report exit {st}, sweep with [sweep] allow-unmet exit {st2}")
 print("bug-free: exit 0; unmet sometimes: exit 2, allowed (flag or config): exit 0")
 
-# A fault class with nothing to act on makes the result vacuous, named: the net preset on a
-# guest without sockets. On a TCP-only guest the preset's datagram classes are not applicable
+# A fault class with nothing to act on makes the result vacuous, named: the net class on a
+# guest without sockets. On a TCP-only guest the class's datagram faults are not applicable
 # (exit 0); the same class named with --fault is vacuous.
 st, rep, _ = sweep("net", "--seeds", "1..4", "--faults", "net", "--", GUEST)
 if st != 2 or not rep["faults"]["eligible_zero"] or not all(c.startswith("net-") for c in rep["faults"]["eligible_zero"]):
@@ -256,18 +256,18 @@ if "running 0" not in text2 or rep2["groups"] != rep["groups"]:
     die(f"whole-command cases did not resume:\n{text2}")
 print(f"whole-command cases: 12 runs of two programs, groups {[(g['case'], g['count']) for g in rep['groups']]}; resumes")
 
-# A fault point that never fires under --buggify is unmet, as a `sometimes` that never holds is
+# A fault point that never fires under --faults buggify is unmet, as a `sometimes` that never holds is
 # (exit 2, allowable), when that is not chance: no run of 20 or more reached it. Not reached in a
 # smoke run of 4, or forced off (buggify:LABEL=0), it is noted (exit 0); one that fires is neither.
-st, rep, _ = sweep("unreached", "--seeds", "1..20", "--buggify", "--", GUEST)
-st1, rep1, _ = sweep("smoke", "--seeds", "1..4", "--buggify", "--", GUEST)
-st2, rep2, _ = sweep("quiet", "--seeds", "1..4", "--buggify", "--fault", "buggify:tried-point=0", "--", GUEST, "point")
-st3, rep3, _ = sweep("loud", "--seeds", "1..4", "--buggify", "--fault", "buggify:tried-point=1000", "--", GUEST, "point")
+st, rep, _ = sweep("unreached", "--seeds", "1..20", "--faults", "buggify", "--", GUEST)
+st1, rep1, _ = sweep("smoke", "--seeds", "1..4", "--faults", "buggify", "--", GUEST)
+st2, rep2, _ = sweep("quiet", "--seeds", "1..4", "--faults", "buggify", "--fault", "buggify:tried-point=0", "--", GUEST, "point")
+st3, rep3, _ = sweep("loud", "--seeds", "1..4", "--faults", "buggify", "--fault", "buggify:tried-point=1000", "--", GUEST, "point")
 st4, _ = report("--allow-unmet", "tried-point", os.path.join(RUNS, "unreached"))
 noted = lambda r: [x["label"] for x in r["sdk"]["buggify_unfired_noted"]]
 if (st, st1, st2, st3, st4) != (2, 0, 0, 0, 0) or rep["sdk"]["buggify_never_fired"] != ["tried-point"] or noted(rep1) != noted(rep2) != ["tried-point"] or noted(rep3) or rep3["sdk"]["buggify_never_fired"]:
     die(f"buggify never fired: 20 runs exit {st} {rep['sdk']}; smoke exit {st1}; forced off exit {st2} {rep2['sdk']}; firing exit {st3}; allowed exit {st4}")
-print("a fault point never reached in 20 runs under --buggify: exit 2, allowed: 0; in 4 runs, or forced off: noted, exit 0; one that fired: 0")
+print("a fault point never reached in 20 runs under --faults buggify: exit 2, allowed: 0; in 4 runs, or forced off: noted, exit 0; one that fired: 0")
 
 # A host file that changes between the run and its replay: inputs-changed, not a finding.
 # Without the change (red/green), the same failure is a finding that replays identically.

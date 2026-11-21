@@ -1,5 +1,5 @@
 # Evidence (a crash check on a program with no SDK): examples/kvlog-c with
-# examples/checks/acked-kept, SEEDS (default 200) seeds under --crash machine, then every crash
+# examples/checks/acked-kept, SEEDS (default 200) seeds under --faults crash, then every crash
 # point of seeds 1 and 2 (--crash-points), then `kvlog fixed` under both. Prints each sweep's
 # summary head (findings, the check: line); kvlog must have a finding and kvlog fixed none.
 #@ tier=evidence budget=60 slots=8
@@ -16,9 +16,9 @@ sweep() {
     grep -A1 '^violation' "$RUNS/$name.txt" || true
     echo "$st"  >"$RUNS/$name.rc"
 }
-sweep plain --seeds "1..$n" --crash machine -- "$kv"
-sweep branch --seeds 1..2 --crash-points --crash machine -- "$kv"
-sweep fixed --seeds "1..$n" --crash machine -- "$kv" fixed
-sweep fixed-branch --seeds 1..2 --crash-points --crash machine -- "$kv" fixed
+sweep plain --seeds "1..$n" --faults crash -- "$kv"
+sweep branch --seeds 1..2 --crash-points --faults crash -- "$kv"
+sweep fixed --seeds "1..$n" --faults crash -- "$kv" fixed
+sweep fixed-branch --seeds 1..2 --crash-points --faults crash -- "$kv" fixed
 [ "$(cat "$RUNS/plain.rc")" = 1 ] && [ "$(cat "$RUNS/branch.rc")" = 1 ] || { echo "FAIL: kvlog: no finding"; exit 1; }
 [ "$(cat "$RUNS/fixed.rc")" = 0 ] && [ "$(cat "$RUNS/fixed-branch.rc")" = 0 ] || { echo "FAIL: kvlog fixed: not clean"; exit 1; }

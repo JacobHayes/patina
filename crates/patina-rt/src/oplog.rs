@@ -280,9 +280,6 @@ pub fn record(op: &FsOp) {
                 Data::Iov(iov, cnt) => Src::Iov(iov, cnt),
                 Data::InFile(fd) => Src::File(fd, offset),
             };
-            let f = crate::state::faults();
-            f.work_bytes
-                .store(f.work_bytes.load(Relaxed) + len, Relaxed);
             append(OpKind::Write, ino, [offset, len, 0, 0, 0, 0], &[src], len);
         }
         FsOp::Truncate { ino, size } => {

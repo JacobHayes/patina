@@ -1,7 +1,7 @@
 # 15. The fault plan comes from the seed. Under --faults disk two seeds resolve different
 # rates in run.json and one seed twice the same. Plan independence (the coupling where one
 # setting's draw moved another's): adding --fault net-chunk-max=1..4 to a run without sockets
-# (ack-log, --faults disk --crash machine:0..30) leaves every other resolved value and the whole
+# (ack-log, --faults disk --fault crash-permille=0..30) leaves every other resolved value and the whole
 # boundary log equal. A net-blackout window given as ranges (START 0..60000, LENGTH
 # 1000..10000 ms) is drawn per seed within them: seeds 1-4 resolve windows inside the ranges,
 # not all the same. max-incarnations on the command line bounds the restarts: a crash at
@@ -25,8 +25,8 @@ lhs=$(field "$d/disk-1/result.json" digest); rhs=$(field "$d/disk-1-again/result
 [ "$lhs" = "$rhs" ] || die "one seed, two digests"
 found=""
 for s in 1 2 3 4 5 6 7 8; do
-    run "$d/base-$s" $s --faults disk --crash machine:0..30 -- /guest/ack-log correct
-    run "$d/more-$s" $s --faults disk --crash machine:0..30 --fault net-chunk-max=1..4 -- /guest/ack-log correct
+    run "$d/base-$s" $s --faults disk --fault crash-permille=0..30 -- /guest/ack-log correct
+    run "$d/more-$s" $s --faults disk --fault crash-permille=0..30 --fault net-chunk-max=1..4 -- /guest/ack-log correct
     python3 -I - "$d/base-$s" "$d/more-$s" <<'PY' || exit 1
 import json, sys
 a, b = (json.load(open(p + "/run.json"))["faults"] for p in sys.argv[1:3])
@@ -52,12 +52,12 @@ done
 [ "$(printf '%s\n' $wins | sort -u | wc -l)" -gt 1 ] || die "net-blackout: one window for every seed:$wins"
 echo "net-blackout=0..60000+1000..10000 resolved per seed:$wins"
 for m in "" 2; do
-    run "$d/inc-$m" 1 --crash process:1000 ${m:+--fault max-incarnations=$m} -- /guest/ack-log correct
+    run "$d/inc-$m" 1 --faults kill --fault crash-permille=1000 ${m:+--fault max-incarnations=$m} -- /guest/ack-log correct
     echo "max-incarnations ${m:-default}: $(field "$d/inc-$m/result.json" incarnations) incarnations"
 done
 [ "$(field "$d/inc-/result.json" incarnations)" = 4 ] && [ "$(field "$d/inc-2/result.json" incarnations)" = 2 ] ||
     die "max-incarnations: $(field "$d/inc-/result.json" incarnations) by default, $(field "$d/inc-2/result.json" incarnations) with 2"
-run "$d/gap" 1 --crash process:1000 --fault max-incarnations=2 --fault down-ms=5000..5000 -- /guest/ack-log correct
+run "$d/gap" 1 --faults kill --fault crash-permille=1000 --fault max-incarnations=2 --fault down-ms=5000..5000 -- /guest/ack-log correct
 crash_t=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["crashes"][0]["vclock_ns"])' "$d/gap/result.json")
 first_t=$("$PATINA" log events "$d/gap" | jq -n '[inputs | select(.inc == 1 and .t) | .t][0]')
 gap=$((first_t - crash_t))

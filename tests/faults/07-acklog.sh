@@ -1,4 +1,4 @@
-# 7. Crash and restart end to end with ack-log under --faults disk --crash machine:50: ACK_SEEDS
+# 7. Crash and restart end to end with ack-log under --faults disk --fault crash-permille=50: ACK_SEEDS
 # seeds (default 20) per model, both models. Crashes at 50 per mille, not the default 3: at 3,
 # a quarter of the seeds crash and ext4-ordered loses a record of the variant below in about
 # one seed in thirty, too few for which seeds those are not to decide the check. The correct
@@ -18,7 +18,7 @@ for m in ext4-ordered posix-strict; do
     mkdir -p "$d"
     cfg=$("$PATINA_CFG" fs-model=$m)
     # The model as a flag, or in the configuration file.
-    sweep 07/$m-correct "$N" $([ $m = posix-strict ] && echo --fault fs-model=$m || echo --config "$cfg") --faults disk --crash machine:50 -- /guest/ack-log correct
+    sweep 07/$m-correct "$N" $([ $m = posix-strict ] && echo --fault fs-model=$m || echo --config "$cfg") --faults disk --fault crash-permille=50 -- /guest/ack-log correct
     python3 -I - "$RUNS/07/$m-correct/summary.tsv" "$m" "$N" <<'PY' || exit 1
 import csv, sys
 rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
@@ -33,11 +33,11 @@ if len(rows) != n or c1 == 0:
     sys.exit("FAIL: no run crashed")
 PY
     # The planted bug: no fsync of the record before the acknowledgement.
-    sweep 07/$m-nofsync "$N" --config "$cfg" --faults disk --crash machine:50 -- /guest/ack-log nofsync
+    sweep 07/$m-nofsync "$N" --config "$cfg" --faults disk --fault crash-permille=50 -- /guest/ack-log nofsync
     found=$(awk -F'\t' '$2 == "failure" && $3 ~ /INVARIANT acked-record-lost/ {print $1; exit}' "$RUNS/07/$m-nofsync/summary.tsv")
     [ -n "$found" ] || die "$m: nofsync never caught in $N seeds"
     o=$d/nofsync-$found
-    run "$o" "$found" --config "$cfg" --faults disk --crash machine:50 -- /guest/ack-log nofsync
+    run "$o" "$found" --config "$cfg" --faults disk --fault crash-permille=50 -- /guest/ack-log nofsync
     python3 -I - "$o/result.json" "$m" "$found" <<'PY' || exit 1
 import json, sys
 r = json.load(open(sys.argv[1]))
@@ -48,7 +48,7 @@ print("%s nofsync caught at seed %s: %s; plan %s; last crash: %s" % (
 if last["fault"] != "crash" or last["kind"] != "machine" or "/work/data.log" not in last.get("lost", {}).get("paths", []):
     sys.exit("FAIL: the last crash in faults.recent that lost anything is not a machine crash that lost /work/data.log")
 PY
-    run "$o-again" "$found" --config "$cfg" --faults disk --crash machine:50 -- /guest/ack-log nofsync
+    run "$o-again" "$found" --config "$cfg" --faults disk --fault crash-permille=50 -- /guest/ack-log nofsync
     a=$(field "$o/result.json" digest)
     b=$(field "$o-again/result.json" digest)
     [ "$a" = "$b" ] || die "$m seed $found: digests $a vs $b"
@@ -62,7 +62,7 @@ PY
 done
 # Crashes on must not change the run before the crash.
 run "$RUNS/07/plain" 3 -- /guest/ack-log correct
-run "$RUNS/07/crash" 3 --crash machine:20 -- /guest/ack-log correct
+run "$RUNS/07/crash" 3 --fault crash-permille=20 -- /guest/ack-log correct
 python3 -I - "$RUNS/07/plain" "$RUNS/07/crash" <<'PY' || exit 1
 import json, struct, sys
 a, b = sys.argv[1], sys.argv[2]

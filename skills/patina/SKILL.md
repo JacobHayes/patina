@@ -63,10 +63,10 @@ replay: patina replay /tmp/app/patina-out/run-0
    |---|---|
    | ordering, races, deadlock | nothing (seeds vary the schedule, at system calls and inside computation) |
    | error handling of file I/O | `--faults disk`, with `--ok-exit N` for documented clean failures |
-   | durability, recovery | `--crash machine` (the program must recover from `/work` on restart), then `--crash-points` |
+   | durability, recovery | `--faults crash` (the program must recover from `/work` on restart), then `--crash-points` |
    | client/server | `--faults net` |
-   | several machines | nodes in `patina.toml`, then `--faults cluster` |
-   | the program's own fault points | `--buggify` |
+   | several machines | nodes in `patina.toml`, then `--faults net,partition,pause,clock,crash` |
+   | the program's own fault points | `--faults buggify` |
 
 5. **Sweep small**, then grow seeds. Exit status 0: all `ok`; 1: findings; 2: Patina could not
    do what you asked (`vacuous`, `unsupported`, `error`, ...), never a pass.
@@ -76,7 +76,7 @@ dir: /tmp/app
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1..20 --crash machine -- ./app
+$ patina sweep --seeds 1..20 --faults crash -- ./app
 ...
 patina sweep: 20 runs, 5 findings in 1 group, 15 ok   (0.5s, 8 jobs)
 outcomes: ok 15, violation 5
@@ -85,7 +85,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   5 of 20 runs   first: seed 2   replayed: identical
   example: acked-records-kept: 7 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 2 --crash machine -- /tmp/app/app
+  rerun:  patina run --seed 2 --faults crash -- /tmp/app/app
   replay: patina replay /tmp/app/patina-out/sweep/seed-2
   explain: patina explain /tmp/app/patina-out/sweep/seed-2
 ```
@@ -106,7 +106,7 @@ jq -r '.groups[] | "\(.count) \(.signature)\n  \(.rerun)"' patina-out/sweep/repo
 run=$(jq -r '.groups[0].first.dir' patina-out/sweep/report.json)
 patina explain "$run"
 patina minimize "$run"
-patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" --runs 3 --vary cpu,aslr --crash machine -- ./app
+patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" --runs 3 --vary cpu,aslr --faults crash -- ./app
 ```
 
 7. **Triage** each group in order: (1) a harness or oracle bug (wrong checker, missing input);

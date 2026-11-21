@@ -43,7 +43,7 @@ failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: res
 ## ledger (Rust, SDK): a rare path found by a fault point
 
 `commit` has a batch path, marked with `buggify!`, that swaps two entries; `always!` says the
-ledger stays sorted. `--buggify` lets the seed take that path.
+ledger stays sorted. `--faults buggify` lets the seed take that path.
 
 <!-- transcript ledger
 setup: rm examples/ledger && mkdir -p examples/ledger/target/release && cp "$GUESTS/examples/ledger" examples/ledger/target/release/
@@ -52,7 +52,7 @@ exit: 1
 -->
 ```sh
 cargo build --release --manifest-path examples/ledger/Cargo.toml
-patina sweep --seeds 1..20 --buggify --out patina-out/ledger -- examples/ledger/target/release/ledger
+patina sweep --seeds 1..20 --faults buggify --out patina-out/ledger -- examples/ledger/target/release/ledger
 ```
 
 ```text
@@ -63,7 +63,7 @@ outcomes: ok 16, violation 4
 violation always: ledger-sorted: after N
   4 of 20 runs   first: seed 1   replayed: identical
   example: ledger-sorted: after 2
-  rerun:  patina run --seed 1 --buggify -- /tmp/patina/examples/ledger/target/release/ledger
+  rerun:  patina run --seed 1 --faults buggify -- /tmp/patina/examples/ledger/target/release/ledger
   replay: patina replay /tmp/patina/patina-out/ledger/seed-1
   explain: patina explain /tmp/patina/patina-out/ledger/seed-1
 ```
@@ -89,7 +89,7 @@ outcomes: ok 6, violation 14
 
 violation always: journal-intact: N bytes
   14 of 20 runs   first: seed 2   replayed: identical
-  example: journal-intact: 7081 bytes
+  example: journal-intact: 6999 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/examples/journal-py:/guest --mount /tmp/patina/sdk/python:/sdk --faults disk -- python3 /guest/journal.py
   replay: patina replay /tmp/patina/patina-out/journal-py/seed-2
@@ -106,7 +106,7 @@ exit: 0 1
 -->
 ```sh
 cc -I sdk/c -o acklog examples/acklog-c/acklog.c
-patina sweep --seeds 1..20 --crash machine --out patina-out/acklog -- ./acklog
+patina sweep --seeds 1..20 --faults crash --out patina-out/acklog -- ./acklog
 ```
 
 ```text
@@ -118,7 +118,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   5 of 20 runs   first: seed 2   replayed: identical
   example: acked-records-kept: 7 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 2 --crash machine -- /tmp/patina/acklog
+  rerun:  patina run --seed 2 --faults crash -- /tmp/patina/acklog
   replay: patina replay /tmp/patina/patina-out/acklog/seed-2
   explain: patina explain /tmp/patina/patina-out/acklog/seed-2
 ```
@@ -135,7 +135,7 @@ exit: 0 1
 -->
 ```sh
 cc -o kvlog examples/kvlog-c/kvlog.c
-patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept --out patina-out/kvlog -- ./kvlog
+patina sweep --seeds 1..30 --fault crash-permille=10 --check examples/checks/acked-kept --out patina-out/kvlog -- ./kvlog
 ```
 
 ```text
@@ -148,7 +148,7 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
   7 of 30 runs   first: seed 5   replayed: identical
   example: acked-record-lost: acknowledged 7, 6 stored after the crash
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 5 --crash machine:10 --check examples/checks/acked-kept -- /tmp/patina/kvlog
+  rerun:  patina run --seed 5 --fault crash-permille=10 --check examples/checks/acked-kept -- /tmp/patina/kvlog
   replay: patina replay /tmp/patina/patina-out/kvlog/seed-5
   explain: patina explain /tmp/patina/patina-out/kvlog/seed-5
 ```

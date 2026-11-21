@@ -383,8 +383,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   sides, times, whether a cut link held, lost or kept back anything) for `result.json`.
 - **Kill and restart.** A node is up from its first process's `Hello` until it goes down
   (`DEC_NODE_DOWN` [node, incarnation, how, status, processes killed, down time]): the seed
-  kills it (`--crash process`: a node event `crash-gap-ms` after each start that keeps a run
-  alive once faults may act (`Live::AfterSetup`; before then it is only drawn again), keyed on
+  kills it (`--faults kill`: a node event `crash-gap-ms` after each start that keeps a run
+  alive while faults may act (`Live::AfterSetup`; outside the fault window it is only drawn
+  again, and after `faults-done` it does nothing), keyed on
   `Stream::Node` by node, incarnation and try, with an `Injected` record `INJ_NODE_KILL`
   counted as `crash`), the driver does (`node kill NAME`, `Op::Node`), or its first
   process ends by itself. A kill `SIGKILL`s every live process of the node through the
@@ -431,7 +432,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   the log into one plain log per disk (`durability::log::split_nodes`: `node/NAME/inc-K/`, K
   the boot the disk began with), which `patina log ops`, the self-check (`check::disks`, run
   for every run with nodes) and `materialise` read as a single machine's.
-- **Machine crash.** `node crash NAME` (`NODE_CRASH`) or the seed under `--crash machine`
+- **Machine crash.** `node crash NAME` (`NODE_CRASH`) or the seed under `--faults crash`
   (`NodeConf::crash` `CRASH_NODE_MACHINE`, drawn as the process kills are) runs
   `nodes::node_crash` at a node action point: the node's mappings are flushed and a `Crash`
   record (`[CRASH_MACHINE, boot, point]`, tagged; point 0 for a crash at a drawn time or a
@@ -451,23 +452,26 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   disk. The links open again then (`wire_heal`), and an item that reaches a dead end resets its
   sender (`RST_UNKNOWN`), as a rebooted host answers a segment of a connection it does not
   know.
-- **Faults per node.** The disk and memory keys are each node's: the config resolves each
-  node's settings (the run's unscoped ones for every node but the driver and a node with
-  `faults = false`, `@NODE` scopes, `[node.NAME.faults]`) with a seed of its own
-  (`Config::node_faults`), the driver's
-  into the run's `FaultCfg` and the others' into `NodeTab::faults`, a `FaultCtl` (settings and
-  counters) per node. The runtime reaches its node's through `state::faults()`; the draws stay
-  keyed by sequence number, `faults-after-setup` stays the run's.
+- **Faults per node.** The node classes (`disk`, `mem`, `buggify`, `crash`, `kill`, `pause`,
+  `clock`) and their keys are each node's: the config resolves each node's classes and
+  settings (the run's unscoped ones for every node but the driver and a node with `faults =
+  false`, `@NODE` scopes) with a seed of its own (`Config::node_plan`), the driver's into the
+  run's `FaultCfg` and `SdkCfg` and the others' into `NodeTab::faults` (a `FaultCtl`, settings
+  and counters, per node) and `NodeTab::sdk`. The runtime reaches its node's through
+  `state::faults()` and `sys::sdk::cfg()`; a fault point's site row is per node
+  (`SdkTab::site_on`), its draws keyed by the node's seed. Draws stay keyed by sequence
+  number; the fault window (`FaultCfg::in_window`) stays the run's.
 - **Crash points per node.** The runtime's crash point (`inject::crash_point`) reads its own
-  node's `FaultCtl`: each node counts its points in its own `crash_points`, and `--crash
-  machine-at:N@NODE` or `machine:PERMILLE@NODE` (`Config::crash_nodes`, `faults::crash_plan`
-  with the node's seed) sets that node's `crash_at` or `crash_permille`. At each start of a
+  node's `FaultCtl`: each node counts its points in its own `crash_points`, and `--fault
+  crash-at=N@NODE` or `crash-permille=P@NODE` (`Config::node_plan`, resolved with the node's
+  seed) sets that node's `crash_at` or `crash_permille`; in such a run only the nodes a crash
+  key names crash, and none at drawn times. At each start of a
   boot the supervisor arms the node's points (`Nodes::arm_points`: the counter from 0,
   `crash_enabled` while the node has boots left, `incarnation` the boot), so the N-th point is
   of that boot. A point that fires is the runtime's `CrashPoint` request; for a node the
   supervisor answers it with `node_point_crash`, the same `node_crash` as above with the point
-  in its `Crash` record and its `INJ_NODE_KILL` (`machine-at` then turns itself off: it fires
-  once, in the node's first boot); under `process-at:N@NODE` (`CRASH_PROCESS`) it answers with
+  in its `Crash` record and its `INJ_NODE_KILL` (`crash-at` then turns itself off: it fires
+  once, in the node's first boot); under `kill` (`CRASH_PROCESS`) it answers with
   `node_kill` instead, the seed's process kill, the point in its `INJ_NODE_KILL`, the disk going
   on. A point's per-mille draw is the runtime's, keyed by the
   record's sequence number as for one machine; the node's seed resolves only a range. A
@@ -475,9 +479,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
   point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
   (`crash_points`, `downs[].point`) and `sweep --crash-points` reads to make one child per point of
-  each node (`seed-S@NODE.P`, `machine-at:P@NODE`). `Config::crash_nodes` joins settings with
-  `+`, each for its own nodes (`machine-at:I@A+machine-at:J@B`). Under `[sweep] crash-pairs = K` a
-  first crash's child also counts the other nodes' points (`+machine:0@B,...`), and one that
+  each node (`seed-S@NODE.P`, `crash-at=P@NODE`). A pair is two scoped keys
+  (`crash-at=I@A`, `crash-at=J@B`). Under `[sweep] crash-pairs = K` a
+  first crash's child also counts the other nodes' points (`crash-permille=0@B,...`), and one that
   ended ok gives each other node's next K points after A's `Crash` record by sequence number
   (`branch::window`, each with the number of B's records before it); each is a pair's child
   (`seed-S@A.I+B.J`), the first child's run up to B's J-th point, which B counts from its first
@@ -544,10 +548,6 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
 - **End.** The driver's exit ends the run; the supervisor records each node that still has
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
-
-Not yet: the SDK's fault keys with nodes (`buggify-permille`, `buggify:LABEL`): the runtime reads
-one `SdkCfg` for the run (`proto::sdk::SdkTab`), so scoping them per node needs a node's own
-copy beside its `FaultCtl`.
 
 ## The boundary log
 
@@ -648,7 +648,7 @@ whose verdict is `pending` is judged again from its logs, or run again when they
 A `--cases` line may give its own run settings before `--` (`sweep::case_line`, the flags of
 `CASE_FLAGS` parsed by `patina run`'s parser); they follow the sweep's on the run's command
 line. The whole line is the case's identity on resume (the `case` file); its id (its `--name`
-or line number) names its directory and `--only-case` selects it; a checker, the report
+or line number) names its directory; a checker, the report
 and a known pattern see the line after its settings (`sweep::case_shown`), so a pattern
 written for a case still matches once its line gains settings.
 `--ok-exit` (`Config::ok_exit`, in `run.json`) is an input of `outcome::classify`: a guest
@@ -1111,9 +1111,32 @@ the coverage per program).
 
 ## The fault plan
 
-`--faults`, `--fault` and `--crash` give the plan (`faults.rs`). A value given as a range is
-resolved from the seed by a draw keyed by the setting's name, so adding one setting never
-moves another's value. The resolved plan is in `run.json`.
+`--faults` (classes, each a set of keys) and `--fault` (one key) give the plan (`faults.rs`:
+`CLASSES`, `KEYS`, `resolve`). A value given as a range is resolved from the seed by a draw
+keyed by the setting's name, so adding one setting never moves another's value. The resolved
+plan is in `run.json`.
+
+The fault window is two sequence numbers in the run's `FaultCfg`: `fault_after_seq` and
+`fault_until_seq` (`FaultCfg::in_window`). Every runtime injection, crash point and fault
+point, and every supervisor fault (link faults through `link_faulted`, partition and pause
+draws, the seed's node kills, clock skew at boot) asks it. The runtime's `mark`
+(`sys/sdk.rs`) sets them: `faults-done` writes `fault_until_seq` and tells the supervisor
+(`Op::Lifecycle`, `LIFE_FAULTS_DONE`), which heals a seed partition in force, ends seed
+pauses (`PEND_DONE`) and cancels their next draws. A run whose plan injects anything is one
+of two passes (`launch::run_one`): held (`Config::faults_held`, `fault_after_seq` starts at the
+maximum for the mark to lower to its own sequence number) if that pass meets
+`setup-complete`, else the pass without the hold. `run_one` tries the held pass first when
+the program's file or a file its arguments name holds a call of the mark (`may_mark`: in an
+executable the label itself, since its debug information names the SDK's functions whether
+linked or not; in a script also the call's name; the answer is cached) or one of its runs met
+the mark before (`$XDG_CACHE_HOME/patina/marks/`, by those files' contents and the
+arguments); otherwise the pass without the hold, which ends at the mark if it comes
+(`restart_at_setup`, `LIFE_RESTART`, verdict `setup-restart`) for the held pass to run, and is
+remembered. A program runs its setup once, but one that names the mark and does not make it.
+Only a mark from a file the command does not name, before the program's first run that meets
+it, lets a fault before the mark stand. The pass is the run's
+`run.json` (`faults-held`), which replay and verify run directly; both marks carry over to
+later incarnations (`launcher::incarnations`).
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's
@@ -1121,7 +1144,7 @@ draws. An injected errno is one Linux returns for that call on that object
 (`faults::errnos`). Every injected fault is a boundary record naming its object, and
 `result.json`'s `faults` counts per class the calls it could act on and the faults injected.
 
-Path swaps (`path-swap-permille`, `path-swap-at`; `patina-rt/src/swap.rs`,
+Path swaps (`path-swap-permille`; `patina-rt/src/swap.rs`,
 `proto::swap`) stand in for another process of the same uid that changes the work tree
 between a program's check of a path and its use. Each process keeps the hashes of the work-tree
 paths named by its last 16 checks (`stat`, `lstat`, `access`, `readlink`, `open`). A use (`open`,
@@ -1145,8 +1168,8 @@ exact. The swap is an `Injected` record (`INJ_PATH_SWAP`: the mutation, the chec
 its seq) followed by `Name` records for the path and the target, written once the swap is made;
 a crash between two of its steps leaves those steps in the operation log and no `Injected`
 record, and a mutation the kernel refuses falls back to the next (none: no swap, though the use
-was counted eligible, so `path-swap-at` can miss).
-Path swaps are in no preset: they model a concurrent writer the program may not be meant to
+was counted eligible).
+Path swaps are in no class: they model a concurrent writer the program may not be meant to
 withstand.
 
 The network wire: a TCP socket in the guest is a real unix socket whose peer the supervisor
@@ -1215,9 +1238,9 @@ name, Go's pure resolver "no such host"; no resolver sends a datagram.
 
 The runtime records every change to `/work` with its data in an operation log, along with
 every sync (`patina-proto/src/oplog.rs`). Crash points follow each change and precede each
-sync; each is counted (its ordinal is what `-at:N` names and what `crashes[].point` reports)
-and the crash draw is used only when it fires, so a run is identical to the run without
-`--crash` up to the crash. With nodes each node counts its own, on its own disk ([Nodes](#nodes),
+sync; each is counted inside the fault window (its ordinal is what `crash-at=N` names and
+what `crashes[].point` reports) and the crash draw is used only when it fires, so a run is
+identical to the run without crashes up to the crash. With nodes each node counts its own, on its own disk ([Nodes](#nodes),
 "Crash points per node").
 
 `sweep --crash-points` places each point from a base's operation log (`patina-cli/src/branch.rs`),
@@ -1292,7 +1315,7 @@ same shadows.
 A process crash restarts the program on `/work` as it was. A machine crash restarts it on
 what a filesystem would have kept: a pure function of the operation log, the seed and the
 model, `ext4-ordered` (the default) or `posix-strict` (`durability/`). Every run with
-`--crash` ends by replaying its whole operation log against the live tree of each
+crashes on ends by replaying its whole operation log against the live tree of each
 incarnation, with no exception: a difference is a Patina defect. File times are carried, not
 modelled: the virtual time table keys a work tree's inodes by node and inode number with a
 fixed minor (`proto::vfs::VT_WORK`), not the mount's index, so the supervisor reads each
@@ -1362,7 +1385,7 @@ injected `syncfs` failure fails every file of the disk, clean or not, where Linu
 those with dirty pages; a description pushed out of `Dur::descs` by another with the same slot
 may report an error it already reported once more; a write-back the kernel would start by
 itself (the flusher, memory pressure) never fails; `msync` of a mapping that is not tracked
-(read-only, private) reports nothing; and a process crash (`--crash process`, unlike a node's
+(read-only, private) reports nothing; and a process crash (`--faults kill` on one machine, unlike a node's
 `kill`) starts its next incarnation with no pending errors, where Linux would keep the page
 cache's. Tests: `tests/faults/22-errseq.sh` (each row against the kernel's sources, and the
 durability consequence under every crash point), `09-failed-fsync.sh`, `nodes/12-disk-faults.sh`.

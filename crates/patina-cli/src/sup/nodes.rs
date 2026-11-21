@@ -13,7 +13,7 @@
 //! a heal opens a link (`Sup::wire_heal`).
 //!
 //! A node goes down three ways, each a `DEC_NODE_DOWN` record: its processes are killed (by the
-//! seed, `--crash process`, or by `node kill NAME`), each `SIGKILL`ed by the
+//! seed, `--faults kill`, or by `node kill NAME`), each `SIGKILL`ed by the
 //! supervisor (`kill_now`) as the kernel kills a process: its sockets close, so peers see the
 //! FIN or RST, its listeners go and connects to them are refused; or its first process ends
 //! by itself, which ends the node (its other processes are killed): an exit status of its
@@ -397,7 +397,7 @@ impl Sup {
                 // request's records come first, and its slot is not taken under it.
                 EVK_NODE_START if !killed.is_empty() => later.push_back((kind, k)),
                 EVK_NODE_KILL if self.nodes.up[k] => {
-                    if self.setup_done() {
+                    if self.faults_on() {
                         killed.extend(if self.node_tab().conf[k].crash == CRASH_NODE_MACHINE {
                             self.node_crash(k, DOWN_CRASH_SEED, 0)
                         } else {
@@ -509,7 +509,7 @@ impl Sup {
         Next::Pick
     }
 
-    /// Draw the seed's kill of `node`'s current boot (`--crash process`, `crash-gap-ms`): none
+    /// Draw the seed's kill of `node`'s current boot (`--faults kill`, `crash-gap-ms`): none
     /// in its last permitted boot (`max-incarnations`).
     fn kill_next(&mut self, k: usize) {
         let t = self.node_tab();

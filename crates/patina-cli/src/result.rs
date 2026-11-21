@@ -115,7 +115,7 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                     v["downs"] = json!(downs);
                 }
                 // With crashes at its crash points: those each boot passed (the first's are
-                // what `machine-at:N@NAME` counts, and `--crash-points` tries).
+                // what `crash-at=N@NAME` counts, and `--crash-points` tries).
                 let c = &t.faults[k].cfg;
                 if c.crash_kind != proto::faults::CRASH_NONE || c.crash_at != 0 {
                     let p: Vec<u64> = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
@@ -1136,6 +1136,15 @@ pub fn nodes_line(n: &Value) -> Option<String> {
         Some(p) => format!("; {p} partitions drawn"),
         None => String::new(),
     };
+    // A run whose links nothing cut says only its nodes.
+    let quiet = cut == 0
+        && parts.is_empty()
+        && ["cuts", "heals", "held"]
+            .iter()
+            .all(|k| net[*k].as_u64().unwrap_or(0) == 0);
+    if quiet {
+        return Some(format!("nodes: {}", nodes.join(", ")));
+    }
     Some(format!(
         "nodes: {}; net: {} cuts, {} heals, {} held, {}{parts}",
         nodes.join(", "),

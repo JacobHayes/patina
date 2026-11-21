@@ -1,6 +1,6 @@
 # 12. A sparse file mapped large (fs sparsemap: 2 GiB MAP_SHARED of a file grown to 1 GiB,
 #     two pages written through the mapping, shrunk and grown again): ok with the guest's own
-#     checks, the operation log replays to the live tree (--crash with a crash point past the
+#     checks, the operation log replays to the live tree (--fault crash-at with a crash point past the
 #     run's end), and Patina's memory follows what was written, not what was mapped: the
 #     largest resident set of the run's processes stays under 256 MiB (the kernel's
 #     high-water mark, not a sample), and the shadow store (Patina's copy of what the log holds
@@ -13,7 +13,7 @@
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/12-sparsemap
-mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --seed 1 --crash machine-at:1000000 \
+mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --seed 1 --fault crash-at=1000000 \
     --out "$o" --mount "$PATINA_GUESTS":/guest:copy -- /guest/sparsemap)
 [ "$(field "$o/result.json" outcome)" = ok ] && grep -qx 'sparsemap ok' "$o/inc-0/stdout" ||
     die "sparsemap: $(field "$o/result.json" outcome) $(field "$o/result.json" message) $(cat "$o/inc-0/stdout" 2>/dev/null)"
@@ -23,7 +23,7 @@ sb=$(field "$o/result.json" shadow_bytes)
 echo "sparsemap: ok, largest resident set $mb MiB, shadow store $sb bytes, $(grep allocated "$o/inc-0/stdout")"
 for m in cuts many refused; do
     crash=()
-    [ "$m" != refused ] || crash=(--crash machine-at:1000000)
+    [ "$m" != refused ] || crash=(--fault crash-at=1000000)
     mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --seed 1 "${crash[@]}" --out "$o-$m" \
         --mount "$PATINA_GUESTS":/guest:copy -- /guest/sparsemap "$m")
     [ "$(field "$o-$m/result.json" outcome)" = ok ] && grep -qx "$m ok" "$o-$m/inc-0/stdout" ||

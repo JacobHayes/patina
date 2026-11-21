@@ -44,7 +44,7 @@ const _: () = assert!(SYSCALL & 0x4000_0000 == 0);
 
 /// Protocol version, the low 16 bits of the `HELLO` answer.
 pub const VERSION: u64 = 1;
-/// `HELLO` answer bit: the run has `--buggify` (fault points may fire). Without it an SDK
+/// `HELLO` answer bit: the run has `--faults buggify` (fault points may fire). Without it an SDK
 /// answers every fault point locally (false, the default value) and never traps for one.
 pub const HELLO_BUGGIFY: u64 = 1 << 16;
 
@@ -92,8 +92,10 @@ pub const NEVER: i64 = 2;
 pub const HDR_LEN: usize = 32;
 pub const LABEL_MAX: usize = 255;
 pub const TEXT_MAX: usize = 4096;
-/// The mark that ends setup (`faults-after-setup`).
+/// The mark that ends setup: faults act from it (`crate::faults::FaultCfg::fault_after_seq`).
 pub const SETUP_COMPLETE: &[u8] = b"setup-complete";
+/// The mark after which no fault acts (`crate::faults::FaultCfg::fault_until_seq`).
+pub const FAULTS_DONE: &[u8] = b"faults-done";
 
 pub fn kind_name(k: u8) -> &'static str {
     match k {
@@ -177,14 +179,22 @@ pub const DELAY_MAX_NS: u64 = 5_000_000_000;
 /// `--fault buggify:LABEL=PERMILLE` overrides, at most this many.
 pub const MAX_POINTS: usize = 32;
 
-/// Written by the launcher before the run; read-only afterwards.
+/// `SdkCfg::buggify`: no fault point fires; every point may (the `buggify` class); only the
+/// points `buggify:LABEL=P` names (the key without the class).
+pub const BUGGIFY_OFF: u64 = 0;
+pub const BUGGIFY_ALL: u64 = 1;
+pub const BUGGIFY_NAMED: u64 = 2;
+
+/// One machine's fault-point settings, written by the launcher before the run; read-only
+/// afterwards. The driver's (and a run without nodes') is `SdkTab::cfg`, a node's
+/// `node::NodeTab::sdk`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SdkCfg {
-    /// 1 with `--buggify`.
+    /// `BUGGIFY_*`.
     pub buggify: u64,
-    /// Firing rate of an active point (`--fault buggify-permille=N`).
-    pub fire_permille: u64,
+    /// The machine's seed: the run's, or a node's own, so each node draws its own decisions.
+    pub seed: u64,
     /// Incarnation: firing draws are fresh after a restart; activation and knobs are per run.
     pub incarnation: u64,
     pub npoints: u64,
@@ -195,8 +205,8 @@ pub struct SdkCfg {
 impl Default for SdkCfg {
     fn default() -> SdkCfg {
         SdkCfg {
-            buggify: 0,
-            fire_permille: FIRE_PERMILLE,
+            buggify: BUGGIFY_OFF,
+            seed: 0,
             incarnation: 0,
             npoints: 0,
             points: [[0; 2]; MAX_POINTS],
@@ -212,50 +222,51 @@ impl SdkCfg {
             .map(|p| p[1])
     }
     /// The firing rate of a point for this run, or `None` if it never fires
-    /// (no `--buggify`, inactive, or forced off).
-    pub fn rate(&self, seed: u64, label: u64, asked: i64) -> Option<u64> {
-        if self.buggify == 0 {
+    /// (no `--faults buggify`, inactive, or forced off).
+    pub fn rate(&self, label: u64, asked: i64) -> Option<u64> {
+        if self.buggify == BUGGIFY_OFF {
             return None;
         }
         let r = match self.point(label) {
             Some(p) => p,
+            None if self.buggify == BUGGIFY_NAMED => return None,
             None => {
-                if point_draw(seed, label, D_ACTIVE, 0) % 1000 >= ACTIVATION_PERMILLE {
+                if point_draw(self.seed, label, D_ACTIVE, 0) % 1000 >= ACTIVATION_PERMILLE {
                     return None;
                 }
                 if asked >= 0 {
                     (asked as u64).min(1000)
                 } else {
-                    self.fire_permille
+                    FIRE_PERMILLE
                 }
             }
         };
         (r > 0).then_some(r)
     }
     /// Does the `n`-th evaluation of a point fire at `rate`?
-    pub fn fires(&self, seed: u64, label: u64, rate: u64, n: u64) -> bool {
+    pub fn fires(&self, label: u64, rate: u64, n: u64) -> bool {
         let n = n ^ self.incarnation.wrapping_mul(0x2545_f491_4f6c_dd1d);
-        point_draw(seed, label, D_FIRE, n) % 1000 < rate
+        point_draw(self.seed, label, D_FIRE, n) % 1000 < rate
     }
     /// A knob's value for this run: `default` unless the point is active.
-    pub fn knob(&self, seed: u64, label: u64, default: i64, lo: i64, hi: i64) -> i64 {
+    pub fn knob(&self, label: u64, default: i64, lo: i64, hi: i64) -> i64 {
         let (lo, hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
-        if self.rate(seed, label, -1).is_none() {
+        if self.rate(label, -1).is_none() {
             return default;
         }
         let span = (hi as i128 - lo as i128 + 1) as u128;
-        let d = point_draw(seed, label, D_KNOB, 0) as u128;
+        let d = point_draw(self.seed, label, D_KNOB, 0) as u128;
         (lo as i128 + (d % span) as i128) as i64
     }
     /// The length of the `n`-th delay of a point, at most `max` (0: the default range).
-    pub fn delay_ns(&self, seed: u64, label: u64, n: u64, max: u64) -> u64 {
+    pub fn delay_ns(&self, label: u64, n: u64, max: u64) -> u64 {
         let (lo, hi) = if max == 0 {
             (DELAY_MIN_NS, DELAY_MAX_NS)
         } else {
             (1, max)
         };
         let n = n ^ self.incarnation.wrapping_mul(0x2545_f491_4f6c_dd1d);
-        lo + point_draw(seed, label, D_DELAY, n) % (hi - lo + 1)
+        lo + point_draw(self.seed, label, D_DELAY, n) % (hi - lo + 1)
     }
 }
 
@@ -274,7 +285,11 @@ pub struct Site {
     pub kind: u8,
     pub label_len: u8,
     pub loc_len: u8,
-    pub _pad: [u8; 5],
+    /// The node whose fault point this is (0: the driver's, or a site every node shares). In a
+    /// run with nodes a node's fault points (`buggify`, `knob`, `delay`) are sites of its own,
+    /// counted and drawn for that node alone.
+    pub node: u8,
+    pub _pad: [u8; 4],
     /// Reports (assertions), evaluations (fault points, knobs, delays).
     pub evaluated: u64,
     /// Reports in which the condition held, hits of a `reachable`, firings of a point or delay.
@@ -315,8 +330,13 @@ pub struct SdkTab {
 pub const SDK_OFFSET: usize = (crate::wire::WIRE_OFFSET + crate::wire::WIRE_SIZE + 0xFFF) & !0xFFF;
 pub const SDK_SIZE: usize = core::mem::size_of::<SdkTab>();
 
-fn site_key(kind: u8, label: u64) -> u64 {
-    mix64(label ^ (kind as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1
+fn site_key(kind: u8, label: u64, node: u8) -> u64 {
+    mix64(label ^ (kind as u64 | (node as u64) << 8).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1
+}
+
+/// Whether a kind's sites are each node's own (fault points), not shared by the run.
+pub fn per_node(kind: u8) -> bool {
+    matches!(kind, KIND_BUGGIFY | KIND_KNOB | KIND_DELAY)
 }
 
 impl SdkTab {
@@ -329,8 +349,14 @@ impl SdkTab {
 
     /// The site of (kind, label), created on first use. `None` when the table is full.
     pub fn site(&mut self, kind: u8, label: &[u8]) -> Option<&mut Site> {
+        self.site_on(kind, label, 0)
+    }
+
+    /// The site of (kind, label) on node `node` (a fault point's: `per_node`; 0 otherwise).
+    pub fn site_on(&mut self, kind: u8, label: &[u8], node: u8) -> Option<&mut Site> {
+        let node = if per_node(kind) { node } else { 0 };
         let lh = label_hash(label);
-        let key = site_key(kind, lh);
+        let key = site_key(kind, lh, node);
         let mut b = (key as usize) % NBUCKET;
         loop {
             let i = self.index[b] as usize;
@@ -338,7 +364,7 @@ impl SdkTab {
                 break;
             }
             let s = &self.sites[i - 1];
-            if s.key == key && s.kind == kind && s.label() == label {
+            if s.key == key && s.kind == kind && s.node == node && s.label() == label {
                 return Some(&mut self.sites[i - 1]);
             }
             b = (b + 1) % NBUCKET;
@@ -354,6 +380,7 @@ impl SdkTab {
         s.key = key;
         s.label_hash = lh;
         s.kind = kind;
+        s.node = node;
         let l = label.len().min(LABEL_MAX);
         s.label_len = l as u8;
         s.label[..l].copy_from_slice(&label[..l]);
@@ -452,21 +479,29 @@ mod tests {
     #[test]
     fn decisions_are_keyed_by_label() {
         let mut c = SdkCfg {
-            buggify: 1,
+            buggify: BUGGIFY_ALL,
+            seed: 7,
             npoints: 1,
             ..SdkCfg::default()
         };
         let (a, b) = (label_hash(b"a"), label_hash(b"b"));
         c.points[0] = [a, 1000];
-        assert_eq!(c.rate(7, a, -1), Some(1000));
-        assert!((0..50).all(|n| c.fires(7, a, 1000, n)));
+        assert_eq!(c.rate(a, -1), Some(1000));
+        assert!((0..50).all(|n| c.fires(a, 1000, n)));
         c.points[0] = [a, 0];
-        assert_eq!(c.rate(7, a, -1), None);
+        assert_eq!(c.rate(a, -1), None);
         // Over many seeds, about a quarter of runs activate a point.
-        let active = (0..4000).filter(|s| c.rate(*s, b, -1).is_some()).count();
+        let active = (0..4000)
+            .filter(|s| SdkCfg { seed: *s, ..c }.rate(b, -1).is_some())
+            .count();
         assert!((800..1200).contains(&active), "{active}");
-        c.buggify = 0;
-        assert_eq!(c.rate(7, a, -1), None);
-        assert_eq!(c.knob(7, b, 5, 1, 9), 5);
+        // A point the key names fires alone without the class.
+        c.buggify = BUGGIFY_NAMED;
+        c.points[0] = [a, 1000];
+        assert_eq!(c.rate(a, -1), Some(1000));
+        assert!((0..4000).all(|s| SdkCfg { seed: s, ..c }.rate(b, -1).is_none()));
+        c.buggify = BUGGIFY_OFF;
+        assert_eq!(c.rate(a, -1), None);
+        assert_eq!(c.knob(b, 5, 1, 9), 5);
     }
 }

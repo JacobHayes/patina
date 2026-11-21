@@ -12,7 +12,7 @@
 #@ tier=release budget=120 slots=4
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f2
-"$PATINA" sweep -j 4 --seeds 1..3 --crash-points --crash machine --buggify --config "$("$PATINA_CFG" preempt=traps)" \
+"$PATINA" sweep -j 4 --seeds 1..3 --crash-points --faults crash --faults buggify --config "$("$PATINA_CFG" preempt=traps)" \
     --env "FJ_N=${F2_N:-100}" --env FJ_VAL_SHIFT=289 --env FJ_WIPE_PARTIAL=1 --max-findings 1 \
     --keep fail --out "$o" \
     --mount "$W/fjall-harness":/guest:copy -- /guest/fjall-harness-debug >"$o.txt" 2>&1 || true

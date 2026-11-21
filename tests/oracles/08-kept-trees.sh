@@ -26,7 +26,7 @@ os.close(fd)
 os.makedirs("d", exist_ok=True)
 open("d/n%d" % inc, "w").write("x")
 sys.exit(int(sys.argv[1]))'
-crash=(--crash machine:300 --fault max-incarnations=3)
+crash=(--fault crash-permille=300 --fault max-incarnations=3)
 # The listing of every crash's post-crash/ and its contents, for the checkers below.
 cat >listing <<'EOF'
 #!/bin/sh

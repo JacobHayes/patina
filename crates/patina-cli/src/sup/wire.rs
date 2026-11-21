@@ -454,13 +454,10 @@ impl Sup {
         tab(self.ctl).cfg
     }
 
+    /// In the fault window (after `setup-complete` in a run held until setup, before
+    /// `faults-done`): faults may act.
     pub(super) fn faults_on(&self) -> bool {
-        self.setup_done()
-    }
-
-    /// Past setup (`faults-after-setup`): faults may act.
-    pub(super) fn setup_done(&self) -> bool {
-        self.ctl.seq.load(Relaxed) >= self.ctl.faults.cfg.fault_after_seq
+        self.ctl.faults.cfg.in_window(self.ctl.seq.load(Relaxed))
     }
 
     /// A per-mille fault decision keyed by (connection, sub-key, n).
@@ -535,7 +532,6 @@ impl Sup {
     /// link, `HELD` with its draw (`wire_heal` stamps it).
     fn stamp(&mut self, id: u32, dir: usize, fin: bool) -> u64 {
         let now = self.now();
-        let cfg = self.net_cfg();
         let (n, last, sport, cport, link) = {
             let c = self.wire.conns.get_mut(&id).unwrap();
             c.dirs[dir].n += 1;
@@ -543,11 +539,7 @@ impl Sup {
             (c.dirs[dir].n, c.dirs[dir].last_t, c.sport, c.cport, link)
         };
         let faulted = self.link_faulted(link.0, link.1);
-        let range = if fin && cfg.halfclose_set != 0 && faulted {
-            (cfg.halfclose_min_ns, cfg.halfclose_max_ns)
-        } else {
-            self.link_delay_range(link.0, link.1)
-        };
+        let range = self.link_delay_range(link.0, link.1);
         let d = self.net_delay(id, dir as u64 | if fin { 2 } else { 0 }, n, range);
         let held = self.wire.conns[&id].dirs[dir].held_since.is_some();
         if held || self.link_cut(link.0, link.1) {

@@ -1,4 +1,4 @@
-# 10. Crash-point coverage for ack-log over COV_SEEDS seeds (default 50; evidence: 500) (machine:20,
+# 10. Crash-point coverage for ack-log over COV_SEEDS seeds (default 50; evidence: 500) (crash-permille=20,
 # ext4-ordered): the
 # number of distinct post-crash trees, and crashes observed between a write and its fsync,
 # between the record fsync and the acknowledgement write, and between the checkpoint
@@ -16,7 +16,7 @@ W1='^write->fsync (data.log)$' W2='^fsync->ack-write$' W3='^rename->dir-fsync$'
 a=1
 while :; do
     b=$((a + N - 1))
-    SWEEP_KEEP=all sweep 10/sweep "$a-$b" --crash machine:20 -- /guest/ack-log correct
+    SWEEP_KEEP=all sweep 10/sweep "$a-$b" --fault crash-permille=20 -- /guest/ack-log correct
     bad=$(awk -F'\t' 'NR > 1 && $2 != "ok" {print; exit}' "$d/sweep/summary.tsv")
     [ -z "$bad" ] || die "not ok: $bad"
     for seed in $(seq "$a" "$b"); do

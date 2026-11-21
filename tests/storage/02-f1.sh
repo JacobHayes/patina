@@ -1,4 +1,4 @@
-# 2. F1 (partial create not recoverable). Under --crash machine:30 and --crash process:30, seeds
+# 2. F1 (partial create not recoverable). Under --fault crash-permille=30 and --faults kill --fault crash-permille=30, seeds
 # 1-100 are searched, 25 at a time, for the violation open-after-crash (a crash at 30 per mille
 # lands early, where the database is created: about one seed in ten reaches it, a few percent at
 # 3 per mille, too few for this range on arm64). For the first seed whose kept post-crash tree,
@@ -7,11 +7,11 @@
 # the architecture and the guest build, so this is an area check, not a quick one.
 #@ tier=area budget=30 slots=4
 . "$(dirname "$0")/lib/common.inc"
-for crash in machine:30 process:30; do
-    n=f1-${crash%%:*}
+for crash in crash kill; do
+    n=f1-$crash
     found= all=
     for b in 1-25 26-50 51-75 76-100; do
-        seeds=$(matches "$n" '^open-after-crash: ' fjall-harness "$b" -- --crash "$crash" -- /guest/fjall-harness-debug)
+        seeds=$(matches "$n" '^open-after-crash: ' fjall-harness "$b" -- --faults "$crash" --fault crash-permille=30 -- /guest/fjall-harness-debug)
         all="$all $seeds"
         for s in $seeds; do
             o=$RUNS/$n/run-$s
@@ -26,7 +26,7 @@ for crash in machine:30 process:30; do
     [ -n "${all// }" ] || die "$crash: no seed of 1-100 reached open-after-crash ($(tail -1 "$RUNS/$n.table"))"
     [ -n "$found" ] || die "$crash: the native harness recovered every kept tree (seeds $(echo $all))"
     w=$RUNS/f1-wipe-$n-$found
-    run fjall-harness "$w" "$found" --env FJ_WIPE_PARTIAL=1 --crash "$crash" -- /guest/fjall-harness-debug
+    run fjall-harness "$w" "$found" --env FJ_WIPE_PARTIAL=1 --faults "$crash" --fault crash-permille=30 -- /guest/fjall-harness-debug
     [ "$(field "$w/result.json" outcome)" = ok ] || die "$crash seed $found with FJ_WIPE_PARTIAL=1: $(field "$w/result.json" message)"
     echo "F1 $crash: seeds $(echo $all) of 1-${b#*-}; seed $found native: $(grep '^INVARIANT' "$o/native.txt" | tail -1); FJ_WIPE_PARTIAL=1: ok"
 done

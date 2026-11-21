@@ -188,7 +188,6 @@ pub const SUB_WSYNC_ERR_FIRE: u64 = 13;
 pub const INJ_ERROR: u64 = 1;
 pub const INJ_SHORT: u64 = 2;
 pub const INJ_DELAY: u64 = 3;
-pub const INJ_ENOSPC: u64 = 4;
 pub const INJ_FSYNC_EIO: u64 = 5;
 /// The class that failed a sync (`args[3]` of an `INJ_FSYNC_EIO` record).
 pub const SYNC_BY_FSYNC_ERROR: u64 = 0;
@@ -211,20 +210,18 @@ pub enum Kind {
     FsShort = 1,
     FsDelay = 2,
     FsyncError = 3,
-    Enospc = 4,
-    MemError = 5,
-    MemLimit = 6,
-    PathSwap = 7,
+    MemError = 4,
+    MemLimit = 5,
+    PathSwap = 6,
 }
 
-pub const NKIND: usize = 8;
+pub const NKIND: usize = 7;
 /// The plan's class name of each `Kind` (`result.json` `faults.counts`).
 pub const KIND_NAMES: [&str; NKIND] = [
     "fs-error",
     "fs-short",
     "fs-delay",
     "fsync-error",
-    "enospc",
     "mem-error",
     "mem-limit",
     "path-swap",
@@ -245,16 +242,20 @@ pub struct FaultCfg {
     pub fsync_error_permille: u64,
     /// 0: off.
     pub fsync_error_at: u64,
-    /// 0: off.
-    pub enospc_after_bytes: u64,
-    /// `fs-delay-permille`, `fs-delay-max-ms`.
+    /// `fs-delay-permille`; the longest delay (10 ms).
     pub delay_permille: u64,
     pub delay_max_ns: u64,
     pub mem_error_permille: u64,
     pub mem_error_at: u64,
-    /// No fault before this sequence number: `faults-after-setup=1` sets it to the maximum
-    /// and the SDK's `setup-complete` mark lowers it to the mark's own.
+    /// No fault before this sequence number: a run held until setup (one whose program marked
+    /// `setup-complete` in an earlier pass, `Config::faults_held`) starts with the maximum, and
+    /// the `setup-complete` mark lowers it to the mark's own.
     pub fault_after_seq: u64,
+    /// No fault from this sequence number on: the `faults-done` mark's own (0: no mark yet).
+    pub fault_until_seq: u64,
+    /// 1: the run's faults act from its start and it has faults, so a `setup-complete` mark
+    /// ends this pass (`ctl::LIFE_RESTART`) and the run starts again held until setup.
+    pub restart_at_setup: u64,
     /// `CRASH_*`.
     pub crash_kind: u64,
     /// Per-mille rate at each crash point (when `crash_at` is 0).
@@ -268,23 +269,24 @@ pub struct FaultCfg {
     pub incarnation: u64,
     /// `mem-limit-mb` in bytes (0: off): anonymous memory growth past it answers `ENOMEM`.
     pub mem_limit_bytes: u64,
-    /// `path-swap-permille`, `path-swap-at` (0: off).
+    /// `path-swap-permille` (0: off).
     pub path_swap_permille: u64,
-    pub path_swap_at: u64,
-    pub reserved: [u64; 1],
 }
 
 impl FaultCfg {
+    /// Faults may act at sequence number `seq`: after setup and before `faults-done`.
+    pub fn in_window(&self, seq: u64) -> bool {
+        seq >= self.fault_after_seq && (self.fault_until_seq == 0 || seq < self.fault_until_seq)
+    }
     pub fn faults_active(&self) -> bool {
         self.any != 0
     }
     pub fn path_swap(&self) -> bool {
-        self.path_swap_permille != 0 || self.path_swap_at != 0
+        self.path_swap_permille != 0
     }
 }
 
-/// Fault state in the control region: configuration, the per-class call counters, bytes
-/// written to `/work` (for `enospc-after-bytes`), counts.
+/// Fault state in the control region: configuration, the per-class call counters, counts.
 #[repr(C)]
 pub struct FaultCtl {
     pub cfg: FaultCfg,
@@ -292,7 +294,6 @@ pub struct FaultCtl {
     pub counters: [AtomicU64; NCLASS],
     /// Sync-class calls on eligible targets (`fsync-error-at`).
     pub sync_calls: AtomicU64,
-    pub work_bytes: AtomicU64,
     pub injected: AtomicU64,
     /// Crash points passed in this incarnation (whether or not one fired); after a crash, the
     /// ordinal of the point that fired.

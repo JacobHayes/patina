@@ -11,9 +11,9 @@
 . "$(dirname "$0")/lib/common.inc"
 found= all=
 for b in 1-100 101-200 201-300 301-400 401-500; do
-    seeds=$(matches f3 'parked: .*wait=sleep deadline=' fjall-harness "$b" -- --env FJ_N=1000 --buggify \
+    seeds=$(matches f3 'parked: .*wait=sleep deadline=' fjall-harness "$b" -- --env FJ_N=1000 --faults buggify \
         --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --config "$("$PATINA_CFG" time-limit=400 preempt=traps)" --fault fs-error-permille=3 \
-        --crash machine:2 -- /guest/fjall-harness-debug)
+        --fault crash-permille=2 -- /guest/fjall-harness-debug)
     all="$all $seeds"
     for s in $seeds; do
         grep -q 'Worker #0 crashed' "$RUNS/f3/run-$s"/inc-*/stderr && { found=$s; break; }

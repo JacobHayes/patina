@@ -1,6 +1,6 @@
 # 13. Nodes: a node's machine crash at its crash points (tests/guests/nodes/ack2.py: a forwards
 # each put to b and acknowledges once b answers; b answers after its fsync, or with `early`
-# before it). `--crash machine-at:N@a` in the middle of a's points crashes a's machine there:
+# before it). `--fault crash-at=N@a` in the middle of a's points crashes a's machine there:
 # one crash event naming a and the point, a's crashed disk kept as post-crash with what it lost
 # counted, a restarted, and b untouched (one boot, no post-crash, every put on its disk). A
 # `--crash-points` sweep crashes each point of each node in turn: on `early` it finds the lost
@@ -22,11 +22,11 @@ done
 D="python3 /guest/ack2.py driver 3"
 s=1
 # a's points in a run that counts them and never crashes; then a crash at the middle one.
-run_ok "$o/base" $s --config "$o/ok.toml" --crash machine:0@a -- $D
+run_ok "$o/base" $s --config "$o/ok.toml" --fault crash-permille=0@a -- $D
 n=$(field "$o/base/result.json" nodes.list.1.crash_points.0)
 [ "$n" -ge 2 ] || die "a counted $n crash points"
 p=$((n / 2))
-run_ok "$o/at" $s --config "$o/ok.toml" --crash machine-at:$p@a -- $D
+run_ok "$o/at" $s --config "$o/ok.toml" --fault crash-at=$p@a -- $D
 "$PATINA" log events "$o/at" --types crash | grep '"type":"crash"' >"$o/at.crash" || die "no crash event"
 [ "$(wc -l <"$o/at.crash")" = 1 ] || die "crash events: $(cat "$o/at.crash")"
 python3 -I - "$o/at" "$p" <<'PY' || die "crash at point $p of a"
@@ -49,7 +49,7 @@ PY
 echo "crash at point $p of a's $n: a down once, b untouched"
 # A process kill at the same point: a's processes killed there and restarted on its disk as it
 # was (no crash of its disk), b untouched.
-run_ok "$o/pk" $s --config "$o/ok.toml" --crash process-at:$p@a -- $D
+run_ok "$o/pk" $s --config "$o/ok.toml" --faults kill@a --fault crash-at=$p@a -- $D
 python3 -I - "$o/pk" "$p" <<'PY' || die "process kill at point $p of a"
 import json, os, sys
 d, p = sys.argv[1], int(sys.argv[2])
@@ -64,7 +64,7 @@ PY
 echo "process kill at point $p of a: a killed there once and restarted on its disk, b untouched"
 # Branch over every point of each node.
 # sw NAME KEEP: KEEP none is the test input PATINA_TEST_KEEP_NONE.
-sw() { rm -rf "${o:?}/sw-$1"; st=0; k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds $s --crash-points --crash machine -j 4 --keep "${k/none/fail}" --out "$o/sw-$1" \
+sw() { rm -rf "${o:?}/sw-$1"; st=0; k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds $s --crash-points --faults crash -j 4 --keep "${k/none/fail}" --out "$o/sw-$1" \
     --config "$o/$1.toml" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/sw-$1.txt" 2>&1 || st=$?; }
 sw early fail
 [ "$st" = 1 ] || die "branch sweep of early: exit $st: $(tail -5 "$o/sw-early.txt")"
@@ -112,7 +112,7 @@ d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 echo "rerun: same digest"
 [ "${CHECK_TIER:-}" != quick ] || exit 0
 # A sample: at most 4 children, both nodes among them, and the report says how many of how many.
-sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds $s --crash-points --crash machine -j 4 \
+sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds $s --crash-points --faults crash -j 4 \
     --out "$o/$n" --config "$o/ok.toml" "$@" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/$n.txt" 2>&1 || st=$?; }
 sw2 max --crash-points=4
 [ "$st" = 0 ] || die "--crash-points=N: exit $st: $(tail -5 "$o/max.txt")"

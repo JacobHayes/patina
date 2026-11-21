@@ -16,6 +16,6 @@ patina_dst::setup_complete();
 ```
 
 A failed `always!` ends the run with outcome `violation` and `label: detail`. Fault points
-fire only in a run with `--buggify`, on evaluations chosen from the seed and the label. Every
+fire only in a run with `--faults buggify`, on evaluations chosen from the seed and the label. Every
 call is in the run's boundary log, so replay checks it. The crate docs (`src/lib.rs`) have the
 details; `sdk/c/patina.h` documents the wire.

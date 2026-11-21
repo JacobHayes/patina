@@ -10,7 +10,7 @@ A_ALL="dents pipebuf epollorder churn addr sigstorm uninit initstack envprobe so
 wl() {
     EXTRA=""; FAULTS="--fault fs-error-permille=5"
     case $1 in
-    W1) GDIR=$W/rust-threads-files; CMD="/guest/rust-threads-files correct"; FAULTS="--crash machine:5" ;;
+    W1) GDIR=$W/rust-threads-files; CMD="/guest/rust-threads-files correct"; FAULTS="--fault crash-permille=5" ;;
     W2) GDIR=$WL/tokio-mt; CMD="/guest/tokio-mt local" ;;
     W3) GDIR=$W/c-sqlite; CMD="/guest/sqlite-dur wal normal" ;;
     W4) GDIR=$WL/go-static; CMD="/guest/go-static all"; FAULTS="--fault fs-error-permille=10" ;;
@@ -19,7 +19,7 @@ wl() {
     W7) GDIR=$GU; CMD="/guest/exec-matrix" ;;
     W8) GDIR=$GU; CMD="/guest/sockets all"; FAULTS=$NETF ;;
     U1) GDIR=$GU; CMD="/guest/udp rpc retry"; FAULTS="--fault net-drop-permille=100 --fault net-dup-permille=50 --fault net-reorder-permille=50" ;;
-    W9) GDIR=$W/fjall-harness; CMD="/guest/fjall-harness-release"; FAULTS="--crash machine:5 --fault fs-error-permille=2" ;;
+    W9) GDIR=$W/fjall-harness; CMD="/guest/fjall-harness-release"; FAULTS="--fault crash-permille=5 --fault fs-error-permille=2" ;;
     churn) GDIR=$G12; CMD="/guest/churn 300 2000" ;;
     pipeprobe) GDIR=$G12; CMD="/guest/pipeprobe 300" ;;
     fs-tour|proc-policy|insn-probe) GDIR=$GU; CMD="/guest/$1" ;;

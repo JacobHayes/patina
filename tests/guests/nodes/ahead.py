@@ -12,6 +12,9 @@
                              driver and b, use control calls (`patina ctl`, `patina.control`),
                              send `ping` and wait for `pong`, with no deadline: only the heal
                              can deliver it
+    ahead.py driver done     as heal, but mark faults-done at 3 s instead: the partition heals
+                             at once, and `pong` comes before the partition's own end
+    ahead.py driver quiet    mark faults-done, then as kill: no kill comes
 
 Each driver prints one line and exits 0, or prints `FAIL: ...` and exits 1.
 """
@@ -65,6 +68,9 @@ def ended(c):
 
 
 def driver(case):
+    if case == "quiet":
+        patina.faults_done()
+        case = "kill"
     if case == "kill":
         c = connect()
         if not ended(c):
@@ -91,6 +97,16 @@ def driver(case):
         if line != "pong":
             raise SystemExit(f"FAIL: heal: {line!r}")
         print("heal: pong")
+    elif case == "done":
+        c = connect()
+        time.sleep(3)
+        t0 = time.monotonic()
+        subprocess.run(["patina", "ctl", "mark", "faults-done"], check=True)
+        c.sendall(b"ping\n")
+        line = c.makefile("r").readline().strip()
+        if line != "pong" or time.monotonic() - t0 > 1:
+            raise SystemExit(f"FAIL: done: {line!r} after {time.monotonic() - t0:.1f} s")
+        print("done: pong")
     else:
         raise SystemExit(f"FAIL: unknown case {case}")
 

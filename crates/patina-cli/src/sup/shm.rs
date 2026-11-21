@@ -8,7 +8,7 @@
 //! The kernel's lifetime rules: `IPC_RMID` marks a segment (its key becomes private, mode gets
 //! `SHM_DEST`) and it goes at its last detach; `fork` copies a process's attachments, `execve`
 //! and exit detach them. A segment outlives the processes that made it: a process crash
-//! (`--crash process`) keeps the table and the memory for the next incarnation (written to
+//! (`--faults kill`) keeps the table and the memory for the next incarnation (written to
 //! `FD_SHM` at the end of the incarnation), a machine crash starts with none.
 
 use proto::ctl::*;

@@ -842,7 +842,18 @@ pub enum Op {
     /// whose start is queued, a kill of one that is down, which cancels its restart) or
     /// `-EAGAIN` (a start past `node::BOOTS_MAX` incarnations).
     Node = 66,
+    /// A lifecycle mark that the supervisor acts on (`crate::sdk::SETUP_COMPLETE`,
+    /// `crate::sdk::FAULTS_DONE`): [`LIFE_*`, the mark's sequence number]. `LIFE_RESTART`: the
+    /// run, whose faults acted from its start, marked `setup-complete`, so it ends here and the
+    /// launcher runs it again with faults held until the mark (never answered).
+    /// `LIFE_FAULTS_DONE`: no fault acts after the mark; the seed's partitions in force heal
+    /// and its pauses in force end now. Reply 0.
+    Lifecycle = 67,
 }
+
+/// `Op::Lifecycle`'s first argument.
+pub const LIFE_RESTART: u64 = 1;
+pub const LIFE_FAULTS_DONE: u64 = 2;
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
 ///
@@ -936,7 +947,7 @@ pub const DEC_TIMERFD: u32 = 0x101;
 impl Op {
     pub fn from_u32(v: u32) -> Option<Op> {
         use Op::*;
-        const ALL: [Op; 43] = [
+        const ALL: [Op; 44] = [
             Hello,
             Yield,
             Sleep,
@@ -980,6 +991,7 @@ impl Op {
             MapsSync,
             ShadowReclaim,
             Node,
+            Lifecycle,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -1029,6 +1041,7 @@ impl Op {
             MapsSync => "MapsSync",
             ShadowReclaim => "ShadowReclaim",
             Node => "Node",
+            Lifecycle => "Lifecycle",
         }
     }
 }

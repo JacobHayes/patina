@@ -1,5 +1,5 @@
 # 13. `patina explain RUNDIR` on the acklog example's crash bug (the first violating seed of
-#    1-64 under `--crash machine`: about one seed in five violates, and which do depends on the
+#    1-64 under `--faults crash`: about one seed in five violates, and which do depends on the
 #    host): the observed replay is the run (its digest, and the
 #    observations are in RUNDIR/explain, not in its boundary log); the story is shorter than the
 #    event log; its crash line is at the run's last crash that lost something (an earlier one
@@ -13,7 +13,7 @@
 . "$(dirname "$0")/lib.inc"
 r=""
 for s in $(seq 1 64); do
-    prun "$RUNS/acklog-$s" --seed "$s" --crash machine -- "$PATINA_GUESTS/examples/acklog"
+    prun "$RUNS/acklog-$s" --seed "$s" --faults crash -- "$PATINA_GUESTS/examples/acklog"
     if [ "$(field "$RUNS/acklog-$s/result.json" outcome)" = violation ]; then r=$RUNS/acklog-$s; break; fi
 done
 [ -n "$r" ] || die "acklog: no violation in seeds 1-64"
@@ -52,7 +52,7 @@ echo "stop event $n: $(cat "$r.stop")"
 # lists none as at risk at the crash (search the first crash point after such a write).
 p=""
 for n in $(seq 1 12); do
-    prun "$RUNS/proc-$n" --seed 1 --crash "process-at:$n" -- "$PATINA_GUESTS/examples/acklog"
+    prun "$RUNS/proc-$n" --seed 1 --faults kill --fault crash-at="$n" -- "$PATINA_GUESTS/examples/acklog"
     "$PATINA" log events "$RUNS/proc-$n" >"$RUNS/proc-$n.events"
     if python3 -I -c 'import json, sys
 since = {}

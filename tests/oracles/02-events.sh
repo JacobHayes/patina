@@ -21,7 +21,7 @@ jq -c '.faults.recent[] | {seq, fault, object, call}' faults/result.json >result
 cmp -s events-recent result-recent || die "the last fault events are not faults.recent: $(diff events-recent result-recent | head -4)"
 
 # Crashes: a kept run with several incarnations.
-"$PATINA" sweep --seeds 1..12 -j 4 --keep all --crash machine:10 --out crashes -- "$kv" fixed >crashes.txt 2>&1 || die "crash sweep: $(tail -2 crashes.txt)"
+"$PATINA" sweep --seeds 1..12 -j 4 --keep all --fault crash-permille=10 --out crashes -- "$kv" fixed >crashes.txt 2>&1 || die "crash sweep: $(tail -2 crashes.txt)"
 n=0
 for d in crashes/seed-*; do
     k=$(jq .incarnations "$d/result.json")

@@ -1,8 +1,9 @@
 //! `patina minimize RUNDIR`: rerun a failing run with less fault injection while it keeps its
-//! signature. First each fault setting (each `--fault` key, each node's scoped one `KEY=V@NODE`
-//! as its own, `--crash`, `--buggify`) is dropped in turn, keeping a removal when the signature
-//! is unchanged. With nodes, a machine crash at crash points that is kept then becomes one
-//! node's crash alone (`machine-at:N@NODE`): each node's first crash, then its later ones at
+//! signature. Its classes are first expanded into their keys; then each fault setting (each
+//! `--fault` key, each node's scoped one `KEY=V@NODE` as its own, each class without keys:
+//! `buggify`, `crash`, `kill`) is dropped in turn, keeping a removal when the signature is
+//! unchanged. With nodes, a crash at crash points that is kept then becomes one node's crash
+//! alone (`crash-at=N@NODE`): each node's first crash, then its later ones at
 //! their places in a first boot (`single_points`), and the settings left are dropped once
 //! more; failing that it is
 //! narrowed to fewer nodes, one dropped at a time. Then each remaining rate is halved (a gap
@@ -24,13 +25,17 @@ use std::process::ExitCode;
 /// The most runs one minimisation makes.
 pub const MAX_RUNS: usize = 30;
 
-/// A crash at one crash point (`machine-at:N`, `process-at:N`): nothing in it to narrow.
+/// A crash at one crash point (`crash-at=N`): nothing in it to narrow.
 fn c_at(c: &Config) -> bool {
-    c.crash.as_deref().is_some_and(|x| x.contains("-at:"))
+    c.faults.iter().any(|x| x.starts_with("crash-at="))
 }
 
-/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, `KIND:N` for a crash rate (with
-/// its `@NODE,...` scope), and the gap between partitions or between a node's crashes
+/// Whether a class entry (`CLASS[@NODE,...]`) is a crash's.
+fn crash_class(x: &str) -> bool {
+    matches!(crate::faults::split_scope(x).0, "crash" | "kill")
+}
+
+/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, and the gap between partitions or between a node's crashes
 /// (`partition-gap-ms`, `crash-gap-ms`) doubled, up to an hour; a node scope (`@NODE,...`)
 /// stays.
 fn halve(v: &str) -> Option<String> {
@@ -151,13 +156,8 @@ impl Search<'_> {
 
 /// The fault settings of a configuration, one per word.
 fn describe(cfg: &Config) -> String {
-    let mut v: Vec<String> = cfg.faults.clone();
-    if let Some(c) = &cfg.crash {
-        v.push(format!("crash {c}"));
-    }
-    if cfg.buggify {
-        v.push("buggify".into());
-    }
+    let mut v: Vec<String> = cfg.fault_classes.clone();
+    v.extend(cfg.faults.iter().cloned());
     if v.is_empty() {
         "no faults".into()
     } else {
@@ -205,20 +205,25 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         quiet: a.json(),
     };
     crate::launch::preflight(&cfg.opts_with(program.clone()).map_err(error)?).map_err(error)?;
-    // A preset is its keys: settings given beside it replace its keys of the same name, and
-    // each key resolves from the seed alone, so the expanded run is the same run.
+    // A class is its keys: settings given beside it replace its keys of the same name, and
+    // each key resolves from the seed alone, so the expanded run is the same run. The classes
+    // without keys stay, one entry each.
     let mut cfg = cfg;
     let mut expanded: Vec<String> = vec![];
-    // A preset's scope (`disk@a`) goes with each of its keys.
-    for (names, scope) in cfg
-        .faults_preset
-        .iter()
-        .map(|p| crate::faults::split_scope(p))
-    {
+    let mut classes: Vec<String> = vec![];
+    let faultable = crate::faults::faultable_nodes(cfg.nodes.len(), &cfg.faults).map_err(error)?;
+    // A class's scope (`disk@a`) goes with each of its keys.
+    for e in &cfg.fault_classes {
+        let (names, scope) = crate::faults::split_scope(e);
         let at = scope.map(|s| format!("@{s}")).unwrap_or_default();
-        for p in names.split(',') {
-            let kv =
-                crate::faults::preset_settings(p, cfg.nodes.len(), &cfg.faults).map_err(error)?;
+        for c in crate::faults::classes(names, cfg.nodes.len(), faultable).map_err(error)? {
+            if scope.is_some() && !crate::faults::node_class(c) {
+                continue;
+            }
+            let kv = crate::faults::class_settings(c).map_err(error)?;
+            if kv.is_empty() {
+                classes.push(format!("{c}{at}"));
+            }
             for (k, v) in kv {
                 let given = |x: &String| {
                     let (x, xs) = crate::faults::split_scope(x);
@@ -230,9 +235,20 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             }
         }
     }
+    // One machine's crash at its default rate: the rate, to halve.
+    let keyed = cfg
+        .faults
+        .iter()
+        .any(|x| x.starts_with("crash-permille=") || x.starts_with("crash-at="));
+    if cfg.nodes.is_empty() && !keyed && classes.iter().any(|c| crash_class(c)) {
+        expanded.push(format!(
+            "crash-permille={}",
+            crate::faults::CRASH_DEFAULT_PERMILLE
+        ));
+    }
     expanded.append(&mut cfg.faults);
     cfg.faults = expanded;
-    cfg.faults_preset.clear();
+    cfg.fault_classes = classes;
     let mut cur = cfg.clone();
     let best: std::cell::RefCell<Option<PathBuf>> = Default::default();
     let keep =
@@ -248,23 +264,40 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 None => Ok(false),
             }
         };
-    // Drop each setting in turn.
+    // Drop each setting in turn. On one machine a crash key and the class saying its kind
+    // (`kill`) go together: the class alone would crash at the default rate, the key alone
+    // would crash the machine.
+    let one = cfg.nodes.is_empty();
+    let crash_key = |x: &String| x.starts_with("crash-permille=") || x.starts_with("crash-at=");
     for f in cfg.faults.clone() {
         let mut c = cur.clone();
         c.faults.retain(|x| *x != f);
+        if one && crash_key(&f) && !c.faults.iter().any(crash_key) {
+            c.fault_classes.retain(|x| !crash_class(x));
+        }
         keep(&mut s, c, &mut cur, format!("without {f}"))?;
     }
-    if let Some(cr) = cur.crash.clone() {
+    for f in cfg.fault_classes.clone() {
+        if !cur.fault_classes.contains(&f)
+            || one && crash_class(&f) && cur.faults.iter().any(crash_key)
+        {
+            continue;
+        }
         let mut c = cur.clone();
-        c.crash = None;
-        keep(&mut s, c, &mut cur, format!("without --crash {cr}"))?;
+        c.fault_classes.retain(|x| *x != f);
+        keep(&mut s, c, &mut cur, format!("without --faults {f}"))?;
     }
-    // With nodes, a crash at crash points becomes one node's first crash alone
-    // (`machine-at:N@NODE`, N its point in the run that last kept the signature), tried node
-    // by node: a node's crash points count its own oplog records and syncs, so its crash lands
-    // at the same place in its work when other nodes no longer crash.
-    if let Some(cr) = cur.crash.clone().filter(|_| !cur.nodes.is_empty()) {
-        let (kind, scope) = crate::faults::split_scope(&cr);
+    // With nodes, a crash at crash points (`crash-permille`) becomes one node's first crash
+    // alone (`crash-at=N@NODE`, N its point in the run that last kept the signature), tried
+    // node by node: a node's crash points count its own oplog records and syncs, so its crash
+    // lands at the same place in its work when other nodes no longer crash.
+    let rate = cur
+        .faults
+        .iter()
+        .find(|x| x.starts_with("crash-permille="))
+        .cloned();
+    if let Some(cr) = rate.filter(|_| !cur.nodes.is_empty()) {
+        let (_, scope) = crate::faults::split_scope(&cr);
         let d = best.borrow().clone().unwrap_or_else(|| rundir.clone());
         let r = read_json(&d.join("result.json")).unwrap_or_default();
         let names: Vec<String> = match scope {
@@ -287,7 +320,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 .map_while(|d| d["point"].as_u64().filter(|p| *p > 0))
                 .collect()
         };
-        if kind.starts_with("machine:") {
+        {
             // Each node's first try, then each node's second, and so on: a node's first crash
             // alone, the likeliest, is tried for every node before a later crash of any.
             let tries: Vec<(String, Vec<u64>)> = names
@@ -300,10 +333,11 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             'ranks: for k in 0..SINGLE_TRIES {
                 for (n, ps) in &tries {
                     let Some(p) = ps.get(k) else { continue };
-                    let at = format!("machine-at:{p}@{n}");
+                    let at = format!("crash-at={p}@{n}");
                     let mut c = cur.clone();
-                    c.crash = Some(at.clone());
-                    if keep(&mut s, c, &mut cur, format!("--crash {cr} -> {at}"))? {
+                    c.faults.retain(|x| !x.starts_with("crash-permille="));
+                    c.faults.push(at.clone());
+                    if keep(&mut s, c, &mut cur, format!("{cr} -> {at}"))? {
                         // Other settings may have been needed only for the other crashes.
                         for f in cur.faults.clone() {
                             let mut c = cur.clone();
@@ -317,11 +351,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     // With nodes: the crash on fewer nodes, one dropped at a time while more than one is left.
-    if let Some(cr) = cur
-        .crash
-        .clone()
-        .filter(|_| !cur.nodes.is_empty() && !c_at(&cur))
-    {
+    let crash = cur.fault_classes.iter().find(|x| crash_class(x)).cloned();
+    if let Some(cr) = crash.filter(|_| !cur.nodes.is_empty() && !c_at(&cur)) {
         let (kind, scope) = crate::faults::split_scope(&cr);
         let mut on: Vec<String> = match scope {
             Some(s) => s.split(',').map(str::to_string).collect(),
@@ -338,21 +369,17 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             }
             let rest: Vec<String> = on.iter().filter(|x| **x != n).cloned().collect();
             let mut c = cur.clone();
-            c.crash = Some(format!("{kind}@{}", rest.join(",")));
+            c.fault_classes.retain(|x| *x != cr);
+            c.fault_classes.push(format!("{kind}@{}", rest.join(",")));
             if keep(
                 &mut s,
                 c,
                 &mut cur,
-                format!("--crash {kind} without node {n}"),
+                format!("--faults {kind} without node {n}"),
             )? {
                 on = rest;
             }
         }
-    }
-    if cur.buggify {
-        let mut c = cur.clone();
-        c.buggify = false;
-        keep(&mut s, c, &mut cur, "without --buggify".into())?;
     }
     // Halve what is left.
     for i in 0..cur.faults.len() {
@@ -363,14 +390,6 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             if !keep(&mut s, c, &mut cur, change)? {
                 break;
             }
-        }
-    }
-    while let Some(h) = cur.crash.as_deref().and_then(halve) {
-        let mut c = cur.clone();
-        let change = format!("--crash {} -> {h}", c.crash.as_deref().unwrap_or(""));
-        c.crash = Some(h);
-        if !keep(&mut s, c, &mut cur, change)? {
-            break;
         }
     }
     let budget_spent = s.runs >= MAX_RUNS;

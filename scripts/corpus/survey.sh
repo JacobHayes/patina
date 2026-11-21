@@ -8,7 +8,7 @@
 #   same    seed 1 three times: outcome, refusals, distinct digests, stdout against native
 #   sweep   seeds 1..N (header `seeds`, default 20): outcomes and distinct digests
 #   verify  patina verify --vary cpu,load,aslr
-#   disk, net  a fault sweep with that preset, seeds 1..N (header `fseeds`, default 10)
+#   disk, net  a fault sweep with that class, seeds 1..N (header `fseeds`, default 10)
 #
 # Environment: CORPUS, a scratch directory (runs go to $CORPUS/runs, replaced per workload);
 # PROGS, the directory that holds the programs the workloads name (default $CORPUS/programs);

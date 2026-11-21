@@ -68,7 +68,7 @@ hang=$!
 # The kvlog sweep (about one seed in four violates, which ones depending on the host), and
 # kvlog fixed.
 rc=0
-"$PATINA" sweep --seeds 1..64 -j 4 --crash machine:10 --out kv --check chk/acked -- "$kv" >kv.txt 2>&1 || rc=$?
+"$PATINA" sweep --seeds 1..64 -j 4 --fault crash-permille=10 --out kv --check chk/acked -- "$kv" >kv.txt 2>&1 || rc=$?
 [ "$rc" = 1 ] || die "kvlog sweep: exit $rc: $(tail -3 kv.txt)"
 groups=$(jq -r '[.groups[].signature] | join(" | ")' kv/report.json)
 case $groups in "violation check: acked-record-lost"*) ;; *) die "kvlog sweep: groups: $groups" ;; esac
@@ -85,7 +85,7 @@ want=$(jq -r '"\(.check.label): \(.check.detail)"' "$first/result.json")
 
 # minimize keeps the crash and the signature; the checker runs in each try.
 "$PATINA" minimize "$first" --out min --format json >min.json 2>min.err || die "minimize: $(tail -2 min.err)"
-case $(jq -r .to min.json) in *"crash machine"*) ;; *) die "minimize dropped the crash: $(jq -c . min.json)" ;; esac
+case $(jq -r .to min.json) in *crash-permille=*) ;; *) die "minimize dropped the crash: $(jq -c . min.json)" ;; esac
 lhs=$(jq -r .signature "$(jq -r .dir min.json)/result.json"); rhs=$(jq -r .signature "$first/result.json")
 [ "$lhs" = "$rhs" ] || die "minimize: another signature"
 
@@ -187,7 +187,7 @@ printf '%s\n' "/bin/sh -c 'echo boom >&2; exit 1' first" "/bin/sh -c 'echo boom 
 echo "calc: $calc_groups; known: $(kn known1 calcs)"
 echo "check: $(jq -c .check kv/report.json); without crashes: vacuous"
 
-# 3. --ok-exit and log tree. Disk faults with fs errors at 10 per mille: under the preset alone
+# 3. --ok-exit and log tree. Disk faults with fs errors at 10 per mille: under the disk class alone
 # about one seed in twenty exits 1, too few in 80 for which seeds those are not to decide it.
 up=$PATINA_GUESTS/examples/upcase same=$root/examples/checks/same-tree
 export PATINA

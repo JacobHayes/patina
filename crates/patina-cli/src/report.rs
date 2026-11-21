@@ -363,56 +363,83 @@ fn fault_classes(r: &Value) -> (BTreeSet<String>, BTreeSet<String>, BTreeMap<Str
     (conf, inj, elig)
 }
 
-/// The fault classes a setting of their own named in some run (`--fault`, a `[faults]` key,
-/// `--crash`), and the classes of each preset the runs named (`run.json`).
+/// The fault classes a setting of their own named in some run (`--fault`, a `[faults]` key),
+/// and the count classes of each `--faults` class the runs named (`run.json`).
 fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<String>>) {
     use crate::launcher::attribution::class_of_key;
-    let (mut named, mut by_preset) = (BTreeSet::new(), BTreeMap::<String, BTreeSet<String>>::new());
-    let strs = |v: &Value| -> Vec<String> {
-        v.as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|x| x.as_str().map(str::to_string))
-            .collect()
-    };
+    let (mut named, mut by_class) = (BTreeSet::new(), BTreeMap::<String, BTreeSet<String>>::new());
     for r in runs {
         let c = &r.run["config"];
         for f in strs(&c["faults"]) {
-            if let Some(k) = class_of_key(f.split_once('=').map_or(f.as_str(), |x| x.0)) {
+            let (kv, _) = crate::faults::split_scope(&f);
+            if let Some(k) = class_of_key(kv.split_once('=').map_or(kv, |x| x.0)) {
                 named.insert(k.to_string());
             }
         }
-        if c["crash"].is_string() {
-            named.insert("crash".to_string());
-        }
-        for p in strs(&c["faults-preset"])
-            .iter()
-            .flat_map(|p| crate::faults::split_scope(p).0.split(','))
-        {
-            // A run with nodes also has the preset's node classes (partitions, pauses, clock
-            // skew), whether or not it had the nodes to draw them over: one without has nothing
-            // for them to act on; `cluster`'s machine crashes when `--crash` names none.
-            let with_nodes = c["nodes"].as_array().is_some_and(|n| !n.is_empty());
-            let node_kv = crate::faults::NODE_PRESETS
-                .iter()
-                .chain(crate::faults::MACHINE_PRESETS)
-                .filter(|x| x.0 == p && with_nodes)
-                .flat_map(|x| x.1.iter());
-            if let Some((_, kv)) = crate::faults::PRESETS.iter().find(|x| x.0 == p) {
-                let e = by_preset.entry(p.to_string()).or_default();
-                e.extend(
-                    kv.iter()
-                        .chain(node_kv)
-                        .filter_map(|(k, _)| class_of_key(k))
-                        .map(str::to_string),
-                );
-                if p == "cluster" && with_nodes && !c["crash"].is_string() {
-                    e.insert("crash".to_string());
+        let nodes = c["nodes"].as_array().map_or(0, |n| n.len());
+        for e in strs(&c["fault-classes"]) {
+            let names = crate::faults::split_scope(&e).0;
+            // Every class that may apply: `all` over a run with nodes enough for each.
+            for class in crate::faults::classes(names, nodes.max(2), 2).unwrap_or_default() {
+                let e = by_class.entry(class.to_string()).or_default();
+                match class {
+                    "crash" | "kill" => {
+                        e.insert("crash".to_string());
+                    }
+                    _ => e.extend(
+                        crate::faults::class_keys(class)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|(k, _)| class_of_key(k))
+                            .map(str::to_string),
+                    ),
                 }
             }
         }
     }
-    (named, by_preset)
+    (named, by_class)
+}
+
+/// A JSON array's strings.
+fn strs(v: &Value) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x.as_str().map(str::to_string))
+        .collect()
+}
+
+/// Whether every process of the run could fire its fault points: one machine with the class,
+/// or the class on the driver and on every node (else a point that only an unfaulted node or
+/// the driver reaches never fires, and that says nothing).
+fn buggify_everywhere(run: &Value) -> bool {
+    let plan = &run["faults"];
+    let nodes = strs_of(&run["config"]["nodes"], "name");
+    if nodes.is_empty() {
+        return plan.get("buggify").is_some();
+    }
+    std::iter::once("driver".to_string())
+        .chain(nodes)
+        .all(|n| plan.get(format!("buggify@{n}")).is_some())
+}
+
+fn strs_of(v: &Value, k: &str) -> Vec<String> {
+    v.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|x| x[k].as_str().map(str::to_string))
+        .collect()
+}
+
+/// The rate `buggify:LABEL` sets in a resolved plan, on any node.
+fn own_rate(plan: &Value, label: &str) -> Option<u64> {
+    let free = crate::signature::checkout_free;
+    plan.as_object().into_iter().flatten().find_map(|(k, v)| {
+        k.strip_prefix("buggify:")
+            .map(|l| crate::faults::split_scope(l).0)
+            .filter(|l| free(l) == label)
+            .and_then(|_| v.as_u64())
+    })
 }
 
 pub fn quote(s: &str) -> String {
@@ -457,12 +484,12 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "mounts",
         "work",
         "stdin",
-        "faults-preset",
+        "fault-classes",
         "faults",
+        // Held faults are what the run comes to by itself (`launch::run_one`).
+        "faults-held",
         "fs-model",
-        "crash",
         "timeout",
-        "buggify",
         "allow-unmet",
         "host-cpu",
         "check",
@@ -507,17 +534,14 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         if let Some(s) = &cfg.stdin {
             flag("--stdin", s.display().to_string());
         }
-        if !cfg.faults_preset.is_empty() {
-            flag("--faults", cfg.faults_preset.join(","));
+        for c in &cfg.fault_classes {
+            flag("--faults", c.clone());
         }
         for f in &cfg.faults {
             flag("--fault", f.clone());
         }
         if cfg.fs_model != d.fs_model {
             flag("--fault", format!("fs-model={}", cfg.fs_model));
-        }
-        if let Some(c) = &cfg.crash {
-            flag("--crash", c.clone());
         }
         if cfg.timeout != d.timeout {
             flag("--timeout", cfg.timeout.to_string());
@@ -532,9 +556,6 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             // Unconditional first (`config::normal`): the list reads back as written.
             let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
             flag("--ok-exit", l.join(","));
-        }
-        if cfg.buggify {
-            a.push("--buggify".into());
         }
     }
     a.push("--".into());
@@ -609,7 +630,7 @@ fn matched_text(pattern: &str, case: Option<&str>, signature: &str, fired: &[Str
 }
 
 /// The faults that fired in a run, sorted: each fault class that injected (`faults.counts`),
-/// and `buggify:LABEL` for each SDK fault point that fired (`--buggify`).
+/// and `buggify:LABEL` for each SDK fault point that fired (`--faults buggify`).
 pub fn fired(result: &Value) -> Vec<String> {
     let mut out: Vec<String> = fault_classes(result).1.into_iter().collect();
     for s in result["sdk"]["sites"].as_array().into_iter().flatten() {
@@ -804,7 +825,7 @@ fn shared_prefix(labels: &[String]) -> Option<(String, usize)> {
         .map(|(p, n)| (p.to_string(), n))
 }
 
-/// A `--buggify` sweep smaller than this is a smoke run: a fault point no run reached is noted,
+/// A `--faults buggify` sweep smaller than this is a smoke run: a fault point no run reached is noted,
 /// not vacuous.
 const SMOKE_RUNS: usize = 20;
 /// A fault point that never fired is vacuous when the chance of that at its rates was below this.
@@ -812,20 +833,14 @@ const MISS_CHANCE: f64 = 0.001;
 
 /// The natural log of the chance that the fault point `label` fired at none of `evaluated`
 /// evaluations in one run with the resolved plan `plan`: active in `ACTIVATION_PERMILLE` of runs
-/// and then firing at `buggify-permille`, or always active at its own `buggify:LABEL` rate.
+/// and then firing at `FIRE_PERMILLE`, or always active at its own `buggify:LABEL` rate.
 fn miss_ln(plan: &Value, label: &str, evaluated: u64) -> f64 {
     use proto::sdk::{ACTIVATION_PERMILLE, FIRE_PERMILLE};
-    let free = crate::signature::checkout_free;
-    let own = plan.as_object().into_iter().flatten().find_map(|(k, v)| {
-        k.strip_prefix("buggify:")
-            .filter(|l| free(l) == label)
-            .and_then(|_| v.as_u64())
-    });
-    let (active, rate) = match own {
+    let (active, rate) = match own_rate(plan, label) {
         Some(p) => (1.0, p as f64 / 1000.0),
         None => (
             ACTIVATION_PERMILLE as f64 / 1000.0,
-            plan["buggify-permille"].as_u64().unwrap_or(FIRE_PERMILLE) as f64 / 1000.0,
+            FIRE_PERMILLE as f64 / 1000.0,
         ),
     };
     let rate = rate.min(1.0);
@@ -956,22 +971,22 @@ pub fn build(
             *eligible.entry(k).or_default() += v;
         }
     }
-    // A class only a preset turned on may have had nothing to act on: `--faults net` on a
+    // A fault only a class turned on may have had nothing to act on: `--faults net` on a
     // program with no datagram socket. Never eligible, it is not applicable, not vacuous, if its
-    // preset acted on something; a class a setting of its own named (`--fault`, a `[faults]`
-    // key, `--crash`) in any run, or one whose presets applied nowhere, stays vacuous.
-    let (named, by_preset) = fault_sources(runs);
+    // class acted on something; one a setting of its own named (`--fault`, a `[faults]` key)
+    // in any run, or one whose classes applied nowhere, stays vacuous.
+    let (named, of_class) = fault_sources(runs);
     let applied =
         |cs: &BTreeSet<String>| cs.iter().any(|c| eligible.get(c).is_some_and(|n| *n > 0));
     let lenient =
-        |c: &str| !named.contains(c) && by_preset.values().any(|cs| cs.contains(c) && applied(cs));
+        |c: &str| !named.contains(c) && of_class.values().any(|cs| cs.contains(c) && applied(cs));
     let (not_applicable, idle): (Vec<String>, Vec<String>) = eligible
         .iter()
         .filter(|(k, v)| **v == 0 && !allow.contains(*k))
         .map(|(k, _)| k.clone())
         .partition(|k| lenient(k));
     // The SDK fold, by checkout-free label. Fault points count only in runs that let them
-    // fire (`--buggify`).
+    // fire (`--faults buggify`).
     let mut sites: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
     // Per site, in how many runs it was evaluated and held (hit, fired), and every label any
     // run declared.
@@ -982,12 +997,17 @@ pub fn build(
     let mut miss: BTreeMap<String, f64> = BTreeMap::new();
     let mut buggify_runs = 0;
     for r in runs {
-        let buggify = r.run["config"]["buggify"] == true;
+        let buggify = buggify_everywhere(&r.run);
         buggify_runs += buggify as usize;
         for s in r.result["sdk"]["sites"].as_array().into_iter().flatten() {
             let kind = s["kind"].as_str().unwrap_or("");
             declared.insert(free(s["label"].as_str().unwrap_or("")));
-            if kind == "buggify" && !buggify {
+            // A point counts in a run that let it fire wherever it is reached: the class
+            // everywhere, or its own `buggify:LABEL` rate.
+            if kind == "buggify"
+                && !buggify
+                && own_rate(&r.run["faults"], &free(s["label"].as_str().unwrap_or(""))).is_none()
+            {
                 continue;
             }
             let label = free(s["label"].as_str().unwrap_or(""));
@@ -2171,7 +2191,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
     let na = names(&v["faults"]["not_applicable"]);
     if !na.is_empty() {
         tail.push(format!(
-            "faults: not applicable (a preset's, nothing to act on in any run): {}",
+            "faults: not applicable (a class's, nothing to act on in any run): {}",
             na.join(", ")
         ));
     }
@@ -2470,7 +2490,7 @@ mod tests {
     }
 
     #[test]
-    fn a_class_only_a_preset_named_may_have_nothing_to_act_on() {
+    fn a_class_only_a_fault_class_turned_on_may_have_nothing_to_act_on() {
         let counts = |drop: u64, chunk: u64| {
             json!({"faults": {"counts": {
                 "net-drop": {"eligible": drop, "injected": 0},
@@ -2478,26 +2498,26 @@ mod tests {
             }}})
         };
         let faults = |r: &[Run]| build(r, &[], None, None, "").0;
-        let preset = json!({"faults-preset": ["net"], "faults": []});
+        let class = json!({"fault-classes": ["net"], "faults": []});
         // TCP only: the datagram class is not applicable, and the sweep is not vacuous.
-        let v = faults(&[run(1, preset.clone(), counts(0, 9))]);
+        let v = faults(&[run(1, class.clone(), counts(0, 9))]);
         assert_eq!(v["faults"]["not_applicable"], json!(["net-drop"]));
         assert_eq!(
             (v["faults"]["eligible_zero"].clone(), v["exit"].clone()),
             (json!([]), json!(0))
         );
         // Named on its own (any run), the class stays strict.
-        let named = json!({"faults-preset": ["net"], "faults": ["net-drop-permille=5"]});
+        let named = json!({"fault-classes": ["net"], "faults": ["net-drop-permille=5"]});
         let v = faults(&[
-            run(1, preset.clone(), counts(0, 9)),
+            run(1, class.clone(), counts(0, 9)),
             run(2, named, counts(0, 9)),
         ]);
         assert_eq!(
             (v["faults"]["eligible_zero"].clone(), v["exit"].clone()),
             (json!(["net-drop"]), json!(2))
         );
-        // A preset that applied to nothing is vacuous, every class of it named.
-        let v = faults(&[run(1, preset.clone(), counts(0, 0))]);
+        // A class that applied to nothing is vacuous, every fault of it named.
+        let v = faults(&[run(1, class.clone(), counts(0, 0))]);
         assert_eq!(
             v["faults"]["eligible_zero"],
             json!(["net-chunk", "net-drop"])
@@ -2514,8 +2534,9 @@ mod tests {
         let sweep = |n: u64, evaluated: u64, plan: Value| {
             let runs: Vec<Run> = (1..=n)
                 .map(|s| {
-                    let mut r = run(s, json!({"buggify": true}), site(evaluated));
+                    let mut r = run(s, json!({"fault-classes": ["buggify"]}), site(evaluated));
                     r.run["faults"] = plan.clone();
+                    r.run["faults"]["buggify"] = json!("all");
                     r
                 })
                 .collect();
@@ -2533,6 +2554,24 @@ mod tests {
         assert_eq!(sweep(2, 1, json!({"buggify:p": 1000})), (json!(2), 0));
         // Forced off (rate 0): never firing is what was asked.
         assert_eq!(sweep(40, 50, json!({"buggify:p": 0})), (json!(0), 1));
+        // With nodes, a point no run reached says nothing unless the driver and every node had
+        // fault points on: the driver may be the only one that reaches it.
+        let nodes = |plan: Value| {
+            let runs: Vec<Run> = (1..=SMOKE_RUNS as u64)
+                .map(|s| {
+                    let c = json!({"fault-classes": ["buggify"], "nodes": [{"name": "a"}]});
+                    let mut r = run(s, c, site(0));
+                    r.run["faults"] = plan.clone();
+                    r
+                })
+                .collect();
+            build(&runs, &[], None, None, "").0["exit"].clone()
+        };
+        assert_eq!(nodes(json!({"buggify@a": "all"})), json!(0));
+        assert_eq!(
+            nodes(json!({"buggify@a": "all", "buggify@driver": "all"})),
+            json!(2)
+        );
         // The chance at the default rates: a quarter active, a quarter of evaluations firing.
         let one = miss_ln(&json!({}), "p", 1).exp();
         assert!((one - (0.75 + 0.25 * 0.75)).abs() < 1e-9, "{one}");

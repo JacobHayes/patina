@@ -1,5 +1,5 @@
 # 3. F6 (batch atomicity broken with no injected fault) from a debug sweep with FJ_N=2000
-# --buggify --crash machine:1 at 24 CPUs under [sched] preempt = "traps" without pause points
+# --faults buggify --fault crash-permille=1 at 24 CPUs under [sched] preempt = "traps" without pause points
 # (seed 2001; 2 seeds in 6,000, none at the default 4 CPUs in 2,000, see docs/EVIDENCE.md), so
 # the settings are given here and the seed is named; the kept tree makes the native harness
 # fail the same way. F2 (the
@@ -17,7 +17,7 @@ if [ "$kind" != True ]; then
     exit 0
 fi
 export PATINA_TEST_PAUSE_POINTS=0 # a test input (AGENTS.md)
-opts="--config $("$PATINA_CFG" preempt=traps cpus=24) --env FJ_N=2000 --buggify --crash machine:1"
+opts="--config $("$PATINA_CFG" preempt=traps cpus=24) --env FJ_N=2000 --faults buggify --fault crash-permille=1"
 f=$RUNS/f6-2001
 run fjall-harness "$f" 2001 $opts -- /guest/fjall-harness-debug
 case "$(field "$f/result.json" message)" in

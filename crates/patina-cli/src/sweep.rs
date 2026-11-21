@@ -12,7 +12,7 @@
 //!
 //! `--crash-points` runs each seed (and case) once with crashes on and never firing (a base, in
 //! `OUT/seed-N`), then once per crash point the base counted, with the crash forced there (a
-//! child, `--crash KIND-at:P` in `OUT/seed-N@P`), points ascending and seeds round-robin. A
+//! child, `--fault crash-at=P` in `OUT/seed-N@P`), points ascending and seeds round-robin. A
 //! child is its base up to its point, so one that does not crash there is `nondeterministic`.
 
 use crate::cli::{find_flag, Args, Res};
@@ -38,12 +38,11 @@ extern "C" fn on_signal(_: libc::c_int) {
 pub const DEFAULT_SEEDS: &str = "1..100";
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 13] = [
+const OWN: [&str; 12] = [
     "--seeds",
     "--crash-points",
     "--jobs",
     "--cases",
-    "--only-case",
     "--keep",
     "--max-findings",
     "--budget",
@@ -928,36 +927,52 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // The configuration every run resolves to, checked once here rather than failing in
     // every run. With --cases and no command, each line is a whole command.
     let cfg = crate::config::resolve_any(a).map_err(error)?;
-    // --crash-points: the crash kind each base and child is given (the sweep places the crash), and
-    // with nodes the nodes it crashes (`@NODE,...`; none: every node but the driver).
+    // --crash-points: crashes on (the `crash` class, or `kill` when named), placed by the sweep
+    // at each point; with nodes on the nodes a crash class names (`@NODE,...`; none: every node
+    // but the driver).
     let mut scope: Option<String> = None;
     let kind: Option<String> = if a.has("--crash-points") {
-        let c = cfg.crash.as_deref();
-        let (c, at) = match c.and_then(|c| c.split_once('@')) {
-            Some((k, at)) => (Some(k), Some(at)),
-            None => (c, None),
-        };
-        if !cfg.nodes.is_empty() && c != Some("machine") {
+        if let Some(f) = cfg.faults.iter().find(|f| {
+            ["crash-permille=", "crash-at=", "crash-gap-ms="]
+                .iter()
+                .any(|k| f.starts_with(k))
+        }) {
             return Err(error(format!(
-                "--crash-points with nodes needs --crash machine[@NODE,...], not --crash {}: it crashes each node's machine at each of its crash points",
-                cfg.crash.as_deref().unwrap_or("(none)")
+                "--crash-points with --fault {f}: the sweep places the crash at each crash point itself"
             )));
         }
-        if cfg.nodes.is_empty() && at.is_some() {
+        let crash: Vec<(&str, Option<&str>)> = cfg
+            .fault_classes
+            .iter()
+            .flat_map(|e| {
+                let (names, at) = crate::faults::split_scope(e);
+                names
+                    .split(',')
+                    .filter(|c| matches!(*c, "crash" | "kill"))
+                    .map(move |c| (c, at))
+            })
+            .collect();
+        if cfg.nodes.is_empty() && crash.iter().any(|(_, at)| at.is_some()) {
             return Err(error(
-                "--crash KIND@NODE names nodes, and the run has none".into(),
+                "--faults crash@NODE names nodes, and the run has none".into(),
             ));
         }
-        scope = at.map(str::to_string);
-        match c {
-            Some(k @ ("machine" | "process")) => Some(k.to_string()),
-            None => return Err(error(
-                "--crash-points needs --crash machine or --crash process: it crashes each seed at each of its crash points".into(),
-            )),
-            Some(c) => return Err(error(format!(
-                "--crash-points needs --crash machine or --crash process without a rate or position, not --crash {c}: it places the crash at each crash point itself"
-            ))),
+        if !crash.is_empty() && crash.iter().all(|(_, at)| at.is_some()) {
+            let mut l: Vec<&str> = crash
+                .iter()
+                .flat_map(|(_, at)| at.unwrap().split(','))
+                .collect();
+            l.dedup();
+            scope = Some(l.join(","));
         }
+        Some(
+            if crash.iter().any(|(c, _)| *c == "kill") {
+                "kill"
+            } else {
+                "crash"
+            }
+            .to_string(),
+        )
     } else {
         None
     };
@@ -991,7 +1006,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     };
     if pairs.is_some() && scope_nodes.len() < 2 {
         return Err(error(
-            "[sweep] crash-pairs crashes two nodes: it needs a run with nodes and --crash machine on two or more".into(),
+            "[sweep] crash-pairs crashes two nodes: it needs a run with nodes and crashes on two or more".into(),
         ));
     }
     let cases: Option<Vec<Case>> = match a.last("--cases") {
@@ -1037,28 +1052,11 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // here too (the sweep's, with the line's on top), and its mounts may hold its program.
     let mut programs: std::collections::BTreeMap<String, crate::config::Program> =
         Default::default();
-    let mut list: Vec<Option<usize>> = match &cases {
+    let list: Vec<Option<usize>> = match &cases {
         Some(c) => (0..c.len()).map(Some).collect(),
         None => vec![None],
     };
-    // --only-case ID,...: those cases of the file alone.
-    if let Some(only) = a.last("--only-case") {
-        let Some(c) = &cases else {
-            return Err(error("--only-case needs --cases".into()));
-        };
-        let ids: Vec<&str> = only
-            .split(',')
-            .map(str::trim)
-            .filter(|x| !x.is_empty())
-            .collect();
-        if let Some(bad) = ids.iter().find(|id| !c.iter().any(|k| k.id == **id)) {
-            return Err(error(format!(
-                "--only-case {bad}: no case has this id (a line's --name, or its line number)"
-            )));
-        }
-        list.retain(|i| i.is_some_and(|i| ids.contains(&c[i].id.as_str())));
-    }
-    // Each run's program, by its case (a selected few of the file's with --only-case).
+    // Each run's program, by its case.
     let mut program_of: std::collections::BTreeMap<Option<usize>, String> = Default::default();
     // The programs run with load-time points: planned here once before the runs start.
     let mut planned: std::collections::BTreeSet<String> = Default::default();
@@ -1106,12 +1104,17 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
         program_of.insert(i, key);
     }
-    let probe_program = {
+    // A program with faults not known to mark `setup-complete` (`launch::run_one`): its first
+    // run goes alone, so that the rest know if it does.
+    let (probe_program, unknown) = {
         let (mut probe, key) = first_cfg.unwrap();
         probe.cmd = cmd_of(list[0]);
         let o = probe.opts_with(programs[&key].clone()).map_err(error)?;
         crate::launch::preflight(&o).map_err(error)?;
-        o.program
+        let unknown = crate::faults::injects(&o.plan)
+            && !crate::launch::marks(&o)
+            && !crate::launch::may_mark(&o);
+        (o.program, unknown)
     };
     let program_key = |case: Option<usize>| -> &String { &program_of[&case] };
 
@@ -1260,7 +1263,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // What each `patina run` is given besides its seed, directory and command.
     let mut pass: Vec<String> = vec![];
     for (name, vals) in &a.flags {
-        if OWN.contains(name) || (kind.is_some() && *name == "--crash") {
+        if OWN.contains(name) {
             continue;
         }
         let f = find_flag(name).unwrap();
@@ -1288,12 +1291,13 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     .arg(dir)
                     .args(["--format", "json"])
                     .args(&pass);
-                if let Some(k) = &kind {
+                if kind.is_some() {
                     let at = |s: &str| format!("@{s}");
-                    c.arg("--crash").arg(match point {
-                        Some(p) if p.n2 > 0 => {
-                            format!("{k}-at:{}@{}+{k}-at:{}@{}", p.n, p.node, p.n2, p.node2)
-                        }
+                    let crash = match point {
+                        Some(p) if p.n2 > 0 => vec![
+                            format!("crash-at={}@{}", p.n, p.node),
+                            format!("crash-at={}@{}", p.n2, p.node2),
+                        ],
                         Some(p) if p.n > 0 && !p.node.is_empty() => {
                             // Under [sweep] crash-pairs the other nodes count their points too.
                             let others: Vec<&str> = scope_nodes
@@ -1301,19 +1305,21 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                                 .filter(|n| **n != p.node)
                                 .map(String::as_str)
                                 .collect();
-                            match pairs {
-                                Some(_) => format!(
-                                    "{k}-at:{}{}+{k}:0@{}",
-                                    p.n,
-                                    at(&p.node),
-                                    others.join(",")
-                                ),
-                                None => format!("{k}-at:{}{}", p.n, at(&p.node)),
+                            let mut v = vec![format!("crash-at={}{}", p.n, at(&p.node))];
+                            if pairs.is_some() {
+                                v.push(format!("crash-permille=0@{}", others.join(",")));
                             }
+                            v
                         }
-                        Some(p) if p.n > 0 => format!("{k}-at:{}", p.n),
-                        _ => format!("{k}:0{}", scope.as_deref().map(at).unwrap_or_default()),
-                    });
+                        Some(p) if p.n > 0 => vec![format!("crash-at={}", p.n)],
+                        _ => vec![format!(
+                            "crash-permille=0{}",
+                            scope.as_deref().map(at).unwrap_or_default()
+                        )],
+                    };
+                    for f in crash {
+                        c.arg("--fault").arg(f);
+                    }
                 }
                 // The case's own settings, after the sweep's: a later --work or --stdin
                 // replaces the sweep's, --mount and --env add to them.
@@ -1414,9 +1420,22 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let mut not_started = if st.stopped.is_some() {
         jobs.len()
     } else {
-        pool(jobs, width, &child, serve, |d, running, now| {
+        let mut jobs = jobs;
+        let first: Vec<Job> = if unknown && jobs.len() > 1 {
+            vec![jobs.remove(0)]
+        } else {
+            vec![]
+        };
+        let left = pool(first, width, &child, serve, |d, running, now| {
             st.event(d, running, now)
-        })
+        });
+        if left > 0 || st.stopped.is_some() || INTERRUPTED.load(SeqCst) {
+            left + jobs.len()
+        } else {
+            pool(jobs, width, &child, serve, |d, running, now| {
+                st.event(d, running, now)
+            })
+        }
     };
     st.flush(true);
     if kind.is_some() && st.stopped.is_none() && !INTERRUPTED.load(SeqCst) {
@@ -2208,9 +2227,9 @@ mod tests {
         ] {
             assert!(case_line(bad).is_err(), "{bad}");
         }
-        assert!(case_line("--crash machine -- ./t")
+        assert!(case_line("--faults crash -- ./t")
             .err()
-            .is_some_and(|e| e.starts_with("--crash ")));
+            .is_some_and(|e| e.starts_with("--faults ")));
     }
 
     #[test]

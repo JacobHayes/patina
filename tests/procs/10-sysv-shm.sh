@@ -24,7 +24,7 @@ python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1]))["refused"]; sys.e
 
 for k in process machine; do
     rm -rf "${o:?}/crash-$k"
-    timeout 300 "$PATINA" run --seed 1 --crash "$k-at:3" --out "$o/crash-$k" --mount "$PATINA_GUESTS":/guest:copy \
+    timeout 300 "$PATINA" run --seed 1 $([ $k = process ] && echo --faults kill || echo --faults crash) --fault crash-at=3 --out "$o/crash-$k" --mount "$PATINA_GUESTS":/guest:copy \
         -- /guest/sysv-shm crash >/dev/null 2>&1 || true
     [ "$(field "$o/crash-$k/result.json" outcome)" = ok ] || die "crash $k: $(field "$o/crash-$k/result.json" outcome)"
     echo "crash $k: $(cat "$o/crash-$k/inc-1/stdout")"

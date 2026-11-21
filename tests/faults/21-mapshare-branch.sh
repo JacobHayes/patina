@@ -11,7 +11,7 @@ rm -rf "${d:?}"
 mkdir -p "$d"
 o=$d/sweep-order
 st=0
-timeout 300 "$PATINA" sweep --seeds 1..20 --crash-points --crash machine --keep fail --out "$o" \
+timeout 300 "$PATINA" sweep --seeds 1..20 --crash-points --faults crash --keep fail --out "$o" \
     --allow-unmet synced-store-kept --allow-unmet unsynced-store-lost --mount "$PATINA_GUESTS":/guest:copy -- /guest/mapshare order >"$o.txt" 2>&1 || st=$?
 [ $st = 0 ] || die "branch sweep of order under machine crashes: exit $st: $(head -5 "$o.txt")"
 echo "order: branch sweep under machine crashes: $(grep -E '^patina sweep' "$o.txt" | cut -d'(' -f1)"
@@ -19,7 +19,7 @@ echo "order: branch sweep under machine crashes: $(grep -E '^patina sweep' "$o.t
 for m in durable durable-sync; do
     o=$d/sweep-$m
     st=0
-    timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points --crash machine --keep fail --out "$o" \
+    timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points --faults crash --keep fail --out "$o" \
         --allow-unmet write-keeps-earlier-store --mount "$PATINA_GUESTS":/guest:copy -- /guest/mapshare $m >"$o.txt" 2>&1 || st=$?
     [ $st = 0 ] || die "branch sweep of $m under machine crashes: exit $st: $(head -5 "$o.txt")"
     echo "branch sweep, $m under machine crashes: $(grep -E '^patina sweep' "$o.txt" | cut -d'(' -f1)"

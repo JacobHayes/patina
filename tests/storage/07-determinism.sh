@@ -13,12 +13,12 @@ v() {
     echo "$name seed $seed: $(grep '^run 0' "$RUNS/$name.txt" | awk '{print $9, $10}'); $(tail -1 "$RUNS/$name.txt" | cut -d' ' -f1-3)"
     rm -rf "${RUNS:?}/$name"
 }
-v f1-machine3 5 --crash machine:3 -- /guest/fjall-harness-debug
-v f1-process3 3 --crash process:3 -- /guest/fjall-harness-debug
+v f1-machine3 5 --fault crash-permille=3 -- /guest/fjall-harness-debug
+v f1-process3 3 --faults kill --fault crash-permille=3 -- /guest/fjall-harness-debug
 v f5 3 --fault fs-short-permille=20 -- /guest/fjall-harness-debug
 [ "${CHECK_TIER:-}" != quick ] || exit 0
-v f2 634 --env FJ_N=2000 --buggify --crash machine:1 -- /guest/fjall-harness-debug
-v f6 946 --env FJ_N=2000 --buggify --crash machine:1 -- /guest/fjall-harness-debug
-v f3 40 --env FJ_N=1000 --buggify --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --config "$("$PATINA_CFG" time-limit=400)" \
-    --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
-v f4 6 --fault fsync-error-at=61 --crash machine:3 -- /guest/fjall-harness-debug
+v f2 634 --env FJ_N=2000 --faults buggify --fault crash-permille=1 -- /guest/fjall-harness-debug
+v f6 946 --env FJ_N=2000 --faults buggify --fault crash-permille=1 -- /guest/fjall-harness-debug
+v f3 40 --env FJ_N=1000 --faults buggify --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --config "$("$PATINA_CFG" time-limit=400)" \
+    --fault fs-error-permille=3 --fault crash-permille=2 -- /guest/fjall-harness-debug
+v f4 6 --fault fsync-error-at=61 --fault crash-permille=3 -- /guest/fjall-harness-debug

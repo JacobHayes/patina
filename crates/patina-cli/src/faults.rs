@@ -1,6 +1,7 @@
-//! The fault plan of a run: presets (`--faults NAME`), single settings (`--fault KEY=VALUE`,
-//! `[faults]` in `patina.toml`) and `--crash`, resolved against the seed into the runtime's,
-//! the wire's and the SDK's configurations.
+//! The fault plan of a run: classes (`--faults CLASS`, `[faults] faults`) and single settings
+//! (`--fault KEY=VALUE`, `[faults] KEY`), resolved against the seed into the runtime's, the
+//! wire's and the SDK's configurations. A class turns on its keys (`CLASSES`); `buggify`,
+//! `crash` and `kill` turn on what has no key of its own (every fault point; a crash's kind).
 //!
 //! A value may be a range `A..B`: the run's value is drawn from the seed, uniformly in the
 //! range, by a draw keyed by the setting's name (`plan_draw`). Adding, removing or changing
@@ -14,6 +15,8 @@ use serde_json::{json, Value};
 
 /// Incarnations a run may start when `max-incarnations` is not given.
 pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
+/// `crash-permille` of the `crash` and `kill` classes at crash points when no crash key is given.
+pub const CRASH_DEFAULT_PERMILLE: u64 = 3;
 /// `down-ms` on one machine when not given: 1 s to 61 s.
 pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
 /// `down-ms` with nodes when not given: 1 s to 5 s. Short beside `crash-gap-ms`, so that with several
@@ -34,7 +37,7 @@ pub struct Plan {
     /// restart in [A, B) ns (A when A = B).
     pub restart_gap_ns: (u64, u64),
     /// With nodes: `crash-gap-ms` and `down-ms` (ns), and the nodes the seed kills
-    /// (`--crash process[@NODE,...]`; bit `k` for node `k`).
+    /// (`--faults kill[@NODE,...]`; bit `k` for node `k`).
     pub crash_gap_ns: (u64, u64),
     pub down_ns: (u64, u64),
     pub node_crash: u64,
@@ -42,8 +45,11 @@ pub struct Plan {
     pub node_crash_kind: u64,
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
-    /// `--buggify`, `buggify-permille=N`, `buggify:LABEL=N` (`proto::sdk`).
+    /// The `buggify` class, `buggify:LABEL=N` (`proto::sdk`).
     pub sdk: proto::sdk::SdkCfg,
+    /// The crash kind the `crash` or `kill` class, or a crash key, names (`CRASH_*`; 0: none).
+    /// Set in `faults` too when the crash comes at crash points (`Ctx::crash_points`).
+    pub crash_class: u64,
     /// Compute points: the run's mean gap in events (`compute-gap`; 0: no compute switches).
     pub compute_gap: u64,
     /// Whether the switch budget applies (`proto::compute::budget`): only to a gap drawn by
@@ -53,9 +59,10 @@ pub struct Plan {
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`Config::compute_walk`; 0: switches are taken at their sites).
     pub compute_walk: u64,
-    /// With nodes: each node's disk and memory settings (`NodeTab::faults`; the driver's are
-    /// in `faults`, entry 0 unused).
+    /// With nodes: each node's disk, memory and crash-point settings (`NodeTab::faults`; the
+    /// driver's are in `faults`, entry 0 unused), and its fault points (`NodeTab::sdk`).
     pub node_faults: [proto::faults::FaultCfg; proto::node::MAX_NODES],
+    pub node_sdk: [proto::sdk::SdkCfg; proto::node::MAX_NODES],
     /// `pause-gap-ms` and `pause-ms` (ns; gap (0, 0): no pauses): a node's own, resolved with
     /// its seed, and each node's (`node_pause`, entry 0 unused: the driver is never paused).
     pub pause_gap_ns: (u64, u64),
@@ -84,8 +91,6 @@ enum Val {
     Size,
     /// The key's own grammar, like `Own`, for a parameter of another class.
     Spread,
-    /// 0 or 1.
-    Flag,
     /// The key's own grammar (`A..B` milliseconds are the per-event spread, not a plan
     /// range).
     Own,
@@ -135,25 +140,13 @@ pub const KEYS: &[Key] = &[
         "fs-delay-permille",
         "P",
         Val::Permille,
-        "delay a call in virtual time, up to fs-delay-max-ms",
-    ),
-    key(
-        "fs-delay-max-ms",
-        "N",
-        Val::Param,
-        "longest fs delay [default: 10]",
+        "delay a call in virtual time, by up to 10 ms",
     ),
     key(
         "fsync-error-permille",
         "P",
         Val::Permille,
         "fail the write-back of a sync call (fsync, fdatasync, msync, syncfs, sync_file_range, an O_SYNC write): its unsynced data never becomes durable; the error is reported as Linux reports it, once to each open file description, an unseen one also to a later opener",
-    ),
-    key(
-        "enospc-after-bytes",
-        "N",
-        Val::Count,
-        "ENOSPC once N bytes have been written to /work",
     ),
     key(
         "mem-error-permille",
@@ -219,7 +212,7 @@ pub const KEYS: &[Key] = &[
         "partition-gap-ms",
         "A..B",
         Val::Own,
-        "in a run with nodes, seed-drawn partitions: virtual time from the start of the run (or setup-complete), then from each partition's end, to the next one's start, a draw in A..B ms each time",
+        "in a run with nodes, seed-drawn partitions: virtual time from the start of the run, then from each partition's end, to the next one's start, a draw in A..B ms each time",
     ),
     key(
         "partition-ms",
@@ -231,7 +224,7 @@ pub const KEYS: &[Key] = &[
         "pause-gap-ms",
         "A..B",
         Val::Own,
-        "in a run with nodes, seed-drawn pauses of each node (all its threads stop; its links hold): virtual time from the run's start (or setup-complete), then from each pause's end, to the node's next pause, a draw in A..B ms each time; each node's own (@NODE scopes it)",
+        "in a run with nodes, seed-drawn pauses of each node (all its threads stop; its links hold): virtual time from the run's start, then from each pause's end, to the node's next pause, a draw in A..B ms each time; each node's own (@NODE scopes it)",
     ),
     key(
         "pause-ms",
@@ -264,28 +257,22 @@ pub const KEYS: &[Key] = &[
         "hold a datagram back past the delay range, so later ones overtake it",
     ),
     key(
-        "net-halfclose-delay-ms",
-        "A..B",
-        Val::Own,
-        "delay each delivered FIN by a draw in A..B ms",
-    ),
-    key(
-        "buggify-permille",
-        "P",
-        Val::Permille,
-        "SDK fault points fire at this rate (with --buggify)",
-    ),
-    key(
         "buggify:LABEL",
         "P",
         Val::Permille,
-        "the SDK fault point LABEL fires at this rate (with --buggify)",
+        "the SDK fault point LABEL fires at this rate (alone: only the points named fire)",
     ),
     key(
-        "faults-after-setup",
-        "0|1",
-        Val::Flag,
-        "no fault until the guest's SDK marks setup-complete",
+        "crash-permille",
+        "P",
+        Val::Permille,
+        "crash at each crash point (after each change to /work, before each sync) at this rate (implies crash; with kill, a kill) [default with the class: 3]",
+    ),
+    key(
+        "crash-at",
+        "N",
+        Val::At,
+        "crash at exactly the N-th crash point of the first incarnation (implies crash; with kill, a kill)",
     ),
     key(
         "max-incarnations",
@@ -297,7 +284,7 @@ pub const KEYS: &[Key] = &[
         "crash-gap-ms",
         "A..B",
         Val::Spread,
-        "with nodes and --crash process: virtual time from a node's start to the seed's kill of its processes, a draw in A..B ms for each boot [default: 5000..60000]",
+        "with nodes: virtual time from a node's start to the seed's crash (or kill) of it, a draw in A..B ms for each boot (implies crash) [default: 5000..60000]",
     ),
     key(
         "down-ms",
@@ -329,18 +316,15 @@ pub const KEYS: &[Key] = &[
         Val::At,
         "fail exactly the N-th memory request",
     ),
-    key(
-        "path-swap-at",
-        "N",
-        Val::At,
-        "swap the path at exactly the N-th use of a checked /work path",
-    ),
 ];
 
-/// `--faults NAME`: rare-fault rates, each a range the seed resolves. `net-reset-permille` is
-/// drawn for each send, so its preset rate is high enough that a connection carrying a few
-/// dozen sends (a keep-alive client's) meets a reset in a good share of seeds.
-pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
+/// The fault classes (`--faults CLASS`): each turns on its keys, every value a range the seed
+/// resolves. `buggify`, `crash` and `kill` have none of their own: they turn on every fault
+/// point, and a crash of their kind (`CRASH_DEFAULT_PERMILLE` at each crash point on one
+/// machine, at drawn times with nodes). `net-reset-permille` is drawn for each send, so its
+/// rate is high enough that a connection carrying a few dozen sends (a keep-alive client's)
+/// meets a reset in a good share of seeds. `partition`, `pause` and `clock` act on nodes.
+pub const CLASSES: &[(&str, &[(&str, &str)])] = &[
     (
         "disk",
         &[
@@ -362,106 +346,108 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("net-reorder-permille", "0..50"),
         ],
     ),
+    ("mem", &[("mem-error-permille", "0..2")]),
+    ("buggify", &[]),
+    ("crash", &[]),
+    ("kill", &[]),
     (
-        "all",
-        &[
-            ("fs-error-permille", "0..5"),
-            ("fs-short-permille", "0..20"),
-            ("fsync-error-permille", "0..3"),
-            ("fs-delay-permille", "0..20"),
-            ("net-delay-ms", "0..50"),
-            ("net-chunk-max", "1..65536"),
-            ("net-reset-permille", "5..50"),
-            ("net-connect-refuse-permille", "0..10"),
-            ("net-drop-permille", "0..50"),
-            ("net-dup-permille", "0..20"),
-            ("net-reorder-permille", "0..50"),
-            ("mem-error-permille", "0..2"),
-        ],
-    ),
-    // Only in a run with nodes (`resolve` refuses it without): the link faults here, the
-    // partitions, pauses, clock skew and machine crashes in `NODE_PRESETS` and
-    // `MACHINE_PRESETS` (the crashes: `cluster_crash`).
-    (
-        "cluster",
-        &[
-            ("net-delay-ms", "0..50"),
-            ("net-chunk-max", "1..65536"),
-            ("net-reset-permille", "5..50"),
-            ("net-connect-refuse-permille", "0..10"),
-            ("net-drop-permille", "0..50"),
-            ("net-dup-permille", "0..20"),
-            ("net-reorder-permille", "0..50"),
-        ],
-    ),
-];
-
-/// What `--faults net` (and `all`, which includes it) adds in a run with at least two nodes
-/// the link faults act on: seed-drawn partitions. Without them a preset sets none of these,
-/// so a one-machine run's plan is what it was.
-pub const NODE_PRESETS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "net",
+        "partition",
         &[
             ("partition-gap-ms", "5000..60000"),
             ("partition-ms", "500..20000"),
         ],
     ),
     (
-        "all",
-        &[
-            ("partition-gap-ms", "5000..60000"),
-            ("partition-ms", "500..20000"),
-        ],
-    ),
-    (
-        "cluster",
-        &[
-            ("partition-gap-ms", "5000..60000"),
-            ("partition-ms", "500..20000"),
-        ],
-    ),
-];
-
-/// What `--faults cluster` and `all` add in a run with nodes (one or more): each node's
-/// pauses and clock skew (node keys: each node draws its own), and for `cluster` the time
-/// between the seed's machine crashes of every node (`cluster_crash`).
-pub const MACHINE_PRESETS: &[(&str, &[(&str, &str)])] = &[
-    (
-        "all",
+        "pause",
         &[
             ("pause-gap-ms", "10000..120000"),
             ("pause-ms", "100..15000"),
-            ("clock-skew-ms", "0..2000"),
         ],
     ),
-    (
-        "cluster",
-        &[
-            ("pause-gap-ms", "10000..120000"),
-            ("pause-ms", "100..15000"),
-            ("clock-skew-ms", "0..2000"),
-            ("crash-gap-ms", "30000..300000"),
-        ],
-    ),
+    ("clock", &[("clock-skew-ms", "0..2000")]),
 ];
 
-/// `--crash` a run with nodes has when it names none and `cluster` is among its presets:
-/// every node's machine crashes at drawn times (`crash-gap-ms`).
-pub const CLUSTER_CRASH: &str = "machine";
+/// `all`: every class that applies to the run but `crash` and `kill`, which a program must be
+/// written to survive (it restarts on what its disk kept).
+pub const ALL: &[&str] = &[
+    "disk",
+    "net",
+    "mem",
+    "buggify",
+    "partition",
+    "pause",
+    "clock",
+];
 
-/// Whether presets `p` (as given: `NAME,...[@NODE,...]`) name `cluster`.
-pub fn names_cluster(p: &[String]) -> bool {
-    p.iter()
-        .any(|p| split_scope(p).0.split(',').any(|n| n == "cluster"))
+/// The classes that act on nodes only, and that `all` leaves out of a run without them (or,
+/// `partition`, without two nodes the link faults act on).
+pub fn needs_nodes(class: &str) -> bool {
+    matches!(class, "partition" | "pause" | "clock")
 }
+
+/// The classes that are each node's (`@NODE` scopes them); `net` and `partition` are the
+/// links', the run's.
+pub fn node_class(class: &str) -> bool {
+    !matches!(class, "net" | "partition")
+}
+
+/// The keys of class `c`.
+pub fn class_keys(c: &str) -> Res<&'static [(&'static str, &'static str)]> {
+    CLASSES
+        .iter()
+        .find(|x| x.0 == c)
+        .map(|x| x.1)
+        .ok_or_else(|| {
+            let names: Vec<&str> = CLASSES.iter().map(|x| x.0).chain(["all"]).collect();
+            format!("--faults: unknown class {c} ({})", names.join(", "))
+        })
+}
+
+/// The classes a list names (`NAME,...` without its scope), `all` expanded for a run with
+/// `nodes` nodes of which `faultable` the link faults act on: a class that needs nodes is
+/// left out of `all` when it has nothing to act on, and refused when named. Each class once.
+pub fn classes(list: &str, nodes: usize, faultable: usize) -> Res<Vec<&'static str>> {
+    let mut out: Vec<&'static str> = vec![];
+    for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        let names: Vec<&'static str> = if name == "all" {
+            ALL.iter()
+                .copied()
+                .filter(|c| !needs_nodes(c) || nodes > 0)
+                .filter(|c| *c != "partition" || faultable >= 2)
+                .collect()
+        } else {
+            let k = CLASSES
+                .iter()
+                .find(|x| x.0 == name)
+                .map(|x| x.0)
+                .ok_or_else(|| class_keys(name).unwrap_err())?;
+            if needs_nodes(k) && nodes == 0 {
+                return Err(format!("--faults {k}: only in a run with nodes"));
+            }
+            if k == "partition" && faultable < 2 {
+                return Err(format!(
+                    "--faults partition: partitions need two nodes the link faults act on (the run has {nodes}; net-links=driver adds the driver)"
+                ));
+            }
+            vec![k]
+        };
+        for c in names {
+            if !out.contains(&c) {
+                out.push(c);
+            }
+        }
+    }
+    if out.contains(&"crash") && out.contains(&"kill") {
+        return Err("--faults crash,kill: a machine crashes or its processes are killed, not both (one of them)".into());
+    }
+    Ok(out)
+}
+
 /// `partition-ms` when partitions are on and it is not given.
 const PARTITION_MS_DEFAULT: &str = "1000..30000";
 
-/// The crash rate `--crash KIND` takes when none is given (per mille, at each crash point).
-pub const CRASH_DEFAULT_PERMILLE: u64 = 3;
-/// `fs-delay-max-ms` when not given.
-const DELAY_MAX_MS_DEFAULT: u64 = 10;
+/// The longest `fs-delay-permille` delay.
+const DELAY_MAX_NS: u64 = 10_000_000;
 /// The time between the pieces of a split delivery (`net-chunk-max`): 1 to 10 µs.
 const CHUNK_GAP_NS: (u64, u64) = (1_000, 10_000);
 
@@ -612,7 +598,7 @@ fn links(v: &str) -> Res<u64> {
 }
 
 /// The nodes the link faults act on (`net-links`, the last one given): partitions need two.
-fn faultable_nodes(nodes: usize, settings: &[String]) -> Res<usize> {
+pub fn faultable_nodes(nodes: usize, settings: &[String]) -> Res<usize> {
     let scope = match settings
         .iter()
         .rev()
@@ -629,14 +615,16 @@ fn faultable_nodes(nodes: usize, settings: &[String]) -> Res<usize> {
     })
 }
 
-/// A key each node has its own value of (DESIGN 2.4): the disk and memory keys. In a run with
-/// nodes the run's value applies to every node but the driver, and `@NODE,...` scopes it.
+/// A key each node has its own value of: the disk, memory, crash-point, fault-point, pause
+/// and clock keys. In a run with nodes the run's value applies to every node but the driver,
+/// and `@NODE,...` scopes it.
 pub fn node_scoped(k: &str) -> bool {
     k.starts_with("fs-")
         || k.starts_with("fsync-")
         || k.starts_with("mem-")
         || k.starts_with("path-swap-")
-        || k == "enospc-after-bytes"
+        || k.starts_with("buggify:")
+        || matches!(k, "crash-permille" | "crash-at")
         || node_only(k)
 }
 
@@ -663,58 +651,42 @@ pub fn set_node_keys(dst: &mut proto::faults::FaultCfg, src: &proto::faults::Fau
     dst.short_permille = src.short_permille;
     dst.fsync_error_permille = src.fsync_error_permille;
     dst.fsync_error_at = src.fsync_error_at;
-    dst.enospc_after_bytes = src.enospc_after_bytes;
     (dst.delay_permille, dst.delay_max_ns) = (src.delay_permille, src.delay_max_ns);
     (dst.mem_error_permille, dst.mem_error_at) = (src.mem_error_permille, src.mem_error_at);
     dst.mem_limit_bytes = src.mem_limit_bytes;
-    (dst.path_swap_permille, dst.path_swap_at) = (src.path_swap_permille, src.path_swap_at);
+    dst.path_swap_permille = src.path_swap_permille;
+    (dst.crash_kind, dst.crash_permille, dst.crash_at) =
+        (src.crash_kind, src.crash_permille, src.crash_at);
     dst.any |= src.any;
 }
 
-/// The keys of preset `p` in a run with `faultable` nodes the link faults act on: its own,
-/// its partition keys (`NODE_PRESETS`) when there are two such nodes, and its machine keys
-/// (`MACHINE_PRESETS`) when there is one. `cluster` without nodes is refused.
-pub fn preset_keys(p: &str, faultable: usize) -> Res<Vec<(&'static str, &'static str)>> {
-    let (_, kv) = PRESETS.iter().find(|x| x.0 == p).ok_or_else(|| {
-        let names: Vec<&str> = PRESETS.iter().map(|x| x.0).collect();
-        format!("--faults: unknown preset {p} ({})", names.join(", "))
-    })?;
-    if p == "cluster" && faultable == 0 {
-        return Err("--faults cluster: only in a run with nodes".into());
-    }
-    let mut out: Vec<(&str, &str)> = kv.to_vec();
-    if faultable >= 2 {
-        for (_, kv) in NODE_PRESETS.iter().filter(|x| x.0 == p) {
-            out.extend(kv.iter().copied());
-        }
-    }
-    if faultable >= 1 {
-        for (_, kv) in MACHINE_PRESETS.iter().filter(|x| x.0 == p) {
-            out.extend(kv.iter().copied());
-        }
-    }
-    Ok(out)
-}
-
-/// A preset expanded into its settings, as `resolve` would apply them for this run: `minimize`
-/// replaces a preset with them (settings given beside it win).
-pub fn preset_settings(p: &str, nodes: usize, settings: &[String]) -> Res<Vec<(String, String)>> {
-    let f = faultable_nodes(nodes, settings)?;
-    Ok(preset_keys(p, f)?
-        .into_iter()
+/// A class's settings, as `resolve` applies them (settings given beside it win): `minimize`
+/// replaces a class with them.
+pub fn class_settings(c: &str) -> Res<Vec<(String, String)>> {
+    Ok(class_keys(c)?
+        .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect())
 }
 
-/// Resolve presets, settings (later ones replace earlier ones of the same key, settings
-/// replace presets) and `--crash` against `seed`. `nodes` is the run's nodes besides the
-/// driver (0: a run without nodes).
+/// Where a crash comes when the `crash` or `kill` class names no crash key: at crash points
+/// (`CRASH_DEFAULT_PERMILLE`; one machine, or nodes some of which name a crash key), or at
+/// drawn times (nodes: `crash-gap-ms`, set by the caller).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashAt {
+    Points,
+    Times,
+}
+
+/// Resolve classes (as `classes` expands them) and settings (later ones replace earlier ones
+/// of the same key, settings replace a class's) against `seed`. `nodes` is the run's nodes
+/// besides the driver (0: a run without nodes, or a node's own settings).
 pub fn resolve(
     seed: u64,
-    presets: &[String],
+    classes: &[&str],
     settings: &[String],
-    crash: Option<&str>,
     nodes: usize,
+    crash_at: CrashAt,
 ) -> Res<Plan> {
     let mut given: Vec<(String, String)> = vec![];
     fn set(given: &mut Vec<(String, String)>, k: &str, v: &str) {
@@ -733,15 +705,15 @@ pub fn resolve(
         }
         named.push((k, v));
     }
-    let faultable = faultable_nodes(nodes, settings)?;
-    for p in presets.iter().flat_map(|p| p.split(',')) {
-        for (k, v) in preset_keys(p, faultable)? {
+    for c in classes {
+        for (k, v) in class_keys(c)? {
             set(&mut given, k, v);
         }
     }
     for (k, v) in named {
         set(&mut given, k, v);
     }
+    let faultable = faultable_nodes(nodes, settings)?;
     let parts = given.iter().any(|e| e.0 == "partition-gap-ms");
     if parts && faultable < 2 {
         return Err(format!(
@@ -766,6 +738,30 @@ pub fn resolve(
     if given.iter().any(|e| e.0 == "pause-gap-ms") && !given.iter().any(|e| e.0 == "pause-ms") {
         set(&mut given, "pause-ms", PAUSE_MS_DEFAULT);
     }
+    // A crash: of the kind its class names (a crash key alone: the machine's), where a crash
+    // key says, or by default.
+    let has = |given: &[(String, String)], k: &str| given.iter().any(|e| e.0 == k);
+    let (rate, at) = (has(&given, "crash-permille"), has(&given, "crash-at"));
+    if rate && at {
+        return Err(
+            "--fault crash-permille and crash-at: one or the other (at a rate, or at one point)"
+                .into(),
+        );
+    }
+    let crash_class = if classes.contains(&"kill") {
+        CRASH_PROCESS
+    } else if classes.contains(&"crash") || rate || at {
+        CRASH_MACHINE
+    } else {
+        proto::faults::CRASH_NONE
+    };
+    if crash_class != proto::faults::CRASH_NONE && crash_at == CrashAt::Points && !rate && !at {
+        set(
+            &mut given,
+            "crash-permille",
+            &CRASH_DEFAULT_PERMILLE.to_string(),
+        );
+    }
     given.sort();
     // The default is not part of the plan: a run that does not name the key resolves it the
     // same way every time, and a stock program's plan reads as before.
@@ -779,11 +775,16 @@ pub fn resolve(
         node_crash: 0,
         node_crash_kind: 0,
         net: Default::default(),
-        sdk: Default::default(),
+        sdk: proto::sdk::SdkCfg {
+            seed,
+            ..Default::default()
+        },
+        crash_class,
         compute_gap: proto::compute::default_gap(plan_draw(seed, "compute-gap")),
         compute_budget: true,
         compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
         node_faults: Default::default(),
+        node_sdk: Default::default(),
         pause_gap_ns: (0, 0),
         pause_ns: (0, 0),
         node_pause: Default::default(),
@@ -791,13 +792,11 @@ pub fn resolve(
         node_skew: Default::default(),
         resolved: vec![],
     };
-    let mut delay_max_given = false;
     for (k, v) in &given {
         let info = find(k).unwrap();
         let value: Value = match info.val {
             Val::Permille => json!(resolve_num(seed, k, v, 1000)?),
             Val::Count | Val::Param => json!(resolve_num(seed, k, v, u64::MAX / 2)?),
-            Val::Flag => json!((num(k, v)? != 0) as u64),
             Val::Size => json!(resolve_size(seed, k, v)?),
             Val::Own | Val::Spread | Val::Word => json!(v),
             Val::Window => json!(resolve_window(seed, k, v)?),
@@ -814,22 +813,49 @@ pub fn resolve(
             x => x.to_string(),
         };
         apply(&mut plan, k, &s)?;
-        delay_max_given |= k == "fs-delay-max-ms";
         plan.resolved.push((k.clone(), value));
     }
-    if !delay_max_given && plan.faults.delay_permille != 0 {
-        plan.faults.delay_max_ns = DELAY_MAX_MS_DEFAULT * 1_000_000;
+    if plan.faults.delay_permille != 0 {
+        plan.faults.delay_max_ns = DELAY_MAX_NS;
     }
     // The pieces of a split delivery follow each other closely, as a sender's segments do.
     if plan.net.chunk_max != 0 {
         (plan.net.chunk_gap_min_ns, plan.net.chunk_gap_max_ns) = CHUNK_GAP_NS;
         plan.net.chunk_gap_set = 1;
     }
-    if let Some(c) = crash {
-        let s = crash_plan(seed, &mut plan.faults, c)?;
-        plan.resolved.push(("crash".into(), json!(s)));
+    if crash_class != proto::faults::CRASH_NONE {
+        let kind = if crash_class == CRASH_PROCESS {
+            "process"
+        } else {
+            "machine"
+        };
+        plan.resolved.push(("crash".into(), json!(kind)));
+        if crash_at == CrashAt::Points || rate || at {
+            plan.faults.crash_kind = crash_class;
+        }
+    }
+    // Every fault point (the class), or only the points named.
+    if classes.contains(&"buggify") {
+        plan.sdk.buggify = proto::sdk::BUGGIFY_ALL;
+        plan.resolved.push(("buggify".into(), json!("all")));
+    } else if plan.sdk.npoints != 0 {
+        plan.sdk.buggify = proto::sdk::BUGGIFY_NAMED;
     }
     Ok(plan)
+}
+
+/// Whether a plan injects anything: a setting or class beyond the limits and timings that
+/// shape a run without faults (`compute-*`, `max-incarnations`, `down-ms`, `net-links`,
+/// `mem-limit-mb`, `crash-gap-ms`).
+pub fn injects(p: &Plan) -> bool {
+    p.resolved.iter().any(|(k, _)| {
+        let k = k.split('@').next().unwrap_or(k);
+        !(k.starts_with("compute-")
+            || matches!(
+                k,
+                "max-incarnations" | "down-ms" | "net-links" | "mem-limit-mb" | "crash-gap-ms"
+            ))
+    })
 }
 
 impl Plan {
@@ -865,13 +891,10 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         "fs-short-permille" => f.short_permille = n(v)?,
         "fsync-error-permille" => f.fsync_error_permille = n(v)?,
         "fsync-error-at" => f.fsync_error_at = n(v)?,
-        "enospc-after-bytes" => f.enospc_after_bytes = n(v)?,
         "fs-delay-permille" => f.delay_permille = n(v)?,
-        "fs-delay-max-ms" => f.delay_max_ns = n(v)? * 1_000_000,
         "mem-error-permille" => f.mem_error_permille = n(v)?,
         "mem-error-at" => f.mem_error_at = n(v)?,
         "path-swap-permille" => f.path_swap_permille = n(v)?,
-        "path-swap-at" => f.path_swap_at = n(v)?,
         "mem-limit-mb" => {
             // A limit, not a draw: it holds whether or not other faults are active.
             f.mem_limit_bytes = n(v)?.saturating_mul(1 << 20);
@@ -897,13 +920,13 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             }
             return Ok(());
         }
-        // The `setup-complete` mark lowers it to its own sequence number.
-        "faults-after-setup" => {
-            f.fault_after_seq = if n(v)? != 0 { u64::MAX } else { 0 };
+        // The kind is the class's (`resolve`).
+        "crash-permille" => {
+            f.crash_permille = n(v)?;
             return Ok(());
         }
-        "buggify-permille" => {
-            o.sdk.fire_permille = n(v)?;
+        "crash-at" => {
+            f.crash_at = n(v)?.max(1);
             return Ok(());
         }
         _ if k.starts_with("buggify:") => return point(&mut o.sdk, &k["buggify:".len()..], n(v)?),
@@ -950,7 +973,7 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
 }
 
 /// `buggify:LABEL=PERMILLE`: the SDK fault point LABEL is active and fires at this rate
-/// (0: never). It acts only with `--buggify`.
+/// (0: never). Without the `buggify` class only the points named fire.
 fn point(c: &mut proto::sdk::SdkCfg, label: &str, p: u64) -> Res<()> {
     if label.is_empty() || label.len() > proto::sdk::LABEL_MAX {
         return Err(format!(
@@ -1028,10 +1051,6 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
             c.blackout_set = 1;
         }
         "net-links" => c.links = links(v)?,
-        "net-halfclose-delay-ms" => {
-            (c.halfclose_min_ns, c.halfclose_max_ns) = ms_range(k, v)?;
-            c.halfclose_set = 1;
-        }
         "net-drop-permille" => c.drop_permille = n(v)?,
         "net-dup-permille" => c.dup_permille = n(v)?,
         "net-reorder-permille" => c.reorder_permille = n(v)?,
@@ -1040,52 +1059,28 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
     Ok(())
 }
 
-/// `--crash machine|process[:PERMILLE] | machine-at:N | process-at:N`, where PERMILLE and N
-/// may be a range `A..B`. N is a crash point's ordinal in the first incarnation. Returns the
-/// resolved form.
-pub fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<String> {
-    let (k, v) = s.split_once(':').unwrap_or((s, ""));
-    let (kind, at) = match k {
-        "machine" => (CRASH_MACHINE, false),
-        "process" => (CRASH_PROCESS, false),
-        "machine-at" => (CRASH_MACHINE, true),
-        "process-at" => (CRASH_PROCESS, true),
-        _ => {
-            return Err(format!(
-                "--crash: unknown kind {k} (machine, process, machine-at:N, process-at:N)"
-            ))
-        }
-    };
-    f.crash_kind = kind;
-    if at {
-        if v.is_empty() {
-            return Err(format!("--crash {s}: expected {k}:N (or A..B)"));
-        }
-        let n = resolve_num(seed, "crash-at", v, u64::MAX / 2)
-            .map_err(|e| e.replace("--fault crash-at", &format!("--crash {k}")))?;
-        f.crash_at = n.max(1);
-        f.crash_permille = 0;
-        return Ok(format!("{k}:{}", f.crash_at));
-    }
-    f.crash_permille = if v.is_empty() {
-        CRASH_DEFAULT_PERMILLE
-    } else {
-        resolve_num(seed, "crash", v, 1000).map_err(|e| e.replace("--fault crash", "--crash"))?
-    };
-    f.crash_at = 0;
-    Ok(format!("{k}:{}", f.crash_permille))
-}
-
-/// The presets and keys, for `--fault help`.
+/// The classes and keys, for `--fault help`.
 pub fn help_text() -> String {
     let mut s = String::from(
-        "fault presets (--faults NAME[,NAME]; each range is resolved from the seed):\n",
+        "fault classes (--faults CLASS[,CLASS][@NODE,...]; each range is resolved from the seed):\n",
     );
-    for (name, kv) in PRESETS {
+    for (name, kv) in CLASSES {
         let v: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        s.push_str(&format!("  {name:<6} {}\n", v.join(" ")));
+        let v = match *name {
+            "buggify" => "every SDK fault point (buggify:LABEL=P sets one)".to_string(),
+            "crash" => format!("machine crashes: crash-permille={CRASH_DEFAULT_PERMILLE} at crash points; with nodes at drawn times (crash-gap-ms)"),
+            "kill" => "process kills, the disk kept: as crash".to_string(),
+            "net" => format!("{} (no partitions: that is the partition class)", v.join(" ")),
+            _ => v.join(" "),
+        };
+        s.push_str(&format!("  {name:<9} {v}\n"));
     }
-    s.push_str("\nfault keys (--fault KEY=VALUE, or [faults] in patina.toml; P and N may be a range A..B):\n");
+    s.push_str(&format!(
+        "  {:<9} {}\n",
+        "all",
+        "every class above that applies to the run, never crash or kill (name them: all,crash)"
+    ));
+    s.push_str("\nfault keys (--fault KEY=VALUE[@NODE,...], or [faults] in patina.toml; P and N may be a range A..B):\n");
     for k in KEYS {
         let lhs = format!("{}={}", k.name, k.value);
         s.push_str(&format!("  {lhs:<34} {}\n", k.help));
@@ -1096,10 +1091,11 @@ pub fn help_text() -> String {
 /// The same tables as JSON.
 pub fn help_json() -> Value {
     json!({
-        "presets": PRESETS.iter().map(|(n, kv)| json!({
+        "classes": CLASSES.iter().map(|(n, kv)| json!({
             "name": n,
             "settings": kv.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
+        "all": ALL,
         "keys": KEYS.iter().map(|k| json!({"name": k.name, "value": k.value, "help": k.help})).collect::<Vec<_>>(),
     })
 }
@@ -1107,6 +1103,7 @@ pub fn help_json() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use CrashAt::{Points, Times};
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
@@ -1118,13 +1115,13 @@ mod tests {
 
     #[test]
     fn ranges_resolve_from_the_seed_and_only_from_it() {
-        let disk = v(&["disk"]);
-        let a = resolve(1, &disk, &[], None, 0).unwrap();
-        let b = resolve(1, &disk, &[], None, 0).unwrap();
+        let disk = ["disk"];
+        let a = resolve(1, &disk, &[], 0, Points).unwrap();
+        let b = resolve(1, &disk, &[], 0, Points).unwrap();
         assert_eq!(a.json(), b.json());
         let rates: std::collections::BTreeSet<u64> = (0..64)
             .map(|s| {
-                let p = resolve(s, &disk, &[], None, 0).unwrap();
+                let p = resolve(s, &disk, &[], 0, Points).unwrap();
                 val(&p, "fs-short-permille").as_u64().unwrap()
             })
             .collect();
@@ -1136,15 +1133,19 @@ mod tests {
 
     #[test]
     fn one_setting_never_moves_another() {
-        let disk = v(&["disk"]);
+        let disk = ["disk"];
         for s in 0..32 {
-            let a = resolve(s, &disk, &[], Some("machine:0..5"), 0).unwrap();
+            let a = resolve(s, &disk, &v(&["crash-permille=0..5"]), 0, Points).unwrap();
             let b = resolve(
                 s,
                 &disk,
-                &v(&["net-chunk-max=1..4", "mem-limit-mb=10..20"]),
-                Some("machine:0..5"),
+                &v(&[
+                    "crash-permille=0..5",
+                    "net-chunk-max=1..4",
+                    "mem-limit-mb=10..20",
+                ]),
                 0,
+                Points,
             )
             .unwrap();
             for (k, x) in &a.resolved {
@@ -1158,18 +1159,39 @@ mod tests {
 
     #[test]
     fn settings_replace_presets_and_unknowns_are_named() {
-        let p = resolve(3, &v(&["disk"]), &v(&["fs-error-permille=7"]), None, 0).unwrap();
+        let p = resolve(3, &["disk"], &v(&["fs-error-permille=7"]), 0, Points).unwrap();
         assert_eq!(p.faults.fs_error_permille, 7);
-        assert!(resolve(0, &v(&["dsk"]), &[], None, 0)
+        assert!(resolve(0, &["dsk"], &[], 0, Points)
             .unwrap_err()
             .contains("dsk"));
-        assert!(resolve(0, &[], &v(&["nope=1"]), None, 0)
+        assert!(resolve(0, &[], &v(&["nope=1"]), 0, Points)
             .unwrap_err()
             .contains("nope"));
-        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), None, 0).is_err());
-        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), None, 0).is_err());
-        let c = resolve(0, &[], &[], Some("machine"), 0).unwrap();
+        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), 0, Points).is_err());
+        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), 0, Points).is_err());
+        let c = resolve(0, &["crash"], &[], 0, Points).unwrap();
         assert_eq!(c.faults.crash_permille, CRASH_DEFAULT_PERMILLE);
+        assert_eq!(c.faults.crash_kind, CRASH_MACHINE);
+        let k = resolve(0, &["kill"], &v(&["crash-at=4"]), 0, Points).unwrap();
+        assert_eq!(
+            (
+                k.faults.crash_kind,
+                k.faults.crash_at,
+                k.faults.crash_permille
+            ),
+            (CRASH_PROCESS, 4, 0)
+        );
+        // A crash key alone crashes the machine; both keys, or a crash and a kill, are refused.
+        let m = resolve(0, &[], &v(&["crash-permille=9"]), 0, Points).unwrap();
+        assert_eq!(
+            (m.faults.crash_kind, m.faults.crash_permille),
+            (CRASH_MACHINE, 9)
+        );
+        assert!(resolve(0, &[], &v(&["crash-permille=9", "crash-at=2"]), 0, Points).is_err());
+        assert!(classes("crash,kill", 0, 0).is_err());
+        // At drawn times (nodes), the class says only what a crash is.
+        let t = resolve(0, &["crash"], &[], 0, Times).unwrap();
+        assert_eq!((t.crash_class, t.faults.crash_kind), (CRASH_MACHINE, 0));
     }
 
     #[test]
@@ -1178,11 +1200,12 @@ mod tests {
             "fsync-error-at=1..100",
             "fs-error-at=write:5..9",
             "mem-error-at=3",
+            "crash-at=10..20",
         ]);
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let p = resolve(s, &[], &at, Some("machine-at:10..20"), 0).unwrap();
-            let q = resolve(s, &[], &at, Some("machine-at:10..20"), 0).unwrap();
+            let p = resolve(s, &[], &at, 0, Points).unwrap();
+            let q = resolve(s, &[], &at, 0, Points).unwrap();
             assert_eq!(p.json(), q.json());
             let f = p.faults;
             assert!(
@@ -1200,35 +1223,35 @@ mod tests {
             seen.insert(f.fsync_error_at);
         }
         assert!(seen.len() > 1, "{seen:?}");
-        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), None, 0).is_err());
-        assert!(resolve(0, &[], &[], Some("machine-at:x"), 0).is_err());
+        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), 0, Points).is_err());
+        assert!(resolve(0, &[], &v(&["crash-at=x"]), 0, Points).is_err());
     }
 
     #[test]
     fn compute_gap_is_drawn_per_seed() {
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let d = resolve(s, &[], &[], None, 0).unwrap();
+            let d = resolve(s, &[], &[], 0, Points).unwrap();
             let (lo, hi) = (proto::compute::GAP_SMALL.0, proto::compute::GAP_LARGE.1);
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
             assert!(d.resolved.is_empty() && d.compute_budget);
             seen.insert(d.compute_gap);
-            let p = resolve(s, &[], &v(&["compute-gap=8"]), None, 0).unwrap();
+            let p = resolve(s, &[], &v(&["compute-gap=8"]), 0, Points).unwrap();
             assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
             assert!(!p.compute_budget);
-            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None, 0).unwrap();
+            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), 0, Points).unwrap();
             assert!((100..=200).contains(&r.compute_gap));
             assert_eq!(val(&r, "compute-gap"), json!(r.compute_gap));
         }
         assert!(seen.len() > 8, "{seen:?}");
         assert_eq!(
-            resolve(0, &[], &v(&["compute-gap=0"]), None, 0)
+            resolve(0, &[], &v(&["compute-gap=0"]), 0, Points)
                 .unwrap()
                 .compute_gap,
             0
         );
         for bad in ["compute-gap=0..8", "compute-gap=9..8", "compute-gap=x"] {
-            assert!(resolve(0, &[], &v(&[bad]), None, 0).is_err(), "{bad}");
+            assert!(resolve(0, &[], &v(&[bad]), 0, Points).is_err(), "{bad}");
         }
     }
 
@@ -1237,7 +1260,7 @@ mod tests {
         let mut small = 0;
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..256 {
-            let p = resolve(s, &v(&["net"]), &[], None, 0).unwrap();
+            let p = resolve(s, &["net"], &[], 0, Points).unwrap();
             let c = p.net.chunk_max;
             assert!(
                 (1..=65536).contains(&c) && val(&p, "net-chunk-max") == json!(c),
@@ -1245,7 +1268,7 @@ mod tests {
             );
             small += (c <= 16) as u32;
             seen.insert(c);
-            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), None, 0).unwrap();
+            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), 0, Points).unwrap();
             assert_eq!(one.net.chunk_max, 7);
         }
         // Log-uniform: about a quarter of seeds at 16 bytes or less (uniform: one in 4096).
@@ -1254,9 +1277,9 @@ mod tests {
             "{small} {}",
             seen.len()
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None, 0).is_err());
+        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), 0, Points).is_err());
         // The pieces of a split delivery follow each other by 1 to 10 µs.
-        let g = resolve(0, &[], &v(&["net-chunk-max=8"]), None, 0).unwrap();
+        let g = resolve(0, &[], &v(&["net-chunk-max=8"]), 0, Points).unwrap();
         assert_eq!(
             (
                 g.net.chunk_gap_set,
@@ -1265,31 +1288,45 @@ mod tests {
             ),
             (1, 1000, 10_000)
         );
-        assert_eq!(resolve(0, &[], &[], None, 0).unwrap().net.chunk_gap_set, 0);
+        assert_eq!(
+            resolve(0, &[], &[], 0, Points).unwrap().net.chunk_gap_set,
+            0
+        );
     }
 
     #[test]
-    fn partitions_come_with_two_nodes_and_never_without() {
-        let net = v(&["net"]);
-        // Without nodes, and with one node the faults act on, `net` is what it always was.
-        for nodes in [0, 1] {
+    fn partitions_come_with_their_class_and_two_nodes() {
+        let net = ["net"];
+        // `net` is the links' faults alone, whatever the nodes.
+        for nodes in [0, 1, 2] {
             for s in 0..8 {
-                let p = resolve(s, &net, &[], None, nodes).unwrap();
-                let q = resolve(s, &net, &[], None, 0).unwrap();
+                let p = resolve(s, &net, &[], nodes, Points).unwrap();
+                let q = resolve(s, &net, &[], 0, Points).unwrap();
                 assert_eq!(p.json(), q.json());
                 assert_eq!(p.net, q.net);
             }
         }
-        let p = resolve(5, &net, &[], None, 2).unwrap();
+        let p = resolve(5, &["partition"], &[], 2, Points).unwrap();
         assert!(p.net.part_gap_max_ns >= p.net.part_gap_min_ns && p.net.part_gap_min_ns > 0);
         assert!(p.net.part_min_ns > 0);
+        // `all` leaves out what has nothing to act on; naming it is refused.
+        assert_eq!(
+            classes("all", 0, 0).unwrap(),
+            ["disk", "net", "mem", "buggify"]
+        );
+        assert!(classes("all", 1, 1).unwrap().contains(&"pause"));
+        assert!(!classes("all", 1, 1).unwrap().contains(&"partition"));
+        assert!(classes("all", 2, 2).unwrap().contains(&"partition"));
+        assert!(classes("partition", 1, 1).is_err());
+        assert!(classes("pause", 0, 0).is_err());
+        assert!(classes("cluster", 2, 2).is_err());
         // One node and the driver's links: two nodes to cut between.
-        let d = resolve(5, &net, &v(&["net-links=driver"]), None, 1).unwrap();
+        let d = resolve(5, &["partition"], &v(&["net-links=driver"]), 1, Points).unwrap();
         assert!(d.net.part_gap_max_ns > 0);
-        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), None, 1).is_err());
-        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), None, 0).is_err());
-        assert!(resolve(0, &[], &v(&["net-links=driver"]), None, 0).is_err());
-        let one = resolve(0, &[], &v(&["partition-gap-ms=10..20"]), None, 3).unwrap();
+        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), 1, Points).is_err());
+        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), 0, Points).is_err());
+        assert!(resolve(0, &[], &v(&["net-links=driver"]), 0, Points).is_err());
+        let one = resolve(0, &[], &v(&["partition-gap-ms=10..20"]), 3, Points).unwrap();
         assert_eq!(one.net.part_gap_min_ns, 10_000_000);
         // The default length.
         assert_eq!(one.net.part_min_ns, 1_000_000_000);
@@ -1297,12 +1334,12 @@ mod tests {
 
     #[test]
     fn a_node_is_down_briefly_by_default() {
-        let p = resolve(3, &[], &[], Some("process"), 3).unwrap();
+        let p = resolve(3, &["kill"], &[], 3, Times).unwrap();
         let s = 1_000_000_000;
         assert!(p.down_ns.0 >= s && p.down_ns.1 <= 5 * s, "{:?}", p.down_ns);
         assert!(p.down_ns.1 <= p.crash_gap_ns.0, "{:?}", p.down_ns);
         // The restart gap of a run without nodes is its own.
-        let one = resolve(3, &[], &[], Some("machine"), 0).unwrap();
+        let one = resolve(3, &["crash"], &[], 0, Points).unwrap();
         assert_eq!(one.restart_gap_ns, (s, 61 * s));
     }
 

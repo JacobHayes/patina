@@ -1,7 +1,7 @@
 /// Append `entry` to the ledger. Entries arrive in increasing order, and the ledger must keep
 /// them that way. `fixed` takes the batch path without its bug.
 pub fn commit(ledger: &mut Vec<u64>, entry: u64, fixed: bool) {
-    // A rare path: Patina takes it on seed-chosen runs under `--buggify`. In an ordinary run
+    // A rare path: Patina takes it on seed-chosen runs under `--faults buggify`. In an ordinary run
     // `buggify!` is always false.
     if patina_dst::buggify!("batch-commit") && !ledger.is_empty() {
         let last = ledger.len() - 1;

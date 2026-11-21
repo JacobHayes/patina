@@ -95,6 +95,9 @@ pub struct NodeTab {
     /// Each node's disk and memory faults: its settings (written by the launcher) and its
     /// counters. The driver's are the run's (`Ctl::faults`); entry 0 is unused.
     pub faults: [crate::faults::FaultCtl; MAX_NODES],
+    /// Each node's fault-point settings (`buggify`; written by the launcher). The driver's are
+    /// the run's (`sdk::SdkTab::cfg`); entry 0 is unused.
+    pub sdk: [crate::sdk::SdkCfg; MAX_NODES],
     /// Written by the supervisor: each node's pauses so far, the first `PAUSES_MAX` of them,
     /// and the virtual time it spent paused.
     pub pauses: [u64; MAX_NODES],
@@ -144,10 +147,12 @@ pub struct Pause {
 pub const BY_SEED: u64 = 1;
 pub const BY_SCRIPT: u64 = 2;
 /// How a pause ended (`Pause::end`, `DEC_NODE_RESUME`): its drawn length ran out, the
-/// script's `node resume`, or the node went down (a kill or a machine crash of a paused node).
+/// script's `node resume`, the node went down (a kill or a machine crash of a paused node), or
+/// the `faults-done` mark ended the seed's pause.
 pub const PEND_SEED: u64 = 1;
 pub const PEND_SCRIPT: u64 = 2;
 pub const PEND_DOWN: u64 = 3;
+pub const PEND_DONE: u64 = 4;
 
 /// A pause's end as events and `result.json` name it (`in force`: the run ended first).
 pub fn pause_end_name(end: u64) -> &'static str {
@@ -155,6 +160,7 @@ pub fn pause_end_name(end: u64) -> &'static str {
         PEND_SEED => "seed",
         PEND_SCRIPT => "script",
         PEND_DOWN => "down",
+        PEND_DONE => "faults-done",
         _ => "in force",
     }
 }
@@ -172,7 +178,7 @@ pub struct NodeConf {
     /// seed-drawn kill.
     pub max_boots: u64,
     /// The seed's kills (scoped by `@NODE`): `CRASH_NODE_PROCESS` kills its processes
-    /// (`--crash process`), `CRASH_NODE_MACHINE` crashes its machine (`--crash machine`); 0:
+    /// (`--faults kill`), `CRASH_NODE_MACHINE` crashes its machine (`--faults crash`); 0:
     /// none.
     pub crash: u64,
     /// Exit statuses of its command that stop the node without a finding: bit `s` of
@@ -222,7 +228,7 @@ pub struct Boot {
     /// Where its output starts in the node's stdout and stderr.
     pub out_off: u64,
     pub err_off: u64,
-    /// With crashes at its crash points (`machine:PERMILLE`, `machine-at:N`): the points it
+    /// With crashes at its crash points (`crash-permille`, `crash-at`): the points it
     /// passed (its `FaultCtl::crash_points` when it went down or the run ended), and the
     /// point its machine crashed at (0: it did not crash at one).
     pub points: u64,
@@ -239,7 +245,7 @@ pub const DOWN_KILL_SCRIPT: u64 = 2;
 pub const DOWN_EXIT: u64 = 3;
 pub const DOWN_FAILED: u64 = 4;
 pub const DOWN_SIGNAL: u64 = 5;
-/// Its machine crashed, by the seed (`--crash machine`) or by a control call (`node crash NAME`).
+/// Its machine crashed, by the seed (`--faults crash`) or by a control call (`node crash NAME`).
 pub const DOWN_CRASH_SEED: u64 = 6;
 pub const DOWN_CRASH_SCRIPT: u64 = 7;
 

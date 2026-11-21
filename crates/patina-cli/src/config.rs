@@ -81,13 +81,18 @@ pub struct Config {
     pub debug_at: Option<u64>,
     /// Size of each sandbox tmpfs in bytes (`[run] disk-mb`, in MiB).
     pub tmpfs_bytes: u64,
-    /// Fault presets (`--faults`, `[faults] preset`).
-    pub faults_preset: Vec<String>,
-    /// `KEY=VALUE` fault settings, in order; they replace a preset's.
+    /// Fault classes (`--faults`, `[faults] faults`), each `CLASS[,CLASS][@NODE,...]`.
+    pub fault_classes: Vec<String>,
+    /// `KEY=VALUE[@NODE,...]` fault settings, in order; they replace a class's.
     pub faults: Vec<String>,
-    pub crash: Option<String>,
-    /// Let SDK fault points fire (`--buggify`, `[sdk] buggify`).
-    pub buggify: bool,
+    /// The pass a run with faults is (`launch::run_one`, recorded in `run.json`): `true`,
+    /// faults held until the program's `setup-complete` mark, which it met; `false`, faults
+    /// from the start of a program that did not mark. Unset: `run_one` finds out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub faults_held: Option<bool>,
+    /// A pass without the hold that ends at the mark, for one held (`launch::run_one`).
+    #[serde(skip)]
+    pub restart_at_mark: bool,
     /// SDK labels and fault classes a sweep or report may find unmet without calling the
     /// result vacuous (`[sweep] allow-unmet`).
     pub allow_unmet: Vec<String>,
@@ -166,15 +171,16 @@ pub struct Node {
     /// `max-incarnations`: its boots (none: the run's `max-incarnations`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_incarnations: Option<u64>,
-    /// `[node.NAME.faults]`: its own disk and memory settings, `KEY=VALUE` (`preset=NAME` for
-    /// a preset's), in order; they replace the run's for this node.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub faults: Vec<String>,
     /// `faults = false`: no seed faults of its own, as the driver: a setting given without a
-    /// scope (`--faults`, `--fault`, `--crash`) leaves it out, and a scope may not name it.
+    /// scope (`--faults`, `--fault`) leaves it out, and a scope may not name it.
     /// Links to it and partitions, which are the run's, still act on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_faults: bool,
+    /// `disk-mb`: the size of its work tree, `/tmp` and `/dev/shm` in MiB, `N` or `A..B`
+    /// drawn per seed (`Config::node_disk_bytes`; none: the run's `[run] disk-mb`, which it
+    /// may not exceed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<String>,
 }
 
 impl Node {
@@ -188,8 +194,8 @@ impl Node {
             restart: None,
             ok_exit: None,
             max_incarnations: None,
-            faults: vec![],
             no_faults: false,
+            disk_mb: None,
         }
     }
 
@@ -228,10 +234,10 @@ impl Default for Config {
             observe: false,
             debug_at: None,
             tmpfs_bytes: 256 << 20,
-            faults_preset: vec![],
+            fault_classes: vec![],
             faults: vec![],
-            crash: None,
-            buggify: false,
+            faults_held: None,
+            restart_at_mark: false,
             allow_unmet: vec![],
             fs_model: Model::Ext4Ordered.name().into(),
             preempt_permille: 100,
@@ -859,11 +865,9 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                     }
                     c.ok_exit = normal(l);
                 }
-                ("faults", "crash") => c.crash = Some(string(v, &at)?),
-                ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
+                ("faults", "faults") => c.fault_classes = strings(v, &at)?,
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
                 ("faults", _) => c.faults.push(format!("{k}={}", scalar(v, &at)?)),
-                ("sdk", "buggify") => c.buggify = boolean(v, &at)?,
                 ("sweep", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
                 ("sweep", "known") => c.known = Some(base.join(string(v, &at)?)),
                 ("sweep", "crash-pairs") => c.crash_pairs = Some(int(v, &at)? as usize),
@@ -934,6 +938,12 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
                     }
                     node.ok_exit = Some(l.iter().map(|x| *x as u8).collect());
                 }
+                "disk-mb" => {
+                    node.disk_mb = Some(match v {
+                        toml::Value::Integer(i) => i.to_string(),
+                        _ => string(v, &at)?,
+                    })
+                }
                 "max-incarnations" => {
                     let n_: u64 = int(v, &at)?;
                     if n_ == 0 || n_ > proto::node::BOOTS_MAX as u64 {
@@ -951,26 +961,9 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
                     }
                     count = Some(c);
                 }
-                "faults" if matches!(v, toml::Value::Boolean(_)) => {
-                    if v.as_bool() == Some(true) {
-                        return Err(format!(
-                            "{at}: false (no seed faults of its own), or a table of its settings"
-                        ));
-                    }
-                    node.no_faults = true;
-                }
                 "faults" => {
-                    for (fk, fv) in table(v, &at)? {
-                        let at = format!("{at}.{fk}");
-                        let ok = fk == "preset" || crate::faults::node_scoped(fk);
-                        if !ok {
-                            return Err(format!(
-                                "{at}: a node's own settings are its disk and memory keys \
-                                 (fs-*, fsync-*, enospc-after-bytes, mem-*, path-swap-*) and \
-                                 preset; the other keys are the run's"
-                            ));
-                        }
-                        node.faults.push(format!("{fk}={}", scalar(fv, &at)?));
+                    if !boolean(v, &at)? {
+                        node.no_faults = true;
                     }
                 }
                 _ => return Err(format!("{file}: unknown key node.{n}.{k}")),
@@ -1086,21 +1079,13 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }
-    if let Some(p) = a.last("--faults") {
-        c.faults_preset = vec![p.to_string()];
-    }
+    c.fault_classes.extend(a.all("--faults").iter().cloned());
     // `--fault KEY=VALUE` is any `[faults]` key, the crash model's too.
     for f in a.all("--fault") {
         match f.strip_prefix("fs-model=") {
             Some(m) => c.fs_model = m.to_string(),
             None => c.faults.push(f.clone()),
         }
-    }
-    if let Some(cr) = a.last("--crash") {
-        c.crash = Some(cr.to_string());
-    }
-    if a.has("--buggify") {
-        c.buggify = true;
     }
     if let Some(k) = a.last("--check") {
         check = Some(k.to_string());
@@ -1159,13 +1144,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
 impl Config {
     /// Check every setting and build the launcher's plan around an already resolved program.
     pub fn opts_with(&self, program: Program) -> Res<Opts> {
-        // With nodes, `--crash` names the nodes the seed kills (`check_nodes`), not a crash
-        // plane of the driver's disk.
-        // With nodes, the disk and memory keys are each node's (`check_nodes`): the run's plan
-        // resolves the others, presets expanded into settings.
-        let (presets, settings) = if self.nodes.is_empty() {
+        let mut plan = if self.nodes.is_empty() {
             if let Some(s) = self
-                .faults_preset
+                .fault_classes
                 .iter()
                 .chain(&self.faults)
                 .find(|s| faults::split_scope(s).1.is_some())
@@ -1179,21 +1160,27 @@ impl Config {
             {
                 return Err(format!("--fault {s}: only in a run with nodes"));
             }
-            (self.faults_preset.clone(), self.faults.clone())
+            let classes = faults::classes(&self.fault_classes.join(","), 0, 0)?;
+            faults::resolve(
+                self.seed,
+                &classes,
+                &self.faults,
+                0,
+                faults::CrashAt::Points,
+            )?
         } else {
-            (vec![], self.run_settings()?)
+            self.node_plan()?
         };
-        let mut plan = faults::resolve(
-            self.seed,
-            &presets,
-            &settings,
-            self.crash.as_deref().filter(|_| self.nodes.is_empty()),
-            self.nodes.len(),
-        )?;
         if let Some(w) = &self.compute_walk {
             plan.compute_walk = faults::walk(self.seed, w)?;
         }
-        plan.sdk.buggify = self.buggify as _;
+        // Faults wait for setup-complete in the run that met it; a first run with faults
+        // that meets it starts again that way.
+        if self.faults_held == Some(true) {
+            plan.faults.fault_after_seq = u64::MAX;
+        } else if self.restart_at_mark && faults::injects(&plan) {
+            plan.faults.restart_at_setup = 1;
+        }
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
             format!(
                 "fs-model: unknown model {} (ext4-ordered, posix-strict)",
@@ -1220,13 +1207,16 @@ impl Config {
         if self.log_limit == 0 || self.log_limit > max_log {
             return Err(format!("[run] log-limit is 1 to {max_log} (MiB)"));
         }
+        for k in 0..self.nodes.len() {
+            self.node_disk_bytes(k)?;
+        }
         if self.tmpfs_bytes < 1 << 20 {
             return Err("[run] disk-mb is at least 1".into());
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());
         }
-        let node_programs = self.check_nodes(&mut plan)?;
+        let node_programs = self.check_nodes()?;
         Ok(Opts {
             cfg: self.clone(),
             program,
@@ -1236,28 +1226,69 @@ impl Config {
         })
     }
 
-    /// The run's own fault settings in a run with nodes: its presets' keys and its settings
-    /// (in that order, a later one replacing an earlier one), without the disk and memory
-    /// keys, which are each node's (`node_settings`). Only those take `@NODE`.
-    fn run_settings(&self) -> Res<Vec<String>> {
+    /// The fault classes of a run with nodes, each with the nodes it names (`None`: every
+    /// node but the driver and those with `faults = false`). `net` and `partition` are the
+    /// links' and take no `@` (`all@NODE` is the node's own classes of `all`).
+    fn scoped_classes(&self) -> Res<Vec<(&'static str, Option<String>)>> {
+        let faultable = faults::faultable_nodes(self.nodes.len(), &self.faults)?;
         let mut out = vec![];
-        for p in &self.faults_preset {
-            let (names, scope) = faults::split_scope(p);
-            for name in names.split(',') {
-                for (k, v) in faults::preset_settings(name, self.nodes.len(), &self.faults)? {
-                    if faults::node_scoped(&k) {
-                        continue;
-                    }
-                    if scope.is_some() {
+        for e in &self.fault_classes {
+            let (names, scope) = faults::split_scope(e);
+            for c in faults::classes(names, self.nodes.len(), faultable)? {
+                if scope.is_some() && !faults::node_class(c) {
+                    if names.split(',').any(|n| n == c) {
                         return Err(format!(
-                            "--faults {p}: {name} sets {k}, which is the run's (only disk, \
-                             memory, pause and clock keys take @NODE)"
+                            "--faults {e}: {c} acts on links, the run's; it takes no @NODE"
                         ));
                     }
-                    out.push(format!("{k}={v}"));
+                    continue;
                 }
+                out.push((c, scope.map(str::to_string)));
             }
         }
+        // `crash-gap-ms` alone crashes every node.
+        let gap = self.faults.iter().any(|s| s.starts_with("crash-gap-ms="));
+        if gap && !out.iter().any(|(c, _)| matches!(*c, "crash" | "kill")) {
+            out.push(("crash", None));
+        }
+        Ok(out)
+    }
+
+    /// Whether a class or setting of scope `scope` applies to node `k` (0: the driver):
+    /// unscoped, every node but the driver and those with `faults = false`; `@NODE,...`, the
+    /// nodes named, which must exist and have faults.
+    fn applies(&self, k: usize, scope: Option<&str>, what: &str) -> Res<bool> {
+        let Some(l) = scope else {
+            return Ok(k != 0 && !self.nodes[k - 1].no_faults);
+        };
+        for n in l.split(',') {
+            if n != "driver" && !self.nodes.iter().any(|x| x.name == n) {
+                return Err(format!("{what}: no node {n}"));
+            }
+            if self.nodes.iter().any(|x| x.name == n && x.no_faults) {
+                return Err(format!("{what}: node {n} has faults = false"));
+            }
+        }
+        let name = if k == 0 {
+            "driver"
+        } else {
+            self.nodes[k - 1].name.as_str()
+        };
+        Ok(l.split(',').any(|n| n == name))
+    }
+
+    /// The plan of a run with nodes: the run's own settings (links, partitions, crash timing,
+    /// compute) resolved with the run's seed, and each node's classes and settings with its own
+    /// (`node_seed`): its disk, memory, fault points, crashes, pauses and clock. `result.json`
+    /// shows a node's as `KEY@NODE`.
+    fn node_plan(&self) -> Res<faults::Plan> {
+        let classes = self.scoped_classes()?;
+        let run_classes: Vec<&str> = classes
+            .iter()
+            .filter(|(c, _)| !faults::node_class(c))
+            .map(|(c, _)| *c)
+            .collect();
+        let mut run_settings = vec![];
         for s in &self.faults {
             let (kv, scope) = faults::split_scope(s);
             let k = kv.split_once('=').map_or(kv, |x| x.0);
@@ -1266,127 +1297,137 @@ impl Config {
             }
             if scope.is_some() {
                 return Err(format!(
-                    "--fault {s}: {k} is the run's (only disk, memory, pause and clock keys \
-                     take @NODE)"
+                    "--fault {s}: {k} is the run's (only a node's own keys take @NODE: disk, \
+                     memory, fault-point, crash-point, pause and clock keys)"
                 ));
             }
-            out.push(kv.to_string());
+            run_settings.push(kv.to_string());
         }
-        Ok(out)
-    }
-
-    /// Node `k`'s disk and memory settings (`k` 0: the driver): the run's presets' and
-    /// settings' that apply to it (unscoped: every node but the driver; `@NODE,...`: the
-    /// nodes named), then its own `[node.NAME.faults]`.
-    fn node_settings(&self, k: usize) -> Res<Vec<String>> {
-        let name = if k == 0 {
-            "driver"
-        } else {
-            self.nodes[k - 1].name.as_str()
+        let mut plan = faults::resolve(
+            self.seed,
+            &run_classes,
+            &run_settings,
+            self.nodes.len(),
+            faults::CrashAt::Times,
+        )?;
+        let between = |k: &str| {
+            k.starts_with("compute-")
+                || k.starts_with("net-")
+                || k.starts_with("partition-")
+                || matches!(k, "crash-gap-ms" | "down-ms" | "max-incarnations")
         };
-        let free = k > 0 && self.nodes[k - 1].no_faults;
-        let applies = |scope: Option<&str>, what: &str| -> Res<bool> {
-            let Some(l) = scope else {
-                return Ok(k != 0 && !free);
-            };
-            for n in l.split(',') {
-                if n != "driver" && !self.nodes.iter().any(|x| x.name == n) {
-                    return Err(format!("{what}: no node {n}"));
-                }
-                if self.nodes.iter().any(|x| x.name == n && x.no_faults) {
-                    return Err(format!("{what}: node {n} has faults = false"));
-                }
-            }
-            Ok(l.split(',').any(|n| n == name))
-        };
-        let preset = |p: &str, out: &mut Vec<String>| -> Res<()> {
-            for (key, v) in faults::preset_settings(p, self.nodes.len(), &self.faults)? {
-                if faults::node_scoped(&key) {
-                    out.push(format!("{key}={v}"));
-                }
-            }
-            Ok(())
-        };
-        let mut out = vec![];
-        for p in &self.faults_preset {
-            let (names, scope) = faults::split_scope(p);
-            if applies(scope, &format!("--faults {p}"))? {
-                for n in names.split(',') {
-                    preset(n, &mut out)?;
-                }
-            }
-        }
-        for s in &self.faults {
-            let (kv, scope) = faults::split_scope(s);
-            let key = kv.split_once('=').map_or(kv, |x| x.0);
-            if faults::node_scoped(key) && applies(scope, &format!("--fault {s}"))? {
-                out.push(kv.to_string());
-            }
-        }
-        if free && !self.nodes[k - 1].faults.is_empty() {
+        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
             return Err(format!(
-                "[node.{name}]: faults = false and a [node.{name}.faults] table"
+                "--fault {k} with nodes: not available yet (the disk, memory, net-, partition- \
+                 and node crash settings work)"
             ));
         }
-        if k > 0 {
-            // Its presets first, then its keys, whatever the table's order.
-            let own = &self.nodes[k - 1].faults;
-            for p in own.iter().filter_map(|s| s.strip_prefix("preset=")) {
-                for n in p.split(',') {
-                    preset(n, &mut out)?;
-                }
-            }
-            out.extend(own.iter().filter(|s| !s.starts_with("preset=")).cloned());
-        }
-        Ok(out)
-    }
-
-    /// Each node's disk and memory faults, resolved with a seed of its own: the driver's into
-    /// the run's `faults`, the others' into `node_faults`; `result.json` shows them as
-    /// `KEY@NODE`.
-    fn node_faults(&self, plan: &mut faults::Plan) -> Res<()> {
+        // Each node's classes and settings.
+        let mut per = vec![];
         for k in 0..=self.nodes.len() {
-            let given = self.node_settings(k)?;
-            if given.is_empty() {
-                continue;
-            }
             let name = if k == 0 {
                 "driver"
             } else {
                 self.nodes[k - 1].name.as_str()
             };
-            if k == 0 {
-                if let Some(s) = given
-                    .iter()
-                    .find(|s| faults::node_only(s.split_once('=').map_or(s.as_str(), |x| x.0)))
-                {
-                    return Err(format!(
-                        "--fault {s}@driver: a node's own key (the driver is never paused, its \
-                         clock is the run's virtual time)"
-                    ));
+            let mut cs: Vec<&str> = vec![];
+            for (c, scope) in &classes {
+                if !faults::node_class(c) || cs.contains(c) {
+                    continue;
+                }
+                if self.applies(
+                    k,
+                    scope.as_deref(),
+                    &format!("--faults {c}@{}", scope.as_deref().unwrap_or("")),
+                )? {
+                    if k == 0 && !matches!(*c, "disk" | "mem" | "buggify") {
+                        return Err(format!(
+                            "--faults {c}@driver: the driver runs the run's checks; it may have \
+                             disk, mem and buggify faults only"
+                        ));
+                    }
+                    cs.push(c);
                 }
             }
+            let mut ss = vec![];
+            for s in &self.faults {
+                let (kv, scope) = faults::split_scope(s);
+                let key = kv.split_once('=').map_or(kv, |x| x.0);
+                if faults::node_scoped(key) && self.applies(k, scope, &format!("--fault {s}"))? {
+                    if k == 0 && (faults::node_only(key) || key.starts_with("crash-")) {
+                        return Err(format!(
+                            "--fault {s}: the driver is never paused, killed or skewed (it runs \
+                             the run's checks; its clock is the run's virtual time)"
+                        ));
+                    }
+                    ss.push(kv.to_string());
+                }
+            }
+            per.push((name, cs, ss));
+        }
+        if per.iter().any(|(_, cs, _)| cs.contains(&"crash"))
+            && per.iter().any(|(_, cs, _)| cs.contains(&"kill"))
+        {
+            return Err("--faults crash and kill: the nodes' machines crash or their processes are killed, not both".into());
+        }
+        // At the nodes' crash points when any names a crash key, else at drawn times.
+        let points = per.iter().any(|(_, _, ss)| {
+            ss.iter()
+                .any(|s| s.starts_with("crash-permille=") || s.starts_with("crash-at="))
+        });
+        if points {
+            if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "crash-gap-ms") {
+                return Err(format!(
+                    "--fault {k} with crash-permille or crash-at: the crashes come at the nodes' \
+                     crash points, not at drawn times"
+                ));
+            }
+        }
+        // At crash points, the nodes that crash are those a crash key names: a crash class
+        // adds no crash to the others (it says what a crash is: `kill`, a process kill).
+        let mode = if points {
+            faults::CrashAt::Points
+        } else {
+            faults::CrashAt::Times
+        };
+        for (k, (name, mut cs, ss)) in per.into_iter().enumerate() {
+            let keyed = ss.iter().any(|s| s.starts_with("crash-"));
+            if points && !keyed {
+                cs.retain(|c| !matches!(*c, "crash" | "kill"));
+            }
+            if cs.is_empty() && ss.is_empty() {
+                continue;
+            }
             let seed = node_seed(self.seed, k);
-            let sub = faults::resolve(seed, &[], &given, None, 0)
+            let sub = faults::resolve(seed, &cs, &ss, 0, mode)
                 .map_err(|e| format!("node {name}: {e}"))?;
-            match k {
-                0 => faults::set_node_keys(&mut plan.faults, &sub.faults),
-                _ => {
-                    faults::set_node_keys(&mut plan.node_faults[k], &sub.faults);
-                    let (g, l) = (sub.pause_gap_ns, sub.pause_ns);
-                    plan.node_pause[k] = [g.0, g.1, l.0, l.1];
-                    plan.node_skew[k] = sub.skew_ns;
+            if k == 0 {
+                faults::set_node_keys(&mut plan.faults, &sub.faults);
+                plan.sdk = sub.sdk;
+            } else {
+                faults::set_node_keys(&mut plan.node_faults[k], &sub.faults);
+                plan.node_sdk[k] = sub.sdk;
+                let (g, l) = (sub.pause_gap_ns, sub.pause_ns);
+                plan.node_pause[k] = [g.0, g.1, l.0, l.1];
+                plan.node_skew[k] = sub.skew_ns;
+                if mode == faults::CrashAt::Times && sub.crash_class != proto::faults::CRASH_NONE {
+                    plan.node_crash |= 1 << k;
+                    plan.node_crash_kind = if sub.crash_class == proto::faults::CRASH_PROCESS {
+                        proto::node::CRASH_NODE_PROCESS
+                    } else {
+                        proto::node::CRASH_NODE_MACHINE
+                    };
                 }
             }
             for (key, v) in sub.resolved {
                 plan.resolved.push((format!("{key}@{name}"), v));
             }
         }
-        Ok(())
+        Ok(plan)
     }
 
     /// Check the nodes of a run (`proto::node`) and resolve their programs.
-    fn check_nodes(&self, plan: &mut faults::Plan) -> Res<Vec<Program>> {
+    fn check_nodes(&self) -> Res<Vec<Program>> {
         if self.nodes.is_empty() {
             return Ok(vec![]);
         }
@@ -1395,35 +1436,6 @@ impl Config {
                 "[node.*]: at most {MAX_NODES} nodes besides the driver"
             ));
         }
-        // `--faults cluster` crashes every node's machine at drawn times unless `--crash`
-        // says otherwise.
-        let cluster = faults::names_cluster(&self.faults_preset).then_some(faults::CLUSTER_CRASH);
-        if let Some(c) = self.crash.as_deref().or(cluster) {
-            let r = self.crash_nodes(c, plan)?;
-            plan.resolved.push(("crash".into(), serde_json::json!(r)));
-        }
-        // Link faults, partitions and node kills act between nodes; a node's own disk and
-        // memory have no fault plane yet.
-        let between = |k: &str| {
-            k.starts_with("compute-")
-                || k.starts_with("net-")
-                || k.starts_with("partition-")
-                || matches!(
-                    k,
-                    "faults-after-setup"
-                        | "crash"
-                        | "crash-gap-ms"
-                        | "down-ms"
-                        | "max-incarnations"
-                )
-        };
-        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
-            return Err(format!(
-                "--fault {k} with nodes: not available yet (the disk, memory, net-, partition- \
-                 and node kill settings work)"
-            ));
-        }
-        self.node_faults(plan)?;
         let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
         let at = crate::launch::GUEST_PATINA;
         if let Some(m) = self.mounts.iter().find(|m| under(at, &m.dst)) {
@@ -1481,113 +1493,34 @@ impl Config {
         Ok(programs)
     }
 
-    /// `--crash` in a run with nodes. `process|machine[@NODE,...]`: the nodes the seed kills
-    /// at drawn times (`crash-gap-ms`; bit `k` for node `k`; no `@`: every node but the
-    /// driver) and what a kill does (`proto::node::CRASH_NODE_*`), returned. `machine:PERMILLE`
-    /// and `machine-at:N` (each `@NODE,...` as before): a machine crash at the node's crash
-    /// points, set in each such node's `FaultCfg` (`state::faults` in the runtime): at each
-    /// point with that chance, or at the N-th point of its first boot, N drawn from the node's
-    /// own seed when a range; `process-at:N`: a kill of the node's processes there, its disk
-    /// kept; no kills at drawn times then. Settings at crash points joined by `+` act on
-    /// nodes of their own each (`machine-at:5@a+machine-at:9@b`: a crash of a's and one of
-    /// b's, as `sweep with `[sweep] crash-pairs`` gives its children). Returns the resolved form.
-    fn crash_nodes(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
-        if !c.contains('+') {
-            return self.crash_nodes_one(c, plan);
-        }
-        let mut shown = vec![];
-        let mut set = 0u64;
-        for part in c.split('+') {
-            if matches!(part.split('@').next(), Some("process" | "machine")) {
-                return Err(format!(
-                    "--crash {c}: only settings at crash points join with + (machine:PERMILLE, \
-                     machine-at:N, process-at:N), not {part}"
-                ));
-            }
-            shown.push(self.crash_nodes_one(part, plan)?);
-            let now = (1..plan.node_faults.len())
-                .filter(|&k| plan.node_faults[k].crash_kind != proto::faults::CRASH_NONE)
-                .fold(0u64, |m, k| m | 1 << k);
-            if now.count_ones() != set.count_ones() + part_nodes(part, self) {
-                return Err(format!(
-                    "--crash {c}: {part} names a node another setting of it names"
-                ));
-            }
-            set = now;
-        }
-        Ok(shown.join(" "))
-    }
-
-    fn crash_nodes_one(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
-        let (kind, at) = c.split_once('@').map_or((c, None), |(k, a)| (k, Some(a)));
-        let timed = match kind {
-            "process" => Some(proto::node::CRASH_NODE_PROCESS),
-            "machine" => Some(proto::node::CRASH_NODE_MACHINE),
-            k if k.starts_with("machine:")
-                || k.starts_with("machine-at:")
-                || k.starts_with("process-at:") =>
-            {
-                None
-            }
-            _ => {
-                return Err(format!(
-                    "--crash {c} with nodes: expected process[@NODE,...] or machine[@NODE,...] \
-                     (at seed-drawn times, crash-gap-ms), or machine:PERMILLE[@NODE,...], \
-                     machine-at:N[@NODE,...] or process-at:N[@NODE,...] (at a node's crash \
-                     points)"
-                ))
-            }
+    /// The size of node `k`'s (0-based, the driver not counted) tmpfs: its `disk-mb`, a range
+    /// drawn from the run's seed, else the run's.
+    pub fn node_disk_bytes(&self, k: usize) -> Res<u64> {
+        let n = &self.nodes[k];
+        let Some(v) = &n.disk_mb else {
+            return Ok(self.tmpfs_bytes);
         };
-        let mut m = 0u64;
-        match at {
-            None => {
-                for (i, n) in self.nodes.iter().enumerate() {
-                    m |= u64::from(!n.no_faults) << (i + 1);
-                }
-                if m == 0 {
-                    return Err(format!("--crash {c}: every node has faults = false"));
-                }
-            }
-            Some(at) => {
-                for n in at.split(',') {
-                    if n == "driver" {
-                        return Err(format!(
-                            "--crash {c}: the driver is never killed (it runs the run's checks)"
-                        ));
-                    }
-                    let k = self
-                        .nodes
-                        .iter()
-                        .position(|x| x.name == n)
-                        .ok_or_else(|| format!("--crash {c}: the run has no node {n}"))?;
-                    if self.nodes[k].no_faults {
-                        return Err(format!("--crash {c}: node {n} has faults = false"));
-                    }
-                    m |= 1 << (k + 1);
-                }
-            }
+        let at = format!("[node.{}] disk-mb", n.name);
+        let num = |s: &str| -> Res<u64> {
+            s.trim()
+                .parse()
+                .map_err(|_| format!("{at}: a number of MiB or a range A..B, not {v}"))
+        };
+        let (a, b) = match v.split_once("..") {
+            Some((a, b)) => (num(a)?, num(b)?),
+            None => (num(v)?, num(v)?),
+        };
+        if a == 0 || a > b {
+            return Err(format!("{at}: {v}: at least 1, and A at most B"));
         }
-        if let Some(t) = timed {
-            (plan.node_crash, plan.node_crash_kind) = (m, t);
-            return Ok(c.to_string());
-        }
-        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "crash-gap-ms") {
+        if b << 20 > self.tmpfs_bytes {
             return Err(format!(
-                "--fault {k} with --crash {c}: the crash comes at the nodes' crash points, not \
-                 at drawn times"
+                "{at}: at most [run] disk-mb ({} MiB)",
+                self.tmpfs_bytes >> 20
             ));
         }
-        let mut shown = vec![];
-        for (i, n) in self.nodes.iter().enumerate() {
-            let k = i + 1;
-            if m & (1 << k) == 0 {
-                continue;
-            }
-            let f = &mut plan.node_faults[k];
-            let r = faults::crash_plan(node_seed(self.seed, k), f, kind)?;
-            shown.push(format!("{r}@{}", n.name));
-        }
-        Ok(shown.join(" "))
+        let key = format!("disk-mb@{}", n.name);
+        Ok((a + faults::plan_draw(self.seed, &key) % (b - a + 1)) << 20)
     }
 
     /// The work tree's guest path.
@@ -1599,14 +1532,6 @@ impl Config {
     pub fn opts(&self) -> Res<Opts> {
         let program = program(&self.cmd[0], &self.mounts)?;
         self.opts_with(program)
-    }
-}
-
-/// How many nodes a crash setting at points names: its `@NODE,...`, or every node with faults.
-fn part_nodes(part: &str, c: &Config) -> u32 {
-    match part.split_once('@') {
-        Some((_, at)) => at.split(',').count() as u32,
-        None => c.nodes.iter().filter(|n| !n.no_faults).count() as u32,
     }
 }
 
@@ -1750,35 +1675,48 @@ mod tests {
             .iter()
             .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_incarnations == Some(4)));
         assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
-        // `--crash process` covers every node but the driver; `@` names some.
+        // `--faults kill` covers every node but the driver; `@` names some.
         use proto::faults::{CRASH_MACHINE, CRASH_NONE, CRASH_PROCESS};
         use proto::node::{CRASH_NODE_MACHINE, CRASH_NODE_PROCESS};
-        let crash = |c: &Config, x: &str| {
-            let mut p = faults::resolve(0, &[], &[], None, c.nodes.len()).unwrap();
-            c.crash_nodes(x, &mut p).map(|_| p)
+        let crash = |c: &Config, classes: &[&str], keys: &[&str]| {
+            let mut c = c.clone();
+            c.fault_classes = classes.iter().map(|x| x.to_string()).collect();
+            c.faults = keys.iter().map(|x| x.to_string()).collect();
+            c.node_plan()
         };
         let timed = |x: &str| {
-            let p = crash(&c, x).unwrap();
+            let p = crash(&c, &[x], &[]).unwrap();
             (p.node_crash, p.node_crash_kind)
         };
-        assert_eq!(timed("process"), (0b11110, CRASH_NODE_PROCESS));
-        assert_eq!(timed("process@w2,db"), (0b10100, CRASH_NODE_PROCESS));
-        assert_eq!(timed("machine@w1"), (0b10, CRASH_NODE_MACHINE));
+        assert_eq!(timed("kill"), (0b11110, CRASH_NODE_PROCESS));
+        assert_eq!(timed("kill@w2,db"), (0b10100, CRASH_NODE_PROCESS));
+        assert_eq!(timed("crash@w1"), (0b10, CRASH_NODE_MACHINE));
+        // `crash-gap-ms` alone crashes every node's machine.
+        let g = crash(&c, &[], &["crash-gap-ms=1000..2000"]).unwrap();
+        assert_eq!(
+            (g.node_crash, g.node_crash_kind),
+            (0b11110, CRASH_NODE_MACHINE)
+        );
         // At crash points: set in the scoped nodes' own settings, none at drawn times.
-        let p = crash(&c, "machine-at:3@w2").unwrap();
+        let p = crash(&c, &["crash"], &["crash-at=3@w2"]).unwrap();
         assert_eq!(p.node_crash, 0);
         let at: Vec<u64> = p.node_faults[1..5].iter().map(|f| f.crash_at).collect();
         assert_eq!(at, [0, 3, 0, 0]);
-        let p = crash(&c, "machine:5").unwrap();
+        let p = crash(&c, &[], &["crash-permille=5"]).unwrap();
         assert!(p.node_faults[1..5].iter().all(|f| f.crash_permille == 5));
         // A process kill at a point: the node's own kind, its point.
-        let p = crash(&c, "process-at:4@w1").unwrap();
+        let p = crash(&c, &["kill@w1"], &["crash-at=4@w1"]).unwrap();
         assert_eq!(p.node_crash, 0);
         let w1 = &p.node_faults[1];
         assert_eq!((w1.crash_kind, w1.crash_at), (CRASH_PROCESS, 4));
         assert_eq!(p.node_faults[2].crash_kind, CRASH_NONE);
-        // Settings at points joined by +: each its own nodes.
-        let p = crash(&c, "machine-at:5@w1+machine:0@w2,db+process-at:2@w3").unwrap();
+        // Settings at points: each its own nodes.
+        let p = crash(
+            &c,
+            &["kill@w3"],
+            &["crash-at=5@w1", "crash-permille=0@w2,db", "crash-at=2@w3"],
+        )
+        .unwrap();
         let k: Vec<(u64, u64, u64)> = p.node_faults[1..5]
             .iter()
             .map(|f| (f.crash_kind, f.crash_at, f.crash_permille))
@@ -1792,15 +1730,19 @@ mod tests {
                 (CRASH_MACHINE, 0, 0)
             ]
         );
-        for bad in [
-            "machine-at:5@w1+machine-at:6@w1",
-            "machine-at:5@w1+machine:0",
-            "machine@w1+machine-at:3@w2",
+        for (cl, keys) in [
+            (
+                &["crash"][..],
+                &["crash-at=5@w1", "crash-permille=6@w1"][..],
+            ),
+            (&["crash@w1"], &["crash-at=3@w2", "crash-gap-ms=1..2"]),
+            (&["crash@w1", "kill@w2"], &[]),
+            (&["kill@driver"], &[]),
+            (&["crash@nope"], &[]),
+            (&[], &["crash-at=1@driver"]),
+            (&["net@w1"], &[]),
         ] {
-            assert!(crash(&c, bad).is_err(), "{bad}");
-        }
-        for bad in ["process:5", "process@driver", "machine@nope", "fs"] {
-            assert!(crash(&c, bad).is_err(), "{bad}");
+            assert!(crash(&c, cl, keys).is_err(), "{cl:?} {keys:?}");
         }
         for bad in [
             "restart = \"sometimes\"",
@@ -1830,22 +1772,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(!c.nodes[0].no_faults && c.nodes[1].no_faults);
         c.faults = vec!["fs-error-permille=7".into()];
-        let plan = |c: &Config| {
-            let mut p = faults::resolve(0, &[], &[], None, c.nodes.len()).unwrap();
-            c.node_faults(&mut p).map(|_| p)
-        };
+        let plan = |c: &Config| c.node_plan();
         // Unscoped: a has it, m does not.
         let p = plan(&c).unwrap();
         assert_eq!(p.node_faults[1].fs_error_permille, 7);
         assert_eq!(p.node_faults[2].fs_error_permille, 0);
-        let mut p = faults::resolve(0, &[], &[], None, 2).unwrap();
-        c.crash_nodes("machine", &mut p).unwrap();
-        assert_eq!(p.node_crash, 0b010);
+        let mut k = c.clone();
+        k.fault_classes = vec!["crash".into()];
+        assert_eq!(k.node_plan().unwrap().node_crash, 0b010);
         // A scope may not name it.
         c.faults = vec!["fs-error-permille=7@m".into()];
         assert!(plan(&c).is_err());
-        let mut p = faults::resolve(0, &[], &[], None, 2).unwrap();
-        assert!(c.crash_nodes("machine:5@m", &mut p).is_err());
+        c.faults = vec!["crash-permille=5@m".into()];
+        assert!(plan(&c).is_err());
     }
 
     #[test]

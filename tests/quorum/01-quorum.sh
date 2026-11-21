@@ -1,6 +1,6 @@
 # 1. Quorum: a three-node replicated store with failover (tests/guests/nodes/q3.py: a primary,
 # two backups, quorum writes, leased reads, view changes that fence the old primary) under the
-# seed's partitions and the net preset. Correct: ok on every seed of a sweep, partitions drawn
+# seed's partitions and the net class. Correct: ok on every seed of a sweep, partitions drawn
 # and acting on traffic, and a failover (a view above 0; searched past the sweep's seeds if
 # none of them had one), identical under verify. The planted bug of reads without the lease
 # (`nolease`: a stale read from the old primary after a one-way or isolating cut) is found by a

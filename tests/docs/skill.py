@@ -1,6 +1,6 @@
 """tests/docs/skill.py: the agent skill (skills/*/*.md) and the user docs (README.md, the guide,
 the examples' README, ARCHITECTURE.md) name only what the patina under test has; the skill also
-mentions every command, fault preset and outcome it has.
+mentions every command, fault class and outcome it has.
 
 ./check docs runs the skill's command blocks (transcripts.py); this checks the names around them,
 which no command runs. The patina binary is the source of truth (`patina --help --format json`):
@@ -8,13 +8,13 @@ which no command runs. The patina binary is the source of truth (`patina --help 
 - In the skill's code (`sh` fences, `$` lines of `text` fences, inline code spans), each
   `patina COMMAND ...` names a command; `log` a word of that command's usage; each
   option, one the command takes (an inline span that starts with an option: one some command
-  takes); `--fault KEY=V` and a span `KEY=V`, a fault key; `--faults A,B`, presets; `--crash
-  KIND`, a kind the option's help names; an option whose value is a list of words, one of them.
+  takes); `--fault KEY=V` and a span `KEY=V`, a fault key; `--faults A,B`, fault classes (or
+  `all`); an option whose value is a list of words, one of them.
   Upper-case words are placeholders and are not checked.
 - The skill's table whose first column is `Outcome` lists every outcome with its exit status.
 - Test inputs (`PATINA_TEST_*`, AGENTS.md) appear in neither `--help` nor these files.
 - docs/EVIDENCE.md is a record of past runs, each with the build it used, and is not checked.
-- Every command appears as `patina COMMAND`, and every preset as a `--faults` value, somewhere in
+- Every command appears as `patina COMMAND`, and every class as a `--faults` value, somewhere in
   the skill: a new one fails here until the skill says when an agent uses it.
 
 An existence check of names, not of wording. Prints each name it does not know, with its place.
@@ -46,7 +46,7 @@ def vocabulary(patina):
          "commands": {c["name"]: c for c in d["commands"]},
          "flags": {f["name"]: f for f in d["flags"]},
          "keys": {k["name"] for k in d["faults"]["keys"]},
-         "presets": {p["name"] for p in d["faults"]["presets"]},
+         "classes": {p["name"] for p in d["faults"]["classes"]} | {"all"},
          "outcomes": {o["name"]: o["exit"] for o in d["outcomes"]},
          "short": {}}
     for f in d["flags"]:
@@ -55,8 +55,6 @@ def vocabulary(patina):
     # A command's second words (log tree): the lower-case words of its usage.
     v["words"] = {n: set(re.findall(r"(?<![-\w])([a-z]+)(?![-\w])", c["usage"])) - {"patina", n}
                   for n, c in v["commands"].items()}
-    crash = v["flags"]["--crash"]["help"]
-    v["crash"] = set(re.findall(r"\b([a-z]+(?:-[a-z]+)*)(?=(?:\|[a-z-]+)*\[?:[A-Z])", crash))
     return v
 
 
@@ -150,16 +148,11 @@ def check_value(where, name, value, arg, v, bad, seen):
         if arg != "help":  # --fault help lists the keys
             check_key(where, arg, v, bad)
     elif name == "--faults":
-        for p in arg.split(","):
-            p = p.split("@")[0]
-            seen["presets"].add(p)
-            if p not in v["presets"]:
-                bad.append(f"{where}: no fault preset {p}")
-    elif name == "--crash":
-        for part in arg.split("+"):
-            kind = re.split(r"[:@\[]", part)[0]
-            if kind not in v["crash"]:
-                bad.append(f"{where}: no crash kind {kind} (--crash help: {sorted(v['crash'])})")
+        # CLASS[,CLASS][@NODE,...]: the scope after `@` names nodes.
+        for p in arg.split("@")[0].split(","):
+            seen["classes"].add(p)
+            if p not in v["classes"]:
+                bad.append(f"{where}: no fault class {p}")
     elif "|" in value and arg.replace("\\|", "|") != value and all(re.fullmatch(r"[a-z]+", a) for a in value.split("|")):
         for a in arg.split(","):
             if a not in value.split("|"):
@@ -175,7 +168,7 @@ def check_key(where, kv, v, bad):
 
 
 def check_file(path, v, bad, seen, doc=False):
-    """Check the names in one file, noting in seen the commands, presets and outcomes it names.
+    """Check the names in one file, noting in seen the commands, classes and outcomes it names.
     A doc (not the skill) also shows other tools' options in code spans: there only the options of
     a `patina` command are checked."""
     rel = os.path.relpath(path, REPO)
@@ -245,24 +238,24 @@ def main():
     v = vocabulary(patina)
     files = sorted(os.path.join(dp, f) for dp, _, fs in os.walk(SKILLS) for f in fs if f.endswith(".md"))
     bad = ["patina --help names a test input (PATINA_TEST_*): AGENTS.md lists them"] if v["test_inputs"] else []
-    seen = {"commands": set(), "presets": set(), "outcomes": {}}
+    seen = {"commands": set(), "classes": set(), "outcomes": {}}
     for path in files:
         check_file(path, v, bad, seen)
     for d in DOCS:
-        check_file(os.path.join(REPO, d), v, bad, {"commands": set(), "presets": set(), "outcomes": {}},
+        check_file(os.path.join(REPO, d), v, bad, {"commands": set(), "classes": set(), "outcomes": {}},
                    doc=True)
     for c in sorted(set(v["commands"]) - seen["commands"]):
         bad.append(f"skills: patina {c} is not mentioned (a new command?): say in skills/patina/SKILL.md "
                    "when an agent uses it")
-    for p in sorted(v["presets"] - seen["presets"]):
-        bad.append(f"skills: --faults {p} is not mentioned (a new preset?): say in skills/patina/faults.md "
+    for p in sorted(v["classes"] - {"all"} - seen["classes"]):
+        bad.append(f"skills: --faults {p} is not mentioned (a new class?): say in skills/patina/faults.md "
                    "when an agent uses it")
     for o in sorted(set(v["outcomes"]) - set(seen["outcomes"])):
         bad.append(f"skills: outcome {o} is not in the Outcome table of skills/patina/SKILL.md (a new "
                    "outcome?): say what an agent does with it")
     for b in bad:
         print("FAIL: " + b)
-    print(f"== skill: {len(files)} files and {len(DOCS)} docs; {len(seen['commands'])} commands, {len(seen['presets'])} presets, "
+    print(f"== skill: {len(files)} files and {len(DOCS)} docs; {len(seen['commands'])} commands, {len(seen['classes'])} classes, "
           f"{len(seen['outcomes'])} outcomes named; {len(bad)} unknown or missing")
     return 1 if bad else 0
 

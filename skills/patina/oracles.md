@@ -107,10 +107,11 @@ Outside Patina every SDK call is a no-op, so it can stay in production builds.
 - `sometimes(cond, label)` and `reachable(label)` must hold or be hit in at least one run of the
   sweep, or the sweep ends `vacuous`. Put one where the interesting state is (a retry taken, a
   recovery run, a leader changed): a sweep that never got there found nothing there.
-- `buggify(label)` is a fault point the seed turns on under `--buggify`: take the rare path
+- `buggify(label)` is a fault point the seed turns on under `--faults buggify`: take the rare path
   (a retry, a slow branch, an early timeout) only where the real program can.
-- `setup_complete()` marks the end of setup; with `--fault faults-after-setup=1`, faults and
-  crash points start there.
+- `setup_complete()` marks the end of setup and faults act only after it (a run with faults that
+  meets it reruns from the start with faults held), and `faults_done()` (C `patina_faults_done`,
+  Go `FaultsDone`, `patina ctl mark faults-done`) ends them before the final checks.
 - `mark("ack 17")` records a promise in the log for a checker to verify against what reached
   the disk (`examples/checks/synced-before-mark`).
 

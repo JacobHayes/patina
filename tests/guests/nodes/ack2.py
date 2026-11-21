@@ -6,8 +6,9 @@
     ack2.py b [MODE] [init]  backup: append each `put I` to `log` with fsync, then answer
                              `ok I`; MODE `early` answers before the append and its fsync,
                              `lazy` answers at once and appends the put when its next request
-                             comes; `init` syncs b's directory before it listens, on its first
-                             start only (no PATINA_INCARNATION): a crash point before any put
+                             comes; `init` syncs b's directory when it first serves a request, on
+                             its first start only (no PATINA_INCARNATION): a crash point before
+                             any put
     ack2.py driver N [wait]  put 1..N through a, then read both logs back; with `wait`, first
                              wait for b to answer a `get`
 
@@ -85,11 +86,8 @@ def call(peer, host, port, line):
 
 
 def serve(name, mode, init):
-    if init and "PATINA_INCARNATION" not in os.environ:
-        d = os.open(".", os.O_RDONLY)
-        os.fsync(d)
-        os.close(d)
     held = recover()
+    initial = [bool(init) and "PATINA_INCARNATION" not in os.environ]
     pending = []
     lock = threading.Lock()
     b = [None, None]
@@ -100,6 +98,11 @@ def serve(name, mode, init):
             for line in f:
                 w = line.split()
                 with lock:
+                    if initial[0]:
+                        initial[0] = False
+                        d = os.open(".", os.O_RDONLY)
+                        os.fsync(d)
+                        os.close(d)
                     for i in pending:
                         if i not in held:
                             append(held, i)
@@ -140,11 +143,11 @@ def serve(name, mode, init):
 def driver(n, wait):
     a = [None, None]
     call(a, "a", 7000, "get\n")
+    patina.setup_complete()
     if wait:
         p = [None, None]
         call(p, "b", 7000, "get\n")
         p[0].close()
-    patina.setup_complete()
     for i in range(1, n + 1):
         call(a, "a", 7000, f"put {i}\n")
         print(f"ack {i}", flush=True)

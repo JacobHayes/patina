@@ -1,5 +1,5 @@
 # Evidence (crash-point enumeration): for each base seed, one run without a crash, then one
-# child per crash point of it (`--crash machine-at:N`), counting the children that end in
+# child per crash point of it (`--fault crash-at=N`), counting the children that end in
 # fjall's journal-entry assertion (F2, docs/EVIDENCE.md "Search quality"). Prints, per seed,
 # the crash points, the children, the F2 children and their points, the CPU-seconds in all
 # and to the first F2, and the share of children whose post-crash tree repeats an earlier
@@ -7,13 +7,13 @@
 #   ENUM_SEEDS   base seeds to take in order (default 1 to 20); a seed over 10,000 crash points
 #                is skipped and the next taken, until ENUM_COUNT (default 3) are enumerated
 #   ENUM_DIR ENUM_CMD ENUM_OPTS  the guest directory, command and options (default the debug
-#                fjall harness with FJ_N=2000 --buggify)
+#                fjall harness with FJ_N=2000 --faults buggify)
 #   ENUM_JOBS    parallel children (default 6)
 #@ tier=evidence budget=1200 slots=6 arch=x86_64
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_WORKLOADS:?}"
 seeds=${ENUM_SEEDS:-$(seq 1 20)}
 cmd=${ENUM_CMD:-/guest/fjall-harness-debug}
-opts=${ENUM_OPTS:---buggify --env FJ_N=2000}
+opts=${ENUM_OPTS:---faults buggify --env FJ_N=2000}
 export PATINA RUNS opts cmd G="${ENUM_DIR:-$PATINA_WORKLOADS/fjall-harness}"
 ulimit -f 4000000
 die() { echo "FAIL: $*"; exit 1; }
@@ -23,7 +23,7 @@ for s in $seeds; do
     [ "$tried" -lt "${ENUM_COUNT:-3}" ] || break
     b=$out/base-$s
     # shellcheck disable=SC2086
-    "$PATINA" run --seed "$s" --crash machine:0 --out "$b" --mount "$G":/guest:copy $opts -- $cmd >/dev/null 2>&1 \
+    "$PATINA" run --seed "$s" --fault crash-permille=0 --out "$b" --mount "$G":/guest:copy $opts -- $cmd >/dev/null 2>&1 \
         || [ -f "$b/result.json" ] || die "seed $s: the base run failed"
     pts=$(jq '.faults.counts.crash.eligible // 0' "$b/result.json")
     [ "$pts" -gt 0 ] || die "seed $s: the base has no crash point ($(jq -r .outcome "$b/result.json"))"
@@ -35,7 +35,7 @@ for s in $seeds; do
     # One child per point: its line is point, crash seq, outcome, F2 (1/0), wall_ms, tree digest.
     xargs -P "${ENUM_JOBS:-6}" -I{} bash -euo pipefail -O inherit_errexit -c '
         s=$1 q=$2 c=$RUNS/enum/child-$1-$2
-        timeout 600 "$PATINA" run --seed "$s" --crash "machine-at:$q" --out "$c" --mount "$G":/guest:copy $opts -- $cmd >/dev/null 2>&1 || true
+        timeout 600 "$PATINA" run --seed "$s" --fault "crash-at=$q" --out "$c" --mount "$G":/guest:copy $opts -- $cmd >/dev/null 2>&1 || true
         if [ -f "$c/result.json" ]; then
             jq -r --arg q "$q" "[\$q, (.crashes[0].seq // \"-\"), .outcome, (if ((.signature // \"\") | test(\"journal/entry.rs\")) then 1 else 0 end), .wall_ms, (.crashes[0].tree_digest // \"-\")] | @tsv" "$c/result.json"
         else

@@ -20,7 +20,7 @@
 // Under Patina an Always that sees false ends the run with outcome violation and the message
 // "label: detail". A passing check reports only the first time it is evaluated in a process (a
 // Sometimes also the first time it holds), so a passing check costs one load. A fault point
-// fires only with `patina run --buggify`, on evaluations chosen by the seed and its label
+// fires only with `patina run --faults buggify`, on evaluations chosen by the seed and its label
 // alone; `--fault buggify:LABEL=PERMILLE` forces one point's rate.
 //
 // The wire is documented in sdk/c/patina.h of the Patina repository.
@@ -312,7 +312,7 @@ func Buggify(label string) *BuggifySite {
 }
 
 // Fires reports whether the point fires on this evaluation at the run's default rate. Outside
-// Patina, and in a run without --buggify, it never does.
+// Patina, and in a run without the buggify class, it never does.
 func (b *BuggifySite) Fires() bool { return b.point(opBuggify, kindBuggify, -1) }
 
 // DelaySite sleeps a seeded virtual time on seed-chosen evaluations.
@@ -340,7 +340,7 @@ type KnobSite struct {
 	def, low, high int64
 }
 
-// Knob declares a tunable whose value is def outside Patina or without --buggify and, with
+// Knob declares a tunable whose value is def outside Patina or without the buggify class and, with
 // it, a seed-chosen value in [low, high] for an active point. Call it once per label, at
 // package level.
 //
@@ -387,5 +387,8 @@ func Control(words string) error {
 	return nil
 }
 
-// SetupComplete marks the end of setup: with faults-after-setup, no fault fires before it.
+// SetupComplete marks the end of setup: no fault acts before it.
 func SetupComplete() { Mark("setup-complete") }
+
+// FaultsDone marks the end of the faults: none acts after it (call it before the final checks).
+func FaultsDone() { Mark("faults-done") }
