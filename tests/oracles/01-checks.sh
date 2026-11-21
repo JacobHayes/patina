@@ -27,7 +27,7 @@
 #    (marklog fixed marks progress before its fsync: only the `ack` marks are judged). An open
 #    through a symlink has its path as passed and the path it walked, the
 #    same in five runs under cpu and aslr variation.
-# 6. `patina recheck`: the same checker leaves each kept run's result.json byte for byte; a
+# 6. `patina report --recheck`: the same checker leaves each kept run's result.json byte for byte; a
 #    keyed finding (LABEL [KEY]: detail) is grouped by its key, and shown as written.
 #@ tier=quick budget=10 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -219,7 +219,9 @@ mv lt-tree/listing lt-listing
 lhs=$(cd lt-tree && sh -c "$list"); rhs=$(cat lt-listing)
 [ "$lhs" = "$rhs" ] || die "log tree differs from the guest's own tree: $lhs"
 ! "$PATINA" log tree lt/inc-0 lt-tree 2>/dev/null || die "log tree wrote into a directory that is not empty"
-pruned=$(for d in up1/seed-*; do [ -d "$d/inc-0" ] || { echo "$d"; break; }; done)
+# A sweep without a checker prunes the logs of its ok runs.
+"$PATINA" sweep --seeds 1..2 --out prn -- "$hello" >prn.txt 2>&1 || die "sweep of hello: $(tail -2 prn.txt)"
+pruned=$(for d in prn/seed-*; do [ -d "$d/inc-0" ] || { echo "$d"; break; }; done)
 [ -n "$pruned" ] && ! "$PATINA" log tree "$pruned/inc-0" lt-pruned 2>/dev/null && [ ! -e lt-pruned ] || die "log tree of a pruned run '$pruned'"
 # Every incarnation of a crashed run; each holds at least the records acknowledged in it.
 n=0
@@ -322,12 +324,12 @@ lhs=$(jq '[.groups[].runs | length] | add' calcs/report.json); rhs=$(jq .finding
 [ "$lhs" = "$rhs" ] || die "report.json: groups do not list every finding's run"
 echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case settings, faults patterns, --group, --ok-exit any"
 
-# 6. Judging kept runs again (`patina recheck`). The same checker leaves every kept run's
+# 6. Judging kept runs again (`patina report --recheck`). The same checker leaves every kept run's
 #    result.json as it was, byte for byte; a checker that names its finding LABEL [KEY] is
 #    grouped by the key alone in every run whose logs were kept, and the report shows one
 #    finding as the checker wrote it.
 for r in calcs/seed-*/*; do [ ! -d "$r/inc-0" ] || cp "$r/result.json" "$r/result.before"; done
-"$PATINA" recheck calcs >rk.txt 2>&1 || true
+"$PATINA" report --recheck calcs >rk.txt 2>&1 || true
 n=0
 for b in calcs/seed-*/*/result.before; do
     cmp -s "$b" "${b%.before}.json" || die "recheck with the same checker rewrote $(dirname "$b")/result.json"
@@ -335,7 +337,7 @@ for b in calcs/seed-*/*/result.before; do
 done
 [ "$n" -gt 0 ] || die "no kept calc run to judge again"
 sed 's/echo "wrong-$1: got $g, want $w"/echo "wrong [$1]: got $g, want $w (0x$g)"/' chk/calc >chk/calc-key && chmod +x chk/calc-key
-"$PATINA" recheck --check chk/calc-key calcs >rk2.txt 2>&1 || true
+"$PATINA" report --recheck --check chk/calc-key calcs >rk2.txt 2>&1 || true
 # Every finding whose logs the sweep kept (a group's first three) is judged again; the others
 # keep their verdict, as a pruned ok run does.
 keyed=$(for r in calcs/seed-*/*; do [ ! -d "$r/inc-0" ] || jq -r 'select(.outcome == "violation") | .signature' "$r/result.json"; done | sort -u | paste -sd,)

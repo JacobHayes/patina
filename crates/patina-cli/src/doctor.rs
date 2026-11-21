@@ -381,6 +381,11 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         },
     });
     checks.push(Check {
+        name: "plan cache (--preempt points, optional)",
+        required: false,
+        result: Ok(crate::rewrite::cache::summary()),
+    });
+    checks.push(Check {
         name: "debugger attach (patina debug, optional)",
         required: false,
         result: debugger_attach(),

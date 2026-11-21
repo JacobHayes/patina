@@ -3,9 +3,10 @@
 # one too many; anything times 0 is the other operand) and one difference by design (it
 # divides toward zero, the reference toward minus infinity), each case run at seeds 1-2.
 # - Groups by a checker that writes `wrong-output: got G, want W`, then by one that keys its
-#   finding by the operation, `wrong-output [OP]: ...` (patina recheck, and a fresh sweep).
-# - The table of expected differences gains the division cases: patina recheck against the
-#   same sweep run afresh (wall time, groups); the disk --keep checked, fail and all take.
+#   finding by the operation, `wrong-output [OP]: ...` (patina report --recheck, and a fresh sweep).
+# - The table of expected differences gains the division cases: patina report --recheck against the
+#   same sweep run afresh (wall time, groups); the disk --keep fail takes with and without a
+#   checker, and --keep all.
 # - The reference guard: the reference made with another work tree; then --relax work.
 # - The fjall harness under --buggify (seed 1, seeds 1-4): exit status and the sdk lines, by
 #   this build and, when OLD_PATINA names one, by an earlier build.
@@ -73,15 +74,15 @@ set -- $(sweep ref --seeds 1 --keep all -- /bin/sh /c/ref {})
 echo "reference: 200 runs, $(secs "$*")"
 
 # Groups before and after a key.
-set -- $(sweep plain --seeds 1..2 --keep checked --check "chk/plain ref" -- /bin/sh /c/calc {})
+set -- $(sweep plain --seeds 1..2 --check "chk/plain ref" -- /bin/sh /c/calc {})
 echo "plain checker: exit $1, $(secs "$*"), $(jq '.groups | length' plain/report.json) groups"
 groups plain
 cp -R plain keyed-rk
 t0=$(date +%s%N)
-rc=0; "$PATINA" recheck --check "chk/keyed ref" keyed-rk >keyed-rk.txt 2>&1 || rc=$?
+rc=0; "$PATINA" report --recheck --check "chk/keyed ref" keyed-rk >keyed-rk.txt 2>&1 || rc=$?
 echo "keyed checker by recheck: exit $rc, $(( ($(date +%s%N) - t0) / 1000000 )) ms, $(jq '.groups | length' keyed-rk/report.json) groups"
 groups keyed-rk
-set -- $(sweep keyed --seeds 1..2 --keep checked --check "chk/keyed ref" -- /bin/sh /c/calc {})
+set -- $(sweep keyed --seeds 1..2 --check "chk/keyed ref" -- /bin/sh /c/calc {})
 echo "keyed checker by a fresh sweep: exit $1, $(secs "$*"), $(jq '.groups | length' keyed/report.json) groups"
 sig() { jq -c '[.groups[] | [.signature, .count]] | sort' "$1/report.json"; }
 a=$(sig keyed-rk) b=$(sig keyed)
@@ -91,19 +92,19 @@ a=$(sig keyed-rk) b=$(sig keyed)
 jq -r '.groups[] | select(.signature | test("\\[div\\]")) | .runs[].case_id' keyed/report.json | sort -un >chk/expected.txt
 echo "table: $(wc -l <chk/expected.txt) division cases"
 t0=$(date +%s%N)
-rc=0; "$PATINA" recheck keyed >keyed-table.txt 2>&1 || rc=$?
+rc=0; "$PATINA" report --recheck keyed >keyed-table.txt 2>&1 || rc=$?
 rk=$(( ($(date +%s%N) - t0) / 1000000 ))
 echo "recheck after the table edit: exit $rc, $rk ms: $(grep '^check: judged' keyed-table.txt)"
 groups keyed
-set -- $(sweep again --seeds 1..2 --keep checked --check "chk/keyed ref" -- /bin/sh /c/calc {})
+set -- $(sweep again --seeds 1..2 --check "chk/keyed ref" -- /bin/sh /c/calc {})
 echo "the same sweep afresh: exit $1, $(secs "$*"): $(grep '^check: judged' again.txt)"
 a=$(sig keyed) b=$(sig again)
 [ "$a" = "$b" ] || die "recheck and the fresh sweep differ: $a / $b"
-set -- $(sweep fail --seeds 1..2 --check "chk/keyed ref" -- /bin/sh /c/calc {})
+set -- $(sweep fail --seeds 1..2 -- /bin/sh /c/calc {})
 set -- $(sweep all --seeds 1..2 --keep all --check "chk/keyed ref" -- /bin/sh /c/calc {})
-echo "disk (du -sk): --keep checked $(du -sk again | cut -f1) KiB, fail $(du -sk fail | cut -f1) KiB, all $(du -sk all | cut -f1) KiB"
-rc=0; "$PATINA" recheck --check "chk/plain ref" fail >fail-rk.txt 2>fail-rk.err || rc=$?
-echo "recheck of the --keep fail sweep: exit $rc: $(tail -1 fail-rk.err)"
+echo "disk (du -sk): --keep fail with a checker $(du -sk again | cut -f1) KiB, without one $(du -sk fail | cut -f1) KiB, --keep all $(du -sk all | cut -f1) KiB"
+rc=0; "$PATINA" report --recheck --check "chk/plain ref" fail >fail-rk.txt 2>fail-rk.err || rc=$?
+echo "recheck of the sweep without a checker: exit $rc: $(tail -1 fail-rk.err)"
 awk '/^check: these/' fail-rk.txt
 
 # The guard: the reference made with another work tree.
@@ -120,7 +121,7 @@ for b in new old; do
     [ -n "$P" ] || continue
     for s in 1 1..4; do
         rc=0
-        "$P" sweep -j 8 --seeds $s --buggify --keep none --out "fj-$b-$s" --mount "$PATINA_WORKLOADS/fjall-harness:/guest:copy" -- /guest/fjall-harness-release >"fj-$b-$s.txt" 2>&1 || rc=$?
+        PATINA_TEST_KEEP_NONE=1 "$P" sweep -j 8 --seeds $s --buggify --out "fj-$b-$s" --mount "$PATINA_WORKLOADS/fjall-harness:/guest:copy" -- /guest/fjall-harness-release >"fj-$b-$s.txt" 2>&1 || rc=$?
         echo "fjall --buggify --seeds $s, $b build: exit $rc"
         awk '/^sdk/ { print "  " $0 }' "fj-$b-$s.txt"
     done

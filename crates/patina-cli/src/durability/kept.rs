@@ -5,7 +5,7 @@
 //! by the time the run ends. A sweep keeping a run (`sweep::cut`, not `--keep all`) packs
 //! them: `live.tree.zst` and `post-crash.tree.zst`, zstd frames of the tree archive
 //! (`tree::Tree::encode`), several times smaller (3 to 20 times on database-like trees).
-//! `post-crash/` stays a directory in a run a checker reads (its own outcome ok: `recheck`
+//! `post-crash/` stays a directory in a run a checker reads (its own outcome ok: `report --recheck`
 //! judges it again, and a checker run on it by hand reads what the run's did). Every reader
 //! takes either form (`live`, `post_crash`).
 

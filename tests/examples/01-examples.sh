@@ -15,7 +15,7 @@ fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 sweep() {
     out=$1; shift
     rc=0
-    "$PATINA" sweep --seeds "1..$N" -j 4 --keep none --out "$out" "$@" >"$out.txt" 2>&1 || rc=$?
+    PATINA_TEST_KEEP_NONE=1 "$PATINA" sweep --seeds "1..$N" -j 4 --out "$out" "$@" >"$out.txt" 2>&1 || rc=$?
     echo "$rc"
 }
 

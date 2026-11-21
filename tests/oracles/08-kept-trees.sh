@@ -3,7 +3,7 @@
 #    the same seed's replay (which writes the trees whole, and must be identical), `log tree` of
 #    every incarnation and node disk, `log tree --post-crash` of every crash, `log ops --check`
 #    and `log events` (what a machine crash lost). In a run a checker judged, `post-crash/`
-#    stays whole: the checker run by hand, `recheck --check` with a checker run per run and with one that serves read
+#    stays whole: the checker run by hand, `report --recheck --check` with a checker run per run and with one that serves read
 #    what the replay's post-crash/ holds. The packed trees are smaller than the trees by a wide
 #    margin, the sweep's "kept" line is the bytes left under its directory, and `--keep all`
 #    keeps the trees as the run wrote them.
@@ -100,7 +100,7 @@ size=$(find raw -name live.tree -printf '%s\n' | sort -n | tail -1)
 
 # Runs a checker judged: live trees packed, post-crash/ whole, read by a checker as the run left
 # it, by hand and judging again.
-sweep checked checked 0 "${crash[@]}" -- /usr/bin/python3 -I -c "$prog" 0
+sweep checked fail 0 "${crash[@]}" -- /usr/bin/python3 -I -c "$prog" 0
 run=$(crashed checked)
 packed=$(find "$run" -name '*.zst') dirs=$(find "$run" -name post-crash -type d)
 case $packed in *live.tree.zst*) ;; *) die "a checked run kept no packed live tree: $packed" ;; esac
@@ -112,7 +112,7 @@ rc=0; line=$(./judge "$run") || rc=$?
 [ "$rc $line" = "1 $want" ] || die "the checker by hand: exit $rc, '$line'; the replay's post-crash/ is '$want'"
 for k in ./judge ./serve; do
     rc=0
-    "$PATINA" recheck --check "$k" "$run" >recheck.txt 2>&1 || rc=$?
+    "$PATINA" report --recheck --check "$k" "$run" >recheck.txt 2>&1 || rc=$?
     got=$(jq -r '"\(.check.label): \(.check.detail)"' "$run/result.json")
     [ "$got" = "$want" ] || die "recheck --check $k: the checker read '$got', the replay's post-crash/ is '$want' (exit $rc: $(tail -2 recheck.txt))"
 done

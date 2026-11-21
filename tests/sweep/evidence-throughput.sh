@@ -12,7 +12,7 @@ rate() {
     name=$1 j=$2; shift 2
     t0=$(date +%s%N)
     st=0
-    "$PATINA" sweep -j "$j" --seeds "1..$n" --keep none --out "$RUNS/$name-j$j" --format json "$@" >"$RUNS/$name-j$j.json" 2>/dev/null || st=$?
+    PATINA_TEST_KEEP_NONE=1 "$PATINA" sweep -j "$j" --seeds "1..$n" --out "$RUNS/$name-j$j" --format json "$@" >"$RUNS/$name-j$j.json" 2>/dev/null || st=$?
     t1=$(date +%s%N)
     python3 -I - "$RUNS/$name-j$j.json" "$n" "$t0" "$t1" "$name" "$j" "$st" <<'PY'
 import json, sys

@@ -4,12 +4,13 @@
 #      and the run's directory; --only-case runs the cases it names; the report's rerun line runs.
 #    - Keyed findings (LABEL [KEY]: detail) group by the key; reasons not to judge count by
 #      their class (CLASS: detail).
-#    - `patina recheck` after an edit of the checker's table judges the kept runs again: the
-#      verdicts follow the table, and the runs' digests, logs and own outcomes are untouched;
-#      the same checker again rewrites nothing. A run --keep fail pruned is not judged again:
-#      the report names two checkers.
+#    - `patina report --recheck` after an edit of the checker's table judges the kept runs
+#      again: the verdicts follow the table, and the runs' digests, logs and own outcomes are
+#      untouched; the same checker again rewrites nothing. A run whose logs are gone is not
+#      judged again: the report names two checkers.
 #    - A sweep resumed with its checker's file changed judges every run again from its logs
-#      (--keep checked: none runs again), and a verdict left pending is judged again.
+#      (a sweep with a checker keeps them: none runs again), and a verdict left pending is
+#      judged again.
 #    - A checker that serves judges a recheck as one run per run does.
 #    - same-output refuses a reference made from another work tree (an error, not a finding);
 #      --relax compares anyway.
@@ -53,7 +54,7 @@ rc=0
 [ "$rc" = 0 ] || die "the reference sweep: exit $rc: $(tail -3 ref.txt)"
 
 # Ids, keys and classes.
-rc=$(sweep sh --keep checked --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
+rc=$(sweep sh --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 [ "$rc" = 1 ] || die "the subject sweep: exit $rc: $(tail -3 sh.txt)"
 [ "$(jq -r '[.groups[].signature] | join(",")' sh/report.json)" = "violation check: wrong-output [4]" ] ||
     die "keyed groups: $(jq -c '[.groups[].signature]' sh/report.json)"
@@ -77,7 +78,7 @@ for r in sh/seed-*/*; do own "$r" >"own/$(echo "$r" | tr / _)"; done
 [ -f sh/seed-1/4-a_tb/replay.json ] || die "the finding's first seed was not replayed"
 echo 4 >chk/expected.txt
 rc=0
-"$PATINA" recheck sh >rk.txt 2>rk.err || rc=$?
+"$PATINA" report --recheck sh >rk.txt 2>rk.err || rc=$?
 [ "$rc" = 0 ] && [ "$(jq '.groups | length' sh/report.json)" = 0 ] || die "recheck after the table edit: exit $rc: $(cat rk.txt rk.err)"
 [ "$(jq -c '.check.not_judged' sh/report.json)" = '{"expected":2}' ] || die "not judged by class: $(jq -c .check sh/report.json)"
 # The checker's file is unchanged but its verdict is not: the replay of the old one goes.
@@ -87,43 +88,47 @@ for r in sh/seed-*/*; do
     [ "$now" = "$was" ] || die "recheck changed more than the check of $r"
     cp "$r/result.json" "own/$(echo "$r" | tr / _).result"
 done
-"$PATINA" recheck sh >/dev/null 2>&1 || die "recheck again: exit $?"
+"$PATINA" report --recheck sh >/dev/null 2>&1 || die "recheck again: exit $?"
 for r in sh/seed-*/*; do
     cmp -s "own/$(echo "$r" | tr / _).result" "$r/result.json" || die "the same checker again rewrote $r/result.json"
 done
 echo "recheck: the table's entry turns 2 findings into $(jq -c .check.not_judged sh/report.json); digests, logs and own outcomes unchanged"
 
 # A checker that serves (same-output.py) judges as one run per run does.
-"$PATINA" recheck --check "$root/examples/checks/same-output ref" sh >/dev/null 2>&1 || true
+"$PATINA" report --recheck --check "$root/examples/checks/same-output ref" sh >/dev/null 2>&1 || true
 verdicts() { for r in sh/seed-*/*; do jq -r '"\(.check.verdict) \(.check.label)"' "$r/result.json"; done | paste -sd,; }
 by_run=$(verdicts)
-"$PATINA" recheck --check "$root/examples/checks/same-output.py ref" sh >/dev/null 2>&1 || true
+"$PATINA" report --recheck --check "$root/examples/checks/same-output.py ref" sh >/dev/null 2>&1 || true
 [ "$(verdicts)" = "$by_run" ] || die "a serving recheck: $(verdicts); per run: $by_run"
 
 # Pruned runs: a recheck names them and leaves them; the report says two checkers judged.
+# (A sweep with a checker keeps what it reads: one run's logs go here as a sweep without a
+# checker prunes them.)
 mv chk/expected.txt chk/expected.off
 rc=$(sweep shf --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 mv chk/expected.off chk/expected.txt
-[ "$rc" = 1 ] || die "the --keep fail sweep: exit $rc: $(tail -3 shf.txt)"
+[ "$rc" = 1 ] || die "the sweep with a checker: exit $rc: $(tail -3 shf.txt)"
+rm -rf shf/seed-1/3-plain/inc-0 shf/seed-1/3-plain/check.out
 rc=0
-"$PATINA" recheck --check "$root/examples/checks/same-output ref" --format json shf >shf.json 2>shf.err || rc=$?
+"$PATINA" report --recheck --check "$root/examples/checks/same-output ref" --format json shf >shf.json 2>shf.err || rc=$?
 [ "$rc" = 1 ] && [ "$(jq '.check.checkers | length' shf.json)" = 2 ] || die "recheck of pruned runs: exit $rc: $(jq -c .check shf.json) $(cat shf.err)"
 [ "$(jq -r 'select(.config.check.program | endswith("chk/diff")) | input_filename' shf/seed-*/*/run.json | wc -l)" -gt 0 ] ||
     die "a pruned run was judged again"
-# A failure whose logs --keep none pruned keeps the signature its stderr gave it.
+# A failure whose logs were pruned (the test input PATINA_TEST_KEEP_NONE) keeps the signature
+# its stderr gave it.
 echo 'echo boom-17 >&2; exit 3' >fails.txt
-rc=$(sweep none --keep none --cases fails.txt --check "chk/diff ref" -- /bin/bash -c {})
+rc=$(PATINA_TEST_KEEP_NONE=1 sweep none --cases fails.txt --check "chk/diff ref" -- /bin/bash -c {})
 before=$(jq -r .signature none/seed-1/1-3/result.json)
-"$PATINA" recheck none >/dev/null 2>&1 || true
+"$PATINA" report --recheck none >/dev/null 2>&1 || true
 [ "$rc" = 1 ] && [ "$(jq -r .signature none/seed-1/1-3/result.json)" = "$before" ] ||
     die "a pruned failure's signature: exit $rc, $before, now $(jq -r .signature none/seed-1/1-3/result.json)"
 
 # Resuming with the checker's file changed: judged again from the kept logs, none run again;
 # and a verdict left pending is judged.
 for r in sh/seed-*/*; do : >"$r/kept"; done
-"$PATINA" recheck --check "chk/diff ref" sh >/dev/null 2>&1 || true
+"$PATINA" report --recheck --check "chk/diff ref" sh >/dev/null 2>&1 || true
 echo '# changed' >>chk/diff
-rc=$(sweep sh --keep checked --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
+rc=$(sweep sh --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 [ "$rc" = 0 ] || die "the resumed sweep: exit $rc: $(tail -3 sh.txt)"
 sha=$(sha256sum chk/diff | cut -d' ' -f1)
 for r in sh/seed-*/*; do
@@ -133,7 +138,7 @@ done
 # The same checker again: only the run whose verdict was left pending is judged.
 p=sh/seed-2/5-2
 jq '.check = {"verdict": "pending"} | .outcome = "error"' "$p/result.json" >p.json && mv p.json "$p/result.json"
-rc=$(sweep sh --keep checked --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
+rc=$(sweep sh --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 [ "$rc" = 0 ] && [ "$(jq -r .check.verdict "$p/result.json")" = pass ] || die "the pending verdict: exit $rc: $(jq -c .check "$p/result.json")"
 
 # The reference guard: another work tree for readf is an error with its reason; --relax judges.

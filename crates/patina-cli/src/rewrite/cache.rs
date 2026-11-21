@@ -1127,63 +1127,24 @@ impl ImageReport {
     }
 }
 
-/// `patina cache [clear]`: where the plans are, how many and how large (of `CACHE_MAX`); with
-/// `clear`, delete them (a plan is only a cache: the next run makes it again).
-pub fn main(a: &crate::cli::Args) -> Res<std::process::ExitCode> {
+/// Where the plans are, how many and how large (of `CACHE_MAX`), for `patina doctor`. A plan
+/// is only a cache: deleting the directory costs the next run the time to make them again.
+pub fn summary() -> String {
     let d = dir();
-    let clear = match a.positional.as_slice() {
-        [] => false,
-        [c] if c == "clear" => true,
-        other => return Err(format!("patina cache: unexpected {}", other.join(" "))),
-    };
-    let (mut plans, mut bytes, mut freed) = (0u64, 0u64, 0u64);
+    let (mut plans, mut bytes) = (0u64, 0u64);
     for e in fs::read_dir(&d).into_iter().flatten().flatten() {
-        let p = e.path();
-        let n = e.metadata().map_or(0, |m| m.len());
-        let lockfile = p.extension().is_some_and(|x| x == "lock");
-        if p.extension().is_some_and(|x| x == "plan") {
+        if e.path().extension().is_some_and(|x| x == "plan") {
             plans += 1;
-            bytes += n;
-        }
-        if clear && !lockfile && fs::remove_file(&p).is_ok() {
-            freed += n;
-        }
-    }
-    // The lock files last, each while held: one a process holds stays (its plan, being made,
-    // lands after the clear).
-    if clear {
-        for e in fs::read_dir(&d).into_iter().flatten().flatten() {
-            let p = e.path();
-            if p.extension().is_some_and(|x| x == "lock") {
-                if let Some(held) = lock_now(&p) {
-                    unlink_held(&p, &held);
-                }
-            }
+            bytes += e.metadata().map_or(0, |m| m.len());
         }
     }
     let size = crate::report::bytes;
-    if a.json() {
-        let mut v = serde_json::json!({
-            "dir": d,
-            "plans": plans,
-            "bytes": bytes,
-            "max_bytes": CACHE_MAX,
-        });
-        if clear {
-            v["cleared_bytes"] = freed.into();
-        }
-        println!("{v}");
-    } else if clear {
-        println!("cleared {}: {plans} plans, {}", d.display(), size(freed));
-    } else {
-        println!(
-            "{}: {plans} plans, {} (at most {}, the least recently used removed first)",
-            d.display(),
-            size(bytes),
-            size(CACHE_MAX)
-        );
-    }
-    Ok(std::process::ExitCode::SUCCESS)
+    format!(
+        "{}: {plans} plans, {} (at most {}, the least recently used removed first; deleting it costs only the time to plan again)",
+        d.display(),
+        size(bytes),
+        size(CACHE_MAX)
+    )
 }
 
 /// Plan the files of `closure(program)`, the largest first, on the planner's threads.

@@ -129,6 +129,7 @@ nothing changes. Those that set the run's configuration land in `run.json`, so a
 | `TIMING` | print the launcher's start-up times |
 | `STDIO_MAX` | bytes of guest stdout or stderr kept before `output-limit` (default 1 GiB) |
 | `PARALLEL`, `LOAD_THREADS`, `CHURN_DIR`, `TIME_GAP_S`, `VERIFY_PRUNE` | `verify --vary` parallel's width, load's threads, the churn directory, time's wait (default 61 s); delete each run directory once judged |
+| `KEEP_NONE` | `1`: a sweep keeps no run's logs (benchmarks that would fill the disk) |
 | `PAGE_SIZE`, `OPLOG_CORRUPT`, `REPLAY_PERTURB` | doctor's page size; corrupt the op log; perturb a replay |
 
 `tests/run.py` sets `PATINA_SCRATCH` for unit tests and scripts (scratch space), not a patina

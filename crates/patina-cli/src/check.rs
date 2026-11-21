@@ -158,7 +158,7 @@ impl Check {
             return Err(format!(
                 "checker {} changed since the run (sha256 {} recorded, {} now): a replay judges \
                  with the recorded checker; put it back to replay, or judge the run with the new \
-                 one (`patina recheck RUNDIR`, or run the same sweep again)",
+                 one (`patina report --recheck RUNDIR`, or run the same sweep again)",
                 self.program.display(),
                 self.sha256,
                 now

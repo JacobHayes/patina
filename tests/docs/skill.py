@@ -6,7 +6,7 @@ mentions every command, fault preset and outcome it has.
 which no command runs. The patina binary is the source of truth (`patina --help --format json`):
 
 - In the skill's code (`sh` fences, `$` lines of `text` fences, inline code spans), each
-  `patina COMMAND ...` names a command; `log` and `cache` a word of that command's usage; each
+  `patina COMMAND ...` names a command; `log` a word of that command's usage; each
   option, one the command takes (an inline span that starts with an option: one some command
   takes); `--fault KEY=V` and a span `KEY=V`, a fault key; `--faults A,B`, presets; `--crash
   KIND`, a kind the option's help names; an option whose value is a list of words, one of them.
@@ -52,7 +52,7 @@ def vocabulary(patina):
     for f in d["flags"]:
         for s in re.findall(r"\balso (-[a-zA-Z]) ", f["help"]):
             v["short"][s] = f["name"]
-    # A command's second words (log tree, cache clear): the lower-case words of its usage.
+    # A command's second words (log tree): the lower-case words of its usage.
     v["words"] = {n: set(re.findall(r"(?<![-\w])([a-z]+)(?![-\w])", c["usage"])) - {"patina", n}
                   for n, c in v["commands"].items()}
     crash = v["flags"]["--crash"]["help"]
@@ -200,7 +200,7 @@ def check_file(path, v, bad, seen, doc=False):
             if cmd == "ctl":  # its words are the control call's (`node kill NAME --process`)
                 continue
             rest = words[1:]
-            if cmd in ("log", "cache") and rest and not rest[0].startswith("-") \
+            if cmd == "log" and rest and not rest[0].startswith("-") \
                     and not PLACEHOLDER.search(rest[0]):
                 if rest[0] not in v["words"][cmd]:
                     bad.append(f"{where}: no patina {cmd} {rest[0]} "

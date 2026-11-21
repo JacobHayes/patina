@@ -30,7 +30,6 @@ mod signature;
 mod sup;
 mod sweep;
 mod sys;
-mod table;
 mod verify;
 
 use cli::{Args, Cmd};
@@ -120,17 +119,15 @@ fn main() -> ExitCode {
         Cmd::Explain => explain::main(&a),
         Cmd::Debug => debug::main(&a),
         Cmd::Log => log::main(&a).map_err(error),
-        Cmd::Table => {
-            table::print();
-            Ok(ExitCode::SUCCESS)
-        }
         Cmd::Doctor => doctor::doctor(&a).map_err(error),
         Cmd::Sweep => sweep::main(&a),
+        Cmd::Report if a.has("--recheck") => recheck::main(&a),
+        Cmd::Report if a.has("--check") || a.has("--jobs") => Err(error(
+            "--check and -j judge runs again: give --recheck".into(),
+        )),
         Cmd::Report => report::main(&a).map_err(error),
-        Cmd::Recheck => recheck::main(&a),
         Cmd::Minimize => minimize::main(&a),
         Cmd::Ctl => Ok(ctl::main(&a.positional)),
-        Cmd::Cache => rewrite::cache::main(&a).map_err(error),
     };
     r.unwrap_or_else(|Fail(o, e)| {
         // A full filesystem (ENOSPC, EDQUOT) is named, as the supervisor names it in a run.
@@ -185,14 +182,13 @@ fn verify(a: &Args) -> Result<ExitCode, Fail> {
     let out = out_dir(a, format!("patina-out/verify-{}", cfg.seed))?;
     let runs = a.num::<usize>("--runs").map_err(error)?.unwrap_or(3);
     let mut vary = vec![];
-    if let Some(v) = a.last("--vary") {
-        for k in v.split(',').filter(|k| !k.is_empty()) {
-            match k {
-                "cpu" | "aslr" | "sandbox" | "load" | "repeat" | "parallel" | "env" | "time" => {
-                    vary.push(k.to_string())
-                }
-                _ => return Err(error(format!("--vary: unknown variant {k}"))),
+    let v = a.last("--vary").unwrap_or("cpu,load,aslr,sandbox,repeat");
+    for k in v.split(',').filter(|k| !k.is_empty()) {
+        match k {
+            "cpu" | "aslr" | "sandbox" | "load" | "repeat" | "parallel" | "env" | "time" => {
+                vary.push(k.to_string())
             }
+            _ => return Err(error(format!("--vary: unknown variant {k}"))),
         }
     }
     let (c, code) = verify::verify(&o, &out, runs, &vary).map_err(internal)?;

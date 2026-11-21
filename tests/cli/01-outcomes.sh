@@ -1,6 +1,6 @@
 # 1. One guest per outcome: each run ends with that outcome in result.json and exits with the
 #    status `patina --help --format json` gives for it. A missing program is `error` naming the
-#    file; a call on a `Stop` row of `patina table` is `unsupported` naming the call.
+#    file; a call on a `Stop` row of the syscall table (`patina --help --format json`) is `unsupported` naming the call.
 #@ tier=quick budget=15
 . "$(dirname "$0")/lib.inc"
 G=$PATINA_GUESTS
@@ -22,8 +22,8 @@ expect abort crash signal -- /usr/bin/python3 -c 'import os; os.abort()'
 expect deadlock liveness deadlock -- "$G/deadlock"
 expect sleeploop liveness time-limit --config "$("$PATINA_CFG" time-limit=100)" -- "$G/liveness"
 # The first Stop row of the syscall table.
-set -- $("$PATINA" table | awk -F'|' '$4 ~ /Stop/ && !n++ {gsub(/ /, ""); print $2, $3}')
-[ $# = 2 ] || die "no Stop row in patina table"
+set -- $("$PATINA" --help --format json | jq -r 'first(.syscalls[] | select(.class == "Stop")) | "\(.nr) \(.name)"')
+[ $# = 2 ] || die "no Stop row in the syscall table"
 nr=$1 name=$2
 expect stoprow unsupported syscall -- /usr/bin/python3 -c "import ctypes; ctypes.CDLL(None).syscall($nr, 0, 0, 0, 0)"
 field "$RUNS/stoprow/result.json" message | grep -qw "$name" || die "stoprow: message does not name $name"

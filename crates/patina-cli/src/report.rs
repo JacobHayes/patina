@@ -1822,7 +1822,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         let checkers = c["checkers"].as_array().map_or(0, |k| k.len());
         if checkers > 1 {
             s.push_str(&format!(
-                "check: these verdicts are of {checkers} checkers (check.checkers in {}): patina recheck judges them again with one\n",
+                "check: these verdicts are of {checkers} checkers (check.checkers in {}): patina report --recheck judges them again with one\n",
                 if head.is_some() { "report.json" } else { "--format json" }
             ));
         }

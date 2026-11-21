@@ -14,14 +14,11 @@ pub enum Cmd {
     Debug,
     Verify,
     Log,
-    Table,
     Doctor,
     Sweep,
     Report,
-    Recheck,
     Minimize,
     Ctl,
-    Cache,
 }
 
 pub struct Command {
@@ -71,14 +68,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Report,
         name: "report",
-        usage: "patina report [--known FILE] [--group N] DIR...",
-        help: "summarise run directories (a sweep's, or any made by patina run --out)",
-    },
-    Command {
-        cmd: Cmd::Recheck,
-        name: "recheck",
-        usage: "patina recheck [--check 'CMD ARGS'] [--known FILE] DIR...",
-        help: "judge kept runs again with a checker (each run's own, read anew, or the one given), without running them; then report",
+        usage: "patina report [--known FILE] [--group N] [--recheck [--check 'CMD ARGS'] [-j N]] DIR...",
+        help: "summarise run directories (a sweep's, or any made by patina run --out); --recheck first judges the kept runs again with a checker, without running them",
     },
     Command {
         cmd: Cmd::Minimize,
@@ -93,22 +84,10 @@ pub const COMMANDS: &[Command] = &[
         help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree (or the one its crash left), export a run's events as JSON lines",
     },
     Command {
-        cmd: Cmd::Table,
-        name: "table",
-        usage: "patina table",
-        help: "the syscall table: every number, what Patina does with it, why",
-    },
-    Command {
         cmd: Cmd::Ctl,
         name: "ctl",
         usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | mark LABEL",
         help: "inside a run with nodes: act on the run's network (from the driver's node), or mark the log",
-    },
-    Command {
-        cmd: Cmd::Cache,
-        name: "cache",
-        usage: "patina cache [clear]",
-        help: "the plans --preempt points keeps: where, how many, how large; clear deletes them",
     },
     Command {
         cmd: Cmd::Doctor,
@@ -160,14 +139,11 @@ const ALL: &[Cmd] = &[
     Cmd::Debug,
     Cmd::Verify,
     Cmd::Log,
-    Cmd::Table,
     Cmd::Doctor,
     Cmd::Sweep,
     Cmd::Report,
-    Cmd::Recheck,
     Cmd::Minimize,
     Cmd::Ctl,
-    Cmd::Cache,
 ];
 
 const fn flag(
@@ -319,8 +295,8 @@ pub const FLAGS: &[Flag] = &[
     flag(
         "--vary",
         "LIST",
-        "none",
-        "what to change between runs: cpu,load,aslr,sandbox,repeat,parallel,env,time (time waits 61 s of wall time before the second run)",
+        "cpu,load,aslr,sandbox,repeat",
+        "what to change between runs: cpu,load,aslr,sandbox,repeat, and on request parallel,env,time (time waits 61 s of wall time before the second run)",
         &[Cmd::Verify],
     ),
     flag(
@@ -334,8 +310,8 @@ pub const FLAGS: &[Flag] = &[
         "--jobs",
         "N",
         "the CPUs, at most 8",
-        "runs at once, each pinned to its own CPU (also -j N); recheck: checkers at once",
-        &[Cmd::Sweep, Cmd::Recheck],
+        "runs at once, each pinned to its own CPU (also -j N); report --recheck: checkers at once",
+        &[Cmd::Sweep, Cmd::Report],
     ),
     flag(
         "--cases",
@@ -353,9 +329,9 @@ pub const FLAGS: &[Flag] = &[
     ),
     flag(
         "--keep",
-        "fail|checked|all|none",
+        "fail|all",
         "fail",
-        "whose logs to keep (run.json and result.json are always kept); fail: those of each group's first three runs; a kept run's work trees are compressed (post-crash/ only in a run no checker reads) and its logs over 4 MiB cut; checked: also every run the checker ran on, for patina recheck; all: every run whole, as patina run leaves it",
+        "whose logs to keep (run.json and result.json are always kept); fail: those of each group's first three runs, and with --check every run the checker read (for report --recheck), work trees compressed and logs over 4 MiB cut; all: every run whole, as patina run leaves it",
         &[Cmd::Sweep],
     ),
     flag(
@@ -390,20 +366,27 @@ pub const FLAGS: &[Flag] = &[
         "--allow-unmet",
         "LABEL",
         "an SDK label (* matches any text: 'lib-*'), a fault class, or check (a check that judged no run) that may stay unmet without making the result vacuous",
-        &[Cmd::Sweep, Cmd::Report, Cmd::Recheck],
+        &[Cmd::Sweep, Cmd::Report],
     ),
     flag(
         "--known",
         "FILE",
         "none",
         "findings already known: lines of ID PATTERN matched against [CASE] SIGNATURE (* any text, # comments); a known finding is counted and does not fail the sweep; an ID written !ID must match some run or the result is vacuous",
-        &[Cmd::Sweep, Cmd::Report, Cmd::Recheck],
+        &[Cmd::Sweep, Cmd::Report],
     ),
     flag(
         "--group",
         "N",
         "none",
         "print group N of the report in full (its position in report.json's groups, from 1): its faults, rerun and replay commands",
+        &[Cmd::Report],
+    ),
+    flag(
+        "--recheck",
+        "",
+        "off",
+        "judge the kept runs again before reporting, with each run's own checker read anew (an edited checker file is the new one) or --check's; a run whose logs were pruned keeps its verdict",
         &[Cmd::Report],
     ),
     flag(
@@ -460,7 +443,7 @@ pub const FLAGS: &[Flag] = &[
         value: "'CMD ARGS'",
         default: "none",
         help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA_CASE_ID, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail or LABEL [KEY]: detail (grouped by LABEL [KEY]), 77 not judged (first line CLASS: detail, counted by CLASS), else error; a checker that names PATINA_CHECK_SERVE in its file is started once per sweep job and answers a line per run (docs/GUIDE.md)",
-        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log, Cmd::Recheck],
+        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log, Cmd::Report],
         repeat: false,
         per: &[
             (
@@ -469,9 +452,9 @@ pub const FLAGS: &[Flag] = &[
                 "log ops: replay the whole operation log and compare with the exported tree",
             ),
             (
-                Cmd::Recheck,
+                Cmd::Report,
                 "each run's own, read anew",
-                "the checker to judge the runs with, in place of the one each recorded",
+                "with --recheck: the checker to judge the runs with, in place of the one each recorded",
             ),
         ],
         per_value: &[(Cmd::Log, "")],
@@ -554,7 +537,7 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
                 out.flags.entry("--help").or_default();
                 continue;
             }
-            if a == "-j" && matches!(cmd, Cmd::Sweep | Cmd::Recheck) {
+            if a == "-j" && matches!(cmd, Cmd::Sweep | Cmd::Report) {
                 let v = it.next().ok_or("-j needs N")?;
                 out.flags.insert("--jobs", vec![v.clone()]);
                 continue;
@@ -671,6 +654,30 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
     s
 }
 
+/// The syscall table, generated from `proto`: every number of this architecture, what Patina
+/// does with it (`class`: Pass, Virt, Attempt, Rewrite, Place, Deny(ERRNO) or Stop, the last
+/// for a number with no row), how faithfully (`strength`) and why.
+fn syscalls() -> Vec<serde_json::Value> {
+    use proto::table::{known, Class};
+    known()
+        .map(|r| {
+            let class = match r.class {
+                Class::Deny(1) => "Deny(EPERM)".to_string(),
+                Class::Deny(38) => "Deny(ENOSYS)".to_string(),
+                Class::Deny(e) => format!("Deny({e})"),
+                c => format!("{c:?}"),
+            };
+            serde_json::json!({
+                "nr": r.nr,
+                "name": r.name,
+                "class": class,
+                "strength": r.strength.letter().to_string(),
+                "why": r.why,
+            })
+        })
+        .collect()
+}
+
 /// The tables as JSON, for agents: every command and every flag with the commands taking it.
 pub fn help_json() -> String {
     let cmds: Vec<serde_json::Value> = COMMANDS
@@ -707,6 +714,7 @@ pub fn help_json() -> String {
         "flags": flags,
         "outcomes": outcomes,
         "faults": crate::faults::help_json(),
+        "syscalls": syscalls(),
     }))
     .unwrap()
 }

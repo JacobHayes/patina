@@ -37,7 +37,7 @@ assert {r["node"] for r in fails} == {"b"}, {r["node"] for r in fails}
 assert {r["seed"] for r in fails} == set(range(1, int(sys.argv[2]) + 1)), {r["seed"] for r in fails}
 print("early: %d of %d points fail, in every seed, on b only" % (len(fails), br["points"]))
 PY
-sw ok none
+sw ok fail
 [ "$st" = 0 ] || die "branch sweep of ok: exit $st: $(tail -5 "$o/sw-ok.txt")"
 grep '^crash points:' "$o/sw-ok.txt"
 # Per-mille crashes at both nodes' points: determinism and the self-check of each node disk.

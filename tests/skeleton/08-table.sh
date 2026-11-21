@@ -1,7 +1,7 @@
-# 8. patina table prints a row for every syscall number the host's kernel headers know for its architecture; rows not written show Stop.
+# 8. The syscall table (`patina --help --format json`, syscalls) has a row for every syscall number the host's kernel headers know for its architecture; rows not written show Stop.
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
-"$PATINA" table >"$RUNS/08-table.md"
+"$PATINA" --help --format json | jq -r '.syscalls[] | "| \(.nr) | \(.name) | \(.class) | \(.strength) | \(.why | gsub("[|]"; "\\|")) |"' >"$RUNS/08-table.md"
 # The host's numbers for its own architecture, from <asm/unistd.h> with the macros expanded
 # (the generic header that arm64 used before Linux 6.11 defines some numbers through others,
 # and two names that are no calls: the count and the start of the architecture's range).

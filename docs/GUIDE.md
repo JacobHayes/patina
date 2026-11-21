@@ -208,7 +208,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--seeds 1..200,250` | an inclusive range, a list, or both (default `1..100`) |
 | `-j N` | runs at once (default the CPUs, at most 8) |
 | `--out DIR` | where runs go (default `patina-out/sweep`) |
-| `--keep fail\|checked\|all\|none` | whose logs to keep: those of each group's first three runs, also those of every run a `--check` read (to judge them again, [below](#judging-again)), every run's, none; `run.json` and `result.json` always stay |
+| `--keep fail\|all` | whose logs to keep: those of each group's first three runs and, with `--check`, of every run the checker read (to judge them again, [below](#judging-again)); or every run's; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
 | `--only-case ID[,ID...]` | with `--cases`: only these cases ([below](#test-suites)) |
@@ -219,7 +219,9 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 `--keep fail` keeps the logs of a group's first three runs (its lowest seeds, the first of them
 the one replayed): a bug hit in hundreds of runs would otherwise keep the same evidence hundreds
 of times. Its other runs keep `run.json` and `result.json`, and their seeds reproduce them
-(`patina run --seed N`, or the group's `rerun:` line). A run kept by `--keep fail` or `checked` whose log is over 4 MiB keeps its first and last MiB
+(`patina run --seed N`, or the group's `rerun:` line). With a checker, `--keep fail` also keeps
+every run the checker read, so that it can be judged again. A run kept by `--keep fail` whose
+log is over 4 MiB keeps its first and last MiB
 (`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
 gives the whole log again. A kept run's work trees, most of its size when its program keeps
 much on disk, are kept compressed, a few times to tens of times smaller: each incarnation's
@@ -998,9 +1000,9 @@ exit: 0 1 0 0
 -->
 ```sh
 patina sweep --seeds 1 --keep all --cases corpus.txt --out patina-out/ref -- sh -c {}
-patina sweep --seeds 1..2 --cases corpus.txt --keep checked --check 'chk/diff patina-out/ref' -- bash -c {}
+patina sweep --seeds 1..2 --cases corpus.txt --check 'chk/diff patina-out/ref' -- bash -c {}
 echo 4 >> chk/expected.txt
-patina recheck patina-out/sweep
+patina report --recheck patina-out/sweep
 ```
 
 ```text
@@ -1011,7 +1013,7 @@ check: judged 6 of 8 runs: 6 passed, 0 failed; 2 not judged (expected 2)
 check: every judged run passed and no --known !ID entry shows that this check can fail
 ```
 
-`patina recheck DIR...` runs the checker again on each run's kept logs and rewrites only its
+`patina report --recheck DIR...` runs the checker again on each run's kept logs and rewrites only its
 verdict: `check` in `result.json` (and the outcome, stop, message and signature that follow
 from it), the checker `run.json` records, `check.out`. The run's digest, logs, faults and SDK
 results stay as they were, and a run judged as before is rewritten byte for byte as it was.
@@ -1021,19 +1023,20 @@ read again from its file; with one, every run gets that checker. It then prints 
 `report.json`. A run that did not end `ok` stays a finding, as in a sweep. A replay made
 before a recheck that changed the verdict is removed: it judged with the earlier checker.
 
-`--keep checked` keeps the logs of every run the checker read, cut as `--keep fail` cuts
-them: for a corpus of short runs, about what `--keep all` keeps (each run's `inc-0` with its
+A sweep with a checker keeps the logs of every run the checker read, cut as a failure's are:
+for a corpus of short runs, about what `--keep all` keeps (each run's `inc-0` with its
 stdout, stderr and log), which is what makes judging again possible. A run whose logs were
-pruned (`--keep fail`: an `ok` run, or a finding past its group's first three) has nothing to read: a recheck names it, leaves its
-verdict as the earlier checker's, and does not count that as a failure; the report then says
-its verdicts are of two checkers (`check.checkers` in `report.json`):
+pruned (a sweep without a checker prunes every `ok` run, and every finding past its group's
+first three) has nothing to read: a recheck with `--check` names it, leaves its verdict as it
+was, and does not count that as a failure; the report then says its verdicts are of two
+checkers (`check.checkers` in `report.json`):
 
 ```text
-recheck: seed-1/2-readf: its logs were pruned (a sweep's --keep fail): not judged again; its verdict is the earlier checker's
+recheck: seed-1/2-readf: its logs were pruned (a sweep without a checker prunes them): not judged again; its verdict is the earlier checker's
 ...
-recheck: judged 2 runs again in 0.0s; 6 pruned, left as they were (a sweep with --keep checked keeps what a checker reads)
+recheck: judged 2 runs again in 0.0s; 6 pruned, left as they were (a sweep with a checker keeps what it reads)
 patina report: 8 runs, 2 findings in 1 group, 6 ok
-check: these verdicts are of 2 checkers (check.checkers in --format json): patina recheck judges them again with one
+check: these verdicts are of 2 checkers (check.checkers in --format json): patina report --recheck judges them again with one
 ```
 
 The same sweep run again with a changed checker does the same before it runs anything: a run
@@ -1041,7 +1044,7 @@ whose recorded checker differs (its words, or its file's SHA-256), or whose verd
 `pending`, is judged again from its logs, and run again only when they were pruned; one line
 says which. A run judged again counts as one the sweep finished: `--keep` prunes or keeps its
 logs by the new verdict, and its findings count toward `--max-findings`. Patina knows the checker's own file only: a table or a reference it reads is not
-tracked, so after editing those, run `patina recheck`. A checker that serves (below) is
+tracked, so after editing those, run `patina report --recheck`. A checker that serves (below) is
 started once per job, as in a sweep.
 
 ### A checker that serves
@@ -1187,7 +1190,7 @@ $ wc -c tree-5/out.txt tree-ref/out.txt
 
 `./upcase fixed` writes the rest of each block; the same sweep of it is `40 ok (4 by
 --ok-exit)`. A sweep keeps the work tree of the runs it keeps: `patina log tree` of a run a
-sweep pruned (an `ok` run, without `--keep all`) is an error. After crashes, `inc-K/live.tree`
+sweep pruned (an `ok` run of a sweep without a checker or `--keep all`) is an error. After crashes, `inc-K/live.tree`
 is each incarnation's tree as it ran, before the crash lost anything; `inc-K/post-crash/` is
 what the crash left (`patina log tree --post-crash INCDIR DIR` writes it out, also where a
 sweep keeps it compressed).
@@ -1252,7 +1255,7 @@ A corpus compared with a reference turns up three kinds of difference: bugs, bug
 known, and differences that are correct (the reference is another implementation, or an older
 version). Keep each in its own table and judge again as the tables grow:
 
-1. Sweep the reference once, `--seeds 1 --keep all`, and the program with `--keep checked`.
+1. Sweep the reference once, `--seeds 1 --keep all`, and the program with its checker.
 2. The checker reads a table of expected differences (case ids, one per line) and exits 77
    with `expected: case ID differs by design` for a case it names: not judged, counted under
    `expected`, never a finding. It reports any other difference keyed by the case,
@@ -1261,7 +1264,7 @@ version). Keep each in its own table and judge again as the tables grow:
 3. Read the groups. A correct difference: add the case id to the table. A bug already known:
    a `--known` line for it (`[*grep-basic*] violation check: wrong-output*`). A new bug:
    reproduce it with the group's `rerun:` line, which runs the case alone.
-4. `patina recheck --known known.txt OUT` after each table edit: no run is made again, and the
+4. `patina report --recheck --known known.txt OUT` after each table edit: no run is made again, and the
    report shows what is left. Keep one `!ID` entry for a case wrong by construction, so a
    checker that stopped failing is caught.
 
@@ -2183,7 +2186,7 @@ whose strings a sweep's cut log or the log limit left out (a reader should allow
 Not in it: the process of a call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its
 thread's `slot`, which is not a process id),
 buffer contents (read the trees: `patina log tree`, `--post-crash`). A run directory a sweep
-pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
+pruned (an `ok` run of a sweep without a checker or `--keep all`) has no logs: the command says so and exits 2. Types
 and fields are only ever added: a reader should ignore what it does not know.
 
 ## Reading a failing run
@@ -2385,7 +2388,8 @@ The same sweep command then checks every seed again (a rebuilt program starts th
 afresh).
 
 `patina verify` runs one seed several times while changing the host (the CPU it runs on,
-address randomization, background load) and checks the runs are identical:
+background load, address randomization, the host counters the sandbox sees, and nothing at
+all: `--vary cpu,load,aslr,sandbox,repeat`, the default) and checks the runs are identical:
 
 <!-- transcript verify
 setup: cp "$GUESTS/examples/acklog" .
@@ -2393,7 +2397,7 @@ exit: 1
 exact-only: one seed's run
 -->
 ```text
-$ patina verify --seed 3 --runs 3 --vary cpu,aslr,load --crash machine -- ./acklog
+$ patina verify --seed 3 --runs 3 --crash machine -- ./acklog
 run 0: cpu 23 aslr off load on env base violation 45adc92bcdf15a4e switches 0
 run 1: cpu 12 aslr on load on env base violation 45adc92bcdf15a4e switches 0
 run 2: cpu 1 aslr off load on env base violation 45adc92bcdf15a4e switches 0
@@ -2401,8 +2405,8 @@ identical: 3 runs in /tmp/patina/patina-out/verify-3
 violation (always): acked-records-kept: 23 acknowledged, 0 stored
 ```
 
-`--vary` also takes `sandbox` (host counters moved between runs), `parallel` (runs at once),
-`env` and `time`. `time` waits before the second run, so a host clock that leaks into the
+`--vary LIST` picks the variations: by default `cpu,load,aslr,sandbox,repeat`; on request
+also `parallel` (runs at once), `env` and `time`. `time` waits before the second run, so a host clock that leaks into the
 run reads differently there; the host's clock cannot be moved without privilege, so the wait
 is the variation. It waits 61 seconds (past a minute boundary: a leak at second or minute resolution shows).
 
@@ -2802,8 +2806,8 @@ longer than a second, one line on stderr says so:
 patina: --preempt points: planning chrome-headless-shell and 45 more files, once: plans are kept in ~/.cache/patina/plans
 ```
 
-`patina cache` prints where the plans are, how many and how large; `patina cache clear`
-deletes them.
+`patina doctor` prints where the plans are, how many and how large. Deleting the directory
+(`rm -rf ~/.cache/patina/plans`) when no run uses it costs only the time to plan again.
 
 **What is not covered.**
 - On x86_64, about 1 to 3% of sites in typical code (as many loop back-edges) have no patch

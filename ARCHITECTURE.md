@@ -74,7 +74,7 @@ storage; each thread's state sits at the base of its alternate signal stack.
 ## The syscall table
 
 Every system call number has a row in `patina-proto/src/table/` with a class, a strength and
-a reason; `patina table` prints them. Rows, handlers and the runtime's own calls name a call
+a reason; `patina --help --format json` lists them (`syscalls`). Rows, handlers and the runtime's own calls name a call
 (`nr::OPENAT`), never its number: the numbers are per architecture, in `patina-proto/src/nr/`,
 generated from the kernel's tables by `scripts/gen-syscalls.py`.
 
@@ -641,7 +641,7 @@ Judging again (`recheck.rs`) is the one exception: `recheck::rejudge` runs the c
 kept run directory (`check::run_on`, with a worker's server or none) and rewrites only what
 follows from the verdict (`result::with_check` over the run's own end, `outcome::ok_end`),
 writing `pending` first so an interrupted recheck never leaves the old verdict under the new
-checker. `patina recheck` and a resumed sweep share it: the checker is not part of a sweep's
+checker. `patina report --recheck` and a resumed sweep share it: the checker is not part of a sweep's
 identity (`sweep::identity`); a run whose recorded checker differs (`recheck::same_checker`) or
 whose verdict is `pending` is judged again from its logs, or run again when they were pruned
 (`sweep::have`). The case (`Config::case`: id and line) is in `run.json`, so a replay and
@@ -1111,7 +1111,8 @@ In a run (`--preempt points`):
   long it took, reaches no record: the bytes are the same, the plan file's lines in
   `/proc/self/maps` are the original file's (`plans::Maps`), and planning is wall time only.
   Planning that takes longer than a second (ten when stderr is not a terminal) prints one line
-  on stderr; `patina cache` shows the directory, `patina cache clear` empties it.
+  on stderr; `patina doctor` shows the directory and its size, and deleting it costs only
+  the time to plan again.
 - **Applying** (`plans.rs`): when the loader or `mmap` maps a private, read-only executable
   file mapping, the runtime asks for its plan, maps the trampolines after the image
   (`MAP_FIXED_NOREPLACE`; `ld.so`'s first mapping of a library is given that much room after

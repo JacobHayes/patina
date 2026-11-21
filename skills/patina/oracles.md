@@ -133,5 +133,5 @@ For a corpus run with `--cases`, keep one case that is wrong by construction and
 A sweep with a check that never failed says so: `check: every judged run passed and no --known
 !ID entry shows that this check can fail`.
 
-After changing only the checker, `patina recheck OUT` judges the kept runs again without
-running them (sweep with `--keep checked` to keep what it needs).
+After changing only the checker, `patina report --recheck OUT` judges the kept runs again
+without running them (a sweep with a checker keeps what it needs).

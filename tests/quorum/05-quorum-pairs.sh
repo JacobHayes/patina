@@ -16,7 +16,8 @@ pairs() {
     for n in n1 n2 n3; do conf "$f" "$n" python3 /guest/q3.py "$n" $b; done
     printf '[sweep]\ncrash-pairs = 3\n' >>"$f"
     rm -rf "${o:?}/$1"; st=0
-    timeout 300 "$PATINA" sweep --seeds 1..2 --branch --branch-max 60 --crash machine -j 6 --keep "$2" \
+    # KEEP none is the test input PATINA_TEST_KEEP_NONE.
+    k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds 1..2 --branch --branch-max 60 --crash machine -j 6 --keep "${k/none/fail}" \
         --out "$o/$1" --config "$f" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/q3.py driver 2 >"$o/$1.txt" 2>&1 || st=$?
     [ -f "$o/$1/report.json" ] || die "$1: no report (exit $st): $(tail -3 "$o/$1.txt")"
 }

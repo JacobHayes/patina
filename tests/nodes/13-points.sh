@@ -62,7 +62,8 @@ assert r["self_check"]["verdict"] == "pass", r["self_check"]
 PY
 echo "process kill at point $p of a: a killed there once and restarted on its disk, b untouched"
 # Branch over every point of each node.
-sw() { rm -rf "${o:?}/sw-$1"; st=0; timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep "$2" --out "$o/sw-$1" \
+# sw NAME KEEP: KEEP none is the test input PATINA_TEST_KEEP_NONE.
+sw() { rm -rf "${o:?}/sw-$1"; st=0; k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep "${k/none/fail}" --out "$o/sw-$1" \
     --config "$o/$1.toml" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/sw-$1.txt" 2>&1 || st=$?; }
 sw early fail
 [ "$st" = 1 ] || die "branch sweep of early: exit $st: $(tail -5 "$o/sw-early.txt")"
@@ -109,7 +110,7 @@ d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 [ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"
 echo "rerun: same digest"
 # A sample: at most 4 children, both nodes among them, and the report says how many of how many.
-sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep none \
+sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 \
     --out "$o/$n" --config "$o/ok.toml" "$@" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/$n.txt" 2>&1 || st=$?; }
 sw2 max --branch-max 4
 [ "$st" = 0 ] || die "--branch-max: exit $st: $(tail -5 "$o/max.txt")"

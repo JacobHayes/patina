@@ -1,10 +1,10 @@
-# 8. Every row has a reason, and patina table shows no Stop for any call that strace -c reports
+# 8. Every row of the syscall table (`patina --help --format json`) has a reason and no Stop for any call that strace -c reports
 #    when fs-tour and the commands below run natively.
 #@ tier=area budget=60
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/08-table
 mkdir -p "$o"
-"$PATINA" table >"$o/table.md"
+"$PATINA" --help --format json | jq -r '.syscalls[] | "| \(.nr) | \(.name) | \(.class) | \(.strength) | \(.why | gsub("[|]"; "\\|")) |"' >"$o/table.md"
 # rows: | nr | name | class | strength | reason |
 awk -F' [|] ' '/^[|] [0-9]/ && $3 != "Stop" && $5 ~ /^ *[|]? *$/ {print; bad=1} END {exit bad}' "$o/table.md" \
     || die "a written row has no reason"

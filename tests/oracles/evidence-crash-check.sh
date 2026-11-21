@@ -10,7 +10,7 @@ kv=$PATINA_GUESTS/examples/kvlog
 sweep() {
     name=$1; shift
     st=0
-    "$PATINA" sweep -j 8 --keep none --out "$RUNS/$name" --check "$root/examples/checks/acked-kept" "$@" >"$RUNS/$name.txt" 2>/dev/null || st=$?
+    PATINA_TEST_KEEP_NONE=1 "$PATINA" sweep -j 8 --out "$RUNS/$name" --check "$root/examples/checks/acked-kept" "$@" >"$RUNS/$name.txt" 2>/dev/null || st=$?
     echo "== $name: exit $st"
     sed -n '/^patina sweep:/,/^$/p' "$RUNS/$name.txt" | grep -v '^$'
     grep -A1 '^violation' "$RUNS/$name.txt" || true

@@ -1,4 +1,4 @@
-//! `patina recheck DIR...`: judge kept runs again with a checker, without running the program
+//! `patina report --recheck DIR...`: judge kept runs again with a checker, without running the program
 //! again, then report. Only the check is rewritten: `result.json`'s `check` and what follows
 //! from it (`outcome`, `stop`, `message`, `exit`, `signature`), the checker `run.json` records
 //! (`config.check`, so that a replay repeats this checker), and `check.out`. The run's own
@@ -236,7 +236,7 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
     let err = crate::error;
     if a.positional.is_empty() {
         return Err(err(
-            "usage: patina recheck [--check 'CMD ARGS'] DIR...".into()
+            "usage: patina report --recheck [--check 'CMD ARGS'] DIR...".into(),
         ));
     }
     let dirs: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
@@ -306,7 +306,7 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
     };
     for d in pruned.iter().take(PRUNED_SHOWN) {
         eprintln!(
-            "recheck: {}: its logs were pruned (a sweep's --keep fail): not judged again; its verdict is the earlier checker's",
+            "recheck: {}: its logs were pruned (a sweep without a checker prunes them): not judged again; its verdict is the earlier checker's",
             rel(d)
         );
     }
@@ -324,7 +324,7 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
             String::new()
         } else {
             format!(
-                "; {} pruned, left as they were (a sweep with --keep checked keeps what a checker reads)",
+                "; {} pruned, left as they were (a sweep with a checker keeps what it reads)",
                 pruned.len()
             )
         }

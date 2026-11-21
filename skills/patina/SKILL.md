@@ -138,14 +138,14 @@ patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" 
   `RUNDIR/inc-0/stdout` and `stderr` (`inc-1/` after a restart); a sweep keeps it only for
   failing runs, the first three of each finding (`--keep fail`): for any other, run its seed again with `patina run --seed N`.
 - Budget: start at `--seeds 1..20`, then grow; `--max-findings 1`, `--budget SECONDS`, `-j N`
-  on a shared host; `--keep none` for large sweeps. One `--out DIR` per experiment: the same
+  on a shared host. One `--out DIR` per experiment: the same
   command resumes it, a changed program replaces it.
 - Never edit the program or weaken the check to make a sweep pass; a finding you will not fix
   now goes in a `--known FILE` (see the guide), so new ones still fail the sweep.
 - A clean sweep is not "no bugs": report what was varied, what the oracle could detect and
   what was not tried. Hand a finding over as its `rerun:` line, `patina --version` and the
   architecture, the `patina explain` lines that show the cause, `patina minimize`'s command.
-- Delete `patina-out/` (your `--out` directories) when done; `patina cache clear` too.
-- Also: `patina recheck DIR` judges kept runs again with a changed checker; `patina log events
-  RUNDIR` exports a run as JSON lines; `patina table` says what Patina does with each system
-  call; `patina ctl` scripts the network inside a run with nodes ([faults.md](faults.md)).
+- Delete `patina-out/` (your `--out` directories) when done.
+- Also: `patina report --recheck DIR` judges kept runs again with a changed checker; `patina
+  log events RUNDIR` exports a run as JSON lines; `patina --help --format json` lists what
+  Patina does with each system call (`syscalls`); `patina ctl` scripts the network inside a run with nodes ([faults.md](faults.md)).

@@ -57,12 +57,14 @@ const OWN: [&str; 14] = [
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Keep {
+    /// Each group's first three failures; with a checker, also every run it judged or did not
+    /// judge, as a failure is kept (`cut`): what a checker reads, so that `report --recheck`
+    /// and a resumed sweep can judge it again.
     Fail,
     All,
+    /// Nothing but run.json and result.json: the test input `PATINA_TEST_KEEP_NONE=1`, for
+    /// benchmarks whose sweeps would otherwise fill the disk.
     None,
-    /// Every run the checker judged or did not judge, as a failure is kept (`cut`): what a
-    /// checker reads, so that `patina recheck` and a resumed sweep can judge it again.
-    Checked,
 }
 
 /// `A..B` (inclusive), `N`, comma-separated.
@@ -618,7 +620,7 @@ impl Judged {
     fn say(&mut self, out: &Path) {
         if self.judged + self.rerun > 0 {
             eprintln!(
-                "sweep: {} in {} had another checker's verdict: {} judged again from their logs, {} to run again (their logs were pruned; --keep checked keeps them)",
+                "sweep: {} in {} had another checker's verdict: {} judged again from their logs, {} to run again (their logs were pruned: a sweep with a checker keeps the logs it reads)",
                 report::count(self.judged + self.rerun, "run"),
                 out.display(),
                 self.judged,
@@ -998,20 +1000,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         ));
     }
     let keep = match a.last("--keep").unwrap_or("fail") {
+        _ if std::env::var_os("PATINA_TEST_KEEP_NONE").is_some_and(|v| v == "1") => Keep::None,
         "fail" => Keep::Fail,
         "all" => Keep::All,
-        "none" => Keep::None,
-        "checked" if cfg.check.is_none() => {
-            return Err(error(
-                "--keep checked keeps what a checker reads: give --check (or --keep all)".into(),
-            ))
-        }
-        "checked" => Keep::Checked,
-        k => {
-            return Err(error(format!(
-                "--keep: expected fail, checked, all or none, not {k}"
-            )))
-        }
+        k => return Err(error(format!("--keep: expected fail or all, not {k}"))),
     };
     let width = match a.num::<usize>("--jobs").map_err(error)? {
         Some(0) => return Err(error("--jobs is at least 1".into())),
@@ -1655,7 +1647,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             prune(&r.dir);
         }
     }
-    if keep == Keep::Fail && !interrupted {
+    // With a checker every run it read stays whole enough to judge again.
+    if keep == Keep::Fail && !interrupted && cfg.check.is_none() {
         thin(&runs, known.as_ref());
     }
     let runs = report::collect(std::slice::from_ref(&out)).map_err(error)?;
@@ -2020,9 +2013,12 @@ impl State<'_> {
     ) {
         let case = case_index.map(|i| case_shown(&self.cases[i]));
         let outcome = r["outcome"].as_str().unwrap_or("internal");
-        // A run the checker ran on keeps its logs under --keep checked; a sweep with it has a
-        // checker, which runs on every run that ended ok.
-        let checked = self.keep == Keep::Checked && r["check"]["verdict"] != "not-run";
+        // A run the checker ran on keeps its logs under --keep fail, for the checker to read
+        // again: a checker runs on every run that ended ok.
+        let checked = self.keep == Keep::Fail
+            && r["check"]["verdict"]
+                .as_str()
+                .is_some_and(|v| v != "not-run");
         // A run whose self-check failed keeps its logs: they show Patina's defect.
         let defect = crate::result::self_check_failed(r);
         if outcome == "ok" && self.keep != Keep::All && !checked && !defect {
