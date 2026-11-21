@@ -6,10 +6,6 @@
 //! - `yield`, `wfe`, `wfi`, `isb`: patched as pause points.
 //! - `PACGA Xd, Xn, Xm`: counted, not patched (the generic key cannot be disabled; its mask
 //!   leaves 32,768 encodings, too many to overwrite where text may hold data).
-//! - With counter preemption only: the exclusive instructions (`ldxr`, `ldaxr`, `ldxp`,
-//!   `ldaxp`, `stxr`, `stlxr`, `stxp`, `stlxp`, any size, and `clrex`), patched and emulated
-//!   so that a store-exclusive never fails spuriously (`rt::arch::insn`'s `exclusive`): a
-//!   spurious failure retries the loop, two more branches counted.
 //!
 //! Data in text: a word that a literal load (`LDR`, `LDRSW`, `LDR` of a SIMD register, by
 //! `pc`-relative offset) in the searched words reads is data, whatever it looks like: it is
@@ -26,7 +22,6 @@ pub enum SiteKind {
     Rndrrs = 2,
     Pacga = 3,
     Pause = 4,
-    Exclusive = 5,
 }
 
 impl SiteKind {
@@ -36,7 +31,6 @@ impl SiteKind {
             SiteKind::Rndrrs => "rndrrs",
             SiteKind::Pacga => "pacga",
             SiteKind::Pause => "pause",
-            SiteKind::Exclusive => "exclusive",
         }
     }
 }
@@ -55,17 +49,7 @@ pub const RNDRRS: u32 = 0xd53b_2420;
 const PACGA_MASK: u32 = 0xffe0_fc00;
 const PACGA: u32 = 0x9ac0_3000;
 
-/// The kind of the word `w`, if it is a candidate; the exclusive instructions with
-/// `exclusive` (counter preemption) only.
-#[inline]
-pub fn kind_with(w: u32, exclusive: bool) -> Option<SiteKind> {
-    if exclusive && (crate::step::is_load_exclusive(w) || crate::step::ends_pair(w)) {
-        return Some(SiteKind::Exclusive);
-    }
-    kind(w)
-}
-
-/// The kind of the word `w`, if it is a candidate (without counter preemption).
+/// The kind of the word `w`, if it is a candidate.
 #[inline]
 pub fn kind(w: u32) -> Option<SiteKind> {
     // One compare rejects almost every word: all candidates have one of two top bytes.
@@ -106,28 +90,18 @@ const BATCH: usize = 256;
 /// `base`, in order) and `f(index, Err(kind))` for each candidate that a literal load in
 /// `words` reads (data). Candidates go in batches of `BATCH`, each with one pass over `words`
 /// for the literal loads.
-pub fn sites(words: &[u32], base: u64, f: impl FnMut(usize, Result<SiteKind, SiteKind>)) {
-    sites_with(words, base, false, f)
-}
-
-/// `sites`, the exclusive instructions included with `exclusive` (`kind_with`).
-pub fn sites_with(
-    words: &[u32],
-    base: u64,
-    exclusive: bool,
-    mut f: impl FnMut(usize, Result<SiteKind, SiteKind>),
-) {
+pub fn sites(words: &[u32], base: u64, mut f: impl FnMut(usize, Result<SiteKind, SiteKind>)) {
     let mut cand = [0usize; BATCH];
     let mut n = 0;
     let mut i = 0;
     while i <= words.len() {
-        if i < words.len() && kind_with(words[i], exclusive).is_some() {
+        if i < words.len() && kind(words[i]).is_some() {
             cand[n] = i;
             n += 1;
         }
         i += 1;
         if n == BATCH || (i > words.len() && n > 0) {
-            batch(words, base, exclusive, &cand[..n], &mut f);
+            batch(words, base, &cand[..n], &mut f);
             n = 0;
         }
     }
@@ -136,7 +110,6 @@ pub fn sites_with(
 fn batch(
     words: &[u32],
     base: u64,
-    exclusive: bool,
     cand: &[usize],
     f: &mut impl FnMut(usize, Result<SiteKind, SiteKind>),
 ) {
@@ -162,7 +135,7 @@ fn batch(
         }
     }
     for (k, &c) in cand.iter().enumerate() {
-        let w = kind_with(words[c], exclusive).unwrap_or(SiteKind::Pause);
+        let w = kind(words[c]).unwrap_or(SiteKind::Pause);
         f(
             c,
             if data[k / 64] & (1 << (k % 64)) != 0 {
@@ -189,32 +162,6 @@ mod tests {
         assert_eq!(kind(0xd503_241f), None); // bti c
         assert_eq!(kind(0xd53b_e040), None); // mrs x0, cntvct_el0 (trapped, not patched)
         assert_eq!(kind(UDF), None);
-    }
-
-    #[test]
-    fn exclusive_only_with_counters() {
-        let ldaxr = 0xc85f_fc20; // ldaxr x0, [x1]
-        let stlxr = 0xc802_fc20; // stlxr w2, x0, [x1]
-        let ldxp = 0xc87f_0820; // ldxp x0, x2, [x1]
-        let clrex = 0xd503_3f5f;
-        let ldadd = 0xf820_0020; // ldadd x0, x0, [x1] (an atomic: never a site)
-        let casp = 0x4820_7c40; // casp w0, w1, w2, w3, [x2]
-        for w in [ldaxr, stlxr, ldxp, clrex] {
-            assert_eq!(kind(w), None);
-            assert_eq!(kind_with(w, true), Some(SiteKind::Exclusive));
-        }
-        for w in [ldadd, casp, YIELD] {
-            assert_eq!(kind_with(w, true), kind(w));
-        }
-        let words = [ldaxr, 0xeb03_001f, 0x5400_0061, stlxr, 0x35ff_ffa2];
-        let mut n = 0;
-        sites_with(&words, 0x1000, true, |_, r| {
-            assert_eq!(r, Ok(SiteKind::Exclusive));
-            n += 1;
-        });
-        assert_eq!(n, 2);
-        sites(&words, 0x1000, |_, _| n += 1);
-        assert_eq!(n, 2);
     }
 
     #[test]

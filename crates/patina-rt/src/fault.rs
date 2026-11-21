@@ -36,7 +36,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     if sig as u64 == sig::SIGTRAP && crate::spin::on_sigtrap(unsafe { &*info }, frame) {
         return;
     }
-    // A debug session of a load-time points or branch counters run (`Config::debug`): gdb passes
+    // A debug session of a load-time points run (`Config::debug`): gdb passes
     // every SIGTRAP on, since it cannot tell the runtime's from its own. One that is not the
     // runtime's (above) nor a plan's is the debugger's: dropped before anything is charged.
     // (A breakpoint instruction of the program's own is dropped too: the session then leaves
@@ -65,14 +65,8 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
                 return;
             }
         }
-        if crate::pmu::is_race(pc) {
-            // Delivered on top of the overflow signal: the instruction faults again.
-            crate::pmu::note_race();
-            return;
-        }
         crate::sup::host_error(sig as i64, pc, proto::ctl::HE_GUEST_FAULT_IN_RUNTIME);
     }
-    crate::pmu::enter(thread(), Some(frame));
     crate::spin::enter(thread(), Some(frame), false);
     crate::compute::enter(thread());
     let info: SigInfo = unsafe { core::ptr::read(info) };
@@ -82,9 +76,6 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
             crate::entry::check_real_mask(frame);
             crate::compute::exit(thread());
             crate::spin::walk_go(thread(), frame);
-            // Last: the counter read in `pmu::exit` starts the counted segment, so a branch
-            // after it would be counted as the program's.
-            crate::pmu::exit(thread(), frame.pc(), 0);
             return;
         }
     }
@@ -106,12 +97,11 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     sig::trap_exit(frame, None);
     crate::entry::check_real_mask(frame);
     crate::compute::exit(thread());
-    crate::pmu::exit(thread(), frame.pc(), 0);
 }
 
 /// A debug session in which gdb passes `SIGTRAP` on (`patina debug`'s helper, for the runs
-/// whose scheduling points take it: load-time points, branch counters).
+/// whose scheduling points take it: load-time points).
 pub fn debugger_passes() -> bool {
     let c = crate::state::config();
-    c.debug != 0 && (c.sched & proto::ctl::SCHED_POINTS != 0 || c.pmu & proto::ctl::PMU_ON != 0)
+    c.debug != 0 && c.sched & proto::ctl::SCHED_POINTS != 0
 }

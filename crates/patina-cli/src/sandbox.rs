@@ -32,8 +32,8 @@ pub const FD_SPEC: i32 = 3019;
 /// keeps, so its `close_inherited` closes them).
 pub const FD_NODE_STDIO0: i32 = 3030;
 const _: () = {
-    use proto::layout::{FD_NODES, FD_PLAN, FD_PMU, FD_PROBE_MEM, FD_SHADOWS, FD_STDIN};
-    assert!(FD_PMU < FD_DATA0 && FD_PLAN < FD_DATA0);
+    use proto::layout::{FD_NODES, FD_PLAN, FD_PROBE_MEM, FD_SHADOWS, FD_STDIN};
+    assert!(FD_PLAN < FD_DATA0);
     assert!(FD_DATA0 + MAX_DATA as i32 <= FD_USERNS);
     assert!(FD_USERNS < FD_SPEC && FD_SPEC < FD_STDIN);
     assert!(FD_NODES < FD_NODE_STDIO0);
@@ -192,7 +192,7 @@ pub fn command(
                 return Err(std::io::Error::last_os_error());
             }
             // Not root: no capability in the host's namespaces into the keeper, even from a
-            // launcher given some by its file (CAP_PERFMON for the branch counters). With
+            // launcher given some by its file. With
             // no_new_privs the exec grants none back. Root's capabilities are its own.
             if libc::geteuid() != 0 {
                 let hdr = [0x2008_0522u32, 0];
@@ -1696,10 +1696,8 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
             Some(ns) => {
                 // The keeper's stderr (`sandbox.log`) until the node's own replaces it.
                 let mut keep = vec![2, FD_CTL, FD_LOG, FD_OPLOG_META, FD_OPLOG_DATA, FD_RT];
-                for fd in [FD_PMU, FD_PLAN] {
-                    if unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0 {
-                        keep.push(fd);
-                    }
+                if unsafe { libc::fcntl(FD_PLAN, libc::F_GETFD) } >= 0 {
+                    keep.push(FD_PLAN);
                 }
                 keep.extend(stdio..stdio + 3);
                 if shadows {

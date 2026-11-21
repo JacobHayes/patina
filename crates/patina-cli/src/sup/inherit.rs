@@ -137,12 +137,12 @@ pub unsafe fn reset_signals() {
 }
 
 /// Close every descriptor but 0-2 and the hidden ones the supervisor keeps (`FD_CTL..FD_PATINA`,
-/// FD_PATINA itself already closed, the counter and plan brokers' ends `FD_PMU` and `FD_PLAN`,
-/// which every guest runtime uses, and the shared memory carried across incarnations, `FD_SHM`):
+/// FD_PATINA itself already closed, the plan broker's end `FD_PLAN`, which every guest runtime
+/// uses, and the shared memory carried across incarnations, `FD_SHM`):
 /// the sandbox's own descriptors (`sandbox::FD_DATA0..=FD_SPEC`) and the stdio ones, already
 /// moved to 0-2, go. `FD_NODES`, the keeper's channel, stays in a run with nodes.
 pub unsafe fn close_inherited(nodes: bool) {
-    const _: () = assert!(FD_PMU == FD_PATINA + 1 && FD_PLAN == FD_PMU + 1);
+    const _: () = assert!(FD_PLAN == FD_PATINA + 1);
     const _: () = assert!(FD_SHM > FD_PLAN + 1 && FD_NODES == FD_SHM + 1);
     // The shadow stores are made after this, above everything it keeps.
     const _: () = assert!(FD_SHADOWS > FD_NODES);

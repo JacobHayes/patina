@@ -5,10 +5,10 @@
 //! space at `COMPUTE_CELL`, mapped at the first `COMPUTE_HELLO`), and make the SDK call
 //! `COMPUTE_POINT` when it reaches 0. Nothing in the program calls runtime code.
 //!
-//! - `enter`, at every runtime entry beside `pmu::enter`: the events since the last `exit`
+//! - `enter`, at every runtime entry: the events since the last `exit`
 //!   are `handed - cell` (clamped to `0..=handed`, so a stray store into the cell moves only
 //!   this process's own count); they are charged to virtual time at `compute_charge_ns` each.
-//! - `exit`, the last thing before every return to program code beside `pmu::exit`: draws the
+//! - `exit`, the last thing before every return to program code: draws the
 //!   next segment's gap (`proto::compute::gap`), cuts it short at the next deadline or the
 //!   time limit and at `REFILL` (`proto::compute::arm`), writes it to the cell and remembers
 //!   which of the three it was.
@@ -22,14 +22,11 @@
 //! process runs, and the next thread to return to program code writes its own gap. A spin
 //! probe (`spin.rs`) arrives at a host-chosen instruction and touches none of this; the spin
 //! point it may find is a state the same in every run, and an entry and exit like a trap.
-//!
-//! With counter preemption on (`Config::pmu`) the cell holds `NO_LIMIT` and nothing is
-//! counted or charged here: counters own scheduling and time for the whole run.
 
 use crate::arch::Frame;
-use crate::state::{config, ctl, proc, ThreadState};
+use crate::state::{ctl, proc, ThreadState};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE, REASON_SWITCH};
+use proto::compute::{PREEMPT_NR, REASON_DEADLINE, REASON_SWITCH};
 use proto::layout::{COMPUTE_CELL, PAGE};
 
 /// The cell's address: with load-time points the plans' (`proto::plan::CELL`, mapped at the
@@ -47,8 +44,6 @@ fn cell() -> u64 {
 pub const OFF: u64 = 0;
 /// Counting, charging and switching.
 pub const ON: u64 = 1;
-/// Counter preemption owns the run: the cell holds `NO_LIMIT`.
-pub const COUNTERS: u64 = 2;
 
 /// Per-process (per address space) state, in `Proc`. Shared with a vfork child, as the cell is.
 pub struct Compute {
@@ -273,14 +268,9 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
     p.hello = true;
     if p.mode == OFF {
         map_cell();
-        if config().pmu & proto::ctl::PMU_ON != 0 {
-            p.mode = COUNTERS;
-            write_cell(NO_LIMIT);
-        } else {
-            // `exit` writes the first gap on the way out of this trap.
-            p.mode = ON;
-            p.handed = 0;
-        }
+        // `exit` writes the first gap on the way out of this trap.
+        p.mode = ON;
+        p.handed = 0;
     }
     p.kinds |= kinds;
     if kinds & proto::sdk::COMPUTE_LINE != 0 {
@@ -445,8 +435,6 @@ pub fn point(ts: &mut ThreadState, frame: &Frame, pc: u64, walk: bool) {
         // The cell ran out by the runtime's own count (a stray store that zeroed it counts the
         // same): consult the supervisor, for the reason `exit` armed it with.
         ON if p.handed == 0 => p.cut,
-        // Counters own the run; a program that wrote the cell gets `NO_LIMIT` back.
-        COUNTERS => return write_cell(NO_LIMIT),
         // The cell has events left (a call by hand), or no stop is due: nothing happens.
         // `exit` rewrites the cell on the way out.
         _ => return,

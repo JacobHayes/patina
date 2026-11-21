@@ -316,8 +316,8 @@ struct Story {
     nodes: Vec<String>,
     lines: Vec<Line>,
     t0: Option<u64>,
-    /// Whether the run had preemptions in computation (load-time points, branch counters, compute
-    /// points), and whether any line is an exchange between actors.
+    /// Whether the run had preemptions in computation (load-time points, compute points), and
+    /// whether any line is an exchange between actors.
     preempts: u64,
     stop_at: Option<usize>,
 }

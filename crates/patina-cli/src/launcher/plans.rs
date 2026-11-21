@@ -163,3 +163,21 @@ impl Broker {
         }
     }
 }
+
+/// The broker's socket pair: (the sandbox end, to place at `FD_PLAN`; our end, served once the
+/// keeper runs).
+pub fn pair() -> Result<(OwnedFd, OwnedFd), String> {
+    let mut fds = [0i32; 2];
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(format!("socketpair: {}", io::Error::last_os_error()));
+    }
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
+}

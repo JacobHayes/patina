@@ -10,8 +10,6 @@
 
 use crate::draw::{draw, mix64, Stream};
 
-/// The cell's value with counter preemption on: nothing is counted, no point is wanted.
-pub const NO_LIMIT: i64 = i64::MAX;
 /// The longest run the cell is armed for, whatever the gap and the deadlines: when it runs out
 /// the thread yields (`REASON_REFILL`). So an instrumented spin-wait hands over by itself in
 /// every gap setting (a spin probe cannot find one: its cell changes every pass), and what one
@@ -19,9 +17,9 @@ pub const NO_LIMIT: i64 = i64::MAX;
 /// virtual time, and a few ms of CPU time: well before the stall watchdog's first probe.
 pub const REFILL: u64 = 1 << 22;
 
-/// `Rec::nr` of a compute point's `Preempt` record (1 is a counter preemption, 2 a spin
-/// point): args [rip, the value the cell was armed with, reason, events of this process so
-/// far, the segment's drawn gap (0: switches off), the instructions a load-time switch walked
+/// `Rec::nr` of a compute point's `Preempt` record (2 is a spin point; 1 is unused): args
+/// [rip, the value the cell was armed with, reason, events of this process so far, the
+/// segment's drawn gap (0: switches off), the instructions a load-time switch walked
 /// past its site]; `out_hash` hashes the general registers where it was taken.
 pub const PREEMPT_NR: u32 = 3;
 /// Reasons in a compute point's record: the drawn gap ran out (a switch), a deadline or the
@@ -48,7 +46,7 @@ pub fn mean_gap(d: u64, lo: u64, hi: u64) -> u64 {
     if lo >= hi {
         lo
     } else {
-        crate::pmu::log_uniform(d, lo, hi)
+        crate::draw::log_uniform(d, lo, hi)
     }
 }
 

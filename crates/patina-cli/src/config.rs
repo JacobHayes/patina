@@ -42,41 +42,11 @@ pub enum Preempt {
     Points,
     /// Only at system calls, spin hints and spin probes.
     Traps,
-    /// Also after a seed-chosen number of branches (counter preemption).
-    Branches,
 }
 
 impl Preempt {
     pub fn points(self) -> bool {
         self == Preempt::Points
-    }
-    pub fn branches(self) -> bool {
-        self == Preempt::Branches
-    }
-}
-
-/// Counter preemption's slice policy (`[sched] preempt = "branches"`).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "kebab-case")]
-pub struct Pmu {
-    pub slice_min: u64,
-    pub slice_max: u64,
-    pub short_permille: u64,
-    pub short_max: u64,
-    pub charge_ps: u64,
-    pub margin: u64,
-}
-
-impl Default for Pmu {
-    fn default() -> Pmu {
-        Pmu {
-            slice_min: proto::pmu::SLICE_MIN_DEFAULT,
-            slice_max: proto::pmu::SLICE_MAX_DEFAULT,
-            short_permille: proto::pmu::SHORT_PERMILLE_DEFAULT,
-            short_max: proto::pmu::SHORT_MAX_DEFAULT,
-            charge_ps: proto::pmu::CHARGE_PS_DEFAULT,
-            margin: proto::pmu::MARGIN_DEFAULT,
-        }
     }
 }
 
@@ -133,11 +103,10 @@ pub struct Config {
     /// (test input `EMULATE_RNDR`: the default follows the host).
     pub emulate_rndr: bool,
     /// Spin probes for a thread that computes without a boundary event (test input
-    /// `SPIN_PROBES`; off under counter preemption).
+    /// `SPIN_PROBES`).
     pub spin_probes: bool,
     /// Where threads are preempted (`[sched] preempt`).
     pub preempt: Preempt,
-    pub pmu: Pmu,
     /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
     /// chosen by process id; test input `HOST_CPU`). Does not reach the guest.
     pub host_cpu: Option<usize>,
@@ -271,7 +240,6 @@ impl Default for Config {
             emulate_rndr: false,
             spin_probes: true,
             preempt: Preempt::default(),
-            pmu: Pmu::default(),
             host_cpu: None,
             compute_walk: None,
             check: None,
@@ -803,13 +771,12 @@ fn boolean(v: &toml::Value, at: &str) -> Res<bool> {
         .ok_or_else(|| format!("{at}: expected true or false"))
 }
 
-/// `points`, `traps` or `branches`.
+/// `points` or `traps`.
 fn preempt(v: &str, at: &str) -> Res<Preempt> {
     match v {
         "points" => Ok(Preempt::Points),
         "traps" => Ok(Preempt::Traps),
-        "branches" => Ok(Preempt::Branches),
-        _ => Err(format!("{at}: expected points, traps or branches, not {v}")),
+        _ => Err(format!("{at}: expected points or traps, not {v}")),
     }
 }
 
@@ -820,14 +787,6 @@ fn scalar(v: &toml::Value, at: &str) -> Res<String> {
         toml::Value::Boolean(b) => Ok(if *b { "1" } else { "0" }.into()),
         _ => Err(format!("{at}: expected a string, integer or boolean")),
     }
-}
-
-fn range(v: &str, at: &str) -> Res<(u64, u64)> {
-    let (a, b) = v
-        .split_once("..")
-        .ok_or_else(|| format!("{at}: expected MIN..MAX"))?;
-    let p = |x: &str| -> Res<u64> { x.parse().map_err(|_| format!("{at}: not a number: {x}")) };
-    Ok((p(a)?, p(b)?))
 }
 
 /// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory,
@@ -910,22 +869,6 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("sweep", "crash-pairs") => c.crash_pairs = Some(int(v, &at)? as usize),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "preempt") => c.preempt = preempt(&string(v, &at)?, &at)?,
-                // The race-hunting policy: every segment short, stops close to traps.
-                ("sched", "branches") => match string(v, &at)?.as_str() {
-                    "default" => {
-                        let d = Pmu::default();
-                        (c.pmu.short_permille, c.pmu.short_max) = (d.short_permille, d.short_max)
-                    }
-                    "hunt" => (c.pmu.short_permille, c.pmu.short_max) = (1000, 64),
-                    o => return Err(format!("{at}: expected default or hunt, not {o}")),
-                },
-                ("sched", "pmu-slice") => {
-                    (c.pmu.slice_min, c.pmu.slice_max) = range(&string(v, &at)?, &at)?
-                }
-                ("sched", "pmu-short-permille") => c.pmu.short_permille = int(v, &at)?,
-                ("sched", "pmu-short-max") => c.pmu.short_max = int(v, &at)?,
-                ("sched", "pmu-charge-ps") => c.pmu.charge_ps = int(v, &at)?,
-                ("sched", "pmu-margin") => c.pmu.margin = int(v, &at)?,
                 ("run" | "sched" | "sdk" | "sweep", _) => {
                     return Err(unknown(&format!("{sec}.{k}")))
                 }
@@ -1282,18 +1225,6 @@ impl Config {
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());
-        }
-        let p = &self.pmu;
-        if p.short_permille > 1000 || p.short_max == 0 || p.short_max > 0xffff_ffff {
-            return Err("pmu-short-permille is at most 1000, pmu-short-max at least 1".into());
-        }
-        if p.slice_min == 0 || p.slice_min > p.slice_max || p.margin < 64 {
-            return Err("pmu-slice needs 1 <= MIN <= MAX; pmu-margin at least 64".into());
-        }
-        if p.short_max > p.margin + proto::pmu::HOP_EXTRA {
-            return Err(
-                "pmu-short-max is at most pmu-margin + 1024 (short slices are hopped)".into(),
-            );
         }
         let node_programs = self.check_nodes(&mut plan)?;
         Ok(Opts {

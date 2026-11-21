@@ -4,4 +4,3 @@
 pub mod attribution;
 pub mod incarnations;
 pub mod plans;
-pub mod pmu;

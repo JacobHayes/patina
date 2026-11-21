@@ -2,7 +2,6 @@
 # tests/cfg KEY=VALUE...: write a patina.toml holding these settings (expert settings are
 # config keys only) into $RUNS and print its path, for `patina run --config "$(cfg ...)"`.
 # Test inputs (stall-ms, pause-points, ...) are environment variables, not keys: AGENTS.md.
-# A pmu-* or branches key also turns counter preemption on (preempt = "branches").
 set -eu
 f=$(mktemp "${RUNS:-${TMPDIR:-/tmp}}/cfg-XXXXXX.toml")
 run="" faults="" sched="" sweep=""
@@ -18,16 +17,11 @@ for kv in "$@"; do
 " ;;
         crash-pairs) sweep="$sweep$k = $v
 " ;;
-        pmu-* | branches) sched="$sched$k = $v
-preempt = \"branches\"
-" ;;
         preempt | preempt-permille) sched="$sched$k = $v
 " ;;
         *) echo "cfg: unknown key $k" >&2; exit 2 ;;
     esac
 done
-# `preempt` once, whatever set it.
-sched=$(printf '%s' "$sched" | awk '!(/^preempt = / && seen++)')
 {
     [ -z "$run" ] || printf '[run]\n%s\n' "$run"
     [ -z "$faults" ] || printf '[faults]\n%s\n' "$faults"

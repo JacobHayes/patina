@@ -560,8 +560,6 @@ pub struct IncEnd {
     pub tmpfs_full: u64,
     /// The most bytes the shadow store held.
     pub shadow_bytes: u64,
-    /// Counter preemption counters (`proto::ctl::PMU_NAMES`).
-    pub pmu: [u64; proto::ctl::PMU_FIELDS],
     /// The SDK's site table.
     pub sdk: crate::result::SdkReport,
     /// `fault_after_seq` at the end: lowered by a `setup-complete` mark.
@@ -651,8 +649,7 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
 /// Can a run start here? Checked by every command before its first sandbox: the host meets
 /// this architecture's requirements (`host`, which `patina doctor` explains); as root, the
 /// sandbox's user namespace can be made and the host paths it binds can be read by the user it
-/// maps to; as another user, the host lets this executable make one (`userns_allowed`);
-/// counters work if `[sched] preempt = "branches"` asks for them.
+/// maps to; as another user, the host lets this executable make one (`userns_allowed`).
 pub fn preflight(o: &Opts) -> Res<()> {
     crate::host::refusal(&crate::host::Facts::probe(o.cfg.host_cpu))?;
     if root_user().is_none() {
@@ -676,7 +673,7 @@ pub fn preflight(o: &Opts) -> Res<()> {
             }
         }
     }
-    pmu_event(o).map(|_| ())
+    Ok(())
 }
 
 const OVERFLOW: u32 = 65534;
@@ -842,17 +839,6 @@ fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
     res
 }
 
-/// The counter event with branch counters, or why counters cannot be used here: an
-/// error, never a run without them.
-pub fn pmu_event(o: &Opts) -> Res<Option<u64>> {
-    if !o.cfg.preempt.branches() {
-        return Ok(None);
-    }
-    crate::launcher::pmu::available().map(Some).map_err(|why| {
-        format!("[sched] preempt = \"branches\": counter preemption is not available here: {why}")
-    })
-}
-
 /// Run one incarnation into `inc` (created).
 pub fn run_incarnation(
     o: &Opts,
@@ -937,23 +923,13 @@ pub fn run_incarnation(
     if c.preempt.points() {
         cfg.sched |= proto::ctl::SCHED_POINTS;
     }
-    let pmu_ev = pmu_event(o)?;
-    // Counter preemption stops a spinning thread itself.
     // Where the host cannot make spin probes work they are off (`host::spin_probes`).
-    if c.spin_probes && pmu_ev.is_none() {
+    if c.spin_probes {
         cfg.sched |= if crate::host::spin_ok() {
             proto::ctl::SCHED_SPIN_PROBE
         } else {
             proto::ctl::SCHED_SPIN_HOST_OFF
         };
-    }
-    if pmu_ev.is_some() {
-        cfg.pmu = proto::ctl::PMU_ON;
-        cfg.pmu_slice_min = c.pmu.slice_min;
-        cfg.pmu_slice_max = c.pmu.slice_max;
-        cfg.pmu_short = c.pmu.short_permille | (c.pmu.short_max << 16);
-        cfg.pmu_charge_ps = c.pmu.charge_ps;
-        cfg.pmu_margin = c.pmu.margin;
     }
     cfg.work[..c.work_path().len()].copy_from_slice(c.work_path().as_bytes());
     if !c.nodes.is_empty() {
@@ -1122,21 +1098,10 @@ pub fn run_incarnation(
         }
         node_stdio.push(fds);
     }
-    // The counter broker's sandbox end.
-    let (pmu_sandbox, pmu_ours) = match pmu_ev {
-        Some(_) => {
-            let (a, b) = crate::launcher::pmu::pair()?;
-            (Some(a), Some(b))
-        }
-        None => (None, None),
-    };
-    if let Some(f) = &pmu_sandbox {
-        place.push((f.as_raw_fd(), FD_PMU));
-    }
     // The plan broker's sandbox end.
     let (plan_sandbox, plan_ours) = match &start.planner {
         Some(_) => {
-            let (a, b) = crate::launcher::pmu::pair()?;
+            let (a, b) = crate::launcher::plans::pair()?;
             (Some(a), Some(b))
         }
         None => (None, None),
@@ -1176,7 +1141,6 @@ pub fn run_incarnation(
     drop(outcome_w);
     drop(etc_fds);
     drop(spec_fd);
-    drop(pmu_sandbox);
     drop(plan_sandbox);
     let plan_broker = match (plan_ours, &start.planner) {
         (Some(ours), Some(p)) => Some(crate::launcher::plans::Broker::start(
@@ -1185,14 +1149,6 @@ pub fn run_incarnation(
             cpu,
             // The control region outlives the broker (`stop` below, before the unmap).
             &unsafe { Ctl::at(ctl_ptr) }.compute.planning,
-        )?),
-        _ => None,
-    };
-    let broker = match (pmu_ours, pmu_ev) {
-        (Some(ours), Some(ev)) => Some(crate::launcher::pmu::Broker::start(
-            ours,
-            ev,
-            child.id() as i32,
         )?),
         _ => None,
     };
@@ -1233,9 +1189,6 @@ pub fn run_incarnation(
             ),
         )
         .encode();
-    }
-    if let Some(b) = broker {
-        b.stop();
     }
     if let Some(b) = plan_broker {
         b.stop();
@@ -1336,9 +1289,7 @@ pub fn run_incarnation(
         }
     }
 
-    if !truncated.is_empty()
-        && !matches!(verdict.class.as_str(), "infra" | "disk-full" | "pmu-late")
-    {
+    if !truncated.is_empty() && !matches!(verdict.class.as_str(), "infra" | "disk-full") {
         // More output than the run directory takes: the comparison would miss the rest.
         verdict = Verdict::new(
             "output-limit",
@@ -1388,7 +1339,6 @@ pub fn run_incarnation(
         unix_sockets: ctl.stats.unix_sockets_sent.load(Relaxed),
         tmpfs_full: ctl.stats.tmpfs_full.load(Relaxed),
         shadow_bytes: unsafe { proto::oplog::Dur::at(ctl_ptr).shadows.peak },
-        pmu: ctl.pmu.read(),
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         sched: ctl.sched.read(),

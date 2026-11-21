@@ -127,7 +127,7 @@ for a loop that changes nothing, and yields there) reach these loops without cou
 neither reaches ends `unsupported` with stop `compute-stall`. Measured 2026-11-16 on an AMD
 Ryzen 9 9950X (family 0x1a), each sweep run once under the evidence lock:
 `./check evidence sched/evidence-spin` (with `PATINA_BASE` naming a build without pause
-points), `runtimes/evidence-go-stalls`, `counters/evidence-go` and `counters/evidence-costs`.
+points) and `runtimes/evidence-go-stalls`.
 
 Which spin-waits execute `pause`: glibc `pthread_spin_lock`, a C test-and-set lock with the
 usual hint, Rust `spin_loop` locks and `std::sync::Mutex`'s spin phase, Go's `procyield`. Go's
@@ -142,12 +142,9 @@ background sweeper polling an idle heap does not; spin probes find it.
 | W4 (stock Go), 100 seeds, spin probes off / on | `compute-stall` 92/100 / 0/100 |
 | go-sweep, 100 seeds, spin probes off / on | 99/100 / 0/100 |
 | go-sweep at 24 CPUs, 100 seeds, spin probes off / on | 97/100 / 0/100 |
-| W4 and go-sweep, `--preempt branches`, 100 seeds each | 100/100 `ok`, 100 distinct digests; 5 seeds x 20 runs under `--vary cpu,load,aslr,sandbox`, faults off and on: identical |
-| Spin table (call inside), `--preempt branches`, 100 seeds each | 0 stalls in 300 seeds |
 | A pause-point guest under `verify --runs 5 --vary cpu,aslr` | one digest |
-| Largest measured skid | 425 branches (margin 1,024) |
 
-What still ends `compute-stall` without counters: a spin-wait with neither a system call nor
+What still ends `compute-stall`: a spin-wait with neither a system call nor
 `pause` whose iterations change state (a counter or a timestamp it computes), and an endless
 loop while another thread waits. A lone thread computing is left alone (2 s of compute is
 `ok`).
@@ -176,15 +173,7 @@ grid; F2 and F6 appeared in none of 1,000 seeds and still reproduce at their see
 
 Red/green: ignoring the page comparison of a fixed point fails `sched/10-spin` (a counting
 loop was treated as a spin); a pause point that does not yield fails `insn/10-pause` (glibc
-spin lock times out); a watchdog that never ends a run fails `skeleton/09-stall`; falling back
-to traps when `--preempt branches` is not available fails `counters/01-unprivileged`.
-
-Counter preemption on Intel: on an Intel Xeon 6975P-C (CI runner with a PMU),
-`counters/02-counter` and `05-exact` stopped at different instructions for the same count,
-`06-migrate` gave 5 different digests in 5 runs, and the race seed `03-races` relies on no
-longer found the double spend. Counter preemption is therefore refused on every CPU but AMD
-family 0x1a and (arm64) the Arm Neoverse N2 ("Branch counters on arm64"), and a seed
-reproduces only on the same family.
+spin lock times out); a watchdog that never ends a run fails `skeleton/09-stall`.
 
 ### arm64
 
@@ -281,8 +270,8 @@ load emulator.
 ## Compute points
 
 Code rebuilt with clang's coverage flags and `sdk/c/patina_compute.c` (ARCHITECTURE.md,
-"Scheduling points"). The race guests are `tests/guests/counters/races.c` and `pool.c`, built
-stock and rebuilt (`tests/guests/compute`); `pool`'s `stats.done++` is one `incq` in the stock
+"Scheduling points"). The race guests are `tests/guests/compute/races.c` and `pool.c`, built
+stock and rebuilt; `pool`'s `stats.done++` is one `incq` in the stock
 -O2 build, and a load hook, a load, `inc`, a store hook and a store in the rebuilt one.
 
 | Check | Result |
@@ -305,7 +294,7 @@ Costs, measured by hand on 2026-11-16, one run each, pinned to one core:
 | Rebuilt loop of 10^8 iterations (1.25 x 10^8 events), `compute-gap=0` | 125,001,003 virtual ns between its clock reads (one event per ns, one trap charge); 0.67 ns of wall time per event (the hook's armed fast path) |
 | The same loop natively: hooks inert / stock build | 0.74 ns per event / 0.18 ns per iteration |
 | A compute point that switches (`compute-gap=8` and `64`, one thread) | 3.5 µs each (a trap and a supervisor hand-off) |
-| `counters/compute.c` (`loops`, `threads`), stock against rebuilt, seeds 1-5 under Patina | stock 0.85 s / 0.21 s; rebuilt 0.59 to 6.6 s / 0.29 to 3.8 s by the seed's mean gap (64514: 0.59 / 0.29 s; 115: 6.6 / 3.8 s); natively stock 0.41 / 0.21 s, rebuilt 0.56 / 0.26 s |
+| A CPU-bound loop guest, since removed (`loops`, `threads`), stock against rebuilt, seeds 1-5 under Patina | stock 0.85 s / 0.21 s; rebuilt 0.59 to 6.6 s / 0.29 to 3.8 s by the seed's mean gap (64514: 0.59 / 0.29 s; 115: 6.6 / 3.8 s); natively stock 0.41 / 0.21 s, rebuilt 0.56 / 0.26 s |
 
 The stock `loops` run under Patina pays for spin probes (it computes with no system call); the
 rebuilt one has compute points and needs none.
@@ -992,8 +981,8 @@ C, C++, Rust and Go guests and `patina replay`.
 
 Measured 2026-11-21 on the x86_64 host above and on a GitHub `ubuntu-24.04-arm` runner (one
 throwaway job, its branch and runs deleted after). Load-time points with walks became the
-preemption of every run, with no flag; `[sched] preempt = "traps"` or `"branches"` is the
-config that chooses the others. Old: main at `e1d438a8` (traps by default); new: the change;
+preemption of every run, with no flag; `[sched] preempt = "traps"` is the
+config that chooses traps. Old: main at `e1d438a8` (traps by default); new: the change;
 "traps": the new build with `[sched] preempt = "traps"`.
 
 **Ledger** (the 90 cells of the stock workload ledger, seeds 1 to 3, faults off and all, one
@@ -1246,8 +1235,7 @@ processes, at their calls; `nodes/14-points-sweep` runs such clusters at the def
 nightly on the GitHub x86_64 and arm64 runners (`ubuntu-24.04`, `ubuntu-24.04-arm`): what
 failed or flaked, each fixed at its cause (the change's message has each):
 `oracles/03-marks` and `oracles/07-resume` (their expectations predated path records and
-rejudged runs being kept), `counters/06-migrate` (a moved run may end `pmu-late` on a loaded
-virtual machine), `signals/11-blocking` (the `sig-block` guest's parent tested a flag, then
+rejudged runs being kept), `signals/11-blocking` (the `sig-block` guest's parent tested a flag, then
 slept: a signal between the two was lost, natively too), `storage/02-f1` (no seed of 1 to
 100 reached open-after-crash on arm64 at 3 per mille; at 30 about one in ten; a check that
 could never fire), `storage/03-f6` (its pinned seed holds on the host kind it was found on),
@@ -1273,184 +1261,6 @@ reference and one varied in every way asked; fewer guests, modes, crash planes a
 two sweep transcripts to the release tier, the assertions unchanged: arm64 280 to 302 wall
 (298 at the last), 554 script, the range it had before the switch; x86_64 227 to 248 wall.
 
-## Branch counters on arm64
-
-Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`
-0x410fd490, 4 CPUs, Linux 7.0.0-1017-azure; the `armv8_pmuv3_0` PMU, 6 counters a group), each
-check run once from a throwaway branch.
-
-**Is the count exact?** A probe program (C, run natively, no Patina) counted events over 50
-processes per body, idle, under 4 `yes` loads, and with a thread moving it between CPUs every
-300 µs:
-
-| Check | Result |
-|---|---|
-| What `BR_RETIRED` (0x21) counts | every branch instruction executed, taken or not: `b.cond`, `cbz`/`cbnz`, `tbz`/`tbnz`, `b`, `bl`, `br`, `blr`, `ret`; nothing else (`svc`, `isb`: 0). A walk single-stepping every instruction with a counter read after each: every branch counted once, 0 of ~600,000 other instructions |
-| Count over 50 runs, 20 bodies (calibration loops, loops, recursion, indirect calls, glibc string functions, libm, `malloc`, uncontended mutex, outline atomics, 8 threads on 4 CPUs, LSE atomics, contended `ldadd`) | one value per body, in all three conditions |
-| Signals arriving (SIGUSR1 every 100 µs) | base + 1 per signal (the handler's `ret`), exactly |
-| Inline `ldxr`/`stxr`, 200,000 operations | base + 2 per failed store, exactly; spurious store failures 0 to 4 per run idle, up to 7 moved; 4 million operations: 17 to 75. The count is exact, the program's path is not: hence the emulation below |
-| A program reading the clock through the vDSO | not one value (its seqlock retries); Patina has no vDSO |
-| Overflow, then single steps to period + 1,500 (ASLR off), 11 bodies x 3 conditions x 2 periods x 50 runs | one stop instruction in every cell; register hashes differ only by pointer-authentication-signed pointers and thread ids (keys are per process natively; Patina turns them off) |
-| Skid (branches past the programmed overflow at the signal) | 11 to 333; margin 1,024 |
-| Overflow signals (`TRAP_PERF`), 75 runs x 3 periods | overflows = total / period every time: none lost, none doubled |
-| Exclusive pairs started per program (a breakpoint on every load-exclusive) | glibc 2.39 dynamic programs, C++, Rust, Python: 0; static glibc 4; Go 93; ubuntu 26.04: 2 in `ld.so` per program |
-| Cost | `read()` of the counter 735 ns; a user read of the PMU registers (with `perf_user_access=1`) 606 ns, trapped by the hypervisor; `brk` round trip 1.2 µs |
-
-rr counts the same event on these cores (skid allowance 1,000) and supports only programs
-using LSE atomics, not exclusive pairs, for the same reason.
-
-**Patina** (`tests/counters`, the runner; x86_64's numbers in "Spin-waits and scheduling
-points"):
-
-| Check | Result |
-|---|---|
-| `05-exact`: the same N reached by hops only and through the counter, N = 3,000 on six programs and N = 1,100,000 on two | 8/8 equal digests (e.g. strings: 8.6 million hops against 2,883 overflows, 2,869 landings, 2,869 stops) |
-| `06-migrate`: tasks moved to a random CPU every 2 ms, 5 runs of four programs | 20/20 equal to the unmoved run (13,500 affinity changes in a strings run) |
-| `evidence-compute`, 7 programs, 10 runs `--vary cpu,load,aslr,sandbox` and 10 `--vary parallel` each | all identical, the same digest both ways, checksums equal to native; largest skid 316 |
-| `evidence-races` (stock builds, no compute points), 100 seeds | race b found in 1 seed with the default policy, 3 with `branches = "hunt"`; seed 16 replays 20/20 under `--vary cpu,load,aslr,sandbox`. pool: in no seed, as on x86_64: its updates are a load, an add and a store with no branch between, and a stop comes only after a branch |
-| `evidence-go`: go-sweep and W4 (stock Go) at 4 CPUs, 20 seeds | 20/20 `ok` each, 20 distinct digests each, 0 stalls; seeds 1-5 x 5 runs, faults off and on: identical |
-| `evidence-spin`: glibc, C and Rust spin locks, 20 seeds | 60/60 `ok`, 0 stalls; largest skid 331 |
-| `04-stalls`: the exclusive-pair spin locks (`llsc-spin`), whose waiter runs only emulated exclusive instructions | `ok` |
-| `evidence-workloads`: W1-W9, 3 runs of seed 1, seeds 1-3 | identical across runs, 3 distinct digests over seeds for each; W9 is a `violation` under counters (below) |
-
-W9 under counters: its crash lands at point 15, before fjall has made its `version` file
-durable, and the harness's open after the crash fails with `EEXIST`, the same in every run
-(seed 1 on arm64; seed 12 of 40 on x86_64 with counters; none of 40 without). It is fjall
-F1, not a Patina bug: the tree the crash left fails the same way when the harness opens a copy
-of it natively, the run is the same digest in 3 of 3 runs, the harness's F1 workaround
-(`FJ_WIPE_PARTIAL=1`) makes the seed `ok`, and without counters seeds 1-200 reach F1 in 14
-runs (10 `EEXIST`, 4 an empty `version`). Counters move the crash points (seed 12's first
-crash at point 10 with them, during fjall's first open, at point 164 without), which is why
-that seed reaches F1 only with them.
-
-Costs (`evidence-costs`, runner, median of 3): a trap with counters on costs 1.28 µs more;
-a preemption 2.6 ms (loops) to 3.4 ms (fp); W1-W9 wall x0.66 (W9, which ends early) to x2.01
-(W2), the rest x1.07 to x1.58.
-
-Red/green: stopping at the overflow without the landing walk fails `05-exact` (9 of 9 cases
-stop elsewhere); not subtracting the return path's three branches (`TAIL` = 0) fails it too
-(9 of 9). Keeping the counted segment across an emulated exclusive instruction (a stub reading
-the counter at SIGILL as at the overflow) made `04-stalls`' two exclusive-pair locks end
-`compute-stall` with no preemption in 2 s (the waiter's every few branches cost an
-emulation, so a long N takes seconds), where ending the segment there passes them: the
-segment ends there.
-
-Runners differ: one of the five jobs got a Neoverse V3 (`MIDR_EL1` 0x410fd841), where
-`--preempt branches` is refused and the branch-counter scripts SKIP.
-
-The period before hop segments, on x86_64 (Zen 5, `perf_event_max_sample_rate` 6,000 at
-HZ 1,000: 6 samples a tick before the kernel throttles): a guest whose bursts of branches end
-just short of a mid-length segment, with every third segment short, left the short period in
-place for the hops after it. Counted with a scratch build: 1,104 and 1,225 overflows while
-hopping and 5,487 and 6,115 hops that found the counter stopped (throttled) over two seeds;
-with the period set before every segment, 30 and 0, and the same digest as before for each
-seed. `dmesg` showed no new perf message either way. After it: `counters` area passes, the
-90-cell ledger is unchanged. On arm64 `07-exclusive` fails with the faulting-exclusive fix
-reverted (`map`: SIGILL) and with the full-table stop removed (`many` ends `ok`).
-
-Unaligned exclusive accesses (`excl align`: each of the 27 load, store and load-then-store
-forms at offsets 0, 1, 2, 4, 8, 12, 14 and 15 of a 64-byte-aligned buffer), native against
-`--preempt branches`, five runner jobs (all Neoverse N2, `uscat` in `/proc/cpuinfo`; the native
-table the same in each):
-
-| Access | Native | Patina before | Patina now |
-|---|---|---|---|
-| Byte forms, any offset | no fault | no fault | no fault |
-| Halfword, word, doubleword, word pair (2 to 8 bytes) at an unaligned offset inside one 16-byte block (e.g. `ldxr x` at +1, +4) | no fault | SIGBUS `BUS_ADRALN` | no fault |
-| The same across a 16-byte boundary (`ldxrh` +15, `ldxr w` +14, `ldxr x` +12, `ldxp w` +12) | SIGBUS 1, `si_addr` the address | SIGBUS 1, the address | the same as native |
-| Doubleword pair (`ldxp`/`stxp x`, 16 bytes) at any unaligned offset | SIGBUS 1, the address | SIGBUS 1, the address | the same as native |
-| A store-exclusive whose monitor is clear (it would fail) | as the load of its size: the alignment check comes first | the same | the same |
-
-The architecture's rule (`AArch64.CheckAlignment`): with FEAT_LSE2 an unaligned exclusive
-access faults only when it crosses a 16-byte boundary. The emulation now applies it when the
-kernel reports `HWCAP_USCAT` and faults on every unaligned address otherwise. An unaligned
-`ldxr` that did not fault natively was inside one 16-byte block. `07-exclusive`'s `align` mode
-compares the 216 lines with the native run; with the old rule planted it fails (`ldxrh +1`
-and 40 more lines raise SIGBUS where natively they do not), and passes with the fix.
-
-What differs from the Apple VM (Tart, Apple M4): no PMU is exposed to the guest, so
-`--preempt branches` is refused there (`patina doctor`: no PMU); the hop logic and the
-exclusive emulation were also run there with a software event standing in for the counter
-(not shipped).
-
-## Branch counters under host load
-
-Measured 2026-11-20 on the KVM guest (Linux 7.0, `perf_event_max_sample_rate` 6,000 at HZ
-1,000: the kernel had lowered it from 100,000 after interrupts that took long, so it throttles
-an event after 6 overflow interrupts in a tick). Each run is one N = 3,000 counter run of a
-`tests/guests/counters/compute` program compared with its hops-only run (`05-exact`'s method;
-8 runs at a time); load is busy loops started for the batch, the host's own load average was
-2 to 10 besides. No bare-metal host was measured.
-
-**Before** (the overflow entry had 3 conditional branches before its `rdpmc`; pmu-margin 512):
-
-| Condition | Runs | Differ | Overshoot (fail closed) |
-|---|---|---|---|
-| quiet, load 1.5 | 200 | 2 | 4 |
-| 16 busy loops at nice 19, load 6.4 | 200 | 1 | 0 |
-| 24 busy loops at nice 0, load 13 | 200 | 0 | 0 |
-
-Every difference was a stop exactly 3 branches late, at the same place in each (the first
-preemption, in `ld.so`), so a run that differed gave the same wrong digest each time. A
-scratch build that counted overflows whose counter had not moved since the interrupt found 5
-in 400 runs and 10 in 600, each such run's stop 3 branches late. The cause: while a segment's
-short period was left armed during runtime work, the runtime's own branches overflowed it
-more than 6 times in a tick; the kernel throttled the event, stopping the counter at the next
-overflow until its next tick, but still sent the signal, so the handler's first 3 branches
-went uncounted. The arm64 runner's twice-repeated wrong digest (`05`, 3000-recur) fits the
-same cause (2 branches before the read there) but was not reproduced: on the runners below
-the rate stayed at 40,000 or more, no overflow found its counter stopped, and 440 runs of
-the old build gave no difference.
-
-Late interrupts, the other failure, are not load: branches from the programmed overflow to
-the interrupted instruction, the largest per run: median 142 to 195 and 99th percentile 465
-to 514 over batches with no added load, lower with busy loops on other CPUs (median 83 to
-142, 99th percentile 242 to 324); the largest seen 704, with the runs on one CPU shared with
-4 busy loops. The late ones come at the same instructions run after run (in `recur`, the
-page faults that grow the stack): the interrupt waits for the next exit to the hypervisor.
-
-**After** (no branch before the read, and the period programmed again at every overflow,
-the long one while hopping):
-
-| Condition | Runs | Equal | `pmu-late` | Overflows found stopped |
-|---|---|---|---|---|
-| margin 1024, four programs, no added load | 200 | 200 | 0 | 0 |
-| the same, 16 loops at nice 10 | 200 | 200 | 0 | 0 |
-| the same, runs pinned to one CPU with 4 loops on it | 200 | 200 | 0 | 0 |
-| the same, 24 loops at nice 0, load 20 | 200 | 200 | 0 | 0 |
-| margin 1024, `recur`, no added load | 1,000 | 1,000 | 0 | 0 |
-| the same, 16 loops at nice 10, load 23 | 1,000 | 1,000 | 0 | 0 |
-| the same, pinned to one CPU with 4 loops on it | 400 | 400 | 0 | 0 |
-| margin 512, `recur`, no added load | 1,000 | 983 | 17 | 0 |
-| bursts (N = 2,100), no added load | 200 | 200 | 0 | 8,264 |
-| bursts, 16 loops at nice 10 | 200 | 200 | 0 | 10 |
-
-`bursts` (an overflow every few microseconds) is where throttling happens now; fewer are found
-stopped under load, as each switch of the CPU restarts the counter. At margin 512 the 17
-late runs ended `internal`, stop `pmu-late`, 3 to 152 branches past the stop; the default and
-the scripts' counter margin is 1,024.
-
-arm64 (GitHub `ubuntu-24.04-arm`, Neoverse N2, `perf_event_max_sample_rate` 100,000 falling
-to 40,000 during the job; one job per build, 4 runs at a time, "loaded" is 4 busy loops at
-nice 10): `counters` passes with the change, with no overflow found stopped in `05` and
-`08-load`, bursts included. Late interrupts happen there too, later than on x86_64:
-
-| `recur`, N = 3,000 | Before | After |
-|---|---|---|
-| margin 512 | 118/120 equal, 2 overshoot (178 and 1,374 past the stop) | 118/120 equal, 2 `pmu-late` (127 and 513 past) |
-| margin 1024 | 120/120 equal | 119/120 equal, 1 `pmu-late` (812 past: 1,836 after the overflow) |
-| margin 1024, loaded | 120/120 equal | 120/120 equal |
-| bursts, quiet and loaded | 80/80 equal | 80/80 equal, 0 stopped |
-
-Red/green: with the old entry planted back (3 branches before the read, subtracted as
-before), `05-exact` and `08-load` fail on bursts (the first differing record printed:
-`preempt` at the same instruction with other registers: another pass of the loop, at record
-304 and 625), and
-pass with the change. On arm64 a planted branch before the read changed nothing on the runner:
-no overflow was throttled there. The arm64 cost: with no branch before the read, every
-SIGTRAP makes the read, a hop's breakpoint included (a failing `read()` there); `06-migrate`
-took 149 s against 138 s before on the runner.
-
 ## Costs
 
 | What | Cost |
@@ -1465,7 +1275,6 @@ took 149 s against 138 s before on the runner.
 | `fork`+`execve`+`wait` of a dynamic program | 1.5 ms (native 0.38 ms; mostly the instruction scan) |
 | Instruction scan, x86_64, of a stripped 170 MB text (headless Chromium, `--dump-dom` of a small page: 4 processes map it) | sweeps from the symbols alone 373 ms per mapping, the run 2.04 s; with the `.eh_frame_hdr` function starts too 54 ms, the run 0.77 s (2026-11-19). Verdicts of the two rules on every candidate of 3,405 x86_64 ELF files of this host (`/usr`, the toolchains, the guest set, Chromium; 18,239 candidates): identical; the guest ledger's 90 digests: identical |
 | The same, each read-only file's mapping scanned once per run (verdicts kept for the other processes) | Chromium's run 0.77 s to 0.50 s, its digest and the ledger's identical (2026-11-19) |
-| `--preempt branches` | 9.7 µs per trap, 1.7-2.3 ms per preemption, W1-W9 wall x0.6 to x6.5 (W1 x6.5, W2 x4.4, the rest under x2); arm64 (runner): 1.3 µs per trap, 2.6-3.4 ms per preemption, W1-W9 x0.66 to x2.0 |
 | `--mount DIR:/guest:copy` copy into tmpfs | ~0.3 ms per MB |
 
 ## Known limits
@@ -1477,11 +1286,8 @@ anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
   counter, a timestamp it computes itself) ends `compute-stall` in code without load-time
-  points (JIT code, or all code under `[sched] preempt = "traps"`); `[sched] preempt =
-  "branches"` switches there too, and needs `CAP_PERFMON`, an exposed PMU and an AMD family
-  0x1a (Zen 5) or Arm Neoverse N2 CPU, the ones checked; its seeds reproduce on the same CPU family only; a skid past
-  the margin ends `internal`; a guest reading its own text during a hop or at a spin point
-  sees `int3`. A lost update inside one read-modify-write instruction cannot be found by any
+  points (JIT code, or all code under `[sched] preempt = "traps"`); a guest reading its own
+  text at a spin point sees `int3`. A lost update inside one read-modify-write instruction cannot be found by any
   preemption.
 - `preempt-permille = 0` livelocks Go (it polls the clock forever).
 - Per-user pipe accounting is shared by every sandbox of the uid: 9 parallel guests with 500
@@ -2557,8 +2363,7 @@ from `999be00b`, 2026-11-16, this host, `-j 6`, `--cpus 4`, `--preempt traps`.
 
 - The corpus campaign (5 legs, 17,240 runs) took 3 min 46 s, 753 child CPU-s; the TOCTOU
   campaign (8,000 runs) 1 min 52 s. No run in either ended `unsupported`: stock Go ran
-  stall-free at default settings. `--preempt branches` was not measured: this host gives
-  `patina` no `CAP_PERFMON`.
+  stall-free at default settings.
 - Replay: the first scenario of 001 and of 004 replayed 5 times, each `identical`; `verify
   --runs 5 --vary cpu,load` identical for both.
 - Findings the old engine's coverage-guided arm found first: 009 appears in the uniform deadline legs (94 of 10,344 runs;
@@ -2581,12 +2386,12 @@ arm64", "Instruction sites on arm64", "Compute points ... arm64", "Second hosts 
 Hosts: GitHub `ubuntu-24.04-arm` runners (Neoverse-N2, 4 CPUs, 7.0.0-1017-azure), each check
 run once from a throwaway branch, and the development VM (Apple M4, 4 CPUs, Linux 7.0).
 
-**The quick tier** (`check-arm64`, every script but the branch-counter one, 115): 141, 149
+**The quick tier** (`check-arm64`, 115 scripts): 141, 149
 and 123 s of wall time on three pushes (x86_64 `check` on the same pushes: 94 to 101 s). Every
 script is under half its budget there.
 
 **Areas.** `./check AREA` for every area once on the runner, with every `arch=x86_64` mark
-removed but the branch-counter scripts, `insn/04-cpuid` and `insn/05-rdpid`: all pass but
+removed but `insn/04-cpuid` and `insn/05-rdpid`: all pass but
 three, each fixed or explained:
 
 | Script | On the runner | Now |

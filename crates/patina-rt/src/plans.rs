@@ -597,8 +597,8 @@ fn field<T: Copy>(row: u64, o: usize) -> T {
     unsafe { core::ptr::read_unaligned((row + o as u64) as *const T) }
 }
 
-/// Where the program is when its counter stopped at `pc`: `pc` itself unless that is a
-/// trampoline address (`proto::plan::shown`).
+/// Where the program is when it stopped at `pc`: `pc` itself unless that is a trampoline
+/// address (`proto::plan::shown`).
 pub fn shown(pc: u64) -> u64 {
     if proc().plans.n == 0 {
         return pc;

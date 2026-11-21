@@ -150,9 +150,7 @@ explain: patina explain /tmp/log-limit/patina-out/run-1
 The starting work tree (`--work`) does not count against it; what the program writes to the
 work tree does (the operation log keeps it for crashes).
 
-A full filesystem under `--out` ends the run `internal`, stop `disk-full`. Under `[sched]
-preempt = "branches"`, an overflow interrupt from the branch counter that comes later than `[sched]
-pmu-margin` ends it `internal`, stop `pmu-late` ([Scheduling](#scheduling)). A guest process killed
+A full filesystem under `--out` ends the run `internal`, stop `disk-full`. A guest process killed
 by SIGKILL from outside the run (the host's out-of-memory killer, or a kill sent on the host) ends
 it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. With `--crash`, a run ends by
 checking its operation log: replaying it must give the work tree each incarnation left. A
@@ -2138,7 +2136,7 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `mark` | SDK `mark`: `label`, `text` (when the mark has one; the SDKs send none), `pid` (the process), `len` (the payload's label and text bytes), `hash` (of the payload: one label, one hash), `ret` |
 | `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, `control`, ...), `label`, `pid`, `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never); a `control` has its words in `text`. An assertion's detail is in `result.json`, not here |
 | `signal`, `sigfault` | a signal delivered (`sig`, `code`, `pc`); a synchronous fault forwarded to the program (`sig`, `code`, `addr`, `pc`) |
-| `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`; a `Hello`, a thread's first event and an image's after `execve`, has `pid` and `tid`: every later event of its `slot` is that thread's); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
+| `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`; a `Hello`, a thread's first event and an image's after `execve`, has `pid` and `tid`: every later event of its `slot` is that thread's); a preemption (`why`: `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
 | `node` | with nodes: a node's first process started (`event` `start`, `name`, `pid`), or the run ended while the node still had processes (`stop`, `name`, `live`) |
 | `net` | with nodes: a control call's `cut` or `heal` (`event`, `from` and `to` as node names, `both`, `ret`; a `heal` with both empty heals every cut), or a held direction a heal released (`release`, `conn`, `dir`, `until`: when its last held item arrives) |
 
@@ -2352,8 +2350,8 @@ yielded at spin points: those come of single steps and breakpoints the runtime t
 that ran 20 ms of CPU time without a system call) stops gdb (`patina: a spin probe ...`);
 continuing drops it, which changes nothing unless the program was spinning.
 
-A run with load-time points (the default) or branch counters takes `SIGTRAP` for its
-scheduling points too. There reading, plain breakpoints, watchpoints (x86_64 only), `finish`
+A run with load-time points (the default) takes `SIGTRAP` for its scheduling points too.
+There reading, plain breakpoints, watchpoints (x86_64 only), `finish`
 and continuing are as exact as in any run, but gdb refuses stepping (`step`, `next`, `stepi`
 and the like are errors, and the run is unchanged): set a breakpoint and continue instead. A
 breakpoint gdb would go on from by itself (with a condition, an ignore count or a thread, or a
@@ -2447,26 +2445,11 @@ long computation: a calibration loop that times itself against the clock sees al
 pass while it computes (code without points moves the clock by a fixed charge per system call,
 not with computation), so it keeps raising its work.
 
-`[sched] preempt` in a `patina.toml` changes where threads switch:
-
-| `preempt` | Threads switch at |
-|---|---|
-| `"points"` (default) | system calls, spin hints, load-time points and walks past them |
-| `"traps"` | system calls, spin hints and spin probes only: to tell whether a finding needs a switch inside computation, or on a host where rewriting cannot work (each such run's rerun line names its `run.json`) |
-| `"branches"` | system calls, spin hints, and after a seed-chosen number of branches, in every file (branch counters) |
-
-`"branches"` needs an AMD Zen 5 or Arm Neoverse N2 CPU with its PMU exposed (not in most
-virtual machines; GitHub's `ubuntu-24.04-arm` runners expose theirs) and `CAP_PERFMON` (`sudo
-setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce only on that CPU family.
-`patina doctor` says which of the three is missing. Its stops are exact: a run stops at the
-branch counting every branch by hand would, with the same registers, or it fails closed. The
-counter's overflow interrupt is aimed 1024 branches (`[sched] pmu-margin`) ahead of the stop
-and the rest is counted by hand; on a virtual machine the interrupt can come later than that
-(up to about 700 branches after the overflow on the x86_64 one measured, 1,900 on GitHub's
-arm64 runners), and the run then ends `internal`, stop `pmu-late`, rather than stop past its
-branch: raise `pmu-margin` (each stop then counts more branches by hand). The kernel's
-throttling of a counter that interrupts too often, which a loaded virtual machine makes more
-likely, does not change where a run stops.
+`[sched] preempt` in a `patina.toml` is a diagnostic: `"traps"` turns load-time points off,
+so threads switch only at system calls, spin hints and spin probes, as they do in code without
+points. It tells whether a finding needs a switch inside computation, and serves on a host where
+rewriting cannot work (each such run's rerun line names its `run.json`). `"points"` is the
+default.
 
 ## Deeper search: rebuilt code
 
@@ -2714,8 +2697,6 @@ seed, with no budget; a long program at a small gap named that way can reach `[r
   reach.
 - One thread runs at a time, so weak-memory behaviours (a store another CPU sees late) never
   happen, and a `lock`-prefixed read-modify-write is never split.
-- With `[sched] preempt = "branches"` the hooks do nothing (Python's is not registered);
-  branch counters switch instead.
 
 ## Load-time points
 
@@ -2775,7 +2756,7 @@ copied code, and switches before an x86_64 `pushf` or an arm64 exclusive load. `
 `rewrite` counts the switches taken after a walk (`walks`, `walk_steps`, `walks_cut`, and
 `walk_max`, the seed's W). A walk costs about one single-step
 per switch, whatever W is. On arm64 walks write breakpoints through `/proc/self/mem`; a host
-that refuses that ends the run `internal` (`[sched] preempt = "traps"` or `"branches"` there).
+that refuses that ends the run `internal` (`[sched] preempt = "traps"` there).
 
 The lost update of `tests/guests/rewrite/races.c lms` (a load and a store through a pointer, in
 a loop) is found on about half the seeds with walks and on none without. One further from a
@@ -2801,7 +2782,6 @@ small gap within about 3 times its run without points (docs/EVIDENCE.md).
 | Spin probes | in a loop found spinning after 20 ms of CPU in code without points | spin-waits in JIT or dark code hand over instead of stalling | always |
 | Rebuilt code (compute points) | at every edge, load and store (Go: comparison) | every window in the rebuilt code, between any two accesses | code you rebuild |
 | Python under `python3 -m patina` | between any two lines | races between Python lines | Python programs |
-| Branch counters (`[sched] preempt = "branches"`) | after a seed-chosen number of branches | every branch, in every file, JIT output included | an AMD Zen 5 or Arm Neoverse N2 PMU with `CAP_PERFMON`; seeds repeat only on that CPU family |
 
 **The plans.** The first run of a program pays for rewriting it and its libraries once. A plan is made on the host from a file's bytes and the Patina build alone, so
 it is the same on every host; each is checked by an independent verifier before it is used,
@@ -2875,7 +2855,6 @@ per requirement, and prints the fix for anything missing:
 | `signal context` | | FP/SIMD, SVE up to 512 bits, FPMR and POE records; a run that uses SME's streaming mode or ZA stops `signal-context` |
 | `pointer authentication` | | its keys are disabled for programs under Patina |
 | `spin probes` (not required) | code writes through `/proc/self/mem`; soft-dirty bits | code writes through `/proc/self/mem`; userfaultfd write protection |
-| `branch counters` (optional) | AMD Zen 5 with its PMU exposed, and `CAP_PERFMON` | Arm Neoverse N2 with its PMU exposed, and `CAP_PERFMON` |
 
 Patina makes its own sandbox (ARCHITECTURE.md, "The sandbox"), so it needs no other program,
 only a kernel that lets an ordinary user make a user namespace:
@@ -2916,10 +2895,6 @@ What differs on arm64:
 
 - The spin hints that are scheduling points are `yield`, `isb`, `wfe` and `wfi` (x86_64:
   `pause`); `RNDR` and `RNDRRS` answer from the seed (x86_64: `rdrand`, `rdseed`).
-- `[sched] preempt = "branches"` works on the Arm Neoverse N2 only, and counts every branch, not only
-  conditional ones (the same N stops sooner in the program than on x86_64). An image's first
-  trap (a system call, usually) comes before its first preemption. With it, the exclusive load/store
-  instructions are emulated (`patched_sites.exclusive` in `result.json`).
 - Rust compute points build with `--target aarch64-unknown-linux-gnu`.
 - Load-time points save two registers 32 to 16 bytes below the stack pointer at each count
   (arm64 has no flags-free memory decrement); a program that keeps data there, which a signal
@@ -2968,7 +2943,6 @@ The install ends with `patina doctor`; on that runner it prints (in part):
 ```text
 ok    user namespaces                    patina makes the sandbox (user, pid, net, mount, IPC, UTS namespaces; tmpfs)
 ok    sandbox run                        a run of /usr/bin/true is ok (12 ms)
-off   branch counters (pmu, optional)    not supported on this CPU, GenuineIntel family 0x6 model 0xad (supported: AMD family 0x1a (Zen 5) and Arm Neoverse N2)
 info  cpu_model                          Intel(R) Xeon(R) 6975P-C
 info  kernel                             7.0.0-1014-aws
 this host can run patina
@@ -2987,7 +2961,6 @@ ok    one CPU model                      cpus 0-3: MIDR 0x410fd490
 ok    signal context                     records: FP/SIMD, SVE
 ok    sandbox run                        a run of /usr/bin/true is ok (16 ms)
 ok    spin probes                        code writes through /proc/self/mem; userfaultfd write protection tracks written pages
-off   branch counters (pmu, optional)    supported, but needs CAP_PERFMON: perf_event_open: Permission denied (os error 13)
 info  kernel                             7.0.0-1017-azure
 this host can run patina
 ```

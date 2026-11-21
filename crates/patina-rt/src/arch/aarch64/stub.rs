@@ -1,33 +1,10 @@
 //! The runtime's one `svc` instruction (`raw.rs` has the containment argument). `ret` returns
-//! through `x30`, not the stack; the check after the call reads only `sp`. The counter overflow
-//! entry sits right before it and falls through into it (`crate::pmu`).
+//! through `x30`, not the stack; the check after the call reads only `sp`.
 
 use core::arch::{asm, global_asm};
 use proto::layout::{RT_REGION_SHIFT, RT_REGION_TAG};
 
 global_asm!(
-    // The counter overflow entry (`crate::pmu`, registered for SIGTRAP with counter preemption
-    // on; x0 = signal, x1 = siginfo, x2 = ucontext, x30 = the restorer, on the alternate stack).
-    // It reads the counter into `ra` with no branch before the read: it falls through into the
-    // `svc` below with x30 set to `2:`, so the guest's count does not depend on whether the
-    // counter ran before the read. Any other SIGTRAP reads descriptor -1 (it fails at once)
-    // and goes on to the plain path.
-    ".globl patina_sigtrap",
-    "patina_sigtrap:",
-    "  stp x29, x30, [sp, #-32]!",
-    "  stp x1, x2, [sp, #16]",
-    "  ldr w9, [x1, #8]", // si_code
-    "  mov x10, sp",
-    "  and x10, x10, #{altmask}",
-    "  ldr x0, [x10, #{off_fd}]",
-    "  mov x11, #-1",
-    "  cmp w9, #6", // TRAP_PERF
-    "  csel x0, x0, x11, eq",
-    "  add x1, x10, #{off_ra}",
-    "  str x11, [x1]",
-    "  mov x2, #8",
-    "  mov x8, #{read}",
-    "  adr x30, 2f",
     ".globl patina_syscall",
     "patina_syscall:",
     "  svc #0",
@@ -39,28 +16,8 @@ global_asm!(
     ".globl patina_syscall_escape",
     "patina_syscall_escape:",
     "  udf #0",
-    "2:",
-    "  ldp x0, x1, [sp, #16]",
-    "  ldr w9, [x0, #8]",
-    "  cmp w9, #6",
-    "  b.ne 8f",
-    "  bl {alarm}",
-    "  ldp x29, x30, [sp], #32",
-    "  ret",
-    "8:",
-    "  mov x2, x1",
-    "  mov x1, x0",
-    "  mov w0, #5", // SIGTRAP
-    "  ldp x29, x30, [sp], #32",
-    "  b {plain}",
     shift = const RT_REGION_SHIFT,
     tag = const RT_REGION_TAG,
-    altmask = const !(proto::layout::ALT_SIZE - 1),
-    off_fd = const crate::pmu::OFF_FD,
-    off_ra = const crate::pmu::OFF_RA,
-    read = const crate::raw::nr::READ,
-    alarm = sym crate::pmu::alarm,
-    plain = sym crate::pmu::trap_plain,
 );
 
 extern "C" {

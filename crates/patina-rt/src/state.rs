@@ -129,8 +129,6 @@ pub struct ThreadState {
     pub vf_sigact: [[u64; 4]; 65],
     /// A vfork child's own hard `RLIMIT_NOFILE` (`fdlim`; copied at the clone).
     pub vf_nofile_hard: u64,
-    /// Counter preemption (`pmu.rs`).
-    pub pmu: crate::pmu::Pmu,
     /// Spin probes and the spin point (`spin.rs`).
     pub spin: crate::spin::Spin,
     /// Compute points (`compute.rs`): events charged to this thread, segments it started.
@@ -166,7 +164,6 @@ impl ThreadState {
             vfork: 0,
             vf_sigact: [[0; 4]; 65],
             vf_nofile_hard: 0,
-            pmu: crate::pmu::Pmu::new(),
             spin: crate::spin::Spin::new(),
             compute_events: 0,
             compute_segs: 0,
@@ -175,7 +172,7 @@ impl ThreadState {
         }
     }
     /// This thread's CPU time, the thread and process CPU clocks: its traps at the trap charge
-    /// and its compute events at the event charge (counters on: events are not counted).
+    /// and its compute events at the event charge.
     pub fn cpu_ns(&self) -> u64 {
         let cfg = config();
         (self.traps * cfg.trap_charge_ns)

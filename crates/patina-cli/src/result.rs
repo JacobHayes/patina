@@ -45,9 +45,6 @@ pub struct RunEnd {
     /// The most bytes the shadow store held (`proto::oplog::Shadows`; the largest over
     /// incarnations): what the operation log holds of the work files mapped shared.
     pub shadow_bytes: u64,
-    /// With branch counters, the counters in `proto::ctl::PMU_NAMES` order (summed;
-    /// `max_skid` is a maximum).
-    pub pmu: Option<[u64; proto::ctl::PMU_FIELDS]>,
     /// The SDK's site table, folded over incarnations.
     pub sdk: SdkReport,
     /// Pause points and spin probes.
@@ -380,11 +377,11 @@ fn kind_names(kinds: u64) -> Vec<&'static str> {
 impl ComputeCounts {
     /// `result.json`'s `compute`: only when an image said hello or events were counted, so a
     /// run of stock programs has the same `result.json` as before compute points existed.
-    fn json(&self, counters: bool) -> Option<Value> {
+    fn json(&self) -> Option<Value> {
         if self.hellos == 0 && self.events == 0 {
             return None;
         }
-        let mut v = json!({
+        Some(json!({
             "images": self.images.images.iter().map(ComputeImage::json).collect::<Vec<_>>(),
             "images_dropped": self.images.dropped,
             "events": self.events,
@@ -392,11 +389,7 @@ impl ComputeCounts {
             "deadline_stops": self.deadline_stops,
             "gap": self.gap,
             "charge_ns": proto::compute::CHARGE_NS,
-        });
-        if counters {
-            v["mode"] = json!("counters");
-        }
-        Some(v)
+        }))
     }
 }
 
@@ -533,11 +526,7 @@ impl InsnCounts {
         let (patched, counted) = (["rdrand", "rdseed"], "rdpid_sites");
         #[cfg(target_arch = "aarch64")]
         let (patched, counted) = (["rndr", "rndrrs"], "pacga_sites");
-        let mut sites = json!({ patched[0]: self.patched[1], patched[1]: self.patched[2], "pause": self.patched[4] });
-        // arm64 with counter preemption: the exclusive instructions (`proto::insn`).
-        if self.patched[5] != 0 {
-            sites["exclusive"] = json!(self.patched[5]);
-        }
+        let sites = json!({ patched[0]: self.patched[1], patched[1]: self.patched[2], "pause": self.patched[4] });
         json!({
             "patched_sites": sites,
             "emulated": em,
@@ -567,23 +556,13 @@ fn named<const N: usize>(names: &[&str; N], v: &[u64; N]) -> Value {
 /// override the run's own).
 pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     let v = &e.verdict;
-    let preemptions = e.sched.get("spin_yields")
-        + e.compute.switches
-        + e.pmu.map_or(0, |p| {
-            p[proto::ctl::PMU_NAMES
-                .iter()
-                .position(|n| *n == "preempts")
-                .unwrap()]
-        });
+    let preemptions = e.sched.get("spin_yields") + e.compute.switches;
     let mut counters = json!({
         "io": named(&["parks", "reattempts", "spurious", "blocking_done", "blocking_parked"], &e.io),
         "net": named(&NET_NAMES, &e.net),
         "insn": e.insn.json(),
     });
     counters["sched"] = named(&proto::ctl::SCHED_NAMES, &e.sched.stats);
-    if let Some(p) = &e.pmu {
-        counters["pmu"] = named(&proto::ctl::PMU_NAMES, p);
-    }
     let mut r = json!({
         "schema": RESULT_SCHEMA,
         "outcome": c.outcome.name(),
@@ -612,7 +591,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "sched": {
             "traps": e.traps,
             "switches": e.switches,
-            "mode": if e.pmu.is_some() { "branches" } else if e.rewrite.is_some() { "points" } else { "traps" },
+            "mode": if e.rewrite.is_some() { "points" } else { "traps" },
             "pause_sites": e.sched.pause_sites,
             "pause_points": e.sched.get("pause_points"),
             "preemptions": preemptions,
@@ -627,7 +606,7 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         None => {}
     }
     r["exit"] = run_exit(c.outcome, &r).into();
-    if let Some(cp) = e.compute.json(e.pmu.is_some()) {
+    if let Some(cp) = e.compute.json() {
         r["compute"] = cp;
     }
     if let Some(w) = &e.rewrite {
@@ -1064,10 +1043,6 @@ pub fn compute_line(c: &Value) -> Option<String> {
             plural(n("images_dropped"), "more start"),
             proto::ctl::IMAGES_MAX
         ));
-    }
-    if c["mode"] == "counters" {
-        s.push_str("; idle: branch counters schedule this run");
-        return Some(s);
     }
     s.push_str(&format!("; {} events", big(n("events"))));
     match n("gap") {

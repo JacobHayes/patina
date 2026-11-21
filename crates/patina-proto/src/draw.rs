@@ -12,8 +12,6 @@ pub enum Stream {
     Crash = 6,
     Torn = 7,
     NetDelay = 8,
-    /// Counter preemption: the slice length of each segment.
-    Slice = 9,
     /// SDK fault points, knobs and delays (`sdk::point_draw`).
     Sdk = 10,
     /// The run's fault plan: each setting given as a range is resolved by its own draw,
@@ -48,6 +46,20 @@ pub const fn mix64(mut z: u64) -> u64 {
 pub const fn draw(seed: u64, stream: Stream, seq: u64) -> u64 {
     let s = mix64((stream as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5851_f42d_4c95_7f2d);
     mix64(mix64(seed ^ s).wrapping_add(seq.wrapping_mul(0xd6e8_feb8_6659_fd93)) ^ s)
+}
+
+/// Piecewise log-uniform in [lo, hi] from the draw `d`: an octave uniformly, then uniform
+/// within it.
+pub fn log_uniform(d: u64, lo: u64, hi: u64) -> u64 {
+    let hi = hi.max(lo);
+    let mut octaves = 0u64;
+    while octaves < 63 && (lo << (octaves + 1)) <= hi {
+        octaves += 1;
+    }
+    let o = d % (octaves + 1);
+    let base = lo << o;
+    let n = base + (d >> 8) % base;
+    n.min(hi)
 }
 
 /// Fill `buf` with bytes derived from one draw: word `i` is `mix64(draw + i * golden)`.

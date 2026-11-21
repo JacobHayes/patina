@@ -1,6 +1,6 @@
 # Evidence (docs/EVIDENCE.md, compute points): the syscall-free races `races b`, `pool`,
 # `rs-race` (Rust atomics) and `go-race` (Go atomics), seeds 1-200, in three columns: the stock
-# build (tests/guests/counters; rs-race-stock, go-race-stock), the build with compute points at the default
+# build (races-stock, pool-stock, rs-race-stock, go-race-stock), the build with compute points at the default
 # compute-gap, and at compute-gap=8. Each column: failing seeds,
 # and whether the first one replays identical. The prototype found 14 and 165 of 200 with a
 # switch at 1 event in 10.
@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 P, GU, OUT = os.environ["PATINA"], os.environ["PATINA_GUESTS"], os.environ["OUT"]
 N = int(os.environ.get("RACE_SEEDS", "200"))
 # (name, stock build, rebuilt build, arguments) under /guest
-PROGS = [("races b", "counters/races", "compute/races", ["b"]), ("pool", "counters/pool", "compute/pool", []),
+PROGS = [("races b", "compute/races-stock", "compute/races", ["b"]), ("pool", "compute/pool-stock", "compute/pool", []),
          ("rs-race", "compute/rs-race-stock", "compute/rs-race", []),
          ("go-race", "compute/go-race-stock", "compute/go-race", [])]
 COLS = [("stock", []), ("default", []), ("gap 8", ["--fault", "compute-gap=8"])]

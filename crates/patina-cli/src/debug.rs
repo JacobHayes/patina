@@ -36,7 +36,7 @@ struct Session {
     gdb: Option<PathBuf>,
     /// Why there is no gdb to start (`--no-gdb`, none found, the host forbids attaching).
     no_gdb: String,
-    /// load-time points or branch counters: the runtime's own breakpoints and single steps share
+    /// load-time points: the runtime's own breakpoints and single steps share
     /// `SIGTRAP` with the debugger's, so gdb passes every `SIGTRAP` on and stepping is refused.
     sigtrap_pass: bool,
 }
@@ -95,7 +95,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         ),
         (_, None, Some(g)) => (Some(g), String::new()),
     };
-    let sigtrap_pass = cfg.preempt != crate::config::Preempt::Traps;
+    let sigtrap_pass = cfg.preempt.points();
     let _ = SESSION.set(Session {
         event,
         gdb,

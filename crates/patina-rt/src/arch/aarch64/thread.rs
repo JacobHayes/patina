@@ -32,16 +32,17 @@ core::arch::global_asm!(
     "  bl {start}",
     "  udf #0",
     // patina_sigreturn_to(uc): rt_sigreturn with the frame whose ucontext is at `uc` (the
-    // kernel reads the frame at `sp`, the siginfo before the ucontext), after the counter
-    // read that starts a measured segment (`pmu`'s `patina_sigreturn_read`).
+    // kernel reads the frame at `sp`, the siginfo before the ucontext).
     ".globl patina_sigreturn_to",
     "patina_sigreturn_to:",
     "  sub x0, x0, #{siginfo}",
     "  mov sp, x0",
-    "  b patina_sigreturn_read",
+    "  mov x8, #{rt_sigreturn}",
+    "  b patina_syscall",
     start = sym crate::sys::thread::thread_start,
     clone = const crate::raw::nr::CLONE,
     siginfo = const SIGINFO_SIZE,
+    rt_sigreturn = const crate::raw::nr::RT_SIGRETURN,
 );
 
 extern "C" {

@@ -1,5 +1,4 @@
 sdk/c
-tests/guests/counters
 tests/guests/threads
 tests/guests/costs
 crates/patina

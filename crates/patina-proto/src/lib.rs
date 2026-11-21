@@ -18,7 +18,6 @@ pub mod node;
 pub mod nr;
 pub mod oplog;
 pub mod plan;
-pub mod pmu;
 pub mod rec;
 pub mod sdk;
 pub mod sigrec;

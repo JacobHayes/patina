@@ -306,7 +306,7 @@ def main():
             free[0] += need
             lock.notify_all()
             results.append((s, ok, dt, why))
-            # A pass that skipped its work (no PMU, no sudo) says so, so a log tells it from a run.
+            # A pass that skipped its work (no sudo, another kind of host) says so, so a log tells it from a run.
             skip = ""
             if ok:
                 with open(log, errors="replace") as fh:
