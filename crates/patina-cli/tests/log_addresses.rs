@@ -14,14 +14,18 @@ use proto::rec::{Rec, REC_SIZE};
 use proto::RecKind;
 use std::process::Command;
 
-/// One run of `sh -c SCRIPT sh ARGS..` with `opts`, under a fresh seed (the property holds for
-/// every seed); its seed and records, after checking that none holds a runtime address.
-fn run(name: &str, opts: &[&str], script: &str, args: &[&str]) -> (u64, Vec<Rec>) {
-    let seed = std::time::SystemTime::now()
+/// A fresh seed for each test run: the property holds for every seed.
+fn fresh_seed() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .subsec_nanos() as u64
-        ^ std::process::id() as u64;
+        ^ std::process::id() as u64
+}
+
+/// One run of `sh -c SCRIPT sh ARGS..` with `opts` under `seed`; its records, after checking
+/// that none holds a runtime address.
+fn run(name: &str, seed: u64, opts: &[&str], script: &str, args: &[&str]) -> Vec<Rec> {
     let out = std::env::temp_dir().join(format!("patina-log-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);
     let st = Command::new(env!("CARGO_BIN_EXE_patina"))
@@ -67,13 +71,15 @@ fn run(name: &str, opts: &[&str], script: &str, args: &[&str]) -> (u64, Vec<Rec>
         );
     }
     let _ = std::fs::remove_dir_all(&out);
-    (seed, recs)
+    recs
 }
 
 #[test]
 fn no_record_holds_a_runtime_address() {
-    let (seed, recs) = run(
+    let seed = fresh_seed();
+    let recs = run(
         "exec",
+        seed,
         &[],
         "set -e; test -L /bin; for i in 1 2 3; do /bin/true; done; \
          /bin/cat /bin/true >/dev/null; /bin/sh -c 'exec /bin/true'; /bin/python3 -c \"$1\"; \
@@ -113,23 +119,27 @@ fn no_record_holds_a_runtime_address() {
     );
 
     // Half the file calls on /work fail: set up with retries, then ten mkdirs through the link.
-    let (seed, recs) = run(
-        "faults",
-        &["--fault", "fs-error-permille=500"],
-        "until mkdir -p /work/d 2>/dev/null; do :; done; \
-         until ln -sfn /work/d /work/l 2>/dev/null; do :; done; test -L /work/l || exit 1; \
-         for i in 1 2 3 4 5 6 7 8 9 10; do mkdir /work/l/m$i 2>/dev/null || true; done",
-        &[],
-    );
-    let injected = recs
-        .iter()
-        .filter(|r| {
+    // A seed's draws can spare every mkdir: seeds from a fresh one on are run (each checked for
+    // runtime addresses) until one injects a fault into mkdir.
+    let first = fresh_seed();
+    let injected = (first..first + 20).find(|&seed| {
+        let recs = run(
+            "faults",
+            seed,
+            &["--fault", "fs-error-permille=500"],
+            "until mkdir -p /work/d 2>/dev/null; do :; done; \
+             until ln -sfn /work/d /work/l 2>/dev/null; do :; done; test -L /work/l || exit 1; \
+             for i in 1 2 3 4 5 6 7 8 9 10; do mkdir /work/l/m$i 2>/dev/null || true; done",
+            &[],
+        );
+        recs.iter().any(|r| {
             // `mkdir` makes `mkdirat` where the architecture has no `mkdir` (arm64).
             r.kind == RecKind::Injected as u8 && [nr::MKDIR, nr::MKDIRAT].contains(&u64::from(r.nr))
         })
-        .count();
+    });
     assert!(
-        injected > 0,
-        "faults seed {seed}: no fault injected into mkdir"
+        injected.is_some(),
+        "faults seeds {first}..{}: no fault injected into mkdir",
+        first + 20
     );
 }
