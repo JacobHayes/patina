@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, "Two crashes: pairs of crash points"): `patina sweep
+# Evidence (Two crashes: pairs of crash points): `patina sweep
 # --crash-points=400 --faults crash` with crash-pairs 3 on q3.py (three replicas, 2 s of virtual
 # time), seeds 1..2, each variant once at -j 6 with --keep fail: the correct store, `nosync` (a
 # node answers before it syncs) and `early` (the primary answers before a backup has the

@@ -8,20 +8,19 @@ check and land, and the rules that hold everywhere.
 
 | Document | For |
 |---|---|
-| [README.md](README.md) | users: install, first run, outcomes |
-| [docs/GUIDE.md](docs/GUIDE.md) | users: every workflow, with real output |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | how it works, each part pointing at its module; limits |
-| [docs/EVIDENCE.md](docs/EVIDENCE.md) | measured results: claim, command, date, host, result |
+| [README.md](README.md) | users: what it is, install, first run, then `patina guide` |
+| [docs/guide/](docs/guide/core.md) | users: the guide `patina guide [TOPIC]` prints, embedded in the binary |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | maintainers: how it works, each part pointing at its module; limits |
 | [examples/README.md](examples/README.md) | one small program per kind of bug |
 
 Flags and commands: `patina --help --format json` is the source of truth (`cli.rs`, which
 the parser reads too). Docs describe the present; history is in git. A change to behaviour
 updates the docs in the same commit.
 
-The agent skill, `skills/patina/` (SKILL.md and its reference files), tells coding agents how to
-use Patina; a change to user-facing behaviour updates it in the same commit. `./check docs` runs
-its commands and checks every name in it, and every `patina` command line in the user docs
-(not EVIDENCE.md, a record of past runs), against `patina --help --format json`.
+User guidance is `docs/guide/*.md`, embedded at build and printed by `patina guide`; `./check docs`
+runs its commands and checks every name in it against `patina --help --format json`.
+The skill, `skills/patina/SKILL.md` (written by `patina skill`), only points agents to `patina
+guide`: it names no option or key, so it should almost never change.
 
 ## Layout
 
@@ -38,7 +37,7 @@ its commands and checks every name in it, and every `patina` command line in the
 - SDKs: `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`.
 - `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run. A script marked
   `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`): x86-only
-  instructions, a seed found on x86_64, and evidence scripts not yet run on arm64; each says why in its header or in docs/EVIDENCE.md.
+  instructions, a seed found on x86_64, and evidence scripts not yet run on arm64; each says why in its header.
 - `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the release tier.
 
 Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), unprivileged user namespaces
@@ -76,7 +75,7 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   An expected failure is written out (`if ! cmd`, `cmd || [ $? = 1 ]`, `st=0; cmd || st=$?`);
   `tests/lint.py` rejects what strict mode cannot see: `|| true` on a pipe or a captured value,
   a negated pipe, `$(...)` that `[ ]` passes on failure, `rm -r "$VAR"` without `:?`, plain `sh`.
-- **Doc transcripts are checked.** A fenced block in README.md, docs/GUIDE.md or
+- **Doc transcripts are checked.** A fenced block in README.md, docs/guide/*.md or
   examples/README.md that shows what a command prints carries `<!-- transcript NAME ... -->`
   (or `<!-- no-run NAME: REASON -->`) and runs in the quick tier (a sweep of many runs is
   `release-only`): exactly on the kind of host its numbers were written on, with numbers as N
@@ -84,8 +83,9 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   passes `./check docs` (`./check release` for a release-only block; `scripts/land` runs those
   too for a change to code, guests or docs).
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
-  `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
-  date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.
+  `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its numbers go
+  in the commit message or the report that asked for them, not a document. A claim in the user
+  docs is an executed transcript, or it is not made. Nothing in quick, an area or CI calls it.
 - **Budgets are fixed by cutting.** Over budget, shrink a script or move it to `area`. Never
   raise a budget, add a shard or add a retry. No script re-runs another area's scripts.
   A script killed over its budget leaves `hang.txt` in its kept run directory (`tests/hang.py`:

@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, scheduling points): stock Go's spin-wait stalls at the default CPU
+# Evidence (scheduling points): stock Go's spin-wait stalls at the default CPU
 # count, with and without spin probes (pause points on throughout). W4 (go-static all) and the
 # reproducer go-sweep over seeds 1-RUNTIMES_STALL_SEEDS (100), each with spin probes on and off;
 # go-sweep also at cpus 24 with probes on and off. stall-ms = 3000. With probes on every run

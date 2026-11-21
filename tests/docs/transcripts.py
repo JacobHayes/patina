@@ -6,8 +6,8 @@ This is a wording check by design, of our own docs against our own tool: the one
 exception to "never assert wording". A transcript that shows what a command prints must show what
 it prints now; two releases existed only to correct ones that did not.
 
-Docs: README.md, docs/GUIDE.md, examples/README.md, ARCHITECTURE.md, and the agent skill's files
-(skills/*/*.md). A transcript is a fenced block with an HTML comment right before it (invisible
+Docs: README.md, examples/README.md, ARCHITECTURE.md, and the guide's pages (docs/guide/*.md),
+which `patina guide` prints. A transcript is a fenced block with an HTML comment right before it (invisible
 when rendered):
 
     <!-- transcript NAME
@@ -46,7 +46,7 @@ status checked and no output compared. Keys:
 
 The docs' numbers (seeds, counts, digests, sequence numbers) are one kind of host's: they depend
 on the architecture, the CPU, the kernel and the host's libraries and interpreters that a program
-loads, as docs/GUIDE.md "Hosts" says. The checker prints the kind of this host, a hash of those;
+loads. The checker prints the kind of this host, a hash of those;
 where it is REFERENCE below, every line is compared exactly. Elsewhere (another architecture, the
 hosted CI runners, whose CPUs vary from run to run) every number is N in both sides first, so the
 lines, labels, flags, outcome names, rerun lines and exit statuses must still match, and the
@@ -56,8 +56,8 @@ its hash in REFERENCE.
 `<!-- no-run NAME: REASON -->` before a block says it cannot run here (a second host, a VM,
 root, the network); every run lists those blocks. A `text` fence holding a `$ patina` or
 `$ ./check` line, or a `sh` fence directly followed by a `text` fence, that has neither comment
-is an error; in the skill's files, so is any unmarked `sh` fence or `text` fence with a `$ `
-line: every command the skill shows an agent runs here.
+is an error; in the guide's pages, so is any unmarked `sh` fence or `text` fence with a `$ `
+line: every command the guide shows runs here.
 
 Compared line by line, exactly, after these, applied to both sides:
   `...` alone on a line   any lines (none included)
@@ -84,8 +84,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-DOCS = ["README.md", "docs/GUIDE.md", "examples/README.md", "ARCHITECTURE.md"]
-SKILLS = "skills"
+DOCS = ["README.md", "examples/README.md", "ARCHITECTURE.md"]
+GUIDE = "docs/guide"
 FENCE = re.compile(r"^```(\w*)\s*$")
 COMMENT = re.compile(r"^<!--\s*(transcript|no-run)\s+([A-Za-z0-9_.-]+)(:?)(.*)$")
 HOST = [
@@ -183,7 +183,7 @@ def parse(path):
     fs = fences(lines)
     blocks, errors, names = [], [], set()
     used = set()
-    strict = path.startswith(SKILLS + "/")
+    strict = path.startswith(GUIDE + "/")
     for k, (start, info, body, end) in enumerate(fs):
         if start in used:
             continue
@@ -474,9 +474,8 @@ def main():
     if not patina or not guests:
         sys.exit("transcripts.py: PATINA and PATINA_GUESTS are not set: run it through ./check docs")
     blocks, errors = [], []
-    skills = sorted(os.path.relpath(os.path.join(dp, f), REPO)
-                    for dp, _, fs in os.walk(os.path.join(REPO, SKILLS)) for f in fs if f.endswith(".md"))
-    for path in DOCS + skills:
+    guide = sorted(os.path.join(GUIDE, f) for f in os.listdir(os.path.join(REPO, GUIDE)) if f.endswith(".md"))
+    for path in DOCS + guide:
         bs, es = parse(path)
         blocks += bs
         errors += es

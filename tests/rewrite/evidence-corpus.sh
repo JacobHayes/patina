@@ -1,4 +1,4 @@
-# Evidence for the rewriter (docs/EVIDENCE.md, "Load-time rewriting"): larger stock programs and
+# Evidence for the rewriter (Load-time rewriting): larger stock programs and
 # their shared libraries rewritten, every plan verified and checked against objdump's decode, then
 # each program's original run once and its rewritten copy RUNS_EACH times (default 50) on one
 # workload, every output equal to the original's. A row per program: sites found and covered,

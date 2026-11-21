@@ -316,6 +316,13 @@ pub const KEYS: &[Key] = &[
         Val::At,
         "fail exactly the N-th memory request",
     ),
+    // Read by `config` (the run's `fs_model`), never by the plan.
+    key(
+        "fs-model",
+        "ext4-ordered|posix-strict",
+        Val::Word,
+        "what a machine crash keeps of what was not synced: as ext4 with its defaults, or only what POSIX promises [default: ext4-ordered]",
+    ),
 ];
 
 /// The fault classes (`--faults CLASS`): each turns on its keys, every value a range the seed

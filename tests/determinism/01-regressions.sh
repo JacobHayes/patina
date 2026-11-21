@@ -1,4 +1,4 @@
-# Regression tests for the differences determinism hardening found and fixed (docs/EVIDENCE.md, "Differences").
+# Regression tests for the differences determinism hardening found and fixed.
 # Each runs the attack guest that first showed the difference under the variant that exposed it.
 #@ tier=quick budget=60 slots=4
 . "$(dirname "$0")/lib/common.inc"

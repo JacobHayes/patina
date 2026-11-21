@@ -12,6 +12,7 @@ mod durability;
 mod events;
 mod explain;
 mod faults;
+mod guide;
 mod host;
 mod inputs;
 mod insn;
@@ -133,6 +134,8 @@ fn main() -> ExitCode {
         Cmd::Report => report::main(&a).map_err(error),
         Cmd::Minimize => minimize::main(&a),
         Cmd::Ctl => Ok(ctl::main(&a.positional)),
+        Cmd::Guide => guide::main(&a).map_err(error),
+        Cmd::Skill => guide::skill(&a).map_err(error),
     };
     r.unwrap_or_else(|Fail(o, e)| {
         // A full filesystem (ENOSPC, EDQUOT) is named, as the supervisor names it in a run.

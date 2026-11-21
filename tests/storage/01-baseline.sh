@@ -1,4 +1,4 @@
-# 1. W9 clean baseline (reduced: 40 seeds per build; the 200-seed sweeps are in docs/EVIDENCE.md).
+# 1. W9 clean baseline (reduced: 40 seeds per build).
 # No faults, no crash: every seed ok, debug and release. With --faults kill --fault crash-permille=3 the only
 # failures allowed are F1 (open-after-crash).
 #@ tier=area budget=90 slots=4

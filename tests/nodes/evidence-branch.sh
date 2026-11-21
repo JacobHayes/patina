@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, "Every crash point of every node"): `patina sweep --crash-points --crash
+# Evidence (Every crash point of every node): `patina sweep --crash-points --crash
 # machine` on runs with nodes, each sweep once at -j 6 with --keep fail:
 # - ack2.py (two nodes; `early`: b answers before its fsync), seeds 1..8, 5 puts;
 # - q3.py (three replicas; `nosync`: a node answers before it syncs; `early`: the primary

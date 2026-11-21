@@ -2,7 +2,7 @@
 //! directory and nothing else: the boundary log's records (calls, SDK calls, injected faults,
 //! crashes, signals, scheduling) merged with the operation log's file operations, each named by
 //! its path at that moment. The stable export a checker reads; its fields are documented in
-//! docs/GUIDE.md ("The event stream") and only ever added to.
+//! `patina guide failures` and only ever added to.
 //!
 //! Streaming: both logs are read record by record; what is kept is the namespace of the work
 //! tree (one entry per live name), never the log.

@@ -1,6 +1,6 @@
 /* instruction channels channel probe: execute every user-mode instruction that can observe something varying
  * (or might) and print "name value" or "name SIGNAME". Run natively on several cores and under
- * patina; the table in docs/EVIDENCE.md instruction channels is built from the differences. */
+ * patina, and the differences between the two. */
 #include <setjmp.h>
 #include <signal.h>
 #include <stdint.h>

@@ -19,6 +19,8 @@ pub enum Cmd {
     Report,
     Minimize,
     Ctl,
+    Guide,
+    Skill,
 }
 
 pub struct Command {
@@ -29,6 +31,12 @@ pub struct Command {
 }
 
 pub const COMMANDS: &[Command] = &[
+    Command {
+        cmd: Cmd::Guide,
+        name: "guide",
+        usage: "patina guide [TOPIC] [--list] [--format md]",
+        help: "start here: how to find bugs with patina, then one topic at a time",
+    },
     Command {
         cmd: Cmd::Run,
         name: "run",
@@ -95,6 +103,12 @@ pub const COMMANDS: &[Command] = &[
         usage: "patina doctor [--print-apparmor-profile]",
         help: "check the host; say what is missing and the command that fixes it",
     },
+    Command {
+        cmd: Cmd::Skill,
+        name: "skill",
+        usage: "patina skill [DIR]",
+        help: "write the skill for coding agents to DIR/patina; no DIR: where to put it",
+    },
 ];
 
 /// One option. `value` is the grammar of its argument (empty for a switch).
@@ -133,7 +147,22 @@ impl Flag {
 
 const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
 /// Listed apart in `patina --help`: plumbing most users never type.
-const ADVANCED: &[Cmd] = &[Cmd::Verify, Cmd::Log, Cmd::Ctl];
+const ADVANCED: &[Cmd] = &[Cmd::Verify, Cmd::Log, Cmd::Ctl, Cmd::Skill];
+/// The commands that print a result (`--format`).
+const FORMATTED: &[Cmd] = &[
+    Cmd::Run,
+    Cmd::Replay,
+    Cmd::Explain,
+    Cmd::Debug,
+    Cmd::Verify,
+    Cmd::Log,
+    Cmd::Doctor,
+    Cmd::Sweep,
+    Cmd::Report,
+    Cmd::Minimize,
+    Cmd::Ctl,
+    Cmd::Guide,
+];
 const ALL: &[Cmd] = &[
     Cmd::Run,
     Cmd::Replay,
@@ -146,6 +175,8 @@ const ALL: &[Cmd] = &[
     Cmd::Report,
     Cmd::Minimize,
     Cmd::Ctl,
+    Cmd::Guide,
+    Cmd::Skill,
 ];
 
 const fn flag(
@@ -439,12 +470,22 @@ pub const FLAGS: &[Flag] = &[
         "exit statuses that end the run ok (any: every status)",
         RUNLIKE,
     ),
+    Flag {
+        name: "--format",
+        value: "text|json",
+        default: "text",
+        help: "output format: json prints result.json",
+        cmds: FORMATTED,
+        repeat: false,
+        per: &[(Cmd::Guide, "text", "md: the markdown it is written in")],
+        per_value: &[(Cmd::Guide, "text|md")],
+    },
     flag(
-        "--format",
-        "text|json",
-        "text",
-        "output format: json prints result.json",
-        ALL,
+        "--list",
+        "",
+        "off",
+        "the topics, one line each",
+        &[Cmd::Guide],
     ),
     flag(
         "--print-apparmor-profile",
@@ -558,8 +599,11 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
                     .ok_or_else(|| format!("{name} needs {}", f.value_for(cmd)))?,
             }
         };
-        if f.name == "--format" && v != "text" && v != "json" {
-            return Err(format!("--format: expected text or json, not {v}"));
+        if f.name == "--format" && !f.value_for(cmd).split('|').any(|x| x == v) {
+            return Err(format!(
+                "--format: expected {}, not {v}",
+                f.value_for(cmd).replace('|', " or ")
+            ));
         }
         let e = out.flags.entry(f.name).or_default();
         if !f.repeat {
@@ -686,13 +730,17 @@ pub fn help_json() -> String {
         .collect();
     let outcomes: Vec<serde_json::Value> = Outcome::ALL
         .iter()
-        .map(|o| serde_json::json!({ "name": o.name(), "exit": o.exit() }))
+        .map(|o| serde_json::json!({ "name": o.name(), "exit": o.exit(), "means": o.means() }))
         .collect();
     serde_json::to_string_pretty(&serde_json::json!({
         "commands": cmds,
         "flags": flags,
         "outcomes": outcomes,
         "faults": crate::faults::help_json(),
+        "config": crate::config::TOML_KEYS.iter().map(|k| serde_json::json!({
+            "table": k.table, "key": k.key, "value": k.value, "default": k.default, "help": k.help,
+        })).collect::<Vec<_>>(),
+        "guide": crate::guide::TOPICS.iter().map(|t| t.name).collect::<Vec<_>>(),
         "syscalls": syscalls(),
     }))
     .unwrap()
@@ -728,7 +776,8 @@ mod tests {
             for &c in f.cmds {
                 let mut a = vec![f.name.to_string()];
                 if !f.value_for(c).is_empty() {
-                    a.push(if f.name == "--format" { "json" } else { "1" }.into());
+                    let first = f.value_for(c).split('|').next().unwrap();
+                    a.push(if f.name == "--format" { first } else { "1" }.into());
                 }
                 let p = parse(c, &a).unwrap_or_else(|e| panic!("{} {}: {e}", cmd_name(c), f.name));
                 assert!(p.has(f.name));

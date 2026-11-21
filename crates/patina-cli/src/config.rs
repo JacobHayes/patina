@@ -791,6 +791,71 @@ fn scalar(v: &toml::Value, at: &str) -> Res<String> {
     }
 }
 
+/// One key of `patina.toml`. `apply_file` and `nodes` accept a key only if it is here, and
+/// `patina --help --format json` and `patina guide config` print this table.
+pub struct TomlKey {
+    /// `run`, `faults`, `sched`, `sweep` or `node.NAME`.
+    pub table: &'static str,
+    pub key: &'static str,
+    pub value: &'static str,
+    pub default: &'static str,
+    pub help: &'static str,
+}
+
+const fn tk(
+    table: &'static str,
+    key: &'static str,
+    value: &'static str,
+    default: &'static str,
+    help: &'static str,
+) -> TomlKey {
+    TomlKey {
+        table,
+        key,
+        value,
+        default,
+        help,
+    }
+}
+
+pub const TOML_KEYS: &[TomlKey] = &[
+    tk("run", "cmd", "[\"CMD\", \"ARG\", ...]", "none", "the program and its arguments, as after `--`"),
+    tk("run", "env", "{ K = \"V\" }", "none", "added to the guest environment, as `--env`"),
+    tk("run", "mounts", "[\"SRC:DST[:copy]\", ...]", "none", "as `--mount`"),
+    tk("run", "work", "\"DIR[:GUEST]\"", "empty", "as `--work`"),
+    tk("run", "stdin", "\"FILE\"", "empty", "as `--stdin`"),
+    tk("run", "check", "\"CMD ARGS\"", "none", "as `--check`"),
+    tk("run", "ok-exit", "[N, \"N:CLASS,...\"] or \"any\"", "none", "as `--ok-exit`"),
+    tk("run", "timeout", "SECONDS", "600", "as `--timeout`: wall time"),
+    tk("run", "cpus", "N", "4", "the CPU count the program sees (1 to 64)"),
+    tk("run", "disk-mb", "MIB", "256", "the size of each sandbox filesystem (`/work`, `/tmp`, copied mounts)"),
+    tk("run", "time-limit", "SECONDS", "3600", "virtual time after which the run ends `liveness`"),
+    tk("run", "log-limit", "MIB", "1024", "log size at which the run ends `liveness` (a livelock)"),
+    tk("run", "check-timeout", "SECONDS", "60", "wall time a checker may take"),
+    tk("faults", "faults", "[\"CLASS[@NODE,...]\", ...]", "none", "as `--faults`"),
+    tk("faults", "KEY", "VALUE", "none", "any fault key, as `--fault KEY=VALUE` (`patina run --fault help`)"),
+    tk("faults", "fs-model", "\"ext4-ordered\" or \"posix-strict\"", "ext4-ordered", "what a machine crash keeps"),
+    tk("sched", "preempt", "\"points\" or \"traps\"", "points", "`traps`: switch threads only at system calls, spin hints and spin probes (a diagnostic)"),
+    tk("sched", "preempt-permille", "P", "100", "the chance in 1000 that a system call switches threads"),
+    tk("sweep", "known", "\"FILE\"", "none", "as `--known`"),
+    tk("sweep", "allow-unmet", "[\"LABEL\", ...]", "none", "as `--allow-unmet`"),
+    tk("sweep", "crash-pairs", "K", "off", "with `--crash-points` and nodes: crash a second node at each of its next K points after a first crash"),
+    tk("node.NAME", "cmd", "[\"CMD\", \"ARG\", ...]", "required", "the node's program"),
+    tk("node.NAME", "env", "{ K = \"V\" }", "none", "added to the run's environment"),
+    tk("node.NAME", "work", "\"DIR[:GUEST]\"", "empty", "its work tree's starting files, as `--work`"),
+    tk("node.NAME", "restart", "\"crash\", \"always\" or \"never\"", "crash", "after which downs the seed restarts it (`always`: also after it exits within `ok-exit`)"),
+    tk("node.NAME", "ok-exit", "N or [N, ...]", "[0]", "exit statuses that only stop the node"),
+    tk("node.NAME", "max-incarnations", "N", "the run's", "the most boots the seed's crashes give it (1 to 64)"),
+    tk("node.NAME", "disk-mb", "N or \"A..B\"", "the run's", "its filesystems' size, drawn per seed from a range"),
+    tk("node.NAME", "count", "N", "1", "N nodes of this table, named NAME1 to NAMEN"),
+    tk("node.NAME", "faults", "true or false", "true", "`false`: no faults of its own, as the driver"),
+];
+
+fn known_key(table: &str, key: &str) -> bool {
+    TOML_KEYS.iter().any(|k| k.table == table && k.key == key)
+        || (table == "faults" && !key.is_empty())
+}
+
 /// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory,
 /// but `[run] cmd` and `[run] check`, commands, are relative to where patina is started), or
 /// take the whole configuration a run recorded when `path` is a `run.json`. Returns `[run]
@@ -820,6 +885,12 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
         }
         for (k, v) in t {
             let at = format!("{name}: {sec}.{k}");
+            if !TOML_KEYS.iter().any(|x| x.table == sec) {
+                return Err(unknown(sec));
+            }
+            if !known_key(sec, k) {
+                return Err(unknown(&format!("{sec}.{k}")));
+            }
             match (sec.as_str(), k.as_str()) {
                 ("run", "cmd") => c.cmd = strings(v, &at)?,
                 ("run", "cpus") => c.cpus = int(v, &at)?,
@@ -869,10 +940,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("sweep", "crash-pairs") => c.crash_pairs = Some(int(v, &at)? as usize),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "preempt") => c.preempt = preempt(&string(v, &at)?, &at)?,
-                ("run" | "sched" | "sdk" | "sweep", _) => {
-                    return Err(unknown(&format!("{sec}.{k}")))
-                }
-                _ => return Err(unknown(sec)),
+                _ => return Err(unknown(&format!("{sec}.{k}"))),
             }
         }
     }
@@ -903,6 +971,9 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
         let mut node = Node::new(n.clone(), vec![]);
         let mut count = None;
         for (k, v) in table(v, &at)? {
+            if !known_key("node.NAME", k) {
+                return Err(format!("{file}: unknown key node.{n}.{k}"));
+            }
             let at = format!("{at}.{k}");
             match k.as_str() {
                 "cmd" => node.cmd = strings(v, &at)?,
@@ -1646,6 +1717,23 @@ mod tests {
         assert_eq!((c.cpus, c.preempt_permille), (2, 500));
         assert_eq!(c.env, vec!["A=1".to_string()]);
         assert_eq!(c.faults, vec!["fs-error-permille=5".to_string()]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every key of the table reaches its own arm of the parser: none falls through to the
+    /// parser's unknown-key error (a value of the wrong type is another error).
+    #[test]
+    fn every_listed_key_is_parsed() {
+        let dir = std::env::temp_dir().join(format!("patina-keys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("patina.toml");
+        for k in TOML_KEYS.iter().filter(|k| k.key != "KEY") {
+            let table = k.table.replace("NAME", "a");
+            std::fs::write(&f, format!("[{table}]\n{} = 0\n", k.key)).unwrap();
+            if let Err(e) = apply_file(&mut Config::default(), &f) {
+                assert!(!e.contains("unknown key"), "[{}] {}: {e}", k.table, k.key);
+            }
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

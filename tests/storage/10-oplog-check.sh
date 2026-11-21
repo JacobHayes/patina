@@ -1,6 +1,6 @@
 # 10. The tracker self-check (patina log ops --check: replay of the whole log = the exported live
 # tree) passes on every incarnation of a sample of each storage reproductions workload, crashes included
-# (reduced: 4 seeds each; the 50-seed sample is in docs/EVIDENCE.md).
+# (reduced: 4 seeds each).
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib/common.inc"
 N=${STORAGE_OPLOG_SEEDS:-4}

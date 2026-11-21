@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, "Instruction sites on arm64"): every arm64 ELF file under /usr/bin,
+# Evidence (Instruction sites on arm64): every arm64 ELF file under /usr/bin,
 # /usr/sbin, /usr/lib and /usr/libexec, every aligned word of its executable sections under the
 # runtime's rule (RNDR/RNDRRS, the pause hints, PACGA) and the counter reads: how many match, and
 # of those how many are data (read by a literal load, or under a `$d` mapping symbol); the words

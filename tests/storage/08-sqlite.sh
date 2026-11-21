@@ -1,8 +1,8 @@
 # 8. W3 SQLite (reduced: 16 seeds per passing case; a caught one searched for, lib/common.inc
-# caught, where storage reproductions's 40-seed runs caught each in more than half the seeds; the full sweeps are in docs/EVIDENCE.md). synchronous=FULL in WAL mode
+# caught, where storage reproductions's 40-seed runs caught each in more than half the seeds). synchronous=FULL in WAL mode
 # and EXTRA in DELETE mode pass under both models; FULL in DELETE mode passes ext4-ordered
 # (under posix-strict it loses the last commit: the journal unlink is not made durable,
-# SQLite's documented reason for EXTRA, checked natively in docs/EVIDENCE.md). synchronous=OFF
+# SQLite's documented reason for EXTRA). synchronous=OFF
 # is caught. fs-error-permille=5: never a corrupt database.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib/common.inc"

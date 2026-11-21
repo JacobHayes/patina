@@ -270,7 +270,7 @@ pub fn dir() -> PathBuf {
 }
 
 /// Making a plan is assumed to take at most a second per this many bytes of the file (on one
-/// thread, Chromium's 167 MB took 13 s before plans were made in parallel: docs/EVIDENCE.md).
+/// thread, Chromium's 167 MB took 13 s before plans were made in parallel).
 const PLAN_RATE: u64 = 2 << 20;
 
 /// How long a process waits for another that holds a file's entry (`size` bytes) before it

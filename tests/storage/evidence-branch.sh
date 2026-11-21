@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, "Crash-point enumeration"): `patina sweep --crash-points` on the
+# Evidence (Crash-point enumeration): `patina sweep --crash-points` on the
 # fjall harness (debug) and acklog-c against plain sweeps, each sweep once at -j 6:
 # - F2 and F6 under --crash-points (seeds 1..3, 200 s), and F6 with manual-flush at every evaluation;
 # - the plain acceptance sweeps for F1, F3, F4 (one sweep) and F5, and acklog-c;

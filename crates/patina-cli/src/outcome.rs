@@ -102,6 +102,23 @@ impl Outcome {
         }
     }
 
+    /// What the outcome means and what to do about it: one line, for `patina guide outcomes`.
+    pub const fn means(self) -> &'static str {
+        match self {
+            Outcome::Ok => "the program exited 0 (or with a status `--ok-exit` names) and failed no check; what that proves is what the checks could detect",
+            Outcome::Violation => "a check failed: an SDK `always` or `unreachable`, or the `--check` command answered 1",
+            Outcome::Liveness => "every thread blocked (deadlock), `[run] time-limit` of virtual time passed, or the log reached `[run] log-limit` (livelock)",
+            Outcome::Failure => "the program exited nonzero with a status `--ok-exit` does not name",
+            Outcome::Crash => "the program died on a signal",
+            Outcome::Unsupported => "the program did something Patina does not model; the message names it. Not a bug in the program",
+            Outcome::Timeout => "`--timeout` of wall time passed: a loop in code without points, or a hang outside virtual time",
+            Outcome::Nondeterministic => "a replay differed from its run: a Patina bug. Keep the run directory and report it",
+            Outcome::Internal => "Patina failed, or the host refused a resource: run `patina doctor`",
+            Outcome::Vacuous => "something asked for never happened: a fault you named, an SDK `sometimes`, `reachable` or fault point, a check that judged no run, a `!ID` known finding",
+            Outcome::Error => "the command could not be carried out: the program cannot run, or the `--check` command broke or answered differently on replay",
+        }
+    }
+
     /// The tool's exit status: 0 clean, 1 a finding in the guest, 2 anything that is not
     /// evidence about the guest (Patina could not decide, or the request was wrong).
     pub const fn exit(self) -> u8 {

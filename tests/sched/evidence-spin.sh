@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, scheduling points), unprivileged, at the default CPU count:
+# Evidence (scheduling points), unprivileged, at the default CPU count:
 #  a. The spin table (stock binaries: glibc and hand-written C spin locks with and without a
 #     call inside and with and without the spin hint, spin-then-yield, pthread mutex, Rust
 #     spin_loop and std Mutex; on arm64 also exclusive-pair spin locks) over seeds

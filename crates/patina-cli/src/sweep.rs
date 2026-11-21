@@ -629,7 +629,8 @@ impl Judged {
     }
 }
 
-/// Default width: the CPUs this process may use, at most 8 (docs/EVIDENCE.md, "Sweep width").
+/// Default width: the CPUs this process may use, at most 8 (wider measured no faster:
+/// tests/sweep/evidence-throughput.sh).
 pub fn default_jobs() -> usize {
     crate::launch::allowed_cpus().len().clamp(1, 8)
 }

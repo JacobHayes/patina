@@ -214,7 +214,7 @@ fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
             "thread {} (tid {}, {name}) computed for {:.1} s without a system call or pause while {waiting}{at}. \
              This is a spin-wait Patina could not preempt, or an endless loop. \
              If that code was not rebuilt with compute points, rebuilding it with them makes such a loop a scheduling point \
-             (docs/GUIDE.md, \"Scheduling\"){POINTS}",
+             (patina guide scheduling){POINTS}",
             h.slot,
             h.tid,
             spun as f64 / 1e9

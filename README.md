@@ -2,15 +2,11 @@
 
 **Weather your code into a fine protective patina — before production does.**
 
-Patina runs a Linux program many times, each run under a seed that decides thread
-order, the clock, randomness, and which disk, network and crash faults the program meets.
-The same seed gives the same run, so a bug that shows up once in a thousand runs becomes a
-seed you can replay as often as you like. Your program runs unmodified: no rebuild, no
-special linking, any language.
-
-Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 KiB pages). It
-makes its own sandbox and needs unprivileged user namespaces; Ubuntu 24.04 and later admit them
-for a program only with an AppArmor profile, installed once as root (below).
+Patina runs a Linux program many times, each run under a seed that decides thread order, the
+clock, randomness, and which disk, network and crash faults the program meets. The same seed
+gives the same run, so a bug that shows up once in a thousand runs becomes a seed you can replay
+as often as you like. Your program runs unmodified: no rebuild, no special linking, any
+language. Patina is experimental; it runs on Linux x86_64 and arm64.
 
 ## Install
 
@@ -18,46 +14,12 @@ for a program only with an AppArmor profile, installed once as root (below).
 curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sh
 ```
 
-This installs one static binary, `~/.local/bin/patina` (`--prefix DIR` for another place),
-and runs `patina doctor`, which checks the host and prints the fix for anything missing. The
-last line should read `this host can run patina`. Debian, Fedora and Arch need nothing more.
-
-Ubuntu 24.04 and later restrict unprivileged user namespaces to programs with an AppArmor
-profile. The installer then prints the one root command that installs a profile for the
-installed path, and runs it with sudo only if you say yes (or pass `--apparmor-profile`):
-
-```sh
-patina doctor --print-apparmor-profile | sudo tee /etc/apparmor.d/patina >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/patina
-```
-
-The profile admits whatever file is at that path, so install to a root-owned place for it:
-`curl -fsSL https://github.com/JacobHayes/patina/releases/latest/download/install.sh | sudo sh
--s -- --prefix /usr/local`. The release's Debian package (`patina_X.Y.Z_amd64.deb`, `_arm64`)
-installs `/usr/bin/patina` with its profile. Without a profile, `sudo sysctl -w
-kernel.apparmor_restrict_unprivileged_userns=0` lifts the restriction for every program.
-
-Its first line names the release it installs. A release's own copy
-(`releases/download/vX.Y.Z/install.sh`) installs that release; `--version X.Y.Z` picks any.
-
-Root works too (the guest sees what it would for the user sudo was run by); in a container,
-see [the guide](docs/GUIDE.md#as-root-and-in-a-container) for the options it needs. Patina
-does not run on macOS itself. On an Apple Silicon Mac, run it in a Linux arm64 VM with 4 KiB
-pages and a 6.12 or newer kernel, and check with `patina doctor` there. This is verified in one
-VM product (Tart, Ubuntu 24.04 with the 7.0 kernel); UTM, Parallels, VMware Fusion, Lima,
-OrbStack and Docker Desktop are not yet confirmed.
-
-From a checkout instead, with Rust (rustup reads the pinned toolchain from
-`rust-toolchain.toml`): `cargo install --locked --path crates/patina-cli`.
-
-For coding agents, [skills/patina](skills/patina/SKILL.md) is a skill that says how to use
-Patina well. Each release attaches it as `patina-skill.tar.gz`, with its version in
-`VERSION`; this unpacks the one matching the installed `patina` into a skills directory (here
-`~/.agents/skills`; use your agent's):
-
-```sh
-v=$(patina --version | cut -d' ' -f2)
-mkdir -p ~/.agents/skills && curl -fsSL "https://github.com/JacobHayes/patina/releases/download/v$v/patina-skill.tar.gz" | tar -xz -C ~/.agents/skills
-```
+This installs one static binary, `~/.local/bin/patina` (`--prefix DIR` for another place), and
+runs `patina doctor`, which checks the host and prints the fix for anything missing; its last
+line should read `this host can run patina`. Ubuntu 24.04 and later admit the sandbox only with
+an AppArmor profile, installed once as root: the installer prints the command and runs it if
+you agree. The release's Debian package installs `/usr/bin/patina` with its profile. From a
+checkout, with Rust: `cargo install --locked --path crates/patina-cli`.
 
 ## First run
 
@@ -82,8 +44,7 @@ run directory: /tmp/patina/examples/quickstart/patina-out/run-0
 replay: patina replay /tmp/patina/examples/quickstart/patina-out/run-0
 ```
 
-The program's own output is in the run directory: `patina-out/run-0/inc-0/stdout` and
-`stderr`. Now run 20 seeds of the version with the bug:
+Now 20 seeds of the version with the bug:
 
 <!-- transcript first-sweep
 dir: /tmp/patina/examples/quickstart
@@ -108,90 +69,16 @@ failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: res
   explain: patina explain /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
 ```
 
-Each group is one bug: its signature, how many runs hit it, and the lowest seed among them.
-Patina already replayed that seed once and got the same run. `patina run --seed 1 -- target/debug/jobs`
-prints the outcome with the tail of the program's stderr; the run directory holds all of it:
+Each group is one bug: its signature, how many runs hit it, and the lowest seed, already replayed
+once with the same result. Its `rerun:` line reproduces it; `patina explain` tells the run as a
+story.
 
-<!-- transcript first-stderr
-dir: /tmp/patina/examples/quickstart
-exact-only: the stderr of seed 1, a finding on this kind of host
--->
-```sh
-cat patina-out/sweep/seed-1/inc-0/stderr
-```
+## Next
 
-```text
+Run `patina guide`. It is the documentation, built into the binary so it always matches the
+version you run: the workflow from the first run to a reported finding, then one topic at a
+time (`patina guide --list`). The same pages are in [docs/guide](docs/guide/core.md).
+[examples/](examples/README.md) has one small program per kind of bug.
 
-thread 'main' (2) panicked at src/main.rs:28:5:
-assertion `left == right` failed: results out of job order
-  left: [2, 1, 3]
- right: [1, 2, 3]
-note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
-```
-
-`patina replay DIR` runs the seed again, into `DIR/replay`, and compares every system call
-with the recorded one; `patina explain DIR` tells the run as a short story (who sent what to
-whom, the faults, how it ended) and names the event to stop at; `patina debug DIR` stops the
-whole run just before that event, with gdb attached to the process about to act. Fix the code, rebuild, and run the same sweep command: a sweep
-directory (`--out`, default `patina-out/sweep`) holds one sweep, so a changed program or
-setting replaces it, and the same sweep with more seeds runs only the new ones.
-
-## What works
-
-Any Linux executable built for the host (x86_64 or arm64): static or dynamic, Rust, C, C++,
-Go, Python, shell scripts (run directly: `patina run -- ./script.sh`) and the programs they start. Threads, `fork`, `exec`, pipes, files, timers, signals and TCP and
-UDP on localhost all run, decided by the seed. The program sees a fixed machine: 4 CPUs, one clock
-that starts at the same time every run, an empty writable `/work` as its working directory.
-Headless Chromium runs with `--no-sandbox`; its own sandbox (namespaces, seccomp) is not
-supported. PostgreSQL 18 built from its release source without changes runs unmodified
-(checked by hand on x86_64, not in CI): initdb, start, psql, stop, and 200 seeds each of a
-commit-durability workload under machine crashes and a SERIALIZABLE bank workload, all ok.
-
-What it does not do: network sockets other than TCP and UDP, multicast and broadcast (the
-call fails with an error, and `patina run` lists it under `refused:`), DNS beyond
-`/etc/hosts`, connections to anything outside the run, and macOS hosts. A call Patina does not
-model ends the run `unsupported` and names it. [ARCHITECTURE.md](ARCHITECTURE.md#limits)
-lists the limits.
-
-Threads switch inside computation too: as the program and every library it loads are mapped,
-Patina rewrites their code so that loops, calls, indirect jumps and atomics are scheduling
-points, and computation moves the clock, so races with no system call in them are found
-([load-time points](docs/GUIDE.md#load-time-points)). The first run of a program does this
-once per file and keeps it in `~/.cache/patina/plans`. Deeper search: a program rebuilt with
-coverage flags and Patina's hook file (or a Python program run with `python3 -m patina`)
-switches at every load and store of its own code ([the guide](docs/GUIDE.md#deeper-search-rebuilt-code)).
-
-```text
-C, C++  clang -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime, plus sdk/c/patina_compute.c
-Rust    patina-dst with features = ["compute"]; the guide's RUSTFLAGS; cargo build --target x86_64-unknown-linux-gnu (arm64: aarch64-unknown-linux-gnu)
-Go      import _ "github.com/JacobHayes/patina/go/patina/compute"; CGO_ENABLED=0 go build -gcflags=all=-d=libfuzzer
-Python  no rebuild (3.12+): sdk/python on PYTHONPATH, then python3 -m patina app.py
-```
-
-## Outcomes
-
-Every run ends in one outcome; the exit status of `patina` follows from it.
-
-| Outcome | Exit | Meaning |
-|---|---|---|
-| `ok` | 0 | the program exited 0, or with a status `--ok-exit` names (stop `ok-exit`; `N:CLASS` only where that fault class injected), and broke no invariant |
-| `violation` | 1 | an invariant failed: an SDK `always`, or the `--check` command |
-| `liveness` | 1 | every thread blocked, the virtual time limit passed, or the program never finished and filled the log to `[run] log-limit` (stop `log-limit`) |
-| `failure` | 1 | the program exited nonzero, with a status `--ok-exit` does not name |
-| `crash` | 1 | the program died on a signal |
-| `unsupported` | 2 | the program did something Patina does not model (stop `exec`: an image the kernel would run that Patina does not load, such as a 32-bit program); the message names it |
-| `timeout` | 2 | the wall-time limit passed |
-| `nondeterministic` | 2 | a replay differed from its run: a Patina bug, please report it |
-| `internal` | 2 | Patina failed, or the host refused a resource |
-| `vacuous` | 2 | a sweep's fault (one you named; a class's is listed as not applicable), SDK check or `--check` never had anything to act on, or a finding a known file requires (`!ID`) did not appear |
-| `error` | 2 | the command could not be carried out: the program cannot run, as `execve` would refuse it (stop `exec`: not executable, a `#!` interpreter missing, not an image of this architecture), or the `--check` command failed (stop `check`) or answered otherwise on replay (`check-unstable`) |
-
-## Where next
-
-- [examples/README.md](examples/README.md): one bug each found by scheduling, by an SDK fault
-  point, by disk faults, by crashes and by network faults, in Rust, Python, C and Go.
-- [docs/GUIDE.md](docs/GUIDE.md): sweeps, faults, crashes, the SDK, reading a result,
-  replay, CI.
-- [ARCHITECTURE.md](ARCHITECTURE.md): how it works and its limits.
-- `patina --help`, `patina COMMAND --help`: every flag of your build; `patina run --fault
-  help`: every fault key.
+For coding agents, `patina skill ~/.agents/skills` (or the skills directory your agent reads)
+writes a small skill that tells the agent when to use Patina and to start from `patina guide`.

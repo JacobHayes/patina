@@ -1,8 +1,7 @@
 # Architecture
 
 How Patina runs a program deterministically, what that rests on, and where it stops. Each
-part names the module that implements it. Measured results are in
-[docs/EVIDENCE.md](docs/EVIDENCE.md).
+part names the module that implements it. It is for maintainers; users read `patina guide`.
 
 ## The parts
 
@@ -296,7 +295,7 @@ program that sleeps an hour takes milliseconds.
 
 ## Nodes
 
-A run with nodes (`[node.NAME]`, GUIDE "Several machines") is still one sandbox, one
+A run with nodes (`[node.NAME]`, `patina guide nodes`) is still one sandbox, one
 supervisor, one virtual clock, one log and one seed; the nodes are views inside it. Node 0 is
 the driver, the command after `--`, started as in a run without nodes; nodes 1 upward are the
 declared ones, in file order. A run without nodes takes the same path as before: no node table
@@ -635,7 +634,7 @@ anything but one verdict line, or not within `[run] check-timeout`, is killed an
 a replay, minimize), or whose server ended after its last answer, starts one for itself. Sending each run's verdict through its own `patina
 run`, rather than judging in the sweep, keeps one code path for verdicts, `check.out` and
 `pending`. Its cost decided the design: a Python checker started per run costs 2 to 4 times
-the unchecked sweep, a server 1.0 to 1.2 times (docs/EVIDENCE.md, Oracles).
+the unchecked sweep, a server 1.0 to 1.2 times.
 Judging again (`recheck.rs`) is the one exception: `recheck::rejudge` runs the checker on a
 kept run directory (`check::run_on`, with a worker's server or none) and rewrites only what
 follows from the verdict (`result::with_check` over the run's own end, `outcome::ok_end`),
@@ -727,7 +726,7 @@ sections (`proto/src/insn/aarch64.rs`), and a site becomes `udf #0x7061`. A word
 literal load of the same code reads is data and is left alone (`rejected_sites`); data in text
 reached otherwise (a table addressed by `adr` in a stripped file) cannot be told from code,
 and the census of every executable file on the dev VM and the CI runner found none that
-matches (docs/EVIDENCE.md). `RNDR` is answered only where the host has it (`HWCAP2_RNG`);
+matches (`tests/insn/evidence-census.sh`). `RNDR` is answered only where the host has it (`HWCAP2_RNG`);
 elsewhere it raises `SIGILL` as it would without Patina (a test input answers and
 advertises it anyway, to test that path). `PACGA` is counted and labelled (`labels.pacga_sites`), not patched. An
 `isb` that is not a spin hint loses nothing to the patch (the fault and the return from it
@@ -814,7 +813,7 @@ are the same, and arming skips the points that could not switch (`proto::compute
 
 A point the program takes is a trap and a hand-over through the supervisor; skipping those
 that cannot switch is what keeps a long program at a small gap within a few times its run
-without points (docs/EVIDENCE.md, "The cost of a point").
+without points.
 
 **Python** (3.12 and later) needs no rebuild: `python3 -m patina SCRIPT` runs the script with
 the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sys.monitoring`.
@@ -823,7 +822,7 @@ the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sy
   every pass of a loop, which a one-line loop or a comprehension makes without starting a
   line. Branch events add nothing these do not, and calls and returns would cost more for no
   new place. Each costs one pure-Python call, 50 to 100 ns, against about 13 ns for the work of
-  a plain line natively: that call is the cost, not the cell (docs/EVIDENCE.md).
+  a plain line natively: that call is the cost, not the cell.
 - **The cell**: `COMPUTE_HELLO` with kind `COMPUTE_LINE` answers its address; the hook reads
   and writes it through a `memoryview` over that address, and makes `COMPUTE_POINT` through
   ctypes when it reaches 0. The hello comes from libc's `syscall`, so for this kind the image
@@ -1034,7 +1033,7 @@ In a run (the default):
   address), then resumes after it. Any other such fault (a program's own `hlt` or privileged
   instruction) is not at a trampoline's trap and goes on as natively. `hlt` rather than `ud2`:
   under a hypervisor that intercepts invalid-opcode exceptions (KVM on AMD) a `ud2` costs
-  several times a `hlt` (docs/EVIDENCE.md). A `ud2` at a `cpuid` row is answered as above, with
+  several times a `hlt`. A `ud2` at a `cpuid` row is answered as above, with
   no record and no virtual time. A fault at an interior row's address (`SIGTRAP` just after its
   `int3`, or `SIGSEGV` from the kernel with no address at its other byte) resumes at the copy of
   that instruction with every register as it was: no record, no virtual time and no count (the
@@ -1091,7 +1090,7 @@ In a run (the default):
   traps; a vfork child, on its parent's memory, puts nothing back. Kept, each place counted twice
   (a hook and the planned site beside it) and half the points were a trampoline's trap and
   walk, unbudgeted in a rebuilt process: a sweep of `examples/stats-c` rebuilt took 5 to 6
-  times its time under traps (docs/EVIDENCE.md). An interpreter's line points
+  times its time under traps. An interpreter's line points
   (`python3 -m patina`) put back every plan of the process the same way (`lines`).
 - **What the program sees**: a signal frame, a fault record and a backtrace through a
   trampoline name the original instruction (`proto::plan::shown`: a stop in a copy maps to
@@ -1106,8 +1105,8 @@ In a run (the default):
 Not covered: code made at run time (JIT), dark code and pages put back keep today's behaviour
 (spin probes, `compute-stall`). Inside a hardware transaction (`xbegin`), an interior entry,
 like a point, aborts it (the program's fallback path runs). A loop back-edge still has no point when the flags stay live
-across every run that could carry its count, or its block holds a refusal (EVIDENCE.md has
-the coverage per program).
+across every run that could carry its count, or its block holds a refusal (`tests/rewrite/evidence-corpus.sh`
+measures the coverage per program).
 
 ## The fault plan
 
@@ -1410,10 +1409,9 @@ deterministic.
 
 By test: whether everything observable really passes through the table is checked, not
 proved. `patina verify` repeats a seed while moving it across CPUs, under load, with address
-randomization on and in another sandbox; a sweep replays the first seed of each finding. The
-measured record, with the fourteen differences found and closed, is in
-[docs/EVIDENCE.md](docs/EVIDENCE.md). New kinds of difference were still appearing when the
-last matrix ran, so a difference is a Patina bug to report, not noise.
+randomization on and in another sandbox; a sweep replays the first seed of each finding. `tests/determinism/` keeps a regression for
+each difference found and closed, and `tests/determinism/evidence-matrix.sh` reruns the whole
+protocol; a difference is a Patina bug to report, not noise.
 
 ## Debugging a run
 
@@ -1560,7 +1558,7 @@ Enforced:
   runtime stack, where handlers keep arrays they built; a pointer the program passes never
   reaches those, since the check refused the call first. Cost: a few comparisons per pointer,
   and for iovecs and `msghdr`s one fault-safe read per entry; a call with no pointer pays a
-  slice-length test (`costs getppid` and `costs pipe` within run-to-run spread, EVIDENCE).
+  slice-length test (`costs getppid` and `costs pipe` within run-to-run spread).
 - **Descriptors.** The invariant: the program's descriptors are the numbers below the soft
   `RLIMIT_NOFILE` it is shown (1024 at the start, raised or lowered as on Linux, never above
   its hard limit of at most 2048), and every descriptor of the runtime, the supervisor and the
@@ -1651,19 +1649,7 @@ Out of scope (a deliberate attack):
   `rt_sigreturn` through the stub with a forged frame.
 
 Write protection that switches at every trap (`mprotect` on entry and exit) was measured and
-rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.md).
-
-## Removed: hardware branch counters
-
-`[sched] preempt = "branches"` preempted after a seed-chosen number of retired branches, read
-from a perf counter a `CAP_PERFMON` launcher opened and finished exactly by single steps. Removed:
-load-time points with walks find more at far less cost (17 to 30 µs per switch against 1.7 to
-3.4 ms per counter preemption); counting was exact on AMD Zen 5 and Arm Neoverse N2 only, CI could
-not test it on x86_64, and virtual machines' late interrupts ended runs `pmu-late`. Worth bringing
-back only for a real bug class, mattering to a user, in code load-time points cannot patch (JIT
-output, text the rewriter cannot prove is code); for precise, virtualisation-safe branch counting
-on ordinary CI runners; or for evidence that load-time rewriting is unsound for an important class
-of programs. The last commit with it is `0327ddd71c5a`.
+rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs.
 
 ## Limits
 
@@ -1773,7 +1759,7 @@ of programs. The last commit with it is `0327ddd71c5a`.
   fsync failures (4,096 files). Filling one ends the run `unsupported`, stop `capacity`, naming it.
   The table of changed files' times drops the entries of deleted files nothing holds open
   (`sup/vtgc.rs`), so only files still reachable count against it (65,536).
-- Not modelled: `timer_create`, `io_uring`; another process's `/proc/PID`. docs/EVIDENCE.md
-  has the full list. Scheduling attributes (`setpriority`, `sched_setscheduler`,
+- Not modelled: `timer_create`, `io_uring`; another process's `/proc/PID` (the syscall table,
+  `patina --help --format json`, says what each call does). Scheduling attributes (`setpriority`, `sched_setscheduler`,
   `sched_setattr` and their getters) are kept and read back but change nothing in the
   schedule; what the kernel refuses an unprivileged process is refused.

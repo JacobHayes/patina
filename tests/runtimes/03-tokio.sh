@@ -8,7 +8,7 @@
 #  d. The 5 s tokio::time::timeout fires (in virtual time: see the partition in g).
 #  e. F: injected file errors are seen by the program (spawn_blocking errors printed).
 #  g. TCP (tokio-mt net, the network wire): D faults off and on, at seed 5: the seed that diverged
-#     before the exit barrier (docs/EVIDENCE.md runtimes "exit versus a wire delivery"). F: net-reset seen
+#     before the exit barrier. F: net-reset seen
 #     as "ConnectionReset"; net-blackout=1+100000: the 5 s read timeouts fire during it, then
 #     all 16 clients finish with correct data (two 100 s partitions: a real wait fails the
 #     budget); net-chunk-max=1: all ok.

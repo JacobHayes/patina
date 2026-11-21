@@ -1,21 +1,26 @@
-"""tests/docs/skill.py: the agent skill (skills/*/*.md) and the user docs (README.md, the guide,
-the examples' README, ARCHITECTURE.md) name only what the patina under test has; the skill also
-mentions every command, fault class and outcome it has.
+"""tests/docs/names.py: the docs name only what the patina under test has; the guide mentions
+every command, fault class and outcome it has; the skill names nothing that can change.
 
-./check docs runs the skill's command blocks (transcripts.py); this checks the names around them,
-which no command runs. The patina binary is the source of truth (`patina --help --format json`):
+The patina binary is the source of truth (`patina --help --format json`). The docs are the
+guide's pages (docs/guide/*.md, which `patina guide` prints), README.md, examples/README.md and
+ARCHITECTURE.md. ./check docs runs their command blocks (transcripts.py); this checks the names
+around them, which no command runs:
 
-- In the skill's code (`sh` fences, `$` lines of `text` fences, inline code spans), each
-  `patina COMMAND ...` names a command; `log` a word of that command's usage; each
-  option, one the command takes (an inline span that starts with an option: one some command
-  takes); `--fault KEY=V` and a span `KEY=V`, a fault key; `--faults A,B`, fault classes (or
-  `all`); an option whose value is a list of words, one of them.
-  Upper-case words are placeholders and are not checked.
-- The skill's table whose first column is `Outcome` lists every outcome with its exit status.
+- In code (`sh` fences, `$` lines of `text` fences, inline code spans), each `patina COMMAND
+  ...` names a command; `log` a word of that command's usage; each option, one the command takes
+  (in the guide, also an inline span that starts with an option: one some command takes);
+  `--fault KEY=V` and a span `KEY=V`, a fault key; `--faults A,B`, fault classes (or `all`); an
+  option whose value is a list of words, one of them. Anywhere, `[TABLE] KEY` names a
+  patina.toml key. Upper-case words are placeholders and are not checked.
+- A table whose first column is `Outcome` lists outcomes with their exit status.
 - Test inputs (`PATINA_TEST_*`, AGENTS.md) appear in neither `--help` nor these files.
-- docs/EVIDENCE.md is a record of past runs, each with the build it used, and is not checked.
-- Every command appears as `patina COMMAND`, and every class as a `--faults` value, somewhere in
-  the skill: a new one fails here until the skill says when an agent uses it.
+- Every command appears as `patina COMMAND`, every class as a `--faults` value and every outcome
+  in an Outcome table somewhere in the guide: a new one fails here until the guide says when
+  to use it.
+- The skill (skills/patina/SKILL.md, which `patina skill` writes) is a pointer that must not go
+  stale: frontmatter `name: patina` and a description; no code block; its only code spans are
+  `patina guide`, `patina doctor` and `patina skill` (with a placeholder argument); and nowhere an
+  option, a fault key or a patina.toml table or key.
 
 An existence check of names, not of wording. Prints each name it does not know, with its place.
 """
@@ -28,8 +33,10 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
-SKILLS = os.path.join(REPO, "skills")
-DOCS = ["README.md", "docs/GUIDE.md", "examples/README.md", "ARCHITECTURE.md"]
+GUIDE = os.path.join(REPO, "docs", "guide")
+SKILL = os.path.join(REPO, "skills", "patina", "SKILL.md")
+DOCS = ["README.md", "examples/README.md", "ARCHITECTURE.md"]
+TOML = re.compile(r"\[(run|faults|sched|sweep)\] ([a-z][a-z-]*)")
 FENCE = re.compile(r"^```(\w*)\s*$")
 SPAN = re.compile(r"`([^`]+)`")
 # The commands `patina debug` adds to gdb, which the docs show as `patina procs` and so on.
@@ -48,6 +55,7 @@ def vocabulary(patina):
          "keys": {k["name"] for k in d["faults"]["keys"]},
          "classes": {p["name"] for p in d["faults"]["classes"]} | {"all"},
          "outcomes": {o["name"]: o["exit"] for o in d["outcomes"]},
+         "config": {(c["table"], c["key"]) for c in d["config"]},
          "short": {}}
     for f in d["flags"]:
         for s in re.findall(r"\balso (-[a-zA-Z]) ", f["help"]):
@@ -59,7 +67,7 @@ def vocabulary(patina):
 
 
 def code(path):
-    """(line number, text, kind) of each piece of code in a skill file: `cmd` for a command line
+    """(line number, text, kind) of each piece of code in a doc: `cmd` for a command line
     of a fence, `span` for an inline code span of prose (which may cross a line); and the rows of
     its tables."""
     lines = open(path).read().split("\n")
@@ -169,12 +177,16 @@ def check_key(where, kv, v, bad):
 
 def check_file(path, v, bad, seen, doc=False):
     """Check the names in one file, noting in seen the commands, classes and outcomes it names.
-    A doc (not the skill) also shows other tools' options in code spans: there only the options of
-    a `patina` command are checked."""
+    A doc other than the guide also shows other tools' options in code spans: there only the
+    options of a `patina` command are checked."""
     rel = os.path.relpath(path, REPO)
     for no, line in enumerate(open(path), 1):
         if "PATINA_TEST_" in line:
             bad.append(f"{rel}:{no}: a test input (PATINA_TEST_*) in a user doc: AGENTS.md lists them")
+        for m in TOML.finditer(line):
+            t, k = m.groups()
+            if (t, k) not in v["config"] and not (t == "faults" and k in v["keys"]):
+                bad.append(f"{rel}:{no}: no patina.toml key [{t}] {k}")
     pieces, rows = code(path)
     for no, text, kind in pieces:
         where = f"{rel}:{no}"
@@ -184,7 +196,7 @@ def check_file(path, v, bad, seen, doc=False):
             if not words or PLACEHOLDER.search(words[0]):
                 continue
             if words[0] in ("--version", "--help") or words[0].startswith("__") \
-                    or (doc and words[0] in GDB):
+                    or words[0] in GDB:
                 continue
             cmd = words[0]
             if cmd not in v["commands"]:
@@ -231,32 +243,57 @@ def check_file(path, v, bad, seen, doc=False):
                        f"the doc says {cells[header.index('Exit')]}")
 
 
+def check_skill(v, bad):
+    """The skill names nothing an option, key or outcome table holds, so it cannot drift."""
+    rel = os.path.relpath(SKILL, REPO)
+    text = open(SKILL).read()
+    head = re.match(r"---\n(.*?)\n---\n", text, re.S)
+    meta = dict(l.split(":", 1) for l in head.group(1).split("\n") if ":" in l) if head else {}
+    if meta.get("name", "").strip() != "patina" or not meta.get("description", "").strip():
+        bad.append(f"{rel}: frontmatter needs name: patina and a description")
+    pieces, _ = code(SKILL)
+    for no, line in enumerate(text.split("\n"), 1):
+        if FENCE.match(line):
+            bad.append(f"{rel}:{no}: a code block: the skill points to patina guide, which shows commands")
+        for m in re.finditer(r"(?<![\w-])--?[a-zA-Z][\w-]*", line):
+            bad.append(f"{rel}:{no}: an option, {m.group(0)}: options belong in patina guide")
+        for k in v["keys"] | {k for t, k in v["config"] if "-" in k}:
+            name = k.split(":")[0] + (":" if ":" in k else "")
+            if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", line):
+                bad.append(f"{rel}:{no}: the key {name}: keys belong in patina guide")
+        if re.search(r"\[(run|faults|sched|sweep|node)\b", line):
+            bad.append(f"{rel}:{no}: a patina.toml table: config belongs in patina guide")
+    for no, span, kind in pieces:
+        if kind == "span" and not re.fullmatch(r"patina (guide|doctor|skill)( [A-Z]+)?", span):
+            bad.append(f"{rel}:{no}: `{span}`: the skill names only `patina guide`, `patina doctor` "
+                       "and `patina skill`")
+
+
 def main():
     patina = os.environ.get("PATINA")
     if not patina:
-        sys.exit("skill.py: PATINA is not set: run it through ./check docs")
+        sys.exit("names.py: PATINA is not set: run it through ./check docs")
     v = vocabulary(patina)
-    files = sorted(os.path.join(dp, f) for dp, _, fs in os.walk(SKILLS) for f in fs if f.endswith(".md"))
+    guide = sorted(os.path.join(GUIDE, f) for f in os.listdir(GUIDE) if f.endswith(".md"))
     bad = ["patina --help names a test input (PATINA_TEST_*): AGENTS.md lists them"] if v["test_inputs"] else []
     seen = {"commands": set(), "classes": set(), "outcomes": {}}
-    for path in files:
+    for path in guide:
         check_file(path, v, bad, seen)
     for d in DOCS:
         check_file(os.path.join(REPO, d), v, bad, {"commands": set(), "classes": set(), "outcomes": {}},
                    doc=True)
+    check_skill(v, bad)
     for c in sorted(set(v["commands"]) - seen["commands"]):
-        bad.append(f"skills: patina {c} is not mentioned (a new command?): say in skills/patina/SKILL.md "
-                   "when an agent uses it")
+        bad.append(f"docs/guide: patina {c} is not mentioned (a new command?): say when to use it")
     for p in sorted(v["classes"] - {"all"} - seen["classes"]):
-        bad.append(f"skills: --faults {p} is not mentioned (a new class?): say in skills/patina/faults.md "
-                   "when an agent uses it")
+        bad.append(f"docs/guide: --faults {p} is not mentioned (a new class?): say when to use it")
     for o in sorted(set(v["outcomes"]) - set(seen["outcomes"])):
-        bad.append(f"skills: outcome {o} is not in the Outcome table of skills/patina/SKILL.md (a new "
-                   "outcome?): say what an agent does with it")
+        bad.append(f"docs/guide: outcome {o} is in no Outcome table (a new outcome?): say what it means")
     for b in bad:
         print("FAIL: " + b)
-    print(f"== skill: {len(files)} files and {len(DOCS)} docs; {len(seen['commands'])} commands, {len(seen['classes'])} classes, "
-          f"{len(seen['outcomes'])} outcomes named; {len(bad)} unknown or missing")
+    print(f"== names: {len(guide)} guide pages, {len(DOCS)} docs and the skill; {len(seen['commands'])} commands, "
+          f"{len(seen['classes'])} classes, {len(seen['outcomes'])} outcomes named in the guide; "
+          f"{len(bad)} unknown or missing")
     return 1 if bad else 0
 
 

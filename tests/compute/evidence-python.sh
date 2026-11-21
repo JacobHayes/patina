@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, compute points, Python): `python3 -m patina` with
+# Evidence (compute points, Python): `python3 -m patina` with
 # tests/guests/compute/py/pycompute.py.
 #  1. `cache` (check-then-act between two threads), seeds 1-200: stock / default compute-gap /
 #     compute-gap=16..256 (about 1 to 17 lines) / compute-gap=0; failing seeds, the first one's

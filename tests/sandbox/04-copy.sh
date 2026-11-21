@@ -1,7 +1,7 @@
 # Change 4: the guest directory, /etc/ld.so.cache and /etc/alternatives are copies on sandbox
 # tmpfs, not bind mounts: their metadata (inode numbers, times, blocks, device) is the
 # sandbox's. Two copies of the guest directory on the host with different inode numbers,
-# times and paths give the same stat output and digest. /usr stays a bind (see docs/EVIDENCE.md sandbox hardening).
+# times and paths give the same stat output and digest. /usr stays a bind.
 #@ tier=quick budget=20 slots=1
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/copy

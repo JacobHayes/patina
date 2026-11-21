@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, compute points): the syscall-free races `races b`, `pool`,
+# Evidence (compute points): the syscall-free races `races b`, `pool`,
 # `rs-race` (Rust atomics) and `go-race` (Go atomics), seeds 1-200, in three columns: the stock
 # build (races-stock, pool-stock, rs-race-stock, go-race-stock), the build with compute points at the default
 # compute-gap, and at compute-gap=8. Each column: failing seeds,

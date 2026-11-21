@@ -128,7 +128,7 @@ violation always: acked-records-kept: N acknowledged, N stored
 The same bug as acklog's, in a program with no SDK: it prints `ack I` once record I is
 written and never syncs it. `examples/checks/acked-kept` runs after each run, outside the
 simulation, and compares the last record acknowledged before each machine crash with the
-tree the crash left ([Checks from outside the program](../docs/GUIDE.md#checks-from-outside-the-program)).
+tree the crash left ([Checks from outside the program](../docs/guide/checks.md)).
 
 <!-- transcript kvlog
 exit: 0 1
@@ -158,7 +158,7 @@ Runs that did not crash are not judged.
 `examples/checks/confined`, `examples/checks/no-symlink-escape` and
 `examples/checks/synced-before-mark` judge what a program did
 rather than what it left, from `patina log events` ([Checks from outside the
-program](../docs/GUIDE.md#checks-from-outside-the-program)).
+program](../docs/guide/checks.md)).
 
 ## upcase-c (C, no SDK): wrong output found against a faults-off run
 
@@ -166,7 +166,7 @@ The program writes a text in upper case to `out.txt` and exits 1 on every error,
 `write` for -1 only: a short write loses the rest of a block and it still exits 0. One run
 without faults is the reference; `--ok-exit 1` lets the clean failures end `ok`, and
 `examples/checks/same-tree` compares each run's final work tree with the reference's
-(`patina log tree`; [Faults off versus on](../docs/GUIDE.md#faults-off-versus-on)).
+(`patina log tree`; [Faults off versus on](../docs/guide/checks.md)).
 
 <!-- transcript upcase
 exit: 0 0 1
@@ -230,7 +230,7 @@ Four workers update shared statistics without their lock. The update makes no sy
 lies a few instructions from the nearest load-time point, so a sweep of the stock build
 (`cc -O2 -pthread -o stats examples/stats-c/stats.c`) seldom shows it. Rebuilt with clang's
 coverage flags and the hook file, its threads also switch inside the update
-([the guide](../docs/GUIDE.md#deeper-search-rebuilt-code)).
+([`patina guide scheduling`](../docs/guide/scheduling.md)).
 
 <!-- transcript stats
 exit: 0 1
@@ -261,7 +261,7 @@ The program serves `public/report.txt` ten times and refuses a symlink there, so
 planted in `public/` cannot make it serve a file from elsewhere. It checks the name with
 `lstat` and then opens the name. `--fault path-swap-permille` lets the seed change a path
 between a check of it and its use, as another process could
-([the guide](../docs/GUIDE.md#path-swaps)).
+([`patina guide faults`](../docs/guide/faults.md)).
 
 <!-- transcript serve
 exit: 0 1

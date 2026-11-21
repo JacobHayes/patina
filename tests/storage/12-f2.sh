@@ -4,7 +4,7 @@
 # which must be the panic in fjall's journal/entry.rs. FJ_VAL_SHIFT=289 lays the journal out so
 # that batch 5 straddles the first 4 KiB block boundary that way (at the default layout the
 # first such batch is about 800, some 1,700 to 3,000 crash points in, minutes of runs:
-# docs/EVIDENCE.md, "Crash-point enumeration"); here the window lies about 240 points in.
+# tests/storage/evidence-branch.sh); here the window lies about 240 points in.
 # FJ_WIPE_PARTIAL=1: the early open-after-crash finding (F1) recovers instead of ending the
 # sweep. F2_N sets FJ_N (5: the journal ends before batch 5, no straddling item: red). Under
 # [sched] preempt = "traps": the crash points are the disk's, the same under either kind of

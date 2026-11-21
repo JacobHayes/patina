@@ -1,7 +1,7 @@
 #!/bin/bash
 # ./check quick              the landing gate (budget 5 min, ceiling 10)
 # ./check AREA [AREA ...]    one area's checks (a directory under tests/) while working on it
-# ./check evidence [NAME..]  the sweeps, matrices and soaks behind docs/EVIDENCE.md, by hand
+# ./check evidence [NAME..]  one-off measurements (sweeps, matrices, soaks), by hand
 # ./check release            the release gate and the nightly job (ceiling 10 min)
 # ./check list               every script with its tier and budget
 # ./check areas              the areas with a script for this machine (the nightly runs each)

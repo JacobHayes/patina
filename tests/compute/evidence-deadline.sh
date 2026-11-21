@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, compute points): a timer that falls due inside rebuilt code
+# Evidence (compute points): a timer that falls due inside rebuilt code
 # stops it at the exact event. Each `deadline` guest (a 50 ms timer, a loop with no system
 # call), seeds 1-20 at the seed's gap and at compute-gap=0: all ok, the loop's virtual time in
 # range, and for guests that report it the handler within ten trap charges of 50 ms; then one

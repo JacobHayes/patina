@@ -127,9 +127,9 @@ jobs:
             dist/patina_*.deb
           if-no-files-found: error
 
-  # The release's files: both archives and packages, the agent skill (skills/patina, with the version
-  # it was released with in VERSION), one SHA256SUMS listing them, install.sh (a tag's installs that
-  # tag's version unless given --version).
+  # The release's files: both archives and packages, one SHA256SUMS listing them, install.sh (a
+  # tag's installs that tag's version unless given --version). The skill for coding agents is in
+  # the binary (`patina skill`).
   dist:
     needs: build
     runs-on: ubuntu-24.04
@@ -144,18 +144,11 @@ jobs:
       - run: |
           if [ "$GITHUB_REF_TYPE" = tag ]; then
             scripts/stamp-install "$GITHUB_REF_NAME" >dist/install.sh
-            version=${GITHUB_REF_NAME#v}
           else
             cp install.sh dist/
-            version=$(git rev-parse --short HEAD)
           fi
-          mkdir "$RUNNER_TEMP/skill"
-          cp -r skills/patina "$RUNNER_TEMP/skill/"
-          echo "$version" >"$RUNNER_TEMP/skill/patina/VERSION"
-          tar -czf dist/patina-skill.tar.gz -C "$RUNNER_TEMP/skill" patina
-          test "$(tar -xzOf dist/patina-skill.tar.gz patina/VERSION)" = "$version"
           (cd dist && sha256sum patina-*.tar.gz patina_*.deb >SHA256SUMS && cat SHA256SUMS)
-          test "$(wc -l <dist/SHA256SUMS)" = 5
+          test "$(wc -l <dist/SHA256SUMS)" = 4
       - uses: actions/upload-artifact@v7
         with:
           name: dist

@@ -1,5 +1,5 @@
 # W4 go-static: stock static Go at the default CPU count (regressions;
-# the 100-seed stall rates are tests/runtimes/evidence-go-stalls.sh, docs/EVIDENCE.md).
+# the 100-seed stall rates are tests/runtimes/evidence-go-stalls.sh).
 #  a. R: `ok`, stdout equal to a native run after masking "~ " lines and the gomaxprocs line.
 #  b. Spin-waits: the reproducer go-sweep (whose background sweeper spins without a system call
 #     or `pause`) is ok on seeds 1-8; with traps and spin probes off it ends unsupported,

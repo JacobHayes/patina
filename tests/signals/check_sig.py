@@ -2,7 +2,7 @@
 
 Each guest prints lines "<words> key=value ...". A line is named by its leading words (or,
 when it has none, by its first key). The expected values are what a Linux kernel gives the
-same program natively (docs/EVIDENCE.md)."""
+same program natively."""
 import sys
 
 g, path = sys.argv[1], sys.argv[2]

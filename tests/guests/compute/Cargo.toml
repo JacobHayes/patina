@@ -1,4 +1,4 @@
-# The Rust compute-point guests, built by build.sh exactly as docs/GUIDE.md tells users to:
+# The Rust compute-point guests, built by build.sh exactly as `patina guide scheduling` tells users to:
 # RUSTFLAGS with the coverage flags, `--target` the host's own triple, the SDK's `compute`
 # feature. rs-build.rs is a build script so that a build without `--target` (the flags on
 # build scripts, which do not link the SDK) fails here.

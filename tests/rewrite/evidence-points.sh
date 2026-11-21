@@ -1,4 +1,4 @@
-# Evidence for load-time points (the default) (docs/EVIDENCE.md, "Load-time rewriting under Patina"):
+# Evidence for load-time points (the default) (Load-time rewriting under Patina):
 # larger stock programs run under Patina with the runtime applying their plans and their
 # libraries'. Per program: the output equals the native run's; the same seed twice gives one
 # digest; wall time without points, with points on a cold plan cache (each plan made and

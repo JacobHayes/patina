@@ -1,6 +1,6 @@
 # 3. F6 (batch atomicity broken with no injected fault) from a debug sweep with FJ_N=2000
 # --faults buggify --fault crash-permille=1 at 24 CPUs under [sched] preempt = "traps" without pause points
-# (seed 2001; 2 seeds in 6,000, none at the default 4 CPUs in 2,000, see docs/EVIDENCE.md), so
+# (seed 2001; 2 seeds in 6,000, none at the default 4 CPUs in 2,000), so
 # the settings are given here and the seed is named; the kept tree makes the native harness
 # fail the same way. F2 (the
 # journal-entry assertion) needs a crash in a window of a few crash points, which plain sweeps

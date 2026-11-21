@@ -8,7 +8,7 @@
 # delays) to what it needs: a crash kept at points was tried as one node's crash alone, one
 # kept at a point is b's (`crash-at=N@b`), and every fault setting left was tried without
 # and no longer failed. Which settings a failure needs depends on its seed, and the failing
-# seed found depends on the host: on the reference host it is the crash alone (docs/GUIDE.md).
+# seed found depends on the host: on the reference host it is the crash alone.
 # A failure built to need b's later crash, not its first (`lazy init`, any seed), is reduced to
 # that later crash alone, at its place in a first boot, b's first crash alone having been tried
 # first and not failed.
