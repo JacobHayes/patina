@@ -114,7 +114,6 @@ fn identity(
 ) -> Res<serde_json::Value> {
     let mut c = cfg.clone();
     c.seed = 0;
-    c.host_cpu = None;
     c.allow_unmet.clear();
     c.check = None;
     c.case = None;

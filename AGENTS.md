@@ -116,20 +116,23 @@ else: no flag, config key or fault key, and no mention in `--help` or the user d
 nothing changes. Those that set the run's configuration land in `run.json`, so a replay or a
 `rerun:` line needs none (`config::test_inputs`); `1`/`0` or `true`/`false` for a switch.
 
-| Variable | Sets |
-|---|---|
-| `STALL_MS` | CPU time a thread computes alone before `compute-stall` (default 10000) |
-| `HOST_CPU` | the host CPU a run is pinned to |
-| `PAUSE_POINTS` | `0`: a spin hint is not a scheduling point |
-| `SPIN_PROBES` | `0`: no spin probes |
-| `EMULATE_RNDR` | arm64: answer `RNDR` from the seed on a host without it |
-| `COMPUTE_WALK` | load-time points: the longest walk, `W` or `A..B` (default 2..64) |
-| `RT` | a runtime file instead of the embedded one |
-| `TIMING` | print the launcher's start-up times |
-| `STDIO_MAX` | bytes of guest stdout or stderr kept before `output-limit` (default 1 GiB) |
-| `PARALLEL`, `LOAD_THREADS`, `CHURN_DIR`, `TIME_GAP_S`, `VERIFY_PRUNE` | `verify --vary` parallel's width, load's threads, the churn directory, time's wait (default 61 s); delete each run directory once judged |
-| `KEEP_NONE` | `1`: a sweep keeps no run's logs (benchmarks that would fill the disk) |
-| `PAGE_SIZE`, `OPLOG_CORRUPT`, `REPLAY_PERTURB` | doctor's page size; corrupt the op log; perturb a replay |
+| Variable | Sets | Why a test needs it |
+|---|---|---|
+| `STALL_MS` | CPU time a thread computes alone before `compute-stall` (default 10000) | stall tests reach one in 1 s, not 10 |
+| `PAUSE_POINTS` | `0`: a spin hint is not a scheduling point | a spin with a hint must be able to stall, to test what else ends it |
+| `SPIN_PROBES` | `0`: no spin probes | stall and probe tests compare runs with probes and without |
+| `EMULATE_RNDR` | arm64: answer `RNDR` from the seed on a host without it | the instruction's path is tested on runners that lack it |
+| `COMPUTE_WALK` | load-time points: the longest walk, `W` or `A..B` (default 2..64) | walk tests fix a length to reach a window or to compare lengths |
+| `RT` | a runtime file instead of the embedded one | runtime development and benchmarks run a runtime built apart |
+| `TIMING` | print the launcher's start-up times | the start-up benchmark reads them |
+| `STDIO_MAX` | bytes of guest stdout or stderr kept before `output-limit` (default 1 GiB) | the limit test reaches it with 100 kB |
+| `PARALLEL`, `LOAD_THREADS` | `verify --vary` parallel's width, load's threads | the test runner shares the host's CPUs among many scripts |
+| `TIME_GAP_S` | `verify --vary time`'s wait (default 61 s) | the quick tier cannot wait a minute |
+| `VERIFY_PRUNE` | delete each `verify` run directory once judged | a long soak would fill the disk |
+| `KEEP_NONE` | `1`: a sweep keeps no run's logs | benchmarks would fill the disk |
+| `PAGE_SIZE` | doctor's page size | the refusal of a host with other pages is tested on a 4 KiB host |
+| `OPLOG_CORRUPT` | corrupt the op log | the corrupt-log path is reached no other way |
+| `REPLAY_PERTURB` | perturb a replay | replay's divergence check needs a replay that diverges |
 
 `tests/run.py` sets `PATINA_SCRATCH` for unit tests and scripts (scratch space), not a patina
 input.

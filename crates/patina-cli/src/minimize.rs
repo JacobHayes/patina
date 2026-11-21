@@ -128,7 +128,7 @@ impl Search<'_> {
         self.runs += 1;
         let dir = self.tries.join(format!("try-{}", self.runs));
         let o = cfg.opts_with(self.program.clone()).map_err(error)?;
-        let cpu = cfg.host_cpu.unwrap_or_else(default_cpu);
+        let cpu = default_cpu();
         let (_, r) = run_one(&o, &dir, cpu, false).map_err(internal)?;
         let same = r["signature"] == self.signature;
         let line = format!(

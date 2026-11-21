@@ -2909,7 +2909,7 @@ longer than a second (ten when stderr is not a terminal), one line on stderr say
 
 <!-- no-run planning-notice: printed while a cold run plans headless Chromium; the directory is the host's -->
 ```text
-patina: rewriting chrome-headless-shell and 45 more files so that threads can switch inside its code (once per file: kept in ~/.cache/patina/plans)
+patina: preparing switch points for 46 files (chrome-headless-shell and 45 more; once per file, cached in ~/.cache/patina/plans)
 ```
 
 `patina doctor` prints where the plans are, how many and how large. Deleting the directory

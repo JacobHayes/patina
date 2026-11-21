@@ -108,7 +108,7 @@ pub fn replay_into(
     if std::env::var_os("PATINA_TEST_REPLAY_PERTURB").is_some() {
         PERTURB_DRAWS.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let cpu = cfg.host_cpu.unwrap_or_else(default_cpu);
+    let cpu = default_cpu();
     let (end, mut result) = run_one(&o, &out, cpu, false)?;
     let mine = crate::result::classified(&end);
     // The run's own outcome, before a checker judged it: a run the checker judged was ok.

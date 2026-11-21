@@ -170,7 +170,7 @@ fn run(a: &Args) -> Result<ExitCode, Fail> {
     let o = cfg.opts().map_err(error)?;
     launch::preflight(&o).map_err(error)?;
     let out = out_dir(a, format!("patina-out/run-{}", cfg.seed))?;
-    let cpu = cfg.host_cpu.unwrap_or_else(launch::default_cpu);
+    let cpu = launch::default_cpu();
     let (_, r) = launch::run_one(&o, &out, cpu, false).map_err(internal)?;
     if a.json() {
         println!("{}", serde_json::to_string_pretty(&r).unwrap());

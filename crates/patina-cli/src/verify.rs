@@ -23,9 +23,8 @@ fn cpu_choices() -> Vec<usize> {
 
 /// Move host-global counters: tmpfs files, pipes and processes created and destroyed on the host.
 fn churn() {
-    let dir = std::env::var("PATINA_TEST_CHURN_DIR").unwrap_or_else(|_| "/dev/shm".into());
     for i in 0..1000 {
-        let p = format!("{dir}/patina-churn-{}-{i}", std::process::id());
+        let p = format!("/dev/shm/patina-churn-{}-{i}", std::process::id());
         let _ = std::fs::write(&p, b"x");
         let _ = std::fs::remove_file(&p);
         let mut fds = [0; 2];
@@ -215,7 +214,7 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
     let out = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
     let cpus = cpu_choices();
     let all = allowed_cpus();
-    let base_cpu = o.cfg.host_cpu.unwrap_or_else(default_cpu);
+    let base_cpu = default_cpu();
     // The `cpu` variant's runs start at a CPU chosen by process id (concurrent verifies spread).
     let cpu_off = std::process::id() as usize % cpus.len();
     let vary = |k: &str| vary.iter().any(|v| v == k);

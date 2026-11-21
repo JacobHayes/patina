@@ -112,9 +112,6 @@ pub struct Config {
     pub spin_probes: bool,
     /// Where threads are preempted (`[sched] preempt`).
     pub preempt: Preempt,
-    /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
-    /// chosen by process id; test input `HOST_CPU`). Does not reach the guest.
-    pub host_cpu: Option<usize>,
     /// Load-time points: the longest walk past a switch point, `W` or `A..B` drawn per seed
     /// (test input `COMPUTE_WALK`; default `proto::compute::WALK_DEFAULT`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,7 +243,6 @@ impl Default for Config {
             emulate_rndr: false,
             spin_probes: true,
             preempt: Preempt::default(),
-            host_cpu: None,
             compute_walk: None,
             check: None,
             ok_exit: vec![],
@@ -1004,9 +1000,6 @@ fn test_inputs(c: &mut Config) -> Res<()> {
     };
     if let Some(x) = var("STALL_MS") {
         c.stall_ms = num(x)?;
-    }
-    if let Some(x) = var("HOST_CPU") {
-        c.host_cpu = Some(num(x)? as usize);
     }
     if let Some(x) = var("PAUSE_POINTS") {
         c.pause_points = flag(x)?;

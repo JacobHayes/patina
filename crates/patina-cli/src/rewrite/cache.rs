@@ -525,17 +525,13 @@ impl Notice {
                     st = me.done.wait_timeout(st, deadline - now).unwrap().0;
                 }
                 st.said = true;
-                let more = match st.files {
-                    1 => String::new(),
-                    n => format!(
-                        " and {} more {}",
-                        n - 1,
-                        if n == 2 { "file" } else { "files" }
-                    ),
+                let (n, first) = (st.files, &st.first);
+                let files = match n {
+                    1 => format!("1 file ({first}"),
+                    _ => format!("{n} files ({first} and {} more", n - 1),
                 };
                 eprintln!(
-                    "patina: rewriting {}{more} so that threads can switch inside its code (once per file: kept in {})",
-                    st.first,
+                    "patina: preparing switch points for {files}; once per file, cached in {})",
                     dir.display()
                 );
             });

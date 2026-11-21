@@ -822,7 +822,7 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
 /// sandbox's user namespace can be made and the host paths it binds can be read by the user it
 /// maps to; as another user, the host lets this executable make one (`userns_allowed`).
 pub fn preflight(o: &Opts) -> Res<()> {
-    crate::host::refusal(&crate::host::Facts::probe(o.cfg.host_cpu))?;
+    crate::host::refusal(&crate::host::Facts::probe(None))?;
     if root_user().is_none() {
         userns_allowed()?;
     }
