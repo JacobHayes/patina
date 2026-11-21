@@ -6,8 +6,9 @@ This is a wording check by design, of our own docs against our own tool: the one
 exception to "never assert wording". A transcript that shows what a command prints must show what
 it prints now; two releases existed only to correct ones that did not.
 
-Docs: README.md, docs/GUIDE.md, examples/README.md, ARCHITECTURE.md. A transcript is a fenced
-block with an HTML comment right before it (invisible when rendered):
+Docs: README.md, docs/GUIDE.md, examples/README.md, ARCHITECTURE.md, and the agent skill's files
+(skills/*/*.md). A transcript is a fenced block with an HTML comment right before it (invisible
+when rendered):
 
     <!-- transcript NAME
     dir: /tmp/upcase
@@ -15,9 +16,12 @@ block with an HTML comment right before it (invisible when rendered):
     exit: 0 1
     -->
 
-Two forms. A `text` fence of `$ COMMAND` lines (a line ending in `\\` continues on the next),
-each followed by its output; or a `sh` fence of commands followed by a `text` fence that is the
-output of its last command (the others' output is not shown; they must still succeed). Keys:
+Three forms. A `text` fence of `$ COMMAND` lines (a line ending in `\\` continues on the next),
+each followed by its output; a `sh` fence of commands followed by a `text` fence that is the
+output of its last command (the others' output is not shown; they must still succeed); or a
+`sh` fence alone, whose commands run in one shell, as a reader pasting them would (a variable
+set by one is seen by the next; a here-document is part of its command), each with its exit
+status checked and no output compared. Keys:
 
   dir      the directory the doc shows the commands in (default /tmp/patina). Blocks of one file
            with the same dir share it, in order: a later block sees what an earlier one left
@@ -50,7 +54,8 @@ its hash in REFERENCE.
 `<!-- no-run NAME: REASON -->` before a block says it cannot run here (a second host, a VM,
 root, the network); every run lists those blocks. A `text` fence holding a `$ patina` or
 `$ ./check` line, or a `sh` fence directly followed by a `text` fence, that has neither comment
-is an error.
+is an error; in the skill's files, so is any unmarked `sh` fence or `text` fence with a `$ `
+line: every command the skill shows an agent runs here.
 
 Compared line by line, exactly, after these, applied to both sides:
   `...` alone on a line   any lines (none included)
@@ -78,6 +83,7 @@ from concurrent.futures import ThreadPoolExecutor
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 DOCS = ["README.md", "docs/GUIDE.md", "examples/README.md", "ARCHITECTURE.md"]
+SKILLS = "skills"
 FENCE = re.compile(r"^```(\w*)\s*$")
 COMMENT = re.compile(r"^<!--\s*(transcript|no-run)\s+([A-Za-z0-9_.-]+)(:?)(.*)$")
 HOST = [
@@ -101,6 +107,7 @@ class Block:
         self.path, self.line, self.name = path, line, name
         self.dir, self.setup, self.skip, self.exits, self.command = "/tmp/patina", [], 0, None, None
         self.cmds = []      # [(command, expected output lines, their doc line numbers)]
+        self.shell = False  # a `sh` fence alone: its commands run in one shell
         self.no_run = self.exact_only = self.arch = self.release_only = None
 
     def where(self):
@@ -141,15 +148,29 @@ def split_dollar(body, first):
     return [tuple(c) for c in cmds]
 
 
+HEREDOC = re.compile(r"(?<!<)<<-?\s*(['\"]?)([A-Za-z_]\w*)\1(?!\w)")
+
+
 def sh_commands(body):
-    cmds, cur = [], ""
+    cmds, cur, end = [], "", None
     for line in body:
+        if end is not None:
+            cur += "\n" + line
+            if line.strip() == end:
+                cmds.append(cur)
+                cur, end = "", None
+            continue
         if not cur and (not line.strip() or line.lstrip().startswith("#")):
             continue
         cur = cur + ("\n" if cur else "") + line
-        if not line.endswith("\\"):
+        m = HEREDOC.search(line)
+        if m:
+            end = m.group(2)
+        elif not line.endswith("\\"):
             cmds.append(cur)
             cur = ""
+    if cur:
+        cmds.append(cur)
     return cmds
 
 
@@ -160,6 +181,7 @@ def parse(path):
     fs = fences(lines)
     blocks, errors, names = [], [], set()
     used = set()
+    strict = path.startswith(SKILLS + "/")
     for k, (start, info, body, end) in enumerate(fs):
         if start in used:
             continue
@@ -177,6 +199,8 @@ def parse(path):
         follows = nxt is not None and info == "sh" and nxt[1] == "text" and all(
             not l.strip() for l in lines[end + 1:nxt[0]])
         looks = follows or (info == "text" and any(l.startswith(("$ patina", "$ ./check")) for l in body))
+        if strict:
+            looks = looks or info == "sh" or (info == "text" and any(l.startswith("$ ") for l in body))
         m = COMMENT.match(head[1][0]) if head else None
         if not m:
             if looks:
@@ -239,9 +263,15 @@ def parse(path):
             n = list(range(nxt[0] + 2, nxt[0] + 2 + len(nxt[2])))
             b.cmds = [(c, None, None) for c in cs[:-1]] + [(cs[-1], nxt[2], n)]
             used.add(nxt[0])
+        elif info == "sh":
+            b.cmds = [(c, None, None) for c in sh_commands(body)[b.skip:]]
+            b.shell = True
+            if not b.cmds:
+                errors.append(f"{b.where()}: no command left to run")
+                continue
         else:
             errors.append(f"{b.where()}: a transcript is a `text` fence of `$` lines, or a `sh` fence "
-                          "followed by a `text` fence")
+                          "(followed by a `text` fence of its last command's output, or alone)")
             continue
         if b.exits is not None and len(b.exits) != len(b.cmds):
             errors.append(f"{b.where()}: exit lists {len(b.exits)} statuses for {len(b.cmds)} commands")
@@ -347,6 +377,28 @@ def first_difference(shown, act, nos):
     return no, doc, cmd
 
 
+def run_shell(b, exits, d, env, root):
+    """Run a `sh` block's commands in one shell, each followed by a line on descriptor 3 with its
+    exit status; the report lines of the first status that differs from the doc's."""
+    status, mark = os.path.join(root, "status"), "@@ transcripts.py: end of a command @@"
+    script = "".join(f"{cmd}\necho \"$?\" >&3; echo '{mark}'\n" for cmd, _, _ in b.cmds).replace(b.dir, d)
+    with open(status, "w") as f3:
+        r = subprocess.run(["bash", "-o", "pipefail", "-c", f"exec 3>&{f3.fileno()}\n" + script],
+                           cwd=d, env=env, pass_fds=(f3.fileno(),), stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT)
+    with open(status) as f:
+        got = [int(x) for x in f.read().split()]
+    outs = r.stdout.decode(errors="replace").replace(root, "").replace(REPO, b.dir).split(mark + "\n")
+    for k, ((cmd, _, _), want) in enumerate(zip(b.cmds, exits)):
+        out = outs[k].rstrip("\n").split("\n") if k < len(outs) else []
+        if k >= len(got):
+            return [f"`$ {cmd}`: not run: the shell ended (status {r.returncode}) before it"] + \
+                ["    " + l for l in out[-15:]]
+        if got[k] != want:
+            return [f"`$ {cmd}`: exit status {got[k]}, the doc says {want}"] + ["    " + l for l in out[-15:]]
+    return []
+
+
 def run_scene(blocks, guests, patina, exact):
     """Run one dir's blocks in order; return [(block, ok, report lines)]."""
     root = tempfile.mkdtemp(prefix="pdocs.", dir="/tmp")
@@ -371,7 +423,9 @@ def run_scene(blocks, guests, patina, exact):
                 if r.returncode:
                     report.append(f"setup `{s}` exited {r.returncode}: {r.stdout.strip()[-400:]}")
             exits = b.exits or [0] * len(b.cmds)
-            for (cmd, exp, nos), want in zip(b.cmds, exits):
+            if b.shell and not report:
+                report += run_shell(b, exits, d, env, root)
+            for (cmd, exp, nos), want in ([] if b.shell else zip(b.cmds, exits)):
                 if report:
                     break
                 r = subprocess.run(["bash", "-o", "pipefail", "-c", cmd.replace(b.dir, d)], cwd=d, env=env,
@@ -418,7 +472,9 @@ def main():
     if not patina or not guests:
         sys.exit("transcripts.py: PATINA and PATINA_GUESTS are not set: run it through ./check docs")
     blocks, errors = [], []
-    for path in DOCS:
+    skills = sorted(os.path.relpath(os.path.join(dp, f), REPO)
+                    for dp, _, fs in os.walk(os.path.join(REPO, SKILLS)) for f in fs if f.endswith(".md"))
+    for path in DOCS + skills:
         bs, es = parse(path)
         blocks += bs
         errors += es

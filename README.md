@@ -57,6 +57,16 @@ OrbStack and Docker Desktop are not yet confirmed.
 From a checkout instead, with Rust (rustup reads the pinned toolchain from
 `rust-toolchain.toml`): `cargo install --locked --path crates/patina-cli`.
 
+For coding agents, [skills/patina](skills/patina/SKILL.md) is a skill that says how to use
+Patina well. Each release after 0.18.0 attaches it as `patina-skill.tar.gz`, with its version in
+`VERSION`; this unpacks the one matching the installed `patina` into a skills directory (here
+`~/.agents/skills`; use your agent's):
+
+```sh
+v=$(patina --version | cut -d' ' -f2)
+mkdir -p ~/.agents/skills && curl -fsSL "https://github.com/JacobHayes/patina/releases/download/v$v/patina-skill.tar.gz" | tar -xz -C ~/.agents/skills
+```
+
 ## First run
 
 Give Patina any program and its arguments after `--`. `examples/quickstart` is a small Rust

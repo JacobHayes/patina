@@ -18,6 +18,10 @@ Flags and commands: `patina --help --format json` is the source of truth (`cli.r
 the parser reads too). Docs describe the present; history is in git. A change to behaviour
 updates the docs in the same commit.
 
+The agent skill, `skills/patina/` (SKILL.md and its reference files), tells coding agents how to
+use Patina; a change to user-facing behaviour updates it in the same commit. `./check docs` runs
+its commands and checks every name in it against `patina --help --format json`.
+
 ## Layout
 
 - `crates/patina-proto`: what the runtime and supervisor agree on (no_std).
