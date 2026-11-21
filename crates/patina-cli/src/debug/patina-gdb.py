@@ -163,16 +163,17 @@ SWITCHING = [False]
 
 def attach(hpid, tid):
     """Attach to host process `hpid` (detaching from another), with symbols, and select the
-    thread whose sandbox id is `tid` (its first thread when 0)."""
-    inf = gdb.selected_inferior()
-    if inf.pid not in (0, hpid):
-        SWITCHING[0] = True
-        try:
+    thread whose sandbox id is `tid` (its first thread when 0). The world stays held from the
+    detach until the attach has stopped the new process: gdb reports events between the two
+    (with no process attached), and none of them is the user letting the world go."""
+    SWITCHING[0] = True
+    try:
+        if gdb.selected_inferior().pid not in (0, hpid):
             gdb.execute("detach", to_string=True)
-        finally:
-            SWITCHING[0] = False
-    if gdb.selected_inferior().pid != hpid:
-        gdb.execute("attach %d" % hpid, to_string=True)
+        if gdb.selected_inferior().pid != hpid:
+            gdb.execute("attach %d" % hpid, to_string=True)
+    finally:
+        SWITCHING[0] = False
     ATTACHED[0] = hpid
     m = next((p["maps"] for p in S["procs"] if p["host"] == hpid), {"images": [], "tramps": []})
     names = []

@@ -6,9 +6,10 @@
 #    stopped before an injected network fault (the supervisor's own event), the run goes on.
 #    Python (journal-py): the backtrace reaches the interpreter's evaluation loop. Two nodes (a
 #    key-value primary and backup, and the driver): stopped at the backup's last call, `patina
-#    attach` moves gdb to another process and back to the stopped thread. A memory write leaves
-#    the run at the first record where the session's events and the run's differ (`log events`
-#    of both), and says it wrote memory. `--at call:NAME:K` names the K-th such call.
+#    attach` moves gdb to another process and back to the stopped thread, the world held. A
+#    memory write leaves the run at the first record where the session's events and the run's
+#    differ (`log events` of both), and says it wrote memory. `--at call:NAME:K` names the
+#    K-th such call.
 #@ tier=area budget=60
 . "$(dirname "$0")/lib.inc"
 E=$PATINA_GUESTS/examples
@@ -150,6 +151,8 @@ gdb.execute("bt", to_string=True)
 gdb.execute("patina attach %d" % S["pid"])
 t = gdb.selected_thread()
 print("FACT back", int(gdb.selected_inferior().pid == mine and t.ptid[1] == S["host_tid"]))
+# The world is still held: nothing let it go while gdb moved.
+print("FACT held", int(not os.path.exists(S["release"])))
 end
 continue
 EOF
@@ -158,5 +161,6 @@ named=$(python3 -I -c 'import json,sys; print(sum(1 for p in json.load(open(sys.
 [ "$named" -ge 2 ] || die "nodes: $named processes with a node name: $(cat "$r/debug/debug.json")"
 [ "$(fact "$r" procs)" -ge 3 ] || die "nodes: $(fact "$r" procs) processes"
 [ "$(fact "$r" moved)" = 1 ] && [ "$(fact "$r" back)" = 1 ] || die "nodes: attach: $(cat "$r.gdb")"
+[ "$(fact "$r" held)" = 1 ] || die "nodes: moving between processes let the world go on: $(cat "$r.gdb")"
 identical "$r"
 echo "nodes: $(fact "$r" procs) processes at seq $at; moved to another and back; identical"
