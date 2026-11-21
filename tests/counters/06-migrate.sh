@@ -1,7 +1,10 @@
 # Hazard: CPU migration inside a run. patina pins a sandbox to one CPU; here a second thread moves
 # every task of the run to a random CPU every 2 ms while it runs (counters are per task, so
-# they must follow). 5 runs each of four programs (two programs at a time) must equal an
-# unperturbed run.
+# they must follow). 5 runs each of four programs (two programs at a time): each that ends ok
+# must equal an unperturbed run, and at least one of each program's does. A run may instead end
+# `pmu-late`, the named stop for an overflow interrupt that came later than the margin: on a
+# loaded virtual machine the moves make that happen now and then, and it is the host's (doctor
+# says so), never a different schedule.
 #@ tier=area budget=200 slots=2
 . "$(dirname "$0")/lib.inc"
 python3 -I - <<'PY'
@@ -54,9 +57,12 @@ fail = []
 with ThreadPoolExecutor(2) as ex:
     done = list(ex.map(one, ["loops", "strings", "fp", "threads"]))
 for p, ref, res in done:
-    same = sum(o["digest"] == ref["digest"] and o["outcome"] == "ok" for o, _ in res)
-    print(f"{p}: reference {ref['outcome']} {ref['digest']} ({ref['counters']['pmu']['preempts']} stops); moved runs equal: {same}/5; "
-          f"affinity changes per run: {[n for _, n in res]}")
-    if same != 5: fail.append(f"{p}: {[(o['outcome'], o['digest']) for o, _ in res]}")
+    ok = [o for o, _ in res if o["outcome"] == "ok"]
+    late = sum(o.get("stop") == "pmu-late" for o, _ in res)
+    same = sum(o["digest"] == ref["digest"] for o in ok)
+    print(f"{p}: reference {ref['outcome']} {ref['digest']} ({ref['counters']['pmu']['preempts']} stops); moved runs equal: {same}/5"
+          f"{f' ({late} pmu-late)' if late else ''}; affinity changes per run: {[n for _, n in res]}")
+    if ref["outcome"] != "ok" or not ok or same != len(ok) or len(ok) + late != 5:
+        fail.append(f"{p}: {[(o['outcome'], o.get('stop'), o['digest']) for o, _ in res]}")
 if fail: die("; ".join(fail))
 PY

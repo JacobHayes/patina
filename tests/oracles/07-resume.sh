@@ -1,6 +1,7 @@
 # A resumed sweep whose checker changed counts each run it judges again as a run it finished:
 # the checker's new findings count toward --max-findings (reached, the sweep starts no run), and
-# a run it now passes is pruned under --keep fail, as one it ran would be.
+# a run it now passes counts as an ok run and keeps its logs under --keep fail, as one the
+# checker ran on would (for the checker to read again).
 #@ tier=area budget=10 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 up=$PATINA_GUESTS/examples/upcase
@@ -27,11 +28,13 @@ sweep --seeds 1..12 --max-findings 1 >s2.txt 2>&1 || rc=$?
 ran=$(find sw -mindepth 2 -maxdepth 2 -name result.json | wc -l)
 [ "$ran" = 6 ] || die "--max-findings reached by the runs judged again, yet $((ran - 6)) new runs ran: $(tail -3 s2.txt)"
 
-# The checker passes them again: under --keep fail each is pruned.
+# The checker passes them again: six ok runs, none run anew, each kept whole for the checker.
 verdict pass-again 'exit 0'
 rc=0
 sweep --seeds 1..6 --keep fail >s3.txt 2>&1 || rc=$?
 [ "$rc" = 0 ] || die "passing checker: exit $rc: $(tail -3 s3.txt)"
+[ "$(jq -c '[.runs, .findings, .outcomes.ok]' sw/report.json)" = "[6,0,6]" ] || die "runs judged again and passed: $(jq -c '{runs, findings, outcomes}' sw/report.json)"
+[ "$(find sw -mindepth 2 -maxdepth 2 -name result.json | wc -l)" = 6 ] || die "a run was started anew: $(tail -3 s3.txt)"
 kept=$(logs)
-[ "$kept" = 0 ] || die "$kept logs of runs judged again and passed kept under --keep fail"
-echo "ok: runs judged again count toward --max-findings and are pruned by --keep"
+[ "$kept" = 6 ] || die "$kept of 6 logs of runs judged again kept under --keep fail with a checker"
+echo "ok: runs judged again count toward --max-findings and as finished runs, kept as the checker's"

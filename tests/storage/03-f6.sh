@@ -5,10 +5,17 @@
 # fail the same way. F2 (the
 # journal-entry assertion) needs a crash in a window of a few crash points, which plain sweeps
 # almost never hit; 12-f2.sh finds it by trying every crash point.
-# The seed depends on the host's libc and CPU, so this is an area check, not a quick one; it was
-# found on x86_64, so the script runs there only.
+# The seed depends on the host's libc and CPU, so this is an area check, not a quick one, and it
+# runs only on the kind of host it was found on (the one the docs' numbers are from:
+# tests/docs/transcripts.py, REFERENCE); elsewhere it says SKIP.
 #@ tier=area budget=15 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
+kind=$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import transcripts as t
+print(t.host_kind(sys.argv[2]) == t.REFERENCE)' "$(dirname "$0")/../docs" "$PATINA_GUESTS")
+if [ "$kind" != True ]; then
+    echo "SKIP: seed 2001 is F6 on the kind of host it was found on (tests/docs/transcripts.py REFERENCE), not this one"
+    exit 0
+fi
 export PATINA_TEST_PAUSE_POINTS=0 # a test input (AGENTS.md)
 opts="--config $("$PATINA_CFG" preempt=traps cpus=24) --env FJ_N=2000 --buggify --crash machine:1"
 f=$RUNS/f6-2001

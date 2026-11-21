@@ -1,7 +1,10 @@
 name: Nightly
 
 # The release tier, `./check release` (tests/run.py), on both architectures; then `cargo audit`
-# over every lock file. Not a gate: nothing waits on it, and a red nightly is fixed forward.
+# over every lock file. Separately, every area (`./check AREA`, each under its own ceiling) on
+# both architectures: nothing else runs the area tier. Not a gate: nothing waits on it, and a red
+# nightly is fixed forward; a failed job fails the workflow, and scripts/land prints the last
+# nightly's result when it starts.
 on:
   schedule:
     - cron: "17 9 * * *"
@@ -51,5 +54,37 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nightly-runs-${{ matrix.runner }}
+          path: ${{ env.PATINA_CHECK_DIR }}/runs
+          retention-days: 7
+
+  # Every area in turn, each under its own ceiling (times the runner's calibration factor); a
+  # failed area does not stop the next. Apart from the release job, so that a red area never
+  # holds up a release.
+  areas:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/check-host
+      # tests/debug drives patina debug with gdb (and skips without it).
+      - run: sudo apt-get install -y -qq --no-install-recommends gdb
+      - name: Every area
+        run: |
+          failed=""
+          for area in $(./check areas); do
+            echo "::group::$area"
+            mise exec -- ./check "$area" || failed="$failed $area"
+            echo "::endgroup::"
+          done
+          [ -z "$failed" ] || { echo "::error::areas failed:$failed"; exit 1; }
+      - if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-areas-${{ matrix.runner }}
           path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7

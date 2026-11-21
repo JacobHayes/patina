@@ -5,6 +5,8 @@
     run.py release            the release gate (and the nightly job): every script in tier release
     run.py evidence [NAME..]  the evidence scripts (all, or those whose AREA/name contains NAME)
     run.py list               every script with its tiers, budget and slots
+    run.py areas              the areas with a quick or area script for this machine (the nightly
+                              runs each with ./check AREA, under its own ceiling)
 
 Before any script runs, it prints the build under test (PATINA: the version and SHA-256 that
 run.json records) and refuses a binary older than any source in its cargo dep-info (a build
@@ -215,6 +217,10 @@ def main():
             arch = f"  arch {s['arch']}" if s["arch"] else ""
             more = "".join(f"  {t} {b} s" for t, b in s["budgets"].items() if b != s["budget"])
             print(f"{s['tier']:13} {s['budget']:5} s  slots {s['slots']}  {s['area']}/{s['name']}{arch}{more}")
+        return 0
+    if args[0] == "areas":
+        on = [s for s in allsc if {"quick", "area"} & set(s["tiers"]) and s["arch"] in (None, platform.machine())]
+        print("\n".join(sorted({s["area"] for s in on})))
         return 0
     tier, sel = select(args, allsc)
     machine = platform.machine()

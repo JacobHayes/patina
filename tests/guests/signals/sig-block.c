@@ -6,7 +6,10 @@
 // blocks, while W is parked, or while W is runnable between two attempts of the wait. A
 // third process keeps pipe traffic going meanwhile, so a parked I/O wait is woken often to
 // check again. "proc": W is one thread and gets kill(W); "thread": a second thread of W
-// makes the call and gets tgkill, its main thread blocking SIGUSR1 and joining it.
+// makes the call and gets tgkill, its main thread blocking SIGUSR1 and joining it. For
+// nanosleep, clock_nanosleep and pause, whose loop checks the handler's flag before the call
+// (a signal between the two leaves the call waiting, natively too), the parent sends one a
+// second until W ends.
 //
 // W checks Linux's rules for the interrupted call (signal(7)): with SA_RESTART a restartable
 // call (read, write, accept, connect, recv, flock, fcntl F_OFD_SETLKW, open of a FIFO,
@@ -435,13 +438,26 @@ int main(int argc, char **argv) {
     if (!strcmp(cls, "retarget")) {
         kill(w, SIGURG);
         kill(w, SIGUSR2);
-    } else if (threaded) {
-        syscall(SYS_tgkill, w, tid, SIGUSR1);
-    } else {
-        kill(w, SIGUSR1);
     }
-    int st;
-    waitpid(w, &st, 0);
+    // nanosleep, clock_nanosleep and pause check the flag the handler sets, then make the call:
+    // a signal can come between the two (natively too, wherever the program is interrupted),
+    // and the call then waits for the next one. Those get one a (virtual) second until W ends.
+    int again = !strcmp(cls, "nanosleep") || !strcmp(cls, "clock_nanosleep") || !strcmp(cls, "pause");
+    int st, reaped = 0;
+    while (strcmp(cls, "retarget")) {
+        if (threaded)
+            syscall(SYS_tgkill, w, tid, SIGUSR1);
+        else
+            kill(w, SIGUSR1);
+        if (!again) break;
+        struct timespec sec = {1, 0};
+        nanosleep(&sec, NULL);
+        if (waitpid(w, &st, WNOHANG) == w) {
+            reaped = 1;
+            break;
+        }
+    }
+    if (!reaped) waitpid(w, &st, 0);
     if (b > 0) waitpid(b, NULL, 0);
     if (!WIFEXITED(st)) {
         printf("waiter killed by signal %d\n", WTERMSIG(st));

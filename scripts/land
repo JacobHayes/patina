@@ -27,6 +27,12 @@ done
 [ -n "${name:-}" ] || { sed -n '2,12p' "$0" >&2; exit 2; }
 [ "$name" != main ] || die "the branch bookmark cannot be main"
 cd "$(jj workspace root)"
+# The last nightly (the release tier and every area, .github/workflows/nightly.yml), for the
+# record: a red one is fixed forward, and it refuses nothing here.
+nightly=$(gh run list --workflow nightly.yml --branch main --limit 1 \
+    --json conclusion,status,createdAt,url --jq '.[0] | "\(.conclusion // .status) \(.createdAt) \(.url)"' 2>/dev/null) || nightly=""
+say "last nightly: ${nightly:-unknown (gh run list failed)}"
+case $nightly in success*|"") ;; *) say "the last nightly is not green: see it before landing more" ;; esac
 id() { jj log --no-graph -r "$1" -T 'commit_id ++ "\n"'; }
 changes=$(jj diff -r @ --summary)
 [ -z "$changes" ] || die "the working copy has changes: commit them (jj commit) or set them aside"

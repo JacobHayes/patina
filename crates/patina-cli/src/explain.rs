@@ -267,20 +267,21 @@ impl Line {
         (self.kind == "msg" && !matches!(peer, "?" | "conn")).then_some(peer)
     }
 
-    /// What folding compares: the line with its numbers taken out.
+    /// What folding compares: the line with its numbers taken out. A number is a token that
+    /// starts with a digit (`4`, `2848`, `0x1f`); digits inside a name are the name's (nodes
+    /// `n1` and `n2` are different nodes).
     fn key(&self) -> String {
         let mut k = format!("{}\u{1}{}\u{1}", self.who, self.kind);
-        let mut digit = false;
+        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let (mut prev, mut number) = (' ', false);
         for c in self.text.chars() {
-            if c.is_ascii_digit() {
-                if !digit {
-                    k.push('N');
-                }
-                digit = true;
-            } else {
-                k.push(c);
-                digit = false;
+            if number && word(c) {
+                prev = c;
+                continue;
             }
+            number = c.is_ascii_digit() && !word(prev);
+            k.push(if number { 'N' } else { c });
+            prev = c;
         }
         k
     }
@@ -1370,6 +1371,25 @@ impl Reader<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Folding takes numbers out of a line, not the digits of a name: the same cut with
+    /// other numbers folds, a cut of other nodes does not.
+    #[test]
+    fn folding_keeps_names() {
+        let line = |text: &str| Line {
+            seq: 0,
+            t: 0,
+            who: String::new(),
+            kind: "network",
+            text: text.into(),
+            quiet: false,
+        };
+        let a = line("NETWORK partition 4: bridge cut {n1} | {n2} for 2848 ms");
+        let b = line("NETWORK partition 9: bridge cut {n1} | {n2} for 0x1f ms");
+        let c = line("NETWORK partition 4: bridge cut {n1} | {n3} for 2848 ms");
+        assert_eq!(a.key(), b.key());
+        assert_ne!(a.key(), c.key());
+    }
 
     /// A name or label from the program reaches the terminal with no control or
     /// direction-changing character; one without any is unchanged.

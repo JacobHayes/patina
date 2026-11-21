@@ -21,8 +21,7 @@ done
 [ -n "$pid" ] || { kill "$launcher"; die "guest process not found"; }
 # The signal must arrive after the guest installed its handler: once its loop of getppid calls
 # shows in the boundary log (its stdout reaches the run directory only at the end). Only the
-# first records are read: the loop logs tens of MB a second, and dumping all of it on every
-# poll delays the signal and loads the disk the other scripts share.
+# first records are read.
 for i in $(seq 300); do
     "$PATINA" log dump --from 1 --to 200 "$o/inc-0/boundary.log" >"$o.dump" 2>/dev/null || true
     grep -q ' getppid ' "$o.dump" && break

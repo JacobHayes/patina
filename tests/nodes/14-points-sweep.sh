@@ -9,8 +9,9 @@
 # kept at a point is b's (`machine-at:N@b`), and every fault setting left was tried without
 # and no longer failed. Which settings a failure needs depends on its seed, and the failing
 # seed found depends on the host: on the reference host it is the crash alone (docs/GUIDE.md).
-# In the area, a failing seed is reduced to one of b's later crashes alone, at its place in a
-# first boot (the first crash alone, tried first, did not fail).
+# In the release tier, a failing seed is reduced to one of b's later crashes alone, at its place
+# in a first boot (the first crash alone, tried first, did not fail): a search over seeds, which
+# took the area tier's nodes past their budgets on the arm64 runner.
 # A node with `faults = false` is left out of `--crash machine` given without a scope.
 #@ tier=area,release budget=120 slots=6
 . "$(dirname "$0")/lib.inc"
@@ -86,10 +87,10 @@ for f in faults:
     assert t and not t[-1]["still_fails"], (f, m["tries"])
 print("minimize: reduced to %s (from %s)" % (m["to"], m["from"]))
 PY
-# In the area: a failure that a node's first crash alone does not give is reduced to one of its
-# later crashes alone. Among the first failing seeds, one where minimize's crash alone that kept
-# the failure is not the first it tried for that node.
-if [ "${CHECK_TIER:-}" = area ]; then
+# In the release tier: a failure that a node's first crash alone does not give is reduced to one
+# of its later crashes alone. Among the first failing seeds, one where minimize's crash alone
+# that kept the failure is not the first it tried for that node.
+if [ "${CHECK_TIER:-}" = release ]; then
     later=""; tried=0
     for s in $(seq 1 100); do
         [ "$(run "$o/l" $s $F -- $D)" = failure ] || continue

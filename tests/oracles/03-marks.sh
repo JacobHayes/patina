@@ -5,7 +5,7 @@
 # bytes (`label_hex`); a mark's text; a payload ending at the end of a mapping is read, and one
 # at a bad pointer or running past the mapping is EFAULT with no label. Marks from two threads
 # and a forked child: `verify --vary cpu,aslr,load` identical, each mark with its process. A
-# program that makes no SDK call has no string record. examples/checks/synced-before-mark on
+# program that makes no SDK call has no label or text record. examples/checks/synced-before-mark on
 # marklog (no crash, no faults): one finding on every seed of a range, naming the first
 # acknowledgement; `marklog fixed` (a progress mark before each fsync) passes with the prefix
 # `ack` and fails when every mark is judged.
@@ -45,11 +45,12 @@ pids=$("$PATINA" log events thr/run-0 --types mark | jq -r 'select(.type == "mar
 case $pids in child=*,t1=*,t2=*) ;; *) die "marks and their processes: $pids" ;; esac
 [ "$(echo "$pids" | tr ',' '\n' | cut -d= -f2 | sort -u | wc -l)" = 2 ] || die "two processes: $pids"
 
-# No SDK call, no string record.
+# No SDK call, no label or text record (its paths are logged as string records too).
 "$PATINA" run --out nosdk -- "$PATINA_GUESTS/hello-static" >nosdk.txt 2>&1 || die "hello: $(tail -2 nosdk.txt)"
 "$PATINA" log dump nosdk/inc-0/boundary.log >nosdk.dump || die "log dump of nosdk"
-n=$(awk '$2 == "str" {n++} END {print n + 0}' nosdk.dump)
-[ "$n" = 0 ] || die "string records in a run without SDK calls"
+awk '$2 == "str" && $5 == "path" {p++} END {exit !p}' nosdk.dump || die "no path record in nosdk: the dump's form changed"
+n=$(awk '$2 == "str" && ($5 == "label" || $5 == "text") {n++} END {print n + 0}' nosdk.dump)
+[ "$n" = 0 ] || die "label or text records in a run without SDK calls"
 
 # synced-before-mark: every seed of the bug, one signature; the fix passes; all marks judged,
 # the fix's progress marks fail it.

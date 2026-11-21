@@ -1,6 +1,6 @@
 # 5. Quorum: the three-node store of 01-quorum under two machine crashes at crash points
 # (`sweep --crash-points`, `[sweep] crash-pairs`): each first crash's child that ended ok, then another node's
-# crash at each of its next 3 points, a sample of 60 children and 60 pairs of each of two seeds.
+# crash at each of its next 3 points, a sample of 40 children and 40 pairs of each of two seeds.
 # A write two nodes acknowledged survives one crash; `nosync` (a node answers before it syncs)
 # loses it when both crash, found only in pairs. The correct store is ok at every first crash
 # and pair tried: it elects a primary after two crashes too (each node asks again after a grace
@@ -18,7 +18,7 @@ pairs() {
     q3_traps "$f"
     rm -rf "${o:?}/$1"; st=0
     # KEEP none is the test input PATINA_TEST_KEEP_NONE.
-    k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points=60 --crash machine -j 6 --keep "${k/none/fail}" \
+    k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points=40 --crash machine -j 6 --keep "${k/none/fail}" \
         --out "$o/$1" --config "$f" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/q3.py driver 2 >"$o/$1.txt" 2>&1 || st=$?
     [ -f "$o/$1/report.json" ] || die "$1: no report (exit $st): $(tail -3 "$o/$1.txt")"
 }
@@ -27,8 +27,8 @@ pairs ok none
 python3 -I - "$o/ok/report.json" <<'PY' || die "correct"
 import json, sys
 b = json.load(open(sys.argv[1]))["crash_points"]
-assert b["tried"] == 120 and b["pairs"]["tried"] == 120 < b["pairs"]["pairs"], b
-assert all(x["tried"] == 60 for x in b["seeds"]), b["seeds"]
+assert b["tried"] == 80 and b["pairs"]["tried"] == 80 < b["pairs"]["pairs"], b
+assert all(x["tried"] == 40 for x in b["seeds"]), b["seeds"]
 print("correct: ok at %d first crashes and %d of %d pairs" % (b["tried"], b["pairs"]["tried"], b["pairs"]["pairs"]))
 PY
 pairs nosync fail

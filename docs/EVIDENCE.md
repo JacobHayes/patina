@@ -1168,6 +1168,25 @@ default and every spin under traps.
 too. The three-node CPython store of `quorum/` runs under traps (its races are between
 processes, at their calls; `nodes/14-points-sweep` runs such clusters at the default).
 
+**Every area, after the switch.** 2026-11-21, every area on the x86_64 host, then every area
+nightly on the GitHub x86_64 and arm64 runners (`ubuntu-24.04`, `ubuntu-24.04-arm`): what
+failed or flaked, each fixed at its cause (the change's message has each):
+`oracles/03-marks` and `oracles/07-resume` (their expectations predated path records and
+rejudged runs being kept), `counters/06-migrate` (a moved run may end `pmu-late` on a loaded
+virtual machine), `signals/11-blocking` (the `sig-block` guest's parent tested a flag, then
+slept: a signal between the two was lost, natively too), `storage/02-f1` (no seed of 1 to
+100 reached open-after-crash on arm64 at 3 per mille; at 30 about one in ten; a check that
+could never fire), `storage/03-f6` (its pinned seed holds on the host kind it was found on),
+`insn/06-scanner-audit` (libcrypto's perlasm data tables decode as instructions),
+`quorum/05-quorum-pairs` (over its budget on arm64), `storage/12-f2` (121 s against 120 on
+the x86_64 runner, 37 s before the switch: its crash-point sweep runs under traps, the
+points being the disk's), `signals/08-outside` (once on the x86_64 runner: its guest's log
+grew by tens of MB a second and the script's read of its first records waited on the disk past
+the budget; the guest now counts between calls), and `patina explain`, whose folding key read the digits in names
+(`n1`, `n3`) as numbers and folded two different cuts into one line. The nightly's areas
+job, every area one after another under its own ceiling, took about 18 minutes on the x86_64
+runner and 32 on the arm64 one.
+
 ## Branch counters on arm64
 
 Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`

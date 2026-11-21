@@ -6,11 +6,13 @@
 # first such batch is about 800, some 1,700 to 3,000 crash points in, minutes of runs:
 # docs/EVIDENCE.md, "Crash-point enumeration"); here the window lies about 240 points in.
 # FJ_WIPE_PARTIAL=1: the early open-after-crash finding (F1) recovers instead of ending the
-# sweep. F2_N sets FJ_N (5: the journal ends before batch 5, no straddling item: red).
+# sweep. F2_N sets FJ_N (5: the journal ends before batch 5, no straddling item: red). Under
+# [sched] preempt = "traps": the crash points are the disk's, the same under either kind of
+# preemption, and load-time points make each of these runs about three times as long.
 #@ tier=release budget=120 slots=4
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f2
-"$PATINA" sweep -j 4 --seeds 1..3 --crash-points --crash machine --buggify \
+"$PATINA" sweep -j 4 --seeds 1..3 --crash-points --crash machine --buggify --config "$("$PATINA_CFG" preempt=traps)" \
     --env "FJ_N=${F2_N:-100}" --env FJ_VAL_SHIFT=289 --env FJ_WIPE_PARTIAL=1 --max-findings 1 \
     --keep fail --out "$o" \
     --mount "$W/fjall-harness":/guest:copy -- /guest/fjall-harness-debug >"$o.txt" 2>&1 || true

@@ -4,6 +4,7 @@
 # ./check evidence [NAME..]  the sweeps, matrices and soaks behind docs/EVIDENCE.md, by hand
 # ./check release            the release gate and the nightly job (ceiling 10 min)
 # ./check list               every script with its tier and budget
+# ./check areas              the areas with a script for this machine (the nightly runs each)
 # Builds patina (the runtime is embedded; a failed build stops here), builds the guests once per
 # source change (tests/guests.sh; a failed guest build stops here), then runs the scripts in
 # parallel (tests/run.py: the build under test, per-script times and budgets, total; it refuses
@@ -12,8 +13,8 @@
 set -euo pipefail; shopt -s inherit_errexit
 cd "$(dirname "$0")"
 root=$(pwd)
-[ $# -ge 1 ] || { sed -n '2,6p' "$0" >&2; exit 2; }
-[ "$1" = list ] && exec python3 -I tests/run.py list
+[ $# -ge 1 ] || { sed -n '2,7p' "$0" >&2; exit 2; }
+case $1 in list | areas) exec python3 -I tests/run.py "$1" ;; esac
 
 export PATINA_CHECK_DIR="${PATINA_CHECK_DIR:-$root/target/patina-check}"
 mkdir -p "$PATINA_CHECK_DIR"

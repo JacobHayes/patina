@@ -34,7 +34,10 @@ python3 -I "$HERE/lib/audit.py" "$o/census.tsv" "$o/scan.tsv" | tee "$o/audit.tx
 tail -1 "$o/audit.txt" | grep -q 'disagree=0' || die "the rule disagrees with objdump"
 [ "$ARCH" = x86_64 ] || exit 0
 echo "== decoder lengths vs objdump"
+# Not libcrypto: its text holds perlasm's data tables, which objdump's linear sweep decodes as
+# instructions (Ubuntu 24.04's build has hundreds such, `(bad)` and prefixes around them).
 for f in $files; do
+    case $f in *libcrypto*) continue ;; esac
     r=$(objdump -d -w -z "$f" | "$PATINA" __insn-scan --decode-check | tail -1)
     echo "  $f $r"
     grep -q 'mismatches=0' <<<"$r" || die "decoder: $r"

@@ -58,6 +58,8 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   (examples at 200 seeds, a determinism matrix, F2, pubsub, the node, signal, mapping and
   rewrite sweeps, install, doctor, replay; fails above 10 minutes); `evidence` is by hand.
   `./check list` shows every script; each tier run ends with its time and share of the ceiling.
+  The nightly also runs every area (`./check areas`) on both architectures, apart from the release
+  job; a red area fails the nightly, whose result `scripts/land` prints first. Fix it forward.
 - **Quick scripts are smoke checks of seconds**: per area the cheapest check that catches a gross
   break, on a seed or two. Sweeps over many seeds, planted-bug matrices and `verify --vary`
   repetitions go in `area` or `release` (or run fuller there: scripts see `CHECK_TIER`). A new
