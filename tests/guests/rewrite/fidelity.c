@@ -1,4 +1,4 @@
-// What a program sees of its own code under --preempt points (tests/rewrite/03-fidelity). Two
+// What a program sees of its own code under load-time points (tests/rewrite/03-fidelity). Two
 // small routines in assembly are planned the same in every build: fid_atomic, an atomic add
 // (x86_64: `lock xadd` with a 32-bit displacement, 8 bytes, flags dead after it; arm64:
 // `ldaddal`) whose count goes before it, the instruction running as a copy in a trampoline, and

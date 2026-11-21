@@ -1,4 +1,4 @@
-# 2. `--preempt points`: the runtime applies plans to stock programs (ARCHITECTURE "Load-time
+# 2. Load-time points (the default): the runtime applies plans to stock programs (ARCHITECTURE "Load-time
 # rewriting"), with a plan cache of its own under RUNS.
 #  a. each differential guest (C static and static-PIE, C++ and Rust static, Go; in the quick
 #     tier C static and Go) prints its native output; its plan was applied and points were taken; seeds 1 and 2 each repeat
@@ -6,7 +6,7 @@
 #     move the schedule);
 #  b. go-race-stock (compute-gap=8) and rs-race-stock (compute-gap=2), stock builds of a
 #     check-then-act on atomics with no system call in the window, end `failure` on some seed of
-#     1-40 and 1-80; without points nothing can switch inside that window: only a compute point
+#     1-40 and 1-80; with [sched] preempt = "traps" nothing can switch inside that window: only a compute point
 #     can (the window has no system call or pause), and a run without them has none (no
 #     `compute` in result.json);
 #  c. deadline-stock (a timer due inside a loop with no system call: compute-stall without
@@ -39,7 +39,7 @@ o=$RUNS/02-points
 rm -rf "${o:?}"
 mkdir -p "$o"
 export XDG_CACHE_HOME=$o/cache
-pts() { "$PATINA" run --preempt points "$@" >/dev/null 2>&1 || true; }
+pts() { "$PATINA" run "$@" >/dev/null 2>&1 || true; }
 
 # a. Four verifies at a time.
 guests="rw-c rw-c-spie rw-cxx rw-rs rw-go"; [ "${CHECK_TIER:-}" != quick ] || guests="rw-c rw-go"
@@ -48,7 +48,7 @@ for g in $guests; do
     printf '%s 1\n%s 2\n' "$g" "$g" >>"$o/a.jobs"
 done
 export PATINA G o
-xargs -P 4 -L 1 bash -euo pipefail -c '"$PATINA" verify --preempt points --seed "$2" --runs 3 \
+xargs -P 4 -L 1 bash -euo pipefail -c '"$PATINA" verify --seed "$2" --runs 3 \
     --vary cpu,load,aslr,sandbox,repeat --out "$o/$1-$2" -- "$G/$1" >"$o/$1-$2.txt" 2>&1 || true' sh <"$o/a.jobs"
 for g in $guests; do
     for s in 1 2; do
@@ -79,13 +79,13 @@ hunt() {
         done
         n=$((n + 4))
     done
-    [ -n "$first" ] || die "b. $name: no failure in seeds 1-$n under --preempt points"
+    [ -n "$first" ] || die "b. $name: no failure in seeds 1-$n under"
     echo "b. $name: failure first on seed $first ($(tail -1 "$o/$name-$first/inc-0/stdout"))"
 }
 hunt go-race 40 --fault compute-gap=8 -- "$G/compute/go-race-stock"
 hunt rs-race 80 --fault compute-gap=2 -- "$G/compute/rs-race-stock"
 for g in go-race-stock rs-race-stock; do
-    "$PATINA" run --seed 1 --fault compute-gap=2 --out "$o/traps-$g" -- "$G/compute/$g" >/dev/null 2>&1 || true
+    "$PATINA" run --config "$("$PATINA_CFG" preempt=traps)" --seed 1 --fault compute-gap=2 --out "$o/traps-$g" -- "$G/compute/$g" >/dev/null 2>&1 || true
     out=$(field "$o/traps-$g/result.json" outcome)
     cp=$(field "$o/traps-$g/result.json" compute)
     [ "$out" != - ] && [ "$cp" = - ] ||
@@ -99,7 +99,7 @@ pts --seed 1 --timeout 30 --out "$o/deadline" -- "$G/compute/deadline-stock" dea
 echo "c. deadline-stock: $(tail -1 "$o/deadline/inc-0/stdout")"
 
 # d.
-"$PATINA" verify --preempt points --seed 1 --fault compute-gap=8 --runs 3 --vary cpu --out "$o/cpu" -- "$G/compute/go-race-stock" >"$o/cpu.txt" 2>&1 || true
+"$PATINA" verify --seed 1 --fault compute-gap=8 --runs 3 --vary cpu --out "$o/cpu" -- "$G/compute/go-race-stock" >"$o/cpu.txt" 2>&1 || true
 grep -q '^identical' "$o/cpu.txt" || die "d. go-race-stock under --vary cpu: $(grep -m1 -v '^run ' "$o/cpu.txt")"
 if [ "$(uname -m)" = x86_64 ]; then
     [ "$(field "$o/cpu/run-0/result.json" rewrite.cpuid)" -ge 1 ] || die "d. no cpuid answered"
@@ -150,7 +150,7 @@ exec 9>&-
 wait "$p1" "$p2"
 [ "$waiting" -ge 2 ] || die "f. the two runs did not both wait on the entry ($waiting waiting)"
 [ "$(made "$o/lock-1" "$o/lock-2")" = 1 ] || die "f. two runs that waited on one entry made its plan $(made "$o/lock-1" "$o/lock-2") times"
-XDG_CACHE_HOME=$o/cache-sweep "$PATINA" sweep --preempt points --seeds 1..4 -j 4 --keep all \
+XDG_CACHE_HOME=$o/cache-sweep "$PATINA" sweep --seeds 1..4 -j 4 --keep all \
     --out "$o/sweep" -- "$G/rw-c" >"$o/sweep.txt" 2>&1 || true
 runs=$(find "$o/sweep" -name result.json -path '*seed-*' -printf '%h\n' | sort)
 [ -n "$runs" ] || die "f. the sweep left no run: $(tail -3 "$o/sweep.txt")"
@@ -173,7 +173,7 @@ for _ in $(seq 600); do
 done
 [ "$state" = T ] || die "g. the helper did not stop holding the lock"
 st=0
-XDG_CACHE_HOME=$held "$PATINA" run --preempt points --seed 1 --out "$o/held" -- "$G/rw-c" >/dev/null 2>"$o/held.err" || st=$?
+XDG_CACHE_HOME=$held "$PATINA" run --seed 1 --out "$o/held" -- "$G/rw-c" >/dev/null 2>"$o/held.err" || st=$?
 kill -CONT "$holder"
 wait "$holder"
 [ "$(field "$o/held/result.json" outcome)" = ok ] || die "g. a run behind a stopped holder (exit $st): $(res "$o/held"); $(cat "$o/held.err")"

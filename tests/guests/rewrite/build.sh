@@ -16,6 +16,8 @@
 #   rw-interior       interior.S (x86_64) or interior-a64.S (arm64), static and static-PIE
 #                     (rw-interior-pie), no C library: jumps the rewriter cannot see into and
 #                     around its patches (tests/rewrite/04-interior)
+#   librw-data.so     data.c, a shared object of data alone: no executable segment
+#                     (tests/rewrite/07-data)
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 out=${1:?output directory}
@@ -32,4 +34,5 @@ interior=$here/interior.S
 [ "$(uname -m)" = x86_64 ] || interior=$here/interior-a64.S
 $cc -nostdlib -static -no-pie -o "$out/rw-interior" "$interior"
 $cc -nostdlib -static-pie -o "$out/rw-interior-pie" "$interior"
+$cc -shared -nostdlib -fPIC -o "$out/librw-data.so" "$here/data.c"
 (cd "$here/go" && GOCACHE=${PATINA_BUILD_DIR:?}/gocache GOTOOLCHAIN=local CGO_ENABLED=0 go build -o "$out/rw-go" .)

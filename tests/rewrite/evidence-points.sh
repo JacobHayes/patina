@@ -1,4 +1,4 @@
-# Evidence for `--preempt points` (docs/EVIDENCE.md, "Load-time rewriting under Patina"):
+# Evidence for load-time points (the default) (docs/EVIDENCE.md, "Load-time rewriting under Patina"):
 # larger stock programs run under Patina with the runtime applying their plans and their
 # libraries'. Per program: the output equals the native run's; the same seed twice gives one
 # digest; wall time without points, with points on a cold plan cache (each plan made and
@@ -30,11 +30,11 @@ row() {
         d=$o/$name-$1; shift
         "$PATINA" run --seed 1 --timeout 1200 --out "$d" "$@" >/dev/null 2>&1 || true
     }
-    r traps0 "$@"
-    r traps "$@"
-    r cold --preempt points "$@"
-    r warm --preempt points "$@"
-    r again --preempt points "$@"
+    r traps0 --config "$("$PATINA_CFG" preempt=traps)" "$@"
+    r traps --config "$("$PATINA_CFG" preempt=traps)" "$@"
+    r cold "$@"
+    r warm "$@"
+    r again "$@"
     for k in traps cold warm again; do
         [ "$(field "$o/$name-$k/result.json" outcome)" = ok ] || die "$name $k: $(field "$o/$name-$k/result.json" message)"
         cmp -s "$want" "$o/$name-$k/inc-0/stdout" || die "$name $k: output differs from the native run"

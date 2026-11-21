@@ -24,7 +24,7 @@ same sweeps of `./kvlog fixed` (fsync before the ack) are clean. For your tool: 
 production does (its arguments, a starting tree with `--work DIR`), state its promise, check
 that promise after each crash, and make sure it can restart on what the crash left.
 
-## A multithreaded program: schedules, then points
+## A multithreaded program: schedules
 
 `jobs` runs three jobs on threads and expects their results in job order. Seeds alone find it:
 
@@ -37,18 +37,17 @@ patina sweep --seeds 1..20 --out patina-out/jobs -- ./jobs
 ```
 
 A race with no system call inside it, here two threads adding to a counter with a plain load
-and store, is `ok` on every seed until the code gets switch points:
+and store, is found the same way: threads also switch inside computation.
 
 <!-- transcript points
 arch: x86_64
 setup: cp "$GUESTS/rw-races" races
 skip: 1
-exit: 0 1
+exit: 1
 -->
 ```sh
 cc -O2 -pthread -o races tests/guests/rewrite/races.c
 patina sweep --seeds 1..20 --out patina-out/races -- ./races lms
-patina sweep --seeds 1..20 --preempt points --fault compute-gap=2..64 --out patina-out/races-points -- ./races lms
 ```
 
 ## A client and server on loopback: network faults

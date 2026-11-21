@@ -32,7 +32,7 @@ use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use proto::compute::{NO_LIMIT, PREEMPT_NR, REASON_DEADLINE, REASON_SWITCH};
 use proto::layout::{COMPUTE_CELL, PAGE};
 
-/// The cell's address: with `--preempt points` the plans' (`proto::plan::CELL`, mapped at the
+/// The cell's address: with load-time points the plans' (`proto::plan::CELL`, mapped at the
 /// image's start), otherwise `COMPUTE_CELL` (mapped at the first hello).
 #[inline]
 fn cell() -> u64 {
@@ -53,6 +53,9 @@ pub const COUNTERS: u64 = 2;
 /// Per-process (per address space) state, in `Proc`. Shared with a vfork child, as the cell is.
 pub struct Compute {
     pub mode: u64,
+    /// Whether an image of this address space said hello: its first is a start, also when
+    /// load-time points turned the cell on before it (`start_points`).
+    pub hello: bool,
     /// Event kinds the image's hook copies named.
     pub kinds: u64,
     /// The value last written to the cell, and that less the events charged since; the
@@ -62,7 +65,7 @@ pub struct Compute {
     pub handed: i64,
     pub draw: u64,
     pub cut: u64,
-    /// With `--preempt points`: the segment's points that stayed with the thread before the
+    /// With load-time points: the segment's points that stayed with the thread before the
     /// one it ends at, and whether that one was drawn as a switch to another thread (`chain`).
     pub stays: u64,
     pub other: bool,
@@ -74,6 +77,7 @@ impl Compute {
     pub const fn new() -> Compute {
         Compute {
             mode: OFF,
+            hello: false,
             kinds: 0,
             armed: 0,
             handed: 0,
@@ -179,7 +183,7 @@ pub fn exit(ts: &mut ThreadState) {
     exit_slow(ts);
 }
 
-/// With `--preempt points`, a segment armed right after the supervisor gave this thread the
+/// With load-time points, a segment armed right after the supervisor gave this thread the
 /// turn, with nothing since (`Ctl::view`: the run's `seq` is still the one it left), is armed
 /// knowing how many threads are runnable: the supervisor's state is the one it would answer a
 /// yield from, so the points that would stay with this thread are drawn here and not taken
@@ -211,7 +215,11 @@ fn exit_slow(ts: &mut ThreadState) {
         0
     };
     let (slot, segs) = (ts.slot, ts.compute_segs);
-    let mean = if crate::plans::on() && cfg.compute_budget != 0 {
+    // The budget holds load-time points to a multiple of the program's work; in a process
+    // whose rebuilt code has said hello the points switch at the drawn gap throughout, as they
+    // do without plans (a deeper search the user built for).
+    let budget = crate::plans::on() && cfg.compute_budget != 0 && proc().compute.kinds == 0;
+    let mean = if budget {
         let s = &c.compute;
         proto::compute::budget(
             cfg.compute_gap,
@@ -254,8 +262,9 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
         return -crate::raw::e::EINVAL;
     }
     let p = &mut proc().compute;
-    let start = p.mode == OFF;
-    if start {
+    let start = !p.hello;
+    p.hello = true;
+    if p.mode == OFF {
         map_cell();
         if config().pmu & proto::ctl::PMU_ON != 0 {
             p.mode = COUNTERS;
@@ -267,6 +276,9 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
         }
     }
     p.kinds |= kinds;
+    if kinds & proto::sdk::COMPUTE_LINE != 0 {
+        crate::plans::lines();
+    }
     let mut path = [0u8; 4096];
     let n = match kinds & proto::sdk::COMPUTE_LINE {
         0 => image_at(pc, &mut path),
@@ -303,7 +315,7 @@ fn map_cell() {
     }
 }
 
-/// An image's start with `--preempt points`: the cell is there before the first instruction,
+/// An image's start with load-time points: the cell is there before the first instruction,
 /// since every trampoline counts in it; `exit` arms it on the way into the program.
 pub fn start_points() {
     if crate::plans::on() {

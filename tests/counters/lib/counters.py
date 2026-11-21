@@ -20,7 +20,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 JOBS = int(os.environ.get("COUNTERS_JOBS", "8"))
 GO = WL + "/go-static"
 FAULT = ["--fault", "fs-error-permille=20"]
-PMU = ["--preempt", "branches"]
+PMU = ["preempt=branches"]
+# The mode before load-time points were the default: system calls, spin hints and probes.
+TRAPS = ["preempt=traps"]
 
 
 TEST_KEYS = ("stall-ms", "host-cpu", "pause-points", "spin-probes")
@@ -64,9 +66,9 @@ def ppatina(required=True):
     p = r.stdout.strip()
     if r.returncode == 0 and p and os.path.exists(p):
         # The capability is not enough: the host must expose a PMU (a VM may not) of a
-        # supported CPU family; otherwise --preempt branches refuses and says why.
+        # supported CPU family; otherwise preempt = "branches" refuses and says why.
         subprocess.run(["rm", "-rf", RUNS + "/pmu-probe"])
-        t = subprocess.run([p, "run", "--seed", "1", "--out", RUNS + "/pmu-probe", "--mount", GU + ":/guest:copy"] + PMU
+        t = subprocess.run([p, "run", "--seed", "1", "--out", RUNS + "/pmu-probe", "--mount", GU + ":/guest:copy"] + config(PMU)[0]
                            + ["--", "/guest/counters/compute", "recur"], capture_output=True, text=True)
         o = outcome(RUNS + "/pmu-probe")
         if o and pmu(o) == "on":

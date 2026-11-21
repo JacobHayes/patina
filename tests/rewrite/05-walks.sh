@@ -1,4 +1,4 @@
-# 5. Walks (`--preempt points`, the test input `PATINA_TEST_COMPUTE_WALK`; ARCHITECTURE "Load-time rewriting"): a
+# 5. Walks (load-time points, the test input `PATINA_TEST_COMPUTE_WALK`; ARCHITECTURE "Load-time rewriting"): a
 # switch at a load-time point is taken a drawn number of instructions past it, single-stepped.
 #  a. rw-races lms (tests/guests/rewrite/races.c: a load and a store with no site between them)
 #     loses an update on some seed of 1-8 with walks, and on none of them without: a plain
@@ -26,7 +26,7 @@ o=$RUNS/05-walks
 rm -rf "${o:?}"
 mkdir -p "$o"
 export XDG_CACHE_HOME=$o/cache
-pts() { "$PATINA" run --preempt points "$@" >/dev/null 2>&1 || true; }
+pts() { "$PATINA" run "$@" >/dev/null 2>&1 || true; }
 # The longest walk is a test input (AGENTS.md): PATINA_TEST_COMPUTE_WALK.
 
 # a. Four seeds at a time, with and without walks.
@@ -57,7 +57,7 @@ xargs -P 4 -L 1 bash -euo pipefail -c 'n=$1 s=$2; shift 2
     w=compute-gap=2..64 PATINA_TEST_COMPUTE_WALK=16
     [ "$n" = rw-races ] || w=compute-gap=64..256 PATINA_TEST_COMPUTE_WALK=32
     export PATINA_TEST_COMPUTE_WALK
-    "$PATINA" verify --preempt points --seed "$s" --fault "$w" --runs 3 --vary cpu,load,aslr,sandbox,repeat \
+    "$PATINA" verify --seed "$s" --fault "$w" --runs 3 --vary cpu,load,aslr,sandbox,repeat \
         --out "$o/v-$n" -- "$G/$n" "$@" >"$o/v-$n.txt" 2>&1 || true' sh <"$o/b.jobs"
 for n in rw-races $guests; do
     grep -q '^identical' "$o/v-$n.txt" || die "b. $n: $(grep -m1 -v '^run ' "$o/v-$n.txt")"

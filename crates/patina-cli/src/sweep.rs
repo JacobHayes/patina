@@ -1060,7 +1060,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     }
     // Each run's program, by its case (a selected few of the file's with --only-case).
     let mut program_of: std::collections::BTreeMap<Option<usize>, String> = Default::default();
-    // The programs run with `--preempt points`: planned here once before the runs start.
+    // The programs run with load-time points: planned here once before the runs start.
     let mut planned: std::collections::BTreeSet<String> = Default::default();
     let mut first_cfg = None;
     for &i in &list {
@@ -1098,7 +1098,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             let p = crate::config::program(&cmd[0], &ccfg.mounts).map_err(at)?;
             programs.insert(key.clone(), p);
         }
-        if ccfg.points {
+        if ccfg.preempt.points() {
             planned.insert(key.clone());
         }
         if first_cfg.is_none() {
@@ -1394,7 +1394,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             report::bytes(st.run_bytes)
         )));
     }
-    // With `--preempt points`, the plans of each program and the libraries it names, made
+    // With load-time points, the plans of each program and the libraries it names, made
     // once here on the sweep's width before its runs start, each pinned to one CPU, find them
     // in the plan cache (a run that meets a file not planned yet waits for the one that plans
     // it: `rewrite::cache`).

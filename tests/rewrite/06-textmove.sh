@@ -1,4 +1,4 @@
-# 6. A change to part of a rewritten image (`--preempt points`; ARCHITECTURE "Load-time
+# 6. A change to part of a rewritten image (load-time points; ARCHITECTURE "Load-time
 # rewriting", "Changes"): rw-textmove (tests/guests/rewrite/textmove.c, static) changes the page
 # of its function cold, then two threads compute in hot, a page it did not touch:
 #  - mremap: the page moved with MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP (the copy
@@ -31,7 +31,7 @@ hot=$(sym hot) cold=$(sym cold)
 export PATINA T o
 printf '%s\n' mremap mprotect munmap remap | xargs -P 4 -I M bash -euo pipefail -c '
     "$T" M >"$o/M.want"
-    "$PATINA" verify --preempt points --seed 2 --fault compute-gap=64..256 --runs 3 \
+    "$PATINA" verify --seed 2 --fault compute-gap=64..256 --runs 3 \
         --vary cpu,load,aslr,sandbox,repeat --out "$o/v-M" -- "$T" M >"$o/v-M.txt" 2>&1 || true'
 
 for m in mremap mprotect munmap remap; do

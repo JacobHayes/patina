@@ -2,14 +2,16 @@
 # the 100-seed stall rates are tests/runtimes/evidence-go-stalls.sh, docs/EVIDENCE.md).
 #  a. R: `ok`, stdout equal to a native run after masking "~ " lines and the gomaxprocs line.
 #  b. Spin-waits: the reproducer go-sweep (whose background sweeper spins without a system call
-#     or `pause`) is ok on seeds 1-8; with spin probes off it ends unsupported, stop
-#     compute-stall, on at least one of them, and every other run is ok. go-static is ok on
+#     or `pause`) is ok on seeds 1-8; with traps and spin probes off it ends unsupported,
+#     stop compute-stall, on at least one of them, and every other run is ok (load-time
+#     points switch inside the sweeper's loop, so it does not stall). go-static is ok on
 #     seeds 1-8.
 #  c. D (seed 1, --vary cpu,load,aslr,sandbox), faults off and on.
 #  d. F: an injected file error is seen by the program (printed "file error:" lines).
 #  e. Report: threads, SIGURG sends and deliveries, rdtsc emulations, futex calls, denied calls.
 #  f. go-spin: a goroutine computing without a trap for less than stall-ms is `ok`; a 20 s
-#     spin under stall-ms = 1000 ends as `unsupported` (compute-stall) (after 1 s, not 20).
+#     spin with traps under stall-ms = 1000 ends as `unsupported` (compute-stall) (after 1 s,
+#     not 20; with load-time points it is preempted at its loop's point and runs to its end).
 #  g. Network: D with network faults; net-reset-permille seen as "connection reset
 #     by peer", a 10 s net-blackout seen as the http.Client's 5 s timeout, net-chunk-max=1
 #     with all 16 responses correct.
@@ -37,7 +39,7 @@ echo "== b. spin-waits"
 PATINA_TEST_STALL_MS=1000 sweep go-sweep $G 1-8 -- -- /guest/go-sweep
 echo "go-sweep: ok $(count go-sweep ok) of 8"
 [ "$(count go-sweep ok)" = 8 ] || fail "go-sweep: not every seed ok"
-PATINA_TEST_STALL_MS=1000 PATINA_TEST_SPIN_PROBES=0 sweep go-sweep-np $G 1-8 -- -- /guest/go-sweep
+PATINA_TEST_STALL_MS=1000 PATINA_TEST_SPIN_PROBES=0 sweep go-sweep-np $G 1-8 -- --config "$("$PATINA_CFG" preempt=traps)" -- /guest/go-sweep
 cs=$(stalls go-sweep-np); ok=$(count go-sweep-np ok)
 echo "go-sweep, spin probes off: ok $ok, compute-stall $cs of 8"
 [ "$cs" -gt 0 ] || fail "go-sweep did not reproduce the spin-wait with spin probes off"
@@ -67,7 +69,7 @@ echo "== f. go-spin"
 PATINA_TEST_STALL_MS=3000 run $G "$RUNS/spin-short" 1 -- /guest/go-spin 300000000
 echo "short spin, stall-ms 3000: class $(field "$RUNS/spin-short/result.json" outcome), wall $(field "$RUNS/spin-short/result.json" wall_ms) ms, stdout: $(cat "$RUNS/spin-short/inc-0/stdout")"
 [ "$(field "$RUNS/spin-short/result.json" outcome)" = ok ] || fail "go-spin short: not ok"
-PATINA_TEST_STALL_MS=1000 run $G "$RUNS/spin-20s" 1 -- /guest/go-spin 20000000000
+PATINA_TEST_STALL_MS=1000 run $G "$RUNS/spin-20s" 1 --config "$("$PATINA_CFG" preempt=traps)" -- /guest/go-spin 20000000000
 echo "20 s spin, stall-ms 1000: class $(field "$RUNS/spin-20s/result.json" outcome), wall $(field "$RUNS/spin-20s/result.json" wall_ms) ms, detail $(field "$RUNS/spin-20s/result.json" message)"
 [ "$(field "$RUNS/spin-20s/result.json" stop)" = compute-stall ] || fail "go-spin 20 s: not compute-stall"
 

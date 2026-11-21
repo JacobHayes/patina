@@ -381,7 +381,7 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         },
     });
     checks.push(Check {
-        name: "plan cache (--preempt points, optional)",
+        name: "plan cache (load-time points)",
         required: false,
         result: Ok(crate::rewrite::cache::summary()),
     });

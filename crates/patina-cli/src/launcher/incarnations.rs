@@ -306,7 +306,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 unix_sockets,
                 tmpfs: [o.cfg.tmpfs_bytes, tmpfs_full],
                 shadow_bytes,
-                pmu: o.cfg.pmu.on.then_some(pmu),
+                pmu: o.cfg.preempt.branches().then_some(pmu),
                 sdk,
                 sched: crate::result::SchedCounts {
                     pause_sites: insn.patched[proto::insn::SiteKind::Pause as usize],
@@ -382,11 +382,11 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     }
 }
 
-/// With `--preempt points`, the run's plans: made for the program and the libraries it names
+/// With load-time points, the run's plans: made for the program and the libraries it names
 /// before the sandbox starts (on the CPUs this process may use, at most 8), the rest when the
 /// runtime asks (`launcher::plans`).
 fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planner>>> {
-    if !o.cfg.points {
+    if !o.cfg.preempt.points() {
         return Ok(None);
     }
     let p = crate::launcher::plans::Planner::new(

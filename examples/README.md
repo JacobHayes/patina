@@ -29,11 +29,11 @@ patina sweep --seeds 1..20 --out patina-out/quickstart -- examples/quickstart/ta
 
 ```text
 ...
-patina sweep: 20 runs, 14 findings in 1 group, 6 ok   (0.2s, 8 jobs)
-outcomes: failure 14, ok 6
+patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.5s, 8 jobs)
+outcomes: failure 11, ok 9
 
 failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101
-  14 of 20 runs   first: seed 1   replayed: identical
+  11 of 20 runs   first: seed 1   replayed: identical
   example: panicked at src/main.rs:28:5: assertion `left == right` failed: results out of job order
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/patina-out/quickstart/seed-1
@@ -84,11 +84,11 @@ patina sweep --seeds 1..20 --faults disk --out patina-out/journal-py \
 
 ```text
 ...
-patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.2s, 8 jobs)
-outcomes: ok 9, violation 11
+patina sweep: 20 runs, 14 findings in 1 group, 6 ok   (1.1s, 8 jobs)
+outcomes: ok 6, violation 14
 
 violation always: journal-intact: N bytes
-  11 of 20 runs   first: seed 2   replayed: identical
+  14 of 20 runs   first: seed 2   replayed: identical
   example: journal-intact: 7081 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/examples/journal-py:/guest --mount /tmp/patina/sdk/python:/sdk --faults disk -- python3 /guest/journal.py
@@ -111,16 +111,16 @@ patina sweep --seeds 1..20 --crash machine --out patina-out/acklog -- ./acklog
 
 ```text
 ...
-patina sweep: 20 runs, 6 findings in 1 group, 14 ok   (0.2s, 8 jobs)
-outcomes: ok 14, violation 6
+patina sweep: 20 runs, 5 findings in 1 group, 15 ok   (0.4s, 8 jobs)
+outcomes: ok 15, violation 5
 
 violation always: acked-records-kept: N acknowledged, N stored
-  6 of 20 runs   first: seed 3   replayed: identical
-  example: acked-records-kept: 23 acknowledged, 0 stored
+  5 of 20 runs   first: seed 2   replayed: identical
+  example: acked-records-kept: 7 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 3 --crash machine -- /tmp/patina/acklog
-  replay: patina replay /tmp/patina/patina-out/acklog/seed-3
-  explain: patina explain /tmp/patina/patina-out/acklog/seed-3
+  rerun:  patina run --seed 2 --crash machine -- /tmp/patina/acklog
+  replay: patina replay /tmp/patina/patina-out/acklog/seed-2
+  explain: patina explain /tmp/patina/patina-out/acklog/seed-2
 ```
 
 ## kvlog-c (C, no SDK): lost data found by a check from outside
@@ -140,17 +140,17 @@ patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept
 
 ```text
 ...
-patina sweep: 30 runs, 9 findings in 1 group, 21 ok   (0.3s, 8 jobs)
-outcomes: ok 21, violation 9
-check: judged 13 of 30 runs: 4 passed, 9 failed; 17 not judged (no crash in this run 17)
+patina sweep: 30 runs, 7 findings in 1 group, 23 ok   (0.5s, 8 jobs)
+outcomes: ok 23, violation 7
+check: judged 9 of 30 runs: 2 passed, 7 failed; 21 not judged (no crash in this run 21)
 
 violation check: acked-record-lost: acknowledged N, N stored after the crash
-  9 of 30 runs   first: seed 2   replayed: identical
-  example: acked-record-lost: acknowledged 22, 21 stored after the crash
+  7 of 30 runs   first: seed 5   replayed: identical
+  example: acked-record-lost: acknowledged 7, 6 stored after the crash
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- /tmp/patina/kvlog
-  replay: patina replay /tmp/patina/patina-out/kvlog/seed-2
-  explain: patina explain /tmp/patina/patina-out/kvlog/seed-2
+  rerun:  patina run --seed 5 --crash machine:10 --check examples/checks/acked-kept -- /tmp/patina/kvlog
+  replay: patina replay /tmp/patina/patina-out/kvlog/seed-5
+  explain: patina explain /tmp/patina/patina-out/kvlog/seed-5
 ```
 
 Runs that did not crash are not judged.
@@ -179,16 +179,16 @@ patina sweep --seeds 1..40 --faults disk --ok-exit 1 --check 'examples/checks/sa
 
 ```text
 ...
-patina sweep: 40 runs, 9 findings in 1 group, 31 ok (4 by --ok-exit)   (0.3s, 8 jobs)
-outcomes: ok 31, violation 9
-check: judged 36 of 40 runs: 27 passed, 9 failed; 4 not judged (clean-failure 4)
+patina sweep: 40 runs, 11 findings in 1 group, 29 ok   (0.5s, 8 jobs)
+outcomes: ok 29, violation 11
+check: judged 40 of 40 runs: 29 passed, 11 failed
 
 violation check: wrong-output: Files want/out.txt and got/out.txt differ
-  9 of 40 runs   first: seed 5   replayed: identical
+  11 of 40 runs   first: seed 2   replayed: identical
   faults in every failing run: fs-short      in none: fs-error, fsync-error
-  rerun:  patina run --seed 5 --faults disk --check 'examples/checks/same-tree patina-out/upcase-ref' --ok-exit 1 -- /tmp/patina/upcase
-  replay: patina replay /tmp/patina/patina-out/upcase/seed-5
-  explain: patina explain /tmp/patina/patina-out/upcase/seed-5
+  rerun:  patina run --seed 2 --faults disk --check 'examples/checks/same-tree patina-out/upcase-ref' --ok-exit 1 -- /tmp/patina/upcase
+  replay: patina replay /tmp/patina/patina-out/upcase/seed-2
+  explain: patina explain /tmp/patina/patina-out/upcase/seed-2
 ```
 
 The same sweep without `--ok-exit` and `--check` reports only the clean failures.
@@ -243,12 +243,12 @@ patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
 
 ```text
 ...
-patina sweep: 20 runs, 8 findings in 1 group, 12 ok   (0.2s, 8 jobs)
-outcomes: failure 8, ok 12
+patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (0.7s, 8 jobs)
+outcomes: failure 13, ok 7
 compute points: /tmp/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
-  8 of 20 runs   first: seed 2   replayed: identical
+  13 of 20 runs   first: seed 2   replayed: identical
   example: lost updates: 198 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/patina/stats-cp
   replay: patina replay /tmp/patina/patina-out/stats-cp/seed-2
@@ -279,12 +279,12 @@ patina sweep: 20 runs, 5 findings in 1 group, 15 ok   (0.1s, 8 jobs)
 outcomes: ok 15, violation 5
 
 violation always: served-only-public: N bytes
-  5 of 20 runs   first: seed 4   replayed: identical
+  5 of 20 runs   first: seed 3   replayed: identical
   example: served-only-public: 66 bytes
   faults in every failing run: path-swap      in none: -
-  rerun:  patina run --seed 4 --fault path-swap-permille=300 -- /tmp/patina/serve
-  replay: patina replay /tmp/patina/patina-out/serve/seed-4
-  explain: patina explain /tmp/patina/patina-out/serve/seed-4
+  rerun:  patina run --seed 3 --fault path-swap-permille=300 -- /tmp/patina/serve
+  replay: patina replay /tmp/patina/patina-out/serve/seed-3
+  explain: patina explain /tmp/patina/patina-out/serve/seed-3
 ```
 
 The fixed program opens with `O_NOFOLLOW` and serves

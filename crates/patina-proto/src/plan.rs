@@ -1,4 +1,4 @@
-//! Load-time plans (`--preempt points`, ARCHITECTURE.md "Load-time rewriting"): what the
+//! Load-time plans (load-time points, ARCHITECTURE.md "Load-time rewriting"): what the
 //! runtime and the launcher's plan broker agree on. The plan file's format is the host's
 //! (`patina-cli/src/rewrite/plan.rs`); the runtime reads only the rows named here, at the
 //! offsets the broker's answer gives, and never decodes an instruction.
@@ -101,7 +101,7 @@ pub const KIND_FAR: u8 = 6;
 /// (`dec qword [abs32]`, 8 bytes) and its `jz` (2 bytes).
 pub const JUMP_ROW: u64 = 10;
 
-/// The count's cell with `--preempt points`: one word below 2 GiB, so a trampoline in any image
+/// The count's cell with load-time points: one word below 2 GiB, so a trampoline in any image
 /// reaches it with a 32-bit absolute operand (`dec qword [0x7fff0000]`).
 pub const CELL: u64 = 0x7fff_0000;
 

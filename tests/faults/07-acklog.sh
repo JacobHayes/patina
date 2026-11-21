@@ -2,8 +2,9 @@
 # seeds (default 20) per model, both models: the correct variant is ok on every seed and
 # some runs crash (volume: tests/faults/evidence-crashes.sh). The variant without
 # the record fsync fails with INVARIANT acked-record-lost on at least one of ACK_SEEDS seeds
-# under each model, and its result says why: faults.recent ends with the machine crash, and
-# what it lost includes data.log. That seed run twice gives the same digest and the same post-crash
+# under each model, and its result says why: the last crash in faults.recent is the machine
+# crash, and what it lost includes data.log (faults the restarted run takes before it finds the
+# loss can follow it). That seed run twice gives the same digest and the same post-crash
 # trees. Also: turning crashes on does not change the run before the crash (boundary logs
 # equal up to the crash seq).
 #@ tier=quick budget=30 slots=4
@@ -37,11 +38,12 @@ PY
     python3 -I - "$o/result.json" "$m" "$found" <<'PY' || exit 1
 import json, sys
 r = json.load(open(sys.argv[1]))
-last = r["faults"]["recent"][-1]
-print("%s nofsync caught at seed %s: %s; plan %s; last fault: %s" % (
+last = [f for f in r["faults"]["recent"] if f["fault"] == "crash"][-1:] or [r["faults"]["recent"][-1]]
+last = last[0]
+print("%s nofsync caught at seed %s: %s; plan %s; last crash: %s" % (
     sys.argv[2], sys.argv[3], r["message"], json.dumps(r["faults"]["plan"], sort_keys=True), json.dumps(last, sort_keys=True)))
 if last["fault"] != "crash" or last["kind"] != "machine" or "/work/data.log" not in last.get("lost", {}).get("paths", []):
-    sys.exit("FAIL: faults.recent does not end with a machine crash that lost /work/data.log")
+    sys.exit("FAIL: the last crash in faults.recent is not a machine crash that lost /work/data.log")
 PY
     run "$o-again" "$found" --config "$cfg" --faults disk --crash machine -- /guest/ack-log nofsync
     a=$(field "$o/result.json" digest)

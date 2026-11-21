@@ -1,4 +1,4 @@
-# 3. `patina debug` of `--preempt points` runs: gdb passes the run's SIGTRAPs and refuses stepping.
+# 3. `patina debug` of runs with load-time points (the default): gdb passes the run's SIGTRAPs and refuses stepping.
 #    go-race-stock (a stock Go build; its scheduling points are load-time plans): stopped at its
 #    first scheduling point, a breakpoint in withdraw (a goroutine) is hit; stepi, next and step
 #    are refused (an error in gdb, the run unchanged); a watchpoint on one round's balance stops
@@ -15,7 +15,7 @@ print(next(e["seq"] for e in ev if "seq" in e and eval(sys.argv[1])))' "$2"
 }
 
 r=$RUNS/gorace
-prun "$r" --seed 1 --preempt points --fault compute-gap=8 -- "$G/compute/go-race-stock"
+prun "$r" --seed 1 --fault compute-gap=8 -- "$G/compute/go-race-stock"
 # The run's first scheduling point: before the goroutines start.
 at=$(seq_of "$r" 'e["type"] == "preempt"')
 cat >"$RUNS/go.gdb" <<'EOF'
@@ -55,7 +55,7 @@ echo "points, Go: breakpoint in withdraw; stepping refused; the watchpoint under
 
 # C, dynamic and position-independent: the program's symbols and plan at its load address.
 r=$RUNS/stats
-prun "$r" --seed 1 --preempt points -- "$G/examples/stats"
+prun "$r" --seed 1 -- "$G/examples/stats"
 at=$(seq_of "$r" 'e["type"] == "call" and e["name"].startswith("clone")')
 cat >"$RUNS/c.gdb" <<'EOF'
 watch *(long *)&stats

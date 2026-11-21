@@ -150,8 +150,8 @@ explain: patina explain /tmp/log-limit/patina-out/run-1
 The starting work tree (`--work`) does not count against it; what the program writes to the
 work tree does (the operation log keeps it for crashes).
 
-A full filesystem under `--out` ends the run `internal`, stop `disk-full`. Under `--preempt
-branches`, an overflow interrupt from the branch counter that comes later than `[sched]
+A full filesystem under `--out` ends the run `internal`, stop `disk-full`. Under `[sched]
+preempt = "branches"`, an overflow interrupt from the branch counter that comes later than `[sched]
 pmu-margin` ends it `internal`, stop `pmu-late` ([Scheduling](#scheduling)). A guest process killed
 by SIGKILL from outside the run (the host's out-of-memory killer, or a kill sent on the host) ends
 it `internal`, stop `killed`, naming the process, with its wait status in `result.json`. With `--crash`, a run ends by
@@ -467,13 +467,13 @@ $ patina sweep --seeds 1..2 --crash-points --crash machine -- ./acklog
 sweep: 2 seeds, 328 crash points
 new: violation always: acked-records-kept: N acknowledged, N stored   (seed 1@8: patina replay /tmp/acklog/patina-out/sweep/seed-1@8)
 sweep: replaying the first seed of 1 finding
-sweep: 5.6 MiB kept in /tmp/acklog/patina-out/sweep
-patina sweep: 330 runs, 164 findings in 1 group, 166 ok   (1.2s, 8 jobs)
-outcomes: ok 166, violation 164
+sweep: 2.0 MiB kept in /tmp/acklog/patina-out/sweep
+patina sweep: 330 runs, 161 findings in 1 group, 169 ok   (3.8s, 8 jobs)
+outcomes: ok 169, violation 161
 crash points: 328 of 328 tried
 
 violation always: acked-records-kept: N acknowledged, N stored
-  164 of 330 runs   first: seed 1@8   replayed: identical
+  161 of 330 runs   first: seed 1@8   replayed: identical
   example: acked-records-kept: 1 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 1 --crash machine-at:8 -- /tmp/acklog/acklog
@@ -528,18 +528,16 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   system call switches threads; `[run] cpus` (default 4) is the CPU count the program sees,
   which sizes its thread pools. Each changes every seed's schedule, so the same seeds then show other
   runs; on their own they did not make the storage findings more frequent.
-- **A race with no system call in it.** Threads switch only at system calls, `pause`
-  instructions and spin probes. Two threads that race on plain memory with none of these
-  between the conflicting accesses always run them in the same order, whatever the seed.
-  Rebuild the code with compute points ([Deeper search](#deeper-search-rebuilt-code));
-  `--preempt points` switches at the branches, calls and atomics of stock code
-  ([Points in stock code](#points-in-stock-code---preempt-points)); branch counters
-  (`--preempt branches`, AMD Zen 5 and Arm Neoverse N2 only) switch there too.
-- **A deadline that never comes.** In stock code virtual time advances by a fixed charge per
-  system call and when every thread sleeps, not with computation, so neither `[run] time-limit`
-  nor the program's own deadline cuts a CPU-bound loop; `--timeout` (wall seconds) does, as
-  `timeout`. Rebuilt code, and stock code under `--preempt points`, is charged 1 ns per event
-  and is cut where the deadline falls due; `--preempt branches` charges time per branch.
+- **A race with no system call in it.** Threads switch at the load-time points of loops,
+  calls, indirect jumps and atomics, and a few instructions past them
+  ([Load-time points](#load-time-points)), not at every instruction: a window far from any of
+  them (a load and a store several instructions from the nearest point) is seldom split, and
+  one in code made at run time (a JIT) never. Rebuild the code with compute points for a point
+  at every load and store ([Deeper search](#deeper-search-rebuilt-code)).
+- **A deadline that never comes.** Computation is charged 1 ns per load-time or compute point
+  passed and is cut where a deadline falls due, except in code without points (JIT output,
+  dark text), where only system calls move the clock; `--timeout` (wall seconds) stops such a
+  run, as `timeout`.
 
 ## Faults
 
@@ -620,7 +618,7 @@ exit: 1
 -->
 ```text
 violation always: journal-intact: N bytes
-  11 of 20 runs   first: seed 2   replayed: identical
+  14 of 20 runs   first: seed 2   replayed: identical
   example: journal-intact: 7081 bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
 ```
@@ -662,14 +660,15 @@ exit: 1
 exact-only: one seed's run
 -->
 ```text
-$ patina run --seed 4 --fault path-swap-permille=300 -- ./serve
+$ patina run --seed 3 --fault path-swap-permille=300 -- ./serve
 violation (always): served-only-public: 66 bytes
-faults injected: 1 (path-swap 1)
+faults injected: 2 (path-swap 2)
 last injected:
-  seq 83 t=100000ms path-swap /work/public/report.txt became a symlink to /etc/passwd between newfstatat (seq 82) and openat
-run directory: /tmp/serve/patina-out/run-4
-replay: patina replay /tmp/serve/patina-out/run-4
-explain: patina explain /tmp/serve/patina-out/run-4
+  seq 63 t=100000ms path-swap /work/public/report.txt was renamed away to /work/public/.patina-swap-63 between newfstatat (seq 62) and openat, put back after it where the call allowed
+  seq 65 t=100000ms path-swap /work/public/report.txt became a symlink to /etc/passwd between newfstatat (seq 64) and openat, put back after it where the call allowed
+run directory: /tmp/serve/patina-out/run-3
+replay: patina replay /tmp/serve/patina-out/run-3
+explain: patina explain /tmp/serve/patina-out/run-3
 ```
 
 In `result.json` each swap names its `object`, the `swap` (`symlink`, `rename`, `remove`), its
@@ -704,10 +703,10 @@ exact-only: one seed's run
 -->
 ```text
 $ patina run --seed 3 --crash machine -- ./acklog
-violation (always): acked-records-kept: 23 acknowledged, 0 stored
+violation (always): acked-records-kept: 21 acknowledged, 0 stored
 faults injected: 1 (crash 1)
 last injected:
-  seq 124 t=100000ms crash kind=machine point=97 object=/work/data.log lost: 0 missing, 1 changed, 0 back
+  seq 124 t=100000ms crash kind=machine point=91 object=/work/acks.log lost: 0 missing, 2 changed, 0 back
 run directory: /tmp/acklog/patina-out/run-3
 replay: patina replay /tmp/acklog/patina-out/run-3
 explain: patina explain /tmp/acklog/patina-out/run-3
@@ -837,8 +836,8 @@ setup: cp "$GUESTS/examples/upcase" .
 -->
 ```text
 $ patina sweep --seeds 1..40 --faults disk --ok-exit 1:fs-error,fsync-error -- ./upcase
-sweep: 152.4 KiB kept in /tmp/upcase/patina-out/sweep
-patina sweep: 40 runs, 0 findings in 0 groups, 40 ok (4 by --ok-exit)   (0.1s, 8 jobs)
+sweep: 229.8 KiB kept in /tmp/upcase/patina-out/sweep
+patina sweep: 40 runs, 0 findings in 0 groups, 40 ok   (0.5s, 8 jobs)
 outcomes: ok 40
 ```
 
@@ -854,20 +853,20 @@ exit: 0 1
 ```text
 $ cc -o kvlog examples/kvlog-c/kvlog.c
 $ patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
-new: violation check: acked-record-lost: acknowledged N, N stored after the crash   (seed 2: patina replay /tmp/kvlog/patina-out/sweep/seed-2)
+new: violation check: acked-record-lost: acknowledged N, N stored after the crash   (seed 5: patina replay /tmp/kvlog/patina-out/sweep/seed-5)
 sweep: replaying the first seed of 1 finding
-sweep: 383.4 KiB kept in /tmp/kvlog/patina-out/sweep
-patina sweep: 30 runs, 9 findings in 1 group, 21 ok   (0.2s, 8 jobs)
-outcomes: ok 21, violation 9
-check: judged 13 of 30 runs: 4 passed, 9 failed; 17 not judged (no crash in this run 17)
+sweep: 301.3 KiB kept in /tmp/kvlog/patina-out/sweep
+patina sweep: 30 runs, 7 findings in 1 group, 23 ok   (0.8s, 8 jobs)
+outcomes: ok 23, violation 7
+check: judged 9 of 30 runs: 2 passed, 7 failed; 21 not judged (no crash in this run 21)
 
 violation check: acked-record-lost: acknowledged N, N stored after the crash
-  9 of 30 runs   first: seed 2   replayed: identical
-  example: acked-record-lost: acknowledged 22, 21 stored after the crash
+  7 of 30 runs   first: seed 5   replayed: identical
+  example: acked-record-lost: acknowledged 7, 6 stored after the crash
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
-  replay: patina replay /tmp/kvlog/patina-out/sweep/seed-2
-  explain: patina explain /tmp/kvlog/patina-out/sweep/seed-2
+  rerun:  patina run --seed 5 --crash machine:10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
+  replay: patina replay /tmp/kvlog/patina-out/sweep/seed-5
+  explain: patina explain /tmp/kvlog/patina-out/sweep/seed-5
 ```
 
 The `check:` line counts what the checker said: judged (it passed or failed the run), not
@@ -890,16 +889,16 @@ exit: 1
 exact-only: one seed's run
 -->
 ```text
-$ patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
-violation (check): acked-record-lost: acknowledged 22, 21 stored after the crash
+$ patina run --seed 5 --crash machine:10 --check examples/checks/acked-kept -- ./kvlog
+violation (check): acked-record-lost: acknowledged 7, 6 stored after the crash
 guest: exit 0
 faults injected: 1 (crash 1)
 last injected:
-  seq 98 t=100000ms crash kind=machine point=27 object=/work/data.log lost: 0 missing, 1 changed, 0 back
-checker output: /tmp/kvlog/patina-out/run-2/check.out
-run directory: /tmp/kvlog/patina-out/run-2
-replay: patina replay /tmp/kvlog/patina-out/run-2
-explain: patina explain /tmp/kvlog/patina-out/run-2
+  seq 69 t=100000ms crash kind=machine point=12 object=/work/data.log lost: 0 missing, 1 changed, 0 back
+checker output: /tmp/kvlog/patina-out/run-5/check.out
+run directory: /tmp/kvlog/patina-out/run-5
+replay: patina replay /tmp/kvlog/patina-out/run-5
+explain: patina explain /tmp/kvlog/patina-out/run-5
 ```
 
 The checker is part of the run's record: `run.json` keeps its words, its directory, its
@@ -910,15 +909,15 @@ they refuse a changed program). A sweep whose checker changed judges its runs ag
 
 <!-- transcript kvlog-minimize
 dir: /tmp/kvlog
-exact-only: the run of seed 2 above
+exact-only: the run of seed 5 above
 -->
 ```text
-$ patina minimize patina-out/run-2
+$ patina minimize patina-out/run-5
 without --crash machine:10: no longer fails
 --crash machine:10 -> machine:5: still fails
 --crash machine:5 -> machine:2: no longer fails
-reduced: crash machine:5 (from crash machine:10); run directory /tmp/kvlog/patina-out/run-2/minimized
-patina run --seed 2 --crash machine:5 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
+reduced: crash machine:5 (from crash machine:10); run directory /tmp/kvlog/patina-out/run-5/minimized
+patina run --seed 5 --crash machine:5 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
 ```
 
 A checker must be a function of the run directory and of files that do not change. One that
@@ -1109,14 +1108,14 @@ exit: 0 1
 -->
 ```text
 $ cc -o upcase examples/upcase-c/upcase.c
-$ patina sweep --seeds 1..40 --faults disk -- ./upcase
+$ patina sweep --seeds 1..80 --faults disk -- ./upcase
 sweep: /tmp/upcase/patina-out/sweep holds another sweep (other settings: ok-exit); replacing it
 ...
-patina sweep: 40 runs, 4 findings in 3 groups, 36 ok   (0.1s, 8 jobs)
-outcomes: failure 4, ok 36
+patina sweep: 80 runs, 4 findings in 3 groups, 76 ok   (1.0s, 8 jobs)
+outcomes: failure 4, ok 76
 
 failure exit: upcase: write: Disk quota exceeded; exit 1
-  2 of 40 runs   first: seed 6   replayed: identical
+  2 of 80 runs   first: seed 56   replayed: identical
   faults in every failing run: fs-error      in none: fs-delay, fs-short, fsync-error
 ...
 ```
@@ -1135,19 +1134,19 @@ run directory: /tmp/upcase/patina-out/ref
 replay: patina replay /tmp/upcase/patina-out/ref
 $ patina sweep --seeds 1..40 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/ref' -- ./upcase
 sweep: /tmp/upcase/patina-out/sweep holds another sweep (other settings: ok-exit); replacing it
-new: violation check: wrong-output: Files want/out.txt and got/out.txt differ   (seed 5: patina replay /tmp/upcase/patina-out/sweep/seed-5)
+new: violation check: wrong-output: Files want/out.txt and got/out.txt differ   (seed 2: patina replay /tmp/upcase/patina-out/sweep/seed-2)
 sweep: replaying the first seed of 1 finding
-sweep: 1.9 MiB kept in /tmp/upcase/patina-out/sweep
-patina sweep: 40 runs, 9 findings in 1 group, 31 ok (4 by --ok-exit)   (0.2s, 8 jobs)
-outcomes: ok 31, violation 9
-check: judged 36 of 40 runs: 27 passed, 9 failed; 4 not judged (clean-failure 4)
+sweep: 592.0 KiB kept in /tmp/upcase/patina-out/sweep
+patina sweep: 40 runs, 11 findings in 1 group, 29 ok   (0.7s, 8 jobs)
+outcomes: ok 29, violation 11
+check: judged 40 of 40 runs: 29 passed, 11 failed
 
 violation check: wrong-output: Files want/out.txt and got/out.txt differ
-  9 of 40 runs   first: seed 5   replayed: identical
+  11 of 40 runs   first: seed 2   replayed: identical
   faults in every failing run: fs-short      in none: fs-error, fsync-error
-  rerun:  patina run --seed 5 --faults disk --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
-  replay: patina replay /tmp/upcase/patina-out/sweep/seed-5
-  explain: patina explain /tmp/upcase/patina-out/sweep/seed-5
+  rerun:  patina run --seed 2 --faults disk --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
+  replay: patina replay /tmp/upcase/patina-out/sweep/seed-2
+  explain: patina explain /tmp/upcase/patina-out/sweep/seed-2
 ```
 
 The finding is like any other: one run of it names the short write, `minimize` keeps only the
@@ -1286,7 +1285,7 @@ cmd = ["python3", "/guest/kv.py", "primary"]
 
 [node.backup]
 cmd = ["python3", "/guest/kv.py", "backup"]
-$ patina run --mount g:/guest -- python3 /guest/kv.py driver
+$ patina run --mount g:/guest:copy -- python3 /guest/kv.py driver
 ok (exit): the program exited 0
 guest: exit 0
 nodes: primary 10.0.0.2 running, backup 10.0.0.3 running; net: 1 cuts, 1 heals, 1 held, none cut at the end
@@ -1399,11 +1398,11 @@ $ patina log events patina-out/run-0 --types node,net
 {"type":"header","v":1,"seed":0,"work":"/work","incarnations":1,"nodes":["driver","primary","backup"]}
 {"type":"node","inc":0,"seq":4,"t":100000000000,"slot":1,"event":"start","name":"primary","pid":4}
 {"type":"node","inc":0,"seq":7,"t":100000000000,"slot":2,"event":"start","name":"backup","pid":6}
-{"type":"net","inc":0,"seq":3310,"t":100052995313,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
-{"type":"net","inc":0,"seq":3512,"t":105053179766,"slot":0,"event":"release","conn":2,"dir":0,"until":105053210647}
-{"type":"net","inc":0,"seq":3513,"t":105053179766,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
-{"type":"node","inc":0,"seq":3768,"t":105053455623,"slot":0,"event":"stop","name":"primary","live":1}
-{"type":"node","inc":0,"seq":3769,"t":105053455623,"slot":0,"event":"stop","name":"backup","live":1}
+{"type":"net","inc":0,"seq":10426,"t":100065031097,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
+{"type":"net","inc":0,"seq":10626,"t":105065238728,"slot":0,"event":"release","conn":2,"dir":0,"until":105065269609}
+{"type":"net","inc":0,"seq":10627,"t":105065238728,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
+{"type":"node","inc":0,"seq":10980,"t":105066553935,"slot":0,"event":"stop","name":"primary","live":1}
+{"type":"node","inc":0,"seq":10981,"t":105066553935,"slot":0,"event":"stop","name":"backup","live":1}
 ```
 
 Seeds, `verify` and `replay` work as for one machine: the nodes share the run's one scheduler,
@@ -1456,7 +1455,7 @@ setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py"
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1..8 -j 4 --mount g:/guest --faults net --fault partition-gap-ms=1000..8000 --fault partition-ms=1000..8000 -- python3 /guest/q3.py driver 90
+$ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --faults net --fault partition-gap-ms=1000..8000 --fault partition-ms=1000..8000 -- python3 /guest/q3.py driver 90
 ...
 patina sweep: 8 runs, 7 findings in 1 group, 1 ok   (8.9s, 4 jobs)
 outcomes: failure 7, ok 1
@@ -1507,7 +1506,7 @@ setup: mkdir g && cp "$GUESTS/kill.py" "$GUESTS/patina.py" g/
 setup: printf '[node.b]\ncmd = ["python3", "/guest/kill.py", "b"]\n' >patina.toml
 -->
 ```text
-$ patina run --mount g:/guest -- python3 /guest/kill.py driver 3
+$ patina run --mount g:/guest:copy -- python3 /guest/kill.py driver 3
 ok (exit): the program exited 0
 guest: exit 0
 nodes: b 10.0.0.2 running after 3 downs, 4 incarnations; net: 0 cuts, 0 heals, 0 held, none cut at the end
@@ -1573,7 +1572,7 @@ setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py"
 exit: 1 0
 -->
 ```text
-$ patina sweep --seeds 1..8 -j 4 --mount g:/guest --crash process --fault crash-gap-ms=3000..15000 --fault down-ms=500..3000 -- python3 /guest/q3.py driver 60
+$ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --crash process --fault crash-gap-ms=3000..15000 --fault down-ms=500..3000 -- python3 /guest/q3.py driver 60
 ...
 patina sweep: 8 runs, 5 findings in 1 group, 3 ok   (5.3s, 4 jobs)
 outcomes: failure 5, ok 3
@@ -1633,7 +1632,7 @@ setup: mkdir g && cp "$GUESTS/disk.py" "$GUESTS/patina.py" g/
 setup: for n in a b; do printf '[node.%s]\ncmd = ["python3", "/guest/disk.py", "%s"]\n' $n $n; done >patina.toml
 -->
 ```text
-$ patina run --mount g:/guest -- python3 /guest/disk.py driver 3
+$ patina run --mount g:/guest:copy -- python3 /guest/disk.py driver 3
 ok (exit): the program exited 0
 guest: exit 0
 nodes: a 10.0.0.2 running after 3 downs, 4 incarnations, b 10.0.0.3 running; net: 0 cuts, 0 heals, 0 held, none cut at the end
@@ -1641,7 +1640,7 @@ run directory: /tmp/disk/patina-out/run-0
 replay: patina replay /tmp/disk/patina-out/run-0
 $ cat patina-out/run-0/inc-0/stdout
 ok 3 machine crashes: fsynced writes kept, the other node untouched, connections silent until a reset after the restart, connects timed out
-unsynced lost in 2 of 3 crashes
+unsynced lost in 1 of 3 crashes
 ```
 
 `disk.py` (in `tests/guests/nodes`) has node a write one file with `fsync` and one without;
@@ -1704,7 +1703,7 @@ setup: printf '[node.a]\ncmd = ["python3", "/guest/ack2.py", "a"]\n[node.b]\ncmd
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1 --crash-points --crash machine -j 4 --mount g:/guest -- python3 /guest/ack2.py driver 3
+$ patina sweep --seeds 1 --crash-points --crash machine -j 4 --mount g:/guest:copy -- python3 /guest/ack2.py driver 3
 ...
 crash points: 30 of 30 tried (a 15 of 15, b 15 of 15)
 nodes: driver, a, b in 31 runs; net: 0 cuts, 0 heals, 11 held over them
@@ -1747,7 +1746,7 @@ setup: printf '[sweep]\ncrash-pairs = 3\n' >>patina.toml
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1 --crash-points=60 --crash machine -j 4 --mount g:/guest -- python3 /guest/q3.py driver 2
+$ patina sweep --seeds 1 --crash-points=60 --crash machine -j 4 --mount g:/guest:copy -- python3 /guest/q3.py driver 2
 sweep: 1 seed, 400 crash points (n1 80, n2 160, n3 160), a sample of 60 (--crash-points=N)
 sweep: 306 pairs after a first crash, a sample of 60 (--crash-points=N)
 ...
@@ -2050,7 +2049,7 @@ $ jq '{outcome, stop, message, signature, incarnations, crashes: [.crashes[].kin
 {
   "outcome": "violation",
   "stop": "always",
-  "message": "acked-records-kept: 23 acknowledged, 0 stored",
+  "message": "acked-records-kept: 21 acknowledged, 0 stored",
   "signature": "violation always: acked-records-kept: N acknowledged, N stored",
   "incarnations": 2,
   "crashes": [
@@ -2079,9 +2078,9 @@ command: patina log ops patina-out/run-3/inc-0
 exact-only: the run of seed 3 above
 -->
 ```text
-     4 seq=52       vt=100000048000   pid=2   Write       ino=2      off=0 len=8
-     5 seq=53       vt=100000049000   pid=2   Write       ino=3      off=0 len=8
-     6 seq=54       vt=100000050000   pid=2   Fsync       ino=3      flags=0
+     4 seq=56       vt=100000054239   pid=2   Write       ino=2      off=0 len=8
+     5 seq=57       vt=100000055241   pid=2   Write       ino=3      off=0 len=8
+     6 seq=58       vt=100000056243   pid=2   Fsync       ino=3      flags=0
 ```
 
 `patina log dump LOG --from SEQ --to SEQ` prints the boundary log; `patina log diff A B`
@@ -2101,18 +2100,18 @@ longer than writing them); `--from SEQ --to SEQ` keeps those sequence numbers.
 
 <!-- transcript events
 dir: /tmp/kvlog
-exact-only: the run of seed 2 above
+exact-only: the run of seed 5 above
 -->
 ```text
-$ patina log events patina-out/run-2 --types inc,op,crash
-{"type":"header","v":1,"seed":2,"work":"/work","incarnations":2}
-{"type":"inc","inc":0,"records":108,"oplog":true}
-{"type":"op","inc":0,"seq":45,"t":100000040000,"pid":2,"op":"create","ino":2,"path":"/work/data.log","mode":420,"fmt":32768}
-{"type":"op","inc":0,"seq":47,"t":100000042000,"pid":2,"op":"fsync-dir","ino":1,"path":"/work"}
-{"type":"op","inc":0,"seq":50,"t":100000044000,"pid":2,"op":"write","ino":2,"path":"/work/data.log","off":0,"len":8}
+$ patina log events patina-out/run-5 --types inc,op,crash
+{"type":"header","v":1,"seed":5,"work":"/work","incarnations":2}
+{"type":"inc","inc":0,"records":79,"oplog":true}
+{"type":"op","inc":0,"seq":46,"t":100000046071,"pid":2,"op":"create","ino":2,"path":"/work/data.log","mode":420,"fmt":32768}
+{"type":"op","inc":0,"seq":49,"t":100000048075,"pid":2,"op":"fsync-dir","ino":1,"path":"/work"}
+{"type":"op","inc":0,"seq":51,"t":100000050111,"pid":2,"op":"write","ino":2,"path":"/work/data.log","off":0,"len":8}
 ...
-{"type":"crash","inc":0,"seq":98,"t":100000090000,"slot":0,"kind":"machine","point":27,"lost":{"back":0,"changed":1,"missing":0,"paths":["/work/data.log"]}}
-{"type":"inc","inc":1,"records":105,"oplog":true}
+{"type":"crash","inc":0,"seq":69,"t":100000066623,"slot":0,"kind":"machine","point":12,"lost":{"back":0,"changed":1,"missing":0,"paths":["/work/data.log"]}}
+{"type":"inc","inc":1,"records":137,"oplog":true}
 ...
 ```
 
@@ -2198,21 +2197,22 @@ exact-only: the run of seed 3 above
 -->
 ```text
 $ patina explain patina-out/run-3
-violation (always): acked-records-kept: 23 acknowledged, 0 stored
-seed 3: 281 events, 31 story lines; showing all 10
+violation (always): acked-records-kept: 21 acknowledged, 0 stored
+seed 3: 283 events, 30 story lines; showing all 11
 data: the first 128 bytes of each read, write, send and receive, from a replay identical to the run (patina-out/run-3/explain)
 
-      44  +      0.040 ms  main  disk: create /work/data.log, create /work/acks.log, fsync the directory /work
-      51  +      0.047 ms  main  assert acked-records-kept
-      52  +      0.048 ms  main  disk: write /work/data.log (8 bytes at 0), write /work/acks.log (8 bytes at 0), fsync /work/acks.log
-     121  +      0.114 ms        ... the line above, 23 times in all, until here
-     124  +      0.117 ms  main  disk: write /work/data.log (8 bytes at 184)
-     124  +      0.117 ms        at the crash /work/data.log had 24 writes not followed by an fsync (24 writes, 0 fsyncs in all)
-     124  +      0.117 ms        CRASH machine at crash point 97; lost: 1 changed (/work/data.log)
-     124  +      0.117 ms        the machine starts again (incarnation 1)
-     172  +  14761.100 ms  main  disk: fsync the directory /work
-     204  +  14761.127 ms  main  assert acked-records-kept
-stop at: event 204 (main assert acked-records-kept); its record: patina log events patina-out/run-3 --from 204 --to 204
+      48  +      0.046 ms  main  disk: create /work/data.log, create /work/acks.log, fsync the directory /work
+      55  +      0.053 ms  main  assert acked-records-kept
+      56  +      0.054 ms  main  disk: write /work/data.log (8 bytes at 0), write /work/acks.log (8 bytes at 0), fsync /work/acks.log
+     119  +      0.115 ms        ... the line above, 21 times in all, until here
+     122  +      0.118 ms  main  disk: write /work/data.log (8 bytes at 168), write /work/acks.log (8 bytes at 168)
+     124  +      0.120 ms        at the crash /work/acks.log had 1 write not followed by an fsync (22 writes, 21 fsyncs in all)
+     124  +      0.120 ms        at the crash /work/data.log had 22 writes not followed by an fsync (22 writes, 0 fsyncs in all)
+     124  +      0.120 ms        CRASH machine at crash point 91; lost: 2 changed (/work/acks.log, /work/data.log)
+     124  +      0.120 ms        the machine starts again (incarnation 1)
+     181  +  14761.109 ms  main  disk: fsync the directory /work
+     211  +  14761.135 ms  main  assert acked-records-kept
+stop at: event 211 (main assert acked-records-kept); its record: patina log events patina-out/run-3 --from 211 --to 211
 ```
 
 A record's write, its acknowledgement's write and an fsync are one disk line, 23 times: the
@@ -2250,7 +2250,7 @@ The stop event: for a failed assertion, the assertion. Otherwise the actor that 
 node that ended the run, or the thread whose exit or signal ended it) and, before its failure's
 output, the last message that reached it or the last error or fault it met; else that output.
 `patina log events RUNDIR --from N --to N` prints its record. Of a run that passed the story is
-told the same way, without a stop. Under `--preempt points`, a run whose threads exchanged
+told the same way, without a stop. A run whose threads exchanged
 nothing through the log before the failure and were preempted in computation says so: a race in
 the program's own memory is not in the log, and the story cannot show its cause;
 `patina log events RUNDIR --types preempt,call` lists where the threads switched.
@@ -2347,11 +2347,12 @@ yielded at spin points: those come of single steps and breakpoints the runtime t
 that ran 20 ms of CPU time without a system call) stops gdb (`patina: a spin probe ...`);
 continuing drops it, which changes nothing unless the program was spinning.
 
-A `--preempt points` or `branches` run takes `SIGTRAP` for its scheduling points too. There
-reading, breakpoints, watchpoints, `finish` and continuing are as exact as in any run, but gdb
-refuses stepping (`step`, `next`, `stepi` and the like are errors, and the run is unchanged):
-set a breakpoint and continue instead. On arm64 `patina debug` does not take such a run in
-this version. Ctrl-C does not interrupt such a run. Code the plan
+A run with load-time points (the default) or branch counters takes `SIGTRAP` for its
+scheduling points too. There reading, breakpoints, watchpoints, `finish` and continuing are as
+exact as in any run, but gdb refuses stepping (`step`, `next`, `stepi` and the like are
+errors, and the run is unchanged): set a breakpoint and continue instead. On arm64 `patina
+debug` does not take such a run in this version: run the seed again with `[sched] preempt =
+"traps"` (another schedule) and debug that. Ctrl-C does not interrupt such a run. Code the plan
 moved shows as the program's own in `bt` (`patina: N trampolines mapped ...`).
 
 The debugger is yours and can change the program as it runs: that is why a session that writes
@@ -2394,11 +2395,11 @@ exact-only: one seed's run
 -->
 ```text
 $ patina verify --seed 3 --runs 3 --crash machine -- ./acklog
-run 0: cpu 23 aslr off load on env base violation 45adc92bcdf15a4e switches 0
-run 1: cpu 12 aslr on load on env base violation 45adc92bcdf15a4e switches 0
-run 2: cpu 1 aslr off load on env base violation 45adc92bcdf15a4e switches 0
+run 0: cpu 8 aslr off load on env base violation 0c145dab17715f9e switches 0
+run 1: cpu 16 aslr on load on env base violation 0c145dab17715f9e switches 0
+run 2: cpu 0 aslr off load on env base violation 0c145dab17715f9e switches 0
 identical: 3 runs in /tmp/patina/patina-out/verify-3
-violation (always): acked-records-kept: 23 acknowledged, 0 stored
+violation (always): acked-records-kept: 21 acknowledged, 0 stored
 ```
 
 `--vary LIST` picks the variations: by default `cpu,load,aslr,sandbox,repeat`; on request
@@ -2410,51 +2411,67 @@ is the variation. It waits 61 seconds (past a minute boundary: a leak at second 
 
 One thread of the program runs at a time; the seed picks the next one at each scheduling
 point. The points are every system call, every spin hint (`pause`; on arm64 `yield`, `isb`,
-`wfe`, `wfi`),
-and spin-waits Patina detects: a thread that computes for 20 ms without a system call is
-stepped until it is found looping without changing anything, and yields there.
+`wfe`, `wfi`), and the load-time points Patina writes into the program and every library it
+loads as they are mapped: before each backward branch, backward call, indirect jump and atomic
+instruction ([Load-time points](#load-time-points)). Some switches are taken a few
+instructions past such a point, so a load, a change and a store between two points can be
+split too. Computation moves the clock (1 ns per point passed), so a timer, a timeout or
+`[run] time-limit` cuts a CPU-bound loop where it falls due.
+
+Each seed draws how many points pass, on average, between two switches (its mean gap): half
+the seeds from 1 to 16, which finds the races of short programs and tests, the other half from
+16 to 65,536, for long programs at their natural pace; a long program at a small gap is held
+to a switch budget (about 3 times its run without points, at worst, on the programs measured;
+docs/EVIDENCE.md, "The default gap"). There is nothing to set.
+
+Code made at run time (JIT output: V8, the JVM), text the rewriter leaves dark, and a file it
+cannot plan get no points: threads switch there only at system calls and spin hints, and a
+thread that computes there for 20 ms without either is stepped until it is found looping
+without changing anything (a spin-wait), and yields there. `patina run` names a file left
+without a plan; `result.json`'s `rewrite` counts the rest.
 
 A thread that computes for 10 s of CPU time without reaching a scheduling point, while
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
 message names the function the thread was last seen in, and the file and offset, as a spin
-probe found it (`last seen in waiter (/guest/spinpoints+0x1392)`). The
-cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
-no system call or `pause`, or a long computation: a calibration loop that times itself
-against the clock sees almost no time pass while it computes (stock code moves the clock by
-a fixed charge per system call, not with computation), so it keeps raising its work. Rebuilt code, and Python under `python3 -m patina`, does not stall
-that way ([Deeper search](#deeper-search-rebuilt-code)), nor does stock code under
-`--preempt points` ([Points in stock code](#points-in-stock-code---preempt-points)), except in
-code it leaves dark. `--preempt branches` also preempts after a
-seed-chosen number of branches; it needs an AMD Zen 5 or Arm Neoverse N2 CPU with its PMU exposed (not in most virtual machines;
-GitHub's `ubuntu-24.04-arm` runners expose theirs) and
-`CAP_PERFMON` (`sudo setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce
-only on that CPU family. `patina doctor` says which of the three is missing.
+probe found it (`last seen in waiter (/guest/spinpoints+0x1392)`). The cause is a spin-wait
+whose loop changes state on each pass (a counter, a timestamp) in code without points, or a
+long computation: a calibration loop that times itself against the clock sees almost no time
+pass while it computes (code without points moves the clock by a fixed charge per system call,
+not with computation), so it keeps raising its work.
 
-Its stops are exact: a run stops at the branch counting every branch by hand would, with the
-same registers, or it fails closed. The counter's overflow interrupt is aimed 1024 branches
-(`[sched] pmu-margin`) ahead of the stop and the rest is counted by hand; on a virtual
-machine the interrupt can come later than that (up to about 700 branches after the overflow
-on the x86_64 one measured, 1,900 on GitHub's arm64 runners), and the run then ends
-`internal`, stop `pmu-late`,
-rather than stop past its branch: raise `pmu-margin` (each stop then counts more branches by
-hand). The kernel's throttling of a counter that interrupts too often, which a loaded virtual
-machine makes more likely, does not change where a run stops.
+`[sched] preempt` in a `patina.toml` changes where threads switch:
+
+| `preempt` | Threads switch at |
+|---|---|
+| `"points"` (default) | system calls, spin hints, load-time points and walks past them |
+| `"traps"` | system calls, spin hints and spin probes only: to tell whether a finding needs a switch inside computation, or on a host where rewriting cannot work (each such run's rerun line names its `run.json`) |
+| `"branches"` | system calls, spin hints, and after a seed-chosen number of branches, in every file (branch counters) |
+
+`"branches"` needs an AMD Zen 5 or Arm Neoverse N2 CPU with its PMU exposed (not in most
+virtual machines; GitHub's `ubuntu-24.04-arm` runners expose theirs) and `CAP_PERFMON` (`sudo
+setcap cap_perfmon+ep $(command -v patina)`), and its seeds reproduce only on that CPU family.
+`patina doctor` says which of the three is missing. Its stops are exact: a run stops at the
+branch counting every branch by hand would, with the same registers, or it fails closed. The
+counter's overflow interrupt is aimed 1024 branches (`[sched] pmu-margin`) ahead of the stop
+and the rest is counted by hand; on a virtual machine the interrupt can come later than that
+(up to about 700 branches after the overflow on the x86_64 one measured, 1,900 on GitHub's
+arm64 runners), and the run then ends `internal`, stop `pmu-late`, rather than stop past its
+branch: raise `pmu-margin` (each stop then counts more branches by hand). The kernel's
+throttling of a counter that interrupts too often, which a loaded virtual machine makes more
+likely, does not change where a run stops.
 
 ## Deeper search: rebuilt code
 
-A stock program switches threads only where it makes a system call or spins. Rebuilt with a
-compiler's coverage flags and Patina's hook file, its own code gets points too:
-
-- Threads switch inside computation, so a race on plain memory with no system call in it (a
-  count updated without its lock, a check and an act on an atomic) can be found.
-- Virtual time advances with computation, 1 ns per event, so a timer, a timeout or
-  `[run] time-limit` cuts a CPU-bound loop at the event where it falls due.
-- A spin-wait in rebuilt code yields by itself instead of ending `compute-stall` (in Go, if
-  its loop makes a comparison).
+Load-time points put a switch point at the loops, calls, indirect jumps and atomics of a stock
+program. Rebuilt with a compiler's coverage flags and Patina's hook file, its own code gets a
+point at every edge, and with clang and Rust at every load and store: a race between two plain
+accesses with no branch, call or atomic between them (a count updated without its lock) is
+found as often as one at a loop. A spin-wait in rebuilt code yields by itself.
 
 An event is one hook call: each edge (a branch taken) and, with clang and Rust, each load and
 store; in Go, each comparison. `examples/stats-c` has four workers that update shared
-statistics without their lock. The stock build never shows it; the rebuilt one does:
+statistics without their lock, a load and a store a few instructions from the nearest
+load-time point. The stock build seldom shows it; the rebuilt one does:
 
 <!-- transcript stats-stock
 dir: /tmp/src/patina
@@ -2483,13 +2500,13 @@ patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
 ```text
 new: failure exit: lost updates: N of N jobs counted; exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/stats-cp/seed-2)
 sweep: replaying the first seed of 1 finding
-sweep: 254.0 KiB kept in /tmp/src/patina/patina-out/stats-cp
-patina sweep: 20 runs, 8 findings in 1 group, 12 ok   (0.1s, 8 jobs)
-outcomes: failure 8, ok 12
+sweep: 4.2 MiB kept in /tmp/src/patina/patina-out/stats-cp; logs over 4 MiB keep their first and last MiB (the run's seed reproduces the whole log: patina replay RUNDIR)
+patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (3.2s, 8 jobs)
+outcomes: failure 13, ok 7
 compute points: /tmp/src/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
-  8 of 20 runs   first: seed 2   replayed: identical
+  13 of 20 runs   first: seed 2   replayed: identical
   example: lost updates: 198 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/src/patina/stats-cp
   replay: patina replay /tmp/src/patina/patina-out/stats-cp/seed-2
@@ -2497,9 +2514,8 @@ failure exit: lost updates: N of N jobs counted; exit 1
 ```
 
 The cost: an event takes under a nanosecond in C and Rust and about 2 ns in Go, natively or
-under Patina, and a switch about 3.5 µs. At the default gap, a C program of 2 million events
-took 33 ms a run against 16 ms stock; a debug Rust build of 78 million events took 0.2 to 3 s
-against 0.05 s, by the seed (docs/EVIDENCE.md, "The default gap").
+under Patina, and a switch about 3.5 µs; the switch budget ([The gap](#the-gap)) bounds the
+switches of a long program at a small gap (docs/EVIDENCE.md, "The default gap").
 
 ### Building
 
@@ -2596,18 +2612,18 @@ outcomes: ok 20
 $ patina sweep --seeds 1..20 --mount tests/guests/compute/py:/guest --mount sdk/python:/sdk \
     --env PYTHONPATH=/sdk -- python3 -m patina /guest/pycompute.py cache 200
 sweep: /tmp/patina/patina-out/sweep holds another sweep (other settings: cmd, env, mounts); replacing it
-new: failure exit: exit 1   (seed 2: patina replay /tmp/patina/patina-out/sweep/seed-2)
+new: failure exit: exit 1   (seed 4: patina replay /tmp/patina/patina-out/sweep/seed-4)
 sweep: replaying the first seed of 1 finding
-sweep: 143.0 KiB kept in /tmp/patina/patina-out/sweep
-patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (0.2s, 8 jobs)
-outcomes: failure 13, ok 7
+sweep: 1.6 MiB kept in /tmp/patina/patina-out/sweep
+patina sweep: 20 runs, 12 findings in 1 group, 8 ok   (1.0s, 8 jobs)
+outcomes: failure 12, ok 8
 compute points: /usr/bin/python3 (lines)
 
 failure exit: exit 1
-  13 of 20 runs   first: seed 2   replayed: identical
-  rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/tests/guests/compute/py:/guest --mount /tmp/patina/sdk/python:/sdk -- python3 -m patina /guest/pycompute.py cache 200
-  replay: patina replay /tmp/patina/patina-out/sweep/seed-2
-  explain: patina explain /tmp/patina/patina-out/sweep/seed-2
+  12 of 20 runs   first: seed 4   replayed: identical
+  rerun:  patina run --seed 4 --env PYTHONPATH=/sdk --mount /tmp/patina/tests/guests/compute/py:/guest --mount /tmp/patina/sdk/python:/sdk -- python3 -m patina /guest/pycompute.py cache 200
+  replay: patina replay /tmp/patina/patina-out/sweep/seed-4
+  explain: patina explain /tmp/patina/patina-out/sweep/seed-4
 ```
 
 CPU-bound Python now moves the clock: a timer or a `threading.Timer` cuts a loop with no
@@ -2650,7 +2666,7 @@ exact-only: one seed's run
 $ patina run --seed 2 -- ./stats-cp
 failure (exit): exit status 1
 guest: exit 1
-compute points: /tmp/src/patina/stats-cp (edges, accesses); 81,619 events, 325 switches, mean gap 248
+compute points: /tmp/src/patina/stats-cp (edges, accesses); 169,645 events, 1,028 switches, mean gap 120
 guest stderr (1 lines, /tmp/src/patina/patina-out/run-2/inc-0/stderr):
   lost updates: 198 of 200 jobs counted
 run directory: /tmp/src/patina/patina-out/run-2
@@ -2664,21 +2680,19 @@ reach the code that ran. `result.json` holds the same as `compute`: `images`
 
 ### The gap
 
-`--fault compute-gap` is the one setting. Each seed draws a mean gap G, log-uniformly from
-`64..65536` by default, and each stretch between two switches is uniform in `1..2G-1`
-events. The draw depends on the seed alone: seed 2 draws 248 in every program.
+Each seed draws a mean gap G: half the seeds log-uniformly from 1 to 16, the other half from
+16 to 65,536 ([Scheduling](#scheduling)), and each stretch between two switches is uniform in
+`1..2G-1` events (or load-time points). The draw depends on the seed alone. A run takes about
+2,048 switches at its gap and then one per 8,192 events: past that, its gaps are drawn with a
+mean of at least 8,192 until it is back within. A short test of a race seldom reaches that; a long
+program at a small gap stays within a few times its run without points. Rebuilt code is not held
+to it: a process whose rebuilt code has said hello switches at its drawn gap throughout.
 
-| Setting | For |
-|---|---|
-| `64..65536` (default) | long programs: the measured ones ran 1.2 to 2 times as long as stock, and their races that recur were found |
-| `2..64` | short programs, tests whose threads run tens of events: found such races 13 to 43 times as often as the default |
-| `0` | no switches; time and deadlines still apply |
-
-A single number (`compute-gap=8`) gives every seed that G.
-
-Each switch writes one 96-byte record to the boundary log, so a long program at a small gap
-can reach `[run] log-limit` (default 1 GiB, about 11 million switches) and end `liveness`, stop
-`log-limit`: raise the limit or the gap.
+The default needs no tuning: it finds the races in Patina's own tests in a robust share of
+seeds and keeps a long program within a few times its run under `[sched] preempt = "traps"`
+([EVIDENCE](EVIDENCE.md)). `--fault compute-gap` (`patina explain faults`) fixes G for every
+seed, with no budget; a long program at a small gap named that way can reach `[run] log-limit`
+(each switch writes a 96-byte record) and end `liveness`, stop `log-limit`.
 
 ### Limits
 
@@ -2689,22 +2703,20 @@ can reach `[run] log-limit` (default 1 GiB, about 11 million switches) and end `
   reach.
 - One thread runs at a time, so weak-memory behaviours (a store another CPU sees late) never
   happen, and a `lock`-prefixed read-modify-write is never split.
-- With `--preempt branches` the hooks do nothing (Python's is not registered); branch
-  counters switch instead.
+- With `[sched] preempt = "branches"` the hooks do nothing (Python's is not registered);
+  branch counters switch instead.
 
-## Points in stock code: `--preempt points`
+## Load-time points
 
-`--preempt points` gives a stock program compute points without a rebuild: as the
-program and each library it loads are mapped, Patina maps in a rewritten copy of their text
-with a count before every backward branch, backward call, indirect jump and atomic instruction
-it can patch. The counts are compute-point events: threads switch there at a seed-chosen
-event, virtual time advances 1 ns per event, and a timer or `[run] time-limit` cuts a CPU-bound
-loop where it falls due. Nothing about the program changes on disk.
+As the program and each library it loads are mapped, Patina maps in a rewritten copy of their
+text with a count before every backward branch, backward call, indirect jump and atomic
+instruction it can patch. The counts are compute-point events: threads switch there at a
+seed-chosen event, virtual time advances 1 ns per event, and a timer or `[run] time-limit` cuts a
+CPU-bound loop where it falls due. Nothing about the program changes on disk.
 
 The check-then-act race of `tests/guests/compute/go/race` (two goroutines read a balance with
 an atomic load, then withdraw with an atomic add; no system call between), built stock, ends
-`ok` on all 20 seeds without points. With them, at the small gaps short programs need
-([The gap](#the-gap)):
+`ok` on every seed with `[sched] preempt = "traps"`. With the default:
 
 <!-- transcript race-points
 dir: /tmp/src/patina
@@ -2715,26 +2727,27 @@ exit: 1
 -->
 ```sh
 go build -C tests/guests/compute/go -o "$PWD/race" ./race
-patina sweep --seeds 1..20 --preempt points --fault compute-gap=2..64 --out patina-out/race -- ./race
+patina sweep --seeds 1..20 --out patina-out/race -- ./race
 ```
 
 ```text
-new: failure exit: exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/race/seed-2)
+new: failure exit: exit 1   (seed 6: patina replay /tmp/src/patina/patina-out/race/seed-6)
 sweep: replaying the first seed of 1 finding
-sweep: 7.2 MiB kept in /tmp/src/patina/patina-out/race
-patina sweep: 20 runs, 8 findings in 1 group, 12 ok   (0.4s, 8 jobs)
-outcomes: failure 8, ok 12
-load-time points: 12683 taken in 20 runs; 1 of 1 files planned
+sweep: 783.0 KiB kept in /tmp/src/patina/patina-out/race
+patina sweep: 20 runs, 7 findings in 1 group, 13 ok   (0.2s, 8 jobs)
+outcomes: failure 7, ok 13
 
 failure exit: exit 1
-  8 of 20 runs   first: seed 2   replayed: identical
-  rerun:  patina run --seed 2 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
-  replay: patina replay /tmp/src/patina/patina-out/race/seed-2
-  explain: patina explain /tmp/src/patina/patina-out/race/seed-2
+  7 of 20 runs   first: seed 6   replayed: identical
+  rerun:  patina run --seed 6 -- /tmp/src/patina/race
+  replay: patina replay /tmp/src/patina/patina-out/race/seed-6
+  explain: patina explain /tmp/src/patina/patina-out/race/seed-6
 ```
 
-`patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
-share of its sites patched and of its text left dark, and anything left without points.
+When code went without points, `patina run` prints a `load-time points:` line: the points
+taken, the seed's mean gap, the files rewritten, by name each file it mapped executable that
+has no plan, and anything else left without points (a sweep's summary names the files without
+a plan).
 `result.json`'s `rewrite` has the counts (`points`, `stays`, `applied`, `dropped`, `restored`,
 `unplanned`, `cpuid`, `interior`; the walks' counts, below) and one entry per file the program
 mapped executable (`images`: `path`, `sha256`, `status`, and for a planned file `sites`,
@@ -2742,22 +2755,21 @@ mapped executable (`images`: `path`, `sha256`, `status`, and for a planned file 
 `cpuid_unpatched`, `cache`: `hit`, `made`, `rebuilt` or `bypassed`, and `rewrite_ms`).
 
 **Walks.** A window between two plain memory accesses with no branch, call or atomic between
-them (a counter loaded, changed and stored) holds no point. So under `--preempt points` a
-switch is sometimes taken a few instructions past its point: 2 switches in W are taken a drawn
-1 to W instructions on, the program single-stepped there, the rest at the point. W is drawn
-per seed, log-uniformly from 4 to 512. A walk ends, and its switch is not taken, where the
+them (a counter loaded, changed and stored) holds no point. So a switch is sometimes taken a
+few instructions past its point: 2 switches in W are taken a drawn 1 to W instructions on, the
+program single-stepped there, the rest at the point. W is drawn per seed, log-uniformly from 2
+to 64. A walk ends, and its switch is not taken, where the
 program enters Patina (a system call, a fault, a spin hint); it never stops inside Patina's
-copied code, and switches before an x86_64 `pushf` or an arm64 exclusive load. The run's
-`load-time points:` line counts the switches taken after a walk (`result.json`: `walks`,
-`walk_steps`, `walks_cut`, and `walk_max`, the seed's W). A walk costs about one single-step
+copied code, and switches before an x86_64 `pushf` or an arm64 exclusive load. `result.json`'s
+`rewrite` counts the switches taken after a walk (`walks`, `walk_steps`, `walks_cut`, and
+`walk_max`, the seed's W). A walk costs about one single-step
 per switch, whatever W is. On arm64 walks write breakpoints through `/proc/self/mem`; a host
-that refuses that ends the run `internal` (`--preempt traps` or `branches` there).
+that refuses that ends the run `internal` (`[sched] preempt = "traps"` or `"branches"` there).
 
 The lost update of `tests/guests/rewrite/races.c lms` (a load and a store through a pointer, in
-a loop) is found on about 1 in 10 seeds at the default gap with walks and on none without, and
-on half of them at `compute-gap=2..64`. One further from a point is found rarely:
-`examples/stats-c`'s lost update on 1 or 2 of 200 seeds. Rebuilt code puts a point at every
-load and store.
+a loop) is found on about half the seeds with walks and on none without. One further from a
+point is found rarely: `examples/stats-c`'s lost update on 1 or 2 of 200 seeds. Rebuilt code
+puts a point at every load and store.
 
 **What it costs.** A point the program takes is a trap into Patina, and a switch there a
 hand-over through the supervisor (tens of microseconds with its walk, on the measured hosts). So
@@ -2765,25 +2777,22 @@ Patina takes only the points that can switch: a thread with no other thread runn
 its next deadline without stopping, and where the seed's draw would keep the running thread at a
 point, the count runs on to the first point whose draw switches (the points passed are `stays`
 in `result.json`'s `rewrite`). Each decision is still drawn from the seed for the point it falls
-on; only the trap is skipped. With the gap drawn by default, a run takes about 32768 switches at
-its gap and then one per 8192 events: past that, its gaps are drawn with a mean of at least 8192
-until it is back within. That keeps a long program at a small gap within about 3 times its run
-without points (docs/EVIDENCE.md); a test of a race never reaches it. A gap the plan names
-(`compute-gap`) is used for the whole run.
+on; only the trap is skipped. The switch budget ([The gap](#the-gap)) keeps a long program at a
+small gap within about 3 times its run without points (docs/EVIDENCE.md).
 
-**What each reaches, and when to use it.**
+**What each reaches.**
 
-| Mechanism | Threads switch | Reaches | Use it |
+| Mechanism | Threads switch | Reaches | When |
 |---|---|---|---|
-| System calls (always) | at every system call | races between calls: locks, files, sockets, channels | always on |
-| Spin hints and probes (always) | at `pause` (arm64 `yield`, `isb`, `wfe`, `wfi`), and in a loop found spinning after 20 ms of CPU | spin-waits hand over instead of stalling | always on |
-| `--preempt points` | before backward branches, backward calls, indirect jumps and atomics in every file the program maps | a window with one of those in it: check-then-act on atomics, loops, retries | stock programs and libraries you cannot rebuild, on any x86_64 or arm64 host |
-| Walks (with `--preempt points`) | 1 to W instructions past such a point | straight-line windows near a point: a load, a change and a store | on with points; raise W, or lower the gap, for a window further from a point |
-| `--preempt branches` | after a seed-chosen number of branches | every branch, in every file | on an AMD Zen 5 or Arm Neoverse N2 PMU with `CAP_PERFMON`; seeds repeat only on that CPU family |
-| Rebuilt code (compute points) | at every edge, load and store (Go: comparison) | every window in the rebuilt code, between any two accesses | code you can rebuild: the densest, and its seeds repeat on any host |
+| System calls and spin hints | at every system call and `pause` (arm64 `yield`, `isb`, `wfe`, `wfi`) | races between calls: locks, files, sockets, channels | always |
+| Load-time points | before backward branches, backward calls, indirect jumps and atomics in every file the program maps | a window with one of those in it: check-then-act on atomics, loops, retries | by default, on x86_64 and arm64 |
+| Walks | 1 to W instructions past such a point | straight-line windows near a point: a load, a change and a store | with load-time points |
+| Spin probes | in a loop found spinning after 20 ms of CPU in code without points | spin-waits in JIT or dark code hand over instead of stalling | always |
+| Rebuilt code (compute points) | at every edge, load and store (Go: comparison) | every window in the rebuilt code, between any two accesses | code you rebuild |
 | Python under `python3 -m patina` | between any two lines | races between Python lines | Python programs |
+| Branch counters (`[sched] preempt = "branches"`) | after a seed-chosen number of branches | every branch, in every file, JIT output included | an AMD Zen 5 or Arm Neoverse N2 PMU with `CAP_PERFMON`; seeds repeat only on that CPU family |
 
-**The plans.** A plan is made on the host from a file's bytes and the Patina build alone, so
+**The plans.** The first run of a program pays for rewriting it and its libraries once. A plan is made on the host from a file's bytes and the Patina build alone, so
 it is the same on every host; each is checked by an independent verifier before it is used,
 and kept in `~/.cache/patina/plans/` (`$XDG_CACHE_HOME`; at most 4 GiB, the least recently used
 removed first; deleting it costs only time). Patina plans the program and the libraries it
@@ -2795,11 +2804,11 @@ before its runs start, and runs or sweeps that meet one file at once make it onc
 them. A run waits for another process's plan of a file at most 5 s and a second per 2 MiB of
 the file: past that, stderr names the process and its lock file, and the run makes the plan
 itself without keeping it (`bypassed`; the same plan, so the same digest). When planning takes
-longer than a second, one line on stderr says so:
+longer than a second (ten when stderr is not a terminal), one line on stderr says so:
 
 <!-- no-run planning-notice: printed while a cold run plans headless Chromium; the directory is the host's -->
 ```text
-patina: --preempt points: planning chrome-headless-shell and 45 more files, once: plans are kept in ~/.cache/patina/plans
+patina: rewriting chrome-headless-shell and 45 more files so that threads can switch inside its code (once per file: kept in ~/.cache/patina/plans)
 ```
 
 `patina doctor` prints where the plans are, how many and how large. Deleting the directory
@@ -2822,6 +2831,13 @@ patina: --preempt points: planning chrome-headless-shell and 45 more files, once
   own text gets the original pages back there and no points in them (counted `restored`, or
   `dropped` when none of the file's rewritten pages is left); the rest of the file keeps its
   points, and mapping the file there again brings them back.
+- A file Patina cannot plan runs unpatched, as with `[sched] preempt = "traps"`: one that is not
+  a 64-bit ELF file of the host's machine with executable segments of at most 1 GiB
+  (`not-elf`), one the rewriter refuses or its verifier rejects (`refused`, `unverified`), one
+  with no site (`empty`), and one written to while it was planned (`changed`). `patina run`
+  names it after `without a plan`, and `result.json`'s `rewrite.images` has its `status` and
+  `why`. A file of data alone (an ELF file with no executable segment, such as ICU's data
+  library) holds no code to rewrite: `result.json` lists it as `data`, and nothing names it.
 
 **What the program sees.** Faults, signal frames, records and unwinding name the original
 addresses, never a rewritten copy's. `/proc/self/maps` shows the original files; each library
@@ -2885,12 +2901,12 @@ What differs on arm64:
 
 - The spin hints that are scheduling points are `yield`, `isb`, `wfe` and `wfi` (x86_64:
   `pause`); `RNDR` and `RNDRRS` answer from the seed (x86_64: `rdrand`, `rdseed`).
-- `--preempt branches` works on the Arm Neoverse N2 only, and counts every branch, not only
+- `[sched] preempt = "branches"` works on the Arm Neoverse N2 only, and counts every branch, not only
   conditional ones (the same N stops sooner in the program than on x86_64). An image's first
   trap (a system call, usually) comes before its first preemption. With it, the exclusive load/store
   instructions are emulated (`patched_sites.exclusive` in `result.json`).
 - Rust compute points build with `--target aarch64-unknown-linux-gnu`.
-- `--preempt points` saves two registers 32 to 16 bytes below the stack pointer at each count
+- Load-time points save two registers 32 to 16 bytes below the stack pointer at each count
   (arm64 has no flags-free memory decrement); a program that keeps data there, which a signal
   frame would overwrite natively too, can see it change, and a hand-written loop that runs
   with the stack pointer not 16-byte aligned gets `SIGBUS` at a count. Sites inside an

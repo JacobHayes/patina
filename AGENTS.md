@@ -122,9 +122,9 @@ nothing changes. Those that set the run's configuration land in `run.json`, so a
 | `STALL_MS` | CPU time a thread computes alone before `compute-stall` (default 10000) |
 | `HOST_CPU` | the host CPU a run is pinned to |
 | `PAUSE_POINTS` | `0`: a spin hint is not a scheduling point |
-| `SPIN_PROBES` | `0`: no spin probes under `--preempt traps` |
+| `SPIN_PROBES` | `0`: no spin probes |
 | `EMULATE_RNDR` | arm64: answer `RNDR` from the seed on a host without it |
-| `COMPUTE_WALK` | `--preempt points`: the longest walk, `W` or `A..B` (default 4..512) |
+| `COMPUTE_WALK` | load-time points: the longest walk, `W` or `A..B` (default 2..64) |
 | `RT` | a runtime file instead of the embedded one |
 | `TIMING` | print the launcher's start-up times |
 | `STDIO_MAX` | bytes of guest stdout or stderr kept before `output-limit` (default 1 GiB) |

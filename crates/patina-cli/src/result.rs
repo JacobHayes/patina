@@ -45,7 +45,7 @@ pub struct RunEnd {
     /// The most bytes the shadow store held (`proto::oplog::Shadows`; the largest over
     /// incarnations): what the operation log holds of the work files mapped shared.
     pub shadow_bytes: u64,
-    /// With `--preempt branches`, the counters in `proto::ctl::PMU_NAMES` order (summed;
+    /// With branch counters, the counters in `proto::ctl::PMU_NAMES` order (summed;
     /// `max_skid` is a maximum).
     pub pmu: Option<[u64; proto::ctl::PMU_FIELDS]>,
     /// The SDK's site table, folded over incarnations.
@@ -58,7 +58,7 @@ pub struct RunEnd {
     pub check: Option<crate::check::Verdict>,
     /// Exit statuses that end the run `ok` (`--ok-exit`).
     pub ok_exit: Vec<crate::config::OkExit>,
-    /// With `--preempt points`: what the plans did.
+    /// With load-time points: what the plans did.
     pub rewrite: Option<RewriteReport>,
     /// With `--crash`, the operation log's self-check: Err with the first difference when
     /// replaying the log does not give the live tree (a Patina defect, reported next to the
@@ -895,10 +895,20 @@ pub fn print_human(r: &Value, dir: &Path) {
             None => println!("guest: exit {x}"),
         }
     }
-    if let Some(l) = compute_line(&r["compute"]) {
+    // Under load-time points with no rebuilt image the compute counts are the points':
+    // their line says all of it.
+    let rebuilt = r["compute"]["images"]
+        .as_array()
+        .is_some_and(|a| !a.is_empty())
+        || r["compute"]["images_dropped"].as_u64().unwrap_or(0) > 0;
+    if let Some(l) = compute_line(&r["compute"]).filter(|_| rebuilt || r["rewrite"].is_null()) {
         println!("{l}");
     }
-    if let Some(l) = rewrite_line(&r["rewrite"]) {
+    // Load-time points are the default: their line only when a file or mapping went without
+    // them (result.json's `rewrite` has the counts of every run).
+    if let Some(l) =
+        rewrite_line(&r["rewrite"], &r["compute"]).filter(|_| rewrite_notable(&r["rewrite"]))
+    {
         println!("{l}");
     }
     if let Some(l) = nodes_line(&r["nodes"]) {
@@ -1045,7 +1055,7 @@ pub fn compute_line(c: &Value) -> Option<String> {
     if images.is_empty() && n("images_dropped") > 0 {
         s.push_str("(none listed)");
     } else if images.is_empty() {
-        // `--preempt points` alone: no image was built with them.
+        // load-time points alone: no image was built with them.
         s.push_str("none built in");
     }
     if n("images_dropped") > 0 {
@@ -1077,7 +1087,7 @@ pub fn compute_line(c: &Value) -> Option<String> {
     Some(s)
 }
 
-/// The `patina run` line for result.json's `rewrite` (`--preempt points`): points taken, the
+/// The `patina run` line for result.json's `rewrite` (load-time points): points taken, the
 /// switches that walked on, and per image rewritten the share of its sites patched and of its text left dark.
 /// `nodes: primary 10.0.0.2 running, backup 10.0.0.3 exit 1; net: 2 cuts, 2 heals, 1 held,
 /// none cut at the end` (a run with nodes; each node's output is in `node/NAME/inc-K/`).
@@ -1139,47 +1149,70 @@ pub fn nodes_line(n: &Value) -> Option<String> {
     ))
 }
 
-pub fn rewrite_line(w: &Value) -> Option<String> {
+/// The `patina run` line for result.json's `rewrite` (load-time points): the points taken and
+/// the run's mean gap (from `compute`), the files rewritten, and by name each file the program
+/// mapped executable that has no plan (it runs unpatched: its threads switch only at system
+/// calls and spin hints there), with what else ran without points. Per-file coverage is in
+/// result.json.
+/// Whether a run's load-time points left something without them: a file without a plan, an
+/// executable mapping left unpatched, a plan dropped or put back in part, or an interpreter's
+/// line points taking over.
+pub fn rewrite_notable(w: &Value) -> bool {
+    let n = |k: &str| w[k].as_u64().unwrap_or(0);
+    w["images"]
+        .as_array()
+        .is_some_and(|a| a.iter().any(|i| !image_covered(i)))
+        || ["unplanned", "dropped", "restored", "lines"]
+            .iter()
+            .any(|k| n(k) > 0)
+}
+
+/// Whether a result.json `rewrite.images` entry left no code of its file without points: it was
+/// planned, or it holds no code (`data`: no executable segment).
+pub fn image_covered(i: &Value) -> bool {
+    i["status"] == "planned" || i["status"] == "data"
+}
+
+pub fn rewrite_line(w: &Value, compute: &Value) -> Option<String> {
     let images = w["images"].as_array()?;
     let n = |k: &str| w[k].as_u64().unwrap_or(0);
-    let planned: Vec<String> = images
+    let mut s = format!("load-time points: {} taken", commas(n("points")));
+    let mut about = vec![];
+    if let Some(g) = compute["gap"].as_u64() {
+        about.push(match g {
+            0 => "switches off (compute-gap=0)".to_string(),
+            g => format!("mean gap {}", commas(g)),
+        });
+    }
+    if n("walks") > 0 {
+        about.push(format!("{} after a walk", commas(n("walks"))));
+    }
+    if !about.is_empty() {
+        s.push_str(&format!(" ({})", about.join(", ")));
+    }
+    let planned = images.iter().filter(|i| i["status"] == "planned").count();
+    s.push_str(&format!("; {} rewritten", plural(planned as u64, "file")));
+    let none: Vec<String> = images
         .iter()
-        .filter(|i| i["status"] == "planned")
-        .take(IMAGES_SHOWN)
+        .filter(|i| !image_covered(i))
         .map(|i| {
             let name = i["path"].as_str().unwrap_or("");
             format!(
-                "{} {}% of {} sites, {}% dark",
+                "{} ({})",
                 name.rsplit('/').next().unwrap_or(name),
-                i["covered_pct"],
-                commas(i["sites"].as_u64().unwrap_or(0)),
-                i["dark_pct"]
+                i["status"].as_str().unwrap_or("")
             )
         })
         .collect();
-    let all = images.iter().filter(|i| i["status"] == "planned").count();
-    let mut s = format!("load-time points: {} taken", commas(n("points")));
-    if n("walks") > 0 {
+    if !none.is_empty() {
+        let shown = none.len().min(IMAGES_SHOWN);
         s.push_str(&format!(
-            " ({} taken after a walk of {} instructions in all)",
-            plural(n("walks"), "switch"),
-            commas(n("walk_steps"))
+            "; without a plan, so switching only at system calls: {}",
+            none[..shown].join(", ")
         ));
-    }
-    s.push_str(&format!("; {} rewritten", plural(all as u64, "image")));
-    if !planned.is_empty() {
-        s.push_str(&format!(" ({}", planned.join("; ")));
-        if all > IMAGES_SHOWN {
-            s.push_str(&format!("; and {} more in result.json", all - IMAGES_SHOWN));
+        if none.len() > shown {
+            s.push_str(&format!(" and {} more in result.json", none.len() - shown));
         }
-        s.push(')');
-    }
-    let other = images.len() - all;
-    if other > 0 {
-        s.push_str(&format!(
-            "; {} without a plan",
-            plural(other as u64, "file")
-        ));
     }
     if n("unplanned") > 0 {
         s.push_str(&format!(
@@ -1193,6 +1226,12 @@ pub fn rewrite_line(w: &Value) -> Option<String> {
             plural(n("dropped"), "plan")
         ));
     }
+    if n("lines") > 0 {
+        s.push_str(&format!(
+            "; off in {} whose interpreter switches at its lines (python3 -m patina)",
+            plural(n("lines"), "process")
+        ));
+    }
     if n("restored") > 0 {
         s.push_str(&format!(
             "; {} put back part of a plan (the rest keeps its points)",
@@ -1203,7 +1242,11 @@ pub fn rewrite_line(w: &Value) -> Option<String> {
 }
 
 fn plural(n: u64, word: &str) -> String {
-    let es = if word.ends_with("ch") { "es" } else { "s" };
+    let es = if word.ends_with("ch") || word.ends_with('s') {
+        "es"
+    } else {
+        "s"
+    };
     format!("{} {word}{}", commas(n), if n == 1 { "" } else { es })
 }
 

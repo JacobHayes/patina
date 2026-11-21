@@ -1,4 +1,4 @@
-//! Plans for a run with `--preempt points`: made on the host, once per file and patina build,
+//! Plans for a run with load-time points: made on the host, once per file and patina build,
 //! kept in the plan cache, and answered to the runtime by the launcher's broker
 //! (`launcher::plans`, protocol in `proto::plan`).
 //!
@@ -63,7 +63,8 @@ pub struct ImageReport {
     /// The path the runtime named (the program's view).
     pub path: String,
     pub sha256: String,
-    /// `planned`, or why not: `not-elf`, `refused`, `unverified`, `empty`.
+    /// `planned`, or why not: `not-elf`, `refused`, `unverified`, `empty`, `changed` (written
+    /// to while it was planned).
     pub status: &'static str,
     pub why: String,
     /// The plan's counts (`rewrite --plan`'s report): bytes of text, proven, extent and dark
@@ -356,7 +357,7 @@ fn lock(p: &Path, bound: Duration, name: &str, wait: impl FnOnce()) -> Lock {
                     if !said && t0.elapsed() >= note {
                         said = true;
                         eprintln!(
-                            "patina: --preempt points: waiting for the plan of {name}: {} holds {} \
+                            "patina: load-time points: waiting for the plan of {name}: {} holds {} \
                              (after {} s in all, {name} is planned here, without the cache)",
                             holder(p),
                             p.display(),
@@ -372,7 +373,7 @@ fn lock(p: &Path, bound: Duration, name: &str, wait: impl FnOnce()) -> Lock {
             Ok(None) => return Lock::None,
             Err(()) => {
                 eprintln!(
-                    "patina: --preempt points: {} has held {} for {} s; planning {name} here, \
+                    "patina: load-time points: {} has held {} for {} s; planning {name} here, \
                      without the cache",
                     holder(p),
                     p.display(),
@@ -533,7 +534,7 @@ impl Notice {
                     ),
                 };
                 eprintln!(
-                    "patina: --preempt points: planning {}{more}, once: plans are kept in {}",
+                    "patina: rewriting {}{more} so that threads can switch inside its code (once per file: kept in {})",
                     st.first,
                     dir.display()
                 );
@@ -753,10 +754,10 @@ impl Planner {
     fn entry(&self, f: &File, m: &fs::Metadata, path: &str) -> Res<Entry> {
         // Nothing is read whole before the file is a 64-bit ELF file with executable load
         // segments, of a size the host reads.
-        let loads = loads(f).filter(|l| !l.is_empty() && m.size() <= FILE_MAX);
-        let (sha, read) = match loads {
-            Some(_) => self.sha(f, m)?,
-            None => ([0; 32], None),
+        let loads = loads(f).filter(|_| m.size() <= FILE_MAX);
+        let (sha, read) = match &loads {
+            Some(l) if !l.is_empty() => self.sha(f, m)?,
+            _ => ([0; 32], None),
         };
         let mut report = ImageReport {
             path: path.to_string(),
@@ -777,6 +778,15 @@ impl Planner {
             r.why = text;
             Entry::None(why, r)
         };
+        // An ELF file with no executable segment (a data-only library) has nothing to rewrite.
+        if loads.as_ref().is_some_and(|l| l.is_empty()) {
+            let Entry::None(w, mut r) = none(NONE_EMPTY, "no executable segment".into(), report)
+            else {
+                unreachable!()
+            };
+            r.status = "data";
+            return Ok(Entry::None(w, r));
+        }
         let Some(loads) = loads else {
             let why = format!(
                 "not a 64-bit ELF file with executable segments of at most {FILE_MAX} bytes"
@@ -839,7 +849,13 @@ impl Planner {
                         let mut data = vec![0u8; m.size() as usize];
                         f.read_exact_at(&mut data, 0).map_err(|e| e.to_string())?;
                         if Sha256::digest(&data)[..] != sha[..] {
-                            return Err(format!("{path}: changed while being planned"));
+                            // Written to while being planned: it runs as it is, unpatched.
+                            let why = "the file changed while it was being planned".to_string();
+                            let Entry::None(w, mut r) = none(NONE_REFUSED, why, report) else {
+                                unreachable!()
+                            };
+                            r.status = "changed";
+                            return Ok(Entry::None(w, r));
                         }
                         data
                     }
@@ -1088,7 +1104,7 @@ impl ImageReport {
             .map_or(0, |(_, v)| *v)
     }
 
-    /// `result.json`'s entry for this image: what `--preempt points` did to it.
+    /// `result.json`'s entry for this image: what load-time points did to it.
     pub fn json(&self) -> serde_json::Value {
         let pct = |a: u64, b: u64| (1000.0 * a as f64 / b.max(1) as f64).round() / 10.0;
         let (mut found, mut covered) = (0, 0);

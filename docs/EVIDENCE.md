@@ -466,6 +466,9 @@ What the numbers say:
   the follow-up that switches on memory another thread touched (race-directed points) is
   the next step for search; not built.
 
+The default has since changed: half the seeds draw from `1..16` and half from `16..65536`,
+with a switch budget, and no gap is given by hand ("Load-time points by default", below).
+
 ### arm64
 
 The same hooks on Linux arm64: the SDKs' raw call is `svc #0`, Go's hook is
@@ -985,6 +988,151 @@ cpu,load,aslr,sandbox,repeat`: gofmt seed 2 (the budget engaged) and Chromium se
 identical on both architectures; the release tier's `rewrite/02-points` and `05-walks` cover the
 C, C++, Rust and Go guests and `patina replay`.
 
+### Load-time points by default
+
+Measured 2026-11-21 on the x86_64 host above and on a GitHub `ubuntu-24.04-arm` runner (one
+throwaway job, its branch and runs deleted after). Load-time points with walks became the
+preemption of every run, with no flag; `[sched] preempt = "traps"` or `"branches"` is the
+config that chooses the others. Old: main at `e1d438a8` (traps by default); new: the change;
+"traps": the new build with `[sched] preempt = "traps"`.
+
+**Ledger** (the 90 cells of the stock workload ledger, seeds 1 to 3, faults off and all, one
+guest set):
+
+| | x86_64 | arm64 |
+|---|---|---|
+| traps vs old: digest, outcome, stop, stdout | identical, 90 of 90 | identical, 90 of 90 |
+| new vs new, a second time | identical | identical |
+| new vs old: digests | 90 differ | 90 differ |
+| new vs old: stdout | 67 differ (times and random values the guests print) | 71 differ |
+| new vs old: outcomes | `fork-exec` seed 2 faults all `ok` → `failure`; `shell` seed 2 faults all `failure` → `ok` | `fork-exec` seed 2 faults all `liveness` → `ok` |
+| new with spin probes off | identical to new | identical to new |
+
+Every digest changes, single-threaded programs' too. A lone thread arms its point to its next
+deadline and takes it there (a `preempt` and a `Yield` that hands back to itself), and the
+virtual clock is charged for the counted work between calls, so the times a program reads
+move: `hello-static`, seed 1, takes 2 points and its calls' times advance by 1,347 ns where
+traps advanced 1,000. The outcome changes are fault-driven cells whose faults land on other
+calls under another schedule.
+
+**Finds** in 200 seeds at the default gap (the race guests of "Walks" and "Compute points";
+`-cp`: rebuilt with compute points). Old default: `64..65536`, from the tables above
+(2026-11-16 for `-cp`, 2026-11-19 for stock). New: half the seeds `1..16`, half `16..65536`,
+with the switch allowance at 2,048 (chosen) or 32,768; `1..65536`: one log-uniform range
+(x86_64, allowance 32,768):
+
+| Guest | traps x86_64 / arm64 | old default x86_64 / arm64 | `1..65536` | new, 32,768 x86_64 / arm64 | new, 2,048 x86_64 / arm64 |
+|---|---|---|---|---|---|
+| `lms` | 0 / 0 | 16 / 15 | 53 | 118 / 120 | 118 / 120 |
+| `go-race-stock` | 0 / 0 | 2 / 4 | 33 | 64 / 60 | 50 / 56 |
+| `rs-race-stock` | 0 / 0 | 0 / 0 | 3 | 6 / 4 | 6 / 4 |
+| `stats-c` | 0 / 0 | 1 / 0 | 1 | 2 / 2 | 1 / 0 |
+| `races b`, `pool`, `publish`, `dcl` | 0 / 0 | 0 / 0 | 0 | | 0 / 0 |
+| `stats-cp` | 141 / 96 | | | 128 / | 130 / 88 |
+| `go-race-cp` | 63 / 58 | 2 / | | 94 / | 94 / 97 |
+| `pool-cp` | | 5 / | | 47 / | 47 / 42 |
+| `races-cp` (`races b`) | | 0 / | | 25 / | 25 / 23 |
+| `rs-race-cp` | | 1 / | | 14 / | 14 / 8 |
+
+`-cp` guests have compute points under traps too, so their traps column already draws the new
+gap. An allowance of 2,048 at first held rebuilt code to the budget as well: `stats-cp` fell
+to 60 and `go-race-cp` to 77. A process whose rebuilt code has said hello is now exempt
+(`Compute::kinds`; `compute/10-budget`), and the rebuilt guests find what they find at
+32,768.
+
+**Cost**: wall ms of seeds 1 to 5, the least of 3 runs, warm plans; new at 2,048 against
+32,768 (both with the new gap draw). The seeds draw mean gaps 3,074, 120, 1,843, 2,096 and
+36,866:
+
+| Program | x86_64 traps | x86_64 32,768 | x86_64 2,048 (÷ traps, largest) | arm64 traps | arm64 32,768 | arm64 2,048 (÷ traps, largest) |
+|---|---|---|---|---|---|---|
+| ripgrep | 324 to 338 | 344 to 742 | 333 to 412 (1.3) | 798 to 813 | 858 to 1,398 | 866 to 985 (1.2) |
+| gofmt | 860 to 1,234 | 1,021 to 2,866 | 1,026 to 2,055 (2.2) | 1,246 to 1,331 | 1,811 to 3,673 | 1,881 to 2,897 (2.2) |
+| CPython | 89 to 96 | 115 to 121 | 118 to 123 (1.4) | 202 to 205 | 245 to 275 | 245 to 274 (1.4) |
+| headless Chromium | 542 to 600 | 962 to 1,771 | 944 to 1,145 (2.0) | 1,258 to 1,285 | 1,655 to 3,082 | 1,687 to 2,000 (1.6) |
+
+At 32,768 the largest were 3.0 (Chromium, x86_64, seed 2) and 2.9 (gofmt, arm64, seed 4).
+The default is the split with an allowance of 2,048: the stock race guests are found in 25 to
+60% of seeds where the old default found them in under 10%, the rebuilt ones as at 32,768,
+and no corpus program's sequential run is past 2.2 times traps. The guide's advice to pass a
+gap by hand is deleted; so is `compute-walk` as a key (main's change), its default (`2..64`)
+unchanged: walks are part of every finding above.
+
+**Corpus** (`scripts/corpus`, the programs of "On arm64" and "The cost of a point" plus the
+ones named): for each, the run's output against a native run, seed 1 twice, `patina verify
+--seed 1 --runs 3 --vary cpu,load,aslr,sandbox,repeat`, and `patina sweep --seeds 1..20 -j 6
+--keep fail`, default and traps (mean wall ms of a seed; `-j 6` on 24 CPUs and on the
+runner's 4):
+
+| Program | x86_64: output, same seed, verify | x86_64 default / traps | arm64: output, same seed, verify | arm64 default / traps |
+|---|---|---|---|---|
+| SQLite | same, identical, identical | 127 / 57 | same, identical, identical | 351 / 211 |
+| git | same, identical, identical | 569 / 338 | same, identical, identical | 2,005 / 1,581 |
+| curl against a local server | same, identical, identical | 167 / 80 | same, identical, identical | 467 / 290 |
+| Redis | same, identical, identical | 668 / 606 | `failure` in every mode (below) | 6,547 / 5,363 |
+| nginx, one process | same, identical, identical | 563 / 289 | same, identical, identical | 1,771 / 1,241 |
+| Node | same, identical, identical | 396 / 217 | same, identical, identical | 1,553 / 889 |
+| Python asyncio | same, identical, identical | 840 / 388 | same, identical, identical | 3,140 / 1,829 |
+| a JVM (OpenJDK 25) | same, identical, identical | 3,121 / 2,058 | same, identical, identical | 11,621 / 9,196 |
+| Go `net/http` | same, identical, identical | 71 / 34 | same, identical, identical | 188 / 103 |
+| etcd, one member | same, identical, identical | 1,586 / 1,819 | same, identical, identical | 4,389 / 4,096 |
+| ripgrep and fd | same, identical, identical | 580 / 414 | same, identical, identical | 1,878 / 1,522 |
+| GNU make `-j` | same, identical, identical | 950 / 408 | same, identical, identical | 2,856 / 1,485 |
+| busybox shell | same, identical, identical | 74 / 36 | same, identical, identical | 254 / 148 |
+| headless Chromium | same, identical, identical | 1,305 / 619 | same, identical, identical | 3,306 / 2,265 |
+| PostgreSQL 18 | same, identical, identical | 1,220 / 700 | same, identical, identical | 4,497 / 3,141 |
+
+Every seed of every sweep ended `ok` with 20 digests, except Redis on arm64: there it ends
+`failure` at every seed under the new default and under traps alike (so under the build
+before), and runs natively. Redis's own start-up check for the arm64 copy-on-write kernel bug
+(a page freed with `MADV_FREE` and written again, then read in a forked child) reports the bug
+under Patina and the server exits ("Redis will now exit to prevent data corruption"); the
+runtime passes `MADV_FREE` as `MADV_DONTNEED` (the call table, `madvise`), the likely reason,
+not confirmed. It is not a matter of preemption and is left as found. Under `-j 6`
+the slowest Chromium seeds took 4.3 and 4.7 times traps on x86_64, by contention: the same
+seeds alone take 2.0. JIT runtimes run correctly with their generated code unpatched; the run
+says so: "load-time points: 5,287 taken (mean gap 3,074, 161 after a walk); 11 files
+rewritten; 11 executable mappings unpatched (JIT, shared or unplanned memory: no points
+there)" (Node; the JVM 4, Chromium 2). Their threads switch at system calls and in the
+runtime's own compiled code, as under traps; a spin in generated code is caught by a spin
+probe or not at all (below).
+
+Defects the soak found, each fixed with a test that failed before:
+
+- etcd's Go binary has a `NOBITS` section whose file offset is past the end of the file; the
+  plan maker refused it as `not-elf` and the run switched only at calls in it (6,288 points a
+  run after the fix). Such a section is clamped to the file's end (`rewrite::elf`, unit test).
+- A shared object with no executable segment (ICU's `libicudata`, loaded by PostgreSQL) was
+  named "without a plan" in every run's summary. It is now `data`, counted as covered and not
+  named (`rewrite/07-data`).
+- The budget held rebuilt code (above; `compute/10-budget`).
+- Landed separately, each with its test: `rt_sigreturn` gives the restored return register
+  back as it is (a Go program under load-time points took a signal while it held `INT64_MIN`,
+  which the dispatcher read as a request and ended the run `internal`); and on arm64 an
+  instruction of the runtime's own precedes the signal restorer (`patina debug` took a
+  noreturn caller's frame for the signal frame).
+
+**First run.** With an empty plan cache, `patina sweep` of Chromium prints once, before any
+seed: "patina: rewriting chrome-headless-shell and 45 more files so that threads can switch
+inside its code (once per file: kept in …/patina/plans)". All 46 were planned before the runs;
+3 files Chromium maps only at run time were made by the first seed that mapped them and hit by
+the others; no file was planned twice. `patina run` prints the same line, then the summary's
+"load-time points: …" line. A program whose plans are all cached prints neither the notice
+nor, when no point was taken, the points line.
+
+**Spin probes.** With spin probes off (`PATINA_TEST_SPIN_PROBES=0`) under the new default,
+every case of the spin table (`flag`, `count`, `alone`, `memcount`, `text`, `twice`, `nested`)
+and `go-sweep` ends `ok`, a 20 s Go spin ends `ok`, and the ledger's 90 digests are unchanged
+on both architectures. No corpus program ended `compute-stall`. One case needs them:
+`spinpoints jit`, a spin in code the program wrote at run time, ends `compute-stall` without
+them, since no plan covers it. So spin probes stay: they cover generated code under the
+default and every spin under traps.
+
+**Area tier.** All areas, x86_64, the host loaded (load average 8.6): 219 of 221 pass in
+299 s wall (main: 259 s); `oracles/03-marks` and `oracles/07-resume` fail on main's own build
+too. The three-node CPython store of `quorum/` runs under traps (its races are between
+processes, at their calls; `nodes/14-points-sweep` runs such clusters at the default).
+
 ## Branch counters on arm64
 
 Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`
@@ -1188,8 +1336,9 @@ queues (`ENOSYS`); raw, netlink and packet sockets, UDP multicast and broadcast;
 anything outside Linux x86_64 and arm64 (arm64: ARCHITECTURE.md, "Limits").
 
 - A spin-wait with neither a system call nor `pause` whose iterations change state (a
-  counter, a timestamp it computes itself) ends `compute-stall` without `--preempt
-  branches`. `--preempt branches` needs `CAP_PERFMON`, an exposed PMU and an AMD family
+  counter, a timestamp it computes itself) ends `compute-stall` in code without load-time
+  points (JIT code, or all code under `[sched] preempt = "traps"`); `[sched] preempt =
+  "branches"` switches there too, and needs `CAP_PERFMON`, an exposed PMU and an AMD family
   0x1a (Zen 5) or Arm Neoverse N2 CPU, the ones checked; its seeds reproduce on the same CPU family only; a skid past
   the margin ends `internal`; a guest reading its own text during a hop or at a spin point
   sees `int3`. A lost update inside one read-modify-write instruction cannot be found by any

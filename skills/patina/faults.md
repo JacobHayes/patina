@@ -6,22 +6,22 @@ once fails in ways that say little. `patina run --fault help` lists every fault 
 
 ## The schedule (always on)
 
-Each seed is another interleaving: threads switch at every system call and spin-wait, so races
-on locks, files, pipes, sockets and channels need no flag. `[run] cpus = N` in patina.toml (default 4)
-changes the CPU count the program sees, and so its thread pools.
+Each seed is another interleaving: threads switch at every system call and spin-wait, and at
+load-time points inside computation (the program and every library it loads are rewritten as
+they are mapped, with a point at backward branches, calls, indirect jumps and atomics, and some
+switches a few instructions past one). So races on locks, files, pipes, sockets and channels,
+and on plain memory (a counter updated without its lock, check-then-act on an atomic), need no
+flag. `[run] cpus = N` in patina.toml (default 4) changes the CPU count the program sees, and so
+its thread pools.
 
-A race on plain memory with no system call between the accesses (a counter updated without
-its lock, check-then-act on an atomic) needs switch points inside the computation:
+JIT output gets no points. For a race between accesses far from any point, rebuild with compute
+points (clang coverage flags plus `sdk/c/patina_compute.c`; Rust, Go: see the guide's "Deeper
+search"; Python: `python3 -m patina` with `sdk/python` on `PYTHONPATH`): a point at every load
+and store.
 
-- `--preempt points`: stock code and every library it loads get points at backward branches,
-  calls, indirect jumps and atomics; add `--fault compute-gap=2..64` for a short test whose
-  threads run few events. JIT output gets none.
-- A rebuild with compute points (clang coverage flags plus `sdk/c/patina_compute.c`; Rust,
-  Go: see the guide's "Deeper search"; Python: `python3 -m patina` with `sdk/python` on
-  `PYTHONPATH`) puts a point at every load and store: the densest, for code you build.
-
-`patina run` prints `load-time points:` or `compute points:` when they took; no line means none
-did. A seed found with points does not replay without them.
+`patina run` prints `load-time points:` when code went without points, naming any file left
+without a plan and counting JIT or other unpatched executable memory (and `compute points:` for
+rebuilt code).
 
 ## Disk: `--faults disk`
 
@@ -97,6 +97,6 @@ See [recipes.md](recipes.md) for a replicated store.
 
 In order of what helps most: more seeds (a narrow window is one seed in thousands); `--crash-points`
 for crash windows; `--buggify`, or `--fault buggify:LABEL=1000` to fire one fault point every
-time; a lower crash rate (`--crash machine:1`) to reach later points; `--preempt points` for
-races with no system call in them. Then say what was tried, and that the oracle is what decides what clean
-means.
+time; a lower crash rate (`--crash machine:1`) to reach later points; a rebuild with compute
+points for races between plain accesses far from any loop, call or atomic. Then say what was
+tried, and that the oracle is what decides what clean means.

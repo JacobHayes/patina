@@ -2,8 +2,11 @@
 #  a. natively the runner is inert: the program's own output, and no sys.monitoring tool;
 #  b. `cache` (check-then-act between two threads, no system call in the window): no failure
 #     stock over seeds 1-40; with compute points at the default gap a failure in seeds 1-40,
-#     whose first seed replays identical; the run names the interpreter with kind `line`;
-#  c. `timer` (an ITIMER_REAL inside a loop with no system call): stock it never fires; with
+#     whose first seed replays identical; the run names the interpreter with kind `line`,
+#     started once, and its load-time points went back when the line points took over (a
+#     switch inside the interpreter holds its lock: no other thread runs Python code);
+#  c. `timer` (an ITIMER_REAL inside a loop with no system call): stock under [sched] preempt
+#     = "traps" it never fires (load-time points charge the interpreter's loop); with
 #     compute points its handler runs within ten trap charges of 10 ms, one digest twice;
 #     `oneline`: the exception the handler raises is caught by the frame's own `except`
 #     in a one-line loop and in a comprehension (it arrives in a jump's hook);
@@ -41,13 +44,15 @@ grep -q "^compute points: $PY (lines)" "$o/cache.txt" || die "b. no compute line
 echo "b. stock: $(grep outcomes "$o/stock.txt"); compute points: $(grep outcomes "$o/cache.txt"), $(grep -m1 'first: seed' "$o/cache.txt" | sed 's/^ *//')"
 
 echo "== c. a timer in a loop"
-prun "$o/t-stock" 1 -- $PY "$PC" timer 10 &
+prun "$o/t-stock" 1 --config "$("$PATINA_CFG" preempt=traps)" -- $PY "$PC" timer 10 &
 prun "$o/t-1" 1 $CP "$PC" timer 10 &
 prun "$o/t-2" 1 $CP "$PC" timer 10 &
 prun "$o/one" 1 $CP "$PC" oneline 5 &
 wait
 grep -q '^timer did not fire' "$o/t-stock/inc-0/stdout" || die "c. stock: $(cat "$o/t-stock/inc-0/stdout")"
 for r in t-1 t-2 one; do [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "c. $r: $(res "$o/$r")"; done
+[ "$(field "$o/t-1/result.json" rewrite.lines)/$(field "$o/t-1/result.json" compute.images | jq -c '[.[].starts]')" = "1/[1]" ] ||
+    die "c. the line points did not take over from the plans once: rewrite $(field "$o/t-1/result.json" rewrite.lines), starts $(field "$o/t-1/result.json" compute.images)"
 h=$(sed -n 's/.*handler_ns=//p' "$o/t-1/inc-0/stdout")
 [ -n "$h" ] && [ "$h" -ge 10000000 ] && [ "$h" -le 10010000 ] || die "c. the handler ran at '$h' virtual ns: $(cat "$o/t-1/inc-0/stdout")"
 lhs=$(field "$o/t-1/result.json" digest); rhs=$(field "$o/t-2/result.json" digest)

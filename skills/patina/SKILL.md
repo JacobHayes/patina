@@ -18,11 +18,12 @@ bug is rare, depends on timing, faults or crashes, or needs a reproducer. `patin
   `internal` until it has one: use the installed binary. Docker's default profile refuses it.
 - No outside network: loopback and the run's own nodes only; names come from `/etc/hosts`.
   Every server and client the test needs must run inside the run.
-- Threads switch only at system calls and spin-waits. A race on plain memory with no system
-  call between the accesses never shows without `--preempt points` (or a rebuild with compute
-  points); code generated at run time (a JIT) gets no points at all.
-- Computing does not advance virtual time in stock code: only `--timeout` (wall seconds) cuts
-  a CPU-bound loop. The one crash-modelled disk is the work tree `/work` (cwd and `HOME`).
+- Threads switch at system calls, spin-waits and the loops, calls, indirect jumps and atomics
+  of every loaded file (load-time points, the default; the first run rewrites each file once).
+  A race between two plain accesses far from those is found rarely (a rebuild with compute
+  points has a point at every access); code generated at run time (a JIT) gets no points, and
+  there only `--timeout` (wall seconds) cuts a CPU-bound loop.
+- The one crash-modelled disk is the work tree `/work` (cwd and `HOME`).
 - A seed replays only on the same kind of host, with the same patina build and program binary.
 - A call Patina does not model ends the run `unsupported`, naming it; a call it refuses gets an
   error code and is listed under `refused:`. Neither is a bug in the program.
@@ -60,7 +61,7 @@ replay: patina replay /tmp/app/patina-out/run-0
 
    | Suspected bug | Add |
    |---|---|
-   | ordering, races, deadlock | nothing (seeds vary the schedule); `--preempt points` for races on plain memory |
+   | ordering, races, deadlock | nothing (seeds vary the schedule, at system calls and inside computation) |
    | error handling of file I/O | `--faults disk`, with `--ok-exit N` for documented clean failures |
    | durability, recovery | `--crash machine` (the program must recover from `/work` on restart), then `--crash-points` |
    | client/server | `--faults net` |
@@ -77,16 +78,16 @@ exit: 1
 ```text
 $ patina sweep --seeds 1..20 --crash machine -- ./app
 ...
-patina sweep: 20 runs, 6 findings in 1 group, 14 ok   (0.2s, 8 jobs)
-outcomes: ok 14, violation 6
+patina sweep: 20 runs, 5 findings in 1 group, 15 ok   (0.5s, 8 jobs)
+outcomes: ok 15, violation 5
 
 violation always: acked-records-kept: N acknowledged, N stored
-  6 of 20 runs   first: seed 3   replayed: identical
-  example: acked-records-kept: 23 acknowledged, 0 stored
+  5 of 20 runs   first: seed 2   replayed: identical
+  example: acked-records-kept: 7 acknowledged, 0 stored
   faults in every failing run: crash      in none: -
-  rerun:  patina run --seed 3 --crash machine -- /tmp/app/app
-  replay: patina replay /tmp/app/patina-out/sweep/seed-3
-  explain: patina explain /tmp/app/patina-out/sweep/seed-3
+  rerun:  patina run --seed 2 --crash machine -- /tmp/app/app
+  replay: patina replay /tmp/app/patina-out/sweep/seed-2
+  explain: patina explain /tmp/app/patina-out/sweep/seed-2
 ```
 
 6. **Read groups, not logs.** A group is one bug: signature, run count, lowest seed and the

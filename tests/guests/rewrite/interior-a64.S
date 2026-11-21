@@ -174,7 +174,7 @@ _start:
     movk x12, #15, lsl #16
     mul x19, x19, x12
     add x19, x19, w0, uxtw
-    // getppid between entries: the program is one thread, so under --preempt points a point
+    // getppid between entries: the program is one thread, so under load-time points a point
     // is taken only at the first count after a system call (ARCHITECTURE "Compute points").
     mov x8, #173
     svc #0

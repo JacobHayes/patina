@@ -253,13 +253,6 @@ pub const FLAGS: &[Flag] = &[
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
     flag(
-        "--preempt",
-        "traps|branches|points",
-        "traps",
-        "system calls only, or also by branches or points",
-        RUNLIKE,
-    ),
-    flag(
         "--faults",
         "NAME",
         "off",

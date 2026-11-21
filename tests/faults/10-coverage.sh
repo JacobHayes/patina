@@ -1,4 +1,4 @@
-# 10. Crash-point coverage for ack-log over COV_SEEDS seeds (default 20; evidence: 500) (machine:20,
+# 10. Crash-point coverage for ack-log over COV_SEEDS seeds (default 50; evidence: 500) (machine:20,
 # ext4-ordered): the
 # number of distinct post-crash trees, and crashes observed between a write and its fsync,
 # between the record fsync and the acknowledgement write, and between the checkpoint
@@ -9,7 +9,7 @@ d=$RUNS/10
 mkdir -p "$d"
 : >"$d/positions"
 : >"$d/trees"
-N=${COV_SEEDS:-20}
+N=${COV_SEEDS:-50}
 SWEEP_KEEP=all sweep 10/sweep "$N" --crash machine:20 -- /guest/ack-log correct
 bad=$(awk -F'\t' 'NR > 1 && $2 != "ok" {print; exit}' "$d/sweep/summary.tsv")
 [ -z "$bad" ] || die "not ok: $bad"

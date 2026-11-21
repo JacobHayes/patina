@@ -47,7 +47,8 @@ pub struct Plan {
     /// Compute points: the run's mean gap in events (`compute-gap`; 0: no compute switches).
     pub compute_gap: u64,
     /// Whether the switch budget applies (`proto::compute::budget`): only to a gap drawn by
-    /// default; a plan that names `compute-gap` gets that gap for the whole run.
+    /// default, and not in a process whose rebuilt code said hello; a plan that names
+    /// `compute-gap` gets that gap for the whole run.
     pub compute_budget: bool,
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`Config::compute_walk`; 0: switches are taken at their sites).
@@ -308,7 +309,7 @@ pub const KEYS: &[Key] = &[
         "compute-gap",
         "G|A..B",
         Val::Gap,
-        "rebuilt code (compute points): mean events between switches, drawn log-uniformly per seed from A..B; 0 turns switches off [default: 64..65536]",
+        "load-time and rebuilt compute points: mean events between switches, drawn log-uniformly per seed from A..B; 0 turns switches off [default: half the seeds 1..16, half 16..65536, load-time points held to a switch budget]",
     ),
     key(
         "fs-error-at",
@@ -768,7 +769,6 @@ pub fn resolve(
     given.sort();
     // The default is not part of the plan: a run that does not name the key resolves it the
     // same way every time, and a stock program's plan reads as before.
-    let (lo, hi) = proto::compute::GAP_DEFAULT;
     let (wlo, whi) = proto::compute::WALK_DEFAULT;
     let mut plan = Plan {
         faults: Default::default(),
@@ -780,7 +780,7 @@ pub fn resolve(
         node_crash_kind: 0,
         net: Default::default(),
         sdk: Default::default(),
-        compute_gap: resolve_gap(seed, "compute-gap", &format!("{lo}..{hi}"))?,
+        compute_gap: proto::compute::default_gap(plan_draw(seed, "compute-gap")),
         compute_budget: true,
         compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
         node_faults: Default::default(),
@@ -1209,7 +1209,7 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
             let d = resolve(s, &[], &[], None, 0).unwrap();
-            let (lo, hi) = proto::compute::GAP_DEFAULT;
+            let (lo, hi) = (proto::compute::GAP_SMALL.0, proto::compute::GAP_LARGE.1);
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
             assert!(d.resolved.is_empty() && d.compute_budget);
             seen.insert(d.compute_gap);

@@ -1,4 +1,4 @@
-# 3. What a program sees of its patched code under `--preempt points` (rw-fid,
+# 3. What a program sees of its patched code under load-time points (rw-fid,
 # tests/guests/rewrite/fidelity.c, dynamic; ARCHITECTURE "Load-time rewriting"):
 #  a. its plan patches both routines the guest probes: the atomic add (fid_xadd: `lock xadd`,
 #     `ldaddal` on arm64; run as a copy in a trampoline) and fid_spin's backward branch (`jz`,
@@ -35,9 +35,9 @@ o=$RUNS/03-fidelity
 rm -rf "${o:?}"
 mkdir -p "$o"
 export XDG_CACHE_HOME=$o/cache
-pts() { # OUT SEED ARGS...: one run under --preempt points; must end ok
+pts() { # OUT SEED ARGS...: one run under; must end ok
     r=$1 s=$2; shift 2
-    "$PATINA" run --preempt points --seed "$s" --out "$r" -- "$@" >/dev/null 2>&1 || true
+    "$PATINA" run --seed "$s" --out "$r" -- "$@" >/dev/null 2>&1 || true
     [ "$(field "$r/result.json" outcome)" = ok ] || die "${r##*/}: $(res "$r")"
 }
 

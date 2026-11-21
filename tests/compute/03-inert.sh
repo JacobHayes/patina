@@ -1,6 +1,7 @@
 # Compute points change nothing they should not:
 #  a. every compute guest runs natively (its hooks go inert) with its normal output;
-#  b. a stock program's run has no `compute` in result.json, no SDK call and no compute record
+#  b. a stock program's run under [sched] preempt = "traps" (no load-time points, whose cell
+#     is the same) has no `compute` in result.json, no SDK call and no compute record
 #     in its log, and its clock moves only by the trap charge across a loop;
 #  c. the rebuilt loop at compute-gap=0 moves the clock by at least one event per iteration;
 #  d. a program that writes 0, -1 and a huge value into its cell repeats (one digest twice);
@@ -28,7 +29,7 @@ native '^total=230000$' "$C/cellpoke" scribble
 native "^loop $N sum=" "$C/loop" "$N"
 echo "a. the compute guests run natively with their normal output"
 
-prun "$o/stock" 1 -- /guest/compute/loop-stock "$N" &
+prun "$o/stock" 1 --config "$("$PATINA_CFG" preempt=traps)" -- /guest/compute/loop-stock "$N" &
 prun "$o/loop" 1 --fault compute-gap=0 -- /guest/compute/loop "$N" &
 prun "$o/poke-1" 1 -- /guest/compute/cellpoke scribble &
 prun "$o/poke-2" 1 -- /guest/compute/cellpoke scribble &

@@ -1,4 +1,4 @@
-//! The plan broker (`--preempt points`): answers the runtime's request for the plan of
+//! The plan broker (load-time points): answers the runtime's request for the plan of
 //! a file it is about to map executable (`proto::plan` has the protocol, `rewrite::cache` the
 //! answer). It runs in the launcher, outside the sandbox: the plan cache is never reachable
 //! from inside, and the runtime gets one read-only descriptor of a plan file at a time.

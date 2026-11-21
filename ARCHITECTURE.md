@@ -708,7 +708,7 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   probes work (`patina doctor`, "spin probes": a container's seccomp profile, a kernel
   without userfaultfd or soft-dirty bits, `/proc/self/mem` closed to code writes), they are
   off, and a `compute-stall` says so.
-- **Branch counters**, with `--preempt branches`: a preemption after a seed-chosen number of
+- **Branch counters**, with `[sched] preempt = "branches"`: a preemption after a seed-chosen number of
   retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
 - **Compute points**, in code rebuilt with the compilers' coverage flags: the hooks count
   events and enter the runtime when a seeded number has run (below).
@@ -741,15 +741,15 @@ program's fault, not emulated.
 **compute-stall.** A thread that computes for 10 s of its own CPU time without a point,
 while another thread could run, ends the run `unsupported` with stop `compute-stall` and
 names the thread. The cause is a loop that changes state on each pass (a counter, a
-timestamp it computes) and contains no system call or spin hint. The fix is `--preempt
-branches`, where the host allows it, or rebuilding that code with compute points (its message
+timestamp it computes) and contains no system call or spin hint. The fix is `[sched] preempt =
+"branches"`, where the host allows it, or rebuilding that code with compute points (its message
 says both: the supervisor does not know whether the code is rebuilt). Rebuilt code does not
 reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
 computing alone is left to finish.
 
 ## Counter preemption
 
-With `--preempt branches`, the turn holder is preempted right after its N-th retired
+With `[sched] preempt = "branches"`, the turn holder is preempted right after its N-th retired
 branch of program code (x86_64: conditional branches; arm64: every branch instruction), N a
 draw from the seed. The stop is treated like a trap: a boundary record, virtual time charged,
 a yield, and pending signals delivered.
@@ -859,7 +859,8 @@ touched.
   reports. Op 9 before any hello gets
   `EINVAL`. A fork child keeps its parent's cell; an exec starts without one.
 - **Arming**: at every return to program code the runtime writes into the cell the smallest
-  of a seeded gap (uniform in `1..2G-1`, G the run's mean from `--fault compute-gap`), the
+  of a seeded gap (uniform in `1..2G-1`, G the run's mean: by default drawn log-uniformly per seed from 1..16 in half the
+  seeds and 16..65536 in the other half, `proto::compute::default_gap`), the
   events until the next deadline is due (a timer, a timeout, the wire, the time limit), and
   2^22 (`proto::compute::arm`). The last is the refill: an instrumented spin-wait yields in
   every setting, `compute-gap=0` included.
@@ -872,8 +873,8 @@ touched.
   (`compute.rs`).
 
 There is no other way into the runtime: a point that switches needs a supervisor hand-off
-anyway, so a direct call would save nothing. With `--preempt branches` the cell is never armed
-and events charge nothing. With `--preempt points` the cell is the plans' (`proto::plan::CELL`,
+anyway, so a direct call would save nothing. With branch counters the cell is never armed
+and events charge nothing. With load-time points (the default) the cell is the plans' (`proto::plan::CELL`,
 below), mapped at each image start rather than at a hello; charging and the point are the same,
 and arming skips the points that could not switch (`proto::compute::chain`):
 
@@ -899,9 +900,10 @@ and arming skips the points that could not switch (`proto::compute::chain`):
   passed (`args[2]` high half; `stays` in `result.json`), and the log stays complete: replay
   arms the same chain from the same inputs.
 - **Budget**: with the gap drawn by default (`Config::compute_budget`; a gap the fault plan
-  names is exempt), once a run has taken 32768 switches plus one per 8192 events charged,
-  its gaps are drawn with a mean of at least 8192 until it is back within
-  (`proto::compute::budget`). The counts are the control region's, written under the turn.
+  names is exempt, and so is a process once its rebuilt code has said hello: `Compute::kinds`),
+  once a run has taken 2048 switches plus one per 8192 events charged, its gaps are drawn with
+  a mean of at least 8192 until it is back within (`proto::compute::budget`). The counts are
+  the control region's, written under the turn.
 
 A point the program takes is a trap and a hand-over through the supervisor; skipping those
 that cannot switch is what keeps a long program at a small gap within a few times its run
@@ -935,19 +937,19 @@ the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sy
   it raises from a line's hook reaches the program at that line; from a jump's hook CPython
   3.12 and 3.14 would let it skip the frame's handlers, so the hook keeps it and raises it from
   the next instruction of that code (local `INSTRUCTION` events) in that thread.
-- **Inert**: outside Patina the hello fails and nothing is registered. Under `--preempt
-  branches` the cell holds `NO_LIMIT` after the hello and nothing is registered either.
+- **Inert**: outside Patina the hello fails and nothing is registered. With branch
+  counters the cell holds `NO_LIMIT` after the hello and nothing is registered either.
 
 A generator or coroutine resuming gets no point of its own: its next line or jump has one, and
 the order of asyncio tasks is the event loop's, which a point in one thread does not change.
 
 ## Load-time rewriting
 
-Stock binaries get compute points without a rebuild (`--preempt points`, x86_64 and arm64): a
+Stock binaries get compute points without a rebuild (the default, x86_64 and arm64): a
 plan, made on the host from the file alone, rewrites single instructions, or short runs of
 them, to jump to trampolines that count, and the runtime maps it over the file's text as the
-file is mapped. Without the flag nothing below runs and no run's behaviour or
-digest changes. The host side is `crates/patina-cli/src/rewrite/` (x86_64 files through the
+file is mapped. With `[sched] preempt = "traps"` or `"branches"` nothing below runs, and a
+traps run's digest is the one the same seed had before points were the default. The host side is `crates/patina-cli/src/rewrite/` (x86_64 files through the
 `iced-x86` decoder, built on x86_64 hosts only; arm64 files through `a64/`, below; also
 reachable through the hidden `patina __rewrite`); the runtime side is `crates/patina-rt/src/plans.rs`,
 which decodes no instruction.
@@ -1080,7 +1082,7 @@ which decodes no instruction.
   finds code, its own refusals and their spans, pairs (in order along fall-through, `b` and
   calls) and the way back by its own rules, and spells the count's words itself.
 
-In a run (`--preempt points`):
+In a run (the default):
 - **The broker** (`launcher/plans.rs`) runs in the launcher, outside the sandbox, on a thread
   pinned to the run's CPU. Only a 64-bit ELF file with executable segments, of at most 1 GiB,
   is read whole; the stall watchdog counts the time a thread waits for a plan as progress, for
@@ -1101,7 +1103,7 @@ In a run (`--preempt points`):
   changed identity rehashes it, and bytes that are not the verified ones make the plan again.
   At most 4 GiB, least recently used removed first. A miss is made under an exclusive
   `flock` on the entry's `.lock` file and looked up again once the lock is held, so processes
-  that meet one file at once make it once; a sweep with `--preempt points` makes its programs'
+  that meet one file at once make it once; a sweep makes its programs'
   plans before its runs start (each run is pinned to one CPU, the sweep has the job count).
   The wait for a lock is bounded (`wait_bound`: 5 s and a second per 2 MiB of the file, several
   times what planning it takes): a holder that is stopped (it keeps its lock), stuck or starved
@@ -1156,7 +1158,7 @@ In a run (`--preempt points`):
   runtime's code, and a `vfork` child (running on its parent's memory) draws none. As with
   spin probes, a stall probe (a `SIGTRAP` sent by the supervisor) that is pending at the very
   moment of an x86_64 step's trap merges with it, and that one step goes uncounted; walks are
-  short (the default W is at most 512, a few ms of steps) and probes come only after 20 ms of
+  short (the default W is at most 64, well under a ms of steps) and probes come only after 20 ms of
   CPU time without a scheduling point, so the window is narrow.
 - **Changes** (`changing`): before the program unmaps, maps over, moves (`mremap`) or
   reprotects part of an image's patched text, the patched pages in that range are mapped back
@@ -1523,7 +1525,7 @@ nopass`), so the spin probes' steps and breakpoints are not available in a sessi
 threads yielded at spin points is refused, and a probe sent during a session is dropped (it
 finds nothing in a program that was not spinning, so nothing recorded changes).
 
-A `--preempt points` or `branches` run takes `SIGTRAP` for its scheduling points (a plan's
+A run with load-time points (the default) or branch counters takes `SIGTRAP` for its scheduling points (a plan's
 `int3` or `brk`, the counter's single steps), which gdb cannot tell from its own. There the
 helper passes on every `SIGTRAP` gdb did not cause (`handle SIGTRAP pass`), and the runtime
 drops one that is neither its own nor a plan's (`fault::debugger_passes`): a trap gdb left
@@ -1657,7 +1659,7 @@ Enforced:
   lexical `..` departs from Linux only where the kernel would fail (`/proc/cpuinfo/..` is
   `/proc`, not `ENOTDIR`). Their link counts are computed (`/proc/self/task`: 2 + the
   threads). Regression `sandbox/12-procgaps`.
-- **Load-time plans** (`--preempt points`). The trampolines and patched pages are program
+- **Load-time plans** (the default). The trampolines and patched pages are program
   memory (read-execute; a program that remaps or reprotects them gets its original pages back,
   above: only pages of the program's own mappings that hold the plan's patched pages are ever
   mapped over, and never a page of the runtime's region); the plan cell is program memory with the consequences of the compute-point cell
@@ -1694,7 +1696,7 @@ Out of scope (a deliberate attack):
   writable because the kernel writes signal frames there): they sit at fixed addresses no
   program is given. Reading the runtime's text and data with the program's own loads is not
   detected (a system call cannot read them for it: above).
-- A file built to make the rewriter or verifier fail on the host (with `--preempt points`):
+- A file built to make the rewriter or verifier fail on the host (with load-time points):
   a panic there ends the launcher, so the run ends without a result, never with the file
   partly planned.
 - Pointing the stack pointer into the runtime's region before jumping to the stub, or
@@ -1745,14 +1747,14 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   the `patina` binary); replay, minimize and `run --config RUNDIR/run.json` refuse a run whose
   either one differs, and a sweep into a directory another build made starts over. The kernel's own behaviour for passed calls is an
   input: a different kernel version or filesystem may change a run.
-- **Branch counters** (`--preempt branches`) need `CAP_PERFMON`, a PMU, and a CPU checked
+- **Branch counters** (`[sched] preempt = "branches"`) need `CAP_PERFMON`, a PMU, and a CPU checked
   exact: AMD family 0x1a (Zen 5), or on arm64 the Arm Neoverse N2; their seeds reproduce on the
   same family (core) only; on arm64 the core's variant and revision are not checked (the
   evidence is from r0p0). On arm64 an image's first segment, up to its first trap, is never
   preempted; code the scanner does not see (a JIT) keeps its native exclusive pairs, whose
   spurious failures can change the count (a hop walk that meets one gives up for that
   segment); more than 4,096 patched sites in one process stop the run.
-- **Load-time points** (`--preempt points`): the points are at backward branches,
+- **Load-time points** (the default): the points are at backward branches,
   backward calls, indirect jumps and atomics that a single-instruction patch can reach (most,
   not all: above), so a race between plain accesses with no such instruction between them
   is not split, as in stock code. Libraries load at other addresses than without points, and a
@@ -1767,8 +1769,8 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   change state ends the run (above).
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
-  seed. Rebuilding the code with compute points switches inside it; so does
-  `--preempt branches`, on the CPUs checked exact, and `--preempt points` at the
+  seed. Rebuilding the code with compute points switches inside it; so do
+  branch counters, on the CPUs checked exact, and load-time points (the default) at the
   branches, calls and atomics inside it. Compute points do not split an atomic
   read-modify-write (a `lock`-prefixed instruction; on arm64 an LSE instruction, an
   exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not
@@ -1780,7 +1782,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   interpreter's own C code have none.
 - **Stock computation does not advance virtual time**: a CPU-bound loop cannot be cut by
   `[run] time-limit` or a program's own deadline, only by `--timeout` (wall time), unless it runs
-  with `--preempt points` and the loop has a point. A loop that
+  with load-time points (the default) and the loop has a point. A loop that
   makes any system call (a clock read) advances it by the per-trap charge. Rebuilt code is
   charged 1 ns per event (Python under `python3 -m patina`, 15 ns per line and jump) and cut at
   the event where a deadline falls due; branch counters charge per branch.

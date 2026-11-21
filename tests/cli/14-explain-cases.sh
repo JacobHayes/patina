@@ -5,7 +5,7 @@
 #    shorter than the event log and stops at the event the run gives: the failed assertion,
 #    the failing thread's output, the message into the driver that it found wrong (from the
 #    node that sent it), after the cut that caused it. Then the observed replay is the run for
-#    every run of an examples sweep kept whole, a node sweep and a `--preempt points` sweep.
+#    every run of an examples sweep kept whole, a node sweep and a sweep with load-time points.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 G=$PATINA_GUESTS
@@ -54,7 +54,7 @@ for e in jobs acklog bank ledger serve stats-cp upcase kvlog; do
 done
 for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s"]\n' $n $n; done >"$RUNS/kv-ok.toml"
 sweep "$RUNS/sw-kv" --seeds 1..3 --config "$RUNS/kv-ok.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver
-sweep "$RUNS/sw-points" --seeds 1..6 --preempt points -- "$G/rw-races" lms
+sweep "$RUNS/sw-points" --seeds 1..6 -- "$G/rw-races" lms
 n=0
 for r in "$RUNS"/sw-*/seed-*; do
     st=0; timeout 120 "$PATINA" explain "$r" >"$r.txt" 2>&1 || st=$?

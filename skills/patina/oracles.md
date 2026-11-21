@@ -21,10 +21,10 @@ setup: cp "$GUESTS/examples/upcase" .
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1..40 --faults disk -- ./upcase
+$ patina sweep --seeds 1..80 --faults disk -- ./upcase
 ...
-patina sweep: 40 runs, 4 findings in 3 groups, 36 ok   (0.1s, 8 jobs)
-outcomes: failure 4, ok 36
+patina sweep: 80 runs, 4 findings in 3 groups, 76 ok   (1.3s, 8 jobs)
+outcomes: failure 4, ok 76
 ...
 ```
 
@@ -36,10 +36,10 @@ failure; a signal is never `ok`. Now every run is `ok`, which proves nothing abo
 dir: /tmp/oracle
 -->
 ```text
-$ patina sweep --seeds 1..40 --faults disk --ok-exit 1:fs-error,fsync-error -- ./upcase
+$ patina sweep --seeds 1..80 --faults disk --ok-exit 1:fs-error,fsync-error -- ./upcase
 ...
-patina sweep: 40 runs, 0 findings in 0 groups, 40 ok (4 by --ok-exit)   (0.1s, 8 jobs)
-outcomes: ok 40
+patina sweep: 80 runs, 0 findings in 0 groups, 80 ok (4 by --ok-exit)   (0.4s, 8 jobs)
+outcomes: ok 80
 ```
 
 ## 2. A check script: `--check 'CMD ARGS'`

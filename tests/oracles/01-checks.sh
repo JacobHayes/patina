@@ -191,7 +191,7 @@ up=$PATINA_GUESTS/examples/upcase same=$root/examples/checks/same-tree
 export PATINA
 "$PATINA" run --seed 1 --out upref -- "$up" >upref.txt 2>&1 || die "upcase reference: $(tail -2 upref.txt)" # lint-allow: seed — faults off, upcase writes the same tree on every seed
 rc=0
-"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up1 -- "$up" >up1.txt 2>&1 || rc=$?
+"$PATINA" sweep --seeds 1..80 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up1 -- "$up" >up1.txt 2>&1 || rc=$?
 [ "$rc" = 1 ] && [ "$(jq '.groups | length' up1/report.json)" = 1 ] || die "upcase checked sweep: exit $rc: $(tail -3 up1.txt)"
 case $(jq -r '.groups[0].signature' up1/report.json) in "violation check: wrong-output"*) ;; *) die "upcase: $(jq -c '.groups[0]' up1/report.json)" ;; esac
 jq -e '.groups[0].faults.every | index("fs-short")' up1/report.json >/dev/null || die "upcase: fs-short is not in every failing run"

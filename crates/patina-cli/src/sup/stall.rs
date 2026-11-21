@@ -15,7 +15,7 @@
 //!   (verdict `stall`), naming the thread. A thread computing alone is left to run.
 //! - **Backstop.** A thread that neither makes progress nor runs (blocked in the kernel
 //!   outside any row) ends the run `internal` after ten times `stall_ms` of wall time. A
-//!   thread waiting for a load-time plan (`--preempt points`) is making progress for the
+//!   thread waiting for a load-time plan (load-time points) is making progress for the
 //!   budget the broker gives that plan (`Planning`); past it the backstop applies, and its
 //!   verdict says what the thread was waiting for.
 
@@ -186,7 +186,7 @@ impl Planning {
         let waited = now.saturating_sub(self.since);
         (self.word != 0 && waited >= self.budget_ns()).then(|| {
             format!(
-                "; it was waiting for a load-time plan (--preempt points) for {} s, past that \
+                "; it was waiting for a load-time plan for {} s, past that \
                  plan's bound of {} s (the launcher's stderr names the file)",
                 waited / 1_000_000_000,
                 self.budget_ns() / 1_000_000_000
@@ -289,15 +289,13 @@ pub fn spin_host(ctl: &proto::ctl::Ctl) -> String {
     format!(" A spin probe could not run: {t}{errno}{doctor}.")
 }
 
-/// The other ways out: switch points written in as the code loads (x86_64), branch counters.
-#[cfg(target_arch = "x86_64")]
+/// The other ways out: load-time points (the default) cover loaded code but not code made at
+/// run time or text they leave dark; branch counters cover every branch.
 const BRANCHES: &str =
-    "; or rerun with --preempt points (switch points written into the code as it loads; \
-     code it leaves dark, such as JIT output, stays without them), or with --preempt branches \
-     (needs CAP_PERFMON and a host PMU; see `patina doctor`).";
-#[cfg(not(target_arch = "x86_64"))]
-const BRANCHES: &str =
-    "; or rerun with --preempt branches (needs CAP_PERFMON and a host PMU; see `patina doctor`).";
+    ". Load-time points (the default) put switch points into code as it loads, but not into \
+     code made at run time (JIT output) or text they leave dark (result.json's rewrite says \
+     which); [sched] preempt = \"branches\" preempts there too (needs CAP_PERFMON and a host \
+     PMU; see `patina doctor`).";
 
 /// CPU time of guest thread `tid` (a PID-namespace id; 0: none), from `/proc/TID/schedstat`.
 fn thread_cpu_ns(tid: i32) -> Option<u64> {

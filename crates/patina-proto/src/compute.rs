@@ -33,8 +33,12 @@ pub const REASON_REFILL: u64 = 3;
 /// Virtual time one event costs: a model of a machine, the same for every build and host.
 pub const CHARGE_NS: u64 = 1;
 
-/// The mean gap's range when the run gives none (`--fault compute-gap`).
-pub const GAP_DEFAULT: (u64, u64) = (64, 65_536);
+/// The mean gap's ranges when the run gives none (`--fault compute-gap`): half the seeds draw
+/// from the small range (the windows of short programs need a switch every few events), the
+/// other half from the large (long programs, at their natural pace); each log-uniformly
+/// (`default_gap`). A long program at a small gap is held to its switch budget (`budget`).
+pub const GAP_SMALL: (u64, u64) = (1, 16);
+pub const GAP_LARGE: (u64, u64) = (16, 65_536);
 /// The largest mean gap a run may ask for (so `2G - 1` and every count stay far from overflow).
 pub const GAP_MAX: u64 = 1 << 40;
 
@@ -46,6 +50,14 @@ pub fn mean_gap(d: u64, lo: u64, hi: u64) -> u64 {
     } else {
         crate::pmu::log_uniform(d, lo, hi)
     }
+}
+
+/// The run's mean gap when the run gives none, from the plan's draw `d` of `compute-gap`: the
+/// draw's top bit picks the range (`GAP_SMALL` or `GAP_LARGE`), its low bits the gap in it, as
+/// `mean_gap` does for a range given.
+pub fn default_gap(d: u64) -> u64 {
+    let (lo, hi) = if d >> 63 == 1 { GAP_SMALL } else { GAP_LARGE };
+    mean_gap(d, lo, hi)
 }
 
 /// The draw key of a segment: the run's sequence number at its start, the thread's slot, and
@@ -65,11 +77,12 @@ pub fn gap(seed: u64, mean: u64, key: u64) -> Option<u64> {
     Some(1 + draw(seed, Stream::Compute, key) % (2 * m - 1))
 }
 
-/// Under `--preempt points` with the gap drawn by default (`Config::compute_budget`), the
-/// switch points a run takes at its drawn mean gap: `ALLOWANCE`, and one more per
-/// `EVENTS_PER_SWITCH` events charged. Past that its segments draw their gaps with a mean of
-/// at least `EVENTS_PER_SWITCH` until it is back within (`budget`).
-pub const ALLOWANCE: u64 = 1 << 15;
+/// Under load-time points with the gap drawn by default (`Config::compute_budget`), in a process
+/// whose rebuilt code has not said hello, the switch points a run takes at its drawn mean gap:
+/// `ALLOWANCE`, and one more per `EVENTS_PER_SWITCH` events charged. Past that its segments
+/// draw their gaps with a mean of at least `EVENTS_PER_SWITCH` until it is back within
+/// (`budget`).
+pub const ALLOWANCE: u64 = 1 << 11;
 pub const EVENTS_PER_SWITCH: u64 = 1 << 13;
 
 /// The mean gap of a segment armed when the run has taken `switches` switch points (a gap or the
@@ -77,7 +90,7 @@ pub const EVENTS_PER_SWITCH: u64 = 1 << 13;
 /// `EVENTS_PER_SWITCH` while the switches are past their allowance. So a program that computes
 /// long at a small mean gap takes about `ALLOWANCE` switches at it and then one per
 /// `EVENTS_PER_SWITCH` events, still at places drawn uniformly, and a seed costs a bounded
-/// multiple of its program's own work whatever its gap; a short program (a test of a race) never
+/// multiple of its program's own work whatever its gap; a short program (a test of a race) seldom
 /// reaches the allowance.
 pub fn budget(mean: u64, switches: u64, events: u64) -> u64 {
     if mean == 0 || switches < ALLOWANCE.saturating_add(events / EVENTS_PER_SWITCH) {
@@ -88,11 +101,11 @@ pub fn budget(mean: u64, switches: u64, events: u64) -> u64 {
 }
 
 /// The longest walk's range when the run gives none (`PATINA_TEST_COMPUTE_WALK`).
-pub const WALK_DEFAULT: (u64, u64) = (4, 512);
+pub const WALK_DEFAULT: (u64, u64) = (2, 64);
 /// The longest walk a run may ask for.
 pub const WALK_MAX: u64 = 1 << 16;
 
-/// The instructions a switch walks on before it is taken (`--preempt points`), for the
+/// The instructions a switch walks on before it is taken (load-time points), for the
 /// switch keyed by `key`, `max` the run's longest walk: 2 switches in `max` (half of them when
 /// `max` is below 4) walk uniformly `1..=max`, the rest none. So a run steps about one
 /// instruction per switch whatever `max` is: the walk's cost is the switches', not its reach.
@@ -144,7 +157,7 @@ pub fn stays(seed: u64, key: u64, runnable: u64) -> bool {
     draw(seed, Stream::Stay, key).is_multiple_of(runnable.max(1))
 }
 
-/// What a segment is armed with under `--preempt points` when the runtime knows how many threads
+/// What a segment is armed with under load-time points when the runtime knows how many threads
 /// are runnable (`runnable`, the arming thread included; 0: not known), `key(k)` keying its
 /// `k`-th gap. Not known: `arm` of one drawn gap, as for rebuilt code. Alone (1): no switch
 /// point, only the next deadline or `REFILL`. Otherwise the points are drawn ahead: each gap
@@ -214,6 +227,24 @@ pub fn chain(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_gap_draws_from_both_ranges() {
+        let (mut small, mut large) = (0, 0);
+        for k in 0..2000u64 {
+            let d = mix64(k);
+            let g = default_gap(d);
+            assert_eq!(g, default_gap(d));
+            let (lo, hi) = if d >> 63 == 1 { GAP_SMALL } else { GAP_LARGE };
+            assert!((lo..=hi).contains(&g), "{g} outside {lo}..{hi}");
+            if g < GAP_SMALL.1 {
+                small += 1;
+            } else if g > GAP_SMALL.1 {
+                large += 1;
+            }
+        }
+        assert!(small > 0 && large > 0, "{small} small, {large} large");
+    }
 
     #[test]
     fn gaps_lie_in_range_repeat_and_average_to_the_mean() {

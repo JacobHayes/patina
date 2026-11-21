@@ -1,7 +1,7 @@
 //! `patina __rewrite`: the load-time rewriter's host side (ARCHITECTURE.md, "Load-time rewriting"). It
 //! reads an x86_64 or arm64 ELF file and makes a plan: the patched text pages, trampolines and a site table
 //! that put a count (a switch point) at backward branches, backward calls, indirect jumps and
-//! atomic instructions. The launcher's broker (`cache.rs`) makes plans for `--preempt points`;
+//! atomic instructions. The launcher's broker (`cache.rs`) makes plans for load-time points;
 //! this hidden command is for the tests and the evidence.
 //!
 //! ```text

@@ -96,12 +96,12 @@ patina sweep --seeds 1..20 -- target/debug/jobs
 ```text
 new: failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101   (seed 1: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1)
 sweep: replaying the first seed of 1 finding
-sweep: 312.3 KiB kept in /tmp/patina/examples/quickstart/patina-out/sweep
-patina sweep: 20 runs, 14 findings in 1 group, 6 ok   (0.2s, 8 jobs)
-outcomes: failure 14, ok 6
+sweep: 167.3 KiB kept in /tmp/patina/examples/quickstart/patina-out/sweep
+patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.5s, 8 jobs)
+outcomes: failure 11, ok 9
 
 failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: results out of job order; exit 101
-  14 of 20 runs   first: seed 1   replayed: identical
+  11 of 20 runs   first: seed 1   replayed: identical
   example: panicked at src/main.rs:28:5: assertion `left == right` failed: results out of job order
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
@@ -153,12 +153,13 @@ call fails with an error, and `patina run` lists it under `refused:`), DNS beyon
 model ends the run `unsupported` and names it. [ARCHITECTURE.md](ARCHITECTURE.md#limits)
 lists the limits.
 
-Deeper search: a program rebuilt with coverage flags and Patina's hook file (or a Python
-program run with `python3 -m patina`) also switches threads and moves the clock inside its own
-computation, so races with no system call in them are found. [The guide](docs/GUIDE.md#deeper-search-rebuilt-code) has the details.
-`--preempt points` does much of this for a stock program and every library it
-loads, without a rebuild, by rewriting their code as it is mapped
-([the guide](docs/GUIDE.md#points-in-stock-code---preempt-points)).
+Threads switch inside computation too: as the program and every library it loads are mapped,
+Patina rewrites their code so that loops, calls, indirect jumps and atomics are scheduling
+points, and computation moves the clock, so races with no system call in them are found
+([load-time points](docs/GUIDE.md#load-time-points)). The first run of a program does this
+once per file and keeps it in `~/.cache/patina/plans`. Deeper search: a program rebuilt with
+coverage flags and Patina's hook file (or a Python program run with `python3 -m patina`)
+switches at every load and store of its own code ([the guide](docs/GUIDE.md#deeper-search-rebuilt-code)).
 
 ```text
 C, C++  clang -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime, plus sdk/c/patina_compute.c

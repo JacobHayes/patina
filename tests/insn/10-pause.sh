@@ -7,17 +7,20 @@
 # there and stalls with pause points on too (spin probes are its answer). One lock gives one
 # digest over 5 runs under --vary cpu,aslr. Spin probes are off throughout, so that pause
 # points alone are measured.
+# Under [sched] preempt = "traps": these are its mechanisms (load-time points, the default,
+# switch inside these loops at their points, so nothing stalls there).
 #@ tier=quick budget=30 slots=5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-pause
 mkdir -p "$o"
 # Test inputs (AGENTS.md): no spin probes, stall-ms 1000; pause points on or off per run.
 export PATINA_TEST_SPIN_PROBES=0 PATINA_TEST_STALL_MS=1000
+cfg=$("$PATINA_CFG" preempt=traps)
 one() { # NAME SEED on|off PROG ARGS...
     n=$1 s=$2 p=$3; shift 3
     rm -rf "${o:?}/$n-$s-$p"
     if [ "$p" = on ]; then c=1; else c=0; fi
-    PATINA_TEST_PAUSE_POINTS=$c timeout 20 "$PATINA" run --seed "$s" --out "$o/$n-$s-$p" \
+    PATINA_TEST_PAUSE_POINTS=$c timeout 20 "$PATINA" run --config "$cfg" --seed "$s" --out "$o/$n-$s-$p" \
         --mount "$PATINA_GUESTS":/guest:copy -- "$@" >/dev/null 2>&1 || true
 }
 for spec in "glibc-spin /guest/spinwait glibc-spin" "own-spin /guest/spinwait own-spin" "rs-spin /guest/rs-spin spin"; do
@@ -36,7 +39,7 @@ for d in nohint-1-on ${nohint:-}; do
 done
 # Determinism with pause points: 5 runs under varied CPU and address layout, one digest.
 rm -rf "${o:?}/verify"
-timeout 60 "$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --out "$o/verify" \
+timeout 60 "$PATINA" verify --config "$cfg" --seed 2 --runs 5 --vary cpu,aslr --out "$o/verify" \
     --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinwait own-spin >/dev/null 2>&1 || true
 nd=$(for i in 0 1 2 3 4; do field "$o/verify/run-$i/result.json" digest; done | sort -u | wc -l)
 [ "$nd" = 1 ] || die "own-spin seed 2: $nd digests over 5 runs under --vary cpu,aslr"

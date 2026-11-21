@@ -156,7 +156,7 @@ e_page_jnz:
     .type _start, @function
 _start:
     // With an argument, a second pass after mapping over the 64 MiB past the image (where the
-    // trampolines are under --preempt points; free natively).
+    // trampolines are under load-time points; free natively).
     mov (%rsp), %r15
     xor %r12d, %r12d
     xor %r13d, %r13d
@@ -193,7 +193,7 @@ _start:
     push %r11
     test %esi, %esi
     ret
-    // getppid between entries: the program is one thread, so under --preempt points a point
+    // getppid between entries: the program is one thread, so under load-time points a point
     // is taken only at the first count after a system call (ARCHITECTURE "Compute points").
 6:  mov %eax, %r8d
     mov $110, %eax

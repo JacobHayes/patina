@@ -525,7 +525,7 @@ pub struct Start<'a> {
     /// System V shared memory a process crash carries to the next incarnation (`FD_SHM`):
     /// one memfd for the run.
     pub shm: std::os::fd::RawFd,
-    /// The run's plans, with `--preempt points` (`launcher::plans`).
+    /// The run's plans, with load-time points (`launcher::plans`).
     pub planner: Option<std::sync::Arc<crate::launcher::plans::Planner>>,
 }
 
@@ -652,7 +652,7 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
 /// this architecture's requirements (`host`, which `patina doctor` explains); as root, the
 /// sandbox's user namespace can be made and the host paths it binds can be read by the user it
 /// maps to; as another user, the host lets this executable make one (`userns_allowed`);
-/// counters work if `--preempt branches` asks for them.
+/// counters work if `[sched] preempt = "branches"` asks for them.
 pub fn preflight(o: &Opts) -> Res<()> {
     crate::host::refusal(&crate::host::Facts::probe(o.cfg.host_cpu))?;
     if root_user().is_none() {
@@ -842,14 +842,14 @@ fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
     res
 }
 
-/// The counter event with `--preempt branches`, or why counters cannot be used here: an
+/// The counter event with branch counters, or why counters cannot be used here: an
 /// error, never a run without them.
 pub fn pmu_event(o: &Opts) -> Res<Option<u64>> {
-    if !o.cfg.pmu.on {
+    if !o.cfg.preempt.branches() {
         return Ok(None);
     }
     crate::launcher::pmu::available().map(Some).map_err(|why| {
-        format!("--preempt branches: counter preemption is not available here: {why}")
+        format!("[sched] preempt = \"branches\": counter preemption is not available here: {why}")
     })
 }
 
@@ -934,7 +934,7 @@ pub fn run_incarnation(
     if c.emulate_rndr {
         cfg.insn |= proto::ctl::INSN_EMULATE_RNDR;
     }
-    if c.points {
+    if c.preempt.points() {
         cfg.sched |= proto::ctl::SCHED_POINTS;
     }
     let pmu_ev = pmu_event(o)?;

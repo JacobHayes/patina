@@ -11,13 +11,13 @@
 #     site and no e_* label is;
 #  b. a copy with the plan applied (`__rewrite --standalone`, which resumes interior entries
 #     itself) prints the native output, 5 runs;
-#  c. under --preempt points with a point on every count (compute-gap=1; the guest is one
+#  c. under with a point on every count (compute-gap=1; the guest is one
 #     thread, so a point is taken at the first count after each of its system calls), seeds 1
 #     and 2 each repeat identical under --vary cpu,load,aslr,sandbox,repeat, print the native
 #     output, take points, and (x86_64) resume at every interior entry the guest made (two per
 #     label);
 #  d. with an argument the guest maps over the range past its image that holds the trampolines,
-#     then makes every entry again: under --preempt points the plan is dropped (its original
+#     then makes every entry again: under the plan is dropped (its original
 #     pages back) and the output is the native one.
 #@ tier=quick budget=60 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
@@ -82,10 +82,10 @@ fi
 # c. and d.
 for g in $GS; do
     for s in 1 2; do
-        "$PATINA" verify --preempt points --fault compute-gap=1 --seed "$s" --runs 3 \
+        "$PATINA" verify --fault compute-gap=1 --seed "$s" --runs 3 \
             --vary cpu,load,aslr,sandbox,repeat --out "$o/$g/v$s" -- "$PATINA_GUESTS/$g" >"$o/$g/v$s.txt" 2>&1 &
     done
-    "$PATINA" run --preempt points --fault compute-gap=1 --seed 1 --out "$o/$g/remap" -- "$PATINA_GUESTS/$g" remap >/dev/null 2>&1 &
+    "$PATINA" run --fault compute-gap=1 --seed 1 --out "$o/$g/remap" -- "$PATINA_GUESTS/$g" remap >/dev/null 2>&1 &
 done
 wait
 for g in $GS; do

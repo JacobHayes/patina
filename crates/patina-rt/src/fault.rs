@@ -36,7 +36,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
     if sig as u64 == sig::SIGTRAP && crate::spin::on_sigtrap(unsafe { &*info }, frame) {
         return;
     }
-    // A debug session of a `--preempt points` or `branches` run (`Config::debug`): gdb passes
+    // A debug session of a load-time points or branch counters run (`Config::debug`): gdb passes
     // every SIGTRAP on, since it cannot tell the runtime's from its own. One that is not the
     // runtime's (above) nor a plan's is the debugger's: dropped before anything is charged.
     // (A breakpoint instruction of the program's own is dropped too: the session then leaves
@@ -110,7 +110,7 @@ pub extern "C" fn on_fault(sig: i32, info: *mut SigInfo, uc: *mut Frame) {
 }
 
 /// A debug session in which gdb passes `SIGTRAP` on (`patina debug`'s helper, for the runs
-/// whose scheduling points take it: `--preempt points`, `branches`).
+/// whose scheduling points take it: load-time points, branch counters).
 pub fn debugger_passes() -> bool {
     let c = crate::state::config();
     c.debug != 0 && (c.sched & proto::ctl::SCHED_POINTS != 0 || c.pmu & proto::ctl::PMU_ON != 0)

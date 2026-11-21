@@ -36,7 +36,7 @@ struct Session {
     gdb: Option<PathBuf>,
     /// Why there is no gdb to start (`--no-gdb`, none found, the host forbids attaching).
     no_gdb: String,
-    /// `--preempt points` or `branches`: the runtime's own breakpoints and single steps share
+    /// load-time points or branch counters: the runtime's own breakpoints and single steps share
     /// `SIGTRAP` with the debugger's, so gdb passes every `SIGTRAP` on and stepping is refused.
     sigtrap_pass: bool,
 }
@@ -61,9 +61,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             rundir.display()
         )));
     }
-    if cfg!(target_arch = "aarch64") && (cfg.points || cfg.pmu.on) {
+    if cfg!(target_arch = "aarch64") && (cfg.preempt != crate::config::Preempt::Traps) {
         return Err(err(format!(
-            "{}: patina debug does not take a run with --preempt points or branches on arm64 in this version",
+            "{}: patina debug does not take a run with load-time points (the default) or branch counters on arm64 in this version: run the seed again with [sched] preempt = \"traps\" in a patina.toml and debug that run",
             rundir.display()
         )));
     }
@@ -101,7 +101,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         ),
         (_, None, Some(g)) => (Some(g), String::new()),
     };
-    let sigtrap_pass = cfg.points || cfg.pmu.on;
+    let sigtrap_pass = cfg.preempt != crate::config::Preempt::Traps;
     let _ = SESSION.set(Session {
         event,
         gdb,
@@ -480,7 +480,7 @@ struct Proc {
 /// What gdb needs of process `host` and cannot find itself (the kernel's exe and auxv are
 /// Patina's runtime, which loads the program): each ELF file it maps but the runtime, as
 /// [its path, the file to read (through the process's root when the host's path is another
-/// file), its load bias]; and with `--preempt points` each trampoline, from the plans it
+/// file), its load bias]; and with load-time points each trampoline, from the plans it
 /// maps, as [start, end, the original instructions' address, their length, the offset of
 /// their copy] in the process's addresses.
 fn images(host: i32) -> Value {

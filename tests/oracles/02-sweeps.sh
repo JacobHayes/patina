@@ -37,7 +37,7 @@ old=$(jq -r --arg sha "$sha" 'select(.config.check.sha256 != $sha) | input_filen
 # upcase: plainly, clean failures only; fixed, against a faults-off reference, no finding.
 "$PATINA" run --seed 1 --out upref -- "$up" >upref.txt 2>&1 || die "upcase reference: $(tail -2 upref.txt)" # lint-allow: seed — faults off, upcase writes the same tree on every seed
 rc=0
-"$PATINA" sweep --seeds 1..40 -j 4 --faults disk --out up0 -- "$up" >up0.txt 2>&1 || rc=$?
+"$PATINA" sweep --seeds 1..80 -j 4 --faults disk --out up0 -- "$up" >up0.txt 2>&1 || rc=$?
 [ "$rc" = 1 ] && [ "$(jq -r '[.groups[].outcome] | unique | join(" ")' up0/report.json)" = failure ] || die "upcase plain sweep: exit $rc: $(tail -3 up0.txt)"
 rc=0
 "$PATINA" sweep --seeds 1..40 -j 4 --faults disk --ok-exit 1 --check "$root/examples/checks/same-tree upref" --out up2 -- "$up" fixed >up2.txt 2>&1 || rc=$?

@@ -445,9 +445,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
     ];
     // Settings no flag carries: config keys (other than those the flags below set) that
     // differ from the defaults. Allow-unmet and the host CPU do not change the run.
-    let mut rest = cfg.clone();
-    rest.pmu.on = d.pmu.on;
-    rest.points = d.points;
+    let rest = cfg.clone();
     let (have, def) = (
         serde_json::to_value(&rest).unwrap(),
         serde_json::to_value(&d).unwrap(),
@@ -524,12 +522,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         if cfg.timeout != d.timeout {
             flag("--timeout", cfg.timeout.to_string());
         }
-        if cfg.pmu.on {
-            flag("--preempt", "branches".into());
-        }
-        if cfg.points {
-            flag("--preempt", "points".into());
-        }
+
         if let Some(k) = &cfg.check {
             flag("--check", crate::check::join(&k.words));
         }
@@ -1079,7 +1072,7 @@ pub fn build(
         let Some(l) = r.result["compute"]["images"].as_array() else {
             continue;
         };
-        // A run under `--preempt points` has the section for its plans' cell alone.
+        // A run under load-time points has the section for its plans' cell alone.
         if l.is_empty() && r.result["rewrite"].is_object() {
             continue;
         }
@@ -1096,7 +1089,7 @@ pub fn build(
             k.sort_by_key(|x| crate::result::kind_rank(x));
         }
     }
-    // Load-time points (`--preempt points`): the points taken, and each file a run asked a plan
+    // Load-time points (load-time points): the points taken, and each file a run asked a plan
     // for, with whether it had one.
     let mut planned: BTreeMap<String, bool> = BTreeMap::new();
     let (mut with_plans, mut taken) = (0, 0);
@@ -1107,7 +1100,8 @@ pub fn build(
         };
         with_plans += 1;
         taken += w["points"].as_u64().unwrap_or(0);
-        for i in l {
+        // A file of data alone holds no code to rewrite: not counted among the files.
+        for i in l.iter().filter(|i| i["status"] != "data") {
             *planned
                 .entry(i["path"].as_str().unwrap_or("").to_string())
                 .or_default() |= i["status"] == "planned";
@@ -1937,16 +1931,40 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             }
         ));
     }
-    if let Some(w) = v.get("rewrite") {
+    // Load-time points are the default: their line only when a file went without a plan.
+    if let Some(w) = v.get("rewrite").filter(|w| {
+        w["images"]
+            .as_array()
+            .is_some_and(|a| a.iter().any(|i| i["planned"] != true))
+    }) {
         let images = w["images"].as_array().map_or(&[][..], |a| &a[..]);
         let planned = images.iter().filter(|i| i["planned"] == true).count();
         s.push_str(&format!(
-            "load-time points: {} taken in {} runs; {} of {} files planned\n",
+            "load-time points: {} taken in {} runs; {} of {} files rewritten",
             w["points"],
             w["runs"],
             planned,
             images.len()
         ));
+        let none: Vec<&str> = images
+            .iter()
+            .filter(|i| i["planned"] != true)
+            .filter_map(|i| i["path"].as_str())
+            .map(|p| p.rsplit('/').next().unwrap_or(p))
+            .take(crate::result::IMAGES_SHOWN)
+            .collect();
+        if !none.is_empty() {
+            s.push_str(&format!(
+                " (without a plan, so switching only at system calls: {}{})",
+                none.join(", "),
+                if images.len() - planned > none.len() {
+                    ", ..."
+                } else {
+                    ""
+                }
+            ));
+        }
+        s.push('\n');
     }
     if let Some(w) = v.get("nodes") {
         let names: Vec<&str> = w["names"]

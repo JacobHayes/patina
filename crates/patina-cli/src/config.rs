@@ -32,11 +32,33 @@ pub struct Mount {
     pub copy: bool,
 }
 
-/// Counter preemption (`--preempt branches`, `[sched] preempt`) and its slice policy.
+/// Where threads are preempted beyond system calls and spin hints (`[sched] preempt`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Preempt {
+    /// Also at load-time points: stock code is rewritten as it is mapped (ARCHITECTURE.md,
+    /// "Load-time rewriting"), with walks past them.
+    #[default]
+    Points,
+    /// Only at system calls, spin hints and spin probes.
+    Traps,
+    /// Also after a seed-chosen number of branches (counter preemption).
+    Branches,
+}
+
+impl Preempt {
+    pub fn points(self) -> bool {
+        self == Preempt::Points
+    }
+    pub fn branches(self) -> bool {
+        self == Preempt::Branches
+    }
+}
+
+/// Counter preemption's slice policy (`[sched] preempt = "branches"`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Pmu {
-    pub on: bool,
     pub slice_min: u64,
     pub slice_max: u64,
     pub short_permille: u64,
@@ -48,7 +70,6 @@ pub struct Pmu {
 impl Default for Pmu {
     fn default() -> Pmu {
         Pmu {
-            on: false,
             slice_min: proto::pmu::SLICE_MIN_DEFAULT,
             slice_max: proto::pmu::SLICE_MAX_DEFAULT,
             short_permille: proto::pmu::SHORT_PERMILLE_DEFAULT,
@@ -112,17 +133,15 @@ pub struct Config {
     /// (test input `EMULATE_RNDR`: the default follows the host).
     pub emulate_rndr: bool,
     /// Spin probes for a thread that computes without a boundary event (test input
-    /// `SPIN_PROBES`; only with `--preempt traps`).
+    /// `SPIN_PROBES`; off under counter preemption).
     pub spin_probes: bool,
+    /// Where threads are preempted (`[sched] preempt`).
+    pub preempt: Preempt,
     pub pmu: Pmu,
-    /// Switch points from load-time plans (`--preempt points`): stock code is
-    /// rewritten as it is mapped (ARCHITECTURE.md, "Load-time rewriting").
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub points: bool,
     /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
     /// chosen by process id; test input `HOST_CPU`). Does not reach the guest.
     pub host_cpu: Option<usize>,
-    /// `--preempt points`: the longest walk past a switch point, `W` or `A..B` drawn per seed
+    /// Load-time points: the longest walk past a switch point, `W` or `A..B` drawn per seed
     /// (test input `COMPUTE_WALK`; default `proto::compute::WALK_DEFAULT`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_walk: Option<String>,
@@ -251,8 +270,8 @@ impl Default for Config {
             pause_points: true,
             emulate_rndr: false,
             spin_probes: true,
+            preempt: Preempt::default(),
             pmu: Pmu::default(),
-            points: false,
             host_cpu: None,
             compute_walk: None,
             check: None,
@@ -784,14 +803,13 @@ fn boolean(v: &toml::Value, at: &str) -> Res<bool> {
         .ok_or_else(|| format!("{at}: expected true or false"))
 }
 
-/// `traps`, `branches` or `points`: whether counter preemption is on, whether load-time plans
-/// are.
-fn preempt(v: &str, at: &str) -> Res<(bool, bool)> {
+/// `points`, `traps` or `branches`.
+fn preempt(v: &str, at: &str) -> Res<Preempt> {
     match v {
-        "traps" => Ok((false, false)),
-        "branches" => Ok((true, false)),
-        "points" => Ok((false, true)),
-        _ => Err(format!("{at}: expected traps, branches or points, not {v}")),
+        "points" => Ok(Preempt::Points),
+        "traps" => Ok(Preempt::Traps),
+        "branches" => Ok(Preempt::Branches),
+        _ => Err(format!("{at}: expected points, traps or branches, not {v}")),
     }
 }
 
@@ -891,7 +909,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("sweep", "known") => c.known = Some(base.join(string(v, &at)?)),
                 ("sweep", "crash-pairs") => c.crash_pairs = Some(int(v, &at)? as usize),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
-                ("sched", "preempt") => (c.pmu.on, c.points) = preempt(&string(v, &at)?, &at)?,
+                ("sched", "preempt") => c.preempt = preempt(&string(v, &at)?, &at)?,
                 // The race-hunting policy: every segment short, stops close to traps.
                 ("sched", "branches") => match string(v, &at)?.as_str() {
                     "default" => {
@@ -1121,9 +1139,7 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(s) = a.last("--stdin") {
         c.stdin = Some(existing(&cwd, "--stdin", s)?);
     }
-    if let Some(p) = a.last("--preempt") {
-        (c.pmu.on, c.points) = preempt(p, "--preempt")?;
-    }
+
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }

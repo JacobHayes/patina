@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 29;
+pub const LAYOUT_VERSION: u64 = 30;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -46,7 +46,8 @@ pub struct Config {
     pub compute_gap: u64,
     pub compute_charge_ns: u64,
     /// Whether the switch budget applies to the mean gap (`crate::compute::budget`): 1 when
-    /// the gap was drawn by default, 0 when the fault plan names `compute-gap`.
+    /// the gap was drawn by default, 0 when the fault plan names `compute-gap` (a process
+    /// whose rebuilt code said hello is exempt either way).
     pub compute_budget: u64,
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`proto::compute::walk`; 0: a switch is taken at its site).
@@ -105,7 +106,7 @@ pub const SCHED_PAUSE_POINTS: u64 = 1;
 /// `Config::sched`: the supervisor may probe a thread that computes without a boundary event
 /// for a spin-wait whose iterations leave its state unchanged (`rt::spin`).
 pub const SCHED_SPIN_PROBE: u64 = 2;
-/// `Config::sched`: switch points from load-time plans (`--preempt points`): the cell is at
+/// `Config::sched`: switch points from load-time plans (load-time points): the cell is at
 /// `plan::CELL` and armed from the image's start, and executable file mappings get their plans.
 pub const SCHED_POINTS: u64 = 8;
 /// `Config::sched`: spin probes were asked for and this host cannot make them work
@@ -275,7 +276,7 @@ pub struct DebugCtl {
 /// The scheduler as the supervisor left it when it last gave the turn, written just before it
 /// does: the run's `seq` then, the slot it gave the turn to, how many threads were runnable
 /// (that one included), and whether that thread's process had no process-directed signal
-/// pending. With `--preempt points` the runtime arms the next segment from it while `seq` is
+/// pending. With load-time points the runtime arms the next segment from it while `seq` is
 /// still that value (`compute::exit`): nothing has happened since but the program's own
 /// computation, so the supervisor would make the same picks then as now.
 #[repr(C)]
@@ -297,7 +298,7 @@ pub struct ComputeStats {
     pub events: AtomicU64,
     pub switches: AtomicU64,
     pub deadline_stops: AtomicU64,
-    /// With `--preempt points` (`PLAN_NAMES` order): trampoline traps taken (each a compute
+    /// With load-time points (`PLAN_NAMES` order): trampoline traps taken (each a compute
     /// point), image mappings a plan was applied to, plans dropped because the program
     /// unmapped, mapped over, moved or reprotected all their patched text (or a trampoline),
     /// executable memory left
@@ -306,7 +307,8 @@ pub struct ComputeStats {
     /// at the copy of its instruction; switches taken after a walk, the instructions
     /// walked, and walks a runtime entry or an instruction the stepper cannot step ended
     /// without a switch; points drawn ahead that stayed with their thread (no trap: `stays`);
-    /// changes that put back part of a plan's patched text and left the rest (`restored`).
+    /// changes that put back part of a plan's patched text and left the rest (`restored`);
+    /// processes whose plans went back when an interpreter's line points took over (`lines`).
     pub plan: [AtomicU64; PLAN_FIELDS],
     /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: a
     /// token for the request and the seconds of that wall time the stall watchdog counts as
@@ -314,7 +316,7 @@ pub struct ComputeStats {
     pub planning: AtomicU64,
 }
 
-pub const PLAN_FIELDS: usize = 11;
+pub const PLAN_FIELDS: usize = 12;
 pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "points",
     "applied",
@@ -327,6 +329,7 @@ pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "walks_cut",
     "stays",
     "restored",
+    "lines",
 ];
 pub const PLAN_POINTS: usize = 0;
 pub const PLAN_APPLIED: usize = 1;
@@ -339,6 +342,7 @@ pub const PLAN_WALK_STEPS: usize = 7;
 pub const PLAN_WALKS_CUT: usize = 8;
 pub const PLAN_STAYS: usize = 9;
 pub const PLAN_RESTORED: usize = 10;
+pub const PLAN_LINES: usize = 11;
 
 impl ComputeStats {
     pub fn plans(&self) -> [u64; PLAN_FIELDS] {
@@ -1235,7 +1239,7 @@ pub const HE_EXEC: u64 = 13;
 /// record, or a magic it does not know). args[0] = the record's magic. The run ends
 /// `unsupported`, stop `signal-context`.
 pub const HE_SIGNAL_CONTEXT: u64 = 14;
-/// A walk (`--preempt points`) could not step on this host: arm64's stepper
+/// A walk (load-time points) could not step on this host: arm64's stepper
 /// could not open or write `/proc/self/mem`, or x86_64's could not read code
 /// (`process_vm_readv`). args[0] = the errno (0: open or write refused), args[1] = the call.
 /// The run ends `infra` rather than walk differently by host.

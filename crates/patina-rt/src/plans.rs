@@ -1,4 +1,4 @@
-//! Switch points from load-time plans (`--preempt points`; ARCHITECTURE.md "Load-time
+//! Switch points from load-time plans (load-time points; ARCHITECTURE.md "Load-time
 //! rewriting"). The launcher's broker answers the plan of a file this process maps executable
 //! (`proto::plan`); here the plan is mapped and its traps are answered. No instruction is
 //! decoded here.
@@ -66,6 +66,8 @@ const ALL: (u64, u64) = (0, u64::MAX);
 pub struct Plans {
     imgs: [Img; MAX_IMAGES],
     n: usize,
+    /// An interpreter's line points took over (`lines`): no mapping takes a plan any more.
+    lines: bool,
 }
 
 impl Plans {
@@ -89,6 +91,7 @@ impl Plans {
         Plans {
             imgs: [Z; MAX_IMAGES],
             n: 0,
+            lines: false,
         }
     }
 }
@@ -248,6 +251,9 @@ const KEEP: u64 = crate::arch::insn::PROT_BTI;
 /// first reserves the span (`PROT_NONE`, anonymous) and maps the file inside it; the rewriter
 /// puts their trampolines past the reservation, within a branch's reach (128 MiB) of the text.
 pub fn room(len: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64 {
+    if proc().plans.lines {
+        return 0;
+    }
     if cfg!(target_arch = "aarch64") && on() && prot == 0 && flags & MAP_ANONYMOUS != 0 {
         return 1 << 27;
     }
@@ -309,7 +315,7 @@ fn run(img: &Img, k: u64) -> (u64, u64, u64) {
 /// `[a, a + len)` of `fd` at file offset `off` was just mapped executable with `prot` (and
 /// `map_prot`, the protection it has now: the loader writes before it protects): apply its plan.
 pub fn on_map(a: u64, len: u64, prot: u64, map_prot: u64, fd: u64, off: u64) {
-    if !on() {
+    if !on() || proc().plans.lines {
         return;
     }
     let Some((w, plan)) = (if prot & PROT_WRITE == 0 {
@@ -688,6 +694,32 @@ pub fn changing(a: u64, len: u64) {
         } else {
             proto::ctl::PLAN_DROPPED
         });
+    }
+}
+
+/// An interpreter turned its line points on (`python3 -m patina`: `compute::hello` with
+/// `COMPUTE_LINE`): every plan of this process goes back to the original file, and no later
+/// mapping in it takes one (a fork child keeps that; an exec starts again), so the cell counts
+/// the interpreter's lines alone. A switch at a point inside the interpreter comes while the
+/// thread holds the interpreter's lock, where no other thread can run its code, and the plans'
+/// events would stretch the gap between line points. Counted `lines`, once per process whose
+/// plans held patched text.
+pub fn lines() {
+    if !on() || proc().plans.lines {
+        return;
+    }
+    proc().plans.lines = true;
+    let mut any = false;
+    for img in imgs().iter_mut() {
+        let mut left = false;
+        for_patched(img, &mut |_, _, _| left = true);
+        if left {
+            restore(img, ALL.0, ALL.1);
+            any = true;
+        }
+    }
+    if any {
+        count(proto::ctl::PLAN_LINES);
     }
 }
 

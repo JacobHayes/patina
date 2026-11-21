@@ -1,4 +1,4 @@
-# Stock Go at the default CPU count (GOMAXPROCS 4), with --preempt branches:
+# Stock Go at the default CPU count (GOMAXPROCS 4), with branch counters:
 # go-sweep (the Go stall reproducer) and W4 (go-static all): 100 seeds each, no stall, all ok;
 # 5 seeds x 20 runs under --vary cpu,load,aslr,sandbox identical, faults off and on.
 # The default cpus.
