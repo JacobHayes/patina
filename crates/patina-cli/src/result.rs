@@ -690,8 +690,9 @@ pub fn host_facts() -> Value {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    // x86_64 names the model; arm64 gives the implementer and part numbers.
-    let info = std::fs::read_to_string("/proc/cpuinfo").unwrap_or_default();
+    // x86_64 names the model; arm64 gives the implementer and part numbers. Only the first
+    // CPU's block is read: the kernel makes each CPU's as it is read.
+    let info = first_cpu_block();
     let field = |k: &str| {
         info.lines()
             .find(|l| l.split(':').next().is_some_and(|f| f.trim() == k))
@@ -708,6 +709,31 @@ pub fn host_facts() -> Value {
         })
         .unwrap_or_default();
     json!({ "kernel": kernel, "cpu": cpu, "arch": std::env::consts::ARCH })
+}
+
+/// `/proc/cpuinfo` up to the end of its first CPU's block (arm64 kernels end every block with
+/// the model fields).
+fn first_cpu_block() -> String {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open("/proc/cpuinfo") else {
+        return String::new();
+    };
+    let mut info = vec![];
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match f.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        };
+        info.extend_from_slice(&buf[..n]);
+        if let Some(i) = info.windows(2).position(|w| w == b"\n\n") {
+            info.truncate(i + 1);
+            break;
+        }
+    }
+    String::from_utf8_lossy(&info).into_owned()
 }
 
 /// This patina build: its version and the SHA-256 of its own binary. `run.json` and

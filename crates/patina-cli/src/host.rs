@@ -96,11 +96,10 @@ impl Facts {
                 .unwrap_or_default(),
             page_size,
             va_bits: if arm { probe_va_bits() } else { VA_BITS_NEEDED },
-            counter_trap: in_child(tsc_child),
-            pac: if !arm || hwcap & (HWCAP_PACA | HWCAP_PACG) == 0 {
-                Ok(false)
-            } else {
-                in_child(pac_child).map(|_| true)
+            counter_trap: children().tsc.clone(),
+            pac: match &children().pac {
+                None => Ok(false),
+                Some(r) => r.clone().map(|_| true),
             },
             midr: if arm {
                 let mut cpus = crate::launch::allowed_cpus();
@@ -124,7 +123,7 @@ impl Facts {
             } else {
                 0
             },
-            spin: spin_support().clone(),
+            spin: children().spin.clone(),
         }
     }
 
@@ -445,11 +444,19 @@ pub fn in_child(f: fn() -> i32) -> Result<(), String> {
         let code = f();
         unsafe { libc::_exit(code) };
     }
+    match wait_child(pid)? {
+        st if libc::WIFEXITED(st) => code_result(libc::WEXITSTATUS(st)),
+        st => Err(format!("child died (status {st:#x})")),
+    }
+}
+
+/// The wait status of child `pid`.
+fn wait_child(pid: i32) -> Result<i32, String> {
     let mut st = 0;
     loop {
         let r = unsafe { libc::waitpid(pid, &mut st, 0) };
         if r == pid {
-            break;
+            return Ok(st);
         }
         let e = std::io::Error::last_os_error();
         if r < 0 && e.raw_os_error() == Some(libc::EINTR) {
@@ -458,17 +465,62 @@ pub fn in_child(f: fn() -> i32) -> Result<(), String> {
         // Reaped elsewhere (SIGCHLD ignored): the result is unknown, never a pass.
         return Err(format!("waitpid: {e}"));
     }
-    if libc::WIFEXITED(st) && libc::WEXITSTATUS(st) == 0 {
+}
+
+/// A probe's code: 0 is success, else an errno.
+fn code_result(code: i32) -> Result<(), String> {
+    if code == 0 {
         Ok(())
-    } else if libc::WIFEXITED(st) {
-        Err(format!(
-            "errno {} ({})",
-            libc::WEXITSTATUS(st),
-            std::io::Error::from_raw_os_error(libc::WEXITSTATUS(st))
-        ))
     } else {
-        Err(format!("child died (status {st:#x})"))
+        Err(format!(
+            "errno {code} ({})",
+            std::io::Error::from_raw_os_error(code)
+        ))
     }
+}
+
+/// Run each of `fs` in turn in one forked child, as `in_child` runs one: each one's result.
+/// Should the child die in one, that one and those after it run again each in a child of its
+/// own, so that a probe that kills its process fails only itself.
+fn in_child_each(fs: &[fn() -> i32]) -> Vec<Result<(), String>> {
+    let mut codes = vec![];
+    let mut p = [0i32; 2];
+    if unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) } == 0 {
+        let pid = unsafe { libc::fork() };
+        if pid == 0 {
+            for f in fs {
+                let code = f() as u8;
+                // A lost byte would shift the later probes' codes: end, and they run again.
+                if unsafe { libc::write(p[1], (&code as *const u8).cast(), 1) } != 1 {
+                    unsafe { libc::_exit(1) };
+                }
+            }
+            unsafe { libc::_exit(0) };
+        }
+        unsafe { libc::close(p[1]) };
+        if pid > 0 {
+            let mut buf = vec![0u8; fs.len()];
+            let mut got = 0;
+            while got < buf.len() {
+                let n =
+                    unsafe { libc::read(p[0], buf[got..].as_mut_ptr().cast(), buf.len() - got) };
+                if n > 0 {
+                    got += n as usize;
+                } else if n == 0
+                    || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR)
+                {
+                    break;
+                }
+            }
+            if wait_child(pid).is_ok() {
+                codes = buf[..got].iter().map(|&c| code_result(c as i32)).collect();
+            }
+        }
+        unsafe { libc::close(p[0]) };
+    }
+    let done = codes.len();
+    codes.extend(fs[done..].iter().map(|&f| in_child(f)));
+    codes
 }
 
 pub fn errno() -> i32 {
@@ -495,34 +547,57 @@ fn pac_child() -> i32 {
     0
 }
 
-/// Can spin probes work here: a word of code written through `/proc/self/mem`, then a page
-/// written after tracking started reported as written and an untouched one not (each in a
-/// child; once per process).
-fn spin_support() -> &'static Result<(), (SpinStep, String)> {
-    static S: std::sync::OnceLock<Result<(), (SpinStep, String)>> = std::sync::OnceLock::new();
-    S.get_or_init(spin_try)
+/// What the probes that change the process they run in found (`children`).
+struct Children {
+    tsc: Result<(), String>,
+    /// `None`: no keys to probe (not arm64, or a CPU without pointer authentication).
+    pac: Option<Result<(), String>>,
+    spin: Result<(), (SpinStep, String)>,
+}
+
+/// The probes that change the process they run in, in one forked child, once per process:
+/// can spin probes work here (a word of code written through `/proc/self/mem`, then a page
+/// written after tracking started reported as written and an untouched one not), does
+/// `PR_SET_TSC` trap the counter, and can the pointer-authentication keys be disabled. The
+/// child writes each probe's code (0 or an errno) to a pipe as it finishes; the key probe is
+/// last, as nothing it returns to may authenticate a pointer signed before.
+fn children() -> &'static Children {
+    static C: std::sync::OnceLock<Children> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        let pac = cfg!(target_arch = "aarch64")
+            && unsafe { libc::getauxval(libc::AT_HWCAP) } & (HWCAP_PACA | HWCAP_PACG) != 0;
+        let track: fn() -> i32 = if cfg!(target_arch = "aarch64") {
+            uffd_child
+        } else {
+            soft_dirty_child
+        };
+        let mut probes: Vec<fn() -> i32> = vec![proc_mem_child, track, tsc_child];
+        if pac {
+            probes.push(pac_child);
+        }
+        let mut codes = in_child_each(&probes).into_iter();
+        let mut next = || codes.next().unwrap_or_else(|| Err("no result".into()));
+        let (mem, track, tsc) = (next(), next(), next());
+        let spin = match (mem, track) {
+            (Err(e), _) => Err((SpinStep::ProcMem, e)),
+            (_, Err(e)) if e.starts_with(&format!("errno {} ", libc::ENODATA)) => Err((
+                SpinStep::Track,
+                "a written page was not reported".to_string(),
+            )),
+            (_, Err(e)) => Err((SpinStep::Track, e)),
+            _ => Ok(()),
+        };
+        Children {
+            tsc,
+            pac: pac.then(next),
+            spin,
+        }
+    })
 }
 
 /// Whether spin probes can work on this host (`spin_probes`).
 pub fn spin_ok() -> bool {
-    spin_support().is_ok()
-}
-
-fn spin_try() -> Result<(), (SpinStep, String)> {
-    in_child(proc_mem_child).map_err(|e| (SpinStep::ProcMem, e))?;
-    let track = if cfg!(target_arch = "aarch64") {
-        uffd_child
-    } else {
-        soft_dirty_child
-    };
-    in_child(track).map_err(|e| {
-        let e = if e.starts_with(&format!("errno {} ", libc::ENODATA)) {
-            "a written page was not reported".to_string()
-        } else {
-            e
-        };
-        (SpinStep::Track, e)
-    })
+    children().spin.is_ok()
 }
 
 /// A word of this function's own code (read-only, executable), written back unchanged through
