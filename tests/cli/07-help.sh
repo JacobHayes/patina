@@ -1,6 +1,7 @@
 # 7. Every flag `patina --help --format json` lists for a command parses for that command (the
 #    help and the parser read one table); a flag the table does not list for it is refused.
-#    Each command's text help names each of its flags. --version prints a parseable version.
+#    Each command's text help names each of its flags; --fault help lists the fault keys.
+#    --version prints a parseable version.
 #@ tier=quick budget=5
 . "$(dirname "$0")/lib.inc"
 "$PATINA" --help --format json >"$RUNS/help.json"
@@ -35,6 +36,14 @@ for c in h["commands"]:
         assert r.returncode != 0, (argv, "accepted a flag the table does not list for it")
 print(f"{n} (command, flag) pairs parse; {len(h['commands'])} commands")
 PY
+# --fault help: every fault key, in place of a run (run --help leaves them out).
+"$PATINA" run --fault help >"$RUNS/keys.txt" || die "--fault help: exit $?"
+jq -r '.faults.keys[].name' "$RUNS/help.json" | while read -r k; do
+    grep -qF -- "$k=" "$RUNS/keys.txt" || die "--fault help lacks $k"
+done
+"$PATINA" run --help >"$RUNS/run.txt"
+k0=$(jq -r '.faults.keys[0].name' "$RUNS/help.json")
+if grep -qF -- "$k0=" "$RUNS/run.txt"; then die "run --help lists the fault keys ($k0)"; fi
 # --version: exit 0, `patina X.Y.Z[-pre]` (the release workflow reads it).
 v=$("$PATINA" --version) || die "--version: exit $?"
 grep -Eq '^patina [0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' <<<"$v" || die "--version: $v"

@@ -1076,10 +1076,10 @@ pub fn crash_plan(seed: u64, f: &mut proto::faults::FaultCfg, s: &str) -> Res<St
     Ok(format!("{k}:{}", f.crash_permille))
 }
 
-/// The presets and keys, for `patina run --help`.
+/// The presets and keys, for `--fault help`.
 pub fn help_text() -> String {
     let mut s = String::from(
-        "\nfault presets (--faults NAME[,NAME]; each range is resolved from the seed):\n",
+        "fault presets (--faults NAME[,NAME]; each range is resolved from the seed):\n",
     );
     for (name, kv) in PRESETS {
         let v: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={v}")).collect();

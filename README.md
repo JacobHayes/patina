@@ -12,14 +12,6 @@ Patina is experimental. Linux x86_64 or arm64 (arm64: kernel 6.12 or newer, 4 Ki
 makes its own sandbox and needs unprivileged user namespaces; Ubuntu 24.04 and later admit them
 for a program only with an AppArmor profile, installed once as root (below).
 
-Changes in 0.18: `patina explain RUNDIR` tells a run as a short story and names the event to
-stop at, and `patina debug RUNDIR` stops a replay just before it with gdb attached ([reading a
-failing run](docs/GUIDE.md#reading-a-failing-run)); `sweep --crash-points=N` samples crash points
-and `[sweep] crash-pairs` crashes a second node after each first crash; `--crash
-process-at:N@NODE`; the descriptor numbers a program sees no longer depend on host timing.
-Run directories from 0.17 are refused. In 0.17: each node is a machine (its own disk, machine
-crashes, faults, pauses and clock; the `cluster` preset); TCP keepalive on the virtual wire.
-
 ## Install
 
 ```sh
@@ -58,7 +50,7 @@ From a checkout instead, with Rust (rustup reads the pinned toolchain from
 `rust-toolchain.toml`): `cargo install --locked --path crates/patina-cli`.
 
 For coding agents, [skills/patina](skills/patina/SKILL.md) is a skill that says how to use
-Patina well. Each release after 0.18.0 attaches it as `patina-skill.tar.gz`, with its version in
+Patina well. Each release attaches it as `patina-skill.tar.gz`, with its version in
 `VERSION`; this unpacks the one matching the installed `patina` into a skills directory (here
 `~/.agents/skills`; use your agent's):
 
@@ -200,4 +192,5 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 - [docs/GUIDE.md](docs/GUIDE.md): sweeps, faults, crashes, the SDK, reading a result,
   replay, CI.
 - [ARCHITECTURE.md](ARCHITECTURE.md): how it works and its limits.
-- `patina --help`, `patina COMMAND --help`: every flag of your build.
+- `patina --help`, `patina COMMAND --help`: every flag of your build; `patina run --fault
+  help`: every fault key.

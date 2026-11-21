@@ -56,7 +56,7 @@ def vocabulary(patina):
     v["words"] = {n: set(re.findall(r"(?<![-\w])([a-z]+)(?![-\w])", c["usage"])) - {"patina", n}
                   for n, c in v["commands"].items()}
     crash = v["flags"]["--crash"]["help"]
-    v["crash"] = set(re.findall(r"\b([a-z]+(?:-[a-z]+)*)(?=\[?:[A-Z])", crash))
+    v["crash"] = set(re.findall(r"\b([a-z]+(?:-[a-z]+)*)(?=(?:\|[a-z-]+)*\[?:[A-Z])", crash))
     return v
 
 
@@ -147,7 +147,8 @@ def check_value(where, name, value, arg, v, bad, seen):
     if PLACEHOLDER.search(arg):
         return
     if name == "--fault":
-        check_key(where, arg, v, bad)
+        if arg != "help":  # --fault help lists the keys
+            check_key(where, arg, v, bad)
     elif name == "--faults":
         for p in arg.split(","):
             p = p.split("@")[0]

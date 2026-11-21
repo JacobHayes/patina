@@ -2,7 +2,7 @@
 
 Every setting below is drawn from the seed, so any finding replays from its `rerun:` line.
 Add one kind at a time, starting from the bug you suspect; a run that meets every fault at
-once fails in ways that say little. `patina run --help` lists every fault key of your build.
+once fails in ways that say little. `patina run --fault help` lists every fault key of your build.
 
 ## The schedule (always on)
 

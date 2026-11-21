@@ -554,8 +554,8 @@ settings.
 | `--faults all` | both, plus `mem-error-permille=0..2` |
 | `--faults cluster` | with nodes only: `net`'s keys, partitions, pauses, clock skew and machine crashes ([Several machines](#several-machines)) |
 
-`--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --help`
-lists every key.
+`--fault KEY=VALUE` sets one key and replaces the preset's value for it; `patina run --fault
+help` lists every key.
 
 A class a preset turned on that had nothing to act on in any run of a sweep (datagram faults
 for a program that only uses TCP, disk faults for one that writes nothing under `/work`) is
@@ -580,9 +580,7 @@ each other by 1 to 10 µs of virtual time, so a seed's throughput over one conne
 median of about 4 MB/s and 6 MB/s at the 90th percentile (256 KiB sent, docs/EVIDENCE.md,
 "Net preset shaping"); a protocol timeout shorter than its message takes at that rate is
 then a finding about the timeout. For the harsh link, name the keys: `--fault
-net-chunk-max=1 --fault net-delay-ms=10..50`. Since 0.13.0, a run with `--faults net` or `all`, or
-with a `net-chunk-max` range, has another digest than under 0.12 when it splits a TCP delivery
-(the chunk size and the gap are drawn anew); every other run keeps its digest. Disk faults act on files under `/work`, pipes and unix sockets; an injected
+net-chunk-max=1 --fault net-delay-ms=10..50`. Disk faults act on files under `/work`, pipes and unix sockets; an injected
 error is one Linux can return for that call on that object. A failed write-back
 (`fsync-error-*`) is reported as Linux reports one: once to each open file description,
 also to a descriptor opened after it if nobody was told yet, never by a `sync_file_range`
@@ -597,8 +595,7 @@ datagram due inside a `net-blackout` window is lost. `net-blackout=START+LENGTH[
 holds TCP deliveries and loses datagrams for LENGTH ms from START ms of virtual time (only
 those from or to PORT, if given), and keepalive probes go unanswered in it, as across a cut; START and LENGTH are each a number or a range drawn per
 seed (`--fault net-blackout=0..60000+1000..10000` puts a window of 1 to 10 s somewhere in
-the first minute). Before 0.16 it was `net-partition`, a name that is refused now: a partition
-is a cut between nodes ("Several machines"). A receive queue past the socket's
+the first minute). A partition is a cut between nodes ("Several machines"). A receive queue past the socket's
 `SO_RCVBUF` drops datagrams with no fault, as Linux does. A request/response protocol with
 no retry, run with `--fault net-drop-permille=50`:
 
@@ -2948,7 +2945,7 @@ this host can run patina
 
 Instead of the sysctl, installing the release's Debian package (`sudo apt-get install -y
 ./patina_X.Y.Z_amd64.deb`) installs `/usr/bin/patina` with its AppArmor profile, and the
-restriction can stay on. On arm64 (from 0.9.0, the first release with an arm64 binary),
+restriction can stay on. On arm64,
 `runs-on: ubuntu-24.04-arm` takes the same setup line. On `ubuntu-24.04-arm`, `patina doctor`
 prints (in part):
 

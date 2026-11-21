@@ -112,6 +112,11 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
+    // `--fault help`: the presets and every fault key, in place of a run.
+    if a.all("--fault").iter().any(|v| v == "help") {
+        print!("{}", faults::help_text());
+        return ExitCode::SUCCESS;
+    }
     let r = match cmd {
         Cmd::Run => run(&a),
         Cmd::Verify => verify(&a),

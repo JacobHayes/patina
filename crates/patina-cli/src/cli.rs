@@ -45,19 +45,19 @@ pub const COMMANDS: &[Command] = &[
         cmd: Cmd::Explain,
         name: "explain",
         usage: "patina explain RUNDIR [--from SEQ] [--to SEQ] [--full]",
-        help: "the story of a run: who sent what to whom, what the seed did, what the program printed, how it ended, and the event to stop at (replays it once into RUNDIR/explain to see its data)",
+        help: "a run as a story: messages, faults, output, its end, and the event to stop at",
     },
     Command {
         cmd: Cmd::Debug,
         name: "debug",
         usage: "patina debug RUNDIR [--at EVENT] [--no-gdb]",
-        help: "replay a run, stop the whole world just before one event and attach gdb to the process about to act; at the end, whether the session was the recorded run (and RUNDIR/debug/session.json)",
+        help: "replay a run and stop it under gdb just before one event",
     },
     Command {
         cmd: Cmd::Verify,
         name: "verify",
         usage: "patina verify [options] [-- CMD ARGS...]",
-        help: "one seed several times under varied host conditions; names the first differing record",
+        help: "one seed under varied host conditions; names the first differing record",
     },
     Command {
         cmd: Cmd::Sweep,
@@ -69,7 +69,7 @@ pub const COMMANDS: &[Command] = &[
         cmd: Cmd::Report,
         name: "report",
         usage: "patina report [--known FILE] [--group N] [--recheck [--check 'CMD ARGS'] [-j N]] DIR...",
-        help: "summarise run directories (a sweep's, or any made by patina run --out); --recheck first judges the kept runs again with a checker, without running them",
+        help: "summarise run directories; --recheck judges the kept runs again first",
     },
     Command {
         cmd: Cmd::Minimize,
@@ -81,13 +81,13 @@ pub const COMMANDS: &[Command] = &[
         cmd: Cmd::Log,
         name: "log",
         usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR [--post-crash] | log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]",
-        help: "read a boundary log, compare two, list file operations, write out an incarnation's final work tree (or the one its crash left), export a run's events as JSON lines",
+        help: "read and compare logs; list file operations; export work trees and events",
     },
     Command {
         cmd: Cmd::Ctl,
         name: "ctl",
         usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | node crash NAME | node kill NAME | node start NAME | node pause NAME | node resume NAME | clock step NAME +90s | mark LABEL",
-        help: "inside a run with nodes: act on the run's network, nodes and clocks (from the driver's node), or mark the log",
+        help: "inside a run: act on its network, nodes and clocks, or mark the log",
     },
     Command {
         cmd: Cmd::Doctor,
@@ -132,6 +132,8 @@ impl Flag {
 }
 
 const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
+/// Listed apart in `patina --help`: plumbing most users never type.
+const ADVANCED: &[Cmd] = &[Cmd::Verify, Cmd::Log, Cmd::Ctl];
 const ALL: &[Cmd] = &[
     Cmd::Run,
     Cmd::Replay,
@@ -184,40 +186,40 @@ const fn many(
 }
 
 pub const FLAGS: &[Flag] = &[
-    flag(
-        "--seed",
-        "N",
-        "0",
-        "the seed",
-        &[Cmd::Run, Cmd::Verify],
-    ),
+    flag("--seed", "N", "0", "the seed", &[Cmd::Run, Cmd::Verify]),
     Flag {
         name: "--out",
         value: "DIR",
         default: "patina-out/run-SEED",
-        help: "run directory; an earlier run there is replaced",
-        cmds: &[Cmd::Run, Cmd::Verify, Cmd::Replay, Cmd::Sweep, Cmd::Minimize],
+        help: "run directory (replaced)",
+        cmds: &[
+            Cmd::Run,
+            Cmd::Verify,
+            Cmd::Replay,
+            Cmd::Sweep,
+            Cmd::Minimize,
+        ],
         repeat: false,
         per: &[
             (
                 Cmd::Verify,
                 "patina-out/verify-SEED",
-                "directory of the runs (run-0, run-1, ...); an earlier one there is replaced",
+                "directory of the runs (replaced)",
             ),
             (
                 Cmd::Replay,
                 "RUNDIR/replay",
-                "the replay's run directory; an earlier one there is replaced",
+                "the replay's run directory (replaced)",
             ),
             (
                 Cmd::Sweep,
                 "patina-out/sweep",
-                "sweep directory: the same sweep there (program, command, settings, patina) resumes, running only the runs it lacks; any other is replaced",
+                "sweep directory (the same sweep resumes)",
             ),
             (
                 Cmd::Minimize,
                 "RUNDIR/minimized",
-                "the reduced run's directory; an earlier one there is replaced",
+                "the reduced run's directory (replaced)",
             ),
         ],
         per_value: &[],
@@ -225,28 +227,28 @@ pub const FLAGS: &[Flag] = &[
     flag(
         "--config",
         "FILE",
-        "./patina.toml if present",
-        "configuration file: a patina.toml, or a run's run.json for all its settings; flags override it",
+        "./patina.toml",
+        "patina.toml or run.json; flags override it",
         RUNLIKE,
     ),
     many("--env", "K=V", "add to the guest environment", RUNLIKE),
     many(
         "--node",
         "NAME='CMD ARGS'",
-        "another machine in the run: node NAME runs CMD ARGS (split into words as a --check line is), after any [node.NAME] tables of patina.toml",
+        "another machine: node NAME runs CMD ARGS",
         RUNLIKE,
     ),
     many(
         "--mount",
         "SRC:DST[:copy]",
-        "host file or directory, read-only in the guest; :copy copies a directory in at start",
+        "host path, read-only in the guest (:copy: copied in)",
         RUNLIKE,
     ),
     flag(
         "--work",
         "DIR[:GUEST]",
         "empty",
-        "initial contents of the guest's writable, crash-modelled disk, at GUEST (default /work)",
+        "files for the crash-modelled disk at GUEST (/work)",
         RUNLIKE,
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
@@ -254,34 +256,34 @@ pub const FLAGS: &[Flag] = &[
         "--preempt",
         "traps|branches|points",
         "traps",
-        "where threads are preempted: system calls and spin-waits; also after N branches (needs CAP_PERFMON and a supported CPU); or also at switch points written into stock code as it loads (loops, backward calls, indirect jumps, atomics)",
+        "system calls only, or also by branches or points",
         RUNLIKE,
     ),
     flag(
         "--faults",
         "NAME",
         "off",
-        "fault preset: disk, net, all (or several: disk,net); its rates are ranges the seed resolves; with nodes, disk@NODE,... scopes it",
+        "fault presets: disk, net, all (disk,net; disk@NODE)",
         RUNLIKE,
     ),
     many(
         "--fault",
         "KEY=VALUE",
-        "one fault setting; replaces the preset's (keys below); with nodes, a disk or memory key's KEY=VALUE@NODE,... scopes it",
+        "one fault key, over the preset's (--fault help: the keys)",
         RUNLIKE,
     ),
     flag(
         "--crash",
         "KIND[:VALUE]",
         "off",
-        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B; with nodes, process or machine at drawn times, or machine:PERMILLE, machine-at:N, process-at:N at each node's own crash points, each [@NODE,...]; what a machine crash keeps: --fault fs-model=ext4-ordered (default) or posix-strict",
+        "machine|process[:PERMILLE] or machine-at|process-at:N",
         RUNLIKE,
     ),
     flag(
         "--buggify",
         "",
         "off",
-        "let SDK fault points fire (rates: --fault buggify-permille=N, --fault buggify:LABEL=N)",
+        "let SDK fault points fire (--fault buggify:LABEL=N)",
         RUNLIKE,
     ),
     flag(
@@ -296,56 +298,63 @@ pub const FLAGS: &[Flag] = &[
         "--vary",
         "LIST",
         "cpu,load,aslr,sandbox,repeat",
-        "what to change between runs: cpu,load,aslr,sandbox,repeat, and on request parallel,env,time (time waits 61 s of wall time before the second run)",
+        "varied; also parallel,env,time",
         &[Cmd::Verify],
     ),
     flag(
         "--seeds",
         "A..B|N,M,...",
         "1..100",
-        "the seeds: an inclusive range, a list, or both (1..100,250)",
+        "inclusive range, list, or both (1..100,250)",
         &[Cmd::Sweep],
     ),
-    flag(
-        "--jobs",
-        "N",
-        "the CPUs, at most 8",
-        "runs at once, each pinned to its own CPU (also -j N); report --recheck: checkers at once",
-        &[Cmd::Sweep, Cmd::Report],
-    ),
+    Flag {
+        name: "--jobs",
+        value: "N",
+        default: "the CPUs, at most 8",
+        help: "runs at once, one CPU each (also -j N)",
+        cmds: &[Cmd::Sweep, Cmd::Report],
+        repeat: false,
+        per: &[(
+            Cmd::Report,
+            "the CPUs, at most 8",
+            "with --recheck: checkers at once",
+        )],
+        per_value: &[],
+    },
     flag(
         "--cases",
         "FILE",
         "none",
-        "one case per line, each (case, seed) one run: a line is a whole command (shell quoting), or fills {} in the command after --",
+        "one case per line: a whole command, or fills {} in CMD",
         &[Cmd::Sweep],
     ),
     flag(
         "--only-case",
         "ID[,ID...]",
         "every case",
-        "run only these cases of --cases FILE: a case's id is its line's --name, or its line number (PATINA_CASE_ID, report.json's case_id)",
+        "only these cases (line --name or line number)",
         &[Cmd::Sweep],
     ),
     flag(
         "--keep",
         "fail|all",
         "fail",
-        "whose logs to keep (run.json and result.json are always kept); fail: those of each group's first three runs, and with --check every run the checker read (for report --recheck), work trees compressed and logs over 4 MiB cut; all: every run whole, as patina run leaves it",
+        "fail: each group's first three runs, and checked runs",
         &[Cmd::Sweep],
     ),
     flag(
         "--max-findings",
         "N",
         "no limit",
-        "stop launching runs once N distinct findings (signatures) are seen; 1: the first",
+        "stop once N distinct findings are seen",
         &[Cmd::Sweep],
     ),
     flag(
         "--crash-points",
         "[=N]",
         "off",
-        "run each seed once without a crash, then once per crash point, crashing there (needs --crash machine or process, without a rate; with nodes, --crash machine[@NODE,...]: once per point of each node); =N: at most N of them per seed (and per level of [sweep] crash-pairs), a seeded sample by node and kind of operation",
+        "one run per crash point per seed; =N: at most N",
         &[Cmd::Sweep],
     ),
     flag(
@@ -358,28 +367,28 @@ pub const FLAGS: &[Flag] = &[
     many(
         "--allow-unmet",
         "LABEL",
-        "an SDK label (* matches any text: 'lib-*'), a fault class, or check (a check that judged no run) that may stay unmet without making the result vacuous",
+        "SDK label, fault class or check that may stay unmet",
         &[Cmd::Sweep, Cmd::Report],
     ),
     flag(
         "--known",
         "FILE",
         "none",
-        "findings already known: lines of ID PATTERN matched against [CASE] SIGNATURE (* any text, # comments); a known finding is counted and does not fail the sweep; an ID written !ID must match some run or the result is vacuous",
+        "known findings (lines: ID PATTERN); they do not fail",
         &[Cmd::Sweep, Cmd::Report],
     ),
     flag(
         "--group",
         "N",
         "none",
-        "print group N of the report in full (its position in report.json's groups, from 1): its faults, rerun and replay commands",
+        "print group N in full (from 1)",
         &[Cmd::Report],
     ),
     flag(
         "--recheck",
         "",
         "off",
-        "judge the kept runs again before reporting, with each run's own checker read anew (an edited checker file is the new one) or --check's; a run whose logs were pruned keeps its verdict",
+        "judge the kept runs again, with --check or their own",
         &[Cmd::Report],
     ),
     flag(
@@ -407,47 +416,47 @@ pub const FLAGS: &[Flag] = &[
         "--at",
         "EVENT",
         "stop",
-        "debug: the event to stop before: SEQ (a sequence number, as explain and log events print it), stop (the event explain stops at), end (the run's last event in a program), call:NAME[:NODE][:K] (the K-th call of that name, negative from the end; default -1), mark:LABEL[:K], sdk:LABEL[:K], fault:K, crash",
+        "event to stop before: SEQ, stop, end, call:NAME, ...",
         &[Cmd::Debug],
     ),
     flag(
         "--no-gdb",
         "",
         "off",
-        "debug: stop and print how to attach (the helper's path, the process), without starting gdb; the world goes on when the helper's debugger continues or detaches, or on Enter",
+        "print how to attach, without starting gdb",
         &[Cmd::Debug],
     ),
     flag(
         "--post-crash",
         "",
         "off",
-        "log tree: the tree the incarnation's crash left (the next incarnation started from), not the one it ended with",
+        "log tree: the tree its crash left, not its last",
         &[Cmd::Log],
     ),
     flag(
         "--types",
         "T,T",
         "all",
-        "log events: only these event types (header, inc, cut, call, op, fault, crash, mark, sdk, signal, sigfault, sched, preempt, insn)",
+        "only these event types: call, op, fault, crash, ...",
         &[Cmd::Log],
     ),
     Flag {
         name: "--check",
         value: "'CMD ARGS'",
         default: "none",
-        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA_CASE_ID, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail or LABEL [KEY]: detail (grouped by LABEL [KEY]), 77 not judged (first line CLASS: detail, counted by CLASS), else error; a checker that names PATINA_CHECK_SERVE in its file is started once per sweep job and answers a line per run (docs/GUIDE.md)",
+        help: "judge ok runs: exit 0 pass, 1 finding, 77 not judged",
         cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log, Cmd::Report],
         repeat: false,
         per: &[
             (
                 Cmd::Log,
                 "",
-                "log ops: replay the whole operation log and compare with the exported tree",
+                "log ops: replay the op log and compare with the tree",
             ),
             (
                 Cmd::Report,
-                "each run's own, read anew",
-                "with --recheck: the checker to judge the runs with, in place of the one each recorded",
+                "each run's own",
+                "with --recheck: the checker to judge with",
             ),
         ],
         per_value: &[(Cmd::Log, "")],
@@ -456,21 +465,21 @@ pub const FLAGS: &[Flag] = &[
         "--ok-exit",
         "N[,N...]|any",
         "none",
-        "guest exit statuses that end the run ok: the program failed cleanly, as it documents (a checker still judges it; PATINA_EXIT has the status); any: every status; a signal never does",
+        "exit statuses that end the run ok (any: every status)",
         RUNLIKE,
     ),
     flag(
         "--format",
         "text|json",
         "text",
-        "output format: json prints result.json (explain: the story, one line per object)",
+        "output format: json prints result.json",
         ALL,
     ),
     flag(
         "--print-apparmor-profile",
         "",
         "",
-        "print the AppArmor profile that lets this patina executable make its sandbox where Ubuntu restricts user namespaces (install it as root)",
+        "print the AppArmor profile this patina needs on Ubuntu",
         &[Cmd::Doctor],
     ),
     flag("--help", "", "", "this help", ALL),
@@ -626,7 +635,11 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
     match cmd {
         None => {
             s.push_str("patina: deterministic simulation testing of any Linux program (x86_64, arm64)\n\nusage: patina COMMAND [options]\n\ncommands:\n");
-            for c in COMMANDS {
+            for c in COMMANDS.iter().filter(|c| !ADVANCED.contains(&c.cmd)) {
+                s.push_str(&format!("  {:<8} {}\n", c.name, c.help));
+            }
+            s.push_str("\nadvanced:\n");
+            for c in COMMANDS.iter().filter(|c| ADVANCED.contains(&c.cmd)) {
                 s.push_str(&format!("  {:<8} {}\n", c.name, c.help));
             }
             s.push_str(
@@ -643,9 +656,6 @@ pub fn help_text(cmd: Option<Cmd>) -> String {
             for f in FLAGS.iter().filter(|f| f.cmds.contains(&c)) {
                 s.push_str(&flag_text(f, c));
                 s.push('\n');
-            }
-            if RUNLIKE.contains(&c) {
-                s.push_str(&crate::faults::help_text());
             }
         }
     }
@@ -723,6 +733,22 @@ mod tests {
 
     fn v(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn help_is_one_short_line_per_flag_and_command() {
+        let lines = FLAGS
+            .iter()
+            .flat_map(|f| f.cmds.iter().map(|&c| flag_text(f, c)))
+            .chain(
+                COMMANDS
+                    .iter()
+                    .map(|c| format!("  {:<8} {}", c.name, c.help)),
+            );
+        let long: Vec<String> = lines
+            .filter(|l| l.contains('\n') || l.chars().count() >= 100)
+            .collect();
+        assert!(long.is_empty(), "{}", long.join("\n"));
     }
 
     #[test]
