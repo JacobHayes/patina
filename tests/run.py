@@ -52,6 +52,7 @@ waits for load to fall rather than land a tier that has used up its margin.
 import hashlib
 import os
 import platform
+from select import select as fd_ready
 import signal
 import subprocess
 import sys
@@ -263,15 +264,22 @@ def main():
         with open(log, "w") as fh:
             p = subprocess.Popen(STRICT + [s["path"]], cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT,
                                  start_new_session=True)
-            try:
-                rc = p.wait(timeout=s["budget"])
-                why = "" if rc == 0 else f"exit {rc}"
-            except subprocess.TimeoutExpired:
+            # Waited for with wait4: the script's CPU time, its reaped descendants' included.
+            pidfd = os.pidfd_open(p.pid)
+            ready, _, _ = fd_ready([pidfd], [], [], s["budget"])
+            os.close(pidfd)
+            if ready:
+                _, st, ru = os.wait4(p.pid, 0)
+                p.returncode = os.waitstatus_to_exitcode(st)
+                why = "" if p.returncode == 0 else f"exit {p.returncode}"
+            else:
                 hang(["snapshot", str(p.pid), runs])
                 kill_session(p.pid)
-                p.wait()
+                _, _, ru = os.wait4(p.pid, 0)
+                p.returncode = -9
                 why = f"over budget ({s['budget']} s), killed"
         dt = time.monotonic() - t0
+        cpu = ru.ru_utime + ru.ru_stime
         # Nothing of the script's runs may be left (sandbox teardown is asynchronous: 5 s grace).
         left = ""
         for _ in range(50):
@@ -305,13 +313,13 @@ def main():
         with lock:
             free[0] += need
             lock.notify_all()
-            results.append((s, ok, dt, why))
+            results.append((s, ok, dt, why, cpu))
             # A pass that skipped its work (no PMU, no sudo) says so, so a log tells it from a run.
             skip = ""
             if ok:
                 with open(log, errors="replace") as fh:
                     skip = next((" (" + l.strip()[:120] + ")" for l in fh if l.startswith("SKIP")), "")
-            print(f"{'PASS' if ok else 'FAIL'} {s['area']}/{s['name']} {dt:.1f} s (budget {s['budget']})"
+            print(f"{'PASS' if ok else 'FAIL'} {s['area']}/{s['name']} {dt:.1f} s, cpu {cpu:.1f} s (budget {s['budget']})"
                   + (skip if ok else f": {why} (see {log})"), flush=True)
             if not ok:
                 with open(log) as fh:
@@ -328,19 +336,20 @@ def main():
         t.join()
     wall = time.monotonic() - t_start
     with open(os.path.join(base, "summary.tsv"), "w") as fh:
-        fh.write("area\tscript\ttier\tresult\tseconds\tbudget\n")
-        for s, ok, dt, _ in sorted(results, key=lambda r: -r[2]):
-            fh.write(f"{s['area']}\t{s['name']}\t{s['tier']}\t{'PASS' if ok else 'FAIL'}\t{dt:.1f}\t{s['budget']}\n")
+        fh.write("area\tscript\ttier\tresult\tseconds\tcpu\tbudget\n")
+        for s, ok, dt, _, cpu in sorted(results, key=lambda r: -r[2]):
+            fh.write(f"{s['area']}\t{s['name']}\t{s['tier']}\t{'PASS' if ok else 'FAIL'}\t{dt:.1f}\t{cpu:.1f}\t{s['budget']}\n")
     print("== slowest:")
-    for s, ok, dt, _ in sorted(results, key=lambda r: -r[2])[:10]:
+    for s, ok, dt, _, _ in sorted(results, key=lambda r: -r[2])[:10]:
         print(f"   {dt:7.1f} s  {s['area']}/{s['name']}")
     nfail = sum(1 for r in results if not r[1])
     load = os.getloadavg()[0]
     ceil = CEILING[tier] and round(CEILING[tier] * factor)
-    four = sum(min(s["slots"], 4) * dt for s, _, dt, _ in results) / 4
+    four = sum(min(s["slots"], 4) * dt for s, _, dt, _, _ in results) / 4
     share = lambda t: f"{100 * t / ceil:.0f}% of the {ceil} s ceiling" if ceil else f"target {TARGET[tier]} s"
     print(f"== {tier}: {len(results) - nfail} passed, {nfail} failed; wall {wall:.0f} s ({share(wall)}); "
           f"on 4 sandboxes about {four:.0f} s ({share(four)}); script time {sum(r[2] for r in results):.0f} s; "
+          f"CPU time {sum(r[4] for r in results):.0f} s; "
           f"load average {load:.1f}; budgets and ceiling x{factor:.2f}")
     if ceil and wall > ceil:
         print(f"FAIL: the {tier} tier took {wall:.0f} s, over its {ceil} s ceiling: cut or speed up, do not raise it")
