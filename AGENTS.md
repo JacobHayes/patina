@@ -85,7 +85,8 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   (or `<!-- no-run NAME: REASON -->`) and runs in the quick tier (a sweep of many runs is
   `release-only`): exactly on the kind of host its numbers were written on, with numbers as N
   elsewhere (`tests/docs/transcripts.py` says how to mark one). A doc change that shows output
-  passes `./check docs` (`./check release` for a release-only block).
+  passes `./check docs` (`./check release` for a release-only block; `scripts/land` runs those
+  too for a change to code, guests or docs).
 - **Evidence is never a gate.** A claim shown by volume (many seeds, a matrix, a soak) is a
   `tests/AREA/evidence-*.sh` script run once by hand (`./check evidence NAME`); its command,
   date, host and result go into `docs/EVIDENCE.md`. Nothing in quick, an area or CI calls it.

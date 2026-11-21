@@ -1460,13 +1460,13 @@ exit: 1
 ```text
 $ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --faults net --fault partition-gap-ms=1000..8000 --fault partition-ms=1000..8000 -- python3 /guest/q3.py driver 90
 ...
-patina sweep: 8 runs, 7 findings in 1 group, 1 ok   (8.9s, 4 jobs)
-outcomes: failure 7, ok 1
-nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 78 held over them
-partitions: 50 drawn (12 bridge, 15 isolate, 8 oneway, 15 split), 46 acted on traffic
+patina sweep: 8 runs, 8 findings in 1 group, 0 ok   (9.2s, 4 jobs)
+outcomes: failure 8
+nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 44 held over them
+partitions: 37 drawn (9 bridge, 11 isolate, 5 oneway, 12 split), 34 acted on traffic
 
 failure exit: exit 1
-  7 of 8 runs   first: seed 1   replayed: identical
+  8 of 8 runs   first: seed 1   replayed: identical
   faults in every failing run: net-delay, net-reset, partition      in none: net-drop, net-dup, net-reorder
   nodes: n1 down in 0, n2 down in 0, n3 down in 0, partitioned at the end in 5
   rerun:  patina run --seed 1 --config /tmp/q3/patina-out/sweep/seed-1/run.json -- python3 /guest/q3.py driver 90
@@ -1577,20 +1577,20 @@ exit: 1 0
 ```text
 $ patina sweep --seeds 1..8 -j 4 --mount g:/guest:copy --crash process --fault crash-gap-ms=3000..15000 --fault down-ms=500..3000 -- python3 /guest/q3.py driver 60
 ...
-patina sweep: 8 runs, 5 findings in 1 group, 3 ok   (5.3s, 4 jobs)
+patina sweep: 8 runs, 5 findings in 1 group, 3 ok   (6.1s, 4 jobs)
 outcomes: failure 5, ok 3
 nodes: driver, n1, n2, n3 in 8 runs; net: 0 cuts, 0 heals, 0 held over them
-node downs: 57 killed; 56 restarts
+node downs: 42 killed; 41 restarts
 
 failure exit: exit 1
-  5 of 8 runs   first: seed 3   replayed: identical
+  5 of 8 runs   first: seed 1   replayed: identical
   faults in every failing run: crash      in none: -
-  nodes: n1 down in 5, n2 down in 4, n3 down in 5
-  rerun:  patina run --seed 3 --config /tmp/q3k/patina-out/sweep/seed-3/run.json -- python3 /guest/q3.py driver 60
-  replay: patina replay /tmp/q3k/patina-out/sweep/seed-3
-  explain: patina explain /tmp/q3k/patina-out/sweep/seed-3
-$ grep FAIL patina-out/sweep/seed-3/inc-0/stdout
-FAIL: lost write: k2 read 0 in view 0; 80 was seen before (ack in view 0; views up to 0)
+  nodes: n1 down in 5, n2 down in 4, n3 down in 4
+  rerun:  patina run --seed 1 --config /tmp/q3k/patina-out/sweep/seed-1/run.json -- python3 /guest/q3.py driver 60
+  replay: patina replay /tmp/q3k/patina-out/sweep/seed-1
+  explain: patina explain /tmp/q3k/patina-out/sweep/seed-1
+$ grep FAIL patina-out/sweep/seed-1/inc-0/stdout
+FAIL: lost write: k1 read 0 in view 1; 84 was seen before (ack in view 1; views up to 1)
 ```
 
 Every kill and restart is in the logs: `result.json`'s `nodes.list` gives each node its
@@ -1715,7 +1715,7 @@ node downs: 30 machine crash; 30 restarts
 failure exit: FAIL: acknowledged put lost on b; exit 1
   6 of 31 runs   first: seed 1@b.1   replayed: identical
   faults in every failing run: crash      in none: -
-  nodes: a down in 0, b down in 6 (lost on its disk in 6; crash points 1, 2, 3, 8, 9, 12)
+  nodes: a down in 0, b down in 6 (lost on its disk in 5; crash points 1, 2, 3, 8, 9, 12)
   rerun:  patina run --seed 1 --config /tmp/ack2/patina-out/sweep/seed-1@b.1/run.json -- python3 /guest/ack2.py driver 3
   replay: patina replay /tmp/ack2/patina-out/sweep/seed-1@b.1
   explain: patina explain /tmp/ack2/patina-out/sweep/seed-1@b.1
@@ -1753,21 +1753,21 @@ $ patina sweep --seeds 1 --crash-points=60 --crash machine -j 4 --mount g:/guest
 sweep: 1 seed, 400 crash points (n1 80, n2 160, n3 160), a sample of 60 (--crash-points=N)
 sweep: 306 pairs after a first crash, a sample of 60 (--crash-points=N)
 ...
-patina sweep: 121 runs, 16 findings in 1 group, 105 ok   (6.2s, 4 jobs)
-outcomes: failure 16, ok 105
+patina sweep: 121 runs, 18 findings in 1 group, 103 ok   (9.9s, 4 jobs)
+outcomes: failure 18, ok 103
 crash points: 60 of 400 tried (n1 12 of 80, n2 24 of 160, n3 24 of 160)
 crash pairs: 60 of 306 tried (a second node's crash after a first)
   seed 1: 60 of 400
-nodes: driver, n1, n2, n3 in 121 runs; net: 0 cuts, 0 heals, 220 held over them
-node downs: 180 machine crash; 162 restarts
+nodes: driver, n1, n2, n3 in 121 runs; net: 0 cuts, 0 heals, 200 held over them
+node downs: 180 machine crash; 157 restarts
 
 failure exit: exit 1
-  16 of 121 runs   first: seed 1@n1.24+n2.42   replayed: identical
+  18 of 121 runs   first: seed 1@n1.11+n3.19   replayed: identical
   faults in every failing run: crash      in none: -
-  nodes: n1 down in 16 (lost on its disk in 16; crash points 21, 24, 26, 27, 29, 34, 35, 38, 39, 49, 50, 51, 54, 61, 62, 69), n2 down in 9 (lost on its disk in 9; crash points 41, 42, 66, 95, 104, 115, 117, 139), n3 down in 7 (lost on its disk in 6; crash points 34, 48, 54, 62, 70, 96)
-  rerun:  patina run --seed 1 --config /tmp/q3-pairs/patina-out/sweep/seed-1@n1.24+n2.42/run.json -- python3 /guest/q3.py driver 2
-  replay: patina replay /tmp/q3-pairs/patina-out/sweep/seed-1@n1.24+n2.42
-  explain: patina explain /tmp/q3-pairs/patina-out/sweep/seed-1@n1.24+n2.42
+  nodes: n1 down in 18 (lost on its disk in 18; crash points 11, 13, 21, 26, 27, 29, 34, 38, 39, 42, 49, 50, 54, 59, 62), n2 down in 5 (lost on its disk in 5; crash points 41, 66, 95, 104, 117), n3 down in 13 (lost on its disk in 13; crash points 17, 19, 34, 48, 54, 62, 66, 70, 81, 82, 96, 113, 115)
+  rerun:  patina run --seed 1 --config /tmp/q3-pairs/patina-out/sweep/seed-1@n1.11+n3.19/run.json -- python3 /guest/q3.py driver 2
+  replay: patina replay /tmp/q3-pairs/patina-out/sweep/seed-1@n1.11+n3.19
+  explain: patina explain /tmp/q3-pairs/patina-out/sweep/seed-1@n1.11+n3.19
 ```
 
 The correct store (no `nosync`) is ok at every first crash and pair of the same sweep

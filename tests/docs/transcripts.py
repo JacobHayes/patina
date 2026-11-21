@@ -39,8 +39,10 @@ status checked and no output compared. Keys:
            it shows depends on one seed's run (a pinned `--seed`, a run directory of a seed).
   arch     MACHINE: the block runs only on this `uname -m` (a feature of one architecture);
            elsewhere it is listed, not run.
-  release-only  REASON: the block runs only in the release tier (`./check release`): a sweep
-           of many runs, too slow for the landing gate; elsewhere it is listed, not run.
+  release-only  REASON: the block runs only in the release tier (`./check release`), or with
+           DOCS_RELEASE_ONLY=1 (scripts/land sets it for a change that can move what the docs
+           show): a sweep of many runs, too slow for the landing gate; elsewhere it is listed,
+           not run.
 
 The docs' numbers (seeds, counts, digests, sequence numbers) are one kind of host's: they depend
 on the architecture, the CPU, the kernel and the host's libraries and interpreters that a program
@@ -494,7 +496,7 @@ def main():
               "exact-only blocks not run")
     norun = [b for b in blocks if b.no_run]
     machine = platform.machine()
-    release = os.environ.get("CHECK_TIER") == "release"
+    release = os.environ.get("CHECK_TIER") == "release" or os.environ.get("DOCS_RELEASE_ONLY") == "1"
     held = [b for b in blocks if not b.no_run and ((b.exact_only and not exact) or (b.arch and b.arch != machine)
                                                    or (b.release_only and not release))]
     runnable = [b for b in blocks if not b.no_run and b not in held]

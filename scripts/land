@@ -4,6 +4,7 @@
 # Refuses unless the working copy has no changes, its parent is REV (the gate runs on the working
 # copy's tree) and every commit to land is described. Then:
 # fetch; rebase REV onto main@origin; `mise run check` (its quick tier held to half its ceiling);
+# for a change to code, guests or docs, `./check docs` with the release-only transcripts too;
 # push REV to the branch BOOKMARK (never main); wait for the CI run of that exact commit, whose
 # required jobs must have passed on their first attempt; fast-forward main to REV (forward only:
 # if main moved, rebase and run again); push main; delete BOOKMARK; print the commit and the CI
@@ -57,6 +58,14 @@ sha=$(id "$rev")
 # The quick tier also fails here past half its ceiling on four sandboxes (tests/run.py
 # CHECK_SOFT_CEILING): growth shows up on this host before it turns CI red.
 CHECK_SOFT_CEILING=50 mise run check || die "mise run check failed at $sha"
+# The docs' release-only transcripts (slow sweeps) are compared exactly only on the reference
+# host, which is where landings run; CI's runners compare numbers as N. A change that can move
+# what the docs show runs them here too, so the release tier is not the first to find them stale.
+shown=$(jj diff --from main@origin --to "$sha" --name-only crates tests/guests examples sdk go skills README.md docs)
+if [ -n "$shown" ]; then
+    say "the change can move what the docs show: ./check docs with the release-only transcripts"
+    DOCS_RELEASE_ONLY=1 ./check docs || die "./check docs (release-only transcripts) failed at $sha"
+fi
 # Counter exactness is checked only where the CPU is supported (CI's x86_64 runners are not):
 # a change to the runtime or the protocol runs the counters area here too, which says whether
 # this host could run it.
