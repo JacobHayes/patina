@@ -132,3 +132,45 @@ jobs:
           path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7
 
+
+  ledger-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Host setup for the sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libsqlite3-dev libssl-dev
+          sort -u /sys/devices/system/cpu/cpu*/regs/identification/midr_el1
+      - uses: ./.github/actions/setup-toolchain
+      - name: Build head and base
+        run: |
+          mise exec -- cargo build --release --quiet -p patina-cli
+          mkdir -p ~/bins && cp target/release/patina ~/bins/head
+          git worktree add ../base 0327ddd71c5a15b380f36ff14048edf67cbe97aa
+          (cd ../base && mise trust --yes . >/dev/null 2>&1 || true; cd ../base && mise exec -- cargo build --release --quiet -p patina-cli)
+          cp ../base/target/release/patina ~/bins/base
+      - name: Guests
+        run: |
+          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
+          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
+          mise exec -- bash tests/guests.sh | tail -1 > ~/setdir
+      - name: Ledgers
+        run: |
+          set=$(cat ~/setdir)
+          printf '[sched]\npreempt = "traps"\n' > ~/traps.toml
+          printf '#!/bin/sh\ncmd=$1; shift\nexec "$PBIN" "$cmd" --config %s/traps.toml "$@"\n' "$HOME" > ~/traps.sh; chmod +x ~/traps.sh
+          for b in base head; do
+            P=~/bins/$b set=$set sh .github/ledger.sh > ~/$b-default.txt
+            PBIN=~/bins/$b P=~/traps.sh set=$set sh .github/ledger.sh > ~/$b-traps.txt
+          done
+          P=~/bins/head set=$set sh .github/ledger.sh > ~/head-default2.txt
+          for f in ~/*-default*.txt ~/*-traps.txt; do echo "== $f"; cat $f; done
+          diff ~/head-default.txt ~/head-default2.txt
+          diff ~/base-default.txt ~/head-default.txt
+          diff ~/base-traps.txt ~/head-traps.txt
+          echo LEDGERS-IDENTICAL
