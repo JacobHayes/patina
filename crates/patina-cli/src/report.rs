@@ -453,6 +453,10 @@ pub fn quote(s: &str) -> String {
     }
 }
 
+/// How a program that marks `setup-complete` avoids setting up twice per run.
+pub const HELD_HINT: &str =
+    "set `[run] faults-held = true` in patina.toml (or pass --faults-held) to set up once";
+
 /// One runnable `patina run` command that reproduces a run from its `run.json` (in `dir`):
 /// the seed and flags, or, when the run has settings only a configuration file carries, the
 /// seed and `--config DIR/run.json`, which carries all of them.
@@ -977,6 +981,11 @@ pub fn build(
     // program with no datagram socket. Never eligible, it is not applicable, not vacuous, if its
     // class acted on something; one a setting of its own named (`--fault`, a `[faults]` key)
     // in any run, or one whose classes applied nowhere, stays vacuous.
+    // Runs not told that the program marks `setup-complete` that met the mark and set up again.
+    let restarted = runs
+        .iter()
+        .filter(|r| r.result["faults"]["window"]["restarted"] == true)
+        .count();
     let (named, of_class) = fault_sources(runs);
     let applied =
         |cs: &BTreeSet<String>| cs.iter().any(|c| eligible.get(c).is_some_and(|n| *n > 0));
@@ -1380,7 +1389,7 @@ pub fn build(
             // point fired).
             "sites": site_runs.iter().map(|((k, l), (e, h))| json!({"kind": k, "label": l, "runs_evaluated": e, "runs_held": h})).collect::<Vec<_>>(),
         },
-        "faults": {"configured": configured, "eligible_zero": idle, "not_applicable": not_applicable},
+        "faults": {"configured": configured, "eligible_zero": idle, "not_applicable": not_applicable, "restarted": restarted},
         "compute_stall": stalls,
         "missing": missing,
         "host_limits": limits,
@@ -2195,6 +2204,13 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         tail.push(format!(
             "faults: not applicable (a class's, nothing to act on in any run): {}",
             na.join(", ")
+        ));
+    }
+    let restarted = v["faults"]["restarted"].as_u64().unwrap_or(0) as usize;
+    if restarted > 0 {
+        tail.push(format!(
+            "faults held until setup-complete: {} met the mark and set up again; {HELD_HINT}",
+            count(restarted, "run")
         ));
     }
     let miss = v["missing"].as_object().unwrap();

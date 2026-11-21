@@ -32,7 +32,7 @@ fsync-error-permille = 0
 | `time-limit` | `SECONDS` | 3600 | virtual time after which the run ends `liveness` |
 | `log-limit` | `MIB` | 1024 | log size at which the run ends `liveness` (a livelock) |
 | `check-timeout` | `SECONDS` | 60 | wall time a checker may take |
-| `faults-held` | `true or false` | false | as `--faults-held`: faults wait for the program's `setup-complete` mark |
+| `faults-held` | `true or false` | false | as `--faults-held`: faults wait for the program's `setup-complete` mark; without it, a run that meets the mark sets up twice |
 
 | `[faults]` | Value | Default | Sets |
 |---|---|---|---|

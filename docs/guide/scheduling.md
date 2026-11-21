@@ -2,7 +2,16 @@
 
 One thread of the program runs at a time; at each scheduling point the seed decides which runs
 next. Every seed is another interleaving, so races, deadlocks and ordering bugs need no flag:
-sweep seeds. The points:
+sweep seeds.
+
+**What the default covers.** In a stock binary threads switch at system calls, loop back-edges,
+backward calls, indirect jumps and atomic instructions, plus a short walk past them: races
+around loops, calls, locks and atomics are found by seeds alone. A race between two plain memory
+accesses in straight-line code is usually not reached there: rebuild the program with compute
+points (below), which find it readily. Code generated at run time (JIT output) gets no points:
+threads switch there only at system calls and spin hints.
+
+The points:
 
 - every system call, and every spin hint (`pause`; on arm64 `yield`, `isb`, `wfe`, `wfi`);
 - **load-time points**: as the program and every library it loads are mapped, Patina maps a
@@ -42,8 +51,6 @@ thread pools; another count gives every seed another schedule.
   get no points: threads switch there only at system calls and spin hints. A thread computing
   there for 20 ms without either is checked for spinning, and yields if it is. `patina run`
   prints a `load-time points:` line naming what went without points.
-- **A window far from any point** (a load and a store several instructions from the nearest
-  loop, call or atomic) is split rarely. Rebuild the code with compute points (below).
 - **Weak memory**: one thread runs at a time, so a store another CPU sees late never happens, and
   a locked read-modify-write is never split.
 - **A seed belongs to its binaries**: the same seed is the same run only with the same program

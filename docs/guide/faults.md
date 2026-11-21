@@ -62,11 +62,12 @@ sdk`) or from a script (`patina ctl mark setup-complete`, `patina ctl mark fault
 
 Faults act from the start of a run, unless it is told that the program marks `setup-complete`
 (`--faults-held`, `[run] faults-held = true`): then from that mark. A run not told that meets
-the mark starts again told, which `run.json` and its rerun line record; a sweep's runs of higher
-seeds then start told. A run told that never makes the mark has no faults (its summary says so).
-Faults stop at `faults-done`: after it nothing more is injected, a partition heals, a paused
-node resumes, and no node is crashed again. Crash points count only between the two marks
-(`result.json`'s `faults.window`).
+the mark starts again told, which `run.json` and its rerun line record, so it sets up twice: set
+`[run] faults-held = true` in `patina.toml` for a program that marks, as the summary says. Every
+run of a sweep is the `patina run` of its seed: one run tells another nothing. A run told that
+never makes the mark has no faults (its summary says so). Faults stop at `faults-done`: after it
+nothing more is injected, a partition heals, a paused node resumes, and no node is crashed
+again. Crash points count only between the two marks (`result.json`'s `faults.window`).
 
 **Put the system under test on a node; the driver is the harness.** The command after `--`
 waits for the system, marks the setup done, drives the workload, marks the faults done, and
@@ -74,7 +75,7 @@ checks:
 
 <!-- no-run node-harness: needs a database to test, which the repository does not ship -->
 ```sh
-patina sweep --seeds 1..200 --faults all,crash --node db='./db --listen :7000' -- ./harness
+patina sweep --seeds 1..200 --faults all,crash --faults-held --node db='./db --listen :7000' -- ./harness
 ```
 
 <!-- no-run harness-script: the driver the sweep above runs -->

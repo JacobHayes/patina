@@ -832,7 +832,7 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("run", "time-limit", "SECONDS", "3600", "virtual time after which the run ends `liveness`"),
     tk("run", "log-limit", "MIB", "1024", "log size at which the run ends `liveness` (a livelock)"),
     tk("run", "check-timeout", "SECONDS", "60", "wall time a checker may take"),
-    tk("run", "faults-held", "true or false", "false", "as `--faults-held`: faults wait for the program's `setup-complete` mark"),
+    tk("run", "faults-held", "true or false", "false", "as `--faults-held`: faults wait for the program's `setup-complete` mark; without it, a run that meets the mark sets up twice"),
     tk("faults", "faults", "[\"CLASS[@NODE,...]\", ...]", "none", "as `--faults`"),
     tk("faults", "KEY", "VALUE", "none", "any fault key, as `--fault KEY=VALUE` (`patina run --fault help`)"),
     tk("faults", "fs-model", "\"ext4-ordered\" or \"posix-strict\"", "ext4-ordered", "what a machine crash keeps"),

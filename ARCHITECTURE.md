@@ -1129,15 +1129,9 @@ lower to its own sequence number. A run not told whose plan injects anything end
 it comes (`restart_at_setup`, `LIFE_RESTART`, verdict `setup-restart`) and starts again told
 (`launch::run_one`; `result.json`'s `faults.window.restarted`). Being told is an input like the
 seed: `run.json` records it, and a replay and the rerun line run it as recorded; nothing on the
-host decides it. A sweep without cases tells the runs of seeds above the lowest seed whose run
-met the mark (each worker learns it before taking its next job). A run without the hold that
-ended without the mark waits uncounted until no lower seed can still meet it, then is
-counted, or run again told if a lower seed met it: which runs are told follows seed order, not
-which run finished first, so a sweep's runs are the same at any width. `sweep.json`'s
-`faults_held_from` keeps the answer for a resumed sweep, which runs again told a kept run it
-now tells; a stopped sweep deletes the runs still waiting. While the waiting findings would reach
-`--max-findings`, no job of a higher seed starts (`Then::Hold`). A crash point's child is told as its
-base was. With cases, each run finds out for itself. Both marks carry over to later incarnations (`launcher::incarnations`).
+host decides it. A sweep learns nothing: each of its runs is the `patina run` of its seed, told
+only if the sweep's command or configuration says so; a crash point's child is told as its
+base ran. The run's and the sweep's summaries say how to be told (`report::HELD_HINT`). Both marks carry over to later incarnations (`launcher::incarnations`).
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's

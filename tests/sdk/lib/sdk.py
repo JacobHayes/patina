@@ -66,7 +66,10 @@ def run(name, seed, cmd, *args, flags=()):
         capture_output=True, text=True, timeout=120)
     if not os.path.exists(os.path.join(out, "result.json")):
         die(f"patina run {' '.join(cmd + list(args))}: no outcome ({p.stderr.strip()[-300:]})")
-    return Run(out, p.returncode)
+    r = Run(out, p.returncode)
+    # what patina printed
+    r.printed = p.stdout
+    return r
 
 
 def report(r):
