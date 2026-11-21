@@ -109,9 +109,13 @@ fn passed(call: &mut dyn Call, row: &'static Row) -> Action {
         let n = &ctl().stats.tmpfs_full;
         n.store(n.load(Relaxed) + 1, Relaxed);
     }
-    if matches!(act, Action::Return(r) if r == -e::EFBIG) && host_fsize_limited() {
+    if matches!(act, Action::Return(r) if r == -e::EFBIG)
+        && call.nr() != nr::RT_SIGRETURN
+        && host_fsize_limited()
+    {
         // The launcher's RLIMIT_FSIZE is inherited and enforced by the kernel; the
         // guest's own limit is virtual. Reaching the host's is not a sandbox answer.
+        // rt_sigreturn returns the program's restored register, whatever it holds.
         crate::sup::host_error(-e::EFBIG, call.nr(), proto::ctl::HE_HOST_LIMIT);
     }
     match (post, act) {

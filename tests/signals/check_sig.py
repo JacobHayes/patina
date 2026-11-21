@@ -71,6 +71,7 @@ elif g == "sig-ctx":
     need("siglongjmp", jumps=3, v=3, blocked_in_handler=1, blocked_after=0)
     need("swapcontext", rounds=5, steps=35)
     need("setcontext", resumed=3)
+    need("setret", min="0x8000000000000000", efbig="0xffffffffffffffe5")
 elif g == "sig-fault":
     # Two rounds of four faults; the guest prints what the kernel gives for each (the second
     # kind is SIGFPE on x86_64, SIGTRAP on arm64).

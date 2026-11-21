@@ -620,10 +620,14 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::RT_SIGACTION => sigaction(call),
         nr::RT_SIGPROCMASK => sigprocmask(call),
         nr::SIGALTSTACK => sigaltstack(call),
-        nr::RT_SIGRETURN => match call.frame() {
-            Some(f) => crate::arch::sigreturn(f, thread()),
-            None => return Action::NeedsFrame,
-        },
+        // The restored return register is the program's and may be any value, `i64::MIN`
+        // (the other calls' "needs a frame" below) included: returned as it is.
+        nr::RT_SIGRETURN => {
+            return match call.frame() {
+                Some(f) => Action::Return(crate::arch::sigreturn(f, thread())),
+                None => Action::NeedsFrame,
+            }
+        }
         nr::KILL => kill(call),
         nr::TKILL => tgkill(call, None, a[0] as i32 as i64, a[1] as i32 as i64),
         nr::TGKILL => tgkill(
