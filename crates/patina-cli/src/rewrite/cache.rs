@@ -993,9 +993,12 @@ pub fn closure(program: &Path) -> Vec<PathBuf> {
         if out.contains(&p) || out.len() > 256 {
             continue;
         }
-        let Ok(data) = fs::read(&p) else { continue };
+        let Ok(f) = File::open(&p) else { continue };
+        if !f.metadata().is_ok_and(|m| m.is_file()) {
+            continue;
+        }
         out.push(p.clone());
-        let Ok(d) = needed(&data) else { continue };
+        let Ok(d) = needed(&f) else { continue };
         let origin = p
             .parent()
             .unwrap_or(Path::new("/"))
@@ -1029,28 +1032,36 @@ struct Needed {
     runpath: Option<String>,
 }
 
-fn needed(d: &[u8]) -> Res<Needed> {
-    let g = |o: usize, n: usize| -> Res<u64> {
-        d.get(o..o + n)
-            .map(|_| le(d, o, n))
-            .ok_or_else(|| "short".to_string())
+/// What `closure` needs of an ELF file: its header, program headers, interpreter, dynamic
+/// section and dynamic string table, read alone (a program and its libraries are megabytes).
+fn needed(f: &File) -> Res<Needed> {
+    let size = f.metadata().map_err(|e| e.to_string())?.len();
+    let rd = |o: u64, n: u64| -> Res<Vec<u8>> {
+        if o.checked_add(n).is_none_or(|e| e > size) {
+            return Err("short".into());
+        }
+        let mut b = vec![0u8; n as usize];
+        f.read_exact_at(&mut b, o).map_err(|_| "short".to_string())?;
+        Ok(b)
     };
-    if d.get(..4) != Some(b"\x7fELF") || d.get(4) != Some(&2) {
+    let h = rd(0, 64)?;
+    if h.get(..4) != Some(b"\x7fELF") || h.get(4) != Some(&2) {
         return Err("not ELF".into());
     }
-    let (phoff, phnum) = (g(0x20, 8)? as usize, g(0x38, 2)? as usize);
+    let (phoff, phnum) = (le(&h, 0x20, 8), le(&h, 0x38, 2));
+    let ph = rd(phoff, 56 * phnum)?;
     let mut loads = vec![];
     let (mut dynamic, mut interp) = (None, None);
-    for i in 0..phnum {
-        let p = phoff + 56 * i;
-        let (t, off, va, fsz) = (g(p, 4)?, g(p + 8, 8)?, g(p + 16, 8)?, g(p + 32, 8)?);
+    for i in 0..phnum as usize {
+        let p = 56 * i;
+        let (t, off, va, fsz) = (le(&ph, p, 4), le(&ph, p + 8, 8), le(&ph, p + 16, 8), le(&ph, p + 32, 8));
         match t {
             1 => loads.push((va, off, fsz)),
-            2 => dynamic = Some((off as usize, fsz as usize)),
+            2 => dynamic = Some((off, fsz)),
             3 => {
-                let s = d.get(off as usize..(off + fsz) as usize).ok_or("interp")?;
+                let s = rd(off, fsz).map_err(|_| "interp")?;
                 interp = Some(
-                    String::from_utf8_lossy(s)
+                    String::from_utf8_lossy(&s)
                         .trim_end_matches('\0')
                         .to_string(),
                 );
@@ -1058,11 +1069,11 @@ fn needed(d: &[u8]) -> Res<Needed> {
             _ => {}
         }
     }
-    let file_of = |va: u64| -> Option<usize> {
+    let file_of = |va: u64| -> Option<u64> {
         loads
             .iter()
             .find(|&&(v, _, n)| va >= v && va < v + n)
-            .map(|&(v, o, _)| (o + va - v) as usize)
+            .map(|&(v, o, _)| o + va - v)
     };
     let mut r = Needed {
         interp,
@@ -1072,13 +1083,15 @@ fn needed(d: &[u8]) -> Res<Needed> {
     let Some((doff, dsz)) = dynamic else {
         return Ok(r);
     };
-    let (mut strtab, mut names, mut rp) = (None, vec![], None);
-    for k in 0..dsz / 16 {
-        let (tag, val) = (g(doff + 16 * k, 8)?, g(doff + 16 * k + 8, 8)?);
+    let d = rd(doff, dsz)?;
+    let (mut strtab, mut strsz, mut names, mut rp) = (None, None, vec![], None);
+    for k in 0..d.len() / 16 {
+        let (tag, val) = (le(&d, 16 * k, 8), le(&d, 16 * k + 8, 8));
         match tag {
             0 => break,
             1 => names.push(val),
             5 => strtab = Some(val),
+            10 => strsz = Some(val),
             15 | 29 => rp = Some(val),
             _ => {}
         }
@@ -1086,8 +1099,10 @@ fn needed(d: &[u8]) -> Res<Needed> {
     let Some(st) = strtab.and_then(file_of) else {
         return Ok(r);
     };
+    // Without a size, the strings up to the end of the file.
+    let strs = rd(st, strsz.unwrap_or(size.saturating_sub(st)).min(size.saturating_sub(st)))?;
     let s = |o: u64| -> Option<String> {
-        let b = d.get(st + o as usize..)?;
+        let b = strs.get(o as usize..)?;
         let n = b.iter().position(|&c| c == 0)?;
         Some(String::from_utf8_lossy(&b[..n]).to_string())
     };
@@ -1172,3 +1187,4 @@ pub fn warm_all(planner: &Planner, program: &Path) {
     files.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     planner.par.each(&files, |_, (_, f)| planner.warm(f));
 }
+
