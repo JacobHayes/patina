@@ -32,8 +32,8 @@ It starts in an empty, writable `/work` (its working directory and `HOME`), sees
 `/usr` and its own directory read-only, and no network beyond the run. Give it inputs with
 `--work DIR` (copied in as the starting `/work`), `--mount SRC:DST`, `--env K=V`, `--stdin
 FILE`; a `not in the sandbox:` line names what to mount. The program after `--` is found on the
-host; a script that exists only in `/work` runs as `sh ./script`. Make this run end `ok` before going on: anything else
-is a setup problem.
+host; a script that exists only in `/work` runs as `sh ./script`. Make this run end `ok` before
+going on: anything else is a setup problem.
 
 **3. Write the check first.** A sweep reports only runs that end other than `ok`. If the bug
 you are after would still exit 0 (lost data, a wrong file, a double apply), add a check before

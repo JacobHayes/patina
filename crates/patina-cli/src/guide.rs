@@ -76,7 +76,12 @@ pub fn plain(md: &str) -> String {
     let mut table: Vec<Vec<String>> = vec![];
     let mut fence = false;
     let mut comment = false;
+    // A prose line whose code span goes on in the next line, waiting for the line that ends it.
+    let mut open = String::new();
     for line in md.lines() {
+        if !open.is_empty() && (line.trim().is_empty() || line.starts_with(['|', '<', '`'])) {
+            out.push(inline(&std::mem::take(&mut open)));
+        }
         if comment {
             comment = !line.contains("-->");
             continue;
@@ -105,7 +110,16 @@ pub fn plain(md: &str) -> String {
         }
         flush(&mut table, &mut out);
         let line = line.trim_start_matches('#').trim_start_matches(' ');
-        out.push(inline(line));
+        if !open.is_empty() {
+            open.push('\n');
+        }
+        open.push_str(line);
+        if open.matches('`').count().is_multiple_of(2) {
+            out.push(inline(&std::mem::take(&mut open)));
+        }
+    }
+    if !open.is_empty() {
+        out.push(inline(&open));
     }
     flush(&mut table, &mut out);
     // A comment's place leaves no run of blank lines.
@@ -336,6 +350,22 @@ mod tests {
             plain(md),
             "T\n\n    patina run -- ./a\n\nSee the faults, --seed N and this.\n\n  A    Bb\n  x|y  z\n"
         );
+        // A code span may go on in the next line.
+        assert_eq!(
+            plain("run `patina\nguide` then\n`x`.\n"),
+            "run patina\nguide then\nx.\n"
+        );
+    }
+
+    #[test]
+    fn every_page_renders_without_marks() {
+        for (name, text) in
+            std::iter::once(("core", CORE)).chain(TOPICS.iter().map(|t| (t.name, t.text)))
+        {
+            for l in plain(text).lines().filter(|l| !l.starts_with("    ")) {
+                assert!(!l.contains('`') && !l.contains("**"), "{name}: {l}");
+            }
+        }
     }
 
     #[test]
