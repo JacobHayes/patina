@@ -677,6 +677,9 @@ enum Then {
     Again(Job),
     /// Run these next, at the same width.
     More(Vec<Job>),
+    /// Go on, starting only jobs of this seed or lower: the runs waiting on lower seeds
+    /// (`State::parked`) hold enough findings to end the sweep if they are counted.
+    Hold(u64),
 }
 
 /// Run `jobs` at most `width` at a time. `event` is called on this thread with each finished
@@ -701,12 +704,14 @@ fn pool(
     // Jobs taken from the queue whose event has not been handled (one may come back).
     let pending = AtomicUsize::new(0);
     let now = AtomicUsize::new(width);
+    // Jobs of higher seeds wait (`Then::Hold`).
+    let below = AtomicU64::new(u64::MAX);
     let cpus = crate::launch::allowed_cpus();
     let (tx, rx) = mpsc::channel::<Done>();
     std::thread::scope(|sc| {
         for w in 0..width {
-            let (tx, queue, running, stop, pending, now) =
-                (tx.clone(), &queue, &running, &stop, &pending, &now);
+            let (tx, queue, running, stop, pending, now, below) =
+                (tx.clone(), &queue, &running, &stop, &pending, &now, &below);
             let cpu = cpus[w * cpus.len() / width];
             sc.spawn(move || {
                 let mut server = Held(None);
@@ -714,16 +719,20 @@ fn pool(
                     if stop.load(SeqCst) || w >= now.load(SeqCst) {
                         return;
                     }
-                    let job = {
+                    let (job, held) = {
                         let mut q = queue.lock().unwrap();
-                        let j = q.pop_front();
+                        let held = q
+                            .front()
+                            .and_then(Job::seed)
+                            .is_some_and(|s| s > below.load(SeqCst));
+                        let j = if held { None } else { q.pop_front() };
                         if j.is_some() {
                             pending.fetch_add(1, SeqCst);
                         }
-                        j
+                        (j, held)
                     };
                     let Some(job) = job else {
-                        if pending.load(SeqCst) == 0 {
+                        if !held && pending.load(SeqCst) == 0 {
                             return;
                         }
                         std::thread::sleep(Duration::from_millis(20));
@@ -803,7 +812,8 @@ fn pool(
             let got = d.is_some();
             let n = running.lock().unwrap().len();
             match event(d, n, now.load(SeqCst)) {
-                Then::Go => {}
+                Then::Go => below.store(u64::MAX, SeqCst),
+                Then::Hold(s) => below.store(s, SeqCst),
                 Then::Stop => stop.store(true, SeqCst),
                 Then::Again(job) => {
                     let w = now.load(SeqCst);
@@ -1958,11 +1968,28 @@ impl State<'_> {
             self.last_line = Instant::now();
             self.say(&format!("sweep: {}", self.status(running)));
         }
-        if self.stopped.is_none() {
-            Then::Go
-        } else {
+        if self.stopped.is_some() {
             Then::Stop
+        } else if let Some(s) = self.hold() {
+            Then::Hold(s)
+        } else {
+            Then::Go
         }
+    }
+
+    /// The seed at or below which the parked findings (`release` counts them once no lower
+    /// seed can tell them) would reach `--max-findings`: a job of a higher seed could not
+    /// change what the sweep reports, so it does not start meanwhile.
+    fn hold(&self) -> Option<u64> {
+        let need = self.max_findings?.checked_sub(self.finding_groups)?;
+        let mut seeds: Vec<u64> = self
+            .parked
+            .iter()
+            .filter(|(_, r)| report::is_finding(r["outcome"].as_str().unwrap_or("internal")))
+            .filter_map(|(j, _)| j.seed())
+            .collect();
+        seeds.sort();
+        seeds.get(need.checked_sub(1)?).copied()
     }
 
     /// Count a finished run; the job back if it should run again at half the width.

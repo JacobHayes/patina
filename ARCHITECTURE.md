@@ -1135,7 +1135,8 @@ ended without the mark waits uncounted until no lower seed can still meet it, th
 counted, or run again told if a lower seed met it: which runs are told follows seed order, not
 which run finished first, so a sweep's runs are the same at any width. `sweep.json`'s
 `faults_held_from` keeps the answer for a resumed sweep, which runs again told a kept run it
-now tells; a stopped sweep deletes the runs still waiting. A crash point's child is told as its
+now tells; a stopped sweep deletes the runs still waiting. While the waiting findings would reach
+`--max-findings`, no job of a higher seed starts (`Then::Hold`). A crash point's child is told as its
 base was. With cases, each run finds out for itself. Both marks carry over to later incarnations (`launcher::incarnations`).
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
