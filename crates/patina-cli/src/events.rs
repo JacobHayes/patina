@@ -969,6 +969,11 @@ impl<W: Write> Export<'_, W> {
                 let mut l = Line::at("sched", k, r);
                 let op = Op::from_u32(r.nr).map_or("unknown", |o| o.name());
                 l.str("op", op).num("ret", r.ret);
+                // A thread's first event (and an image's after execve): its process and
+                // thread ids, so every later event of its slot has a process.
+                if r.nr == Op::Hello as u32 {
+                    l.num("pid", r.args[0]).num("tid", r.args[1]);
+                }
                 self.emit("sched", Some(r.seq), l)
             }
             Some(RecKind::Preempt) => {

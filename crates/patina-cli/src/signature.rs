@@ -287,7 +287,8 @@ pub fn last_line_raw(stderr: &str) -> Option<String> {
 }
 
 /// Collapse what varies between seeds: `0x` hex to `0x_`, digit runs to `N`, other runs of
-/// six or more hex digits containing a digit to `H`; whitespace runs to one space.
+/// six or more hex digits holding both a digit and a letter to `H`; whitespace runs to one
+/// space.
 pub fn normalise(s: &str) -> String {
     let mut out = String::new();
     for word in s.split_whitespace() {
@@ -310,6 +311,7 @@ pub fn normalise(s: &str) -> String {
             } else if boundary
                 && hex_run(i) >= 6
                 && c[i..i + hex_run(i)].iter().any(|x| x.is_ascii_digit())
+                && c[i..i + hex_run(i)].iter().any(|x| x.is_ascii_alphabetic())
                 && c.get(i + hex_run(i))
                     .is_none_or(|x| !x.is_ascii_alphanumeric())
             {
@@ -375,6 +377,15 @@ mod tests {
             sig(v("balance -7\nstate 9 at 0xdead00"), "")
         );
         assert_ne!(sig(v("balance -1"), ""), sig(v("lost entry 3"), ""));
+        // A decimal number is a number at any length; a hex id is one at any value.
+        assert_eq!(
+            sig(v("acknowledged (offset 19)"), ""),
+            sig(v("acknowledged (offset 121122)"), "")
+        );
+        assert_eq!(
+            sig(v("upload 3f9a1c2b0e done"), ""),
+            sig(v("upload 77ab0e19ff done"), "")
+        );
         // Without a panic line, the last informative stderr line names the failure.
         assert_eq!(
             sig(fail(1), "round 3\nno convergence after 412 rounds\n"),

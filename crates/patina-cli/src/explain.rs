@@ -348,6 +348,8 @@ struct Reader<'a> {
     /// Thread slots that had a turn.
     slots: std::collections::BTreeSet<u16>,
     files: HashMap<(String, String), Synced>,
+    /// On one machine, the process of each thread slot (its last `Hello`).
+    pids: HashMap<u16, u64>,
     /// A write to a pipe or a local socket waiting for the read of the same bytes (its hash).
     pipes: HashMap<String, usize>,
     /// The disk line being extended and the first operation in it.
@@ -391,6 +393,7 @@ impl Story {
             turn: None,
             slots: Default::default(),
             files: HashMap::new(),
+            pids: HashMap::new(),
             pipes: HashMap::new(),
             disk: None,
             ends: HashMap::new(),
@@ -819,10 +822,17 @@ impl Reader<'_> {
         if !self.nodes.is_empty() {
             return v["node"].as_str().unwrap_or("").to_string();
         }
-        match v["slot"].as_u64() {
-            Some(0) => "main".to_string(),
-            Some(n) => format!("t{n}"),
-            None => String::new(),
+        let Some(n) = v["slot"].as_u64() else {
+            return String::new();
+        };
+        let name = match n {
+            0 => "main".to_string(),
+            n => format!("t{n}"),
+        };
+        // A thread of another process than the first names its process.
+        match (self.pids.get(&(n as u16)), self.pids.get(&0)) {
+            (Some(p), Some(first)) if p != first => format!("{name}/p{p}"),
+            _ => name,
         }
     }
 
@@ -998,10 +1008,13 @@ impl Reader<'_> {
             "crash" => {
                 self.end_turn();
                 let node = v["node"].as_str().unwrap_or("").to_string();
+                // Unsynced writes are what a machine crash may lose; a process crash leaves
+                // them in the page cache, still unsynced.
+                let machine = s(v, "kind") == "machine";
                 let mut files: Vec<(String, Synced)> = self
                     .files
                     .iter()
-                    .filter(|((n, _), f)| *n == node && f.since > 0)
+                    .filter(|((n, _), f)| machine && *n == node && f.since > 0)
                     .map(|((_, p), f)| (p.clone(), *f))
                     .collect();
                 files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1020,7 +1033,9 @@ impl Reader<'_> {
                         ),
                     );
                 }
-                self.files.retain(|(n, _), _| *n != node);
+                if machine {
+                    self.files.retain(|(n, _), _| *n != node);
+                }
                 let lost = &v["lost"];
                 let mut what = vec![];
                 for (k, word) in [
@@ -1163,6 +1178,9 @@ impl Reader<'_> {
                 }
             }
             "sched" => {
+                if s(v, "op") == "Hello" {
+                    self.pids.insert(u(v, "slot") as u16, u(v, "pid"));
+                }
                 self.turn(v);
                 let slot = u(v, "slot");
                 let end = match s(v, "op") {

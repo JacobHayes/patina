@@ -1,10 +1,12 @@
 # 13. `patina explain RUNDIR` on the acklog example's crash bug (the first violating seed of
 #    1-20 under `--crash machine`): the observed replay is the run (its digest, and the
 #    observations are in RUNDIR/explain, not in its boundary log); the story is shorter than the
-#    event log; its crash line is at the run's crash and names a path the crash lost; its stop
+#    event log; its crash line is at the run's crash and names a path the crash lost (a process
+#    crash's lists no unsynced write: it loses none); a thread of a second process is named with
+#    its process id; its stop
 #    event is the run's failed assertion (`log events --from N --to N`). A second explain reuses
 #    the replay. A run of another build is refused.
-#    Expected on the arm64 runner: about 3 s.
+#    Expected on the arm64 runner: about 4 s.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib.inc"
 r=""
@@ -44,6 +46,42 @@ n=$(python3 -I -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[
 [ "$(field "$r.stop" type)" = sdk ] && [ "$(field "$r.stop" op)" = assert ] || die "the stop event is not an assertion: $(cat "$r.stop")"
 case "$(field "$r/result.json" message)" in "$(field "$r.stop" label)"*) ;; *) die "the stop event is another assertion: $(cat "$r.stop")" ;; esac
 echo "stop event $n: $(cat "$r.stop")"
+# A process crash loses nothing: writes not yet synced stay in the page cache, and the story
+# lists none as at risk at the crash (search the first crash point after such a write).
+p=""
+for n in $(seq 1 12); do
+    prun "$RUNS/proc-$n" --seed 1 --crash "process-at:$n" -- "$PATINA_GUESTS/examples/acklog"
+    "$PATINA" log events "$RUNS/proc-$n" >"$RUNS/proc-$n.events"
+    if python3 -I -c 'import json, sys
+since = {}
+for e in map(json.loads, open(sys.argv[1])):
+    if e["type"] == "crash":
+        sys.exit(0 if any(since.values()) else 1)
+    if e["type"] == "op" and e["op"] in ("write", "fsync"):
+        since[e["path"]] = e["op"] == "write"
+sys.exit(1)' "$RUNS/proc-$n.events"; then p=$RUNS/proc-$n; break; fi
+done
+[ -n "$p" ] || die "acklog: no process crash after an unsynced write in points 1-12"
+timeout 60 "$PATINA" explain "$p" --format json >"$p.story" || die "explain of a process crash"
+python3 -I -c 'import json,sys; ls=[json.loads(l) for l in open(sys.argv[1])]
+assert any(l["kind"] == "crash" for l in ls), "no crash line"
+bad=[l["text"] for l in ls if l["kind"] == "unsynced"]
+assert not bad, bad' "$p.story" || die "a process crash lists writes at risk"
+echo "process crash at point $n: no unsynced writes listed"
+# A thread of another process than the first is named with that process's id, the one its
+# Hello event carries.
+prun "$RUNS/pipe" --seed 1 -- /bin/sh -c 'echo one | cat'
+timeout 60 "$PATINA" explain "$RUNS/pipe" --full --format json >"$RUNS/pipe.story" || die "explain of a pipeline"
+"$PATINA" log events "$RUNS/pipe" --types sched >"$RUNS/pipe.sched"
+python3 -I -c 'import json,sys
+pids = {e["slot"]: e["pid"] for e in map(json.loads, open(sys.argv[2])) if e.get("op") == "Hello"}
+whos = {l["who"] for l in map(json.loads, open(sys.argv[1])) if l.get("who")}
+named = {w for w in whos if "/p" in w}
+assert named, whos
+for w in named:
+    t, p = w.split("/p")
+    assert pids[int(t[1:])] == int(p) != pids[0], (w, pids)
+print("pipeline actors:", sorted(whos))' "$RUNS/pipe.story" "$RUNS/pipe.sched" || die "process names in the story"
 # Again: the replay is reused (its result is not rewritten).
 m=$(stat -c %Y.%y "$r/explain/result.json")
 timeout 60 "$PATINA" explain "$r" >"$r.text"

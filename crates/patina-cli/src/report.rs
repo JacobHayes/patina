@@ -462,6 +462,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "cpus",
         "faults-preset",
         "faults",
+        "fs-model",
         "crash",
         "time-limit",
         "timeout",
@@ -518,6 +519,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         for f in &cfg.faults {
             flag("--fault", f.clone());
+        }
+        if cfg.fs_model != d.fs_model {
+            flag("--fault", format!("fs-model={}", cfg.fs_model));
         }
         if let Some(c) = &cfg.crash {
             flag("--crash", c.clone());
@@ -1001,6 +1005,10 @@ pub fn build(
     // The SDK fold, by checkout-free label. Fault points count only in runs that let them
     // fire (`--buggify`).
     let mut sites: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    // Per site, in how many runs it was evaluated and held (hit, fired), and every label any
+    // run declared.
+    let mut site_runs: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
+    let mut declared: BTreeSet<String> = BTreeSet::new();
     // Per fault point: the natural log of the chance that it fired at none of its evaluations,
     // at its rates (`miss_ln`).
     let mut miss: BTreeMap<String, f64> = BTreeMap::new();
@@ -1010,11 +1018,18 @@ pub fn build(
         buggify_runs += buggify as usize;
         for s in r.result["sdk"]["sites"].as_array().into_iter().flatten() {
             let kind = s["kind"].as_str().unwrap_or("");
+            declared.insert(free(s["label"].as_str().unwrap_or("")));
             if kind == "buggify" && !buggify {
                 continue;
             }
             let label = free(s["label"].as_str().unwrap_or(""));
             let evaluated = s["evaluated"].as_u64().unwrap_or(0);
+            let held = s["held"].as_u64().unwrap_or(0);
+            let e = site_runs
+                .entry((kind.to_string(), label.clone()))
+                .or_default();
+            e.0 += (evaluated > 0) as u64;
+            e.1 += (held > 0) as u64;
             if kind == "buggify" {
                 *miss.entry(label.clone()).or_default() +=
                     miss_ln(&r.run["faults"], &label, evaluated);
@@ -1061,6 +1076,16 @@ pub fn build(
         })
         .collect();
     let never_evaluated = unmet("always", &|e, _| e == 0);
+    // An --allow-unmet pattern that names nothing the runs have: no label, no fault class
+    // configured, not `check` (a shell's expansion of an unquoted `*` is the usual cause).
+    let unmatched_allow: Vec<&String> = allow
+        .iter()
+        .filter(|p| {
+            *p != "check"
+                && !declared.iter().any(|l| glob(p, l))
+                && !configured.iter().chain(eligible.keys()).any(|c| glob(p, c))
+        })
+        .collect();
     // Paths the sandbox lacks, by hint, with the runs that met them.
     let mut missing: BTreeMap<String, usize> = BTreeMap::new();
     for r in runs {
@@ -1360,6 +1385,9 @@ pub fn build(
             "buggify_never_fired": never_fired,
             "buggify_unfired_noted": noted_unfired,
             "always_never_evaluated": never_evaluated,
+            // Every site: in how many runs it was evaluated, and held (a `reachable` hit, a
+            // point fired).
+            "sites": site_runs.iter().map(|((k, l), (e, h))| json!({"kind": k, "label": l, "runs_evaluated": e, "runs_held": h})).collect::<Vec<_>>(),
         },
         "faults": {"configured": configured, "eligible_zero": idle, "not_applicable": not_applicable},
         "compute_stall": stalls,
@@ -1367,6 +1395,7 @@ pub fn build(
         "host_limits": limits,
         "allow_unmet": allow,
         "allowed_unmet": allowed_unmet,
+        "allow_unmet_unmatched": unmatched_allow,
         "vacuous": vacuous,
         "exit": exit,
     });
@@ -2137,6 +2166,12 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             by.join(", ")
         ));
     }
+    for p in names(&v["allow_unmet_unmatched"]) {
+        tail.push(format!(
+            "allow-unmet: {} matches no SDK label, fault class or check of these runs (an unquoted * the shell expanded?)",
+            quote(&p)
+        ));
+    }
     for c in names(&v["faults"]["eligible_zero"]) {
         tail.push(format!("faults: {c} eligible 0 times: nothing to act on"));
     }
@@ -2508,6 +2543,37 @@ mod tests {
         // The chance at the default rates: a quarter active, a quarter of evaluations firing.
         let one = miss_ln(&json!({}), "p", 1).exp();
         assert!((one - (0.75 + 0.25 * 0.75)).abs() < 1e-9, "{one}");
+    }
+
+    #[test]
+    fn sites_count_the_runs_that_met_them_and_an_allow_pattern_naming_nothing_is_named() {
+        let site = |held: u64| {
+            json!({"outcome": "ok", "sdk": {"sites": [
+                {"kind": "sometimes", "label": "transfer-done", "evaluated": 1, "held": held},
+                {"kind": "reachable", "label": "resume", "evaluated": 0, "held": 0}]}})
+        };
+        let runs: Vec<Run> = (1..=5)
+            .map(|s| run(s, json!({}), site((s % 2 == 1) as u64)))
+            .collect();
+        let allow = ["resume", "transfer-*", "Cargo.toml", "check"].map(String::from);
+        let v = build(&runs, &allow, None, None, "").0;
+        let met: Vec<(String, u64, u64)> = v["sdk"]["sites"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| {
+                (
+                    x["label"].as_str().unwrap().to_string(),
+                    x["runs_evaluated"].as_u64().unwrap(),
+                    x["runs_held"].as_u64().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            met,
+            [("resume".into(), 0, 0), ("transfer-done".into(), 5, 3)]
+        );
+        assert_eq!(v["allow_unmet_unmatched"], json!(["Cargo.toml"]));
     }
 
     #[test]

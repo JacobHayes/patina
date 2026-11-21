@@ -282,22 +282,28 @@ if st != 2 or r.get("outcome") != "error" or r.get("stop") != "inputs-changed":
     die(f"host file changed before the replay: exit {st} {r.get('outcome')} {se[-500:]}")
 print(f"host file changed before the replay: {r['outcome']} ({r['message'][:80]}); steady: finding, identical")
 
-# A livelock ends log-limit at the same record in every run of a seed (the limit counts log,
-# not time); a sweep of it keeps each run's first and last records only, and a replay of such
-# a run still compares.
+# A livelock ends liveness, stop log-limit, at the same record in every run of a seed (the limit
+# counts log, not time); a sweep of it is a finding and keeps each run's first and last records
+# only, and a replay of such a run still compares.
 lim = []
 for i in range(2):
     d = os.path.join(RUNS, f"livelock-{i}")
+    # lint-allow: seed — the livelock mode never finishes, whatever the seed
     patina("run", "--seed", "1", "--log-limit", "1", "--out", d, "--", GUEST, "livelock")
     lim.append(result(d))
     if os.path.getsize(os.path.join(d, "inc-0", "boundary.log")) > 1 << 20:
         die(f"--log-limit 1: the log holds {os.path.getsize(os.path.join(d, 'inc-0', 'boundary.log'))} bytes")
-if [(r["outcome"], r["stop"]) for r in lim] != [("unsupported", "log-limit")] * 2 or lim[0]["digest"] != lim[1]["digest"]:
+if [(r["outcome"], r["stop"]) for r in lim] != [("liveness", "log-limit")] * 2 or lim[0]["digest"] != lim[1]["digest"]:
     die(f"livelock: {[(r['outcome'], r['stop'], r['digest']) for r in lim]}")
 st, rep, text = sweep("livelock", "--seeds", "1..4", "--log-limit", "8", "--", GUEST, "livelock")
 kept = sum(os.path.getsize(os.path.join(p, f)) for p, _, fs in os.walk(os.path.join(RUNS, "livelock")) for f in fs)
-if [g["stop"] for g in rep["groups"]] != ["log-limit"] or kept > 4 * (5 << 19):
+if st != 1 or [g["stop"] for g in rep["groups"]] != ["log-limit"] or kept > 4 * (5 << 19):
     die(f"livelock sweep: {[(g['signature'], g['count']) for g in rep['groups']]}, {kept} bytes kept\n{text}")
+# --keep fail keeps the logs of a group's first three runs; the rest keep their results.
+seeds = sorted(r["seed"] for r in rep["groups"][0]["runs"])
+whole = [n for n in seeds if os.path.isdir(os.path.join(RUNS, "livelock", f"seed-{n}", "inc-0"))]
+if len(seeds) < 4 or whole != seeds[:3]:
+    die(f"livelock sweep: runs {seeds}, kept whole {whole}")
 st, so, se = patina("replay", "--format", "json", os.path.join(RUNS, "livelock", "seed-2"))
 if json.loads(so or "{}").get("stop") != "log-limit":
     die(f"replay of a cut log: exit {st} {so[:300]} {se[-300:]}")

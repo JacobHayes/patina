@@ -835,6 +835,33 @@ fn prune(dir: &Path) {
     let _ = std::fs::remove_file(dir.join(crate::check::OUTPUT));
 }
 
+/// The runs of one group `--keep fail` keeps whole: those of its lowest seeds (then crash points
+/// and cases), the first of which is the one replayed. A bug hit in many runs would otherwise keep
+/// the same evidence many times.
+pub const KEEP_PER_GROUP: usize = 3;
+
+/// Prune every run of a group but its first `KEEP_PER_GROUP` (a run whose self-check failed
+/// keeps its logs: they show Patina's defect).
+fn thin(runs: &[report::Run], known: Option<&report::Known>) {
+    let (v, _) = report::build(runs, &[], known, None, "");
+    let by_dir: std::collections::HashMap<&Path, &report::Run> =
+        runs.iter().map(|r| (r.dir.as_path(), r)).collect();
+    for g in v["groups"].as_array().into_iter().flatten() {
+        let mut members: Vec<&report::Run> = g["runs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| by_dir.get(Path::new(r["dir"].as_str()?)).copied())
+            .collect();
+        members.sort_by_key(|r| (r.seed, r.point.clone(), r.case_pos));
+        for r in members.into_iter().skip(KEEP_PER_GROUP) {
+            if !crate::result::self_check_failed(&r.result) {
+                prune(&r.dir);
+            }
+        }
+    }
+}
+
 /// A kept run's log over `CUT_OVER` bytes keeps its first and last `CUT_KEEP` (whole records):
 /// a sweep of runs that each reach --log-limit stays small. The seed reproduces the whole log.
 const CUT_OVER: u64 = 4 << 20;
@@ -1036,7 +1063,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
         list.retain(|i| i.is_some_and(|i| ids.contains(&c[i].id.as_str())));
     }
-    let mut program_of: Vec<String> = vec![];
+    // Each run's program, by its case (a selected few of the file's with --only-case).
+    let mut program_of: std::collections::BTreeMap<Option<usize>, String> = Default::default();
     // The programs run with `--preempt points`: planned here once before the runs start.
     let mut planned: std::collections::BTreeSet<String> = Default::default();
     let mut first_cfg = None;
@@ -1081,7 +1109,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         if first_cfg.is_none() {
             first_cfg = Some((ccfg, key.clone()));
         }
-        program_of.push(key);
+        program_of.insert(i, key);
     }
     let probe_program = {
         let (mut probe, key) = first_cfg.unwrap();
@@ -1090,7 +1118,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         crate::launch::preflight(&o).map_err(error)?;
         o.program
     };
-    let program_key = |case: Option<usize>| -> &String { &program_of[case.unwrap_or(0)] };
+    let program_key = |case: Option<usize>| -> &String { &program_of[&case] };
 
     let out = crate::absolute(PathBuf::from(a.last("--out").unwrap_or("patina-out/sweep")));
     if let Ok(rd) = std::fs::read_dir(&out) {
@@ -1627,6 +1655,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         for r in &runs {
             prune(&r.dir);
         }
+    }
+    if keep == Keep::Fail && !interrupted {
+        thin(&runs, known.as_ref());
     }
     let runs = report::collect(std::slice::from_ref(&out)).map_err(error)?;
     st.say(&format!(

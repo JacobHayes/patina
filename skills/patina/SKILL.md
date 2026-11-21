@@ -123,7 +123,7 @@ patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" 
 | `violation` | 1 | an SDK `always`/`unreachable`, or `--check`, failed | triage |
 | `failure` | 1 | nonzero exit not in `--ok-exit` | triage; under faults, is it a clean failure? |
 | `crash` | 1 | killed by a signal | triage |
-| `liveness` | 1 | all threads blocked, or virtual `--time-limit` passed | triage: deadlock or lost wakeup |
+| `liveness` | 1 | all threads blocked, virtual `--time-limit` passed, or `--log-limit` reached (`log-limit`) | triage: deadlock or lost wakeup |
 | `unsupported` | 2 | Patina does not model what the program did | report the named call; do not hide it |
 | `timeout` | 2 | wall `--timeout` passed | a CPU-bound loop or a hang outside virtual time |
 | `nondeterministic` | 2 | a replay differed from its run | a Patina bug: keep the run directory, report it |
@@ -136,7 +136,7 @@ patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" 
 - Keep output out of your context: read the summary, `report.json`, `result.json` and
   `patina explain` (`--full` for every line), not `boundary.log`. A run's output is in
   `RUNDIR/inc-0/stdout` and `stderr` (`inc-1/` after a restart); a sweep keeps it only for
-  failing runs (`--keep fail`): for any other, run its seed again with `patina run --seed N`.
+  failing runs, the first three of each finding (`--keep fail`): for any other, run its seed again with `patina run --seed N`.
 - Budget: start at `--seeds 1..20`, then grow; `--max-findings 1`, `--budget SECONDS`, `-j N`
   on a shared host; `--keep none` for large sweeps. One `--out DIR` per experiment: the same
   command resumes it, a changed program replaces it.

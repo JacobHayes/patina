@@ -57,7 +57,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let recorded = crate::result::read_json(&rundir.join("result.json")).map_err(err)?;
     if crate::durability::check::incarnations(&rundir).is_empty() {
         return Err(err(format!(
-            "{}: the run kept no logs (a sweep keeps only those of its findings): run the seed again with patina run to debug it",
+            "{}: the run kept no logs (a sweep keeps those of the first runs of each finding): run the seed again with patina run to debug it",
             rundir.display()
         )));
     }

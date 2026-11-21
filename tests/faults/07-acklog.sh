@@ -13,7 +13,8 @@ for m in ext4-ordered posix-strict; do
     d=$RUNS/07/$m
     mkdir -p "$d"
     cfg=$("$PATINA_CFG" fs-model=$m)
-    sweep 07/$m-correct "$N" --config "$cfg" --faults disk --fault faults-in-recovery=0 --crash machine -- /guest/ack-log correct
+    # The model as a flag, or in the configuration file.
+    sweep 07/$m-correct "$N" $([ $m = posix-strict ] && echo --fault fs-model=$m || echo --config "$cfg") --faults disk --fault faults-in-recovery=0 --crash machine -- /guest/ack-log correct
     python3 -I - "$RUNS/07/$m-correct/summary.tsv" "$m" "$N" <<'PY' || exit 1
 import csv, sys
 rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))

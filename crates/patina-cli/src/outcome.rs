@@ -219,7 +219,8 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
         ),
         "capacity" => Classified::new(Unsupported, "capacity", d),
         "signal-context" => Classified::new(Unsupported, "signal-context", d),
-        "log-limit" => Classified::new(Unsupported, "log-limit", d),
+        // A run that never finished: as a time limit, a log full of a loop is a liveness finding.
+        "log-limit" => Classified::new(Liveness, "log-limit", d),
         "output-limit" => Classified::new(Unsupported, "output-limit", d),
         "timeout" => Classified::new(Timeout, "timeout", d),
         "disk-full" => Classified::new(Internal, "disk-full", d),

@@ -127,19 +127,21 @@ program got an error code for them). The program's full output is in the run dir
 
 A run that never ends fills its logs fast (a livelock writes hundreds of MB a second), so the
 logs are limited: `--log-limit MIB` (`[run] log-limit`, default 1024) ends the run
-`unsupported`, stop `log-limit`, at the record that would pass it, the same record on every
-run of the seed. The message says what filled it (here `tests/guests/sweep/bugs.c`, whose two
+`liveness`, stop `log-limit`, at the record that would pass it, the same record on every
+run of the seed. Like a run past `--time-limit`, it is a finding: a sweep groups it, replays it
+and matches it against `--known`. The message says what filled it (here `tests/guests/sweep/bugs.c`, whose two
 threads each yield until the other is done):
 
 <!-- transcript log-limit
 setup: cp "$GUESTS/sweep-bugs" .
-exit: 2
+exit: 1
 -->
 ```text
 $ patina run --seed 1 --log-limit 8 -- ./sweep-bugs livelock
-unsupported (log-limit): 8.0 MiB of boundary log (87381 records, 52% scheduling-decision records) reached --log-limit: the program had not finished, likely a livelock under this schedule (a run that is only long, or writes that much to the work tree, needs a higher --log-limit)
+liveness (log-limit): 8.0 MiB of boundary log (87381 records, 52% scheduling-decision records) reached --log-limit: the program had not finished, likely a livelock under this schedule (a run that is only long, or writes that much to the work tree, needs a higher --log-limit)
 run directory: /tmp/patina/patina-out/run-1
 replay: patina replay /tmp/patina/patina-out/run-1
+explain: patina explain /tmp/patina/patina-out/run-1
 ```
 
 The starting work tree (`--work`) does not count against it; what the program writes to the
@@ -194,7 +196,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--seeds 1..200,250` | an inclusive range, a list, or both (default `1..100`) |
 | `-j N` | runs at once (default the CPUs, at most 8) |
 | `--out DIR` | where runs go (default `patina-out/sweep`) |
-| `--keep fail\|checked\|all\|none` | whose logs to keep: the findings', also those of every run a `--check` read (to judge them again, [below](#judging-again)), every run's, none; `run.json` and `result.json` always stay |
+| `--keep fail\|checked\|all\|none` | whose logs to keep: those of each group's first three runs, also those of every run a `--check` read (to judge them again, [below](#judging-again)), every run's, none; `run.json` and `result.json` always stay |
 | `--max-findings N`, `--budget SECONDS` | stop early |
 | `--cases FILE` | one run per line of FILE per seed (below) |
 | `--only-case ID[,ID...]` | with `--cases`: only these cases ([below](#test-suites)) |
@@ -203,7 +205,10 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--branch-pairs K` | with `--branch` and nodes: a second node's crash at each of its next K points after each first crash ([below](#several-machines)) |
 | `--known FILE` | findings already known: counted, and they do not fail the sweep ([below](#known-findings)) |
 
-A run kept by `--keep fail` or `checked` whose log is over 4 MiB keeps its first and last MiB
+`--keep fail` keeps the logs of a group's first three runs (its lowest seeds, the first of them
+the one replayed): a bug hit in hundreds of runs would otherwise keep the same evidence hundreds
+of times. Its other runs keep `run.json` and `result.json`, and their seeds reproduce them
+(`patina run --seed N`, or the group's `rerun:` line). A run kept by `--keep fail` or `checked` whose log is over 4 MiB keeps its first and last MiB
 (`boundary.log`, `boundary.tail`); `patina replay` still compares those, and the run's seed
 gives the whole log again. A kept run's work trees, most of its size when its program keeps
 much on disk, are kept compressed, a few times to tens of times smaller: each incarnation's
@@ -229,7 +234,8 @@ Each group in the summary is one signature: the outcome, what stopped the run, a
 line of evidence (the failed `always` label with the first line of its detail, the panic or
 assertion line or else the last line of stderr, the blocked waits). What names the failure is
 kept: the exit status, the signal, the label. Numbers in the program's text (line and column
-numbers, addresses, ids, counts, durations) become `N`, so one bug over many seeds is one group.
+numbers, addresses, ids, counts, durations) become `N`, and hex ids (six or more hex digits,
+letters among them) `H`, so one bug over many seeds is one group.
 Absolute paths keep their last three components, in signatures and SDK labels alike (a label
 made from a source path is the same in every checkout). With `--cases`, a finding named by a
 label (an `always`, a `--check` finding) or by an `INVARIANT` line is one group over every case
@@ -701,8 +707,8 @@ replay: patina replay /tmp/acklog/patina-out/run-3
 explain: patina explain /tmp/acklog/patina-out/run-3
 ```
 
-What survives a machine crash follows `ext4-ordered` by default; `[faults] fs-model =
-"posix-strict"` allows everything POSIX allows, which loses more.
+What survives a machine crash follows `ext4-ordered` by default; `--fault fs-model=posix-strict`
+(`[faults] fs-model = "posix-strict"`) allows everything POSIX allows, which loses more.
 
 A run starts at most 4 incarnations: the last one never crashes, so a program restarts at
 most 3 times. `--fault max-incarnations=N` (`[faults] max-incarnations = N`) changes that.
@@ -738,7 +744,9 @@ after a run that ended `ok`, Patina runs `CMD ARGS RUNDIR` on the host.
 `LABEL: detail` is treated as an SDK `always` label and detail are: the label is kept as
 written, digits included, and numbers in the detail become `N`, so a sweep groups one bug once
 however many runs hit it; put what tells findings apart, as the leg or the oracle's variant, in
-the label (`SILENT-err7: ...`), not the detail. When the checker knows what tells its findings
+the label (`SILENT-err7: ...`), not the detail. Names in the detail (a file, a key) are kept as
+written and split the group by name: write the class of the problem on the detail's first line
+and the specifics after it, or use a key (below). When the checker knows what tells its findings
 apart, it says so with a key: `LABEL [KEY]: detail`, LABEL one word and KEY anything up to the
 `]`, groups by the label and key as written, and the detail does not enter the signature at all
 (`wrong-output [grep-basic]: got 3 lines, want 4` is the group `wrong-output [grep-basic]`,
@@ -972,7 +980,7 @@ before a recheck that changed the verdict is removed: it judged with the earlier
 `--keep checked` keeps the logs of every run the checker read, cut as `--keep fail` cuts
 them: for a corpus of short runs, about what `--keep all` keeps (each run's `inc-0` with its
 stdout, stderr and log), which is what makes judging again possible. A run whose logs were
-pruned (`--keep fail`, an `ok` run) has nothing to read: a recheck names it, leaves its
+pruned (`--keep fail`: an `ok` run, or a finding past its group's first three) has nothing to read: a recheck names it, leaves its
 verdict as the earlier checker's, and does not count that as a failure; the report then says
 its verdicts are of two checkers (`check.checkers` in `report.json`):
 
@@ -1911,7 +1919,17 @@ labels share a prefix, so `--allow-unmet 'fjall-*'` allows the sites a program d
 in a library it uses, and `--allow-unmet '*'` allows every label (when the oracle is a
 `--check`). The summary gives a count per kind and the first five labels; `report.json` lists
 all of them, with every `always` never evaluated, and the allowed ones under `allowed_unmet`. An `unreachable` that no run reached is
-what it should be, and is not listed.
+what it should be, and is not listed. `report.json`'s `sdk.sites` has every site with the number
+of runs that evaluated it and that it held in (`runs_evaluated`, `runs_held`: a `sometimes`
+true, a `reachable` hit, a point fired), so how often a sweep reached its goal is one `jq`
+away. A pattern that matches no label, fault class or `check` of the runs is named on its own
+line (`allow_unmet_unmatched`): an unquoted `*` that the shell expanded to file names leaves
+the sweep `vacuous` otherwise without a hint.
+
+A driver that runs one scenario of several still declares every scenario's sites (the Go SDK
+declares them at package level, the others at first use or load): give each scenario's labels
+a prefix of its own (`upload-*`, `resume-*`), and a sweep of one scenario allows the others'
+(`--allow-unmet 'resume-*'`), as a library's are allowed below.
 
 This stays strict on purpose: a `sometimes` you wrote that no run met fails your sweep, since a
 search that never reached what it was meant to reach found nothing there. Patina cannot tell a
@@ -1994,8 +2012,11 @@ $ jq '{outcome, stop, message, signature, incarnations, crashes: [.crashes[].kin
 ```
 
 Other fields: `faults` (the resolved plan, per class how many calls it could act on and how
-many it hit, and the last 20 injected), `sdk` (every declared site, evaluated and held
-counts), `refused` (calls answered with an error because Patina does not model them),
+many it hit, and the last 20 injected), `sdk` (every declared site with `evaluated` and
+`held`: for a fault point, its evaluations and firings; for an assertion, `sometimes` or
+`reachable`, the process images that reported it, since an SDK reports a site that holds once
+per image and a passing check costs a load and a branch, with no call to Patina: an `always`
+checked ten thousand times in one process shows `evaluated` 1), `refused` (calls answered with an error because Patina does not model them),
 `sched`, `counters`, `digest`, `wall_ms`.
 
 `compute` is there only when code rebuilt with compute points ran
@@ -2065,7 +2086,7 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `mark` | SDK `mark`: `label`, `text` (when the mark has one; the SDKs send none), `pid` (the process), `len` (the payload's label and text bytes), `hash` (of the payload: one label, one hash), `ret` |
 | `sdk` | another SDK call: `op` (`hello`, `assert`, `buggify`, `knob`, `delay`, `declare`, `control`, ...), `label`, `pid`, `len`, `hash` (of the label and text), `ret` (a `buggify`: 1 fired, 0 not, 2 never); a `control` has its words in `text`. An assertion's detail is in `result.json`, not here |
 | `signal`, `sigfault` | a signal delivered (`sig`, `code`, `pc`); a synchronous fault forwarded to the program (`sig`, `code`, `addr`, `pc`) |
-| `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
+| `sched`, `preempt`, `insn` | a supervisor decision (`op`: `Yield`, `Sleep`, `FutexWait`, ..., `ret`; a `Hello`, a thread's first event and an image's after `execve`, has `pid` and `tid`: every later event of its `slot` is that thread's); a preemption (`why`: `counter`, `spin-point`, `compute`, `pc`); an emulated instruction (`insn`, `ret`) |
 | `node` | with nodes: a node's first process started (`event` `start`, `name`, `pid`), or the run ended while the node still had processes (`stop`, `name`, `live`) |
 | `net` | with nodes: a control call's `cut` or `heal` (`event`, `from` and `to` as node names, `both`, `ret`; a `heal` with both empty heals every cut), or a held direction a heal released (`release`, `conn`, `dir`, `until`: when its last held item arrives) |
 
@@ -2164,7 +2185,8 @@ handles secrets. A second `explain` of the run reuses that replay. Bytes are sho
 escaped (`\n`, `\"`, `\xNN` for the rest), at most 64 characters with `...` after.
 
 Who: the node's name in a run with nodes (`driver` for the driver); on one machine `main` and
-`t1`, `t2`, ... for the threads in the order they started. With several threads on one
+`t1`, `t2`, ... for the threads in the order they started, with `/pPID` after a thread of
+another process than the first (`t2/p4`: a thread of process 4). With several threads on one
 machine, each turn of a thread is a line: its calls, the threads and processes it started,
 which threads it woke and how the turn ended (switched out by the seed, waiting for a lock, for
 I/O, sleeping, ending). A message is `-> PEER "bytes"`; between processes over a pipe or a
@@ -2608,7 +2630,7 @@ events. The draw depends on the seed alone: seed 2 draws 248 in every program.
 A single number (`compute-gap=8`) gives every seed that G.
 
 Each switch writes one 96-byte record to the boundary log, so a long program at a small gap
-can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `unsupported`, stop
+can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `liveness`, stop
 `log-limit`: raise the limit or the gap.
 
 ### Limits

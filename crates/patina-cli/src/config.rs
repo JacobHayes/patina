@@ -1109,7 +1109,13 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(p) = a.last("--faults") {
         c.faults_preset = vec![p.to_string()];
     }
-    c.faults.extend(a.all("--fault").iter().cloned());
+    // `--fault KEY=VALUE` is any `[faults]` key, the crash model's too.
+    for f in a.all("--fault") {
+        match f.strip_prefix("fs-model=") {
+            Some(m) => c.fs_model = m.to_string(),
+            None => c.faults.push(f.clone()),
+        }
+    }
     if let Some(cr) = a.last("--crash") {
         c.crash = Some(cr.to_string());
     }
@@ -1733,6 +1739,23 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
     use super::*;
+
+    #[test]
+    fn the_crash_model_is_a_fault_flag_as_its_key_is() {
+        let a: Vec<String> = [
+            "--fault",
+            "fs-model=posix-strict",
+            "--fault",
+            "fs-error-permille=5",
+            "--",
+            "/bin/true",
+        ]
+        .map(String::from)
+        .to_vec();
+        let c = resolve_any(&crate::cli::parse(crate::cli::Cmd::Run, &a).unwrap()).unwrap();
+        assert_eq!(c.fs_model, Model::PosixStrict.name());
+        assert_eq!(c.faults, vec!["fs-error-permille=5".to_string()]);
+    }
 
     #[test]
     fn unknown_keys_are_refused_by_name() {

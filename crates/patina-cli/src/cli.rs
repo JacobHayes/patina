@@ -299,7 +299,7 @@ pub const FLAGS: &[Flag] = &[
         "--crash",
         "KIND[:VALUE]",
         "off",
-        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B; with nodes, process or machine at drawn times, or machine:PERMILLE, machine-at:N, process-at:N at each node's own crash points, each [@NODE,...]",
+        "crash and restart: machine[:PERMILLE], process[:PERMILLE] (default 3), machine-at:N, process-at:N (the N-th crash point); PERMILLE and N may be A..B; with nodes, process or machine at drawn times, or machine:PERMILLE, machine-at:N, process-at:N at each node's own crash points, each [@NODE,...]; what a machine crash keeps: --fault fs-model=ext4-ordered (default) or posix-strict",
         RUNLIKE,
     ),
     flag(
@@ -327,7 +327,7 @@ pub const FLAGS: &[Flag] = &[
         "--log-limit",
         "MIB",
         "1024",
-        "size of the run's logs at which it ends unsupported (log-limit): a livelock's log fills the disk",
+        "size of the run's logs at which it ends liveness (log-limit): a livelock's log fills the disk",
         RUNLIKE,
     ),
     flag(
@@ -384,7 +384,7 @@ pub const FLAGS: &[Flag] = &[
         "--keep",
         "fail|checked|all|none",
         "fail",
-        "whose logs to keep (run.json and result.json are always kept); a kept run's work trees are compressed (post-crash/ only in a run no checker reads) and its logs over 4 MiB cut; checked: also every run the checker ran on, for patina recheck; all: every run whole, as patina run leaves it",
+        "whose logs to keep (run.json and result.json are always kept); fail: those of each group's first three runs; a kept run's work trees are compressed (post-crash/ only in a run no checker reads) and its logs over 4 MiB cut; checked: also every run the checker ran on, for patina recheck; all: every run whole, as patina run leaves it",
         &[Cmd::Sweep],
     ),
     flag(
@@ -633,9 +633,25 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
             Some((n, v)) => (n, Some(v.to_string())),
             None => (a.as_str(), None),
         };
-        let f = find_flag(name)
-            .filter(|f| f.cmds.contains(&cmd))
-            .ok_or_else(|| format!("unknown option {name} (patina {} --help)", cmd_name(cmd)))?;
+        let f = match find_flag(name) {
+            Some(f) if f.cmds.contains(&cmd) => f,
+            // An option of other commands says whose it is (a sweep's flags on a single run).
+            Some(f) => {
+                let whose: Vec<&str> = f.cmds.iter().map(|c| cmd_name(*c)).collect();
+                return Err(format!(
+                    "{name} is an option of patina {}, not of patina {} (patina {} --help)",
+                    whose.join(", "),
+                    cmd_name(cmd),
+                    cmd_name(cmd)
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "unknown option {name} (patina {} --help)",
+                    cmd_name(cmd)
+                ))
+            }
+        };
         let v = if f.value_for(cmd).is_empty() {
             if inline.is_some() {
                 return Err(format!("{name} takes no value"));
@@ -788,6 +804,9 @@ mod tests {
     fn unknown_and_foreign_flags_are_refused() {
         assert!(parse(Cmd::Run, &v(&["--bogus"])).is_err());
         assert!(parse(Cmd::Run, &v(&["--runs", "3"])).is_err());
+        // Another command's option names the commands that take it.
+        let e = parse(Cmd::Run, &v(&["--allow-unmet", "x"])).unwrap_err();
+        assert!(e.contains(cmd_name(Cmd::Sweep)), "{e}");
         let p = parse(
             Cmd::Run,
             &v(&[

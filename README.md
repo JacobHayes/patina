@@ -183,10 +183,10 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 |---|---|---|
 | `ok` | 0 | the program exited 0, or with a status `--ok-exit` names (stop `ok-exit`; `N:CLASS` only where that fault class injected), and broke no invariant |
 | `violation` | 1 | an invariant failed: an SDK `always`, or the `--check` command |
-| `liveness` | 1 | every thread blocked, or the virtual time limit passed |
+| `liveness` | 1 | every thread blocked, the virtual time limit passed, or the program never finished and filled the log to `--log-limit` (stop `log-limit`) |
 | `failure` | 1 | the program exited nonzero, with a status `--ok-exit` does not name |
 | `crash` | 1 | the program died on a signal |
-| `unsupported` | 2 | the program did something Patina does not model (stop `exec`: an image the kernel would run that Patina does not load, such as a 32-bit program), or never finished and filled the log to `--log-limit` (stop `log-limit`); the message names it |
+| `unsupported` | 2 | the program did something Patina does not model (stop `exec`: an image the kernel would run that Patina does not load, such as a 32-bit program); the message names it |
 | `timeout` | 2 | the wall-time limit passed |
 | `nondeterministic` | 2 | a replay differed from its run: a Patina bug, please report it |
 | `internal` | 2 | Patina failed, or the host refused a resource |

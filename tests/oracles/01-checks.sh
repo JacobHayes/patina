@@ -323,7 +323,8 @@ echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case setti
 
 # 6. Judging kept runs again (`patina recheck`). The same checker leaves every kept run's
 #    result.json as it was, byte for byte; a checker that names its finding LABEL [KEY] is
-#    grouped by the key alone, and the report shows one finding as the checker wrote it.
+#    grouped by the key alone in every run whose logs were kept, and the report shows one
+#    finding as the checker wrote it.
 for r in calcs/seed-*/*; do [ ! -d "$r/inc-0" ] || cp "$r/result.json" "$r/result.before"; done
 "$PATINA" recheck calcs >rk.txt 2>&1 || true
 n=0
@@ -334,10 +335,13 @@ done
 [ "$n" -gt 0 ] || die "no kept calc run to judge again"
 sed 's/echo "wrong-$1: got $g, want $w"/echo "wrong [$1]: got $g, want $w (0x$g)"/' chk/calc >chk/calc-key && chmod +x chk/calc-key
 "$PATINA" recheck --check chk/calc-key calcs >rk2.txt 2>&1 || true
-keyed=$(jq -r '[.groups[] | select(.run_outcome == "violation") | .signature] | sort | join(",")' calcs/report.json)
+# Every finding whose logs the sweep kept (a group's first three) is judged again; the others
+# keep their verdict, as a pruned ok run does.
+keyed=$(for r in calcs/seed-*/*; do [ ! -d "$r/inc-0" ] || jq -r 'select(.outcome == "violation") | .signature' "$r/result.json"; done | sort -u | paste -sd,)
 [ "$keyed" = "violation check: wrong [mul],violation check: wrong [sub]" ] || die "keyed findings: $keyed"
-jq -e '.groups[0].example | test("0x[0-9]")' calcs/report.json >/dev/null || die "the example is not as written: $(jq -c '.groups[0].example' calcs/report.json)"
-echo "recheck: $n kept runs unchanged by the same checker; keyed: $keyed, e.g. $(jq -r '.groups[0].example' calcs/report.json)"
+ex=$(jq -r '[.groups[] | select(.signature | contains("["))][0].example' calcs/report.json)
+case $ex in *0x[0-9]*) ;; *) die "the example is not as written: $ex" ;; esac
+echo "recheck: $n kept runs unchanged by the same checker; keyed: $keyed, e.g. $ex"
 
 wait "$hang" || true
 is hang "$(cat hang.rc)" 2 error check
