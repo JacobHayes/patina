@@ -1667,6 +1667,8 @@ of programs. The last commit with it is `0327ddd71c5a`.
 
 ## Limits
 
+- **Protection keys** (`pkey_alloc`: `ENOSYS`): the runtime reads and writes for the program under its
+  handler's key rights, not the thread's; honouring keys means switching PKRU or POR_EL0 at each access.
 - **Linux x86_64 and arm64.** No macOS. Unprivileged user namespaces are required (on
   Ubuntu 24.04 and later, an AppArmor profile for the executable, or the restriction lifted). arm64 needs Linux 6.12 or later (the counter-timer trap), 4 KiB pages, a
   48-bit address space and one CPU model among the CPUs a run may use; `patina doctor`
