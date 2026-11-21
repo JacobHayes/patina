@@ -4,7 +4,10 @@
 # (`--fault compute-gap`, which no budget holds):
 #  a. stats-cp gives the same digest both ways: in a process whose rebuilt code has said hello the
 #     points switch at the drawn gap throughout;
-#  b. stats takes fewer switches at its default gap than with the gap named: the budget held it.
+#  b. stats takes fewer switches at its default gap than with the gap named: the budget held it;
+#  c. stats-cp's own plan went back at its hello (`rewrite.rebuilt`), so each place in its text
+#     counts once, at its hook: the events it charges are under 1.5 times those of the same seed
+#     under traps, where it has no plan (with its plan kept, each counted twice: about 2 times).
 #@ tier=quick budget=20 slots=4
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/10-budget # not o: prun sets it
@@ -20,6 +23,7 @@ done
 prun "$d/cp-named" "$seed" --fault compute-gap="$gap" -- /guest/examples/stats-cp &
 prun "$d/stock" "$seed" -- /guest/examples/stats &
 prun "$d/stock-named" "$seed" --fault compute-gap="$gap" -- /guest/examples/stats &
+prun "$d/cp-traps" "$seed" --config "$("$PATINA_CFG" preempt=traps)" -- /guest/examples/stats-cp &
 wait
 a=$(field "$d/cp-$seed/result.json" digest) b=$(field "$d/cp-named/result.json" digest)
 [ "$a" != - ] && [ "$a" = "$b" ] || die "a. stats-cp seed $seed (gap $gap): digest $a at the default, $b with the gap named (switches $(field "$d/cp-$seed/result.json" compute.switches) and $(field "$d/cp-named/result.json" compute.switches))"
@@ -27,3 +31,7 @@ echo "a. stats-cp seed $seed (gap $gap): one digest both ways, $(field "$d/cp-na
 x=$(field "$d/stock/result.json" compute.switches) y=$(field "$d/stock-named/result.json" compute.switches)
 [ "$x" -lt "$y" ] || die "b. stats seed $seed (gap $gap): $x switches at the default, $y with the gap named"
 echo "b. stats seed $seed: $x switches at the default, $y with the gap named"
+r=$(field "$d/cp-$seed/result.json" rewrite.rebuilt)
+e=$(field "$d/cp-$seed/result.json" compute.events) t=$(field "$d/cp-traps/result.json" compute.events)
+[ "$r" = 1 ] && [ $((2 * e)) -lt $((3 * t)) ] || die "c. stats-cp seed $seed: plans put back at a hello $r, $e events at the default, $t under traps"
+echo "c. stats-cp seed $seed: its plan put back at its hello; $e events at the default, $t under traps"

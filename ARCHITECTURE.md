@@ -875,8 +875,9 @@ touched.
 There is no other way into the runtime: a point that switches needs a supervisor hand-off
 anyway, so a direct call would save nothing. With branch counters the cell is never armed
 and events charge nothing. With load-time points (the default) the cell is the plans' (`proto::plan::CELL`,
-below), mapped at each image start rather than at a hello; charging and the point are the same,
-and arming skips the points that could not switch (`proto::compute::chain`):
+below), mapped at each image start rather than at a hello, and a rebuilt image's own plan goes
+back at its hello (its hooks are its points; "Rebuilt images", below); charging and the point
+are the same, and arming skips the points that could not switch (`proto::compute::chain`):
 
 - **Alone**: with no other thread runnable, the cell is armed to the next deadline (or
   2^22): no gap is drawn, as no pick could switch.
@@ -1178,6 +1179,16 @@ In a run (the default):
   load bias takes the plan again for what it covers, shrunk so that no patch is left half on
   a page that stays original. An image tracks at most 16 ranges put back; past that, all of
   it goes back. Trampolines are never placed in the runtime's region.
+- **Rebuilt images** (`plans::rebuilt`): when an image's code rebuilt with compute points says
+  hello (edges or comparisons), its patched pages go back as for a change, all of them, so in
+  that image the cell counts the hooks' events alone, as under traps; other images, stock
+  libraries among them, keep their plans (counted `rebuilt`). Code in the image that was not
+  rebuilt (a static libc, Rust's prebuilt `std`) loses its load-time points with it, as under
+  traps; a vfork child, on its parent's memory, puts nothing back. Kept, each place counted twice
+  (a hook and the planned site beside it) and half the points were a trampoline's trap and
+  walk, unbudgeted in a rebuilt process: a sweep of `examples/stats-c` rebuilt took 5 to 6
+  times its time under traps (docs/EVIDENCE.md). An interpreter's line points
+  (`python3 -m patina`) put back every plan of the process the same way (`lines`).
 - **What the program sees**: a signal frame, a fault record and a backtrace through a
   trampoline name the original instruction (`proto::plan::shown`: a stop in a copy maps to
   the same offset of the original, a stop at a count to the instruction it precedes), so

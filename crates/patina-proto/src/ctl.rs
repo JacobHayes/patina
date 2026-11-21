@@ -308,7 +308,9 @@ pub struct ComputeStats {
     /// walked, and walks a runtime entry or an instruction the stepper cannot step ended
     /// without a switch; points drawn ahead that stayed with their thread (no trap: `stays`);
     /// changes that put back part of a plan's patched text and left the rest (`restored`);
-    /// processes whose plans went back when an interpreter's line points took over (`lines`).
+    /// processes whose plans went back when an interpreter's line points took over (`lines`);
+    /// images whose plan went back when their code rebuilt with compute points said hello
+    /// (`rebuilt`).
     pub plan: [AtomicU64; PLAN_FIELDS],
     /// Nonzero while the launcher's plan broker makes a plan a guest thread waits for: a
     /// token for the request and the seconds of that wall time the stall watchdog counts as
@@ -316,7 +318,7 @@ pub struct ComputeStats {
     pub planning: AtomicU64,
 }
 
-pub const PLAN_FIELDS: usize = 12;
+pub const PLAN_FIELDS: usize = 13;
 pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "points",
     "applied",
@@ -330,6 +332,7 @@ pub const PLAN_NAMES: [&str; PLAN_FIELDS] = [
     "stays",
     "restored",
     "lines",
+    "rebuilt",
 ];
 pub const PLAN_POINTS: usize = 0;
 pub const PLAN_APPLIED: usize = 1;
@@ -343,6 +346,7 @@ pub const PLAN_WALKS_CUT: usize = 8;
 pub const PLAN_STAYS: usize = 9;
 pub const PLAN_RESTORED: usize = 10;
 pub const PLAN_LINES: usize = 11;
+pub const PLAN_REBUILT: usize = 12;
 
 impl ComputeStats {
     pub fn plans(&self) -> [u64; PLAN_FIELDS] {

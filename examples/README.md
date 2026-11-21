@@ -248,7 +248,7 @@ compute points: /tmp/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
   6 of 10 runs   first: seed 2   replayed: identical
-  example: lost updates: 197 of 200 jobs counted
+  example: lost updates: 196 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/patina/stats-cp
   replay: patina replay /tmp/patina/patina-out/stats-cp/seed-2
   explain: patina explain /tmp/patina/patina-out/stats-cp/seed-2

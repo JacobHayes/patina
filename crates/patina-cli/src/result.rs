@@ -1232,6 +1232,12 @@ pub fn rewrite_line(w: &Value, compute: &Value) -> Option<String> {
             plural(n("lines"), "process")
         ));
     }
+    if n("rebuilt") > 0 {
+        s.push_str(&format!(
+            "; off in {} rebuilt with compute points (their hooks are their points)",
+            plural(n("rebuilt"), "image")
+        ));
+    }
     if n("restored") > 0 {
         s.push_str(&format!(
             "; {} put back part of a plan (the rest keeps its points)",

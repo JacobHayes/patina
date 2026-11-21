@@ -1043,6 +1043,38 @@ x86_64 (on arm64, before the second change: 88, 97, 42, 23 and 8). It costs: a s
 `stats-cp` over seeds 1 to 20 (`-j 4`) takes 3.1 s at the default and 0.5 s under traps on
 x86_64, its libc's load-time points switching at small gaps with no budget.
 
+**Rebuilt code without its plan** (2026-11-21; this host, the GitHub x86_64 and arm64
+runners). That cost was the rebuilt image's own load-time points: its code counted each
+place twice (the compiler's hook and the planned site beside it), and the plan's points, a
+trampoline's trap and walk each, were drawn at small gaps with no budget. Rules tried: a budget floor for rebuilt processes
+(`go-race-cp` 76 finds, but `go-deadline` 3.2 times traps), switching only after a stock
+site's point (`rs-race-cp` 11 to 4). The rule kept: at its hello a rebuilt image's plan pages
+are put back from the file (`plans::rebuilt`; not in a vfork child, whose memory is its
+parent's), so its hooks are its points, as under traps, while the stock libraries it loads
+keep theirs. Code of the image the compiler did not instrument (a static libc, Rust's std)
+loses its points with them. Finds in 200 seeds (main, this change, traps) and the 200-seed
+sweep's seconds (`-j 4`):
+
+| Guest | this host | x86_64 runner | arm64 runner |
+|---|---|---|---|
+| `stats-cp` | 133, 139, 141 (9.9, 2.1, 2.0 s) | 130, 144, 143 (41, 18, 17 s) | 69, 92, 96 (124, 59, 60 s) |
+| `go-race-cp` | 98, 64, 63 | 95, 64, 63 | 99, 64, 58 |
+| `rs-race-cp` | 14, 11, 12 | 12, 12, 10 | 15, 11, 14 |
+| `races-cp` | 35, 25, 32 | 23, 27, 31 | 34, 29, 23 |
+| `pool-cp` | 44, 47, 91 | 48, 53, 86 | 43, 57, 69 |
+| `go-race-stock` | 51, 51, 0 | 50, 50, 0 | 56, 56, 0 |
+| `rs-race-stock` | 6, 6, 0 | 3, 3, 0 | 5, 5, 0 |
+| `stats`, `races b`, `pool` (stock) | 1, 1, 0; 0; 0 | 0; 0; 0 | 0; 0; 0 |
+
+The rebuilt guests are found at their traps rates (the extra finds main had in `go-race-cp`
+came with its cost), the stock ones unchanged. Largest ratio of a seed's wall time at the
+default to traps, seeds 1 to 20, this change (main): `stats-cp` 1.3 (8.0) here, 1.6 (3.4) and
+1.5 (2.5) on the runners; `go-race-cp` 4.9 (15.4), 2.9 (7.7), 2.3 (10.2); `go-deadline`, seed
+2, 1.3 (4.5) here. The ratios still above 3 are of runs of 40 to 190 ms (`rs-race-cp` up to 6
+on the runners, 15 here; `pool-cp` 8 here, 3.2 on the runners), whose remaining points are
+in stock code and in code the compiler did not instrument. Not removed: the rebuilt images'
+plans are still made; deciding at plan time is the better design, left for later.
+
 **Cost**: wall ms of seeds 1 to 5, the least of 3 runs, warm plans; new at 2,048 against
 32,768 (both with the new gap draw). The seeds draw mean gaps 3,074, 120, 1,843, 2,096 and
 36,866:

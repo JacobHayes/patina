@@ -285,6 +285,8 @@ pub fn hello(arg: u64, pc: u64) -> i64 {
     p.kinds |= kinds;
     if kinds & proto::sdk::COMPUTE_LINE != 0 {
         crate::plans::lines();
+    } else {
+        crate::plans::rebuilt(pc);
     }
     let mut path = [0u8; 4096];
     let n = match kinds & proto::sdk::COMPUTE_LINE {

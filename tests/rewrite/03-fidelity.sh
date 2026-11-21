@@ -16,7 +16,9 @@
 #  e. `mprotect` (fid_spin's page made writable and back) puts that page back (`restored`, or
 #     `dropped` when it was the plan's only patched page): the run reads the native sum;
 #  f. shlib-stock (stock, with libraries; dlopen and dlclose twice) ends ok with its native
-#     line, every image planned (the dlopened one too), the dlclosed library's plans dropped.
+#     line, every image planned (the dlopened one too); the libraries rebuilt with compute
+#     points (libcomp.so, and libcompdl.so at each dlopen) have their plans put back at their
+#     hello (`rebuilt`), so the dlclose finds none to drop.
 #@ tier=quick budget=30 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
@@ -97,5 +99,8 @@ st=$(python3 -I -c 'import json,sys
 i=json.load(open(sys.argv[1]))["rewrite"]["images"]
 print(" ".join(sorted(set(e["status"] for e in i))), any(e["path"].endswith("/libcompdl.so") for e in i))' "$o/shlib/result.json")
 [ "$st" = "planned True" ] || die "f. shlib-stock images: $st (want all planned, libcompdl.so among them)"
-[ "$(field "$o/shlib/result.json" rewrite.dropped)" -ge 2 ] || die "f. shlib-stock: the dlclosed library's plans were not dropped"
-echo "f. shlib-stock: every image planned, $(field "$o/shlib/result.json" rewrite.dropped) plans dropped at dlclose"
+rebuilt=$(field "$o/shlib/result.json" rewrite.rebuilt)
+dropped=$(field "$o/shlib/result.json" rewrite.dropped)
+[ "$rebuilt" -ge 3 ] || die "f. shlib-stock: $rebuilt plans put back at a hello (want libcomp.so's and libcompdl.so's at each dlopen)"
+[ "$dropped" = 0 ] || die "f. shlib-stock: $dropped plans dropped at dlclose (want none left to drop)"
+echo "f. shlib-stock: every image planned, $rebuilt plans put back at their hello, none left for dlclose"

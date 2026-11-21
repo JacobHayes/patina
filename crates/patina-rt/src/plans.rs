@@ -723,6 +723,35 @@ pub fn lines() {
     }
 }
 
+/// Code rebuilt with compute points said hello from `pc` (`compute::hello`, edges or
+/// comparisons): the plan of the image holding `pc` goes back to the original file, so in that
+/// image the cell counts the hooks' events alone, as without plans, instead of each place
+/// counted twice (a hook call and a planned site beside it) and taken through a trampoline's
+/// trap and walk half the time. Other images keep their plans; code of the image the compiler did
+/// not instrument (a static libc, Rust's prebuilt `std`) loses its points with it. Counted
+/// `rebuilt`, once per image load whose plan held patched text.
+pub fn rebuilt(pc: u64) {
+    // A vfork child runs on its parent's memory: the parent's plans are left as they are.
+    if !on() || crate::state::thread().vfork != 0 {
+        return;
+    }
+    let pc = shown(pc);
+    for img in imgs().iter_mut() {
+        if !img.maps[..img.nmaps]
+            .iter()
+            .any(|&(a, len, _)| a <= pc && pc - a < len)
+        {
+            continue;
+        }
+        let mut left = false;
+        for_patched(img, &mut |_, _, _| left = true);
+        if left {
+            restore(img, ALL.0, ALL.1);
+            count(proto::ctl::PLAN_REBUILT);
+        }
+    }
+}
+
 /// Map the original file's pages over the patched pages of `img` in `[lo, hi)` and mark the
 /// range put back; past `MAX_RESTORED` ranges, every patched page.
 fn restore(img: &mut Img, lo: u64, hi: u64) {

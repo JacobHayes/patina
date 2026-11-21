@@ -2512,7 +2512,7 @@ compute points: /tmp/src/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
   6 of 10 runs   first: seed 2   replayed: identical
-  example: lost updates: 197 of 200 jobs counted
+  example: lost updates: 196 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/src/patina/stats-cp
   replay: patina replay /tmp/src/patina/patina-out/stats-cp/seed-2
   explain: patina explain /tmp/src/patina/patina-out/stats-cp/seed-2
@@ -2671,9 +2671,9 @@ exact-only: one seed's run
 $ patina run --seed 2 -- ./stats-cp
 failure (exit): exit status 1
 guest: exit 1
-compute points: /tmp/src/patina/stats-cp (edges, accesses); 169,677 events, 1,369 switches, mean gap 120
+compute points: /tmp/src/patina/stats-cp (edges, accesses); 89,285 events, 701 switches, mean gap 120
 guest stderr (1 lines, /tmp/src/patina/patina-out/run-2/inc-0/stderr):
-  lost updates: 197 of 200 jobs counted
+  lost updates: 196 of 200 jobs counted
 run directory: /tmp/src/patina/patina-out/run-2
 replay: patina replay /tmp/src/patina/patina-out/run-2
 explain: patina explain /tmp/src/patina/patina-out/run-2
@@ -2691,7 +2691,9 @@ Each seed draws a mean gap G: half the seeds log-uniformly from 1 to 16, the oth
 2,048 switches at its gap and then one per 8,192 events: past that, its gaps are drawn with a
 mean of at least 8,192 until it is back within. A short test of a race seldom reaches that; a long
 program at a small gap stays within a few times its run without points. Rebuilt code is not held
-to it: a process whose rebuilt code has said hello switches at its drawn gap throughout.
+to it: a process whose rebuilt code has said hello switches at its drawn gap throughout, and a
+file rebuilt with the hooks has no load-time points of its own (its hooks are its points), so
+it costs close to what it does under `[sched] preempt = "traps"`.
 
 The default needs no tuning: it finds the races in Patina's own tests in a robust share of
 seeds and keeps a long program within a few times its run under `[sched] preempt = "traps"`

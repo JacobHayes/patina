@@ -1,5 +1,6 @@
 # The examples (examples/README.md), each with its documented sweep options over seeds 1-20
-# (1-200 in the release tier):
+# (1-200 in the release tier; stats-c 1-10 in both, as documented: half its seeds switch every
+# 1 to 16 events in its rebuilt code, seconds a seed on the arm64 runner):
 # the bug is found, under the expected signature; the fixed variant is ok on every seed, and
 # the fault or fault point the example is about fired in at least one of those runs. stats-c's
 # stock build is ok on every seed under traps (its race needs points in its code).
@@ -41,14 +42,14 @@ example journal-py 'violation always: journal-intact: N bytes' 1 --faults disk -
 example acklog-c 'violation always: acked-records-kept: N acknowledged, N stored' 1 --crash machine -- "$E/acklog"
 example bank-go 'violation always: balance-matches-deposits: balance N, deposits N' 1 --fault net-reset-permille=50 -- "$E/bank"
 example serve-c 'violation always: served-only-public: N bytes' 1 --fault path-swap-permille=300 -- "$E/serve"
-# stats-c under [sched] preempt = "traps" and compute-gap=64..65536: its race is found by the
-# compute points it was rebuilt with, under any preemption; at the default gap, half the seeds
-# switch every 1 to 16 events in its rebuilt code (no budget holds it), and with load-time
-# points in its libc as well that takes this script past its budget on arm64.
+# stats-c rebuilt with compute points: its race is found by the points it was rebuilt with.
+all=$N
+N=10
+example stats-c 'failure exit: lost updates: N of N jobs counted; exit 1' 0 -- "$E/stats-cp"
+N=$all
+# stats-c built without compute points, under [sched] preempt = "traps": the race has no system
+# call in it, so no seed finds it without points in its code.
 T=$("$PATINA_CFG" preempt=traps)
-example stats-c 'failure exit: lost updates: N of N jobs counted; exit 1' 0 --config "$T" --fault compute-gap=64..65536 -- "$E/stats-cp"
-# stats-c built without compute points: the race has no system call in it, so no seed finds it
-# without points in its code.
 rc=$(sweep "$RUNS/stats-c-stock" --config "$T" -- "$E/stats")
 echo "stats-c stock: exit $rc, $(jq -c .outcomes "$RUNS/stats-c-stock/report.json")"
 [ "$rc" = 0 ] || fail "stats-c stock: a finding without compute points"
