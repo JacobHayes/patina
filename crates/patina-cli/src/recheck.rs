@@ -97,10 +97,10 @@ pub fn rejudge(dir: &Path, check: Option<&Check>, server: Option<&Server>) -> Re
         }
     };
     let rp = dir.join("replay.json");
-    // A `--branch` child that missed its crash point is nondeterministic whatever its checker
+    // A `--crash-points` child that missed its crash point is nondeterministic whatever its checker
     // says, a finding already: its result stays, and the new checker is not run on it, as on
     // any run that did not end ok. The result first: stopped before run.json, it is stale.
-    if r["branch_missed"].is_object() {
+    if r["crash_point_missed"].is_object() {
         match &check {
             Some(_) => r["check"] = serde_json::to_value(Verdict::not_run()).unwrap(),
             None => {

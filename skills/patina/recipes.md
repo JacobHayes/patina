@@ -16,10 +16,10 @@ exit: 0 1 1
 ```sh
 cc -o kvlog examples/kvlog-c/kvlog.c
 patina sweep --seeds 1..30 --crash machine:10 --check examples/checks/acked-kept --out patina-out/kvlog -- ./kvlog
-patina sweep --seeds 1..2 --branch --branch-max 50 --crash machine --check examples/checks/acked-kept --out patina-out/kvlog-branch -- ./kvlog
+patina sweep --seeds 1..2 --crash-points=50 --crash machine --check examples/checks/acked-kept --out patina-out/kvlog-branch -- ./kvlog
 ```
 
-The first finds the lost record in some seeds; `--branch` tries crash points one by one. The
+The first finds the lost record in some seeds; `--crash-points` tries crash points one by one. The
 same sweeps of `./kvlog fixed` (fsync before the ack) are clean. For your tool: run it as
 production does (its arguments, a starting tree with `--work DIR`), state its promise, check
 that promise after each crash, and make sure it can restart on what the crash left.

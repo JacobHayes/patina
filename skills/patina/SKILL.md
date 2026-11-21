@@ -62,7 +62,7 @@ replay: patina replay /tmp/app/patina-out/run-0
    |---|---|
    | ordering, races, deadlock | nothing (seeds vary the schedule); `--preempt points` for races on plain memory |
    | error handling of file I/O | `--faults disk`, with `--ok-exit N` for documented clean failures |
-   | durability, recovery | `--crash machine` (the program must recover from `/work` on restart), then `--branch` |
+   | durability, recovery | `--crash machine` (the program must recover from `/work` on restart), then `--crash-points` |
    | client/server | `--faults net` |
    | several machines | nodes in `patina.toml`, then `--faults cluster` |
    | the program's own fault points | `--buggify` |

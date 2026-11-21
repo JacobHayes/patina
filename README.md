@@ -14,7 +14,7 @@ for a program only with an AppArmor profile, installed once as root (below).
 
 Changes in 0.18: `patina explain RUNDIR` tells a run as a short story and names the event to
 stop at, and `patina debug RUNDIR` stops a replay just before it with gdb attached ([reading a
-failing run](docs/GUIDE.md#reading-a-failing-run)); `sweep --branch-max` samples crash points
+failing run](docs/GUIDE.md#reading-a-failing-run)); `sweep --crash-points=N` samples crash points
 and `[sweep] crash-pairs` crashes a second node after each first crash; `--crash
 process-at:N@NODE`; the descriptor numbers a program sees no longer depend on host timing.
 Run directories from 0.17 are refused. In 0.17: each node is a machine (its own disk, machine

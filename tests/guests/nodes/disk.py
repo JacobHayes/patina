@@ -13,7 +13,7 @@ when absent; N what `unsynced` holds now), and then holds the connection open. I
 
 The driver checks, for each round: a reports the incarnation it expects, and the `synced` its
 last incarnation wrote (fsync keeps it across a machine crash); an established connection to a
-sees nothing once `node kill a` returns (no end of file, no reset); a connect to a while it is
+sees nothing once `node crash a` returns (no end of file, no reset); a connect to a while it is
 down times out (it is not refused); node b, which never crashes, still reports what it wrote
 (another node's crash leaves its unsynced data alone). After `node start a` the old connection
 gets a reset at its next send (a's new machine does not know it). It counts the rounds whose
@@ -92,7 +92,7 @@ def driver(rounds):
         if k > 0:
             check(a["synced"] == f"s{k - 1}", f"round {k}: a lost its fsynced write: {a}")
             lost += a["unsynced"] != f"u{k - 1}"
-        patina.control("node kill a")
+        patina.control("node crash a")
         # Silent: the connection shows nothing (until its own timeouts, which are longer).
         c.settimeout(1)
         try:

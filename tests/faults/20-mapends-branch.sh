@@ -13,7 +13,7 @@ for spec in "machine durable" "process kill" "machine kill" "machine forked" "pr
     read -r plane m <<<"$spec"
     o=$d/sweep-$plane-$m
     st=0
-    timeout 300 "$PATINA" sweep --seeds 1..2 --branch --crash "$plane" --keep fail --out "$o" \
+    timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points --crash "$plane" --keep fail --out "$o" \
         --mount "$PATINA_GUESTS":/guest:copy -- /guest/mapends "$m" >"$o.txt" 2>&1 || st=$?
     [ $st = 0 ] || die "branch sweep $m under $plane crashes: exit $st: $(head -5 "$o.txt")"
     echo "branch sweep, $m under $plane crashes: $(grep -E '^patina sweep' "$o.txt" | cut -d'(' -f1)"
@@ -22,7 +22,7 @@ done
 python3 -I - "$d/sweep-machine-durable/report.json" <<'PY' || exit 1
 import json, sys
 r = json.load(open(sys.argv[1]))
-b = r["branch"]
+b = r["crash_points"]
 if b["tried"] != b["points"] or b["points"] < 4:
     sys.exit("FAIL: durable: %d of %d crash points tried" % (b["tried"], b["points"]))
 PY

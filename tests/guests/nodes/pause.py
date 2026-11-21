@@ -149,7 +149,7 @@ def script():
 
     # A paused node can be killed; a pause of a node that is down is EAGAIN.
     ctl("node pause b")
-    ctl("node kill b --process")
+    ctl("node kill b")
     ctl("node pause b", errno.EAGAIN)
     ctl("node start b")
     c, f = connect()

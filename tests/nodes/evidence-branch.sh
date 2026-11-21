@@ -1,4 +1,4 @@
-# Evidence (docs/EVIDENCE.md, "Every crash point of every node"): `patina sweep --branch --crash
+# Evidence (docs/EVIDENCE.md, "Every crash point of every node"): `patina sweep --crash-points --crash
 # machine` on runs with nodes, each sweep once at -j 6 with --keep fail:
 # - ack2.py (two nodes; `early`: b answers before its fsync), seeds 1..8, 5 puts;
 # - q3.py (three replicas; `nosync`: a node answers before it syncs; `early`: the primary
@@ -6,7 +6,7 @@
 # - wal.py (one node recovering its log; `nocheck`: recovery trusts each record's length),
 #   seeds 1..2, 15 s of virtual time.
 # Each line: crash points per node over the seeds, children tried, runs, wall seconds, failing
-# runs, groups. Then wal.py's `nocheck` again with `--branch-max 300` (a sample of 300 children
+# runs, groups. Then wal.py's `nocheck` again with `--crash-points=300` (a sample of 300 children
 # per seed).
 #@ tier=evidence budget=1200 slots=6
 . "$(dirname "$0")/lib.inc"
@@ -14,17 +14,17 @@ o=$RUNS/evidence-branch; mkdir -p "$o"
 # sw NAME SEEDS CONFIG DRIVER...: one branch sweep into $o/NAME; prints its line.
 sw() {
     n=$1 seeds=$2 cfg=$3; shift 3
-    max=""; case $n in *-max) max="--branch-max 300" ;; esac
+    max=""; case $n in *-max) max="--crash-points=300" ;; esac
     rm -rf "${o:?}/$n"
     t0=$(date +%s)
     st=0
-    timeout 1100 "$PATINA" sweep --seeds "$seeds" --branch $max --crash machine -j 6 --keep fail --out "$o/$n" \
+    timeout 1100 "$PATINA" sweep --seeds "$seeds" --crash-points $max --crash machine -j 6 --keep fail --out "$o/$n" \
         --config "$cfg" --mount "$PATINA_GUESTS":/guest:copy -- "$@" >"$o/$n.txt" 2>&1 || st=$?
     [ -f "$o/$n/report.json" ] || die "$n: no report (exit $st): $(tail -3 "$o/$n.txt")"
     python3 -I - "$o/$n/report.json" "$n" "$seeds" "$(( $(date +%s) - t0 ))" <<'PY'
 import json, sys
 rep, name, seeds, wall = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3], sys.argv[4]
-b = rep["branch"]
+b = rep["crash_points"]
 per = ", ".join("%s %d" % (x["node"], x["points"]) for x in b["nodes"])
 fail = sum(g["count"] for g in rep["groups"])
 groups = "; ".join("%s (%d)" % (g["signature"], g["count"]) for g in rep["groups"]) or "-"

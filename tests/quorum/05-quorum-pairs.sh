@@ -1,5 +1,5 @@
 # 5. Quorum: the three-node store of 01-quorum under two machine crashes at crash points
-# (`sweep --branch`, `[sweep] crash-pairs`): each first crash's child that ended ok, then another node's
+# (`sweep --crash-points`, `[sweep] crash-pairs`): each first crash's child that ended ok, then another node's
 # crash at each of its next 3 points, a sample of 60 children and 60 pairs of each of two seeds.
 # A write two nodes acknowledged survives one crash; `nosync` (a node answers before it syncs)
 # loses it when both crash, found only in pairs. The correct store is ok at every first crash
@@ -17,7 +17,7 @@ pairs() {
     printf '[sweep]\ncrash-pairs = 3\n' >>"$f"
     rm -rf "${o:?}/$1"; st=0
     # KEEP none is the test input PATINA_TEST_KEEP_NONE.
-    k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds 1..2 --branch --branch-max 60 --crash machine -j 6 --keep "${k/none/fail}" \
+    k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points=60 --crash machine -j 6 --keep "${k/none/fail}" \
         --out "$o/$1" --config "$f" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/q3.py driver 2 >"$o/$1.txt" 2>&1 || st=$?
     [ -f "$o/$1/report.json" ] || die "$1: no report (exit $st): $(tail -3 "$o/$1.txt")"
 }
@@ -25,7 +25,7 @@ pairs ok none
 [ "$st" = 0 ] || die "correct: exit $st: $(grep -A4 '^[a-z].*exit' "$o/ok.txt" | head -12)"
 python3 -I - "$o/ok/report.json" <<'PY' || die "correct"
 import json, sys
-b = json.load(open(sys.argv[1]))["branch"]
+b = json.load(open(sys.argv[1]))["crash_points"]
 assert b["tried"] == 120 and b["pairs"]["tried"] == 120 < b["pairs"]["pairs"], b
 assert all(x["tried"] == 60 for x in b["seeds"]), b["seeds"]
 print("correct: ok at %d first crashes and %d of %d pairs" % (b["tried"], b["pairs"]["tried"], b["pairs"]["pairs"]))
@@ -39,7 +39,7 @@ runs = [x for g in r["groups"] for x in g["runs"]]
 assert runs and all("point2" in x for x in runs), [(x.get("node"), x["point"], x.get("node2")) for x in runs]
 kept = [x["dir"] + "/inc-0/stdout" for x in runs if os.path.isfile(x["dir"] + "/inc-0/stdout")]
 assert kept and all("lost write" in open(p).read() for p in kept), r["groups"][0]["signature"]
-print("nosync: a lost write in %d of %d pairs, in no first crash alone" % (len(runs), r["branch"]["pairs"]["tried"]))
+print("nosync: a lost write in %d of %d pairs, in no first crash alone" % (len(runs), r["crash_points"]["pairs"]["tried"]))
 PY
 c=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["dir"])' "$o/nosync/report.json")
 s=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["seed"])' "$o/nosync/report.json")

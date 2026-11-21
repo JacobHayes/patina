@@ -131,7 +131,7 @@ def check_words(where, cmd, words, v, bad, seen):
             bad.append(f"{where}: patina {cmd} takes no {name}")
             continue
         value = (f["by_command"].get(cmd) or f)["value"] if cmd else f["value"]
-        if not value:
+        if not value or (value.startswith("[=") and not eq):  # a switch, or an optional value not given
             continue
         if eq:
             arg = inline
@@ -167,7 +167,7 @@ def check_value(where, name, value, arg, v, bad, seen):
 
 def check_key(where, kv, v, bad):
     key = kv.split("=")[0]
-    if key.startswith("point:") and "point:LABEL" in v["keys"]:
+    if key.startswith("buggify:") and "buggify:LABEL" in v["keys"]:
         return
     if key not in v["keys"]:
         bad.append(f"{where}: no fault key {key}")
@@ -197,7 +197,7 @@ def check_file(path, v, bad, seen, doc=False):
                 bad.append(f"{where}: no command patina {cmd}")
                 continue
             seen["commands"].add(cmd)
-            if cmd == "ctl":  # its words are the control call's (`node kill NAME --process`)
+            if cmd == "ctl":  # its words are the control call's (`node kill NAME`)
                 continue
             rest = words[1:]
             if cmd == "log" and rest and not rest[0].startswith("-") \

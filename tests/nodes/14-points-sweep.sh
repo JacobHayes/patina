@@ -1,4 +1,4 @@
-# 14. Nodes: crash points, fuller (tests/guests/nodes/ack2.py, as 13-points). A `--branch` sweep
+# 14. Nodes: crash points, fuller (tests/guests/nodes/ack2.py, as 13-points). A `--crash-points` sweep
 # over four seeds of `early` (two in the release tier) finds the lost acknowledged put on b in
 # each seed and in b's children only, and the correct store is ok at every point of every node.
 # A run crashing at per-mille chance at both nodes' points is identical under verify --vary,
@@ -22,14 +22,14 @@ for v in ok early; do
 done
 D="python3 /guest/ack2.py driver 4"
 S=4; [ "${CHECK_TIER:-}" != release ] || S=2
-sw() { rm -rf "${o:?}/sw-$1"; st=0; timeout 600 "$PATINA" sweep --seeds 1..$S --branch --crash machine -j 6 --keep "$2" --out "$o/sw-$1" \
+sw() { rm -rf "${o:?}/sw-$1"; st=0; timeout 600 "$PATINA" sweep --seeds 1..$S --crash-points --crash machine -j 6 --keep "$2" --out "$o/sw-$1" \
     --config "$o/$1.toml" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/sw-$1.txt" 2>&1 || st=$?; }
 sw early fail
 [ "$st" = 1 ] || die "branch sweep of early: exit $st: $(tail -5 "$o/sw-early.txt")"
 python3 -I - "$o/sw-early" "$S" <<'PY' || die "branch sweep of early"
 import json, os, sys
 rep = json.load(open(os.path.join(sys.argv[1], "report.json")))
-br = rep["branch"]
+br = rep["crash_points"]
 assert br["tried"] == br["points"], br
 fails = [r for g in rep["groups"] for r in g["runs"]]
 assert all("lost on b" in g["signature"] for g in rep["groups"]), [g["signature"] for g in rep["groups"]]

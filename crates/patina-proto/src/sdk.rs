@@ -144,7 +144,7 @@ impl Hdr {
     }
 }
 
-/// The identity of a label, as decisions and `point:LABEL` overrides key it.
+/// The identity of a label, as decisions and `buggify:LABEL` overrides key it.
 pub fn label_hash(label: &[u8]) -> u64 {
     hash_bytes(0x7061_6c61_6265_6c00, label)
 }
@@ -174,7 +174,7 @@ pub const FIRE_PERMILLE: u64 = 250;
 pub const DELAY_MIN_NS: u64 = 1_000_000;
 pub const DELAY_MAX_NS: u64 = 5_000_000_000;
 
-/// `--fault point:LABEL=PERMILLE` overrides, at most this many.
+/// `--fault buggify:LABEL=PERMILLE` overrides, at most this many.
 pub const MAX_POINTS: usize = 32;
 
 /// Written by the launcher before the run; read-only afterwards.

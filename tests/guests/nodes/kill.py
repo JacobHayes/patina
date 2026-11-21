@@ -7,7 +7,7 @@
 
 On each connection b sends one line, `inc=I starts=N pid=P` (I is PATINA_INCARNATION, 0 when
 it is not set), and then holds the connection open. The driver checks, for each cycle: both
-connections end (end of file or a reset) once `node kill b --process` returns; a connect to
+connections end (end of file or a reset) once `node kill b` returns; a connect to
 either port is refused while b is down; a second kill and a start while up are refused
 (`EALREADY`); after `node start b` the new process reports the next incarnation and a count
 that kept the last one's (the work tree stays). It prints `ok ...` lines or `FAIL: ...` and
@@ -103,7 +103,7 @@ def driver(cycles):
               f"cycle {k}: b reports {a} (expected incarnation {k}, start {k + 1})")
         check(b1["pid"] != a["pid"], f"cycle {k}: :7001 is served by the first process")
         check(control_err("node start b") == errno.EALREADY, f"cycle {k}: a start of a running node")
-        patina.control("node kill b --process")
+        patina.control("node kill b")
         check(ended(c0) and ended(c1), f"cycle {k}: a connection to the killed node did not end")
         for p in (7000, 7001):
             try:
@@ -111,7 +111,7 @@ def driver(cycles):
                 check(False, f"cycle {k}: :{p} still accepts")
             except ConnectionRefusedError:
                 pass
-        check(control_err("node kill b --process") == errno.EALREADY,
+        check(control_err("node kill b") == errno.EALREADY,
               f"cycle {k}: a kill of a node that is down")
         for x in (c0, c1, f0, f1):
             x.close()

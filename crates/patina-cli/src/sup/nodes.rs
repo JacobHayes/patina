@@ -13,7 +13,7 @@
 //! a heal opens a link (`Sup::wire_heal`).
 //!
 //! A node goes down three ways, each a `DEC_NODE_DOWN` record: its processes are killed (by the
-//! seed, `--crash process`, or by `node kill NAME --process`), each `SIGKILL`ed by the
+//! seed, `--crash process`, or by `node kill NAME`), each `SIGKILL`ed by the
 //! supervisor (`kill_now`) as the kernel kills a process: its sockets close, so peers see the
 //! FIN or RST, its listeners go and connects to them are refused; or its first process ends
 //! by itself, which ends the node (its other processes are killed): an exit status of its
@@ -526,7 +526,7 @@ impl Sup {
             (k as u64) << 24 | (b & 0xff) << 16 | (tries & 0xff) << 8 | NSUB_KILL,
         );
         let (lo, hi) = (t.crash_gap_min_ns, t.crash_gap_max_ns);
-        // In [A, B), A when A = B: as `restart-gap-ms`.
+        // In [A, B), A when A = B: as `down-ms`.
         let gap = lo + if hi > lo { d % (hi - lo) } else { 0 };
         self.nodes.kill_ev[k] = Some(self.sched.schedule(
             self.now() + gap,

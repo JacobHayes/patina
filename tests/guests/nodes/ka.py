@@ -105,9 +105,9 @@ def driver(mode):
         fail("no echo")
     th = None
     if mode in ("crash", "ut"):
-        patina.control("node kill b")
+        patina.control("node crash b")
     elif mode == "restart":
-        patina.control("node kill b")
+        patina.control("node crash b")
         th = later(2.5, "node start b")
     elif mode in ("short", "long"):
         patina.control("net cut driver b")

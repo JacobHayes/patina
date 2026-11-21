@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 
 /// Incarnations a run may start when `max-incarnations` is not given.
 pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
-/// `restart-gap-ms` when not given: 1 s to 61 s.
+/// `down-ms` on one machine when not given: 1 s to 61 s.
 pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
-/// `down-ms` when not given: 1 s to 5 s. Short beside `crash-gap-ms`, so that with several
+/// `down-ms` with nodes when not given: 1 s to 5 s. Short beside `crash-gap-ms`, so that with several
 /// nodes the seed's kills seldom leave every node down at once.
 pub const DOWN_DEFAULT: (u64, u64) = (1_000_000_000, 5_000_000_000);
 /// `crash-gap-ms` when not given: 5 s to 60 s.
@@ -30,8 +30,8 @@ pub struct Plan {
     pub faults: proto::faults::FaultCfg,
     /// `max-incarnations=N`: crashes stop once the run has started N incarnations.
     pub max_incarnations: u64,
-    /// `restart-gap-ms=A..B`: virtual time from a crash to the restart, drawn per restart in
-    /// [A, B) ns (A when A = B).
+    /// `down-ms=A..B` on one machine: virtual time from a crash to the restart, drawn per
+    /// restart in [A, B) ns (A when A = B).
     pub restart_gap_ns: (u64, u64),
     /// With nodes: `crash-gap-ms` and `down-ms` (ns), and the nodes the seed kills
     /// (`--crash process[@NODE,...]`; bit `k` for node `k`).
@@ -42,7 +42,7 @@ pub struct Plan {
     pub node_crash_kind: u64,
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
-    /// `--buggify`, `buggify-permille=N`, `point:LABEL=N` (`proto::sdk`).
+    /// `--buggify`, `buggify-permille=N`, `buggify:LABEL=N` (`proto::sdk`).
     pub sdk: proto::sdk::SdkCfg,
     /// Compute points: the run's mean gap in events (`compute-gap`; 0: no compute switches).
     pub compute_gap: u64,
@@ -275,7 +275,7 @@ pub const KEYS: &[Key] = &[
         "SDK fault points fire at this rate (with --buggify)",
     ),
     key(
-        "point:LABEL",
+        "buggify:LABEL",
         "P",
         Val::Permille,
         "the SDK fault point LABEL fires at this rate (with --buggify)",
@@ -285,12 +285,6 @@ pub const KEYS: &[Key] = &[
         "0|1",
         Val::Flag,
         "no fault until the guest's SDK marks setup-complete",
-    ),
-    key(
-        "restart-gap-ms",
-        "A..B",
-        Val::Spread,
-        "virtual time from a crash to the restart: a draw in A..B ms for each restart [default: 1000..61000]",
     ),
     key(
         "max-incarnations",
@@ -308,7 +302,7 @@ pub const KEYS: &[Key] = &[
         "down-ms",
         "A..B",
         Val::Spread,
-        "with nodes: virtual time a node stays down before its restart, a draw in A..B ms for each restart [default: 1000..5000]",
+        "virtual time from a crash to the restart, a draw in A..B ms for each restart [default: 1000..61000; with nodes, each node's, 1000..5000]",
     ),
     key(
         "compute-gap",
@@ -471,8 +465,8 @@ const DELAY_MAX_MS_DEFAULT: u64 = 10;
 const CHUNK_GAP_NS: (u64, u64) = (1_000, 10_000);
 
 fn find(k: &str) -> Option<&'static Key> {
-    let name = if k.starts_with("point:") {
-        "point:LABEL"
+    let name = if k.starts_with("buggify:") {
+        "buggify:LABEL"
     } else {
         k
     };
@@ -652,7 +646,7 @@ pub fn node_only(k: &str) -> bool {
 }
 
 /// `SETTING@NODE,...`: the setting and the nodes it names (`None`: no scope). A setting's
-/// scope follows its value (`KEY=VALUE@NODE`): an `@` in the key (`point:LABEL`) is the key's.
+/// scope follows its value (`KEY=VALUE@NODE`): an `@` in the key (`buggify:LABEL`) is the key's.
 pub fn split_scope(s: &str) -> (&str, Option<&str>) {
     let from = s.find('=').map_or(0, |i| i + 1);
     match s[from..].rfind('@') {
@@ -760,8 +754,7 @@ pub fn resolve(
     }
     if nodes == 0 {
         if let Some(e) = given.iter().find(|e| {
-            e.0.starts_with("partition-")
-                || matches!(e.0.as_str(), "net-links" | "crash-gap-ms" | "down-ms")
+            e.0.starts_with("partition-") || matches!(e.0.as_str(), "net-links" | "crash-gap-ms")
         }) {
             return Err(format!("--fault {}: only in a run with nodes", e.0));
         }
@@ -884,16 +877,14 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             f.mem_limit_bytes = n(v)?.saturating_mul(1 << 20);
             return Ok(());
         }
-        "restart-gap-ms" => {
-            o.restart_gap_ns = ms_range(k, v)?;
-            return Ok(());
-        }
         "crash-gap-ms" => {
             o.crash_gap_ns = ms_range(k, v)?;
             return Ok(());
         }
         "down-ms" => {
+            // One machine's restart, or each node's: the run has one or the other.
             o.down_ns = ms_range(k, v)?;
+            o.restart_gap_ns = o.down_ns;
             if o.down_ns.1 == 0 {
                 return Err(format!("--fault {k}={v}: B is at least 1"));
             }
@@ -915,7 +906,7 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             o.sdk.fire_permille = n(v)?;
             return Ok(());
         }
-        _ if k.starts_with("point:") => return point(&mut o.sdk, &k["point:".len()..], n(v)?),
+        _ if k.starts_with("buggify:") => return point(&mut o.sdk, &k["buggify:".len()..], n(v)?),
         "partition-gap-ms" => {
             (o.net.part_gap_min_ns, o.net.part_gap_max_ns) = ms_range(k, v)?;
             if o.net.part_gap_min_ns == 0 {
@@ -958,11 +949,13 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
     Ok(())
 }
 
-/// `point:LABEL=PERMILLE`: the SDK fault point LABEL is active and fires at this rate
+/// `buggify:LABEL=PERMILLE`: the SDK fault point LABEL is active and fires at this rate
 /// (0: never). It acts only with `--buggify`.
 fn point(c: &mut proto::sdk::SdkCfg, label: &str, p: u64) -> Res<()> {
     if label.is_empty() || label.len() > proto::sdk::LABEL_MAX {
-        return Err(format!("--fault point:{label}: a label is 1 to 255 bytes"));
+        return Err(format!(
+            "--fault buggify:{label}: a label is 1 to 255 bytes"
+        ));
     }
     let h = proto::sdk::label_hash(label.as_bytes());
     let n = c.npoints as usize;
@@ -1320,7 +1313,10 @@ mod tests {
             ("fs-error-permille=5", Some("a,b"))
         );
         assert_eq!(split_scope("disk@a"), ("disk", Some("a")));
-        assert_eq!(split_scope("point:db@retry=5"), ("point:db@retry=5", None));
+        assert_eq!(
+            split_scope("buggify:db@retry=5"),
+            ("buggify:db@retry=5", None)
+        );
         assert_eq!(
             split_scope("fs-error-permille=5"),
             ("fs-error-permille=5", None)

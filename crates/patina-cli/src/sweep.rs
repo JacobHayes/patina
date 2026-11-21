@@ -10,7 +10,7 @@
 //! sweep); any other sweep replaces the directory, so that edit, rebuild and the same command
 //! never report an old program's runs.
 //!
-//! `--branch` runs each seed (and case) once with crashes on and never firing (a base, in
+//! `--crash-points` runs each seed (and case) once with crashes on and never firing (a base, in
 //! `OUT/seed-N`), then once per crash point the base counted, with the crash forced there (a
 //! child, `--crash KIND-at:P` in `OUT/seed-N@P`), points ascending and seeds round-robin. A
 //! child is its base up to its point, so one that does not crash there is `nondeterministic`.
@@ -38,10 +38,9 @@ extern "C" fn on_signal(_: libc::c_int) {
 pub const DEFAULT_SEEDS: &str = "1..100";
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 14] = [
+const OWN: [&str; 13] = [
     "--seeds",
-    "--branch",
-    "--branch-max",
+    "--crash-points",
     "--jobs",
     "--cases",
     "--only-case",
@@ -125,7 +124,7 @@ fn identity(
         "patina": crate::result::build()?,
         "program": program,
         "config": c,
-        "branch": branch,
+        "crash_points": branch,
         "pairs": pairs,
     }))
 }
@@ -168,11 +167,11 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
     if old["program"] != ident["program"] {
         return Some("the program changed".into());
     }
-    if old["branch"] != ident["branch"] {
-        return Some(if ident["branch"] == true {
-            "a sweep without --branch".into()
+    if old["crash_points"] != ident["crash_points"] {
+        return Some(if ident["crash_points"] == true {
+            "a sweep without --crash-points".into()
         } else {
-            "a sweep with --branch".into()
+            "a sweep with --crash-points".into()
         });
     }
     if old["pairs"] != ident["pairs"] {
@@ -643,7 +642,7 @@ enum Job {
         /// Index into the cases.
         case: Option<usize>,
         dir: PathBuf,
-        /// Under `--branch`: a base (`n` 0), or the child crashing at a point (`report::Point`).
+        /// Under `--crash-points`: a base (`n` 0), or the child crashing at a point (`report::Point`).
         point: Option<report::Point>,
     },
     Replay {
@@ -929,10 +928,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // The configuration every run resolves to, checked once here rather than failing in
     // every run. With --cases and no command, each line is a whole command.
     let cfg = crate::config::resolve_any(a).map_err(error)?;
-    // --branch: the crash kind each base and child is given (the sweep places the crash), and
+    // --crash-points: the crash kind each base and child is given (the sweep places the crash), and
     // with nodes the nodes it crashes (`@NODE,...`; none: every node but the driver).
     let mut scope: Option<String> = None;
-    let kind: Option<String> = if a.has("--branch") {
+    let kind: Option<String> = if a.has("--crash-points") {
         let c = cfg.crash.as_deref();
         let (c, at) = match c.and_then(|c| c.split_once('@')) {
             Some((k, at)) => (Some(k), Some(at)),
@@ -940,7 +939,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         };
         if !cfg.nodes.is_empty() && c != Some("machine") {
             return Err(error(format!(
-                "--branch with nodes needs --crash machine[@NODE,...], not --crash {}: it crashes each node's machine at each of its crash points",
+                "--crash-points with nodes needs --crash machine[@NODE,...], not --crash {}: it crashes each node's machine at each of its crash points",
                 cfg.crash.as_deref().unwrap_or("(none)")
             )));
         }
@@ -953,25 +952,30 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         match c {
             Some(k @ ("machine" | "process")) => Some(k.to_string()),
             None => return Err(error(
-                "--branch needs --crash machine or --crash process: it crashes each seed at each of its crash points".into(),
+                "--crash-points needs --crash machine or --crash process: it crashes each seed at each of its crash points".into(),
             )),
             Some(c) => return Err(error(format!(
-                "--branch needs --crash machine or --crash process without a rate or position, not --crash {c}: it places the crash at each crash point itself"
+                "--crash-points needs --crash machine or --crash process without a rate or position, not --crash {c}: it places the crash at each crash point itself"
             ))),
         }
     } else {
         None
     };
-    let branch_max = a.num::<usize>("--branch-max").map_err(error)?;
+    // --crash-points=N: at most N children of each base.
+    let branch_max = match a.last("--crash-points").filter(|v| !v.is_empty()) {
+        None => None,
+        Some(v) => Some(
+            v.parse::<usize>()
+                .map_err(|_| error(format!("--crash-points={v}: not a number")))?,
+        ),
+    };
     let pairs = cfg.crash_pairs;
-    if (branch_max.is_some() || pairs.is_some()) && kind.is_none() {
-        return Err(error(
-            "--branch-max and [sweep] crash-pairs go with --branch".into(),
-        ));
+    if pairs.is_some() && kind.is_none() {
+        return Err(error("[sweep] crash-pairs goes with --crash-points".into()));
     }
     if branch_max == Some(0) || pairs == Some(0) {
         return Err(error(
-            "--branch-max and [sweep] crash-pairs are at least 1".into(),
+            "--crash-points=N and [sweep] crash-pairs are at least 1".into(),
         ));
     }
     // The nodes a branch crashes (its `@NODE,...`, else every node with faults): under
@@ -1166,10 +1170,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
     }
     std::fs::create_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
-    // `--branch-max` is a stopping rule, not part of the sweep's identity (a larger one adds
+    // `--crash-points=N` is a stopping rule, not part of the sweep's identity (a larger one adds
     // to the children run): recorded for the report.
     let mut recorded = ident.clone();
-    recorded["branch_max"] = serde_json::json!(branch_max);
+    recorded["crash_points_max"] = serde_json::json!(branch_max);
     write_json(&out.join(SWEEP_FILE), &recorded).map_err(error)?;
 
     let run_dir = |seed: u64, case: Option<usize>, point: Option<&report::Point>| -> PathBuf {
@@ -1443,7 +1447,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             .filter(|x| !x.0.is_empty())
             .map(|(n, k)| format!("{n} {k}"))
             .collect();
-        // Each base's children: its points, or with --branch-max a sample by node and kind of
+        // Each base's children: its points, or with --crash-points=N a sample by node and kind of
         // operation (`branch::places`).
         let sample = |items: &[(report::Point, String)], key: u64| -> Vec<report::Point> {
             let mut o: Vec<usize> = match branch_max {
@@ -1490,7 +1494,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 format!(" ({})", by_node.join(", "))
             },
             if level.len() < points as usize {
-                format!(", a sample of {} (--branch-max)", level.len())
+                format!(", a sample of {} (--crash-points=N)", level.len())
             } else {
                 String::new()
             }
@@ -1532,7 +1536,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     "sweep: {} after a first crash{}",
                     report::count(all, "pair"),
                     if level.len() < all {
-                        format!(", a sample of {} (--branch-max)", level.len())
+                        format!(", a sample of {} (--crash-points=N)", level.len())
                     } else {
                         String::new()
                     }
@@ -1755,10 +1759,10 @@ struct State<'k> {
     run_bytes: u64,
     /// Some kept run's log was cut.
     cut: bool,
-    /// Under `--branch`, once the bases ran: each (seed, case)'s crash points (with nodes, each
+    /// Under `--crash-points`, once the bases ran: each (seed, case)'s crash points (with nodes, each
     /// node's; `report::base_points`) and base directory.
     bases: std::collections::BTreeMap<(u64, Option<usize>), Base>,
-    /// A `--branch` sweep: each base writes where its points are (`branch::describe`) before
+    /// A `--crash-points` sweep: each base writes where its points are (`branch::describe`) before
     /// its logs are pruned.
     branch: bool,
     /// `[sweep] crash-pairs = K`: each first crash's child that ended ok writes the next K points of
@@ -1766,7 +1770,7 @@ struct State<'k> {
     pairs: Option<usize>,
 }
 
-/// A `--branch` base: its crash points per node (`""`: the one machine) and its directory.
+/// A `--crash-points` base: its crash points per node (`""`: the one machine) and its directory.
 type Base = (Vec<(String, u64)>, PathBuf);
 
 impl State<'_> {
@@ -1949,7 +1953,7 @@ impl State<'_> {
                     base.display()
                 )
                 .into();
-                r["branch_missed"] = serde_json::json!({
+                r["crash_point_missed"] = serde_json::json!({
                     "outcome": was["outcome"],
                     "message": was["message"],
                     "base": base,
@@ -2077,7 +2081,7 @@ impl State<'_> {
     }
 }
 
-/// Why a `--branch` child that should have crashed at `point` did not (`None`: it did, or it
+/// Why a `--crash-points` child that should have crashed at `point` did not (`None`: it did, or it
 /// is not a finished run). `base_points` is the crash points its base counted (of the point's
 /// node, whose first boot's first down is the crash).
 fn missed_point(r: &serde_json::Value, point: &report::Point, base_points: u64) -> Option<String> {

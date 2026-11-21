@@ -43,7 +43,7 @@ what it recovered: an `always` in recovery, or a check over `inc-K/stdout` and
 `inc-K/post-crash/`.
 
 A crash that must land in a narrow window (between a write and its fsync) is found in few
-seeds. `--branch` runs each seed once to count its crash points, then once per point:
+seeds. `--crash-points` runs each seed once to count its crash points, then once per point:
 
 <!-- transcript branch
 dir: /tmp/crash
@@ -51,15 +51,15 @@ setup: cp "$GUESTS/examples/acklog" .
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1..2 --branch --branch-max 40 --crash machine -- ./acklog
-sweep: 2 seeds, 328 crash points, a sample of 80 (--branch-max)
+$ patina sweep --seeds 1..2 --crash-points=40 --crash machine -- ./acklog
+sweep: 2 seeds, 328 crash points, a sample of 80 (--crash-points=N)
 ...
 crash points: 80 of 328 tried
   seed 1: 40 of 164   seed 2: 40 of 164
 ...
 ```
 
-`--branch-max N` samples N points per seed; the same command with a larger N runs only the new
+`--crash-points=N` samples N points per seed; the same command with a larger N runs only the new
 ones. `--crash machine-at:N` (or `A..B`) crashes at a chosen point; `patina explain` of a run
 shows which operation each crash point followed.
 
@@ -80,23 +80,23 @@ retrying client meets one; one key alone: `--fault net-reset-permille=50`.
 Each `[node.NAME]` table in `patina.toml` (or `--node NAME='CMD ARGS'`) is a machine with its
 own disk, address (`10.0.0.2`, ...), hostname and clock; names resolve on every node. The
 command after `--` is the driver: never faulted, it runs the test and decides the exit status.
-From the driver, `patina ctl net cut a b`, `net heal`, `node kill NAME` (machine crash) or
-`node kill NAME --process`, `node start NAME`, `node pause NAME` script a scenario; the seed
+From the driver, `patina ctl net cut a b`, `net heal`, `node crash NAME` (machine crash) or
+`node kill NAME`, `node start NAME`, `node pause NAME` script a scenario; the seed
 does the same with:
 
 - `--faults net`: link faults, and partitions between nodes (`--fault partition-gap-ms=A..B`).
 - `--crash machine` or `--crash process`: kills or machine crashes at seed-drawn times
   (`--fault crash-gap-ms=2000..10000` for short runs), each followed by a restart.
 - `--faults cluster`: link faults, partitions, pauses, clock skew and machine crashes together.
-- `--branch --crash machine`: every crash point of each node; `[sweep] crash-pairs = K` also
-  crashes a second node after each first crash; give large runs a `--branch-max`.
+- `--crash-points --crash machine`: every crash point of each node; `[sweep] crash-pairs = K` also
+  crashes a second node after each first crash; give large runs a `--crash-points=N`.
 
 See [recipes.md](recipes.md) for a replicated store.
 
 ## If a sweep finds nothing
 
-In order of what helps most: more seeds (a narrow window is one seed in thousands); `--branch`
-for crash windows; `--buggify`, or `--fault point:LABEL=1000` to fire one fault point every
+In order of what helps most: more seeds (a narrow window is one seed in thousands); `--crash-points`
+for crash windows; `--buggify`, or `--fault buggify:LABEL=1000` to fire one fault point every
 time; a lower crash rate (`--crash machine:1`) to reach later points; `--preempt points` for
 races with no system call in them. Then say what was tried, and that the oracle is what decides what clean
 means.

@@ -31,9 +31,9 @@
  *   net cut A B                  both directions between the node sets A and B are cut
  *   net cut --from A --to B      one direction: what A sends to B is held
  *   net heal [A B | --from A --to B]   heal those links; no sets: every scripted cut
- *   node kill NAME               crash node NAME's machine: what it had not synced may be lost,
+ *   node crash NAME              crash node NAME's machine: what it had not synced may be lost,
  *                                its peers are not told (-EALREADY: it is down)
- *   node kill NAME --process     kill every process of node NAME (-EALREADY: it is down)
+ *   node kill NAME               kill every process of node NAME (-EALREADY: it is down)
  *   node start NAME              start node NAME's command again (-EALREADY: it is up or
  *                                starting; -EAGAIN: past 64 incarnations)
  *   node pause NAME              freeze node NAME's machine (-EALREADY: paused; -EAGAIN: down

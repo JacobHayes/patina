@@ -3,10 +3,10 @@
 # before it). `--crash machine-at:N@a` in the middle of a's points crashes a's machine there:
 # one crash event naming a and the point, a's crashed disk kept as post-crash with what it lost
 # counted, a restarted, and b untouched (one boot, no post-crash, every put on its disk). A
-# `--branch` sweep crashes each point of each node in turn: on `early` it finds the lost
+# `--crash-points` sweep crashes each point of each node in turn: on `early` it finds the lost
 # acknowledged put on b, in children of b only, with b's crash losing it on b's disk, and the
 # report's group names b's crash points; the correct store is ok at every point of both nodes;
-# a child's rerun line gives its digest again. `--branch-max` runs a sample with each node in it
+# a child's rerun line gives its digest again. `--crash-points=N` runs a sample with each node in it
 # and says how many of how many it tried; `[sweep] crash-pairs` crashes the other node at its next
 # points after each first crash, the correct store ok at each pair, a pair's rerun line giving
 # its digest again. One seed, a few puts: about 10 s on the arm64 runner.
@@ -63,7 +63,7 @@ PY
 echo "process kill at point $p of a: a killed there once and restarted on its disk, b untouched"
 # Branch over every point of each node.
 # sw NAME KEEP: KEEP none is the test input PATINA_TEST_KEEP_NONE.
-sw() { rm -rf "${o:?}/sw-$1"; st=0; k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 --keep "${k/none/fail}" --out "$o/sw-$1" \
+sw() { rm -rf "${o:?}/sw-$1"; st=0; k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds $s --crash-points --crash machine -j 4 --keep "${k/none/fail}" --out "$o/sw-$1" \
     --config "$o/$1.toml" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/sw-$1.txt" 2>&1 || st=$?; }
 sw early fail
 [ "$st" = 1 ] || die "branch sweep of early: exit $st: $(tail -5 "$o/sw-early.txt")"
@@ -75,7 +75,7 @@ python3 -I - "$o/sw-early" <<'PY' || die "branch sweep of early"
 import json, os, sys
 d = sys.argv[1]
 rep = json.load(open(os.path.join(d, "report.json")))
-br = rep["branch"]
+br = rep["crash_points"]
 assert br["tried"] == br["points"] and [x["node"] for x in br["nodes"]] == ["a", "b"], br
 assert all(x["points"] > 0 and x["tried"] == x["points"] for x in br["nodes"]), br
 assert len(rep["groups"]) == 1, [g["signature"] for g in rep["groups"]]
@@ -98,7 +98,7 @@ sw ok none
 python3 -I - "$o/sw-ok" <<'PY' || die "branch sweep of ok"
 import json, os, sys
 rep = json.load(open(os.path.join(sys.argv[1], "report.json")))
-br = rep["branch"]
+br = rep["crash_points"]
 assert rep["groups"] == [] and rep["outcomes"] == {"ok": rep["runs"]}, rep["outcomes"]
 assert br["tried"] == br["points"] and all(x["tried"] == x["points"] > 0 for x in br["nodes"]), br
 print("ok: ok at all %d points" % br["points"])
@@ -110,18 +110,18 @@ d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 [ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"
 echo "rerun: same digest"
 # A sample: at most 4 children, both nodes among them, and the report says how many of how many.
-sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds $s --branch --crash machine -j 4 \
+sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds $s --crash-points --crash machine -j 4 \
     --out "$o/$n" --config "$o/ok.toml" "$@" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/$n.txt" 2>&1 || st=$?; }
-sw2 max --branch-max 4
-[ "$st" = 0 ] || die "--branch-max: exit $st: $(tail -5 "$o/max.txt")"
-python3 -I - "$o/max/report.json" "$o/sw-ok/report.json" <<'PY' || die "--branch-max 4"
+sw2 max --crash-points=4
+[ "$st" = 0 ] || die "--crash-points=N: exit $st: $(tail -5 "$o/max.txt")"
+python3 -I - "$o/max/report.json" "$o/sw-ok/report.json" <<'PY' || die "--crash-points=4"
 import json, sys
-br, full = json.load(open(sys.argv[1]))["branch"], json.load(open(sys.argv[2]))["branch"]
+br, full = json.load(open(sys.argv[1]))["crash_points"], json.load(open(sys.argv[2]))["crash_points"]
 assert br["tried"] == 4 and br["points"] == full["points"], (br, full)
 assert all(x["tried"] > 0 for x in br["nodes"]), br["nodes"]
-print("--branch-max 4: %d of %d tried (%s)" % (br["tried"], br["points"], ", ".join("%s %d" % (x["node"], x["tried"]) for x in br["nodes"])))
+print("--crash-points=4: %d of %d tried (%s)" % (br["tried"], br["points"], ", ".join("%s %d" % (x["node"], x["tried"]) for x in br["nodes"])))
 PY
-grep -q "^crash points: 4 of " "$o/max.txt" || die "--branch-max: $(cat "$o/max.txt")"
+grep -q "^crash points: 4 of " "$o/max.txt" || die "--crash-points=N: $(cat "$o/max.txt")"
 # Pairs: after each first crash whose child ended ok, the other node's next 2 points.
 { cat "$o/ok.toml"; printf '[sweep]\ncrash-pairs = 2\n'; } >"$o/pairs.toml"
 sw2 pairs --config "$o/pairs.toml"
@@ -129,8 +129,8 @@ sw2 pairs --config "$o/pairs.toml"
 python3 -I - "$o/pairs/report.json" <<'PY' || die "crash-pairs 2"
 import json, sys
 rep = json.load(open(sys.argv[1]))
-pr = rep["branch"]["pairs"]
-assert pr["pairs"] > 0 and pr["tried"] == pr["pairs"] and rep["groups"] == [], rep["branch"]
+pr = rep["crash_points"]["pairs"]
+assert pr["pairs"] > 0 and pr["tried"] == pr["pairs"] and rep["groups"] == [], rep["crash_points"]
 print("crash-pairs 2: ok at all %d pairs" % pr["tried"])
 PY
 grep -q "^crash pairs: [1-9][0-9]* of " "$o/pairs.txt" || die "crash-pairs: $(cat "$o/pairs.txt")"

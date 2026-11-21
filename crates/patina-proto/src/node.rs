@@ -15,9 +15,9 @@
 //! net heal                     every scripted cut
 //! net heal A B                 both directions between A and B
 //! net heal --from A --to B     one direction
-//! node kill NAME               crash the node's machine: its unsynced writes may be lost, it
+//! node crash NAME              crash the node's machine: its unsynced writes may be lost, it
 //!                              stays down, silent (EALREADY: down)
-//! node kill NAME --process     kill every process of the node; it stays down (EALREADY: down)
+//! node kill NAME               kill every process of the node; it stays down (EALREADY: down)
 //! node start NAME              start a node that is down, as at a restart (EALREADY: up or
 //!                              starting; EAGAIN: past 64 incarnations)
 //! node pause NAME              freeze every thread of the node until `node resume` (EALREADY:
@@ -239,7 +239,7 @@ pub const DOWN_KILL_SCRIPT: u64 = 2;
 pub const DOWN_EXIT: u64 = 3;
 pub const DOWN_FAILED: u64 = 4;
 pub const DOWN_SIGNAL: u64 = 5;
-/// Its machine crashed, by the seed (`--crash machine`) or by a control call (`node kill NAME`).
+/// Its machine crashed, by the seed (`--crash machine`) or by a control call (`node crash NAME`).
 pub const DOWN_CRASH_SEED: u64 = 6;
 pub const DOWN_CRASH_SCRIPT: u64 = 7;
 
@@ -566,15 +566,15 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
         [b"node", rest @ ..] => {
             let (verb, name) =
                 match rest {
-                    [b"kill", name, b"--process"] => (NODE_KILL, *name),
-                    [b"kill", name] => (NODE_CRASH, *name),
+                    [b"crash", name] => (NODE_CRASH, *name),
+                    [b"kill", name] => (NODE_KILL, *name),
                     [b"start", name] => (NODE_START, *name),
                     [b"pause", name] => (NODE_PAUSE, *name),
                     [b"resume", name] => (NODE_RESUME, *name),
                     _ => return Err(no(
                         EINVAL,
-                        "expected: node kill NAME [--process], node start NAME, node pause NAME \
-                         or node resume NAME",
+                        "expected: node crash NAME, node kill NAME, node start NAME, node pause \
+                         NAME or node resume NAME",
                     )),
                 };
             if tab.count() == 0 {
@@ -733,7 +733,7 @@ mod tests {
         ] {
             assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
         }
-        assert_eq!(errno(b"node kill a", 1), EPERM);
+        assert_eq!(errno(b"node crash a", 1), EPERM);
         assert_eq!(errno(b"node pause driver", 0), EINVAL);
         assert_eq!(errno(b"node resume a", 1), EPERM);
         assert_eq!(
@@ -750,19 +750,19 @@ mod tests {
                 node: 2
             })
         );
-        assert_eq!(errno(b"node kill a --process", 1), EPERM);
+        assert_eq!(errno(b"node kill a", 1), EPERM);
         assert_eq!(errno(b"node start zed", 0), ENOENT);
         assert_eq!(errno(b"node start driver", 0), EINVAL);
         assert_eq!(errno(b"node stop a", 0), EINVAL);
         assert_eq!(
-            parse(b"node kill b --process", &t, 0),
+            parse(b"node kill b", &t, 0),
             Ok(Control::Node {
                 verb: NODE_KILL,
                 node: 2
             })
         );
         assert_eq!(
-            parse(b"node kill b", &t, 0),
+            parse(b"node crash b", &t, 0),
             Ok(Control::Node {
                 verb: NODE_CRASH,
                 node: 2

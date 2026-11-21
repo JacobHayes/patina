@@ -1,4 +1,4 @@
-# 2. `patina sweep --branch`: each seed once with crashes on and never firing, then once per
+# 2. `patina sweep --crash-points`: each seed once with crashes on and never firing, then once per
 #    crash point it counted, crashing there.
 # - On the window guest (one record acknowledged before its sync), the sweep finds
 #   acked-records-stored; the
@@ -9,7 +9,7 @@
 #   command without it runs only the missing children, and the report's outcomes and groups
 #   then count every run in the directory, the cut sweep's and the resumed one's.
 # - With two seeds and two cases, the children are each base's crash points, per base.
-# - --branch without --crash, or with a rate, is refused and runs nothing; a plain sweep and a
+# - --crash-points without --crash, or with a rate, is refused and runs nothing; a plain sweep and a
 #   branch sweep into one directory replace each other.
 # - examples/acklog-c: the sweep finds acked-records-kept.
 #@ tier=quick budget=15 slots=4
@@ -43,11 +43,11 @@ set -- $(window "$d/base")
 [ $# = 2 ] || die "the base acknowledges no record before its sync"
 lo=$1 hi=$2
 # Cut, then resumed: the resumed sweep is the whole one.
-sw full --seeds $s --branch --crash machine --max-findings 1 -- $W
+sw full --seeds $s --crash-points --crash machine --max-findings 1 -- $W
 grep -q '^crash points: [0-9]* of [0-9]* tried' "$d/full.txt" || die "cut: $(cat "$d/full.txt")"
-tried=$(field "$d/full/report.json" branch.tried) all=$(field "$d/full/report.json" branch.points)
+tried=$(field "$d/full/report.json" crash_points.tried) all=$(field "$d/full/report.json" crash_points.points)
 [ "$tried" -lt "$all" ] || die "--max-findings 1 tried $tried of $all"
-sw full --seeds $s --branch --crash machine -- $W
+sw full --seeds $s --crash-points --crash machine -- $W
 [ "$st" = 1 ] || die "branch sweep of seed $s: exit $st ($(tail -3 "$d/full.txt"))"
 grep -q "^sweep: $tried of $all children already in" "$d/full.txt" || die "resume: $(head -3 "$d/full.txt")"
 rerun=$(python3 -I - "$d" "$s" "$lo" "$hi" <<'PY'
@@ -64,9 +64,9 @@ if g["first"]["seed"] != s or p is None or not lo <= p <= hi:
     sys.exit("FAIL: first run %s@%s, window %d..%d" % (g["first"]["seed"], p, lo, hi))
 if (g["replay"] or {}).get("result") != "identical":
     sys.exit("FAIL: replay %s" % g["replay"])
-b = rep["branch"]
+b = rep["crash_points"]
 if rep["runs"] != n + 1 or b["points"] != n or b["tried"] != n:
-    sys.exit("FAIL: %d runs, branch %s; the base counted %d" % (rep["runs"], b, n))
+    sys.exit("FAIL: %d runs, crash points %s; the base counted %d" % (rep["runs"], b, n))
 # The report counts every run in the directory, before and after the resume.
 runs = [json.load(open(f)) for f in glob.glob(os.path.join(d, "full", "seed-*", "result.json"))]
 outcomes = collections.Counter(r["outcome"] for r in runs)
@@ -89,12 +89,12 @@ echo "cut at $tried of $all points; resumed, the report counts every run; rerun 
 
 # Two seeds, two cases: one base per pair, one child per point of each.
 printf '/guest/hello-static\n/guest/hello-static x\n' >"$d/lines"
-sw cases --seeds 1..2 --cases "$d/lines" --branch --crash process
+sw cases --seeds 1..2 --cases "$d/lines" --crash-points --crash process
 [ "$st" = 0 ] || die "cases: exit $st ($(tail -3 "$d/cases.txt"))"
 python3 -I - "$d/cases/report.json" <<'PY' || exit 1
 import json, sys
 r = json.load(open(sys.argv[1]))
-b = r["branch"]
+b = r["crash_points"]
 if len(b["seeds"]) != 4 or b["points"] == 0 or b["tried"] != b["points"] or r["runs"] != 4 + b["points"]:
     sys.exit("FAIL: %d runs, %s" % (r["runs"], b))
 print("2 seeds x 2 cases: %d runs, %s" % (r["runs"], [(s["seed"], s["case"], s["points"]) for s in b["seeds"]]))
@@ -102,12 +102,12 @@ PY
 
 # Refusals; plain and branch sweeps replace each other.
 for c in "" "--crash machine:5" "--crash machine-at:3"; do
-    sw refused --seeds 1 --branch $c -- /guest/hello-static
-    [ "$st" = "$(exit_of error)" ] && [ ! -e "$d/refused" ] || die "--branch $c: exit $st, $(ls "$d/refused" 2>&1 | head -2)"
-    echo "--branch ${c:-without --crash}: $(tail -1 "$d/refused.txt")"
+    sw refused --seeds 1 --crash-points $c -- /guest/hello-static
+    [ "$st" = "$(exit_of error)" ] && [ ! -e "$d/refused" ] || die "--crash-points $c: exit $st, $(ls "$d/refused" 2>&1 | head -2)"
+    echo "--crash-points ${c:-without --crash}: $(tail -1 "$d/refused.txt")"
 done
 sw swap --seeds 1 --crash machine -- /guest/hello-static
-sw swap --seeds 1 --branch --crash machine -- /guest/hello-static
+sw swap --seeds 1 --crash-points --crash machine -- /guest/hello-static
 ls "$d/swap" >"$d/swap.ls"
 grep -q 'replacing it' "$d/swap.txt" && grep -q '^seed-1@' "$d/swap.ls" || die "branch over plain: $(head -2 "$d/swap.txt")"
 sw swap --seeds 1 --crash machine -- /guest/hello-static
@@ -115,6 +115,6 @@ ls "$d/swap" >"$d/swap.ls"
 grep -q 'replacing it' "$d/swap.txt" && ! grep -q '^seed-1@' "$d/swap.ls" || die "plain over branch: $(head -2 "$d/swap.txt")"
 echo "a branch sweep and a plain sweep replace each other"
 
-sw acklog --seeds 1 --branch --crash machine --max-findings 1 -- /guest/examples/acklog
+sw acklog --seeds 1 --crash-points --crash machine --max-findings 1 -- /guest/examples/acklog
 [ "$st" = 1 ] && grep -q 'acked-records-kept' "$d/acklog.txt" || die "acklog: exit $st ($(tail -3 "$d/acklog.txt"))"
 echo "examples/acklog-c: $(grep -m1 '^violation' "$d/acklog.txt")"

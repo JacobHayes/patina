@@ -21,7 +21,7 @@
 // "label: detail". A passing check reports only the first time it is evaluated in a process (a
 // Sometimes also the first time it holds), so a passing check costs one load. A fault point
 // fires only with `patina run --buggify`, on evaluations chosen by the seed and its label
-// alone; `--fault point:LABEL=PERMILLE` forces one point's rate.
+// alone; `--fault buggify:LABEL=PERMILLE` forces one point's rate.
 //
 // The wire is documented in sdk/c/patina.h of the Patina repository.
 package patina

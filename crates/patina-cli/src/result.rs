@@ -118,7 +118,7 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                     v["downs"] = json!(downs);
                 }
                 // With crashes at its crash points: those each boot passed (the first's are
-                // what `machine-at:N@NAME` counts, and `--branch` tries).
+                // what `machine-at:N@NAME` counts, and `--crash-points` tries).
                 let c = &t.faults[k].cfg;
                 if c.crash_kind != proto::faults::CRASH_NONE || c.crash_at != 0 {
                     let p: Vec<u64> = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]

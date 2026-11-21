@@ -1,8 +1,8 @@
-# Evidence (docs/EVIDENCE.md, "Crash-point enumeration"): `patina sweep --branch` on the
+# Evidence (docs/EVIDENCE.md, "Crash-point enumeration"): `patina sweep --crash-points` on the
 # fjall harness (debug) and acklog-c against plain sweeps, each sweep once at -j 6:
-# - F2 and F6 under --branch (seeds 1..3, 200 s), and F6 with manual-flush at every evaluation;
+# - F2 and F6 under --crash-points (seeds 1..3, 200 s), and F6 with manual-flush at every evaluation;
 # - the plain acceptance sweeps for F1, F3, F4 (one sweep) and F5, and acklog-c;
-# - F1, acklog-c, F3 and F4 under --branch;
+# - F1, acklog-c, F3 and F4 under --crash-points;
 # - the cost of the F2 branch sweep: crash points per seed, child wall_ms by the point's
 #   position, the share of a child's time that is the prefix it shares with its base, and the
 #   share of children whose post-crash tree repeats an earlier child's of the same seed.
@@ -36,7 +36,7 @@ for root, dirs, files in os.walk(d):
 hit = [n for n, r in rows if rx.search("%s %s" % (r.get("signature") or "", r.get("message") or ""))]
 cpu = sum(r.get("wall_ms", 0) for _, r in rows) / 1000
 rep = json.load(open(os.path.join(d, "report.json")))
-b = rep.get("branch")
+b = rep.get("crash_points")
 print("  %s: %d of %d runs match /%s/, %.0f CPU-s, %.2e per CPU-s%s%s; groups: %s" % (
     os.path.basename(d), len(hit), len(rows), sys.argv[2], cpu, len(hit) / cpu if cpu else 0,
     "; points %d of %d tried" % (b["tried"], b["points"]) if b else "",
@@ -45,12 +45,12 @@ print("  %s: %d of %d runs match /%s/, %.0f CPU-s, %.2e per CPU-s%s%s; groups: %
 PY
 }
 
-echo "== E1: F2 and F6 under --branch"
-sw f2 --seeds 1..3 --branch --crash machine --buggify --env FJ_N=2000 --budget 200 $FJ -- $H
+echo "== E1: F2 and F6 under --crash-points"
+sw f2 --seeds 1..3 --crash-points --crash machine --buggify --env FJ_N=2000 --budget 200 $FJ -- $H
 stats f2 'journal/entry.rs'
 stats f2 'batch-atomic-across-keyspaces'
 stats f2 'open-after-crash'
-sw f6 --seeds 1..3 --branch --crash machine --buggify --env FJ_N=2000 --fault point:manual-flush=1000 --budget 200 $FJ -- $H
+sw f6 --seeds 1..3 --crash-points --crash machine --buggify --env FJ_N=2000 --fault buggify:manual-flush=1000 --budget 200 $FJ -- $H
 stats f6 'batch-atomic-across-keyspaces'
 stats f6 'journal/entry.rs'
 
@@ -66,14 +66,14 @@ stats f5p 'iterate-failed|reopen-failed'
 sw akp --seeds 1..20 --crash machine $AK -- /guest/acklog
 stats akp 'acked-records-kept'
 
-echo "== E2: the same findings under --branch"
-sw f1b --seeds 1..3 --branch --crash machine --max-findings 1 $FJ -- $H
+echo "== E2: the same findings under --crash-points"
+sw f1b --seeds 1..3 --crash-points --crash machine --max-findings 1 $FJ -- $H
 stats f1b 'open-after-crash'
-sw akb --seeds 1 --branch --crash machine $AK -- /guest/acklog
+sw akb --seeds 1 --crash-points --crash machine $AK -- /guest/acklog
 stats akb 'acked-records-kept'
-sw f3b --seeds 1..3 --branch --crash machine $F3 --budget 120 $FJ -- $H
+sw f3b --seeds 1..3 --crash-points --crash machine $F3 --budget 120 $FJ -- $H
 stats f3b 'liveness|parked'
-sw f4b --seeds 1..10 --branch --crash machine --fault fsync-error-at=1..100 --budget 120 $FJ -- $H
+sw f4b --seeds 1..10 --crash-points --crash machine --fault fsync-error-at=1..100 --budget 120 $FJ -- $H
 stats f4b 'batch-atomic-across-keyspaces'
 
 echo "== E4: cost of the F2 branch sweep"
@@ -86,7 +86,7 @@ import json, os, re, statistics, sys
 R = sys.argv[1]
 d = os.path.join(R, "f2")
 rep = json.load(open(os.path.join(d, "report.json")))
-pts = {x["seed"]: x["points"] for x in rep["branch"]["seeds"]}
+pts = {x["seed"]: x["points"] for x in rep["crash_points"]["seeds"]}
 print("  crash points per seed: %s (min %d, median %d, max %d)" % (
     pts, min(pts.values()), statistics.median(pts.values()), max(pts.values())))
 kids, base = [], {}

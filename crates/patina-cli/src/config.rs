@@ -98,7 +98,7 @@ pub struct Config {
     /// Let SDK fault points fire (`--buggify`, `[sdk] buggify`).
     pub buggify: bool,
     /// SDK labels and fault classes a sweep or report may find unmet without calling the
-    /// result vacuous (`[sdk] allow-unmet`).
+    /// result vacuous (`[sweep] allow-unmet`).
     pub allow_unmet: Vec<String>,
     pub fs_model: String,
     pub preempt_permille: u64,
@@ -137,7 +137,7 @@ pub struct Config {
     /// of the run, so not in `run.json`.
     #[serde(skip)]
     pub known: Option<PathBuf>,
-    /// With `--branch` and nodes, the second crashes after each first one (`[sweep]
+    /// With `--crash-points` and nodes, the second crashes after each first one (`[sweep]
     /// crash-pairs`): a setting of the sweep, not of a run.
     #[serde(skip)]
     pub crash_pairs: Option<usize>,
@@ -627,7 +627,7 @@ fn table<'a>(v: &'a toml::Value, at: &str) -> Res<&'a toml::Table> {
 
 /// One `--ok-exit` status: `N`, or `N:CLASS[,CLASS...]`, which ends a run `ok` only when one of
 /// the fault classes injected in it (`report::fired`: a class of `faults.counts`, or
-/// `point:LABEL`). Written in `run.json` as the number, or as that text.
+/// `buggify:LABEL`). Written in `run.json` as the number, or as that text.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct OkExit {
     /// Empty: always. Sorted.
@@ -693,7 +693,7 @@ pub fn ok_exit_any() -> Vec<OkExit> {
 pub fn ok_exit_list(l: &str, at: &str) -> Res<Vec<OkExit>> {
     let mut out: Vec<OkExit> = vec![];
     for item in l.split(',').map(str::trim) {
-        // `N`, `N:CLASS`, or a CLASS extending the condition before it (`point:LABEL` too).
+        // `N`, `N:CLASS`, or a CLASS extending the condition before it (`buggify:LABEL` too).
         let digits = |t: &str| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
         let (n, class) = match item.split_once(':') {
             Some((n, c)) if digits(n.trim()) => (Some(n.trim()), Some(c.trim())),
@@ -738,14 +738,14 @@ fn normal(mut l: Vec<OkExit>) -> Vec<OkExit> {
     l
 }
 
-/// A fault class an `--ok-exit` condition may name: one `faults.counts` has, or `point:LABEL`.
+/// A fault class an `--ok-exit` condition may name: one `faults.counts` has, or `buggify:LABEL`.
 fn fault_class(c: &str, at: &str) -> Res<String> {
     let known = crate::launcher::attribution::CLASSES;
-    if known.contains(&c) || c.strip_prefix("point:").is_some_and(|l| !l.is_empty()) {
+    if known.contains(&c) || c.strip_prefix("buggify:").is_some_and(|l| !l.is_empty()) {
         Ok(c.to_string())
     } else {
         Err(format!(
-            "{at}: {c:?} is not a fault class ({}, point:LABEL)",
+            "{at}: {c:?} is not a fault class ({}, buggify:LABEL)",
             known.join(", ")
         ))
     }
@@ -887,7 +887,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
                 ("faults", _) => c.faults.push(format!("{k}={}", scalar(v, &at)?)),
                 ("sdk", "buggify") => c.buggify = boolean(v, &at)?,
-                ("sdk", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
+                ("sweep", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
                 ("sweep", "known") => c.known = Some(base.join(string(v, &at)?)),
                 ("sweep", "crash-pairs") => c.crash_pairs = Some(int(v, &at)? as usize),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
@@ -1470,12 +1470,6 @@ impl Config {
                         | "max-incarnations"
                 )
         };
-        if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "restart-gap-ms") {
-            return Err(format!(
-                "--fault {k} with nodes: a node's down time is down-ms, after a process kill \
-                 or a machine crash"
-            ));
-        }
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
             return Err(format!(
                 "--fault {k} with nodes: not available yet (the disk, memory, net-, partition- \
@@ -1691,7 +1685,7 @@ mod tests {
     #[test]
     fn ok_exit_takes_conditions_and_reads_back_as_written() {
         let l = ok_exit_list(
-            "5:fsync-error, fs-error,1,7:point:drop,point:b,fs-error",
+            "5:fsync-error, fs-error,1,7:buggify:drop,buggify:b,fs-error",
             "--ok-exit",
         )
         .unwrap();
@@ -1700,15 +1694,19 @@ mod tests {
             shown,
             [
                 "1",
-                "5:fs-error,fsync-error",
-                "7:fs-error,point:b,point:drop"
+                "7:buggify:b,buggify:drop,fs-error",
+                "5:fs-error,fsync-error"
             ]
         );
         assert_eq!(ok_exit_list(&shown.join(","), "x").unwrap(), l);
         let j = serde_json::to_value(&l).unwrap();
         assert_eq!(
             j,
-            serde_json::json!([1, "5:fs-error,fsync-error", "7:fs-error,point:b,point:drop"])
+            serde_json::json!([
+                1,
+                "7:buggify:b,buggify:drop,fs-error",
+                "5:fs-error,fsync-error"
+            ])
         );
         assert_eq!(serde_json::from_value::<Vec<OkExit>>(j).unwrap(), l);
         // A status allowed always needs no condition.
@@ -1716,7 +1714,7 @@ mod tests {
         for bad in [
             "5:nope",
             "fs-error",
-            "point:x",
+            "buggify:x",
             "1,fs-error",
             "0:fs-error",
             "5:",
@@ -1737,7 +1735,7 @@ mod tests {
         apply_file(&mut c, &f).unwrap();
         assert_eq!(
             (c.ok_exit, c.known),
-            (l[..2].to_vec(), Some(dir.join("k.txt")))
+            (vec![l[0].clone(), l[2].clone()], Some(dir.join("k.txt")))
         );
         std::fs::write(&f, "[sweep]\njobs = 2\n").unwrap();
         assert!(apply_file(&mut Config::default(), &f).is_err());

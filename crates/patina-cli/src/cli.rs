@@ -86,8 +86,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Ctl,
         name: "ctl",
-        usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | mark LABEL",
-        help: "inside a run with nodes: act on the run's network (from the driver's node), or mark the log",
+        usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | node crash NAME | node kill NAME | node start NAME | node pause NAME | node resume NAME | clock step NAME +90s | mark LABEL",
+        help: "inside a run with nodes: act on the run's network, nodes and clocks (from the driver's node), or mark the log",
     },
     Command {
         cmd: Cmd::Doctor,
@@ -281,7 +281,7 @@ pub const FLAGS: &[Flag] = &[
         "--buggify",
         "",
         "off",
-        "let SDK fault points fire (rates: --fault buggify-permille=N, --fault point:LABEL=N)",
+        "let SDK fault points fire (rates: --fault buggify-permille=N, --fault buggify:LABEL=N)",
         RUNLIKE,
     ),
     flag(
@@ -342,17 +342,10 @@ pub const FLAGS: &[Flag] = &[
         &[Cmd::Sweep],
     ),
     flag(
-        "--branch",
-        "",
+        "--crash-points",
+        "[=N]",
         "off",
-        "run each seed once without a crash, then once per crash point, crashing there (needs --crash machine or process, without a rate; with nodes, --crash machine[@NODE,...]: once per point of each node)",
-        &[Cmd::Sweep],
-    ),
-    flag(
-        "--branch-max",
-        "N",
-        "every point",
-        "with --branch: at most N children of each seed (and each level of [sweep] crash-pairs), a seeded sample by node and kind of operation at the point",
+        "run each seed once without a crash, then once per crash point, crashing there (needs --crash machine or process, without a rate; with nodes, --crash machine[@NODE,...]: once per point of each node); =N: at most N of them per seed (and per level of [sweep] crash-pairs), a seeded sample by node and kind of operation",
         &[Cmd::Sweep],
     ),
     flag(
@@ -573,6 +566,9 @@ pub fn parse(cmd: Cmd, args: &[String]) -> Res<Args> {
                 return Err(format!("{name} takes no value"));
             }
             String::new()
+        } else if f.value_for(cmd).starts_with("[=") {
+            // An optional value, given only as NAME=VALUE.
+            inline.unwrap_or_default()
         } else {
             match inline {
                 Some(v) => v,
@@ -608,7 +604,9 @@ pub fn find_cmd(name: &str) -> Option<Cmd> {
 
 fn flag_text(f: &Flag, c: Cmd) -> String {
     let mut lhs = f.name.to_string();
-    if !f.value_for(c).is_empty() {
+    if f.value_for(c).starts_with('[') {
+        lhs.push_str(f.value_for(c));
+    } else if !f.value_for(c).is_empty() {
         lhs = format!("{lhs} {}", f.value_for(c));
     }
     let (default, help) = f.for_cmd(c);

@@ -1,8 +1,8 @@
 # 9. Nodes: a node's machine crash (tests/guests/nodes/disk.py). The driver crashes node a's
-# machine with `node kill a` and starts it again, five times: what a fsynced survives every
+# machine with `node crash a` and starts it again, five times: what a fsynced survives every
 # crash, what it did not can be lost (lost in some of the crashes here), node b's unsynced
 # write is untouched by a's crashes; an established connection to a sees nothing once the
-# kill returns (no end of file, no reset, unlike `node kill a --process` in 05-kill), a
+# kill returns (no end of file, no reset, unlike `node kill a` in 05-kill), a
 # connect to a while it is down times out rather than being refused, and after the restart
 # the old connection gets a reset at its next send. Every disk passes the self-check, also one
 # that holds a Unix socket's synced file at the crash (a restarted node's tree has none). The same
@@ -19,7 +19,7 @@ lost=$(sed -n 's/^unsynced lost in \([0-9]*\) of .*/\1/p' "$o/crash/inc-0/stdout
 n=$("$PATINA" log events "$o/crash" --types node | grep -c '"event":"machine-crash","name":"a".*"by":"script"')
 [ "$n" = 5 ] || die "machine-crash events of a: $n"
 rm -f "$o/s.toml"; conf "$o/s.toml" b python3 -c "import os, socket, time; socket.socket(socket.AF_UNIX).bind('/work/sock'); os.fsync(os.open('/work', os.O_RDONLY)); time.sleep(30)"
-run_ok "$o/sock" 1 --config "$o/s.toml" -- python3 -c "import sys, time; sys.path.insert(0, '/guest'); import patina; time.sleep(1); patina.control('node kill b'); patina.control('node start b'); time.sleep(1)"
+run_ok "$o/sock" 1 --config "$o/s.toml" -- python3 -c "import sys, time; sys.path.insert(0, '/guest'); import patina; time.sleep(1); patina.control('node crash b'); patina.control('node start b'); time.sleep(1)"
 [ "$(field "$o/sock/result.json" self_check.verdict)" = pass ] || die "self-check with a socket's file: $(field "$o/sock/result.json" self_check)"
 echo "a machine crash with a Unix socket's file in the tree: self-check pass"
 verify_ok "$o/verify" 2 3 --config "$o/d.toml" -- python3 /guest/disk.py driver 3

@@ -31,7 +31,7 @@ for lang, cmd in LANGS.items():
         die(f"{lang} unreach: {r.cls} {r.outcome['message']!r}")
 
     r = run(f"01/{lang}-script", 5, cmd, "script",
-            flags=["--buggify", "--fault", "point:point-a=500"])
+            flags=["--buggify", "--fault", "buggify:point-a=500"])
     if r.cls != "ok":
         die(f"{lang} script: {r.cls} {r.outcome['message']}")
     u = r.site("unreached")

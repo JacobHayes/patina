@@ -31,7 +31,7 @@ pub fn main(words: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let why = match (-r) as i32 {
-        libc::EPERM => "only the driver's node may act on the network",
+        libc::EPERM => "only the driver's node may act on the network, nodes and clocks",
         libc::ENOENT => "no node of that name",
         libc::EOPNOTSUPP => "not available yet",
         libc::EINVAL => "not a control call (patina ctl --help)",

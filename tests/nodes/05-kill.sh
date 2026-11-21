@@ -1,5 +1,5 @@
 # 5. Nodes: a node's processes killed and started again (tests/guests/nodes/kill.py). The
-# driver kills node b with `node kill b --process` and starts it with `node start b`, 50 times
+# driver kills node b with `node kill b` and starts it with `node start b`, 50 times
 # (10 in the quick tier):
 # each kill ends both of b's connections (its first process's and its child's), a connect to
 # either port is refused while b is down, a kill of a node that is down and a start of one that

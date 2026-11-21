@@ -6,7 +6,7 @@
 # 1000..10000 ms) is drawn per seed within them: seeds 1-4 resolve windows inside the ranges,
 # not all the same. max-incarnations on the command line bounds the restarts: a crash at
 # every crash point gives 4 incarnations by default and 2 with --fault max-incarnations=2;
-# with --fault restart-gap-ms=5000..5000 the restart's first record is 5 virtual s after the
+# with --fault down-ms=5000..5000 the restart's first record is 5 virtual s after the
 # crash.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
@@ -57,9 +57,9 @@ for m in "" 2; do
 done
 [ "$(field "$d/inc-/result.json" incarnations)" = 4 ] && [ "$(field "$d/inc-2/result.json" incarnations)" = 2 ] ||
     die "max-incarnations: $(field "$d/inc-/result.json" incarnations) by default, $(field "$d/inc-2/result.json" incarnations) with 2"
-run "$d/gap" 1 --crash process:1000 --fault max-incarnations=2 --fault restart-gap-ms=5000..5000 -- /guest/ack-log correct
+run "$d/gap" 1 --crash process:1000 --fault max-incarnations=2 --fault down-ms=5000..5000 -- /guest/ack-log correct
 crash_t=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["crashes"][0]["vclock_ns"])' "$d/gap/result.json")
 first_t=$("$PATINA" log events "$d/gap" | jq -n '[inputs | select(.inc == 1 and .t) | .t][0]')
 gap=$((first_t - crash_t))
-[ "$gap" -ge 5000000000 ] && [ "$gap" -lt 5001000000 ] || die "restart-gap-ms=5000..5000: the restart began $gap ns after the crash"
-echo "restart-gap-ms=5000..5000: the restart's first record $gap virtual ns after the crash"
+[ "$gap" -ge 5000000000 ] && [ "$gap" -lt 5001000000 ] || die "down-ms=5000..5000: the restart began $gap ns after the crash"
+echo "down-ms=5000..5000: the restart's first record $gap virtual ns after the crash"

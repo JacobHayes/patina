@@ -387,7 +387,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   kills it (`--crash process`: a node event `crash-gap-ms` after each start that keeps a run
   alive once faults may act (`Live::AfterSetup`; before then it is only drawn again), keyed on
   `Stream::Node` by node, incarnation and try, with an `Injected` record `INJ_NODE_KILL`
-  counted as `crash`), the driver does (`node kill NAME --process`, `Op::Node`), or its first
+  counted as `crash`), the driver does (`node kill NAME`, `Op::Node`), or its first
   process ends by itself. A kill `SIGKILL`s every live process of the node through the
   supervisor's own kill (`kill_now`, with its exit barrier: the kernel has closed every
   descriptor before anything else happens); a socket's end is then
@@ -432,7 +432,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   the log into one plain log per disk (`durability::log::split_nodes`: `node/NAME/inc-K/`, K
   the boot the disk began with), which `patina log ops`, the self-check (`check::disks`, run
   for every run with nodes) and `materialise` read as a single machine's.
-- **Machine crash.** `node kill NAME` (`NODE_CRASH`) or the seed under `--crash machine`
+- **Machine crash.** `node crash NAME` (`NODE_CRASH`) or the seed under `--crash machine`
   (`NodeConf::crash` `CRASH_NODE_MACHINE`, drawn as the process kills are) runs
   `nodes::node_crash` at a node action point: the node's mappings are flushed and a `Crash`
   record (`[CRASH_MACHINE, boot, point]`, tagged; point 0 for a crash at a drawn time or a
@@ -475,7 +475,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   process or thread of the node being created when its point fires ends the run
   `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
   point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
-  (`crash_points`, `downs[].point`) and `sweep --branch` reads to make one child per point of
+  (`crash_points`, `downs[].point`) and `sweep --crash-points` reads to make one child per point of
   each node (`seed-S@NODE.P`, `machine-at:P@NODE`). `Config::crash_nodes` joins settings with
   `+`, each for its own nodes (`machine-at:I@A+machine-at:J@B`). Under `[sweep] crash-pairs = K` a
   first crash's child also counts the other nodes' points (`+machine:0@B,...`), and one that
@@ -546,7 +546,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
   `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
 
-Not yet: the SDK's fault keys with nodes (`buggify-permille`, `point:LABEL`): the runtime reads
+Not yet: the SDK's fault keys with nodes (`buggify-permille`, `buggify:LABEL`): the runtime reads
 one `SdkCfg` for the run (`proto::sdk::SdkTab`), so scoping them per node needs a node's own
 copy beside its `FaultCtl`.
 
@@ -1302,12 +1302,12 @@ and the crash draw is used only when it fires, so a run is identical to the run 
 `--crash` up to the crash. With nodes each node counts its own, on its own disk ([Nodes](#nodes),
 "Crash points per node").
 
-`sweep --branch` places each point from a base's operation log (`patina-cli/src/branch.rs`),
+`sweep --crash-points` places each point from a base's operation log (`patina-cli/src/branch.rs`),
 written per run as `points.json` before the sweep prunes the run's logs: the runtime's records
 in order (not the supervisor's, which offer no point), for each call that recorded a sync a
 point before its records, then one after each record. The places are used only when their
 number is the runtime's count (`crash_points`); otherwise the sample has one kind per node
-(and no pair is taken after the node's points). `--branch-max N` takes the first N of an order
+(and no pair is taken after the node's points). `--crash-points=N` takes the first N of an order
 stratified by node, then by the kind of record at the point (`branch::sample_order`): seeded by
 the seed and case, and for the first crashes nested, so a larger N adds children to those run
 (the pairs to sample from depend on the first crashes run). No point is left out as the same

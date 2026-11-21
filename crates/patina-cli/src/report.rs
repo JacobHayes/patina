@@ -38,7 +38,7 @@ pub struct Run {
     pub run: Value,
     /// `replay.json`, written by a sweep that replayed this run.
     pub replay: Option<Value>,
-    /// In a `--branch` sweep: where it crashes (`Point`).
+    /// In a `--crash-points` sweep: where it crashes (`Point`).
     pub point: Option<Point>,
 }
 
@@ -55,7 +55,7 @@ impl Run {
     }
 }
 
-/// A run's place in a `--branch` sweep: a base (`n` 0, `seed-N`), or the child crashing at
+/// A run's place in a `--crash-points` sweep: a base (`n` 0, `seed-N`), or the child crashing at
 /// crash point `n` (`seed-N@P`), of node `node`'s first boot in a run with nodes
 /// (`seed-N@NODE.P`; `node` empty: the one machine); under `[sweep] crash-pairs`, a pair's child
 /// crashes node `node2` at its point `n2` after that (`seed-N@A.I+B.J`). Ordered by point, then
@@ -155,7 +155,7 @@ impl Point {
     }
 }
 
-/// The crash points a `--branch` base counted: with nodes, each node's whose crashes were
+/// The crash points a `--crash-points` base counted: with nodes, each node's whose crashes were
 /// at its crash points (`nodes.list[].crash_points`, its first boot's), by name; otherwise
 /// the one machine's (`""`, the `crash` class's eligible calls).
 pub fn base_points(r: &Value, run: &Value) -> Vec<(String, u64)> {
@@ -235,7 +235,7 @@ pub fn collect(dirs: &[PathBuf]) -> Res<Vec<Run>> {
         let mut here = vec![];
         walk(d, &mut here);
         // A branch sweep's directory says so in its sweep.json.
-        let branch = read_json(&d.join("sweep.json")).is_ok_and(|v| v["branch"] == true);
+        let branch = read_json(&d.join("sweep.json")).is_ok_and(|v| v["crash_points"] == true);
         found.extend(here.into_iter().map(|r| (r, branch)));
     }
     found.sort();
@@ -616,13 +616,13 @@ fn matched_text(pattern: &str, case: Option<&str>, signature: &str, fired: &[Str
 }
 
 /// The faults that fired in a run, sorted: each fault class that injected (`faults.counts`),
-/// and `point:LABEL` for each SDK fault point that fired (`--buggify`).
+/// and `buggify:LABEL` for each SDK fault point that fired (`--buggify`).
 pub fn fired(result: &Value) -> Vec<String> {
     let mut out: Vec<String> = fault_classes(result).1.into_iter().collect();
     for s in result["sdk"]["sites"].as_array().into_iter().flatten() {
         if s["kind"] == "buggify" && s["held"].as_u64().unwrap_or(0) > 0 {
             out.push(format!(
-                "point:{}",
+                "buggify:{}",
                 crate::signature::checkout_free(s["label"].as_str().unwrap_or(""))
             ));
         }
@@ -819,12 +819,12 @@ const MISS_CHANCE: f64 = 0.001;
 
 /// The natural log of the chance that the fault point `label` fired at none of `evaluated`
 /// evaluations in one run with the resolved plan `plan`: active in `ACTIVATION_PERMILLE` of runs
-/// and then firing at `buggify-permille`, or always active at its own `point:LABEL` rate.
+/// and then firing at `buggify-permille`, or always active at its own `buggify:LABEL` rate.
 fn miss_ln(plan: &Value, label: &str, evaluated: u64) -> f64 {
     use proto::sdk::{ACTIVATION_PERMILLE, FIRE_PERMILLE};
     let free = crate::signature::checkout_free;
     let own = plan.as_object().into_iter().flatten().find_map(|(k, v)| {
-        k.strip_prefix("point:")
+        k.strip_prefix("buggify:")
             .filter(|l| free(l) == label)
             .and_then(|_| v.as_u64())
     });
@@ -1375,7 +1375,7 @@ pub fn build(
         "exit": exit,
     });
     if let Some(b) = branch {
-        v["branch"] = b;
+        v["crash_points"] = b;
     }
     if let Some(first) = defects.first() {
         v["self_check_failed"] = json!({
@@ -1535,7 +1535,7 @@ pub fn build(
 
 /// With nodes: what happened to each node in a group's runs: in how many it went down, in how
 /// many a crash of its machine lost something on its disk (`downs[].lost`), and the crash
-/// points it crashed at (a `--branch` sweep's children and `machine:P` runs); and in how many a
+/// points it crashed at (a `--crash-points` sweep's children and `machine:P` runs); and in how many a
 /// partition was in force at the end. `null` without nodes.
 fn node_causes(runs: &[&Run]) -> Value {
     let Some(list) = runs[0].result["nodes"]["list"].as_array() else {
@@ -1863,7 +1863,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             }
         ));
     }
-    if let Some(b) = v.get("branch") {
+    if let Some(b) = v.get("crash_points") {
         let (p, t) = (
             b["points"].as_u64().unwrap_or(0),
             b["tried"].as_u64().unwrap_or(0),
@@ -2226,7 +2226,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
     if v["vacuous"] == true {
         if n("runs") == 0 {
             tail.push("vacuous: no runs".to_string());
-        } else if v["branch"]["points"] == 0 {
+        } else if v["crash_points"]["points"] == 0 {
             tail.push("vacuous: no base has a crash point: nothing under the work tree changed, nothing to branch at".to_string());
         } else if unmet {
             let labels: Vec<String> = [
@@ -2239,12 +2239,12 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             .collect();
             let hint = match shared_prefix(&labels) {
                 Some((p, n)) => format!(
-                    "; {n} of these labels start {p:?}, a library's perhaps: allow them once in patina.toml, [sdk] allow-unmet = [\"{p}*\"]"
+                    "; {n} of these labels start {p:?}, a library's perhaps: allow them once in patina.toml, [sweep] allow-unmet = [\"{p}*\"]"
                 ),
                 None => String::new(),
             };
             tail.push(format!(
-                "vacuous: see above (allow a label with --allow-unmet or [sdk] allow-unmet{hint})"
+                "vacuous: see above (allow a label with --allow-unmet or [sweep] allow-unmet{hint})"
             ));
         }
     }
@@ -2353,7 +2353,7 @@ mod tests {
         assert_eq!(k.id_of(Some("x ls"), &silent(&[])), Some("any"));
         let mut r = silent(&[]);
         r["sdk"] = json!({"sites": [{"kind": "buggify", "label": "drop", "held": 2}]});
-        assert_eq!(fired(&r), vec!["point:drop".to_string()]);
+        assert_eq!(fired(&r), vec!["buggify:drop".to_string()]);
     }
 
     #[test]
@@ -2512,9 +2512,9 @@ mod tests {
         assert_eq!(sweep(SMOKE_RUNS as u64, 0, json!({})), (json!(2), 0));
         // Reached and missed: chance in a few runs, all but impossible at a rate of 1000.
         assert_eq!(sweep(4, 3, json!({})), (json!(0), 1));
-        assert_eq!(sweep(2, 1, json!({"point:p": 1000})), (json!(2), 0));
+        assert_eq!(sweep(2, 1, json!({"buggify:p": 1000})), (json!(2), 0));
         // Forced off (rate 0): never firing is what was asked.
-        assert_eq!(sweep(40, 50, json!({"point:p": 0})), (json!(0), 1));
+        assert_eq!(sweep(40, 50, json!({"buggify:p": 0})), (json!(0), 1));
         // The chance at the default rates: a quarter active, a quarter of evaluations firing.
         let one = miss_ln(&json!({}), "p", 1).exp();
         assert!((one - (0.75 + 0.25 * 0.75)).abs() < 1e-9, "{one}");

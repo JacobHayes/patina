@@ -35,7 +35,7 @@
 //! - [`buggify!`]: a fault point. False unless the run has
 //!   `--buggify`; then a point is active in a quarter of runs and an active point fires on a
 //!   quarter of its evaluations, decided from the seed and the label alone. `--fault
-//!   point:LABEL=PERMILLE` forces one point's rate (`0`: off).
+//!   buggify:LABEL=PERMILLE` forces one point's rate (`0`: off).
 //! - [`buggify_knob!`]: a seed-chosen integer in a range; [`buggify_delay!`]: maybe sleep a
 //!   seeded virtual time.
 //! - [`mark!`] names a point in the run's log; [`setup_complete`] marks the end of setup (with

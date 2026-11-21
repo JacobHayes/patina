@@ -12,7 +12,7 @@
 # (`generic_write_sync`: an O_DSYNC write syncs and returns the sync's error), mm/msync.c
 # (`vfs_fsync_range` on the mapping's file). The badfd mode needs no injection and is compared
 # with a native run. Then the durability consequence, under every crash point of a seed
-# (`--branch`, a machine crash): the program that writes, starts write-back with a WRITE-only
+# (`--crash-points`, a machine crash): the program that writes, starts write-back with a WRITE-only
 # sync_file_range, reopens, fsyncs and acknowledges only on success never loses an
 # acknowledged file; the planted bug that retries a failed fsync on a new descriptor and then
 # acknowledges does (in the quick tier under ext4-ordered; ./check faults also posix-strict).
@@ -47,12 +47,12 @@ for model in $models; do
     for m in pg pg-retry; do
         o=$d/$m-$model
         st=0
-        PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds 1..1 --branch --crash machine --fault fsync-error-at=1 \
+        PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds 1..1 --crash-points --crash machine --fault fsync-error-at=1 \
             --config "$("$PATINA_CFG" fs-model=$model)" --out "$o" \
             --mount "$PATINA_GUESTS":/guest:copy -- /guest/errseq "$m" >"$o.txt" 2>&1 || st=$?
         [ -f "$o/report.json" ] || die "$m $model: no report (exit $st): $(tail -3 "$o.txt")"
         r=$(python3 -I -c 'import json,sys
-r=json.load(open(sys.argv[1])); b=r["branch"]
+r=json.load(open(sys.argv[1])); b=r["crash_points"]
 assert b["tried"] == b["points"] > 0, b
 print(r["outcomes"].get("failure", 0), b["points"])' "$o/report.json") || die "$m $model: not every crash point tried"
         set -- $r
