@@ -60,11 +60,13 @@ the fixture) and final checks that should see a quiet system (read everything ba
 replicas). Mark both ends, with the SDK (`setup_complete()`, `faults_done()`; `patina guide
 sdk`) or from a script (`patina ctl mark setup-complete`, `patina ctl mark faults-done`).
 
-Faults act from the start of the run, or from `setup-complete` if the program makes that mark,
-and stop at `faults-done`: after it nothing more is injected, a partition heals, a paused node
-resumes, and no node is crashed again. A program that marks `setup-complete` runs with faults
-held until the mark; Patina finds that out on its first run and remembers it. Crash points count
-only between the two marks.
+Faults act from the start of a run, unless it is told that the program marks `setup-complete`
+(`--faults-held`, `[run] faults-held = true`): then from that mark. A run not told that meets
+the mark starts again told, which `run.json` and its rerun line record; a sweep's runs of higher
+seeds then start told. A run told that never makes the mark has no faults (its summary says so).
+Faults stop at `faults-done`: after it nothing more is injected, a partition heals, a paused
+node resumes, and no node is crashed again. Crash points count only between the two marks
+(`result.json`'s `faults.window`).
 
 **Put the system under test on a node; the driver is the harness.** The command after `--`
 waits for the system, marks the setup done, drives the workload, marks the faults done, and

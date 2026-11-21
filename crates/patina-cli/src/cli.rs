@@ -302,6 +302,13 @@ pub const FLAGS: &[Flag] = &[
         "wall time after which the run ends timeout",
         RUNLIKE,
     ),
+    flag(
+        "--faults-held",
+        "",
+        "off",
+        "faults wait for the program's setup-complete mark",
+        RUNLIKE,
+    ),
     flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),
     flag(
         "--vary",

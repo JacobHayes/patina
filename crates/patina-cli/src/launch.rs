@@ -494,97 +494,6 @@ unsafe fn perturb_child() {
     }
 }
 
-/// Whether a run of the program of `o` met `setup-complete` after a pass without the hold
-/// (`$XDG_CACHE_HOME/patina/marks/`, by the contents of its file and of every file its
-/// arguments name, and the arguments): its later runs try the held pass first.
-pub fn marks(o: &Opts) -> bool {
-    marks_file(o).exists()
-}
-
-fn set_marks(o: &Opts) {
-    let f = marks_file(o);
-    if !f.exists() {
-        let _ = fs::create_dir_all(f.parent().unwrap());
-        let _ = fs::write(&f, "");
-    }
-}
-
-/// Before its first run, whether the program may mark `setup-complete`: its file or a file its
-/// arguments name holds the call. An executable holds the label itself only where the call is
-/// linked in (its debug information names the SDK's functions whether or not they are linked);
-/// a script holds the label (`patina ctl mark setup-complete`) or the call by name (Python's
-/// `setup_complete`, Go's `SetupComplete`). The answer is kept beside [`marks`]'s, so a
-/// program's files are read for it once.
-pub fn may_mark(o: &Opts) -> bool {
-    let f = marks_file(o).with_extension("scan");
-    if let Ok(b) = fs::read(&f) {
-        return b == b"1";
-    }
-    let has = |p: &Path| {
-        fs::read(p).is_ok_and(|b| {
-            let words: &[&[u8]] = if b.starts_with(b"\x7fELF") {
-                &[b"setup-complete"]
-            } else {
-                &[b"setup-complete", b"setup_complete", b"SetupComplete"]
-            };
-            words.iter().any(|w| contains(&b, w))
-        })
-    };
-    let r = has(&o.program.host)
-        || o.node_programs.iter().any(|p| has(&p.host))
-        || o.cfg
-            .cmd
-            .iter()
-            .chain(o.cfg.nodes.iter().flat_map(|n| n.cmd.iter()))
-            .filter(|a| a.starts_with('/'))
-            .filter_map(|a| crate::config::program(a, &o.cfg.mounts).ok())
-            .any(|p| has(&p.host));
-    // Written whole under another name, then renamed: a concurrent run reads all or nothing.
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let t = f.with_extension(format!("scan.{}.{n}", std::process::id()));
-    let _ = fs::create_dir_all(f.parent().unwrap());
-    if fs::write(&t, if r { "1" } else { "0" }).is_ok() {
-        let _ = fs::rename(&t, &f);
-    }
-    r
-}
-
-/// Whether `w` (not empty) occurs in `b`.
-fn contains(b: &[u8], w: &[u8]) -> bool {
-    let (first, rest) = (w[0], &w[1..]);
-    let mut i = 0;
-    while let Some(j) = b[i..].iter().position(|&c| c == first) {
-        i += j + 1;
-        if b[i..].starts_with(rest) {
-            return true;
-        }
-    }
-    false
-}
-
-fn marks_file(o: &Opts) -> PathBuf {
-    let mut key = o.program.sha256.clone().into_bytes();
-    for a in o
-        .cfg
-        .cmd
-        .iter()
-        .chain(o.cfg.nodes.iter().flat_map(|n| n.cmd.iter()))
-    {
-        key.push(0);
-        key.extend_from_slice(a.as_bytes());
-        if a.starts_with('/') {
-            if let Ok(p) = crate::config::program(a, &o.cfg.mounts) {
-                key.extend_from_slice(p.sha256.as_bytes());
-            }
-        }
-    }
-    cache_dir().join("marks").join(format!(
-        "{:016x}",
-        proto::rec::hash_bytes(0x6d61_726b, &key)
-    ))
-}
-
 /// Run a whole chain of incarnations into `out` (created; must not hold an earlier run):
 /// `run.json` first, then the incarnations, then `result.json`. With `--check`, when the run
 /// ended ok the checker runs on the finished directory and `result.json` is written again
@@ -614,41 +523,27 @@ pub fn run_one(
         )?;
         crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)
     };
-    // Faults act from the program's `setup-complete` mark if it makes one, else from the
-    // start: the run is the pass with faults held until the mark if that pass meets it, else
-    // the pass without the hold. Which pass comes first is a guess (`marks`), right for every
-    // seed of a program but for one that marks only under some; `run.json` records the pass
-    // (`faults-held`), which a replay runs as it is.
-    let with = |held: bool, restart: bool| -> Res<Opts> {
-        let mut cfg = o.cfg.clone();
-        cfg.faults_held = Some(held);
-        cfg.restart_at_mark = restart;
-        cfg.opts_with(o.program.clone())
-    };
-    let next;
-    let (mut end, o) = if o.cfg.faults_held.is_some() || !crate::faults::injects(&o.plan) {
+    // Faults act from the start unless the run is told the program marks `setup-complete`
+    // (`faults_held`). A run not told that meets the mark ends there and starts again told:
+    // `run.json` records the pass that is the run, which a replay and the rerun line run as
+    // it is.
+    let held;
+    let (mut end, o) = if o.cfg.faults_held || !crate::faults::injects(&o.plan) {
         (pass(o)?, o)
-    } else if !marks(o) && !may_mark(o) {
-        // Faults from the start; at the mark (it marks after all) the held pass instead.
-        let first = with(false, true)?;
+    } else {
+        let mut cfg = o.cfg.clone();
+        cfg.restart_at_mark = true;
+        let first = cfg.opts_with(o.program.clone())?;
         let end = pass(&first)?;
         if end.verdict.class == crate::sup::sdk::SETUP_RESTART {
-            next = with(true, false)?;
-            set_marks(o);
-            (pass(&next)?, &next)
+            cfg.restart_at_mark = false;
+            cfg.faults_held = true;
+            held = cfg.opts_with(o.program.clone())?;
+            let mut end = pass(&held)?;
+            end.faults["window"]["restarted"] = true.into();
+            (end, &held)
         } else {
-            next = first;
-            (end, &next)
-        }
-    } else {
-        let first = with(true, false)?;
-        let end = pass(&first)?;
-        if !end.faults["window"]["from_seq"].is_null() {
-            next = first;
-            (end, &next)
-        } else {
-            next = with(false, false)?;
-            (pass(&next)?, &next)
+            (end, o)
         }
     };
     let write = |end: &RunEnd| -> Res<serde_json::Value> {

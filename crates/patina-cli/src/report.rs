@@ -486,7 +486,6 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "stdin",
         "fault-classes",
         "faults",
-        // Held faults are what the run comes to by itself (`launch::run_one`).
         "faults-held",
         "fs-model",
         "timeout",
@@ -556,6 +555,9 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             // Unconditional first (`config::normal`): the list reads back as written.
             let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
             flag("--ok-exit", l.join(","));
+        }
+        if cfg.faults_held {
+            a.push("--faults-held".into());
         }
     }
     a.push("--".into());

@@ -85,11 +85,11 @@ pub struct Config {
     pub fault_classes: Vec<String>,
     /// `KEY=VALUE[@NODE,...]` fault settings, in order; they replace a class's.
     pub faults: Vec<String>,
-    /// The pass a run with faults is (`launch::run_one`, recorded in `run.json`): `true`,
-    /// faults held until the program's `setup-complete` mark, which it met; `false`, faults
-    /// from the start of a program that did not mark. Unset: `run_one` finds out.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub faults_held: Option<bool>,
+    /// Faults wait for the program's `setup-complete` mark (`[run] faults-held`,
+    /// `--faults-held`). A run without it that meets the mark starts again with it
+    /// (`launch::run_one`); `run.json` records it either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub faults_held: bool,
     /// A pass without the hold that ends at the mark, for one held (`launch::run_one`).
     #[serde(skip)]
     pub restart_at_mark: bool,
@@ -233,7 +233,7 @@ impl Default for Config {
             tmpfs_bytes: 256 << 20,
             fault_classes: vec![],
             faults: vec![],
-            faults_held: None,
+            faults_held: false,
             restart_at_mark: false,
             allow_unmet: vec![],
             fs_model: Model::Ext4Ordered.name().into(),
@@ -832,6 +832,7 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("run", "time-limit", "SECONDS", "3600", "virtual time after which the run ends `liveness`"),
     tk("run", "log-limit", "MIB", "1024", "log size at which the run ends `liveness` (a livelock)"),
     tk("run", "check-timeout", "SECONDS", "60", "wall time a checker may take"),
+    tk("run", "faults-held", "true or false", "false", "as `--faults-held`: faults wait for the program's `setup-complete` mark"),
     tk("faults", "faults", "[\"CLASS[@NODE,...]\", ...]", "none", "as `--faults`"),
     tk("faults", "KEY", "VALUE", "none", "any fault key, as `--fault KEY=VALUE` (`patina run --fault help`)"),
     tk("faults", "fs-model", "\"ext4-ordered\" or \"posix-strict\"", "ext4-ordered", "what a machine crash keeps"),
@@ -910,6 +911,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "time-limit") => c.time_limit = time_limit(int(v, &at)?, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
+                ("run", "faults-held") => c.faults_held = boolean(v, &at)?,
                 ("run", "disk-mb") => c.tmpfs_bytes = int(v, &at)?.saturating_mul(1 << 20),
                 ("run", "check-timeout") => c.check_timeout = Some(int(v, &at)?),
                 ("run", "check") => check = Some(string(v, &at)?),
@@ -1143,6 +1145,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }
+    if a.has("--faults-held") {
+        c.faults_held = true;
+    }
     c.fault_classes.extend(a.all("--faults").iter().cloned());
     // `--fault KEY=VALUE` is any `[faults]` key, the crash model's too.
     for f in a.all("--fault") {
@@ -1238,9 +1243,9 @@ impl Config {
         if let Some(w) = &self.compute_walk {
             plan.compute_walk = faults::walk(self.seed, w)?;
         }
-        // Faults wait for setup-complete in the run that met it; a first run with faults
-        // that meets it starts again that way.
-        if self.faults_held == Some(true) {
+        // Faults wait for setup-complete when the run is told the program marks it; a run not
+        // told that meets the mark starts again told (`launch::run_one`).
+        if self.faults_held {
             plan.faults.fault_after_seq = u64::MAX;
         } else if self.restart_at_mark && faults::injects(&plan) {
             plan.faults.restart_at_setup = 1;

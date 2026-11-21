@@ -1,6 +1,7 @@
 /* Engine properties of the SDK channel, shown once in C (sdk-extra MODE):
  *   fork        a child started by fork and one started by execve report into the run's table
- *   setup       a fault point before and after `setup-complete`                               */
+ *   setup       a fault point before and after `setup-complete`
+ *   setup-fail  a setup that fails where the fault point `setup-fail` fires, then the mark      */
 #include "patina.h"
 #include <stdio.h>
 #include <string.h>
@@ -36,6 +37,11 @@ int main(int argc, char **argv) {
         patina_setup_complete();
         for (int i = 0; i < 5; i++) after[i] = PATINA_BUGGIFY("setup-point") ? '1' : '0';
         printf("before=%s after=%s\n", before, after);
+        return 0;
+    }
+    if (!strcmp(mode, "setup-fail")) {
+        if (PATINA_BUGGIFY("setup-fail")) return 3;
+        patina_setup_complete();
         return 0;
     }
     return 2;

@@ -1121,21 +1121,22 @@ point, and every supervisor fault (link faults through `link_faulted`, partition
 draws, the seed's node kills, clock skew at boot) asks it. The runtime's `mark`
 (`sys/sdk.rs`) sets them: `faults-done` writes `fault_until_seq` and tells the supervisor
 (`Op::Lifecycle`, `LIFE_FAULTS_DONE`), which heals a seed partition in force, ends seed
-pauses (`PEND_DONE`) and cancels their next draws. A run whose plan injects anything is one
-of two passes (`launch::run_one`): held (`Config::faults_held`, `fault_after_seq` starts at the
-maximum for the mark to lower to its own sequence number) if that pass meets
-`setup-complete`, else the pass without the hold. `run_one` tries the held pass first when
-the program's file or a file its arguments name holds a call of the mark (`may_mark`: in an
-executable the label itself, since its debug information names the SDK's functions whether
-linked or not; in a script also the call's name; the answer is cached) or one of its runs met
-the mark before (`$XDG_CACHE_HOME/patina/marks/`, by those files' contents and the
-arguments); otherwise the pass without the hold, which ends at the mark if it comes
-(`restart_at_setup`, `LIFE_RESTART`, verdict `setup-restart`) for the held pass to run, and is
-remembered. A program runs its setup once, but one that names the mark and does not make it.
-Only a mark from a file the command does not name, before the program's first run that meets
-it, lets a fault before the mark stand. The pass is the run's
-`run.json` (`faults-held`), which replay and verify run directly; both marks carry over to
-later incarnations (`launcher::incarnations`).
+pauses (`PEND_DONE`) and cancels their next draws.
+
+A run is told that the program marks `setup-complete` (`Config::faults_held`: `--faults-held`,
+`[run] faults-held`) or not. Told, `fault_after_seq` starts at the maximum for the mark to
+lower to its own sequence number. A run not told whose plan injects anything ends at the mark if
+it comes (`restart_at_setup`, `LIFE_RESTART`, verdict `setup-restart`) and starts again told
+(`launch::run_one`; `result.json`'s `faults.window.restarted`). Being told is an input like the
+seed: `run.json` records it, and a replay and the rerun line run it as recorded; nothing on the
+host decides it. A sweep without cases tells the runs of seeds above the lowest seed whose run
+met the mark (each worker learns it before taking its next job). A run without the hold that
+ended without the mark waits uncounted until no lower seed can still meet it, then is
+counted, or run again told if a lower seed met it: which runs are told follows seed order, not
+which run finished first, so a sweep's runs are the same at any width. `sweep.json`'s
+`faults_held_from` keeps the answer for a resumed sweep, which runs again told a kept run it
+now tells; a stopped sweep deletes the runs still waiting. A crash point's child is told as its
+base was. With cases, each run finds out for itself. Both marks carry over to later incarnations (`launcher::incarnations`).
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's

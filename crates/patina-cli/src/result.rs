@@ -976,6 +976,14 @@ pub fn print_human(r: &Value, dir: &Path) {
             }
         }
     }
+    let w = &r["faults"]["window"];
+    if w["restarted"] == true {
+        println!("faults held until setup-complete: the run met the mark with faults acting and started again held (--faults-held starts it so)");
+    } else if w.is_object() && w["from_seq"].is_null() {
+        println!(
+            "faults held until setup-complete, which the program never marked: no fault could act"
+        );
+    }
     if let Some(l) = refused_line(r) {
         println!("{l}");
     }

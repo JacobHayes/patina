@@ -24,7 +24,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::SeqCst};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -98,6 +98,8 @@ pub fn parse_seeds(s: &str) -> Res<Vec<u64>> {
 
 /// What a sweep directory records about the sweep that made it.
 pub const SWEEP_FILE: &str = "sweep.json";
+/// `sweep.json`: the lowest seed whose runs start told that the program marks `setup-complete`.
+const HELD_FROM: &str = "faults_held_from";
 const SWEEP_SCHEMA: &str = "patina.sweep/v1";
 
 /// What decides every run of a sweep besides its seed and case: patina itself, the program
@@ -114,6 +116,8 @@ fn identity(
 ) -> Res<serde_json::Value> {
     let mut c = cfg.clone();
     c.seed = 0;
+    // Told or learned, the hold is the program's: `sweep.json`'s `faults_held`.
+    c.faults_held = false;
     c.allow_unmet.clear();
     c.check = None;
     c.case = None;
@@ -650,6 +654,15 @@ enum Job {
     },
 }
 
+impl Job {
+    fn seed(&self) -> Option<u64> {
+        match self {
+            Job::Run { seed, .. } => Some(*seed),
+            Job::Replay { .. } => None,
+        }
+    }
+}
+
 struct Done {
     job: Job,
     stdout: Vec<u8>,
@@ -662,6 +675,8 @@ enum Then {
     Go,
     Stop,
     Again(Job),
+    /// Run these next, at the same width.
+    More(Vec<Job>),
 }
 
 /// Run `jobs` at most `width` at a time. `event` is called on this thread with each finished
@@ -670,11 +685,13 @@ enum Then {
 /// Returns the number of jobs never started.
 /// With `serve` (a serving checker), each worker keeps one checker server and lends it to the
 /// runs it starts; one that died or was killed for a bad answer is started again for the next
-/// run, and each is ended with its worker.
+/// run, and each is ended with its worker. `ended` is called on the worker with each job whose
+/// child ended, before the worker takes the next.
 fn pool(
     jobs: Vec<Job>,
     width: usize,
     child: &(dyn Fn(&Job) -> Command + Sync),
+    ended: &(dyn Fn(&Job) + Sync),
     serve: Option<&crate::check::Check>,
     mut event: impl FnMut(Option<Done>, usize, usize) -> Then,
 ) -> usize {
@@ -762,6 +779,7 @@ fn pool(
                             server = Held(None);
                         }
                     }
+                    ended(&job);
                     if INTERRUPTED.load(SeqCst) {
                         pending.fetch_sub(1, SeqCst);
                         return;
@@ -791,6 +809,12 @@ fn pool(
                     let w = now.load(SeqCst);
                     now.store((w / 2).max(1), SeqCst);
                     queue.lock().unwrap().push_front(job);
+                }
+                Then::More(jobs) => {
+                    let mut q = queue.lock().unwrap();
+                    for j in jobs.into_iter().rev() {
+                        q.push_front(j);
+                    }
                 }
             }
             if got {
@@ -1104,17 +1128,12 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         }
         program_of.insert(i, key);
     }
-    // A program with faults not known to mark `setup-complete` (`launch::run_one`): its first
-    // run goes alone, so that the rest know if it does.
-    let (probe_program, unknown) = {
+    let (probe_program, injects) = {
         let (mut probe, key) = first_cfg.unwrap();
         probe.cmd = cmd_of(list[0]);
         let o = probe.opts_with(programs[&key].clone()).map_err(error)?;
         crate::launch::preflight(&o).map_err(error)?;
-        let unknown = crate::faults::injects(&o.plan)
-            && !crate::launch::marks(&o)
-            && !crate::launch::may_mark(&o);
-        (o.program, unknown)
+        (o.program, crate::faults::injects(&o.plan))
     };
     let program_key = |case: Option<usize>| -> &String { &program_of[&case] };
 
@@ -1163,6 +1182,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         pairs,
     )
     .map_err(error)?;
+    // The runs told that the program marks `setup-complete` (`launch::run_one`): those of
+    // seeds from this one on, learned from a lower seed's run that met the mark (`u64::MAX`:
+    // none yet), this sweep's or a resumed one's (`sweep.json`'s `faults_held_from`).
+    let mut held_from = u64::MAX;
     if out.is_dir() {
         if let Some(why) = differs(&out, &ident) {
             eprintln!(
@@ -1170,6 +1193,11 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 out.display()
             );
             std::fs::remove_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
+        } else if let Some(f) = read_json(&out.join(SWEEP_FILE))
+            .ok()
+            .and_then(|v| v[HELD_FROM].as_u64())
+        {
+            held_from = f;
         }
     }
     std::fs::create_dir_all(&out).map_err(|e| error(format!("{}: {e}", out.display())))?;
@@ -1177,7 +1205,18 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // to the children run): recorded for the report.
     let mut recorded = ident.clone();
     recorded["crash_points_max"] = serde_json::json!(branch_max);
+    if cfg.faults_held {
+        held_from = 0;
+    }
+    if held_from != u64::MAX {
+        recorded[HELD_FROM] = held_from.into();
+    }
+    let resumed_from = held_from;
     write_json(&out.join(SWEEP_FILE), &recorded).map_err(error)?;
+    let held_from = AtomicU64::new(held_from);
+    // Learned when the runs have faults and are not told; not with cases, where each case's
+    // command finds out for itself (one that marks need not mean another does).
+    let learn = (injects && cases.is_none() && !cfg.faults_held).then_some(&held_from);
 
     let run_dir = |seed: u64, case: Option<usize>, point: Option<&report::Point>| -> PathBuf {
         let mut dir = out.join(match point {
@@ -1222,7 +1261,17 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     stale,
                 ))
             };
+            // A kept run of a seed the sweep tells now that started without the hold (it
+            // ended before a lower seed was known to meet the mark) runs again, told.
+            let untold = || {
+                injects
+                    && seed >= resumed_from
+                    && point.as_ref().is_none_or(|p| p.n == 0)
+                    && read_json(&dir.join("run.json"))
+                        .is_ok_and(|r| r["config"]["faults-held"] != true)
+            };
             match have {
+                Have::Current if untold() => run(false),
                 Have::Current => Ok(Fresh::Kept),
                 Have::Stale => Ok(Fresh::Rejudge(Job::Run {
                     seed,
@@ -1291,6 +1340,17 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     .arg(dir)
                     .args(["--format", "json"])
                     .args(&pass);
+                // Held as the sweep learned, or a crash point's child as its base ran.
+                let base = point.as_ref().filter(|p| p.n > 0).map(|_| {
+                    read_json(
+                        &run_dir(*seed, *case, Some(&report::Point::default())).join("run.json"),
+                    )
+                    .is_ok_and(|r| r["config"]["faults-held"] == true)
+                });
+                let told = learn.is_some_and(|f| *seed >= f.load(SeqCst));
+                if base.unwrap_or(told) && !a.has("--faults-held") {
+                    c.arg("--faults-held");
+                }
                 if kind.is_some() {
                     let at = |s: &str| format!("@{s}");
                     let crash = match point {
@@ -1354,6 +1414,15 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         c
     };
 
+    // A base run that met the mark (and so started again held) tells the seeds above it, from
+    // the next job any worker takes.
+    let learned = |job: &Job| {
+        if let (Some(from), Job::Run { seed, dir, .. }) = (learn, job) {
+            if read_json(&dir.join("run.json")).is_ok_and(|r| r["config"]["faults-held"] == true) {
+                from.fetch_min(seed + 1, SeqCst);
+            }
+        }
+    };
     unsafe {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
@@ -1384,6 +1453,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         bases: Default::default(),
         branch: kind.is_some(),
         pairs,
+        learn,
+        parked: vec![],
+        requeue: vec![],
+        held_from: held_from.load(SeqCst),
     };
     if todo < total {
         st.say(&format!(
@@ -1420,23 +1493,11 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let mut not_started = if st.stopped.is_some() {
         jobs.len()
     } else {
-        let mut jobs = jobs;
-        let first: Vec<Job> = if unknown && jobs.len() > 1 {
-            vec![jobs.remove(0)]
-        } else {
-            vec![]
-        };
-        let left = pool(first, width, &child, serve, |d, running, now| {
+        pool(jobs, width, &child, &learned, serve, |d, running, now| {
             st.event(d, running, now)
-        });
-        if left > 0 || st.stopped.is_some() || INTERRUPTED.load(SeqCst) {
-            left + jobs.len()
-        } else {
-            pool(jobs, width, &child, serve, |d, running, now| {
-                st.event(d, running, now)
-            })
-        }
+        })
     };
+    not_started += st.unpark();
     st.flush(true);
     if kind.is_some() && st.stopped.is_none() && !INTERRUPTED.load(SeqCst) {
         // The children: each base's crash points, points ascending, seeds (and cases)
@@ -1599,9 +1660,14 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             not_started = if st.stopped.is_some() {
                 children.len()
             } else {
-                pool(children, st.width, &child, serve, |d, running, now| {
-                    st.event(d, running, now)
-                })
+                pool(
+                    children,
+                    st.width,
+                    &child,
+                    &|_| {},
+                    serve,
+                    |d, running, now| st.event(d, running, now),
+                )
             };
             st.flush(true);
         }
@@ -1657,7 +1723,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 "sweep: replaying the first seed of {}",
                 report::count(replays.len(), "finding")
             ));
-            pool(replays, st.width, &child, None, |d, _, _| {
+            pool(replays, st.width, &child, &|_| {}, None, |d, _, _| {
                 if let Some(d) = d {
                     replayed(d);
                 }
@@ -1787,6 +1853,18 @@ struct State<'k> {
     /// `[sweep] crash-pairs = K`: each first crash's child that ended ok writes the next K points of
     /// each other node after its crash (`branch::window`).
     pairs: Option<usize>,
+    /// Learning that the program marks `setup-complete`: the lowest seed whose runs start told
+    /// (`u64::MAX`: none). A run that met the mark (and so started again held) tells the seeds
+    /// above it.
+    learn: Option<&'k AtomicU64>,
+    /// Runs without the hold that ended without the mark, waiting until no lower seed can still
+    /// meet it: then counted, or run again told if one did. So which runs are told follows
+    /// seed order, not which run finished first.
+    parked: Vec<(Job, serde_json::Value)>,
+    /// Parked jobs to run again told, at the front of the queue.
+    requeue: Vec<Job>,
+    /// `learn` as `sweep.json` has it.
+    held_from: u64,
 }
 
 /// A `--crash-points` base: its crash points per node (`""`: the one machine) and its directory.
@@ -1847,6 +1925,10 @@ impl State<'_> {
         if let Some(d) = d {
             if let Some(job) = self.finished(d, running, width) {
                 return Then::Again(job);
+            }
+            self.release();
+            if !self.requeue.is_empty() && self.stopped.is_none() {
+                return Then::More(std::mem::take(&mut self.requeue));
             }
         }
         if let Some(b) = self.budget {
@@ -1997,15 +2079,108 @@ impl State<'_> {
                 let _ = write_json(&dir.join(crate::branch::FILE), &v);
             }
         }
-        self.done += 1;
-        if let Some(n) = self.unfinished.get_mut(seed) {
-            *n -= 1;
-            if *n == 0 {
-                self.unfinished.remove(seed);
+        if let Some(from) = self
+            .learn
+            .filter(|_| point.as_ref().is_none_or(|p| p.n == 0))
+        {
+            // A run refused before it started (no run.json) is counted as it is.
+            let run = read_json(&dir.join("run.json")).unwrap_or_default();
+            if run["config"]["faults-held"] == true {
+                self.learned(from.load(SeqCst));
+            } else if !run.is_null() {
+                self.store(dir, &r);
+                self.parked.push((d.job, r));
+                return None;
             }
         }
-        self.account(*seed, *case_index, point.clone(), dir, &r);
+        self.count(*seed, *case_index, point.clone(), dir, &r);
         None
+    }
+
+    /// A finished run counted: it leaves the unfinished, then `account`.
+    fn count(
+        &mut self,
+        seed: u64,
+        case: Option<usize>,
+        point: Option<report::Point>,
+        dir: &Path,
+        r: &serde_json::Value,
+    ) {
+        self.done += 1;
+        if let Some(n) = self.unfinished.get_mut(&seed) {
+            *n -= 1;
+            if *n == 0 {
+                self.unfinished.remove(&seed);
+            }
+        }
+        self.account(seed, case, point, dir, r);
+    }
+
+    /// A held run, after the worker's `learned`: `sweep.json` keeps where telling starts
+    /// (`from`), and the first time, a line says so.
+    fn learned(&mut self, from: u64) {
+        if from >= self.held_from {
+            return;
+        }
+        let f = self.out.join(SWEEP_FILE);
+        if let Ok(mut v) = read_json(&f) {
+            v[HELD_FROM] = from.into();
+            let _ = write_json(&f, &v);
+        }
+        if self.held_from == u64::MAX {
+            self.say(&format!(
+                "sweep: seed {} met setup-complete: runs of higher seeds start with faults held until it (faults-held)",
+                from - 1
+            ));
+        }
+        self.held_from = from;
+    }
+
+    /// The parked runs no lower seed can still tell: counted, or (a lower seed met the mark)
+    /// deleted and queued to run again told.
+    fn release(&mut self) {
+        let Some(from) = self.learn.map(|f| f.load(SeqCst)) else {
+            return;
+        };
+        let parked: BTreeSet<u64> = self.parked.iter().filter_map(|p| p.0.seed()).collect();
+        let low = self
+            .unfinished
+            .keys()
+            .find(|s| !parked.contains(s))
+            .copied();
+        for (job, r) in std::mem::take(&mut self.parked) {
+            let Job::Run {
+                seed,
+                case,
+                ref dir,
+                ref point,
+            } = job
+            else {
+                continue;
+            };
+            if seed >= from {
+                let _ = std::fs::remove_dir_all(dir);
+                self.requeue.push(job);
+            } else if low.is_none_or(|l| l > seed) {
+                let (dir, point) = (dir.clone(), point.clone());
+                self.count(seed, case, point, &dir, &r);
+            } else {
+                self.parked.push((job, r));
+            }
+        }
+    }
+
+    /// At the end (a stopped sweep): the parked runs a lower seed told, and those a lower seed
+    /// still could, are deleted and not run (a resumed sweep runs them). Returns their number.
+    fn unpark(&mut self) -> usize {
+        self.release();
+        for (job, _) in std::mem::take(&mut self.parked) {
+            if let Job::Run { dir, .. } = &job {
+                let _ = std::fs::remove_dir_all(dir);
+            }
+            self.requeue.push(job);
+        }
+        std::mem::take(&mut self.requeue).len()
     }
 
     /// The runs judged again by this sweep's checker, accounted as finished runs.
@@ -2024,17 +2199,8 @@ impl State<'_> {
         }
     }
 
-    /// What a finished run (or one judged again) does to the sweep: its logs pruned or cut
-    /// by `--keep`, a finding counted, grouped and announced, `--max-findings`.
-    fn account(
-        &mut self,
-        seed: u64,
-        case_index: Option<usize>,
-        point: Option<report::Point>,
-        dir: &Path,
-        r: &serde_json::Value,
-    ) {
-        let case = case_index.map(|i| case_shown(&self.cases[i]));
+    /// A finished run's logs pruned or cut by `--keep` (again later does nothing more).
+    fn store(&mut self, dir: &Path, r: &serde_json::Value) {
         let outcome = r["outcome"].as_str().unwrap_or("internal");
         // A run the checker ran on keeps its logs under --keep fail, for the checker to read
         // again: a checker runs on every run that ended ok.
@@ -2050,6 +2216,21 @@ impl State<'_> {
         if (outcome != "ok" || checked || defect) && self.keep != Keep::All {
             self.cut |= cut(dir, r);
         }
+    }
+
+    /// What a finished run (or one judged again) does to the sweep: its logs pruned or cut
+    /// by `--keep`, a finding counted, grouped and announced, `--max-findings`.
+    fn account(
+        &mut self,
+        seed: u64,
+        case_index: Option<usize>,
+        point: Option<report::Point>,
+        dir: &Path,
+        r: &serde_json::Value,
+    ) {
+        let case = case_index.map(|i| case_shown(&self.cases[i]));
+        let outcome = r["outcome"].as_str().unwrap_or("internal");
+        self.store(dir, r);
         if r["stop"] == "disk-full" && self.stopped.is_none() {
             self.stopped = Some(format!("seed {seed} found the filesystem full"));
         }
