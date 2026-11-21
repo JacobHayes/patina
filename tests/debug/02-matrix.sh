@@ -135,6 +135,7 @@ echo "Python: the evaluation loop in the backtrace; identical"
 # Nodes: the stop's process, another, and back.
 r=$RUNS/kv
 printf '[node.primary]\ncmd = ["python3", "/guest/kv.py", "primary"]\n[node.backup]\ncmd = ["python3", "/guest/kv.py", "backup"]\n' >"$RUNS/kv.toml"
+[ -z "$TRAPS" ] || cat "$TRAPS" >>"$RUNS/kv.toml"
 prun "$r" --seed 1 --config "$RUNS/kv.toml" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/kv.py driver
 at=$("$PATINA" log events "$r" | python3 -I -c 'import json,sys
 print([e for e in map(json.loads, sys.stdin) if e["type"] == "call" and e.get("node") == "backup"][-1]["seq"])')

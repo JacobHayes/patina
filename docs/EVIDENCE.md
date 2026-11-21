@@ -1028,17 +1028,20 @@ with the switch allowance at 2,048 (chosen) or 32,768; `1..65536`: one log-unifo
 | `rs-race-stock` | 0 / 0 | 0 / 0 | 3 | 6 / 4 | 6 / 4 |
 | `stats-c` | 0 / 0 | 1 / 0 | 1 | 2 / 2 | 1 / 0 |
 | `races b`, `pool`, `publish`, `dcl` | 0 / 0 | 0 / 0 | 0 | | 0 / 0 |
-| `stats-cp` | 141 / 96 | | | 128 / | 130 / 88 |
-| `go-race-cp` | 63 / 58 | 2 / | | 94 / | 94 / 97 |
-| `pool-cp` | | 5 / | | 47 / | 47 / 42 |
-| `races-cp` (`races b`) | | 0 / | | 25 / | 25 / 23 |
-| `rs-race-cp` | | 1 / | | 14 / | 14 / 8 |
+| `stats-cp` | 141 / 96 | | | 128 / | 133 / |
+| `go-race-cp` | 63 / 58 | 2 / | | 94 / | 98 / |
+| `pool-cp` | | 5 / | | 47 / | 44 / |
+| `races-cp` (`races b`) | | 0 / | | 25 / | 32 / |
+| `rs-race-cp` | | 1 / | | 14 / | 18 / |
 
 `-cp` guests have compute points under traps too, so their traps column already draws the new
 gap. An allowance of 2,048 at first held rebuilt code to the budget as well: `stats-cp` fell
 to 60 and `go-race-cp` to 77. A process whose rebuilt code has said hello is now exempt
-(`Compute::kinds`; `compute/10-budget`), and the rebuilt guests find what they find at
-32,768.
+(`Compute::kinds`; `compute/10-budget`), and draws its points one gap at a time, as without
+plans (below, "Found by CI"); the `-cp` cells of the last column are that final build's,
+x86_64 (on arm64, before the second change: 88, 97, 42, 23 and 8). It costs: a sweep of
+`stats-cp` over seeds 1 to 20 (`-j 4`) takes 3.1 s at the default and 0.5 s under traps on
+x86_64, its libc's load-time points switching at small gaps with no budget.
 
 **Cost**: wall ms of seeds 1 to 5, the least of 3 runs, warm plans; new at 2,048 against
 32,768 (both with the new gap draw). The seeds draw mean gaps 3,074, 120, 1,843, 2,096 and
@@ -1111,6 +1114,38 @@ Defects the soak found, each fixed with a test that failed before:
   which the dispatcher read as a request and ended the run `internal`); and on arm64 an
   instruction of the runtime's own precedes the signal restorer (`patina debug` took a
   noreturn caller's frame for the signal frame).
+
+**Found by CI** (the landing gate's first three attempts, both architectures):
+
+- The same seed is another run on another host when the program's code differs: a C program
+  built and linked against each host's glibc took load-time points at other places, so its
+  fault draws (keyed by the record sequence) fell on other calls. `upcase` under `--faults
+  disk` had no clean failure in seeds 1 to 40 here and one on the runner, and the docs showed
+  the difference. The docs' blocks that depend on which seeds draw which fault now use 100
+  seeds or run only on the reference host; GUIDE "Hosts" says a seed under the default
+  reproduces with the same program and libraries, and per CPU model where a library picks
+  code by CPU feature. `[sched] preempt = "traps"` keeps the old property.
+- arm64: two CPU-bound Python threads under line points ran one after the other at seeds 1,
+  6, 7 and 9 of 1 to 10 (`compute/09-python` d; the run-ahead arming that reads the
+  supervisor's view of runnable threads, in a process whose interpreter had said hello).
+  Such a process now draws one gap at a time: 42 to 99 alternations on seeds 1 to 10 on the
+  runner, and on x86_64. Reviewed independently: no correctness, determinism or replay defect.
+- arm64: `patina debug` refuses runs with load-time points (a limit in GUIDE); the debug
+  area's runs there are traps runs now. The load fault's ESR in `signals/10-frame` names
+  another translation table level (the address space holds other mappings near address 16),
+  which the test now allows. A file with no executable segment is not asked for a plan on
+  arm64 at all, so `rewrite/07-data` accepts it unlisted there.
+- `examples/01-examples` passed its budget on arm64 in `stats-c`, under traps too (8.9 s for
+  20 seeds of `stats-cp`): half the seeds' gaps of 1 to 16 events, unbudgeted in rebuilt code.
+  Its stats-c sweeps run under traps with `compute-gap=64..65536`, the coverage they had.
+- On the x86_64 runner the stock `stats` build found its race at seed 10 of 20 (here: none in
+  20, 1 in 200), so the docs no longer show its sweep's output on other hosts.
+- Two scripts passed their budgets by a few percent: `debug/01-smoke` on the x86_64 runner
+  (24.5 s against 23, 2.6 s under traps; the session's event file of the run with load-time
+  points was 199 MB), and `docs/01-transcripts` on arm64 (61 s
+  against 60, most of the excess in the two `stats-cp` sweeps' small-gap seeds). The debug
+  area's runs are traps runs on every host now (`debug/03-points` keeps the default's), and the
+  docs' `stats-cp` sweeps show seeds 1 to 10.
 
 **First run.** With an empty plan cache, `patina sweep` of Chromium prints once, before any
 seed: "patina: rewriting chrome-headless-shell and 45 more files so that threads can switch

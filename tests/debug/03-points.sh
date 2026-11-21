@@ -7,6 +7,7 @@
 #    stats-c stock (C, dynamic, PIE): a watchpoint on the shared count stops in a worker.
 #@ tier=area budget=60 arch=x86_64
 . "$(dirname "$0")/lib.inc"
+TRAPS="" # this script's runs are the default's
 G=$PATINA_GUESTS
 seq_of() {
     "$PATINA" log events "$1" | python3 -I -c 'import json,sys

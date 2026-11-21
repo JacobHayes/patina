@@ -817,7 +817,7 @@ stop `ok-exit`, so the checker judges it too and gets the status as `PATINA_EXIT
 program killed by a signal is a `crash` whatever the list holds, an exit status not in it is
 still a `failure`, as is a listed status after the program wrote a line starting `INVARIANT `
 to stderr, and a failed `always` is still a `violation`. A sweep counts these runs apart
-from the passes (`31 ok (4 by --ok-exit)`, `ok_exit` in `report.json`), so a sweep in which
+from the passes (`79 ok (5 by --ok-exit)`, `ok_exit` in `report.json`), so a sweep in which
 every run failed cleanly says so. Name only statuses the program documents as a clean
 failure: a program that exits 1 both for an error it handled and for an uncaught exception
 passes both with `--ok-exit 1`; a checker can still fail such a run on its stderr. A Rust
@@ -835,10 +835,10 @@ dir: /tmp/upcase
 setup: cp "$GUESTS/examples/upcase" .
 -->
 ```text
-$ patina sweep --seeds 1..40 --faults disk --ok-exit 1:fs-error,fsync-error -- ./upcase
-sweep: 229.8 KiB kept in /tmp/upcase/patina-out/sweep
-patina sweep: 40 runs, 0 findings in 0 groups, 40 ok   (0.5s, 8 jobs)
-outcomes: ok 40
+$ patina sweep --seeds 1..100 --faults disk --ok-exit 1:fs-error,fsync-error -- ./upcase
+sweep: 574.1 KiB kept in /tmp/upcase/patina-out/sweep
+patina sweep: 100 runs, 0 findings in 0 groups, 100 ok (5 by --ok-exit)   (0.5s, 8 jobs)
+outcomes: ok 100
 ```
 
 `examples/kvlog-c` is an append-only log with no SDK in it: it prints `ack I` once record I
@@ -1105,6 +1105,7 @@ failures:
 <!-- transcript upcase-plain
 dir: /tmp/upcase
 exit: 0 1
+exact-only: which errors the seeds draw, and so the group shown first, are the seeds' runs
 -->
 ```text
 $ cc -o upcase examples/upcase-c/upcase.c
@@ -1132,17 +1133,17 @@ ok (exit): the program exited 0
 guest: exit 0
 run directory: /tmp/upcase/patina-out/ref
 replay: patina replay /tmp/upcase/patina-out/ref
-$ patina sweep --seeds 1..40 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/ref' -- ./upcase
+$ patina sweep --seeds 1..100 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/ref' -- ./upcase
 sweep: /tmp/upcase/patina-out/sweep holds another sweep (other settings: ok-exit); replacing it
 new: violation check: wrong-output: Files want/out.txt and got/out.txt differ   (seed 2: patina replay /tmp/upcase/patina-out/sweep/seed-2)
 sweep: replaying the first seed of 1 finding
-sweep: 592.0 KiB kept in /tmp/upcase/patina-out/sweep
-patina sweep: 40 runs, 11 findings in 1 group, 29 ok   (0.7s, 8 jobs)
-outcomes: ok 29, violation 11
-check: judged 40 of 40 runs: 29 passed, 11 failed
+sweep: 12.0 MiB kept in /tmp/upcase/patina-out/sweep
+patina sweep: 100 runs, 21 findings in 1 group, 79 ok (5 by --ok-exit)   (0.5s, 8 jobs)
+outcomes: ok 79, violation 21
+check: judged 95 of 100 runs: 74 passed, 21 failed; 5 not judged (clean-failure 5)
 
 violation check: wrong-output: Files want/out.txt and got/out.txt differ
-  11 of 40 runs   first: seed 2   replayed: identical
+  21 of 100 runs   first: seed 2   replayed: identical
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --faults disk --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
   replay: patina replay /tmp/upcase/patina-out/sweep/seed-2
@@ -2475,6 +2476,7 @@ load-time point. The stock build seldom shows it; the rebuilt one does:
 
 <!-- transcript stats-stock
 dir: /tmp/src/patina
+exact-only: which seeds find the race in the stock build are the seeds' runs
 -->
 ```sh
 cc -O2 -pthread -o stats examples/stats-c/stats.c
@@ -2494,20 +2496,20 @@ exit: 0 1
 ```sh
 clang -O2 -pthread -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \
   -o stats-cp examples/stats-c/stats.c sdk/c/patina_compute.c
-patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
+patina sweep --seeds 1..10 --out patina-out/stats-cp -- ./stats-cp
 ```
 
 ```text
 new: failure exit: lost updates: N of N jobs counted; exit 1   (seed 2: patina replay /tmp/src/patina/patina-out/stats-cp/seed-2)
 sweep: replaying the first seed of 1 finding
-sweep: 4.2 MiB kept in /tmp/src/patina/patina-out/stats-cp; logs over 4 MiB keep their first and last MiB (the run's seed reproduces the whole log: patina replay RUNDIR)
-patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (3.2s, 8 jobs)
-outcomes: failure 13, ok 7
+sweep: 2.9 MiB kept in /tmp/src/patina/patina-out/stats-cp; logs over 4 MiB keep their first and last MiB (the run's seed reproduces the whole log: patina replay RUNDIR)
+patina sweep: 10 runs, 6 findings in 1 group, 4 ok   (0.9s, 8 jobs)
+outcomes: failure 6, ok 4
 compute points: /tmp/src/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
-  13 of 20 runs   first: seed 2   replayed: identical
-  example: lost updates: 198 of 200 jobs counted
+  6 of 10 runs   first: seed 2   replayed: identical
+  example: lost updates: 197 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/src/patina/stats-cp
   replay: patina replay /tmp/src/patina/patina-out/stats-cp/seed-2
   explain: patina explain /tmp/src/patina/patina-out/stats-cp/seed-2
@@ -2612,18 +2614,18 @@ outcomes: ok 20
 $ patina sweep --seeds 1..20 --mount tests/guests/compute/py:/guest --mount sdk/python:/sdk \
     --env PYTHONPATH=/sdk -- python3 -m patina /guest/pycompute.py cache 200
 sweep: /tmp/patina/patina-out/sweep holds another sweep (other settings: cmd, env, mounts); replacing it
-new: failure exit: exit 1   (seed 4: patina replay /tmp/patina/patina-out/sweep/seed-4)
+new: failure exit: exit 1   (seed 1: patina replay /tmp/patina/patina-out/sweep/seed-1)
 sweep: replaying the first seed of 1 finding
-sweep: 1.6 MiB kept in /tmp/patina/patina-out/sweep
-patina sweep: 20 runs, 12 findings in 1 group, 8 ok   (1.0s, 8 jobs)
-outcomes: failure 12, ok 8
+sweep: 1.2 MiB kept in /tmp/patina/patina-out/sweep; logs over 4 MiB keep their first and last MiB (the run's seed reproduces the whole log: patina replay RUNDIR)
+patina sweep: 20 runs, 15 findings in 1 group, 5 ok   (0.9s, 8 jobs)
+outcomes: failure 15, ok 5
 compute points: /usr/bin/python3 (lines)
 
 failure exit: exit 1
-  12 of 20 runs   first: seed 4   replayed: identical
-  rerun:  patina run --seed 4 --env PYTHONPATH=/sdk --mount /tmp/patina/tests/guests/compute/py:/guest --mount /tmp/patina/sdk/python:/sdk -- python3 -m patina /guest/pycompute.py cache 200
-  replay: patina replay /tmp/patina/patina-out/sweep/seed-4
-  explain: patina explain /tmp/patina/patina-out/sweep/seed-4
+  15 of 20 runs   first: seed 1   replayed: identical
+  rerun:  patina run --seed 1 --env PYTHONPATH=/sdk --mount /tmp/patina/tests/guests/compute/py:/guest --mount /tmp/patina/sdk/python:/sdk -- python3 -m patina /guest/pycompute.py cache 200
+  replay: patina replay /tmp/patina/patina-out/sweep/seed-1
+  explain: patina explain /tmp/patina/patina-out/sweep/seed-1
 ```
 
 CPU-bound Python now moves the clock: a timer or a `threading.Timer` cuts a loop with no
@@ -2666,9 +2668,9 @@ exact-only: one seed's run
 $ patina run --seed 2 -- ./stats-cp
 failure (exit): exit status 1
 guest: exit 1
-compute points: /tmp/src/patina/stats-cp (edges, accesses); 169,645 events, 1,028 switches, mean gap 120
+compute points: /tmp/src/patina/stats-cp (edges, accesses); 169,677 events, 1,369 switches, mean gap 120
 guest stderr (1 lines, /tmp/src/patina/patina-out/run-2/inc-0/stderr):
-  lost updates: 198 of 200 jobs counted
+  lost updates: 197 of 200 jobs counted
 run directory: /tmp/src/patina/patina-out/run-2
 replay: patina replay /tmp/src/patina/patina-out/run-2
 explain: patina explain /tmp/src/patina/patina-out/run-2
@@ -2888,7 +2890,11 @@ Where `spin probes` is off, programs still run; a spin-wait with no hint instruc
 ends `compute-stall`, and the stall's message says why the probe was off.
 
 Seeds and digests are per architecture and per kind of host. A seed found on x86_64 is a
-different run on arm64. On one host a seed repeats exactly. Across hosts of one architecture, a
+different run on arm64. On one host a seed repeats exactly. Under load-time points (the
+default) a seed's schedule, and so its faults and the times it reads, follows the instructions
+the program runs: the same seed is the same run only with the same program and libraries, and
+a library routine chosen by CPU feature (glibc's `memcpy`, say) makes it another run on another
+CPU model. Under `[sched] preempt = "traps"`, across hosts of one architecture, a
 static program that reads no host file gives the same digest, apart from what it reads of the
 host: the kernel release (`uname`), addresses that follow the CPU's state size (XSAVE on
 x86_64), signal-frame records that follow the CPU's features, and code a library chooses by CPU

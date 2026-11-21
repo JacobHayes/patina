@@ -21,7 +21,16 @@ fields=$(awk '/^[<>]/ {print $2, $3}' "$o/diff.txt" | sort -u | tr '\n' ';')
 echo "differing fields: $fields"
 allowed="fp.hdr.xstate_bv fp.legacy_reserved_416_464_zero mc.reserved1_zero uc_stack.pad uc.unused_zero mc.pad_zero rec.tail_zero rec.sve.size rec.sve.beyond_fpsimd"
 for f in $(awk '/^[<>]/ {print $3}' "$o/diff.txt" | sort -u); do
-    case " $allowed " in *" $f "*) ;; *) die "field $f differs" ;; esac
+    case " $allowed " in *" $f "*) continue ;; esac
+    # arm64: the load fault's ESR names the translation table level the walk stopped at, which
+    # follows what else is mapped in the 512 GiB around address 16 (another layout under
+    # load-time points than under traps): the rest of it must match.
+    if [ "$f" = rec.esr.esr ]; then
+        a=$(awk '$2 == "fault" && $3 == "rec.esr.esr" {print $4}' "$o/diff.txt" | head -1)
+        b=$(awk '$2 == "fault" && $3 == "rec.esr.esr" {print $4}' "$o/diff.txt" | tail -1)
+        [ $((a & ~3)) = $((b & ~3)) ] && continue
+    fi
+    die "field $f differs"
 done
 # The normalised values themselves.
 if ! grep -q 'fp.hdr.xstate_bv' "$o/patina.txt"; then

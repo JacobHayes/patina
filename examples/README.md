@@ -174,17 +174,17 @@ exit: 0 0 1
 ```sh
 cc -o upcase examples/upcase-c/upcase.c
 patina run --seed 1 --out patina-out/upcase-ref -- ./upcase
-patina sweep --seeds 1..40 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/upcase-ref' --out patina-out/upcase -- ./upcase
+patina sweep --seeds 1..100 --faults disk --ok-exit 1 --check 'examples/checks/same-tree patina-out/upcase-ref' --out patina-out/upcase -- ./upcase
 ```
 
 ```text
 ...
-patina sweep: 40 runs, 11 findings in 1 group, 29 ok   (0.5s, 8 jobs)
-outcomes: ok 29, violation 11
-check: judged 40 of 40 runs: 29 passed, 11 failed
+patina sweep: 100 runs, 21 findings in 1 group, 79 ok (5 by --ok-exit)   (0.4s, 8 jobs)
+outcomes: ok 79, violation 21
+check: judged 95 of 100 runs: 74 passed, 21 failed; 5 not judged (clean-failure 5)
 
 violation check: wrong-output: Files want/out.txt and got/out.txt differ
-  11 of 40 runs   first: seed 2   replayed: identical
+  21 of 100 runs   first: seed 2   replayed: identical
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --faults disk --check 'examples/checks/same-tree patina-out/upcase-ref' --ok-exit 1 -- /tmp/patina/upcase
   replay: patina replay /tmp/patina/patina-out/upcase/seed-2
@@ -225,37 +225,34 @@ violation always: balance-matches-deposits: balance N, deposits N
 
 ## stats-c (C, compute points): a race with no system call in it
 
-Four workers update shared statistics without their lock. The update makes no system call, so
-the stock build runs it the same way on every seed. Rebuilt with clang's coverage flags and the
-hook file, its threads also switch inside computation
+Four workers update shared statistics without their lock. The update makes no system call and
+lies a few instructions from the nearest load-time point, so a sweep of the stock build
+(`cc -O2 -pthread -o stats examples/stats-c/stats.c`) seldom shows it. Rebuilt with clang's
+coverage flags and the hook file, its threads also switch inside the update
 ([the guide](../docs/GUIDE.md#deeper-search-rebuilt-code)).
 
 <!-- transcript stats
-exit: 0 0 0 1
+exit: 0 1
 -->
 ```sh
-cc -O2 -pthread -o stats examples/stats-c/stats.c
-patina sweep --seeds 1..20 --out patina-out/stats -- ./stats
 clang -O2 -pthread -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime \
   -o stats-cp examples/stats-c/stats.c sdk/c/patina_compute.c
-patina sweep --seeds 1..20 --out patina-out/stats-cp -- ./stats-cp
+patina sweep --seeds 1..10 --out patina-out/stats-cp -- ./stats-cp
 ```
 
 ```text
 ...
-patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (0.7s, 8 jobs)
-outcomes: failure 13, ok 7
+patina sweep: 10 runs, 6 findings in 1 group, 4 ok   (1.1s, 8 jobs)
+outcomes: failure 6, ok 4
 compute points: /tmp/patina/stats-cp (edges, accesses)
 
 failure exit: lost updates: N of N jobs counted; exit 1
-  13 of 20 runs   first: seed 2   replayed: identical
-  example: lost updates: 198 of 200 jobs counted
+  6 of 10 runs   first: seed 2   replayed: identical
+  example: lost updates: 197 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/patina/stats-cp
   replay: patina replay /tmp/patina/patina-out/stats-cp/seed-2
   explain: patina explain /tmp/patina/patina-out/stats-cp/seed-2
 ```
-
-The stock sweep before it is `ok` on every seed.
 
 ## serve-c (C, SDK): a check-then-use race found by path swaps
 
