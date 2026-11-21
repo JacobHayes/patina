@@ -1653,6 +1653,18 @@ Out of scope (a deliberate attack):
 Write protection that switches at every trap (`mprotect` on entry and exit) was measured and
 rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs.
 
+## Removed: hardware branch counters
+
+`[sched] preempt = "branches"` preempted after a seed-chosen number of retired branches, read
+from a perf counter a `CAP_PERFMON` launcher opened and finished exactly by single steps. Removed:
+load-time points with walks find more at far less cost (17 to 30 µs per switch against 1.7 to
+3.4 ms per counter preemption); counting was exact on AMD Zen 5 and Arm Neoverse N2 only, CI could
+not test it on x86_64, and virtual machines' late interrupts ended runs `pmu-late`. Worth bringing
+back only for a real bug class, mattering to a user, in code load-time points cannot patch (JIT
+output, text the rewriter cannot prove is code); for precise, virtualisation-safe branch counting
+on ordinary CI runners; or for evidence that load-time rewriting is unsound for an important class
+of programs. The last commit with it is `0327ddd71c5a`.
+
 ## Limits
 
 - **Linux x86_64 and arm64.** No macOS. Unprivileged user namespaces are required (on
