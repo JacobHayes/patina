@@ -2,7 +2,8 @@
 #    prints admits this binary by its canonical path and nothing else, and, where the parser is
 #    installed, parses (offline, nothing loaded). On arm64, a host with 16 KiB pages (faked:
 #    PATINA_TEST_PAGE_SIZE) fails the page-size check, and the launcher refuses a run with
-#    `error` before any sandbox.
+#    `error` before any sandbox. Where Ubuntu restricts user namespaces, a copy of patina no
+#    profile names is refused before its run, with the fix doctor prints for it.
 #@ tier=quick,release budget=10
 . "$(dirname "$0")/lib.inc"
 st=0
@@ -43,4 +44,25 @@ PY
     [ "$st" = "$(exit_of error)" ] || die "16 KiB pages: run exit $st: $(cat "$RUNS/pages-run.txt")"
     [ ! -e "$RUNS/pages-run" ] || die "16 KiB pages: the run started"
     echo "16 KiB pages: refused: $(cat "$RUNS/pages-run.txt")"
+fi
+
+# Where the host restricts user namespaces to profiled programs, a copy of patina at a path no
+# profile names is refused before its run starts, with doctor's fix for that copy.
+if [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]; then
+    mkdir -p "$RUNS/unprofiled"
+    cp "$PATINA" "$RUNS/unprofiled/patina"
+    st=0
+    timeout 60 "$RUNS/unprofiled/patina" run --out "$RUNS/unprofiled/run" -- /bin/true >"$RUNS/unprofiled/run.txt" 2>&1 || st=$?
+    [ "$st" = "$(exit_of error)" ] || die "unprofiled: run exit $st: $(cat "$RUNS/unprofiled/run.txt")"
+    [ ! -e "$RUNS/unprofiled/run" ] || die "unprofiled: the run started"
+    st=0
+    timeout 60 "$RUNS/unprofiled/patina" doctor --format json >"$RUNS/unprofiled/doctor.json" 2>&1 || st=$?
+    python3 -I - "$RUNS/unprofiled/doctor.json" "$RUNS/unprofiled/run.txt" <<'PY' || die "unprofiled: the run's fix is not doctor's: $(cat "$RUNS/unprofiled/run.txt")"
+import json, sys
+fix = [c["fix"] for c in json.load(open(sys.argv[1]))["checks"] if c["name"] == "user namespaces" and not c["ok"]]
+assert fix and fix[0], fix
+assert f"fix: {fix[0]}" in open(sys.argv[2]).read().splitlines()
+PY
+    rm -f "$RUNS/unprofiled/patina"
+    echo "unprofiled copy: refused with doctor's fix"
 fi

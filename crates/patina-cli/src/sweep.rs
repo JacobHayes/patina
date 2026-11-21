@@ -34,6 +34,9 @@ extern "C" fn on_signal(_: libc::c_int) {
     INTERRUPTED.store(true, SeqCst);
 }
 
+/// The seeds of a sweep that names none.
+pub const DEFAULT_SEEDS: &str = "1..100";
+
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
 const OWN: [&str; 15] = [
     "--seeds",
@@ -894,11 +897,7 @@ fn clock(s: f64) -> String {
 }
 
 pub fn main(a: &Args) -> Result<ExitCode, Fail> {
-    let seeds = parse_seeds(
-        a.last("--seeds")
-            .ok_or_else(|| error("--seeds is required (A..B, or a list N,M,...)".into()))?,
-    )
-    .map_err(error)?;
+    let seeds = parse_seeds(a.last("--seeds").unwrap_or(DEFAULT_SEEDS)).map_err(error)?;
     // The configuration every run resolves to, checked once here rather than failing in
     // every run. With --cases and no command, each line is a whole command.
     let cfg = crate::config::resolve_any(a).map_err(error)?;

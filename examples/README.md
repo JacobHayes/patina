@@ -37,6 +37,7 @@ failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: res
   example: panicked at src/main.rs:28:5: assertion `left == right` failed: results out of job order
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/patina-out/quickstart/seed-1
+  explain: patina explain /tmp/patina/patina-out/quickstart/seed-1
 ```
 
 ## ledger (Rust, SDK): a rare path found by a fault point
@@ -64,6 +65,7 @@ violation always: ledger-sorted: after N
   example: ledger-sorted: after 2
   rerun:  patina run --seed 1 --buggify -- /tmp/patina/examples/ledger/target/release/ledger
   replay: patina replay /tmp/patina/patina-out/ledger/seed-1
+  explain: patina explain /tmp/patina/patina-out/ledger/seed-1
 ```
 
 ## journal-py (Python, SDK): a short write found by disk faults
@@ -91,6 +93,7 @@ violation always: journal-intact: N bytes
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/examples/journal-py:/guest --mount /tmp/patina/sdk/python:/sdk --faults disk -- python3 /guest/journal.py
   replay: patina replay /tmp/patina/patina-out/journal-py/seed-2
+  explain: patina explain /tmp/patina/patina-out/journal-py/seed-2
 ```
 
 ## acklog-c (C, SDK): lost data found by machine crashes
@@ -117,6 +120,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 3 --crash machine -- /tmp/patina/acklog
   replay: patina replay /tmp/patina/patina-out/acklog/seed-3
+  explain: patina explain /tmp/patina/patina-out/acklog/seed-3
 ```
 
 ## kvlog-c (C, no SDK): lost data found by a check from outside
@@ -146,6 +150,7 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- /tmp/patina/kvlog
   replay: patina replay /tmp/patina/patina-out/kvlog/seed-2
+  explain: patina explain /tmp/patina/patina-out/kvlog/seed-2
 ```
 
 Runs that did not crash are not judged.
@@ -183,6 +188,7 @@ violation check: wrong-output: Files want/out.txt and got/out.txt differ
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 5 --faults disk --check 'examples/checks/same-tree patina-out/upcase-ref' --ok-exit 1 -- /tmp/patina/upcase
   replay: patina replay /tmp/patina/patina-out/upcase/seed-5
+  explain: patina explain /tmp/patina/patina-out/upcase/seed-5
 ```
 
 The same sweep without `--ok-exit` and `--check` reports only the clean failures.
@@ -214,6 +220,7 @@ violation always: balance-matches-deposits: balance N, deposits N
   faults in every failing run: net-reset      in none: -
   rerun:  patina run --seed 2 --fault net-reset-permille=50 -- /tmp/patina/bank
   replay: patina replay /tmp/patina/patina-out/bank/seed-2
+  explain: patina explain /tmp/patina/patina-out/bank/seed-2
 ```
 
 ## stats-c (C, compute points): a race with no system call in it
@@ -245,6 +252,7 @@ failure exit: lost updates: N of N jobs counted; exit 1
   example: lost updates: 198 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/patina/stats-cp
   replay: patina replay /tmp/patina/patina-out/stats-cp/seed-2
+  explain: patina explain /tmp/patina/patina-out/stats-cp/seed-2
 ```
 
 The stock sweep before it is `ok` on every seed.
@@ -276,6 +284,7 @@ violation always: served-only-public: N bytes
   faults in every failing run: path-swap      in none: -
   rerun:  patina run --seed 4 --fault path-swap-permille=300 -- /tmp/patina/serve
   replay: patina replay /tmp/patina/patina-out/serve/seed-4
+  explain: patina explain /tmp/patina/patina-out/serve/seed-4
 ```
 
 The fixed program opens with `O_NOFOLLOW` and serves

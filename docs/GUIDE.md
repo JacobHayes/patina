@@ -177,7 +177,8 @@ preset = "disk"
 fsync-error-permille = 0
 ```
 
-With that file, `patina sweep --seeds 1..50 --out patina-out/toml` needs no other arguments.
+With that file, `patina sweep` needs no other arguments: it runs seeds 1 to 100 into
+`patina-out/sweep`.
 
 ## Sweeps
 
@@ -190,7 +191,7 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 
 | Flag | Effect |
 |---|---|
-| `--seeds 1..200,250` | an inclusive range, a list, or both |
+| `--seeds 1..200,250` | an inclusive range, a list, or both (default `1..100`) |
 | `-j N` | runs at once (default the CPUs, at most 8) |
 | `--out DIR` | where runs go (default `patina-out/sweep`) |
 | `--keep fail\|checked\|all\|none` | whose logs to keep: the findings', also those of every run a `--check` read (to judge them again, [below](#judging-again)), every run's, none; `run.json` and `result.json` always stay |
@@ -293,6 +294,7 @@ outcomes: failure 10, ok 10
   example: AssertionError: 3 != 2
   rerun:  patina run --seed 1 --config /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter/run.json -- python3 -m unittest test_store.Store.test_counter
   replay: patina replay /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
+  explain: patina explain /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
 ```
 
 Given a command after `--`, a line is instead put in place of `{}` in it: `--cases names.txt
@@ -391,6 +393,7 @@ violation check: wrong-mul: got N, want N
   example: wrong-mul: got 1, want 0
   rerun:  patina run --seed 1 --config /tmp/calc/patina-out/sweep/seed-1/19-0/run.json -- /bin/sh /demo/calc mul 1 0
   replay: patina replay /tmp/calc/patina-out/sweep/seed-1/19-0
+  explain: patina explain /tmp/calc/patina-out/sweep/seed-1/19-0
 
 known sub-clamps: violation check: wrong-sub: got N, want -N   (6 runs, 3 cases)
 known planted: violation check: wrong-planted: got , want wrong   (2 runs)
@@ -456,6 +459,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 1 --crash machine-at:8 -- /tmp/acklog/acklog
   replay: patina replay /tmp/acklog/patina-out/sweep/seed-1@8
+  explain: patina explain /tmp/acklog/patina-out/sweep/seed-1@8
 ```
 
 A run forced to crash at point N that does not crash there ran another prefix than its seed's
@@ -653,6 +657,7 @@ last injected:
   seq 83 t=100000ms path-swap /work/public/report.txt became a symlink to /etc/passwd between newfstatat (seq 82) and openat
 run directory: /tmp/serve/patina-out/run-4
 replay: patina replay /tmp/serve/patina-out/run-4
+explain: patina explain /tmp/serve/patina-out/run-4
 ```
 
 In `result.json` each swap names its `object`, the `swap` (`symlink`, `rename`, `remove`), its
@@ -693,6 +698,7 @@ last injected:
   seq 124 t=100000ms crash kind=machine point=97 object=/work/data.log lost: 0 missing, 1 changed, 0 back
 run directory: /tmp/acklog/patina-out/run-3
 replay: patina replay /tmp/acklog/patina-out/run-3
+explain: patina explain /tmp/acklog/patina-out/run-3
 ```
 
 What survives a machine crash follows `ext4-ordered` by default; `[faults] fs-model =
@@ -809,6 +815,7 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 2 --crash machine:10 --check examples/checks/acked-kept -- /tmp/kvlog/kvlog
   replay: patina replay /tmp/kvlog/patina-out/sweep/seed-2
+  explain: patina explain /tmp/kvlog/patina-out/sweep/seed-2
 ```
 
 The `check:` line counts what the checker said: judged (it passed or failed the run), not
@@ -840,6 +847,7 @@ last injected:
 checker output: /tmp/kvlog/patina-out/run-2/check.out
 run directory: /tmp/kvlog/patina-out/run-2
 replay: patina replay /tmp/kvlog/patina-out/run-2
+explain: patina explain /tmp/kvlog/patina-out/run-2
 ```
 
 The checker is part of the run's record: `run.json` keeps its words, its directory, its
@@ -1086,6 +1094,7 @@ violation check: wrong-output: Files want/out.txt and got/out.txt differ
   faults in every failing run: fs-short      in none: fs-error, fsync-error
   rerun:  patina run --seed 5 --faults disk --check 'examples/checks/same-tree patina-out/ref' --ok-exit 1 -- /tmp/upcase/upcase
   replay: patina replay /tmp/upcase/patina-out/sweep/seed-5
+  explain: patina explain /tmp/upcase/patina-out/sweep/seed-5
 ```
 
 The finding is like any other: one run of it names the short write, `minimize` keeps only the
@@ -1106,6 +1115,7 @@ last injected:
 checker output: /tmp/upcase/patina-out/run-5/check.out
 run directory: /tmp/upcase/patina-out/run-5
 replay: patina replay /tmp/upcase/patina-out/run-5
+explain: patina explain /tmp/upcase/patina-out/run-5
 $ patina minimize patina-out/sweep/seed-5
 without fs-error-permille=0..5: still fails
 without fs-short-permille=0..20: no longer fails
@@ -1163,6 +1173,7 @@ check: judged 9 of 9 runs: 6 passed, 3 failed
   3 of 9 runs   first: seed 1, case 1   replayed: identical
   rerun:  patina run --seed 1 --config /tmp/sh/patina-out/sh/seed-1/1-a_tb/run.json -- dash -c 'echo -e '\''a\tb'\'''
   replay: patina replay /tmp/sh/patina-out/sh/seed-1/1-a_tb
+  explain: patina explain /tmp/sh/patina-out/sh/seed-1/1-a_tb
 ```
 
 (dash's `echo` prints `-e a	b`.) A checker may as well run the reference itself, natively.
@@ -1405,6 +1416,7 @@ failure exit: exit 1
   nodes: n1 down in 0, n2 down in 0, n3 down in 0, partitioned at the end in 5
   rerun:  patina run --seed 1 --config /tmp/q3/patina-out/sweep/seed-1/run.json -- python3 /guest/q3.py driver 90
   replay: patina replay /tmp/q3/patina-out/sweep/seed-1
+  explain: patina explain /tmp/q3/patina-out/sweep/seed-1
 
 faults: not applicable (a preset's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
@@ -1523,6 +1535,7 @@ failure exit: exit 1
   nodes: n1 down in 5, n2 down in 4, n3 down in 5
   rerun:  patina run --seed 3 --config /tmp/q3k/patina-out/sweep/seed-3/run.json -- python3 /guest/q3.py driver 60
   replay: patina replay /tmp/q3k/patina-out/sweep/seed-3
+  explain: patina explain /tmp/q3k/patina-out/sweep/seed-3
 $ grep FAIL patina-out/sweep/seed-3/inc-0/stdout
 FAIL: lost write: k2 read 0 in view 0; 80 was seen before (ack in view 0; views up to 0)
 ```
@@ -1648,6 +1661,7 @@ failure exit: FAIL: acknowledged put lost on b; exit 1
   nodes: a down in 0, b down in 6 (lost on its disk in 6; crash points 1, 2, 3, 8, 9, 12)
   rerun:  patina run --seed 1 --config /tmp/ack2/patina-out/sweep/seed-1@b.1/run.json -- python3 /guest/ack2.py driver 3
   replay: patina replay /tmp/ack2/patina-out/sweep/seed-1@b.1
+  explain: patina explain /tmp/ack2/patina-out/sweep/seed-1@b.1
 ```
 
 A group's `nodes:` line says, for its failing runs, in how many each node went down, in how many
@@ -1695,6 +1709,7 @@ failure exit: exit 1
   nodes: n1 down in 16 (lost on its disk in 16; crash points 21, 24, 26, 27, 29, 34, 35, 38, 39, 49, 50, 51, 54, 61, 62, 69), n2 down in 9 (lost on its disk in 9; crash points 41, 42, 66, 95, 104, 115, 117, 139), n3 down in 7 (lost on its disk in 6; crash points 34, 48, 54, 62, 70, 96)
   rerun:  patina run --seed 1 --config /tmp/q3-pairs/patina-out/sweep/seed-1@n1.24+n2.42/run.json -- python3 /guest/q3.py driver 2
   replay: patina replay /tmp/q3-pairs/patina-out/sweep/seed-1@n1.24+n2.42
+  explain: patina explain /tmp/q3-pairs/patina-out/sweep/seed-1@n1.24+n2.42
 ```
 
 The correct store (no `nosync`) is ok at every first crash and pair of the same sweep
@@ -1874,7 +1889,7 @@ production builds without flags.
 | `buggify(label)` | a fault point: true on seed-chosen evaluations under `--buggify` |
 | `knob(label, default, lo, hi)` | a seed-chosen value under `--buggify` |
 | `mark(label)` | a named point in the run's log, label in clear (up to 255 bytes, so it can carry data: `mark("ack 17")`); `setup_complete()` is `mark("setup-complete")` |
-| `control(words)` | Python and C (`patina_control`): a control call, such as `net cut a b` in a run with nodes ([Several machines](#several-machines)); raises (returns) the errno Patina answered |
+| `control(words)` | a control call (C: `patina_control`), such as `net cut a b` in a run with nodes ([Several machines](#several-machines)); raises (returns) the errno Patina answered |
 
 A mark records what the program promised, where it promised it; a checker decides whether
 the promise was backed. `patina log events` shows each mark's label, process and place among
@@ -2409,6 +2424,7 @@ failure exit: lost updates: N of N jobs counted; exit 1
   example: lost updates: 198 of 200 jobs counted
   rerun:  patina run --seed 2 -- /tmp/src/patina/stats-cp
   replay: patina replay /tmp/src/patina/patina-out/stats-cp/seed-2
+  explain: patina explain /tmp/src/patina/patina-out/stats-cp/seed-2
 ```
 
 The cost: an event takes under a nanosecond in C and Rust and about 2 ns in Go, natively or
@@ -2522,6 +2538,7 @@ failure exit: exit 1
   11 of 20 runs   first: seed 2   replayed: identical
   rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/tests/guests/compute/py:/guest --mount /tmp/patina/sdk/python:/sdk -- python3 -m patina /guest/pycompute.py cache 200
   replay: patina replay /tmp/patina/patina-out/sweep/seed-2
+  explain: patina explain /tmp/patina/patina-out/sweep/seed-2
 ```
 
 CPU-bound Python now moves the clock: a timer or a `threading.Timer` cuts a loop with no
@@ -2569,6 +2586,7 @@ guest stderr (1 lines, /tmp/src/patina/patina-out/run-2/inc-0/stderr):
   lost updates: 198 of 200 jobs counted
 run directory: /tmp/src/patina/patina-out/run-2
 replay: patina replay /tmp/src/patina/patina-out/run-2
+explain: patina explain /tmp/src/patina/patina-out/run-2
 ```
 
 `patina sweep` names the images once. No line means no rebuilt code ran: the flags did not
@@ -2643,6 +2661,7 @@ failure exit: exit 1
   8 of 20 runs   first: seed 2   replayed: identical
   rerun:  patina run --seed 2 --fault compute-gap=2..64 --preempt points -- /tmp/src/patina/race
   replay: patina replay /tmp/src/patina/patina-out/race/seed-2
+  explain: patina explain /tmp/src/patina/patina-out/race/seed-2
 ```
 
 `patina run` prints a `load-time points:` line: the points taken, each rewritten file with the
@@ -2664,7 +2683,7 @@ copied code, and switches before an x86_64 `pushf` or an arm64 exclusive load. T
 `load-time points:` line counts the switches taken after a walk (`result.json`: `walks`,
 `walk_steps`, `walks_cut`, and `walk_max`, the seed's W). A walk costs about one single-step
 per switch, whatever W is. On arm64 walks write breakpoints through `/proc/self/mem`; a host
-that refuses that ends the run `infra` (or set `compute-walk=0`).
+that refuses that ends the run `internal` (or set `compute-walk=0`).
 
 The lost update of `tests/guests/rewrite/races.c lms` (a load and a store through a pointer, in
 a loop) is found on about 1 in 10 seeds at the default gap with walks and on none without, and

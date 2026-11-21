@@ -113,6 +113,7 @@ failure exit: panicked at src/main.rs:N:N: assertion `left == right` failed: res
   example: panicked at src/main.rs:28:5: assertion `left == right` failed: results out of job order
   rerun:  patina run --seed 1 -- /tmp/patina/examples/quickstart/target/debug/jobs
   replay: patina replay /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
+  explain: patina explain /tmp/patina/examples/quickstart/patina-out/sweep/seed-1
 ```
 
 Each group is one bug: its signature, how many runs hit it, and the lowest seed among them.

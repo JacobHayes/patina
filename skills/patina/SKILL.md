@@ -86,6 +86,7 @@ violation always: acked-records-kept: N acknowledged, N stored
   faults in every failing run: crash      in none: -
   rerun:  patina run --seed 3 --crash machine -- /tmp/app/app
   replay: patina replay /tmp/app/patina-out/sweep/seed-3
+  explain: patina explain /tmp/app/patina-out/sweep/seed-3
 ```
 
 6. **Read groups, not logs.** A group is one bug: signature, run count, lowest seed and the

@@ -131,6 +131,7 @@ outcomes: failure 10, ok 10
   example: AssertionError: 3 != 2
   rerun:  patina run --seed 1 --config /tmp/suite/patina-out/sweep/seed-1/2-test_store.Store.test_counter/run.json -- python3 -m unittest test_store.Store.test_counter
   replay: patina replay /tmp/suite/patina-out/sweep/seed-1/2-test_store.Store.test_counter
+  explain: patina explain /tmp/suite/patina-out/sweep/seed-1/2-test_store.Store.test_counter
 ```
 
 Write the cases file with one loop over the runner's own listing. Go: `go test -c -o pkg.test`,

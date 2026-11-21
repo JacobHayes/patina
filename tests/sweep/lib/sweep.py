@@ -128,6 +128,11 @@ print("first seeds run alone: same digest and signature as inside the sweep")
 st, rep, _ = sweep("clean", "--seeds", "1..8", *FS, "--", GUEST)
 if st != 0 or rep["groups"] or rep["vacuous"]:
     die(f"bug-free guest: exit {st} {rep['groups']}")
+# No --seeds: seeds 1 to 100.
+st, rep, _ = sweep("default-seeds", "--", GUEST)
+seeds = sorted(int(d[len("seed-"):]) for d in os.listdir(os.path.join(RUNS, "default-seeds")) if d.startswith("seed-"))
+if st != 0 or rep["runs"] != 100 or seeds != list(range(1, 101)):
+    die(f"sweep without --seeds: exit {st}, {rep['runs']} runs, seeds {seeds[:3]}..{seeds[-3:]}")
 st, rep, text = sweep("never", "--seeds", "1..4", "--", GUEST, "never")
 if st != 2 or rep["sdk"]["sometimes_never_held"] != ["rare-state"]:
     die(f"a sometimes that never holds: exit {st} {rep['sdk']}\n{text}")

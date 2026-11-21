@@ -65,7 +65,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Sweep,
         name: "sweep",
-        usage: "patina sweep --seeds A..B [--cases FILE] [-j N] [run options] [-- CMD ARGS...]",
+        usage: "patina sweep [--seeds A..B] [--cases FILE] [-j N] [run options] [-- CMD ARGS...]",
         help: "many seeds in parallel, each a normal run; findings grouped by signature",
     },
     Command {
@@ -355,14 +355,14 @@ pub const FLAGS: &[Flag] = &[
     flag(
         "--seeds",
         "A..B|N,M,...",
-        "",
+        "1..100",
         "the seeds: an inclusive range, a list, or both (1..100,250)",
         &[Cmd::Sweep],
     ),
     flag(
         "--jobs",
         "N",
-        "half the CPUs, at most 8",
+        "the CPUs, at most 8",
         "runs at once, each pinned to its own CPU (also -j N); recheck: checkers at once",
         &[Cmd::Sweep, Cmd::Recheck],
     ),

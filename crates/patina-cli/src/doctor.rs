@@ -22,7 +22,7 @@ fn sysctl(name: &str) -> Option<String> {
 }
 
 /// Patina's own executable, as AppArmor names it (the path a profile attaches to).
-fn exe() -> std::path::PathBuf {
+pub fn exe() -> std::path::PathBuf {
     std::fs::canonicalize("/proc/self/exe").unwrap_or_else(|_| "/proc/self/exe".into())
 }
 
@@ -73,7 +73,7 @@ fn profile_fix() -> String {
 }
 
 /// What lets Patina make its namespaces here.
-fn namespace_fix() -> String {
+pub fn namespace_fix() -> String {
     let restricted = sysctl("kernel.apparmor_restrict_unprivileged_userns").as_deref() == Some("1");
     // A container's default profile denies them (seccomp, AppArmor) and masks parts of /proc,
     // which keeps a new /proc from being mounted. On a host that restricts user namespaces

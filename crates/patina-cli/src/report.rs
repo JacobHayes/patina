@@ -1697,6 +1697,10 @@ fn group_text(g: &Value, runs: u64, faulted: bool) -> String {
     }
     s.push_str(&format!("  rerun:  {}\n", st("rerun")));
     s.push_str(&format!("  replay: {}\n", st("replay_command")));
+    s.push_str(&format!(
+        "  explain: patina explain {}\n",
+        quote(g["first"]["dir"].as_str().unwrap_or(""))
+    ));
     s
 }
 

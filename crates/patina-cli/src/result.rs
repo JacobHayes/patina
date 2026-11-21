@@ -987,6 +987,9 @@ pub fn print_human(r: &Value, dir: &Path) {
     }
     println!("run directory: {}", dir.display());
     println!("replay: patina replay {}", dir.display());
+    if r["exit"] == 1 {
+        println!("explain: patina explain {}", dir.display());
+    }
 }
 
 /// Images a summary line names; the rest are counted (the JSON has them all).

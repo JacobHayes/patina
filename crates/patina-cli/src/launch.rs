@@ -651,9 +651,13 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
 /// Can a run start here? Checked by every command before its first sandbox: the host meets
 /// this architecture's requirements (`host`, which `patina doctor` explains); as root, the
 /// sandbox's user namespace can be made and the host paths it binds can be read by the user it
-/// maps to; counters work if `--preempt branches` asks for them.
+/// maps to; as another user, the host lets this executable make one (`userns_allowed`);
+/// counters work if `--preempt branches` asks for them.
 pub fn preflight(o: &Opts) -> Res<()> {
     crate::host::refusal(&crate::host::Facts::probe(o.cfg.host_cpu))?;
+    if root_user().is_none() {
+        userns_allowed()?;
+    }
     if let Some(user) = root_user() {
         userns()?;
         if user.0 == OVERFLOW {
@@ -676,6 +680,49 @@ pub fn preflight(o: &Opts) -> Res<()> {
 }
 
 const OVERFLOW: u32 = 65534;
+
+/// Whether the host lets this executable make the sandbox's user namespace and map itself in
+/// it, as the sandbox does first: tried in a child only where a sysctl restricts unprivileged
+/// user namespaces (Ubuntu 24.04 and later admit them for a program with an AppArmor
+/// profile). A refusal is `patina doctor`'s finding and its fix, before any run directory.
+fn userns_allowed() -> Res<()> {
+    let on =
+        |k: &str| std::fs::read_to_string(format!("/proc/sys/{k}")).is_ok_and(|v| v.trim() == "1");
+    if !on("kernel/apparmor_restrict_unprivileged_userns") {
+        return Ok(());
+    }
+    // The child: a new user namespace, then the write the sandbox makes first in it.
+    let pid = unsafe { libc::fork() };
+    if pid == 0 {
+        unsafe {
+            let e = if libc::unshare(libc::CLONE_NEWUSER) != 0 {
+                *libc::__errno_location()
+            } else {
+                let fd = libc::open(c"/proc/self/setgroups".as_ptr(), libc::O_WRONLY);
+                if fd < 0 || libc::write(fd, b"deny".as_ptr().cast(), 4) != 4 {
+                    *libc::__errno_location()
+                } else {
+                    0
+                }
+            };
+            libc::_exit(e.clamp(0, 255));
+        }
+    }
+    if pid < 0 {
+        return Ok(());
+    }
+    let mut st = 0;
+    unsafe { libc::waitpid(pid, &mut st, 0) };
+    match libc::WIFEXITED(st).then(|| libc::WEXITSTATUS(st)) {
+        Some(0) | None => Ok(()),
+        Some(e) => Err(format!(
+            "this host does not let {} make its sandbox: /proc/self/setgroups: {}\nfix: {}",
+            crate::doctor::exe().display(),
+            std::io::Error::from_raw_os_error(e),
+            crate::doctor::namespace_fix()
+        )),
+    }
+}
 
 /// Run as root, the host user the sandbox's user 1000 is: the user sudo was run by
 /// (`SUDO_UID`, `SUDO_GID`), else nobody. `None` for an ordinary user, whose own uid it is.
