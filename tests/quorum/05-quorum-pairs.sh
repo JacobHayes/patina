@@ -4,8 +4,9 @@
 # A write two nodes acknowledged survives one crash; `nosync` (a node answers before it syncs)
 # loses it when both crash, found only in pairs. The correct store is ok at every first crash
 # and pair tried: it elects a primary after two crashes too (each node asks again after a grace
-# period of its own, and grants a higher view whether or not it is asking itself). A pair's
-# rerun line gives its digest again.
+# period of its own, and grants a higher view whether or not it is asking itself). Every
+# failing run kept (`--keep fail` keeps each group's first three) printed the lost write. A
+# pair's rerun line gives its digest again.
 #@ tier=area budget=90 slots=6
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/05-quorum-pairs; mkdir -p "$o"
@@ -30,11 +31,12 @@ PY
 pairs nosync fail
 [ "$st" = 1 ] || die "nosync: exit $st: $(tail -5 "$o/nosync.txt")"
 python3 -I - "$o/nosync/report.json" <<'PY' || die "nosync"
-import json, sys
+import json, os, sys
 r = json.load(open(sys.argv[1]))
 runs = [x for g in r["groups"] for x in g["runs"]]
 assert runs and all("point2" in x for x in runs), [(x.get("node"), x["point"], x.get("node2")) for x in runs]
-assert all("lost write" in open(x["dir"] + "/inc-0/stdout").read() for x in runs), r["groups"][0]["signature"]
+kept = [x["dir"] + "/inc-0/stdout" for x in runs if os.path.isfile(x["dir"] + "/inc-0/stdout")]
+assert kept and all("lost write" in open(p).read() for p in kept), r["groups"][0]["signature"]
 print("nosync: a lost write in %d of %d pairs, in no first crash alone" % (len(runs), r["branch"]["pairs"]["tried"]))
 PY
 c=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["dir"])' "$o/nosync/report.json")

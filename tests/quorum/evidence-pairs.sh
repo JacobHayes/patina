@@ -17,12 +17,15 @@ for v in ok nosync early; do
         --out "$o/$v" --config "$f" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/q3.py driver 2 >"$o/$v.txt" 2>&1 || st=$?
     [ -f "$o/$v/report.json" ] || die "$v: no report (exit $st): $(tail -3 "$o/$v.txt")"
     python3 -I - "$o/$v/report.json" "$v" "$(( $(date +%s) - t0 ))" <<'PY'
-import collections, json, re, sys
+import collections, json, os, re, sys
 rep, name, wall = json.load(open(sys.argv[1])), sys.argv[2], sys.argv[3]
 b = rep["branch"]
 runs = [x for g in rep["groups"] for x in g["runs"]]
 labels = collections.Counter()
+# Labels from the runs whose output the sweep kept (each group's first three).
 for x in runs:
+    if not os.path.isfile(x["dir"] + "/inc-0/stdout"):
+        continue
     out = open(x["dir"] + "/inc-0/stdout").read()
     m = re.search(r"^FAIL: ([a-z ]+):", out, re.M)
     labels[m[1] if m else "other"] += 1
