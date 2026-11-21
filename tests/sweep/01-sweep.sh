@@ -12,5 +12,5 @@
 #    it inputs-changed; a livelock ends liveness (log-limit) at the same record twice, and a sweep of it
 #    is a finding that keeps bounded bytes (logs of its first three runs) whose cut logs still replay; an interrupted sweep leaves no process and no partial run;
 #    minimize keeps only the fault setting the finding needs, and its rerun command reproduces it.
-#@ tier=quick budget=60 slots=4
+#@ tier=quick budget=60 slots=1.5
 exec python3 -I "$(dirname "$0")/lib/sweep.py"

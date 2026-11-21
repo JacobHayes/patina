@@ -4,7 +4,7 @@
 #     256 MiB) and 2^20 inodes, its free counts the size minus what the run used; the
 #     superblock id is 0 everywhere. A `/` or `/dev` sized from the host's RAM (a tenth or
 #     half of it) fails here on any host.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/11-statfs
 verify_ok "$o" 1 cpu 2 -- /guest/statfs

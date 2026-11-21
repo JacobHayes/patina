@@ -4,7 +4,7 @@
 # limits, and in the launcher's child before the sandbox: a leaked descriptor, a new session with a
 # controlling terminal, the persona, nice, IO priority, scheduling policy, timer slack, THP,
 # OOM adjustment and every soft limit. A hard limit too low to honour ends the run as internal.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=1
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/inherit
 mkdir -p "$out"

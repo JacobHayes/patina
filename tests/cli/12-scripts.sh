@@ -12,7 +12,7 @@
 #    what Patina keeps from the program is refused as that path is. An image an `execve` inside
 #    the guest resolved that the new runtime cannot load again (a memfd) is not blamed on the
 #    program.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/scripts/f
 e=$RUNS/scripts/far

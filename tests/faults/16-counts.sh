@@ -4,7 +4,7 @@
 # a run whose operation log was corrupted (test hook PATINA_TEST_OPLOG_CORRUPT) reports the
 # failed self-check next to its own outcome, which stands (ok, or a violation with its label
 # and signature), and exits 2.
-#@ tier=quick budget=15
+#@ tier=quick budget=15 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/16
 run "$d/counts" 1 --faults disk,net --fault fs-error-permille=50 -- /guest/io-errors tally

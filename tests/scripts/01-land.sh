@@ -4,7 +4,7 @@
 #    another tree); a required job that passed only on a re-run, unless --accept-rerun; and
 #    main having moved while CI ran. Each refusal leaves main@origin off the commit and no branch
 #    on origin; otherwise main@origin is fast-forwarded to the commit and the branch is gone.
-#@ tier=quick budget=15
+#@ tier=quick budget=15 slots=0.5
 : "${RUNS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 die() { echo "FAIL: $*"; exit 1; }

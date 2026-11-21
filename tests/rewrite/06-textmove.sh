@@ -10,7 +10,7 @@
 # Each: the native output; part of the plan put back and none of it dropped; a point taken
 # after the change in the page the threads run (hot, or cold for remap): the rest kept its
 # points; identical under --vary cpu,load,aslr,sandbox,repeat.
-#@ tier=quick budget=40 slots=4
+#@ tier=quick budget=40 slots=3.5
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 . "$(dirname "$0")/../json.inc"

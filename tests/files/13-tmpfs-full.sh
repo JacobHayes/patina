@@ -3,7 +3,7 @@
 #     most that many bytes, result.json counts the ENOSPC with the size, and `patina run`
 #     names the setting; a `:copy` mount larger than the size (the guest set)
 #     ends the run naming it too.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/13-tmpfs-full
 size=$((8 << 20))

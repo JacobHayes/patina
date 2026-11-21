@@ -1,10 +1,9 @@
 # 2. Atomicity: 8 threads x 1,000 records of exactly 4,096 bytes into one pipe; the reader
-#    never sees an interleaved record. Seed 1 at preempt-permille 1000 (the area tier 100 and
-#    500 too).
-#@ tier=quick budget=30
+#    never sees an interleaved record. Seed 1 at preempt-permille 100, 500 and 1000.
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-atomic; mkdir -p "$o"
-ps="100 500 1000"; [ "${CHECK_TIER:-}" != quick ] || ps=1000
+ps="100 500 1000"
 for p in $ps; do
     for seed in 1; do
         run_ok "$o/p$p-s$seed" "$seed" --config "$("$PATINA_CFG" preempt-permille="$p")" -- /guest/atomic

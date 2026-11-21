@@ -11,7 +11,7 @@
 #   reaches exactly what the absolute path reaches (`..`, magic links, another pid,
 #   thread-self, runtime descriptors); listings show only what the policy allows, in a fixed
 #   order; none becomes the working directory or travels by SCM_RIGHTS; exec keeps them policed.
-#@ tier=quick budget=15 slots=4
+#@ tier=quick budget=15 slots=1
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/procgaps
 mkdir -p "$out"

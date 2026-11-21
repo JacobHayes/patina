@@ -1,6 +1,6 @@
 # 4. /proc policy: every listed path opened and printed; identical over 4 runs under
 #    --vary cpu; /proc/1/environ, /proc/kallsyms, /sys/class/net give ENOENT and are refused.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/04-proc
 verify_ok "$o" 1 cpu 4 -- /guest/proc-policy

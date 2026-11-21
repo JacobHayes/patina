@@ -1,14 +1,14 @@
 # 2. Socket semantics: each mode checks what it observes and exits non-zero otherwise.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-semantics; mkdir -p "$o"
 for m in names refused shutlisten addrinuse halfclose eof rst epipe sigpipe-kill rcvtimeo peek waitall sendfile v6; do
     run_ok "$o/$m" 1 -- /guest/sockets "$m"
     echo "$m: ok"
 done
-# 64 MiB through a slow reader (16 in the quick tier): back-pressure keeps the supervisor's
+# 64 MiB through a slow reader: back-pressure keeps the supervisor's
 # queue at one window.
-mb=64; [ "${CHECK_TIER:-}" != quick ] || mb=16
+mb=64
 run_ok "$o/big" 1 -- /guest/sockets big $mb
 q=$(net "$o/big" peak_queued); h=$(net "$o/big" sup_hwm_kb); b=$(net "$o/big" bytes)
 log=$(stat -c %s "$o/big/inc-0/boundary.log")

@@ -8,7 +8,7 @@
 #  c. stats-cp's own plan went back at its hello (`rewrite.rebuilt`), so each place in its text
 #     counts once, at its hook: the events it charges are under 1.5 times those of the same seed
 #     under traps, where it has no plan (with its plan kept, each counted twice: about 2 times).
-#@ tier=quick budget=20 slots=4
+#@ tier=quick budget=20 slots=1.5
 . "$(dirname "$0")/lib.inc"
 d=$RUNS/10-budget # not o: prun sets it
 mkdir -p "$d"

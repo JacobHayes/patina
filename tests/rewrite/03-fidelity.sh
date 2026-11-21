@@ -19,7 +19,7 @@
 #     line, every image planned (the dlopened one too); the libraries rebuilt with compute
 #     points (libcomp.so, and libcompdl.so at each dlopen) have their plans put back at their
 #     hello (`rebuilt`), so the dlclose finds none to drop.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=1
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 . "$(dirname "$0")/../json.inc"

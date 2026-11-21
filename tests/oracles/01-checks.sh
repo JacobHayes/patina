@@ -29,7 +29,7 @@
 #    same in five runs under cpu and aslr variation.
 # 6. `patina report --recheck`: the same checker leaves each kept run's result.json byte for byte; a
 #    keyed finding (LABEL [KEY]: detail) is grouped by its key, and shown as written.
-#@ tier=quick budget=10 slots=4
+#@ tier=quick budget=10 slots=2
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 kv=$PATINA_GUESTS/examples/kvlog hello=$PATINA_GUESTS/hello-static

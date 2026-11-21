@@ -1,6 +1,6 @@
 # 5. Zombies and orphans: kill(pid, 0) succeeds on a zombie and waitpid then returns it (then
 # ESRCH); a grandchild whose parent died reports getppid() == 1. Same as native, identical runs.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/05-zombies
 mkdir -p "$o"

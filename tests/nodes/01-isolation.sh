@@ -11,7 +11,7 @@
 # What is not available yet is refused, naming the feature; without nodes `net` is EINVAL and
 # a control mark works. The C, Rust and Go SDKs' control calls answer the driver and give a
 # node EPERM (the Rust and Go SDKs' in the area tier).
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-isolation; mkdir -p "$o"
 conf "$o/iso.toml" b python3 /guest/iso.py node

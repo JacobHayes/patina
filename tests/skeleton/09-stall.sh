@@ -7,7 +7,7 @@
 # are off, the message says so instead). Leaves no process behind.
 # Under [sched] preempt = "traps": these are its mechanisms (load-time points, the default,
 # switch inside these loops at their points, so nothing stalls there).
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/09-stall
 ms=$(python3 -I "$(dirname "$0")/../cpu-ms.py" timeout 120 env PATINA_TEST_STALL_MS=500 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" preempt=traps)" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinpoints count)

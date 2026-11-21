@@ -8,7 +8,7 @@
 # - System calls given pointers into the runtime's region (`ptrprobe`: both directions, inside
 #   iovecs and msghdrs, and the memory calls on ranges there) answer what the kernel answers for
 #   a hole, as a native run of the same program shows, and move none of the runtime's bytes.
-#@ tier=quick budget=20 slots=2
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 : "${RT_BIN:?}"
 out=$RUNS/containment

@@ -10,7 +10,7 @@
 #     Seeds 1-10 of each case in the area, 1-5 in the release tier, 1-2 in the quick tier: every
 #     run ok (the guest checks Linux's EINTR and restart rules). A signal Patina loses ends a
 #     run `internal` (the lost-signal detector) or `liveness`.
-#@ tier=quick,area,release budget=60 slots=4
+#@ tier=quick,area,release budget=60 slots=3
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/11-blocking
 mkdir -p "$o"

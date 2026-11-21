@@ -1,7 +1,7 @@
 # 5. The counter-timer trap: reads of CNTFRQ_EL0 and CNTVCT_EL0 answer from virtual time, so
 # two runs print the same values (the real counter moves between runs) and the counter goes
 # forward between reads; also when the program is reached by an exec (which resets the trap).
-#@ tier=quick budget=10 arch=aarch64
+#@ tier=quick budget=10 arch=aarch64 slots=0.5
 . "$(dirname "$0")/lib.inc"
 for via in direct exec; do
     for k in a b; do

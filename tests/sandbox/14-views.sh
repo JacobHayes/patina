@@ -5,7 +5,7 @@
 # shares the sandbox's PID, network and guests' user namespaces; its process has no capability
 # and no_new_privs, runs as the guest's user, and PID 1 reaps it. What one view writes, no
 # other view and not the base sees.
-#@ tier=quick budget=10 slots=1
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/views
 mkdir -p "$out"

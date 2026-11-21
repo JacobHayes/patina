@@ -3,7 +3,7 @@
 # seeds missed it about once in a hundred) must end at least one run
 # `iterate-failed` or `reopen-failed` on an UnexpectedEof, with fs-short injected in every
 # failing run of that group; the same seed without faults passes.
-#@ tier=quick budget=15
+#@ tier=quick budget=15 slots=1.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/f5
 "$PATINA" sweep --seeds 1..48 -j 4 --out "$o" --mount "$W/fjall-harness":/guest:copy --fault fs-short-permille=20 \

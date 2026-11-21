@@ -26,7 +26,7 @@
 #     address randomization, all ok, one digest, a spin point found.
 # Under [sched] preempt = "traps": these are its mechanisms (load-time points, the default,
 # switch inside these loops at their points, so nothing stalls there).
-#@ tier=quick budget=30 slots=5
+#@ tier=quick budget=30 slots=2
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-spin
 mkdir -p "$o"

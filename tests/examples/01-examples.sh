@@ -4,7 +4,7 @@
 # the bug is found, under the expected signature; the fixed variant is ok on every seed, and
 # the fault or fault point the example is about fired in at least one of those runs. stats-c's
 # stock build is ok on every seed under traps (its race needs points in its code).
-#@ tier=quick,release budget=20 budget-release=120 slots=4
+#@ tier=quick,release budget=20 budget-release=120 slots=2
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 E=$PATINA_GUESTS/examples
 N=20

@@ -6,7 +6,7 @@
 # SIGILL at the site, not a pause point (on a host without BTI the call is fine). A signal
 # handler in a BTI-guarded shared object (bti-sig): with a landing pad it runs; without one its
 # entry is the same fault.
-#@ tier=quick budget=10 arch=aarch64
+#@ tier=quick budget=10 arch=aarch64 slots=0.5
 . "$(dirname "$0")/lib.inc"
 for g in bti-dyn bti-static; do
     for k in a b; do

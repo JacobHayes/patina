@@ -4,7 +4,7 @@
 #     guest checks each). Seeds 1-20: every run ok; seed 1 identical over 3 runs. Where kcmp
 #     fails (tests/no-kcmp.py), a mask update cannot tell which descriptors share the file: the
 #     run ends internal, never with the update applied to some of them.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=3
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/12-signalfd
 mkdir -p "$o"

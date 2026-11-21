@@ -4,7 +4,7 @@
 # a host fact). arm64: a literal-pool word in program text equal to `yield`, read by `ldr`, is
 # data: not patched (rejected_sites), it reads as itself. The runtime's own code reads no
 # counter and no random-number instruction.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-guest-ud2
 case $ARCH in

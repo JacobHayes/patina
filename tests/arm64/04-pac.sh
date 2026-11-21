@@ -3,7 +3,7 @@
 # the same on every repeat; also when the program is reached by an exec (the kernel enables and
 # redraws the keys at every exec: the new image's runtime disables them again). On a host
 # without PAC there is nothing to disable.
-#@ tier=quick budget=15 arch=aarch64
+#@ tier=quick budget=15 arch=aarch64 slots=0.5
 . "$(dirname "$0")/lib.inc"
 grep -qw paca /proc/cpuinfo || { echo "SKIP: this host has no address authentication"; exit 0; }
 for via in direct exec; do

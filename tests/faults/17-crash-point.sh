@@ -12,7 +12,7 @@
 # - the base and the child past the last point end as the run without `--crash` (same
 #   digest, no crash injected);
 # - a child replays identical.
-#@ tier=quick budget=10 slots=4
+#@ tier=quick budget=10 slots=2
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/17
 run "$d/ref" 1 -- /guest/window

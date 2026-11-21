@@ -7,7 +7,7 @@
 # control calls (`patina ctl`, `patina.control`) still answer inside it. Only a partition's
 # start ahead, or a kill after the driver marked faults-done: the run is deadlocked. A
 # faults-done mark inside a partition heals it at once.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-ahead; mkdir -p "$o"
 rm -f "$o/b.toml" "$o/exit.toml"

@@ -3,7 +3,7 @@
 # update in `stats.done++`, one instruction in the stock -O2 x86_64 build) each end `failure` on at
 # least one seed; the first failing seed of each replays identical, and `races b`'s three runs
 # under --vary cpu,aslr give one digest.
-#@ tier=quick budget=20 slots=4
+#@ tier=quick budget=20 slots=1.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-races
 mkdir -p "$o"

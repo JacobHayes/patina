@@ -10,7 +10,7 @@
 # that lost nothing among them). That seed run twice gives the same digest and the same
 # post-crash trees. Also: turning crashes on does not change the run before the crash
 # (boundary logs equal up to the crash seq).
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=2
 . "$(dirname "$0")/lib/common.inc"
 N=${ACK_SEEDS:-20}
 for m in ext4-ordered posix-strict; do

@@ -4,7 +4,7 @@
 #     mutex in a segment (the guest checks each as Linux has it). ok and identical over 2 runs
 #     at seed 1, every run ok over seeds 1-20. SHM_HUGETLB and SHM_LOCK answer EPERM and are
 #     recorded as refused. A segment survives a process crash and not a machine crash.
-#@ tier=quick budget=40 slots=4
+#@ tier=quick budget=40 slots=2
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-sysv-shm
 mkdir -p "$o"

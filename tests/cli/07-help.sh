@@ -2,7 +2,7 @@
 #    help and the parser read one table); a flag the table does not list for it is refused.
 #    Each command's text help names each of its flags; --fault help lists the fault keys.
 #    --version prints a parseable version.
-#@ tier=quick budget=5
+#@ tier=quick budget=5 slots=0.5
 . "$(dirname "$0")/lib.inc"
 "$PATINA" --help --format json >"$RUNS/help.json"
 python3 -I - "$PATINA" "$RUNS/help.json" <<'PY' || die "help and parser disagree"

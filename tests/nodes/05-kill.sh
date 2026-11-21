@@ -1,6 +1,5 @@
 # 5. Nodes: a node's processes killed and started again (tests/guests/nodes/kill.py). The
-# driver kills node b with `node kill b` and starts it with `node start b`, 50 times
-# (10 in the quick tier):
+# driver kills node b with `node kill b` and starts it with `node start b`, 50 times:
 # each kill ends both of b's connections (its first process's and its child's), a connect to
 # either port is refused while b is down, a kill of a node that is down and a start of one that
 # is up are refused, and each restart finds the work tree the last one left and its own
@@ -8,12 +7,12 @@
 # same under verify. A node's own end: an exit outside `ok-exit` ends the run `failure`
 # naming the node, a signal `crash`; an exit within it stops the node, and `restart = "always"`
 # starts it again up to `max-incarnations`; `count` makes that many nodes of one table.
-#@ tier=quick budget=60 slots=2
+#@ tier=quick budget=60 slots=1
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/05-kill; mkdir -p "$o"
 rm -f "$o/b.toml"; conf "$o/b.toml" b python3 /guest/kill.py b
 
-k=50; [ "${CHECK_TIER:-}" != quick ] || k=10
+k=50
 run_ok "$o/kill" 1 --config "$o/b.toml" -- python3 /guest/kill.py driver $k
 sed 's/^/    /' "$o/kill/inc-0/stdout"
 [ "$(field "$o/kill/result.json" nodes.list.1.incarnations)" = $((k + 1)) ] || die "b: $(field "$o/kill/result.json" nodes.list.1)"

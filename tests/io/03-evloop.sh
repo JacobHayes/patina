@@ -1,7 +1,7 @@
 # 3. evloop: epoll over 32 socketpairs (level and edge triggered), 4 eventfds, a timerfd,
 #    with worker threads; the same with poll and with select. ok; identical across runs,
 #    including the order of the events printed (stdout is compared byte for byte).
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=1.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-evloop; mkdir -p "$o"
 for mode in epoll poll select; do

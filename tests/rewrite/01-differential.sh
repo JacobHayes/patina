@@ -7,7 +7,7 @@
 # runs, and its counts do run (a copy whose cell starts at 1000 events stops on its trap: x86_64
 # `hlt`, SIGSEGV; arm64 `udf`, SIGILL). On x86_64
 # and arm64; each guest is built on the architecture it runs on.
-#@ tier=quick budget=60
+#@ tier=quick budget=60 slots=0.5
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 HERE=$(cd "$(dirname "$0")" && pwd)

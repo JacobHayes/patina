@@ -1,7 +1,7 @@
 # 7. Memory: 100k mmap/munmap of mixed sizes, mremap growth, brk grow and shrink, MADV_DONTNEED
 #    reads zeros and MADV_FREE is refused (EINVAL, the data kept); addresses identical under
 #    --vary aslr.
-#@ tier=quick budget=40
+#@ tier=quick budget=40 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/07-memory
 verify_ok "$o" 1 aslr 2 -- /guest/memtest

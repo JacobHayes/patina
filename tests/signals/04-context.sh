@@ -2,7 +2,7 @@
 # the interrupted call's return register to INT64_MIN and to -EFBIG gets them back after
 # rt_sigreturn, also where the host's RLIMIT_FSIZE is finite (a call's EFBIG there ends the run
 # `infra`, a restored register's never).
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 patina_run "$RUNS/04-context" 1 sig-ctx
 check_ok "$RUNS/04-context" sig-ctx

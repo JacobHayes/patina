@@ -17,10 +17,11 @@ holds the guests' sources.
 
 A script declares itself in a line `#@ tier=TIER[,TIER] budget=SECONDS slots=N arch=MACHINE`
 (tiers quick, area, release, evidence; defaults: tier=area, budget 120 s, slots 1, every
-architecture; slots = sandboxes it runs at once; arch = the only `uname -m` it runs on, the
-others skip it and count it). A script in two tiers may set `budget-TIER=SECONDS` for the
+architecture; slots = the CPUs it keeps busy, its CPU time over its wall time as measured on the
+arm64 runner, to the half (0.5 for one that mostly waits); arch = the only `uname -m` it runs on,
+the others skip it and count it). A script in two tiers may set `budget-TIER=SECONDS` for the
 second; it sees the tier it runs for in CHECK_TIER. Scripts run in
-parallel, at most CHECK_SLOTS sandboxes at once (default half the CPUs, at least 8), longest
+parallel, their slots together at most CHECK_SLOTS (default half the CPUs, at least 8), longest
 budget first. Each gets a
 private RUNS directory; a script still running at its budget is killed with its whole session
 and fails (first tests/hang.py writes RUNS/hang.txt: its processes and threads, what each was
@@ -29,7 +30,7 @@ killed too, so a failed script's directory is quiet when it is kept or uploaded)
 directories are deleted (CHECK_KEEP=1 keeps them); their output stays in <base>/<area>-<name>.out,
 where <base> is under PATINA_CHECK_DIR/runs (./check sets it; default target/patina-check).
 The tier total is printed, with its share of the ceiling and the time the same scripts would take
-on four sandboxes (the CI runners' four cores: the sum over scripts of time x min(slots, 4) / 4);
+on four CPUs (the CI runners' four cores: the sum over scripts of time x min(slots, 4) / 4);
 quick fails above QUICK_CEILING s (600), an area above 300 s, release above 600 s (each times
 the calibration factor, below).
 CHECK_SOFT_CEILING=PCT (scripts/land sets 50) also fails a tier whose four-sandbox time is over
@@ -121,7 +122,7 @@ def scripts():
             tiers = meta["tier"].split(",")
             budget = int(meta.get("budget", DEFAULTS[tiers[0]]))
             out.append({"area": area, "name": f[:-3], "path": os.path.join(d, f), "tier": meta["tier"],
-                        "tiers": tiers, "budget": budget, "slots": int(meta["slots"]), "arch": meta.get("arch"),
+                        "tiers": tiers, "budget": budget, "slots": float(meta["slots"]), "arch": meta.get("arch"),
                         "budgets": {t: int(meta.get(f"budget-{t}", budget)) for t in tiers}})
     return out
 
@@ -222,7 +223,7 @@ def main():
         for s in allsc:
             arch = f"  arch {s['arch']}" if s["arch"] else ""
             more = "".join(f"  {t} {b} s" for t, b in s["budgets"].items() if b != s["budget"])
-            print(f"{s['tier']:13} {s['budget']:5} s  slots {s['slots']}  {s['area']}/{s['name']}{arch}{more}")
+            print(f"{s['tier']:13} {s['budget']:5} s  slots {s['slots']:g}  {s['area']}/{s['name']}{arch}{more}")
         return 0
     if args[0] == "areas":
         on = [s for s in allsc if {"quick", "area"} & set(s["tiers"]) and s["arch"] in (None, platform.machine())]
@@ -241,9 +242,9 @@ def main():
     label = "-".join(a.lower() for a in args)[:40]
     base = os.path.join(CHECK_DIR, "runs", time.strftime("%Y%m%dT%H%M%S") + f"-{label}-{os.getpid()}")
     os.makedirs(base)
-    slots_total = int(os.environ.get("CHECK_SLOTS", max(8, (os.cpu_count() or 8) // 2)))
+    slots_total = float(os.environ.get("CHECK_SLOTS", max(8, len(os.sched_getaffinity(0)) // 2)))
     keep = os.environ.get("CHECK_KEEP") == "1" or tier == "evidence"
-    print(f"== {tier}: {len(sel)} scripts, at most {slots_total} sandboxes at once; output in {base}", flush=True)
+    print(f"== {tier}: {len(sel)} scripts, at most {slots_total:g} slots (CPUs) at once; output in {base}", flush=True)
     factor, why = calibrate(base)
     for s in sel:
         s["budget"] = round(s["budget"] * factor)
@@ -353,7 +354,7 @@ def main():
     four = sum(min(s["slots"], 4) * dt for s, _, dt, _, _ in results) / 4
     share = lambda t: f"{100 * t / ceil:.0f}% of the {ceil} s ceiling" if ceil else f"target {TARGET[tier]} s"
     print(f"== {tier}: {len(results) - nfail} passed, {nfail} failed; wall {wall:.0f} s ({share(wall)}); "
-          f"on 4 sandboxes about {four:.0f} s ({share(four)}); script time {sum(r[2] for r in results):.0f} s; "
+          f"on 4 CPUs about {four:.0f} s ({share(four)}); script time {sum(r[2] for r in results):.0f} s; "
           f"CPU time {sum(r[4] for r in results):.0f} s; "
           f"load average {load:.1f}; budgets and ceiling x{factor:.2f}")
     if ceil and wall > ceil:
@@ -363,7 +364,7 @@ def main():
     soft = int(os.environ.get("CHECK_SOFT_CEILING", "0"))
     ceil = CEILING[tier]
     if soft and ceil and four > ceil * soft / 100:
-        print(f"FAIL: on 4 sandboxes the {tier} tier would take about {four:.0f} s, over {soft}% of its {ceil} s "
+        print(f"FAIL: on 4 CPUs the {tier} tier would take about {four:.0f} s, over {soft}% of its {ceil} s "
               "ceiling: the slower CI runner (arm64) would come near or over it. Cut: move sweeps, matrices "
               "and repetitions to the area or release tier (AGENTS.md); do not raise the ceiling")
         return 1

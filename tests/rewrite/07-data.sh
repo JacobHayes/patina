@@ -4,7 +4,7 @@
 # plan (x86_64, at ld.so's first mapping of a library; arm64 asks at an executable mapping, and
 # this file has none, so it is not listed), and the `patina run` line does not name it as a
 # file left without points.
-#@ tier=quick budget=10 slots=1
+#@ tier=quick budget=10 slots=1.5
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 G=$(realpath "$PATINA_GUESTS")

@@ -51,7 +51,7 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
 ## Checks and landing
 
 - **Tiers**: `quick` gates every landing (target 5 minutes on the arm64 runner, fails above 10;
-  `scripts/land` fails it past half that on four sandboxes here); `./check AREA` runs an area's
+  `scripts/land` fails it past half that on four CPUs here); `./check AREA` runs an area's
   quick and `area` scripts while working on it; `release` gates a release and runs nightly
   (examples at 200 seeds, a determinism matrix, F2, pubsub, the node, signal, mapping and
   rewrite sweeps, install, doctor, replay; fails above 10 minutes); `evidence` is by hand.
@@ -101,6 +101,8 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
   astronomically unlikely; and the correct version is clean on every seed it runs.
 - Every script declares `#@ tier=TIER[,TIER] budget=SECONDS slots=N` (and `arch=MACHINE` when
   it runs on one architecture only) and must fail on a planted break: show it red, then green.
+  `slots` is the CPUs it keeps busy (`tests/run.py` prints each script's CPU time; slots = CPU
+  over wall on the arm64 runner, to the half), so the runner packs the tier onto the cores.
 - **No wall clock, fixed sleeps or pinned seeds in tests** (`tests/lint.py`): assert virtual
   time, poll for the condition, search a seed range. An exception says why on its line.
 - Builders run under a resource wrapper (memory cap, CPU weight, a scratch-size cap) and delete

@@ -1,6 +1,6 @@
-// go-deadline [MAX]: a CPU-bound loop under context.WithTimeout(50 ms). The loop does integer
-// work and polls ctx.Err() every 1024 iterations, with no system call in between; it ends
-// when the context is done or after MAX iterations (default 2^31). Prints the iterations, the
+// go-deadline [MAX [MS]]: a CPU-bound loop under context.WithTimeout(MS ms, default 50). The
+// loop does integer work and polls ctx.Err() every 1024 iterations, with no system call in
+// between; it ends when the context is done or after MAX iterations (default 2^31). Prints the iterations, the
 // elapsed time (virtual under Patina) and whether the deadline ended it; exit status 1 if it
 // did not. Built with compute points (go-deadline) and stock (go-deadline-stock).
 package main
@@ -18,19 +18,21 @@ import (
 var table [256]uint64
 
 func main() {
-	max := uint64(1) << 31
-	if len(os.Args) > 1 {
-		n, err := strconv.ParseUint(os.Args[1], 10, 64)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "usage: go-deadline [MAX]")
-			os.Exit(2)
+	max, ms := uint64(1)<<31, uint64(50)
+	for k, p := range []*uint64{&max, &ms} {
+		if len(os.Args) > k+1 {
+			n, err := strconv.ParseUint(os.Args[k+1], 10, 64)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "usage: go-deadline [MAX [MS]]")
+				os.Exit(2)
+			}
+			*p = n
 		}
-		max = n
 	}
 	for i := range table {
 		table[i] = uint64(i + len(os.Args))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(ms)*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	var i, sum uint64

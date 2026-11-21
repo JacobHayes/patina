@@ -1,7 +1,6 @@
 # 2. Load-time points (the default): the runtime applies plans to stock programs (ARCHITECTURE "Load-time
 # rewriting"), with a plan cache of its own under RUNS.
-#  a. each differential guest (C static and static-PIE, C++ and Rust static, Go; in the quick
-#     tier C static and Go) prints its native output; its plan was applied and points were taken; seeds 1 and 2 each repeat
+#  a. each differential guest (C static and static-PIE, C++ and Rust static, Go) prints its native output; its plan was applied and points were taken; seeds 1 and 2 each repeat
 #     identical under --vary cpu,load,aslr,sandbox,repeat, and their digests differ (the points
 #     move the schedule);
 #  b. go-race-stock (compute-gap=8) and rs-race-stock (compute-gap=2), stock builds of a
@@ -25,7 +24,7 @@
 #     (5 s for rw-c), not to the run's timeout: the run names the holder's pid and the lock on
 #     stderr, makes the plan itself outside the cache (`bypassed`, the entry left unwritten) and
 #     has a.'s digest. About 6 s on the arm64 runner, nearly all of it the bound.
-#@ tier=quick,release budget=60 slots=4
+#@ tier=quick,release budget=60 slots=2
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 . "$(dirname "$0")/../json.inc"
@@ -39,7 +38,7 @@ export XDG_CACHE_HOME=$o/cache
 pts() { "$PATINA" run "$@" >/dev/null 2>&1 || true; }
 
 # a. Four verifies at a time.
-guests="rw-c rw-c-spie rw-cxx rw-rs rw-go"; [ "${CHECK_TIER:-}" != quick ] || guests="rw-c rw-go"
+guests="rw-c rw-c-spie rw-cxx rw-rs rw-go"
 for g in $guests; do
     "$G/$g" >"$o/$g.want"
     printf '%s 1\n%s 2\n' "$g" "$g" >>"$o/a.jobs"

@@ -3,7 +3,7 @@
 # increase, lie between the surrounding clock reads (x86: 3 ticks per virtual ns, rdtscp's aux
 # is 0; arm64: 1 tick per ns, CNTFRQ_EL0 = 1e9); identical over 3 runs varying the core. A guest
 # that asks for PR_TSC_SIGSEGV gets the signal.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-tsc
 case $ARCH in

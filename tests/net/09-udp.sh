@@ -4,7 +4,7 @@
 #    datagram order fails within a few seeds of the default delivery jitter; stock Go, Python
 #    (socket and asyncio) and tokio are identical under verify; name lookups in C, Go and
 #    Python answer from /etc/hosts and send no datagram.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-udp; mkdir -p "$o"
 for m in semantics fork; do

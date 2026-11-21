@@ -4,7 +4,7 @@
 # child saw, its argv, its environment variable, inherited descriptors 0,1,2,5 (5 inherited, 6
 # close-on-exec gone), the hidden descriptor EBADF, and the kernel's error for each failure
 # (posix_spawn returns it).
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=1.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-exec-matrix
 mkdir -p "$o"

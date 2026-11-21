@@ -8,7 +8,7 @@
 #    cannot be told from another eventfd: the run ends internal;
 #    SO_RCVTIMEO 2 s gives EAGAIN at 2 virtual s. Together about 130 virtual seconds, eight times
 #    this script's budget: a real wait fails it (no wall time is read).
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-timeouts; mkdir -p "$o"
 for m in poll epoll timerfd timerfd2 timerfd-exec timerfd-exec-many rcvtimeo; do

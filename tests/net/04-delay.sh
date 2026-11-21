@@ -1,6 +1,6 @@
 # 4. 1 MiB with net-delay-ms=20000..30000 takes more than 30 virtual seconds, twice this
 #    script's budget, so a real wait would fail it (no wall time is read).
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/04-delay; mkdir -p "$o"
 for i in 1 2 3; do

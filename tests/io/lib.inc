@@ -21,8 +21,6 @@ run_ok() {
 # one digest and one stdout over the run directories; the first run is ok.
 verify_ok() {
     out=$1; seed=$2; runs=$3; shift 3
-    # Quick tier: two runs, the reference and one varied in each way asked; more in the area tier.
-    [ "${CHECK_TIER:-}" != quick ] || [ "$runs" -le 2 ] || runs=2
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" --vary cpu,load --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" \
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
     n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)

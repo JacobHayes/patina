@@ -3,7 +3,7 @@
 # time in virtual time), futex wait with and without SA_RESTART and with a timeout, from a
 # second thread. Pipe read and poll need blocking I/O's blocking I/O (before it, a read on an
 # empty pipe blocks in the kernel): that part runs, and must pass, once tests/io exists.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 patina_run "$RUNS/06-restart/self" 1 sig-restart self
 check_ok "$RUNS/06-restart/self" sig-restart sig-restart-self

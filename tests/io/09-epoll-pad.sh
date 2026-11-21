@@ -2,7 +2,7 @@
 #    which the kernel neither reads nor writes and the program may leave as anything): the
 #    epoll-pad guest's two EPOLL_CTL_MOD calls, whose events differ only there, have one input
 #    hash, and its two epoll_wait calls, into buffers prefilled differently, one output hash.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib.inc"
 case $(uname -m) in x86_64) echo "SKIP: x86_64's struct epoll_event has no padding: the hashes are equal by layout" ;; esac
 o=$RUNS/09-epoll-pad

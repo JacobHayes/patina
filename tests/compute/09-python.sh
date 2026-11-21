@@ -14,7 +14,7 @@
 #     when the first has finished (one alternation); with compute points they alternate on
 #     seeds 1-3, and seed 1 is identical over verify --runs 3 --vary cpu,aslr (2 in the quick
 #     tier).
-#@ tier=quick budget=20 slots=4
+#@ tier=quick budget=20 slots=2.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-python
 mkdir -p "$o"

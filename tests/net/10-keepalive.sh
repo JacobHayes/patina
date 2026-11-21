@@ -6,7 +6,7 @@
 # the fault the same program blocks for ever; a shorter window is survived; a side that gave
 # up resets its peer's later probe; the first unanswered probe falls where Linux's would.
 # Expected on the arm64 runner: about 5 s (the native runs sleep 3 s, side by side).
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-keepalive; rm -rf "${o:?}"; mkdir -p "$o"
 for k in opts alive closed; do

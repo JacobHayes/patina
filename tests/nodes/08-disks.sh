@@ -5,7 +5,7 @@
 # under the seed's machine crashes, where every crash ends a disk, its log closed by a `Crash`
 # record after what the node's mappings held, and, outside the quick tier, under its process
 # kills.
-#@ tier=quick budget=60 slots=4
+#@ tier=quick budget=60 slots=1
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/08-disks; mkdir -p "$o"
 rm -f "$o/m.toml" "$o/loop.toml"

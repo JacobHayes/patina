@@ -10,7 +10,7 @@
 #     munmaps the kernel refuses (length 0) change nothing Patina tracks: 200 of them inside one
 #     mapping, then its tail written and another file mapped, end ok and
 #     the operation log replays to the live tree.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/12-sparsemap
 mb=$(python3 -I "$(dirname "$0")/../maxrss-mb.py" timeout 120 "$PATINA" run --seed 1 --fault crash-at=1000000 \

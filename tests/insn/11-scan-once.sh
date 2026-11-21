@@ -2,7 +2,7 @@
 # twice maps the program and its libraries again in each child, and those mappings take the
 # first scan's verdicts (scan.reused_mappings). Catches the per-run scan silently turning into
 # a scan per process, which costs whole seconds on a large program and changes no digest.
-#@ tier=quick budget=15
+#@ tier=quick budget=15 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/11-scan-once
 patina_run "$o" 1 /bin/sh -c '/bin/true; /bin/true'

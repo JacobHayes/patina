@@ -17,7 +17,7 @@
 # acknowledged file; the planted bug that retries a failed fsync on a new descriptor and then
 # acknowledges does (in the quick tier under ext4-ordered; ./check faults also posix-strict).
 # Expected on the arm64 runner: about 10 s (16 to 18 s measured with both models).
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=1.5
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/22
 rm -rf "${d:?}"

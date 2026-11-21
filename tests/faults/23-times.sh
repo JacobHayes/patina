@@ -5,7 +5,7 @@
 # keep them), and as a node's program under `--fault crash-at=50@a` (its boot 1 on a new
 # disk), each reads after the restart as it did before and none as the virtual file epoch;
 # the process-crash run replays identical. About 3 s.
-#@ tier=quick budget=15 slots=2
+#@ tier=quick budget=15 slots=1
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/23
 prog='echo "inc=${PATINA_INCARNATION:-0}"

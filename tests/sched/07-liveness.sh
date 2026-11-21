@@ -1,6 +1,6 @@
 # 7. A thread sleeping 1 s in a loop forever: outcome liveness at time-limit 100. The 100
 # virtual seconds are several times this script's budget: a real wait fails it.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/07-liveness
 PATINA_OPTS="--config $("$PATINA_CFG" time-limit=100)" patina_run "$out" 1 liveness

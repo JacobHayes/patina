@@ -3,7 +3,7 @@
 # RNDRRS into x3): success flag set, identical over 3 runs varying the core, different seeds give
 # different values. arm64 answers RNDR only where the host has it; on a host without it the
 # program is told so (HWCAP2_RNG clear, a host fact), and `emulate-rndr` exercises the path.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-rand
 mkdir -p "$o"

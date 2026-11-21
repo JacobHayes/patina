@@ -55,7 +55,7 @@ jj rebase -b "$rev" -d main@origin
 conflicted=$(jj log --no-graph -r "(main@origin..$rev) & conflicts()" -T 'commit_id')
 [ -z "$conflicted" ] || die "the rebase onto main@origin conflicts: resolve, then run again"
 sha=$(id "$rev")
-# The quick tier also fails here past half its ceiling on four sandboxes (tests/run.py
+# The quick tier also fails here past half its ceiling on four CPUs (tests/run.py
 # CHECK_SOFT_CEILING): growth shows up on this host before it turns CI red.
 CHECK_SOFT_CEILING=50 mise run check || die "mise run check failed at $sha"
 # The docs' release-only transcripts (slow sweeps) are compared exactly only on the reference

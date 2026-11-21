@@ -2,7 +2,7 @@
 #     procs spinchild's child, computing alone, is sent SIGKILL from the host once it runs.
 #     The run ends internal, stop killed, naming SIGKILL and the process, with the wait status
 #     137 and signal 9 in result.json.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/11-killed
 rm -rf "${o:?}"

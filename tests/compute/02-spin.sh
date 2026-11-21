@@ -5,7 +5,7 @@
 #     ends ok on seeds 1-3 with pause points and spin probes off;
 #  c. both, with switches off (compute-gap=0), still end ok on seed 1 with no spin found: the
 #     cell runs out every 2^22 events and yields.
-#@ tier=quick budget=20 slots=6
+#@ tier=quick budget=20 slots=1.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-spin
 mkdir -p "$o"

@@ -6,7 +6,7 @@
 # whose form is the kernel's history: x86_64, the XSAVE in-use bits set for every AVX..PKRU
 # component; arm64, the SVE record in its header form when nothing beyond the FP/SIMD
 # registers is set. The guest (sig-frame, or its arm64 twin) prints the fields of its machine.
-#@ tier=quick
+#@ tier=quick slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-frame
 mkdir -p "$o"

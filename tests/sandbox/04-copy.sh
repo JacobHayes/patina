@@ -2,7 +2,7 @@
 # tmpfs, not bind mounts: their metadata (inode numbers, times, blocks, device) is the
 # sandbox's. Two copies of the guest directory on the host with different inode numbers,
 # times and paths give the same stat output and digest. /usr stays a bind.
-#@ tier=quick budget=20 slots=1
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/copy
 mkdir -p "$out"

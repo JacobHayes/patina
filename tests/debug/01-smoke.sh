@@ -8,7 +8,7 @@
 #    run. An event number past the run's end is refused before anything runs. SKIP without gdb
 #    (PATINA_GDB or PATH) or where the host lets no debugger attach. About 1 s on x86_64, 2 s
 #    on GitHub's arm64 runner.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib.inc"
 r=$RUNS/jobs
 prun "$r" --seed 1 -- "$PATINA_GUESTS/examples/jobs"

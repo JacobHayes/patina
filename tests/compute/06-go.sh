@@ -3,14 +3,14 @@
 #     that does not import the package fails to link on a libfuzzer hook (fail closed); a build
 #     without the flag that imports it has no hook in the binary;
 #  b. the guests run natively with their normal output;
-#  c. go-deadline (a CPU-bound loop under context.WithTimeout(50 ms)) ends `ok` on seeds 1-2 at
-#     the default gap: the deadline fired inside the loop, at a virtual time of at least 50 ms
+#  c. go-deadline (a CPU-bound loop under context.WithTimeout(10 ms)) ends `ok` on seeds 1-2 at
+#     the default gap: the deadline fired inside the loop, at a virtual time of at least 10 ms
 #     and under a second;
 #  d. go-race (check-then-act on an atomic.Int64, no system call in the window) ends `failure`
 #     on at least one of seeds 1-40 at compute-gap=8, every other seed `ok`; the first failing
 #     seed replays identical; result.json names one image, kind compare; an atomic.Bool spin (go-race boolspin)
 #     with one P (GOMAXPROCS=1: only the hook's preemption check lets main run) ends `ok`.
-#@ tier=quick budget=8 slots=5
+#@ tier=quick budget=8 slots=1
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/06-go
 mkdir -p "$o"
@@ -30,14 +30,14 @@ out=$(timeout 20 "$C/go-deadline" 134217728 | tail -1) || true
 grep -q ' deadline$' <<<"$out" || die "b. go-deadline natively printed $out"
 echo "b. the guests run natively with their normal output"
 
-# At most 2^27 iterations: 2^28 events, about 5 times what reaching the deadline takes.
-prun "$o/dl-1" 1 -- /guest/compute/go-deadline 134217728 &
-prun "$o/dl-2" 2 -- /guest/compute/go-deadline 134217728 &
+# At most 2^25 iterations: 2^26 events, about 6 times what reaching the 10 ms deadline takes.
+prun "$o/dl-1" 1 -- /guest/compute/go-deadline 33554432 10 &
+prun "$o/dl-2" 2 -- /guest/compute/go-deadline 33554432 10 &
 wait
 for s in 1 2; do
     [ "$(field "$o/dl-$s/result.json" outcome)" = ok ] || die "c. go-deadline seed $s: $(res "$o/dl-$s")"
     t=$(sed -n 's/.*elapsed_ns=\([0-9]*\) deadline$/\1/p' "$o/dl-$s/inc-0/stdout")
-    [ -n "$t" ] && [ "$t" -ge 50000000 ] && [ "$t" -lt 1000000000 ] || die "c. go-deadline seed $s: $(tail -1 "$o/dl-$s/inc-0/stdout")"
+    [ -n "$t" ] && [ "$t" -ge 10000000 ] && [ "$t" -lt 1000000000 ] || die "c. go-deadline seed $s: $(tail -1 "$o/dl-$s/inc-0/stdout")"
 done
 echo "c. go-deadline: cut by its context at $(sed -n 's/.*elapsed_ns=\([0-9]*\).*/\1/p' "$o/dl-1/inc-0/stdout") virtual ns on seed 1 ($(field "$o/dl-1/result.json" compute.events) events)"
 

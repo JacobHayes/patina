@@ -5,7 +5,7 @@
 #     the same way under dash and busybox sh, where this machine has them. The first line
 #     names the release it installs: the latest, or with a release's copy
 #     (scripts/stamp-install) that release, fetched from its own download URL (a faked curl).
-#@ tier=quick budget=10
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib.inc"
 root=$(cd "$(dirname "$0")/../.." && pwd)
 d=$RUNS/install

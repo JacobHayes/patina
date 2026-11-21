@@ -19,7 +19,7 @@
 #  d. with an argument the guest maps over the range past its image that holds the trampolines,
 #     then makes every entry again: under the plan is dropped (its original
 #     pages back) and the output is the native one.
-#@ tier=quick budget=60 slots=4
+#@ tier=quick budget=60 slots=3.5
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 . "$(dirname "$0")/../json.inc"

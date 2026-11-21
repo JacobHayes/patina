@@ -2,7 +2,7 @@
 # fs-tour, randops (10,000 random operations) and Python sqlite3 writing 1,000 rows,
 # seeds 1-2. randops covers the two tracker bugs the self-check
 # found: O_CREAT through a dangling symlink, and copy_file_range into a write-only descriptor.
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 for seed in 1 2; do
     for g in fs-tour randops sqlite; do

@@ -12,7 +12,7 @@
 # - --crash-points with a crash rate or a fixed crash point is refused and runs nothing; a plain
 #   sweep and a branch sweep into one directory replace each other.
 # - examples/acklog-c: the sweep finds acked-records-kept.
-#@ tier=quick budget=15 slots=4
+#@ tier=quick budget=15 slots=2.5
 . "$(dirname "$0")/../cli/lib.inc"
 d=$RUNS/branch
 mkdir -p "$d"

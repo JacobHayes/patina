@@ -13,7 +13,7 @@
 #   guest that fills its table.
 # The spin runs use [sched] preempt = "traps": under load-time points the stretch is cut at its
 # loop's point and no probe is sent.
-#@ tier=quick budget=15 slots=4
+#@ tier=quick budget=15 slots=1
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/fdspace
 mkdir -p "$out"

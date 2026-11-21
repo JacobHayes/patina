@@ -8,7 +8,7 @@
 # relative ones on any clock do not, and a timerfd with TFD_TIMER_CANCEL_ON_SET reads
 # ECANCELED at the step. Both are identical under verify --vary cpu,load,aslr,sandbox,repeat
 # and replay. Without nodes, and for the driver, the clock key is refused.
-#@ tier=quick budget=40 slots=2
+#@ tier=quick budget=40 slots=2.5
 # arm64 (CI runner): about 8 s.
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/18-clock; mkdir -p "$o"

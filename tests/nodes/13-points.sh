@@ -11,7 +11,7 @@
 # point after each first crash (of a run of two puts), the correct store ok at each pair, a pair's rerun line giving
 # its digest again. One seed, a few puts. The quick tier stops before the sample and the pairs
 # (the area tier runs them): about 12 s on the arm64 runner.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=2.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/13-points; mkdir -p "$o"
 for v in ok early; do

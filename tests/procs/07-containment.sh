@@ -4,7 +4,7 @@
 # (b) The launcher is killed with SIGKILL while the daemons live. In both cases, afterwards no
 # process of the run remains (none holds anything of the run directory, none is in any of the
 # run's namespaces, captured while it lived) and no mount from it exists.
-#@ tier=quick budget=40
+#@ tier=quick budget=40 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-containment
 mkdir -p "$o"

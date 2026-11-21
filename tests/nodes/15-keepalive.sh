@@ -6,7 +6,7 @@
 # budget changes nothing, a longer one times out both sides; a pause of b (`node pause b`)
 # shorter or longer than the budget acts as a cut of that length. A run replays identically.
 # Expected on the arm64 runner: about 3 s.
-#@ tier=quick budget=60 slots=2
+#@ tier=quick budget=60 slots=1
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/15-keepalive; mkdir -p "$o"
 rm -f "$o/b.toml"; conf "$o/b.toml" b python3 /guest/ka.py b

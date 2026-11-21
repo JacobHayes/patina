@@ -3,7 +3,7 @@
 #     after a machine crash part way, the next boot keeps the synced records and fills the
 #     rest (kept + written fill the disk), the operation log's self-check passes and the run
 #     replays identically; a node's own disk-mb, a range, is drawn per seed within it.
-#@ tier=quick budget=10
+#@ tier=quick budget=10 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/24-disk-full
 mkdir -p "$o"

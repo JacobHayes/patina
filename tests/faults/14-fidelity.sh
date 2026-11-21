@@ -2,7 +2,7 @@
 # runs coreutils through os/exec (pipes) is ok, and no injected error in its boundary log
 # names a pipe or a unix socket (those get short transfers and delays only). Linux never
 # answers EIO on a pipe read; an injected one deadlocks Go's os/exec.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 : "${PATINA_WORKLOADS:?}"
 o=$RUNS/14/go

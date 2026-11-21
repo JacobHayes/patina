@@ -2,7 +2,7 @@
 # (connection resets and short chunks) and U1 (datagram drops), the boundary log with faults on equals the log with faults off up to the
 # first injected fault or crash point (the fault draws do not disturb any other stream). Also:
 # fault classes that never fire leave the digest unchanged.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/faultplan
 mkdir -p "$out"

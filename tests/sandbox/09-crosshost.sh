@@ -5,7 +5,7 @@
 # CPU count is fixed; registers a call does not read are not recorded; and a launcher that
 # already runs under a seccomp filter (a container's profile) still gets the runtime's filter
 # stacked on it, with the same digest.
-#@ tier=quick budget=30 slots=1
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/crosshost
 mkdir -p "$out"

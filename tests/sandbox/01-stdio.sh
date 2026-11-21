@@ -2,7 +2,7 @@
 # determinism hardening reproducers of B10 (stdout block count) and B11 (stdout extent count) and of hole C3
 # (the guest changing the launcher's file through fd 1) pass with the per-instance stdio
 # rewrites removed from the runtime.
-#@ tier=quick budget=30 slots=4
+#@ tier=quick budget=30 slots=1.5
 . "$(dirname "$0")/lib/common.inc"
 out=$RUNS/stdio
 mkdir -p "$out"

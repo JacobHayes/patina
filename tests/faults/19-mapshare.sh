@@ -4,7 +4,7 @@
 # a store then another process's pwrite or writev on the page, and a pwrite then a store of
 # the old byte; a truncation and extension by one process under another's mapping; more files
 # mapped one after another than Patina keeps shadows of at once): each mode with no crash
-# plane, --faults crash and (in the area tier) --faults kill ends ok, its self-check
+# plane, --faults crash and --faults kill ends ok, its self-check
 # passes, `patina log ops --check` passes, and what the file holds (read(2)) at the end of the last incarnation is
 # what a native run prints. Then a pwrite on a page another process stored to through its
 # mapping: the page is logged whole before the write. More files mapped at once than Patina
@@ -15,7 +15,7 @@
 d=$RUNS/19
 rm -rf "${d:?}"
 mkdir -p "$d/native"
-planes="none machine process"; [ "${CHECK_TIER:-}" != quick ] || planes="none machine"
+planes="none machine process"
 for m in back back-kill alternate store-write store-writev write-store trunc files; do
     native=$(cd "$d/native" && "$PATINA_GUESTS/mapshare" "$m")
     for plane in $planes; do

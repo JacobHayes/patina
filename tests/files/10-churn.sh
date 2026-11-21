@@ -3,7 +3,7 @@
 #     open after its unlink keeps its times through the table's reclaiming; 20,000 unix socket
 #     pairs, whose numbers the program never asks for, take no virtual inode number and end ok;
 #     pipes past the virtual inode table end unsupported (capacity), never internal.
-#@ tier=quick budget=20
+#@ tier=quick budget=20 slots=1
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/10-churn
 mkdir -p "$o"

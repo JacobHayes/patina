@@ -4,7 +4,7 @@
 # tests/insn/06), the values come from the seeded getrandom; a library loaded by dlopen has its
 # sites patched (x86: CPython's hashlib loads libcrypto, rdrand; arm64: ctypes loads libffi,
 # whose cache flush ends in `isb`, a pause point).
-#@ tier=quick budget=30
+#@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/03-libs
 for w in insn-rand-cpp insn-rand-ssl; do

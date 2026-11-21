@@ -1,5 +1,5 @@
 # 3. Two runs of one seed have equal digests; two seeds give different digests.
-#@ tier=quick budget=5
+#@ tier=quick budget=5 slots=0.5
 . "$(dirname "$0")/lib.inc"
 for r in 1a:1 1b:1 2:2; do
     prun "$RUNS/s${r%%:*}" --seed "${r#*:}" -- "$PATINA_GUESTS/hello-static"
