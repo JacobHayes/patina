@@ -733,7 +733,7 @@ literal load of the same code reads is data and is left alone (`rejected_sites`)
 reached otherwise (a table addressed by `adr` in a stripped file) cannot be told from code,
 and the census of every executable file on the dev VM and the CI runner found none that
 matches (docs/EVIDENCE.md). `RNDR` is answered only where the host has it (`HWCAP2_RNG`);
-elsewhere it raises `SIGILL` as it would without Patina (`[run] emulate-rndr` answers and
+elsewhere it raises `SIGILL` as it would without Patina (a test input answers and
 advertises it anyway, to test that path). `PACGA` is counted and labelled (`labels.pacga_sites`), not patched. An
 `isb` that is not a spin hint loses nothing to the patch (the fault and the return from it
 synchronize the context as `isb` does). No landing pad is ever patched and `udf` is not one,
@@ -1136,7 +1136,7 @@ In a run (`--preempt points`):
   runs and never written while a thread may run it, so no thread sees a half-made patch.
 - **Walks** (`spin.rs`): a point whose drawn gap ran out (a switch, not a deadline or a
   refill) draws a walk from its segment key (`proto::compute::walk`, `Stream::Walk`): 2
-  switches in W (W per seed from `compute-walk`; 2 in 4 below 4) go on 1 to W of the program's
+  switches in W (W drawn per seed; 2 in 4 below 4) go on 1 to W of the program's
   instructions, the rest switch at the point. The thread returns to the program single-stepped
   by the spin probes' stepper (x86_64 trap flag; arm64 a `brk` written past the next
   instruction), one instruction a trap, and switches where the count reaches 0 (the record

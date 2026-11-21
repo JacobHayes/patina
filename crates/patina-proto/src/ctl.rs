@@ -132,7 +132,7 @@ pub fn spin_host_text(v: u64) -> Option<&'static str> {
 
 /// `Config::insn` (arm64): answer `RNDR`/`RNDRRS` from the seed and advertise them
 /// (`HWCAP2_RNG`) even on a host without them: the test of that path on such hosts
-/// (`[run] emulate-rndr`).
+/// (`PATINA_TEST_EMULATE_RNDR`).
 pub const INSN_EMULATE_RNDR: u64 = 1;
 
 /// `Config::pmu`: counter preemption is on.
@@ -238,7 +238,7 @@ pub struct Ctl {
     /// Instruction channels: patched sites, emulations, unscanned code.
     pub insn: InsnCtl,
     /// Host `CLOCK_MONOTONIC` ns at supervisor milestones, for the start-up breakdown
-    /// (`PATINA_TIMING=1` makes the launcher print them). Indexes `TM_*`. Never logged.
+    /// (`PATINA_TEST_TIMING=1` makes the launcher print them). Indexes `TM_*`. Never logged.
     pub timing: [AtomicU64; 8],
     /// Counter preemption counters, summed over every thread of the run.
     pub pmu: PmuStats,
@@ -1234,7 +1234,7 @@ pub const HE_EXEC: u64 = 13;
 /// record, or a magic it does not know). args[0] = the record's magic. The run ends
 /// `unsupported`, stop `signal-context`.
 pub const HE_SIGNAL_CONTEXT: u64 = 14;
-/// A walk (`--preempt points`, `compute-walk`) could not step on this host: arm64's stepper
+/// A walk (`--preempt points`) could not step on this host: arm64's stepper
 /// could not open or write `/proc/self/mem`, or x86_64's could not read code
 /// (`process_vm_readv`). args[0] = the errno (0: open or write refused), args[1] = the call.
 /// The run ends `infra` rather than walk differently by host.

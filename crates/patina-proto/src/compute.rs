@@ -87,7 +87,7 @@ pub fn budget(mean: u64, switches: u64, events: u64) -> u64 {
     }
 }
 
-/// The longest walk's range when the run gives none (`--fault compute-walk`).
+/// The longest walk's range when the run gives none (`PATINA_TEST_COMPUTE_WALK`).
 pub const WALK_DEFAULT: (u64, u64) = (4, 512);
 /// The longest walk a run may ask for.
 pub const WALK_MAX: u64 = 1 << 16;

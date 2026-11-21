@@ -14,7 +14,7 @@ for spec in "w4 /guest/go-static all" "sweep /guest/go-sweep" "sweep24 --cpus 24
     for probes in true false; do
         n=$name-probes-$probes
         # shellcheck disable=SC2086
-        t=$(sweep "$n" $G 1-"$N" -- --config "$("$PATINA_CFG" stall-ms=3000 spin-probes=$probes)" $opts -- $cmd | cut -d';' -f1)
+        t=$(PATINA_TEST_STALL_MS=3000 PATINA_TEST_SPIN_PROBES=$probes sweep "$n" $G 1-"$N" -- $opts -- $cmd | cut -d';' -f1)
         echo "$name, spin probes $probes: ok $(count "$n" ok), compute-stall $(stalls "$n") of $N ($t)"
         other=$(( N - $(count "$n" ok) - $(stalls "$n") ))
         [ "$other" = 0 ] || fail "$n: $other outcomes other than ok/compute-stall"

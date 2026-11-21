@@ -1,6 +1,7 @@
 #!/bin/sh
 # tests/cfg KEY=VALUE...: write a patina.toml holding these settings (expert settings are
 # config keys only) into $RUNS and print its path, for `patina run --config "$(cfg ...)"`.
+# Test inputs (stall-ms, pause-points, ...) are environment variables, not keys: AGENTS.md.
 # A pmu-* or branches key also turns counter preemption on (preempt = "branches").
 set -eu
 f=$(mktemp "${RUNS:-${TMPDIR:-/tmp}}/cfg-XXXXXX.toml")
@@ -11,14 +12,14 @@ for kv in "$@"; do
         true | false | *[!0-9]* | '') case $v in true | false) ;; *) v="\"$v\"" ;; esac ;;
     esac
     case $k in
-        tmpfs-bytes | time-limit | timeout | cpus | emulate-rndr) run="$run$k = $v
+        tmpfs-bytes | time-limit | timeout | cpus) run="$run$k = $v
 " ;;
         fs-model) faults="$faults$k = $v
 " ;;
         pmu-* | branches) sched="$sched$k = $v
 preempt = \"branches\"
 " ;;
-        preempt | preempt-permille | stall-ms | host-cpu | pause-points | spin-probes) sched="$sched$k = $v
+        preempt | preempt-permille) sched="$sched$k = $v
 " ;;
         *) echo "cfg: unknown key $k" >&2; exit 2 ;;
     esac

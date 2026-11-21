@@ -349,7 +349,7 @@ pub const FLAGS: &[Flag] = &[
         "--vary",
         "LIST",
         "none",
-        "what to change between runs: cpu,load,aslr,sandbox,repeat,parallel,env,time (time waits PATINA_TIME_GAP_S of wall time before the second run, 61 s by default)",
+        "what to change between runs: cpu,load,aslr,sandbox,repeat,parallel,env,time (time waits 61 s of wall time before the second run)",
         &[Cmd::Verify],
     ),
     flag(

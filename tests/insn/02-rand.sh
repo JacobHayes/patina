@@ -16,7 +16,7 @@ case $ARCH in
             grep -qx 'no-rng' "$o/host/inc-0/stdout" || die "no RNDR on this host, but the program was told otherwise: $(head -2 "$o/host/inc-0/stdout")"
             echo "host without RNDR: the program sees no HWCAP2_RNG"
         fi
-        INSN_ARGS="--config $("$PATINA_CFG" emulate-rndr=true)"
+        export PATINA_TEST_EMULATE_RNDR=1 # a test input (AGENTS.md)
         ;;
 esac
 verify "$o/s1" 1 3 insn rand

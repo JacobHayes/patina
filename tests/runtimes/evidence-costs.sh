@@ -12,7 +12,7 @@ measure() {
     shift
     : >"$RUNS/cost-$name.native"
     for k in 1 2 3 4 5; do native "$RUNS/cost-$name-native.out" "$W/$wl" "$@" >>"$RUNS/cost-$name.native"; done
-    for k in 1 2 3 4 5; do run "$wl" "$RUNS/cost-$name-$k" "$k" $opts --config "$("$PATINA_CFG" stall-ms=3000)" -- "$@"; done
+    for k in 1 2 3 4 5; do PATINA_TEST_STALL_MS=3000 run "$wl" "$RUNS/cost-$name-$k" "$k" $opts -- "$@"; done
     python3 -I - "$RUNS" "$name" <<'PY'
 import json, sys
 runs, name = sys.argv[1], sys.argv[2]

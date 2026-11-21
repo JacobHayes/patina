@@ -1,5 +1,5 @@
 """Per-run start-up, broken into phases, for a static `true`, the dynamic
-/usr/bin/true and `python3 -c pass`. PATINA_TIMING=1 makes the launcher print host CLOCK_MONOTONIC
+/usr/bin/true and `python3 -c pass`. PATINA_TEST_TIMING=1 makes the launcher print host CLOCK_MONOTONIC
 marks of its own and of the supervisor (Ctl::timing). REPS runs each, median [min..max] ms:
 
   launcher setup       launch -> spawn        run directory, logs, control memfd, /etc files
@@ -42,7 +42,7 @@ for name, argv in progs.items():
     for i in range(REPS):
         out = f"{OUT}/su"
         shutil.rmtree(out, ignore_errors=True)
-        e = dict(os.environ, PATINA_TIMING="1")
+        e = dict(os.environ, PATINA_TEST_TIMING="1")
         t0 = time.perf_counter_ns()
         r = subprocess.run(["taskset", "-c", str(CPU), PATINA, "run", "--seed", "1", "--out", out, "--mount", GUESTS + ":/guest:copy", "--", *argv],
                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=e, text=True)

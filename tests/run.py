@@ -251,7 +251,7 @@ def main():
         runs = os.path.join(base, s["area"], s["name"])
         os.makedirs(runs)
         env = dict(os.environ, RUNS=runs, PATINA_SCRATCH=os.path.join(runs, "scratch"), CHECK_TIER=tier)
-        env.setdefault("PATINA_LOAD_THREADS", "2")
+        env.setdefault("PATINA_TEST_LOAD_THREADS", "2")
         log = os.path.join(base, f"{s['area']}-{s['name']}.out")
         t0 = time.monotonic()
         with open(log, "w") as fh:

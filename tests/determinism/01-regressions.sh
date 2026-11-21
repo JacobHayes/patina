@@ -8,7 +8,7 @@ G=$PATINA_ATTACK_GUESTS
 vfy() { # vfy NAME RUNS VARY -- guest...
     n=$1; r=$2; v=$3; shift 4
     rm -rf "${out:?}/$n"
-    PATINA_PARALLEL=${PATINA_PARALLEL:-4} timeout 900 "$PATINA" verify --seed 1 --runs "$r" --vary "$v" --out "$out/$n" \
+    PATINA_TEST_PARALLEL=${PATINA_TEST_PARALLEL:-4} timeout 900 "$PATINA" verify --seed 1 --runs "$r" --vary "$v" --out "$out/$n" \
         --mount "$G":/guest:copy -- "$@" >"$out/$n.txt" 2>&1 || grep -q '^identical: ' "$out/$n.txt" || die "$n: $(tail -3 "$out/$n.txt")"
     echo "$n: $r runs identical under $v ($(digest "$out/$n/run-0"))"
     rm -rf "${out:?}/$n"

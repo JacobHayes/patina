@@ -1,6 +1,6 @@
 """Helpers for the counter preemption scripts (counter preemption).
 
-Environment from ./check: PATINA (unprivileged build), PATINA_RT, PATINA_GUESTS, PATINA_WORKLOADS, RUNS.
+Environment from ./check: PATINA (unprivileged build), PATINA_GUESTS, PATINA_WORKLOADS, RUNS.
 Counter runs use a copy of $PATINA with CAP_PERFMON (lib/mkcap.sh: content-keyed, one recorded
 sudo use per new build). Quick and area scripts print SKIP and pass where it cannot be made
 (a host without sudo or PMU); evidence scripts fail. That SKIP is `SKIP: host: REASON`: the
@@ -23,18 +23,29 @@ FAULT = ["--fault", "fs-error-permille=20"]
 PMU = ["--preempt", "branches"]
 
 
+TEST_KEYS = ("stall-ms", "host-cpu", "pause-points", "spin-probes")
+
+
 def config(opts):
-    """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "stall-ms=2000"):
-    the keys go into a patina.toml (tests/cfg), passed as --config. A flag's value
-    (`--fault fs-error-permille=20`) stays with its flag."""
-    keys, rest = [], []
+    """Option lists hold flags, config keys (`KEY=VALUE`, e.g. "pmu-slice=100..100") and test
+    inputs (`stall-ms=2000`, AGENTS.md "Test inputs"): the keys go into a patina.toml
+    (tests/cfg), passed as --config; test inputs into the environment. A flag's value
+    (`--fault fs-error-permille=20`) stays with its flag. Returns (arguments, environment)."""
+    keys, rest, env = [], [], dict(os.environ)
     for i, o in enumerate(opts):
         flag_value = i > 0 and opts[i - 1].startswith("--") and "=" not in opts[i - 1]
-        (keys if "=" in o and not o.startswith("-") and not flag_value else rest).append(o)
+        if "=" in o and not o.startswith("-") and not flag_value:
+            k, v = o.split("=", 1)
+            if k in TEST_KEYS:
+                env["PATINA_TEST_" + k.upper().replace("-", "_")] = v
+            else:
+                keys.append(o)
+        else:
+            rest.append(o)
     if not keys:
-        return rest
+        return rest, env
     f = subprocess.run([os.environ["PATINA_CFG"]] + keys, capture_output=True, text=True, check=True).stdout.strip()
-    return ["--config", f] + rest
+    return ["--config", f] + rest, env
 
 
 def pmu(o):
@@ -99,9 +110,10 @@ def prune(d):
 def run(patina, out, seed, guest, opts, cmd, keep=False, timeout=900):
     subprocess.run(["rm", "-rf", out])
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    args = [patina, "run", "--seed", str(seed), "--out", out, "--mount", guest + ":/guest:copy"] + config(opts) + ["--"] + cmd
+    extra, env = config(opts)
+    args = [patina, "run", "--seed", str(seed), "--out", out, "--mount", guest + ":/guest:copy"] + extra + ["--"] + cmd
     try:
-        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         pass
     oc = outcome(out) or {"outcome": "none", "message": "no outcome", "digest": "-", "wall_ms": 0}
@@ -133,9 +145,10 @@ def verify(patina, out, seed, guest, runs, vary, opts, cmd, timeout=7200):
     args = [patina, "verify", "--seed", str(seed), "--runs", str(runs), "--out", out, "--mount", guest + ":/guest:copy"]
     if vary:
         args += ["--vary", vary]
-    env = dict(os.environ, PATINA_VERIFY_PRUNE="1")
+    extra, env = config(opts)
+    env["PATINA_TEST_VERIFY_PRUNE"] = "1"
     try:
-        r = subprocess.run(args + config(opts) + ["--"] + cmd, capture_output=True, text=True, timeout=timeout, env=env)
+        r = subprocess.run(args + extra + ["--"] + cmd, capture_output=True, text=True, timeout=timeout, env=env)
         txt = r.stdout + r.stderr
         return "identical:" in txt, txt
     except subprocess.TimeoutExpired:

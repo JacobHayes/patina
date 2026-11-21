@@ -28,17 +28,18 @@
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/10-spin
 mkdir -p "$o"
-on=$("$PATINA_CFG" stall-ms=1000)
-off=$("$PATINA_CFG" stall-ms=1000 spin-probes=false)
-one() { # OUT GUESTDIR SEED CONFIG -- PROG ARGS...
+# Test inputs (AGENTS.md): each run's environment.
+on="PATINA_TEST_STALL_MS=1000"
+off="PATINA_TEST_STALL_MS=1000 PATINA_TEST_SPIN_PROBES=0"
+one() { # OUT GUESTDIR SEED INPUTS -- PROG ARGS...
     d=$o/$1 g=$2 s=$3 c=$4; shift 4
     rm -rf "${d:?}"
-    timeout 60 "$PATINA" run --seed "$s" --config "$c" --out "$d" --mount "$g":/guest:copy "$@" >/dev/null 2>&1 || true
+    timeout 60 env $c "$PATINA" run --seed "$s" --out "$d" --mount "$g":/guest:copy "$@" >/dev/null 2>&1 || true
 }
 G=$PATINA_GUESTS
 one flag "$G" 1 "$on" -- /guest/spinpoints flag &
 one flag-off "$G" 1 "$off" -- /guest/spinpoints flag &
-python3 -I "$(dirname "$0")/../cpu-ms.py" sh -c 'rm -rf "${1:?}" && exec timeout 60 "$2" run --seed 1 --config "$3" --out "$1" --mount "$4":/guest:copy -- /guest/spinpoints count' sh "$o/count-a" "$PATINA" "$on" "$G" >"$o/count-a.ms" &
+python3 -I "$(dirname "$0")/../cpu-ms.py" sh -c 'rm -rf "${1:?}" && exec timeout 60 env $3 "$2" run --seed 1 --out "$1" --mount "$4":/guest:copy -- /guest/spinpoints count' sh "$o/count-a" "$PATINA" "$on" "$G" >"$o/count-a.ms" &
 one count-b "$G" 1 "$on" -- /guest/spinpoints count &
 one alone "$G" 1 "$on" -- /guest/spinpoints alone 2000 &
 wait
@@ -49,7 +50,7 @@ wait
 arm64=""; [ "$(uname -m)" != aarch64 ] || arm64=yes # lint-allow: test-subst — uname -m does not fail
 one twice "$G" 1 "$on" -- /guest/spinpoints twice &
 one jit "$G" 1 "$on" --timeout 20 -- /guest/spinpoints jit &
-timeout 120 "$PATINA" verify --seed 1 --runs 4 --vary cpu,load,aslr --config "$on" --out "$o/nested" \
+timeout 120 env $on "$PATINA" verify --seed 1 --runs 4 --vary cpu,load,aslr --out "$o/nested" \
     --mount "$G":/guest:copy -- /guest/spinpoints nested 300 >"$o/nested.txt" 2>&1 || true &
 [ -z "$arm64" ] || for m in xchg cas; do one "llsc-$m" "$G" 1 "$on" -- /guest/llsc-spin "$m" & done
 wait

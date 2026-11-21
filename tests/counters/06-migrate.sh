@@ -31,7 +31,7 @@ def tasks(root):
     return out
 def moved(out, cmd):
     subprocess.run(["rm", "-rf", out])
-    pr = subprocess.Popen([P, "run", "--seed", "3"] + config(PMU) + ["--out", out, "--mount", GU + ":/guest:copy", "--"] + cmd,
+    pr = subprocess.Popen([P, "run", "--seed", "3"] + config(PMU)[0] + ["--out", out, "--mount", GU + ":/guest:copy", "--"] + cmd,
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     n = 0
     rnd = random.Random(len(out))

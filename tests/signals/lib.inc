@@ -1,5 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
-# Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
+# Environment from ./check: PATINA, PATINA_GUESTS, RUNS.
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 

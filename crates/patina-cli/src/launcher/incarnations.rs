@@ -359,7 +359,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         }
         crashes.push(c);
         faults.add_crash(k, &kind, seq, end.crash_points, vclock, what);
-        if std::env::var_os("PATINA_TIMING").is_some() {
+        if std::env::var_os("PATINA_TEST_TIMING").is_some() {
             // the launcher's crash work: build the next tree, write it, digest it.
             eprintln!(
                 "patina-timing crash inc={k} tree={t_tree} written={t_written} digest={t_digest} end={}",

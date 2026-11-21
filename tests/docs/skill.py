@@ -12,6 +12,7 @@ which no command runs. The patina binary is the source of truth (`patina --help 
   KIND`, a kind the option's help names; an option whose value is a list of words, one of them.
   Upper-case words are placeholders and are not checked.
 - The skill's table whose first column is `Outcome` lists every outcome with its exit status.
+- Test inputs (`PATINA_TEST_*`, AGENTS.md) appear in neither `--help` nor these files.
 - docs/EVIDENCE.md is a record of past runs, each with the build it used, and is not checked.
 - Every command appears as `patina COMMAND`, and every preset as a `--faults` value, somewhere in
   the skill: a new one fails here until the skill says when an agent uses it.
@@ -38,9 +39,11 @@ PLACEHOLDER = re.compile(r"[A-Z]")
 
 
 def vocabulary(patina):
-    d = json.loads(subprocess.run([patina, "--help", "--format", "json"], check=True,
-                                  stdout=subprocess.PIPE, text=True).stdout)
-    v = {"commands": {c["name"]: c for c in d["commands"]},
+    text = subprocess.run([patina, "--help", "--format", "json"], check=True,
+                          stdout=subprocess.PIPE, text=True).stdout
+    d = json.loads(text)
+    v = {"test_inputs": "PATINA_TEST_" in text,
+         "commands": {c["name"]: c for c in d["commands"]},
          "flags": {f["name"]: f for f in d["flags"]},
          "keys": {k["name"] for k in d["faults"]["keys"]},
          "presets": {p["name"] for p in d["faults"]["presets"]},
@@ -175,6 +178,9 @@ def check_file(path, v, bad, seen, doc=False):
     A doc (not the skill) also shows other tools' options in code spans: there only the options of
     a `patina` command are checked."""
     rel = os.path.relpath(path, REPO)
+    for no, line in enumerate(open(path), 1):
+        if "PATINA_TEST_" in line:
+            bad.append(f"{rel}:{no}: a test input (PATINA_TEST_*) in a user doc: AGENTS.md lists them")
     pieces, rows = code(path)
     for no, text, kind in pieces:
         where = f"{rel}:{no}"
@@ -237,7 +243,7 @@ def main():
         sys.exit("skill.py: PATINA is not set: run it through ./check docs")
     v = vocabulary(patina)
     files = sorted(os.path.join(dp, f) for dp, _, fs in os.walk(SKILLS) for f in fs if f.endswith(".md"))
-    bad = []
+    bad = ["patina --help names a test input (PATINA_TEST_*): AGENTS.md lists them"] if v["test_inputs"] else []
     seen = {"commands": set(), "presets": set(), "outcomes": {}}
     for path in files:
         check_file(path, v, bad, seen)

@@ -8,7 +8,8 @@
 # found on x86_64, so the script runs there only.
 #@ tier=area budget=15 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
-opts="--config $("$PATINA_CFG" pause-points=false) --cpus 24 --env FJ_N=2000 --buggify --crash machine:1"
+export PATINA_TEST_PAUSE_POINTS=0 # a test input (AGENTS.md)
+opts="--cpus 24 --env FJ_N=2000 --buggify --crash machine:1"
 f=$RUNS/f6-2001
 run fjall-harness "$f" 2001 $opts -- /guest/fjall-harness-debug
 case "$(field "$f/result.json" message)" in

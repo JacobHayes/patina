@@ -105,15 +105,17 @@ pub struct Config {
     pub allow_unmet: Vec<String>,
     pub fs_model: String,
     pub preempt_permille: u64,
+    /// CPU time a thread may compute without a boundary event while another waits, before the
+    /// run ends `compute-stall` (test input `STALL_MS`).
     pub stall_ms: u64,
     /// Every executed pause hint (`pause`; on arm64 `yield`, `wfe`, `wfi`, `isb`) is a
-    /// scheduling point (`[sched] pause-points`).
+    /// scheduling point (test input `PAUSE_POINTS`).
     pub pause_points: bool,
     /// arm64: answer `RNDR`/`RNDRRS` from the seed and advertise them on a host without them
-    /// (`[run] emulate-rndr`; a test of that path: the default follows the host).
+    /// (test input `EMULATE_RNDR`: the default follows the host).
     pub emulate_rndr: bool,
-    /// Spin probes for a thread that computes without a boundary event (`[sched]
-    /// spin-probes`; only with `--preempt traps`).
+    /// Spin probes for a thread that computes without a boundary event (test input
+    /// `SPIN_PROBES`; only with `--preempt traps`).
     pub spin_probes: bool,
     pub pmu: Pmu,
     /// Switch points from load-time plans (`--preempt points`): stock code is
@@ -121,8 +123,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub points: bool,
     /// The host CPU every sandbox process is pinned to (default: one of the allowed set,
-    /// chosen by process id). Does not reach the guest.
+    /// chosen by process id; test input `HOST_CPU`). Does not reach the guest.
     pub host_cpu: Option<usize>,
+    /// `--preempt points`: the longest walk past a switch point, `W` or `A..B` drawn per seed
+    /// (test input `COMPUTE_WALK`; default `proto::compute::WALK_DEFAULT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_walk: Option<String>,
     /// The checker run after a run that ended ok (`--check`, `[run] check`; `check.rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check: Option<crate::check::Check>,
@@ -244,6 +250,7 @@ impl Default for Config {
             pmu: Pmu::default(),
             points: false,
             host_cpu: None,
+            compute_walk: None,
             check: None,
             ok_exit: vec![],
             known: None,
@@ -870,9 +877,6 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                     }
                     c.ok_exit = normal(l);
                 }
-                ("run", "emulate-rndr") if cfg!(target_arch = "aarch64") => {
-                    c.emulate_rndr = boolean(v, &at)?
-                }
                 ("faults", "crash") => c.crash = Some(string(v, &at)?),
                 ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
@@ -885,11 +889,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 ("sdk", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
                 ("sweep", "known") => c.known = Some(base.join(string(v, &at)?)),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
-                ("sched", "stall-ms") => c.stall_ms = int(v, &at)?,
-                ("sched", "host-cpu") => c.host_cpu = Some(int(v, &at)? as usize),
                 ("sched", "preempt") => (c.pmu.on, c.points) = preempt(&string(v, &at)?, &at)?,
-                ("sched", "pause-points") => c.pause_points = boolean(v, &at)?,
-                ("sched", "spin-probes") => c.spin_probes = boolean(v, &at)?,
                 // The race-hunting policy: every segment short, stops close to traps.
                 ("sched", "branches") => match string(v, &at)?.as_str() {
                     "default" => {
@@ -1029,6 +1029,47 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
 }
 
 /// The resolved configuration of `run` and `verify`.
+/// Test inputs (AGENTS.md, "Test inputs"): `PATINA_TEST_<NAME>` environment variables set what
+/// only Patina's own tests change. Each lands in the configuration, so `run.json` records it and
+/// a replay needs none. Unset, nothing changes.
+fn test_inputs(c: &mut Config) -> Res<()> {
+    fn var(name: &str) -> Option<(String, String)> {
+        let k = format!("PATINA_TEST_{name}");
+        std::env::var(&k).ok().map(|v| (k, v))
+    }
+    let num = |(k, v): (String, String)| {
+        v.parse::<u64>()
+            .map_err(|_| format!("{k}={v}: expected a number"))
+    };
+    let flag = |(k, v): (String, String)| match v.as_str() {
+        "1" | "true" => Ok(true),
+        "0" | "false" => Ok(false),
+        _ => Err(format!("{k}={v}: expected 1 or 0")),
+    };
+    if let Some(x) = var("STALL_MS") {
+        c.stall_ms = num(x)?;
+    }
+    if let Some(x) = var("HOST_CPU") {
+        c.host_cpu = Some(num(x)? as usize);
+    }
+    if let Some(x) = var("PAUSE_POINTS") {
+        c.pause_points = flag(x)?;
+    }
+    if let Some(x) = var("SPIN_PROBES") {
+        c.spin_probes = flag(x)?;
+    }
+    if let Some(x) = var("EMULATE_RNDR") {
+        if !cfg!(target_arch = "aarch64") {
+            return Err(format!("{}: arm64 only", x.0));
+        }
+        c.emulate_rndr = flag(x)?;
+    }
+    if let Some((_, v)) = var("COMPUTE_WALK") {
+        c.compute_walk = Some(v);
+    }
+    Ok(())
+}
+
 pub fn resolve(a: &Args) -> Res<Config> {
     let c = resolve_any(a)?;
     if c.cmd.is_empty() {
@@ -1048,6 +1089,7 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(f) = &file {
         check = apply_file(&mut c, f)?;
     }
+    test_inputs(&mut c)?;
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
     c.seed = a.num::<u64>("--seed")?.unwrap_or(0);
     for e in a.all("--env") {
@@ -1214,6 +1256,9 @@ impl Config {
             self.crash.as_deref().filter(|_| self.nodes.is_empty()),
             self.nodes.len(),
         )?;
+        if let Some(w) = &self.compute_walk {
+            plan.compute_walk = faults::walk(self.seed, w)?;
+        }
         plan.sdk.buggify = self.buggify as _;
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
             format!(
@@ -1755,12 +1800,12 @@ mod tests {
         assert!(e.contains("nosuch"), "{e}");
         std::fs::write(
             &f,
-            "[run]\ncmd = [\"/bin/true\"]\ncpus = 2\nenv = { A = \"1\" }\n[faults]\nfs-error-permille = 5\n[sched]\nstall-ms = 500\n",
+            "[run]\ncmd = [\"/bin/true\"]\ncpus = 2\nenv = { A = \"1\" }\n[faults]\nfs-error-permille = 5\n[sched]\npreempt-permille = 500\n",
         )
         .unwrap();
         let mut c = Config::default();
         apply_file(&mut c, &f).unwrap();
-        assert_eq!((c.cpus, c.stall_ms), (2, 500));
+        assert_eq!((c.cpus, c.preempt_permille), (2, 500));
         assert_eq!(c.env, vec!["A=1".to_string()]);
         assert_eq!(c.faults, vec!["fs-error-permille=5".to_string()]);
         std::fs::remove_dir_all(&dir).unwrap();

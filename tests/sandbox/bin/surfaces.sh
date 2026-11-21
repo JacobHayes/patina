@@ -3,7 +3,7 @@
 # fcntl commands, prctl options, socket option (level, name) pairs, Deny hits, refusals and the
 # calls made (surface "call").
 # One run per workload, seed 1, faults off. Writes OUT/surfaces.tsv (workload, surface, value,
-# count) and OUT/outcomes.tsv (workload, class, refused). Needs PATINA, PATINA_RT, OUT.
+# count) and OUT/outcomes.tsv (workload, class, refused). Needs PATINA, OUT.
 #   surfaces.sh [NAMES...]      default: every entry below
 set -euo pipefail; shopt -s inherit_errexit
 : "${PATINA:?}" "${OUT:?}"

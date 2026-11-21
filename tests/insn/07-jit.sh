@@ -25,7 +25,7 @@ if [ "$ARCH" = x86_64 ]; then
 else
     [ "$d" = 1 ] || die "the counter read in anonymous code gave $d values in 3 runs"
     echo "anonymous code: its counter read is trapped (one value in 3 runs)"
-    INSN_ARGS="--config $("$PATINA_CFG" emulate-rndr=true)"
+    export PATINA_TEST_EMULATE_RNDR=1 # a test input (AGENTS.md)
     patina_run "$o/anon-rndr" 1 insn-jit anon-rndr
     f=$o/anon-rndr/result.json
     [ "$(field "$f" labels.unscanned_exec_mappings)" -ge 1 ] || die "anon-rndr: not labelled"

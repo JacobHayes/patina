@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 P = ppatina()
 progs = ["loops", "recur", "indirect", "strings", "fp", "signals", "threads"]
 n = int(os.environ.get("COUNTERS_RUNS", "100"))
-os.environ["PATINA_PARALLEL"] = "8"
+os.environ["PATINA_TEST_PARALLEL"] = "8"
 seed = 7
 # The varied runs: a few programs at once (one sandbox each); the parallel runs: one program
 # at a time (8 sandboxes), so at most 8 sandboxes run at any moment.

@@ -1,9 +1,9 @@
 # 2 (reduced). The protocol (tests/determinism/bin/protocol.sh) over a few workloads and attack guests:
 # seed 1, faults off and on, every variant but time (03-time.sh) with fewer runs (repeat 5,
-# parallel 4), two cells at a time with PATINA_PARALLEL=2. The whole matrix is evidence-matrix.sh.
+# parallel 4), two cells at a time with PATINA_TEST_PARALLEL=2. The whole matrix is evidence-matrix.sh.
 #@ tier=area budget=120 slots=4
 . "$(dirname "$0")/lib/common.inc"
-export PATINA_PARALLEL=2 DET_REPEAT=${DET_REPEAT:-5} DET_PARALLEL_RUNS=${DET_PARALLEL_RUNS:-4}
+export PATINA_TEST_PARALLEL=2 DET_REPEAT=${DET_REPEAT:-5} DET_PARALLEL_RUNS=${DET_PARALLEL_RUNS:-4}
 mkdir -p "$RUNS/cells"
 for w in ${DET_REDUCED:-W1 W3 W8 sockprobe envprobe uninit dents}; do
     for f in off on; do echo "$w 1 $f"; done

@@ -1,6 +1,6 @@
 //! Build the in-guest runtime (`patina-rt`, its own workspace, the bare target of the
 //! architecture `patina` is built for, release profile) and hand its path to `include_bytes!` in `launch.rs`, so `patina` is one
-//! self-contained binary. `PATINA_RT=path` at run time overrides the embedded runtime.
+//! self-contained binary. `PATINA_TEST_RT=path` at run time overrides the embedded runtime.
 
 use std::path::PathBuf;
 use std::process::Command;

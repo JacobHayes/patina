@@ -69,7 +69,7 @@ const HWCAP2_FRAME_RECORDS: [(u64, &str); 2] = [(1 << 48, "FPMR"), (1 << 63, "PO
 
 impl Facts {
     /// This host's facts. On x86_64 only the counter trap is probed. `cpu`: a CPU a run is
-    /// pinned to (`[sched] host-cpu`), whose model is checked with the allowed ones.
+    /// pinned to (`PATINA_TEST_HOST_CPU`), whose model is checked with the allowed ones.
     pub fn probe(cpu: Option<usize>) -> Facts {
         let arm = cfg!(target_arch = "aarch64");
         let (hwcap, hwcap2) = if arm {

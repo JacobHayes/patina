@@ -40,14 +40,14 @@ pub fn cache_dir() -> PathBuf {
         .join("patina")
 }
 
-/// The runtime the sandbox executes: the file `PATINA_RT` names (runtime development), else
+/// The runtime the sandbox executes: the file `PATINA_TEST_RT` names (runtime development), else
 /// the embedded copy written once to `$XDG_CACHE_HOME/patina/rt-<hash>` (default
 /// `~/.cache`, else the temporary directory) and checked against the embedded bytes on every
 /// open. A file, not a memfd: some LSM policies refuse to execute a memfd.
 pub fn rt_file() -> Res<File> {
-    if let Some(p) = std::env::var_os("PATINA_RT") {
+    if let Some(p) = std::env::var_os("PATINA_TEST_RT") {
         return File::open(&p)
-            .map_err(|e| format!("runtime {} (PATINA_RT): {e}", Path::new(&p).display()));
+            .map_err(|e| format!("runtime {} (PATINA_TEST_RT): {e}", Path::new(&p).display()));
     }
     let dir = cache_dir();
     let path = dir.join(format!("rt-{:016x}", proto::rec::hash_bytes(0x7274, RT)));
@@ -1240,7 +1240,7 @@ pub fn run_incarnation(
         b.stop();
     }
     let t_waited = mono_ns();
-    let stdio_max = std::env::var("PATINA_STDIO_MAX")
+    let stdio_max = std::env::var("PATINA_TEST_STDIO_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(STDIO_MAX);
@@ -1342,7 +1342,7 @@ pub fn run_incarnation(
         verdict = Verdict::new(
             "output-limit",
             format!(
-                "guest {} larger than {stdio_max} bytes (PATINA_STDIO_MAX)",
+                "guest {} larger than {stdio_max} bytes",
                 truncated.join(" and ")
             ),
         );
@@ -1410,7 +1410,7 @@ pub fn run_incarnation(
         nodes: (!c.nodes.is_empty())
             .then(|| crate::result::nodes_json(unsafe { proto::node::NodeTab::at(ctl_ptr) })),
     };
-    if std::env::var_os("PATINA_TIMING").is_some() {
+    if std::env::var_os("PATINA_TEST_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.
         let tm = |i: usize| ctl.timing[i].load(Relaxed);
         eprintln!(

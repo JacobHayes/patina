@@ -18,7 +18,7 @@ done | xargs -P 4 -L 1 bash -euo pipefail -O inherit_errexit -c '
     wl "$w"
     [ "$f" = off ] || EXTRA="$EXTRA $FAULTS"
     # shellcheck disable=SC2086
-    PATINA_PARALLEL=1 timeout 600 "$PATINA" verify --seed "$s" --runs 3 --vary cpu,aslr --out "$o" \
+    PATINA_TEST_PARALLEL=1 timeout 600 "$PATINA" verify --seed "$s" --runs 3 --vary cpu,aslr --out "$o" \
         --mount "$GDIR":/guest:copy $EXTRA -- $CMD >"$o.txt" 2>&1 || true
     echo "$w seed $s faults $f: $(grep -m1 "^identical\|differ\|error" "$o.txt" || tail -1 "$o.txt")"
     rm -rf "${o:?}"

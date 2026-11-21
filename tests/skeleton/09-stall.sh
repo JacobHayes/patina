@@ -8,7 +8,7 @@
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/09-stall
-ms=$(python3 -I "$(dirname "$0")/../cpu-ms.py" timeout 120 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" stall-ms=500)" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinpoints count)
+ms=$(python3 -I "$(dirname "$0")/../cpu-ms.py" timeout 120 env PATINA_TEST_STALL_MS=500 "$PATINA" run --seed 1 --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- /guest/spinpoints count)
 [ "$(field "$out/result.json" outcome)/$(field "$out/result.json" stop)" = unsupported/compute-stall ] || die "outcome $(field "$out/result.json" outcome) $(field "$out/result.json" stop)"
 case $(field "$out/result.json" message) in
 *"in waiter (/guest/spinpoints+0x"* | *"Spin probes are off"* | *"A spin probe could not run"*) ;;

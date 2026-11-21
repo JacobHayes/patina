@@ -9,15 +9,15 @@
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/02-spin
 mkdir -p "$o"
-on=$("$PATINA_CFG" stall-ms=1000)
-off=$("$PATINA_CFG" stall-ms=1000 pause-points=false spin-probes=false)
+# Test inputs (AGENTS.md): stall-ms 1000; the locks also without pause points and spin probes.
+export PATINA_TEST_STALL_MS=1000
 # --timeout: a run that cannot end by itself ends here, not at the script's budget.
 for s in 1 2 3; do
-    prun "$o/count-$s" "$s" --timeout 10 --config "$on" -- /guest/compute/spinpoints count &
-    prun "$o/lock-$s" "$s" --timeout 10 --config "$off" -- /guest/compute/spinwait own-spin-nohint &
+    prun "$o/count-$s" "$s" --timeout 10 -- /guest/compute/spinpoints count &
+    PATINA_TEST_PAUSE_POINTS=0 PATINA_TEST_SPIN_PROBES=0 prun "$o/lock-$s" "$s" --timeout 10 -- /guest/compute/spinwait own-spin-nohint &
 done
-prun "$o/count-0" 1 --timeout 10 --fault compute-gap=0 --config "$on" -- /guest/compute/spinpoints count &
-prun "$o/lock-0" 1 --timeout 10 --fault compute-gap=0 --config "$off" -- /guest/compute/spinwait own-spin-nohint &
+prun "$o/count-0" 1 --timeout 10 --fault compute-gap=0 -- /guest/compute/spinpoints count &
+PATINA_TEST_PAUSE_POINTS=0 PATINA_TEST_SPIN_PROBES=0 prun "$o/lock-0" 1 --timeout 10 --fault compute-gap=0 -- /guest/compute/spinwait own-spin-nohint &
 wait
 for s in 1 2 3; do
     [ "$(field "$o/count-$s/result.json" outcome)" = ok ] || die "a. spinpoints count seed $s: $(res "$o/count-$s")"

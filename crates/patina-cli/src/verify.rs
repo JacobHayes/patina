@@ -23,7 +23,7 @@ fn cpu_choices() -> Vec<usize> {
 
 /// Move host-global counters: tmpfs files, pipes and processes created and destroyed on the host.
 fn churn() {
-    let dir = std::env::var("PATINA_CHURN_DIR").unwrap_or_else(|_| "/dev/shm".into());
+    let dir = std::env::var("PATINA_TEST_CHURN_DIR").unwrap_or_else(|_| "/dev/shm".into());
     for i in 0..1000 {
         let p = format!("{dir}/patina-churn-{}-{i}", std::process::id());
         let _ = std::fs::write(&p, b"x");
@@ -47,7 +47,7 @@ fn churn() {
 }
 
 /// Host load while the runs execute: a few busy loops (threads of this process, stopped
-/// when the returned guard is dropped). Four by default (`PATINA_LOAD_THREADS` overrides):
+/// when the returned guard is dropped). Four by default (`PATINA_TEST_LOAD_THREADS` overrides):
 /// enough to make the scheduler move the runs around, without starving them when
 /// several verifies run at once (2x the core count each took the host to load 250).
 struct Load {
@@ -59,7 +59,7 @@ impl Load {
     fn start() -> Load {
         use std::sync::atomic::{AtomicBool, Ordering};
         let stop = std::sync::Arc::new(AtomicBool::new(false));
-        let n: usize = std::env::var("PATINA_LOAD_THREADS")
+        let n: usize = std::env::var("PATINA_TEST_LOAD_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(4);
@@ -229,8 +229,8 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
     let mut i = 0;
     while i < n {
         // `parallel`: up to 12 runs at once after the reference, each on its own core.
-        // PATINA_PARALLEL lowers the batch (a shared host may cap concurrent sandboxes).
-        let width: usize = std::env::var("PATINA_PARALLEL")
+        // PATINA_TEST_PARALLEL lowers the batch (a shared host may cap concurrent sandboxes).
+        let width: usize = std::env::var("PATINA_TEST_PARALLEL")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(12)
@@ -243,7 +243,7 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
         if vary("time") && i == 1 {
             // The host's clock cannot be moved without privilege: the variation is a wait. 61 s
             // crosses a minute boundary, so a leak at second or minute resolution differs.
-            let gap: u64 = std::env::var("PATINA_TIME_GAP_S")
+            let gap: u64 = std::env::var("PATINA_TEST_TIME_GAP_S")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(61);
@@ -346,9 +346,9 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
                         );
                         return Ok((c, ExitCode::from(Outcome::Error.exit())));
                     }
-                    // Long soaks: PATINA_VERIFY_PRUNE removes each run found identical
+                    // Long soaks: PATINA_TEST_VERIFY_PRUNE removes each run found identical
                     // to run 0 (run 0 stays for comparison).
-                    if std::env::var_os("PATINA_VERIFY_PRUNE").is_some() {
+                    if std::env::var_os("PATINA_TEST_VERIFY_PRUNE").is_some() {
                         let _ = std::fs::remove_dir_all(&rr.dir);
                     }
                 }

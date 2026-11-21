@@ -34,15 +34,15 @@ else
 fi
 
 echo "== b. spin-waits"
-sweep go-sweep $G 1-8 -- --config "$("$PATINA_CFG" stall-ms=1000)" -- /guest/go-sweep
+PATINA_TEST_STALL_MS=1000 sweep go-sweep $G 1-8 -- -- /guest/go-sweep
 echo "go-sweep: ok $(count go-sweep ok) of 8"
 [ "$(count go-sweep ok)" = 8 ] || fail "go-sweep: not every seed ok"
-sweep go-sweep-np $G 1-8 -- --config "$("$PATINA_CFG" stall-ms=1000 spin-probes=false)" -- /guest/go-sweep
+PATINA_TEST_STALL_MS=1000 PATINA_TEST_SPIN_PROBES=0 sweep go-sweep-np $G 1-8 -- -- /guest/go-sweep
 cs=$(stalls go-sweep-np); ok=$(count go-sweep-np ok)
 echo "go-sweep, spin probes off: ok $ok, compute-stall $cs of 8"
 [ "$cs" -gt 0 ] || fail "go-sweep did not reproduce the spin-wait with spin probes off"
 [ $((ok + cs)) = 8 ] || fail "go-sweep, spin probes off: outcomes other than ok/compute-stall"
-echo "go-static: $(sweep go-static8 $G 1-8 -- --config "$("$PATINA_CFG" stall-ms=3000)" -- /guest/go-static all | cut -d';' -f1)"
+echo "go-static: $(PATINA_TEST_STALL_MS=3000 sweep go-static8 $G 1-8 -- -- /guest/go-static all | cut -d';' -f1)"
 [ "$(count go-static8 ok)" = 8 ] || fail "W4: $((8 - $(count go-static8 ok))) of 8 not ok"
 
 echo "== c. D, faults off and on"
@@ -64,10 +64,10 @@ echo "== e. report (seed 1)"
 stats "$RUNS/go-r"
 
 echo "== f. go-spin"
-run $G "$RUNS/spin-short" 1 --config "$("$PATINA_CFG" stall-ms=3000)" -- /guest/go-spin 300000000
+PATINA_TEST_STALL_MS=3000 run $G "$RUNS/spin-short" 1 -- /guest/go-spin 300000000
 echo "short spin, stall-ms 3000: class $(field "$RUNS/spin-short/result.json" outcome), wall $(field "$RUNS/spin-short/result.json" wall_ms) ms, stdout: $(cat "$RUNS/spin-short/inc-0/stdout")"
 [ "$(field "$RUNS/spin-short/result.json" outcome)" = ok ] || fail "go-spin short: not ok"
-run $G "$RUNS/spin-20s" 1 --config "$("$PATINA_CFG" stall-ms=1000)" -- /guest/go-spin 20000000000
+PATINA_TEST_STALL_MS=1000 run $G "$RUNS/spin-20s" 1 -- /guest/go-spin 20000000000
 echo "20 s spin, stall-ms 1000: class $(field "$RUNS/spin-20s/result.json" outcome), wall $(field "$RUNS/spin-20s/result.json" wall_ms) ms, detail $(field "$RUNS/spin-20s/result.json" message)"
 [ "$(field "$RUNS/spin-20s/result.json" stop)" = compute-stall ] || fail "go-spin 20 s: not compute-stall"
 

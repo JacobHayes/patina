@@ -1,7 +1,7 @@
 #!/bin/bash
 # tests/determinism/bin/matrix.sh [WORKLOADS] [SEEDS] [FAULTS]
 # Every workload x seed x faults cell through tests/determinism/bin/protocol.sh, one cell at a time (the
-# parallel variant itself runs PATINA_PARALLEL sandboxes). Defaults: W1-W9 and every attack
+# parallel variant itself runs PATINA_TEST_PARALLEL sandboxes). Defaults: W1-W9 and every attack
 # guest, seeds 1-5, faults off and on. Writes $MATRIX_OUT/summary.txt (one line per variant)
 # and $MATRIX_OUT/table.tsv (workload, seed, faults, variants identical, variants differing).
 set -euo pipefail; shopt -s inherit_errexit

@@ -1,5 +1,5 @@
 # Shared helpers for the scripts of this area (sourced). Environment from ./check: PATINA,
-# PATINA_RT, RUNS. The four workloads have their own guest directories under $W.
+# RUNS. The four workloads have their own guest directories under $W.
 : "${PATINA:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=${PATINA_WORKLOADS:?}

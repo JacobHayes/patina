@@ -1,10 +1,10 @@
 # Evidence (docs/EVIDENCE.md): the whole protocol (tests/determinism/bin/protocol.sh:
 # reference, repeat 21, cpu 6, load, aslr, sandbox, parallel 9, env) over every W1-W9 workload
 # and attack guest, seeds DET_SEEDS (default "1 2"), faults off
-# and on. Cells run 4 at a time, each with PATINA_PARALLEL=2.
+# and on. Cells run 4 at a time, each with PATINA_TEST_PARALLEL=2.
 #@ tier=evidence budget=2400 slots=8 arch=x86_64
 . "$(dirname "$0")/lib/common.inc"
-export PATINA_PARALLEL=2 DET_PARALLEL_RUNS=${DET_PARALLEL_RUNS:-4}
+export PATINA_TEST_PARALLEL=2 DET_PARALLEL_RUNS=${DET_PARALLEL_RUNS:-4}
 mkdir -p "$RUNS/cells"
 for w in ${DET_WLS:-$W_ALL $A_ALL}; do
     for s in ${DET_SEEDS:-1 2}; do

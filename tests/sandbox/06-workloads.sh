@@ -10,7 +10,7 @@ for n in ${SANDBOX_ENTRIES:-$ENTRIES}; do
     entry "$n"
     rm -rf "${out:?}/$n"
     # shellcheck disable=SC2086
-    PATINA_PARALLEL=${PATINA_PARALLEL:-4} timeout 3600 "$PATINA" verify --seed 1 --runs 3 --vary env --out "$out/$n" --mount "$GDIR":/guest:copy $OPTS \
+    PATINA_TEST_PARALLEL=${PATINA_TEST_PARALLEL:-4} timeout 3600 "$PATINA" verify --seed 1 --runs 3 --vary env --out "$out/$n" --mount "$GDIR":/guest:copy $OPTS \
         -- $CMD >"$out/$n.txt" 2>&1 || grep -q '^identical: ' "$out/$n.txt" || die "$n: $(tail -3 "$out/$n.txt")"
     c=$(class "$out/$n/run-0")
     [ "$c" = ok ] || die "$n: class $c"

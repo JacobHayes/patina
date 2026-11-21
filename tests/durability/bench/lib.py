@@ -31,9 +31,19 @@ def prune(d):
                 os.unlink(os.path.join(root, f))
 
 
+TEST_KEYS = ("stall-ms", "host-cpu", "pause-points", "spin-probes")
+
+
 def config(opts):
-    """Option lists hold flags and config keys (`KEY=VALUE`, e.g. "stall-ms=2000"): the keys go
-    into a patina.toml (tests/cfg), passed as --config."""
+    """Option lists hold flags, config keys (`KEY=VALUE`) and test inputs (`stall-ms=2000`,
+    AGENTS.md "Test inputs"): the keys go into a patina.toml (tests/cfg), passed as --config;
+    test inputs into the environment. Returns (arguments, environment)."""
+    env = dict(os.environ)
+    for o in list(opts):
+        k = o.split("=", 1)[0]
+        if not o.startswith("-") and "=" in o and k in TEST_KEYS:
+            env["PATINA_TEST_" + k.upper().replace("-", "_")] = o.split("=", 1)[1]
+    opts = [o for o in opts if o.startswith("-") or o.split("=", 1)[0] not in TEST_KEYS]
     keys, rest, i = [], [], 0
     while i < len(opts):
         o = opts[i]
@@ -44,9 +54,9 @@ def config(opts):
         (keys if not o.startswith("-") and "=" in o else rest).append(o)
         i += 1
     if not keys:
-        return rest
+        return rest, env
     f = subprocess.run([os.environ["PATINA_CFG"]] + keys, capture_output=True, text=True, check=True).stdout.strip()
-    return ["--config", f] + rest
+    return ["--config", f] + rest, env
 
 
 def patina_run(out, args, guest=GUESTS, opts=(), env=None, rt=None, timeout=900, keep_logs=False, cpu=None):
@@ -54,10 +64,10 @@ def patina_run(out, args, guest=GUESTS, opts=(), env=None, rt=None, timeout=900,
     of the patina process)."""
     shutil.rmtree(out, ignore_errors=True)
     cpu = CPU if cpu is None else cpu
-    cmd = ["taskset", "-c", str(cpu), PATINA, "run", "--out", out, "--mount", guest + ":/guest:copy", *config(opts), "--", *args]
-    e = dict(os.environ)
+    extra, e = config(opts)
+    cmd = ["taskset", "-c", str(cpu), PATINA, "run", "--out", out, "--mount", guest + ":/guest:copy", *extra, "--", *args]
     if rt:
-        e["PATINA_RT"] = rt
+        e["PATINA_TEST_RT"] = rt
     if env:
         e.update(env)
     t0 = time.perf_counter_ns()

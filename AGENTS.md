@@ -110,6 +110,30 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
 A run that differs between repeats of one seed is a determinism bug until proven otherwise:
 find it, never retry it.
 
+### Test inputs
+
+What only Patina's own tests change is an environment variable `PATINA_TEST_<NAME>`, and nothing
+else: no flag, config key or fault key, and no mention in `--help` or the user docs. Unset,
+nothing changes. Those that set the run's configuration land in `run.json`, so a replay or a
+`rerun:` line needs none (`config::test_inputs`); `1`/`0` or `true`/`false` for a switch.
+
+| Variable | Sets |
+|---|---|
+| `STALL_MS` | CPU time a thread computes alone before `compute-stall` (default 10000) |
+| `HOST_CPU` | the host CPU a run is pinned to |
+| `PAUSE_POINTS` | `0`: a spin hint is not a scheduling point |
+| `SPIN_PROBES` | `0`: no spin probes under `--preempt traps` |
+| `EMULATE_RNDR` | arm64: answer `RNDR` from the seed on a host without it |
+| `COMPUTE_WALK` | `--preempt points`: the longest walk, `W` or `A..B` (default 4..512) |
+| `RT` | a runtime file instead of the embedded one |
+| `TIMING` | print the launcher's start-up times |
+| `STDIO_MAX` | bytes of guest stdout or stderr kept before `output-limit` (default 1 GiB) |
+| `PARALLEL`, `LOAD_THREADS`, `CHURN_DIR`, `TIME_GAP_S`, `VERIFY_PRUNE` | `verify --vary` parallel's width, load's threads, the churn directory, time's wait (default 61 s); delete each run directory once judged |
+| `PAGE_SIZE`, `OPLOG_CORRUPT`, `REPLAY_PERTURB` | doctor's page size; corrupt the op log; perturb a replay |
+
+`tests/run.py` sets `PATINA_SCRATCH` for unit tests and scripts (scratch space), not a patina
+input.
+
 ## Rules
 
 - **Fail closed.** An effect Patina does not control is a refusal or a named stop, never a

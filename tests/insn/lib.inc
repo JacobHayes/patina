@@ -1,5 +1,5 @@
 # Shared helpers for the scripts of this area (sourced, not run).
-# Environment from ./check: PATINA, PATINA_RT, PATINA_GUESTS, RUNS.
+# Environment from ./check: PATINA, PATINA_GUESTS, RUNS.
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 HERE=$(cd "$(dirname "$0")" && pwd)
 # Guests write small outputs; a runaway one stops at 2 GB.
@@ -15,8 +15,6 @@ print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
 
 # The machine: x86_64 or aarch64 (the guests in x86 assembly have arm64 twins of one name).
 ARCH=$(uname -m)
-# INSN_ARGS: more `patina run` options for patina_run and verify (word-split).
-INSN_ARGS=${INSN_ARGS:-}
 
 # prog NAME: /guest/NAME, or NAME itself when it is an absolute path
 prog() { case $1 in /*) echo "$1" ;; *) echo "/guest/$1" ;; esac; }
@@ -26,7 +24,7 @@ patina_run() { # out seed guest args...
     rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
     # shellcheck disable=SC2086
-    timeout 300 "$PATINA" run --seed "$seed" --out "$out" $INSN_ARGS --mount "$PATINA_GUESTS":/guest:copy -- "$g" "$@" >/dev/null || [ -f "$out/result.json" ] || die "patina run $g: no result.json"
+    timeout 300 "$PATINA" run --seed "$seed" --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$g" "$@" >/dev/null || [ -f "$out/result.json" ] || die "patina run $g: no result.json"
 }
 
 # verify OUT SEED RUNS GUEST ARGS...: patina verify --vary cpu exits 0 and, independently, the
@@ -36,7 +34,7 @@ verify() {
     rm -rf "${out:?}"
     mkdir -p "$(dirname "$out")"
     # shellcheck disable=SC2086
-    timeout 1800 "$PATINA" verify --seed "$seed" --runs "$n" --vary cpu --out "$out" $INSN_ARGS --mount "$PATINA_GUESTS":/guest:copy -- "$g" "$@" \
+    timeout 1800 "$PATINA" verify --seed "$seed" --runs "$n" --vary cpu --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "$g" "$@" \
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"
     d=$(for i in $(seq 0 $((n - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     [ "$d" = 1 ] || die "$g seed $seed: $d distinct digests"

@@ -50,7 +50,7 @@ pub struct Plan {
     /// default; a plan that names `compute-gap` gets that gap for the whole run.
     pub compute_budget: bool,
     /// Load-time points: the longest walk of a switch past its site, in instructions
-    /// (`compute-walk`; 0: switches are taken at their sites).
+    /// (`Config::compute_walk`; 0: switches are taken at their sites).
     pub compute_walk: u64,
     /// With nodes: each node's disk and memory settings (`NodeTab::faults`; the driver's are
     /// in `faults`, entry 0 unused).
@@ -90,7 +90,7 @@ enum Val {
     Own,
     /// A position (the N-th call): may be a range, which searches positions across seeds.
     At,
-    /// `compute-gap`, `compute-walk`: `A..B` draws log-uniformly, not uniformly.
+    /// `compute-gap`: `A..B` draws log-uniformly, not uniformly.
     Gap,
     /// A window `START+LENGTH[:PORT]` in milliseconds, START and LENGTH each a number or a
     /// range resolved like any other (LENGTH by the draw of `KEY:length`).
@@ -317,12 +317,6 @@ pub const KEYS: &[Key] = &[
         "rebuilt code (compute points): mean events between switches, drawn log-uniformly per seed from A..B; 0 turns switches off [default: 64..65536]",
     ),
     key(
-        "compute-walk",
-        "W|A..B",
-        Val::Gap,
-        "--preempt points: 2 switches in W (in 4 when W is below 4) are taken 1..W instructions (uniform) past their point, single-stepped, the rest at it; W drawn log-uniformly per seed from A..B; 0 takes every switch at its point [default: 4..512]",
-    ),
-    key(
         "fs-error-at",
         "CLASS:N",
         Val::At,
@@ -526,9 +520,15 @@ fn resolve_num(seed: u64, k: &str, v: &str, max: u64) -> Res<u64> {
     Ok(a + plan_draw(seed, k) % (b - a + 1))
 }
 
-/// `compute-gap=G|A..B` (the run's mean gap) and `compute-walk=W|A..B` (its longest walk): a
-/// range drawn log-uniformly by the key's own plan draw (`proto::compute::mean_gap`). `0`
-/// turns compute switches, or walks, off.
+/// The longest walk past a switch point, `W` or `A..B` drawn as `resolve_gap` draws (the test
+/// input `PATINA_TEST_COMPUTE_WALK`, `Config::compute_walk`).
+pub fn walk(seed: u64, v: &str) -> Res<u64> {
+    resolve_gap(seed, "compute-walk", v)
+}
+
+/// `compute-gap=G|A..B` (the run's mean gap) and the longest walk (`walk`): a range drawn
+/// log-uniformly by the key's own plan draw (`proto::compute::mean_gap`). `0` turns compute
+/// switches, or walks, off.
 fn resolve_gap(seed: u64, k: &str, v: &str) -> Res<u64> {
     let max = match k {
         "compute-walk" => proto::compute::WALK_MAX,
@@ -811,10 +811,7 @@ pub fn resolve(
             Val::At => json!(resolve_at(seed, k, v)?),
             Val::Gap => {
                 let g = resolve_gap(seed, k, v)?;
-                match k.as_str() {
-                    "compute-walk" => plan.compute_walk = g,
-                    _ => (plan.compute_gap, plan.compute_budget) = (g, false),
-                }
+                (plan.compute_gap, plan.compute_budget) = (g, false);
                 plan.resolved.push((k.clone(), json!(g)));
                 continue;
             }

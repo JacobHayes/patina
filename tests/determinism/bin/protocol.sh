@@ -21,7 +21,7 @@ for v in repeat cpu load aslr sandbox parallel env; do
     case $v in repeat) n=$REPEAT ;; cpu) n=6 ;; parallel) n=${DET_PARALLEL_RUNS:-9} ;; *) n=4 ;; esac
     vv=$v; [ "$v" = repeat ] && vv=repeat
     # shellcheck disable=SC2086
-    if PATINA_PARALLEL=${PATINA_PARALLEL:-8} timeout 7200 "$PATINA" verify --seed "$seed" --runs "$n" --vary "$vv" --out "$out/$v" \
+    if PATINA_TEST_PARALLEL=${PATINA_TEST_PARALLEL:-8} timeout 7200 "$PATINA" verify --seed "$seed" --runs "$n" --vary "$vv" --out "$out/$v" \
         --mount "$GDIR":/guest:copy $opts -- $CMD >"$out/$v.txt" 2>&1 || grep -q '^identical: ' "$out/$v.txt"; then
         d=$(jq -r .digest "$out/$v/run-0/result.json")
         c=$(jq -r .outcome "$out/$v/run-0/result.json")

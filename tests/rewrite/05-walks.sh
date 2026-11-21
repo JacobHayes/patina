@@ -1,4 +1,4 @@
-# 5. Walks (`--preempt points`, `--fault compute-walk`; ARCHITECTURE "Load-time rewriting"): a
+# 5. Walks (`--preempt points`, the test input `PATINA_TEST_COMPUTE_WALK`; ARCHITECTURE "Load-time rewriting"): a
 # switch at a load-time point is taken a drawn number of instructions past it, single-stepped.
 #  a. rw-races lms (tests/guests/rewrite/races.c: a load and a store with no site between them)
 #     loses an update on some seed of 1-8 with walks, and on none of them without: a plain
@@ -27,13 +27,13 @@ rm -rf "${o:?}"
 mkdir -p "$o"
 export XDG_CACHE_HOME=$o/cache
 pts() { "$PATINA" run --preempt points "$@" >/dev/null 2>&1 || true; }
-WALK="--fault compute-gap=2..64 --fault compute-walk=16"
+# The longest walk is a test input (AGENTS.md): PATINA_TEST_COMPUTE_WALK.
 
 # a. Four seeds at a time, with and without walks.
 first=""
 for s in $(seq 1 8); do
-    pts --seed "$s" $WALK --out "$o/w-$s" -- "$G/rw-races" lms &
-    pts --seed "$s" --fault compute-gap=2..64 --fault compute-walk=0 --out "$o/n-$s" -- "$G/rw-races" lms &
+    PATINA_TEST_COMPUTE_WALK=16 pts --seed "$s" --fault compute-gap=2..64 --out "$o/w-$s" -- "$G/rw-races" lms &
+    PATINA_TEST_COMPUTE_WALK=0 pts --seed "$s" --fault compute-gap=2..64 --out "$o/n-$s" -- "$G/rw-races" lms &
     [ $((s % 2)) = 1 ] || wait
 done
 wait
@@ -54,9 +54,10 @@ guests="rw-c rw-cxx rw-rs rw-go"; [ "${CHECK_TIER:-}" != quick ] || guests=rw-go
 { echo "rw-races $first lms"; for g in $guests; do echo "$g 3"; done; } >"$o/b.jobs"
 export PATINA G o
 xargs -P 4 -L 1 bash -euo pipefail -c 'n=$1 s=$2; shift 2
-    w="--fault compute-gap=2..64 --fault compute-walk=16"
-    [ "$n" = rw-races ] || w="--fault compute-gap=64..256 --fault compute-walk=32"
-    "$PATINA" verify --preempt points --seed "$s" $w --runs 3 --vary cpu,load,aslr,sandbox,repeat \
+    w=compute-gap=2..64 PATINA_TEST_COMPUTE_WALK=16
+    [ "$n" = rw-races ] || w=compute-gap=64..256 PATINA_TEST_COMPUTE_WALK=32
+    export PATINA_TEST_COMPUTE_WALK
+    "$PATINA" verify --preempt points --seed "$s" --fault "$w" --runs 3 --vary cpu,load,aslr,sandbox,repeat \
         --out "$o/v-$n" -- "$G/$n" "$@" >"$o/v-$n.txt" 2>&1 || true' sh <"$o/b.jobs"
 for n in rw-races $guests; do
     grep -q '^identical' "$o/v-$n.txt" || die "b. $n: $(grep -m1 -v '^run ' "$o/v-$n.txt")"
@@ -72,11 +73,11 @@ for m in fault timer fork sys flags; do
     # shellcheck disable=SC2046
     $(c_cmd $m) | sort >"$o/$m.want"
     for s in 1 2; do
-        case $m in fault) f="compute-gap=1 --fault compute-walk=2" ;;
-            sys | flags) f="compute-gap=2..16 --fault compute-walk=16" ;;
-            *) f="compute-gap=64..256 --fault compute-walk=2" ;; esac
-        # shellcheck disable=SC2046,SC2086
-        pts --seed "$s" --fault $f --out "$o/$m-$s" -- $(c_cmd $m) &
+        case $m in fault) f=compute-gap=1 w=2 ;;
+            sys | flags) f=compute-gap=2..16 w=16 ;;
+            *) f=compute-gap=64..256 w=2 ;; esac
+        # shellcheck disable=SC2046
+        PATINA_TEST_COMPUTE_WALK=$w pts --seed "$s" --fault "$f" --out "$o/$m-$s" -- $(c_cmd $m) &
     done
     wait
 done

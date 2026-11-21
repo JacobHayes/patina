@@ -590,7 +590,7 @@ pub fn materialise(log: &super::log::OpLog, seed: u64, key: u64) -> Result<Tree,
     let ops = &log.ops;
     // Timed only when asked: the supervisor, which materialises a node's machine crash, reads
     // no clock through the vDSO (`rdtsc` faults there).
-    let timing = std::env::var_os("PATINA_TIMING").is_some();
+    let timing = std::env::var_os("PATINA_TEST_TIMING").is_some();
     let now = || timing.then(std::time::Instant::now);
     let t0 = now();
     // One replay without a cut, keeping a state at or before the last forced commit.

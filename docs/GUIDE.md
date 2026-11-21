@@ -513,9 +513,8 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   `--crash machine-at:A..B`.
 - **The fault rates**: a preset's ranges (`--faults disk`) and a key's own range.
 - **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
-  system call switches threads; `[sched] pause-points = false` stops treating the spin hint
-  (`pause`; on arm64 `yield`, `isb`, `wfe`, `wfi`) as a scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
-  its thread pools. Each changes every seed's schedule, so the same seeds then show other
+  system call switches threads; `--cpus N` (default 4) is the CPU count the program sees,
+  which sizes its thread pools. Each changes every seed's schedule, so the same seeds then show other
   runs; on their own they did not make the storage findings more frequent.
 - **A race with no system call in it.** Threads switch only at system calls, `pause`
   instructions and spin probes. Two threads that race on plain memory with none of these
@@ -2398,8 +2397,7 @@ violation (always): acked-records-kept: 23 acknowledged, 0 stored
 `--vary` also takes `sandbox` (host counters moved between runs), `parallel` (runs at once),
 `env` and `time`. `time` waits before the second run, so a host clock that leaks into the
 run reads differently there; the host's clock cannot be moved without privilege, so the wait
-is the variation. It waits `PATINA_TIME_GAP_S` seconds, 61 by default
-(past a minute boundary: a leak at second or minute resolution shows).
+is the variation. It waits 61 seconds (past a minute boundary: a leak at second or minute resolution shows).
 
 ## Scheduling
 
@@ -2740,14 +2738,13 @@ mapped executable (`images`: `path`, `sha256`, `status`, and for a planned file 
 them (a counter loaded, changed and stored) holds no point. So under `--preempt points` a
 switch is sometimes taken a few instructions past its point: 2 switches in W are taken a drawn
 1 to W instructions on, the program single-stepped there, the rest at the point. W is drawn
-per seed, log-uniformly from 4 to 512 by default (`--fault compute-walk=W` or `A..B`; `0`
-takes every switch at its point). A walk ends, and its switch is not taken, where the
+per seed, log-uniformly from 4 to 512. A walk ends, and its switch is not taken, where the
 program enters Patina (a system call, a fault, a spin hint); it never stops inside Patina's
 copied code, and switches before an x86_64 `pushf` or an arm64 exclusive load. The run's
 `load-time points:` line counts the switches taken after a walk (`result.json`: `walks`,
 `walk_steps`, `walks_cut`, and `walk_max`, the seed's W). A walk costs about one single-step
 per switch, whatever W is. On arm64 walks write breakpoints through `/proc/self/mem`; a host
-that refuses that ends the run `internal` (or set `compute-walk=0`).
+that refuses that ends the run `internal` (`--preempt traps` or `branches` there).
 
 The lost update of `tests/guests/rewrite/races.c lms` (a load and a store through a pointer, in
 a loop) is found on about 1 in 10 seeds at the default gap with walks and on none without, and

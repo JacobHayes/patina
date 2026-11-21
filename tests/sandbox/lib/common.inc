@@ -13,7 +13,7 @@ detail() { jq -r .message "$1/result.json"; }
 vfy() {
     n=$1; r=$2; v=$3; g=$4; shift 5
     rm -rf "${out:?}/$n"
-    PATINA_PARALLEL=${PATINA_PARALLEL:-4} timeout 1800 "$PATINA" verify --seed 1 --runs "$r" --vary "$v" --out "$out/$n" \
+    PATINA_TEST_PARALLEL=${PATINA_TEST_PARALLEL:-4} timeout 1800 "$PATINA" verify --seed 1 --runs "$r" --vary "$v" --out "$out/$n" \
         --mount "$g":/guest:copy -- "$@" >"$out/$n.txt" 2>&1 || grep -q '^identical: ' "$out/$n.txt" || die "$n: $(tail -3 "$out/$n.txt")"
     echo "$n: $r runs identical under $v ($(digest "$out/$n/run-0"))"
 }

@@ -273,7 +273,7 @@ pub fn partition_line(nodes: &Value) -> Option<String> {
 pub struct RewriteReport {
     pub images: Vec<Value>,
     pub plans: [u64; proto::ctl::PLAN_FIELDS],
-    /// The run's longest walk (`compute-walk`, drawn per seed).
+    /// The run's longest walk (drawn per seed).
     pub walk: u64,
 }
 
@@ -1078,7 +1078,7 @@ pub fn compute_line(c: &Value) -> Option<String> {
 }
 
 /// The `patina run` line for result.json's `rewrite` (`--preempt points`): points taken, the
-/// switches that walked on (`compute-walk`), and per image rewritten the share of its sites patched and of its text left dark.
+/// switches that walked on, and per image rewritten the share of its sites patched and of its text left dark.
 /// `nodes: primary 10.0.0.2 running, backup 10.0.0.3 exit 1; net: 2 cuts, 2 heals, 1 held,
 /// none cut at the end` (a run with nodes; each node's output is in `node/NAME/inc-K/`).
 pub fn nodes_line(n: &Value) -> Option<String> {

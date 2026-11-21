@@ -8,10 +8,10 @@
 //!   mapping, under `proto::insn`'s rule. A site is overwritten with `udf #0x7061`
 //!   (`proto::insn::UDF`) and `emulate` answers the SIGILL:
 //!   - `RNDR`/`RNDRRS`: a draw from the seed, when the host has the instruction (the kernel's
-//!     `HWCAP2_RNG`) or the run asks for it (`[run] emulate-rndr`, which also advertises it).
+//!     `HWCAP2_RNG`) or the run asks for it (`PATINA_TEST_EMULATE_RNDR`, which also advertises it).
 //!     On a host without it the site is left alone: executing it raises SIGILL, a host-stable
 //!     fact, as it would outside Patina.
-//!   - `yield`, `wfe`, `wfi`, `isb`: pause points (`sched.pause-points`). An `isb` that is not a
+//!   - `yield`, `wfe`, `wfi`, `isb`: pause points (`Config::pause_points`). An `isb` that is not a
 //!     spin hint (after a system-register write, ending a cache flush) loses nothing: the
 //!     SIGILL entry and the return from it are context synchronization events themselves.
 //!   - `pacga`: counted (`pacga_sites`), not patched.

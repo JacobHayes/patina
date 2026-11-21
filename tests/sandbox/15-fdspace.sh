@@ -28,9 +28,8 @@ last=$(sed -n 's/^soft fds .* \([0-9]*\)$/\1/p' "$out/native.txt")
 [ "$last" = $((soft - 1)) ] && grep -q '^soft opened [0-9]* errno 24$' "$out/native.txt" ||
     die "limits: native did not fill to the soft limit $soft (last $last)"
 echo "limits: $(wc -l <"$out/native.txt") lines as native, filled to $last below the soft limit $soft"
-off=$("$PATINA_CFG" spin-probes=false)
 timeout 300 "$PATINA" run --seed 1 --out "$out/on" --mount "$G17":/guest:copy -- /guest/fdspace spin >/dev/null 2>&1 || true
-timeout 300 "$PATINA" run --seed 1 --config "$off" --out "$out/off" --mount "$G17":/guest:copy -- /guest/fdspace spin >/dev/null 2>&1 || true
+PATINA_TEST_SPIN_PROBES=0 timeout 300 "$PATINA" run --seed 1 --out "$out/off" --mount "$G17":/guest:copy -- /guest/fdspace spin >/dev/null 2>&1 || true
 for r in on off; do
     [ "$(class "$out/$r")" = ok ] || die "spin $r: $(class "$out/$r"): $(detail "$out/$r")"
 done
