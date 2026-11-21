@@ -108,12 +108,19 @@ pub fn rt_file() -> Res<File> {
 }
 
 /// The CPUs of the launcher's affinity set.
-pub fn allowed_cpus() -> Vec<usize> {
+pub fn affinity() -> Vec<usize> {
     let mut set: libc::cpu_set_t = unsafe { std::mem::zeroed() };
     unsafe { libc::sched_getaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &mut set) };
     (0..libc::CPU_SETSIZE as usize)
         .filter(|&c| unsafe { libc::CPU_ISSET(c, &set) })
         .collect()
+}
+
+/// The CPUs runs use: the affinity set, of a hybrid CPU's only one kind of core
+/// (`host::run_cpus`; a host where that cannot be known is refused before any run).
+pub fn allowed_cpus() -> Vec<usize> {
+    let a = affinity();
+    crate::host::run_cpus(&a, &crate::host::CoreKinds::probe()).unwrap_or(a)
 }
 
 /// The CPU a run is pinned to without --cpu: one of the allowed set, chosen by process id, so

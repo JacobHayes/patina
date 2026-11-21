@@ -1698,9 +1698,10 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs.
   backward calls, indirect jumps and atomics that a single-instruction patch can reach (most,
   not all: above), so a race between plain accesses with no such instruction between them
   is not split, as in stock code. Libraries load at other addresses than without points, and a
-  program reading its own text reads the patch. `cpuid`'s core ids are core 0's, but on a
-  hybrid CPU the leaves that differ by core type (caches, TLBs) are the core's, so seeds there
-  repeat only on one kind of core. A plan is found by the file's identity (device, inode, size,
+  program reading its own text reads the patch. `cpuid`'s core ids are core 0's; the leaves
+  that differ by kind of core (caches, TLBs) are the core's, so on a hybrid x86_64 CPU runs use
+  one kind (its performance cores, `host::run_cpus`; `patina doctor` names them), and a host
+  whose kinds the kernel does not list is refused. Not yet run on hybrid hardware. A plan is found by the file's identity (device, inode, size,
   change time): a file the program rewrites in place at the same size, on a filesystem whose
   change times are coarse, can keep the old plan for a moment. At most 64 planned images per
   process (more run without points, counted `unplanned`). Seeds found without points do not replay with

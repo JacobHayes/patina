@@ -38,6 +38,95 @@ pub struct Facts {
     /// userfaultfd's asynchronous write protection), each read by `PAGEMAP_SCAN`. `Err`: the
     /// step that failed and why.
     pub spin: Result<(), (SpinStep, String)>,
+    /// The launcher's affinity set.
+    pub affinity: Vec<usize>,
+    /// x86_64: the kinds of core of a hybrid CPU.
+    pub kinds: CoreKinds,
+}
+
+/// x86_64: a hybrid CPU (`CPUID.(EAX=7,ECX=0):EDX[15]`) and the CPUs of each of its kinds of
+/// core, as the kernel lists them (`/sys/devices/cpu_core/cpus`, `/sys/devices/cpu_atom/cpus`).
+/// The kinds answer `cpuid` differently (caches, TLBs: leaves the runtime passes through), so
+/// runs use one kind (`run_cpus`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CoreKinds {
+    pub hybrid: bool,
+    /// The performance cores.
+    pub core: Option<Vec<usize>>,
+    /// The efficient cores.
+    pub atom: Option<Vec<usize>>,
+}
+
+impl CoreKinds {
+    pub fn probe() -> CoreKinds {
+        let list = |kind: &str| {
+            std::fs::read_to_string(format!("/sys/devices/{kind}/cpus"))
+                .ok()
+                .and_then(|s| cpu_list(&s))
+        };
+        CoreKinds {
+            hybrid: hybrid_flag(),
+            core: list("cpu_core"),
+            atom: list("cpu_atom"),
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+fn hybrid_flag() -> bool {
+    use core::arch::x86_64::{__cpuid_count, __get_cpuid_max};
+    __get_cpuid_max(0).0 >= 7 && __cpuid_count(7, 0).edx & (1 << 15) != 0
+}
+#[cfg(not(target_arch = "x86_64"))]
+fn hybrid_flag() -> bool {
+    false
+}
+
+/// The CPUs runs use out of `affinity`: all of them, unless they are of two kinds of a hybrid
+/// CPU; then its performance cores among them. `Err`: a hybrid CPU whose kinds the kernel does
+/// not list for every CPU of `affinity` (the reason and the fix).
+pub fn run_cpus(affinity: &[usize], k: &CoreKinds) -> Result<Vec<usize>, (String, String)> {
+    let hybrid = k.hybrid || k.core.is_some() || k.atom.is_some();
+    if !hybrid || affinity.len() <= 1 {
+        return Ok(affinity.to_vec());
+    }
+    let of = |l: &Option<Vec<usize>>| -> Vec<usize> {
+        let l = l.as_deref().unwrap_or(&[]);
+        affinity.iter().copied().filter(|c| l.contains(c)).collect()
+    };
+    let (core, atom) = (of(&k.core), of(&k.atom));
+    let unknown: Vec<usize> = affinity
+        .iter()
+        .copied()
+        .filter(|c| !core.contains(c) && !atom.contains(c))
+        .collect();
+    if !unknown.is_empty() {
+        return Err((
+            format!(
+                "a hybrid CPU whose kind of core the kernel does not list for cpus {} (/sys/devices/cpu_core/cpus, /sys/devices/cpu_atom/cpus), and its kinds answer cpuid differently",
+                ranges(&unknown)
+            ),
+            format!(
+                "pin with taskset to cores of one kind, for example taskset -c {} patina ...",
+                affinity[0]
+            ),
+        ));
+    }
+    Ok(if core.is_empty() { atom } else { core })
+}
+
+/// `0-3,6` (the kernel's CPU list) as CPU numbers; `None` if malformed.
+fn cpu_list(s: &str) -> Option<Vec<usize>> {
+    let mut out = vec![];
+    for part in s.trim().split(',').filter(|p| !p.is_empty()) {
+        let (a, b) = part.split_once('-').unwrap_or((part, part));
+        let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
+        if a > b {
+            return None;
+        }
+        out.extend(a..=b);
+    }
+    Some(out)
 }
 
 /// The part of spin probes' host support that failed (`Facts::spin`).
@@ -124,6 +213,8 @@ impl Facts {
                 0
             },
             spin: children().spin.clone(),
+            affinity: crate::launch::affinity(),
+            kinds: CoreKinds::probe(),
         }
     }
 
@@ -166,13 +257,16 @@ pub fn platform(f: &Facts) -> Check {
 /// This architecture's checks after the sandbox's own (`doctor`'s order).
 pub fn checks(f: &Facts) -> Vec<Check> {
     match f.arch {
-        "x86_64" => vec![(
-            "rdtsc trap",
-            f.counter_trap
-                .clone()
-                .map(|_| "PR_SET_TSC makes rdtsc fault".into())
-                .map_err(|e| (e, crate::doctor::CONTAINER_FIX.into())),
-        )],
+        "x86_64" => vec![
+            (
+                "rdtsc trap",
+                f.counter_trap
+                    .clone()
+                    .map(|_| "PR_SET_TSC makes rdtsc fault".into())
+                    .map_err(|e| (e, crate::doctor::CONTAINER_FIX.into())),
+            ),
+            ("one kind of core", one_kind(f)),
+        ],
         "aarch64" => vec![
             ("counter-timer trap", counter_timer(f)),
             ("page size", page_size(f)),
@@ -314,6 +408,31 @@ fn ranges(cpus: &[usize]) -> String {
         i = j + 1;
     }
     out.join(",")
+}
+
+fn one_kind(f: &Facts) -> Result<String, (String, String)> {
+    let k = &f.kinds;
+    let used = run_cpus(&f.affinity, k)?;
+    if !(k.hybrid || k.core.is_some() || k.atom.is_some()) {
+        return Ok("not a hybrid CPU".into());
+    }
+    if used.len() == f.affinity.len() {
+        return Ok(format!(
+            "a hybrid CPU; runs use cpus {}, all of one kind",
+            ranges(&used)
+        ));
+    }
+    let rest: Vec<usize> = f
+        .affinity
+        .iter()
+        .copied()
+        .filter(|c| !used.contains(c))
+        .collect();
+    Ok(format!(
+        "a hybrid CPU; runs use its performance cores, cpus {}, not its efficient cores, cpus {}",
+        ranges(&used),
+        ranges(&rest)
+    ))
 }
 
 fn one_model(f: &Facts) -> Result<String, (String, String)> {
@@ -782,6 +901,8 @@ mod tests {
             hwcap2: 0,
             sve_vl: 16,
             spin: Ok(()),
+            affinity: (0..4).collect(),
+            kinds: CoreKinds::default(),
         }
     }
 
@@ -965,6 +1086,78 @@ mod tests {
             assert!(why.contains(e) && !fix.is_empty(), "{why}; {fix}");
         }
         assert!(spin_probes(&runner()).1.is_ok());
+    }
+
+    /// A hybrid x86_64 host: performance cores 0-7, efficient cores 8-15.
+    fn hybrid(affinity: impl IntoIterator<Item = usize>) -> Facts {
+        Facts {
+            arch: "x86_64",
+            affinity: affinity.into_iter().collect(),
+            kinds: CoreKinds {
+                hybrid: true,
+                core: cpu_list("0-7\n"),
+                atom: cpu_list("8-15\n"),
+            },
+            ..runner()
+        }
+    }
+
+    #[test]
+    fn hybrid_runs_use_one_kind_of_core() {
+        // Both kinds allowed: the performance cores.
+        let f = hybrid(0..16);
+        assert_eq!(run_cpus(&f.affinity, &f.kinds), Ok((0..8).collect()));
+        assert!(failing(&f).is_empty());
+        let (_, r) = checks(&f).pop().unwrap();
+        assert!(r.unwrap().contains("cpus 0-7"));
+        // Some of each: the performance ones among them.
+        let f = hybrid([3, 9, 10]);
+        assert_eq!(run_cpus(&f.affinity, &f.kinds), Ok(vec![3]));
+        // Only efficient cores: those.
+        let f = hybrid(8..12);
+        assert_eq!(run_cpus(&f.affinity, &f.kinds), Ok((8..12).collect()));
+        // Not hybrid: every allowed CPU.
+        let f = Facts {
+            kinds: CoreKinds::default(),
+            ..hybrid(0..16)
+        };
+        assert_eq!(run_cpus(&f.affinity, &f.kinds), Ok((0..16).collect()));
+        assert!(failing(&f).is_empty());
+    }
+
+    #[test]
+    fn hybrid_without_kinds_listed_is_refused() {
+        // The hybrid flag without the kernel's lists: which CPU is which is unknown.
+        let f = Facts {
+            kinds: CoreKinds {
+                hybrid: true,
+                core: None,
+                atom: None,
+            },
+            ..hybrid(0..4)
+        };
+        assert_eq!(failing(&f), vec!["one kind of core"]);
+        let Err((_, fix)) = run_cpus(&f.affinity, &f.kinds) else {
+            panic!("unknown kinds accepted")
+        };
+        assert!(fix.contains("taskset -c 0 "), "{fix}");
+        // One CPU is one kind whatever the lists say.
+        let f = Facts {
+            affinity: vec![2],
+            ..f
+        };
+        assert!(failing(&f).is_empty());
+        // A CPU in neither list.
+        let f = hybrid([7, 8, 16]);
+        assert!(run_cpus(&f.affinity, &f.kinds).is_err());
+    }
+
+    #[test]
+    fn cpu_lists_parse() {
+        assert_eq!(cpu_list("0-3,6,8-9\n"), Some(vec![0, 1, 2, 3, 6, 8, 9]));
+        assert_eq!(cpu_list(""), Some(vec![]));
+        assert_eq!(cpu_list("3-1"), None);
+        assert_eq!(cpu_list("x"), None);
     }
 
     #[test]

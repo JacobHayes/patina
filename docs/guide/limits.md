@@ -14,6 +14,7 @@ patina` when it can.
 | an older kernel with `kernel.unprivileged_userns_clone=0` | that sysctl set to 1 |
 | a Docker or Podman container | three options (below) |
 | arm64 | Linux 6.12 or later, 4 KiB pages, one CPU model among the CPUs a run uses |
+| x86_64 with performance and efficient cores | nothing: runs use the performance cores (`patina doctor` lists them) |
 
 On Ubuntu 24.04 and later, `patina doctor` prints the root command that installs the profile:
 
