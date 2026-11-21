@@ -40,7 +40,8 @@ the runner is slow. The fix is to cut, not to raise either.
 
 Calibration: before any script, the runner times a small piece of the scripts' own work (a
 sweep of four seeds of a guest that forks and execs, on four sandboxes, with a copied mount),
-three times, and divides the median by REFERENCE for the machine: the slowest of that time
+once, or three times when the first is slower than the reference, and divides the median by
+REFERENCE for the machine: the slowest of that time
 seen on an unloaded CI runner of the architecture. The factor, bounded to [1, 3], multiplies
 every budget and the tier ceiling, and is printed at the start and in the summary. An unloaded
 runner or any faster host measures at most the reference and runs at 1x, so a script that has
@@ -84,7 +85,11 @@ def calibrate(base):
     if not ref or not guests:
         return 1.0, "no reference for this machine" if not ref else "no PATINA_GUESTS"
     times = []
+    # One probe at the reference or faster is the answer (1x); a slower one is confirmed by two
+    # more, and their median taken.
     for i in range(3):
+        if i == 1 and times[0] <= ref:
+            break
         out = os.path.join(base, "calibration", str(i))
         t0 = time.monotonic()
         r = subprocess.run([os.environ["PATINA"], "sweep", "--seeds", "1..4", "-j", "4", "--keep", "fail",
@@ -94,7 +99,7 @@ def calibrate(base):
         subprocess.run(["rm", "-rf", out])
         if r.returncode != 0:
             return 1.0, f"calibration failed (exit {r.returncode}: {r.stdout.strip()[-200:]})"
-    t = sorted(times)[1]
+    t = sorted(times)[len(times) // 2]
     factor = min(FACTOR_MAX, max(1.0, t / ref))
     return factor, f"probe {t:.2f} s, reference {ref:.2f} s"
 
