@@ -300,8 +300,13 @@ impl<'a> Elf<'a> {
             let s = shoff + i * 64;
             let typ = u32_at(d, s + 4)?;
             let (off, size) = (u64_at(d, s + 0x18)? as usize, u64_at(d, s + 0x20)? as usize);
-            // SHT_NOBITS holds no file bytes
-            let size = if typ == 8 { 0 } else { size };
+            // SHT_NOBITS holds no file bytes, and its offset need not lie within the file (a
+            // tool that moved the section headers may leave it past the end).
+            let (off, size) = if typ == 8 {
+                (off.min(d.len()), 0)
+            } else {
+                (off, size)
+            };
             if off.checked_add(size).is_none_or(|e| e > d.len()) {
                 return Err(format!("section {i} outside the file"));
             }
@@ -632,5 +637,27 @@ fn eh_frame(d: &[u8], addr: u64, anchors: &mut Vec<u64>, extents: &mut Vec<(u64,
             }
         }
         pos = end;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A NOBITS section takes no bytes of the file, so its offset may lie past the file's end
+    /// (as after patchelf grew a Go binary's headers): the file still parses.
+    #[test]
+    fn a_nobits_section_may_start_past_the_end_of_the_file() {
+        let mut d = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let shoff = u64_at(&d, 0x28).unwrap() as usize;
+        let shnum = u16_at(&d, 0x3c).unwrap() as usize;
+        let i = (0..shnum)
+            .find(|i| u32_at(&d, shoff + i * 64 + 4).unwrap() == 8)
+            .expect("a NOBITS section");
+        let past = (d.len() as u64 + 0x10000).to_le_bytes();
+        d[shoff + i * 64 + 0x18..][..8].copy_from_slice(&past);
+        if let Err(e) = Elf::parse(&d) {
+            panic!("{e}");
+        }
     }
 }
