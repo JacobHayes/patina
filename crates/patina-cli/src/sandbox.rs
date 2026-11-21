@@ -1143,6 +1143,7 @@ pub fn keeper_main(args: &[String]) -> Res<ExitCode> {
         [f, p] if f == "--parent" => p.parse().map_err(|_| "__sandbox: --parent PID")?,
         _ => return Err("__sandbox: usage: __sandbox --parent PID".into()),
     };
+    crate::launch::mark("keeper");
     let spec: Spec =
         serde_json::from_slice(&read_fd(FD_SPEC)?).map_err(|e| format!("__sandbox: spec: {e}"))?;
     unsafe { libc::close(FD_SPEC) };
@@ -1160,7 +1161,9 @@ pub fn keeper_main(args: &[String]) -> Res<ExitCode> {
     if Path::new("/proc/self/ns/cgroup").exists() {
         flags |= libc::CLONE_NEWCGROUP;
     }
+    crate::launch::mark("userns");
     sys(unsafe { libc::unshare(flags) } as _, "unshare namespaces")?;
+    crate::launch::mark("unshared");
     // At the root, so that the pivots move this process's root and working directory too: the
     // keeper keeps no reference to the host's tree.
     chdir("/")?;
@@ -1296,14 +1299,17 @@ fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
     let mut ev: Vec<*const libc::c_char> = env.iter().map(|a| a.as_ptr()).collect();
     ev.push(std::ptr::null());
     let exe = c(spec.exe.as_deref().unwrap_or(&spec.argv[0]));
+    crate::launch::mark("execsup");
     unsafe { libc::execve(exe.as_ptr(), av.as_ptr(), ev.as_ptr()) };
     fail(last_err(&format!("execute {}", spec.argv[0])))
 }
 
 /// PID 1's part, in order (ARCHITECTURE.md "The sandbox").
 fn setup(spec: &Spec, chan: &OwnedFd) -> Res<()> {
+    crate::launch::mark("pid1");
     let old_umask = unsafe { libc::umask(0) };
     loopback()?;
+    crate::launch::mark("lo");
     // Bind sources as the host resolves them, before the host's root moves.
     let mut ops = spec.ops.clone();
     for op in &mut ops {
@@ -1336,10 +1342,12 @@ fn setup(spec: &Spec, chan: &OwnedFd) -> Res<()> {
     mkdir("oldroot", 0o755)?;
     pivot_root("/tmp", "oldroot")?;
     chdir("/")?;
+    crate::launch::mark("pivot1");
     let mut seq = 0;
     for op in &ops {
         apply(op, &mut seq)?;
     }
+    crate::launch::mark("ops");
     // Detach the host's tree: private first, so the unmount reaches no other namespace.
     mount(
         Some("oldroot"),
@@ -1393,6 +1401,7 @@ fn setup(spec: &Spec, chan: &OwnedFd) -> Res<()> {
     send_fd(chan.as_raw_fd(), ns)?;
     unsafe { libc::close(ns) };
     drop_caps()?;
+    crate::launch::mark("caps");
     unsafe { libc::umask(old_umask) };
     chdir(&spec.chdir)?;
     sys(unsafe { libc::setsid() } as _, "setsid")?;

@@ -486,12 +486,19 @@ unsafe fn perturb_child() {
 /// `run.json` first, then the incarnations, then `result.json`. With `--check`, when the run
 /// ended ok the checker runs on the finished directory and `result.json` is written again
 /// with its verdict (`check.rs`); the run itself, its logs and digest, are done by then.
+pub fn mark(n: &str) {
+    if std::env::var_os("PATINA_TEST_TIMING").is_some() {
+        eprintln!("patina-mark {n} {}", mono_ns());
+    }
+}
+
 pub fn run_one(
     o: &Opts,
     out: &Path,
     cpu: usize,
     no_personality: bool,
 ) -> Res<(RunEnd, serde_json::Value)> {
+    let t_run0 = std::time::Instant::now();
     fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
     if out.join("result.json").exists() || out.join("inc-0").exists() {
         return Err(format!("{} already holds a run", out.display()));
@@ -500,7 +507,9 @@ pub fn run_one(
         &out.join("run.json"),
         &crate::result::run_json(&o.cfg, &o.program, &o.node_programs, &o.plan)?,
     )?;
+    mark("runjson");
     let mut end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
+    mark("chain");
     let write = |end: &RunEnd| -> Res<serde_json::Value> {
         let mut r = crate::result::result_json(end, &crate::result::classified(end));
         r["signature"] = crate::signature::of(&r, out);
@@ -517,6 +526,7 @@ pub fn run_one(
         });
     }
     let mut r = write(&end)?;
+    mark("written");
     if let (Some(c), true) = (&o.cfg.check, ok) {
         end.check = Some(crate::check::run(
             c,
@@ -525,6 +535,27 @@ pub fn run_one(
             end.verdict.exit_status,
         ));
         r = write(&end)?;
+    }
+    if let Some(p) = std::env::var_os("PATINA_SPEED_LOG") {
+        let ru = |w| unsafe {
+            let mut u: libc::rusage = std::mem::zeroed();
+            libc::getrusage(w, &mut u);
+            (u.ru_utime.tv_sec as f64 + u.ru_utime.tv_usec as f64 / 1e6)
+                + (u.ru_stime.tv_sec as f64 + u.ru_stime.tv_usec as f64 / 1e6)
+        };
+        let line = format!(
+            "{:.2} {:.2} {:.2} {} {}\n",
+            t_run0.elapsed().as_secs_f64() * 1000.0,
+            ru(libc::RUSAGE_SELF) * 1000.0,
+            ru(libc::RUSAGE_CHILDREN) * 1000.0,
+            end.traps,
+            o.program.guest
+        );
+        let _ = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(p)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
     }
     Ok((end, r))
 }
@@ -884,6 +915,7 @@ pub fn run_incarnation(
     let inc = inc.to_path_buf();
     fs::create_dir_all(&inc).map_err(|e| format!("create {}: {e}", inc.display()))?;
     let rt_file = rt_file()?;
+    mark("rtfile");
     let patina_file = File::open("/proc/self/exe").map_err(|e| format!("own executable: {e}"))?;
 
     let create = |name: &str| -> Res<File> {
@@ -903,6 +935,7 @@ pub fn run_incarnation(
     }
     log.set_len(LOG_STEP)
         .map_err(|e| format!("boundary.log: {e}"))?;
+    mark("log");
     let opmeta = create("oplog.meta")?;
     let opdata = create("oplog.data")?;
     // The guest's stdio are sandbox objects, never host files: an empty read-only memfd
@@ -1056,7 +1089,9 @@ pub fn run_incarnation(
 
     // The supervisor, executed by the sandbox's PID 1 from the descriptor placed at FD_PATINA.
     let work = c.work_path();
+    mark("prelayout");
     let lay = layout(o, start.root)?;
+    mark("layout");
     let mut argv = vec![format!("/proc/self/fd/{FD_PATINA}"), "__sup".to_string()];
     for cp in &lay.copies {
         argv.extend(["--copy".into(), cp.clone()]);
@@ -1166,6 +1201,7 @@ pub fn run_incarnation(
     let personality = !no_personality;
     let perturb = PERTURB.load(Relaxed);
 
+    mark("prespawn");
     let mut cmd = sandbox::command(place, move || unsafe {
         if perturb {
             perturb_child();

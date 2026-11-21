@@ -393,6 +393,8 @@ fn planner(o: &Opts) -> Res<Option<std::sync::Arc<crate::launcher::plans::Planne
         crate::result::build()?,
         crate::rewrite::default_threads(),
     );
+    crate::launch::mark("planner-new");
     crate::rewrite::cache::warm_all(&p, &o.program.host);
+    crate::launch::mark("warm");
     Ok(Some(std::sync::Arc::new(p)))
 }

@@ -166,10 +166,15 @@ fn out_dir(a: &Args, default: String) -> Result<PathBuf, Fail> {
 }
 
 fn run(a: &Args) -> Result<ExitCode, Fail> {
+    launch::mark("main");
     let cfg = config::resolve(a).map_err(error)?;
+    launch::mark("resolve");
     let o = cfg.opts().map_err(error)?;
+    launch::mark("opts");
     launch::preflight(&o).map_err(error)?;
+    launch::mark("preflight");
     let out = out_dir(a, format!("patina-out/run-{}", cfg.seed))?;
+    launch::mark("outdir");
     let cpu = cfg.host_cpu.unwrap_or_else(launch::default_cpu);
     let (_, r) = launch::run_one(&o, &out, cpu, false).map_err(internal)?;
     if a.json() {
