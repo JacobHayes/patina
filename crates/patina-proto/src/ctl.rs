@@ -47,7 +47,7 @@ pub struct Config {
     pub compute_charge_ns: u64,
     /// Whether the switch budget applies to the mean gap (`crate::compute::budget`): 1 when
     /// the gap was drawn by default, 0 when the fault plan names `compute-gap` (a process
-    /// whose rebuilt code said hello is exempt either way).
+    /// whose rebuilt code said hello is exempt either way, and draws one gap at a time).
     pub compute_budget: u64,
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`proto::compute::walk`; 0: a switch is taken at its site).

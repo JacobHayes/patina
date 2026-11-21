@@ -889,8 +889,9 @@ and arming skips the points that could not switch (`proto::compute::chain`):
 - **What the runtime reads**: the supervisor publishes, at each hand-over, the record
   sequence number, the slot it handed to, its runnable count and whether that thread's process
   has a signal pending (`Ctl::view`, `proto::ctl::SchedView`). The runtime uses them only when
-  the sequence number and slot are its own turn's and no signal is pending, else it draws one
-  gap as for rebuilt code: after a record the runtime wrote alone (a call it served, an
+  the sequence number and slot are its own turn's and no signal is pending, and never in a
+  process whose rebuilt code has said hello (`Compute::kinds`); else it draws one gap as for
+  rebuilt code: after a record the runtime wrote alone (a call it served, an
   emulated instruction) until the next hand-over, and while a signal is kept blocked and
   pending. They live in the control region (not reachable from the program,
   [Containment](#containment)) and are a function of the supervisor's state at that

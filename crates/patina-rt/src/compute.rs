@@ -191,7 +191,8 @@ pub fn exit(ts: &mut ThreadState) {
 /// call the runtime answered, a signal delivered, a record of any kind) moves `seq`, and the
 /// segment is armed with one gap, its point a yield the supervisor picks for as before. What
 /// this reads is the supervisor's (`view`, `seq`, the deadline) and the run's seed; a program
-/// that wrote there would change only when its own points come, as for its cell.
+/// that wrote there would change only when its own points come, as for its cell. A process
+/// whose rebuilt code has said hello does not read the view: one gap at a time.
 #[inline(never)]
 fn exit_slow(ts: &mut ThreadState) {
     ts.compute_segs += 1;
@@ -204,8 +205,16 @@ fn exit_slow(ts: &mut ThreadState) {
             .saturating_add(cfg.vtime_limit_ns)
             .saturating_add(1),
     );
+    // In a process whose rebuilt code has said hello (an interpreter's lines included) the
+    // points are drawn one gap at a time, as without plans, and held to no budget: its own
+    // points are a deeper search the user built for. With the view, two threads of a CPU-bound
+    // Python program that hand the interpreter's lock to each other ran one after the other
+    // on several arm64 seeds (compute/09-python, d); without it they alternate, as without
+    // plans.
+    let rebuilt = proc().compute.kinds != 0;
     let v = &c.view;
     let runnable = if crate::plans::on()
+        && !rebuilt
         && v.seq.load(Relaxed) == seq
         && v.slot.load(Relaxed) == ts.slot as u64
         && v.quiet.load(Relaxed) != 0
@@ -215,10 +224,8 @@ fn exit_slow(ts: &mut ThreadState) {
         0
     };
     let (slot, segs) = (ts.slot, ts.compute_segs);
-    // The budget holds load-time points to a multiple of the program's work; in a process
-    // whose rebuilt code has said hello the points switch at the drawn gap throughout, as they
-    // do without plans (a deeper search the user built for).
-    let budget = crate::plans::on() && cfg.compute_budget != 0 && proc().compute.kinds == 0;
+    // The budget holds load-time points to a multiple of the program's work.
+    let budget = crate::plans::on() && cfg.compute_budget != 0 && !rebuilt;
     let mean = if budget {
         let s = &c.compute;
         proto::compute::budget(
