@@ -342,6 +342,45 @@ impl<'a> Elf<'a> {
         &self.data[t.off..t.off + t.len]
     }
 
+    /// The function holding the byte at file offset `off`: the sized `STT_FUNC` symbol that
+    /// holds its address, else the nearest one below it (from `.symtab`, else `.dynsym`).
+    pub fn function_at_offset(&self, off: u64) -> Option<String> {
+        let l = self
+            .loads
+            .iter()
+            .find(|l| off >= l.off && off - l.off < l.filesz)?;
+        let a = l.vaddr + (off - l.off);
+        let d = self.data;
+        let secs = self.sections().ok()?;
+        let mut best: Option<(u64, bool, usize)> = None;
+        let tables = secs.iter().filter(|s| s.typ == 2);
+        for s in tables.chain(secs.iter().filter(|s| s.typ == 11)) {
+            let names = secs.get(s.link as usize)?.off;
+            for k in 0..s.size / 24 {
+                let o = s.off + k * 24;
+                let (info, shndx) = (d[o + 4], u16_at(d, o + 6).ok()?);
+                let (value, size) = (u64_at(d, o + 8).ok()?, u64_at(d, o + 16).ok()?);
+                if !matches!(info & 0xf, 2 | 10) || shndx == 0 || value > a {
+                    continue;
+                }
+                let holds = a - value < size;
+                let better = match best {
+                    None => true,
+                    Some((v, h, _)) => (holds && !h) || (holds == h && value > v),
+                };
+                if better {
+                    best = Some((value, holds, names + u32_at(d, o).ok()? as usize));
+                }
+            }
+            if best.is_some() {
+                break;
+            }
+        }
+        let n = d.get(best?.2..)?;
+        let n = &n[..n.iter().position(|&b| b == 0)?];
+        (!n.is_empty()).then(|| String::from_utf8_lossy(n).into_owned())
+    }
+
     /// The file offset of the loaded byte at `vaddr`, when the file holds it.
     pub fn file_offset(&self, vaddr: u64) -> Option<usize> {
         let l = self

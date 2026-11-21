@@ -800,6 +800,10 @@ pub struct Slot {
     /// The process's hard `RLIMIT_NOFILE` as the program sees it, across `execve`: written by
     /// the runtime just before the call, read by the new image at its start (0: the default).
     pub nofile_hard: AtomicU64,
+    /// Where the thread was in program code when a spin probe last found it there (0: not
+    /// since the supervisor cleared it at the first probe of a stretch of computing): for the
+    /// `compute-stall` message only, never in the log.
+    pub probe_pc: AtomicU64,
 }
 
 /// `Slot::clock_flags`: an absolute `CLOCK_REALTIME` deadline, and a timerfd's

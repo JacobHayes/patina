@@ -9,7 +9,10 @@
 //!   process (`finish` kills the whole PID namespace, which holds for any number of
 //!   processes) and then exports the live tree.
 //! - `export`: the live `/work` as a tree archive on descriptor 3006, at every finish, after
-//!   the guests are dead.
+//!   the guests are dead, with the virtual modification times the guest saw (`live_tree`).
+//! - `seed_times`: at a restart, the times the tree it starts from carries (`Tree::times`,
+//!   passed on by `carry_times`) go into the virtual time table, so a file keeps the time it
+//!   had.
 
 use crate::durability::tree::{Kind, Tree};
 use crate::outcome::Verdict;
@@ -25,6 +28,98 @@ pub fn copy_in(src: &Path, dst: &Path) -> Result<(), String> {
     let t = Tree::from_dir(src).map_err(|e| format!("reading {}: {e}", src.display()))?;
     t.fill(dst, 0)
         .map_err(|e| format!("writing {}: {e}", dst.display()))
+}
+
+/// Node `node`'s work tree `work` with the virtual modification time of each inode the guest
+/// changed (the virtual time table's).
+pub fn live_tree(ctl: &Ctl, node: usize, work: &Path) -> Result<Tree, String> {
+    let mut t = Tree::from_dir(work).map_err(|e| format!("live tree export: {e}"))?;
+    let v = unsafe { proto::vfs::Vfs::at(ctl as *const Ctl as *mut u8) };
+    let epoch = FILE_EPOCH_S * 1_000_000_000;
+    for n in t.nodes.values_mut() {
+        if let Some(Ok(i)) = v.vt_find(proto::vfs::work_key(node as u64, n.ino)) {
+            n.mtime = Some(v.vt[i].mtime).filter(|&m| m != epoch);
+        }
+    }
+    Ok(t)
+}
+
+/// A restart of node `node` (0: the driver) on the tree now in `work`: the table forgets the
+/// inodes of the node's earlier work tree, and each path of `times` (what `Tree::times` wrote
+/// for that tree) gets its time as all four of its inode's times (the tree carries only the
+/// modification time). Before any guest of the node runs.
+pub fn seed_times(ctl: &Ctl, node: usize, work: &Path, times: &[u8]) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let v = unsafe { proto::vfs::Vfs::at(ctl as *const Ctl as *mut u8) };
+    let mine = |k: u64| k >> 48 == (node as u64) << 8 | proto::vfs::VT_WORK;
+    super::vtgc::retain(v, |e| !mine(e.key));
+    for (p, t) in crate::durability::tree::decode_times(times)? {
+        let f = if p.is_empty() {
+            work.to_path_buf()
+        } else {
+            work.join(std::ffi::OsStr::from_bytes(&p))
+        };
+        // A path a work tree cannot hold as a file (a socket's) is not there.
+        let Ok(m) = std::fs::symlink_metadata(&f) else {
+            continue;
+        };
+        let key = proto::vfs::work_key(node as u64, m.ino());
+        let Some(slot) = v.vt_find(key) else {
+            return Err("the virtual time table is full".into());
+        };
+        if let Err(i) = slot {
+            if v.vt_used as usize >= proto::vfs::VT_CAP / 2 {
+                return Err(format!(
+                    "more than {} files with times to carry in the work tree",
+                    proto::vfs::VT_CAP / 2
+                ));
+            }
+            v.vt_used += 1;
+            v.vt[i] = proto::vfs::VtEntry {
+                key,
+                atime: t,
+                mtime: t,
+                ctime: t,
+                btime: t,
+                gone_dev: 0,
+            };
+        }
+    }
+    Ok(())
+}
+
+/// The times of the tree a crash left go to the next incarnation's supervisor after the
+/// System V shared memory a process crash carries, in the same descriptor (`FD_SHM`): the
+/// launcher appends them and their length (`carry_times`), the supervisor splits them off
+/// (`carried`).
+pub fn carry_times(fd: i32, times: &[u8]) -> Result<(), String> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(format!(
+            "carried state: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let b = [times, &(times.len() as u64).to_le_bytes()].concat();
+    pwrite_all(fd, st.st_size as u64, &b)
+}
+
+/// What the carried state holds: the shared memory, and the times (`carry_times`; empty in a
+/// first incarnation, which no crash came before).
+pub fn carried(b: &[u8], restart: bool) -> Result<(&[u8], &[u8]), String> {
+    if !restart {
+        return Ok((b, &[]));
+    }
+    let n = b
+        .len()
+        .checked_sub(8)
+        .ok_or("carried state without its times")?;
+    let t = u64::from_le_bytes(b[n..].try_into().unwrap()) as usize;
+    let s = n
+        .checked_sub(t)
+        .ok_or("carried times longer than the state")?;
+    Ok((&b[..s], &b[s..n]))
 }
 
 fn pwrite_all(fd: i32, mut off: u64, b: &[u8]) -> Result<(), String> {
@@ -248,17 +343,16 @@ pub fn crash_verdict(a: [u64; 6], vclock_ns: u64) -> Verdict {
 
 /// Node `node`'s live work tree `work` as a record of the log (`KIND_LIVE_TREE`), after the
 /// guests are dead: the launcher makes it the node's `live.tree`.
-pub fn export_node(ctl: &Ctl, node: usize, work: &Path) -> Result<(), String> {
-    let bytes = Tree::from_dir(work)
-        .map_err(|e| format!("live tree export: {e}"))?
-        .encode();
+pub fn export_node(ctl: &Ctl, node: usize, work: &Path) -> Result<Tree, String> {
+    let tree = live_tree(ctl, node, work)?;
+    let bytes = tree.encode();
     let kind = proto::oplog::tag_kind(proto::oplog::KIND_LIVE_TREE, node);
     let len = |c: &Ctl| c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed);
     let before = len(ctl);
     let r = put(ctl, kind, 0, [0; 6], &bytes, ctl.seq.load(Relaxed), 0);
     // The archive is the check's input, not the guest's output: exempt from `--log-limit`.
     ctl.log_exempt.fetch_add(len(ctl) - before, Relaxed);
-    r
+    r.map(|()| tree)
 }
 
 /// The log of node `node`'s disk so far: its records in the shared log from `at` (bytes of
@@ -306,12 +400,12 @@ pub fn disk_log(ctl: &Ctl, node: usize, at: u64) -> Result<crate::durability::lo
 }
 
 /// Export the live `/work` to descriptor 3006 (absent when the launcher passed none).
-pub fn export(work: &Path) {
+pub fn export(ctl: &Ctl, work: &Path) {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(FD_EXPORT, &mut st) } != 0 {
         return;
     }
-    let bytes = match Tree::from_dir(work) {
+    let bytes = match live_tree(ctl, 0, work) {
         Ok(t) => t.encode(),
         Err(e) => format!("export failed: {e}").into_bytes(),
     };

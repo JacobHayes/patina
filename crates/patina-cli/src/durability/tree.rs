@@ -2,13 +2,19 @@
 //! tree, descriptor 3006), what replaying an operation log produces, and what the
 //! materialiser writes as the next incarnation's `/in`.
 //!
-//! Archive format (deterministic: entries in sorted path order): magic `PATINAT2`, then per
+//! Archive format (deterministic: entries in sorted path order): magic `PATINAT3`, then per
 //! entry: path (u32 length + bytes, "" = the root), kind u8, mode u32, uid u32, gid u32,
-//! ino u64, data (file contents or symlink target: u64 length, u32 extent count, then per
+//! ino u64, mtime (u8 1 + u64, or u8 0 for none), data (file contents or symlink target: u64 length, u32 extent count, then per
 //! extent u64 offset + u64 length + bytes; the extents are the maximal runs of 4 KiB blocks
 //! holding a non-zero byte, everything else reads as zeros), xattrs (u32 count, then u32
 //! length + name, u32 length + value each). The encoding of a tree is a function of its
-//! contents only (not of which zero blocks happen to be stored), so `digest` is too.
+//! contents only (not of which zero blocks happen to be stored), so `digest` is too. An
+//! archive of `PATINAT2` (no mtime) still reads.
+//!
+//! A node's `mtime` is the virtual modification time the guest saw (`None`: the virtual file
+//! epoch, never changed). It is carried from one incarnation to the next (`times`,
+//! `decode_times`), never compared: `canonical` (so `diff` and `digest`) leaves it out. It
+//! never passes through a host file's times, which a host filesystem may clamp.
 //!
 //! Contents are `Content` (sparse, shared blocks): a 64 MiB file made by `set_len` costs
 //! what its written blocks cost, here, in the archive and in the trees written out.
@@ -84,6 +90,8 @@ pub struct Node {
     /// File contents, or the symlink target.
     pub data: Content,
     pub xattrs: BTreeMap<Vec<u8>, Vec<u8>>,
+    /// Virtual modification time, realtime nanoseconds (`None`: the virtual file epoch).
+    pub mtime: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -92,7 +100,8 @@ pub struct Tree {
     pub nodes: BTreeMap<Vec<u8>, Node>,
 }
 
-const MAGIC: &[u8; 8] = b"PATINAT2";
+const MAGIC: &[u8; 8] = b"PATINAT3";
+const MAGIC_UNTIMED: &[u8; 8] = b"PATINAT2";
 
 fn put_bytes(o: &mut Vec<u8>, b: &[u8], wide: bool) {
     if wide {
@@ -218,6 +227,13 @@ impl Tree {
             o.extend_from_slice(&n.uid.to_le_bytes());
             o.extend_from_slice(&n.gid.to_le_bytes());
             o.extend_from_slice(&n.ino.to_le_bytes());
+            match n.mtime {
+                Some(t) => {
+                    o.push(1);
+                    o.extend_from_slice(&t.to_le_bytes());
+                }
+                None => o.push(0),
+            }
             put_content(&mut o, &n.data);
             o.extend_from_slice(&(n.xattrs.len() as u32).to_le_bytes());
             for (k, v) in &n.xattrs {
@@ -229,7 +245,8 @@ impl Tree {
     }
 
     pub fn decode(b: &[u8]) -> Result<Tree, String> {
-        if b.len() < 8 || &b[..8] != MAGIC {
+        let timed = b.len() >= 8 && &b[..8] == MAGIC;
+        if !timed && (b.len() < 8 || &b[..8] != MAGIC_UNTIMED) {
             return Err("not a tree archive".into());
         }
         let mut c = Cur { b, p: 8 };
@@ -241,6 +258,11 @@ impl Tree {
             let uid = c.u32()?;
             let gid = c.u32()?;
             let ino = c.u64()?;
+            let mtime = if timed && c.u8()? != 0 {
+                Some(c.u64()?)
+            } else {
+                None
+            };
             let data = c.content()?;
             let nx = c.u32()?;
             let mut xattrs = BTreeMap::new();
@@ -259,6 +281,7 @@ impl Tree {
                     ino,
                     data,
                     xattrs,
+                    mtime,
                 },
             );
         }
@@ -270,7 +293,8 @@ impl Tree {
         Tree::decode(&b)
     }
 
-    /// Read a directory tree from disk (the live `/work`, or a materialised tree).
+    /// Read a directory tree from disk (the live `/work`, or a materialised tree), without
+    /// times.
     pub fn from_dir(root: &Path) -> io::Result<Tree> {
         let mut t = Tree::default();
         fn walk(t: &mut Tree, root: &Path, rel: &[u8]) -> io::Result<()> {
@@ -301,6 +325,7 @@ impl Tree {
                     ino: m.ino(),
                     data,
                     xattrs,
+                    mtime: None,
                 },
             );
             if kind == Kind::Dir {
@@ -408,6 +433,30 @@ impl Tree {
         Ok(())
     }
 
+    /// The times the tree carries, by path: per path with a time, u32 length, the path, u64
+    /// the time (`decode_times` reads it).
+    pub fn times(&self) -> Vec<u8> {
+        let mut o = vec![];
+        for (p, n) in &self.nodes {
+            if let Some(t) = n.mtime {
+                put_bytes(&mut o, p, false);
+                o.extend_from_slice(&t.to_le_bytes());
+            }
+        }
+        o
+    }
+
+    /// The times a crash leaves: each node gets the `mtime` of the node with its inode
+    /// number in `live`, the tree at the crash (`None` for an inode `live` no longer has).
+    /// Times are not crash-modelled: a file keeps the time it had, whatever data it keeps.
+    pub fn times_from(&mut self, live: &Tree) {
+        let at: BTreeMap<u64, Option<u64>> =
+            live.nodes.values().map(|n| (n.ino, n.mtime)).collect();
+        for n in self.nodes.values_mut() {
+            n.mtime = at.get(&n.ino).copied().flatten();
+        }
+    }
+
     /// Identity of the tree independent of inode numbers: inode numbers are replaced by the
     /// index of the first path that names the inode.
     pub fn canonical(&self) -> Tree {
@@ -416,6 +465,7 @@ impl Tree {
         for (i, (_, n)) in t.nodes.iter_mut().enumerate() {
             let id = *first.entry(n.ino).or_insert(i as u64);
             n.ino = if n.kind == Kind::Dir { i as u64 } else { id };
+            n.mtime = None;
         }
         t
     }
@@ -459,6 +509,17 @@ fn read_xattrs(p: &Path) -> BTreeMap<Vec<u8>, Vec<u8>> {
         }
     }
     out
+}
+
+/// What `Tree::times` wrote: (path, time) pairs.
+pub fn decode_times(b: &[u8]) -> Result<Vec<(Vec<u8>, u64)>, String> {
+    let mut c = Cur { b, p: 0 };
+    let mut out = vec![];
+    while c.p < b.len() {
+        let p = c.bytes(false)?;
+        out.push((p, c.u64()?));
+    }
+    Ok(out)
 }
 
 pub fn set_xattr(p: &Path, k: &[u8], v: &[u8]) -> io::Result<()> {

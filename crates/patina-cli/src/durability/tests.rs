@@ -580,6 +580,41 @@ fn write_dir_sparse_is_content_identical() {
     assert_eq!(file(&back, "small").unwrap(), b"abc");
 }
 
+/// A crash's tree takes each inode's time from the live tree (none for an inode the live tree
+/// lacks); the time survives the archive and the list carried to the next incarnation, an
+/// archive without times still reads, and neither the digest nor `diff` sees times.
+#[test]
+fn times_are_carried_and_never_compared() {
+    let mut b = B::new();
+    b.base_file("kept", 2, b"abc");
+    b.base_file("gone", 3, b"xyz");
+    let mut t = mat(&b.crash(), 1, Model::Ext4Ordered);
+    let untimed = t.clone();
+    let ino = |t: &Tree, p: &str| t.nodes[p.as_bytes()].ino;
+    let mut live = t.clone();
+    live.nodes.remove(&b"gone"[..]);
+    let at = 1_767_225_605_000_000_123u64;
+    live.nodes.get_mut(&b"kept"[..]).unwrap().mtime = Some(at);
+    t.times_from(&live);
+    assert_eq!(t.nodes[&b"kept"[..]].mtime, Some(at));
+    assert_eq!(t.nodes[&b"gone"[..]].mtime, None);
+    assert_eq!(ino(&t, "kept"), ino(&untimed, "kept"));
+    assert_eq!(Tree::decode(&t.encode()).unwrap(), t);
+    assert_eq!(t.digest(), untimed.digest());
+    assert_eq!(crate::durability::tree::diff(&t, &untimed, true), None);
+    // An archive of the earlier format: the root alone, without the time field (after the
+    // magic, the path's length, kind, mode, uid, gid and inode number).
+    let root = Tree {
+        nodes: [(Vec::new(), untimed.nodes[&b""[..]].clone())].into(),
+    };
+    let mut old = root.encode();
+    old[..8].copy_from_slice(b"PATINAT2");
+    old.remove(8 + 4 + 1 + 12 + 8);
+    assert_eq!(Tree::decode(&old).unwrap(), root);
+    let carried = crate::durability::tree::decode_times(&t.times()).unwrap();
+    assert_eq!(carried, vec![(b"kept".to_vec(), at)]);
+}
+
 /// A small deterministic generator for random logs.
 struct Rng(u64);
 impl Rng {

@@ -470,6 +470,7 @@ impl Fs {
                     ino,
                     data: i.data.clone(),
                     xattrs: i.xattrs.clone(),
+                    mtime: None,
                 },
             );
             if let Some(d) = self.dirs.get(&ino) {

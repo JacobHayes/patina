@@ -578,7 +578,7 @@ impl Sup {
         }
         // Every guest is dead: the live tree is final, and so is the shared memory a process
         // crash leaves to the next incarnation (any other end leaves none).
-        crash::export(&work_dir(self.ctl));
+        crash::export(self.ctl, &work_dir(self.ctl));
         for node in self.disks.nodes() {
             if let Some(p) = self.disks.path(node) {
                 let _ = crash::export_node(self.ctl, node, &p);
@@ -1081,6 +1081,7 @@ impl Sup {
                         slot: i,
                         tid: self.slot(i).tid.load(Relaxed),
                         pid: self.slot(i).pid.load(Relaxed),
+                        pc: self.slot(i).probe_pc.load(Relaxed),
                     });
                     let running = self.running;
                     let sched = &self.sched;
@@ -1093,7 +1094,12 @@ impl Sup {
                         sched.waiting_besides(running)
                     }) {
                         stall::Poll::Quiet => {}
-                        stall::Poll::Probe { tid, pid } => stall::probe(pid, tid),
+                        stall::Poll::Probe { tid, pid, first } => {
+                            if let (true, Some(i)) = (first, self.running) {
+                                self.slot(i).probe_pc.store(0, Relaxed);
+                            }
+                            stall::probe(pid, tid)
+                        }
                         // A debug session waits as long as its debugger holds the world:
                         // a thread at a stop or a breakpoint makes no progress.
                         stall::Poll::End(v)
@@ -1319,8 +1325,17 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if let Err(e) = sup.udp.init() {
         sup.finish(Verdict::new("infra", e));
     }
-    // Shared memory a process crash left for this incarnation.
-    match read_all_fd(FD_SHM).and_then(|b| shm::Shm::restore(&b)) {
+    // Shared memory a process crash left for this incarnation, and after any crash the times
+    // of the tree it starts from (`crash::carried`).
+    let restart = unsafe { proto::sdk::SdkTab::at(ctl as *const Ctl as *mut u8) }
+        .cfg
+        .incarnation
+        > 0;
+    let carried = read_all_fd(FD_SHM)
+        .unwrap_or_else(|e| sup.finish(Verdict::new("infra", format!("shared memory state: {e}"))));
+    let (shm_state, times) =
+        crash::carried(&carried, restart).unwrap_or_else(|e| sup.finish(Verdict::new("infra", e)));
+    match shm::Shm::restore(shm_state) {
         Ok(s) => sup.shm = s,
         Err(e) => sup.finish(Verdict::new("infra", format!("shared memory state: {e}"))),
     }
@@ -1340,6 +1355,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
                 "infra",
                 format!("copying /in to the work tree: {e}{}", tmpfs_hint(ctl, &e)),
             ));
+        }
+    }
+    if restart {
+        if let Err(e) = crash::seed_times(ctl, 0, &work_dir(ctl), times) {
+            sup.finish(Verdict::new("infra", format!("the work tree's times: {e}")));
         }
     }
     if let Err(e) = crash::write_base(ctl, 0, &work_dir(ctl)) {

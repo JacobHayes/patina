@@ -42,7 +42,7 @@ pub fn epoch() -> u64 {
 /// node's mounts are numbered in its own mount table, so the node is part of the key (0 for
 /// the driver, and in a run without nodes).
 pub fn key(vdev_minor: u64, ino: u64) -> u64 {
-    const _: () = assert!(VDEV_MOUNT_BASE + crate::path::MAX_MOUNTS as u64 <= 0x100);
+    const _: () = assert!(VDEV_MOUNT_BASE + crate::path::MAX_MOUNTS as u64 <= proto::vfs::VT_WORK);
     (crate::state::node() as u64) << 56 | (vdev_minor & 0xff) << 48 | (ino & 0xffff_ffff_ffff)
 }
 

@@ -29,6 +29,8 @@ pub struct Holder {
     pub slot: usize,
     pub tid: i32,
     pub pid: i32,
+    /// Where a spin probe last found it in program code (`Slot::probe_pc`, 0: nowhere).
+    pub pc: u64,
 }
 
 /// What the rest of the run could do if the holder yielded.
@@ -43,6 +45,8 @@ pub enum Poll {
     Probe {
         tid: i32,
         pid: i32,
+        /// The first of this stretch of computing: what an earlier one found is stale.
+        first: bool,
     },
     End(Verdict),
 }
@@ -113,13 +117,21 @@ impl Watchdog {
             if spun >= self.stall_ns {
                 let o = others();
                 if o.runnable > 0 || o.timed {
+                    // Where a probe of this stretch found it: none sent, nothing known.
+                    let probed = self.next_probe != PROBE_FIRST_NS;
+                    let h = Holder {
+                        pc: if probed { h.pc } else { 0 },
+                        ..h
+                    };
                     return Poll::End(compute_stall(&h, spun, &o));
                 }
             } else if self.probes && spun >= self.next_probe {
+                let first = self.next_probe == PROBE_FIRST_NS;
                 self.next_probe = self.next_probe.saturating_mul(4);
                 return Poll::Probe {
                     tid: h.tid,
                     pid: h.pid,
+                    first,
                 };
             }
             if spun > 0 {
@@ -192,10 +204,14 @@ fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
         (1, _) => "1 other thread was runnable".to_string(),
         (n, _) => format!("{n} other threads were runnable"),
     };
+    let at = match (h.pc != 0).then(|| place(h.tid, h.pc)).flatten() {
+        Some(p) => format!(", last seen in {p}"),
+        None => String::new(),
+    };
     Verdict::new(
         "stall",
         format!(
-            "thread {} (tid {}, {name}) computed for {:.1} s without a system call or pause while {waiting}. \
+            "thread {} (tid {}, {name}) computed for {:.1} s without a system call or pause while {waiting}{at}. \
              This is a spin-wait Patina could not preempt, or an endless loop. \
              If that code was not rebuilt with compute points, rebuilding it with them makes such a loop a scheduling point \
              (docs/GUIDE.md, \"Scheduling\"){BRANCHES}",
@@ -204,6 +220,44 @@ fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
             spun as f64 / 1e9
         ),
     )
+}
+
+/// Where `pc` is in thread `tid`'s memory: the function holding it (from the file's symbols)
+/// and the file with the offset (`/proc/TID/maps`), or anonymous memory.
+fn place(tid: i32, pc: u64) -> Option<String> {
+    let maps = std::fs::read_to_string(format!("/proc/{tid}/maps")).ok()?;
+    for line in maps.lines() {
+        // start-end perms offset dev inode path (which may hold spaces)
+        let mut f = line.splitn(6, ' ');
+        let (lo, hi) = f.next()?.split_once('-')?;
+        let (lo, hi) = (
+            u64::from_str_radix(lo, 16).ok()?,
+            u64::from_str_radix(hi, 16).ok()?,
+        );
+        if pc < lo || pc >= hi {
+            continue;
+        }
+        let off = u64::from_str_radix(f.nth(1)?, 16).ok()?;
+        let Some(path) = f.nth(2).map(str::trim_start).filter(|p| p.starts_with('/')) else {
+            return Some(format!("anonymous memory at {pc:#x}"));
+        };
+        let fo = pc - lo + off;
+        // A file deleted since it was mapped: its path may name another file now.
+        let gone = path.ends_with(" (deleted)");
+        let func = (!gone)
+            .then(|| std::fs::read(path).ok())
+            .flatten()
+            .and_then(|d| {
+                crate::rewrite::elf::Elf::parse(&d)
+                    .ok()?
+                    .function_at_offset(fo)
+            });
+        return Some(match func {
+            Some(s) => format!("{s} ({path}+{fo:#x})"),
+            None => format!("{path}+{fo:#x}"),
+        });
+    }
+    None
 }
 
 /// Why spin probes could not help, when the host or the thread's state is the reason: the

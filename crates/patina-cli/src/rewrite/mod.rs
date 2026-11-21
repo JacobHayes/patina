@@ -27,7 +27,7 @@ pub mod cache;
 mod class;
 #[cfg(target_arch = "x86_64")]
 mod code;
-mod elf;
+pub(crate) mod elf;
 #[cfg(target_arch = "x86_64")]
 mod flags;
 pub mod par;

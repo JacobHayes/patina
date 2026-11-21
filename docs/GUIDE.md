@@ -97,7 +97,7 @@ patina: error: --mount ./conf:/etc/passwd: /etc/passwd would shadow what the san
 The work tree is the one writable, crash-modelled disk: `--work DIR:/var/lib/app` puts it
 where a program expects its data, and it is still the working directory and `HOME`. There is
 one work tree; other places a program writes (`/tmp`, a `:copy` mount) are writable but not
-crash-modelled.
+crash-modelled: a restart finds them as the run began ([Crashes](#crashes)).
 
 Every file in the work tree starts with the same modification time (the simulated clock's
 start, 2026-01-01), whatever it was on the host: a run depends on the tree's contents only,
@@ -105,6 +105,7 @@ not on when its files were last touched. A program whose behaviour depends on fi
 (`make`, `find -newer`, an mtime-ordered cache) sees them all equal. To give it times, set them
 inside the run, at the start of the case: `touch -d '2026-01-01 00:00:05' src/b.c && make`
 (a `--cases` line, or a wrapper script), and they are part of the run like any other change.
+A restart after a crash keeps the times the run gave its files.
 
 The guest sees no network beyond itself: a connection or datagram to another host fails with
 `Network is unreachable`, and names resolve from the sandbox's `/etc/hosts` only (`localhost`
@@ -706,6 +707,45 @@ explain: patina explain /tmp/acklog/patina-out/run-3
 
 What survives a machine crash follows `ext4-ordered` by default; `--fault fs-model=posix-strict`
 (`[faults] fs-model = "posix-strict"`) allows everything POSIX allows, which loses more.
+
+`ext4-ordered` stands for ext4 mounted with its defaults (`data=ordered`, delayed allocation,
+`auto_da_alloc`, a journal commit every 5 s). Names, sizes and attributes reach the disk only
+at a commit: at an `fsync` of a file or directory the running transaction holds, at `sync`,
+once the transaction is 5 virtual seconds old, and at one seed-chosen moment after the last of
+those. A commit is all or nothing and they come in order, so creations, renames and unlinks
+survive in the order they were made, across directories too. A file's new size reaches the
+disk with its data (delayed allocation: written back at its `fsync`, at `sync`, or at the
+seed-chosen commit), with one exception: a write that extends a file inside its last
+allocated 4 KiB block raises the size at once, so a crash can keep the larger size with the
+new bytes reading as zeros, as ext4 does. A rewrite of a block that was already on disk goes in place: each such block survives
+old or new, on its own. Replacing a file by `rename` over it, or after truncating it to zero,
+writes the new data first (`auto_da_alloc`). `fdatasync` is an `fsync`.
+
+`posix-strict` keeps only what POSIX promises: data and attributes of a file after its own
+`fsync` or a `sync`, a name after an `fsync` of each directory it changes or a `sync`. Every
+other change is kept or dropped on its own draw, in any combination that leaves a consistent
+tree, so unlinks in two directories can survive one without the other. No real filesystem
+reorders this freely: a finding only `posix-strict` gives is a program relying on more than
+POSIX promises, not a state ext4 produces.
+
+A restart starts the program as a new boot would, with the arguments and environment it had
+(plus `PATINA_INCARNATION`). What carries over:
+
+| | after `--crash process` | after `--crash machine` |
+|---|---|---|
+| `/work` | as it was | what the model keeps |
+| a file's modification time | as it was | as it was at the crash, whatever data the model keeps |
+| `/tmp`, other writable places | empty again | empty again |
+| System V shared memory | kept | gone |
+| process IDs | the same numbers again, from the first | the same |
+| the clock | 1 to 61 s later (`restart-gap-ms`) | the same |
+
+A file's access, change and birth times read as its modification time after a restart. Times
+are not crash-modelled: ext4 too can keep an inode's new time with its old data. Process IDs
+repeat on purpose: it is the worst case for a lock file that names its holder, whose dead
+holder now has the PID of a live process of the new incarnation. A program that checks
+whether a lock's PID is alive fails on every restart; when every restart fails the same way,
+check this first.
 
 A run starts at most 4 incarnations: the last one never crashes, so a program restarts at
 most 3 times. `--fault max-incarnations=N` (`[faults] max-incarnations = N`) changes that.
@@ -1609,6 +1649,10 @@ Each disk has its own operation log: `RUNDIR/node/NAME/inc-K/` holds `oplog.meta
 with boot K (a disk lasts across process kills and ends at a machine crash, its log closed by
 a `Crash` record). `patina log ops` reads one, and every run with nodes ends with the
 self-check on every disk (`result.json`'s `self_check` names the disk that differs). The driver's disk is `inc-0/` as without nodes.
+A checker reads a node's work tree as the run left it with `patina log tree
+RUNDIR/node/NAME/inc-K DIR` (the disk's last boot K), as it reads the driver's
+([Checks from outside the program](#checks-from-outside-the-program)): to compare what a
+sender sent with what a receiver kept, say.
 
 `wal.py` recovers a log of checksummed records after each machine crash: a record the crash
 caught before it reached the disk can survive as zeros or cut short, and recovery that trusts
@@ -2367,8 +2411,12 @@ stepped until it is found looping without changing anything, and yields there.
 
 A thread that computes for 10 s of CPU time without reaching a scheduling point, while
 another thread is waiting to run, ends the run `unsupported` with stop `compute-stall`. The
+message names the function the thread was last seen in, and the file and offset, as a spin
+probe found it (`last seen in waiter (/guest/spinpoints+0x1392)`). The
 cause is a spin-wait whose loop changes state on each pass (a counter, a timestamp) and has
-no system call or `pause`. Rebuilt code, and Python under `python3 -m patina`, does not stall
+no system call or `pause`, or a long computation: a calibration loop that times itself
+against the clock sees almost no time pass while it computes (stock code moves the clock by
+a fixed charge per system call, not with computation), so it keeps raising its work. Rebuilt code, and Python under `python3 -m patina`, does not stall
 that way ([Deeper search](#deeper-search-rebuilt-code)), nor does stock code under
 `--preempt points` ([Points in stock code](#points-in-stock-code---preempt-points)), except in
 code it leaves dark. `--preempt branches` also preempts after a

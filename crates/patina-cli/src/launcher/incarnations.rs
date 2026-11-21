@@ -69,7 +69,9 @@ pub fn next_tree(
         return Tree::read_archive(&inc.join("live.tree"));
     }
     let log = OpLog::load(inc)?;
-    materialise(&log, u64::MAX, seed, key, model)
+    let mut t = materialise(&log, u64::MAX, seed, key, model)?;
+    t.times_from(&Tree::read_archive(&inc.join("live.tree"))?);
+    Ok(t)
 }
 
 /// A run with nodes: each node disk a machine crash ended (`node/NAME/inc-K/`, its log closed
@@ -116,7 +118,9 @@ fn node_crashes(
                 continue;
             };
             let (seq, boot) = (c.seq, c.a[1]);
-            let tree = materialise(&log, u64::MAX, seed, seq, model)?;
+            let live = Tree::read_archive(&disk.join("live.tree"))?;
+            let mut tree = materialise(&log, u64::MAX, seed, seq, model)?;
+            tree.times_from(&live);
             // The next boot's disk began with that tree (its base records), less what a work
             // tree cannot hold as a file (a Unix socket's inode: `Tree::write_dir` drops it,
             // as a restarted server makes its socket again): a difference is a Patina defect.
@@ -141,7 +145,6 @@ fn node_crashes(
             let post = disk.join("post-crash");
             tree.write_dir(&post)
                 .map_err(|e| format!("{}: {e}", post.display()))?;
-            let live = Tree::read_archive(&disk.join("live.tree"))?;
             let what = lost(&live, &tree, works.get(k - 1).copied().unwrap_or("/work"));
             if let Some(d) = n["downs"]
                 .as_array_mut()
@@ -337,6 +340,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         let post = inc.join("post-crash");
         tree.write_dir(&post)
             .map_err(|e| format!("{}: {e}", post.display()))?;
+        crate::sup::crash::carry_times(shm.as_raw_fd(), &tree.times())?;
         let t_digest = crate::launch::mono_ns();
         let mut c = json!({
             "incarnation": k,

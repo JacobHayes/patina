@@ -69,9 +69,11 @@ pub struct Nodes {
     /// The node each slot was last said to belong to (`DEC_NODE_SLOT`; absent: the driver's).
     slot_node: std::collections::BTreeMap<usize, usize>,
     /// Where each node's disk begins in the shared operation log (`oplog.meta` bytes), and
-    /// the tree its next boot starts from after a machine crash (a tree archive).
+    /// the tree its next boot starts from after a machine crash (a tree archive) and that
+    /// tree's times (`Tree::times`).
     disk_at: [u64; MAX_NODES],
     next_tree: [Option<Vec<u8>>; MAX_NODES],
+    next_times: [Option<Vec<u8>>; MAX_NODES],
 }
 
 impl Nodes {
@@ -247,7 +249,7 @@ impl Sup {
             let pid = self.sched.entries[idx].pid;
             // A first boot, or the first after a machine crash: a new disk.
             if self.disks.dev(node).is_err() {
-                self.disk_start(node, pid);
+                self.disk_start(node, pid, boot);
             }
             self.node_tab().first_pid[node] = pid as u64;
             self.node_tab().status[node] = RUNNING;
@@ -263,14 +265,19 @@ impl Sup {
     /// Node `node`'s disk starts (the first process of its first boot, or of its first after a
     /// machine crash, `pid`, said `Hello`, before it runs): its
     /// work tree is reached and its base records written, exempt from `--log-limit` as the
-    /// driver's are.
-    fn disk_start(&mut self, node: usize, pid: i32) {
+    /// driver's are. After a machine crash (`boot` above 0) the times its tree carries go into
+    /// the virtual time table first (`crash::seed_times`).
+    fn disk_start(&mut self, node: usize, pid: i32, boot: u64) {
         let work = self.node_tab().work_path(node).to_vec();
         let len = |c: &proto::ctl::Ctl| c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed);
         let before = len(self.ctl);
         self.nodes.disk_at[node] = self.ctl.oplog_len.load(Relaxed);
         let r = self.disks.open(node, pid, &work).and_then(|()| {
             let p = self.disks.path(node).ok_or("no work tree")?;
+            if boot > 0 {
+                let times = self.nodes.next_times[node].take().unwrap_or_default();
+                super::crash::seed_times(self.ctl, node, &p, &times)?;
+            }
             super::crash::write_base(self.ctl, node, &p)
         });
         if let Err(e) = r {
@@ -694,7 +701,7 @@ impl Sup {
     /// dead): its live tree is logged, and the tree its next boot starts from returned.
     fn disk_end(&mut self, k: usize, seq: u64) -> Result<Vec<u8>, String> {
         let p = self.disks.path(k).ok_or("its work tree was not reached")?;
-        super::crash::export_node(self.ctl, k, &p)?;
+        let live = super::crash::export_node(self.ctl, k, &p)?;
         self.disks.close(k);
         super::shadows::forget_node(self.ctl, k)?;
         let log = super::crash::disk_log(self.ctl, k, self.nodes.disk_at[k])?;
@@ -703,13 +710,15 @@ impl Sup {
         } else {
             crate::durability::materialise::Model::Ext4Ordered
         };
-        let t = crate::durability::materialise::materialise(
+        let mut t = crate::durability::materialise::materialise(
             &log,
             u64::MAX,
             self.ctl.config.seed,
             seq,
             model,
         )?;
+        t.times_from(&live);
+        self.nodes.next_times[k] = Some(t.times());
         Ok(t.encode())
     }
 

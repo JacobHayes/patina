@@ -83,10 +83,16 @@ pub fn reclaim(ctl: &Ctl) {
     let Some(held) = held() else {
         return;
     };
+    retain(v, |e| {
+        e.gone_dev == 0 || held.contains(&(e.gone_dev, e.key & 0xffff_ffff_ffff))
+    });
+}
+
+/// Rebuild the table with the entries `keep` holds to.
+pub fn retain(v: &mut Vfs, keep: impl Fn(&VtEntry) -> bool) {
     let keep: Vec<VtEntry> =
         v.vt.iter()
-            .filter(|e| e.key != 0)
-            .filter(|e| e.gone_dev == 0 || held.contains(&(e.gone_dev, e.key & 0xffff_ffff_ffff)))
+            .filter(|e| e.key != 0 && keep(e))
             .copied()
             .collect();
     if keep.len() == v.vt_used as usize {

@@ -575,7 +575,12 @@ pub fn on_sigtrap(info: &SigInfo, frame: &mut Frame) -> bool {
     let pc = frame.pc();
     if code == SI_TKILL && (info[2] & 0xffff_ffff) as i32 == 1 {
         // A probe from the supervisor (PID 1). Ignored unless the thread is in guest code
-        // with nothing of ours in progress.
+        // with nothing of ours in progress. Where it was is kept for a stall's message.
+        if !in_runtime(pc) {
+            unsafe { &*ctl().slot(ts.slot as usize) }
+                .probe_pc
+                .store(pc, Relaxed);
+        }
         if config().sched & SCHED_SPIN_PROBE != 0
             && !in_runtime(pc)
             && ts.vfork == 0

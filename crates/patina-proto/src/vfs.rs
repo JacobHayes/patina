@@ -42,11 +42,21 @@ pub fn under(p: &[u8], dir: &[u8]) -> bool {
     p == dir || (p.starts_with(dir) && p.get(dir.len()) == Some(&b'/'))
 }
 
+/// The virtual minor in the key of a node's own work tree's inodes, whatever its mount index:
+/// the supervisor computes these keys (`node << 56 | VT_WORK << 48 | ino`) to carry the work
+/// tree's times across a restart.
+pub const VT_WORK: u64 = 0xff;
+
+/// The table's key of inode `ino` of node `node`'s work tree.
+pub const fn work_key(node: u64, ino: u64) -> u64 {
+    node << 56 | VT_WORK << 48 | (ino & 0xffff_ffff_ffff)
+}
+
 /// Times of one sandbox inode, realtime nanoseconds. `key` 0 is an empty entry.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct VtEntry {
-    /// `vdev_minor << 48 | ino`.
+    /// `node << 56 | vdev_minor << 48 | ino` (`VT_WORK` for the work tree).
     pub key: u64,
     pub atime: u64,
     pub mtime: u64,

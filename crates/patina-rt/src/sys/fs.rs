@@ -178,8 +178,19 @@ fn mode_of(st: &St) -> u32 {
 /// Virtual time key of an inode on a sandbox tmpfs.
 pub fn vkey(st: &St) -> Option<u64> {
     let i = path::mount_index(st.dev())?;
-    (path::mounts().m[i].class == MountClass::Tmpfs)
-        .then(|| vtime::key(VDEV_MOUNT_BASE + i as u64, st.ino()))
+    (path::mounts().m[i].class == MountClass::Tmpfs).then(|| time_key(i, st.ino()))
+}
+
+/// The time table's key of inode `ino` on the tmpfs of mount index `i`. The work tree's names
+/// no mount index: the supervisor carries its times from one incarnation to the next
+/// (`proto::vfs::VT_WORK`).
+fn time_key(i: usize, ino: u64) -> u64 {
+    let minor = if path::mounts().m[i].work {
+        proto::vfs::VT_WORK
+    } else {
+        VDEV_MOUNT_BASE + i as u64
+    };
+    vtime::key(minor, ino)
 }
 
 /// Record `w` on the inode `st` names; an inode with no name left (`O_TMPFILE`, or changed
@@ -584,7 +595,7 @@ pub fn ident(dev: u64, ino: u64) -> Ident {
                 ino
             };
             let times = if m.class == MountClass::Tmpfs {
-                vtime::get(vtime::key(vminor, ino))
+                vtime::get(time_key(i, ino))
             } else {
                 vtime::get(0)
             };

@@ -1376,7 +1376,17 @@ A process crash restarts the program on `/work` as it was. A machine crash resta
 what a filesystem would have kept: a pure function of the operation log, the seed and the
 model, `ext4-ordered` (the default) or `posix-strict` (`durability/`). Every run with
 `--crash` ends by replaying its whole operation log against the live tree of each
-incarnation, with no exception: a difference is a Patina defect. The run keeps its own
+incarnation, with no exception: a difference is a Patina defect. File times are carried, not
+modelled: the virtual time table keys a work tree's inodes by node and inode number with a
+fixed minor (`proto::vfs::VT_WORK`), not the mount's index, so the supervisor reads each
+file's modification time into the live tree it exports (`sup::crash::live_tree`); a machine
+crash's tree takes, per inode, the time the live tree had (`Tree::times_from`). The times go
+to the next incarnation as data, never as host file times (a host filesystem may clamp them):
+the launcher appends them to the state the shared-memory descriptor carries
+(`crash::carry_times`), a node's stay in its supervisor; before the restarted incarnation's or
+boot's first guest the supervisor puts them back into the table by path (`seed_times`), after
+dropping the node's entries of its earlier disk (the new disk's inode numbers can repeat them).
+The digest and the self-check leave times out. The run keeps its own
 outcome and reports the failed self-check beside it (`result.json`'s `self_check`, exit
 status 2; a sweep counts such runs apart and keeps their logs). `patina log ops` prints the
 log.
