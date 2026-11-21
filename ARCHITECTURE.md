@@ -26,13 +26,12 @@ executed from there (`launch.rs`).
 
 The architecture seam: in the runtime, `arch/x86_64/` and `arch/aarch64/` export the same names
 (the trap frame and its accessors, the system-call stub, process entry, the signal frame, the
-clone trampoline, instruction sites and their patch, the stepper of a spin probe, the counter
-trap), and portable code names no register or instruction (`arch/mod.rs`). In `patina-proto`,
+clone trampoline, instruction sites and their patch, the stepper of a spin probe), and portable code names no register or instruction (`arch/mod.rs`). In `patina-proto`,
 what both sides must agree on per architecture: system-call numbers (`nr/`), the structure
 layouts and flags that differ (`abi.rs`), the instruction-site rules (`insn/`), and for arm64
 the successor decoder (`step.rs`) and signal-frame records (`sigrec.rs`), compiled and tested
-on every host. In `patina-cli`, the host checks (`host.rs`) and branch counters
-(`launcher/pmu.rs`, x86_64 only). One build serves one architecture; seeds do not cross.
+on every host. In `patina-cli`, the host checks (`host.rs`). One build serves one architecture;
+seeds do not cross.
 
 ## The trap
 
@@ -606,7 +605,7 @@ whole log limit and 1 MiB (what a run's last trap and the supervisor write past 
 besides it, so the observations never take the place of a record and a run
 that ends on its limit ends at the same record (with `[run] log-limit` at its maximum there is no
 room, and the story shows sizes without bytes). The runtime code that observes runs between
-two segments of program code, so no counter preemption counts its branches. When an incarnation ends
+two segments of program code. When an incarnation ends
 the launcher moves the `Observe` records out of `boundary.log` into `inc-K/observe.log`
 (`log::take_observations`), outside the sandbox, so the stored log is the run's byte for byte;
 `explain` then compares the replay with the run as `replay` does (records, digest, outcome)
@@ -708,8 +707,6 @@ The scheduler can switch threads only where a thread enters the runtime. Those p
   probes work (`patina doctor`, "spin probes": a container's seccomp profile, a kernel
   without userfaultfd or soft-dirty bits, `/proc/self/mem` closed to code writes), they are
   off, and a `compute-stall` says so.
-- **Branch counters**, with `[sched] preempt = "branches"`: a preemption after a seed-chosen number of
-  retired branches of program code, at an exact instruction (`pmu.rs`). Off by default.
 - **Compute points**, in code rebuilt with the compilers' coverage flags: the hooks count
   events and enter the runtime when a seeded number has run (below).
 
@@ -741,103 +738,12 @@ program's fault, not emulated.
 **compute-stall.** A thread that computes for 10 s of its own CPU time without a point,
 while another thread could run, ends the run `unsupported` with stop `compute-stall` and
 names the thread. The cause is a loop that changes state on each pass (a counter, a
-timestamp it computes) and contains no system call or spin hint. The fix is `[sched] preempt =
-"branches"`, where the host allows it, or rebuilding that code with compute points (its message
-says both: the supervisor does not know whether the code is rebuilt). Rebuilt code does not
+timestamp it computes) and contains no system call or spin hint, in code without load-time
+points (JIT output, text the rewriter leaves dark). The fix is rebuilding that code with
+compute points (its message says so: the supervisor does not know whether the code is
+rebuilt). Rebuilt code does not
 reach it while it stays in instrumented code: it yields at least every 2^22 events. A thread
 computing alone is left to finish.
-
-## Counter preemption
-
-With `[sched] preempt = "branches"`, the turn holder is preempted right after its N-th retired
-branch of program code (x86_64: conditional branches; arm64: every branch instruction), N a
-draw from the seed. The stop is treated like a trap: a boundary record, virtual time charged,
-a yield, and pending signals delivered.
-
-`perf_event_open` needs `CAP_PERFMON`, which nothing in the sandbox has. The launcher (a
-`patina` given the capability) serves a broker on a hidden socket: a guest thread sends its
-pidfd, the broker checks the thread belongs to this run and returns one counter with a fixed
-configuration (`launcher/pmu.rs`). Capabilities never enter the sandbox.
-
-A segment is the program code between two runtime entries; each segment draws a fresh N. The
-counter overflows a little before N; the runtime then walks forward itself, planting `int3`
-at the next control transfer and emulating it, counting branches by hand until N is exact
-(`patina-rt/src/pmu.rs`). The overflow is aimed `[sched] pmu-margin` branches (1024 by
-default) ahead of N; an overflow interrupt that comes later than that lands past N, which
-cannot be repaired: the run ends `internal`, stop `pmu-late`.
-
-**What is exact.** On the CPUs accepted, a stop is where counting every branch by hand would
-put it (same instruction, same registers), or the run fails closed (`pmu-late`); it is never
-elsewhere silently. Two host behaviours work against that, both measured on a virtual machine
-under load (docs/EVIDENCE.md, "Branch counters under host load"):
-
-- Throttling. The kernel stops an event that interrupts more often than
-  `perf_event_max_sample_rate` allows per tick (the kernel lowers that rate itself when its
-  interrupts take long, as on a loaded virtual machine), at the overflow, until its next tick,
-  a context switch or a period change, and still sends the signal. So the overflow handler
-  reads the counter before any branch the counter would count (x86_64: the dispatch is a
-  `cmov` and an indirect jump, and the only conditional branch before the read is a retry
-  of it, taken only when the kernel changed the event's page during the read (the
-  runtime counts it); arm64: the `read()` comes first), and a stopped counter and a running one
-  read the same; every overflow then programs the period
-  again, which restarts it, before program code runs. Overflows found stopped are counted
-  (`stopped` in the run's counters). A branch before the read would be lost whenever the
-  counter was stopped, and the stop would come that much late, at the same place each time:
-  a wrong digest that repeats.
-- Late interrupts. On the x86_64 virtual machine measured, the overflow interrupt came a
-  median of about 150 and up to about 700 branches after the overflow, at the same places
-  run after run, such as page faults (the interrupt waits for the next exit to the
-  hypervisor); on GitHub's arm64 runners up to about 1,900. Within the margin
-  that costs hops only; past it the run ends `pmu-late`, and the remedy is a larger margin.
-  `patina doctor` says this on its `branch counters` line.
-
-Most draws are long (about 1 to 4 million branches); 2% are short (up to 256), which lands
-stops just after a system call, where check-then-act windows sit. `[sched] branches = "hunt"`
-makes every segment short.
-
-Only CPUs whose counting was checked exact are accepted: AMD family 0x1a (Zen 5), and on
-arm64 the Arm Neoverse N2 (by `MIDR_EL1` implementer and part, every core of the host;
-`proto::pmu::ARM_CORES`). On an Intel Xeon the conditional-branch event stopped at different
-instructions for the same count. Other CPUs are refused with an error, never silently run
-without counters.
-
-**arm64** (`arch/aarch64/pmu.rs`). The event is `BR_RETIRED` (0x21), every branch taken or
-not, measured exact on the Neoverse N2 (docs/EVIDENCE.md, "Branch counters on arm64"). The
-differences from x86_64:
-
-- The counter is read with `read()` on its descriptor (user access to the PMU registers needs
-  a host setting and, on the hosts measured, traps to the hypervisor at the same cost). Each
-  read the count depends on is in assembly a fixed number of branches from program code: at
-  the return to the program (the signal restorer and `sigreturn_to`, which read only when a
-  segment asks and then `rt_sigreturn`) and as the overflow handler's first act, before any
-  branch (`arch/aarch64/stub.rs`). The kernel
-  writes the value into the thread state, so no branch follows the read to keep it.
-- No overflow is taken inside the runtime: with counters on, every runtime handler blocks
-  SIGTRAP, so an overflow that comes while runtime code runs waits until `rt_sigreturn`
-  restores the program's mask and is taken at the program's next instruction. The program's
-  entry is a jump, not such a return: an image's first segment (from its entry point to its
-  first trap) is not measured.
-- Hops plant `brk` at the next branch; conditional and direct branches are taken in the frame
-  (`proto::step`), indirect ones (`br`, `blr`, `ret`) and any branch reached with
-  `PSTATE.BTYPE` set run natively to a breakpoint at their successor, so the CPU makes its own
-  branch-target check.
-- A store-exclusive natively fails now and then with no other writer (the host clears the
-  exclusive monitor), and its retry loop counts two more branches, more or less often by run.
-  With counters on, the scanner also patches every exclusive instruction (`ldxr`/`stxr` and
-  their acquire, release and pair forms, and `clrex`) and the runtime emulates them with a
-  monitor of its own: the store fails exactly when a boundary event (a trap, a preemption,
-  a signal) came between the load and the store. Emulation is no boundary event (no record,
-  no sequence number), but its SIGILL is a runtime entry like any other: the counted segment
-  ends there and the next starts with a new N, so in code dense with exclusive pairs
-  preemptions fall soon after one. (Keeping the segment across it was tried: a waiter
-  spinning on an exclusive pair then needs a whole long N of emulated instructions, seconds,
-  before its preemption, and the exclusive-pair spin locks stalled.) An access that would fault raises the fault the
-  instruction would (SIGSEGV; SIGBUS `BUS_ADRALN` for an address that is not a multiple of the
-  access size, a pair's two elements together, and on a host with FEAT_LSE2, as the Neoverse
-  N2, only for one that also crosses a 16-byte boundary) with the site still emulated,
-  so both halves of a pair stay on the one monitor; a process whose patch table is full when
-  an exclusive instruction is found stops (`unsupported`, stop `capacity`), since one left
-  native would fail at random. Without counters they are not patched.
 
 ## Compute points
 
@@ -873,8 +779,7 @@ touched.
   (`compute.rs`).
 
 There is no other way into the runtime: a point that switches needs a supervisor hand-off
-anyway, so a direct call would save nothing. With branch counters the cell is never armed
-and events charge nothing. With load-time points (the default) the cell is the plans' (`proto::plan::CELL`,
+anyway, so a direct call would save nothing. With load-time points (the default) the cell is the plans' (`proto::plan::CELL`,
 below), mapped at each image start rather than at a hello, and a rebuilt image's own plan goes
 back at its hello (its hooks are its points; "Rebuilt images", below); charging and the point
 are the same, and arming skips the points that could not switch (`proto::compute::chain`):
@@ -939,8 +844,7 @@ the SDK file's hook (`sdk/python/patina.py`, `compute()`) registered through `sy
   it raises from a line's hook reaches the program at that line; from a jump's hook CPython
   3.12 and 3.14 would let it skip the frame's handlers, so the hook keeps it and raises it from
   the next instruction of that code (local `INSTRUCTION` events) in that thread.
-- **Inert**: outside Patina the hello fails and nothing is registered. With branch
-  counters the cell holds `NO_LIMIT` after the hello and nothing is registered either.
+- **Inert**: outside Patina the hello fails and nothing is registered.
 
 A generator or coroutine resuming gets no point of its own: its next line or jump has one, and
 the order of asyncio tasks is the event loop's, which a point in one thread does not change.
@@ -950,7 +854,7 @@ the order of asyncio tasks is the event loop's, which a point in one thread does
 Stock binaries get compute points without a rebuild (the default, x86_64 and arm64): a
 plan, made on the host from the file alone, rewrites single instructions, or short runs of
 them, to jump to trampolines that count, and the runtime maps it over the file's text as the
-file is mapped. With `[sched] preempt = "traps"` or `"branches"` nothing below runs, and a
+file is mapped. With `[sched] preempt = "traps"` nothing below runs, and a
 traps run's digest is the one the same seed had before points were the default. The host side is `crates/patina-cli/src/rewrite/` (x86_64 files through the
 `iced-x86` decoder, built on x86_64 hosts only; arm64 files through `a64/`, below; also
 reachable through the hidden `patina __rewrite`); the runtime side is `crates/patina-rt/src/plans.rs`,
@@ -1539,8 +1443,8 @@ nopass`), so the spin probes' steps and breakpoints are not available in a sessi
 threads yielded at spin points is refused, and a probe sent during a session is dropped (it
 finds nothing in a program that was not spinning, so nothing recorded changes).
 
-A run with load-time points (the default) or branch counters takes `SIGTRAP` for its scheduling points (a plan's
-`int3` or `brk`, the counter's single steps), which gdb cannot tell from its own. There the
+A run with load-time points (the default) takes `SIGTRAP` for its scheduling points (a plan's
+`int3` or `brk`, a walk's single steps), which gdb cannot tell from its own. There the
 helper passes on every `SIGTRAP` gdb did not cause (`handle SIGTRAP pass`), and the runtime
 drops one that is neither its own nor a plan's (`fault::debugger_passes`): a trap gdb left
 behind (a watchpoint's, after it was deleted) never reaches the program. gdb's own steps would
@@ -1726,6 +1630,18 @@ Out of scope (a deliberate attack):
 Write protection that switches at every trap (`mprotect` on entry and exit) was measured and
 rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.md).
 
+## Removed: hardware branch counters
+
+`[sched] preempt = "branches"` preempted after a seed-chosen number of retired branches, read
+from a perf counter a `CAP_PERFMON` launcher opened and finished exactly by single steps. Removed:
+load-time points with walks find more at far less cost (17 to 30 µs per switch against 1.7 to
+3.4 ms per counter preemption); counting was exact on AMD Zen 5 and Arm Neoverse N2 only, CI could
+not test it on x86_64, and virtual machines' late interrupts ended runs `pmu-late`. Worth bringing
+back only for a real bug class, mattering to a user, in code load-time points cannot patch (JIT
+output, text the rewriter cannot prove is code); for precise, virtualisation-safe branch counting
+on ordinary CI runners; or for evidence that load-time rewriting is unsound for an important class
+of programs. The last commit with it is `0327ddd71c5a`.
+
 ## Limits
 
 - **Linux x86_64 and arm64.** No macOS. Unprivileged user namespaces are required (on
@@ -1736,8 +1652,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   guarded control stacks (their `prctl`s answer `EINVAL` and are recorded) or allocate a
   protection key (`pkey_alloc` answers `ENOSYS`); `FPMR` and `POR_EL0` are carried through
   signal frames. On arm64 every system call is served as on x86_64 (the
-  structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`);
-  branch counters work on the Neoverse N2 only (above, "Counter preemption"), and
+  structure layouts and flags that differ are in `proto::abi`, the argument orders in `arch`), and
   `patina doctor` checks the host's arm64 requirements. Threads, fork,
   vfork, exec and signals work as on x86_64 (the clone trampoline is in
   `arch/aarch64/thread.rs`); so do the instruction channels, pause points and spin probes
@@ -1768,13 +1683,6 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   the `patina` binary); replay, minimize and `run --config RUNDIR/run.json` refuse a run whose
   either one differs, and a sweep into a directory another build made starts over. The kernel's own behaviour for passed calls is an
   input: a different kernel version or filesystem may change a run.
-- **Branch counters** (`[sched] preempt = "branches"`) need `CAP_PERFMON`, a PMU, and a CPU checked
-  exact: AMD family 0x1a (Zen 5), or on arm64 the Arm Neoverse N2; their seeds reproduce on the
-  same family (core) only; on arm64 the core's variant and revision are not checked (the
-  evidence is from r0p0). On arm64 an image's first segment, up to its first trap, is never
-  preempted; code the scanner does not see (a JIT) keeps its native exclusive pairs, whose
-  spurious failures can change the count (a hop walk that meets one gives up for that
-  segment); more than 4,096 patched sites in one process stop the run.
 - **Load-time points** (the default): the points are at backward branches,
   backward calls, indirect jumps and atomics that a single-instruction patch can reach (most,
   not all: above), so a race between plain accesses with no such instruction between them
@@ -1786,13 +1694,12 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   change times are coarse, can keep the old plan for a moment. At most 64 planned images per
   process (more run without points, counted `unplanned`). Seeds found without points do not replay with
   them, or the reverse.
-- **compute-stall**: in stock code without branch counters, a spin-wait whose iterations
-  change state ends the run (above).
+- **compute-stall**: in stock code without points, a spin-wait whose iterations change state
+  ends the run (above).
 - **Interleaving at system calls, pause points and spin probes only** in stock code. A race on
   plain memory with none of these between the conflicting accesses runs in one order in every
-  seed. Rebuilding the code with compute points switches inside it; so do
-  branch counters, on the CPUs checked exact, and load-time points (the default) at the
-  branches, calls and atomics inside it. Compute points do not split an atomic
+  seed. Rebuilding the code with compute points switches inside it; so do load-time points
+  (the default) at the branches, calls and atomics inside it. Compute points do not split an atomic
   read-modify-write (a `lock`-prefixed instruction; on arm64 an LSE instruction, an
   exclusive load/store pair, or the compilers' out-of-line atomic helpers, which are not
   rebuilt), gcc gives edges only, and code not rebuilt (libc, the Go runtime,
@@ -1806,7 +1713,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   with load-time points (the default) and the loop has a point. A loop that
   makes any system call (a clock read) advances it by the per-trap charge. Rebuilt code is
   charged 1 ns per event (Python under `python3 -m patina`, 15 ns per line and jump) and cut at
-  the event where a deadline falls due; branch counters charge per branch.
+  the event where a deadline falls due.
 - **One thread runs at a time**, so weak-memory behaviours (a store another CPU sees late)
   never happen.
 - **One clock, one kernel.** All processes of a run share one sandbox, one kernel and one

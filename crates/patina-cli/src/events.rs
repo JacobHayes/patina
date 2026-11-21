@@ -979,7 +979,6 @@ impl<W: Write> Export<'_, W> {
             Some(RecKind::Preempt) => {
                 let mut l = Line::at("preempt", k, r);
                 let why = match r.nr {
-                    1 => "counter",
                     2 => "spin-point",
                     proto::compute::PREEMPT_NR => "compute",
                     _ => "unknown",

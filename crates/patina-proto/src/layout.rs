@@ -97,12 +97,9 @@ pub const FD_PATINA: i32 = 3007;
 pub const FD_STDIN: i32 = 3020;
 pub const FD_STDOUT: i32 = 3021;
 pub const FD_STDERR: i32 = 3022;
-/// The counter broker: a `SOCK_SEQPACKET` end whose peer is the launcher (only with branch
-/// counters).
-pub const FD_PMU: i32 = 3008;
 /// The plan broker: a `SOCK_SEQPACKET` end whose peer is the launcher (only with load-time
 /// points; `proto::plan` has the protocol).
-pub const FD_PLAN: i32 = 3009;
+pub const FD_PLAN: i32 = 3008;
 /// The supervisor's System V shared memory carried from one incarnation to the next after a
 /// process crash (`sup::shm`; a memfd the launcher makes once per run). Not given to guests.
 pub const FD_SHM: i32 = 3023;
@@ -119,7 +116,7 @@ pub const FD_SHADOWS: i32 = FD_LIMIT - crate::oplog::SHADOW_SLOTS as i32;
 /// The sandbox's `RLIMIT_NOFILE`: one more than the highest descriptor number.
 pub const FD_LIMIT: i32 = 4096;
 const _: () = assert!(FD_SHADOWS > FD_RT_DYN + 512);
-/// Hidden descriptors the runtime makes for itself (counters, mappings' duplicates) are
+/// Hidden descriptors the runtime makes for itself (mappings' duplicates and the like) are
 /// placed at the lowest free number from here.
 pub const FD_RT_DYN: i32 = 3100;
 /// A spin probe's descriptors, at fixed numbers: a probe starts when host timing says, so what
@@ -131,9 +128,6 @@ pub const FD_PROBE_PAGEMAP: i32 = 3091;
 pub const FD_PROBE_MAPS: i32 = 3092;
 pub const FD_PROBE_TRACK: i32 = 3093;
 const _: () = assert!(FD_PROBE_TRACK < FD_RT_DYN && FD_PROBE_MEM > FD_NODES);
-/// A thread's counter page is mapped at this offset in its alternate stack (after the
-/// thread state, far below where the stack grows down to).
-pub const PMU_PAGE_OFF: u64 = 4096;
 
 /// Virtual time origin of the monotonic clock, and the realtime epoch added to it
 /// (2026-01-01T00:00:00Z).

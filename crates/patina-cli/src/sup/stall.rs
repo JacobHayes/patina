@@ -214,7 +214,7 @@ fn compute_stall(h: &Holder, spun: u64, o: &Others) -> Verdict {
             "thread {} (tid {}, {name}) computed for {:.1} s without a system call or pause while {waiting}{at}. \
              This is a spin-wait Patina could not preempt, or an endless loop. \
              If that code was not rebuilt with compute points, rebuilding it with them makes such a loop a scheduling point \
-             (docs/GUIDE.md, \"Scheduling\"){BRANCHES}",
+             (docs/GUIDE.md, \"Scheduling\"){POINTS}",
             h.slot,
             h.tid,
             spun as f64 / 1e9
@@ -289,13 +289,12 @@ pub fn spin_host(ctl: &proto::ctl::Ctl) -> String {
     format!(" A spin probe could not run: {t}{errno}{doctor}.")
 }
 
-/// The other ways out: load-time points (the default) cover loaded code but not code made at
-/// run time or text they leave dark; branch counters cover every branch.
-const BRANCHES: &str =
+/// What load-time points (the default) leave out: code made at run time and text they leave
+/// dark.
+const POINTS: &str =
     ". Load-time points (the default) put switch points into code as it loads, but not into \
      code made at run time (JIT output) or text they leave dark (result.json's rewrite says \
-     which); [sched] preempt = \"branches\" preempts there too (needs CAP_PERFMON and a host \
-     PMU; see `patina doctor`).";
+     which).";
 
 /// CPU time of guest thread `tid` (a PID-namespace id; 0: none), from `/proc/TID/schedstat`.
 fn thread_cpu_ns(tid: i32) -> Option<u64> {

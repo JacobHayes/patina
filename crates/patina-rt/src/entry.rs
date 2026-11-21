@@ -77,10 +77,9 @@ extern "C" fn rt_main(ksp: u64) -> ! {
     install_filter();
     crate::fdlim::start();
     hello();
-    crate::pmu::open(thread());
     let k = crate::loader::KernelStart::parse(ksp);
     // The host facts the instruction rule depends on, before any image is scanned.
-    crate::arch::insn::init(k.aux(16), k.aux(26)); // AT_HWCAP, AT_HWCAP2
+    crate::arch::insn::init(k.aux(26)); // AT_HWCAP2
     crate::loader::start(&k)
 }
 
@@ -93,26 +92,12 @@ fn install_handlers() {
         }
         let flags =
             SA_SIGINFO | SA_ONSTACK | SA_NODEFER | SA_RESTORER | crate::arch::SA_ARCH_RUNTIME;
-        // arm64 with counter preemption: SIGTRAP waits while a handler runs, so that the
-        // overflow signal never interrupts runtime code (`arch/aarch64/pmu.rs`).
-        let held: u64 = if cfg!(target_arch = "aarch64") && config().pmu & proto::ctl::PMU_ON != 0 {
-            bit(SIGTRAP)
-        } else {
-            0
-        };
-        let sys: [u64; 4] = [on_sigsys as *const () as u64, flags, restorer(), held];
+        let sys: [u64; 4] = [on_sigsys as *const () as u64, flags, restorer(), 0];
         if sc4(nr::RT_SIGACTION, SIGSYS, sys.as_ptr() as u64, 0, 8) != 0 {
             crate::fatal(proto::ctl::Setup::SigactionSys, 0);
         }
         for s in [SIGSEGV, SIGILL, SIGBUS, SIGFPE, SIGTRAP] {
-            // With counter preemption, SIGTRAP enters through the overflow stub, which
-            // passes every other SIGTRAP on to the fault entry.
-            let h = if s == SIGTRAP && config().pmu & proto::ctl::PMU_ON != 0 {
-                crate::pmu::sigtrap_entry()
-            } else {
-                on_fault as *const () as u64
-            };
-            let f: [u64; 4] = [h, flags, restorer(), held];
+            let f: [u64; 4] = [on_fault as *const () as u64, flags, restorer(), 0];
             if sc4(nr::RT_SIGACTION, s, f.as_ptr() as u64, 0, 8) != 0 {
                 crate::fatal(proto::ctl::Setup::SigactionFault, 0);
             }
@@ -320,11 +305,6 @@ pub fn maybe_yield(ts: &ThreadState) {
 pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
     let ts = thread();
     let frame = unsafe { &mut *uc };
-    if crate::pmu::is_race(frame.pc()) {
-        // Delivered on top of the overflow signal: that handler re-executes the call.
-        crate::pmu::sigsys_race(ts);
-        return;
-    }
     let pc = frame.pc();
     // The instruction's own address: a program mapping may end where the region starts.
     let insn = pc.wrapping_sub(crate::arch::SYSCALL_LEN);
@@ -336,7 +316,6 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
         }
         crate::sup::containment(proto::ctl::CONTAIN_SYSCALL, insn, insn, false);
     }
-    crate::pmu::enter(ts, Some(frame));
     crate::spin::enter(ts, Some(frame), true);
     crate::compute::enter(ts);
     if frame.nr() == proto::sdk::SYSCALL
@@ -349,7 +328,6 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
         crate::sys::sig::trap_exit(frame, None);
         check_real_mask(frame_of(uc));
         crate::compute::exit(thread());
-        crate::pmu::exit(thread(), frame_of(uc).pc(), 0);
         return;
     }
     charge(ts);
@@ -384,7 +362,6 @@ pub extern "C" fn on_sigsys(_sig: i32, _info: *mut u8, uc: *mut Frame) {
     }
     check_real_mask(frame_of(uc));
     crate::compute::exit(thread());
-    crate::pmu::exit(thread(), frame_of(uc).pc(), 0);
 }
 
 fn frame_of<'a>(uc: *mut Frame) -> &'a Frame {

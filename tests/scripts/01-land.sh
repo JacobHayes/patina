@@ -4,10 +4,6 @@
 #    another tree); a required job that passed only on a re-run, unless --accept-rerun; and
 #    main having moved while CI ran. Each refusal leaves main@origin off the commit and no branch
 #    on origin; otherwise main@origin is fast-forwarded to the commit and the branch is gone.
-#    A change to the runtime runs `./check counters` (stubbed: it names an output directory made
-#    here); land counts the scripts that passed and skipped, with each skip's reason, and says
-#    the host cannot run counters only when the capability check's `SKIP: host:` says so, not
-#    when one script skipped for a tool of its own.
 #@ tier=quick budget=15
 : "${RUNS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -74,26 +70,3 @@ topic=$(ontopic)
 [ -z "$topic" ] || die "the branch bookmark is still on origin"
 echo "landed with --accept-rerun: main@origin is the commit; the branch bookmark is gone from origin"
 
-# The counters summary: a stub ./check counters names a directory of script outputs.
-printf '#!/bin/sh\necho "== area: stub; output in $COUNTERS_OUT"\n' >check
-chmod 755 check
-mkdir -p crates/patina-rt "$s/partial" "$s/host"
-echo PASS >"$s/partial/counters-01-unprivileged.out"
-echo PASS >"$s/partial/counters-05-exact.out"
-printf 'SKIP: no gdb (PATH)\n' >"$s/partial/counters-10-debug.out"
-echo PASS >"$s/host/counters-01-unprivileged.out"
-printf 'SKIP: host: no counters on this host\n' >"$s/host/counters-05-exact.out"
-printf 'SKIP: host: no counters on this host\n' >"$s/host/counters-10-debug.out"
-for k in partial host; do
-    echo "$k" >crates/patina-rt/f
-    jj commit --quiet -m "$k"
-    COUNTERS_OUT=$s/$k land topic
-    [ "$st" = 0 ] || die "counters $k: exit $st: $(cat "$s/out")"
-    line=$(grep '^land: counters' "$s/out") || die "counters $k: no counters line: $(cat "$s/out")"
-    case $k in
-        partial) case $line in *SKIPPED*) die "a skip of one script made land say the host skipped: $line" ;; esac
-                 case $line in *"passed 2"*"skipped 1"*10-debug*) ;; *) die "counters partial: $line" ;; esac ;;
-        host) case $line in *SKIPPED*"passed 1"*"skipped 2"*) ;; *) die "counters host: $line" ;; esac ;;
-    esac
-    echo "counters $k: $line"
-done

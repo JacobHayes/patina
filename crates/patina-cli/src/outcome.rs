@@ -225,8 +225,6 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
         "timeout" => Classified::new(Timeout, "timeout", d),
         "disk-full" => Classified::new(Internal, "disk-full", d),
         "infra" => Classified::new(Internal, "internal", d),
-        // Counter preemption's overflow interrupt came after the stop it was aimed ahead of.
-        "pmu-late" => Classified::new(Internal, "pmu-late", d),
         // A guest process killed by SIGKILL from outside the run (the host's OOM killer).
         "killed" => Classified::new(Internal, "killed", d),
         // The program cannot run, as `execve` would refuse it: the request is wrong.

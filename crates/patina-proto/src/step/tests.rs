@@ -426,26 +426,3 @@ fn every_word_of_the_branch_group_is_decoded_or_refused() {
         }
     }
 }
-
-#[test]
-fn flow_of_each_class() {
-    for i in [
-        C_B, C_BEQ, C_BGT, C_CBZW, C_CBNZX, C_TBZ33, C_TBNZ2, C_BSELF, C_BLSELF,
-    ] {
-        assert_eq!(flow(CODE[i]), Flow::Branch, "{:#x}", CODE[i]);
-    }
-    // br, blr, ret, ret x7, braa, braaz, blraa, blrabz, retaa, retab
-    for w in &CODE[0x38 / 4..=0x5c / 4] {
-        assert_eq!(flow(*w), Flow::Indirect, "{w:#x}");
-    }
-    // svc, brk, udf, hlt, eret, bc.vs
-    for w in &CODE[0x60 / 4..=0x70 / 4] {
-        assert_eq!(flow(*w), Flow::Enters, "{w:#x}");
-    }
-    assert_eq!(flow(CODE[C_BCVS]), Flow::Enters);
-    // nop, add, ldr, isb, mrs, the atomics, the exclusives
-    for w in &CODE[0x74 / 4..=0xa0 / 4] {
-        assert_eq!(flow(*w), Flow::Plain, "{w:#x}");
-    }
-    assert_eq!(flow(0x885f_fc01), Flow::Plain); // ldaxr w1, [x0]
-}

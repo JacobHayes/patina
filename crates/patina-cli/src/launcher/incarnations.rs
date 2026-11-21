@@ -191,7 +191,6 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let mut unix_sockets = 0;
     let mut tmpfs_full = 0;
     let mut shadow_bytes = 0;
-    let mut pmu = [0u64; proto::ctl::PMU_FIELDS];
     let mut sdk = crate::result::SdkReport::default();
     let mut sched = [0u64; proto::ctl::SCHED_FIELDS];
     let mut compute = [0u64; 5];
@@ -244,13 +243,6 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         sdk.add(end.sdk);
         // A `setup-complete` mark holds for the incarnations after it.
         cfg.fault_after_seq = end.fault_after_seq;
-        for (i, (a, b)) in pmu.iter_mut().zip(end.pmu).enumerate() {
-            *a = if proto::ctl::PMU_NAMES[i] == "max_skid" {
-                (*a).max(b)
-            } else {
-                *a + b
-            };
-        }
         for (a, b) in sched.iter_mut().zip(end.sched) {
             *a += b;
         }
@@ -306,7 +298,6 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 unix_sockets,
                 tmpfs: [o.cfg.tmpfs_bytes, tmpfs_full],
                 shadow_bytes,
-                pmu: o.cfg.preempt.branches().then_some(pmu),
                 sdk,
                 sched: crate::result::SchedCounts {
                     pause_sites: insn.patched[proto::insn::SiteKind::Pause as usize],

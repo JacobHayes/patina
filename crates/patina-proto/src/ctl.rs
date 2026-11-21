@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 30;
+pub const LAYOUT_VERSION: u64 = 31;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -23,18 +23,6 @@ pub struct Config {
     pub tmpfs_bytes: u64,
     /// CPU count the guest is told it has.
     pub cpu_count: u64,
-    /// Counter preemption (`PMU_*` bits; 0 = off, and then nothing below is used).
-    /// Set by the launcher only when it could open the counters.
-    pub pmu: u64,
-    /// Long slices: N log-uniform in `[pmu_slice_min, pmu_slice_max]` branches.
-    pub pmu_slice_min: u64,
-    pub pmu_slice_max: u64,
-    /// Short slices: probability in thousandths (low 16 bits) and the largest N (bits 16..).
-    pub pmu_short: u64,
-    /// Virtual time charged per branch of a preempted slice, in picoseconds.
-    pub pmu_charge_ps: u64,
-    /// Branches before N at which the hardware alarm is aimed (above the largest skid).
-    pub pmu_margin: u64,
     /// Scheduling points beyond traps (`SCHED_*` bits).
     pub sched: u64,
     /// Instruction channels (`INSN_*` bits).
@@ -137,9 +125,6 @@ pub fn spin_host_text(v: u64) -> Option<&'static str> {
 /// (`PATINA_TEST_EMULATE_RNDR`).
 pub const INSN_EMULATE_RNDR: u64 = 1;
 
-/// `Config::pmu`: counter preemption is on.
-pub const PMU_ON: u64 = 1;
-
 impl Config {
     pub const fn default_with_seed(seed: u64) -> Config {
         Config {
@@ -150,12 +135,6 @@ impl Config {
             stall_ms: 10_000,
             tmpfs_bytes: 256 << 20,
             cpu_count: 1,
-            pmu: 0,
-            pmu_slice_min: 0,
-            pmu_slice_max: 0,
-            pmu_short: 0,
-            pmu_charge_ps: 0,
-            pmu_margin: 0,
             sched: 0,
             insn: 0,
             spin_charge_ns: 0,
@@ -242,8 +221,6 @@ pub struct Ctl {
     /// Host `CLOCK_MONOTONIC` ns at supervisor milestones, for the start-up breakdown
     /// (`PATINA_TEST_TIMING=1` makes the launcher print them). Indexes `TM_*`. Never logged.
     pub timing: [AtomicU64; 8],
-    /// Counter preemption counters, summed over every thread of the run.
-    pub pmu: PmuStats,
     /// Pause points and spin probes, summed over every process of the run.
     pub sched: SchedStats,
     /// Compute points, summed over every process of the run.
@@ -404,74 +381,6 @@ impl SchedStats {
     }
 }
 
-/// Counter preemption counters (`PMU_NAMES` order in the outcome).
-#[repr(C)]
-pub struct PmuStats {
-    /// Counters opened (one per thread image).
-    pub opened: AtomicU64,
-    /// Preemptions (stops), of which reached by hops from the segment start (short slices).
-    pub preempts: AtomicU64,
-    pub preempts_short: AtomicU64,
-    /// Overflow interrupts taken in guest code, and period reprogrammings.
-    pub alarms: AtomicU64,
-    pub rearms: AtomicU64,
-    /// Conditional branches counted by hops, other transfers emulated, single steps.
-    pub hops: AtomicU64,
-    pub emulated: AtomicU64,
-    pub steps: AtomicU64,
-    /// Counter reads at segment starts (`rdpmc`).
-    pub reads: AtomicU64,
-    /// Segments started.
-    pub segments: AtomicU64,
-    /// Long segments that reached the margin and finished by hops (landings).
-    pub landings: AtomicU64,
-    /// A synchronous signal that arrived on top of the overflow signal (handled, see `rt::pmu`).
-    pub races: AtomicU64,
-    /// Largest overflow skid seen (branches past the programmed point, at a landing).
-    pub max_skid: AtomicU64,
-    /// Overflows after which the counter was found stopped (the kernel throttled the event).
-    pub stopped: AtomicU64,
-}
-pub const PMU_FIELDS: usize = 14;
-pub const PMU_NAMES: [&str; PMU_FIELDS] = [
-    "opened",
-    "preempts",
-    "preempts_short",
-    "alarms",
-    "rearms",
-    "hops",
-    "emulated",
-    "steps",
-    "reads",
-    "segments",
-    "landings",
-    "races",
-    "max_skid",
-    "stopped",
-];
-
-impl PmuStats {
-    pub fn read(&self) -> [u64; PMU_FIELDS] {
-        let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
-        [
-            r(&self.opened),
-            r(&self.preempts),
-            r(&self.preempts_short),
-            r(&self.alarms),
-            r(&self.rearms),
-            r(&self.hops),
-            r(&self.emulated),
-            r(&self.steps),
-            r(&self.reads),
-            r(&self.segments),
-            r(&self.landings),
-            r(&self.races),
-            r(&self.max_skid),
-            r(&self.stopped),
-        ]
-    }
-}
-
 /// Indexes of `Ctl::timing`.
 pub const TM_SUP_START: usize = 0;
 pub const TM_COPIED: usize = 1;
@@ -481,13 +390,13 @@ pub const TM_FINISH: usize = 4;
 pub const TM_EXPORTED: usize = 5;
 
 /// Site kinds counted in `InsnCtl::patched` (index 0 unused).
-pub const INSN_KINDS: usize = 6;
+pub const INSN_KINDS: usize = 5;
 
 /// Instruction-channel counters, summed over every process of the run.
 #[repr(C)]
 pub struct InsnCtl {
     /// Sites patched, by `proto::insn::SiteKind` (x86_64: 1 rdrand, 2 rdseed, 4 pause; arm64:
-    /// 1 rndr, 2 rndrrs, 4 pause, 5 exclusive).
+    /// 1 rndr, 2 rndrrs, 4 pause).
     pub patched: [AtomicU64; INSN_KINDS],
     /// Emulated executions, by `INSN_*` index.
     pub emulated: [AtomicU64; 8],
@@ -1190,7 +1099,6 @@ setup_steps! {
     Panic = "runtime panic",
     PacKeys = "PR_PAC_SET_ENABLED_KEYS",
     RestorerPage = "cannot map the signal restorer page",
-    Counters = "branch counters are not supported on this architecture",
     Rlimit = "cannot set the program's RLIMIT_NOFILE",
 }
 /// A real signal from outside the sandbox is pending (args[0] = the signal number).
@@ -1202,14 +1110,6 @@ pub const HE_REAL_MASK: u64 = 5;
 /// the kernel's per-host-user pipe page accounting (`pipe-user-pages-soft`), which every
 /// process of the launching user shares. args[0] = errno, args[1] = syscall.
 pub const HE_HOST_LIMIT: u64 = 6;
-/// Counter preemption could not keep its guarantee: args[0] = `PMU_E_*`, args[1] a value.
-pub const HE_PMU: u64 = 7;
-pub const PMU_E_OVERSHOOT: u64 = 1;
-pub const PMU_E_MISSED: u64 = 2;
-pub const PMU_E_DECODE: u64 = 3;
-pub const PMU_E_OPEN: u64 = 4;
-pub const PMU_E_PAGE: u64 = 5;
-pub const PMU_E_BACKWARDS: u64 = 6;
 /// Program code reached into the runtime: args[0] = `CONTAIN_*`, args[1] = the address,
 /// args[3] = the program's instruction pointer, args[4] = 1 for a store.
 pub const HE_CONTAINMENT: u64 = 8;
@@ -1282,7 +1182,7 @@ limits! {
     LIMIT_DESCRIPTORS = 5: "open file descriptors (the runtime needs a few of its own)",
     LIMIT_SHARED = 6: "shared mappings in one process, a writable one among them (the runtime keys process-shared futexes by them)",
     LIMIT_RUNTIME_MEMORY = 7: "bytes of runtime memory used over one process's life (the threads' stacks and the runtime's own tables)",
-    LIMIT_PATCH_SITES = 8: "patched instruction sites in one process (under branch counters on arm64 every exclusive load and store is one, and none may run natively)",
+    LIMIT_PATCH_SITES = 8: "patched instruction sites in one process",
     LIMIT_MAPPED_FILES = 9: "work-tree files with a shared, writable mapping at once in the run (the copy of what the operation log holds of each)",
 }
 

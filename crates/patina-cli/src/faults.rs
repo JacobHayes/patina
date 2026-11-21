@@ -551,7 +551,7 @@ fn resolve_gap(seed: u64, k: &str, v: &str) -> Res<u64> {
 }
 
 /// A size or a range `A..B` of sizes, resolved: a range draws log-uniformly
-/// (`proto::pmu::log_uniform`) by the key's own plan draw.
+/// (`proto::draw::log_uniform`) by the key's own plan draw.
 fn resolve_size(seed: u64, k: &str, v: &str) -> Res<u64> {
     let (a, b) = match v.split_once("..") {
         Some((a, b)) => (num(k, a)?, num(k, b)?),
@@ -566,7 +566,7 @@ fn resolve_size(seed: u64, k: &str, v: &str) -> Res<u64> {
             u64::MAX / 4
         ));
     }
-    Ok(proto::pmu::log_uniform(plan_draw(seed, k), a, b))
+    Ok(proto::draw::log_uniform(plan_draw(seed, k), a, b))
 }
 
 /// `START+LENGTH[:PORT]`, each of START and LENGTH resolved like a number (LENGTH by the

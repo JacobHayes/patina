@@ -236,9 +236,7 @@ pub extern "C" fn thread_start(uc2: *mut Frame) -> ! {
         // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
         let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
-    crate::pmu::open(ts);
     crate::compute::exit(ts);
-    crate::pmu::exit(ts, unsafe { (*uc2).pc() }, 0);
     crate::arch::sigreturn_to(uc2 as u64)
 }
 
@@ -256,7 +254,6 @@ pub fn exit(call: &mut dyn Call) -> ! {
         // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
         let _ = crate::guest::put(clear, 0u32);
     }
-    crate::pmu::close(ts);
     crate::sup::call_sup_noreply(Op::ThreadExit, [status, clear, 0, 0, 0, 0]);
     loop {
         unsafe { sc1(nr::EXIT, status) };

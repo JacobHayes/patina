@@ -349,38 +349,6 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         result,
     });
     checks.push(Check {
-        name: "branch counters (pmu, optional)",
-        required: false,
-        result: {
-            use crate::launcher::pmu::Unavailable as U;
-            crate::launcher::pmu::available()
-                .map(|ev| {
-                    format!(
-                        "supported: event {ev:#x} opens; stops are exact, and a run whose \
-                         overflow interrupt comes later than [sched] pmu-margin (seen on \
-                         virtual machines) ends `internal`, stop `pmu-late`"
-                    )
-                })
-                .map_err(|e| match e {
-                    U::Cpu(m) => (
-                        format!(
-                            "not supported on this CPU, {m} (supported: {})",
-                            proto::pmu::SUPPORTED_CPUS
-                        ),
-                        String::new(),
-                    ),
-                    U::Permission(m) => (
-                        format!("supported, but needs CAP_PERFMON: {m}"),
-                        "sudo setcap cap_perfmon+ep $(command -v patina)".into(),
-                    ),
-                    U::NoPmu(m) => (
-                        format!("no PMU exposed (virtual machine?): {m}"),
-                        "run on bare metal, or a VM that passes the PMU through".into(),
-                    ),
-                })
-        },
-    });
-    checks.push(Check {
         name: "plan cache (load-time points)",
         required: false,
         result: Ok(crate::rewrite::cache::summary()),
@@ -390,28 +358,6 @@ pub fn doctor(args: &Args) -> Res<ExitCode> {
         required: false,
         result: debugger_attach(),
     });
-    // Counter preemption's broker reads a thread's pidfd.
-    {
-        let pidfd_thread =
-            unsafe { libc::syscall(libc::SYS_pidfd_open, libc::gettid(), libc::O_EXCL) };
-        checks.push(Check {
-            name: "pidfd of a thread (pmu, optional)",
-            required: false,
-            result: if pidfd_thread >= 0 {
-                unsafe { libc::close(pidfd_thread as i32) };
-                Ok("pidfd_open(PIDFD_THREAD) works".into())
-            } else {
-                Err((
-                    format!(
-                        "pidfd_open(PIDFD_THREAD): {}",
-                        std::io::Error::last_os_error()
-                    ),
-                    "kernel 6.9 or newer".into(),
-                ))
-            },
-        });
-    }
-
     let (vendor, model) = cpu();
     let out_dir = std::env::current_dir().unwrap_or_else(|_| "/".into());
     let mut host = json!({

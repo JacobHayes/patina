@@ -37,7 +37,7 @@ case $nightly in success*|"") ;; *) say "the last nightly is not green: see it b
 id() { jj log --no-graph -r "$1" -T 'commit_id ++ "\n"'; }
 changes=$(jj diff -r @ --summary)
 [ -z "$changes" ] || die "the working copy has changes: commit them (jj commit) or set them aside"
-# The gate and the counters check run on the working copy's tree, so REV must be its parent.
+# The gate runs on the working copy's tree, so REV must be its parent.
 this=$(id "$rev"); parent=$(id @-)
 [ "$this" = "$parent" ] || die "$rev is not the working copy's parent: the gate checks the working copy's tree (jj new $rev, then run again)"
 jj git fetch
@@ -65,32 +65,6 @@ shown=$(jj diff --from main@origin --to "$sha" --name-only crates tests/guests e
 if [ -n "$shown" ]; then
     say "the change can move what the docs show: ./check docs with the release-only transcripts"
     DOCS_RELEASE_ONLY=1 ./check docs || die "./check docs (release-only transcripts) failed at $sha"
-fi
-# Counter exactness is checked only where the CPU is supported (CI's x86_64 runners are not):
-# a change to the runtime or the protocol runs the counters area here too, which says whether
-# this host could run it.
-touched=$(jj diff --from main@origin --to "$sha" --name-only crates/patina-rt crates/patina-proto)
-if [ -n "$touched" ]; then
-    say "the change touches the runtime: ./check counters"
-    log=$(mktemp)
-    ./check counters 2>&1 | tee "$log" || { rm -f "$log"; die "./check counters failed at $sha"; }
-    dir=$(sed -n 's/.*output in \(\/[^ ]*\)$/\1/p' "$log" | tail -1)
-    rm -f "$log"
-    [ -d "$dir" ] || die "./check counters printed no output directory"
-    # Each script passed (./check failed otherwise); one that printed `SKIP: REASON` skipped its
-    # work. The host cannot run counters only when the capability check says so (`SKIP: host:`,
-    # tests/counters/lib/counters.py), not when one script lacks a tool of its own.
-    passed=0 skipped=0 why="" host=""
-    for f in "$dir"/counters-*.out; do
-        [ -f "$f" ] || die "./check counters left no script output in $dir"
-        s=$(sed -n '/^SKIP: /{s///p;q}' "$f")
-        n=$(basename "$f" .out)
-        if [ -z "$s" ]; then passed=$((passed + 1)); continue; fi
-        skipped=$((skipped + 1)) why="$why${why:+; }${n#counters-}: $s"
-        case $s in host:*) host=${s#host: } ;; esac
-    done
-    counts="passed $passed, skipped $skipped${why:+ ($why)}"
-    if [ -n "$host" ]; then say "counters: SKIPPED on this host ($host); $counts"; else say "counters: $counts"; fi
 fi
 jj bookmark set "$name" -r "$sha"
 jj git push --bookmark "$name"

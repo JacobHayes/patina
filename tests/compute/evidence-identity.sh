@@ -17,8 +17,8 @@ CASES = [(w, *WL[w][:3]) for w in ORDER] + [
     ("c-threads", GU, ["/guest/c-threads"], []),
     ("rs-threads", GU, ["/guest/rs-threads"], []),
     ("spinpoints flag", GU, ["/guest/spinpoints", "flag"], []),
-    ("races b (stock)", GU, ["/guest/counters/races", "b"], []),
-    ("pool (stock)", GU, ["/guest/counters/pool"], []),
+    ("races b (stock)", GU, ["/guest/compute/races-stock", "b"], []),
+    ("pool (stock)", GU, ["/guest/compute/pool-stock"], []),
     ("loop (stock)", GU, ["/guest/compute/loop-stock", "100000"], []),
 ]
 SEEDS = [1, 2, 3]

@@ -46,7 +46,7 @@
 //! `compute-stall`). A store-exclusive also fails, natively, when the host interrupts its
 //! pair; a program that reads the status (a weak compare-and-swap) can take another path,
 //! more or less often by host, which Patina does not hide. Hazards
-//! as for hops (see `pmu.rs`): a guest that reads its own flags sees the trap flag (x86_64),
+//! of stepping: a guest that reads its own flags sees the trap flag (x86_64),
 //! and one that reads its own code at the point or at the step's stop while it is planted
 //! sees the breakpoint (only the stepped thread runs then, and it reads its code only by
 //! executing a load; a guest that checksums its text between probes sees it unchanged,

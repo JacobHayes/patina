@@ -37,9 +37,8 @@ its commands and checks every name in it, and every `patina` command line in the
 - `crates/patina-cli`: the `patina` binary: launcher, supervisor, CLI.
 - SDKs: `crates/patina` (Rust), `sdk/c/patina.h`, `go/patina`, `sdk/python/patina.py`.
 - `tests/AREA/*.sh`: check scripts; `tests/guests/`: the programs they run. A script marked
-  `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`): the branch
-  counter scripts, x86-only instructions, a seed found on x86_64, and evidence scripts not
-  yet run on arm64; each says why in its header or in docs/EVIDENCE.md.
+  `arch=x86_64` in its `#@` line is skipped on other machines (`tests/run.py`): x86-only
+  instructions, a seed found on x86_64, and evidence scripts not yet run on arm64; each says why in its header or in docs/EVIDENCE.md.
 - `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the release tier.
 
 Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), unprivileged user namespaces
@@ -67,10 +66,7 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
 - **The gate is `mise run check`**: fmt, clippy `-D warnings`, `tests/lint.py`, `./check quick`;
   CI runs it on x86_64 (`check`) and arm64 (`check-arm64`). **Land with `scripts/land BRANCH`**
   (`--dry-run` first): it rebases, runs the gate, pushes BRANCH, needs both jobs green on the
-  first attempt, fast-forwards `main` and deletes BRANCH. Never move `main` by hand. A change to
-  `crates/patina-rt` or `crates/patina-proto` also runs `./check counters` there: CI's x86_64
-  runners have no CPU whose branch counters are supported, so a host that has one is the only
-  place their exactness is checked (land says whether it ran or was skipped).
+  first attempt, fast-forwards `main` and deletes BRANCH. Never move `main` by hand.
 - **A check tests the build it just made.** `./check` stops on a failed patina or guest build;
   `tests/run.py` prints the build under test and refuses a binary older than its sources. A
   planted break that does not compile proves nothing unless the check failed on it.

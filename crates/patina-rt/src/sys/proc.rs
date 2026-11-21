@@ -155,15 +155,11 @@ fn fork_child(call: &mut dyn Call, flags: u64, stack: u64, ctid: u64) -> i64 {
     // copies nobody runs on, free for reuse.
     let p = proc();
     let own = ts as *mut ThreadState as u64;
-    let mut others = [0u64; MAX_THREADS];
-    let mut nothers = 0;
     for i in 0..MAX_THREADS {
         let a = p.alt_of_slot[i];
         p.alt_of_slot[i] = 0;
         if a != 0 && a != own {
             super::thread::free_altstack(a);
-            others[nothers] = a;
-            nothers += 1;
         }
     }
     p.alt_of_slot[slot] = own;
@@ -181,8 +177,6 @@ fn fork_child(call: &mut dyn Call, flags: u64, stack: u64, ctid: u64) -> i64 {
         // As the kernel: a pointer it cannot write is ignored (and never runtime memory).
         let _ = crate::guest::put(ts.child_settid, ts.tid);
     }
-    // The inherited counters count the parent's threads: replace them.
-    crate::pmu::fork_child(ts, &others[..nothers]);
     // The child's own boundary event for the return of the call.
     crate::entry::charge(ts);
     0

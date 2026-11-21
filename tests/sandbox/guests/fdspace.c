@@ -115,7 +115,7 @@ static void dups(const char *tag) {
 
 /* Numbers no program descriptor has: every call on them answers as for a closed one. */
 static void hidden(void) {
-    static const int at[] = {2999, 3000, 3009, 3090, 3091, 3092, 3093, 3100, 4032, 4095};
+    static const int at[] = {2999, 3000, 3008, 3090, 3091, 3092, 3093, 3100, 4032, 4095};
     for (unsigned i = 0; i < sizeof at / sizeof *at; i++) {
         int fd = at[i];
         struct stat st;

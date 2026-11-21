@@ -293,8 +293,6 @@ def compute():
         return False
     cell = memoryview((ctypes.c_ubyte * 8).from_address(addr)).cast("B").cast("q")
     _compute_on = True
-    if cell[0] == (1 << 63) - 1:
-        return True  # [sched] preempt = "branches": counters switch and charge, the hook would do nothing
     tool = next((i for i in (4, 3) if mon.get_tool(i) is None), None)
     if tool is None:
         raise RuntimeError("patina: compute points need a free sys.monitoring tool id (3 or 4)")

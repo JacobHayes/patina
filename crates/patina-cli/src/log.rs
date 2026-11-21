@@ -201,7 +201,6 @@ pub fn describe(r: &Rec) -> String {
         },
         Some(RecKind::InsnEmulation) => insn_name(r.nr),
         Some(RecKind::Preempt) => match r.nr {
-            1 => "counter".to_string(),
             2 => "spin point".to_string(),
             proto::compute::PREEMPT_NR => match r.args[2] & 0xffff_ffff {
                 proto::compute::REASON_DEADLINE => "compute deadline".to_string(),

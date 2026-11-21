@@ -3,8 +3,7 @@ name: CI
 # Every push and pull request runs the landing gate: `mise run check` (format, clippy, then
 # `./check quick`), on an x86_64 runner (`check`) and with the same steps on an arm64 runner
 # (`check-arm64`), where `./check` skips the scripts marked `arch=x86_64` (tests/run.py). Both
-# must be green to land. `counters` and `counters-arm64` are informational: they run the counter
-# preemption checks where the runner exposes a PMU and skip them where it does not.
+# must be green to land.
 on:
   pull_request:
   push:
@@ -133,78 +132,3 @@ jobs:
           path: ${{ env.PATINA_CHECK_DIR }}/runs
           retention-days: 7
 
-  counters:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - name: Host setup for the sandbox
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libsqlite3-dev libssl-dev
-          grep -m1 'model name' /proc/cpuinfo
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: check-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: false
-      - uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.PATINA_CHECK_DIR }}/guests
-          key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
-          restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
-      - name: Fetch the Rust guests' dependencies (their builds are offline)
-        run: |
-          [ ! -d "$PATINA_CHECK_DIR/guests" ] || find "$PATINA_CHECK_DIR/guests" -mindepth 2 -maxdepth 2 -exec touch -h {} +
-          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
-          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
-      # The scripts give a copy of patina CAP_PERFMON with `sudo setcap` and print SKIP when the
-      # runner exposes no PMU.
-      - run: mise exec -- ./check counters
-      - if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: counters-runs
-          path: ${{ env.PATINA_CHECK_DIR }}/runs
-          retention-days: 7
-
-  # The same on arm64: the hosted runners are often a Neoverse N2 with its PMU exposed; on
-  # another core (a Neoverse V3 also comes up) the scripts SKIP.
-  counters-arm64:
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 15
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v7
-      - name: Host setup for the sandbox
-        run: |
-          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libsqlite3-dev libssl-dev
-          sort -u /sys/devices/system/cpu/cpu*/regs/identification/midr_el1
-      - uses: ./.github/actions/setup-toolchain
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: check-arm64-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml') }}
-          save-if: false
-      - uses: actions/cache/restore@v6
-        with:
-          path: ${{ env.PATINA_CHECK_DIR }}/guests
-          key: guests-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('tests/guests.sh', 'tests/guests/**', 'tests/determinism/attack/**', 'tests/sandbox/guests/**', 'rust-toolchain.toml', 'mise.lock') }}
-          restore-keys: guests-${{ runner.os }}-${{ runner.arch }}-
-      - name: Fetch the Rust guests' dependencies (their builds are offline)
-        run: |
-          [ ! -d "$PATINA_CHECK_DIR/guests" ] || find "$PATINA_CHECK_DIR/guests" -mindepth 2 -maxdepth 2 -exec touch -h {} +
-          cargo fetch --locked --manifest-path tests/guests/fjall-harness/Cargo.toml
-          cargo fetch --locked --manifest-path tests/guests/tokio-mt/Cargo.toml
-      # The scripts give a copy of patina CAP_PERFMON with `sudo setcap` and print SKIP when the
-      # runner exposes no PMU.
-      - run: mise exec -- ./check counters
-      - if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: counters-arm64-runs
-          path: ${{ env.PATINA_CHECK_DIR }}/runs
-          retention-days: 7

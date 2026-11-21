@@ -20,7 +20,6 @@ fn record_kind(r: &Rec) -> String {
     match RecKind::from_u8(r.kind) {
         Some(RecKind::Trap) => format!("{} system call records", proto::table::name(r.nr as u64)),
         Some(RecKind::Preempt) => match r.nr {
-            1 => "counter-preemption records".into(),
             2 => "spin-point records".into(),
             _ => "compute-switch records".into(),
         },
@@ -885,7 +884,7 @@ impl Sup {
                     self.finish(Verdict::new(
                         "infra",
                         format!(
-                            "load-time points: this host does not let a walk single-step (errno {}, {}); [sched] preempt = \"traps\" or \"branches\" does not walk",
+                            "load-time points: this host does not let a walk single-step (errno {}, {}); [sched] preempt = \"traps\" does not walk",
                             -(errno as i64),
                             if nr == 0 { "/proc/self/mem" } else { proto::table::name(nr) }
                         ),
@@ -905,30 +904,6 @@ impl Sup {
                         "infra",
                         format!("host limit: errno {} in {} (launcher rlimit or per-user kernel accounting)", -(errno as i64), proto::table::name(nr)),
                     ));
-                }
-                if code == HE_PMU {
-                    if errno == PMU_E_OVERSHOOT {
-                        // A late overflow interrupt: the stop is behind, it cannot be reached.
-                        self.finish(Verdict::new(
-                            "pmu-late",
-                            format!(
-                                "pmu: the overflow interrupt came {} branches after the stop, \
-                                 later than the margin of {} branches it is aimed ahead of it \
-                                 (seen on virtual machines, whose PMU interrupts can come \
-                                 late); raise [sched] pmu-margin",
-                                nr as i64, self.ctl.config.pmu_margin
-                            ),
-                        ));
-                    }
-                    let what = match errno {
-                        PMU_E_MISSED => "missed overflow",
-                        PMU_E_BACKWARDS => "the count went backwards",
-                        PMU_E_DECODE => "cannot decode guest code",
-                        PMU_E_OPEN => "cannot open a counter",
-                        PMU_E_PAGE => "counter page or period",
-                        _ => "unknown",
-                    };
-                    self.finish(Verdict::new("infra", format!("pmu: {what} (value {nr})")));
                 }
                 if code == HE_REAL_MASK {
                     self.finish(Verdict::new(

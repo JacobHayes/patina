@@ -5,8 +5,9 @@
 # RUSTFLAGS and the SDK's `compute` feature. Without clang, clang++, gcc or g++ the C guests
 # are not built and MISSING says so: this script succeeds, so other areas are not blocked, and
 # tests/compute fails.
-#   races, pool       the counters area's syscall-free races (races at -O1 as there; pool at
-#                     -O2, where its `stats.done++` is one instruction in a stock build)
+#   races, pool       syscall-free races (races at -O1; pool at -O2, where its `stats.done++`
+#                     is one instruction in a stock build); races-stock, pool-stock the same
+#                     built without the flags
 #   spinpoints        tests/guests/threads/spinpoints.c (`count`: a spin-wait that changes state)
 #   spinwait          tests/guests/costs/spinwait.c (its `own-spin-nohint` lock waits without a
 #                     spin hint, so nothing but compute points can switch inside it)
@@ -67,8 +68,10 @@ fi
 cp="-g -pthread -fsanitize-coverage=trace-pc,trace-loads,trace-stores -fno-sanitize-link-runtime"
 hook=$root/sdk/c/patina_compute.c
 g=$root/tests/guests
-clang -O1 $cp -o "$out/races" "$g/counters/races.c" "$hook"
-clang -O2 $cp -o "$out/pool" "$g/counters/pool.c" "$hook"
+clang -O1 $cp -o "$out/races" "$here/races.c" "$hook"
+clang -O1 -g -pthread -o "$out/races-stock" "$here/races.c"
+clang -O2 $cp -o "$out/pool" "$here/pool.c" "$hook"
+clang -O1 -g -pthread -o "$out/pool-stock" "$here/pool.c"
 clang -O2 $cp -o "$out/spinpoints" "$g/threads/spinpoints.c" "$hook"
 clang -O2 $cp -o "$out/spinwait" "$g/costs/spinwait.c" "$hook"
 clang -O2 $cp -o "$out/cellpoke" "$here/cellpoke.c" "$hook"
@@ -79,9 +82,9 @@ clang -O2 $cp -o "$out/deadline" "$here/deadline.c" "$hook"
 clang -O2 -g -o "$out/deadline-stock" "$here/deadline.c"
 gp="-g -pthread -fsanitize-coverage=trace-pc"
 gcc -O2 -c -o "$out/hook-gcc.o" "$hook"
-gcc -O1 $gp -o "$out/races-gcc" "$g/counters/races.c" "$out/hook-gcc.o"
+gcc -O1 $gp -o "$out/races-gcc" "$here/races.c" "$out/hook-gcc.o"
 rm "$out/hook-gcc.o"
-gcc -O2 $gp -o "$out/pool-gcc" "$g/counters/pool.c" "$hook"
+gcc -O2 $gp -o "$out/pool-gcc" "$here/pool.c" "$hook"
 clang++ -O2 $cp -o "$out/cxx" "$here/cxx.cc" -x c++ "$hook"
 g++ -O2 $gp -o "$out/cxx-gcc" "$here/cxx.cc" -x c++ "$hook"
 clang -O2 $cp -fPIC -shared -DLIB=comp -o "$out/libcomp.so" "$here/shlib-lib.c" "$hook"
