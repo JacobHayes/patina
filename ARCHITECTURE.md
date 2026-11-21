@@ -1495,7 +1495,9 @@ sandbox on the host (the keeper's child is the pid namespace's init; host pids f
 writes the stop's facts (`RUNDIR/debug/debug.json`) and a gdb helper beside them, and starts gdb
 in its own process group, which gets the terminal. The helper loads each image's symbols at its
 load address from `/proc/PID/maps` (the kernel's view is of the runtime, which loaded the
-program), lets the runtime's signals through (`SIGSYS`, the faulting signals), and opens the
+program): the first mapping of each file at an offset where one of its segments starts (not
+only offset 0, which under load-time points can be a plan's page; where several segments
+start in that page, the one whose permissions the mapping has), lets the runtime's signals through (`SIGSYS`, the faulting signals), and opens the
 gate (a file the launcher polls) when gdb continues, detaches or exits. The launcher opens it
 too when gdb exits by any means, and when the session is interrupted, so no world stays
 parked. The x86_64 signal restorer is named `__restore_rt`, the name gdb's signal-frame
@@ -1532,10 +1534,17 @@ helper passes on every `SIGTRAP` gdb did not cause (`handle SIGTRAP pass`), and 
 drops one that is neither its own nor a plan's (`fault::debugger_passes`): a trap gdb left
 behind (a watchpoint's, after it was deleted) never reaches the program. gdb's own steps would
 be among the runtime's, so the helper refuses stepping (`step`, `next`, `stepi`, `nexti`,
-`until`, `advance` are errors). On arm64 such a run is refused in this version: an arm64
-watchpoint traps before the access and gdb steps over it, and a breakpoint gdb sets in code
-the plan moved is not hit there. Ctrl-C's `SIGTRAP` is passed on and dropped, so it does not
-interrupt such a run. A breakpoint instruction of the program's own is dropped too: such a
+`until`, `advance` are errors). A stop gdb reports (a breakpoint's) turns passing off until
+the program goes on: gdb steps over a breakpoint with the stop's `SIGTRAP` when it passes it,
+which would take the thread into the runtime's handler and back to the breakpoint. A
+watchpoint that traps after the access (x86_64) is reported that way; an arm64 one traps
+before it and gdb steps over it with no stop in between, so on arm64 the helper refuses
+watchpoints (`watch`, `rwatch`, `awatch`) in such a run. For the same reason the helper
+disables, with a message, a breakpoint gdb would go on from by itself (a condition, an ignore
+count, another thread's, a `dprintf`), a software watchpoint (gdb steps the program), and a
+breakpoint in code the plan moved (it runs in a trampoline, so the breakpoint would not be
+hit, and on a plan's own trap instruction it would take the scheduling point's place). Ctrl-C's `SIGTRAP` is passed on and
+dropped, so it does not interrupt such a run. A breakpoint instruction of the program's own is dropped too: such a
 session leaves the run, and its end says where. Code the plan moved runs in trampolines no
 symbol file covers: the launcher lists each process's trampolines with the original
 instructions each stands for (from the plans the process maps), and the helper's unwinder

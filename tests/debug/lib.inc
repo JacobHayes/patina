@@ -31,9 +31,9 @@ if [ "$probe" != 0 ]; then
     exit 0
 fi
 
-# The scripts' runs are traps runs (TRAPS, a config to pass or to append to one's own): on arm64
-# `patina debug` takes only those in this version, and on x86_64 a session of a run with
-# load-time points takes about ten times as long (03-points covers those, and clears TRAPS).
+# The scripts' runs are traps runs (TRAPS, a config to pass or to append to one's own): only
+# those step and (on arm64) watch, and a session of a run with load-time points takes about
+# ten times as long (03-points covers those, and clears TRAPS).
 TRAPS=$RUNS/traps.toml
 printf '[sched]\npreempt = "traps"\n' >"$TRAPS"
 # prun OUT [run options] -- CMD...: `patina run` into OUT (it must leave a result); under TRAPS

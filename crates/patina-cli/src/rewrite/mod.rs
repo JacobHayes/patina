@@ -201,11 +201,27 @@ pub fn default_threads() -> usize {
     crate::launch::allowed_cpus().len().clamp(1, 8)
 }
 
-/// For a debugger (`patina debug`): an ELF file's SHA-256 and the lowest address of its
-/// loadable segments (its load bias is where that is mapped, less it).
-pub fn image_start(data: &[u8]) -> Res<([u8; 32], u64)> {
+/// For a debugger (`patina debug`): an ELF file's SHA-256 and, when a loadable segment starts
+/// in the page at file offset `off` (as the loader maps it), the address that page loads at:
+/// the load bias of a mapping of the file at that offset is where it is mapped, less it. A
+/// mapping at an offset no segment starts at (a library mapping a page of itself for its own
+/// use) gives None. When several segments start in that page (a small program), the one
+/// the mapping's permissions (`perms`, as in `/proc/PID/maps`) are of: executable or not,
+/// then writable or not (a RELRO page is read-only and of the writable segment, last).
+/// Patina's hosts have 4 KiB pages (`patina doctor`).
+pub fn image_at(data: &[u8], off: u64, perms: &str) -> Res<([u8; 32], Option<u64>)> {
+    const PAGE: u64 = 4096;
+    const PF_X: u32 = 1;
+    const PF_W: u32 = 2;
     let e = elf::Elf::parse(data)?;
-    Ok((e.sha256, e.image_start()))
+    let (x, w) = (perms.contains('x'), perms.contains('w'));
+    let here = || e.loads.iter().filter(|l| l.off & !(PAGE - 1) == off);
+    let at = here()
+        .filter(|l| (l.flags & PF_X != 0) == x)
+        .min_by_key(|l| ((l.flags & PF_W != 0) != w, l.vaddr))
+        .or_else(|| here().next())
+        .map(|l| l.vaddr.wrapping_sub(l.off - off));
+    Ok((e.sha256, at))
 }
 
 /// For a debugger (`patina debug`): the SHA-256 of the file a plan is for, and each of its

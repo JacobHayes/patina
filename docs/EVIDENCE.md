@@ -1147,6 +1147,22 @@ Defects the soak found, each fixed with a test that failed before:
   area's runs are traps runs on every host now (`debug/03-points` keeps the default's), and the
   docs' `stats-cp` sweeps show seeds 1 to 10.
 
+**`patina debug` on arm64 at the default** (2026-11-21, the arm64 VM, then the GitHub arm64
+runner with Ubuntu's gdb): a run with load-time points is debugged read-only, as on x86_64.
+Two things kept it out. The program's symbols went in at the wrong address when its text
+starts at file offset 0 (a small arm64 program), the page a plan maps over: the helper now
+takes the first mapping at an offset where a segment starts, the segment whose permissions
+the mapping has. And gdb stepped over a breakpoint with the stop's own `SIGTRAP` passed on,
+into the runtime's handler and back to the breakpoint, for ever (a kept breakpoint never
+let its thread go on, on x86_64 too): a reported stop now turns passing off until the
+program goes on. `debug/03-points` on both architectures: a stop at a scheduling point,
+symbols, `bt` through trampolines, a breakpoint in a goroutine, a kept breakpoint hit by two
+threads in turn, a conditional breakpoint disabled, stepping refused, on arm64 a watchpoint
+refused (it traps before the access and gdb steps over it), the session `identical`. An
+independent review found the same loop again where gdb goes on from a breakpoint by itself
+(a condition, an ignore count, another thread's, a `dprintf`) and after a call into the
+program; the first kind is disabled with a message, the second turns passing off.
+
 **First run.** With an empty plan cache, `patina sweep` of Chromium prints once, before any
 seed: "patina: rewriting chrome-headless-shell and 45 more files so that threads can switch
 inside its code (once per file: kept in …/patina/plans)". All 46 were planned before the runs;

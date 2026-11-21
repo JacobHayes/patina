@@ -25,16 +25,65 @@ if PASS:
     gdb.execute("handle SIGTRAP nostop noprint pass")
     for c in ("step", "next", "stepi", "nexti", "until", "advance"):
         gdb.execute("define hook-%s\npython no_step()\nend" % c)
+    # arm64 watchpoints trap before the access, and gdb steps over it with the SIGTRAP it
+    # passes on: the step lands in the runtime's handler and the access traps again, forever.
+    if not S["watchpoints"]:
+        for c in ("watch", "rwatch", "awatch"):
+            gdb.execute("define hook-%s\npython no_watch()\nend" % c)
 else:
     gdb.execute("handle SIGTRAP stop print nopass")
 
 def no_step():
     raise gdb.GdbError("patina: no stepping in this run (its scheduling points share SIGTRAP "
-                       "with the debugger); use breakpoints or watchpoints and continue")
+                       "with the debugger); use breakpoints%s and continue"
+                       % (" or watchpoints" if S["watchpoints"] else ""))
+
+def no_watch():
+    raise gdb.GdbError("patina: no watchpoints in this run on arm64 (its scheduling points "
+                       "share SIGTRAP with the debugger, which steps over each hit); use "
+                       "breakpoints and continue, or record the seed again under "
+                       "[sched] preempt = \"traps\" (another schedule)")
+
+def trap_passes(on):
+    if PASS:
+        gdb.execute("with confirm off -- handle SIGTRAP nostop noprint %s"
+                    % ("pass" if on else "nopass"), to_string=True)
+
+def vet(bp):
+    """In a run whose SIGTRAPs are passed on, gdb must report every stop at a breakpoint (the
+    stop turns passing off, `on_stop`): one it takes and goes on from by itself (a condition,
+    an ignore count, another thread's, a dprintf) would step over it with the SIGTRAP passed,
+    into the runtime's handler and back, forever; a software watchpoint steps the program.
+    So does an arm64 watchpoint (it traps before the access). Such a breakpoint is disabled.
+    (A Python breakpoint whose `stop` answers False is the same, and not seen here.)"""
+    if not PASS or not bp.is_valid() or not bp.enabled:
+        return
+    why = None
+    if bp.type == gdb.BP_WATCHPOINT:
+        why = "a software watchpoint steps the program"
+    elif bp.type in (gdb.BP_HARDWARE_WATCHPOINT, gdb.BP_READ_WATCHPOINT,
+                     gdb.BP_ACCESS_WATCHPOINT) and not S["watchpoints"]:
+        why = "an arm64 watchpoint stops before the access and gdb steps over it"
+    elif bp.condition or bp.ignore_count or bp.thread is not None or getattr(bp, "task", None) is not None \
+            or getattr(gdb, "BP_DPRINTF", None) == bp.type:
+        why = "gdb would go on from it by itself (a condition, an ignore count, a thread, a dprintf)"
+    else:
+        for l in getattr(bp, "locations", ()):
+            if l.address is not None and moved(int(l.address)):
+                why = "its address is in code the plan moved, which runs in a trampoline"
+                break
+    if why:
+        bp.enabled = False
+        print("patina: breakpoint %d disabled: %s, and this run's scheduling points share "
+              "SIGTRAP with the debugger; use a plain breakpoint and continue" % (bp.number, why))
 
 def on_stop(e):
     """Name a SIGTRAP stop gdb did not cause: Ctrl-C (the runtime turns gdb's SIGINT into a
-    SIGTRAP to itself), or the supervisor's spin probe (from PID 1), which gdb keeps."""
+    SIGTRAP to itself), or the supervisor's spin probe (from PID 1), which gdb keeps. In a run
+    whose SIGTRAPs are passed on, the stop's own SIGTRAP (a breakpoint's) is not: until the
+    program goes on (`on_cont`), so that gdb's step over the breakpoint does not take the
+    program into its handler and back to the breakpoint, forever."""
+    trap_passes(False)
     try:
         i = gdb.parse_and_eval("$_siginfo")
         trap = int(i["si_signo"]) == 5 and int(i["si_code"]) == -6
@@ -56,6 +105,10 @@ def ns_pid(status):
             return int(l.split()[-1])
 
 TRAMP = []  # (start, end, original address, length, offset of the copy)
+
+def moved(a):
+    """Whether address `a` is in original code a plan moved to a trampoline (not run there)."""
+    return any(orig <= a < orig + n for _, _, orig, n, _ in TRAMP)
 
 def tramp_orig(pc):
     i = bisect.bisect_right(TRAMP, (pc, 1 << 64)) - 1
@@ -168,12 +221,21 @@ def on_call(e):
         note("call")
     else:
         CALLING[0] -= 1
+        # gdb reports no stop at a call's end and puts back the thread's last stop signal: a
+        # breakpoint's SIGTRAP, which must not be passed when the program goes on.
+        trap_passes(False)
 
-gdb.events.cont.connect(release)
+def on_cont(e):
+    release()
+    trap_passes(True)
+
+gdb.events.cont.connect(on_cont)
 gdb.events.gdb_exiting.connect(lambda e: go())
 gdb.execute("define hook-detach\npython release()\nend")
 gdb.events.before_prompt.connect(before_prompt)
 gdb.events.stop.connect(on_stop)
+gdb.events.breakpoint_created.connect(vet)
+gdb.events.breakpoint_modified.connect(vet)
 gdb.events.memory_changed.connect(lambda e: note("memory"))
 gdb.events.register_changed.connect(lambda e: note("register"))
 gdb.events.inferior_call.connect(on_call)

@@ -61,12 +61,6 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             rundir.display()
         )));
     }
-    if cfg!(target_arch = "aarch64") && (cfg.preempt != crate::config::Preempt::Traps) {
-        return Err(err(format!(
-            "{}: patina debug does not take a run with load-time points (the default) or branch counters on arm64 in this version: run the seed again with [sched] preempt = \"traps\" in a patina.toml and debug that run",
-            rundir.display()
-        )));
-    }
     // Spin points come of single steps and breakpoints the runtime takes with SIGTRAP, which
     // gdb would take as its own.
     if recorded["counters"]["sched"]["spin_yields"]
@@ -488,6 +482,8 @@ fn images(host: i32) -> Value {
     let maps = std::fs::read_to_string(format!("/proc/{host}/maps")).unwrap_or_default();
     let exe = std::fs::read_link(format!("/proc/{host}/exe")).unwrap_or_default();
     let (mut images, mut bias, mut plans) = (vec![], std::collections::HashMap::new(), vec![]);
+    // Files done with: placed, or not ELF (a data file mapped many times is read once).
+    let mut done = std::collections::HashSet::new();
     for line in maps.lines() {
         let w: Vec<&str> = line.splitn(6, ' ').collect();
         let path = w.get(5).map_or("", |p| p.trim_start());
@@ -502,10 +498,12 @@ fn images(host: i32) -> Value {
             .split('-')
             .next()
             .and_then(|a| u64::from_str_radix(a, 16).ok());
-        if w[2] != "00000000"
-            || Path::new(path) == exe
-            || images.iter().any(|i: &Value| i[0] == path)
-        {
+        let off = w.get(2).and_then(|o| u64::from_str_radix(o, 16).ok());
+        // The first mapping of the file where one of its segments starts gives its bias, not
+        // only the one at offset 0: under load-time points a plan's page can stand there (a
+        // small program whose text starts at file offset 0, as on arm64). Not an inaccessible
+        // one: the loader's reservation between segments carries offsets of its own.
+        if Path::new(path) == exe || done.contains(path) || w[1].starts_with("---") {
             continue;
         }
         let inside = format!("/proc/{host}/root{path}");
@@ -514,12 +512,22 @@ fn images(host: i32) -> Value {
             true => path.to_string(),
             false => inside,
         };
-        let found = std::fs::read(&file)
-            .ok()
-            .and_then(|d| crate::rewrite::image_start(&d).ok());
-        if let (Some((sha, lo)), Some(start)) = (found, start) {
-            bias.insert(sha, start.wrapping_sub(lo));
-            images.push(json!([path, file, start.wrapping_sub(lo)]));
+        let found = off.and_then(|off| {
+            std::fs::read(&file)
+                .ok()
+                .map(|d| crate::rewrite::image_at(&d, off, w[1]))
+        });
+        match (found, start) {
+            (Some(Ok((sha, Some(at)))), Some(start)) => {
+                let b = start.wrapping_sub(at);
+                bias.insert(sha, b);
+                images.push(json!([path, file, b]));
+                done.insert(path.to_string());
+            }
+            (Some(Err(_)) | None, _) => {
+                done.insert(path.to_string());
+            }
+            _ => {}
         }
     }
     let mut tramps = vec![];
@@ -676,6 +684,7 @@ fn stopped(
         "host_tid": host_tid,
         "pidns": pidns,
         "sigtrap_pass": s.sigtrap_pass,
+        "watchpoints": !(s.sigtrap_pass && cfg!(target_arch = "aarch64")),
         "release": release,
         "notes": out.join("notes"),
         "procs": procs.iter().map(|q| json!({"pid": q.pid, "host": q.host, "comm": q.comm, "node": q.node, "threads": q.threads.len(), "maps": images(q.host)})).collect::<Vec<_>>(),
@@ -712,9 +721,10 @@ fn stopped(
         p.host,
         procs.len()
     );
-    let exact = match s.sigtrap_pass {
-        true => "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, finish; no stepping in this run (its scheduling points share SIGTRAP with the debugger)",
-        false => "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, step, next, stepi, finish",
+    let exact = match (s.sigtrap_pass, cfg!(target_arch = "aarch64")) {
+        (true, false) => "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, finish; no stepping in this run (its scheduling points share SIGTRAP with the debugger)",
+        (true, true) => "reading (bt, print, x, info registers), breakpoints, continue, finish; no stepping or watchpoints in this run (its scheduling points share SIGTRAP with the debugger, and an arm64 watchpoint is stepped over)",
+        (false, _) => "reading (bt, print, x, info registers), breakpoints, watchpoints, continue, step, next, stepi, finish",
     };
     let _ = writeln!(o, "  exact, the recorded run: {exact}");
     let _ = writeln!(

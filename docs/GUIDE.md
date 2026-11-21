@@ -2349,11 +2349,14 @@ that ran 20 ms of CPU time without a system call) stops gdb (`patina: a spin pro
 continuing drops it, which changes nothing unless the program was spinning.
 
 A run with load-time points (the default) or branch counters takes `SIGTRAP` for its
-scheduling points too. There reading, breakpoints, watchpoints, `finish` and continuing are as
-exact as in any run, but gdb refuses stepping (`step`, `next`, `stepi` and the like are
-errors, and the run is unchanged): set a breakpoint and continue instead. On arm64 `patina
-debug` does not take such a run in this version: run the seed again with `[sched] preempt =
-"traps"` (another schedule) and debug that. Ctrl-C does not interrupt such a run. Code the plan
+scheduling points too. There reading, plain breakpoints, watchpoints (x86_64 only), `finish`
+and continuing are as exact as in any run, but gdb refuses stepping (`step`, `next`, `stepi`
+and the like are errors, and the run is unchanged): set a breakpoint and continue instead. A
+breakpoint gdb would go on from by itself (with a condition, an ignore count or a thread, or a
+`dprintf`), or one in code the plan moved, is disabled with a message. On arm64 gdb refuses
+watchpoints there too (an arm64 watchpoint stops before the access and gdb steps over it):
+use a breakpoint, or run the seed again with `[sched] preempt = "traps"` (another schedule)
+and debug that. Ctrl-C does not interrupt such a run. Code the plan
 moved shows as the program's own in `bt` (`patina: N trampolines mapped ...`).
 
 The debugger is yours and can change the program as it runs: that is why a session that writes
