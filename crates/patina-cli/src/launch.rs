@@ -26,6 +26,10 @@ use std::sync::atomic::Ordering::*;
 /// The in-guest runtime, built by `build.rs`.
 static RT: &[u8] = include_bytes!(env!("PATINA_RT_EMBED"));
 
+/// The runtime file's name: `proto::rec::hash_bytes(0x7274, RT)`, worked out by `build.rs`
+/// rather than on every run (a serial pass over the runtime's megabytes).
+const RT_ID: &str = env!("PATINA_RT_ID");
+
 /// `$XDG_CACHE_HOME/patina` (default `~/.cache/patina`, else in the temporary directory).
 pub fn cache_dir() -> PathBuf {
     std::env::var_os("XDG_CACHE_HOME")
@@ -42,18 +46,44 @@ pub fn cache_dir() -> PathBuf {
 
 /// The runtime the sandbox executes: the file `PATINA_TEST_RT` names (runtime development), else
 /// the embedded copy written once to `$XDG_CACHE_HOME/patina/rt-<hash>` (default
-/// `~/.cache`, else the temporary directory) and checked against the embedded bytes on every
-/// open. A file, not a memfd: some LSM policies refuse to execute a memfd.
+/// `~/.cache`, else the temporary directory) and checked against the embedded bytes, again
+/// whenever the file is not the one last checked. A file, not a memfd: some LSM policies refuse
+/// to execute a memfd.
 pub fn rt_file() -> Res<File> {
     if let Some(p) = std::env::var_os("PATINA_TEST_RT") {
         return File::open(&p)
             .map_err(|e| format!("runtime {} (PATINA_TEST_RT): {e}", Path::new(&p).display()));
     }
     let dir = cache_dir();
-    let path = dir.join(format!("rt-{:016x}", proto::rec::hash_bytes(0x7274, RT)));
+    let path = dir.join(format!("rt-{RT_ID}"));
+    // `rt-<id>.ok` holds the identity (device, inode, size, change time) of the file last found
+    // to hold exactly the embedded bytes: while the file keeps it, at the embedded size, its
+    // bytes are not read again.
+    let ok = path.with_extension("ok");
     if let Ok(mut f) = File::open(&path) {
+        let id = f
+            .metadata()
+            .ok()
+            .filter(|m| m.len() == RT.len() as u64)
+            .map(|m| {
+                use std::os::unix::fs::MetadataExt;
+                let (d, i, s) = (m.dev(), m.ino(), m.size());
+                format!("{d} {i} {s} {}.{}", m.ctime(), m.ctime_nsec())
+            });
+        if id.is_some() && fs::read_to_string(&ok).ok() == id {
+            return Ok(f);
+        }
         let mut have = Vec::with_capacity(RT.len());
         if f.read_to_end(&mut have).is_ok() && have == RT {
+            if let Some(id) = id {
+                let tmp = dir.join(format!(".rt-ok-{}", std::process::id()));
+                if fs::write(&tmp, id)
+                    .and_then(|_| fs::rename(&tmp, &ok))
+                    .is_err()
+                {
+                    let _ = fs::remove_file(&tmp);
+                }
+            }
             return Ok(f);
         }
     }
@@ -1576,4 +1606,13 @@ pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
     let mut cmd = r.cmd;
     let st = cmd.status().map_err(|e| format!("sandbox: {e}"))?;
     Ok(std::process::ExitCode::from(st.code().unwrap_or(1) as u8))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn rt_id_is_hash_bytes() {
+        let h = proto::rec::hash_bytes(0x7274, super::RT);
+        assert_eq!(super::RT_ID, format!("{h:016x}"));
+    }
 }
