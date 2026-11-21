@@ -3,9 +3,9 @@
 # by its exit or by SIGKILL, undone by the main process's store; two processes taking turns;
 # a store then another process's pwrite or writev on the page, and a pwrite then a store of
 # the old byte; a truncation and extension by one process under another's mapping; more files
-# mapped one after another than Patina keeps shadows of at once): each mode with no
-# crash plane, --crash machine and --crash process ends ok, its self-check passes, `patina log
-# ops --check` passes, and what the file holds (read(2)) at the end of the last incarnation is
+# mapped one after another than Patina keeps shadows of at once): each mode with no crash
+# plane, --crash machine and (in the area tier) --crash process ends ok, its self-check
+# passes, `patina log ops --check` passes, and what the file holds (read(2)) at the end of the last incarnation is
 # what a native run prints. Then a pwrite on a page another process stored to through its
 # mapping: the page is logged whole before the write. More files mapped at once than Patina
 # keeps shadows of end the run unsupported (capacity). A same-seed repeat is identical and
@@ -15,9 +15,10 @@
 d=$RUNS/19
 rm -rf "${d:?}"
 mkdir -p "$d/native"
+planes="none machine process"; [ "${CHECK_TIER:-}" != quick ] || planes="none machine"
 for m in back back-kill alternate store-write store-writev write-store trunc files; do
     native=$(cd "$d/native" && "$PATINA_GUESTS/mapshare" "$m")
-    for plane in none machine process; do
+    for plane in $planes; do
         o=$d/$m-$plane
         c=()
         [ $plane = none ] || c=(--crash "$plane")

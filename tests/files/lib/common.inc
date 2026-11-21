@@ -13,6 +13,8 @@ die() { echo "FAIL: $*"; exit 1; }
 # verify_ok OUT SEED VARY RUNS [run options] -- cmd...: patina verify must report identical runs, all ok.
 verify_ok() {
     out=$1; seed=$2; vary=$3; runs=$4; shift 4
+    # Quick tier: two runs, the reference and one varied in each way asked; more in the area tier.
+    [ "${CHECK_TIER:-}" != quick ] || [ "$runs" -le 2 ] || runs=2
     v=; [ -n "$vary" ] && v="--vary $vary"
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" $v --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" >"$out.log" 2>&1 \
         || grep -q '^identical: ' "$out.log" || { tail -5 "$out.log"; die "verify $* (seed $seed): not identical"; }

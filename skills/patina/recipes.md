@@ -96,6 +96,7 @@ cmd = ["python3", "/guest/q3.py", "n3", "nosync"]
 <!-- transcript nodes-sweep
 dir: /tmp/q3
 exit: 1
+release-only: a sweep of eight runs of a three-node cluster
 -->
 ```sh
 patina sweep --seeds 1..8 --mount g:/guest --faults cluster --fault crash-gap-ms=2000..10000 -- python3 /guest/q3.py driver 30

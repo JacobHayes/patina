@@ -1261,6 +1261,18 @@ the budget; the guest now counts between calls), and `patina explain`, whose fol
 job, every area one after another under its own ceiling, took about 18 minutes on the x86_64
 runner and 32 on the arm64 one.
 
+**The quick tier after the switch** (GitHub runners, `./check quick` as CI runs it; wall
+seconds, script seconds). Before the switch (main at `e1d438a8` and the commits before it):
+arm64 274 to 303 wall, 580 script; x86_64 228 to 383 wall. With load-time points by default:
+arm64 332 to 353 wall, 692 script; x86_64 273 to 380 wall. The scripts it slowed most on arm64
+were `docs/01-transcripts` (27 to 43 s), `skeleton/02-repeat` (12 to 26), `nodes/13-points`
+(17 to 28), `examples/01-examples` (4 to 21, its rebuilt `stats-c` at the default gap),
+`nodes/01-isolation` (8 to 17) and `net/02-semantics` (3 to 12, 64 MiB through a socket at 5
+times traps). The fuller matrices moved to the area tier (two verify runs in quick: the
+reference and one varied in every way asked; fewer guests, modes, crash planes and seeds) and
+two sweep transcripts to the release tier, the assertions unchanged: arm64 280 to 302 wall
+(298 at the last), 554 script, the range it had before the switch; x86_64 227 to 248 wall.
+
 ## Branch counters on arm64
 
 Measured 2026-11-18 on GitHub `ubuntu-24.04-arm` runners (Azure, Arm Neoverse N2 r0p0, `MIDR_EL1`

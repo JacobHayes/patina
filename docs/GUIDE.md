@@ -461,6 +461,7 @@ command again runs only the points not tried yet.
 dir: /tmp/acklog
 setup: cp "$GUESTS/examples/acklog" .
 exit: 1
+release-only: a sweep of 328 crash points
 -->
 ```text
 $ patina sweep --seeds 1..2 --crash-points --crash machine -- ./acklog
@@ -698,6 +699,7 @@ shows the shape:
 
 <!-- transcript crash
 dir: /tmp/acklog
+setup: cp -f "$GUESTS/examples/acklog" .
 exit: 1
 exact-only: one seed's run
 -->

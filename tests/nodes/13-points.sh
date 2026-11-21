@@ -8,8 +8,9 @@
 # report's group names b's crash points; the correct store is ok at every point of both nodes;
 # a child's rerun line gives its digest again. `--crash-points=N` runs a sample with each node in it
 # and says how many of how many it tried; `[sweep] crash-pairs` crashes the other node at its next
-# points after each first crash, the correct store ok at each pair, a pair's rerun line giving
-# its digest again. One seed, a few puts: about 10 s on the arm64 runner.
+# point after each first crash (of a run of two puts), the correct store ok at each pair, a pair's rerun line giving
+# its digest again. One seed, a few puts. The quick tier stops before the sample and the pairs
+# (the area tier runs them): about 12 s on the arm64 runner.
 #@ tier=quick budget=30 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/13-points; mkdir -p "$o"
@@ -109,6 +110,7 @@ st=0; timeout 120 "$PATINA" run --seed $s --config "$c/run.json" --out "$o/rerun
 d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 [ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"
 echo "rerun: same digest"
+[ "${CHECK_TIER:-}" != quick ] || exit 0
 # A sample: at most 4 children, both nodes among them, and the report says how many of how many.
 sw2() { n=$1; shift; rm -rf "${o:?}/$n"; st=0; PATINA_TEST_KEEP_NONE=1 timeout 300 "$PATINA" sweep --seeds $s --crash-points --crash machine -j 4 \
     --out "$o/$n" --config "$o/ok.toml" "$@" --mount "$PATINA_GUESTS":/guest:copy -- $D >"$o/$n.txt" 2>&1 || st=$?; }
@@ -122,16 +124,18 @@ assert all(x["tried"] > 0 for x in br["nodes"]), br["nodes"]
 print("--crash-points=4: %d of %d tried (%s)" % (br["tried"], br["points"], ", ".join("%s %d" % (x["node"], x["tried"]) for x in br["nodes"])))
 PY
 grep -q "^crash points: 4 of " "$o/max.txt" || die "--crash-points=N: $(cat "$o/max.txt")"
-# Pairs: after each first crash whose child ended ok, the other node's next 2 points.
-{ cat "$o/ok.toml"; printf '[sweep]\ncrash-pairs = 2\n'; } >"$o/pairs.toml"
+# Pairs: after each first crash whose child ended ok, the other node's next point; of a driver
+# of two puts (fewer points: the pairs are a second level of runs).
+D="python3 /guest/ack2.py driver 2"
+{ cat "$o/ok.toml"; printf '[sweep]\ncrash-pairs = 1\n'; } >"$o/pairs.toml"
 sw2 pairs --config "$o/pairs.toml"
 [ "$st" = 0 ] || die "crash-pairs: exit $st: $(tail -5 "$o/pairs.txt")"
-python3 -I - "$o/pairs/report.json" <<'PY' || die "crash-pairs 2"
+python3 -I - "$o/pairs/report.json" <<'PY' || die "crash-pairs 1"
 import json, sys
 rep = json.load(open(sys.argv[1]))
 pr = rep["crash_points"]["pairs"]
 assert pr["pairs"] > 0 and pr["tried"] == pr["pairs"] and rep["groups"] == [], rep["crash_points"]
-print("crash-pairs 2: ok at all %d pairs" % pr["tried"])
+print("crash-pairs 1: ok at all %d pairs" % pr["tried"])
 PY
 grep -q "^crash pairs: [1-9][0-9]* of " "$o/pairs.txt" || die "crash-pairs: $(cat "$o/pairs.txt")"
 # A pair's rerun line reproduces it (its run.json names both crashes).

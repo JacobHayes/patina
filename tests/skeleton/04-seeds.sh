@@ -1,6 +1,8 @@
-# 4. Seeds 1 and 2 give different stdout (random bytes differ) and different digests.
+# 4. Seeds 1 and 2 give different stdout (random bytes differ) and different digests (the quick
+#    tier: the static and dynamic C guests; the area tier every guest).
 #@ tier=quick
 . "$(dirname "$0")/lib.inc"
+[ "${CHECK_TIER:-}" != quick ] || GUESTS="hello-static hello-dyn"
 for g in $GUESTS; do
     for s in 1 2; do patina_run "$RUNS/04-seeds/$g-s$s" "$s" "$g"; done
     a=$RUNS/04-seeds/$g-s1; b=$RUNS/04-seeds/$g-s2

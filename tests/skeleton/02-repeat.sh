@@ -1,7 +1,9 @@
 # 2. patina verify --seed 1 --runs 4 --vary cpu,aslr,sandbox exits 0 for each guest; independently:
-#    one digest and one stdout over the run directories.
+#    one digest and one stdout over the run directories. The quick tier takes the dynamic C
+#    guest (the loader, libc and their load-time points); the area tier every guest.
 #@ tier=quick budget=30
 . "$(dirname "$0")/lib.inc"
+[ "${CHECK_TIER:-}" != quick ] || GUESTS=hello-dyn
 for g in $GUESTS; do
     out=$RUNS/02-repeat/$g
     mkdir -p "$RUNS/02-repeat"

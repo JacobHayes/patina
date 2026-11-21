@@ -35,6 +35,8 @@ net() { field "$1/result.json" "counters.net.$2"; }
 # digest and one stdout over the run directories. Prints the first run's class.
 verify_same() {
     out=$1; seed=$2; runs=$3; shift 3
+    # Quick tier: two runs, the reference and one varied in each way asked; more in the area tier.
+    [ "${CHECK_TIER:-}" != quick ] || [ "$runs" -le 2 ] || runs=2
     rm -rf "${out:?}"
     timeout 1800 "$PATINA" verify --seed "$seed" --runs "$runs" --vary "$VARY" --out "$out" --mount "$PATINA_GUESTS":/guest:copy "$@" \
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }

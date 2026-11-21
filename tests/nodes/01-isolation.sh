@@ -10,7 +10,7 @@
 # cannot run ends the run at once, naming the node. Identical under verify --vary cpu,load,aslr,sandbox,repeat.
 # What is not available yet is refused, naming the feature; without nodes `net` is EINVAL and
 # a control mark works. The C, Rust and Go SDKs' control calls answer the driver and give a
-# node EPERM.
+# node EPERM (the Rust and Go SDKs' in the area tier).
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-isolation; mkdir -p "$o"
@@ -93,6 +93,7 @@ mark from-a-node: ok" ] || die "C control from a node: $n"
 echo "C control: the driver's answered, a node's EPERM"
 
 # The Rust and Go SDKs' control calls: the same answers (errno 2 ENOENT, 1 EPERM).
+[ "${CHECK_TIER:-}" != quick ] || exit 0
 for sdk in rs go; do
     rm -f "$o/ctl-$sdk.toml"
     conf "$o/ctl-$sdk.toml" c /guest/sdk-$sdk control node

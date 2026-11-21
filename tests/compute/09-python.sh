@@ -1,7 +1,7 @@
 # Python compute points (`python3 -m patina`, sdk/python/patina.py; tests/guests/compute/py):
 #  a. natively the runner is inert: the program's own output, and no sys.monitoring tool;
 #  b. `cache` (check-then-act between two threads, no system call in the window): no failure
-#     stock over seeds 1-40; with compute points at the default gap a failure in seeds 1-40,
+#     stock over seeds 1-40 (1-10 in the quick tier); with compute points at the default gap a failure in seeds 1-40,
 #     whose first seed replays identical; the run names the interpreter with kind `line`,
 #     started once, and its load-time points went back when the line points took over (a
 #     switch inside the interpreter holds its lock: no other thread runs Python code);
@@ -12,7 +12,8 @@
 #     in a one-line loop and in a comprehension (it arrives in a jump's hook);
 #  d. `cpu` (two threads, loops with no system call): stock the second thread starts only
 #     when the first has finished (one alternation); with compute points they alternate on
-#     seeds 1-3, and seed 1 is identical over verify --runs 3 --vary cpu,aslr.
+#     seeds 1-3, and seed 1 is identical over verify --runs 3 --vary cpu,aslr (2 in the quick
+#     tier).
 #@ tier=quick budget=20 slots=4
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/09-python
@@ -30,14 +31,15 @@ print(patina.compute(), sys.monitoring.get_tool(3), sys.monitoring.get_tool(4))'
 echo "a. natively: the program's output; compute() off and no monitoring tool"
 
 echo "== b. check-then-act"
-sw() { # NAME [options] -- PROG...: a sweep of seeds 1-40 into $o/NAME
-    sn=$1; shift
-    "$PATINA" sweep --seeds 1..40 --out "$o/$sn" --mount "$G":/guest:copy "$@" >"$o/$sn.txt" 2>&1 || true
+sw() { # NAME N [options] -- PROG...: a sweep of seeds 1-N into $o/NAME
+    sn=$1 n=$2; shift 2
+    "$PATINA" sweep --seeds "1..$n" --out "$o/$sn" --mount "$G":/guest:copy "$@" >"$o/$sn.txt" 2>&1 || true
     [ -f "$o/$sn/report.json" ] || die "b. $sn: $(tail -3 "$o/$sn.txt")"
 }
-sw stock -- $PY "$PC" cache 200
-grep -q '^outcomes: ok 40$' "$o/stock.txt" || die "b. stock: $(grep outcomes "$o/stock.txt")"
-sw cache $CP "$PC" cache 200
+n=40; [ "${CHECK_TIER:-}" != quick ] || n=10
+sw stock $n -- $PY "$PC" cache 200
+grep -q "^outcomes: ok $n\$" "$o/stock.txt" || die "b. stock: $(grep outcomes "$o/stock.txt")"
+sw cache 40 $CP "$PC" cache 200
 grep -q '^outcomes: failure' "$o/cache.txt" || die "b. compute points: $(grep outcomes "$o/cache.txt")"
 grep -q 'replayed: identical' "$o/cache.txt" || die "b. the first failing seed does not replay: $(grep -A1 '^failure' "$o/cache.txt")"
 grep -q "^compute points: $PY (lines)" "$o/cache.txt" || die "b. no compute line naming $PY: $(grep 'compute points' "$o/cache.txt")"
@@ -72,7 +74,8 @@ for s in 1 2 3; do
     [ -n "$a" ] && [ "$a" -gt 1 ] || die "d. seed $s: $(res "$o/c-$s"); $(cat "$o/c-$s/inc-0/stdout")"
 done
 rm -rf "${o:?}/verify"
-"$PATINA" verify --runs 3 --vary cpu,aslr --seed 1 --out "$o/verify" --mount "$G":/guest:copy \
+r=3; [ "${CHECK_TIER:-}" != quick ] || r=2
+"$PATINA" verify --runs $r --vary cpu,aslr --seed 1 --out "$o/verify" --mount "$G":/guest:copy \
     $CP "$PC" cpu 50000 >"$o/verify.txt" 2>&1 || true
-grep -q '^identical: 3 runs' "$o/verify.txt" || die "d. cpu seed 1 under --vary cpu,aslr: $(tail -3 "$o/verify.txt")"
-echo "d. stock: 1 alternation; compute points: $(alt "$o/c-1"), $(alt "$o/c-2"), $(alt "$o/c-3") alternations on seeds 1-3; seed 1 identical over 3 runs varying cpu and aslr"
+grep -q "^identical: $r runs" "$o/verify.txt" || die "d. cpu seed 1 under --vary cpu,aslr: $(tail -3 "$o/verify.txt")"
+echo "d. stock: 1 alternation; compute points: $(alt "$o/c-1"), $(alt "$o/c-2"), $(alt "$o/c-3") alternations on seeds 1-3; seed 1 identical over $r runs varying cpu and aslr"

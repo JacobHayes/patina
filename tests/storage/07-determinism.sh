@@ -2,7 +2,8 @@
 # one seed of each run twice (the second on another CPU, both beside busy loops: --vary
 # cpu,load) gives identical digests, outcomes, output and post-crash tree digests (patina
 # verify compares the crash records, which carry each post-crash tree's digest). The seeds
-# are samples: the comparison holds whether or not the seed fails.
+# are samples: the comparison holds whether or not the seed fails. The quick tier takes F1
+# (machine and process crashes) and F5; the area tier every finding's.
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 v() {
@@ -14,9 +15,10 @@ v() {
 }
 v f1-machine3 5 --crash machine:3 -- /guest/fjall-harness-debug
 v f1-process3 3 --crash process:3 -- /guest/fjall-harness-debug
+v f5 3 --fault fs-short-permille=20 -- /guest/fjall-harness-debug
+[ "${CHECK_TIER:-}" != quick ] || exit 0
 v f2 634 --env FJ_N=2000 --buggify --crash machine:1 -- /guest/fjall-harness-debug
 v f6 946 --env FJ_N=2000 --buggify --crash machine:1 -- /guest/fjall-harness-debug
 v f3 40 --env FJ_N=1000 --buggify --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --config "$("$PATINA_CFG" time-limit=400)" \
     --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
 v f4 6 --fault fsync-error-at=61 --crash machine:3 -- /guest/fjall-harness-debug
-v f5 3 --fault fs-short-permille=20 -- /guest/fjall-harness-debug

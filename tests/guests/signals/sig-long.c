@@ -23,7 +23,7 @@ int main(void) {
     if (write(1, "started\n", 8) != 8) return 3;
     for (long i = 0; i < 100000000L; i++) {
         syscall(SYS_getppid);
-        for (volatile int j = 0; j < 2000; j++) {
+        for (volatile int j = 0; j < 200; j++) {
         }
     }
     return 0;
