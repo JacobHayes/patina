@@ -121,7 +121,7 @@ fn hash_epoll(h: &mut Hasher, p: u64, n: u64) {
     }
 }
 
-/// The C strings a call's inputs named, kept as the hash read them (`--log-paths`).
+/// The C strings a call's inputs named, kept as the hash read them (`log_paths`).
 struct Kept {
     s: [PathBuf; 2],
     /// Per string: the argument it is (`Paths::NONE`: none kept), and whether it was cut.
@@ -249,7 +249,7 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     }
 }
 
-/// `trap` without `--log-paths`: the record, and an SDK call's strings.
+/// `trap` without `log_paths`: the record, and an SDK call's strings.
 fn trap_plain(row: &Row, call: &dyn crate::trap::Call, ret: i64, args: &[u64; 6]) {
     let nr = call.nr();
     let ts = crate::state::thread();
@@ -412,7 +412,7 @@ fn append_unchained(rec: &Rec) {
     c.log_exempt.fetch_add(REC_SIZE as u64, Relaxed);
 }
 
-/// `trap` with `--log-paths`: the record, then each C string the call read (as the hash read
+/// `trap` with `log_paths`: the record, then each C string the call read (as the hash read
 /// it, once), the path each walked argument resolved to, and `execve`'s arguments.
 #[inline(never)]
 fn trap_paths(row: &Row, call: &dyn crate::trap::Call, ret: i64, args: &[u64; 6]) {

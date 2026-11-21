@@ -13,7 +13,7 @@
 H=/guest/fjall-harness-debug
 FJ="--mount $W/fjall-harness:/guest:copy"
 AK="--mount $PATINA_GUESTS/examples:/guest:copy"
-F3="--env FJ_N=1000 --buggify --env FJ_LOG=1 --env FJ_WIPE_PARTIAL=1 --time-limit 400 --fault fs-error-permille=3"
+F3="--env FJ_N=1000 --buggify --env FJ_LOG=1 --env FJ_WIPE_PARTIAL=1 --config $("$PATINA_CFG" time-limit=400) --fault fs-error-permille=3"
 # sw NAME ARGS...: one sweep into $RUNS/NAME (its text in NAME.txt).
 sw() {
     n=$1; shift

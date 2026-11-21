@@ -61,14 +61,26 @@ rc=0
 [ "$rc" = 2 ] || die "--types nosuch: exit $rc"
 
 # A sweep's cut log: its first and last records, a `cut` line between; a pruned run: no stream.
-"$PATINA" sweep --seeds 1..2 --log-limit 12 --out cut -- "$churn" 100000000 >cut.txt 2>&1 || true
+"$PATINA" sweep --seeds 1..2 --config "$("$PATINA_CFG" log-limit=12)" --out cut -- "$churn" 100000000 >cut.txt 2>&1 || true
 d=$(ls -d cut/seed-* | sed -n 1p)
 [ -f "$d/inc-0/boundary.cut" ] || die "the cut sweep kept no cut log: $(tail -2 cut.txt)"
 "$PATINA" log events "$d" >cut.jsonl
-records=$(jq -s 'map(select(.type | IN("header", "inc", "cut", "op") | not)) | length' cut.jsonl)
-want=$(jq '.head + .records - .tail_from' "$d/inc-0/boundary.cut")
-[ "$(jq -s 'map(select(.type == "cut")) | length' cut.jsonl)" = 1 ] && [ "$records" = "$want" ] ||
-    die "cut log: $records events from records, want $want"
+# Its events are the whole log's first and last, as the replay (which writes the whole log)
+# gives them: the last head event may have lost the strings that follow its record.
+"$PATINA" replay "$d" --out cut-replay >cut-replay.txt 2>&1 || true
+grep -q '^identical' cut-replay.txt || die "replay of the cut run: $(head -2 cut-replay.txt)"
+"$PATINA" log events cut-replay >whole.jsonl
+python3 -I - cut.jsonl whole.jsonl <<'PY' || die "cut log: its events are not the whole log's head and tail"
+import json, sys
+cut, whole = ([json.loads(l) for l in open(f)] for f in sys.argv[1:])
+assert [e["type"] for e in cut].count("cut") == 1, "one cut line"
+i = [e["type"] for e in cut].index("cut")
+rec = lambda l: [{k: v for k, v in e.items() if k != "seq"} for e in l if e["type"] not in ("header", "inc", "cut", "op")]
+head, tail, all_ = rec(cut[:i]), rec(cut[i + 1:]), rec(whole)
+assert head and tail and len(head) + len(tail) < len(all_), (len(head), len(tail), len(all_))
+assert head[:-1] == all_[:len(head) - 1] and head[-1]["type"] == all_[len(head) - 1]["type"], "head"
+assert tail == all_[len(all_) - len(tail):], "tail"
+PY
 "$PATINA" sweep --seeds 1..2 --out pruned -- "$kv" fixed >pruned.txt 2>&1 || die "pruned sweep: $(tail -2 pruned.txt)"
 rc=0
 "$PATINA" log events pruned/seed-1 >pruned.jsonl 2>pruned.err || rc=$?

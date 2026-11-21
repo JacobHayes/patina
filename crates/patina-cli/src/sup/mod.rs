@@ -28,7 +28,7 @@ fn record_kind(r: &Rec) -> String {
         Some(RecKind::SignalDelivery) => "signal-delivery records".into(),
         Some(RecKind::InsnEmulation) => "instruction-emulation records".into(),
         Some(RecKind::Injected) => "injected-fault records".into(),
-        Some(RecKind::Str) => "string records (SDK labels, --log-paths)".into(),
+        Some(RecKind::Str) => "string records (SDK labels, paths)".into(),
         _ => "other records".into(),
     }
 }
@@ -51,7 +51,7 @@ fn tmpfs_hint(ctl: &Ctl, e: &str) -> String {
         return String::new();
     }
     format!(
-        " (each sandbox tmpfs holds {} bytes: --tmpfs-bytes, [run] tmpfs-bytes)",
+        " (each sandbox tmpfs holds {} bytes: [run] disk-mb)",
         ctl.config.tmpfs_bytes
     )
 }
@@ -253,7 +253,7 @@ impl Sup {
         seq
     }
 
-    /// The run's logs reached `--log-limit`: what they hold, and which records filled them.
+    /// The run's logs reached `[run] log-limit`: what they hold, and which records filled them.
     fn log_limit_verdict(&mut self) -> Verdict {
         let c = self.ctl;
         let all = c.log_len.load(Relaxed);
@@ -297,9 +297,9 @@ impl Sup {
         Verdict::new(
             "log-limit",
             format!(
-                "{} of boundary log ({n} records{top}){ops} reached --log-limit: the program \
+                "{} of boundary log ({n} records{top}){ops} reached [run] log-limit: the program \
                  had not finished, likely a livelock under this schedule (a run that is only \
-                 long, or writes that much to the work tree, needs a higher --log-limit)",
+                 long, or writes that much to the work tree, needs a higher [run] log-limit)",
                 crate::report::bytes(len)
             ),
         )
@@ -360,7 +360,7 @@ impl Sup {
             self.finish(Verdict::new(
                 "liveness",
                 format!(
-                    "virtual time passed --time-limit ({} s); {running}parked: {}",
+                    "virtual time passed [run] time-limit ({} s); {running}parked: {}",
                     cfg.vtime_limit_ns / 1_000_000_000,
                     self.parked_detail()
                 ),

@@ -1,4 +1,4 @@
-# 4. F3 (flush worker dies on EIO, writers sleep forever). --time-limit 400: the outcome is
+# 4. F3 (flush worker dies on EIO, writers sleep forever). time-limit 400: the outcome is
 # liveness, the parked thread is in a sleep whose deadline is within 100 ms of the limit (the
 # write-stall loop's 100 ms sleep); the 400 virtual seconds are many times this script's
 # budget, so a real wait fails it. Seeds 1-100 are searched (a few
@@ -8,7 +8,7 @@
 #@ tier=area budget=30 slots=4
 . "$(dirname "$0")/lib/common.inc"
 seeds=$(matches f3 'parked: .*wait=sleep deadline=' fjall-harness 1-100 -- --env FJ_N=1000 --buggify \
-    --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --time-limit 400 --fault fs-error-permille=3 --crash machine:2 \
+    --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --config "$("$PATINA_CFG" time-limit=400)" --fault fs-error-permille=3 --crash machine:2 \
     -- /guest/fjall-harness-debug)
 found=
 for s in $seeds; do

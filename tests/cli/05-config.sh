@@ -3,13 +3,13 @@
 #    An unknown key is refused, naming it.
 #@ tier=quick budget=5
 . "$(dirname "$0")/lib.inc"
-# The program, a mounted data directory, the configuration file, and an empty one that the
-# flags run names instead.
+# The program, a mounted data directory, the configuration file, and one with only the
+# settings no flag carries (cpus, time-limit) that the flags run names instead.
 d=$RUNS/same
 mkdir -p "$d/data"
 cp "$PATINA_GUESTS/hello-static" "$d/prog"
 echo hello >"$d/data/x"
-: >"$d/empty.toml"
+printf '[run]\ncpus = 3\ntime-limit = 500\n' >"$d/rest.toml"
 cat >"$d/patina.toml" <<'EOF'
 [run]
 cmd = ["./prog", "a"]
@@ -25,8 +25,8 @@ EOF
 st=0
 (cd "$d" && timeout 60 "$PATINA" run --seed 3 --out file) >"$RUNS/file.txt" 2>&1 || st=$?
 [ -f "$d/file/result.json" ] || die "file: no result.json ($(tail -2 "$RUNS/file.txt"))"
-(cd "$d" && timeout 60 "$PATINA" run --config empty.toml --out flags --seed 3 --cpus 3 --env CLI_TEST=1 \
-    --mount data:/data --time-limit 500 --timeout 50 --fault fs-error-permille=5 -- ./prog a) >"$RUNS/flags.txt" 2>&1 || true
+(cd "$d" && timeout 60 "$PATINA" run --config rest.toml --out flags --seed 3 --env CLI_TEST=1 \
+    --mount data:/data --timeout 50 --fault fs-error-permille=5 -- ./prog a) >"$RUNS/flags.txt" 2>&1 || true
 [ -f "$d/flags/result.json" ] || die "flags: no result.json ($(tail -2 "$RUNS/flags.txt"))"
 python3 -I - "$d" <<'PY' || die "run.json differs"
 import json, sys

@@ -894,7 +894,7 @@ impl<W: Write> Export<'_, W> {
                     &proto::table::Class::code_name(r.class).to_ascii_lowercase(),
                 );
                 l.hex("in", r.in_hash).hex("out", r.out_hash);
-                // With --log-paths: the call's strings.
+                // The call's strings.
                 let strs = recs.strings(r)?;
                 if let Some(s) = strs.first() {
                     l.num("pid", s.pid);

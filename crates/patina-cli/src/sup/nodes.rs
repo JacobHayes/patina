@@ -264,7 +264,7 @@ impl Sup {
 
     /// Node `node`'s disk starts (the first process of its first boot, or of its first after a
     /// machine crash, `pid`, said `Hello`, before it runs): its
-    /// work tree is reached and its base records written, exempt from `--log-limit` as the
+    /// work tree is reached and its base records written, exempt from `[run] log-limit` as the
     /// driver's are. After a machine crash (`boot` above 0) the times its tree carries go into
     /// the virtual time table first (`crash::seed_times`).
     fn disk_start(&mut self, node: usize, pid: i32, boot: u64) {

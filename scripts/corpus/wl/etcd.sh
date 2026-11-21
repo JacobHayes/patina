@@ -1,7 +1,7 @@
 #!/bin/bash
 # etcd: a 3-member cluster on loopback; etcdctl put/get/txn, member list, a leader-kill and recovery read.
 # programs: conda-etcd
-# flags: --tmpfs-bytes 1073741824
+# run: disk-mb = 1024
 set -euo pipefail; shopt -s inherit_errexit
 B=$PROGS/conda-etcd/3.7.3/bin
 cl=n1=http://127.0.0.1:41101,n2=http://127.0.0.1:41102,n3=http://127.0.0.1:41103

@@ -520,7 +520,7 @@ pub struct Start<'a> {
     pub faults: proto::faults::FaultCfg,
     /// Wall time after which the run ends `timeout` (`--timeout`).
     pub deadline: std::time::Instant,
-    /// Bytes the earlier incarnations' logs hold (they count against `--log-limit`).
+    /// Bytes the earlier incarnations' logs hold (they count against `[run] log-limit`).
     pub log_used: u64,
     /// System V shared memory a process crash carries to the next incarnation (`FD_SHM`):
     /// one memfd for the run.
@@ -924,7 +924,8 @@ pub fn run_incarnation(
     cfg.compute_walk = o.plan.compute_walk;
     cfg.compute_charge_ns = proto::compute::CHARGE_NS;
     cfg.log_limit = (c.log_limit << 20).saturating_sub(start.log_used);
-    cfg.log_paths = c.log_paths as u64;
+    // Every call's path and argument strings are in the log, for checkers and `explain`.
+    cfg.log_paths = 1;
     cfg.observe = c.observe as u64;
     cfg.debug = c.debug_at.unwrap_or(0);
     if c.pause_points {

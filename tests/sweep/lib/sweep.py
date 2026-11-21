@@ -24,6 +24,11 @@ def patina(*args, timeout=60):
     return p.returncode, p.stdout, p.stderr
 
 
+def cfg(*keys):
+    """A patina.toml holding these KEY=VALUE settings (tests/cfg): its path."""
+    return subprocess.run([os.environ["PATINA_CFG"], *keys], capture_output=True, text=True, check=True).stdout.strip()
+
+
 def sweep(name, *args):
     """`patina sweep --out RUNS/name ARGS`: (exit status, report.json, text output, both
     streams)."""
@@ -137,10 +142,10 @@ st, rep, text = sweep("never", "--seeds", "1..4", "--", GUEST, "never")
 if st != 2 or rep["sdk"]["sometimes_never_held"] != ["rare-state"]:
     die(f"a sometimes that never holds: exit {st} {rep['sdk']}\n{text}")
 st, _ = report("--allow-unmet", "rare-state", os.path.join(RUNS, "never"))
-cfg = os.path.join(RUNS, "allow.toml")
-with open(cfg, "w") as fh:
+allow = os.path.join(RUNS, "allow.toml")
+with open(allow, "w") as fh:
     fh.write('[sdk]\nallow-unmet = ["rare-state"]\n')
-st2, _, _ = sweep("never-allowed", "--seeds", "1..4", "--config", cfg, "--", GUEST, "never")
+st2, _, _ = sweep("never-allowed", "--seeds", "1..4", "--config", allow, "--", GUEST, "never")
 if (st, st2) != (0, 0):
     die(f"allow-unmet: report exit {st}, sweep with [sdk] allow-unmet exit {st2}")
 print("bug-free: exit 0; unmet sometimes: exit 2, allowed (flag or config): exit 0")
@@ -173,10 +178,10 @@ if "--ok-exit 3:mem-error" not in rr:
 kf = os.path.join(RUNS, "okx-known.txt")
 with open(kf, "w") as fh:
     fh.write("noted failure exit:*\nnear failure exit: *exit N\n")
-cfg = os.path.join(RUNS, "okx.toml")
-with open(cfg, "w") as fh:
+okx_toml = os.path.join(RUNS, "okx.toml")
+with open(okx_toml, "w") as fh:
     fh.write(f'[run]\nok-exit = ["3:mem-error"]\n[sweep]\nknown = "okx-known.txt"\n')
-st3, rep3, text3 = sweep("okx-toml", "--config", cfg, *okx)
+st3, rep3, text3 = sweep("okx-toml", "--config", okx_toml, *okx)
 head = text3.split("patina sweep: ", 1)[-1].split("\n", 1)[0]
 near = [e.get("near") for e in rep3["known"]["entries"]]
 if st3 != 0 or rep3["known"]["findings"] != rep2["findings"] or " 0 findings" not in f" {head}" or near != [None, rep2["groups"][0]["signature"]]:
@@ -289,13 +294,13 @@ lim = []
 for i in range(2):
     d = os.path.join(RUNS, f"livelock-{i}")
     # lint-allow: seed — the livelock mode never finishes, whatever the seed
-    patina("run", "--seed", "1", "--log-limit", "1", "--out", d, "--", GUEST, "livelock")
+    patina("run", "--seed", "1", "--config", cfg("log-limit=1"), "--out", d, "--", GUEST, "livelock")
     lim.append(result(d))
     if os.path.getsize(os.path.join(d, "inc-0", "boundary.log")) > 1 << 20:
-        die(f"--log-limit 1: the log holds {os.path.getsize(os.path.join(d, 'inc-0', 'boundary.log'))} bytes")
+        die(f"log-limit 1: the log holds {os.path.getsize(os.path.join(d, 'inc-0', 'boundary.log'))} bytes")
 if [(r["outcome"], r["stop"]) for r in lim] != [("liveness", "log-limit")] * 2 or lim[0]["digest"] != lim[1]["digest"]:
     die(f"livelock: {[(r['outcome'], r['stop'], r['digest']) for r in lim]}")
-st, rep, text = sweep("livelock", "--seeds", "1..4", "--log-limit", "8", "--", GUEST, "livelock")
+st, rep, text = sweep("livelock", "--seeds", "1..4", "--config", cfg("log-limit=8"), "--", GUEST, "livelock")
 kept = sum(os.path.getsize(os.path.join(p, f)) for p, _, fs in os.walk(os.path.join(RUNS, "livelock")) for f in fs)
 if st != 1 or [g["stop"] for g in rep["groups"]] != ["log-limit"] or kept > 4 * (5 << 19):
     die(f"livelock sweep: {[(g['signature'], g['count']) for g in rep['groups']]}, {kept} bytes kept\n{text}")
@@ -307,7 +312,7 @@ if len(seeds) < 4 or whole != seeds[:3]:
 st, so, se = patina("replay", "--format", "json", os.path.join(RUNS, "livelock", "seed-2"))
 if json.loads(so or "{}").get("stop") != "log-limit":
     die(f"replay of a cut log: exit {st} {so[:300]} {se[-300:]}")
-print(f"livelock: log-limit at digest {lim[0]['digest']} twice; a sweep of 4 at --log-limit 8 keeps {kept} bytes; a cut run replays")
+print(f"livelock: log-limit at digest {lim[0]['digest']} twice; a sweep of 4 at log-limit 8 keeps {kept} bytes; a cut run replays")
 
 # Interrupted: the running children end, every remaining directory holds a finished run,
 # and the report covers them.

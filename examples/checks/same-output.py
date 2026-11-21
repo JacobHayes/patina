@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""same-output.py REF [RUN]: `same-output` in Python, a checker that runs either way: with
-`--check`, a process per run (RUN is its last argument); with `--check-serve`, one process per
-sweep job that reads a line per run and answers one (the loop at the end). Interpreter start-up
-is most of a small checker's cost: serving pays it once."""
+"""same-output.py REF [RUN]: `same-output` in Python, a checker that runs either way: a process
+per run (RUN is its last argument), or, since this file names PATINA_CHECK_SERVE, one process
+per sweep job that reads a line per run and answers one (the loop at the end). Interpreter
+start-up is most of a small checker's cost: serving pays it once."""
 import filecmp
 import json
 import os

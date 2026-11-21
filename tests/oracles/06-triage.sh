@@ -10,7 +10,7 @@
 #      the report names two checkers.
 #    - A sweep resumed with its checker's file changed judges every run again from its logs
 #      (--keep checked: none runs again), and a verdict left pending is judged again.
-#    - --check-serve judges a recheck as --check does.
+#    - A checker that serves judges a recheck as one run per run does.
 #    - same-output refuses a reference made from another work tree (an error, not a finding);
 #      --relax compares anyway.
 #@ tier=area budget=30 slots=4
@@ -93,12 +93,12 @@ for r in sh/seed-*/*; do
 done
 echo "recheck: the table's entry turns 2 findings into $(jq -c .check.not_judged sh/report.json); digests, logs and own outcomes unchanged"
 
-# --check-serve judges as --check does.
+# A checker that serves (same-output.py) judges as one run per run does.
 "$PATINA" recheck --check "$root/examples/checks/same-output ref" sh >/dev/null 2>&1 || true
 verdicts() { for r in sh/seed-*/*; do jq -r '"\(.check.verdict) \(.check.label)"' "$r/result.json"; done | paste -sd,; }
 by_run=$(verdicts)
-"$PATINA" recheck --check-serve "$root/examples/checks/same-output.py ref" sh >/dev/null 2>&1 || true
-[ "$(verdicts)" = "$by_run" ] || die "--check-serve recheck: $(verdicts); --check: $by_run"
+"$PATINA" recheck --check "$root/examples/checks/same-output.py ref" sh >/dev/null 2>&1 || true
+[ "$(verdicts)" = "$by_run" ] || die "a serving recheck: $(verdicts); per run: $by_run"
 
 # Pruned runs: a recheck names them and leaves them; the report says two checkers judged.
 mv chk/expected.txt chk/expected.off

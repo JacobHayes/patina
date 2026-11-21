@@ -54,7 +54,7 @@ pub const STR_BYTES: usize = 64;
 pub const STR_LABEL: u8 = 1;
 /// An SDK call's text (a `mark`'s; an assertion's detail is in `result.json`, not here).
 pub const STR_TEXT: u8 = 2;
-/// With `--log-paths` (`Config::log_paths`): a call's first C-string argument as the program
+/// With `Config::log_paths` (every run): a call's first C-string argument as the program
 /// passed it (a path; an attribute's or a memfd's name), and its second (`rename`'s new path).
 pub const STR_PATH: u8 = 3;
 pub const STR_PATH2: u8 = 4;

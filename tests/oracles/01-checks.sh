@@ -24,8 +24,8 @@
 #    rename and b/y after it, under --work's guest location; one line per trap record; two runs
 #    of one seed give the same bytes. examples/checks/confined and synced-before-mark, which
 #    read it, find their planted bugs over a seed range through --check and pass the fixes
-#    (marklog fixed marks progress before its fsync: only the `ack` marks are judged). With
-#    --log-paths, an open through a symlink has its path as passed and the path it walked, the
+#    (marklog fixed marks progress before its fsync: only the `ack` marks are judged). An open
+#    through a symlink has its path as passed and the path it walked, the
 #    same in five runs under cpu and aslr variation.
 # 6. `patina recheck`: the same checker leaves each kept run's result.json byte for byte; a
 #    keyed finding (LABEL [KEY]: detail) is grouped by its key, and shown as written.
@@ -62,7 +62,7 @@ is() {
 }
 
 # Beside the rest: a checker still running after --timeout.
-(run hang --check-timeout 2 --check chk/hang -- "$hello" >hang.rc) &
+(run hang --config "$("$PATINA_CFG" check-timeout=2)" --check chk/hang -- "$hello" >hang.rc) &
 hang=$!
 
 # The kvlog sweep, and kvlog fixed.
@@ -111,7 +111,7 @@ got="$rc $(jq -r '"\(.outcome) \(.stop)"' path-replay.json)"
 # Runs that did not end ok do not start the checker; one that did, does.
 is failed "$(run failed --check chk/mark -- /bin/sh -c 'exit 3')" 1 failure exit
 is crashed "$(run crashed --check chk/mark -- /usr/bin/python3 -I -c 'import os; os.abort()')" 1 crash signal
-is stuck "$(run stuck --time-limit 100 --check chk/mark -- "$PATINA_GUESTS/liveness")" 1 liveness time-limit
+is stuck "$(run stuck --config $("$PATINA_CFG" time-limit=100) --check chk/mark -- "$PATINA_GUESTS/liveness")" 1 liveness time-limit
 [ ! -e chk/ran ] || die "the checker ran after a run that did not end ok"
 is marked "$(run marked --check chk/mark -- "$hello")" 0 ok exit
 [ -e chk/ran ] || die "the checker did not run after an ok run"
@@ -237,7 +237,7 @@ files=$PATINA_GUESTS/oracles-files marklog=$PATINA_GUESTS/oracles-marklog
 mkdir app
 (
     for v in other data; do
-        "$PATINA" sweep --seeds 1..4 -j 2 --out conf-$v --check "$root/examples/checks/confined /work/data" -- "$files" $v >conf-$v.txt 2>&1 || true
+        "$PATINA" sweep --seeds 1..4 -j 2 --out conf-$v --check "$root/examples/checks/confined -r /etc -r /usr /work/data" -- "$files" $v >conf-$v.txt 2>&1 || true
     done
     for v in bug fixed; do
         "$PATINA" sweep --seeds 1..4 -j 2 --out mark-$v --check "$root/examples/checks/synced-before-mark /work/data.log ack" -- "$marklog" $v >mark-$v.txt 2>&1 || true
@@ -254,10 +254,10 @@ traps=$("$PATINA" log dump tour/inc-0/boundary.log | awk '$2 == "trap"' | wc -l)
 calls=$(jq -s 'map(select(.type | IN("call", "sdk", "mark"))) | length' tour.jsonl)
 [ "$calls" = "$traps" ] || die "tour: $calls calls for $traps trap records"
 rc=0
-"$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --log-paths --out lp -- "$PATINA_GUESTS/oracles-paths" tour >lp.txt 2>&1 || rc=$? # lint-allow: seed — verify repeats one seed; any seed shows it
-[ "$rc" = 0 ] && grep -q '^identical: 5 runs' lp.txt || die "verify --log-paths: $(tail -3 lp.txt)"
+"$PATINA" verify --seed 2 --runs 5 --vary cpu,aslr --out lp -- "$PATINA_GUESTS/oracles-paths" tour >lp.txt 2>&1 || rc=$? # lint-allow: seed — verify repeats one seed; any seed shows it
+[ "$rc" = 0 ] && grep -q '^identical: 5 runs' lp.txt || die "verify, paths: $(tail -3 lp.txt)"
 lp=$("$PATINA" log events lp/run-0 --types call | jq -r 'select(.path == "link/a.txt") | .resolved')
-[ "$lp" = /work/data/a.txt ] || die "--log-paths: link/a.txt resolved to '$lp'"
+[ "$lp" = /work/data/a.txt ] || die "paths: link/a.txt resolved to '$lp'"
 app=$("$PATINA" log events app --types op | jq -r 'select(.type == "op") | .path' | sort -u | paste -sd,)
 [ "$app" = "/var/lib/app/a,/var/lib/app/a/x,/var/lib/app/b,/var/lib/app/b/y" ] || die "--work DIR:/var/lib/app: paths $app"
 wait "$sweeps"
@@ -275,24 +275,25 @@ found mark-bug "violation check: ack-before-fsync: ack N (seq N)"
 found mark-fixed none
 
 # 5. A serving checker, case settings, faults in known patterns, the report's size.
-# chk/calc as a server (`--check-serve`): a line per run, its environment set from the line.
-printf '%s\n' '#!/bin/sh' 'while read -r l; do' \
+# chk/calc as a server (its file names PATINA_CHECK_SERVE): a line per run, its environment
+# set from the line.
+printf '%s\n' '#!/bin/sh' '# serves: PATINA_CHECK_SERVE' 'while read -r l; do' \
   '  eval "$(printf "%s" "$l" | jq -r ".env | to_entries[] | \"export \(.key)=\(.value | @sh)\"")"' \
   '  out=$("$(dirname "$0")/calc" "$(printf "%s" "$l" | jq -r .rundir)") && echo pass || echo "fail $out"' \
   'done' >chk/calc-serve
-printf '#!/bin/sh\nwhile read -r l; do echo maybe; done\n' >chk/serve-garbage
-printf '#!/bin/sh\nexit 0\n' >chk/serve-gone
+printf '#!/bin/sh\n# PATINA_CHECK_SERVE\nwhile read -r l; do echo maybe; done\n' >chk/serve-garbage
+printf '#!/bin/sh\n# PATINA_CHECK_SERVE\nexit 0\n' >chk/serve-gone
 chmod +x chk/calc-serve chk/serve-garbage chk/serve-gone
 # calcs NAME FLAGS: the calc sweep with a checker given in FLAGS
 calcs() { n=$1; shift; rc=0; "$PATINA" sweep --seeds 1..2 -j 4 --cases calc.txt --mount "$RUNS/calc:/calc" --out "$n" "$@" >"$n.txt" 2>&1 || rc=$?; echo "$rc"; }
-rc=$(calcs calcs-serve --known known2 --check-serve chk/calc-serve)
+rc=$(calcs calcs-serve --known known2 --check chk/calc-serve)
 groups() { jq -c '[.groups[] | [.signature, (.cases | length), .count]]' "$1/report.json"; }
-[ "$rc" = 0 ] || die "calc with --check-serve: exit $rc"
+[ "$rc" = 0 ] || die "calc served: exit $rc"
 lhs=$(groups calcs-serve); rhs=$(groups calcs)
-[ "$lhs" = "$rhs" ] || die "calc with --check-serve: groups $lhs, --check gave $rhs"
+[ "$lhs" = "$rhs" ] || die "calc served: groups $lhs, --check gave $rhs"
 # A server that answers anything but a verdict, or ends, judges nothing: every run is an error.
 for s in garbage gone; do
-  rc=$(calcs calcs-$s --check-serve chk/serve-$s)
+  rc=$(calcs calcs-$s --check chk/serve-$s)
   [ "$rc" = 2 ] && [ "$(jq '.check.errors' calcs-$s/report.json)" = 18 ] && [ "$(jq '.check.passed' calcs-$s/report.json)" = 0 ] || die "a server that $s: exit $rc: $(jq -c .check calcs-$s/report.json)"
 done
 # The health note: every judged run passed and no !ID entry shows the check can fail.

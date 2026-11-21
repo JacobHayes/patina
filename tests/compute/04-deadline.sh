@@ -4,7 +4,7 @@
 #     at the seed's gap (10 ms: a small gap switches often) and at compute-gap=0 (20 ms;
 #     deadlines do not depend on switches), one digest twice each; seed 1 (10 ms) gives one
 #     digest under verify --runs 3 --vary cpu,aslr;
-#  b. an endless loop under --time-limit 1 ends liveness, one digest twice (it sleeps 990 ms
+#  b. an endless loop under time-limit 1 ends liveness, one digest twice (it sleeps 990 ms
 #     first: 10 ms of events, not a second's);
 #  c. thread and process CPU time after a loop of N iterations (at least N events) are >= N ns.
 #@ tier=quick budget=10 slots=6
@@ -19,7 +19,7 @@ dl() { # OUT SEED MS [options]: one run of `deadline deadline MS`
 # Six at a time, the slowest first.
 for k in 1 2; do
     dl "$o/d-3-$k" 3 10 & dl "$o/d-2-$k" 2 10 &
-    prun "$o/e-$k" 1 --time-limit 1 --timeout 20 -- /guest/compute/deadline endless 990 &
+    prun "$o/e-$k" 1 --config "$("$PATINA_CFG" time-limit=1)" --timeout 20 -- /guest/compute/deadline endless 990 &
 done
 wait
 for s in 1 2 3; do
@@ -57,7 +57,7 @@ for s in (1, 2, 3):
 for k in (1, 2):
     e = r(f"e-{k}")
     if e["outcome"] != "liveness":
-        bad.append(f"b. endless loop, --time-limit 1: {e['outcome']}/{e.get('stop')}: {e.get('message')}")
+        bad.append(f"b. endless loop, time-limit 1: {e['outcome']}/{e.get('stop')}: {e.get('message')}")
 if r("e-1")["digest"] != r("e-2")["digest"]:
     bad.append("b. endless loop: two runs differ")
 c = re.search(r"thread_ns=(\d+) process_ns=(\d+)", out("cpu"))
@@ -69,5 +69,5 @@ PY
 [ -z "$fails" ] || die "$fails"
 grep -q '^identical: 3 runs' "$o/verify.txt" || die "a. deadline seed 1 under --vary cpu,aslr: $(tail -3 "$o/verify.txt")"
 echo "a. timer in a loop: handler at $(sed -n 's/.*handler_ns=\([0-9]*\).*/\1/p' "$o/z-1-1/inc-0/stdout") ns for 20 ms (seed 1, compute-gap=0); seeds 1-3 ok at the seed's gap and at 0, one digest twice; seed 1 identical under --vary cpu,aslr"
-echo "b. endless loop, --time-limit 1: liveness after $(field "$o/e-1/result.json" compute.events) events, one digest twice"
+echo "b. endless loop, time-limit 1: liveness after $(field "$o/e-1/result.json" compute.events) events, one digest twice"
 echo "c. CPU time after $N iterations: $(sed -n 's/^cpu [0-9]* //p' "$o/cpu/inc-0/stdout")"

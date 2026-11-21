@@ -15,7 +15,7 @@ for a program only with an AppArmor profile, installed once as root (below).
 Changes in 0.18: `patina explain RUNDIR` tells a run as a short story and names the event to
 stop at, and `patina debug RUNDIR` stops a replay just before it with gdb attached ([reading a
 failing run](docs/GUIDE.md#reading-a-failing-run)); `sweep --branch-max` samples crash points
-and `--branch-pairs` crashes a second node after each first crash; `--crash
+and `[sweep] crash-pairs` crashes a second node after each first crash; `--crash
 process-at:N@NODE`; the descriptor numbers a program sees no longer depend on host timing.
 Run directories from 0.17 are refused. In 0.17: each node is a machine (its own disk, machine
 crashes, faults, pauses and clock; the `cluster` preset); TCP keepalive on the virtual wire.
@@ -183,7 +183,7 @@ Every run ends in one outcome; the exit status of `patina` follows from it.
 |---|---|---|
 | `ok` | 0 | the program exited 0, or with a status `--ok-exit` names (stop `ok-exit`; `N:CLASS` only where that fault class injected), and broke no invariant |
 | `violation` | 1 | an invariant failed: an SDK `always`, or the `--check` command |
-| `liveness` | 1 | every thread blocked, the virtual time limit passed, or the program never finished and filled the log to `--log-limit` (stop `log-limit`) |
+| `liveness` | 1 | every thread blocked, the virtual time limit passed, or the program never finished and filled the log to `[run] log-limit` (stop `log-limit`) |
 | `failure` | 1 | the program exited nonzero, with a status `--ok-exit` does not name |
 | `crash` | 1 | the program died on a signal |
 | `unsupported` | 2 | the program did something Patina does not model (stop `exec`: an image the kernel would run that Patina does not load, such as a 32-bit program); the message names it |

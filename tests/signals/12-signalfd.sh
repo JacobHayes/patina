@@ -10,7 +10,7 @@ o=$RUNS/12-signalfd
 mkdir -p "$o"
 echo "/guest/sig-fd" >"$o/cases"
 st=0
-timeout 300 "$PATINA" sweep --seeds 1..20 --cases "$o/cases" -j 4 --time-limit 60 --keep fail \
+timeout 300 "$PATINA" sweep --seeds 1..20 --cases "$o/cases" -j 4 --config "$("$PATINA_CFG" time-limit=60)" --keep fail \
     --out "$o/sweep" --mount "$PATINA_GUESTS":/guest:copy >"$o/sweep.txt" 2>&1 || st=$?
 outcomes=$(python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["outcomes"], sort_keys=True))' "$o/sweep/report.json")
 echo "sig-fd seeds 1-20: $outcomes (sweep exit $st)"

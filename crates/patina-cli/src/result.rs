@@ -39,7 +39,7 @@ pub struct RunEnd {
     pub net: [u64; NET_FIELDS],
     /// AF_UNIX sockets sent in SCM_RIGHTS, summed over incarnations.
     pub unix_sockets: u64,
-    /// The size of each sandbox tmpfs (`tmpfs-bytes`) and the file calls a full one answered
+    /// The size of each sandbox tmpfs (`[run] disk-mb`) and the file calls a full one answered
     /// `ENOSPC`, summed over incarnations.
     pub tmpfs: [u64; 2],
     /// The most bytes the shadow store held (`proto::oplog::Shadows`; the largest over
@@ -1234,7 +1234,7 @@ pub fn tmpfs_line(r: &Value) -> Option<String> {
     let n = r["tmpfs"]["enospc"].as_u64().filter(|&n| n > 0)?;
     let b = r["tmpfs"]["bytes"].as_u64().unwrap_or(0);
     Some(format!(
-        "sandbox tmpfs full: {n} file call{} answered ENOSPC; /work, /tmp and copied mounts hold {} each (--tmpfs-bytes, [run] tmpfs-bytes)",
+        "sandbox tmpfs full: {n} file call{} answered ENOSPC; /work, /tmp and copied mounts hold {} each ([run] disk-mb)",
         if n == 1 { "" } else { "s" },
         if b.is_multiple_of(1 << 20) {
             format!("{} MiB", b >> 20)

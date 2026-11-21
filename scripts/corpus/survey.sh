@@ -15,7 +15,8 @@
 # PATINA, the patina under test (default `patina`); BASE, for the base phase.
 #
 # Workload headers: `# programs: DIR...` (each $PROGS/DIR mounted read-only at its own path),
-# `# flags: ...` (more patina flags), `# seeds: N`, `# fseeds: N`.
+# `# flags: ...` (more patina flags), `# run: KEY = VALUE` (a `[run]` setting, written to the
+# patina.toml every phase reads), `# seeds: N`, `# fseeds: N`.
 set -euo pipefail; shopt -s inherit_errexit
 here=$(cd "$(dirname "$0")" && pwd)
 name=${1:?usage: survey.sh NAME [PHASE...]}; shift
@@ -35,6 +36,8 @@ read -r -a progs <<<"$(hdr programs)"
 for d in "${progs[@]}"; do opts+=(--mount "$PROGS/$d:$PROGS/$d"); done
 read -r -a flags <<<"$(hdr flags)"
 opts+=("${flags[@]}")
+run=$(hdr run)
+[ -z "$run" ] || printf '[run]\n%s\n' "$run" >patina.toml
 seeds=$(hdr seeds); seeds=${seeds:-20}
 fseeds=$(hdr fseeds); fseeds=${fseeds:-10}
 sum=$out/summary.txt

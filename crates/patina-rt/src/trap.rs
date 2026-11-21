@@ -21,7 +21,7 @@ pub trait Call {
     /// and the supervisor are told (never a runtime address).
     fn guest_args(&self) -> [u64; 6];
     /// The call's resolved paths: the buffers a handler is given in place of the guest's
-    /// paths, and what `--log-paths` records (`resolve::prepare`).
+    /// paths, and what `log_paths` records (`resolve::prepare`).
     fn paths(&mut self) -> &mut Paths;
     fn paths_ref(&self) -> &Paths;
 }

@@ -6,7 +6,7 @@
  *   vfork     a child stores, vforks, and its vfork child stores too and kills it
  *   violation the main process stores and fails an `always`
  *   msync     the main process stores, msyncs, and fails an `always`
- *   hang      the main process stores and sleeps (run with --time-limit)
+ *   hang      the main process stores and sleeps (run with [run] time-limit)
  *   unmap     the main process stores, unmaps and exits
  *   exit      the main process stores and exits with the mapping still mapped
  *   fixed     the main process stores and maps anonymous memory over the mapping (MAP_FIXED)

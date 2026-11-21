@@ -52,12 +52,13 @@ pub struct Config {
     /// (`proto::compute::walk`; 0: a switch is taken at its site).
     pub compute_walk: u64,
     /// The most bytes this incarnation's logs (the boundary log and the operation log) may
-    /// hold (`--log-limit`, less what earlier incarnations wrote). The append that would pass
+    /// hold (`[run] log-limit`, less what earlier incarnations wrote). The append that would pass
     /// it ends the run `log-limit` instead: a count of records, never of wall time, so a seed
     /// ends at the same record in every run.
     pub log_limit: u64,
-    /// `--log-paths`: each call's path arguments (as passed, and the path the call walks) and
-    /// `execve`'s arguments follow its trap record in clear (`rec::STR_PATH` ...). 0: off.
+    /// Each call's path arguments (as passed, and the path the call walks) and `execve`'s
+    /// arguments follow its trap record in clear (`rec::STR_PATH` ...). `patina run` always
+    /// sets it; 0: off.
     pub log_paths: u64,
     /// `patina explain`'s replay: each data call's first bytes, its descriptor and peer follow
     /// its records as an observation (`rec::RecKind::Observe`), outside the digest and the log

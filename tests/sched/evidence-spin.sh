@@ -8,7 +8,7 @@
 #  b. W1-W9 with their fault settings, seeds 1-SPIN_SEEDS, default settings: outcomes and
 #     compute-stalls per workload. W8's `sockets all` fails on its injected resets (the guest
 #     does not retry); any compute-stall fails the script.
-#  c. Cost of pause points: W1-W9, seeds 1-5, faults off, --cpus 4, one run at a time pinned
+#  c. Cost of pause points: W1-W9, seeds 1-5, faults off, cpus 4, one run at a time pinned
 #     to one core: median wall_ms with pause points off and on, and of a build without them
 #     when PATINA_BASE names one (its scanner does not look for `pause`).
 #@ tier=evidence budget=1800 slots=8
@@ -95,7 +95,7 @@ with ThreadPoolExecutor(8) as ex:
 
 import lib
 BASE = os.environ.get("PATINA_BASE")
-log("== c. cost of pause points: W1-W9, seeds 1-5, faults off, --cpus 4, pinned, serial; "
+log("== c. cost of pause points: W1-W9, seeds 1-5, faults off, cpus 4, pinned, serial; "
     + ("base: " + BASE if BASE else "no base build (PATINA_BASE)"))
 for w in ORDER:
     g, cmd, fo, extra = WL[w]
@@ -105,7 +105,7 @@ for w in ORDER:
             row.append(f"{name} -")
             continue
         cur, lib.PATINA = lib.PATINA, patina
-        rs = [patina_run(f"{OUT}/c/{w}-{name}-{s}", cmd, guest=g, opts=["--seed", str(s), "--cpus=4"] + keys + flags(extra))
+        rs = [patina_run(f"{OUT}/c/{w}-{name}-{s}", cmd, guest=g, opts=["--seed", str(s), "cpus=4"] + keys + flags(extra))
               for s in range(1, 6)]
         lib.PATINA = cur
         ok = [o for o in rs if o["outcome"] == "ok"]

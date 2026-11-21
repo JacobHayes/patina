@@ -8,15 +8,15 @@ use crate::faults;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// The CPU count a guest is told it has when `--cpus` is not given: a fixed number, not the
+/// The CPU count a guest is told it has when `[run] cpus` is not given: a fixed number, not the
 /// host's, so that a run (Go's GOMAXPROCS, thread pools sized from it) is the same on any host.
 /// Four: enough worker threads for the races of a small server, few enough that idle workers
 /// polling for work (Go's Ps, tokio's workers) do not dominate the schedule.
 pub const DEFAULT_CPUS: u64 = 4;
-/// The most `--cpus` can give: the guest's affinity mask is one word.
+/// The most `[run] cpus` can give: the guest's affinity mask is one word.
 pub const MAX_CPUS: u64 = 64;
 
-/// The MiB a run's logs may hold when `--log-limit` is not given. A run that has not ended by
+/// The MiB a run's logs may hold when `[run] log-limit` is not given. A run that has not ended by
 /// then is almost always a livelock (a loop of switches or calls that never finishes), and its
 /// log fills the disk quickly (hundreds of MB a second); a long, real run raises it.
 pub const DEFAULT_LOG_LIMIT_MIB: u64 = 1024;
@@ -78,11 +78,8 @@ pub struct Config {
     pub time_limit: u64,
     /// Wall seconds.
     pub timeout: u64,
-    /// MiB the run's logs may hold, every incarnation together (`--log-limit`).
+    /// MiB the run's logs may hold, every incarnation together (`[run] log-limit`).
     pub log_limit: u64,
-    /// Path and argument strings in the boundary log (`--log-paths`, `[run] log-paths`).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub log_paths: bool,
     /// `patina explain`'s replay: observations of data calls beside the log, outside the
     /// digest (`proto::ctl::Config::observe`). Never part of a run's settings or `run.json`.
     #[serde(skip)]
@@ -91,7 +88,7 @@ pub struct Config {
     /// (`proto::ctl::Config::debug`). Never part of a run's settings or `run.json`.
     #[serde(skip)]
     pub debug_at: Option<u64>,
-    /// Size of each sandbox tmpfs (`--tmpfs-bytes`, `[run] tmpfs-bytes`).
+    /// Size of each sandbox tmpfs in bytes (`[run] disk-mb`, in MiB).
     pub tmpfs_bytes: u64,
     /// Fault presets (`--faults`, `[faults] preset`).
     pub faults_preset: Vec<String>,
@@ -140,6 +137,14 @@ pub struct Config {
     /// of the run, so not in `run.json`.
     #[serde(skip)]
     pub known: Option<PathBuf>,
+    /// With `--branch` and nodes, the second crashes after each first one (`[sweep]
+    /// crash-pairs`): a setting of the sweep, not of a run.
+    #[serde(skip)]
+    pub crash_pairs: Option<usize>,
+    /// Wall seconds the checker may run (`[run] check-timeout`), set on the checker once it is
+    /// resolved.
+    #[serde(skip)]
+    pub check_timeout: Option<u64>,
     /// The case of a sweep's `--cases` run (set by the sweep), kept so that a replay or a
     /// rerun from `run.json` is the same case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -232,7 +237,6 @@ impl Default for Config {
             time_limit: 3600,
             timeout: 600,
             log_limit: DEFAULT_LOG_LIMIT_MIB,
-            log_paths: false,
             observe: false,
             debug_at: None,
             tmpfs_bytes: 256 << 20,
@@ -254,6 +258,8 @@ impl Default for Config {
             check: None,
             ok_exit: vec![],
             known: None,
+            crash_pairs: None,
+            check_timeout: None,
             case: None,
             nodes: vec![],
         }
@@ -809,8 +815,8 @@ fn range(v: &str, at: &str) -> Res<(u64, u64)> {
 /// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory,
 /// but `[run] cmd` and `[run] check`, commands, are relative to where patina is started), or
 /// take the whole configuration a run recorded when `path` is a `run.json`. Returns `[run]
-/// check` (or `check-serve`, true), resolved by the caller once flags are known.
-fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
+/// check`, resolved by the caller once flags are known.
+fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
     let name = path.display().to_string();
     if path.extension().is_some_and(|e| e == "json") {
         let run = crate::result::read_json(path)?;
@@ -854,10 +860,9 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 ("run", "time-limit") => c.time_limit = time_limit(int(v, &at)?, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
-                ("run", "log-paths") => c.log_paths = boolean(v, &at)?,
-                ("run", "tmpfs-bytes") => c.tmpfs_bytes = int(v, &at)?,
-                ("run", "check") => check = Some((string(v, &at)?, false)),
-                ("run", "check-serve") => check = Some((string(v, &at)?, true)),
+                ("run", "disk-mb") => c.tmpfs_bytes = int(v, &at)?.saturating_mul(1 << 20),
+                ("run", "check-timeout") => c.check_timeout = Some(int(v, &at)?),
+                ("run", "check") => check = Some(string(v, &at)?),
                 ("run", "ok-exit") if v.as_str() == Some("any") => c.ok_exit = ok_exit_any(),
                 ("run", "ok-exit") => {
                     let mut l = vec![];
@@ -881,13 +886,10 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<(String, bool)>> {
                 ("faults", "preset") => c.faults_preset = vec![string(v, &at)?],
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
                 ("faults", _) => c.faults.push(format!("{k}={}", scalar(v, &at)?)),
-                ("sdk", "buggify") => {
-                    c.buggify = v
-                        .as_bool()
-                        .ok_or_else(|| format!("{at}: expected true or false"))?
-                }
+                ("sdk", "buggify") => c.buggify = boolean(v, &at)?,
                 ("sdk", "allow-unmet") => c.allow_unmet = strings(v, &at)?,
                 ("sweep", "known") => c.known = Some(base.join(string(v, &at)?)),
+                ("sweep", "crash-pairs") => c.crash_pairs = Some(int(v, &at)? as usize),
                 ("sched", "preempt-permille") => c.preempt_permille = int(v, &at)?,
                 ("sched", "preempt") => (c.pmu.on, c.points) = preempt(&string(v, &at)?, &at)?,
                 // The race-hunting policy: every segment short, stops close to traps.
@@ -1119,26 +1121,11 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(s) = a.last("--stdin") {
         c.stdin = Some(existing(&cwd, "--stdin", s)?);
     }
-    if let Some(n) = a.num("--cpus")? {
-        c.cpus = n;
-    }
     if let Some(p) = a.last("--preempt") {
         (c.pmu.on, c.points) = preempt(p, "--preempt")?;
     }
-    if let Some(n) = a.num("--time-limit")? {
-        c.time_limit = time_limit(n, "--time-limit")?;
-    }
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
-    }
-    if let Some(n) = a.num("--log-limit")? {
-        c.log_limit = n;
-    }
-    if let Some(n) = a.num("--tmpfs-bytes")? {
-        c.tmpfs_bytes = n;
-    }
-    if a.has("--log-paths") {
-        c.log_paths = true;
     }
     if let Some(p) = a.last("--faults") {
         c.faults_preset = vec![p.to_string()];
@@ -1156,17 +1143,9 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if a.has("--buggify") {
         c.buggify = true;
     }
-    match (a.last("--check"), a.last("--check-serve")) {
-        (Some(_), Some(_)) => {
-            return Err(
-                "--check and --check-serve: give one (the same checker runs either way)".into(),
-            )
-        }
-        (Some(k), None) => check = Some((k.to_string(), false)),
-        (None, Some(k)) => check = Some((k.to_string(), true)),
-        (None, None) => {}
+    if let Some(k) = a.last("--check") {
+        check = Some(k.to_string());
     }
-    let check_timeout = a.num::<u64>("--check-timeout")?;
     if let Some(l) = a.last("--ok-exit") {
         c.ok_exit = if l == "any" {
             ok_exit_any()
@@ -1177,16 +1156,12 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     // A checker is resolved where patina starts (one a run.json recorded, again from its own
     // directory): its SHA-256 is the file's now.
     c.check = match check {
-        Some((k, serve)) => {
-            let mut k = crate::check::Check::resolve(&k, &logical("."))?;
-            k.serve = serve;
-            Some(k)
-        }
+        Some(k) => Some(crate::check::Check::resolve(&k, &logical("."))?),
         None => c.check.as_ref().map(|k| k.again()).transpose()?,
     };
-    match (c.check.as_mut(), check_timeout) {
+    match (c.check.as_mut(), c.check_timeout) {
         (Some(k), Some(t)) => k.timeout = t,
-        (None, Some(_)) => return Err("--check-timeout needs --check or --check-serve".into()),
+        (None, Some(_)) => return Err("[run] check-timeout needs a checker".into()),
         _ => {}
     }
     // A sweep gives each of its --cases runs its case.
@@ -1280,14 +1255,14 @@ impl Config {
             ));
         }
         if self.cpus == 0 || self.cpus > MAX_CPUS {
-            return Err(format!("--cpus is 1 to {MAX_CPUS}"));
+            return Err(format!("[run] cpus is 1 to {MAX_CPUS}"));
         }
         let max_log = proto::layout::LOG_MAX >> 20;
         if self.log_limit == 0 || self.log_limit > max_log {
-            return Err(format!("--log-limit is 1 to {max_log} (MiB)"));
+            return Err(format!("[run] log-limit is 1 to {max_log} (MiB)"));
         }
         if self.tmpfs_bytes < 1 << 20 {
-            return Err("--tmpfs-bytes is at least 1048576 (1 MiB)".into());
+            return Err("[run] disk-mb is at least 1".into());
         }
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());
@@ -1574,7 +1549,7 @@ impl Config {
     /// own seed when a range; `process-at:N`: a kill of the node's processes there, its disk
     /// kept; no kills at drawn times then. Settings at crash points joined by `+` act on
     /// nodes of their own each (`machine-at:5@a+machine-at:9@b`: a crash of a's and one of
-    /// b's, as `sweep --branch-pairs` gives its children). Returns the resolved form.
+    /// b's, as `sweep with `[sweep] crash-pairs`` gives its children). Returns the resolved form.
     fn crash_nodes(&self, c: &str, plan: &mut faults::Plan) -> Res<String> {
         if !c.contains('+') {
             return self.crash_nodes_one(c, plan);

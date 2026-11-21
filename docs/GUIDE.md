@@ -63,10 +63,11 @@ else of the host is visible unless you give it:
 | `--work DIR:GUEST` | the same tree at `GUEST` instead (`--work :GUEST`: empty) |
 | `--stdin FILE` | standard input |
 | `--env K=V` | one environment variable (the rest is fixed: `PATH`, `HOME`, `LANG`, `TZ`, `PATINA=1`) |
-| `--cpus N` | the CPU count it sees (default 4, whatever the host has) |
-| `--tmpfs-bytes N` | the size of each of its filesystems (`/work`, `/tmp`, copied mounts), all memory-backed tmpfs (`[run] tmpfs-bytes`, default 268435456, 256 MiB) |
 
-A write past that size answers `ENOSPC`, as a full disk does; when one did, `patina run`
+It sees 4 CPUs, whatever the host has (`[run] cpus` in [the configuration
+file](#a-configuration-file)). Its filesystems (`/work`, `/tmp`, copied mounts) are
+memory-backed tmpfs of 256 MiB each (`[run] disk-mb`). A write past that size answers
+`ENOSPC`, as a full disk does; when one did, `patina run`
 names the setting (`sandbox tmpfs full: ...`) and `result.json`'s `tmpfs.enospc` counts the
 calls.
 
@@ -127,22 +128,23 @@ program got an error code for them). The program's full output is in the run dir
 | `check.out` | with `--check`, the checker's output ([Checks from outside the program](#checks-from-outside-the-program)) |
 
 A run that never ends fills its logs fast (a livelock writes hundreds of MB a second), so the
-logs are limited: `--log-limit MIB` (`[run] log-limit`, default 1024) ends the run
+logs are limited: `[run] log-limit` (MiB, default 1024) ends the run
 `liveness`, stop `log-limit`, at the record that would pass it, the same record on every
-run of the seed. Like a run past `--time-limit`, it is a finding: a sweep groups it, replays it
+run of the seed. Like a run past `[run] time-limit`, it is a finding: a sweep groups it, replays it
 and matches it against `--known`. The message says what filled it (here `tests/guests/sweep/bugs.c`, whose two
 threads each yield until the other is done):
 
 <!-- transcript log-limit
-setup: cp "$GUESTS/sweep-bugs" .
+dir: /tmp/log-limit
+setup: cp "$GUESTS/sweep-bugs" . && printf '[run]\nlog-limit = 8\n' >patina.toml
 exit: 1
 -->
 ```text
-$ patina run --seed 1 --log-limit 8 -- ./sweep-bugs livelock
-liveness (log-limit): 8.0 MiB of boundary log (87381 records, 52% scheduling-decision records) reached --log-limit: the program had not finished, likely a livelock under this schedule (a run that is only long, or writes that much to the work tree, needs a higher --log-limit)
-run directory: /tmp/patina/patina-out/run-1
-replay: patina replay /tmp/patina/patina-out/run-1
-explain: patina explain /tmp/patina/patina-out/run-1
+$ patina run --seed 1 -- ./sweep-bugs livelock
+liveness (log-limit): 8.0 MiB of boundary log (87381 records, 52% scheduling-decision records) reached [run] log-limit: the program had not finished, likely a livelock under this schedule (a run that is only long, or writes that much to the work tree, needs a higher [run] log-limit)
+run directory: /tmp/log-limit/patina-out/run-1
+replay: patina replay /tmp/log-limit/patina-out/run-1
+explain: patina explain /tmp/log-limit/patina-out/run-1
 ```
 
 The starting work tree (`--work`) does not count against it; what the program writes to the
@@ -165,9 +167,18 @@ the table.
 
 ### A configuration file
 
-`patina.toml` in the current directory (or `--config FILE`) holds the same settings; flags
-override it, and an unknown key is an error. `--config RUNDIR/run.json` takes every setting
-of an earlier run.
+`patina.toml` in the current directory (or `--config FILE`) holds the same settings as the
+flags, and a few that only it holds; flags override it, and an unknown key is an error.
+`--config RUNDIR/run.json` takes every setting of an earlier run.
+
+| Key | Default | Sets |
+|---|---|---|
+| `[run] cpus` | 4 | the CPU count the program sees (1 to 64) |
+| `[run] disk-mb` | 256 | the size of each sandbox filesystem, in MiB |
+| `[run] time-limit` | 3600 | virtual seconds after which the run ends `liveness` |
+| `[run] log-limit` | 1024 | MiB of logs at which the run ends `unsupported` |
+| `[run] check-timeout` | 60 | wall seconds a checker may run |
+| `[sweep] crash-pairs` | off | with `--branch` and nodes, second crashes ([below](#several-machines)) |
 
 ```toml
 [run]
@@ -203,7 +214,6 @@ patina sweep --seeds 1..200 --crash machine --out patina-out/acklog -- ./acklog
 | `--only-case ID[,ID...]` | with `--cases`: only these cases ([below](#test-suites)) |
 | `--branch` | with `--crash machine` or `process`: every crash point of each seed (below) |
 | `--branch-max N` | with `--branch`: at most N children of each seed, a seeded sample by node and kind of operation (below) |
-| `--branch-pairs K` | with `--branch` and nodes: a second node's crash at each of its next K points after each first crash ([below](#several-machines)) |
 | `--known FILE` | findings already known: counted, and they do not fail the sweep ([below](#known-findings)) |
 
 `--keep fail` keeps the logs of a group's first three runs (its lowest seeds, the first of them
@@ -218,7 +228,7 @@ did not end `ok` on its own) a crash's `post-crash/` as `post-crash.tree.zst`. `
 tree` (`--post-crash` for the tree a crash left), `log ops --check` and `log events` read
 them as the run left them; a checker, run again or by hand, reads `post-crash/` as it was.
 `--keep all` keeps every run as `patina run` leaves it. The sweep prints the bytes it kept,
-does not start while `-j` runs at `--log-limit` could fill the filesystem under `--out`, and
+does not start while `-j` runs at `[run] log-limit` could fill the filesystem under `--out`, and
 stops launching runs when free space falls below that, or when a run finds the filesystem
 full.
 
@@ -513,7 +523,7 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   `--crash machine-at:A..B`.
 - **The fault rates**: a preset's ranges (`--faults disk`) and a key's own range.
 - **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
-  system call switches threads; `--cpus N` (default 4) is the CPU count the program sees,
+  system call switches threads; `[run] cpus` (default 4) is the CPU count the program sees,
   which sizes its thread pools. Each changes every seed's schedule, so the same seeds then show other
   runs; on their own they did not make the storage findings more frequent.
 - **A race with no system call in it.** Threads switch only at system calls, `pause`
@@ -524,7 +534,7 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   ([Points in stock code](#points-in-stock-code---preempt-points)); branch counters
   (`--preempt branches`, AMD Zen 5 and Arm Neoverse N2 only) switch there too.
 - **A deadline that never comes.** In stock code virtual time advances by a fixed charge per
-  system call and when every thread sleeps, not with computation, so neither `--time-limit`
+  system call and when every thread sleeps, not with computation, so neither `[run] time-limit`
   nor the program's own deadline cuts a CPU-bound loop; `--timeout` (wall seconds) does, as
   `timeout`. Rebuilt code, and stock code under `--preempt points`, is charged 1 ns per event
   and is cut where the deadline falls due; `--preempt branches` charges time per branch.
@@ -774,7 +784,7 @@ after a run that ended `ok`, Patina runs `CMD ARGS RUNDIR` on the host.
 | exit 0 | stays `ok` (`check.verdict` `pass`) |
 | exit 1 | `violation`, stop `check`, named by the first line of its stdout, `LABEL: detail` or `LABEL [KEY]: detail` |
 | exit 77 | stays `ok`, not judged (`not-judged`; the first line says why, `CLASS: detail`) |
-| any other exit, a signal, cannot be started, still running after `--check-timeout` seconds (default 60) | `error`, stop `check`: a broken checker is never a pass |
+| any other exit, a signal, cannot be started, still running after `[run] check-timeout` seconds (default 60) | `error`, stop `check`: a broken checker is never a pass |
 
 `LABEL: detail` is treated as an SDK `always` label and detail are: the label is kept as
 written, digits included, and numbers in the detail become `N`, so a sweep groups one bug once
@@ -793,7 +803,7 @@ The checker's stdout, then its stderr, are in `RUNDIR/check.out`; `result.json` 
 verdict under `check`. The checker is your program, run as you on the host: Patina does not
 sandbox it or limit its network. `CMD ARGS` is split into words as a `--cases` line is
 (quotes, no expansion); no shell runs unless you name one (`--check 'sh -c "..."'`). Its time
-limit is `--check-timeout` (60 s), counted from its own start, apart from the run's
+limit is `[run] check-timeout` (60 s), counted from its own start, apart from the run's
 `--timeout`; it is killed if patina is, and a run
 directory left by a patina stopped during the check says `error` (`check.verdict` `pending`).
 `verify --vary env` changes the environment variables, umask and limits the checker inherits
@@ -930,12 +940,11 @@ A property of what the program did, rather than of what it left, reads the event
 Two examples ship beside `acked-kept`:
 
 - `examples/checks/confined [-r PREFIX]... ROOT... RUN`: every change to the work tree (`op`
-  events other than `close` and the syncs) is on a path under a root; in a run made with
-  `--log-paths`, every file opened is too, or under a prefix it may read (`-r /usr -r /etc`
+  events other than `close` and the syncs) is on a path under a root, and every file opened
+  is too, or under a prefix it may read (`-r /usr -r /etc`
   for a dynamically linked program), judged on the path the open walked. A read-only open of
   a directory above a root (to fsync it after a create or rename) is allowed.
-- `examples/checks/no-symlink-escape ROOT... RUN`: in a run made with `--log-paths`, every
-  file opened resolves under a root, symlinks followed: a link planted in a directory the
+- `examples/checks/no-symlink-escape ROOT... RUN`: every file opened resolves under a root, symlinks followed: a link planted in a directory the
   program serves, or one a path swap makes between a check and the open
   ([path swaps](#path-swaps)), does not take it elsewhere. Without the flag it does not judge
   (exit 77).
@@ -961,7 +970,7 @@ setup: cp "$GUESTS/oracles-files" files
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1..4 --check 'examples/checks/confined /work/data' -- ./files other
+$ patina sweep --seeds 1..4 --check 'examples/checks/confined -r /etc -r /usr /work/data' -- ./files other
 new: violation check: outside-roots: mkdir /work/other (seq N)   (seed 1: patina replay /tmp/files/patina-out/sweep/seed-1)
 sweep: replaying the first seed of 1 finding
 sweep: 42.8 KiB kept in /tmp/files/patina-out/sweep
@@ -1006,7 +1015,7 @@ check: every judged run passed and no --known !ID entry shows that this check ca
 verdict: `check` in `result.json` (and the outcome, stop, message and signature that follow
 from it), the checker `run.json` records, `check.out`. The run's digest, logs, faults and SDK
 results stay as they were, and a run judged as before is rewritten byte for byte as it was.
-Without `--check` or `--check-serve` it judges each run with the checker the run records,
+Without `--check` it judges each run with the checker the run records,
 read again from its file; with one, every run gets that checker. It then prints the report
 (`--known`, `--allow-unmet` as for `report`) and, given one sweep directory, writes its
 `report.json`. A run that did not end `ok` stays a finding, as in a sweep. A replay made
@@ -1032,15 +1041,16 @@ whose recorded checker differs (its words, or its file's SHA-256), or whose verd
 `pending`, is judged again from its logs, and run again only when they were pruned; one line
 says which. A run judged again counts as one the sweep finished: `--keep` prunes or keeps its
 logs by the new verdict, and its findings count toward `--max-findings`. Patina knows the checker's own file only: a table or a reference it reads is not
-tracked, so after editing those, run `patina recheck`. With `--check-serve` the servers are
+tracked, so after editing those, run `patina recheck`. A checker that serves (below) is
 started once per job, as in a sweep.
 
 ### A checker that serves
 
 A checker in a scripting language spends most of its time starting: an interpreter and its
-imports cost 30 to 100 ms, where a short run costs 10 to 30. `--check-serve 'CMD ARGS'` (`[run]
-check-serve`) starts it once per sweep job instead, with `PATINA_CHECK_SERVE=1` and no run
-directory, and asks it about each run on its stdin, one JSON line, `{"rundir": DIR, "env":
+imports cost 30 to 100 ms, where a short run costs 10 to 30. A checker whose program, or a
+file its command names (`python3 chk.py`), contains the name `PATINA_CHECK_SERVE` serves: the
+sweep starts it once per job, with `PATINA_CHECK_SERVE=1` and no run directory, and asks it
+about each run on its stdin, one JSON line, `{"rundir": DIR, "env":
 {"PATINA_SEED": ..., "PATINA_EXIT": ..., "PATINA_CASE": ..., "PATINA_CASE_NAME": ...,
 "PATINA_CASE_ID": ...}}`. It answers one line on its stdout:
 
@@ -1049,7 +1059,7 @@ directory, and asks it about each run on its stdin, one JSON line, `{"rundir": D
 | `pass` | stays `ok` |
 | `fail LABEL: detail`, `fail LABEL [KEY]: detail` | `violation`, stop `check` |
 | `skip CLASS: detail` (or any reason) | stays `ok`, not judged |
-| anything else, two lines, a line before it was asked, nothing within `--check-timeout`, or it ended | `error`; the server is killed and the sweep starts another for the job's next run |
+| anything else, two lines, a line before it was asked, nothing within `[run] check-timeout`, or it ended | `error`; the server is killed and the sweep starts another for the job's next run |
 
 A line carries no request number: an answer written out of turn is found at the job's next
 request at the latest, so the run it lands on may take it for its own, but the sweep then has
@@ -1072,7 +1082,7 @@ if os.environ.get("PATINA_CHECK_SERVE"):
         print({0: "pass", 1: f"fail {say}", 77: f"skip {say}", 2: f"error: {say}"}[code], flush=True)
 ```
 
-A run started per run costs less when the interpreter is named by its path with no wrapper
+A checker started per run costs less when the interpreter is named by its path with no wrapper
 in front of it (`/usr/bin/python3 -I`, not a version manager's shim): on 300 runs of a Python
 checker that imports a 2,500-line oracle module, the sweep took 1.9 s without a check, 7.2 s
 through a shim, 4.3 s with the interpreter's path, and 2.3 s serving.
@@ -1715,7 +1725,7 @@ its crash lost something on its disk, the crash points it crashed at, and in how
 partition was in force at the end. Without `early` the same sweep is ok at all 30 points
 (`tests/nodes/13-points.sh`, `14-points-sweep.sh`).
 
-**Two crashes.** `--branch-pairs K` adds a second level: each first crash's child (node A at
+**Two crashes.** `[sweep] crash-pairs = K` adds a second level: each first crash's child (node A at
 its point I) also counts the other nodes' points, and from each that ended ok the sweep takes,
 for each other node B, B's next K points after A's crash, and runs each pair as a child
 crashing both (`--crash
@@ -1734,10 +1744,11 @@ exact-only: which pairs lose a write depend on the seed's run
 dir: /tmp/q3-pairs
 setup: mkdir g && cp "$GUESTS/q3.py" "$GUESTS/patina.py" g/
 setup: for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "nosync"]\n' $n $n; done >patina.toml
+setup: printf '[sweep]\ncrash-pairs = 3\n' >>patina.toml
 exit: 1
 -->
 ```text
-$ patina sweep --seeds 1 --branch --branch-pairs 3 --branch-max 60 --crash machine -j 4 --mount g:/guest -- python3 /guest/q3.py driver 2
+$ patina sweep --seeds 1 --branch --branch-max 60 --crash machine -j 4 --mount g:/guest -- python3 /guest/q3.py driver 2
 sweep: 1 seed, 400 crash points (n1 80, n2 160, n3 160), a sample of 60 (--branch-max)
 sweep: 306 pairs after a first crash, a sample of 60 (--branch-max)
 ...
@@ -2084,7 +2095,7 @@ directory ([Faults off versus on](#faults-off-versus-on)).
 `patina log events RUNDIR` prints a whole run as JSON lines, one object per line, for a
 checker (`--check`) or `jq` to read: every incarnation's boundary records in log order, each
 file operation after its call with the path it had at that moment, injected faults and
-crashes. It reads only the run directory, streams (a run at the default 1 GiB `--log-limit`
+crashes. It reads only the run directory, streams (a run at the default 1 GiB `[run] log-limit`
 takes about 5 s and a few MiB of memory), and the same directory gives the same bytes.
 `--types op,crash` keeps the types named (and the header) (piping 10 million lines through `jq` alone takes
 longer than writing them); `--from SEQ --to SEQ` keeps those sequence numbers.
@@ -2096,13 +2107,13 @@ exact-only: the run of seed 2 above
 ```text
 $ patina log events patina-out/run-2 --types inc,op,crash
 {"type":"header","v":1,"seed":2,"work":"/work","incarnations":2}
-{"type":"inc","inc":0,"records":98,"oplog":true}
+{"type":"inc","inc":0,"records":108,"oplog":true}
 {"type":"op","inc":0,"seq":45,"t":100000040000,"pid":2,"op":"create","ino":2,"path":"/work/data.log","mode":420,"fmt":32768}
 {"type":"op","inc":0,"seq":47,"t":100000042000,"pid":2,"op":"fsync-dir","ino":1,"path":"/work"}
 {"type":"op","inc":0,"seq":50,"t":100000044000,"pid":2,"op":"write","ino":2,"path":"/work/data.log","off":0,"len":8}
 ...
 {"type":"crash","inc":0,"seq":98,"t":100000090000,"slot":0,"kind":"machine","point":27,"lost":{"back":0,"changed":1,"missing":0,"paths":["/work/data.log"]}}
-{"type":"inc","inc":1,"records":95,"oplog":true}
+{"type":"inc","inc":1,"records":105,"oplog":true}
 ...
 ```
 
@@ -2117,7 +2128,7 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `header` | first line: `v` (1), `seed`, `work` (the work tree's guest path), `incarnations`; with nodes `nodes` (their names, the driver first) |
 | `inc` | an incarnation begins: `records` (its boundary records), `oplog` (false: a sweep removed its operation log) |
 | `cut` | a sweep kept only the head and tail of the log: `records`, `head`, `tail_from` (the records between are not printed; operations are) |
-| `call` | a system call: `name` (`nr` too when unknown), `args` (only the registers the call reads, as the program set them: an `int` may show its 32-bit value), `ret`, `disp` (`pass`, `virt`, `attempt`, `rewrite`, `place`, `deny`, `stop`), `in`, `out` (hashes of what it read and wrote; absent when none); with `--log-paths` (below): `pid`, `path`, `path2`, `resolved`, `resolved2`, `argv`, `argv_cut`, `path_cut` |
+| `call` | a system call: `name` (`nr` too when unknown), `args` (only the registers the call reads, as the program set them: an `int` may show its 32-bit value), `ret`, `disp` (`pass`, `virt`, `attempt`, `rewrite`, `place`, `deny`, `stop`), `in`, `out` (hashes of what it read and wrote; absent when none); and (below) `pid`, `path`, `path2`, `resolved`, `resolved2`, `argv`, `argv_cut`, `path_cut` |
 | `op` | a change to the work tree, after its call: `pid`, `op`, `ino`, `path` (absent for a file with no name left), and by `op`: `create` `mode` `fmt`; `mkdir` `mode`; `symlink` `target`; `unlink`, `rmdir` `left` (links); `rename` `to`, `replaced`, `flags`; `write`, `mmap-dirty`, `mmap-shared` `off` `len`; `truncate` `size`; `fallocate` `mode` `off` `len`; `setattr` `mode` `uid` `gid`; `xattr-set`, `xattr-remove` `name`; `fsync` `flags` (1 data only, 2 no commit, 4 msync); also `link`, `fsync-dir`, `fsync-fail`, `sync`, `close`. No `slot` |
 | `fault` | an injected fault, as `faults.recent` shows it (every one, not the last 20): `class`, `call`, `object`, `pid`, and `errno`, `count`, `bytes` or `delay_ns`; a path swap's `swap`, `target`, `after`, `after_seq`, `put_back`; a datagram's `datagram`, `from`, `to` |
 | `crash` | a crash point fired (`seq` is its call's): `kind` (`machine`, `process`), `point`, and for a machine crash `lost` (as `faults.recent`) |
@@ -2128,7 +2139,7 @@ thread). Numbers are JSON numbers (registers as signed 64-bit integers), hashes 
 | `node` | with nodes: a node's first process started (`event` `start`, `name`, `pid`), or the run ended while the node still had processes (`stop`, `name`, `live`) |
 | `net` | with nodes: a control call's `cut` or `heal` (`event`, `from` and `to` as node names, `both`, `ret`; a `heal` with both empty heals every cut), or a held direction a heal released (`release`, `conn`, `dir`, `until`: when its last held item arrives) |
 
-**Paths.** With `--log-paths` (`[run] log-paths = true`) a `call` also has its C-string
+**Paths.** A `call` also has its C-string
 arguments as the program passed them: `path` and `path2` (a path, a rename's new path; for
 the attribute calls the attribute's name, for `memfd_create` its name), and for each path the
 call walks, the absolute path it reached, `resolved` (`resolved2`): symlinks on the way
@@ -2141,20 +2152,17 @@ sandbox). `resolved` is the walk's result whether or not the call succeeded: sel
 A call that answered `EFAULT` has no strings, and a walk that failed (a missing directory on
 the way) has no `resolved`.
 
-The flag is off by default because the log grows: W1-W9 at seed 3 (x86_64) gained 0% (W8,
-sockets), +1.3% to +1.9% (W2, tokio), +3.4% (W4, Go), +8.9% (W1, Rust), +10% (W3 SQLite, W9
-fjall), +24% (W6 shell pipelines, W7 fork and exec) and +32% (W5, a CPython start and its
-imports). It is part of the run: `run.json` names it, the rerun line and `replay` carry it,
-and a run with it has another digest than one without; a run without it has the log it had
-before the flag existed. Each recorded call costs about half a microsecond of CPU (an open in
-a loop of opens: 5% to 10% more CPU); W1-W9's wall time, the least of three runs each, moved
-by at most 3 ms or 4%; without the flag the cost is not measurable.
+The strings grow the log: W1-W9 at seed 3 (x86_64) by 0% (W8, sockets), +1.3% to +1.9% (W2,
+tokio), +3.4% (W4, Go), +8.9% (W1, Rust), +10% (W3 SQLite, W9 fjall), +24% (W6 shell
+pipelines, W7 fork and exec) and +32% (W5, a CPython start and its imports). Each recorded
+call costs about half a microsecond of CPU (an open in a loop of opens: 5% to 10% more CPU);
+W1-W9's wall time, the least of three runs each, moved by at most 3 ms or 4%.
 
 <!-- transcript log-paths
 dir: /tmp/paths
 -->
 ```text
-$ patina run --log-paths -- /bin/sh -c 'mkdir data; echo a > data/a.txt; ln -s data link; cat link/a.txt'
+$ patina run -- /bin/sh -c 'mkdir data; echo a > data/a.txt; ln -s data link; cat link/a.txt'
 ok (exit): the program exited 0
 guest: exit 0
 refused: /sys/fs/selinux (unsupported; the guest got an error code)
@@ -2172,8 +2180,7 @@ each byte that is not is U+FFFD in the string and the exact bytes are in a secon
 the program's pointer did not cover (`ret` -14, `EFAULT`) has no `label`, nor does one
 whose strings a sweep's cut log or the log limit left out (a reader should allow for it).
 
-Not in it: without `--log-paths`, the path and argument strings of calls (only their hashes,
-`in`) and the process of a call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its
+Not in it: the process of a call (an `op`, a `fault` and an SDK call have `pid`; a `call` has its
 thread's `slot`, which is not a process id),
 buffer contents (read the trees: `patina log tree`, `--post-crash`). A run directory a sweep
 pruned (an `ok` run without `--keep all`) has no logs: the command says so and exits 2. Types
@@ -2387,9 +2394,9 @@ exact-only: one seed's run
 -->
 ```text
 $ patina verify --seed 3 --runs 3 --vary cpu,aslr,load --crash machine -- ./acklog
-run 0: cpu 23 aslr off load on env base violation b0d7bd9186765280 switches 0
-run 1: cpu 12 aslr on load on env base violation b0d7bd9186765280 switches 0
-run 2: cpu 1 aslr off load on env base violation b0d7bd9186765280 switches 0
+run 0: cpu 23 aslr off load on env base violation 45adc92bcdf15a4e switches 0
+run 1: cpu 12 aslr on load on env base violation 45adc92bcdf15a4e switches 0
+run 2: cpu 1 aslr off load on env base violation 45adc92bcdf15a4e switches 0
 identical: 3 runs in /tmp/patina/patina-out/verify-3
 violation (always): acked-records-kept: 23 acknowledged, 0 stored
 ```
@@ -2441,7 +2448,7 @@ compiler's coverage flags and Patina's hook file, its own code gets points too:
 - Threads switch inside computation, so a race on plain memory with no system call in it (a
   count updated without its lock, a check and an act on an atomic) can be found.
 - Virtual time advances with computation, 1 ns per event, so a timer, a timeout or
-  `--time-limit` cuts a CPU-bound loop at the event where it falls due.
+  `[run] time-limit` cuts a CPU-bound loop at the event where it falls due.
 - A spin-wait in rebuilt code yields by itself instead of ending `compute-stall` (in Go, if
   its loop makes a comparison).
 
@@ -2670,7 +2677,7 @@ events. The draw depends on the seed alone: seed 2 draws 248 in every program.
 A single number (`compute-gap=8`) gives every seed that G.
 
 Each switch writes one 96-byte record to the boundary log, so a long program at a small gap
-can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `liveness`, stop
+can reach `[run] log-limit` (default 1 GiB, about 11 million switches) and end `liveness`, stop
 `log-limit`: raise the limit or the gap.
 
 ### Limits
@@ -2691,7 +2698,7 @@ can reach `--log-limit` (default 1 GiB, about 11 million switches) and end `live
 program and each library it loads are mapped, Patina maps in a rewritten copy of their text
 with a count before every backward branch, backward call, indirect jump and atomic instruction
 it can patch. The counts are compute-point events: threads switch there at a seed-chosen
-event, virtual time advances 1 ns per event, and a timer or `--time-limit` cuts a CPU-bound
+event, virtual time advances 1 ns per event, and a timer or `[run] time-limit` cuts a CPU-bound
 loop where it falls due. Nothing about the program changes on disk.
 
 The check-then-act race of `tests/guests/compute/go/race` (two goroutines read a balance with

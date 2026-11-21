@@ -2,7 +2,7 @@
  *   deadline [MS]   arms ITIMER_REAL for MS ms (default 50) and computes until its handler sets
  *                   a flag; prints the virtual ns from before the arming to the handler and to
  *                   the loop's end, and exits 0 if the loop ran MS to MS*1.2 ms, else 1
- *   endless [MS]    sleeps MS ms (default 0), then computes forever (only --time-limit or
+ *   endless [MS]    sleeps MS ms (default 0), then computes forever (only [run] time-limit or
  *                   --timeout ends it)
  *   cpu N           N iterations, then prints the thread's and the process's CPU time (each
  *                   iteration is at least one event, so under Patina each is at least N ns)

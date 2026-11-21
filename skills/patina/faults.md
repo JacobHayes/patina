@@ -7,8 +7,8 @@ once fails in ways that say little. `patina run --help` lists every fault key of
 ## The schedule (always on)
 
 Each seed is another interleaving: threads switch at every system call and spin-wait, so races
-on locks, files, pipes, sockets and channels need no flag. `--cpus N` (default 4) changes the
-CPU count the program sees, and so its thread pools.
+on locks, files, pipes, sockets and channels need no flag. `[run] cpus = N` in patina.toml (default 4)
+changes the CPU count the program sees, and so its thread pools.
 
 A race on plain memory with no system call between the accesses (a counter updated without
 its lock, check-then-act on an atomic) needs switch points inside the computation:
@@ -88,8 +88,8 @@ does the same with:
 - `--crash machine` or `--crash process`: kills or machine crashes at seed-drawn times
   (`--fault crash-gap-ms=2000..10000` for short runs), each followed by a restart.
 - `--faults cluster`: link faults, partitions, pauses, clock skew and machine crashes together.
-- `--branch --crash machine`: every crash point of each node; `--branch-pairs K` also crashes a
-  second node after each first crash; give large runs a `--branch-max`.
+- `--branch --crash machine`: every crash point of each node; `[sweep] crash-pairs = K` also
+  crashes a second node after each first crash; give large runs a `--branch-max`.
 
 See [recipes.md](recipes.md) for a replicated store.
 

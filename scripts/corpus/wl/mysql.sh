@@ -1,7 +1,7 @@
 #!/bin/bash
 # MySQL 9.7: --initialize-insecure, start, 4 concurrent client sessions inserting into InnoDB, queries, shutdown.
 # programs: conda-mysql-server conda-mysql-client
-# flags: --tmpfs-bytes 1073741824
+# run: disk-mb = 1024
 set -euo pipefail; shopt -s inherit_errexit
 B=$PROGS/conda-mysql-server/9.7.4
 $B/bin/mysqld --no-defaults --initialize-insecure --datadir=$PWD/data --basedir=$B >init.log 2>&1

@@ -4,9 +4,8 @@
 //! resolves the path into its own buffer and passes that on): one execs, opens and stats through
 //! `/bin`, takes a signal and connects a TCP socket (a unix socket underneath); one makes
 //! directories through a symlink in `/work` with file faults on, so injected-fault records name
-//! such calls. No value of any record may fall inside the runtime's region. The first runs
-//! with `--log-paths`: the path strings are the program's own (`/bin/true` as it named it),
-//! not the runtime's rewritten paths. Needs what `patina run` needs (user namespaces)
+//! such calls. No value of any record may fall inside the runtime's region, and the logged path
+//! strings are the program's own (`/bin/true` as it named it), not the runtime's rewritten paths. Needs what `patina run` needs (user namespaces)
 //! and the host's python3.
 
 use proto::layout::{RT_BASE, RT_REGION_END};
@@ -75,7 +74,7 @@ fn run(name: &str, opts: &[&str], script: &str, args: &[&str]) -> (u64, Vec<Rec>
 fn no_record_holds_a_runtime_address() {
     let (seed, recs) = run(
         "exec",
-        &["--log-paths"],
+        &[],
         "set -e; test -L /bin; for i in 1 2 3; do /bin/true; done; \
          /bin/cat /bin/true >/dev/null; /bin/sh -c 'exec /bin/true'; /bin/python3 -c \"$1\"; \
          exec /bin/ls /bin/sh",

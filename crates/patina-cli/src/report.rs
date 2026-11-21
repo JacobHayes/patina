@@ -57,7 +57,7 @@ impl Run {
 
 /// A run's place in a `--branch` sweep: a base (`n` 0, `seed-N`), or the child crashing at
 /// crash point `n` (`seed-N@P`), of node `node`'s first boot in a run with nodes
-/// (`seed-N@NODE.P`; `node` empty: the one machine); under `--branch-pairs`, a pair's child
+/// (`seed-N@NODE.P`; `node` empty: the one machine); under `[sweep] crash-pairs`, a pair's child
 /// crashes node `node2` at its point `n2` after that (`seed-N@A.I+B.J`). Ordered by point, then
 /// node. A label is a portable file name: no `:` (GitHub's artifact upload refuses one, as
 /// Windows does).
@@ -459,29 +459,27 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "mounts",
         "work",
         "stdin",
-        "cpus",
         "faults-preset",
         "faults",
         "fs-model",
         "crash",
-        "time-limit",
         "timeout",
-        "log-limit",
-        "log-paths",
-        "tmpfs-bytes",
         "buggify",
         "allow-unmet",
         "host-cpu",
         "check",
         "ok-exit",
     ];
-    // A case's checker gets its case only from run.json.
+    // A case's checker gets its case, and a checker its timeout, only from run.json.
     let config_only = have
         .as_object()
         .unwrap()
         .iter()
         .any(|(k, v)| !flagged.contains(&k.as_str()) && def.get(k.as_str()) != Some(v))
-        || cfg.check.as_ref().is_some_and(|k| k.case.is_some());
+        || cfg
+            .check
+            .as_ref()
+            .is_some_and(|k| k.case.is_some() || k.timeout != crate::check::DEFAULT_TIMEOUT);
     if config_only {
         a.push("--config".into());
         a.push(quote(&dir.join("run.json").display().to_string()));
@@ -511,9 +509,6 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         if let Some(s) = &cfg.stdin {
             flag("--stdin", s.display().to_string());
         }
-        if cfg.cpus != d.cpus {
-            flag("--cpus", cfg.cpus.to_string());
-        }
         if !cfg.faults_preset.is_empty() {
             flag("--faults", cfg.faults_preset.join(","));
         }
@@ -526,17 +521,8 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         if let Some(c) = &cfg.crash {
             flag("--crash", c.clone());
         }
-        if cfg.time_limit != d.time_limit {
-            flag("--time-limit", cfg.time_limit.to_string());
-        }
         if cfg.timeout != d.timeout {
             flag("--timeout", cfg.timeout.to_string());
-        }
-        if cfg.log_limit != d.log_limit {
-            flag("--log-limit", cfg.log_limit.to_string());
-        }
-        if cfg.tmpfs_bytes != d.tmpfs_bytes {
-            flag("--tmpfs-bytes", cfg.tmpfs_bytes.to_string());
         }
         if cfg.pmu.on {
             flag("--preempt", "branches".into());
@@ -545,15 +531,7 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             flag("--preempt", "points".into());
         }
         if let Some(k) = &cfg.check {
-            let f = if k.serve { "--check-serve" } else { "--check" };
-            flag(f, crate::check::join(&k.words));
-        }
-        if let Some(k) = cfg
-            .check
-            .as_ref()
-            .filter(|k| k.timeout != crate::check::DEFAULT_TIMEOUT)
-        {
-            flag("--check-timeout", k.timeout.to_string());
+            flag("--check", crate::check::join(&k.words));
         }
         if cfg.ok_exit == crate::config::ok_exit_any() {
             flag("--ok-exit", "any".into());
@@ -564,9 +542,6 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         }
         if cfg.buggify {
             a.push("--buggify".into());
-        }
-        if cfg.log_paths {
-            a.push("--log-paths".into());
         }
     }
     a.push("--".into());
@@ -1145,7 +1120,7 @@ pub fn build(
         }
     }
     // A branch sweep: each base's crash points and the children run of them; with nodes, each
-    // node's too; under --branch-pairs, the pairs after the first crashes (each first crash's
+    // node's too; under [sweep] crash-pairs, the pairs after the first crashes (each first crash's
     // `points.json`) and those run.
     #[derive(Default, Clone, Copy)]
     struct Tally {

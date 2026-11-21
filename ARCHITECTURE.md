@@ -93,7 +93,7 @@ options, paths under `/proc`, `/sys`, `/dev`) are refused unless listed; the com
 `ioctl`, `fcntl`, `prctl` and `arch_prctl` are listed with the arguments each reads
 (`proto::table::cmds`), so none is let through without saying what it reads. Path arguments are
 checked against that policy before any handler runs (`resolve.rs`, `path.rs`). Host values
-are replaced: inode numbers, file times, `/proc` contents, the CPU count (`--cpus`), the
+are replaced: inode numbers, file times, `/proc` contents, the CPU count (`[run] cpus`), the
 sizes `statfs` reports (every sandbox tmpfs reports the configured tmpfs size, also `/` and
 `/dev`, which the host's RAM sizes).
 
@@ -477,7 +477,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
   (`crash_points`, `downs[].point`) and `sweep --branch` reads to make one child per point of
   each node (`seed-S@NODE.P`, `machine-at:P@NODE`). `Config::crash_nodes` joins settings with
-  `+`, each for its own nodes (`machine-at:I@A+machine-at:J@B`). Under `--branch-pairs K` a
+  `+`, each for its own nodes (`machine-at:I@A+machine-at:J@B`). Under `[sweep] crash-pairs = K` a
   first crash's child also counts the other nodes' points (`+machine:0@B,...`), and one that
   ended ok gives each other node's next K points after A's `Crash` record by sequence number
   (`branch::window`, each with the number of B's records before it); each is a pair's child
@@ -579,14 +579,12 @@ comparison. The bytes are a copy of what the handler already read through the ch
 copy (`sys/sdk.rs` keeps the label it was given until `log::trap` writes it), never a second
 read of the program's memory. A call whose payload could not be read has none.
 
-With `--log-paths` (`Config::log_paths`) a call's C-string arguments follow its record the
-same way: each as the program passed it, read once (the bytes the input hash reads,
+A call's C-string arguments follow its record the same way: each as the program passed it, read once (the bytes the input hash reads,
 `log::trap_paths`), and the absolute path each walked argument resolved to, kept by the path
 resolver (`resolve::prepare`) in the call's path buffers, which live in the trap entry's frame
 until the record is written; `execve`'s arguments are read from the program's array, bounded
 (`proto::rec::ARGV_MAX`, `ARGV_BYTES`, `PATH_BYTES`). The resolver's walk is in the
-program's view of the file system, so no host path enters. Without the flag `log::trap`
-takes one more branch and writes what it wrote before.
+program's view of the file system, so no host path enters.
 
 Replay runs the program again and compares record by record
 (`replay.rs`); `patina log diff` names the first difference; `patina verify` repeats a seed
@@ -606,7 +604,7 @@ the call has already read or written; nothing about the program's state changes 
 is taken. An observation is written only while the log's mapping (`LOG_MAX`) keeps room for the
 whole log limit and 1 MiB (what a run's last trap and the supervisor write past the limit)
 besides it, so the observations never take the place of a record and a run
-that ends on its limit ends at the same record (with `--log-limit` at its maximum there is no
+that ends on its limit ends at the same record (with `[run] log-limit` at its maximum there is no
 room, and the story shows sizes without bytes). The runtime code that observes runs between
 two segments of program code, so no counter preemption counts its branches. When an incarnation ends
 the launcher moves the `Observe` records out of `boundary.log` into `inc-K/observe.log`
@@ -628,12 +626,12 @@ records its verdict (`check`), which can turn an ok run into a `violation` (stop
 signed as an `always` is) or an `error`. Its output is not in the logs or the digest. A
 replay whose logs equal the run's while the verdict differs ends `error`, stop
 `check-unstable`, not `nondeterministic`.
-A serving checker (`--check-serve`, `check::Server`) is started once per sweep job by the
-sweep's worker thread, which lends its pipes to each `patina run` it starts (`PATINA_CHECK_SERVER`:
+A serving checker (one whose file names `PATINA_CHECK_SERVE`, `check::serves`;
+`check::Server`) is started once per sweep job by the sweep's worker thread, which lends its pipes to each `patina run` it starts (`PATINA_CHECK_SERVER`:
 descriptors kept across that one exec, close-on-exec again at once in the child); the run
 writes one request line and reads one verdict line, so the verdict is still made, recorded and
 replayed by the run, as a per-run checker's is. A server that wrote out of turn, answered with
-anything but one verdict line, or not within `--check-timeout`, is killed and the run is an
+anything but one verdict line, or not within `[run] check-timeout`, is killed and the run is an
 `error`; the worker starts another for its next run. A run with no lent server (`patina run`,
 a replay, minimize), or whose server ended after its last answer, starts one for itself. Sending each run's verdict through its own `patina
 run`, rather than judging in the sweep, keeps one code path for verdicts, `check.out` and
@@ -678,7 +676,7 @@ logs and keeps only the live names. Its fields are versioned (`v` in the header)
 added to; `log dump` and `log ops` stay the text forms.
 
 The logs of a run (this one and the operation log) are limited (`Config::log_limit`,
-`--log-limit`): the append that would pass the limit ends the run instead, so the cut depends
+`[run] log-limit`): the append that would pass the limit ends the run instead, so the cut depends
 on records, not time. The log file grows by `fallocate`, so a full host filesystem is a failed
 call (`disk-full`), never a fault on a store through the mapping.
 
@@ -1780,7 +1778,7 @@ rejected: 1.3 to 7.8 µs per pair against a trap of about 1 µs (docs/EVIDENCE.m
   operation (`dict.setdefault`, `list.append`) is never split, and C extensions and the
   interpreter's own C code have none.
 - **Stock computation does not advance virtual time**: a CPU-bound loop cannot be cut by
-  `--time-limit` or a program's own deadline, only by `--timeout` (wall time), unless it runs
+  `[run] time-limit` or a program's own deadline, only by `--timeout` (wall time), unless it runs
   with `--preempt points` and the loop has a point. A loop that
   makes any system call (a clock read) advances it by the per-trap charge. Rebuilt code is
   charged 1 ns per event (Python under `python3 -m patina`, 15 ns per line and jump) and cut at

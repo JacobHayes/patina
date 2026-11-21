@@ -242,28 +242,10 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
     let dirs: Vec<PathBuf> = a.positional.iter().map(PathBuf::from).collect();
     let runs = crate::report::collect(&dirs).map_err(err)?;
     // A checker given here, or each run's own (its words again: an edited file is read anew).
-    let given = match (a.last("--check"), a.last("--check-serve")) {
-        (Some(_), Some(_)) => {
-            return Err(err(
-                "--check and --check-serve: give one (the same checker runs either way)".into(),
-            ))
-        }
-        (Some(k), None) => Some((k, false)),
-        (None, Some(k)) => Some((k, true)),
-        (None, None) => None,
-    };
-    let timeout = a.num::<u64>("--check-timeout").map_err(err)?;
-    let mut fixed = match given {
-        Some((k, serve)) => {
-            let mut c = Check::resolve(k, &crate::config::logical(".")).map_err(err)?;
-            c.serve = serve;
-            Some(c)
-        }
+    let fixed = match a.last("--check") {
+        Some(k) => Some(Check::resolve(k, &crate::config::logical(".")).map_err(err)?),
         None => None,
     };
-    if let (Some(c), Some(t)) = (fixed.as_mut(), timeout) {
-        c.timeout = t;
-    }
     // Recorded checkers, each resolved once.
     let mut recorded: Vec<(Value, Check)> = vec![];
     if fixed.is_none() {
@@ -274,16 +256,12 @@ pub fn main(a: &Args) -> Result<ExitCode, crate::Fail> {
             }
             let c: Check = serde_json::from_value(k.clone())
                 .map_err(|e| err(format!("{}: run.json check: {e}", r.dir.display())))?;
-            let mut again = c.again().map_err(err)?;
-            if let Some(t) = timeout {
-                again.timeout = t;
-            }
+            let again = c.again().map_err(err)?;
             recorded.push((k.clone(), again));
         }
         if recorded.is_empty() {
             return Err(err(
-                "no run here was made with a checker: give one with --check or --check-serve"
-                    .into(),
+                "no run here was made with a checker: give one with --check".into(),
             ));
         }
     }

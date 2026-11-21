@@ -38,10 +38,10 @@ pub struct Check {
     /// The program the first word names, absolute.
     pub program: PathBuf,
     pub sha256: String,
-    /// A serving checker (`--check-serve`): one process answers a line per run.
+    /// A serving checker (`serves`): one process answers a line per run.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub serve: bool,
-    /// Wall seconds the checker may run (`--check-timeout`).
+    /// Wall seconds the checker may run (`[run] check-timeout`).
     #[serde(default = "default_timeout")]
     pub timeout: u64,
     /// The case of a sweep's `--cases` run (set by the sweep for its runs).
@@ -61,7 +61,7 @@ pub struct Case {
     pub id: Option<String>,
 }
 
-/// `--check-timeout`'s default: a checker reads a run directory; one still running after a
+/// `[run] check-timeout`'s default: a checker reads a run directory; one still running after a
 /// minute is stuck, and should not hold a sweep for the run's own `--timeout`.
 pub const DEFAULT_TIMEOUT: u64 = 60;
 
@@ -76,6 +76,21 @@ pub const CASE_ID_VAR: &str = "PATINA_CASE_ID";
 /// The whole case line, settings included, from a sweep to its run (for `run.json`); not
 /// passed on to the checker.
 pub const CASE_LINE_VAR: &str = "PATINA_CASE_LINE";
+
+/// Whether a checker serves: its program, or a file its command names (`python3 chk.py`), holds
+/// the name `PATINA_CHECK_SERVE`, which a checker reads to know how it was started. Nothing is
+/// asked of a checker that does not name it.
+fn serves(words: &[String], dir: &Path, program: &Path) -> bool {
+    std::iter::once(program.to_path_buf())
+        .chain(words.iter().skip(1).map(|w| dir.join(w)))
+        .filter(|p| p.is_file())
+        .any(|p| {
+            std::fs::read(&p).is_ok_and(|b| {
+                b.windows(SERVE_VAR.len())
+                    .any(|w| w == SERVE_VAR.as_bytes())
+            })
+        })
+}
 
 /// The checker's output file in the run directory.
 pub const OUTPUT: &str = "check.out";
@@ -123,12 +138,13 @@ impl Check {
             return Err(format!("--check: its directory {} is gone", dir.display()));
         }
         let sha256 = crate::config::sha256_file(&program)?;
+        let serve = serves(&words, &dir, &program);
         Ok(Check {
             words,
             dir,
             program,
             sha256,
-            serve: false,
+            serve,
             timeout: DEFAULT_TIMEOUT,
             case: None,
         })
@@ -324,7 +340,7 @@ pub fn finding(line: &str) -> (String, String) {
 }
 
 /// Run `c` on the run directory `rundir`: its seed, the program's exit status, at most
-/// `c.timeout` seconds. A serving checker (`--check-serve`) is asked through the sweep job's
+/// `c.timeout` seconds. A serving checker (`serves`) is asked through the sweep job's
 /// server (`SERVER_VAR`), or one started for this run alone.
 pub fn run(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>) -> Verdict {
     run_on(c, rundir, seed, exit, None)
@@ -350,11 +366,11 @@ pub fn run_on(
     }
 }
 
-/// `--check-serve`: the checker started once per sweep job, with `PATINA_CHECK_SERVE=1` and
+/// A serving checker: started once per sweep job, with `PATINA_CHECK_SERVE=1` and
 /// no run directory. For each run, one line on its stdin, `{"rundir": DIR, "env":
 /// {"PATINA_SEED": ..., "PATINA_EXIT": ..., "PATINA_CASE": ..., "PATINA_CASE_NAME": ...}}`, and
 /// one line back on its stdout: `pass`, `fail LABEL: detail`, or `skip REASON` (not judged).
-/// Anything else, end of output, or no answer within `--check-timeout` is `error`, and the
+/// Anything else, end of output, or no answer within `[run] check-timeout` is `error`, and the
 /// server is killed (a sweep starts another for its next run). Bytes on its stdout before a
 /// request are an error too: a line answers only the request just written. What it writes to
 /// stderr while it answers goes to `check.out` after the answer.
@@ -367,7 +383,8 @@ pub struct Server {
 
 /// A sweep job's server, as a `patina run` it starts finds it: `REQ,RES,ERR,PGID`.
 pub const SERVER_VAR: &str = "PATINA_CHECK_SERVER";
-/// Set (to 1) for a serving checker.
+/// Set (to 1) for a serving checker; a checker that serves names it in its program or in a
+/// file its command names (`serves`).
 pub const SERVE_VAR: &str = "PATINA_CHECK_SERVE";
 
 impl Server {
@@ -626,7 +643,7 @@ fn ask(ch: Channel, line: &str, timeout: u64) -> (Verdict, String, Vec<u8>) {
                 crate::sys::Waited::Ready => {}
                 crate::sys::Waited::Timeout => {
                     return fail(
-                        format!("the checker server did not read its request within --check-timeout ({timeout} s)"),
+                        format!("the checker server did not read its request within [run] check-timeout ({timeout} s)"),
                         vec![],
                     )
                 }
@@ -651,7 +668,7 @@ fn ask(ch: Channel, line: &str, timeout: u64) -> (Verdict, String, Vec<u8>) {
             crate::sys::Waited::Timeout => {
                 return fail(
                     format!(
-                        "the checker server did not answer within --check-timeout ({timeout} s)"
+                        "the checker server did not answer within [run] check-timeout ({timeout} s)"
                     ),
                     got,
                 )
@@ -785,7 +802,7 @@ fn run_inner(c: &Check, rundir: &Path, seed: u64, exit: Option<i64>, timeout: u6
         .unwrap_or_default();
     if timed_out {
         return Ok(Verdict::error(format!(
-            "the checker ran longer than --check-timeout ({timeout} s){last}"
+            "the checker ran longer than [run] check-timeout ({timeout} s){last}"
         )));
     }
     // The run directory differs between a run, its replay and minimize's tries: a path in it

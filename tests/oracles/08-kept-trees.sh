@@ -3,7 +3,7 @@
 #    the same seed's replay (which writes the trees whole, and must be identical), `log tree` of
 #    every incarnation and node disk, `log tree --post-crash` of every crash, `log ops --check`
 #    and `log events` (what a machine crash lost). In a run a checker judged, `post-crash/`
-#    stays whole: the checker run by hand, `recheck --check` and `recheck --check-serve` read
+#    stays whole: the checker run by hand, `recheck --check` with a checker run per run and with one that serves read
 #    what the replay's post-crash/ holds. The packed trees are smaller than the trees by a wide
 #    margin, the sweep's "kept" line is the bytes left under its directory, and `--keep all`
 #    keeps the trees as the run wrote them.
@@ -37,7 +37,7 @@ done | sha256sum | cut -c1-16
 EOF
 printf '#!/bin/sh\nexit 0\n' >pass
 printf '#!/bin/sh\necho "post: $(%s/listing "$1")"\nexit 1\n' "$PWD" >judge
-printf '#!/bin/sh\nwhile read -r l; do\n  d=$(echo "$l" | jq -r .rundir)\n  echo "fail post: $(%s/listing "$d")"\ndone\n' "$PWD" >serve
+printf '#!/bin/sh\n# PATINA_CHECK_SERVE\nwhile read -r l; do\n  d=$(echo "$l" | jq -r .rundir)\n  echo "fail post: $(%s/listing "$d")"\ndone\n' "$PWD" >serve
 chmod +x listing pass judge serve
 
 # sweep OUT KEEP STATUS [FLAGS] -- CMD: seeds 1..4 checked by `pass`, exit STATUS.
@@ -110,11 +110,11 @@ same "$run" craw >same-checked.txt
 want="post: $(./listing craw)"
 rc=0; line=$(./judge "$run") || rc=$?
 [ "$rc $line" = "1 $want" ] || die "the checker by hand: exit $rc, '$line'; the replay's post-crash/ is '$want'"
-for how in --check:./judge --check-serve:./serve; do
+for k in ./judge ./serve; do
     rc=0
-    "$PATINA" recheck "${how%%:*}" "${how#*:}" "$run" >recheck.txt 2>&1 || rc=$?
+    "$PATINA" recheck --check "$k" "$run" >recheck.txt 2>&1 || rc=$?
     got=$(jq -r '"\(.check.label): \(.check.detail)"' "$run/result.json")
-    [ "$got" = "$want" ] || die "recheck ${how%%:*}: the checker read '$got', the replay's post-crash/ is '$want' (exit $rc: $(tail -2 recheck.txt))"
+    [ "$got" = "$want" ] || die "recheck --check $k: the checker read '$got', the replay's post-crash/ is '$want' (exit $rc: $(tail -2 recheck.txt))"
 done
 
 # Nodes: each node's disks are packed and read the same way.
@@ -133,4 +133,4 @@ same nodes/seed-1 nraw >same-nodes.txt
 sweep all all 1 "${crash[@]}" -- /usr/bin/python3 -I -c "$prog" 1
 packed_all=$(find all -name '*.zst') whole_all=$(find all -name live.tree)
 [ -z "$packed_all" ] && [ -n "$whole_all" ] || die "--keep all packed a tree: $packed_all"
-echo "ok: failures: $(cat same-fail.txt); checked: $(cat same-checked.txt), its post-crash/ read by hand and by recheck --check and --check-serve; nodes: $(cat same-nodes.txt); packed $psize bytes for $size; kept line ${shown}B"
+echo "ok: failures: $(cat same-fail.txt); checked: $(cat same-checked.txt), its post-crash/ read by hand and by recheck with a checker per run and one that serves; nodes: $(cat same-nodes.txt); packed $psize bytes for $size; kept line ${shown}B"

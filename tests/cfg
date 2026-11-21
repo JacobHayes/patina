@@ -5,16 +5,18 @@
 # A pmu-* or branches key also turns counter preemption on (preempt = "branches").
 set -eu
 f=$(mktemp "${RUNS:-${TMPDIR:-/tmp}}/cfg-XXXXXX.toml")
-run="" faults="" sched=""
+run="" faults="" sched="" sweep=""
 for kv in "$@"; do
     k=${kv%%=*} v=${kv#*=}
     case $v in
         true | false | *[!0-9]* | '') case $v in true | false) ;; *) v="\"$v\"" ;; esac ;;
     esac
     case $k in
-        tmpfs-bytes | time-limit | timeout | cpus) run="$run$k = $v
+        disk-mb | time-limit | timeout | cpus | log-limit | check-timeout) run="$run$k = $v
 " ;;
         fs-model) faults="$faults$k = $v
+" ;;
+        crash-pairs) sweep="$sweep$k = $v
 " ;;
         pmu-* | branches) sched="$sched$k = $v
 preempt = \"branches\"
@@ -30,5 +32,6 @@ sched=$(printf '%s' "$sched" | awk '!(/^preempt = / && seen++)')
     [ -z "$run" ] || printf '[run]\n%s\n' "$run"
     [ -z "$faults" ] || printf '[faults]\n%s\n' "$faults"
     [ -z "$sched" ] || printf '[sched]\n%s\n' "$sched"
+    [ -z "$sweep" ] || printf '[sweep]\n%s\n' "$sweep"
 } >"$f"
 echo "$f"

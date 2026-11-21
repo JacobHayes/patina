@@ -7,7 +7,7 @@
 : "${PATINA_WORKLOADS:?}"
 o=$RUNS/14/go
 rm -rf "${o:?}"; mkdir -p "$(dirname "$o")"
-timeout 300 "$PATINA" run --seed 1 --cpus 2 --out "$o" --mount "$PATINA_WORKLOADS/go-static":/guest:copy \
+timeout 300 "$PATINA" run --seed 1 --config "$("$PATINA_CFG" cpus=2)" --out "$o" --mount "$PATINA_WORKLOADS/go-static":/guest:copy \
     --fault fs-error-permille=1000 --fault fs-short-permille=300 -- /guest/go-static local >/dev/null 2>&1 \
     || [ -f "$o/result.json" ] || die "go-static: no result.json"
 "$PATINA" log dump "$o/inc-0/boundary.log" >"$o.dump"

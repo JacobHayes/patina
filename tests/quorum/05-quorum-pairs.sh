@@ -1,5 +1,5 @@
 # 5. Quorum: the three-node store of 01-quorum under two machine crashes at crash points
-# (`sweep --branch --branch-pairs`): each first crash's child that ended ok, then another node's
+# (`sweep --branch`, `[sweep] crash-pairs`): each first crash's child that ended ok, then another node's
 # crash at each of its next 3 points, a sample of 60 children and 60 pairs of each of two seeds.
 # A write two nodes acknowledged survives one crash; `nosync` (a node answers before it syncs)
 # loses it when both crash, found only in pairs. The correct store is ok at every first crash
@@ -14,8 +14,9 @@ pairs() {
     f=$o/$1.toml; rm -f "$f"
     b=""; [ "$1" = ok ] || b=$1
     for n in n1 n2 n3; do conf "$f" "$n" python3 /guest/q3.py "$n" $b; done
+    printf '[sweep]\ncrash-pairs = 3\n' >>"$f"
     rm -rf "${o:?}/$1"; st=0
-    timeout 300 "$PATINA" sweep --seeds 1..2 --branch --branch-pairs 3 --branch-max 60 --crash machine -j 6 --keep "$2" \
+    timeout 300 "$PATINA" sweep --seeds 1..2 --branch --branch-max 60 --crash machine -j 6 --keep "$2" \
         --out "$o/$1" --config "$f" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/q3.py driver 2 >"$o/$1.txt" 2>&1 || st=$?
     [ -f "$o/$1/report.json" ] || die "$1: no report (exit $st): $(tail -3 "$o/$1.txt")"
 }

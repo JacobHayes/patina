@@ -1,7 +1,7 @@
 //! What `sweep --branch` knows of a run's crash points besides their count: each point's
 //! place, read back from the run's operation log (one disk's, `oplog.meta`), so that a sweep
 //! can sample them by node and kind of operation (`--branch-max`) and find a second node's
-//! points after a first crash (`--branch-pairs`). Written per run as `points.json` before a
+//! points after a first crash (`[sweep] crash-pairs`). Written per run as `points.json` before a
 //! sweep prunes the run's logs.
 //!
 //! The runtime offers a crash point after each record it appends to a disk's log and before

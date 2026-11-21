@@ -350,7 +350,7 @@ pub fn export_node(ctl: &Ctl, node: usize, work: &Path) -> Result<Tree, String> 
     let len = |c: &Ctl| c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed);
     let before = len(ctl);
     let r = put(ctl, kind, 0, [0; 6], &bytes, ctl.seq.load(Relaxed), 0);
-    // The archive is the check's input, not the guest's output: exempt from `--log-limit`.
+    // The archive is the check's input, not the guest's output: exempt from `[run] log-limit`.
     ctl.log_exempt.fetch_add(len(ctl) - before, Relaxed);
     r.map(|()| tree)
 }

@@ -123,7 +123,7 @@ patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" 
 | `violation` | 1 | an SDK `always`/`unreachable`, or `--check`, failed | triage |
 | `failure` | 1 | nonzero exit not in `--ok-exit` | triage; under faults, is it a clean failure? |
 | `crash` | 1 | killed by a signal | triage |
-| `liveness` | 1 | all threads blocked, virtual `--time-limit` passed, or `--log-limit` reached (`log-limit`) | triage: deadlock or lost wakeup |
+| `liveness` | 1 | all threads blocked, virtual `[run] time-limit` passed, or `[run] log-limit` reached (`log-limit`) | triage: deadlock or lost wakeup |
 | `unsupported` | 2 | Patina does not model what the program did | report the named call; do not hide it |
 | `timeout` | 2 | wall `--timeout` passed | a CPU-bound loop or a hang outside virtual time |
 | `nondeterministic` | 2 | a replay differed from its run | a Patina bug: keep the run directory, report it |

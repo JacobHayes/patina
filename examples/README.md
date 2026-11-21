@@ -155,7 +155,7 @@ violation check: acked-record-lost: acknowledged N, N stored after the crash
 
 Runs that did not crash are not judged.
 
-`examples/checks/confined`, `examples/checks/no-symlink-escape` (with `--log-paths`) and
+`examples/checks/confined`, `examples/checks/no-symlink-escape` and
 `examples/checks/synced-before-mark` judge what a program did
 rather than what it left, from `patina log events` ([Checks from outside the
 program](../docs/GUIDE.md#checks-from-outside-the-program)).

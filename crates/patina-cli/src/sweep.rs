@@ -38,11 +38,10 @@ extern "C" fn on_signal(_: libc::c_int) {
 pub const DEFAULT_SEEDS: &str = "1..100";
 
 /// Flags of the sweep itself; every other flag given is passed to each `patina run`.
-const OWN: [&str; 15] = [
+const OWN: [&str; 14] = [
     "--seeds",
     "--branch",
     "--branch-max",
-    "--branch-pairs",
     "--jobs",
     "--cases",
     "--only-case",
@@ -175,7 +174,7 @@ fn differs(out: &Path, ident: &serde_json::Value) -> Option<String> {
         });
     }
     if old["pairs"] != ident["pairs"] {
-        return Some("another --branch-pairs".into());
+        return Some("another [sweep] crash-pairs".into());
     }
     if old["config"] != ident["config"] {
         let keys = changed_settings(&old["config"], &ident["config"]);
@@ -669,7 +668,7 @@ enum Then {
 /// job (and with `None` a few times a second), with the number running and the current width.
 /// On SIGINT or SIGTERM the running children are terminated and their jobs are not reported.
 /// Returns the number of jobs never started.
-/// With `serve` (`--check-serve`), each worker keeps one checker server and lends it to the
+/// With `serve` (a serving checker), each worker keeps one checker server and lends it to the
 /// runs it starts; one that died or was killed for a bad answer is started again for the next
 /// run, and each is ended with its worker.
 fn pool(
@@ -863,7 +862,7 @@ fn thin(runs: &[report::Run], known: Option<&report::Known>) {
 }
 
 /// A kept run's log over `CUT_OVER` bytes keeps its first and last `CUT_KEEP` (whole records):
-/// a sweep of runs that each reach --log-limit stays small. The seed reproduces the whole log.
+/// a sweep of runs that each reach [run] log-limit stays small. The seed reproduces the whole log.
 const CUT_OVER: u64 = 4 << 20;
 const CUT_KEEP: u64 = (1 << 20) / proto::rec::REC_SIZE as u64 * proto::rec::REC_SIZE as u64;
 
@@ -962,19 +961,19 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         None
     };
     let branch_max = a.num::<usize>("--branch-max").map_err(error)?;
-    let pairs = a.num::<usize>("--branch-pairs").map_err(error)?;
+    let pairs = cfg.crash_pairs;
     if (branch_max.is_some() || pairs.is_some()) && kind.is_none() {
         return Err(error(
-            "--branch-max and --branch-pairs go with --branch".into(),
+            "--branch-max and [sweep] crash-pairs go with --branch".into(),
         ));
     }
     if branch_max == Some(0) || pairs == Some(0) {
         return Err(error(
-            "--branch-max and --branch-pairs are at least 1".into(),
+            "--branch-max and [sweep] crash-pairs are at least 1".into(),
         ));
     }
     // The nodes a branch crashes (its `@NODE,...`, else every node with faults): under
-    // --branch-pairs a first crash's child counts the others' points.
+    // [sweep] crash-pairs a first crash's child counts the others' points.
     let scope_nodes: Vec<String> = match &scope {
         Some(s) => s.split(',').map(str::to_string).collect(),
         None => cfg
@@ -986,7 +985,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     };
     if pairs.is_some() && scope_nodes.len() < 2 {
         return Err(error(
-            "--branch-pairs crashes two nodes: it needs a run with nodes and --crash machine on two or more".into(),
+            "[sweep] crash-pairs crashes two nodes: it needs a run with nodes and --crash machine on two or more".into(),
         ));
     }
     let cases: Option<Vec<Case>> = match a.last("--cases") {
@@ -1004,7 +1003,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         "none" => Keep::None,
         "checked" if cfg.check.is_none() => {
             return Err(error(
-                "--keep checked keeps what a checker reads: give --check or --check-serve (or --keep all)".into(),
+                "--keep checked keeps what a checker reads: give --check (or --keep all)".into(),
             ))
         }
         "checked" => Keep::Checked,
@@ -1300,7 +1299,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                             format!("{k}-at:{}@{}+{k}-at:{}@{}", p.n, p.node, p.n2, p.node2)
                         }
                         Some(p) if p.n > 0 && !p.node.is_empty() => {
-                            // Under --branch-pairs the other nodes count their points too.
+                            // Under [sweep] crash-pairs the other nodes count their points too.
                             let others: Vec<&str> = scope_nodes
                                 .iter()
                                 .filter(|n| **n != p.node)
@@ -1393,7 +1392,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     }
     if let Some(free) = free_bytes(&out).filter(|f| *f < st.run_bytes * width as u64) {
         return Err(error(format!(
-            "the filesystem holding {} has {} free; {width} runs at once may write {} each (--log-limit and their output): free space, or lower -j or --log-limit",
+            "the filesystem holding {} has {} free; {width} runs at once may write {} each ([run] log-limit and their output): free space, or lower -j or [run] log-limit",
             out.display(),
             report::bytes(free),
             report::bytes(st.run_bytes)
@@ -1504,7 +1503,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 String::new()
             }
         ));
-        // Level 1, the first crashes; level 2 (--branch-pairs), a second node's crash at each
+        // Level 1, the first crashes; level 2 ([sweep] crash-pairs), a second node's crash at each
         // of its next points after a first crash whose child ended ok.
         for depth in 1..=(1 + pairs.is_some() as u64) {
             if depth == 2 {
@@ -1769,7 +1768,7 @@ struct State<'k> {
     /// A `--branch` sweep: each base writes where its points are (`branch::describe`) before
     /// its logs are pruned.
     branch: bool,
-    /// `--branch-pairs K`: each first crash's child that ended ok writes the next K points of
+    /// `[sweep] crash-pairs = K`: each first crash's child that ended ok writes the next K points of
     /// each other node after its crash (`branch::window`).
     pairs: Option<usize>,
 }
@@ -1846,7 +1845,7 @@ impl State<'_> {
             let need = self.run_bytes * width.min(left) as u64;
             if let Some(free) = free_bytes(&self.out).filter(|f| *f < need) {
                 self.stopped = Some(format!(
-                    "the filesystem holding {} has {} free, less than {width} runs at once may write ({} each: --log-limit and their output); stopped before it fills",
+                    "the filesystem holding {} has {} free, less than {width} runs at once may write ({} each: [run] log-limit and their output); stopped before it fills",
                     self.out.display(),
                     report::bytes(free),
                     report::bytes(self.run_bytes)

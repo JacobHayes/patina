@@ -32,7 +32,7 @@ for m in kill forked term orphan vfork violation msync hang unmap exit fixed rem
         o=$d/$m-$plane
         c=()
         [ $plane = none ] || c=(--crash "$plane")
-        run "$o" 1 --time-limit 5 "${c[@]}" -- /guest/mapends "$m"
+        run "$o" 1 --config "$("$PATINA_CFG" time-limit=5)" "${c[@]}" -- /guest/mapends "$m"
         got=$(class "$o")
         [ "$got" = "$(want "$m")" ] || die "$m, crash plane $plane: $got $(field "$o/result.json" message)"
         sc=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("self_check", {}).get("verdict", "-"))' "$o/result.json")
@@ -45,7 +45,7 @@ for m in kill forked term orphan vfork violation msync hang unmap exit fixed rem
     done
     echo "$m: $(want "$m") with every crash plane; operation log check ok${native:+; $native as natively}"
 done
-run "$d/again" 1 --time-limit 5 --crash machine -- /guest/mapends kill
+run "$d/again" 1 --config "$("$PATINA_CFG" time-limit=5)" --crash machine -- /guest/mapends kill
 a=$(field "$d/again/result.json" digest)
 b=$(field "$d/kill-machine/result.json" digest)
 [ -n "$a" ] && [ "$a" = "$b" ] || die "kill under --crash machine: a repeat of the seed differs"

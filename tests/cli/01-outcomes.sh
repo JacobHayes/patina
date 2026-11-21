@@ -20,7 +20,7 @@ expect exit3 failure exit -- /bin/sh -c 'exit 3'
 [ "$(field "$RUNS/exit3/result.json" guest.exit)" = 3 ] || die "exit3: guest.exit"
 expect abort crash signal -- /usr/bin/python3 -c 'import os; os.abort()'
 expect deadlock liveness deadlock -- "$G/deadlock"
-expect sleeploop liveness time-limit --time-limit 100 -- "$G/liveness"
+expect sleeploop liveness time-limit --config "$("$PATINA_CFG" time-limit=100)" -- "$G/liveness"
 # The first Stop row of the syscall table.
 set -- $("$PATINA" table | awk -F'|' '$4 ~ /Stop/ && !n++ {gsub(/ /, ""); print $2, $3}')
 [ $# = 2 ] || die "no Stop row in patina table"

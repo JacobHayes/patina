@@ -16,7 +16,7 @@ v f1-machine3 5 --crash machine:3 -- /guest/fjall-harness-debug
 v f1-process3 3 --crash process:3 -- /guest/fjall-harness-debug
 v f2 634 --env FJ_N=2000 --buggify --crash machine:1 -- /guest/fjall-harness-debug
 v f6 946 --env FJ_N=2000 --buggify --crash machine:1 -- /guest/fjall-harness-debug
-v f3 40 --env FJ_N=1000 --buggify --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --time-limit 400 \
+v f3 40 --env FJ_N=1000 --buggify --env FJ_LOG=2 --env FJ_WIPE_PARTIAL=1 --config "$("$PATINA_CFG" time-limit=400)" \
     --fault fs-error-permille=3 --crash machine:2 -- /guest/fjall-harness-debug
 v f4 6 --fault fsync-error-at=61 --crash machine:3 -- /guest/fjall-harness-debug
 v f5 3 --fault fs-short-permille=20 -- /guest/fjall-harness-debug

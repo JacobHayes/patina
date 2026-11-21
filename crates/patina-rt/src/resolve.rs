@@ -125,11 +125,11 @@ fn path_args(nr: u64, a: &[u64; 6]) -> ([Arg; 2], usize) {
 }
 
 /// A call's path buffers (in the trap entry's frame, so they outlive the handler until the
-/// call's record is written): the resolved paths a handler is given, and with `--log-paths`
+/// call's record is written): the resolved paths a handler is given, and with `log_paths`
 /// the path each walked argument resolves to.
 pub struct Paths {
     pub bufs: [PathBuf; 2],
-    /// With `--log-paths`: the argument whose walk `bufs[k]` holds, or `NONE`.
+    /// With `log_paths`: the argument whose walk `bufs[k]` holds, or `NONE`.
     pub logged: [u8; 2],
 }
 
@@ -141,7 +141,7 @@ impl Paths {
             logged: [Paths::NONE; 2],
         }
     }
-    /// The resolved path of argument `i`, if `--log-paths` kept one.
+    /// The resolved path of argument `i`, if `log_paths` kept one.
     pub fn logged(&self, i: usize) -> Option<&[u8]> {
         (0..2)
             .find(|&k| self.logged[k] as usize == i)
@@ -150,7 +150,7 @@ impl Paths {
 }
 
 /// Prepare every path argument of the call: `call.paths()` holds the resolved paths for as
-/// long as the handler runs (and, with `--log-paths`, until the record is written).
+/// long as the handler runs (and, with `log_paths`, until the record is written).
 /// `Err(errno)`: the walk itself failed (ELOOP, ENOENT on the way, ENOTDIR), which is what
 /// the kernel would answer.
 pub fn prepare(call: &mut dyn Call) -> Result<(), i64> {

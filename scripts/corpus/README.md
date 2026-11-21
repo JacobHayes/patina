@@ -43,4 +43,5 @@ already has (git, make, rsync, busybox, sqlite3, python3, curl) come from `/usr`
 helper files beside it) and natively with `GUEST` set to this directory. A workload is a
 short scenario: start the program, drive it (clients, writes, a restart), stop it, print
 what a reader can compare with the native run. Headers set what else the run needs:
-`# flags:` (patina flags), `# seeds:` and `# fseeds:` (sweep widths).
+`# flags:` (patina flags), `# run:` (a `[run]` setting for the patina.toml every phase reads),
+`# seeds:` and `# fseeds:` (sweep widths).

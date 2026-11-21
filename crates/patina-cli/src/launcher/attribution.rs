@@ -164,7 +164,7 @@ impl Faults {
         }
         self.crash_points += end.crash_points;
         let b = std::fs::read(inc.join("boundary.log")).unwrap_or_default();
-        // Decoded as needed, never all at once: a log can be as large as --log-limit.
+        // Decoded as needed, never all at once: a log can be as large as [run] log-limit.
         let chunks = b.as_chunks::<REC_SIZE>().0;
         let rec = |i: usize| chunks.get(i).map(|c| Rec::from_bytes(c));
         if let Some(n) = end.nodes.as_ref() {

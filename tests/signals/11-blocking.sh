@@ -27,7 +27,7 @@ echo "/guest/sig-block retarget restart proc" >>"$o/cases"
 echo "/guest/sig-block vfork restart proc" >>"$o/cases"
 n=10; [ "${CHECK_TIER:-}" != quick ] || n=2; [ "${CHECK_TIER:-}" != release ] || n=5
 st=0
-timeout 300 "$PATINA" sweep --seeds 1..$n --cases "$o/cases" -j 4 --time-limit 100 --keep fail \
+timeout 300 "$PATINA" sweep --seeds 1..$n --cases "$o/cases" -j 4 --config "$("$PATINA_CFG" time-limit=100)" --keep fail \
     --out "$o/sweep" --mount "$PATINA_GUESTS":/guest:copy >"$o/sweep.txt" 2>&1 || st=$?
 outcomes=$(python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["outcomes"], sort_keys=True))' "$o/sweep/report.json")
 echo "sig-block: $(wc -l <"$o/cases") cases x seeds 1-$n: $outcomes (sweep exit $st)"

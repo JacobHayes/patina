@@ -77,7 +77,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Recheck,
         name: "recheck",
-        usage: "patina recheck [--check 'CMD ARGS' | --check-serve 'CMD ARGS'] [--known FILE] DIR...",
+        usage: "patina recheck [--check 'CMD ARGS'] [--known FILE] DIR...",
         help: "judge kept runs again with a checker (each run's own, read anew, or the one given), without running them; then report",
     },
     Command {
@@ -274,7 +274,6 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
-    flag("--cpus", "N", "4", "CPU count the guest sees (1 to 64)", RUNLIKE),
     flag(
         "--preempt",
         "traps|branches|points",
@@ -310,38 +309,10 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag(
-        "--time-limit",
-        "SECONDS",
-        "3600",
-        "virtual time after which the run ends liveness",
-        RUNLIKE,
-    ),
-    flag(
         "--timeout",
         "SECONDS",
         "600",
         "wall time after which the run ends timeout",
-        RUNLIKE,
-    ),
-    flag(
-        "--log-limit",
-        "MIB",
-        "1024",
-        "size of the run's logs at which it ends liveness (log-limit): a livelock's log fills the disk",
-        RUNLIKE,
-    ),
-    flag(
-        "--tmpfs-bytes",
-        "BYTES",
-        "268435456",
-        "size of each sandbox tmpfs (/work, /tmp, copied mounts): a write past it answers ENOSPC",
-        RUNLIKE,
-    ),
-    flag(
-        "--log-paths",
-        "",
-        "off",
-        "record each call's paths (as passed and as walked) and execve's arguments in the log, for a checker (`patina log events`); logs grow by about a third at most",
         RUNLIKE,
     ),
     flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),
@@ -405,14 +376,7 @@ pub const FLAGS: &[Flag] = &[
         "--branch-max",
         "N",
         "every point",
-        "with --branch: at most N children of each seed (and each level of --branch-pairs), a seeded sample by node and kind of operation at the point",
-        &[Cmd::Sweep],
-    ),
-    flag(
-        "--branch-pairs",
-        "K",
-        "off",
-        "with --branch and nodes: then, from each child that ended ok, crash a second node at each of its next K points after the first crash",
+        "with --branch: at most N children of each seed (and each level of [sweep] crash-pairs), a seeded sample by node and kind of operation at the point",
         &[Cmd::Sweep],
     ),
     flag(
@@ -495,7 +459,7 @@ pub const FLAGS: &[Flag] = &[
         name: "--check",
         value: "'CMD ARGS'",
         default: "none",
-        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA_CASE_ID, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail or LABEL [KEY]: detail (grouped by LABEL [KEY]), 77 not judged (first line CLASS: detail, counted by CLASS), else error",
+        help: "after a run that ends ok, run CMD ARGS RUNDIR on the host, as you, not sandboxed, from this directory (env PATINA_SEED, PATINA_EXIT, PATINA_CASE, PATINA_CASE_NAME, PATINA_CASE_ID, PATINA; output in RUNDIR/check.out); exit 0 pass, 1 finding named by its first stdout line LABEL: detail or LABEL [KEY]: detail (grouped by LABEL [KEY]), 77 not judged (first line CLASS: detail, counted by CLASS), else error; a checker that names PATINA_CHECK_SERVE in its file is started once per sweep job and answers a line per run (docs/GUIDE.md)",
         cmds: &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Log, Cmd::Recheck],
         repeat: false,
         per: &[
@@ -512,20 +476,6 @@ pub const FLAGS: &[Flag] = &[
         ],
         per_value: &[(Cmd::Log, "")],
     },
-    flag(
-        "--check-serve",
-        "'CMD ARGS'",
-        "none",
-        "--check with one checker process per sweep job, not per run: CMD ARGS starts with PATINA_CHECK_SERVE=1, reads one JSON line per run on stdin ({\"rundir\": ..., \"env\": {PATINA_SEED, ...}}) and answers one line: pass, fail LABEL[ [KEY]]: detail, or skip CLASS: detail; anything else is error and the process is restarted",
-        &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Recheck],
-    ),
-    flag(
-        "--check-timeout",
-        "SECONDS",
-        "60",
-        "wall time after which the checker is stopped and the run ends error",
-        &[Cmd::Run, Cmd::Verify, Cmd::Sweep, Cmd::Recheck],
-    ),
     flag(
         "--ok-exit",
         "N[,N...]|any",
