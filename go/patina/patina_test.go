@@ -36,7 +36,7 @@ func TestSitesAreInertOutsidePatina(t *testing.T) {
 		t.Fatal("Sometimes.Check(true) returned false")
 	}
 	Reachable("inert-reachable").Mark()
-	if Buggify("inert-fault").Fires() || Buggify("inert-fault-prob").FiresWithProb(1) {
+	if Buggify("inert-fault").Fires() {
 		t.Fatal("a fault fired outside Patina")
 	}
 	if BuggifyDelay("inert-delay").Delay() {

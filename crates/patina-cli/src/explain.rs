@@ -40,21 +40,13 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let err = |e: String| Fail(Outcome::Error, e);
     let [rundir] = a.positional.as_slice() else {
         return Err(err(
-            "usage: patina explain RUNDIR [--from SEQ] [--to SEQ] [--last N] [--grep TEXT] [--full]"
-                .into(),
+            "usage: patina explain RUNDIR [--from SEQ] [--to SEQ] [--full]".into(),
         ));
     };
     let rundir = PathBuf::from(rundir);
     let opts = View {
         from: a.num::<u64>("--from").map_err(err)?,
         to: a.num::<u64>("--to").map_err(err)?,
-        last: a.num::<usize>("--last").map_err(err)?,
-        grep: a.last("--grep").map(|g| {
-            g.split('|')
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect()
-        }),
         full: a.has("--full"),
     };
     let dir = observed(&rundir)?;
@@ -132,8 +124,6 @@ fn observed(rundir: &Path) -> Result<PathBuf, Fail> {
 struct View {
     from: Option<u64>,
     to: Option<u64>,
-    last: Option<usize>,
-    grep: Option<Vec<String>>,
     full: bool,
 }
 
@@ -293,13 +283,6 @@ impl Line {
             }
         }
         k
-    }
-    /// Lines a window keeps whatever `--grep` says: what the seed did, and how actors ended.
-    fn context(&self) -> bool {
-        matches!(
-            self.kind,
-            "fault" | "network" | "crash" | "node" | "exits" | "prints" | "signal"
-        )
     }
 }
 
@@ -489,19 +472,11 @@ impl Story {
         let picked: Vec<Line> = base
             .into_iter()
             .filter(|l| v.from.is_none_or(|f| l.seq >= f) && v.to.is_none_or(|t| l.seq <= t))
-            .filter(|l| match &v.grep {
-                None => true,
-                Some(g) => {
-                    l.context()
-                        || g.iter()
-                            .any(|p| l.who.contains(p.as_str()) || l.text.contains(p.as_str()))
-                }
-            })
             .collect();
         let mut sel = if v.full { picked } else { fold(&picked) };
         let n = sel.len();
         let window = v.from.is_some() || v.to.is_some() || v.full;
-        let last = v.last.unwrap_or(if window { usize::MAX } else { LAST });
+        let last = if window { usize::MAX } else { LAST };
         if sel.len() > last {
             sel.drain(..sel.len() - last);
         }
@@ -580,12 +555,11 @@ impl Story {
             q if q > 0 && !v.full => format!(" ({q} quiet turns left out)"),
             _ => String::new(),
         };
-        let what = if v.grep.is_some() { " with --grep" } else { "" };
         let shown = if sel.len() == n {
-            format!("showing all {n}{what}")
+            format!("showing all {n}")
         } else {
             format!(
-                "showing the last {} of {n}{what} (--last N, --from/--to SEQ, --grep TEXT, --full for others)",
+                "showing the last {} of {n} (--from/--to SEQ, --full for others)",
                 sel.len()
             )
         };

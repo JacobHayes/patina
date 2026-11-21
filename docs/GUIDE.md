@@ -510,8 +510,7 @@ under `--crash`, usually one crash. In order of what helped most on the storage 
   earlier points. To search a region you know (from the `point` of a crash near it, or
   `faults.counts.crash.eligible` of a run without crashes), give the position as a range:
   `--crash machine-at:A..B`.
-- **The fault rates**: a preset's ranges (`--faults disk`), a key's own range, and
-  `--fault swarm=1`, which turns each configured class off in half the seeds.
+- **The fault rates**: a preset's ranges (`--faults disk`) and a key's own range.
 - **The scheduling settings.** `[sched] preempt-permille` (default 100) is the chance that a
   system call switches threads; `[sched] pause-points = false` stops treating the spin hint
   (`pause`; on arm64 `yield`, `isb`, `wfe`, `wfi`) as a scheduling point; `--cpus N` (default 4) is the CPU count the program sees, which sizes
@@ -539,7 +538,7 @@ settings.
 | Preset | Settings |
 |---|---|
 | `--faults disk` | `fs-error-permille=0..5 fs-short-permille=0..20 fsync-error-permille=0..3 fs-delay-permille=0..20` |
-| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-chunk-gap-us=1..10 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
+| `--faults net` | `net-delay-ms=0..50 net-chunk-max=1..65536 net-reset-permille=5..50 net-connect-refuse-permille=0..10 net-drop-permille=0..50 net-dup-permille=0..20 net-reorder-permille=0..50` |
 | `--faults all` | both, plus `mem-error-permille=0..2` |
 | `--faults cluster` | with nodes only: `net`'s keys, partitions, pauses, clock skew and machine crashes ([Several machines](#several-machines)) |
 
@@ -564,10 +563,8 @@ faults: not applicable (a preset's, nothing to act on in any run): net-drop, net
 
 Over TCP, `net-chunk-max` splits each delivery into pieces of at most that many bytes (a
 range draws a size per seed, log-uniformly, so about one seed in four of `1..65536` delivers
-at most 16 bytes a piece, and one in 17 a byte at a time). `net-chunk-gap-us=A..B` sets the
-virtual time between the pieces of one delivery; without it each piece waits a whole
-`net-delay-ms` draw, as a link that slow would. The presets set a gap of 1 to 10 µs, so a
-seed's throughput over one connection in `--faults net` is about 180 kB/s at the least, a
+at most 16 bytes a piece, and one in 17 a byte at a time). The pieces of one delivery follow
+each other by 1 to 10 µs of virtual time, so a seed's throughput over one connection in `--faults net` is about 180 kB/s at the least, a
 median of about 4 MB/s and 6 MB/s at the 90th percentile (256 KiB sent, docs/EVIDENCE.md,
 "Net preset shaping"); a protocol timeout shorter than its message takes at that rate is
 then a finding about the timeout. For the harsh link, name the keys: `--fault
@@ -716,8 +713,7 @@ Each restart begins 1 to 61 s of virtual time after the crash, drawn from the se
 `--fault restart-gap-ms=A..B` draws it in A..B ms instead (`5000..5000` for exactly 5 s), for
 a program whose recovery depends on how long it was down (leases, timeouts).
 The other faults stay on in the incarnations after a crash, so recovery code meets them
-too; `--fault faults-in-recovery=0` turns them off after the first crash, to see whether a
-program recovers from the crash alone.
+too (`patina minimize` shows whether the crash alone fails it).
 
 ## Checks from outside the program
 
@@ -1326,7 +1322,7 @@ lost and nothing fails at once, as with a cable pulled out for a while: bytes an
 of a connection that a cut direction carries are held; the receiver's reads wait, and the
 sender's writes go on until its buffer fills. A heal delivers what was held in order, each item after the link's
 delay from the heal. A direction still cut after 924.6 s of virtual time (the kernel's default
-retransmission limit; `net-give-up-ms`, or the sender's `TCP_USER_TIMEOUT`) gives up: the
+retransmission limit, or the sender's `TCP_USER_TIMEOUT`) gives up: the
 sender's next call fails with `ETIMEDOUT` and the connection is reset. A connection with
 `SO_KEEPALIVE` probes as Linux does (`TCP_KEEPIDLE`, `TCP_KEEPINTVL`, `TCP_KEEPCNT`, default
 7200, 75 and 9 s and probes): a side whose probes go unanswered across a cut for its budget
@@ -1334,7 +1330,7 @@ sender's next call fails with `ETIMEDOUT` and the connection is reset. A connect
 reads; a cut shorter than that changes nothing. Each unanswered probe is a `probe` event. A
 connect across a cut
 (in either direction) retries at 1, 3, 7, 15, 31 and 63 s and fails with `ETIMEDOUT` at 127 s
-(the kernel's default 6 SYN retries; `net-syn-retries`, or the socket's `TCP_SYNCNT`); healed in
+(the kernel's default 6 SYN retries, or the socket's `TCP_SYNCNT`); healed in
 between, it completes at the next retry, refused then if nothing listens. A datagram sent while
 its link is cut is lost.
 `result.json`'s `nodes.net` counts the cuts, heals and held directions and lists the links still
@@ -1380,8 +1376,8 @@ so a direction of a pair of nodes gets its own.
 **Partitions** are the seed's cuts. `partition-gap-ms=A..B` turns them on: after a gap drawn
 from `A..B` the seed draws a shape and two sides of the nodes the link faults act on, cuts the
 links between them for `partition-ms` (a range, default `1000..30000`), heals them, and draws
-the next gap. A cut is a script's cut: held, not lost, but for datagrams. The shapes
-(`partition-shape`, any of them joined by commas; default all):
+the next gap. A cut is a script's cut: held, not lost, but for datagrams. The shape is drawn
+from those the nodes fit:
 
 | Shape | Cuts |
 |---|---|
@@ -1486,8 +1482,7 @@ node, `crash-gap-ms=A..B` (default `5000..60000`) is the virtual time to its nex
 a kill, `down-ms=A..B` (default `1000..5000`, short beside the gap, so that several nodes are
 seldom all down at once) the time it stays down before its restart.
 `max-incarnations=N` stops the kills once a node has started N times (each node counts its
-own), and `faults-in-recovery=0` turns the network's faults, partitions and every node's
-disk and memory faults off after the first kill (the SDK's `buggify` points stay on). In a run with nodes `--crash` means this, its machine form
+own). In a run with nodes `--crash` means this, its machine form
 (`--crash machine[@a,b]`, next section) or a machine crash at a node's crash points
 ([At a node's crash points](#at-a-nodes-crash-points)); `restart-gap-ms` is refused, and the
 driver is never killed.
@@ -1563,8 +1558,8 @@ nodes that had it (`tests/quorum/03-quorum-kills.sh`); without it, the same swee
 
 `patina ctl node kill NAME` (without `--process`) crashes node `NAME`'s machine, and
 `--crash machine` has the seed do it (`--crash machine@a,b`: only those nodes), at the times it
-draws for its kills, with the same `crash-gap-ms`, `down-ms`, `max-incarnations`, `restart` and
-`faults-in-recovery`. A machine crash differs from a process kill in three ways.
+draws for its kills, with the same `crash-gap-ms`, `down-ms`, `max-incarnations` and `restart`.
+A machine crash differs from a process kill in three ways.
 
 - **The disk.** Each node's work tree is a disk of its own. What the node had not synced may be
   lost: its next boot starts on what a file system would have kept, drawn from the seed under
@@ -1574,7 +1569,7 @@ draws for its kills, with the same `crash-gap-ms`, `down-ms`, `max-incarnations`
   start empty, as after a reboot.
 - **Silence.** The node sends nothing as it goes down: no FIN, no RST. A peer learns of it only
   from its own timeouts: what it sends to the node is held, and its connection fails with
-  `ETIMEDOUT` after its `TCP_USER_TIMEOUT` (or `net-give-up-ms`); a peer that only reads waits,
+  `ETIMEDOUT` after its `TCP_USER_TIMEOUT` (or Linux's 924.6 s); a peer that only reads waits,
   unless it keeps the connection alive (`SO_KEEPALIVE`): its probes go unanswered and it fails
   with `ETIMEDOUT` after idle + count x interval, or with `ECONNRESET` if a probe reaches the
   node once it is back.
@@ -1758,7 +1753,7 @@ fsync-error-permille = 5
 
 Each node draws a range from a seed of its own and counts its own calls (`fs-error-at`,
 `fsync-error-at`, `enospc-after-bytes`) over all its boots; `result.json` shows each node's settings as
-`KEY@NODE`; with `swarm`, each node turns its classes off by its own seed. The other keys are
+`KEY@NODE`. The other keys are
 the run's and take no scope. A node with `faults = false` in its table gets none of its own:
 like the driver, it is left out of `--faults`, `--fault` and `--crash` given without a scope,
 and a scope may not name it; the links to it and the partitions, which are the run's, still
@@ -1796,7 +1791,7 @@ What a pause does:
   program reading its monotonic clock after a resume sees the time that passed.
 - **Network.** What a peer sends to the node is held, as across a cut: the peer's writes go
   on until its buffer fills, its reads wait, and a peer that has data the node has not
-  acknowledged gives up after its `TCP_USER_TIMEOUT` (or `net-give-up-ms`), its next call
+  acknowledged gives up after its `TCP_USER_TIMEOUT` (or Linux's 924.6 s), its next call
   failing with `ETIMEDOUT`. Data on its way to the node when the pause began is held too, with
   the rest of its delay; data the node sent before the pause arrives. A connect to or from the
   node waits for its SYN retries. A datagram to a paused node is lost. The node's own TCP
@@ -2197,9 +2192,8 @@ merged into one line until it repeats, a turn of only calls in which nothing sta
 (when the story is longer than its window), and repeats: up to 12 lines that come back at
 least 3 times in a row, numbers aside, are kept once with `... N times in all, until here`.
 Faults, partitions, crashes and node events before the window are listed first, folded by kind.
-By default the last 40 lines are shown; `--last N`, `--from SEQ`/`--to SEQ` (event numbers),
-`--grep TEXT[|TEXT...]` (lines that contain one of the texts, with what the seed did and how
-actors ended) and `--full` (every line, nothing folded) choose others. `--format json` prints
+By default the last 40 lines are shown; `--from SEQ`/`--to SEQ` (event numbers) and `--full`
+(every line, nothing folded; pipe it to `grep`) choose others. `--format json` prints
 one JSON object per line: the outcome, then each line (`kind`, `who`, `text`, `seq`, `t` in
 virtual nanoseconds, and `to` for a message whose receiver is known), then the stop line.
 
@@ -2552,12 +2546,12 @@ sweep: /tmp/patina/patina-out/sweep holds another sweep (other settings: cmd, en
 new: failure exit: exit 1   (seed 2: patina replay /tmp/patina/patina-out/sweep/seed-2)
 sweep: replaying the first seed of 1 finding
 sweep: 143.0 KiB kept in /tmp/patina/patina-out/sweep
-patina sweep: 20 runs, 11 findings in 1 group, 9 ok   (0.2s, 8 jobs)
-outcomes: failure 11, ok 9
+patina sweep: 20 runs, 13 findings in 1 group, 7 ok   (0.2s, 8 jobs)
+outcomes: failure 13, ok 7
 compute points: /usr/bin/python3 (lines)
 
 failure exit: exit 1
-  11 of 20 runs   first: seed 2   replayed: identical
+  13 of 20 runs   first: seed 2   replayed: identical
   rerun:  patina run --seed 2 --env PYTHONPATH=/sdk --mount /tmp/patina/tests/guests/compute/py:/guest --mount /tmp/patina/sdk/python:/sdk -- python3 -m patina /guest/pycompute.py cache 200
   replay: patina replay /tmp/patina/patina-out/sweep/seed-2
   explain: patina explain /tmp/patina/patina-out/sweep/seed-2
@@ -2947,23 +2941,3 @@ install the profile there for the path patina has inside the container (`patina 
 `/etc/apparmor.d/patina` and load it with `sudo apparmor_parser -r /etc/apparmor.d/patina`), or
 set the host's `kernel.apparmor_restrict_unprivileged_userns=0`. `patina doctor` in the
 container names both.
-
-## Moving from 0.5
-
-| 0.5 | Now |
-|---|---|
-| `verdict(VerdictKind::Violation, ..)` | `always!(cond, label, ..)`, or `violation(label, detail)` for a label made at run time |
-| `verdict(VerdictKind::Pass)` and the other kinds | exit 0 passes; a nonzero exit, a panic or a signal fails |
-| `lifecycle::setup_complete()`, `lifecycle::event!` | `setup_complete()`, `mark!` |
-| `rng()` | any RNG: `getrandom` and `AT_RANDOM` come from the seed |
-| `param("k")`, `--param k=v` | `--env K=V` and `std::env::var("K")` |
-| `#[patina_dst::test]` | a plain `#[test]`, swept with `--cases` ([Test suites](#test-suites)) |
-| `patina-dst-proptest` | plain `proptest`; its seed comes from `getrandom` |
-| `patina test` | `patina sweep --cases` |
-| `patina campaign` | `patina sweep` with `--faults`, `--crash`, `--buggify` |
-| `cargo patina build`, `cargo patina audit` | `cargo build`: any Linux binary for the host runs |
-
-A violation ends the run. A harness that reported every broken invariant with one `verdict`
-each now checks them all first and makes one call naming each that failed, or keeps the most
-telling one. A harness gated on `cfg(patina)` needs its build to set it
-(`RUSTFLAGS="--cfg patina"` or `.cargo/config.toml`); nothing sets it for you.

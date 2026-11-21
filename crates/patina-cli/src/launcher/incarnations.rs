@@ -11,8 +11,7 @@
 //! ```
 //!
 //! Crashes are drawn only while incarnations remain: the last permitted incarnation runs
-//! with crashes off. An `-at` crash fires once. With `faults-in-recovery = false` faults
-//! other than crashes stop after the first crash. A run with crashes on ends with the
+//! with crashes off. An `-at` crash fires once. A run with crashes on ends with the
 //! operation log's self-check (`self_check`).
 
 use super::attribution::{lost, Faults};
@@ -374,9 +373,6 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             // An `-at` crash fires once.
             cfg.crash_kind = CRASH_NONE;
             cfg.crash_at = 0;
-        }
-        if !o.plan.faults_in_recovery {
-            cfg.faults_off = 1;
         }
         k += 1;
     }

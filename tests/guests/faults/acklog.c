@@ -42,6 +42,11 @@ static int valid_rec(const char *buf, long len, int i) {
 static char *slurp(const char *p, long *len) {
     *len = 0;
     int fd = open(p, O_RDONLY);
+    if (fd < 0 && errno != ENOENT) {
+        /* Recovery cannot judge what it cannot open: stop without acknowledging more. */
+        printf("open %s: %s: stopping\n", p, strerrorname_np(errno));
+        exit(0);
+    }
     if (fd < 0) return NULL;
     struct stat st;
     fstat(fd, &st);

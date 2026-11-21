@@ -8,7 +8,7 @@
 //! done at its time as for any thread, and the node's threads see it all at once when they run
 //! again, in the scheduler's order. Its links are cut by a layer of their own
 //! (`Links::paused`): what a peer sends to it is held as on a cut, so the peer's own give-up
-//! clock (`net-give-up-ms`, its `TCP_USER_TIMEOUT`) runs; what was on its way to the node and
+//! clock (Linux's, or its `TCP_USER_TIMEOUT`) runs; what was on its way to the node and
 //! not yet delivered is held too (`wire_pause`), with the rest of its delay; a connect to it
 //! or from it waits for its SYN retries; a datagram to it is lost; a keepalive probe either way
 //! goes unanswered (its clocks run, so the node's own probes do too). At the resume every link
@@ -25,8 +25,7 @@
 //! pause of a length drawn from `pause-ms`, the next gap from its end. Every draw is on
 //! `Stream::Node`, keyed by the node, the pause's ordinal in the chain and a sub-key
 //! (`NSUB_PAUSE_*`), so turning pauses on moves no other decision. A start that falls while
-//! faults may not act (before `setup-complete` under `faults-after-setup`, after a crash under
-//! `faults-in-recovery=0`), while the node is down, or while a script has paused it, makes no
+//! faults may not act (before `setup-complete` under `faults-after-setup`), while the node is down, or while a script has paused it, makes no
 //! pause. A start does not keep a run alive (`Live::No`): with every other thread waiting for
 //! nothing, a pause changes nothing. An end does (`Live::Yes`): the node's threads run again.
 //! A script's pause with no resume ahead keeps nothing alive, nor do the paused node's timers

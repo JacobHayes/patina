@@ -20,7 +20,8 @@ updates the docs in the same commit.
 
 The agent skill, `skills/patina/` (SKILL.md and its reference files), tells coding agents how to
 use Patina; a change to user-facing behaviour updates it in the same commit. `./check docs` runs
-its commands and checks every name in it against `patina --help --format json`.
+its commands and checks every name in it, and every `patina` command line in the user docs
+(not EVIDENCE.md, a record of past runs), against `patina --help --format json`.
 
 ## Layout
 

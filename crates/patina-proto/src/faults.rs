@@ -105,8 +105,7 @@ const EDQUOT: i32 = 122;
 /// The errnos an injected error may take: only what Linux can return for this call on this
 /// object. The injector draws from this table and from nothing else; an empty slice means
 /// the call is never failed with an error (pipes and unix sockets get short transfers and
-/// delays only; `close` fails only on a regular file, after closing it). `EINTR` is added
-/// by the runtime, with `fs-eintr=1`, where `eintr_ok` says so. Network faults draw no errno
+/// delays only; `close` fails only on a regular file, after closing it). Network faults draw no errno
 /// here: TCP's act on the wire (a reset answers `ECONNRESET`, a refused connect
 /// `ECONNREFUSED`), and a datagram fault loses, duplicates or holds the datagram, so a UDP
 /// call never fails from a fault (`ECONNREFUSED` on a connected UDP socket is a port nobody
@@ -127,12 +126,6 @@ pub fn errnos(obj: Obj, c: FClass, creating: bool) -> &'static [i32] {
         (_, FClass::Rename | FClass::Mkdir | FClass::Link | FClass::Fallocate) => &[EIO, ENOSPC],
         (_, FClass::Unlink | FClass::Truncate) => &[EIO],
     }
-}
-
-/// Can `EINTR` be drawn (with `fs-eintr=1`)? For the calls on a `/work` file or path that
-/// can wait in Linux.
-pub fn eintr_ok(obj: Obj, c: FClass) -> bool {
-    matches!(obj, Obj::File | Obj::Path) && matches!(c, FClass::Open | FClass::Read | FClass::Write)
 }
 
 /// May the count of this read or write be shortened? Regular files, pipes and unix sockets.
@@ -247,7 +240,6 @@ pub struct FaultCfg {
     /// `fs-error-at=CLASS:N`: class index + 1 (0: off) and N.
     pub fs_error_at_class: u64,
     pub fs_error_at_n: u64,
-    pub fs_eintr: u64,
     /// `fs-short-permille`.
     pub short_permille: u64,
     pub fsync_error_permille: u64,
@@ -274,8 +266,6 @@ pub struct FaultCfg {
     pub crash_enabled: u64,
     /// Incarnation number (also `PATINA_INCARNATION`).
     pub incarnation: u64,
-    /// `faults-in-recovery = false`: no faults other than crashes after the first crash.
-    pub faults_off: u64,
     /// `mem-limit-mb` in bytes (0: off): anonymous memory growth past it answers `ENOMEM`.
     pub mem_limit_bytes: u64,
     /// `path-swap-permille`, `path-swap-at` (0: off).
@@ -286,7 +276,7 @@ pub struct FaultCfg {
 
 impl FaultCfg {
     pub fn faults_active(&self) -> bool {
-        self.any != 0 && self.faults_off == 0
+        self.any != 0
     }
     pub fn path_swap(&self) -> bool {
         self.path_swap_permille != 0 || self.path_swap_at != 0

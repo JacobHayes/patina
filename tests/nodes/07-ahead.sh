@@ -30,7 +30,7 @@ run_ok "$o/restart" 1 --config "$o/exit.toml" -- python3 /guest/ahead.py driver 
 [ "$(cat "$o/restart/inc-0/stdout")" = "restart: back inc=1" ] || die "restart: $(cat "$o/restart/inc-0/stdout")"
 echo "a restart ahead: $(cat "$o/restart/inc-0/stdout")"
 
-parts="--fault net-links=driver --fault partition-gap-ms=2000..2000 --fault partition-ms=5000..5000 --fault partition-shape=split"
+parts="--fault net-links=driver --fault partition-gap-ms=2000..2000 --fault partition-ms=5000..5000"
 run_ok "$o/heal" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py driver heal
 [ "$(cat "$o/heal/inc-0/stdout")" = "heal: pong" ] || die "heal: $(cat "$o/heal/inc-0/stdout")"
 p=$(field "$o/heal/result.json" nodes.partitions.0)

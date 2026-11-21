@@ -32,7 +32,7 @@
 //!   and a sweep does not list it as unmet when no run reaches it. [`violation`] is a failed
 //!   `always` with a label computed at run time.
 //! - [`sometimes!`], [`reachable!`]: coverage oracles, reported per run and folded by a sweep.
-//! - [`buggify!`], [`buggify_with_prob!`]: a fault point. False unless the run has
+//! - [`buggify!`]: a fault point. False unless the run has
 //!   `--buggify`; then a point is active in a quarter of runs and an active point fires on a
 //!   quarter of its evaluations, decided from the seed and the label alone. `--fault
 //!   point:LABEL=PERMILLE` forces one point's rate (`0`: off).
@@ -199,20 +199,6 @@ macro_rules! buggify {
         $crate::__site!($crate::__rt::KIND_BUGGIFY, $label);
         static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
         __PATINA_SITE.point(false, __PATINA_LABEL, -1)
-    }};
-}
-
-/// [`buggify!`] at probability `p` (`0.0..=1.0`) per evaluation instead of the run default.
-///
-/// ```
-/// assert!(!patina_dst::buggify_with_prob!("aggressive-retry", 1.0));
-/// ```
-#[macro_export]
-macro_rules! buggify_with_prob {
-    ($label:expr, $p:expr $(,)?) => {{
-        $crate::__site!($crate::__rt::KIND_BUGGIFY, $label);
-        static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
-        __PATINA_SITE.point(false, __PATINA_LABEL, $crate::__rt::permille($p))
     }};
 }
 

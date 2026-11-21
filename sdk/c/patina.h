@@ -9,7 +9,6 @@
  *   PATINA_REACHABLE("label")              should be reached on some runs
  *   PATINA_UNREACHABLE("label", detail)    must not be reached: reaching it is a violation
  *   PATINA_BUGGIFY("label")                fault point: 1 on seed-chosen evaluations (--buggify)
- *   PATINA_BUGGIFY_WITH_PROB("label", p)   the same at p per mille instead of the run default
  *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--buggify)
  *   PATINA_DELAY("label", max_ns)          maybe sleep a seeded virtual time (0: default range)
  *   patina_mark(label), patina_setup_complete(), patina_is_simulated()
@@ -181,11 +180,6 @@ static inline long patina_control(const char *words) {
     return patina__sys(PATINA_OP_CONTROL, words, n);
 }
 
-/* Declare a site whose label is not a literal (the macros declare theirs in the ELF section). */
-static inline void patina_declare(int kind, const char *label, const char *where) {
-    if (patina_is_simulated()) patina__call(PATINA_OP_DECLARE, kind, 0, label, where, 0, 0, 0);
-}
-
 #define PATINA__STR2(x) #x
 #define PATINA__STR(x) PATINA__STR2(x)
 #define PATINA__LOC __FILE__ ":" PATINA__STR(__LINE__)
@@ -193,7 +187,7 @@ static inline void patina_declare(int kind, const char *label, const char *where
 /* The site's record in `patina_sites`: 0xb7, kind, label length, location length, label,
  * location. No pointers, so it needs no relocation; the runtime reads it from the file. C only:
  * C++ cannot initialise an array with a string literal minus its NUL, so C++ sites are not
- * declared ahead (call patina_declare for one that must be reported unreached). */
+ * declared ahead. */
 #if defined(__has_attribute)
 #if __has_attribute(nonstring)
 #define PATINA__NONSTRING __attribute__((nonstring))
@@ -261,8 +255,6 @@ static inline void patina_declare(int kind, const char *label, const char *where
     })
 
 #define PATINA_BUGGIFY(label) PATINA__POINT(PATINA_OP_BUGGIFY, PATINA_KIND_BUGGIFY, label, -1)
-#define PATINA_BUGGIFY_WITH_PROB(label, permille)                                              \
-    PATINA__POINT(PATINA_OP_BUGGIFY, PATINA_KIND_BUGGIFY, label, (int64_t)(permille))
 #define PATINA_DELAY(label, max_ns)                                                            \
     PATINA__POINT(PATINA_OP_DELAY, PATINA_KIND_DELAY, label, (int64_t)(max_ns))
 

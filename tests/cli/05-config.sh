@@ -23,7 +23,7 @@ timeout = 50
 fs-error-permille = 5
 EOF
 st=0
-(cd "$d" && PATINA_SEED=3 timeout 60 "$PATINA" run --out file) >"$RUNS/file.txt" 2>&1 || st=$?
+(cd "$d" && timeout 60 "$PATINA" run --seed 3 --out file) >"$RUNS/file.txt" 2>&1 || st=$?
 [ -f "$d/file/result.json" ] || die "file: no result.json ($(tail -2 "$RUNS/file.txt"))"
 (cd "$d" && timeout 60 "$PATINA" run --config empty.toml --out flags --seed 3 --cpus 3 --env CLI_TEST=1 \
     --mount data:/data --time-limit 500 --timeout 50 --fault fs-error-permille=5 -- ./prog a) >"$RUNS/flags.txt" 2>&1 || true

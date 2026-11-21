@@ -1,5 +1,6 @@
-"""tests/docs/skill.py: the agent skill (skills/*/*.md) names only what the patina under test has,
-and mentions every command, fault preset and outcome it has.
+"""tests/docs/skill.py: the agent skill (skills/*/*.md) and the user docs (README.md, the guide,
+the examples' README, ARCHITECTURE.md) name only what the patina under test has; the skill also
+mentions every command, fault preset and outcome it has.
 
 ./check docs runs the skill's command blocks (transcripts.py); this checks the names around them,
 which no command runs. The patina binary is the source of truth (`patina --help --format json`):
@@ -11,6 +12,7 @@ which no command runs. The patina binary is the source of truth (`patina --help 
   KIND`, a kind the option's help names; an option whose value is a list of words, one of them.
   Upper-case words are placeholders and are not checked.
 - The skill's table whose first column is `Outcome` lists every outcome with its exit status.
+- docs/EVIDENCE.md is a record of past runs, each with the build it used, and is not checked.
 - Every command appears as `patina COMMAND`, and every preset as a `--faults` value, somewhere in
   the skill: a new one fails here until the skill says when an agent uses it.
 
@@ -26,8 +28,11 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 SKILLS = os.path.join(REPO, "skills")
+DOCS = ["README.md", "docs/GUIDE.md", "examples/README.md", "ARCHITECTURE.md"]
 FENCE = re.compile(r"^```(\w*)\s*$")
 SPAN = re.compile(r"`([^`]+)`")
+# The commands `patina debug` adds to gdb, which the docs show as `patina procs` and so on.
+GDB = {"procs", "attach", "where"}
 KEY = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$")
 PLACEHOLDER = re.compile(r"[A-Z]")
 
@@ -67,8 +72,8 @@ def code(path):
             fence = None
             continue
         if fence is not None:
-            if fence == "sh" or (fence == "text" and line.startswith("$ ")):
-                text = line[2:] if fence == "text" else line
+            if fence == "sh" or (fence == "text" and (line.startswith("$ ") or cont)):
+                text = line[2:] if fence == "text" and line.startswith("$ ") else line
                 cont += text
                 if text.endswith("\\"):
                     cont = cont[:-1]
@@ -95,7 +100,7 @@ def code(path):
 def commands(text):
     """The `patina ...` invocations in a line of code, each as its words up to the end of that
     command (a pipe, `;`, `&&`, `)`)."""
-    for m in re.finditer(r"(?:^|[\s;(&|])patina\s+(?=\S)", text):
+    for m in re.finditer(r"(?:^|[\s;(&|])(?<!-m )patina\s+(?=\S)", text):
         rest = re.split(r"\s(?:\||;|&&|\|\|)\s|\)", text[m.end():])[0]
         try:
             yield shlex.split(rest)
@@ -148,10 +153,10 @@ def check_value(where, name, value, arg, v, bad, seen):
                 bad.append(f"{where}: no fault preset {p}")
     elif name == "--crash":
         for part in arg.split("+"):
-            kind = re.split(r"[:@]", part)[0]
+            kind = re.split(r"[:@\[]", part)[0]
             if kind not in v["crash"]:
                 bad.append(f"{where}: no crash kind {kind} (--crash help: {sorted(v['crash'])})")
-    elif "|" in value and all(re.fullmatch(r"[a-z]+", a) for a in value.split("|")):
+    elif "|" in value and arg.replace("\\|", "|") != value and all(re.fullmatch(r"[a-z]+", a) for a in value.split("|")):
         for a in arg.split(","):
             if a not in value.split("|"):
                 bad.append(f"{where}: {name} takes {value}, not {a}")
@@ -165,6 +170,67 @@ def check_key(where, kv, v, bad):
         bad.append(f"{where}: no fault key {key}")
 
 
+def check_file(path, v, bad, seen, doc=False):
+    """Check the names in one file, noting in seen the commands, presets and outcomes it names.
+    A doc (not the skill) also shows other tools' options in code spans: there only the options of
+    a `patina` command are checked."""
+    rel = os.path.relpath(path, REPO)
+    pieces, rows = code(path)
+    for no, text, kind in pieces:
+        where = f"{rel}:{no}"
+        found = False
+        for words in commands(text):
+            found = True
+            if not words or PLACEHOLDER.search(words[0]):
+                continue
+            if words[0] in ("--version", "--help") or words[0].startswith("__") \
+                    or (doc and words[0] in GDB):
+                continue
+            cmd = words[0]
+            if cmd not in v["commands"]:
+                bad.append(f"{where}: no command patina {cmd}")
+                continue
+            seen["commands"].add(cmd)
+            if cmd == "ctl":  # its words are the control call's (`node kill NAME --process`)
+                continue
+            rest = words[1:]
+            if cmd in ("log", "cache") and rest and not rest[0].startswith("-") \
+                    and not PLACEHOLDER.search(rest[0]):
+                if rest[0] not in v["words"][cmd]:
+                    bad.append(f"{where}: no patina {cmd} {rest[0]} "
+                               f"(usage: {v['commands'][cmd]['usage']})")
+                rest = rest[1:]
+            check_words(where, cmd, rest, v, bad, seen)
+        if found or kind != "span" or (doc and text.startswith("-")):
+            continue
+        if text.startswith("-") and not text.startswith("--- "):
+            try:
+                words = shlex.split(text)
+            except ValueError:
+                words = text.split()
+            check_words(where, None, words, v, bad, seen)
+        elif "=" in text and " " not in text and KEY.match(text.split("=")[0]):
+            check_key(where, text, v, bad)
+    header, prev = None, 0
+    for no, cells in rows:
+        if no != prev + 1:
+            header = None
+        prev = no
+        if cells[0] == "Outcome":
+            header = cells
+            continue
+        m = re.fullmatch(r"`([a-z-]+)`", cells[0])
+        if header is None or not m:
+            continue
+        name = m.group(1)
+        seen["outcomes"][name] = f"{rel}:{no}"
+        if name not in v["outcomes"]:
+            bad.append(f"{rel}:{no}: no outcome {name}")
+        elif "Exit" in header and cells[header.index("Exit")] != str(v["outcomes"][name]):
+            bad.append(f"{rel}:{no}: outcome {name} exits {v['outcomes'][name]}, "
+                       f"the doc says {cells[header.index('Exit')]}")
+
+
 def main():
     patina = os.environ.get("PATINA")
     if not patina:
@@ -174,58 +240,10 @@ def main():
     bad = []
     seen = {"commands": set(), "presets": set(), "outcomes": {}}
     for path in files:
-        rel = os.path.relpath(path, REPO)
-        pieces, rows = code(path)
-        for no, text, kind in pieces:
-            where = f"{rel}:{no}"
-            found = False
-            for words in commands(text):
-                found = True
-                if not words or PLACEHOLDER.search(words[0]):
-                    continue
-                if words[0] in ("--version", "--help"):
-                    continue
-                cmd = words[0]
-                if cmd not in v["commands"]:
-                    bad.append(f"{where}: no command patina {cmd}")
-                    continue
-                seen["commands"].add(cmd)
-                rest = words[1:]
-                if cmd in ("log", "cache") and rest and not rest[0].startswith("-") \
-                        and not PLACEHOLDER.search(rest[0]):
-                    if rest[0] not in v["words"][cmd]:
-                        bad.append(f"{where}: no patina {cmd} {rest[0]} "
-                                   f"(usage: {v['commands'][cmd]['usage']})")
-                    rest = rest[1:]
-                check_words(where, cmd, rest, v, bad, seen)
-            if found or kind != "span":
-                continue
-            if text.startswith("-") and not text.startswith("--- "):
-                try:
-                    words = shlex.split(text)
-                except ValueError:
-                    words = text.split()
-                check_words(where, None, words, v, bad, seen)
-            elif "=" in text and " " not in text and KEY.match(text.split("=")[0]):
-                check_key(where, text, v, bad)
-        header, prev = None, 0
-        for no, cells in rows:
-            if no != prev + 1:
-                header = None
-            prev = no
-            if cells[0] == "Outcome":
-                header = cells
-                continue
-            m = re.fullmatch(r"`([a-z-]+)`", cells[0])
-            if header is None or not m:
-                continue
-            name = m.group(1)
-            seen["outcomes"][name] = f"{rel}:{no}"
-            if name not in v["outcomes"]:
-                bad.append(f"{rel}:{no}: no outcome {name}")
-            elif "Exit" in header and cells[header.index("Exit")] != str(v["outcomes"][name]):
-                bad.append(f"{rel}:{no}: outcome {name} exits {v['outcomes'][name]}, "
-                           f"the skill says {cells[header.index('Exit')]}")
+        check_file(path, v, bad, seen)
+    for d in DOCS:
+        check_file(os.path.join(REPO, d), v, bad, {"commands": set(), "presets": set(), "outcomes": {}},
+                   doc=True)
     for c in sorted(set(v["commands"]) - seen["commands"]):
         bad.append(f"skills: patina {c} is not mentioned (a new command?): say in skills/patina/SKILL.md "
                    "when an agent uses it")
@@ -237,7 +255,7 @@ def main():
                    "outcome?): say what an agent does with it")
     for b in bad:
         print("FAIL: " + b)
-    print(f"== skill: {len(files)} files; {len(seen['commands'])} commands, {len(seen['presets'])} presets, "
+    print(f"== skill: {len(files)} files and {len(DOCS)} docs; {len(seen['commands'])} commands, {len(seen['presets'])} presets, "
           f"{len(seen['outcomes'])} outcomes named; {len(bad)} unknown or missing")
     return 1 if bad else 0
 

@@ -74,15 +74,11 @@ pub struct NodeTab {
     /// Written by the launcher: each node's restart policy, boots and ok-exit statuses, and the
     /// run's node kill and down-time settings.
     pub conf: [NodeConf; MAX_NODES],
-    /// `crash-gap-ms` and `down-ms` (ns); `faults-in-recovery=0` as 1.
+    /// `crash-gap-ms` and `down-ms` (ns).
     pub crash_gap_min_ns: u64,
     pub crash_gap_max_ns: u64,
     pub down_min_ns: u64,
     pub down_max_ns: u64,
-    pub recovery_off: u64,
-    /// Written by the supervisor: 1 once the seed killed a node under `faults-in-recovery=0`
-    /// (the link faults and partitions stop).
-    pub quiet: u64,
     /// Each node's boots so far, and the first `BOOTS_MAX` of them.
     pub boots: [u64; MAX_NODES],
     pub boot: [[Boot; BOOTS_MAX]; MAX_NODES],
@@ -310,7 +306,7 @@ pub struct Part {
     pub bridge: u64,
 }
 
-/// Partition shapes (`partition-shape`), as bits of `NetCfg::part_shapes`. Each cuts the links
+/// Partition shapes, each drawn for a partition when the nodes fit it. Each cuts the links
 /// between two sides A and B of the faultable nodes: `split` both ways, `isolate` one node (A)
 /// from all the others both ways, `oneway` only from A to B, and `bridge` both ways but for
 /// one node of B that still reaches both sides.

@@ -29,7 +29,6 @@ package patina
 import (
 	"encoding/binary"
 	"fmt"
-	"math"
 	"os"
 	"runtime"
 	"strings"
@@ -315,11 +314,6 @@ func Buggify(label string) *BuggifySite {
 // Fires reports whether the point fires on this evaluation at the run's default rate. Outside
 // Patina, and in a run without --buggify, it never does.
 func (b *BuggifySite) Fires() bool { return b.point(opBuggify, kindBuggify, -1) }
-
-// FiresWithProb is Fires at probability p (0 to 1) instead of the run default.
-func (b *BuggifySite) FiresWithProb(p float64) bool {
-	return b.point(opBuggify, kindBuggify, int64(math.Round(min(max(p, 0), 1)*1000)))
-}
 
 // DelaySite sleeps a seeded virtual time on seed-chosen evaluations.
 type DelaySite struct{ site }

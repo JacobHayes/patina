@@ -1002,7 +1002,6 @@ pub fn run_incarnation(
         t.fs_model = (o.fs_model == crate::durability::materialise::Model::PosixStrict) as u64;
         (t.crash_gap_min_ns, t.crash_gap_max_ns) = p.crash_gap_ns;
         (t.down_min_ns, t.down_max_ns) = p.down_ns;
-        t.recovery_off = (!p.faults_in_recovery) as u64;
         for (f, cfg) in t.faults.iter_mut().zip(p.node_faults).skip(1) {
             unsafe { std::ptr::write_volatile(std::ptr::addr_of_mut!(f.cfg), cfg) };
         }

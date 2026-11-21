@@ -47,7 +47,7 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Explain,
         name: "explain",
-        usage: "patina explain RUNDIR [--from SEQ] [--to SEQ] [--last N] [--grep TEXT] [--full]",
+        usage: "patina explain RUNDIR [--from SEQ] [--to SEQ] [--full]",
         help: "the story of a run: who sent what to whom, what the seed did, what the program printed, how it ended, and the event to stop at (replays it once into RUNDIR/explain to see its data)",
     },
     Command {
@@ -212,7 +212,7 @@ pub const FLAGS: &[Flag] = &[
         "--seed",
         "N",
         "0",
-        "the seed (default from PATINA_SEED)",
+        "the seed",
         &[Cmd::Run, Cmd::Verify],
     ),
     Flag {
@@ -457,20 +457,6 @@ pub const FLAGS: &[Flag] = &[
         &[Cmd::Log, Cmd::Explain],
     ),
     flag(
-        "--last",
-        "N",
-        "40",
-        "explain: show the last N story lines of those selected (all with --from, --to or --full)",
-        &[Cmd::Explain],
-    ),
-    flag(
-        "--grep",
-        "TEXT[|TEXT...]",
-        "none",
-        "explain: only story lines that contain one of the texts (plain text, not a pattern), and what the seed did and how actors ended",
-        &[Cmd::Explain],
-    ),
-    flag(
         "--full",
         "",
         "off",
@@ -551,7 +537,7 @@ pub const FLAGS: &[Flag] = &[
         "--format",
         "text|json",
         "text",
-        "output format (default from PATINA_FORMAT); json prints result.json (explain: the story, one line per object)",
+        "output format: json prints result.json (explain: the story, one line per object)",
         ALL,
     ),
     flag(
@@ -600,10 +586,7 @@ impl Args {
         }
     }
     pub fn json(&self) -> bool {
-        match self.last("--format") {
-            Some(f) => f == "json",
-            None => std::env::var("PATINA_FORMAT").is_ok_and(|v| v == "json"),
-        }
+        self.last("--format") == Some("json")
     }
 }
 

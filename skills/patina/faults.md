@@ -97,7 +97,6 @@ See [recipes.md](recipes.md) for a replicated store.
 
 In order of what helps most: more seeds (a narrow window is one seed in thousands); `--branch`
 for crash windows; `--buggify`, or `--fault point:LABEL=1000` to fire one fault point every
-time; a lower crash rate (`--crash machine:1`) to reach later points; `--fault swarm=1` to
-turn each configured fault class off in half the seeds; `--preempt points` for races with no
-system call in them. Then say what was tried, and that the oracle is what decides what clean
+time; a lower crash rate (`--crash machine:1`) to reach later points; `--preempt points` for
+races with no system call in them. Then say what was tried, and that the oracle is what decides what clean
 means.

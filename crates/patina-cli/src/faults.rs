@@ -5,8 +5,7 @@
 //! A value may be a range `A..B`: the run's value is drawn from the seed, uniformly in the
 //! range, by a draw keyed by the setting's name (`plan_draw`). Adding, removing or changing
 //! one setting therefore never moves another's value, nor any other decision of the run.
-//! `swarm=1` turns each configured class off with probability one half, by the same kind of
-//! draw. The resolved values are the plan (`Plan::resolved`), written to `run.json` and to
+//! The resolved values are the plan (`Plan::resolved`), written to `run.json` and to
 //! `result.json`'s `faults.plan`: the seed and the configuration are the whole run.
 
 use crate::cli::Res;
@@ -29,8 +28,6 @@ const PAUSE_MS_DEFAULT: &str = "100..15000";
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub faults: proto::faults::FaultCfg,
-    /// `faults-in-recovery=0`: no faults other than crashes after the first crash.
-    pub faults_in_recovery: bool,
     /// `max-incarnations=N`: crashes stop once the run has started N incarnations.
     pub max_incarnations: u64,
     /// `restart-gap-ms=A..B`: virtual time from a crash to the restart, drawn per restart in
@@ -68,40 +65,37 @@ pub struct Plan {
     pub skew_ns: (u64, u64),
     pub node_skew: [(u64, u64); proto::node::MAX_NODES],
     /// The resolved settings, in key order, as `result.json` and `run.json` show them: a
-    /// number, a string, or `"off"` for a class `swarm` turned off.
+    /// number or a string.
     pub resolved: Vec<(String, Value)>,
 }
 
 /// How a key's value is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Val {
-    /// 0 to 1000; may be a range; a class `swarm` may turn off.
+    /// 0 to 1000; may be a range.
     Permille,
-    /// A count; may be a range; a class `swarm` may turn off.
+    /// A count; may be a range.
     Count,
     /// A count; may be a range; a parameter of another class.
     Param,
     /// A size in bytes; a range `A..B` (A at least 1) draws log-uniformly, since sizes span
-    /// orders of magnitude; a class `swarm` may turn off.
+    /// orders of magnitude.
     Size,
-    /// The key's own grammar, like `Own`, for a parameter of another class: never swarmed.
+    /// The key's own grammar, like `Own`, for a parameter of another class.
     Spread,
     /// 0 or 1.
     Flag,
     /// The key's own grammar (`A..B` milliseconds are the per-event spread, not a plan
-    /// range); a class `swarm` may turn off.
+    /// range).
     Own,
-    /// A position (the N-th call): may be a range, which searches positions across seeds;
-    /// never swarmed.
+    /// A position (the N-th call): may be a range, which searches positions across seeds.
     At,
-    /// `compute-gap`, `compute-walk`: `A..B` draws log-uniformly, not uniformly; never
-    /// swarmed.
+    /// `compute-gap`, `compute-walk`: `A..B` draws log-uniformly, not uniformly.
     Gap,
     /// A window `START+LENGTH[:PORT]` in milliseconds, START and LENGTH each a number or a
-    /// range resolved like any other (LENGTH by the draw of `KEY:length`); a class `swarm`
-    /// may turn off.
+    /// range resolved like any other (LENGTH by the draw of `KEY:length`).
     Window,
-    /// A word or a list of words, as given: never drawn, never swarmed.
+    /// A word, as given: never drawn.
     Word,
 }
 
@@ -161,12 +155,6 @@ pub const KEYS: &[Key] = &[
         "ENOSPC once N bytes have been written to /work",
     ),
     key(
-        "fs-eintr",
-        "0|1",
-        Val::Flag,
-        "fs errors on calls that can wait may also be EINTR",
-    ),
-    key(
         "mem-error-permille",
         "P",
         Val::Permille,
@@ -197,12 +185,6 @@ pub const KEYS: &[Key] = &[
         "TCP deliveries are split into pieces of at most N bytes (a range A..B draws log-uniformly per seed)",
     ),
     key(
-        "net-chunk-gap-us",
-        "A..B",
-        Val::Spread,
-        "the pieces of a split delivery follow each other by a draw in A..B microseconds [default: each piece is delayed as a delivery is, by net-delay-ms]",
-    ),
-    key(
         "net-reset-permille",
         "P",
         Val::Permille,
@@ -227,18 +209,6 @@ pub const KEYS: &[Key] = &[
         "for LENGTH ms of virtual time from START ms, hold TCP deliveries, lose datagrams and leave keepalive probes unanswered on every link the link faults act on, loopback included (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
     ),
     key(
-        "net-syn-retries",
-        "N",
-        Val::Param,
-        "a TCP connect that gets no answer (across a cut link, or net-connect-timeout) retries its SYN N times, after 1, 3, 7, 15, ... s, and fails ETIMEDOUT after the last (in a run with nodes a socket's TCP_SYNCNT, when set, is its own) [default: 6, ETIMEDOUT at 127 s]",
-    ),
-    key(
-        "net-give-up-ms",
-        "N",
-        Val::Param,
-        "a TCP direction whose data a cut link has held for N ms resets its sender, who sees ETIMEDOUT (in a run with nodes a socket's TCP_USER_TIMEOUT, when set, is its own limit); keepalive (SO_KEEPALIVE) has its own budget [default: 924600]",
-    ),
-    key(
         "net-links",
         "nodes|driver|all",
         Val::Word,
@@ -255,12 +225,6 @@ pub const KEYS: &[Key] = &[
         "A..B",
         Val::Spread,
         "how long each partition lasts: a draw in A..B ms [default: 1000..30000]",
-    ),
-    key(
-        "partition-shape",
-        "SHAPE[,SHAPE]",
-        Val::Word,
-        "the shapes partitions are drawn from: split (two sides, both ways), isolate (one node from the rest), oneway (two sides, one direction), bridge (two sides, one node still reaches both) [default: all four]",
     ),
     key(
         "pause-gap-ms",
@@ -317,22 +281,10 @@ pub const KEYS: &[Key] = &[
         "the SDK fault point LABEL fires at this rate (with --buggify)",
     ),
     key(
-        "swarm",
-        "0|1",
-        Val::Flag,
-        "turn each configured class off with probability 1/2, per seed",
-    ),
-    key(
         "faults-after-setup",
         "0|1",
         Val::Flag,
         "no fault until the guest's SDK marks setup-complete",
-    ),
-    key(
-        "faults-in-recovery",
-        "0|1",
-        Val::Flag,
-        "after a crash, the other faults stay on (1) or go off for the rest of the run (0) [default: 1]",
     ),
     key(
         "restart-gap-ms",
@@ -414,7 +366,6 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
-            ("net-chunk-gap-us", "1..10"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
             ("net-drop-permille", "0..50"),
@@ -431,7 +382,6 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
             ("fs-delay-permille", "0..20"),
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
-            ("net-chunk-gap-us", "1..10"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
             ("net-drop-permille", "0..50"),
@@ -448,7 +398,6 @@ pub const PRESETS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("net-delay-ms", "0..50"),
             ("net-chunk-max", "1..65536"),
-            ("net-chunk-gap-us", "1..10"),
             ("net-reset-permille", "5..50"),
             ("net-connect-refuse-permille", "0..10"),
             ("net-drop-permille", "0..50"),
@@ -524,15 +473,8 @@ const PARTITION_MS_DEFAULT: &str = "1000..30000";
 pub const CRASH_DEFAULT_PERMILLE: u64 = 3;
 /// `fs-delay-max-ms` when not given.
 const DELAY_MAX_MS_DEFAULT: u64 = 10;
-
-/// The words a renamed key is refused with (no alias: a plan means one thing).
-fn renamed(k: &str) -> Option<String> {
-    (k == "net-partition").then(|| {
-        "--fault net-partition: renamed net-blackout (a partition is now a cut between nodes, \
-         partition-gap-ms)"
-            .to_string()
-    })
-}
+/// The time between the pieces of a split delivery (`net-chunk-max`): 1 to 10 µs.
+const CHUNK_GAP_NS: (u64, u64) = (1_000, 10_000);
 
 fn find(k: &str) -> Option<&'static Key> {
     let name = if k.starts_with("point:") {
@@ -723,7 +665,6 @@ pub fn split_scope(s: &str) -> (&str, Option<&str>) {
 pub fn set_node_keys(dst: &mut proto::faults::FaultCfg, src: &proto::faults::FaultCfg) {
     dst.fs_error_permille = src.fs_error_permille;
     (dst.fs_error_at_class, dst.fs_error_at_n) = (src.fs_error_at_class, src.fs_error_at_n);
-    dst.fs_eintr = src.fs_eintr;
     dst.short_permille = src.short_permille;
     dst.fsync_error_permille = src.fsync_error_permille;
     dst.fsync_error_at = src.fsync_error_at;
@@ -792,9 +733,6 @@ pub fn resolve(
         let (k, v) = kv
             .split_once('=')
             .ok_or_else(|| format!("--fault {kv}: expected KEY=VALUE"))?;
-        if let Some(e) = renamed(k) {
-            return Err(e);
-        }
         if find(k).is_none() {
             return Err(format!("--fault: unknown key {k}"));
         }
@@ -835,17 +773,12 @@ pub fn resolve(
         set(&mut given, "pause-ms", PAUSE_MS_DEFAULT);
     }
     given.sort();
-    let swarm = match given.iter().position(|e| e.0 == "swarm") {
-        Some(i) => num("swarm", &given.remove(i).1)? != 0,
-        None => false,
-    };
     // The default is not part of the plan: a run that does not name the key resolves it the
     // same way every time, and a stock program's plan reads as before.
     let (lo, hi) = proto::compute::GAP_DEFAULT;
     let (wlo, whi) = proto::compute::WALK_DEFAULT;
     let mut plan = Plan {
         faults: Default::default(),
-        faults_in_recovery: true,
         max_incarnations: MAX_INCARNATIONS_DEFAULT,
         restart_gap_ns: RESTART_GAP_DEFAULT,
         crash_gap_ns: CRASH_GAP_DEFAULT,
@@ -865,9 +798,6 @@ pub fn resolve(
         node_skew: Default::default(),
         resolved: vec![],
     };
-    if swarm {
-        plan.resolved.push(("swarm".into(), json!(1)));
-    }
     let mut delay_max_given = false;
     for (k, v) in &given {
         let info = find(k).unwrap();
@@ -889,14 +819,6 @@ pub fn resolve(
                 continue;
             }
         };
-        let class = matches!(
-            info.val,
-            Val::Permille | Val::Count | Val::Own | Val::Size | Val::Window
-        );
-        if swarm && class && plan_draw(seed, &format!("swarm:{k}")) & 1 == 1 {
-            plan.resolved.push((k.clone(), json!("off")));
-            continue;
-        }
         let s = match &value {
             Value::String(s) => s.clone(),
             x => x.to_string(),
@@ -908,21 +830,14 @@ pub fn resolve(
     if !delay_max_given && plan.faults.delay_permille != 0 {
         plan.faults.delay_max_ns = DELAY_MAX_MS_DEFAULT * 1_000_000;
     }
+    // The pieces of a split delivery follow each other closely, as a sender's segments do.
+    if plan.net.chunk_max != 0 {
+        (plan.net.chunk_gap_min_ns, plan.net.chunk_gap_max_ns) = CHUNK_GAP_NS;
+        plan.net.chunk_gap_set = 1;
+    }
     if let Some(c) = crash {
         let s = crash_plan(seed, &mut plan.faults, c)?;
         plan.resolved.push(("crash".into(), json!(s)));
-    }
-    let shapes = plan.net.part_shapes;
-    if parts
-        && shapes != 0
-        && !proto::node::SHAPES
-            .iter()
-            .any(|s| shapes & (1 << s.0) != 0 && proto::node::shape_min_nodes(s.0) <= faultable)
-    {
-        return Err(format!(
-            "--fault partition-shape: no shape it names fits {faultable} nodes the link faults act \
-             on (bridge needs 3)"
-        ));
     }
     Ok(plan)
 }
@@ -957,7 +872,6 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
                 return Err("--fault fs-error-at: N counts from 1".into());
             }
         }
-        "fs-eintr" => f.fs_eintr = n(v)?,
         "fs-short-permille" => f.short_permille = n(v)?,
         "fsync-error-permille" => f.fsync_error_permille = n(v)?,
         "fsync-error-at" => f.fsync_error_at = n(v)?,
@@ -971,10 +885,6 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         "mem-limit-mb" => {
             // A limit, not a draw: it holds whether or not other faults are active.
             f.mem_limit_bytes = n(v)?.saturating_mul(1 << 20);
-            return Ok(());
-        }
-        "faults-in-recovery" => {
-            o.faults_in_recovery = n(v)? != 0;
             return Ok(());
         }
         "restart-gap-ms" => {
@@ -1014,9 +924,6 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             if o.net.part_gap_min_ns == 0 {
                 return Err(format!("--fault {k}={v}: A is at least 1"));
             }
-            if o.net.part_shapes == 0 {
-                o.net.part_shapes = proto::node::SHAPES.iter().fold(0, |b, s| b | 1 << s.0);
-            }
             return Ok(());
         }
         "clock-skew-ms" => {
@@ -1045,20 +952,6 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             if o.net.part_min_ns == 0 {
                 return Err(format!("--fault {k}={v}: A is at least 1"));
             }
-            return Ok(());
-        }
-        "partition-shape" => {
-            let mut bits = 0;
-            for w in v.split(',') {
-                let s = proto::node::SHAPES
-                    .iter()
-                    .find(|s| s.1 == w)
-                    .ok_or_else(|| {
-                        format!("--fault {k}: unknown shape {w} (split, isolate, oneway, bridge)")
-                    })?;
-                bits |= 1 << s.0;
-            }
-            o.net.part_shapes = bits;
             return Ok(());
         }
         _ if k.starts_with("net-") => return net_fault(&mut o.net, k, v),
@@ -1144,28 +1037,7 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
             c.blackout_port = port;
             c.blackout_set = 1;
         }
-        "net-syn-retries" => {
-            c.syn_retries = n(v)?;
-            if c.syn_retries == 0 || c.syn_retries > proto::wire::SYN_RETRIES_MAX {
-                return Err(format!(
-                    "--fault {k}: 1 to {} (the kernel's least is 1)",
-                    proto::wire::SYN_RETRIES_MAX
-                ));
-            }
-            c.syn_retries_set = 1;
-        }
-        "net-give-up-ms" => {
-            c.give_up_ns = n(v)?.saturating_mul(1_000_000);
-            if c.give_up_ns == 0 {
-                return Err(format!("--fault {k}: at least 1"));
-            }
-            c.give_up_set = 1;
-        }
         "net-links" => c.links = links(v)?,
-        "net-chunk-gap-us" => {
-            (c.chunk_gap_min_ns, c.chunk_gap_max_ns) = span(k, v, 1000, "microseconds")?;
-            c.chunk_gap_set = 1;
-        }
         "net-halfclose-delay-ms" => {
             (c.halfclose_min_ns, c.halfclose_max_ns) = ms_range(k, v)?;
             c.halfclose_set = 1;
@@ -1280,11 +1152,7 @@ mod tests {
             let b = resolve(
                 s,
                 &disk,
-                &v(&[
-                    "net-chunk-max=1..4",
-                    "net-chunk-gap-us=1..10",
-                    "mem-limit-mb=10..20",
-                ]),
+                &v(&["net-chunk-max=1..4", "mem-limit-mb=10..20"]),
                 Some("machine:0..5"),
                 0,
             )
@@ -1347,7 +1215,7 @@ mod tests {
     }
 
     #[test]
-    fn compute_gap_is_drawn_per_seed_and_never_swarmed() {
+    fn compute_gap_is_drawn_per_seed() {
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
             let d = resolve(s, &[], &[], None, 0).unwrap();
@@ -1355,7 +1223,7 @@ mod tests {
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
             assert!(d.resolved.is_empty() && d.compute_budget);
             seen.insert(d.compute_gap);
-            let p = resolve(s, &[], &v(&["compute-gap=8", "swarm=1"]), None, 0).unwrap();
+            let p = resolve(s, &[], &v(&["compute-gap=8"]), None, 0).unwrap();
             assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
             assert!(!p.compute_budget);
             let r = resolve(s, &[], &v(&["compute-gap=100..200"]), None, 0).unwrap();
@@ -1397,7 +1265,8 @@ mod tests {
             seen.len()
         );
         assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), None, 0).is_err());
-        let g = resolve(0, &[], &v(&["net-chunk-gap-us=1..10"]), None, 0).unwrap();
+        // The pieces of a split delivery follow each other by 1 to 10 µs.
+        let g = resolve(0, &[], &v(&["net-chunk-max=8"]), None, 0).unwrap();
         assert_eq!(
             (
                 g.net.chunk_gap_set,
@@ -1406,7 +1275,7 @@ mod tests {
             ),
             (1, 1000, 10_000)
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-gap-us=5"]), None, 0).is_err());
+        assert_eq!(resolve(0, &[], &[], None, 0).unwrap().net.chunk_gap_set, 0);
     }
 
     #[test]
@@ -1423,31 +1292,17 @@ mod tests {
         }
         let p = resolve(5, &net, &[], None, 2).unwrap();
         assert!(p.net.part_gap_max_ns >= p.net.part_gap_min_ns && p.net.part_gap_min_ns > 0);
-        assert!(p.net.part_shapes != 0 && p.net.part_min_ns > 0);
+        assert!(p.net.part_min_ns > 0);
         // One node and the driver's links: two nodes to cut between.
         let d = resolve(5, &net, &v(&["net-links=driver"]), None, 1).unwrap();
         assert!(d.net.part_gap_max_ns > 0);
         assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), None, 1).is_err());
         assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), None, 0).is_err());
         assert!(resolve(0, &[], &v(&["net-links=driver"]), None, 0).is_err());
-        let one = resolve(
-            0,
-            &[],
-            &v(&["partition-gap-ms=10..20", "partition-shape=oneway,bridge"]),
-            None,
-            3,
-        )
-        .unwrap();
+        let one = resolve(0, &[], &v(&["partition-gap-ms=10..20"]), None, 3).unwrap();
         assert_eq!(one.net.part_gap_min_ns, 10_000_000);
-        assert_eq!(
-            one.net.part_shapes,
-            1 << proto::node::SHAPE_ONEWAY | 1 << proto::node::SHAPE_BRIDGE
-        );
         // The default length.
         assert_eq!(one.net.part_min_ns, 1_000_000_000);
-        assert!(resolve(0, &[], &v(&["partition-shape=ring"]), None, 3).is_err());
-        let e = resolve(0, &[], &v(&["net-partition=1+2"]), None, 0).unwrap_err();
-        assert!(e.contains("net-blackout"), "{e}");
     }
 
     #[test]
@@ -1473,17 +1328,5 @@ mod tests {
             split_scope("fs-error-permille=5"),
             ("fs-error-permille=5", None)
         );
-    }
-
-    #[test]
-    fn swarm_turns_classes_off_per_seed() {
-        let all = v(&["all"]);
-        let offs: std::collections::BTreeSet<usize> = (0..32)
-            .map(|s| {
-                let p = resolve(s, &all, &v(&["swarm=1"]), None, 0).unwrap();
-                p.resolved.iter().filter(|e| e.1 == json!("off")).count()
-            })
-            .collect();
-        assert!(offs.len() > 2, "{offs:?}");
     }
 }

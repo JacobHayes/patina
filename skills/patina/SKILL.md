@@ -103,7 +103,7 @@ exit: 0 0 0 0 1
 ```sh
 jq -r '.groups[] | "\(.count) \(.signature)\n  \(.rerun)"' patina-out/sweep/report.json
 run=$(jq -r '.groups[0].first.dir' patina-out/sweep/report.json)
-patina explain "$run" --last 12
+patina explain "$run"
 patina minimize "$run"
 patina verify --seed "$(jq .groups[0].first.seed patina-out/sweep/report.json)" --runs 3 --vary cpu,aslr --crash machine -- ./app
 ```

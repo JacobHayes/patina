@@ -1049,15 +1049,7 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         check = apply_file(&mut c, f)?;
     }
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-    c.seed = match a.num::<u64>("--seed")? {
-        Some(s) => s,
-        None => match std::env::var("PATINA_SEED") {
-            Ok(v) => v
-                .parse()
-                .map_err(|_| format!("PATINA_SEED: not a number: {v}"))?,
-            Err(_) => 0,
-        },
-    };
+    c.seed = a.num::<u64>("--seed")?.unwrap_or(0);
     for e in a.all("--env") {
         if !e.contains('=') {
             return Err(format!("--env {e}: expected K=V"));
@@ -1384,17 +1376,12 @@ impl Config {
 
     /// Each node's disk and memory faults, resolved with a seed of its own: the driver's into
     /// the run's `faults`, the others' into `node_faults`; `result.json` shows them as
-    /// `KEY@NODE`. With `swarm`, each node's classes are turned off by its own seed, as a run
-    /// without nodes turns off its own.
+    /// `KEY@NODE`.
     fn node_faults(&self, plan: &mut faults::Plan) -> Res<()> {
-        let swarm = plan.resolved.iter().any(|(k, v)| k == "swarm" && *v == 1);
         for k in 0..=self.nodes.len() {
-            let mut given = self.node_settings(k)?;
+            let given = self.node_settings(k)?;
             if given.is_empty() {
                 continue;
-            }
-            if swarm {
-                given.push("swarm=1".into());
             }
             let name = if k == 0 {
                 "driver"
@@ -1424,7 +1411,7 @@ impl Config {
                     plan.node_skew[k] = sub.skew_ns;
                 }
             }
-            for (key, v) in sub.resolved.into_iter().filter(|(k, _)| k != "swarm") {
+            for (key, v) in sub.resolved {
                 plan.resolved.push((format!("{key}@{name}"), v));
             }
         }
@@ -1456,13 +1443,11 @@ impl Config {
                 || k.starts_with("partition-")
                 || matches!(
                     k,
-                    "swarm"
-                        | "faults-after-setup"
+                    "faults-after-setup"
                         | "crash"
                         | "crash-gap-ms"
                         | "down-ms"
                         | "max-incarnations"
-                        | "faults-in-recovery"
                 )
         };
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "restart-gap-ms") {
@@ -1896,39 +1881,6 @@ mod tests {
         assert!(plan(&c).is_err());
         let mut p = faults::resolve(0, &[], &[], None, 2).unwrap();
         assert!(c.crash_nodes("machine:5@m", &mut p).is_err());
-    }
-
-    #[test]
-    fn swarm_turns_a_nodes_classes_off_by_its_own_seed() {
-        let mut c = Config {
-            nodes: vec![
-                Node::new("a".into(), vec!["/bin/true".into()]),
-                Node::new("b".into(), vec!["/bin/true".into()]),
-            ],
-            faults: vec!["fs-error-permille=7".into(), "swarm=1".into()],
-            ..Config::default()
-        };
-        let mut off = [false; 2];
-        let mut on = [false; 2];
-        for seed in 0..64 {
-            c.seed = seed;
-            let mut p = faults::resolve(seed, &[], &["swarm=1".into()], None, 2).unwrap();
-            c.node_faults(&mut p).unwrap();
-            for k in 0..2 {
-                let x = p.node_faults[k + 1].fs_error_permille;
-                off[k] |= x == 0;
-                on[k] |= x == 7;
-            }
-        }
-        assert_eq!((off, on), ([true; 2], [true; 2]));
-        // Each node by its own seed: a's and b's differ for some seed.
-        let differ = (0..64).any(|seed| {
-            c.seed = seed;
-            let mut p = faults::resolve(seed, &[], &["swarm=1".into()], None, 2).unwrap();
-            c.node_faults(&mut p).unwrap();
-            p.node_faults[1].fs_error_permille != p.node_faults[2].fs_error_permille
-        });
-        assert!(differ);
     }
 
     #[test]

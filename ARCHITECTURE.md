@@ -356,9 +356,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   clears the script's only. The wire consults them when it stamps a delivery: an item on a cut
   direction is queued with no time (`HELD`) and the direction is held; when a layer opens a
   link, held items are re-stamped from that time in order (`DEC_WIRE_HEAL`). A direction held
-  for `net-give-up-ms` (924.6 s; the sender's `TCP_USER_TIMEOUT` if set) resets its sender with
-  `ETIMEDOUT`; a connect across a cut retries on the kernel's SYN schedule (`syn_retry_s`, for
-  `net-syn-retries` or the socket's `TCP_SYNCNT`) and fails after the last retry (the cut is
+  for Linux's give-up time (924.6 s; the sender's `TCP_USER_TIMEOUT` if set) resets its sender
+  with `ETIMEDOUT`; a connect across a cut retries on the kernel's SYN schedule (`syn_retry_s`,
+  for 6 retries or the socket's `TCP_SYNCNT`) and fails after the last retry (the cut is
   looked at when the SYN is sent and retried; a cut made inside a handshake's delay does not
   stop it). A datagram sent on a cut link is lost (`UF_CUT`). No fault is drawn for a cut.
 - **Link faults.** A link fault (`net-*`) is drawn only on the links `net-links` names
@@ -455,7 +455,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
 - **Faults per node.** The disk and memory keys are each node's: the config resolves each
   node's settings (the run's unscoped ones for every node but the driver and a node with
   `faults = false`, `@NODE` scopes, `[node.NAME.faults]`) with a seed of its own
-  (`Config::node_faults`; under `swarm` that seed turns the node's classes off), the driver's
+  (`Config::node_faults`), the driver's
   into the run's `FaultCfg` and the others' into `NodeTab::faults`, a `FaultCtl` (settings and
   counters) per node. The runtime reaches its node's through `state::faults()`; the draws stay
   keyed by sequence number, `faults-after-setup` stays the run's.

@@ -14,14 +14,12 @@ run_fails "$o/chunk-naive-on" 1 --fault net-chunk-max=1 -- /guest/sockets chunk 
 run_ok "$o/chunk-naive-off" 1 -- /guest/sockets chunk naive
 run_ok "$o/chunk-correct-on" 1 --fault net-chunk-max=1 -- /guest/sockets chunk correct
 echo "net-chunk-max=1: naive receiver fails, passes without; correct receiver: $(grep 'correct receiver' "$o/chunk-correct-on/inc-0/stdout")"
-# net-chunk-gap-us: the pieces of a split delivery follow each other by the gap, not each by a
-# delivery delay: 500 one-byte pieces end seconds sooner at 1 us than at 10 ms, one read each.
-run_ok "$o/gap-off" 1 --fault net-chunk-max=1 --fault net-delay-ms=10..10 -- /guest/sockets chunk correct
-run_ok "$o/gap-on" 1 --fault net-chunk-max=1 --fault net-delay-ms=10..10 --fault net-chunk-gap-us=1..1 -- /guest/sockets chunk correct
-end() { "$PATINA" log events "$1" | tail -n1 | jq .t; }
-saved=$(( $(end "$o/gap-off") - $(end "$o/gap-on") ))
-grep -q ' in 500 reads' "$o/gap-on/inc-0/stdout" && [ "$saved" -gt 4000000000 ] || die "net-chunk-gap-us: $saved ns sooner; $(cat "$o/gap-on/inc-0/stdout")"
-echo "net-chunk-gap-us=1..1: the same 500 one-byte reads, $((saved / 1000000)) ms of virtual time sooner"
+# The pieces of a split delivery follow each other by microseconds, not each by a delivery
+# delay: 500 one-byte pieces at net-delay-ms=10..10 take well under 500 x 10 ms, one read each.
+run_ok "$o/gap" 1 --fault net-chunk-max=1 --fault net-delay-ms=10..10 -- /guest/sockets chunk correct
+span=$("$PATINA" log events "$o/gap" | jq -s 'map(select(.t)) | last.t - first.t')
+grep -q ' in 500 reads' "$o/gap/inc-0/stdout" && [ "$span" -lt 1000000000 ] || die "split delivery: $span ns; $(cat "$o/gap/inc-0/stdout")"
+echo "net-chunk-max=1 at net-delay-ms=10..10: 500 one-byte reads in $((span / 1000000)) ms of virtual time"
 [ "$(net "$o/chunk-correct-on" chunks)" -ge 500 ] || die "chunks"
 pair reset net-reset-permille=200 reset reset
 awk '/reset|ECONN|Connection/ && n++ < 3' "$o/reset-on/inc-0/stdout"

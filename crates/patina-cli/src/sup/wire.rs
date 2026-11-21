@@ -32,10 +32,10 @@
 //! client node and a server node (the same one over loopback), and each direction is a link.
 //! A cut link (`link::Sup::link_cut`, a script's or the seed's) holds what is stamped on it:
 //! the item keeps its delay draw and no time (`HELD`) until a heal stamps it, at the heal's
-//! time plus that draw; a direction held for `net-give-up-ms` (or its sender's
+//! time plus that draw; a direction held for Linux's give-up time (or its sender's
 //! `TCP_USER_TIMEOUT`) gives up, and its sender sees `ETIMEDOUT`. A connect across a cut link
 //! (either direction) does not establish: it retries at TCP's SYN retry times
-//! (`net-syn-retries`, or the socket's `TCP_SYNCNT`) and establishes at the first one after a
+//! (Linux's six, or the socket's `TCP_SYNCNT`) and establishes at the first one after a
 //! heal, or fails `ETIMEDOUT` after the last. The link faults (`net-*`) act on the links
 //! `link_faulted` names; the others carry the default delay and nothing else.
 
@@ -455,7 +455,7 @@ impl Sup {
     }
 
     pub(super) fn faults_on(&self) -> bool {
-        self.setup_done() && !self.nodes_quiet()
+        self.setup_done()
     }
 
     /// Past setup (`faults-after-setup`): faults may act.
@@ -1592,12 +1592,11 @@ impl Conn {
 }
 
 impl Sup {
-    /// The SYN retries of a connect from socket `i`: its `TCP_SYNCNT`, else `net-syn-retries`.
     /// SYN retries of socket `i`: its `TCP_SYNCNT` in a run with nodes (without nodes a socket
-    /// option changes nothing, as before), else `net-syn-retries`.
+    /// option changes nothing), else Linux's default.
     fn syn_retries(&self, i: usize) -> u64 {
         if self.node_count() == 0 {
-            return self.net_cfg().syn_retries();
+            return SYN_RETRIES_DEFAULT;
         }
         match tab(self.ctl)
             .socks
@@ -1605,7 +1604,7 @@ impl Sup {
             .and_then(|s| s.opt(OPT_TCP_SYNCNT))
         {
             Some(n) if n > 0 => n as u64,
-            _ => self.net_cfg().syn_retries(),
+            _ => SYN_RETRIES_DEFAULT,
         }
     }
 
@@ -1615,10 +1614,10 @@ impl Sup {
     }
 
     /// How long direction `dir` of `id` may hold data before its sender gives up: the
-    /// sender's `TCP_USER_TIMEOUT` when set in a run with nodes, else `net-give-up-ms`.
+    /// sender's `TCP_USER_TIMEOUT` when set in a run with nodes, else Linux's default.
     fn give_up_ns(&self, id: u32, dir: usize) -> u64 {
         if self.node_count() == 0 {
-            return self.net_cfg().give_up_ns();
+            return GIVE_UP_DEFAULT_NS;
         }
         let c = &self.wire.conns[&id];
         let sender = if dir == 0 { c.client.idx } else { c.server.idx };
@@ -1629,7 +1628,7 @@ impl Sup {
                 .and_then(|s| s.opt(OPT_TCP_USER_TIMEOUT))
         }) {
             Some(ms) if ms > 0 => ms as u64 * 1_000_000,
-            _ => self.net_cfg().give_up_ns(),
+            _ => GIVE_UP_DEFAULT_NS,
         }
     }
 

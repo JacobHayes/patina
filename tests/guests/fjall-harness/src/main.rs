@@ -108,7 +108,7 @@ fn fsync_dir(p: &Path) {
 }
 
 /// Errnos Patina's fault injection can return on a `/work` file or path (EIO, ENOSPC,
-/// EDQUOT, EMFILE, ENFILE, ENOMEM, and EINTR with `fs-eintr=1`): an operation that fails
+/// EDQUOT, EMFILE, ENFILE, ENOMEM): an operation that fails
 /// with one of these cannot be judged.
 fn is_injected_io(d: &str) -> bool {
     ["code: 5,", "code: 28,", "code: 122,", "code: 24,", "code: 23,", "code: 12,", "code: 4,"]

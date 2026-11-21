@@ -8,13 +8,13 @@
 //! asks `link_cut` when it stamps a delivery, and re-stamps what a cut held when a layer opens
 //! a link (`wire_heal`); `net heal` clears scripted cuts only.
 //!
-//! The partition schedule (`partition-gap-ms`, `partition-ms`, `partition-shape`) is a chain
+//! The partition schedule (`partition-gap-ms`, `partition-ms`) is a chain
 //! of node events: a start draws a shape and two sides of the nodes the link faults act on,
 //! cuts the links between them for a drawn length, and an end opens them and draws the gap to
 //! the next start. Every draw is on `Stream::Partition`, keyed by the partition's ordinal and
 //! a sub-key (`proto::node::PSUB_*`), so turning partitions on moves no other decision and no
-//! draw depends on traffic. A start falls while faults are off (before `setup-complete`, or
-//! after a crash with `faults-in-recovery=0`) makes no partition; the next is drawn. A start
+//! draw depends on traffic. A start that falls while faults are off (before `setup-complete`)
+//! makes no partition; the next is drawn. A start
 //! does not keep a run alive (`Live::No`): a run that waits only for it is deadlocked. An end
 //! does, since it may release held traffic.
 //!
@@ -183,7 +183,7 @@ impl Sup {
         let shapes: Vec<u64> = SHAPES
             .iter()
             .map(|s| s.0)
-            .filter(|s| c.part_shapes & (1 << s) != 0 && nodes.len() >= shape_min_nodes(*s))
+            .filter(|s| nodes.len() >= shape_min_nodes(*s))
             .collect();
         if shapes.is_empty() {
             return; // nothing this run's nodes can be cut into: the schedule ends

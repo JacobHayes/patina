@@ -350,12 +350,6 @@ pub const fn loc_len(loc: &str) -> usize {
     if loc.len() > 120 { 120 } else { loc.len() }
 }
 
-/// `0.0..=1.0` as per mille.
-pub fn permille(p: f64) -> i64 {
-    let p = if p.is_nan() { 0.0 } else { p.clamp(0.0, 1.0) };
-    (p * 1000.0 + 0.5) as i64
-}
-
 pub fn nanos(d: core::time::Duration) -> i64 {
     i64::try_from(d.as_nanos()).unwrap_or(i64::MAX)
 }

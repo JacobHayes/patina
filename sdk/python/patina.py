@@ -203,11 +203,9 @@ class Buggify(_Site):
 
     _kind = _POINT
 
-    def fires(self, probability=None):
-        """Whether the point fires now: never outside Patina or without --buggify.
-        ``probability`` (0 to 1) replaces the run's default rate."""
-        a = -1 if probability is None else round(min(max(probability, 0.0), 1.0) * 1000)
-        return self._point(_BUGGIFY, a)
+    def fires(self):
+        """Whether the point fires now: never outside Patina or without --buggify."""
+        return self._point(_BUGGIFY, -1)
 
 
 class BuggifyDelay(_Site):

@@ -283,12 +283,10 @@ pub fn parse_abstract(a: &[u8], len: usize, prefix: &[u8]) -> Option<u64> {
 pub const PORT_FIRST: u16 = 32768;
 pub const PORT_LAST: u16 = 60999;
 /// SYN retransmissions before a connect gives up (Linux's `tcp_syn_retries`): retries at 1, 3,
-/// 7, 15, 31 and 63 s, `ETIMEDOUT` at 127 s (`net-syn-retries`).
+/// 7, 15, 31 and 63 s, `ETIMEDOUT` at 127 s.
 pub const SYN_RETRIES_DEFAULT: u64 = 6;
-/// The most `net-syn-retries` takes (the kernel's own limit, 127).
-pub const SYN_RETRIES_MAX: u64 = 127;
 /// A direction holding unacknowledged data this long gives up (Linux's `tcp_retries2` = 15:
-/// about 924.6 s; `net-give-up-ms`).
+/// about 924.6 s).
 pub const GIVE_UP_DEFAULT_NS: u64 = 924_600_000_000;
 
 /// Seconds from a connect to its `n`-th SYN retry (from 0; the last one is the give-up), with
@@ -334,29 +332,20 @@ pub struct NetCfg {
     pub drop_permille: u64,
     pub dup_permille: u64,
     pub reorder_permille: u64,
-    /// 1 when `net-chunk-gap-us` is set: the time between the pieces of a split delivery;
-    /// otherwise each piece takes a delivery delay.
+    /// 1 when `net-chunk-max` splits deliveries: the time between the pieces of a split
+    /// delivery (1 to 10 µs); otherwise each piece takes a delivery delay.
     pub chunk_gap_set: u64,
     pub chunk_gap_min_ns: u64,
     pub chunk_gap_max_ns: u64,
-    /// 1 when `net-syn-retries` is set: SYN retries before a connect gives up (otherwise
-    /// `SYN_RETRIES_DEFAULT`).
-    pub syn_retries_set: u64,
-    pub syn_retries: u64,
-    /// 1 when `net-give-up-ms` is set: how long a direction holds data before its sender
-    /// gives up (otherwise `GIVE_UP_DEFAULT_NS`).
-    pub give_up_set: u64,
-    pub give_up_ns: u64,
     /// A run with nodes: which links the link faults act on (`LINKS_*`).
     pub links: u64,
     /// A run with nodes: the seed's partitions (`partition-*`): the gap from one's end to the
-    /// next one's start and each one's length, drawn in [min, max] ns, and the shapes drawn
-    /// from (`node::SHAPE_*` bits). Off when `part_gap_max_ns` is 0.
+    /// next one's start and each one's length, drawn in [min, max] ns; each partition's shape
+    /// is drawn from every `node::SHAPES` entry the nodes fit. Off when `part_gap_max_ns` is 0.
     pub part_gap_min_ns: u64,
     pub part_gap_max_ns: u64,
     pub part_min_ns: u64,
     pub part_max_ns: u64,
-    pub part_shapes: u64,
 }
 
 /// `NetCfg::links`: in a run with nodes, link faults act on links between two nodes other than
@@ -365,29 +354,6 @@ pub struct NetCfg {
 pub const LINKS_NODES: u64 = 0;
 pub const LINKS_DRIVER: u64 = 1;
 pub const LINKS_ALL: u64 = 2;
-
-impl NetCfg {
-    /// SYN retries of a connect (`net-syn-retries`).
-    pub const fn syn_retries(&self) -> u64 {
-        if self.syn_retries_set != 0 {
-            self.syn_retries
-        } else {
-            SYN_RETRIES_DEFAULT
-        }
-    }
-    /// From a connect to its give-up when no answer comes (Linux, 6 retries: 127 s).
-    pub const fn connect_timeout_ns(&self) -> u64 {
-        syn_retry_s(self.syn_retries()) * 1_000_000_000
-    }
-    /// How long a direction holds data before its sender gives up (`net-give-up-ms`).
-    pub const fn give_up_ns(&self) -> u64 {
-        if self.give_up_set != 0 {
-            self.give_up_ns
-        } else {
-            GIVE_UP_DEFAULT_NS
-        }
-    }
-}
 
 /// Sub-keys of `draw(Stream::FaultNet, key)`.
 pub const NSUB_REFUSE: u64 = 1;

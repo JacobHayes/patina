@@ -264,8 +264,7 @@ fn decide(call: &dyn Call, c: FClass, obj: Obj) -> Decision {
         _ => false,
     };
     let base = errnos(obj, c, creating);
-    let eintr = cfg.fs_eintr != 0 && eintr_ok(obj, c);
-    let k = base.len() as u64 + eintr as u64;
+    let k = base.len() as u64;
     if k != 0 {
         f.eligible(Kind::FsError);
         let at = cfg.fs_error_at_class != 0
@@ -273,12 +272,7 @@ fn decide(call: &dyn Call, c: FClass, obj: Obj) -> Decision {
             && cfg.fs_error_at_n == n;
         if at || permille(cfg.fs_error_permille, SUB_ERR_FIRE) {
             let i = (d(SUB_ERR_PICK) % k) as usize;
-            let errno = if i < base.len() {
-                base[i] as i64
-            } else {
-                e::EINTR
-            };
-            return Decision::Error(errno);
+            return Decision::Error(base[i] as i64);
         }
     }
     if c == FClass::Write && obj == Obj::File {
