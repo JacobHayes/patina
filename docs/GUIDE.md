@@ -1488,11 +1488,11 @@ $ patina log events patina-out/run-0 --types node,net
 {"type":"header","v":1,"seed":0,"work":"/work","incarnations":1,"nodes":["driver","primary","backup"]}
 {"type":"node","inc":0,"seq":4,"t":100000000000,"slot":1,"event":"start","name":"primary","pid":4}
 {"type":"node","inc":0,"seq":7,"t":100000000000,"slot":2,"event":"start","name":"backup","pid":6}
-{"type":"net","inc":0,"seq":10418,"t":100064774228,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
-{"type":"net","inc":0,"seq":10624,"t":105064968035,"slot":0,"event":"release","conn":2,"dir":0,"until":105064998916}
-{"type":"net","inc":0,"seq":10625,"t":105064968035,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
-{"type":"node","inc":0,"seq":10945,"t":105066283311,"slot":0,"event":"stop","name":"primary","live":1}
-{"type":"node","inc":0,"seq":10946,"t":105066283311,"slot":0,"event":"stop","name":"backup","live":1}
+{"type":"net","inc":0,"seq":10389,"t":100064824537,"slot":0,"event":"cut","by":"script","from":["primary"],"to":["backup"],"both":true,"ret":0}
+{"type":"net","inc":0,"seq":10586,"t":105065020575,"slot":0,"event":"release","conn":2,"dir":0,"until":105065051456}
+{"type":"net","inc":0,"seq":10587,"t":105065020575,"slot":0,"event":"heal","by":"script","from":[],"to":[],"both":true,"ret":0}
+{"type":"node","inc":0,"seq":10929,"t":105066334735,"slot":0,"event":"stop","name":"primary","live":1}
+{"type":"node","inc":0,"seq":10930,"t":105066334735,"slot":0,"event":"stop","name":"backup","live":1}
 ```
 
 Seeds, `verify` and `replay` work as for one machine: the nodes share the run's one scheduler,
@@ -2030,6 +2030,7 @@ production builds without flags.
 | `sometimes(cond, label)`, `reachable(label)` | should hold or be reached in some run of a sweep |
 | `buggify(label)` | a fault point: true on seed-chosen evaluations under `--faults buggify` |
 | `knob(label, default, lo, hi)` | a seed-chosen value under `--faults buggify` |
+| `delay(label, max)` | under `--faults buggify`, on seed-chosen evaluations, sleep a seeded virtual time (1 ms to `max`, default 5 s) |
 | `mark(label)` | a named point in the run's log, label in clear (up to 255 bytes, so it can carry data: `mark("ack 17")`); `setup_complete()` is `mark("setup-complete")`, `faults_done()` is `mark("faults-done")` ([Setup and faults-done](#setup-and-faults-done)) |
 | `control(words)` | a control call (C: `patina_control`), such as `net cut a b` in a run with nodes ([Several machines](#several-machines)); raises (returns) the errno Patina answered |
 
@@ -2122,6 +2123,28 @@ directory on `PYTHONPATH`.
 INTACT = patina.Always("journal-intact")
 INTACT.check(got == expected, f"{len(got)} bytes")
 ```
+
+Each SDK has the same calls. Rust and C check a literal label per call site; Go and Python
+declare a site once and call its method:
+
+| Call | Rust | C | Go | Python |
+|---|---|---|---|---|
+| always | `always!(c, "l", ...)` | `PATINA_ALWAYS(c, "l", d)` | `Always("l").Check(c, ...)` | `Always("l").check(c, d)` |
+| unreachable | `unreachable!("l", ...)` | `PATINA_UNREACHABLE("l", d)` | `Unreachable("l").Reached(...)` | `Unreachable("l").reached(d)` |
+| sometimes | `sometimes!(c, "l")` | `PATINA_SOMETIMES(c, "l")` | `Sometimes("l").Check(c)` | `Sometimes("l").check(c)` |
+| reachable | `reachable!("l")` | `PATINA_REACHABLE("l")` | `Reachable("l").Hit()` | `Reachable("l").hit()` |
+| buggify | `buggify!("l")` | `PATINA_BUGGIFY("l")` | `Buggify("l").Fires()` | `Buggify("l").fires()` |
+| knob | `knob!("l", d, lo, hi)` | `PATINA_KNOB("l", d, lo, hi)` | `Knob("l", d, lo, hi).Value()` | `Knob("l", d, lo, hi).value()` |
+| delay | `delay!("l", max)` | `PATINA_DELAY("l", ns)` | `Delay("l").Delay(ns)` | `Delay("l").delay(ns)` |
+| mark | `mark(s)` | `patina_mark(s)` | `Mark(s)` | `mark(s)` |
+| setup, faults done | `setup_complete()`, `faults_done()` | `patina_setup_complete()`, `patina_faults_done()` | `SetupComplete()`, `FaultsDone()` | `setup_complete()`, `faults_done()` |
+| control | `control(w)` | `patina_control(w)` | `Control(w)` | `control(w)` |
+| under Patina? | `is_simulated()` | `patina_is_simulated()` | `IsSimulated()` | `is_simulated()` |
+
+A `delay` bound of 0 (or none, in Rust) is the default. Rust adds `violation(label, detail)`
+for a label computed at run time, and `always_family!` (with `sometimes_family!` and
+`reachable_family!`) for one declared site that many callers share, as Go's and Python's
+sites are.
 
 Other languages can speak the wire directly; `sdk/c/patina.h` documents it.
 

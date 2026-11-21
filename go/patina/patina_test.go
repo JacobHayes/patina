@@ -35,16 +35,17 @@ func TestSitesAreInertOutsidePatina(t *testing.T) {
 	if !Sometimes("inert-sometimes").Check(true) {
 		t.Fatal("Sometimes.Check(true) returned false")
 	}
-	Reachable("inert-reachable").Mark()
+	Reachable("inert-reachable").Hit()
 	if Buggify("inert-fault").Fires() {
 		t.Fatal("a fault fired outside Patina")
 	}
-	if BuggifyDelay("inert-delay").Delay() {
+	if Delay("inert-delay").Delay(0) {
 		t.Fatal("a delay was injected outside Patina")
 	}
 	if got := Knob("inert-knob", 64, 1, 1024).Value(); got != 64 {
 		t.Fatalf("Knob.Value() = %d, not its default", got)
 	}
 	SetupComplete()
+	FaultsDone()
 	Mark("inert-mark")
 }

@@ -13,7 +13,7 @@ NEVER_HOLDS = patina.Sometimes("never-holds")
 POINT_A = patina.Buggify("point-a")
 POINT_B = patina.Buggify("point-b")
 KNOB_A = patina.Knob("knob-a", 7, 1, 100)
-DELAY_A = patina.BuggifyDelay("delay-a")
+DELAY_A = patina.Delay("delay-a")
 BEFORE_FAIL = patina.Reachable("before-fail")
 MUST_HOLD = patina.Always("must-hold")
 AFTER_FAIL = patina.Reachable("after-fail")
@@ -23,7 +23,7 @@ LOOP_BOUNDED = patina.Always("loop-bounded")
 
 
 def script(two):
-    SCRIPT_START.mark()
+    SCRIPT_START.hit()
     if len(sys.argv) > 1000:
         UNREACHED.check(True)
     for i in range(1000):
@@ -45,10 +45,10 @@ def main():
     if mode == "script":
         script(len(sys.argv) > 2 and sys.argv[2] == "two")
     elif mode == "fail":
-        BEFORE_FAIL.mark()
+        BEFORE_FAIL.hit()
         balance = -1
         MUST_HOLD.check(balance >= 0, f"balance {balance}")
-        AFTER_FAIL.mark()
+        AFTER_FAIL.hit()
     elif mode == "unreach":
         NEVER_HERE.reached("reached")
     elif mode == "coin":

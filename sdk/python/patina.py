@@ -37,7 +37,7 @@ import struct
 import sys
 
 __all__ = [
-    "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "BuggifyDelay", "Knob",
+    "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "Delay", "Knob",
     "mark", "setup_complete", "faults_done", "is_simulated", "compute", "control",
 ]
 
@@ -193,7 +193,7 @@ class Reachable(_Site):
 
     _kind = _REACHABLE
 
-    def mark(self):
+    def hit(self):
         if not self._bits & _EVAL:
             self._report(True)
 
@@ -208,7 +208,7 @@ class Buggify(_Site):
         return self._point(_BUGGIFY, -1)
 
 
-class BuggifyDelay(_Site):
+class Delay(_Site):
     """A delay point: sleeps a seeded virtual time (never real time) when it fires."""
 
     _kind = _DELAYK
@@ -236,7 +236,7 @@ class Knob(_Site):
 
 
 def mark(label):
-    """Name a point in the run's log."""
+    """Name a point in the run's log: any text, not declared ahead (``mark("ack 17")``)."""
     if _get()[0]:
         _call(_MARK, _REACHABLE, False, label.encode("utf-8"))
 

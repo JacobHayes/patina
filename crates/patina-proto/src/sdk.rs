@@ -172,7 +172,7 @@ pub fn point_draw(seed: u64, label: u64, domain: u64, n: u64) -> u64 {
 /// active point fires on a quarter of its evaluations.
 pub const ACTIVATION_PERMILLE: u64 = 250;
 pub const FIRE_PERMILLE: u64 = 250;
-/// `buggify_delay` without a caller's bound: a seeded delay in [1 ms, 5 s].
+/// `delay` without a caller's bound: a seeded delay in [1 ms, 5 s].
 pub const DELAY_MIN_NS: u64 = 1_000_000;
 pub const DELAY_MAX_NS: u64 = 5_000_000_000;
 

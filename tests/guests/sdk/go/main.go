@@ -22,7 +22,7 @@ var (
 	pointA      = patina.Buggify("point-a")
 	pointB      = patina.Buggify("point-b")
 	knobA       = patina.Knob("knob-a", 7, 1, 100)
-	delayA      = patina.BuggifyDelay("delay-a")
+	delayA      = patina.Delay("delay-a")
 	beforeFail  = patina.Reachable("before-fail")
 	mustHold    = patina.Always("must-hold")
 	afterFail   = patina.Reachable("after-fail")
@@ -32,7 +32,7 @@ var (
 )
 
 func script(two bool) {
-	scriptStart.Mark()
+	scriptStart.Hit()
 	if len(os.Args) > 1000 {
 		unreached.Check(true)
 	}
@@ -53,7 +53,7 @@ func script(two bool) {
 	}
 	slept := 0
 	k := knobA.Value()
-	if delayA.DelayUpTo(1000000) {
+	if delayA.Delay(1000000) {
 		slept = 1
 	}
 	fmt.Printf("a=%s knob=%d delay=%d\n", bits, k, slept)
@@ -68,10 +68,10 @@ func main() {
 	case "script":
 		script(len(os.Args) > 2 && os.Args[2] == "two")
 	case "fail":
-		beforeFail.Mark()
+		beforeFail.Hit()
 		balance := -1
 		mustHold.Check(balance >= 0, "balance ", balance)
-		afterFail.Mark()
+		afterFail.Hit()
 	case "unreach":
 		neverHere.Reached("reached")
 	case "coin":

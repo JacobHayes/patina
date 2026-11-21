@@ -292,8 +292,8 @@ func Reachable(label string) *ReachableSite {
 	return r
 }
 
-// Mark notes the site reached.
-func (r *ReachableSite) Mark() {
+// Hit notes the site reached.
+func (r *ReachableSite) Hit() {
 	if r.bits.Load()&bitEval == 0 {
 		r.report(kindReachable, true, nil)
 	}
@@ -318,21 +318,18 @@ func (b *BuggifySite) Fires() bool { return b.point(opBuggify, kindBuggify, -1) 
 // DelaySite sleeps a seeded virtual time on seed-chosen evaluations.
 type DelaySite struct{ site }
 
-// BuggifyDelay declares a delay point. Call it once per label, at package level.
+// Delay declares a delay point. Call it once per label, at package level.
 //
 //go:noinline
-func BuggifyDelay(label string) *DelaySite {
+func Delay(label string) *DelaySite {
 	d := &DelaySite{}
 	d.declare(kindDelay, label)
 	return d
 }
 
-// Delay sleeps between 1 ms and 5 s of virtual time (never real time) when the point fires,
-// and reports whether it did.
-func (d *DelaySite) Delay() bool { return d.point(opDelay, kindDelay, 0) }
-
-// DelayUpTo is Delay with the sleep at most max nanoseconds.
-func (d *DelaySite) DelayUpTo(maxNs int64) bool { return d.point(opDelay, kindDelay, maxNs) }
+// Delay sleeps a seeded virtual time (never real time) when the point fires, between 1 ms and
+// maxNs nanoseconds (0: 5 s), and reports whether it did.
+func (d *DelaySite) Delay(maxNs int64) bool { return d.point(opDelay, kindDelay, maxNs) }
 
 // KnobSite is a tunable a run sets within bounds, so each seed explores a configuration.
 type KnobSite struct {

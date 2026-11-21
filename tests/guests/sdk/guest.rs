@@ -19,8 +19,8 @@ fn script(two: bool, argc: usize) {
             let _ = patina_dst::buggify!("point-b");
         }
     }
-    let knob = patina_dst::buggify_knob!("knob-a", 7, 1, 100);
-    let slept = patina_dst::buggify_delay!("delay-a", std::time::Duration::from_millis(1));
+    let knob = patina_dst::knob!("knob-a", 7, 1, 100);
+    let slept = patina_dst::delay!("delay-a", std::time::Duration::from_millis(1));
     println!("a={bits} knob={knob} delay={}", slept as u8);
 }
 
@@ -53,9 +53,9 @@ fn main() {
             println!("{acc}");
         }
         "marks" => {
-            patina_dst::mark!("ack 1");
+            patina_dst::mark("ack 1");
             std::fs::write("marked", "x").unwrap();
-            patina_dst::mark!("ack 2");
+            patina_dst::mark("ack 2");
         }
         // A run with nodes: the control call from the driver (`control`) and from a node
         // (`control node`), each answer as `WORDS: ok` or `WORDS: errno N`.

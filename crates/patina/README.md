@@ -10,8 +10,8 @@ if patina_dst::buggify!("batch-commit") { /* a rare path the real system can tak
 patina_dst::always!(ledger.is_sorted(), "ledger-sorted", "after {entry}");
 patina_dst::sometimes!(ledger.len() > 4, "ledger-grew");
 patina_dst::reachable!("recovery-ran");
-let batch = patina_dst::buggify_knob!("batch-size", 64, 1, 1024);
-patina_dst::buggify_delay!("pre-heartbeat-stall");
+let batch = patina_dst::knob!("batch-size", 64, 1, 1024);
+patina_dst::delay!("pre-heartbeat-stall");
 patina_dst::setup_complete();
 ```
 

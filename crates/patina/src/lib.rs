@@ -36,9 +36,9 @@
 //!   `--faults buggify`; then a point is active in a quarter of runs and an active point fires on a
 //!   quarter of its evaluations, decided from the seed and the label alone. `--fault
 //!   buggify:LABEL=PERMILLE` forces one point's rate (`0`: off).
-//! - [`buggify_knob!`]: a seed-chosen integer in a range; [`buggify_delay!`]: maybe sleep a
-//!   seeded virtual time.
-//! - [`mark!`] names a point in the run's log; [`setup_complete`] marks the end of setup (no
+//! - [`knob!`]: a seed-chosen integer in a range; [`delay!`]: maybe sleep a seeded virtual
+//!   time.
+//! - [`mark`] names a point in the run's log; [`setup_complete`] marks the end of setup (no
 //!   fault acts before it) and [`faults_done`] the end of the faults (none acts after it).
 //!   [`is_simulated`].
 //!
@@ -64,7 +64,7 @@ mod sys;
 #[cfg(feature = "compute")]
 pub mod compute;
 
-pub use sys::{is_simulated, mark as mark_label};
+pub use sys::{is_simulated, mark};
 
 /// A control call in a run with several machines, e.g. `control("net cut a b")`: `Err` holds
 /// the errno Patina answered (`EPERM` outside the driver's node, `ENOENT` for an unknown node,
@@ -214,11 +214,11 @@ macro_rules! buggify {
 /// is a seed-chosen `i64` in `[lo, hi]`, fixed for the run.
 ///
 /// ```
-/// let batch = patina_dst::buggify_knob!("batch-size", 64, 1, 1024);
+/// let batch = patina_dst::knob!("batch-size", 64, 1, 1024);
 /// assert_eq!(batch, 64);
 /// ```
 #[macro_export]
-macro_rules! buggify_knob {
+macro_rules! knob {
     ($label:expr, $default:expr, $lo:expr, $hi:expr $(,)?) => {{
         $crate::__site!($crate::__rt::KIND_KNOB, $label);
         $crate::__rt::knob(__PATINA_LABEL, $default, $lo, $hi)
@@ -229,33 +229,21 @@ macro_rules! buggify_knob {
 /// (a `Duration`). Returns whether it slept.
 ///
 /// ```
-/// assert!(!patina_dst::buggify_delay!("pre-heartbeat-stall"));
+/// assert!(!patina_dst::delay!("pre-heartbeat-stall"));
 /// ```
 #[macro_export]
-macro_rules! buggify_delay {
+macro_rules! delay {
     ($label:expr $(,)?) => {
-        $crate::buggify_delay!(@ $label, 0)
+        $crate::delay!(@ $label, 0)
     };
     ($label:expr, $max:expr $(,)?) => {
-        $crate::buggify_delay!(@ $label, $crate::__rt::nanos($max))
+        $crate::delay!(@ $label, $crate::__rt::nanos($max))
     };
     (@ $label:expr, $ns:expr) => {{
         $crate::__site!($crate::__rt::KIND_DELAY, $label);
         static __PATINA_SITE: $crate::__rt::Site = $crate::__rt::Site::new();
         __PATINA_SITE.point(true, __PATINA_LABEL, $ns)
     }};
-}
-
-/// A named point in the run's log (any `&str`, not declared ahead).
-///
-/// ```
-/// patina_dst::mark!("workload-started");
-/// ```
-#[macro_export]
-macro_rules! mark {
-    ($label:expr $(,)?) => {
-        $crate::mark_label($label)
-    };
 }
 
 /// A declared `always!` site that many callers share; see [`always_family!`].

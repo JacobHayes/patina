@@ -8,9 +8,10 @@ fn every_call_is_inert_outside_patina() {
     patina_dst::sometimes!(true, "inert-sometimes");
     patina_dst::reachable!("inert-reachable");
     assert!(!patina_dst::buggify!("inert-buggify"));
-    assert_eq!(patina_dst::buggify_knob!("inert-knob", 7, 1, 100), 7);
-    assert!(!patina_dst::buggify_delay!("inert-delay"));
-    patina_dst::mark!("inert-mark");
+    assert_eq!(patina_dst::knob!("inert-knob", 7, 1, 100), 7);
+    assert!(!patina_dst::delay!("inert-delay"));
+    patina_dst::mark("inert-mark");
+    patina_dst::faults_done();
     patina_dst::setup_complete();
     patina_dst::violation("inert-violation", "detail");
 }
