@@ -6,9 +6,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 # limit only: 10-earlier runs scripts that raise it again (blocking I/O sets 8000000).
 ulimit -S -f 2000000
 
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../json.inc"
 die() { echo "FAIL: $*"; exit 1; }
 
 # run_ok OUT SEED cmd...: one run, outcome ok.

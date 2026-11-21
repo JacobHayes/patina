@@ -42,8 +42,8 @@ kept = [x["dir"] + "/inc-0/stdout" for x in runs if os.path.isfile(x["dir"] + "/
 assert kept and all("lost write" in open(p).read() for p in kept), r["groups"][0]["signature"]
 print("nosync: a lost write in %d of %d pairs, in no first crash alone" % (len(runs), r["crash_points"]["pairs"]["tried"]))
 PY
-c=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["dir"])' "$o/nosync/report.json")
-s=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["seed"])' "$o/nosync/report.json")
+c=$(field "$o/nosync/report.json" groups.0.first.dir)
+s=$(field "$o/nosync/report.json" groups.0.first.seed)
 st=0; timeout 120 "$PATINA" run --seed "$s" --config "$c/run.json" --out "$o/rerun" -- python3 /guest/q3.py driver 2 >/dev/null 2>&1 || st=$?
 d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 [ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"

@@ -12,9 +12,9 @@ echo "/guest/sig-fd" >"$o/cases"
 st=0
 timeout 300 "$PATINA" sweep --seeds 1..20 --cases "$o/cases" -j 4 --config "$("$PATINA_CFG" time-limit=60)" --keep fail \
     --out "$o/sweep" --mount "$PATINA_GUESTS":/guest:copy >"$o/sweep.txt" 2>&1 || st=$?
-outcomes=$(python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["outcomes"], sort_keys=True))' "$o/sweep/report.json")
+outcomes=$(jq -cS .outcomes "$o/sweep/report.json")
 echo "sig-fd seeds 1-20: $outcomes (sweep exit $st)"
-[ "$outcomes" = '{"ok": 20}' ] || { tail -30 "$o/sweep.txt"; die "not every run ok"; }
+[ "$outcomes" = '{"ok":20}' ] || { tail -30 "$o/sweep.txt"; die "not every run ok"; }
 rm -rf "${o:?}/v"
 timeout 300 "$PATINA" verify --seed 1 --runs 3 --out "$o/v" --mount "$PATINA_GUESTS":/guest:copy -- /guest/sig-fd \
     >"$o/verify.txt" 2>&1 || die "verify exit $?: $(tail -3 "$o/verify.txt")"

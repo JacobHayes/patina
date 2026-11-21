@@ -11,7 +11,7 @@ o=$RUNS/04-quorum-machine; mkdir -p "$o"
 Q3_FAULTS="--faults crash --fault crash-gap-ms=1000..4000 --fault down-ms=200..1000 --faults net,partition --fault partition-gap-ms=1000..6000 --fault partition-ms=1000..6000"
 Q3_SECONDS=40
 out=$(q3_sweep "$o" ok all)
-[ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
+[ "$out" = '{"ok":8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
 set -- $(python3 -I -c 'import json,sys
 n=set(); k=c=0
 for f in sys.argv[1:]:

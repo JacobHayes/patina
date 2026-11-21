@@ -10,7 +10,7 @@ export SWEEP_JOBS=${SWEEP_JOBS:-4}
 ulimit -S -f 2000000
 export SWEEP_FSIZE=2000000
 FAILS=0
-field() { jq -r ".$2" "$1"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../json.inc"
 die() { echo "FAIL: $*"; exit 1; }
 # fail MSG: record a failure and keep collecting evidence; `finish` exits 1.
 fail() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }

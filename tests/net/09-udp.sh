@@ -27,7 +27,7 @@ hunt() {
             lhs=$(field "$o/$n-$s/replay/result.json" digest); rhs=$(field "$o/$n-$s/result.json" digest)
             [ "$lhs" = "$rhs" ] ||
                 die "$n seed $s: replay differs ($(tail -2 "$o/$n.replay.txt"))"
-            echo "$n: seed $s: $c, replayed identically; $(field "$o/$n-$s/result.json" faults.recent | python3 -I -c 'import json,sys; r=json.load(sys.stdin); print(r[-1] if r else "no fault")')"
+            echo "$n: seed $s: $c, replayed identically; $(field "$o/$n-$s/result.json" faults.recent | jq -rc '.[-1] // "no fault"')"
             return 0
         fi
         rm -rf "${o:?}/$n-$s"

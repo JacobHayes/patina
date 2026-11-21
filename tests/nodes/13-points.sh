@@ -105,7 +105,7 @@ assert br["tried"] == br["points"] and all(x["tried"] == x["points"] > 0 for x i
 print("ok: ok at all %d points" % br["points"])
 PY
 # A failing child's rerun line reproduces it.
-c=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["groups"][0]["first"]["dir"])' "$o/sw-early/report.json")
+c=$(field "$o/sw-early/report.json" groups.0.first.dir)
 st=0; timeout 120 "$PATINA" run --seed $s --config "$c/run.json" --out "$o/rerun" -- $D >/dev/null 2>&1 || st=$?
 d1=$(field "$o/rerun/result.json" digest) d2=$(field "$c/result.json" digest)
 [ "$d1" = "$d2" ] || die "rerun of $c: digest $d1, not $d2"

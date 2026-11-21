@@ -36,7 +36,7 @@ for m in kill forked term orphan vfork violation msync hang unmap exit fixed rem
         run "$o" 1 --config "$("$PATINA_CFG" time-limit=5)" "${c[@]}" -- /guest/mapends "$m"
         got=$(class "$o")
         [ "$got" = "$(want "$m")" ] || die "$m, crash plane $plane: $got $(field "$o/result.json" message)"
-        sc=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("self_check", {}).get("verdict", "-"))' "$o/result.json")
+        sc=$(jq -r '.self_check.verdict // "-"' "$o/result.json")
         [ "$sc" = "$([ $plane = none ] && echo - || echo pass)" ] || die "$m, crash plane $plane: self-check $sc"
         "$PATINA" log ops --check "$o" >"$o.check" || die "$m, crash plane $plane: $(cat "$o.check")"
         if [ -n "$native" ]; then

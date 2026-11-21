@@ -40,7 +40,7 @@ guide`: it names no option or key, so it should almost never change.
   instructions, a seed found on x86_64, and evidence scripts not yet run on arm64; each says why in its header.
 - `examples/`: small programs, one bug each; `testbeds/pubsub`: a larger tokio program for the release tier.
 
-Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), unprivileged user namespaces
+Host: Linux x86_64 or arm64 (arm64: ARCHITECTURE "Limits"), `jq` for the check scripts, unprivileged user namespaces
 (`patina doctor` says what is missing, and on Ubuntu 24.04 and later prints the AppArmor
 profile command). rustup installs the pinned toolchain; mise
 supplies Go. arm64 changes are developed against a Linux arm64 VM and accepted on the hosted

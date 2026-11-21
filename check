@@ -14,6 +14,7 @@ set -euo pipefail; shopt -s inherit_errexit
 cd "$(dirname "$0")"
 root=$(pwd)
 [ $# -ge 1 ] || { sed -n '2,7p' "$0" >&2; exit 2; }
+command -v jq >/dev/null || { echo "check: jq is missing (apt install jq): the check scripts read JSON with it" >&2; exit 1; }
 case $1 in list | areas) exec python3 -I tests/run.py "$1" ;; esac
 
 export PATINA_CHECK_DIR="${PATINA_CHECK_DIR:-$root/target/patina-check}"

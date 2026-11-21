@@ -13,7 +13,7 @@ rm -rf "${o:?}" && mkdir -p "$o"
 export XDG_CACHE_HOME=$o/cache
 "$PATINA" run --seed 1 --out "$o/run" --mount "$G":/guest:copy --env LD_PRELOAD=/guest/librw-data.so -- /bin/true >"$o.txt" 2>&1 || true
 r=$o/run/result.json
-oc=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["outcome"])' "$r" 2>/dev/null || echo none)
+oc=$(jq -r .outcome "$r" 2>/dev/null || echo none)
 [ "$oc" = ok ] || die "outcome $oc: $(tail -3 "$o.txt")"
 st=$(python3 -I -c 'import json, sys
 r = json.load(open(sys.argv[1]))

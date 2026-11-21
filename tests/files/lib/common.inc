@@ -5,9 +5,7 @@ LIB=$(cd "$(dirname "$0")/lib" && pwd)
 # No guest output may grow without bound (a guest reading /dev/zero to the end, say).
 ulimit -f 4000000
 
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../../json.inc"
 die() { echo "FAIL: $*"; exit 1; }
 
 # verify_ok OUT SEED VARY RUNS [run options] -- cmd...: patina verify must report identical runs, all ok.

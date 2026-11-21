@@ -5,9 +5,7 @@
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
 # field FILE KEY[.SUB]: one (possibly nested) field of a JSON file
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[int(k)] if isinstance(v,list) else v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) or v is None else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../json.inc"
 
 if [ -n "${PATINA_GDB:-}" ]; then
     GDB=$PATINA_GDB
@@ -73,7 +71,7 @@ session() {
 
 # identical RUNDIR: the session ended as the recorded run.
 identical() {
-    [ "$dst" = 0 ] && [ "$(field "$1/debug/session.json" identical)" = True ] \
+    [ "$dst" = 0 ] && [ "$(field "$1/debug/session.json" identical)" = true ] \
         || die "$1: not identical (exit $dst): $(tail -3 "$1.debug")"
 }
 

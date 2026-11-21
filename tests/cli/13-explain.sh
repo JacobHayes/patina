@@ -43,7 +43,7 @@ assert stop["kind"] == "stop", stop
 label = result["message"].split(":")[0].strip()
 print(f"story: {len(lines)} lines for {len(events)} events; stop at event {stop['seq']}; label {label}")
 EOF
-n=$(python3 -I -c 'import json,sys; print([json.loads(l) for l in open(sys.argv[1])][-1]["seq"])' "$r.story")
+n=$(jq -s '.[-1].seq' "$r.story")
 "$PATINA" log events "$r" --from "$n" --to "$n" | tail -1 >"$r.stop"
 [ "$(field "$r.stop" type)" = sdk ] && [ "$(field "$r.stop" op)" = assert ] || die "the stop event is not an assertion: $(cat "$r.stop")"
 case "$(field "$r/result.json" message)" in "$(field "$r.stop" label)"*) ;; *) die "the stop event is another assertion: $(cat "$r.stop")" ;; esac

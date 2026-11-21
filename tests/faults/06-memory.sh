@@ -14,7 +14,7 @@ for n in $(seq 1 24); do
     f=$(awk '!/ ok$/ && $0 != "done" {printf "%s ", $0}' "$o/inc-0/stdout")
     nf=$(awk '!/ ok$/ && $0 != "done" {n++} END {print n + 0}' "$o/inc-0/stdout")
     [ "$nf" -le 1 ] || die "mem-error-at=$n: more than one failed step"
-    echo "mem-error-at=$n: $(field "$o/result.json" faults.recent | python3 -I -c 'import json,sys; print(" ".join(x["call"] for x in json.load(sys.stdin)) or "-")') -> ${f:-no failure visible to the guest (handled by libc, or N beyond its requests)}"
+    echo "mem-error-at=$n: $(field "$o/result.json" faults.recent | jq -r 'map(.call) | join(" ") | if . == "" then "-" else . end') -> ${f:-no failure visible to the guest (handled by libc, or N beyond its requests)}"
     seen="$seen$f"
 done
 for k in 0 1 2 3 4; do

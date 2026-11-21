@@ -40,9 +40,9 @@ sweep() {
         --mount "$PATINA_GUESTS":/guest:copy -- python3 "/guest/$_g" driver $_args >"$o/$_name.txt" 2>&1 || _st=$?
     [ -f "$o/$_name/report.json" ] || { tail -20 "$o/$_name.txt"; die "sweep $_name: no report (exit $_st)"; }
 }
-failures() { python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["outcomes"].get("failure", 0))' "$o/$1/report.json"; }
+failures() { jq -r '.outcomes.failure // 0' "$o/$1/report.json"; }
 clean() {
-    [ "$(field "$o/$1/report.json" outcomes)" = "{\"ok\": $N}" ] || die "$1: $(field "$o/$1/report.json" outcomes)"
+    [ "$(field "$o/$1/report.json" outcomes)" = "{\"ok\":$N}" ] || die "$1: $(field "$o/$1/report.json" outcomes)"
     echo "$1: $N of $N seeds ok"
 }
 # search NAME GUEST NODES BUG DRIVER-ARGS [patina options]: the sweep of a planted bug, seeds
@@ -57,7 +57,7 @@ print(" ".join(x["replay"]["result"] for x in g if x["replay"]))
 sys.exit(0 if g and all(x["replay"] and x["replay"]["result"] == "identical" for x in g) else 1)' "$o/$1/report.json") \
         || die "$1: a first failing run did not replay identically: $r"
     l=$(cat "$o/$1"/seed-*/inc-0/stdout | sed -n 's/^FAIL: \([a-z ]*\):.*/\1/p' | sort | uniq -c | tr -s ' \n' ' ')
-    echo "$1: found after $(python3 -I -c 'import json,sys; print(sum(json.load(open(sys.argv[1]))["outcomes"].values()))' "$o/$1/report.json") runs:$l; replayed: $r"
+    echo "$1: found after $(jq '[.outcomes[]] | add' "$o/$1/report.json") runs:$l; replayed: $r"
 }
 control() {
     [ "$(failures "$1")" = 0 ] || die "$1: found in $(failures "$1") seeds without its class"

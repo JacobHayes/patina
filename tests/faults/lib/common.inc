@@ -7,9 +7,7 @@ LIB=$HERE/lib
 # only, so that the scripts 12-earlier runs can set their own (blocking I/O raises it to 8000000).
 ulimit -S -f 4000000
 
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../../json.inc"
 die() { echo "FAIL: $*"; exit 1; }
 
 # run OUT SEED [patina run options] -- /guest/cmd args: one run (OUT replaced).

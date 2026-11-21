@@ -6,7 +6,7 @@ W=${PATINA_WORKLOADS:?}
 export PATINA_WORKLOADS=$W
 export SWEEP_JOBS=${SWEEP_JOBS:-4}
 ulimit -f 8000000
-field() { jq -r ".$2" "$1"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../../json.inc"
 die() { echo "FAIL: $*"; exit 1; }
 # run WORKLOAD OUT SEED [patina options] -- /guest/cmd args: one run (OUT must not exist).
 run() {

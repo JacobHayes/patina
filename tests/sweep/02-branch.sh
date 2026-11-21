@@ -82,7 +82,7 @@ PY
 # lint-allow: plain-sh — the rerun line is printed for a user's shell; run it as one would
 sh -c "$(echo "$rerun" | sed "s|^patina run |'$PATINA' run --out '$d/rerun' |")" >/dev/null 2>&1 || true
 sig() { field "$1" signature; }
-lhs=$(sig "$d/rerun/result.json"); rhs=$(field "$d/full/report.json" groups | python3 -I -c 'import json,sys; print([g for g in json.load(sys.stdin) if "acked" in g["signature"]][0]["signature"])')
+lhs=$(sig "$d/rerun/result.json"); rhs=$(field "$d/full/report.json" groups | jq -r '[.[] | select(.signature | contains("acked"))][0].signature')
 [ "$lhs" = "$rhs" ] ||
     die "rerun: $(sig "$d/rerun/result.json")"
 echo "cut at $tried of $all points; resumed, the report counts every run; rerun gives the same signature: $rerun"

@@ -17,7 +17,7 @@ k=50; [ "${CHECK_TIER:-}" != quick ] || k=10
 run_ok "$o/kill" 1 --config "$o/b.toml" -- python3 /guest/kill.py driver $k
 sed 's/^/    /' "$o/kill/inc-0/stdout"
 [ "$(field "$o/kill/result.json" nodes.list.1.incarnations)" = $((k + 1)) ] || die "b: $(field "$o/kill/result.json" nodes.list.1)"
-hows=$(python3 -I -c 'import json,sys; print(" ".join(sorted({d["how"] for d in json.load(open(sys.argv[1]))["nodes"]["list"][1]["downs"]})))' "$o/kill/result.json")
+hows=$(jq -r '[.nodes.list[1].downs[].how] | unique | join(" ")' "$o/kill/result.json")
 [ "$hows" = "killed by script" ] || die "b's downs: $hows"
 n=$("$PATINA" log events "$o/kill" --types node | grep -c '"event":"kill","name":"b".*"by":"script"')
 [ "$n" = $k ] || die "kill events of b: $n"

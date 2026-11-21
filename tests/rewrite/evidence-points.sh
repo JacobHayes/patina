@@ -15,11 +15,8 @@ o=$RUNS/evidence-points
 rm -rf "${o:?}"
 mkdir -p "$o"
 export XDG_CACHE_HOME=$o/cache
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."):
-    if not isinstance(v, dict) or k not in v: print("-"); sys.exit()
-    v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "$0")/../json.inc"
+field() { field_opt "$@"; }
 
 # row NAME IMAGE WANT [patina options] -- CMD...: WANT is the native output; IMAGE the program's
 # file name (its coverage is reported). Runs: traps (twice, the second's wall time reported),

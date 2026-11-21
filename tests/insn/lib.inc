@@ -8,10 +8,7 @@ ulimit -f 4000000
 die() { echo "FAIL: $*"; exit 1; }
 
 # field FILE KEY[.SUB]: one (possibly nested) field of a result.json
-field() { python3 -I -c 'import json,sys
-v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../json.inc"
 
 # The machine: x86_64 or aarch64 (the guests in x86 assembly have arm64 twins of one name).
 ARCH=$(uname -m)

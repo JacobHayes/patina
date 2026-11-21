@@ -5,9 +5,7 @@
 set -eu
 : "${PATINA:?}" "${PATINA_CFG:?}" "${PATINA_GUESTS:?}" "${OUT:?}"
 mkdir -p "$OUT"
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[k]
-print(v)' "$1" "$2"; }
+. "$(dirname "$0")/../../json.inc"
 cpu=${CPU:-2}
 run() { # name preempt args...
     name=$1; p=$2; shift 2

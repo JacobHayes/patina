@@ -18,13 +18,13 @@ timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep all --out "$o/ok" --config 
     --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/wal.py driver 15 >"$o/ok.txt" 2>&1 || st=$?
 [ -f "$o/ok/report.json" ] || { tail -20 "$o/ok.txt"; die "sweep ok: no report (exit $st)"; }
 out=$(field "$o/ok/report.json" outcomes)
-[ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
+[ "$out" = '{"ok":8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
 # torn DIR...: how many of the runs dropped a torn tail.
 torn() {
     python3 -I -c 'import re,sys
 print(sum(int(re.search(r"dropped in (\d+) of", open(d + "/inc-0/stdout").read()).group(1)) > 0 for d in sys.argv[1:]))' "$@"
 }
-c=$(python3 -I -c 'import json,sys; print(sum(json.load(open(d + "/result.json"))["self_check"]["verdict"] == "pass" for d in sys.argv[1:]))' "$o"/ok/seed-*)
+c=$(jq -s '[.[] | select(.self_check.verdict == "pass")] | length' "$o"/ok/seed-*/result.json)
 [ "$c" = 8 ] || die "correct: the self-check passed in only $c of 8 runs"
 t=$(torn "$o"/ok/seed-*)
 # The scenario must arise: if no run of the sweep tore a tail, later seeds one at a time, each ok.

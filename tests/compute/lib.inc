@@ -6,11 +6,8 @@ die() { echo "FAIL: $*"; exit 1; }
 [ ! -f "$G/compute/MISSING" ] || die "$(cat "$G/compute/MISSING")"
 
 # field FILE KEY[.SUB]: one (possibly nested) field of a result.json ("-" if absent)
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."):
-    if not isinstance(v, dict) or k not in v: print("-"); sys.exit()
-    v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../json.inc"
+field() { field_opt "$@"; }
 
 # prun OUT SEED [patina options] -- PROG ARGS...: one run with the guests at /guest
 prun() {

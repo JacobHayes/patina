@@ -22,11 +22,8 @@
 #@ tier=quick budget=30 slots=4
 : "${PATINA:?}" "${PATINA_GUESTS:?}" "${RUNS:?}"
 die() { echo "FAIL: $*"; exit 1; }
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."):
-    if not isinstance(v, dict) or k not in v: print("-"); sys.exit()
-    v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "$0")/../json.inc"
+field() { field_opt "$@"; }
 res() { echo "$(field "$1/result.json" outcome)/$(field "$1/result.json" stop): $(field "$1/result.json" message)"; }
 # The guests by their resolved path: the sandbox binds the program's directory at the path it
 # is given, so through a symlink Patina's maps (with points or without) name that path where the

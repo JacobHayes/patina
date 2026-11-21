@@ -11,7 +11,7 @@
 o=$RUNS/01-quorum; mkdir -p "$o"
 
 out=$(q3_sweep "$o" ok all)
-[ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
+[ "$out" = '{"ok":8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
 acted=$(field "$o/ok/report.json" nodes.partitions.acted)
 [ "$acted" -ge 1 ] || die "correct: no partition acted on traffic in 8 runs"
 # A failover: the first seed of the sweep with one, or later seeds one at a time, each ok.

@@ -14,7 +14,7 @@ out=$o/inc-0/stdout
 read -r n e < <(sed -n 's/^filled \([0-9]*\) errno=\([0-9]*\)$/\1 \2/p' "$out")
 [ "$e" = 28 ] && [ "$n" -gt $((size / 2)) ] && [ "$n" -le "$size" ] || die "filled: $(cat "$out")"
 grep -q "^statfs /tmp .* blocks=$((size / 4096)) " "$out" || die "/tmp: $(grep '^statfs /tmp' "$out")"
-r=$(python3 -I -c 'import json, sys; t = json.load(open(sys.argv[1]))["tmpfs"]; print(t["bytes"], t["enospc"])' "$o/result.json")
+r=$(jq -r '.tmpfs | "\(.bytes) \(.enospc)"' "$o/result.json")
 [ "${r% *}" = "$size" ] && [ "${r#* }" -ge 1 ] || die "result.json tmpfs: $r"
 grep -qF '[run] disk-mb' <<<"$said" || die "the run does not name [run] disk-mb: $said"
 st=0

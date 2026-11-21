@@ -4,9 +4,7 @@
 GUESTS="hello-static hello-spie hello-dyn hello-rs"
 
 # field FILE KEY[.SUB]: one (possibly nested) field of a result.json
-field() { python3 -I -c 'import json,sys; v=json.load(open(sys.argv[1]))
-for k in sys.argv[2].split("."): v=v[k]
-print(json.dumps(v) if isinstance(v,(list,dict)) else v)' "$1" "$2"; }
+. "$(dirname "${BASH_SOURCE[0]}")/../json.inc"
 
 die() { echo "FAIL: $*"; exit 1; }
 

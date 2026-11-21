@@ -39,7 +39,7 @@ timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep all --out "$o/ok" --config 
     --mount "$PATINA_GUESTS":/guest:copy -- sleep 6 >"$o/ok.txt" 2>&1 || st=$?
 [ -f "$o/ok/report.json" ] || { tail -20 "$o/ok.txt"; die "sweep ok: no report (exit $st)"; }
 out=$(field "$o/ok/report.json" outcomes)
-[ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
+[ "$out" = '{"ok":8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
 set -- $(python3 -I -c 'import json,sys
 k=c=0
 for f in sys.argv[1:]:

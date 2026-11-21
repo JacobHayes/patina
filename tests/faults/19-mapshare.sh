@@ -25,7 +25,7 @@ for m in back back-kill alternate store-write store-writev write-store trunc fil
         run "$o" 1 "${c[@]}" -- /guest/mapshare "$m"
         got=$(class "$o")
         [ "$got" = ok ] || die "$m, crash plane $plane: $got $(field "$o/result.json" message)"
-        sc=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("self_check", {}).get("verdict", "-"))' "$o/result.json")
+        sc=$(jq -r '.self_check.verdict // "-"' "$o/result.json")
         [ "$sc" = "$([ $plane = none ] && echo - || echo pass)" ] || die "$m, crash plane $plane: self-check $sc"
         "$PATINA" log ops --check "$o" >"$o.check" || die "$m, crash plane $plane: $(cat "$o.check")"
         # The last incarnation's output: a crash restarts the program, which starts over.

@@ -11,7 +11,7 @@
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/15
-plan() { python3 -I -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["faults"], sort_keys=True))' "$1/run.json"; }
+plan() { jq -cS .faults "$1/run.json"; }
 for s in 1 2; do
     run "$d/disk-$s" $s --faults disk -- /guest/io-errors tally
 done
@@ -58,7 +58,7 @@ done
 [ "$(field "$d/inc-/result.json" incarnations)" = 4 ] && [ "$(field "$d/inc-2/result.json" incarnations)" = 2 ] ||
     die "max-incarnations: $(field "$d/inc-/result.json" incarnations) by default, $(field "$d/inc-2/result.json" incarnations) with 2"
 run "$d/gap" 1 --faults kill --fault crash-permille=1000 --fault max-incarnations=2 --fault down-ms=5000..5000 -- /guest/ack-log correct
-crash_t=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["crashes"][0]["vclock_ns"])' "$d/gap/result.json")
+crash_t=$(jq -r '.crashes[0].vclock_ns' "$d/gap/result.json")
 first_t=$("$PATINA" log events "$d/gap" | jq -n '[inputs | select(.inc == 1 and .t) | .t][0]')
 gap=$((first_t - crash_t))
 [ "$gap" -ge 5000000000 ] && [ "$gap" -lt 5001000000 ] || die "down-ms=5000..5000: the restart began $gap ns after the crash"

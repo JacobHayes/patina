@@ -11,7 +11,7 @@ Q3_FAULTS="--faults kill --fault crash-gap-ms=2000..10000 --fault down-ms=500..3
 Q3_SECONDS=40
 
 out=$(q3_sweep "$o" ok all)
-[ "$out" = '{"ok": 8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
+[ "$out" = '{"ok":8}' ] || { tail -30 "$o/ok.txt"; die "correct: $out"; }
 # The nodes killed and restarted in some run, and the kills over the sweep.
 set -- $(python3 -I -c 'import json,sys
 n=set(); k=0
