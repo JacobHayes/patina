@@ -1,7 +1,9 @@
 # 13. `patina explain RUNDIR` on the acklog example's crash bug (the first violating seed of
-#    1-20 under `--crash machine`): the observed replay is the run (its digest, and the
+#    1-64 under `--crash machine`: about one seed in five violates, and which do depends on the
+#    host): the observed replay is the run (its digest, and the
 #    observations are in RUNDIR/explain, not in its boundary log); the story is shorter than the
-#    event log; its crash line is at the run's crash and names a path the crash lost (a process
+#    event log; its crash line is at the run's last crash that lost something (an earlier one
+#    may have lost nothing) and names a path that crash lost (a process
 #    crash's lists no unsynced write: it loses none); a thread of a second process is named with
 #    its process id; its stop
 #    event is the run's failed assertion (`log events --from N --to N`). A second explain reuses
@@ -10,11 +12,11 @@
 #@ tier=quick budget=20
 . "$(dirname "$0")/lib.inc"
 r=""
-for s in $(seq 1 20); do
+for s in $(seq 1 64); do
     prun "$RUNS/acklog-$s" --seed "$s" --crash machine -- "$PATINA_GUESTS/examples/acklog"
     if [ "$(field "$RUNS/acklog-$s/result.json" outcome)" = violation ]; then r=$RUNS/acklog-$s; break; fi
 done
-[ -n "$r" ] || die "acklog: no violation in seeds 1-20"
+[ -n "$r" ] || die "acklog: no violation in seeds 1-64"
 echo "acklog: seed $s violates: $(field "$r/result.json" message)"
 st=0; timeout 60 "$PATINA" explain "$r" --format json >"$r.story" 2>"$r.err" || st=$?
 [ "$st" = 0 ] || die "explain: exit $st ($(cat "$r.err"))"
@@ -32,7 +34,7 @@ events = [json.loads(l) for l in open(r + ".events")]
 result = json.load(open(r + "/result.json"))
 lines = [l for l in story if l["kind"] not in ("outcome", "stop")]
 assert len(lines) * 4 < len(events), (len(lines), len(events))
-crash = next(e for e in events if e["type"] == "crash")
+crash = [e for e in events if e["type"] == "crash" and e["lost"]["paths"]][-1]
 at = [l for l in lines if l["kind"] in ("crash", "unsynced") and l["seq"] == crash["seq"]]
 assert at, "no crash line at the crash"
 assert any(p in l["text"] for l in at for p in crash["lost"]["paths"]), at

@@ -7,8 +7,10 @@
 # arguments are cut at 256 (`argv_cut`). The replay is identical, and `verify --vary
 # cpu,aslr,load` is identical on threads and a Python start.
 # examples/checks/no-symlink-escape: a planted symlink out of public/ fails every seed, a path
-# swap the seeds where it was followed (one signature), the fix (openat2 beneath, no symlinks)
-# passes both. examples/checks/confined fails the open; it allows the read-only open of the
+# swap the seeds where it was followed (one signature: a search of seeds 1-128 that stops at
+# the first finding, since only a swap to a symlink between the stat and the open escapes,
+# about one seed in six at every use swapped), the fix (openat2 beneath, no symlinks) passes
+# both. examples/checks/confined fails the open; it allows the read-only open of the
 # work tree to fsync it after a create under the root, and not one of /tmp.
 #@ tier=area budget=30 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -44,10 +46,10 @@ vfy vpython /usr/bin/python3 -I -c 'import json, os; os.listdir("/")'
 
 # The escape checks.
 nse=$root/examples/checks/no-symlink-escape
-sweep() { n=$1 c=$2; shift 2; rc=0; "$PATINA" sweep --seeds 1..20 -j 4 --out "$n" --check "$c" "$@" >"$n.txt" 2>&1 || rc=$?; echo "$rc $(jq -r '"\(.findings) \([.groups[].signature] | join(" | "))"' "$n/report.json")"; }
-got=$(sweep swap "$nse /work/public" --fault path-swap-permille=300 -- "$paths" escape)
+sweep() { n=$1 c=$2; shift 2; rc=0; "$PATINA" sweep --seeds "${SEEDS:-1..20}" -j 4 --out "$n" --check "$c" "$@" >"$n.txt" 2>&1 || rc=$?; echo "$rc $(jq -r '"\(.findings) \([.groups[].signature] | join(" | "))"' "$n/report.json")"; }
+got=$(SEEDS=1..128 sweep swap "$nse /work/public" --fault path-swap-permille=1000 --max-findings 1 -- "$paths" escape)
 case $got in "1 "[1-9]*" violation check: symlink-escape: public/report.txt -> /etc/passwd (seq N)") ;; *) die "path swaps: $got" ;; esac
-[ "$(sweep swapfix "$nse /work/public" --fault path-swap-permille=300 -- "$paths" escape fixed)" = "0 0 " ] || die "path swaps, fixed: $(tail -3 swapfix.txt)"
+[ "$(SEEDS=1..128 sweep swapfix "$nse /work/public" --fault path-swap-permille=1000 -- "$paths" escape fixed)" = "0 0 " ] || die "path swaps, fixed: $(tail -3 swapfix.txt)"
 [ "$(sweep static "$nse /work/public" -- "$paths" escape link)" = "1 20 violation check: symlink-escape: public/notes.txt -> /etc/passwd (seq N)" ] || die "a planted link: $(tail -3 static.txt)"
 [ "$(sweep staticfix "$nse /work/public" -- "$paths" escape link fixed)" = "0 0 " ] || die "a planted link, fixed: $(tail -3 staticfix.txt)"
 conf=$root/examples/checks/confined
@@ -56,4 +58,4 @@ conf=$root/examples/checks/confined
 [ "$(sweep durable "$conf /work/public" -- "$paths" durable)" = "0 0 " ] || die "confined, fsync of the parent: $(tail -3 durable.txt)"
 [ "$(sweep durtmp "$conf /work/public" -- "$paths" durable /tmp)" = "1 20 violation check: outside-roots: open /tmp (seq N)" ] || die "confined, fsync of /tmp: $(tail -3 durtmp.txt)"
 [ "$(sweep durtmp2 "$conf /work/public" -- "$paths" durable /tmp openat2)" = "1 20 violation check: outside-roots: open /tmp (seq N)" ] || die "confined, openat2 of /tmp: $(tail -3 durtmp2.txt)"
-echo "ok: paths as passed and resolved, argv, edges; replay and verify identical; escapes: swaps $(echo "$got" | cut -d' ' -f2) of 20, a planted link 20 of 20, fixes none"
+echo "ok: paths as passed and resolved, argv, edges; replay and verify identical; escapes: a swap found after $(jq .runs swap/report.json) runs, a planted link 20 of 20, fixes none"

@@ -1713,9 +1713,9 @@ nodes: driver, a, b in 31 runs; net: 0 cuts, 0 heals, 11 held over them
 node downs: 30 machine crash; 30 restarts
 
 failure exit: FAIL: acknowledged put lost on b; exit 1
-  6 of 31 runs   first: seed 1@b.1   replayed: identical
+  5 of 31 runs   first: seed 1@b.1   replayed: identical
   faults in every failing run: crash      in none: -
-  nodes: a down in 0, b down in 6 (lost on its disk in 5; crash points 1, 2, 3, 8, 9, 12)
+  nodes: a down in 0, b down in 5 (lost on its disk in 5; crash points 1, 2, 3, 9, 13)
   rerun:  patina run --seed 1 --config /tmp/ack2/patina-out/sweep/seed-1@b.1/run.json -- python3 /guest/ack2.py driver 3
   replay: patina replay /tmp/ack2/patina-out/sweep/seed-1@b.1
   explain: patina explain /tmp/ack2/patina-out/sweep/seed-1@b.1
@@ -1783,8 +1783,10 @@ node's first boot would reach it with no crash before (the points of the boots b
 its own, and the points either side, since the work a crash undid is done again); at most 6
 places per node, each a run of minimize's 30. A failure planted under crashes of both nodes,
 net delays and duplicates and disk delays reduces to `--crash machine-at:8@b` and nothing else
-(`tests/nodes/14-points-sweep.sh`, its first failing seed on the reference host). Over seeds
-1 to 200 of that mix, 58 of the 59 failing seeds reduce to one crash, where the first crash
+(`tests/nodes/14-points-sweep.sh`, its first failing seed on the reference host). A failure
+built so that b's first crash comes before it serves anything and its second loses an
+acknowledged put reduces, on any seed, to that second crash alone at its place in a first
+boot (the same script). Over seeds 1 to 200 of that mix, 58 of the 59 failing seeds reduce to one crash, where the first crash
 alone reduced 46; in the others the loss needs a net or disk delay as well, and minimize keeps
 it.
 

@@ -65,16 +65,17 @@ is() {
 (run hang --config "$("$PATINA_CFG" check-timeout=2)" --check chk/hang -- "$hello" >hang.rc) &
 hang=$!
 
-# The kvlog sweep, and kvlog fixed.
+# The kvlog sweep (about one seed in four violates, which ones depending on the host), and
+# kvlog fixed.
 rc=0
-"$PATINA" sweep --seeds 1..30 -j 4 --crash machine:10 --out kv --check chk/acked -- "$kv" >kv.txt 2>&1 || rc=$?
+"$PATINA" sweep --seeds 1..64 -j 4 --crash machine:10 --out kv --check chk/acked -- "$kv" >kv.txt 2>&1 || rc=$?
 [ "$rc" = 1 ] || die "kvlog sweep: exit $rc: $(tail -3 kv.txt)"
 groups=$(jq -r '[.groups[].signature] | join(" | ")' kv/report.json)
 case $groups in "violation check: acked-record-lost"*) ;; *) die "kvlog sweep: groups: $groups" ;; esac
 [ "$(jq '.groups | length' kv/report.json)" = 1 ] || die "kvlog sweep: more than one group: $groups"
 [ "$(jq -r '.groups[0].replay.result' kv/report.json)" = identical ] || die "kvlog: the first seed's replay: $(jq -c .groups[0].replay kv/report.json)"
 first=$(jq -r '.groups[0].first.dir' kv/report.json)
-echo "kvlog: $(jq -r .findings kv/report.json) of 30 runs: $groups (first $first)"
+echo "kvlog: $(jq -r .findings kv/report.json) of 64 runs: $groups (first $first)"
 
 # By hand, outside patina, the checker says what it said in the run.
 rc=0
@@ -186,12 +187,13 @@ printf '%s\n' "/bin/sh -c 'echo boom >&2; exit 1' first" "/bin/sh -c 'echo boom 
 echo "calc: $calc_groups; known: $(kn known1 calcs)"
 echo "check: $(jq -c .check kv/report.json); without crashes: vacuous"
 
-# 3. --ok-exit and log tree.
+# 3. --ok-exit and log tree. Disk faults with fs errors at 10 per mille: under the preset alone
+# about one seed in twenty exits 1, too few in 80 for which seeds those are not to decide it.
 up=$PATINA_GUESTS/examples/upcase same=$root/examples/checks/same-tree
 export PATINA
 "$PATINA" run --seed 1 --out upref -- "$up" >upref.txt 2>&1 || die "upcase reference: $(tail -2 upref.txt)" # lint-allow: seed — faults off, upcase writes the same tree on every seed
 rc=0
-"$PATINA" sweep --seeds 1..80 -j 4 --faults disk --ok-exit 1 --check "$same upref" --out up1 -- "$up" >up1.txt 2>&1 || rc=$?
+"$PATINA" sweep --seeds 1..80 -j 4 --faults disk --fault fs-error-permille=10 --ok-exit 1 --check "$same upref" --out up1 -- "$up" >up1.txt 2>&1 || rc=$?
 [ "$rc" = 1 ] && [ "$(jq '.groups | length' up1/report.json)" = 1 ] || die "upcase checked sweep: exit $rc: $(tail -3 up1.txt)"
 case $(jq -r '.groups[0].signature' up1/report.json) in "violation check: wrong-output"*) ;; *) die "upcase: $(jq -c '.groups[0]' up1/report.json)" ;; esac
 jq -e '.groups[0].faults.every | index("fs-short")' up1/report.json >/dev/null || die "upcase: fs-short is not in every failing run"

@@ -1,11 +1,13 @@
-# 14. `patina explain` on four kinds of failure, each the first failing seed of a range: a race
+# 14. `patina explain` on four kinds of failure, each the first failing seed of 1-64: a race
 #    between threads (the jobs example), crash consistency (acklog under `--crash machine`), a
 #    two-node bug (tests/guests/nodes/kv.py, the backup acknowledging before it applies) and a
-#    three-node split brain (tests/guests/nodes/q3.py nofence under partitions). Each story is far
-#    shorter than the event log and stops at the event the run gives: the failed assertion,
-#    the failing thread's output, the message into the driver that it found wrong (from the
-#    node that sent it), after the cut that caused it. Then the observed replay is the run for
-#    every run of an examples sweep kept whole, a node sweep and a sweep with load-time points.
+#    three-node split brain (tests/guests/nodes/q3.py nofence under partitions). Which seed fails
+#    first depends on the host, so what is asserted holds for every failing seed: each story is
+#    shorter than the event log (far shorter for the nodes) and stops at the event the run
+#    gives: the failed assertion, the failing thread's output, the message into the driver that
+#    it found wrong (from the node that sent it), with the last partition before it. Then the
+#    observed replay is the run for every run of an examples sweep kept whole, a node sweep and a
+#    sweep with load-time points.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
 G=$PATINA_GUESTS
@@ -30,15 +32,15 @@ story() {
 # check RUNDIR CASE: the case's facts, from the run (tests/cli/explain-facts.py).
 check() { python3 -I "$(dirname "$0")/explain-facts.py" "$1" "$2" "$PATINA" || die "$2: the story"; }
 
-first "$RUNS/jobs" "$(seq 1 20)" failure -- "$G/examples/jobs"
+first "$RUNS/jobs" "$(seq 1 64)" failure -- "$G/examples/jobs"
 story "$RUNS/jobs"; check "$RUNS/jobs" thread
-first "$RUNS/acklog" "$(seq 1 20)" violation --crash machine -- "$G/examples/acklog"
+first "$RUNS/acklog" "$(seq 1 64)" violation --crash machine -- "$G/examples/acklog"
 story "$RUNS/acklog"; check "$RUNS/acklog" crash
 for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s", "bug"]\n' $n $n; done >"$RUNS/kv.toml"
-first "$RUNS/kv" "$(seq 1 8)" failure --config "$RUNS/kv.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver
+first "$RUNS/kv" "$(seq 1 64)" failure --config "$RUNS/kv.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver
 story "$RUNS/kv"; check "$RUNS/kv" nodes
 for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "nofence"]\n' $n $n; done >"$RUNS/q3.toml"
-first "$RUNS/q3" "$(seq 1 8)" failure --config "$RUNS/q3.toml" --faults net --fault partition-gap-ms=1000..6000 \
+first "$RUNS/q3" "$(seq 1 64)" failure --config "$RUNS/q3.toml" --faults net --fault partition-gap-ms=1000..6000 \
     --fault partition-ms=1000..6000 --mount "$G":/guest:copy -- python3 /guest/q3.py driver 60
 story "$RUNS/q3"; check "$RUNS/q3" partition
 

@@ -34,12 +34,13 @@ verify() {
 
 class() { field "$1/result.json" outcome; }
 
-# sweep NAME SEEDS [patina run options] -- /guest/cmd args: one run per seed (1..SEEDS),
+# sweep NAME SEEDS [patina run options] -- /guest/cmd args: one run per seed (1..SEEDS; SEEDS
+# A-B: A..B),
 # $T07_JOBS (default 4) at a time, through tests/storage/lib/sweep.sh: $RUNS/NAME/summary.tsv
 # (seed outcome message digest incarnations crashes wall_ms); run directories deleted unless
 # SWEEP_KEEP says otherwise (all, fail).
 sweep() {
     _n=$1; _s=$2; shift 2
     SWEEP_OUT=$RUNS/$_n SWEEP_KEEP=${SWEEP_KEEP:-none} SWEEP_JOBS=${T07_JOBS:-4} PATINA_WORKLOADS=$(dirname "$PATINA_GUESTS") \
-        "$HERE/../storage/lib/sweep.sh" "$(basename "$PATINA_GUESTS")" "1-$_s" -- "$@" >"$RUNS/$_n.table"
+        "$HERE/../storage/lib/sweep.sh" "$(basename "$PATINA_GUESTS")" "$(case $_s in *-*) echo "$_s" ;; *) echo "1-$_s" ;; esac)" -- "$@" >"$RUNS/$_n.table"
 }

@@ -3,9 +3,13 @@
 
     ack2.py a                primary: append each `put I` to `log` with fsync, forward it to b,
                              answer `ok I` once b has answered; serve :7000
-    ack2.py b [early]        backup: append each `put I` to `log` with fsync, then answer
-                             `ok I`; with `early`, answer before the append and its fsync
-    ack2.py driver N         put 1..N through a, then read both logs back
+    ack2.py b [MODE] [init]  backup: append each `put I` to `log` with fsync, then answer
+                             `ok I`; MODE `early` answers before the append and its fsync,
+                             `lazy` answers at once and appends the put when its next request
+                             comes; `init` syncs b's directory before it listens, on its first
+                             start only (no PATINA_INCARNATION): a crash point before any put
+    ack2.py driver N [wait]  put 1..N through a, then read both logs back; with `wait`, first
+                             wait for b to answer a `get`
 
 A node recovers its log on every boot and ignores a `put` it already holds, so a put sent
 again after a crash is applied once. A node serves each connection in a thread of its own, one
@@ -17,7 +21,9 @@ records, space-separated.
 The driver prints `ack I` for each acknowledged put, then reads both logs (waiting for a node
 that is down) and prints `ok N acknowledged, a holds A, b holds B`, or `FAIL: acknowledged I
 lost on NODE` (and on standard error which node lost one) and exits 1. With `early`, a crash of b's machine between its answer and its
-fsync loses an acknowledged put.
+fsync loses an acknowledged put when the answer reached a before the crash. With `lazy` it always
+does: a sends the next request only after the answer, so a crash at a point of that append
+(b's first such point is the `create` of `log`) follows the acknowledgement.
 """
 import os
 import socket
@@ -78,8 +84,13 @@ def call(peer, host, port, line):
         peer[0] = None
 
 
-def serve(name, early):
+def serve(name, mode, init):
+    if init and "PATINA_INCARNATION" not in os.environ:
+        d = os.open(".", os.O_RDONLY)
+        os.fsync(d)
+        os.close(d)
     held = recover()
+    pending = []
     lock = threading.Lock()
     b = [None, None]
 
@@ -89,6 +100,10 @@ def serve(name, early):
             for line in f:
                 w = line.split()
                 with lock:
+                    for i in pending:
+                        if i not in held:
+                            append(held, i)
+                    pending.clear()
                     if w[0] == "get":
                         c.sendall((" ".join(map(str, sorted(held))) + "\n").encode())
                         continue
@@ -97,10 +112,14 @@ def serve(name, early):
                         if i not in held:
                             append(held, i)
                         call(b, "b", 7000, f"put {i}\n")
-                    elif early:
+                    elif mode == "early":
                         c.sendall(f"ok {i}\n".encode())
                         if i not in held:
                             append(held, i)
+                        continue
+                    elif mode == "lazy":
+                        c.sendall(f"ok {i}\n".encode())
+                        pending.append(i)
                         continue
                     elif i not in held:
                         append(held, i)
@@ -118,9 +137,13 @@ def serve(name, early):
         threading.Thread(target=conn, args=(c,), daemon=True).start()
 
 
-def driver(n):
+def driver(n, wait):
     a = [None, None]
     call(a, "a", 7000, "get\n")
+    if wait:
+        p = [None, None]
+        call(p, "b", 7000, "get\n")
+        p[0].close()
     patina.setup_complete()
     for i in range(1, n + 1):
         call(a, "a", 7000, f"put {i}\n")
@@ -141,6 +164,6 @@ def driver(n):
 
 if __name__ == "__main__":
     if sys.argv[1] == "driver":
-        driver(int(sys.argv[2]))
+        driver(int(sys.argv[2]), sys.argv[3:] == ["wait"])
     else:
-        serve(sys.argv[1], sys.argv[2:] == ["early"])
+        serve(sys.argv[1], next((m for m in sys.argv[2:] if m != "init"), None), "init" in sys.argv[2:])

@@ -1,12 +1,15 @@
-# 7. Crash and restart end to end with ack-log under --faults disk --crash machine: ACK_SEEDS
-# seeds (default 20) per model, both models: the correct variant is ok on every seed and
-# some runs crash (volume: tests/faults/evidence-crashes.sh). The variant without
-# the record fsync fails with INVARIANT acked-record-lost on at least one of ACK_SEEDS seeds
-# under each model, and its result says why: the last crash in faults.recent is the machine
-# crash, and what it lost includes data.log (faults the restarted run takes before it finds the
-# loss can follow it). That seed run twice gives the same digest and the same post-crash
-# trees. Also: turning crashes on does not change the run before the crash (boundary logs
-# equal up to the crash seq).
+# 7. Crash and restart end to end with ack-log under --faults disk --crash machine:50: ACK_SEEDS
+# seeds (default 20) per model, both models. Crashes at 50 per mille, not the default 3: at 3,
+# a quarter of the seeds crash and ext4-ordered loses a record of the variant below in about
+# one seed in thirty, too few for which seeds those are not to decide the check. The correct
+# variant is ok on every seed and some runs crash (volume: tests/faults/evidence-crashes.sh).
+# The variant without the record fsync fails with INVARIANT acked-record-lost on at least one
+# of ACK_SEEDS seeds under each model (about half of them), and its result says why: the last
+# crash in faults.recent that lost anything is a machine crash, and what it lost includes
+# data.log (faults the restarted run takes before it finds the loss can follow it, a crash
+# that lost nothing among them). That seed run twice gives the same digest and the same
+# post-crash trees. Also: turning crashes on does not change the run before the crash
+# (boundary logs equal up to the crash seq).
 #@ tier=quick budget=30 slots=4
 . "$(dirname "$0")/lib/common.inc"
 N=${ACK_SEEDS:-20}
@@ -15,7 +18,7 @@ for m in ext4-ordered posix-strict; do
     mkdir -p "$d"
     cfg=$("$PATINA_CFG" fs-model=$m)
     # The model as a flag, or in the configuration file.
-    sweep 07/$m-correct "$N" $([ $m = posix-strict ] && echo --fault fs-model=$m || echo --config "$cfg") --faults disk --crash machine -- /guest/ack-log correct
+    sweep 07/$m-correct "$N" $([ $m = posix-strict ] && echo --fault fs-model=$m || echo --config "$cfg") --faults disk --crash machine:50 -- /guest/ack-log correct
     python3 -I - "$RUNS/07/$m-correct/summary.tsv" "$m" "$N" <<'PY' || exit 1
 import csv, sys
 rows = list(csv.DictReader(open(sys.argv[1]), delimiter="\t"))
@@ -30,22 +33,22 @@ if len(rows) != n or c1 == 0:
     sys.exit("FAIL: no run crashed")
 PY
     # The planted bug: no fsync of the record before the acknowledgement.
-    sweep 07/$m-nofsync "$N" --config "$cfg" --faults disk --crash machine -- /guest/ack-log nofsync
+    sweep 07/$m-nofsync "$N" --config "$cfg" --faults disk --crash machine:50 -- /guest/ack-log nofsync
     found=$(awk -F'\t' '$2 == "failure" && $3 ~ /INVARIANT acked-record-lost/ {print $1; exit}' "$RUNS/07/$m-nofsync/summary.tsv")
     [ -n "$found" ] || die "$m: nofsync never caught in $N seeds"
     o=$d/nofsync-$found
-    run "$o" "$found" --config "$cfg" --faults disk --crash machine -- /guest/ack-log nofsync
+    run "$o" "$found" --config "$cfg" --faults disk --crash machine:50 -- /guest/ack-log nofsync
     python3 -I - "$o/result.json" "$m" "$found" <<'PY' || exit 1
 import json, sys
 r = json.load(open(sys.argv[1]))
-last = [f for f in r["faults"]["recent"] if f["fault"] == "crash"][-1:] or [r["faults"]["recent"][-1]]
-last = last[0]
+crashes = [f for f in r["faults"]["recent"] if f["fault"] == "crash"]
+last = ([f for f in crashes if f.get("lost", {}).get("paths")] or crashes or r["faults"]["recent"])[-1]
 print("%s nofsync caught at seed %s: %s; plan %s; last crash: %s" % (
     sys.argv[2], sys.argv[3], r["message"], json.dumps(r["faults"]["plan"], sort_keys=True), json.dumps(last, sort_keys=True)))
 if last["fault"] != "crash" or last["kind"] != "machine" or "/work/data.log" not in last.get("lost", {}).get("paths", []):
-    sys.exit("FAIL: the last crash in faults.recent is not a machine crash that lost /work/data.log")
+    sys.exit("FAIL: the last crash in faults.recent that lost anything is not a machine crash that lost /work/data.log")
 PY
-    run "$o-again" "$found" --config "$cfg" --faults disk --crash machine -- /guest/ack-log nofsync
+    run "$o-again" "$found" --config "$cfg" --faults disk --crash machine:50 -- /guest/ack-log nofsync
     a=$(field "$o/result.json" digest)
     b=$(field "$o-again/result.json" digest)
     [ "$a" = "$b" ] || die "$m seed $found: digests $a vs $b"
