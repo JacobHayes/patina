@@ -22,6 +22,11 @@ global_asm!(
     ".text",
     // The restorer: `rt_sigreturn` through the stub, after the counter read that starts a
     // measured segment (`pmu`'s `patina_sigreturn_read`; no read without counters).
+    // Preceded by an instruction of its own, so that no call's return address is the
+    // restorer: a debugger takes a frame whose pc is the restorer for the runtime's signal
+    // frame (the helper's unwinder, `debug/patina-gdb.py`), and a noreturn call ending the
+    // function laid out before it would otherwise return there.
+    "  udf #0",
     ".globl patina_restorer",
     "patina_restorer:",
     "  b patina_sigreturn_read",

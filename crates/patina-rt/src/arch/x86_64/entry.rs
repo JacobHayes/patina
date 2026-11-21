@@ -20,6 +20,10 @@ global_asm!(
     ".text",
     // The name debuggers know a signal trampoline by (gdb's and lldb's `__restore_rt`): an
     // attached debugger unwinds through the runtime's handler frames into the program's.
+    // Preceded by an instruction of its own, as glibc's and the arm64 vDSO's restorers are: a
+    // noreturn call ending the function laid out before it would otherwise return to it, and a
+    // debugger would take that caller's frame for a signal frame.
+    "  ud2",
     ".globl __restore_rt",
     ".type __restore_rt,@function",
     "__restore_rt:",
