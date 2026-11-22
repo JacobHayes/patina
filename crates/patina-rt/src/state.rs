@@ -317,12 +317,12 @@ pub fn work_path() -> &'static [u8] {
     }
 }
 
-/// This process's machine's realtime clock offset (ns; `MachineTab::clock_off`): 0 for main
-/// and in a run without machines.
+/// This process's machine's realtime clock offset (ns; `MachineTab::clock_off`): 0 in a run
+/// without machines.
 pub fn clock_offset() -> i64 {
-    match machine() {
-        0 => 0,
-        k => unsafe { proto::machine::MachineTab::at(ctl_base()) }.clock_offset(k),
+    match with_machines() {
+        false => 0,
+        true => unsafe { proto::machine::MachineTab::at(ctl_base()) }.clock_offset(machine()),
     }
 }
 
@@ -330,7 +330,7 @@ pub fn clock_offset() -> i64 {
 /// for the `clock` class (`MachineTab::clock_reads`).
 pub fn clock_read(off: i64) {
     let k = machine();
-    if k == 0 || k >= proto::machine::MAX_MACHINES {
+    if !with_machines() || k >= proto::machine::MAX_MACHINES {
         return;
     }
     let t = unsafe { proto::machine::MachineTab::at(ctl_base()) };

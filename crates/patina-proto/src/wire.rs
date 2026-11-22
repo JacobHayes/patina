@@ -334,7 +334,8 @@ pub struct NetCfg {
     pub chunk_gap_set: u64,
     pub chunk_gap_min_ns: u64,
     pub chunk_gap_max_ns: u64,
-    /// A run with machines: which links the link faults act on (`LINKS_*`).
+    /// The machines whose links the link faults act on (bit `k`: machine `k`, main 0): a link
+    /// between two of them, or a machine's loopback.
     pub links: u64,
     /// A run with machines: the seed's partitions (`partition-*`): the gap from one's end to the
     /// next one's start and each one's length, drawn in [min, max] ns; each partition's shape
@@ -344,12 +345,6 @@ pub struct NetCfg {
     pub part_min_ns: u64,
     pub part_max_ns: u64,
 }
-
-/// `NetCfg::links`: in a run with machines, link faults act on links between two machines other
-/// than main; also on main's links (`net@main`). Without machines there is only loopback, and
-/// they act on it.
-pub const LINKS_MACHINES: u64 = 0;
-pub const LINKS_MAIN: u64 = 1;
 
 /// Sub-keys of `draw(Stream::FaultNet, key)`.
 pub const NSUB_REFUSE: u64 = 1;

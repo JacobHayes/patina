@@ -1,8 +1,10 @@
 # Machines: several machines in one run
 
 A run can hold several machines. The command after `--` runs on machine **main** (or give it as
-`[machine.main] run`): the seed's faults leave main alone unless one names it (`@main`), and the
-run ends with its exit status. Each other `[machine.NAME]` table in `patina.toml`, or `--machine NAME='CMD ARGS'`,
+`[machine.main] run`). Main is a machine like any other, and the seed's faults act on every
+machine, main included; main differs only in that the run ends with its exit status. A main that
+is the test's driver, not part of the system under test, writes `[machine.main] faults = false`
+(below). Each other `[machine.NAME]` table in `patina.toml`, or `--machine NAME='CMD ARGS'`,
 adds a machine whose program starts with the run, before main's:
 
 <!-- transcript machines-kv
@@ -28,8 +30,8 @@ replay: patina replay /tmp/machines/patina-out/run-0
 `kv.py` (in `tests/guests/machines`) is a store whose primary sends each write to the backup; the
 main writes, cuts the link between them, sees the next write wait, heals it, and checks both
 agree. To test a distributed system, put the system under test on machines, give each a `ready`
-probe (below), and make main the harness: drive the workload, call `patina ctl settle`, then
-check the system.
+probe (below), and make main the harness, out of the faults: drive the workload, call `patina
+ctl settle`, then check the system.
 
 ## Settle, then check
 
@@ -47,11 +49,20 @@ system:
 <!-- transcript machines-settle
 dir: /tmp/settle
 setup: mkdir g && cp "$GUESTS/phases.py" g/
-setup: printf '[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
-exit: 1
+setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
+exit: 0 1
 exact-only: one seed's run
 -->
 ```text
+$ cat patina.toml
+[machine.main]
+faults = false
+
+[machine.a]
+run = ["python3", "/guest/phases.py", "serve"]
+
+[machine.b]
+run = ["python3", "/guest/phases.py", "serve", "lazy"]
 $ patina run --seed 5 --mount g:/guest:copy --faults crash --fault crash-gap-ms=1000..4000 --fault max-boots=8 -- sh -c 'python3 /guest/phases.py work 10 a b && patina ctl settle && python3 /guest/phases.py check 10 a b'
 failure (exit): exit status 1
 guest: exit 1
@@ -70,9 +81,10 @@ explain: patina explain /tmp/settle/patina-out/run-5
 ```
 
 `phases.py` (in `tests/guests/machines`) stores puts; `work` puts 1 to 10 on both machines and
-`check` polls each until it answers, then looks for every acknowledged put. With `lazy`, b
-acknowledges a put before its `fsync`, and the check after settle finds what b's machine crash
-lost. Settle works the same with one machine: under `--faults crash`, `-- sh -c './app && patina
+`check` polls each until it answers, then looks for every acknowledged put. Main, the driver,
+has `faults = false`, so `--faults crash` crashes a and b and the run says so (`faults on:`).
+With `lazy`, b acknowledges a put before its `fsync`, and the check after settle finds what b's
+machine crash lost. Settle works the same with one machine: under `--faults crash`, `-- sh -c './app && patina
 ctl settle && ./verify'` reruns `./app` at each boot after a crash and runs `./verify` once,
 after the last.
 
@@ -157,7 +169,7 @@ the final check (`--finally`) start; a machine may still be booting, so the chec
 <!-- transcript machines-phases
 dir: /tmp/phases-machines
 setup: mkdir g && cp "$GUESTS/phases.py" g/
-setup: printf '[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
+setup: printf '[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
 exit: 1
 exact-only: one seed's run
 -->
@@ -204,9 +216,15 @@ pulled cable does, until a heal or the sender's timeout; datagrams across it are
 
 ## The seed's faults on machines
 
-- `--faults net`: delays, resets and the rest on the links between machines (not main's:
-  `--faults net@main` adds them; `partition@main` likewise).
-- `--faults partition`: cuts between groups of machines for a while (two machines or more).
+One rule, whatever the number of machines: a class or key without `@` acts on every machine,
+main included, and on every link between them. Main can be paused, clock-stepped, cut off and
+given disk faults like the others; a crash or kill of main beside other machines is not
+available yet, and is refused (exempt main, or name the machines).
+
+- `--faults net`: delays, resets and the rest on the links between machines with faults, each
+  one's loopback included.
+- `--faults partition`: cuts between groups of machines for a while (two machines with faults or
+  more).
 - `--faults pause`: a machine frozen for a while; its peers see a live machine that does not answer.
 - `--faults clock`: each boot of a machine draws a realtime clock offset.
 - `--faults crash` or `--faults kill`: machine crashes or process kills at drawn times, each
@@ -214,13 +232,15 @@ pulled cable does, until a heal or the sender's timeout; datagrams across it are
 - `--faults disk`, `mem`, `buggify`: each machine's own.
 
 `@MACHINE,...` scopes a class or key to machines: `--faults crash@db`, `--fault
-fsync-error-permille=5@a,main`. `[machine.NAME] faults = false` keeps a machine out of unscoped
-faults. A group's `machines:` line says which machines were down or partitioned in its failing runs.
+fsync-error-permille=5@a,main`. `[machine.NAME] faults = false` keeps a machine out of all the
+seed's faults, its links included; a test driver on main writes `[machine.main] faults = false`.
+The run prints `faults on:` with the machines its faults act on, and says so when every machine
+has `faults = false`. A group's `machines:` line says which machines were down or partitioned in its failing runs.
 
 <!-- transcript machines-sweep
 dir: /tmp/q3
 setup: mkdir g && cp "$GUESTS/q3.py" "$GUESTS/patina.py" g/
-setup: for n in n1 n2 n3; do printf '[machine.%s]\nrun = ["python3", "/guest/q3.py", "%s", "nosync"]\n\n' $n $n; done >patina.toml
+setup: { printf '[machine.main]\nfaults = false\n\n'; for n in n1 n2 n3; do printf '[machine.%s]\nrun = ["python3", "/guest/q3.py", "%s", "nosync"]\n\n' $n $n; done; } >patina.toml
 exit: 1
 release-only: a sweep of eight runs of a three-machine cluster
 -->
@@ -228,7 +248,7 @@ release-only: a sweep of eight runs of a three-machine cluster
 patina sweep --seeds 1..8 --mount g:/guest --faults net,partition,pause,clock,crash --fault crash-gap-ms=2000..10000 -- python3 /guest/q3.py main 30
 ```
 
-`q3.py` is a store on three machines; with `nosync` a machine acknowledges a write before it is on
+`q3.py` is a store on three machines and its main a checking client (`faults = false`); with `nosync` a machine acknowledges a write before it is on
 disk, and a write the cluster acknowledged is lost when the machines that had it crash. Without
 `nosync` the same sweep is clean.
 
@@ -244,7 +264,7 @@ point.
 release-only: a sweep of a seed's 30 crash points
 dir: /tmp/ack2
 setup: mkdir g && cp "$GUESTS/ack2.py" "$GUESTS/patina.py" g/
-setup: printf '[run]\nsetup = "mark"\n[machine.a]\nrun = ["python3", "/guest/ack2.py", "a"]\n[machine.b]\nrun = ["python3", "/guest/ack2.py", "b", "early"]\n' >patina.toml
+setup: printf '[run]\nsetup = "mark"\n[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/ack2.py", "a"]\n[machine.b]\nrun = ["python3", "/guest/ack2.py", "b", "early"]\n' >patina.toml
 exit: 1
 -->
 ```text

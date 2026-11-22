@@ -19,6 +19,7 @@ for v in ok early; do
     printf '[run]\nsetup = "mark"\n' >"$o/$v.toml"  # main marks setup-complete
     conf "$o/$v.toml" a python3 /guest/ack2.py a
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
+    driver "$o/$v.toml"
 done
 D="python3 /guest/ack2.py main 3"
 s=1

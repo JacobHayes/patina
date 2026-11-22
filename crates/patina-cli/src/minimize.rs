@@ -211,15 +211,14 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let mut cfg = cfg;
     let mut expanded: Vec<String> = vec![];
     let mut classes: Vec<String> = vec![];
-    let faultable =
-        crate::faults::faultable_machines(cfg.machines.len(), cfg.main_links().map_err(error)?);
+    let faultable = cfg.link_mask().map_err(error)?.count_ones() as usize;
     // A class's scope (`disk@a`) goes with each of its keys.
     for e in &cfg.fault_classes {
         let (names, scope) = crate::faults::split_scope(e);
         let at = scope.map(|s| format!("@{s}")).unwrap_or_default();
         for c in crate::faults::classes(names, cfg.machines.len(), faultable).map_err(error)? {
-            // `all@MACHINE` is the machine's own classes; a link class named with @main keeps it.
-            let named = scope == Some("main") && names.split(',').any(|n| n == c);
+            // `all@MACHINE` is the machine's own classes; a link class named with a scope keeps it.
+            let named = names.split(',').any(|n| n == c);
             if scope.is_some() && !crate::faults::machine_class(c) && !named {
                 continue;
             }

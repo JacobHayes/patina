@@ -40,6 +40,7 @@ for n in primary backup; do printf '[machine.%s]\nrun = ["python3", "/guest/kv.p
 first "$RUNS/kv" "$(seq 1 64)" failure --config "$RUNS/kv.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py main
 story "$RUNS/kv"; check "$RUNS/kv" machines
 for n in n1 n2 n3; do printf '[machine.%s]\nrun = ["python3", "/guest/q3.py", "%s", "nofence"]\n' $n $n; done >"$RUNS/q3.toml"
+printf '[machine.main]\nfaults = false\n' >>"$RUNS/q3.toml"
 first "$RUNS/q3" "$(seq 1 64)" failure --config "$RUNS/q3.toml" --faults net,partition --fault partition-gap-ms=1000..6000 \
     --fault partition-ms=1000..6000 --mount "$G":/guest:copy -- python3 /guest/q3.py main 60
 story "$RUNS/q3"; check "$RUNS/q3" partition

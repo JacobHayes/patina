@@ -309,6 +309,39 @@ main, the command after `--`, started as in a run without machines; machines 1 u
 declared ones, in file order. A run without machines takes the same path as before: no machine table
 is written (`n == 0`), no record of any machine is made, and its seeds and digests are unchanged.
 
+Who is faulted is one rule, with no count of machines in it: the seed's unscoped faults (classes,
+keys, crash points, partitions) act on every machine, main included, and on every link between
+machines with faults, each one's loopback included; `@NAME` narrows a class or key to the
+machines named, and `[machine.NAME] faults = false` takes a machine, its links included, out of
+every one (`Config::scope_bits`, `Config::link_mask`). Main differs only in that its exit ends the
+run. One limit remains that depends on the count: beside other machines main is forked by the
+supervisor, not booted by the launcher's boot loop, so it cannot be crashed or killed and
+started again there, and a crash or kill class or key that acts on main in such a run is refused
+(`main_crash`). A test driver on main opts out; the run says which machines its faults act on:
+
+<!-- transcript architecture-driver
+dir: /tmp/driver
+setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["sleep", "1"]\n' >patina.toml
+exit: 0 0 2
+-->
+```text
+$ cat patina.toml
+[machine.main]
+faults = false
+
+[machine.a]
+run = ["sleep", "1"]
+$ patina run --faults disk -- /bin/true
+ok (exit): the program exited 0
+guest: exit 0
+faults on: a
+machines: a 10.0.0.2 running
+run directory: /tmp/driver/patina-out/run-0
+replay: patina replay /tmp/driver/patina-out/run-0
+$ patina run --config /dev/null --machine a='sleep 1' --faults crash -- /bin/true
+patina: error: --faults crash: acts on main too, and main is not crashed or killed beside other machines (not available yet): give [machine.main] faults = false, or name the machines (@a,b)
+```
+
 - **Start.** The launcher writes the machine table (`proto::machine::MachineTab`, after the scan
   table in the control region: names; the supervisor's first pids, statuses and cut counters)
   and passes each machine's starting tree, program and environment to the keeper in the layout
@@ -369,8 +402,9 @@ is written (`n == 0`), no record of any machine is made, and its seeds and diges
   looked at when the SYN is sent and retried; a cut made inside a handshake's delay does not
   stop it). A datagram sent on a cut link is lost (`UF_CUT`). No fault is drawn for a cut.
 - **Link faults.** A link fault (`net-*`) is drawn only on the faulted links
-  (`Sup::link_faulted`: between machines other than main, and main's too when a link class or
-  key names `@main`, `NetCfg::links`); on the others an item
+  (`Sup::link_faulted`: both ends are machines the link faults act on, `NetCfg::links`, a mask
+  of machines, so a faulted machine's loopback is faulted too, as without machines); on the
+  others an item
   gets the default delay range and no draw at all, so turning a class on draws nothing on
   them. The draws are keyed by connection or datagram as without machines, so each direction of a
   pair of machines has its own. With machines an injection's record names its link (`args[1]`,
@@ -463,8 +497,8 @@ is written (`n == 0`), no record of any machine is made, and its seeds and diges
   know.
 - **Faults per machine.** The machine classes (`disk`, `mem`, `buggify`, `crash`, `kill`, `pause`,
   `clock`) and their keys are each machine's: the config resolves each machine's classes and
-  settings (the run's unscoped ones for every machine but main and a machine with `faults =
-  false`, `@MACHINE` scopes) with a seed of its own (`Config::machine_plan`), main's into the
+  settings (the run's unscoped ones for every machine, main included, but a machine with
+  `faults = false`; `@MACHINE` scopes) with a seed of its own (`Config::machine_plan`), main's into the
   run's `FaultCfg` and `SdkCfg` and the others' into `MachineTab::faults` (a `FaultCtl`, settings
   and counters, per machine) and `MachineTab::sdk`. The runtime reaches its machine's through
   `state::faults()` and `sys::sdk::cfg()`; a fault point's site row is per machine
@@ -534,8 +568,9 @@ is written (`n == 0`), no record of any machine is made, and its seeds and diges
   machine's offset (`MachineTab::clock_off`, `sup/clock.rs`), which the runtime adds wherever it
   answers a realtime time (`sys::time`'s clocks, `vtime::now` for the times a machine stamps on
   its files, System V shared memory times, `/proc/stat`'s `btime`) and subtracts where it
-  converts an absolute realtime deadline to virtual time (`realtime_to_vclock`). Main's
-  offset is 0. Monotonic and boot-time clocks have none, and no clock has a rate of its own.
+  converts an absolute realtime deadline to virtual time (`realtime_to_vclock`); main's is
+  drawn at the run's start, the others' at each boot. Without machines there is no table and
+  the offset is 0. Monotonic and boot-time clocks have none, and no clock has a rate of its own.
   The offset is each boot's skew (`clock-skew-ms`, drawn when the boot starts on
   `Stream::Machine` keyed by machine, boot and `MSUB_SKEW`) plus main's steps (`clock NAME`,
   `Op::Machine` `CLOCK_STEP` with the change as its third argument), each a decision record

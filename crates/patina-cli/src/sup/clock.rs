@@ -7,8 +7,9 @@
 //! The offset is the boot's skew plus the script's steps: with `clock-skew-ms=A..B` each
 //! boot of a machine draws a skew in A..B ms, ahead or behind (`Stream::Machine`, keyed by the machine,
 //! the boot and `MSUB_SKEW`); `clock NAME DELTA` from main moves the machine's clock
-//! by DELTA, and the move stays across its restarts, as a clock set on a machine does. The
-//! main's clock is never moved: it is the run's virtual time.
+//! by DELTA, and the move stays across its restarts, as a clock set on a machine does. Main
+//! draws its skew at the run's start (its one boot beside other machines); a run without
+//! machines has no offset.
 //!
 //! A step does what setting the clock does on Linux: an absolute realtime deadline (a
 //! `clock_nanosleep` or futex wait with `TIMER_ABSTIME` on `CLOCK_REALTIME`, a timerfd armed

@@ -21,6 +21,7 @@ for v in ok early; do
     printf '[run]\nsetup = "mark"\n' >"$o/$v.toml"  # main marks setup-complete
     conf "$o/$v.toml" a python3 /guest/ack2.py a
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
+    driver "$o/$v.toml"
 done
 D="python3 /guest/ack2.py main 4"
 S=4; [ "${CHECK_TIER:-}" != release ] || S=2
@@ -140,7 +141,9 @@ assert [c["point"] for c in mc] == [n] and mc[0]["seq"] in mcreates, (mc, mcreat
 print("minimize: b's later crash alone: %s (b's first crash alone, at point %d, did not fail), from %s" % (m["to"], first, m["from"]))
 PY
 # faults = false: an unscoped crash leaves the machine out.
-{ cat "$o/ok.toml"; printf 'faults = false\n'; } >"$o/free.toml"
+rm -f "$o/free.toml"; printf '[run]\nsetup = "mark"\n' >"$o/free.toml"
+conf "$o/free.toml" a python3 /guest/ack2.py a
+conf "$o/free.toml" b python3 /guest/ack2.py b; printf 'faults = false\n' >>"$o/free.toml"; driver "$o/free.toml"
 run_ok "$o/free" 1 --config "$o/free.toml" --fault crash-permille=300 -- $D
 python3 -I - "$o/free/result.json" <<'PY' || die "faults = false"
 import json, sys

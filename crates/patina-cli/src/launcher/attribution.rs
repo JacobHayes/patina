@@ -333,7 +333,7 @@ impl Faults {
             "injected": injected,
             "recent": self.recent,
         });
-        if !plan.on.is_empty() {
+        if !plan.on.is_empty() || plan.none_on {
             v["on"] = json!(plan.on);
         }
         v

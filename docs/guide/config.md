@@ -58,12 +58,37 @@ fsync-error-permille = 0
 | `env` | `{ K = "V" }` | none | added to the run's environment |
 | `ready` | `"CMD ARGS" or ["CMD", "ARG", ...]` | ready once started | a probe run on it every 100 ms until it exits 0: main's command and the faults wait for every machine's (main's own: the faults only) |
 | `disk` | `"DIR[:GUEST]"` | empty | its disk's starting files (main's: as `--disk`) |
-| `restart` | `"crash", "always" or "never"` | crash | after which downs the seed restarts it (`always`: also after it exits within `ok-exit`) |
-| `ok-exit` | `N or [N, ...]` | [0] | exit statuses that only stop the machine |
+| `restart` | `"crash", "always" or "never"` | crash | after which downs the seed restarts it (`always`: also after it exits within `ok-exit`; main's: `crash`) |
+| `ok-exit` | `N or [N, ...]` | [0] | exit statuses that only stop the machine (main's: as `[run] ok-exit`, one of the two) |
 | `max-boots` | `N` | the run's | the most boots the seed's crashes give it (1 to 64) |
 | `disk-mb` | `N or "A..B"` | the run's | its filesystems' size, drawn per seed from a range |
-| `count` | `N` | 1 | N machines of this table, named NAME1 to NAMEN |
-| `faults` | `true or false` | true | `false`: no faults of its own, as main |
+| `count` | `N` | 1 | N machines of this table, named NAME1 to NAMEN (not main) |
+| `faults` | `true or false` | true | `false`: none of the seed's faults act on it or its links (a test driver on main) |
 <!-- end generated -->
+
+`[machine.main]` takes every `[machine.NAME]` key but `count`; its `restart` is `crash` only, and
+its `ok-exit` is `[run] ok-exit` (give one of the two). The seed's faults act on every machine,
+main included, whatever the number of machines; `faults = false` exempts one, its links included.
+A test driver on main opts out:
+
+<!-- transcript config-driver
+dir: /tmp/driver
+setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["sleep", "1"]\n' >patina.toml
+-->
+```text
+$ cat patina.toml
+[machine.main]
+faults = false
+
+[machine.a]
+run = ["sleep", "1"]
+$ patina run --faults disk -- /bin/true
+ok (exit): the program exited 0
+guest: exit 0
+faults on: a
+machines: a 10.0.0.2 running
+run directory: /tmp/driver/patina-out/run-0
+replay: patina replay /tmp/driver/patina-out/run-0
+```
 
 Fault keys and their ranges: `patina run --fault help`. Options: `patina COMMAND --help`.

@@ -51,6 +51,10 @@ verify_ok() {
     [ "$(field "$1/run-0/result.json" outcome)" = ok ] || die "$* : class $(field "$1/run-0/result.json" outcome): $(field "$1/run-0/result.json" message)"
 }
 
+# driver FILE: main is the test's driver, not under test: none of the seed's faults act on it
+# or its links (`[machine.main] faults = false`). Append it after the machines' tables.
+driver() { printf '[machine.main]\nfaults = false\n' >>"$1"; }
+
 # conf FILE NAME CMD...: append a machine to a configuration file.
 conf() {
     f=$1; n=$2; shift 2

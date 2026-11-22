@@ -25,7 +25,6 @@ use super::sched::{Event, EventId, Live};
 use super::Sup;
 use proto::ctl::*;
 use proto::machine::*;
-use proto::wire::LINKS_MAIN;
 use proto::{draw, Stream};
 use std::sync::atomic::Ordering::Relaxed;
 
@@ -92,25 +91,17 @@ impl Sup {
         }
     }
 
-    /// Do the link faults (`net-*`) act on the link from `from` to `to`? Without machines there
-    /// is only loopback, and they do; with machines, between two machines other than main, and
-    /// main's links too with `net@main` (`NetCfg::links`); never a machine's loopback.
+    /// Do the link faults (`net-*`) act on the link from `from` to `to`? When both ends are
+    /// machines they act on (`NetCfg::links`): a link between two of them, or one's loopback
+    /// (`from == to`; in a run without machines, the only link there is).
     pub(super) fn link_faulted(&self, from: usize, to: usize) -> bool {
         // Outside the fault window (before a declared setup ends, after the faults end) no
         // link is faulted.
-        if !self.faults_on() {
+        if !self.faults_on() || from >= MAX_MACHINES || to >= MAX_MACHINES {
             return false;
         }
-        if self.machine_count() == 0 {
-            return true;
-        }
-        if from == to {
-            false
-        } else if from == 0 || to == 0 {
-            self.net_cfg_links() >= LINKS_MAIN
-        } else {
-            true
-        }
+        let on = self.net_cfg_links();
+        on >> from & 1 != 0 && on >> to & 1 != 0
     }
 
     fn net_cfg_links(&self) -> u64 {
@@ -119,14 +110,12 @@ impl Sup {
             .links
     }
 
-    /// The machines the seed's partitions are drawn over, in order.
+    /// The machines the seed's partitions are drawn over, in order: those the link faults act on.
     fn faultable(&self) -> Vec<usize> {
-        let from = if self.net_cfg_links() >= LINKS_MAIN {
-            0
-        } else {
-            1
-        };
-        (from..self.machine_count()).collect()
+        let on = self.net_cfg_links();
+        (0..self.machine_count())
+            .filter(|k| on >> k & 1 != 0)
+            .collect()
     }
 
     /// One of the partition schedule's draws.

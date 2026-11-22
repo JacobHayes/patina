@@ -312,6 +312,9 @@ pub fn machines_json(t: &proto::machine::MachineTab) -> Value {
                         .collect();
                     v["crash_points"] = json!(p);
                 }
+            }
+            // Main's one boot beside other machines is not in the boot table.
+            let boots = (t.boots[k] as usize).clamp(1, proto::machine::BOOTS_MAX);
                 // Its pauses (the seed's and the script's), and the virtual time it spent
                 // paused in all.
                 if t.pauses[k] > 0 {
@@ -341,7 +344,7 @@ pub fn machines_json(t: &proto::machine::MachineTab) -> Value {
                         "stepped_ms": ms(t.clock_stepped[k]),
                     });
                     if skewed {
-                        c["skew_ms"] = t.boot[k][..boots.min(proto::machine::BOOTS_MAX)]
+                        c["skew_ms"] = t.boot[k][..boots]
                             .iter()
                             .map(|b| ms(b.skew_ns))
                             .collect();
@@ -349,7 +352,6 @@ pub fn machines_json(t: &proto::machine::MachineTab) -> Value {
                     }
                     v["clock"] = c;
                 }
-            }
             v
         })
         .collect();
@@ -403,7 +405,7 @@ pub fn machines_json(t: &proto::machine::MachineTab) -> Value {
     if t.ended_by > 0 {
         v["ended_by"] = json!(name(t.ended_by as usize - 1));
     }
-    if (1..t.count()).any(|k| t.conf[k].skew_max_ns > 0) {
+    if (0..t.count()).any(|k| t.conf[k].skew_max_ns > 0) {
         let sum = |c: &[std::sync::atomic::AtomicU64]| -> u64 {
             c.iter()
                 .map(|x| x.load(std::sync::atomic::Ordering::Relaxed))
@@ -1209,9 +1211,12 @@ pub fn print_human(r: &Value, dir: &Path) {
     ) {
         println!("settled: seq {seq} t={}ms", ns / 1_000_000);
     }
-    if let Some(on) = r["faults"]["on"].as_array().filter(|a| !a.is_empty()) {
+    if let Some(on) = r["faults"]["on"].as_array() {
         let names: Vec<&str> = on.iter().filter_map(|n| n.as_str()).collect();
-        println!("faults on: {}", names.join(", "));
+        match names.is_empty() {
+            true => println!("faults on: none: every machine has faults = false"),
+            false => println!("faults on: {}", names.join(", ")),
+        }
     }
     if let Some(l) = machines_line(&r["machines"]) {
         println!("{l}");

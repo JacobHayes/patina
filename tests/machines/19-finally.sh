@@ -1,6 +1,6 @@
 # 19. Machines: setup, main command and final check (tests/guests/machines/phases.py) under the
-# seed's machine crashes and partitions (partition@main). Machines a and b store puts; the setup
-# waits for both; the main command puts records on both, 0.2 s apart; `--finally` checks both
+# seed's crashes of a and b and partitions of all three machines, main included. Machines a and
+# b store puts; the setup waits for both; the main command puts records on both, 0.2 s apart; `--finally` checks both
 # hold every acknowledged put. A main command that ends with main cut from a and a
 # paused (by control calls), and one that ends with a machine the seed killed still down (its
 # restart drawn a minute later; seeds searched until one does): the final check starts with
@@ -16,7 +16,7 @@ for v in ok lazy; do
     conf "$o/$v.toml" a python3 /guest/phases.py serve
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/phases.py serve; else conf "$o/$v.toml" b python3 /guest/phases.py serve lazy; fi
 done
-F="--faults crash --faults partition@main --fault crash-gap-ms=1000..4000 --fault down-ms=200..2000 --fault max-boots=8 --fault partition-gap-ms=1000..4000 --fault partition-ms=500..4000"
+F="--faults crash@a,b --faults partition --fault crash-gap-ms=1000..4000 --fault down-ms=200..2000 --fault max-boots=8 --fault partition-gap-ms=1000..4000 --fault partition-ms=500..4000"
 P=(--setup "python3 /guest/phases.py check 0 a b" --finally "python3 /guest/phases.py check 10 a b")
 
 # settled DIR: at the final check's start no partition is open and every machine is up; nothing
@@ -69,7 +69,7 @@ grep -q '^identical' "$o/replay.txt" || die "replay: $(cat "$o/replay.txt")"
 echo "seed $s: the same run twice, replay identical"
 
 # A machine the seed killed, down at the main command's end: started before the final check.
-K="--faults kill --fault crash-gap-ms=500..3000 --fault down-ms=60000..60000"
+K="--faults kill@a,b --fault crash-gap-ms=500..3000 --fault down-ms=60000..60000"
 k=$s; n=0
 while [ $k -lt $((s + 16)) ]; do
     run_ok "$o/down" $k --config "$o/ok.toml" $K --setup "python3 /guest/phases.py check 0 a b" \

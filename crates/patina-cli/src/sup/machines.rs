@@ -145,6 +145,10 @@ impl Sup {
             ));
         }
         self.boot_hello(0, 0, 0);
+        // Main is up from its `Hello` to the run's end (it is never taken down), and its clock
+        // draws its skew as a machine's boot does.
+        self.machines.up[0] = true;
+        self.clock_boot(0, 0);
         for machine in 1..self.machine_count() {
             // Every slot but main's is free before any guest runs.
             self.start_machine(machine, machine);

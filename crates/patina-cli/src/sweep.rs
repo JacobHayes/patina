@@ -932,8 +932,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // every run. With --cases and no command, each line is a whole command.
     let cfg = crate::config::resolve_any(a).map_err(error)?;
     // --crash-points: crashes on (the `crash` class, or `kill` when named), placed by the sweep
-    // at each point; with machines on the machines a crash class names (`@MACHINE,...`; none: every machine
-    // but main).
+    // at each point; with machines on the machines a crash class names (`@MACHINE,...`; none: every
+    // machine with faults).
     let mut scope: Option<String> = None;
     let kind: Option<String> = if a.has("--crash-points") {
         if let Some(f) = cfg.faults.iter().find(|f| {
@@ -956,11 +956,6 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     .map(move |c| (c, at))
             })
             .collect();
-        if cfg.machines.is_empty() && crash.iter().any(|(_, at)| at.is_some()) {
-            return Err(error(
-                "--faults crash@MACHINE names machines, and the run has none".into(),
-            ));
-        }
         if !crash.is_empty() && crash.iter().all(|(_, at)| at.is_some()) {
             let mut l: Vec<&str> = crash
                 .iter()

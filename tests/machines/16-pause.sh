@@ -6,8 +6,8 @@
 # that is down is EAGAIN. The seed's pauses (pause-gap-ms@b): result.json lists them, the
 # events show each pause and resume, and the run is identical under verify --vary
 # cpu,load,aslr,sandbox,repeat and under replay. A script's pause with no resume, with the
-# main waiting on b, ends the run `liveness`, naming b. Without machines, and for main,
-# the pause keys are refused.
+# main waiting on b, ends the run `liveness`, naming b. Main is paused by the seed as any
+# machine is (`@main`, or unscoped); without machines the pause keys are refused.
 #@ tier=quick budget=40 slots=2
 # arm64 (CI runner): about 6 s.
 . "$(dirname "$0")/lib.inc"
@@ -39,9 +39,12 @@ m=$(field "$o/stuck/result.json" message)
 [ "$c" = liveness ] && grep -q 'paused: b (by script' <<<"$m" || die "a pause with no resume: $c: $m"
 echo "no resume: $c: $m"
 
-# Refused: the pause keys without machines and for main.
+# Main's pauses: as a machine's; its sleep ends late by the time it was paused.
+run_ok "$o/main" 1 --config "$o/b.toml" --fault pause-gap-ms=500..1000@main --fault pause-ms=500..1000@main -- sleep 5  # lint-allow: sleep — the guest's, in virtual time
+p=$(field "$o/main/result.json" machines.list.0.pauses)
+[ "${p:-0}" -ge 1 ] && [ "$(field_opt "$o/main/result.json" machines.list.1.pauses)" = - ] || die "main's pauses: $(field "$o/main/result.json" machines.list)"
+echo "main: $p pauses by the seed, $(field "$o/main/result.json" machines.list.0.paused_ms) ms paused"
+# Refused: the pause keys without machines.
 st=0; "$PATINA" run --out "$o/none" --fault pause-gap-ms=1000..2000 -- /bin/true >/dev/null 2>"$o/none.err" || st=$?
 [ "$st" != 0 ] && grep -q 'pause-gap-ms' "$o/none.err" || die "pause-gap-ms without machines: $(cat "$o/none.err")"
-st=0; "$PATINA" run --out "$o/drv" --config "$o/b.toml" --fault pause-gap-ms=1000..2000@main -- /bin/true >/dev/null 2>"$o/drv.err" || st=$?
-[ "$st" != 0 ] && grep -q 'pause-gap-ms' "$o/drv.err" || die "pause-gap-ms@main: $(cat "$o/drv.err")"
-echo "refused: pause-gap-ms without machines and for main"
+echo "refused: pause-gap-ms without machines"

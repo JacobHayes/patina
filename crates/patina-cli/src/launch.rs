@@ -224,9 +224,15 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         dst: "/proc".into(),
     });
     // /work and /tmp: sandbox tmpfs (fresh, sequential inode numbers, their own virtual
-    // times); programs expect /tmp for temporary files. Not durable.
-    ops.push(tmpfs(work));
-    ops.push(tmpfs("/tmp"));
+    // times), main's size (`[machine.main] disk-mb`); programs expect /tmp for temporary files.
+    // Not durable.
+    let main_size = c.main_disk_bytes()?;
+    for d in [work, "/tmp"] {
+        ops.push(Op::Tmpfs {
+            dst: d.into(),
+            size: main_size,
+        });
+    }
     // Generated /etc: the data files below, plus the host's ld.so.cache and localtime
     // naming UTC. The cache is a copy (a file on the sandbox's root tmpfs), not a bind.
     let mut etc = etc_files(work, &names);
@@ -1022,8 +1028,17 @@ pub fn run_boot(
                 .chain(c.machines.iter().map(|n| n.name.as_bytes())),
         );
         // Each machine's restart policy, boots and ok-exit statuses, and the run's kill and
-        // down-time settings (`sup::machines`).
+        // down-time settings (`sup::machines`); main's pauses and clock skew.
         let p = &o.plan;
+        t.conf[0] = proto::machine::MachineConf {
+            pause_gap_min_ns: p.machine_pause[0][0],
+            pause_gap_max_ns: p.machine_pause[0][1],
+            pause_min_ns: p.machine_pause[0][2],
+            pause_max_ns: p.machine_pause[0][3],
+            skew_min_ns: p.machine_skew[0].0,
+            skew_max_ns: p.machine_skew[0].1,
+            ..Default::default()
+        };
         for (i, n) in c.machines.iter().enumerate() {
             let k = i + 1;
             let w = n.disk_path().as_bytes();
@@ -1138,7 +1153,7 @@ pub fn run_boot(
             argv.extend(["--ok".into(), e.status.to_string()]);
         }
     }
-    for e in &c.env {
+    for e in c.env.iter().chain(&c.main_env) {
         argv.extend(["--env".into(), e.clone()]);
     }
     // The `ready` probes, at the first boot only (`sup::ready`): each machine's number, then
@@ -1668,7 +1683,7 @@ pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
     }
     let lay = layout(&o, c.disk.as_deref())?;
     let mut env: Vec<String> = crate::sup::BASE_ENV.iter().map(|s| s.to_string()).collect();
-    for kv in &c.env {
+    for kv in c.env.iter().chain(&c.main_env) {
         let k = kv.split('=').next().unwrap_or("");
         env.retain(|e| e.split('=').next() != Some(k));
         env.push(kv.clone());

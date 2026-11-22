@@ -11,7 +11,7 @@
 o=$RUNS/11-wal; mkdir -p "$o"
 W_FAULTS="--faults crash --fault crash-gap-ms=300..1500 --fault down-ms=100..300 --fault max-boots=12"
 # The correct version: seeds 1-8, every run kept.
-rm -f "$o/ok.toml"; conf "$o/ok.toml" a python3 /guest/wal.py a
+rm -f "$o/ok.toml"; conf "$o/ok.toml" a python3 /guest/wal.py a; driver "$o/ok.toml"
 rm -rf "${o:?}/ok"
 st=0
 timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep all --out "$o/ok" --config "$o/ok.toml" $W_FAULTS \
@@ -35,6 +35,6 @@ while [ "$t" = 0 ] && [ $s -le $FIND_SEEDS ]; do
 done
 [ "$t" -ge 1 ] || die "correct: no torn tail in seeds 1-$FIND_SEEDS (the scenario never arose)"
 echo "correct: ok on seeds 1-8 with the self-check passing in all; a torn tail dropped in $t runs (seeds 1-$((s - 1)))"
-f=$o/nocheck.toml; rm -f "$f"; conf "$f" a python3 /guest/wal.py a nocheck
+f=$o/nocheck.toml; rm -f "$f"; conf "$f" a python3 /guest/wal.py a nocheck; driver "$f"
 r=$(find_bug "$o" nocheck --config "$f" $W_FAULTS -- python3 /guest/wal.py main 15)
 echo "nocheck: $r"

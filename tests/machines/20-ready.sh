@@ -13,9 +13,13 @@
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/20-ready; mkdir -p "$o"
 rm -f "$o"/*.toml
-conf "$o/plain.toml" srv python3 /guest/slow.py
-cp "$o/plain.toml" "$o/ready.toml"
-echo 'ready = "patina wait :7000"' >>"$o/ready.toml"
+# srv.toml and srv-ready.toml: the machine, without and with its probe; plain.toml and
+# ready.toml add main, the test's driver.
+conf "$o/srv.toml" srv python3 /guest/slow.py
+cp "$o/srv.toml" "$o/srv-ready.toml"
+echo 'ready = "patina wait :7000"' >>"$o/srv-ready.toml"
+cp "$o/srv.toml" "$o/plain.toml"; driver "$o/plain.toml"
+cp "$o/srv-ready.toml" "$o/ready.toml"; driver "$o/ready.toml"
 F=(--fault fsync-error-permille=50)
 W=(python3 /guest/phases.py work 5 srv)
 
@@ -69,7 +73,7 @@ done
 r=$(field "$o/main-$s/result.json" ready.main)
 [ "$r" != null ] || die "main: never ready"
 # With a machine that waits too: main's command starts once srv is ready, before main is.
-{ cat "$o/ready.toml"; cat "$o/main.toml"; } >"$o/both.toml"
+{ cat "$o/srv-ready.toml"; cat "$o/main.toml"; } >"$o/both.toml"
 run_ok "$o/both" 1 --config "$o/both.toml" "${F[@]}" -- sh -c 'python3 /guest/slow.py & python3 /guest/phases.py work 5 127.0.0.1 && python3 /guest/phases.py work 5 srv'
 r=$(field "$o/both/result.json" ready.main)
 [ "$r" != null ] || die "main and srv: main never ready"
@@ -80,7 +84,7 @@ echo "a probe on main: seeds 1-$s ok; with srv's too, ok; main's command ending 
 
 # A probe that never passes.
 conf "$o/never.toml" srv python3 /guest/phases.py serve
-echo 'ready = ["test", "-e", "/work/never"]' >>"$o/never.toml"
+echo 'ready = ["test", "-e", "/work/never"]' >>"$o/never.toml"; driver "$o/never.toml"
 c=$(run "$o/never" 1 --config "$o/never.toml" -- "${W[@]}")
 [ "$c/$(field "$o/never/result.json" stop)" = error/ready ] || die "never ready: $c: $(field "$o/never/result.json" message)"
 case $(field "$o/never/result.json" message) in *srv*) ;; *) die "never ready: the message does not name srv" ;; esac
@@ -88,10 +92,11 @@ case $(field "$o/never/result.json" message) in *srv*) ;; *) die "never ready: t
 echo "a probe that never passes: error (ready), naming srv"
 
 # A runner killed while its machine waits: the probe runs again, and the machine is ready.
-cp "$o/plain.toml" "$o/kick.toml"
+cp "$o/srv.toml" "$o/kick.toml"
 cat >>"$o/kick.toml" <<'EOF'
 ready = ["sh", "-c", "test -e /work/kicked || { touch /work/kicked; kill -9 $PPID; }; exec patina wait :7000"]
 EOF
+driver "$o/kick.toml"
 run_ok "$o/kick" 1 --config "$o/kick.toml" -- "${W[@]}"
 r=$(field "$o/kick/result.json" ready.srv)
 [ "$r" != null ] || die "a killed runner: srv never ready"

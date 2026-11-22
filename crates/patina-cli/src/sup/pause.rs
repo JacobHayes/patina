@@ -60,7 +60,7 @@ impl Sup {
 
     /// The seed's first pause of every machine that has pauses, once every machine has started.
     pub(super) fn pauses_begin(&mut self) {
-        for k in 1..self.machine_count() {
+        for k in 0..self.machine_count() {
             if self.machine_tab().conf[k].pause_gap_max_ns > 0 {
                 self.pause_next(k);
             }
@@ -189,7 +189,7 @@ impl Sup {
 
     /// The faults end: the seed's pause of each machine ends now, and no other is drawn.
     pub(super) fn pauses_done(&mut self) {
-        for k in 1..MAX_MACHINES {
+        for k in 0..MAX_MACHINES {
             if let Some(e) = self.pauses.ev[k].take() {
                 self.sched.cancel(e);
             }
@@ -320,7 +320,7 @@ impl Sup {
     /// would run)`.
     pub(super) fn paused_detail(&self) -> String {
         let mut v = vec![];
-        for k in 1..self.machine_count() {
+        for k in 0..self.machine_count() {
             if self.paused(k) {
                 let n = self
                     .sched

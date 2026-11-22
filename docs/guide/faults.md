@@ -39,10 +39,11 @@ little.
    `/work`, pipes and unix sockets: a `--stdin FILE` is neither, so feed input through a pipe
    (`-- sh -c 'cat input | ./prog'`) or a file in `/work` to put its reads under faults. Keep a
    harness script out of `/work` (`--mount` it): there its own reads meet the faults too.
-4. **Machines.** With several machines, a class or key without `@` acts on every machine but
-   main; `@a,b` names machines (`patina guide machines`), and `net@main` or `partition@main` adds
-   main's links. `partition`, `pause` and `clock` exist only with machines. A run prints `faults
-   on:` with the machines its faults act on.
+4. **Machines.** A class or key without `@` acts on every machine, main included, and on the
+   links between them, however many machines the run has; `@a,b` names machines (`patina guide
+   machines`). `[machine.NAME] faults = false` exempts a machine from all of them: a test driver
+   on main writes `[machine.main] faults = false`. `partition`, `pause` and `clock` exist only
+   with machines. A run prints `faults on:` with the machines its faults act on.
 
 <!-- transcript not-applicable
 dir: /tmp/sockets
@@ -113,10 +114,12 @@ and checks they are all there. `result.json`'s `phases` has each command's start
 
 **Put the system under test on a machine; main is the harness**: its setup waits for the
 system, its main command drives the workload, its final check verifies (`patina guide machines`).
-A run with one machine costs about what a run without machines does.
+`[machine.main] faults = false` keeps the harness out of the faults. A run with one machine costs
+about what a run without machines does.
 
 <!-- no-run machine-harness: needs a database to test, which the repository does not ship -->
 ```sh
+printf '[machine.main]\nfaults = false\n' >patina.toml
 patina sweep --seeds 1..200 --faults all,crash --machine db='./db --listen :7000' \
     --setup './wait-for db:7000' --finally './verify db:7000' -- ./workload db:7000
 ```

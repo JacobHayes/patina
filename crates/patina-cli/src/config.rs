@@ -145,6 +145,16 @@ pub struct Config {
     /// Main's `ready` probe (`[machine.main] ready`; empty: none).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ready: Vec<String>,
+    /// Main's own `[machine.main]` keys, as a machine's (`Machine`): its environment, added to
+    /// the run's; `faults = false`; its `disk-mb` and `max-boots`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub main_env: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub main_no_faults: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_disk_mb: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub main_max_boots: Option<u64>,
 }
 
 /// A run's setup (`[run] setup`): a command Patina runs before the main one, or `mark`, the
@@ -205,9 +215,9 @@ pub struct Machine {
     /// `max-boots`: its boots (none: the run's `max-boots`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_boots: Option<u64>,
-    /// `faults = false`: no seed faults of its own, as main: a setting given without a
-    /// scope (`--faults`, `--fault`) leaves it out, and a scope may not name it.
-    /// Links to it and partitions, which are the run's, still act on it.
+    /// `faults = false`: none of the seed's faults: a setting given without a scope
+    /// (`--faults`, `--fault`) leaves it out, a scope may not name it, and the link faults and
+    /// partitions leave its links alone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_faults: bool,
     /// `disk-mb`: the size of its disk, `/tmp` and `/dev/shm` in MiB, `N` or `A..B`
@@ -294,6 +304,10 @@ impl Default for Config {
             case: None,
             machines: vec![],
             ready: vec![],
+            main_env: vec![],
+            main_no_faults: false,
+            main_disk_mb: None,
+            main_max_boots: None,
         }
     }
 }
@@ -826,6 +840,38 @@ fn probe(v: &toml::Value, at: &str) -> Res<Vec<String>> {
     Ok(w)
 }
 
+/// Main's `ok-exit` (`[run] ok-exit` or `[machine.main] ok-exit`, one of the two): `"any"`, or
+/// statuses `N` and `"N:CLASS,..."`, as `--ok-exit`.
+fn main_ok_exit(c: &mut Config, v: &toml::Value, at: &str) -> Res<()> {
+    if !c.ok_exit.is_empty() {
+        return Err(format!(
+            "{at}: main's ok-exit is given twice ([run] ok-exit and [machine.main] ok-exit)"
+        ));
+    }
+    if v.as_str() == Some("any") {
+        c.ok_exit = ok_exit_any();
+        return Ok(());
+    }
+    let mut l = vec![];
+    for x in v
+        .as_array()
+        .ok_or_else(|| format!("{at}: expected an array of exit statuses (N or \"N:CLASS,...\")"))?
+    {
+        let t = match (x.as_integer(), x.as_str()) {
+            (Some(i), _) => i.to_string(),
+            (_, Some(t)) if t.contains(':') => t.to_string(),
+            _ => x.to_string(),
+        };
+        let one = ok_exit_list(&t, at)?;
+        if one.len() != 1 {
+            return Err(format!("{at}: {t:?} is not one status"));
+        }
+        l.extend(one);
+    }
+    c.ok_exit = normal(l);
+    Ok(())
+}
+
 fn boolean(v: &toml::Value, at: &str) -> Res<bool> {
     v.as_bool()
         .ok_or_else(|| format!("{at}: expected true or false"))
@@ -902,12 +948,12 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("machine.NAME", "env", "{ K = \"V\" }", "none", "added to the run's environment"),
     tk("machine.NAME", "ready", "\"CMD ARGS\" or [\"CMD\", \"ARG\", ...]", "ready once started", "a probe run on it every 100 ms until it exits 0: main's command and the faults wait for every machine's (main's own: the faults only)"),
     tk("machine.NAME", "disk", "\"DIR[:GUEST]\"", "empty", "its disk's starting files (main's: as `--disk`)"),
-    tk("machine.NAME", "restart", "\"crash\", \"always\" or \"never\"", "crash", "after which downs the seed restarts it (`always`: also after it exits within `ok-exit`)"),
-    tk("machine.NAME", "ok-exit", "N or [N, ...]", "[0]", "exit statuses that only stop the machine"),
+    tk("machine.NAME", "restart", "\"crash\", \"always\" or \"never\"", "crash", "after which downs the seed restarts it (`always`: also after it exits within `ok-exit`; main's: `crash`)"),
+    tk("machine.NAME", "ok-exit", "N or [N, ...]", "[0]", "exit statuses that only stop the machine (main's: as `[run] ok-exit`, one of the two)"),
     tk("machine.NAME", "max-boots", "N", "the run's", "the most boots the seed's crashes give it (1 to 64)"),
     tk("machine.NAME", "disk-mb", "N or \"A..B\"", "the run's", "its filesystems' size, drawn per seed from a range"),
-    tk("machine.NAME", "count", "N", "1", "N machines of this table, named NAME1 to NAMEN"),
-    tk("machine.NAME", "faults", "true or false", "true", "`false`: no faults of its own, as main"),
+    tk("machine.NAME", "count", "N", "1", "N machines of this table, named NAME1 to NAMEN (not main)"),
+    tk("machine.NAME", "faults", "true or false", "true", "`false`: none of the seed's faults act on it or its links (a test driver on main)"),
 ];
 
 fn known_key(table: &str, key: &str) -> bool {
@@ -983,25 +1029,7 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "disk-mb") => c.tmpfs_bytes = int(v, &at)?.saturating_mul(1 << 20),
                 ("run", "check-timeout") => c.check_timeout = Some(int(v, &at)?),
                 ("run", "check") => check = Some(string(v, &at)?),
-                ("run", "ok-exit") if v.as_str() == Some("any") => c.ok_exit = ok_exit_any(),
-                ("run", "ok-exit") => {
-                    let mut l = vec![];
-                    for x in v.as_array().ok_or_else(|| {
-                        format!("{at}: expected an array of exit statuses (N or \"N:CLASS,...\")")
-                    })? {
-                        let t = match (x.as_integer(), x.as_str()) {
-                            (Some(i), _) => i.to_string(),
-                            (_, Some(t)) if t.contains(':') => t.to_string(),
-                            _ => x.to_string(),
-                        };
-                        let one = ok_exit_list(&t, &at)?;
-                        if one.len() != 1 {
-                            return Err(format!("{at}: {t:?} is not one status"));
-                        }
-                        l.extend(one);
-                    }
-                    c.ok_exit = normal(l);
-                }
+                ("run", "ok-exit") => main_ok_exit(c, v, &at)?,
                 ("faults", "faults") => c.fault_classes = strings(v, &at)?,
                 ("faults", "fs-model") => c.fs_model = string(v, &at)?,
                 ("faults", _) => c.faults.push(format!("{k}={}", scalar(v, &at)?)),
@@ -1039,21 +1067,7 @@ fn machines(c: &mut Config, text: &str, t: &toml::Table, base: &Path, file: &str
     for n in order {
         let at = format!("{file}: machine.{n}");
         let v = t.get(&n).ok_or_else(|| format!("{at}: not found"))?;
-        if n == "main" {
-            for (k, v) in table(v, &at)? {
-                let at = format!("{at}.{k}");
-                match k.as_str() {
-                    "run" => c.cmd = strings(v, &at)?,
-                    "disk" => (c.disk, c.disk_at) = disk_arg(base, &at, &string(v, &at)?)?,
-                    "ready" => c.ready = probe(v, &at)?,
-                    _ if known_key("machine.NAME", k) => {
-                        return Err(format!("{at}: main takes run, disk and ready only"))
-                    }
-                    _ => return Err(format!("{file}: unknown key machine.main.{k}")),
-                }
-            }
-            continue;
-        }
+        let main = n == "main";
         let mut machine = Machine::new(n.clone(), vec![]);
         let mut count = None;
         for (k, v) in table(v, &at)? {
@@ -1062,6 +1076,9 @@ fn machines(c: &mut Config, text: &str, t: &toml::Table, base: &Path, file: &str
             }
             let at = format!("{at}.{k}");
             match k.as_str() {
+                // Main's exit statuses that end the run ok, as `[run] ok-exit`.
+                "ok-exit" if main => main_ok_exit(c, v, &at)?,
+                "count" if main => return Err(format!("{at}: main is one machine")),
                 "run" => machine.run = strings(v, &at)?,
                 "ready" => machine.ready = probe(v, &at)?,
                 "env" => {
@@ -1122,6 +1139,29 @@ fn machines(c: &mut Config, text: &str, t: &toml::Table, base: &Path, file: &str
                 }
                 _ => return Err(format!("{file}: unknown key machine.{n}.{k}")),
             }
+        }
+        if main {
+            // Main's run is the command after `--` and is started again after each crash; its
+            // exit ends the run, so no other restart policy applies to it.
+            if let Some(r) = machine.restart.as_deref().filter(|r| *r != "crash") {
+                return Err(format!(
+                    "{at}.restart: {r}: main is started again after a crash, and its exit ends the run (crash only)"
+                ));
+            }
+            if !machine.run.is_empty() {
+                c.cmd = machine.run;
+            }
+            if machine.disk.is_some() || machine.disk_at.is_some() {
+                (c.disk, c.disk_at) = (machine.disk, machine.disk_at);
+            }
+            if !machine.ready.is_empty() {
+                c.ready = machine.ready;
+            }
+            c.main_env = machine.env;
+            c.main_no_faults = machine.no_faults;
+            c.main_disk_mb = machine.disk_mb;
+            c.main_max_boots = machine.max_boots;
+            continue;
         }
         // `count = N`: machines NAME1..NAMEN in its place, each with this table.
         match count {
@@ -1307,41 +1347,54 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
 impl Config {
     /// Check every setting and build the launcher's plan around an already resolved program.
     pub fn opts_with(&self, program: Program) -> Res<Opts> {
+        // Faults asked for: any class, or any key but the scheduler's `compute-*`.
+        let asked = !self.fault_classes.is_empty()
+            || self.faults.iter().any(|s| !s.starts_with("compute-"));
         let mut plan = if self.machines.is_empty() {
-            if let Some(s) = self
-                .fault_classes
-                .iter()
-                .chain(&self.faults)
-                .find(|s| faults::split_scope(s).1.is_some())
-            {
-                return Err(format!(
-                    "{s}: @MACHINE names machines, and the run has none"
-                ));
+            // Main is the run's one machine: a scope may name it alone, and is then no scope.
+            let mut given = vec![];
+            for s in self.fault_classes.iter().chain(&self.faults) {
+                let (body, scope) = faults::split_scope(s);
+                self.scope_bits(scope, s)?;
+                given.push(body.to_string());
             }
-            if let Some(s) = self
-                .faults
+            let (cs, ss) = given.split_at(self.fault_classes.len());
+            if let Some(s) = ss
                 .iter()
                 .find(|s| faults::machine_only(s.split_once('=').map_or(s.as_str(), |x| x.0)))
             {
                 return Err(format!("--fault {s}: only in a run with machines"));
             }
-            let classes = faults::classes(&self.fault_classes.join(","), 0, 0)?;
+            let on = !self.main_no_faults;
+            let ss: Vec<String> = ss
+                .iter()
+                .filter(|s| on || s.starts_with("compute-"))
+                .cloned()
+                .collect();
+            let classes = match on {
+                true => faults::classes(&cs.join(","), 0, 1)?,
+                false => vec![],
+            };
             let mut plan = faults::resolve(
                 self.seed,
                 &classes,
-                &self.faults,
+                &ss,
                 0,
-                false,
+                on as u64,
                 faults::CrashAt::Points,
             )?;
-            // The program's faults: any class, or any key but the scheduler's `compute-*`.
-            if !classes.is_empty() || self.faults.iter().any(|s| !s.starts_with("compute-")) {
+            if asked && on {
                 plan.on = vec!["main".to_string()];
+            }
+            if let Some(b) = self.main_max_boots {
+                plan.max_boots = b;
             }
             plan
         } else {
             self.machine_plan()?
         };
+        // Faults asked for, and every machine has `faults = false`: `faults on:` says none.
+        plan.none_on = asked && self.main_no_faults && self.machines.iter().all(|m| m.no_faults);
         if let Some(w) = &self.compute_walk {
             plan.compute_walk = faults::walk(self.seed, w)?;
         }
@@ -1393,6 +1446,7 @@ impl Config {
         for k in 0..self.machines.len() {
             self.machine_disk_bytes(k)?;
         }
+        self.main_disk_bytes()?;
         if self.tmpfs_bytes < 1 << 20 {
             return Err("[run] disk-mb is at least 1".into());
         }
@@ -1427,48 +1481,75 @@ impl Config {
         !self.ready.is_empty() || self.machines.iter().any(|m| !m.ready.is_empty())
     }
 
-    /// Whether the link faults act on main's links too: a link class (`net`, `partition`) or
-    /// key (`net-*`, `partition-*`) scoped `@main`, the only scope the links' faults take.
-    pub fn main_links(&self) -> Res<bool> {
-        let mut main = false;
+    /// The run's machines, main first (machine `k` is `names()[k]`).
+    fn names(&self) -> Vec<&str> {
+        std::iter::once("main")
+            .chain(self.machines.iter().map(|m| m.name.as_str()))
+            .collect()
+    }
+
+    /// Whether machine `k` (0: main) has faults: `faults = false` takes it out of them all.
+    fn has_faults(&self, k: usize) -> bool {
+        match k {
+            0 => !self.main_no_faults,
+            _ => !self.machines[k - 1].no_faults,
+        }
+    }
+
+    /// The machines a scope names (bit `k`: machine `k`), each of which must exist and have
+    /// faults; no scope: every machine with faults.
+    fn scope_bits(&self, scope: Option<&str>, what: &str) -> Res<u64> {
+        let names = self.names();
+        let Some(l) = scope else {
+            return Ok((0..names.len())
+                .filter(|&k| self.has_faults(k))
+                .fold(0, |b, k| b | 1 << k));
+        };
+        let mut bits = 0;
+        for n in l.split(',') {
+            let Some(k) = names.iter().position(|x| *x == n) else {
+                return Err(match self.machines.is_empty() {
+                    true => format!("{what}: no machine {n} (the run's one machine is main)"),
+                    false => format!("{what}: no machine {n}"),
+                });
+            };
+            if !self.has_faults(k) {
+                return Err(format!("{what}: machine {n} has faults = false"));
+            }
+            bits |= 1 << k;
+        }
+        Ok(bits)
+    }
+
+    /// The machines whose links the link faults act on (bit `k`: machine `k`, `NetCfg::links`):
+    /// a link class (`net`, `partition`, `all`) or key (`net-*`, `partition-*`) acts on the
+    /// links between machines with faults, each one's loopback included, or, scoped, between
+    /// the machines it names (`all@MACHINE` is the machine's own classes of `all`).
+    pub fn link_mask(&self) -> Res<u64> {
+        let mut m = 0;
         for e in &self.fault_classes {
             let (names, scope) = faults::split_scope(e);
-            let Some(scope) = scope else { continue };
-            for c in names.split(',').filter(|c| !faults::machine_class(c)) {
-                if scope != "main" {
-                    return Err(format!(
-                        "--faults {e}: {c} acts on links, the run's; its only scope is @main \
-                         (main's links too)"
-                    ));
-                }
-                main = true;
+            let links = names
+                .split(',')
+                .any(|c| matches!(c, "net" | "partition") || (c == "all" && scope.is_none()));
+            if links {
+                m |= self.scope_bits(scope, &format!("--faults {e}"))?;
             }
         }
         for s in &self.faults {
             let (kv, scope) = faults::split_scope(s);
-            let k = kv.split_once('=').map_or(kv, |x| x.0);
-            match scope {
-                Some(scope) if faults::link_key(k) => {
-                    if scope != "main" {
-                        return Err(format!(
-                            "--fault {s}: {k} acts on links, the run's; its only scope is @main \
-                             (main's links too)"
-                        ));
-                    }
-                    main = true;
-                }
-                _ => {}
+            if faults::link_key(kv.split_once('=').map_or(kv, |x| x.0)) {
+                m |= self.scope_bits(scope, &format!("--fault {s}"))?;
             }
         }
-        Ok(main)
+        Ok(m)
     }
 
     /// The fault classes of a run with machines, each with the machines it names (`None`: every
-    /// machine but main and those with `faults = false`). `net` and `partition` are the
-    /// links', the run's: their scope is `main_links`'s (`all@MACHINE` is the machine's own
-    /// classes of `all`).
+    /// machine with faults). `net` and `partition` are the links': their scope is
+    /// `link_mask`'s (`all@MACHINE` is the machine's own classes of `all`).
     fn scoped_classes(&self) -> Res<Vec<(&'static str, Option<String>)>> {
-        let faultable = faults::faultable_machines(self.machines.len(), self.main_links()?);
+        let faultable = self.link_mask()?.count_ones() as usize;
         let mut out = vec![];
         for e in &self.fault_classes {
             let (names, scope) = faults::split_scope(e);
@@ -1491,26 +1572,10 @@ impl Config {
     }
 
     /// Whether a class or setting of scope `scope` applies to machine `k` (0: main):
-    /// unscoped, every machine but main and those with `faults = false`; `@MACHINE,...`, the
-    /// machines named, which must exist and have faults.
+    /// unscoped, every machine with faults; `@MACHINE,...`, the machines named, which must
+    /// exist and have faults.
     fn applies(&self, k: usize, scope: Option<&str>, what: &str) -> Res<bool> {
-        let Some(l) = scope else {
-            return Ok(k != 0 && !self.machines[k - 1].no_faults);
-        };
-        for n in l.split(',') {
-            if n != "main" && !self.machines.iter().any(|x| x.name == n) {
-                return Err(format!("{what}: no machine {n}"));
-            }
-            if self.machines.iter().any(|x| x.name == n && x.no_faults) {
-                return Err(format!("{what}: machine {n} has faults = false"));
-            }
-        }
-        let name = if k == 0 {
-            "main"
-        } else {
-            self.machines[k - 1].name.as_str()
-        };
-        Ok(l.split(',').any(|n| n == name))
+        Ok(self.scope_bits(scope, what)? & 1 << k != 0)
     }
 
     /// The plan of a run with machines: the run's own settings (links, partitions, crash timing,
@@ -1533,18 +1598,20 @@ impl Config {
             }
             if scope.is_some() && !faults::link_key(k) {
                 return Err(format!(
-                    "--fault {s}: {k} is the run's (only a machine's own keys take @MACHINE: disk, \
-                     memory, fault-point, crash-point, pause and clock keys)"
+                    "--fault {s}: {k} is the run's (only a machine's own keys and the links' take \
+                     @MACHINE: disk, memory, fault-point, crash-point, pause, clock, net- and \
+                     partition- keys)"
                 ));
             }
             run_settings.push(kv.to_string());
         }
+        let links_on = self.link_mask()?;
         let mut plan = faults::resolve(
             self.seed,
             &run_classes,
             &run_settings,
             self.machines.len(),
-            self.main_links()?,
+            links_on,
             faults::CrashAt::Times,
         )?;
         let between = |k: &str| {
@@ -1561,12 +1628,8 @@ impl Config {
         }
         // Each machine's classes and settings.
         let mut per = vec![];
-        for k in 0..=self.machines.len() {
-            let name = if k == 0 {
-                "main"
-            } else {
-                self.machines[k - 1].name.as_str()
-            };
+        let names = self.names();
+        for (k, name) in names.iter().copied().enumerate() {
             let mut cs: Vec<&str> = vec![];
             for (c, scope) in &classes {
                 if !faults::machine_class(c) || cs.contains(c) {
@@ -1577,11 +1640,8 @@ impl Config {
                     scope.as_deref(),
                     &format!("--faults {c}@{}", scope.as_deref().unwrap_or("")),
                 )? {
-                    if k == 0 && !matches!(*c, "disk" | "mem" | "buggify") {
-                        return Err(format!(
-                            "--faults {c}@main: main runs the run's checks; it may have \
-                             disk, mem and buggify faults only"
-                        ));
+                    if k == 0 && matches!(*c, "crash" | "kill") {
+                        return Err(main_crash(&format!("--faults {c}")));
                     }
                     cs.push(c);
                 }
@@ -1591,11 +1651,8 @@ impl Config {
                 let (kv, scope) = faults::split_scope(s);
                 let key = kv.split_once('=').map_or(kv, |x| x.0);
                 if faults::machine_scoped(key) && self.applies(k, scope, &format!("--fault {s}"))? {
-                    if k == 0 && (faults::machine_only(key) || key.starts_with("crash-")) {
-                        return Err(format!(
-                            "--fault {s}: main is never paused, killed or skewed (it runs \
-                             the run's checks; its clock is the run's virtual time)"
-                        ));
+                    if k == 0 && key.starts_with("crash-") {
+                        return Err(main_crash(&format!("--fault {s}")));
                     }
                     ss.push(kv.to_string());
                 }
@@ -1603,17 +1660,16 @@ impl Config {
             per.push((name, cs, ss));
         }
         // The machines the seed's faults act on: their own classes and settings, and the links'
-        // faults on every declared machine (main too with `@main`).
+        // faults on the machines whose links they act on.
         let links = !run_classes.is_empty()
             || run_settings
                 .iter()
                 .any(|s| faults::link_key(s.split_once('=').map_or(s.as_str(), |x| x.0)));
-        let main_links = self.main_links()?;
         plan.on = per
             .iter()
             .enumerate()
             .filter(|(k, (_, cs, ss))| {
-                !cs.is_empty() || !ss.is_empty() || (links && (*k > 0 || main_links))
+                !cs.is_empty() || !ss.is_empty() || (links && links_on & 1 << k != 0)
             })
             .map(|(_, (name, _, _))| name.to_string())
             .collect();
@@ -1651,17 +1707,17 @@ impl Config {
                 continue;
             }
             let seed = machine_seed(self.seed, k);
-            let sub = faults::resolve(seed, &cs, &ss, 0, false, mode)
+            let sub = faults::resolve(seed, &cs, &ss, 0, 0, mode)
                 .map_err(|e| format!("machine {name}: {e}"))?;
+            let (g, l) = (sub.pause_gap_ns, sub.pause_ns);
+            plan.machine_pause[k] = [g.0, g.1, l.0, l.1];
+            plan.machine_skew[k] = sub.skew_ns;
             if k == 0 {
                 faults::set_machine_keys(&mut plan.faults, &sub.faults);
                 plan.sdk = sub.sdk;
             } else {
                 faults::set_machine_keys(&mut plan.machine_faults[k], &sub.faults);
                 plan.machine_sdk[k] = sub.sdk;
-                let (g, l) = (sub.pause_gap_ns, sub.pause_ns);
-                plan.machine_pause[k] = [g.0, g.1, l.0, l.1];
-                plan.machine_skew[k] = sub.skew_ns;
                 if mode == faults::CrashAt::Times && sub.crash_class != proto::faults::CRASH_NONE {
                     plan.machine_crash |= 1 << k;
                     plan.machine_crash_kind = if sub.crash_class == proto::faults::CRASH_PROCESS {
@@ -1747,10 +1803,20 @@ impl Config {
     /// drawn from the run's seed, else the run's.
     pub fn machine_disk_bytes(&self, k: usize) -> Res<u64> {
         let n = &self.machines[k];
-        let Some(v) = &n.disk_mb else {
+        self.disk_bytes(&n.name, n.disk_mb.as_deref())
+    }
+
+    /// The size of main's disk and `/tmp`: its `disk-mb` (`[machine.main] disk-mb`), else the
+    /// run's.
+    pub fn main_disk_bytes(&self) -> Res<u64> {
+        self.disk_bytes("main", self.main_disk_mb.as_deref())
+    }
+
+    fn disk_bytes(&self, name: &str, v: Option<&str>) -> Res<u64> {
+        let Some(v) = v else {
             return Ok(self.tmpfs_bytes);
         };
-        let at = format!("[machine.{}] disk-mb", n.name);
+        let at = format!("[machine.{name}] disk-mb");
         let num = |s: &str| -> Res<u64> {
             s.trim()
                 .parse()
@@ -1769,7 +1835,7 @@ impl Config {
                 self.tmpfs_bytes >> 20
             ));
         }
-        let key = format!("disk-mb@{}", n.name);
+        let key = format!("disk-mb@{name}");
         Ok((a + faults::plan_draw(self.seed, &key) % (b - a + 1)) << 20)
     }
 
@@ -1783,6 +1849,16 @@ impl Config {
         let program = program(&self.cmd[0], &self.mounts)?;
         self.opts_with(program)
     }
+}
+
+/// Why a crash or kill of main is refused in a run with other machines: main's boots are the
+/// launcher's, one sandbox each (`launcher::boots`), and only a run without other machines has
+/// them.
+fn main_crash(what: &str) -> String {
+    format!(
+        "{what}: acts on main too, and main is not crashed or killed beside other machines (not \
+         available yet): give [machine.main] faults = false, or name the machines (@a,b)"
+    )
 }
 
 /// The seed machine `k`'s own settings resolve from (main's: the run's).
@@ -1947,7 +2023,12 @@ mod tests {
             c.machines[3],
             Machine::new("db".into(), c.machines[3].run.clone())
         );
-        // `--faults kill` covers every machine but main; `@` names some.
+        // `--faults kill` covers every machine with faults, main too; main is not killed beside
+        // other machines, so a test whose main drives it takes it out; `@` names some.
+        let mut k = c.clone();
+        k.fault_classes = vec!["kill".into()];
+        assert!(k.machine_plan().is_err());
+        c.main_no_faults = true;
         use proto::faults::{CRASH_MACHINE, CRASH_NONE, CRASH_PROCESS};
         use proto::machine::{SEED_CRASH, SEED_KILL};
         let crash = |c: &Config, classes: &[&str], keys: &[&str]| {
@@ -2012,7 +2093,6 @@ mod tests {
             (&["kill@main"], &[]),
             (&["crash@nope"], &[]),
             (&[], &["crash-at=1@main"]),
-            (&["net@w1"], &[]),
         ] {
             assert!(crash(&c, cl, keys).is_err(), "{cl:?} {keys:?}");
         }
@@ -2030,7 +2110,7 @@ mod tests {
     }
 
     #[test]
-    fn a_machine_without_faults_is_left_out_as_main_is() {
+    fn a_machine_without_faults_is_left_out_main_included() {
         let dir = std::env::temp_dir().join(format!("patina-nofaults-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("patina.toml");
@@ -2045,17 +2125,32 @@ mod tests {
         assert!(!c.machines[0].no_faults && c.machines[1].no_faults);
         c.faults = vec!["fs-error-permille=7".into()];
         let plan = |c: &Config| c.machine_plan();
-        // Unscoped: a has it, m does not.
+        // Unscoped: main and a have it, m does not.
         let p = plan(&c).unwrap();
+        assert_eq!(p.faults.fs_error_permille, 7);
         assert_eq!(p.machine_faults[1].fs_error_permille, 7);
         assert_eq!(p.machine_faults[2].fs_error_permille, 0);
+        assert_eq!(p.on, ["main", "a"]);
+        // The links' faults: between the machines with faults, never m's links.
+        let mut n = c.clone();
+        n.fault_classes = vec!["net".into()];
+        assert_eq!(n.machine_plan().unwrap().net.links, 0b011);
+        n.fault_classes = vec!["net@a".into()];
+        assert_eq!(n.machine_plan().unwrap().net.links, 0b010);
+        n.main_no_faults = true;
+        n.fault_classes = vec!["net".into()];
+        assert_eq!(n.machine_plan().unwrap().net.links, 0b010);
         let mut k = c.clone();
         k.fault_classes = vec!["crash".into()];
+        assert!(k.machine_plan().is_err());
+        k.main_no_faults = true;
         assert_eq!(k.machine_plan().unwrap().machine_crash, 0b010);
         // A scope may not name it.
         c.faults = vec!["fs-error-permille=7@m".into()];
         assert!(plan(&c).is_err());
         c.faults = vec!["crash-permille=5@m".into()];
+        assert!(plan(&c).is_err());
+        c.faults = vec!["net-drop-permille=5@m".into()];
         assert!(plan(&c).is_err());
     }
 

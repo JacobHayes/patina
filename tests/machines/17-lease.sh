@@ -34,6 +34,7 @@ sweep() {
         if [ "$_bug" = ok ]; then conf "$_f" "$_n" python3 "/guest/$_g" "$_n"
         else conf "$_f" "$_n" python3 "/guest/$_g" "$_n" "$_bug"; fi
     done
+    driver "$_f"
     _st=0
     # shellcheck disable=SC2086
     timeout 600 "$PATINA" sweep --seeds "${SEEDS:-1..$N}" -j 6 --keep fail --out "$o/$_name" --config "$_f" "$@" \

@@ -5,8 +5,9 @@
 # change its view; each machine has its own abstract AF_UNIX names, and names read back carry no
 # prefix; UDP between machines carries the machines' addresses; b's first process starts with the
 # main's process state; a cut stops a connect and loses a datagram, and a heal lets both
-# through; a socket's TCP_SYNCNT and TCP_USER_TIMEOUT set its own limits across a cut. The link faults leave
-# main's links alone unless @main says otherwise. A machine given with --machine whose command
+# through; a socket's TCP_SYNCNT and TCP_USER_TIMEOUT set its own limits across a cut. The link
+# faults act on main's links like any machine's, and `[machine.main] faults = false` leaves main
+# out. A machine given with --machine whose command
 # cannot run ends the run at once, naming the machine. Identical under verify --vary cpu,aslr,sandbox,repeat
 # (and load in the area tier).
 # What is not available yet is refused, naming the feature; without machines a control call is
@@ -28,14 +29,16 @@ r=$o/iso/run-0
 [ "$(field "$r/result.json" machines.net.heals)" -ge 1 ] || die "result.json: no heal counted"
 [ -f "$r/machine/b/boot-1/stdout" ] || die "no stdout for machine b"
 
-# The link faults act between machines other than main: on main's links nothing is drawn; with
-# @main they act there too.
+# The link faults act on main's links like any machine's; main with faults = false is left out.
 run_ok "$o/links" 1 --config "$o/iso.toml" --fault net-reset-permille=1 -- python3 /guest/iso.py main
-[ "$(field "$o/links/result.json" faults.counts.net-reset.eligible)" = 0 ] || die "net-reset drawn on main's links"
-run_ok "$o/links-main" 1 --config "$o/iso.toml" --fault net-reset-permille=1@main -- python3 /guest/iso.py main
-e=$(field "$o/links-main/result.json" faults.counts.net-reset.eligible)
-[ "$e" -gt 0 ] || die "@main: net-reset not drawn on main's links"
-echo "link faults: none drawn on main's links by default, $e reads with @main"
+e=$(field "$o/links/result.json" faults.counts.net-reset.eligible)
+[ "$e" -gt 0 ] || die "net-reset not drawn on main's links"
+on=$(field "$o/links/result.json" faults.on)
+cp "$o/iso.toml" "$o/drv.toml"; driver "$o/drv.toml"
+run_ok "$o/links-drv" 1 --config "$o/drv.toml" --fault net-reset-permille=1 -- python3 /guest/iso.py main
+d=$(field "$o/links-drv/result.json" faults.on)
+[ "$d" != "$on" ] && ! grep -q main <<<"$d" || die "faults = false: main still faulted: $d"
+echo "link faults: $e reads drawn on main's links; with main's faults = false, faults on $d"
 c=$(run "$o/noexec" 1 --machine a=/etc/hostname -- /bin/true)
 stop=$(field "$o/noexec/result.json" stop); m=$(field "$o/noexec/result.json" message)
 [ "$c" = error ] && [ "$stop" = exec ] && grep -q 'machine a' <<<"$m" || die "a machine that cannot run: $c ($stop): $m"
@@ -50,7 +53,6 @@ refused() {
     echo "refused: $what"
 }
 # Only the disk and memory keys are a machine's own; a scope names machines of the run.
-refused net-drop-permille --config "$o/iso.toml" --fault net-drop-permille=10@b
 refused "no machine nope" --config "$o/iso.toml" --fault fs-error-permille=10@nope
 printf '[machine.c]\nrun = ["/bin/true"]\n[machine.c.faults]\nnet-drop-permille = 5\n' >"$o/own.toml"
 refused machine.c.faults --config "$o/own.toml"

@@ -38,10 +38,12 @@ mk() {  # mk FILE PROG BUG NAME...: one table per machine, BUG (if any) after th
     for n in "$@"; do
         if [ -n "$bug" ]; then conf "$f" "$n" python3 "/guest/$prog" "$n" "$bug"; else conf "$f" "$n" python3 "/guest/$prog" "$n"; fi
     done
+    driver "$f"
 }
 rm -f "$o/ack2-ok.toml" "$o/ack2-early.toml"
 conf "$o/ack2-ok.toml" a python3 /guest/ack2.py a; conf "$o/ack2-ok.toml" b python3 /guest/ack2.py b
 conf "$o/ack2-early.toml" a python3 /guest/ack2.py a; conf "$o/ack2-early.toml" b python3 /guest/ack2.py b early
+driver "$o/ack2-ok.toml"; driver "$o/ack2-early.toml"
 sw ack2-ok 1..8 "$o/ack2-ok.toml" python3 /guest/ack2.py main 5
 sw ack2-early 1..8 "$o/ack2-early.toml" python3 /guest/ack2.py main 5
 for v in ok nosync early; do

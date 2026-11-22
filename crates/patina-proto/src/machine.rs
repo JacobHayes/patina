@@ -126,7 +126,7 @@ pub struct MachineTab {
 impl MachineTab {
     /// Machine `k`'s realtime clock offset (ns).
     pub fn clock_offset(&self, k: usize) -> i64 {
-        if k == 0 || k >= MAX_MACHINES {
+        if k >= MAX_MACHINES {
             return 0;
         }
         // Written by the supervisor while no guest thread runs.

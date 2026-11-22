@@ -14,6 +14,7 @@ for v in ok lazy; do
     rm -f "$o/$v.toml"
     conf "$o/$v.toml" a python3 /guest/phases.py serve
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/phases.py serve; else conf "$o/$v.toml" b python3 /guest/phases.py serve lazy; fi
+    driver "$o/$v.toml"
 done
 
 # after_settle DIR: the seed's faults and downs after the settle point (none expected), one per line.
