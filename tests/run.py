@@ -207,11 +207,17 @@ def kill_session(sid):
 
 
 def hang(args):
-    """tests/hang.py: what a script killed over its budget was doing, into RUNS/hang.txt."""
+    """tests/hang.py: what a script killed over its budget was doing, into RUNS/hang.txt; its
+    snapshot's CPU time of the script's processes in seconds (None when it gave none)."""
     try:
-        subprocess.run([sys.executable, "-I", os.path.join(HERE, "hang.py")] + args, timeout=300)
+        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "hang.py")] + args, timeout=300,
+                           stdout=subprocess.PIPE, text=True)
     except subprocess.TimeoutExpired:
-        pass
+        return None
+    for line in r.stdout.splitlines():
+        if line.startswith("cpu "):
+            return float(line.split()[1])
+    return None
 
 
 def main():
@@ -270,22 +276,25 @@ def main():
         with open(log, "w") as fh:
             p = subprocess.Popen(STRICT + [s["path"]], cwd=ROOT, env=env, stdout=fh, stderr=subprocess.STDOUT,
                                  start_new_session=True)
-            # Waited for with wait4: the script's CPU time, its reaped descendants' included.
+            # Waited for with wait4: the script's CPU time, its reaped descendants' included. A
+            # killed script's descendants are not reaped by it, so its CPU time is the process
+            # tree's, read from /proc just before the kill (tests/hang.py snapshot).
             pidfd = os.pidfd_open(p.pid)
             ready, _, _ = fd_ready([pidfd], [], [], s["budget"])
             os.close(pidfd)
+            tree = None
             if ready:
                 _, st, ru = os.wait4(p.pid, 0)
                 p.returncode = os.waitstatus_to_exitcode(st)
                 why = "" if p.returncode == 0 else f"exit {p.returncode}"
             else:
-                hang(["snapshot", str(p.pid), runs])
+                tree = hang(["snapshot", str(p.pid), runs])
                 kill_session(p.pid)
                 _, _, ru = os.wait4(p.pid, 0)
                 p.returncode = -9
                 why = f"over budget ({s['budget']} s), killed"
         dt = time.monotonic() - t0
-        cpu = ru.ru_utime + ru.ru_stime
+        cpu = max(ru.ru_utime + ru.ru_stime, tree or 0)
         # Nothing of the script's runs may be left (sandbox teardown is asynchronous: 5 s grace).
         left = ""
         for _ in range(50):

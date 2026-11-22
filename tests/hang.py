@@ -5,7 +5,9 @@ RUNS/hang.txt (RUNS is the script's run directory, kept and uploaded with a fail
                                 and every process of a run under RUNS by tests/leftovers.py's
                                 rule: sandboxes leave the session), each thread's state, kernel
                                 wait channel and CPU time, sampled twice a second apart: a thread
-                                whose CPU time grew was computing, one whose did not was waiting
+                                whose CPU time grew was computing, one whose did not was waiting;
+                                prints `cpu SECONDS`: the CPU time of those processes and of the
+                                children they reaped, at the end of the snapshot
     hang.py logs RUNS           after the kill: for each run under RUNS that has no result.json
                                 (it was still going), its boundary log cut to the records written
                                 (the launcher sizes the file ahead and cuts it only at the end),
@@ -97,6 +99,16 @@ def snapshot(sid, runs, out):
 
     for p in kids.get(None, []):
         show(p, 0)
+    # The tree's CPU time just before the kill, for run.py's FAIL line: the killed processes are
+    # never reaped by the script, so its rusage leaves them out. Each live process counts its own
+    # time and that of the children it reaped (stat fields utime, stime, cutime, cstime).
+    ticks = 0
+    for p in pids:
+        s = read(f"/proc/{p}/stat")
+        f = s.rsplit(")", 1)[1].split() if ")" in s else []
+        if len(f) > 14:
+            ticks += sum(int(x) for x in f[11:15])
+    print(f"cpu {ticks / os.sysconf('SC_CLK_TCK'):.2f}", flush=True)
 
 
 def logs(runs, out):
