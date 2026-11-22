@@ -12,7 +12,6 @@
 //! Processes an earlier phase left running keep running. Everything is in the turn's order, so
 //! every transition is the same in every run of a seed.
 
-use super::link::EVK_MACHINE_START;
 use super::{Sup, Verdict};
 use proto::ctl::*;
 use proto::layout::*;
@@ -47,6 +46,8 @@ pub struct Phases {
     pub continuing: bool,
     /// The slot the current phase's root started in (its records' slot).
     pub root_slot: usize,
+    /// `patina ctl settle` was answered: every later call is a no-op (`settle`).
+    pub settled: bool,
 }
 
 /// The descriptors this process has open.
@@ -153,8 +154,7 @@ impl Sup {
     /// script's cuts heal and its pauses end, and every down machine whose restart its policy
     /// scheduled is queued to start now (the final check's root starts after them).
     fn settle(&mut self) {
-        self.partitions_done();
-        self.pauses_done();
+        self.seed_stop();
         let n = self.machine_count();
         if n == 0 {
             return;
@@ -163,16 +163,6 @@ impl Sup {
         for k in 1..n {
             if self.paused(k) {
                 self.resume(k, PEND_DONE);
-            }
-        }
-        for k in 1..n {
-            if self.machine_is_up(k) || self.machines.pending.contains(&(EVK_MACHINE_START, k)) {
-                continue;
-            }
-            // A restart its policy scheduled comes now; a machine the script took down, or
-            // one its policy or `max-boots` leaves down, stays down.
-            if self.machines_start_queued(k) {
-                self.machine_start_now(k);
             }
         }
     }

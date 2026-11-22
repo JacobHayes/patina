@@ -94,8 +94,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Ctl,
         name: "ctl",
-        usage: "patina ctl partition A B | partition --from A --to B | heal [A B] | crash MACHINE | kill MACHINE | start MACHINE | pause MACHINE | resume MACHINE | clock MACHINE +90s",
-        help: "inside a run with machines: act on links, machines and clocks, as the fault classes do",
+        usage: "patina ctl partition A B | partition --from A --to B | heal [A B] | crash MACHINE | kill MACHINE | start MACHINE | pause MACHINE | resume MACHINE | clock MACHINE +90s | settle [SECONDS]",
+        help: "from main: act on links, machines and clocks; settle: end the faults, wait for recovery",
     },
     Command {
         cmd: Cmd::Doctor,

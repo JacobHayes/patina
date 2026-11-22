@@ -78,6 +78,9 @@ pub struct PhaseTab {
     pub boot: [u64; 3],
     /// Without machines: the link faults' chances in the fault window (`PhaseCtl::elig`), summed.
     pub elig: [u64; proto::machine::ELIG_N],
+    /// Where `patina ctl settle` stopped the faults: sequence number and virtual time ns
+    /// (0: no settle).
+    pub settle: [u64; 2],
 }
 
 impl PhaseTab {
@@ -92,6 +95,7 @@ impl PhaseTab {
             err_off: a(&p.err_off),
             boot: [0; 3],
             elig: p.elig.each_ref().map(|v| v.load(Relaxed)),
+            settle: [p.settle_seq.load(Relaxed), p.settle_ns.load(Relaxed)],
         }
     }
 
@@ -99,6 +103,9 @@ impl PhaseTab {
     pub fn add(&mut self, k: u64, b: &PhaseTab) {
         for (a, b) in self.elig.iter_mut().zip(b.elig) {
             *a += b;
+        }
+        if b.settle[0] != 0 {
+            self.settle = b.settle;
         }
         // The phases after the first this boot ran are its own, run or not.
         let Some(first) = b.from_seq.iter().position(|s| *s != 0) else {
@@ -176,7 +183,11 @@ impl Phases {
         } else {
             json!({})
         };
-        if self.faults_until_seq != 0 && self.faults_until_seq != self.tab.to_seq[1] {
+        // A settle says where it stopped the faults itself (`result.json`'s `settle`).
+        if self.faults_until_seq != 0
+            && self.faults_until_seq != self.tab.to_seq[1]
+            && self.faults_until_seq != self.tab.settle[0]
+        {
             main["faults_until_seq"] = json!(self.faults_until_seq);
         }
         if main.as_object().is_some_and(|o| !o.is_empty()) {
@@ -775,7 +786,13 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         r["check"] = serde_json::to_value(k).unwrap();
     }
     if let Some(p) = &e.phases {
-        r["phases"] = p.json();
+        let v = p.json();
+        if v.as_object().is_some_and(|o| !o.is_empty()) {
+            r["phases"] = v;
+        }
+        if p.tab.settle[0] != 0 {
+            r["settle"] = json!({"seq": p.tab.settle[0], "vclock_ns": p.tab.settle[1]});
+        }
     }
     if let Some(n) = &e.machines {
         r["machines"] = n.clone();
@@ -1161,6 +1178,12 @@ pub fn print_human(r: &Value, dir: &Path) {
     }
     if let Some(l) = Phases::line(&r["phases"]) {
         println!("{l}");
+    }
+    if let (Some(seq), Some(ns)) = (
+        r["settle"]["seq"].as_u64(),
+        r["settle"]["vclock_ns"].as_u64(),
+    ) {
+        println!("settled: seq {seq} t={}ms", ns / 1_000_000);
     }
     if let Some(on) = r["faults"]["on"].as_array().filter(|a| !a.is_empty()) {
         let names: Vec<&str> = on.iter().filter_map(|n| n.as_str()).collect();

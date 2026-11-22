@@ -84,6 +84,7 @@ pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
 pub(crate) mod sdk;
+pub mod settle;
 mod shadows;
 pub mod shm;
 pub mod signal;

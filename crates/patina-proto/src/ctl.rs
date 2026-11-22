@@ -250,6 +250,9 @@ pub struct PhaseCtl {
     /// In a run without machines, the link faults' chances inside the fault window, by
     /// `machine::ELIG_*` (with machines: `MachineTab::elig`).
     pub elig: [AtomicU64; crate::machine::ELIG_N],
+    /// Where `settle` stopped the faults: its sequence number and virtual time (0: no settle).
+    pub settle_seq: AtomicU64,
+    pub settle_ns: AtomicU64,
 }
 
 /// `PhaseCtl::phase`.
@@ -886,12 +889,20 @@ pub enum Op {
     /// declare `[run] setup = "mark"`: the run ends here (never answered).
     /// `LIFE_FAULTS_DONE`: no fault acts after the mark; the seed's partitions in force heal
     /// and its pauses in force end now. Reply 0.
+    /// `LIFE_SETTLE` [_, _, limit ns] (`patina ctl settle`, from main): the first call ends the
+    /// faults as `faults-done` does and boots at once every machine the seed took down. Reply
+    /// 0 once every machine the script did not take down is ready, `-EAGAIN` before that (the
+    /// runtime asks again 100 ms of virtual time later); past the limit the run ends
+    /// `liveness`, stop `settle` (never answered).
     Lifecycle = 67,
 }
 
 /// `Op::Lifecycle`'s first argument.
 pub const LIFE_SETUP_UNDECLARED: u64 = 1;
 pub const LIFE_FAULTS_DONE: u64 = 2;
+pub const LIFE_SETTLE: u64 = 3;
+/// How long the runtime waits between a `LIFE_SETTLE` answered `-EAGAIN` and the next.
+pub const SETTLE_POLL_NS: u64 = 100_000_000;
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
 ///

@@ -4,7 +4,7 @@
 //! after the run (`launch::sdk_sites`).
 
 use super::{Next, Sup, Verdict};
-use proto::ctl::{Op, LIFE_FAULTS_DONE, LIFE_SETUP_UNDECLARED};
+use proto::ctl::{Op, LIFE_FAULTS_DONE, LIFE_SETTLE, LIFE_SETUP_UNDECLARED};
 use proto::sdk::SdkTab;
 
 /// The verdict class of a run whose program marked `setup-complete` without the run declaring
@@ -22,9 +22,10 @@ impl Sup {
 
     /// A lifecycle mark (`Op::Lifecycle`): an undeclared `setup-complete`, which ends the run,
     /// or `faults-done`, after which the seed's partition and pauses in force end and no fault
-    /// of the supervisor's acts (`faults_on`; the runtime set `fault_until_seq`).
+    /// of the supervisor's acts (`faults_on`; the runtime set `fault_until_seq`); or
+    /// `settle` (`settle::settle_call`).
     pub(super) fn lifecycle(&mut self, idx: usize, a: [u64; 6]) -> Next {
-        self.decide(Op::Lifecycle as u32, idx, a, 0);
+        let seq = self.decide(Op::Lifecycle as u32, idx, a, 0);
         match a[0] {
             LIFE_SETUP_UNDECLARED => {
                 let d = if self.phases.setup.is_some() {
@@ -41,6 +42,8 @@ impl Sup {
                 self.pauses_done();
                 Next::Continue(0)
             }
+            LIFE_SETTLE if self.machine_of(idx) == 0 => self.settle_call(seq, a[2]),
+            LIFE_SETTLE => Next::Continue(-(libc::EPERM as i64)),
             _ => Next::Continue(-(libc::EINVAL as i64)),
         }
     }

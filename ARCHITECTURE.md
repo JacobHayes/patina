@@ -354,8 +354,9 @@ is written (`n == 0`), no record of any machine is made, and its seeds and diges
 - **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the machine
   table (`proto::machine::parse`; the supervisor cannot read a machine process's memory, which is not
   its descendant), refuses every call outside main's machine (`EPERM`), and sends
-  `Op::Net` [verb, from set, to set, both] or `Op::Machine` [verb, machine]; the call is logged with
-  its words as an SDK call is.
+  `Op::Net` [verb, from set, to set, both], `Op::Machine` [verb, machine] or, for `settle`,
+  `Op::Lifecycle` [`LIFE_SETTLE`, _, limit] (below, "Settle"); the call is logged with its words
+  as an SDK call is.
 - **Cuts.** The supervisor keeps two matrices of cut links (`sup/link.rs`): the script's
   (`partition`) and the seed's (partitions); a link is cut while either says so, and `heal`
   clears the script's only. The wire consults them when it stamps a delivery: an item on a cut
@@ -1153,6 +1154,22 @@ draws, the seed's machine kills, clock skew at boot) asks it. The phases move it
   `error`). `faults-done` writes `fault_until_seq` and tells the supervisor
   (`LIFE_FAULTS_DONE`), which heals a seed partition in force, ends seed pauses (`PEND_DONE`)
   and cancels their next draws.
+- **Settle** (`sup/settle.rs`). `patina ctl settle [SECONDS]`, from main, also in a run without
+  machines. The first `LIFE_SETTLE` sets `fault_until_seq` to its decision record's number
+  (crash points stop counting there), records that number and the virtual time in `PhaseCtl`
+  (`result.json`'s `settle`), and undoes the seed's book only (`seed_stop`): its partition and
+  pauses end, and each machine it took down whose restart its policy scheduled is started now.
+  The script's book stays: its cuts and pauses, and its downs. A script's `crash` or `kill`
+  cancels a machine's scheduled restart even when the seed had already taken it down, so such a
+  machine has no start queued and is not waited for. The supervisor answers `-EAGAIN` while a
+  machine is up and paused, or down with a start queued (ready means started and not paused;
+  a `ready` probe will add to it), and the runtime, still in the call's trap, sleeps 100 ms of
+  virtual time (`Op::Sleep`) and asks again. Past the limit (default 60 s, from the first call)
+  the run ends `liveness`, stop `settle`, naming the machine. Once answered 0, a call is
+  answered 0 at once. A signal the sleep would take ends the call with `EINTR`; `patina ctl`
+  asks again. Every step is a request under the turn, so the wait replays exactly. The
+  `--finally` settle (`phase::settle`) is `seed_stop` plus the script's cuts healed and its
+  pauses ended, and does not wait.
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's

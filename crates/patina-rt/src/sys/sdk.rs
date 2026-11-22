@@ -164,6 +164,7 @@ fn control(ptr: u64, len: u64) -> i64 {
             let v = proto::machine::CLOCK_STEP;
             crate::sup::call_sup(Op::Machine, [v, machine as u64, delta as u64, 0, 0, 0]).ret
         }
+        Ok(proto::machine::Control::Settle { limit_ns }) => settle(limit_ns),
     };
     keep(
         proto::rec::hash_bytes(OP_CONTROL, words),
@@ -171,6 +172,23 @@ fn control(ptr: u64, len: u64) -> i64 {
         words,
     );
     r
+}
+
+/// `settle`: ask the supervisor until every machine is ready, 100 ms of virtual time apart
+/// (`ctl::LIFE_SETTLE`; past the limit it ends the run). A signal the sleep would take ends the
+/// wait with `-EINTR`: the call may be made again.
+fn settle(limit_ns: u64) -> i64 {
+    loop {
+        let a = [proto::ctl::LIFE_SETTLE, thread().seq, limit_ns, 0, 0, 0];
+        let r = crate::sup::call_sup(Op::Lifecycle, a).ret;
+        if r != -e::EAGAIN {
+            return r;
+        }
+        let at = ctl().vclock_ns.load(Relaxed) + proto::ctl::SETTLE_POLL_NS;
+        if crate::sup::call_sup(Op::Sleep, [at, 0, 0, 0, 0, 0]).ret != 0 {
+            return -e::EINTR;
+        }
+    }
 }
 
 /// A mark. The lifecycle marks: `setup-complete` (the first) starts the faults of a run that

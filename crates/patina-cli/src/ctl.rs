@@ -26,12 +26,16 @@ pub fn main(words: &[String]) -> ExitCode {
         eprintln!("patina ctl: expected words (patina ctl --help)");
         return ExitCode::from(2);
     }
-    let r = call(OP_CONTROL, text.as_bytes());
+    let mut r = call(OP_CONTROL, text.as_bytes());
+    // A signal ended `settle`'s wait: it is asked again.
+    while r == -(libc::EINTR as i64) {
+        r = call(OP_CONTROL, text.as_bytes());
+    }
     if r == 0 {
         return ExitCode::SUCCESS;
     }
     let why = match (-r) as i32 {
-        libc::EPERM => "only main may act on the network, machines and clocks",
+        libc::EPERM => "only main may call",
         libc::ENOENT => "no machine of that name",
         libc::EOPNOTSUPP => "not available yet",
         libc::EINVAL => "not a control call (patina ctl --help)",

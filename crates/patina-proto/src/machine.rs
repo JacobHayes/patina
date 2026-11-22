@@ -26,11 +26,14 @@
 //! resume NAME                  end its pause (EALREADY: not paused)
 //! clock NAME +90s              move the machine's realtime clock (+Ns, -Ns, +Nms, -Nms; at most
 //!                              a year): its absolute realtime timers move with it
+//! settle [SECONDS]             end the seed's faults and wait until every machine is ready
+//!                              again (the run ends `liveness`, stop `settle`, past SECONDS
+//!                              of virtual time, default 60); also in a run without machines
 //! ```
 //!
 //! A set is machine names joined by commas, or `rest`: every machine not in the other set. Only the
 //! main may make a control call (elsewhere `EPERM`); an unknown name is `ENOENT`,
-//! other words `EINVAL`, and so is any call in a run without machines.
+//! other words `EINVAL`, and so is any call but `settle` in a run without machines.
 
 /// Main and at most 15 machines.
 pub const MAX_MACHINES: usize = 16;
@@ -486,7 +489,13 @@ pub enum Control {
     Machine { verb: u64, machine: usize },
     /// `clock`: machine `machine`'s realtime clock moves by `delta` ns.
     Clock { machine: usize, delta: i64 },
+    /// `settle`: the seed's faults end; the call returns once every machine is ready, or the
+    /// run ends `liveness` after `limit_ns` of virtual time (`ctl::LIFE_SETTLE`).
+    Settle { limit_ns: u64 },
 }
+
+/// `settle`'s default limit (ns of virtual time).
+pub const SETTLE_LIMIT_NS: u64 = 60_000_000_000;
 
 /// Why a control call is refused: the errno (positive) and a reason for `patina ctl`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -520,18 +529,37 @@ pub fn parse(text: &[u8], tab: &MachineTab, machine: usize) -> Result<Control, R
     };
     if !matches!(
         verb,
-        b"partition" | b"heal" | b"crash" | b"kill" | b"start" | b"pause" | b"resume" | b"clock"
+        b"partition"
+            | b"heal"
+            | b"crash"
+            | b"kill"
+            | b"start"
+            | b"pause"
+            | b"resume"
+            | b"clock"
+            | b"settle"
     ) {
         return Err(no(EINVAL, USAGE));
+    }
+    if verb == b"settle" {
+        if machine != 0 {
+            return Err(no(EPERM, "only main may call"));
+        }
+        let limit_ns = match w {
+            [_] => SETTLE_LIMIT_NS,
+            [_, s] => secs(s).ok_or(no(
+                EINVAL,
+                "settle: the limit is a whole number of seconds, at most a year",
+            ))?,
+            _ => return Err(no(EINVAL, USAGE)),
+        };
+        return Ok(Control::Settle { limit_ns });
     }
     if tab.count() == 0 {
         return Err(no(EINVAL, "the run has no machines to act on"));
     }
     if machine != 0 {
-        return Err(no(
-            EPERM,
-            "only main may act on the network, machines and clocks",
-        ));
+        return Err(no(EPERM, "only main may call"));
     }
     let target = |name: &[u8]| match tab.find(name) {
         Some(0) => Err(no(
@@ -609,7 +637,17 @@ pub fn parse(text: &[u8], tab: &MachineTab, machine: usize) -> Result<Control, R
 
 /// What a control call may say.
 const USAGE: &str = "expected: partition A B, partition --from A --to B, heal [A B], crash MACHINE, \
-                     kill MACHINE, start MACHINE, pause MACHINE, resume MACHINE, or clock MACHINE +Ns|-Ns|+Nms|-Nms";
+                     kill MACHINE, start MACHINE, pause MACHINE, resume MACHINE, clock MACHINE +Ns|-Ns|+Nms|-Nms, \
+                     or settle [SECONDS]";
+
+/// `settle`'s limit: whole seconds, at most `CLOCK_STEP_MAX_NS`, in ns.
+fn secs(s: &[u8]) -> Option<u64> {
+    if s.is_empty() || s.len() > 9 || !s.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let n = s.iter().fold(0u64, |a, c| a * 10 + (c - b'0') as u64);
+    Some(n * 1_000_000_000).filter(|&v| v <= CLOCK_STEP_MAX_NS)
+}
 
 /// A clock step's change: `+90s`, `-5s`, `250ms` (no sign: ahead), in ns, at most
 /// `CLOCK_STEP_MAX_NS` either way.
@@ -786,9 +824,30 @@ mod tests {
                 delta: 250_000_000
             })
         );
-        // Without machines there is nothing to act on.
+        // Without machines there is nothing to act on, but the faults can still settle.
         let none = tab(&[]);
         assert_eq!(parse(b"heal", &none, 0).unwrap_err().errno, EINVAL);
+        assert_eq!(
+            parse(b"settle", &none, 0),
+            Ok(Control::Settle {
+                limit_ns: SETTLE_LIMIT_NS
+            })
+        );
+        assert_eq!(
+            parse(b"settle 5", &t, 0),
+            Ok(Control::Settle {
+                limit_ns: 5_000_000_000
+            })
+        );
+        assert_eq!(errno(b"settle", 1), EPERM);
+        for bad in [
+            &b"settle 1.5"[..],
+            b"settle -1",
+            b"settle 5 5",
+            b"settle 99999999",
+        ] {
+            assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
+        }
     }
 
     #[test]

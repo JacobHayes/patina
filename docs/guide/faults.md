@@ -83,7 +83,9 @@ seed and log.
   until the system answers rather than assume it already does.
 
 `--finally` runs inside the run against the live system; `--check` runs on the host after the
-run, over its recorded output and final disk (`patina guide checks`).
+run, over its recorded output and final disk (`patina guide checks`). The same in one command:
+`-- sh -c 'work && patina ctl settle && check'`; `settle` ends the seed's faults where it is
+called and waits until the machines have recovered (`patina guide machines`).
 
 A run with a setup and a final check is as deterministic as one without: the same seed gives the
 same run, and `replay` repeats it exactly. The only difference is that no fault is injected in

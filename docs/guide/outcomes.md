@@ -11,7 +11,7 @@ has the outcome and `stop`, a short word for what ended the run (`always`, `exit
 |---|---|---|
 | `ok` | 0 | the program exited 0 (or with a status `--ok-exit` names) and failed no check; what that proves is what the checks could detect |
 | `violation` | 1 | a check failed: an SDK `always` or `unreachable`, or the `--check` command answered 1 |
-| `liveness` | 1 | every thread blocked (deadlock), `[run] time-limit` of virtual time passed, or the log reached `[run] log-limit` (livelock) |
+| `liveness` | 1 | every thread blocked (deadlock), `[run] time-limit` of virtual time passed, the log reached `[run] log-limit` (livelock), or a machine was not ready again within `patina ctl settle`'s limit |
 | `failure` | 1 | the program exited nonzero with a status `--ok-exit` does not name |
 | `crash` | 1 | the program died on a signal |
 | `unsupported` | 2 | the program did something Patina does not model; the message names it. Not a bug in the program |

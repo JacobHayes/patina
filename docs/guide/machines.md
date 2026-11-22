@@ -28,8 +28,52 @@ replay: patina replay /tmp/machines/patina-out/run-0
 `kv.py` (in `tests/guests/machines`) is a store whose primary sends each write to the backup; the
 main writes, cuts the link between them, sees the next write wait, heals it, and checks both
 agree. To test a distributed system, put the system under test on machines and make main the
-harness, in three commands: the setup waits for the system, the main command drives the
-workload, the final check verifies (`patina guide faults`).
+harness: drive the workload, call `patina ctl settle`, then check the system.
+
+## Settle, then check
+
+`patina ctl settle [SECONDS]` in main's script (or the SDK's `control("settle")`) ends the seed's
+faults for the rest of the run and waits for the system to recover: the seed's partitions heal,
+the machines it paused resume, the machines it took down boot at once, and the call returns when
+every machine is ready again (started and not paused). What the script itself did stays: its
+cuts, its pauses, and a machine it crashed or killed, which stays down and is not waited for. A
+machine not ready SECONDS of virtual time (default 60) after the faults stopped ends the run
+`liveness` (stop `settle`), naming it: the system did not recover. Crash points stop counting at
+settle, a second call does nothing, and `result.json`'s `settle` holds the point (sequence
+number and virtual time). What follows the call is the check, against a quiet, recovered
+system:
+
+<!-- transcript machines-settle
+dir: /tmp/settle
+setup: mkdir g && cp "$GUESTS/phases.py" g/
+setup: printf '[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
+exit: 1
+exact-only: one seed's run
+-->
+```text
+$ patina run --seed 5 --mount g:/guest:copy --faults crash --fault crash-gap-ms=1000..4000 --fault max-boots=8 -- sh -c 'python3 /guest/phases.py work 10 a b && patina ctl settle && python3 /guest/phases.py check 10 a b'
+failure (exit): exit status 1
+guest: exit 1
+settled: seq 7352 t=106215ms
+faults on: a, b
+machines: a 10.0.0.2 running after 1 down, 2 boots, b 10.0.0.3 running after 1 down, 2 boots
+guest stderr (1 lines, /tmp/settle/patina-out/run-5/boot-1/stderr):
+  FAIL: check: b lost acknowledged puts [3, 4, 5, 6]
+faults injected: 2 (crash 2)
+last injected:
+  seq 4277 t=101147ms crash machine=a kind=machine lost: 0 missing, 0 changed, 0 back
+  seq 4304 t=101779ms crash machine=b kind=machine object=/work/log lost: 0 missing, 1 changed, 0 back
+run directory: /tmp/settle/patina-out/run-5
+replay: patina replay /tmp/settle/patina-out/run-5
+explain: patina explain /tmp/settle/patina-out/run-5
+```
+
+`phases.py` (in `tests/guests/machines`) stores puts; `work` puts 1 to 10 on both machines and
+`check` polls each until it answers, then looks for every acknowledged put. With `lazy`, b
+acknowledges a put before its `fsync`, and the check after settle finds what b's machine crash
+lost. Settle works the same with one machine: under `--faults crash`, `-- sh -c './app && patina
+ctl settle && ./verify'` reruns `./app` at each boot after a crash and runs `./verify` once,
+after the last.
 
 **What a machine has of its own:** a disk, `/tmp`, its hostname (its name), a port
 space, a loopback, and the address `10.0.0.K` (main `10.0.0.1`, the first machine
@@ -79,7 +123,7 @@ the final check finds what b's machine crashes lost.
 
 Main acts on the network and the machines with control calls, the fault classes' own actions:
 `patina ctl WORDS` in a script (`patina` is on the `PATH` of every run; without machines every call
-is refused), or the SDK's `control("WORDS")`.
+but `settle` is refused), or the SDK's `control("WORDS")`.
 
 | Words | |
 |---|---|
@@ -90,6 +134,7 @@ is refused), or the SDK's `control("WORDS")`.
 | `start NAME` | start a machine that is down |
 | `pause NAME`, `resume NAME` | freeze the machine and let it run again |
 | `clock NAME +90s` | move the machine's realtime clock |
+| `settle [SECONDS]` | end the seed's faults and wait until every machine is ready (above) |
 
 A set is machine names joined by commas (`main` included), or `rest`. A cut holds TCP data, as a
 pulled cable does, until a heal or the sender's timeout; datagrams across it are lost.

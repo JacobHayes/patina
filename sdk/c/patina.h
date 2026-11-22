@@ -40,10 +40,12 @@
  *                                or starting)
  *   resume NAME                  let it run again (-EALREADY: not paused)
  *   clock NAME +90s              move machine NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
+ *   settle [SECONDS]             end the seed's faults; return once every machine is ready
+ *                                (past SECONDS, default 60, the run ends liveness; -EINTR: ask again)
  * A set is machine names joined by commas ("main" is the command after --), or "rest": every
  * machine the other set does not name. Answers: 0; -EPERM when a process outside main
- * acts on the network, a machine or a clock; -ENOENT for an unknown machine; -EINVAL for other words
- * or a run without machines; -ENOSYS outside Patina.
+ * calls; -ENOENT for an unknown machine; -EINVAL for other words
+ * or a run without machines (but settle); -ENOSYS outside Patina.
  */
 #ifndef PATINA_H
 #define PATINA_H

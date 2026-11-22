@@ -107,7 +107,7 @@ impl Outcome {
         match self {
             Outcome::Ok => "the program exited 0 (or with a status `--ok-exit` names) and failed no check; what that proves is what the checks could detect",
             Outcome::Violation => "a check failed: an SDK `always` or `unreachable`, or the `--check` command answered 1",
-            Outcome::Liveness => "every thread blocked (deadlock), `[run] time-limit` of virtual time passed, or the log reached `[run] log-limit` (livelock)",
+            Outcome::Liveness => "every thread blocked (deadlock), `[run] time-limit` of virtual time passed, the log reached `[run] log-limit` (livelock), or a machine was not ready again within `patina ctl settle`'s limit",
             Outcome::Failure => "the program exited nonzero with a status `--ok-exit` does not name",
             Outcome::Crash => "the program died on a signal",
             Outcome::Unsupported => "the program did something Patina does not model; the message names it. Not a bug in the program",
@@ -226,6 +226,8 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
             format!("every thread is blocked with no deadline: {d}"),
         ),
         "liveness" => Classified::new(Liveness, "time-limit", d),
+        // The machines did not recover within `patina ctl settle`'s limit.
+        crate::sup::settle::SETTLE => Classified::new(Liveness, "settle", d),
         "stall" => Classified::new(Unsupported, "compute-stall", d),
         "containment" => Classified::new(Unsupported, "containment", d),
         "compute-cell" => Classified::new(Unsupported, "compute-cell", d),
