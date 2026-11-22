@@ -1,4 +1,4 @@
-# 20. `patina ctl settle` (tests/guests/machines/phases.py): the test ends the seed's faults
+# 21. `patina ctl settle` (tests/guests/machines/phases.py): the test ends the seed's faults
 # and waits for the system to recover, then checks it. One machine under crashes at a high rate:
 # the check after settle runs once, in the last boot, which no crash ends; the seed's crashes
 # all came before the settle point. Machines a and b store puts, b acknowledging before its
@@ -10,7 +10,7 @@
 # `settle 5` ends the run liveness, stop settle, naming it. Replay identical.
 #@ tier=quick budget=40 slots=2
 . "$(dirname "$0")/lib.inc"
-o=$RUNS/20-settle; mkdir -p "$o"
+o=$RUNS/21-settle; mkdir -p "$o"
 for v in ok lazy; do
     rm -f "$o/$v.toml"
     conf "$o/$v.toml" a python3 /guest/phases.py serve
