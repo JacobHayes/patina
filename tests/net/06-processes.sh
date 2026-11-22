@@ -5,8 +5,8 @@
 o=$RUNS/06-processes; mkdir -p "$o"
 for m in forkserver execinherit; do
     verify_ok "$o/$m" 1 3 -- /guest/sockets "$m"
-    sed 's/^/    /' "$o/$m/run-0/inc-0/stdout"
+    sed 's/^/    /' "$o/$m/run-0/boot-1/stdout"
 done
 # The child sleeps 1000 ms and exits: EOF comes at >= 1000 ms.
 verify_ok "$o/exitclose" 1 3 -- /guest/sockets exitclose 1000
-grep -h EOF "$o/exitclose/run-0/inc-0/stdout"
+grep -h EOF "$o/exitclose/run-0/boot-1/stdout"

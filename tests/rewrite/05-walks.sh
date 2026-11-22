@@ -43,7 +43,7 @@ for s in $(seq 1 8); do
     [ "$(field "$o/n-$s/result.json" outcome)" = ok ] || die "a. lms seed $s without walks: $(res "$o/n-$s")"
 done
 [ -n "$first" ] || die "a. lms: no lost update in seeds 1-8 with walks"
-grep -q LOST-UPDATE "$o/w-$first/inc-0/stdout" || die "a. lms seed $first: $(cat "$o/w-$first/inc-0/stdout")"
+grep -q LOST-UPDATE "$o/w-$first/boot-1/stdout" || die "a. lms seed $first: $(cat "$o/w-$first/boot-1/stdout")"
 echo "a. lms: lost update first on seed $first with walks ($(field "$o/w-$first/result.json" rewrite.walks) walks), none in seeds 1-8 without"
 
 # b.
@@ -83,8 +83,8 @@ for m in fault timer fork sys flags; do
     walks=0 cut=0
     for s in 1 2; do
         [ "$(field "$o/$m-$s/result.json" outcome)" = ok ] || die "c. $m seed $s: $(res "$o/$m-$s")"
-        sort "$o/$m-$s/inc-0/stdout" | cmp -s "$o/$m.want" - ||
-            die "c. $m seed $s: $(head -2 "$o/$m-$s/inc-0/stdout") (natively $(head -1 "$o/$m.want"))"
+        sort "$o/$m-$s/boot-1/stdout" | cmp -s "$o/$m.want" - ||
+            die "c. $m seed $s: $(head -2 "$o/$m-$s/boot-1/stdout") (natively $(head -1 "$o/$m.want"))"
         walks=$((walks + $(field "$o/$m-$s/result.json" rewrite.walks)))
         cut=$((cut + $(field "$o/$m-$s/result.json" rewrite.walks_cut)))
     done

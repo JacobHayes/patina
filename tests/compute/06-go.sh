@@ -36,10 +36,10 @@ prun "$o/dl-2" 2 -- /guest/compute/go-deadline 33554432 10 &
 wait
 for s in 1 2; do
     [ "$(field "$o/dl-$s/result.json" outcome)" = ok ] || die "c. go-deadline seed $s: $(res "$o/dl-$s")"
-    t=$(sed -n 's/.*elapsed_ns=\([0-9]*\) deadline$/\1/p' "$o/dl-$s/inc-0/stdout")
-    [ -n "$t" ] && [ "$t" -ge 10000000 ] && [ "$t" -lt 1000000000 ] || die "c. go-deadline seed $s: $(tail -1 "$o/dl-$s/inc-0/stdout")"
+    t=$(sed -n 's/.*elapsed_ns=\([0-9]*\) deadline$/\1/p' "$o/dl-$s/boot-1/stdout")
+    [ -n "$t" ] && [ "$t" -ge 10000000 ] && [ "$t" -lt 1000000000 ] || die "c. go-deadline seed $s: $(tail -1 "$o/dl-$s/boot-1/stdout")"
 done
-echo "c. go-deadline: cut by its context at $(sed -n 's/.*elapsed_ns=\([0-9]*\).*/\1/p' "$o/dl-1/inc-0/stdout") virtual ns on seed 1 ($(field "$o/dl-1/result.json" compute.events) events)"
+echo "c. go-deadline: cut by its context at $(sed -n 's/.*elapsed_ns=\([0-9]*\).*/\1/p' "$o/dl-1/boot-1/stdout") virtual ns on seed 1 ($(field "$o/dl-1/result.json" compute.events) events)"
 
 prun "$o/bool" 1 --env GOMAXPROCS=1 -- /guest/compute/go-race boolspin &
 hunt "$o" race 40 --fault compute-gap=8 -- /guest/compute/go-race
@@ -52,4 +52,4 @@ print(" ".join(i["path"]+":"+",".join(i["kinds"]) for i in c.get("images",[])) o
 "$PATINA" replay "$o/race-$first" >"$o/race-replay.txt" 2>&1 || true
 grep -q '^identical' "$o/race-replay.txt" || die "d. go-race seed $first does not replay: $(head -3 "$o/race-replay.txt")"
 [ "$(field "$o/bool/result.json" outcome)" = ok ] || die "d. go-race boolspin: $(res "$o/bool")"
-echo "d. go-race: failure on $found of seeds 1-$scanned (first $first: $(tail -1 "$o/race-$first/inc-0/stdout")); it replays identical; one image, comparisons; boolspin ok"
+echo "d. go-race: failure on $found of seeds 1-$scanned (first $first: $(tail -1 "$o/race-$first/boot-1/stdout")); it replays identical; one image, comparisons; boolspin ok"

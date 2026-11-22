@@ -22,8 +22,8 @@ timeout 300 "$PATINA" __native --mount "$G17":/guest -- /guest/fdspace >"$out/na
     die "native: exit $?: $(tail -3 "$out/native.err")"
 timeout 300 "$PATINA" run --seed 1 --out "$out/limits" --mount "$G17":/guest:copy -- /guest/fdspace >/dev/null 2>&1 || true
 [ "$(class "$out/limits")" = ok ] || die "limits: $(class "$out/limits"): $(detail "$out/limits")"
-cmp -s "$out/native.txt" "$out/limits/inc-0/stdout" ||
-    die "limits: differs from native: $(diff "$out/native.txt" "$out/limits/inc-0/stdout" | cut -c1-160 | head -8)"
+cmp -s "$out/native.txt" "$out/limits/boot-1/stdout" ||
+    die "limits: differs from native: $(diff "$out/native.txt" "$out/limits/boot-1/stdout" | cut -c1-160 | head -8)"
 # The fill ends with the number just below the soft limit the guest starts with, then EMFILE.
 soft=$(sed -n 's/^start nofile \([0-9]*\) .*/\1/p' "$out/native.txt")
 last=$(sed -n 's/^soft fds .* \([0-9]*\)$/\1/p' "$out/native.txt")
@@ -39,8 +39,8 @@ done
 probes=$(jq -r .counters.sched.spin_probes "$out/on/result.json")
 [ "$probes" -gt 0 ] || die "spin: no probe was sent (the stretch is too short to test anything)"
 [ "$(jq -r .counters.sched.spin_probes "$out/off/result.json")" = 0 ] || die "spin: a probe with probes off"
-cmp -s "$out/on/inc-0/stdout" "$out/off/inc-0/stdout" ||
-    die "spin: a probe changed what the guest saw: $(diff "$out/on/inc-0/stdout" "$out/off/inc-0/stdout" | cut -c1-160 | head -4)"
+cmp -s "$out/on/boot-1/stdout" "$out/off/boot-1/stdout" ||
+    die "spin: a probe changed what the guest saw: $(diff "$out/on/boot-1/stdout" "$out/off/boot-1/stdout" | cut -c1-160 | head -4)"
 d_on=$(digest "$out/on")
 d_off=$(digest "$out/off")
 [ "$d_on" = "$d_off" ] || die "spin: digest $d_on with $probes probes, $d_off without"

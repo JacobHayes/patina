@@ -261,13 +261,13 @@ pub struct FaultCfg {
     pub crash_kind: u64,
     /// Per-mille rate at each crash point (when `crash_at` is 0).
     pub crash_permille: u64,
-    /// `machine-at:N` / `process-at:N`: crash at the N-th crash point of the first incarnation
+    /// `machine-at:N` / `process-at:N`: crash at the N-th crash point of the first boot
     /// (0: off).
     pub crash_at: u64,
-    /// 1 when this incarnation may crash (not the last permitted one; `-at` only until it fired).
+    /// 1 when this boot may crash (not the last permitted one; `-at` only until it fired).
     pub crash_enabled: u64,
-    /// Incarnation number (also `PATINA_INCARNATION`).
-    pub incarnation: u64,
+    /// Boot number (also `PATINA_BOOT`).
+    pub boot: u64,
     /// `mem-limit-mb` in bytes (0: off): anonymous memory growth past it answers `ENOMEM`.
     pub mem_limit_bytes: u64,
     /// `path-swap-permille` (0: off).
@@ -296,7 +296,7 @@ pub struct FaultCtl {
     /// Sync-class calls on eligible targets (`fsync-error-at`).
     pub sync_calls: AtomicU64,
     pub injected: AtomicU64,
-    /// Crash points passed in this incarnation (whether or not one fired); after a crash, the
+    /// Crash points passed in this boot (whether or not one fired); after a crash, the
     /// ordinal of the point that fired.
     pub crash_points: AtomicU64,
     /// Eligible calls per `Kind`, counted while faults are active.

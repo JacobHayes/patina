@@ -53,7 +53,7 @@ PY
     b=$(field "$o-again/result.json" digest)
     [ "$a" = "$b" ] || die "$m seed $found: digests $a vs $b"
     n=0
-    for p in "$o"/inc-*/post-crash; do
+    for p in "$o"/boot-*/post-crash; do
         q=$o-again/${p#"$o/"}
         diff -r "$p" "$q" >/dev/null || die "$m seed $found: post-crash trees differ ($p)"
         n=$((n + 1))
@@ -68,7 +68,7 @@ import json, struct, sys
 a, b = sys.argv[1], sys.argv[2]
 c = json.load(open(b + "/result.json"))["crashes"][0]["seq"]
 recs = lambda p: [x[i:i + 96] for x in [open(p, "rb").read()] for i in range(0, len(x), 96)]
-ra, rb = recs(a + "/inc-0/boundary.log"), recs(b + "/inc-0/boundary.log")
+ra, rb = recs(a + "/boot-1/boundary.log"), recs(b + "/boot-1/boundary.log")
 pre = [r for r in rb if struct.unpack_from("<Q", r, 0)[0] < c]
 if ra[:len(pre)] != pre:
     sys.exit("FAIL: boundary logs differ before the crash at seq %d" % c)

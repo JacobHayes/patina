@@ -40,7 +40,7 @@ for m in kill forked term orphan vfork violation msync hang unmap exit fixed rem
         [ "$sc" = "$([ $plane = none ] && echo - || echo pass)" ] || die "$m, crash plane $plane: self-check $sc"
         "$PATINA" log ops --check "$o" >"$o.check" || die "$m, crash plane $plane: $(cat "$o.check")"
         if [ -n "$native" ]; then
-            out=$(cat "$o/inc-0/stdout")
+            out=$(cat "$o/boot-1/stdout")
             [ "$out" = "$native" ] || die "$m, crash plane $plane: printed '$out', natively '$native'"
         fi
     done

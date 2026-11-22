@@ -31,7 +31,7 @@ pub enum RecKind {
     /// An observation of a data call (`Config::observe`, set only for `patina explain`'s
     /// replay), right after its call's records: never chained into the digest, not counted
     /// against the log limit, and moved out of `boundary.log` into `observe.log` by the
-    /// launcher when the incarnation ends (`Rec::observed`).
+    /// launcher when the boot ends (`Rec::observed`).
     Observe = 11,
 }
 

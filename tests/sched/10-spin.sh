@@ -85,16 +85,16 @@ echo "d. go-sweep at the default CPU count: ok on seeds 1-3 (spin points found o
 stall memcount || die "e. memory-only counting spin: $(res memcount)"
 echo "e. memory-only counting spin: $(res memcount | cut -c1-60)"
 
-[ "$(field "$o/text/result.json" outcome)" = ok ] && grep -qx 'text same after 10 rounds' "$o/text/inc-0/stdout" ||
-    die "f. text checksum: $(res text) $(cat "$o/text/inc-0/stdout" 2>/dev/null)"
+[ "$(field "$o/text/result.json" outcome)" = ok ] && grep -qx 'text same after 10 rounds' "$o/text/boot-1/stdout" ||
+    die "f. text checksum: $(res text) $(cat "$o/text/boot-1/stdout" 2>/dev/null)"
 echo "f. text unchanged after 10 rounds ($(field "$o/text/result.json" counters.sched.spin_found) spin points found)"
-[ "$(field "$o/twice/result.json" outcome)" = ok ] && grep -qx 'twice done' "$o/twice/inc-0/stdout" ||
-    die "f. two spin points in a row: $(res twice) $(cat "$o/twice/inc-0/stdout" 2>/dev/null)"
+[ "$(field "$o/twice/result.json" outcome)" = ok ] && grep -qx 'twice done' "$o/twice/boot-1/stdout" ||
+    die "f. two spin points in a row: $(res twice) $(cat "$o/twice/boot-1/stdout" 2>/dev/null)"
 [ "$(field "$o/twice/result.json" counters.sched.spin_found)" -ge 2 ] || die "f. twice: fewer than two spin points found"
 echo "f. two spin points in a row, then their code run again: ok"
 
-[ "$(field "$o/jit/result.json" outcome)" = ok ] && grep -qx 'jit patched' "$o/jit/inc-0/stdout" ||
-    die "h. JIT code patched by its handler: $(res jit) $(cat "$o/jit/inc-0/stdout" 2>/dev/null)"
+[ "$(field "$o/jit/result.json" outcome)" = ok ] && grep -qx 'jit patched' "$o/jit/boot-1/stdout" ||
+    die "h. JIT code patched by its handler: $(res jit) $(cat "$o/jit/boot-1/stdout" 2>/dev/null)"
 [ "$(field "$o/jit/result.json" counters.sched.spin_found)" -ge 1 ] || die "h. jit: ok without a found spin"
 echo "h. JIT code patched by its signal handler while it spins: ok"
 
@@ -111,8 +111,8 @@ echo "i. nested spin: 4 runs of seed 1 under verify ok with one digest"
 if [ "$arm64" ]; then
     for m in xchg cas; do
         d=$o/llsc-$m
-        [ "$(field "$d/result.json" outcome)" = ok ] && grep -qx "$m counter=400" "$d/inc-0/stdout" ||
-            die "g. llsc-spin $m: $(res "llsc-$m") $(cat "$d/inc-0/stdout" 2>/dev/null)"
+        [ "$(field "$d/result.json" outcome)" = ok ] && grep -qx "$m counter=400" "$d/boot-1/stdout" ||
+            die "g. llsc-spin $m: $(res "llsc-$m") $(cat "$d/boot-1/stdout" 2>/dev/null)"
         [ "$(field "$d/result.json" counters.sched.spin_found)" -gt 0 ] || die "g. llsc-spin $m: ok without a found spin"
     done
     echo "g. exclusive-pair spin locks: ok (spin points found: xchg $(field "$o/llsc-xchg/result.json" counters.sched.spin_found), cas $(field "$o/llsc-cas/result.json" counters.sched.spin_found))"

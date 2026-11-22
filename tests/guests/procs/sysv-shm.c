@@ -14,7 +14,7 @@
  * - an unrelated image (exec of this program) finds a segment by its key and sees its data;
  *   a process-shared mutex in a segment between two processes.
  * sysv-shm refused: SHM_HUGETLB and SHM_LOCK, printed (their answers depend on privileges).
- * sysv-shm crash: with --crash: the first incarnation makes key 0x5053 and writes it, then
+ * sysv-shm crash: with --crash: the first boot makes key 0x5053 and writes it, then
  *   writes /work/f (crash points); a later one prints whether the segment is still there. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -209,8 +209,8 @@ static int after_exec(int id) {
 }
 
 static int crash(void) {
-    const char *inc = getenv("PATINA_INCARNATION");
-    if (!inc) {
+    const char *boot = getenv("PATINA_BOOT");
+    if (!boot) {
         int id = shmget(0x5053, 4096, IPC_CREAT | 0600);
         char *p = shmat(id, NULL, 0);
         strcpy(p, "kept");
@@ -225,12 +225,12 @@ static int crash(void) {
     }
     int id = shmget(0x5053, 0, 0);
     if (id < 0) {
-        printf("incarnation %s: no segment (errno %d)\n", inc, errno);
+        printf("boot %s: no segment (errno %d)\n", boot, errno);
         return 0;
     }
     struct shmid_ds d = st(id);
     char *p = shmat(id, NULL, SHM_RDONLY);
-    printf("incarnation %s: segment %d nattch %lu holds %s\n", inc, id, d.shm_nattch, p);
+    printf("boot %s: segment %d nattch %lu holds %s\n", boot, id, d.shm_nattch, p);
     return 0;
 }
 

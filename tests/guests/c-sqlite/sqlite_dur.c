@@ -2,12 +2,12 @@
  *
  * usage: sqlite-dur MODE SYNC [ROWS]
  *   MODE: delete | wal (journal_mode), SYNC: off | normal | full | extra (synchronous),
- *   ROWS: rows written per incarnation (default 120).
+ *   ROWS: rows written per boot (default 120).
  *
  * Files: /work/sq/db (+ -journal / -wal / -shm), /work/sq/acks.
- * First incarnation (no /work/sq/acks): create the database and table, fsync the
+ * First boot (no /work/sq/acks): create the database and table, fsync the
  * directory, create the ack file (fsynced, directory fsynced).
- * Every incarnation that finds /work/sq/acks first checks:
+ * Every boot that finds /work/sq/acks first checks:
  *   - the database opens and PRAGMA integrity_check says "ok"   (INVARIANT corrupt-db)
  *   - every row holds the value derived from its id             (INVARIANT row-value)
  *   - every acknowledged id is present                          (INVARIANT acked-row-lost)

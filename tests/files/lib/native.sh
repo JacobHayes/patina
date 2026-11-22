@@ -2,14 +2,14 @@
 # Run a command natively (no runtime) in the sandbox a patina run gets (`patina __native`): the
 # same mounts, generated /etc, /work and /tmp tmpfs, /in copied into /work as the supervisor
 # copies it, and its environment, with the guests at /guest.
-# usage: [STRACE=1] native.sh OUTDIR [--work DIR] [--env K=V]... -- /guest/prog args...
+# usage: [STRACE=1] native.sh OUTDIR [--disk DIR] [--env K=V]... -- /guest/prog args...
 # stdout and stderr go to OUTDIR/stdout, OUTDIR/stderr; the exit status is the command's.
 set -euo pipefail; shopt -s inherit_errexit
 out=$1; shift
 opts=()
 while [ "$1" != -- ]; do
     case $1 in
-        --work|--env) opts+=("$1" "$2"); shift 2 ;;
+        --disk|--env) opts+=("$1" "$2"); shift 2 ;;
         *) echo "native.sh: unknown option $1" >&2; exit 2 ;;
     esac
 done

@@ -1,6 +1,6 @@
 ---
 name: patina
-description: Find, reproduce and explain rare bugs in a Linux program with Patina, a deterministic simulation tester that runs the program under many seeds, each deciding thread scheduling, time, disk and network faults, machine crashes and node partitions, and replays any seed exactly. Use when asked to test crash safety, durability, error handling under faults, concurrency or a distributed system; to reproduce a flaky or intermittent failure; or when a task mentions patina or deterministic simulation testing.
+description: Find, reproduce and explain rare bugs in a Linux program with Patina, a deterministic simulation tester that runs the program under many seeds, each deciding thread scheduling, time, disk and network faults, machine crashes and network partitions, and replays any seed exactly. Use when asked to test crash safety, durability, error handling under faults, concurrency or a distributed system; to reproduce a flaky or intermittent failure; or when a task mentions patina or deterministic simulation testing.
 ---
 
 # Patina

@@ -4,7 +4,7 @@
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/04-proc
 verify_ok "$o" 1 cpu 4 -- /guest/proc-policy
-out=$o/run-0/inc-0/stdout
+out=$o/run-0/boot-1/stdout
 for p in /proc/1/environ /proc/kallsyms /sys/class/net; do
     grep -qx "== $p open errno 2" "$out" || die "$p did not answer ENOENT"
     field "$o/run-0/result.json" refused | grep -q "\"$p\"" || die "$p not in outcome.refused"

@@ -28,22 +28,22 @@
  *   8 COMPUTE_HELLO  arg = version 1 | kinds << 8 (1 edge, 2 access, 4 compare) -> cell address
  *   9 COMPUTE_POINT  arg = 0: the cell reached 0 -> 0, the cell refilled
  * Op 10 CONTROL takes no header: the payload is the words, separated by blanks:
- *   partition A B                both directions between the node sets A and B are cut
+ *   partition A B                both directions between the machine sets A and B are cut
  *   partition --from A --to B    one direction: what A sends to B is held
  *   heal [A B | --from A --to B] heal those links; no sets: every scripted cut
- *   crash NAME                   crash node NAME's machine: what it had not synced may be lost,
+ *   crash NAME                   crash machine NAME: what it had not synced may be lost,
  *                                its peers are not told (-EALREADY: it is down)
- *   kill NAME                    kill every process of node NAME (-EALREADY: it is down)
- *   start NAME                   start node NAME's command again (-EALREADY: it is up or
- *                                starting; -EAGAIN: past 64 incarnations)
- *   pause NAME                   freeze node NAME's machine (-EALREADY: paused; -EAGAIN: down
+ *   kill NAME                    kill every process of machine NAME (-EALREADY: it is down)
+ *   start NAME                   start machine NAME's command again (-EALREADY: it is up or
+ *                                starting; -EAGAIN: past 64 boots)
+ *   pause NAME                   freeze machine NAME (-EALREADY: paused; -EAGAIN: down
  *                                or starting)
  *   resume NAME                  let it run again (-EALREADY: not paused)
- *   clock NAME +90s              move node NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
- * A set is node names joined by commas ("driver" is the command after --), or "rest": every
- * node the other set does not name. Answers: 0; -EPERM when a process outside the driver's node
- * acts on the network, a node or a clock; -ENOENT for an unknown node; -EINVAL for other words
- * or a run without nodes; -ENOSYS outside Patina.
+ *   clock NAME +90s              move machine NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
+ * A set is machine names joined by commas ("main" is the command after --), or "rest": every
+ * machine the other set does not name. Answers: 0; -EPERM when a process outside main
+ * acts on the network, a machine or a clock; -ENOENT for an unknown machine; -EINVAL for other words
+ * or a run without machines; -ENOSYS outside Patina.
  */
 #ifndef PATINA_H
 #define PATINA_H

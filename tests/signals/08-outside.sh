@@ -23,7 +23,7 @@ done
 # shows in the boundary log (its stdout reaches the run directory only at the end). Only the
 # first records are read.
 for i in $(seq 300); do
-    "$PATINA" log dump --from 1 --to 200 "$o/inc-0/boundary.log" >"$o.dump" 2>/dev/null || true
+    "$PATINA" log dump --from 1 --to 200 "$o/boot-1/boundary.log" >"$o.dump" 2>/dev/null || true
     grep -q ' getppid ' "$o.dump" && break
     sleep 0.05
 done
@@ -34,6 +34,6 @@ c=$(field "$o/result.json" outcome); d=$(field "$o/result.json" message)
 echo "outcome: $c: $d"
 [ "$c" = internal ] || die "outcome $c"
 case "$d" in *SIGUSR1*) ;; *) die "detail does not name SIGUSR1: $d" ;; esac
-grep -q started "$o/inc-0/stdout" || die "guest did not start"
-! grep -q 'handler ran' "$o/inc-0/stdout" || die "the guest handler ran"
+grep -q started "$o/boot-1/stdout" || die "guest did not start"
+! grep -q 'handler ran' "$o/boot-1/stdout" || die "the guest handler ran"
 echo "guest handler did not run"

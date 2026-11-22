@@ -11,8 +11,8 @@ done
 mb=64
 run_ok "$o/big" 1 -- /guest/sockets big $mb
 q=$(net "$o/big" peak_queued); h=$(net "$o/big" sup_hwm_kb); b=$(net "$o/big" bytes)
-log=$(stat -c %s "$o/big/inc-0/boundary.log")
+log=$(stat -c %s "$o/big/boot-1/boundary.log")
 echo "big $mb MiB: bytes $b, peak queued $q bytes, supervisor VmHWM $h KiB (boundary log $log bytes, mapped), steps $(net "$o/big" steps)"
 [ "$b" -ge $((mb * 1048576)) ] || die "bytes $b"
 [ "$q" -le 1048576 ] || die "the supervisor queued $q bytes"
-rm -f "$o/big/inc-0/boundary.log"
+rm -f "$o/big/boot-1/boundary.log"

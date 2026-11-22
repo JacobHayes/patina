@@ -11,8 +11,8 @@ for via in direct exec; do
         esac
         [ "$st" = 0 ] || die "$via $k: exit $st ($(tail -2 "$RUNS/$via$k.txt"))"
     done
-    a=$RUNS/${via}a/inc-0/stdout
-    cmp -s "$a" "$RUNS/${via}b/inc-0/stdout" || die "$via: the reads differ between runs: $(tr '\n' ' ' <"$a") vs $(tr '\n' ' ' <"$RUNS/${via}b/inc-0/stdout")"
+    a=$RUNS/${via}a/boot-1/stdout
+    cmp -s "$a" "$RUNS/${via}b/boot-1/stdout" || die "$via: the reads differ between runs: $(tr '\n' ' ' <"$a") vs $(tr '\n' ' ' <"$RUNS/${via}b/boot-1/stdout")"
     awk '/^cntvct/ { if (NR > 2 && $2 <= last) bad = 1; last = $2 } END { exit bad }' "$a" ||
         die "$via: the counter did not go forward: $(tr '\n' ' ' <"$a")"
     echo "$via: $(tr '\n' ' ' <"$a")"

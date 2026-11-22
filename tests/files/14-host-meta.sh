@@ -25,14 +25,14 @@ look "$o/b"
 da=$(field "$o/a/result.json" digest)
 db=$(field "$o/b/result.json" digest)
 [ "$da" = "$db" ] ||
-    die "digest moved by a read, a link and a sibling's touch: $(diff "$o/a/inc-0/stdout" "$o/b/inc-0/stdout")"
+    die "digest moved by a read, a link and a sibling's touch: $(diff "$o/a/boot-1/stdout" "$o/b/boot-1/stdout")"
 "$PATINA" replay "$o/a" >/dev/null 2>&1 || die "replay: $(field "$o/a/replay/result.json" message)"
 # One link each; atime, ctime and btime equal to the mtime.
-awk '$3 != 1 || $4 != $5 || $6 != $5 || $7 != $5 { exit 1 }' "$o/a/inc-0/stdout" ||
-    die "links and times: $(cat "$o/a/inc-0/stdout")"
+awk '$3 != 1 || $4 != $5 || $6 != $5 || $7 != $5 { exit 1 }' "$o/a/boot-1/stdout" ||
+    die "links and times: $(cat "$o/a/boot-1/stdout")"
 touch -m -d '2001-01-01' "$o/d/f"
 st=0
 "$PATINA" replay "$o/a" >/dev/null 2>&1 || st=$?
 [ "$(field "$o/a/replay/result.json" stop)" = inputs-changed ] ||
     die "a replay after the file was touched: exit $st, stop $(field "$o/a/replay/result.json" stop)"
-echo "host metadata: same digest after a read, a link and a sibling's touch ($(wc -l <"$o/a/inc-0/stdout") files), replay identical; a touch of the file is inputs-changed"
+echo "host metadata: same digest after a read, a link and a sibling's touch ($(wc -l <"$o/a/boot-1/stdout") files), replay identical; a touch of the file is inputs-changed"

@@ -15,11 +15,11 @@ done
 wait
 for k in opts alive closed; do
     run_ok "$o/$k" 1 -- /guest/sockets keepalive $k
-    diff "$o/native-$k.txt" "$o/$k/inc-0/stdout" >"$o/$k.diff" || die "$k: Patina differs from Linux: $(cat "$o/$k.diff")"
+    diff "$o/native-$k.txt" "$o/$k/boot-1/stdout" >"$o/$k.diff" || die "$k: Patina differs from Linux: $(cat "$o/$k.diff")"
     echo "$k: as natively"
 done
 run_ok "$o/cut" 1 --fault net-blackout=1000+10000 -- /guest/sockets keepalive cut
-sed 's/^/    /' "$o/cut/inc-0/stdout"
+sed 's/^/    /' "$o/cut/boot-1/stdout"
 n=$("$PATINA" log events "$o/cut" | grep -c '"event":"probe"')
 [ "$n" = 6 ] || die "unanswered probes in the window: $n, two sides of 3 each"
 c=$(run "$o/cut-off" 1 -- /guest/sockets keepalive cut)
@@ -29,5 +29,5 @@ run_ok "$o/survive" 1 --fault net-blackout=1000+2500 -- /guest/sockets keepalive
 # probes a reachable peer answered keep their cadence (every max(interval, idle)).
 run_ok "$o/peer-rst" 1 --fault net-blackout=1000+10000 -- /guest/sockets keepalive peer-rst
 run_ok "$o/cadence" 1 --fault net-blackout=25000+40000 -- /guest/sockets keepalive cadence
-sed 's/^/    /' "$o/peer-rst/inc-0/stdout" "$o/cadence/inc-0/stdout"
+sed 's/^/    /' "$o/peer-rst/boot-1/stdout" "$o/cadence/boot-1/stdout"
 echo "a blackout longer than the budget: both sides ETIMEDOUT; without it: $c; a shorter one survived"

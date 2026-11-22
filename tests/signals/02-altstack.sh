@@ -4,4 +4,4 @@
 . "$(dirname "$0")/lib.inc"
 patina_run "$RUNS/02-altstack" 1 sig-alt
 check_ok "$RUNS/02-altstack" sig-alt
-cat "$RUNS/02-altstack/inc-0/stdout"
+cat "$RUNS/02-altstack/boot-1/stdout"

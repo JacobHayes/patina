@@ -1,10 +1,10 @@
 //! `patina explain RUNDIR`: the story of a run. The run is replayed once with observation on
 //! (`Config::observe`: each data call's first bytes, its descriptor and its connection, kept in
-//! `RUNDIR/explain/inc-K/observe.log`, outside the log and the digest); the replay must be the
+//! `RUNDIR/explain/boot-K/observe.log`, outside the log and the digest); the replay must be the
 //! run, record for record, as `patina replay` checks it, or nothing is told. The story is read
 //! from the replay's event stream (`events::export`) and those observations: one line per
-//! message between nodes or processes, output line, change to the work tree, fault, cut,
-//! crash and node event, and with several threads on one machine one per turn; repeats fold,
+//! message between machines or processes, output line, change to the disk, fault, cut,
+//! crash and machine event, and with several threads on one machine one per turn; repeats fold,
 //! and a window of the last lines is shown, ending with the event worth stopping at.
 //!
 //! Nothing here knows a program: lines are made of system calls, file operations, faults and
@@ -140,7 +140,7 @@ pub struct Obs {
     pub cut: bool,
 }
 
-/// An incarnation's observations by (sequence number, slot). A record that does not parse is
+/// A boot's observations by (sequence number, slot). A record that does not parse is
 /// skipped: the file is the runtime's, written beside the program, and is never trusted.
 pub fn read_observations(path: &Path) -> Res<HashMap<(u64, u16), Obs>> {
     use std::io::Read;
@@ -155,7 +155,7 @@ pub fn read_observations(path: &Path) -> Res<HashMap<(u64, u16), Obs>> {
     Ok(parse_observations(recs))
 }
 
-/// At most this many observations are read of an incarnation (a story needs far fewer).
+/// At most this many observations are read of a boot (a story needs far fewer).
 const OBS_MAX: usize = 1 << 20;
 
 pub fn parse_observations(
@@ -247,7 +247,7 @@ pub fn quote(b: &[u8], more: bool) -> String {
     format!("\"{s}\"{}", if cut { "..." } else { "" })
 }
 
-/// A story line. `who` is the actor (a node, or a thread on one machine; empty for the
+/// A story line. `who` is the actor (a machine, or a thread on one machine; empty for the
 /// network and the seed's own events).
 #[derive(Clone, Debug)]
 struct Line {
@@ -268,8 +268,8 @@ impl Line {
     }
 
     /// What folding compares: the line with its numbers taken out. A number is a token that
-    /// starts with a digit (`4`, `2848`, `0x1f`); digits inside a name are the name's (nodes
-    /// `n1` and `n2` are different nodes).
+    /// starts with a digit (`4`, `2848`, `0x1f`); digits inside a name are the name's (machines
+    /// `n1` and `n2` are different machines).
     fn key(&self) -> String {
         let mut k = format!("{}\u{1}{}\u{1}", self.who, self.kind);
         let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
@@ -287,7 +287,7 @@ impl Line {
     }
 }
 
-/// Per file of a work tree: writes since its last fsync, writes, fsyncs.
+/// Per file of a disk: writes since its last fsync, writes, fsyncs.
 #[derive(Default, Clone, Copy)]
 struct Synced {
     since: u64,
@@ -313,7 +313,7 @@ struct Story {
     outcome: String,
     seed: u64,
     events: u64,
-    nodes: Vec<String>,
+    machines: Vec<String>,
     lines: Vec<Line>,
     t0: Option<u64>,
     /// Whether the run had preemptions in computation (load-time points, compute points), and
@@ -325,7 +325,7 @@ struct Story {
 /// Reads the event stream into story lines.
 struct Reader<'a> {
     obs: Vec<HashMap<(u64, u16), Obs>>,
-    nodes: Vec<String>,
+    machines: Vec<String>,
     /// Thread slots seen on one machine: more than one makes turns.
     threads: bool,
     turn: Option<Turn>,
@@ -338,7 +338,7 @@ struct Reader<'a> {
     pipes: HashMap<String, usize>,
     /// The disk line being extended and the first operation in it.
     disk: Option<(usize, String)>,
-    /// On one machine, who used each connection (incarnation, id) and when (an event count),
+    /// On one machine, who used each connection (boot, id) and when (an event count),
     /// and the sends whose receiver is told once the whole run is read.
     ends: HashMap<(usize, u64), Vec<(u64, String)>>,
     sends: Vec<(usize, (usize, u64), u64, String)>,
@@ -348,8 +348,8 @@ struct Reader<'a> {
 
 impl Story {
     fn read(dir: &Path, recorded: &Value) -> Res<Story> {
-        let incs = crate::durability::check::incarnations(dir);
-        let obs = incs
+        let bdirs = crate::durability::check::boots(dir);
+        let obs = bdirs
             .iter()
             .map(|i| read_observations(&i.join(crate::log::OBSERVE_LOG)))
             .collect::<Res<Vec<_>>>()?;
@@ -362,7 +362,7 @@ impl Story {
             ),
             seed: recorded["seed"].as_u64().unwrap_or(0),
             events: 0,
-            nodes: vec![],
+            machines: vec![],
             lines: vec![],
             t0: None,
             preempts: 0,
@@ -370,9 +370,9 @@ impl Story {
         };
         let mut rd = Reader {
             obs,
-            nodes: vec![],
-            // Turns are told on one machine (the header of a run with nodes turns them off:
-            // there the machines and their messages are; a node's threads are its own).
+            machines: vec![],
+            // Turns are told on one machine (the header of a run with machines turns them off:
+            // there the machines and their messages are; a machine's threads are its own).
             threads: true,
             turn: None,
             slots: Default::default(),
@@ -404,10 +404,10 @@ impl Story {
             st_lines_retain(rd.st);
         }
         let events = rd.events;
-        let nodes = rd.nodes.clone();
+        let machines = rd.machines.clone();
         drop(rd);
         st.events = events;
-        st.nodes = nodes;
+        st.machines = machines;
         st.stop_at = st.stop_line(recorded);
         Ok(st)
     }
@@ -426,9 +426,9 @@ impl Story {
                 l.kind == "sdk" && l.text.starts_with("assert ") && l.text[7..] == label
             });
         }
-        // The actor that ended the run: a node that failed, or the last that exited, crashed
+        // The actor that ended the run: a machine that failed, or the last that exited, crashed
         // or took a fatal signal.
-        let failed = r["node_end"]["node"].as_str().map(str::to_string);
+        let failed = r["machine_end"]["machine"].as_str().map(str::to_string);
         let end = match &failed {
             Some(n) => ls.iter().rposition(|l| &l.who == n)?,
             None => ls
@@ -508,7 +508,7 @@ impl Story {
         self.lines.iter().any(|l| {
             matches!(
                 l.kind,
-                "msg" | "disk" | "fault" | "network" | "crash" | "node" | "unsynced"
+                "msg" | "disk" | "fault" | "network" | "crash" | "machine" | "unsynced"
             )
         })
     }
@@ -518,7 +518,7 @@ impl Story {
     }
 
     /// Lines a window does not show that the window's lines depend on: what the seed did
-    /// before it (faults, cuts, crashes, node events), folded by kind.
+    /// before it (faults, cuts, crashes, machine events), folded by kind.
     fn before(&self, first: u64) -> Vec<Line> {
         // The last of each kind of line, its numbers aside, with how many there were.
         // By key: the last line, how many, the first's number, and when it was last seen.
@@ -527,7 +527,7 @@ impl Story {
             if l.seq >= first
                 || !matches!(
                     l.kind,
-                    "fault" | "network" | "crash" | "node" | "unsynced" | "phase"
+                    "fault" | "network" | "crash" | "machine" | "unsynced" | "phase"
                 )
             {
                 continue;
@@ -797,8 +797,8 @@ fn set(v: &Value) -> String {
 
 impl Reader<'_> {
     fn who(&self, v: &Value) -> String {
-        if !self.nodes.is_empty() {
-            return v["node"].as_str().unwrap_or("").to_string();
+        if !self.machines.is_empty() {
+            return v["machine"].as_str().unwrap_or("").to_string();
         }
         let Some(n) = v["slot"].as_u64() else {
             return String::new();
@@ -924,7 +924,7 @@ impl Reader<'_> {
         }
         match ty {
             "header" => {
-                self.nodes = v["nodes"]
+                self.machines = v["machines"]
                     .as_array()
                     .map(|a| {
                         a.iter()
@@ -932,11 +932,11 @@ impl Reader<'_> {
                             .collect()
                     })
                     .unwrap_or_default();
-                if !self.nodes.is_empty() {
+                if !self.machines.is_empty() {
                     self.threads = false;
                 }
             }
-            "inc" if u(v, "inc") > 0 => {
+            "boot" if u(v, "boot") > 1 => {
                 self.end_turn();
                 self.disk = None;
                 let l = Line {
@@ -944,7 +944,7 @@ impl Reader<'_> {
                     t: self.st.lines.last().map_or(0, |l| l.t),
                     who: String::new(),
                     kind: "crash",
-                    text: format!("the machine starts again (incarnation {})", u(v, "inc")),
+                    text: format!("the machine starts again (boot {})", u(v, "boot")),
                     quiet: false,
                 };
                 self.st.lines.push(l);
@@ -954,7 +954,7 @@ impl Reader<'_> {
             "fault" => {
                 self.turn(v);
                 let class = s(v, "class");
-                // Shown by their own events (`net`, `crash`, `node`), or one per message.
+                // Shown by their own events (`net`, `crash`, `machine`), or one per message.
                 if matches!(
                     class,
                     "partition" | "crash" | "net-delay" | "net-chunk" | "kill" | "pause" | "clock"
@@ -985,18 +985,18 @@ impl Reader<'_> {
             }
             "crash" => {
                 self.end_turn();
-                let node = v["node"].as_str().unwrap_or("").to_string();
+                let machine = v["machine"].as_str().unwrap_or("").to_string();
                 // Unsynced writes are what a machine crash may lose; a process crash leaves
                 // them in the page cache, still unsynced.
-                let machine = s(v, "kind") == "machine";
+                let power_loss = s(v, "kind") == "machine";
                 let mut files: Vec<(String, Synced)> = self
                     .files
                     .iter()
-                    .filter(|((n, _), f)| machine && *n == node && f.since > 0)
+                    .filter(|((n, _), f)| power_loss && *n == machine && f.since > 0)
                     .map(|((_, p), f)| (p.clone(), *f))
                     .collect();
                 files.sort_by(|a, b| a.0.cmp(&b.0));
-                let who = node.clone();
+                let who = machine.clone();
                 for (p, f) in files {
                     self.push(
                         v,
@@ -1011,8 +1011,8 @@ impl Reader<'_> {
                         ),
                     );
                 }
-                if machine {
-                    self.files.retain(|(n, _), _| *n != node);
+                if power_loss {
+                    self.files.retain(|(n, _), _| *n != machine);
                 }
                 let lost = &v["lost"];
                 let mut what = vec![];
@@ -1075,35 +1075,35 @@ impl Reader<'_> {
                     let arrow = if v["both"] == true { "<->" } else { "->" };
                     self.push(
                         v,
-                        "driver".into(),
+                        "main".into(),
                         "network",
                         format!("NETWORK cut {} {arrow} {}", set(&v["from"]), set(&v["to"])),
                     );
                 }
                 ("heal", _) => {
-                    self.push(v, "driver".into(), "network", "NETWORK heal".into());
+                    self.push(v, "main".into(), "network", "NETWORK heal".into());
                 }
                 _ => {}
             },
-            "node" => {
+            "machine" => {
                 let name = s(v, "name").to_string();
                 let text = match s(v, "event") {
-                    "start" if u(v, "incarnation") == 0 => return,
+                    "start" if u(v, "machine_boot") == 0 => return,
                     "start" => format!(
-                        "NODE {name} starts again (incarnation {})",
-                        u(v, "incarnation")
+                        "MACHINE {name} starts again (boot {})",
+                        u(v, "machine_boot")
                     ),
                     "stop" => return,
-                    "kill" => format!("NODE {name} killed by the {}", s(v, "by")),
+                    "kill" => format!("MACHINE {name} killed by the {}", s(v, "by")),
                     "machine-crash" => {
-                        format!("NODE {name}'s machine crashes (by the {})", s(v, "by"))
+                        format!("MACHINE {name}'s machine crashes (by the {})", s(v, "by"))
                     }
-                    "crash" => format!("NODE {name} ends on signal {}", u(v, "signal")),
-                    "exit" => format!("NODE {name} exits with status {}", u(v, "exit")),
-                    "pause" => format!("NODE {name} paused by the {}", s(v, "by")),
-                    "resume" => format!("NODE {name} resumes after {} ms", u(v, "paused_ms")),
+                    "crash" => format!("MACHINE {name} ends on signal {}", u(v, "signal")),
+                    "exit" => format!("MACHINE {name} exits with status {}", u(v, "exit")),
+                    "pause" => format!("MACHINE {name} paused by the {}", s(v, "by")),
+                    "resume" => format!("MACHINE {name} resumes after {} ms", u(v, "paused_ms")),
                     "clock" => format!(
-                        "NODE {name}'s clock {} {} ms (offset {} ms)",
+                        "MACHINE {name}'s clock {} {} ms (offset {} ms)",
                         if v["skew_ms"].is_null() {
                             "steps"
                         } else {
@@ -1114,7 +1114,7 @@ impl Reader<'_> {
                     ),
                     _ => return,
                 };
-                self.push(v, String::new(), "node", text);
+                self.push(v, String::new(), "machine", text);
             }
             "phase" => {
                 self.end_turn();
@@ -1253,9 +1253,9 @@ impl Reader<'_> {
         if ret <= 0 {
             return;
         }
-        let inc = u(v, "inc") as usize;
+        let bdir = (u(v, "boot") as usize).saturating_sub(1);
         let key = (u(v, "seq"), u(v, "slot") as u16);
-        let Some(o) = self.obs.get(inc).and_then(|m| m.get(&key)).cloned() else {
+        let Some(o) = self.obs.get(bdir).and_then(|m| m.get(&key)).cloned() else {
             // No observation (not a data call, or none kept): output by its size.
             if name == "write" && matches!(args.first(), Some(1 | 2)) {
                 let to = if args[0] == 2 { " to stderr" } else { "" };
@@ -1275,8 +1275,8 @@ impl Reader<'_> {
         }
         match o.ftype {
             S_SOCK if o.conn != 0 => {
-                let c = (inc, o.conn);
-                if self.nodes.is_empty() {
+                let c = (bdir, o.conn);
+                if self.machines.is_empty() {
                     self.ends
                         .entry(c)
                         .or_default()
@@ -1285,15 +1285,15 @@ impl Reader<'_> {
                 if !write {
                     return; // the send is told, with its receiver
                 }
-                if self.nodes.is_empty() {
+                if self.machines.is_empty() {
                     let i = self.push(v, who, "msg", format!("-> conn {} {q}", o.conn));
                     self.sends.push((i, c, self.events, q));
                     return;
                 }
-                // A node's peer is the node at the connection's other address (its own on
+                // A machine's peer is the machine at the connection's other address (its own on
                 // loopback).
-                let peer = proto::wire::addr_node(o.raddr)
-                    .and_then(|k| self.nodes.get(k).cloned())
+                let peer = proto::wire::addr_machine(o.raddr)
+                    .and_then(|k| self.machines.get(k).cloned())
                     .unwrap_or_else(|| who.clone());
                 self.push(v, who, "msg", format!("-> {peer} {q}"));
             }
@@ -1319,23 +1319,23 @@ impl Reader<'_> {
 
     fn op(&mut self, v: &Value) {
         let op = s(v, "op");
-        let node = v["node"].as_str().unwrap_or("").to_string();
+        let machine = v["machine"].as_str().unwrap_or("").to_string();
         let p = path(v, "path");
         let name = p.clone();
         match op {
             "write" | "mmap-dirty" => {
-                let f = self.files.entry((node.clone(), p.clone())).or_default();
+                let f = self.files.entry((machine.clone(), p.clone())).or_default();
                 f.since += 1;
                 f.writes += 1;
             }
             "fsync" => {
-                let f = self.files.entry((node.clone(), p.clone())).or_default();
+                let f = self.files.entry((machine.clone(), p.clone())).or_default();
                 f.since = 0;
                 f.fsyncs += 1;
             }
             "sync" => {
                 for ((n, _), f) in self.files.iter_mut() {
-                    if *n == node {
+                    if *n == machine {
                         f.since = 0;
                     }
                 }
@@ -1351,9 +1351,9 @@ impl Reader<'_> {
             "sync" => "sync".to_string(),
             _ => return,
         };
-        // An operation's actor: its node, or on one machine the thread whose turn it is.
-        let who = if !self.nodes.is_empty() {
-            node
+        // An operation's actor: its machine, or on one machine the thread whose turn it is.
+        let who = if !self.machines.is_empty() {
+            machine
         } else {
             match &self.turn {
                 Some(t) => self.st.lines[t.line].who.clone(),
@@ -1389,7 +1389,7 @@ mod tests {
     use super::*;
 
     /// Folding takes numbers out of a line, not the digits of a name: the same cut with
-    /// other numbers folds, a cut of other nodes does not.
+    /// other numbers folds, a cut of other machines does not.
     #[test]
     fn folding_keeps_names() {
         let line = |text: &str| Line {

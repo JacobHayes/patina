@@ -9,13 +9,13 @@
 o=$RUNS/09-udp; mkdir -p "$o"
 for m in semantics fork; do
     run_ok "$o/$m" 1 -- /guest/udp "$m"
-    echo "$m: $(head -1 "$o/$m/inc-0/stdout")"
+    echo "$m: $(head -1 "$o/$m/boot-1/stdout")"
 done
 run_ok "$o/rpc" 1 -- /guest/udp rpc retry
 run_ok "$o/rpc-drop" 1 --fault net-drop-permille=200 -- /guest/udp rpc retry
 d=$(field "$o/rpc-drop/result.json" faults.counts.net-drop.injected)
 [ "$d" -ge 1 ] || die "no datagram dropped"
-echo "rpc with drops: $(head -1 "$o/rpc-drop/inc-0/stdout"), $d dropped of $(field "$o/rpc-drop/result.json" faults.counts.net-drop.eligible)"
+echo "rpc with drops: $(head -1 "$o/rpc-drop/boot-1/stdout"), $d dropped of $(field "$o/rpc-drop/result.json" faults.counts.net-drop.eligible)"
 
 # hunt NAME FAULT-OPTS -- ARGS: the first seed of 1..8 whose run is not ok; it replays identically.
 hunt() {
@@ -42,7 +42,7 @@ VARY=cpu,aslr
 verify_ok "$o/go" 1 3 -- /guest/go-udp
 verify_ok "$o/tokio" 1 3 -- /guest/tokio-udp
 verify_ok "$o/py" 1 3 -- /usr/bin/python3 /guest/udp.py
-for g in go tokio py; do echo "$g: $(head -1 "$o/$g/run-0/inc-0/stdout")"; done
+for g in go tokio py; do echo "$g: $(head -1 "$o/$g/run-0/boot-1/stdout")"; done
 
 # Names: localhost from /etc/hosts, an unknown name not found; no datagram is sent.
 verify_ok "$o/dns-c" 1 2 -- /guest/udp dns
@@ -50,10 +50,10 @@ verify_ok "$o/dns-go" 1 2 -- /guest/go-udp dns
 verify_ok "$o/dns-py" 1 2 -- /usr/bin/python3 /guest/udp.py dns
 for g in c go py; do
     f=$o/dns-$g/run-0
-    sed 's/^/    /' "$f/inc-0/stdout"
+    sed 's/^/    /' "$f/boot-1/stdout"
     [ "$(net "$f" datagrams)" = 0 ] || die "dns-$g sent datagrams"
-    grep -q '^localhost.*127\.0\.0\.1' "$f/inc-0/stdout" || die "dns-$g: localhost"
+    grep -q '^localhost.*127\.0\.0\.1' "$f/boot-1/stdout" || die "dns-$g: localhost"
 done
-grep -q '^unknown.example: error -2 ' "$o/dns-c/run-0/inc-0/stdout" || die "dns-c: EAI_NONAME"
-grep -q '^unknown.example: \[\] not-found true' "$o/dns-go/run-0/inc-0/stdout" || die "dns-go: not found"
-grep -q '^unknown.example gaierror -2 ' "$o/dns-py/run-0/inc-0/stdout" || die "dns-py: EAI_NONAME"
+grep -q '^unknown.example: error -2 ' "$o/dns-c/run-0/boot-1/stdout" || die "dns-c: EAI_NONAME"
+grep -q '^unknown.example: \[\] not-found true' "$o/dns-go/run-0/boot-1/stdout" || die "dns-go: not found"
+grep -q '^unknown.example gaierror -2 ' "$o/dns-py/run-0/boot-1/stdout" || die "dns-py: EAI_NONAME"

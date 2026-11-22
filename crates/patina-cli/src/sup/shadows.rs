@@ -1,5 +1,5 @@
 //! The shadow stores' supervisor half (`proto::oplog::Shadows`): they are made at each
-//! incarnation's start (`create`), the records the supervisor appends keep them as the
+//! boot's start (`create`), the records the supervisor appends keep them as the
 //! runtime's do (`apply`, from `crash::append`), and the slots of files no process maps are
 //! freed (`reclaim`).
 //!
@@ -125,13 +125,13 @@ pub fn read(k: usize, off: u64, buf: &mut [u8]) -> Result<(), String> {
     Ok(())
 }
 
-/// The slot of the inode of key `key` (`proto::oplog::node_key`).
+/// The slot of the inode of key `key` (`proto::oplog::machine_key`).
 pub fn slot_of(ctl: &Ctl, key: u64) -> Option<usize> {
     table(ctl).slot_of(key)
 }
 
 /// A record the supervisor appended (`crash::append`) for the inode of key `key`
-/// (`proto::oplog::node_key`): its store follows, as for the runtime's records
+/// (`proto::oplog::machine_key`): its store follows, as for the runtime's records
 /// (`rt::oplog::shadow_apply`).
 pub fn apply(ctl: &Ctl, key: u64, kind: OpKind, a: &[u64; 6], data: &[u8]) -> Result<(), String> {
     let s = table(ctl);
@@ -166,8 +166,8 @@ pub fn apply(ctl: &Ctl, key: u64, kind: OpKind, a: &[u64; 6], data: &[u8]) -> Re
     }
 }
 
-/// Keys (`proto::oplog::node_key`) of the work inodes (on the work devices `devs`, each with
-/// its node) some process of the sandbox maps shared, from every thread's
+/// Keys (`proto::oplog::machine_key`) of the work inodes (on the work devices `devs`, each with
+/// its machine) some process of the sandbox maps shared, from every thread's
 /// `/proc/PID/task/TID/maps` (a process whose first thread has exited shows no mappings at
 /// `/proc/PID`); None when one could not be read.
 fn mapped(devs: &[(u64, usize)]) -> Option<HashSet<u64>> {
@@ -212,8 +212,8 @@ fn mapped(devs: &[(u64, usize)]) -> Option<HashSet<u64>> {
                     continue;
                 };
                 let dev = libc::makedev(ma, mi);
-                if let Some(&(_, node)) = devs.iter().find(|(d, _)| *d == dev) {
-                    out.insert(proto::oplog::node_key(ino, node));
+                if let Some(&(_, machine)) = devs.iter().find(|(d, _)| *d == dev) {
+                    out.insert(proto::oplog::machine_key(ino, machine));
                 }
             }
         }
@@ -226,15 +226,15 @@ fn mapped(devs: &[(u64, usize)]) -> Option<HashSet<u64>> {
 /// makes the pass free nothing. Every guest is stopped at a boundary or in the kernel: the
 /// mappings do not change while they are read. Which slots are freed when changes no record
 /// (only how much memory the store holds, and when a full table is reported).
-/// Node `node`'s disk is gone (a machine crash, its processes dead): its slots are freed and
+/// Machine `machine`'s disk is gone (a machine crash, its processes dead): its slots are freed and
 /// its fsync error generations forgotten, so its next disk, whose files may reuse its inode
 /// numbers, starts with none of them.
-pub fn forget_node(ctl: &Ctl, node: usize) -> Result<(), String> {
-    unsafe { Dur::at(ctl as *const Ctl as *mut u8).forget_node(node) };
+pub fn forget_machine(ctl: &Ctl, machine: usize) -> Result<(), String> {
+    unsafe { Dur::at(ctl as *const Ctl as *mut u8).forget_machine(machine) };
     let s = table(ctl);
     for k in 0..SHADOW_SLOTS {
         let key = s.ino[k];
-        if node != 0 && key != 0 && key >> 56 == node as u64 {
+        if machine != 0 && key != 0 && key >> 56 == machine as u64 {
             free(s, k)?;
         }
     }
@@ -248,7 +248,7 @@ pub fn reclaim(ctl: &Ctl, disks: &super::disks::Disks) {
         return;
     }
     let devs = disks.devs();
-    if devs.first().is_none_or(|&(_, node)| node != 0) {
+    if devs.first().is_none_or(|&(_, machine)| machine != 0) {
         return;
     }
     let Some(held) = mapped(&devs) else {

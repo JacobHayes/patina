@@ -1,13 +1,13 @@
 //! `patina minimize RUNDIR`: rerun a failing run with less fault injection while it keeps its
 //! signature. Its classes are first expanded into their keys; then each fault setting (each
-//! `--fault` key, each node's scoped one `KEY=V@NODE` as its own, each class without keys:
+//! `--fault` key, each machine's scoped one `KEY=V@MACHINE` as its own, each class without keys:
 //! `buggify`, `crash`, `kill`) is dropped in turn, keeping a removal when the signature is
-//! unchanged. With nodes, a crash at crash points that is kept then becomes one node's crash
-//! alone (`crash-at=N@NODE`): each node's first crash, then its later ones at
+//! unchanged. With machines, a crash at crash points that is kept then becomes one machine's crash
+//! alone (`crash-at=N@MACHINE`): each machine's first crash, then its later ones at
 //! their places in a first boot (`single_points`), and the settings left are dropped once
 //! more; failing that it is
-//! narrowed to fewer nodes, one dropped at a time. Then each remaining rate is halved (a gap
-//! between partitions or node crashes doubled) for as long as that holds. The seed and every
+//! narrowed to fewer machines, one dropped at a time. Then each remaining rate is halved (a gap
+//! between partitions or machine crashes doubled) for as long as that holds. The seed and every
 //! scheduling setting stay as they were. At most `MAX_RUNS` runs, one at a time; the smallest
 //! run found is written to `--out`.
 
@@ -30,13 +30,13 @@ fn c_at(c: &Config) -> bool {
     c.faults.iter().any(|x| x.starts_with("crash-at="))
 }
 
-/// Whether a class entry (`CLASS[@NODE,...]`) is a crash's.
+/// Whether a class entry (`CLASS[@MACHINE,...]`) is a crash's.
 fn crash_class(x: &str) -> bool {
     matches!(crate::faults::split_scope(x).0, "crash" | "kill")
 }
 
-/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, and the gap between partitions or between a node's crashes
-/// (`partition-gap-ms`, `crash-gap-ms`) doubled, up to an hour; a node scope (`@NODE,...`)
+/// A rate halved: `K=N` or `K=A..B` for a `-permille` key, and the gap between partitions or between a machine's crashes
+/// (`partition-gap-ms`, `crash-gap-ms`) doubled, up to an hour; a machine scope (`@MACHINE,...`)
 /// stays.
 fn halve(v: &str) -> Option<String> {
     let (v, scope) = crate::faults::split_scope(v);
@@ -73,14 +73,14 @@ fn halve_unscoped(v: &str) -> Option<String> {
     Some(format!("{kind}:{}", h(n)?))
 }
 
-/// The most single crashes tried for one node (`single_points`).
+/// The most single crashes tried for one machine (`single_points`).
 const SINGLE_TRIES: usize = 6;
 
-/// Where to try a node's one crash (`machine-at:P@NODE`, a point of its first boot) in place of
+/// Where to try a machine's one crash (`machine-at:P@MACHINE`, a point of its first boot) in place of
 /// its crashes at points of a failing run, `points` being the point each boot crashed at. First
 /// the first crash's own point, which is the same place in a run without the later crashes.
 /// Then each later crash, the most recent first (the failure followed it): with no crash
-/// before it, the node's first boot runs on through the work of the boots that crashed, so the
+/// before it, the machine's first boot runs on through the work of the boots that crashed, so the
 /// place is about the points of the boots before it plus its own, give or take the work a crash
 /// undid and the next boot did again (the points either side). Last, the points either side of
 /// the first crash's. At most `SINGLE_TRIES`: each is
@@ -211,13 +211,16 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let mut cfg = cfg;
     let mut expanded: Vec<String> = vec![];
     let mut classes: Vec<String> = vec![];
-    let faultable = crate::faults::faultable_nodes(cfg.nodes.len(), &cfg.faults).map_err(error)?;
+    let faultable =
+        crate::faults::faultable_machines(cfg.machines.len(), cfg.main_links().map_err(error)?);
     // A class's scope (`disk@a`) goes with each of its keys.
     for e in &cfg.fault_classes {
         let (names, scope) = crate::faults::split_scope(e);
         let at = scope.map(|s| format!("@{s}")).unwrap_or_default();
-        for c in crate::faults::classes(names, cfg.nodes.len(), faultable).map_err(error)? {
-            if scope.is_some() && !crate::faults::node_class(c) {
+        for c in crate::faults::classes(names, cfg.machines.len(), faultable).map_err(error)? {
+            // `all@MACHINE` is the machine's own classes; a link class named with @main keeps it.
+            let named = scope == Some("main") && names.split(',').any(|n| n == c);
+            if scope.is_some() && !crate::faults::machine_class(c) && !named {
                 continue;
             }
             let kv = crate::faults::class_settings(c).map_err(error)?;
@@ -240,7 +243,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         .faults
         .iter()
         .any(|x| x.starts_with("crash-permille=") || x.starts_with("crash-at="));
-    if cfg.nodes.is_empty() && !keyed && classes.iter().any(|c| crash_class(c)) {
+    if cfg.machines.is_empty() && !keyed && classes.iter().any(|c| crash_class(c)) {
         expanded.push(format!(
             "crash-permille={}",
             crate::faults::CRASH_DEFAULT_PERMILLE
@@ -267,7 +270,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // Drop each setting in turn. On one machine a crash key and the class saying its kind
     // (`kill`) go together: the class alone would crash at the default rate, the key alone
     // would crash the machine.
-    let one = cfg.nodes.is_empty();
+    let one = cfg.machines.is_empty();
     let crash_key = |x: &String| x.starts_with("crash-permille=") || x.starts_with("crash-at=");
     for f in cfg.faults.clone() {
         let mut c = cur.clone();
@@ -287,42 +290,43 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
         c.fault_classes.retain(|x| *x != f);
         keep(&mut s, c, &mut cur, format!("without --faults {f}"))?;
     }
-    // With nodes, a crash at crash points (`crash-permille`) becomes one node's first crash
-    // alone (`crash-at=N@NODE`, N its point in the run that last kept the signature), tried
-    // node by node: a node's crash points count its own oplog records and syncs, so its crash
-    // lands at the same place in its work when other nodes no longer crash.
+    // With machines, a crash at crash points (`crash-permille`) becomes one machine's first crash
+    // alone (`crash-at=N@MACHINE`, N its point in the run that last kept the signature), tried
+    // machine by machine: a machine's crash points count its own oplog records and syncs, so its crash
+    // lands at the same place in its work when other machines no longer crash.
     let rate = cur
         .faults
         .iter()
         .find(|x| x.starts_with("crash-permille="))
         .cloned();
-    if let Some(cr) = rate.filter(|_| !cur.nodes.is_empty()) {
+    if let Some(cr) = rate.filter(|_| !cur.machines.is_empty()) {
         let (_, scope) = crate::faults::split_scope(&cr);
         let d = best.borrow().clone().unwrap_or_else(|| rundir.clone());
         let r = read_json(&d.join("result.json")).unwrap_or_default();
         let names: Vec<String> = match scope {
             Some(s) => s.split(',').map(str::to_string).collect(),
             None => cur
-                .nodes
+                .machines
                 .iter()
                 .filter(|n| !n.no_faults)
                 .map(|n| n.name.clone())
                 .collect(),
         };
-        // The points the node crashed at, boot by boot (its downs at a crash point).
+        // The points the machine crashed at, boot by boot (its downs at a crash point).
         let points = |n: &str| -> Vec<u64> {
-            let node = r["nodes"]["list"]
+            let machine = r["machines"]["list"]
                 .as_array()
                 .and_then(|l| l.iter().find(|x| x["name"] == n));
-            node.and_then(|x| x["downs"].as_array())
+            machine
+                .and_then(|x| x["downs"].as_array())
                 .into_iter()
                 .flatten()
                 .map_while(|d| d["point"].as_u64().filter(|p| *p > 0))
                 .collect()
         };
         {
-            // Each node's first try, then each node's second, and so on: a node's first crash
-            // alone, the likeliest, is tried for every node before a later crash of any.
+            // Each machine's first try, then each machine's second, and so on: a machine's first crash
+            // alone, the likeliest, is tried for every machine before a later crash of any.
             let tries: Vec<(String, Vec<u64>)> = names
                 .into_iter()
                 .map(|n| {
@@ -350,14 +354,14 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             }
         }
     }
-    // With nodes: the crash on fewer nodes, one dropped at a time while more than one is left.
+    // With machines: the crash on fewer machines, one dropped at a time while more than one is left.
     let crash = cur.fault_classes.iter().find(|x| crash_class(x)).cloned();
-    if let Some(cr) = crash.filter(|_| !cur.nodes.is_empty() && !c_at(&cur)) {
+    if let Some(cr) = crash.filter(|_| !cur.machines.is_empty() && !c_at(&cur)) {
         let (kind, scope) = crate::faults::split_scope(&cr);
         let mut on: Vec<String> = match scope {
             Some(s) => s.split(',').map(str::to_string).collect(),
             None => cur
-                .nodes
+                .machines
                 .iter()
                 .filter(|n| !n.no_faults)
                 .map(|n| n.name.clone())
@@ -375,7 +379,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 &mut s,
                 c,
                 &mut cur,
-                format!("--faults {kind} without node {n}"),
+                format!("--faults {kind} without machine {n}"),
             )? {
                 on = rest;
             }
@@ -498,7 +502,7 @@ mod tests {
             halve("partition-gap-ms=4000..4000").as_deref(),
             Some("partition-gap-ms=8000..8000")
         );
-        // A node scope stays; a node's crash gap doubles.
+        // A machine scope stays; a machine's crash gap doubles.
         assert_eq!(
             halve("fs-error-permille=8@a,b").as_deref(),
             Some("fs-error-permille=4@a,b")

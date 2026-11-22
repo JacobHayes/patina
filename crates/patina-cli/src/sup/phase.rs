@@ -1,22 +1,22 @@
 //! A run's phases: the setup command (`--setup`), the main command (after `--`) and the final
-//! check (`--finally`), run one after the other as the driver's root process, in the same
+//! check (`--finally`), run one after the other as main's root process, in the same
 //! sandbox, seed and log. Faults act only in the main phase: the window opens where the setup
 //! command exits 0 and closes where the main command ends.
 //!
 //! The end of a phase's root process is a request under the turn (`ProcExit`); its record
 //! (`DEC_PHASE`) moves the fault window. The next phase's root does not start there: a
-//! process another guest is creating may hold a reserved slot, so the start waits, as a node's
-//! restart does, for the next point where nothing is in flight (`nodes::node_actions`), and
-//! comes after the node restarts queued before it. The supervisor forks it as it forked the
+//! process another guest is creating may hold a reserved slot, so the start waits, as a machine's
+//! restart does, for the next point where nothing is in flight (`machines::machine_actions`), and
+//! comes after the machine restarts queued before it. The supervisor forks it as it forked the
 //! first root, with the descriptors the first had (`Phases::fds`), and waits for its `Hello`.
 //! Processes an earlier phase left running keep running. Everything is in the turn's order, so
 //! every transition is the same in every run of a seed.
 
-use super::link::EVK_NODE_START;
+use super::link::EVK_MACHINE_START;
 use super::{Sup, Verdict};
 use proto::ctl::*;
 use proto::layout::*;
-use proto::node::*;
+use proto::machine::*;
 use std::ffi::CString;
 use std::sync::atomic::Ordering::{Relaxed, SeqCst};
 
@@ -150,12 +150,12 @@ impl Sup {
     }
 
     /// The faults stop before the final check: the seed's partition and pauses end, the
-    /// script's cuts heal and its pauses end, and every down node whose restart its policy
+    /// script's cuts heal and its pauses end, and every down machine whose restart its policy
     /// scheduled is queued to start now (the final check's root starts after them).
     fn settle(&mut self) {
         self.partitions_done();
         self.pauses_done();
-        let n = self.node_count();
+        let n = self.machine_count();
         if n == 0 {
             return;
         }
@@ -166,18 +166,18 @@ impl Sup {
             }
         }
         for k in 1..n {
-            if self.node_is_up(k) || self.nodes.pending.contains(&(EVK_NODE_START, k)) {
+            if self.machine_is_up(k) || self.machines.pending.contains(&(EVK_MACHINE_START, k)) {
                 continue;
             }
-            // A restart its policy scheduled comes now; a node the script took down, or
-            // one its policy or `max-incarnations` leaves down, stays down.
-            if self.nodes_start_queued(k) {
-                self.node_start_now(k);
+            // A restart its policy scheduled comes now; a machine the script took down, or
+            // one its policy or `max-boots` leaves down, stays down.
+            if self.machines_start_queued(k) {
+                self.machine_start_now(k);
             }
         }
     }
 
-    /// Start the root of the pending phase (`nodes::node_actions`, where nothing is being
+    /// Start the root of the pending phase (`machines::machine_actions`, where nothing is being
     /// created): a free slot, a fork as the first root's, and its `Hello`.
     pub(super) fn phase_start(&mut self) {
         let p = std::mem::take(&mut self.phases.pending);
@@ -203,14 +203,14 @@ impl Sup {
         s.vmask.store(0, Relaxed);
         s.sigpend.store(0, Relaxed);
         s.sched.store(0, Relaxed);
-        s.node.store(0, Relaxed);
+        s.machine.store(0, Relaxed);
         s.state.store(SLOT_RESERVED, SeqCst);
-        // A process tree of its own: its runtime installs the seccomp filter (the driver's
+        // A process tree of its own: its runtime installs the seccomp filter (main's
         // other processes, parked until its `Hello`, keep theirs).
         self.ctl.filter_installed.fetch_and(!1u64, SeqCst);
-        self.nodes.booting = Some(slot);
-        // The slot may have been a node's: the log says it is the driver's again.
-        self.slot_node(slot, 0);
+        self.machines.booting = Some(slot);
+        // The slot may have been a machine's: the log says it is main's again.
+        self.slot_machine(slot, 0);
         self.phases.root_slot = slot;
         self.phase_begin(p);
         let pid = self.fork_root(&cmd);
@@ -242,8 +242,8 @@ impl Sup {
             .filter(|f| *f > 2 && !self.phases.fds.contains(f))
             .collect();
         close.extend([FD_OUTCOME, FD_EXPORT, FD_SHM]);
-        if self.node_count() > 0 {
-            close.push(FD_NODES);
+        if self.machine_count() > 0 {
+            close.push(FD_MACHINES);
         }
         let empty = c"";
         let pid = unsafe { libc::fork() };

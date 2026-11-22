@@ -19,8 +19,8 @@ trio() { # trio A SEED B [faults]
     [ -n "$a1" ] || die "$1: no outcome"
     [ "$a1" = "$a2" ] || die "$1 then $3 then $1: $a1 vs $a2"
     for f in stdout stderr; do
-        [ -e "$out/$1-first/inc-0/$f" ] || continue
-        cmp -s "$out/$1-first/inc-0/$f" "$out/$1-again/inc-0/$f" || die "$1: $f differs after $3"
+        [ -e "$out/$1-first/boot-1/$f" ] || continue
+        cmp -s "$out/$1-first/boot-1/$f" "$out/$1-again/boot-1/$f" || die "$1: $f differs after $3"
     done
     echo "$1 / $3 / $1 seed $2 faults ${4:-off}: $a1 both times (between: $b)"
     rm -rf "${out:?}/$1-first" "${out:?}/$1-again" "${out:?}/$3-between"

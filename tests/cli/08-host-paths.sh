@@ -24,7 +24,7 @@ for how in direct link mount; do
     esac
     prun "$d/sib-$how" --seed 1 "$@"
     [ "$st" = 0 ] || die "sibling ($how): exit $st ($(tail -3 "$d/sib-$how.txt"))"
-    grep -qx 'arg 1 one' "$d/sib-$how/inc-0/stdout" || die "sibling ($how): $(head -3 "$d/sib-$how/inc-0/stdout")"
+    grep -qx 'arg 1 one' "$d/sib-$how/boot-1/stdout" || die "sibling ($how): $(head -3 "$d/sib-$how/boot-1/stdout")"
 done
 echo "a program finds its sibling by its own path: given directly, through a symlink, inside a mount"
 

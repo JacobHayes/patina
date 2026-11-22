@@ -27,19 +27,19 @@ pub const MAX_DATA: usize = 8;
 pub const FD_USERNS: i32 = 3018;
 /// Launcher to keeper: the `Spec`, as JSON.
 pub const FD_SPEC: i32 = 3019;
-/// Launcher to keeper, in a run with nodes: node `k`'s stdin, stdout and stderr memfds at
-/// `FD_NODE_STDIO0 + 3 * (k - 1)` and the two after it (above every number the supervisor
+/// Launcher to keeper, in a run with machines: machine `k`'s stdin, stdout and stderr memfds at
+/// `FD_MACHINE_STDIO0 + 3 * (k - 1)` and the two after it (above every number the supervisor
 /// keeps, so its `close_inherited` closes them).
-pub const FD_NODE_STDIO0: i32 = 3030;
+pub const FD_MACHINE_STDIO0: i32 = 3030;
 const _: () = {
-    use proto::layout::{FD_NODES, FD_PLAN, FD_PROBE_MEM, FD_SHADOWS, FD_STDIN};
+    use proto::layout::{FD_MACHINES, FD_PLAN, FD_PROBE_MEM, FD_SHADOWS, FD_STDIN};
     assert!(FD_PLAN < FD_DATA0);
     assert!(FD_DATA0 + MAX_DATA as i32 <= FD_USERNS);
     assert!(FD_USERNS < FD_SPEC && FD_SPEC < FD_STDIN);
-    assert!(FD_NODES < FD_NODE_STDIO0);
+    assert!(FD_MACHINES < FD_MACHINE_STDIO0);
     // The keeper's descriptors are closed before the supervisor makes the shadow stores.
-    assert!(FD_NODE_STDIO0 + 3 * (proto::node::MAX_NODES as i32 - 1) < FD_SHADOWS);
-    assert!(FD_NODE_STDIO0 + 3 * (proto::node::MAX_NODES as i32 - 1) + 2 < FD_PROBE_MEM);
+    assert!(FD_MACHINE_STDIO0 + 3 * (proto::machine::MAX_MACHINES as i32 - 1) < FD_SHADOWS);
+    assert!(FD_MACHINE_STDIO0 + 3 * (proto::machine::MAX_MACHINES as i32 - 1) + 2 < FD_PROBE_MEM);
 };
 
 /// One step of the layout, applied in order (the order is the guest's mount table order).
@@ -112,32 +112,32 @@ pub struct Spec {
     /// The path executed (default `argv[0]`).
     pub exe: Option<String>,
     pub after: After,
-    /// A run with nodes: PID 1 keeps its end of the keeper's socket pair at `FD_NODES` for the
-    /// supervisor, and the keeper starts each node's first process when asked (`Nodes`).
+    /// A run with machines: PID 1 keeps its end of the keeper's socket pair at `FD_MACHINES` for the
+    /// supervisor, and the keeper starts each machine's first process when asked (`Machines`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nodes: Option<Nodes>,
+    pub machines: Option<Machines>,
 }
 
-/// The nodes of a run (1 upward; the driver is PID 1's command), as the keeper starts them.
+/// The machines of a run (1 upward; main is PID 1's command), as the keeper starts them.
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct Nodes {
-    pub nodes: Vec<NodeSpec>,
-    /// Bytes of each tmpfs of a node's view.
+pub struct Machines {
+    pub machines: Vec<MachineSpec>,
+    /// Bytes of each tmpfs of a machine's view.
     pub size: u64,
-    /// Paths that get an empty tmpfs of their own in every node's view besides the node's work
-    /// tree, `/tmp` and `/dev/shm` (the driver's work tree, where it is elsewhere).
+    /// Paths that get an empty tmpfs of their own in every machine's view besides the machine's
+    /// disk, `/tmp` and `/dev/shm` (main's disk, where it is elsewhere).
     pub hide: Vec<String>,
-    /// Mounts the nodes share with the driver that are read-only in a node's view (the root,
-    /// `/dev`, `/guest`, `:copy` mounts): one node's writes never reach another.
+    /// Mounts the machines share with main that are read-only in a machine's view (the root,
+    /// `/dev`, `/guest`, `:copy` mounts): one machine's writes never reach another.
     pub readonly: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct NodeSpec {
+pub struct MachineSpec {
     pub name: String,
-    /// The guest path of the node's work tree.
+    /// The guest path of the machine's disk.
     pub work: String,
-    /// Where the node's starting tree is bound (copied into its work tree), if it has one.
+    /// Where the machine's starting tree is bound (copied into its disk), if it has one.
     pub input: Option<String>,
     /// The runtime's arguments (`rt EXE ARGV...`) and the whole environment.
     pub argv: Vec<String>,
@@ -1205,8 +1205,8 @@ pub fn keeper_main(args: &[String]) -> Res<ExitCode> {
     if let After::Views { size } = spec.after {
         views_keeper(&keeper, ours.as_raw_fd(), size);
     }
-    if let Some(n) = &spec.nodes {
-        nodes_keeper(&keeper, ours.as_raw_fd(), n);
+    if let Some(n) = &spec.machines {
+        machines_keeper(&keeper, ours.as_raw_fd(), n);
     }
     Ok(ExitCode::from(exit_code(wait_pid(pid))))
 }
@@ -1249,12 +1249,12 @@ fn pid1(spec: &Spec, chan: OwnedFd) -> ! {
         fail(e);
     }
     match &spec.after {
-        // With nodes, the supervisor asks the keeper to start them through PID 1's end.
-        After::Exec if spec.nodes.is_some() => {
-            if unsafe { libc::dup2(chan.as_raw_fd(), proto::layout::FD_NODES) }
-                != proto::layout::FD_NODES
+        // With machines, the supervisor asks the keeper to start them through PID 1's end.
+        After::Exec if spec.machines.is_some() => {
+            if unsafe { libc::dup2(chan.as_raw_fd(), proto::layout::FD_MACHINES) }
+                != proto::layout::FD_MACHINES
             {
-                fail(last_err("dup2 the nodes channel"));
+                fail(last_err("dup2 the machines channel"));
             }
         }
         After::Exec => {}
@@ -1607,7 +1607,7 @@ pub fn minimal(after: After, argv: Vec<String>) -> Spec {
         argv,
         exe: None,
         after,
-        nodes: None,
+        machines: None,
     }
 }
 
@@ -1659,13 +1659,13 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
 /// The one-byte message that carries the shadow stores to the keeper (a start is two bytes).
 pub const SHADOWS_MSG: u8 = 0xff;
 
-/// The keeper of a run with nodes: start a process of node `k` each time the supervisor asks
-/// (two bytes, `k` and its incarnation), answer `ok OUT ERR` (where the node's stdout and
-/// stderr are up to) or why not, until PID 1's end closes. Incarnation 0 makes the node's
+/// The keeper of a run with machines: start a process of machine `k` each time the supervisor asks
+/// (two bytes, `k` and its boot), answer `ok OUT ERR` (where the machine's stdout and
+/// stderr are up to) or why not, until PID 1's end closes. The first boot makes the machine's
 /// view; a later one starts in the same view again, whose namespaces the keeper holds.
-fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
+fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
     use proto::layout::*;
-    let mut saved: Vec<Option<Saved>> = (0..n.nodes.len()).map(|_| None).collect();
+    let mut saved: Vec<Option<Saved>> = (0..n.machines.len()).map(|_| None).collect();
     let mut shadows = false;
     loop {
         let mut b = [0u8; 3];
@@ -1673,12 +1673,12 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
         if r <= 0 {
             return;
         }
-        // The supervisor's shadow stores, before the first start (`sup::nodes::boot_nodes`):
-        // every node's processes share them, at the numbers the supervisor's have.
+        // The supervisor's shadow stores, before the first start (`sup::machines::boot_machines`):
+        // every machine's processes share them, at the numbers the supervisor's have.
         if r == 1 && b[0] == SHADOWS_MSG {
             if fds.len() != proto::oplog::SHADOW_SLOTS {
                 eprintln!(
-                    "patina: node keeper: {} shadow stores, expected {}",
+                    "patina: machine keeper: {} shadow stores, expected {}",
                     fds.len(),
                     proto::oplog::SHADOW_SLOTS
                 );
@@ -1692,21 +1692,21 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
             shadows = true;
             continue;
         }
-        // A start: [node, boot], or [node, boot, 1] with a machine crash's next tree (a tree
-        // archive): a new view, as a machine's restart has, its work tree that tree.
+        // A start: [machine, boot], or [machine, boot, 1] with a machine crash's next tree (a tree
+        // archive): a new view, as a machine's restart has, its disk that tree.
         let (i, boot) = (b[0] as usize, b[1] as u64);
         let tree = fds.into_iter().next();
-        let stdio = FD_NODE_STDIO0 + 3 * (i as i32 - 1);
+        let stdio = FD_MACHINE_STDIO0 + 3 * (i as i32 - 1);
         let size = |fd: RawFd| {
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
             unsafe { libc::fstat(fd, &mut st) };
             st.st_size
         };
         let at = (size(stdio + 1), size(stdio + 2));
-        let res = match n.nodes.get(i.wrapping_sub(1)) {
-            None => Err(format!("no node {i}")),
+        let res = match n.machines.get(i.wrapping_sub(1)) {
+            None => Err(format!("no machine {i}")),
             Some(ns) => {
-                // The keeper's stderr (`sandbox.log`) until the node's own replaces it.
+                // The keeper's stderr (`sandbox.log`) until the machine's own replaces it.
                 let mut keep = vec![2, FD_CTL, FD_LOG, FD_OPLOG_META, FD_OPLOG_DATA, FD_RT];
                 if unsafe { libc::fcntl(FD_PLAN, libc::F_GETFD) } >= 0 {
                     keep.push(FD_PLAN);
@@ -1717,7 +1717,7 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
                 }
                 // Close-on-exec: read before the runtime starts.
                 keep.extend(tree.as_ref().map(|t| t.as_raw_fd()));
-                let run = || node_main(ns, stdio, ns.size, boot, tree.as_ref());
+                let run = || machine_main(ns, stdio, ns.size, boot, tree.as_ref());
                 match (&saved[i - 1], boot) {
                     (None, 0) | (Some(_), _) if boot == 0 || tree.is_some() => {
                         let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
@@ -1732,7 +1732,11 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
                         k.view(Place::New(&v), &keep, run).map(|s| saved[i - 1] = s)
                     }
                     (Some(s), b) if b > 0 => k.view(Place::Again(s), &keep, run).map(|_| ()),
-                    _ => Err(format!("node {}: incarnation {boot} out of turn", ns.name)),
+                    _ => Err(format!(
+                        "machine {}: boot {} out of turn",
+                        ns.name,
+                        boot + 1
+                    )),
                 }
             }
         };
@@ -1744,14 +1748,20 @@ fn nodes_keeper(k: &Keeper, chan: RawFd, n: &Nodes) {
     }
 }
 
-/// A node's first process, in its view: its starting tree (on its first start; after a
+/// A machine's first process, in its view: its starting tree (on its first start; after a
 /// machine crash the tree `tree` holds; a restart after a process kill finds the tree its
-/// last incarnation left), its stdio, the process state every guest
+/// last boot left), its stdio, the process state every guest
 /// inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime. A
-/// restart's environment adds `PATINA_INCARNATION`.
-fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64, boot: u64, tree: Option<&OwnedFd>) -> i32 {
+/// restart's environment adds `PATINA_BOOT`.
+fn machine_main(
+    ns: &MachineSpec,
+    stdio: RawFd,
+    size: u64,
+    boot: u64,
+    tree: Option<&OwnedFd>,
+) -> i32 {
     let fail = |e: String| -> i32 {
-        eprintln!("patina sandbox: node {}: {e}", ns.name);
+        eprintln!("patina sandbox: machine {}: {e}", ns.name);
         126
     };
     if let Some(fd) = tree {
@@ -1793,7 +1803,7 @@ fn node_main(ns: &NodeSpec, stdio: RawFd, size: u64, boot: u64, tree: Option<&Ow
     let argv: Vec<CString> = ns.argv.iter().map(|a| c(a)).collect();
     let mut env: Vec<CString> = ns.env.iter().map(|a| c(a)).collect();
     if boot > 0 {
-        env.push(c(&format!("PATINA_INCARNATION={boot}")));
+        env.push(c(&format!("PATINA_BOOT={}", boot + 1)));
     }
     let mut av: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     av.push(std::ptr::null());

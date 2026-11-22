@@ -6,7 +6,7 @@
 #    interpreter is a text file. Every file the
 #    native kernel refuses ends a top-level run `error`, stop `exec`, naming the kernel's errno;
 #    a 32-bit ELF, which the kernel runs and Patina does not, ends `unsupported`, stop `exec`. A script reached through a symlink, a relative path, the guest's PATH,
-#    `--work` and `--mount` runs; one whose interpreter the sandbox lacks is named with the
+#    `--disk` and `--mount` runs; one whose interpreter the sandbox lacks is named with the
 #    directory to mount, and mounting it makes the run pass. A directory or an unreadable file is
 #    refused before the run. None ends `internal`. An interpreter whose symbolic link leads into
 #    what Patina keeps from the program is refused as that path is. An image an `execve` inside
@@ -84,7 +84,7 @@ python3 -I "$d/probe.py" "$d" $names >"$d/native.txt"
 # shellcheck disable=SC2086
 prun "$r/probe" --seed 1 --mount "$d:$d" -- /usr/bin/python3 -I "$d/probe.py" "$d" $names
 [ "$st" = 0 ] || die "in-guest probe: exit $st ($(tail -3 "$r/probe.txt"))"
-diff "$d/native.txt" "$r/probe/inc-0/stdout" || die "execve inside a guest differs from the native kernel"
+diff "$d/native.txt" "$r/probe/boot-1/stdout" || die "execve inside a guest differs from the native kernel"
 echo "execve inside a guest answers as the native kernel for $(wc -l <"$d/native.txt") files"
 
 # The same files as the top-level program: what runs prints what it prints natively; what the
@@ -118,8 +118,8 @@ for n in $names elf32; do
             nerr=$((nerr + 1)) ;;
         *)
             [ "$o" = ok ] || die "$n: $o: $msg"
-            [ "$(tr -d '\n' <"$r/top-$n/inc-0/stdout")" = "$want" ] ||
-                die "$n: stdout $(cat "$r/top-$n/inc-0/stdout"), natively $want"
+            [ "$(tr -d '\n' <"$r/top-$n/boot-1/stdout")" = "$want" ] ||
+                die "$n: stdout $(cat "$r/top-$n/boot-1/stdout"), natively $want"
             nok=$((nok + 1)) ;;
     esac
 done
@@ -131,13 +131,13 @@ cd "$d"
 prun "$r/rel" --seed 1 -- ./ok.sh a
 [ "$st" = 0 ] || die "relative path: exit $st"
 prun "$r/path" --seed 1 --mount "$d:/guest" -- ok.sh a
-[ "$st" = 0 ] && [ "$(cat "$r/path/inc-0/stdout")" = "/guest/ok.sh|a|" ] || die "by name: exit $st: $(cat "$r/path.txt")"
-prun "$r/work" --seed 1 --work . -- ./ok.sh a
-[ "$st" = 0 ] || die "--work: exit $st"
+[ "$st" = 0 ] && [ "$(cat "$r/path/boot-1/stdout")" = "/guest/ok.sh|a|" ] || die "by name: exit $st: $(cat "$r/path.txt")"
+prun "$r/work" --seed 1 --disk . -- ./ok.sh a
+[ "$st" = 0 ] || die "--disk: exit $st"
 cd - >/dev/null
 prun "$r/mnt" --seed 1 --mount "$d:/m" -- /m/ok.sh a
-[ "$st" = 0 ] && [ "$(cat "$r/mnt/inc-0/stdout")" = "/m/ok.sh|a|" ] || die "--mount: exit $st: $(cat "$r/mnt.txt")"
-echo "a script runs by a relative path, by name on the guest's PATH, beside --work and inside --mount"
+[ "$st" = 0 ] && [ "$(cat "$r/mnt/boot-1/stdout")" = "/m/ok.sh|a|" ] || die "--mount: exit $st: $(cat "$r/mnt.txt")"
+echo "a script runs by a relative path, by name on the guest's PATH, beside --disk and inside --mount"
 
 # An interpreter the sandbox lacks: named with its directory; mounted, the run passes.
 prun "$r/far" --seed 1 -- "$d/far.sh"
@@ -162,7 +162,7 @@ mkdir -p "$r/hid/m" "$r/hid/w"
 printf '#!/m/l\n' >"$r/hid/w/s.sh" && chmod +x "$r/hid/w/s.sh"
 ln -s /.patina/in/s.sh "$r/hid/m/l"
 cd "$r/hid/w"
-prun "$r/hid/run" --seed 1 --work . --mount "$r/hid/m:/m" -- ./s.sh
+prun "$r/hid/run" --seed 1 --disk . --mount "$r/hid/m:/m" -- ./s.sh
 cd - >/dev/null
 [ "$(field "$r/hid/run/result.json" stop)" = exec ] || die "hidden interpreter: $(field "$r/hid/run/result.json" stop)"
 python3 -I -c 'import json,sys; sys.exit(0 if "/m/l" in json.load(open(sys.argv[1]))["refused"] else 1)' \

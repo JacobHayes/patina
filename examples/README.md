@@ -165,7 +165,7 @@ program](../docs/guide/checks.md)).
 The program writes a text in upper case to `out.txt` and exits 1 on every error, but checks
 `write` for -1 only: a short write loses the rest of a block and it still exits 0. One run
 without faults is the reference; `--ok-exit 1` lets the clean failures end `ok`, and
-`examples/checks/same-tree` compares each run's final work tree with the reference's
+`examples/checks/same-tree` compares each run's final disk with the reference's
 (`patina log tree`; [Faults off versus on](../docs/guide/checks.md)).
 
 <!-- transcript upcase

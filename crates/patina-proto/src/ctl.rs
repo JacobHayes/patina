@@ -40,8 +40,8 @@ pub struct Config {
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`proto::compute::walk`; 0: a switch is taken at its site).
     pub compute_walk: u64,
-    /// The most bytes this incarnation's logs (the boundary log and the operation log) may
-    /// hold (`[run] log-limit`, less what earlier incarnations wrote). The append that would pass
+    /// The most bytes this boot's logs (the boundary log and the operation log) may
+    /// hold (`[run] log-limit`, less what earlier boots wrote). The append that would pass
     /// it ends the run `log-limit` instead: a count of records, never of wall time, so a seed
     /// ends at the same record in every run.
     pub log_limit: u64,
@@ -53,12 +53,12 @@ pub struct Config {
     /// its records as an observation (`rec::RecKind::Observe`), outside the digest and the log
     /// limit. 0: off (every run but that replay).
     pub observe: u64,
-    /// The guest path of the work tree, the crash-modelled tmpfs (`--work DIR:GUEST`),
+    /// The guest path of the disk, the crash-modelled tmpfs (`--disk DIR:GUEST`),
     /// NUL-padded; all zero is `/work`.
     pub work: [u8; WORK_PATH_MAX],
-    /// Machines of the run, the driver (node 0) included; 0 in a run without nodes
-    /// (`crate::node`).
-    pub nodes: u64,
+    /// Machines of the run, main (machine 0) included; 0 in a run without machines
+    /// (`crate::machine`).
+    pub machines: u64,
     /// `patina debug`'s replay: the sequence number to stop the world before (`DebugCtl`).
     /// 0: off, in every other run. The rules of a debug session (the gate, a debugger's
     /// `SIGINT` and `SIGCONT` taken by the runtime, the backstop waiting while the debugger
@@ -66,11 +66,11 @@ pub struct Config {
     pub debug: u64,
 }
 
-/// The longest work tree path, with its NUL.
+/// The longest disk path, with its NUL.
 pub const WORK_PATH_MAX: usize = 64;
 
 impl Config {
-    /// The work tree's guest path.
+    /// The disk's guest path.
     pub fn work_path(&self) -> &[u8] {
         let n = self
             .work
@@ -83,7 +83,7 @@ impl Config {
             &self.work[..n]
         }
     }
-    /// Is `p` the work tree or under it?
+    /// Is `p` the disk or under it?
     pub fn on_work(&self, p: &[u8]) -> bool {
         crate::vfs::under(p, self.work_path())
     }
@@ -146,7 +146,7 @@ impl Config {
             log_paths: 0,
             observe: 0,
             work: [0; WORK_PATH_MAX],
-            nodes: 0,
+            machines: 0,
             debug: 0,
         }
     }
@@ -191,16 +191,16 @@ pub struct Ctl {
     /// Which slot holds the current request.
     pub pending_slot: AtomicU32,
     pub stats: Stats,
-    /// Bit `1 << node` set once the first guest process of that node (of this incarnation)
-    /// has installed the runtime's seccomp filter. Every later guest process of the node
+    /// Bit `1 << machine` set once the first guest process of that machine (of this boot)
+    /// has installed the runtime's seccomp filter. Every later guest process of the machine
     /// descends from it and inherits the filter, so the runtime's entry after an `execve`
     /// must not stack a second one; an inherited filter from outside the sandbox (a
     /// container's profile) is not a reason to skip it, which is why `PR_GET_SECCOMP` cannot
-    /// be the test. A node's first process descends from the keeper, not from the driver; the
-    /// supervisor clears the node's bit when it starts one (a restart's is a new tree).
+    /// be the test. A machine's first process descends from the keeper, not from main; the
+    /// supervisor clears the machine's bit when it starts one (a restart's is a new tree).
     pub filter_installed: AtomicU64,
     /// Log bytes that do not count against `Config::log_limit`: the base records of the
-    /// incarnation's starting work tree, written by the supervisor before the program runs, and
+    /// boot's starting disk, written by the supervisor before the program runs, and
     /// observations (`Config::observe`).
     pub log_exempt: AtomicU64,
     /// Address of the runtime's table of tracked shared mappings (`oplog::SharedMaps`), the
@@ -232,7 +232,7 @@ pub struct Ctl {
 }
 
 /// The phases of a run with a setup command or a final check (`[run] setup`, `[run] finally`),
-/// indexed by `PHASE_* - 1`. The launcher writes the phase an incarnation starts in; the
+/// indexed by `PHASE_* - 1`. The launcher writes the phase a boot starts in; the
 /// supervisor writes each phase's start and end (`sup::phase`). A run with neither has
 /// `phase` 0 and nothing here is consulted.
 #[repr(C)]
@@ -247,9 +247,9 @@ pub struct PhaseCtl {
     /// Per phase: where its output starts in the run's stdout and stderr (bytes).
     pub out_off: [AtomicU64; 3],
     pub err_off: [AtomicU64; 3],
-    /// In a run without nodes, the link faults' chances inside the fault window, by
-    /// `node::ELIG_*` (with nodes: `NodeTab::elig`).
-    pub elig: [AtomicU64; crate::node::ELIG_N],
+    /// In a run without machines, the link faults' chances inside the fault window, by
+    /// `machine::ELIG_*` (with machines: `MachineTab::elig`).
+    pub elig: [AtomicU64; crate::machine::ELIG_N],
 }
 
 /// `PhaseCtl::phase`.
@@ -514,9 +514,9 @@ const _: () = assert!(core::mem::size_of::<Ctl>() <= 4096);
 pub const CTL_HEADER_SIZE: usize = 4096;
 /// Header, slots, the shared filesystem state (`vfs`), the durability state (`oplog::Dur`),
 /// the network wire's table (`wire::WireTab`), the SDK's site table (`sdk::SdkTab`), the
-/// compute-point image table (`ComputeTab`), the instruction scans (`ScanTab`), then the node
-/// table (`node::NodeTab`).
-pub const CTL_SIZE: usize = crate::node::NODE_TAB_OFFSET + crate::node::NODE_TAB_SIZE;
+/// compute-point image table (`ComputeTab`), the instruction scans (`ScanTab`), then the machine
+/// table (`machine::MachineTab`).
+pub const CTL_SIZE: usize = crate::machine::MACHINE_TAB_OFFSET + crate::machine::MACHINE_TAB_SIZE;
 
 /// Images listed in `ComputeTab`, and the bytes of each one's path kept (its end).
 pub const IMAGES_MAX: usize = 32;
@@ -743,14 +743,14 @@ pub struct Slot {
     /// and `SCHED_RESET_ON_FORK` (bit 16); 0 is `SCHED_OTHER` at nice 0. Kept by the runtimes
     /// so that a get after a set answers what was set; they change nothing in the schedule.
     pub sched: AtomicU64,
-    /// The machine the thread belongs to (`crate::node`; 0: the driver, or a run without
-    /// nodes). Written by the supervisor when it reserves the slot; the runtime reads it at
+    /// The machine the thread belongs to (`crate::machine`; 0: main, or a run without
+    /// machines). Written by the supervisor when it reserves the slot; the runtime reads it at
     /// `Hello`.
-    pub node: AtomicU64,
+    pub machine: AtomicU64,
     /// What the deadline of the runtime's next `Sleep`, `FutexWait` or `TimerFdSet` is on
     /// (`CLK_*`): written by the runtime before it asks, read and cleared by the supervisor
     /// (so a call made in a signal handler before the runtime clears it does not see it),
-    /// which moves a realtime deadline when the node's clock is stepped. Not part of the request:
+    /// which moves a realtime deadline when the machine's clock is stepped. Not part of the request:
     /// the log is the same whatever it says.
     pub clock_flags: AtomicU64,
     /// The process's hard `RLIMIT_NOFILE` as the program sees it, across `execve`: written by
@@ -861,13 +861,13 @@ pub enum Op {
     /// The virtual time table is 3/4 full: drop the entries of inodes nothing can reach any
     /// more (`vfs::VtEntry::gone_dev`). Reply 0.
     VtReclaim = 61,
-    /// A control call's network words (`crate::node::Control`), from the driver's node:
-    /// [`NET_CUT`|`NET_HEAL`, from set, to set] (sets of node bits; a heal with both sets 0
+    /// A control call's network words (`crate::machine::Control`), from main:
+    /// [`NET_CUT`|`NET_HEAL`, from set, to set] (sets of machine bits; a heal with both sets 0
     /// heals every scripted cut). Reply 0.
     Net = 62,
-    /// In a run with nodes, the node of process [pid] as the supervisor's process table has
-    /// it (zombies included): reply the node, or `-ESRCH` when the run has no such process.
-    PidNode = 63,
+    /// In a run with machines, the machine of process [pid] as the supervisor's process table has
+    /// it (zombies included): reply the machine, or `-ESRCH` when the run has no such process.
+    PidMachine = 63,
     /// A `sync` or `syncfs` while a work file the caller does not map has a shadow: log what
     /// every live process's tracked mappings hold that the log does not, as at a crash point
     /// (`sup::maps`). args: [the caller's sequence number]. Reply 0.
@@ -875,11 +875,11 @@ pub enum Op {
     /// The shadow store's table is full: free the slots of inodes no process maps
     /// (`oplog::Shadows`). Reply 0.
     ShadowReclaim = 65,
-    /// A control call's node words (`crate::node::Control::Node`), from the driver's node:
-    /// [`NODE_KILL`|`NODE_START`, node]. Reply 0, `-EALREADY` (a start of a node that is up or
+    /// A control call's machine words (`crate::machine::Control::Machine`), from main:
+    /// [`MACHINE_KILL`|`MACHINE_START`, machine]. Reply 0, `-EALREADY` (a start of a machine that is up or
     /// whose start is queued, a kill of one that is down, which cancels its restart) or
-    /// `-EAGAIN` (a start past `node::BOOTS_MAX` incarnations).
-    Node = 66,
+    /// `-EAGAIN` (a start past `machine::BOOTS_MAX` boots).
+    Machine = 66,
     /// A lifecycle mark that the supervisor acts on (`crate::sdk::SETUP_COMPLETE`,
     /// `crate::sdk::FAULTS_DONE`): [`LIFE_*`, the mark's sequence number].
     /// `LIFE_SETUP_UNDECLARED`: the program marked `setup-complete` in a run that does not
@@ -921,10 +921,10 @@ pub const DEC_WIRE_FIN: u32 = 0x143;
 pub const DEC_WIRE_RST: u32 = 0x144;
 pub const DEC_WIRE_FAIL: u32 = 0x145;
 pub const DEC_WIRE_CLOSE: u32 = 0x146;
-/// A heal reached a direction a cut held (`node`): [conn, dir, the last held item's new time].
+/// A heal reached a direction a cut held (`machine`): [conn, dir, the last held item's new time].
 pub const DEC_WIRE_HEAL: u32 = 0x14a;
-/// A machine crash took a connection's end (`node`): [conn, side (1: the server's), node]. Its
-/// peer is not told; what reaches the end once its node is back is answered with a RST.
+/// A machine crash took a connection's end (`machine`): [conn, side (1: the server's), machine]. Its
+/// peer is not told; what reaches the end once its machine is back is answered with a RST.
 pub const DEC_WIRE_DEAD: u32 = 0x14b;
 /// A keepalive probe went unanswered (a cut link, a machine that is down, a blackout):
 /// [conn, side (1: the server's), probes unanswered so far].
@@ -1025,10 +1025,10 @@ impl Op {
             SdkViolation,
             VtReclaim,
             Net,
-            PidNode,
+            PidMachine,
             MapsSync,
             ShadowReclaim,
-            Node,
+            Machine,
             Lifecycle,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
@@ -1075,10 +1075,10 @@ impl Op {
             SdkViolation => "SdkViolation",
             VtReclaim => "VtReclaim",
             Net => "Net",
-            PidNode => "PidNode",
+            PidMachine => "PidMachine",
             MapsSync => "MapsSync",
             ShadowReclaim => "ShadowReclaim",
-            Node => "Node",
+            Machine => "Machine",
             Lifecycle => "Lifecycle",
         }
     }
@@ -1285,33 +1285,33 @@ pub const SIGACT_PDEATHSIG: u64 = 100;
 pub const FUTEX_SHARED_BIT: u64 = 1 << 63;
 /// Decision code: a process passed its exit barrier (args: [pid, status word, virtual signal, parent]).
 pub const DEC_PROC_GONE: u32 = 0x130;
-/// Decision code: a node's first process said `Hello` at boot (args: [node, pid, boot]; the
+/// Decision code: a machine's first process said `Hello` at boot (args: [machine, pid, boot]; the
 /// boot is 0 at the run's start and counts restarts).
-pub const DEC_NODE_START: u32 = 0x150;
-/// Decision code: the driver ended the run while node `node` still had processes (args:
-/// [node, live processes]); one per such node, in node order, before the run's end.
-pub const DEC_NODE_STOP: u32 = 0x151;
-/// In a run with nodes, slot [slot] now runs a thread of [node] (only when that changed; a
-/// slot's node is the driver's until a record says otherwise).
-pub const DEC_NODE_SLOT: u32 = 0x152;
-/// A partition the seed drew starts (`node`): [ordinal, shape, side A, side B (node bits),
-/// length ns, the bridge node (bits; 0 but for `bridge`)]. Its links are cut until `DEC_NET_PART_END`.
+pub const DEC_MACHINE_START: u32 = 0x150;
+/// Decision code: main ended the run while machine `machine` still had processes (args:
+/// [machine, live processes]); one per such machine, in machine order, before the run's end.
+pub const DEC_MACHINE_STOP: u32 = 0x151;
+/// In a run with machines, slot [slot] now runs a thread of [machine] (only when that changed; a
+/// slot's machine is main's until a record says otherwise).
+pub const DEC_MACHINE_SLOT: u32 = 0x152;
+/// A partition the seed drew starts (`machine`): [ordinal, shape, side A, side B (machine bits),
+/// length ns, the bridge machine (bits; 0 but for `bridge`)]. Its links are cut until `DEC_NET_PART_END`.
 pub const DEC_NET_PART: u32 = 0x153;
 /// The seed's partition [ordinal] ends: its links open (a link a script cut stays cut).
 pub const DEC_NET_PART_END: u32 = 0x154;
-/// Node [node] is down (`proto::node::DOWN_*`): [node, boot, how, exit status or signal,
+/// Machine [machine] is down (`proto::machine::DOWN_*`): [machine, boot, how, exit status or signal,
 /// processes killed, down time ns until its restart (0: none queued)]. A kill writes it before
-/// it kills; the end of a node's first process after it.
-pub const DEC_NODE_DOWN: u32 = 0x155;
-/// Node [node] is paused: none of its threads runs and its links hold until `DEC_NODE_RESUME`:
-/// [node, boot, by (`proto::node::BY_*`), the node's pause ordinal, length ns (0: until a
+/// it kills; the end of a machine's first process after it.
+pub const DEC_MACHINE_DOWN: u32 = 0x155;
+/// Machine [machine] is paused: none of its threads runs and its links hold until `DEC_MACHINE_RESUME`:
+/// [machine, boot, by (`proto::machine::BY_*`), the machine's pause ordinal, length ns (0: until a
 /// script resumes it)].
-pub const DEC_NODE_PAUSE: u32 = 0x156;
-/// Node [node]'s pause ends: [node, boot, how (`proto::node::PEND_*`), ordinal, ns it lasted].
-pub const DEC_NODE_RESUME: u32 = 0x157;
-/// Node [node]'s realtime clock offset changed: [node, boot, how (`proto::node::CLK_*`), the
+pub const DEC_MACHINE_PAUSE: u32 = 0x156;
+/// Machine [machine]'s pause ends: [machine, boot, how (`proto::machine::PEND_*`), ordinal, ns it lasted].
+pub const DEC_MACHINE_RESUME: u32 = 0x157;
+/// Machine [machine]'s realtime clock offset changed: [machine, boot, how (`proto::machine::CLK_*`), the
 /// change ns, the new offset ns (both two's complement), 0].
-pub const DEC_NODE_CLOCK: u32 = 0x158;
+pub const DEC_MACHINE_CLOCK: u32 = 0x158;
 
 /// A phase of the run ends (`--setup`, `--finally`; `sup::phase`): [the phase that ended
 /// (`PHASE_*`), its command's wait status word, the phase that starts (0: none, the run ends),
@@ -1345,7 +1345,7 @@ impl Ctl {
             self.denied[(nr / 64) as usize].fetch_or(1 << (nr % 64), Ordering::Relaxed);
         }
     }
-    /// Bytes of this incarnation's logs that count against `Config::log_limit`.
+    /// Bytes of this boot's logs that count against `Config::log_limit`.
     pub fn log_used(&self) -> u64 {
         let r = |a: &AtomicU64| a.load(Ordering::Relaxed);
         (r(&self.log_len) + r(&self.oplog_len) + r(&self.opdata_len))

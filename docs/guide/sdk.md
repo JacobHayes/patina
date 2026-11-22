@@ -58,7 +58,7 @@ if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path
   from `patina log events` to check a promise was backed (`patina guide checks`).
   `setup_complete()` (in a run that declares `setup = "mark"`) and `faults_done()` bound when
   faults act (`patina guide faults`).
-- **`control`** is a control call, as `patina ctl` (`patina guide nodes`).
+- **`control`** is a control call, as `patina ctl` (`patina guide machines`).
 
 A label is the finding's name, so make it say what broke (`acked-records-kept`). A library's
 sites that a program does not reach would make its sweeps `vacuous`: give them a prefix and
@@ -69,5 +69,5 @@ allow it once, `--allow-unmet 'lib-*'` or in `patina.toml`:
 allow-unmet = ["lib-*"]
 ```
 
-A driver that runs one scenario of several gives each scenario's labels a prefix and allows the
+A harness that runs one scenario of several gives each scenario's labels a prefix and allows the
 others'. Other languages can speak the wire directly: `sdk/c/patina.h` documents it.

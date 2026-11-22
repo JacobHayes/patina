@@ -12,7 +12,7 @@
  *                  one a path swap makes between the two calls. `fixed` opens beneath
  *                  the working directory with no symlink (openat2 RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS).
  *   durable [DIR]  creates public/new.txt and fsyncs it, then opens DIR (default ".", the
- *                  work tree) read-only as a directory and fsyncs it, as a durable create does;
+ *                  disk) read-only as a directory and fsyncs it, as a durable create does;
  *                  `durable DIR openat2` opens it with openat2 */
 #include <fcntl.h>
 #include <linux/openat2.h>

@@ -21,7 +21,7 @@ while :; do
     [ -z "$bad" ] || die "not ok: $bad"
     for seed in $(seq "$a" "$b"); do
         o=$d/sweep/run-$seed
-        set --; for inc in "$o"/inc-*; do [ -d "$inc/post-crash" ] && set -- "$@" "$inc"; done
+        set --; for inc in "$o"/boot-*; do [ -d "$inc/post-crash" ] && set -- "$@" "$inc"; done
         [ $# = 0 ] || python3 -I "$LIB/faults.py" crash-position "$@" >>"$d/positions"
         jq -r '.crashes[].tree_digest' "$o/result.json" >>"$d/trees"
         rm -rf "${o:?}"

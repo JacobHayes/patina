@@ -58,15 +58,15 @@ only with the same binary and Patina version.
 A fixed machine: 4 CPUs, a clock that starts at the same time every run, an empty writable
 `/work` (its working directory and `HOME`), `/tmp`, the host's `/usr` read-only, and its own
 directory read-only. Each filesystem is 256 MiB of memory (`[run] disk-mb`); a write past that
-fails with `ENOSPC`, as on a full disk. The work tree is the one crash-modelled disk. Every file
+fails with `ENOSPC`, as on a full disk. Main's disk, `/work`, is the one crash-modelled disk. Every file
 in it starts with the same modification time.
 
 ## What Patina refuses
 
 - **The network outside the run.** A connection to another host fails with `Network is
   unreachable`; names resolve only from the sandbox's `/etc/hosts`. Servers and clients must run
-  inside the run, in one program, in programs it starts, or on nodes.
-- **Some sockets.** TCP and UDP on loopback and between nodes work; multicast, broadcast, raw
+  inside the run, in one program, in programs it starts, or on machines.
+- **Some sockets.** TCP and UDP on loopback and between machines work; multicast, broadcast, raw
   sockets and ancillary data are refused: the call fails with an error and `patina run` lists it
   under `refused:`.
 - **What Patina does not model** ends the run `unsupported`, naming it (`timer_create`,

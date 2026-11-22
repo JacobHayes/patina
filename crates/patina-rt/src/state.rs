@@ -240,9 +240,9 @@ pub struct Proc {
     /// Reclaimed alternate stacks, reused before new ones are mapped.
     pub alt_free: [u64; proto::ctl::MAX_THREADS],
     pub nalt_free: usize,
-    /// The machine this process belongs to (`proto::node`; 0 in a run without nodes): read
+    /// The machine this process belongs to (`proto::machine`; 0 in a run without machines): read
     /// from the slot at each image start; a fork child's copy is its parent's.
-    pub node: usize,
+    pub machine: usize,
     /// Standard-format XSAVE component offsets and sizes (CPUID 0xD), filled on use.
     #[cfg(target_arch = "x86_64")]
     pub xsave_off: [u32; 64],
@@ -280,7 +280,7 @@ static PROC: Global<Proc> = Global(UnsafeCell::new(Proc {
     alt_of_slot: [0; proto::ctl::MAX_THREADS],
     alt_free: [0; proto::ctl::MAX_THREADS],
     nalt_free: 0,
-    node: 0,
+    machine: 0,
     #[cfg(target_arch = "x86_64")]
     xsave_off: [0; 64],
     #[cfg(target_arch = "x86_64")]
@@ -303,37 +303,37 @@ pub fn proc() -> &'static mut Proc {
     unsafe { &mut *PROC.0.get() }
 }
 
-/// The node (machine) this process belongs to: 0 in a run without nodes, and for the driver.
-/// Every reader goes through here (`Proc::node` is set at each image start, `entry`).
-pub fn node() -> usize {
-    proc().node
+/// The machine this process belongs to: 0 in a run without machines, and for main.
+/// Every reader goes through here (`Proc::machine` is set at each image start, `entry`).
+pub fn machine() -> usize {
+    proc().machine
 }
 
-/// This process's work tree: the driver's (`Config::work`), or its node's (`NodeTab::work`).
+/// This process's disk: main's (`Config::work`), or its machine's (`MachineTab::work`).
 pub fn work_path() -> &'static [u8] {
-    match node() {
+    match machine() {
         0 => config().work_path(),
-        k => unsafe { proto::node::NodeTab::at(ctl_base()) }.work_path(k),
+        k => unsafe { proto::machine::MachineTab::at(ctl_base()) }.work_path(k),
     }
 }
 
-/// This process's node's realtime clock offset (ns; `NodeTab::clock_off`): 0 for the driver
-/// and in a run without nodes.
+/// This process's machine's realtime clock offset (ns; `MachineTab::clock_off`): 0 for main
+/// and in a run without machines.
 pub fn clock_offset() -> i64 {
-    match node() {
+    match machine() {
         0 => 0,
-        k => unsafe { proto::node::NodeTab::at(ctl_base()) }.clock_offset(k),
+        k => unsafe { proto::machine::MachineTab::at(ctl_base()) }.clock_offset(k),
     }
 }
 
-/// A read of the realtime clock under offset `off`: on a node with `clock-skew-ms`, counted
-/// for the `clock` class (`NodeTab::clock_reads`).
+/// A read of the realtime clock under offset `off`: on a machine with `clock-skew-ms`, counted
+/// for the `clock` class (`MachineTab::clock_reads`).
 pub fn clock_read(off: i64) {
-    let k = node();
-    if k == 0 || k >= proto::node::MAX_NODES {
+    let k = machine();
+    if k == 0 || k >= proto::machine::MAX_MACHINES {
         return;
     }
-    let t = unsafe { proto::node::NodeTab::at(ctl_base()) };
+    let t = unsafe { proto::machine::MachineTab::at(ctl_base()) };
     if t.conf[k].skew_max_ns == 0 {
         return;
     }
@@ -351,26 +351,26 @@ pub fn clock_flags(f: u64) {
         .store(f, Relaxed);
 }
 
-/// This process's disk and memory faults: the driver's are the run's (`Ctl::faults`), another
-/// node's its own (`NodeTab::faults`).
+/// This process's disk and memory faults: main's are the run's (`Ctl::faults`), another
+/// machine's its own (`MachineTab::faults`).
 pub fn faults() -> &'static proto::faults::FaultCtl {
-    match node() {
+    match machine() {
         0 => &ctl().faults,
         k => {
-            &unsafe { proto::node::NodeTab::at(ctl_base()) }.faults
-                [k.min(proto::node::MAX_NODES - 1)]
+            &unsafe { proto::machine::MachineTab::at(ctl_base()) }.faults
+                [k.min(proto::machine::MAX_MACHINES - 1)]
         }
     }
 }
 
-/// Is `p` this process's work tree or under it?
+/// Is `p` this process's disk or under it?
 pub fn on_work(p: &[u8]) -> bool {
     proto::vfs::under(p, work_path())
 }
 
-/// Does the run have nodes (`config().nodes`: the driver and the declared nodes, or 0)?
-pub fn with_nodes() -> bool {
-    config().nodes > 0
+/// Does the run have machines (`config().machines`: main and the declared machines, or 0)?
+pub fn with_machines() -> bool {
+    config().machines > 0
 }
 
 impl Proc {

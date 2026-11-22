@@ -48,7 +48,7 @@ for n in $hinted; do
     for s in 1 2 3; do
         d=$o/$n-$s-on
         [ "$(field "$d/result.json" outcome)" = ok ] || die "$n seed $s: $(field "$d/result.json" outcome) $(field "$d/result.json" message)"
-        grep -q 'counter=4000' "$d/inc-0/stdout" || die "$n seed $s: wrong count: $(cat "$d/inc-0/stdout")"
+        grep -q 'counter=4000' "$d/boot-1/stdout" || die "$n seed $s: wrong count: $(cat "$d/boot-1/stdout")"
         [ "$(field "$d/result.json" sched.pause_points)" -gt 0 ] || die "$n seed $s: no pause point"
     done
     d=$o/$n-1-off

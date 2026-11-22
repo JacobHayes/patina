@@ -13,9 +13,9 @@ refused() { jq -c '.refused' "$1/result.json"; }
 vfy denyprobe 3 repeat "$G17" -- /guest/denyprobe
 d=$out/denyprobe/run-0
 awk '/^(ioctl FS|fcntl|prctl|getsockopt SO_[CPM]|setsockopt|getsockopt SOL_IP)/ { n++; if ($(NF-1) != "r=-1") bad++ }
-     END { exit !(n == 13 && bad == 0) }' "$d/inc-0/stdout" || die "denyprobe: an unlisted request was not refused"
-grep -q '^getsockopt SO_TYPE (listed) *r=0' "$d/inc-0/stdout" || die "denyprobe: a listed option was refused"
-awk '/^ioctl-generic/ { if ($(NF-1) != "r=-1" || $NF != "errno=25") bad++ } END { exit bad > 0 }' "$d/inc-0/stdout" ||
+     END { exit !(n == 13 && bad == 0) }' "$d/boot-1/stdout" || die "denyprobe: an unlisted request was not refused"
+grep -q '^getsockopt SO_TYPE (listed) *r=0' "$d/boot-1/stdout" || die "denyprobe: a listed option was refused"
+awk '/^ioctl-generic/ { if ($(NF-1) != "r=-1" || $NF != "errno=25") bad++ } END { exit bad > 0 }' "$d/boot-1/stdout" ||
     die "denyprobe: a non-terminal request in the terminal range did not answer ENOTTY"
 for k in '"ioctl:0x80087601"' '"fcntl:1024"' '"prctl:30"' '"sockopt:1:57"' '"sockopt:0:1"' '"ioctl:0x5452"' '"ioctl:0x5460"' '"ioctl:0x5411"'; do
     refused "$d" | grep -q "$k" || die "denyprobe: $k not recorded"
@@ -24,7 +24,7 @@ echo "denyprobe: 13 unlisted requests refused (ENOTTY, EINVAL, ENOPROTOOPT) and 
 # Path walks out of the policy's view: every attempt refused (ENOENT, or ELOOP for a loop),
 # never a descriptor of the supervisor's.
 vfy pathescape 3 repeat "$G17" -- /guest/pathescape
-s=$out/pathescape/run-0/inc-0/stdout
+s=$out/pathescape/run-0/boot-1/stdout
 awk '/^chdir \/ / { next } { n++; if (!($(NF-1) == "r=-1" && ($NF == "errno=2" || $NF == "errno=40"))) { bad++; print } }
      END { exit !(n == 28 && bad == 0) }' "$s" || die "pathescape: a walk was not refused"
 refused "$out/pathescape/run-0" | grep -q '"/proc/1/fd/3001"' || die "pathescape: refusal not recorded"
@@ -35,8 +35,8 @@ for k in a b; do
     rm -rf "${out:?}/procescape-$k"
     timeout 300 "$PATINA" run --seed 1 --out "$out/procescape-$k" --mount "$G12":/guest:copy -- /guest/procescape >/dev/null 2>&1 || true
 done
-cmp -s "$out/procescape-a/inc-0/stdout" "$out/procescape-b/inc-0/stdout" || die "procescape: stdout depends on the run directory"
+cmp -s "$out/procescape-a/boot-1/stdout" "$out/procescape-b/boot-1/stdout" || die "procescape: stdout depends on the run directory"
 lhs=$(digest "$out/procescape-a"); rhs=$(digest "$out/procescape-b")
 [ "$lhs" = "$rhs" ] || die "procescape: digests differ"
-awk '{ if ($0 ~ /fd=[0-9]/ && $0 !~ /fd=-1/) bad++ } END { exit bad > 0 }' "$out/procescape-a/inc-0/stdout" || die "procescape: an escape opened"
+awk '{ if ($0 ~ /fd=[0-9]/ && $0 !~ /fd=-1/) bad++ } END { exit bad > 0 }' "$out/procescape-a/boot-1/stdout" || die "procescape: an escape opened"
 echo "B7 procescape: every escape refused, same stdout and digest from two run directories"

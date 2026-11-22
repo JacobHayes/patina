@@ -5,11 +5,11 @@
 o=$RUNS/07-locks; mkdir -p "$o"
 for seed in 1; do
     verify_ok "$o/v$seed" "$seed" 4 -- /guest/locks
-    [ "$(cat "$o/v$seed/run-0/inc-0/stdout")" = "flock entries 400 violations 0
-ofd entries 400 violations 0" ] || die "seed $seed: $(cat "$o/v$seed/run-0/inc-0/stdout")"
+    [ "$(cat "$o/v$seed/run-0/boot-1/stdout")" = "flock entries 400 violations 0
+ofd entries 400 violations 0" ] || die "seed $seed: $(cat "$o/v$seed/run-0/boot-1/stdout")"
 done
 for p in 500 1000; do
     run_ok "$o/p$p" 1 --config "$("$PATINA_CFG" preempt-permille="$p")" -- /guest/locks
-    echo "preempt $p: $(tr '\n' ' ' <"$o/p$p/inc-0/stdout")"
+    echo "preempt $p: $(tr '\n' ' ' <"$o/p$p/boot-1/stdout")"
 done
 io_line locks $(ls "$o"/v*/run-0/result.json "$o"/p*/result.json)

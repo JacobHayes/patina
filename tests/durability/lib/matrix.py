@@ -5,7 +5,7 @@ D: `patina verify --runs COSTS_D_RUNS --vary cpu,load,aslr,sandbox` identical fo
    (defaults 20 and 5), faults off and with the workload's fault configuration
    (tests/durability/bench/workloads.py); and seeds 1-10, one run each, faults off: number of distinct
    digests (>= 3 required for concurrent workloads).
-Self-check: `patina log ops --check` on seed 1 faults off and on (every incarnation).
+Self-check: `patina log ops --check` on seed 1 faults off and on (every boot).
 F: the workload's fault scenario is checked by its own task's area scripts (named per workload
    in the table; ./check TNN).
 Usage: matrix.py OUTDIR [W...]. Writes OUTDIR/matrix.tsv and prints the table.
@@ -59,7 +59,7 @@ for w in only:
     o = outcome(rd)
     r_ok = o["outcome"] == "ok" and o["guest"]["exit"] == 0
     # The tracker's self-check (replay of the operation log = the live tree), faults off (the R
-    # run) and on (seed 1 with the workload's fault configuration), every incarnation.
+    # run) and on (seed 1 with the workload's fault configuration), every boot.
     fd = os.path.join(base, "r-faults")
     subprocess.run([PATINA, "run", "--seed", "1", "--out", fd, "--mount", gdir + ":/guest:copy", *extra, *faults, "--", *argv],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)

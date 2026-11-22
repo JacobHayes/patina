@@ -100,15 +100,15 @@ pub const FD_STDERR: i32 = 3022;
 /// The plan broker: a `SOCK_SEQPACKET` end whose peer is the launcher (only with load-time
 /// points; `proto::plan` has the protocol).
 pub const FD_PLAN: i32 = 3008;
-/// The supervisor's System V shared memory carried from one incarnation to the next after a
+/// The supervisor's System V shared memory carried from one boot to the next after a
 /// process crash (`sup::shm`; a memfd the launcher makes once per run). Not given to guests.
 pub const FD_SHM: i32 = 3023;
-/// A run with nodes: PID 1's end of the socket pair to the sandbox's keeper, which starts each
-/// node's first process in its own view (`SOCK_SEQPACKET`; `cli::sandbox::NodeReq`). Kept by
-/// the supervisor, never given to guests. Absent in a run without nodes.
-pub const FD_NODES: i32 = 3024;
+/// A run with machines: PID 1's end of the socket pair to the sandbox's keeper, which starts each
+/// machine's first process in its own view (`SOCK_SEQPACKET`; `cli::sandbox::MachineReq`). Kept by
+/// the supervisor, never given to guests. Absent in a run without machines.
+pub const FD_MACHINES: i32 = 3024;
 /// The shadow stores (`oplog::Shadows`): `oplog::SHADOW_SLOTS` sparse memfds from here, which
-/// the supervisor makes at each incarnation's start and every guest process it starts
+/// the supervisor makes at each boot's start and every guest process it starts
 /// inherits. Read and written by the runtime and the supervisor only; never mapped. At the top
 /// of the descriptor range (the sandbox's `RLIMIT_NOFILE` is `FD_LIMIT`), far above the
 /// runtime's own (`FD_RT_DYN`).
@@ -127,7 +127,7 @@ pub const FD_PROBE_MEM: i32 = 3090;
 pub const FD_PROBE_PAGEMAP: i32 = 3091;
 pub const FD_PROBE_MAPS: i32 = 3092;
 pub const FD_PROBE_TRACK: i32 = 3093;
-const _: () = assert!(FD_PROBE_TRACK < FD_RT_DYN && FD_PROBE_MEM > FD_NODES);
+const _: () = assert!(FD_PROBE_TRACK < FD_RT_DYN && FD_PROBE_MEM > FD_MACHINES);
 
 /// Virtual time origin of the monotonic clock, and the realtime epoch added to it
 /// (2026-01-01T00:00:00Z).

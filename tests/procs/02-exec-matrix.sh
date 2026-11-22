@@ -10,7 +10,7 @@ o=$RUNS/02-exec-matrix
 mkdir -p "$o"
 verify_ok "$o/v" 1 3 cpu,load /guest/exec-matrix
 native "$o/native.txt" /guest/exec-matrix || die "native run: exit $?"
-cmp "$o/native.txt" "$o/v/run-0/inc-0/stdout" || { diff "$o/native.txt" "$o/v/run-0/inc-0/stdout" | head -20; die "differs from native"; }
+cmp "$o/native.txt" "$o/v/run-0/boot-1/stdout" || { diff "$o/native.txt" "$o/v/run-0/boot-1/stdout" | head -20; die "differs from native"; }
 echo "stdout equals the native run ($(wc -l <"$o/native.txt") lines)"
-python3 -I "$HERE/check_procs.py" matrix "$o/v/run-0/inc-0/stdout" || die "wrong values"
+python3 -I "$HERE/check_procs.py" matrix "$o/v/run-0/boot-1/stdout" || die "wrong values"
 echo "exec-matrix $(counts "$o/v/run-0")"

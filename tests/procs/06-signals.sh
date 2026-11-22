@@ -6,6 +6,6 @@ o=$RUNS/06-signals
 mkdir -p "$o"
 verify_ok "$o/v" 1 3 cpu,load /guest/xsig
 native "$o/native.txt" /guest/xsig || die "native: exit $?"
-cmp "$o/native.txt" "$o/v/run-0/inc-0/stdout" || { diff "$o/native.txt" "$o/v/run-0/inc-0/stdout"; die "differs from native"; }
-python3 -I "$HERE/check_procs.py" xsig "$o/v/run-0/inc-0/stdout" || die "wrong values"
-cat "$o/v/run-0/inc-0/stdout"
+cmp "$o/native.txt" "$o/v/run-0/boot-1/stdout" || { diff "$o/native.txt" "$o/v/run-0/boot-1/stdout"; die "differs from native"; }
+python3 -I "$HERE/check_procs.py" xsig "$o/v/run-0/boot-1/stdout" || die "wrong values"
+cat "$o/v/run-0/boot-1/stdout"

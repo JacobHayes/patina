@@ -72,14 +72,14 @@ echo "b. races-gcc b (gcc, edges): failure on $found of the seeds run at compute
 
 for p in cxx cxx-gcc; do
     [ "$(field "$o/$p/result.json" outcome)" = ok ] || die "c. $p: $(res "$o/$p")"
-    [ "$(tail -3 "$o/$p/inc-0/stdout" | paste -sd'|')" = 'ctor ok|total=6000 caught=60 ok|dtor ok' ] ||
-        die "c. $p printed $(tail -3 "$o/$p/inc-0/stdout" | paste -sd'|')"
+    [ "$(tail -3 "$o/$p/boot-1/stdout" | paste -sd'|')" = 'ctor ok|total=6000 caught=60 ok|dtor ok' ] ||
+        die "c. $p printed $(tail -3 "$o/$p/boot-1/stdout" | paste -sd'|')"
 done
 echo "c. C++: cxx ($(field "$o/cxx/result.json" compute.events) events) and cxx-gcc ($(field "$o/cxx-gcc/result.json" compute.events) events) end ok with their constructor, exceptions and destructor"
 
 for r in shlib-1 shlib-2 shlib-stock; do
     [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "d. $r: $(res "$o/$r")"
-    tail -1 "$o/$r/inc-0/stdout" | grep -q 'compdl=29992,29992 ok$' || die "d. $r printed $(tail -1 "$o/$r/inc-0/stdout")"
+    tail -1 "$o/$r/boot-1/stdout" | grep -q 'compdl=29992,29992 ok$' || die "d. $r printed $(tail -1 "$o/$r/boot-1/stdout")"
     # Each image that said hello is named, the program only when its own hooks did; the
     # address space started once.
     im=$(field "$o/$r/result.json" compute.images | python3 -I -c 'import json,sys; i=json.load(sys.stdin); print(" ".join(sorted(e["path"] for e in i)), sum(e["starts"] for e in i))')
@@ -88,7 +88,7 @@ for r in shlib-1 shlib-2 shlib-stock; do
     [ "$im" = "$want 1" ] || die "d. $r: images and starts $im, not $want 1"
 done
 # The program, libcomp.so, and libcompdl.so once per dlopen: four hook copies, one cell.
-"$PATINA" log dump "$o/shlib-1/inc-0/boundary.log" | sed -n 's/.* patina_sdk .*args=\[0x8, .*ret=\([0-9]*\) .*/\1/p' >"$o/shlib.hellos"
+"$PATINA" log dump "$o/shlib-1/boot-1/boundary.log" | sed -n 's/.* patina_sdk .*args=\[0x8, .*ret=\([0-9]*\) .*/\1/p' >"$o/shlib.hellos"
 [ "$(wc -l <"$o/shlib.hellos")" = 4 ] || die "d. shlib: $(wc -l <"$o/shlib.hellos") hellos, not one per hook copy loaded"
 [ "$(sort -u "$o/shlib.hellos" | wc -l)" = 1 ] || die "d. shlib: the hellos got more than one cell: $(sort -u "$o/shlib.hellos" | paste -sd' ')"
 lhs=$(field "$o/shlib-1/result.json" digest); rhs=$(field "$o/shlib-2/result.json" digest)

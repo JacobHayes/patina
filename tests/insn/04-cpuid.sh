@@ -15,9 +15,9 @@ done
 # The same core twice gives the same dump (so what differs is the core, not the run).
 rm -rf "${o:?}/again"
 timeout 120 taskset -c 0 "$PATINA" run --seed 1 --out "$o/again" --mount "$PATINA_GUESTS":/guest:copy -- /guest/insn-cpuid >/dev/null
-cmp -s "$o/again/inc-0/stdout" "$o/cpu-0/inc-0/stdout" || die "two dumps on cpu 0 differ"
+cmp -s "$o/again/boot-1/stdout" "$o/cpu-0/boot-1/stdout" || die "two dumps on cpu 0 differ"
 echo "cores: $cpus"
-python3 -I "$HERE/lib/cpuid_diff.py" $(for c in $cpus; do echo "$o/cpu-$c/inc-0/stdout"; done) | tee "$o/report.txt"
+python3 -I "$HERE/lib/cpuid_diff.py" $(for c in $cpus; do echo "$o/cpu-$c/boot-1/stdout"; done) | tee "$o/report.txt"
 grep -q '^diff ' "$o/report.txt" || echo "no field differs between cores"
 dep=""
 for w in "hello-dyn a b" c-threads order rs-threads insn-go-hello "/usr/bin/python3 -c pass"; do

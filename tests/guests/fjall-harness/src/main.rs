@@ -1,6 +1,6 @@
 //! Crash-recovery harness for fjall, an ordinary binary run under `patina run`.
 //!
-//! Incarnation 0 (no `ROOT/db` yet): create the db, commit batches that insert
+//! Boot 0 (no `ROOT/db` yet): create the db, commit batches that insert
 //! key i into two keyspaces atomically, and every few batches call
 //! `db.persist(SyncAll)` and then append the acknowledged high-water mark to an
 //! fsynced ack file. Background flush/compaction is forced via a tiny memtable.

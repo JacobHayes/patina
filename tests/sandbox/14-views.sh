@@ -1,7 +1,7 @@
 # PID 1 of the sandbox, as it is when it executes the supervisor, has no capability in any set
-# and no_new_privs, as uid 1000. Another view of the sandbox (`Keeper::view`, the part node
-# work builds on): `patina __sandbox-views` makes a sandbox whose keeper adds two views, n1 and
-# n2. Each view has its own mount, UTS and IPC namespace, work tree, /tmp and hostname, and
+# and no_new_privs, as uid 1000. Another view of the sandbox (`Keeper::view`, the part machines
+# build on): `patina __sandbox-views` makes a sandbox whose keeper adds two views, n1 and
+# n2. Each view has its own mount, UTS and IPC namespace, disk, /tmp and hostname, and
 # shares the sandbox's PID, network and guests' user namespaces; its process has no capability
 # and no_new_privs, runs as the guest's user, and PID 1 reaps it. What one view writes, no
 # other view and not the base sees.
@@ -26,7 +26,7 @@ for n in ("n1", "n2"):
 assert v["base"]["hostname"] != v["n1"]["hostname"] != v["n2"]["hostname"] != v["base"]["hostname"]
 assert host_name not in (v["n1"]["hostname"], v["n2"]["hostname"])
 assert v["n1"]["hostname"] == "n1" and v["n2"]["hostname"] == "n2"
-# Each view's work tree and /tmp are its own; the base kept what it wrote.
+# Each view's disk and /tmp are its own; the base kept what it wrote.
 for n in ("base", "n1", "n2"):
     assert v[n]["work"] == n, (n, v[n]["work"])
 assert "mark" not in v["base"]["tmp"] and v["n1"]["tmp"] == ["mark"] and v["n2"]["tmp"] == ["mark"]

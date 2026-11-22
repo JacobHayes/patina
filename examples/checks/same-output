@@ -2,8 +2,8 @@
 # same-output [--relax FIELD]... REF RUN: the run's stdout and exit status are the reference's.
 # REF is a run directory, or a sweep of the reference over the same --cases file with --seeds 1
 # --keep all, whose seed-1/$PATINA_CASE_NAME is the reference for each case. Each side's last
-# incarnation is compared. A reference made from other input (another case, case settings,
-# work tree or --stdin: same-input.sh) is an error, not a finding; --relax FIELD compares
+# boot is compared. A reference made from other input (another case, case settings,
+# disk or --stdin: same-input.sh) is an error, not a finding; --relax FIELD compares
 # anyway. For `patina run --check`; needs jq.
 set -u # lint-allow: strict-line — no set -e: exit 1 is a finding, so a command that fails exits 2 (error) itself
 . "$(dirname "$0")/same-input.sh"
@@ -13,7 +13,7 @@ ref=$1
 [ -z "${PATINA_CASE_NAME:-}" ] || ref=$ref/seed-1/$PATINA_CASE_NAME
 # shellcheck disable=SC2086 # the fields, one word each
 same_input "$ref" "$2" $relax || exit 2
-last() { k=0; while [ -d "$1/inc-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/inc-$k"; }
+last() { k=1; while [ -d "$1/boot-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/boot-$k"; }
 want=$(jq -r .guest.exit "$ref/result.json") || exit 2
 [ "$PATINA_EXIT" = "$want" ] || { echo "wrong-exit: exit $PATINA_EXIT, the reference exited $want"; exit 1; }
 cmp -s "$(last "$ref")/stdout" "$(last "$2")/stdout"

@@ -68,8 +68,8 @@ pub mod compute;
 pub use sys::{is_simulated, mark};
 
 /// A control call in a run with several machines, e.g. `control("partition a b")`: `Err` holds
-/// the errno Patina answered (`EPERM` outside the driver's node, `ENOENT` for an unknown node,
-/// `EINVAL` for other words, `EALREADY` or `EAGAIN` for a node in the wrong state), or `ENOSYS`
+/// the errno Patina answered (`EPERM` outside main, `ENOENT` for an unknown machine,
+/// `EINVAL` for other words, `EALREADY` or `EAGAIN` for a machine in the wrong state), or `ENOSYS`
 /// outside Patina.
 /// The words are those of `patina ctl` (`sdk/c/patina.h` in the Patina repository).
 pub fn control(words: &str) -> Result<(), i32> {
@@ -82,8 +82,8 @@ pub fn setup_complete() {
     sys::mark("setup-complete");
 }
 
-/// Mark the end of the faults: no fault acts after this call (cut links heal, paused nodes
-/// resume, down nodes come back). Call it before the final checks.
+/// Mark the end of the faults: no fault acts after this call (cut links heal, paused machines
+/// resume, down machines come back). Call it before the final checks.
 pub fn faults_done() {
     sys::mark("faults-done");
 }

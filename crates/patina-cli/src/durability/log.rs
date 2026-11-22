@@ -62,7 +62,7 @@ pub struct OpLog {
 }
 
 impl OpLog {
-    /// Load `dir/oplog.meta` and `dir/oplog.data` (an incarnation directory).
+    /// Load `dir/oplog.meta` and `dir/oplog.data` (a boot directory).
     pub fn load(dir: &Path) -> Result<OpLog, String> {
         let meta = read_all(&dir.join("oplog.meta"))?;
         let data = read_all(&dir.join("oplog.data"))?;
@@ -96,35 +96,35 @@ impl OpLog {
     }
 }
 
-/// Split the shared operation log of a run with nodes, `inc/oplog.*`, whose kinds carry their
-/// node (`proto::oplog::tag_kind`), into one log per disk: node `k`'s records (`k` > 0) go to
+/// Split the shared operation log of a run with machines, `bdir/oplog.*`, whose kinds carry their
+/// machine (`proto::oplog::tag_kind`), into one log per disk: machine `k`'s records (`k` > 0) go to
 /// `disk(k, b)/oplog.*`, where `b` is the boot its disk began with (0, or the boot after a
 /// machine crash), and the live tree record that ends each disk (`KIND_LIVE_TREE`, at a
-/// machine crash or at the end of the run) to `disk(k, b)/live.tree`; the driver's stay in
-/// `inc/oplog.*`. Every log is then plain, with its records' bytes in its own `oplog.data`, in
+/// machine crash or at the end of the run) to `disk(k, b)/live.tree`; main's stay in
+/// `bdir/oplog.*`. Every log is then plain, with its records' bytes in its own `oplog.data`, in
 /// the shared log's order. A log without a tagged record is left as it is.
-pub fn split_nodes(
-    inc: &Path,
+pub fn split_machines(
+    bdir: &Path,
     disk: impl Fn(usize, u64) -> Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    use proto::oplog::{kind_node, KIND_LIVE_TREE, KIND_MASK};
+    use proto::oplog::{kind_machine, KIND_LIVE_TREE, KIND_MASK};
     use std::collections::BTreeMap;
-    let meta = read_all(&inc.join("oplog.meta"))?;
+    let meta = read_all(&bdir.join("oplog.meta"))?;
     let recs: Vec<OpRec> = meta
         .as_chunks::<OPREC_SIZE>()
         .0
         .iter()
         .map(|c| OpRec::from_bytes(c))
         .collect();
-    if recs.iter().all(|r| kind_node(r.kind) == 0) {
+    if recs.iter().all(|r| kind_machine(r.kind) == 0) {
         return Ok(());
     }
-    let data = read_all(&inc.join("oplog.data"))?;
-    // Per disk (node, first boot): its meta, its data, its live tree.
+    let data = read_all(&bdir.join("oplog.data"))?;
+    // Per disk (machine, first boot): its meta, its data, its live tree.
     type Disk = (Vec<u8>, Vec<u8>, Option<Vec<u8>>);
     let mut out: BTreeMap<(usize, u64), Disk> = BTreeMap::new();
     out.entry((0, 0)).or_default();
-    // Each node's disk now, and the boot its next disk begins with (after a machine crash).
+    // Each machine's disk now, and the boot its next disk begins with (after a machine crash).
     let mut cur: BTreeMap<usize, u64> = BTreeMap::new();
     let mut next: BTreeMap<usize, u64> = BTreeMap::new();
     for (i, r) in recs.iter().enumerate() {
@@ -132,7 +132,7 @@ pub fn split_nodes(
         let bytes = data
             .get(o..o + l)
             .ok_or_else(|| format!("oplog record {i}: data beyond oplog.data"))?;
-        let k = kind_node(r.kind);
+        let k = kind_machine(r.kind);
         let b = *cur.entry(k).or_insert(0);
         let e = out.entry((k, b)).or_default();
         let kind = r.kind & KIND_MASK;
@@ -159,9 +159,10 @@ pub fn split_nodes(
     };
     for ((k, b), (m, d, tree)) in out {
         let dir = if k == 0 {
-            inc.to_path_buf()
+            bdir.to_path_buf()
         } else {
-            disk(k, b).ok_or_else(|| format!("oplog: records of node {k}, which the run lacks"))?
+            disk(k, b)
+                .ok_or_else(|| format!("oplog: records of machine {k}, which the run lacks"))?
         };
         fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         write(dir.join("oplog.meta"), &m)?;

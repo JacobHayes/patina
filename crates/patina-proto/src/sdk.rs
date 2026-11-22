@@ -68,7 +68,7 @@ pub const COMPUTE_COMPARE: u64 = 4;
 /// that interprets, through libc, so the image noted is the program, not the image at the call.
 pub const COMPUTE_LINE: u64 = 8;
 pub const COMPUTE_KINDS: u64 = COMPUTE_EDGE | COMPUTE_ACCESS | COMPUTE_COMPARE | COMPUTE_LINE;
-/// A control call (`crate::node` has the grammar): `ptr`/`len` name the words alone, no
+/// A control call (`crate::machine` has the grammar): `ptr`/`len` name the words alone, no
 /// header, 1 to `TEXT_MAX` bytes. Answers 0 or -errno; the trap record's strings are the label
 /// `control` and the words.
 pub const OP_CONTROL: u64 = 10;
@@ -186,17 +186,17 @@ pub const BUGGIFY_ALL: u64 = 1;
 pub const BUGGIFY_NAMED: u64 = 2;
 
 /// One machine's fault-point settings, written by the launcher before the run; read-only
-/// afterwards. The driver's (and a run without nodes') is `SdkTab::cfg`, a node's
-/// `node::NodeTab::sdk`.
+/// afterwards. Main's (and a run without machines') is `SdkTab::cfg`, a machine's
+/// `machine::MachineTab::sdk`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SdkCfg {
     /// `BUGGIFY_*`.
     pub buggify: u64,
-    /// The machine's seed: the run's, or a node's own, so each node draws its own decisions.
+    /// The machine's seed: the run's, or a machine's own, so each machine draws its own decisions.
     pub seed: u64,
-    /// Incarnation: firing draws are fresh after a restart; activation and knobs are per run.
-    pub incarnation: u64,
+    /// Boot: firing draws are fresh after a restart; activation and knobs are per run.
+    pub boot: u64,
     pub npoints: u64,
     /// (label hash, permille): the point is active and fires at this rate (0: never).
     pub points: [[u64; 2]; MAX_POINTS],
@@ -207,7 +207,7 @@ impl Default for SdkCfg {
         SdkCfg {
             buggify: BUGGIFY_OFF,
             seed: 0,
-            incarnation: 0,
+            boot: 0,
             npoints: 0,
             points: [[0; 2]; MAX_POINTS],
         }
@@ -245,7 +245,7 @@ impl SdkCfg {
     }
     /// Does the `n`-th evaluation of a point fire at `rate`?
     pub fn fires(&self, label: u64, rate: u64, n: u64) -> bool {
-        let n = n ^ self.incarnation.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        let n = n ^ self.boot.wrapping_mul(0x2545_f491_4f6c_dd1d);
         point_draw(self.seed, label, D_FIRE, n) % 1000 < rate
     }
     /// A knob's value for this run: `default` unless the point is active.
@@ -265,7 +265,7 @@ impl SdkCfg {
         } else {
             (1, max)
         };
-        let n = n ^ self.incarnation.wrapping_mul(0x2545_f491_4f6c_dd1d);
+        let n = n ^ self.boot.wrapping_mul(0x2545_f491_4f6c_dd1d);
         lo + point_draw(self.seed, label, D_DELAY, n) % (hi - lo + 1)
     }
 }
@@ -285,10 +285,10 @@ pub struct Site {
     pub kind: u8,
     pub label_len: u8,
     pub loc_len: u8,
-    /// The node whose fault point this is (0: the driver's, or a site every node shares). In a
-    /// run with nodes a node's fault points (`buggify`, `knob`, `delay`) are sites of its own,
-    /// counted and drawn for that node alone.
-    pub node: u8,
+    /// The machine whose fault point this is (0: main's, or a site every machine shares). In a
+    /// run with machines a machine's fault points (`buggify`, `knob`, `delay`) are sites of its own,
+    /// counted and drawn for that machine alone.
+    pub machine: u8,
     pub _pad: [u8; 4],
     /// Reports (assertions), evaluations (fault points, knobs, delays).
     pub evaluated: u64,
@@ -330,12 +330,12 @@ pub struct SdkTab {
 pub const SDK_OFFSET: usize = (crate::wire::WIRE_OFFSET + crate::wire::WIRE_SIZE + 0xFFF) & !0xFFF;
 pub const SDK_SIZE: usize = core::mem::size_of::<SdkTab>();
 
-fn site_key(kind: u8, label: u64, node: u8) -> u64 {
-    mix64(label ^ (kind as u64 | (node as u64) << 8).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1
+fn site_key(kind: u8, label: u64, machine: u8) -> u64 {
+    mix64(label ^ (kind as u64 | (machine as u64) << 8).wrapping_mul(0x9e37_79b9_7f4a_7c15)) | 1
 }
 
-/// Whether a kind's sites are each node's own (fault points), not shared by the run.
-pub fn per_node(kind: u8) -> bool {
+/// Whether a kind's sites are each machine's own (fault points), not shared by the run.
+pub fn per_machine(kind: u8) -> bool {
     matches!(kind, KIND_BUGGIFY | KIND_KNOB | KIND_DELAY)
 }
 
@@ -352,11 +352,11 @@ impl SdkTab {
         self.site_on(kind, label, 0)
     }
 
-    /// The site of (kind, label) on node `node` (a fault point's: `per_node`; 0 otherwise).
-    pub fn site_on(&mut self, kind: u8, label: &[u8], node: u8) -> Option<&mut Site> {
-        let node = if per_node(kind) { node } else { 0 };
+    /// The site of (kind, label) on machine `machine` (a fault point's: `per_machine`; 0 otherwise).
+    pub fn site_on(&mut self, kind: u8, label: &[u8], machine: u8) -> Option<&mut Site> {
+        let machine = if per_machine(kind) { machine } else { 0 };
         let lh = label_hash(label);
-        let key = site_key(kind, lh, node);
+        let key = site_key(kind, lh, machine);
         let mut b = (key as usize) % NBUCKET;
         loop {
             let i = self.index[b] as usize;
@@ -364,7 +364,7 @@ impl SdkTab {
                 break;
             }
             let s = &self.sites[i - 1];
-            if s.key == key && s.kind == kind && s.node == node && s.label() == label {
+            if s.key == key && s.kind == kind && s.machine == machine && s.label() == label {
                 return Some(&mut self.sites[i - 1]);
             }
             b = (b + 1) % NBUCKET;
@@ -380,7 +380,7 @@ impl SdkTab {
         s.key = key;
         s.label_hash = lh;
         s.kind = kind;
-        s.node = node;
+        s.machine = machine;
         let l = label.len().min(LABEL_MAX);
         s.label_len = l as u8;
         s.label[..l].copy_from_slice(&label[..l]);

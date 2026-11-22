@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/13
 run "$d/dir" 1 --fault fs-error-at=close:1 -- /guest/closedir
-grep -qx "dir close 0 ok" "$d/dir/inc-0/stdout" || die "directory close faulted: $(cat "$d/dir/inc-0/stdout")"
+grep -qx "dir close 0 ok" "$d/dir/boot-1/stdout" || die "directory close faulted: $(cat "$d/dir/boot-1/stdout")"
 run "$d/file" 1 --fault fs-error-at=close:2 -- /guest/closedir
-grep -q "^file close -1 " "$d/file/inc-0/stdout" || die "file close not faulted: $(cat "$d/file/inc-0/stdout")"
-echo "dir close:1 -> $(head -1 "$d/dir/inc-0/stdout"); file close:2 -> $(tail -1 "$d/file/inc-0/stdout")"
+grep -q "^file close -1 " "$d/file/boot-1/stdout" || die "file close not faulted: $(cat "$d/file/boot-1/stdout")"
+echo "dir close:1 -> $(head -1 "$d/dir/boot-1/stdout"); file close:2 -> $(tail -1 "$d/file/boot-1/stdout")"

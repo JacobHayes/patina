@@ -2,7 +2,7 @@
 //! 3002 (`oplog.meta`), variable data (names, written bytes) in 3003 (`oplog.data`).
 //! Appended by the runtime after each successful mutating call on `/work`, while it holds
 //! the turn; the supervisor writes the base records (the initial tree) before the first
-//! guest starts. Inode numbers are the tmpfs numbers of the incarnation that wrote them.
+//! guest starts. Inode numbers are the tmpfs numbers of the boot that wrote them.
 //!
 //! Fields of `OpRec::a` per kind (data = the record's bytes in `oplog.data`):
 //!
@@ -125,32 +125,32 @@ pub const FSYNC_NO_COMMIT: u64 = 2;
 /// `msync(MS_SYNC)`.
 pub const FSYNC_MSYNC: u64 = 4;
 
-/// `OpRec::kind` of a run with nodes: the low 16 bits are the `OpKind`, the next 8 the node
-/// whose work tree the record is about (0: the driver's, so a run without nodes has plain
-/// kinds). The launcher splits such a log into one log per node (`launcher::disks`), whose
+/// `OpRec::kind` of a run with machines: the low 16 bits are the `OpKind`, the next 8 the machine
+/// whose disk the record is about (0: main's, so a run without machines has plain
+/// kinds). The launcher splits such a log into one log per machine (`launcher::disks`), whose
 /// kinds are plain again; nothing else reads a tagged log.
 pub const KIND_MASK: u32 = 0xffff;
-pub const KIND_NODE_SHIFT: u32 = 16;
+pub const KIND_MACHINE_SHIFT: u32 = 16;
 
-pub fn tag_kind(kind: u32, node: usize) -> u32 {
-    kind | ((node as u32 & 0xff) << KIND_NODE_SHIFT)
+pub fn tag_kind(kind: u32, machine: usize) -> u32 {
+    kind | ((machine as u32 & 0xff) << KIND_MACHINE_SHIFT)
 }
 
-/// The raw kind of a record of a tagged log holding its node's live work tree, as a tree
-/// archive (the supervisor's, at the end of the run): the launcher makes it that node's
+/// The raw kind of a record of a tagged log holding its machine's live disk, as a tree
+/// archive (the supervisor's, at the end of the run): the launcher makes it that machine's
 /// `live.tree`. Not an `OpKind`.
 pub const KIND_LIVE_TREE: u32 = KIND_MASK;
 
-/// The node of a tagged kind (`tag_kind`).
-pub fn kind_node(kind: u32) -> usize {
-    ((kind >> KIND_NODE_SHIFT) & 0xff) as usize
+/// The machine of a tagged kind (`tag_kind`).
+pub fn kind_machine(kind: u32) -> usize {
+    ((kind >> KIND_MACHINE_SHIFT) & 0xff) as usize
 }
 
-/// The key of a node's inode in the tables shared by every node (`Shadows`, `Dur::errgen`):
-/// its inode number with the node in the top byte (node 0's keys are its inode numbers).
+/// The key of a machine's inode in the tables shared by every machine (`Shadows`, `Dur::errgen`):
+/// its inode number with the machine in the top byte (machine 0's keys are its inode numbers).
 /// Work inode numbers are tmpfs's, far below 2^56.
-pub fn node_key(ino: u64, node: usize) -> u64 {
-    ino ^ ((node as u64) << 56)
+pub fn machine_key(ino: u64, machine: usize) -> u64 {
+    ino ^ ((machine as u64) << 56)
 }
 
 /// One operation record.
@@ -222,9 +222,9 @@ pub const SHARED_MAPS_SIZE: usize = core::mem::size_of::<SharedMaps>();
 /// samples the sequence when it is opened: the current value if seen, else 0, so an error
 /// nobody has seen is reported to a later opener too. A call that reports compares the
 /// description's sample with the value, returns the error when they differ, and advances the
-/// sample and marks the value seen. Each node's disk has one such sequence for `syncfs` (`sb`:
-/// every failure on the node). Descriptions are named by keys the runtime gives at open
-/// (`node << 56 | n`, from `next_desc`); a description that reported keeps its samples in
+/// sample and marks the value seen. Each machine's disk has one such sequence for `syncfs` (`sb`:
+/// every failure on the machine). Descriptions are named by keys the runtime gives at open
+/// (`machine << 56 | n`, from `next_desc`); a description that reported keeps its samples in
 /// `descs`, which every descriptor of it (a duplicate, a fork's copy, a mapping) reads.
 pub const ERRGEN_CAP: usize = 4096;
 /// Descriptions that reported an error at once (`Dur::descs`).
@@ -232,15 +232,15 @@ pub const DESC_CAP: usize = 4096;
 
 #[repr(C)]
 pub struct Dur {
-    /// Open addressing by inode key (`node_key`): `[key, failures, seen, base]`, where `seen`
-    /// is the value of the inode's sequence last reported and `base` the node's `wide` when the
+    /// Open addressing by inode key (`machine_key`): `[key, failures, seen, base]`, where `seen`
+    /// is the value of the inode's sequence last reported and `base` the machine's `wide` when the
     /// inode was made; key 0 is empty.
     pub errgen: [[u64; 4]; ERRGEN_CAP],
-    /// Failures of a whole disk (an injected `syncfs` failure), per node: they count in every
-    /// inode's sequence of that node.
-    pub wide: [u64; crate::node::MAX_NODES],
-    /// The disk's sequence per node, `[value, seen]`: every failure on the node's disk.
-    pub sb: [[u64; 2]; crate::node::MAX_NODES],
+    /// Failures of a whole disk (an injected `syncfs` failure), per machine: they count in every
+    /// inode's sequence of that machine.
+    pub wide: [u64; crate::machine::MAX_MACHINES],
+    /// The disk's sequence per machine, `[value, seen]`: every failure on the machine's disk.
+    pub sb: [[u64; 2]; crate::machine::MAX_MACHINES],
     /// Description key → `[key, file sample, disk sample]`, one entry per slot (direct-mapped:
     /// a description whose slot another takes falls back to its descriptors' own samples, and
     /// may report an error once more).
@@ -255,7 +255,7 @@ pub struct Dur {
 pub const SHADOW_SLOTS: usize = 64;
 
 /// The shadow store's table. Slot `k`'s store is a memfd the supervisor makes at each
-/// incarnation's start, inherited by every guest at the hidden descriptor
+/// boot's start, inherited by every guest at the hidden descriptor
 /// `layout::FD_SHADOWS + k`; it holds what the operation log holds of the work inode `ino[k]`,
 /// at the file's own offsets (sparse: a hole, or a read past its end, is zeros and holds no
 /// memory). One memfd per slot, not windows of one: `RLIMIT_FSIZE` bounds the offsets a write
@@ -263,7 +263,7 @@ pub const SHADOW_SLOTS: usize = 64;
 /// always fits.
 ///
 /// Invariant: for every work inode with a slot, its store holds the result of replaying the
-/// incarnation's operation log for that inode. Every content record appended for a slotted
+/// boot's operation log for that inode. Every content record appended for a slotted
 /// inode, by the runtime or the supervisor, updates the store from the record's own bytes
 /// (`effect`); a slot is made at the first tracked mapping of an inode no slot names (no
 /// mapping of it exists, so the file holds what the log holds) and filled from the file;
@@ -371,13 +371,13 @@ impl Dur {
             _ => [key, 0, 0, 0],
         }
     }
-    fn node_of(key: u64) -> usize {
-        ((key >> 56) as usize).min(crate::node::MAX_NODES - 1)
+    fn machine_of(key: u64) -> usize {
+        ((key >> 56) as usize).min(crate::machine::MAX_MACHINES - 1)
     }
-    /// The current value of the error sequence of inode `key` (`node_key`).
+    /// The current value of the error sequence of inode `key` (`machine_key`).
     pub fn seq(&self, key: u64) -> u64 {
         let [_, n, _, base] = self.entry(key);
-        n + self.wide[Self::node_of(key)] - base
+        n + self.wide[Self::machine_of(key)] - base
     }
     /// What a description opened now on inode `key` samples: the value if it was seen, else 0.
     pub fn sample(&self, key: u64) -> u64 {
@@ -394,19 +394,19 @@ impl Dur {
         let i = self.slot(key)?;
         self.errgen[i][0] = key;
         self.errgen[i][1] += 1;
-        self.sb[Self::node_of(key)][0] += 1;
+        self.sb[Self::machine_of(key)][0] += 1;
         Some(())
     }
-    /// A write-back failure of node `node`'s whole disk (`syncfs`).
-    pub fn fail_wide(&mut self, node: usize) {
-        let n = node.min(crate::node::MAX_NODES - 1);
+    /// A write-back failure of machine `machine`'s whole disk (`syncfs`).
+    pub fn fail_wide(&mut self, machine: usize) {
+        let n = machine.min(crate::machine::MAX_MACHINES - 1);
         self.wide[n] += 1;
         self.sb[n][0] += 1;
     }
     /// Inode `key` was made (a file, directory or symlink, maybe at a number a deleted inode
     /// had): it starts with no error. None when the table is full.
     pub fn new_inode(&mut self, key: u64) -> Option<()> {
-        let w = self.wide[Self::node_of(key)];
+        let w = self.wide[Self::machine_of(key)];
         if w == 0 && self.entry(key) == [key, 0, 0, 0] {
             return Some(()); // nothing to forget, nothing to start from
         }
@@ -425,26 +425,27 @@ impl Dur {
         self.errgen[i][2] = v;
         Some(())
     }
-    /// The disk sequence of `node`: its value, and what an opener samples.
-    pub fn sb_seq(&self, node: usize) -> u64 {
-        self.sb[node.min(crate::node::MAX_NODES - 1)][0]
+    /// The disk sequence of `machine`: its value, and what an opener samples.
+    pub fn sb_seq(&self, machine: usize) -> u64 {
+        self.sb[machine.min(crate::machine::MAX_MACHINES - 1)][0]
     }
-    pub fn sb_sample(&self, node: usize) -> u64 {
-        let [v, seen] = self.sb[node.min(crate::node::MAX_NODES - 1)];
+    pub fn sb_sample(&self, machine: usize) -> u64 {
+        let [v, seen] = self.sb[machine.min(crate::machine::MAX_MACHINES - 1)];
         if seen == v {
             v
         } else {
             0
         }
     }
-    pub fn sb_mark_seen(&mut self, node: usize) {
-        let n = node.min(crate::node::MAX_NODES - 1);
+    pub fn sb_mark_seen(&mut self, machine: usize) {
+        let n = machine.min(crate::machine::MAX_MACHINES - 1);
         self.sb[n][1] = self.sb[n][0];
     }
-    /// A new description key for a descriptor opened on node `node`.
-    pub fn new_desc(&mut self, node: usize) -> u64 {
+    /// A new description key for a descriptor opened on machine `machine`.
+    pub fn new_desc(&mut self, machine: usize) -> u64 {
         self.next_desc += 1;
-        (self.next_desc & ((1 << 56) - 1)) | ((node.min(crate::node::MAX_NODES - 1) as u64) << 56)
+        (self.next_desc & ((1 << 56) - 1))
+            | ((machine.min(crate::machine::MAX_MACHINES - 1) as u64) << 56)
     }
     fn desc_slot(key: u64) -> usize {
         (crate::draw::mix64(key) as usize) % DESC_CAP
@@ -463,24 +464,24 @@ impl Dur {
     pub fn set_desc(&mut self, key: u64, s: [u64; 2]) {
         self.descs[Self::desc_slot(key)] = [key, s[0], s[1]];
     }
-    /// Node `node`'s disk is gone (a machine crash, its processes dead): its inodes' sequences,
+    /// Machine `machine`'s disk is gone (a machine crash, its processes dead): its inodes' sequences,
     /// its disk sequence and its descriptions' samples read 0 again, so its next disk starts
     /// with none. The keys stay, holding their place in the probe chains.
-    pub fn forget_node(&mut self, node: usize) {
-        if node == 0 || node >= crate::node::MAX_NODES {
+    pub fn forget_machine(&mut self, machine: usize) {
+        if machine == 0 || machine >= crate::machine::MAX_MACHINES {
             return;
         }
-        self.wide[node] = 0;
-        self.sb[node] = [0, 0];
+        self.wide[machine] = 0;
+        self.sb[machine] = [0, 0];
         for e in self.errgen.iter_mut() {
-            if e[0] != 0 && e[0] >> 56 == node as u64 {
+            if e[0] != 0 && e[0] >> 56 == machine as u64 {
                 e[1] = 0;
                 e[2] = 0;
                 e[3] = 0;
             }
         }
         for e in self.descs.iter_mut() {
-            if e[0] != 0 && e[0] >> 56 == node as u64 {
+            if e[0] != 0 && e[0] >> 56 == machine as u64 {
                 e[1] = 0;
                 e[2] = 0;
             }

@@ -2,14 +2,16 @@
 
 `patina.toml` in the current directory (or `--config FILE`) holds the same settings as the flags,
 and a few only it holds; flags override it, and an unknown key is an error. Paths in it are
-relative to the file, but `cmd` and `check` are commands, relative to where patina is started.
-`--config RUNDIR/run.json` takes every setting of an earlier run. With `cmd` set, `patina sweep`
-needs no other arguments.
+relative to the file, but `run` and `check` are commands, relative to where patina is started.
+`--config RUNDIR/run.json` takes every setting of an earlier run. With `[machine.main] run` set,
+`patina sweep` needs no other arguments.
 
 ```toml
 [run]
-cmd = ["./acklog"]
 cpus = 2
+
+[machine.main]
+run = ["./acklog"]
 
 [faults]
 faults = ["disk", "crash"]
@@ -19,10 +21,8 @@ fsync-error-permille = 0
 <!-- generated: config (crates/patina-cli/src/config.rs, TOML_KEYS); a unit test keeps it equal -->
 | `[run]` | Value | Default | Sets |
 |---|---|---|---|
-| `cmd` | `["CMD", "ARG", ...]` | none | the program and its arguments, as after `--` |
 | `env` | `{ K = "V" }` | none | added to the guest environment, as `--env` |
 | `mounts` | `["SRC:DST[:copy]", ...]` | none | as `--mount` |
-| `work` | `"DIR[:GUEST]"` | empty | as `--work` |
 | `stdin` | `"FILE"` | empty | as `--stdin` |
 | `check` | `"CMD ARGS"` | none | as `--check` |
 | `ok-exit` | `[N, "N:CLASS,..."] or "any"` | none | as `--ok-exit` |
@@ -37,7 +37,7 @@ fsync-error-permille = 0
 
 | `[faults]` | Value | Default | Sets |
 |---|---|---|---|
-| `faults` | `["CLASS[@NODE,...]", ...]` | none | as `--faults` |
+| `faults` | `["CLASS[@MACHINE,...]", ...]` | none | as `--faults` |
 | `KEY` | `VALUE` | none | any fault key, as `--fault KEY=VALUE` (`patina run --fault help`) |
 | `fs-model` | `"ext4-ordered" or "posix-strict"` | ext4-ordered | what a machine crash keeps |
 
@@ -50,19 +50,19 @@ fsync-error-permille = 0
 |---|---|---|---|
 | `known` | `"FILE"` | none | as `--known` |
 | `allow-unmet` | `["LABEL", ...]` | none | as `--allow-unmet` |
-| `crash-pairs` | `K` | off | with `--crash-points` and nodes: crash a second node at each of its next K points after a first crash |
+| `crash-pairs` | `K` | off | with `--crash-points` and machines: crash a second machine at each of its next K points after a first crash |
 
-| `[node.NAME]` | Value | Default | Sets |
+| `[machine.NAME]` | Value | Default | Sets |
 |---|---|---|---|
-| `cmd` | `["CMD", "ARG", ...]` | required | the node's program |
+| `run` | `["CMD", "ARG", ...]` | required | the command Patina starts at each of its boots; [machine.main] run is the command after `--` |
 | `env` | `{ K = "V" }` | none | added to the run's environment |
-| `work` | `"DIR[:GUEST]"` | empty | its work tree's starting files, as `--work` |
+| `disk` | `"DIR[:GUEST]"` | empty | its disk's starting files (main's: as `--disk`) |
 | `restart` | `"crash", "always" or "never"` | crash | after which downs the seed restarts it (`always`: also after it exits within `ok-exit`) |
-| `ok-exit` | `N or [N, ...]` | [0] | exit statuses that only stop the node |
-| `max-incarnations` | `N` | the run's | the most boots the seed's crashes give it (1 to 64) |
+| `ok-exit` | `N or [N, ...]` | [0] | exit statuses that only stop the machine |
+| `max-boots` | `N` | the run's | the most boots the seed's crashes give it (1 to 64) |
 | `disk-mb` | `N or "A..B"` | the run's | its filesystems' size, drawn per seed from a range |
-| `count` | `N` | 1 | N nodes of this table, named NAME1 to NAMEN |
-| `faults` | `true or false` | true | `false`: no faults of its own, as the driver |
+| `count` | `N` | 1 | N machines of this table, named NAME1 to NAMEN |
+| `faults` | `true or false` | true | `false`: no faults of its own, as main |
 <!-- end generated -->
 
 Fault keys and their ranges: `patina run --fault help`. Options: `patina COMMAND --help`.

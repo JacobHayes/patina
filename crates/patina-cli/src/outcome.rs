@@ -5,7 +5,7 @@
 /// What the supervisor (or the launcher) decided. Sent as
 /// `class \t exit_status \t signal \t detail \n`. `class` is the engine's own token
 /// (`ok`, `failed`, `deadlock`, `liveness`, `stall`, `containment`, `unsupported`, `capacity`,
-/// `log-limit`, `disk-full`, `killed`, `infra`, `exec`, `exec-unsupported`, `timeout`, `crash` between incarnations); `classify` maps it to an [`Outcome`].
+/// `log-limit`, `disk-full`, `killed`, `infra`, `exec`, `exec-unsupported`, `timeout`, `crash` between boots); `classify` maps it to an [`Outcome`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Verdict {
     pub class: String,
@@ -215,10 +215,10 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
             }
             (None, _) => Classified::new(Failure, "exit", d),
         },
-        // A node's command (`proto::node`): an exit outside its `ok-exit`, or a signal Patina
-        // did not send. The detail names the node.
-        "node-failed" => Classified::new(Failure, "exit", d),
-        "node-crash" => Classified::new(Crash, "signal", d),
+        // A machine's command (`proto::machine`): an exit outside its `ok-exit`, or a signal Patina
+        // did not send. The detail names the machine.
+        "machine-failed" => Classified::new(Failure, "exit", d),
+        "machine-crash" => Classified::new(Crash, "signal", d),
         "violation" => Classified::new(Violation, "always", d),
         "deadlock" => Classified::new(
             Liveness,

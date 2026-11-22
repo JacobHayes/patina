@@ -76,7 +76,7 @@ if len(fs) != 1 or "fs-error" not in fs[0]["faults"]["every"]:
 if fs[0]["count"] < 2:
     die(f"the fs-error bug did not collapse across seeds: {fs}")
 # Its example is the first run's line as written, with its own count.
-first_err = open(os.path.join(RUNS, "two", f"seed-{fs[0]['first']['seed']}", "inc-0", "stderr")).read().strip().splitlines()[-1]
+first_err = open(os.path.join(RUNS, "two", f"seed-{fs[0]['first']['seed']}", "boot-1", "stderr")).read().strip().splitlines()[-1]
 if fs[0].get("example") != first_err or not any(c.isdigit() for c in first_err):
     die(f"the fs-error group's example {fs[0].get('example')!r}, its first run wrote {first_err!r}")
 # The `new:` lines name each group's first (lowest) seed, as the report does.
@@ -211,7 +211,7 @@ one = os.path.join(RUNS, "one-run")
 if patina("run", "--seed", "1", "--out", one, "--", GUEST)[0] != 0:
     die("patina run for the one-run directory")
 st, rep, text = sweep("one-run", "--seeds", "1..2", "--", GUEST)
-if st != 0 or os.path.exists(os.path.join(one, "inc-0")):
+if st != 0 or os.path.exists(os.path.join(one, "boot-1")):
     die(f"a run's directory as --out: exit {st}\n{text}")
 print("an older patina's --out directory and a run's are replaced; one holding files patina does not write is refused, untouched")
 
@@ -296,8 +296,8 @@ for i in range(2):
     # lint-allow: seed — the livelock mode never finishes, whatever the seed
     patina("run", "--seed", "1", "--config", cfg("log-limit=1"), "--out", d, "--", GUEST, "livelock")
     lim.append(result(d))
-    if os.path.getsize(os.path.join(d, "inc-0", "boundary.log")) > 1 << 20:
-        die(f"log-limit 1: the log holds {os.path.getsize(os.path.join(d, 'inc-0', 'boundary.log'))} bytes")
+    if os.path.getsize(os.path.join(d, "boot-1", "boundary.log")) > 1 << 20:
+        die(f"log-limit 1: the log holds {os.path.getsize(os.path.join(d, 'boot-1', 'boundary.log'))} bytes")
 if [(r["outcome"], r["stop"]) for r in lim] != [("liveness", "log-limit")] * 2 or lim[0]["digest"] != lim[1]["digest"]:
     die(f"livelock: {[(r['outcome'], r['stop'], r['digest']) for r in lim]}")
 st, rep, text = sweep("livelock", "--seeds", "1..4", "--config", cfg("log-limit=8"), "--", GUEST, "livelock")
@@ -306,7 +306,7 @@ if st != 1 or [g["stop"] for g in rep["groups"]] != ["log-limit"] or kept > 4 * 
     die(f"livelock sweep: {[(g['signature'], g['count']) for g in rep['groups']]}, {kept} bytes kept\n{text}")
 # --keep fail keeps the logs of a group's first three runs; the rest keep their results.
 seeds = sorted(r["seed"] for r in rep["groups"][0]["runs"])
-whole = [n for n in seeds if os.path.isdir(os.path.join(RUNS, "livelock", f"seed-{n}", "inc-0"))]
+whole = [n for n in seeds if os.path.isdir(os.path.join(RUNS, "livelock", f"seed-{n}", "boot-1"))]
 if len(seeds) < 4 or whole != seeds[:3]:
     die(f"livelock sweep: runs {seeds}, kept whole {whole}")
 st, so, se = patina("replay", "--format", "json", os.path.join(RUNS, "livelock", "seed-2"))

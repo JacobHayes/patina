@@ -12,7 +12,7 @@ lhs=$(field "$out/result.json" digest); rhs=$(field "$RUNS/06-deadlock/b/result.
 [ "$lhs" = "$rhs" ] || die "two digests"
 detail=$(field "$out/result.json" message)
 echo "detail: $detail"
-python3 -I - "$detail" "$out/inc-0/stdout" <<'PY' || die "detail does not name both threads' waits on the two mutexes"
+python3 -I - "$detail" "$out/boot-1/stdout" <<'PY' || die "detail does not name both threads' waits on the two mutexes"
 import re, sys
 detail, stdout = sys.argv[1], open(sys.argv[2]).read().split()
 m1, m2 = int(stdout[1], 16), int(stdout[3], 16)

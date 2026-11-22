@@ -14,7 +14,7 @@ pub mod faults;
 pub mod hwcap;
 pub mod insn;
 pub mod layout;
-pub mod node;
+pub mod machine;
 pub mod nr;
 pub mod oplog;
 pub mod plan;

@@ -55,42 +55,42 @@ pub const ADDR_LOOP4: u8 = 1;
 /// 10.0.0.1, the host address.
 pub const ADDR_HOST4: u8 = 2;
 pub const ADDR_LOOP6: u8 = 3;
-/// In a run with nodes, node `k` (1 upward) has `10.0.0.(k + 1)`: kind `ADDR_NODE + k`. The
-/// driver's address is `ADDR_HOST4`, as the one host's is without nodes.
-pub const ADDR_NODE: u8 = 0x10;
+/// In a run with machines, machine `k` (1 upward) has `10.0.0.(k + 1)`: kind `ADDR_MACHINE + k`. The
+/// main's address is `ADDR_HOST4`, as the one host's is without machines.
+pub const ADDR_MACHINE: u8 = 0x10;
 
-/// The address kind of node `node`'s own address.
-pub const fn node_addr(node: usize) -> u8 {
-    if node == 0 {
+/// The address kind of machine `machine`'s own address.
+pub const fn machine_addr(machine: usize) -> u8 {
+    if machine == 0 {
         ADDR_HOST4
     } else {
-        ADDR_NODE + node as u8
+        ADDR_MACHINE + machine as u8
     }
 }
 
-/// The node whose address kind `kind` is (`None`: any, or a loopback kind).
-pub const fn addr_node(kind: u8) -> Option<usize> {
+/// The machine whose address kind `kind` is (`None`: any, or a loopback kind).
+pub const fn addr_machine(kind: u8) -> Option<usize> {
     match kind {
         ADDR_HOST4 => Some(0),
-        k if k > ADDR_NODE && k < ADDR_NODE + crate::node::MAX_NODES as u8 => {
-            Some((k - ADDR_NODE) as usize)
+        k if k > ADDR_MACHINE && k < ADDR_MACHINE + crate::machine::MAX_MACHINES as u8 => {
+            Some((k - ADDR_MACHINE) as usize)
         }
         _ => None,
     }
 }
 
-/// The last octet of an address kind's `10.0.0.X` (`None`: not a node address).
+/// The last octet of an address kind's `10.0.0.X` (`None`: not a machine address).
 pub const fn addr_octet(kind: u8) -> Option<u8> {
-    match addr_node(kind) {
+    match addr_machine(kind) {
         Some(n) => Some(n as u8 + 1),
         None => None,
     }
 }
 
-/// The number in a listener's abstract name (`LISTEN_PREFIX`): the port, with the node above
-/// it, so that node 0's names are the names of a run without nodes.
-pub const fn listen_n(node: usize, port: u16) -> u64 {
-    (node as u64) << 16 | port as u64
+/// The number in a listener's abstract name (`LISTEN_PREFIX`): the port, with the machine above
+/// it, so that machine 0's names are the names of a run without machines.
+pub const fn listen_n(machine: usize, port: u16) -> u64 {
+    (machine as u64) << 16 | port as u64
 }
 
 /// One guest socket of family `AF_INET`/`AF_INET6` (`family` 0: not a wire socket).
@@ -334,23 +334,22 @@ pub struct NetCfg {
     pub chunk_gap_set: u64,
     pub chunk_gap_min_ns: u64,
     pub chunk_gap_max_ns: u64,
-    /// A run with nodes: which links the link faults act on (`LINKS_*`).
+    /// A run with machines: which links the link faults act on (`LINKS_*`).
     pub links: u64,
-    /// A run with nodes: the seed's partitions (`partition-*`): the gap from one's end to the
+    /// A run with machines: the seed's partitions (`partition-*`): the gap from one's end to the
     /// next one's start and each one's length, drawn in [min, max] ns; each partition's shape
-    /// is drawn from every `node::SHAPES` entry the nodes fit. Off when `part_gap_max_ns` is 0.
+    /// is drawn from every `machine::SHAPES` entry the machines fit. Off when `part_gap_max_ns` is 0.
     pub part_gap_min_ns: u64,
     pub part_gap_max_ns: u64,
     pub part_min_ns: u64,
     pub part_max_ns: u64,
 }
 
-/// `NetCfg::links`: in a run with nodes, link faults act on links between two nodes other than
-/// the driver; also on the driver's links; also on every node's loopback. Without nodes there
-/// is only loopback, and they act on it.
-pub const LINKS_NODES: u64 = 0;
-pub const LINKS_DRIVER: u64 = 1;
-pub const LINKS_ALL: u64 = 2;
+/// `NetCfg::links`: in a run with machines, link faults act on links between two machines other
+/// than main; also on main's links (`net@main`). Without machines there is only loopback, and
+/// they act on it.
+pub const LINKS_MACHINES: u64 = 0;
+pub const LINKS_MAIN: u64 = 1;
 
 /// Sub-keys of `draw(Stream::FaultNet, key)`.
 pub const NSUB_REFUSE: u64 = 1;
@@ -379,12 +378,12 @@ pub const INJ_NET_DUP: u64 = 26;
 pub const INJ_NET_REORDER: u64 = 27;
 /// A datagram due inside a `net-blackout` window is lost.
 pub const INJ_NET_BLACKOUT_DROP: u64 = 28;
-/// A partition the seed drew between nodes (`partition-*`): `args` = [kind, shape, ordinal,
-/// side A (node bits), side B, length ns]; supervisor records of slot 0.
+/// A partition the seed drew between machines (`partition-*`): `args` = [kind, shape, ordinal,
+/// side A (machine bits), side B, length ns]; supervisor records of slot 0.
 pub const INJ_NET_CUT: u64 = 29;
 
-/// `args[1]` of a wire or datagram `Injected` record in a run with nodes: the link it acted on
-/// (`from`, `to`: nodes); 0 without nodes.
+/// `args[1]` of a wire or datagram `Injected` record in a run with machines: the link it acted on
+/// (`from`, `to`: machines); 0 without machines.
 pub const fn inj_link(from: usize, to: usize) -> u64 {
     1 | (from as u64) << 8 | (to as u64) << 16
 }

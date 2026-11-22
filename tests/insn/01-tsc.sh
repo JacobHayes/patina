@@ -11,15 +11,15 @@ case $ARCH in
     *) reads="cntvct" ;;
 esac
 verify "$o/v" 1 3 insn tsc
-grep -qx 'OK tsc' "$o/v/run-0/inc-0/stdout" || die "guest checks failed: $(grep FAIL "$o/v/run-0/inc-0/stdout" | head -3)"
+grep -qx 'OK tsc' "$o/v/run-0/boot-1/stdout" || die "guest checks failed: $(grep FAIL "$o/v/run-0/boot-1/stdout" | head -3)"
 for k in $reads; do
     [ "$(field "$o/v/run-0/result.json" "counters.insn.emulated.$k")" -ge 1000 ] || die "fewer than 1000 $k emulations"
 done
-n=$("$PATINA" log dump "$o/v/run-0/inc-0/boundary.log" | grep -c ' insn ')
+n=$("$PATINA" log dump "$o/v/run-0/boot-1/boundary.log" | grep -c ' insn ')
 echo "insn records in the boundary log: $n; emulated $(field "$o/v/run-0/result.json" counters.insn.emulated)"
 [ "$n" -ge 2000 ] || die "only $n insn records"
 trim "$o/v"
 patina_run "$o/tscsig" 1 insn tscsig
 [ "$(field "$o/tscsig/result.json" outcome)" = ok ] || die "tscsig: $(field "$o/tscsig/result.json" message)"
-grep -qx 'OK tscsig' "$o/tscsig/inc-0/stdout" || die "tscsig: $(cat "$o/tscsig/inc-0/stdout")"
+grep -qx 'OK tscsig' "$o/tscsig/boot-1/stdout" || die "tscsig: $(cat "$o/tscsig/boot-1/stdout")"
 echo "PR_SET_TSC(PR_TSC_SIGSEGV) by the guest: the counter delivered SIGSEGV to it; PR_GET_TSC virtual"

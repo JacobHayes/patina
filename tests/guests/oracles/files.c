@@ -1,4 +1,4 @@
-/* files MODE: changes to the work tree whose paths `patina log events` names.
+/* files MODE: changes to the disk whose paths `patina log events` names.
  *   tour   create a/x, rename it to b/y, append to it, fsync it
  *   data   write data/f only
  *   other  write data/f, then other/f (outside data/) */

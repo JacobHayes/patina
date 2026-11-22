@@ -299,13 +299,13 @@ fn own_slot() -> &'static Slot {
     unsafe { &*ctl().slot(crate::state::thread().slot as usize) }
 }
 
-/// The live threads of the caller's node: another node's are not found (`ESRCH`), as on
+/// The live threads of the caller's machine: another machine's are not found (`ESRCH`), as on
 /// another machine.
 fn slots() -> impl Iterator<Item = &'static Slot> {
-    let node = crate::state::node() as u64;
+    let machine = crate::state::machine() as u64;
     (0..MAX_THREADS)
         .map(|i| unsafe { &*ctl().slot(i) })
-        .filter(move |s| s.state.load(Acquire) == SLOT_LIVE && s.node.load(Relaxed) == node)
+        .filter(move |s| s.state.load(Acquire) == SLOT_LIVE && s.machine.load(Relaxed) == machine)
 }
 
 /// The live thread `tid` (0: the caller), as `find_task_by_vpid`.

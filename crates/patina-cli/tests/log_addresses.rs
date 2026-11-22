@@ -42,7 +42,7 @@ fn run(name: &str, seed: u64, opts: &[&str], script: &str, args: &[&str]) -> Vec
         String::from_utf8_lossy(&st.stdout),
         String::from_utf8_lossy(&st.stderr)
     );
-    let log = std::fs::read(out.join("inc-0/boundary.log")).expect("boundary log");
+    let log = std::fs::read(out.join("boot-1/boundary.log")).expect("boundary log");
     let recs: Vec<Rec> = log
         .as_chunks::<REC_SIZE>()
         .0

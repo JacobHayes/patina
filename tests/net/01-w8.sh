@@ -6,7 +6,7 @@ o=$RUNS/01-w8; mkdir -p "$o"
 verify_ok "$o/v1" 1 3 -- /guest/sockets all
 for seed in 2 3 4 5 6; do
     run_ok "$o/r$seed" "$seed" -- /guest/sockets all
-    rm -f "$o/r$seed/inc-0/boundary.log"
+    rm -f "$o/r$seed/boot-1/boundary.log"
 done
 d=$( (field "$o/v1/run-0/result.json" digest
       for s in 2 3 4 5 6; do field "$o/r$s/result.json" digest; done) | sort -u | wc -l)

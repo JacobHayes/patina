@@ -1,5 +1,5 @@
 # 10. The tracker self-check (patina log ops --check: replay of the whole log = the exported live
-# tree) passes on every incarnation of a sample of each storage reproductions workload, crashes included
+# tree) passes on every boot of a sample of each storage reproductions workload, crashes included
 # (reduced: 4 seeds each).
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib/common.inc"
@@ -13,7 +13,7 @@ chk() {
         k=$((k + $(grep -c ': ok (' "$RUNS/$name/check-$s.txt")))
         rm -rf "${RUNS:?}/$name/run-$s"
     done
-    echo "$name: $N seeds, $k incarnations, replay = live tree in every one"
+    echo "$name: $N seeds, $k boots, replay = live tree in every one"
 }
 chk fjall fjall-harness 1-$N -- --fault crash-permille=3 -- /guest/fjall-harness-debug
 chk fjall-faults fjall-harness 1-$N -- --faults buggify --fault fs-error-permille=3 --fault crash-permille=2 -- /guest/fjall-harness-debug

@@ -14,6 +14,6 @@ sweep b-ext4-ordered rust-threads-files 1-20 -- --fault crash-permille=5 -- /gue
 [ "$(count b-ext4-ordered ok)" = 20 ] || die "B fails under ext4-ordered"
 caught b-posix-strict 'INVARIANT snapshot-(lost|corrupt)' rust-threads-files --config "$("$PATINA_CFG" fs-model=posix-strict)" --fault crash-permille=5 -- /guest/rust-threads-files b
 run rust-threads-files "$RUNS/timeout" 1 -- /guest/rust-threads-files correct
-grep -q "idle wait 30000 ms" "$RUNS/timeout/inc-0/stdout" || die "idle wait: $(cat "$RUNS/timeout/inc-0/stdout")"
+grep -q "idle wait 30000 ms" "$RUNS/timeout/boot-1/stdout" || die "idle wait: $(cat "$RUNS/timeout/boot-1/stdout")"
 tables
-echo "30 s wait: $(cat "$RUNS/timeout/inc-0/stdout") in $(field "$RUNS/timeout/result.json" wall_ms) ms wall"
+echo "30 s wait: $(cat "$RUNS/timeout/boot-1/stdout") in $(field "$RUNS/timeout/result.json" wall_ms) ms wall"

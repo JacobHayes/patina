@@ -181,8 +181,8 @@ pub fn vkey(st: &St) -> Option<u64> {
     (path::mounts().m[i].class == MountClass::Tmpfs).then(|| time_key(i, st.ino()))
 }
 
-/// The time table's key of inode `ino` on the tmpfs of mount index `i`. The work tree's names
-/// no mount index: the supervisor carries its times from one incarnation to the next
+/// The time table's key of inode `ino` on the tmpfs of mount index `i`. The disk's names
+/// no mount index: the supervisor carries its times from one boot to the next
 /// (`proto::vfs::VT_WORK`).
 fn time_key(i: usize, ino: u64) -> u64 {
     let minor = if path::mounts().m[i].work {
@@ -1141,7 +1141,7 @@ fn mutate(call: &mut dyn Call) -> i64 {
     })
 }
 
-/// A name change the runtime makes itself in the work tree (a path swap, `crate::swap`): the
+/// A name change the runtime makes itself in the disk (a path swap, `crate::swap`): the
 /// kernel call with the runtime's own arguments, then the same times and operation record as
 /// the program's own call would get.
 pub fn mutate_as_guest(nr: u64, a: [u64; 6]) -> i64 {

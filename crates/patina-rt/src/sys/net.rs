@@ -36,17 +36,17 @@ pub fn handle(call: &mut dyn Call) -> Action {
                     Err(e) => return Action::Return(e),
                 }
             }
-            if crate::state::with_nodes() {
-                return node_names(call);
+            if crate::state::with_machines() {
+                return machine_names(call);
             }
         }
     }
     super::unixsock::handle(call)
 }
 
-/// An `AF_UNIX` call in a run with nodes: its abstract names under the node's prefix
+/// An `AF_UNIX` call in a run with machines: its abstract names under the machine's prefix
 /// (`unixname`).
-fn node_names(call: &mut dyn Call) -> Action {
+fn machine_names(call: &mut dyn Call) -> Action {
     use super::unixname::{name_in, passcred_autobind, Msgs, Name, Out, MMSG_MAX};
     let fd = call.arg(0);
     if !super::unixsock::is_socket(fd) {

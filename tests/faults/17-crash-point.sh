@@ -27,11 +27,11 @@ seq 1 $((n + 1)) | xargs -P 4 -I{} bash -euo pipefail -O inherit_errexit -c '
 mid=$((n / 2)) late=$((n * 3 / 4))
 # first A B: the first record at which two runs' logs differ (log diff exits 1: they differ)
 first() {
-    "$PATINA" log diff "$1/inc-0/boundary.log" "$2/inc-0/boundary.log" >"$1.diff" || [ $? = 1 ]
+    "$PATINA" log diff "$1/boot-1/boundary.log" "$2/boot-1/boundary.log" >"$1.diff" || [ $? = 1 ]
     sed -n 's/^first difference at record \([0-9]*\) .*/\1/p' "$1.diff"
 }
 # cp_at RUN: the line number of the first CrashPoint record of a run's log dump
-cp_at() { "$PATINA" log dump "$1/inc-0/boundary.log" | awk '/ CrashPoint / && !n {n = NR} END {print n}'; }
+cp_at() { "$PATINA" log dump "$1/boot-1/boundary.log" | awk '/ CrashPoint / && !n {n = NR} END {print n}'; }
 for c in "$mid" "$late"; do
     i=$(($(cp_at "$d/c-$c") - 1))
     [ "$(first "$d/ref" "$d/c-$c")" = "$i" ] || die "child $c: first differs from the run without a crash at record $(first "$d/ref" "$d/c-$c"), its CrashPoint is record $i"
@@ -47,7 +47,7 @@ import faults
 def res(p):
     return json.load(open(os.path.join(d, p, "result.json")))
 base, ref = res("base"), res("ref")
-ops = faults.oplog(os.path.join(d, "base", "inc-0"))
+ops = faults.oplog(os.path.join(d, "base", "boot-1"))
 nm = faults.names(ops)
 on = lambda o, name: nm.get(o["ino"]) == name
 # The window: the data.log write whose next data.log fsync comes after an acks.log fsync.
@@ -75,7 +75,7 @@ for p in range(1, n + 1):
         sys.exit("FAIL: child %d: %s %s" % (p, r["outcome"], r["message"]))
 for p in range(1, n):
     if seqs[p] == seqs[p + 1]:
-        a, b = (len(faults.oplog(os.path.join(d, "c-%d" % q, "inc-0"))) for q in (p, p + 1))
+        a, b = (len(faults.oplog(os.path.join(d, "c-%d" % q, "boot-1"))) for q in (p, p + 1))
         if b <= a:
             sys.exit("FAIL: points %d and %d (seq %d): operation logs of %d and %d records" % (p, p + 1, seqs[p], a, b))
         multi += 1

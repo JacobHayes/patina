@@ -80,7 +80,7 @@ pub const KIND_JUMP: u8 = 1;
 pub const KIND_BEFORE: u8 = 2;
 /// Entry kinds. A `cpuid` (`0F A2`) written over with `ud2` (`0F 0B`) in place: the runtime
 /// answers it with the identity fields that differ between cores (the APIC, x2APIC, compute
-/// unit and node ids, the hybrid core type) as core 0's, zero, so a value the program reads does
+/// unit and machine ids, the hybrid core type) as core 0's, zero, so a value the program reads does
 /// not depend on the core a run was given (ARCHITECTURE.md "Load-time rewriting").
 pub const KIND_CPUID: u8 = 3;
 /// The start of an instruction inside a group patch other than its first (an interior

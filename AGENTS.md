@@ -53,7 +53,7 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
 - **Tiers**: `quick` gates every landing (target 5 minutes on the arm64 runner, fails above 10;
   `scripts/land` fails it past half that on four CPUs here); `./check AREA` runs an area's
   quick and `area` scripts while working on it; `release` gates a release and runs nightly
-  (examples at 200 seeds, a determinism matrix, F2, pubsub, the node, signal, mapping and
+  (examples at 200 seeds, a determinism matrix, F2, pubsub, the machine, signal, mapping and
   rewrite sweeps, install, doctor, replay; fails above 10 minutes); `evidence` is by hand.
   `./check list` shows every script; each tier run ends with its time and share of the ceiling.
   The nightly also runs every area (`./check areas`) on both architectures, apart from the release
@@ -96,7 +96,7 @@ a profile for the paths they run from (`patina doctor` prints it); a copy run fr
 - **A planted bug is searched for, not counted.** How many seeds of a fixed range find a bug
   moves with the build, the host's interpreters and the seeds, so no test asserts a find rate
   or a mid-range count over seeds. Search seeds until the first finding within a generous
-  bound (`find_bug` in `tests/nodes/lib.inc`, `--max-findings 1`), then assert facts about that
+  bound (`find_bug` in `tests/machines/lib.inc`, `--max-findings 1`), then assert facts about that
   run (its class, an identical replay); or assert at least one of N where a miss is
   astronomically unlikely; and the correct version is clean on every seed it runs.
 - Every script declares `#@ tier=TIER[,TIER] budget=SECONDS slots=N` (and `arch=MACHINE` when

@@ -71,7 +71,7 @@ extern "C" fn rt_main(ksp: u64) -> ! {
     // rdtsc/rdtscp fault from here on (inherited by fork and execve); the fault
     // entry answers them from virtual time. Checked, and set if it did not survive.
     crate::insn::tsc::ensure_faulting();
-    // The slot first: it says which node this process belongs to, and so whether the filter
+    // The slot first: it says which machine this process belongs to, and so whether the filter
     // is installed already (no system call is made while finding it).
     claim_slot();
     install_filter();
@@ -152,7 +152,7 @@ fn install_filter() {
         filter: f.as_ptr(),
     };
     unsafe {
-        let bit = 1u64 << crate::state::node();
+        let bit = 1u64 << crate::state::machine();
         if ctl()
             .filter_installed
             .load(core::sync::atomic::Ordering::Acquire)
@@ -181,7 +181,7 @@ fn install_filter() {
     }
 }
 
-/// Find this task's slot (reserved by the supervisor) and its node.
+/// Find this task's slot (reserved by the supervisor) and its machine.
 fn claim_slot() {
     let ts = thread();
     let c = ctl();
@@ -211,7 +211,7 @@ fn claim_slot() {
         crate::fatal(proto::ctl::Setup::NoSlot, 0)
     };
     ts.slot = i as u32;
-    proc().node = unsafe { &*c.slot(i) }.node.load(Relaxed) as usize;
+    proc().machine = unsafe { &*c.slot(i) }.machine.load(Relaxed) as usize;
 }
 
 /// Announce this task's slot.

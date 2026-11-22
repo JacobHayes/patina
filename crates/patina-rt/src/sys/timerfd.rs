@@ -19,7 +19,7 @@ const TFD_NONBLOCK: u64 = 0o4000;
 const TFD_CLOEXEC: u64 = 0o2000000;
 
 /// Per-process: the timer key (0: not a timerfd) and clock of each descriptor, and for an
-/// absolute realtime timer set with `TFD_TIMER_CANCEL_ON_SET` the count of its node's clock
+/// absolute realtime timer set with `TFD_TIMER_CANCEL_ON_SET` the count of its machine's clock
 /// steps it last saw, plus 1 (0: not cancelable).
 struct Marks {
     key: [u64; N],
@@ -34,19 +34,19 @@ static MARKS: G = G(UnsafeCell::new(Marks {
     cancel: [0; N],
 }));
 
-/// This node's clock steps so far (`NodeTab::clock_sets`; the driver's clock is never
+/// This machine's clock steps so far (`MachineTab::clock_sets`; main's clock is never
 /// stepped).
 fn clock_sets() -> u64 {
-    match crate::state::node() {
+    match crate::state::machine() {
         0 => 0,
         k => {
-            unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) }.clock_sets
-                [k.min(proto::node::MAX_NODES - 1)]
+            unsafe { proto::machine::MachineTab::at(crate::state::ctl_base()) }.clock_sets
+                [k.min(proto::machine::MAX_MACHINES - 1)]
         }
     }
 }
 
-/// A read of timerfd `fd`: `ECANCELED` once after a step of the node's clock when it is an
+/// A read of timerfd `fd`: `ECANCELED` once after a step of the machine's clock when it is an
 /// absolute realtime timer set with `TFD_TIMER_CANCEL_ON_SET`, its count reset, as the
 /// kernel answers; None otherwise.
 pub fn canceled(fd: i64) -> Option<i64> {
@@ -230,7 +230,7 @@ fn settime(fd: i64, flags: u64, new: u64, old: u64) -> i64 {
     } else {
         super::time::now().saturating_add(value)
     };
-    // An absolute realtime timer moves with a step of the node's clock; with
+    // An absolute realtime timer moves with a step of the machine's clock; with
     // `TFD_TIMER_CANCEL_ON_SET` a step also cancels its next read (`canceled`).
     let rt_abs = clock == 0 && flags & TFD_TIMER_ABSTIME != 0;
     let cancel = rt_abs && flags & TFD_TIMER_CANCEL_ON_SET != 0;

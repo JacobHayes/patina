@@ -19,7 +19,7 @@ refused() { jq -c '.refused' "$1/result.json"; }
 for part in sched clone nlink proc; do
     vfy "$part" 2 repeat "$G17" -- /guest/procgaps "$part"
     r=$out/$part/run-0
-    [ "$(class "$r")" = ok ] || die "$part: $(class "$r"): $(detail "$r"); $(grep -m3 FAIL "$r/inc-0/stdout")"
+    [ "$(class "$r")" = ok ] || die "$part: $(class "$r"): $(detail "$r"); $(grep -m3 FAIL "$r/boot-1/stdout")"
 done
 refused "$out/sched/run-0" | grep -q '"membarrier"' || die "sched: the membarrier refusal is not recorded: $(refused "$out/sched/run-0")"
 refused "$out/clone/run-0" | grep -q '"clone"' || die "clone: the refusal is not recorded: $(refused "$out/clone/run-0")"

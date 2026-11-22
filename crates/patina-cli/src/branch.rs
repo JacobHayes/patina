@@ -1,6 +1,6 @@
 //! What `sweep --crash-points` knows of a run's crash points besides their count: each point's
 //! place, read back from the run's operation log (one disk's, `oplog.meta`), so that a sweep
-//! can sample them by node and kind of operation (`--crash-points=N`) and find a second node's
+//! can sample them by machine and kind of operation (`--crash-points=N`) and find a second machine's
 //! points after a first crash (`[sweep] crash-pairs`). Written per run as `points.json` before a
 //! sweep prunes the run's logs.
 //!
@@ -10,7 +10,7 @@
 //! the order of its records (`places`): for each system call (one sequence number) that
 //! recorded a sync, one before its records, then one after each record. The places are used
 //! only when their number is the count the runtime made (`crash_points`); otherwise the run's
-//! points are `placed: false`: sampled by node alone, and no pair is taken after them.
+//! points are `placed: false`: sampled by machine alone, and no pair is taken after them.
 //!
 //! No point is left out as the same as another: a point before a sync right after a write has
 //! the disk of the point before it, but a crash there takes the next sequence number, so every
@@ -90,20 +90,20 @@ pub fn read_places(dir: &Path, count: u64) -> Option<Vec<Place>> {
     (p.len() as u64 == count).then_some(p)
 }
 
-/// The directory of a disk's first boot in a run: the one machine's (`node` empty) or a
-/// node's.
-fn disk(run: &Path, node: &str) -> std::path::PathBuf {
-    if node.is_empty() {
-        run.join("inc-0")
+/// The directory of a disk's first boot in a run: the one machine's (`machine` empty) or a
+/// machine's.
+fn disk(run: &Path, machine: &str) -> std::path::PathBuf {
+    if machine.is_empty() {
+        run.join("boot-1")
     } else {
-        run.join("node").join(node).join("inc-0")
+        run.join("machine").join(machine).join("boot-1")
     }
 }
 
-/// A base's `points.json`: for each node with points (`""`: the one machine), their number,
+/// A base's `points.json`: for each machine with points (`""`: the one machine), their number,
 /// whether they were placed, and if so each point's kind (in order, from point 1).
 pub fn describe(run: &Path, points: &[(String, u64)]) -> Value {
-    let mut nodes = serde_json::Map::new();
+    let mut machines = serde_json::Map::new();
     for (n, k) in points {
         let v = match read_places(&disk(run, n), *k) {
             Some(p) => json!({
@@ -113,14 +113,14 @@ pub fn describe(run: &Path, points: &[(String, u64)]) -> Value {
             }),
             None => json!({"points": k, "placed": false}),
         };
-        nodes.insert(n.clone(), v);
+        machines.insert(n.clone(), v);
     }
-    json!({ "nodes": nodes })
+    json!({ "machines": machines })
 }
 
-/// A first crash's child (node `a` crashed at a point; `others` counted theirs): for each other
-/// node, its first `k` points after the crash, each with its kind and the runtime's records
-/// before it: `{"after": {"b": [[J, KIND, RECORDS], ...]}, "placed": {"b": true}}`. A node whose points cannot
+/// A first crash's child (machine `a` crashed at a point; `others` counted theirs): for each other
+/// machine, its first `k` points after the crash, each with its kind and the runtime's records
+/// before it: `{"after": {"b": [[J, KIND, RECORDS], ...]}, "placed": {"b": true}}`. A machine whose points cannot
 /// be placed, or a crash whose `Crash` record is not found, gives none.
 pub fn window(run: &Path, a: &str, others: &[(String, u64)], k: usize) -> Value {
     let crash = crash_seq(run, a);
@@ -144,8 +144,8 @@ pub fn window(run: &Path, a: &str, others: &[(String, u64)], k: usize) -> Value 
     json!({"after": after, "placed": placed})
 }
 
-fn crash_seq(run: &Path, node: &str) -> Option<u64> {
-    let meta = std::fs::read(disk(run, node).join("oplog.meta")).ok()?;
+fn crash_seq(run: &Path, machine: &str) -> Option<u64> {
+    let meta = std::fs::read(disk(run, machine).join("oplog.meta")).ok()?;
     meta.as_chunks::<OPREC_SIZE>()
         .0
         .iter()
@@ -154,11 +154,11 @@ fn crash_seq(run: &Path, node: &str) -> Option<u64> {
         .map(|r| r.seq)
 }
 
-/// How many of the runtime's records the disk of `node`'s first boot in `run` holds before its
+/// How many of the runtime's records the disk of `machine`'s first boot in `run` holds before its
 /// first `Crash` record, leaving out the shared mappings the crash itself logged just before
 /// it (`None`: no crash).
-pub fn records_before_crash(run: &Path, node: &str) -> Option<usize> {
-    let meta = std::fs::read(disk(run, node).join("oplog.meta")).ok()?;
+pub fn records_before_crash(run: &Path, machine: &str) -> Option<usize> {
+    let meta = std::fs::read(disk(run, machine).join("oplog.meta")).ok()?;
     let recs: Vec<OpRec> = meta
         .as_chunks::<OPREC_SIZE>()
         .0
@@ -225,7 +225,7 @@ fn interleave(lists: Vec<Vec<usize>>, key: u64) -> Vec<usize> {
 }
 
 /// The order a sample of `items` is taken in, stratified twice by `stratum(i)`: `(group,
-/// kind)`, a node (or a pair of nodes) and a kind of operation. Within a group each kind is
+/// kind)`, a machine (or a pair of machines) and a kind of operation. Within a group each kind is
 /// shuffled by `key` and the kinds interleaved (`interleave`), then the groups interleaved:
 /// every group gives an item before any gives a second, every kind of a group one before any
 /// of its kinds gives a second, and after that each in proportion to its size. Any prefix is a
@@ -320,7 +320,7 @@ mod tests {
 
     #[test]
     fn a_sample_is_stratified_seeded_and_nested() {
-        // Node a: 90 writes, 9 fsyncs, 1 rename; node b: 10 writes.
+        // Machine a: 90 writes, 9 fsyncs, 1 rename; machine b: 10 writes.
         let items: Vec<(&str, &str)> = (0..110)
             .map(|i| match i {
                 0 => ("a", "rename"),
@@ -334,9 +334,10 @@ mod tests {
         let mut all = o.clone();
         all.sort();
         assert_eq!(all, (0..110).collect::<Vec<_>>());
-        // Both nodes in the first two; every kind of a in a's first three.
-        let nodes: std::collections::BTreeSet<&str> = o[..2].iter().map(|&i| items[i].0).collect();
-        assert_eq!(nodes.len(), 2);
+        // Both machines in the first two; every kind of a in a's first three.
+        let machines: std::collections::BTreeSet<&str> =
+            o[..2].iter().map(|&i| items[i].0).collect();
+        assert_eq!(machines.len(), 2);
         let a: Vec<usize> = o.iter().copied().filter(|&i| items[i].0 == "a").collect();
         let kinds: std::collections::BTreeSet<&str> = a[..3].iter().map(|&i| items[i].1).collect();
         assert_eq!(kinds.len(), 3);

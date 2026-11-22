@@ -101,9 +101,9 @@ func main() {
 		}
 		patina.Mark("ack 2")
 	case "control":
-		// A run with nodes: the control call from the driver, and from a node ("control node").
-		words := []string{"partition driver c", "heal", "partition driver nobody"}
-		if len(os.Args) > 2 && os.Args[2] == "node" {
+		// A run with machines: the control call from main, and from another machine ("control machine").
+		words := []string{"partition main c", "heal", "partition main nobody"}
+		if len(os.Args) > 2 && os.Args[2] == "machine" {
 			words = []string{"heal"}
 		}
 		for _, w := range words {
@@ -113,7 +113,7 @@ func main() {
 				fmt.Printf("%s: ok\n", w)
 			}
 		}
-		time.Sleep(time.Second) // virtual: the node runs meanwhile
+		time.Sleep(time.Second) // virtual: the other machine runs meanwhile
 	default:
 		fmt.Fprintln(os.Stderr, "unknown mode", mode)
 		os.Exit(2)

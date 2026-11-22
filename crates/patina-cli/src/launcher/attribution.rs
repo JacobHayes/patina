@@ -6,7 +6,7 @@
 //!   injector (`proto::faults::Kind`), at crash points, and on the wire (reads of sent data
 //!   for resets, connections for connect faults, deliveries for delay, chunking and
 //!   partitions, FINs for half-close delays). Zero eligible means the class had nothing to act on.
-//! - `injected`: the sum of the classes' `injected` (crashes included), all incarnations. The
+//! - `injected`: the sum of the classes' `injected` (crashes included), all boots. The
 //!   report of an earlier failed fsync to another descriptor is an event, not a new fault. A
 //!   sync failed by `fs-error-permille` counts for `fs-error`, one failed by
 //!   `fsync-error-permille` for `fsync-error`.
@@ -15,7 +15,7 @@
 //!   returned; a crash is an event too, with what it did to `/work`.
 
 use crate::faults::Plan;
-use crate::launch::IncEnd;
+use crate::launch::BootEnd;
 use crate::result::NET_FIELDS;
 use proto::faults::*;
 use proto::rec::{Rec, RecKind, REC_SIZE};
@@ -52,8 +52,8 @@ fn class_of(kind: u64, class: u64, by: u64) -> Option<&'static str> {
         INJ_NET_REORDER => "net-reorder",
         INJ_NET_BLACKOUT_DROP => "net-blackout",
         INJ_NET_CUT => "partition",
-        proto::node::INJ_NODE_KILL => "crash",
-        proto::node::INJ_NODE_PAUSE => "pause",
+        proto::machine::INJ_MACHINE_KILL => "crash",
+        proto::machine::INJ_MACHINE_PAUSE => "pause",
         _ => return None,
     })
 }
@@ -123,7 +123,7 @@ pub fn class_of_key(k: &str) -> Option<&'static str> {
     })
 }
 
-/// The faults of a chain of incarnations, folded as they end.
+/// The faults of a chain of boots, folded as they end.
 #[derive(Default)]
 pub struct Faults {
     recent: VecDeque<Value>,
@@ -131,15 +131,15 @@ pub struct Faults {
     eligible: [u64; NKIND],
     crash_points: u64,
     crashes: u64,
-    /// Nodes' machine crashes at a crash point (counted among `crash_points` already).
+    /// Machines' machine crashes at a crash point (counted among `crash_points` already).
     point_kills: u64,
-    /// A run with nodes: their names (the driver first), and the seed's partitions that acted
+    /// A run with machines: their names (main first), and the seed's partitions that acted
     /// on traffic.
-    pub nodes: Vec<String>,
+    pub machines: Vec<String>,
     parts_acted: u64,
-    /// Realtime reads on nodes with `clock-skew-ms`, and those under an offset (`clock`).
+    /// Realtime reads on machines with `clock-skew-ms`, and those under an offset (`clock`).
     clock_reads: (u64, u64),
-    /// With nodes: the link faults' chances on the links they act on (`faulted_links`), which
+    /// With machines: the link faults' chances on the links they act on (`faulted_links`), which
     /// replace the run-wide counters as their eligible counts.
     link_elig: Option<[u64; 5]>,
 }
@@ -152,29 +152,29 @@ impl Faults {
         self.recent.push_back(v);
     }
 
-    /// Fold incarnation `k`: its counters and the `Injected` records of its boundary log.
-    pub fn add_incarnation(&mut self, inc: &Path, k: u64, end: &IncEnd) {
+    /// Fold boot `k`: its counters and the `Injected` records of its boundary log.
+    pub fn add_boot(&mut self, bdir: &Path, k: u64, end: &BootEnd) {
         for (a, b) in self.eligible.iter_mut().zip(end.eligible) {
             *a += b;
         }
         self.crash_points += end.crash_points;
-        let b = std::fs::read(inc.join("boundary.log")).unwrap_or_default();
+        let b = std::fs::read(bdir.join("boundary.log")).unwrap_or_default();
         // Decoded as needed, never all at once: a log can be as large as [run] log-limit.
         let chunks = b.as_chunks::<REC_SIZE>().0;
         let rec = |i: usize| chunks.get(i).map(|c| Rec::from_bytes(c));
-        if let Some(n) = end.nodes.as_ref() {
+        if let Some(n) = end.machines.as_ref() {
             self.parts_acted += n["partitions_acted"].as_u64().unwrap_or(0);
             self.clock_reads.0 += n["clock_reads"].as_u64().unwrap_or(0);
             self.clock_reads.1 += n["clock_reads_offset"].as_u64().unwrap_or(0);
         }
         // A run with a setup or a final check: only the chances in the main phase.
-        if end.nodes.is_none() && end.phases.from_seq.iter().any(|s| *s != 0) {
+        if end.machines.is_none() && end.phases.from_seq.iter().any(|s| *s != 0) {
             let e = self.link_elig.get_or_insert([0; 5]);
             for (a, b) in e.iter_mut().zip(end.phases.elig) {
                 *a += b;
             }
         }
-        if let Some(f) = end.nodes.as_ref().map(|n| &n["faulted_links"]) {
+        if let Some(f) = end.machines.as_ref().map(|n| &n["faulted_links"]) {
             if f.is_object() {
                 let e = self.link_elig.get_or_insert([0; 5]);
                 for (i, k) in ["connections", "chunks", "fins", "sends", "datagrams"]
@@ -191,47 +191,58 @@ impl Faults {
                 continue;
             }
             let (fault, mut e) = injected(r, rec(i + 1), rec(i + 2));
-            name_link(&mut e, &self.nodes);
+            name_link(&mut e, &self.machines);
             if r.args[0] == INJ_NET_CUT {
                 // The sides by name.
                 let names = |bits: u64| -> Value {
                     (0..64)
                         .filter(|b| bits & (1 << b) != 0)
-                        .map(|b| self.nodes.get(b).cloned().unwrap_or_else(|| b.to_string()))
+                        .map(|b| {
+                            self.machines
+                                .get(b)
+                                .cloned()
+                                .unwrap_or_else(|| b.to_string())
+                        })
                         .collect()
                 };
                 e["a"] = names(r.args[3]);
                 e["b"] = names(r.args[4]);
             }
-            if r.args[0] == proto::node::INJ_NODE_KILL || r.args[0] == proto::node::INJ_NODE_PAUSE {
+            if r.args[0] == proto::machine::INJ_MACHINE_KILL
+                || r.args[0] == proto::machine::INJ_MACHINE_PAUSE
+            {
                 let k = r.args[1] as usize;
-                e["node"] = json!(self.nodes.get(k).cloned().unwrap_or_else(|| k.to_string()));
+                e["machine"] = json!(self
+                    .machines
+                    .get(k)
+                    .cloned()
+                    .unwrap_or_else(|| k.to_string()));
             }
-            if r.args[0] == proto::node::INJ_NODE_KILL {
+            if r.args[0] == proto::machine::INJ_MACHINE_KILL {
                 self.point_kills += (r.args[4] != 0) as u64;
             }
             if let Some(c) = fault {
                 *self.by_class.entry(c).or_default() += 1;
             }
-            e["incarnation"] = json!(k);
+            e["boot"] = json!(k + 1);
             e["seq"] = json!(r.seq);
             e["vtime_ms"] = json!(r.vclock_ns / 1_000_000);
             self.push(e);
         }
     }
 
-    /// Crash points the nodes passed (`nodes.list[].crash_points`): the `crash` class's
+    /// Crash points the machines passed (`machines.list[].crash_points`): the `crash` class's
     /// eligible calls, as a single machine's are.
     pub fn add_points(&mut self, n: u64) {
         self.crash_points += n;
     }
 
-    /// What node `k`'s machine crash at the end of its boot `boot` did to its disk: on the
+    /// What machine `k`'s machine crash at the end of its boot `boot` did to its disk: on the
     /// crash's event, as a single machine's crash has it.
-    pub fn node_lost(&mut self, k: usize, boot: u64, lost: Value) {
-        let name = self.nodes.get(k).cloned().unwrap_or_default();
+    pub fn machine_lost(&mut self, k: usize, boot: u64, lost: Value) {
+        let name = self.machines.get(k).cloned().unwrap_or_default();
         if let Some(e) = self.recent.iter_mut().find(|e| {
-            e["node"] == name.as_str() && e["node_incarnation"] == boot && e["kind"] == "machine"
+            e["machine"] == name.as_str() && e["machine_boot"] == boot + 1 && e["kind"] == "machine"
         }) {
             if let Some(p) = lost["paths"].get(0) {
                 e["object"] = p.clone();
@@ -240,7 +251,7 @@ impl Faults {
         }
     }
 
-    /// A crash ended incarnation `k`; `lost` says what it did to `/work` (machine crashes).
+    /// A crash ended boot `k`; `lost` says what it did to `/work` (machine crashes).
     pub fn add_crash(
         &mut self,
         k: u64,
@@ -252,7 +263,7 @@ impl Faults {
     ) {
         self.crashes += 1;
         let mut e = json!({
-            "incarnation": k,
+            "boot": k + 1,
             "seq": seq,
             "point": point,
             "vtime_ms": vclock / 1_000_000,
@@ -273,7 +284,7 @@ impl Faults {
         let mut counts = serde_json::Map::new();
         let got = |c: &str| self.by_class.get(c).copied().unwrap_or(0);
         for (k, v) in &plan.resolved {
-            // A node's own setting (`KEY@NODE`) counts under its key's class.
+            // A machine's own setting (`KEY@MACHINE`) counts under its key's class.
             let Some(c) = class_of_key(crate::faults::split_scope(k).0) else {
                 continue;
             };
@@ -286,7 +297,7 @@ impl Faults {
                 None => (net[0], net[2], net[11], net[12], net[13]),
             };
             let (eligible, injected) = match c {
-                // Machine crashes at crash points; node kills (by the seed) at drawn times.
+                // Machine crashes at crash points; machine kills (by the seed) at drawn times.
                 "crash" => (
                     self.crash_points + got(c) - self.point_kills,
                     self.crashes + got(c),
@@ -299,7 +310,7 @@ impl Faults {
                 "partition" => (self.parts_acted, got(c)),
                 // Every pause the seed made.
                 "pause" => (got(c), got(c)),
-                // Realtime clock reads on the nodes with a skew, and those it moved.
+                // Realtime clock reads on the machines with a skew, and those it moved.
                 "clock" => self.clock_reads,
                 // Drawn once for every datagram sent.
                 "net-drop" | "net-dup" | "net-reorder" => (datagrams, got(c)),
@@ -316,22 +327,26 @@ impl Faults {
             .values()
             .map(|v| v["injected"].as_u64().unwrap_or(0))
             .sum();
-        json!({
+        let mut v = json!({
             "plan": plan.json(),
             "counts": counts,
             "injected": injected,
             "recent": self.recent,
-        })
+        });
+        if !plan.on.is_empty() {
+            v["on"] = json!(plan.on);
+        }
+        v
     }
 }
 
 /// What an `Injected` record `r` did, as `recent` shows it apart from where it happened
-/// (`incarnation`, `seq`, `vtime_ms`): its class (`None`: a consequence, not an injection) and
+/// (`boot`, `seq`, `vtime_ms`): its class (`None`: a consequence, not an injection) and
 /// the event's fields. `n1` and `n2` are the records after it (its `Name` records, if any).
 pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static str>, Value) {
     let [kind, class, value, by, port, _] = r.args;
     let fault = class_of(kind, class, by);
-    // A wire or datagram fault in a run with nodes: the link, as node numbers (named by the
+    // A wire or datagram fault in a run with machines: the link, as machine numbers (named by the
     // caller, `name_link`).
     let link = (INJ_NET_RESET..INJ_NET_CUT)
         .contains(&kind)
@@ -366,23 +381,23 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
         None if kind == INJ_NET_CUT => {
             e["object"] = json!("net");
             e["partition"] = json!(value);
-            e["shape"] = json!(proto::node::shape_name(class));
+            e["shape"] = json!(proto::machine::shape_name(class));
             e["length_ms"] = json!(r.args[5] / 1_000_000);
         }
-        // A node's processes killed or its machine crashed by the seed (named by the caller):
-        // the incarnation it ended, and the crash point it came at.
-        None if kind == proto::node::INJ_NODE_KILL => {
+        // A machine's processes killed or its machine crashed by the seed (named by the caller):
+        // the boot it ended, and the crash point it came at.
+        None if kind == proto::machine::INJ_MACHINE_KILL => {
             e["kind"] = json!(if by == 1 { "machine" } else { "process" });
-            e["node_incarnation"] = json!(value);
+            e["machine_boot"] = json!(value + 1);
             if port != 0 {
                 e["point"] = json!(port);
             }
         }
         // The wire's records: the connection's server port.
-        // A node paused by the seed (named by the caller): its incarnation, the pause's
-        // ordinal on the node, and its length.
-        None if kind == proto::node::INJ_NODE_PAUSE => {
-            e["node_incarnation"] = json!(value);
+        // A machine paused by the seed (named by the caller): its boot, the pause's
+        // ordinal on the machine, and its length.
+        None if kind == proto::machine::INJ_MACHINE_PAUSE => {
+            e["machine_boot"] = json!(value + 1);
             e["pause"] = json!(by);
             e["length_ms"] = json!(port / 1_000_000);
         }
@@ -424,14 +439,14 @@ pub fn injected(r: &Rec, n1: Option<Rec>, n2: Option<Rec>) -> (Option<&'static s
     (fault, e)
 }
 
-/// An event's `link` (node numbers, `injected`) by the nodes' names.
-pub fn name_link(e: &mut Value, nodes: &[String]) {
+/// An event's `link` (machine numbers, `injected`) by the machines' names.
+pub fn name_link(e: &mut Value, machines: &[String]) {
     if let Some(l) = e["link"].as_array() {
         let n: Vec<Value> = l
             .iter()
             .map(|k| {
                 let k = k.as_u64().unwrap_or(0) as usize;
-                json!(nodes.get(k).cloned().unwrap_or_else(|| k.to_string()))
+                json!(machines.get(k).cloned().unwrap_or_else(|| k.to_string()))
             })
             .collect();
         e["link"] = json!(n);
@@ -555,7 +570,7 @@ pub fn line(f: &Value) -> String {
         return out;
     }
     for k in [
-        "node",
+        "machine",
         "kind",
         "point",
         "pause",

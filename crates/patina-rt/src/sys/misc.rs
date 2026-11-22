@@ -100,7 +100,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
                 }
             }
         }
-        // Another node's process is not found (`proc::foreign_pid`).
+        // Another machine's process is not found (`proc::foreign_pid`).
         nr::CAPGET
             if crate::guest::get::<[i32; 2]>(call.arg(0))
                 .is_ok_and(|h| super::proc::foreign_pid(h[1] as u32 as u64)) =>

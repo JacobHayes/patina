@@ -49,7 +49,7 @@ xargs -P 4 -L 1 bash -euo pipefail -c '"$PATINA" verify --seed "$2" --runs 3 \
 for g in $guests; do
     for s in 1 2; do
         grep -q '^identical' "$o/$g-$s.txt" || die "a. $g seed $s: $(grep -m1 -v '^run ' "$o/$g-$s.txt")"
-        cmp -s "$o/$g.want" "$o/$g-$s/run-0/inc-0/stdout" || die "a. $g seed $s: output differs from the native run"
+        cmp -s "$o/$g.want" "$o/$g-$s/run-0/boot-1/stdout" || die "a. $g seed $s: output differs from the native run"
         [ "$(field "$o/$g-$s/run-0/result.json" rewrite.applied)" -ge 1 ] && [ "$(field "$o/$g-$s/run-0/result.json" rewrite.points)" -ge 1 ] ||
             die "a. $g seed $s: no plan applied or no point taken ($(field "$o/$g-$s/run-0/result.json" rewrite))"
     done
@@ -76,7 +76,7 @@ hunt() {
         n=$((n + 4))
     done
     [ -n "$first" ] || die "b. $name: no failure in seeds 1-$n under"
-    echo "b. $name: failure first on seed $first ($(tail -1 "$o/$name-$first/inc-0/stdout"))"
+    echo "b. $name: failure first on seed $first ($(tail -1 "$o/$name-$first/boot-1/stdout"))"
 }
 hunt go-race 40 --fault compute-gap=8 -- "$G/compute/go-race-stock"
 hunt rs-race 80 --fault compute-gap=2 -- "$G/compute/rs-race-stock"
@@ -92,7 +92,7 @@ echo "b. without points neither race window holds a switch"
 # c. The guest exits 0 only if its loop ended 10 to 12 virtual ms after the arming.
 pts --seed 1 --timeout 30 --out "$o/deadline" -- "$G/compute/deadline-stock" deadline 10
 [ "$(field "$o/deadline/result.json" outcome)" = ok ] || die "c. deadline-stock: $(res "$o/deadline")"
-echo "c. deadline-stock: $(tail -1 "$o/deadline/inc-0/stdout")"
+echo "c. deadline-stock: $(tail -1 "$o/deadline/boot-1/stdout")"
 
 # d.
 "$PATINA" verify --seed 1 --fault compute-gap=8 --runs 3 --vary cpu --out "$o/cpu" -- "$G/compute/go-race-stock" >"$o/cpu.txt" 2>&1 || true

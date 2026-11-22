@@ -147,20 +147,20 @@ pub(super) fn parse_addr(
     } else {
         -EADDRNOTAVAIL
     };
-    // With nodes, `10.0.0.(k + 1)` is node k's: a process may bind its own node's, and
-    // connect to any node's.
-    let me = crate::state::node();
-    let nodes = (crate::state::config().nodes as usize).max(1);
+    // With machines, `10.0.0.(k + 1)` is machine k's: a process may bind its own machine's, and
+    // connect to any machine's.
+    let me = crate::state::machine();
+    let machines = (crate::state::config().machines as usize).max(1);
     let kind4 = |a: [u8; 4]| -> Result<u8, i64> {
         match a {
             [0, 0, 0, 0] => Ok(ADDR_ANY),
             [127, 0, 0, 1] => Ok(ADDR_LOOP4),
-            [10, 0, 0, x] if x >= 1 && (x as usize) <= nodes => {
+            [10, 0, 0, x] if x >= 1 && (x as usize) <= machines => {
                 let k = x as usize - 1;
                 if !connect && k != me {
                     Err(-EADDRNOTAVAIL)
                 } else {
-                    Ok(node_addr(k))
+                    Ok(machine_addr(k))
                 }
             }
             _ => Err(unknown),
@@ -303,9 +303,9 @@ fn socket(call: &mut dyn Call) -> Action {
     Action::Return(fd)
 }
 
-/// Bind the real socket to `@patina-l-<n>` (`listen_n`: the port, and the node).
+/// Bind the real socket to `@patina-l-<n>` (`listen_n`: the port, and the machine).
 fn real_bind(fd: i64, port: u16) -> i64 {
-    let (a, n) = abstract_addr(LISTEN_PREFIX, Some(listen_n(crate::state::node(), port)));
+    let (a, n) = abstract_addr(LISTEN_PREFIX, Some(listen_n(crate::state::machine(), port)));
     unsafe { sc3(nr::BIND, fd as u64, a.as_ptr() as u64, n as u64) }
 }
 
@@ -655,7 +655,7 @@ fn take_reset(fd: i64, i: usize) -> Option<i64> {
         return None;
     }
     s.flags &= !WF_RESET;
-    // A give-up (a cut held the data, runs with nodes) leaves `ETIMEDOUT` on a connected
+    // A give-up (a cut held the data, runs with machines) leaves `ETIMEDOUT` on a connected
     // socket; a failed connect's error is on a socket that never connected.
     let gave_up = s.state == WS_CONNECTED && s.err == e::ETIMEDOUT as u16;
     take_err(fd, i);

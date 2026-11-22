@@ -2,13 +2,13 @@
 # acked-kept RUN: a record acknowledged on stdout ("ack I") before a machine crash is in the
 # tree the crash left (data.log, 8 bytes a record). For `patina run --check`.
 set -u # lint-allow: strict-line — no set -e: exit 1 is a finding, so a command that fails exits 2 (error) itself
-ls -d "$1"/inc-*/post-crash >/dev/null 2>&1 || { echo "no crash in this run"; exit 77; }
-for inc in "$1"/inc-*; do
-  [ -d "$inc/post-crash" ] || continue
-  last=$(awk '/^ack / {v = $2} END {print v}' "$inc/stdout") || exit 2
+ls -d "$1"/boot-*/post-crash >/dev/null 2>&1 || { echo "no crash in this run"; exit 77; }
+for boot in "$1"/boot-*; do
+  [ -d "$boot/post-crash" ] || continue
+  last=$(awk '/^ack / {v = $2} END {print v}' "$boot/stdout") || exit 2
   stored=0
-  if [ -f "$inc/post-crash/data.log" ]; then
-    bytes=$(wc -c <"$inc/post-crash/data.log") || exit 2
+  if [ -f "$boot/post-crash/data.log" ]; then
+    bytes=$(wc -c <"$boot/post-crash/data.log") || exit 2
     stored=$((bytes / 8))
   fi
   [ "${last:--1}" -lt "$stored" ] || { echo "acked-record-lost: acknowledged $last, $stored stored after the crash"; exit 1; }

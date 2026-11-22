@@ -19,9 +19,9 @@ for m in $modes; do
 done
 if [ "$ARCH" != x86_64 ]; then
     patina_run "$o/litpool" 1 insn litpool
-    grep -qx 'OK litpool' "$o/litpool/inc-0/stdout" || die "litpool: $(head -2 "$o/litpool/inc-0/stdout")"
+    grep -qx 'OK litpool' "$o/litpool/boot-1/stdout" || die "litpool: $(head -2 "$o/litpool/boot-1/stdout")"
     [ "$(field "$o/litpool/result.json" counters.insn.scan.rejected_sites)" -ge 1 ] || die "litpool: no rejected site"
-    echo "a literal-pool word equal to yield: $(head -1 "$o/litpool/inc-0/stdout"), rejected_sites $(field "$o/litpool/result.json" counters.insn.scan.rejected_sites)"
+    echo "a literal-pool word equal to yield: $(head -1 "$o/litpool/boot-1/stdout"), rejected_sites $(field "$o/litpool/result.json" counters.insn.scan.rejected_sites)"
 fi
 python3 -I "$HERE/lib/census.py" "$RT_BIN" >"$o/rt-census.txt"
 for k in $kinds; do

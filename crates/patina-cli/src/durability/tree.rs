@@ -1,6 +1,6 @@
-//! A file tree as data: what the supervisor exports at the end of an incarnation (the live
+//! A file tree as data: what the supervisor exports at the end of a boot (the live
 //! tree, descriptor 3006), what replaying an operation log produces, and what the
-//! materialiser writes as the next incarnation's `/in`.
+//! materialiser writes as the next boot's `/in`.
 //!
 //! Archive format (deterministic: entries in sorted path order): magic `PATINAT3`, then per
 //! entry: path (u32 length + bytes, "" = the root), kind u8, mode u32, uid u32, gid u32,
@@ -12,7 +12,7 @@
 //! archive of `PATINAT2` (no mtime) still reads.
 //!
 //! A node's `mtime` is the virtual modification time the guest saw (`None`: the virtual file
-//! epoch, never changed). It is carried from one incarnation to the next (`times`,
+//! epoch, never changed). It is carried from one boot to the next (`times`,
 //! `decode_times`), never compared: `canonical` (so `diff` and `digest`) leaves it out. It
 //! never passes through a host file's times, which a host filesystem may clamp.
 //!

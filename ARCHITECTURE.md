@@ -7,7 +7,7 @@ part names the module that implements it. It is for maintainers; users read `pat
 
 ```
 patina (patina-cli)
- ├─ launcher        one sandbox per incarnation; fixed process state; restart after a crash
+ ├─ launcher        one sandbox per boot; fixed process state; restart after a crash
  └─ supervisor      PID 1 in the sandbox: the turn, virtual time, signals, the network wire,
      │              crash points; answers the runtime over a shared control region
      └─ guest processes, each with the runtime (patina-rt) loaded first
@@ -131,13 +131,13 @@ a fresh IPC namespace makes them and virtual times. A segment's memory is a memf
 supervisor holds; `shmat` opens it as `/proc/1/fd/N` and maps it where the runtime chooses
 (`sys/shm.rs`), and the futex key of the mapping is the segment's, so every process names one
 queue. Attachments follow `fork`, `execve` and exit in the supervisor. At the end of an
-incarnation a process crash writes the table and the memory to `FD_SHM`, a memfd the launcher
+boot a process crash writes the table and the memory to `FD_SHM`, a memfd the launcher
 keeps for the run, and the next supervisor starts from it; any other end leaves it empty.
 
 ## The sandbox
 
 Patina makes the sandbox itself (`sandbox.rs`): every namespace but the time namespace
-unshared, uid and gid 1000, no capabilities. `/usr` is a read-only bind; `/work` (or the path `--work DIR:GUEST` gives,
+unshared, uid and gid 1000, no capabilities. `/usr` is a read-only bind; `/work` (or the path `--disk DIR:GUEST` gives,
 `Config::work`) and `/tmp` are tmpfs; `/etc` is generated; the program's directory is a
 read-only bind at the path it was given by (`config::program`), and `:copy` mounts are copies
 (`sup/mod.rs`). `launch::layout` lists the mounts in order; the order is the guest's mount
@@ -228,7 +228,7 @@ the sandbox runs under it, guests too: a guest's `unshare` is refused by the run
 namespace a native command (`patina __native`) makes is nested in the guests' user namespace
 and owns nothing outside it.
 
-Another view (`Keeper::view`): the part a node of a multi-machine run builds on. From the
+Another view (`Keeper::view`): the part a machine of a multi-machine run builds on. From the
 keeper, a helper unshares a mount, UTS and IPC namespace, makes every mount private, mounts a
 new tmpfs (`fsopen`, onto a directory opened without following links) on each path given (the
 work path, `/tmp`, `/dev/shm`) and sets the hostname; its child joins the guests' user
@@ -237,12 +237,12 @@ names, and runs the caller's function, in the sandbox's PID and network namespac
 PID 1 when the helper exits. The helper, while it makes the view, is the one process of the
 sandbox's PID namespace other than the keeper with capabilities (the keeper's, in the outer
 user namespace); it executes nothing of the guest's. The helper and the process are not dumpable (a
-node's first process makes itself dumpable, without capabilities, to set its own process state
+machine's first process makes itself dumpable, without capabilities, to set its own process state
 just before it executes the runtime, as an exec would) and hold only the
 descriptors the view needs; the process gets a new session (no terminal), `/dev/null` for any
 standard descriptor not passed. The keeper must have one thread: the helper forks without
 executing. `patina __sandbox-views` checks it
-(`sandbox/14-views.sh`): two views, each with its own mounts, hostname, IPC, work tree and
+(`sandbox/14-views.sh`): two views, each with its own mounts, hostname, IPC, disk and
 `/tmp`, none seeing another's files, sharing the PID, network and user namespaces, with no
 capability.
 
@@ -293,61 +293,68 @@ Virtual time advances only by what the program does: each trap charges a fixed a
 when every thread sleeps the clock jumps to the next deadline (`sup/time.rs`). A run of a
 program that sleeps an hour takes milliseconds.
 
-## Nodes
+## Machines
 
-A run with nodes (`[node.NAME]`, `patina guide nodes`) is still one sandbox, one
-supervisor, one virtual clock, one log and one seed; the nodes are views inside it. Node 0 is
-the driver, the command after `--`, started as in a run without nodes; nodes 1 upward are the
-declared ones, in file order. A run without nodes takes the same path as before: no node table
-is written (`n == 0`), no record of any node is made, and its seeds and digests are unchanged.
+Words: a **machine** is one computer of a run, with its own disk, hostname and address; **main**
+is machine 0, whose program is the command after `--` (or `[machine.main] run`). A **boot** is
+one start of a machine's program, numbered from 1 (`boot-K/`, `PATINA_BOOT`, set from boot 2
+on); internally boots are indexed from 0 and shown as index + 1. A machine's **disk** is its
+crash-modelled directory (`/work` unless `--disk DIR:GUEST` moves it). `PATINA_MACHINE` names
+the machine a process runs on, in a run with machines.
 
-- **Start.** The launcher writes the node table (`proto::node::NodeTab`, after the scan
+A run with machines (`[machine.NAME]`, `patina guide machines`) is still one sandbox, one
+supervisor, one virtual clock, one log and one seed; the machines are views inside it. Machine 0 is
+main, the command after `--`, started as in a run without machines; machines 1 upward are the
+declared ones, in file order. A run without machines takes the same path as before: no machine table
+is written (`n == 0`), no record of any machine is made, and its seeds and digests are unchanged.
+
+- **Start.** The launcher writes the machine table (`proto::machine::MachineTab`, after the scan
   table in the control region: names; the supervisor's first pids, statuses and cut counters)
-  and passes each node's starting tree, program and environment to the keeper in the layout
-  (`sandbox::Nodes`), with each node's stdio memfds at `3030 + 3(k-1)`. PID 1 keeps a socket to
-  the keeper at `FD_NODES` (3024) and hands it to the supervisor. Boot is sequential and before
-  any guest runs: the driver says `Hello` and waits; for each node in order the supervisor
-  reserves the next slot, marks it with the node, asks the keeper to start the node
-  (`Keeper::view`: its own mount, UTS and IPC namespaces, tmpfs on its work tree, `/tmp` and
+  and passes each machine's starting tree, program and environment to the keeper in the layout
+  (`sandbox::Machines`), with each machine's stdio memfds at `3030 + 3(k-1)`. PID 1 keeps a socket to
+  the keeper at `FD_MACHINES` (3024) and hands it to the supervisor. Boot is sequential and before
+  any guest runs: main says `Hello` and waits; for each machine in order the supervisor
+  reserves the next slot, marks it with the machine, asks the keeper to start the machine
+  (`Keeper::view`: its own mount, UTS and IPC namespaces, tmpfs on its disk, `/tmp` and
   `/dev/shm`, the shared trees read-only, its hostname), and waits for its first process's
-  `Hello` from that slot (`DEC_NODE_START`). The process copies its starting tree in, takes its
+  `Hello` from that slot (`DEC_MACHINE_START`). The process copies its starting tree in, takes its
   stdio, sets the process state every guest inherits (`sup/inherit.rs`, as the supervisor's own
   child does) and executes the runtime, which starts as for any program. One process is
   starting at a time, so slots, pids and records come in one order. The shared trees (`/`,
-  `/guest`, `:copy` mounts) are the driver's: what the driver writes there a node sees (a file,
-  a path socket), read-only. That is a deliberate channel the driver has and nodes do not, as a
-  shared disk would be. A node whose first process fails before its `Hello` ends the run as
+  `/guest`, `:copy` mounts) are main's: what main writes there a machine sees (a file,
+  a path socket), read-only. That is a deliberate channel main has and machines do not, as a
+  shared disk would be. A machine whose first process fails before its `Hello` ends the run as
   `infra` after the stall limit; one whose command cannot be loaded ends it as `exec`, naming
-  the node (the runtime's host error, `HE_EXEC`, from a process that has not executed: the
+  the machine (the runtime's host error, `HE_EXEC`, from a process that has not executed: the
   supervisor keeps the pids that have, `execed`).
-- **Which node.** Every slot carries its node (`Slot::node`), set when the slot is reserved and
-  inherited by threads and children; the runtime installs its filter once per node
-  (`filter_installed` holds a bit per node). The supervisor writes `DEC_NODE_SLOT` when a slot
-  changes node, so a reader of the log knows each record's node. The runtime reads its node in
-  one place (`state::node()`, from the slot at each image start). A process's view of other
-  processes is its node's: `kill`, `tgkill`, `setpgid`, `getpgid`, `getsid` and `capget` of
-  another node's process answer `ESRCH`, as do process groups and `kill(-1)` (the supervisor's
-  process table answers which node a pid is on, zombies included: `Op::PidNode`), and `sched_*`
-  see only the node's threads. System V shared memory is one table per node (each node is its own IPC namespace).
-- **Addresses and ports.** A node's address is the wire's address kind `0x10 + k`
-  (`10.0.0.(k+1)`; the driver keeps `HOST4`, `10.0.0.1`). The wire keys ports, listeners and
-  connections by `(node, port)`: the listener's abstract name is `@patina-l-<node << 16 | port>`;
-  loopback is per node; a connection to another node's address is routed to that node. UDP
-  ports are per node; in UDP's address kinds a node's own address is `HOST4` and another
-  node `j`'s `0x10 + j` (the driver's `0x10`), which the supervisor routes to node `j`'s `HOST4`
+- **Which machine.** Every slot carries its machine (`Slot::machine`), set when the slot is reserved and
+  inherited by threads and children; the runtime installs its filter once per machine
+  (`filter_installed` holds a bit per machine). The supervisor writes `DEC_MACHINE_SLOT` when a slot
+  changes machine, so a reader of the log knows each record's machine. The runtime reads its machine in
+  one place (`state::machine()`, from the slot at each image start). A process's view of other
+  processes is its machine's: `kill`, `tgkill`, `setpgid`, `getpgid`, `getsid` and `capget` of
+  another machine's process answer `ESRCH`, as do process groups and `kill(-1)` (the supervisor's
+  process table answers which machine a pid is on, zombies included: `Op::PidMachine`), and `sched_*`
+  see only the machine's threads. System V shared memory is one table per machine (each machine is its own IPC namespace).
+- **Addresses and ports.** A machine's address is the wire's address kind `0x10 + k`
+  (`10.0.0.(k+1)`; main keeps `HOST4`, `10.0.0.1`). The wire keys ports, listeners and
+  connections by `(machine, port)`: the listener's abstract name is `@patina-l-<machine << 16 | port>`;
+  loopback is per machine; a connection to another machine's address is routed to that machine. UDP
+  ports are per machine; in UDP's address kinds a machine's own address is `HOST4` and another
+  machine `j`'s `0x10 + j` (main's `0x10`), which the supervisor routes to machine `j`'s `HOST4`
   from `0x10 + sender` (`sup/udp.rs`, `rt::sys::udp`). Abstract `AF_UNIX` names live in the
-  kernel's one network namespace, which every node shares: the runtime gives the kernel each
-  name a node binds, connects or sends to under the node's prefix `patina-n<k>-` (under the
+  kernel's one network namespace, which every machine shares: the runtime gives the kernel each
+  name a machine binds, connects or sends to under the machine's prefix `patina-n<k>-` (under the
   reserved `patina-` names, which a guest cannot give) and takes it off every name read back
-  (`rt::sys::unixname`), so a node's names are its own. Message headers are copied to runtime
+  (`rt::sys::unixname`), so a machine's names are its own. Message headers are copied to runtime
   memory with the name replaced, never written in place: a guest's header may be read-only or
   shared by threads. An autobind, and the kernel's random one for an unbound socket with
   `SO_PASSCRED` (made explicit before a connect, or a datagram socket's send), is the runtime's
-  counter name under the prefix. Without nodes none of this runs.
-- **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the node
-  table (`proto::node::parse`; the supervisor cannot read a node process's memory, which is not
-  its descendant), refuses every call outside the driver's node (`EPERM`), and sends
-  `Op::Net` [verb, from set, to set, both] or `Op::Node` [verb, node]; the call is logged with
+  counter name under the prefix. Without machines none of this runs.
+- **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the machine
+  table (`proto::machine::parse`; the supervisor cannot read a machine process's memory, which is not
+  its descendant), refuses every call outside main's machine (`EPERM`), and sends
+  `Op::Net` [verb, from set, to set, both] or `Op::Machine` [verb, machine]; the call is logged with
   its words as an SDK call is.
 - **Cuts.** The supervisor keeps two matrices of cut links (`sup/link.rs`): the script's
   (`partition`) and the seed's (partitions); a link is cut while either says so, and `heal`
@@ -359,16 +366,17 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   for 6 retries or the socket's `TCP_SYNCNT`) and fails after the last retry (the cut is
   looked at when the SYN is sent and retried; a cut made inside a handshake's delay does not
   stop it). A datagram sent on a cut link is lost (`UF_CUT`). No fault is drawn for a cut.
-- **Link faults.** A link fault (`net-*`) is drawn only on the links `net-links` names
-  (`Sup::link_faulted`: between nodes other than the driver, by default); on the others an item
+- **Link faults.** A link fault (`net-*`) is drawn only on the faulted links
+  (`Sup::link_faulted`: between machines other than main, and main's too when a link class or
+  key names `@main`, `NetCfg::links`); on the others an item
   gets the default delay range and no draw at all, so turning a class on draws nothing on
-  them. The draws are keyed by connection or datagram as without nodes, so each direction of a
-  pair of nodes has its own. With nodes an injection's record names its link (`args[1]`,
+  them. The draws are keyed by connection or datagram as without machines, so each direction of a
+  pair of machines has its own. With machines an injection's record names its link (`args[1]`,
   `proto::wire::inj_link`) and its eligible counts are those of the faulted links
-  (`NodeTab::elig`, `result.json`'s `nodes.faulted_links`).
-- **Partitions.** `partition-gap-ms` starts a chain of node events (`Event::Node`): a start
-  draws a shape and two sides of the nodes the link faults act on (`proto::node::sides`, a
-  keyed shuffle), sets the seed's matrix (one direction for `oneway`; `bridge` keeps one node's
+  (`MachineTab::elig`, `result.json`'s `machines.faulted_links`).
+- **Partitions.** `partition-gap-ms` starts a chain of machine events (`Event::Machine`): a start
+  draws a shape and two sides of the machines the link faults act on (`proto::machine::sides`, a
+  keyed shuffle), sets the seed's matrix (one direction for `oneway`; `bridge` keeps one machine's
   links), records `DEC_NET_PART` and an `Injected` record (`INJ_NET_CUT`), and schedules its end
   after a drawn length; the end opens the links the script does not cut, records
   `DEC_NET_PART_END`, re-stamps what was held and schedules the next start. Every draw is on
@@ -378,25 +386,25 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   is deadlocked, as it would be without partitions (nothing is in flight, so the cut holds
   nothing and its heal changes nothing); an end does (`Live::Yes`), since it may release held
   traffic. A start that falls
-  while faults are off makes no partition. The node table keeps the first 64 partitions (shape,
+  while faults are off makes no partition. The machine table keeps the first 64 partitions (shape,
   sides, times, whether a cut link held, lost or kept back anything) for `result.json`.
-- **Kill and restart.** A node is up from its first process's `Hello` until it goes down
-  (`DEC_NODE_DOWN` [node, incarnation, how, status, processes killed, down time]): the seed
-  kills it (`--faults kill`: a node event `crash-gap-ms` after each start that keeps a run
+- **Kill and restart.** A machine is up from its first process's `Hello` until it goes down
+  (`DEC_MACHINE_DOWN` [machine, boot, how, status, processes killed, down time]): the seed
+  kills it (`--faults kill`: a machine event `crash-gap-ms` after each start that keeps a run
   alive while faults may act (`Live::AfterSetup`; outside the fault window it is only drawn
   again, and after the faults end it does nothing), keyed on
-  `Stream::Node` by node, incarnation and try, with an `Injected` record `INJ_NODE_KILL`
-  counted as `crash`), the driver does (`kill NAME`, `Op::Node`), or its first
-  process ends by itself. A kill `SIGKILL`s every live process of the node through the
+  `Stream::Machine` by machine, boot and try, with an `Injected` record `INJ_MACHINE_KILL`
+  counted as `crash`), main does (`kill NAME`, `Op::Machine`), or its first
+  process ends by itself. A kill `SIGKILL`s every live process of the machine through the
   supervisor's own kill (`kill_now`, with its exit barrier: the kernel has closed every
   descriptor before anything else happens); a socket's end is then
   the kernel's and the wire's ordinary one (FIN or RST to its peers, a listener whose name the
-  next connect finds gone, `ECONNREFUSED`). A first process's own end kills the node's others
-  the same way and classifies the end: an exit within `ok-exit` (`NodeConf`) stops the node;
-  another exit ends the run (`node-failed`, outcome `failure`), a signal Patina did not send
-  too (`node-crash`, outcome `crash`). The node table keeps each incarnation's pid, times, how
-  it ended and the stdio offsets where its output starts (`Boot`, at most 64 incarnations).
-  Node events act only where no request is in flight that they could disturb (`node_actions`:
+  next connect finds gone, `ECONNREFUSED`). A first process's own end kills the machine's others
+  the same way and classifies the end: an exit within `ok-exit` (`MachineConf`) stops the machine;
+  another exit ends the run (`machine-failed`, outcome `failure`), a signal Patina did not send
+  too (`machine-crash`, outcome `crash`). The machine table keeps each boot's pid, times, how
+  it ended and the stdio offsets where its output starts (`Boot`, at most 64 boots).
+  Machine events act only where no request is in flight that they could disturb (`machine_actions`:
   before the turn holder's request is handled, or at an idle jump, after which the wire is
   stepped and I/O waiters woken, so peers see a kill at once); a kill that ends the turn
   holder's process leaves its request unserved, and a turn holder ending its own process
@@ -404,149 +412,149 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   or thread the runtime is creating (its `Forked` not yet served) or a vfork child has not
   said `Hello`: until then the new task is in no table, and a kill would miss it. A restart (an
   event that keeps a run alive, `down-ms` after a down its `restart` policy follows, or the
-  driver's `start`) waits for the next such point after a kill in the same one (with
-  nothing runnable, at once: `node_actions_idle`), takes the lowest free slot (one an exited
-  thread left is replaced), clears the node's `filter_installed` bit (a new process tree needs
-  the filter) and asks the keeper for incarnation K: the keeper keeps every node's mount, UTS
+  main's `start`) waits for the next such point after a kill in the same one (with
+  nothing runnable, at once: `machine_actions_idle`), takes the lowest free slot (one an exited
+  thread left is replaced), clears the machine's `filter_installed` bit (a new process tree needs
+  the filter) and asks the keeper for boot K: the keeper keeps every machine's mount, UTS
   and IPC namespaces from its first start (`sandbox::Saved`, received from the view's helper)
   and starts the new process in them (`Place::Again`), without the starting tree's copy and with
-  `PATINA_INCARNATION=K`; its memfd stdio continues where the last left off, and the launcher
-  splits it per incarnation by the offsets the keeper reported. Everything is in the turn's
-  order, so kills, restarts and their records are the same in every run of a seed. The work
-  tree, `/tmp` and `/dev/shm` are kept whole across a kill, as a process kill keeps the page
-  cache: what a node's processes stored through a shared mapping is in the tmpfs pages and,
+  `PATINA_BOOT=K+1`; its memfd stdio continues where the last left off, and the launcher
+  splits it per boot by the offsets the keeper reported. Everything is in the turn's
+  order, so kills, restarts and their records are the same in every run of a seed. The disk,
+  `/tmp` and `/dev/shm` are kept whole across a kill, as a process kill keeps the page
+  cache: what a machine's processes stored through a shared mapping is in the tmpfs pages and,
   through the kill's own flush, in its disk's log.
-- **Disks.** Each node's work tree is a disk: the runtime marks a node's own work mount as
-  the work tree (`state::work_path`, from `NodeTab::work`), so everything the crash model
-  records for the driver's tree it records for a node's, in the one shared operation log,
-  each record's kind tagged with its node (`proto::oplog::tag_kind`; node 0's kinds are plain,
-  so a run without nodes writes the same bytes). The shadow table and the writeback-error
-  generations are shared, keyed by node and inode (`node_key`); the 64 shadow memfds go to the
-  keeper once (`SHADOWS_MSG`) and every node process inherits them at `FD_SHADOWS`. The
-  supervisor reaches a node's tree through its first process's root (`sup/disks.rs`, an
+- **Disks.** Each machine has a disk: the runtime marks a machine's own work mount as
+  the disk (`state::work_path`, from `MachineTab::work`), so everything the crash model
+  records for main's tree it records for a machine's, in the one shared operation log,
+  each record's kind tagged with its machine (`proto::oplog::tag_kind`; machine 0's kinds are plain,
+  so a run without machines writes the same bytes). The shadow table and the writeback-error
+  generations are shared, keyed by machine and inode (`machine_key`); the 64 shadow memfds go to the
+  keeper once (`SHADOWS_MSG`) and every machine process inherits them at `FD_SHADOWS`. The
+  supervisor reaches a machine's tree through its first process's root (`sup/disks.rs`, an
   `O_PATH` descriptor of `/proc/PID/root/WORK` opened at that process's `Hello`) and writes
   its base records there, before it runs; reclaim and the mapping flush find each mapping's
-  node by its device, and a `sync` flushes the caller's node's mappings only. At the end of the
-  run every node's live tree is a record of the log (`KIND_LIVE_TREE`), and the launcher splits
-  the log into one plain log per disk (`durability::log::split_nodes`: `node/NAME/inc-K/`, K
+  machine by its device, and a `sync` flushes the caller's machine's mappings only. At the end of the
+  run every machine's live tree is a record of the log (`KIND_LIVE_TREE`), and the launcher splits
+  the log into one plain log per disk (`durability::log::split_machines`: `machine/NAME/boot-K/`, K
   the boot the disk began with), which `patina log ops`, the self-check (`check::disks`, run
-  for every run with nodes) and `materialise` read as a single machine's.
-- **Machine crash.** `crash NAME` (`NODE_CRASH`) or the seed under `--faults crash`
-  (`NodeConf::crash` `CRASH_NODE_MACHINE`, drawn as the process kills are) runs
-  `nodes::node_crash` at a node action point: the node's mappings are flushed and a `Crash`
+  for every run with machines) and `materialise` read as a single machine's.
+- **Machine crash.** `crash NAME` (`MACHINE_CRASH`) or the seed under `--faults crash`
+  (`MachineConf::crash` `SEED_CRASH`, drawn as the process kills are) runs
+  `machines::machine_crash` at a machine action point: the machine's mappings are flushed and a `Crash`
   record (`[CRASH_MACHINE, boot, point]`, tagged; point 0 for a crash at a drawn time or a
   script's) ends its disk's log; its links are cut by a third
   layer (`Links::down`) until it is back; the wire forgets its ends (`wire_machine_down`:
   their descriptors closed without a FIN or RST, `End::dead`, a `DEC_WIRE_DEAD` record), holds
-  what was in flight to them so the senders' give-up clocks run, drops what the node itself
-  held, frees connections within the node and connects from it, and sends a connect to it
+  what was in flight to them so the senders' give-up clocks run, drops what the machine itself
+  held, frees connections within the machine and connects from it, and sends a connect to it
   into SYN retries; then its processes are killed as above (their ends reach no peer). Its
   live tree is logged, its disk closed, and the tree of its next boot materialised in the
   supervisor from its disk's records in the shared log (`crash::disk_log`, `materialise` with
-  the run's seed, the crash's sequence number as the key and `NodeTab::fs_model`), a pure
+  the run's seed, the crash's sequence number as the key and `MachineTab::fs_model`), a pure
   function of the log as for a single machine; its System V shared memory goes. Its restart
-  sends the keeper that tree (`[node, boot, 1]` and a memfd): the keeper makes a new view
-  (`Place::New`: new tmpfs work tree, `/tmp`, `/dev/shm`, IPC namespace) and fills the work
-  tree from it before the runtime starts, and the first `Hello` of the new boot opens the new
+  sends the keeper that tree (`[machine, boot, 1]` and a memfd): the keeper makes a new view
+  (`Place::New`: new tmpfs disk, `/tmp`, `/dev/shm`, IPC namespace) and fills the disk
+  from it before the runtime starts, and the first `Hello` of the new boot opens the new
   disk. The links open again then (`wire_heal`), and an item that reaches a dead end resets its
   sender (`RST_UNKNOWN`), as a rebooted host answers a segment of a connection it does not
   know.
-- **Faults per node.** The node classes (`disk`, `mem`, `buggify`, `crash`, `kill`, `pause`,
-  `clock`) and their keys are each node's: the config resolves each node's classes and
-  settings (the run's unscoped ones for every node but the driver and a node with `faults =
-  false`, `@NODE` scopes) with a seed of its own (`Config::node_plan`), the driver's into the
-  run's `FaultCfg` and `SdkCfg` and the others' into `NodeTab::faults` (a `FaultCtl`, settings
-  and counters, per node) and `NodeTab::sdk`. The runtime reaches its node's through
-  `state::faults()` and `sys::sdk::cfg()`; a fault point's site row is per node
-  (`SdkTab::site_on`), its draws keyed by the node's seed. Draws stay keyed by sequence
+- **Faults per machine.** The machine classes (`disk`, `mem`, `buggify`, `crash`, `kill`, `pause`,
+  `clock`) and their keys are each machine's: the config resolves each machine's classes and
+  settings (the run's unscoped ones for every machine but main and a machine with `faults =
+  false`, `@MACHINE` scopes) with a seed of its own (`Config::machine_plan`), main's into the
+  run's `FaultCfg` and `SdkCfg` and the others' into `MachineTab::faults` (a `FaultCtl`, settings
+  and counters, per machine) and `MachineTab::sdk`. The runtime reaches its machine's through
+  `state::faults()` and `sys::sdk::cfg()`; a fault point's site row is per machine
+  (`SdkTab::site_on`), its draws keyed by the machine's seed. Draws stay keyed by sequence
   number; the fault window (`FaultCfg::in_window`) stays the run's.
-- **Crash points per node.** The runtime's crash point (`inject::crash_point`) reads its own
-  node's `FaultCtl`: each node counts its points in its own `crash_points`, and `--fault
-  crash-at=N@NODE` or `crash-permille=P@NODE` (`Config::node_plan`, resolved with the node's
-  seed) sets that node's `crash_at` or `crash_permille`; in such a run only the nodes a crash
+- **Crash points per machine.** The runtime's crash point (`inject::crash_point`) reads its own
+  machine's `FaultCtl`: each machine counts its points in its own `crash_points`, and `--fault
+  crash-at=N@MACHINE` or `crash-permille=P@MACHINE` (`Config::machine_plan`, resolved with the machine's
+  seed) sets that machine's `crash_at` or `crash_permille`; in such a run only the machines a crash
   key names crash, and none at drawn times. At each start of a
-  boot the supervisor arms the node's points (`Nodes::arm_points`: the counter from 0,
-  `crash_enabled` while the node has boots left, `incarnation` the boot), so the N-th point is
-  of that boot. A point that fires is the runtime's `CrashPoint` request; for a node the
-  supervisor answers it with `node_point_crash`, the same `node_crash` as above with the point
-  in its `Crash` record and its `INJ_NODE_KILL` (`crash-at` then turns itself off: it fires
-  once, in the node's first boot); under `kill` (`CRASH_PROCESS`) it answers with
-  `node_kill` instead, the seed's process kill, the point in its `INJ_NODE_KILL`, the disk going
+  boot the supervisor arms the machine's points (`Machines::arm_points`: the counter from 0,
+  `crash_enabled` while the machine has boots left, `boot` the boot), so the N-th point is
+  of that boot. A point that fires is the runtime's `CrashPoint` request; for a machine the
+  supervisor answers it with `machine_point_crash`, the same `machine_crash` as above with the point
+  in its `Crash` record and its `INJ_MACHINE_KILL` (`crash-at` then turns itself off: it fires
+  once, in the machine's first boot); under `kill` (`CRASH_PROCESS`) it answers with
+  `machine_kill` instead, the seed's process kill, the point in its `INJ_MACHINE_KILL`, the disk going
   on. A point's per-mille draw is the runtime's, keyed by the
-  record's sequence number as for one machine; the node's seed resolves only a range. A
-  process or thread of the node being created when its point fires ends the run
-  `unsupported` (a crash could not kill it); another node's creations do not matter. The node's boot table keeps each boot's point count and the
+  record's sequence number as for one machine; the machine's seed resolves only a range. A
+  process or thread of the machine being created when its point fires ends the run
+  `unsupported` (a crash could not kill it); another machine's creations do not matter. The machine's boot table keeps each boot's point count and the
   point it crashed at (`Boot::points`, `Boot::point`), which `result.json` shows
   (`crash_points`, `downs[].point`) and `sweep --crash-points` reads to make one child per point of
-  each node (`seed-S@NODE.P`, `crash-at=P@NODE`). A pair is two scoped keys
+  each machine (`seed-S@MACHINE.P`, `crash-at=P@MACHINE`). A pair is two scoped keys
   (`crash-at=I@A`, `crash-at=J@B`). Under `[sweep] crash-pairs = K` a
-  first crash's child also counts the other nodes' points (`crash-permille=0@B,...`), and one that
-  ended ok gives each other node's next K points after A's `Crash` record by sequence number
+  first crash's child also counts the other machines' points (`crash-permille=0@B,...`), and one that
+  ended ok gives each other machine's next K points after A's `Crash` record by sequence number
   (`branch::window`, each with the number of B's records before it); each is a pair's child
   (`seed-S@A.I+B.J`), the first child's run up to B's J-th point, which B counts from its first
   boot as before, so B crashes where the first child reached that point. A pair whose B
   crashed after another number of its records is `nondeterministic`. After the run the
   launcher writes each
-  crashed disk's materialised tree to `node/NAME/inc-K/post-crash/`, checks it is the base of
+  crashed disk's materialised tree to `machine/NAME/boot-K/post-crash/`, checks it is the base of
   the next disk, and counts what it lost against the disk's live tree (`downs[].lost`, the
-  `crash` event). A node's points count only its own disk's changes and syncs, so its N-th
-  point stays at the same place in its own work when another node's crashes change.
-- **Pause.** `pause NAME` / `resume NAME` (`Op::Node`, `NODE_PAUSE`,
-  `NODE_RESUME`) and the seed's pauses (`pause-gap-ms`, `pause-ms`, each node's own:
-  `NodeConf::pause_*`) freeze a node's machine (`sup/pause.rs`). The scheduler keeps a set of
+  `crash` event). A machine's points count only its own disk's changes and syncs, so its N-th
+  point stays at the same place in its own work when another machine's crashes change.
+- **Pause.** `pause NAME` / `resume NAME` (`Op::Machine`, `MACHINE_PAUSE`,
+  `MACHINE_RESUME`) and the seed's pauses (`pause-gap-ms`, `pause-ms`, each machine's own:
+  `MachineConf::pause_*`) freeze a machine (`sup/pause.rs`). The scheduler keeps a set of
   frozen slots beside the runnable one (`Sched::frozen`); a frozen slot keeps its state, its
   wake and its place in the event queue but is never picked, and the idle jump and the
   deadlock check count only eligible slots, so with nothing frozen the picks and their draws
-  are those of a run without pauses. Every slot whose `Slot::node` is paused is frozen
-  (`refreeze`; a slot a paused node gains, `slot_node`); a turn holder of a paused node has
+  are those of a run without pauses. Every slot whose `Slot::machine` is paused is frozen
+  (`refreeze`; a slot a paused machine gains, `slot_machine`); a turn holder of a paused machine has
   its request served as at the pause and is frozen before its reply is read (`serve`, a
   `Continue` of a frozen slot chooses another). Clocks are not stopped: deadlines fall due as
   they would, and the threads they wake run at the resume. A fourth link layer
-  (`Links::paused`) cuts every link to and from the node, so the wire holds what a peer sends
-  (its give-up clock runs); `wire_pause` re-holds what was in flight to the node with the rest
+  (`Links::paused`) cuts every link to and from the machine, so the wire holds what a peer sends
+  (its give-up clock runs); `wire_pause` re-holds what was in flight to the machine with the rest
   of its delay and sends handshakes either way into SYN retries; a datagram arriving at a
-  paused node is lost (`UD_PAUSED`); keepalive timers are re-armed (`ka_arm_all`), so probes
+  paused machine is lost (`UD_PAUSED`); keepalive timers are re-armed (`ka_arm_all`), so probes
   either way go unanswered. A resume opens the links nothing else cuts
-  (`wire_heal`). A pause takes effect at a node action point, as kills do; a kill or machine
-  crash of a paused node ends the pause first (`pause_down`). The seed's chain is node events
-  (`EVK_PAUSE_START`, `Live::No`; `EVK_PAUSE_END`, `Live::Yes`) drawn on `Stream::Node` keyed
-  by node, the pause's ordinal and a sub-key (`NSUB_PAUSE_*`), with an `Injected` record
-  `INJ_NODE_PAUSE` counted as `pause`; a start skips while faults may not act, while the node
+  (`wire_heal`). A pause takes effect at a machine action point, as kills do; a kill or machine
+  crash of a paused machine ends the pause first (`pause_down`). The seed's chain is machine events
+  (`EVK_PAUSE_START`, `Live::No`; `EVK_PAUSE_END`, `Live::Yes`) drawn on `Stream::Machine` keyed
+  by machine, the pause's ordinal and a sub-key (`NSUB_PAUSE_*`), with an `Injected` record
+  `INJ_MACHINE_PAUSE` counted as `pause`; a start skips while faults may not act, while the machine
   is down or while a script has paused it. Each pause and resume is a decision record
-  (`DEC_NODE_PAUSE` [node, boot, by, ordinal, length], `DEC_NODE_RESUME` [node, boot, how,
-  ordinal, ns paused]); the node table keeps the first 32 of each node for `result.json`. With
+  (`DEC_MACHINE_PAUSE` [machine, boot, by, ordinal, length], `DEC_MACHINE_RESUME` [machine, boot, how,
+  ordinal, ns paused]); the machine table keeps the first 32 of each machine for `result.json`. With
   no eligible slot, a pending event that can only wake a frozen slot (its sleep's end, a
-  paused node's timerfd or signal timer) keeps nothing alive (`only_frozen`): a paused node's
+  paused machine's timerfd or signal timer) keeps nothing alive (`only_frozen`): a paused machine's
   interval timer would otherwise fire forever. The lost-signal check skips frozen slots (a
   process-directed signal waits for a runnable thread of the process that is frozen too). A
-  deadlock's detail names the paused nodes.
-- **Clocks.** One virtual time serves every node; a node's realtime clock is it plus the
-  node's offset (`NodeTab::clock_off`, `sup/clock.rs`), which the runtime adds wherever it
-  answers a realtime time (`sys::time`'s clocks, `vtime::now` for the times a node stamps on
+  deadlock's detail names the paused machines.
+- **Clocks.** One virtual time serves every machine; a machine's realtime clock is it plus the
+  machine's offset (`MachineTab::clock_off`, `sup/clock.rs`), which the runtime adds wherever it
+  answers a realtime time (`sys::time`'s clocks, `vtime::now` for the times a machine stamps on
   its files, System V shared memory times, `/proc/stat`'s `btime`) and subtracts where it
-  converts an absolute realtime deadline to virtual time (`realtime_to_vclock`). The driver's
+  converts an absolute realtime deadline to virtual time (`realtime_to_vclock`). Main's
   offset is 0. Monotonic and boot-time clocks have none, and no clock has a rate of its own.
   The offset is each boot's skew (`clock-skew-ms`, drawn when the boot starts on
-  `Stream::Node` keyed by node, boot and `NSUB_SKEW`) plus the driver's steps (`clock NAME`,
-  `Op::Node` `CLOCK_STEP` with the change as its third argument), each a decision record
-  (`DEC_NODE_CLOCK` [node, boot, how, change, offset]); a node without either writes none. A
-  step moves the node's absolute realtime deadlines: the runtime says which deadline is one in
+  `Stream::Machine` keyed by machine, boot and `MSUB_SKEW`) plus main's steps (`clock NAME`,
+  `Op::Machine` `CLOCK_STEP` with the change as its third argument), each a decision record
+  (`DEC_MACHINE_CLOCK` [machine, boot, how, change, offset]); a machine without either writes none. A
+  step moves the machine's absolute realtime deadlines: the runtime says which deadline is one in
   `Slot::clock_flags` before a `Sleep`, `FutexWait` or `TimerFdSet` (outside the request, so
   the log does not change; the supervisor clears it as it reads it), the scheduler keeps it (`Entry::rt_abs`) and `retime` moves it
   (one now past wakes as a timeout), and a timerfd armed so moves too (`timers_clock_set`);
   one armed with `TFD_TIMER_CANCEL_ON_SET` gets a count written so it is readable, and the
-  runtime answers its next read `ECANCELED` when its node's step count (`NodeTab::clock_sets`)
+  runtime answers its next read `ECANCELED` when its machine's step count (`MachineTab::clock_sets`)
   moved since it was armed. Relative deadlines, on any clock, are virtual times and do not
   move, as the kernel keeps relative realtime timers on the monotonic base. Not modelled: a
   realtime futex wait that a stop signal interrupted resumes (`restart_syscall`) with its
   virtual deadline, so a step while it was stopped does not move it; a timerfd's
   `ECANCELED` is kept per process, not per open file, so after a fork each process holding it
-  reads it once. On a node with a
+  reads it once. On a machine with a
   skew the runtime counts its realtime reads, and those under an offset, for the `clock`
-  class (`NodeTab::clock_reads`).
-- **End.** The driver's exit ends the run; the supervisor records each node that still has
-  processes (`DEC_NODE_STOP`) and the launcher copies each node's stdio to
-  `node/NAME/inc-K/` and the node table to `result.json`'s `nodes`.
+  class (`MachineTab::clock_reads`).
+- **End.** Main's exit ends the run; the supervisor records each machine that still has
+  processes (`DEC_MACHINE_STOP`) and the launcher copies each machine's stdio to
+  `machine/NAME/boot-K/` and the machine table to `result.json`'s `machines`.
 
 ## The boundary log
 
@@ -604,8 +612,8 @@ whole log limit and 1 MiB (what a run's last trap and the supervisor write past 
 besides it, so the observations never take the place of a record and a run
 that ends on its limit ends at the same record (with `[run] log-limit` at its maximum there is no
 room, and the story shows sizes without bytes). The runtime code that observes runs between
-two segments of program code. When an incarnation ends
-the launcher moves the `Observe` records out of `boundary.log` into `inc-K/observe.log`
+two segments of program code. When a boot ends
+the launcher moves the `Observe` records out of `boundary.log` into `boot-K/observe.log`
 (`log::take_observations`), outside the sandbox, so the stored log is the run's byte for byte;
 `explain` then compares the replay with the run as `replay` does (records, digest, outcome)
 and tells nothing when they differ. Proof that observation changes nothing is that comparison
@@ -652,8 +660,8 @@ and a known pattern see the line after its settings (`sweep::case_shown`), so a 
 written for a case still matches once its line gains settings.
 `--ok-exit` (`Config::ok_exit`, in `run.json`) is an input of `outcome::classify`: a guest
 that exited with a listed status, not on a signal, ends `ok`, stop `ok-exit`, and the checker
-judges it; the logs and digest are those of the run without the flag. Each incarnation's
-final work tree is `inc-K/live.tree` (`durability::tree`); `patina log tree` writes it out.
+judges it; the logs and digest are those of the run without the flag. Each boot's
+final disk is `boot-K/live.tree` (`durability::tree`); `patina log tree` writes it out.
 A sweep keeps a run's trees compressed (`durability::kept`, from `sweep::cut`, after the run
 and its checker are done with them): `live.tree.zst`, and `post-crash.tree.zst` in a run no
 checker reads (`recheck::checkable`: a checker's input stays as the checker saw it, for
@@ -900,7 +908,7 @@ which decodes no instruction.
   own: its two bytes become `ud2` in place, no trampoline. The runtime answers it from the host
   CPU with the fields that name a core set to core 0's (leaf 1 `EBX[31:24]`, the APIC id; the
   x2APIC id of leaves 0xB and 0x1F; leaf 0x1A's core type; leaf 0x8000001E's APIC, compute
-  unit and node ids; leaf 0x80000026's): a thread placed on another core reads the same
+  unit and machine ids; leaf 0x80000026's): a thread placed on another core reads the same
   values, which a Go program keeps in registers a point records. Natively those differ by core;
   the rest is the host's, as without points. A `cpuid` the plan does not cover (dark, tainted,
   JIT) answers the core's own (`cpuid_unpatched` counts the `0f a2` pairs left, an upper
@@ -1118,24 +1126,24 @@ plan is in `run.json`.
 The fault window is two sequence numbers in the run's `FaultCfg`: `fault_after_seq` and
 `fault_until_seq` (`FaultCfg::in_window`). Every runtime injection, crash point and fault
 point, and every supervisor fault (link faults through `link_faulted`, partition and pause
-draws, the seed's node kills, clock skew at boot) asks it. The phases move it, under the turn:
+draws, the seed's machine kills, clock skew at boot) asks it. The phases move it, under the turn:
 
 - **Phases** (`sup/phase.rs`). A run with `--setup` or `--finally` runs its commands one after
-  the other as the driver's root process, in one sandbox and log; `PhaseCtl` (in `Ctl`) holds
+  the other as main's root process, in one sandbox and log; `PhaseCtl` (in `Ctl`) holds
   the phase and, per phase, its start and end sequence numbers, its wait status and where its
   output starts. A root's end is its `ProcExit` request, or its kill (`kill_now`); `phase_end`
   logs `DEC_PHASE` [ended phase, wait word, next phase] and, at the setup's ok end, sets
   `fault_after_seq` to that record's number (the launcher starts it at the maximum for a
   declared setup). At an ok end of the main command before a final check it sets
   `fault_until_seq` and settles the system (`settle`): the seed's partition and pauses end, the
-  script's cuts heal and its pauses end, and each down node with a restart scheduled by its
-  policy is started now (one a control call took down, or past `max-incarnations`, stays down).
-  The next root starts at the next point where nothing is being created (`node_actions`), after
-  the nodes it started, in a free slot, forked as the first root was. Nothing host-timed decides
-  a transition: each is a request or a node action under the turn. Every incarnation starts with
+  script's cuts heal and its pauses end, and each down machine with a restart scheduled by its
+  policy is started now (one a control call took down, or past `max-boots`, stays down).
+  The next root starts at the next point where nothing is being created (`machine_actions`), after
+  the machines it started, in a free slot, forked as the first root was. Nothing host-timed decides
+  a transition: each is a request or a machine action under the turn. Every boot starts with
   the setup (a crash comes only in the main phase), so the restarted machine boots without what
   an earlier setup started; the launcher resets `fault_after_seq` to the maximum for each
-  incarnation with a declared setup, and in mark mode the program marks again. `result::phased`
+  boot with a declared setup, and in mark mode the program marks again. `result::phased`
   classifies: a setup that did not end ok is `error` (stop `setup`), or after a machine crash
   the finding (stop `setup`), and after an ok main command a failed final check is the finding
   (stop `finally`).
@@ -1153,7 +1161,7 @@ draws. An injected errno is one Linux returns for that call on that object
 `result.json`'s `faults` counts per class the calls it could act on and the faults injected.
 
 Path swaps (`path-swap-permille`; `patina-rt/src/swap.rs`,
-`proto::swap`) stand in for another process of the same uid that changes the work tree
+`proto::swap`) stand in for another process of the same uid that changes the disk
 between a program's check of a path and its use. Each process keeps the hashes of the work-tree
 paths named by its last 16 checks (`stat`, `lstat`, `access`, `readlink`, `open`). A use (`open`,
 `exec`, `chdir`, a creation, removal, rename, link or attribute change by name) whose path is a
@@ -1167,8 +1175,8 @@ before an `exec`) are put back right after the call, as far as the call left the
 swap made. A path with a `..` component is not eligible: the kernel resolves it through what
 precedes it, which the swap does not follow. The runtime makes each
 step with its own calls in the guest process, relative to the component's directory opened with
-`RESOLVE_NO_SYMLINKS` and checked to be on the work tree: the kernel applies the guest's
-permissions and the sticky bit, a mount point refuses, nothing outside the work tree changes,
+`RESOLVE_NO_SYMLINKS` and checked to be on the disk: the kernel applies the guest's
+permissions and the sticky bit, a mount point refuses, nothing outside the disk changes,
 and a target outside is only a name. Each step is recorded like the program's own name change
 (virtual times, an operation record, a crash point after it), so inode numbers and times are
 the run's, a machine crash may lose part of a swap like any unsynced rename, and replay is
@@ -1248,16 +1256,16 @@ The runtime records every change to `/work` with its data in an operation log, a
 every sync (`patina-proto/src/oplog.rs`). Crash points follow each change and precede each
 sync; each is counted inside the fault window (its ordinal is what `crash-at=N` names and
 what `crashes[].point` reports) and the crash draw is used only when it fires, so a run is
-identical to the run without crashes up to the crash. With nodes each node counts its own, on its own disk ([Nodes](#nodes),
-"Crash points per node").
+identical to the run without crashes up to the crash. With machines each machine counts its own, on its own disk ([Machines](#machines),
+"Crash points per machine").
 
 `sweep --crash-points` places each point from a base's operation log (`patina-cli/src/branch.rs`),
 written per run as `points.json` before the sweep prunes the run's logs: the runtime's records
 in order (not the supervisor's, which offer no point), for each call that recorded a sync a
 point before its records, then one after each record. The places are used only when their
-number is the runtime's count (`crash_points`); otherwise the sample has one kind per node
-(and no pair is taken after the node's points). `--crash-points=N` takes the first N of an order
-stratified by node, then by the kind of record at the point (`branch::sample_order`): seeded by
+number is the runtime's count (`crash_points`); otherwise the sample has one kind per machine
+(and no pair is taken after the machine's points). `--crash-points=N` takes the first N of an order
+stratified by machine, then by the kind of record at the point (`branch::sample_order`): seeded by
 the seed and case, and for the first crashes nested, so a larger N adds children to those run
 (the pairs to sample from depend on the first crashes run). No point is left out as the same
 as another, even a point before a sync right after the record of the point before (nothing ran
@@ -1276,7 +1284,7 @@ pages that differ.
 The shadows are one store for the whole run (`proto::oplog::Shadows`), with one invariant: a
 file's shadow is the replay of the operation log onto that file. A slot is a sparse memfd at a
 hidden descriptor (`FD_SHADOWS`, the top 64 numbers below the sandbox's real `RLIMIT_NOFILE`),
-made by the supervisor at each incarnation's start and inherited by every guest; the table of
+made by the supervisor at each boot's start and inherited by every guest; the table of
 which inode each slot holds is in the control region. The store is kept in one place: every
 record appended to the log, by a runtime (`rt::oplog::append`) or by the supervisor
 (`sup/crash.rs`), changes its file's shadow as it changes the file, before the crash point
@@ -1314,7 +1322,7 @@ the one end while guest code runs, stops that process first). The table is the p
 memory, so it only chooses what is compared: each file is the process's own open file
 (`pidfd_getfd`, nothing is reopened) and must be the work file the entry names, and the bytes
 logged are the file's. A crash point logs every process's mappings before its `Crash` record,
-so the log of every incarnation is complete. The table is read with `process_vm_readv` (the
+so the log of every boot is complete. The table is read with `process_vm_readv` (the
 supervisor is every guest's ancestor, as Yama's `ptrace_scope` 1 asks); a host that refuses it
 ends a kill or a crash `internal`, naming it, and at the end of the run leaves the outcome as
 it is, with the self-check reporting what the log lacks. The supervisor compares with the
@@ -1324,16 +1332,16 @@ A process crash restarts the program on `/work` as it was. A machine crash resta
 what a filesystem would have kept: a pure function of the operation log, the seed and the
 model, `ext4-ordered` (the default) or `posix-strict` (`durability/`). Every run with
 crashes on ends by replaying its whole operation log against the live tree of each
-incarnation, with no exception: a difference is a Patina defect. File times are carried, not
-modelled: the virtual time table keys a work tree's inodes by node and inode number with a
+boot, with no exception: a difference is a Patina defect. File times are carried, not
+modelled: the virtual time table keys a disk's inodes by machine and inode number with a
 fixed minor (`proto::vfs::VT_WORK`), not the mount's index, so the supervisor reads each
 file's modification time into the live tree it exports (`sup::crash::live_tree`); a machine
 crash's tree takes, per inode, the time the live tree had (`Tree::times_from`). The times go
-to the next incarnation as data, never as host file times (a host filesystem may clamp them):
+to the next boot as data, never as host file times (a host filesystem may clamp them):
 the launcher appends them to the state the shared-memory descriptor carries
-(`crash::carry_times`), a node's stay in its supervisor; before the restarted incarnation's or
+(`crash::carry_times`), a machine's stay in its supervisor; before the restarted boot's or
 boot's first guest the supervisor puts them back into the table by path (`seed_times`), after
-dropping the node's entries of its earlier disk (the new disk's inode numbers can repeat them).
+dropping the machine's entries of its earlier disk (the new disk's inode numbers can repeat them).
 The digest and the self-check leave times out. The run keeps its own
 outcome and reports the failed self-check beside it (`result.json`'s `self_check`, exit
 status 2; a sweep counts such runs apart and keeps their logs). `patina log ops` prints the
@@ -1384,8 +1392,8 @@ failed `fsync` and then trusts it does.
 | `fsync` of a block device or of a file outside the work directories (procfs, a mount) | no: 0 | no | no |
 
 Calls are counted for `fsync-error-at` and drawn for `fsync-error-permille` at each "may be
-given" cell. Per-node: every key and sequence is the node's (`proto::oplog::node_key`), and a
-machine crash of a node forgets its sequences and descriptions' samples with its disk. Where
+given" cell. Per-machine: every key and sequence is the machine's (`proto::oplog::machine_key`), and a
+machine crash of a machine forgets its sequences and descriptions' samples with its disk. Where
 it differs from Linux: a descriptor the runtime did not see opened (inherited across `execve`,
 received over a unix socket) is taken as opened at its first sync call or `dup`;
 `sync_file_range` and an `O_DSYNC` write write back the whole file rather than their range; an
@@ -1393,10 +1401,10 @@ injected `syncfs` failure fails every file of the disk, clean or not, where Linu
 those with dirty pages; a description pushed out of `Dur::descs` by another with the same slot
 may report an error it already reported once more; a write-back the kernel would start by
 itself (the flusher, memory pressure) never fails; `msync` of a mapping that is not tracked
-(read-only, private) reports nothing; and a process crash (`--faults kill` on one machine, unlike a node's
-`kill`) starts its next incarnation with no pending errors, where Linux would keep the page
+(read-only, private) reports nothing; and a process crash (`--faults kill` on one machine, unlike a machine's
+`kill`) starts its next boot with no pending errors, where Linux would keep the page
 cache's. Tests: `tests/faults/22-errseq.sh` (each row against the kernel's sources, and the
-durability consequence under every crash point), `09-failed-fsync.sh`, `nodes/12-disk-faults.sh`.
+durability consequence under every crash point), `09-failed-fsync.sh`, `machines/12-disk-faults.sh`.
 
 ## The SDK channel
 
@@ -1750,10 +1758,10 @@ of programs. The last commit with it is `0327ddd71c5a`.
 - **One thread runs at a time**, so weak-memory behaviours (a store another CPU sees late)
   never happen.
 - **One clock, one kernel.** All processes of a run share one sandbox, one kernel and one
-  virtual clock. Several machines are nodes inside it (above, "Nodes"): each has its own
+  virtual clock. Several machines are machines inside it (above, "Machines"): each has its own
   files, hostname, IPC, ports, address and realtime clock offset, but no clock drift (a
   clock's rate is the run's), no own kernel or OS image, no
-  IPv6 address, at most 15 besides the driver; and there is no network outside the run.
+  IPv6 address, at most 15 besides main; and there is no network outside the run.
 - **TCP and UDP only.** Raw, packet and netlink sockets, and `SOCK_DGRAM` with a protocol
   other than UDP, are refused and listed in `result.json`'s `refused`; `patina run` prints
   them. On UDP: multicast and broadcast (and their membership options), ancillary data on send,

@@ -26,17 +26,17 @@ one_shell() {
     echo "$sh seed 1: class $c, wall $(field "$RUNS/$sh-r/result.json" wall_ms) ms, native wall ${n_ms} ms"
     [ "$c" = ok ] || fail "W6 $sh seed 1: class $c"
     grep -v '^~ ' "$RUNS/$sh-native.txt" >"$RUNS/$sh-native.masked"
-    grep -v '^~ ' "$RUNS/$sh-r/inc-0/stdout" | cmp - "$RUNS/$sh-native.masked" \
+    grep -v '^~ ' "$RUNS/$sh-r/boot-1/stdout" | cmp - "$RUNS/$sh-native.masked" \
         && echo "$sh: stdout equals native after masking $(grep -c '^~ ' "$RUNS/$sh-native.txt") lines" \
         || fail "W6 $sh: stdout differs from native after masking"
-    [ "$(tail -1 "$RUNS/$sh-r/inc-0/stdout")" = done ] || fail "W6 $sh: script did not finish"
+    [ "$(tail -1 "$RUNS/$sh-r/boot-1/stdout")" = done ] || fail "W6 $sh: script did not finish"
 
     echo "== $sh: b. D, faults off and on"
     verify_seeds $S $sh-d cpu,load,aslr,sandbox "1" -- /bin/$sh /guest/w6.sh || fail "W6 $sh D (faults off)"
     verify_seeds $S $sh-df cpu,load,aslr,sandbox "1" $FAULT -- /bin/$sh /guest/w6.sh || fail "W6 $sh D (faults on)"
 
     echo "== $sh: c. virtual times"
-    o=$RUNS/$sh-d/seed-1/run-0/inc-0/stdout
+    o=$RUNS/$sh-d/seed-1/run-0/boot-1/stdout
     awk '/^~ ls -l -/ && n++ < 2' "$o"
     grep '^~ date' "$o"
     n=$(awk '/^~ ls -l -/ && !/ 2026-01-01 00:00:0/ {n++} END {print n + 0}' "$o")
@@ -60,9 +60,9 @@ one_shell() {
         o=$RUNS/$sh-f24/run-$s
         if [ "$(field "$o/result.json" outcome)" = failure ]; then
             nf=$((nf + 1))
-            last=$(tail -1 "$o/inc-0/stdout")
+            last=$(tail -1 "$o/boot-1/stdout")
             [ "$last" != done ] || fail "W6 $sh seed $s: failed but printed done"
-            [ -s "$o/inc-0/stderr" ] || fail "W6 $sh seed $s: failed with an empty stderr"
+            [ -s "$o/boot-1/stderr" ] || fail "W6 $sh seed $s: failed with an empty stderr"
         fi
     done
     echo "$sh: $nf of 24 runs stopped by set -e after an injected error"
@@ -77,5 +77,5 @@ wait $p2 || FAILS=$((FAILS + $?))
 cat "$RUNS/sh.log" "$RUNS/bash.log"
 
 echo "== d. sleep 5 in virtual time"
-grep -q '^sleep 5: elapsed >= 5: yes$' "$RUNS/sh-r/inc-0/stdout" || fail "W6: the script's sleep 5 did not take 5 virtual seconds"
+grep -q '^sleep 5: elapsed >= 5: yes$' "$RUNS/sh-r/boot-1/stdout" || fail "W6: the script's sleep 5 did not take 5 virtual seconds"
 finish

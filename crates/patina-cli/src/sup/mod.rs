@@ -76,8 +76,8 @@ pub mod futex;
 pub mod inherit;
 pub mod io;
 mod link;
+mod machines;
 mod maps;
-mod nodes;
 mod pause;
 mod phase;
 pub mod proc;
@@ -118,11 +118,11 @@ struct Sup {
     udp: udp::Udp,
     /// System V shared memory.
     shm: shm::Shm,
-    /// Nodes: their boot and end (a run with nodes).
-    nodes: nodes::Nodes,
-    /// Links between nodes: the cuts of a script and of the seed.
+    /// Machines: their boot and end (a run with machines).
+    machines: machines::Machines,
+    /// Links between machines: the cuts of a script and of the seed.
     links: link::Links,
-    /// Paused nodes.
+    /// Paused machines.
     pauses: pause::Pauses,
     /// The program's path in the sandbox (the first image).
     exe: String,
@@ -130,12 +130,12 @@ struct Sup {
     phases: phase::Phases,
     /// Processes in which an `execve` has replaced an image (pids are unique in a run): a
     /// runtime there that cannot run its image was handed one an `execve` resolved, not the
-    /// program (or a node's command).
+    /// program (or a machine's command).
     execed: std::collections::BTreeSet<i32>,
     /// The shared mappings of the processes still alive were logged for the end of the run
     /// (`end_maps`): a crash point did it before its `Crash` record.
     maps_ended: std::cell::Cell<bool>,
-    /// Each node's work tree.
+    /// Each machine's disk.
     disks: disks::Disks,
 }
 
@@ -301,7 +301,7 @@ impl Sup {
             format!(
                 "{} of boundary log ({n} records{top}){ops} reached [run] log-limit: the program \
                  had not finished, likely a livelock under this schedule (a run that is only \
-                 long, or writes that much to the work tree, needs a higher [run] log-limit)",
+                 long, or writes that much to the disk, needs a higher [run] log-limit)",
                 crate::report::bytes(len)
             ),
         )
@@ -412,7 +412,8 @@ impl Sup {
                 self.finish(Verdict::new("infra", d));
             }
             let old = self.now();
-            if (self.node_count() > 0 || self.phases.pending != 0) && self.node_actions_idle() {
+            if (self.machine_count() > 0 || self.phases.pending != 0) && self.machine_actions_idle()
+            {
                 continue;
             }
             // Nothing pending that can wake anyone (a partition to come, or a kill before
@@ -441,8 +442,8 @@ impl Sup {
                     self.after_events();
                     // A kill closed sockets and ended waits: the wire and the waiters see it now,
                     // not at the next event.
-                    if (self.node_count() > 0 || self.phases.pending != 0)
-                        && !self.node_actions().is_empty()
+                    if (self.machine_count() > 0 || self.phases.pending != 0)
+                        && !self.machine_actions().is_empty()
                     {
                         self.wire_step();
                         self.io.sync(&mut self.sched, self.ctl);
@@ -460,9 +461,9 @@ impl Sup {
         for (key, count) in self.io.deliver_timers(&mut self.sched, self.ctl, now) {
             self.decide(DEC_TIMERFD, 0, [key, count, 0, 0, 0, 0], 0);
         }
-        // Node events first: a heal re-stamps what the wire then delivers.
-        for key in std::mem::take(&mut self.sched.fired_node) {
-            self.node_event(key);
+        // Machine events first: a heal re-stamps what the wire then delivers.
+        for key in std::mem::take(&mut self.sched.fired_machine) {
+            self.machine_event(key);
         }
         self.wire_step();
         self.io.sync(&mut self.sched, self.ctl);
@@ -483,7 +484,7 @@ impl Sup {
     }
 
     fn deadlock(&self) -> ! {
-        let paused = if self.node_count() > 0 {
+        let paused = if self.machine_count() > 0 {
             self.paused_detail()
         } else {
             String::new()
@@ -498,8 +499,8 @@ impl Sup {
     /// their runtime (`maps`).
     fn flush_maps(&self, pids: &[(i32, usize)], seq: u64) -> Result<(), String> {
         let mut pass = maps::Pass::new(self.ctl, &self.disks, seq);
-        for &(pid, node) in pids {
-            pass.process(pid, node)?;
+        for &(pid, machine) in pids {
+            pass.process(pid, machine)?;
         }
         Ok(())
     }
@@ -523,14 +524,14 @@ impl Sup {
         self.flush_maps(&pids, seq)
     }
 
-    /// Every live process with mappings of its own, and its node, in pid order: not a vfork
+    /// Every live process with mappings of its own, and its machine, in pid order: not a vfork
     /// child (its mappings are its parent's, logged with it).
     fn mapping_pids(&self) -> Vec<(i32, usize)> {
         self.procs
             .map
             .iter()
             .filter(|(_, p)| p.state == proc::PState::Live && p.vfork_parent.is_none())
-            .map(|(pid, p)| (*pid, p.node))
+            .map(|(pid, p)| (*pid, p.machine))
             .collect()
     }
 
@@ -581,11 +582,11 @@ impl Sup {
             while libc::waitpid(-1, &mut st, 0) > 0 {}
         }
         // Every guest is dead: the live tree is final, and so is the shared memory a process
-        // crash leaves to the next incarnation (any other end leaves none).
+        // crash leaves to the next boot (any other end leaves none).
         crash::export(self.ctl, &work_dir(self.ctl));
-        for node in self.disks.nodes() {
-            if let Some(p) = self.disks.path(node) {
-                let _ = crash::export_node(self.ctl, node, &p);
+        for machine in self.disks.machines() {
+            if let Some(p) = self.disks.path(machine) {
+                let _ = crash::export_machine(self.ctl, machine, &p);
             }
         }
         let carried = if v.class == "crash" && v.detail.starts_with("process ") {
@@ -618,12 +619,12 @@ impl Sup {
         let id = a[1] as i32 as i64;
         let slot = unsafe { self.ctl.slot(idx) };
         let mut out = [0u64; 16];
-        // Each node is its own IPC namespace: its own table of segments.
-        let node = self.node_of(idx);
-        let shm = if node == 0 {
+        // Each machine is its own IPC namespace: its own table of segments.
+        let machine = self.machine_of(idx);
+        let shm = if machine == 0 {
             &mut self.shm
         } else {
-            self.nodes.shm.entry(node).or_default()
+            self.machines.shm.entry(machine).or_default()
         };
         let r = match a[0] {
             SHMOP_GET => shm.get(
@@ -684,16 +685,16 @@ impl Sup {
     fn handle(&mut self, idx: usize, req: Request) -> Next {
         let a = req.args;
         let own_asid = self.sched.entries[idx].asid;
-        // Words in memory shared across processes are keyed globally, per node: the same
-        // file or segment identity on two nodes is two objects.
-        let node = if self.node_count() > 0 {
-            self.node_of(idx) as u64
+        // Words in memory shared across processes are keyed globally, per machine: the same
+        // file or segment identity on two machines is two objects.
+        let machine = if self.machine_count() > 0 {
+            self.machine_of(idx) as u64
         } else {
             0
         };
         let asid_of = |addr: u64| {
             if addr & FUTEX_SHARED_BIT != 0 {
-                u64::MAX - node
+                u64::MAX - machine
             } else {
                 own_asid
             }
@@ -777,7 +778,7 @@ impl Sup {
                     ));
                 }
                 self.sched.add(child, tid, pid, asid);
-                self.slot_node(child, self.node_of(idx));
+                self.slot_machine(child, self.machine_of(idx));
                 let s = self.slot(child);
                 s.tid.store(tid, Relaxed);
                 s.pid.store(pid, Relaxed);
@@ -813,9 +814,9 @@ impl Sup {
             }
             Some(Op::TimerFdSet) => {
                 let pid = self.sched.entries[idx].pid;
-                let node = self.node_of(idx);
+                let machine = self.machine_of(idx);
                 let flags = self.slot(idx).clock_flags.swap(0, Relaxed);
-                let r = self.io.timer_set(&mut self.sched, pid, node, flags, a);
+                let r = self.io.timer_set(&mut self.sched, pid, machine, flags, a);
                 // An expiry already due (an absolute time in the past) is delivered before
                 // the call returns, as the kernel does.
                 let now = self.now();
@@ -865,10 +866,10 @@ impl Sup {
                             ),
                         ));
                     }
-                    // A node's first image: its command (the launcher checked it on the host).
-                    let node = self.node_of(idx);
-                    let d = if node > 0 {
-                        let what = format!("node {}'s command", self.node_name(node));
+                    // A machine's first image: its command (the launcher checked it on the host).
+                    let machine = self.machine_of(idx);
+                    let d = if machine > 0 {
+                        let what = format!("machine {}'s command", self.machine_name(machine));
                         exec_failure(&what, errno, why, 0)
                     } else {
                         exec_failure(&self.exe, errno, why, a[3] as usize)
@@ -993,12 +994,12 @@ impl Sup {
                 Next::Continue(0)
             }
             Some(Op::Net) => self.net_op(idx, a),
-            Some(Op::PidNode) => self.pid_node(a),
+            Some(Op::PidMachine) => self.pid_machine(a),
             Some(Op::MapsSync) => {
                 // A sync reaches the caller's machine only.
-                let node = self.node_of(idx);
+                let machine = self.machine_of(idx);
                 let mut pids = self.mapping_pids();
-                pids.retain(|&(_, n)| n == node);
+                pids.retain(|&(_, n)| n == machine);
                 if let Err(e) = self.flush_maps(&pids, a[0]) {
                     self.finish(Self::maps_verdict(e));
                 }
@@ -1008,10 +1009,10 @@ impl Sup {
                 shadows::reclaim(self.ctl, &self.disks);
                 Next::Continue(0)
             }
-            Some(Op::Node) => self.node_op(idx, a),
+            Some(Op::Machine) => self.machine_op(idx, a),
             Some(Op::Lifecycle) => self.lifecycle(idx, a),
-            // A node's machine crash at its crash point: the node goes down, the run goes on.
-            Some(Op::CrashPoint) if self.node_of(idx) != 0 => self.node_point_crash(idx),
+            // A machine's crash at its crash point: the machine goes down, the run goes on.
+            Some(Op::CrashPoint) if self.machine_of(idx) != 0 => self.machine_point_crash(idx),
             Some(Op::CrashPoint) => {
                 // Every process ends here: what their shared mappings hold, then the end.
                 let pid = self.sched.entries[idx].pid as u32;
@@ -1133,14 +1134,14 @@ impl Sup {
             self.after_events();
             let pid = self.sched.entries[idx].pid;
             // Not while the turn holder is ending its process (`ProcExit`, a last thread's
-            // `ThreadExit`): its own end is its node's, not a kill's.
+            // `ThreadExit`): its own end is its machine's, not a kill's.
             let ending = req.op == Op::ProcExit as u32
                 || (req.op == Op::ThreadExit as u32 && self.sched.live_in(pid) <= 1);
-            if (self.node_count() > 0 || self.phases.pending != 0)
+            if (self.machine_count() > 0 || self.phases.pending != 0)
                 && !ending
-                && self.node_actions().contains(&pid)
+                && self.machine_actions().contains(&pid)
             {
-                // A node kill ended the process that asked: its request is not served.
+                // A machine kill ended the process that asked: its request is not served.
                 self.wire_step();
                 self.io.sync(&mut self.sched, self.ctl);
                 let (to, _) = self.choose();
@@ -1158,7 +1159,7 @@ impl Sup {
             self.wire_step();
             self.io.sync(&mut self.sched, self.ctl);
             let to = match next {
-                // A caller whose node was paused before its request was served finishes the
+                // A caller whose machine was paused before its request was served finishes the
                 // call, and waits with its reply until the resume.
                 Next::Continue(ret) if self.sched.is_frozen(idx) => {
                     self.sched.entries[idx].reply = ret;
@@ -1206,8 +1207,8 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     // `HIDDEN:DST`: trees the launcher bound at a hidden place, copied to DST.
     let mut copies: Vec<(String, String)> = vec![];
     let mut exe: Option<String> = None;
-    // A run with nodes: the keeper's channel is at `FD_NODES`.
-    let mut nodes = false;
+    // A run with machines: the keeper's channel is at `FD_MACHINES`.
+    let mut machines = false;
     // The setup command and the final check: each program's guest path and its argv.
     let mut setup: Option<(String, Vec<String>)> = None;
     let mut finally: Option<(String, Vec<String>)> = None;
@@ -1221,7 +1222,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
                 copies.push((h.to_string(), d.to_string()));
             }
             "--exe" => exe = Some(it.next().ok_or("--exe needs PATH")?.clone()),
-            "--nodes" => nodes = true,
+            "--machines" => machines = true,
             "--setup-exe" => {
                 setup = Some((it.next().ok_or("--setup-exe needs PATH")?.clone(), vec![]))
             }
@@ -1292,7 +1293,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             }
         }
         // Every other inherited descriptor, from the launcher's caller or the keeper.
-        inherit::close_inherited(nodes);
+        inherit::close_inherited(machines);
     }
     let ctl_ptr = map_shared(FD_CTL, CTL_SIZE).map_err(|e| format!("map ctl: {e}"))?;
     let ctl: &'static Ctl = unsafe { Ctl::at(ctl_ptr) };
@@ -1327,7 +1328,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         wire: wire::Wire::default(),
         udp: udp::Udp::default(),
         shm: shm::Shm::default(),
-        nodes: nodes::Nodes::default(),
+        machines: machines::Machines::default(),
         links: link::Links::default(),
         pauses: pause::Pauses::default(),
         exe: exe.clone().unwrap_or_else(|| cmd[0].clone()),
@@ -1340,7 +1341,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
         sup.finish(Verdict::new("infra", e));
     }
-    // This incarnation's shadow stores, which every guest the supervisor starts inherits.
+    // This boot's shadow stores, which every guest the supervisor starts inherits.
     if let Err(e) = shadows::create() {
         sup.finish(Verdict::new("infra", e));
     }
@@ -1350,11 +1351,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if let Err(e) = sup.udp.init() {
         sup.finish(Verdict::new("infra", e));
     }
-    // Shared memory a process crash left for this incarnation, and after any crash the times
+    // Shared memory a process crash left for this boot, and after any crash the times
     // of the tree it starts from (`crash::carried`).
     let restart = unsafe { proto::sdk::SdkTab::at(ctl as *const Ctl as *mut u8) }
         .cfg
-        .incarnation
+        .boot
         > 0;
     let carried = read_all_fd(FD_SHM)
         .unwrap_or_else(|e| sup.finish(Verdict::new("infra", format!("shared memory state: {e}"))));
@@ -1378,13 +1379,13 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         if let Err(e) = crash::copy_in(Path::new("/.patina/in"), &work_dir(ctl)) {
             sup.finish(Verdict::new(
                 "infra",
-                format!("copying /in to the work tree: {e}{}", tmpfs_hint(ctl, &e)),
+                format!("copying /in to the disk: {e}{}", tmpfs_hint(ctl, &e)),
             ));
         }
     }
     if restart {
         if let Err(e) = crash::seed_times(ctl, 0, &work_dir(ctl), times) {
-            sup.finish(Verdict::new("infra", format!("the work tree's times: {e}")));
+            sup.finish(Verdict::new("infra", format!("the disk's times: {e}")));
         }
     }
     if let Err(e) = crash::write_base(ctl, 0, &work_dir(ctl)) {
@@ -1424,8 +1425,11 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if unsafe { libc::prctl(libc::PR_SET_TSC, libc::PR_TSC_SIGSEGV, 0, 0, 0) } != 0 {
         sup.finish(Verdict::new("infra", "PR_SET_TSC failed in the supervisor"));
     }
-    if nodes != (ctl.config.nodes > 1) {
-        sup.finish(Verdict::new("infra", "--nodes and the node table disagree"));
+    if machines != (ctl.config.machines > 1) {
+        sup.finish(Verdict::new(
+            "infra",
+            "--machines and the machine table disagree",
+        ));
     }
     // The first root: the setup command's, when the run starts in its setup (`phase`).
     let first_phase = ctl.phases.phase.load(Relaxed);
@@ -1445,13 +1449,13 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         Ok(fd) => fd,
         Err(e) => sup.finish(Verdict::new("infra", format!("pidfd_open: {e}"))),
     };
-    if nodes {
-        sup.boot_nodes();
+    if machines {
+        sup.boot_machines();
     }
     sup.serve()
 }
 
-/// The work tree's guest path (`--work DIR:GUEST`).
+/// The disk's guest path (`--disk DIR:GUEST`).
 /// The whole of descriptor `fd` (a regular file or memfd; absent: empty).
 fn read_all_fd(fd: i32) -> Result<Vec<u8>, String> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
@@ -1556,7 +1560,7 @@ fn exec_failure(exe: &str, errno: u64, why: proto::exec::Why, depth: usize) -> S
         reason
     };
     match chain.as_slice() {
-        [] if exe.starts_with("node ") => format!("cannot run {exe}: {reason} ({errno})"),
+        [] if exe.starts_with("machine ") => format!("cannot run {exe}: {reason} ({errno})"),
         [] => format!("cannot run the program {exe}: {reason} ({errno})"),
         c => format!(
             "cannot run the program {exe}: its #! interpreter {}: {reason} ({errno})",

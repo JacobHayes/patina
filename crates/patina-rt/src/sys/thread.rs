@@ -166,7 +166,7 @@ pub fn clone_vm(
     s.vmask.store(parent_vmask, Relaxed);
     s.sigpend.store(0, Relaxed);
     s.sched.store(super::sched::inherited(), Relaxed);
-    s.node.store(crate::state::node() as u64, Relaxed);
+    s.machine.store(crate::state::machine() as u64, Relaxed);
     s.state.store(SLOT_RESERVED, SeqCst);
     let kflags = (flags & !(CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) | CLONE_CHILD_CLEARTID;
     let ktid = unsafe { &(*(alt as *const ThreadState)).ktid } as *const u32 as u64;

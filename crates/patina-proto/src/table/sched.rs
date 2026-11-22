@@ -19,7 +19,7 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::SCHED_SETATTR, Virt, C, PRIO).refs(&[out(1, Len::Fixed(48))]),
     Row::new(G, nr::SCHED_GET_PRIORITY_MAX, Virt, C, "The kernel's answer: 99 for SCHED_FIFO and SCHED_RR, 0 for the other policies, EINVAL for an unknown one."),
     Row::new(G, nr::SCHED_GET_PRIORITY_MIN, Virt, C, "The kernel's answer: 1 for SCHED_FIFO and SCHED_RR, 0 for the other policies, EINVAL for an unknown one."),
-    Row::new(G, nr::GETCPU, Virt, C, "CPU 0, node 0.").outs(&[out(0, Len::Fixed(4)), out(1, Len::Fixed(4))]),
+    Row::new(G, nr::GETCPU, Virt, C, "CPU 0, machine 0.").outs(&[out(0, Len::Fixed(4)), out(1, Len::Fixed(4))]),
     Row::new(G, nr::FUTEX, Virt, C, "Wait queues are supervisor state keyed by (address-space id, address), woken FIFO; the guest's word is read by the runtime while it holds the turn; timeouts are virtual deadlines. PI operations answer ENOSYS.").refs(&[out(0, Len::Futex)]),
     Row::new(G, nr::FUTEX_WAITV, Deny(errno::ENOSYS), C, "futex_waitv is refused; programs fall back to futex."),
     Row::new(G, nr::GET_ROBUST_LIST, Deny(errno::ENOSYS), C, "The robust list is recorded by the runtime and never walked; reading it back is refused."),

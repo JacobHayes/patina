@@ -156,7 +156,7 @@ def check_value(where, name, value, arg, v, bad, seen):
         if arg != "help":  # --fault help lists the keys
             check_key(where, arg, v, bad)
     elif name == "--faults":
-        # CLASS[,CLASS][@NODE,...]: the scope after `@` names nodes.
+        # CLASS[,CLASS][@MACHINE,...]: the scope after `@` names machines.
         for p in arg.split("@")[0].split(","):
             seen["classes"].add(p)
             if p not in v["classes"]:
@@ -261,7 +261,7 @@ def check_skill(v, bad):
             name = k.split(":")[0] + (":" if ":" in k else "")
             if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", line):
                 bad.append(f"{rel}:{no}: the key {name}: keys belong in patina guide")
-        if re.search(r"\[(run|faults|sched|sweep|node)\b", line):
+        if re.search(r"\[(run|faults|sched|sweep|machine)\b", line):
             bad.append(f"{rel}:{no}: a patina.toml table: config belongs in patina guide")
     for no, span, kind in pieces:
         if kind == "span" and not re.fullmatch(r"patina (guide|doctor|skill)( [A-Z]+)?", span):

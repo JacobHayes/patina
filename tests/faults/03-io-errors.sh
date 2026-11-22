@@ -7,7 +7,7 @@
 o=$RUNS/03/tally
 verify "$o" 5 4 "" --fault fs-error-permille=100 -- /guest/io-errors tally
 [ "$(class "$o/run-0")" = ok ] || die "tally run: $(class "$o/run-0")"
-python3 -I - "$o/run-0/inc-0/stdout" <<'PY' || exit 1
+python3 -I - "$o/run-0/boot-1/stdout" <<'PY' || exit 1
 import sys
 # what Linux can return for each call on a /work file or path (proto::faults::errnos)
 legal = {"open": {"EIO", "ENOSPC", "EMFILE", "ENFILE"}, "read": {"EIO"}, "write": {"EIO", "ENOSPC", "EDQUOT"},
@@ -45,8 +45,8 @@ n=$(field "$o/run-0/result.json" faults.injected)
 echo "faults injected per run: $n; 4 runs identical"
 o=$RUNS/03/nth
 run "$o" 1 --fault fs-error-at=write:7 -- /guest/io-errors nth
-cat "$o/inc-0/stdout"
-[ "$(grep -c ': ok$' "$o/inc-0/stdout")" = 9 ] || die "fs-error-at=write:7: not exactly one failed write"
-grep -qxE 'write 7: (EIO|ENOSPC|EDQUOT)' "$o/inc-0/stdout" || die "write 7 did not fail"
-grep -q 'contents (27 bytes): W1 W2 W3 W4 W5 W6 W8 W9 W0' "$o/inc-0/stdout" || die "the failed write left an effect"
+cat "$o/boot-1/stdout"
+[ "$(grep -c ': ok$' "$o/boot-1/stdout")" = 9 ] || die "fs-error-at=write:7: not exactly one failed write"
+grep -qxE 'write 7: (EIO|ENOSPC|EDQUOT)' "$o/boot-1/stdout" || die "write 7 did not fail"
+grep -q 'contents (27 bytes): W1 W2 W3 W4 W5 W6 W8 W9 W0' "$o/boot-1/stdout" || die "the failed write left an effect"
 echo "fs-error-at=write:7: exactly the 7th write failed; its record is not in the file"

@@ -13,7 +13,7 @@ for p in "races b" pool; do
     [ -n "$first" ] || die "$n: no failure in seeds 1-$scanned at compute-gap=8 (switches on seed 1: $(field "$o/$n-1/result.json" compute.switches))"
     "$PATINA" replay "$o/$n-$first" >"$o/$n-replay.txt" 2>&1 || true
     grep -q '^identical' "$o/$n-replay.txt" || die "$n seed $first does not replay: $(head -3 "$o/$n-replay.txt")"
-    echo "$p: failure on $found of seeds 1-$scanned (first $first: $(tail -1 "$o/$n-$first/inc-0/stdout")); it replays identical"
+    echo "$p: failure on $found of seeds 1-$scanned (first $first: $(tail -1 "$o/$n-$first/boot-1/stdout")); it replays identical"
     [ "$n" = races ] && rb=$first
 done
 rm -rf "${o:?}/verify"

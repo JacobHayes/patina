@@ -1,10 +1,10 @@
 #!/bin/bash
-# Sweep driver:
+# Sweep main:
 #   tests/storage/lib/sweep.sh WORKLOAD SEEDS... -- [patina run options] -- /guest/prog args...
 # WORKLOAD names the guest directory $PATINA_WORKLOADS/WORKLOAD. SEEDS are numbers or ranges A-B. Runs the seeds in
 # parallel ($SWEEP_JOBS, default 6, one core each), collects every result.json into
-# $SWEEP_OUT/outcomes/SEED.json (and the last incarnation's stderr tail into SEED.err),
-# writes $SWEEP_OUT/summary.tsv (seed, outcome, message, digest, incarnations, crashes,
+# $SWEEP_OUT/outcomes/SEED.json (and the last boot's stderr tail into SEED.err),
+# writes $SWEEP_OUT/summary.tsv (seed, outcome, message, digest, boots, crashes,
 # wall_ms) and prints a table of outcome x message counts plus the sweep's wall time.
 # Run directories: $SWEEP_OUT/run-SEED. $SWEEP_KEEP: fail (default: keep runs whose outcome
 # is not ok, delete the rest), all, none. Every run is under ulimit -f and timeout.
@@ -36,12 +36,12 @@ printf '%s\n' $seeds | xargs -P "${SWEEP_JOBS:-6}" -I{} bash -euo pipefail -O in
     st=0
     timeout "$SWEEP_TIMEOUT" "$PATINA" run --seed "$s" --out "$o" --mount "$guests":/guest:copy "$@" >/dev/null 2>"$SWEEP_OUT/outcomes/$s.patinaerr" || st=$?
     if [ ! -f "$o/result.json" ]; then
-        echo "{\"outcome\":\"patina-error\",\"message\":\"exit $st\",\"seed\":$s,\"crashes\":[],\"incarnations\":0,\"digest\":\"\",\"wall_ms\":0}" >"$SWEEP_OUT/outcomes/$s.json"
+        echo "{\"outcome\":\"patina-error\",\"message\":\"exit $st\",\"seed\":$s,\"crashes\":[],\"boots\":0,\"digest\":\"\",\"wall_ms\":0}" >"$SWEEP_OUT/outcomes/$s.json"
         exit 0
     fi
     rm -f "$SWEEP_OUT/outcomes/$s.patinaerr"
     cp "$o/result.json" "$SWEEP_OUT/outcomes/$s.json"
-    last=$(ls -d "$o"/inc-* | sort -t- -k2 -n | tail -1)
+    last=$(ls -d "$o"/boot-* | sort -t- -k2 -n | tail -1)
     tail -c 4000 "$last/stderr" >"$SWEEP_OUT/outcomes/$s.err" 2>/dev/null || true
     cls=$(jq -r .outcome "$o/result.json")
     case $SWEEP_KEEP in
@@ -60,10 +60,10 @@ rows, table = [], collections.Counter()
 for s in seeds:
     o = json.load(open(os.path.join(out, "outcomes", "%d.json" % s)))
     det = (o.get("message") or "").splitlines()[0][:90] if o.get("message") else ""
-    rows.append((s, o["outcome"], det, o.get("digest", ""), o.get("incarnations", 0), len(o.get("crashes", [])), o.get("wall_ms", 0)))
+    rows.append((s, o["outcome"], det, o.get("digest", ""), o.get("boots", 0), len(o.get("crashes", [])), o.get("wall_ms", 0)))
     table[(o["outcome"], det)] += 1
 with open(os.path.join(out, "summary.tsv"), "w") as f:
-    f.write("seed\toutcome\tmessage\tdigest\tincarnations\tcrashes\twall_ms\n")
+    f.write("seed\toutcome\tmessage\tdigest\tboots\tcrashes\twall_ms\n")
     for r in rows:
         f.write("\t".join(map(str, r)) + "\n")
 wall = t1 - t0

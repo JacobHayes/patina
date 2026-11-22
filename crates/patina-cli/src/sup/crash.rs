@@ -1,10 +1,10 @@
 //! The supervisor's part of crash and restart:
 //!
-//! - `copy_in`: the next incarnation's `/in` into `/work` in sorted path order, keeping hard
+//! - `copy_in`: the next boot's `/in` into `/work` in sorted path order, keeping hard
 //!   links, symlinks, FIFOs, modes and user xattrs (inode numbers then follow that order).
 //! - `write_base`: the initial `/work` as base records (`seq` 0, durable) at the head of the
 //!   operation log, so the log alone determines every post-crash tree.
-//! - `crash_verdict`: `Op::CrashPoint` ends the incarnation; the caller logs every process's
+//! - `crash_verdict`: `Op::CrashPoint` ends the boot; the caller logs every process's
 //!   shared mappings (`maps`) and the `Crash` record (`append_crash`), then kills every guest
 //!   process (`finish` kills the whole PID namespace, which holds for any number of
 //!   processes) and then exports the live tree.
@@ -30,29 +30,29 @@ pub fn copy_in(src: &Path, dst: &Path) -> Result<(), String> {
         .map_err(|e| format!("writing {}: {e}", dst.display()))
 }
 
-/// Node `node`'s work tree `work` with the virtual modification time of each inode the guest
+/// Machine `machine`'s disk `work` with the virtual modification time of each inode the guest
 /// changed (the virtual time table's).
-pub fn live_tree(ctl: &Ctl, node: usize, work: &Path) -> Result<Tree, String> {
+pub fn live_tree(ctl: &Ctl, machine: usize, work: &Path) -> Result<Tree, String> {
     let mut t = Tree::from_dir(work).map_err(|e| format!("live tree export: {e}"))?;
     let v = unsafe { proto::vfs::Vfs::at(ctl as *const Ctl as *mut u8) };
     let epoch = FILE_EPOCH_S * 1_000_000_000;
     for n in t.nodes.values_mut() {
-        if let Some(Ok(i)) = v.vt_find(proto::vfs::work_key(node as u64, n.ino)) {
+        if let Some(Ok(i)) = v.vt_find(proto::vfs::work_key(machine as u64, n.ino)) {
             n.mtime = Some(v.vt[i].mtime).filter(|&m| m != epoch);
         }
     }
     Ok(t)
 }
 
-/// A restart of node `node` (0: the driver) on the tree now in `work`: the table forgets the
-/// inodes of the node's earlier work tree, and each path of `times` (what `Tree::times` wrote
+/// A restart of machine `machine` (0: main) on the tree now in `work`: the table forgets the
+/// inodes of the machine's earlier disk, and each path of `times` (what `Tree::times` wrote
 /// for that tree) gets its time as all four of its inode's times (the tree carries only the
-/// modification time). Before any guest of the node runs.
-pub fn seed_times(ctl: &Ctl, node: usize, work: &Path, times: &[u8]) -> Result<(), String> {
+/// modification time). Before any guest of the machine runs.
+pub fn seed_times(ctl: &Ctl, machine: usize, work: &Path, times: &[u8]) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::MetadataExt;
     let v = unsafe { proto::vfs::Vfs::at(ctl as *const Ctl as *mut u8) };
-    let mine = |k: u64| k >> 48 == (node as u64) << 8 | proto::vfs::VT_WORK;
+    let mine = |k: u64| k >> 48 == (machine as u64) << 8 | proto::vfs::VT_WORK;
     super::vtgc::retain(v, |e| !mine(e.key));
     for (p, t) in crate::durability::tree::decode_times(times)? {
         let f = if p.is_empty() {
@@ -60,18 +60,18 @@ pub fn seed_times(ctl: &Ctl, node: usize, work: &Path, times: &[u8]) -> Result<(
         } else {
             work.join(std::ffi::OsStr::from_bytes(&p))
         };
-        // A path a work tree cannot hold as a file (a socket's) is not there.
+        // A path a disk cannot hold as a file (a socket's) is not there.
         let Ok(m) = std::fs::symlink_metadata(&f) else {
             continue;
         };
-        let key = proto::vfs::work_key(node as u64, m.ino());
+        let key = proto::vfs::work_key(machine as u64, m.ino());
         let Some(slot) = v.vt_find(key) else {
             return Err("the virtual time table is full".into());
         };
         if let Err(i) = slot {
             if v.vt_used as usize >= proto::vfs::VT_CAP / 2 {
                 return Err(format!(
-                    "more than {} files with times to carry in the work tree",
+                    "more than {} files with times to carry in the disk",
                     proto::vfs::VT_CAP / 2
                 ));
             }
@@ -89,7 +89,7 @@ pub fn seed_times(ctl: &Ctl, node: usize, work: &Path, times: &[u8]) -> Result<(
     Ok(())
 }
 
-/// The times of the tree a crash left go to the next incarnation's supervisor after the
+/// The times of the tree a crash left go to the next boot's supervisor after the
 /// System V shared memory a process crash carries, in the same descriptor (`FD_SHM`): the
 /// launcher appends them and their length (`carry_times`), the supervisor splits them off
 /// (`carried`).
@@ -106,7 +106,7 @@ pub fn carry_times(fd: i32, times: &[u8]) -> Result<(), String> {
 }
 
 /// What the carried state holds: the shared memory, and the times (`carry_times`; empty in a
-/// first incarnation, which no crash came before).
+/// first boot, which no crash came before).
 pub fn carried(b: &[u8], restart: bool) -> Result<(&[u8], &[u8]), String> {
     if !restart {
         return Ok((b, &[]));
@@ -147,12 +147,12 @@ fn pwrite_all(fd: i32, mut off: u64, b: &[u8]) -> Result<(), String> {
 
 /// Append one operation record (with its bytes) at the end of the log, as the runtime does
 /// (`rt::oplog::put_rec`), and keep its inode's window in the shadow store (`shadows`): `seq`
-/// and `pid` say where in the run it belongs (0, 0 for the base); `node` is the node whose
-/// work tree it is about.
+/// and `pid` say where in the run it belongs (0, 0 for the base); `machine` is the machine whose
+/// disk it is about.
 #[allow(clippy::too_many_arguments)]
 pub fn append(
     ctl: &Ctl,
-    node: usize,
+    machine: usize,
     kind: OpKind,
     ino: u64,
     a: [u64; 6],
@@ -162,14 +162,14 @@ pub fn append(
 ) -> Result<(), String> {
     put(
         ctl,
-        proto::oplog::tag_kind(kind as u32, node),
+        proto::oplog::tag_kind(kind as u32, machine),
         ino,
         a,
         data,
         seq,
         pid,
     )?;
-    super::shadows::apply(ctl, proto::oplog::node_key(ino, node), kind, &a, data)
+    super::shadows::apply(ctl, proto::oplog::machine_key(ino, machine), kind, &a, data)
 }
 
 fn put(
@@ -201,12 +201,18 @@ fn put(
     Ok(())
 }
 
-/// The `Crash` record that ends the log of a crashed incarnation (`kind`: `CRASH_*`), after
+/// The `Crash` record that ends the log of a crashed boot (`kind`: `CRASH_*`), after
 /// the shared mappings of every process were logged (`maps`).
-pub fn append_crash(ctl: &Ctl, node: usize, kind: u64, seq: u64, pid: u32) -> Result<(), String> {
+pub fn append_crash(
+    ctl: &Ctl,
+    machine: usize,
+    kind: u64,
+    seq: u64,
+    pid: u32,
+) -> Result<(), String> {
     append(
         ctl,
-        node,
+        machine,
         OpKind::Crash,
         0,
         [kind, 0, 0, 0, 0, 0],
@@ -218,12 +224,12 @@ pub fn append_crash(ctl: &Ctl, node: usize, kind: u64, seq: u64, pid: u32) -> Re
 
 struct Writer<'a> {
     ctl: &'a Ctl,
-    node: usize,
+    machine: usize,
 }
 
 impl Writer<'_> {
     fn rec(&self, kind: OpKind, ino: u64, a: [u64; 6], data: &[u8]) -> Result<(), String> {
-        append(self.ctl, self.node, kind, ino, a, data, 0, 0)
+        append(self.ctl, self.machine, kind, ino, a, data, 0, 0)
     }
 }
 
@@ -238,11 +244,11 @@ fn fmt_bits(k: Kind) -> u64 {
     }
 }
 
-/// Base records for the tree now in node `node`'s work tree `work`. Returns the number of
+/// Base records for the tree now in machine `machine`'s disk `work`. Returns the number of
 /// records.
-pub fn write_base(ctl: &Ctl, node: usize, work: &Path) -> Result<usize, String> {
+pub fn write_base(ctl: &Ctl, machine: usize, work: &Path) -> Result<usize, String> {
     let t = Tree::from_dir(work).map_err(|e| format!("reading {}: {e}", work.display()))?;
-    let w = Writer { ctl, node };
+    let w = Writer { ctl, machine };
     let root = t.nodes.get(&b""[..]).ok_or("no root")?;
     let owner = (root.uid, root.gid);
     w.rec(
@@ -341,12 +347,12 @@ pub fn crash_verdict(a: [u64; 6], vclock_ns: u64) -> Verdict {
     )
 }
 
-/// Node `node`'s live work tree `work` as a record of the log (`KIND_LIVE_TREE`), after the
-/// guests are dead: the launcher makes it the node's `live.tree`.
-pub fn export_node(ctl: &Ctl, node: usize, work: &Path) -> Result<Tree, String> {
-    let tree = live_tree(ctl, node, work)?;
+/// Machine `machine`'s live disk `work` as a record of the log (`KIND_LIVE_TREE`), after the
+/// guests are dead: the launcher makes it the machine's `live.tree`.
+pub fn export_machine(ctl: &Ctl, machine: usize, work: &Path) -> Result<Tree, String> {
+    let tree = live_tree(ctl, machine, work)?;
     let bytes = tree.encode();
-    let kind = proto::oplog::tag_kind(proto::oplog::KIND_LIVE_TREE, node);
+    let kind = proto::oplog::tag_kind(proto::oplog::KIND_LIVE_TREE, machine);
     let len = |c: &Ctl| c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed);
     let before = len(ctl);
     let r = put(ctl, kind, 0, [0; 6], &bytes, ctl.seq.load(Relaxed), 0);
@@ -355,10 +361,14 @@ pub fn export_node(ctl: &Ctl, node: usize, work: &Path) -> Result<Tree, String> 
     r.map(|()| tree)
 }
 
-/// The log of node `node`'s disk so far: its records in the shared log from `at` (bytes of
+/// The log of machine `machine`'s disk so far: its records in the shared log from `at` (bytes of
 /// `oplog.meta`, where the disk's base records begin), plain.
-pub fn disk_log(ctl: &Ctl, node: usize, at: u64) -> Result<crate::durability::log::OpLog, String> {
-    use proto::oplog::{kind_node, KIND_LIVE_TREE, KIND_MASK, OPREC_SIZE};
+pub fn disk_log(
+    ctl: &Ctl,
+    machine: usize,
+    at: u64,
+) -> Result<crate::durability::log::OpLog, String> {
+    use proto::oplog::{kind_machine, KIND_LIVE_TREE, KIND_MASK, OPREC_SIZE};
     let read = |fd: i32, off: u64, len: usize| -> Result<Vec<u8>, String> {
         let mut b = vec![0u8; len];
         let mut done = 0;
@@ -386,7 +396,7 @@ pub fn disk_log(ctl: &Ctl, node: usize, at: u64) -> Result<crate::durability::lo
     let mut ops = vec![];
     for (i, c) in meta.as_chunks::<OPREC_SIZE>().0.iter().enumerate() {
         let r = OpRec::from_bytes(c);
-        if kind_node(r.kind) != node || r.kind & KIND_MASK == KIND_LIVE_TREE {
+        if kind_machine(r.kind) != machine || r.kind & KIND_MASK == KIND_LIVE_TREE {
             continue;
         }
         let data = read(FD_OPLOG_DATA, r.data_off, r.data_len as usize)?;

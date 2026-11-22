@@ -30,7 +30,7 @@ replay: patina replay /tmp/app/patina-out/run-0
 
 It starts in an empty, writable `/work` (its working directory and `HOME`), sees the host's
 `/usr` and its own directory read-only, and no network beyond the run. Give it inputs with
-`--work DIR` (copied in as the starting `/work`), `--mount SRC:DST`, `--env K=V`, `--stdin
+`--disk DIR` (copied in as the starting `/work`), `--mount SRC:DST`, `--env K=V`, `--stdin
 FILE`; a `not in the sandbox:` line names what to mount. The program after `--` is found on the
 host; a script that exists only in `/work` runs as `sh ./script`. Make this run end `ok` before
 going on: anything else is a setup problem.
@@ -54,7 +54,7 @@ check that cannot fail proves nothing. `patina guide checks`.
 | error handling of file I/O | `--faults disk` | `patina guide faults` |
 | durability, recovery after power loss | `--crash-points`; for a long program `--faults crash` | `patina guide crashes` |
 | a client and server | `--faults net` | `patina guide faults` |
-| several machines | nodes, then `--faults net,partition,pause,clock,crash` | `patina guide nodes` |
+| several machines | machines, then `--faults net,partition,pause,clock,crash` | `patina guide machines` |
 | the program's own rare paths | SDK fault points and `--faults buggify` | `patina guide sdk` |
 
 **5. Sweep small, then grow.** Exit status 0: every run `ok`; 1: findings; 2: Patina could
@@ -117,7 +117,7 @@ Keep run output out of your context: read the summary, `report.json`, `result.js
 - `patina guide faults`: the fault classes, the keys, and when faults act
 - `patina guide crashes`: crash consistency: crash points and what a crash leaves on disk
 - `patina guide scheduling`: where threads switch, and what is not covered
-- `patina guide nodes`: several machines in one run, and `patina ctl`
+- `patina guide machines`: several machines in one run, and `patina ctl`
 - `patina guide sweeps`: seeds, test suites, kept runs, known findings
 - `patina guide failures`: reading a failing run: explain, debug, replay, logs
 - `patina guide sdk`: the SDK in Rust, C, Go and Python

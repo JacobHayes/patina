@@ -29,7 +29,7 @@ echo "seed 1: class $c, native wall ${n_ms} ms"
 if [ "$c" = ok ]; then
     # The CPU count changes the first line (gomaxprocs 4 numcpu 4); the rest must be native's.
     grep -v '^~ \|^gomaxprocs ' "$RUNS/go-native.txt" >"$RUNS/go-native.masked"
-    grep -v '^~ \|^gomaxprocs ' "$RUNS/go-r/inc-0/stdout" | cmp - "$RUNS/go-native.masked" && echo "stdout equals native after masking" \
+    grep -v '^~ \|^gomaxprocs ' "$RUNS/go-r/boot-1/stdout" | cmp - "$RUNS/go-native.masked" && echo "stdout equals native after masking" \
         || fail "W4 stdout differs from native after masking"
 else
     fail "W4 seed 1: class $c"
@@ -55,9 +55,9 @@ echo "== d. F: injected file errors seen by the program"
 fs=""
 for s in 1 2 3; do
     run $G "$RUNS/go-f$s" "$s" $FAULT -- /guest/go-static all
-    if [ "$(field "$RUNS/go-f$s/result.json" outcome)" = ok ] && grep -q '^file error:' "$RUNS/go-f$s/inc-0/stdout"; then
+    if [ "$(field "$RUNS/go-f$s/result.json" outcome)" = ok ] && grep -q '^file error:' "$RUNS/go-f$s/boot-1/stdout"; then
         fs="$fs $s"
-        echo "seed $s: $(field "$RUNS/go-f$s/result.json" faults.injected) faults injected; program printed $(grep -c '^file error:' "$RUNS/go-f$s/inc-0/stdout") file errors, e.g.: $(grep -m1 '^file error:' "$RUNS/go-f$s/inc-0/stdout")"
+        echo "seed $s: $(field "$RUNS/go-f$s/result.json" faults.injected) faults injected; program printed $(grep -c '^file error:' "$RUNS/go-f$s/boot-1/stdout") file errors, e.g.: $(grep -m1 '^file error:' "$RUNS/go-f$s/boot-1/stdout")"
     fi
 done
 [ -n "$fs" ] || fail "W4 F: no run where the program saw an injected file error"
@@ -67,7 +67,7 @@ stats "$RUNS/go-r"
 
 echo "== f. go-spin"
 PATINA_TEST_STALL_MS=3000 run $G "$RUNS/spin-short" 1 -- /guest/go-spin 300000000
-echo "short spin, stall-ms 3000: class $(field "$RUNS/spin-short/result.json" outcome), wall $(field "$RUNS/spin-short/result.json" wall_ms) ms, stdout: $(cat "$RUNS/spin-short/inc-0/stdout")"
+echo "short spin, stall-ms 3000: class $(field "$RUNS/spin-short/result.json" outcome), wall $(field "$RUNS/spin-short/result.json" wall_ms) ms, stdout: $(cat "$RUNS/spin-short/boot-1/stdout")"
 [ "$(field "$RUNS/spin-short/result.json" outcome)" = ok ] || fail "go-spin short: not ok"
 PATINA_TEST_STALL_MS=1000 run $G "$RUNS/spin-20s" 1 --config "$("$PATINA_CFG" preempt=traps)" -- /guest/go-spin 20000000000
 echo "20 s spin, stall-ms 1000: class $(field "$RUNS/spin-20s/result.json" outcome), wall $(field "$RUNS/spin-20s/result.json" wall_ms) ms, detail $(field "$RUNS/spin-20s/result.json" message)"

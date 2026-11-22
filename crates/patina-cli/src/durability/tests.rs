@@ -581,7 +581,7 @@ fn write_dir_sparse_is_content_identical() {
 }
 
 /// A crash's tree takes each inode's time from the live tree (none for an inode the live tree
-/// lacks); the time survives the archive and the list carried to the next incarnation, an
+/// lacks); the time survives the archive and the list carried to the next boot, an
 /// archive without times still reads, and neither the digest nor `diff` sees times.
 #[test]
 fn times_are_carried_and_never_compared() {

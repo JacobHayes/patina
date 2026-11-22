@@ -1,7 +1,7 @@
-//! Per-node abstract `AF_UNIX` names. Abstract names live in the kernel's network namespace,
-//! which every node of a run shares (`proto::node`), so in a run with nodes each name a guest
-//! gives is stored as `\0patina-n<K>-<name>` for its node `K`, and every name the kernel gives
-//! back has its own node's prefix taken off. A node's names are its own: one node cannot bind,
+//! Per-machine abstract `AF_UNIX` names. Abstract names live in the kernel's network namespace,
+//! which every machine of a run shares (`proto::machine`), so in a run with machines each name a guest
+//! gives is stored as `\0patina-n<K>-<name>` for its machine `K`, and every name the kernel gives
+//! back has its own machine's prefix taken off. A machine's names are its own: one machine cannot bind,
 //! connect to or send to another's (the prefix is under the reserved `patina-` names, which a
 //! guest cannot name itself). An autobind (`bind` with the family only, or a connect, or a
 //! datagram socket's send, on an unbound socket with `SO_PASSCRED`, which the kernel would
@@ -13,7 +13,7 @@
 //! runtime memory with their names replaced (`Msgs`). A `sendmmsg` or `recvmmsg` call on an
 //! `AF_UNIX` socket handles at most `MMSG_MAX` messages (both may return fewer than asked).
 //! A prefixed name is `PREFIX_MAX` bytes longer: an abstract name that no longer fits a
-//! `sockaddr_un` is `EINVAL`, as an over-long address is. Without nodes nothing here runs.
+//! `sockaddr_un` is `EINVAL`, as an over-long address is. Without machines nothing here runs.
 
 use super::*;
 use crate::guest;
@@ -25,7 +25,7 @@ const SO_TYPE: u64 = 3;
 const SOCK_DGRAM: i32 = 2;
 /// `sizeof(struct sockaddr_un)`.
 const SUN_LEN: usize = 110;
-/// Messages of an `AF_UNIX` `sendmmsg`/`recvmmsg` call in a run with nodes.
+/// Messages of an `AF_UNIX` `sendmmsg`/`recvmmsg` call in a run with machines.
 pub const MMSG_MAX: usize = 16;
 /// The longest prefix: `patina-n14-`.
 const PREFIX_MAX: usize = 11;
@@ -46,12 +46,12 @@ impl Name {
     }
 }
 
-/// This node's prefix (without the leading NUL): `patina-n<K>-`.
+/// This machine's prefix (without the leading NUL): `patina-n<K>-`.
 fn prefix(out: &mut [u8; PREFIX_MAX]) -> usize {
     let p = b"patina-n";
     out[..p.len()].copy_from_slice(p);
     let mut n = p.len();
-    n += crate::path::fmt_dec(&mut out[n..], crate::state::node() as u64);
+    n += crate::path::fmt_dec(&mut out[n..], crate::state::machine() as u64);
     out[n] = b'-';
     n + 1
 }
@@ -92,7 +92,7 @@ pub fn autobind_name(v: u64, out: &mut Name) {
     out.len = (3 + k + 5) as u32;
 }
 
-/// The name the kernel gave (`n` bytes of `sa`) as the guest is to see it: its own node's
+/// The name the kernel gave (`n` bytes of `sa`) as the guest is to see it: its own machine's
 /// prefix taken off. Returns the guest's length.
 fn strip(sa: &mut [u8; SUN_LEN + 2], n: usize) -> usize {
     let n = n.min(SUN_LEN);

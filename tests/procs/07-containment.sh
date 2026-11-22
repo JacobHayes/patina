@@ -19,7 +19,7 @@ echo "(a) while running: $(cat "$o/a.alive"); namespaces: $(tr '\n' ' ' <"$o/a.n
 n=$(sed -n 's/.*(\([0-9]*\) inside its PID namespace).*/\1/p' "$o/a.alive")
 [ "$n" -ge 52 ] || die "(a) only $n processes alive in the sandbox (supervisor, main, 50 daemons expected)"
 wait "$launcher" || die "(a) patina run exit $?"
-grep -q 'daemons started: 50' "$o/a/inc-0/stdout" || die "(a) the guest did not report its daemons"
+grep -q 'daemons started: 50' "$o/a/boot-1/stdout" || die "(a) the guest did not report its daemons"
 [ "$(field "$o/a/result.json" outcome)" = ok ] || die "(a) class $(field "$o/a/result.json" outcome)"
 [ "$(field "$o/a/result.json" guest.exit)" = 0 ] || die "(a) exit status"
 set -- --started-before "$seen"; while read -r ns; do set -- "$@" --ns "$ns"; done <"$o/a.ns"

@@ -588,7 +588,7 @@ pub fn cut_for(ops: &[Op], seed: u64, key: u64) -> Result<(usize, usize), String
 
 pub fn materialise(log: &super::log::OpLog, seed: u64, key: u64) -> Result<Tree, String> {
     let ops = &log.ops;
-    // Timed only when asked: the supervisor, which materialises a node's machine crash, reads
+    // Timed only when asked: the supervisor, which materialises a machine's crash, reads
     // no clock through the vDSO (`rdtsc` faults there).
     let timing = std::env::var_os("PATINA_TEST_TIMING").is_some();
     let now = || timing.then(std::time::Instant::now);

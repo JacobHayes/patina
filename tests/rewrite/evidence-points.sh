@@ -34,7 +34,7 @@ row() {
     r again "$@"
     for k in traps cold warm again; do
         [ "$(field "$o/$name-$k/result.json" outcome)" = ok ] || die "$name $k: $(field "$o/$name-$k/result.json" message)"
-        cmp -s "$want" "$o/$name-$k/inc-0/stdout" || die "$name $k: output differs from the native run"
+        cmp -s "$want" "$o/$name-$k/boot-1/stdout" || die "$name $k: output differs from the native run"
     done
     d1=$(field "$o/$name-warm/result.json" digest)
     d2=$(field "$o/$name-again/result.json" digest)

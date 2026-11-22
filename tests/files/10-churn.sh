@@ -9,7 +9,7 @@ o=$RUNS/10-churn
 mkdir -p "$o"
 timeout 60 "$PATINA" run --seed 1 --out "$o/files" --mount "$PATINA_GUESTS":/guest:copy -- /guest/churn 60000 >/dev/null || true
 [ "$(field "$o/files/result.json" outcome)" = ok ] \
-    || die "file churn: $(field "$o/files/result.json" outcome): $(field "$o/files/result.json" message) $(cat "$o/files/inc-0/stderr")"
+    || die "file churn: $(field "$o/files/result.json" outcome): $(field "$o/files/result.json" message) $(cat "$o/files/boot-1/stderr")"
 rm -rf "${o:?}/files"
 timeout 60 "$PATINA" run --seed 1 --out "$o/socks" --mount "$PATINA_GUESTS":/guest:copy -- /guest/churn socks 20000 >/dev/null || true
 [ "$(field "$o/socks/result.json" outcome)" = ok ] \

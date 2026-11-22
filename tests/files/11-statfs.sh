@@ -8,7 +8,7 @@
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/11-statfs
 verify_ok "$o" 1 cpu 2 -- /guest/statfs
-out=$o/run-0/inc-0/stdout
+out=$o/run-0/boot-1/stdout
 size=$((256 << 20))
 for m in / /dev/shm /work /tmp /guest; do
     line=$(grep "^statfs $m type=" "$out" | head -1)

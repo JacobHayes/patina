@@ -1,7 +1,7 @@
 #!/bin/sh
-# same-tree [--relax FIELD]... REF RUN: a run that exits 0 leaves the work tree the reference
+# same-tree [--relax FIELD]... REF RUN: a run that exits 0 leaves the disk the reference
 # left. REF is a run directory, or a sweep kept whole (--keep all) over the same seeds, whose
-# seed-$PATINA_SEED is the reference. Each side's last incarnation is compared. A run that
+# seed-$PATINA_SEED is the reference. Each side's last boot is compared. A run that
 # failed cleanly (an --ok-exit status) is not judged. A reference made from other input
 # (same-input.sh) is an error, not a finding; --relax FIELD compares anyway. For `patina run
 # --check`; uses `patina log tree` and jq.
@@ -13,7 +13,7 @@ while [ "${1:-}" = --relax ]; do relax="$relax $2"; shift 2; done
 ref=$1; [ ! -d "$ref/seed-$PATINA_SEED" ] || ref=$ref/seed-$PATINA_SEED
 # shellcheck disable=SC2086 # the fields, one word each
 same_input "$ref" "$2" $relax || exit 2
-last() { k=0; while [ -d "$1/inc-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/inc-$k"; }
+last() { k=1; while [ -d "$1/boot-$((k + 1))" ]; do k=$((k + 1)); done; echo "$1/boot-$k"; }
 t=$(mktemp -d) || exit 2
 trap 'rm -rf "${t:?}"' EXIT
 "${PATINA:-patina}" log tree "$(last "$ref")" "$t/want" && "${PATINA:-patina}" log tree "$(last "$2")" "$t/got" || exit 2

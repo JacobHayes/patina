@@ -25,7 +25,7 @@ c=$(field "$RUNS/tk-r/result.json" outcome)
 echo "seed 1: class $c, native wall ${n_ms} ms"
 [ "$c" = ok ] || fail "W2 seed 1: class $c"
 grep -v '^~ ' "$RUNS/tk-native.txt" | sort >"$RUNS/tk-native.masked"
-grep -v '^~ ' "$RUNS/tk-r/inc-0/stdout" | sort | cmp - "$RUNS/tk-native.masked" && echo "stdout lines equal native after masking" \
+grep -v '^~ ' "$RUNS/tk-r/boot-1/stdout" | sort | cmp - "$RUNS/tk-native.masked" && echo "stdout lines equal native after masking" \
     || fail "W2 stdout differs from native after masking"
 
 echo "== b. D, faults off and on"
@@ -41,7 +41,7 @@ echo "W2: $d distinct digests over seeds 1-10 ($(count tk-10 ok) ok)"
 echo "== d. the 5 s timeout"
 for s in 1 2 3; do
     run $T "$RUNS/tk-t$s" "$s" -- /guest/tokio-mt local
-    grep -q '^timeout 5s: fired, elapsed >= 5s: true$' "$RUNS/tk-t$s/inc-0/stdout" || fail "W2 seed $s: the 5 s timeout did not fire as expected"
+    grep -q '^timeout 5s: fired, elapsed >= 5s: true$' "$RUNS/tk-t$s/boot-1/stdout" || fail "W2 seed $s: the 5 s timeout did not fire as expected"
     echo "seed $s: wall $(field "$RUNS/tk-t$s/result.json" wall_ms) ms; native wall ${n_ms} ms"
 done
 
@@ -50,7 +50,7 @@ fs=0
 for s in 1 2 3; do
     o=$RUNS/tk-f$s
     run $T "$o" "$s" $FAULT -- /guest/tokio-mt local
-    n=$(grep -c '^spawn_blocking error' "$o/inc-0/stdout") || [ $? = 1 ]
+    n=$(grep -c '^spawn_blocking error' "$o/boot-1/stdout") || [ $? = 1 ]
     echo "seed $s: $(field "$o/result.json" faults.injected) faults injected, class $(field "$o/result.json" outcome), $n spawn_blocking errors seen"
     [ "$n" -gt 0 ] && fs=$((fs + 1))
 done
@@ -66,7 +66,7 @@ netf $T tk-part '^echo (tcp): 16 of 16 clients ok' "1 2" --fault net-blackout=1+
 cat "$RUNS/tk-part.txt"
 [ "$(grep -c ': class ok, .* 1 lines match' "$RUNS/tk-part.txt")" = 2 ] || fail "W2: not every client recovered after the partition"
 for s in 1 2; do
-    n=$(sed -n 's/^timeouts during echo: //p' "$RUNS/tk-part-$s/inc-0/stdout")
+    n=$(sed -n 's/^timeouts during echo: //p' "$RUNS/tk-part-$s/boot-1/stdout")
     [ "${n:-0}" -gt 0 ] || fail "W2 seed $s: no 5 s timeout fired during the 100 s partition"
 done
 echo "-- net-chunk-max=1"

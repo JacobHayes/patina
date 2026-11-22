@@ -26,7 +26,7 @@ def run(job):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=600)
     with open(os.path.join(out, "result.json")) as f:
         r = json.load(f)
-    with open(os.path.join(out, "inc-0", "stdout")) as f:
+    with open(os.path.join(out, "boot-1", "stdout")) as f:
         text = f.read()
     subprocess.run(["rm", "-rf", out])  # judged: keep nothing
     return job, r, text

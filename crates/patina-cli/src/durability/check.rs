@@ -1,4 +1,4 @@
-//! `patina log ops --check RUN`: for every incarnation, replaying the complete operation log onto
+//! `patina log ops --check RUN`: for every boot, replaying the complete operation log onto
 //! its base must give exactly the live tree the supervisor exported (`live.tree`, or the
 //! `live.tree.zst` a sweep keeps: `kept`): names,
 //! kinds, modes, owners, link structure (inode numbers), contents, extended attributes.
@@ -11,10 +11,16 @@ use super::materialise::replay;
 use super::tree::diff;
 use std::path::{Path, PathBuf};
 
-pub fn incarnations(run: &Path) -> Vec<PathBuf> {
+/// The directory of boot `k` (0-based) of a run or of a machine: `boot-1` for the first.
+pub fn boot_dir(k: impl Into<u64>) -> String {
+    format!("boot-{}", k.into() + 1)
+}
+
+/// The boot directories of a run or of a machine, first boot first.
+pub fn boots(run: &Path) -> Vec<PathBuf> {
     let mut v = vec![];
-    for k in 0.. {
-        let d = run.join(format!("inc-{k}"));
+    for k in 0u64.. {
+        let d = run.join(boot_dir(k));
         if !d.is_dir() {
             break;
         }
@@ -23,17 +29,17 @@ pub fn incarnations(run: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// Every disk's directory of a run, the ones `check_inc` checks: each incarnation's (the
-/// driver's), then each node's (`node/NAME/inc-K/` holding an operation log), by name.
+/// Every disk's directory of a run, the ones `check_disk` checks: each boot's (the
+/// main's), then each machine's (`machine/NAME/boot-K/` holding an operation log), by name.
 pub fn disks(run: &Path) -> Vec<PathBuf> {
-    let mut v = incarnations(run);
-    let mut names: Vec<PathBuf> = std::fs::read_dir(run.join("node"))
+    let mut v = boots(run);
+    let mut names: Vec<PathBuf> = std::fs::read_dir(run.join("machine"))
         .map(|rd| rd.flatten().map(|e| e.path()).collect())
         .unwrap_or_default();
     names.sort();
     for n in names {
         v.extend(
-            incarnations(&n)
+            boots(&n)
                 .into_iter()
                 .filter(|d| d.join("oplog.meta").exists()),
         );
@@ -41,8 +47,8 @@ pub fn disks(run: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// Check one incarnation directory. Ok(summary) or Err(first difference).
-pub fn check_inc(dir: &Path) -> Result<String, String> {
+/// Check one boot directory. Ok(summary) or Err(first difference).
+pub fn check_disk(dir: &Path) -> Result<String, String> {
     let log = OpLog::load(dir)?;
     let live = super::kept::live(dir)?;
     let replayed = replay(&log)?.to_tree();
@@ -64,13 +70,13 @@ pub fn check_inc(dir: &Path) -> Result<String, String> {
 }
 
 pub fn check(run: &Path) -> Result<(), String> {
-    let incs = disks(run);
-    if incs.is_empty() {
-        return Err(format!("{}: no incarnations", run.display()));
+    let bdirs = disks(run);
+    if bdirs.is_empty() {
+        return Err(format!("{}: no boots", run.display()));
     }
     let mut bad = 0;
-    for d in incs {
-        match check_inc(&d) {
+    for d in bdirs {
+        match check_disk(&d) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 println!("FAIL {e}");
@@ -79,7 +85,7 @@ pub fn check(run: &Path) -> Result<(), String> {
         }
     }
     if bad > 0 {
-        return Err(format!("log ops --check: {bad} incarnation(s) differ"));
+        return Err(format!("log ops --check: {bad} boot(s) differ"));
     }
     Ok(())
 }

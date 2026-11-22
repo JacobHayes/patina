@@ -10,9 +10,9 @@
 //! for that datagram alone, so datagrams may overtake one another inside the drawn latency, as
 //! UDP allows. Faults are draws keyed by the datagram id and their own sub-key
 //! (`Stream::Dgram`): drop, duplicate (the copy has its own delay), reorder (an extra hold), and
-//! `net-blackout` (a datagram due inside the window is lost). With nodes, a datagram to another
-//! node's address (`ADDR_NODE + j`, `rt::sys::udp`) goes to node `j`'s own address and arrives
-//! from `ADDR_NODE + sender`; the link faults act on it as `net-links` says, and one sent
+//! `net-blackout` (a datagram due inside the window is lost). With machines, a datagram to another
+//! machine's address (`ADDR_MACHINE + j`, `rt::sys::udp`) goes to machine `j`'s own address and arrives
+//! from `ADDR_MACHINE + sender`; the link faults act on it as `NetCfg::links` says, and one sent
 //! while its link is cut (`link::Sup::link_cut`) is lost. At its time (an event in the
 //! scheduler's queue) the datagram is routed by its destination as Linux's lookup does
 //! (connected and specific sockets first; a `SO_REUSEPORT` group by a hash of the source;
@@ -50,9 +50,9 @@ const UD_DELIVERED: u64 = 0;
 const UD_NO_RECEIVER: u64 = 1;
 const UD_RCVBUF_FULL: u64 = 2;
 const UD_HELD: u64 = 3;
-/// Its node's machine crashed while it was in flight: lost, and no error comes back.
+/// Its machine crashed while it was in flight: lost, and no error comes back.
 const UD_MACHINE_DOWN: u64 = 4;
-/// Its node was paused when it arrived: lost, as on a cut link.
+/// Its machine was paused when it arrived: lost, as on a cut link.
 const UD_PAUSED: u64 = 5;
 
 struct USock {
@@ -68,15 +68,15 @@ struct USock {
     order: u64,
     /// Packets the kernel did not take yet (its buffer was full).
     held: VecDeque<Vec<u8>>,
-    /// The node of the process that made it: datagrams stay on their node (`ADDR_HOST4` is
-    /// the node's own address here, `rt::sys::udp`).
-    node: usize,
+    /// The machine of the process that made it: datagrams stay on their machine (`ADDR_HOST4` is
+    /// the machine's own address here, `rt::sys::udp`).
+    machine: usize,
 }
 
 struct Flight {
     src: usize,
-    /// The node it is routed in, and the destination kind as its sender named it.
-    node: usize,
+    /// The machine it is routed in, and the destination kind as its sender named it.
+    machine: usize,
     named: u8,
     skind: u8,
     sport: u16,
@@ -91,7 +91,7 @@ pub struct Udp {
     listen_fd: i32,
     pending: BTreeMap<usize, i32>,
     socks: BTreeMap<usize, USock>,
-    /// Bound sockets by (node, port): every node has its own port space.
+    /// Bound sockets by (machine, port): every machine has its own port space.
     ports: BTreeMap<(usize, u16), Vec<usize>>,
     next_port: BTreeMap<usize, u16>,
     next_id: u64,
@@ -175,7 +175,7 @@ impl Udp {
 impl Sup {
     pub fn udp_op(&mut self, op: Op, idx: usize, a: [u64; 6]) -> Next {
         let r = match op {
-            Op::UdpSocket => self.udp_socket(a[0] as usize, a[1] as u16, self.node_of(idx)),
+            Op::UdpSocket => self.udp_socket(a[0] as usize, a[1] as u16, self.machine_of(idx)),
             Op::UdpBind => self.udp_bind(a[0] as usize, a[1] as u16, a[2] as u8, a[3]),
             // A shutdown of the read side: wake what waits for the socket to be readable.
             Op::UdpConnect if a[3] == 2 => {
@@ -187,9 +187,9 @@ impl Sup {
                     s.peer = (a[3] == 1).then_some((a[2] as u8, a[1] as u16));
                     s.kind = a[4] as u8;
                     if a[3] == 0 && a[5] == 0 && s.port != 0 {
-                        let (p, node) = (s.port, s.node);
+                        let (p, machine) = (s.port, s.machine);
                         s.port = 0;
-                        self.udp_unport(a[0] as usize, node, p);
+                        self.udp_unport(a[0] as usize, machine, p);
                     }
                 }
                 0
@@ -200,7 +200,7 @@ impl Sup {
         Next::Continue(r)
     }
 
-    fn udp_socket(&mut self, i: usize, family: u16, node: usize) -> i64 {
+    fn udp_socket(&mut self, i: usize, family: u16, machine: usize) -> i64 {
         if self.udp.host_sndbuf < 2 * DGRAM_BUF_MAX {
             self.finish(Verdict::new(
                 "infra",
@@ -260,7 +260,7 @@ impl Sup {
                 peer: None,
                 order: 0,
                 held: VecDeque::new(),
-                node,
+                machine,
             },
         );
         if self.udp.socks.len() >= self.udp.sweep_at {
@@ -294,23 +294,28 @@ impl Sup {
         unsafe { libc::close(s.fd) };
         self.udp.blocked.remove(&i);
         if s.port != 0 {
-            self.udp_unport(i, s.node, s.port);
+            self.udp_unport(i, s.machine, s.port);
         }
         self.wire_decide(DEC_UDP_CLOSE, [i as u64, s.port as u64, 0, 0, 0, 0]);
     }
 
-    fn udp_unport(&mut self, i: usize, node: usize, p: u16) {
-        if let Some(v) = self.udp.ports.get_mut(&(node, p)) {
+    fn udp_unport(&mut self, i: usize, machine: usize, p: u16) {
+        if let Some(v) = self.udp.ports.get_mut(&(machine, p)) {
             v.retain(|&x| x != i);
             if v.is_empty() {
-                self.udp.ports.remove(&(node, p));
+                self.udp.ports.remove(&(machine, p));
             }
         }
     }
 
-    /// Live sockets of node `node` bound to `p`.
-    fn udp_on_port(&mut self, node: usize, p: u16) -> Vec<usize> {
-        let v = self.udp.ports.get(&(node, p)).cloned().unwrap_or_default();
+    /// Live sockets of machine `machine` bound to `p`.
+    fn udp_on_port(&mut self, machine: usize, p: u16) -> Vec<usize> {
+        let v = self
+            .udp
+            .ports
+            .get(&(machine, p))
+            .cloned()
+            .unwrap_or_default();
         let mut out = vec![];
         for j in v {
             if self.udp.live(j) {
@@ -323,7 +328,7 @@ impl Sup {
     }
 
     fn udp_bind(&mut self, i: usize, port: u16, kind: u8, flags: u64) -> i64 {
-        let Some((family, node)) = self.udp.socks.get(&i).map(|s| (s.family, s.node)) else {
+        let Some((family, machine)) = self.udp.socks.get(&i).map(|s| (s.family, s.machine)) else {
             return -(libc::EBADF as i64);
         };
         let v6only = flags & UDP_V6ONLY != 0;
@@ -331,10 +336,10 @@ impl Sup {
             let span = (PORT_LAST - PORT_FIRST) as u32 + 1;
             let mut got = None;
             for _ in 0..span {
-                let next = self.udp.next_port.entry(node).or_insert(PORT_FIRST);
+                let next = self.udp.next_port.entry(machine).or_insert(PORT_FIRST);
                 let p = *next;
                 *next = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
-                if self.udp_on_port(node, p).is_empty() {
+                if self.udp_on_port(machine, p).is_empty() {
                     got = Some(p);
                     break;
                 }
@@ -344,7 +349,7 @@ impl Sup {
                 None => return -(libc::EADDRINUSE as i64),
             }
         } else {
-            for j in self.udp_on_port(node, port) {
+            for j in self.udp_on_port(machine, port) {
                 let o = &self.udp.socks[&j];
                 let ov6 = o.flags & UDP_V6ONLY != 0;
                 let overlap = [ADDR_LOOP4, ADDR_HOST4, ADDR_LOOP6]
@@ -365,7 +370,7 @@ impl Sup {
         s.kind = kind;
         s.flags = flags;
         s.order = order;
-        self.udp.ports.entry((node, p)).or_default().push(i);
+        self.udp.ports.entry((machine, p)).or_default().push(i);
         p as i64
     }
 
@@ -380,7 +385,7 @@ impl Sup {
         lo + draw(self.ctl.config.seed, Stream::Dgram, id << 4 | sub) % (hi - lo + 1)
     }
 
-    /// An injected datagram fault: `args` = [kind, link (`inj_link`, with nodes), value, id,
+    /// An injected datagram fault: `args` = [kind, link (`inj_link`, with machines), value, id,
     /// destination port, source port].
     #[allow(clippy::too_many_arguments)]
     fn dgram_inject(
@@ -427,7 +432,7 @@ impl Sup {
                 format!("udp: send on unknown socket {i}"),
             ));
         };
-        let (fd, sport, skind, node) = (s.fd, s.port, s.kind, s.node);
+        let (fd, sport, skind, machine) = (s.fd, s.port, s.kind, s.machine);
         let r = unsafe {
             libc::recv(
                 fd,
@@ -448,31 +453,35 @@ impl Sup {
         let data = self.udp.buf[..len].to_vec();
         let id = self.udp.next_id;
         self.udp.next_id += 1;
-        // Another node's address: routed to that node's own, from the sender's.
+        // Another machine's address: routed to that machine's own, from the sender's.
         let named = dkind;
-        let (dnode, dkind, skind) = match dkind {
-            k if k >= ADDR_NODE => ((k - ADDR_NODE) as usize, ADDR_HOST4, ADDR_NODE + node as u8),
-            k => (node, k, if skind == ADDR_ANY { k } else { skind }),
+        let (dmachine, dkind, skind) = match dkind {
+            k if k >= ADDR_MACHINE => (
+                (k - ADDR_MACHINE) as usize,
+                ADDR_HOST4,
+                ADDR_MACHINE + machine as u8,
+            ),
+            k => (machine, k, if skind == ADDR_ANY { k } else { skind }),
         };
         let c = &tab(self.ctl).counters;
         WireTab::inc(&c.datagrams, 1);
         let cfg = tab(self.ctl).cfg;
         let now = self.now();
-        let faulted = self.link_faulted(node, dnode);
+        let faulted = self.link_faulted(machine, dmachine);
         if faulted {
             self.dgram_elig();
         }
-        let link = if self.node_count() > 0 {
-            inj_link(node, dnode)
+        let link = if self.machine_count() > 0 {
+            inj_link(machine, dmachine)
         } else {
             0
         };
-        let range = self.link_delay_range(node, dnode);
+        let range = self.link_delay_range(machine, dmachine);
         let mut fate = 0;
         let mut t = now + self.dgram_draw(id, DSUB_DELAY, range);
-        if self.link_cut(node, dnode) {
+        if self.link_cut(machine, dmachine) {
             fate |= UF_CUT;
-            self.cut_acted(node, dnode);
+            self.cut_acted(machine, dmachine);
         }
         if fate == 0 && faulted && self.dgram_fault(cfg.drop_permille, id, DSUB_DROP) {
             fate |= UF_DROP;
@@ -504,7 +513,7 @@ impl Sup {
         let lost = fate & (UF_DROP | UF_BLACKOUT | UF_CUT) != 0;
         let f = |dup| Flight {
             src: i,
-            node: dnode,
+            machine: dmachine,
             named,
             skind,
             sport,
@@ -542,11 +551,11 @@ impl Sup {
         0
     }
 
-    /// One more datagram the link faults act on (`proto::node::ELIG_DATAGRAMS`).
+    /// One more datagram the link faults act on (`proto::machine::ELIG_DATAGRAMS`).
     fn dgram_elig(&self) {
-        if self.node_count() > 0 {
-            unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) }.elig
-                [proto::node::ELIG_DATAGRAMS] += 1;
+        if self.machine_count() > 0 {
+            unsafe { proto::machine::MachineTab::at(self.ctl as *const Ctl as *mut u8) }.elig
+                [proto::machine::ELIG_DATAGRAMS] += 1;
         } else if self
             .ctl
             .phases
@@ -554,7 +563,7 @@ impl Sup {
             .load(std::sync::atomic::Ordering::Relaxed)
             != 0
         {
-            self.ctl.phases.elig[proto::node::ELIG_DATAGRAMS]
+            self.ctl.phases.elig[proto::machine::ELIG_DATAGRAMS]
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
@@ -573,14 +582,14 @@ impl Sup {
     /// The socket a datagram from (skind, sport) to (dkind, dport) reaches, if any.
     fn udp_route(
         &mut self,
-        node: usize,
+        machine: usize,
         skind: u8,
         sport: u16,
         dkind: u8,
         dport: u16,
     ) -> Option<usize> {
         let mut best: Vec<(u64, u64, usize)> = vec![];
-        for j in self.udp_on_port(node, dport) {
+        for j in self.udp_on_port(machine, dport) {
             let s = &self.udp.socks[&j];
             if !covers(s.family, s.kind, s.flags & UDP_V6ONLY != 0, dkind) {
                 continue;
@@ -620,7 +629,7 @@ impl Sup {
         let id = k >> 1;
         let len = f.data.len() as u64;
         let c = &tab(self.ctl).counters;
-        if f.node < 64 && self.links.down >> f.node & 1 != 0 {
+        if f.machine < 64 && self.links.down >> f.machine & 1 != 0 {
             WireTab::inc(&c.dgram_lost, 1);
             self.wire_decide(
                 DEC_UDP_DELIVER,
@@ -628,14 +637,18 @@ impl Sup {
             );
             return;
         }
-        // A datagram from another node (its sender's socket may have closed since).
-        let from_other = self.udp.socks.get(&f.src).is_none_or(|s| s.node != f.node);
-        if f.node < 64 && self.links.paused >> f.node & 1 != 0 && from_other {
+        // A datagram from another machine (its sender's socket may have closed since).
+        let from_other = self
+            .udp
+            .socks
+            .get(&f.src)
+            .is_none_or(|s| s.machine != f.machine);
+        if f.machine < 64 && self.links.paused >> f.machine & 1 != 0 && from_other {
             WireTab::inc(&c.dgram_lost, 1);
             self.wire_decide(DEC_UDP_DELIVER, [id, 0, len, UD_PAUSED, f.dup as u64, 0]);
             return;
         }
-        let Some(j) = self.udp_route(f.node, f.skind, f.sport, f.dkind, f.dport) else {
+        let Some(j) = self.udp_route(f.machine, f.skind, f.sport, f.dkind, f.dport) else {
             WireTab::inc(&c.dgram_lost, 1);
             self.wire_decide(
                 DEC_UDP_DELIVER,

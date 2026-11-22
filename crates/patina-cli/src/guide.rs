@@ -26,7 +26,7 @@ pub const TOPICS: &[Topic] = topics![
     "faults",
     "crashes",
     "scheduling",
-    "nodes",
+    "machines",
     "sweeps",
     "failures",
     "sdk",

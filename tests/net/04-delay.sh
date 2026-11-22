@@ -5,7 +5,7 @@
 o=$RUNS/04-delay; mkdir -p "$o"
 for i in 1 2 3; do
     run_ok "$o/x$i" "$i" --fault net-delay-ms=20000..30000 -- /guest/sockets xfer 1024 30000
-    echo "seed $i: $(grep transfer: "$o/x$i/inc-0/stdout"); run wall $(field "$o/x$i/result.json" wall_ms) ms"
+    echo "seed $i: $(grep transfer: "$o/x$i/boot-1/stdout"); run wall $(field "$o/x$i/result.json" wall_ms) ms"
 done
 run_fails "$o/x-off" 1 -- /guest/sockets xfer 1024 30000
 echo "without the delay the transfer takes under 30 virtual seconds (the check fails as it should)"

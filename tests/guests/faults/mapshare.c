@@ -18,12 +18,12 @@
  *   held       65 files mapped at once (one more than Patina keeps shadows of)
  *   durable    a child stores 'x' and waits; the main process fsyncs the file and the
  *              directory, writes and fsyncs a marker; the child then stores 'u' at byte 1 and
- *              is killed. In a later incarnation: the marker means the first store is durable
+ *              is killed. In a later boot: the marker means the first store is durable
  *              (`always`: synced-store-kept); the second may be lost (`sometimes`:
  *              unsynced-store-lost).
  *   durable-sync  durable, but the child maps only the second page and stores there, and the
  *              main process, mapping only the first page, calls sync(2) instead of fsync
- *   order      store-write, and in a later incarnation: the page cache held the child's
+ *   order      store-write, and in a later boot: the page cache held the child's
  *              stores before the write, so a file that has the write has them
  *              (`always`: write-keeps-earlier-store).
  * Every mode but durable and order prints bytes of the file as read(2) returns them, which is what a
@@ -90,10 +90,10 @@ static int later(int at) {
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "back";
-    const char *inc = getenv("PATINA_INCARNATION");
+    const char *boot = getenv("PATINA_BOOT");
     int dsync = !strcmp(mode, "durable-sync");
-    if ((!strcmp(mode, "durable") || dsync) && inc && atoi(inc) > 0) return later(dsync ? PG : 0);
-    if (!strcmp(mode, "order") && inc && atoi(inc) > 0) {
+    if ((!strcmp(mode, "durable") || dsync) && boot && atoi(boot) > 0) return later(dsync ? PG : 0);
+    if (!strcmp(mode, "order") && boot && atoi(boot) > 0) {
         char b[201] = {0};
         int f = open("shm", O_RDONLY);
         if (f >= 0 && pread(f, b, sizeof b, 0) == sizeof b)

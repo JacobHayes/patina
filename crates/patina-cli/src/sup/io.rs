@@ -39,10 +39,10 @@ struct TimerFd {
     holders: BTreeSet<i32>,
     /// `CLOCK_*` it was created on.
     clock: u64,
-    /// The node of the process that created it; whether it is armed on an absolute realtime
-    /// time (a step of the node's clock moves it), and with `TFD_TIMER_CANCEL_ON_SET` (a step
+    /// The machine of the process that created it; whether it is armed on an absolute realtime
+    /// time (a step of the machine's clock moves it), and with `TFD_TIMER_CANCEL_ON_SET` (a step
     /// makes it readable and cancels its next read).
-    node: usize,
+    machine: usize,
     rt_abs: bool,
     cancel: bool,
     /// Expiries a step of the clock passed over beyond `next` (delivered with it).
@@ -175,18 +175,18 @@ impl Io {
         }
     }
 
-    /// `TimerFdSet` from a thread of process `pid` of node `node`, its `Slot::clock_flags`
+    /// `TimerFdSet` from a thread of process `pid` of machine `machine`, its `Slot::clock_flags`
     /// `flags`.
-    /// The node of timer `key`'s creator.
-    pub fn timer_node(&self, key: u64) -> Option<usize> {
-        self.timers.get(&key).map(|t| t.node)
+    /// The machine of timer `key`'s creator.
+    pub fn timer_machine(&self, key: u64) -> Option<usize> {
+        self.timers.get(&key).map(|t| t.machine)
     }
 
     pub fn timer_set(
         &mut self,
         sched: &mut Sched,
         pid: i32,
-        node: usize,
+        machine: usize,
         flags: u64,
         a: [u64; 6],
     ) -> i64 {
@@ -205,7 +205,7 @@ impl Io {
                     event: None,
                     holders: BTreeSet::from([pid]),
                     clock: a[3],
-                    node,
+                    machine,
                     rt_abs: false,
                     cancel: false,
                     extra: 0,
@@ -332,7 +332,7 @@ impl Io {
         }
     }
 
-    /// Node `k`'s realtime clock moved by `delta` ns: its absolute realtime timers move with
+    /// Machine `k`'s realtime clock moved by `delta` ns: its absolute realtime timers move with
     /// it (one now past is due now, with the expiries it passed counted), and those set with
     /// `TFD_TIMER_CANCEL_ON_SET` become readable (the runtime answers their next read
     /// `ECANCELED`).
@@ -346,7 +346,7 @@ impl Io {
     ) {
         let mut readable = false;
         for (&key, t) in self.timers.iter_mut() {
-            if t.node != k {
+            if t.machine != k {
                 continue;
             }
             if t.cancel {
@@ -577,7 +577,7 @@ mod tests {
                 event: None,
                 holders: BTreeSet::from([0]),
                 clock: 1,
-                node: 0,
+                machine: 0,
                 rt_abs: false,
                 cancel: false,
                 extra: 0,
@@ -612,21 +612,21 @@ mod tests {
     }
 
     #[test]
-    fn a_clock_step_moves_absolute_realtime_timers_of_its_node() {
+    fn a_clock_step_moves_absolute_realtime_timers_of_its_machine() {
         let mem = ctl();
         let c = unsafe { Ctl::at(mem.as_ptr() as *mut u8) };
         let mut s = Sched::new(1, 8);
         let mut io = Io::default();
         let mut p = [0i32; 2];
         assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
-        let t = |node| TimerFd {
+        let t = |machine| TimerFd {
             fd: p[1],
             next: None,
             interval: 0,
             event: None,
             holders: BTreeSet::from([0]),
             clock: 0,
-            node,
+            machine,
             rt_abs: false,
             cancel: false,
             extra: 0,
@@ -636,12 +636,12 @@ mod tests {
         io.timers.insert(3, t(3));
         let abs = proto::ctl::CLK_REALTIME_ABS;
         let cancel = abs | proto::ctl::CLK_CANCEL_ON_SET;
-        // Node 2: an absolute timer at 10_000 (period 1_000) and a relative one; node 3's
+        // Machine 2: an absolute timer at 10_000 (period 1_000) and a relative one; machine 3's
         // absolute one is another machine's.
         io.timer_set(&mut s, 0, 2, cancel, [TFD_ARM, 1, 10_000, 1_000, 0, 0]);
         io.timer_set(&mut s, 0, 2, 0, [TFD_ARM, 2, 10_000, 0, 0, 0]);
         io.timer_set(&mut s, 0, 3, abs, [TFD_ARM, 3, 10_000, 0, 0, 0]);
-        // Node 2's clock steps 12_500 ahead at 1_000: its absolute timer's expiry, 10_000 of
+        // Machine 2's clock steps 12_500 ahead at 1_000: its absolute timer's expiry, 10_000 of
         // the old clock, is 3_500 past (at -2_500 of the new): 4 expiries are due.
         io.timers_clock_set(&mut s, c, 2, 12_500, 1_000);
         assert_eq!(io.timer_get([1, 0, 0, 0, 0, 0]), 500);

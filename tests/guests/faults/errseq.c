@@ -83,7 +83,7 @@ static int pg(int retry) {
         printf("acknowledged files kept\n");
         return 0;
     }
-    if (getenv("PATINA_INCARNATION")) {
+    if (getenv("PATINA_BOOT")) {
         printf("restarted before the acknowledgement\n");
         return 0;
     }

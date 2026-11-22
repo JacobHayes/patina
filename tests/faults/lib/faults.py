@@ -30,7 +30,7 @@ def names(ops):
 
 
 def crash_position(inc):
-    """Where an ack-log incarnation crashed: the last record before the Crash record."""
+    """Where an ack-log boot crashed: the last record before the Crash record."""
     ops = oplog(inc)
     if not ops or ops[-1]["kind"] != "Crash":
         return None

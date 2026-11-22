@@ -6,8 +6,8 @@
 o=$RUNS/05/delay
 run "$o" 1 --fault fs-delay-permille=1000 -- /guest/delay
 run "$o-off" 1 -- /guest/delay
-v=$(awk '{print $4}' "$o/inc-0/stdout")
-off=$(awk '{print $4}' "$o-off/inc-0/stdout")
+v=$(awk '{print $4}' "$o/boot-1/stdout")
+off=$(awk '{print $4}' "$o-off/boot-1/stdout")
 echo "100 writes: virtual ${v} ms (${off} ms without the fault), wall $(field "$o/result.json" wall_ms) ms (whole run)"
 [ "$v" -gt 100 ] && [ "$v" -le 1100 ] || die "virtual time $v ms"
 [ "$off" -lt $((v / 2)) ] || die "virtual time without the fault $off ms, with it $v ms"

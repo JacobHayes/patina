@@ -35,7 +35,7 @@ class() { field "$1/result.json" outcome; }
 # sweep NAME SEEDS [patina run options] -- /guest/cmd args: one run per seed (1..SEEDS; SEEDS
 # A-B: A..B),
 # $T07_JOBS (default 4) at a time, through tests/storage/lib/sweep.sh: $RUNS/NAME/summary.tsv
-# (seed outcome message digest incarnations crashes wall_ms); run directories deleted unless
+# (seed outcome message digest boots crashes wall_ms); run directories deleted unless
 # SWEEP_KEEP says otherwise (all, fail).
 sweep() {
     _n=$1; _s=$2; shift 2

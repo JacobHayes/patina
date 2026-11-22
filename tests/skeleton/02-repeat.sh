@@ -8,8 +8,8 @@ for g in $GUESTS; do
     timeout 120 "$PATINA" verify --seed 1 --runs 4 --vary cpu,aslr,sandbox --out "$out" --mount "$PATINA_GUESTS":/guest:copy -- "/guest/$g" >"$out.txt" || grep -q '^identical: ' "$out.txt" || die "$g: verify exit $?"
     n=$(for i in 0 1 2 3; do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$g: $n distinct digests"
-    n=$(for i in 0 1 2 3; do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
+    n=$(for i in 0 1 2 3; do sha256sum <"$out/run-$i/boot-1/stdout"; done | sort -u | wc -l)
     [ "$n" = 1 ] || die "$g: $n distinct stdout files"
-    [ -s "$out/run-0/inc-0/stdout" ] || die "$g: empty stdout"
+    [ -s "$out/run-0/boot-1/stdout" ] || die "$g: empty stdout"
     echo "$g: 4 runs (cpu, aslr, sandbox), 1 digest, 1 stdout"
 done

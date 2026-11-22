@@ -14,7 +14,7 @@ mkdir -p "$o"
 (cd "$o" && "$PATINA" __native --mount "$PATINA_GUESTS:/guest" -- /guest/sig-frame >native.txt)
 patina_run "$o/patina" 1 sig-frame
 [ "$(field "$o/patina/result.json" outcome)" = ok ] || die "patina run: $(field "$o/patina/result.json" outcome)"
-cp "$o/patina/inc-0/stdout" "$o/patina.txt"
+cp "$o/patina/boot-1/stdout" "$o/patina.txt"
 diff "$o/native.txt" "$o/patina.txt" >"$o/diff.txt" || true
 cat "$o/diff.txt"
 fields=$(awk '/^[<>]/ {print $2, $3}' "$o/diff.txt" | sort -u | tr '\n' ';')

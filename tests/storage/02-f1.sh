@@ -15,9 +15,9 @@ for crash in crash kill; do
         all="$all $seeds"
         for s in $seeds; do
             o=$RUNS/$n/run-$s
-            # The tree the failing incarnation started from: the last crash's post-crash tree.
-            k=$(jq '.crashes[-1].incarnation' "$o/result.json")
-            native_fjall fjall-harness-debug "$o/inc-$k/post-crash" "$o/native" >"$o/native.txt"
+            # The tree the failing boot started from: the last crash's post-crash tree.
+            k=$(jq '.crashes[-1].boot' "$o/result.json")
+            native_fjall fjall-harness-debug "$o/boot-$k/post-crash" "$o/native" >"$o/native.txt"
             rm -rf "${o:?}/native"
             grep -q '^INVARIANT open-after-crash' "$o/native.txt" && { found=$s; break; }
         done

@@ -35,7 +35,7 @@ want=$(awk 'BEGIN { for (i = 0; i < 255; i++) printf "%d", i % 10 }')
 [ "$(jq -r 'select(.label == "with-text") | .text' edge.jsonl)" = "some text" ] || die "a mark's text: $(grep with-text edge.jsonl)"
 [ "$(jq -r 'select(.label == "at-end!") | .ret' edge.jsonl)" = 0 ] || die "a payload at the end of a mapping"
 [ "$(jq -c 'select(.ret == -14) | has("label")' edge.jsonl | paste -sd,)" = "false,false" ] || die "EFAULT payloads: $(jq -c 'select(.ret != 0)' edge.jsonl)"
-grep -qx 'across -14' edge/inc-0/stdout && grep -qx 'end 0' edge/inc-0/stdout || die "edge answers: $(cat edge/inc-0/stdout)"
+grep -qx 'across -14' edge/boot-1/stdout && grep -qx 'end 0' edge/boot-1/stdout || die "edge answers: $(cat edge/boot-1/stdout)"
 
 # Threads and a child: identical under the host's variations; each label with its process.
 rc=0
@@ -47,7 +47,7 @@ case $pids in child=*,t1=*,t2=*) ;; *) die "marks and their processes: $pids" ;;
 
 # No SDK call, no label or text record (its paths are logged as string records too).
 "$PATINA" run --out nosdk -- "$PATINA_GUESTS/hello-static" >nosdk.txt 2>&1 || die "hello: $(tail -2 nosdk.txt)"
-"$PATINA" log dump nosdk/inc-0/boundary.log >nosdk.dump || die "log dump of nosdk"
+"$PATINA" log dump nosdk/boot-1/boundary.log >nosdk.dump || die "log dump of nosdk"
 awk '$2 == "str" && $5 == "path" {p++} END {exit !p}' nosdk.dump || die "no path record in nosdk: the dump's form changed"
 n=$(awk '$2 == "str" && ($5 == "label" || $5 == "text") {n++} END {print n + 0}' nosdk.dump)
 [ "$n" = 0 ] || die "label or text records in a run without SDK calls"

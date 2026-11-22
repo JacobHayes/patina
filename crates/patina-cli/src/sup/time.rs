@@ -40,7 +40,7 @@ impl Sched {
                 Event::SigTimer { pid } => self.due_timers.push((pid, id.0)),
                 Event::TimerFd { key } => self.fired_timers.push(key),
                 Event::Wire { key } => self.fired_wire.push(key),
-                Event::Node { key, .. } => self.fired_node.push(key),
+                Event::Machine { key, .. } => self.fired_machine.push(key),
             }
             n += 1;
         }
@@ -51,7 +51,9 @@ impl Sched {
     /// anyone. `setup`: faults may act (`Live::AfterSetup`).
     pub fn only_weak(&self, setup: bool) -> bool {
         self.events.values().all(|e| match e {
-            Event::Node { live, .. } => *live == Live::No || (*live == Live::AfterSetup && !setup),
+            Event::Machine { live, .. } => {
+                *live == Live::No || (*live == Live::AfterSetup && !setup)
+            }
             _ => false,
         })
     }
@@ -120,7 +122,7 @@ mod tests {
             .map(|e| match e {
                 Event::Timeout { slot } => *slot,
                 Event::SigTimer { .. } => usize::MAX,
-                Event::TimerFd { .. } | Event::Wire { .. } | Event::Node { .. } => {
+                Event::TimerFd { .. } | Event::Wire { .. } | Event::Machine { .. } => {
                     unreachable!()
                 }
             })
@@ -132,13 +134,13 @@ mod tests {
     }
 
     #[test]
-    fn only_some_node_events_keep_a_run_alive() {
+    fn only_some_machine_events_keep_a_run_alive() {
         let mut s = Sched::new(1, 8);
         s.add(0, 10, 2, 0);
         s.park(0, Wait::Sleep, None, MayPark::for_test(0));
         let start = s.schedule(
             100,
-            Event::Node {
+            Event::Machine {
                 key: 0,
                 live: Live::No,
             },
@@ -148,7 +150,7 @@ mod tests {
         // A kill: once faults may act.
         let kill = s.schedule(
             200,
-            Event::Node {
+            Event::Machine {
                 key: 2,
                 live: Live::AfterSetup,
             },
@@ -158,7 +160,7 @@ mod tests {
         // A restart or a partition's end, always.
         s.schedule(
             300,
-            Event::Node {
+            Event::Machine {
                 key: 3,
                 live: Live::Yes,
             },
@@ -166,7 +168,7 @@ mod tests {
         assert!(!s.only_weak(false));
         // The jump goes to the earliest event, the start too.
         assert_eq!(s.idle_jump(0, false), Some(100));
-        assert!(!s.events.contains_key(&start) && s.fired_node == vec![0]);
+        assert!(!s.events.contains_key(&start) && s.fired_machine == vec![0]);
     }
 
     #[test]

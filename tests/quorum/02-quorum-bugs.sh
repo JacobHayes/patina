@@ -1,4 +1,4 @@
-# 2. Quorum: the three-node store of 01-quorum with its other planted bugs, each found by a
+# 2. Quorum: the three-machine store of 01-quorum with its other planted bugs, each found by a
 # search of seeds, its first failing run replaying identically: acknowledging before a quorum
 # (`early`) and an isolated old primary that acknowledges on its own (`nofence`), both a split
 # brain.

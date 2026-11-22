@@ -33,8 +33,8 @@ c=json.load(open(sys.argv[1])).get("compute",{})
 print(" ".join(i["path"]+":"+",".join(i["kinds"])+":"+str(i["starts"]) for i in c.get("images",[])) or "-")' "$1/result.json"; }
 for s in 1 2 3 4; do
     d=$o/tree-$s
-    [ "$(field "$d/result.json" outcome)" = ok ] || die "a. mixed seed $s: $(res "$d") ($(tail -1 "$d/inc-0/stdout"))"
-    grep -q "^sha256 $want\$" "$d/inc-0/stdout" || die "a. mixed seed $s: the child's hash: $(grep sha256 "$d/inc-0/stdout")"
+    [ "$(field "$d/result.json" outcome)" = ok ] || die "a. mixed seed $s: $(res "$d") ($(tail -1 "$d/boot-1/stdout"))"
+    grep -q "^sha256 $want\$" "$d/boot-1/stdout" || die "a. mixed seed $s: the child's hash: $(grep sha256 "$d/boot-1/stdout")"
     [ "$(images "$d")" = "$M:edge,access:3" ] ||
         die "a. mixed seed $s: compute.images $(images "$d")"
     [ "$(field "$d/result.json" compute.switches)" -gt 0 ] || die "a. mixed seed $s: no compute switch"

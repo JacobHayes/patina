@@ -42,8 +42,8 @@ pub struct Process {
     pub ign: u64,
     /// Processes started and images executed (evidence).
     pub execs: u64,
-    /// The machine it belongs to (0: the driver's, or a run without nodes).
-    pub node: usize,
+    /// The machine it belongs to (0: main's, or a run without machines).
+    pub machine: usize,
 }
 
 #[derive(Default)]
@@ -74,9 +74,9 @@ const CLD_KILLED: u64 = 2;
 
 impl Sup {
     fn proc_new(&mut self, pid: i32, ppid: i32, pidfd: i32, exit_signal: u64, from: Option<i32>) {
-        let (autoreap, ign, node) = from
+        let (autoreap, ign, machine) = from
             .and_then(|p| self.procs.map.get(&p))
-            .map(|p| (p.autoreap, p.ign, p.node))
+            .map(|p| (p.autoreap, p.ign, p.machine))
             .unwrap_or((false, 0, 0));
         self.procs.map.insert(
             pid,
@@ -92,7 +92,7 @@ impl Sup {
                 pdeathsig: 0,
                 ign,
                 execs: 0,
-                node,
+                machine,
             },
         );
         self.procs.created += 1;
@@ -128,7 +128,7 @@ impl Sup {
                 let ppid = self.sched.entries[parent].pid;
                 let asid = self.sched.entries[parent].asid; // the same memory as the parent
                 self.sched.add(idx, tid, pid, asid);
-                self.slot_node(idx, self.node_of(parent));
+                self.slot_machine(idx, self.machine_of(parent));
                 let s = self.slot(idx);
                 s.tid.store(tid, Relaxed);
                 s.pid.store(pid, Relaxed);
@@ -141,32 +141,32 @@ impl Sup {
             }
             HELLO_IMAGE
                 if self.sched.entries[idx].state == State::Free
-                    || self.nodes.booting == Some(idx) =>
+                    || self.machines.booting == Some(idx) =>
             {
-                // The first guest, or a node's first process (`nodes::start_node`). A restart's
+                // The first guest, or a machine's first process (`machines::start_machine`). A restart's
                 // slot may be one an exited thread left (`SLOT_FREE` once its process reaped
                 // it, its entry still `exiting`): the kernel thread is gone, the entry is
                 // replaced.
-                let node = self.slot(idx).node.load(Relaxed) as usize;
-                if node != 0 && self.nodes.booting != Some(idx) {
+                let machine = self.slot(idx).machine.load(Relaxed) as usize;
+                if machine != 0 && self.machines.booting != Some(idx) {
                     self.finish(Verdict::new(
                         "infra",
-                        format!("Hello of node {node} in slot {idx}, which no boot reserved"),
+                        format!("Hello of machine {machine} in slot {idx}, which no boot reserved"),
                     ));
                 }
                 let asid = self.procs.new_asid();
                 self.sched.add(idx, tid, pid, asid);
-                self.slot_node(idx, node);
+                self.slot_machine(idx, machine);
                 self.slot(idx).state.store(SLOT_LIVE, SeqCst);
-                let fd = if node == 0 {
+                let fd = if machine == 0 {
                     self.procs.main = pid;
                     self.pidfd
                 } else {
                     self.open_pidfd(pid)
                 };
                 self.proc_new(pid, 1, fd, SIGCHLD_U, None);
-                self.procs.map.get_mut(&pid).unwrap().node = node;
-                self.nodes.started(node, pid);
+                self.procs.map.get_mut(&pid).unwrap().machine = machine;
+                self.machines.started(machine, pid);
                 self.signal_thread_new(idx, pid);
                 Next::Continue(0)
             }
@@ -208,7 +208,7 @@ impl Sup {
         let asid = self.procs.new_asid();
         self.sched.free(child);
         self.sched.add(child, tid, pid, asid);
-        self.slot_node(child, self.node_of(idx));
+        self.slot_machine(child, self.machine_of(idx));
         let s = self.slot(child);
         s.tid.store(tid, Relaxed);
         s.pid.store(pid, Relaxed);
@@ -216,7 +216,7 @@ impl Sup {
         let fd = self.open_pidfd(pid);
         self.proc_new(pid, ppid, fd, a[4], Some(ppid));
         self.shm.forked(ppid, pid);
-        for t in self.nodes.shm.values_mut() {
+        for t in self.machines.shm.values_mut() {
             t.forked(ppid, pid);
         }
         self.signal_thread_new(child, pid);
@@ -273,7 +273,7 @@ impl Sup {
         // The old image's shared memory attachments end.
         let now = self.now();
         self.shm.gone(pid, now);
-        for t in self.nodes.shm.values_mut() {
+        for t in self.machines.shm.values_mut() {
             t.gone(pid, now);
         }
         // Handled signals return to their default; ignored ones stay ignored.
@@ -349,12 +349,12 @@ impl Sup {
         !self.procs.vfork_pending.is_empty()
     }
 
-    /// A vfork child of node `k` has not said `Hello` yet.
+    /// A vfork child of machine `k` has not said `Hello` yet.
     pub fn vfork_on(&self, k: usize) -> bool {
         self.procs
             .vfork_pending
             .values()
-            .any(|parent| self.node_of(*parent) == k)
+            .any(|parent| self.machine_of(*parent) == k)
     }
 
     /// SIGCHLD's disposition changed: is auto-reaping on?
@@ -419,7 +419,7 @@ impl Sup {
         self.io.timers_exited(&mut self.sched, pid);
         let now = self.now();
         self.shm.gone(pid, now);
-        for t in self.nodes.shm.values_mut() {
+        for t in self.machines.shm.values_mut() {
             t.gone(pid, now);
         }
         // The process's descriptors are closed now.
@@ -446,7 +446,7 @@ impl Sup {
             [pid as u64, word as u64, vsig, ppid as u64, 0, 0],
             0,
         );
-        self.node_gone(pid, word);
+        self.machine_gone(pid, word);
         if pid == self.procs.main && !self.phases.continuing {
             return; // the caller ends the run
         }
@@ -525,17 +525,17 @@ impl Sup {
     /// its shared mappings hold is logged first, at this point of the run, as its runtime
     /// would at an exit (`maps`); a vfork child's are its parent's, which keeps them.
     pub fn kill_now(&mut self, pid: i32) {
-        let Some((fd, vfork_child, node)) = self
+        let Some((fd, vfork_child, machine)) = self
             .procs
             .map
             .get(&pid)
             .filter(|p| p.state == PState::Live)
-            .map(|p| (p.pidfd, p.vfork_parent.is_some(), p.node))
+            .map(|p| (p.pidfd, p.vfork_parent.is_some(), p.machine))
         else {
             return;
         };
-        if !vfork_child && !self.nodes.crashing {
-            if let Err(e) = self.flush_maps(&[(pid, node)], self.ctl.seq.load(Relaxed)) {
+        if !vfork_child && !self.machines.crashing {
+            if let Err(e) = self.flush_maps(&[(pid, machine)], self.ctl.seq.load(Relaxed)) {
                 self.finish(Self::maps_verdict(e));
             }
         }
@@ -565,7 +565,7 @@ impl Sup {
     /// The root of the run's last phase is gone: the run's verdict. After a final check it is
     /// the main command's (the check's own end is in `PhaseCtl`, judged by the launcher).
     pub fn main_exit(&mut self, status: i64, sig: i64) -> ! {
-        self.nodes_stop();
+        self.machines_stop();
         let (status, sig) = match self.phases.main_word {
             Some(w) if self.ctl.phases.phase.load(Relaxed) == PHASE_FINALLY => {
                 if w & 0x7f != 0 {
@@ -621,17 +621,17 @@ impl Sup {
 
     /// Target processes of a `kill` with a pid, a group, or -1, in pid order. None: no such
     /// process (`ESRCH`). PID 1 is never a target.
-    /// The processes `kill` reaches: those of the caller's node only (another node's pid is
-    /// not found, `kill(-1)` stays on the node).
+    /// The processes `kill` reaches: those of the caller's machine only (another machine's pid is
+    /// not found, `kill(-1)` stays on the machine).
     pub fn kill_targets(&self, mode: u64, id: i32, caller: i32) -> Option<Vec<(i32, PState)>> {
-        let node = self.procs.map.get(&caller).map_or(0, |p| p.node);
-        let mine = self.procs.map.iter().filter(|(_, p)| p.node == node);
+        let machine = self.procs.map.get(&caller).map_or(0, |p| p.machine);
+        let mine = self.procs.map.iter().filter(|(_, p)| p.machine == machine);
         let v: Vec<(i32, PState)> = match mode {
             SIGSEND_PROC => {
                 if id == 1 {
                     return Some(vec![]);
                 }
-                let p = self.procs.map.get(&id).filter(|p| p.node == node)?;
+                let p = self.procs.map.get(&id).filter(|p| p.machine == machine)?;
                 vec![(id, p.state)]
             }
             SIGSEND_PGRP => mine

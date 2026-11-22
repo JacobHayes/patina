@@ -4,17 +4,17 @@
 with the same arguments, on what had reached the disk: data never synced may be gone, renames and
 creations may be undone. `--faults kill` kills the processes and keeps everything they wrote, as
 when a program dies but the machine does not. The program must recover on start: read its state
-from `/work`, check it, carry on. `PATINA_INCARNATION=K` is set after the K-th restart.
+from `/work`, check it, carry on. `PATINA_BOOT=K` is set from the second boot on (boot K).
 
-The one crash-modelled disk is the work tree, `/work` (`--work DIR` fills it, `--work
+The one crash-modelled disk is main's disk, `/work` (`--disk DIR` fills it, `--disk
 DIR:/var/lib/app` puts it where the program expects its data). `/tmp` and other writable places
 start empty again after a restart.
 
 ## The check after a crash
 
 The oracle compares what the program promised before the crash with what it recovered. With the
-SDK, an `always` in recovery; without it, a check over `inc-K/stdout` (what incarnation K
-printed, its acknowledgements) and `inc-K/post-crash/` (the files the crash left, which the next
+SDK, an `always` in recovery; without it, a check over `boot-K/stdout` (what boot K
+printed, its acknowledgements) and `boot-K/post-crash/` (the files the crash left, which the next
 start recovers from). `examples/kvlog-c` appends records and prints `ack I` once record I is
 written, without an fsync; `examples/checks/acked-kept` compares the last acknowledgement with
 what the crash left, and does not judge a run without a crash:
@@ -108,13 +108,13 @@ What a restart finds:
 | the clock | 1 to 61 s later (`down-ms`) | the same |
 
 Process IDs repeat on purpose: a lock file naming a dead holder now names a live process. A run
-has at most 4 incarnations (`max-incarnations`), the last never crashed. The other fault
+has at most 4 boots (`max-boots`), the last never crashed. The other fault
 classes stay on after a restart, so recovery meets them too; `patina minimize` shows whether the
 crash alone fails the run.
 
 ## Reading a crash
 
 `patina explain RUNDIR` shows the writes, fsyncs and the crash in order, and at the crash which
-files had writes not followed by an fsync. `patina log ops RUNDIR/inc-0` lists every change to
-`/work`; `patina log tree --post-crash RUNDIR/inc-0 DIR` writes the tree the crash left. With
-several machines each node's disk crashes on its own (`patina guide nodes`).
+files had writes not followed by an fsync. `patina log ops RUNDIR/boot-1` lists every change to
+`/work`; `patina log tree --post-crash RUNDIR/boot-1 DIR` writes the tree the crash left. With
+several machines each machine's disk crashes on its own (`patina guide machines`).

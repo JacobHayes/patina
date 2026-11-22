@@ -66,32 +66,32 @@ pts "$o/mprotect" 1 "$F" mprotect &
 pts "$o/shlib" 1 "$G/compute/shlib-stock" &
 wait
 for m in fault timer fork jit; do
-    sort "$o/$m/inc-0/stdout" | cmp -s "$o/$m.want" - || die "b. $m: $(head -2 "$o/$m/inc-0/stdout") (natively $(head -1 "$o/$m.want"))"
+    sort "$o/$m/boot-1/stdout" | cmp -s "$o/$m.want" - || die "b. $m: $(head -2 "$o/$m/boot-1/stdout") (natively $(head -1 "$o/$m.want"))"
 done
 [ "$(field "$o/fork/result.json" rewrite.applied)" -gt "$(field "$o/fault/result.json" rewrite.applied)" ] ||
     die "b. fork: the exec'd child applied no plans of its own ($(field "$o/fork/result.json" rewrite))"
 [ "$(field "$o/jit/result.json" rewrite.unplanned)" -ge 1 ] || die "b. jit: the copied code was not counted unplanned"
-echo "b. fault, timer, fork, jit as natively ($(head -1 "$o/fault/inc-0/stdout"))"
+echo "b. fault, timer, fork, jit as natively ($(head -1 "$o/fault/boot-1/stdout"))"
 
 cols() { awk '{print $2, $3, $6}' "$1"; }
 cols "$o/maps.want" >"$o/maps.cols"
-sort "$o/maps/inc-0/stdout" >"$o/maps.got"
+sort "$o/maps/boot-1/stdout" >"$o/maps.got"
 cols "$o/maps.got" | cmp -s "$o/maps.cols" - || die "c. /proc/self/maps differs from native: $(cols "$o/maps.got" | diff "$o/maps.cols" - | head -4)"
 echo "c. /proc/self/maps: $(wc -l <"$o/maps.cols") lines as natively"
 
-got=$(cat "$o/checksum/inc-0/stdout")
+got=$(cat "$o/checksum/boot-1/stdout")
 want=$(cat "$o/checksum.want")
 [ -n "$got" ] && [ "$got" != "$want" ] || die "d. checksum: reads did not see the patch"
-cmp -s "$o/checksum/inc-0/stdout" "$o/checksum-2/inc-0/stdout" || die "d. checksum: seeds 1 and 2 differ"
-echo "d. checksum: $(cat "$o/checksum/inc-0/stdout") (natively $(cat "$o/checksum.want")) on both seeds"
+cmp -s "$o/checksum/boot-1/stdout" "$o/checksum-2/boot-1/stdout" || die "d. checksum: seeds 1 and 2 differ"
+echo "d. checksum: $(cat "$o/checksum/boot-1/stdout") (natively $(cat "$o/checksum.want")) on both seeds"
 
 [ $(($(field "$o/mprotect/result.json" rewrite.restored) + $(field "$o/mprotect/result.json" rewrite.dropped))) -ge 1 ] ||
     die "e. mprotect: no part of the plan put back"
-cmp -s "$o/mprotect/inc-0/stdout" "$o/checksum.want" || die "e. mprotect: $(cat "$o/mprotect/inc-0/stdout"), not the native sum"
+cmp -s "$o/mprotect/boot-1/stdout" "$o/checksum.want" || die "e. mprotect: $(cat "$o/mprotect/boot-1/stdout"), not the native sum"
 echo "e. mprotect: fid_spin's page put back, the native sum read"
 
 # f.
-tail -1 "$o/shlib/inc-0/stdout" | grep -q 'compdl=29992,29992 ok$' || die "f. shlib-stock printed $(tail -1 "$o/shlib/inc-0/stdout")"
+tail -1 "$o/shlib/boot-1/stdout" | grep -q 'compdl=29992,29992 ok$' || die "f. shlib-stock printed $(tail -1 "$o/shlib/boot-1/stdout")"
 st=$(python3 -I -c 'import json,sys
 i=json.load(open(sys.argv[1]))["rewrite"]["images"]
 print(" ".join(sorted(set(e["status"] for e in i))), any(e["path"].endswith("/libcompdl.so") for e in i))' "$o/shlib/result.json")

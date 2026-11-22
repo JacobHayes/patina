@@ -63,16 +63,16 @@ pub fn clone_process(
     Action::Return(r)
 }
 
-/// Is `pid` (as a call's argument) a process of another node? Pids are unique in the run; a
-/// process of another node is not found, as on another machine. The supervisor's process
-/// table answers (`Op::PidNode`), zombies included; without nodes there is no other node.
+/// Is `pid` (as a call's argument) a process of another machine? Pids are unique in the run; a
+/// process of another machine is not found, as on another machine. The supervisor's process
+/// table answers (`Op::PidMachine`), zombies included; without machines there is no other machine.
 pub fn foreign_pid(pid: u64) -> bool {
     let pid = pid as i32;
-    if pid <= 0 || !crate::state::with_nodes() {
+    if pid <= 0 || !crate::state::with_machines() {
         return false;
     }
-    let r = crate::sup::call_sup(Op::PidNode, [pid as u64, 0, 0, 0, 0, 0]).ret;
-    r >= 0 && r as usize != crate::state::node()
+    let r = crate::sup::call_sup(Op::PidMachine, [pid as u64, 0, 0, 0, 0, 0]).ret;
+    r >= 0 && r as usize != crate::state::machine()
 }
 
 fn reserve(slot: usize, vmask: u64) {
@@ -83,7 +83,7 @@ fn reserve(slot: usize, vmask: u64) {
     s.vmask.store(vmask, Relaxed);
     s.sigpend.store(0, Relaxed);
     s.sched.store(super::sched::inherited(), Relaxed);
-    s.node.store(crate::state::node() as u64, Relaxed);
+    s.machine.store(crate::state::machine() as u64, Relaxed);
     s.state.store(SLOT_RESERVED, SeqCst);
 }
 
@@ -448,7 +448,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             }
             r
         }
-        // Process groups and sessions: the kernel's, for the processes of the caller's node.
+        // Process groups and sessions: the kernel's, for the processes of the caller's machine.
         nr::SETPGID | nr::GETPGID | nr::GETSID if foreign_pid(call.arg(0)) => -e::ESRCH,
         nr::SETPGID | nr::GETPGRP | nr::SETSID | nr::GETPGID | nr::GETSID => raw(call),
         nr::FORK => return clone_process(call, SIGCHLD, 0, 0, 0, 0),

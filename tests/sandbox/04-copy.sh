@@ -19,8 +19,8 @@ for k in a b; do
 done
 ia=$(stat -c %i "$out/ga/hostcopy"); ib=$(stat -c %i "$out/gb/hostcopy")
 [ "$ia" != "$ib" ] || die "the two host copies share an inode"
-cmp -s "$out/run-a/inc-0/stdout" "$out/run-b/inc-0/stdout" || die "hostcopy: stat output depends on the host files"
+cmp -s "$out/run-a/boot-1/stdout" "$out/run-b/boot-1/stdout" || die "hostcopy: stat output depends on the host files"
 lhs=$(digest "$out/run-a"); rhs=$(digest "$out/run-b")
 [ "$lhs" = "$rhs" ] || die "hostcopy: digests differ"
-grep -q '^open /.patina/guest/hostcopy -1 errno 2$' "$out/run-a/inc-0/stdout" || die "hostcopy: the copy source is reachable"
+grep -q '^open /.patina/guest/hostcopy -1 errno 2$' "$out/run-a/boot-1/stdout" || die "hostcopy: the copy source is reachable"
 echo "hostcopy: two host copies (different inodes, times, paths): same stat of /guest, ld.so.cache, alternatives; same digest"

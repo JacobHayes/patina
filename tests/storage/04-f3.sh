@@ -16,7 +16,7 @@ for b in 1-100 101-200 201-300 301-400 401-500; do
         --fault crash-permille=2 -- /guest/fjall-harness-debug)
     all="$all $seeds"
     for s in $seeds; do
-        grep -q 'Worker #0 crashed' "$RUNS/f3/run-$s"/inc-*/stderr && { found=$s; break; }
+        grep -q 'Worker #0 crashed' "$RUNS/f3/run-$s"/boot-*/stderr && { found=$s; break; }
     done
     [ -z "$found" ] || break
 done

@@ -27,7 +27,7 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::GETRANDOM, Virt, C, "Bytes from draw(Entropy, seq); flags are ignored and the call never waits.").outs(&[out(0, Len::Ret { max: 1 })]),
     Row::new(G, nr::SYSINFO, Virt, C, "Constants: uptime is the virtual clock, 16 GiB total and 12 GiB free memory, no swap, one process, unit 1.").outs(&[out(0, Len::Fixed(112))]),
     Row::new(G, nr::GETRUSAGE, Virt, C, "User time is the thread's trap charges; every other field (system time, page faults, context switches, max RSS) is 0.").outs(&[out(1, Len::Fixed(144))]),
-    Row::new(G, nr::GET_MEMPOLICY, Virt, C, "The default policy with an empty node mask."),
+    Row::new(G, nr::GET_MEMPOLICY, Virt, C, "The default policy with an empty machine mask."),
     Row::new(G, nr::GETGROUPS, Virt, C, "The list is the namespace's primary group alone: the launcher's supplementary groups are inherited and cannot be dropped without a capability, and unmapped ones read as the overflow id, so their number would show.").outs(&[out(1, Len::RetTimes { max: 0, size: 4 })]),
     Row::new(G, nr::SETGROUPS, Pass, A, CREDS).refs(&[out(1, Len::ArgTimes { arg: 0, size: 4 })]),
     Row::new(G, nr::SETRESUID, Pass, A, CREDS),

@@ -1,6 +1,6 @@
 //! `patina ctl WORDS...`: a control call (`proto::sdk::OP_CONTROL`) from inside a run, for
-//! scripts. The words are the call's (`proto::node`, the grammar); the runtime parses them
-//! against the run's nodes and answers 0 or an errno, which is said here with its reason.
+//! scripts. The words are the call's (`proto::machine`, the grammar); the runtime parses them
+//! against the run's machines and answers 0 or an errno, which is said here with its reason.
 
 use proto::sdk::{OP_CONTROL, OP_HELLO, SYSCALL, TEXT_MAX};
 use std::process::ExitCode;
@@ -31,8 +31,8 @@ pub fn main(words: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let why = match (-r) as i32 {
-        libc::EPERM => "only the driver's node may act on the network, nodes and clocks",
-        libc::ENOENT => "no node of that name",
+        libc::EPERM => "only main may act on the network, machines and clocks",
+        libc::ENOENT => "no machine of that name",
         libc::EOPNOTSUPP => "not available yet",
         libc::EINVAL => "not a control call (patina ctl --help)",
         _ => "refused",

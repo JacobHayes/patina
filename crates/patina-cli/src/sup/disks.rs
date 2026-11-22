@@ -1,21 +1,21 @@
-//! Each node's work tree, its disk, as the supervisor reaches it: the driver's at its path in
-//! the supervisor's own view; another node's through the root of the node's first process
+//! Each machine's disk, its disk, as the supervisor reaches it: main's at its path in
+//! the supervisor's own view; another machine's through the root of the machine's first process
 //! (`/proc/PID/root` + its work path), opened when that process says `Hello` and held for the
-//! run (the descriptor keeps the node's tmpfs reachable after its processes are gone).
+//! run (the descriptor keeps the machine's tmpfs reachable after its processes are gone).
 //!
-//! Every node's records share one operation log, each tagged with its node
-//! (`proto::oplog::tag_kind`); the launcher splits it into one log per node. A node's base
+//! Every machine's records share one operation log, each tagged with its machine
+//! (`proto::oplog::tag_kind`); the launcher splits it into one log per machine. A machine's base
 //! records are written when its disk is first reached, before its first process runs.
 
-use proto::node::MAX_NODES;
+use proto::machine::MAX_MACHINES;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
 
 pub struct Disks {
-    /// The driver's work tree.
+    /// Main's disk.
     work: PathBuf,
-    /// Each other node's work tree (`O_PATH`) and its device, once reached.
+    /// Each other machine's disk (`O_PATH`) and its device, once reached.
     root: Vec<Option<(OwnedFd, u64)>>,
 }
 
@@ -23,12 +23,12 @@ impl Disks {
     pub fn new(work: PathBuf) -> Disks {
         Disks {
             work,
-            root: (0..MAX_NODES).map(|_| None).collect(),
+            root: (0..MAX_MACHINES).map(|_| None).collect(),
         }
     }
 
-    /// Reach node `node`'s work tree `work` through its process `pid`.
-    pub fn open(&mut self, node: usize, pid: i32, work: &[u8]) -> Result<(), String> {
+    /// Reach machine `machine`'s disk `work` through its process `pid`.
+    pub fn open(&mut self, machine: usize, pid: i32, work: &[u8]) -> Result<(), String> {
         use std::os::unix::ffi::OsStrExt;
         let mut p = format!("/proc/{pid}/root").into_bytes();
         p.extend_from_slice(work);
@@ -56,22 +56,22 @@ impl Disks {
                 std::io::Error::last_os_error()
             ));
         }
-        if let Some(r) = self.root.get_mut(node) {
+        if let Some(r) = self.root.get_mut(machine) {
             *r = Some((fd, st.st_dev));
         }
         Ok(())
     }
 
-    /// Node `node`'s disk is gone (its machine crashed): its next boot reaches a new one.
-    pub fn close(&mut self, node: usize) {
-        if let Some(r) = self.root.get_mut(node) {
+    /// Machine `machine`'s disk is gone (its machine crashed): its next boot reaches a new one.
+    pub fn close(&mut self, machine: usize) {
+        if let Some(r) = self.root.get_mut(machine) {
             *r = None;
         }
     }
 
-    /// The path of node `node`'s work tree, if it was reached.
-    pub fn path(&self, node: usize) -> Option<PathBuf> {
-        match node {
+    /// The path of machine `machine`'s disk, if it was reached.
+    pub fn path(&self, machine: usize) -> Option<PathBuf> {
+        match machine {
             0 => Some(self.work.clone()),
             // The directory itself, not the descriptor's link (which `lstat` would describe).
             k => self
@@ -82,9 +82,9 @@ impl Disks {
         }
     }
 
-    /// Node `node`'s work device.
-    pub fn dev(&self, node: usize) -> Result<u64, String> {
-        match node {
+    /// Machine `machine`'s work device.
+    pub fn dev(&self, machine: usize) -> Result<u64, String> {
+        match machine {
             0 => std::fs::metadata(&self.work)
                 .map(|m| m.dev())
                 .map_err(|e| format!("{}: {e}", self.work.display())),
@@ -93,11 +93,11 @@ impl Disks {
                 .get(k)
                 .and_then(|r| r.as_ref())
                 .map(|(_, d)| *d)
-                .ok_or_else(|| format!("node {k}: its work tree was not reached")),
+                .ok_or_else(|| format!("machine {k}: its disk was not reached")),
         }
     }
 
-    /// Every reached work device and its node (the driver's first, when it can be read).
+    /// Every reached work device and its machine (main's first, when it can be read).
     pub fn devs(&self) -> Vec<(u64, usize)> {
         let mut v: Vec<(u64, usize)> = self.dev(0).ok().map(|d| (d, 0)).into_iter().collect();
         for (k, r) in self.root.iter().enumerate() {
@@ -108,8 +108,10 @@ impl Disks {
         v
     }
 
-    /// The nodes whose work trees were reached besides the driver's, in order.
-    pub fn nodes(&self) -> Vec<usize> {
-        (1..MAX_NODES).filter(|&k| self.root[k].is_some()).collect()
+    /// The machines whose disks were reached besides main's, in order.
+    pub fn machines(&self) -> Vec<usize> {
+        (1..MAX_MACHINES)
+            .filter(|&k| self.root[k].is_some())
+            .collect()
     }
 }

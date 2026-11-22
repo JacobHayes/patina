@@ -57,7 +57,7 @@ into words as a shell would, without expansion; name a shell to get one (`--chec
 
 | | |
 |---|---|
-| `RUNDIR` | its last argument: `run.json`, `result.json`, `inc-K/stdout`, `inc-K/stderr`, `inc-K/post-crash/` |
+| `RUNDIR` | its last argument: `run.json`, `result.json`, `boot-K/stdout`, `boot-K/stderr`, `boot-K/post-crash/` |
 | `PATINA_SEED`, `PATINA_EXIT` | the seed; the program's exit status |
 | `PATINA_CASE`, `PATINA_CASE_ID` | with `--cases`: the case's line and its id |
 | `PATINA` | the `patina` running it, for `"$PATINA" log tree` and `"$PATINA" log events` |
@@ -77,9 +77,9 @@ then stays out of the signature). The checker must be a function of the run dire
 clock, no network, no reference that moves; a replay that judges differently ends `error`, stop
 `check-unstable`. Its output is in `RUNDIR/check.out`.
 
-What it can read: `inc-K/stdout` and `stderr` (incarnation K: one per start of the program);
-`inc-K/post-crash/`, the files a machine crash left; `patina log tree RUNDIR/inc-K DIR`, the
-work tree that start ended with; `patina log events RUNDIR`, everything the program did as JSON
+What it can read: `boot-K/stdout` and `stderr` (boot K: one per start of the program);
+`boot-K/post-crash/`, the files a machine crash left; `patina log tree RUNDIR/boot-K DIR`, the
+disk that start ended with; `patina log events RUNDIR`, everything the program did as JSON
 lines (`patina guide failures`).
 
 Here the reference is the faults-off run of seed 1, and `examples/checks/same-tree` compares

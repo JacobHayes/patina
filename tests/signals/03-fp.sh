@@ -7,6 +7,6 @@
 for seed in 1; do
     patina_run "$RUNS/03-fp/s$seed" "$seed" sig-fp
     check_ok "$RUNS/03-fp/s$seed" sig-fp
-    cat "$RUNS/03-fp/s$seed/inc-0/stdout"
+    cat "$RUNS/03-fp/s$seed/boot-1/stdout"
     deliveries "$RUNS/03-fp/s$seed"
 done

@@ -33,7 +33,7 @@ def run(name, seed, opts, args, mnt=MNT):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=900)
     with open(os.path.join(out, "result.json")) as f:
         r = json.load(f)
-    with open(os.path.join(out, "inc-0", "stdout")) as f:
+    with open(os.path.join(out, "boot-1", "stdout")) as f:
         r["stdout"] = f.read().strip()
     return out, r
 

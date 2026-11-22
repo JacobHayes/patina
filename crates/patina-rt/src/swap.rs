@@ -1,6 +1,6 @@
 //! Path swaps (`path-swap-permille`; `proto::swap`): before a call uses a
 //! path that the same process named in one of its last `WINDOW` checks, the runtime may
-//! change one component of the checked path in the work tree, as another process with the
+//! change one component of the checked path in the disk, as another process with the
 //! same uid could between the two calls: it becomes a symlink, another entry of its directory
 //! is renamed into its place, or it is renamed away. The swap may be put back right after
 //! the call returns (never after an `exec`, which does not return).
@@ -10,7 +10,7 @@
 //! draws do not move. The mutation is made by the runtime's own calls, in the guest process
 //! (so directory permissions and the sticky bit hold as for any process of that uid), through
 //! a descriptor of the component's directory opened without following any symlink and
-//! checked to be on the work tree: nothing outside it is changed, and a symlink to a path
+//! checked to be on the disk: nothing outside it is changed, and a symlink to a path
 //! outside is only a name. Each step is a name change recorded like the program's own
 //! (`sys::fs::mutate_as_guest`: virtual times, the operation log, a crash point), so replay,
 //! `patina log ops` and the crash model see it. The swap is an `Injected` record
@@ -214,7 +214,7 @@ fn decide(nr: u64, a0: u64, checked: &[u8], root: &[u8], chk: Seen) -> Option<Sw
 }
 
 /// The directory `p` (a normalised absolute path), opened without following a symlink on the
-/// way, if it is a directory of the work tree.
+/// way, if it is a directory of the disk.
 fn open_parent(p: &PathBuf) -> Option<i64> {
     let mut z = [0u8; PATH_MAX + 1];
     z[..p.n].copy_from_slice(p.as_bytes());

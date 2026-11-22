@@ -41,7 +41,7 @@ verify() {
     fi
     nd=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     nc=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" outcome; done | sort -u | wc -l)
-    ns=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
+    ns=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/boot-1/stdout"; done | sort -u | wc -l)
     [ "$nd" = 1 ] && [ "$nc" = 1 ] && [ "$ns" = 1 ] || {
         echo "verify $wl seed $seed: $nd digests, $nc classes, $ns stdout files over $runs runs"
         return 1
@@ -94,8 +94,8 @@ netf() {
         o=$RUNS/$name-$s
         run "$wl" "$o" "$s" "$@"
         c=$(field "$o/result.json" outcome)
-        k=$(grep -c -- "$pat" "$o/inc-0/stdout") || [ $? = 1 ]
-        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,blacked_out}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/inc-0/stdout" || [ $? = 1 ])"
+        k=$(grep -c -- "$pat" "$o/boot-1/stdout") || [ $? = 1 ]
+        echo "seed $s: class $c, wall $(field "$o/result.json" wall_ms) ms, faults $(field "$o/result.json" faults.injected), net $(jq -c '.counters.net | {connections,chunks,resets,blacked_out}' "$o/result.json"); $k lines match: $(grep -m1 -- "$pat" "$o/boot-1/stdout" || [ $? = 1 ])"
         [ "$c" = ok ] && [ "$k" -gt 0 ] && seen=$((seen + 1))
     done
     [ "$seen" -gt 0 ]

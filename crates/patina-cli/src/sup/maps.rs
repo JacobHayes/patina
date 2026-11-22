@@ -19,7 +19,7 @@
 //! Trust: the table is the target's memory, which a stray store of the program could change.
 //! It only chooses what is compared. Each entry's file is the target's own open file
 //! (`pidfd_getfd` of its descriptor: no reopen, so no permission check, no open of a device or
-//! a FIFO), and must be a regular file of the work tree with the entry's inode; what is read is
+//! a FIFO), and must be a regular file of the disk with the entry's inode; what is read is
 //! bounded by the file's size; the bytes logged are the file's, read
 //! through a description the program itself opened. A damaged table can add or omit records
 //! of the target's own work files, with their true contents, and nothing else.
@@ -103,13 +103,13 @@ impl<'a> Pass<'a> {
     /// Log what process `pid`'s tracked mappings hold that the log does not. A process that
     /// is gone, or never started an image, has nothing to log; a table that cannot be read
     /// otherwise (the host refuses `process_vm_readv`) is an error, as is a failed write to
-    /// the log. `node` is the process's node, whose work tree its records are about.
-    pub fn process(&mut self, pid: i32, node: usize) -> Result<(), String> {
+    /// the log. `machine` is the process's machine, whose disk its records are about.
+    pub fn process(&mut self, pid: i32, machine: usize) -> Result<(), String> {
         let addr = self.ctl.maps_table.load(Relaxed);
         if addr < RT_BASE || addr.saturating_add(SHARED_MAPS_SIZE as u64) > RT_REGION_END {
             return Ok(());
         }
-        let work_dev = self.disks.dev(node)?;
+        let work_dev = self.disks.dev(machine)?;
         let mut t: SharedMaps = unsafe { std::mem::zeroed() };
         let bytes = unsafe {
             std::slice::from_raw_parts_mut(&mut t as *mut SharedMaps as *mut u8, SHARED_MAPS_SIZE)
@@ -133,7 +133,7 @@ impl<'a> Pass<'a> {
         };
         let r = t.m[..n]
             .iter()
-            .try_for_each(|m| self.mapping(pid, node, pidfd, work_dev, m));
+            .try_for_each(|m| self.mapping(pid, machine, pidfd, work_dev, m));
         unsafe { libc::close(pidfd) };
         r
     }
@@ -141,7 +141,7 @@ impl<'a> Pass<'a> {
     fn mapping(
         &mut self,
         pid: i32,
-        node: usize,
+        machine: usize,
         pidfd: i32,
         work_dev: u64,
         m: &SharedMap,
@@ -163,7 +163,7 @@ impl<'a> Pass<'a> {
             };
         }
         let fd = fd as i32;
-        let r = self.file(pid, node, fd, work_dev, m);
+        let r = self.file(pid, machine, fd, work_dev, m);
         unsafe { libc::close(fd) };
         r
     }
@@ -171,7 +171,7 @@ impl<'a> Pass<'a> {
     fn file(
         &mut self,
         pid: i32,
-        node: usize,
+        machine: usize,
         fd: i32,
         work_dev: u64,
         m: &SharedMap,
@@ -186,7 +186,8 @@ impl<'a> Pass<'a> {
         }
         // A tracked mapping's inode has a slot (slots are freed only when nothing maps the
         // inode); only a damaged entry has none.
-        let Some(k) = super::shadows::slot_of(self.ctl, proto::oplog::node_key(m.ino, node)) else {
+        let Some(k) = super::shadows::slot_of(self.ctl, proto::oplog::machine_key(m.ino, machine))
+        else {
             return Ok(());
         };
         let end = m.off.saturating_add(m.len).min(st.st_size as u64);
@@ -223,32 +224,32 @@ impl<'a> Pass<'a> {
                                 b.extend_from_slice(&f[r])
                             }
                             _ => {
-                                self.emit(pid, node, m.ino, run.take())?;
+                                self.emit(pid, machine, m.ino, run.take())?;
                                 run = Some((at, f[r].to_vec()));
                             }
                         }
                     } else {
-                        self.emit(pid, node, m.ino, run.take())?;
+                        self.emit(pid, machine, m.ino, run.take())?;
                     }
                     q += k as u64;
                 }
                 p += n;
             }
         }
-        self.emit(pid, node, m.ino, run.take())
+        self.emit(pid, machine, m.ino, run.take())
     }
 
     fn emit(
         &self,
         pid: i32,
-        node: usize,
+        machine: usize,
         ino: u64,
         run: Option<(u64, Vec<u8>)>,
     ) -> Result<(), String> {
         let Some((off, b)) = run else { return Ok(()) };
         super::crash::append(
             self.ctl,
-            node,
+            machine,
             OpKind::MmapDirty,
             ino,
             [off, b.len() as u64, 0, 0, 0, 0],

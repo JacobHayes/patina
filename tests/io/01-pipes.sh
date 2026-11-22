@@ -13,7 +13,7 @@ D fifo order 1: msg0;msg1;msg2;
 pipes ok'
 for seed in 1; do
     verify_ok "$o/v$seed" "$seed" 4 -- /guest/pipes
-    [ "$(cat "$o/v$seed/run-0/inc-0/stdout")" = "$want" ] || die "seed $seed: unexpected output"
+    [ "$(cat "$o/v$seed/run-0/boot-1/stdout")" = "$want" ] || die "seed $seed: unexpected output"
 done
 for seed in $(seq 1 8); do run_ok "$o/s$seed" "$seed" -- /guest/pipes; done
 n=$(for seed in $(seq 1 8); do field "$o/s$seed/result.json" digest; done | sort -u | wc -l)

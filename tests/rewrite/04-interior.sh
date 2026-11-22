@@ -90,12 +90,12 @@ for g in $GS; do
     for s in 1 2; do
         r=$q/v$s/run-0
         grep -q '^identical' "$q/v$s.txt" || die "c. $g seed $s: $(grep -m1 -v '^run ' "$q/v$s.txt")"
-        cmp -s "$q/want" "$r/inc-0/stdout" || die "c. $g seed $s: output differs from the native run"
+        cmp -s "$q/want" "$r/boot-1/stdout" || die "c. $g seed $s: output differs from the native run"
         [ "$(field "$r/result.json" rewrite.points)" -ge 1 ] || die "c. $g seed $s: no point taken ($(field "$r/result.json" rewrite))"
         [ "$arch" != x86_64 ] || [ "$(field "$r/result.json" rewrite.interior)" = $((2 * n)) ] ||
             die "c. $g seed $s: $(field "$r/result.json" rewrite.interior) interior entries resumed, the guest made $((2 * n))"
     done
-    cmp -s "$q/want-remap" "$q/remap/inc-0/stdout" ||
+    cmp -s "$q/want-remap" "$q/remap/boot-1/stdout" ||
         die "d. $g after mapping over the trampolines: $(field "$q/remap/result.json" outcome): $(field "$q/remap/result.json" message)"
     [ "$(field "$q/remap/result.json" rewrite.dropped)" -ge 1 ] || die "d. $g: the plan was not dropped ($(field "$q/remap/result.json" rewrite))"
 done

@@ -60,7 +60,7 @@ for ph in $phases; do
         st=0; "${BASE:?the patina to compare with}" run --seed 1 --out base "${opts[@]}" -- /guest/"$name".sh >base.txt 2>&1 || st=$?
         log "base seed 1: $(res base)"
         refused base
-        rm -f base/inc-*/boundary.log ;;
+        rm -f base/boot-*/boundary.log ;;
     same)
         for i in 1 2 3; do
             st=0; "$PATINA" run --seed 1 --out same-$i "${opts[@]}" -- /guest/"$name".sh >same-$i.txt 2>&1 || st=$?
@@ -70,9 +70,9 @@ for ph in $phases; do
         n=$(for i in 1 2 3; do jq -r .digest same-$i/result.json; done | sort -u | wc -l)
         log "same-seed digests distinct: $n"
         if [ -f native.out ]; then
-            if cmp -s native.out same-1/inc-0/stdout; then log "stdout vs native: same"; else log "stdout vs native: differs"; fi
+            if cmp -s native.out same-1/boot-1/stdout; then log "stdout vs native: same"; else log "stdout vs native: differs"; fi
         fi
-        rm -f same-2/inc-*/boundary.log same-3/inc-*/boundary.log ;;
+        rm -f same-2/boot-*/boundary.log same-3/boot-*/boundary.log ;;
     sweep)
         st=0; "$PATINA" sweep --seeds 1..$seeds -j 6 --keep fail --out sweep "${opts[@]}" -- /guest/"$name".sh >sweep.txt 2>&1 || st=$?
         n=$(cat sweep/seed-*/result.json | jq -r .digest | sort -u | wc -l)
@@ -80,7 +80,7 @@ for ph in $phases; do
     verify)
         st=0; "$PATINA" verify --seed 1 --runs 3 --vary cpu,load,aslr --out verify "${opts[@]}" -- /guest/"$name".sh >verify.txt 2>&1 || st=$?
         log "verify (exit $st): $(grep -E '^(identical|differ|nondeterministic)' verify.txt | awk 'NR <= 3' | tr '\n' ';')"
-        rm -f verify/run-*/inc-*/boundary.log ;;
+        rm -f verify/run-*/boot-*/boundary.log ;;
     disk | net)
         st=0; "$PATINA" sweep --seeds 1..$fseeds -j 6 --keep fail --faults "$ph" --out "f$ph" "${opts[@]}" -- /guest/"$name".sh >"f$ph.txt" 2>&1 || st=$?
         log "faults $ph 1..$fseeds (exit $st): $(grep -m1 '^outcomes:' "f$ph.txt" || [ $? = 1 ])"

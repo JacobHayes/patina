@@ -67,5 +67,5 @@ printf '%s\n' "--env V=1 -- /bin/sh -c 'echo \$V' a" "--env V=2 -- /bin/sh -c 'e
 : >cs/seed-1/1-a/kept && : >cs/seed-1/2-b/kept
 sed -i 's/V=2/V=3/' cases.txt
 "$PATINA" sweep --seeds 1 --keep all --cases cases.txt --out cs >cs2.txt 2>&1 || die "case sweep again: $(tail -3 cs2.txt)"
-[ -f cs/seed-1/1-a/kept ] && [ ! -f cs/seed-1/2-b/kept ] && [ "$(cat cs/seed-1/2-b/inc-0/stdout)" = 3 ] || die "resuming with one case line changed: $(ls cs/seed-1/*)"
+[ -f cs/seed-1/1-a/kept ] && [ ! -f cs/seed-1/2-b/kept ] && [ "$(cat cs/seed-1/2-b/boot-1/stdout)" = 3 ] || die "resuming with one case line changed: $(ls cs/seed-1/*)"
 echo "ok: servers restarted ($(wc -l <chk/twice.starts) starts for 8 runs), double and early answers are errors, replays identical and check-unstable, an interrupted sweep passes nothing and leaves nothing, a changed case line runs again"

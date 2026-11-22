@@ -5,9 +5,9 @@
 # For `patina run --check`.
 set -eu
 file=$1 prefix=$2 run=$3
-bad=$({ "${PATINA:-patina}" log events "$run" --types inc,op,mark || echo '"patina log events failed"'; } | jq -rn --arg f "$file" --arg p "$prefix" '
+bad=$({ "${PATINA:-patina}" log events "$run" --types boot,op,mark || echo '"patina log events failed"'; } | jq -rn --arg f "$file" --arg p "$prefix" '
   first(foreach (inputs | if type == "string" then error(.) else . end) as $e ({dirty: false};
-      if $e.type == "inc" then .dirty = false
+      if $e.type == "boot" then .dirty = false
       elif $e.type == "op" and $e.path == $f and ($e.op | IN("write", "truncate", "fallocate", "mmap-dirty")) then .dirty = true
       elif $e.type == "op" and (($e.path == $f and $e.op == "fsync" and ($e.flags / 2 | floor) % 2 == 0) or $e.op == "sync") then .dirty = false
       elif $e.type == "mark" and (($e.label // "") | startswith($p)) then .bad = (if .dirty then $e else null end)

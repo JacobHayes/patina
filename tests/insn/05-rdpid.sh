@@ -9,7 +9,7 @@ n=$(nproc)
 for c in 0 $((n - 1)); do
     rm -rf "${o:?}/cpu-$c"
     timeout 120 taskset -c "$c" "$PATINA" run --seed 1 --out "$o/cpu-$c" --mount "$PATINA_GUESTS":/guest:copy -- /guest/insn-cpuid rdpid >/dev/null
-    echo "cpu $c: $(cat "$o/cpu-$c/inc-0/stdout"), rdpid_sites $(field "$o/cpu-$c/result.json" counters.insn.scan.rdpid_sites)"
+    echo "cpu $c: $(cat "$o/cpu-$c/boot-1/stdout"), rdpid_sites $(field "$o/cpu-$c/result.json" counters.insn.scan.rdpid_sites)"
     [ "$(field "$o/cpu-$c/result.json" counters.insn.scan.rdpid_sites)" -ge 1 ] || die "the guest's own rdpid was not seen by the scanner"
 done
 G=$PATINA_GUESTS

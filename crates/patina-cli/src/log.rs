@@ -1,10 +1,10 @@
 //! `patina log dump|diff|ops|tree|events`: read a boundary log, compare two, list file
-//! operations, write out an incarnation's final work tree, export a run as JSON lines
+//! operations, write out a boot's final disk, export a run as JSON lines
 //! (`crate::events`); and
 //! the record-by-record comparison of two run directories that replay and verify use.
 
 use crate::cli::{Args, Res};
-use crate::durability::check::incarnations;
+use crate::durability::check::boots;
 use proto::ctl::Op;
 use proto::rec::{
     Rec, REC_SIZE, STR_ARGV, STR_ARGV_CUT, STR_BYTES, STR_CUT, STR_LABEL, STR_MORE, STR_PATH,
@@ -58,10 +58,10 @@ pub struct Cut {
     pub tail_from: u64,
 }
 
-/// Cut the boundary log of the incarnation `inc` to its first and last `keep` bytes.
-pub fn cut(inc: &Path, keep: u64) -> Res<()> {
+/// Cut the boundary log of the boot `bdir` to its first and last `keep` bytes.
+pub fn cut(bdir: &Path, keep: u64) -> Res<()> {
     use std::io::{Read, Seek, SeekFrom};
-    let log = inc.join("boundary.log");
+    let log = bdir.join("boundary.log");
     let err = |e: std::io::Error| format!("{}: {e}", log.display());
     let len = std::fs::metadata(&log).map_err(err)?.len();
     let n = len / REC_SIZE as u64;
@@ -83,24 +83,24 @@ pub fn cut(inc: &Path, keep: u64) -> Res<()> {
         .map_err(err)?;
     let mut tail = vec![];
     f.read_to_end(&mut tail).map_err(err)?;
-    std::fs::write(inc.join("boundary.tail"), &tail).map_err(err)?;
+    std::fs::write(bdir.join("boundary.tail"), &tail).map_err(err)?;
     f.set_len(c.head * REC_SIZE as u64).map_err(err)?;
     // Last: a log is read as cut only once it is.
     crate::result::write_json(
-        &inc.join("boundary.cut"),
+        &bdir.join("boundary.cut"),
         &serde_json::to_value(&c).unwrap(),
     )
 }
 
 /// The observations of `patina explain`'s replay (`RecKind::Observe`), moved out of the
-/// incarnation's `boundary.log` into `observe.log`: what stays is the log the run would have
+/// boot's `boundary.log` into `observe.log`: what stays is the log the run would have
 /// written without them, record for record, which the replay comparison then checks.
-pub fn take_observations(inc: &Path) -> Res<()> {
+pub fn take_observations(bdir: &Path) -> Res<()> {
     use std::io::{BufReader, BufWriter, Read, Write};
-    let log = inc.join("boundary.log");
+    let log = bdir.join("boundary.log");
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    let kept = inc.join("boundary.log.kept");
-    let obs = inc.join(OBSERVE_LOG);
+    let kept = bdir.join("boundary.log.kept");
+    let obs = bdir.join(OBSERVE_LOG);
     let r = BufReader::with_capacity(
         1 << 20,
         std::fs::File::open(&log).map_err(|e| err(&log, e))?,
@@ -132,7 +132,7 @@ pub fn take_observations(inc: &Path) -> Res<()> {
     std::fs::rename(&kept, &log).map_err(|e| err(&log, e))
 }
 
-/// An incarnation's observations (`take_observations`).
+/// A boot's observations (`take_observations`).
 pub const OBSERVE_LOG: &str = "observe.log";
 
 /// The name of an emulated instruction (an `InsnEmulation` record's `nr`).
@@ -163,22 +163,22 @@ pub fn describe(r: &Rec) -> String {
     let what = match kind {
         Some(RecKind::Trap) => format!("{} [{}]", name(r.nr as u64), Class::code_name(r.class)),
         Some(RecKind::SupDecision) => match r.nr {
-            proto::ctl::DEC_NODE_START => "node start".to_string(),
-            proto::ctl::DEC_NODE_STOP => "node stop".to_string(),
-            proto::ctl::DEC_NODE_SLOT => "node slot".to_string(),
-            proto::ctl::DEC_NODE_DOWN => {
-                format!("node down {}", proto::node::down_name(r.args[2]))
+            proto::ctl::DEC_MACHINE_START => "machine start".to_string(),
+            proto::ctl::DEC_MACHINE_STOP => "machine stop".to_string(),
+            proto::ctl::DEC_MACHINE_SLOT => "machine slot".to_string(),
+            proto::ctl::DEC_MACHINE_DOWN => {
+                format!("machine down {}", proto::machine::down_name(r.args[2]))
             }
-            proto::ctl::DEC_NODE_PAUSE => format!("node pause {}", r.args[0]),
-            proto::ctl::DEC_NODE_RESUME => format!(
-                "node resume {} {}",
+            proto::ctl::DEC_MACHINE_PAUSE => format!("machine pause {}", r.args[0]),
+            proto::ctl::DEC_MACHINE_RESUME => format!(
+                "machine resume {} {}",
                 r.args[0],
-                proto::node::pause_end_name(r.args[2])
+                proto::machine::pause_end_name(r.args[2])
             ),
-            proto::ctl::DEC_NODE_CLOCK => format!(
-                "node clock {} {} {} ns, offset {} ns",
+            proto::ctl::DEC_MACHINE_CLOCK => format!(
+                "machine clock {} {} {} ns, offset {} ns",
                 r.args[0],
-                if r.args[2] == proto::node::CLK_SKEW {
+                if r.args[2] == proto::machine::CLK_SKEW {
                     "skew"
                 } else {
                     "step"
@@ -192,7 +192,7 @@ pub fn describe(r: &Rec) -> String {
             proto::ctl::DEC_NET_PART => format!(
                 "partition {} {}",
                 r.args[0],
-                proto::node::shape_name(r.args[1])
+                proto::machine::shape_name(r.args[1])
             ),
             proto::ctl::DEC_NET_PART_END => format!("partition {} end", r.args[0]),
             proto::ctl::DEC_PHASE => format!(
@@ -329,44 +329,44 @@ impl Str {
     }
 }
 
-/// With nodes, which node each record's thread belongs to: the run's node names (from
-/// `run.json` beside the log's incarnation) and each slot's node, as the log's `DEC_NODE_SLOT`
+/// With machines, which machine each record's thread belongs to: the run's machine names (from
+/// `run.json` beside the log's boot) and each slot's machine, as the log's `DEC_MACHINE_SLOT`
 /// records say it.
-pub struct Nodes {
+pub struct Machines {
     names: Vec<String>,
     slot: std::collections::HashMap<u16, usize>,
 }
 
-impl Nodes {
-    /// `None` for a run without nodes (or a log outside a run directory).
-    pub fn of_log(log: &Path) -> Option<Nodes> {
+impl Machines {
+    /// `None` for a run without machines (or a log outside a run directory).
+    pub fn of_log(log: &Path) -> Option<Machines> {
         let run = log.parent()?.parent()?;
         let cfg = crate::result::read_json(&run.join("run.json")).ok()?;
-        let ns = cfg["config"]["nodes"].as_array()?;
-        let names = std::iter::once("driver".to_string())
+        let ns = cfg["config"]["machines"].as_array()?;
+        let names = std::iter::once("main".to_string())
             .chain(
                 ns.iter()
                     .filter_map(|n| n["name"].as_str().map(str::to_string)),
             )
             .collect();
-        Some(Nodes {
+        Some(Machines {
             names,
             slot: Default::default(),
         })
     }
 
-    /// The next record in log order: ` node=NAME`.
+    /// The next record in log order: ` machine=NAME`.
     pub fn see(&mut self, r: &Rec) -> String {
-        if r.kind == RecKind::SupDecision as u8 && r.nr == proto::ctl::DEC_NODE_SLOT {
+        if r.kind == RecKind::SupDecision as u8 && r.nr == proto::ctl::DEC_MACHINE_SLOT {
             self.slot.insert(r.args[0] as u16, r.args[1] as usize);
         }
         let k = self.slot.get(&r.slot).copied().unwrap_or(0);
-        format!(" node={}", self.names.get(k).map_or("?", |s| s.as_str()))
+        format!(" machine={}", self.names.get(k).map_or("?", |s| s.as_str()))
     }
 
-    /// ` node=NAME` of record `i` of `recs`.
+    /// ` machine=NAME` of record `i` of `recs`.
     fn at(log: &Path, recs: &[Rec], i: usize) -> String {
-        let Some(mut n) = Nodes::of_log(log) else {
+        let Some(mut n) = Machines::of_log(log) else {
             return String::new();
         };
         let mut s = String::new();
@@ -399,7 +399,7 @@ pub fn print_difference(pa: &str, pb: &str) -> Res<bool> {
                 b.len()
             );
             let show = |r: Option<Rec>, p: &str, recs: &[Rec]| {
-                r.map(|r| describe(&r) + &Nodes::at(Path::new(p), recs, i))
+                r.map(|r| describe(&r) + &Machines::at(Path::new(p), recs, i))
                     .unwrap_or_else(|| "(end of log)".into())
             };
             println!("  A: {}", show(x, pa, &a));
@@ -409,14 +409,14 @@ pub fn print_difference(pa: &str, pb: &str) -> Res<bool> {
     }
 }
 
-/// The first difference between the boundary logs of two run directories, incarnation by
-/// incarnation, decoded; `None` when every log is equal.
+/// The first difference between the boundary logs of two run directories, boot by
+/// boot, decoded; `None` when every log is equal.
 pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
-    let (ia, ib) = (incarnations(a), incarnations(b));
+    let (ia, ib) = (boots(a), boots(b));
     for k in 0..ia.len().max(ib.len()) {
         let (Some(da), Some(db)) = (ia.get(k), ib.get(k)) else {
             return Ok(Some(format!(
-                "incarnation counts differ: {} and {}",
+                "boot counts differ: {} and {}",
                 ia.len(),
                 ib.len()
             )));
@@ -435,7 +435,8 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
             let len = std::fs::metadata(pb).map(|m| m.len()).unwrap_or(0) / REC_SIZE as u64;
             if len != c.records {
                 return Ok(Some(format!(
-                    "inc-{k}: the recorded log has {} records, the replayed {len}",
+                    "boot-{}: the recorded log has {} records, the replayed {len}",
+                    k + 1,
                     c.records
                 )));
             }
@@ -450,7 +451,8 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
             for (x, y, at) in parts {
                 if let Some((i, ra, rb)) = first_difference(&x, &y) {
                     return Ok(Some(format!(
-                        "inc-{k} record {}: recorded {}; replayed {}",
+                        "boot-{} record {}: recorded {}; replayed {}",
+                        k + 1,
                         at + i,
                         show(ra),
                         show(rb)
@@ -462,11 +464,12 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
         let (x, y) = (load(&pa)?, load(&pb)?);
         if let Some((i, ra, rb)) = first_difference(&x, &y) {
             let at = |p: &str, recs: &[Rec], r: Option<Rec>| match r {
-                Some(_) => Nodes::at(Path::new(p), recs, i),
+                Some(_) => Machines::at(Path::new(p), recs, i),
                 None => String::new(),
             };
             return Ok(Some(format!(
-                "inc-{k} record {i}: recorded {}{}; replayed {}{}",
+                "boot-{} record {i}: recorded {}{}; replayed {}{}",
+                k + 1,
                 show(ra),
                 at(&pa, &x, ra),
                 show(rb),
@@ -477,28 +480,28 @@ pub fn first_run_difference(a: &Path, b: &Path) -> Res<Option<String>> {
     Ok(None)
 }
 
-/// `log tree INCDIR DIR [--post-crash]`: write the work tree the incarnation ended with
-/// (`INCDIR/live.tree`, or the `live.tree.zst` a sweep keeps), or with `--post-crash` the
+/// `log tree BOOTDIR DIR [--post-crash]`: write the disk the boot ended with
+/// (`BOOTDIR/live.tree`, or the `live.tree.zst` a sweep keeps), or with `--post-crash` the
 /// tree its crash left (`post-crash/`, or `post-crash.tree.zst`), into `DIR`, which must not
 /// exist or be empty: names, kinds, modes, contents, symlinks, hard links and user xattrs, as
 /// `Tree::write_dir` does.
-fn tree(inc: &Path, dir: &Path, post: bool) -> Res<()> {
+fn tree(bdir: &Path, dir: &Path, post: bool) -> Res<()> {
     use crate::durability::kept;
     let t = if post {
-        kept::post_crash(inc)?.ok_or_else(|| {
+        kept::post_crash(bdir)?.ok_or_else(|| {
             format!(
-                "{}: no tree a crash left: the incarnation did not end in a crash, or its run's logs were pruned (a sweep prunes the logs of ok runs unless given --keep all)",
-                inc.display()
+                "{}: no tree a crash left: the boot did not end in a crash, or its run's logs were pruned (a sweep prunes the logs of ok runs unless given --keep all)",
+                bdir.display()
             )
         })?
     } else {
-        if !kept::has_live(inc) {
+        if !kept::has_live(bdir) {
             return Err(format!(
-                "{}: no such file: an incarnation's final tree is kept only with its run's logs; a sweep prunes the logs of ok runs unless given --keep all",
-                inc.join(kept::LIVE).display()
+                "{}: no such file: a boot's final tree is kept only with its run's logs; a sweep prunes the logs of ok runs unless given --keep all",
+                bdir.join(kept::LIVE).display()
             ));
         }
-        kept::live(inc)?
+        kept::live(bdir)?
     };
     let err = |e: std::io::Error| format!("{}: {e}", dir.display());
     match std::fs::read_dir(dir) {
@@ -525,11 +528,11 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             let path = arg(1, "log dump LOG [--from SEQ] [--to SEQ]")?;
             let from = args.num::<u64>("--from")?.unwrap_or(0);
             let to = args.num::<u64>("--to")?.unwrap_or(u64::MAX);
-            let mut nodes = Nodes::of_log(Path::new(path));
+            let mut machines = Machines::of_log(Path::new(path));
             for r in load(path)?.iter() {
-                let node = nodes.as_mut().map(|n| n.see(r)).unwrap_or_default();
+                let machine = machines.as_mut().map(|n| n.see(r)).unwrap_or_default();
                 if r.seq >= from && r.seq <= to {
-                    println!("{}{node}", describe(r));
+                    println!("{}{machine}", describe(r));
                 }
             }
             Ok(ExitCode::SUCCESS)
@@ -543,7 +546,7 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             })
         }
         Some("ops") => {
-            let dir = Path::new(arg(1, "log ops INCDIR | log ops --check RUNDIR")?);
+            let dir = Path::new(arg(1, "log ops BOOTDIR | log ops --check RUNDIR")?);
             if args.has("--check") {
                 crate::durability::check::check(dir)?;
             } else {
@@ -552,7 +555,7 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Some("tree") => {
-            let usage = "log tree INCDIR DIR [--post-crash]";
+            let usage = "log tree BOOTDIR DIR [--post-crash]";
             tree(
                 Path::new(arg(1, usage)?),
                 Path::new(arg(2, usage)?),
@@ -574,7 +577,7 @@ pub fn main(args: &Args) -> Res<ExitCode> {
             }
         }
         _ => Err(
-            "log dump LOG | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR [--post-crash] | log events RUNDIR"
+            "log dump LOG | log diff LOG LOG | log ops BOOTDIR | log ops --check RUNDIR | log tree BOOTDIR DIR [--post-crash] | log events RUNDIR"
                 .into(),
         ),
     }

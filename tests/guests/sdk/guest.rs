@@ -1,5 +1,5 @@
 //! The SDK test guest in Rust: the script of guest.c (modes script [two], fail, unreach, coin,
-//! loop, marks), and the control call (control [node]).
+//! loop, marks), and the control call (control [machine]).
 use std::io::Read;
 
 fn script(two: bool, argc: usize) {
@@ -57,14 +57,14 @@ fn main() {
             std::fs::write("marked", "x").unwrap();
             patina_dst::mark("ack 2");
         }
-        // A run with nodes: the control call from the driver (`control`) and from a node
-        // (`control node`), each answer as `WORDS: ok` or `WORDS: errno N`.
+        // A run with machines: the control call from main (`control`) and from another machine
+        // (`control machine`), each answer as `WORDS: ok` or `WORDS: errno N`.
         "control" => {
-            let node = args.get(2).is_some_and(|a| a == "node");
-            let words: &[&str] = if node {
+            let machine = args.get(2).is_some_and(|a| a == "machine");
+            let words: &[&str] = if machine {
                 &["heal"]
             } else {
-                &["partition driver c", "heal", "partition driver nobody"]
+                &["partition main c", "heal", "partition main nobody"]
             };
             for w in words {
                 match patina_dst::control(w) {
@@ -72,7 +72,7 @@ fn main() {
                     Err(e) => println!("{w}: errno {e}"),
                 }
             }
-            std::thread::sleep(std::time::Duration::from_secs(1)); // virtual: the node runs
+            std::thread::sleep(std::time::Duration::from_secs(1)); // virtual: the other machine runs
         }
         m => {
             eprintln!("unknown mode {m}");

@@ -4,11 +4,11 @@
 //! its path at that moment. The stable export a checker reads; its fields are documented in
 //! `patina guide failures` and only ever added to.
 //!
-//! Streaming: both logs are read record by record; what is kept is the namespace of the work
-//! tree (one entry per live name), never the log.
+//! Streaming: both logs are read record by record; what is kept is the namespace of the disk
+//! (one entry per live name), never the log.
 
 use crate::cli::Res;
-use crate::durability::check::incarnations;
+use crate::durability::check::boots;
 use crate::log::{Cut, Str};
 use proto::ctl::Op;
 use proto::oplog::{OpKind, OpRec, OPREC_SIZE};
@@ -29,8 +29,8 @@ pub const VERSION: u32 = 1;
 
 /// Every event type, in the order the guide lists them.
 pub const TYPES: [&str; 17] = [
-    "header", "inc", "cut", "call", "op", "fault", "crash", "mark", "sdk", "signal", "sigfault",
-    "sched", "preempt", "insn", "node", "net", "phase",
+    "header", "boot", "cut", "call", "op", "fault", "crash", "mark", "sdk", "signal", "sigfault",
+    "sched", "preempt", "insn", "machine", "net", "phase",
 ];
 
 /// What to print: the types (`None`: all) and the sequence range of events that have one.
@@ -69,15 +69,15 @@ impl Select {
     }
 }
 
-/// A JSON line being built: `{"type":T,"inc":K,...}`.
+/// A JSON line being built: `{"type":T,"boot":K,...}`, `k` the boot's index (0: boot 1).
 struct Line(String);
 
 impl Line {
-    fn new(ty: &str, inc: usize) -> Line {
-        Line(format!("{{\"type\":\"{ty}\",\"inc\":{inc}"))
+    fn new(ty: &str, k: usize) -> Line {
+        Line(format!("{{\"type\":\"{ty}\",\"boot\":{}", k + 1))
     }
-    fn at(ty: &str, inc: usize, r: &Rec) -> Line {
-        let mut l = Line::new(ty, inc);
+    fn at(ty: &str, k: usize, r: &Rec) -> Line {
+        let mut l = Line::new(ty, k);
         l.num("seq", r.seq)
             .num("t", r.vclock_ns)
             .num("slot", r.slot);
@@ -149,7 +149,7 @@ enum Item {
     Cut(Cut),
 }
 
-/// An incarnation's boundary records in log order: `boundary.log`, and for a cut log the
+/// A boot's boundary records in log order: `boundary.log`, and for a cut log the
 /// `Cut` and then `boundary.tail`. Two records of lookahead (an injected fault's names).
 struct Records {
     cur: Option<(BufReader<File>, PathBuf)>,
@@ -162,12 +162,12 @@ fn open(p: &Path) -> Res<File> {
 }
 
 impl Records {
-    fn open(inc: &Path) -> Res<Records> {
-        let log = inc.join("boundary.log");
-        let tail = match crate::result::read_json(&inc.join("boundary.cut")) {
+    fn open(bdir: &Path) -> Res<Records> {
+        let log = bdir.join("boundary.log");
+        let tail = match crate::result::read_json(&bdir.join("boundary.cut")) {
             Ok(c) => Some((
-                inc.join("boundary.tail"),
-                serde_json::from_value(c).map_err(|e| format!("{}: {e}", inc.display()))?,
+                bdir.join("boundary.tail"),
+                serde_json::from_value(c).map_err(|e| format!("{}: {e}", bdir.display()))?,
             )),
             Err(_) => None,
         };
@@ -273,9 +273,9 @@ struct Ops {
 }
 
 impl Ops {
-    /// `None` when the incarnation has no operation log (a sweep removes a large one).
-    fn open(inc: &Path) -> Res<Option<Ops>> {
-        let (m, d) = (inc.join("oplog.meta"), inc.join("oplog.data"));
+    /// `None` when the boot has no operation log (a sweep removes a large one).
+    fn open(bdir: &Path) -> Res<Option<Ops>> {
+        let (m, d) = (bdir.join("oplog.meta"), bdir.join("oplog.data"));
         if !m.exists() || !d.exists() {
             return Ok(None);
         }
@@ -353,7 +353,7 @@ impl Ops {
     }
 }
 
-/// The work tree's names as the operations go by: each inode's links in the order they were
+/// The disk's names as the operations go by: each inode's links in the order they were
 /// made. A path names an inode's first link that still exists.
 struct Names {
     at: String,
@@ -496,14 +496,14 @@ struct Export<'a, W: Write> {
     out: W,
     sel: &'a Select,
     result: Option<Value>,
-    work: String,
-    /// A run with nodes: their names (the driver first), each slot's node as the log says it
-    /// (`DEC_NODE_SLOT`), and the node of the record being exported.
-    nodes: Vec<String>,
-    /// Each node's work tree (`work` of its `[node.NAME]`; the driver's is `work`).
-    node_work: Vec<String>,
-    slot_node: HashMap<u16, usize>,
-    node: Option<usize>,
+    disk: String,
+    /// A run with machines: their names (main first), each slot's machine as the log says it
+    /// (`DEC_MACHINE_SLOT`), and the machine of the record being exported.
+    machines: Vec<String>,
+    /// Each machine's disk (`work` of its `[machine.NAME]`; main's is `work`).
+    machine_disk: Vec<String>,
+    slot_machine: HashMap<u16, usize>,
+    machine: Option<usize>,
 }
 
 impl<W: Write> Export<'_, W> {
@@ -513,64 +513,64 @@ impl<W: Write> Export<'_, W> {
         if !wanted || seq.is_some_and(|s| !self.sel.in_range(s)) {
             return Ok(());
         }
-        // With nodes, an event of a thread names the thread's node.
-        if let Some(n) = self.node.and_then(|n| self.nodes.get(n)) {
-            line.str("node", &n.clone());
+        // With machines, an event of a thread names the thread's machine.
+        if let Some(n) = self.machine.and_then(|n| self.machines.get(n)) {
+            line.str("machine", &n.clone());
         }
         writeln!(self.out, "{}", line.done()).map_err(|e| e.to_string())
     }
 
-    fn node_name(&self, k: u64) -> String {
-        self.nodes
+    fn machine_name(&self, k: u64) -> String {
+        self.machines
             .get(k as usize)
             .cloned()
             .unwrap_or_else(|| k.to_string())
     }
 
-    /// Node names of a bit set (`Op::Net`).
-    fn node_set(&self, bits: u64) -> String {
+    /// Machine names of a bit set (`Op::Net`).
+    fn machine_set(&self, bits: u64) -> String {
         let v: Vec<Value> = (0..64)
             .filter(|b| bits & (1 << b) != 0)
-            .map(|b| self.node_name(b).into())
+            .map(|b| self.machine_name(b).into())
             .collect();
         Value::from(v).to_string()
     }
 
-    /// The node events (`node`, `net`) of a decision record, if it is one (an unanswered
-    /// keepalive probe also in a run without nodes).
-    fn node_record(&mut self, k: usize, r: &Rec) -> Option<Res<()>> {
+    /// The machine events (`machine`, `net`) of a decision record, if it is one (an unanswered
+    /// keepalive probe also in a run without machines).
+    fn machine_record(&mut self, k: usize, r: &Rec) -> Option<Res<()>> {
         if r.kind != RecKind::SupDecision as u8
-            || self.nodes.is_empty() && r.nr != proto::ctl::DEC_WIRE_PROBE
+            || self.machines.is_empty() && r.nr != proto::ctl::DEC_WIRE_PROBE
         {
             return None;
         }
         let a = r.args;
         let mut l;
         let ty = match r.nr {
-            proto::ctl::DEC_NODE_SLOT => {
-                self.slot_node.insert(a[0] as u16, a[1] as usize);
+            proto::ctl::DEC_MACHINE_SLOT => {
+                self.slot_machine.insert(a[0] as u16, a[1] as usize);
                 return Some(Ok(()));
             }
-            proto::ctl::DEC_NODE_START | proto::ctl::DEC_NODE_STOP => {
-                l = Line::at("node", k, r);
-                let start = r.nr == proto::ctl::DEC_NODE_START;
+            proto::ctl::DEC_MACHINE_START | proto::ctl::DEC_MACHINE_STOP => {
+                l = Line::at("machine", k, r);
+                let start = r.nr == proto::ctl::DEC_MACHINE_START;
                 l.str("event", if start { "start" } else { "stop" })
-                    .str("name", &self.node_name(a[0]));
+                    .str("name", &self.machine_name(a[0]));
                 if start {
                     l.num("pid", a[1]);
-                    // A restart's incarnation (the run's first start of every node is 0).
+                    // A restart's boot (none at a machine's first boot).
                     if a[2] > 0 {
-                        l.num("incarnation", a[2]);
+                        l.num("machine_boot", a[2] + 1);
                     }
                 } else {
                     l.num("live", a[1]);
                 }
-                "node"
+                "machine"
             }
-            // [node, incarnation, how, exit status or signal, processes killed, down ns].
-            proto::ctl::DEC_NODE_DOWN => {
-                use proto::node::*;
-                l = Line::at("node", k, r);
+            // [machine, boot, how, exit status or signal, processes killed, down ns].
+            proto::ctl::DEC_MACHINE_DOWN => {
+                use proto::machine::*;
+                l = Line::at("machine", k, r);
                 let (event, by) = match a[2] {
                     DOWN_KILL_SEED => ("kill", Some("seed")),
                     DOWN_KILL_SCRIPT => ("kill", Some("script")),
@@ -580,8 +580,8 @@ impl<W: Write> Export<'_, W> {
                     _ => ("exit", None),
                 };
                 l.str("event", event)
-                    .str("name", &self.node_name(a[0]))
-                    .num("incarnation", a[1]);
+                    .str("name", &self.machine_name(a[0]))
+                    .num("machine_boot", a[1] + 1);
                 match (by, a[2]) {
                     (Some(by), _) => {
                         l.str("by", by);
@@ -597,59 +597,59 @@ impl<W: Write> Export<'_, W> {
                 if a[5] > 0 {
                     l.num("restart_in_ms", a[5] / 1_000_000);
                 }
-                "node"
+                "machine"
             }
-            // [node, incarnation, by, ordinal, length ns (0: until a resume), 0].
-            proto::ctl::DEC_NODE_PAUSE => {
-                use proto::node::*;
-                l = Line::at("node", k, r);
+            // [machine, boot, by, ordinal, length ns (0: until a resume), 0].
+            proto::ctl::DEC_MACHINE_PAUSE => {
+                use proto::machine::*;
+                l = Line::at("machine", k, r);
                 l.str("event", "pause")
-                    .str("name", &self.node_name(a[0]))
-                    .num("incarnation", a[1])
+                    .str("name", &self.machine_name(a[0]))
+                    .num("machine_boot", a[1] + 1)
                     .str("by", if a[2] == BY_SEED { "seed" } else { "script" })
                     .num("n", a[3]);
                 if a[4] > 0 {
                     l.num("length_ms", a[4] / 1_000_000);
                 }
-                "node"
+                "machine"
             }
-            // [node, incarnation, how (`PEND_*`), ordinal, ns paused, 0].
-            proto::ctl::DEC_NODE_RESUME => {
-                l = Line::at("node", k, r);
+            // [machine, boot, how (`PEND_*`), ordinal, ns paused, 0].
+            proto::ctl::DEC_MACHINE_RESUME => {
+                l = Line::at("machine", k, r);
                 l.str("event", "resume")
-                    .str("name", &self.node_name(a[0]))
-                    .num("incarnation", a[1])
-                    .str("by", proto::node::pause_end_name(a[2]))
+                    .str("name", &self.machine_name(a[0]))
+                    .num("machine_boot", a[1] + 1)
+                    .str("by", proto::machine::pause_end_name(a[2]))
                     .num("n", a[3])
                     .num("paused_ms", a[4] / 1_000_000);
-                "node"
+                "machine"
             }
-            // [node, incarnation, how (`CLK_*`), change ns, offset ns, 0] (two's complement).
-            proto::ctl::DEC_NODE_CLOCK => {
-                l = Line::at("node", k, r);
-                let skew = a[2] == proto::node::CLK_SKEW;
+            // [machine, boot, how (`CLK_*`), change ns, offset ns, 0] (two's complement).
+            proto::ctl::DEC_MACHINE_CLOCK => {
+                l = Line::at("machine", k, r);
+                let skew = a[2] == proto::machine::CLK_SKEW;
                 l.str("event", "clock")
-                    .str("name", &self.node_name(a[0]))
-                    .num("incarnation", a[1])
+                    .str("name", &self.machine_name(a[0]))
+                    .num("machine_boot", a[1] + 1)
                     .str("by", if skew { "seed" } else { "script" })
                     .raw(
                         if skew { "skew_ms" } else { "step_ms" },
                         &(a[3] as i64 / 1_000_000).to_string(),
                     )
                     .raw("offset_ms", &(a[4] as i64 / 1_000_000).to_string());
-                "node"
+                "machine"
             }
             n if n == Op::Net as u32 => {
                 l = Line::at("net", k, r);
                 let verb = match a[0] {
-                    proto::node::NET_CUT => "cut",
-                    proto::node::NET_HEAL => "heal",
+                    proto::machine::NET_CUT => "cut",
+                    proto::machine::NET_HEAL => "heal",
                     _ => "unknown",
                 };
                 l.str("event", verb)
                     .str("by", "script")
-                    .raw("from", &self.node_set(a[1]))
-                    .raw("to", &self.node_set(a[2]))
+                    .raw("from", &self.machine_set(a[1]))
+                    .raw("to", &self.machine_set(a[2]))
                     .raw("both", if a[3] != 0 { "true" } else { "false" })
                     .num("ret", r.ret);
                 "net"
@@ -660,12 +660,12 @@ impl<W: Write> Export<'_, W> {
                 l.str("event", "cut")
                     .str("by", "seed")
                     .num("n", a[0])
-                    .str("shape", proto::node::shape_name(a[1]))
-                    .raw("a", &self.node_set(a[2]))
-                    .raw("b", &self.node_set(a[3]))
+                    .str("shape", proto::machine::shape_name(a[1]))
+                    .raw("a", &self.machine_set(a[2]))
+                    .raw("b", &self.machine_set(a[3]))
                     .num("length_ms", a[4] / 1_000_000);
-                if a[1] == proto::node::SHAPE_BRIDGE {
-                    l.raw("bridge", &self.node_set(a[5]));
+                if a[1] == proto::machine::SHAPE_BRIDGE {
+                    l.raw("bridge", &self.machine_set(a[5]));
                 }
                 "net"
             }
@@ -679,7 +679,7 @@ impl<W: Write> Export<'_, W> {
                 l.str("event", "forget")
                     .num("conn", a[0])
                     .str("side", if a[1] != 0 { "server" } else { "client" })
-                    .str("name", &self.node_name(a[2]));
+                    .str("name", &self.machine_name(a[2]));
                 "net"
             }
             // An unanswered keepalive probe (`sup::wire`): [conn, side, probes so far].
@@ -701,15 +701,15 @@ impl<W: Write> Export<'_, W> {
             }
             _ => return None,
         };
-        self.node = None;
+        self.machine = None;
         Some(self.emit(ty, Some(r.seq), l))
     }
 
-    /// An operation of a disk of node `node` (0: the driver's; with nodes, `node` names it).
-    fn op(&mut self, k: usize, node: usize, names: &mut Names, o: &OpEv) -> Res<()> {
-        self.node = (!self.nodes.is_empty()).then_some(node);
+    /// An operation of a disk of machine `machine` (0: main's; with machines, `machine` names it).
+    fn op(&mut self, k: usize, machine: usize, names: &mut Names, o: &OpEv) -> Res<()> {
+        self.machine = (!self.machines.is_empty()).then_some(machine);
         let r = self.op_of(k, names, o);
-        self.node = None;
+        self.machine = None;
         r
     }
 
@@ -718,7 +718,7 @@ impl<W: Write> Export<'_, W> {
         let Some(kind) = o.kind else {
             return Ok(());
         };
-        // Base records are the incarnation's starting tree, not operations; the `Crash`
+        // Base records are the boot's starting tree, not operations; the `Crash`
         // record is the `crash` event's.
         if o.r.seq == 0 || kind == OpKind::Crash {
             return Ok(());
@@ -780,7 +780,7 @@ impl<W: Write> Export<'_, W> {
         self.emit("op", Some(r.seq), l)
     }
 
-    fn crash(&mut self, k: usize, inc: &Path, r: &Rec) -> Res<()> {
+    fn crash(&mut self, k: usize, bdir: &Path, r: &Rec) -> Res<()> {
         // The crash's `seq` is its call's, as in `result.json`.
         let mut l = Line::new("crash", k);
         l.num("seq", r.args[1])
@@ -788,18 +788,18 @@ impl<W: Write> Export<'_, W> {
             .num("slot", r.slot);
         let kind = crate::sup::crash::crash_name(r.args[0]);
         l.str("kind", kind);
-        // A node's machine crash at its crash point: its point and what it lost are its
-        // `downs` entry's (the run goes on; `node` names it).
-        if let Some(n) = self.node.filter(|n| *n > 0) {
+        // A machine's crash at its crash point: its point and what it lost are its
+        // `downs` entry's (the run goes on; `machine` names it).
+        if let Some(n) = self.machine.filter(|n| *n > 0) {
             let d = self.result.as_ref().and_then(|v| {
-                v["nodes"]["list"][n]["downs"]
+                v["machines"]["list"][n]["downs"]
                     .as_array()?
                     .iter()
                     .find(|d| d["at_ms"] == r.vclock_ns / 1_000_000 && d["point"].is_u64())
                     .cloned()
             });
             if let Some(d) = d {
-                l.num("ninc", d["incarnation"].as_u64().unwrap_or(0))
+                l.num("machine_boot", d["boot"].as_u64().unwrap_or(1))
                     .num("point", d["point"].as_u64().unwrap_or(0));
                 if d["lost"].is_object() {
                     l.raw("lost", &d["lost"].to_string());
@@ -811,34 +811,34 @@ impl<W: Write> Export<'_, W> {
             .result
             .as_ref()
             .and_then(|v| v["crashes"].as_array())
-            .and_then(|a| a.iter().find(|c| c["incarnation"] == k as u64));
+            .and_then(|a| a.iter().find(|c| c["boot"] == k as u64 + 1));
         if let Some(p) = c.and_then(|c| c["point"].as_u64()) {
             l.num("point", p);
         }
-        // What a machine crash did to the work tree, as `faults.recent` shows it.
+        // What a machine crash did to the disk, as `faults.recent` shows it.
         if kind == "machine" {
             use crate::durability::kept;
-            if let (Ok(live), Ok(Some(post))) = (kept::live(inc), kept::post_crash(inc)) {
-                let lost = crate::launcher::attribution::lost(&live, &post, &self.work);
+            if let (Ok(live), Ok(Some(post))) = (kept::live(bdir), kept::post_crash(bdir)) {
+                let lost = crate::launcher::attribution::lost(&live, &post, &self.disk);
                 l.raw("lost", &lost.to_string());
             }
         }
         self.emit("crash", Some(r.args[1]), l)
     }
 
-    fn record(&mut self, k: usize, inc: &Path, recs: &mut Records, r: &Rec) -> Res<()> {
-        if !self.nodes.is_empty() {
-            self.node = Some(self.slot_node.get(&r.slot).copied().unwrap_or(0));
+    fn record(&mut self, k: usize, bdir: &Path, recs: &mut Records, r: &Rec) -> Res<()> {
+        if !self.machines.is_empty() {
+            self.machine = Some(self.slot_machine.get(&r.slot).copied().unwrap_or(0));
         }
-        let res = match self.node_record(k, r) {
+        let res = match self.machine_record(k, r) {
             Some(res) => res,
-            None => self.record_of(k, inc, recs, r),
+            None => self.record_of(k, bdir, recs, r),
         };
-        self.node = None;
+        self.machine = None;
         res
     }
 
-    fn record_of(&mut self, k: usize, inc: &Path, recs: &mut Records, r: &Rec) -> Res<()> {
+    fn record_of(&mut self, k: usize, bdir: &Path, recs: &mut Records, r: &Rec) -> Res<()> {
         let a = r.args;
         match RecKind::from_u8(r.kind) {
             Some(RecKind::Trap) if r.nr as u64 == proto::sdk::SYSCALL => {
@@ -943,14 +943,14 @@ impl<W: Write> Export<'_, W> {
             Some(RecKind::Injected) => {
                 let (n1, n2) = (recs.peek(0)?, recs.peek(1)?);
                 let (_, mut e) = crate::launcher::attribution::injected(r, n1, n2);
-                crate::launcher::attribution::name_link(&mut e, &self.nodes);
-                // The network's faults are the supervisor's, on a link: no thread's node.
+                crate::launcher::attribution::name_link(&mut e, &self.machines);
+                // The network's faults are the supervisor's, on a link: no thread's machine.
                 if (proto::wire::INJ_NET_RESET..=proto::wire::INJ_NET_CUT).contains(&r.args[0]) {
-                    self.node = None;
+                    self.machine = None;
                 }
-                // A node's kill or machine crash by the seed: that node's.
-                if r.args[0] == proto::node::INJ_NODE_KILL {
-                    self.node = Some(r.args[1] as usize);
+                // A machine's kill or machine crash by the seed: that machine's.
+                if r.args[0] == proto::machine::INJ_MACHINE_KILL {
+                    self.machine = Some(r.args[1] as usize);
                 }
                 let mut l = Line::at("fault", k, r);
                 // `faults.recent`'s fields; its `fault` is the class, its `thread` the slot.
@@ -964,7 +964,7 @@ impl<W: Write> Export<'_, W> {
             }
             // An injected fault's names, read with it; a call's strings, read with it.
             Some(RecKind::Name | RecKind::Str) => Ok(()),
-            Some(RecKind::SupDecision) if r.nr == Op::CrashPoint as u32 => self.crash(k, inc, r),
+            Some(RecKind::SupDecision) if r.nr == Op::CrashPoint as u32 => self.crash(k, bdir, r),
             // The end of a phase's command (`sup::phase`): [phase, wait word, next phase].
             Some(RecKind::SupDecision) if r.nr == proto::ctl::DEC_PHASE => {
                 let mut l = Line::at("phase", k, r);
@@ -1026,34 +1026,34 @@ impl<W: Write> Export<'_, W> {
         }
     }
 
-    fn incarnation(&mut self, k: usize, inc: &Path) -> Res<()> {
-        let mut recs = Records::open(inc)?;
-        let ops = Ops::open(inc)?;
-        let records = std::fs::metadata(inc.join("boundary.log"))
+    fn boot(&mut self, k: usize, bdir: &Path) -> Res<()> {
+        let mut recs = Records::open(bdir)?;
+        let ops = Ops::open(bdir)?;
+        let records = std::fs::metadata(bdir.join("boundary.log"))
             .map(|m| m.len() / REC_SIZE as u64)
             .unwrap_or(0);
         let records = match &recs.tail {
             Some((_, c)) => c.records,
             None => records,
         };
-        let mut l = Line::new("inc", k);
+        let mut l = Line::new("boot", k);
         l.num("records", records)
             .raw("oplog", if ops.is_some() { "true" } else { "false" });
-        self.emit("inc", None, l)?;
-        // The driver's disk, then each node's disks one after another (`node/NAME/inc-K/`):
+        self.emit("boot", None, l)?;
+        // Main's disk, then each machine's disks one after another (`machine/NAME/boot-K/`):
         // their operations merged in the log's order.
-        let mut streams = vec![Stream::new(0, ops.into_iter().collect(), self.work.clone())];
+        let mut streams = vec![Stream::new(0, ops.into_iter().collect(), self.disk.clone())];
         if k == 0 {
-            let run = inc.parent().unwrap_or(Path::new("."));
-            for (n, name) in self.nodes.iter().enumerate().skip(1) {
+            let run = bdir.parent().unwrap_or(Path::new("."));
+            for (n, name) in self.machines.iter().enumerate().skip(1) {
                 let mut disks = vec![];
-                for d in crate::durability::check::incarnations(&run.join("node").join(name)) {
+                for d in crate::durability::check::boots(&run.join("machine").join(name)) {
                     if let Some(o) = Ops::open(&d)? {
                         disks.push(o);
                     }
                 }
                 let at = self
-                    .node_work
+                    .machine_disk
                     .get(n)
                     .cloned()
                     .unwrap_or_else(|| "/work".into());
@@ -1076,18 +1076,18 @@ impl<W: Write> Export<'_, W> {
             // come before the first record after them in virtual time; a crash comes after
             // every operation before it.
             let crash = r.kind == RecKind::SupDecision as u8 && r.nr == Op::CrashPoint as u32;
-            // A node's operation of an earlier call comes before it too: its machine crash at
+            // A machine's operation of an earlier call comes before it too: its machine crash at
             // a crash point has records at the same time as the operation before it. (The
-            // driver's operations keep their order as without nodes.)
-            while let Some(i) = first(&streams, |node, n| {
+            // main's operations keep their order as without machines.)
+            while let Some(i) = first(&streams, |machine, n| {
                 (n.r.vclock_ns < r.vclock_ns
                     || (crash && n.r.vclock_ns == r.vclock_ns)
-                    || (node > 0 && n.r.seq < r.seq))
+                    || (machine > 0 && n.r.seq < r.seq))
                     && n.r.seq != r.seq
             }) {
                 self.take_op(k, &mut streams[i])?;
             }
-            self.record(k, inc, &mut recs, &r)?;
+            self.record(k, bdir, &mut recs, &r)?;
             // A call's operations follow it.
             if r.kind == RecKind::Trap as u8 {
                 while let Some(i) = first(&streams, |_, n| n.r.seq == r.seq) {
@@ -1103,13 +1103,13 @@ impl<W: Write> Export<'_, W> {
 
     fn take_op(&mut self, k: usize, s: &mut Stream) -> Res<()> {
         let n = s.take()?.unwrap();
-        self.op(k, s.node, &mut s.names, &n)
+        self.op(k, s.machine, &mut s.names, &n)
     }
 }
 
-/// One node's disks' operation logs, read one after another (a disk's names are its own).
+/// One machine's disks' operation logs, read one after another (a disk's names are its own).
 struct Stream {
-    node: usize,
+    machine: usize,
     disks: VecDeque<Ops>,
     names: Names,
     at: String,
@@ -1119,9 +1119,9 @@ struct Stream {
 }
 
 impl Stream {
-    fn new(node: usize, disks: Vec<Ops>, at: String) -> Stream {
+    fn new(machine: usize, disks: Vec<Ops>, at: String) -> Stream {
         Stream {
-            node,
+            machine,
             // A disk with no operation would stall the ones after it.
             disks: disks.into_iter().filter(|o| o.next.is_some()).collect(),
             names: Names::new(at.clone()),
@@ -1156,7 +1156,7 @@ fn first(streams: &[Stream], ok: impl Fn(usize, &OpEv) -> bool) -> Option<usize>
     streams
         .iter()
         .enumerate()
-        .filter_map(|(i, s)| s.next().filter(|n| ok(s.node, n)).map(|n| (i, n)))
+        .filter_map(|(i, s)| s.next().filter(|n| ok(s.machine, n)).map(|n| (i, n)))
         .min_by_key(|(i, n)| (n.r.vclock_ns, n.r.seq, *i))
         .map(|(i, _)| i)
 }
@@ -1164,8 +1164,8 @@ fn first(streams: &[Stream], ok: impl Fn(usize, &OpEv) -> bool) -> Option<usize>
 /// Print the stream of the run directory `run` to `out`.
 pub fn export(run: &Path, sel: &Select, out: impl Write) -> Res<()> {
     let runjson = run.join("run.json");
-    let incs = incarnations(run);
-    if incs.is_empty() {
+    let bdirs = boots(run);
+    if bdirs.is_empty() {
         return Err(if runjson.is_file() {
             format!(
                 "{}: no logs: a sweep keeps only run.json and result.json of a run that ended ok \
@@ -1174,19 +1174,19 @@ pub fn export(run: &Path, sel: &Select, out: impl Write) -> Res<()> {
                 run.display()
             )
         } else {
-            format!("{}: not a run directory (no inc-0)", run.display())
+            format!("{}: not a run directory (no boot-1)", run.display())
         });
     }
     let cfg = crate::result::read_json(&runjson).ok();
-    let work = cfg
+    let disk = cfg
         .as_ref()
-        .and_then(|c| c["config"]["work-at"].as_str().map(str::to_string))
+        .and_then(|c| c["config"]["disk-at"].as_str().map(str::to_string))
         .unwrap_or_else(|| "/work".to_string());
-    let nodes: Vec<String> = cfg
+    let machines: Vec<String> = cfg
         .as_ref()
-        .and_then(|c| c["config"]["nodes"].as_array())
+        .and_then(|c| c["config"]["machines"].as_array())
         .map(|ns| {
-            std::iter::once("driver".to_string())
+            std::iter::once("main".to_string())
                 .chain(
                     ns.iter()
                         .filter_map(|n| n["name"].as_str().map(str::to_string)),
@@ -1194,37 +1194,36 @@ pub fn export(run: &Path, sel: &Select, out: impl Write) -> Res<()> {
                 .collect()
         })
         .unwrap_or_default();
-    let node_work: Vec<String> = std::iter::once(work.clone())
+    let machine_disk: Vec<String> = std::iter::once(disk.clone())
         .chain(
             cfg.as_ref()
-                .and_then(|c| c["config"]["nodes"].as_array())
+                .and_then(|c| c["config"]["machines"].as_array())
                 .into_iter()
                 .flatten()
-                .map(|n| n["work_at"].as_str().unwrap_or("/work").to_string()),
+                .map(|n| n["disk_at"].as_str().unwrap_or("/work").to_string()),
         )
         .collect();
     let mut x = Export {
         out: BufWriter::with_capacity(1 << 20, out),
         sel,
         result: crate::result::read_json(&run.join("result.json")).ok(),
-        work,
-        nodes,
-        node_work,
-        slot_node: HashMap::new(),
-        node: None,
+        disk,
+        machines,
+        machine_disk,
+        slot_machine: HashMap::new(),
+        machine: None,
     };
     let mut l = Line(format!("{{\"type\":\"header\",\"v\":{VERSION}"));
     if let Some(s) = cfg.as_ref().and_then(|c| c["config"]["seed"].as_u64()) {
         l.num("seed", s);
     }
-    l.str("work", &x.work.clone())
-        .num("incarnations", incs.len());
-    if !x.nodes.is_empty() {
-        l.raw("nodes", &Value::from(x.nodes.clone()).to_string());
+    l.str("disk", &x.disk.clone()).num("boots", bdirs.len());
+    if !x.machines.is_empty() {
+        l.raw("machines", &Value::from(x.machines.clone()).to_string());
     }
     x.emit("header", None, l)?;
-    for (k, inc) in incs.iter().enumerate() {
-        x.incarnation(k, inc)?;
+    for (k, bdir) in bdirs.iter().enumerate() {
+        x.boot(k, bdir)?;
     }
     x.out.flush().map_err(|e| e.to_string())
 }

@@ -22,9 +22,9 @@ st=0; timeout 60 "$PATINA" explain "$r" --format json >"$r.story" 2>"$r.err" || 
 [ "$st" = 0 ] || die "explain: exit $st ($(cat "$r.err"))"
 lhs=$(field "$r/explain/result.json" digest); rhs=$(field "$r/result.json" digest)
 [ "$lhs" = "$rhs" ] || die "the observed replay's digest differs"
-obs=$(stat -c %s "$r/explain/inc-0/observe.log")
+obs=$(stat -c %s "$r/explain/boot-1/observe.log")
 [ "$obs" -gt 0 ] || die "no observations"
-cmp -s "$r/inc-0/boundary.log" "$r/explain/inc-0/boundary.log" || die "the observed replay's boundary log is not the run's"
+cmp -s "$r/boot-1/boundary.log" "$r/explain/boot-1/boundary.log" || die "the observed replay's boundary log is not the run's"
 "$PATINA" log events "$r" >"$r.events"
 python3 -I - "$r" <<'EOF' || die "the story"
 import json, sys

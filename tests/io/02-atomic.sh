@@ -7,8 +7,8 @@ ps="100 500 1000"
 for p in $ps; do
     for seed in 1; do
         run_ok "$o/p$p-s$seed" "$seed" --config "$("$PATINA_CFG" preempt-permille="$p")" -- /guest/atomic
-        [ "$(cat "$o/p$p-s$seed/inc-0/stdout")" = "records 8000 interleaved 0" ] || die "p$p seed $seed: $(cat "$o/p$p-s$seed/inc-0/stdout")"
-        rm -f "$o/p$p-s$seed/inc-0/boundary.log"
+        [ "$(cat "$o/p$p-s$seed/boot-1/stdout")" = "records 8000 interleaved 0" ] || die "p$p seed $seed: $(cat "$o/p$p-s$seed/boot-1/stdout")"
+        rm -f "$o/p$p-s$seed/boot-1/boundary.log"
     done
     echo "preempt $p: seed 1: 8000 records, 0 interleaved"
 done

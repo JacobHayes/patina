@@ -4,8 +4,8 @@
 #    Rust (quickstart): a breakpoint, step, finish, next and stepi, then on. Go (bank-go): a
 #    breakpoint in the deposit handler (a goroutine) is hit twice, in the program's source;
 #    stopped before an injected network fault (the supervisor's own event), the run goes on.
-#    Python (journal-py): the backtrace reaches the interpreter's evaluation loop. Two nodes (a
-#    key-value primary and backup, and the driver): stopped at the backup's last call, `patina
+#    Python (journal-py): the backtrace reaches the interpreter's evaluation loop. Two machines (a
+#    key-value primary and backup, and main): stopped at the backup's last call, `patina
 #    attach` moves gdb to another process and back to the stopped thread, the world held. A
 #    memory write leaves the run at the first record where the session's events and the run's
 #    differ (`log events` of both), and says it wrote memory. `--at call:NAME:K` names the
@@ -133,14 +133,14 @@ session "$r" "$RUNS/py.gdb" --at sdk:journal-intact:1
 identical "$r"
 echo "Python: the evaluation loop in the backtrace; identical"
 
-# Nodes: the stop's process, another, and back.
+# Machines: the stop's process, another, and back.
 r=$RUNS/kv
-printf '[node.primary]\ncmd = ["python3", "/guest/kv.py", "primary"]\n[node.backup]\ncmd = ["python3", "/guest/kv.py", "backup"]\n' >"$RUNS/kv.toml"
+printf '[machine.primary]\nrun = ["python3", "/guest/kv.py", "primary"]\n[machine.backup]\nrun = ["python3", "/guest/kv.py", "backup"]\n' >"$RUNS/kv.toml"
 [ -z "$TRAPS" ] || cat "$TRAPS" >>"$RUNS/kv.toml"
-prun "$r" --seed 1 --config "$RUNS/kv.toml" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/kv.py driver
+prun "$r" --seed 1 --config "$RUNS/kv.toml" --mount "$PATINA_GUESTS":/guest:copy -- python3 /guest/kv.py main
 at=$("$PATINA" log events "$r" | python3 -I -c 'import json,sys
-print([e for e in map(json.loads, sys.stdin) if e["type"] == "call" and e.get("node") == "backup"][-1]["seq"])')
-cat >"$RUNS/nodes.gdb" <<'EOF'
+print([e for e in map(json.loads, sys.stdin) if e["type"] == "call" and e.get("machine") == "backup"][-1]["seq"])')
+cat >"$RUNS/machines.gdb" <<'EOF'
 python
 mine = gdb.selected_inferior().pid
 print("FACT procs", len(procs()))
@@ -156,11 +156,11 @@ print("FACT held", int(not os.path.exists(S["release"])))
 end
 continue
 EOF
-session "$r" "$RUNS/nodes.gdb" --at "$at"
-named=$(python3 -I -c 'import json,sys; print(sum(1 for p in json.load(open(sys.argv[1]))["procs"] if p["node"]))' "$r/debug/debug.json")
-[ "$named" -ge 2 ] || die "nodes: $named processes with a node name: $(cat "$r/debug/debug.json")"
-[ "$(fact "$r" procs)" -ge 3 ] || die "nodes: $(fact "$r" procs) processes"
-[ "$(fact "$r" moved)" = 1 ] && [ "$(fact "$r" back)" = 1 ] || die "nodes: attach: $(cat "$r.gdb")"
-[ "$(fact "$r" held)" = 1 ] || die "nodes: moving between processes let the world go on: $(cat "$r.gdb")"
+session "$r" "$RUNS/machines.gdb" --at "$at"
+named=$(python3 -I -c 'import json,sys; print(sum(1 for p in json.load(open(sys.argv[1]))["procs"] if p["machine"]))' "$r/debug/debug.json")
+[ "$named" -ge 2 ] || die "machines: $named processes with a machine name: $(cat "$r/debug/debug.json")"
+[ "$(fact "$r" procs)" -ge 3 ] || die "machines: $(fact "$r" procs) processes"
+[ "$(fact "$r" moved)" = 1 ] && [ "$(fact "$r" back)" = 1 ] || die "machines: attach: $(cat "$r.gdb")"
+[ "$(fact "$r" held)" = 1 ] || die "machines: moving between processes let the world go on: $(cat "$r.gdb")"
 identical "$r"
-echo "nodes: $(fact "$r" procs) processes at seq $at; moved to another and back; identical"
+echo "machines: $(fact "$r" procs) processes at seq $at; moved to another and back; identical"

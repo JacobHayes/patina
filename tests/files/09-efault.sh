@@ -8,5 +8,5 @@ mkdir -p "$o"
 native "$o/native" -- /guest/efault || die "native efault exit $?"
 timeout 120 "$PATINA" run --seed 1 --out "$o/patina" --mount "$PATINA_GUESTS":/guest:copy -- /guest/efault >/dev/null || true
 [ "$(field "$o/patina/result.json" outcome)" = ok ] || die "patina efault: $(field "$o/patina/result.json" outcome): $(field "$o/patina/result.json" message)"
-diff "$o/native/stdout" "$o/patina/inc-0/stdout" || die "differs from native"
-echo "efault: $(grep -c EFAULT "$o/patina/inc-0/stdout") calls answer EFAULT, as natively"
+diff "$o/native/stdout" "$o/patina/boot-1/stdout" || die "differs from native"
+echo "efault: $(grep -c EFAULT "$o/patina/boot-1/stdout") calls answer EFAULT, as natively"

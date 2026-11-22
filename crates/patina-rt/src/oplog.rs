@@ -146,7 +146,7 @@ fn put_rec(kind: OpKind, ino: u64, a: [u64; 6], data: (u64, u64)) {
     let rec = OpRec {
         seq: ts.seq,
         vclock_ns: c.vclock_ns.load(Relaxed),
-        kind: proto::oplog::tag_kind(kind as u32, crate::state::node()),
+        kind: proto::oplog::tag_kind(kind as u32, crate::state::machine()),
         pid: ts.pid as u32,
         ino,
         a,
@@ -366,10 +366,10 @@ fn new_desc(ino: u64) -> Desc {
     let k = skey(ino);
     let d = dur();
     Desc {
-        key: d.new_desc(crate::state::node()),
+        key: d.new_desc(crate::state::machine()),
         ino: k,
         file: d.sample(k),
-        disk: d.sb_sample(crate::state::node()),
+        disk: d.sb_sample(crate::state::machine()),
     }
 }
 
@@ -464,14 +464,14 @@ fn keep(fd: i64, d: Desc) {
 /// `syncfs`'s `errseq_check_and_advance` on the disk's sequence, for the description at `fd`.
 fn report_disk(fd: i64, ino: u64) -> bool {
     let mut d = desc_at(fd, ino);
-    let node = crate::state::node();
+    let machine = crate::state::machine();
     let dd = dur();
     let shared = dd.desc(d.key);
-    let v = dd.sb_seq(node);
+    let v = dd.sb_seq(machine);
     if d.disk.max(shared[1]) == v {
         return false;
     }
-    dd.sb_mark_seen(node);
+    dd.sb_mark_seen(machine);
     d.file = d.file.max(shared[0]);
     d.disk = v;
     dd.set_desc(d.key, [d.file, d.disk]);
@@ -485,9 +485,9 @@ fn shadows() -> &'static mut Shadows {
     &mut dur().shadows
 }
 
-/// The shadow table's key of this process's work inode `ino` (`proto::oplog::node_key`).
+/// The shadow table's key of this process's work inode `ino` (`proto::oplog::machine_key`).
 fn skey(ino: u64) -> u64 {
-    proto::oplog::node_key(ino, crate::state::node())
+    proto::oplog::machine_key(ino, crate::state::machine())
 }
 
 const SEEK_SET: u64 = 0;
@@ -1087,10 +1087,10 @@ fn flush_everything() {
     let others = s
         .ino
         .iter()
-        // Only this node's files: another machine's page cache is not this one's to sync.
+        // Only this machine's files: another machine's page cache is not this one's to sync.
         .any(|&key| {
             key != 0
-                && key >> 56 == crate::state::node() as u64
+                && key >> 56 == crate::state::machine() as u64
                 && !t.m[..t.n].iter().any(|m| skey(m.ino) == key)
         });
     if others {
@@ -1223,7 +1223,7 @@ const AT_FDCWD_: i64 = -100;
 fn fail(ino: u64, nr: u64, who: crate::inject::Who, by: u64) {
     let d = dur();
     if ino == 0 {
-        d.fail_wide(crate::state::node());
+        d.fail_wide(crate::state::machine());
     } else if d.fail(skey(ino)).is_none() {
         crate::sup::capacity(
             proto::ctl::LIMIT_FSYNC_FAILURES,
@@ -1477,13 +1477,13 @@ pub fn on_exit() {
     flush_all();
 }
 
-/// The work tree's path as a C string (the launcher leaves room for the NUL).
+/// The disk's path as a C string (the launcher leaves room for the NUL).
 fn work_cstr() -> u64 {
     let w = crate::state::work_path();
     if w == b"/work" {
         c"/work".as_ptr() as u64
     } else {
-        // NUL-padded in the control region (`Config::work`, `NodeTab::work`).
+        // NUL-padded in the control region (`Config::work`, `MachineTab::work`).
         w.as_ptr() as u64
     }
 }

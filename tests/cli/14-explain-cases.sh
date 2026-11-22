@@ -1,12 +1,12 @@
 # 14. `patina explain` on four kinds of failure, each the first failing seed of 1-64: a race
 #    between threads (the jobs example), crash consistency (acklog under `--faults crash`), a
-#    two-node bug (tests/guests/nodes/kv.py, the backup acknowledging before it applies) and a
-#    three-node split brain (tests/guests/nodes/q3.py nofence under partitions). Which seed fails
+#    two-machine bug (tests/guests/machines/kv.py, the backup acknowledging before it applies) and a
+#    three-machine split brain (tests/guests/machines/q3.py nofence under partitions). Which seed fails
 #    first depends on the host, so what is asserted holds for every failing seed: each story is
-#    shorter than the event log (far shorter for the nodes) and stops at the event the run
-#    gives: the failed assertion, the failing thread's output, the message into the driver that
-#    it found wrong (from the node that sent it), with the last partition before it. Then the
-#    observed replay is the run for every run of an examples sweep kept whole, a node sweep and a
+#    shorter than the event log (far shorter for the machines) and stops at the event the run
+#    gives: the failed assertion, the failing thread's output, the message into main that
+#    it found wrong (from the machine that sent it), with the last partition before it. Then the
+#    observed replay is the run for every run of an examples sweep kept whole, a machine sweep and a
 #    sweep with load-time points.
 #@ tier=area budget=60 slots=4
 . "$(dirname "$0")/lib.inc"
@@ -36,12 +36,12 @@ first "$RUNS/jobs" "$(seq 1 64)" failure -- "$G/examples/jobs"
 story "$RUNS/jobs"; check "$RUNS/jobs" thread
 first "$RUNS/acklog" "$(seq 1 64)" violation --faults crash -- "$G/examples/acklog"
 story "$RUNS/acklog"; check "$RUNS/acklog" crash
-for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s", "bug"]\n' $n $n; done >"$RUNS/kv.toml"
-first "$RUNS/kv" "$(seq 1 64)" failure --config "$RUNS/kv.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver
-story "$RUNS/kv"; check "$RUNS/kv" nodes
-for n in n1 n2 n3; do printf '[node.%s]\ncmd = ["python3", "/guest/q3.py", "%s", "nofence"]\n' $n $n; done >"$RUNS/q3.toml"
+for n in primary backup; do printf '[machine.%s]\nrun = ["python3", "/guest/kv.py", "%s", "bug"]\n' $n $n; done >"$RUNS/kv.toml"
+first "$RUNS/kv" "$(seq 1 64)" failure --config "$RUNS/kv.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py main
+story "$RUNS/kv"; check "$RUNS/kv" machines
+for n in n1 n2 n3; do printf '[machine.%s]\nrun = ["python3", "/guest/q3.py", "%s", "nofence"]\n' $n $n; done >"$RUNS/q3.toml"
 first "$RUNS/q3" "$(seq 1 64)" failure --config "$RUNS/q3.toml" --faults net,partition --fault partition-gap-ms=1000..6000 \
-    --fault partition-ms=1000..6000 --mount "$G":/guest:copy -- python3 /guest/q3.py driver 60
+    --fault partition-ms=1000..6000 --mount "$G":/guest:copy -- python3 /guest/q3.py main 60
 story "$RUNS/q3"; check "$RUNS/q3" partition
 
 # The observed replay is the run, for every run of three sweeps kept whole (explain fails as
@@ -54,8 +54,8 @@ sweep() {
 for e in jobs acklog bank ledger serve stats-cp upcase kvlog; do
     sweep "$RUNS/sw-$e" --seeds 1..3 --faults crash --fault net-reset-permille=1000 -- "$G/examples/$e"
 done
-for n in primary backup; do printf '[node.%s]\ncmd = ["python3", "/guest/kv.py", "%s"]\n' $n $n; done >"$RUNS/kv-ok.toml"
-sweep "$RUNS/sw-kv" --seeds 1..3 --config "$RUNS/kv-ok.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py driver
+for n in primary backup; do printf '[machine.%s]\nrun = ["python3", "/guest/kv.py", "%s"]\n' $n $n; done >"$RUNS/kv-ok.toml"
+sweep "$RUNS/sw-kv" --seeds 1..3 --config "$RUNS/kv-ok.toml" --mount "$G":/guest:copy -- python3 /guest/kv.py main
 sweep "$RUNS/sw-points" --seeds 1..6 -- "$G/rw-races" lms
 n=0
 for r in "$RUNS"/sw-*/seed-*; do

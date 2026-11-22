@@ -194,10 +194,10 @@ struct RunResult {
 
 fn one(o: &Opts, dir: PathBuf, cpu: usize, no_pers: bool) -> Res<RunResult> {
     let (oc, _) = run_one(o, &dir, cpu, no_pers)?;
-    // Every incarnation's output, in order.
-    let incs = crate::durability::check::incarnations(&dir);
-    let stdout: Vec<u8> = incs.iter().flat_map(|d| read(&d.join("stdout"))).collect();
-    let stderr: Vec<u8> = incs.iter().flat_map(|d| read(&d.join("stderr"))).collect();
+    // Every boot's output, in order.
+    let bdirs = crate::durability::check::boots(&dir);
+    let stdout: Vec<u8> = bdirs.iter().flat_map(|d| read(&d.join("stdout"))).collect();
+    let stderr: Vec<u8> = bdirs.iter().flat_map(|d| read(&d.join("stderr"))).collect();
     Ok(RunResult {
         oc,
         stdout,
@@ -312,7 +312,7 @@ pub fn verify(o: &Opts, out: &Path, runs: usize, vary: &[String]) -> Res<(Classi
                     let same = r.oc.digest == rr.oc.digest
                         && r.oc.verdict == rr.oc.verdict
                         && r.oc.traps == rr.oc.traps
-                        && r.oc.incarnations == rr.oc.incarnations
+                        && r.oc.boots == rr.oc.boots
                         && r.oc.crashes == rr.oc.crashes
                         && r.stdout == rr.stdout
                         && r.stderr == rr.stderr;

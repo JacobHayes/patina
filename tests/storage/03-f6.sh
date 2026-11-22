@@ -25,7 +25,7 @@ case "$(field "$f/result.json" message)" in
     *) die "F6: $(field "$f/result.json" message)" ;;
 esac
 [ "$(jq '.faults.injected - (.faults.counts.crash.injected // 0)' "$f/result.json")" = 0 ] || die "F6: expected no injected fault but the crash"
-native_fjall fjall-harness-debug "$f/inc-0/post-crash" "$f/native" >"$f/native.txt"
+native_fjall fjall-harness-debug "$f/boot-1/post-crash" "$f/native" >"$f/native.txt"
 grep -q '^INVARIANT batch-atomic-across-keyspaces' "$f/native.txt" || die "F6 native: $(tail -2 "$f/native.txt")"
 rm -rf "${f:?}/native"
 echo "F6 seed 2001: $(field "$f/result.json" message); native harness agrees on the kept tree"

@@ -17,7 +17,7 @@ patina_run() { # out seed guest args...
 # check_ok OUT GUEST [CHECKER-NAME]: outcome ok and the guest's printed results right.
 check_ok() {
     [ "$(field "$1/result.json" outcome)" = ok ] || die "$2 in $1: class $(field "$1/result.json" outcome) $(field "$1/result.json" message)"
-    python3 -I "$HERE/check_sig.py" "${3:-$2}" "$1/inc-0/stdout" || die "$2 in $1: wrong results"
+    python3 -I "$HERE/check_sig.py" "${3:-$2}" "$1/boot-1/stdout" || die "$2 in $1: wrong results"
 }
 
 # verify OUT SEED GUEST RUNS: patina verify exits 0 and, independently, the run directories
@@ -30,10 +30,10 @@ verify() {
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"
     d=$(for i in $(seq 0 $((n - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     [ "$d" = 1 ] || die "$g seed $seed: $d distinct digests"
-    d=$(for i in $(seq 0 $((n - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
+    d=$(for i in $(seq 0 $((n - 1))); do sha256sum <"$out/run-$i/boot-1/stdout"; done | sort -u | wc -l)
     [ "$d" = 1 ] || die "$g seed $seed: $d distinct stdout files"
     check_ok "$out/run-0" "$g"
 }
 
 # deliveries RUN: "count signal" lines of the guest signal deliveries in a boundary log.
-deliveries() { "$PATINA" log dump "$1/inc-0/boundary.log" | awk '$2 == "signal" {print $5}' | sort | uniq -c; }
+deliveries() { "$PATINA" log dump "$1/boot-1/boundary.log" | awk '$2 == "signal" {print $5}' | sort | uniq -c; }

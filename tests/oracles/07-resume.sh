@@ -16,7 +16,7 @@ verdict pass 'exit 0'
 rc=0
 sweep --seeds 1..6 --keep all >s1.txt 2>&1 || rc=$?
 [ "$rc" = 0 ] || die "first sweep: exit $rc: $(tail -3 s1.txt)"
-logs() { find sw -mindepth 2 -maxdepth 2 -name 'inc-*' | wc -l; }
+logs() { find sw -mindepth 2 -maxdepth 2 -name 'boot-*' | wc -l; }
 [ "$(logs)" -gt 0 ] || die "--keep all kept no logs"
 
 # The checker now rejects every run: the six judged again are findings, one group, which is

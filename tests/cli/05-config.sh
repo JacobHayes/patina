@@ -1,5 +1,6 @@
 # 5. A run from ./patina.toml with no flags equals the same run given only flags (from the same
-#    directory: a program runs from where it is): run.json is equal, and so are the digests.
+#    directory: a program runs from where it is): run.json is equal, and so are the digests. The
+#    file's [machine.main] run is the flags run's command after --.
 #    An unknown key is refused, naming it.
 #@ tier=quick budget=5
 . "$(dirname "$0")/lib.inc"
@@ -12,12 +13,14 @@ echo hello >"$d/data/x"
 printf '[run]\ncpus = 3\ntime-limit = 500\n' >"$d/rest.toml"
 cat >"$d/patina.toml" <<'EOF'
 [run]
-cmd = ["./prog", "a"]
 cpus = 3
 env = { CLI_TEST = "1" }
 mounts = ["./data:/data"]
 time-limit = 500
 timeout = 50
+
+[machine.main]
+run = ["./prog", "a"]
 
 [faults]
 fs-error-permille = 5

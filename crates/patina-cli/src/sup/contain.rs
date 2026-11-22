@@ -87,9 +87,9 @@ fn ctl_field(off: usize) -> String {
         ),
         (SCAN_TAB_OFFSET, SCAN_TAB_SIZE, "instruction scan table"),
         (
-            proto::node::NODE_TAB_OFFSET,
-            proto::node::NODE_TAB_SIZE,
-            "node table",
+            proto::machine::MACHINE_TAB_OFFSET,
+            proto::machine::MACHINE_TAB_SIZE,
+            "machine table",
         ),
     ];
     for (start, len, name) in tables {
@@ -127,7 +127,7 @@ const CTL_FIELDS: &[(usize, usize, &str)] = fields!(Ctl:
     denied, stop_nr, io, faults, insn, timing, sched, compute, debug, phases,
 );
 
-const SLOT_FIELDS: &[(usize, usize, &str)] = fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched, node, clock_flags, nofile_hard, probe_pc);
+const SLOT_FIELDS: &[(usize, usize, &str)] = fields!(Slot: go, state, tid, pid, req, rep, vmask, sigpend, siginfo, sched, machine, clock_flags, nofile_hard, probe_pc);
 
 #[cfg(test)]
 mod tests {

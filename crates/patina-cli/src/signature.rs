@@ -17,11 +17,11 @@
 //! paths keep their last three components (`checkout_free`), so a label made from a source
 //! file's path is the same in every checkout.
 //!
-//! The rule for nodes: a node's own end (`node_end`) is named `[node NAME]` with NAME's
+//! The rule for machines: a machine's own end (`machine_end`) is named `[machine NAME]` with NAME's
 //! digits collapsed, so replicas numbered alike (`n1`, `n2`, `n3`) that end the same way are
-//! one bug while nodes named for their roles (`primary`, `backup`) stay apart. Which node
+//! one bug while machines named for their roles (`primary`, `backup`) stay apart. Which machine
 //! crashed, and where, is a fault setting's effect and not part of it: a lost write found by
-//! the driver after b's crash and after a's has one name.
+//! main after b's crash and after a's has one name.
 
 use serde_json::Value;
 use std::path::Path;
@@ -39,26 +39,26 @@ const CHECK_DETAIL_MAX: usize = PRIMARY_MAX;
 const PATH_KEEP: usize = 3;
 
 /// The signature of a finished run (`null` for `ok`). `dir` is its run directory: the last
-/// incarnation's stderr is read there for a panic or assertion line.
+/// boot's stderr is read there for a panic or assertion line.
 pub fn of(r: &Value, dir: &Path) -> Value {
     let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
     let (outcome, stop) = (s("outcome"), s("stop"));
     if outcome == "ok" || outcome.is_empty() {
         return Value::Null;
     }
-    // A node's own end (`node_end`): its stderr, its exit or signal, and its name, which
-    // tells it from the same end of another node's command (digits collapsed: replicas).
-    let (stderr_at, at) = match r["node_end"]["node"].as_str() {
+    // A machine's own end (`machine_end`): its stderr, its exit or signal, and its name, which
+    // tells it from the same end of another machine's command (digits collapsed: replicas).
+    let (stderr_at, at) = match r["machine_end"]["machine"].as_str() {
         Some(n) => (
-            dir.join("node").join(n).join(format!(
-                "inc-{}",
-                r["node_end"]["incarnation"].as_u64().unwrap_or(0)
+            dir.join("machine").join(n).join(format!(
+                "boot-{}",
+                r["machine_end"]["boot"].as_u64().unwrap_or(1)
             )),
-            format!(" [node {}]", normalise(n)),
+            format!(" [machine {}]", normalise(n)),
         ),
         None => {
-            let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
-            (dir.join(format!("inc-{inc}")), String::new())
+            let boot = r["boots"].as_u64().unwrap_or(1).max(1);
+            (dir.join(format!("boot-{boot}")), String::new())
         }
     };
     let stderr = std::fs::read(stderr_at.join("stderr"))
@@ -106,8 +106,8 @@ fn primary(r: &Value, stderr: &str) -> String {
             } else if let Some(l) = last_line(stderr) {
                 parts.push(l);
             }
-            let g = if r["node_end"].is_object() {
-                &r["node_end"]
+            let g = if r["machine_end"].is_object() {
+                &r["machine_end"]
             } else {
                 &r["guest"]
             };
@@ -340,8 +340,8 @@ mod tests {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("patina-sig-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(dir.join("inc-0")).unwrap();
-        std::fs::write(dir.join("inc-0/stderr"), stderr).unwrap();
+        std::fs::create_dir_all(dir.join("boot-1")).unwrap();
+        std::fs::write(dir.join("boot-1/stderr"), stderr).unwrap();
         let s = of(&r, &dir);
         std::fs::remove_dir_all(&dir).unwrap();
         s.as_str().unwrap_or("").to_string()
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn what_varies_by_seed_does_not_split_and_what_failed_does() {
         let fail = |exit: i64| {
-            json!({"outcome": "failure", "stop": "exit", "message": "x", "incarnations": 1,
+            json!({"outcome": "failure", "stop": "exit", "message": "x", "boots": 1,
                    "guest": {"exit": exit, "signal": null}})
         };
         let panic = |thread: &str, line: u32, msg: &str| {
@@ -409,28 +409,30 @@ mod tests {
     }
 
     #[test]
-    fn a_node_end_names_its_node_with_digits_collapsed() {
-        let end = |node: &str| {
-            let dir =
-                std::env::temp_dir().join(format!("patina-sig-node-{}-{node}", std::process::id()));
-            let inc = dir.join("node").join(node).join("inc-0");
-            std::fs::create_dir_all(&inc).unwrap();
-            std::fs::write(inc.join("stderr"), "replica diverged at 41\n").unwrap();
-            let r = json!({"outcome": "failure", "stop": "node-exit", "message": "x",
-                "node_end": {"node": node, "incarnation": 0, "exit": 3, "signal": null}});
+    fn a_machine_end_names_its_machine_with_digits_collapsed() {
+        let end = |machine: &str| {
+            let dir = std::env::temp_dir().join(format!(
+                "patina-sig-machine-{}-{machine}",
+                std::process::id()
+            ));
+            let bdir = dir.join("machine").join(machine).join("boot-1");
+            std::fs::create_dir_all(&bdir).unwrap();
+            std::fs::write(bdir.join("stderr"), "replica diverged at 41\n").unwrap();
+            let r = json!({"outcome": "failure", "stop": "machine-exit", "message": "x",
+                "machine_end": {"machine": machine, "boot": 1, "exit": 3, "signal": null}});
             let s = of(&r, &dir);
             std::fs::remove_dir_all(&dir).unwrap();
             s.as_str().unwrap_or("").to_string()
         };
         // Replicas numbered alike: one bug.
         assert_eq!(end("n1"), end("n3"));
-        // Nodes named for their roles: apart, and apart from the driver's end.
+        // Machines named for their roles: apart, and apart from main's end.
         assert_ne!(end("primary"), end("backup"));
         assert!(
             end("primary")
                 != sig(
-                    json!({"outcome": "failure", "stop": "node-exit",
-            "message": "x", "incarnations": 1, "guest": {"exit": 3, "signal": null}}),
+                    json!({"outcome": "failure", "stop": "machine-exit",
+            "message": "x", "boots": 1, "guest": {"exit": 3, "signal": null}}),
                     "replica diverged at 41\n"
                 )
         );
@@ -447,12 +449,12 @@ mod tests {
         assert!(c.starts_with("violation check: acked-record-lost"), "{c}");
         // A checker's first line is the name it chose: kept whole (an `always` detail is cut),
         // its label's digits too.
-        let detail = format!("open db: {} (inc-2)", "x".repeat(80));
+        let detail = format!("open db: {} (boot-2)", "x".repeat(80));
         let check = json!({"outcome": "violation", "stop": "check", "message": "x",
             "check": {"verdict": "fail", "label": "open-ps1", "detail": detail}});
         let c = sig(check, "");
         assert!(
-            c.starts_with("violation check: open-ps1: ") && c.ends_with("(inc-N)"),
+            c.starts_with("violation check: open-ps1: ") && c.ends_with("(boot-N)"),
             "{c}"
         );
     }

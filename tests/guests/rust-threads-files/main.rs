@@ -1,7 +1,7 @@
 //! W1 rust-threads-files: 8 threads produce records under a mutex; a condvar-driven
 //! flusher appends them to `log`, fsyncs it, then acknowledges them in `acks` (fsynced).
 //! Every third batch it also replaces `state` (a snapshot) by write-to-temp + rename and
-//! acknowledges the snapshot number. A checker runs at the start of every incarnation
+//! acknowledges the snapshot number. A checker runs at the start of every boot
 //! after the first (the tree under /work/w1 exists) and verifies that every acknowledged
 //! record and snapshot survived.
 //!
@@ -159,7 +159,7 @@ fn main() {
         setup(root);
         (0, 0)
     };
-    let round: u64 = std::env::var("PATINA_INCARNATION").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let round: u64 = std::env::var("PATINA_BOOT").ok().and_then(|s| s.parse::<u64>().ok()).map_or(0, |b| b - 1);
     let seq0 = seq0.max(round * 1_000_000);
     let sh = Arc::new((Mutex::new(Shared { pending: vec![], durable_upto: seq0, next_seq: seq0, workers_done: 0 }), Condvar::new(), Condvar::new()));
     // flusher

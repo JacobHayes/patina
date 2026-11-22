@@ -4,6 +4,6 @@ if grep -qx "$PATINA_CASE_ID" "$(dirname "$0")/expected.txt" 2>/dev/null; then
     echo "expected: case $PATINA_CASE_ID differs by design"
     exit 77
 fi
-cmp -s "$ref/inc-0/stdout" "$2/inc-0/stdout" && exit 0
-echo "wrong-output [$PATINA_CASE_ID]: got $(head -c 20 "$2/inc-0/stdout" | tr -c '[:print:]' .)"
+cmp -s "$ref/boot-1/stdout" "$2/boot-1/stdout" && exit 0
+echo "wrong-output [$PATINA_CASE_ID]: got $(head -c 20 "$2/boot-1/stdout" | tr -c '[:print:]' .)"
 exit 1

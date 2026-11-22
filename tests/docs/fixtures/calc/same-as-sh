@@ -11,7 +11,7 @@ sub) want=$(($4 - $5)) ;;
 mul) want=$(($4 * $5)) ;;
 *) want=wrong ;;
 esac
-got=$(cat "$run/inc-0/stdout")
+got=$(cat "$run/boot-1/stdout")
 [ "$got" = "$want" ] && exit 0
 echo "wrong-$op: got $got, want $want"
 exit 1

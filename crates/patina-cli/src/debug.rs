@@ -55,7 +55,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     let rundir = PathBuf::from(rundir);
     let (mut cfg, program) = crate::replay::load(&rundir).map_err(err)?;
     let recorded = crate::result::read_json(&rundir.join("result.json")).map_err(err)?;
-    if crate::durability::check::incarnations(&rundir).is_empty() {
+    if crate::durability::check::boots(&rundir).is_empty() {
         return Err(err(format!(
             "{}: the run kept no logs (a sweep keeps those of the first runs of each finding): run the seed again with patina run to debug it",
             rundir.display()
@@ -182,7 +182,7 @@ fn resolve(rundir: &Path, at: &str, events: &[Value]) -> Result<(u64, String), F
             .and_then(|v| v["seq"].as_u64())
             .ok_or_else(|| err(format!("--at {at}: the run has {} {what}", all.len())))
     };
-    // NAME[:NODE][:K]: the last part is K when it is a number.
+    // NAME[:MACHINE][:K]: the last part is K when it is a number.
     let split = |rest: &str| -> (String, Option<String>, i64) {
         let mut parts: Vec<&str> = rest.split(':').collect();
         let k = match parts.last().and_then(|p| p.parse::<i64>().ok()) {
@@ -192,8 +192,8 @@ fn resolve(rundir: &Path, at: &str, events: &[Value]) -> Result<(u64, String), F
             }
             _ => -1,
         };
-        let node = (parts.len() > 1).then(|| parts[1..].join(":"));
-        (parts[0].to_string(), node, k)
+        let machine = (parts.len() > 1).then(|| parts[1..].join(":"));
+        (parts[0].to_string(), machine, k)
     };
     let seq = match at.split_once(':') {
         None if at == "stop" => match crate::explain::stop_event(rundir)? {
@@ -235,12 +235,12 @@ fn resolve(rundir: &Path, at: &str, events: &[Value]) -> Result<(u64, String), F
             )?
         }
         Some((kind @ ("call" | "mark" | "sdk"), rest)) => {
-            let (name, node, k) = split(rest);
+            let (name, machine, k) = split(rest);
             let key = if kind == "call" { "name" } else { "label" };
             let all = events
                 .iter()
                 .filter(|v| v["type"] == kind && v[key] == name.as_str())
-                .filter(|v| node.as_deref().is_none_or(|n| v["node"] == n))
+                .filter(|v| machine.as_deref().is_none_or(|n| v["machine"] == n))
                 .collect();
             pick(all, k, &format!("{kind} events named {name}"))?
         }
@@ -281,8 +281,8 @@ fn describe(v: &Value) -> String {
         t => t.to_string(),
     };
     let mut who = vec![];
-    if let Some(n) = v["node"].as_str() {
-        who.push(format!("node {n}"));
+    if let Some(n) = v["machine"].as_str() {
+        who.push(format!("machine {n}"));
     }
     let guest = !matches!(
         v["type"].as_str(),
@@ -348,8 +348,8 @@ fn notes(out: &Path) -> Vec<(&'static str, &'static str)> {
 /// replayed one's where the recorded log ended) and the difference in words.
 fn first_left(rundir: &Path, out: &Path) -> Res<Option<(u64, String)>> {
     let (a, b) = (
-        crate::durability::check::incarnations(rundir),
-        crate::durability::check::incarnations(out),
+        crate::durability::check::boots(rundir),
+        crate::durability::check::boots(out),
     );
     for (da, db) in a.iter().zip(&b) {
         let load = |d: &Path| crate::log::load(&d.join("boundary.log").display().to_string());
@@ -465,8 +465,8 @@ struct Proc {
     pid: i32,
     host: i32,
     comm: String,
-    /// The machine it runs on, in a run with nodes.
-    node: String,
+    /// The machine it runs on, in a run with machines.
+    machine: String,
     /// (sandbox tid, host tid)
     threads: Vec<(i32, i32)>,
 }
@@ -620,7 +620,7 @@ fn sandbox_procs(keeper: i32) -> Res<(String, Vec<Proc>)> {
             pid,
             host,
             comm,
-            node: String::new(),
+            machine: String::new(),
             threads,
         });
     }
@@ -649,19 +649,19 @@ fn stopped(
         _ => (0, 0),
     };
     let (pidns, mut procs) = sandbox_procs(keeper)?;
-    // With nodes, each process's machine, from its threads' slots.
+    // With machines, each process's machine, from its threads' slots.
     // SAFETY: as above.
     let base = ctl as *mut u8;
-    let tab = unsafe { proto::node::NodeTab::at(base) };
+    let tab = unsafe { proto::machine::MachineTab::at(base) };
     if tab.count() > 0 {
         for i in 0..proto::ctl::MAX_THREADS {
             let sl = unsafe { &*proto::Ctl::at(base).slot(i) };
             if sl.state.load(SeqCst) != proto::ctl::SLOT_LIVE {
                 continue;
             }
-            let (pid, k) = (sl.pid.load(SeqCst), sl.node.load(SeqCst) as usize);
+            let (pid, k) = (sl.pid.load(SeqCst), sl.machine.load(SeqCst) as usize);
             if let Some(q) = procs.iter_mut().find(|q| q.pid == pid) {
-                q.node = String::from_utf8_lossy(tab.name(k)).into_owned();
+                q.machine = String::from_utf8_lossy(tab.name(k)).into_owned();
             }
         }
     }
@@ -687,7 +687,7 @@ fn stopped(
         "watchpoints": !(s.sigtrap_pass && cfg!(target_arch = "aarch64")),
         "release": release,
         "notes": out.join("notes"),
-        "procs": procs.iter().map(|q| json!({"pid": q.pid, "host": q.host, "comm": q.comm, "node": q.node, "threads": q.threads.len(), "maps": images(q.host)})).collect::<Vec<_>>(),
+        "procs": procs.iter().map(|q| json!({"pid": q.pid, "host": q.host, "comm": q.comm, "machine": q.machine, "threads": q.threads.len(), "maps": images(q.host)})).collect::<Vec<_>>(),
     });
     crate::result::write_json(&out.join("debug.json"), &facts)?;
     // Whole or not there: a script may start gdb as soon as the helper exists.
@@ -717,7 +717,7 @@ fn stopped(
         "  {whose}: pid {} ({}{}) thread {tid} [host pid {}, thread {host_tid}]; other threads parked: {others}; processes: {}",
         p.pid,
         p.comm,
-        if p.node.is_empty() { String::new() } else { format!(", node {}", p.node) },
+        if p.machine.is_empty() { String::new() } else { format!(", machine {}", p.machine) },
         p.host,
         procs.len()
     );

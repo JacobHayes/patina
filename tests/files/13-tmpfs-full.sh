@@ -10,7 +10,7 @@ size=$((8 << 20))
 cfg=$("$PATINA_CFG" disk-mb=8)
 said=$("$PATINA" run --seed 1 --config "$cfg" --out "$o" --mount "$PATINA_GUESTS":/guest -- /guest/statfs fill 2>&1) ||
     die "statfs fill: $said"
-out=$o/inc-0/stdout
+out=$o/boot-1/stdout
 read -r n e < <(sed -n 's/^filled \([0-9]*\) errno=\([0-9]*\)$/\1 \2/p' "$out")
 [ "$e" = 28 ] && [ "$n" -gt $((size / 2)) ] && [ "$n" -le "$size" ] || die "filled: $(cat "$out")"
 grep -q "^statfs /tmp .* blocks=$((size / 4096)) " "$out" || die "/tmp: $(grep '^statfs /tmp' "$out")"

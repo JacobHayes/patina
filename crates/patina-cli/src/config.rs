@@ -59,17 +59,17 @@ pub struct Config {
     /// `K=V`, in order; a later key replaces an earlier one.
     pub env: Vec<String>,
     pub mounts: Vec<Mount>,
-    pub work: Option<PathBuf>,
-    /// Where the work tree is in the guest (`--work DIR:GUEST`); none is `/work`.
+    pub disk: Option<PathBuf>,
+    /// Where the disk is in the guest (`--disk DIR:GUEST`); none is `/work`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_at: Option<String>,
+    pub disk_at: Option<String>,
     pub stdin: Option<PathBuf>,
     pub cpus: u64,
     /// Virtual seconds.
     pub time_limit: u64,
     /// Wall seconds.
     pub timeout: u64,
-    /// MiB the run's logs may hold, every incarnation together (`[run] log-limit`).
+    /// MiB the run's logs may hold, every boot together (`[run] log-limit`).
     pub log_limit: u64,
     /// `patina explain`'s replay: observations of data calls beside the log, outside the
     /// digest (`proto::ctl::Config::observe`). Never part of a run's settings or `run.json`.
@@ -81,9 +81,9 @@ pub struct Config {
     pub debug_at: Option<u64>,
     /// Size of each sandbox tmpfs in bytes (`[run] disk-mb`, in MiB).
     pub tmpfs_bytes: u64,
-    /// Fault classes (`--faults`, `[faults] faults`), each `CLASS[,CLASS][@NODE,...]`.
+    /// Fault classes (`--faults`, `[faults] faults`), each `CLASS[,CLASS][@MACHINE,...]`.
     pub fault_classes: Vec<String>,
-    /// `KEY=VALUE[@NODE,...]` fault settings, in order; they replace a class's.
+    /// `KEY=VALUE[@MACHINE,...]` fault settings, in order; they replace a class's.
     pub faults: Vec<String>,
     /// The run's setup (`--setup`, `[run] setup`): a command run first, without faults, or
     /// the program's own `setup-complete` mark. No fault acts before it ends.
@@ -127,7 +127,7 @@ pub struct Config {
     /// of the run, so not in `run.json`.
     #[serde(skip)]
     pub known: Option<PathBuf>,
-    /// With `--crash-points` and nodes, the second crashes after each first one (`[sweep]
+    /// With `--crash-points` and machines, the second crashes after each first one (`[sweep]
     /// crash-pairs`): a setting of the sweep, not of a run.
     #[serde(skip)]
     pub crash_pairs: Option<usize>,
@@ -139,9 +139,9 @@ pub struct Config {
     /// rerun from `run.json` is the same case.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case: Option<RunCase>,
-    /// The machines besides the driver (`[node.NAME]`), in declaration order: node 1 upward.
+    /// The machines besides main (`[machine.NAME]`), in declaration order: machine 1 upward.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<Node>,
+    pub machines: Vec<Machine>,
 }
 
 /// A run's setup (`[run] setup`): a command Patina runs before the main one, or `mark`, the
@@ -177,65 +177,66 @@ fn command(mut w: Vec<String>, what: &str) -> Res<Vec<String>> {
     Ok(w)
 }
 
-/// One node of a run with several machines (`proto::node`).
+/// One machine of a run with several machines (`proto::machine`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Node {
+pub struct Machine {
     pub name: String,
-    pub cmd: Vec<String>,
+    /// `run`: the command Patina starts at each of its boots.
+    pub run: Vec<String>,
     /// `K=V`, added to the run's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
-    /// The host directory copied into its work tree at its start, and the tree's guest path
-    /// (`work = "DIR[:GUEST]"`, as `--work`; no `GUEST`: `/work`).
+    /// The host directory copied into its disk at its start, and the tree's guest path
+    /// (`work = "DIR[:GUEST]"`, as `--disk`; no `GUEST`: `/work`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work: Option<PathBuf>,
+    pub disk: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub work_at: Option<String>,
+    pub disk_at: Option<String>,
     /// `restart`: `crash` (`None`), `always` or `never`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restart: Option<String>,
     /// `ok-exit`: exit statuses of its command that stop it without a finding (none: `[0]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ok_exit: Option<Vec<u8>>,
-    /// `max-incarnations`: its boots (none: the run's `max-incarnations`).
+    /// `max-boots`: its boots (none: the run's `max-boots`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_incarnations: Option<u64>,
-    /// `faults = false`: no seed faults of its own, as the driver: a setting given without a
+    pub max_boots: Option<u64>,
+    /// `faults = false`: no seed faults of its own, as main: a setting given without a
     /// scope (`--faults`, `--fault`) leaves it out, and a scope may not name it.
     /// Links to it and partitions, which are the run's, still act on it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_faults: bool,
-    /// `disk-mb`: the size of its work tree, `/tmp` and `/dev/shm` in MiB, `N` or `A..B`
-    /// drawn per seed (`Config::node_disk_bytes`; none: the run's `[run] disk-mb`, which it
+    /// `disk-mb`: the size of its disk, `/tmp` and `/dev/shm` in MiB, `N` or `A..B`
+    /// drawn per seed (`Config::machine_disk_bytes`; none: the run's `[run] disk-mb`, which it
     /// may not exceed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<String>,
 }
 
-impl Node {
-    pub fn new(name: String, cmd: Vec<String>) -> Node {
-        Node {
+impl Machine {
+    pub fn new(name: String, run: Vec<String>) -> Machine {
+        Machine {
             name,
-            cmd,
+            run,
             env: vec![],
-            work: None,
-            work_at: None,
+            disk: None,
+            disk_at: None,
             restart: None,
             ok_exit: None,
-            max_incarnations: None,
+            max_boots: None,
             no_faults: false,
             disk_mb: None,
         }
     }
 
-    pub fn work_path(&self) -> &str {
-        self.work_at.as_deref().unwrap_or("/work")
+    pub fn disk_path(&self) -> &str {
+        self.disk_at.as_deref().unwrap_or("/work")
     }
 }
 
-/// The most nodes besides the driver.
-pub const MAX_NODES: usize = proto::node::MAX_NODES - 1;
+/// The most machines besides main.
+pub const MAX_MACHINES: usize = proto::machine::MAX_MACHINES - 1;
 
 /// A sweep case, as its run records it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,8 +255,8 @@ impl Default for Config {
             cmd: vec![],
             env: vec![],
             mounts: vec![],
-            work: None,
-            work_at: None,
+            disk: None,
+            disk_at: None,
             stdin: None,
             cpus: DEFAULT_CPUS,
             time_limit: 3600,
@@ -283,7 +284,7 @@ impl Default for Config {
             crash_pairs: None,
             check_timeout: None,
             case: None,
-            nodes: vec![],
+            machines: vec![],
         }
     }
 }
@@ -311,8 +312,8 @@ pub struct Opts {
     pub program: Program,
     pub plan: faults::Plan,
     pub fs_model: Model,
-    /// Each node's program (`cfg.nodes` order).
-    pub node_programs: Vec<Program>,
+    /// Each machine's program (`cfg.machines` order).
+    pub machine_programs: Vec<Program>,
     /// The setup command's program and the final check's (`Config::setup`, `Config::finally`).
     pub setup_program: Option<Program>,
     pub finally_program: Option<Program>,
@@ -334,7 +335,7 @@ fn existing(base: &Path, what: &str, p: &str) -> Res<PathBuf> {
     std::fs::canonicalize(&full).map_err(|e| format!("{what} {p}: {e}"))
 }
 
-/// Why a mount or the work tree cannot be at guest path `dst`, if it cannot: it would shadow
+/// Why a mount or the disk cannot be at guest path `dst`, if it cannot: it would shadow
 /// what the sandbox needs.
 fn shadows(dst: &str) -> Option<String> {
     let under = |r: &str| dst == r || dst.starts_with(&format!("{r}/"));
@@ -371,7 +372,7 @@ fn shadows(dst: &str) -> Option<String> {
     None
 }
 
-/// A guest path as `--mount` and `--work` take it: absolute, without `.` or `..`, not `/`,
+/// A guest path as `--mount` and `--disk` take it: absolute, without `.` or `..`, not `/`,
 /// no trailing slash.
 fn guest_path(what: &str, dst: &str) -> Res<String> {
     let p = Path::new(dst);
@@ -397,8 +398,8 @@ fn guest_path(what: &str, dst: &str) -> Res<String> {
     Ok(dst)
 }
 
-/// `--work DIR[:GUEST]` (DIR may be empty: an empty tree at GUEST).
-fn work(base: &Path, what: &str, s: &str) -> Res<(Option<PathBuf>, Option<String>)> {
+/// `--disk DIR[:GUEST]` (DIR may be empty: an empty tree at GUEST).
+fn disk_arg(base: &Path, what: &str, s: &str) -> Res<(Option<PathBuf>, Option<String>)> {
     let (dir, at) = match s.rsplit_once(':') {
         Some((d, g)) if g.starts_with('/') => (d, Some(g)),
         _ => (s, None),
@@ -827,10 +828,10 @@ fn scalar(v: &toml::Value, at: &str) -> Res<String> {
     }
 }
 
-/// One key of `patina.toml`. `apply_file` and `nodes` accept a key only if it is here, and
+/// One key of `patina.toml`. `apply_file` and `machines` accept a key only if it is here, and
 /// `patina --help --format json` and `patina guide config` print this table.
 pub struct TomlKey {
-    /// `run`, `faults`, `sched`, `sweep` or `node.NAME`.
+    /// `run`, `faults`, `sched`, `sweep` or `machine.NAME`.
     pub table: &'static str,
     pub key: &'static str,
     pub value: &'static str,
@@ -855,10 +856,8 @@ const fn tk(
 }
 
 pub const TOML_KEYS: &[TomlKey] = &[
-    tk("run", "cmd", "[\"CMD\", \"ARG\", ...]", "none", "the program and its arguments, as after `--`"),
     tk("run", "env", "{ K = \"V\" }", "none", "added to the guest environment, as `--env`"),
     tk("run", "mounts", "[\"SRC:DST[:copy]\", ...]", "none", "as `--mount`"),
-    tk("run", "work", "\"DIR[:GUEST]\"", "empty", "as `--work`"),
     tk("run", "stdin", "\"FILE\"", "empty", "as `--stdin`"),
     tk("run", "check", "\"CMD ARGS\"", "none", "as `--check`"),
     tk("run", "ok-exit", "[N, \"N:CLASS,...\"] or \"any\"", "none", "as `--ok-exit`"),
@@ -870,23 +869,23 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("run", "check-timeout", "SECONDS", "60", "wall time a checker may take"),
     tk("run", "setup", "\"CMD ARGS\", [\"CMD\", \"ARG\", ...] or \"mark\"", "none", "as `--setup`: run first, without faults; `mark`: the program marks `setup-complete`"),
     tk("run", "finally", "\"CMD ARGS\" or [\"CMD\", \"ARG\", ...]", "none", "as `--finally`: the final check, run with the faults stopped"),
-    tk("faults", "faults", "[\"CLASS[@NODE,...]\", ...]", "none", "as `--faults`"),
+    tk("faults", "faults", "[\"CLASS[@MACHINE,...]\", ...]", "none", "as `--faults`"),
     tk("faults", "KEY", "VALUE", "none", "any fault key, as `--fault KEY=VALUE` (`patina run --fault help`)"),
     tk("faults", "fs-model", "\"ext4-ordered\" or \"posix-strict\"", "ext4-ordered", "what a machine crash keeps"),
     tk("sched", "preempt", "\"points\" or \"traps\"", "points", "`traps`: switch threads only at system calls, spin hints and spin probes (a diagnostic)"),
     tk("sched", "preempt-permille", "P", "100", "the chance in 1000 that a system call switches threads"),
     tk("sweep", "known", "\"FILE\"", "none", "as `--known`"),
     tk("sweep", "allow-unmet", "[\"LABEL\", ...]", "none", "as `--allow-unmet`"),
-    tk("sweep", "crash-pairs", "K", "off", "with `--crash-points` and nodes: crash a second node at each of its next K points after a first crash"),
-    tk("node.NAME", "cmd", "[\"CMD\", \"ARG\", ...]", "required", "the node's program"),
-    tk("node.NAME", "env", "{ K = \"V\" }", "none", "added to the run's environment"),
-    tk("node.NAME", "work", "\"DIR[:GUEST]\"", "empty", "its work tree's starting files, as `--work`"),
-    tk("node.NAME", "restart", "\"crash\", \"always\" or \"never\"", "crash", "after which downs the seed restarts it (`always`: also after it exits within `ok-exit`)"),
-    tk("node.NAME", "ok-exit", "N or [N, ...]", "[0]", "exit statuses that only stop the node"),
-    tk("node.NAME", "max-incarnations", "N", "the run's", "the most boots the seed's crashes give it (1 to 64)"),
-    tk("node.NAME", "disk-mb", "N or \"A..B\"", "the run's", "its filesystems' size, drawn per seed from a range"),
-    tk("node.NAME", "count", "N", "1", "N nodes of this table, named NAME1 to NAMEN"),
-    tk("node.NAME", "faults", "true or false", "true", "`false`: no faults of its own, as the driver"),
+    tk("sweep", "crash-pairs", "K", "off", "with `--crash-points` and machines: crash a second machine at each of its next K points after a first crash"),
+    tk("machine.NAME", "run", "[\"CMD\", \"ARG\", ...]", "required", "the command Patina starts at each of its boots; [machine.main] run is the command after `--`"),
+    tk("machine.NAME", "env", "{ K = \"V\" }", "none", "added to the run's environment"),
+    tk("machine.NAME", "disk", "\"DIR[:GUEST]\"", "empty", "its disk's starting files (main's: as `--disk`)"),
+    tk("machine.NAME", "restart", "\"crash\", \"always\" or \"never\"", "crash", "after which downs the seed restarts it (`always`: also after it exits within `ok-exit`)"),
+    tk("machine.NAME", "ok-exit", "N or [N, ...]", "[0]", "exit statuses that only stop the machine"),
+    tk("machine.NAME", "max-boots", "N", "the run's", "the most boots the seed's crashes give it (1 to 64)"),
+    tk("machine.NAME", "disk-mb", "N or \"A..B\"", "the run's", "its filesystems' size, drawn per seed from a range"),
+    tk("machine.NAME", "count", "N", "1", "N machines of this table, named NAME1 to NAMEN"),
+    tk("machine.NAME", "faults", "true or false", "true", "`false`: no faults of its own, as main"),
 ];
 
 fn known_key(table: &str, key: &str) -> bool {
@@ -895,7 +894,7 @@ fn known_key(table: &str, key: &str) -> bool {
 }
 
 /// Apply `patina.toml` (read from `path`; relative paths in it are relative to its directory,
-/// but `[run] cmd` and `[run] check`, commands, are relative to where patina is started), or
+/// but `[machine.main] run` and `[run] check`, commands, are relative to where patina is started), or
 /// take the whole configuration a run recorded when `path` is a `run.json`. Returns `[run]
 /// check`, resolved by the caller once flags are known.
 fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
@@ -917,8 +916,8 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
     let unknown = |k: &str| format!("{name}: unknown key {k}");
     for (sec, v) in &doc {
         let t = table(v, &format!("{name}: [{sec}]"))?;
-        if sec == "node" {
-            c.nodes = nodes(&text, t, &base, &name)?;
+        if sec == "machine" {
+            machines(c, &text, t, &base, &name)?;
             continue;
         }
         for (k, v) in t {
@@ -930,7 +929,6 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 return Err(unknown(&format!("{sec}.{k}")));
             }
             match (sec.as_str(), k.as_str()) {
-                ("run", "cmd") => c.cmd = strings(v, &at)?,
                 ("run", "cpus") => c.cpus = int(v, &at)?,
                 ("run", "env") => {
                     for (ek, ev) in table(v, &at)? {
@@ -943,7 +941,6 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                             .push(mount(&base, &m).map_err(|e| format!("{at}: {e}"))?);
                     }
                 }
-                ("run", "work") => (c.work, c.work_at) = work(&base, &at, &string(v, &at)?)?,
                 ("run", "stdin") => c.stdin = Some(existing(&base, &at, &string(v, &at)?)?),
                 ("run", "time-limit") => c.time_limit = time_limit(int(v, &at)?, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
@@ -998,18 +995,19 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
     Ok(check)
 }
 
-/// `[node.NAME]` tables, in the order the file declares them (a TOML table's keys are not).
-fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>> {
+/// `[machine.NAME]` tables, in the order the file declares them (a TOML table's keys are not).
+/// `[machine.main]` is main's: its `run` is the command after `--`, its `disk` is `--disk`'s.
+fn machines(c: &mut Config, text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<()> {
     let order: Vec<String> = match toml::de::DeTable::parse(text) {
         Ok(d) => {
-            let mut keys: Vec<(usize, String)> = match d.get_ref().get("node").map(|v| v.get_ref())
-            {
-                Some(toml::de::DeValue::Table(n)) => n
-                    .keys()
-                    .map(|k| (k.span().start, k.get_ref().to_string()))
-                    .collect(),
-                _ => vec![],
-            };
+            let mut keys: Vec<(usize, String)> =
+                match d.get_ref().get("machine").map(|v| v.get_ref()) {
+                    Some(toml::de::DeValue::Table(n)) => n
+                        .keys()
+                        .map(|k| (k.span().start, k.get_ref().to_string()))
+                        .collect(),
+                    _ => vec![],
+                };
             keys.sort();
             keys.into_iter().map(|k| k.1).collect()
         }
@@ -1017,29 +1015,43 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
     };
     let mut out = vec![];
     for n in order {
-        let at = format!("{file}: node.{n}");
+        let at = format!("{file}: machine.{n}");
         let v = t.get(&n).ok_or_else(|| format!("{at}: not found"))?;
-        let mut node = Node::new(n.clone(), vec![]);
+        if n == "main" {
+            for (k, v) in table(v, &at)? {
+                let at = format!("{at}.{k}");
+                match k.as_str() {
+                    "run" => c.cmd = strings(v, &at)?,
+                    "disk" => (c.disk, c.disk_at) = disk_arg(base, &at, &string(v, &at)?)?,
+                    _ if known_key("machine.NAME", k) => {
+                        return Err(format!("{at}: main takes run and disk only"))
+                    }
+                    _ => return Err(format!("{file}: unknown key machine.main.{k}")),
+                }
+            }
+            continue;
+        }
+        let mut machine = Machine::new(n.clone(), vec![]);
         let mut count = None;
         for (k, v) in table(v, &at)? {
-            if !known_key("node.NAME", k) {
-                return Err(format!("{file}: unknown key node.{n}.{k}"));
+            if !known_key("machine.NAME", k) {
+                return Err(format!("{file}: unknown key machine.{n}.{k}"));
             }
             let at = format!("{at}.{k}");
             match k.as_str() {
-                "cmd" => node.cmd = strings(v, &at)?,
+                "run" => machine.run = strings(v, &at)?,
                 "env" => {
                     for (ek, ev) in table(v, &at)? {
-                        node.env.push(format!("{ek}={}", string(ev, &at)?));
+                        machine.env.push(format!("{ek}={}", string(ev, &at)?));
                     }
                 }
-                "work" => (node.work, node.work_at) = work(base, &at, &string(v, &at)?)?,
+                "disk" => (machine.disk, machine.disk_at) = disk_arg(base, &at, &string(v, &at)?)?,
                 "restart" => {
                     let s = string(v, &at)?;
                     if !matches!(s.as_str(), "crash" | "always" | "never") {
                         return Err(format!("{at}: crash, always or never, not {s}"));
                     }
-                    node.restart = Some(s);
+                    machine.restart = Some(s);
                 }
                 "ok-exit" => {
                     let l: Vec<i64> = match v {
@@ -1054,52 +1066,53 @@ fn nodes(text: &str, t: &toml::Table, base: &Path, file: &str) -> Res<Vec<Node>>
                     if let Some(x) = l.iter().find(|x| !(0..=255).contains(*x)) {
                         return Err(format!("{at}: {x} is not an exit status (0 to 255)"));
                     }
-                    node.ok_exit = Some(l.iter().map(|x| *x as u8).collect());
+                    machine.ok_exit = Some(l.iter().map(|x| *x as u8).collect());
                 }
                 "disk-mb" => {
-                    node.disk_mb = Some(match v {
+                    machine.disk_mb = Some(match v {
                         toml::Value::Integer(i) => i.to_string(),
                         _ => string(v, &at)?,
                     })
                 }
-                "max-incarnations" => {
+                "max-boots" => {
                     let n_: u64 = int(v, &at)?;
-                    if n_ == 0 || n_ > proto::node::BOOTS_MAX as u64 {
+                    if n_ == 0 || n_ > proto::machine::BOOTS_MAX as u64 {
                         return Err(format!(
-                            "{at}: 1 to {} (a node boots at most that often)",
-                            proto::node::BOOTS_MAX
+                            "{at}: 1 to {} (a machine boots at most that often)",
+                            proto::machine::BOOTS_MAX
                         ));
                     }
-                    node.max_incarnations = Some(n_);
+                    machine.max_boots = Some(n_);
                 }
                 "count" => {
                     let c: u64 = int(v, &at)?;
-                    if c == 0 || c > MAX_NODES as u64 {
-                        return Err(format!("{at}: 1 to {MAX_NODES}"));
+                    if c == 0 || c > MAX_MACHINES as u64 {
+                        return Err(format!("{at}: 1 to {MAX_MACHINES}"));
                     }
                     count = Some(c);
                 }
                 "faults" => {
                     if !boolean(v, &at)? {
-                        node.no_faults = true;
+                        machine.no_faults = true;
                     }
                 }
-                _ => return Err(format!("{file}: unknown key node.{n}.{k}")),
+                _ => return Err(format!("{file}: unknown key machine.{n}.{k}")),
             }
         }
-        // `count = N`: nodes NAME1..NAMEN in its place, each with this table.
+        // `count = N`: machines NAME1..NAMEN in its place, each with this table.
         match count {
             Some(c) => {
                 for i in 1..=c {
-                    let mut x = node.clone();
+                    let mut x = machine.clone();
                     x.name = format!("{n}{i}");
                     out.push(x);
                 }
             }
-            None => out.push(node),
+            None => out.push(machine),
         }
     }
-    Ok(out)
+    c.machines = out;
+    Ok(())
 }
 
 /// The resolved configuration of `run` and `verify`.
@@ -1144,7 +1157,7 @@ fn test_inputs(c: &mut Config) -> Res<()> {
 pub fn resolve(a: &Args) -> Res<Config> {
     let c = resolve_any(a)?;
     if c.cmd.is_empty() {
-        return Err("no program: give -- CMD ARGS..., or [run] cmd in patina.toml".into());
+        return Err("no command for main: give one after `--` or as [machine.main] run".into());
     }
     Ok(c)
 }
@@ -1169,23 +1182,25 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
         }
         c.env.push(e.clone());
     }
-    for n in a.all("--node") {
+    for n in a.all("--machine") {
         let (name, cmd) = n
             .split_once('=')
-            .ok_or_else(|| format!("--node {n}: expected NAME='CMD ARGS'"))?;
-        if c.nodes.iter().any(|x| x.name == name) {
-            return Err(format!("--node {name}: the run already has a node {name}"));
+            .ok_or_else(|| format!("--machine {n}: expected NAME='CMD ARGS'"))?;
+        if c.machines.iter().any(|x| x.name == name) {
+            return Err(format!(
+                "--machine {name}: the run already has a machine {name}"
+            ));
         }
-        c.nodes.push(Node::new(
+        c.machines.push(Machine::new(
             name.to_string(),
-            crate::sweep::words(cmd).map_err(|e| format!("--node {name}: {e}"))?,
+            crate::sweep::words(cmd).map_err(|e| format!("--machine {name}: {e}"))?,
         ));
     }
     for m in a.all("--mount") {
         c.mounts.push(mount(&cwd, m)?);
     }
-    if let Some(w) = a.last("--work") {
-        (c.work, c.work_at) = work(&cwd, "--work", w)?;
+    if let Some(w) = a.last("--disk") {
+        (c.disk, c.disk_at) = disk_arg(&cwd, "--disk", w)?;
     }
     if let Some(s) = a.last("--stdin") {
         c.stdin = Some(existing(&cwd, "--stdin", s)?);
@@ -1268,32 +1283,40 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
 impl Config {
     /// Check every setting and build the launcher's plan around an already resolved program.
     pub fn opts_with(&self, program: Program) -> Res<Opts> {
-        let mut plan = if self.nodes.is_empty() {
+        let mut plan = if self.machines.is_empty() {
             if let Some(s) = self
                 .fault_classes
                 .iter()
                 .chain(&self.faults)
                 .find(|s| faults::split_scope(s).1.is_some())
             {
-                return Err(format!("{s}: @NODE names nodes, and the run has none"));
+                return Err(format!(
+                    "{s}: @MACHINE names machines, and the run has none"
+                ));
             }
             if let Some(s) = self
                 .faults
                 .iter()
-                .find(|s| faults::node_only(s.split_once('=').map_or(s.as_str(), |x| x.0)))
+                .find(|s| faults::machine_only(s.split_once('=').map_or(s.as_str(), |x| x.0)))
             {
-                return Err(format!("--fault {s}: only in a run with nodes"));
+                return Err(format!("--fault {s}: only in a run with machines"));
             }
             let classes = faults::classes(&self.fault_classes.join(","), 0, 0)?;
-            faults::resolve(
+            let mut plan = faults::resolve(
                 self.seed,
                 &classes,
                 &self.faults,
                 0,
+                false,
                 faults::CrashAt::Points,
-            )?
+            )?;
+            // The program's faults: any class, or any key but the scheduler's `compute-*`.
+            if !classes.is_empty() || self.faults.iter().any(|s| !s.starts_with("compute-")) {
+                plan.on = vec!["main".to_string()];
+            }
+            plan
         } else {
-            self.node_plan()?
+            self.machine_plan()?
         };
         if let Some(w) = &self.compute_walk {
             plan.compute_walk = faults::walk(self.seed, w)?;
@@ -1312,7 +1335,7 @@ impl Config {
                 self.fs_model
             )
         })?;
-        let w = self.work_path();
+        let w = self.disk_path();
         let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
         if let Some(m) = self
             .mounts
@@ -1320,7 +1343,7 @@ impl Config {
             .find(|m| under(&m.dst, w) || under(w, &m.dst))
         {
             return Err(format!(
-                "--mount {}:{}: the work tree is at {w}; a mount cannot be in it or around it",
+                "--mount {}:{}: the disk is at {w}; a mount cannot be in it or around it",
                 m.src.display(),
                 m.dst
             ));
@@ -1332,8 +1355,8 @@ impl Config {
         if self.log_limit == 0 || self.log_limit > max_log {
             return Err(format!("[run] log-limit is 1 to {max_log} (MiB)"));
         }
-        for k in 0..self.nodes.len() {
-            self.node_disk_bytes(k)?;
+        for k in 0..self.machines.len() {
+            self.machine_disk_bytes(k)?;
         }
         if self.tmpfs_bytes < 1 << 20 {
             return Err("[run] disk-mb is at least 1".into());
@@ -1341,7 +1364,7 @@ impl Config {
         if self.preempt_permille > 1000 {
             return Err("preempt-permille is at most 1000".into());
         }
-        let node_programs = self.check_nodes()?;
+        let machine_programs = self.check_machines()?;
         let phase = |what: &str, w: &[String]| -> Res<Program> {
             self::program(&w[0], &self.mounts).map_err(|e| format!("{what}: {e}"))
         };
@@ -1358,33 +1381,68 @@ impl Config {
             program,
             plan,
             fs_model,
-            node_programs,
+            machine_programs,
             setup_program,
             finally_program,
         })
     }
 
-    /// The fault classes of a run with nodes, each with the nodes it names (`None`: every
-    /// node but the driver and those with `faults = false`). `net` and `partition` are the
-    /// links' and take no `@` (`all@NODE` is the node's own classes of `all`).
+    /// Whether the link faults act on main's links too: a link class (`net`, `partition`) or
+    /// key (`net-*`, `partition-*`) scoped `@main`, the only scope the links' faults take.
+    pub fn main_links(&self) -> Res<bool> {
+        let mut main = false;
+        for e in &self.fault_classes {
+            let (names, scope) = faults::split_scope(e);
+            let Some(scope) = scope else { continue };
+            for c in names.split(',').filter(|c| !faults::machine_class(c)) {
+                if scope != "main" {
+                    return Err(format!(
+                        "--faults {e}: {c} acts on links, the run's; its only scope is @main \
+                         (main's links too)"
+                    ));
+                }
+                main = true;
+            }
+        }
+        for s in &self.faults {
+            let (kv, scope) = faults::split_scope(s);
+            let k = kv.split_once('=').map_or(kv, |x| x.0);
+            match scope {
+                Some(scope) if faults::link_key(k) => {
+                    if scope != "main" {
+                        return Err(format!(
+                            "--fault {s}: {k} acts on links, the run's; its only scope is @main \
+                             (main's links too)"
+                        ));
+                    }
+                    main = true;
+                }
+                _ => {}
+            }
+        }
+        Ok(main)
+    }
+
+    /// The fault classes of a run with machines, each with the machines it names (`None`: every
+    /// machine but main and those with `faults = false`). `net` and `partition` are the
+    /// links', the run's: their scope is `main_links`'s (`all@MACHINE` is the machine's own
+    /// classes of `all`).
     fn scoped_classes(&self) -> Res<Vec<(&'static str, Option<String>)>> {
-        let faultable = faults::faultable_nodes(self.nodes.len(), &self.faults)?;
+        let faultable = faults::faultable_machines(self.machines.len(), self.main_links()?);
         let mut out = vec![];
         for e in &self.fault_classes {
             let (names, scope) = faults::split_scope(e);
-            for c in faults::classes(names, self.nodes.len(), faultable)? {
-                if scope.is_some() && !faults::node_class(c) {
+            for c in faults::classes(names, self.machines.len(), faultable)? {
+                if scope.is_some() && !faults::machine_class(c) {
                     if names.split(',').any(|n| n == c) {
-                        return Err(format!(
-                            "--faults {e}: {c} acts on links, the run's; it takes no @NODE"
-                        ));
+                        out.push((c, None));
                     }
                     continue;
                 }
                 out.push((c, scope.map(str::to_string)));
             }
         }
-        // `crash-gap-ms` alone crashes every node.
+        // `crash-gap-ms` alone crashes every machine.
         let gap = self.faults.iter().any(|s| s.starts_with("crash-gap-ms="));
         if gap && !out.iter().any(|(c, _)| matches!(*c, "crash" | "kill")) {
             out.push(("crash", None));
@@ -1392,50 +1450,50 @@ impl Config {
         Ok(out)
     }
 
-    /// Whether a class or setting of scope `scope` applies to node `k` (0: the driver):
-    /// unscoped, every node but the driver and those with `faults = false`; `@NODE,...`, the
-    /// nodes named, which must exist and have faults.
+    /// Whether a class or setting of scope `scope` applies to machine `k` (0: main):
+    /// unscoped, every machine but main and those with `faults = false`; `@MACHINE,...`, the
+    /// machines named, which must exist and have faults.
     fn applies(&self, k: usize, scope: Option<&str>, what: &str) -> Res<bool> {
         let Some(l) = scope else {
-            return Ok(k != 0 && !self.nodes[k - 1].no_faults);
+            return Ok(k != 0 && !self.machines[k - 1].no_faults);
         };
         for n in l.split(',') {
-            if n != "driver" && !self.nodes.iter().any(|x| x.name == n) {
-                return Err(format!("{what}: no node {n}"));
+            if n != "main" && !self.machines.iter().any(|x| x.name == n) {
+                return Err(format!("{what}: no machine {n}"));
             }
-            if self.nodes.iter().any(|x| x.name == n && x.no_faults) {
-                return Err(format!("{what}: node {n} has faults = false"));
+            if self.machines.iter().any(|x| x.name == n && x.no_faults) {
+                return Err(format!("{what}: machine {n} has faults = false"));
             }
         }
         let name = if k == 0 {
-            "driver"
+            "main"
         } else {
-            self.nodes[k - 1].name.as_str()
+            self.machines[k - 1].name.as_str()
         };
         Ok(l.split(',').any(|n| n == name))
     }
 
-    /// The plan of a run with nodes: the run's own settings (links, partitions, crash timing,
-    /// compute) resolved with the run's seed, and each node's classes and settings with its own
-    /// (`node_seed`): its disk, memory, fault points, crashes, pauses and clock. `result.json`
-    /// shows a node's as `KEY@NODE`.
-    fn node_plan(&self) -> Res<faults::Plan> {
+    /// The plan of a run with machines: the run's own settings (links, partitions, crash timing,
+    /// compute) resolved with the run's seed, and each machine's classes and settings with its own
+    /// (`machine_seed`): its disk, memory, fault points, crashes, pauses and clock. `result.json`
+    /// shows a machine's as `KEY@MACHINE`.
+    fn machine_plan(&self) -> Res<faults::Plan> {
         let classes = self.scoped_classes()?;
         let run_classes: Vec<&str> = classes
             .iter()
-            .filter(|(c, _)| !faults::node_class(c))
+            .filter(|(c, _)| !faults::machine_class(c))
             .map(|(c, _)| *c)
             .collect();
         let mut run_settings = vec![];
         for s in &self.faults {
             let (kv, scope) = faults::split_scope(s);
             let k = kv.split_once('=').map_or(kv, |x| x.0);
-            if faults::node_scoped(k) {
+            if faults::machine_scoped(k) {
                 continue;
             }
-            if scope.is_some() {
+            if scope.is_some() && !faults::link_key(k) {
                 return Err(format!(
-                    "--fault {s}: {k} is the run's (only a node's own keys take @NODE: disk, \
+                    "--fault {s}: {k} is the run's (only a machine's own keys take @MACHINE: disk, \
                      memory, fault-point, crash-point, pause and clock keys)"
                 ));
             }
@@ -1445,32 +1503,33 @@ impl Config {
             self.seed,
             &run_classes,
             &run_settings,
-            self.nodes.len(),
+            self.machines.len(),
+            self.main_links()?,
             faults::CrashAt::Times,
         )?;
         let between = |k: &str| {
             k.starts_with("compute-")
                 || k.starts_with("net-")
                 || k.starts_with("partition-")
-                || matches!(k, "crash-gap-ms" | "down-ms" | "max-incarnations")
+                || matches!(k, "crash-gap-ms" | "down-ms" | "max-boots")
         };
         if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| !between(k)) {
             return Err(format!(
-                "--fault {k} with nodes: not available yet (the disk, memory, net-, partition- \
-                 and node crash settings work)"
+                "--fault {k} with machines: not available yet (the disk, memory, net-, partition- \
+                 and machine crash settings work)"
             ));
         }
-        // Each node's classes and settings.
+        // Each machine's classes and settings.
         let mut per = vec![];
-        for k in 0..=self.nodes.len() {
+        for k in 0..=self.machines.len() {
             let name = if k == 0 {
-                "driver"
+                "main"
             } else {
-                self.nodes[k - 1].name.as_str()
+                self.machines[k - 1].name.as_str()
             };
             let mut cs: Vec<&str> = vec![];
             for (c, scope) in &classes {
-                if !faults::node_class(c) || cs.contains(c) {
+                if !faults::machine_class(c) || cs.contains(c) {
                     continue;
                 }
                 if self.applies(
@@ -1480,7 +1539,7 @@ impl Config {
                 )? {
                     if k == 0 && !matches!(*c, "disk" | "mem" | "buggify") {
                         return Err(format!(
-                            "--faults {c}@driver: the driver runs the run's checks; it may have \
+                            "--faults {c}@main: main runs the run's checks; it may have \
                              disk, mem and buggify faults only"
                         ));
                     }
@@ -1491,10 +1550,10 @@ impl Config {
             for s in &self.faults {
                 let (kv, scope) = faults::split_scope(s);
                 let key = kv.split_once('=').map_or(kv, |x| x.0);
-                if faults::node_scoped(key) && self.applies(k, scope, &format!("--fault {s}"))? {
-                    if k == 0 && (faults::node_only(key) || key.starts_with("crash-")) {
+                if faults::machine_scoped(key) && self.applies(k, scope, &format!("--fault {s}"))? {
+                    if k == 0 && (faults::machine_only(key) || key.starts_with("crash-")) {
                         return Err(format!(
-                            "--fault {s}: the driver is never paused, killed or skewed (it runs \
+                            "--fault {s}: main is never paused, killed or skewed (it runs \
                              the run's checks; its clock is the run's virtual time)"
                         ));
                     }
@@ -1503,12 +1562,27 @@ impl Config {
             }
             per.push((name, cs, ss));
         }
+        // The machines the seed's faults act on: their own classes and settings, and the links'
+        // faults on every declared machine (main too with `@main`).
+        let links = !run_classes.is_empty()
+            || run_settings
+                .iter()
+                .any(|s| faults::link_key(s.split_once('=').map_or(s.as_str(), |x| x.0)));
+        let main_links = self.main_links()?;
+        plan.on = per
+            .iter()
+            .enumerate()
+            .filter(|(k, (_, cs, ss))| {
+                !cs.is_empty() || !ss.is_empty() || (links && (*k > 0 || main_links))
+            })
+            .map(|(_, (name, _, _))| name.to_string())
+            .collect();
         if per.iter().any(|(_, cs, _)| cs.contains(&"crash"))
             && per.iter().any(|(_, cs, _)| cs.contains(&"kill"))
         {
-            return Err("--faults crash and kill: the nodes' machines crash or their processes are killed, not both".into());
+            return Err("--faults crash and kill: the machines crash or their processes are killed, not both".into());
         }
-        // At the nodes' crash points when any names a crash key, else at drawn times.
+        // At the machines' crash points when any names a crash key, else at drawn times.
         let points = per.iter().any(|(_, _, ss)| {
             ss.iter()
                 .any(|s| s.starts_with("crash-permille=") || s.starts_with("crash-at="))
@@ -1516,12 +1590,12 @@ impl Config {
         if points {
             if let Some((k, _)) = plan.resolved.iter().find(|(k, _)| k == "crash-gap-ms") {
                 return Err(format!(
-                    "--fault {k} with crash-permille or crash-at: the crashes come at the nodes' \
+                    "--fault {k} with crash-permille or crash-at: the crashes come at the machines' \
                      crash points, not at drawn times"
                 ));
             }
         }
-        // At crash points, the nodes that crash are those a crash key names: a crash class
+        // At crash points, the machines that crash are those a crash key names: a crash class
         // adds no crash to the others (it says what a crash is: `kill`, a process kill).
         let mode = if points {
             faults::CrashAt::Points
@@ -1536,24 +1610,24 @@ impl Config {
             if cs.is_empty() && ss.is_empty() {
                 continue;
             }
-            let seed = node_seed(self.seed, k);
-            let sub = faults::resolve(seed, &cs, &ss, 0, mode)
-                .map_err(|e| format!("node {name}: {e}"))?;
+            let seed = machine_seed(self.seed, k);
+            let sub = faults::resolve(seed, &cs, &ss, 0, false, mode)
+                .map_err(|e| format!("machine {name}: {e}"))?;
             if k == 0 {
-                faults::set_node_keys(&mut plan.faults, &sub.faults);
+                faults::set_machine_keys(&mut plan.faults, &sub.faults);
                 plan.sdk = sub.sdk;
             } else {
-                faults::set_node_keys(&mut plan.node_faults[k], &sub.faults);
-                plan.node_sdk[k] = sub.sdk;
+                faults::set_machine_keys(&mut plan.machine_faults[k], &sub.faults);
+                plan.machine_sdk[k] = sub.sdk;
                 let (g, l) = (sub.pause_gap_ns, sub.pause_ns);
-                plan.node_pause[k] = [g.0, g.1, l.0, l.1];
-                plan.node_skew[k] = sub.skew_ns;
+                plan.machine_pause[k] = [g.0, g.1, l.0, l.1];
+                plan.machine_skew[k] = sub.skew_ns;
                 if mode == faults::CrashAt::Times && sub.crash_class != proto::faults::CRASH_NONE {
-                    plan.node_crash |= 1 << k;
-                    plan.node_crash_kind = if sub.crash_class == proto::faults::CRASH_PROCESS {
-                        proto::node::CRASH_NODE_PROCESS
+                    plan.machine_crash |= 1 << k;
+                    plan.machine_crash_kind = if sub.crash_class == proto::faults::CRASH_PROCESS {
+                        proto::machine::SEED_KILL
                     } else {
-                        proto::node::CRASH_NODE_MACHINE
+                        proto::machine::SEED_CRASH
                     };
                 }
             }
@@ -1564,81 +1638,79 @@ impl Config {
         Ok(plan)
     }
 
-    /// Check the nodes of a run (`proto::node`) and resolve their programs.
-    fn check_nodes(&self) -> Res<Vec<Program>> {
-        if self.nodes.is_empty() {
+    /// Check the machines of a run (`proto::machine`) and resolve their programs.
+    fn check_machines(&self) -> Res<Vec<Program>> {
+        if self.machines.is_empty() {
             return Ok(vec![]);
         }
-        if self.nodes.len() > MAX_NODES {
+        if self.machines.len() > MAX_MACHINES {
             return Err(format!(
-                "[node.*]: at most {MAX_NODES} nodes besides the driver"
+                "[machine.*]: at most {MAX_MACHINES} machines besides main"
             ));
         }
         let under = |a: &str, b: &str| a == b || a.starts_with(&format!("{b}/"));
         let at = crate::launch::GUEST_PATINA;
         if let Some(m) = self.mounts.iter().find(|m| under(at, &m.dst)) {
             return Err(format!(
-                "mount {} with nodes: patina ctl is at {at}, which it would cover",
+                "mount {} with machines: patina ctl is at {at}, which it would cover",
                 m.dst
             ));
         }
         let mut programs = vec![];
-        for n in &self.nodes {
-            let at = format!("node.{}", n.name);
-            if !proto::node::valid_name(n.name.as_bytes()) {
+        for n in &self.machines {
+            let at = format!("machine.{}", n.name);
+            if !proto::machine::valid_name(n.name.as_bytes()) {
                 return Err(format!(
-                    "{at}: a node name is 1 to {} letters, digits and -, starting with a letter",
-                    proto::node::NAME_MAX
+                    "{at}: a machine name is 1 to {} letters, digits and -, starting with a letter",
+                    proto::machine::NAME_MAX
                 ));
             }
-            if n.name.as_bytes() == proto::node::DRIVER {
-                return Err(format!(
-                    "{at}: driver is the name of node 0 (the command after --)"
-                ));
+            if n.name.as_bytes() == proto::machine::MAIN {
+                return Err(format!("{at}: main is the machine of the command after --"));
             }
-            if let Some(why) = proto::node::RESERVED
+            if let Some(why) = proto::machine::RESERVED
                 .iter()
                 .find(|(r, _)| n.name.as_bytes() == *r)
                 .map(|(_, why)| why)
             {
                 return Err(format!("{at}: the name is taken ({why})"));
             }
-            if n.cmd.is_empty() {
-                return Err(format!("{at}: cmd is required"));
+            if n.run.is_empty() {
+                return Err(format!("{at}: run is required"));
             }
             if let Some(e) = n.env.iter().find(|e| !e.contains('=')) {
                 return Err(format!("{at}: env {e}: expected K=V"));
             }
-            let w = n.work_path();
+            let w = n.disk_path();
             if let Some(m) = self
                 .mounts
                 .iter()
                 .find(|m| under(&m.dst, w) || under(w, &m.dst))
             {
                 return Err(format!(
-                    "{at}: the work tree is at {w}; mount {} cannot be in it or around it",
+                    "{at}: its disk is at {w}; mount {} cannot be in it or around it",
                     m.dst
                 ));
             }
-            if w != self.work_path() && (under(w, self.work_path()) || under(self.work_path(), w)) {
+            if w != self.disk_path() && (under(w, self.disk_path()) || under(self.disk_path(), w)) {
                 return Err(format!(
-                    "{at}: its work tree {w} is inside the driver's {} or holds it",
-                    self.work_path()
+                    "{at}: its disk {w} is inside main's {} or holds it",
+                    self.disk_path()
                 ));
             }
-            programs.push(program(&n.cmd[0], &self.mounts).map_err(|e| format!("{at}: {e}"))?);
+            programs.push(program(&n.run[0], &self.mounts).map_err(|e| format!("{at}: {e}"))?);
         }
         Ok(programs)
     }
 
-    /// The size of node `k`'s (0-based, the driver not counted) tmpfs: its `disk-mb`, a range
+    /// The size of machine `k`'s (0-based, main not counted) tmpfs: its `disk-mb`, a range
     /// drawn from the run's seed, else the run's.
-    pub fn node_disk_bytes(&self, k: usize) -> Res<u64> {
-        let n = &self.nodes[k];
+    pub fn machine_disk_bytes(&self, k: usize) -> Res<u64> {
+        let n = &self.machines[k];
         let Some(v) = &n.disk_mb else {
             return Ok(self.tmpfs_bytes);
         };
-        let at = format!("[node.{}] disk-mb", n.name);
+        let at = format!("[machine.{}] disk-mb", n.name);
         let num = |s: &str| -> Res<u64> {
             s.trim()
                 .parse()
@@ -1661,9 +1733,9 @@ impl Config {
         Ok((a + faults::plan_draw(self.seed, &key) % (b - a + 1)) << 20)
     }
 
-    /// The work tree's guest path.
-    pub fn work_path(&self) -> &str {
-        self.work_at.as_deref().unwrap_or("/work")
+    /// The disk's guest path.
+    pub fn disk_path(&self) -> &str {
+        self.disk_at.as_deref().unwrap_or("/work")
     }
 
     /// Resolve the program from `cmd[0]` and build the plan.
@@ -1673,8 +1745,8 @@ impl Config {
     }
 }
 
-/// The seed node `k`'s own settings resolve from (the driver's: the run's).
-fn node_seed(seed: u64, k: usize) -> u64 {
+/// The seed machine `k`'s own settings resolve from (main's: the run's).
+fn machine_seed(seed: u64, k: usize) -> u64 {
     match k {
         0 => seed,
         _ => proto::draw::mix64(seed ^ (k as u64) << 56),
@@ -1783,11 +1855,13 @@ mod tests {
         assert!(e.contains("nosuch"), "{e}");
         std::fs::write(
             &f,
-            "[run]\ncmd = [\"/bin/true\"]\ncpus = 2\nenv = { A = \"1\" }\n[faults]\nfs-error-permille = 5\n[sched]\npreempt-permille = 500\n",
+            "[machine.main]\nrun = [\"/bin/true\"]\n[run]\ncpus = 2\nenv = { A = \"1\" }\n[faults]\nfs-error-permille = 5\n[sched]\npreempt-permille = 500\n",
         )
         .unwrap();
         let mut c = Config::default();
         apply_file(&mut c, &f).unwrap();
+        assert!(c.machines.is_empty());
+        assert_eq!(c.cmd, vec!["/bin/true".to_string()]);
         assert_eq!((c.cpus, c.preempt_permille), (2, 500));
         assert_eq!(c.env, vec!["A=1".to_string()]);
         assert_eq!(c.faults, vec!["fs-error-permille=5".to_string()]);
@@ -1812,67 +1886,70 @@ mod tests {
     }
 
     #[test]
-    fn node_tables_take_their_restart_keys_and_crash_names_nodes() {
-        let dir = std::env::temp_dir().join(format!("patina-nodes-{}", std::process::id()));
+    fn machine_tables_take_their_restart_keys_and_crash_names_machines() {
+        let dir = std::env::temp_dir().join(format!("patina-machines-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("patina.toml");
         std::fs::write(
             &f,
-            "[node.w]\ncmd = [\"/bin/true\"]\nrestart = \"always\"\nok-exit = [0, 3]\n\
-             max-incarnations = 4\ncount = 3\n[node.db]\ncmd = [\"/bin/true\"]\n",
+            "[machine.w]\nrun = [\"/bin/true\"]\nrestart = \"always\"\nok-exit = [0, 3]\n\
+             max-boots = 4\ncount = 3\n[machine.db]\nrun = [\"/bin/true\"]\n",
         )
         .unwrap();
         let mut c = Config::default();
         apply_file(&mut c, &f).unwrap();
-        let names: Vec<&str> = c.nodes.iter().map(|n| n.name.as_str()).collect();
+        let names: Vec<&str> = c.machines.iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["w1", "w2", "w3", "db"]);
-        assert!(c.nodes[..3]
+        assert!(c.machines[..3]
             .iter()
-            .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_incarnations == Some(4)));
-        assert_eq!(c.nodes[3], Node::new("db".into(), c.nodes[3].cmd.clone()));
-        // `--faults kill` covers every node but the driver; `@` names some.
+            .all(|n| n.ok_exit == Some(vec![0, 3]) && n.max_boots == Some(4)));
+        assert_eq!(
+            c.machines[3],
+            Machine::new("db".into(), c.machines[3].run.clone())
+        );
+        // `--faults kill` covers every machine but main; `@` names some.
         use proto::faults::{CRASH_MACHINE, CRASH_NONE, CRASH_PROCESS};
-        use proto::node::{CRASH_NODE_MACHINE, CRASH_NODE_PROCESS};
+        use proto::machine::{SEED_CRASH, SEED_KILL};
         let crash = |c: &Config, classes: &[&str], keys: &[&str]| {
             let mut c = c.clone();
             c.fault_classes = classes.iter().map(|x| x.to_string()).collect();
             c.faults = keys.iter().map(|x| x.to_string()).collect();
-            c.node_plan()
+            c.machine_plan()
         };
         let timed = |x: &str| {
             let p = crash(&c, &[x], &[]).unwrap();
-            (p.node_crash, p.node_crash_kind)
+            (p.machine_crash, p.machine_crash_kind)
         };
-        assert_eq!(timed("kill"), (0b11110, CRASH_NODE_PROCESS));
-        assert_eq!(timed("kill@w2,db"), (0b10100, CRASH_NODE_PROCESS));
-        assert_eq!(timed("crash@w1"), (0b10, CRASH_NODE_MACHINE));
-        // `crash-gap-ms` alone crashes every node's machine.
+        assert_eq!(timed("kill"), (0b11110, SEED_KILL));
+        assert_eq!(timed("kill@w2,db"), (0b10100, SEED_KILL));
+        assert_eq!(timed("crash@w1"), (0b10, SEED_CRASH));
+        // `crash-gap-ms` alone crashes every machine.
         let g = crash(&c, &[], &["crash-gap-ms=1000..2000"]).unwrap();
         assert_eq!(
-            (g.node_crash, g.node_crash_kind),
-            (0b11110, CRASH_NODE_MACHINE)
+            (g.machine_crash, g.machine_crash_kind),
+            (0b11110, SEED_CRASH)
         );
-        // At crash points: set in the scoped nodes' own settings, none at drawn times.
+        // At crash points: set in the scoped machines' own settings, none at drawn times.
         let p = crash(&c, &["crash"], &["crash-at=3@w2"]).unwrap();
-        assert_eq!(p.node_crash, 0);
-        let at: Vec<u64> = p.node_faults[1..5].iter().map(|f| f.crash_at).collect();
+        assert_eq!(p.machine_crash, 0);
+        let at: Vec<u64> = p.machine_faults[1..5].iter().map(|f| f.crash_at).collect();
         assert_eq!(at, [0, 3, 0, 0]);
         let p = crash(&c, &[], &["crash-permille=5"]).unwrap();
-        assert!(p.node_faults[1..5].iter().all(|f| f.crash_permille == 5));
-        // A process kill at a point: the node's own kind, its point.
+        assert!(p.machine_faults[1..5].iter().all(|f| f.crash_permille == 5));
+        // A process kill at a point: the machine's own kind, its point.
         let p = crash(&c, &["kill@w1"], &["crash-at=4@w1"]).unwrap();
-        assert_eq!(p.node_crash, 0);
-        let w1 = &p.node_faults[1];
+        assert_eq!(p.machine_crash, 0);
+        let w1 = &p.machine_faults[1];
         assert_eq!((w1.crash_kind, w1.crash_at), (CRASH_PROCESS, 4));
-        assert_eq!(p.node_faults[2].crash_kind, CRASH_NONE);
-        // Settings at points: each its own nodes.
+        assert_eq!(p.machine_faults[2].crash_kind, CRASH_NONE);
+        // Settings at points: each its own machines.
         let p = crash(
             &c,
             &["kill@w3"],
             &["crash-at=5@w1", "crash-permille=0@w2,db", "crash-at=2@w3"],
         )
         .unwrap();
-        let k: Vec<(u64, u64, u64)> = p.node_faults[1..5]
+        let k: Vec<(u64, u64, u64)> = p.machine_faults[1..5]
             .iter()
             .map(|f| (f.crash_kind, f.crash_at, f.crash_permille))
             .collect();
@@ -1892,9 +1969,9 @@ mod tests {
             ),
             (&["crash@w1"], &["crash-at=3@w2", "crash-gap-ms=1..2"]),
             (&["crash@w1", "kill@w2"], &[]),
-            (&["kill@driver"], &[]),
+            (&["kill@main"], &[]),
             (&["crash@nope"], &[]),
-            (&[], &["crash-at=1@driver"]),
+            (&[], &["crash-at=1@main"]),
             (&["net@w1"], &[]),
         ] {
             assert!(crash(&c, cl, keys).is_err(), "{cl:?} {keys:?}");
@@ -1902,39 +1979,39 @@ mod tests {
         for bad in [
             "restart = \"sometimes\"",
             "ok-exit = 256",
-            "max-incarnations = 0",
+            "max-boots = 0",
             "count = 16",
             "faults = \"net\"",
         ] {
-            std::fs::write(&f, format!("[node.w]\ncmd = [\"/bin/true\"]\n{bad}\n")).unwrap();
+            std::fs::write(&f, format!("[machine.w]\nrun = [\"/bin/true\"]\n{bad}\n")).unwrap();
             assert!(apply_file(&mut Config::default(), &f).is_err(), "{bad}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn a_node_without_faults_is_left_out_as_the_driver_is() {
+    fn a_machine_without_faults_is_left_out_as_main_is() {
         let dir = std::env::temp_dir().join(format!("patina-nofaults-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("patina.toml");
         std::fs::write(
             &f,
-            "[node.a]\ncmd = [\"/bin/true\"]\n[node.m]\ncmd = [\"/bin/true\"]\nfaults = false\n",
+            "[machine.a]\nrun = [\"/bin/true\"]\n[machine.m]\nrun = [\"/bin/true\"]\nfaults = false\n",
         )
         .unwrap();
         let mut c = Config::default();
         apply_file(&mut c, &f).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
-        assert!(!c.nodes[0].no_faults && c.nodes[1].no_faults);
+        assert!(!c.machines[0].no_faults && c.machines[1].no_faults);
         c.faults = vec!["fs-error-permille=7".into()];
-        let plan = |c: &Config| c.node_plan();
+        let plan = |c: &Config| c.machine_plan();
         // Unscoped: a has it, m does not.
         let p = plan(&c).unwrap();
-        assert_eq!(p.node_faults[1].fs_error_permille, 7);
-        assert_eq!(p.node_faults[2].fs_error_permille, 0);
+        assert_eq!(p.machine_faults[1].fs_error_permille, 7);
+        assert_eq!(p.machine_faults[2].fs_error_permille, 0);
         let mut k = c.clone();
         k.fault_classes = vec!["crash".into()];
-        assert_eq!(k.node_plan().unwrap().node_crash, 0b010);
+        assert_eq!(k.machine_plan().unwrap().machine_crash, 0b010);
         // A scope may not name it.
         c.faults = vec!["fs-error-permille=7@m".into()];
         assert!(plan(&c).is_err());
@@ -1970,19 +2047,19 @@ mod tests {
         let d = std::env::temp_dir();
         let s = d.display().to_string();
         assert_eq!(
-            work(&d, "--work", &s).unwrap(),
+            disk_arg(&d, "--disk", &s).unwrap(),
             (Some(d.canonicalize().unwrap()), None)
         );
-        let (dir, at) = work(&d, "--work", &format!("{s}:/var/lib/app")).unwrap();
+        let (dir, at) = disk_arg(&d, "--disk", &format!("{s}:/var/lib/app")).unwrap();
         assert!(dir.is_some() && at.as_deref() == Some("/var/lib/app"));
         assert_eq!(
-            work(&d, "--work", ":/srv").unwrap(),
+            disk_arg(&d, "--disk", ":/srv").unwrap(),
             (None, Some("/srv".into()))
         );
-        assert!(work(&d, "--work", &format!("{s}:/usr/x")).is_err());
+        assert!(disk_arg(&d, "--disk", &format!("{s}:/usr/x")).is_err());
         let mut c = Config {
             cmd: vec!["/bin/true".into()],
-            work_at: Some("/srv/app".into()),
+            disk_at: Some("/srv/app".into()),
             ..Config::default()
         };
         c.mounts.push(mount(&d, &format!("{s}:/srv")).unwrap());

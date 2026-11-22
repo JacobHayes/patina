@@ -18,7 +18,7 @@ pub struct Replayed {
     pub dir: PathBuf,
 }
 
-/// Remove an earlier run in `dir` (a directory holding `run.json` or `inc-0`); refuse any
+/// Remove an earlier run in `dir` (a directory holding `run.json` or `boot-1`); refuse any
 /// other non-empty directory.
 pub fn clear_out(dir: &Path) -> Res<()> {
     let Ok(mut rd) = std::fs::read_dir(dir) else {
@@ -27,7 +27,7 @@ pub fn clear_out(dir: &Path) -> Res<()> {
     if rd.next().is_none() {
         return Ok(());
     }
-    if ["run.json", "inc-0", "run-0"]
+    if ["run.json", "boot-1", "run-0"]
         .iter()
         .any(|f| dir.join(f).exists())
     {
@@ -71,9 +71,9 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
         .map_err(|e| format!("{}: config: {e}", run_path.display()))?;
     let program: Program = serde_json::from_value(run["program"].clone())
         .map_err(|e| format!("{}: program: {e}", run_path.display()))?;
-    let nodes: Vec<Program> = match run.get("node_programs") {
+    let machines: Vec<Program> = match run.get("machine_programs") {
         Some(v) => serde_json::from_value(v.clone())
-            .map_err(|e| format!("{}: node_programs: {e}", run_path.display()))?,
+            .map_err(|e| format!("{}: machine_programs: {e}", run_path.display()))?,
         None => vec![],
     };
     // The setup command's program and the final check's.
@@ -86,7 +86,7 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
             );
         }
     }
-    for p in std::iter::once(&program).chain(&nodes).chain(&phases) {
+    for p in std::iter::once(&program).chain(&machines).chain(&phases) {
         let now = sha256_file(&p.host)
             .map_err(|e| format!("program {} is gone: {e}", p.host.display()))?;
         if now != p.sha256 {
@@ -134,7 +134,7 @@ pub fn replay_into(
     };
     // A run a sweep pruned kept no logs: its digest, the hash of every record, is the
     // comparison.
-    let pruned = crate::durability::check::incarnations(rundir).is_empty();
+    let pruned = crate::durability::check::boots(rundir).is_empty();
     let first = match pruned {
         true => None,
         false => crate::log::first_run_difference(rundir, &out)?,
@@ -150,7 +150,7 @@ pub fn replay_into(
                 result["digest"]
             ))
         }
-        // The self-check reads the exported work trees, which the logs do not hold (a run
+        // The self-check reads the exported disks, which the logs do not hold (a run
         // recorded without one has nothing to compare).
         None if !recorded["self_check"].is_null()
             && recorded["self_check"]["verdict"] != result["self_check"]["verdict"] =>

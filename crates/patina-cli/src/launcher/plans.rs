@@ -88,7 +88,7 @@ fn reply(fd: RawFd, w: &[u64; REPLY_WORDS], plan: Option<&File>) {
     unsafe { libc::sendmsg(fd, &m, libc::MSG_NOSIGNAL) };
 }
 
-/// A running broker for one incarnation.
+/// A running broker for one boot.
 pub struct Broker {
     ours: OwnedFd,
     thread: Option<JoinHandle<()>>,

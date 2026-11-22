@@ -7,4 +7,4 @@ out=$RUNS/procgaps-all
 mkdir -p "$out"
 vfy all 3 cpu,aslr "$G17" -- /guest/procgaps all
 r=$out/all/run-0
-[ "$(class "$r")" = ok ] || die "all: $(class "$r"): $(detail "$r"); $(grep -m3 FAIL "$r/inc-0/stdout")"
+[ "$(class "$r")" = ok ] || die "all: $(class "$r"): $(detail "$r"); $(grep -m3 FAIL "$r/boot-1/stdout")"

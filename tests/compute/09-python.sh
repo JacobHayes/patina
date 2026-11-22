@@ -51,27 +51,27 @@ prun "$o/t-1" 1 $CP "$PC" timer 10 &
 prun "$o/t-2" 1 $CP "$PC" timer 10 &
 prun "$o/one" 1 $CP "$PC" oneline 5 &
 wait
-grep -q '^timer did not fire' "$o/t-stock/inc-0/stdout" || die "c. stock: $(cat "$o/t-stock/inc-0/stdout")"
+grep -q '^timer did not fire' "$o/t-stock/boot-1/stdout" || die "c. stock: $(cat "$o/t-stock/boot-1/stdout")"
 for r in t-1 t-2 one; do [ "$(field "$o/$r/result.json" outcome)" = ok ] || die "c. $r: $(res "$o/$r")"; done
 [ "$(field "$o/t-1/result.json" rewrite.lines)/$(field "$o/t-1/result.json" compute.images | jq -c '[.[].starts]')" = "1/[1]" ] ||
     die "c. the line points did not take over from the plans once: rewrite $(field "$o/t-1/result.json" rewrite.lines), starts $(field "$o/t-1/result.json" compute.images)"
-h=$(sed -n 's/.*handler_ns=//p' "$o/t-1/inc-0/stdout")
-[ -n "$h" ] && [ "$h" -ge 10000000 ] && [ "$h" -le 10010000 ] || die "c. the handler ran at '$h' virtual ns: $(cat "$o/t-1/inc-0/stdout")"
+h=$(sed -n 's/.*handler_ns=//p' "$o/t-1/boot-1/stdout")
+[ -n "$h" ] && [ "$h" -ge 10000000 ] && [ "$h" -le 10010000 ] || die "c. the handler ran at '$h' virtual ns: $(cat "$o/t-1/boot-1/stdout")"
 lhs=$(field "$o/t-1/result.json" digest); rhs=$(field "$o/t-2/result.json" digest)
 [ "$lhs" = "$rhs" ] || die "c. two runs of the timer differ"
-[ "$(cat "$o/one/inc-0/stdout")" = "one-line loop: Stop caught
-comprehension: Stop caught" ] || die "c. oneline: $(cat "$o/one/inc-0/stdout") $(tail -2 "$o/one/inc-0/stderr")"
-echo "c. stock: $(cat "$o/t-stock/inc-0/stdout"); compute points: $(cat "$o/t-1/inc-0/stdout"), one digest twice; a one-line loop and a comprehension: Stop caught"
+[ "$(cat "$o/one/boot-1/stdout")" = "one-line loop: Stop caught
+comprehension: Stop caught" ] || die "c. oneline: $(cat "$o/one/boot-1/stdout") $(tail -2 "$o/one/boot-1/stderr")"
+echo "c. stock: $(cat "$o/t-stock/boot-1/stdout"); compute points: $(cat "$o/t-1/boot-1/stdout"), one digest twice; a one-line loop and a comprehension: Stop caught"
 
 echo "== d. two CPU-bound threads"
-alt() { sed -n 's/^cpu: [0-9]* marks, \([0-9]*\) alternations$/\1/p' "$1/inc-0/stdout"; }
+alt() { sed -n 's/^cpu: [0-9]* marks, \([0-9]*\) alternations$/\1/p' "$1/boot-1/stdout"; }
 prun "$o/c-stock" 1 -- $PY "$PC" cpu 50000 &
 for s in 1 2 3; do prun "$o/c-$s" "$s" $CP "$PC" cpu 50000 & done
 wait
-[ "$(alt "$o/c-stock")" = 1 ] || die "d. stock: $(cat "$o/c-stock/inc-0/stdout")"
+[ "$(alt "$o/c-stock")" = 1 ] || die "d. stock: $(cat "$o/c-stock/boot-1/stdout")"
 for s in 1 2 3; do
     a=$(alt "$o/c-$s")
-    [ -n "$a" ] && [ "$a" -gt 1 ] || die "d. seed $s: $(res "$o/c-$s"); $(cat "$o/c-$s/inc-0/stdout")"
+    [ -n "$a" ] && [ "$a" -gt 1 ] || die "d. seed $s: $(res "$o/c-$s"); $(cat "$o/c-$s/boot-1/stdout")"
 done
 rm -rf "${o:?}/verify"
 r=3; [ "${CHECK_TIER:-}" != quick ] || r=2

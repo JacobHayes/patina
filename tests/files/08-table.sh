@@ -12,7 +12,7 @@ t=$o/tree
 python3 -I "$LIB/mktree.py" "$t"
 [ -x /usr/bin/strace ] || die "strace not installed"
 i=0
-trace() { # name [--work DIR] -- cmd...
+trace() { # name [--disk DIR] -- cmd...
     i=$((i + 1))
     n=$1; shift
     mkdir -p "$o/s$i"
@@ -23,7 +23,7 @@ trace() { # name [--work DIR] -- cmd...
 trace fs-tour -- /guest/fs-tour
 while IFS= read -r cmd; do
     set -f; set -- $cmd; set +f
-    trace "$cmd" --work "$t" -- "$@"
+    trace "$cmd" --disk "$t" -- "$@"
 done <<'CMDS'
 /usr/bin/ls -la /work
 /usr/bin/ls -laRi /work/a

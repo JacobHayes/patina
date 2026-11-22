@@ -12,7 +12,7 @@ cpus=$(python3 -I -c 'import os; print(" ".join(map(str, sorted(os.sched_getaffi
 one() { # seed cpu
     d=$o/s$1
     timeout 1800 taskset -c "$2" "$PATINA" run --seed "$1" --config "$("$PATINA_CFG" preempt-permille=500)" --out "$d" --mount "$PATINA_GUESTS":/guest:copy -- /guest/ring "$LAPS" >/dev/null 2>"$d.err" || true
-    rm -f "$d/inc-0/boundary.log"
+    rm -f "$d/boot-1/boundary.log"
 }
 seed=1
 while [ "$seed" -le "$SEEDS" ]; do
@@ -32,7 +32,7 @@ for s in range(1, n + 1):
     cls[oc["outcome"]] += 1
     walls.append(oc["wall_ms"]); digests.add(oc["digest"])
     if oc["outcome"] == "ok":
-        assert open(f"{o}/s{s}/inc-0/stdout").read() == f"laps {laps} hops {laps*16-15}\n", s
+        assert open(f"{o}/s{s}/boot-1/stdout").read() == f"laps {laps} hops {laps*16-15}\n", s
     else:
         print("seed", s, oc["outcome"], oc["stop"], oc["message"][:300])
 print(f"{n} seeds x {laps} laps: classes {dict(cls)}; distinct digests {len(digests)}; wall ms min/median/max {min(walls)}/{sorted(walls)[n//2]}/{max(walls)}")

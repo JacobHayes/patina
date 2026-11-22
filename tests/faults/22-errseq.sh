@@ -27,7 +27,7 @@ expect() {  # expect MODE "LABEL RESULT;..."
     f="--fault fsync-error-at=1"
     [ "$m" = badfd ] && f=
     run "$d/$m" 1 $f -- /guest/errseq "$m"
-    got=$(tr '\n' ';' <"$d/$m/inc-0/stdout")
+    got=$(tr '\n' ';' <"$d/$m/boot-1/stdout")
     [ "$got" = "$2" ] || die "$m: got '$got', Linux gives '$2'"
     echo "$m: $got"
 }

@@ -16,7 +16,7 @@ timeout 120 "$PATINA" run --seed 1 --out "$o/patina" --mount "$PATINA_GUESTS":/g
 refused=$(field "$o/patina/result.json" refused)
 case $refused in *'"madvise:free"'*'"madvise:collapse"'* | *'"madvise:collapse"'*'"madvise:free"'*) ;; *) die "MADV_FREE and MADV_COLLAPSE not recorded as refused: $refused" ;; esac
 [ "$(field "$o/patina/result.json" exit)" = 0 ] || die "patina madvise: exit $(field "$o/patina/result.json" exit)"
-python3 -I - "$o/native/stdout" "$o/patina/inc-0/stdout" <<'EOF'
+python3 -I - "$o/native/stdout" "$o/patina/boot-1/stdout" <<'EOF'
 import sys
 native, patina = (open(p).read().splitlines() for p in sys.argv[1:3])
 assert len(native) == len(patina) > 0, (len(native), len(patina))

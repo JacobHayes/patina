@@ -27,7 +27,7 @@ static const char *def[] = {
  "/sys/kernel/mm/transparent_hugepage/enabled","/sys/kernel/mm/transparent_hugepage/hpage_pmd_size",
  "/sys/kernel/mm/transparent_hugepage/defrag","/sys/kernel/mm/transparent_hugepage/shmem_enabled",
  "/sys/fs/cgroup/cpu.max","/sys/fs/cgroup/memory.max","/sys/devices/system/cpu/cpu0/cache/index0/size",
- "/sys/devices/system/node/online","/sys/devices/system/cpu/cpu0/topology/core_id","/sys/kernel/random/uuid",
+ "/sys/devices/system/machine/online","/sys/devices/system/cpu/cpu0/topology/core_id","/sys/kernel/random/uuid",
  "/dev/shm","/dev/null","/dev/zero","/dev/full","/dev/random","/dev/urandom","/dev/tty","/dev/stdin","/dev/stdout",
  "/dev/fd/0","/dev/fd/3000","/proc/self/fd/3000","/proc/self/fd/3001","/proc/1/stat","/proc/1/mem","/proc/2/stat",
  "/proc/self/root/usr","/proc/self/cwd","/proc/self/exe","/etc/hostname","/etc/machine-id","/etc/resolv.conf",

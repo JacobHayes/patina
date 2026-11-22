@@ -7,7 +7,7 @@ for i in 1 2 3; do
     out=$RUNS/04-vtime/run$i
     patina_run "$out" 1 c-threads
     check_result "$out" c-threads
-    ns=$(awk '$1 == "timedwait" {print $5}' "$out/inc-0/stdout")
+    ns=$(awk '$1 == "timedwait" {print $5}' "$out/boot-1/stdout")
     [ "$ns" -ge 30000000000 ] && [ "$ns" -lt 30100000000 ] || die "timed wait measured $ns ns"
-    echo "run $i: wall $(field "$out/result.json" wall_ms) ms, timed wait measured $ns ns, $(grep virtual "$out/inc-0/stdout")"
+    echo "run $i: wall $(field "$out/result.json" wall_ms) ms, timed wait measured $ns ns, $(grep virtual "$out/boot-1/stdout")"
 done

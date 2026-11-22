@@ -9,7 +9,7 @@
 out=$RUNS/inherit
 mkdir -p "$out"
 vfy inherit 4 env "$G17" -- /guest/inherit
-s=$out/inherit/run-1/inc-0/stdout
+s=$out/inherit/run-1/boot-1/stdout
 # Derived checks on the changed run: no inherited descriptor, one group, no terminal, the
 # persona's read-implies-exec did not reach a read-only mapping.
 [ "$(sed -n 's/^fds //p' "$s")" = "0 1 2" ] || die "inherit: descriptors $(sed -n 's/^fds //p' "$s")"

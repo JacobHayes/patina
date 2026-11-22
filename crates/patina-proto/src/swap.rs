@@ -1,5 +1,5 @@
-//! Path swaps (`path-swap-permille`): the runtime changes a path in the work
-//! tree between a process's check of it and its use, as another process with the same uid
+//! Path swaps (`path-swap-permille`): the runtime changes a path in the disk
+//! between a process's check of it and its use, as another process with the same uid
 //! could. This module is what the runtime and the launcher agree on: which calls check and
 //! which use a path, and the code that says what a swap did.
 //!
@@ -112,13 +112,13 @@ pub const MUT_RENAME: u64 = 2;
 /// It is renamed away: the name is gone.
 pub const MUT_REMOVE: u64 = 3;
 
-/// What a symlink points at: outside the work tree (`/etc/passwd` for a file, the work root's
+/// What a symlink points at: outside the disk (`/etc/passwd` for a file, the work root's
 /// parent for a directory), another entry of the same directory, or nothing.
 pub const TO_OUTSIDE: u64 = 1;
 pub const TO_SIBLING: u64 = 2;
 pub const TO_DANGLING: u64 = 3;
 
-/// A file outside the work tree that every sandbox has.
+/// A file outside the disk that every sandbox has.
 pub const OUTSIDE_FILE: &[u8] = b"/etc/passwd";
 /// The name a swapped-out entry is renamed to, in its own directory, before the seq.
 pub const ASIDE_PREFIX: &[u8] = b".patina-swap-";

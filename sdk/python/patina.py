@@ -243,8 +243,8 @@ def mark(label):
 
 def control(words):
     """A control call (the grammar is in ``patina.h``), e.g. ``control("partition a b")``: raises
-    ``OSError`` with the errno Patina answered (``EPERM`` outside the driver's node, ``ENOENT``
-    for an unknown node, ``EINVAL`` for other words, ``EALREADY`` or ``EAGAIN`` for a node in the
+    ``OSError`` with the errno Patina answered (``EPERM`` outside main, ``ENOENT``
+    for an unknown machine, ``EINVAL`` for other words, ``EALREADY`` or ``EAGAIN`` for a machine in the
     wrong state), or ``ENOSYS`` outside Patina."""
     if not _get()[0]:
         raise OSError(38, "control: not inside a Patina run")

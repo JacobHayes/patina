@@ -48,23 +48,23 @@ pub enum Event {
     TimerFd { key: u64 },
     /// A network wire event: collected in `fired_wire` for the supervisor's wire.
     Wire { key: u64 },
-    /// A node event (`nodes`: a partition's start or end, a node's kill or restart):
-    /// collected in `fired_node`. `live` says whether it keeps a run alive whose threads all
+    /// A machine event (`machines`: a partition's start or end, a machine's kill or restart):
+    /// collected in `fired_machine`. `live` says whether it keeps a run alive whose threads all
     /// wait with no deadline.
-    Node { key: u64, live: Live },
+    Machine { key: u64, live: Live },
 }
 
-/// Whether a pending node event keeps a run alive whose threads all wait with no deadline
+/// Whether a pending machine event keeps a run alive whose threads all wait with no deadline
 /// (`Sched::only_weak`): with only events that do not, the run is deadlocked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Live {
-    /// It may wake someone: a partition's end (held traffic goes on), a node's restart.
+    /// It may wake someone: a partition's end (held traffic goes on), a machine's restart.
     Yes,
     /// It cannot: a partition's start. Every thread waits with no deadline and nothing else is
     /// ahead, so no traffic is in flight: a cut holds nothing, and its heal leaves the links
     /// as they were.
     No,
-    /// The seed's kill of a node: while faults may act (`FaultCfg::in_window`), since outside
+    /// The seed's kill of a machine: while faults may act (`FaultCfg::in_window`), since outside
     /// the window it is only drawn again.
     AfterSetup,
 }
@@ -96,8 +96,8 @@ pub struct Entry {
     pub reply: i64,
     /// Why it last became runnable after a park.
     pub woke: Option<WakeReason>,
-    /// Its deadline is an absolute realtime time of its node (`Slot::clock_flags`): a step
-    /// of the node's clock moves it (`retime`).
+    /// Its deadline is an absolute realtime time of its machine (`Slot::clock_flags`): a step
+    /// of the machine's clock moves it (`retime`).
     pub rt_abs: bool,
 }
 
@@ -137,9 +137,9 @@ pub struct Sched {
     pub fired_timers: Vec<u64>,
     /// Wire event keys that fired, in firing order.
     pub fired_wire: Vec<u64>,
-    /// Node event keys that fired, in firing order.
-    pub fired_node: Vec<u64>,
-    /// Slots of a paused node's threads (`nodes`): never picked, whether runnable or not. A
+    /// Machine event keys that fired, in firing order.
+    pub fired_machine: Vec<u64>,
+    /// Slots of a paused machine's threads (`machines`): never picked, whether runnable or not. A
     /// thread keeps its state while frozen: a wake makes it runnable, and it runs once its
     /// slot leaves this set.
     pub(super) frozen: BTreeSet<usize>,
@@ -155,7 +155,7 @@ impl Sched {
         }
     }
 
-    /// The runnable threads the scheduler may pick: those of no paused node, in slot order.
+    /// The runnable threads the scheduler may pick: those of no paused machine, in slot order.
     /// Without a pause, every runnable thread.
     pub fn eligible(&self) -> impl Iterator<Item = usize> + '_ {
         self.runnable
@@ -164,7 +164,7 @@ impl Sched {
             .filter(|s| !self.frozen.contains(s))
     }
 
-    /// Slot `slot` belongs to a paused node: it is not picked until `thaw`.
+    /// Slot `slot` belongs to a paused machine: it is not picked until `thaw`.
     pub fn freeze(&mut self, slot: usize) {
         self.frozen.insert(slot);
     }
@@ -191,13 +191,13 @@ impl Sched {
             due_timers: Vec::new(),
             fired_timers: Vec::new(),
             fired_wire: Vec::new(),
-            fired_node: Vec::new(),
+            fired_machine: Vec::new(),
             frozen: BTreeSet::new(),
         }
     }
 
     /// A new thread (or process image) in `slot`, runnable (and not frozen: the caller
-    /// freezes it if its node is paused).
+    /// freezes it if its machine is paused).
     pub fn add(&mut self, slot: usize, tid: i32, pid: i32, asid: u64) {
         self.frozen.remove(&slot);
         self.entries[slot] = Entry {
@@ -258,7 +258,7 @@ impl Sched {
         e.rt_abs = false;
     }
 
-    /// Move the deadline of parked `slot` to `at` (a step of its node's realtime clock): a
+    /// Move the deadline of parked `slot` to `at` (a step of its machine's realtime clock): a
     /// deadline now past wakes it at once, as a timeout.
     pub fn retime(&mut self, slot: usize, at: u64, now: u64) {
         let State::Parked {

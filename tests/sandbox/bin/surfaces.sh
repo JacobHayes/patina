@@ -23,7 +23,7 @@ import json, sys
 o = json.load(open(sys.argv[2] + "/result.json"))
 print("%s\t%s\t%s" % (sys.argv[1], o["outcome"], ",".join(o.get("refused", []))))
 PY
-    for inc in "$d"/inc-*; do
+    for inc in "$d"/boot-*; do
         "$PATINA" log dump "$inc/boundary.log"
     done | python3 -I -c '
 import collections, re, sys
@@ -48,6 +48,6 @@ for l in sys.stdin:
 for (s, v), k in sorted(c.items()):
     print("%s\t%s\t%s\t%d" % (n, s, v, k))
 ' "$n" >>"$OUT/surfaces.tsv"
-    rm -f "$d"/inc-*/boundary.log "$d"/inc-*/oplog.data
+    rm -f "$d"/boot-*/boundary.log "$d"/boot-*/oplog.data
 done
 cat "$OUT/outcomes.tsv"

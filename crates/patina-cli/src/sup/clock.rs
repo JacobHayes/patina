@@ -1,14 +1,14 @@
-//! Each node's realtime clock (`proto::node`): one virtual time serves the run; a node's
+//! Each machine's realtime clock (`proto::machine`): one virtual time serves the run; a machine's
 //! `CLOCK_REALTIME` (and what derives from it: `gettimeofday`, `time`, the times it writes
-//! on its files, `/proc/stat`'s `btime`) is that time plus the node's offset
-//! (`NodeTab::clock_off`), which the runtime adds. Monotonic and boot-time clocks have no
+//! on its files, `/proc/stat`'s `btime`) is that time plus the machine's offset
+//! (`MachineTab::clock_off`), which the runtime adds. Monotonic and boot-time clocks have no
 //! offset, and no clock runs fast or slow.
 //!
 //! The offset is the boot's skew plus the script's steps: with `clock-skew-ms=A..B` each
-//! boot of a node draws a skew in A..B ms, ahead or behind (`Stream::Node`, keyed by the node,
-//! the boot and `NSUB_SKEW`); `clock NAME DELTA` from the driver moves the node's clock
+//! boot of a machine draws a skew in A..B ms, ahead or behind (`Stream::Machine`, keyed by the machine,
+//! the boot and `MSUB_SKEW`); `clock NAME DELTA` from main moves the machine's clock
 //! by DELTA, and the move stays across its restarts, as a clock set on a machine does. The
-//! driver's clock is never moved: it is the run's virtual time.
+//! main's clock is never moved: it is the run's virtual time.
 //!
 //! A step does what setting the clock does on Linux: an absolute realtime deadline (a
 //! `clock_nanosleep` or futex wait with `TIMER_ABSTIME` on `CLOCK_REALTIME`, a timerfd armed
@@ -22,7 +22,7 @@
 use super::{Next, Sup};
 use proto::ctl::*;
 use proto::layout::{REALTIME_EPOCH_S, VCLOCK_BOOT_NS};
-use proto::node::*;
+use proto::machine::*;
 use std::sync::atomic::Ordering::Relaxed;
 
 impl Sup {
@@ -33,52 +33,52 @@ impl Sup {
         self.sched.entries[idx].rt_abs = f & CLK_REALTIME_ABS != 0;
     }
 
-    /// Boot `b` of node `k` started: its offset is its skew (drawn with `clock-skew-ms`) plus
+    /// Boot `b` of machine `k` started: its offset is its skew (drawn with `clock-skew-ms`) plus
     /// the steps so far.
     pub(super) fn clock_boot(&mut self, k: usize, b: u64) {
-        let c = self.node_tab().conf[k];
+        let c = self.machine_tab().conf[k];
         if c.skew_max_ns == 0 {
             return;
         }
         // After the faults end a boot draws no skew: its clock is the steps alone.
         if self.ctl.faults.cfg.fault_until_seq != 0 {
-            let t = self.node_tab();
+            let t = self.machine_tab();
             t.clock_off[k] = t.clock_stepped[k];
             return;
         }
         let d = proto::draw(
             self.ctl.config.seed,
-            proto::Stream::Node,
-            (k as u64) << 24 | (b & 0xffff) << 8 | NSUB_SKEW,
+            proto::Stream::Machine,
+            (k as u64) << 24 | (b & 0xffff) << 8 | MSUB_SKEW,
         );
         let span = c.skew_max_ns.saturating_sub(c.skew_min_ns) + 1;
         let mag = (c.skew_min_ns + (d >> 1) % span) as i64;
         let skew = if d & 1 != 0 { -mag } else { mag };
         // Not before 1970 (as a step may not be): steps back by decades and a skew behind
-        // leave the node at the epoch.
+        // leave the machine at the epoch.
         let now = self.now();
         let real = (now - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * 1_000_000_000) as i64;
-        let stepped = self.node_tab().clock_stepped[k] as i64;
+        let stepped = self.machine_tab().clock_stepped[k] as i64;
         let skew = skew.max(-real.saturating_add(stepped));
-        let t = self.node_tab();
+        let t = self.machine_tab();
         let off = skew.saturating_add(t.clock_stepped[k] as i64);
         t.clock_off[k] = off as u64;
         if let Some(e) = t.boot[k].get_mut(b as usize) {
             e.skew_ns = skew as u64;
         }
         self.decide(
-            DEC_NODE_CLOCK,
+            DEC_MACHINE_CLOCK,
             0,
             [k as u64, b, CLK_SKEW, skew as u64, off as u64, 0],
             0,
         );
     }
 
-    /// `clock NAME DELTA` from the driver: node `k`'s clock moves by `delta` ns. A step
-    /// that would put the node's realtime before 1970 answers `EINVAL`.
+    /// `clock NAME DELTA` from main: machine `k`'s clock moves by `delta` ns. A step
+    /// that would put the machine's realtime before 1970 answers `EINVAL`.
     pub(super) fn clock_step(&mut self, k: usize, delta: i64) -> Next {
         let now = self.now();
-        let t = self.node_tab();
+        let t = self.machine_tab();
         let off = (t.clock_off[k] as i64).saturating_add(delta);
         let real = (now - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * 1_000_000_000) as i64;
         if real.saturating_add(off) < 0 {
@@ -89,15 +89,15 @@ impl Sup {
         t.clock_stepped[k] = (t.clock_stepped[k] as i64).saturating_add(delta) as u64;
         let b = t.boots[k].saturating_sub(1);
         self.decide(
-            DEC_NODE_CLOCK,
+            DEC_MACHINE_CLOCK,
             0,
             [k as u64, b, CLK_STEP, delta as u64, off as u64, 0],
             0,
         );
-        // The node's absolute realtime deadlines move with its clock.
+        // The machine's absolute realtime deadlines move with its clock.
         for i in 0..self.sched.entries.len() {
             let e = &self.sched.entries[i];
-            if !e.rt_abs || self.slot(i).node.load(Relaxed) as usize != k {
+            if !e.rt_abs || self.slot(i).machine.load(Relaxed) as usize != k {
                 continue;
             }
             if let super::sched::State::Parked {

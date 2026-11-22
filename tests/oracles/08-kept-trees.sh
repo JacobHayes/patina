@@ -1,7 +1,7 @@
-# 8. A sweep keeps a run's work trees packed (`live.tree.zst`; `post-crash.tree.zst` in a run no
+# 8. A sweep keeps a run's disks packed (`live.tree.zst`; `post-crash.tree.zst` in a run no
 #    checker reads) and every reader of them reads the packed run as the run left it: against
 #    the same seed's replay (which writes the trees whole, and must be identical), `log tree` of
-#    every incarnation and node disk, `log tree --post-crash` of every crash, `log ops --check`
+#    every boot and machine disk, `log tree --post-crash` of every crash, `log ops --check`
 #    and `log events` (what a machine crash lost). In a run a checker judged, `post-crash/`
 #    stays whole: the checker run by hand, `report --recheck --check` with a checker run per run and with one that serves read
 #    what the replay's post-crash/ holds. The packed trees are smaller than the trees by a wide
@@ -13,10 +13,10 @@ die() { echo "FAIL: $*"; exit 1; }
 rm -rf "${RUNS:?}/kept-trees"
 mkdir -p "$RUNS/kept-trees" && cd "$RUNS/kept-trees"
 
-# A guest with a compressible work tree: a 1 MB file, fsynced, then an unsynced line and a new
-# file each incarnation (a machine crash may lose those); it exits with its argument.
+# A guest with a compressible disk: a 1 MB file, fsynced, then an unsynced line and a new
+# file each boot (a machine crash may lose those); it exits with its argument.
 prog='import os, sys
-inc = int(os.environ.get("PATINA_INCARNATION", "0"))
+inc = int(os.environ.get("PATINA_BOOT", "1")) - 1
 rows = b"".join(b"row %08d status=active payload=%s\n" % (i, b"x" * 40) for i in range(16000))
 fd = os.open("db", os.O_RDWR | os.O_CREAT, 0o644)
 os.pwrite(fd, rows, 0)
@@ -26,7 +26,7 @@ os.close(fd)
 os.makedirs("d", exist_ok=True)
 open("d/n%d" % inc, "w").write("x")
 sys.exit(int(sys.argv[1]))'
-crash=(--fault crash-permille=300 --fault max-incarnations=3)
+crash=(--fault crash-permille=300 --fault max-boots=3)
 # The listing of every crash's post-crash/ and its contents, for the checkers below.
 cat >listing <<'EOF'
 #!/bin/sh
@@ -52,7 +52,7 @@ crashed() {
     for d in "$1"/seed-*; do
         [ "$(jq '.crashes | length' "$d/result.json")" -ge 1 ] && { echo "$d"; return; }
     done
-    echo "FAIL: no seed of 1..4 of $1 crashed: $(jq -c .incarnations "$1"/seed-*/result.json)" >&2
+    echo "FAIL: no seed of 1..4 of $1 crashed: $(jq -c .boots "$1"/seed-*/result.json)" >&2
     exit 1
 }
 
@@ -117,20 +117,20 @@ for k in ./judge ./serve; do
     [ "$got" = "$want" ] || die "recheck --check $k: the checker read '$got', the replay's post-crash/ is '$want' (exit $rc: $(tail -2 recheck.txt))"
 done
 
-# Nodes: each node's disks are packed and read the same way.
+# Machines: each machine's disks are packed and read the same way.
 cat >d.toml <<'EOF'
-[node.a]
-cmd = ["python3", "/guest/disk.py", "a"]
-[node.b]
-cmd = ["python3", "/guest/disk.py", "b"]
+[machine.a]
+run = ["python3", "/guest/disk.py", "a"]
+[machine.b]
+run = ["python3", "/guest/disk.py", "b"]
 EOF
-sweep nodes fail 1 --config d.toml --mount "$PATINA_GUESTS":/guest:copy -- /bin/sh -c 'python3 /guest/disk.py driver 2; exit 1'
-node=$(find nodes -path '*/node/a/inc-1/post-crash.tree.zst')
-[ -n "$node" ] || die "no packed node disk: $(find nodes -path '*/node/a/*' | head -3)"
-same nodes/seed-1 nraw >same-nodes.txt
+sweep machines fail 1 --config d.toml --mount "$PATINA_GUESTS":/guest:copy -- /bin/sh -c 'python3 /guest/disk.py main 2; exit 1'
+machine=$(find machines -path '*/machine/a/boot-2/post-crash.tree.zst')
+[ -n "$machine" ] || die "no packed machine disk: $(find machines -path '*/machine/a/*' | head -3)"
+same machines/seed-1 nraw >same-machines.txt
 
 # --keep all: the trees as the run wrote them.
 sweep all all 1 "${crash[@]}" -- /usr/bin/python3 -I -c "$prog" 1
 packed_all=$(find all -name '*.zst') whole_all=$(find all -name live.tree)
 [ -z "$packed_all" ] && [ -n "$whole_all" ] || die "--keep all packed a tree: $packed_all"
-echo "ok: failures: $(cat same-fail.txt); checked: $(cat same-checked.txt), its post-crash/ read by hand and by recheck with a checker per run and one that serves; nodes: $(cat same-nodes.txt); packed $psize bytes for $size; kept line ${shown}B"
+echo "ok: failures: $(cat same-fail.txt); checked: $(cat same-checked.txt), its post-crash/ read by hand and by recheck with a checker per run and one that serves; machines: $(cat same-machines.txt); packed $psize bytes for $size; kept line ${shown}B"

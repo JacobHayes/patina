@@ -1,5 +1,5 @@
 """sandbox.py OUT MARKER SECONDS: wait until the run writing to OUT is up and its guest stdout
-(OUT/inc-0/stdout) contains MARKER, or, for MARKER "procs:N", until at least N processes of the
+(OUT/boot-1/stdout) contains MARKER, or, for MARKER "procs:N", until at least N processes of the
 run are inside its PID namespace (since sandbox hardening the guest's stdout reaches OUT only at the end of
 the run; every guest process holds the boundary log, so it counts as a process of the run);
 then print, one per line, every namespace of the run's
@@ -34,7 +34,7 @@ def members():
 # At most SECONDS of polls (more under load: the bound counts polls, not wall time).
 for _ in range(int(limit / 0.05)):
     try:
-        up = procs is not None or marker in open(out + "inc-0/stdout", "rb").read()
+        up = procs is not None or marker in open(out + "boot-1/stdout", "rb").read()
     except OSError:
         up = False
     if up:

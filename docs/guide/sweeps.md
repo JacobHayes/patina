@@ -54,12 +54,12 @@ outcomes: failure 10, ok 10
   explain: patina explain /tmp/casedemo/patina-out/sweep/seed-1/2-test_store.Store.test_counter
 ```
 
-A line may start with its own settings, up to a word `--`: `--work DIR[:GUEST]`, `--mount`,
+A line may start with its own settings, up to a word `--`: `--disk DIR[:GUEST]`, `--mount`,
 `--env`, `--stdin` as for `patina run`, and --name NAME, the case's id (a line number moves when
 a line is added above it, a name does not):
 
 ```text
---work cases/grep-basic/t:/work/t --name grep-basic -- /h/harness grep-basic
+--disk cases/grep-basic/t:/work/t --name grep-basic -- /h/harness grep-basic
 ```
 
 Write the file with one loop over the runner's own listing. Rust test binaries:

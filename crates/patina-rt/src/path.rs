@@ -144,7 +144,7 @@ pub fn read_mounts() {
             dev: makedev(ma, mi),
             class,
             point: p,
-            // Each node's own work tree (the driver's is hidden under a node's).
+            // Each machine's own disk (main's is hidden under a machine's).
             work: point == crate::state::work_path(),
         };
         t.n += 1;

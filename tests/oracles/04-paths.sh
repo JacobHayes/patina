@@ -11,7 +11,7 @@
 # the first finding, since only a swap to a symlink between the stat and the open escapes,
 # about one seed in six at every use swapped), the fix (openat2 beneath, no symlinks) passes
 # both. examples/checks/confined fails the open; it allows the read-only open of the
-# work tree to fsync it after a create under the root, and not one of /tmp.
+# disk to fsync it after a create under the root, and not one of /tmp.
 #@ tier=area budget=30 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)

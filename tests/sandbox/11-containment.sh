@@ -40,7 +40,7 @@ contained() {
 }
 rm -rf "${out:?}/count"
 timeout 120 "$PATINA" run --seed 1 --out "$out/count" --mount "$G12":/guest:copy -- /guest/gadget count "$text" >/dev/null 2>&1 || true
-pairs=$(head -1 "$out/count/inc-0/stdout")
+pairs=$(head -1 "$out/count/boot-1/stdout")
 [ "${pairs:-0}" -ge 1 ] || die "gadget: no syscall byte pair found in the runtime's text"
 i=0
 while [ "$i" -lt "$pairs" ]; do
@@ -56,23 +56,23 @@ addrs=$(printf '%#x ' 0x600000000000 "$data" 0x601000000000 0x601000040000 0x601
 for k in a b; do
     rm -rf "${out:?}/ptr-$k"
     timeout 120 "$PATINA" run --seed 1 --out "$out/ptr-$k" --mount "$G12":/guest:copy -- /guest/ptrprobe $addrs >/dev/null 2>&1 || true
-    [ "$(class "$out/ptr-$k")" = ok ] || die "ptrprobe: $(class "$out/ptr-$k"): $(detail "$out/ptr-$k"); $(grep -m3 DIFF "$out/ptr-$k/inc-0/stdout")"
+    [ "$(class "$out/ptr-$k")" = ok ] || die "ptrprobe: $(class "$out/ptr-$k"): $(detail "$out/ptr-$k"); $(grep -m3 DIFF "$out/ptr-$k/boot-1/stdout")"
 done
 lhs=$(digest "$out/ptr-a"); rhs=$(digest "$out/ptr-b")
 [ "$lhs" = "$rhs" ] || die "ptrprobe: digests differ between repeats"
 "$G12/ptrprobe" $addrs >"$out/ptr-native.txt" 2>&1 || die "ptrprobe natively: $(grep -m3 DIFF "$out/ptr-native.txt")"
 grep -v '^story ' "$out/ptr-native.txt" >"$out/ptr-native.cmp"
-grep -v '^story ' "$out/ptr-a/inc-0/stdout" >"$out/ptr-patina.cmp"
+grep -v '^story ' "$out/ptr-a/boot-1/stdout" >"$out/ptr-patina.cmp"
 cmp -s "$out/ptr-native.cmp" "$out/ptr-patina.cmp" ||
     die "ptrprobe: differs from the native run: $(diff "$out/ptr-native.cmp" "$out/ptr-patina.cmp" | head -5)"
 # FNV-1a of nothing: no byte arrived.
 grep -qx 'learned cbf29ce484222325' "$out/ptr-patina.cmp" || die "ptrprobe: bytes arrived: $(grep '^learned ' "$out/ptr-patina.cmp")"
-grep '^story munmap ' "$out/ptr-a/inc-0/stdout" | awk '$4 != -22 {bad = 1} END {exit bad || NR == 0}' ||
-    die "ptrprobe: munmap in the region: $(grep -m3 '^story munmap ' "$out/ptr-a/inc-0/stdout")"
-grep -qx 'story task-mem -2' "$out/ptr-a/inc-0/stdout" ||
-    die "ptrprobe: /proc/self/task/TID/mem through the task directory: $(grep task-mem "$out/ptr-a/inc-0/stdout")"
-grep -qx 'story straddle-write -14 drained 0' "$out/ptr-a/inc-0/stdout" ||
-    die "ptrprobe: a buffer into the region: $(grep straddle "$out/ptr-a/inc-0/stdout")"
+grep '^story munmap ' "$out/ptr-a/boot-1/stdout" | awk '$4 != -22 {bad = 1} END {exit bad || NR == 0}' ||
+    die "ptrprobe: munmap in the region: $(grep -m3 '^story munmap ' "$out/ptr-a/boot-1/stdout")"
+grep -qx 'story task-mem -2' "$out/ptr-a/boot-1/stdout" ||
+    die "ptrprobe: /proc/self/task/TID/mem through the task directory: $(grep task-mem "$out/ptr-a/boot-1/stdout")"
+grep -qx 'story straddle-write -14 drained 0' "$out/ptr-a/boot-1/stdout" ||
+    die "ptrprobe: a buffer into the region: $(grep straddle "$out/ptr-a/boot-1/stdout")"
 echo "ptrprobe: $(grep -vc '^story \|^learned ' "$out/ptr-patina.cmp") calls with pointers into the runtime's region answer as natively for a hole; no byte of the runtime's arrived"
 contained clock /guest/ctlwrite
 off=$(shuf -i 0-241663 -n 1) byte=$(shuf -i 0-255 -n 1)

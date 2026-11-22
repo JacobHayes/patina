@@ -1,4 +1,4 @@
-//! The launcher: one sandbox per incarnation (`sandbox`), descriptors inherited at the hidden
+//! The launcher: one sandbox per boot (`sandbox`), descriptors inherited at the hidden
 //! numbers, pinning and `ADDR_NO_RANDOMIZE` set before the sandbox's keeper starts. `PR_SET_TSC`
 //! is set by the runtime, not here: the host's glibc executes `rdtsc` at start-up, so the
 //! supervisor would die of SIGSEGV if it were set before it.
@@ -142,8 +142,8 @@ pub const GENERATED_ETC: [&str; 7] = [
     "/etc/alternatives",
 ];
 
-/// `/etc/hosts`: without nodes `sim` is the loopback's; with nodes every node is named at its
-/// address (`10.0.0.(k + 1)`, the driver first) and `localhost` is each node's own loopback.
+/// `/etc/hosts`: without machines `sim` is the loopback's; with machines every machine is named at its
+/// address (`10.0.0.(k + 1)`, main first) and `localhost` is each machine's own loopback.
 fn hosts(names: &[&str]) -> Vec<u8> {
     if names.is_empty() {
         return b"127.0.0.1 localhost sim\n::1 localhost\n".to_vec();
@@ -175,20 +175,20 @@ fn etc_files(home: &str, names: &[&str]) -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-/// The sandbox's layout for a run of `o` (`root`: the incarnation's `/in`): the steps in the
+/// The sandbox's layout for a run of `o` (`root`: the boot's `/in`): the steps in the
 /// order the guest's mount table lists their mounts, the generated files' contents
 /// (`Op::Data`), and the trees the supervisor copies in (`HIDDEN:DST`).
 pub struct Layout {
     pub ops: Vec<Op>,
     pub data: Vec<Vec<u8>>,
     pub copies: Vec<String>,
-    /// A run with nodes: what the keeper needs to start each node (`sandbox::Nodes`).
-    pub nodes: Option<sandbox::Nodes>,
+    /// A run with machines: what the keeper needs to start each machine (`sandbox::Machines`).
+    pub machines: Option<sandbox::Machines>,
 }
 
 pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     let c = &o.cfg;
-    let work = c.work_path();
+    let work = c.disk_path();
     let size = c.tmpfs_bytes;
     let ro = |src: String, dst: String| Op::Bind {
         src,
@@ -204,17 +204,17 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         dst: d.into(),
         size,
     };
-    // With nodes the driver is one machine among several, named like the others.
-    let names: Vec<&str> = if c.nodes.is_empty() {
+    // With machines main is one machine among several, named like the others.
+    let names: Vec<&str> = if c.machines.is_empty() {
         vec![]
     } else {
-        std::iter::once("driver")
-            .chain(c.nodes.iter().map(|n| n.name.as_str()))
+        std::iter::once("main")
+            .chain(c.machines.iter().map(|n| n.name.as_str()))
             .collect()
     };
     let mut ops = vec![
         Op::Hostname {
-            name: if names.is_empty() { "sim" } else { "driver" }.into(),
+            name: if names.is_empty() { "sim" } else { "main" }.into(),
         },
         ro("/usr".into(), "/usr".into()),
     ];
@@ -259,7 +259,7 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
             ops.push(link(&t, &format!("/etc/alternatives/{n}")));
         }
     }
-    // The program, the `:copy` mounts and the incarnation's /in are bound at a hidden place,
+    // The program, the `:copy` mounts and the boot's /in are bound at a hidden place,
     // and the supervisor copies them into sandbox tmpfs (/guest, the mount points, /work)
     // before the guest starts: what the guest reads there has the sandbox's own metadata
     // (inode numbers in copy order, virtual times, tmpfs blocks), not the host's. Other
@@ -301,7 +301,7 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         ops.push(ro(r.display().to_string(), "/.patina/in".into()));
     }
     // `patina` itself, for `patina ctl` from a script: unless a mount covers its place (refused
-    // in a run with nodes, `Config::check_nodes`; without nodes the mount's tree stands).
+    // in a run with machines, `Config::check_machines`; without machines the mount's tree stands).
     if !c.mounts.iter().any(|m| under(GUEST_PATINA, &m.dst)) {
         let exe = std::env::current_exe().map_err(|e| format!("own executable: {e}"))?;
         ops.push(ro(exe.display().to_string(), GUEST_PATINA.into()));
@@ -315,10 +315,10 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
             place_program(p, what, &c.mounts, &mut ops, &mut copies, &mut progs)?;
         }
     }
-    let nodes = if c.nodes.is_empty() {
+    let machines = if c.machines.is_empty() {
         None
     } else {
-        Some(node_layout(o, &mut ops, &mut copies, &mut progs)?)
+        Some(machine_layout(o, &mut ops, &mut copies, &mut progs)?)
     };
     assert!(etc.len() <= sandbox::MAX_DATA);
     for (i, (path, _)) in etc.iter().enumerate() {
@@ -331,7 +331,7 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         ops,
         data: etc.into_iter().map(|e| e.1).collect(),
         copies,
-        nodes,
+        machines,
     })
 }
 
@@ -339,7 +339,7 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
 /// `PATH` (`sup::BASE_ENV`).
 pub const GUEST_PATINA: &str = "/opt/patina/bin/patina";
 
-/// Another program of the run (a node's, a phase's) where the driver's is: a copied one at
+/// Another program of the run (a machine's, a phase's) where main's is: a copied one at
 /// `/guest` (refused where two programs would take one name), a program's directory bound
 /// read-only where its path leads, unless a bind is there already. `progs` holds the copied
 /// programs placed so far, as (guest path, host path).
@@ -392,15 +392,15 @@ fn place_program(
     Ok(())
 }
 
-/// The layout's part for nodes: each node's program and starting tree bound where the driver's
-/// are, its work tree's mount point, and what the keeper needs to
-/// start each node in its own view.
-fn node_layout(
+/// The layout's part for machines: each machine's program and starting tree bound where main's
+/// are, its disk's mount point, and what the keeper needs to
+/// start each machine in its own view.
+fn machine_layout(
     o: &Opts,
     ops: &mut Vec<Op>,
     copies: &mut Vec<String>,
     progs: &mut Vec<(String, PathBuf)>,
-) -> Res<sandbox::Nodes> {
+) -> Res<sandbox::Machines> {
     let c = &o.cfg;
     let ro = |src: String, dst: String| Op::Bind {
         src,
@@ -409,25 +409,25 @@ fn node_layout(
         dev: false,
     };
     let mut specs = vec![];
-    for (k, (n, p)) in c.nodes.iter().zip(&o.node_programs).enumerate() {
+    for (k, (n, p)) in c.machines.iter().zip(&o.machine_programs).enumerate() {
         let k = k + 1;
         place_program(
             p,
-            &format!("node.{}", n.name),
+            &format!("machine.{}", n.name),
             &c.mounts,
             ops,
             copies,
             progs,
         )?;
-        let w = n.work_path();
-        if w != c.work_path() && !specs.iter().any(|s: &sandbox::NodeSpec| s.work == w) {
+        let w = n.disk_path();
+        if w != c.disk_path() && !specs.iter().any(|s: &sandbox::MachineSpec| s.work == w) {
             ops.push(Op::Dir { dst: w.into() });
         }
-        let input = match &n.work {
+        let input = match &n.disk {
             Some(dir) => {
                 let r = fs::canonicalize(dir)
-                    .map_err(|e| format!("node.{}: work {}: {e}", n.name, dir.display()))?;
-                let at = format!("/.patina/node/{k}/in");
+                    .map_err(|e| format!("machine.{}: work {}: {e}", n.name, dir.display()))?;
+                let at = format!("/.patina/machine/{k}/in");
                 ops.push(ro(r.display().to_string(), at.clone()));
                 Some(at)
             }
@@ -443,24 +443,24 @@ fn node_layout(
         for kv in c.env.iter().chain(&n.env) {
             set(&mut env, kv);
         }
-        set(&mut env, &format!("PATINA_NODE={}", n.name));
+        set(&mut env, &format!("PATINA_MACHINE={}", n.name));
         let mut argv = vec![
             "rt".to_string(),
             p.guest.clone(),
             if p.copied {
                 p.guest.clone()
             } else {
-                n.cmd[0].clone()
+                n.run[0].clone()
             },
         ];
-        argv.extend(n.cmd[1..].iter().cloned());
-        specs.push(sandbox::NodeSpec {
+        argv.extend(n.run[1..].iter().cloned());
+        specs.push(sandbox::MachineSpec {
             name: n.name.clone(),
             work: w.into(),
             input,
             argv,
             env,
-            size: c.node_disk_bytes(k - 1)?,
+            size: c.machine_disk_bytes(k - 1)?,
         });
     }
     let mut readonly: Vec<String> = vec!["/".into(), "/dev".into(), "/guest".into()];
@@ -470,10 +470,10 @@ fn node_layout(
             readonly.push(dst);
         }
     }
-    Ok(sandbox::Nodes {
-        nodes: specs,
+    Ok(sandbox::Machines {
+        machines: specs,
         size: c.tmpfs_bytes,
-        hide: vec![c.work_path().into()],
+        hide: vec![c.disk_path().into()],
         readonly,
     })
 }
@@ -541,8 +541,8 @@ unsafe fn perturb_child() {
     }
 }
 
-/// Run a whole chain of incarnations into `out` (created; must not hold an earlier run):
-/// `run.json` first, then the incarnations, then `result.json`. With `--check`, when the run
+/// Run a whole chain of boots into `out` (created; must not hold an earlier run):
+/// `run.json` first, then the boots, then `result.json`. With `--check`, when the run
 /// ended ok the checker runs on the finished directory and `result.json` is written again
 /// with its verdict (`check.rs`); the run itself, its logs and digest, are done by then.
 pub fn run_one(
@@ -552,11 +552,11 @@ pub fn run_one(
     no_personality: bool,
 ) -> Res<(RunEnd, serde_json::Value)> {
     fs::create_dir_all(out).map_err(|e| format!("create {}: {e}", out.display()))?;
-    if out.join("result.json").exists() || out.join("inc-0").exists() {
+    if out.join("result.json").exists() || out.join("boot-1").exists() {
         return Err(format!("{} already holds a run", out.display()));
     }
     crate::result::write_json(&out.join("run.json"), &crate::result::run_json(o)?)?;
-    let mut end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
+    let mut end = crate::launcher::boots::run_chain(o, out, cpu, no_personality)?;
     let write = |end: &RunEnd| -> Res<serde_json::Value> {
         let mut r = crate::result::result_json(end, &crate::result::classified(end));
         r["signature"] = crate::signature::of(&r, out);
@@ -585,7 +585,7 @@ pub fn run_one(
     Ok((end, r))
 }
 
-/// Where an incarnation starts: its number, `/in`, the boundary sequence number and
+/// Where a boot starts: its number, `/in`, the boundary sequence number and
 /// virtual time it continues from, and its fault configuration.
 pub struct Start<'a> {
     pub k: u64,
@@ -595,9 +595,9 @@ pub struct Start<'a> {
     pub faults: proto::faults::FaultCfg,
     /// Wall time after which the run ends `timeout` (`--timeout`).
     pub deadline: std::time::Instant,
-    /// Bytes the earlier incarnations' logs hold (they count against `[run] log-limit`).
+    /// Bytes the earlier boots' logs hold (they count against `[run] log-limit`).
     pub log_used: u64,
-    /// System V shared memory a process crash carries to the next incarnation (`FD_SHM`):
+    /// System V shared memory a process crash carries to the next boot (`FD_SHM`):
     /// one memfd for the run.
     pub shm: std::os::fd::RawFd,
     /// The run's plans, with load-time points (`launcher::plans`).
@@ -614,8 +614,8 @@ pub fn shm_carrier() -> Res<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// What one incarnation left behind.
-pub struct IncEnd {
+/// What one boot left behind.
+pub struct BootEnd {
     pub verdict: Verdict,
     pub digest: u64,
     pub traps: u64,
@@ -658,8 +658,8 @@ pub struct IncEnd {
     pub crash_points: u64,
     /// Bytes its boundary log and operation log hold.
     pub log_bytes: u64,
-    /// A run with nodes: `result.json`'s `nodes` (`result::nodes_json`).
-    pub nodes: Option<serde_json::Value>,
+    /// A run with machines: `result.json`'s `machines` (`result::machines_json`).
+    pub machines: Option<serde_json::Value>,
 }
 
 pub use proto::vfs::SANDBOX_ROOTS;
@@ -675,7 +675,7 @@ fn under(p: &str, dir: &str) -> bool {
 /// left out: there the guest's view is the sandbox's, not the host's.
 pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Value> {
     let mut covered: Vec<String> = o.cfg.mounts.iter().map(|m| m.dst.clone()).collect();
-    covered.push(o.cfg.work_path().to_string());
+    covered.push(o.cfg.disk_path().to_string());
     if let Some(d) = Path::new(&o.program.guest).parent() {
         if o.program.dir.is_some() {
             covered.push(d.display().to_string());
@@ -922,17 +922,17 @@ fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
     res
 }
 
-/// Run one incarnation into `inc` (created).
-pub fn run_incarnation(
+/// Run one boot into `bdir` (created).
+pub fn run_boot(
     o: &Opts,
-    inc: &Path,
+    bdir: &Path,
     cpu: usize,
     no_personality: bool,
     start: &Start,
-) -> Res<IncEnd> {
+) -> Res<BootEnd> {
     let t_launch = mono_ns();
-    let inc = inc.to_path_buf();
-    fs::create_dir_all(&inc).map_err(|e| format!("create {}: {e}", inc.display()))?;
+    let bdir = bdir.to_path_buf();
+    fs::create_dir_all(&bdir).map_err(|e| format!("create {}: {e}", bdir.display()))?;
     let rt_file = rt_file()?;
     let patina_file = File::open("/proc/self/exe").map_err(|e| format!("own executable: {e}"))?;
 
@@ -941,7 +941,7 @@ pub fn run_incarnation(
             .read(true)
             .write(true)
             .create_new(true)
-            .open(inc.join(name))
+            .open(bdir.join(name))
             .map_err(|e| format!("create {name}: {e}"))
     };
     let log = create("boundary.log")?;
@@ -1014,60 +1014,61 @@ pub fn run_incarnation(
             proto::ctl::SCHED_SPIN_HOST_OFF
         };
     }
-    cfg.work[..c.work_path().len()].copy_from_slice(c.work_path().as_bytes());
-    if !c.nodes.is_empty() {
-        cfg.nodes = c.nodes.len() as u64 + 1;
+    cfg.work[..c.disk_path().len()].copy_from_slice(c.disk_path().as_bytes());
+    if !c.machines.is_empty() {
+        cfg.machines = c.machines.len() as u64 + 1;
     }
     unsafe { Ctl::init(ctl_ptr as *mut Ctl, cfg) };
-    if !c.nodes.is_empty() {
-        let t = unsafe { proto::node::NodeTab::at(ctl_ptr) };
+    if !c.machines.is_empty() {
+        let t = unsafe { proto::machine::MachineTab::at(ctl_ptr) };
         t.set(
-            std::iter::once(proto::node::DRIVER).chain(c.nodes.iter().map(|n| n.name.as_bytes())),
+            std::iter::once(proto::machine::MAIN)
+                .chain(c.machines.iter().map(|n| n.name.as_bytes())),
         );
-        // Each node's restart policy, boots and ok-exit statuses, and the run's kill and
-        // down-time settings (`sup::nodes`).
+        // Each machine's restart policy, boots and ok-exit statuses, and the run's kill and
+        // down-time settings (`sup::machines`).
         let p = &o.plan;
-        for (i, n) in c.nodes.iter().enumerate() {
+        for (i, n) in c.machines.iter().enumerate() {
             let k = i + 1;
-            let w = n.work_path().as_bytes();
+            let w = n.disk_path().as_bytes();
             t.work[k][..w.len()].copy_from_slice(w);
             let mut ok_exit = [0u64; 4];
             for s in n.ok_exit.as_deref().unwrap_or(&[0]) {
                 ok_exit[(*s / 64) as usize] |= 1 << (s % 64);
             }
-            t.conf[k] = proto::node::NodeConf {
+            t.conf[k] = proto::machine::MachineConf {
                 restart: match n.restart.as_deref() {
-                    Some("always") => proto::node::RESTART_ALWAYS,
-                    Some("never") => proto::node::RESTART_NEVER,
-                    _ => proto::node::RESTART_CRASH,
+                    Some("always") => proto::machine::RESTART_ALWAYS,
+                    Some("never") => proto::machine::RESTART_NEVER,
+                    _ => proto::machine::RESTART_CRASH,
                 },
                 max_boots: n
-                    .max_incarnations
-                    .unwrap_or(p.max_incarnations)
-                    .min(proto::node::BOOTS_MAX as u64),
-                crash: if (p.node_crash >> k) & 1 != 0 {
-                    p.node_crash_kind
+                    .max_boots
+                    .unwrap_or(p.max_boots)
+                    .min(proto::machine::BOOTS_MAX as u64),
+                crash: if (p.machine_crash >> k) & 1 != 0 {
+                    p.machine_crash_kind
                 } else {
                     0
                 },
                 ok_exit,
-                pause_gap_min_ns: p.node_pause[k][0],
-                pause_gap_max_ns: p.node_pause[k][1],
-                pause_min_ns: p.node_pause[k][2],
-                pause_max_ns: p.node_pause[k][3],
-                skew_min_ns: p.node_skew[k].0,
-                skew_max_ns: p.node_skew[k].1,
+                pause_gap_min_ns: p.machine_pause[k][0],
+                pause_gap_max_ns: p.machine_pause[k][1],
+                pause_min_ns: p.machine_pause[k][2],
+                pause_max_ns: p.machine_pause[k][3],
+                skew_min_ns: p.machine_skew[k].0,
+                skew_max_ns: p.machine_skew[k].1,
             };
         }
         t.fs_model = (o.fs_model == crate::durability::materialise::Model::PosixStrict) as u64;
         (t.crash_gap_min_ns, t.crash_gap_max_ns) = p.crash_gap_ns;
         (t.down_min_ns, t.down_max_ns) = p.down_ns;
-        for (f, cfg) in t.faults.iter_mut().zip(p.node_faults).skip(1) {
+        for (f, cfg) in t.faults.iter_mut().zip(p.machine_faults).skip(1) {
             unsafe { std::ptr::write_volatile(std::ptr::addr_of_mut!(f.cfg), cfg) };
         }
-        for (d, cfg) in t.sdk.iter_mut().zip(p.node_sdk).skip(1) {
+        for (d, cfg) in t.sdk.iter_mut().zip(p.machine_sdk).skip(1) {
             *d = proto::sdk::SdkCfg {
-                incarnation: start.k,
+                boot: start.k,
                 ..cfg
             };
         }
@@ -1090,7 +1091,7 @@ pub fn run_incarnation(
     // SDK fault points (`proto::sdk`), read by the runtime.
     unsafe {
         proto::sdk::SdkTab::at(ctl_ptr).cfg = proto::sdk::SdkCfg {
-            incarnation: start.k,
+            boot: start.k,
             ..o.plan.sdk
         }
     };
@@ -1102,7 +1103,7 @@ pub fn run_incarnation(
     let (outcome_r, outcome_w) = unsafe { (File::from_raw_fd(p[0]), OwnedFd::from_raw_fd(p[1])) };
 
     // The supervisor, executed by the sandbox's PID 1 from the descriptor placed at FD_PATINA.
-    let work = c.work_path();
+    let work = c.disk_path();
     let lay = layout(o, start.root)?;
     let mut argv = vec![format!("/proc/self/fd/{FD_PATINA}"), "__sup".to_string()];
     for cp in &lay.copies {
@@ -1144,14 +1145,14 @@ pub fn run_incarnation(
     for e in &c.env {
         argv.extend(["--env".into(), e.clone()]);
     }
-    if !c.nodes.is_empty() {
-        argv.push("--nodes".into());
-        argv.extend(["--env".into(), "PATINA_NODE=driver".into()]);
+    if !c.machines.is_empty() {
+        argv.push("--machines".into());
+        argv.extend(["--env".into(), "PATINA_MACHINE=main".into()]);
     }
-    // Only restarted incarnations get it: incarnation 0 must match a run without --crash
-    // byte for byte up to the crash (the environment shapes the initial stack).
+    // Only later boots get it: the first must match a run without --crash byte for byte up
+    // to the crash (the environment shapes the initial stack).
     if start.k > 0 {
-        argv.extend(["--env".into(), format!("PATINA_INCARNATION={}", start.k)]);
+        argv.extend(["--env".into(), format!("PATINA_BOOT={}", start.k + 1)]);
     }
     argv.push("--".into());
     // argv[0]: a copied program is named by where it runs from.
@@ -1171,7 +1172,7 @@ pub fn run_incarnation(
         argv,
         exe: None,
         after: sandbox::After::Exec,
-        nodes: lay.nodes,
+        machines: lay.machines,
     };
     let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
     let mut etc_fds = vec![];
@@ -1201,9 +1202,9 @@ pub fn run_incarnation(
     if let Some(fd) = userns {
         place.push((fd, sandbox::FD_USERNS));
     }
-    // Each node's stdio: memfds as the driver's (an empty stdin).
-    let mut node_stdio = vec![];
-    for (k, n) in c.nodes.iter().enumerate() {
+    // Each machine's stdio: memfds as main's (an empty stdin).
+    let mut machine_stdio = vec![];
+    for (k, n) in c.machines.iter().enumerate() {
         let fds = [
             stdio_memfd(&format!("patina-{}-stdin", n.name), Some(&[]))?,
             stdio_memfd(&format!("patina-{}-stdout", n.name), None)?,
@@ -1212,10 +1213,10 @@ pub fn run_incarnation(
         for (j, f) in fds.iter().enumerate() {
             place.push((
                 f.as_raw_fd(),
-                sandbox::FD_NODE_STDIO0 + 3 * k as i32 + j as i32,
+                sandbox::FD_MACHINE_STDIO0 + 3 * k as i32 + j as i32,
             ));
         }
-        node_stdio.push(fds);
+        machine_stdio.push(fds);
     }
     // The plan broker's sandbox end.
     let (plan_sandbox, plan_ours) = match &start.planner {
@@ -1276,7 +1277,7 @@ pub fn run_incarnation(
         crate::debug::Watch::start(
             ctl_ptr as usize,
             child.id() as i32,
-            inc.parent().unwrap_or(Path::new(".")),
+            bdir.parent().unwrap_or(Path::new(".")),
         )
     });
     let mut verdict_text = String::new();
@@ -1303,8 +1304,9 @@ pub fn run_incarnation(
         verdict_text = Verdict::new(
             "timeout",
             format!(
-                "--timeout: {} s of wall time passed (incarnation {})",
-                o.cfg.timeout, start.k
+                "--timeout: {} s of wall time passed (boot {})",
+                o.cfg.timeout,
+                start.k + 1
             ),
         )
         .encode();
@@ -1323,22 +1325,22 @@ pub fn run_incarnation(
             truncated.push(name);
         }
     }
-    // Each node's stdio: `node/NAME/inc-K/` for its boot K (the driver's is `inc-0/`), each
-    // the part of the node's output from where the boot started to where the next did.
-    let tab: Option<&proto::node::NodeTab> =
-        (!c.nodes.is_empty()).then(|| &*unsafe { proto::node::NodeTab::at(ctl_ptr) });
-    for (i, (n, fds)) in c.nodes.iter().zip(&node_stdio).enumerate() {
+    // Each machine's stdio: `machine/NAME/boot-K/` for its boot K (main's is `boot-1/`), each
+    // the part of the machine's output from where the boot started to where the next did.
+    let tab: Option<&proto::machine::MachineTab> =
+        (!c.machines.is_empty()).then(|| &*unsafe { proto::machine::MachineTab::at(ctl_ptr) });
+    for (i, (n, fds)) in c.machines.iter().zip(&machine_stdio).enumerate() {
         let k = i + 1;
         let boots = tab.map_or(1, |t| {
-            (t.boots[k] as usize).clamp(1, proto::node::BOOTS_MAX)
+            (t.boots[k] as usize).clamp(1, proto::machine::BOOTS_MAX)
         });
         for b in 0..boots {
-            let dir = inc
+            let dir = bdir
                 .parent()
                 .unwrap_or(Path::new("."))
-                .join("node")
+                .join("machine")
                 .join(&n.name)
-                .join(format!("inc-{b}"));
+                .join(crate::durability::check::boot_dir(b as u64));
             fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
             let off = |b: usize, j: usize| -> u64 {
                 match tab {
@@ -1355,7 +1357,7 @@ pub fn run_incarnation(
                     .write(true)
                     .create_new(true)
                     .open(dir.join(name))
-                    .map_err(|e| format!("create node {} {name}: {e}", n.name))?;
+                    .map_err(|e| format!("create machine {} {name}: {e}", n.name))?;
                 if copy_stdio_part(mem, &f, off(b, j), off(b + 1, j), stdio_max)
                     .map_err(|e| format!("copy {name}: {e}"))?
                 {
@@ -1364,21 +1366,23 @@ pub fn run_incarnation(
             }
         }
     }
-    drop(node_stdio);
-    // Each node's disks: their parts of the shared operation log (`node/NAME/inc-K/`, K the
+    drop(machine_stdio);
+    // Each machine's disks: their parts of the shared operation log (`machine/NAME/boot-K/`, K the
     // boot a disk began with).
-    if !c.nodes.is_empty() {
-        let run = inc.parent().unwrap_or(Path::new("."));
-        crate::durability::log::split_nodes(&inc, |k, b| {
-            c.nodes
-                .get(k.wrapping_sub(1))
-                .map(|n| run.join("node").join(&n.name).join(format!("inc-{b}")))
+    if !c.machines.is_empty() {
+        let run = bdir.parent().unwrap_or(Path::new("."));
+        crate::durability::log::split_machines(&bdir, |k, b| {
+            c.machines.get(k.wrapping_sub(1)).map(|n| {
+                run.join("machine")
+                    .join(&n.name)
+                    .join(crate::durability::check::boot_dir(b))
+            })
         })?;
     }
 
     let mut verdict = Verdict::decode(&verdict_text).unwrap_or_else(|| {
-        let err = fs::read_to_string(inc.join("stderr")).unwrap_or_default()
-            + &fs::read_to_string(inc.join("sandbox.log")).unwrap_or_default();
+        let err = fs::read_to_string(bdir.join("stderr")).unwrap_or_default()
+            + &fs::read_to_string(bdir.join("sandbox.log")).unwrap_or_default();
         let last = err
             .lines()
             .rev()
@@ -1401,7 +1405,7 @@ pub fn run_incarnation(
         )
     });
     if verdict.class == "failed" {
-        if let Ok(err) = fs::read_to_string(inc.join("stderr")) {
+        if let Ok(err) = fs::read_to_string(bdir.join("stderr")) {
             if let Some(l) = err.lines().find(|l| l.starts_with("INVARIANT ")) {
                 verdict.detail = l.to_string();
             }
@@ -1422,7 +1426,7 @@ pub fn run_incarnation(
     log.set_len(log_len)
         .map_err(|e| format!("truncate boundary.log: {e}"))?;
     if c.observe {
-        crate::log::take_observations(&inc)?;
+        crate::log::take_observations(&bdir)?;
     }
     let mut refused: Vec<String> = ctl
         .denied_nrs()
@@ -1437,7 +1441,7 @@ pub fn run_incarnation(
         .missing()
         .map(|(w, p)| (w, String::from_utf8_lossy(p).into_owned()))
         .collect();
-    let end = IncEnd {
+    let end = BootEnd {
         verdict,
         digest: ctl.log_hash.load(Relaxed),
         traps: ctl.stats.traps.load(Relaxed),
@@ -1468,9 +1472,9 @@ pub fn run_incarnation(
         compute_images: crate::result::ComputeImages::read(unsafe {
             proto::ctl::ComputeTab::at(ctl_ptr)
         }),
-        // Every node's eligible calls with the driver's (a run without nodes has none).
+        // Every machine's eligible calls with main's (a run without machines has none).
         eligible: std::array::from_fn(|i| {
-            let t = unsafe { proto::node::NodeTab::at(ctl_ptr) };
+            let t = unsafe { proto::machine::MachineTab::at(ctl_ptr) };
             ctl.faults.eligible[i].load(Relaxed)
                 + t.faults
                     .iter()
@@ -1479,15 +1483,16 @@ pub fn run_incarnation(
         }),
         crash_points: ctl.faults.crash_points.load(Relaxed),
         log_bytes: ctl.log_used(),
-        nodes: (!c.nodes.is_empty())
-            .then(|| crate::result::nodes_json(unsafe { proto::node::NodeTab::at(ctl_ptr) })),
+        machines: (!c.machines.is_empty()).then(|| {
+            crate::result::machines_json(unsafe { proto::machine::MachineTab::at(ctl_ptr) })
+        }),
     };
     if std::env::var_os("PATINA_TEST_TIMING").is_some() {
         // cost measurement start-up breakdown: host CLOCK_MONOTONIC ns, launcher and supervisor marks.
         let tm = |i: usize| ctl.timing[i].load(Relaxed);
         eprintln!(
-            "patina-timing inc={} launch={t_launch} spawn={t_spawn} sup_start={} copied={} first_hello={} main_exit={} finish={} exported={} verdict={t_verdict} waited={t_waited} done={}",
-            start.k,
+            "patina-timing boot={} launch={t_launch} spawn={t_spawn} sup_start={} copied={} first_hello={} main_exit={} finish={} exported={} verdict={t_verdict} waited={t_waited} done={}",
+            start.k + 1,
             tm(TM_SUP_START),
             tm(TM_COPIED),
             tm(TM_FIRST_HELLO),
@@ -1543,7 +1548,7 @@ fn copy_stdio(mem: &OwnedFd, to: &File, max: u64) -> std::io::Result<bool> {
     copy_stdio_part(mem, to, 0, u64::MAX, max)
 }
 
-/// `copy_stdio` of the bytes `from..until` of `mem` (a node's boot's part of its output).
+/// `copy_stdio` of the bytes `from..until` of `mem` (a machine's boot's part of its output).
 fn copy_stdio_part(
     mem: &OwnedFd,
     to: &File,
@@ -1654,10 +1659,10 @@ pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
     let a = crate::cli::parse(crate::cli::Cmd::Run, args)?;
     let o = crate::config::resolve(&a)?.opts()?;
     let c = &o.cfg;
-    if !c.nodes.is_empty() {
-        return Err("a native twin of a run with nodes: not available yet".into());
+    if !c.machines.is_empty() {
+        return Err("a native twin of a run with machines: not available yet".into());
     }
-    let lay = layout(&o, c.work.as_deref())?;
+    let lay = layout(&o, c.disk.as_deref())?;
     let mut env: Vec<String> = crate::sup::BASE_ENV.iter().map(|s| s.to_string()).collect();
     for kv in &c.env {
         let k = kv.split('=').next().unwrap_or("");
@@ -1679,14 +1684,14 @@ pub fn native_main(args: &[String]) -> Res<std::process::ExitCode> {
     let spec = sandbox::Spec {
         ops: lay.ops,
         join_userns: false,
-        chdir: c.work_path().into(),
+        chdir: c.disk_path().into(),
         env,
         argv,
         exe: Some(o.program.guest.clone()),
-        nodes: None,
+        machines: None,
         after: sandbox::After::Native {
             copies,
-            work: Some(c.work_path().into()),
+            work: Some(c.disk_path().into()),
         },
     };
     // The supervisor's umask, whatever the caller's.

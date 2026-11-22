@@ -7,14 +7,14 @@
 . "$(dirname "$0")/lib.inc"
 patina_run "$RUNS/06-restart/self" 1 sig-restart self
 check_ok "$RUNS/06-restart/self" sig-restart sig-restart-self
-cat "$RUNS/06-restart/self/inc-0/stdout"
+cat "$RUNS/06-restart/self/boot-1/stdout"
 patina_run "$RUNS/06-restart/wait" 1 sig-restart
 check_ok "$RUNS/06-restart/wait" sig-restart
-cat "$RUNS/06-restart/wait/inc-0/stdout"
+cat "$RUNS/06-restart/wait/boot-1/stdout"
 if [ -d "$HERE/../io" ]; then
     patina_run "$RUNS/06-restart/io" 1 sig-restart io
     check_ok "$RUNS/06-restart/io" sig-restart sig-restart-io
-    cat "$RUNS/06-restart/io/inc-0/stdout"
+    cat "$RUNS/06-restart/io/boot-1/stdout"
 else
     echo "NOT RUN: pipe read and poll: blocking pipe I/O is blocking I/O (tests/io not present)"
 fi

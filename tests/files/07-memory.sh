@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib/common.inc"
 o=$RUNS/07-memory
 verify_ok "$o" 1 aslr 2 -- /guest/memtest
-out=$o/run-0/inc-0/stdout
+out=$o/run-0/boot-1/stdout
 grep -q '^madvise dontneed 0 -> 0 0 7$' "$out" || die "MADV_DONTNEED did not read zeros"
 grep -q '^madvise free -1 -> 7 7 7$' "$out" || die "MADV_FREE was not refused with the data kept"
 grep -q '^addr brk-regrow .* byte 0$' "$out" || die "brk regrowth not zero"

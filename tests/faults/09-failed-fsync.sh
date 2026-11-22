@@ -7,9 +7,9 @@ d=$RUNS/09
 # The crash point: just after the fsync of "acks" that follows the failure (from a run
 # without crashes; the run before the crash is the same).
 run "$d/probe" 1 --fault fsync-error-at=3 -- /guest/ack-log retry
-"$PATINA" log ops "$d/probe/inc-0" >"$d/probe.ops"
+"$PATINA" log ops "$d/probe/boot-1" >"$d/probe.ops"
 sed -n 1,12p "$d/probe.ops"
-set -- $(python3 -I "$LIB/faults.py" point-after "$d/probe/inc-0" Fsync acks 1)
+set -- $(python3 -I "$LIB/faults.py" point-after "$d/probe/boot-1" Fsync acks 1)
 at=$1 aseq=$2
 echo "crash at crash point $at, after the acks fsync at seq $aseq"
 for m in ext4-ordered posix-strict; do
@@ -22,6 +22,6 @@ for m in ext4-ordered posix-strict; do
         || die "$m: retry-until-success was not caught"
     o=$d/fatal-$m
     run "$o" 1 --config "$("$PATINA_CFG" fs-model=$m)" --fault fsync-error-at=3 --fault crash-at=$at -- /guest/ack-log fatal
-    echo "$m fatal: $(class "$o") ($(tail -1 "$o/inc-0/stdout"))"
+    echo "$m fatal: $(class "$o") ($(tail -1 "$o/boot-1/stdout"))"
     [ "$(class "$o")" = ok ] || die "$m: fatal-on-EIO guest: $(class "$o") $(field "$o/result.json" message)"
 done

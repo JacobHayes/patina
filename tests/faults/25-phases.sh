@@ -1,4 +1,4 @@
-# 25. A run's phases (tests/guests/nodes/phases.py): `--setup` starts a server in the
+# 25. A run's phases (tests/guests/machines/phases.py): `--setup` starts a server in the
 # background and exits; the main command puts records through it under `--faults disk,net`;
 # `--finally` checks the server holds them. The server outlives the setup command; every fault
 # event comes after the setup's end and before the main command's; the same seed gives the same
@@ -15,15 +15,15 @@ fin=(--finally "python3 /guest/phases.py check $n 127.0.0.1")
 work=(-- python3 /guest/phases.py work $n 127.0.0.1)
 
 # window DIR: the run's fault and crash events all lie in a main phase (after the setup's end,
-# before the main command's, in the same incarnation); prints how many there are.
+# before the main command's, in the same boot); prints how many there are.
 window() {
-    "$PATINA" log events "$1" --types inc,phase,fault,crash >"$1.ev" || die "log events $1"
+    "$PATINA" log events "$1" --types boot,phase,fault,crash >"$1.ev" || die "log events $1"
     python3 -I - "$1.ev" <<'PY'
 import json, sys
 phase, n = "setup", 0
 for line in open(sys.argv[1]):
     e = json.loads(line)
-    if e["type"] == "inc":
+    if e["type"] == "boot":
         phase = "setup"
     elif e["type"] == "phase":
         phase = e.get("next", "none")
@@ -48,8 +48,8 @@ done
 for p in setup main finally; do
     [ "$(field "$d/w/result.json" phases.$p.exit.status)" = 0 ] || die "seed $s: the $p command: $(field "$d/w/result.json" phases.$p)"
 done
-grep -q '^start: serving$' "$d/w/inc-0/stdout" && grep -q "^check: $n puts" "$d/w/inc-0/stdout" \
-    || die "seed $s: $(cat "$d/w/inc-0/stdout")"
+grep -q '^start: serving$' "$d/w/boot-1/stdout" && grep -q "^check: $n puts" "$d/w/boot-1/stdout" \
+    || die "seed $s: $(cat "$d/w/boot-1/stdout")"
 echo "seed $s: setup, main and finally exit 0; $f fault events, all in the main phase"
 
 # The same seed: the same run; replay and verify identical across the phases.
@@ -99,6 +99,6 @@ assert br["points"] > 0 and br["tried"] == br["points"], br
 PY
 for c in "$d"/cp/seed-*@*; do
     [ "$(window "$c")" = 1 ] || die "crash points: $c: a crash outside the main phase"
-    [ "$(grep -c '^start: serving$' "$c/inc-1/stdout")" = 1 ] || die "crash points: $c: the restart did not run the setup"
+    [ "$(grep -c '^start: serving$' "$c/boot-2/stdout")" = 1 ] || die "crash points: $c: the restart did not run the setup"
 done
 echo "crash points: $(field "$d/cp/report.json" crash_points.points), each in the main phase; ok at each"

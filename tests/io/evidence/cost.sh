@@ -25,7 +25,7 @@ import json, sys
 o = json.load(open(sys.argv[1]))
 print(f"patina p{sys.argv[2]} run {sys.argv[3]}: {o['outcome']} {o['wall_ms']} ms, traps {o['sched']['traps']}, switches {o['sched']['switches']}, io {o['counters']['io']}")
 PY
-        rm -f "$d/inc-0/boundary.log"
+        rm -f "$d/boot-1/boundary.log"
     done
 done
 echo "pairs per run: $((2 * N))"

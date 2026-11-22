@@ -44,16 +44,16 @@ for w in only:
             exts.append(o["ext_ms"])
             traps.append(o["sched"]["traps"])
             sws.append(o["sched"]["switches"])
-            incs.append(o["incarnations"])
+            incs.append(o["boots"])
             classes[o["outcome"]] = classes.get(o["outcome"], 0) + 1
         row[key] = {"wall_ms": stats(walls), "ext_ms": stats(exts), "traps": stats(traps),
-                    "switches": stats(sws), "incarnations": stats(incs), "classes": classes}
+                    "switches": stats(sws), "boots": stats(incs), "classes": classes}
     res[w] = row
     log(f"{w}: native {fmt(row['native_ms'], ' ms', 0)} (exit {rc}, {row['native_syscalls']} syscalls); "
         f"patina off {fmt(row['off']['wall_ms'], ' ms', 0)} traps {row['off']['traps']['median']:.0f} "
         f"switches {row['off']['switches']['median']:.0f} {row['off']['classes']}; "
         f"patina on {fmt(row['on']['wall_ms'], ' ms', 0)} traps {row['on']['traps']['median']:.0f} "
-        f"switches {row['on']['switches']['median']:.0f} incarnations {row['on']['incarnations']['median']:.0f} {row['on']['classes']}")
+        f"switches {row['on']['switches']['median']:.0f} boots {row['on']['boots']['median']:.0f} {row['on']['classes']}")
 res["loadavg_after"] = uptime()
 save("e2e" + ("-" + "-".join(sys.argv[1:]) if sys.argv[1:] else "") + ".json", res)
 log("loadavg", res["loadavg_before"], "->", res["loadavg_after"])

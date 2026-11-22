@@ -17,7 +17,7 @@ for seed in 1 2; do
         [ $seed = 1 ] && echo "$g: $(cat "$o.check")"
         if [ $g = randops ]; then
             # keep the evidence small: the summary and the check result stay
-            cp "$o/inc-0/stdout" "$o.stdout"
+            cp "$o/boot-1/stdout" "$o.stdout"
             rm -rf "${o:?}"
         fi
     done

@@ -34,12 +34,12 @@ printf '%s\n' mremap mprotect munmap remap | xargs -P 4 -I M bash -euo pipefail 
 for m in mremap mprotect munmap remap; do
     r=$o/v-$m/run-0
     grep -q '^identical' "$o/v-$m.txt" || die "$m: $(grep -m1 -v '^run ' "$o/v-$m.txt")"
-    cmp -s "$o/$m.want" "$r/inc-0/stdout" || die "$m: printed $(head -2 "$r/inc-0/stdout"), natively $(head -2 "$o/$m.want")"
+    cmp -s "$o/$m.want" "$r/boot-1/stdout" || die "$m: printed $(head -2 "$r/boot-1/stdout"), natively $(head -2 "$o/$m.want")"
     [ "$(field "$r/result.json" rewrite.restored)" -ge 1 ] || die "$m: no part of the plan put back"
     [ "$(field "$r/result.json" rewrite.dropped)" = 0 ] || die "$m: the plan was dropped"
     page=$hot change=$m
     case $m in remap) page=$cold change=munmap ;; esac
-    "$PATINA" log dump "$r/inc-0/boundary.log" >"$o/$m.log" 2>&1 || die "$m: log dump: $(head -1 "$o/$m.log")"
+    "$PATINA" log dump "$r/boot-1/boundary.log" >"$o/$m.log" 2>&1 || die "$m: log dump: $(head -1 "$o/$m.log")"
     python3 -I - "$o/$m.log" "$change" "$page" <<'EOF' || die "$m: no point taken in 0x$page's page after the $change"
 import re, sys
 log, change, page = sys.argv[1], sys.argv[2], int(sys.argv[3], 16) & ~4095

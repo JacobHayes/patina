@@ -1,6 +1,6 @@
 //! Post-crash trees: a pure function of
 //! (operation log prefix, seed, model). The base image is part of the log: the supervisor
-//! records the initial `/work` (incarnation 0's `--work`, or the previous incarnation's
+//! records the initial `/work` (boot 0's `--disk`, or the previous boot's
 //! post-crash tree) as base records with `seq` 0, which are durable by definition. So the
 //! function needs no filesystem and is tested without a sandbox.
 //!
@@ -488,7 +488,7 @@ impl Fs {
     }
 }
 
-/// Replay the whole log: the live tree the incarnation should have ended with.
+/// Replay the whole log: the live tree the boot should have ended with.
 pub fn replay(log: &OpLog) -> Result<Fs, String> {
     let mut fs = Fs::default();
     for (i, op) in log.ops.iter().enumerate() {

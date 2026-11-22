@@ -35,11 +35,11 @@ verify() {
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || die "$g seed $seed: verify exit $? ($(tail -3 "$out.verify.txt"))"
     d=$(for i in $(seq 0 $((n - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     [ "$d" = 1 ] || die "$g seed $seed: $d distinct digests"
-    d=$(for i in $(seq 0 $((n - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
+    d=$(for i in $(seq 0 $((n - 1))); do sha256sum <"$out/run-$i/boot-1/stdout"; done | sort -u | wc -l)
     [ "$d" = 1 ] || die "$g seed $seed: $d distinct stdout files"
     c=$(grep -o 'cpu [0-9]*' "$out.verify.txt" | sort -u | wc -l)
     echo "$g seed $seed: $n identical runs on $c cores, digest $(field "$out/run-0/result.json" digest)"
 }
 
 # Drop the boundary logs of a verify directory (the digests stay in result.json).
-trim() { for f in "$1"/run-*/inc-0/boundary.log; do rm -f "$f"; done; }
+trim() { for f in "$1"/run-*/boot-1/boundary.log; do rm -f "$f"; done; }

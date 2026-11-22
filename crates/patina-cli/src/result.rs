@@ -9,12 +9,12 @@ use std::path::Path;
 pub const RESULT_SCHEMA: &str = "patina.result/v3";
 pub const RUN_SCHEMA: &str = "patina.run/v1";
 
-/// What a chain of incarnations produced.
+/// What a chain of boots produced.
 #[derive(Clone, Debug)]
 pub struct RunEnd {
     pub verdict: Verdict,
     pub seed: u64,
-    pub incarnations: u64,
+    pub boots: u64,
     pub digest: String,
     pub traps: u64,
     pub switches: u64,
@@ -33,18 +33,18 @@ pub struct RunEnd {
     pub faults: Value,
     /// Instruction channels.
     pub insn: InsnCounts,
-    /// Network wire counters, `NET_NAMES` order, summed over incarnations
+    /// Network wire counters, `NET_NAMES` order, summed over boots
     /// (`peak_queued` and `sup_hwm_kb` are maxima).
     pub net: [u64; NET_FIELDS],
-    /// AF_UNIX sockets sent in SCM_RIGHTS, summed over incarnations.
+    /// AF_UNIX sockets sent in SCM_RIGHTS, summed over boots.
     pub unix_sockets: u64,
     /// The size of each sandbox tmpfs (`[run] disk-mb`) and the file calls a full one answered
-    /// `ENOSPC`, summed over incarnations.
+    /// `ENOSPC`, summed over boots.
     pub tmpfs: [u64; 2],
     /// The most bytes the shadow store held (`proto::oplog::Shadows`; the largest over
-    /// incarnations): what the operation log holds of the work files mapped shared.
+    /// boots): what the operation log holds of the work files mapped shared.
     pub shadow_bytes: u64,
-    /// The SDK's site table, folded over incarnations.
+    /// The SDK's site table, folded over boots.
     pub sdk: SdkReport,
     /// Pause points and spin probes.
     pub sched: SchedCounts,
@@ -60,13 +60,13 @@ pub struct RunEnd {
     /// replaying the log does not give the live tree (a Patina defect, reported next to the
     /// program's own outcome, never instead of it). None when it did not run.
     pub self_check: Option<Result<(), String>>,
-    /// A run with nodes: each node and the scripted network (`nodes_json`).
-    pub nodes: Option<Value>,
+    /// A run with machines: each machine and the scripted network (`machines_json`).
+    pub machines: Option<Value>,
     /// A run with a declared setup, a final check or a `faults-done` mark: its phases.
     pub phases: Option<Phases>,
 }
 
-/// `proto::ctl::PhaseCtl` as an incarnation left it, folded over incarnations (`add`).
+/// `proto::ctl::PhaseCtl` as a boot left it, folded over boots (`add`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PhaseTab {
     pub from_seq: [u64; 3],
@@ -74,10 +74,10 @@ pub struct PhaseTab {
     pub word: [u64; 3],
     pub out_off: [u64; 3],
     pub err_off: [u64; 3],
-    /// The incarnation of each phase's last run.
-    pub inc: [u64; 3],
-    /// Without nodes: the link faults' chances in the fault window (`PhaseCtl::elig`), summed.
-    pub elig: [u64; proto::node::ELIG_N],
+    /// The boot of each phase's last run.
+    pub boot: [u64; 3],
+    /// Without machines: the link faults' chances in the fault window (`PhaseCtl::elig`), summed.
+    pub elig: [u64; proto::machine::ELIG_N],
 }
 
 impl PhaseTab {
@@ -90,28 +90,28 @@ impl PhaseTab {
             word: a(&p.word),
             out_off: a(&p.out_off),
             err_off: a(&p.err_off),
-            inc: [0; 3],
+            boot: [0; 3],
             elig: p.elig.each_ref().map(|v| v.load(Relaxed)),
         }
     }
 
-    /// Fold incarnation `k` in: a phase that ran again after a crash is its last run.
+    /// Fold boot `k` in: a phase that ran again after a crash is its last run.
     pub fn add(&mut self, k: u64, b: &PhaseTab) {
         for (a, b) in self.elig.iter_mut().zip(b.elig) {
             *a += b;
         }
-        // The phases after the first this incarnation ran are its own, run or not.
+        // The phases after the first this boot ran are its own, run or not.
         let Some(first) = b.from_seq.iter().position(|s| *s != 0) else {
             return;
         };
         for i in first..3 {
             if b.from_seq[i] == 0 {
                 (self.from_seq[i], self.to_seq[i], self.word[i]) = (0, 0, 0);
-                (self.out_off[i], self.err_off[i], self.inc[i]) = (0, 0, 0);
+                (self.out_off[i], self.err_off[i], self.boot[i]) = (0, 0, 0);
             } else {
                 (self.from_seq[i], self.to_seq[i], self.word[i]) =
                     (b.from_seq[i], b.to_seq[i], b.word[i]);
-                (self.out_off[i], self.err_off[i], self.inc[i]) = (b.out_off[i], b.err_off[i], k);
+                (self.out_off[i], self.err_off[i], self.boot[i]) = (b.out_off[i], b.err_off[i], k);
             }
         }
     }
@@ -138,7 +138,7 @@ pub struct Phases {
     pub faults_until_seq: u64,
     /// Where the setup ended (0: it did not, or the run declares none).
     pub setup_seq: u64,
-    /// The last incarnation came after a machine crash (it set up again).
+    /// The last boot came after a machine crash (it set up again).
     pub after_crash: bool,
 }
 
@@ -146,7 +146,7 @@ impl Phases {
     /// `result.json`'s `phases`: per phase that ran, its start and end (sequence numbers; the
     /// faults act from `setup.to_seq` to `main.to_seq`, or to `main.faults_until_seq` where a
     /// `faults-done` mark came first), its command's exit, and for a command where its output
-    /// starts in the incarnation's stdout and stderr. A final check that did not run is
+    /// starts in the boot's stdout and stderr. A final check that did not run is
     /// `{"skipped": true}`.
     pub fn json(&self) -> Value {
         let exit = |i: usize| match self.tab.end(i) {
@@ -160,7 +160,7 @@ impl Phases {
                 "from_seq": seq(self.tab.from_seq[i]),
                 "to_seq": seq(self.tab.to_seq[i]),
                 "exit": exit(i),
-                "incarnation": self.tab.inc[i],
+                "boot": self.tab.boot[i] + 1,
                 "stdout_at": self.tab.out_off[i],
                 "stderr_at": self.tab.err_off[i],
             })
@@ -221,10 +221,10 @@ impl Phases {
     }
 }
 
-/// `result.json`'s `nodes`: each node (the driver first) with its address, its first process and
+/// `result.json`'s `machines`: each machine (main first) with its address, its first process and
 /// how that ended (`running` when the run ended first), and the scripted network: cuts and heals
 /// served, connection directions a cut held, and the links still cut at the end.
-pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
+pub fn machines_json(t: &proto::machine::MachineTab) -> Value {
     let name = |k: usize| String::from_utf8_lossy(t.name(k)).into_owned();
     let list: Vec<Value> = (0..t.count())
         .map(|k| {
@@ -234,7 +234,7 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                 v["pid"] = json!(t.first_pid[k]);
                 v["end"] = if t.first_pid[k] == 0 {
                     json!("not started")
-                } else if s == proto::node::RUNNING {
+                } else if s == proto::machine::RUNNING {
                     json!("running")
                 } else if s & 0x7f == 0 {
                     json!({"exit": (s >> 8) & 0xff})
@@ -243,15 +243,15 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                 };
                 // Each time it went down (kills, its command's ends) and the restarts.
                 let boots = t.boots[k] as usize;
-                v["incarnations"] = json!(boots);
-                let downs: Vec<Value> = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
+                v["boots"] = json!(boots);
+                let downs: Vec<Value> = t.boot[k][..boots.min(proto::machine::BOOTS_MAX)]
                     .iter()
                     .enumerate()
                     .filter(|(_, b)| b.how != 0)
                     .map(|(i, b)| {
                         let mut d = json!({
-                            "incarnation": i,
-                            "how": proto::node::down_name(b.how),
+                            "boot": i + 1,
+                            "how": proto::machine::down_name(b.how),
                             "at_ms": b.end_ns / 1_000_000,
                             "up_ms": b.end_ns.saturating_sub(b.start_ns) / 1_000_000,
                             "down_ms": if b.down_ns == 0 { Value::Null } else { json!(b.down_ns / 1_000_000) },
@@ -260,8 +260,8 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                             d["point"] = json!(b.point);
                         }
                         match b.how {
-                            proto::node::DOWN_EXIT | proto::node::DOWN_FAILED => d["exit"] = json!(b.value),
-                            proto::node::DOWN_SIGNAL => d["signal"] = json!(b.value),
+                            proto::machine::DOWN_EXIT | proto::machine::DOWN_FAILED => d["exit"] = json!(b.value),
+                            proto::machine::DOWN_SIGNAL => d["signal"] = json!(b.value),
                             _ => {}
                         }
                         d
@@ -274,7 +274,7 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                 // what `crash-at=N@NAME` counts, and `--crash-points` tries).
                 let c = &t.faults[k].cfg;
                 if c.crash_kind != proto::faults::CRASH_NONE || c.crash_at != 0 {
-                    let p: Vec<u64> = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
+                    let p: Vec<u64> = t.boot[k][..boots.min(proto::machine::BOOTS_MAX)]
                         .iter()
                         .map(|b| b.points)
                         .collect();
@@ -283,15 +283,15 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                 // Its pauses (the seed's and the script's), and the virtual time it spent
                 // paused in all.
                 if t.pauses[k] > 0 {
-                    let n = (t.pauses[k] as usize).min(proto::node::PAUSES_MAX);
+                    let n = (t.pauses[k] as usize).min(proto::machine::PAUSES_MAX);
                     let p: Vec<Value> = t.pause[k][..n]
                         .iter()
                         .map(|p| {
                             json!({
-                                "by": if p.by == proto::node::BY_SEED { "seed" } else { "script" },
+                                "by": if p.by == proto::machine::BY_SEED { "seed" } else { "script" },
                                 "at_ms": p.from_ns / 1_000_000,
                                 "ms": if p.to_ns == 0 { Value::Null } else { json!((p.to_ns - p.from_ns) / 1_000_000) },
-                                "end": proto::node::pause_end_name(p.end),
+                                "end": proto::machine::pause_end_name(p.end),
                             })
                         })
                         .collect();
@@ -309,7 +309,7 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
                         "stepped_ms": ms(t.clock_stepped[k]),
                     });
                     if skewed {
-                        c["skew_ms"] = t.boot[k][..boots.min(proto::node::BOOTS_MAX)]
+                        c["skew_ms"] = t.boot[k][..boots.min(proto::machine::BOOTS_MAX)]
                             .iter()
                             .map(|b| ms(b.skew_ns))
                             .collect();
@@ -337,19 +337,19 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
     };
     // Virtual time as events and `faults.recent` give it.
     let ms = |ns: u64| ns / 1_000_000;
-    let parts: Vec<Value> = t.parts[..(t.parts_n as usize).min(proto::node::PARTS_MAX)]
+    let parts: Vec<Value> = t.parts[..(t.parts_n as usize).min(proto::machine::PARTS_MAX)]
         .iter()
         .map(|p| {
             let mut v = json!({
                 "n": p.n,
-                "shape": proto::node::shape_name(p.shape),
+                "shape": proto::machine::shape_name(p.shape),
                 "a": bits(p.a),
                 "b": bits(p.b),
                 "from_ms": ms(p.from_ns),
                 "to_ms": if p.to_ns == 0 { Value::Null } else { json!(ms(p.to_ns)) },
                 "acted": p.acted != 0,
             });
-            if p.shape == proto::node::SHAPE_BRIDGE {
+            if p.shape == proto::machine::SHAPE_BRIDGE {
                 let all = (1u64 << t.count()) - 1;
                 v["bridge"] = json!(bits(p.bridge & all));
             }
@@ -359,13 +359,13 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
     let mut v = json!({
         "list": list,
         "net": {"cuts": t.cuts, "heals": t.heals, "held": t.held, "cut_at_end": cut},
-        // What the link faults had a chance at, on the links they act on (`net-links`).
+        // What the link faults had a chance at, on the links they act on (`NetCfg::links`).
         "faulted_links": {
-            "connections": t.elig[proto::node::ELIG_CONNECTIONS],
-            "chunks": t.elig[proto::node::ELIG_CHUNKS],
-            "fins": t.elig[proto::node::ELIG_FINS],
-            "sends": t.elig[proto::node::ELIG_SENDS],
-            "datagrams": t.elig[proto::node::ELIG_DATAGRAMS],
+            "connections": t.elig[proto::machine::ELIG_CONNECTIONS],
+            "chunks": t.elig[proto::machine::ELIG_CHUNKS],
+            "fins": t.elig[proto::machine::ELIG_FINS],
+            "sends": t.elig[proto::machine::ELIG_SENDS],
+            "datagrams": t.elig[proto::machine::ELIG_DATAGRAMS],
         },
     });
     if t.ended_by > 0 {
@@ -388,11 +388,11 @@ pub fn nodes_json(t: &proto::node::NodeTab) -> Value {
     v
 }
 
-/// The partition a run with nodes ended in, if one was in force (`in force at the end:
+/// The partition a run with machines ended in, if one was in force (`in force at the end:
 /// partition N SHAPE {A} | {B} since t=Tms`), else the last one the run had (`last partition:
 /// ... t=T1..T2ms`).
-pub fn partition_line(nodes: &Value) -> Option<String> {
-    let p = nodes["partitions"].as_array()?.last()?;
+pub fn partition_line(machines: &Value) -> Option<String> {
+    let p = machines["partitions"].as_array()?.last()?;
     let side = |k: &str| {
         let v: Vec<&str> = p[k]
             .as_array()
@@ -421,7 +421,7 @@ pub fn partition_line(nodes: &Value) -> Option<String> {
 }
 
 /// `result.json`'s `rewrite`: each file the runtime asked a plan for (`rewrite::cache`), and
-/// the runtime's counts (`proto::ctl::PLAN_NAMES`), summed over incarnations.
+/// the runtime's counts (`proto::ctl::PLAN_NAMES`), summed over boots.
 #[derive(Clone, Debug)]
 pub struct RewriteReport {
     pub images: Vec<Value>,
@@ -430,7 +430,7 @@ pub struct RewriteReport {
     pub walk: u64,
 }
 
-/// Compute points (`proto::ctl::ComputeStats`), summed over incarnations, and the run's mean gap.
+/// Compute points (`proto::ctl::ComputeStats`), summed over boots, and the run's mean gap.
 #[derive(Clone, Debug, Default)]
 pub struct ComputeCounts {
     pub hellos: u64,
@@ -438,7 +438,7 @@ pub struct ComputeCounts {
     pub switches: u64,
     pub deadline_stops: u64,
     pub gap: u64,
-    /// The image table (`proto::ctl::ComputeTab`), folded over incarnations.
+    /// The image table (`proto::ctl::ComputeTab`), folded over boots.
     pub images: ComputeImages,
 }
 
@@ -489,7 +489,7 @@ impl ComputeImages {
         }
     }
 
-    /// Fold a later incarnation in: starts add, kinds join.
+    /// Fold a later boot in: starts add, kinds join.
     pub fn add(&mut self, b: ComputeImages) {
         for x in b.images {
             match self
@@ -550,7 +550,7 @@ impl ComputeCounts {
 }
 
 /// The scheduling points beyond traps: `pause` sites patched, and the counters of
-/// `proto::ctl::SCHED_NAMES`, summed over incarnations.
+/// `proto::ctl::SCHED_NAMES`, summed over boots.
 #[derive(Clone, Debug, Default)]
 pub struct SchedCounts {
     pub pause_sites: u64,
@@ -619,7 +619,7 @@ pub fn net_add(a: &mut [u64; NET_FIELDS], b: &[u64; NET_FIELDS]) {
     }
 }
 
-/// Instruction-channel counters, as in `proto::ctl::InsnCtl`, summed over incarnations.
+/// Instruction-channel counters, as in `proto::ctl::InsnCtl`, summed over boots.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InsnCounts {
     /// By `proto::insn::SiteKind`: [unused, rdrand, rdseed, rdpid, pause] on x86_64, [unused,
@@ -725,14 +725,14 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
         "stop": c.stop,
         "message": c.message,
         "exit": c.outcome.exit(),
-        "guest": if v.class.starts_with("node-") {
+        "guest": if v.class.starts_with("machine-") {
             json!({ "exit": null, "signal": null })
         } else {
             json!({ "exit": v.exit_status, "signal": v.signal })
         },
         "seed": e.seed,
         "digest": e.digest,
-        "incarnations": e.incarnations,
+        "boots": e.boots,
         "crashes": e.crashes,
         "faults": e.faults,
         "sdk": e.sdk.json(),
@@ -777,23 +777,23 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some(p) = &e.phases {
         r["phases"] = p.json();
     }
-    if let Some(n) = &e.nodes {
-        r["nodes"] = n.clone();
-        // A node's own end ended the run: which node, which of its boots, and how.
+    if let Some(n) = &e.machines {
+        r["machines"] = n.clone();
+        // A machine's own end ended the run: which machine, which of its boots, and how.
         if let Some(name) = n["ended_by"]
             .as_str()
-            .filter(|_| v.class.starts_with("node-"))
+            .filter(|_| v.class.starts_with("machine-"))
         {
             let boots = n["list"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .find(|x| x["name"] == name)
-                .and_then(|x| x["incarnations"].as_u64())
+                .and_then(|x| x["boots"].as_u64())
                 .unwrap_or(1);
-            r["node_end"] = json!({
-                "node": name,
-                "incarnation": boots.max(1) - 1,
+            r["machine_end"] = json!({
+                "machine": name,
+                "boot": boots.max(1),
                 "exit": v.exit_status,
                 "signal": v.signal,
             });
@@ -972,9 +972,9 @@ pub fn run_json(o: &crate::config::Opts) -> Res<Value> {
         "host": host_facts(),
         "inputs": crate::inputs::fingerprints(cfg),
     });
-    // Each node's program, as `program` (`cfg.nodes` order).
-    if !o.node_programs.is_empty() {
-        v["node_programs"] = json!(o.node_programs);
+    // Each machine's program, as `program` (`cfg.machines` order).
+    if !o.machine_programs.is_empty() {
+        v["machine_programs"] = json!(o.machine_programs);
     }
     // The setup command's program and the final check's.
     if let Some(p) = &o.setup_program {
@@ -1126,7 +1126,7 @@ const LINE_MAX: usize = 240;
 /// the guest's stderr (with its panic or assertion line) and the faults injected; the calls
 /// refused (each answered with an errno the guest may have handled silently); the run
 /// directory and how to replay it. `--format json` prints `result.json`, which holds all of it
-/// but stderr (in `inc-K/stderr`).
+/// but stderr (in `boot-K/stderr`).
 pub fn print_human(r: &Value, dir: &Path) {
     let s = |k: &str| r[k].as_str().unwrap_or("").to_string();
     println!("{} ({}): {}", s("outcome"), s("stop"), s("message"));
@@ -1162,11 +1162,15 @@ pub fn print_human(r: &Value, dir: &Path) {
     if let Some(l) = Phases::line(&r["phases"]) {
         println!("{l}");
     }
-    if let Some(l) = nodes_line(&r["nodes"]) {
+    if let Some(on) = r["faults"]["on"].as_array().filter(|a| !a.is_empty()) {
+        let names: Vec<&str> = on.iter().filter_map(|n| n.as_str()).collect();
+        println!("faults on: {}", names.join(", "));
+    }
+    if let Some(l) = machines_line(&r["machines"]) {
         println!("{l}");
     }
     let ok = r["outcome"] == "ok";
-    if let Some(p) = partition_line(&r["nodes"]).filter(|_| !ok) {
+    if let Some(p) = partition_line(&r["machines"]).filter(|_| !ok) {
         println!("{p}");
     }
     // A failed setup or final check: that command's own output, both streams.
@@ -1176,9 +1180,9 @@ pub fn print_human(r: &Value, dir: &Path) {
         .filter(|s| r["phases"][*s]["from_seq"].is_u64());
     if let Some(p) = phase {
         let ph = &r["phases"][p];
-        let inc = ph["incarnation"].as_u64().unwrap_or(0);
+        let boot = ph["boot"].as_u64().unwrap_or(1);
         for (stream, at) in [("stdout", "stdout_at"), ("stderr", "stderr_at")] {
-            let path = dir.join(format!("inc-{inc}")).join(stream);
+            let path = dir.join(format!("boot-{boot}")).join(stream);
             let b = std::fs::read(&path).unwrap_or_default();
             let from = (ph[at].as_u64().unwrap_or(0) as usize).min(b.len());
             let text = String::from_utf8_lossy(&b[from..]).into_owned();
@@ -1202,8 +1206,8 @@ pub fn print_human(r: &Value, dir: &Path) {
         }
     }
     if !ok && phase.is_none() {
-        let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
-        let path = dir.join(format!("inc-{inc}")).join("stderr");
+        let boot = r["boots"].as_u64().unwrap_or(1).max(1);
+        let path = dir.join(format!("boot-{boot}")).join("stderr");
         let text = std::fs::read(&path)
             .map(|b| String::from_utf8_lossy(&b).into_owned())
             .unwrap_or_default();
@@ -1368,21 +1372,19 @@ pub fn compute_line(c: &Value) -> Option<String> {
 
 /// The `patina run` line for result.json's `rewrite` (load-time points): points taken, the
 /// switches that walked on, and per image rewritten the share of its sites patched and of its text left dark.
-/// `nodes: primary 10.0.0.2 running, backup 10.0.0.3 exit 1; net: 2 cuts, 2 heals, 1 held,
-/// none cut at the end` (a run with nodes; each node's output is in `node/NAME/inc-K/`).
-pub fn nodes_line(n: &Value) -> Option<String> {
+/// `machines: primary 10.0.0.2 running, backup 10.0.0.3 exit 1; net: 2 cuts, 2 heals, 1 held,
+/// none cut at the end` (a run with machines; each machine's output is in `machine/NAME/boot-K/`).
+pub fn machines_line(n: &Value) -> Option<String> {
     let list = n["list"].as_array()?;
-    let nodes: Vec<String> = list
+    let machines: Vec<String> = list
         .iter()
         .skip(1)
         .map(|v| {
             let end = &v["end"];
             let downs = v["downs"].as_array().map_or(&[][..], |d| d.as_slice());
-            let incs = v["incarnations"].as_u64().unwrap_or(1);
-            // Down at the end: its last incarnation ended (a kill, or an `ok-exit` exit).
-            let last = downs
-                .last()
-                .filter(|d| d["incarnation"].as_u64() == Some(incs.saturating_sub(1)));
+            let boots = v["boots"].as_u64().unwrap_or(1);
+            // Down at the end: its last boot ended (a kill, or an `ok-exit` exit).
+            let last = downs.last().filter(|d| d["boot"].as_u64() == Some(boots));
             let end = if let Some(d) = last.filter(|d| d["exit"].is_null() && d["signal"].is_null())
             {
                 format!("down ({})", d["how"].as_str().unwrap_or("?"))
@@ -1396,9 +1398,9 @@ pub fn nodes_line(n: &Value) -> Option<String> {
             let restarts = match downs.len() {
                 0 => String::new(),
                 n => format!(
-                    " after {n} down{}, {incs} incarnation{}",
+                    " after {n} down{}, {boots} boot{}",
                     if n == 1 { "" } else { "s" },
-                    if incs == 1 { "" } else { "s" }
+                    if boots == 1 { "" } else { "s" }
                 ),
             };
             format!(
@@ -1414,18 +1416,18 @@ pub fn nodes_line(n: &Value) -> Option<String> {
         Some(p) => format!("; {p} partitions drawn"),
         None => String::new(),
     };
-    // A run whose links nothing cut says only its nodes.
+    // A run whose links nothing cut says only its machines.
     let quiet = cut == 0
         && parts.is_empty()
         && ["cuts", "heals", "held"]
             .iter()
             .all(|k| net[*k].as_u64().unwrap_or(0) == 0);
     if quiet {
-        return Some(format!("nodes: {}", nodes.join(", ")));
+        return Some(format!("machines: {}", machines.join(", ")));
     }
     Some(format!(
-        "nodes: {}; net: {} cuts, {} heals, {} held, {}{parts}",
-        nodes.join(", "),
+        "machines: {}; net: {} cuts, {} heals, {} held, {}{parts}",
+        machines.join(", "),
         net["cuts"],
         net["heals"],
         net["held"],
@@ -1622,7 +1624,7 @@ pub fn refused_line(r: &Value) -> Option<String> {
     })
 }
 
-/// The SDK's site table and violation (`proto::sdk::SdkTab`), folded over incarnations.
+/// The SDK's site table and violation (`proto::sdk::SdkTab`), folded over boots.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SdkReport {
     /// Sorted by label, then kind.
@@ -1673,7 +1675,7 @@ impl SdkReport {
         r
     }
 
-    /// Fold a later incarnation in: counts add, a knob keeps its last value.
+    /// Fold a later boot in: counts add, a knob keeps its last value.
     pub fn add(&mut self, b: SdkReport) {
         for x in b.sites {
             match self

@@ -13,7 +13,7 @@
 o=$RUNS/04-timeouts; mkdir -p "$o"
 for m in poll epoll timerfd timerfd2 timerfd-exec timerfd-exec-many rcvtimeo; do
     run_ok "$o/$m" 1 -- /guest/timeouts "$m"
-    echo "$m: wall_ms $(field "$o/$m/result.json" wall_ms); $(head -1 "$o/$m/inc-0/stdout")"
+    echo "$m: wall_ms $(field "$o/$m/result.json" wall_ms); $(head -1 "$o/$m/boot-1/stdout")"
 done
 python3 -I "$(dirname "$0")/../no-kcmp.py" "$PATINA" run --seed 1 --out "$o/nokcmp" \
     --mount "$PATINA_GUESTS":/guest:copy -- /guest/timeouts timerfd-exec >/dev/null 2>&1 || [ -f "$o/nokcmp/result.json" ]
@@ -23,7 +23,7 @@ echo "timerfd-exec without kcmp: internal"
 python3 -I - "$o" <<'PY'
 import json, re, sys
 o = sys.argv[1]
-def out(m): return open(f"{o}/{m}/inc-0/stdout").read().split("\n")
+def out(m): return open(f"{o}/{m}/boot-1/stdout").read().split("\n")
 def wall(m): return json.load(open(f"{o}/{m}/result.json"))["wall_ms"]
 S = 10**9
 for m in ("poll", "epoll"):

@@ -56,88 +56,88 @@ impl Run {
 }
 
 /// A run's place in a `--crash-points` sweep: a base (`n` 0, `seed-N`), or the child crashing at
-/// crash point `n` (`seed-N@P`), of node `node`'s first boot in a run with nodes
-/// (`seed-N@NODE.P`; `node` empty: the one machine); under `[sweep] crash-pairs`, a pair's child
-/// crashes node `node2` at its point `n2` after that (`seed-N@A.I+B.J`). Ordered by point, then
-/// node. A label is a portable file name: no `:` (GitHub's artifact upload refuses one, as
+/// crash point `n` (`seed-N@P`), of machine `machine`'s first boot in a run with machines
+/// (`seed-N@MACHINE.P`; `machine` empty: the one machine); under `[sweep] crash-pairs`, a pair's child
+/// crashes machine `machine2` at its point `n2` after that (`seed-N@A.I+B.J`). Ordered by point, then
+/// machine. A label is a portable file name: no `:` (GitHub's artifact upload refuses one, as
 /// Windows does).
 #[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
     pub n: u64,
-    pub node: String,
+    pub machine: String,
     pub n2: u64,
-    pub node2: String,
+    pub machine2: String,
 }
 
 impl Point {
-    pub fn child(n: u64, node: &str) -> Point {
+    pub fn child(n: u64, machine: &str) -> Point {
         Point {
             n,
-            node: node.to_string(),
+            machine: machine.to_string(),
             ..Default::default()
         }
     }
 
-    /// The pair's child: `self`'s crash, then node `node`'s at its point `n`.
-    pub fn then(&self, n: u64, node: &str) -> Point {
+    /// The pair's child: `self`'s crash, then machine `machine`'s at its point `n`.
+    pub fn then(&self, n: u64, machine: &str) -> Point {
         Point {
             n2: n,
-            node2: node.to_string(),
+            machine2: machine.to_string(),
             ..self.clone()
         }
     }
 
     /// Its first crash alone (the child of the first level a pair branched from).
     pub fn first(&self) -> Point {
-        Point::child(self.n, &self.node)
+        Point::child(self.n, &self.machine)
     }
 
-    /// `P`, `NODE.P` or `A.I+B.J`, as a directory name and a run's name have it after `@` (a
-    /// node's name has no `.` or `+`).
+    /// `P`, `MACHINE.P` or `A.I+B.J`, as a directory name and a run's name have it after `@` (a
+    /// machine's name has no `.` or `+`).
     pub fn label(&self) -> String {
-        let one = |n: u64, node: &str| {
-            if node.is_empty() {
+        let one = |n: u64, machine: &str| {
+            if machine.is_empty() {
                 n.to_string()
             } else {
-                format!("{node}.{n}")
+                format!("{machine}.{n}")
             }
         };
-        let mut l = one(self.n, &self.node);
+        let mut l = one(self.n, &self.machine);
         if self.n2 > 0 {
-            l = format!("{l}+{}", one(self.n2, &self.node2));
+            l = format!("{l}+{}", one(self.n2, &self.machine2));
         }
         l
     }
 
-    /// A label read back (`P`, `NODE.P`, `A.I+B.J`, each point > 0).
+    /// A label read back (`P`, `MACHINE.P`, `A.I+B.J`, each point > 0).
     pub fn parse(s: &str) -> Option<Point> {
         let one = |s: &str| -> Option<(u64, String)> {
-            let (node, n) = s.rsplit_once('.').unwrap_or(("", s));
+            let (machine, n) = s.rsplit_once('.').unwrap_or(("", s));
             let n = n.parse::<u64>().ok().filter(|n| *n > 0)?;
-            (node.is_empty() || proto::node::valid_name(node.as_bytes()))
-                .then(|| (n, node.to_string()))
+            (machine.is_empty() || proto::machine::valid_name(machine.as_bytes()))
+                .then(|| (n, machine.to_string()))
         };
         match s.split_once('+') {
-            None => one(s).map(|(n, node)| Point::child(n, &node)),
+            None => one(s).map(|(n, machine)| Point::child(n, &machine)),
             Some((a, b)) => {
-                let ((n, node), (n2, node2)) = (one(a)?, one(b)?);
-                (!node.is_empty() && !node2.is_empty() && node != node2)
-                    .then(|| Point::child(n, &node).then(n2, &node2))
+                let ((n, machine), (n2, machine2)) = (one(a)?, one(b)?);
+                (!machine.is_empty() && !machine2.is_empty() && machine != machine2)
+                    .then(|| Point::child(n, &machine).then(n2, &machine2))
             }
         }
     }
 
-    /// A child's fields in `report.json`: its `point`, its `node` when it has one, and a
-    /// pair's `point2` and `node2`.
+    /// A child's fields in `report.json`: its `point`, its `machine` when it has one, and a
+    /// pair's `point2` and `machine2`.
     fn json(p: Option<&Point>, v: &mut Value) {
         if let Some(p) = p.filter(|p| p.n > 0) {
             v["point"] = json!(p.n);
-            if !p.node.is_empty() {
-                v["node"] = json!(p.node);
+            if !p.machine.is_empty() {
+                v["machine"] = json!(p.machine);
             }
             if p.n2 > 0 {
                 v["point2"] = json!(p.n2);
-                v["node2"] = json!(p.node2);
+                v["machine2"] = json!(p.machine2);
             }
         } else {
             v["point"] = Value::Null;
@@ -147,25 +147,25 @@ impl Point {
     /// The child a `report.json` entry names (`Point::json`).
     pub fn of(v: &Value) -> Option<Point> {
         let n = v["point"].as_u64().filter(|n| *n > 0)?;
-        let p = Point::child(n, v["node"].as_str().unwrap_or(""));
+        let p = Point::child(n, v["machine"].as_str().unwrap_or(""));
         Some(match v["point2"].as_u64() {
-            Some(n2) => p.then(n2, v["node2"].as_str().unwrap_or("")),
+            Some(n2) => p.then(n2, v["machine2"].as_str().unwrap_or("")),
             None => p,
         })
     }
 }
 
-/// The crash points a `--crash-points` base counted: with nodes, each node's whose crashes were
-/// at its crash points (`nodes.list[].crash_points`, its first boot's), by name; otherwise
+/// The crash points a `--crash-points` base counted: with machines, each machine's whose crashes were
+/// at its crash points (`machines.list[].crash_points`, its first boot's), by name; otherwise
 /// the one machine's (`""`, the `crash` class's eligible calls).
 pub fn base_points(r: &Value, run: &Value) -> Vec<(String, u64)> {
-    // A run with nodes counts no points of the one machine, even when it ended before its
-    // result had a node table.
-    let nodes = run["config"]["nodes"]
+    // A run with machines counts no points of the one machine, even when it ended before its
+    // result had a machine table.
+    let machines = run["config"]["machines"]
         .as_array()
         .is_some_and(|n| !n.is_empty());
-    match r["nodes"]["list"].as_array() {
-        None if nodes => vec![],
+    match r["machines"]["list"].as_array() {
+        None if machines => vec![],
         Some(l) => l
             .iter()
             .filter_map(|n| {
@@ -182,7 +182,7 @@ pub fn base_points(r: &Value, run: &Value) -> Vec<(String, u64)> {
     }
 }
 
-/// How a run is named: `seed 3`, or `seed 3@120` (`3@b.120` on node b) for a branch child.
+/// How a run is named: `seed 3`, or `seed 3@120` (`3@b.120` on machine b) for a branch child.
 pub fn run_name(seed: u64, point: Option<&Point>) -> String {
     match point {
         Some(p) if p.n > 0 => format!("{seed}@{}", p.label()),
@@ -305,7 +305,7 @@ fn walk(d: &Path, out: &mut Vec<PathBuf>) {
     for e in rd.flatten() {
         let name = e.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') || name.starts_with("inc-") {
+        if name.starts_with('.') || name.starts_with("boot-") {
             continue;
         }
         if e.file_type().is_ok_and(|t| t.is_dir()) {
@@ -376,11 +376,11 @@ fn fault_sources(runs: &[Run]) -> (BTreeSet<String>, BTreeMap<String, BTreeSet<S
                 named.insert(k.to_string());
             }
         }
-        let nodes = c["nodes"].as_array().map_or(0, |n| n.len());
+        let machines = c["machines"].as_array().map_or(0, |n| n.len());
         for e in strs(&c["fault-classes"]) {
             let names = crate::faults::split_scope(&e).0;
-            // Every class that may apply: `all` over a run with nodes enough for each.
-            for class in crate::faults::classes(names, nodes.max(2), 2).unwrap_or_default() {
+            // Every class that may apply: `all` over a run with machines enough for each.
+            for class in crate::faults::classes(names, machines.max(2), 2).unwrap_or_default() {
                 let e = by_class.entry(class.to_string()).or_default();
                 match class {
                     "crash" | "kill" => {
@@ -410,16 +410,16 @@ fn strs(v: &Value) -> Vec<String> {
 }
 
 /// Whether every process of the run could fire its fault points: one machine with the class,
-/// or the class on the driver and on every node (else a point that only an unfaulted node or
-/// the driver reaches never fires, and that says nothing).
+/// or the class on main and on every machine (else a point that only an unfaulted machine or
+/// main reaches never fires, and that says nothing).
 fn buggify_everywhere(run: &Value) -> bool {
     let plan = &run["faults"];
-    let nodes = strs_of(&run["config"]["nodes"], "name");
-    if nodes.is_empty() {
+    let machines = strs_of(&run["config"]["machines"], "name");
+    if machines.is_empty() {
         return plan.get("buggify").is_some();
     }
-    std::iter::once("driver".to_string())
-        .chain(nodes)
+    std::iter::once("main".to_string())
+        .chain(machines)
         .all(|n| plan.get(format!("buggify@{n}")).is_some())
 }
 
@@ -431,7 +431,7 @@ fn strs_of(v: &Value, k: &str) -> Vec<String> {
         .collect()
 }
 
-/// The rate `buggify:LABEL` sets in a resolved plan, on any node.
+/// The rate `buggify:LABEL` sets in a resolved plan, on any machine.
 fn own_rate(plan: &Value, label: &str) -> Option<u64> {
     let free = crate::signature::checkout_free;
     plan.as_object().into_iter().flatten().find_map(|(k, v)| {
@@ -520,15 +520,15 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             let c = if m.copy { ":copy" } else { "" };
             flag("--mount", format!("{}:{}{c}", m.src.display(), m.dst));
         }
-        if cfg.work.is_some() || cfg.work_at.is_some() {
+        if cfg.disk.is_some() || cfg.disk_at.is_some() {
             let dir = cfg
-                .work
+                .disk
                 .as_ref()
                 .map(|w| w.display().to_string())
                 .unwrap_or_default();
-            match &cfg.work_at {
-                Some(g) => flag("--work", format!("{dir}:{g}")),
-                None => flag("--work", dir),
+            match &cfg.disk_at {
+                Some(g) => flag("--disk", format!("{dir}:{g}")),
+                None => flag("--disk", dir),
             }
         }
         if let Some(s) = &cfg.stdin {
@@ -865,9 +865,9 @@ fn example(signature: &str, result: &Value, dir: &Path) -> Value {
     // The stderr line the signature quotes (a panic or assertion, else the last line): as
     // the guest wrote it, when the signature changed it.
     if matches!(result["outcome"].as_str(), Some("failure" | "crash")) {
-        let inc = result["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
+        let boot = result["boots"].as_u64().unwrap_or(1).max(1);
         let stderr =
-            std::fs::read(dir.join(format!("inc-{inc}")).join("stderr")).unwrap_or_default();
+            std::fs::read(dir.join(format!("boot-{boot}")).join("stderr")).unwrap_or_default();
         let stderr = String::from_utf8_lossy(&stderr);
         let line = crate::signature::guest_line_raw(&stderr).or_else(|| {
             let m = result["message"].as_str().unwrap_or("");
@@ -1141,8 +1141,8 @@ pub fn build(
             *limits.entry(l).or_default() += 1;
         }
     }
-    // A branch sweep: each base's crash points and the children run of them; with nodes, each
-    // node's too; under [sweep] crash-pairs, the pairs after the first crashes (each first crash's
+    // A branch sweep: each base's crash points and the children run of them; with machines, each
+    // machine's too; under [sweep] crash-pairs, the pairs after the first crashes (each first crash's
     // `points.json`) and those run.
     #[derive(Default, Clone, Copy)]
     struct Tally {
@@ -1150,14 +1150,14 @@ pub fn build(
         tried: u64,
     }
     let mut bases: BTreeMap<(u64, Option<String>), Tally> = BTreeMap::new();
-    // In the order the nodes are configured (the bases' node tables), not by name.
-    let mut per_node: Vec<(String, Tally)> = vec![];
-    fn node(per_node: &mut Vec<(String, Tally)>, n: &str) -> usize {
-        match per_node.iter().position(|x| x.0 == n) {
+    // In the order the machines are configured (the bases' machine tables), not by name.
+    let mut per_machine: Vec<(String, Tally)> = vec![];
+    fn machine(per_machine: &mut Vec<(String, Tally)>, n: &str) -> usize {
+        match per_machine.iter().position(|x| x.0 == n) {
             Some(i) => i,
             None => {
-                per_node.push((n.to_string(), Tally::default()));
-                per_node.len() - 1
+                per_machine.push((n.to_string(), Tally::default()));
+                per_machine.len() - 1
             }
         }
     }
@@ -1170,16 +1170,16 @@ pub fn build(
                 bases.entry((r.seed, r.case.clone())).or_default().points =
                     pts.iter().map(|x| x.1).sum();
                 for (n, k) in pts.into_iter().filter(|x| !x.0.is_empty()) {
-                    let i = node(&mut per_node, &n);
-                    per_node[i].1.points += k;
+                    let i = machine(&mut per_machine, &n);
+                    per_machine[i].1.points += k;
                 }
             }
             Some(p) if p.n2 > 0 => pairs_tried += 1,
             Some(p) => {
                 bases.entry((r.seed, r.case.clone())).or_default().tried += 1;
-                if !p.node.is_empty() {
-                    let i = node(&mut per_node, &p.node);
-                    per_node[i].1.tried += 1;
+                if !p.machine.is_empty() {
+                    let i = machine(&mut per_machine, &p.machine);
+                    per_machine[i].1.tried += 1;
                 }
                 let f = file(r);
                 pairs += f["after"]
@@ -1199,10 +1199,10 @@ pub fn build(
             "tried": sum(|t| t.tried),
             "seeds": bases.iter().map(|((s, c), t)| json!({"seed": s, "case": c, "points": t.points, "tried": t.tried})).collect::<Vec<_>>(),
         });
-        if !per_node.is_empty() {
-            b["nodes"] = per_node
+        if !per_machine.is_empty() {
+            b["machines"] = per_machine
                 .iter()
-                .map(|(n, t)| json!({"node": n, "points": t.points, "tried": t.tried}))
+                .map(|(n, t)| json!({"machine": n, "points": t.points, "tried": t.tried}))
                 .collect();
         }
         if pairs > 0 || pairs_tried > 0 {
@@ -1319,7 +1319,7 @@ pub fn build(
                 "example": example(&g.signature, &first.result, &first.dir),
                 "replay": replay,
                 "faults": {"every": every, "none": none},
-                "nodes": node_causes(&g.runs),
+                "machines": machine_causes(&g.runs),
                 "rerun": rerun_command(&first.run, first.seed, &first.dir),
                 "replay_command": format!("patina replay {}", quote(&first.dir.display().to_string())),
             })
@@ -1456,15 +1456,15 @@ pub fn build(
             "images": planned.iter().map(|(p, k)| json!({"path": p, "planned": k})).collect::<Vec<_>>(),
         });
     }
-    // Runs with nodes: their names, and what the scripted network did over them.
-    let with_nodes: Vec<&Value> = runs
+    // Runs with machines: their names, and what the scripted network did over them.
+    let with_machines: Vec<&Value> = runs
         .iter()
-        .map(|r| &r.result["nodes"])
+        .map(|r| &r.result["machines"])
         .filter(|n| n.is_object())
         .collect();
-    if !with_nodes.is_empty() {
+    if !with_machines.is_empty() {
         let mut names: Vec<String> = vec![];
-        for n in &with_nodes {
+        for n in &with_machines {
             for m in n["list"].as_array().into_iter().flatten() {
                 if let Some(x) = m["name"].as_str().filter(|x| !names.iter().any(|y| y == x)) {
                     names.push(x.to_string());
@@ -1472,7 +1472,7 @@ pub fn build(
             }
         }
         let sum = |k: &str| -> u64 {
-            with_nodes
+            with_machines
                 .iter()
                 .map(|n| n["net"][k].as_u64().unwrap_or(0))
                 .sum()
@@ -1480,7 +1480,7 @@ pub fn build(
         // The seed's partitions: drawn, those that acted on traffic, and the shapes drawn.
         let mut shapes = serde_json::Map::new();
         let (mut drawn, mut acted) = (0u64, 0u64);
-        for n in &with_nodes {
+        for n in &with_machines {
             drawn += n["partitions_drawn"].as_u64().unwrap_or(0);
             acted += n["partitions_acted"].as_u64().unwrap_or(0);
             for p in n["partitions"].as_array().into_iter().flatten() {
@@ -1489,22 +1489,22 @@ pub fn build(
                 shapes.insert(k, json!(c + 1));
             }
         }
-        v["nodes"] = json!({
-            "runs": with_nodes.len(),
+        v["machines"] = json!({
+            "runs": with_machines.len(),
             "names": names,
             "cuts": sum("cuts"),
             "heals": sum("heals"),
             "held": sum("held"),
         });
         if drawn > 0 {
-            v["nodes"]["partitions"] = json!({"drawn": drawn, "acted": acted, "shapes": shapes});
+            v["machines"]["partitions"] = json!({"drawn": drawn, "acted": acted, "shapes": shapes});
         }
-        // Each time a node went down, by how (`result.json`'s `downs`), and its restarts.
+        // Each time a machine went down, by how (`result.json`'s `downs`), and its restarts.
         let mut downs = serde_json::Map::new();
         let mut restarts = 0u64;
-        for n in &with_nodes {
+        for n in &with_machines {
             for m in n["list"].as_array().into_iter().flatten() {
-                restarts += m["incarnations"].as_u64().unwrap_or(1).saturating_sub(1);
+                restarts += m["boots"].as_u64().unwrap_or(1).saturating_sub(1);
                 for d in m["downs"].as_array().into_iter().flatten() {
                     let k = d["how"].as_str().unwrap_or("?").to_string();
                     let c = downs.get(&k).and_then(|c| c.as_u64()).unwrap_or(0);
@@ -1513,14 +1513,14 @@ pub fn build(
             }
         }
         if !downs.is_empty() {
-            v["nodes"]["downs"] = json!(downs);
-            v["nodes"]["restarts"] = json!(restarts);
+            v["machines"]["downs"] = json!(downs);
+            v["machines"]["restarts"] = json!(restarts);
         }
         // Pauses (by who made them) and the virtual time paused; clock steps, and the largest
-        // offset a node's clock had at the end.
+        // offset a machine's clock had at the end.
         let (mut pauses, mut paused_ms) = (serde_json::Map::new(), 0u64);
         let (mut steps, mut skew_max) = (0u64, None::<i64>);
-        for n in &with_nodes {
+        for n in &with_machines {
             for m in n["list"].as_array().into_iter().flatten() {
                 for p in m["pause"].as_array().into_iter().flatten() {
                     let k = p["by"].as_str().unwrap_or("?").to_string();
@@ -1536,10 +1536,10 @@ pub fn build(
             }
         }
         if !pauses.is_empty() {
-            v["nodes"]["pauses"] = json!({"by": pauses, "paused_ms": paused_ms});
+            v["machines"]["pauses"] = json!({"by": pauses, "paused_ms": paused_ms});
         }
         if steps > 0 || skew_max.is_some() {
-            v["nodes"]["clock"] = json!({"steps": steps, "skew_max_ms": skew_max});
+            v["machines"]["clock"] = json!({"steps": steps, "skew_max_ms": skew_max});
         }
     }
     if with_points > 0 {
@@ -1555,22 +1555,22 @@ pub fn build(
     (v, text)
 }
 
-/// With nodes: what happened to each node in a group's runs: in how many it went down, in how
+/// With machines: what happened to each machine in a group's runs: in how many it went down, in how
 /// many a crash of its machine lost something on its disk (`downs[].lost`), and the crash
 /// points it crashed at (a `--crash-points` sweep's children and `machine:P` runs); and in how many a
-/// partition was in force at the end. `null` without nodes.
-fn node_causes(runs: &[&Run]) -> Value {
-    let Some(list) = runs[0].result["nodes"]["list"].as_array() else {
+/// partition was in force at the end. `null` without machines.
+fn machine_causes(runs: &[&Run]) -> Value {
+    let Some(list) = runs[0].result["machines"]["list"].as_array() else {
         return Value::Null;
     };
-    let nodes: Vec<Value> = list
+    let machines: Vec<Value> = list
         .iter()
         .filter_map(|n| n["name"].as_str())
-        .filter(|n| *n != "driver")
+        .filter(|n| *n != "main")
         .map(|name| {
             let (mut down, mut lost, mut points) = (0, 0, BTreeSet::new());
             for r in runs {
-                let Some(n) = r.result["nodes"]["list"]
+                let Some(n) = r.result["machines"]["list"]
                     .as_array()
                     .and_then(|l| l.iter().find(|x| x["name"] == name))
                 else {
@@ -1585,25 +1585,25 @@ fn node_causes(runs: &[&Run]) -> Value {
                 }));
                 points.extend(downs.iter().filter_map(|d| d["point"].as_u64()));
             }
-            json!({"node": name, "down": down, "lost": lost, "points": points})
+            json!({"machine": name, "down": down, "lost": lost, "points": points})
         })
         .collect();
     let partitioned = runs
         .iter()
         .filter(|r| {
-            r.result["nodes"]["partitions"]
+            r.result["machines"]["partitions"]
                 .as_array()
                 .and_then(|p| p.last())
                 .is_some_and(|p| p["to_ms"].is_null())
         })
         .count();
-    json!({"list": nodes, "partitioned_at_end": partitioned})
+    json!({"list": machines, "partitioned_at_end": partitioned})
 }
 
-/// `nodes: b down in 10 (lost on its disk in 10; crash points 1, 2), a down in 0`, and the
-/// runs that ended partitioned; `None` when no node went down and none did.
-fn node_causes_line(g: &Value) -> Option<String> {
-    let n = &g["nodes"];
+/// `machines: b down in 10 (lost on its disk in 10; crash points 1, 2), a down in 0`, and the
+/// runs that ended partitioned; `None` when no machine went down and none did.
+fn machine_causes_line(g: &Value) -> Option<String> {
+    let n = &g["machines"];
     let list = n["list"].as_array()?;
     let part = n["partitioned_at_end"].as_u64().unwrap_or(0);
     if part == 0 && list.iter().all(|x| x["down"] == 0) {
@@ -1632,7 +1632,7 @@ fn node_causes_line(g: &Value) -> Option<String> {
             };
             format!(
                 "{} down in {}{why}",
-                x["node"].as_str().unwrap_or(""),
+                x["machine"].as_str().unwrap_or(""),
                 x["down"]
             )
         })
@@ -1640,7 +1640,7 @@ fn node_causes_line(g: &Value) -> Option<String> {
     if part > 0 {
         each.push(format!("partitioned at the end in {part}"));
     }
-    Some(format!("  nodes: {}\n", each.join(", ")))
+    Some(format!("  machines: {}\n", each.join(", ")))
 }
 
 /// Groups a report prints in full; the others get one line (`patina report --group N`).
@@ -1718,7 +1718,7 @@ fn group_text(g: &Value, runs: u64, faulted: bool) -> String {
             list("none")
         ));
     }
-    if let Some(l) = node_causes_line(g) {
+    if let Some(l) = machine_causes_line(g) {
         s.push_str(&l);
     }
     s.push_str(&format!("  rerun:  {}\n", st("rerun")));
@@ -1890,15 +1890,15 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             b["points"].as_u64().unwrap_or(0),
             b["tried"].as_u64().unwrap_or(0),
         );
-        // With nodes: each node's points and children (`b 120 of 120`).
-        let nodes: Vec<String> = b["nodes"]
+        // With machines: each machine's points and children (`b 120 of 120`).
+        let machines: Vec<String> = b["machines"]
             .as_array()
             .into_iter()
             .flatten()
             .map(|n| {
                 format!(
                     "{} {} of {}",
-                    n["node"].as_str().unwrap_or(""),
+                    n["machine"].as_str().unwrap_or(""),
                     n["tried"],
                     n["points"]
                 )
@@ -1906,15 +1906,15 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             .collect();
         s.push_str(&format!(
             "crash points: {t} of {p} tried{}\n",
-            if nodes.is_empty() {
+            if machines.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", nodes.join(", "))
+                format!(" ({})", machines.join(", "))
             }
         ));
         if let Some(x) = b.get("pairs") {
             s.push_str(&format!(
-                "crash pairs: {} of {} tried (a second node's crash after a first)\n",
+                "crash pairs: {} of {} tried (a second machine's crash after a first)\n",
                 x["tried"], x["pairs"]
             ));
         }
@@ -1994,7 +1994,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         }
         s.push('\n');
     }
-    if let Some(w) = v.get("nodes") {
+    if let Some(w) = v.get("machines") {
         let names: Vec<&str> = w["names"]
             .as_array()
             .into_iter()
@@ -2002,7 +2002,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
             .filter_map(|x| x.as_str())
             .collect();
         s.push_str(&format!(
-            "nodes: {} in {} runs; net: {} cuts, {} heals, {} held over them\n",
+            "machines: {} in {} runs; net: {} cuts, {} heals, {} held over them\n",
             names.join(", "),
             w["runs"],
             w["cuts"],
@@ -2027,7 +2027,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         if let Some(d) = w["downs"].as_object() {
             let hows: Vec<String> = d.iter().map(|(k, n)| format!("{n} {k}")).collect();
             s.push_str(&format!(
-                "node downs: {}; {} restarts\n",
+                "machine downs: {}; {} restarts\n",
                 hows.join(", "),
                 w["restarts"]
             ));
@@ -2035,7 +2035,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         if let Some(p) = w["pauses"]["by"].as_object() {
             let by: Vec<String> = p.iter().map(|(k, n)| format!("{n} by {k}")).collect();
             s.push_str(&format!(
-                "node pauses: {}; {} ms paused\n",
+                "machine pauses: {}; {} ms paused\n",
                 by.join(", "),
                 w["pauses"]["paused_ms"]
             ));
@@ -2046,7 +2046,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
                 .as_i64()
                 .map(|m| format!("skews up to {m} ms"))
                 .unwrap_or_else(|| "no skew".into());
-            s.push_str(&format!("node clocks: {skew}; {} steps\n", c["steps"]));
+            s.push_str(&format!("machine clocks: {skew}; {} steps\n", c["steps"]));
         }
     }
     let groups = v["groups"].as_array().unwrap();
@@ -2273,7 +2273,7 @@ fn render(v: &Value, finding_groups: usize, head: Option<&SweepHead>, again: &st
         if n("runs") == 0 {
             tail.push("vacuous: no runs".to_string());
         } else if v["crash_points"]["points"] == 0 {
-            tail.push("vacuous: no base has a crash point: nothing under the work tree changed, nothing to branch at".to_string());
+            tail.push("vacuous: no base has a crash point: nothing under the disk changed, nothing to branch at".to_string());
         } else if unmet {
             let labels: Vec<String> = [
                 "sometimes_never_held",
@@ -2562,12 +2562,12 @@ mod tests {
         assert_eq!(sweep(2, 1, json!({"buggify:p": 1000})), (json!(2), 0));
         // Forced off (rate 0): never firing is what was asked.
         assert_eq!(sweep(40, 50, json!({"buggify:p": 0})), (json!(0), 1));
-        // With nodes, a point no run reached says nothing unless the driver and every node had
-        // fault points on: the driver may be the only one that reaches it.
-        let nodes = |plan: Value| {
+        // With machines, a point no run reached says nothing unless main and every machine had
+        // fault points on: main may be the only one that reaches it.
+        let machines = |plan: Value| {
             let runs: Vec<Run> = (1..=SMOKE_RUNS as u64)
                 .map(|s| {
-                    let c = json!({"fault-classes": ["buggify"], "nodes": [{"name": "a"}]});
+                    let c = json!({"fault-classes": ["buggify"], "machines": [{"name": "a"}]});
                     let mut r = run(s, c, site(0));
                     r.run["faults"] = plan.clone();
                     r
@@ -2575,9 +2575,9 @@ mod tests {
                 .collect();
             build(&runs, &[], None, None, "").0["exit"].clone()
         };
-        assert_eq!(nodes(json!({"buggify@a": "all"})), json!(0));
+        assert_eq!(machines(json!({"buggify@a": "all"})), json!(0));
         assert_eq!(
-            nodes(json!({"buggify@a": "all", "buggify@driver": "all"})),
+            machines(json!({"buggify@a": "all", "buggify@main": "all"})),
             json!(2)
         );
         // The chance at the default rates: a quarter active, a quarter of evaluations firing.

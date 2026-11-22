@@ -27,8 +27,8 @@ fn vfs() -> &'static mut Vfs {
     unsafe { Vfs::at(crate::state::ctl_base()) }
 }
 
-/// Virtual realtime, nanoseconds since 1970: the node's own (its clock offset added), as the
-/// times a node writes on its files are.
+/// Virtual realtime, nanoseconds since 1970: the machine's own (its clock offset added), as the
+/// times a machine writes on its files are.
 pub fn now() -> u64 {
     (ctl().vclock_ns.load(Relaxed) - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * NS)
         .saturating_add_signed(crate::state::clock_offset())
@@ -39,11 +39,11 @@ pub fn epoch() -> u64 {
 }
 
 /// The table's key of inode `ino` on the mount with virtual minor `vdev_minor` (below 256): a
-/// node's mounts are numbered in its own mount table, so the node is part of the key (0 for
-/// the driver, and in a run without nodes).
+/// machine's mounts are numbered in its own mount table, so the machine is part of the key (0 for
+/// main, and in a run without machines).
 pub fn key(vdev_minor: u64, ino: u64) -> u64 {
     const _: () = assert!(VDEV_MOUNT_BASE + crate::path::MAX_MOUNTS as u64 <= proto::vfs::VT_WORK);
-    (crate::state::node() as u64) << 56 | (vdev_minor & 0xff) << 48 | (ino & 0xffff_ffff_ffff)
+    (crate::state::machine() as u64) << 56 | (vdev_minor & 0xff) << 48 | (ino & 0xffff_ffff_ffff)
 }
 
 fn slot(key: u64, insert: bool) -> Option<&'static mut VtEntry> {

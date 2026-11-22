@@ -67,7 +67,7 @@ pub fn checkable(r: &Value) -> bool {
 
 /// Whether the run ended ok on its own and its logs are gone: a checker has nothing to read.
 pub fn pruned(dir: &Path, r: &Value) -> bool {
-    own(r).outcome == Outcome::Ok && !dir.join("inc-0").is_dir()
+    own(r).outcome == Outcome::Ok && !dir.join("boot-1").is_dir()
 }
 
 /// Judge the run in `dir` again with `check` (none: the run gets no check), through `server`

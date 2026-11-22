@@ -30,7 +30,7 @@ print(" ".join(i["path"]+":"+",".join(i["kinds"]) for i in c.get("images",[])) o
 [ -n "$first" ] || die "b. rs-race: no failure in seeds 1-$scanned at compute-gap=2 (switches on seed 1: $(field "$o/race-1/result.json" compute.switches))"
 "$PATINA" replay "$o/race-$first" >"$o/race-replay.txt" 2>&1 || true
 grep -q '^identical' "$o/race-replay.txt" || die "b. rs-race seed $first does not replay: $(head -3 "$o/race-replay.txt")"
-echo "b. rs-race: failure on $found of seeds 1-$scanned at compute-gap=2 (first $first: $(tail -1 "$o/race-$first/inc-0/stdout")); it replays identical; one image, edges and accesses"
+echo "b. rs-race: failure on $found of seeds 1-$scanned at compute-gap=2 (first $first: $(tail -1 "$o/race-$first/boot-1/stdout")); it replays identical; one image, edges and accesses"
 
 # --timeout: without compute points the loop never lets the sleeper run; it ends here.
 dl="--timeout 8 --fault compute-gap=4096"
@@ -38,8 +38,8 @@ for s in 1 2 3; do prun "$o/dl-$s" "$s" $dl -- /guest/compute/rs-deadline & done
 prun "$o/dl-1b" 1 $dl -- /guest/compute/rs-deadline &
 wait
 for s in 1 2 3; do
-    [ "$(field "$o/dl-$s/result.json" outcome)" = ok ] || die "c. rs-deadline seed $s: $(res "$o/dl-$s"): $(tail -1 "$o/dl-$s/inc-0/stdout")"
+    [ "$(field "$o/dl-$s/result.json" outcome)" = ok ] || die "c. rs-deadline seed $s: $(res "$o/dl-$s"): $(tail -1 "$o/dl-$s/boot-1/stdout")"
 done
 lhs=$(field "$o/dl-1/result.json" digest); rhs=$(field "$o/dl-1b/result.json" digest)
 [ "$lhs" = "$rhs" ] || die "c. rs-deadline seed 1: two digests"
-echo "c. rs-deadline ok on seeds 1-3 ($(tail -1 "$o/dl-1/inc-0/stdout")); seed 1 gives one digest twice"
+echo "c. rs-deadline ok on seeds 1-3 ($(tail -1 "$o/dl-1/boot-1/stdout")); seed 1 gives one digest twice"

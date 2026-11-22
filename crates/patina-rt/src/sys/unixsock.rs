@@ -87,8 +87,8 @@ fn socketpair(call: &mut dyn Call) -> Action {
 }
 
 /// bind: an autobind request (the address is the family only) gets "\0" + five hex digits
-/// from a run counter instead of the kernel's random choice (in a run with nodes, under the
-/// node's prefix: `unixname`).
+/// from a run counter instead of the kernel's random choice (in a run with machines, under the
+/// machine's prefix: `unixname`).
 fn bind(call: &mut dyn Call) -> i64 {
     let [fd, addr, len, ..] = args(call);
     if len == 2 && crate::guest::get::<u16>(addr) == Ok(AF_UNIX as u16) {
@@ -115,7 +115,7 @@ pub(super) fn autobind(fd: i64) -> i64 {
             return -ENOSPC;
         }
         io.autobind_next.store(n + 1, Relaxed);
-        let r = if crate::state::with_nodes() {
+        let r = if crate::state::with_machines() {
             let mut nm = super::unixname::Name::new();
             super::unixname::autobind_name(n, &mut nm);
             unsafe { sc3(nr::BIND, fd as u64, nm.sa.as_ptr() as u64, nm.len as u64) }

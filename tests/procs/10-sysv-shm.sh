@@ -18,7 +18,7 @@ echo "sysv-shm seeds 1-20: $outcomes (sweep exit $st)"
 [ "$outcomes" = '{"ok":20}' ] || { tail -30 "$o/sweep.txt"; die "not every run ok"; }
 
 run_ok "$o/refused" 1 /guest/sysv-shm refused
-[ "$(grep -c 'errno 1$' "$o/refused/inc-0/stdout")" = 2 ] || die "refusals: $(cat "$o/refused/inc-0/stdout")"
+[ "$(grep -c 'errno 1$' "$o/refused/boot-1/stdout")" = 2 ] || die "refusals: $(cat "$o/refused/boot-1/stdout")"
 python3 -I -c 'import json,sys; r=json.load(open(sys.argv[1]))["refused"]; sys.exit(not ("shmget:0x800" in r and "shmctl:11" in r))' \
     "$o/refused/result.json" || die "refusals not recorded: $(field "$o/refused/result.json" refused)"
 
@@ -27,7 +27,7 @@ for k in process machine; do
     timeout 300 "$PATINA" run --seed 1 $([ $k = process ] && echo --faults kill || echo --faults crash) --fault crash-at=3 --out "$o/crash-$k" --mount "$PATINA_GUESTS":/guest:copy \
         -- /guest/sysv-shm crash >/dev/null 2>&1 || true
     [ "$(field "$o/crash-$k/result.json" outcome)" = ok ] || die "crash $k: $(field "$o/crash-$k/result.json" outcome)"
-    echo "crash $k: $(cat "$o/crash-$k/inc-1/stdout")"
+    echo "crash $k: $(cat "$o/crash-$k/boot-2/stdout")"
 done
-grep -q 'holds kept$' "$o/crash-process/inc-1/stdout" || die "the segment did not survive a process crash"
-grep -q 'no segment' "$o/crash-machine/inc-1/stdout" || die "the segment survived a machine crash"
+grep -q 'holds kept$' "$o/crash-process/boot-2/stdout" || die "the segment did not survive a process crash"
+grep -q 'no segment' "$o/crash-machine/boot-2/stdout" || die "the segment survived a machine crash"

@@ -8,8 +8,8 @@
 //! The kernel's lifetime rules: `IPC_RMID` marks a segment (its key becomes private, mode gets
 //! `SHM_DEST`) and it goes at its last detach; `fork` copies a process's attachments, `execve`
 //! and exit detach them. A segment outlives the processes that made it: a process crash
-//! (`--faults kill`) keeps the table and the memory for the next incarnation (written to
-//! `FD_SHM` at the end of the incarnation), a machine crash starts with none.
+//! (`--faults kill`) keeps the table and the memory for the next boot (written to
+//! `FD_SHM` at the end of the boot), a machine crash starts with none.
 
 use proto::ctl::*;
 use std::collections::BTreeMap;
@@ -253,7 +253,7 @@ impl Shm {
         }
     }
 
-    /// The table for the next incarnation after a process crash: nothing is attached any
+    /// The table for the next boot after a process crash: nothing is attached any
     /// more (every process died at once), so marked segments are gone and the others were
     /// detached now.
     pub fn save(&self, now: u64) -> Vec<u8> {

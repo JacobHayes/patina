@@ -272,11 +272,11 @@ class PatinaCmd(gdb.Command):
             print("stopped before seq %d: %s; process %d (host pid %d), thread %d" % (
                 S["seq"], S["event"], S["pid"], S["host_pid"], S["tid"]))
         elif w == ["procs"]:
-            node = dict((p["pid"], p["node"]) for p in S["procs"])
+            machine = dict((p["pid"], p["machine"]) for p in S["procs"])
             for pid, host, name in procs():
                 print("%s pid %d  host pid %d  %s%s" % (
                     "*" if host == gdb.selected_inferior().pid else " ", pid, host, name,
-                    "  node " + node[pid] if node.get(pid) else ""))
+                    "  machine " + machine[pid] if machine.get(pid) else ""))
         elif len(w) == 2 and w[0] == "attach" and w[1].isdigit():
             hosts = [h for p, h, _ in procs() if p == int(w[1])]
             if not hosts:

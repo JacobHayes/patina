@@ -15,6 +15,6 @@ for m in $cases; do
     native=$("$PATINA_GUESTS/forge" "$m")
     patina_run "$RUNS/13-forge/$m" 1 forge "$m"
     [ "$(field "$RUNS/13-forge/$m/result.json" outcome)" = ok ] || die "$m: $(field "$RUNS/13-forge/$m/result.json" outcome) $(field "$RUNS/13-forge/$m/result.json" message)"
-    [ "$(cat "$RUNS/13-forge/$m/inc-0/stdout")" = "$native" ] || die "$m: native '$native', patina '$(cat "$RUNS/13-forge/$m/inc-0/stdout")'"
+    [ "$(cat "$RUNS/13-forge/$m/boot-1/stdout")" = "$native" ] || die "$m: native '$native', patina '$(cat "$RUNS/13-forge/$m/boot-1/stdout")'"
     echo "$m: $native" | tr '\n' ' '; echo
 done

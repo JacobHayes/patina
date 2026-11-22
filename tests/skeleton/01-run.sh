@@ -6,6 +6,6 @@ for g in $GUESTS; do
     patina_run "$out" 1 "$g" a b
     c=$(field "$out/result.json" outcome)
     [ "$c" = ok ] || die "$g: class $c ($(field "$out/result.json" message))"
-    python3 -I "$(dirname "$0")/check_hello.py" "$out/inc-0/stdout" "$g" a b || die "$g: stdout"
+    python3 -I "$(dirname "$0")/check_hello.py" "$out/boot-1/stdout" "$g" a b || die "$g: stdout"
     echo "$g ok digest $(field "$out/result.json" digest) traps $(field "$out/result.json" sched.traps)"
 done

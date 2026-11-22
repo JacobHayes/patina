@@ -12,7 +12,7 @@ lhs=$(field "$o/a/result.json" digest); rhs=$(field "$o/b/result.json" digest)
 [ "$lhs" = "$rhs" ] || die "two digests"
 detail=$(field "$o/a/result.json" message)
 echo "detail: $detail"
-fd=$(sed -n 's/^read fd \([0-9]*\)$/\1/p' "$o/a/inc-0/stdout")
+fd=$(sed -n 's/^read fd \([0-9]*\)$/\1/p' "$o/a/boot-1/stdout")
 python3 -I - "$detail" "$fd" <<'PY'
 import sys
 detail, fd = sys.argv[1], sys.argv[2]

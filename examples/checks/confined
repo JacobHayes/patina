@@ -1,5 +1,5 @@
 #!/bin/sh
-# confined [-r PREFIX]... ROOT... RUN: every change to the work tree (a create, write, rename,
+# confined [-r PREFIX]... ROOT... RUN: every change to the disk (a create, write, rename,
 # unlink, ...; not a close or a sync) is on a path under one of the ROOTs, named as the program
 # sees it (/work/data). Every file the program opened is also
 # under a ROOT or a PREFIX it may read (-r /usr), judged on the path the open walked (symlinks

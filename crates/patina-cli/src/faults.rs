@@ -13,14 +13,14 @@ use crate::cli::Res;
 use proto::faults::{FClass, CRASH_MACHINE, CRASH_PROCESS};
 use serde_json::{json, Value};
 
-/// Incarnations a run may start when `max-incarnations` is not given.
-pub const MAX_INCARNATIONS_DEFAULT: u64 = 4;
+/// Boots a run may start when `max-boots` is not given.
+pub const MAX_BOOTS_DEFAULT: u64 = 4;
 /// `crash-permille` of the `crash` and `kill` classes at crash points when no crash key is given.
 pub const CRASH_DEFAULT_PERMILLE: u64 = 3;
 /// `down-ms` on one machine when not given: 1 s to 61 s.
 pub const RESTART_GAP_DEFAULT: (u64, u64) = (1_000_000_000, 61_000_000_000);
-/// `down-ms` with nodes when not given: 1 s to 5 s. Short beside `crash-gap-ms`, so that with several
-/// nodes the seed's kills seldom leave every node down at once.
+/// `down-ms` with machines when not given: 1 s to 5 s. Short beside `crash-gap-ms`, so that with several
+/// machines the seed's kills seldom leave every machine down at once.
 pub const DOWN_DEFAULT: (u64, u64) = (1_000_000_000, 5_000_000_000);
 /// `crash-gap-ms` when not given: 5 s to 60 s.
 pub const CRASH_GAP_DEFAULT: (u64, u64) = (5_000_000_000, 60_000_000_000);
@@ -31,18 +31,18 @@ const PAUSE_MS_DEFAULT: &str = "100..15000";
 #[derive(Clone, Debug)]
 pub struct Plan {
     pub faults: proto::faults::FaultCfg,
-    /// `max-incarnations=N`: crashes stop once the run has started N incarnations.
-    pub max_incarnations: u64,
+    /// `max-boots=N`: crashes stop once the run has started N boots.
+    pub max_boots: u64,
     /// `down-ms=A..B` on one machine: virtual time from a crash to the restart, drawn per
     /// restart in [A, B) ns (A when A = B).
     pub restart_gap_ns: (u64, u64),
-    /// With nodes: `crash-gap-ms` and `down-ms` (ns), and the nodes the seed kills
-    /// (`--faults kill[@NODE,...]`; bit `k` for node `k`).
+    /// With machines: `crash-gap-ms` and `down-ms` (ns), and the machines the seed kills
+    /// (`--faults kill[@MACHINE,...]`; bit `k` for machine `k`).
     pub crash_gap_ns: (u64, u64),
     pub down_ns: (u64, u64),
-    pub node_crash: u64,
-    /// What the seed's kills of those nodes do (`proto::node::CRASH_NODE_*`).
-    pub node_crash_kind: u64,
+    pub machine_crash: u64,
+    /// What the seed's kills of those machines do (`proto::machine::CRASH_MACHINE_*`).
+    pub machine_crash_kind: u64,
     /// `net-*` keys.
     pub net: proto::wire::NetCfg,
     /// The `buggify` class, `buggify:LABEL=N` (`proto::sdk`).
@@ -59,22 +59,25 @@ pub struct Plan {
     /// Load-time points: the longest walk of a switch past its site, in instructions
     /// (`Config::compute_walk`; 0: switches are taken at their sites).
     pub compute_walk: u64,
-    /// With nodes: each node's disk, memory and crash-point settings (`NodeTab::faults`; the
-    /// driver's are in `faults`, entry 0 unused), and its fault points (`NodeTab::sdk`).
-    pub node_faults: [proto::faults::FaultCfg; proto::node::MAX_NODES],
-    pub node_sdk: [proto::sdk::SdkCfg; proto::node::MAX_NODES],
-    /// `pause-gap-ms` and `pause-ms` (ns; gap (0, 0): no pauses): a node's own, resolved with
-    /// its seed, and each node's (`node_pause`, entry 0 unused: the driver is never paused).
+    /// With machines: each machine's disk, memory and crash-point settings (`MachineTab::faults`; the
+    /// main's are in `faults`, entry 0 unused), and its fault points (`MachineTab::sdk`).
+    pub machine_faults: [proto::faults::FaultCfg; proto::machine::MAX_MACHINES],
+    pub machine_sdk: [proto::sdk::SdkCfg; proto::machine::MAX_MACHINES],
+    /// `pause-gap-ms` and `pause-ms` (ns; gap (0, 0): no pauses): a machine's own, resolved with
+    /// its seed, and each machine's (`machine_pause`, entry 0 unused: main is never paused).
     pub pause_gap_ns: (u64, u64),
     pub pause_ns: (u64, u64),
-    pub node_pause: [[u64; 4]; proto::node::MAX_NODES],
-    /// `clock-skew-ms` (ns; max 0: none): a node's own, and each node's (entry 0 unused: the
-    /// driver's clock is the run's virtual time).
+    pub machine_pause: [[u64; 4]; proto::machine::MAX_MACHINES],
+    /// `clock-skew-ms` (ns; max 0: none): a machine's own, and each machine's (entry 0 unused: the
+    /// main's clock is the run's virtual time).
     pub skew_ns: (u64, u64),
-    pub node_skew: [(u64, u64); proto::node::MAX_NODES],
+    pub machine_skew: [(u64, u64); proto::machine::MAX_MACHINES],
     /// The resolved settings, in key order, as `result.json` and `run.json` show them: a
     /// number or a string.
     pub resolved: Vec<(String, Value)>,
+    /// The machines the seed's faults act on, by name, main first (`faults on:`; set by
+    /// `Config::opts_with`).
+    pub on: Vec<String>,
 }
 
 /// How a key's value is read.
@@ -203,16 +206,10 @@ pub const KEYS: &[Key] = &[
         "for LENGTH ms of virtual time from START ms, hold TCP deliveries, lose datagrams and leave keepalive probes unanswered on every link the link faults act on, loopback included (from or to PORT); START and LENGTH are each a number or a range A..B drawn per seed",
     ),
     key(
-        "net-links",
-        "nodes|driver|all",
-        Val::Word,
-        "in a run with nodes, the links the net- faults and partitions act on: between two nodes other than the driver; also the driver's; also every node's loopback (partitions never cut loopback) [default: nodes]",
-    ),
-    key(
         "partition-gap-ms",
         "A..B",
         Val::Own,
-        "in a run with nodes, seed-drawn partitions: virtual time from the start of the run, then from each partition's end, to the next one's start, a draw in A..B ms each time",
+        "in a run with machines, seed-drawn partitions: virtual time from the start of the run, then from each partition's end, to the next one's start, a draw in A..B ms each time",
     ),
     key(
         "partition-ms",
@@ -224,7 +221,7 @@ pub const KEYS: &[Key] = &[
         "pause-gap-ms",
         "A..B",
         Val::Own,
-        "in a run with nodes, seed-drawn pauses of each node (all its threads stop; its links hold): virtual time from the run's start, then from each pause's end, to the node's next pause, a draw in A..B ms each time; each node's own (@NODE scopes it)",
+        "in a run with machines, seed-drawn pauses of each machine (all its threads stop; its links hold): virtual time from the run's start, then from each pause's end, to the machine's next pause, a draw in A..B ms each time; each machine's own (@MACHINE scopes it)",
     ),
     key(
         "pause-ms",
@@ -236,7 +233,7 @@ pub const KEYS: &[Key] = &[
         "clock-skew-ms",
         "A..B",
         Val::Own,
-        "in a run with nodes, each boot of a node draws its realtime clock's offset: A..B ms, ahead or behind (monotonic clocks have none); each node's own (@NODE scopes it)",
+        "in a run with machines, each boot of a machine draws its realtime clock's offset: A..B ms, ahead or behind (monotonic clocks have none); each machine's own (@MACHINE scopes it)",
     ),
     key(
         "net-drop-permille",
@@ -272,25 +269,25 @@ pub const KEYS: &[Key] = &[
         "crash-at",
         "N",
         Val::At,
-        "crash at exactly the N-th crash point of the first incarnation (implies crash; with kill, a kill)",
+        "crash at exactly the N-th crash point of the first boot (implies crash; with kill, a kill)",
     ),
     key(
-        "max-incarnations",
+        "max-boots",
         "N",
         Val::Param,
-        "at most N incarnations: no crash in the N-th, so a run restarts at most N-1 times (with nodes: each node's boots, as its own max-incarnations) [default: 4]",
+        "at most N boots: no crash in the N-th, so a run restarts at most N-1 times (with machines: each machine's boots, as its own max-boots) [default: 4]",
     ),
     key(
         "crash-gap-ms",
         "A..B",
         Val::Spread,
-        "with nodes: virtual time from a node's start to the seed's crash (or kill) of it, a draw in A..B ms for each boot (implies crash) [default: 5000..60000]",
+        "with machines: virtual time from a machine's start to the seed's crash (or kill) of it, a draw in A..B ms for each boot (implies crash) [default: 5000..60000]",
     ),
     key(
         "down-ms",
         "A..B",
         Val::Spread,
-        "virtual time from a crash to the restart, a draw in A..B ms for each restart [default: 1000..61000; with nodes, each node's, 1000..5000]",
+        "virtual time from a crash to the restart, a draw in A..B ms for each restart [default: 1000..61000; with machines, each machine's, 1000..5000]",
     ),
     key(
         "compute-gap",
@@ -328,9 +325,9 @@ pub const KEYS: &[Key] = &[
 /// The fault classes (`--faults CLASS`): each turns on its keys, every value a range the seed
 /// resolves. `buggify`, `crash` and `kill` have none of their own: they turn on every fault
 /// point, and a crash of their kind (`CRASH_DEFAULT_PERMILLE` at each crash point on one
-/// machine, at drawn times with nodes). `net-reset-permille` is drawn once per connection, with
+/// machine, at drawn times with machines). `net-reset-permille` is drawn once per connection, with
 /// the send that meets it, so most connections of a run, long transfers included, survive.
-/// `partition`, `pause` and `clock` act on nodes.
+/// `partition`, `pause` and `clock` act on machines.
 pub const CLASSES: &[(&str, &[(&str, &str)])] = &[
     (
         "disk",
@@ -386,15 +383,15 @@ pub const ALL: &[&str] = &[
     "clock",
 ];
 
-/// The classes that act on nodes only, and that `all` leaves out of a run without them (or,
-/// `partition`, without two nodes the link faults act on).
-pub fn needs_nodes(class: &str) -> bool {
+/// The classes that act on machines only, and that `all` leaves out of a run without them (or,
+/// `partition`, without two machines the link faults act on).
+pub fn needs_machines(class: &str) -> bool {
     matches!(class, "partition" | "pause" | "clock")
 }
 
-/// The classes that are each node's (`@NODE` scopes them); `net` and `partition` are the
+/// The classes that are each machine's (`@MACHINE` scopes them); `net` and `partition` are the
 /// links', the run's.
-pub fn node_class(class: &str) -> bool {
+pub fn machine_class(class: &str) -> bool {
     !matches!(class, "net" | "partition")
 }
 
@@ -411,15 +408,15 @@ pub fn class_keys(c: &str) -> Res<&'static [(&'static str, &'static str)]> {
 }
 
 /// The classes a list names (`NAME,...` without its scope), `all` expanded for a run with
-/// `nodes` nodes of which `faultable` the link faults act on: a class that needs nodes is
+/// `machines` machines of which `faultable` the link faults act on: a class that needs machines is
 /// left out of `all` when it has nothing to act on, and refused when named. Each class once.
-pub fn classes(list: &str, nodes: usize, faultable: usize) -> Res<Vec<&'static str>> {
+pub fn classes(list: &str, machines: usize, faultable: usize) -> Res<Vec<&'static str>> {
     let mut out: Vec<&'static str> = vec![];
     for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
         let names: Vec<&'static str> = if name == "all" {
             ALL.iter()
                 .copied()
-                .filter(|c| !needs_nodes(c) || nodes > 0)
+                .filter(|c| !needs_machines(c) || machines > 0)
                 .filter(|c| *c != "partition" || faultable >= 2)
                 .collect()
         } else {
@@ -428,12 +425,12 @@ pub fn classes(list: &str, nodes: usize, faultable: usize) -> Res<Vec<&'static s
                 .find(|x| x.0 == name)
                 .map(|x| x.0)
                 .ok_or_else(|| class_keys(name).unwrap_err())?;
-            if needs_nodes(k) && nodes == 0 {
-                return Err(format!("--faults {k}: only in a run with nodes"));
+            if needs_machines(k) && machines == 0 {
+                return Err(format!("--faults {k}: only in a run with machines"));
             }
             if k == "partition" && faultable < 2 {
                 return Err(format!(
-                    "--faults partition: partitions need two nodes the link faults act on (the run has {nodes}; net-links=driver adds the driver)"
+                    "--faults partition: partitions need two machines the link faults act on (the run has {machines}; partition@main adds main)"
                 ));
             }
             vec![k]
@@ -591,58 +588,42 @@ fn resolve_at(seed: u64, k: &str, v: &str) -> Res<String> {
     })
 }
 
-/// The links the net- faults act on, by `net-links`'s word.
-fn links(v: &str) -> Res<u64> {
-    use proto::wire::{LINKS_ALL, LINKS_DRIVER, LINKS_NODES};
-    match v {
-        "nodes" => Ok(LINKS_NODES),
-        "driver" => Ok(LINKS_DRIVER),
-        "all" => Ok(LINKS_ALL),
-        _ => Err(format!(
-            "--fault net-links={v}: expected nodes, driver or all"
-        )),
+/// The machines the link faults act on: partitions need two. `main_links`: a link class or key
+/// scoped `@main`, which adds main's links to the declared machines'.
+pub fn faultable_machines(machines: usize, main_links: bool) -> usize {
+    if machines == 0 {
+        0
+    } else {
+        machines + main_links as usize
     }
 }
 
-/// The nodes the link faults act on (`net-links`, the last one given): partitions need two.
-pub fn faultable_nodes(nodes: usize, settings: &[String]) -> Res<usize> {
-    let scope = match settings
-        .iter()
-        .rev()
-        .filter_map(|kv| kv.split_once('='))
-        .find(|(k, _)| *k == "net-links")
-    {
-        Some((_, v)) => links(v)?,
-        None => proto::wire::LINKS_NODES,
-    };
-    Ok(if nodes == 0 {
-        0
-    } else {
-        nodes + (scope >= proto::wire::LINKS_DRIVER) as usize
-    })
+/// A key of the links (`net-*`, `partition-*`): the run's, whose only scope is `@main`.
+pub fn link_key(k: &str) -> bool {
+    k.starts_with("net-") || k.starts_with("partition-")
 }
 
-/// A key each node has its own value of: the disk, memory, crash-point, fault-point, pause
-/// and clock keys. In a run with nodes the run's value applies to every node but the driver,
-/// and `@NODE,...` scopes it.
-pub fn node_scoped(k: &str) -> bool {
+/// A key each machine has its own value of: the disk, memory, crash-point, fault-point, pause
+/// and clock keys. In a run with machines the run's value applies to every machine but main,
+/// and `@MACHINE,...` scopes it.
+pub fn machine_scoped(k: &str) -> bool {
     k.starts_with("fs-")
         || k.starts_with("fsync-")
         || k.starts_with("mem-")
         || k.starts_with("path-swap-")
         || k.starts_with("buggify:")
         || matches!(k, "crash-permille" | "crash-at")
-        || node_only(k)
+        || machine_only(k)
 }
 
-/// A node's own key that only a node has (the driver is never paused): refused in a run
-/// without nodes, and for the driver.
-pub fn node_only(k: &str) -> bool {
+/// A machine's own key that only a machine has (main is never paused): refused in a run
+/// without machines, and for main.
+pub fn machine_only(k: &str) -> bool {
     k.starts_with("pause-") || k.starts_with("clock-")
 }
 
-/// `SETTING@NODE,...`: the setting and the nodes it names (`None`: no scope). A setting's
-/// scope follows its value (`KEY=VALUE@NODE`): an `@` in the key (`buggify:LABEL`) is the key's.
+/// `SETTING@MACHINE,...`: the setting and the machines it names (`None`: no scope). A setting's
+/// scope follows its value (`KEY=VALUE@MACHINE`): an `@` in the key (`buggify:LABEL`) is the key's.
 pub fn split_scope(s: &str) -> (&str, Option<&str>) {
     let from = s.find('=').map_or(0, |i| i + 1);
     match s[from..].rfind('@') {
@@ -651,8 +632,8 @@ pub fn split_scope(s: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// Copy the node-scoped settings of `src` into `dst` (the rest of `dst` stays).
-pub fn set_node_keys(dst: &mut proto::faults::FaultCfg, src: &proto::faults::FaultCfg) {
+/// Copy the machine-scoped settings of `src` into `dst` (the rest of `dst` stays).
+pub fn set_machine_keys(dst: &mut proto::faults::FaultCfg, src: &proto::faults::FaultCfg) {
     dst.fs_error_permille = src.fs_error_permille;
     (dst.fs_error_at_class, dst.fs_error_at_n) = (src.fs_error_at_class, src.fs_error_at_n);
     dst.short_permille = src.short_permille;
@@ -677,8 +658,8 @@ pub fn class_settings(c: &str) -> Res<Vec<(String, String)>> {
 }
 
 /// Where a crash comes when the `crash` or `kill` class names no crash key: at crash points
-/// (`CRASH_DEFAULT_PERMILLE`; one machine, or nodes some of which name a crash key), or at
-/// drawn times (nodes: `crash-gap-ms`, set by the caller).
+/// (`CRASH_DEFAULT_PERMILLE`; one machine, or machines some of which name a crash key), or at
+/// drawn times (machines: `crash-gap-ms`, set by the caller).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CrashAt {
     Points,
@@ -686,13 +667,15 @@ pub enum CrashAt {
 }
 
 /// Resolve classes (as `classes` expands them) and settings (later ones replace earlier ones
-/// of the same key, settings replace a class's) against `seed`. `nodes` is the run's nodes
-/// besides the driver (0: a run without nodes, or a node's own settings).
+/// of the same key, settings replace a class's) against `seed`. `machines` is the run's machines
+/// besides main (0: a run without machines, or a machine's own settings); `main_links`: the link
+/// faults act on main's links too (`net@main`).
 pub fn resolve(
     seed: u64,
     classes: &[&str],
     settings: &[String],
-    nodes: usize,
+    machines: usize,
+    main_links: bool,
     crash_at: CrashAt,
 ) -> Res<Plan> {
     let mut given: Vec<(String, String)> = vec![];
@@ -720,23 +703,24 @@ pub fn resolve(
     for (k, v) in named {
         set(&mut given, k, v);
     }
-    let faultable = faultable_nodes(nodes, settings)?;
+    let faultable = faultable_machines(machines, main_links);
     let parts = given.iter().any(|e| e.0 == "partition-gap-ms");
     if parts && faultable < 2 {
         return Err(format!(
-            "--fault partition-gap-ms: partitions need two nodes the link faults act on ({})",
-            if nodes == 0 {
-                "the run has no nodes".to_string()
+            "--fault partition-gap-ms: partitions need two machines the link faults act on ({})",
+            if machines == 0 {
+                "the run has no machines".to_string()
             } else {
-                format!("the run has {nodes}; net-links=driver adds the driver")
+                format!("the run has {machines}; partition@main adds main")
             }
         ));
     }
-    if nodes == 0 {
-        if let Some(e) = given.iter().find(|e| {
-            e.0.starts_with("partition-") || matches!(e.0.as_str(), "net-links" | "crash-gap-ms")
-        }) {
-            return Err(format!("--fault {}: only in a run with nodes", e.0));
+    if machines == 0 {
+        if let Some(e) = given
+            .iter()
+            .find(|e| e.0.starts_with("partition-") || e.0 == "crash-gap-ms")
+        {
+            return Err(format!("--fault {}: only in a run with machines", e.0));
         }
     }
     if parts && !given.iter().any(|e| e.0 == "partition-ms") {
@@ -775,12 +759,12 @@ pub fn resolve(
     let (wlo, whi) = proto::compute::WALK_DEFAULT;
     let mut plan = Plan {
         faults: Default::default(),
-        max_incarnations: MAX_INCARNATIONS_DEFAULT,
+        max_boots: MAX_BOOTS_DEFAULT,
         restart_gap_ns: RESTART_GAP_DEFAULT,
         crash_gap_ns: CRASH_GAP_DEFAULT,
         down_ns: DOWN_DEFAULT,
-        node_crash: 0,
-        node_crash_kind: 0,
+        machine_crash: 0,
+        machine_crash_kind: 0,
         net: Default::default(),
         sdk: proto::sdk::SdkCfg {
             seed,
@@ -790,15 +774,19 @@ pub fn resolve(
         compute_gap: proto::compute::default_gap(plan_draw(seed, "compute-gap")),
         compute_budget: true,
         compute_walk: resolve_gap(seed, "compute-walk", &format!("{wlo}..{whi}"))?,
-        node_faults: Default::default(),
-        node_sdk: Default::default(),
+        machine_faults: Default::default(),
+        machine_sdk: Default::default(),
         pause_gap_ns: (0, 0),
         pause_ns: (0, 0),
-        node_pause: Default::default(),
+        machine_pause: Default::default(),
         skew_ns: (0, 0),
-        node_skew: Default::default(),
+        machine_skew: Default::default(),
         resolved: vec![],
+        on: vec![],
     };
+    if main_links {
+        plan.net.links = proto::wire::LINKS_MAIN;
+    }
     for (k, v) in &given {
         let info = find(k).unwrap();
         let value: Value = match info.val {
@@ -898,7 +886,7 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             return Ok(());
         }
         "down-ms" => {
-            // One machine's restart, or each node's: the run has one or the other.
+            // One machine's restart, or each machine's: the run has one or the other.
             o.down_ns = ms_range(k, v)?;
             o.restart_gap_ns = o.down_ns;
             if o.down_ns.1 == 0 {
@@ -906,10 +894,10 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
             }
             return Ok(());
         }
-        "max-incarnations" => {
-            o.max_incarnations = n(v)?;
-            if o.max_incarnations == 0 {
-                return Err("--fault max-incarnations: at least 1".into());
+        "max-boots" => {
+            o.max_boots = n(v)?;
+            if o.max_boots == 0 {
+                return Err("--fault max-boots: at least 1".into());
             }
             return Ok(());
         }
@@ -932,7 +920,7 @@ fn apply(o: &mut Plan, k: &str, v: &str) -> Res<()> {
         }
         "clock-skew-ms" => {
             o.skew_ns = ms_range(k, v)?;
-            if o.skew_ns.1 > proto::node::CLOCK_STEP_MAX_NS {
+            if o.skew_ns.1 > proto::machine::CLOCK_STEP_MAX_NS {
                 return Err(format!("--fault {k}={v}: at most a year"));
             }
             return Ok(());
@@ -1043,7 +1031,6 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
             c.blackout_port = port;
             c.blackout_set = 1;
         }
-        "net-links" => c.links = links(v)?,
         "net-drop-permille" => c.drop_permille = n(v)?,
         "net-dup-permille" => c.dup_permille = n(v)?,
         "net-reorder-permille" => c.reorder_permille = n(v)?,
@@ -1055,13 +1042,13 @@ fn net_fault(c: &mut proto::wire::NetCfg, k: &str, v: &str) -> Res<()> {
 /// The classes and keys, for `--fault help`.
 pub fn help_text() -> String {
     let mut s = String::from(
-        "fault classes (--faults CLASS[,CLASS][@NODE,...]; each range is resolved from the seed):\n",
+        "fault classes (--faults CLASS[,CLASS][@MACHINE,...]; each range is resolved from the seed):\n",
     );
     for (name, kv) in CLASSES {
         let v: Vec<String> = kv.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let v = match *name {
             "buggify" => "every SDK fault point (buggify:LABEL=P sets one)".to_string(),
-            "crash" => format!("machine crashes: crash-permille={CRASH_DEFAULT_PERMILLE} at crash points; with nodes at drawn times (crash-gap-ms)"),
+            "crash" => format!("machine crashes: crash-permille={CRASH_DEFAULT_PERMILLE} at crash points; with machines at drawn times (crash-gap-ms)"),
             "kill" => "process kills, the disk kept: as crash".to_string(),
             "net" => format!("{} (no partitions: that is the partition class)", v.join(" ")),
             _ => v.join(" "),
@@ -1073,7 +1060,7 @@ pub fn help_text() -> String {
         "all",
         "every class above that applies to the run, never crash or kill (name them: all,crash)"
     ));
-    s.push_str("\nfault keys (--fault KEY=VALUE[@NODE,...], or [faults] in patina.toml; P and N may be a range A..B):\n");
+    s.push_str("\nfault keys (--fault KEY=VALUE[@MACHINE,...], or [faults] in patina.toml; P and N may be a range A..B):\n");
     for k in KEYS {
         let lhs = format!("{}={}", k.name, k.value);
         s.push_str(&format!("  {lhs:<34} {}\n", k.help));
@@ -1109,12 +1096,12 @@ mod tests {
     #[test]
     fn ranges_resolve_from_the_seed_and_only_from_it() {
         let disk = ["disk"];
-        let a = resolve(1, &disk, &[], 0, Points).unwrap();
-        let b = resolve(1, &disk, &[], 0, Points).unwrap();
+        let a = resolve(1, &disk, &[], 0, false, Points).unwrap();
+        let b = resolve(1, &disk, &[], 0, false, Points).unwrap();
         assert_eq!(a.json(), b.json());
         let rates: std::collections::BTreeSet<u64> = (0..64)
             .map(|s| {
-                let p = resolve(s, &disk, &[], 0, Points).unwrap();
+                let p = resolve(s, &disk, &[], 0, false, Points).unwrap();
                 val(&p, "fs-short-permille").as_u64().unwrap()
             })
             .collect();
@@ -1128,7 +1115,7 @@ mod tests {
     fn one_setting_never_moves_another() {
         let disk = ["disk"];
         for s in 0..32 {
-            let a = resolve(s, &disk, &v(&["crash-permille=0..5"]), 0, Points).unwrap();
+            let a = resolve(s, &disk, &v(&["crash-permille=0..5"]), 0, false, Points).unwrap();
             let b = resolve(
                 s,
                 &disk,
@@ -1138,6 +1125,7 @@ mod tests {
                     "mem-limit-mb=10..20",
                 ]),
                 0,
+                false,
                 Points,
             )
             .unwrap();
@@ -1152,20 +1140,20 @@ mod tests {
 
     #[test]
     fn settings_replace_presets_and_unknowns_are_named() {
-        let p = resolve(3, &["disk"], &v(&["fs-error-permille=7"]), 0, Points).unwrap();
+        let p = resolve(3, &["disk"], &v(&["fs-error-permille=7"]), 0, false, Points).unwrap();
         assert_eq!(p.faults.fs_error_permille, 7);
-        assert!(resolve(0, &["dsk"], &[], 0, Points)
+        assert!(resolve(0, &["dsk"], &[], 0, false, Points)
             .unwrap_err()
             .contains("dsk"));
-        assert!(resolve(0, &[], &v(&["nope=1"]), 0, Points)
+        assert!(resolve(0, &[], &v(&["nope=1"]), 0, false, Points)
             .unwrap_err()
             .contains("nope"));
-        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), 0, Points).is_err());
-        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), 0, Points).is_err());
-        let c = resolve(0, &["crash"], &[], 0, Points).unwrap();
+        assert!(resolve(0, &[], &v(&["fs-error-permille=5..2"]), 0, false, Points).is_err());
+        assert!(resolve(0, &[], &v(&["fs-error-permille=0..1001"]), 0, false, Points).is_err());
+        let c = resolve(0, &["crash"], &[], 0, false, Points).unwrap();
         assert_eq!(c.faults.crash_permille, CRASH_DEFAULT_PERMILLE);
         assert_eq!(c.faults.crash_kind, CRASH_MACHINE);
-        let k = resolve(0, &["kill"], &v(&["crash-at=4"]), 0, Points).unwrap();
+        let k = resolve(0, &["kill"], &v(&["crash-at=4"]), 0, false, Points).unwrap();
         assert_eq!(
             (
                 k.faults.crash_kind,
@@ -1175,15 +1163,23 @@ mod tests {
             (CRASH_PROCESS, 4, 0)
         );
         // A crash key alone crashes the machine; both keys, or a crash and a kill, are refused.
-        let m = resolve(0, &[], &v(&["crash-permille=9"]), 0, Points).unwrap();
+        let m = resolve(0, &[], &v(&["crash-permille=9"]), 0, false, Points).unwrap();
         assert_eq!(
             (m.faults.crash_kind, m.faults.crash_permille),
             (CRASH_MACHINE, 9)
         );
-        assert!(resolve(0, &[], &v(&["crash-permille=9", "crash-at=2"]), 0, Points).is_err());
+        assert!(resolve(
+            0,
+            &[],
+            &v(&["crash-permille=9", "crash-at=2"]),
+            0,
+            false,
+            Points
+        )
+        .is_err());
         assert!(classes("crash,kill", 0, 0).is_err());
-        // At drawn times (nodes), the class says only what a crash is.
-        let t = resolve(0, &["crash"], &[], 0, Times).unwrap();
+        // At drawn times (machines), the class says only what a crash is.
+        let t = resolve(0, &["crash"], &[], 0, false, Times).unwrap();
         assert_eq!((t.crash_class, t.faults.crash_kind), (CRASH_MACHINE, 0));
     }
 
@@ -1197,8 +1193,8 @@ mod tests {
         ]);
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let p = resolve(s, &[], &at, 0, Points).unwrap();
-            let q = resolve(s, &[], &at, 0, Points).unwrap();
+            let p = resolve(s, &[], &at, 0, false, Points).unwrap();
+            let q = resolve(s, &[], &at, 0, false, Points).unwrap();
             assert_eq!(p.json(), q.json());
             let f = p.faults;
             assert!(
@@ -1216,35 +1212,38 @@ mod tests {
             seen.insert(f.fsync_error_at);
         }
         assert!(seen.len() > 1, "{seen:?}");
-        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), 0, Points).is_err());
-        assert!(resolve(0, &[], &v(&["crash-at=x"]), 0, Points).is_err());
+        assert!(resolve(0, &[], &v(&["fsync-error-at=9..2"]), 0, false, Points).is_err());
+        assert!(resolve(0, &[], &v(&["crash-at=x"]), 0, false, Points).is_err());
     }
 
     #[test]
     fn compute_gap_is_drawn_per_seed() {
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..64 {
-            let d = resolve(s, &[], &[], 0, Points).unwrap();
+            let d = resolve(s, &[], &[], 0, false, Points).unwrap();
             let (lo, hi) = (proto::compute::GAP_SMALL.0, proto::compute::GAP_LARGE.1);
             assert!((lo..=hi).contains(&d.compute_gap), "{}", d.compute_gap);
             assert!(d.resolved.is_empty() && d.compute_budget);
             seen.insert(d.compute_gap);
-            let p = resolve(s, &[], &v(&["compute-gap=8"]), 0, Points).unwrap();
+            let p = resolve(s, &[], &v(&["compute-gap=8"]), 0, false, Points).unwrap();
             assert_eq!((p.compute_gap, val(&p, "compute-gap")), (8, json!(8)));
             assert!(!p.compute_budget);
-            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), 0, Points).unwrap();
+            let r = resolve(s, &[], &v(&["compute-gap=100..200"]), 0, false, Points).unwrap();
             assert!((100..=200).contains(&r.compute_gap));
             assert_eq!(val(&r, "compute-gap"), json!(r.compute_gap));
         }
         assert!(seen.len() > 8, "{seen:?}");
         assert_eq!(
-            resolve(0, &[], &v(&["compute-gap=0"]), 0, Points)
+            resolve(0, &[], &v(&["compute-gap=0"]), 0, false, Points)
                 .unwrap()
                 .compute_gap,
             0
         );
         for bad in ["compute-gap=0..8", "compute-gap=9..8", "compute-gap=x"] {
-            assert!(resolve(0, &[], &v(&[bad]), 0, Points).is_err(), "{bad}");
+            assert!(
+                resolve(0, &[], &v(&[bad]), 0, false, Points).is_err(),
+                "{bad}"
+            );
         }
     }
 
@@ -1253,7 +1252,7 @@ mod tests {
         let mut small = 0;
         let mut seen = std::collections::BTreeSet::new();
         for s in 0..256 {
-            let p = resolve(s, &["net"], &[], 0, Points).unwrap();
+            let p = resolve(s, &["net"], &[], 0, false, Points).unwrap();
             let c = p.net.chunk_max;
             assert!(
                 (1..=65536).contains(&c) && val(&p, "net-chunk-max") == json!(c),
@@ -1261,7 +1260,7 @@ mod tests {
             );
             small += (c <= 16) as u32;
             seen.insert(c);
-            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), 0, Points).unwrap();
+            let one = resolve(s, &[], &v(&["net-chunk-max=7"]), 0, false, Points).unwrap();
             assert_eq!(one.net.chunk_max, 7);
         }
         // Log-uniform: about a quarter of seeds at 16 bytes or less (uniform: one in 4096).
@@ -1270,9 +1269,9 @@ mod tests {
             "{small} {}",
             seen.len()
         );
-        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), 0, Points).is_err());
+        assert!(resolve(0, &[], &v(&["net-chunk-max=0..8"]), 0, false, Points).is_err());
         // The pieces of a split delivery follow each other by 1 to 10 µs.
-        let g = resolve(0, &[], &v(&["net-chunk-max=8"]), 0, Points).unwrap();
+        let g = resolve(0, &[], &v(&["net-chunk-max=8"]), 0, false, Points).unwrap();
         assert_eq!(
             (
                 g.net.chunk_gap_set,
@@ -1282,24 +1281,27 @@ mod tests {
             (1, 1000, 10_000)
         );
         assert_eq!(
-            resolve(0, &[], &[], 0, Points).unwrap().net.chunk_gap_set,
+            resolve(0, &[], &[], 0, false, Points)
+                .unwrap()
+                .net
+                .chunk_gap_set,
             0
         );
     }
 
     #[test]
-    fn partitions_come_with_their_class_and_two_nodes() {
+    fn partitions_come_with_their_class_and_two_machines() {
         let net = ["net"];
-        // `net` is the links' faults alone, whatever the nodes.
-        for nodes in [0, 1, 2] {
+        // `net` is the links' faults alone, whatever the machines.
+        for machines in [0, 1, 2] {
             for s in 0..8 {
-                let p = resolve(s, &net, &[], nodes, Points).unwrap();
-                let q = resolve(s, &net, &[], 0, Points).unwrap();
+                let p = resolve(s, &net, &[], machines, false, Points).unwrap();
+                let q = resolve(s, &net, &[], 0, false, Points).unwrap();
                 assert_eq!(p.json(), q.json());
                 assert_eq!(p.net, q.net);
             }
         }
-        let p = resolve(5, &["partition"], &[], 2, Points).unwrap();
+        let p = resolve(5, &["partition"], &[], 2, false, Points).unwrap();
         assert!(p.net.part_gap_max_ns >= p.net.part_gap_min_ns && p.net.part_gap_min_ns > 0);
         assert!(p.net.part_min_ns > 0);
         // `all` leaves out what has nothing to act on; naming it is refused.
@@ -1313,26 +1315,25 @@ mod tests {
         assert!(classes("partition", 1, 1).is_err());
         assert!(classes("pause", 0, 0).is_err());
         assert!(classes("cluster", 2, 2).is_err());
-        // One node and the driver's links: two nodes to cut between.
-        let d = resolve(5, &["partition"], &v(&["net-links=driver"]), 1, Points).unwrap();
+        // One machine and main's links: two machines to cut between.
+        let d = resolve(5, &["partition"], &[], 1, true, Points).unwrap();
         assert!(d.net.part_gap_max_ns > 0);
-        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), 1, Points).is_err());
-        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), 0, Points).is_err());
-        assert!(resolve(0, &[], &v(&["net-links=driver"]), 0, Points).is_err());
-        let one = resolve(0, &[], &v(&["partition-gap-ms=10..20"]), 3, Points).unwrap();
+        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), 1, false, Points).is_err());
+        assert!(resolve(0, &[], &v(&["partition-gap-ms=1..2"]), 0, false, Points).is_err());
+        let one = resolve(0, &[], &v(&["partition-gap-ms=10..20"]), 3, false, Points).unwrap();
         assert_eq!(one.net.part_gap_min_ns, 10_000_000);
         // The default length.
         assert_eq!(one.net.part_min_ns, 1_000_000_000);
     }
 
     #[test]
-    fn a_node_is_down_briefly_by_default() {
-        let p = resolve(3, &["kill"], &[], 3, Times).unwrap();
+    fn a_machine_is_down_briefly_by_default() {
+        let p = resolve(3, &["kill"], &[], 3, false, Times).unwrap();
         let s = 1_000_000_000;
         assert!(p.down_ns.0 >= s && p.down_ns.1 <= 5 * s, "{:?}", p.down_ns);
         assert!(p.down_ns.1 <= p.crash_gap_ns.0, "{:?}", p.down_ns);
-        // The restart gap of a run without nodes is its own.
-        let one = resolve(3, &["crash"], &[], 0, Points).unwrap();
+        // The restart gap of a run without machines is its own.
+        let one = resolve(3, &["crash"], &[], 0, false, Points).unwrap();
         assert_eq!(one.restart_gap_ns, (s, 61 * s));
     }
 

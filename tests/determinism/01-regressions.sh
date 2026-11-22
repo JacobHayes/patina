@@ -24,7 +24,7 @@ for k in a b; do
     rm -rf "${out:?}/procescape-$k"
     timeout 300 "$PATINA" run --seed 1 --out "$out/procescape-$k" --mount "$G":/guest:copy -- /guest/procescape >/dev/null 2>&1 || true
 done
-cmp -s "$out/procescape-a/inc-0/stdout" "$out/procescape-b/inc-0/stdout" || die "procescape: stdout depends on the run directory"
+cmp -s "$out/procescape-a/boot-1/stdout" "$out/procescape-b/boot-1/stdout" || die "procescape: stdout depends on the run directory"
 lhs=$(digest "$out/procescape-a"); rhs=$(digest "$out/procescape-b")
 [ "$lhs" = "$rhs" ] || die "procescape: digests differ"
 echo "procescape: same stdout and digest from two run directories"
@@ -52,7 +52,7 @@ echo "fdexhaust: same digest with launcher nofile 1024 and 4096"
 # in the background after 300 s, so it moved within a long run). Since sandbox hardening stdout is a memfd.
 rm -rf "${out:?}/stdo"
 timeout 300 "$PATINA" run --seed 1 --out "$out/stdo" --mount "$G":/guest:copy -- /guest/stdoutprobe >/dev/null 2>&1 || true
-awk '/^step/ { n++; if ($6 != int(($4 + 4095) / 4096) * 8) bad++ } END { exit !(n == 40 && bad == 0) }' "$out/stdo/inc-0/stderr" ||
+awk '/^step/ { n++; if ($6 != int(($4 + 4095) / 4096) * 8) bad++ } END { exit !(n == 40 && bad == 0) }' "$out/stdo/boot-1/stderr" ||
     die "stdoutprobe: stdout block counts are not derived from the size"
 rm -rf "${out:?}/stdo"
 echo "stdoutprobe: 40 fstat(1) block counts follow the size"
@@ -82,10 +82,10 @@ rm -rf "${out:?}/w8"
 for j in 1111111111111111 2222222222222222; do
     rm -rf "${out:?}/dead-$j"
     timeout 120 "$PATINA" run --seed 1 --out "$out/dead-$j" --mount "$G":/guest:copy -- /guest/deadargs "$j" >/dev/null 2>&1 || true
-    [ "$(class "$out/dead-$j")" = ok ] || die "deadargs $j: $(class "$out/dead-$j"): $(head -3 "$out/dead-$j/inc-0/stderr")"
+    [ "$(class "$out/dead-$j")" = ok ] || die "deadargs $j: $(class "$out/dead-$j"): $(head -3 "$out/dead-$j/boot-1/stderr")"
 done
 lhs=$(digest "$out/dead-1111111111111111"); rhs=$(digest "$out/dead-2222222222222222")
 [ "$lhs" = "$rhs" ] ||
-    die "deadargs: unread argument registers reach the log: $("$PATINA" log diff "$out/dead-1111111111111111/inc-0/boundary.log" "$out/dead-2222222222222222/inc-0/boundary.log" | sed -n 2,3p)"
+    die "deadargs: unread argument registers reach the log: $("$PATINA" log diff "$out/dead-1111111111111111/boot-1/boundary.log" "$out/dead-2222222222222222/boot-1/boundary.log" | sed -n 2,3p)"
 echo "deadargs: junk in the argument registers calls do not read leaves the digest unchanged"
 rm -rf "${out:?}"/dead-*

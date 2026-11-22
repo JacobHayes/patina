@@ -15,7 +15,7 @@
  *   forked    the main process stores, forks; the child (sharing the mapping) stores and is
  *             killed by SIGKILL
  *   durable   a child stores and is killed; the main process fsyncs the file and the
- *             directory, then writes and fsyncs a marker. In a later incarnation: the marker
+ *             directory, then writes and fsyncs a marker. In a later boot: the marker
  *             means the store is durable (`always`: synced-store-kept).
  * Every mode but orphan, violation, msync, hang and remap prints the file's first bytes as read(2)
  * returns them, which is what a native run prints too.
@@ -80,8 +80,8 @@ static void show(void) {
 
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "kill";
-    const char *inc = getenv("PATINA_INCARNATION");
-    if (!strcmp(mode, "durable") && inc && atoi(inc) > 0) {
+    const char *boot = getenv("PATINA_BOOT");
+    if (!strcmp(mode, "durable") && boot && atoi(boot) > 0) {
         char s = 0, b = 0;
         int m = open("marker", O_RDONLY);
         if (m < 0 || read(m, &s, 1) != 1) return 0; /* crashed before the marker was synced */

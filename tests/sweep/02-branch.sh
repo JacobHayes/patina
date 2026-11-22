@@ -24,7 +24,7 @@ window() { python3 -I - "$1" "$(dirname "$0")/../faults/lib" <<'PY'
 import os, sys
 sys.path.insert(0, sys.argv[2])
 import faults
-ops = faults.oplog(os.path.join(sys.argv[1], "inc-0"))
+ops = faults.oplog(os.path.join(sys.argv[1], "boot-1"))
 nm = faults.names(ops)
 on = lambda o, name: nm.get(o["ino"]) == name
 pts = faults.points(ops)

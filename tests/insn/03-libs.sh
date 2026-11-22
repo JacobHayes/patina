@@ -16,10 +16,10 @@ for w in insn-rand-cpp insn-rand-ssl; do
         p=$(($(field "$r/result.json" counters.insn.patched_sites.rdrand) + $(field "$r/result.json" counters.insn.patched_sites.rdseed)))
         [ "$p" -ge 2 ] || die "$w: only $p sites patched"
     fi
-    sed 's/^/    /' "$r/inc-0/stdout"
+    sed 's/^/    /' "$r/boot-1/stdout"
     trim "$o/$w"
     patina_run "$o/$w-seed2" 2 "$w"
-    cmp -s "$r/inc-0/stdout" "$o/$w-seed2/inc-0/stdout" && die "$w: seeds 1 and 2 print the same values"
+    cmp -s "$r/boot-1/stdout" "$o/$w-seed2/boot-1/stdout" && die "$w: seeds 1 and 2 print the same values"
     echo "$w: seed 2 prints different values"
 done
 if [ "$ARCH" = x86_64 ]; then

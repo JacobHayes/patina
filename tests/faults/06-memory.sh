@@ -9,10 +9,10 @@ for n in $(seq 1 24); do
     o=$RUNS/06/at-$n
     run "$o" 1 --fault mem-error-at=$n -- /guest/memfault
     [ "$(class "$o")" = ok ] || die "mem-error-at=$n: $(class "$o") $(field "$o/result.json" message)"
-    grep -qx done "$o/inc-0/stdout" || die "mem-error-at=$n: guest did not finish"
+    grep -qx done "$o/boot-1/stdout" || die "mem-error-at=$n: guest did not finish"
     # The steps that failed (lines neither "... ok" nor "done"): none, or one.
-    f=$(awk '!/ ok$/ && $0 != "done" {printf "%s ", $0}' "$o/inc-0/stdout")
-    nf=$(awk '!/ ok$/ && $0 != "done" {n++} END {print n + 0}' "$o/inc-0/stdout")
+    f=$(awk '!/ ok$/ && $0 != "done" {printf "%s ", $0}' "$o/boot-1/stdout")
+    nf=$(awk '!/ ok$/ && $0 != "done" {n++} END {print n + 0}' "$o/boot-1/stdout")
     [ "$nf" -le 1 ] || die "mem-error-at=$n: more than one failed step"
     echo "mem-error-at=$n: $(field "$o/result.json" faults.recent | jq -r 'map(.call) | join(" ") | if . == "" then "-" else . end') -> ${f:-no failure visible to the guest (handled by libc, or N beyond its requests)}"
     seen="$seen$f"
@@ -24,7 +24,7 @@ grep -q "step 10 thread EAGAIN" <<<"$seen" || die "thread creation never failed 
 # The order: the failing mmap step follows N.
 prev=-1
 for n in $(seq 1 24); do
-    k=$(sed -n 's/.*step \([0-4]\) mmap ENOMEM.*/\1/p' "$RUNS/06/at-$n/inc-0/stdout")
+    k=$(sed -n 's/.*step \([0-4]\) mmap ENOMEM.*/\1/p' "$RUNS/06/at-$n/boot-1/stdout")
     [ -z "$k" ] && continue
     [ "$k" -gt "$prev" ] || die "mmap failures not in call order"
     prev=$k
@@ -33,11 +33,11 @@ done
 # on every run, near 64 MiB, and malloc then returns NULL with ENOMEM; the result names it.
 o=$RUNS/06/limit
 verify "$o" 1 2 "" --fault mem-limit-mb=64 -- /guest/memfault limit
-cat "$o/run-0/inc-0/stdout"
-k=$(sed -n 's/^limit: ENOMEM at MiB \([0-9]*\)$/\1/p' "$o/run-0/inc-0/stdout")
+cat "$o/run-0/boot-1/stdout"
+k=$(sed -n 's/^limit: ENOMEM at MiB \([0-9]*\)$/\1/p' "$o/run-0/boot-1/stdout")
 [ -n "$k" ] || die "mem-limit-mb=64: no ENOMEM in 100 MiB"
 [ "$k" -gt 48 ] && [ "$k" -le 64 ] || die "mem-limit-mb=64: refused at MiB $k"
-grep -qx "malloc ENOMEM" "$o/run-0/inc-0/stdout" || die "malloc past the limit did not return NULL/ENOMEM"
+grep -qx "malloc ENOMEM" "$o/run-0/boot-1/stdout" || die "malloc past the limit did not return NULL/ENOMEM"
 python3 -I - "$o/run-0/result.json" <<'PY' || exit 1
 import json, sys
 f = json.load(open(sys.argv[1]))["faults"]

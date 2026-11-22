@@ -38,7 +38,7 @@ fails=$(python3 -I - "$o" "$N" <<'PY'
 import json, re, sys
 o, n = sys.argv[1], int(sys.argv[2])
 r = lambda d: json.load(open(f"{o}/{d}/result.json"))
-out = lambda d: open(f"{o}/{d}/inc-0/stdout").read()
+out = lambda d: open(f"{o}/{d}/boot-1/stdout").read()
 bad = []
 for s in (1, 2, 3):
     for k, ms in (("d", 10), ("z", 20)):
@@ -68,6 +68,6 @@ PY
 ) || die "the result check failed"
 [ -z "$fails" ] || die "$fails"
 grep -q '^identical: 3 runs' "$o/verify.txt" || die "a. deadline seed 1 under --vary cpu,aslr: $(tail -3 "$o/verify.txt")"
-echo "a. timer in a loop: handler at $(sed -n 's/.*handler_ns=\([0-9]*\).*/\1/p' "$o/z-1-1/inc-0/stdout") ns for 20 ms (seed 1, compute-gap=0); seeds 1-3 ok at the seed's gap and at 0, one digest twice; seed 1 identical under --vary cpu,aslr"
+echo "a. timer in a loop: handler at $(sed -n 's/.*handler_ns=\([0-9]*\).*/\1/p' "$o/z-1-1/boot-1/stdout") ns for 20 ms (seed 1, compute-gap=0); seeds 1-3 ok at the seed's gap and at 0, one digest twice; seed 1 identical under --vary cpu,aslr"
 echo "b. endless loop, time-limit 1: liveness after $(field "$o/e-1/result.json" compute.events) events, one digest twice"
-echo "c. CPU time after $N iterations: $(sed -n 's/^cpu [0-9]* //p' "$o/cpu/inc-0/stdout")"
+echo "c. CPU time after $N iterations: $(sed -n 's/^cpu [0-9]* //p' "$o/cpu/boot-1/stdout")"

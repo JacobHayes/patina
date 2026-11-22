@@ -4,4 +4,4 @@
 . "$(dirname "$0")/lib/common.inc"
 verify_ok "$RUNS/01-fs-tour-1" 1 cpu,load,aslr,sandbox 4 -- /guest/fs-tour
 o=$RUNS/01-fs-tour-1/run-0
-echo "fs-tour: ok, $(field "$o/result.json" sched.traps) traps, $(wc -l <"$o/inc-0/stdout") output lines; 4 runs identical"
+echo "fs-tour: ok, $(field "$o/result.json" sched.traps) traps, $(wc -l <"$o/boot-1/stdout") output lines; 4 runs identical"

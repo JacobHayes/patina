@@ -23,6 +23,7 @@ exact-only: one seed's run
 ```text
 $ patina run --seed 3 --faults crash -- ./acklog
 violation (always): acked-records-kept: 21 acknowledged, 0 stored
+faults on: main
 faults injected: 1 (crash 1)
 last injected:
   seq 124 t=100000ms crash kind=machine point=91 object=/work/acks.log lost: 0 missing, 2 changed, 0 back
@@ -51,14 +52,14 @@ data: the first 128 bytes of each read, write, send and receive, from a replay i
      124  +      0.120 ms        at the crash /work/acks.log had 1 write not followed by an fsync (22 writes, 21 fsyncs in all)
      124  +      0.120 ms        at the crash /work/data.log had 22 writes not followed by an fsync (22 writes, 0 fsyncs in all)
      124  +      0.120 ms        CRASH machine at crash point 91; lost: 2 changed (/work/acks.log, /work/data.log)
-     124  +      0.120 ms        the machine starts again (incarnation 1)
+     124  +      0.120 ms        the machine starts again (boot 2)
      181  +  14761.109 ms  main  disk: fsync the directory /work
      211  +  14761.135 ms  main  assert acked-records-kept
 stop at: event 211 (main assert acked-records-kept); its record: patina log events patina-out/run-3 --from 211 --to 211
 ```
 
 Each line is an event number, virtual time since the start, who (a thread, `main`, `t1`, ...;
-a node's name with nodes) and what: messages with the bytes sent, disk changes, faults,
+a machine's name with machines) and what: messages with the bytes sent, disk changes, faults,
 crashes, output, the end. Repeats are folded. `--full` prints every line; `--from SEQ --to SEQ`
 picks a window. A race in the program's own memory leaves no trace in the log: the story then
 says the threads were switched in computation, and `patina log events RUNDIR --types
@@ -90,9 +91,9 @@ exact-only: one seed's run
 -->
 ```text
 $ patina verify --seed 3 --runs 3 --faults crash -- ./acklog
-run 0: cpu 8 aslr off load on env base violation a6f8fbcb6b6345b9 switches 0
-run 1: cpu 16 aslr on load on env base violation a6f8fbcb6b6345b9 switches 0
-run 2: cpu 0 aslr off load on env base violation a6f8fbcb6b6345b9 switches 0
+run 0: cpu 8 aslr off load on env base violation 83f2ee3c8dde6b28 switches 0
+run 1: cpu 16 aslr on load on env base violation 83f2ee3c8dde6b28 switches 0
+run 2: cpu 0 aslr off load on env base violation 83f2ee3c8dde6b28 switches 0
 identical: 3 runs in /tmp/acklog/patina-out/verify-3
 violation (always): acked-records-kept: 21 acknowledged, 0 stored
 ```
@@ -106,9 +107,9 @@ command again.
 | File | |
 |---|---|
 | `run.json` | the seed, the settings, the program's SHA-256: `patina run --config RUNDIR/run.json` reruns it |
-| `result.json` | the outcome, `stop`, `message`, `signature`; `faults` (the plan, what was injected), `crashes`, `sdk` (every site), `refused` (calls answered with an error), `nodes` |
-| `inc-K/stdout`, `inc-K/stderr` | the program's output in incarnation K (one per start) |
-| `inc-K/post-crash/` | the files a machine crash left |
+| `result.json` | the outcome, `stop`, `message`, `signature`; `faults` (the plan, what was injected), `crashes`, `sdk` (every site), `refused` (calls answered with an error), `machines` |
+| `boot-K/stdout`, `boot-K/stderr` | the program's output in boot K (one per start) |
+| `boot-K/post-crash/` | the files a machine crash left |
 | `check.out` | the checker's output |
 
 <!-- transcript result-json
@@ -116,22 +117,22 @@ dir: /tmp/acklog
 exact-only: the run of seed 3 above
 -->
 ```text
-$ jq '{outcome, stop, message, incarnations}' patina-out/run-3/result.json
+$ jq '{outcome, stop, message, boots}' patina-out/run-3/result.json
 {
   "outcome": "violation",
   "stop": "always",
   "message": "acked-records-kept: 21 acknowledged, 0 stored",
-  "incarnations": 2
+  "boots": 2
 }
 ```
 
 The logs, read by `patina log`:
 
-- `patina log ops RUNDIR/inc-0`: every change to `/work`, in order;
-- `patina log tree RUNDIR/inc-0 DIR`: the work tree that incarnation ended with, written to DIR
+- `patina log ops RUNDIR/boot-1`: every change to `/work`, in order;
+- `patina log tree RUNDIR/boot-1 DIR`: the disk that boot ended with, written to DIR
   (`--post-crash`: the one its crash left);
 - `patina log events RUNDIR`: the whole run as JSON lines for `jq` or a checker: system calls
-  with their paths, file operations, faults, crashes, marks, node and network events (`--types
+  with their paths, file operations, faults, crashes, marks, machine and network events (`--types
   op,crash` keeps those; every line has `type`, `seq` and `t`, virtual nanoseconds);
 - `patina log dump LOG --from SEQ --to SEQ` and `patina log diff LOG LOG`: the raw boundary log,
   and the first record where two differ.
@@ -142,8 +143,8 @@ exact-only: the run of seed 3 above
 -->
 ```text
 $ patina log events patina-out/run-3 --types crash
-{"type":"header","v":1,"seed":3,"work":"/work","incarnations":2}
-{"type":"crash","inc":0,"seq":124,"t":100000120074,"slot":0,"kind":"machine","point":91,"lost":{"back":0,"changed":2,"missing":0,"paths":["/work/acks.log","/work/data.log"]}}
+{"type":"header","v":1,"seed":3,"disk":"/work","boots":2}
+{"type":"crash","boot":1,"seq":124,"t":100000120074,"slot":0,"kind":"machine","point":91,"lost":{"back":0,"changed":2,"missing":0,"paths":["/work/acks.log","/work/data.log"]}}
 ```
 
 A run a sweep did not keep has no logs; its seed reproduces it with `patina run --seed N`.

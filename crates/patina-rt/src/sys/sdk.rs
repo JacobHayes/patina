@@ -67,13 +67,13 @@ fn tab() -> &'static mut SdkTab {
     unsafe { SdkTab::at(crate::state::ctl_base()) }
 }
 
-/// This machine's fault-point settings: the run's (the driver's), or the node's own.
+/// This machine's fault-point settings: the run's (main's), or the machine's own.
 fn cfg() -> SdkCfg {
-    match crate::state::node() {
+    match crate::state::machine() {
         0 => tab().cfg,
         k => {
-            unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) }.sdk
-                [k.min(proto::node::MAX_NODES - 1)]
+            unsafe { proto::machine::MachineTab::at(crate::state::ctl_base()) }.sdk
+                [k.min(proto::machine::MAX_MACHINES - 1)]
         }
     }
 }
@@ -134,7 +134,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
     Action::Return(r)
 }
 
-/// A control call (`proto::node`): the words are kept for the trap's records whatever the
+/// A control call (`proto::machine`): the words are kept for the trap's records whatever the
 /// answer; a network action is the supervisor's (its decision record follows the trap's).
 fn control(ptr: u64, len: u64) -> i64 {
     if len == 0 || len > TEXT_MAX as u64 {
@@ -148,21 +148,21 @@ fn control(ptr: u64, len: u64) -> i64 {
     if let Err(e) = vm(nr::PROCESS_VM_READV, words.as_mut_ptr(), ptr, len as usize) {
         return e;
     }
-    let tab = unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) };
-    let r = match proto::node::parse(words, tab, crate::state::node()) {
+    let tab = unsafe { proto::machine::MachineTab::at(crate::state::ctl_base()) };
+    let r = match proto::machine::parse(words, tab, crate::state::machine()) {
         Err(r) => -r.errno,
-        Ok(proto::node::Control::Net {
+        Ok(proto::machine::Control::Net {
             verb,
             from,
             to,
             both,
         }) => crate::sup::call_sup(Op::Net, [verb, from, to, both as u64, 0, 0]).ret,
-        Ok(proto::node::Control::Node { verb, node }) => {
-            crate::sup::call_sup(Op::Node, [verb, node as u64, 0, 0, 0, 0]).ret
+        Ok(proto::machine::Control::Machine { verb, machine }) => {
+            crate::sup::call_sup(Op::Machine, [verb, machine as u64, 0, 0, 0, 0]).ret
         }
-        Ok(proto::node::Control::Clock { node, delta }) => {
-            let v = proto::node::CLOCK_STEP;
-            crate::sup::call_sup(Op::Node, [v, node as u64, delta as u64, 0, 0, 0]).ret
+        Ok(proto::machine::Control::Clock { machine, delta }) => {
+            let v = proto::machine::CLOCK_STEP;
+            crate::sup::call_sup(Op::Machine, [v, machine as u64, delta as u64, 0, 0, 0]).ret
         }
     };
     keep(
@@ -227,7 +227,7 @@ fn quiet() -> bool {
 fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64 {
     let (label, text) = buf[HDR_LEN..].split_at(h.label_len);
     let t = tab();
-    let node = crate::state::node() as u8;
+    let machine = crate::state::machine() as u8;
     let want = match op {
         OP_ASSERT => matches!(
             h.kind,
@@ -246,7 +246,7 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         return 0;
     }
     let cfg = cfg();
-    let Some(s) = t.site_on(h.kind, label, node) else {
+    let Some(s) = t.site_on(h.kind, label, machine) else {
         // Table full (counted): the call is still answered.
         return match op {
             OP_ASSERT if fails(h) => violation(call, label, text),

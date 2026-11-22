@@ -5,7 +5,7 @@
 for mode in correct naive; do
     o=$RUNS/04/$mode
     verify "$o" 1 3 "" --fault fs-short-permille=200 -- /guest/short "$mode"
-    out=$(cat "$o/run-0/inc-0/stdout")
+    out=$(cat "$o/run-0/boot-1/stdout")
     echo "$mode: $out ($(field "$o/run-0/result.json" faults.injected) short transfers injected)"
     case $mode in
         correct) grep -q "^copy OK" <<<"$out" || die "correct loops: $out" ;;

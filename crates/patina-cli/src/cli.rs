@@ -41,7 +41,7 @@ pub const COMMANDS: &[Command] = &[
         cmd: Cmd::Run,
         name: "run",
         usage: "patina run [options] [-- CMD ARGS...]",
-        help: "one run of a program under a seed",
+        help: "one run of a program under a seed; CMD is what machine main runs",
     },
     Command {
         cmd: Cmd::Replay,
@@ -88,14 +88,14 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Log,
         name: "log",
-        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops INCDIR | log ops --check RUNDIR | log tree INCDIR DIR [--post-crash] | log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]",
-        help: "read and compare logs; list file operations; export work trees and events",
+        usage: "patina log dump LOG [--from SEQ] [--to SEQ] | log diff LOG LOG | log ops BOOTDIR | log ops --check RUNDIR | log tree BOOTDIR DIR [--post-crash] | log events RUNDIR [--types T,T] [--from SEQ] [--to SEQ]",
+        help: "read and compare logs; list file operations; export disks and events",
     },
     Command {
         cmd: Cmd::Ctl,
         name: "ctl",
-        usage: "patina ctl partition A B | partition --from A --to B | heal [A B] | crash NODE | kill NODE | start NODE | pause NODE | resume NODE | clock NODE +90s",
-        help: "inside a run with nodes: act on its links, nodes and clocks, as the fault classes do",
+        usage: "patina ctl partition A B | partition --from A --to B | heal [A B] | crash MACHINE | kill MACHINE | start MACHINE | pause MACHINE | resume MACHINE | clock MACHINE +90s",
+        help: "inside a run with machines: act on links, machines and clocks, as the fault classes do",
     },
     Command {
         cmd: Cmd::Doctor,
@@ -264,9 +264,9 @@ pub const FLAGS: &[Flag] = &[
     ),
     many("--env", "K=V", "add to the guest environment", RUNLIKE),
     many(
-        "--node",
+        "--machine",
         "NAME='CMD ARGS'",
-        "another machine: node NAME runs CMD ARGS",
+        "another machine, which runs CMD ARGS at each boot",
         RUNLIKE,
     ),
     many(
@@ -276,22 +276,22 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag(
-        "--work",
+        "--disk",
         "DIR[:GUEST]",
         "empty",
-        "files for the crash-modelled disk at GUEST (/work)",
+        "main's starting disk, mounted at GUEST (/work)",
         RUNLIKE,
     ),
     flag("--stdin", "FILE", "empty", "guest standard input", RUNLIKE),
     many(
         "--faults",
-        "CLASS[,...][@NODE]",
-        "disk, net, crash, ...; all: no crash/kill (--fault help)",
+        "CLASS[,...][@MACHINE]",
+        "disk, net...; all: no crash/kill (--fault help)",
         RUNLIKE,
     ),
     many(
         "--fault",
-        "KEY=VALUE[@NODE]",
+        "KEY=VALUE[@MACHINE]",
         "one fault key, over its class's (--fault help: the keys)",
         RUNLIKE,
     ),

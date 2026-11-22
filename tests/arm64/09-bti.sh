@@ -12,7 +12,7 @@ for g in bti-dyn bti-static; do
     for k in a b; do
         prun "$RUNS/$g-$k" --seed 1 -- "$PATINA_GUESTS/$g"
         [ "$st" = 0 ] || die "$g $k: exit $st ($(tail -2 "$RUNS/$g-$k.txt"))"
-        grep -qx 'spin 45' "$RUNS/$g-$k/inc-0/stdout" || die "$g $k: $(cat "$RUNS/$g-$k/inc-0/stdout")"
+        grep -qx 'spin 45' "$RUNS/$g-$k/boot-1/stdout" || die "$g $k: $(cat "$RUNS/$g-$k/boot-1/stdout")"
         [ "$(field "$RUNS/$g-$k/result.json" sched.pause_points)" -ge 10 ] || die "$g $k: the isb was not a pause point"
     done
     lhs=$(field "$RUNS/$g-a/result.json" digest); rhs=$(field "$RUNS/$g-b/result.json" digest)
@@ -32,7 +32,7 @@ check() {
     if [ $bti = 1 ] && [ "$want" != ok ]; then
         [ "$r/$(field "$f" sched.pause_points)" = "$want" ] || die "$n: $r (want $want) $(field "$f" message)"
     else
-        [ "$st" = 0 ] && grep -qx "$expect" "$RUNS/$n/inc-0/stdout" || die "$n: $r, $(cat "$RUNS/$n/inc-0/stdout")"
+        [ "$st" = 0 ] && grep -qx "$expect" "$RUNS/$n/boot-1/stdout" || die "$n: $r, $(cat "$RUNS/$n/boot-1/stdout")"
     fi
     echo "$n: $r (outcome/signal)"
 }

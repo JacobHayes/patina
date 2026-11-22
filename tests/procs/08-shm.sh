@@ -6,9 +6,9 @@
 o=$RUNS/08-shm
 for seed in 1 2 3; do
     verify_ok "$o/v$seed" "$seed" 2 cpu,load /guest/shm
-    grep -q '^mutex/cond: counter=400 .* child status=0$' "$o/v$seed/run-0/inc-0/stdout" || die "seed $seed: mutex/cond values"
-    grep -q '^semaphore: waits=100 value=0 child status=0$' "$o/v$seed/run-0/inc-0/stdout" || die "seed $seed: semaphore values"
+    grep -q '^mutex/cond: counter=400 .* child status=0$' "$o/v$seed/run-0/boot-1/stdout" || die "seed $seed: mutex/cond values"
+    grep -q '^semaphore: waits=100 value=0 child status=0$' "$o/v$seed/run-0/boot-1/stdout" || die "seed $seed: semaphore values"
 done
 n=$(for seed in 1 2 3; do field "$o/v$seed/run-0/result.json" digest; done | sort -u | wc -l)
 echo "distinct digests over seeds 1-3: $n"
-cat "$o/v1/run-0/inc-0/stdout"
+cat "$o/v1/run-0/boot-1/stdout"

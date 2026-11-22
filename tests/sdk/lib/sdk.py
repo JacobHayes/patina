@@ -37,7 +37,7 @@ class Run:
         self.status = status
         with open(os.path.join(out, "result.json")) as f:
             self.outcome = json.load(f)
-        with open(os.path.join(out, "inc-0", "stdout")) as f:
+        with open(os.path.join(out, "boot-1", "stdout")) as f:
             self.stdout = f.read()
         self.sdk = self.outcome["sdk"]
 
@@ -83,6 +83,6 @@ def report(r):
 
 def log_ops(r):
     """The boundary log's records, decoded: one line each."""
-    p = subprocess.run([PATINA, "log", "dump", os.path.join(r.out, "inc-0", "boundary.log")],
+    p = subprocess.run([PATINA, "log", "dump", os.path.join(r.out, "boot-1", "boundary.log")],
                        capture_output=True, text=True, check=True)
     return p.stdout.splitlines()

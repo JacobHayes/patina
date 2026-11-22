@@ -13,7 +13,7 @@
 #      (a sweep with a checker keeps them: none runs again), and a verdict left pending is
 #      judged again.
 #    - A checker that serves judges a recheck as one run per run does.
-#    - same-output refuses a reference made from another work tree (an error, not a finding);
+#    - same-output refuses a reference made from another disk (an error, not a finding);
 #      --relax compares anyway.
 #@ tier=area budget=30 slots=4
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
@@ -24,16 +24,16 @@ export PATINA
 mkdir chk t1 t2
 echo one >t1/f
 echo two >t2/f
-# The corpus: a comment, a named case with a work tree of its own, and a case dash and bash
+# The corpus: a comment, a named case with a disk of its own, and a case dash and bash
 # disagree on (dash's echo prints -e).
 cat >cases.txt <<'EOF'
 # ids: a line's --name, or its line number
---work t1 --name readf -- cat f
+--disk t1 --name readf -- cat f
 echo plain
 echo -e 'a\tb'
 printf '%s\n' 1 2
 EOF
-sed 's/^--work t1/--work t2/' cases.txt >cases-t2.txt
+sed 's/^--disk t1/--disk t2/' cases.txt >cases-t2.txt
 # The checker: stdout as the reference's, unless the table of expected differences names the
 # case; a difference is keyed by the case's id.
 cat >chk/diff <<'EOF'
@@ -43,8 +43,8 @@ if grep -qx "$PATINA_CASE_ID" "$(dirname "$0")/expected.txt" 2>/dev/null; then
     echo "expected: case $PATINA_CASE_ID differs by design"
     exit 77
 fi
-cmp -s "$ref/inc-0/stdout" "$2/inc-0/stdout" && exit 0
-echo "wrong-output [$PATINA_CASE_ID]: got $(head -c 20 "$2/inc-0/stdout" | tr -c '[:print:]' .)"
+cmp -s "$ref/boot-1/stdout" "$2/boot-1/stdout" && exit 0
+echo "wrong-output [$PATINA_CASE_ID]: got $(head -c 20 "$2/boot-1/stdout" | tr -c '[:print:]' .)"
 exit 1
 EOF
 chmod +x chk/diff
@@ -75,7 +75,7 @@ echo "ids: $ids; group $(jq -r '.groups[0].signature' sh/report.json), e.g. $(jq
 # The table names the case: a recheck judges every kept run again, and only the check changes.
 mkdir own
 # own RUN: what a recheck must not change: the digest, the program's end, faults, SDK, the log
-own() { jq -c '{digest, guest, faults, sdk}' "$1/result.json"; sha256sum "$1/inc-0/boundary.log" | cut -d' ' -f1; }
+own() { jq -c '{digest, guest, faults, sdk}' "$1/result.json"; sha256sum "$1/boot-1/boundary.log" | cut -d' ' -f1; }
 for r in sh/seed-*/*; do own "$r" >"own/$(echo "$r" | tr / _)"; done
 [ -f sh/seed-1/4-a_tb/replay.json ] || die "the finding's first seed was not replayed"
 echo 4 >chk/expected.txt
@@ -110,7 +110,7 @@ mv chk/expected.txt chk/expected.off
 rc=$(sweep shf --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 mv chk/expected.off chk/expected.txt
 [ "$rc" = 1 ] || die "the sweep with a checker: exit $rc: $(tail -3 shf.txt)"
-rm -rf shf/seed-1/3-plain/inc-0 shf/seed-1/3-plain/check.out
+rm -rf shf/seed-1/3-plain/boot-1 shf/seed-1/3-plain/check.out
 rc=0
 "$PATINA" report --recheck --check "$root/examples/checks/same-output ref" --format json shf >shf.json 2>shf.err || rc=$?
 [ "$rc" = 1 ] && [ "$(jq '.check.checkers | length' shf.json)" = 2 ] || die "recheck of pruned runs: exit $rc: $(jq -c .check shf.json) $(cat shf.err)"
@@ -143,13 +143,13 @@ jq '.check = {"verdict": "pending"} | .outcome = "error"' "$p/result.json" >p.js
 rc=$(sweep sh --cases cases.txt --check "chk/diff ref" -- /bin/bash -c {})
 [ "$rc" = 0 ] && [ "$(jq -r .check.verdict "$p/result.json")" = pass ] || die "the pending verdict: exit $rc: $(jq -c .check "$p/result.json")"
 
-# The reference guard: another work tree for readf is an error with its reason; --relax judges.
+# The reference guard: another disk for readf is an error with its reason; --relax judges.
 "$PATINA" sweep --seeds 1 --keep all --cases cases-t2.txt --out ref-t2 -- /bin/sh -c {} >ref-t2.txt 2>&1 || die "ref-t2: $(tail -2 ref-t2.txt)"
 rc=$(sweep guard --cases cases.txt --check "$root/examples/checks/same-output ref-t2" -- /bin/bash -c {})
 [ "$rc" = 1 ] && [ "$(jq -r '[.groups[] | select(.outcome == "error") | .cases[]] | join(",")' guard/report.json)" = "cat f" ] ||
     die "the guard: exit $rc: $(jq -c '[.groups[] | [.signature, .cases]]' guard/report.json)"
-jq -e '.groups[] | select(.outcome == "error") | .example | test("reference-mismatch: work")' guard/report.json >/dev/null || die "the guard's reason: $(jq -c '[.groups[].example]' guard/report.json)"
-rc=$(sweep relax --cases cases.txt --check "$root/examples/checks/same-output --relax work --relax settings ref-t2" -- /bin/bash -c {})
+jq -e '.groups[] | select(.outcome == "error") | .example | test("reference-mismatch: disk")' guard/report.json >/dev/null || die "the guard's reason: $(jq -c '[.groups[].example]' guard/report.json)"
+rc=$(sweep relax --cases cases.txt --check "$root/examples/checks/same-output --relax disk --relax settings ref-t2" -- /bin/bash -c {})
 [ "$rc" = 1 ] && [ "$(jq '.check.errors' relax/report.json)" = 0 ] || die "--relax: exit $rc: $(jq -c .check relax/report.json)"
 echo "guard: $(jq -r '.groups[] | select(.outcome == "error") | .example' guard/report.json)"
 echo "ok: case ids, keys, classes; recheck after a table edit; serve as run; pruned runs named; a resume judges again; the reference guard"

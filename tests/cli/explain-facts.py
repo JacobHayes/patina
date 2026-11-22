@@ -1,6 +1,6 @@
 """The facts of an explained run (tests/cli/14-explain-cases.sh): RUNDIR.story (`patina explain
 --format json`) against RUNDIR.events (`patina log events`) and the run's result. Usage:
-explain-facts.py RUNDIR CASE PATINA, CASE one of thread, crash, nodes, partition."""
+explain-facts.py RUNDIR CASE PATINA, CASE one of thread, crash, machines, partition."""
 import json
 import subprocess
 import sys
@@ -22,11 +22,11 @@ def full():
     return [l for l in map(json.loads, out.splitlines()) if l["kind"] not in ("outcome", "stop")]
 
 
-# Shorter than the event log, told or whole; far shorter for the nodes' runs. Which seed fails
+# Shorter than the event log, told or whole; far shorter for the machines' runs. Which seed fails
 # first depends on the host, so these hold for every failing seed: a race in jobs can show
 # after a few hundred events, and its whole story is then a third of them.
 told = len(full())
-far = case in ("nodes", "partition")
+far = case in ("machines", "partition")
 assert len(lines) * (10 if far else 4) < len(records), (len(lines), len(records))
 assert told * (4 if far else 1) < len(records), (told, len(records))
 # The stop event is a record of the run, the same in `log events --from N --to N`.
@@ -48,16 +48,16 @@ elif case == "crash":
     assert any(p in l["text"] for l in near for p in crash["lost"]["paths"]), near
     assert ev["type"] == "sdk" and ev["op"] == "assert", ev
     assert result["message"].startswith(ev["label"]), (ev, result["message"])
-elif case in ("nodes", "partition"):
-    nodes = header["nodes"]
-    # The stop is a message into the driver, sent by the node the event is of.
-    assert stop.get("to") == "driver" and ev.get("node") == stop["who"], (stop, ev)
-    # Every node's messages are in the story.
+elif case in ("machines", "partition"):
+    machines = header["machines"]
+    # The stop is a message into main, sent by the machine the event is of.
+    assert stop.get("to") == "main" and ev.get("machine") == stop["who"], (stop, ev)
+    # Every machine's messages are in the story.
     talk = {l["who"] for l in full() if l["kind"] == "msg"}
-    assert set(nodes) <= talk, (nodes, talk)
+    assert set(machines) <= talk, (machines, talk)
     if case == "partition":
         # A partition of the seed came before the stop, and the last one is in the story.
-        # (Which node it cut off depends on the seed: the sender, or the others.)
+        # (Which machine it cut off depends on the seed: the sender, or the others.)
         cuts = [e for e in records if e["type"] == "net" and e.get("event") == "cut" and e.get("by") == "seed"
                 and e["seq"] < stop["seq"]]
         assert cuts, stop

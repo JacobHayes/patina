@@ -29,7 +29,7 @@ import json, os, re, sys
 d, rx = sys.argv[1], re.compile(sys.argv[2])
 rows = []
 for root, dirs, files in os.walk(d):
-    dirs[:] = [x for x in dirs if not x.startswith(".") and not x.startswith("inc-")]
+    dirs[:] = [x for x in dirs if not x.startswith(".") and not x.startswith("boot-")]
     if "result.json" in files:
         r = json.load(open(os.path.join(root, "result.json")))
         rows.append((os.path.basename(root), r))
@@ -79,7 +79,7 @@ stats f4b 'batch-atomic-across-keyspaces'
 echo "== E4: cost of the F2 branch sweep"
 for s in 1 2 3; do
     "$PATINA" run --seed $s --fault crash-permille=0 --faults buggify --env FJ_N=2000 --out "$RUNS/base-$s" $FJ -- $H >/dev/null 2>&1 || true
-    "$PATINA" log dump "$RUNS/base-$s/inc-0/boundary.log" | tail -1 | sed -n 's/^seq=\([0-9]*\) .*/\1/p' >"$RUNS/base-$s.last"
+    "$PATINA" log dump "$RUNS/base-$s/boot-1/boundary.log" | tail -1 | sed -n 's/^seq=\([0-9]*\) .*/\1/p' >"$RUNS/base-$s.last"
 done
 python3 -I - "$RUNS" <<'PY'
 import json, os, re, statistics, sys

@@ -6,8 +6,8 @@ value in each range, so one sweep covers gentle and harsh settings. Add one clas
 starting from the bug you suspect: a run that meets every fault at once fails in ways that say
 little.
 
-    --faults CLASS[,CLASS...][@NODE,...]     repeatable; [faults] faults = ["CLASS", ...]
-    --fault  KEY=VALUE[@NODE,...]            repeatable; [faults] KEY = VALUE
+    --faults CLASS[,CLASS...][@MACHINE,...]  repeatable; [faults] faults = ["CLASS", ...]
+    --fault  KEY=VALUE[@MACHINE,...]         repeatable; [faults] KEY = VALUE
 
 `patina run --fault help` prints every class with the ranges it turns on, and every key.
 
@@ -19,9 +19,9 @@ little.
 | `buggify` | the program's own fault points fire (`patina guide sdk`) |
 | `crash` | the machine crashes and the program restarts on what reached the disk (`patina guide crashes`) |
 | `kill` | the program's processes are killed and restarted; the disk keeps everything |
-| `partition` | links between nodes are cut for a while (`patina guide nodes`) |
-| `pause` | a node stops for a while, its sockets open |
-| `clock` | a node's realtime clock is off by a drawn amount |
+| `partition` | links between machines are cut for a while (`patina guide machines`) |
+| `pause` | a machine stops for a while, its sockets open |
+| `clock` | a machine's realtime clock is off by a drawn amount |
 | `all` | every class that applies to the run, but `crash` and `kill`: name those, `--faults all,crash` |
 
 ## The rules
@@ -39,9 +39,10 @@ little.
    `/work`, pipes and unix sockets: a `--stdin FILE` is neither, so feed input through a pipe
    (`-- sh -c 'cat input | ./prog'`) or a file in `/work` to put its reads under faults. Keep a
    harness script out of `/work` (`--mount` it): there its own reads meet the faults too.
-4. **Nodes.** With several machines, a class or key without `@` acts on every node but the
-   driver; `@a,b` names nodes (`patina guide nodes`). `partition`, `pause` and `clock` exist only
-   with nodes.
+4. **Machines.** With several machines, a class or key without `@` acts on every machine but
+   main; `@a,b` names machines (`patina guide machines`), and `net@main` or `partition@main` adds
+   main's links. `partition`, `pause` and `clock` exist only with machines. A run prints `faults
+   on:` with the machines its faults act on.
 
 <!-- transcript not-applicable
 dir: /tmp/sockets
@@ -75,7 +76,7 @@ seed and log.
   `--crash-points` and `minimize` crash only the work.
 - **The final check** runs only if the main command ended by itself with an ok status (0 or an
   `--ok-exit` status); otherwise the run ends with the main command's outcome. Before it starts
-  the faults stop for the rest of the run: partitions and cuts heal, paused nodes resume, a node
+  the faults stop for the rest of the run: partitions and cuts heal, paused machines resume, a machine
   whose restart policy has a restart scheduled starts at once (one a control call took down stays
   down), and nothing more is injected. A nonzero exit is a
   `failure` (stop `finally`), with its output. Recovery takes time, so make the check poll
@@ -98,22 +99,23 @@ $ patina run --mount g:/guest:copy --faults disk,net --setup 'python3 /guest/pha
 ok (exit): the program exited 0
 guest: exit 0
 phases: setup exit 0, main exit 0, finally exit 0
+faults on: main
 faults injected: 42 (net-delay 41, net-reset 1)
 run directory: /tmp/phases/patina-out/run-0
 replay: patina replay /tmp/phases/patina-out/run-0
 ```
 
-`phases.py` (in `tests/guests/nodes`) starts a store in the background, puts records through it,
+`phases.py` (in `tests/guests/machines`) starts a store in the background, puts records through it,
 and checks they are all there. `result.json`'s `phases` has each command's start and end
 (sequence numbers), its exit and where its output begins; `patina explain` shows the boundaries.
 
-**Put the system under test on a node; the driver is the harness**: its setup waits for the
-system, its main command drives the workload, its final check verifies (`patina guide nodes`).
-A run with one node costs about what a run without nodes does.
+**Put the system under test on a machine; main is the harness**: its setup waits for the
+system, its main command drives the workload, its final check verifies (`patina guide machines`).
+A run with one machine costs about what a run without machines does.
 
-<!-- no-run node-harness: needs a database to test, which the repository does not ship -->
+<!-- no-run machine-harness: needs a database to test, which the repository does not ship -->
 ```sh
-patina sweep --seeds 1..200 --faults all,crash --node db='./db --listen :7000' \
+patina sweep --seeds 1..200 --faults all,crash --machine db='./db --listen :7000' \
     --setup './wait-for db:7000' --finally './verify db:7000' -- ./workload db:7000
 ```
 
@@ -123,7 +125,7 @@ sdk`); faults act from the mark. A mark the run does not declare, or a declared 
 reached, ends the run `error` naming the fix; a program named `mark` is given by its path
 (`--setup ./mark`). `faults_done()` stops injecting from where it is called and ends the seed's
 partitions and pauses; it needs no declaration, and unlike `--finally` it neither heals cuts
-made by control calls nor starts down nodes.
+made by control calls nor starts down machines.
 
 ## What the keys do
 

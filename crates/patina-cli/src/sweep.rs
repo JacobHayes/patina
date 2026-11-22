@@ -137,7 +137,7 @@ const PATINA_OUTPUT: [&str; 5] = [
     "campaign-state.json",
 ];
 
-/// Other names a run directory holds beside `PATINA_OUTPUT` and `inc-K`.
+/// Other names a run directory holds beside `PATINA_OUTPUT` and `boot-K`.
 const RUN_OUTPUT: [&str; 7] = [
     "check.out",
     crate::branch::FILE,
@@ -206,7 +206,7 @@ const CASE_NAME_MAX: usize = 40;
 
 /// The run settings a case line may give before its command; every other setting is the
 /// sweep's.
-pub const CASE_FLAGS: [&str; 4] = ["--work", "--mount", "--env", "--stdin"];
+pub const CASE_FLAGS: [&str; 4] = ["--disk", "--mount", "--env", "--stdin"];
 
 /// One line of a `--cases` file.
 struct Case {
@@ -246,7 +246,7 @@ struct Line<'a> {
 }
 
 /// Split a case line: a line whose first word starts with `--` gives run settings up to a
-/// word `--` (`--work DIR[:GUEST]`, `--mount`, `--env`, `--stdin`, parsed as `patina run`
+/// word `--` (`--disk DIR[:GUEST]`, `--mount`, `--env`, `--stdin`, parsed as `patina run`
 /// parses them, and `--name NAME` for its directory), then its command.
 fn case_line(text: &str) -> Res<Line<'_>> {
     let plain = Line {
@@ -819,14 +819,14 @@ impl Drop for Held {
     }
 }
 
-/// Remove the logs (`inc-*`, and the nodes' output in `node/`) and the checker's output of a run
+/// Remove the logs (`boot-*`, and the machines' output in `machine/`) and the checker's output of a run
 /// directory, keeping `run.json` and `result.json`.
 fn prune(dir: &Path) {
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("inc-") || name == "node" {
+            if name.starts_with("boot-") || name == "machine" {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -866,22 +866,26 @@ fn thin(runs: &[report::Run], known: Option<&report::Known>) {
 const CUT_OVER: u64 = 4 << 20;
 const CUT_KEEP: u64 = (1 << 20) / proto::rec::REC_SIZE as u64 * proto::rec::REC_SIZE as u64;
 
-/// Shrink a kept run, its result `r`: its work trees packed (`durability::kept`, lossless;
+/// Shrink a kept run, its result `r`: its disks packed (`durability::kept`, lossless;
 /// `post-crash/` stays whole in a run a checker reads), its large logs cut (`crate::log::Cut`;
-/// the operation log of an incarnation over the size goes whole: `patina log ops` needs all
+/// the operation log of a boot over the size goes whole: `patina log ops` needs all
 /// of it). Whether a log was cut.
 fn cut(dir: &Path, r: &serde_json::Value) -> bool {
     crate::durability::kept::pack_run(dir, !crate::recheck::checkable(r));
     let mut cut = false;
-    // The driver's incarnations and every node's disks.
-    for inc in crate::durability::check::disks(dir) {
-        let size = |f: &str| std::fs::metadata(inc.join(f)).map(|m| m.len()).unwrap_or(0);
+    // Main's boots and every machine's disks.
+    for bdir in crate::durability::check::disks(dir) {
+        let size = |f: &str| {
+            std::fs::metadata(bdir.join(f))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
         if size("boundary.log") > CUT_OVER {
-            cut |= crate::log::cut(&inc, CUT_KEEP).is_ok();
+            cut |= crate::log::cut(&bdir, CUT_KEEP).is_ok();
         }
         if size("oplog.meta") + size("oplog.data") > CUT_OVER {
-            let _ = std::fs::remove_file(inc.join("oplog.meta"));
-            let _ = std::fs::remove_file(inc.join("oplog.data"));
+            let _ = std::fs::remove_file(bdir.join("oplog.meta"));
+            let _ = std::fs::remove_file(bdir.join("oplog.data"));
             cut = true;
         }
     }
@@ -928,8 +932,8 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     // every run. With --cases and no command, each line is a whole command.
     let cfg = crate::config::resolve_any(a).map_err(error)?;
     // --crash-points: crashes on (the `crash` class, or `kill` when named), placed by the sweep
-    // at each point; with nodes on the nodes a crash class names (`@NODE,...`; none: every node
-    // but the driver).
+    // at each point; with machines on the machines a crash class names (`@MACHINE,...`; none: every machine
+    // but main).
     let mut scope: Option<String> = None;
     let kind: Option<String> = if a.has("--crash-points") {
         if let Some(f) = cfg.faults.iter().find(|f| {
@@ -952,9 +956,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     .map(move |c| (c, at))
             })
             .collect();
-        if cfg.nodes.is_empty() && crash.iter().any(|(_, at)| at.is_some()) {
+        if cfg.machines.is_empty() && crash.iter().any(|(_, at)| at.is_some()) {
             return Err(error(
-                "--faults crash@NODE names nodes, and the run has none".into(),
+                "--faults crash@MACHINE names machines, and the run has none".into(),
             ));
         }
         if !crash.is_empty() && crash.iter().all(|(_, at)| at.is_some()) {
@@ -993,20 +997,20 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
             "--crash-points=N and [sweep] crash-pairs are at least 1".into(),
         ));
     }
-    // The nodes a branch crashes (its `@NODE,...`, else every node with faults): under
+    // The machines a branch crashes (its `@MACHINE,...`, else every machine with faults): under
     // [sweep] crash-pairs a first crash's child counts the others' points.
-    let scope_nodes: Vec<String> = match &scope {
+    let scope_machines: Vec<String> = match &scope {
         Some(s) => s.split(',').map(str::to_string).collect(),
         None => cfg
-            .nodes
+            .machines
             .iter()
             .filter(|n| !n.no_faults)
             .map(|n| n.name.clone())
             .collect(),
     };
-    if pairs.is_some() && scope_nodes.len() < 2 {
+    if pairs.is_some() && scope_machines.len() < 2 {
         return Err(error(
-            "[sweep] crash-pairs crashes two nodes: it needs a run with nodes and crashes on two or more".into(),
+            "[sweep] crash-pairs crashes two machines: it needs a run with machines and crashes on two or more".into(),
         ));
     }
     let cases: Option<Vec<Case>> = match a.last("--cases") {
@@ -1129,7 +1133,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 PATINA_OUTPUT.contains(&n.as_str())
                     || RUN_OUTPUT.contains(&n.as_str())
                     || n.starts_with("seed-")
-                    || n.strip_prefix("inc-")
+                    || n.strip_prefix("boot-")
                         .is_some_and(|k| k.parse::<u32>().is_ok())
             };
             let marked = names
@@ -1290,17 +1294,17 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     let at = |s: &str| format!("@{s}");
                     let crash = match point {
                         Some(p) if p.n2 > 0 => vec![
-                            format!("crash-at={}@{}", p.n, p.node),
-                            format!("crash-at={}@{}", p.n2, p.node2),
+                            format!("crash-at={}@{}", p.n, p.machine),
+                            format!("crash-at={}@{}", p.n2, p.machine2),
                         ],
-                        Some(p) if p.n > 0 && !p.node.is_empty() => {
-                            // Under [sweep] crash-pairs the other nodes count their points too.
-                            let others: Vec<&str> = scope_nodes
+                        Some(p) if p.n > 0 && !p.machine.is_empty() => {
+                            // Under [sweep] crash-pairs the other machines count their points too.
+                            let others: Vec<&str> = scope_machines
                                 .iter()
-                                .filter(|n| **n != p.node)
+                                .filter(|n| **n != p.machine)
                                 .map(String::as_str)
                                 .collect();
-                            let mut v = vec![format!("crash-at={}{}", p.n, at(&p.node))];
+                            let mut v = vec![format!("crash-at={}{}", p.n, at(&p.machine))];
                             if pairs.is_some() {
                                 v.push(format!("crash-permille=0@{}", others.join(",")));
                             }
@@ -1316,7 +1320,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                         c.arg("--fault").arg(f);
                     }
                 }
-                // The case's own settings, after the sweep's: a later --work or --stdin
+                // The case's own settings, after the sweep's: a later --disk or --stdin
                 // replaces the sweep's, --mount and --env add to them.
                 if let (Some(i), Some(cs)) = (case, &cases) {
                     for (f, v) in &cs[*i].flags {
@@ -1423,9 +1427,9 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
     if kind.is_some() && st.stopped.is_none() && !INTERRUPTED.load(SeqCst) {
         // The children: each base's crash points, points ascending, seeds (and cases)
         // round-robin.
-        // With nodes, each node's points of a seed are tried in turn at each ordinal.
+        // With machines, each machine's points of a seed are tried in turn at each ordinal.
         let mut most = 0;
-        let mut per_node: Vec<(String, u64)> = vec![];
+        let mut per_machine: Vec<(String, u64)> = vec![];
         for &seed in &seeds {
             for &case in &list {
                 let b = run_dir(seed, case, Some(&report::Point::default()));
@@ -1434,26 +1438,26 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 let pts = report::base_points(&r, &run);
                 for (n, k) in &pts {
                     most = most.max(*k);
-                    match per_node.iter_mut().find(|x| x.0 == *n) {
+                    match per_machine.iter_mut().find(|x| x.0 == *n) {
                         Some(x) => x.1 += k,
-                        None => per_node.push((n.clone(), *k)),
+                        None => per_machine.push((n.clone(), *k)),
                     }
                 }
                 st.bases.insert((seed, case), (pts, b));
             }
         }
-        let points: u64 = per_node.iter().map(|x| x.1).sum();
-        let by_node: Vec<String> = per_node
+        let points: u64 = per_machine.iter().map(|x| x.1).sum();
+        let by_machine: Vec<String> = per_machine
             .iter()
             .filter(|x| !x.0.is_empty())
             .map(|(n, k)| format!("{n} {k}"))
             .collect();
-        // Each base's children: its points, or with --crash-points=N a sample by node and kind of
+        // Each base's children: its points, or with --crash-points=N a sample by machine and kind of
         // operation (`branch::places`).
         let sample = |items: &[(report::Point, String)], key: u64| -> Vec<report::Point> {
             let mut o: Vec<usize> = match branch_max {
                 Some(m) => {
-                    // By node (a pair's two nodes), then the kind of operation at the point.
+                    // By machine (a pair's two machines), then the kind of operation at the point.
                     let mut o = crate::branch::sample_order(items, key, |x| {
                         let (g, k) = x.1.rsplit_once('/').unwrap_or(("", &x.1));
                         (g.to_string(), k.to_string())
@@ -1472,7 +1476,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 .unwrap_or_else(|_| crate::branch::describe(b, pts));
             let mut items = vec![];
             for (n, k) in pts {
-                let d = &d["nodes"][n.as_str()];
+                let d = &d["machines"][n.as_str()];
                 for p in 1..=*k {
                     let kind = d["kinds"][(p - 1) as usize].as_str().unwrap_or("");
                     items.push((report::Point::child(p, n), format!("{n}/{kind}")));
@@ -1489,10 +1493,10 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 if cases.is_some() { "base" } else { "seed" }
             ),
             report::count(points as usize, "crash point"),
-            if by_node.is_empty() {
+            if by_machine.is_empty() {
                 String::new()
             } else {
-                format!(" ({})", by_node.join(", "))
+                format!(" ({})", by_machine.join(", "))
             },
             if level.len() < points as usize {
                 format!(", a sample of {} (--crash-points=N)", level.len())
@@ -1500,7 +1504,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                 String::new()
             }
         ));
-        // Level 1, the first crashes; level 2 ([sweep] crash-pairs), a second node's crash at each
+        // Level 1, the first crashes; level 2 ([sweep] crash-pairs), a second machine's crash at each
         // of its next points after a first crash whose child ended ok.
         for depth in 1..=(1 + pairs.is_some() as u64) {
             if depth == 2 {
@@ -1523,7 +1527,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                             for x in l.as_array().into_iter().flatten() {
                                 if let Some(j) = x[0].as_u64() {
                                     let kind = x[1].as_str().unwrap_or("");
-                                    items.push((a.then(j, b), format!("{}/{b}/{kind}", a.node)));
+                                    items.push((a.then(j, b), format!("{}/{b}/{kind}", a.machine)));
                                 }
                             }
                         }
@@ -1543,7 +1547,7 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     }
                 ));
             }
-            // Points ascending, seeds (and cases) round-robin; with nodes, each node's points
+            // Points ascending, seeds (and cases) round-robin; with machines, each machine's points
             // of a seed in turn at each ordinal.
             level.sort_by(|x, y| (x.2.n, x.0, x.1, &x.2).cmp(&(y.2.n, y.0, y.1, &y.2)));
             let mut children = vec![];
@@ -1760,18 +1764,18 @@ struct State<'k> {
     run_bytes: u64,
     /// Some kept run's log was cut.
     cut: bool,
-    /// Under `--crash-points`, once the bases ran: each (seed, case)'s crash points (with nodes, each
-    /// node's; `report::base_points`) and base directory.
+    /// Under `--crash-points`, once the bases ran: each (seed, case)'s crash points (with machines, each
+    /// machine's; `report::base_points`) and base directory.
     bases: std::collections::BTreeMap<(u64, Option<usize>), Base>,
     /// A `--crash-points` sweep: each base writes where its points are (`branch::describe`) before
     /// its logs are pruned.
     branch: bool,
     /// `[sweep] crash-pairs = K`: each first crash's child that ended ok writes the next K points of
-    /// each other node after its crash (`branch::window`).
+    /// each other machine after its crash (`branch::window`).
     pairs: Option<usize>,
 }
 
-/// A `--crash-points` base: its crash points per node (`""`: the one machine) and its directory.
+/// A `--crash-points` base: its crash points per machine (`""`: the one machine) and its directory.
 type Base = (Vec<(String, u64)>, PathBuf);
 
 impl State<'_> {
@@ -1908,13 +1912,13 @@ impl State<'_> {
             point.as_ref().filter(|p| p.n > 0),
             self.bases.get(&(*seed, *case_index)),
         ) {
-            let n = pts.iter().find(|x| x.0 == p.node).map_or(0, |x| x.1);
+            let n = pts.iter().find(|x| x.0 == p.machine).map_or(0, |x| x.1);
             // A pair's second crash is at a point its first crash's child reached.
             let why = missed_point(&r, &p.first(), n).or_else(|| {
                 (p.n2 > 0)
-                    .then(|| missed_point(&r, &report::Point::child(p.n2, &p.node2), u64::MAX))
+                    .then(|| missed_point(&r, &report::Point::child(p.n2, &p.machine2), u64::MAX))
                     .flatten()
-                    .map(|w| format!("{w} of {}", p.node2))
+                    .map(|w| format!("{w} of {}", p.machine2))
             });
             // And at the place it had in that child: after the same records of its disk.
             let why = why.or_else(|| {
@@ -1927,16 +1931,16 @@ impl State<'_> {
                 let f = first(format!("seed-{seed}@{}", p.first().label()))
                     .filter(|_| p.n2 > 0)?;
                 let w = read_json(&f.join(crate::branch::FILE)).ok()?;
-                let want = w["after"][p.node2.as_str()]
+                let want = w["after"][p.machine2.as_str()]
                     .as_array()?
                     .iter()
                     .find(|x| x[0].as_u64() == Some(p.n2))?[2]
                     .as_u64()?;
-                let got = crate::branch::records_before_crash(dir, &p.node2)? as u64;
+                let got = crate::branch::records_before_crash(dir, &p.machine2)? as u64;
                 (got != want).then(|| {
                     format!(
                         "{} crashed after {got} records of its disk, where its point {} came after {want} in {}",
-                        p.node2,
+                        p.machine2,
                         p.n2,
                         f.display()
                     )
@@ -1962,7 +1966,7 @@ impl State<'_> {
                 let _ = write_json(&dir.join("result.json"), &r);
             }
         }
-        // Where a base's points are, and a first crash's next points of the other nodes, read
+        // Where a base's points are, and a first crash's next points of the other machines, read
         // from the logs before `account` prunes them.
         if let Some(p) = point.as_ref().filter(|_| self.branch) {
             let run = read_json(&dir.join("run.json")).unwrap_or_default();
@@ -1970,8 +1974,8 @@ impl State<'_> {
             let v = match self.pairs {
                 _ if p.n == 0 => Some(crate::branch::describe(dir, &pts)),
                 Some(k) if p.n2 == 0 && r["outcome"] == "ok" => {
-                    let others: Vec<_> = pts.into_iter().filter(|x| x.0 != p.node).collect();
-                    Some(crate::branch::window(dir, &p.node, &others, k))
+                    let others: Vec<_> = pts.into_iter().filter(|x| x.0 != p.machine).collect();
+                    Some(crate::branch::window(dir, &p.machine, &others, k))
                 }
                 _ => None,
             };
@@ -2084,7 +2088,7 @@ impl State<'_> {
 
 /// Why a `--crash-points` child that should have crashed at `point` did not (`None`: it did, or it
 /// is not a finished run). `base_points` is the crash points its base counted (of the point's
-/// node, whose first boot's first down is the crash).
+/// machine, whose first boot's first down is the crash).
 fn missed_point(r: &serde_json::Value, point: &report::Point, base_points: u64) -> Option<String> {
     let injected = r["faults"]["counts"]["crash"]["injected"].as_u64()?;
     let p = point.n;
@@ -2092,13 +2096,13 @@ fn missed_point(r: &serde_json::Value, point: &report::Point, base_points: u64) 
     if p > base_points || matches!(r["outcome"].as_str(), Some("unsupported" | "internal")) {
         return None;
     }
-    // With nodes, a crash of that node at a point (another node's may come first).
-    let (injected, at) = if point.node.is_empty() {
+    // With machines, a crash of that machine at a point (another machine's may come first).
+    let (injected, at) = if point.machine.is_empty() {
         (injected, r["crashes"][0]["point"].as_u64())
     } else {
-        let at = r["nodes"]["list"]
+        let at = r["machines"]["list"]
             .as_array()
-            .and_then(|l| l.iter().find(|n| n["name"] == point.node.as_str()))
+            .and_then(|l| l.iter().find(|n| n["name"] == point.machine.as_str()))
             .and_then(|n| n["downs"][0]["point"].as_u64());
         (at.is_some() as u64, at)
     };
@@ -2137,8 +2141,8 @@ mod tests {
             missed_point(&serde_json::json!({"outcome": "internal"}), &at(5), 9),
             None
         );
-        // A node's: its first boot's first down, at the point or not.
-        let node = |p: Option<u64>| {
+        // A machine's: its first boot's first down, at the point or not.
+        let machine = |p: Option<u64>| {
             let downs: Vec<serde_json::Value> = p
                 .map(|p| serde_json::json!({"point": p}))
                 .into_iter()
@@ -2146,15 +2150,15 @@ mod tests {
             serde_json::json!({
                 "outcome": "ok",
                 "faults": {"counts": {"crash": {"eligible": 9, "injected": 1}}},
-                "nodes": {"list": [{"name": "driver"}, {"name": "b", "downs": downs}]},
+                "machines": {"list": [{"name": "main"}, {"name": "b", "downs": downs}]},
             })
         };
         let b = |n| report::Point::child(n, "b");
-        assert_eq!(missed_point(&node(Some(5)), &b(5), 9), None);
-        assert!(missed_point(&node(Some(4)), &b(5), 9).is_some());
-        assert!(missed_point(&node(None), &b(5), 9).is_some());
+        assert_eq!(missed_point(&machine(Some(5)), &b(5), 9), None);
+        assert!(missed_point(&machine(Some(4)), &b(5), 9).is_some());
+        assert!(missed_point(&machine(None), &b(5), 9).is_some());
         // A child that stopped on its own before the point is named by its outcome.
-        let mut stopped = node(None);
+        let mut stopped = machine(None);
         stopped["outcome"] = "unsupported".into();
         assert_eq!(missed_point(&stopped, &b(5), 9), None);
     }
@@ -2186,26 +2190,26 @@ mod tests {
 
     #[test]
     fn a_case_line_gives_its_own_settings() {
-        let l = case_line("--work d:/srv --env A=1 --env B=2 --name x1 -- ./t 'a b'").unwrap();
+        let l = case_line("--disk d:/srv --env A=1 --env B=2 --name x1 -- ./t 'a b'").unwrap();
         assert_eq!(
             l.flags,
             vec![
+                ("--disk", "d:/srv".to_string()),
                 ("--env", "A=1".to_string()),
-                ("--env", "B=2".to_string()),
-                ("--work", "d:/srv".to_string())
+                ("--env", "B=2".to_string())
             ]
         );
         assert_eq!((l.name.as_deref(), l.rest), (Some("x1"), "./t 'a b'"));
         // No settings: the line is the command.
-        let l = case_line("./t --work d").unwrap();
-        assert!(l.flags.is_empty() && l.rest == "./t --work d");
+        let l = case_line("./t --disk d").unwrap();
+        assert!(l.flags.is_empty() && l.rest == "./t --disk d");
         // The sweep's own settings, unknown ones, and a line without its command are refused.
         for bad in [
             "--seed 3 -- ./t",
             "--fault fs-error-permille=3 -- ./t",
             "--bogus -- ./t",
-            "--work d ./t",
-            "--work d --",
+            "--disk d ./t",
+            "--disk d --",
         ] {
             assert!(case_line(bad).is_err(), "{bad}");
         }

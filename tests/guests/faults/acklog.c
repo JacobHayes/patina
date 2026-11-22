@@ -95,8 +95,8 @@ int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     mode = argc > 1 ? argv[1] : "correct";
     int total = argc > 2 ? atoi(argv[2]) : 30;
-    const char *inc = getenv("PATINA_INCARNATION");
-    printf("ack-log %s incarnation %s\n", mode, inc ? inc : "-");
+    const char *boot = getenv("PATINA_BOOT");
+    printf("ack-log %s boot %s\n", mode, boot ? boot : "-");
     dirfd_ = open(".", O_RDONLY | O_DIRECTORY);
 
     int next = 0, nacks = 0;

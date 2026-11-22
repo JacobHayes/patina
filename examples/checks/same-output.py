@@ -13,10 +13,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def last(run):
-    k = 0
-    while os.path.isdir(f"{run}/inc-{k + 1}"):
+    k = 1
+    while os.path.isdir(f"{run}/boot-{k + 1}"):
         k += 1
-    return f"{run}/inc-{k}"
+    return f"{run}/boot-{k}"
 
 
 def check(ref, run):

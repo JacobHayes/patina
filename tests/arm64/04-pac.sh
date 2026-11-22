@@ -16,5 +16,5 @@ for via in direct exec; do
         field "$RUNS/$via$k/result.json" digest
     done | sort -u >"$RUNS/digests-$via"
     [ "$(wc -l <"$RUNS/digests-$via")" = 1 ] || die "$via: 5 repeats, digests: $(tr '\n' ' ' <"$RUNS/digests-$via")"
-    echo "$via: 5 repeats: $(cat "$RUNS/${via}1/inc-0/stdout"); digest $(cat "$RUNS/digests-$via")"
+    echo "$via: 5 repeats: $(cat "$RUNS/${via}1/boot-1/stdout"); digest $(cat "$RUNS/digests-$via")"
 done

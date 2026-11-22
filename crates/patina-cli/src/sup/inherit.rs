@@ -138,14 +138,14 @@ pub unsafe fn reset_signals() {
 
 /// Close every descriptor but 0-2 and the hidden ones the supervisor keeps (`FD_CTL..FD_PATINA`,
 /// FD_PATINA itself already closed, the plan broker's end `FD_PLAN`, which every guest runtime
-/// uses, and the shared memory carried across incarnations, `FD_SHM`):
+/// uses, and the shared memory carried across boots, `FD_SHM`):
 /// the sandbox's own descriptors (`sandbox::FD_DATA0..=FD_SPEC`) and the stdio ones, already
-/// moved to 0-2, go. `FD_NODES`, the keeper's channel, stays in a run with nodes.
-pub unsafe fn close_inherited(nodes: bool) {
+/// moved to 0-2, go. `FD_MACHINES`, the keeper's channel, stays in a run with machines.
+pub unsafe fn close_inherited(machines: bool) {
     const _: () = assert!(FD_PLAN == FD_PATINA + 1);
-    const _: () = assert!(FD_SHM > FD_PLAN + 1 && FD_NODES == FD_SHM + 1);
+    const _: () = assert!(FD_SHM > FD_PLAN + 1 && FD_MACHINES == FD_SHM + 1);
     // The shadow stores are made after this, above everything it keeps.
-    const _: () = assert!(FD_SHADOWS > FD_NODES);
+    const _: () = assert!(FD_SHADOWS > FD_MACHINES);
     libc::syscall(libc::SYS_close_range, 3u32, (FD_CTL - 1) as u32, 0u32);
     libc::syscall(
         libc::SYS_close_range,
@@ -159,7 +159,11 @@ pub unsafe fn close_inherited(nodes: bool) {
         (FD_SHM - 1) as u32,
         0u32,
     );
-    let from = if nodes { FD_NODES + 1 } else { FD_SHM + 1 };
+    let from = if machines {
+        FD_MACHINES + 1
+    } else {
+        FD_SHM + 1
+    };
     libc::syscall(libc::SYS_close_range, from as u32, u32::MAX, 0u32);
 }
 

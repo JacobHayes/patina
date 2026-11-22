@@ -3,7 +3,7 @@
 . "$(dirname "$0")/lib.inc"
 out=$RUNS/05-clock/hello-dyn
 patina_run "$out" 1 hello-dyn
-"$PATINA" log dump "$out/inc-0/boundary.log" >"$out/dump.txt"
+"$PATINA" log dump "$out/boot-1/boundary.log" >"$out/dump.txt"
 n=$(awk '$2=="trap" && ($5=="clock_gettime" || $5=="gettimeofday" || $5=="time") {n++} END {print n+0}' "$out/dump.txt")
 [ "$n" -ge 200 ] || die "only $n clock records"
 bad=$(awk '$2=="trap" && $5 ~ /^(clock_gettime|gettimeofday|time|clock_getres|getrandom)$/ && $6=="[Pass]"' "$out/dump.txt" | wc -l)

@@ -28,8 +28,8 @@
 //! `DEC_WIRE_FAIL` [conn, errno], `DEC_WIRE_CLOSE` [conn], `DEC_WIRE_PROBE` [conn, side,
 //! unanswered] (keepalive, `Sup::ka_fire`). Direction 0 is client to server.
 //!
-//! Nodes (`proto::node`): every node has its own port space and address; a connection joins a
-//! client node and a server node (the same one over loopback), and each direction is a link.
+//! Machines (`proto::machine`): every machine has its own port space and address; a connection joins a
+//! client machine and a server machine (the same one over loopback), and each direction is a link.
 //! A cut link (`link::Sup::link_cut`, a script's or the seed's) holds what is stamped on it:
 //! the item keeps its delay draw and no time (`HELD`) until a heal stamps it, at the heal's
 //! time plus that draw; a direction held for Linux's give-up time (or its sender's
@@ -85,7 +85,7 @@ const RST_PEER_GONE: u64 = 3;
 const RST_LISTENER_GONE: u64 = 4;
 /// A direction held by a cut for its give-up time (`give_up_ns`): the sender gives up.
 const RST_GIVE_UP: u64 = 5;
-/// A segment reached an end whose machine crashed since: the node answers it with a RST.
+/// A segment reached an end whose machine crashed since: the machine answers it with a RST.
 const RST_UNKNOWN: u64 = 6;
 /// A side's keepalive probes went unanswered for its budget: it gives up (`ETIMEDOUT`) and
 /// sends a RST its peer gets if it can reach it.
@@ -153,7 +153,7 @@ struct End {
     eof: bool,
     /// The guest closed every reference.
     gone: bool,
-    /// Its node's machine crashed (`wire_machine_down`): what reaches it is answered with a RST.
+    /// Its machine crashed (`wire_machine_down`): what reaches it is answered with a RST.
     dead: bool,
 }
 
@@ -176,9 +176,9 @@ struct Conn {
     /// The server side must report a reset when it is accepted.
     server_reset: bool,
     dirs: [Dir; 2],
-    /// The client's node and the server's (the same over loopback).
-    cnode: usize,
-    snode: usize,
+    /// The client's machine and the server's (the same over loopback).
+    cmachine: usize,
+    smachine: usize,
     /// When the connect was made, and the SYN retries a cut has cost it so far.
     syn_at: u64,
     syn_n: usize,
@@ -213,7 +213,7 @@ struct Ka {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Reach {
     Answer,
-    /// The peer's machine came back without the connection: its node answers with a RST.
+    /// The peer's machine came back without the connection: its machine answers with a RST.
     Rst,
     /// Lost: a cut either way, the peer's machine down, a blackout.
     Nothing,
@@ -234,8 +234,8 @@ struct SockRec {
     port: u16,
     kind: u8,
     listening: bool,
-    /// The node of the process that made it.
-    node: usize,
+    /// The machine of the process that made it.
+    machine: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,9 +250,9 @@ pub struct Wire {
     /// Client hidden ends accepted on `@patina-wire`, by socket index, not yet claimed by a connect.
     pending: BTreeMap<usize, i32>,
     socks: BTreeMap<usize, SockRec>,
-    /// Ports in use, by (node, port): every node has its own port space.
+    /// Ports in use, by (machine, port): every machine has its own port space.
     ports: BTreeMap<(usize, u16), PortUse>,
-    /// The next ephemeral port of each node.
+    /// The next ephemeral port of each machine.
     next_port: BTreeMap<usize, u16>,
     conns: BTreeMap<u32, Conn>,
     next_conn: u32,
@@ -308,14 +308,14 @@ fn close(fd: i32) {
     }
 }
 
-/// Is node `node`'s listener name for `port` (`@patina-l-<n>`) held by a live socket? (Bind a
+/// Is machine `machine`'s listener name for `port` (`@patina-l-<n>`) held by a live socket? (Bind a
 /// probe to it.)
-fn name_alive(node: usize, port: u16) -> bool {
+fn name_alive(machine: usize, port: u16) -> bool {
     let p = unix_socket();
     if p < 0 {
         return true;
     }
-    let r = sock_bind(p, LISTEN_PREFIX, Some(listen_n(node, port)));
+    let r = sock_bind(p, LISTEN_PREFIX, Some(listen_n(machine, port)));
     let e = errno();
     close(p);
     r != 0 && e == libc::EADDRINUSE
@@ -367,16 +367,16 @@ impl Wire {
         Ok(())
     }
 
-    fn port_free(&mut self, node: usize, p: u16) -> bool {
-        match self.ports.get(&(node, p)) {
+    fn port_free(&mut self, machine: usize, p: u16) -> bool {
+        match self.ports.get(&(machine, p)) {
             None => true,
             Some(PortUse::Client(_)) => false,
             Some(PortUse::Bound(i)) => {
-                if name_alive(node, p) {
+                if name_alive(machine, p) {
                     return false;
                 }
                 let i = *i;
-                self.ports.remove(&(node, p));
+                self.ports.remove(&(machine, p));
                 if let Some(s) = self.socks.get_mut(&i) {
                     if s.port == p {
                         s.listening = false;
@@ -387,13 +387,13 @@ impl Wire {
         }
     }
 
-    fn alloc_port(&mut self, node: usize, u: PortUse) -> Option<u16> {
+    fn alloc_port(&mut self, machine: usize, u: PortUse) -> Option<u16> {
         let span = (PORT_LAST - PORT_FIRST) as u32 + 1;
         for _ in 0..span {
-            let next = self.next_port.entry(node).or_insert(PORT_FIRST);
+            let next = self.next_port.entry(machine).or_insert(PORT_FIRST);
             let p = *next;
             *next = if p >= PORT_LAST { PORT_FIRST } else { p + 1 };
-            if let std::collections::btree_map::Entry::Vacant(e) = self.ports.entry((node, p)) {
+            if let std::collections::btree_map::Entry::Vacant(e) = self.ports.entry((machine, p)) {
                 e.insert(u);
                 return Some(p);
             }
@@ -401,9 +401,9 @@ impl Wire {
         None
     }
 
-    /// The live listener of node `node` for a connection to `port` at address kind `kind`.
-    fn listener(&mut self, node: usize, port: u16, kind: u8, ctl: &Ctl) -> Option<usize> {
-        let Some(PortUse::Bound(i)) = self.ports.get(&(node, port)).copied() else {
+    /// The live listener of machine `machine` for a connection to `port` at address kind `kind`.
+    fn listener(&mut self, machine: usize, port: u16, kind: u8, ctl: &Ctl) -> Option<usize> {
+        let Some(PortUse::Bound(i)) = self.ports.get(&(machine, port)).copied() else {
             return None;
         };
         let s = *self.socks.get(&i)?;
@@ -416,7 +416,7 @@ impl Wire {
             (AF_INET6, ADDR_ANY) => !v6only || kind == ADDR_LOOP6,
             (_, k) => k == kind,
         };
-        if !ok || !name_alive(node, port) {
+        if !ok || !name_alive(machine, port) {
             return None;
         }
         Some(i)
@@ -434,9 +434,9 @@ impl Sup {
     fn wire_inject(&mut self, kind: u64, nr: u64, value: u64, conn: u32) {
         let seq = self.next_seq();
         let port = self.wire.conns.get(&conn).map_or(0, |c| c.sport as u64);
-        // With nodes, the link: the client's node to the server's.
+        // With machines, the link: the client's machine to the server's.
         let link = match self.wire.conns.get(&conn) {
-            Some(c) if self.node_count() > 0 => inj_link(c.cnode, c.snode),
+            Some(c) if self.machine_count() > 0 => inj_link(c.cmachine, c.smachine),
             _ => 0,
         };
         let rec = proto::Rec {
@@ -550,12 +550,12 @@ impl Sup {
         }
     }
 
-    /// The link direction `dir` of connection `id` travels: (from node, to node).
+    /// The link direction `dir` of connection `id` travels: (from machine, to machine).
     fn link(c: &Conn, dir: usize) -> (usize, usize) {
         if dir == 0 {
-            (c.cnode, c.snode)
+            (c.cmachine, c.smachine)
         } else {
-            (c.snode, c.cnode)
+            (c.smachine, c.cmachine)
         }
     }
 
@@ -636,12 +636,12 @@ impl Sup {
         let r = match op {
             Op::WireSocket => {
                 let i = a[0] as usize;
-                let node = self.node_of(idx);
+                let machine = self.machine_of(idx);
                 self.wire.socks.insert(
                     i,
                     SockRec {
                         family: a[1] as u16,
-                        node,
+                        machine,
                         ..SockRec::default()
                     },
                 );
@@ -708,15 +708,15 @@ impl Sup {
             return s.port as i64;
         }
         let p = if port == 0 {
-            match self.wire.alloc_port(s.node, PortUse::Bound(i)) {
+            match self.wire.alloc_port(s.machine, PortUse::Bound(i)) {
                 Some(p) => p,
                 None => return -(libc::EADDRINUSE as i64),
             }
         } else {
-            if !self.wire.port_free(s.node, port) {
+            if !self.wire.port_free(s.machine, port) {
                 return -(libc::EADDRINUSE as i64);
             }
-            self.wire.ports.insert((s.node, port), PortUse::Bound(i));
+            self.wire.ports.insert((s.machine, port), PortUse::Bound(i));
             port
         };
         s.port = p;
@@ -767,9 +767,9 @@ impl Sup {
 
     fn wire_connect(&mut self, idx: usize, a: [u64; 6]) -> i64 {
         let (i, port, kind, pad) = (a[0] as usize, a[1] as u16, a[2] as u8, a[3]);
-        // Loopback stays on the caller's node; a node address leads to that node.
-        let cnode = self.node_of(idx);
-        let snode = addr_node(kind).unwrap_or(cnode);
+        // Loopback stays on the caller's machine; a machine address leads to that machine.
+        let cmachine = self.machine_of(idx);
+        let smachine = addr_machine(kind).unwrap_or(cmachine);
         self.wire_accept_pending();
         let Some(cfd) = self.wire.pending.remove(&i) else {
             self.finish(Verdict::new(
@@ -783,7 +783,7 @@ impl Sup {
         let cport = if bound != 0 {
             bound
         } else {
-            match self.wire.alloc_port(cnode, PortUse::Client(id)) {
+            match self.wire.alloc_port(cmachine, PortUse::Client(id)) {
                 Some(p) => p,
                 None => {
                     close(cfd);
@@ -792,8 +792,8 @@ impl Sup {
             }
         };
         let cfg = self.net_cfg();
-        let listener = self.wire.listener(snode, port, kind, self.ctl);
-        let faulted = self.link_faulted(cnode, snode);
+        let listener = self.wire.listener(smachine, port, kind, self.ctl);
+        let faulted = self.link_faulted(cmachine, smachine);
         let fate = if faulted && self.net_fault(cfg.refuse_permille, id, NSUB_REFUSE, 0) {
             self.wire_inject(INJ_NET_REFUSE, nr::CONNECT, ECONNREFUSED as u64, id);
             Fate::Refuse { injected: true }
@@ -807,15 +807,22 @@ impl Sup {
         };
         let now = self.now();
         // Across a cut link (either way) the handshake cannot complete: SYN retries.
-        let cut = self.link_cut(cnode, snode) || self.link_cut(snode, cnode);
+        let cut = self.link_cut(cmachine, smachine) || self.link_cut(smachine, cmachine);
         if cut {
-            self.cut_acted(cnode, snode);
-            self.cut_acted(snode, cnode);
+            self.cut_acted(cmachine, smachine);
+            self.cut_acted(smachine, cmachine);
         }
         let mut t = match fate {
             Fate::Timeout => now + self.syn_retry_ns(i, self.syn_retries(i)),
             _ if cut => now + self.syn_retry_ns(i, 0),
-            _ => now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.link_delay_range(cnode, snode)),
+            _ => {
+                now + self.net_delay(
+                    id,
+                    NSUB_HANDSHAKE,
+                    0,
+                    self.link_delay_range(cmachine, smachine),
+                )
+            }
         };
         if fate != Fate::Timeout && !cut && faulted {
             if let Some(to) = self.blackout_hold(t, port, cport) {
@@ -856,8 +863,8 @@ impl Sup {
             retry: false,
             server_reset: false,
             dirs: [Dir::default(), Dir::default()],
-            cnode,
-            snode,
+            cmachine,
+            smachine,
             syn_at: now,
             syn_n: (cut && fate != Fate::Timeout) as usize,
             give_up_ev: None,
@@ -876,7 +883,7 @@ impl Sup {
         s.conn = id;
         WireTab::inc(&tab(self.ctl).counters.connections, 1);
         if faulted {
-            self.link_elig(proto::node::ELIG_CONNECTIONS);
+            self.link_elig(proto::machine::ELIG_CONNECTIONS);
         }
         0
     }
@@ -887,8 +894,8 @@ impl Sup {
             return -(libc::ECONNABORTED as i64);
         };
         c.server.idx = Some(i);
-        let (sport, cport, kind, reset, snode) =
-            (c.sport, c.cport, c.kind, c.server_reset, c.snode);
+        let (sport, cport, kind, reset, smachine) =
+            (c.sport, c.cport, c.kind, c.server_reset, c.smachine);
         let (laddr, raddr) = c.addrs(true);
         c.server_reset = false;
         self.wire.by_idx.insert(i, (id, true));
@@ -900,7 +907,7 @@ impl Sup {
                 port: sport,
                 kind,
                 listening: false,
-                node: snode,
+                machine: smachine,
             },
         );
         let s = &mut tab(self.ctl).socks[i];
@@ -1075,8 +1082,8 @@ impl Sup {
             fix_bufs(sfd);
             self.wire.conns.get_mut(&id).unwrap().server.fd = sfd;
         }
-        let snode = self.wire.conns[&id].snode;
-        let r = sock_connect(sfd, LISTEN_PREFIX, listen_n(snode, sport));
+        let smachine = self.wire.conns[&id].smachine;
+        let r = sock_connect(sfd, LISTEN_PREFIX, listen_n(smachine, sport));
         let e = errno();
         if r != 0 && e == libc::EAGAIN {
             self.wire.conns.get_mut(&id).unwrap().retry = true;
@@ -1210,7 +1217,7 @@ impl Sup {
                 let (from, to) = Self::link(&self.wire.conns[&id], dir);
                 let faulted = self.link_faulted(from, to);
                 if faulted {
-                    self.link_elig(proto::node::ELIG_SENDS);
+                    self.link_elig(proto::machine::ELIG_SENDS);
                 }
                 if faulted && self.reset_at(cfg.reset_permille, id) == Some(k) {
                     self.wire_inject(INJ_NET_RESET, nr::SENDTO, r as u64, id);
@@ -1311,7 +1318,7 @@ impl Sup {
                 c.client.dead
             };
             if dead && !matches!(front, Item::Rst { .. }) {
-                // Its node is back without the connection: the segment gets a RST, and the
+                // Its machine is back without the connection: the segment gets a RST, and the
                 // rest in flight to it goes.
                 let dropped = d.bytes;
                 d.q.clear();
@@ -1372,7 +1379,7 @@ impl Sup {
                         WireTab::inc(&cnt.bytes, r as u64);
                         WireTab::inc(&cnt.chunks, 1);
                         if faulted {
-                            self.link_elig(proto::node::ELIG_CHUNKS);
+                            self.link_elig(proto::machine::ELIG_CHUNKS);
                         }
                         self.bump_gen();
                         if split {
@@ -1465,7 +1472,7 @@ impl Sup {
                     }
                     WireTab::inc(&tab(self.ctl).counters.fins, 1);
                     if faulted {
-                        self.link_elig(proto::node::ELIG_FINS);
+                        self.link_elig(proto::machine::ELIG_FINS);
                     }
                     self.bump_gen();
                     self.wire_decide(DEC_WIRE_FIN, [id as u64, dir as u64, 1, 0, 0, 0]);
@@ -1577,8 +1584,8 @@ impl Sup {
         {
             self.sched.cancel(ev);
         }
-        if self.wire.ports.get(&(c.cnode, c.cport)) == Some(&PortUse::Client(id)) {
-            self.wire.ports.remove(&(c.cnode, c.cport));
+        if self.wire.ports.get(&(c.cmachine, c.cport)) == Some(&PortUse::Client(id)) {
+            self.wire.ports.remove(&(c.cmachine, c.cport));
         }
         for i in [c.client.idx, c.server.idx].into_iter().flatten() {
             if self.wire.by_idx.get(&i).is_some_and(|&(k, _)| k == id) {
@@ -1606,12 +1613,12 @@ impl Sup {
 
 impl Conn {
     /// The (local, peer) address kinds one side sees: both the address connected to, as the
-    /// one host saw them, unless the connection joins two nodes.
+    /// one host saw them, unless the connection joins two machines.
     fn addrs(&self, server: bool) -> (u8, u8) {
-        if self.cnode == self.snode {
+        if self.cmachine == self.smachine {
             return (self.kind, self.kind);
         }
-        let (c, s) = (node_addr(self.cnode), self.kind);
+        let (c, s) = (machine_addr(self.cmachine), self.kind);
         if server {
             (s, c)
         } else {
@@ -1621,10 +1628,10 @@ impl Conn {
 }
 
 impl Sup {
-    /// SYN retries of socket `i`: its `TCP_SYNCNT` in a run with nodes (without nodes a socket
+    /// SYN retries of socket `i`: its `TCP_SYNCNT` in a run with machines (without machines a socket
     /// option changes nothing), else Linux's default.
     fn syn_retries(&self, i: usize) -> u64 {
-        if self.node_count() == 0 {
+        if self.machine_count() == 0 {
             return SYN_RETRIES_DEFAULT;
         }
         match tab(self.ctl)
@@ -1643,9 +1650,9 @@ impl Sup {
     }
 
     /// How long direction `dir` of `id` may hold data before its sender gives up: the
-    /// sender's `TCP_USER_TIMEOUT` when set in a run with nodes, else Linux's default.
+    /// sender's `TCP_USER_TIMEOUT` when set in a run with machines, else Linux's default.
     fn give_up_ns(&self, id: u32, dir: usize) -> u64 {
-        if self.node_count() == 0 {
+        if self.machine_count() == 0 {
             return GIVE_UP_DEFAULT_NS;
         }
         let c = &self.wire.conns[&id];
@@ -1661,10 +1668,11 @@ impl Sup {
         }
     }
 
-    /// One more chance a link fault had on a link it acts on (`proto::node::ELIG_*`).
+    /// One more chance a link fault had on a link it acts on (`proto::machine::ELIG_*`).
     fn link_elig(&self, k: usize) {
-        if self.node_count() > 0 {
-            unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) }.elig[k] += 1;
+        if self.machine_count() > 0 {
+            unsafe { proto::machine::MachineTab::at(self.ctl as *const Ctl as *mut u8) }.elig[k] +=
+                1;
         } else if self.ctl.phases.phase.load(Relaxed) != 0 {
             self.ctl.phases.elig[k].fetch_add(1, Relaxed);
         }
@@ -1679,7 +1687,7 @@ impl Sup {
             return;
         }
         c.dirs[dir].held_since = Some(now);
-        let tb = unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) };
+        let tb = unsafe { proto::machine::MachineTab::at(self.ctl as *const Ctl as *mut u8) };
         tb.held += 1;
         let t = now + limit;
         if c.give_up_ev.is_some_and(|ev| ev.0 <= t) {
@@ -1745,11 +1753,11 @@ impl Sup {
     fn syn_retry(&mut self, id: u32) -> bool {
         let now = self.now();
         let c = &self.wire.conns[&id];
-        let (cnode, snode, at, n, port, kind) =
-            (c.cnode, c.snode, c.syn_at, c.syn_n, c.sport, c.kind);
-        let cut = self.link_cut(cnode, snode) || self.link_cut(snode, cnode);
+        let (cmachine, smachine, at, n, port, kind) =
+            (c.cmachine, c.smachine, c.syn_at, c.syn_n, c.sport, c.kind);
+        let cut = self.link_cut(cmachine, smachine) || self.link_cut(smachine, cmachine);
         let t = if !cut {
-            let l = self.wire.listener(snode, port, kind, self.ctl);
+            let l = self.wire.listener(smachine, port, kind, self.ctl);
             let c = self.wire.conns.get_mut(&id).unwrap();
             if c.fate == (Fate::Refuse { injected: false }) || c.fate == Fate::Establish {
                 c.listener = l;
@@ -1759,7 +1767,12 @@ impl Sup {
                     Fate::Refuse { injected: false }
                 };
             }
-            now + self.net_delay(id, NSUB_HANDSHAKE, 0, self.link_delay_range(cnode, snode))
+            now + self.net_delay(
+                id,
+                NSUB_HANDSHAKE,
+                0,
+                self.link_delay_range(cmachine, smachine),
+            )
         } else {
             let i = self.wire.conns[&id].client.idx.unwrap_or(usize::MAX);
             if n as u64 >= self.syn_retries(i) {
@@ -1784,17 +1797,17 @@ impl Sup {
         true
     }
 
-    /// Node `k`'s machine crashed (before its processes are killed): the wire forgets its
-    /// ends without a FIN or RST to their peers. A connection within the node goes; a connect
+    /// Machine `k`'s machine crashed (before its processes are killed): the wire forgets its
+    /// ends without a FIN or RST to their peers. A connection within the machine goes; a connect
     /// from it goes; a connect to it retries its SYN (the link is down, `link_cut`). An
-    /// established connection keeps its peer's end: what the peer has in flight to the node,
-    /// or sends later, is held (its give-up clock runs) until the node is back, where it gets a
-    /// RST; what the node had stamped before the crash still arrives, what it held goes.
+    /// established connection keeps its peer's end: what the peer has in flight to the machine,
+    /// or sends later, is held (its give-up clock runs) until the machine is back, where it gets a
+    /// RST; what the machine had stamped before the crash still arrives, what it held goes.
     pub(super) fn wire_machine_down(&mut self, k: usize) {
         let ids: Vec<u32> = self.wire.conns.keys().copied().collect();
         for id in ids {
             let c = &self.wire.conns[&id];
-            let (on_c, on_s) = (c.cnode == k, c.snode == k);
+            let (on_c, on_s) = (c.cmachine == k, c.smachine == k);
             if !on_c && !on_s {
                 continue;
             }
@@ -1803,7 +1816,7 @@ impl Sup {
                 continue;
             }
             if !c.established {
-                // A connect to the node: its SYN goes unanswered from here. One already
+                // A connect to the machine: its SYN goes unanswered from here. One already
                 // retrying keeps its schedule (each retry checks the link); else its first
                 // retry comes at the first retry time, as for a connect across a cut.
                 if c.fate != Fate::Timeout && c.syn_n == 0 {
@@ -1830,7 +1843,7 @@ impl Sup {
             let own = server as usize; // the direction the dead end sends in
             let into = own ^ 1;
             let c = self.wire.conns.get_mut(&id).unwrap();
-            let (cnode, cport) = (c.cnode, c.cport);
+            let (cmachine, cport) = (c.cmachine, c.cport);
             let e = if server { &mut c.server } else { &mut c.client };
             let (fd, idx) = (e.fd, e.idx.take());
             if server {
@@ -1865,8 +1878,8 @@ impl Sup {
                     self.wire.by_idx.remove(&i);
                 }
             }
-            if !server && self.wire.ports.get(&(cnode, cport)) == Some(&PortUse::Client(id)) {
-                self.wire.ports.remove(&(cnode, cport));
+            if !server && self.wire.ports.get(&(cmachine, cport)) == Some(&PortUse::Client(id)) {
+                self.wire.ports.remove(&(cmachine, cport));
             }
             // In flight to it: held from now, as on a cut link.
             let c = self.wire.conns.get_mut(&id).unwrap();
@@ -1897,23 +1910,23 @@ impl Sup {
             {
                 self.sched.cancel(ev);
             }
-            // Its peer's probes now go unanswered (or, once the node is back, get a RST).
+            // Its peer's probes now go unanswered (or, once the machine is back, get a RST).
             self.ka_arm(id, !server);
             self.maybe_free(id);
         }
         self.bump_gen();
     }
 
-    /// Node `k` is paused (its links are cut, `Links::paused`): what is on its way to it and not
+    /// Machine `k` is paused (its links are cut, `Links::paused`): what is on its way to it and not
     /// yet delivered is held from now with the rest of its delay, so the sender's give-up clock
     /// runs; a handshake with it, either way, waits for its SYN retries (each looks at the
-    /// link). What the node sent before the pause still arrives.
+    /// link). What the machine sent before the pause still arrives.
     pub(super) fn wire_pause(&mut self, k: usize) {
         let now = self.now();
         let ids: Vec<u32> = self.wire.conns.keys().copied().collect();
         for id in ids {
             let c = &self.wire.conns[&id];
-            if c.cnode == c.snode || (c.cnode != k && c.snode != k) {
+            if c.cmachine == c.smachine || (c.cmachine != k && c.smachine != k) {
                 continue;
             }
             if !c.established {
@@ -1937,7 +1950,7 @@ impl Sup {
                 continue;
             }
             // Direction 0 goes to the server.
-            let into = (c.snode != k) as usize;
+            let into = (c.smachine != k) as usize;
             let c = self.wire.conns.get_mut(&id).unwrap();
             let d = &mut c.dirs[into];
             let mut any = false;
@@ -2067,19 +2080,19 @@ impl Sup {
         })
     }
 
-    /// The (this side's, peer's) nodes.
-    fn ka_nodes(c: &Conn, server: bool) -> (usize, usize) {
+    /// The (this side's, peer's) machines.
+    fn ka_machines(c: &Conn, server: bool) -> (usize, usize) {
         if server {
-            (c.snode, c.cnode)
+            (c.smachine, c.cmachine)
         } else {
-            (c.cnode, c.snode)
+            (c.cmachine, c.smachine)
         }
     }
 
     /// The `net-blackout` window `[from, to)` on this connection, if one acts on it.
     fn ka_blackout(&self, c: &Conn, server: bool) -> Option<(u64, u64)> {
         let b = self.net_cfg();
-        let (me, peer) = Self::ka_nodes(c, server);
+        let (me, peer) = Self::ka_machines(c, server);
         let port_ok = b.blackout_port == 0
             || b.blackout_port == c.sport as u64
             || b.blackout_port == c.cport as u64;
@@ -2092,7 +2105,7 @@ impl Sup {
     /// What a probe from side `server` at `t` gets back.
     fn ka_reach(&self, id: u32, server: bool, t: u64) -> Reach {
         let c = &self.wire.conns[&id];
-        let (me, peer) = Self::ka_nodes(c, server);
+        let (me, peer) = Self::ka_machines(c, server);
         if self.link_cut(me, peer) || self.link_cut(peer, me) {
             return Reach::Nothing;
         }
@@ -2254,7 +2267,7 @@ impl Sup {
             Reach::Answer => {
                 // There and back, each way with its link's delay.
                 let c = &self.wire.conns[&id];
-                let (me, peer) = Self::ka_nodes(c, server);
+                let (me, peer) = Self::ka_machines(c, server);
                 let n = c.ka[s].answered << 1 | s as u64;
                 let rtt = self.net_delay(id, NSUB_KEEPALIVE, n, self.link_delay_range(me, peer))
                     + self.net_delay(
@@ -2291,7 +2304,7 @@ impl Sup {
             }
             Reach::Nothing => {
                 let c = &self.wire.conns[&id];
-                let (me, peer) = Self::ka_nodes(c, server);
+                let (me, peer) = Self::ka_machines(c, server);
                 self.cut_acted(me, peer);
                 self.cut_acted(peer, me);
                 let k = &mut self.wire.conns.get_mut(&id).unwrap().ka[s];

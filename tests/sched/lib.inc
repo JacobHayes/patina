@@ -17,5 +17,5 @@ patina_run() { # out seed guest args...   (extra patina options in $PATINA_OPTS)
 # check_result OUT GUEST: outcome ok and the guest's own results correct.
 check_result() {
     [ "$(field "$1/result.json" outcome)" = ok ] || die "$2 in $1: class $(field "$1/result.json" outcome) $(field "$1/result.json" message)"
-    python3 -I "$HERE/check_threads.py" "$2" "$1/inc-0/stdout" || die "$2 in $1: wrong results"
+    python3 -I "$HERE/check_threads.py" "$2" "$1/boot-1/stdout" || die "$2 in $1: wrong results"
 }

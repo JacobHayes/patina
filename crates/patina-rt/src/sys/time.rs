@@ -9,16 +9,16 @@ pub fn now() -> u64 {
     ctl().vclock_ns.load(Relaxed)
 }
 
-/// The realtime clock: virtual time from the epoch, plus the node's offset (`clock-skew-ms`,
-/// `clock NAME`; 0 for the driver).
+/// The realtime clock: virtual time from the epoch, plus the machine's offset (`clock-skew-ms`,
+/// `clock NAME`; 0 for main).
 fn realtime_ns() -> u64 {
     let off = crate::state::clock_offset();
     crate::state::clock_read(off);
     (now() - VCLOCK_BOOT_NS + REALTIME_EPOCH_S * NS).saturating_add_signed(off)
 }
 
-/// An absolute `CLOCK_REALTIME` time of this node as a virtual monotonic time (0 if before
-/// boot). A step of the node's clock moves it (`Slot::clock_flags`).
+/// An absolute `CLOCK_REALTIME` time of this machine as a virtual monotonic time (0 if before
+/// boot). A step of the machine's clock moves it (`Slot::clock_flags`).
 pub fn realtime_to_vclock(ns: u64) -> u64 {
     (ns.saturating_add_signed(crate::state::clock_offset().saturating_neg()) + VCLOCK_BOOT_NS)
         .saturating_sub(REALTIME_EPOCH_S * NS)
@@ -38,7 +38,7 @@ fn sleep_until(deadline: u64) -> i64 {
     crate::sup::call_sup(proto::ctl::Op::Sleep, [deadline, 0, 0, 0, 0, 0]).ret
 }
 
-/// Sleep until `deadline`, an absolute realtime time converted: a step of the node's clock
+/// Sleep until `deadline`, an absolute realtime time converted: a step of the machine's clock
 /// moves it.
 fn sleep_until_realtime(deadline: u64) -> i64 {
     crate::state::clock_flags(proto::ctl::CLK_REALTIME_ABS);
@@ -92,7 +92,7 @@ fn cpu_ns(call: &mut dyn Call) -> u64 {
 fn clock(call: &mut dyn Call, id: i64) -> Result<u64, i64> {
     Ok(match id {
         0 | 5 | 8 => realtime_ns(), // REALTIME, REALTIME_COARSE, REALTIME_ALARM
-        11 => realtime_ns() + 37 * NS, // TAI (the node's offset included)
+        11 => realtime_ns() + 37 * NS, // TAI (the machine's offset included)
         1 | 4 | 6 | 7 | 9 => now(), // MONOTONIC, _RAW, _COARSE, BOOTTIME, BOOTTIME_ALARM
         2 | 3 => cpu_ns(call),      // PROCESS_CPUTIME_ID, THREAD_CPUTIME_ID
         _ => return Err(-e::EINVAL),

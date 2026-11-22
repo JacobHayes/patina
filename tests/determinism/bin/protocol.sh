@@ -31,7 +31,7 @@ for v in repeat cpu load aslr sandbox parallel env; do
         else
             echo "$w s$seed $f $v differs from the reference: run 0 $c $d"
             # log diff exits 1: the logs differ, as the digests do.
-            "$PATINA" log diff "$refdir/inc-0/boundary.log" "$out/$v/run-0/inc-0/boundary.log" >"$out/$v.diff" 2>&1 || [ $? = 1 ]
+            "$PATINA" log diff "$refdir/boot-1/boundary.log" "$out/$v/run-0/boot-1/boundary.log" >"$out/$v.diff" 2>&1 || [ $? = 1 ]
             sed -n '1,3s/^/    /p' "$out/$v.diff"
             status=1
         fi

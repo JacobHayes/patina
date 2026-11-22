@@ -38,11 +38,11 @@ verify_same() {
         >"$out.verify.txt" 2>&1 || grep -q '^identical: ' "$out.verify.txt" || { tail -5 "$out.verify.txt"; die "verify $* (seed $seed): exit $?"; }
     _n=$(for i in $(seq 0 $((runs - 1))); do field "$out/run-$i/result.json" digest; done | sort -u | wc -l)
     [ "$_n" = 1 ] || die "$* seed $seed: $_n distinct digests"
-    _n=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/inc-0/stdout"; done | sort -u | wc -l)
+    _n=$(for i in $(seq 0 $((runs - 1))); do sha256sum <"$out/run-$i/boot-1/stdout"; done | sort -u | wc -l)
     [ "$_n" = 1 ] || die "$* seed $seed: $_n distinct stdout files"
     echo "seed $seed: $runs identical runs, digest $(field "$out/run-0/result.json" digest), class $(field "$out/run-0/result.json" outcome), cpus $(grep -o 'cpu [0-9]*' "$out.verify.txt" | sort -u | wc -l)"
     # Keep the evidence small: one boundary log per verify.
-    for i in $(seq 1 $((runs - 1))); do rm -f "$out/run-$i/inc-"*/boundary.log; done
+    for i in $(seq 1 $((runs - 1))); do rm -f "$out/run-$i/boot-"*/boundary.log; done
 }
 verify_ok() {
     verify_same "$@"

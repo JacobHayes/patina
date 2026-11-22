@@ -15,9 +15,9 @@ for i in 1 2 3; do
     [ "$(field "$o/r$i/result.json" outcome)" = ok ] || die "run $i: $(field "$o/r$i/result.json" message)"
     u=$(field "$o/r$i/result.json" labels.unscanned_exec_mappings)
     [ "$u" -ge 1 ] || die "run $i: unscanned_exec_mappings $u"
-    echo "run $i: $(cat "$o/r$i/inc-0/stdout"), unscanned_exec_mappings $u, digest $(field "$o/r$i/result.json" digest)"
+    echo "run $i: $(cat "$o/r$i/boot-1/stdout"), unscanned_exec_mappings $u, digest $(field "$o/r$i/result.json" digest)"
 done
-d=$(for i in 1 2 3; do cat "$o/r$i/inc-0/stdout"; done | sort -u | wc -l)
+d=$(for i in 1 2 3; do cat "$o/r$i/boot-1/stdout"; done | sort -u | wc -l)
 if [ "$ARCH" = x86_64 ]; then
     [ "$d" -ge 2 ] || die "the unscanned rdrand gave the same value in 3 runs"
     echo "the labelled gap: $d distinct values in 3 runs of seed 1"
@@ -42,7 +42,7 @@ for m in $modes; do
         [ "$(field "$o/$m-$i/result.json" outcome)" = ok ] || die "$m: $(field "$o/$m-$i/result.json" message)"
     done
     f=$o/$m-1/result.json
-    echo "$m: $(cat "$o/$m-1/inc-0/stdout") / $(cat "$o/$m-2/inc-0/stdout"); patched $(field "$f" counters.insn.patched_sites), emulated $(field "$f" counters.insn.emulated), pause points $(field "$f" sched.pause_points), unscanned $(field "$f" labels.unscanned_exec_mappings)"
+    echo "$m: $(cat "$o/$m-1/boot-1/stdout") / $(cat "$o/$m-2/boot-1/stdout"); patched $(field "$f" counters.insn.patched_sites), emulated $(field "$f" counters.insn.emulated), pause points $(field "$f" sched.pause_points), unscanned $(field "$f" labels.unscanned_exec_mappings)"
     u=$(field "$f" labels.unscanned_exec_mappings)
     case $ARCH/$m in
         x86_64/file-shared) [ "$u" -ge 1 ] && [ "$(field "$f" counters.insn.patched_sites.rdrand)" = 0 ] || die "$m: not labelled" ;;
@@ -53,5 +53,5 @@ for m in $modes; do
         */*:rndr) [ "$(field "$f" counters.insn.emulated.rndr)" = 1 ] && [ "$u" = 0 ] || die "$m: not patched" ;;
         *) [ "$(field "$f" sched.pause_points)" -ge 1 ] && [ "$u" = 0 ] || die "$m: not patched" ;;
     esac
-    [ "$m" = file-shared ] || cmp -s "$o/$m-1/inc-0/stdout" "$o/$m-2/inc-0/stdout" || die "$m: runs differ"
+    [ "$m" = file-shared ] || cmp -s "$o/$m-1/boot-1/stdout" "$o/$m-2/boot-1/stdout" || die "$m: runs differ"
 done
