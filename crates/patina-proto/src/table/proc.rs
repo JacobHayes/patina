@@ -22,7 +22,7 @@ pub const ROWS: &[Row] = &[
     Row::new(G, nr::GETRLIMIT, Virt, C, RLIM).outs(&[out(1, Len::Fixed(16))]),
     Row::new(G, nr::SETRLIMIT, Virt, C, RLIM).refs(&[out(1, Len::Fixed(16))]),
     Row::new(G, nr::ARCH_PRCTL, Pass, A, "ARCH_SET_FS/GS and ARCH_GET_FS/GS are per-thread register state; other codes answer EINVAL as on a kernel without them.").refs(&[out(1, Len::Command)]),
-    Row::new(G, nr::UNAME, Rewrite, A, "Host-stable release and version; the hostname is the UTS namespace's (\"sim\"); the domain name, a copy of the host's NIS domain, reads \"(none)\".").outs(&[out(0, Len::Fixed(390))]),
+    Row::new(G, nr::UNAME, Rewrite, A, "Host-stable release and version; the hostname is the UTS namespace's (the machine's name); the domain name, a copy of the host's NIS domain, reads \"(none)\".").outs(&[out(0, Len::Fixed(390))]),
     Row::new(G, nr::CLONE3, Deny(errno::ENOSYS), C, "Refused so that libc falls back to clone."),
     Row::new(G, nr::RSEQ, Deny(errno::ENOSYS), C, "Refused; glibc and others accept ENOSYS silently."),
     Row::new(G, nr::PRCTL, Pass, A, "PR_SET_NAME, PR_GET_NAME, PR_GET_DUMPABLE and PR_SET_VMA act on sandbox state; PR_GET_TSC/PR_SET_TSC are virtual (the real counter always faults); PR_SET_PDEATHSIG/PR_GET_PDEATHSIG are virtual (raised by the supervisor at the parent's exit barrier); PR_SET_CHILD_SUBREAPER answers EINVAL (orphans always go to the supervisor, PID 1); any other option answers EINVAL and is recorded as prctl:OPTION (deny by default).").refs(&[out(1, Len::Command)]),

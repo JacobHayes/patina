@@ -39,13 +39,12 @@
 pub const MAX_MACHINES: usize = 16;
 /// The longest machine name.
 pub const NAME_MAX: usize = 32;
-/// Main's name in a run with machines (its hostname; without machines the hostname is `sim`).
+/// Main's name, and its hostname, whether or not other machines are declared.
 pub const MAIN: &[u8] = b"main";
 /// Names a machine cannot have besides `MAIN`, and why.
 pub const RESERVED: &[(&[u8], &str)] = &[
     (b"rest", "a control call's word for every other machine"),
     (b"localhost", "the loopback name in /etc/hosts"),
-    (b"sim", "the hostname of a run without machines"),
 ];
 
 #[repr(C)]

@@ -8,8 +8,8 @@
 #@ tier=quick budget=15 slots=1
 . "$(dirname "$0")/lib/common.inc"
 d=$RUNS/23
-prog='echo "boot=${PATINA_BOOT:-1}"
-if [ -z "$PATINA_BOOT" ]; then
+prog='echo "boot=$PATINA_BOOT"
+if [ "$PATINA_BOOT" = 1 ]; then
   echo f >f; touch -d "2100-01-01 00:00:00" f
   sleep 5; echo a >a; sleep 5; echo b >b; sync  # lint-allow: sleep — virtual time in the guest, which costs no wall time
   stat -c "%n %y" a b f

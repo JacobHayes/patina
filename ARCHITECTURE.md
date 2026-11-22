@@ -297,10 +297,11 @@ program that sleeps an hour takes milliseconds.
 
 Words: a **machine** is one computer of a run, with its own disk, hostname and address; **main**
 is machine 0, whose program is the command after `--` (or `[machine.main] run`). A **boot** is
-one start of a machine's program, numbered from 1 (`boot-K/`, `PATINA_BOOT`, set from boot 2
-on); internally boots are indexed from 0 and shown as index + 1. A machine's **disk** is its
+one start of a machine's program, numbered from 1 (`boot-K/`, `PATINA_BOOT`, set at every
+boot); internally boots are indexed from 0 and shown as index + 1. A machine's **disk** is its
 crash-modelled directory (`/work` unless `--disk DIR:GUEST` moves it). `PATINA_MACHINE` names
-the machine a process runs on, in a run with machines.
+the machine a process runs on, `main` also in a run without declared machines; the hostname is
+the same name.
 
 A run with machines (`[machine.NAME]`, `patina guide machines`) is still one sandbox, one
 supervisor, one virtual clock, one log and one seed; the machines are views inside it. Machine 0 is

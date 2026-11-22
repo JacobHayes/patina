@@ -91,9 +91,9 @@ exact-only: one seed's run
 -->
 ```text
 $ patina verify --seed 3 --runs 3 --faults crash -- ./acklog
-run 0: cpu 8 aslr off load on env base violation 83f2ee3c8dde6b28 switches 0
-run 1: cpu 16 aslr on load on env base violation 83f2ee3c8dde6b28 switches 0
-run 2: cpu 0 aslr off load on env base violation 83f2ee3c8dde6b28 switches 0
+run 0: cpu 8 aslr off load on env base violation 30b1f6c03f5f1c25 switches 0
+run 1: cpu 16 aslr on load on env base violation 30b1f6c03f5f1c25 switches 0
+run 2: cpu 0 aslr off load on env base violation 30b1f6c03f5f1c25 switches 0
 identical: 3 runs in /tmp/acklog/patina-out/verify-3
 violation (always): acked-records-kept: 21 acknowledged, 0 stored
 ```
@@ -144,7 +144,7 @@ exact-only: the run of seed 3 above
 ```text
 $ patina log events patina-out/run-3 --types crash
 {"type":"header","v":1,"seed":3,"disk":"/work","boots":2}
-{"type":"crash","boot":1,"seq":124,"t":100000120074,"slot":0,"kind":"machine","point":91,"lost":{"back":0,"changed":2,"missing":0,"paths":["/work/acks.log","/work/data.log"]}}
+{"type":"crash","boot":1,"seq":124,"t":100000120163,"slot":0,"kind":"machine","point":91,"lost":{"back":0,"changed":2,"missing":0,"paths":["/work/acks.log","/work/data.log"]}}
 ```
 
 A run a sweep did not keep has no logs; its seed reproduces it with `patina run --seed N`.

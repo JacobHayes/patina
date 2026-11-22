@@ -7,7 +7,7 @@
     disk.py main ROUNDS    crash machine a's machine and start it again ROUNDS times
 
 On each connection a machine sends one line, `inc=I synced=S unsynced=U now=N` (I is
-PATINA_BOOT less 1, 0 when it is not set; S and U what the files held when it started, `-`
+PATINA_BOOT less 1; S and U what the files held when it started, `-`
 when absent; N what `unsynced` holds now), and then holds the connection open. It writes
 `s<I>` and `u<I>`.
 

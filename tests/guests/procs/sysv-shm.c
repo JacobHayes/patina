@@ -210,7 +210,7 @@ static int after_exec(int id) {
 
 static int crash(void) {
     const char *boot = getenv("PATINA_BOOT");
-    if (!boot) {
+    if (!boot || atoi(boot) == 1) {
         int id = shmget(0x5053, 4096, IPC_CREAT | 0600);
         char *p = shmat(id, NULL, 0);
         strcpy(p, "kept");

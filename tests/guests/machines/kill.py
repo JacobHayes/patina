@@ -5,8 +5,8 @@
                            the starts in the disk's `starts`
     kill.py main CYCLES  kill b and start it again CYCLES times, checking each time
 
-On each connection b sends one line, `inc=I starts=N pid=P` (I is PATINA_BOOT less 1, 0 when
-it is not set), and then holds the connection open. Main checks, for each cycle: both
+On each connection b sends one line, `inc=I starts=N pid=P` (I is PATINA_BOOT less 1), and
+then holds the connection open. Main checks, for each cycle: both
 connections end (end of file or a reset) once `kill b` returns; a connect to
 either port is refused while b is down; a second kill and a start while up are refused
 (`EALREADY`); after `start b` the new process reports the next boot and a count

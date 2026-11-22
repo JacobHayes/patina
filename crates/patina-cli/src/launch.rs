@@ -142,12 +142,9 @@ pub const GENERATED_ETC: [&str; 7] = [
     "/etc/alternatives",
 ];
 
-/// `/etc/hosts`: without machines `sim` is the loopback's; with machines every machine is named at its
-/// address (`10.0.0.(k + 1)`, main first) and `localhost` is each machine's own loopback.
+/// `/etc/hosts`: every machine is named at its address (`10.0.0.(k + 1)`, main first) and
+/// `localhost` is each machine's own loopback.
 fn hosts(names: &[&str]) -> Vec<u8> {
-    if names.is_empty() {
-        return b"127.0.0.1 localhost sim\n::1 localhost\n".to_vec();
-    }
     let mut h = String::from("127.0.0.1 localhost\n::1 localhost\n");
     for (k, n) in names.iter().enumerate() {
         h += &format!("10.0.0.{} {n}\n", k + 1);
@@ -204,17 +201,13 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         dst: d.into(),
         size,
     };
-    // With machines main is one machine among several, named like the others.
-    let names: Vec<&str> = if c.machines.is_empty() {
-        vec![]
-    } else {
-        std::iter::once("main")
-            .chain(c.machines.iter().map(|n| n.name.as_str()))
-            .collect()
-    };
+    // Main is a machine named like the others, whether or not others are declared.
+    let names: Vec<&str> = std::iter::once("main")
+        .chain(c.machines.iter().map(|n| n.name.as_str()))
+        .collect();
     let mut ops = vec![
         Op::Hostname {
-            name: if names.is_empty() { "sim" } else { "main" }.into(),
+            name: "main".into(),
         },
         ro("/usr".into(), "/usr".into()),
     ];
@@ -1147,13 +1140,9 @@ pub fn run_boot(
     }
     if !c.machines.is_empty() {
         argv.push("--machines".into());
-        argv.extend(["--env".into(), "PATINA_MACHINE=main".into()]);
     }
-    // Only later boots get it: the first must match a run without --crash byte for byte up
-    // to the crash (the environment shapes the initial stack).
-    if start.k > 0 {
-        argv.extend(["--env".into(), format!("PATINA_BOOT={}", start.k + 1)]);
-    }
+    argv.extend(["--env".into(), "PATINA_MACHINE=main".into()]);
+    argv.extend(["--env".into(), format!("PATINA_BOOT={}", start.k + 1)]);
     argv.push("--".into());
     // argv[0]: a copied program is named by where it runs from.
     argv.push(if o.program.copied {

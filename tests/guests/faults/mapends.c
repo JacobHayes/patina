@@ -81,7 +81,7 @@ static void show(void) {
 int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "kill";
     const char *boot = getenv("PATINA_BOOT");
-    if (!strcmp(mode, "durable") && boot && atoi(boot) > 0) {
+    if (!strcmp(mode, "durable") && boot && atoi(boot) > 1) {
         char s = 0, b = 0;
         int m = open("marker", O_RDONLY);
         if (m < 0 || read(m, &s, 1) != 1) return 0; /* crashed before the marker was synced */

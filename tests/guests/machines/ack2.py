@@ -7,7 +7,7 @@
                              `ok I`; MODE `early` answers before the append and its fsync,
                              `lazy` answers at once and appends the put when its next request
                              comes; `init` syncs b's directory when it first serves a request, on
-                             its first start only (no PATINA_BOOT): a crash point before
+                             its first start only (PATINA_BOOT 1): a crash point before
                              any put
     ack2.py main N [wait]  put 1..N through a, then read both logs back; with `wait`, first
                              wait for b to answer a `get`
@@ -87,7 +87,7 @@ def call(peer, host, port, line):
 
 def serve(name, mode, init):
     held = recover()
-    initial = [bool(init) and "PATINA_BOOT" not in os.environ]
+    initial = [bool(init) and os.environ.get("PATINA_BOOT") == "1"]
     pending = []
     lock = threading.Lock()
     b = [None, None]

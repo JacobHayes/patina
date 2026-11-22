@@ -1568,10 +1568,12 @@ pub fn ready(
 }
 
 /// The smallest sandbox: `/usr` and its links, `/dev`, `/proc`, a 1 MiB tmpfs at `/tmp` and
-/// `/work`, hostname `sim`; `argv` run natively.
+/// `/work`, hostname `main`; `argv` run natively.
 pub fn minimal(after: After, argv: Vec<String>) -> Spec {
     let mut ops = vec![
-        Op::Hostname { name: "sim".into() },
+        Op::Hostname {
+            name: "main".into(),
+        },
         Op::Bind {
             src: "/usr".into(),
             dst: "/usr".into(),
@@ -1751,8 +1753,8 @@ fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
 /// A machine's first process, in its view: its starting tree (on its first start; after a
 /// machine crash the tree `tree` holds; a restart after a process kill finds the tree its
 /// last boot left), its stdio, the process state every guest
-/// inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime. A
-/// restart's environment adds `PATINA_BOOT`.
+/// inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime. Its
+/// environment adds `PATINA_BOOT`.
 fn machine_main(
     ns: &MachineSpec,
     stdio: RawFd,
@@ -1802,9 +1804,7 @@ fn machine_main(
     }
     let argv: Vec<CString> = ns.argv.iter().map(|a| c(a)).collect();
     let mut env: Vec<CString> = ns.env.iter().map(|a| c(a)).collect();
-    if boot > 0 {
-        env.push(c(&format!("PATINA_BOOT={}", boot + 1)));
-    }
+    env.push(c(&format!("PATINA_BOOT={}", boot + 1)));
     let mut av: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();
     av.push(std::ptr::null());
     let mut ev: Vec<*const libc::c_char> = env.iter().map(|a| a.as_ptr()).collect();

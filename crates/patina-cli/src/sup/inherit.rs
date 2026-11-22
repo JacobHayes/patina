@@ -31,7 +31,7 @@
 //! | capabilities, ambient, bounding    | none (sandbox); cleared in the first guest's fork child   |
 //! | securebits, no_new_privs           | checked 0; no_new_privs set by the sandbox and fork child |
 //! | session, process group, terminal   | new session (sandbox); no controlling terminal (checked)  |
-//! | hostname, domain name              | "sim" (sandbox); the domain name reads "(none)" (uname)   |
+//! | hostname, domain name              | the machine's name (sandbox); domain "(none)" (uname)     |
 //! | OOM score adjustment               | 1000 (here)                                               |
 //! | namespaces, cgroup                 | new namespaces (sandbox); the cgroup's limits: the host's |
 //! | LSM labels, Landlock domains       | not observable but as refusals; not normalised (residual) |

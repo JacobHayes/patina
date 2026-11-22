@@ -4,7 +4,8 @@
 with the same arguments, on what had reached the disk: data never synced may be gone, renames and
 creations may be undone. `--faults kill` kills the processes and keeps everything they wrote, as
 when a program dies but the machine does not. The program must recover on start: read its state
-from `/work`, check it, carry on. `PATINA_BOOT=K` is set from the second boot on (boot K).
+from `/work`, check it, carry on. `PATINA_BOOT=K` is set at boot K: 1 at the first, 2 after the
+first crash.
 
 The one crash-modelled disk is main's disk, `/work` (`--disk DIR` fills it, `--disk
 DIR:/var/lib/app` puts it where the program expects its data). `/tmp` and other writable places

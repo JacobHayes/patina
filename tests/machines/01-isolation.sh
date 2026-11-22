@@ -56,7 +56,7 @@ printf '[machine.c]\nrun = ["/bin/true"]\n[machine.c.faults]\nnet-drop-permille 
 refused machine.c.faults --config "$o/own.toml"
 printf '[machine.c]\nrun = ["/bin/true"]\nfaults = "net"\n' >"$o/faults.toml"
 refused machine.c.faults --config "$o/faults.toml"
-for taken in sim rest localhost; do
+for taken in rest localhost; do
     printf '[machine.%s]\nrun = ["/bin/true"]\n' "$taken" >"$o/taken.toml"
     refused "machine.$taken" --config "$o/taken.toml"
 done

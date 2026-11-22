@@ -92,8 +92,8 @@ int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "back";
     const char *boot = getenv("PATINA_BOOT");
     int dsync = !strcmp(mode, "durable-sync");
-    if ((!strcmp(mode, "durable") || dsync) && boot && atoi(boot) > 0) return later(dsync ? PG : 0);
-    if (!strcmp(mode, "order") && boot && atoi(boot) > 0) {
+    if ((!strcmp(mode, "durable") || dsync) && boot && atoi(boot) > 1) return later(dsync ? PG : 0);
+    if (!strcmp(mode, "order") && boot && atoi(boot) > 1) {
         char b[201] = {0};
         int f = open("shm", O_RDONLY);
         if (f >= 0 && pread(f, b, sizeof b, 0) == sizeof b)

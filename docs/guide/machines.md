@@ -75,8 +75,8 @@ lost. Settle works the same with one machine: under `--faults crash`, `-- sh -c 
 ctl settle && ./verify'` reruns `./app` at each boot after a crash and runs `./verify` once,
 after the last.
 
-**What a machine has of its own:** a disk, `/tmp`, its hostname (its name), a port
-space, a loopback, and the address `10.0.0.K` (main `10.0.0.1`, the first machine
+**What a machine has of its own:** a disk, `/tmp`, its hostname and `PATINA_MACHINE` (its name;
+`main` also in a run with no machines declared), `PATINA_BOOT` (its boot, from 1), a port space, a loopback, and the address `10.0.0.K` (main `10.0.0.1`, the first machine
 `10.0.0.2`); `/etc/hosts` names every machine. `/usr`, the mounts and the program's directory are
 shared and read-only. A listener on `0.0.0.0` is reachable from every machine, one on `127.0.0.1`
 only from its own. A machine's output is in `RUNDIR/machine/NAME/boot-K/`. Up to 15 machines;
@@ -106,11 +106,11 @@ phases: setup exit 0, main exit 0, finally exit 1
 faults on: a, b
 machines: a 10.0.0.2 running after 1 down, 2 boots, b 10.0.0.3 running after 1 down, 2 boots
 finally stderr (1 lines, /tmp/phases-machines/patina-out/run-4/boot-1/stderr from byte 0):
-  FAIL: check: b lost acknowledged puts [4, 5, 6, 7, 8, 9]
+  FAIL: check: b lost acknowledged puts [1, 2, 3, 4, 5, 6, 7, 8, 9]
 faults injected: 2 (crash 2)
 last injected:
-  seq 11550 t=101745ms crash machine=a kind=machine lost: 0 missing, 0 changed, 0 back
-  seq 11575 t=102608ms crash machine=b kind=machine object=/work/log lost: 0 missing, 1 changed, 0 back
+  seq 11641 t=101745ms crash machine=a kind=machine lost: 0 missing, 0 changed, 0 back
+  seq 11667 t=102608ms crash machine=b kind=machine object=/work/log lost: 0 missing, 1 changed, 0 back
 run directory: /tmp/phases-machines/patina-out/run-4
 replay: patina replay /tmp/phases-machines/patina-out/run-4
 explain: patina explain /tmp/phases-machines/patina-out/run-4
