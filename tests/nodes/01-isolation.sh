@@ -7,13 +7,18 @@
 # driver's process state; a cut stops a connect and loses a datagram, and a heal lets both
 # through; a socket's TCP_SYNCNT and TCP_USER_TIMEOUT set its own limits across a cut. The link faults leave the
 # driver's links alone unless net-links says otherwise. A node given with --node whose command
-# cannot run ends the run at once, naming the node. Identical under verify --vary cpu,load,aslr,sandbox,repeat.
+# cannot run ends the run at once, naming the node. Identical under verify --vary cpu,aslr,sandbox,repeat
+# (and load in the area tier).
 # What is not available yet is refused, naming the feature; without nodes a control call is
 # EINVAL, from a shell script too (`patina ctl`, as in a run with nodes). The C, Rust and Go SDKs' control calls answer the driver and give a
 # node EPERM (the Rust and Go SDKs' in the area tier).
 #@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-isolation; mkdir -p "$o"
+# Quick: no load generator. Its two threads spin for the whole verify, most of this
+# script's CPU time; on a slow, busy runner the script, which holds half a CPU, was starved past
+# its budget.
+[ "${CHECK_TIER:-}" != quick ] || VARY=cpu,aslr,sandbox,repeat
 conf "$o/iso.toml" b python3 /guest/iso.py node
 verify_ok "$o/iso" 1 2 --config "$o/iso.toml" -- python3 /guest/iso.py driver
 sed 's/^/    /' "$o/iso/run-0/inc-0/stdout"
