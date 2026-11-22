@@ -41,7 +41,8 @@ only from its own. A node's output is in `RUNDIR/node/NAME/inc-K/`. Up to 15 nod
 ## The driver's control: `patina ctl`
 
 The driver acts on the network and the nodes with control calls: `patina ctl WORDS` in a script
-(`patina` is on the `PATH` of a run with nodes), or the SDK's `control("WORDS")`.
+(`patina` is on the `PATH` of every run; without nodes only `mark` has something to act on),
+or the SDK's `control("WORDS")`.
 
 | Words | |
 |---|---|

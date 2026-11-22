@@ -90,9 +90,9 @@ exact-only: one seed's run
 -->
 ```text
 $ patina verify --seed 3 --runs 3 --faults crash -- ./acklog
-run 0: cpu 8 aslr off load on env base violation 0c145dab17715f9e switches 0
-run 1: cpu 16 aslr on load on env base violation 0c145dab17715f9e switches 0
-run 2: cpu 0 aslr off load on env base violation 0c145dab17715f9e switches 0
+run 0: cpu 8 aslr off load on env base violation a6f8fbcb6b6345b9 switches 0
+run 1: cpu 16 aslr on load on env base violation a6f8fbcb6b6345b9 switches 0
+run 2: cpu 0 aslr off load on env base violation a6f8fbcb6b6345b9 switches 0
 identical: 3 runs in /tmp/acklog/patina-out/verify-3
 violation (always): acked-records-kept: 21 acknowledged, 0 stored
 ```

@@ -29,6 +29,7 @@
 #    same in five runs under cpu and aslr variation.
 # 6. `patina report --recheck`: the same checker leaves each kept run's result.json byte for byte; a
 #    keyed finding (LABEL [KEY]: detail) is grouped by its key, and shown as written.
+# Quick tier: 1, 2, 3 and 6 (about 4 s on the arm64 runner); 4 and 5 in the area tier.
 #@ tier=quick budget=10 slots=2
 : "${PATINA:?}" "${RUNS:?}" "${PATINA_GUESTS:?}"
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -237,6 +238,9 @@ done
 echo "log tree: $n incarnations of $first"
 
 # 4. The event stream, and the example checks that read it.
+# 4 and 5 run in the area tier only: a dozen more sweeps, which the quick tier's budget does not
+# hold on a shared runner (5 to 7 s of 10 there, and over it beside a busy neighbour).
+if [ "${CHECK_TIER:-}" != quick ]; then
 files=$PATINA_GUESTS/oracles-files marklog=$PATINA_GUESTS/oracles-marklog
 mkdir app
 (
@@ -325,6 +329,7 @@ lhs=$(head -1 g2.txt); rhs=$(jq -r '.groups[1].signature' calcs/report.json)
 lhs=$(jq '[.groups[].runs | length] | add' calcs/report.json); rhs=$(jq .findings calcs/report.json)
 [ "$lhs" = "$rhs" ] || die "report.json: groups do not list every finding's run"
 echo "serve: $(groups calcs-serve); garbage and gone: 18 errors each; case settings, faults patterns, --group, --ok-exit any"
+fi
 
 # 6. Judging kept runs again (`patina report --recheck`). The same checker leaves every kept run's
 #    result.json as it was, byte for byte; a checker that names its finding LABEL [KEY] is

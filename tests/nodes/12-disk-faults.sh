@@ -31,7 +31,9 @@ check table no no yes
 F="--faults crash --fault crash-gap-ms=1..4 --fault down-ms=100..300 --fault max-incarnations=8 --fault fsync-error-permille=1"
 rm -f "$o/ok.toml" "$o/retry.toml"
 conf "$o/ok.toml" a /guest/ack-log correct 1000000; printf 'restart = "always"\n' >>"$o/ok.toml"
-conf "$o/retry.toml" a /guest/ack-log retry 1000000
+# retry is bounded: a seed whose crashes all miss the window ends at its total, not at a million
+# records (that one run was the script's whole budget on a slow runner).
+conf "$o/retry.toml" a /guest/ack-log retry 20000
 rm -rf "${o:?}/ok"
 st=0
 timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep all --out "$o/ok" --config "$o/ok.toml" $F \

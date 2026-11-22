@@ -23,8 +23,8 @@ native() { # [-s N] WANT PROG ARGS...: natively, exit 0 (or N) and the output ma
     [ "$st" = 0 ] || [ "$st" = "$may" ] || die "a. $*: natively: exit $st: $out"
     grep -q "$want" <<<"$out" || die "a. $*: natively printed $out"
 }
-native 'balance=0 withdrawn=100 ok$' "$C/races-gcc" b
-# pool's race (unsynchronised counters) can show natively too, as in 03-inert: then it exits 1.
+# The planted races can show natively too, as in 03-inert: then the guest exits 1.
+native -s 1 'balance=0 withdrawn=100 ok$\|DOUBLE-SPEND$' "$C/races-gcc" b
 native -s 1 'LOST-UPDATE\|ok$' "$C/pool-gcc"
 for p in cxx cxx-gcc; do native '^ctor ok|total=6000 caught=60 ok|dtor ok$' "$C/$p"; done
 for p in shlib shlib-stock; do native 'compdl=29992,29992 ok$' "$C/$p"; done

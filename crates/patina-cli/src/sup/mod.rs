@@ -56,9 +56,9 @@ fn tmpfs_hint(ctl: &Ctl, e: &str) -> String {
 }
 
 /// The guest's fixed environment; `--env` adds to it. `PATINA=1` tells a program it runs
-/// under Patina.
+/// under Patina. The last `PATH` directory holds `patina` itself (`launch::GUEST_PATINA`).
 pub(crate) const BASE_ENV: [&str; 5] = [
-    "PATH=/guest:/usr/local/bin:/usr/bin:/bin",
+    "PATH=/guest:/usr/local/bin:/usr/bin:/bin:/opt/patina/bin",
     "HOME=/work",
     "LANG=C.UTF-8",
     "TZ=UTC",

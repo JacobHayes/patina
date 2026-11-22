@@ -9,13 +9,13 @@
 # driver's links alone unless net-links says otherwise. A node given with --node whose command
 # cannot run ends the run at once, naming the node. Identical under verify --vary cpu,load,aslr,sandbox,repeat.
 # What is not available yet is refused, naming the feature; without nodes `net` is EINVAL and
-# a control mark works. The C, Rust and Go SDKs' control calls answer the driver and give a
+# a control mark works, from a shell script too (`patina ctl`, as in a run with nodes). The C, Rust and Go SDKs' control calls answer the driver and give a
 # node EPERM (the Rust and Go SDKs' in the area tier).
 #@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/01-isolation; mkdir -p "$o"
 conf "$o/iso.toml" b python3 /guest/iso.py node
-verify_ok "$o/iso" 1 3 --config "$o/iso.toml" -- python3 /guest/iso.py driver
+verify_ok "$o/iso" 1 2 --config "$o/iso.toml" -- python3 /guest/iso.py driver
 sed 's/^/    /' "$o/iso/run-0/inc-0/stdout"
 r=$o/iso/run-0
 [ "$(field "$r/result.json" nodes.list.1.name)" = b ] || die "result.json: node b"
@@ -69,6 +69,28 @@ except OSError as e:
 [ "$(cat "$o/none/inc-0/stdout")" = done ] || die "patina ctl without nodes"
 [ "$(field "$o/none/result.json" nodes 2>/dev/null || echo none)" = none ] || die "nodes in a run without them"
 echo "without nodes: mark ok, net refused"
+
+# From a shell script, in a run without nodes and in one with: `patina` is on the PATH, the
+# lifecycle marks are made, `net` answers as above; and although the host's PATH has a patina
+# too, no hint calls the guest's missing (env tries each PATH directory in turn, where a
+# shell looks first).
+cat >"$o/marks.sh" <<'EOF'
+patina ctl mark setup-complete && env patina ctl mark faults-done || exit 3
+st=0; patina ctl net heal 2>/dev/null || st=$?
+echo "net heal: $st"
+EOF
+rm -f "$o/one.toml"
+conf "$o/one.toml" c sleep 1  # lint-allow: sleep — the guest's, in virtual time
+for k in none one; do
+    cfg=(); [ $k = none ] || cfg=(--config "$o/one.toml")
+    PATH="$(dirname "$PATINA"):$PATH" run_ok "$o/sh-$k" 1 --faults disk --faults-held "${cfg[@]}" --mount "$o":/s -- sh /s/marks.sh
+    w=$(jq -r '.faults.window | "\(.from_seq) \(.to_seq)"' "$o/sh-$k/result.json")
+    [[ $w =~ ^[0-9]+\ [0-9]+$ ]] || die "sh, nodes $k: the marks did not bound the faults: window $w"
+    want=2; [ $k = none ] || want=0
+    [ "$(cat "$o/sh-$k/inc-0/stdout")" = "net heal: $want" ] || die "sh, nodes $k: $(cat "$o/sh-$k/inc-0/stdout")"
+    [ "$(jq -r '[.missing[]? | select(.name == "patina")] | length' "$o/sh-$k/result.json")" = 0 ] || die "sh, nodes $k: patina is called missing"
+done
+echo "from a shell script: the marks are made with and without nodes; patina is not called missing"
 
 # The C SDK's control call: answers from the driver and from a node.
 conf "$o/ctl.toml" c /guest/ctl node

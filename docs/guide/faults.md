@@ -91,6 +91,15 @@ patina ctl mark faults-done
 
 A run with one node costs about what a run without nodes does.
 
+A script marks the same way in a run of one machine (`patina` is on the `PATH` of every run):
+
+<!-- transcript mark-script
+dir: /tmp/marks
+-->
+```sh
+patina run --faults disk --faults-held -- /bin/sh -c 'patina ctl mark setup-complete && echo work >out.txt; patina ctl mark faults-done'
+```
+
 ## What the keys do
 
 - **Disk.** An injected error is one Linux returns for that call on that object. A failed

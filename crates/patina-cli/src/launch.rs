@@ -300,6 +300,12 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
             fs::canonicalize(root).map_err(|e| format!("/work from {}: {e}", root.display()))?;
         ops.push(ro(r.display().to_string(), "/.patina/in".into()));
     }
+    // `patina` itself, for `patina ctl` from a script: unless a mount covers its place (refused
+    // in a run with nodes, `Config::check_nodes`; without nodes the mount's tree stands).
+    if !c.mounts.iter().any(|m| under(GUEST_PATINA, &m.dst)) {
+        let exe = std::env::current_exe().map_err(|e| format!("own executable: {e}"))?;
+        ops.push(ro(exe.display().to_string(), GUEST_PATINA.into()));
+    }
     let nodes = if c.nodes.is_empty() {
         None
     } else {
@@ -320,13 +326,12 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     })
 }
 
-/// The guest path of `patina` itself in a run with nodes (`patina ctl`), and the `PATH` such a
-/// run starts with (the run's own `PATH`, if it sets one, replaces it).
+/// The guest path of `patina` itself (`patina ctl`), in the last directory of every run's
+/// `PATH` (`sup::BASE_ENV`).
 pub const GUEST_PATINA: &str = "/opt/patina/bin/patina";
-pub const NODES_PATH: &str = "PATH=/guest:/usr/local/bin:/usr/bin:/bin:/opt/patina/bin";
 
 /// The layout's part for nodes: each node's program and starting tree bound where the driver's
-/// are, its work tree's mount point, `patina` for `patina ctl`, and what the keeper needs to
+/// are, its work tree's mount point, and what the keeper needs to
 /// start each node in its own view.
 fn node_layout(o: &Opts, ops: &mut Vec<Op>, copies: &mut Vec<String>) -> Res<sandbox::Nodes> {
     let c = &o.cfg;
@@ -397,7 +402,6 @@ fn node_layout(o: &Opts, ops: &mut Vec<Op>, copies: &mut Vec<String>) -> Res<san
             env.push(kv.to_string());
         };
         set(&mut env, &format!("HOME={w}"));
-        set(&mut env, NODES_PATH);
         for kv in c.env.iter().chain(&n.env) {
             set(&mut env, kv);
         }
@@ -421,8 +425,6 @@ fn node_layout(o: &Opts, ops: &mut Vec<Op>, copies: &mut Vec<String>) -> Res<san
             size: c.node_disk_bytes(k - 1)?,
         });
     }
-    let exe = std::env::current_exe().map_err(|e| format!("own executable: {e}"))?;
-    ops.push(ro(exe.display().to_string(), GUEST_PATINA.into()));
     let mut readonly: Vec<String> = vec!["/".into(), "/dev".into(), "/guest".into()];
     for (i, m) in c.mounts.iter().enumerate() {
         let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
@@ -700,7 +702,9 @@ pub fn not_in_sandbox(o: &Opts, missing: &[(u8, String)]) -> Vec<serde_json::Val
         let Some(name) = Path::new(p).file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if named.iter().any(|n| n == name) {
+        // `patina` is the run's own (`GUEST_PATINA`, last on the PATH): the lookup passed the
+        // other directories on its way there.
+        if name == "patina" || named.iter().any(|n| n == name) {
             continue;
         }
         let found = std::env::var_os("PATH").and_then(|v| {
@@ -1104,9 +1108,6 @@ pub fn run_incarnation(
     if !c.nodes.is_empty() {
         argv.push("--nodes".into());
         argv.extend(["--env".into(), "PATINA_NODE=driver".into()]);
-        if !c.env.iter().any(|e| e.starts_with("PATH=")) {
-            argv.extend(["--env".into(), NODES_PATH.into()]);
-        }
     }
     // Only restarted incarnations get it: incarnation 0 must match a run without --crash
     // byte for byte up to the crash (the environment shapes the initial stack).
