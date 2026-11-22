@@ -139,6 +139,17 @@ nothing changes. Those that set the run's configuration land in `run.json`, so a
 `tests/run.py` sets `PATINA_SCRATCH` for unit tests and scripts (scratch space), not a patina
 input.
 
+## Releasing
+
+`scripts/release X.Y.Z NOTES_FILE` (`--dry-run` first) is the release: from a clean working
+copy on `main@origin` it bumps every pin of the current version, lands the bump with
+`scripts/land`, pushes the tag `vX.Y.Z`, waits for `.github/workflows/release.yml` (the release
+tier on both architectures, the builds and installs, then publish and the Go SDK's
+`go/patina/vX.Y.Z` tag), checks the published files against `SHA256SUMS` and this host's binary's
+version, and sets the release notes from NOTES_FILE. Don't ask proxy.golang.org for a version
+before its `go/patina/` tag exists: it caches the miss. The crates.io SDK is `scripts/publish.sh`,
+by hand.
+
 ## Rules
 
 - **Fail closed.** An effect Patina does not control is a refusal or a named stop, never a

@@ -1,0 +1,94 @@
+#!/bin/bash
+# scripts/release [--dry-run] X.Y.Z NOTES_FILE: cut release X.Y.Z.
+#
+# Refuses unless the working copy has no changes and its parent is main@origin, NOTES_FILE is
+# non-empty and neither vX.Y.Z nor go/patina/vX.Y.Z exists on origin. Then: bumps every pin of
+# the current version (each tracked file that names it; in a Cargo.lock only our own path
+# packages, never a registry crate that shares the number), commits and lands the bump with
+# scripts/land; pushes the lightweight tag vX.Y.Z to that commit (git: the one git write);
+# waits for the release workflow and fails if any of its jobs did not pass; downloads the
+# release, checks every file against its SHA256SUMS and that this host's binary prints the new
+# version; sets the release notes from NOTES_FILE. --dry-run checks and shows the bump only.
+set -euo pipefail; shopt -s inherit_errexit
+die() { echo "release: refused: $*" >&2; exit 1; }
+say() { echo "release: $*"; }
+dry=0 args=()
+for a in "$@"; do
+    case $a in
+        --dry-run) dry=1 ;;
+        -*) die "unknown option $a" ;;
+        *) args+=("$a") ;;
+    esac
+done
+[ ${#args[@]} = 2 ] || { sed -n '2,11p' "$0" >&2; exit 2; }
+new=${args[0]} notes=$(realpath -e -- "${args[1]}" 2>/dev/null) || die "no notes file ${args[1]}"
+[[ $new =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "not a version X.Y.Z: $new"
+[ -s "$notes" ] || die "the notes file $notes is empty"
+tag=v$new
+cd "$(jj workspace root)"
+old=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+[ -n "$old" ] || die "no [workspace.package] version in Cargo.toml"
+[ "$old" != "$new" ] || die "the version is already $new"
+
+jj git fetch
+changes=$(jj diff -r @ --summary)
+[ -z "$changes" ] || die "the working copy has changes"
+parent=$(jj log --no-graph -r @- -T commit_id) main=$(jj log --no-graph -r main@origin -T commit_id)
+[ "$parent" = "$main" ] || die "the working copy's parent is not main@origin (jj new main@origin)"
+for t in "$tag" "go/patina/$tag"; do
+    found=$(git ls-remote --tags origin "refs/tags/$t")
+    [ -z "$found" ] || die "tag $t exists on origin"
+done
+
+# Every tracked file naming the old version, as a whole number (not 10.21.0 or 0.21.01).
+pat="(?<![0-9.])\Q$old\E(?![0-9])"
+mapfile -t files < <(jj file list | grep -v '\.lock$' | xargs -d '\n' grep -lIP "$pat" --)
+mapfile -t locks < <(jj file list | grep '\.lock$' | xargs -d '\n' grep -lIP "$pat" --)
+[ ${#files[@]} -gt 0 ] || die "no file names $old"
+say "bump $old -> $new in: ${files[*]} ${locks[*]}"
+if [ "$dry" = 1 ]; then
+    grep -nP "$pat" -- "${files[@]}" | sed 's/^/  /'
+    say "dry run: locks change only their path packages named patina*; then commit, scripts/land release-$new,"
+    say "dry run: push $tag, wait for release.yml, check SHA256SUMS and this host's binary, set the notes"
+    exit 0
+fi
+perl -pi -e "s/$pat/$new/g" -- "${files[@]}"
+# A lock entry is ours when it names a patina package and has no source (a path dependency).
+[ ${#locks[@]} = 0 ] || perl -00 -pi -e "s/^version = \"\Q$old\E\"\$/version = \"$new\"/m if /^name = \"patina/m && !/^source = /m" -- "${locks[@]}"
+jj diff --stat
+jj commit -m "Release $new"
+scripts/land "release-$new"
+
+jj git fetch
+sha=$(jj log --no-graph -r main@origin -T commit_id)
+subject=$(jj log --no-graph -r main@origin -T 'description.first_line()')
+[ "$subject" = "Release $new" ] || die "main@origin is not the bump commit: $subject"
+git push origin "$sha:refs/tags/$tag"
+say "pushed $tag at $sha; waiting for the release workflow"
+run=""
+for _ in $(seq 60); do
+    run=$(gh run list --workflow release.yml --commit "$sha" --event push --limit 1 --json databaseId -q '.[0].databaseId')
+    [ -z "$run" ] || break
+    sleep 10
+done
+[ -n "$run" ] || die "no release workflow run for $tag after 10 minutes"
+timeout 5400 gh run watch "$run" --interval 60 >/dev/null || true
+url=$(gh run view "$run" --json url -q .url)
+bad=$(gh run view "$run" --json jobs -q '.jobs[] | select(.conclusion != "success") | "\(.name) \(.conclusion)"')
+[ -z "$bad" ] || die "release jobs did not pass ($url): $bad"
+conclusion=$(gh run view "$run" --json conclusion -q .conclusion)
+[ "$conclusion" = success ] || die "the release run ended $conclusion: $url"
+found=$(git ls-remote --tags origin "refs/tags/go/patina/$tag")
+[ -n "$found" ] || die "the workflow pushed no go/patina/$tag"
+
+dl=$(mktemp -d)
+trap 'rm -rf -- "${dl:?}"' EXIT
+gh release download "$tag" -D "$dl"
+(cd "$dl" && sha256sum -c SHA256SUMS)
+case $(uname -m) in x86_64) target=x86_64-unknown-linux-musl ;; aarch64) target=aarch64-unknown-linux-musl ;; *) die "no archive for $(uname -m)" ;; esac
+tar -xzf "$dl/patina-$target.tar.gz" -C "$dl" patina
+printed=$("$dl/patina" --version)
+[ "$printed" = "patina $new" ] || die "the release's $target binary prints $printed"
+say "SHA256SUMS ok; the $target binary prints $printed"
+gh release edit "$tag" --notes-file "$notes"
+say "released $tag at $sha: $(gh release view "$tag" --json url -q .url); workflow $url"
