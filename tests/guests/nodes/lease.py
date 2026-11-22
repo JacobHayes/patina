@@ -20,7 +20,7 @@ checks: no read answers a value older than a write acknowledged before the read 
 (`stale read`); at the end, every acknowledged write is in the store's log (`lost write`) and
 no write was accepted with a token other than the current lease's (`stale write`). It prints
 `ok ...` or `FAIL: ...` and exits 1. With `steps`, every 2 to 5 s it steps the clock of p1 or
-p2 back by 2 to 6 s (`clock step`), which a monotonic lease does not notice.
+p2 back by 2 to 6 s (`clock NAME`), which a monotonic lease does not notice.
 
 Planted bugs (BUG, given to s and to both replicas):
     nofence    the store does not fence: a replica paused after its check and resumed after
@@ -168,7 +168,7 @@ def driver(seconds, steps):
         while True:
             time.sleep(random.uniform(2, 5))
             p = random.choice(["p1", "p2"])
-            patina.control(f"clock step {p} -{random.randint(2, 6)}s")
+            patina.control(f"clock {p} -{random.randint(2, 6)}s")
 
     if steps:
         threading.Thread(target=stepper, daemon=True).start()

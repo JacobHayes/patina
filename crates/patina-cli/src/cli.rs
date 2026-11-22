@@ -94,8 +94,8 @@ pub const COMMANDS: &[Command] = &[
     Command {
         cmd: Cmd::Ctl,
         name: "ctl",
-        usage: "patina ctl net cut A B | net cut --from A --to B | net heal [A B] | node crash NAME | node kill NAME | node start NAME | node pause NAME | node resume NAME | clock step NAME +90s | mark LABEL",
-        help: "inside a run: act on its network, nodes and clocks; mark setup-complete, faults-done",
+        usage: "patina ctl partition A B | partition --from A --to B | heal [A B] | crash NODE | kill NODE | start NODE | pause NODE | resume NODE | clock NODE +90s",
+        help: "inside a run with nodes: act on its links, nodes and clocks, as the fault classes do",
     },
     Command {
         cmd: Cmd::Doctor,
@@ -303,10 +303,17 @@ pub const FLAGS: &[Flag] = &[
         RUNLIKE,
     ),
     flag(
-        "--faults-held",
-        "",
-        "off",
-        "faults wait for the program's setup-complete mark",
+        "--setup",
+        "'CMD ARGS'",
+        "none",
+        "run first, without faults (mark: the program marks it)",
+        RUNLIKE,
+    ),
+    flag(
+        "--finally",
+        "'CMD ARGS'",
+        "none",
+        "run last, after an ok exit, with the faults stopped",
         RUNLIKE,
     ),
     flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),

@@ -2,7 +2,6 @@
 //! answer, schema `patina.result/v3`), and the human summary of a result.
 
 use crate::cli::Res;
-use crate::config::{Config, Program};
 use crate::outcome::{classify, Classified, Outcome, Verdict};
 use serde_json::{json, Value};
 use std::path::Path;
@@ -63,6 +62,163 @@ pub struct RunEnd {
     pub self_check: Option<Result<(), String>>,
     /// A run with nodes: each node and the scripted network (`nodes_json`).
     pub nodes: Option<Value>,
+    /// A run with a declared setup, a final check or a `faults-done` mark: its phases.
+    pub phases: Option<Phases>,
+}
+
+/// `proto::ctl::PhaseCtl` as an incarnation left it, folded over incarnations (`add`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhaseTab {
+    pub from_seq: [u64; 3],
+    pub to_seq: [u64; 3],
+    pub word: [u64; 3],
+    pub out_off: [u64; 3],
+    pub err_off: [u64; 3],
+    /// The incarnation of each phase's last run.
+    pub inc: [u64; 3],
+    /// Without nodes: the link faults' chances in the fault window (`PhaseCtl::elig`), summed.
+    pub elig: [u64; proto::node::ELIG_N],
+}
+
+impl PhaseTab {
+    pub fn read(p: &proto::ctl::PhaseCtl) -> PhaseTab {
+        use std::sync::atomic::Ordering::Relaxed;
+        let a = |x: &[std::sync::atomic::AtomicU64; 3]| x.each_ref().map(|v| v.load(Relaxed));
+        PhaseTab {
+            from_seq: a(&p.from_seq),
+            to_seq: a(&p.to_seq),
+            word: a(&p.word),
+            out_off: a(&p.out_off),
+            err_off: a(&p.err_off),
+            inc: [0; 3],
+            elig: p.elig.each_ref().map(|v| v.load(Relaxed)),
+        }
+    }
+
+    /// Fold incarnation `k` in: a phase that ran again after a crash is its last run.
+    pub fn add(&mut self, k: u64, b: &PhaseTab) {
+        for (a, b) in self.elig.iter_mut().zip(b.elig) {
+            *a += b;
+        }
+        // The phases after the first this incarnation ran are its own, run or not.
+        let Some(first) = b.from_seq.iter().position(|s| *s != 0) else {
+            return;
+        };
+        for i in first..3 {
+            if b.from_seq[i] == 0 {
+                (self.from_seq[i], self.to_seq[i], self.word[i]) = (0, 0, 0);
+                (self.out_off[i], self.err_off[i], self.inc[i]) = (0, 0, 0);
+            } else {
+                (self.from_seq[i], self.to_seq[i], self.word[i]) =
+                    (b.from_seq[i], b.to_seq[i], b.word[i]);
+                (self.out_off[i], self.err_off[i], self.inc[i]) = (b.out_off[i], b.err_off[i], k);
+            }
+        }
+    }
+
+    /// Phase `i`'s command's end, as `(exit status, signal)` (`None`: it did not end by itself).
+    pub fn end(&self, i: usize) -> Option<(i64, Option<i64>)> {
+        let w = self.word[i].checked_sub(1)? as i64;
+        Some(match w & 0x7f {
+            0 => ((w >> 8) & 0xff, None),
+            sig => (128 + sig, Some(sig)),
+        })
+    }
+}
+
+/// A run's phases: its declared setup (`command` or `mark`) and whether it ended, whether it
+/// has a final check, and the table.
+#[derive(Clone, Debug)]
+pub struct Phases {
+    pub setup: Option<&'static str>,
+    pub setup_done: bool,
+    pub finally: bool,
+    pub tab: PhaseTab,
+    /// Where the faults stopped (0: they did not before the run ended).
+    pub faults_until_seq: u64,
+    /// Where the setup ended (0: it did not, or the run declares none).
+    pub setup_seq: u64,
+    /// The last incarnation came after a machine crash (it set up again).
+    pub after_crash: bool,
+}
+
+impl Phases {
+    /// `result.json`'s `phases`: per phase that ran, its start and end (sequence numbers; the
+    /// faults act from `setup.to_seq` to `main.to_seq`, or to `main.faults_until_seq` where a
+    /// `faults-done` mark came first), its command's exit, and for a command where its output
+    /// starts in the incarnation's stdout and stderr. A final check that did not run is
+    /// `{"skipped": true}`.
+    pub fn json(&self) -> Value {
+        let exit = |i: usize| match self.tab.end(i) {
+            Some((s, None)) => json!({"status": s}),
+            Some((_, Some(sig))) => json!({"signal": sig}),
+            None => Value::Null,
+        };
+        let seq = |s: u64| (s != 0).then_some(s);
+        let cmd = |i: usize| {
+            json!({
+                "from_seq": seq(self.tab.from_seq[i]),
+                "to_seq": seq(self.tab.to_seq[i]),
+                "exit": exit(i),
+                "incarnation": self.tab.inc[i],
+                "stdout_at": self.tab.out_off[i],
+                "stderr_at": self.tab.err_off[i],
+            })
+        };
+        let mut v = json!({});
+        match self.setup {
+            Some("command") => v["setup"] = cmd(0),
+            Some(_) => v["setup"] = json!({"by": "mark", "to_seq": seq(self.setup_seq)}),
+            None => {}
+        }
+        let mut main = if self.tab.from_seq[1] != 0 {
+            cmd(1)
+        } else {
+            json!({})
+        };
+        if self.faults_until_seq != 0 && self.faults_until_seq != self.tab.to_seq[1] {
+            main["faults_until_seq"] = json!(self.faults_until_seq);
+        }
+        if main.as_object().is_some_and(|o| !o.is_empty()) {
+            v["main"] = main;
+        }
+        // Declared and not run: the main command did not end by itself with an ok status.
+        if self.finally {
+            v["finally"] = if self.tab.from_seq[2] != 0 {
+                cmd(2)
+            } else {
+                json!({"skipped": true})
+            };
+        }
+        v
+    }
+
+    /// The summary's line: `phases: setup exit 0, main exit 0, finally exit 1`.
+    pub fn line(v: &Value) -> Option<String> {
+        let parts: Vec<String> = ["setup", "main", "finally"]
+            .iter()
+            .filter(|p| v[**p].as_object().is_some_and(|o| !o.is_empty()))
+            .map(|p| {
+                let e = &v[*p]["exit"];
+                let how = if v[*p]["by"] == "mark" {
+                    match v[*p]["to_seq"].as_u64() {
+                        Some(_) => "marked".to_string(),
+                        None => "never marked".to_string(),
+                    }
+                } else if let Some(s) = e["status"].as_u64() {
+                    format!("exit {s}")
+                } else if let Some(s) = e["signal"].as_i64() {
+                    format!("killed by {}", crate::outcome::signal_name(s))
+                } else if v[*p]["skipped"] == true {
+                    "skipped".to_string()
+                } else {
+                    "did not end".to_string()
+                };
+                format!("{p} {how}")
+            })
+            .collect();
+        (!parts.is_empty()).then(|| format!("phases: {}", parts.join(", ")))
+    }
 }
 
 /// `result.json`'s `nodes`: each node (the driver first) with its address, its first process and
@@ -618,6 +774,9 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some(k) = &e.check {
         r["check"] = serde_json::to_value(k).unwrap();
     }
+    if let Some(p) = &e.phases {
+        r["phases"] = p.json();
+    }
     if let Some(n) = &e.nodes {
         r["nodes"] = n.clone();
         // A node's own end ended the run: which node, which of its boots, and how.
@@ -801,25 +960,28 @@ pub fn same_build(run: &Value, at: &Path) -> Res<()> {
 }
 
 /// `run.json`: the request, with the fault plan resolved from the seed (`faults`).
-pub fn run_json(
-    cfg: &Config,
-    program: &Program,
-    nodes: &[Program],
-    plan: &crate::faults::Plan,
-) -> Res<Value> {
+pub fn run_json(o: &crate::config::Opts) -> Res<Value> {
+    let cfg = &o.cfg;
     let mut v = json!({
         "schema": RUN_SCHEMA,
         "patina": build()?,
         "seed": cfg.seed,
         "config": cfg,
-        "faults": plan.json(),
-        "program": program,
+        "faults": o.plan.json(),
+        "program": o.program,
         "host": host_facts(),
         "inputs": crate::inputs::fingerprints(cfg),
     });
     // Each node's program, as `program` (`cfg.nodes` order).
-    if !nodes.is_empty() {
-        v["node_programs"] = json!(nodes);
+    if !o.node_programs.is_empty() {
+        v["node_programs"] = json!(o.node_programs);
+    }
+    // The setup command's program and the final check's.
+    if let Some(p) = &o.setup_program {
+        v["setup_program"] = json!(p);
+    }
+    if let Some(p) = &o.finally_program {
+        v["finally_program"] = json!(p);
     }
     Ok(v)
 }
@@ -855,7 +1017,88 @@ pub fn classified(e: &RunEnd) -> Classified {
             );
         }
     }
-    with_check(own, e.check.as_ref())
+    with_check(phased(own, e.phases.as_ref()), e.check.as_ref())
+}
+
+/// A run's outcome given its phases. Before a declared setup ends nothing is a finding: a run
+/// that ended there (its setup command failed or hung, its program never marked the setup's
+/// end) is `error`, stop `setup`, as is a run whose program never marked it. After an `ok`
+/// main command, a final check that failed is the finding, stop `finally`.
+fn phased(own: Classified, p: Option<&Phases>) -> Classified {
+    use Outcome::*;
+    let Some(p) = p else { return own };
+    let finding = matches!(
+        own.outcome,
+        Ok | Violation | Liveness | Failure | Crash | Timeout
+    );
+    if let (Some(by), false, true) = (p.setup, p.setup_done, finding) {
+        // After a machine crash the setup ran on the crashed machine's disk: its failure is
+        // what the crash left, a finding; a run Patina ended there keeps its own outcome.
+        if p.after_crash {
+            return match (by, p.tab.end(0)) {
+                ("command", Some((_, Some(sig)))) => Classified::new(
+                    Crash,
+                    "setup",
+                    format!(
+                        "after a machine crash, the setup command was killed by signal {sig} ({})",
+                        crate::outcome::signal_name(sig)
+                    ),
+                ),
+                ("command", Some((s, None))) => Classified::new(
+                    Failure,
+                    "setup",
+                    format!("after a machine crash, the setup command exited {s}"),
+                ),
+                _ if own.outcome != Ok => own,
+                _ => Classified::new(
+                    Error,
+                    "setup",
+                    "after a machine crash, the program never marked setup-complete, which `setup = \"mark\"` declares".to_string(),
+                ),
+            };
+        }
+        let msg = match (by, p.tab.end(0)) {
+            ("command", Some((_, Some(sig)))) => format!(
+                "the setup command was killed by signal {sig} ({})",
+                crate::outcome::signal_name(sig)
+            ),
+            ("command", Some((s, None))) => format!("the setup command exited {s}"),
+            ("command", None) => format!("the setup command did not finish: {}", own.message),
+            _ => format!(
+                "the program never marked setup-complete, which `setup = \"mark\"` declares (the run ended: {})",
+                own.message
+            ),
+        };
+        return Classified::new(Error, "setup", msg);
+    }
+    let started = p.finally && p.tab.from_seq[2] != 0;
+    match (own.outcome, started, p.tab.end(2)) {
+        (Ok, true, Some((_, Some(sig)))) => Classified::new(
+            Crash,
+            "finally",
+            format!(
+                "the final check (--finally) was killed by signal {sig} ({})",
+                crate::outcome::signal_name(sig)
+            ),
+        ),
+        (Ok, true, Some((s, None))) if s != 0 => Classified::new(
+            Failure,
+            "finally",
+            format!("the final check (--finally) exited {s}"),
+        ),
+        (Ok, true, None) => Classified::new(
+            Crash,
+            "finally",
+            "the final check (--finally) did not end".to_string(),
+        ),
+        // Patina ended the run in the final check (the system never answered it).
+        (Liveness | Timeout, true, None) => Classified::new(
+            own.outcome,
+            "finally",
+            format!("the final check (--finally) did not end: {}", own.message),
+        ),
+        _ => own,
+    }
 }
 
 /// A run's outcome given its own and its checker's verdict.
@@ -916,6 +1159,9 @@ pub fn print_human(r: &Value, dir: &Path) {
     {
         println!("{l}");
     }
+    if let Some(l) = Phases::line(&r["phases"]) {
+        println!("{l}");
+    }
     if let Some(l) = nodes_line(&r["nodes"]) {
         println!("{l}");
     }
@@ -923,7 +1169,39 @@ pub fn print_human(r: &Value, dir: &Path) {
     if let Some(p) = partition_line(&r["nodes"]).filter(|_| !ok) {
         println!("{p}");
     }
-    if !ok {
+    // A failed setup or final check: that command's own output, both streams.
+    let phase = r["stop"]
+        .as_str()
+        .filter(|s| *s == "setup" || *s == "finally")
+        .filter(|s| r["phases"][*s]["from_seq"].is_u64());
+    if let Some(p) = phase {
+        let ph = &r["phases"][p];
+        let inc = ph["incarnation"].as_u64().unwrap_or(0);
+        for (stream, at) in [("stdout", "stdout_at"), ("stderr", "stderr_at")] {
+            let path = dir.join(format!("inc-{inc}")).join(stream);
+            let b = std::fs::read(&path).unwrap_or_default();
+            let from = (ph[at].as_u64().unwrap_or(0) as usize).min(b.len());
+            let text = String::from_utf8_lossy(&b[from..]).into_owned();
+            let lines: Vec<&str> = text.lines().collect();
+            if lines.is_empty() {
+                continue;
+            }
+            let first = lines.len().saturating_sub(STDERR_LINES);
+            println!(
+                "{p} {stream} ({}, {} from byte {from}):",
+                if first > 0 {
+                    format!("last {STDERR_LINES} of {} lines", lines.len())
+                } else {
+                    format!("{} lines", lines.len())
+                },
+                path.display()
+            );
+            for l in &lines[first..] {
+                println!("  {}", l.chars().take(LINE_MAX).collect::<String>());
+            }
+        }
+    }
+    if !ok && phase.is_none() {
         let inc = r["incarnations"].as_u64().unwrap_or(1).max(1) - 1;
         let path = dir.join(format!("inc-{inc}")).join("stderr");
         let text = std::fs::read(&path)
@@ -975,17 +1253,6 @@ pub fn print_human(r: &Value, dir: &Path) {
                 println!("  {}", crate::launcher::attribution::line(f));
             }
         }
-    }
-    let w = &r["faults"]["window"];
-    if w["restarted"] == true {
-        println!(
-            "faults held until setup-complete: the run met the mark and started again held; {}",
-            crate::report::HELD_HINT
-        );
-    } else if w.is_object() && w["from_seq"].is_null() {
-        println!(
-            "faults held until setup-complete, which the program never marked: no fault could act"
-        );
     }
     if let Some(l) = refused_line(r) {
         println!("{l}");

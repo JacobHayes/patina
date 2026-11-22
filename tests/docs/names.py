@@ -203,7 +203,7 @@ def check_file(path, v, bad, seen, doc=False):
                 bad.append(f"{where}: no command patina {cmd}")
                 continue
             seen["commands"].add(cmd)
-            if cmd == "ctl":  # its words are the control call's (`node kill NAME`)
+            if cmd == "ctl":  # its words are the control call's (`kill NAME`)
                 continue
             rest = words[1:]
             if cmd == "log" and rest and not rest[0].startswith("-") \

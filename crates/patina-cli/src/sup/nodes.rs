@@ -13,13 +13,13 @@
 //! a heal opens a link (`Sup::wire_heal`).
 //!
 //! A node goes down three ways, each a `DEC_NODE_DOWN` record: its processes are killed (by the
-//! seed, `--faults kill`, or by `node kill NAME`), each `SIGKILL`ed by the
+//! seed, `--faults kill`, or by `kill NAME`), each `SIGKILL`ed by the
 //! supervisor (`kill_now`) as the kernel kills a process: its sockets close, so peers see the
 //! FIN or RST, its listeners go and connects to them are refused; or its first process ends
 //! by itself, which ends the node (its other processes are killed): an exit status of its
 //! `ok-exit` stops it, another ends the run `failure`, a signal Patina did not send ends it
 //! `crash`. The work tree, `/tmp` and `/dev/shm` stay as they were. A restart (its `restart`
-//! policy after a down time drawn from `down-ms`, or `node start NAME`) asks the keeper for a
+//! policy after a down time drawn from `down-ms`, or `start NAME`) asks the keeper for a
 //! new first process in the node's existing view, with `PATINA_INCARNATION` set to the boot.
 //!
 //! Kills and restarts the clock brings (node events) wait for a point where no request is in
@@ -44,7 +44,7 @@ use std::sync::atomic::Ordering::*;
 pub struct Nodes {
     /// Node events and control calls to act on at the next point where they may
     /// (`node_actions`): (`EVK_NODE_KILL` or `EVK_NODE_START`, node).
-    pending: VecDeque<(u64, usize)>,
+    pub(super) pending: VecDeque<(u64, usize)>,
     /// The supervisor is killing a node's processes: their ends are not the node's own.
     killing: bool,
     /// The node's machine is crashing: its stores were flushed before its `Crash` record, and
@@ -210,7 +210,7 @@ impl Sup {
     }
 
     /// Wait for the `Hello` of slot `slot` and serve it; its reply waits for the scheduler.
-    fn boot_hello(&mut self, slot: usize, node: usize, boot: u64) {
+    pub(super) fn boot_hello(&mut self, slot: usize, node: usize, boot: u64) {
         let limit = self.ctl.config.stall_ms.max(1);
         let start = super::now_ns();
         while self.ctl.sup_word.load(SeqCst) == 0 {
@@ -367,12 +367,12 @@ impl Sup {
     /// Nothing is runnable (`choose`): act on the node kills and restarts that came due but
     /// waited (a restart after a kill in the same call), as at an idle jump. Whether one acted.
     pub(super) fn node_actions_idle(&mut self) -> bool {
-        if self.nodes.pending.is_empty() {
+        if self.nodes.pending.is_empty() && self.phases.pending == 0 {
             return false;
         }
-        let before = self.nodes.pending.len();
+        let before = (self.nodes.pending.len(), self.phases.pending);
         let killed = self.node_actions();
-        if killed.is_empty() && self.nodes.pending.len() == before {
+        if killed.is_empty() && (self.nodes.pending.len(), self.phases.pending) == before {
             return false;
         }
         self.wire_step();
@@ -425,7 +425,29 @@ impl Sup {
             }
         }
         self.nodes.pending = later;
+        // The next phase's root, once the node restarts queued before it have started.
+        if self.phases.pending != 0
+            && !creating
+            && killed.is_empty()
+            && self.nodes.pending.is_empty()
+        {
+            self.phase_start();
+        }
         killed
+    }
+
+    /// Whether node `k`'s start is queued (`node_actions`) or scheduled.
+    pub(super) fn nodes_start_queued(&self, k: usize) -> bool {
+        self.nodes.start_ev[k].is_some() || self.nodes.pending.contains(&(EVK_NODE_START, k))
+    }
+
+    /// Queue node `k`'s start for the next point where nothing is in flight (`node_actions`),
+    /// in place of a restart scheduled later.
+    pub(super) fn node_start_now(&mut self, k: usize) {
+        if let Some(e) = self.nodes.start_ev[k].take() {
+            self.sched.cancel(e);
+        }
+        self.nodes.pending.push_back((EVK_NODE_START, k));
     }
 
     /// Boot `b` of node `k` starts: its crash points (`machine:PERMILLE`, `machine-at:N`,

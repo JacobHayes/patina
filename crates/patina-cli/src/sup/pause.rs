@@ -1,4 +1,4 @@
-//! Pauses of a node (`proto::node`): `node pause NAME` and `node resume NAME` from the driver,
+//! Pauses of a node (`proto::node`): `pause NAME` and `resume NAME` from the driver,
 //! and the seed's (`pause-gap-ms`, `pause-ms`, each node its own).
 //!
 //! A paused node is a frozen machine: none of its threads is picked (`Sched::freeze`, every
@@ -25,8 +25,8 @@
 //! pause of a length drawn from `pause-ms`, the next gap from its end. Every draw is on
 //! `Stream::Node`, keyed by the node, the pause's ordinal in the chain and a sub-key
 //! (`NSUB_PAUSE_*`), so turning pauses on moves no other decision. A start that falls while
-//! faults may not act (outside the fault window: before a `setup-complete` the run waits for,
-//! after `faults-done`), while the node is down, or while a script has paused it, makes no
+//! faults may not act (outside the fault window: before a declared setup ends, after the
+//! faults end), while the node is down, or while a script has paused it, makes no
 //! pause. A start does not keep a run alive (`Live::No`): with every other thread waiting for
 //! nothing, a pause changes nothing. An end does (`Live::Yes`): the node's threads run again.
 //! A script's pause with no resume ahead keeps nothing alive, nor do the paused node's timers
@@ -187,7 +187,7 @@ impl Sup {
         }
     }
 
-    /// `faults-done`: the seed's pause of each node ends now, and no other is drawn.
+    /// The faults end: the seed's pause of each node ends now, and no other is drawn.
     pub(super) fn pauses_done(&mut self) {
         for k in 1..MAX_NODES {
             if let Some(e) = self.pauses.ev[k].take() {
@@ -258,7 +258,7 @@ impl Sup {
         s.store(s.load(Relaxed) + 1, Relaxed);
     }
 
-    /// `node pause NAME` (`NODE_PAUSE`) and `node resume NAME` (`NODE_RESUME`) from the driver.
+    /// `pause NAME` (`NODE_PAUSE`) and `resume NAME` (`NODE_RESUME`) from the driver.
     /// A pause of a node that is down or starting answers `EAGAIN`, of one already paused
     /// `EALREADY`; a resume of one not paused `EALREADY`. A script's resume ends the seed's
     /// pause too; the seed's next is drawn from then.

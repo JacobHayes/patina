@@ -1,4 +1,3 @@
-import json
 import os
 import shlex
 import subprocess
@@ -64,74 +63,61 @@ for label in ["forked-child", "exec-child", "parent-done"]:
         die(f"fork: {label} {r.site(label)}")
 print("a forked and an exec'd child report into the run's table")
 
-# A program that marks setup-complete gets faults only after the mark: a run not told so meets
-# the mark with faults acting, starts again held and says so; one told (--faults-held) starts
-# held, and is the same run. One that never marks gets them from the start, in one pass.
-def held(r):
-    return json.load(open(os.path.join(r.out, "run.json")))["config"].get("faults-held") is True
-
-
-def restarted(r):
-    return r.outcome["faults"]["window"].get("restarted") is True
+# A program that marks setup-complete, in a run that declares it (--setup mark), gets faults
+# only after the mark; the run records where it marked. Declared and never marked, or marked
+# and not declared: an error naming the setup. Never restarted, never inferred.
+def marked_at(r):
+    return (r.outcome.get("phases") or {}).get("setup", {}).get("to_seq")
 
 
 flags = ["--fault", "buggify:setup-point=1000"]
-r = run("02/setup", 1, EXTRA, "setup", flags=flags)
-if r.stdout != "before=00000 after=11111\n" or not r.sdk["setup_complete"]:
-    die(f"faults held until setup-complete: {r.stdout!r} {r.sdk['setup_complete']}")
-if not held(r) or not restarted(r):
-    die(f"a run not told that meets the mark: held {held(r)}, restarted {restarted(r)}")
-told = run("02/setup-told", 1, EXTRA, "setup", flags=flags + ["--faults-held"])
-if not held(told) or restarted(told) or told.outcome["digest"] != r.outcome["digest"]:
-    die(f"a told run: held {held(told)}, restarted {restarted(told)}, digest {told.outcome['digest']} vs {r.outcome['digest']}")
-if held(alone) or restarted(alone) or alone.outcome["faults"]["window"]["from_seq"] != 0:
-    die(f"a program that never marks setup-complete: held {held(alone)}, window {alone.outcome['faults']['window']}")
-print("faults held until setup-complete: quiet before the mark, firing after, the first run restarted once; never marked: from the start")
+r = run("02/setup", 1, EXTRA, "setup", flags=flags + ["--setup", "mark"])
+if r.cls != "ok" or r.stdout != "before=00000 after=11111\n" or not r.sdk["setup_complete"] or not marked_at(r):
+    die(f"faults after a declared setup-complete: {r.cls} {r.stdout!r} {r.outcome.get('phases')}")
+never = run("02/setup-never", 1, C, "script", flags=flags + ["--setup", "mark"])
+if never.cls != "error" or never.outcome.get("stop") != "setup" or never.status != 2:
+    die(f"declared and never marked: {never.cls} {never.outcome.get('stop')} exit {never.status}")
+undeclared = run("02/setup-undeclared", 1, EXTRA, "setup", flags=flags)
+if undeclared.cls != "error" or undeclared.outcome.get("stop") != "setup-mark" or "setup = \"mark\"" not in undeclared.outcome["message"]:
+    die(f"marked and not declared: {undeclared.cls} {undeclared.outcome.get('stop')} {undeclared.outcome['message']}")
+if alone.outcome.get("phases") is not None:
+    die(f"a run without a setup: phases {alone.outcome['phases']}")
+print("setup = mark: quiet before the mark, firing after; never marked and undeclared marks are errors")
 
-# The rerun line of a held run (its finding: a checker that always fails) reproduces it exactly,
-# held from the start.
-judged = run("02/setup-judged", 1, EXTRA, "setup", flags=flags + ["--check", "false"])
+# The rerun line of a run with a declared setup (its finding: a checker that always fails)
+# reproduces it exactly.
+judged = run("02/setup-judged", 1, EXTRA, "setup", flags=flags + ["--setup", "mark", "--check", "false"])
 rep = report(judged)
 line = shlex.split(rep["groups"][0]["rerun"])
 again = os.path.join(RUNS, "02/setup-rerun")
 subprocess.run(["rm", "-rf", again], check=True)
 subprocess.run([PATINA, "run", "--out", again, *line[2:]], capture_output=True, text=True, timeout=120)
 again = Run(again)
-if again.outcome["digest"] != judged.outcome["digest"] or not held(again) or restarted(again):
-    die(f"the rerun line {line}: digest {again.outcome['digest']} vs {judged.outcome['digest']}, restarted {restarted(again)}")
-print("the rerun line of a held run is the run, held from the start")
+if again.outcome["digest"] != judged.outcome["digest"] or marked_at(again) != marked_at(judged):
+    die(f"the rerun line {line}: digest {again.outcome['digest']} vs {judged.outcome['digest']}")
+print("the rerun line of a run with setup = mark is the run")
 
-# A sweep's runs are its seeds' runs: untold, each restarts once at the mark, the same digests as
-# the single runs at any width; its summary names the flag once. Told, no run restarts.
-single = {s: run(f"02/setup-{s}", s, EXTRA, "setup", flags=flags) for s in range(1, 7)}
-if not all(restarted(x) and held(x) and "--faults-held" in x.printed for x in single.values()):
-    die("an untold run of a program that marks: not every one restarted, held, with the flag named")
+# A sweep's runs are its seeds' runs, the same digests as the single runs at any width.
+single = {s: run(f"02/setup-{s}", s, EXTRA, "setup", flags=flags + ["--setup", "mark"]) for s in range(1, 7)}
 
 
-def sweep(j, more=()):
-    out = os.path.join(RUNS, f"02/setup-sweep-j{j}{''.join(more)}")
+def sweep(j):
+    out = os.path.join(RUNS, f"02/setup-sweep-j{j}")
     subprocess.run(["rm", "-rf", out], check=True)
     p = subprocess.run([PATINA, "sweep", "--seeds", "1..6", "-j", j, "--keep", "all", "--out", out,
-                        "--mount", GUESTS + ":/guest:copy", *flags, *more, "--", *EXTRA, "setup"],
+                        "--mount", GUESTS + ":/guest:copy", *flags, "--setup", "mark", "--", *EXTRA, "setup"],
                        capture_output=True, text=True, timeout=300)
     runs = {int(d.removeprefix("seed-")): Run(os.path.join(out, d)) for d in os.listdir(out) if d.startswith("seed-")}
     if len(runs) != 6:
         die(f"sweep -j {j}: exit {p.returncode}: {sorted(runs)} {p.stderr[-300:]}")
-    return runs, p.stdout
+    return runs
 
 
 for j in ["1", "8"]:
-    runs, printed = sweep(j)
+    runs = sweep(j)
     if {s: x.outcome["digest"] for s, x in runs.items()} != {s: x.outcome["digest"] for s, x in single.items()}:
         die(f"sweep -j {j}: digests differ from the single runs'")
-    if not all(restarted(x) for x in runs.values()) or printed.count("--faults-held") != 1:
-        die(f"sweep -j {j}: restarted {[s for s, x in runs.items() if restarted(x)]}, flag named {printed.count('--faults-held')} times")
-runs, printed = sweep("8", ["--faults-held"])
-if any(restarted(x) for x in runs.values()):
-    die(f"a told sweep: restarted {[s for s, x in runs.items() if restarted(x)]}")
-if {s: x.outcome["digest"] for s, x in runs.items()} != {s: x.outcome["digest"] for s, x in single.items()}:
-    die("a told sweep: digests differ from the untold runs'")
-print("a sweep's runs are its seeds' single runs, digest for digest at -j 1 and -j 8; told, none restarts")
+print("a sweep's runs are its seeds' single runs, digest for digest at -j 1 and -j 8")
 
 out = os.path.join(RUNS, "02/verify")
 # lint-allow: seed — the guest's `fail` mode violates its assertion on every seed

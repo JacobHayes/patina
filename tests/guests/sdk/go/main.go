@@ -102,9 +102,9 @@ func main() {
 		patina.Mark("ack 2")
 	case "control":
 		// A run with nodes: the control call from the driver, and from a node ("control node").
-		words := []string{"net cut driver c", "net heal", "net cut driver nobody"}
+		words := []string{"partition driver c", "heal", "partition driver nobody"}
 		if len(os.Args) > 2 && os.Args[2] == "node" {
-			words = []string{"net heal"}
+			words = []string{"heal"}
 		}
 		for _, w := range words {
 			if err := patina.Control(w); err != nil {

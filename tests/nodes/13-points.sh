@@ -16,6 +16,7 @@
 o=$RUNS/13-points; mkdir -p "$o"
 for v in ok early; do
     rm -f "$o/$v.toml"
+    printf '[run]\nsetup = "mark"\n' >"$o/$v.toml"  # the driver marks setup-complete
     conf "$o/$v.toml" a python3 /guest/ack2.py a
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
 done

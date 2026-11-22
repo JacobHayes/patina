@@ -53,52 +53,77 @@ $ patina sweep --seeds 1..20 --faults net --out patina-out/tcp -- ./sockets chun
 faults: not applicable (a class's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
 
-## When faults act: setup-complete and faults-done
+## When faults act: setup, main command, final check
 
-Most programs have a setup that is not under test (create the schema, start the cluster, load
-the fixture) and final checks that should see a quiet system (read everything back, compare
-replicas). Mark both ends, with the SDK (`setup_complete()`, `faults_done()`; `patina guide
-sdk`) or from a script (`patina ctl mark setup-complete`, `patina ctl mark faults-done`).
+Most tests have a setup that is not under test (start the server, create the schema, load the
+fixture) and a final check that should see a settled system (read everything back, compare
+replicas). A run has up to three commands, run one after the other inside it: the same sandbox,
+seed and log.
 
-Faults act from the start of a run, unless it is told that the program marks `setup-complete`
-(`--faults-held`, `[run] faults-held = true`): then from that mark. A run not told that meets
-the mark starts again told, which `run.json` and its rerun line record, so it sets up twice: set
-`[run] faults-held = true` in `patina.toml` for a program that marks, as the summary says. Every
-run of a sweep is the `patina run` of its seed: one run tells another nothing. A run told that
-never makes the mark has no faults (its summary says so). Faults stop at `faults-done`: after it
-nothing more is injected, a partition heals, a paused node resumes, and no node is crashed
-again. Crash points count only between the two marks (`result.json`'s `faults.window`).
+    --setup 'CMD ARGS'      [run] setup = "CMD ARGS" or ["CMD", "ARG", ...]
+    -- CMD ARGS             the main command
+    --finally 'CMD ARGS'    [run] finally = "CMD ARGS" or ["CMD", "ARG", ...]
 
-**Put the system under test on a node; the driver is the harness.** The command after `--`
-waits for the system, marks the setup done, drives the workload, marks the faults done, and
-checks:
+- **The setup** runs without faults or crash points. When it exits 0 the main command starts,
+  and what it left running (a server started in the background) keeps running, faulted from
+  then on. A setup that exits nonzero, is killed, or hangs until the run's limit (`[run]
+  time-limit`, `--timeout`) ends the run `error` (stop `setup`), showing its output: a harness
+  problem, not a finding. After a machine crash the machine runs the setup again, then the main
+  command, so a setup must be safe to repeat on the crashed disk; a setup that fails there is a
+  finding (stop `setup`).
+- **The main command** runs under the faults; crash points count only in it, so
+  `--crash-points` and `minimize` crash only the work.
+- **The final check** runs only if the main command ended by itself with an ok status (0 or an
+  `--ok-exit` status); otherwise the run ends with the main command's outcome. Before it starts
+  the faults stop for the rest of the run: partitions and cuts heal, paused nodes resume, a node
+  whose restart policy has a restart scheduled starts at once (one a control call took down stays
+  down), and nothing more is injected. A nonzero exit is a
+  `failure` (stop `finally`), with its output. Recovery takes time, so make the check poll
+  until the system answers rather than assume it already does.
+
+`--finally` runs inside the run against the live system; `--check` runs on the host after the
+run, over its recorded output and final disk (`patina guide checks`).
+
+A run with a setup and a final check is as deterministic as one without: the same seed gives the
+same run, and `replay` repeats it exactly. The only difference is that no fault is injected in
+the setup or the final check.
+
+<!-- transcript phases
+dir: /tmp/phases
+setup: mkdir g && cp "$GUESTS/phases.py" g/
+exact-only: the faults one seed draws
+-->
+```text
+$ patina run --mount g:/guest:copy --faults disk,net --setup 'python3 /guest/phases.py start' --finally 'python3 /guest/phases.py check 20 127.0.0.1' -- python3 /guest/phases.py work 20 127.0.0.1
+ok (exit): the program exited 0
+guest: exit 0
+phases: setup exit 0, main exit 0, finally exit 0
+faults injected: 42 (net-delay 41, net-reset 1)
+run directory: /tmp/phases/patina-out/run-0
+replay: patina replay /tmp/phases/patina-out/run-0
+```
+
+`phases.py` (in `tests/guests/nodes`) starts a store in the background, puts records through it,
+and checks they are all there. `result.json`'s `phases` has each command's start and end
+(sequence numbers), its exit and where its output begins; `patina explain` shows the boundaries.
+
+**Put the system under test on a node; the driver is the harness**: its setup waits for the
+system, its main command drives the workload, its final check verifies (`patina guide nodes`).
+A run with one node costs about what a run without nodes does.
 
 <!-- no-run node-harness: needs a database to test, which the repository does not ship -->
 ```sh
-patina sweep --seeds 1..200 --faults all,crash --faults-held --node db='./db --listen :7000' -- ./harness
+patina sweep --seeds 1..200 --faults all,crash --node db='./db --listen :7000' \
+    --setup './wait-for db:7000' --finally './verify db:7000' -- ./workload db:7000
 ```
 
-<!-- no-run harness-script: the driver the sweep above runs -->
-```sh
-#!/bin/sh
-# harness: the driver
-until nc -z db 7000; do sleep 0.1; done
-patina ctl mark setup-complete
-./workload db:7000
-patina ctl mark faults-done
-./verify db:7000
-```
-
-A run with one node costs about what a run without nodes does.
-
-A script marks the same way in a run of one machine (`patina` is on the `PATH` of every run):
-
-<!-- transcript mark-script
-dir: /tmp/marks
--->
-```sh
-patina run --faults disk --faults-held -- /bin/sh -c 'patina ctl mark setup-complete && echo work >out.txt; patina ctl mark faults-done'
-```
+**A program that is its own harness** can mark the end of its setup itself: declare it with
+`[run] setup = "mark"` (`--setup mark`) and call the SDK's `setup_complete()` (`patina guide
+sdk`); faults act from the mark. A mark the run does not declare, or a declared one never
+reached, ends the run `error` naming the fix; a program named `mark` is given by its path
+(`--setup ./mark`). `faults_done()` stops injecting from where it is called and ends the seed's
+partitions and pauses; it needs no declaration, and unlike `--finally` it neither heals cuts
+made by control calls nor starts down nodes.
 
 ## What the keys do
 

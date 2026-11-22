@@ -1,7 +1,7 @@
 # 18. Nodes: each node's realtime clock. clock-skew-ms gives each boot of a node an offset
 # (here exactly 1 s, ahead or behind): the node's realtime clock and the times it writes on
 # its files carry it, its monotonic clock does not, the driver's clock has none; result.json
-# and the events show each node's skew. `clock step` (tests/guests/nodes/clockstep.c) moves a
+# and the events show each node's skew. `clock NAME` (tests/guests/nodes/clockstep.c) moves a
 # node's clock as setting the clock does on Linux (clock_nanosleep(2), timerfd_create(2)):
 # absolute realtime sleeps, condition-variable waits and timerfds move with it (a +5 s step
 # at 1 s fires timers due at 10 s at 5 s; a -5 s step at 20 s moves one due at 22 s to 27 s),

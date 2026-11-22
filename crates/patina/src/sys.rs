@@ -161,7 +161,7 @@ fn call(
 }
 
 /// A named point in the run's log, any `&str` (not declared ahead): `mark("ack 17")`;
-/// `setup-complete` and `faults-done` bound the faults.
+/// `setup-complete` (in a run that declares `setup = "mark"`) and `faults-done` bound the faults.
 pub fn mark(label: &str) {
     if state() & ON != 0 {
         call(OP_MARK, KIND_REACHABLE, false, label, b"", &mut 0, 0, 0);

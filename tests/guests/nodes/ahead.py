@@ -89,9 +89,9 @@ def driver(case):
     elif case == "heal":
         c = connect()
         time.sleep(3)
-        subprocess.run(["patina", "ctl", "mark", "in-the-cut"], check=True)
-        patina.control("net cut driver b")
-        patina.control("net heal")
+        subprocess.run(["patina", "ctl", "heal", "--from", "b", "--to", "driver"], check=True)
+        patina.control("partition driver b")
+        patina.control("heal")
         c.sendall(b"ping\n")
         line = c.makefile("r").readline().strip()
         if line != "pong":
@@ -101,7 +101,7 @@ def driver(case):
         c = connect()
         time.sleep(3)
         t0 = time.monotonic()
-        subprocess.run(["patina", "ctl", "mark", "faults-done"], check=True)
+        patina.faults_done()
         c.sendall(b"ping\n")
         line = c.makefile("r").readline().strip()
         if line != "pong" or time.monotonic() - t0 > 1:

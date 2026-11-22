@@ -18,6 +18,7 @@
 o=$RUNS/14-points-sweep; mkdir -p "$o"
 for v in ok early; do
     rm -f "$o/$v.toml"
+    printf '[run]\nsetup = "mark"\n' >"$o/$v.toml"  # the driver marks setup-complete
     conf "$o/$v.toml" a python3 /guest/ack2.py a
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
 done
@@ -96,6 +97,7 @@ PY
 # boots crashes b twice, whatever the seed and host: first at that directory sync (harmless),
 # then at the create of `log` for put 1, which a has acknowledged.
 o2=$o/later; mkdir -p "$o2"; rm -f "$o2/c.toml"
+printf '[run]\nsetup = "mark"\n' >"$o2/c.toml"
 conf "$o2/c.toml" a python3 /guest/ack2.py a
 conf "$o2/c.toml" b python3 /guest/ack2.py b lazy init
 printf 'max-incarnations = 3\n' >>"$o2/c.toml"

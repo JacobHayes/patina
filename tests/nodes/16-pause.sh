@@ -1,4 +1,4 @@
-# 16. Nodes: pauses (tests/guests/nodes/pause.py). The driver pauses node b with `node pause b`
+# 16. Nodes: pauses (tests/guests/nodes/pause.py). The driver pauses node b with `pause b`
 # and resumes it: a connection to b survives; b answers nothing while paused and at once after,
 # its monotonic clock showing the time paused and its ticker's timers having fired late, not
 # early; a sender's TCP_USER_TIMEOUT fires while b is paused (ETIMEDOUT); a second pause and a

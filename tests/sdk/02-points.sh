@@ -3,10 +3,9 @@
 #    adding a second point leaves the first one's decisions alone (draws keyed by label);
 #    buggify:LABEL=1000 fires every time and =0 never; a `sometimes` holds on some seeds and not
 #    others; a child started by fork and one by execve report into the run's table; with any
-#    fault configured, no point fires before `setup-complete` and all do after: a run not told
-#    that the program marks restarts once at the mark, a told one (--faults-held) is the same
-#    run, the rerun line reproduces it, and a sweep's runs are those single runs at -j 1 and
-#    -j 8; a program that never marks gets faults from the start; a violation replays
-#    identically.
+#    fault configured and `--setup mark`, no point fires before `setup-complete` and all do
+#    after, the rerun line reproduces the run, and a sweep's runs are those single runs at -j 1
+#    and -j 8; declared and never marked, or marked and not declared, the run is an error; a
+#    violation replays identically.
 #@ tier=quick budget=30
 exec python3 -I "$(dirname "$0")/lib/points.py"

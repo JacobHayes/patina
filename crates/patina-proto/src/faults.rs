@@ -247,15 +247,16 @@ pub struct FaultCfg {
     pub delay_max_ns: u64,
     pub mem_error_permille: u64,
     pub mem_error_at: u64,
-    /// No fault before this sequence number: a run held until setup (one whose program marked
-    /// `setup-complete` in an earlier pass, `Config::faults_held`) starts with the maximum, and
-    /// the `setup-complete` mark lowers it to the mark's own.
+    /// No fault before this sequence number: a run that declares a setup (`[run] setup`) starts
+    /// with the maximum, lowered where the setup ends (the setup command's exit 0, or the
+    /// program's `setup-complete` mark).
     pub fault_after_seq: u64,
-    /// No fault from this sequence number on: the `faults-done` mark's own (0: no mark yet).
+    /// No fault from this sequence number on: where the faults end (a `faults-done` mark, or
+    /// the main command's end in a run with `--finally`; 0: not yet).
     pub fault_until_seq: u64,
-    /// 1: the run's faults act from its start and it has faults, so a `setup-complete` mark
-    /// ends this pass (`ctl::LIFE_RESTART`) and the run starts again held until setup.
-    pub restart_at_setup: u64,
+    /// 1: the run declares that the program marks `setup-complete` (`[run] setup = "mark"`);
+    /// 0: a `setup-complete` mark ends the run (`ctl::LIFE_SETUP_UNDECLARED`).
+    pub setup_mark: u64,
     /// `CRASH_*`.
     pub crash_kind: u64,
     /// Per-mille rate at each crash point (when `crash_at` is 0).

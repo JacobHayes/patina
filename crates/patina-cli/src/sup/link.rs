@@ -2,19 +2,19 @@
 //! and the seed's partition schedule.
 //!
 //! A link is an ordered pair of nodes. It is cut while any of four layers says so: a script's
-//! `net cut` (`Op::Net`, `nodes::Sup::net_op`), a partition the seed drew, a machine crash of
+//! `partition` (`Op::Net`, `nodes::Sup::net_op`), a partition the seed drew, a machine crash of
 //! either node (until the node is back, `nodes::Sup::node_crash`), or a pause of either node
 //! (until its resume, `pause`). The wire
 //! asks `link_cut` when it stamps a delivery, and re-stamps what a cut held when a layer opens
-//! a link (`wire_heal`); `net heal` clears scripted cuts only.
+//! a link (`wire_heal`); the script's `heal` clears scripted cuts only.
 //!
 //! The partition schedule (`partition-gap-ms`, `partition-ms`) is a chain
 //! of node events: a start draws a shape and two sides of the nodes the link faults act on,
 //! cuts the links between them for a drawn length, and an end opens them and draws the gap to
 //! the next start. Every draw is on `Stream::Partition`, keyed by the partition's ordinal and
 //! a sub-key (`proto::node::PSUB_*`), so turning partitions on moves no other decision and no
-//! draw depends on traffic. A start that falls while faults are off (before `setup-complete`)
-//! makes no partition; the next is drawn. A start
+//! draw depends on traffic. A start that falls while faults are off (before a declared setup
+//! ends) makes no partition; the next is drawn. A start
 //! does not keep a run alive (`Live::No`): a run that waits only for it is deadlocked. An end
 //! does, since it may release held traffic.
 //!
@@ -94,8 +94,8 @@ impl Sup {
     /// is only loopback, and they do; with nodes, by `net-links`: between two nodes other than
     /// the driver, also the driver's links, also each node's loopback.
     pub(super) fn link_faulted(&self, from: usize, to: usize) -> bool {
-        // Outside the fault window (before setup-complete in a run that waits for it, after
-        // faults-done) no link is faulted.
+        // Outside the fault window (before a declared setup ends, after the faults end) no
+        // link is faulted.
         if !self.faults_on() {
             return false;
         }
@@ -269,7 +269,8 @@ impl Sup {
         self.part_next(k + 1);
     }
 
-    /// `faults-done`: the seed's partition in force heals now, and no other is drawn.
+    /// The faults end (`faults-done`, or the main command's end before `--finally`): the
+    /// seed's partition in force heals now, and no other is drawn.
     pub(super) fn partitions_done(&mut self) {
         if let Some(e) = self.links.ev.take() {
             self.sched.cancel(e);
@@ -279,6 +280,26 @@ impl Sup {
             if let Some(e) = self.links.ev.take() {
                 self.sched.cancel(e);
             }
+        }
+    }
+
+    /// The faults stop before the final check (`phase::settle`): every link the script cut
+    /// opens.
+    pub(super) fn heal_all(&mut self) {
+        let n = self.node_count();
+        let mut opened = vec![];
+        for a in 0..n {
+            for b in 0..n {
+                let was = self.link_cut(a, b);
+                self.links.script[a] &= !(1u64 << b);
+                if was && !self.link_cut(a, b) {
+                    opened.push((a, b));
+                }
+            }
+        }
+        self.node_tab().cut_at_end = self.links.script;
+        if !opened.is_empty() {
+            self.wire_heal(&opened);
         }
     }
 

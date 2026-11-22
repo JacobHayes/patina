@@ -4,7 +4,7 @@
     pause.py b               serve :7000; each line read is answered with `t=MS gap=MS`, b's
                              monotonic clock and the longest gap its ticker (a thread that
                              sleeps 100 ms in a loop) has seen
-    pause.py driver script   pause and resume b with `node pause b` / `node resume b`, checking
+    pause.py driver script   pause and resume b with `pause b` / `resume b`, checking
                              what the driver and b see
     pause.py driver seed S   ask b every 500 ms for S seconds of virtual time (the seed's
                              pauses act); print the longest wait for an answer
@@ -101,8 +101,8 @@ def ctl(words, want=0):
 def script():
     c, f = connect()
     a = ask(c, f)
-    ctl("node pause b")
-    ctl("node pause b", errno.EALREADY)
+    ctl("pause b")
+    ctl("pause b", errno.EALREADY)
     t0 = time.monotonic()
     c.sendall(b"?\n")
     c.settimeout(2)
@@ -112,8 +112,8 @@ def script():
     except (TimeoutError, socket.timeout):
         pass
     waited = time.monotonic() - t0
-    ctl("node resume b")
-    ctl("node resume b", errno.EALREADY)
+    ctl("resume b")
+    ctl("resume b", errno.EALREADY)
     c.settimeout(None)
     # The makefile reader may be left unusable by the timeout: read from a fresh one.
     f = c.makefile("r")
@@ -131,7 +131,7 @@ def script():
     d, g = connect()
     ask(d, g)
     d.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 1000)
-    ctl("node pause b")
+    ctl("pause b")
     t0 = time.monotonic()
     d.sendall(b"?\n")
     try:
@@ -141,17 +141,17 @@ def script():
         if e.errno != errno.ETIMEDOUT:
             fail(f"read while b is paused: {e}")
     gave = time.monotonic() - t0
-    ctl("node resume b")
+    ctl("resume b")
     print(f"ok sender: TCP_USER_TIMEOUT=1000 gave up after {int(gave * 1000)} ms with ETIMEDOUT",
           flush=True)
     a = ask(c, f)
     print("ok after: the first connection still answers", flush=True)
 
     # A paused node can be killed; a pause of a node that is down is EAGAIN.
-    ctl("node pause b")
-    ctl("node kill b")
-    ctl("node pause b", errno.EAGAIN)
-    ctl("node start b")
+    ctl("pause b")
+    ctl("kill b")
+    ctl("pause b", errno.EAGAIN)
+    ctl("start b")
     c, f = connect()
     ask(c, f)
     print("ok kill: a paused node killed and started again; a pause while down EAGAIN", flush=True)
@@ -174,7 +174,7 @@ def seed(seconds):
 def stuck():
     c, f = connect()
     ask(c, f)
-    ctl("node pause b")
+    ctl("pause b")
     # Nothing sent and not acknowledged: no give-up clock runs, only b could end this wait.
     c.recv(1)
 

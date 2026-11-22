@@ -346,11 +346,11 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   counter name under the prefix. Without nodes none of this runs.
 - **Control calls.** `sdk::OP_CONTROL` carries words. The runtime parses them against the node
   table (`proto::node::parse`; the supervisor cannot read a node process's memory, which is not
-  its descendant), refuses `net` and `node` outside the driver's node (`EPERM`), and sends
+  its descendant), refuses every call outside the driver's node (`EPERM`), and sends
   `Op::Net` [verb, from set, to set, both] or `Op::Node` [verb, node]; the call is logged with
   its words as an SDK call is.
 - **Cuts.** The supervisor keeps two matrices of cut links (`sup/link.rs`): the script's
-  (`net cut`) and the seed's (partitions); a link is cut while either says so, and `net heal`
+  (`partition`) and the seed's (partitions); a link is cut while either says so, and `heal`
   clears the script's only. The wire consults them when it stamps a delivery: an item on a cut
   direction is queued with no time (`HELD`) and the direction is held; when a layer opens a
   link, held items are re-stamped from that time in order (`DEC_WIRE_HEAL`). A direction held
@@ -384,9 +384,9 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   (`DEC_NODE_DOWN` [node, incarnation, how, status, processes killed, down time]): the seed
   kills it (`--faults kill`: a node event `crash-gap-ms` after each start that keeps a run
   alive while faults may act (`Live::AfterSetup`; outside the fault window it is only drawn
-  again, and after `faults-done` it does nothing), keyed on
+  again, and after the faults end it does nothing), keyed on
   `Stream::Node` by node, incarnation and try, with an `Injected` record `INJ_NODE_KILL`
-  counted as `crash`), the driver does (`node kill NAME`, `Op::Node`), or its first
+  counted as `crash`), the driver does (`kill NAME`, `Op::Node`), or its first
   process ends by itself. A kill `SIGKILL`s every live process of the node through the
   supervisor's own kill (`kill_now`, with its exit barrier: the kernel has closed every
   descriptor before anything else happens); a socket's end is then
@@ -404,7 +404,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   or thread the runtime is creating (its `Forked` not yet served) or a vfork child has not
   said `Hello`: until then the new task is in no table, and a kill would miss it. A restart (an
   event that keeps a run alive, `down-ms` after a down its `restart` policy follows, or the
-  driver's `node start`) waits for the next such point after a kill in the same one (with
+  driver's `start`) waits for the next such point after a kill in the same one (with
   nothing runnable, at once: `node_actions_idle`), takes the lowest free slot (one an exited
   thread left is replaced), clears the node's `filter_installed` bit (a new process tree needs
   the filter) and asks the keeper for incarnation K: the keeper keeps every node's mount, UTS
@@ -431,7 +431,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   the log into one plain log per disk (`durability::log::split_nodes`: `node/NAME/inc-K/`, K
   the boot the disk began with), which `patina log ops`, the self-check (`check::disks`, run
   for every run with nodes) and `materialise` read as a single machine's.
-- **Machine crash.** `node crash NAME` (`NODE_CRASH`) or the seed under `--faults crash`
+- **Machine crash.** `crash NAME` (`NODE_CRASH`) or the seed under `--faults crash`
   (`NodeConf::crash` `CRASH_NODE_MACHINE`, drawn as the process kills are) runs
   `nodes::node_crash` at a node action point: the node's mappings are flushed and a `Crash`
   record (`[CRASH_MACHINE, boot, point]`, tagged; point 0 for a crash at a drawn time or a
@@ -491,7 +491,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   the next disk, and counts what it lost against the disk's live tree (`downs[].lost`, the
   `crash` event). A node's points count only its own disk's changes and syncs, so its N-th
   point stays at the same place in its own work when another node's crashes change.
-- **Pause.** `node pause NAME` / `node resume NAME` (`Op::Node`, `NODE_PAUSE`,
+- **Pause.** `pause NAME` / `resume NAME` (`Op::Node`, `NODE_PAUSE`,
   `NODE_RESUME`) and the seed's pauses (`pause-gap-ms`, `pause-ms`, each node's own:
   `NodeConf::pause_*`) freeze a node's machine (`sup/pause.rs`). The scheduler keeps a set of
   frozen slots beside the runnable one (`Sched::frozen`); a frozen slot keeps its state, its
@@ -527,7 +527,7 @@ is written (`n == 0`), no record of any node is made, and its seeds and digests 
   converts an absolute realtime deadline to virtual time (`realtime_to_vclock`). The driver's
   offset is 0. Monotonic and boot-time clocks have none, and no clock has a rate of its own.
   The offset is each boot's skew (`clock-skew-ms`, drawn when the boot starts on
-  `Stream::Node` keyed by node, boot and `NSUB_SKEW`) plus the driver's steps (`clock step`,
+  `Stream::Node` keyed by node, boot and `NSUB_SKEW`) plus the driver's steps (`clock NAME`,
   `Op::Node` `CLOCK_STEP` with the change as its third argument), each a decision record
   (`DEC_NODE_CLOCK` [node, boot, how, change, offset]); a node without either writes none. A
   step moves the node's absolute realtime deadlines: the runtime says which deadline is one in
@@ -1118,20 +1118,33 @@ plan is in `run.json`.
 The fault window is two sequence numbers in the run's `FaultCfg`: `fault_after_seq` and
 `fault_until_seq` (`FaultCfg::in_window`). Every runtime injection, crash point and fault
 point, and every supervisor fault (link faults through `link_faulted`, partition and pause
-draws, the seed's node kills, clock skew at boot) asks it. The runtime's `mark`
-(`sys/sdk.rs`) sets them: `faults-done` writes `fault_until_seq` and tells the supervisor
-(`Op::Lifecycle`, `LIFE_FAULTS_DONE`), which heals a seed partition in force, ends seed
-pauses (`PEND_DONE`) and cancels their next draws.
+draws, the seed's node kills, clock skew at boot) asks it. The phases move it, under the turn:
 
-A run is told that the program marks `setup-complete` (`Config::faults_held`: `--faults-held`,
-`[run] faults-held`) or not. Told, `fault_after_seq` starts at the maximum for the mark to
-lower to its own sequence number. A run not told whose plan injects anything ends at the mark if
-it comes (`restart_at_setup`, `LIFE_RESTART`, verdict `setup-restart`) and starts again told
-(`launch::run_one`; `result.json`'s `faults.window.restarted`). Being told is an input like the
-seed: `run.json` records it, and a replay and the rerun line run it as recorded; nothing on the
-host decides it. A sweep learns nothing: each of its runs is the `patina run` of its seed, told
-only if the sweep's command or configuration says so; a crash point's child is told as its
-base ran. The run's and the sweep's summaries say how to be told (`report::HELD_HINT`). Both marks carry over to later incarnations (`launcher::incarnations`).
+- **Phases** (`sup/phase.rs`). A run with `--setup` or `--finally` runs its commands one after
+  the other as the driver's root process, in one sandbox and log; `PhaseCtl` (in `Ctl`) holds
+  the phase and, per phase, its start and end sequence numbers, its wait status and where its
+  output starts. A root's end is its `ProcExit` request, or its kill (`kill_now`); `phase_end`
+  logs `DEC_PHASE` [ended phase, wait word, next phase] and, at the setup's ok end, sets
+  `fault_after_seq` to that record's number (the launcher starts it at the maximum for a
+  declared setup). At an ok end of the main command before a final check it sets
+  `fault_until_seq` and settles the system (`settle`): the seed's partition and pauses end, the
+  script's cuts heal and its pauses end, and each down node with a restart scheduled by its
+  policy is started now (one a control call took down, or past `max-incarnations`, stays down).
+  The next root starts at the next point where nothing is being created (`node_actions`), after
+  the nodes it started, in a free slot, forked as the first root was. Nothing host-timed decides
+  a transition: each is a request or a node action under the turn. Every incarnation starts with
+  the setup (a crash comes only in the main phase), so the restarted machine boots without what
+  an earlier setup started; the launcher resets `fault_after_seq` to the maximum for each
+  incarnation with a declared setup, and in mark mode the program marks again. `result::phased`
+  classifies: a setup that did not end ok is `error` (stop `setup`), or after a machine crash
+  the finding (stop `setup`), and after an ok main command a failed final check is the finding
+  (stop `finally`).
+- **Marks** (`sys/sdk.rs`). `[run] setup = "mark"` sets `FaultCfg::setup_mark`: the first
+  `setup-complete` lowers `fault_after_seq` from the maximum to its own number. Undeclared, it
+  ends the run (`Op::Lifecycle`, `LIFE_SETUP_UNDECLARED`, verdict `setup-mark`, outcome
+  `error`). `faults-done` writes `fault_until_seq` and tells the supervisor
+  (`LIFE_FAULTS_DONE`), which heals a seed partition in force, ends seed pauses (`PEND_DONE`)
+  and cancels their next draws.
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's

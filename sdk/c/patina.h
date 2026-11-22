@@ -12,7 +12,7 @@
  *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--faults buggify)
  *   PATINA_DELAY("label", max_ns)          maybe sleep a seeded virtual time (0: default range)
  *   patina_mark(label), patina_setup_complete(), patina_faults_done(), patina_is_simulated()
- *   patina_control("net cut a b")          a control call: 0, or -errno (below)
+ *   patina_control("partition a b")        a control call: 0, or -errno (below)
  *
  * Labels of the macros are string literals: each expansion declares its site in the ELF section
  * `patina_sites` (so a site never reached is still reported) and keeps one static byte, so a
@@ -28,19 +28,18 @@
  *   8 COMPUTE_HELLO  arg = version 1 | kinds << 8 (1 edge, 2 access, 4 compare) -> cell address
  *   9 COMPUTE_POINT  arg = 0: the cell reached 0 -> 0, the cell refilled
  * Op 10 CONTROL takes no header: the payload is the words, separated by blanks:
- *   net cut A B                  both directions between the node sets A and B are cut
- *   net cut --from A --to B      one direction: what A sends to B is held
- *   net heal [A B | --from A --to B]   heal those links; no sets: every scripted cut
- *   node crash NAME              crash node NAME's machine: what it had not synced may be lost,
+ *   partition A B                both directions between the node sets A and B are cut
+ *   partition --from A --to B    one direction: what A sends to B is held
+ *   heal [A B | --from A --to B] heal those links; no sets: every scripted cut
+ *   crash NAME                   crash node NAME's machine: what it had not synced may be lost,
  *                                its peers are not told (-EALREADY: it is down)
- *   node kill NAME               kill every process of node NAME (-EALREADY: it is down)
- *   node start NAME              start node NAME's command again (-EALREADY: it is up or
+ *   kill NAME                    kill every process of node NAME (-EALREADY: it is down)
+ *   start NAME                   start node NAME's command again (-EALREADY: it is up or
  *                                starting; -EAGAIN: past 64 incarnations)
- *   node pause NAME              freeze node NAME's machine (-EALREADY: paused; -EAGAIN: down
+ *   pause NAME                   freeze node NAME's machine (-EALREADY: paused; -EAGAIN: down
  *                                or starting)
- *   node resume NAME             let it run again (-EALREADY: not paused)
- *   clock step NAME +90s         move node NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
- *   mark LABEL                   the same as patina_mark
+ *   resume NAME                  let it run again (-EALREADY: not paused)
+ *   clock NAME +90s              move node NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
  * A set is node names joined by commas ("driver" is the command after --), or "rest": every
  * node the other set does not name. Answers: 0; -EPERM when a process outside the driver's node
  * acts on the network, a node or a clock; -ENOENT for an unknown node; -EINVAL for other words
@@ -165,8 +164,9 @@ static inline int64_t patina__knob(const char *label, int64_t def, int64_t lo, i
     return patina__call(PATINA_OP_KNOB, PATINA_KIND_KNOB, 0, label, 0, &v, lo, hi) == 0 ? v : def;
 }
 
-/* A named point in the run's log; "setup-complete" (no fault acts before it) and "faults-done"
- * (none acts after it) bound the faults. */
+/* A named point in the run's log. "setup-complete" ends the setup of a run that declares
+ * `setup = "mark"` (no fault acts before it; in a run that does not declare it, it ends the run
+ * with an error); "faults-done" ends the faults (none acts after it). */
 static inline void patina_mark(const char *label) {
     if (patina_is_simulated())
         patina__call(PATINA_OP_MARK, PATINA_KIND_REACHABLE, 0, label, 0, 0, 0, 0);

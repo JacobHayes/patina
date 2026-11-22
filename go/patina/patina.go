@@ -367,7 +367,7 @@ func Mark(label string) {
 	}
 }
 
-// Control makes a control call in a run with several machines, e.g. Control("net cut a b"),
+// Control makes a control call in a run with several machines, e.g. Control("partition a b"),
 // with the words of patina ctl: nil, or the errno Patina answered (EPERM outside the driver's
 // node, ENOENT for an unknown node, EINVAL for other words, EALREADY or EAGAIN for a node in
 // the wrong state), or ENOSYS outside Patina.
@@ -384,7 +384,9 @@ func Control(words string) error {
 	return nil
 }
 
-// SetupComplete marks the end of setup: no fault acts before it.
+// SetupComplete marks the end of setup: no fault acts before it. Only in a run that declares
+// it (setup = "mark" under [run], or --setup mark); in any other run it ends the run with an
+// error.
 func SetupComplete() { Mark("setup-complete") }
 
 // FaultsDone marks the end of the faults: none acts after it (call it before the final checks).

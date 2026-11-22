@@ -89,7 +89,7 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    // Its words are the control call's, not options (`net cut --from A --to B`).
+    // Its words are the control call's, not options (`partition --from A --to B`).
     if first == "ctl" && !rest.iter().any(|a| a == "--help" || a == "-h") {
         return ctl::main(rest);
     }

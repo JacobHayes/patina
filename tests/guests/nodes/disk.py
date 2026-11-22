@@ -13,9 +13,9 @@ when absent; N what `unsynced` holds now), and then holds the connection open. I
 
 The driver checks, for each round: a reports the incarnation it expects, and the `synced` its
 last incarnation wrote (fsync keeps it across a machine crash); an established connection to a
-sees nothing once `node crash a` returns (no end of file, no reset); a connect to a while it is
+sees nothing once `crash a` returns (no end of file, no reset); a connect to a while it is
 down times out (it is not refused); node b, which never crashes, still reports what it wrote
-(another node's crash leaves its unsynced data alone). After `node start a` the old connection
+(another node's crash leaves its unsynced data alone). After `start a` the old connection
 gets a reset at its next send (a's new machine does not know it). It counts the rounds whose
 `unsynced` was not what a wrote (an unsynced write may be lost). It prints `ok ...` lines or
 `FAIL: ...` and exits 1.
@@ -92,7 +92,7 @@ def driver(rounds):
         if k > 0:
             check(a["synced"] == f"s{k - 1}", f"round {k}: a lost its fsynced write: {a}")
             lost += a["unsynced"] != f"u{k - 1}"
-        patina.control("node crash a")
+        patina.control("crash a")
         # Silent: the connection shows nothing (until its own timeouts, which are longer).
         c.settimeout(1)
         try:
@@ -115,7 +115,7 @@ def driver(rounds):
         t.close()
         _, b = connect("b")
         check(b["inc"] == "0" and b["now"] == "u0", f"round {k}: b reports {b}")
-        patina.control("node start a")
+        patina.control("start a")
         c2, _ = connect("a")
         c2.close()
         # The new machine answers the old connection's next segment with a reset.

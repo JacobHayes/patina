@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 pub const VERSION: u32 = 1;
 
 /// Every event type, in the order the guide lists them.
-pub const TYPES: [&str; 16] = [
+pub const TYPES: [&str; 17] = [
     "header", "inc", "cut", "call", "op", "fault", "crash", "mark", "sdk", "signal", "sigfault",
-    "sched", "preempt", "insn", "node", "net",
+    "sched", "preempt", "insn", "node", "net", "phase",
 ];
 
 /// What to print: the types (`None`: all) and the sequence range of events that have one.
@@ -965,6 +965,21 @@ impl<W: Write> Export<'_, W> {
             // An injected fault's names, read with it; a call's strings, read with it.
             Some(RecKind::Name | RecKind::Str) => Ok(()),
             Some(RecKind::SupDecision) if r.nr == Op::CrashPoint as u32 => self.crash(k, inc, r),
+            // The end of a phase's command (`sup::phase`): [phase, wait word, next phase].
+            Some(RecKind::SupDecision) if r.nr == proto::ctl::DEC_PHASE => {
+                let mut l = Line::at("phase", k, r);
+                l.str("ended", proto::ctl::phase_name(a[0]));
+                let w = a[1] as i64;
+                if w & 0x7f != 0 {
+                    l.num("signal", (w & 0x7f) as u64);
+                } else {
+                    l.num("exit", ((w >> 8) & 0xff) as u64);
+                }
+                if a[2] != 0 {
+                    l.str("next", proto::ctl::phase_name(a[2]));
+                }
+                self.emit("phase", Some(r.seq), l)
+            }
             Some(RecKind::SupDecision) => {
                 let mut l = Line::at("sched", k, r);
                 let op = Op::from_u32(r.nr).map_or("unknown", |o| o.name());

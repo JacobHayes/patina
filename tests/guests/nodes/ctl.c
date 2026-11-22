@@ -22,24 +22,23 @@ static void ask(const char *w) {
 
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "node") == 0) {
-        ask("net heal");
-        ask("mark from-a-node");
+        ask("heal");
         /* Up while the driver pauses and resumes it, however long the asks above took on this
          * host (the run ends with the driver). */
         sleep(5);
         return 0;
     }
+    ask("partition driver c");
+    ask("heal --from driver --to c");
+    ask("partition driver nobody");
     ask("net cut driver c");
-    ask("net heal --from driver --to c");
-    ask("net cut driver nobody");
-    ask("net sever driver c");
-    ask("node pause c");
-    ask("node pause c");
-    ask("node resume c");
-    ask("node resume c");
-    ask("node pause driver");
-    ask("clock step c +1s");
-    ask("clock step driver +1s");
+    ask("pause c");
+    ask("pause c");
+    ask("resume c");
+    ask("resume c");
+    ask("pause driver");
+    ask("clock c +1s");
+    ask("clock driver +1s");
     sleep(1); /* virtual: the node runs meanwhile */
     return 0;
 }

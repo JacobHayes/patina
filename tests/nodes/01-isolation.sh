@@ -8,8 +8,8 @@
 # through; a socket's TCP_SYNCNT and TCP_USER_TIMEOUT set its own limits across a cut. The link faults leave the
 # driver's links alone unless net-links says otherwise. A node given with --node whose command
 # cannot run ends the run at once, naming the node. Identical under verify --vary cpu,load,aslr,sandbox,repeat.
-# What is not available yet is refused, naming the feature; without nodes `net` is EINVAL and
-# a control mark works, from a shell script too (`patina ctl`, as in a run with nodes). The C, Rust and Go SDKs' control calls answer the driver and give a
+# What is not available yet is refused, naming the feature; without nodes a control call is
+# EINVAL, from a shell script too (`patina ctl`, as in a run with nodes). The C, Rust and Go SDKs' control calls answer the driver and give a
 # node EPERM (the Rust and Go SDKs' in the area tier).
 #@ tier=quick budget=20 slots=0.5
 . "$(dirname "$0")/lib.inc"
@@ -56,60 +56,54 @@ for taken in driver rest localhost; do
     refused "node.$taken" --config "$o/taken.toml"
 done
 
-# Without nodes: no network to act on; a mark is a mark.
+# Without nodes: no network to act on.
 run_ok "$o/none" 1 -- python3 -c '
 import errno, sys
 sys.path.insert(0, "/guest")
 import patina
-patina.control("mark here")
 try:
-    patina.control("net heal")
+    patina.control("heal")
 except OSError as e:
     print("done" if e.errno == errno.EINVAL else e)'
 [ "$(cat "$o/none/inc-0/stdout")" = done ] || die "patina ctl without nodes"
 [ "$(field "$o/none/result.json" nodes 2>/dev/null || echo none)" = none ] || die "nodes in a run without them"
-echo "without nodes: mark ok, net refused"
+echo "without nodes: a control call is refused"
 
-# From a shell script, in a run without nodes and in one with: `patina` is on the PATH, the
-# lifecycle marks are made, `net` answers as above; and although the host's PATH has a patina
-# too, no hint calls the guest's missing (env tries each PATH directory in turn, where a
-# shell looks first).
-cat >"$o/marks.sh" <<'EOF'
-patina ctl mark setup-complete && env patina ctl mark faults-done || exit 3
-st=0; patina ctl net heal 2>/dev/null || st=$?
-echo "net heal: $st"
+# From a shell script, in a run without nodes and in one with: `patina` is on the PATH and
+# `heal` answers as above; and although the host's PATH has a patina too, no hint calls the
+# guest's missing (env tries each PATH directory in turn, where a shell looks first).
+cat >"$o/ctl.sh" <<'EOF'
+st=0; env patina ctl heal 2>/dev/null || st=$?
+echo "heal: $st"
 EOF
 rm -f "$o/one.toml"
 conf "$o/one.toml" c sleep 1  # lint-allow: sleep — the guest's, in virtual time
 for k in none one; do
     cfg=(); [ $k = none ] || cfg=(--config "$o/one.toml")
-    PATH="$(dirname "$PATINA"):$PATH" run_ok "$o/sh-$k" 1 --faults disk --faults-held "${cfg[@]}" --mount "$o":/s -- sh /s/marks.sh
-    w=$(jq -r '.faults.window | "\(.from_seq) \(.to_seq)"' "$o/sh-$k/result.json")
-    [[ $w =~ ^[0-9]+\ [0-9]+$ ]] || die "sh, nodes $k: the marks did not bound the faults: window $w"
+    PATH="$(dirname "$PATINA"):$PATH" run_ok "$o/sh-$k" 1 --faults disk "${cfg[@]}" --mount "$o":/s -- sh /s/ctl.sh
     want=2; [ $k = none ] || want=0
-    [ "$(cat "$o/sh-$k/inc-0/stdout")" = "net heal: $want" ] || die "sh, nodes $k: $(cat "$o/sh-$k/inc-0/stdout")"
+    [ "$(cat "$o/sh-$k/inc-0/stdout")" = "heal: $want" ] || die "sh, nodes $k: $(cat "$o/sh-$k/inc-0/stdout")"
     [ "$(jq -r '[.missing[]? | select(.name == "patina")] | length' "$o/sh-$k/result.json")" = 0 ] || die "sh, nodes $k: patina is called missing"
 done
-echo "from a shell script: the marks are made with and without nodes; patina is not called missing"
+echo "from a shell script: patina ctl answers with and without nodes; patina is not called missing"
 
 # The C SDK's control call: answers from the driver and from a node.
 conf "$o/ctl.toml" c /guest/ctl node
 run_ok "$o/ctl" 1 --config "$o/ctl.toml" -- /guest/ctl
 d=$(cat "$o/ctl/inc-0/stdout"); n=$(cat "$o/ctl/node/c/inc-0/stdout")
-want="net cut driver c: ok
-net heal --from driver --to c: ok
-net cut driver nobody: ENOENT
-net sever driver c: EINVAL
-node pause c: ok
-node pause c: EALREADY
-node resume c: ok
-node resume c: EALREADY
-node pause driver: EINVAL
-clock step c +1s: ok
-clock step driver +1s: EINVAL"
+want="partition driver c: ok
+heal --from driver --to c: ok
+partition driver nobody: ENOENT
+net cut driver c: EINVAL
+pause c: ok
+pause c: EALREADY
+resume c: ok
+resume c: EALREADY
+pause driver: EINVAL
+clock c +1s: ok
+clock driver +1s: EINVAL"
 [ "$d" = "$want" ] || die "C control from the driver: $d"
-[ "$n" = "net heal: EPERM
-mark from-a-node: ok" ] || die "C control from a node: $n"
+[ "$n" = "heal: EPERM" ] || die "C control from a node: $n"
 echo "C control: the driver's answered, a node's EPERM"
 
 # The Rust and Go SDKs' control calls: the same answers (errno 2 ENOENT, 1 EPERM).
@@ -119,9 +113,9 @@ for sdk in rs go; do
     conf "$o/ctl-$sdk.toml" c /guest/sdk-$sdk control node
     run_ok "$o/ctl-$sdk" 1 --config "$o/ctl-$sdk.toml" -- /guest/sdk-$sdk control
     d=$(cat "$o/ctl-$sdk/inc-0/stdout"); n=$(cat "$o/ctl-$sdk/node/c/inc-0/stdout")
-    [ "$d" = "net cut driver c: ok
-net heal: ok
-net cut driver nobody: errno 2" ] || die "$sdk control from the driver: $d"
-    [ "$n" = "net heal: errno 1" ] || die "$sdk control from a node: $n"
+    [ "$d" = "partition driver c: ok
+heal: ok
+partition driver nobody: errno 2" ] || die "$sdk control from the driver: $d"
+    [ "$n" = "heal: errno 1" ] || die "$sdk control from a node: $n"
 done
 echo "Rust and Go control: the driver's answered, a node's EPERM"

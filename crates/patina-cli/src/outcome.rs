@@ -115,7 +115,7 @@ impl Outcome {
             Outcome::Nondeterministic => "a replay differed from its run: a Patina bug. Keep the run directory and report it",
             Outcome::Internal => "Patina failed, or the host refused a resource: run `patina doctor`",
             Outcome::Vacuous => "something asked for never happened: a fault you named, an SDK `sometimes`, `reachable` or fault point, a check that judged no run, a `!ID` known finding",
-            Outcome::Error => "the command could not be carried out: the program cannot run, or the `--check` command broke or answered differently on replay",
+            Outcome::Error => "the command could not be carried out: the program cannot run, its setup did not complete (stop `setup`, `setup-mark`), or the `--check` command broke or answered differently on replay",
         }
     }
 
@@ -246,6 +246,8 @@ pub fn classify(v: &Verdict, ok_exit: &[u8]) -> Classified {
         "killed" => Classified::new(Internal, "killed", d),
         // The program cannot run, as `execve` would refuse it: the request is wrong.
         "exec" => Classified::new(Error, "exec", d),
+        // The program marked `setup-complete` and the run does not declare that it does.
+        crate::sup::sdk::SETUP_MARK => Classified::new(Error, "setup-mark", d),
         // An image the kernel would run that Patina does not load (a 32-bit program).
         "exec-unsupported" => Classified::new(Unsupported, "exec", d),
         other => Classified::new(

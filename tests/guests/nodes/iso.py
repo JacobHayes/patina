@@ -129,7 +129,7 @@ def state():
 
 
 def report(peer):
-    ctl = subprocess.run(["patina", "ctl", "net", "heal"], capture_output=True, text=True)
+    ctl = subprocess.run(["patina", "ctl", "heal"], capture_output=True, text=True)
     return {
         "hostname": socket.gethostname(),
         "pid": os.getpid(),
@@ -137,7 +137,7 @@ def report(peer):
         "own": seen("b"),
         "driver": seen("d"),
         "shm_driver": call(libc.shmget, KEY + 1, 0, 0),
-        "control": err(lambda: patina.control("net cut driver b")),
+        "control": err(lambda: patina.control("partition driver b")),
         "ctl_exit": ctl.returncode,
         "ctl_err": ctl.stderr.strip(),
         "abstract": ABSTRACT_B,
@@ -247,10 +247,10 @@ def driver():
           "UDP between nodes: b sees the driver's address, the driver sees b's")
     check(r["sethostname"] == errno.EPERM, "b has no capability to change its view")
 
-    patina.control("net cut driver b")
+    patina.control("partition driver b")
     check(connect(("b", 7000), timeout=5) == "timeout", "a cut: a connect to b does not complete")
     check(ping(u, 3) is None, "a cut: a datagram to b is lost")
-    patina.control("net heal")
+    patina.control("heal")
     c = connect(("b", 7000), timeout=60)
     check(not isinstance(c, (int, str)), "healed: a connect to b completes")
     c.close()
@@ -258,7 +258,7 @@ def driver():
 
     # A socket's own limits across a cut: TCP_SYNCNT 2 gives up at 7 s (1 + 2 + 4), and
     # TCP_USER_TIMEOUT 2000 fails a send whose data the cut held for 2 s.
-    patina.control("net cut driver b")
+    patina.control("partition driver b")
     c = socket.socket()
     c.setsockopt(socket.IPPROTO_TCP, socket.TCP_SYNCNT, 2)
     t = time.monotonic()
@@ -266,16 +266,16 @@ def driver():
     took = time.monotonic() - t
     c.close()
     check(e == errno.ETIMEDOUT and 6.5 < took < 8, f"TCP_SYNCNT 2: ETIMEDOUT after {took:.1f} s")
-    patina.control("net heal")
+    patina.control("heal")
     c = connect(("b", 7004), timeout=60)
     c.settimeout(None)
     c.setsockopt(socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 2000)
-    patina.control("net cut --from driver --to b")
+    patina.control("partition --from driver --to b")
     c.send(b"x")
     time.sleep(5)
     e = err(lambda: c.send(b"y"))
     c.close()
-    patina.control("net heal")
+    patina.control("heal")
     check(e == errno.ETIMEDOUT, f"TCP_USER_TIMEOUT 2000: a held send fails ETIMEDOUT ({e})")
 
 

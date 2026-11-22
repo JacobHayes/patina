@@ -38,8 +38,9 @@
 //!   buggify:LABEL=PERMILLE` forces one point's rate (`0`: off).
 //! - [`knob!`]: a seed-chosen integer in a range; [`delay!`]: maybe sleep a seeded virtual
 //!   time.
-//! - [`mark`] names a point in the run's log; [`setup_complete`] marks the end of setup (no
-//!   fault acts before it) and [`faults_done`] the end of the faults (none acts after it).
+//! - [`mark`] names a point in the run's log; [`setup_complete`] marks the end of setup in a
+//!   run that declares `setup = "mark"` (no fault acts before it) and [`faults_done`] the end
+//!   of the faults (none acts after it).
 //!   [`is_simulated`].
 //!
 //! # Labels and sites
@@ -66,7 +67,7 @@ pub mod compute;
 
 pub use sys::{is_simulated, mark};
 
-/// A control call in a run with several machines, e.g. `control("net cut a b")`: `Err` holds
+/// A control call in a run with several machines, e.g. `control("partition a b")`: `Err` holds
 /// the errno Patina answered (`EPERM` outside the driver's node, `ENOENT` for an unknown node,
 /// `EINVAL` for other words, `EALREADY` or `EAGAIN` for a node in the wrong state), or `ENOSYS`
 /// outside Patina.
@@ -75,8 +76,8 @@ pub fn control(words: &str) -> Result<(), i32> {
     sys::control(words)
 }
 
-/// Mark the end of setup: in a run with faults, no fault acts before this call (the run
-/// starts again from the beginning with faults held until it).
+/// Mark the end of setup: no fault acts before this call. Only in a run that declares it
+/// (`[run] setup = "mark"`, or `--setup mark`); in any other run it ends the run with an error.
 pub fn setup_complete() {
     sys::mark("setup-complete");
 }

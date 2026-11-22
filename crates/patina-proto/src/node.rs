@@ -7,30 +7,30 @@
 //! it before the run, the runtime reads it to parse a control call's words and to know which
 //! addresses exist. A run without nodes has `n == 0` and nothing here is consulted.
 //!
-//! A control call (`sdk::OP_CONTROL`) carries words; the grammar (also in `sdk/c/patina.h`):
+//! A control call (`sdk::OP_CONTROL`) carries words, named as the fault classes are; the
+//! grammar (also in `sdk/c/patina.h`):
 //!
 //! ```text
-//! net cut A B                  both directions between the sets A and B
-//! net cut --from A --to B      one direction: what A sends to B is held
-//! net heal                     every scripted cut
-//! net heal A B                 both directions between A and B
-//! net heal --from A --to B     one direction
-//! node crash NAME              crash the node's machine: its unsynced writes may be lost, it
+//! partition A B                both directions between the sets A and B are cut
+//! partition --from A --to B    one direction: what A sends to B is held
+//! heal                         every scripted cut
+//! heal A B                     both directions between A and B
+//! heal --from A --to B         one direction
+//! crash NAME                   crash the node's machine: its unsynced writes may be lost, it
 //!                              stays down, silent (EALREADY: down)
-//! node kill NAME               kill every process of the node; it stays down (EALREADY: down)
-//! node start NAME              start a node that is down, as at a restart (EALREADY: up or
+//! kill NAME                    kill every process of the node; it stays down (EALREADY: down)
+//! start NAME                   start a node that is down, as at a restart (EALREADY: up or
 //!                              starting; EAGAIN: past 64 incarnations)
-//! node pause NAME              freeze every thread of the node until `node resume` (EALREADY:
+//! pause NAME                   freeze every thread of the node until `resume` (EALREADY:
 //!                              paused; EAGAIN: down or starting)
-//! node resume NAME             end its pause (EALREADY: not paused)
-//! clock step NAME +90s         move the node's realtime clock (+Ns, -Ns, +Nms, -Nms; at
-//!                              most a year): its absolute realtime timers move with it
-//! mark LABEL                   the SDK's mark (any node)
+//! resume NAME                  end its pause (EALREADY: not paused)
+//! clock NAME +90s              move the node's realtime clock (+Ns, -Ns, +Nms, -Nms; at most
+//!                              a year): its absolute realtime timers move with it
 //! ```
 //!
 //! A set is node names joined by commas, or `rest`: every node not in the other set. Only the
-//! driver's node may use `net`, `node` and `clock` (elsewhere `EPERM`); an unknown name is
-//! `ENOENT`, other words `EINVAL`.
+//! driver's node may make a control call (elsewhere `EPERM`); an unknown name is `ENOENT`,
+//! other words `EINVAL`, and so is any call in a run without nodes.
 
 /// The driver and at most 15 nodes.
 pub const MAX_NODES: usize = 16;
@@ -55,7 +55,7 @@ pub struct NodeTab {
     /// ended: `RUNNING`, or the status word (`(code & 0xff) << 8`, or the signal).
     pub first_pid: [u64; MAX_NODES],
     pub status: [u64; MAX_NODES],
-    /// Scripted `net cut` and `net heal` calls served, and the links cut at the end (bit
+    /// Scripted `partition` and `heal` calls served, and the links cut at the end (bit
     /// `to` of `cut_at_end[from]`).
     pub cuts: u64,
     pub heals: u64,
@@ -104,7 +104,7 @@ pub struct NodeTab {
     pub pause: [[Pause; PAUSES_MAX]; MAX_NODES],
     pub paused_ns: [u64; MAX_NODES],
     /// Written by the supervisor: each node's realtime clock offset (ns, two's complement):
-    /// its boot's skew (`clock-skew-ms`) plus the script's steps (`clock step`) so far; the
+    /// its boot's skew (`clock-skew-ms`) plus the script's steps (`clock NAME DELTA`) so far; the
     /// runtime adds it to every realtime time the node reads or sets. The driver's is 0.
     pub clock_off: [u64; MAX_NODES],
     /// The script's steps of each node's clock: how many, and their sum (ns, two's
@@ -147,8 +147,9 @@ pub struct Pause {
 pub const BY_SEED: u64 = 1;
 pub const BY_SCRIPT: u64 = 2;
 /// How a pause ended (`Pause::end`, `DEC_NODE_RESUME`): its drawn length ran out, the
-/// script's `node resume`, the node went down (a kill or a machine crash of a paused node), or
-/// the `faults-done` mark ended the seed's pause.
+/// script's `resume`, the node went down (a kill or a machine crash of a paused node), or
+/// the faults ended (a `faults-done` mark ended the seed's pause, or the main command's end
+/// before `--finally` ended every pause).
 pub const PEND_SEED: u64 = 1;
 pub const PEND_SCRIPT: u64 = 2;
 pub const PEND_DOWN: u64 = 3;
@@ -165,7 +166,7 @@ pub fn pause_end_name(end: u64) -> &'static str {
     }
 }
 
-/// Boots a node may have at most (`max-incarnations` is capped by it, and so is `node start`).
+/// Boots a node may have at most (`max-incarnations` is capped by it, and so is `start`).
 pub const BOOTS_MAX: usize = 64;
 
 /// A node's settings (`[node.NAME]`).
@@ -245,7 +246,7 @@ pub const DOWN_KILL_SCRIPT: u64 = 2;
 pub const DOWN_EXIT: u64 = 3;
 pub const DOWN_FAILED: u64 = 4;
 pub const DOWN_SIGNAL: u64 = 5;
-/// Its machine crashed, by the seed (`--faults crash`) or by a control call (`node crash NAME`).
+/// Its machine crashed, by the seed (`--faults crash`) or by a control call (`crash NAME`).
 pub const DOWN_CRASH_SEED: u64 = 6;
 pub const DOWN_CRASH_SCRIPT: u64 = 7;
 
@@ -453,7 +454,7 @@ pub const NODE_CRASH: u64 = 3;
 /// Freeze every thread of the node, and end that.
 pub const NODE_PAUSE: u64 = 4;
 pub const NODE_RESUME: u64 = 5;
-/// `clock step NAME DELTA`: `Op::Node` [`CLOCK_STEP`, node, delta ns (two's complement)].
+/// `clock NAME DELTA`: `Op::Node` [`CLOCK_STEP`, node, delta ns (two's complement)].
 pub const CLOCK_STEP: u64 = 6;
 /// `DEC_NODE_CLOCK`'s how: a boot's skew, or the script's step.
 pub const CLK_SKEW: u64 = 1;
@@ -467,7 +468,7 @@ const EINVAL: i64 = 22;
 
 /// A parsed control call.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Control<'a> {
+pub enum Control {
     /// `NET_CUT` or `NET_HEAL` from the nodes of `from` to those of `to` (bit sets), and
     /// back when `both`. A heal with both sets empty heals every scripted cut.
     Net {
@@ -478,16 +479,9 @@ pub enum Control<'a> {
     },
     /// `NODE_KILL` (its processes), `NODE_CRASH` (its machine), `NODE_START`, `NODE_PAUSE` or
     /// `NODE_RESUME`, of node `node`.
-    Node {
-        verb: u64,
-        node: usize,
-    },
-    /// `clock step`: node `node`'s realtime clock moves by `delta` ns.
-    Clock {
-        node: usize,
-        delta: i64,
-    },
-    Mark(&'a [u8]),
+    Node { verb: u64, node: usize },
+    /// `clock`: node `node`'s realtime clock moves by `delta` ns.
+    Clock { node: usize, delta: i64 },
 }
 
 /// Why a control call is refused: the errno (positive) and a reason for `patina ctl`.
@@ -502,7 +496,7 @@ const fn no(errno: i64, why: &'static str) -> Refusal {
 }
 
 /// The words of a control call, from a process of node `node`.
-pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'a>, Refusal> {
+pub fn parse(text: &[u8], tab: &NodeTab, node: usize) -> Result<Control, Refusal> {
     let mut w = [&[][..]; 8];
     let mut n = 0;
     for x in text
@@ -516,24 +510,37 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
         n += 1;
     }
     let w = &w[..n];
+    let verb = match w.first() {
+        Some(v) => *v,
+        None => return Err(no(EINVAL, USAGE)),
+    };
+    if !matches!(
+        verb,
+        b"partition" | b"heal" | b"crash" | b"kill" | b"start" | b"pause" | b"resume" | b"clock"
+    ) {
+        return Err(no(EINVAL, USAGE));
+    }
+    if tab.count() == 0 {
+        return Err(no(EINVAL, "the run has no nodes to act on"));
+    }
+    if node != 0 {
+        return Err(no(
+            EPERM,
+            "only the driver's node may act on the network, nodes and clocks",
+        ));
+    }
+    let target = |name: &[u8]| match tab.find(name) {
+        Some(0) => Err(no(
+            EINVAL,
+            "the driver is not a node to act on (its clock is the run's virtual time)",
+        )),
+        Some(k) => Ok(k),
+        None if valid_name(name) => Err(no(ENOENT, "no node of that name")),
+        None => Err(no(EINVAL, "not a node name")),
+    };
     match w {
-        [b"mark", label] if label.len() <= crate::sdk::LABEL_MAX => Ok(Control::Mark(label)),
-        [b"mark", ..] => Err(no(EINVAL, "expected: mark LABEL")),
-        [b"net", rest @ ..] => {
-            let (verb, rest) = match rest {
-                [b"cut", r @ ..] => (NET_CUT, r),
-                [b"heal", r @ ..] => (NET_HEAL, r),
-                _ => return Err(no(EINVAL, "expected: net cut ... or net heal ...")),
-            };
-            if tab.count() == 0 {
-                return Err(no(EINVAL, "net: the run has no nodes"));
-            }
-            if node != 0 {
-                return Err(no(
-                    EPERM,
-                    "net: only the driver's node may act on the network",
-                ));
-            }
+        [b"partition" | b"heal", rest @ ..] => {
+            let verb = if verb == b"heal" { NET_HEAL } else { NET_CUT };
             let (a, b, both) = match rest {
                 [] if verb == NET_HEAL => {
                     return Ok(Control::Net {
@@ -548,7 +555,7 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
                 _ => {
                     return Err(no(
                         EINVAL,
-                        "expected: net cut|heal A B, or net cut|heal --from A --to B",
+                        "expected: partition|heal A B, or partition|heal --from A --to B",
                     ))
                 }
             };
@@ -560,7 +567,7 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
                 from
             };
             if from == 0 || to == 0 {
-                return Err(no(EINVAL, "net: a set names no node"));
+                return Err(no(EINVAL, "a set names no node"));
             }
             Ok(Control::Net {
                 verb,
@@ -569,63 +576,36 @@ pub fn parse<'a>(text: &'a [u8], tab: &NodeTab, node: usize) -> Result<Control<'
                 both,
             })
         }
-        [b"node", rest @ ..] => {
-            let (verb, name) =
-                match rest {
-                    [b"crash", name] => (NODE_CRASH, *name),
-                    [b"kill", name] => (NODE_KILL, *name),
-                    [b"start", name] => (NODE_START, *name),
-                    [b"pause", name] => (NODE_PAUSE, *name),
-                    [b"resume", name] => (NODE_RESUME, *name),
-                    _ => return Err(no(
-                        EINVAL,
-                        "expected: node crash NAME, node kill NAME, node start NAME, node pause \
-                         NAME or node resume NAME",
-                    )),
-                };
-            if tab.count() == 0 {
-                return Err(no(EINVAL, "node: the run has no nodes"));
-            }
-            if node != 0 {
-                return Err(no(EPERM, "node: only the driver's node may act on nodes"));
-            }
-            match tab.find(name) {
-                Some(0) => Err(no(
-                    EINVAL,
-                    "node: the driver is not a node to kill, start or pause",
-                )),
-                Some(k) => Ok(Control::Node { verb, node: k }),
-                None if valid_name(name) => Err(no(ENOENT, "node: no node of that name")),
-                None => Err(no(EINVAL, "node: not a node name")),
-            }
-        }
-        [b"clock", rest @ ..] => {
-            let [b"step", name, d] = rest else {
-                return Err(no(EINVAL, "expected: clock step NAME +Ns|-Ns|+Nms|-Nms"));
-            };
+        [b"clock", name, d] => {
             let delta = step(d).ok_or(no(
                 EINVAL,
-                "clock step: the change is a whole number of s or ms, signed, at most a year",
+                "clock: the change is a whole number of s or ms, signed, at most a year",
             ))?;
-            if tab.count() == 0 {
-                return Err(no(EINVAL, "clock: the run has no nodes"));
-            }
-            if node != 0 {
-                return Err(no(EPERM, "clock: only the driver's node may set a clock"));
-            }
-            match tab.find(name) {
-                Some(0) => Err(no(
-                    EINVAL,
-                    "clock: the driver's clock is the run's virtual time; it is not stepped",
-                )),
-                Some(k) => Ok(Control::Clock { node: k, delta }),
-                None if valid_name(name) => Err(no(ENOENT, "clock: no node of that name")),
-                None => Err(no(EINVAL, "clock: not a node name")),
-            }
+            Ok(Control::Clock {
+                node: target(name)?,
+                delta,
+            })
         }
-        _ => Err(no(EINVAL, "expected: net ..., or mark LABEL")),
+        [v, name] if *v != b"clock" => {
+            let verb = match *v {
+                b"crash" => NODE_CRASH,
+                b"kill" => NODE_KILL,
+                b"start" => NODE_START,
+                b"pause" => NODE_PAUSE,
+                _ => NODE_RESUME,
+            };
+            Ok(Control::Node {
+                verb,
+                node: target(name)?,
+            })
+        }
+        _ => Err(no(EINVAL, USAGE)),
     }
 }
+
+/// What a control call may say.
+const USAGE: &str = "expected: partition A B, partition --from A --to B, heal [A B], crash NODE, \
+                     kill NODE, start NODE, pause NODE, resume NODE, or clock NODE +Ns|-Ns|+Nms|-Nms";
 
 /// A clock step's change: `+90s`, `-5s`, `250ms` (no sign: ahead), in ns, at most
 /// `CLOCK_STEP_MAX_NS` either way.
@@ -692,30 +672,26 @@ mod tests {
             })
         };
         assert_eq!(
-            parse(b"net cut a b", &t, 0),
+            parse(b"partition a b", &t, 0),
             net(NET_CUT, 0b10, 0b100, true)
         );
         assert_eq!(
-            parse(b"  net  cut --from a,b --to driver\n", &t, 0),
+            parse(b"  partition --from a,b --to driver\n", &t, 0),
             net(NET_CUT, 0b110, 0b1, false)
         );
         // `rest` is every node the other side does not name, on either side.
         assert_eq!(
-            parse(b"net cut a rest", &t, 0),
+            parse(b"partition a rest", &t, 0),
             net(NET_CUT, 0b10, 0b1101, true)
         );
         assert_eq!(
-            parse(b"net cut rest a", &t, 0),
+            parse(b"partition rest a", &t, 0),
             net(NET_CUT, 0b1101, 0b10, true)
         );
-        assert_eq!(parse(b"net heal", &t, 0), net(NET_HEAL, 0, 0, true));
+        assert_eq!(parse(b"heal", &t, 0), net(NET_HEAL, 0, 0, true));
         assert_eq!(
-            parse(b"net heal c b", &t, 0),
+            parse(b"heal c b", &t, 0),
             net(NET_HEAL, 0b1000, 0b100, true)
-        );
-        assert_eq!(
-            parse(b"mark setup-complete", &t, 2),
-            Ok(Control::Mark(b"setup-complete"))
         );
     }
 
@@ -723,87 +699,92 @@ mod tests {
     fn refusals_name_their_errno() {
         let t = tab(&["driver", "a", "b"]);
         let errno = |w: &[u8], node| parse(w, &t, node).unwrap_err().errno;
-        assert_eq!(errno(b"net cut a b", 1), EPERM);
-        assert_eq!(errno(b"net cut a zed", 0), ENOENT);
+        assert_eq!(errno(b"partition a b", 1), EPERM);
+        assert_eq!(errno(b"partition a zed", 0), ENOENT);
         for bad in [
-            &b"net cut a"[..],
-            b"net cut a,,b driver",
-            b"net cut rest rest",
-            b"net cut --to a --from b",
-            b"net cut a b c",
-            b"net",
+            &b"partition a"[..],
+            b"partition a,,b driver",
+            b"partition rest rest",
+            b"partition --to a --from b",
+            b"partition a b c",
+            b"partition",
             b"cut a b",
             b"",
-            b"net cut a_b driver",
-            b"net cut rest,a b",
+            b"partition a_b driver",
+            b"partition rest,a b",
+            // The words before the fault classes named them are not calls any more.
+            b"net cut a b",
+            b"net heal",
+            b"node kill a",
+            b"clock step a +90s",
+            b"mark setup-complete",
         ] {
             assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
         }
-        assert_eq!(errno(b"node crash a", 1), EPERM);
-        assert_eq!(errno(b"node pause driver", 0), EINVAL);
-        assert_eq!(errno(b"node resume a", 1), EPERM);
+        assert_eq!(errno(b"crash a", 1), EPERM);
+        assert_eq!(errno(b"pause driver", 0), EINVAL);
+        assert_eq!(errno(b"resume a", 1), EPERM);
         assert_eq!(
-            parse(b"node pause a", &t, 0),
+            parse(b"pause a", &t, 0),
             Ok(Control::Node {
                 verb: NODE_PAUSE,
                 node: 1
             })
         );
         assert_eq!(
-            parse(b"node resume b", &t, 0),
+            parse(b"resume b", &t, 0),
             Ok(Control::Node {
                 verb: NODE_RESUME,
                 node: 2
             })
         );
-        assert_eq!(errno(b"node kill a", 1), EPERM);
-        assert_eq!(errno(b"node start zed", 0), ENOENT);
-        assert_eq!(errno(b"node start driver", 0), EINVAL);
-        assert_eq!(errno(b"node stop a", 0), EINVAL);
+        assert_eq!(errno(b"kill a", 1), EPERM);
+        assert_eq!(errno(b"start zed", 0), ENOENT);
+        assert_eq!(errno(b"start driver", 0), EINVAL);
+        assert_eq!(errno(b"stop a", 0), EINVAL);
         assert_eq!(
-            parse(b"node kill b", &t, 0),
+            parse(b"kill b", &t, 0),
             Ok(Control::Node {
                 verb: NODE_KILL,
                 node: 2
             })
         );
         assert_eq!(
-            parse(b"node crash b", &t, 0),
+            parse(b"crash b", &t, 0),
             Ok(Control::Node {
                 verb: NODE_CRASH,
                 node: 2
             })
         );
         assert_eq!(
-            parse(b"node start a", &t, 0),
+            parse(b"start a", &t, 0),
             Ok(Control::Node {
                 verb: NODE_START,
                 node: 1
             })
         );
-        assert_eq!(errno(b"clock step driver +90s", 0), EINVAL);
-        assert_eq!(errno(b"clock step a +90s", 1), EPERM);
-        assert_eq!(errno(b"clock step a 1.5s", 0), EINVAL);
-        assert_eq!(errno(b"clock step a +9999999d", 0), EINVAL);
-        assert_eq!(errno(b"clock skew a", 0), EINVAL);
+        assert_eq!(errno(b"clock driver +90s", 0), EINVAL);
+        assert_eq!(errno(b"clock a +90s", 1), EPERM);
+        assert_eq!(errno(b"clock a 1.5s", 0), EINVAL);
+        assert_eq!(errno(b"clock a +9999999d", 0), EINVAL);
+        assert_eq!(errno(b"clock a", 0), EINVAL);
         assert_eq!(
-            parse(b"clock step a -5s", &t, 0),
+            parse(b"clock a -5s", &t, 0),
             Ok(Control::Clock {
                 node: 1,
                 delta: -5_000_000_000
             })
         );
         assert_eq!(
-            parse(b"clock step b 250ms", &t, 0),
+            parse(b"clock b 250ms", &t, 0),
             Ok(Control::Clock {
                 node: 2,
                 delta: 250_000_000
             })
         );
-        // Without nodes there is no network to act on; a mark still works.
+        // Without nodes there is nothing to act on.
         let none = tab(&[]);
-        assert_eq!(parse(b"net heal", &none, 0).unwrap_err().errno, EINVAL);
-        assert!(parse(b"mark m", &none, 0).is_ok());
+        assert_eq!(parse(b"heal", &none, 0).unwrap_err().errno, EINVAL);
     }
 
     #[test]

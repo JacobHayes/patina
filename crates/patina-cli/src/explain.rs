@@ -525,7 +525,10 @@ impl Story {
         let mut by: HashMap<String, (Line, usize, u64, usize)> = HashMap::new();
         for (i, l) in self.lines.iter().enumerate() {
             if l.seq >= first
-                || !matches!(l.kind, "fault" | "network" | "crash" | "node" | "unsynced")
+                || !matches!(
+                    l.kind,
+                    "fault" | "network" | "crash" | "node" | "unsynced" | "phase"
+                )
             {
                 continue;
             }
@@ -1112,6 +1115,19 @@ impl Reader<'_> {
                     _ => return,
                 };
                 self.push(v, String::new(), "node", text);
+            }
+            "phase" => {
+                self.end_turn();
+                let how = match v["signal"].as_u64() {
+                    Some(sig) => format!("killed by signal {sig}"),
+                    None => format!("exits {}", u(v, "exit")),
+                };
+                let next = match s(v, "next") {
+                    "" => String::new(),
+                    n => format!("; the {n} command starts"),
+                };
+                let text = format!("PHASE the {} command {how}{next}", s(v, "ended"));
+                self.push(v, String::new(), "phase", text);
             }
             "mark" => {
                 self.turn(v);

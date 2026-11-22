@@ -56,7 +56,8 @@ if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path
   **`delay`** sleeps a seed-chosen virtual time on drawn evaluations.
 - **`mark`** records a label in the run's log, in clear (`mark("ack 17")`): a checker reads it
   from `patina log events` to check a promise was backed (`patina guide checks`).
-  `setup_complete()` and `faults_done()` bound when faults act (`patina guide faults`).
+  `setup_complete()` (in a run that declares `setup = "mark"`) and `faults_done()` bound when
+  faults act (`patina guide faults`).
 - **`control`** is a control call, as `patina ctl` (`patina guide nodes`).
 
 A label is the finding's name, so make it say what broke (`acked-records-kept`). A library's

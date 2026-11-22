@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
-pub const LAYOUT_VERSION: u64 = 31;
+pub const LAYOUT_VERSION: u64 = 32;
 pub const MAX_THREADS: usize = 1024;
 
 /// Seed, rates and limits. Read-only after start.
@@ -227,6 +227,44 @@ pub struct Ctl {
     pub compute: ComputeStats,
     /// `patina debug`'s stop (`Config::debug`).
     pub debug: DebugCtl,
+    /// The run's phases (`--setup`, `--finally`).
+    pub phases: PhaseCtl,
+}
+
+/// The phases of a run with a setup command or a final check (`[run] setup`, `[run] finally`),
+/// indexed by `PHASE_* - 1`. The launcher writes the phase an incarnation starts in; the
+/// supervisor writes each phase's start and end (`sup::phase`). A run with neither has
+/// `phase` 0 and nothing here is consulted.
+#[repr(C)]
+pub struct PhaseCtl {
+    /// The phase the run is in (`PHASE_*`; 0: a run without phase commands).
+    pub phase: AtomicU64,
+    /// Per phase: the sequence number of its start, and of its end (0: not reached).
+    pub from_seq: [AtomicU64; 3],
+    pub to_seq: [AtomicU64; 3],
+    /// Per phase: its command's wait status word plus 1 (0: it did not end by itself).
+    pub word: [AtomicU64; 3],
+    /// Per phase: where its output starts in the run's stdout and stderr (bytes).
+    pub out_off: [AtomicU64; 3],
+    pub err_off: [AtomicU64; 3],
+    /// In a run without nodes, the link faults' chances inside the fault window, by
+    /// `node::ELIG_*` (with nodes: `NodeTab::elig`).
+    pub elig: [AtomicU64; crate::node::ELIG_N],
+}
+
+/// `PhaseCtl::phase`.
+pub const PHASE_SETUP: u64 = 1;
+pub const PHASE_MAIN: u64 = 2;
+pub const PHASE_FINALLY: u64 = 3;
+/// A phase's name, as `result.json` and the logs say it.
+pub fn phase_name(p: u64) -> &'static str {
+    match p {
+        PHASE_SETUP => "setup",
+        PHASE_MAIN => "main",
+        PHASE_FINALLY => "finally",
+        0 => "none",
+        _ => "?",
+    }
 }
 
 /// The stop of a debug session: whoever takes sequence number `Config::debug` (a guest thread
@@ -843,16 +881,16 @@ pub enum Op {
     /// `-EAGAIN` (a start past `node::BOOTS_MAX` incarnations).
     Node = 66,
     /// A lifecycle mark that the supervisor acts on (`crate::sdk::SETUP_COMPLETE`,
-    /// `crate::sdk::FAULTS_DONE`): [`LIFE_*`, the mark's sequence number]. `LIFE_RESTART`: the
-    /// run, whose faults acted from its start, marked `setup-complete`, so it ends here and the
-    /// launcher runs it again with faults held until the mark (never answered).
+    /// `crate::sdk::FAULTS_DONE`): [`LIFE_*`, the mark's sequence number].
+    /// `LIFE_SETUP_UNDECLARED`: the program marked `setup-complete` in a run that does not
+    /// declare `[run] setup = "mark"`: the run ends here (never answered).
     /// `LIFE_FAULTS_DONE`: no fault acts after the mark; the seed's partitions in force heal
     /// and its pauses in force end now. Reply 0.
     Lifecycle = 67,
 }
 
 /// `Op::Lifecycle`'s first argument.
-pub const LIFE_RESTART: u64 = 1;
+pub const LIFE_SETUP_UNDECLARED: u64 = 1;
 pub const LIFE_FAULTS_DONE: u64 = 2;
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -1274,6 +1312,11 @@ pub const DEC_NODE_RESUME: u32 = 0x157;
 /// Node [node]'s realtime clock offset changed: [node, boot, how (`proto::node::CLK_*`), the
 /// change ns, the new offset ns (both two's complement), 0].
 pub const DEC_NODE_CLOCK: u32 = 0x158;
+
+/// A phase of the run ends (`--setup`, `--finally`; `sup::phase`): [the phase that ended
+/// (`PHASE_*`), its command's wait status word, the phase that starts (0: none, the run ends),
+/// 0, 0, 0]. Faults start after the setup's record and stop at the main command's.
+pub const DEC_PHASE: u32 = 0x159;
 
 /// Signals whose default action is "ignore" (SIGCHLD, SIGCONT, SIGURG, SIGWINCH).
 pub const fn sig_default_ignored(sig: u64) -> bool {

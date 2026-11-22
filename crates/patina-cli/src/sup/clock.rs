@@ -6,7 +6,7 @@
 //!
 //! The offset is the boot's skew plus the script's steps: with `clock-skew-ms=A..B` each
 //! boot of a node draws a skew in A..B ms, ahead or behind (`Stream::Node`, keyed by the node,
-//! the boot and `NSUB_SKEW`); `clock step NAME DELTA` from the driver moves the node's clock
+//! the boot and `NSUB_SKEW`); `clock NAME DELTA` from the driver moves the node's clock
 //! by DELTA, and the move stays across its restarts, as a clock set on a machine does. The
 //! driver's clock is never moved: it is the run's virtual time.
 //!
@@ -40,7 +40,7 @@ impl Sup {
         if c.skew_max_ns == 0 {
             return;
         }
-        // After `faults-done` a boot draws no skew: its clock is the steps alone.
+        // After the faults end a boot draws no skew: its clock is the steps alone.
         if self.ctl.faults.cfg.fault_until_seq != 0 {
             let t = self.node_tab();
             t.clock_off[k] = t.clock_stepped[k];
@@ -74,7 +74,7 @@ impl Sup {
         );
     }
 
-    /// `clock step NAME DELTA` from the driver: node `k`'s clock moves by `delta` ns. A step
+    /// `clock NAME DELTA` from the driver: node `k`'s clock moves by `delta` ns. A step
     /// that would put the node's realtime before 1970 answers `EINVAL`.
     pub(super) fn clock_step(&mut self, k: usize, delta: i64) -> Next {
         let now = self.now();

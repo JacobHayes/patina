@@ -62,9 +62,9 @@ fn main() {
         "control" => {
             let node = args.get(2).is_some_and(|a| a == "node");
             let words: &[&str] = if node {
-                &["net heal"]
+                &["heal"]
             } else {
-                &["net cut driver c", "net heal", "net cut driver nobody"]
+                &["partition driver c", "heal", "partition driver nobody"]
             };
             for w in words {
                 match patina_dst::control(w) {

@@ -28,8 +28,8 @@ replay: patina replay /tmp/nodes/patina-out/run-0
 `kv.py` (in `tests/guests/nodes`) is a store whose primary sends each write to the backup; the
 driver writes, cuts the link between them, sees the next write wait, heals it, and checks both
 agree. To test a distributed system, put the system under test on nodes and make the driver the
-harness: wait for the system, mark `setup-complete`, drive the workload, mark `faults-done`,
-check (`patina guide faults`).
+harness, in three commands: the setup waits for the system, the main command drives the
+workload, the final check verifies (`patina guide faults`).
 
 **What a node has of its own:** a work tree (its disk), `/tmp`, its hostname (its name), a port
 space, a loopback, and the address `10.0.0.K` (the driver `10.0.0.1`, the first node
@@ -38,22 +38,57 @@ shared and read-only. A listener on `0.0.0.0` is reachable from every node, one 
 only from its own. A node's output is in `RUNDIR/node/NAME/inc-K/`. Up to 15 nodes;
 `count = N` in a table makes N of them. The node keys are in `patina guide config`.
 
+## Setup, main command, final check with nodes
+
+The nodes boot first, without faults. The setup (`--setup`) then runs as the driver's first
+command, on the driver's node; when it exits 0 the main command starts and the faults with it.
+When the main command ends ok the faults stop for good: partitions and cuts heal, paused nodes
+resume, and every down node whose restart policy has a restart scheduled starts at once (a node
+a control call took down stays down). Only then does
+the final check (`--finally`) start; a node may still be booting, so the check polls:
+
+<!-- transcript nodes-phases
+dir: /tmp/phases-nodes
+setup: mkdir g && cp "$GUESTS/phases.py" g/
+setup: printf '[node.a]\ncmd = ["python3", "/guest/phases.py", "serve"]\n[node.b]\ncmd = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
+exit: 1
+exact-only: one seed's run
+-->
+```text
+$ patina run --seed 4 --mount g:/guest:copy --faults crash,partition --fault crash-gap-ms=1000..4000 --fault max-incarnations=8 --setup 'python3 /guest/phases.py check 0 a b' --finally 'python3 /guest/phases.py check 10 a b' -- python3 /guest/phases.py work 10 a b
+failure (finally): the final check (--finally) exited 1
+guest: exit 0
+phases: setup exit 0, main exit 0, finally exit 1
+nodes: a 10.0.0.2 running after 1 down, 2 incarnations, b 10.0.0.3 running after 1 down, 2 incarnations
+finally stderr (1 lines, /tmp/phases-nodes/patina-out/run-4/inc-0/stderr from byte 0):
+  FAIL: check: b lost acknowledged puts [4, 5, 6, 7, 8, 9]
+faults injected: 2 (crash 2)
+last injected:
+  seq 11550 t=101745ms crash node=a kind=machine lost: 0 missing, 0 changed, 0 back
+  seq 11575 t=102608ms crash node=b kind=machine object=/work/log lost: 0 missing, 1 changed, 0 back
+run directory: /tmp/phases-nodes/patina-out/run-4
+replay: patina replay /tmp/phases-nodes/patina-out/run-4
+explain: patina explain /tmp/phases-nodes/patina-out/run-4
+```
+
+With `lazy`, b acknowledges a put before its `fsync`: the main command sees nothing wrong, and
+the final check finds what b's machine crashes lost.
+
 ## The driver's control: `patina ctl`
 
-The driver acts on the network and the nodes with control calls: `patina ctl WORDS` in a script
-(`patina` is on the `PATH` of every run; without nodes only `mark` has something to act on),
-or the SDK's `control("WORDS")`.
+The driver acts on the network and the nodes with control calls, the fault classes' own actions:
+`patina ctl WORDS` in a script (`patina` is on the `PATH` of every run; without nodes every call
+is refused), or the SDK's `control("WORDS")`.
 
 | Words | |
 |---|---|
-| `net cut A B`, `net cut --from A --to B` | cut both directions between node sets A and B, or one |
-| `net heal A B`, `net heal` | heal those links, or every cut |
-| `node crash NAME` | crash the node's machine: unsynced data may be lost, its peers hear nothing |
-| `node kill NAME` | kill every process of the node; its disk is kept |
-| `node start NAME` | start a node that is down |
-| `node pause NAME`, `node resume NAME` | freeze the node and let it run again |
-| `clock step NAME +90s` | move the node's realtime clock |
-| `mark LABEL` | as the SDK's `mark`: `setup-complete`, `faults-done`, or a promise |
+| `partition A B`, `partition --from A --to B` | cut both directions between node sets A and B, or one |
+| `heal A B`, `heal` | heal those links, or every cut |
+| `crash NAME` | crash the node's machine: unsynced data may be lost, its peers hear nothing |
+| `kill NAME` | kill every process of the node; its disk is kept |
+| `start NAME` | start a node that is down |
+| `pause NAME`, `resume NAME` | freeze the node and let it run again |
+| `clock NAME +90s` | move the node's realtime clock |
 
 A set is node names joined by commas (`driver` included), or `rest`. A cut holds TCP data, as a
 pulled cable does, until a heal or the sender's timeout; datagrams across it are lost.
@@ -100,7 +135,7 @@ point.
 release-only: a sweep of a seed's 30 crash points
 dir: /tmp/ack2
 setup: mkdir g && cp "$GUESTS/ack2.py" "$GUESTS/patina.py" g/
-setup: printf '[node.a]\ncmd = ["python3", "/guest/ack2.py", "a"]\n[node.b]\ncmd = ["python3", "/guest/ack2.py", "b", "early"]\n' >patina.toml
+setup: printf '[run]\nsetup = "mark"\n[node.a]\ncmd = ["python3", "/guest/ack2.py", "a"]\n[node.b]\ncmd = ["python3", "/guest/ack2.py", "b", "early"]\n' >patina.toml
 exit: 1
 -->
 ```text
@@ -111,7 +146,8 @@ crash points: 30 of 30 tried (a 15 of 15, b 15 of 15)
 ```
 
 `ack2.py` forwards each put from node a to b and acknowledges it once b answers; with `early`, b
-answers before its `fsync`, and a crash of b loses an acknowledged put.
+answers before its `fsync`, and a crash of b loses an acknowledged put. Its driver marks the end
+of its setup itself (`setup = "mark"` under `[run]`), so only the puts' points count.
 
 ## In the logs
 

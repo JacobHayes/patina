@@ -151,10 +151,6 @@ fn control(ptr: u64, len: u64) -> i64 {
     let tab = unsafe { proto::node::NodeTab::at(crate::state::ctl_base()) };
     let r = match proto::node::parse(words, tab, crate::state::node()) {
         Err(r) => -r.errno,
-        Ok(proto::node::Control::Mark(label)) => {
-            mark(label);
-            0
-        }
         Ok(proto::node::Control::Net {
             verb,
             from,
@@ -177,20 +173,23 @@ fn control(ptr: u64, len: u64) -> i64 {
     r
 }
 
-/// A mark. The lifecycle marks: `setup-complete` (the first) starts the faults of a run held
-/// until setup, and ends a pass whose faults acted from the start (the launcher runs it again
-/// held: `ctl::LIFE_RESTART`); `faults-done` (the first) ends every fault, the supervisor's
-/// too (`ctl::LIFE_FAULTS_DONE`).
+/// A mark. The lifecycle marks: `setup-complete` (the first) starts the faults of a run that
+/// declares the program marks it (`FaultCfg::setup_mark`), and ends any other run
+/// (`ctl::LIFE_SETUP_UNDECLARED`); `faults-done` (the first) ends every fault, the
+/// supervisor's too (`ctl::LIFE_FAULTS_DONE`).
 fn mark(label: &[u8]) {
     let t = tab();
     let seq = thread().seq;
     let f = &ctl().faults.cfg;
+    if label == SETUP_COMPLETE && f.setup_mark == 0 {
+        crate::sup::call_sup(
+            Op::Lifecycle,
+            [proto::ctl::LIFE_SETUP_UNDECLARED, seq, 0, 0, 0, 0],
+        );
+        crate::sup::hang()
+    }
     if label == SETUP_COMPLETE && t.setup_seq == 0 {
         t.setup_seq = seq;
-        if f.restart_at_setup != 0 {
-            crate::sup::call_sup(Op::Lifecycle, [proto::ctl::LIFE_RESTART, seq, 0, 0, 0, 0]);
-            crate::sup::hang()
-        }
         let p = core::ptr::addr_of!(f.fault_after_seq) as *mut u64;
         unsafe {
             if core::ptr::read_volatile(p) == u64::MAX {
@@ -219,8 +218,8 @@ fn payload(ptr: u64, len: u64, buf: &mut [u8; MAX_LEN]) -> Result<Hdr, i64> {
     Hdr::parse(&buf[..], len as usize).ok_or(-e::EINVAL)
 }
 
-/// Fault points stay quiet outside the run's fault window (before `setup-complete` in a run
-/// held until setup, after `faults-done`).
+/// Fault points stay quiet outside the run's fault window (before the end of a declared
+/// setup, after the faults end).
 fn quiet() -> bool {
     !ctl().faults.cfg.in_window(thread().seq)
 }

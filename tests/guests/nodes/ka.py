@@ -13,7 +13,7 @@
       short    the link is cut both ways for 3 s: nothing happens, and a second line echoes
       long     the link is cut both ways for 10 s: ETIMEDOUT at the budget, on b's side too
       pause-short, pause-long
-               b is paused (`node pause b`) for 3 s or 10 s: a probe to a paused machine goes
+               b is paused (`pause b`) for 3 s or 10 s: a probe to a paused machine goes
                unanswered as across a cut, so the same
 
 Times are virtual. It prints `ok MODE: ...` or `FAIL: ...` and exits 1.
@@ -105,16 +105,16 @@ def driver(mode):
         fail("no echo")
     th = None
     if mode in ("crash", "ut"):
-        patina.control("node crash b")
+        patina.control("crash b")
     elif mode == "restart":
-        patina.control("node crash b")
-        th = later(2.5, "node start b")
+        patina.control("crash b")
+        th = later(2.5, "start b")
     elif mode in ("short", "long"):
-        patina.control("net cut driver b")
-        th = later(3 if mode == "short" else 10, "net heal")
+        patina.control("partition driver b")
+        th = later(3 if mode == "short" else 10, "heal")
     elif mode in ("pause-short", "pause-long"):
-        patina.control("node pause b")
-        th = later(3 if mode == "pause-short" else 10, "node resume b")
+        patina.control("pause b")
+        th = later(3 if mode == "pause-short" else 10, "resume b")
     else:
         fail(f"mode {mode}")
     if mode in ("short", "pause-short"):

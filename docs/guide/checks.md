@@ -137,10 +137,10 @@ every SDK call does nothing, so it can stay in production builds (`patina guide 
 
 A failed `always` ends the run `violation`, named by its label. A `sometimes` or `reachable`
 that no run of a sweep met makes the sweep `vacuous`: put one where the interesting state is (a
-retry taken, a recovery run), so a sweep that never got there says so. Faults act only between
-`setup_complete()` and `faults_done()` (a shell script: `patina ctl mark setup-complete`,
-`patina ctl mark faults-done`): the setup is not under test and the final checks see a quiet
-system (`patina guide faults`). `mark("ack 17")` records a promise in the log;
+retry taken, a recovery run), so a sweep that never got there says so. Faults act only after
+`setup_complete()` (in a run that declares `setup = "mark"`) and before `faults_done()`: the
+setup is not under test and the final checks see a quiet system; `--setup` and `--finally` do
+the same with commands (`patina guide faults`). `mark("ack 17")` records a promise in the log;
 `examples/checks/synced-before-mark` then checks that its data was synced first.
 
 ## Prove the check can fail

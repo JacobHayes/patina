@@ -242,7 +242,7 @@ def mark(label):
 
 
 def control(words):
-    """A control call (the grammar is in ``patina.h``), e.g. ``control("net cut a b")``: raises
+    """A control call (the grammar is in ``patina.h``), e.g. ``control("partition a b")``: raises
     ``OSError`` with the errno Patina answered (``EPERM`` outside the driver's node, ``ENOENT``
     for an unknown node, ``EINVAL`` for other words, ``EALREADY`` or ``EAGAIN`` for a node in the
     wrong state), or ``ENOSYS`` outside Patina."""
@@ -257,7 +257,9 @@ def control(words):
 
 
 def setup_complete():
-    """The end of setup: no fault acts before it."""
+    """The end of setup: no fault acts before it. Only in a run that declares it (``setup =
+    "mark"`` under ``[run]``, or ``--setup mark``); in any other run it ends the run with an
+    error."""
     mark("setup-complete")
 
 

@@ -469,8 +469,7 @@ impl Sup {
         tab(self.ctl).cfg
     }
 
-    /// In the fault window (after `setup-complete` in a run held until setup, before
-    /// `faults-done`): faults may act.
+    /// In the fault window (after a declared setup, before the faults end): faults may act.
     pub(super) fn faults_on(&self) -> bool {
         self.ctl.faults.cfg.in_window(self.ctl.seq.load(Relaxed))
     }
@@ -1666,6 +1665,8 @@ impl Sup {
     fn link_elig(&self, k: usize) {
         if self.node_count() > 0 {
             unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) }.elig[k] += 1;
+        } else if self.ctl.phases.phase.load(Relaxed) != 0 {
+            self.ctl.phases.elig[k].fetch_add(1, Relaxed);
         }
     }
 

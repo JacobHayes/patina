@@ -4,12 +4,12 @@
 //! after the run (`launch::sdk_sites`).
 
 use super::{Next, Sup, Verdict};
-use proto::ctl::{Op, LIFE_FAULTS_DONE, LIFE_RESTART};
+use proto::ctl::{Op, LIFE_FAULTS_DONE, LIFE_SETUP_UNDECLARED};
 use proto::sdk::SdkTab;
 
-/// The verdict class of a pass that ended at `setup-complete` to be run again held until setup
-/// (`launch::run_one`); never a run's outcome.
-pub const SETUP_RESTART: &str = "setup-restart";
+/// The verdict class of a run whose program marked `setup-complete` without the run declaring
+/// it (`outcome::classify`: `error`, stop `setup-mark`).
+pub const SETUP_MARK: &str = "setup-mark";
 
 impl Sup {
     /// The runtime wrote the violation into the table and the trap's record into the log.
@@ -20,13 +20,22 @@ impl Sup {
         self.finish(Verdict::new("violation", msg))
     }
 
-    /// A lifecycle mark (`Op::Lifecycle`): the end of a pass at `setup-complete`, or
-    /// `faults-done`, after which the seed's partition and pauses in force end and no fault of
-    /// the supervisor's acts (`faults_on`; the runtime set `fault_until_seq`).
+    /// A lifecycle mark (`Op::Lifecycle`): an undeclared `setup-complete`, which ends the run,
+    /// or `faults-done`, after which the seed's partition and pauses in force end and no fault
+    /// of the supervisor's acts (`faults_on`; the runtime set `fault_until_seq`).
     pub(super) fn lifecycle(&mut self, idx: usize, a: [u64; 6]) -> Next {
         self.decide(Op::Lifecycle as u32, idx, a, 0);
         match a[0] {
-            LIFE_RESTART => self.finish(Verdict::new(SETUP_RESTART, String::new())),
+            LIFE_SETUP_UNDECLARED => {
+                let d = if self.phases.setup.is_some() {
+                    "the program marked setup-complete, but the run's setup is a command (--setup): \
+                     a program that marks the end of its own setup declares `setup = \"mark\"` instead"
+                } else {
+                    "the program marked setup-complete, which the run does not declare: add \
+                     `setup = \"mark\"` under [run] in patina.toml (or pass --setup mark)"
+                };
+                self.finish(Verdict::new(SETUP_MARK, d))
+            }
             LIFE_FAULTS_DONE => {
                 self.partitions_done();
                 self.pauses_done();

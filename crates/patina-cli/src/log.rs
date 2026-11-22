@@ -195,6 +195,12 @@ pub fn describe(r: &Rec) -> String {
                 proto::node::shape_name(r.args[1])
             ),
             proto::ctl::DEC_NET_PART_END => format!("partition {} end", r.args[0]),
+            proto::ctl::DEC_PHASE => format!(
+                "phase {} end, status {:#x}, next {}",
+                proto::ctl::phase_name(r.args[0]),
+                r.args[1],
+                proto::ctl::phase_name(r.args[2])
+            ),
             _ => Op::from_u32(r.nr)
                 .map(|o| o.name().to_string())
                 .unwrap_or_else(|| format!("op{}", r.nr)),

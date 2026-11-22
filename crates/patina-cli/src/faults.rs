@@ -851,20 +851,6 @@ pub fn resolve(
     Ok(plan)
 }
 
-/// Whether a plan injects anything: a setting or class beyond the limits and timings that
-/// shape a run without faults (`compute-*`, `max-incarnations`, `down-ms`, `net-links`,
-/// `mem-limit-mb`, `crash-gap-ms`).
-pub fn injects(p: &Plan) -> bool {
-    p.resolved.iter().any(|(k, _)| {
-        let k = k.split('@').next().unwrap_or(k);
-        !(k.starts_with("compute-")
-            || matches!(
-                k,
-                "max-incarnations" | "down-ms" | "net-links" | "mem-limit-mb" | "crash-gap-ms"
-            ))
-    })
-}
-
 impl Plan {
     /// The resolved plan as a JSON object.
     pub fn json(&self) -> Value {

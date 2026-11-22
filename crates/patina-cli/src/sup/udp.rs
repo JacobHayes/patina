@@ -547,6 +547,15 @@ impl Sup {
         if self.node_count() > 0 {
             unsafe { proto::node::NodeTab::at(self.ctl as *const Ctl as *mut u8) }.elig
                 [proto::node::ELIG_DATAGRAMS] += 1;
+        } else if self
+            .ctl
+            .phases
+            .phase
+            .load(std::sync::atomic::Ordering::Relaxed)
+            != 0
+        {
+            self.ctl.phases.elig[proto::node::ELIG_DATAGRAMS]
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

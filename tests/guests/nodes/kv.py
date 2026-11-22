@@ -154,7 +154,7 @@ def driver():
             fail(f"stale read: the backup answered {got} for k{i} after the primary's OK")
     print("replicated: 3 keys", flush=True)
 
-    patina.control("net cut primary backup")
+    patina.control("partition primary backup")
     try:
         p.ask("SET cut v-cut", timeout=5)
         fail("a SET completed while the backup was cut off")
@@ -167,7 +167,7 @@ def driver():
     if Client("primary", 7000).ask("GET cut") != "v-cut":
         fail("the primary does not hold the pending SET")
 
-    patina.control("net heal")
+    patina.control("heal")
     if p.wait(timeout=60) != "OK":
         fail("the pending SET after the heal")
     got = b.ask("GET cut")

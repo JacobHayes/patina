@@ -10,7 +10,7 @@ pub fn now() -> u64 {
 }
 
 /// The realtime clock: virtual time from the epoch, plus the node's offset (`clock-skew-ms`,
-/// `clock step`; 0 for the driver).
+/// `clock NAME`; 0 for the driver).
 fn realtime_ns() -> u64 {
     let off = crate::state::clock_offset();
     crate::state::clock_read(off);

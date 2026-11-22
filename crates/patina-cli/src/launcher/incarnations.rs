@@ -203,9 +203,17 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let shm = shm_carrier()?;
     let mut plans = [0u64; proto::ctl::PLAN_FIELDS];
     let planner = planner(o)?;
+    let setup_cmd = matches!(o.cfg.setup, Some(crate::config::Setup::Command(_)));
+    let phase_cmds = setup_cmd || !o.cfg.finally.is_empty();
+    let mut phases = crate::result::PhaseTab::default();
     loop {
         let inc = out.join(format!("inc-{k}"));
         cfg.incarnation = k;
+        // Every incarnation sets up again without faults: the command runs again, the
+        // program marks again.
+        if o.cfg.setup.is_some() {
+            cfg.fault_after_seq = u64::MAX;
+        }
         cfg.crash_enabled = (cfg.crash_kind != CRASH_NONE && k + 1 < max) as u64;
         let start = Start {
             k,
@@ -217,6 +225,13 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             log_used,
             shm: shm.as_raw_fd(),
             planner: planner.clone(),
+            // Every incarnation starts with the setup command, without faults: a machine that
+            // crashed (which comes only in the main phase) boots without what setup started.
+            phase: match (phase_cmds, setup_cmd) {
+                (false, _) => 0,
+                (true, true) => proto::ctl::PHASE_SETUP,
+                (true, false) => proto::ctl::PHASE_MAIN,
+            },
         };
         let mut end = run_incarnation(o, &inc, cpu, no_personality, &start)?;
         faults.add_incarnation(&inc, k, &end);
@@ -241,9 +256,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         tmpfs_full += end.tmpfs_full;
         shadow_bytes = shadow_bytes.max(end.shadow_bytes);
         sdk.add(end.sdk);
-        // The lifecycle marks hold for the incarnations after them.
+        // Where the setup and the faults ended holds for the incarnations after them.
         cfg.fault_after_seq = end.fault_after_seq;
         cfg.fault_until_seq = end.fault_until_seq;
+        phases.add(k, &end.phases);
         for (a, b) in sched.iter_mut().zip(end.sched) {
             *a += b;
         }
@@ -292,19 +308,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 missing: crate::launch::not_in_sandbox(o, &missing),
                 wall_ms: t0.elapsed().as_millis() as u64,
                 crashes,
-                faults: {
-                    let mut f = faults.json(&o.plan, &net);
-                    // Where faults could act: from setup-complete (0: the start; none: the
-                    // mark never came) to faults-done (none: to the end).
-                    if crate::faults::injects(&o.plan) {
-                        let seq = |s: u64| (s != u64::MAX).then_some(s);
-                        f["window"] = serde_json::json!({
-                            "from_seq": seq(cfg.fault_after_seq),
-                            "to_seq": (cfg.fault_until_seq != 0).then_some(cfg.fault_until_seq),
-                        });
-                    }
-                    f
-                },
+                faults: faults.json(&o.plan, &net),
                 io,
                 insn,
                 net,
@@ -333,6 +337,28 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 }),
                 self_check,
                 nodes: end.nodes.clone(),
+                phases: {
+                    let setup = o.cfg.setup.as_ref().map(|s| match s {
+                        crate::config::Setup::Mark => "mark",
+                        crate::config::Setup::Command(_) => "command",
+                    });
+                    let done = cfg.fault_after_seq != u64::MAX;
+                    (setup.is_some() || !o.cfg.finally.is_empty() || cfg.fault_until_seq != 0).then(
+                        || crate::result::Phases {
+                            setup,
+                            setup_done: setup.is_some() && done,
+                            finally: !o.cfg.finally.is_empty(),
+                            tab: phases,
+                            faults_until_seq: cfg.fault_until_seq,
+                            after_crash: k > 0,
+                            setup_seq: if setup.is_some() && done {
+                                cfg.fault_after_seq
+                            } else {
+                                0
+                            },
+                        },
+                    )
+                },
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

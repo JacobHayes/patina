@@ -306,10 +306,19 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         let exe = std::env::current_exe().map_err(|e| format!("own executable: {e}"))?;
         ops.push(ro(exe.display().to_string(), GUEST_PATINA.into()));
     }
+    let mut progs: Vec<(String, PathBuf)> = vec![];
+    if o.program.copied {
+        progs.push((o.program.guest.clone(), o.program.host.clone()));
+    }
+    for (what, p) in [("setup", &o.setup_program), ("finally", &o.finally_program)] {
+        if let Some(p) = p {
+            place_program(p, what, &c.mounts, &mut ops, &mut copies, &mut progs)?;
+        }
+    }
     let nodes = if c.nodes.is_empty() {
         None
     } else {
-        Some(node_layout(o, &mut ops, &mut copies)?)
+        Some(node_layout(o, &mut ops, &mut copies, &mut progs)?)
     };
     assert!(etc.len() <= sandbox::MAX_DATA);
     for (i, (path, _)) in etc.iter().enumerate() {
@@ -330,10 +339,68 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
 /// `PATH` (`sup::BASE_ENV`).
 pub const GUEST_PATINA: &str = "/opt/patina/bin/patina";
 
+/// Another program of the run (a node's, a phase's) where the driver's is: a copied one at
+/// `/guest` (refused where two programs would take one name), a program's directory bound
+/// read-only where its path leads, unless a bind is there already. `progs` holds the copied
+/// programs placed so far, as (guest path, host path).
+fn place_program(
+    p: &crate::config::Program,
+    what: &str,
+    mounts: &[crate::config::Mount],
+    ops: &mut Vec<Op>,
+    copies: &mut Vec<String>,
+    progs: &mut Vec<(String, PathBuf)>,
+) -> Res<()> {
+    let ro = |src: String, dst: String| Op::Bind {
+        src,
+        dst,
+        rw: false,
+        dev: false,
+    };
+    if p.copied {
+        match progs.iter().find(|(g, _)| *g == p.guest) {
+            Some((_, h)) if *h != p.host => {
+                return Err(format!(
+                    "{what}: its program {} and another program both run as {}",
+                    p.host.display(),
+                    p.guest
+                ))
+            }
+            Some(_) => {}
+            None => {
+                let name = p.guest.trim_start_matches("/guest/");
+                ops.push(ro(
+                    p.host.display().to_string(),
+                    format!("/.patina/prog/{name}"),
+                ));
+                if !copies.iter().any(|cp| cp == "/.patina/prog:/guest") {
+                    copies.push("/.patina/prog:/guest".into());
+                }
+                progs.push((p.guest.clone(), p.host.clone()));
+            }
+        }
+    }
+    if let (Some(d), Some(g)) = (&p.dir, Path::new(&p.guest).parent()) {
+        let at = crate::config::guest_resolve(&g.display().to_string(), mounts);
+        if !ops
+            .iter()
+            .any(|op| matches!(op, Op::Bind { dst, .. } if *dst == at))
+        {
+            ops.push(ro(d.display().to_string(), at));
+        }
+    }
+    Ok(())
+}
+
 /// The layout's part for nodes: each node's program and starting tree bound where the driver's
 /// are, its work tree's mount point, and what the keeper needs to
 /// start each node in its own view.
-fn node_layout(o: &Opts, ops: &mut Vec<Op>, copies: &mut Vec<String>) -> Res<sandbox::Nodes> {
+fn node_layout(
+    o: &Opts,
+    ops: &mut Vec<Op>,
+    copies: &mut Vec<String>,
+    progs: &mut Vec<(String, PathBuf)>,
+) -> Res<sandbox::Nodes> {
     let c = &o.cfg;
     let ro = |src: String, dst: String| Op::Bind {
         src,
@@ -341,46 +408,17 @@ fn node_layout(o: &Opts, ops: &mut Vec<Op>, copies: &mut Vec<String>) -> Res<san
         rw: false,
         dev: false,
     };
-    let mut progs: Vec<(String, PathBuf)> = vec![];
-    if o.program.copied {
-        progs.push((o.program.guest.clone(), o.program.host.clone()));
-    }
     let mut specs = vec![];
     for (k, (n, p)) in c.nodes.iter().zip(&o.node_programs).enumerate() {
         let k = k + 1;
-        if p.copied {
-            match progs.iter().find(|(g, _)| *g == p.guest) {
-                Some((_, h)) if *h != p.host => {
-                    return Err(format!(
-                        "node.{}: its program {} and another program both run as {}",
-                        n.name,
-                        p.host.display(),
-                        p.guest
-                    ))
-                }
-                Some(_) => {}
-                None => {
-                    let name = p.guest.trim_start_matches("/guest/");
-                    ops.push(ro(
-                        p.host.display().to_string(),
-                        format!("/.patina/prog/{name}"),
-                    ));
-                    if !copies.iter().any(|cp| cp == "/.patina/prog:/guest") {
-                        copies.push("/.patina/prog:/guest".into());
-                    }
-                    progs.push((p.guest.clone(), p.host.clone()));
-                }
-            }
-        }
-        if let (Some(d), Some(g)) = (&p.dir, Path::new(&p.guest).parent()) {
-            let at = crate::config::guest_resolve(&g.display().to_string(), &c.mounts);
-            if !ops
-                .iter()
-                .any(|op| matches!(op, Op::Bind { dst, .. } if *dst == at))
-            {
-                ops.push(ro(d.display().to_string(), at));
-            }
-        }
+        place_program(
+            p,
+            &format!("node.{}", n.name),
+            &c.mounts,
+            ops,
+            copies,
+            progs,
+        )?;
         let w = n.work_path();
         if w != c.work_path() && !specs.iter().any(|s: &sandbox::NodeSpec| s.work == w) {
             ops.push(Op::Dir { dst: w.into() });
@@ -517,44 +555,8 @@ pub fn run_one(
     if out.join("result.json").exists() || out.join("inc-0").exists() {
         return Err(format!("{} already holds a run", out.display()));
     }
-    // One pass: `run.json`, then the incarnations, into a run directory without them.
-    let pass = |o: &Opts| -> Res<RunEnd> {
-        for e in fs::read_dir(out).map_err(|e| format!("{}: {e}", out.display()))? {
-            let p = e.map_err(|e| format!("{}: {e}", out.display()))?.path();
-            let name = p.file_name().unwrap_or_default().to_string_lossy();
-            if name.starts_with("inc-") || name == "node" {
-                fs::remove_dir_all(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            }
-        }
-        crate::result::write_json(
-            &out.join("run.json"),
-            &crate::result::run_json(&o.cfg, &o.program, &o.node_programs, &o.plan)?,
-        )?;
-        crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)
-    };
-    // Faults act from the start unless the run is told the program marks `setup-complete`
-    // (`faults_held`). A run not told that meets the mark ends there and starts again told:
-    // `run.json` records the pass that is the run, which a replay and the rerun line run as
-    // it is.
-    let held;
-    let (mut end, o) = if o.cfg.faults_held || !crate::faults::injects(&o.plan) {
-        (pass(o)?, o)
-    } else {
-        let mut cfg = o.cfg.clone();
-        cfg.restart_at_mark = true;
-        let first = cfg.opts_with(o.program.clone())?;
-        let end = pass(&first)?;
-        if end.verdict.class == crate::sup::sdk::SETUP_RESTART {
-            cfg.restart_at_mark = false;
-            cfg.faults_held = true;
-            held = cfg.opts_with(o.program.clone())?;
-            let mut end = pass(&held)?;
-            end.faults["window"]["restarted"] = true.into();
-            (end, &held)
-        } else {
-            (end, o)
-        }
-    };
+    crate::result::write_json(&out.join("run.json"), &crate::result::run_json(o)?)?;
+    let mut end = crate::launcher::incarnations::run_chain(o, out, cpu, no_personality)?;
     let write = |end: &RunEnd| -> Res<serde_json::Value> {
         let mut r = crate::result::result_json(end, &crate::result::classified(end));
         r["signature"] = crate::signature::of(&r, out);
@@ -600,6 +602,8 @@ pub struct Start<'a> {
     pub shm: std::os::fd::RawFd,
     /// The run's plans, with load-time points (`launcher::plans`).
     pub planner: Option<std::sync::Arc<crate::launcher::plans::Planner>>,
+    /// The phase it starts in (`proto::ctl::PHASE_*`; 0: a run without phase commands).
+    pub phase: u64,
 }
 
 /// The descriptor `Start::shm` names, made once per run.
@@ -635,10 +639,12 @@ pub struct IncEnd {
     pub shadow_bytes: u64,
     /// The SDK's site table.
     pub sdk: crate::result::SdkReport,
-    /// `fault_after_seq` and `fault_until_seq` at the end: set by the `setup-complete` and
-    /// `faults-done` marks.
+    /// `fault_after_seq` and `fault_until_seq` at the end: where the setup ended and the
+    /// faults ended.
     pub fault_after_seq: u64,
     pub fault_until_seq: u64,
+    /// The phases' table at the end (`proto::ctl::PhaseCtl`).
+    pub phases: crate::result::PhaseTab,
     /// Pause points and spin probes (`proto::ctl::SCHED_NAMES`).
     pub sched: [u64; proto::ctl::SCHED_FIELDS],
     /// Compute points (`proto::ctl::ComputeStats::read`), and the image table.
@@ -1068,6 +1074,7 @@ pub fn run_incarnation(
     }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_STEP, Relaxed);
+    ctl.phases.phase.store(start.phase, Relaxed);
     if start.k > 0 {
         ctl.seq.store(start.seq0, Relaxed);
         ctl.vclock_ns.store(start.vclock0, Relaxed);
@@ -1102,6 +1109,38 @@ pub fn run_incarnation(
         argv.extend(["--copy".into(), cp.clone()]);
     }
     argv.extend(["--exe".into(), o.program.guest.clone()]);
+    // The setup command and the final check: each program's guest path, then its argv (argv[0]
+    // as the main command's).
+    let phase_cmds = [
+        (
+            "setup",
+            &o.setup_program,
+            match &c.setup {
+                Some(crate::config::Setup::Command(w)) => w.as_slice(),
+                _ => &[],
+            },
+        ),
+        ("finally", &o.finally_program, c.finally.as_slice()),
+    ];
+    for (what, p, w) in phase_cmds {
+        if let Some(p) = p {
+            argv.extend([format!("--{what}-exe"), p.guest.clone()]);
+            let a0 = if p.copied {
+                p.guest.clone()
+            } else {
+                w[0].clone()
+            };
+            for x in std::iter::once(&a0).chain(&w[1..]) {
+                argv.extend([format!("--{what}-arg"), x.clone()]);
+            }
+        }
+    }
+    if !c.finally.is_empty() {
+        // An ok status with a condition is judged after the run: it does not start the check.
+        for e in c.ok_exit.iter().filter(|e| e.when.is_empty()) {
+            argv.extend(["--ok".into(), e.status.to_string()]);
+        }
+    }
     for e in &c.env {
         argv.extend(["--env".into(), e.clone()]);
     }
@@ -1422,6 +1461,7 @@ pub fn run_incarnation(
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         fault_until_seq: ctl.faults.cfg.fault_until_seq,
+        phases: crate::result::PhaseTab::read(&ctl.phases),
         sched: ctl.sched.read(),
         compute: ctl.compute.read(),
         plans: ctl.compute.plans(),

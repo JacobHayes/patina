@@ -85,14 +85,14 @@ pub struct Config {
     pub fault_classes: Vec<String>,
     /// `KEY=VALUE[@NODE,...]` fault settings, in order; they replace a class's.
     pub faults: Vec<String>,
-    /// Faults wait for the program's `setup-complete` mark (`[run] faults-held`,
-    /// `--faults-held`). A run without it that meets the mark starts again with it
-    /// (`launch::run_one`); `run.json` records it either way.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub faults_held: bool,
-    /// A pass without the hold that ends at the mark, for one held (`launch::run_one`).
-    #[serde(skip)]
-    pub restart_at_mark: bool,
+    /// The run's setup (`--setup`, `[run] setup`): a command run first, without faults, or
+    /// the program's own `setup-complete` mark. No fault acts before it ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Setup>,
+    /// The final check (`--finally`, `[run] finally`), run after the main command with the
+    /// faults stopped (empty: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finally: Vec<String>,
     /// SDK labels and fault classes a sweep or report may find unmet without calling the
     /// result vacuous (`[sweep] allow-unmet`).
     pub allow_unmet: Vec<String>,
@@ -142,6 +142,39 @@ pub struct Config {
     /// The machines besides the driver (`[node.NAME]`), in declaration order: node 1 upward.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<Node>,
+}
+
+/// A run's setup (`[run] setup`): a command Patina runs before the main one, or `mark`, the
+/// program's own `setup-complete` mark.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Setup {
+    Mark,
+    Command(Vec<String>),
+}
+
+impl Setup {
+    /// `--setup` and `[run] setup` as text: `mark`, or a command's words.
+    pub fn parse(s: &str, what: &str) -> Res<Setup> {
+        if s.trim() == "mark" {
+            return Ok(Setup::Mark);
+        }
+        Ok(Setup::Command(command(
+            crate::sweep::words(s).map_err(|e| format!("{what}: {e}"))?,
+            what,
+        )?))
+    }
+}
+
+/// A phase command's words, its program given by a relative path made absolute (as `cmd`).
+fn command(mut w: Vec<String>, what: &str) -> Res<Vec<String>> {
+    if w.is_empty() {
+        return Err(format!("{what}: an empty command"));
+    }
+    if w[0].contains('/') && !w[0].starts_with('/') {
+        w[0] = logical(&w[0]).display().to_string();
+    }
+    Ok(w)
 }
 
 /// One node of a run with several machines (`proto::node`).
@@ -233,8 +266,8 @@ impl Default for Config {
             tmpfs_bytes: 256 << 20,
             fault_classes: vec![],
             faults: vec![],
-            faults_held: false,
-            restart_at_mark: false,
+            setup: None,
+            finally: vec![],
             allow_unmet: vec![],
             fs_model: Model::Ext4Ordered.name().into(),
             preempt_permille: 100,
@@ -280,6 +313,9 @@ pub struct Opts {
     pub fs_model: Model,
     /// Each node's program (`cfg.nodes` order).
     pub node_programs: Vec<Program>,
+    /// The setup command's program and the final check's (`Config::setup`, `Config::finally`).
+    pub setup_program: Option<Program>,
+    pub finally_program: Option<Program>,
 }
 
 fn expand(base: &Path, p: &str) -> PathBuf {
@@ -832,7 +868,8 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("run", "time-limit", "SECONDS", "3600", "virtual time after which the run ends `liveness`"),
     tk("run", "log-limit", "MIB", "1024", "log size at which the run ends `liveness` (a livelock)"),
     tk("run", "check-timeout", "SECONDS", "60", "wall time a checker may take"),
-    tk("run", "faults-held", "true or false", "false", "as `--faults-held`: faults wait for the program's `setup-complete` mark; without it, a run that meets the mark sets up twice"),
+    tk("run", "setup", "\"CMD ARGS\", [\"CMD\", \"ARG\", ...] or \"mark\"", "none", "as `--setup`: run first, without faults; `mark`: the program marks `setup-complete`"),
+    tk("run", "finally", "\"CMD ARGS\" or [\"CMD\", \"ARG\", ...]", "none", "as `--finally`: the final check, run with the faults stopped"),
     tk("faults", "faults", "[\"CLASS[@NODE,...]\", ...]", "none", "as `--faults`"),
     tk("faults", "KEY", "VALUE", "none", "any fault key, as `--fault KEY=VALUE` (`patina run --fault help`)"),
     tk("faults", "fs-model", "\"ext4-ordered\" or \"posix-strict\"", "ext4-ordered", "what a machine crash keeps"),
@@ -911,7 +948,19 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "time-limit") => c.time_limit = time_limit(int(v, &at)?, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
-                ("run", "faults-held") => c.faults_held = boolean(v, &at)?,
+                ("run", "setup") => {
+                    c.setup = Some(match v.as_str() {
+                        Some(t) => Setup::parse(t, &at)?,
+                        None => Setup::Command(command(strings(v, &at)?, &at)?),
+                    })
+                }
+                ("run", "finally") => {
+                    c.finally = match v.as_str() {
+                        Some(t) => crate::sweep::words(t).map_err(|e| format!("{at}: {e}"))?,
+                        None => strings(v, &at)?,
+                    };
+                    c.finally = command(std::mem::take(&mut c.finally), &at)?;
+                }
                 ("run", "disk-mb") => c.tmpfs_bytes = int(v, &at)?.saturating_mul(1 << 20),
                 ("run", "check-timeout") => c.check_timeout = Some(int(v, &at)?),
                 ("run", "check") => check = Some(string(v, &at)?),
@@ -1145,8 +1194,14 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }
-    if a.has("--faults-held") {
-        c.faults_held = true;
+    if let Some(t) = a.last("--setup") {
+        c.setup = Some(Setup::parse(t, "--setup")?);
+    }
+    if let Some(t) = a.last("--finally") {
+        c.finally = command(
+            crate::sweep::words(t).map_err(|e| format!("--finally: {e}"))?,
+            "--finally",
+        )?;
     }
     c.fault_classes.extend(a.all("--faults").iter().cloned());
     // `--fault KEY=VALUE` is any `[faults]` key, the crash model's too.
@@ -1243,12 +1298,13 @@ impl Config {
         if let Some(w) = &self.compute_walk {
             plan.compute_walk = faults::walk(self.seed, w)?;
         }
-        // Faults wait for setup-complete when the run is told the program marks it; a run not
-        // told that meets the mark starts again told (`launch::run_one`).
-        if self.faults_held {
+        // No fault acts before a declared setup ends; a `setup-complete` mark is the program's
+        // to make only where the run declares it.
+        if self.setup.is_some() {
             plan.faults.fault_after_seq = u64::MAX;
-        } else if self.restart_at_mark && faults::injects(&plan) {
-            plan.faults.restart_at_setup = 1;
+        }
+        if self.setup == Some(Setup::Mark) {
+            plan.faults.setup_mark = 1;
         }
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
             format!(
@@ -1286,12 +1342,25 @@ impl Config {
             return Err("preempt-permille is at most 1000".into());
         }
         let node_programs = self.check_nodes()?;
+        let phase = |what: &str, w: &[String]| -> Res<Program> {
+            self::program(&w[0], &self.mounts).map_err(|e| format!("{what}: {e}"))
+        };
+        let setup_program = match &self.setup {
+            Some(Setup::Command(w)) => Some(phase("setup", w)?),
+            _ => None,
+        };
+        let finally_program = match self.finally.is_empty() {
+            true => None,
+            false => Some(phase("finally", &self.finally)?),
+        };
         Ok(Opts {
             cfg: self.clone(),
             program,
             plan,
             fs_model,
             node_programs,
+            setup_program,
+            finally_program,
         })
     }
 

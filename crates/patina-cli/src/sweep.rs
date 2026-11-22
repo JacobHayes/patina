@@ -1286,16 +1286,6 @@ pub fn main(a: &Args) -> Result<ExitCode, Fail> {
                     .arg(dir)
                     .args(["--format", "json"])
                     .args(&pass);
-                // A crash point's child holds faults as its base ran (`launch::run_one`).
-                let base_held = point.as_ref().filter(|p| p.n > 0).is_some_and(|_| {
-                    read_json(
-                        &run_dir(*seed, *case, Some(&report::Point::default())).join("run.json"),
-                    )
-                    .is_ok_and(|r| r["config"]["faults-held"] == true)
-                });
-                if base_held && !a.has("--faults-held") {
-                    c.arg("--faults-held");
-                }
                 if kind.is_some() {
                     let at = |s: &str| format!("@{s}");
                     let crash = match point {

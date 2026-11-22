@@ -157,10 +157,10 @@ static void node(void) {
 static void driver(void) {
     struct timespec s = {1, 0};
     clock_nanosleep(CLOCK_MONOTONIC, 0, &s, NULL);
-    long r = patina_control("clock step b +5s");
+    long r = patina_control("clock b +5s");
     s.tv_sec = 19;
     clock_nanosleep(CLOCK_MONOTONIC, 0, &s, NULL);
-    long r2 = patina_control("clock step b -5s");
+    long r2 = patina_control("clock b -5s");
     s.tv_sec = 10;
     clock_nanosleep(CLOCK_MONOTONIC, 0, &s, NULL);
     printf("steps: %ld %ld\n", r, r2);

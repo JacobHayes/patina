@@ -79,6 +79,7 @@ mod link;
 mod maps;
 mod nodes;
 mod pause;
+mod phase;
 pub mod proc;
 #[allow(dead_code)]
 pub mod sched;
@@ -125,6 +126,8 @@ struct Sup {
     pauses: pause::Pauses,
     /// The program's path in the sandbox (the first image).
     exe: String,
+    /// The run's phases (`--setup`, `--finally`; `phase`).
+    phases: phase::Phases,
     /// Processes in which an `execve` has replaced an image (pids are unique in a run): a
     /// runtime there that cannot run its image was handed one an `execve` resolved, not the
     /// program (or a node's command).
@@ -409,7 +412,7 @@ impl Sup {
                 self.finish(Verdict::new("infra", d));
             }
             let old = self.now();
-            if self.node_count() > 0 && self.node_actions_idle() {
+            if (self.node_count() > 0 || self.phases.pending != 0) && self.node_actions_idle() {
                 continue;
             }
             // Nothing pending that can wake anyone (a partition to come, or a kill before
@@ -438,7 +441,9 @@ impl Sup {
                     self.after_events();
                     // A kill closed sockets and ended waits: the wire and the waiters see it now,
                     // not at the next event.
-                    if self.node_count() > 0 && !self.node_actions().is_empty() {
+                    if (self.node_count() > 0 || self.phases.pending != 0)
+                        && !self.node_actions().is_empty()
+                    {
                         self.wire_step();
                         self.io.sync(&mut self.sched, self.ctl);
                     }
@@ -647,16 +652,29 @@ impl Sup {
 
     /// The process of `idx` is ending (`exit_group`, a fatal signal, or the exit of its
     /// last thread). Exit barrier and the rest: `proc::process_died`. The run ends when the
-    /// first guest exits.
+    /// root of its last phase exits; the root of an earlier phase is an ordinary process's
+    /// exit, and the next phase's root starts after it (`phase`).
     fn proc_exit(&mut self, op: Op, idx: usize, args: [u64; 6], status: i64, sig: i64) -> Next {
         let pid = self.sched.entries[idx].pid;
-        if pid == self.procs.main {
+        let next = match pid == self.procs.main {
+            true => self.phase_next(status, sig),
+            false => None,
+        };
+        if pid == self.procs.main && next.is_none() {
             self.ctl.timing[TM_MAIN_EXIT].store(now_ns(), Relaxed);
         }
+        self.phases.continuing = next.is_some();
         self.process_died(pid, status, sig as u64);
+        self.phases.continuing = false;
+        if let Some(n) = next {
+            self.procs.main = 0;
+            self.phase_end(status, sig, n);
+            return Next::Pick;
+        }
         if pid == self.procs.main {
             let _ = self.reap();
             self.decide(op as u32, idx, args, 0);
+            self.phase_end(status, sig, 0);
             self.main_exit(status, sig);
         }
         Next::Pick
@@ -1118,7 +1136,10 @@ impl Sup {
             // `ThreadExit`): its own end is its node's, not a kill's.
             let ending = req.op == Op::ProcExit as u32
                 || (req.op == Op::ThreadExit as u32 && self.sched.live_in(pid) <= 1);
-            if self.node_count() > 0 && !ending && self.node_actions().contains(&pid) {
+            if (self.node_count() > 0 || self.phases.pending != 0)
+                && !ending
+                && self.node_actions().contains(&pid)
+            {
                 // A node kill ended the process that asked: its request is not served.
                 self.wire_step();
                 self.io.sync(&mut self.sched, self.ctl);
@@ -1187,6 +1208,10 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     let mut exe: Option<String> = None;
     // A run with nodes: the keeper's channel is at `FD_NODES`.
     let mut nodes = false;
+    // The setup command and the final check: each program's guest path and its argv.
+    let mut setup: Option<(String, Vec<String>)> = None;
+    let mut finally: Option<(String, Vec<String>)> = None;
+    let mut ok: Vec<i64> = vec![];
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1197,6 +1222,29 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             }
             "--exe" => exe = Some(it.next().ok_or("--exe needs PATH")?.clone()),
             "--nodes" => nodes = true,
+            "--setup-exe" => {
+                setup = Some((it.next().ok_or("--setup-exe needs PATH")?.clone(), vec![]))
+            }
+            "--finally-exe" => {
+                finally = Some((it.next().ok_or("--finally-exe needs PATH")?.clone(), vec![]))
+            }
+            "--setup-arg" | "--finally-arg" => {
+                let v = it.next().ok_or("an argument is needed")?.clone();
+                let p = if a == "--setup-arg" {
+                    &mut setup
+                } else {
+                    &mut finally
+                };
+                p.as_mut()
+                    .ok_or("an argument before its program")?
+                    .1
+                    .push(v);
+            }
+            "--ok" => ok.push(
+                it.next()
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--ok needs a status")?,
+            ),
             "--env" => {
                 let kv = it.next().ok_or("--env needs K=V")?;
                 let k = kv.split('=').next().unwrap_or("");
@@ -1286,6 +1334,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         execed: Default::default(),
         maps_ended: std::cell::Cell::new(false),
         disks: disks::Disks::new(work_dir(ctl)),
+        phases: phase::Phases::default(),
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
@@ -1356,20 +1405,18 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     ctl.timing[TM_COPIED].store(now_ns(), Relaxed);
     // The first guest: slot 0, reserved before the task exists.
     sup.slot(0).state.store(SLOT_RESERVED, SeqCst);
-    let cstrs = |v: &[String]| -> Vec<CString> {
-        v.iter()
-            .map(|s| CString::new(s.as_bytes()).unwrap())
-            .collect()
+    let cmd_of = |exe: String, argv: Vec<String>| phase::Cmd {
+        argv: [vec!["rt".to_string(), exe.clone()], argv].concat(),
+        exe,
     };
-    let mut rt_args = vec!["rt".to_string(), exe.unwrap_or_else(|| cmd[0].clone())];
-    rt_args.extend(cmd.iter().cloned());
-    let argv_c = cstrs(&rt_args);
-    let envp_c = cstrs(&env);
-    let mut argv: Vec<*const libc::c_char> = argv_c.iter().map(|c| c.as_ptr()).collect();
-    argv.push(std::ptr::null());
-    let mut envp: Vec<*const libc::c_char> = envp_c.iter().map(|c| c.as_ptr()).collect();
-    envp.push(std::ptr::null());
-    let empty = c"";
+    let main_cmd = cmd_of(exe.unwrap_or_else(|| cmd[0].clone()), cmd);
+    sup.phases.setup = setup.map(|(e, a)| cmd_of(e, a));
+    sup.phases.finally = finally.map(|(e, a)| cmd_of(e, a));
+    sup.phases.ok = ok;
+    sup.phases.env = env
+        .iter()
+        .map(|s| CString::new(s.as_bytes()).unwrap())
+        .collect();
 
     // Make rdtsc fault in the supervisor too. Guest tasks run with it (set by the
     // runtime); if the supervisor did not, every hand-off would switch between tasks
@@ -1380,32 +1427,19 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     if nodes != (ctl.config.nodes > 1) {
         sup.finish(Verdict::new("infra", "--nodes and the node table disagree"));
     }
-    let pid = unsafe { libc::fork() };
-    if pid < 0 {
-        sup.finish(Verdict::new("infra", "fork failed"));
+    // The first root: the setup command's, when the run starts in its setup (`phase`).
+    let first_phase = ctl.phases.phase.load(Relaxed);
+    let first = match (first_phase, &sup.phases.setup) {
+        (PHASE_SETUP, Some(c)) => c.clone(),
+        _ => main_cmd.clone(),
+    };
+    sup.phases.main = Some(main_cmd);
+    sup.exe = first.exe.clone();
+    if first_phase != 0 {
+        sup.phase_begin(first_phase);
     }
-    if pid == 0 {
-        unsafe {
-            libc::close(FD_OUTCOME);
-            libc::close(FD_EXPORT);
-            libc::close(FD_SHM);
-            if nodes {
-                libc::close(FD_NODES);
-            }
-            if !inherit::child() {
-                libc::_exit(126);
-            }
-            libc::syscall(
-                libc::SYS_execveat,
-                FD_RT,
-                empty.as_ptr(),
-                argv.as_ptr(),
-                envp.as_ptr(),
-                libc::AT_EMPTY_PATH,
-            );
-            libc::_exit(127);
-        }
-    }
+    sup.phases.fds = phase::open_fds();
+    let pid = sup.fork_root(&first);
     sup.child = pid;
     sup.pidfd = match pidfd_open(pid) {
         Ok(fd) => fd,
