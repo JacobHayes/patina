@@ -64,6 +64,27 @@ pub struct RunEnd {
     pub machines: Option<Value>,
     /// A run with a declared setup, a final check or a `faults-done` mark: its phases.
     pub phases: Option<Phases>,
+    /// A run with a `ready` probe: when each machine was first ready (`ready_json`).
+    pub ready: Option<Value>,
+}
+
+/// `result.json`'s `ready`: each machine (main first) and the virtual time, in ms as the
+/// machines' `at_ms`, it was first ready: its probe's pass, or its start without one (null:
+/// never).
+pub fn ready_json(names: &[String], ns: &[u64]) -> Value {
+    let m: serde_json::Map<String, Value> = names
+        .iter()
+        .zip(ns)
+        .map(|(n, &t)| {
+            let v = if t == 0 {
+                Value::Null
+            } else {
+                json!(t / 1_000_000)
+            };
+            (n.clone(), v)
+        })
+        .collect();
+    Value::Object(m)
 }
 
 /// `proto::ctl::PhaseCtl` as a boot left it, folded over boots (`add`).
@@ -785,6 +806,9 @@ pub fn result_json(e: &RunEnd, c: &Classified) -> Value {
     if let Some(k) = &e.check {
         r["check"] = serde_json::to_value(k).unwrap();
     }
+    if let Some(v) = &e.ready {
+        r["ready"] = v.clone();
+    }
     if let Some(p) = &e.phases {
         let v = p.json();
         if v.as_object().is_some_and(|o| !o.is_empty()) {
@@ -1228,7 +1252,34 @@ pub fn print_human(r: &Value, dir: &Path) {
             }
         }
     }
-    if !ok && phase.is_none() {
+    // A machine never ready: its stderr, where its probe's runner wrote what the probe last
+    // said beside the machine's own output (`ready`).
+    let unready: Vec<(&String, std::path::PathBuf)> =
+        match (r["stop"].as_str(), r["ready"].as_object()) {
+            (Some("ready"), Some(m)) => m
+                .iter()
+                .filter(|(_, v)| v.is_null())
+                .map(|(n, _)| {
+                    let d = if n == "main" {
+                        dir.to_path_buf()
+                    } else {
+                        dir.join("machine").join(n)
+                    };
+                    (n, d.join("boot-1").join("stderr"))
+                })
+                .collect(),
+            _ => vec![],
+        };
+    for (name, path) in &unready {
+        let text = String::from_utf8_lossy(&std::fs::read(path).unwrap_or_default()).into_owned();
+        let lines: Vec<&str> = text.lines().collect();
+        let first = lines.len().saturating_sub(STDERR_LINES);
+        println!("{name} stderr ({} lines, {}):", lines.len(), path.display());
+        for l in &lines[first..] {
+            println!("  {}", l.chars().take(LINE_MAX).collect::<String>());
+        }
+    }
+    if !ok && phase.is_none() && unready.is_empty() {
         let boot = r["boots"].as_u64().unwrap_or(1).max(1);
         let path = dir.join(format!("boot-{boot}")).join("stderr");
         let text = std::fs::read(&path)

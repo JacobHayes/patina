@@ -207,6 +207,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let setup_cmd = matches!(o.cfg.setup, Some(crate::config::Setup::Command(_)));
     let phase_cmds = setup_cmd || !o.cfg.finally.is_empty();
     let mut phases = crate::result::PhaseTab::default();
+    let mut ready_ns = [0u64; proto::machine::MAX_MACHINES];
     loop {
         let bdir = out.join(crate::durability::check::boot_dir(k));
         cfg.boot = k;
@@ -261,6 +262,10 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         cfg.fault_after_seq = end.fault_after_seq;
         cfg.fault_until_seq = end.fault_until_seq;
         phases.add(k, &end.phases);
+        // Probes run at the first boot only: its times are the run's.
+        if k == 0 {
+            ready_ns = end.ready_ns;
+        }
         for (a, b) in sched.iter_mut().zip(end.sched) {
             *a += b;
         }
@@ -338,6 +343,12 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                 }),
                 self_check,
                 machines: end.machines.clone(),
+                ready: o.cfg.has_ready().then(|| {
+                    let names: Vec<String> = std::iter::once("main".to_string())
+                        .chain(o.cfg.machines.iter().map(|m| m.name.clone()))
+                        .collect();
+                    crate::result::ready_json(&names, &ready_ns)
+                }),
                 phases: {
                     let setup = o.cfg.setup.as_ref().map(|s| match s {
                         crate::config::Setup::Mark => "mark",

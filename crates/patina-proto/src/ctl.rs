@@ -1329,6 +1329,13 @@ pub const DEC_MACHINE_CLOCK: u32 = 0x158;
 /// 0, 0, 0]. Faults start after the setup's record and stop at the main command's.
 pub const DEC_PHASE: u32 = 0x159;
 
+/// Machine [machine]'s `ready` probe passed (`sup::ready`): [machine, 1 when every machine is
+/// now ready and the fault window opens here (0: machines still wait), 0, 0, 0, 0]. At boot,
+/// [`READY_HOLD`, 0, ...] with the slot that runs first as its result: main's command waits
+/// until every other machine is ready.
+pub const DEC_READY: u32 = 0x15a;
+pub const READY_HOLD: u64 = u64::MAX;
+
 /// Signals whose default action is "ignore" (SIGCHLD, SIGCONT, SIGURG, SIGWINCH).
 pub const fn sig_default_ignored(sig: u64) -> bool {
     matches!(sig, 17 | 18 | 23 | 28)

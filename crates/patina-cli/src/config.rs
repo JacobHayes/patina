@@ -142,6 +142,9 @@ pub struct Config {
     /// The machines besides main (`[machine.NAME]`), in declaration order: machine 1 upward.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub machines: Vec<Machine>,
+    /// Main's `ready` probe (`[machine.main] ready`; empty: none).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready: Vec<String>,
 }
 
 /// A run's setup (`[run] setup`): a command Patina runs before the main one, or `mark`, the
@@ -212,6 +215,10 @@ pub struct Machine {
     /// may not exceed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<String>,
+    /// `ready`: the probe run on it every 100 ms of virtual time at its first boot until it
+    /// exits 0 (`sup::ready`; empty: ready once started).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready: Vec<String>,
 }
 
 impl Machine {
@@ -227,6 +234,7 @@ impl Machine {
             max_boots: None,
             no_faults: false,
             disk_mb: None,
+            ready: vec![],
         }
     }
 
@@ -285,6 +293,7 @@ impl Default for Config {
             check_timeout: None,
             case: None,
             machines: vec![],
+            ready: vec![],
         }
     }
 }
@@ -805,6 +814,18 @@ fn strings(v: &toml::Value, at: &str) -> Res<Vec<String>> {
         .collect()
 }
 
+/// A `ready` probe: `"CMD ARGS"` (split as a shell would, without one) or `["CMD", "ARG"]`.
+fn probe(v: &toml::Value, at: &str) -> Res<Vec<String>> {
+    let w = match v.as_str() {
+        Some(t) => crate::sweep::words(t).map_err(|e| format!("{at}: {e}"))?,
+        None => strings(v, at)?,
+    };
+    if w.is_empty() {
+        return Err(format!("{at}: an empty command"));
+    }
+    Ok(w)
+}
+
 fn boolean(v: &toml::Value, at: &str) -> Res<bool> {
     v.as_bool()
         .ok_or_else(|| format!("{at}: expected true or false"))
@@ -879,6 +900,7 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("sweep", "crash-pairs", "K", "off", "with `--crash-points` and machines: crash a second machine at each of its next K points after a first crash"),
     tk("machine.NAME", "run", "[\"CMD\", \"ARG\", ...]", "required", "the command Patina starts at each of its boots; [machine.main] run is the command after `--`"),
     tk("machine.NAME", "env", "{ K = \"V\" }", "none", "added to the run's environment"),
+    tk("machine.NAME", "ready", "\"CMD ARGS\" or [\"CMD\", \"ARG\", ...]", "ready once started", "a probe run on it every 100 ms until it exits 0: main's command and the faults wait for every machine's (main's own: the faults only)"),
     tk("machine.NAME", "disk", "\"DIR[:GUEST]\"", "empty", "its disk's starting files (main's: as `--disk`)"),
     tk("machine.NAME", "restart", "\"crash\", \"always\" or \"never\"", "crash", "after which downs the seed restarts it (`always`: also after it exits within `ok-exit`)"),
     tk("machine.NAME", "ok-exit", "N or [N, ...]", "[0]", "exit statuses that only stop the machine"),
@@ -1023,8 +1045,9 @@ fn machines(c: &mut Config, text: &str, t: &toml::Table, base: &Path, file: &str
                 match k.as_str() {
                     "run" => c.cmd = strings(v, &at)?,
                     "disk" => (c.disk, c.disk_at) = disk_arg(base, &at, &string(v, &at)?)?,
+                    "ready" => c.ready = probe(v, &at)?,
                     _ if known_key("machine.NAME", k) => {
-                        return Err(format!("{at}: main takes run and disk only"))
+                        return Err(format!("{at}: main takes run, disk and ready only"))
                     }
                     _ => return Err(format!("{file}: unknown key machine.main.{k}")),
                 }
@@ -1040,6 +1063,7 @@ fn machines(c: &mut Config, text: &str, t: &toml::Table, base: &Path, file: &str
             let at = format!("{at}.{k}");
             match k.as_str() {
                 "run" => machine.run = strings(v, &at)?,
+                "ready" => machine.ready = probe(v, &at)?,
                 "env" => {
                     for (ek, ev) in table(v, &at)? {
                         machine.env.push(format!("{ek}={}", string(ev, &at)?));
@@ -1322,7 +1346,18 @@ impl Config {
             plan.compute_walk = faults::walk(self.seed, w)?;
         }
         // No fault acts before a declared setup ends; a `setup-complete` mark is the program's
-        // to make only where the run declares it.
+        // to make only where the run declares it. With `ready` probes, none before every
+        // machine is ready (`sup::ready`): known here, before the run starts.
+        if self.has_ready() {
+            if self.setup.is_some() {
+                return Err(
+                    "ready probes and a setup (--setup, [run] setup) cannot be combined: \
+                            give one"
+                        .into(),
+                );
+            }
+            plan.faults.fault_after_seq = u64::MAX;
+        }
         if self.setup.is_some() {
             plan.faults.fault_after_seq = u64::MAX;
         }
@@ -1385,6 +1420,11 @@ impl Config {
             setup_program,
             finally_program,
         })
+    }
+
+    /// Whether any machine, main included, declares a `ready` probe.
+    pub fn has_ready(&self) -> bool {
+        !self.ready.is_empty() || self.machines.iter().any(|m| !m.ready.is_empty())
     }
 
     /// Whether the link faults act on main's links too: a link class (`net`, `partition`) or

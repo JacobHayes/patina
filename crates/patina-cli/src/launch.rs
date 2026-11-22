@@ -454,6 +454,7 @@ fn machine_layout(
             argv,
             env,
             size: c.machine_disk_bytes(k - 1)?,
+            ready: (!n.ready.is_empty()).then(|| crate::ready::runner_argv(&n.ready)),
         });
     }
     let mut readonly: Vec<String> = vec!["/".into(), "/dev".into(), "/guest".into()];
@@ -638,6 +639,8 @@ pub struct BootEnd {
     pub fault_until_seq: u64,
     /// The phases' table at the end (`proto::ctl::PhaseCtl`).
     pub phases: crate::result::PhaseTab,
+    /// When each machine was first ready (`MachineTab::ready_ns`).
+    pub ready_ns: [u64; proto::machine::MAX_MACHINES],
     /// Pause points and spin probes (`proto::ctl::SCHED_NAMES`).
     pub sched: [u64; proto::ctl::SCHED_FIELDS],
     /// Compute points (`proto::ctl::ComputeStats::read`), and the image table.
@@ -1138,6 +1141,17 @@ pub fn run_boot(
     for e in &c.env {
         argv.extend(["--env".into(), e.clone()]);
     }
+    // The `ready` probes, at the first boot only (`sup::ready`): each machine's number, then
+    // its probe's words.
+    if start.k == 0 {
+        let probes = std::iter::once(&c.ready).chain(c.machines.iter().map(|m| &m.ready));
+        for (k, w) in probes.enumerate().filter(|(_, w)| !w.is_empty()) {
+            argv.extend(["--ready".into(), k.to_string()]);
+            for x in w {
+                argv.extend(["--ready-arg".into(), x.clone()]);
+            }
+        }
+    }
     if !c.machines.is_empty() {
         argv.push("--machines".into());
     }
@@ -1455,6 +1469,7 @@ pub fn run_boot(
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         fault_until_seq: ctl.faults.cfg.fault_until_seq,
         phases: crate::result::PhaseTab::read(&ctl.phases),
+        ready_ns: unsafe { proto::machine::MachineTab::at(ctl_ptr) }.ready_ns,
         sched: ctl.sched.read(),
         compute: ctl.compute.read(),
         plans: ctl.compute.plans(),

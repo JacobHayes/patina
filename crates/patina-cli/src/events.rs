@@ -624,6 +624,16 @@ impl<W: Write> Export<'_, W> {
                     .num("paused_ms", a[4] / 1_000_000);
                 "machine"
             }
+            // A machine's `ready` probe passed (`sup::ready`): [machine, the faults begin].
+            proto::ctl::DEC_READY if a[0] != proto::ctl::READY_HOLD => {
+                l = Line::at("machine", k, r);
+                l.str("event", "ready")
+                    .str("name", &self.machine_name(a[0]));
+                if a[1] != 0 {
+                    l.str("faults", "begin");
+                }
+                "machine"
+            }
             // [machine, boot, how (`CLK_*`), change ns, offset ns, 0] (two's complement).
             proto::ctl::DEC_MACHINE_CLOCK => {
                 l = Line::at("machine", k, r);

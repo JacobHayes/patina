@@ -154,11 +154,13 @@ impl Sup {
                         format!("Hello of machine {machine} in slot {idx}, which no boot reserved"),
                     ));
                 }
+                // A `ready` probe's runner (`ready`) is neither main nor a machine's first.
+                let probe = self.ready.starting == Some(idx);
                 let asid = self.procs.new_asid();
                 self.sched.add(idx, tid, pid, asid);
                 self.slot_machine(idx, machine);
                 self.slot(idx).state.store(SLOT_LIVE, SeqCst);
-                let fd = if machine == 0 {
+                let fd = if machine == 0 && !probe {
                     self.procs.main = pid;
                     self.pidfd
                 } else {
@@ -166,7 +168,11 @@ impl Sup {
                 };
                 self.proc_new(pid, 1, fd, SIGCHLD_U, None);
                 self.procs.map.get_mut(&pid).unwrap().machine = machine;
-                self.machines.started(machine, pid);
+                if probe {
+                    self.machines.booting = None;
+                } else {
+                    self.machines.started(machine, pid);
+                }
                 self.signal_thread_new(idx, pid);
                 Next::Continue(0)
             }
@@ -447,6 +453,10 @@ impl Sup {
             0,
         );
         self.machine_gone(pid, word);
+        self.ready_gone(pid, word);
+        if pid == self.procs.main {
+            self.ready_main_gone(word);
+        }
         if pid == self.procs.main && !self.phases.continuing {
             return; // the caller ends the run
         }

@@ -21,6 +21,7 @@ mod launcher;
 mod log;
 mod minimize;
 mod outcome;
+mod ready;
 mod recheck;
 mod replay;
 mod report;
@@ -65,6 +66,7 @@ fn main() -> ExitCode {
         "__sandbox-views" => Some(sandbox::views_main()),
         "__insn-scan" => Some(insn::main(rest)),
         "__rewrite" => Some(rewrite::main(rest)),
+        "__ready" => return ready::runner(rest),
         _ => None,
     };
     if let Some(r) = hidden {
@@ -134,6 +136,7 @@ fn main() -> ExitCode {
         Cmd::Report => report::main(&a).map_err(error),
         Cmd::Minimize => minimize::main(&a),
         Cmd::Ctl => Ok(ctl::main(&a.positional)),
+        Cmd::Wait => Ok(ready::wait(&a.positional)),
         Cmd::Guide => guide::main(&a).map_err(error),
         Cmd::Skill => guide::skill(&a).map_err(error),
     };

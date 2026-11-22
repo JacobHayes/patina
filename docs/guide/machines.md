@@ -27,8 +27,9 @@ replay: patina replay /tmp/machines/patina-out/run-0
 
 `kv.py` (in `tests/guests/machines`) is a store whose primary sends each write to the backup; the
 main writes, cuts the link between them, sees the next write wait, heals it, and checks both
-agree. To test a distributed system, put the system under test on machines and make main the
-harness: drive the workload, call `patina ctl settle`, then check the system.
+agree. To test a distributed system, put the system under test on machines, give each a `ready`
+probe (below), and make main the harness: drive the workload, call `patina ctl settle`, then
+check the system.
 
 ## Settle, then check
 
@@ -81,6 +82,68 @@ after the last.
 shared and read-only. A listener on `0.0.0.0` is reachable from every machine, one on `127.0.0.1`
 only from its own. A machine's output is in `RUNDIR/machine/NAME/boot-K/`. Up to 15 machines;
 `count = N` in a table makes N of them. The machine keys are in `patina guide config`.
+
+## Waiting for a machine: `ready`
+
+A server needs a moment before it serves. `ready = "CMD ARGS"` in a machine's table is a probe
+Patina runs on that machine, from its first boot, every 100 ms of virtual time until it exits 0.
+Main's command starts, and the seed's faults begin, when every machine is ready; a machine
+without a probe is ready when it starts. `patina wait HOST:PORT` is a probe for a server: one TCP
+connect, exit 0 when it is accepted (`:PORT` is the machine's own port).
+
+<!-- transcript machines-ready
+dir: /tmp/ready
+setup: mkdir g && cp "$GUESTS/phases.py" "$GUESTS/slow.py" g/
+setup: printf '[machine.srv]\nrun = ["python3", "/guest/slow.py"]\nready = "patina wait :7000"\n' >patina.toml
+exit: 0 0 0 1
+-->
+```text
+$ cat patina.toml
+[machine.srv]
+run = ["python3", "/guest/slow.py"]
+ready = "patina wait :7000"
+$ patina sweep --seeds 1..8 --mount g:/guest:copy --fault fsync-error-permille=50 -- python3 /guest/phases.py work 5 srv
+sweep: 70.0 KiB kept in /tmp/ready/patina-out/sweep
+patina sweep: 8 runs, 0 findings in 0 groups, 8 ok   (0.2s, 8 jobs)
+outcomes: ok 8
+machines: main, srv in 8 runs; net: 0 cuts, 0 heals, 0 held over them
+$ grep -v ready patina.toml >plain.toml
+$ patina sweep --seeds 1..8 --config plain.toml --out patina-out/plain --mount g:/guest:copy --fault fsync-error-permille=50 -- python3 /guest/phases.py work 5 srv
+...
+patina sweep: 8 runs, 6 findings in 1 group, 2 ok   (0.3s, 8 jobs)
+...
+failure exit [machine srv]: FAIL: serve: start: [Errno N] Input/output error; exit 1
+...
+```
+
+`slow.py` makes 20 synced writes before it serves `phases.py`'s store, and exits at a failed one. Without `ready`
+the fsync errors reach that start, and the sweep's findings are the start's, not the store's; with
+it the faults begin once the server accepts a connection. `result.json`'s `ready` has the virtual
+time (ms) each machine was first ready.
+
+A probe on main holds the faults, not main's command, until it passes: a test whose own setup
+must finish first writes `[machine.main] ready = "test -e /tmp/setup-done"` and creates the file
+when done; a client and server on main alone (`-- sh -c './server & ./client'`) take
+`[machine.main] ready = "patina wait :7000"`. Probes run at the first boot only: after a restart
+nobody is told, clients retry. `ready` and `--setup` cannot be combined.
+
+A probe that has not passed 60 s of virtual time after boot, or a machine whose `run` ends before
+it is ready, ends the run `error`, stop `ready`: the faults never began. The machine's stderr has
+what the probe last said:
+
+<!-- transcript machines-never-ready
+dir: /tmp/ready
+setup: printf '[machine.srv]\nrun = ["python3", "/guest/phases.py", "serve"]\nready = "test -e /work/ready"\n' >never.toml
+exit: 2
+-->
+```text
+$ patina run --config never.toml --mount g:/guest:copy -- python3 /guest/phases.py work 5 srv
+error (ready): machine srv was not ready 60 s after boot: its probe `test -e /work/ready` never exited 0 (what it last said is in srv's stderr); the faults had not begun
+machines: srv 10.0.0.2 running
+srv stderr (1 lines, /tmp/ready/patina-out/run-0/machine/srv/boot-1/stderr):
+  patina: ready probe `test -e /work/ready`: exit 1
+...
+```
 
 ## Setup, main command, final check with machines
 

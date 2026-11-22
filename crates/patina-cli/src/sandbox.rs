@@ -144,6 +144,10 @@ pub struct MachineSpec {
     pub env: Vec<String>,
     /// The size of each of its tmpfs.
     pub size: u64,
+    /// The runtime's arguments of its `ready` probe's runner (`crate::ready`), which the
+    /// supervisor asks for after its first process (none: no probe).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready: Option<Vec<String>>,
 }
 
 /// The keeper's command, `patina __sandbox`: in the child, `first`, then SIGCHLD at its
@@ -1660,6 +1664,9 @@ pub fn apparmor_profile(exe: &Path) -> Res<String> {
 
 /// The one-byte message that carries the shadow stores to the keeper (a start is two bytes).
 pub const SHADOWS_MSG: u8 = 0xff;
+/// The third byte of a start that asks for the machine's `ready` probe runner, in its view,
+/// beside its first process (`sup::ready`).
+pub const PROBE_MSG: u8 = 2;
 
 /// The keeper of a run with machines: start a process of machine `k` each time the supervisor asks
 /// (two bytes, `k` and its boot), answer `ok OUT ERR` (where the machine's stdout and
@@ -1697,6 +1704,7 @@ fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
         // A start: [machine, boot], or [machine, boot, 1] with a machine crash's next tree (a tree
         // archive): a new view, as a machine's restart has, its disk that tree.
         let (i, boot) = (b[0] as usize, b[1] as u64);
+        let probe = r == 3 && b[2] == PROBE_MSG;
         let tree = fds.into_iter().next();
         let stdio = FD_MACHINE_STDIO0 + 3 * (i as i32 - 1);
         let size = |fd: RawFd| {
@@ -1719,8 +1727,12 @@ fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
                 }
                 // Close-on-exec: read before the runtime starts.
                 keep.extend(tree.as_ref().map(|t| t.as_raw_fd()));
-                let run = || machine_main(ns, stdio, ns.size, boot, tree.as_ref());
+                let run = || machine_main(ns, stdio, ns.size, boot, tree.as_ref(), probe);
                 match (&saved[i - 1], boot) {
+                    (Some(s), _) if probe => k.view(Place::Again(s), &keep, run).map(|_| ()),
+                    (None, _) if probe => {
+                        Err(format!("machine {}: a probe before its boot", ns.name))
+                    }
                     (None, 0) | (Some(_), _) if boot == 0 || tree.is_some() => {
                         let mut tmpfs: Vec<&str> = vec![&ns.work, "/tmp", "/dev/shm"];
                         tmpfs.extend(n.hide.iter().map(String::as_str).filter(|h| *h != ns.work));
@@ -1754,19 +1766,23 @@ fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
 /// machine crash the tree `tree` holds; a restart after a process kill finds the tree its
 /// last boot left), its stdio, the process state every guest
 /// inherits (as the supervisor's own child has it, `sup::inherit`), then the runtime. Its
-/// environment adds `PATINA_BOOT`.
+/// environment adds `PATINA_BOOT`. With `probe`, the machine's `ready` probe runner instead, in
+/// the view its first process made: the same stdio, directory and environment.
 fn machine_main(
     ns: &MachineSpec,
     stdio: RawFd,
     size: u64,
     boot: u64,
     tree: Option<&OwnedFd>,
+    probe: bool,
 ) -> i32 {
     let fail = |e: String| -> i32 {
         eprintln!("patina sandbox: machine {}: {e}", ns.name);
         126
     };
-    if let Some(fd) = tree {
+    if probe {
+        // Its disk is the machine's, as its first process left it.
+    } else if let Some(fd) = tree {
         let fill = || -> Result<(), String> {
             use std::io::Read;
             let mut b = vec![];
@@ -1802,7 +1818,11 @@ fn machine_main(
     if let Err(e) = crate::sup::inherit::normalise(size) {
         return fail(e);
     }
-    let argv: Vec<CString> = ns.argv.iter().map(|a| c(a)).collect();
+    let argv: Vec<CString> = match (&ns.ready, probe) {
+        (Some(r), true) => r.iter().map(|a| c(a)).collect(),
+        (None, true) => return fail("no ready probe".into()),
+        (_, false) => ns.argv.iter().map(|a| c(a)).collect(),
+    };
     let mut env: Vec<CString> = ns.env.iter().map(|a| c(a)).collect();
     env.push(c(&format!("PATINA_BOOT={}", boot + 1)));
     let mut av: Vec<*const libc::c_char> = argv.iter().map(|a| a.as_ptr()).collect();

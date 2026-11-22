@@ -81,6 +81,7 @@ mod maps;
 mod pause;
 mod phase;
 pub mod proc;
+mod ready;
 #[allow(dead_code)]
 pub mod sched;
 pub(crate) mod sdk;
@@ -138,6 +139,8 @@ struct Sup {
     maps_ended: std::cell::Cell<bool>,
     /// Each machine's disk.
     disks: disks::Disks,
+    /// The `ready` probes and the start of the fault window (`ready`).
+    ready: ready::Ready,
 }
 
 /// What a request does with the turn.
@@ -413,7 +416,10 @@ impl Sup {
                 self.finish(Verdict::new("infra", d));
             }
             let old = self.now();
-            if (self.machine_count() > 0 || self.phases.pending != 0) && self.machine_actions_idle()
+            if (self.machine_count() > 0
+                || self.phases.pending != 0
+                || !self.machines.pending.is_empty())
+                && self.machine_actions_idle()
             {
                 continue;
             }
@@ -443,7 +449,9 @@ impl Sup {
                     self.after_events();
                     // A kill closed sockets and ended waits: the wire and the waiters see it now,
                     // not at the next event.
-                    if (self.machine_count() > 0 || self.phases.pending != 0)
+                    if (self.machine_count() > 0
+                        || self.phases.pending != 0
+                        || !self.machines.pending.is_empty())
                         && !self.machine_actions().is_empty()
                     {
                         self.wire_step();
@@ -1138,7 +1146,9 @@ impl Sup {
             // `ThreadExit`): its own end is its machine's, not a kill's.
             let ending = req.op == Op::ProcExit as u32
                 || (req.op == Op::ThreadExit as u32 && self.sched.live_in(pid) <= 1);
-            if (self.machine_count() > 0 || self.phases.pending != 0)
+            if (self.machine_count() > 0
+                || self.phases.pending != 0
+                || !self.machines.pending.is_empty())
                 && !ending
                 && self.machine_actions().contains(&pid)
             {
@@ -1214,6 +1224,9 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     let mut setup: Option<(String, Vec<String>)> = None;
     let mut finally: Option<(String, Vec<String>)> = None;
     let mut ok: Vec<i64> = vec![];
+    // Each machine's `ready` probe (`ready`): `--ready K`, then its words.
+    let mut probes: Vec<Vec<String>> = vec![];
+    let mut probe_of: Option<usize> = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -1224,6 +1237,21 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             }
             "--exe" => exe = Some(it.next().ok_or("--exe needs PATH")?.clone()),
             "--machines" => machines = true,
+            "--ready" => {
+                let k: usize = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .filter(|&k| k < proto::machine::MAX_MACHINES)
+                    .ok_or("--ready needs a machine number")?;
+                if probes.len() <= k {
+                    probes.resize(k + 1, vec![]);
+                }
+                probe_of = Some(k);
+            }
+            "--ready-arg" => {
+                let v = it.next().ok_or("--ready-arg needs a word")?.clone();
+                probes[probe_of.ok_or("--ready-arg before --ready")?].push(v);
+            }
             "--setup-exe" => {
                 setup = Some((it.next().ok_or("--setup-exe needs PATH")?.clone(), vec![]))
             }
@@ -1337,6 +1365,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         maps_ended: std::cell::Cell::new(false),
         disks: disks::Disks::new(work_dir(ctl)),
         phases: phase::Phases::default(),
+        ready: ready::Ready::new(probes),
     };
     // The rest of the process state guests inherit from the supervisor.
     if let Err(e) = inherit::normalise(ctl.config.tmpfs_bytes) {
@@ -1452,6 +1481,10 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     };
     if machines {
         sup.boot_machines();
+    } else if sup.ready.declared() {
+        // Main's probe, alone: main's `Hello` first, then its runner's.
+        sup.boot_hello(0, 0, 0);
+        sup.ready_begin();
     }
     sup.serve()
 }

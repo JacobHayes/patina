@@ -19,6 +19,7 @@ pub enum Cmd {
     Report,
     Minimize,
     Ctl,
+    Wait,
     Guide,
     Skill,
 }
@@ -98,6 +99,12 @@ pub const COMMANDS: &[Command] = &[
         help: "from main: act on links, machines and clocks; settle: end the faults, wait for recovery",
     },
     Command {
+        cmd: Cmd::Wait,
+        name: "wait",
+        usage: "patina wait HOST:PORT | wait :PORT",
+        help: "inside a run: one TCP connect, exit 0 if it succeeds; a `ready` probe for a server",
+    },
+    Command {
         cmd: Cmd::Doctor,
         name: "doctor",
         usage: "patina doctor [--print-apparmor-profile]",
@@ -147,7 +154,7 @@ impl Flag {
 
 const RUNLIKE: &[Cmd] = &[Cmd::Run, Cmd::Verify, Cmd::Sweep];
 /// Listed apart in `patina --help`: plumbing most users never type.
-const ADVANCED: &[Cmd] = &[Cmd::Verify, Cmd::Log, Cmd::Ctl, Cmd::Skill];
+const ADVANCED: &[Cmd] = &[Cmd::Verify, Cmd::Log, Cmd::Ctl, Cmd::Wait, Cmd::Skill];
 /// The commands that print a result (`--format`).
 const FORMATTED: &[Cmd] = &[
     Cmd::Run,
@@ -175,6 +182,7 @@ const ALL: &[Cmd] = &[
     Cmd::Report,
     Cmd::Minimize,
     Cmd::Ctl,
+    Cmd::Wait,
     Cmd::Guide,
     Cmd::Skill,
 ];

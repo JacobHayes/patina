@@ -220,7 +220,8 @@ impl Sup {
         for i in 0..self.sched.entries.len() {
             let machine = self.slot(i).machine.load(Relaxed) as usize;
             let live = self.sched.entries[i].state != super::sched::State::Free;
-            if live && self.paused(machine) {
+            // Main's first thread waiting for the machines' `ready` probes stays frozen.
+            if live && (self.paused(machine) || (i == 0 && self.ready.hold)) {
                 self.sched.freeze(i);
             } else {
                 self.sched.thaw(i);

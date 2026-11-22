@@ -29,7 +29,7 @@
 //! not said `Hello` (a fork or vfork in flight), whose slot the new process could otherwise
 //! claim. Every such state is the turn's, so the wait is the same in every run of a seed.
 
-use super::link::{ev_key, EVK_MACHINE_KILL, EVK_MACHINE_START};
+use super::link::{ev_key, EVK_MACHINE_KILL, EVK_MACHINE_START, EVK_READY};
 use super::proc::PState;
 use super::sched::{Event, EventId, Live};
 use super::{Next, Sup};
@@ -151,8 +151,13 @@ impl Sup {
         }
         self.partitions_begin();
         self.pauses_begin();
-        // Main's `Hello` was answered with its reply kept: it runs first.
-        self.reply(0, 0);
+        // Main's `Hello` was answered with its reply kept: it runs first, unless it waits
+        // for the machines' `ready` probes.
+        if self.ready.declared() {
+            self.ready_begin();
+        } else {
+            self.reply(0, 0);
+        }
     }
 
     /// Start boot `boots[machine]` of `machine` in the free slot `slot`: the keeper starts its first
@@ -210,6 +215,8 @@ impl Sup {
         self.machines.up[machine] = true;
         self.machines.kill_try[machine] = 0;
         self.kill_next(machine);
+        // Back before it was ready: its probe runs again.
+        self.ready_queue(machine);
     }
 
     /// Wait for the `Hello` of slot `slot` and serve it; its reply waits for the scheduler.
@@ -248,7 +255,8 @@ impl Sup {
         };
         self.sched.entries[idx].reply = ret;
         self.decide(req.op, idx, req.args, idx as i64);
-        if machine > 0 {
+        // A `ready` probe's runner is not the machine's first process.
+        if machine > 0 && self.ready.starting != Some(slot) {
             let pid = self.sched.entries[idx].pid;
             // A first boot, or the first after a machine crash: a new disk.
             if self.disks.dev(machine).is_err() {
@@ -424,6 +432,8 @@ impl Sup {
                     };
                     self.start_machine(k, slot);
                 }
+                EVK_READY if creating || !killed.is_empty() => later.push_back((kind, k)),
+                EVK_READY => self.ready_again(k),
                 _ => {}
             }
         }
@@ -852,6 +862,23 @@ impl Sup {
         let b = self.machine_tab().boots[k].saturating_sub(1);
         let down = self.down_time(k, b, how);
         self.machine_down(k, how, value, &others, down);
+        if self.ready_waits(k) {
+            // Before it was ready: it never will be (`ready`).
+            let ended = if how == DOWN_SIGNAL {
+                format!("was killed by signal {value}")
+            } else {
+                format!("exited {value}")
+            };
+            self.machine_tab().ended_by = k as u64 + 1;
+            self.machines_stop();
+            self.finish(Verdict::new(
+                "ready",
+                format!(
+                    "machine {}'s run {ended} before it was ready; the faults had not begun",
+                    self.machine_name(k)
+                ),
+            ))
+        }
         if how == DOWN_EXIT {
             return;
         }
@@ -904,6 +931,20 @@ impl Sup {
     }
 }
 
+/// Ask the keeper to start machine `machine`'s `ready` probe runner in its view (`ready`);
+/// returns once it exists.
+pub(super) fn keeper_probe(machine: usize) -> Result<(), String> {
+    let b = [machine as u8, 0, crate::sandbox::PROBE_MSG];
+    let r = unsafe { libc::send(FD_MACHINES, b.as_ptr().cast(), 3, libc::MSG_NOSIGNAL) };
+    if r != 3 {
+        return Err(format!(
+            "asking the keeper to start it: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    keeper_answer().map(|_| ())
+}
+
 /// Ask the keeper to start boot `boot` of machine `machine` (its first process); returns once it
 /// exists, with where its output starts in the machine's stdout and stderr.
 fn keeper_start(machine: usize, boot: u64, tree: Option<&[u8]>) -> Result<(u64, u64), String> {
@@ -929,6 +970,11 @@ fn keeper_start(machine: usize, boot: u64, tree: Option<&[u8]>) -> Result<(u64, 
     if let Err(e) = asked {
         return Err(format!("asking the keeper to start it: {e}"));
     }
+    keeper_answer()
+}
+
+/// The keeper's answer to a start: where the machine's stdout and stderr are up to.
+fn keeper_answer() -> Result<(u64, u64), String> {
     let mut buf = [0u8; 4096];
     let n = unsafe { libc::recv(FD_MACHINES, buf.as_mut_ptr().cast(), buf.len(), 0) };
     match n {

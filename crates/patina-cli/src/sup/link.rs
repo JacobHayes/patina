@@ -38,6 +38,8 @@ pub const EVK_MACHINE_START: u64 = 3;
 /// The seed's pause of a machine, and its end.
 pub const EVK_PAUSE_START: u64 = 4;
 pub const EVK_PAUSE_END: u64 = 5;
+/// The deadline of the `ready` probes (`ready`).
+pub const EVK_READY: u64 = 6;
 const EVK_BITS: u64 = 4;
 
 pub fn ev_key(kind: u64, machine: usize) -> u64 {
@@ -170,6 +172,7 @@ impl Sup {
             k @ (EVK_PAUSE_START | EVK_PAUSE_END) => {
                 self.pause_event(k, (key >> EVK_BITS) as usize)
             }
+            EVK_READY => self.ready_deadline(),
             k => self.machine_event_more(k, (key >> EVK_BITS) as usize),
         }
     }

@@ -117,6 +117,10 @@ pub struct MachineTab {
     /// those under an offset other than 0 (the `clock` class's eligible and injected counts).
     pub clock_reads: [core::sync::atomic::AtomicU64; MAX_MACHINES],
     pub clock_reads_off: [core::sync::atomic::AtomicU64; MAX_MACHINES],
+    /// Written by the supervisor in a run that declares a `ready` probe: the virtual time each
+    /// machine (main included) was first ready, its probe's pass or, without one, its start
+    /// (0: not yet).
+    pub ready_ns: [u64; MAX_MACHINES],
 }
 
 impl MachineTab {

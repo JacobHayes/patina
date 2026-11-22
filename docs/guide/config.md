@@ -56,6 +56,7 @@ fsync-error-permille = 0
 |---|---|---|---|
 | `run` | `["CMD", "ARG", ...]` | required | the command Patina starts at each of its boots; [machine.main] run is the command after `--` |
 | `env` | `{ K = "V" }` | none | added to the run's environment |
+| `ready` | `"CMD ARGS" or ["CMD", "ARG", ...]` | ready once started | a probe run on it every 100 ms until it exits 0: main's command and the faults wait for every machine's (main's own: the faults only) |
 | `disk` | `"DIR[:GUEST]"` | empty | its disk's starting files (main's: as `--disk`) |
 | `restart` | `"crash", "always" or "never"` | crash | after which downs the seed restarts it (`always`: also after it exits within `ok-exit`) |
 | `ok-exit` | `N or [N, ...]` | [0] | exit statuses that only stop the machine |

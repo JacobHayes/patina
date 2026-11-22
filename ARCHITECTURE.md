@@ -1128,7 +1128,8 @@ plan is in `run.json`.
 The fault window is two sequence numbers in the run's `FaultCfg`: `fault_after_seq` and
 `fault_until_seq` (`FaultCfg::in_window`). Every runtime injection, crash point and fault
 point, and every supervisor fault (link faults through `link_faulted`, partition and pause
-draws, the seed's machine kills, clock skew at boot) asks it. The phases move it, under the turn:
+draws, the seed's machine kills, clock skew at boot) asks it. The phases, the `ready` probes and
+the marks move it, under the turn:
 
 - **Phases** (`sup/phase.rs`). A run with `--setup` or `--finally` runs its commands one after
   the other as main's root process, in one sandbox and log; `PhaseCtl` (in `Ctl`) holds
@@ -1149,6 +1150,29 @@ draws, the seed's machine kills, clock skew at boot) asks it. The phases move it
   classifies: a setup that did not end ok is `error` (stop `setup`), or after a machine crash
   the finding (stop `setup`), and after an ok main command a failed final check is the finding
   (stop `finally`).
+- **Ready probes** (`sup/ready.rs`). A run in which any machine, main included, declares
+  `ready` starts with `fault_after_seq` at the maximum: the launcher knows it from the
+  configuration before the first instruction, so nothing is scanned or learned. At boot, after
+  every machine's first process has said `Hello`, the supervisor starts one runner per probe on
+  the probe's machine (main's forked as a phase's root is; another's by the keeper in the
+  machine's existing view, `sandbox::PROBE_MSG`), in a free slot it reserves, and waits for its
+  `Hello` (`Ready::starting` keeps it from being taken for main or the machine's first
+  process). The runner is `patina __ready -- CMD ARGS` (`crate::ready`), an ordinary guest: it
+  runs the probe, sleeps 100 ms of virtual time while it exits nonzero, writes each new output
+  of it to the machine's stderr, and exits 0 when it passes. Its end (`process_died` →
+  `ready_gone`) makes its machine ready: `DEC_READY` [machine, last], and at the last one
+  `fault_after_seq` is that record's number. A machine without a probe is ready at its start.
+  While a machine besides main waits, main's first thread is frozen with its `Hello` answered
+  (`Sched::freeze`, kept through `refreeze`), and the first turn goes to the scheduler's pick
+  (`DEC_READY` [`READY_HOLD`]); the last of them ready thaws it, so main's command starts
+  there (main's own probe holds the faults only). An event 60 s of virtual time after boot
+  (`EVK_READY`, live) ends a run with a machine still waiting `error`, stop `ready`, as does
+  the end of a waiting machine's first process (`machine_gone`) or, while main waits, of
+  main's command (`ready_main_gone`). A runner killed while its machine waits is queued
+  (`EVK_READY` in `machines.pending`) and started again by `machine_actions` once the machine
+  is up, so its probe keeps polling. `MachineTab::ready_ns` gives `result.json`'s `ready`. Probes run at the
+  first boot only (`--ready` is passed to the supervisor only then); later boots keep the
+  window the first opened. `ready` and a setup cannot be combined.
 - **Marks** (`sys/sdk.rs`). `[run] setup = "mark"` sets `FaultCfg::setup_mark`: the first
   `setup-complete` lowers `fault_after_seq` from the maximum to its own number. Undeclared, it
   ends the run (`Op::Lifecycle`, `LIFE_SETUP_UNDECLARED`, verdict `setup-mark`, outcome

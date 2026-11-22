@@ -195,6 +195,18 @@ pub fn describe(r: &Rec) -> String {
                 proto::machine::shape_name(r.args[1])
             ),
             proto::ctl::DEC_NET_PART_END => format!("partition {} end", r.args[0]),
+            proto::ctl::DEC_READY if r.args[0] == proto::ctl::READY_HOLD => {
+                "ready: main waits".to_string()
+            }
+            proto::ctl::DEC_READY => format!(
+                "ready {}{}",
+                r.args[0],
+                if r.args[1] != 0 {
+                    ", the faults begin"
+                } else {
+                    ""
+                }
+            ),
             proto::ctl::DEC_PHASE => format!(
                 "phase {} end, status {:#x}, next {}",
                 proto::ctl::phase_name(r.args[0]),
