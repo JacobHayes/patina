@@ -19,7 +19,7 @@ has the outcome and `stop`, a short word for what ended the run (`always`, `exit
 | `nondeterministic` | 2 | a replay differed from its run: a Patina bug. Keep the run directory and report it |
 | `internal` | 2 | Patina failed, or the host refused a resource: run `patina doctor` |
 | `vacuous` | 2 | something asked for never happened: a fault you named, an SDK `sometimes`, `reachable` or fault point, a check that judged no run, a `!ID` known finding |
-| `error` | 2 | the command could not be carried out: the program cannot run, its setup did not complete (stop `setup`, `setup-mark`), a machine was never ready (stop `ready`), or the `--check` command broke or answered differently on replay |
+| `error` | 2 | the command could not be carried out: the program cannot run, a machine was never ready (stop `ready`), or the `--check` command broke or answered differently on replay |
 <!-- end generated -->
 
 A finding to triage is `violation`, `liveness`, `failure` or `crash`. `unsupported`, `internal`

@@ -34,7 +34,7 @@ run_ok "$o/links" 1 --config "$o/iso.toml" --fault net-reset-permille=1 -- pytho
 e=$(field "$o/links/result.json" faults.counts.net-reset.eligible)
 [ "$e" -gt 0 ] || die "net-reset not drawn on main's links"
 on=$(field "$o/links/result.json" faults.on)
-cp "$o/iso.toml" "$o/drv.toml"; driver "$o/drv.toml"
+cp "$o/iso.toml" "$o/drv.toml"; main_unfaulted "$o/drv.toml"
 run_ok "$o/links-drv" 1 --config "$o/drv.toml" --fault net-reset-permille=1 -- python3 /guest/iso.py main
 d=$(field "$o/links-drv/result.json" faults.on)
 [ "$d" != "$on" ] && ! grep -q main <<<"$d" || die "faults = false: main still faulted: $d"

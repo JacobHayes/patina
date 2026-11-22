@@ -32,8 +32,6 @@ fsync-error-permille = 0
 | `time-limit` | `SECONDS` | 3600 | virtual time after which the run ends `liveness` |
 | `log-limit` | `MIB` | 1024 | log size at which the run ends `liveness` (a livelock) |
 | `check-timeout` | `SECONDS` | 60 | wall time a checker may take |
-| `setup` | `"CMD ARGS", ["CMD", "ARG", ...] or "mark"` | none | as `--setup`: run first, without faults; `mark`: the program marks `setup-complete` |
-| `finally` | `"CMD ARGS" or ["CMD", "ARG", ...]` | none | as `--finally`: the final check, run with the faults stopped |
 
 | `[faults]` | Value | Default | Sets |
 |---|---|---|---|
@@ -63,16 +61,16 @@ fsync-error-permille = 0
 | `max-boots` | `N` | the run's | the most boots the seed's crashes give it (1 to 64) |
 | `disk-mb` | `N or "A..B"` | the run's | its filesystems' size, drawn per seed from a range |
 | `count` | `N` | 1 | N machines of this table, named NAME1 to NAMEN (not main) |
-| `faults` | `true or false` | true | `false`: none of the seed's faults act on it or its links (a test driver on main) |
+| `faults` | `true or false` | true | `false`: none of the seed's faults act on it or its links (main, when it runs only the test) |
 <!-- end generated -->
 
 `[machine.main]` takes every `[machine.NAME]` key but `count`; its `restart` is `crash` only, and
 its `ok-exit` is `[run] ok-exit` (give one of the two). The seed's faults act on every machine,
 main included, whatever the number of machines; `faults = false` exempts one, its links included.
-A test driver on main opts out:
+A main that runs only the test opts out:
 
-<!-- transcript config-driver
-dir: /tmp/driver
+<!-- transcript config-unfaulted
+dir: /tmp/unfaulted
 setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["sleep", "1"]\n' >patina.toml
 -->
 ```text
@@ -87,8 +85,8 @@ ok (exit): the program exited 0
 guest: exit 0
 faults on: a
 machines: a 10.0.0.2 running
-run directory: /tmp/driver/patina-out/run-0
-replay: patina replay /tmp/driver/patina-out/run-0
+run directory: /tmp/unfaulted/patina-out/run-0
+replay: patina replay /tmp/unfaulted/patina-out/run-0
 ```
 
 Fault keys and their ranges: `patina run --fault help`. Options: `patina COMMAND --help`.

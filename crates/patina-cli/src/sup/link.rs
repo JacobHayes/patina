@@ -13,8 +13,8 @@
 //! cuts the links between them for a drawn length, and an end opens them and draws the gap to
 //! the next start. Every draw is on `Stream::Partition`, keyed by the partition's ordinal and
 //! a sub-key (`proto::machine::PSUB_*`), so turning partitions on moves no other decision and no
-//! draw depends on traffic. A start that falls while faults are off (before a declared setup
-//! ends) makes no partition; the next is drawn. A start
+//! draw depends on traffic. A start that falls while faults are off (before every machine
+//! is ready) makes no partition; the next is drawn. A start
 //! does not keep a run alive (`Live::No`): a run that waits only for it is deadlocked. An end
 //! does, since it may release held traffic.
 //!
@@ -95,8 +95,8 @@ impl Sup {
     /// machines they act on (`NetCfg::links`): a link between two of them, or one's loopback
     /// (`from == to`; in a run without machines, the only link there is).
     pub(super) fn link_faulted(&self, from: usize, to: usize) -> bool {
-        // Outside the fault window (before a declared setup ends, after the faults end) no
-        // link is faulted.
+        // Outside the fault window (before every machine is ready, after `settle`) no link is
+        // faulted.
         if !self.faults_on() || from >= MAX_MACHINES || to >= MAX_MACHINES {
             return false;
         }
@@ -260,8 +260,8 @@ impl Sup {
         self.part_next(k + 1);
     }
 
-    /// The faults end (`faults-done`, or the main command's end before `--finally`): the
-    /// seed's partition in force heals now, and no other is drawn.
+    /// The faults end (`settle`): the seed's partition in force heals now, and no other is
+    /// drawn.
     pub(super) fn partitions_done(&mut self) {
         if let Some(e) = self.links.ev.take() {
             self.sched.cancel(e);
@@ -271,26 +271,6 @@ impl Sup {
             if let Some(e) = self.links.ev.take() {
                 self.sched.cancel(e);
             }
-        }
-    }
-
-    /// The faults stop before the final check (`phase::settle`): every link the script cut
-    /// opens.
-    pub(super) fn heal_all(&mut self) {
-        let n = self.machine_count();
-        let mut opened = vec![];
-        for a in 0..n {
-            for b in 0..n {
-                let was = self.link_cut(a, b);
-                self.links.script[a] &= !(1u64 << b);
-                if was && !self.link_cut(a, b) {
-                    opened.push((a, b));
-                }
-            }
-        }
-        self.machine_tab().cut_at_end = self.links.script;
-        if !opened.is_empty() {
-            self.wire_heal(&opened);
         }
     }
 

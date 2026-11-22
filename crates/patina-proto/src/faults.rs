@@ -247,16 +247,12 @@ pub struct FaultCfg {
     pub delay_max_ns: u64,
     pub mem_error_permille: u64,
     pub mem_error_at: u64,
-    /// No fault before this sequence number: a run that declares a setup (`[run] setup`) starts
-    /// with the maximum, lowered where the setup ends (the setup command's exit 0, or the
-    /// program's `setup-complete` mark).
+    /// No fault before this sequence number: a run that declares a `ready` probe starts with
+    /// the maximum, lowered where the last machine is ready (`sup::ready`).
     pub fault_after_seq: u64,
-    /// No fault from this sequence number on: where the faults end (a `faults-done` mark, or
-    /// the main command's end in a run with `--finally`; 0: not yet).
+    /// No fault from this sequence number on: where `patina ctl settle` ended the faults (0:
+    /// not yet).
     pub fault_until_seq: u64,
-    /// 1: the run declares that the program marks `setup-complete` (`[run] setup = "mark"`);
-    /// 0: a `setup-complete` mark ends the run (`ctl::LIFE_SETUP_UNDECLARED`).
-    pub setup_mark: u64,
     /// `CRASH_*`.
     pub crash_kind: u64,
     /// Per-mille rate at each crash point (when `crash_at` is 0).
@@ -275,7 +271,7 @@ pub struct FaultCfg {
 }
 
 impl FaultCfg {
-    /// Faults may act at sequence number `seq`: after setup and before `faults-done`.
+    /// Faults may act at sequence number `seq`: after every machine is ready and before `settle`.
     pub fn in_window(&self, seq: u64) -> bool {
         seq >= self.fault_after_seq && (self.fault_until_seq == 0 || seq < self.fault_until_seq)
     }

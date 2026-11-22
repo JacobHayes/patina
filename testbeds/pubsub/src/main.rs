@@ -99,6 +99,8 @@ struct Options {
     messages: u64,
     timeout: Duration,
     bug: Bug,
+    /// Created once every subscriber is registered (`--ready-file`): a `ready` probe's mark.
+    ready_file: Option<String>,
 }
 
 fn main() {
@@ -106,7 +108,7 @@ fn main() {
         eprintln!("error: {message}");
         eprintln!(
             "usage: pubsub [--seed N] [--topics N] [--subscribers N] [--publishers N] \
-             [--messages N] [--timeout-secs N] [--bug NAME]\n\
+             [--messages N] [--timeout-secs N] [--bug NAME] [--ready-file PATH]\n\
              valid --bug names: {}",
             Bug::NAMES.join(", ")
         );
@@ -185,7 +187,9 @@ async fn orchestrate(options: Options) -> i32 {
                 .await
                 .ok_or_else(|| "a subscriber exited before becoming ready".to_string())?;
         }
-        patina_dst::setup_complete();
+        if let Some(path) = &options.ready_file {
+            std::fs::write(path, b"").map_err(|e| format!("--ready-file {path}: {e}"))?;
+        }
 
         // Every subscriber is registered: launch the publishers and release the
         // start gate. The LEVEL signal reaches each publisher whenever it first
@@ -366,6 +370,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
         messages: 16,
         timeout: Duration::from_secs(30),
         bug: Bug::None,
+        ready_file: None,
     };
     while let Some(flag) = args.next() {
         let (key, inline) = match flag.split_once('=') {
@@ -389,6 +394,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Stri
             "--publishers" => o.publishers = n("--publishers")? as u32,
             "--messages" => o.messages = n("--messages")?,
             "--timeout-secs" => o.timeout = Duration::from_secs(n("--timeout-secs")?),
+            "--ready-file" => o.ready_file = Some(val("--ready-file")?),
             "--bug" => {
                 let name = val("--bug")?;
                 o.bug = Bug::parse(&name).ok_or_else(|| {

@@ -154,8 +154,7 @@ pub const BY_SEED: u64 = 1;
 pub const BY_SCRIPT: u64 = 2;
 /// How a pause ended (`Pause::end`, `DEC_MACHINE_RESUME`): its drawn length ran out, the
 /// script's `resume`, the machine went down (a kill or a machine crash of a paused machine), or
-/// the faults ended (a `faults-done` mark ended the seed's pause, or the main command's end
-/// before `--finally` ended every pause).
+/// `settle` ended the seed's pause.
 pub const PEND_SEED: u64 = 1;
 pub const PEND_SCRIPT: u64 = 2;
 pub const PEND_DOWN: u64 = 3;
@@ -167,7 +166,7 @@ pub fn pause_end_name(end: u64) -> &'static str {
         PEND_SEED => "seed",
         PEND_SCRIPT => "script",
         PEND_DOWN => "down",
-        PEND_DONE => "faults-done",
+        PEND_DONE => "settle",
         _ => "in force",
     }
 }
@@ -493,7 +492,7 @@ pub enum Control {
     /// `clock`: machine `machine`'s realtime clock moves by `delta` ns.
     Clock { machine: usize, delta: i64 },
     /// `settle`: the seed's faults end; the call returns once every machine is ready, or the
-    /// run ends `liveness` after `limit_ns` of virtual time (`ctl::LIFE_SETTLE`).
+    /// run ends `liveness` after `limit_ns` of virtual time (`ctl::Op::Settle`).
     Settle { limit_ns: u64 },
 }
 
@@ -762,7 +761,7 @@ mod tests {
             b"net heal",
             b"machine kill a",
             b"clock step a +90s",
-            b"mark setup-complete",
+            b"mark ack",
         ] {
             assert_eq!(errno(bad, 0), EINVAL, "{bad:?}");
         }

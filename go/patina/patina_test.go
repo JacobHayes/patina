@@ -45,7 +45,5 @@ func TestSitesAreInertOutsidePatina(t *testing.T) {
 	if got := Knob("inert-knob", 64, 1, 1024).Value(); got != 64 {
 		t.Fatalf("Knob.Value() = %d, not its default", got)
 	}
-	SetupComplete()
-	FaultsDone()
 	Mark("inert-mark")
 }

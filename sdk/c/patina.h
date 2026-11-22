@@ -11,7 +11,7 @@
  *   PATINA_BUGGIFY("label")                fault point: 1 on seed-chosen evaluations (--faults buggify)
  *   PATINA_KNOB("label", def, lo, hi)      def, or a seed-chosen value in [lo, hi] (--faults buggify)
  *   PATINA_DELAY("label", max_ns)          maybe sleep a seeded virtual time (0: default range)
- *   patina_mark(label), patina_setup_complete(), patina_faults_done(), patina_is_simulated()
+ *   patina_mark(label), patina_is_simulated()
  *   patina_control("partition a b")        a control call: 0, or -errno (below)
  *
  * Labels of the macros are string literals: each expansion declares its site in the ELF section
@@ -41,7 +41,8 @@
  *   resume NAME                  let it run again (-EALREADY: not paused)
  *   clock NAME +90s              move machine NAME's realtime clock (+Ns, -Ns, +Nms, -Nms)
  *   settle [SECONDS]             end the seed's faults; return once every machine is ready
- *                                (past SECONDS, default 60, the run ends liveness; -EINTR: ask again)
+ *                                (past SECONDS, default 60, the run ends liveness); a signal
+ *                                that interrupts the wait is handled and the wait goes on
  * A set is machine names joined by commas ("main" is the command after --), or "rest": every
  * machine the other set does not name. Answers: 0; -EPERM when a process outside main
  * calls; -ENOENT for an unknown machine; -EINVAL for other words
@@ -166,22 +167,21 @@ static inline int64_t patina__knob(const char *label, int64_t def, int64_t lo, i
     return patina__call(PATINA_OP_KNOB, PATINA_KIND_KNOB, 0, label, 0, &v, lo, hi) == 0 ? v : def;
 }
 
-/* A named point in the run's log. "setup-complete" ends the setup of a run that declares
- * `setup = "mark"` (no fault acts before it; in a run that does not declare it, it ends the run
- * with an error); "faults-done" ends the faults (none acts after it). */
+/* A named point in the run's log. */
 static inline void patina_mark(const char *label) {
     if (patina_is_simulated())
         patina__call(PATINA_OP_MARK, PATINA_KIND_REACHABLE, 0, label, 0, 0, 0, 0);
 }
-static inline void patina_setup_complete(void) { patina_mark("setup-complete"); }
-static inline void patina_faults_done(void) { patina_mark("faults-done"); }
 
 /* A control call (the words above). Unlike the macros it is a call each time. */
 static inline long patina_control(const char *words) {
     if (!patina_is_simulated()) return -38;
     size_t n = strlen(words);
     if (n > PATINA_TEXT_MAX) return -22;
-    return patina__sys(PATINA_OP_CONTROL, words, n);
+    long r;
+    /* -EINTR: a signal ended settle's wait (its handler has run); ask again. */
+    while ((r = patina__sys(PATINA_OP_CONTROL, words, n)) == -4) {}
+    return r;
 }
 
 #define PATINA__STR2(x) #x

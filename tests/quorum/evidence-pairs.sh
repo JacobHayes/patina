@@ -11,7 +11,7 @@ for v in ok nosync early; do
     f=$o/$v.toml; rm -f "$f"
     b=""; [ $v = ok ] || b=$v
     for n in n1 n2 n3; do conf "$f" "$n" python3 /guest/q3.py "$n" $b; done
-    printf '[sweep]\ncrash-pairs = 3\n' >>"$f"; driver "$f"
+    printf '[sweep]\ncrash-pairs = 3\n' >>"$f"; main_unfaulted "$f"
     rm -rf "${o:?}/$v"
     t0=$(date +%s); st=0
     timeout 800 "$PATINA" sweep --seeds 1..2 --crash-points=400 --faults crash -j 6 --keep fail \

@@ -85,14 +85,6 @@ pub struct Config {
     pub fault_classes: Vec<String>,
     /// `KEY=VALUE[@MACHINE,...]` fault settings, in order; they replace a class's.
     pub faults: Vec<String>,
-    /// The run's setup (`--setup`, `[run] setup`): a command run first, without faults, or
-    /// the program's own `setup-complete` mark. No fault acts before it ends.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub setup: Option<Setup>,
-    /// The final check (`--finally`, `[run] finally`), run after the main command with the
-    /// faults stopped (empty: none).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub finally: Vec<String>,
     /// SDK labels and fault classes a sweep or report may find unmet without calling the
     /// result vacuous (`[sweep] allow-unmet`).
     pub allow_unmet: Vec<String>,
@@ -155,39 +147,6 @@ pub struct Config {
     pub main_disk_mb: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub main_max_boots: Option<u64>,
-}
-
-/// A run's setup (`[run] setup`): a command Patina runs before the main one, or `mark`, the
-/// program's own `setup-complete` mark.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Setup {
-    Mark,
-    Command(Vec<String>),
-}
-
-impl Setup {
-    /// `--setup` and `[run] setup` as text: `mark`, or a command's words.
-    pub fn parse(s: &str, what: &str) -> Res<Setup> {
-        if s.trim() == "mark" {
-            return Ok(Setup::Mark);
-        }
-        Ok(Setup::Command(command(
-            crate::sweep::words(s).map_err(|e| format!("{what}: {e}"))?,
-            what,
-        )?))
-    }
-}
-
-/// A phase command's words, its program given by a relative path made absolute (as `cmd`).
-fn command(mut w: Vec<String>, what: &str) -> Res<Vec<String>> {
-    if w.is_empty() {
-        return Err(format!("{what}: an empty command"));
-    }
-    if w[0].contains('/') && !w[0].starts_with('/') {
-        w[0] = logical(&w[0]).display().to_string();
-    }
-    Ok(w)
 }
 
 /// One machine of a run with several machines (`proto::machine`).
@@ -285,8 +244,6 @@ impl Default for Config {
             tmpfs_bytes: 256 << 20,
             fault_classes: vec![],
             faults: vec![],
-            setup: None,
-            finally: vec![],
             allow_unmet: vec![],
             fs_model: Model::Ext4Ordered.name().into(),
             preempt_permille: 100,
@@ -337,9 +294,6 @@ pub struct Opts {
     pub fs_model: Model,
     /// Each machine's program (`cfg.machines` order).
     pub machine_programs: Vec<Program>,
-    /// The setup command's program and the final check's (`Config::setup`, `Config::finally`).
-    pub setup_program: Option<Program>,
-    pub finally_program: Option<Program>,
 }
 
 fn expand(base: &Path, p: &str) -> PathBuf {
@@ -934,8 +888,6 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("run", "time-limit", "SECONDS", "3600", "virtual time after which the run ends `liveness`"),
     tk("run", "log-limit", "MIB", "1024", "log size at which the run ends `liveness` (a livelock)"),
     tk("run", "check-timeout", "SECONDS", "60", "wall time a checker may take"),
-    tk("run", "setup", "\"CMD ARGS\", [\"CMD\", \"ARG\", ...] or \"mark\"", "none", "as `--setup`: run first, without faults; `mark`: the program marks `setup-complete`"),
-    tk("run", "finally", "\"CMD ARGS\" or [\"CMD\", \"ARG\", ...]", "none", "as `--finally`: the final check, run with the faults stopped"),
     tk("faults", "faults", "[\"CLASS[@MACHINE,...]\", ...]", "none", "as `--faults`"),
     tk("faults", "KEY", "VALUE", "none", "any fault key, as `--fault KEY=VALUE` (`patina run --fault help`)"),
     tk("faults", "fs-model", "\"ext4-ordered\" or \"posix-strict\"", "ext4-ordered", "what a machine crash keeps"),
@@ -953,7 +905,7 @@ pub const TOML_KEYS: &[TomlKey] = &[
     tk("machine.NAME", "max-boots", "N", "the run's", "the most boots the seed's crashes give it (1 to 64)"),
     tk("machine.NAME", "disk-mb", "N or \"A..B\"", "the run's", "its filesystems' size, drawn per seed from a range"),
     tk("machine.NAME", "count", "N", "1", "N machines of this table, named NAME1 to NAMEN (not main)"),
-    tk("machine.NAME", "faults", "true or false", "true", "`false`: none of the seed's faults act on it or its links (a test driver on main)"),
+    tk("machine.NAME", "faults", "true or false", "true", "`false`: none of the seed's faults act on it or its links (main, when it runs only the test)"),
 ];
 
 fn known_key(table: &str, key: &str) -> bool {
@@ -1013,19 +965,6 @@ fn apply_file(c: &mut Config, path: &Path) -> Res<Option<String>> {
                 ("run", "time-limit") => c.time_limit = time_limit(int(v, &at)?, &at)?,
                 ("run", "timeout") => c.timeout = int(v, &at)?,
                 ("run", "log-limit") => c.log_limit = int(v, &at)?,
-                ("run", "setup") => {
-                    c.setup = Some(match v.as_str() {
-                        Some(t) => Setup::parse(t, &at)?,
-                        None => Setup::Command(command(strings(v, &at)?, &at)?),
-                    })
-                }
-                ("run", "finally") => {
-                    c.finally = match v.as_str() {
-                        Some(t) => crate::sweep::words(t).map_err(|e| format!("{at}: {e}"))?,
-                        None => strings(v, &at)?,
-                    };
-                    c.finally = command(std::mem::take(&mut c.finally), &at)?;
-                }
                 ("run", "disk-mb") => c.tmpfs_bytes = int(v, &at)?.saturating_mul(1 << 20),
                 ("run", "check-timeout") => c.check_timeout = Some(int(v, &at)?),
                 ("run", "check") => check = Some(string(v, &at)?),
@@ -1273,15 +1212,6 @@ pub fn resolve_any(a: &Args) -> Res<Config> {
     if let Some(n) = a.num("--timeout")? {
         c.timeout = n;
     }
-    if let Some(t) = a.last("--setup") {
-        c.setup = Some(Setup::parse(t, "--setup")?);
-    }
-    if let Some(t) = a.last("--finally") {
-        c.finally = command(
-            crate::sweep::words(t).map_err(|e| format!("--finally: {e}"))?,
-            "--finally",
-        )?;
-    }
     c.fault_classes.extend(a.all("--faults").iter().cloned());
     // `--fault KEY=VALUE` is any `[faults]` key, the crash model's too.
     for f in a.all("--fault") {
@@ -1398,24 +1328,10 @@ impl Config {
         if let Some(w) = &self.compute_walk {
             plan.compute_walk = faults::walk(self.seed, w)?;
         }
-        // No fault acts before a declared setup ends; a `setup-complete` mark is the program's
-        // to make only where the run declares it. With `ready` probes, none before every
-        // machine is ready (`sup::ready`): known here, before the run starts.
+        // With `ready` probes, no fault acts before every machine is ready (`sup::ready`):
+        // known here, before the run starts.
         if self.has_ready() {
-            if self.setup.is_some() {
-                return Err(
-                    "ready probes and a setup (--setup, [run] setup) cannot be combined: \
-                            give one"
-                        .into(),
-                );
-            }
             plan.faults.fault_after_seq = u64::MAX;
-        }
-        if self.setup.is_some() {
-            plan.faults.fault_after_seq = u64::MAX;
-        }
-        if self.setup == Some(Setup::Mark) {
-            plan.faults.setup_mark = 1;
         }
         let fs_model = Model::parse(&self.fs_model).ok_or_else(|| {
             format!(
@@ -1454,25 +1370,12 @@ impl Config {
             return Err("preempt-permille is at most 1000".into());
         }
         let machine_programs = self.check_machines()?;
-        let phase = |what: &str, w: &[String]| -> Res<Program> {
-            self::program(&w[0], &self.mounts).map_err(|e| format!("{what}: {e}"))
-        };
-        let setup_program = match &self.setup {
-            Some(Setup::Command(w)) => Some(phase("setup", w)?),
-            _ => None,
-        };
-        let finally_program = match self.finally.is_empty() {
-            true => None,
-            false => Some(phase("finally", &self.finally)?),
-        };
         Ok(Opts {
             cfg: self.clone(),
             program,
             plan,
             fs_model,
             machine_programs,
-            setup_program,
-            finally_program,
         })
     }
 

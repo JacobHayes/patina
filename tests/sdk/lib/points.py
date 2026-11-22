@@ -63,49 +63,40 @@ for label in ["forked-child", "exec-child", "parent-done"]:
         die(f"fork: {label} {r.site(label)}")
 print("a forked and an exec'd child report into the run's table")
 
-# A program that marks setup-complete, in a run that declares it (--setup mark), gets faults
-# only after the mark; the run records where it marked. Declared and never marked, or marked
-# and not declared: an error naming the setup. Never restarted, never inferred.
-def marked_at(r):
-    return (r.outcome.get("phases") or {}).get("setup", {}).get("to_seq")
+# A program that is its own harness: main's `ready` probe waits for a file the program creates
+# at the end of its setup; no fault point fires before the probe passes, all do after.
+CONF = os.path.join(RUNS, "02/ready.toml")
+os.makedirs(os.path.dirname(CONF), exist_ok=True)
+with open(CONF, "w") as f:
+    f.write('[machine.main]\nready = "test -e /tmp/setup-done"\n')
+flags = ["--config", CONF, "--fault", "buggify:ready-point=1000"]
+r = run("02/ready", 1, EXTRA, "ready", flags=flags)
+if r.cls != "ok" or r.stdout != "before=00000 after=11111\n":
+    die(f"faults after main's probe passed: {r.cls} {r.stdout!r}")
+print("main's ready probe: quiet before it passes, firing after")
 
-
-flags = ["--fault", "buggify:setup-point=1000"]
-r = run("02/setup", 1, EXTRA, "setup", flags=flags + ["--setup", "mark"])
-if r.cls != "ok" or r.stdout != "before=00000 after=11111\n" or not r.sdk["setup_complete"] or not marked_at(r):
-    die(f"faults after a declared setup-complete: {r.cls} {r.stdout!r} {r.outcome.get('phases')}")
-never = run("02/setup-never", 1, C, "script", flags=flags + ["--setup", "mark"])
-if never.cls != "error" or never.outcome.get("stop") != "setup" or never.status != 2:
-    die(f"declared and never marked: {never.cls} {never.outcome.get('stop')} exit {never.status}")
-undeclared = run("02/setup-undeclared", 1, EXTRA, "setup", flags=flags)
-if undeclared.cls != "error" or undeclared.outcome.get("stop") != "setup-mark" or "setup = \"mark\"" not in undeclared.outcome["message"]:
-    die(f"marked and not declared: {undeclared.cls} {undeclared.outcome.get('stop')} {undeclared.outcome['message']}")
-if alone.outcome.get("phases") is not None:
-    die(f"a run without a setup: phases {alone.outcome['phases']}")
-print("setup = mark: quiet before the mark, firing after; never marked and undeclared marks are errors")
-
-# The rerun line of a run with a declared setup (its finding: a checker that always fails)
-# reproduces it exactly.
-judged = run("02/setup-judged", 1, EXTRA, "setup", flags=flags + ["--setup", "mark", "--check", "false"])
+# The rerun line of a run with a probe (its finding: a checker that always fails) reproduces it
+# exactly.
+judged = run("02/ready-judged", 1, EXTRA, "ready", flags=flags + ["--check", "false"])
 rep = report(judged)
 line = shlex.split(rep["groups"][0]["rerun"])
-again = os.path.join(RUNS, "02/setup-rerun")
+again = os.path.join(RUNS, "02/ready-rerun")
 subprocess.run(["rm", "-rf", again], check=True)
 subprocess.run([PATINA, "run", "--out", again, *line[2:]], capture_output=True, text=True, timeout=120)
 again = Run(again)
-if again.outcome["digest"] != judged.outcome["digest"] or marked_at(again) != marked_at(judged):
+if again.outcome["digest"] != judged.outcome["digest"]:
     die(f"the rerun line {line}: digest {again.outcome['digest']} vs {judged.outcome['digest']}")
-print("the rerun line of a run with setup = mark is the run")
+print("the rerun line of a run with a ready probe is the run")
 
 # A sweep's runs are its seeds' runs, the same digests as the single runs at any width.
-single = {s: run(f"02/setup-{s}", s, EXTRA, "setup", flags=flags + ["--setup", "mark"]) for s in range(1, 7)}
+single = {s: run(f"02/ready-{s}", s, EXTRA, "ready", flags=flags) for s in range(1, 7)}
 
 
 def sweep(j):
-    out = os.path.join(RUNS, f"02/setup-sweep-j{j}")
+    out = os.path.join(RUNS, f"02/ready-sweep-j{j}")
     subprocess.run(["rm", "-rf", out], check=True)
     p = subprocess.run([PATINA, "sweep", "--seeds", "1..6", "-j", j, "--keep", "all", "--out", out,
-                        "--mount", GUESTS + ":/guest:copy", *flags, "--setup", "mark", "--", *EXTRA, "setup"],
+                        "--mount", GUESTS + ":/guest:copy", *flags, "--", *EXTRA, "ready"],
                        capture_output=True, text=True, timeout=300)
     runs = {int(d.removeprefix("seed-")): Run(os.path.join(out, d)) for d in os.listdir(out) if d.startswith("seed-")}
     if len(runs) != 6:

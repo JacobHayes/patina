@@ -54,7 +54,7 @@ SYNCS = ("Fsync", "FsyncDir", "FsyncFail", "Sync")
 
 def points(ops):
     """The crash point ordinal just after each record (None for base records and the Crash
-    record), as the runtime counts them with no setup-complete mark: one point after each
+    record), as the runtime counts them in a run without `ready` probes: one point after each
     record it appends, and one before each sync-class call, ahead of the records that call
     appends (writeback, then the sync record; all with the call's seq). Scripts check what a
     run crashed at, so a difference from the runtime's count shows as a crash elsewhere."""

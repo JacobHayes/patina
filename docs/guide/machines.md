@@ -3,7 +3,7 @@
 A run can hold several machines. The command after `--` runs on machine **main** (or give it as
 `[machine.main] run`). Main is a machine like any other, and the seed's faults act on every
 machine, main included; main differs only in that the run ends with its exit status. A main that
-is the test's driver, not part of the system under test, writes `[machine.main] faults = false`
+runs only the test, not part of the system under test, writes `[machine.main] faults = false`
 (below). Each other `[machine.NAME]` table in `patina.toml`, or `--machine NAME='CMD ARGS'`,
 adds a machine whose program starts with the run, before main's:
 
@@ -37,8 +37,9 @@ ctl settle`, then check the system.
 
 `patina ctl settle [SECONDS]` in main's script (or the SDK's `control("settle")`) ends the seed's
 faults for the rest of the run and waits for the system to recover: the seed's partitions heal,
-the machines it paused resume, the machines it took down boot at once, and the call returns when
-every machine is ready again (started and not paused). What the script itself did stays: its
+the machines it paused resume, the machines it took down boot at once, each machine's `ready`
+probe (below) runs again, and the call returns when every machine is ready again (started, not
+paused, its probe passed). What the script itself did stays: its
 cuts, its pauses, and a machine it crashed or killed, which stays down and is not waited for. A
 machine not ready SECONDS of virtual time (default 60) after the faults stopped ends the run
 `liveness` (stop `settle`), naming it: the system did not recover. Crash points stop counting at
@@ -49,7 +50,7 @@ system:
 <!-- transcript machines-settle
 dir: /tmp/settle
 setup: mkdir g && cp "$GUESTS/phases.py" g/
-setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
+setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\nready = "patina wait :7000"\n\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\nready = "patina wait :7000"\n' >patina.toml
 exit: 0 1
 exact-only: one seed's run
 -->
@@ -60,29 +61,31 @@ faults = false
 
 [machine.a]
 run = ["python3", "/guest/phases.py", "serve"]
+ready = "patina wait :7000"
 
 [machine.b]
 run = ["python3", "/guest/phases.py", "serve", "lazy"]
+ready = "patina wait :7000"
 $ patina run --seed 5 --mount g:/guest:copy --faults crash --fault crash-gap-ms=1000..4000 --fault max-boots=8 -- sh -c 'python3 /guest/phases.py work 10 a b && patina ctl settle && python3 /guest/phases.py check 10 a b'
 failure (exit): exit status 1
 guest: exit 1
-settled: seq 7352 t=106215ms
+settled: seq 7716 t=106309ms
 faults on: a, b
 machines: a 10.0.0.2 running after 1 down, 2 boots, b 10.0.0.3 running after 1 down, 2 boots
 guest stderr (1 lines, /tmp/settle/patina-out/run-5/boot-1/stderr):
-  FAIL: check: b lost acknowledged puts [3, 4, 5, 6]
+  FAIL: check: b lost acknowledged puts [1, 2, 3, 4, 5, 6]
 faults injected: 2 (crash 2)
 last injected:
-  seq 4277 t=101147ms crash machine=a kind=machine lost: 0 missing, 0 changed, 0 back
-  seq 4304 t=101779ms crash machine=b kind=machine object=/work/log lost: 0 missing, 1 changed, 0 back
+  seq 5098 t=101147ms crash machine=a kind=machine lost: 0 missing, 0 changed, 0 back
+  seq 5124 t=101779ms crash machine=b kind=machine object=/work/log lost: 1 missing, 0 changed, 0 back
 run directory: /tmp/settle/patina-out/run-5
 replay: patina replay /tmp/settle/patina-out/run-5
 explain: patina explain /tmp/settle/patina-out/run-5
 ```
 
 `phases.py` (in `tests/guests/machines`) stores puts; `work` puts 1 to 10 on both machines and
-`check` polls each until it answers, then looks for every acknowledged put. Main, the driver,
-has `faults = false`, so `--faults crash` crashes a and b and the run says so (`faults on:`).
+`check` polls each until it answers, then looks for every acknowledged put. Main runs only the
+test and has `faults = false`, so `--faults crash` crashes a and b and the run says so (`faults on:`).
 With `lazy`, b acknowledges a put before its `fsync`, and the check after settle finds what b's
 machine crash lost. Settle works the same with one machine: under `--faults crash`, `-- sh -c './app && patina
 ctl settle && ./verify'` reruns `./app` at each boot after a crash and runs `./verify` once,
@@ -122,7 +125,7 @@ machines: main, srv in 8 runs; net: 0 cuts, 0 heals, 0 held over them
 $ grep -v ready patina.toml >plain.toml
 $ patina sweep --seeds 1..8 --config plain.toml --out patina-out/plain --mount g:/guest:copy --fault fsync-error-permille=50 -- python3 /guest/phases.py work 5 srv
 ...
-patina sweep: 8 runs, 6 findings in 1 group, 2 ok   (0.3s, 8 jobs)
+patina sweep: 8 runs, 5 findings in 1 group, 3 ok   (0.3s, 8 jobs)
 ...
 failure exit [machine srv]: FAIL: serve: start: [Errno N] Input/output error; exit 1
 ...
@@ -136,8 +139,8 @@ time (ms) each machine was first ready.
 A probe on main holds the faults, not main's command, until it passes: a test whose own setup
 must finish first writes `[machine.main] ready = "test -e /tmp/setup-done"` and creates the file
 when done; a client and server on main alone (`-- sh -c './server & ./client'`) take
-`[machine.main] ready = "patina wait :7000"`. Probes run at the first boot only: after a restart
-nobody is told, clients retry. `ready` and `--setup` cannot be combined.
+`[machine.main] ready = "patina wait :7000"`. Probes run at the first boot and again at `settle`;
+after a restart in between nobody is told: clients retry.
 
 A probe that has not passed 60 s of virtual time after boot, or a machine whose `run` ends before
 it is ready, ends the run `error`, stop `ready`: the faults never began. The machine's stderr has
@@ -156,43 +159,6 @@ srv stderr (1 lines, /tmp/ready/patina-out/run-0/machine/srv/boot-1/stderr):
   patina: ready probe `test -e /work/ready`: exit 1
 ...
 ```
-
-## Setup, main command, final check with machines
-
-The machines boot first, without faults. The setup (`--setup`) then runs as main's first
-command, on main's machine; when it exits 0 the main command starts and the faults with it.
-When the main command ends ok the faults stop for good: partitions and cuts heal, paused machines
-resume, and every down machine whose restart policy has a restart scheduled starts at once (a machine
-a control call took down stays down). Only then does
-the final check (`--finally`) start; a machine may still be booting, so the check polls:
-
-<!-- transcript machines-phases
-dir: /tmp/phases-machines
-setup: mkdir g && cp "$GUESTS/phases.py" g/
-setup: printf '[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/phases.py", "serve"]\n[machine.b]\nrun = ["python3", "/guest/phases.py", "serve", "lazy"]\n' >patina.toml
-exit: 1
-exact-only: one seed's run
--->
-```text
-$ patina run --seed 4 --mount g:/guest:copy --faults crash,partition --fault crash-gap-ms=1000..4000 --fault max-boots=8 --setup 'python3 /guest/phases.py check 0 a b' --finally 'python3 /guest/phases.py check 10 a b' -- python3 /guest/phases.py work 10 a b
-failure (finally): the final check (--finally) exited 1
-guest: exit 0
-phases: setup exit 0, main exit 0, finally exit 1
-faults on: a, b
-machines: a 10.0.0.2 running after 1 down, 2 boots, b 10.0.0.3 running after 1 down, 2 boots
-finally stderr (1 lines, /tmp/phases-machines/patina-out/run-4/boot-1/stderr from byte 0):
-  FAIL: check: b lost acknowledged puts [1, 2, 3, 4, 5, 6, 7, 8, 9]
-faults injected: 2 (crash 2)
-last injected:
-  seq 11641 t=101745ms crash machine=a kind=machine lost: 0 missing, 0 changed, 0 back
-  seq 11667 t=102608ms crash machine=b kind=machine object=/work/log lost: 0 missing, 1 changed, 0 back
-run directory: /tmp/phases-machines/patina-out/run-4
-replay: patina replay /tmp/phases-machines/patina-out/run-4
-explain: patina explain /tmp/phases-machines/patina-out/run-4
-```
-
-With `lazy`, b acknowledges a put before its `fsync`: the main command sees nothing wrong, and
-the final check finds what b's machine crashes lost.
 
 ## Main's control: `patina ctl`
 
@@ -233,7 +199,8 @@ available yet, and is refused (exempt main, or name the machines).
 
 `@MACHINE,...` scopes a class or key to machines: `--faults crash@db`, `--fault
 fsync-error-permille=5@a,main`. `[machine.NAME] faults = false` keeps a machine out of all the
-seed's faults, its links included; a test driver on main writes `[machine.main] faults = false`.
+seed's faults, its links included; a main that runs only the test writes `[machine.main] faults
+= false`.
 The run prints `faults on:` with the machines its faults act on, and says so when every machine
 has `faults = false`. A group's `machines:` line says which machines were down or partitioned in its failing runs.
 
@@ -264,7 +231,7 @@ point.
 release-only: a sweep of a seed's 30 crash points
 dir: /tmp/ack2
 setup: mkdir g && cp "$GUESTS/ack2.py" "$GUESTS/patina.py" g/
-setup: printf '[run]\nsetup = "mark"\n[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/ack2.py", "a"]\n[machine.b]\nrun = ["python3", "/guest/ack2.py", "b", "early"]\n' >patina.toml
+setup: printf '[machine.main]\nfaults = false\n[machine.a]\nrun = ["python3", "/guest/ack2.py", "a"]\nready = "patina wait :7000"\n[machine.b]\nrun = ["python3", "/guest/ack2.py", "b", "early"]\nready = "patina wait :7000"\n' >patina.toml
 exit: 1
 -->
 ```text
@@ -275,8 +242,8 @@ crash points: 30 of 30 tried (a 15 of 15, b 15 of 15)
 ```
 
 `ack2.py` forwards each put from machine a to b and acknowledges it once b answers; with `early`, b
-answers before its `fsync`, and a crash of b loses an acknowledged put. Its main marks the end
-of its setup itself (`setup = "mark"` under `[run]`), so only the puts' points count.
+answers before its `fsync`, and a crash of b loses an acknowledged put. Both machines have
+`ready = "patina wait :7000"`, so the points count once both serve: only the puts' points.
 
 ## In the logs
 

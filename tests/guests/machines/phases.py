@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""A store of puts behind TCP, for runs with a setup, a main command and a final check.
+"""A store of puts behind TCP, for tests that work, settle and check.
 
     phases.py serve [lazy]     serve :7000: `put I` appends `I` to `log` (in the disk) with
                                fsync and answers `ok`; `get` answers the puts held, space-separated;
                                a failed write or fsync answers `err`. With `lazy` it answers `ok`
                                without the fsync. On start it reads `log` back.
-    phases.py start [lazy]     a setup: start `serve` in the background (it outlives this
-                               command), wait until it answers, exit 0
     phases.py work N HOST...   put 1..N on each host, 0.2 s apart; each put is sent again (on a
                                new connection after an error or a second of silence) until `ok`
-    phases.py check N HOST...  a final check: poll each host until it answers `get` (at most 60 s
+    phases.py check N HOST...  the check after settle: poll each host until it answers `get` (at most 60 s
                                of virtual time), then exit 1 if a host lacks a put of 1..N
 
 Each command prints what it did and exits 0, or prints `FAIL: ...` and exits 1.
 """
 import os
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -99,12 +96,6 @@ def main(argv):
     cmd = argv[0]
     if cmd == "serve":
         serve(argv[1:] == ["lazy"])
-    elif cmd == "start":
-        subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve", *argv[1:]],
-                         start_new_session=True)
-        if until("127.0.0.1", "get\n", 30) is None:
-            raise SystemExit("FAIL: start: the server never answered")
-        print("start: serving", flush=True)
     elif cmd == "work":
         n, hosts = int(argv[1]), argv[2:]
         for i in range(1, n + 1):

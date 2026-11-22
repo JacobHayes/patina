@@ -136,7 +136,7 @@ def report(peer):
         "cwd": os.getcwd(),
         "own": seen("b"),
         "main": seen("d"),
-        "shm_driver": call(libc.shmget, KEY + 1, 0, 0),
+        "shm_main": call(libc.shmget, KEY + 1, 0, 0),
         "control": err(lambda: patina.control("partition main b")),
         "ctl_exit": ctl.returncode,
         "ctl_err": ctl.stderr.strip(),
@@ -215,7 +215,7 @@ def main():
           "b sees its own disk, /tmp and /dev/shm, not main's")
     check(seen("b") == [] and seen("d") == [os.getcwd(), "/tmp", "/dev/shm"],
           "main sees its own, not b's")
-    check(r["shm_driver"] == errno.ENOENT and call(libc.shmget, KEY, 0, 0) == errno.ENOENT,
+    check(r["shm_main"] == errno.ENOENT and call(libc.shmget, KEY, 0, 0) == errno.ENOENT,
           "System V shared memory is per machine")
     check(local == "10.0.0.1" and r["peer"] == "10.0.0.1", "addresses: main is 10.0.0.1 at both ends")
     check(connect(("10.0.0.2", 7001)) == errno.ECONNREFUSED, "b's loopback listener is not on its address")

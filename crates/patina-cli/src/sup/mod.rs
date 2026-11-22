@@ -79,9 +79,9 @@ mod link;
 mod machines;
 mod maps;
 mod pause;
-mod phase;
 pub mod proc;
 mod ready;
+mod root;
 #[allow(dead_code)]
 pub mod sched;
 pub(crate) mod sdk;
@@ -128,8 +128,8 @@ struct Sup {
     pauses: pause::Pauses,
     /// The program's path in the sandbox (the first image).
     exe: String,
-    /// The run's phases (`--setup`, `--finally`; `phase`).
-    phases: phase::Phases,
+    /// How guest process trees are started (`root`).
+    roots: root::Roots,
     /// Processes in which an `execve` has replaced an image (pids are unique in a run): a
     /// runtime there that cannot run its image was handed one an `execve` resolved, not the
     /// program (or a machine's command).
@@ -416,9 +416,7 @@ impl Sup {
                 self.finish(Verdict::new("infra", d));
             }
             let old = self.now();
-            if (self.machine_count() > 0
-                || self.phases.pending != 0
-                || !self.machines.pending.is_empty())
+            if (self.machine_count() > 0 || !self.machines.pending.is_empty())
                 && self.machine_actions_idle()
             {
                 continue;
@@ -449,9 +447,7 @@ impl Sup {
                     self.after_events();
                     // A kill closed sockets and ended waits: the wire and the waiters see it now,
                     // not at the next event.
-                    if (self.machine_count() > 0
-                        || self.phases.pending != 0
-                        || !self.machines.pending.is_empty())
+                    if (self.machine_count() > 0 || !self.machines.pending.is_empty())
                         && !self.machine_actions().is_empty()
                     {
                         self.wire_step();
@@ -661,30 +657,17 @@ impl Sup {
     }
 
     /// The process of `idx` is ending (`exit_group`, a fatal signal, or the exit of its
-    /// last thread). Exit barrier and the rest: `proc::process_died`. The run ends when the
-    /// root of its last phase exits; the root of an earlier phase is an ordinary process's
-    /// exit, and the next phase's root starts after it (`phase`).
+    /// last thread). Exit barrier and the rest: `proc::process_died`. The run ends when main's
+    /// command exits.
     fn proc_exit(&mut self, op: Op, idx: usize, args: [u64; 6], status: i64, sig: i64) -> Next {
         let pid = self.sched.entries[idx].pid;
-        let next = match pid == self.procs.main {
-            true => self.phase_next(status, sig),
-            false => None,
-        };
-        if pid == self.procs.main && next.is_none() {
+        if pid == self.procs.main {
             self.ctl.timing[TM_MAIN_EXIT].store(now_ns(), Relaxed);
         }
-        self.phases.continuing = next.is_some();
         self.process_died(pid, status, sig as u64);
-        self.phases.continuing = false;
-        if let Some(n) = next {
-            self.procs.main = 0;
-            self.phase_end(status, sig, n);
-            return Next::Pick;
-        }
         if pid == self.procs.main {
             let _ = self.reap();
             self.decide(op as u32, idx, args, 0);
-            self.phase_end(status, sig, 0);
             self.main_exit(status, sig);
         }
         Next::Pick
@@ -1019,7 +1002,7 @@ impl Sup {
                 Next::Continue(0)
             }
             Some(Op::Machine) => self.machine_op(idx, a),
-            Some(Op::Lifecycle) => self.lifecycle(idx, a),
+            Some(Op::Settle) => self.settle_req(idx, a),
             // A machine's crash at its crash point: the machine goes down, the run goes on.
             Some(Op::CrashPoint) if self.machine_of(idx) != 0 => self.machine_point_crash(idx),
             Some(Op::CrashPoint) => {
@@ -1146,9 +1129,7 @@ impl Sup {
             // `ThreadExit`): its own end is its machine's, not a kill's.
             let ending = req.op == Op::ProcExit as u32
                 || (req.op == Op::ThreadExit as u32 && self.sched.live_in(pid) <= 1);
-            if (self.machine_count() > 0
-                || self.phases.pending != 0
-                || !self.machines.pending.is_empty())
+            if (self.machine_count() > 0 || !self.machines.pending.is_empty())
                 && !ending
                 && self.machine_actions().contains(&pid)
             {
@@ -1220,10 +1201,6 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     let mut exe: Option<String> = None;
     // A run with machines: the keeper's channel is at `FD_MACHINES`.
     let mut machines = false;
-    // The setup command and the final check: each program's guest path and its argv.
-    let mut setup: Option<(String, Vec<String>)> = None;
-    let mut finally: Option<(String, Vec<String>)> = None;
-    let mut ok: Vec<i64> = vec![];
     // Each machine's `ready` probe (`ready`): `--ready K`, then its words.
     let mut probes: Vec<Vec<String>> = vec![];
     let mut probe_of: Option<usize> = None;
@@ -1252,29 +1229,6 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
                 let v = it.next().ok_or("--ready-arg needs a word")?.clone();
                 probes[probe_of.ok_or("--ready-arg before --ready")?].push(v);
             }
-            "--setup-exe" => {
-                setup = Some((it.next().ok_or("--setup-exe needs PATH")?.clone(), vec![]))
-            }
-            "--finally-exe" => {
-                finally = Some((it.next().ok_or("--finally-exe needs PATH")?.clone(), vec![]))
-            }
-            "--setup-arg" | "--finally-arg" => {
-                let v = it.next().ok_or("an argument is needed")?.clone();
-                let p = if a == "--setup-arg" {
-                    &mut setup
-                } else {
-                    &mut finally
-                };
-                p.as_mut()
-                    .ok_or("an argument before its program")?
-                    .1
-                    .push(v);
-            }
-            "--ok" => ok.push(
-                it.next()
-                    .and_then(|v| v.parse().ok())
-                    .ok_or("--ok needs a status")?,
-            ),
             "--env" => {
                 let kv = it.next().ok_or("--env needs K=V")?;
                 let k = kv.split('=').next().unwrap_or("");
@@ -1364,7 +1318,7 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
         execed: Default::default(),
         maps_ended: std::cell::Cell::new(false),
         disks: disks::Disks::new(work_dir(ctl)),
-        phases: phase::Phases::default(),
+        roots: root::Roots::default(),
         ready: ready::Ready::new(probes),
     };
     // The rest of the process state guests inherit from the supervisor.
@@ -1436,15 +1390,12 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
     ctl.timing[TM_COPIED].store(now_ns(), Relaxed);
     // The first guest: slot 0, reserved before the task exists.
     sup.slot(0).state.store(SLOT_RESERVED, SeqCst);
-    let cmd_of = |exe: String, argv: Vec<String>| phase::Cmd {
-        argv: [vec!["rt".to_string(), exe.clone()], argv].concat(),
-        exe,
+    let main_exe = exe.unwrap_or_else(|| cmd[0].clone());
+    let main_cmd = root::Cmd {
+        argv: [vec!["rt".to_string(), main_exe.clone()], cmd].concat(),
+        exe: main_exe,
     };
-    let main_cmd = cmd_of(exe.unwrap_or_else(|| cmd[0].clone()), cmd);
-    sup.phases.setup = setup.map(|(e, a)| cmd_of(e, a));
-    sup.phases.finally = finally.map(|(e, a)| cmd_of(e, a));
-    sup.phases.ok = ok;
-    sup.phases.env = env
+    sup.roots.env = env
         .iter()
         .map(|s| CString::new(s.as_bytes()).unwrap())
         .collect();
@@ -1461,19 +1412,9 @@ pub fn main(args: &[String]) -> Res<ExitCode> {
             "--machines and the machine table disagree",
         ));
     }
-    // The first root: the setup command's, when the run starts in its setup (`phase`).
-    let first_phase = ctl.phases.phase.load(Relaxed);
-    let first = match (first_phase, &sup.phases.setup) {
-        (PHASE_SETUP, Some(c)) => c.clone(),
-        _ => main_cmd.clone(),
-    };
-    sup.phases.main = Some(main_cmd);
-    sup.exe = first.exe.clone();
-    if first_phase != 0 {
-        sup.phase_begin(first_phase);
-    }
-    sup.phases.fds = phase::open_fds();
-    let pid = sup.fork_root(&first);
+    sup.exe = main_cmd.exe.clone();
+    sup.roots.fds = root::open_fds();
+    let pid = sup.fork_root(&main_cmd);
     sup.child = pid;
     sup.pidfd = match pidfd_open(pid) {
         Ok(fd) => fd,

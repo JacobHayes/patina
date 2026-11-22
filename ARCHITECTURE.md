@@ -317,10 +317,11 @@ every one (`Config::scope_bits`, `Config::link_mask`). Main differs only in that
 run. One limit remains that depends on the count: beside other machines main is forked by the
 supervisor, not booted by the launcher's boot loop, so it cannot be crashed or killed and
 started again there, and a crash or kill class or key that acts on main in such a run is refused
-(`main_crash`). A test driver on main opts out; the run says which machines its faults act on:
+(`main_crash`). A main that runs only the test opts out; the run says which machines its faults
+act on:
 
-<!-- transcript architecture-driver
-dir: /tmp/driver
+<!-- transcript architecture-unfaulted
+dir: /tmp/unfaulted
 setup: printf '[machine.main]\nfaults = false\n\n[machine.a]\nrun = ["sleep", "1"]\n' >patina.toml
 exit: 0 0 2
 -->
@@ -336,8 +337,8 @@ ok (exit): the program exited 0
 guest: exit 0
 faults on: a
 machines: a 10.0.0.2 running
-run directory: /tmp/driver/patina-out/run-0
-replay: patina replay /tmp/driver/patina-out/run-0
+run directory: /tmp/unfaulted/patina-out/run-0
+replay: patina replay /tmp/unfaulted/patina-out/run-0
 $ patina run --config /dev/null --machine a='sleep 1' --faults crash -- /bin/true
 patina: error: --faults crash: acts on main too, and main is not crashed or killed beside other machines (not available yet): give [machine.main] faults = false, or name the machines (@a,b)
 ```
@@ -389,7 +390,7 @@ patina: error: --faults crash: acts on main too, and main is not crashed or kill
   table (`proto::machine::parse`; the supervisor cannot read a machine process's memory, which is not
   its descendant), refuses every call outside main's machine (`EPERM`), and sends
   `Op::Net` [verb, from set, to set, both], `Op::Machine` [verb, machine] or, for `settle`,
-  `Op::Lifecycle` [`LIFE_SETTLE`, _, limit] (below, "Settle"); the call is logged with its words
+  `Op::Settle` [_, limit] (below, "Settle"); the call is logged with its words
   as an SDK call is.
 - **Cuts.** The supervisor keeps two matrices of cut links (`sup/link.rs`): the script's
   (`partition`) and the seed's (partitions); a link is cut while either says so, and `heal`
@@ -427,7 +428,7 @@ patina: error: --faults crash: acts on main too, and main is not crashed or kill
 - **Kill and restart.** A machine is up from its first process's `Hello` until it goes down
   (`DEC_MACHINE_DOWN` [machine, boot, how, status, processes killed, down time]): the seed
   kills it (`--faults kill`: a machine event `crash-gap-ms` after each start that keeps a run
-  alive while faults may act (`Live::AfterSetup`; outside the fault window it is only drawn
+  alive while faults may act (`Live::InWindow`; outside the fault window it is only drawn
   again, and after the faults end it does nothing), keyed on
   `Stream::Machine` by machine, boot and try, with an `Injected` record `INJ_MACHINE_KILL`
   counted as `crash`), main does (`kill NAME`, `Op::Machine`), or its first
@@ -1163,33 +1164,14 @@ plan is in `run.json`.
 The fault window is two sequence numbers in the run's `FaultCfg`: `fault_after_seq` and
 `fault_until_seq` (`FaultCfg::in_window`). Every runtime injection, crash point and fault
 point, and every supervisor fault (link faults through `link_faulted`, partition and pause
-draws, the seed's machine kills, clock skew at boot) asks it. The phases, the `ready` probes and
-the marks move it, under the turn:
+draws, the seed's machine kills, clock skew at boot) asks it. The `ready` probes open it and
+`settle` closes it, under the turn:
 
-- **Phases** (`sup/phase.rs`). A run with `--setup` or `--finally` runs its commands one after
-  the other as main's root process, in one sandbox and log; `PhaseCtl` (in `Ctl`) holds
-  the phase and, per phase, its start and end sequence numbers, its wait status and where its
-  output starts. A root's end is its `ProcExit` request, or its kill (`kill_now`); `phase_end`
-  logs `DEC_PHASE` [ended phase, wait word, next phase] and, at the setup's ok end, sets
-  `fault_after_seq` to that record's number (the launcher starts it at the maximum for a
-  declared setup). At an ok end of the main command before a final check it sets
-  `fault_until_seq` and settles the system (`settle`): the seed's partition and pauses end, the
-  script's cuts heal and its pauses end, and each down machine with a restart scheduled by its
-  policy is started now (one a control call took down, or past `max-boots`, stays down).
-  The next root starts at the next point where nothing is being created (`machine_actions`), after
-  the machines it started, in a free slot, forked as the first root was. Nothing host-timed decides
-  a transition: each is a request or a machine action under the turn. Every boot starts with
-  the setup (a crash comes only in the main phase), so the restarted machine boots without what
-  an earlier setup started; the launcher resets `fault_after_seq` to the maximum for each
-  boot with a declared setup, and in mark mode the program marks again. `result::phased`
-  classifies: a setup that did not end ok is `error` (stop `setup`), or after a machine crash
-  the finding (stop `setup`), and after an ok main command a failed final check is the finding
-  (stop `finally`).
 - **Ready probes** (`sup/ready.rs`). A run in which any machine, main included, declares
   `ready` starts with `fault_after_seq` at the maximum: the launcher knows it from the
   configuration before the first instruction, so nothing is scanned or learned. At boot, after
   every machine's first process has said `Hello`, the supervisor starts one runner per probe on
-  the probe's machine (main's forked as a phase's root is; another's by the keeper in the
+  the probe's machine (main's forked as main's command is, `sup/root.rs`; another's by the keeper in the
   machine's existing view, `sandbox::PROBE_MSG`), in a free slot it reserves, and waits for its
   `Hello` (`Ready::starting` keeps it from being taken for main or the machine's first
   process). The runner is `patina __ready -- CMD ARGS` (`crate::ready`), an ordinary guest: it
@@ -1206,30 +1188,25 @@ the marks move it, under the turn:
   main's command (`ready_main_gone`). A runner killed while its machine waits is queued
   (`EVK_READY` in `machines.pending`) and started again by `machine_actions` once the machine
   is up, so its probe keeps polling. `MachineTab::ready_ns` gives `result.json`'s `ready`. Probes run at the
-  first boot only (`--ready` is passed to the supervisor only then); later boots keep the
-  window the first opened. `ready` and a setup cannot be combined.
-- **Marks** (`sys/sdk.rs`). `[run] setup = "mark"` sets `FaultCfg::setup_mark`: the first
-  `setup-complete` lowers `fault_after_seq` from the maximum to its own number. Undeclared, it
-  ends the run (`Op::Lifecycle`, `LIFE_SETUP_UNDECLARED`, verdict `setup-mark`, outcome
-  `error`). `faults-done` writes `fault_until_seq` and tells the supervisor
-  (`LIFE_FAULTS_DONE`), which heals a seed partition in force, ends seed pauses (`PEND_DONE`)
-  and cancels their next draws.
+  first boot (`--ready` is passed to the supervisor only then) and again at `settle`; later
+  boots keep the window the first opened.
 - **Settle** (`sup/settle.rs`). `patina ctl settle [SECONDS]`, from main, also in a run without
-  machines. The first `LIFE_SETTLE` sets `fault_until_seq` to its decision record's number
-  (crash points stop counting there), records that number and the virtual time in `PhaseCtl`
+  machines. The first `Op::Settle` sets `fault_until_seq` to its decision record's number
+  (crash points stop counting there), records that number and the virtual time in `SettleCtl`
   (`result.json`'s `settle`), and undoes the seed's book only (`seed_stop`): its partition and
   pauses end, and each machine it took down whose restart its policy scheduled is started now.
+  Every machine but main with a probe runs it again (`ready_again_all`, `Ready::again`): now
+  if it is up, else when it boots.
   The script's book stays: its cuts and pauses, and its downs. A script's `crash` or `kill`
   cancels a machine's scheduled restart even when the seed had already taken it down, so such a
   machine has no start queued and is not waited for. The supervisor answers `-EAGAIN` while a
-  machine is up and paused, or down with a start queued (ready means started and not paused;
-  a `ready` probe will add to it), and the runtime, still in the call's trap, sleeps 100 ms of
+  machine is up and paused, up with its probe not yet passed again, or down with a start
+  queued, and the runtime, still in the call's trap, sleeps 100 ms of
   virtual time (`Op::Sleep`) and asks again. Past the limit (default 60 s, from the first call)
   the run ends `liveness`, stop `settle`, naming the machine. Once answered 0, a call is
-  answered 0 at once. A signal the sleep would take ends the call with `EINTR`; `patina ctl`
-  asks again. Every step is a request under the turn, so the wait replays exactly. The
-  `--finally` settle (`phase::settle`) is `seed_stop` plus the script's cuts healed and its
-  pauses ended, and does not wait.
+  answered 0 at once. A signal the sleep would take ends the call with `EINTR`, so that its
+  handler runs; `patina ctl` and the SDKs' `control` ask again. Every step is a request under
+  the turn, so the wait replays exactly.
 
 Each fault decision is a draw keyed by the call's sequence number and the fault class, made
 before the call (`patina-rt/src/inject.rs`). Turning one class on does not move another's

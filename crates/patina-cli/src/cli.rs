@@ -310,20 +310,6 @@ pub const FLAGS: &[Flag] = &[
         "wall time after which the run ends timeout",
         RUNLIKE,
     ),
-    flag(
-        "--setup",
-        "'CMD ARGS'",
-        "none",
-        "run first, without faults (mark: the program marks it)",
-        RUNLIKE,
-    ),
-    flag(
-        "--finally",
-        "'CMD ARGS'",
-        "none",
-        "run last, after an ok exit, with the faults stopped",
-        RUNLIKE,
-    ),
     flag("--runs", "N", "3", "runs to compare", &[Cmd::Verify]),
     flag(
         "--vary",

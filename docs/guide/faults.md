@@ -41,8 +41,8 @@ little.
    harness script out of `/work` (`--mount` it): there its own reads meet the faults too.
 4. **Machines.** A class or key without `@` acts on every machine, main included, and on the
    links between them, however many machines the run has; `@a,b` names machines (`patina guide
-   machines`). `[machine.NAME] faults = false` exempts a machine from all of them: a test driver
-   on main writes `[machine.main] faults = false`. `partition`, `pause` and `clock` exist only
+   machines`). `[machine.NAME] faults = false` exempts a machine from all of them: a main that
+   runs only the test writes `[machine.main] faults = false`. `partition`, `pause` and `clock` exist only
    with machines. A run prints `faults on:` with the machines its faults act on.
 
 <!-- transcript not-applicable
@@ -55,82 +55,79 @@ $ patina sweep --seeds 1..20 --faults net --out patina-out/tcp -- ./sockets chun
 faults: not applicable (a class's, nothing to act on in any run): net-drop, net-dup, net-reorder
 ```
 
-## When faults act: setup, main command, final check
+## When faults act: `ready` opens the window, `settle` closes it
 
-Most tests have a setup that is not under test (start the server, create the schema, load the
-fixture) and a final check that should see a settled system (read everything back, compare
-replicas). A run has up to three commands, run one after the other inside it: the same sandbox,
-seed and log.
+The seed's faults act in one window of the run, and the test says where it opens and closes:
 
-    --setup 'CMD ARGS'      [run] setup = "CMD ARGS" or ["CMD", "ARG", ...]
-    -- CMD ARGS             the main command
-    --finally 'CMD ARGS'    [run] finally = "CMD ARGS" or ["CMD", "ARG", ...]
+- **It opens when every machine is ready.** A machine's `ready` probe is a command Patina runs on
+  it every 100 ms of virtual time until it exits 0 (`patina guide machines`); a machine without
+  one is ready when it starts, so with no probe the window is open from the start. A server
+  takes `ready = "patina wait :7000"`; a test whose own setup must finish first puts a probe on
+  main, `[machine.main] ready = "test -e /tmp/setup-done"`, and creates the file when the setup
+  is done. Crash points count only inside the window, so `--crash-points` and `minimize` crash
+  only the work.
+- **It closes at `patina ctl settle`** in the test (the SDK's `control("settle")`), or at the
+  run's end. Settle ends the seed's partitions and pauses, boots at once the machines the seed
+  took down, runs the machines' probes again, and returns when every machine is ready: the
+  system has recovered. What the test's own control calls did stays.
+- **The final check is the test's own code after settle**, against the live, quiet system:
+  `-- sh -c './work && patina ctl settle && ./verify'`. Under `--faults crash` the command after
+  `--` starts again at each boot, so `./work` runs again after a crash and `./verify` runs once,
+  after the last. `--check` is the other kind of check: it runs on the host after the run, over
+  its recorded output and final disk (`patina guide checks`).
 
-- **The setup** runs without faults or crash points. When it exits 0 the main command starts,
-  and what it left running (a server started in the background) keeps running, faulted from
-  then on. A setup that exits nonzero, is killed, or hangs until the run's limit (`[run]
-  time-limit`, `--timeout`) ends the run `error` (stop `setup`), showing its output: a harness
-  problem, not a finding. After a machine crash the machine runs the setup again, then the main
-  command, so a setup must be safe to repeat on the crashed disk; a setup that fails there is a
-  finding (stop `setup`).
-- **The main command** runs under the faults; crash points count only in it, so
-  `--crash-points` and `minimize` crash only the work.
-- **The final check** runs only if the main command ended by itself with an ok status (0 or an
-  `--ok-exit` status); otherwise the run ends with the main command's outcome. Before it starts
-  the faults stop for the rest of the run: partitions and cuts heal, paused machines resume, a machine
-  whose restart policy has a restart scheduled starts at once (one a control call took down stays
-  down), and nothing more is injected. A nonzero exit is a
-  `failure` (stop `finally`), with its output. Recovery takes time, so make the check poll
-  until the system answers rather than assume it already does.
+A client and a server on one machine, the faults held until the server listens:
 
-`--finally` runs inside the run against the live system; `--check` runs on the host after the
-run, over its recorded output and final disk (`patina guide checks`). The same in one command:
-`-- sh -c 'work && patina ctl settle && check'`; `settle` ends the seed's faults where it is
-called and waits until the machines have recovered (`patina guide machines`).
-
-A run with a setup and a final check is as deterministic as one without: the same seed gives the
-same run, and `replay` repeats it exactly. The only difference is that no fault is injected in
-the setup or the final check.
-
-<!-- transcript phases
-dir: /tmp/phases
+<!-- transcript settle-one
+dir: /tmp/settle-one
 setup: mkdir g && cp "$GUESTS/phases.py" g/
+setup: printf '[machine.main]\nready = "patina wait :7000"\n' >patina.toml
 exact-only: the faults one seed draws
 -->
 ```text
-$ patina run --mount g:/guest:copy --faults disk,net --setup 'python3 /guest/phases.py start' --finally 'python3 /guest/phases.py check 20 127.0.0.1' -- python3 /guest/phases.py work 20 127.0.0.1
+$ cat patina.toml
+[machine.main]
+ready = "patina wait :7000"
+$ patina run --mount g:/guest:copy --faults disk,net -- sh -c 'python3 /guest/phases.py serve & python3 /guest/phases.py work 20 127.0.0.1 && patina ctl settle && python3 /guest/phases.py check 20 127.0.0.1'
 ok (exit): the program exited 0
 guest: exit 0
-phases: setup exit 0, main exit 0, finally exit 0
+settled: seq 9882 t=105534ms
 faults on: main
-faults injected: 42 (net-delay 41, net-reset 1)
-run directory: /tmp/phases/patina-out/run-0
-replay: patina replay /tmp/phases/patina-out/run-0
+faults injected: 45 (fs-delay 1, net-delay 43, net-reset 1)
+run directory: /tmp/settle-one/patina-out/run-0
+replay: patina replay /tmp/settle-one/patina-out/run-0
 ```
 
-`phases.py` (in `tests/guests/machines`) starts a store in the background, puts records through it,
-and checks they are all there. `result.json`'s `phases` has each command's start and end
-(sequence numbers), its exit and where its output begins; `patina explain` shows the boundaries.
+`phases.py` (in `tests/guests/machines`) is a store: `serve` answers puts on :7000, `work` puts
+1 to 20 and retries each until it is acknowledged, and `check` looks for every acknowledged put.
+`result.json`'s `ready` has when each machine was first ready and `settle` where the faults
+ended (sequence number and virtual time).
 
-**Put the system under test on a machine; main is the harness**: its setup waits for the
-system, its main command drives the workload, its final check verifies (`patina guide machines`).
-`[machine.main] faults = false` keeps the harness out of the faults. A run with one machine costs
-about what a run without machines does.
+A starting state the test needs but does not test belongs in the disk: `--disk DIR` (or
+`[machine.NAME] disk`) starts a machine's disk as a copy of DIR. Put a system under test on its
+own machines and main is the test (`patina guide machines`):
 
-<!-- no-run machine-harness: needs a database to test, which the repository does not ship -->
+<!-- no-run primary-standby: needs a database to test, which the repository does not ship -->
 ```sh
-printf '[machine.main]\nfaults = false\n' >patina.toml
-patina sweep --seeds 1..200 --faults all,crash --machine db='./db --listen :7000' \
-    --setup './wait-for db:7000' --finally './verify db:7000' -- ./workload db:7000
-```
+cat >patina.toml <<'TOML'
+[machine.main]
+faults = false
 
-**A program that is its own harness** can mark the end of its setup itself: declare it with
-`[run] setup = "mark"` (`--setup mark`) and call the SDK's `setup_complete()` (`patina guide
-sdk`); faults act from the mark. A mark the run does not declare, or a declared one never
-reached, ends the run `error` naming the fix; a program named `mark` is given by its path
-(`--setup ./mark`). `faults_done()` stops injecting from where it is called and ends the seed's
-partitions and pauses; it needs no declaration, and unlike `--finally` it neither heals cuts
-made by control calls nor starts down machines.
+[machine.primary]
+run   = "./db --role primary --peer standby"
+ready = "patina wait :5432"
+
+[machine.standby]
+run   = "./db --role standby --peer primary"
+ready = "patina wait :5432"
+TOML
+cat >test.sh <<'SH'
+./workload primary,standby || exit
+patina ctl settle
+./verify primary,standby
+SH
+patina sweep --seeds 1..200 --faults net,partition,crash -- sh test.sh
+```
 
 ## What the keys do
 

@@ -1,8 +1,11 @@
 /* Engine properties of the SDK channel, shown once in C (sdk-extra MODE):
  *   fork        a child started by fork and one started by execve report into the run's table
- *   setup       a fault point before and after `setup-complete`                               */
+ *   ready       a fault point before and after the program creates /tmp/setup-done, which
+ *               main's `ready` probe waits for (it then waits 1 s for the probe to pass)    */
 #include "patina.h"
+#include <fcntl.h>
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -30,11 +33,13 @@ int main(int argc, char **argv) {
         PATINA_REACHABLE("parent-done");
         return WIFEXITED(st) ? WEXITSTATUS(st) : 3;
     }
-    if (!strcmp(mode, "setup")) {
+    if (!strcmp(mode, "ready")) {
         char before[6] = {0}, after[6] = {0};
-        for (int i = 0; i < 5; i++) before[i] = PATINA_BUGGIFY("setup-point") ? '1' : '0';
-        patina_setup_complete();
-        for (int i = 0; i < 5; i++) after[i] = PATINA_BUGGIFY("setup-point") ? '1' : '0';
+        for (int i = 0; i < 5; i++) before[i] = PATINA_BUGGIFY("ready-point") ? '1' : '0';
+        close(open("/tmp/setup-done", O_CREAT | O_WRONLY, 0644));
+        struct timespec t = {1, 0};
+        nanosleep(&t, 0);
+        for (int i = 0; i < 5; i++) after[i] = PATINA_BUGGIFY("ready-point") ? '1' : '0';
         printf("before=%s after=%s\n", before, after);
         return 0;
     }

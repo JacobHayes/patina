@@ -14,12 +14,12 @@
 o=$RUNS/20-ready; mkdir -p "$o"
 rm -f "$o"/*.toml
 # srv.toml and srv-ready.toml: the machine, without and with its probe; plain.toml and
-# ready.toml add main, the test's driver.
+# ready.toml add main, unfaulted: it runs only the test.
 conf "$o/srv.toml" srv python3 /guest/slow.py
 cp "$o/srv.toml" "$o/srv-ready.toml"
 echo 'ready = "patina wait :7000"' >>"$o/srv-ready.toml"
-cp "$o/srv.toml" "$o/plain.toml"; driver "$o/plain.toml"
-cp "$o/srv-ready.toml" "$o/ready.toml"; driver "$o/ready.toml"
+cp "$o/srv.toml" "$o/plain.toml"; main_unfaulted "$o/plain.toml"
+cp "$o/srv-ready.toml" "$o/ready.toml"; main_unfaulted "$o/ready.toml"
 F=(--fault fsync-error-permille=50)
 W=(python3 /guest/phases.py work 5 srv)
 
@@ -84,7 +84,7 @@ echo "a probe on main: seeds 1-$s ok; with srv's too, ok; main's command ending 
 
 # A probe that never passes.
 conf "$o/never.toml" srv python3 /guest/phases.py serve
-echo 'ready = ["test", "-e", "/work/never"]' >>"$o/never.toml"; driver "$o/never.toml"
+echo 'ready = ["test", "-e", "/work/never"]' >>"$o/never.toml"; main_unfaulted "$o/never.toml"
 c=$(run "$o/never" 1 --config "$o/never.toml" -- "${W[@]}")
 [ "$c/$(field "$o/never/result.json" stop)" = error/ready ] || die "never ready: $c: $(field "$o/never/result.json" message)"
 case $(field "$o/never/result.json" message) in *srv*) ;; *) die "never ready: the message does not name srv" ;; esac
@@ -96,7 +96,7 @@ cp "$o/srv.toml" "$o/kick.toml"
 cat >>"$o/kick.toml" <<'EOF'
 ready = ["sh", "-c", "test -e /work/kicked || { touch /work/kicked; kill -9 $PPID; }; exec patina wait :7000"]
 EOF
-driver "$o/kick.toml"
+main_unfaulted "$o/kick.toml"
 run_ok "$o/kick" 1 --config "$o/kick.toml" -- "${W[@]}"
 r=$(field "$o/kick/result.json" ready.srv)
 [ "$r" != null ] || die "a killed runner: srv never ready"

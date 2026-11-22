@@ -12,7 +12,7 @@ patina_dst::sometimes!(ledger.len() > 4, "ledger-grew");
 patina_dst::reachable!("recovery-ran");
 let batch = patina_dst::knob!("batch-size", 64, 1, 1024);
 patina_dst::delay!("pre-heartbeat-stall");
-patina_dst::setup_complete(); // in a run with `setup = "mark"` under [run]
+patina_dst::control("settle").ok(); // end the faults, wait for the machines to recover
 ```
 
 A failed `always!` ends the run with outcome `violation` and `label: detail`. Fault points

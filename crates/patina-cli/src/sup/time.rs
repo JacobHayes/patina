@@ -48,11 +48,11 @@ impl Sched {
     }
 
     /// No pending event keeps the run alive (or none is pending): nothing will ever wake
-    /// anyone. `setup`: faults may act (`Live::AfterSetup`).
-    pub fn only_weak(&self, setup: bool) -> bool {
+    /// anyone. `window`: faults may act (`Live::InWindow`).
+    pub fn only_weak(&self, window: bool) -> bool {
         self.events.values().all(|e| match e {
             Event::Machine { live, .. } => {
-                *live == Live::No || (*live == Live::AfterSetup && !setup)
+                *live == Live::No || (*live == Live::InWindow && !window)
             }
             _ => false,
         })
@@ -61,11 +61,11 @@ impl Sched {
     /// Nothing runnable: move the clock to the earliest event and fire everything due
     /// then. Returns the new time, or None when nothing is runnable and nothing is pending
     /// (deadlock) or something is runnable (no jump needed).
-    pub fn idle_jump(&mut self, now: u64, setup: bool) -> Option<u64> {
+    pub fn idle_jump(&mut self, now: u64, window: bool) -> Option<u64> {
         if self.eligible().next().is_some() {
             return None;
         }
-        if self.only_weak(setup) {
+        if self.only_weak(window) {
             return None;
         }
         let at = self.next_deadline()?;
@@ -152,7 +152,7 @@ mod tests {
             200,
             Event::Machine {
                 key: 2,
-                live: Live::AfterSetup,
+                live: Live::InWindow,
             },
         );
         assert!(s.only_weak(false) && !s.only_weak(true));

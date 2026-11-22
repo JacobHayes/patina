@@ -38,7 +38,7 @@ import sys
 
 __all__ = [
     "Always", "Unreachable", "Sometimes", "Reachable", "Buggify", "Delay", "Knob",
-    "mark", "setup_complete", "faults_done", "is_simulated", "compute", "control",
+    "mark", "is_simulated", "compute", "control",
 ]
 
 _SYSCALL = 0x7061
@@ -245,27 +245,19 @@ def control(words):
     """A control call (the grammar is in ``patina.h``), e.g. ``control("partition a b")``: raises
     ``OSError`` with the errno Patina answered (``EPERM`` outside main, ``ENOENT``
     for an unknown machine, ``EINVAL`` for other words, ``EALREADY`` or ``EAGAIN`` for a machine in the
-    wrong state), or ``ENOSYS`` outside Patina."""
+    wrong state), or ``ENOSYS`` outside Patina. ``control("settle")`` ends the seed's faults and
+    returns once every machine is ready again; a signal that interrupts its wait does not end it."""
     if not _get()[0]:
         raise OSError(38, "control: not inside a Patina run")
     w = words.encode("utf-8")
     if not 0 < len(w) <= _TEXT_MAX:
         raise OSError(22, "control: expected 1 to %d bytes of words" % _TEXT_MAX)
-    r = _sys(_CONTROL, ctypes.create_string_buffer(w, len(w)))
+    r = -4
+    while r == -4:  # EINTR: a signal ended settle's wait (its handler has run); ask again
+        r = _sys(_CONTROL, ctypes.create_string_buffer(w, len(w)))
     if r < 0:
         raise OSError(-r, "control %r: %s" % (words, os.strerror(-r)))
 
-
-def setup_complete():
-    """The end of setup: no fault acts before it. Only in a run that declares it (``setup =
-    "mark"`` under ``[run]``, or ``--setup mark``); in any other run it ends the run with an
-    error."""
-    mark("setup-complete")
-
-
-def faults_done():
-    """The end of the faults: none acts after it (call it before the final checks)."""
-    mark("faults-done")
 
 
 # Compute points (ARCHITECTURE.md, "Compute points"): `python3 -m patina SCRIPT ARGS...` runs

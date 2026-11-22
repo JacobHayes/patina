@@ -38,10 +38,8 @@
 //!   buggify:LABEL=PERMILLE` forces one point's rate (`0`: off).
 //! - [`knob!`]: a seed-chosen integer in a range; [`delay!`]: maybe sleep a seeded virtual
 //!   time.
-//! - [`mark`] names a point in the run's log; [`setup_complete`] marks the end of setup in a
-//!   run that declares `setup = "mark"` (no fault acts before it) and [`faults_done`] the end
-//!   of the faults (none acts after it).
-//!   [`is_simulated`].
+//! - [`mark`] names a point in the run's log; [`control`] makes a control call (`settle` ends
+//!   the faults and waits for the machines to recover); [`is_simulated`].
 //!
 //! # Labels and sites
 //!
@@ -72,20 +70,10 @@ pub use sys::{is_simulated, mark};
 /// `EINVAL` for other words, `EALREADY` or `EAGAIN` for a machine in the wrong state), or `ENOSYS`
 /// outside Patina.
 /// The words are those of `patina ctl` (`sdk/c/patina.h` in the Patina repository).
+/// `control("settle")` ends the seed's faults and returns once every machine is ready again;
+/// a signal that interrupts its wait is handled and the wait goes on.
 pub fn control(words: &str) -> Result<(), i32> {
     sys::control(words)
-}
-
-/// Mark the end of setup: no fault acts before this call. Only in a run that declares it
-/// (`[run] setup = "mark"`, or `--setup mark`); in any other run it ends the run with an error.
-pub fn setup_complete() {
-    sys::mark("setup-complete");
-}
-
-/// Mark the end of the faults: no fault acts after this call (cut links heal, paused machines
-/// resume, down machines come back). Call it before the final checks.
-pub fn faults_done() {
-    sys::mark("faults-done");
 }
 
 /// Report a failed invariant under a label computed at run time. The label is not declared

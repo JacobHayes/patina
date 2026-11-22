@@ -25,7 +25,7 @@
 //! pause of a length drawn from `pause-ms`, the next gap from its end. Every draw is on
 //! `Stream::Machine`, keyed by the machine, the pause's ordinal in the chain and a sub-key
 //! (`NSUB_PAUSE_*`), so turning pauses on moves no other decision. A start that falls while
-//! faults may not act (outside the fault window: before a declared setup ends, after the
+//! faults may not act (outside the fault window: before every machine is ready, after the
 //! faults end), while the machine is down, or while a script has paused it, makes no
 //! pause. A start does not keep a run alive (`Live::No`): with every other thread waiting for
 //! nothing, a pause changes nothing. An end does (`Live::Yes`): the machine's threads run again.
@@ -298,7 +298,7 @@ impl Sup {
         if self.pauses.on == 0 {
             return false;
         }
-        let setup = self.faults_on();
+        let window = self.faults_on();
         let pid_paused = |pid: i32| {
             self.procs
                 .map
@@ -307,7 +307,7 @@ impl Sup {
         };
         self.sched.events.values().all(|e| match e {
             Event::Machine { live, .. } => {
-                *live == Live::No || (*live == Live::AfterSetup && !setup)
+                *live == Live::No || (*live == Live::InWindow && !window)
             }
             Event::Timeout { slot } => self.sched.is_frozen(*slot),
             Event::TimerFd { key } => self.io.timer_machine(*key).is_some_and(|k| self.paused(k)),

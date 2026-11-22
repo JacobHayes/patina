@@ -13,7 +13,7 @@ for n in a b c d; do
     conf "$o/m.toml" "$n" /guest/mapshare alternate
     conf "$o/loop.toml" "$n" sh -c "while :; do /guest/mapshare alternate >/dev/null; done"
 done
-driver "$o/loop.toml"
+main_unfaulted "$o/loop.toml"
 check_disks() {
     [ "$(field "$1/result.json" self_check.verdict)" = pass ] || die "$1: self-check: $(field "$1/result.json" self_check)"
     k=$("$PATINA" log ops "$1/boot-1" | awk '/MmapDirty/ { c++ } END { print c + 0 }')

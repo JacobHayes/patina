@@ -3,16 +3,16 @@
 # waiting main sees its connection end; the kill's down time is drawn from the machine default
 # (down-ms 1..5 s). A machine's restart ahead: main accepts the restarted machine's connection.
 # A partition's heal ahead: the request the cut held is delivered and answered. Main has faults
-# there (no driver), so the seed's partition separates main from a machine, and main's own
-# control calls (`patina ctl`, `patina.control`) still answer inside it. Only a partition's
-# start ahead, or a kill after main marked faults-done: the run is deadlocked. A
-# faults-done mark inside a partition heals it at once.
+# there (no `faults = false`), so the seed's partition separates main from a machine, and main's
+# own control calls (`patina ctl`, `patina.control`) still answer inside it. Only a partition's
+# start ahead, or a kill after main's `settle`: the run is deadlocked. A `settle` inside a
+# partition heals it at once.
 #@ tier=quick budget=30 slots=0.5
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/07-ahead; mkdir -p "$o"
 rm -f "$o/b.toml" "$o/exit.toml" "$o/bk.toml"
 conf "$o/b.toml" b python3 /guest/ahead.py b
-cp "$o/b.toml" "$o/bk.toml"; driver "$o/bk.toml"
+cp "$o/b.toml" "$o/bk.toml"; main_unfaulted "$o/bk.toml"
 conf "$o/exit.toml" b python3 /guest/ahead.py b exit
 printf 'restart = "always"\n' >>"$o/exit.toml"
 deadlock() {
@@ -41,12 +41,12 @@ n=$("$PATINA" log events "$o/heal" --types sdk | grep -c '"op":"control"')
 [ "$n" = 3 ] || die "heal: $n control calls in the events"
 echo "a heal ahead: the held ping answered; the seed's partition $p; main's control calls answered inside it"
 
-run_ok "$o/done" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py main done
-[ "$(cat "$o/done/boot-1/stdout")" = "done: pong" ] || die "done: $(cat "$o/done/boot-1/stdout")"
-echo "faults-done inside a partition: healed at once"
+run_ok "$o/settle" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py main settle
+[ "$(cat "$o/settle/boot-1/stdout")" = "settle: pong" ] || die "settle: $(cat "$o/settle/boot-1/stdout")"
+echo "settle inside a partition: healed at once"
 
 run "$o/cut" 1 --config "$o/b.toml" $parts -- python3 /guest/ahead.py main kill >/dev/null
 deadlock "$o/cut" "only a partition's start ahead"
 run "$o/quiet" 1 --config "$o/bk.toml" --faults kill --fault crash-gap-ms=2000..3000 -- python3 /guest/ahead.py main quiet >/dev/null
-deadlock "$o/quiet" "a kill after faults-done"
-echo "only a partition's start ahead, or a kill after faults-done: deadlock"
+deadlock "$o/quiet" "a kill after settle"
+echo "only a partition's start ahead, or a kill after settle: deadlock"

@@ -382,12 +382,12 @@ impl Sup {
     /// Nothing is runnable (`choose`): act on the machine kills and restarts that came due but
     /// waited (a restart after a kill in the same call), as at an idle jump. Whether one acted.
     pub(super) fn machine_actions_idle(&mut self) -> bool {
-        if self.machines.pending.is_empty() && self.phases.pending == 0 {
+        if self.machines.pending.is_empty() {
             return false;
         }
-        let before = (self.machines.pending.len(), self.phases.pending);
+        let before = self.machines.pending.len();
         let killed = self.machine_actions();
-        if killed.is_empty() && (self.machines.pending.len(), self.phases.pending) == before {
+        if killed.is_empty() && self.machines.pending.len() == before {
             return false;
         }
         self.wire_step();
@@ -442,14 +442,6 @@ impl Sup {
             }
         }
         self.machines.pending = later;
-        // The next phase's root, once the machine restarts queued before it have started.
-        if self.phases.pending != 0
-            && !creating
-            && killed.is_empty()
-            && self.machines.pending.is_empty()
-        {
-            self.phase_start();
-        }
         killed
     }
 
@@ -575,7 +567,7 @@ impl Sup {
             self.now() + gap,
             Event::Machine {
                 key: ev_key(EVK_MACHINE_KILL, k),
-                live: Live::AfterSetup,
+                live: Live::InWindow,
             },
         ));
     }

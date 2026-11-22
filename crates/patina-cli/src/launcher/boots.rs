@@ -204,18 +204,11 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
     let shm = shm_carrier()?;
     let mut plans = [0u64; proto::ctl::PLAN_FIELDS];
     let planner = planner(o)?;
-    let setup_cmd = matches!(o.cfg.setup, Some(crate::config::Setup::Command(_)));
-    let phase_cmds = setup_cmd || !o.cfg.finally.is_empty();
-    let mut phases = crate::result::PhaseTab::default();
+    let mut settle = [0u64; 2];
     let mut ready_ns = [0u64; proto::machine::MAX_MACHINES];
     loop {
         let bdir = out.join(crate::durability::check::boot_dir(k));
         cfg.boot = k;
-        // Every boot sets up again without faults: the command runs again, the
-        // program marks again.
-        if o.cfg.setup.is_some() {
-            cfg.fault_after_seq = u64::MAX;
-        }
         cfg.crash_enabled = (cfg.crash_kind != CRASH_NONE && k + 1 < max) as u64;
         let start = Start {
             k,
@@ -227,13 +220,6 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
             log_used,
             shm: shm.as_raw_fd(),
             planner: planner.clone(),
-            // Every boot starts with the setup command, without faults: a machine that
-            // crashed (which comes only in the main phase) boots without what setup started.
-            phase: match (phase_cmds, setup_cmd) {
-                (false, _) => 0,
-                (true, true) => proto::ctl::PHASE_SETUP,
-                (true, false) => proto::ctl::PHASE_MAIN,
-            },
         };
         let mut end = run_boot(o, &bdir, cpu, no_personality, &start)?;
         faults.add_boot(&bdir, k, &end);
@@ -258,10 +244,12 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
         tmpfs_full += end.tmpfs_full;
         shadow_bytes = shadow_bytes.max(end.shadow_bytes);
         sdk.add(end.sdk);
-        // Where the setup and the faults ended holds for the boots after them.
+        // Where the faults began and ended holds for the boots after them.
         cfg.fault_after_seq = end.fault_after_seq;
         cfg.fault_until_seq = end.fault_until_seq;
-        phases.add(k, &end.phases);
+        if end.settle[0] != 0 {
+            settle = end.settle;
+        }
         // Probes run at the first boot only: its times are the run's.
         if k == 0 {
             ready_ns = end.ready_ns;
@@ -349,28 +337,7 @@ pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<
                         .collect();
                     crate::result::ready_json(&names, &ready_ns)
                 }),
-                phases: {
-                    let setup = o.cfg.setup.as_ref().map(|s| match s {
-                        crate::config::Setup::Mark => "mark",
-                        crate::config::Setup::Command(_) => "command",
-                    });
-                    let done = cfg.fault_after_seq != u64::MAX;
-                    (setup.is_some() || !o.cfg.finally.is_empty() || cfg.fault_until_seq != 0).then(
-                        || crate::result::Phases {
-                            setup,
-                            setup_done: setup.is_some() && done,
-                            finally: !o.cfg.finally.is_empty(),
-                            tab: phases,
-                            faults_until_seq: cfg.fault_until_seq,
-                            after_crash: k > 0,
-                            setup_seq: if setup.is_some() && done {
-                                cfg.fault_after_seq
-                            } else {
-                                0
-                            },
-                        },
-                    )
-                },
+                settle: (settle[0] != 0).then_some(settle),
             });
         }
         let (kind, seq, vclock) = crash_detail(&end.verdict.detail)

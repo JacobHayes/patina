@@ -309,11 +309,6 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     if o.program.copied {
         progs.push((o.program.guest.clone(), o.program.host.clone()));
     }
-    for (what, p) in [("setup", &o.setup_program), ("finally", &o.finally_program)] {
-        if let Some(p) = p {
-            place_program(p, what, &c.mounts, &mut ops, &mut copies, &mut progs)?;
-        }
-    }
     let machines = if c.machines.is_empty() {
         None
     } else {
@@ -602,8 +597,6 @@ pub struct Start<'a> {
     pub shm: std::os::fd::RawFd,
     /// The run's plans, with load-time points (`launcher::plans`).
     pub planner: Option<std::sync::Arc<crate::launcher::plans::Planner>>,
-    /// The phase it starts in (`proto::ctl::PHASE_*`; 0: a run without phase commands).
-    pub phase: u64,
 }
 
 /// The descriptor `Start::shm` names, made once per run.
@@ -639,12 +632,12 @@ pub struct BootEnd {
     pub shadow_bytes: u64,
     /// The SDK's site table.
     pub sdk: crate::result::SdkReport,
-    /// `fault_after_seq` and `fault_until_seq` at the end: where the setup ended and the
-    /// faults ended.
+    /// `fault_after_seq` and `fault_until_seq` at the end: where the faults began (every
+    /// machine ready) and ended (`settle`).
     pub fault_after_seq: u64,
     pub fault_until_seq: u64,
-    /// The phases' table at the end (`proto::ctl::PhaseCtl`).
-    pub phases: crate::result::PhaseTab,
+    /// Where `settle` stopped the faults: sequence number and virtual time ns (0: no settle).
+    pub settle: [u64; 2],
     /// When each machine was first ready (`MachineTab::ready_ns`).
     pub ready_ns: [u64; proto::machine::MAX_MACHINES],
     /// Pause points and spin probes (`proto::ctl::SCHED_NAMES`).
@@ -1086,7 +1079,6 @@ pub fn run_boot(
     }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_STEP, Relaxed);
-    ctl.phases.phase.store(start.phase, Relaxed);
     if start.k > 0 {
         ctl.seq.store(start.seq0, Relaxed);
         ctl.vclock_ns.store(start.vclock0, Relaxed);
@@ -1121,38 +1113,6 @@ pub fn run_boot(
         argv.extend(["--copy".into(), cp.clone()]);
     }
     argv.extend(["--exe".into(), o.program.guest.clone()]);
-    // The setup command and the final check: each program's guest path, then its argv (argv[0]
-    // as the main command's).
-    let phase_cmds = [
-        (
-            "setup",
-            &o.setup_program,
-            match &c.setup {
-                Some(crate::config::Setup::Command(w)) => w.as_slice(),
-                _ => &[],
-            },
-        ),
-        ("finally", &o.finally_program, c.finally.as_slice()),
-    ];
-    for (what, p, w) in phase_cmds {
-        if let Some(p) = p {
-            argv.extend([format!("--{what}-exe"), p.guest.clone()]);
-            let a0 = if p.copied {
-                p.guest.clone()
-            } else {
-                w[0].clone()
-            };
-            for x in std::iter::once(&a0).chain(&w[1..]) {
-                argv.extend([format!("--{what}-arg"), x.clone()]);
-            }
-        }
-    }
-    if !c.finally.is_empty() {
-        // An ok status with a condition is judged after the run: it does not start the check.
-        for e in c.ok_exit.iter().filter(|e| e.when.is_empty()) {
-            argv.extend(["--ok".into(), e.status.to_string()]);
-        }
-    }
     for e in c.env.iter().chain(&c.main_env) {
         argv.extend(["--env".into(), e.clone()]);
     }
@@ -1483,7 +1443,7 @@ pub fn run_boot(
         sdk: crate::result::SdkReport::read(unsafe { proto::sdk::SdkTab::at(ctl_ptr) }),
         fault_after_seq: ctl.faults.cfg.fault_after_seq,
         fault_until_seq: ctl.faults.cfg.fault_until_seq,
-        phases: crate::result::PhaseTab::read(&ctl.phases),
+        settle: [ctl.settle.seq.load(Relaxed), ctl.settle.ns.load(Relaxed)],
         ready_ns: unsafe { proto::machine::MachineTab::at(ctl_ptr) }.ready_ns,
         sched: ctl.sched.read(),
         compute: ctl.compute.read(),

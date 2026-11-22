@@ -92,10 +92,6 @@ pub const NEVER: i64 = 2;
 pub const HDR_LEN: usize = 32;
 pub const LABEL_MAX: usize = 255;
 pub const TEXT_MAX: usize = 4096;
-/// The mark that ends setup: faults act from it (`crate::faults::FaultCfg::fault_after_seq`).
-pub const SETUP_COMPLETE: &[u8] = b"setup-complete";
-/// The mark after which no fault acts (`crate::faults::FaultCfg::fault_until_seq`).
-pub const FAULTS_DONE: &[u8] = b"faults-done";
 
 pub fn kind_name(k: u8) -> &'static str {
     match k {
@@ -317,8 +313,6 @@ pub struct SdkTab {
     pub nsites: u64,
     /// Sites not recorded because the table was full.
     pub dropped: u64,
-    /// Sequence number of the first `setup-complete` mark (0: none).
-    pub setup_seq: u64,
     /// The failed `always`: `label: detail` (`violation_len` 0: none), the label's length.
     pub violation_label: u64,
     pub violation_len: u64,

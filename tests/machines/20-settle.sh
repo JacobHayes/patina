@@ -5,8 +5,9 @@
 # fsync (`lazy`): the check after settle finds the puts a machine crash lost, nothing is injected
 # after the settle point, and the correct store is ok. A machine the seed took down with a
 # minute's down time boots at once at settle. A machine the script crashed, after the seed had
-# already taken it down, stays down and is not waited for. A machine the script paused is not
-# ready: `settle 5` ends the run liveness, stop settle, naming it. Replay identical.
+# already taken it down, stays down and is not waited for. Settle runs the machines' `ready`
+# probes again: a machine whose probe passed at boot and never passes again does not recover, and
+# `settle 5` ends the run liveness, stop settle, naming it. Replay identical.
 #@ tier=quick budget=40 slots=2
 . "$(dirname "$0")/lib.inc"
 o=$RUNS/20-settle; mkdir -p "$o"
@@ -14,7 +15,7 @@ for v in ok lazy; do
     rm -f "$o/$v.toml"
     conf "$o/$v.toml" a python3 /guest/phases.py serve
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/phases.py serve; else conf "$o/$v.toml" b python3 /guest/phases.py serve lazy; fi
-    driver "$o/$v.toml"
+    main_unfaulted "$o/$v.toml"
 done
 
 # after_settle DIR: the seed's faults and downs after the settle point (none expected), one per line.
@@ -76,10 +77,16 @@ grep -q 'crash b: .*os error 114' "$o/script/boot-1/stderr" || die "the script's
 [ "$(field "$o/script/result.json" machines.list.2.boots)" = 1 ] || die "b booted again: $(field "$o/script/result.json" machines.list.2)"
 echo "script's crash: b stayed down, not waited for"
 
-# A machine the script paused is never ready: liveness, stop settle, naming it.
-c=$(run "$o/stuck" 1 --config "$o/ok.toml" -- sh -c 'python3 /guest/phases.py work 2 a b && patina ctl pause a && patina ctl settle 5')
+# A machine whose probe passes once, at boot, and never again: it does not recover. Liveness,
+# stop settle, naming it.
+rm -f "$o/once.toml"
+conf "$o/once.toml" a python3 /guest/phases.py serve
+printf 'ready = ["sh", "-c", "test ! -e /tmp/probed && touch /tmp/probed"]\n' >>"$o/once.toml"
+conf "$o/once.toml" b python3 /guest/phases.py serve
+main_unfaulted "$o/once.toml"
+c=$(run "$o/stuck" 1 --config "$o/once.toml" -- sh -c 'python3 /guest/phases.py work 2 a b && patina ctl settle 5')
 m=$(field "$o/stuck/result.json" message)
-[ "$c/$(field "$o/stuck/result.json" stop)" = liveness/settle ] && grep -q 'machine a\b' <<<"$m" || die "paused a: $c: $m"
+[ "$c/$(field "$o/stuck/result.json" stop)" = liveness/settle ] && grep -q 'machine a\b' <<<"$m" || die "a's probe: $c: $m"
 "$PATINA" replay "$o/stuck" >"$o/replay.txt" 2>&1 || true  # exit 1: the run's finding
 grep -q '^identical' "$o/replay.txt" || die "replay: $(head -3 "$o/replay.txt")"
-echo "paused: $c (settle): $m; replay identical"
+echo "a probe that never passes again: $c (settle): $m; replay identical"

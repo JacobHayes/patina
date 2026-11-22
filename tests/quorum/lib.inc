@@ -17,7 +17,7 @@ q3_sweep() {
     _f=$1/$2.toml; rm -f "$_f"
     _b=""; [ "$2" = ok ] || _b=$2
     for _n in n1 n2 n3; do conf "$_f" "$_n" python3 /guest/q3.py "$_n" $_b; done
-    q3_traps "$_f"; driver "$_f"
+    q3_traps "$_f"; main_unfaulted "$_f"
     rm -rf "${1:?}/$2"
     _st=0
     timeout 600 "$PATINA" sweep --seeds 1..8 -j 4 --keep "$3" --out "$1/$2" --config "$_f" $Q3_FAULTS \
@@ -30,7 +30,7 @@ q3_sweep() {
 q3_bug() {
     _f=$1/$2.toml; rm -f "$_f"
     for _n in n1 n2 n3; do conf "$_f" "$_n" python3 /guest/q3.py "$_n" "$2"; done
-    q3_traps "$_f"; driver "$_f"
+    q3_traps "$_f"; main_unfaulted "$_f"
     _r=$(find_bug "$1" "$2" --config "$_f" $Q3_FAULTS -- python3 /guest/q3.py main "$Q3_SECONDS")
     _l=$(cat "$1/$2"/seed-*/boot-1/stdout 2>/dev/null | sed -n 's/^FAIL: \([a-z ]*\):.*/\1/p' | sort | uniq -c | tr -s ' \n' ' ')
     echo "$2:$_l; $_r"

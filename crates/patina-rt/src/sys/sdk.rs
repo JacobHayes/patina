@@ -175,12 +175,12 @@ fn control(ptr: u64, len: u64) -> i64 {
 }
 
 /// `settle`: ask the supervisor until every machine is ready, 100 ms of virtual time apart
-/// (`ctl::LIFE_SETTLE`; past the limit it ends the run). A signal the sleep would take ends the
-/// wait with `-EINTR`: the call may be made again.
+/// (`ctl::Op::Settle`; past the limit it ends the run). A signal the sleep would take ends the
+/// wait with `-EINTR`, so that its handler runs: the SDKs and `patina ctl` ask again.
 fn settle(limit_ns: u64) -> i64 {
     loop {
-        let a = [proto::ctl::LIFE_SETTLE, thread().seq, limit_ns, 0, 0, 0];
-        let r = crate::sup::call_sup(Op::Lifecycle, a).ret;
+        let a = [thread().seq, limit_ns, 0, 0, 0, 0];
+        let r = crate::sup::call_sup(Op::Settle, a).ret;
         if r != -e::EAGAIN {
             return r;
         }
@@ -188,40 +188,6 @@ fn settle(limit_ns: u64) -> i64 {
         if crate::sup::call_sup(Op::Sleep, [at, 0, 0, 0, 0, 0]).ret != 0 {
             return -e::EINTR;
         }
-    }
-}
-
-/// A mark. The lifecycle marks: `setup-complete` (the first) starts the faults of a run that
-/// declares the program marks it (`FaultCfg::setup_mark`), and ends any other run
-/// (`ctl::LIFE_SETUP_UNDECLARED`); `faults-done` (the first) ends every fault, the
-/// supervisor's too (`ctl::LIFE_FAULTS_DONE`).
-fn mark(label: &[u8]) {
-    let t = tab();
-    let seq = thread().seq;
-    let f = &ctl().faults.cfg;
-    if label == SETUP_COMPLETE && f.setup_mark == 0 {
-        crate::sup::call_sup(
-            Op::Lifecycle,
-            [proto::ctl::LIFE_SETUP_UNDECLARED, seq, 0, 0, 0, 0],
-        );
-        crate::sup::hang()
-    }
-    if label == SETUP_COMPLETE && t.setup_seq == 0 {
-        t.setup_seq = seq;
-        let p = core::ptr::addr_of!(f.fault_after_seq) as *mut u64;
-        unsafe {
-            if core::ptr::read_volatile(p) == u64::MAX {
-                core::ptr::write_volatile(p, seq);
-            }
-        }
-    }
-    if label == FAULTS_DONE && f.fault_until_seq == 0 {
-        let p = core::ptr::addr_of!(f.fault_until_seq) as *mut u64;
-        unsafe { core::ptr::write_volatile(p, seq) };
-        crate::sup::call_sup(
-            Op::Lifecycle,
-            [proto::ctl::LIFE_FAULTS_DONE, seq, 0, 0, 0, 0],
-        );
     }
 }
 
@@ -236,8 +202,8 @@ fn payload(ptr: u64, len: u64, buf: &mut [u8; MAX_LEN]) -> Result<Hdr, i64> {
     Hdr::parse(&buf[..], len as usize).ok_or(-e::EINVAL)
 }
 
-/// Fault points stay quiet outside the run's fault window (before the end of a declared
-/// setup, after the faults end).
+/// Fault points stay quiet outside the run's fault window (before every machine is ready,
+/// after `settle`).
 fn quiet() -> bool {
     !ctl().faults.cfg.in_window(thread().seq)
 }
@@ -260,7 +226,6 @@ fn serve(call: &mut dyn Call, op: u64, h: &Hdr, buf: &mut [u8], ptr: u64) -> i64
         return -e::EINVAL;
     }
     if op == OP_MARK {
-        mark(label);
         return 0;
     }
     let cfg = cfg();

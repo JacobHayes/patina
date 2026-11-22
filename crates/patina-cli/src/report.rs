@@ -486,8 +486,6 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
         "stdin",
         "fault-classes",
         "faults",
-        "setup",
-        "finally",
         "fs-model",
         "timeout",
         "allow-unmet",
@@ -556,14 +554,6 @@ pub fn rerun_command(run: &Value, seed: u64, dir: &Path) -> String {
             // Unconditional first (`config::normal`): the list reads back as written.
             let l: Vec<String> = cfg.ok_exit.iter().map(|x| x.to_string()).collect();
             flag("--ok-exit", l.join(","));
-        }
-        match &cfg.setup {
-            Some(crate::config::Setup::Mark) => flag("--setup", "mark".into()),
-            Some(crate::config::Setup::Command(w)) => flag("--setup", crate::check::join(w)),
-            None => {}
-        }
-        if !cfg.finally.is_empty() {
-            flag("--finally", crate::check::join(&cfg.finally));
         }
     }
     a.push("--".into());

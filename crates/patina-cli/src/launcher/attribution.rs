@@ -167,13 +167,6 @@ impl Faults {
             self.clock_reads.0 += n["clock_reads"].as_u64().unwrap_or(0);
             self.clock_reads.1 += n["clock_reads_offset"].as_u64().unwrap_or(0);
         }
-        // A run with a setup or a final check: only the chances in the main phase.
-        if end.machines.is_none() && end.phases.from_seq.iter().any(|s| *s != 0) {
-            let e = self.link_elig.get_or_insert([0; 5]);
-            for (a, b) in e.iter_mut().zip(end.phases.elig) {
-                *a += b;
-            }
-        }
         if let Some(f) = end.machines.as_ref().map(|n| &n["faulted_links"]) {
             if f.is_object() {
                 let e = self.link_elig.get_or_insert([0; 5]);

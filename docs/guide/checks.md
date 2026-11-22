@@ -131,16 +131,13 @@ every SDK call does nothing, so it can stay in production builds (`patina guide 
 |---|---|---|---|---|
 | must hold | `always!(c, "l", ...)` | `PATINA_ALWAYS(c, "l", d)` | `Always("l").Check(c, ...)` | `Always("l").check(c, d)` |
 | must hold in some run | `sometimes!(c, "l")` | `PATINA_SOMETIMES(c, "l")` | `Sometimes("l").Check(c)` | `Sometimes("l").check(c)` |
-| setup is done | `setup_complete()` | `patina_setup_complete()` | `SetupComplete()` | `setup_complete()` |
-| faults are done | `faults_done()` | `patina_faults_done()` | `FaultsDone()` | `faults_done()` |
 | a promise, for a checker | `mark(s)` | `patina_mark(s)` | `Mark(s)` | `mark(s)` |
 
 A failed `always` ends the run `violation`, named by its label. A `sometimes` or `reachable`
 that no run of a sweep met makes the sweep `vacuous`: put one where the interesting state is (a
-retry taken, a recovery run), so a sweep that never got there says so. Faults act only after
-`setup_complete()` (in a run that declares `setup = "mark"`) and before `faults_done()`: the
-setup is not under test and the final checks see a quiet system; `--setup` and `--finally` do
-the same with commands (`patina guide faults`). `mark("ack 17")` records a promise in the log;
+retry taken, a recovery run), so a sweep that never got there says so. A check of the live
+system goes after `control("settle")` (`patina ctl settle` in a script), which ends the faults
+and waits for the system to recover (`patina guide faults`). `mark("ack 17")` records a promise in the log;
 `examples/checks/synced-before-mark` then checks that its data was synced first.
 
 ## Prove the check can fail

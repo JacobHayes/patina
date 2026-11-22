@@ -11,7 +11,5 @@ fn every_call_is_inert_outside_patina() {
     assert_eq!(patina_dst::knob!("inert-knob", 7, 1, 100), 7);
     assert!(!patina_dst::delay!("inert-delay"));
     patina_dst::mark("inert-mark");
-    patina_dst::faults_done();
-    patina_dst::setup_complete();
     patina_dst::violation("inert-violation", "detail");
 }

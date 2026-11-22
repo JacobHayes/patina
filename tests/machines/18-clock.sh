@@ -17,7 +17,7 @@ o=$RUNS/18-clock; mkdir -p "$o"
 show="import time, os; g = time.time() - time.monotonic(); open('f', 'w').close(); print(round(g, 3), round(os.stat('f').st_mtime - time.time(), 1))"
 : >"$o/skew.toml"
 for n in a b; do conf "$o/skew.toml" "$n" python3 -c "$show"; done
-driver "$o/skew.toml"
+main_unfaulted "$o/skew.toml"
 verify_ok "$o/skew" 1 3 --config "$o/skew.toml" --fault clock-skew-ms=1000..1000 -- python3 -c "$show"
 r=$o/skew/run-0
 d=$(cut -d' ' -f1 "$r/boot-1/stdout")

@@ -469,7 +469,7 @@ impl Sup {
         tab(self.ctl).cfg
     }
 
-    /// In the fault window (after a declared setup, before the faults end): faults may act.
+    /// In the fault window (every machine ready, before `settle`): faults may act.
     pub(super) fn faults_on(&self) -> bool {
         self.ctl.faults.cfg.in_window(self.ctl.seq.load(Relaxed))
     }
@@ -1673,8 +1673,6 @@ impl Sup {
         if self.machine_count() > 0 {
             unsafe { proto::machine::MachineTab::at(self.ctl as *const Ctl as *mut u8) }.elig[k] +=
                 1;
-        } else if self.ctl.phases.phase.load(Relaxed) != 0 {
-            self.ctl.phases.elig[k].fetch_add(1, Relaxed);
         }
     }
 

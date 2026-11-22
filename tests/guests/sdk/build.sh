@@ -2,7 +2,7 @@
 # Build the SDK test guests into $1: sdk-c (sdk/c/patina.h), sdk-rs (crates/patina, built with
 # rustc alone), sdk-go (go/patina, stock Go, static, no cgo), and sdk-py.py with patina.py.
 # Each runs the same script of operations (see guest.c); sdk-extra shows fork, execve and
-# setup-complete once, in C.
+# a fault point before and after main's `ready` probe passes once, in C.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)

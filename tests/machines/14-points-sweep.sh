@@ -18,10 +18,10 @@
 o=$RUNS/14-points-sweep; mkdir -p "$o"
 for v in ok early; do
     rm -f "$o/$v.toml"
-    printf '[run]\nsetup = "mark"\n' >"$o/$v.toml"  # main marks setup-complete
-    conf "$o/$v.toml" a python3 /guest/ack2.py a
+    conf "$o/$v.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
-    driver "$o/$v.toml"
+    printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
+    main_unfaulted "$o/$v.toml"
 done
 D="python3 /guest/ack2.py main 4"
 S=4; [ "${CHECK_TIER:-}" != release ] || S=2
@@ -93,15 +93,14 @@ PY
 # A failure that a machine's first crash alone does not give is reduced to its later crash alone, at
 # its place in a first boot. Built, not searched for: b (`lazy init`) syncs its directory before
 # it serves its first request, on its first boot only, and appends a put only at its next
-# request, which a sends once it has the answer; main (`wait`) marks setup-complete, then
-# waits for b to answer. A crash at each of b's points (`crash-permille=1000@b`) in at most 3
+# request, which a sends once it has the answer; main (`wait`) starts once a and b serve (their
+# `ready` probes), then waits for b to answer. A crash at each of b's points (`crash-permille=1000@b`) in at most 3
 # boots crashes b twice, whatever the seed and host: first at that directory sync (harmless),
 # then at the create of `log` for put 1, which a has acknowledged.
 o2=$o/later; mkdir -p "$o2"; rm -f "$o2/c.toml"
-printf '[run]\nsetup = "mark"\n' >"$o2/c.toml"
-conf "$o2/c.toml" a python3 /guest/ack2.py a
+conf "$o2/c.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o2/c.toml"
 conf "$o2/c.toml" b python3 /guest/ack2.py b lazy init
-printf 'max-boots = 3\n' >>"$o2/c.toml"
+printf 'max-boots = 3\nready = "patina wait :7000"\n' >>"$o2/c.toml"
 s=$((RANDOM % 1000 + 1))
 [ "$(run "$o2/l" $s --config "$o2/c.toml" --fault crash-permille=1000@b -- python3 /guest/ack2.py main 2 wait)" = failure ] \
     || die "seed $s: the built run did not fail: $(field "$o2/l/result.json" message)"
@@ -141,9 +140,9 @@ assert [c["point"] for c in mc] == [n] and mc[0]["seq"] in mcreates, (mc, mcreat
 print("minimize: b's later crash alone: %s (b's first crash alone, at point %d, did not fail), from %s" % (m["to"], first, m["from"]))
 PY
 # faults = false: an unscoped crash leaves the machine out.
-rm -f "$o/free.toml"; printf '[run]\nsetup = "mark"\n' >"$o/free.toml"
-conf "$o/free.toml" a python3 /guest/ack2.py a
-conf "$o/free.toml" b python3 /guest/ack2.py b; printf 'faults = false\n' >>"$o/free.toml"; driver "$o/free.toml"
+rm -f "$o/free.toml"
+conf "$o/free.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o/free.toml"
+conf "$o/free.toml" b python3 /guest/ack2.py b; printf 'faults = false\nready = "patina wait :7000"\n' >>"$o/free.toml"; main_unfaulted "$o/free.toml"
 run_ok "$o/free" 1 --config "$o/free.toml" --fault crash-permille=300 -- $D
 python3 -I - "$o/free/result.json" <<'PY' || die "faults = false"
 import json, sys

@@ -160,8 +160,7 @@ fn call(
     r
 }
 
-/// A named point in the run's log, any `&str` (not declared ahead): `mark("ack 17")`;
-/// `setup-complete` (in a run that declares `setup = "mark"`) and `faults-done` bound the faults.
+/// A named point in the run's log, any `&str` (not declared ahead): `mark("ack 17")`.
 pub fn mark(label: &str) {
     if state() & ON != 0 {
         call(OP_MARK, KIND_REACHABLE, false, label, b"", &mut 0, 0, 0);
@@ -176,9 +175,13 @@ pub fn control(words: &str) -> Result<(), i32> {
     if words.is_empty() || words.len() > TEXT_MAX {
         return Err(22);
     }
-    match sys(OP_CONTROL, words.as_ptr(), words.len()) {
-        r if r < 0 => Err(-r as i32),
-        _ => Ok(()),
+    loop {
+        // EINTR: a signal ended `settle`'s wait (its handler has run); ask again.
+        match sys(OP_CONTROL, words.as_ptr(), words.len()) {
+            -4 => continue,
+            r if r < 0 => return Err(-r as i32),
+            _ => return Ok(()),
+        }
     }
 }
 

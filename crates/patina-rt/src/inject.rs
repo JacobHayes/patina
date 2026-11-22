@@ -209,7 +209,7 @@ pub fn count_injected() {
         .store(c.stats.faults_injected.load(Relaxed) + 1, Relaxed);
 }
 
-/// Faults are active and the run is in its fault window (after setup, before `faults-done`).
+/// Faults are active and the run is in its fault window (every machine ready, before `settle`).
 pub fn active() -> bool {
     crate::state::faults().cfg.faults_active() && after_start()
 }
@@ -456,7 +456,7 @@ static SUB: path::Global<CrashSub> = path::Global::new(CrashSub { seq: 0, sub: 0
 /// the `Crash` record and kills every guest process (a machine's: that machine's, which it then
 /// restarts in the run). Never returns in that case. A point that does not fire changes
 /// nothing but the count, so a run's prefix is the same whatever the crash setting.
-/// The fault window (`setup-complete` to `faults-done`) is the run's.
+/// The fault window (every machine ready to `settle`) is the run's.
 pub fn crash_point() {
     let c = ctl();
     let f = crate::state::faults();

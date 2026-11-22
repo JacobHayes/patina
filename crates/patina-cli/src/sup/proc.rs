@@ -457,7 +457,7 @@ impl Sup {
         if pid == self.procs.main {
             self.ready_main_gone(word);
         }
-        if pid == self.procs.main && !self.phases.continuing {
+        if pid == self.procs.main {
             return; // the caller ends the run
         }
         if let Some(parent) = vfork_parent {
@@ -566,26 +566,13 @@ impl Sup {
         }
         self.process_died(pid, 128 + SIGKILL as i64, SIGKILL);
         if pid == self.procs.main {
-            // A phase's root killed outright: its end is recorded as an exit's is.
-            self.phase_end(0, SIGKILL as i64, 0);
             self.main_exit(128 + SIGKILL as i64, SIGKILL as i64);
         }
     }
 
-    /// The root of the run's last phase is gone: the run's verdict. After a final check it is
-    /// the main command's (the check's own end is in `PhaseCtl`, judged by the launcher).
+    /// Main's command is gone: the run's verdict.
     pub fn main_exit(&mut self, status: i64, sig: i64) -> ! {
         self.machines_stop();
-        let (status, sig) = match self.phases.main_word {
-            Some(w) if self.ctl.phases.phase.load(Relaxed) == PHASE_FINALLY => {
-                if w & 0x7f != 0 {
-                    (128 + (w & 0x7f), w & 0x7f)
-                } else {
-                    ((w >> 8) & 0xff, 0)
-                }
-            }
-            _ => (status, sig),
-        };
         let mut v = if sig != 0 {
             Verdict::new("failed", format!("killed by signal {sig}"))
         } else if status == 0 {

@@ -77,8 +77,9 @@ crash points: 80 of 328 tried
 
 Use it first for a crash window; keep plain crash sweeps for bugs that need variety across seeds
 (fault plans, a failed fsync at a chosen call). Seeds differ widely in their count of points:
-give large ones `--crash-points=N` or `--budget`. Points count only in the main command: give
-a setup with `--setup` (`patina guide faults`).
+give large ones `--crash-points=N` or `--budget`. Points count only while the faults act: a
+setup that should not be crashed finishes before a `ready` probe on main passes (`patina guide
+faults`).
 
 ## What survives a machine crash
 

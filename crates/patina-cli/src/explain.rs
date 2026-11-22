@@ -527,7 +527,7 @@ impl Story {
             if l.seq >= first
                 || !matches!(
                     l.kind,
-                    "fault" | "network" | "crash" | "machine" | "unsynced" | "phase"
+                    "fault" | "network" | "crash" | "machine" | "unsynced"
                 )
             {
                 continue;
@@ -1115,19 +1115,6 @@ impl Reader<'_> {
                     _ => return,
                 };
                 self.push(v, String::new(), "machine", text);
-            }
-            "phase" => {
-                self.end_turn();
-                let how = match v["signal"].as_u64() {
-                    Some(sig) => format!("killed by signal {sig}"),
-                    None => format!("exits {}", u(v, "exit")),
-                };
-                let next = match s(v, "next") {
-                    "" => String::new(),
-                    n => format!("; the {n} command starts"),
-                };
-                let text = format!("PHASE the {} command {how}{next}", s(v, "ended"));
-                self.push(v, String::new(), "phase", text);
             }
             "mark" => {
                 self.turn(v);

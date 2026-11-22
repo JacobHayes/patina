@@ -227,47 +227,16 @@ pub struct Ctl {
     pub compute: ComputeStats,
     /// `patina debug`'s stop (`Config::debug`).
     pub debug: DebugCtl,
-    /// The run's phases (`--setup`, `--finally`).
-    pub phases: PhaseCtl,
+    /// Where `patina ctl settle` stopped the faults (`sup::settle`).
+    pub settle: SettleCtl,
 }
 
-/// The phases of a run with a setup command or a final check (`[run] setup`, `[run] finally`),
-/// indexed by `PHASE_* - 1`. The launcher writes the phase a boot starts in; the
-/// supervisor writes each phase's start and end (`sup::phase`). A run with neither has
-/// `phase` 0 and nothing here is consulted.
+/// Where `patina ctl settle` stopped the faults: its sequence number and virtual time (0: no
+/// settle).
 #[repr(C)]
-pub struct PhaseCtl {
-    /// The phase the run is in (`PHASE_*`; 0: a run without phase commands).
-    pub phase: AtomicU64,
-    /// Per phase: the sequence number of its start, and of its end (0: not reached).
-    pub from_seq: [AtomicU64; 3],
-    pub to_seq: [AtomicU64; 3],
-    /// Per phase: its command's wait status word plus 1 (0: it did not end by itself).
-    pub word: [AtomicU64; 3],
-    /// Per phase: where its output starts in the run's stdout and stderr (bytes).
-    pub out_off: [AtomicU64; 3],
-    pub err_off: [AtomicU64; 3],
-    /// In a run without machines, the link faults' chances inside the fault window, by
-    /// `machine::ELIG_*` (with machines: `MachineTab::elig`).
-    pub elig: [AtomicU64; crate::machine::ELIG_N],
-    /// Where `settle` stopped the faults: its sequence number and virtual time (0: no settle).
-    pub settle_seq: AtomicU64,
-    pub settle_ns: AtomicU64,
-}
-
-/// `PhaseCtl::phase`.
-pub const PHASE_SETUP: u64 = 1;
-pub const PHASE_MAIN: u64 = 2;
-pub const PHASE_FINALLY: u64 = 3;
-/// A phase's name, as `result.json` and the logs say it.
-pub fn phase_name(p: u64) -> &'static str {
-    match p {
-        PHASE_SETUP => "setup",
-        PHASE_MAIN => "main",
-        PHASE_FINALLY => "finally",
-        0 => "none",
-        _ => "?",
-    }
+pub struct SettleCtl {
+    pub seq: AtomicU64,
+    pub ns: AtomicU64,
 }
 
 /// The stop of a debug session: whoever takes sequence number `Config::debug` (a guest thread
@@ -883,25 +852,17 @@ pub enum Op {
     /// whose start is queued, a kill of one that is down, which cancels its restart) or
     /// `-EAGAIN` (a start past `machine::BOOTS_MAX` boots).
     Machine = 66,
-    /// A lifecycle mark that the supervisor acts on (`crate::sdk::SETUP_COMPLETE`,
-    /// `crate::sdk::FAULTS_DONE`): [`LIFE_*`, the mark's sequence number].
-    /// `LIFE_SETUP_UNDECLARED`: the program marked `setup-complete` in a run that does not
-    /// declare `[run] setup = "mark"`: the run ends here (never answered).
-    /// `LIFE_FAULTS_DONE`: no fault acts after the mark; the seed's partitions in force heal
-    /// and its pauses in force end now. Reply 0.
-    /// `LIFE_SETTLE` [_, _, limit ns] (`patina ctl settle`, from main): the first call ends the
-    /// faults as `faults-done` does and boots at once every machine the seed took down. Reply
-    /// 0 once every machine the script did not take down is ready, `-EAGAIN` before that (the
-    /// runtime asks again 100 ms of virtual time later); past the limit the run ends
-    /// `liveness`, stop `settle` (never answered).
-    Lifecycle = 67,
+    /// `patina ctl settle` (`crate::machine::Control::Settle`, from main): [the call's
+    /// sequence number, limit ns]. The first call ends the faults from its sequence
+    /// number on, ends the seed's partitions and pauses in force, boots at once every machine
+    /// the seed took down and runs the machines' `ready` probes again. Reply 0 once every
+    /// machine the script did not take down is ready, `-EAGAIN` before that (the runtime asks
+    /// again 100 ms of virtual time later); past the limit the run ends `liveness`, stop
+    /// `settle` (never answered).
+    Settle = 67,
 }
 
-/// `Op::Lifecycle`'s first argument.
-pub const LIFE_SETUP_UNDECLARED: u64 = 1;
-pub const LIFE_FAULTS_DONE: u64 = 2;
-pub const LIFE_SETTLE: u64 = 3;
-/// How long the runtime waits between a `LIFE_SETTLE` answered `-EAGAIN` and the next.
+/// How long the runtime waits between an `Op::Settle` answered `-EAGAIN` and the next.
 pub const SETTLE_POLL_NS: u64 = 100_000_000;
 
 /// Network wire requests. Socket indexes are `vino - VINO_BASE`.
@@ -1040,7 +1001,7 @@ impl Op {
             MapsSync,
             ShadowReclaim,
             Machine,
-            Lifecycle,
+            Settle,
         ];
         ALL.iter().copied().find(|o| *o as u32 == v)
     }
@@ -1090,7 +1051,7 @@ impl Op {
             MapsSync => "MapsSync",
             ShadowReclaim => "ShadowReclaim",
             Machine => "Machine",
-            Lifecycle => "Lifecycle",
+            Settle => "Settle",
         }
     }
 }
@@ -1323,11 +1284,6 @@ pub const DEC_MACHINE_RESUME: u32 = 0x157;
 /// Machine [machine]'s realtime clock offset changed: [machine, boot, how (`proto::machine::CLK_*`), the
 /// change ns, the new offset ns (both two's complement), 0].
 pub const DEC_MACHINE_CLOCK: u32 = 0x158;
-
-/// A phase of the run ends (`--setup`, `--finally`; `sup::phase`): [the phase that ended
-/// (`PHASE_*`), its command's wait status word, the phase that starts (0: none, the run ends),
-/// 0, 0, 0]. Faults start after the setup's record and stop at the main command's.
-pub const DEC_PHASE: u32 = 0x159;
 
 /// Machine [machine]'s `ready` probe passed (`sup::ready`): [machine, 1 when every machine is
 /// now ready and the fault window opens here (0: machines still wait), 0, 0, 0, 0]. At boot,

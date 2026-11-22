@@ -15,7 +15,7 @@ pairs() {
     b=""; [ "$1" = ok ] || b=$1
     for n in n1 n2 n3; do conf "$f" "$n" python3 /guest/q3.py "$n" $b; done
     printf '[sweep]\ncrash-pairs = 3\n' >>"$f"
-    q3_traps "$f"; driver "$f"
+    q3_traps "$f"; main_unfaulted "$f"
     rm -rf "${o:?}/$1"; st=0
     # KEEP none is the test input PATINA_TEST_KEEP_NONE.
     k=$2; env $([ "$k" = none ] && echo PATINA_TEST_KEEP_NONE=1) timeout 300 "$PATINA" sweep --seeds 1..2 --crash-points=40 --faults crash -j 6 --keep "${k/none/fail}" \

@@ -25,7 +25,6 @@ each call site; Go and Python declare a site once and call its method:
 | knob | `knob!("l", d, lo, hi)` | `PATINA_KNOB("l", d, lo, hi)` | `Knob("l", d, lo, hi).Value()` | `Knob("l", d, lo, hi).value()` |
 | delay | `delay!("l", max)` | `PATINA_DELAY("l", ns)` | `Delay("l").Delay(ns)` | `Delay("l").delay(ns)` |
 | mark | `mark(s)` | `patina_mark(s)` | `Mark(s)` | `mark(s)` |
-| setup, faults done | `setup_complete()`, `faults_done()` | `patina_setup_complete()`, `patina_faults_done()` | `SetupComplete()`, `FaultsDone()` | `setup_complete()`, `faults_done()` |
 | control | `control(w)` | `patina_control(w)` | `Control(w)` | `control(w)` |
 | under Patina? | `is_simulated()` | `patina_is_simulated()` | `IsSimulated()` | `is_simulated()` |
 
@@ -56,9 +55,9 @@ if patina_dst::buggify!("batch-commit") && !ledger.is_empty() { /* the rare path
   **`delay`** sleeps a seed-chosen virtual time on drawn evaluations.
 - **`mark`** records a label in the run's log, in clear (`mark("ack 17")`): a checker reads it
   from `patina log events` to check a promise was backed (`patina guide checks`).
-  `setup_complete()` (in a run that declares `setup = "mark"`) and `faults_done()` bound when
-  faults act (`patina guide faults`).
-- **`control`** is a control call, as `patina ctl` (`patina guide machines`).
+- **`control`** is a control call, as `patina ctl` (`patina guide machines`). `control("settle")`
+  ends the seed's faults and returns once every machine has recovered (`patina guide faults`); a
+  signal that interrupts its wait is handled and the wait goes on.
 
 A label is the finding's name, so make it say what broke (`acked-records-kept`). A library's
 sites that a program does not reach would make its sweeps `vacuous`: give them a prefix and

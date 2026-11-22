@@ -370,7 +370,8 @@ func Mark(label string) {
 // Control makes a control call in a run with several machines, e.g. Control("partition a b"),
 // with the words of patina ctl: nil, or the errno Patina answered (EPERM outside main, ENOENT
 // for an unknown machine, EINVAL for other words, EALREADY or EAGAIN for a machine in the wrong
-// state), or ENOSYS outside Patina.
+// state), or ENOSYS outside Patina. Control("settle") ends the seed's faults and returns once
+// every machine is ready again; a signal that interrupts its wait does not end it.
 func Control(words string) error {
 	if get()&stOn == 0 {
 		return syscall.ENOSYS
@@ -378,16 +379,15 @@ func Control(words string) error {
 	if len(words) == 0 || len(words) > textMax {
 		return syscall.EINVAL
 	}
-	if r := sys(opControl, []byte(words)); r < 0 {
-		return syscall.Errno(-r)
+	for {
+		r := sys(opControl, []byte(words))
+		// EINTR: a signal ended settle's wait; ask again.
+		if r == -int64(syscall.EINTR) {
+			continue
+		}
+		if r < 0 {
+			return syscall.Errno(-r)
+		}
+		return nil
 	}
-	return nil
 }
-
-// SetupComplete marks the end of setup: no fault acts before it. Only in a run that declares
-// it (setup = "mark" under [run], or --setup mark); in any other run it ends the run with an
-// error.
-func SetupComplete() { Mark("setup-complete") }
-
-// FaultsDone marks the end of the faults: none acts after it (call it before the final checks).
-func FaultsDone() { Mark("faults-done") }

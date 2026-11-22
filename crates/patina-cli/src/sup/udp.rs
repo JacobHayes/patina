@@ -556,15 +556,6 @@ impl Sup {
         if self.machine_count() > 0 {
             unsafe { proto::machine::MachineTab::at(self.ctl as *const Ctl as *mut u8) }.elig
                 [proto::machine::ELIG_DATAGRAMS] += 1;
-        } else if self
-            .ctl
-            .phases
-            .phase
-            .load(std::sync::atomic::Ordering::Relaxed)
-            != 0
-        {
-            self.ctl.phases.elig[proto::machine::ELIG_DATAGRAMS]
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 

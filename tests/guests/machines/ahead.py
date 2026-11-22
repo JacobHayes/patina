@@ -12,9 +12,9 @@
                              main and b, use control calls (`patina ctl`, `patina.control`),
                              send `ping` and wait for `pong`, with no deadline: only the heal
                              can deliver it
-    ahead.py main done     as heal, but mark faults-done at 3 s instead: the partition heals
-                             at once, and `pong` comes before the partition's own end
-    ahead.py main quiet    mark faults-done, then as kill: no kill comes
+    ahead.py main settle   as heal, but `control("settle")` at 3 s instead: the partition
+                             heals at once, and `pong` comes before the partition's own end
+    ahead.py main quiet    `control("settle")`, then as kill: no kill comes
 
 Each main prints one line and exits 0, or prints `FAIL: ...` and exits 1.
 """
@@ -69,7 +69,7 @@ def ended(c):
 
 def main(case):
     if case == "quiet":
-        patina.faults_done()
+        patina.control("settle")
         case = "kill"
     if case == "kill":
         c = connect()
@@ -97,16 +97,16 @@ def main(case):
         if line != "pong":
             raise SystemExit(f"FAIL: heal: {line!r}")
         print("heal: pong")
-    elif case == "done":
+    elif case == "settle":
         c = connect()
         time.sleep(3)
         t0 = time.monotonic()
-        patina.faults_done()
+        patina.control("settle")
         c.sendall(b"ping\n")
         line = c.makefile("r").readline().strip()
         if line != "pong" or time.monotonic() - t0 > 1:
-            raise SystemExit(f"FAIL: done: {line!r} after {time.monotonic() - t0:.1f} s")
-        print("done: pong")
+            raise SystemExit(f"FAIL: settle: {line!r} after {time.monotonic() - t0:.1f} s")
+        print("settle: pong")
     else:
         raise SystemExit(f"FAIL: unknown case {case}")
 

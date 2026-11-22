@@ -4,7 +4,7 @@
 //! closed (`FaultCfg::fault_after_seq` at its maximum, set by the launcher from the
 //! configuration: known before the first instruction). At boot, once every machine's first
 //! process has started, the supervisor starts one runner per probe on the probe's machine
-//! (main's forked as a phase's root is, another's by the keeper in the machine's view), a guest
+//! (main's forked as main's command is, another's by the keeper in the machine's view), a guest
 //! process (`crate::ready::runner`) that runs the probe every 100 ms of virtual time until it
 //! exits 0, then exits 0 itself: its end makes its machine ready. A machine without a probe is
 //! ready when it starts. While a machine other than main waits, main's first thread is frozen
@@ -14,10 +14,11 @@
 //! not passed 60 s of virtual time after boot, ends the run `error`, stop `ready`: the faults
 //! never began. Probes start at the first boot; a runner killed before its machine is ready
 //! (with the machine, by a script's `kill`, or alone) starts again once the machine is up, so
-//! its probe keeps polling. Everything here is in the turn's order.
+//! its probe keeps polling. `patina ctl settle` runs every other machine's probe again
+//! (`Ready::again`) and returns once each has passed. Everything here is in the turn's order.
 
 use super::link::{ev_key, EVK_READY};
-use super::phase::Cmd;
+use super::root::Cmd;
 use super::sched::{Event, EventId, Live};
 use super::{Sup, Verdict};
 use proto::ctl::*;
@@ -33,6 +34,10 @@ pub struct Ready {
     pub words: Vec<Vec<String>>,
     /// Machines whose probe has not passed (bit `k`).
     waiting: u64,
+    /// Machines whose probe `settle` runs again and which has not passed again (bit `k`).
+    pub again: u64,
+    /// `settle` was answered 0: every later call is a no-op.
+    pub settled: bool,
     /// Each machine's runner while it runs (0: none).
     runner: [i32; MAX_MACHINES],
     /// The slot of a runner whose `Hello` is awaited (`proc::hello`, `machines::boot_hello`).
@@ -148,6 +153,8 @@ impl Sup {
         self.ready.runner[k] = 0;
         if word == 0 && self.ready_waits(k) {
             self.machine_ready(k);
+        } else if word == 0 {
+            self.ready.again &= !(1 << k);
         } else if word & 0x7f != 0 && (k == 0 || self.machine_is_up(k)) {
             self.ready_queue(k);
         }
@@ -156,14 +163,14 @@ impl Sup {
     /// Machine `k` waits and its runner is gone: start one again where nothing in flight can
     /// be disturbed (`machine_actions`).
     pub(super) fn ready_queue(&mut self, k: usize) {
-        if self.ready_waits(k) && self.ready.runner[k] == 0 {
+        if self.probe_due(k) && self.ready.runner[k] == 0 {
             self.machines.pending.push_back((EVK_READY, k));
         }
     }
 
     /// The runner queued by `ready_queue`, if its machine still waits, is up and has none.
     pub(super) fn ready_again(&mut self, k: usize) {
-        if self.ready_waits(k) && self.ready.runner[k] == 0 && (k == 0 || self.machine_is_up(k)) {
+        if self.probe_due(k) && self.ready.runner[k] == 0 && (k == 0 || self.machine_is_up(k)) {
             self.ready_start(k);
         }
     }
@@ -218,6 +225,24 @@ impl Sup {
     /// Whether machine `k` has a probe that has not passed.
     pub(super) fn ready_waits(&self, k: usize) -> bool {
         k < MAX_MACHINES && self.ready.waiting >> k & 1 != 0
+    }
+
+    /// Whether machine `k`'s probe must still pass: at boot, or again for `settle`.
+    fn probe_due(&self, k: usize) -> bool {
+        k < MAX_MACHINES && (self.ready.waiting | self.ready.again) >> k & 1 != 0
+    }
+
+    /// `settle` began: every machine but main with a probe runs it again, now if it is up,
+    /// else when it boots (`machines::start_machine`).
+    pub(super) fn ready_again_all(&mut self) {
+        for k in 1..self.machine_count() {
+            if self.ready.probe(k).is_some() {
+                self.ready.again |= 1 << k;
+                if self.machine_is_up(k) {
+                    self.ready_queue(k);
+                }
+            }
+        }
     }
 
     /// The deadline came (`EVK_READY`): a machine still waiting ends the run, the first

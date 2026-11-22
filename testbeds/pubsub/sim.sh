@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build pubsub and sweep it under Patina (the program marks the end of its setup). Fails if
+# Build pubsub and sweep it under Patina (the faults wait for every subscriber to register: the
+# program creates a file that main's `ready` probe waits for). Fails if
 # the clean program has a finding or saw no fault, or if a planted bug is not found in the
 # seed range.
 #   SEEDS=N (200)  JOBS=N (8)  OUT=DIR (/tmp/pubsub-sim)  PATINA=path (patina on PATH)
@@ -12,6 +13,7 @@ OUT=${OUT:-${TMPDIR:-/tmp}/pubsub-sim}
 cargo build --release --quiet
 bin=$(cd "${CARGO_TARGET_DIR:-target}/release" && pwd)/pubsub
 mkdir -p "$OUT"
+printf '[machine.main]\nready = "test -e /tmp/pubsub-ready"\n' >"$OUT/patina.toml"
 fail=0
 
 # leg NAME EXPECT [patina options] -- [pubsub options]
@@ -21,7 +23,7 @@ leg() {
     shift 2
     dir=$OUT/$name
     rm -rf "${dir:?}"
-    "$PATINA" sweep --setup mark --seeds "1..$SEEDS" -j "$JOBS" --keep fail --out "$dir" "$@" >"$dir.log" 2>&1 || true
+    "$PATINA" sweep --config "$OUT/patina.toml" --seeds "1..$SEEDS" -j "$JOBS" --keep fail --out "$dir" "$@" >"$dir.log" 2>&1 || true
     if [ ! -f "$dir/report.json" ]; then
         echo "FAIL $name: no report, see $dir.log"; fail=1; return
     fi
@@ -47,9 +49,13 @@ leg() {
 }
 
 net="--fault net-delay-ms=0..40 --fault net-chunk-max=16..4096"
+r="--ready-file /tmp/pubsub-ready"
 # shellcheck disable=SC2086
-leg clean clean $net -- "$bin"
-leg lost-wakeup "failure exit: PUBSUB_FAILURE not-converged" -- "$bin" --bug lost-wakeup --timeout-secs 10
-leg drop-read-remainder "always: seq-gap" -- "$bin" --bug drop-read-remainder
-leg stale-timeout "always: liveness-timeout" -- "$bin" --bug stale-timeout
+leg clean clean $net -- "$bin" $r
+# shellcheck disable=SC2086
+leg lost-wakeup "failure exit: PUBSUB_FAILURE not-converged" -- "$bin" $r --bug lost-wakeup --timeout-secs 10
+# shellcheck disable=SC2086
+leg drop-read-remainder "always: seq-gap" -- "$bin" $r --bug drop-read-remainder
+# shellcheck disable=SC2086
+leg stale-timeout "always: liveness-timeout" -- "$bin" $r --bug stale-timeout
 exit $fail

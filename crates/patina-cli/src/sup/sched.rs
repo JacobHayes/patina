@@ -66,7 +66,7 @@ pub enum Live {
     No,
     /// The seed's kill of a machine: while faults may act (`FaultCfg::in_window`), since outside
     /// the window it is only drawn again.
-    AfterSetup,
+    InWindow,
 }
 
 /// Identity of a scheduled event: (time, insertion number). Unique and totally ordered.

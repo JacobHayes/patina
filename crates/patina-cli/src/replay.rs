@@ -76,17 +76,7 @@ pub fn load(rundir: &Path) -> Res<(Config, Program)> {
             .map_err(|e| format!("{}: machine_programs: {e}", run_path.display()))?,
         None => vec![],
     };
-    // The setup command's program and the final check's.
-    let mut phases: Vec<Program> = vec![];
-    for k in ["setup_program", "finally_program"] {
-        if let Some(v) = run.get(k) {
-            phases.push(
-                serde_json::from_value(v.clone())
-                    .map_err(|e| format!("{}: {k}: {e}", run_path.display()))?,
-            );
-        }
-    }
-    for p in std::iter::once(&program).chain(&machines).chain(&phases) {
+    for p in std::iter::once(&program).chain(&machines) {
         let now = sha256_file(&p.host)
             .map_err(|e| format!("program {} is gone: {e}", p.host.display()))?;
         if now != p.sha256 {

@@ -16,10 +16,10 @@
 o=$RUNS/13-points; mkdir -p "$o"
 for v in ok early; do
     rm -f "$o/$v.toml"
-    printf '[run]\nsetup = "mark"\n' >"$o/$v.toml"  # main marks setup-complete
-    conf "$o/$v.toml" a python3 /guest/ack2.py a
+    conf "$o/$v.toml" a python3 /guest/ack2.py a; printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
     if [ $v = ok ]; then conf "$o/$v.toml" b python3 /guest/ack2.py b; else conf "$o/$v.toml" b python3 /guest/ack2.py b early; fi
-    driver "$o/$v.toml"
+    printf 'ready = "patina wait :7000"\n' >> "$o/$v.toml"
+    main_unfaulted "$o/$v.toml"
 done
 D="python3 /guest/ack2.py main 3"
 s=1
