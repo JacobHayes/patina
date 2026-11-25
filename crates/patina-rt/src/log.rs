@@ -72,10 +72,12 @@ pub fn append(rec: &Rec) {
     #[allow(unreachable_code)]
     let t0 = crate::profile::now_ns();
     let c = ctl();
-    if over_limit() {
+    let off = c.log_len.load(Relaxed);
+    let used = (off + c.oplog_len.load(Relaxed) + c.opdata_len.load(Relaxed))
+        .saturating_sub(c.log_exempt.load(Relaxed));
+    if used + REC_SIZE as u64 > c.config.log_limit {
         crate::sup::log_limit();
     }
-    let off = c.log_len.load(Relaxed);
     ensure(off + REC_SIZE as u64);
     unsafe {
         core::ptr::copy_nonoverlapping(
@@ -166,8 +168,7 @@ fn hash_keep(bufs: &[Out], args: &[u64; 6], ret: i64, mut keep: Option<&mut Kept
                     buf.n = 0;
                     let read = crate::guest::each(p, n as u64, |b| {
                         h.update(b);
-                        buf.b[buf.n..buf.n + b.len()].copy_from_slice(b);
-                        buf.n += b.len();
+                        let _ = buf.push(b);
                     });
                     if read.is_err() {
                         h.update(b"\0EFAULT");
@@ -240,9 +241,15 @@ pub fn trap(row: &Row, call: &dyn crate::trap::Call, ret: i64) {
     let nr = call.nr();
     // Only the registers the call reads (`proto::table::nargs`): the others are zero here, in
     // the record and for the hashes (a pointer the call ignores names nothing).
-    let args = &proto::table::nargs::used_args(nr, &call.guest_args());
+    let args = &proto::table::nargs::mask_args(call.live_mask(), &call.guest_args());
     let c = ctl();
-    if c.config.log_paths != 0 && row.group != proto::table::Group::Sdk {
+    let needs_paths = c.config.log_paths != 0
+        && !row.ins.is_empty()
+        && row.group != proto::table::Group::Sdk
+        && (row.ins.iter().any(|b| matches!(b.len, Len::CStr))
+            || nr == nr::EXECVE
+            || nr == nr::EXECVEAT);
+    if needs_paths {
         trap_paths(row, call, ret, args);
     } else {
         trap_plain(row, call, ret, args);
@@ -261,10 +268,15 @@ fn trap_plain(row: &Row, call: &dyn crate::trap::Call, ret: i64, args: &[u64; 6]
     // Inputs are read only when the kernel did not report the pointer bad.
     let in_hash = if row.group == proto::table::Group::Sdk {
         crate::sys::sdk::take_hash()
-    } else if ret == -e::EFAULT {
+    } else if row.ins.is_empty() || ret == -e::EFAULT {
         0
     } else {
         hash_bufs(row.ins, args, ret.max(0))
+    };
+    let out_hash = if row.outs.is_empty() || ret < 0 {
+        0
+    } else {
+        hash_bufs(row.outs, args, ret)
     };
     let rec = Rec {
         seq: ts.seq,
@@ -275,7 +287,7 @@ fn trap_plain(row: &Row, call: &dyn crate::trap::Call, ret: i64, args: &[u64; 6]
         nr: nr as u32,
         args: *args,
         ret,
-        out_hash: hash_bufs(row.outs, args, ret),
+        out_hash,
         in_hash,
     };
     append(&rec);
@@ -494,8 +506,7 @@ fn log_argv(argv: u64) {
         }
         buf.n = 0;
         let ok = crate::guest::each(p, n as u64, |b| {
-            buf.b[buf.n..buf.n + b.len()].copy_from_slice(b);
-            buf.n += b.len();
+            let _ = buf.push(b);
         });
         if ok.is_err() {
             return;

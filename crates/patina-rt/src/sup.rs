@@ -3,9 +3,12 @@
 use crate::raw::*;
 use crate::state::{ctl, thread};
 use core::sync::atomic::Ordering::*;
-use proto::ctl::{Op, Reply, Request};
+use proto::ctl::{
+    futex_bloom_mask, Op, Reply, Request, FAST_BASE, FAST_SOLO, IPC_READY, IPC_SLEEP, IPC_SPIN,
+    YIELD_OTHER,
+};
 
-unsafe fn post(op: Op, args: [u64; 6]) -> *mut proto::Slot {
+unsafe fn post(op: Op, args: [u64; 6], go_init: u32) -> *mut proto::Slot {
     let ts = thread();
     let c = ctl();
     let slot = c.slot(ts.slot as usize);
@@ -17,17 +20,137 @@ unsafe fn post(op: Op, args: [u64; 6]) -> *mut proto::Slot {
             args,
         },
     );
-    (*slot).go.store(0, SeqCst);
-    c.pending_slot.store(ts.slot, SeqCst);
-    c.sup_word.store(1, SeqCst);
-    futex_wake(&c.sup_word as *const _ as *const u32, 1);
+    (*slot).go.store(go_init, Relaxed);
+    c.pending_slot.store(ts.slot, Relaxed);
+    if c.sup_word.swap(IPC_READY, AcqRel) == IPC_SLEEP {
+        futex_wake(&c.sup_word as *const _ as *const u32, 1);
+    }
     slot
 }
 
+/// In-process fast path for self-picking `Op::Yield` (solo or multi-thread when the seeded pick
+/// selects the current thread) and zero-waiter `Op::FutexWake` (verified via `Ctl::futex_bloom`).
+/// Produces the exact same `RecKind::SupDecision` record, counters, and `SchedView` as the
+/// supervisor without waking or context-switching to it.
+#[inline]
+fn try_fast_sup(op: Op, args: [u64; 6]) -> Option<Reply> {
+    let c = ctl();
+    let fast = c.sup_fast.load(Relaxed);
+    if fast & FAST_BASE == 0 || c.config.debug != 0 {
+        return None;
+    }
+    let seq = c.seq.load(Relaxed) + 1;
+    match op {
+        Op::Yield => {
+            if fast & FAST_SOLO != 0 {
+                // Only eligible runnable thread: both Pick and PickOther choose `idx`.
+            } else if args[0] != YIELD_OTHER {
+                let eligible = c.view.runnable.load(Relaxed);
+                let pos = c.runnable_pos.load(Relaxed);
+                if eligible <= 1 || pos >= eligible {
+                    return None;
+                }
+                if proto::draw(c.config.seed, proto::Stream::Sched, seq) % eligible != pos {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        }
+        Op::FutexWake => {
+            let b = c.futex_bloom.load(Relaxed);
+            if b != 0 {
+                let m0 = futex_bloom_mask(args[0]);
+                if b & m0 == m0 {
+                    return None;
+                }
+                if args[3] != 0 {
+                    let m3 = futex_bloom_mask(args[3]);
+                    if b & m3 == m3 {
+                        return None;
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+    let now = c.vclock_ns.load(Relaxed);
+    if now > proto::layout::VCLOCK_BOOT_NS + c.config.vtime_limit_ns
+        || now >= c.next_deadline_ns.load(Relaxed)
+    {
+        return None;
+    }
+    if c.io.waiters.load(Relaxed) != 0 && c.io.gen.load(Relaxed) != c.io_synced_gen.load(Relaxed) {
+        return None;
+    }
+    let base = crate::state::ctl_base();
+    let shadows_reclaim = unsafe {
+        (*(base.add(proto::oplog::DUR_OFFSET) as *const proto::oplog::Dur))
+            .shadows
+            .reclaim
+    };
+    if shadows_reclaim != 0 {
+        return None;
+    }
+    let wt = unsafe { proto::wire::WireTab::at(base) };
+    if wt.dirty_n != 0 || wt.scan_all != 0 {
+        return None;
+    }
+    if crate::log::over_limit() {
+        return None;
+    }
+    if (seq & 1023) == 0 {
+        outside_check();
+    }
+    c.seq.store(seq, Relaxed);
+    let s = &c.stats.decisions;
+    s.store(s.load(Relaxed) + 1, Relaxed);
+    let idx = thread().slot as usize;
+    let rec = proto::rec::Rec {
+        seq,
+        vclock_ns: now,
+        slot: idx as u16,
+        kind: proto::RecKind::SupDecision as u8,
+        class: 0,
+        nr: op as u32,
+        args,
+        ret: idx as i64,
+        out_hash: 0,
+        in_hash: 0,
+    };
+    crate::log::append(&rec);
+    c.view.seq.store(seq, Relaxed);
+    Some(Reply { ret: 0, flags: 0 })
+}
+
 /// Give the turn to the supervisor with a request; return when it gives the turn back.
-/// Every request (in particular every park) first checks for real signals from outside.
+/// Every blocking/lifecycle request (and periodically for hot non-blocking ops) checks for
+/// real signals from outside.
 pub fn call_sup(op: Op, args: [u64; 6]) -> Reply {
-    outside_check();
+    if let Some(rep) = try_fast_sup(op, args) {
+        return rep;
+    }
+    let check = crate::state::config().debug != 0
+        || (ctl().seq.load(Relaxed) & 63) == 0
+        || matches!(
+            op,
+            Op::Hello
+                | Op::Sleep
+                | Op::FutexWait
+                | Op::Park
+                | Op::WaitPark
+                | Op::SigWait
+                | Op::SigSuspend
+                | Op::VforkStart
+                | Op::ProcExit
+                | Op::ThreadExit
+                | Op::Exec
+                | Op::Forked
+                | Op::Machine
+        );
+    if check {
+        outside_check();
+    }
     call_sup_raw(op, args)
 }
 
@@ -84,10 +207,47 @@ fn debugger_signals(set: u64) -> u64 {
 
 fn call_sup_raw(op: Op, args: [u64; 6]) -> Reply {
     let t0 = crate::profile::now_ns();
+    // Only spin on the guest CPU when this request will likely return the turn to the same
+    // thread. Blocking ops (or Yield with another runnable thread) yield the guest CPU right
+    // away so the next guest thread runs without contention.
+    let may_switch = matches!(
+        op,
+        Op::FutexWait
+            | Op::Sleep
+            | Op::Park
+            | Op::WaitPark
+            | Op::SigWait
+            | Op::SigSuspend
+            | Op::VforkStart
+    ) || (op == Op::Yield && ctl().view.runnable.load(Relaxed) > 1);
+    let spin_iters = if may_switch {
+        0
+    } else {
+        ctl().ipc_spin.load(Relaxed)
+    };
+    let go_init = if spin_iters > 0 { IPC_SPIN } else { IPC_SLEEP };
     let rep = unsafe {
-        let slot = post(op, args);
-        while (*slot).go.load(Acquire) == 0 {
-            futex_wait(&(*slot).go as *const _ as *const u32, 0);
+        let slot = post(op, args, go_init);
+        let mut state = (*slot).go.load(Acquire);
+        if state == IPC_SPIN {
+            for _ in 0..spin_iters {
+                core::hint::spin_loop();
+                state = (*slot).go.load(Acquire);
+                if state != IPC_SPIN {
+                    break;
+                }
+            }
+        }
+        while state != IPC_READY {
+            if state == IPC_SLEEP
+                || (*slot)
+                    .go
+                    .compare_exchange(IPC_SPIN, IPC_SLEEP, AcqRel, Acquire)
+                    .is_ok()
+            {
+                futex_wait(&(*slot).go as *const _ as *const u32, IPC_SLEEP);
+            }
+            state = (*slot).go.load(Acquire);
         }
         core::ptr::read_volatile(&(*slot).rep)
     };
@@ -98,7 +258,7 @@ fn call_sup_raw(op: Op, args: [u64; 6]) -> Reply {
 /// Send a request the supervisor never answers (exit); the caller exits right after.
 pub fn call_sup_noreply(op: Op, args: [u64; 6]) {
     unsafe {
-        post(op, args);
+        post(op, args, IPC_SLEEP);
     }
 }
 

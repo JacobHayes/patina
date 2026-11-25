@@ -97,22 +97,16 @@ impl Target {
         let s = &mut self.script;
         s.n = 0;
         if dirfd != AT_FDCWD && given.first() != Some(&b'/') {
-            for &c in b"/dev/fd/" {
-                s.b[s.n] = c;
-                s.n += 1;
-            }
-            s.n += path::fmt_dec(&mut s.b[s.n..], dirfd as u64);
+            s.push(b"/dev/fd/");
+            s.push_dec(dirfd as u64);
             if !given.is_empty() {
-                s.b[s.n] = b'/';
-                s.n += 1;
+                s.push_byte(b'/');
             }
         }
-        if s.n + given.len() >= s.b.len() {
+        if !s.push(given) {
             return Err(-e::ENAMETOOLONG);
         }
-        s.b[s.n..s.n + given.len()].copy_from_slice(given);
-        s.n += given.len();
-        s.b[s.n] = 0;
+        s.terminate();
         Ok(())
     }
 }
@@ -141,15 +135,15 @@ fn fd_path(fd: i64, out: &mut PathBuf) -> bool {
             nr::READLINKAT,
             crate::sys::fs::AT_FDCWD as u64,
             lp.as_ptr() as u64,
-            out.b.as_mut_ptr() as u64,
-            out.b.len() as u64 - 1,
+            out.as_mut_ptr() as u64,
+            out.cap() as u64 - 1,
         )
     };
     if r <= 0 {
         return false;
     }
     out.n = r as usize;
-    out.b[out.n] = 0;
+    out.terminate();
     true
 }
 
@@ -188,19 +182,19 @@ fn open_exec(dirfd: i64, p: &[u8], flags: u64) -> Result<i64, (i64, Why)> {
     }
     let fd = if empty {
         // The descriptor itself (fexecve): reopen it for reading through /proc/self/fd.
-        let mut lp = PathBuf::new();
+        let mut lp = [0u8; 32];
         let mut l = 0;
         for &c in b"/proc/self/fd/" {
-            lp.b[l] = c;
+            lp[l] = c;
             l += 1;
         }
-        l += path::fmt_dec(&mut lp.b[l..], dirfd as u64);
-        lp.b[l] = 0;
+        l += path::fmt_dec(&mut lp[l..], dirfd as u64);
+        lp[l] = 0;
         crate::fdlim::transient(|| unsafe {
             sc4(
                 nr::OPENAT,
                 AT_FDCWD as u64,
-                lp.b.as_ptr() as u64,
+                lp.as_ptr() as u64,
                 O_RDONLY_CLOEXEC,
                 0,
             )
@@ -260,18 +254,20 @@ fn check_elf(fd: i64, head: &[u8]) -> Result<(), (i64, Why)> {
             // PT_INTERP: the interpreter must exist (the kernel answers ENOENT otherwise).
             let mut ip = PathBuf::new();
             let n = (ph[4] as usize).min(BUF - 1);
-            unsafe {
+            let got = unsafe {
                 sc4(
                     nr::PREAD64,
                     fd as u64,
-                    ip.b.as_mut_ptr() as u64,
+                    ip.as_mut_ptr() as u64,
                     n as u64,
                     ph[1],
                 )
             };
-            ip.n = ip.b[..n].iter().position(|&c| c == 0).unwrap_or(n);
-            ip.b[ip.n] = 0;
-            let r = unsafe { sc4(nr::FACCESSAT2, AT_FDCWD as u64, ip.b.as_ptr() as u64, 0, 0) };
+            let got = if got > 0 { (got as usize).min(n) } else { 0 };
+            let raw = unsafe { core::slice::from_raw_parts(ip.as_ptr(), got) };
+            ip.n = raw.iter().position(|&c| c == 0).unwrap_or(got);
+            ip.terminate();
+            let r = unsafe { sc4(nr::FACCESSAT2, AT_FDCWD as u64, ip.as_ptr() as u64, 0, 0) };
             if r < 0 {
                 if r == -e::EACCES {
                     return Err((r, Why::Errno));
@@ -296,7 +292,7 @@ fn interp_image(ip: &PathBuf) -> Result<(), (i64, Why)> {
         sc4(
             nr::OPENAT,
             AT_FDCWD as u64,
-            ip.b.as_ptr() as u64,
+            ip.as_ptr() as u64,
             O_RDONLY_CLOEXEC,
             0,
         )
@@ -342,19 +338,16 @@ fn resolve_in(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<(),
     let mut fl = flags;
     // The policy on the first path (later ones are interpreter paths, checked the same way).
     let mut name = PathBuf::new();
-    if path.len() >= name.b.len() {
+    if !name.set(path) {
         return Err((-e::ENAMETOOLONG, Why::Errno));
     }
-    name.b[..path.len()].copy_from_slice(path);
-    name.b[path.len()] = 0;
-    name.n = path.len();
     // The interpreter one past the kernel's depth: opened, as the kernel does, then ELOOP.
     let mut last = false;
     loop {
         let mut norm = PathBuf::new();
-        let kind = path::classify(dfd, name.b.as_ptr() as u64, &mut norm);
+        let kind = path::classify(dfd, name.as_ptr() as u64, &mut norm);
         let fd = match kind {
-            Kind::Plain => match open_exec(dfd, &name.b[..=name.n], fl) {
+            Kind::Plain => match open_exec(dfd, name.as_bytes_with_nul(), fl) {
                 // An interpreter's name is not resolved before it is opened (the program's
                 // is, `resolve`): where its symbolic links lead is checked here.
                 Ok(fd) if t.depth > 0 && hidden_target(fd) => {
@@ -380,9 +373,8 @@ fn resolve_in(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<(),
             Kind::SelfExe => {
                 let gp = proc().guest_path();
                 let mut g = PathBuf::new();
-                g.b[..gp.len()].copy_from_slice(gp);
-                g.b[gp.len()] = 0;
-                open_exec(AT_FDCWD, &g.b[..=gp.len()], 0)?
+                g.set(gp);
+                open_exec(AT_FDCWD, g.as_bytes_with_nul(), 0)?
             }
             Kind::SelfFd(n) => open_exec(n, b"\0", AT_EMPTY_PATH)?,
             Kind::Hidden => {
@@ -434,10 +426,7 @@ fn resolve_in(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<(),
         if d == MAX_DEPTH {
             // The kernel opens this level's interpreter, then gives up.
             last = true;
-            let l = script.interp.len();
-            name.b[..l].copy_from_slice(script.interp);
-            name.b[l] = 0;
-            name.n = l;
+            name.set(script.interp);
             dfd = AT_FDCWD;
             fl = 0;
             continue;
@@ -447,14 +436,11 @@ fn resolve_in(dirfd: i64, path: &[u8], flags: u64, t: &mut Target) -> Result<(),
         t.has_arg[d] = script.arg.is_some();
         t.lens[d][1] = copy_into(&mut t.levels[d][1], script.arg.unwrap_or(b"")).map_err(long)?;
         if d == 0 {
-            t.set_script(dfd, &name.b[..name.n])
+            t.set_script(dfd, name.as_bytes())
                 .map_err(|r| (r, Why::NameTooLong))?;
         }
         t.depth += 1;
-        let l = script.interp.len();
-        name.b[..l].copy_from_slice(script.interp);
-        name.b[l] = 0;
-        name.n = l;
+        name.set(script.interp);
         dfd = AT_FDCWD;
         fl = 0;
     }
@@ -467,7 +453,7 @@ fn hidden_target(fd: i64) -> bool {
     let mut norm = PathBuf::new();
     fd_path(fd, &mut real)
         && matches!(
-            path::classify(AT_FDCWD, real.b.as_ptr() as u64, &mut norm),
+            path::classify(AT_FDCWD, real.as_ptr() as u64, &mut norm),
             Kind::Hidden
         )
 }
@@ -590,7 +576,7 @@ pub fn execve(call: &mut dyn Call) -> Action {
     let mut n = 0;
     v[n] = c"rt".as_ptr() as u64;
     n += 1;
-    v[n] = t.elf.b.as_ptr() as u64;
+    v[n] = t.elf.as_ptr() as u64;
     n += 1;
     t.prefix(|s| {
         v[n] = s.as_ptr() as u64;

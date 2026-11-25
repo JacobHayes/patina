@@ -60,12 +60,22 @@ impl Sup {
             close.push(FD_MACHINES);
         }
         let empty = c"";
+        let guest_cpu = self
+            .ctl
+            .guest_cpu
+            .load(std::sync::atomic::Ordering::Relaxed);
         let pid = unsafe { libc::fork() };
         if pid < 0 {
             self.finish(Verdict::new("infra", "fork failed"));
         }
         if pid == 0 {
             unsafe {
+                if guest_cpu != u64::MAX {
+                    let mut set: libc::cpu_set_t = std::mem::zeroed();
+                    libc::CPU_SET(guest_cpu as usize, &mut set);
+                    let _ =
+                        libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+                }
                 for fd in &close {
                     libc::close(*fd);
                 }

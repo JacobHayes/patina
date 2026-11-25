@@ -541,6 +541,7 @@ fn machine_layout(
         size: c.tmpfs_bytes,
         hide: vec![c.disk_path().into()],
         readonly,
+        guest_cpu: None,
     })
 }
 
@@ -1288,6 +1289,18 @@ pub fn run_boot(
     }
     let ctl = unsafe { Ctl::at(ctl_ptr) };
     ctl.log_cap.store(LOG_INIT, Relaxed);
+    let cpus = allowed_cpus();
+    let sup_cpu = if cpus.len() >= 2 {
+        let pos = cpus.iter().position(|&c| c == cpu).unwrap_or(0);
+        Some(cpus[(pos + cpus.len() / 2) % cpus.len()])
+    } else {
+        None
+    };
+    if let Some(sc) = sup_cpu {
+        ctl.guest_cpu.store(cpu as u64, Relaxed);
+        ctl.sup_cpu.store(sc as u64, Relaxed);
+        ctl.ipc_spin.store(1500, Relaxed);
+    }
     if start.k > 0 {
         ctl.seq.store(start.seq0, Relaxed);
         ctl.vclock_ns.store(start.vclock0, Relaxed);
@@ -1352,6 +1365,12 @@ pub fn run_boot(
     sup_args.extend(c.cmd[1..].iter().cloned());
     // As root, the user namespace is joined from a descriptor at FD_USERNS.
     let userns = userns()?;
+    let mut machines = lay.machines;
+    if sup_cpu.is_some() {
+        if let Some(m) = machines.as_mut() {
+            m.guest_cpu = Some(cpu);
+        }
+    }
     let spec = sandbox::Spec {
         ops: lay.ops,
         join_userns: userns.is_some(),
@@ -1360,7 +1379,7 @@ pub fn run_boot(
         argv: vec![],
         exe: None,
         after: sandbox::After::Sup { args: sup_args },
-        machines: lay.machines,
+        machines,
     };
     let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
     let mut etc_fds = vec![];
@@ -1436,6 +1455,9 @@ pub fn run_boot(
         }
         let mut set: libc::cpu_set_t = std::mem::zeroed();
         libc::CPU_SET(cpu, &mut set);
+        if let Some(sc) = sup_cpu {
+            libc::CPU_SET(sc, &mut set);
+        }
         if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -1555,6 +1577,13 @@ pub fn run_boot(
         }
     }
     drop(machine_stdio);
+    // Truncate preallocated oplog files back to their written lengths before any reader sees them.
+    opmeta
+        .set_len(ctl.oplog_len.load(Relaxed))
+        .map_err(|e| format!("truncate oplog.meta: {e}"))?;
+    opdata
+        .set_len(ctl.opdata_len.load(Relaxed))
+        .map_err(|e| format!("truncate oplog.data: {e}"))?;
     // Each machine's disks: their parts of the shared operation log (`machine/NAME/boot-K/`, K the
     // boot a disk began with).
     if !c.machines.is_empty() {

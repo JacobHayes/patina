@@ -375,6 +375,7 @@ pub static NARGS: [u8; NR_COUNT] = {
 };
 
 /// Bit `i` set: call `nr` reads argument `i`, given the values in `a`.
+#[inline]
 pub fn live(nr: u64, a: &[u64; 6]) -> u8 {
     let n = if (nr as usize) < NR_COUNT {
         NARGS[nr as usize]
@@ -386,16 +387,23 @@ pub fn live(nr: u64, a: &[u64; 6]) -> u8 {
     (((1u16 << n) - 1) as u8) & !dead(nr, a)
 }
 
+/// Mask `args` by a precomputed `live` bitmask (`live(nr, args)`).
+#[inline]
+pub fn mask_args(m: u8, args: &[u64; 6]) -> [u64; 6] {
+    [
+        if m & (1 << 0) != 0 { args[0] } else { 0 },
+        if m & (1 << 1) != 0 { args[1] } else { 0 },
+        if m & (1 << 2) != 0 { args[2] } else { 0 },
+        if m & (1 << 3) != 0 { args[3] } else { 0 },
+        if m & (1 << 4) != 0 { args[4] } else { 0 },
+        if m & (1 << 5) != 0 { args[5] } else { 0 },
+    ]
+}
+
 /// The arguments of call `nr` it reads (`live`); the rest are zero.
+#[inline]
 pub fn used_args(nr: u64, args: &[u64; 6]) -> [u64; 6] {
-    let m = live(nr, args);
-    let mut r = [0u64; 6];
-    for (i, v) in r.iter_mut().enumerate() {
-        if m & (1 << i) != 0 {
-            *v = args[i];
-        }
-    }
-    r
+    mask_args(live(nr, args), args)
 }
 
 const fn bit(i: usize) -> u8 {

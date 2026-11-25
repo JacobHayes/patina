@@ -329,28 +329,92 @@ pub enum Kind {
 }
 
 /// A path buffer on the caller's stack.
+///
+/// Backed by `MaybeUninit` so constructing one does not zero `PATH_MAX` bytes on every trap.
+/// Bytes `0..self.n` are initialised; call `terminate()` before passing `as_ptr()` as a C string.
 pub struct PathBuf {
-    pub b: [u8; PATH_MAX],
+    b: [core::mem::MaybeUninit<u8>; PATH_MAX],
     pub n: usize,
 }
 
 impl PathBuf {
+    #[inline]
     pub const fn new() -> PathBuf {
-        PathBuf {
-            b: [0; PATH_MAX],
-            n: 0,
+        let mut b = [core::mem::MaybeUninit::uninit(); PATH_MAX];
+        b[0] = core::mem::MaybeUninit::new(0);
+        PathBuf { b, n: 0 }
+    }
+    #[inline]
+    pub fn as_bytes(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.b.as_ptr() as *const u8, self.n) }
+    }
+    /// The bytes including the trailing NUL (`terminate()` must have been called).
+    #[inline]
+    pub fn as_bytes_with_nul(&self) -> &[u8] {
+        unsafe { core::slice::from_raw_parts(self.b.as_ptr() as *const u8, self.n + 1) }
+    }
+    #[inline]
+    pub fn as_ptr(&self) -> *const u8 {
+        self.b.as_ptr() as *const u8
+    }
+    #[inline]
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.b.as_mut_ptr() as *mut u8
+    }
+    #[inline]
+    pub const fn cap(&self) -> usize {
+        PATH_MAX
+    }
+    #[inline]
+    pub fn byte(&self, i: usize) -> u8 {
+        debug_assert!(i < self.n);
+        unsafe { self.b[i].assume_init() }
+    }
+    #[inline]
+    pub fn terminate(&mut self) {
+        if self.n < PATH_MAX {
+            self.b[self.n].write(0);
         }
     }
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.b[..self.n]
-    }
-    fn push(&mut self, s: &[u8]) -> bool {
+    #[inline]
+    pub fn push(&mut self, s: &[u8]) -> bool {
         if self.n + s.len() >= PATH_MAX {
             return false;
         }
-        self.b[self.n..self.n + s.len()].copy_from_slice(s);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                s.as_ptr(),
+                (self.b.as_mut_ptr() as *mut u8).add(self.n),
+                s.len(),
+            );
+        }
         self.n += s.len();
         true
+    }
+    #[inline]
+    pub fn push_byte(&mut self, c: u8) -> bool {
+        if self.n + 1 >= PATH_MAX {
+            return false;
+        }
+        self.b[self.n].write(c);
+        self.n += 1;
+        true
+    }
+    #[inline]
+    pub fn set(&mut self, s: &[u8]) -> bool {
+        self.n = 0;
+        if !self.push(s) {
+            self.terminate();
+            return false;
+        }
+        self.terminate();
+        true
+    }
+    #[inline]
+    pub fn push_dec(&mut self, v: u64) -> bool {
+        let mut t = [0u8; 20];
+        let l = fmt_dec(&mut t, v);
+        self.push(&t[..l])
     }
 }
 
@@ -359,7 +423,7 @@ const AT_FDCWD: i64 = -100;
 /// The real path of `dirfd` (or the working directory) by the runtime's own calls.
 fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
     let r = if dirfd == AT_FDCWD {
-        unsafe { sc2(nr::GETCWD, out.b.as_mut_ptr() as u64, PATH_MAX as u64) } // length incl. NUL
+        unsafe { sc2(nr::GETCWD, out.as_mut_ptr() as u64, PATH_MAX as u64) } // length incl. NUL
     } else {
         let mut lp = [0u8; 32];
         let mut l = 0;
@@ -374,7 +438,7 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
                 nr::READLINKAT,
                 AT_FDCWD as u64,
                 lp.as_ptr() as u64,
-                out.b.as_mut_ptr() as u64,
+                out.as_mut_ptr() as u64,
                 PATH_MAX as u64 - 1,
             )
         };
@@ -388,7 +452,8 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
         return false;
     }
     out.n = (r - 1) as usize;
-    out.n > 0 && out.b[0] == b'/'
+    out.terminate();
+    out.n > 0 && out.byte(0) == b'/'
 }
 
 pub fn fmt_dec(out: &mut [u8], mut v: u64) -> usize {
@@ -415,13 +480,14 @@ pub fn normalise(p: &[u8], out: &mut PathBuf) {
         match comp {
             b"" | b"." => {}
             b".." => {
-                while out.n > 0 && out.b[out.n - 1] != b'/' {
+                while out.n > 0 && out.byte(out.n - 1) != b'/' {
                     out.n -= 1;
                 }
                 out.n = out.n.saturating_sub(1);
             }
             c => {
                 if !(out.push(b"/") && out.push(c)) {
+                    out.terminate();
                     return;
                 }
             }
@@ -430,7 +496,7 @@ pub fn normalise(p: &[u8], out: &mut PathBuf) {
     if out.n == 0 {
         out.push(b"/");
     }
-    out.b[out.n] = 0;
+    out.terminate();
 }
 
 /// The normalised absolute path of `(dirfd, p)` whatever its form, or of the descriptor

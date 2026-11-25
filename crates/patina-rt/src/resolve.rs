@@ -133,8 +133,71 @@ pub struct Paths {
     pub logged: [u8; 2],
 }
 
+/// Quick check whether syscall `nr` takes any path argument (`path_args`).
+#[inline]
+pub fn has_paths(nr: u64) -> bool {
+    matches!(
+        nr,
+        nr::OPEN
+            | nr::OPENAT
+            | nr::OPENAT2
+            | nr::CREAT
+            | nr::STAT
+            | nr::ACCESS
+            | nr::CHDIR
+            | nr::GETXATTR
+            | nr::LISTXATTR
+            | nr::SETXATTR
+            | nr::REMOVEXATTR
+            | nr::STATFS
+            | nr::TRUNCATE
+            | nr::CHMOD
+            | nr::CHOWN
+            | nr::UTIME
+            | nr::UTIMES
+            | nr::EXECVE
+            | nr::LSTAT
+            | nr::READLINK
+            | nr::LGETXATTR
+            | nr::LLISTXATTR
+            | nr::LSETXATTR
+            | nr::LREMOVEXATTR
+            | nr::LCHOWN
+            | nr::MKDIR
+            | nr::MKNOD
+            | nr::UNLINK
+            | nr::RMDIR
+            | nr::NEWFSTATAT
+            | nr::STATX
+            | nr::READLINKAT
+            | nr::FACCESSAT
+            | nr::FCHMODAT
+            | nr::FUTIMESAT
+            | nr::FACCESSAT2
+            | nr::FCHMODAT2
+            | nr::UTIMENSAT
+            | nr::FCHOWNAT
+            | nr::EXECVEAT
+            | nr::SETXATTRAT
+            | nr::GETXATTRAT
+            | nr::LISTXATTRAT
+            | nr::REMOVEXATTRAT
+            | nr::MKDIRAT
+            | nr::MKNODAT
+            | nr::UNLINKAT
+            | nr::RENAME
+            | nr::LINK
+            | nr::SYMLINK
+            | nr::RENAMEAT
+            | nr::RENAMEAT2
+            | nr::LINKAT
+            | nr::SYMLINKAT
+    )
+}
+
 impl Paths {
     pub const NONE: u8 = u8::MAX;
+    #[inline]
     pub const fn new() -> Paths {
         Paths {
             bufs: [PathBuf::new(), PathBuf::new()],
@@ -155,6 +218,9 @@ impl Paths {
 /// the kernel would answer.
 pub fn prepare(call: &mut dyn Call) -> Result<(), i64> {
     let nr = call.nr();
+    if !has_paths(nr) {
+        return Ok(());
+    }
     let mut a = [0u64; 6];
     for (i, v) in a.iter_mut().enumerate() {
         *v = call.arg(i);
@@ -222,7 +288,7 @@ fn prepare_into(
                 if log {
                     paths.logged[k] = arg.pi as u8;
                 }
-                set[*ns] = (arg.pi, out.b.as_ptr() as u64);
+                set[*ns] = (arg.pi, out.as_ptr() as u64);
                 set[*ns + 1] = (arg.di.unwrap(), AT_FDCWD as u64);
                 *ns += 2;
                 continue;
@@ -250,7 +316,7 @@ fn prepare_into(
             }
             continue;
         }
-        set[*ns] = (arg.pi, out.b.as_ptr() as u64);
+        set[*ns] = (arg.pi, out.as_ptr() as u64);
         *ns += 1;
         if let Some(i) = arg.di {
             set[*ns] = (i, AT_FDCWD as u64);
@@ -374,7 +440,7 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
             if !push(out, j.as_bytes()) {
                 return Err(-e::ENAMETOOLONG);
             }
-            out.b[out.n] = 0;
+            out.terminate();
             return Ok(Resolved::Path);
         }
         return Ok(Resolved::Same);
@@ -384,18 +450,13 @@ fn resolve(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<Reso
 }
 
 fn push(b: &mut PathBuf, s: &[u8]) -> bool {
-    if b.n + s.len() >= PATH_MAX {
-        return false;
-    }
-    b.b[b.n..b.n + s.len()].copy_from_slice(s);
-    b.n += s.len();
-    true
+    b.push(s)
 }
 
 /// The real path of `dirfd` (or the working directory).
 fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
     let r = if dirfd == AT_FDCWD {
-        unsafe { sc2(nr::GETCWD, out.b.as_mut_ptr() as u64, PATH_MAX as u64) }
+        unsafe { sc2(nr::GETCWD, out.as_mut_ptr() as u64, PATH_MAX as u64) }
     } else {
         let mut lp = [0u8; 32];
         let pre = b"/proc/self/fd/";
@@ -407,7 +468,7 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
                 nr::READLINKAT,
                 AT_FDCWD as u64,
                 lp.as_ptr() as u64,
-                out.b.as_mut_ptr() as u64,
+                out.as_mut_ptr() as u64,
                 PATH_MAX as u64 - 1,
             )
         };
@@ -421,9 +482,10 @@ fn base_dir(dirfd: i64, out: &mut PathBuf) -> bool {
         return false;
     }
     out.n = (r - 1) as usize;
+    out.terminate();
     // A deleted directory reads as "... (deleted)", and a non-directory as what it is: both
     // are refused (the walk cannot start there).
-    out.n > 0 && out.b[0] == b'/' && !out.as_bytes().ends_with(b" (deleted)")
+    out.n > 0 && out.byte(0) == b'/' && !out.as_bytes().ends_with(b" (deleted)")
 }
 
 /// Under `/proc`, `/sys` or `/dev` (but not `/dev/shm`): the policy's own ground.
@@ -453,7 +515,7 @@ fn is_dir(p: &PathBuf) -> Result<bool, i64> {
         sc4(
             nr::NEWFSTATAT,
             AT_FDCWD as u64,
-            p.b.as_ptr() as u64,
+            p.as_ptr() as u64,
             st.as_mut_ptr() as u64,
             0,
         )
@@ -527,7 +589,7 @@ fn walk(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<(), i64
                 if out.n > 0 && !is_dir(&terminated(out))? {
                     return Err(-e::ENOTDIR);
                 }
-                while out.n > 0 && out.b[out.n - 1] != b'/' {
+                while out.n > 0 && out.byte(out.n - 1) != b'/' {
                     out.n -= 1;
                 }
                 out.n = out.n.saturating_sub(1);
@@ -572,12 +634,12 @@ fn walk(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<(), i64
         if last && !follow && !trailing_slash {
             break;
         }
-        out.b[out.n] = 0;
+        out.terminate();
         let r = unsafe {
             sc4(
                 nr::READLINKAT,
                 AT_FDCWD as u64,
-                out.b.as_ptr() as u64,
+                out.as_ptr() as u64,
                 t.as_mut_ptr() as u64,
                 PATH_MAX as u64,
             )
@@ -621,13 +683,13 @@ fn walk(dirfd: i64, s: &[u8], follow: bool, out: &mut PathBuf) -> Result<(), i64
     } else if s.ends_with(b"/") && !out.as_bytes().ends_with(b"/") && !push(out, b"/") {
         return Err(-e::ENAMETOOLONG);
     }
-    out.b[out.n] = 0;
+    out.terminate();
     Ok(())
 }
 
 fn terminated(p: &PathBuf) -> PathBuf {
     let mut q = PathBuf::new();
     push(&mut q, p.as_bytes());
-    q.b[q.n] = 0;
+    q.terminate();
     q
 }

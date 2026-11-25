@@ -19,12 +19,17 @@ impl Sched {
 
     /// Wake up to `n` waiters on `key` whose bitset intersects `bitset`, oldest first.
     pub fn futex_wake(&mut self, key: FutexKey, n: u64, bitset: u32) -> u64 {
+        if n == 0 {
+            return 0;
+        }
         let Some(q) = self.futex.get(&key) else {
             return 0;
         };
-        let mut wake = vec![];
+        let mut stack = [0usize; 16];
+        let mut count = 0usize;
+        let mut extra: Vec<usize> = Vec::new();
         for &s in q {
-            if wake.len() as u64 >= n {
+            if (count + extra.len()) as u64 >= n {
                 break;
             }
             if let super::sched::State::Parked {
@@ -33,14 +38,22 @@ impl Sched {
             } = self.entries[s].state
             {
                 if b & bitset != 0 {
-                    wake.push(s);
+                    if count < stack.len() {
+                        stack[count] = s;
+                        count += 1;
+                    } else {
+                        extra.push(s);
+                    }
                 }
             }
         }
-        for &s in &wake {
+        for &s in &stack[..count] {
             self.make_runnable(s, WakeReason::Woken);
         }
-        wake.len() as u64
+        for &s in &extra {
+            self.make_runnable(s, WakeReason::Woken);
+        }
+        (count + extra.len()) as u64
     }
 
     /// Wake up to `n_wake` waiters on `from`, then move up to `n_requeue` of the

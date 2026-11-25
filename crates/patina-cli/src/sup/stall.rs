@@ -86,6 +86,14 @@ impl Watchdog {
         self.next_probe = PROBE_FIRST_NS;
     }
 
+    /// A request arrived: defer reading the wall clock until a poll actually fires.
+    #[inline]
+    pub fn note_request(&mut self) {
+        self.last_progress = 0;
+        self.base = None;
+        self.next_probe = PROBE_FIRST_NS;
+    }
+
     /// No request for a slice: decide what to do about the holder.
     pub fn poll(
         &mut self,
@@ -96,8 +104,8 @@ impl Watchdog {
     ) -> Poll {
         let tid = holder.as_ref().map(|h| h.tid).unwrap_or(0);
         let cpu = thread_cpu_ns(tid);
-        if seq != self.last_seq {
-            // Progress without a request (a trap that did not yield).
+        if self.last_progress == 0 || seq != self.last_seq {
+            // Progress since the last poll (a request, or a trap that did not yield).
             self.last_seq = seq;
             self.last_progress = now;
             self.base = cpu.map(|c| (tid, c));

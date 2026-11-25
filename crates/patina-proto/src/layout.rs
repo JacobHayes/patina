@@ -7,6 +7,15 @@ pub const RT_BASE: u64 = 0x6000_0000_0000;
 /// Runtime private memory: alternate stacks (aligned to their size), tables. Bump allocated.
 pub const RT_PRIV: u64 = 0x6010_0000_0000;
 pub const RT_PRIV_SIZE: u64 = 0x10_0000_0000;
+/// Fixed shared mappings of the durability operation log (`FD_OPLOG_META`, `FD_OPLOG_DATA`) in
+/// the unused upper half of `RT_PRIV` (below `spin.rs`'s top-of-region scratch area).
+pub const OPLOG_META_BASE: u64 = 0x6018_0000_0000;
+pub const OPLOG_META_MAX: u64 = 0x4_0000_0000; // 16 GiB
+pub const OPLOG_DATA_BASE: u64 = 0x601c_0000_0000;
+pub const OPLOG_DATA_MAX: u64 = 0x3_0000_0000; // 12 GiB
+const _: () = assert!(OPLOG_META_BASE >= RT_PRIV + RT_PRIV_SIZE / 2);
+const _: () = assert!(OPLOG_META_BASE + OPLOG_META_MAX <= OPLOG_DATA_BASE);
+const _: () = assert!(OPLOG_DATA_BASE + OPLOG_DATA_MAX <= RT_PRIV + RT_PRIV_SIZE - (1 << 30));
 /// The control region's published address: an inaccessible reservation, so that a program's
 /// load or store there faults and is named (`HE_CONTAINMENT`). The runtime reaches the region
 /// (a shared memfd) through a read-write mapping at a page in `[CTL_RW_LO, CTL_RW_LO +

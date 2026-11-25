@@ -95,6 +95,15 @@ fn ioctl(call: &mut dyn Call) -> Action {
             set_class(call, Class::Pass);
             Action::Return(clone_like(call, req))
         }
+        FIONBIO => {
+            set_class(call, Class::Pass);
+            let r = raw(call);
+            host_check(call, r);
+            if r >= 0 {
+                crate::state::bump_fl_gen();
+            }
+            Action::Return(r)
+        }
         // The requests listed with their arguments (`proto::table::cmds::IOCTL`): FIONREAD,
         // FIONBIO, FIONCLEX, FIOCLEX, and those whose answer is a function of the file on a
         // sandbox or host-stable filesystem.
@@ -188,6 +197,7 @@ fn clone_like(call: &mut dyn Call, req: u64) -> i64 {
 fn copy_marks(src: i64, dst: i64) {
     let u = proc().is_urandom(src);
     proc().set_urandom(dst, u);
+    proc().copy_fd_meta(src, dst);
     super::procfs::mark(dst, super::procfs::kind_of(src));
     super::timerfd::copy(src, dst);
     super::signalfd::copy(src, dst);
@@ -197,6 +207,7 @@ fn copy_marks(src: i64, dst: i64) {
 fn clear_marks(fd: i64) {
     crate::oplog::closed_fd(fd);
     proc().set_urandom(fd, false);
+    proc().clear_fd_meta(fd);
     super::procfs::mark(fd, None);
     super::timerfd::closed(fd);
     super::signalfd::closed(fd);
@@ -263,7 +274,19 @@ fn fcntl(call: &mut dyn Call) -> i64 {
         }
         F_SETFL if arg & O_DIRECT != 0 => {
             crate::path::refuse(b"O_DIRECT");
-            unsafe { sc3(nr::FCNTL, fd, cmd, arg & !O_DIRECT) }
+            let r = unsafe { sc3(nr::FCNTL, fd, cmd, arg & !O_DIRECT) };
+            if r >= 0 {
+                crate::state::bump_fl_gen();
+            }
+            r
+        }
+        F_SETFL => {
+            let r = raw(call);
+            host_check(call, r);
+            if r >= 0 {
+                crate::state::bump_fl_gen();
+            }
+            r
         }
         F_SETLKW | F_OFD_SETLKW | F_SETLK | F_OFD_SETLK => super::lock::fcntl_lock(fd, cmd, arg),
         F_SETPIPE_SZ => {
@@ -333,19 +356,41 @@ fn wrote_ex(
     if len <= 0 {
         return 0;
     }
-    let Some(st) = fstat_raw(fd) else { return 0 };
-    if let Some(k) = vkey(&st) {
-        vtime::touch(k, Which::Modify);
-        vtime::names(k, if st.nlink() == 0 { st.dev() } else { 0 });
+    let p = proc();
+    let meta = match p.get_fd_meta(fd) {
+        Some(m) if m.flags & crate::state::META_STAT != 0 => m,
+        _ => {
+            let Some(st) = fstat_raw(fd) else { return 0 };
+            let work = crate::path::is_work(st.dev());
+            let vk = vkey(&st);
+            p.cache_fd_stat(fd, &st, work, vk)
+        }
+    };
+    if meta.flags & crate::state::META_HAS_VKEY != 0 {
+        let nlink_pos = meta.flags & crate::state::META_NLINK_POS != 0
+            && meta.unlink_gen == ctl().unlink_gen.load(Relaxed);
+        if nlink_pos {
+            vtime::touch_with_names(meta.vkey, Which::Modify, 0);
+        } else if let Some(st) = fstat_raw(fd) {
+            if st.nlink() == 0 {
+                vtime::touch_with_names(meta.vkey, Which::Modify, meta.dev);
+            } else {
+                vtime::touch_with_names(meta.vkey, Which::Modify, 0);
+                p.mark_fd_nlink_pos(fd);
+            }
+        } else {
+            vtime::touch(meta.vkey, Which::Modify);
+        }
     }
-    if !crate::path::is_work(st.dev()) {
+    if meta.flags & crate::state::META_WORK == 0 {
         return 0;
     }
     // O_APPEND (or RWF_APPEND): the kernel wrote at the end, whatever the offset said.
     const O_APPEND: i64 = 0o2000;
-    let fl = unsafe { sc2(nr::FCNTL, fd as u64, 3) }; // F_GETFL
+    let fl = p.get_fd_fl(fd);
     let append = append.unwrap_or(fl >= 0 && fl & O_APPEND != 0);
     let offset = if append {
+        let Some(st) = fstat_raw(fd) else { return 0 };
         Some((st.size() as i64 - len).max(0) as u64)
     } else {
         offset
@@ -355,15 +400,15 @@ fn wrote_ex(
         (pos - len).max(0) as u64
     });
     after_mutation(&FsOp::Write {
-        ino: st.ino(),
+        ino: meta.ino,
         offset: off,
         len: len as u64,
         data,
     });
-    if st.mode() & 0o170000 != 0o100000 {
+    if meta.flags & crate::state::META_REG == 0 {
         return 0;
     }
-    crate::oplog::write_sync(call_nr, fd, st.ino(), fl.max(0), rwf)
+    crate::oplog::write_sync(call_nr, fd, meta.ino, fl.max(0), rwf)
 }
 
 const RWF_NOWAIT: u64 = 8;
@@ -545,6 +590,8 @@ pub fn handle(call: &mut dyn Call) -> Action {
             if r == 0 {
                 clear_marks(fd);
                 super::io::bump(); // the last close of an end changes its peer; locks are released
+            } else if r != -e::EBADF {
+                proc().clear_fd_meta(fd);
             }
             r
         }
@@ -564,25 +611,33 @@ pub fn handle(call: &mut dyn Call) -> Action {
         nr::PREADV2 if super::signalfd::is_signalfd(fd) && call.arg(3) as i64 == -1 => {
             super::signalfd::read(call, fd)
         }
-        nr::READ | nr::WRITE | nr::READV | nr::WRITEV | nr::PREADV2 | nr::PWRITEV2
-            if super::io::can_block(super::io::kind_of(fd)) =>
-        {
-            let k = super::io::kind_of(fd).unwrap();
-            match (k, super::inet::wire_idx(fd)) {
-                (super::io::Kind::Sock, Some(i)) => super::inet::rw(call, i),
-                _ => super::io::rw(call, k),
+        nr::READ | nr::WRITE | nr::READV | nr::WRITEV | nr::PREADV2 | nr::PWRITEV2 => {
+            if let Some(k) = super::io::kind_of(fd).filter(|&k| super::io::can_block(Some(k))) {
+                match (k, super::inet::wire_idx(fd)) {
+                    (super::io::Kind::Sock, Some(i)) => super::inet::rw(call, i),
+                    _ => super::io::rw(call, k),
+                }
+            } else {
+                match call.nr() {
+                    nr::WRITE | nr::WRITEV | nr::PWRITEV2 => write_call(call),
+                    nr::PREADV2 => {
+                        let mut a = args(call);
+                        a[5] &= !RWF_NOWAIT;
+                        let r = unsafe { sc6(nr::PREADV2, a[0], a[1], a[2], a[3], a[4], a[5]) };
+                        host_check(call, r);
+                        r
+                    }
+                    _ => {
+                        let r = raw(call);
+                        host_check(call, r);
+                        r
+                    }
+                }
             }
         }
-        nr::WRITE | nr::PWRITE64 | nr::WRITEV | nr::PWRITEV | nr::PWRITEV2 => write_call(call),
+        nr::PWRITE64 | nr::PWRITEV => write_call(call),
         nr::COPY_FILE_RANGE | nr::SENDFILE => file_to_file(call),
         nr::SPLICE | nr::TEE | nr::VMSPLICE => splice(call),
-        nr::PREADV2 => {
-            let mut a = args(call);
-            a[5] &= !RWF_NOWAIT;
-            let r = unsafe { sc6(nr::PREADV2, a[0], a[1], a[2], a[3], a[4], a[5]) };
-            host_check(call, r);
-            r
-        }
         nr::FSYNC | nr::FDATASYNC | nr::SYNC | nr::SYNCFS | nr::SYNC_FILE_RANGE => sync_call(call),
         nr::FTRUNCATE
         | nr::FALLOCATE
@@ -620,9 +675,7 @@ pub fn handle(call: &mut dyn Call) -> Action {
             host_check(call, r);
             r
         }
-        nr::READ
-        | nr::PREAD64
-        | nr::READV
+        nr::PREAD64
         | nr::PREADV
         | nr::LSEEK
         | nr::FGETXATTR

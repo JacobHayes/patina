@@ -111,22 +111,30 @@ pub static ARCH_PRCTL: &[Cmd] = &[
     c(0x1004, U64),   // ARCH_GET_GS
 ];
 
+#[inline]
 fn find(list: &'static [Cmd], cmd: u64) -> Option<&'static Cmd> {
     list.iter().find(|e| e.cmd == cmd)
 }
 
+#[inline]
 pub fn fcntl(cmd: u64) -> Option<&'static Cmd> {
-    find(FCNTL, cmd)
+    if cmd <= 7 {
+        return Some(&FCNTL[cmd as usize]);
+    }
+    find(&FCNTL[8..], cmd)
 }
 
+#[inline]
 pub fn ioctl(request: u64) -> Option<&'static Cmd> {
     find(IOCTL, request & 0xffff_ffff)
 }
 
+#[inline]
 pub fn prctl(option: u64) -> Option<&'static Cmd> {
     find(PRCTL, option)
 }
 
+#[inline]
 pub fn arch_prctl(code: u64) -> Option<&'static Cmd> {
     find(ARCH_PRCTL, code)
 }
@@ -134,6 +142,7 @@ pub fn arch_prctl(code: u64) -> Option<&'static Cmd> {
 /// For a multiplexed call: the index of its first argument after the command, and what the
 /// command (`a`'s selecting argument) reads from there on. `None` for other calls; an empty
 /// list for a command the runtime does not let through (it reads nothing more).
+#[inline]
 pub fn args_of(nr: u64, a: &[u64; 6]) -> Option<(usize, &'static [Use])> {
     let (first, e) = match nr {
         super::nr::FCNTL => (2, fcntl(a[1])),

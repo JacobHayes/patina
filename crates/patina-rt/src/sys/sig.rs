@@ -840,8 +840,8 @@ pub fn charge_delivery(sig: u64, handler: u64, f: u64, info: &SigInfo, pc: u64, 
 pub fn trap_exit(frame: &mut Frame, call: Option<(u64, u64)>) {
     let ts = thread();
     let call = call.filter(|&(n, _)| n != nr::RT_SIGRETURN);
-    if let Some(code) = call.and_then(|(n, _)| restart_class(n)) {
-        if frame.ret() == -e::EINTR {
+    if frame.ret() == -e::EINTR {
+        if let Some(code) = call.and_then(|(n, _)| restart_class(n)) {
             frame.set_ret(-code);
         }
     }

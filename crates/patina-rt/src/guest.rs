@@ -69,14 +69,25 @@ pub fn in_region(p: u64, n: u64) -> bool {
 /// the kernel does for a pointer into a hole: the region reads as address space nothing is
 /// mapped in. Structures the runtime cannot read here (a pointer into a real hole) are left
 /// to the kernel, which answers for them itself.
+#[inline]
 pub fn names_runtime(row: &proto::table::Row, a: &[u64; 6]) -> bool {
-    let live = proto::table::nargs::live(row.nr as u64, a);
+    if row.ins.is_empty() && row.outs.is_empty() && row.refs.is_empty() {
+        return false;
+    }
+    names_runtime_live(row, a, proto::table::nargs::live(row.nr as u64, a))
+}
+
+#[inline]
+pub fn names_runtime_live(row: &proto::table::Row, a: &[u64; 6], live: u8) -> bool {
+    if row.ins.is_empty() && row.outs.is_empty() && row.refs.is_empty() {
+        return false;
+    }
     row.ins
         .iter()
         .chain(row.outs)
         .chain(row.refs)
         .filter(|b| live & (1 << b.arg) != 0)
-        .any(|b| reaches(row.nr as u64, b, a))
+        .any(|b| reaches(row.nr as u64, b, a, live))
 }
 
 /// After a park, before the call is attempted again: does the call being served still name
@@ -90,7 +101,7 @@ pub fn still_clear() -> bool {
     !names_runtime(row, &ts.call_args)
 }
 
-fn reaches(nr: u64, b: &proto::table::Out, a: &[u64; 6]) -> bool {
+fn reaches(nr: u64, b: &proto::table::Out, a: &[u64; 6], live: u8) -> bool {
     use proto::table::Len::*;
     let p = a[b.arg as usize];
     match b.len {
@@ -128,7 +139,6 @@ fn reaches(nr: u64, b: &proto::table::Out, a: &[u64; 6]) -> bool {
                     && get::<[u64; 2]>(p).is_ok_and(|[v, n]| in_region(v, n & 0xffff_ffff)))
         }
         Command => proto::table::cmds::args_of(nr, a).is_some_and(|(first, uses)| {
-            let live = proto::table::nargs::live(nr, a);
             uses.iter()
                 .enumerate()
                 .filter(|(i, _)| live & (1 << (first + i)) != 0)
@@ -187,7 +197,7 @@ fn str_reaches(p: u64, max: u64) -> bool {
     if p == 0 {
         return false;
     }
-    let mut buf = [0u8; 256];
+    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); 256];
     let mut n = 0u64;
     while n < max {
         let at = p + n;
@@ -195,8 +205,10 @@ fn str_reaches(p: u64, max: u64) -> bool {
         if in_region(at, k as u64) {
             return true;
         }
-        if read(at, &mut buf[..k]).is_err() || buf[..k].contains(&0) {
-            return false;
+        match read_uninit(at, &mut buf[..k]) {
+            Err(_) => return false,
+            Ok(s) if s.contains(&0) => return false,
+            Ok(_) => {}
         }
         n += k as u64;
     }
@@ -291,14 +303,23 @@ pub fn get<T: Copy>(p: u64) -> Result<T, i64> {
     Ok(unsafe { v.assume_init() })
 }
 
+/// Read guest bytes at `p` into an uninitialised buffer, returning the initialised slice.
+#[inline]
+fn read_uninit(p: u64, buf: &mut [core::mem::MaybeUninit<u8>]) -> Result<&[u8], i64> {
+    match copy(buf.as_mut_ptr() as u64, p, buf.len(), p) {
+        0 => Ok(unsafe { core::slice::from_raw_parts(buf.as_ptr() as *const u8, buf.len()) }),
+        r => Err(r),
+    }
+}
+
 /// Feed `n` guest bytes at `p` to `f` in pieces; `Err` at the first piece that cannot be read.
 pub fn each(p: u64, n: u64, mut f: impl FnMut(&[u8])) -> Result<(), i64> {
-    let mut buf = [0u8; 512];
+    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); 512];
     let mut off = 0u64;
     while off < n {
         let k = (n - off).min(buf.len() as u64) as usize;
-        read(p + off, &mut buf[..k])?;
-        f(&buf[..k]);
+        let s = read_uninit(p + off, &mut buf[..k])?;
+        f(s);
         off += k as u64;
     }
     Ok(())
@@ -308,12 +329,12 @@ pub fn each(p: u64, n: u64, mut f: impl FnMut(&[u8])) -> Result<(), i64> {
 /// (`Ok(max)` if it does not), reading no further than its page boundaries require.
 pub fn strlen(p: u64, max: usize) -> Result<usize, i64> {
     let mut n = 0usize;
-    let mut buf = [0u8; 256];
+    let mut buf = [core::mem::MaybeUninit::<u8>::uninit(); 256];
     while n < max {
         let a = p + n as u64;
         let k = ((4096 - (a & 4095)) as usize).min(buf.len()).min(max - n);
-        read(a, &mut buf[..k])?;
-        if let Some(i) = buf[..k].iter().position(|&c| c == 0) {
+        let s = read_uninit(a, &mut buf[..k])?;
+        if let Some(i) = s.iter().position(|&c| c == 0) {
             return Ok(n + i);
         }
         n += k;

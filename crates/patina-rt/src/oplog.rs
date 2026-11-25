@@ -39,6 +39,106 @@ fn pwrite_all(fd: i32, mut off: u64, s: &[u8]) {
     }
 }
 
+fn grow_oplog(fd: i32, cap: u64, newcap: u64) {
+    let r = unsafe { sc4(nr::FALLOCATE, fd as u64, 0, cap, newcap - cap) };
+    if r == -e::EOPNOTSUPP {
+        let r = unsafe { sc2(nr::FTRUNCATE, fd as u64, newcap) };
+        if r < 0 {
+            crate::sup::log_write_failed(r, nr::FTRUNCATE);
+        }
+    } else if r < 0 {
+        crate::sup::log_write_failed(r, nr::FALLOCATE);
+    }
+}
+
+fn ensure_oplog(
+    fd: i32,
+    base: u64,
+    mapped: &mut u64,
+    cap_atom: &core::sync::atomic::AtomicU64,
+    max: u64,
+    need: u64,
+) -> bool {
+    if need > max {
+        return false;
+    }
+    if need <= *mapped {
+        return true;
+    }
+    let cap = cap_atom.load(Relaxed);
+    let mut newcap = cap;
+    while need > newcap {
+        let next = (newcap + log_grow_step(newcap)).min(max);
+        if next <= newcap {
+            return false;
+        }
+        newcap = next;
+    }
+    if newcap > cap {
+        grow_oplog(fd, cap, newcap);
+        cap_atom.store(newcap, Relaxed);
+    }
+    let r = unsafe {
+        sc6(
+            nr::MMAP,
+            base + *mapped,
+            newcap - *mapped,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED | MAP_FIXED_NOREPLACE,
+            fd as u64,
+            *mapped,
+        )
+    };
+    if r as u64 != base + *mapped {
+        crate::sup::host_error(r, nr::MMAP, proto::ctl::HE_SYSCALL);
+    }
+    *mapped = newcap;
+    true
+}
+
+#[inline]
+fn ensure_meta(need: u64) -> bool {
+    let c = ctl();
+    let p = crate::state::proc();
+    ensure_oplog(
+        FD_OPLOG_META,
+        OPLOG_META_BASE,
+        &mut p.oplog_mapped,
+        &c.oplog_cap,
+        OPLOG_META_MAX,
+        need,
+    )
+}
+
+#[inline]
+fn ensure_data(need: u64) -> bool {
+    let c = ctl();
+    let p = crate::state::proc();
+    ensure_oplog(
+        FD_OPLOG_DATA,
+        OPLOG_DATA_BASE,
+        &mut p.opdata_mapped,
+        &c.opdata_cap,
+        OPLOG_DATA_MAX,
+        need,
+    )
+}
+
+#[inline]
+fn write_data_bytes(off: u64, s: &[u8]) {
+    if s.is_empty() {
+        return;
+    }
+    let end = off + s.len() as u64;
+    if ensure_data(end) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(s.as_ptr(), (OPLOG_DATA_BASE + off) as *mut u8, s.len());
+        }
+    } else {
+        pwrite_all(FD_OPLOG_DATA, off, s);
+    }
+}
+
 /// Where a record's bytes come from.
 enum Src<'a> {
     Bytes(&'a [u8]),
@@ -94,19 +194,31 @@ fn put_data(pieces: &[Src], len_hint: u64) -> (u64, u64) {
     for p in pieces {
         match *p {
             Src::Bytes(b) => {
-                pwrite_all(FD_OPLOG_DATA, off, b);
+                write_data_bytes(off, b);
                 off += b.len() as u64;
             }
             Src::Iov(iov, cnt) => {
                 let mut left = len_hint;
+                let mapped = ensure_data(off + left);
                 for i in 0..cnt.min(1024) {
                     if left == 0 {
                         break;
                     }
                     let [base, l] = unsafe { *((iov + i * 16) as *const [u64; 2]) };
                     let n = l.min(left);
-                    let s = unsafe { core::slice::from_raw_parts(base as *const u8, n as usize) };
-                    pwrite_all(FD_OPLOG_DATA, off, s);
+                    if mapped {
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                base as *const u8,
+                                (OPLOG_DATA_BASE + off) as *mut u8,
+                                n as usize,
+                            );
+                        }
+                    } else {
+                        let s =
+                            unsafe { core::slice::from_raw_parts(base as *const u8, n as usize) };
+                        pwrite_all(FD_OPLOG_DATA, off, s);
+                    }
                     off += n;
                     left -= n;
                 }
@@ -115,20 +227,35 @@ fn put_data(pieces: &[Src], len_hint: u64) -> (u64, u64) {
                 // The target of copy_file_range/sendfile is often write-only: read it back
                 // through a read-only descriptor of the same file (via /proc/self/fd).
                 let rfd = readable(fd);
-                let mut buf = [0u8; 16384];
                 let mut left = len_hint;
                 let mut at = foff;
-                while left > 0 {
-                    let n = left.min(buf.len() as u64);
-                    let r = unsafe { sc4(nr::PREAD64, rfd as u64, buf.as_mut_ptr() as u64, n, at) };
-                    if r <= 0 {
-                        // The file is shorter than the call said: record zeros (cannot happen on tmpfs).
-                        crate::sup::host_error(r, nr::PREAD64, proto::ctl::HE_RUNTIME_ASSERT);
+                if ensure_data(off + left) {
+                    while left > 0 {
+                        let r = unsafe {
+                            sc4(nr::PREAD64, rfd as u64, OPLOG_DATA_BASE + off, left, at)
+                        };
+                        if r <= 0 {
+                            crate::sup::host_error(r, nr::PREAD64, proto::ctl::HE_RUNTIME_ASSERT);
+                        }
+                        off += r as u64;
+                        at += r as u64;
+                        left -= r as u64;
                     }
-                    pwrite_all(FD_OPLOG_DATA, off, &buf[..r as usize]);
-                    off += r as u64;
-                    at += r as u64;
-                    left -= r as u64;
+                } else {
+                    let mut buf = [0u8; 16384];
+                    while left > 0 {
+                        let n = left.min(buf.len() as u64);
+                        let r =
+                            unsafe { sc4(nr::PREAD64, rfd as u64, buf.as_mut_ptr() as u64, n, at) };
+                        if r <= 0 {
+                            // The file is shorter than the call said: record zeros (cannot happen on tmpfs).
+                            crate::sup::host_error(r, nr::PREAD64, proto::ctl::HE_RUNTIME_ASSERT);
+                        }
+                        pwrite_all(FD_OPLOG_DATA, off, &buf[..r as usize]);
+                        off += r as u64;
+                        at += r as u64;
+                        left -= r as u64;
+                    }
                 }
                 if rfd != fd {
                     unsafe { sc1(nr::CLOSE, rfd as u64) };
@@ -154,8 +281,19 @@ fn put_rec(kind: OpKind, ino: u64, a: [u64; 6], data: (u64, u64)) {
         data_len: data.1,
     };
     let off = c.oplog_len.load(Relaxed);
-    pwrite_all(FD_OPLOG_META, off, rec.as_bytes());
-    c.oplog_len.store(off + OPREC_SIZE as u64, Relaxed);
+    let end = off + OPREC_SIZE as u64;
+    if ensure_meta(end) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                rec.as_bytes().as_ptr(),
+                (OPLOG_META_BASE + off) as *mut u8,
+                OPREC_SIZE,
+            );
+        }
+    } else {
+        pwrite_all(FD_OPLOG_META, off, rec.as_bytes());
+    }
+    c.oplog_len.store(end, Relaxed);
 }
 
 /// Append one record and offer a crash point after it.
@@ -1268,7 +1406,6 @@ const SYNC_FILE_RANGE_WAIT_AFTER: u64 = 4;
 /// `sync`, `syncfs`. Which call may be given the injected failure, which reports a pending
 /// one, and what each records: ARCHITECTURE.md, "The fsync-error model".
 pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
-    const F_GETFL: u64 = 3;
     if nr == nr::SYNC {
         // sync(2) reports nothing.
         crate::inject::crash_point();
@@ -1278,7 +1415,8 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
     }
     let fd = a[0] as i32 as i64;
     // `fdget`: a closed descriptor or an `O_PATH` one is EBADF.
-    let fl = unsafe { sc2(nr::FCNTL, fd as u64, F_GETFL) };
+    let p = crate::state::proc();
+    let fl = p.get_fd_fl(fd);
     if fl < 0 || fl & O_PATH != 0 {
         return -e::EBADF;
     }
@@ -1289,12 +1427,20 @@ pub fn sync_call(nr: u64, a: [u64; 6]) -> i64 {
             return -e::EINVAL;
         }
     }
-    let Some(st) = fstat_raw(fd) else {
-        return -e::EBADF;
+    let meta = match p.get_fd_meta(fd) {
+        Some(m) if m.flags & crate::state::META_STAT != 0 => m,
+        _ => {
+            let Some(st) = fstat_raw(fd) else {
+                return -e::EBADF;
+            };
+            let work = path::is_work(st.dev());
+            let vk = crate::sys::fs::vkey(&st);
+            p.cache_fd_stat(fd, &st, work, vk)
+        }
     };
-    let fmt = st.mode() as u64 & S_IFMT;
-    let work = path::is_work(st.dev());
-    let ino = st.ino();
+    let fmt = (meta.mode_fmt as u64) << 12;
+    let work = meta.flags & crate::state::META_WORK != 0;
+    let ino = meta.ino;
     if nr == nr::SYNCFS {
         if !work {
             return 0;
@@ -1452,6 +1598,16 @@ pub fn write_sync(call_nr: u64, fd: i64, ino: u64, fl: i64, rwf: u64) -> i64 {
 
 /// Before `close(fd)`: the inode, when it is a `/work` regular file.
 pub fn before_close(fd: i64) -> Option<u64> {
+    if let Some(m) = crate::state::proc().get_fd_meta(fd) {
+        if m.flags & crate::state::META_STAT != 0 {
+            return (m.flags & (crate::state::META_WORK | crate::state::META_REG)
+                == (crate::state::META_WORK | crate::state::META_REG))
+                .then_some(m.ino);
+        }
+        if m.kind > 1 {
+            return None; // Pipe, Sock, or Anon: never a /work regular file
+        }
+    }
     let st = fstat_raw(fd)?;
     (path::is_work(st.dev()) && st.mode() & 0o170000 == 0o100000).then_some(st.ino())
 }

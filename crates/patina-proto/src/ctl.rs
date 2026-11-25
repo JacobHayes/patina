@@ -6,10 +6,32 @@ use core::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering};
 
 pub const MAGIC: u64 = 0x7461_705f_6c74_6321; // "!ctl_pat"
 #[cfg(not(feature = "profile"))]
-pub const LAYOUT_VERSION: u64 = 32;
+pub const LAYOUT_VERSION: u64 = 33;
 #[cfg(feature = "profile")]
-pub const LAYOUT_VERSION: u64 = 32 | (1 << 32);
+pub const LAYOUT_VERSION: u64 = 33 | (1 << 32);
 pub const MAX_THREADS: usize = 1024;
+
+/// `Ctl::sup_word` and `Slot::go` futex states:
+/// - `IPC_SLEEP` (0): waiter may be sleeping in `futex_wait(..., 0)`; poster must `futex_wake`.
+/// - `IPC_READY` (1): request or reply has been posted.
+/// - `IPC_SPIN` (2): waiter is actively spinning in user space; poster skips `futex_wake`.
+pub const IPC_SLEEP: u32 = 0;
+pub const IPC_READY: u32 = 1;
+pub const IPC_SPIN: u32 = 2;
+
+/// `Ctl::sup_fast` capability bits published by the supervisor on each `reply`:
+/// when set (and dynamic guards in `rt::sup::try_fast_sup` hold), the runtime may serve
+/// solo `Op::Yield` or zero-waiter `Op::FutexWake` in-process with identical log records.
+pub const FAST_BASE: u64 = 1 << 0;
+pub const FAST_SOLO: u64 = 1 << 1;
+
+/// Two-bit Bloom mask for a futex address (`Ctl::futex_bloom`).
+/// Never has false negatives: if `(bloom & mask) != mask`, zero threads are parked on `addr`.
+#[inline]
+pub fn futex_bloom_mask(addr: u64) -> u64 {
+    let h = crate::draw::mix64(addr ^ 0x517c_c1b7_2722_0a95);
+    (1u64 << (h & 63)) | (1u64 << ((h >> 6) & 63))
+}
 
 /// Seed, rates and limits. Read-only after start.
 #[repr(C)]
@@ -189,6 +211,13 @@ pub struct Ctl {
     pub log_cap: AtomicU64,
     pub oplog_len: AtomicU64,
     pub opdata_len: AtomicU64,
+    /// Allocated file sizes of `oplog.meta` and `oplog.data` (page-aligned, for mmap growth).
+    pub oplog_cap: AtomicU64,
+    pub opdata_cap: AtomicU64,
+    /// Monotonic generation bumped on `fcntl(F_SETFL)` / `ioctl(FIONBIO)` (per-fd flag cache).
+    pub fl_gen: AtomicU64,
+    /// Monotonic generation bumped on `unlink` / `rename` (per-fd `nlink > 0` cache).
+    pub unlink_gen: AtomicU64,
     /// Futex word the supervisor sleeps on (1 = a request is pending).
     pub sup_word: AtomicU32,
     /// Which slot holds the current request.
@@ -232,6 +261,19 @@ pub struct Ctl {
     pub debug: DebugCtl,
     /// Where `patina ctl settle` stopped the faults (`sup::settle`).
     pub settle: SettleCtl,
+    /// Adaptive spin iterations for guest/supervisor IPC (`0` on single-CPU hosts). Never logged.
+    pub ipc_spin: AtomicU64,
+    /// Host CPU pinned for guest processes and for the supervisor (`u64::MAX` when sharing one CPU).
+    pub guest_cpu: AtomicU64,
+    pub sup_cpu: AtomicU64,
+    /// Fast-path flags (`FAST_*`) published by the supervisor when handing over the turn.
+    pub sup_fast: AtomicU64,
+    /// `Ctl::io.gen` as of the supervisor's last `io.sync`.
+    pub io_synced_gen: AtomicU64,
+    /// Position of the turn holder in `Sched::runnable` (`0..view.runnable`), or `u64::MAX`.
+    pub runnable_pos: AtomicU64,
+    /// 64-bit Bloom filter of parked futex addresses (`futex_bloom_mask`); 0 when none parked.
+    pub futex_bloom: AtomicU64,
 }
 
 /// Where `patina ctl settle` stopped the faults: its sequence number and virtual time (0: no
@@ -1353,6 +1395,8 @@ impl Ctl {
             .store(crate::layout::VCLOCK_BOOT_NS, Ordering::Relaxed);
         self.next_deadline_ns.store(u64::MAX, Ordering::Relaxed);
         self.stop_nr.store(u64::MAX, Ordering::Relaxed);
+        self.guest_cpu.store(u64::MAX, Ordering::Relaxed);
+        self.sup_cpu.store(u64::MAX, Ordering::Relaxed);
         self.layout_version.store(LAYOUT_VERSION, Ordering::Relaxed);
         self.magic.store(MAGIC, Ordering::Release);
     }

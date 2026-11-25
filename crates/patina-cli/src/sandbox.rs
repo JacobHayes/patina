@@ -137,6 +137,9 @@ pub struct Machines {
     /// Mounts the machines share with main that are read-only in a machine's view (the root,
     /// `/dev`, `/guest`, `:copy` mounts): one machine's writes never reach another.
     pub readonly: Vec<String>,
+    /// Host CPU to pin each machine's guest processes to (when supervisor uses a separate CPU).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_cpu: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -1794,7 +1797,8 @@ fn machines_keeper(k: &Keeper, chan: RawFd, n: &Machines) {
                 }
                 // Close-on-exec: read before the runtime starts.
                 keep.extend(tree.as_ref().map(|t| t.as_raw_fd()));
-                let run = || machine_main(ns, stdio, ns.size, boot, tree.as_ref(), probe);
+                let run =
+                    || machine_main(ns, stdio, ns.size, boot, tree.as_ref(), probe, n.guest_cpu);
                 match (&saved[i - 1], boot) {
                     (Some(s), _) if probe => k.view(Place::Again(s), &keep, run).map(|_| ()),
                     (None, _) if probe => {
@@ -1842,6 +1846,7 @@ fn machine_main(
     boot: u64,
     tree: Option<&OwnedFd>,
     probe: bool,
+    guest_cpu: Option<usize>,
 ) -> i32 {
     let fail = |e: String| -> i32 {
         eprintln!("patina sandbox: machine {}: {e}", ns.name);
@@ -1897,6 +1902,11 @@ fn machine_main(
     let mut ev: Vec<*const libc::c_char> = env.iter().map(|a| a.as_ptr()).collect();
     ev.push(std::ptr::null());
     unsafe {
+        if let Some(c) = guest_cpu {
+            let mut set: libc::cpu_set_t = std::mem::zeroed();
+            libc::CPU_SET(c, &mut set);
+            let _ = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
+        }
         if !crate::sup::inherit::child() {
             return fail("process state".into());
         }

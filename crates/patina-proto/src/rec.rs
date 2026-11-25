@@ -270,6 +270,7 @@ pub const REC_SIZE: usize = core::mem::size_of::<Rec>();
 const _: () = assert!(REC_SIZE == 96);
 
 impl Rec {
+    #[inline]
     pub fn as_bytes(&self) -> &[u8; REC_SIZE] {
         // SAFETY: repr(C), no padding (asserted size), all fields plain integers.
         unsafe { &*(self as *const Rec as *const [u8; REC_SIZE]) }
@@ -282,6 +283,7 @@ impl Rec {
 }
 
 /// 64-bit hash of a byte string (word-at-a-time multiply-xorshift; not cryptographic).
+#[inline]
 pub fn hash_bytes(seed: u64, data: &[u8]) -> u64 {
     let mut h = mix64(
         seed ^ 0x243f_6a88_85a3_08d3 ^ (data.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
@@ -307,16 +309,19 @@ pub struct Hasher {
 }
 
 impl Hasher {
+    #[inline]
     pub fn new() -> Hasher {
         Hasher {
             h: 0x452821e638d01377,
             n: 0,
         }
     }
+    #[inline]
     pub fn update(&mut self, data: &[u8]) {
         self.h = mix64(self.h ^ hash_bytes(self.n, data));
         self.n += data.len() as u64;
     }
+    #[inline]
     pub fn finish(&self) -> u64 {
         mix64(self.h ^ self.n)
     }
@@ -328,7 +333,46 @@ impl Default for Hasher {
     }
 }
 
-/// Running log hash after appending `rec`.
+/// Running log hash after appending `rec` (exact specialization of `hash_bytes(0, rec.as_bytes())`
+/// for the fixed 96-byte, 8-byte-aligned `Rec`).
+#[inline]
 pub fn chain(prev: u64, rec: &Rec) -> u64 {
-    mix64(prev.rotate_left(17) ^ hash_bytes(0, rec.as_bytes()))
+    // SAFETY: `Rec` is `#[repr(C)]`, 8-byte aligned, size 96 == 12 * 8, no padding.
+    let w = unsafe { &*(rec as *const Rec as *const [u64; 12]) };
+    let mut h =
+        mix64(0x243f_6a88_85a3_08d3 ^ (REC_SIZE as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    let mut i = 0;
+    while i < 12 {
+        h = mix64(h ^ u64::from_le(w[i]))
+            .rotate_left(23)
+            .wrapping_add(0x9e37_79b9_7f4a_7c15);
+        i += 1;
+    }
+    mix64(prev.rotate_left(17) ^ mix64(h))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chain_matches_hash_bytes() {
+        let r = Rec {
+            seq: 42,
+            vclock_ns: 1_234_567_890,
+            slot: 3,
+            kind: RecKind::Trap as u8,
+            class: 2,
+            nr: 63,
+            args: [1, 2, 3, 4, 5, 6],
+            ret: -11,
+            out_hash: 0xdead_beef_cafe_babe,
+            in_hash: 0x0123_4567_89ab_cdef,
+        };
+        let prev = 0xfedc_ba98_7654_3210;
+        assert_eq!(
+            chain(prev, &r),
+            mix64(prev.rotate_left(17) ^ hash_bytes(0, r.as_bytes()))
+        );
+    }
 }

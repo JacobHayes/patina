@@ -122,8 +122,8 @@ pub const EINTR: i64 = 4;
 pub struct Sched {
     pub seed: u64,
     pub entries: Vec<Entry>,
-    /// Runnable slots, ordered by slot index (the picking rule depends on this order).
-    pub(super) runnable: BTreeSet<usize>,
+    /// Runnable slots, kept sorted by slot index (the picking rule depends on this order).
+    pub(super) runnable: Vec<usize>,
     pub(super) events: BTreeMap<EventId, Event>,
     pub(super) next_event: u64,
     pub(super) futex: BTreeMap<FutexKey, VecDeque<usize>>,
@@ -161,7 +161,26 @@ impl Sched {
         self.runnable
             .iter()
             .copied()
-            .filter(|s| !self.frozen.contains(s))
+            .filter(|s| self.frozen.is_empty() || !self.frozen.contains(s))
+    }
+
+    /// Count of eligible runnable threads (O(1) when no machine is paused).
+    #[inline]
+    pub fn eligible_count(&self) -> usize {
+        if self.frozen.is_empty() {
+            self.runnable.len()
+        } else {
+            self.eligible().count()
+        }
+    }
+
+    /// Position of `slot` in `eligible()` when no machine is paused (`None` otherwise).
+    #[inline]
+    pub fn eligible_pos(&self, slot: usize) -> Option<usize> {
+        if !self.frozen.is_empty() {
+            return None;
+        }
+        self.runnable.binary_search(&slot).ok()
     }
 
     /// Slot `slot` belongs to a paused machine: it is not picked until `thaw`.
@@ -174,7 +193,21 @@ impl Sched {
     }
 
     pub fn is_frozen(&self, slot: usize) -> bool {
-        self.frozen.contains(&slot)
+        !self.frozen.is_empty() && self.frozen.contains(&slot)
+    }
+
+    #[inline]
+    fn runnable_insert(&mut self, slot: usize) {
+        if let Err(pos) = self.runnable.binary_search(&slot) {
+            self.runnable.insert(pos, slot);
+        }
+    }
+
+    #[inline]
+    fn runnable_remove(&mut self, slot: usize) {
+        if let Ok(pos) = self.runnable.binary_search(&slot) {
+            self.runnable.remove(pos);
+        }
     }
 }
 
@@ -183,7 +216,7 @@ impl Sched {
         Sched {
             seed,
             entries: vec![Entry::free(); slots],
-            runnable: BTreeSet::new(),
+            runnable: Vec::with_capacity(16),
             events: BTreeMap::new(),
             next_event: 0,
             futex: BTreeMap::new(),
@@ -210,11 +243,11 @@ impl Sched {
             woke: None,
             rt_abs: false,
         };
-        self.runnable.insert(slot);
+        self.runnable_insert(slot);
     }
 
     pub fn is_runnable(&self, slot: usize) -> bool {
-        self.runnable.contains(&slot)
+        self.runnable.binary_search(&slot).is_ok()
     }
 
     pub fn runnable(&self) -> impl Iterator<Item = usize> + '_ {
@@ -223,6 +256,17 @@ impl Sched {
 
     /// The picking rule: the eligible set in slot order, `eligible[draw(Sched, seq) % len]`.
     pub fn pick(&self, seq: u64) -> Option<usize> {
+        if self.frozen.is_empty() {
+            let n = self.runnable.len();
+            if n == 0 {
+                return None;
+            }
+            if n == 1 {
+                return Some(self.runnable[0]);
+            }
+            let i = (draw(self.seed, Stream::Sched, seq) % n as u64) as usize;
+            return Some(self.runnable[i]);
+        }
         let n = self.eligible().count() as u64;
         if n == 0 {
             return None;
@@ -234,6 +278,19 @@ impl Sched {
     /// The picking rule without `except`: the other eligible threads in slot order,
     /// `others[draw(Sched, seq) % len]`; None when there are none.
     pub fn pick_except(&self, seq: u64, except: usize) -> Option<usize> {
+        if self.frozen.is_empty() {
+            let pos = self.runnable.binary_search(&except).ok();
+            let n = self.runnable.len() - usize::from(pos.is_some());
+            if n == 0 {
+                return None;
+            }
+            let i = (draw(self.seed, Stream::Sched, seq) % n as u64) as usize;
+            let idx = match pos {
+                Some(p) if i >= p => i + 1,
+                _ => i,
+            };
+            return Some(self.runnable[idx]);
+        }
         let n = self.eligible().filter(|&s| s != except).count() as u64;
         if n == 0 {
             return None;
@@ -246,7 +303,7 @@ impl Sched {
     /// it would take is pending (`Sup::may_block`).
     pub fn park(&mut self, slot: usize, wait: Wait, deadline: Option<u64>, ok: MayPark) {
         assert_eq!(ok.slot(), slot, "leave to park was given for another slot");
-        self.runnable.remove(&slot);
+        self.runnable_remove(slot);
         if let Wait::Futex { key, .. } = wait {
             self.futex.entry(key).or_default().push_back(slot);
         }
@@ -305,7 +362,7 @@ impl Sched {
         e.state = State::Runnable;
         e.reply = reply;
         e.woke = Some(reason);
-        self.runnable.insert(slot);
+        self.runnable_insert(slot);
         true
     }
 
@@ -330,7 +387,7 @@ impl Sched {
         if let Some(id) = self.entries[slot].timer.take() {
             self.events.remove(&id);
         }
-        self.runnable.remove(&slot);
+        self.runnable_remove(slot);
     }
 
     /// `slot` sent `ThreadExit`.
