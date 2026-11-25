@@ -6,8 +6,8 @@ use crate::arch::Frame;
 use crate::raw::*;
 use crate::state::{config, ctl, ThreadState};
 use core::sync::atomic::Ordering::Relaxed;
-use proto::layout::FD_CPU_PROFILE;
 use proto::guest_profile::{encode_image, encode_sample, MAX_FRAMES, MAX_RECORD_BYTES};
+use proto::layout::FD_CPU_PROFILE;
 
 #[inline]
 pub fn enabled() -> bool {

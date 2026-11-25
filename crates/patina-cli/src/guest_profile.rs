@@ -20,8 +20,8 @@ use crate::durability::check::boots;
 use crate::log::{Cut, Str};
 use crate::result::read_json;
 use proto::ctl::Op;
-use proto::layout::{RT_BASE, RT_REGION_END};
 use proto::guest_profile::{HEADER_LEN, KIND_IMAGE, KIND_SAMPLE, MAGIC, VERSION};
+use proto::layout::{RT_BASE, RT_REGION_END};
 use proto::rec::{Rec, RecKind, REC_SIZE, STR_PATH, STR_RESOLVED};
 use proto::table::name as syscall_name;
 use serde::Serialize;
@@ -2536,7 +2536,8 @@ mod tests {
         blob.extend_from_slice(&rec[..n]);
         // Sample includes one RT frame in [RT_BASE, RT_REGION_END) that MUST be filtered out.
         let pcs = [0x40_1200u64, RT_BASE + 0x1234, 0x40_1050];
-        let m = proto::guest_profile::encode_sample(&mut rec, 1_000_000, 5, 1000, 100, 100, 0, &pcs);
+        let m =
+            proto::guest_profile::encode_sample(&mut rec, 1_000_000, 5, 1000, 100, 100, 0, &pcs);
         blob.extend_from_slice(&rec[..m]);
         std::fs::write(b1.join("cpu_profile.bin"), &blob).unwrap();
 

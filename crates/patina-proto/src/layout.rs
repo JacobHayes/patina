@@ -131,10 +131,10 @@ pub const FD_SHM: i32 = 3023;
 pub const FD_MACHINES: i32 = 3024;
 /// Deterministic CPU profile sidecar (`cpu_profile.bin`): written directly by `patina-rt` when
 /// `--profile-cpu` is active, completely decoupled from `boundary.log` and its replay digest.
-pub const FD_CPU_PROFILE: i32 = 3026;
+pub const FD_CPU_PROFILE: i32 = 3025;
 /// Shared 64 KiB edge-coverage bitmap memfd (`plan::COVERAGE_MAP`): mapped `MAP_SHARED` by
 /// `patina-rt` when `--coverage` is active and read by the launcher at run end.
-pub const FD_COVERAGE: i32 = 3027;
+pub const FD_COVERAGE: i32 = 3026;
 /// The shadow stores (`oplog::Shadows`): `oplog::SHADOW_SLOTS` sparse memfds from here, which
 /// the supervisor makes at each boot's start and every guest process it starts
 /// inherits. Read and written by the runtime and the supervisor only; never mapped. At the top
