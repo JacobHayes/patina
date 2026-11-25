@@ -300,70 +300,35 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         ops.push(link(t, l));
     }
     ops.push(Op::Dev { dst: "/dev".into() });
-    ops.push(Op::Proc {
-        dst: "/proc".into(),
-    });
-    // /work and /tmp: sandbox tmpfs (fresh, sequential inode numbers, their own virtual
-    // times), main's size (`[machine.main] disk-mb`); programs expect /tmp for temporary files.
-    // Not durable.
-    let main_size = c.main_disk_bytes()?;
-    for d in [work, "/tmp"] {
-        ops.push(Op::Tmpfs {
-            dst: d.into(),
-            size: main_size,
-        });
-    }
-    // Generated /etc: the data files below, plus the host's ld.so.cache and localtime
-    // naming UTC. The cache is a copy (a file on the sandbox's root tmpfs), not a bind.
+    // Generated /etc: the data files below, plus the host's ld.so.cache, localtime (UTC), and
+    // Debian's alternatives (`/usr/bin/awk` -> `/etc/alternatives/awk` -> gawk). Placed before
+    // `Op::Proc` so persistent sandbox workers build them once at startup (user mounts cannot
+    // shadow these paths, checked in `config.rs`).
     let mut etc = etc_files(work, &names);
     if let Some(cache) = cached_ld_so_cache() {
         etc.push(("/etc/ld.so.cache", cache));
     }
     ops.push(link("/usr/share/zoneinfo/UTC", "/etc/localtime"));
-    // Debian's alternatives (`/usr/bin/awk` -> `/etc/alternatives/awk` -> gawk); without them
-    // `awk` is "not found". Recreated as symlinks on the root tmpfs, in name order, instead of
-    // a bind of the host directory.
     if let Some(entries) = cached_alternatives() {
         ops.push(Op::SymlinkDir {
             dst: "/etc/alternatives".into(),
             entries,
         });
     }
-    // The program, the `:copy` mounts and the boot's /in are bound at a hidden place,
-    // and the supervisor copies them into sandbox tmpfs (/guest, the mount points, /work)
-    // before the guest starts: what the guest reads there has the sandbox's own metadata
-    // (inode numbers in copy order, virtual times, tmpfs blocks), not the host's. Other
-    // mounts are read-only binds.
-    let mut copies: Vec<String> = vec![];
-    ops.push(tmpfs("/guest"));
-    // The program's directory, read-only where its path as given leads (no mount covers it),
-    // then the mounts, each where its path leads through the mounts before it.
-    if let (Some(d), Some(g)) = (&o.program.dir, Path::new(&o.program.guest).parent()) {
-        ops.push(ro(
-            d.display().to_string(),
-            crate::config::guest_resolve(&g.display().to_string(), &c.mounts),
-        ));
+    assert!(etc.len() <= sandbox::MAX_DATA);
+    for (i, (path, _)) in etc.iter().enumerate() {
+        ops.push(Op::Data {
+            index: i,
+            dst: path.to_string(),
+        });
     }
-    for (i, m) in c.mounts.iter().enumerate() {
-        let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
-        if !m.copy {
-            ops.push(ro(m.src.display().to_string(), dst));
-            continue;
-        }
-        let hidden = format!("/.patina/copy/{i}");
-        ops.push(ro(m.src.display().to_string(), hidden.clone()));
-        if dst != "/guest" {
-            ops.push(tmpfs(&dst));
-        }
-        copies.push(format!("{hidden}:{dst}"));
-    }
+    // Hidden read-only binds for copied program and boot /in, plus `patina` itself.
     if o.program.copied {
         let name = o.program.guest.trim_start_matches("/guest/");
         ops.push(ro(
             o.program.host.display().to_string(),
             format!("/.patina/prog/{name}"),
         ));
-        copies.push("/.patina/prog:/guest".into());
     }
     if let Some(root) = root {
         let r =
@@ -376,6 +341,70 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
         let exe = std::env::current_exe().map_err(|e| format!("own executable: {e}"))?;
         ops.push(ro(exe.display().to_string(), GUEST_PATINA.into()));
     }
+    // Partition user mounts & program dir: static read-only binds not nested under any writable
+    // tmpfs go before `Op::Proc` (mounted once in persistent workers); `Op::Proc`, writable
+    // tmpfs mounts (`/work`, `/tmp`, `/guest`, `:copy`), and any binds nested under them go
+    // after `Op::Proc` so every run gets fresh inodes and fresh `/proc`.
+    let mut tmpfs_roots: Vec<String> = vec![work.into(), "/tmp".into(), "/guest".into()];
+    for (i, m) in c.mounts.iter().enumerate() {
+        if m.copy {
+            let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
+            if dst != "/guest" {
+                tmpfs_roots.push(dst);
+            }
+        }
+    }
+    let under_tmpfs = |p: &str| tmpfs_roots.iter().any(|t| under(p, t));
+    let main_size = c.main_disk_bytes()?;
+    let mut post_ops: Vec<Op> = vec![
+        Op::Proc {
+            dst: "/proc".into(),
+        },
+        // /work and /tmp: sandbox tmpfs (fresh, sequential inode numbers, their own virtual
+        // times), main's size (`[machine.main] disk-mb`); programs expect /tmp for temporary files.
+        // Not durable.
+        Op::Tmpfs {
+            dst: work.into(),
+            size: main_size,
+        },
+        Op::Tmpfs {
+            dst: "/tmp".into(),
+            size: main_size,
+        },
+        tmpfs("/guest"),
+    ];
+    let mut copies: Vec<String> = vec![];
+    if let (Some(d), Some(g)) = (&o.program.dir, Path::new(&o.program.guest).parent()) {
+        let dst = crate::config::guest_resolve(&g.display().to_string(), &c.mounts);
+        let op = ro(d.display().to_string(), dst.clone());
+        if under_tmpfs(&dst) {
+            post_ops.push(op);
+        } else {
+            ops.push(op);
+        }
+    }
+    for (i, m) in c.mounts.iter().enumerate() {
+        let dst = crate::config::guest_resolve(&m.dst, &c.mounts[..i]);
+        if !m.copy {
+            let op = ro(m.src.display().to_string(), dst.clone());
+            if under_tmpfs(&dst) {
+                post_ops.push(op);
+            } else {
+                ops.push(op);
+            }
+            continue;
+        }
+        let hidden = format!("/.patina/copy/{i}");
+        ops.push(ro(m.src.display().to_string(), hidden.clone()));
+        if dst != "/guest" {
+            post_ops.push(tmpfs(&dst));
+        }
+        copies.push(format!("{hidden}:{dst}"));
+    }
+    if o.program.copied {
+        copies.push("/.patina/prog:/guest".into());
+    }
+    ops.extend(post_ops);
     let mut progs: Vec<(String, PathBuf)> = vec![];
     if o.program.copied {
         progs.push((o.program.guest.clone(), o.program.host.clone()));
@@ -385,13 +414,6 @@ pub fn layout(o: &Opts, root: Option<&Path>) -> Res<Layout> {
     } else {
         Some(machine_layout(o, &mut ops, &mut copies, &mut progs)?)
     };
-    assert!(etc.len() <= sandbox::MAX_DATA);
-    for (i, (path, _)) in etc.iter().enumerate() {
-        ops.push(Op::Data {
-            index: i,
-            dst: path.to_string(),
-        });
-    }
     Ok(Layout {
         ops,
         data: etc.into_iter().map(|e| e.1).collect(),
@@ -1126,18 +1148,19 @@ fn make_userns(uid: u32, gid: u32) -> Result<OwnedFd, String> {
     res
 }
 
-/// Run one boot into `bdir` (created).
-pub fn run_boot(
+/// Run one boot into `bdir` (created), optionally reusing a persistent `SandboxWorker` for
+/// single-machine first boots (`patina batch`).
+pub fn run_boot_with_worker(
     o: &Opts,
     bdir: &Path,
     cpu: usize,
     no_personality: bool,
     start: &Start,
+    worker: Option<&mut Option<sandbox::SandboxWorker>>,
 ) -> Res<BootEnd> {
     let t_launch = mono_ns();
     let bdir = bdir.to_path_buf();
     fs::create_dir_all(&bdir).map_err(|e| format!("create {}: {e}", bdir.display()))?;
-    let rt_file = rt_file()?;
 
     let create = |name: &str| -> Res<File> {
         OpenOptions::new()
@@ -1317,9 +1340,33 @@ pub fn run_boot(
 
     // The supervisor runs directly in PID 1 after sandbox setup (no second exec of patina).
     let work = c.disk_path();
-    let lay = layout(o, start.root)?;
+    let personality = !no_personality;
+    let perturb = PERTURB.load(Relaxed);
+    let reuse_eligible = worker.is_some()
+        && start.k == 0
+        && c.machines.is_empty()
+        && !no_personality
+        && !perturb
+        && c.debug_at.is_none()
+        && std::env::var_os("PATINA_NO_SANDBOX_REUSE").is_none();
+
+    // Reuse an already-started worker's `copies` list without rebuilding `Layout` (avoids cloning
+    // `/etc/ld.so.cache` and `/etc/alternatives` and re-opening `rt_file` on every hot batch job).
+    let mut cached_layout: Option<Layout> = None;
+    let copies_ref: &[String] = if reuse_eligible {
+        if let Some(Some(w)) = worker.as_deref() {
+            w.copies()
+        } else {
+            cached_layout = Some(layout(o, start.root)?);
+            &cached_layout.as_ref().unwrap().copies
+        }
+    } else {
+        cached_layout = Some(layout(o, start.root)?);
+        &cached_layout.as_ref().unwrap().copies
+    };
+
     let mut sup_args: Vec<String> = vec![];
-    for cp in &lay.copies {
+    for cp in copies_ref {
         sup_args.extend(["--copy".into(), cp.clone()]);
     }
     sup_args.extend(["--exe".into(), o.program.guest.clone()]);
@@ -1352,59 +1399,6 @@ pub fn run_boot(
     sup_args.extend(c.cmd[1..].iter().cloned());
     // As root, the user namespace is joined from a descriptor at FD_USERNS.
     let userns = userns()?;
-    let spec = sandbox::Spec {
-        ops: lay.ops,
-        join_userns: userns.is_some(),
-        chdir: work.into(),
-        env: vec![],
-        argv: vec![],
-        exe: None,
-        after: sandbox::After::Sup { args: sup_args },
-        machines: lay.machines,
-    };
-    let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
-    let mut etc_fds = vec![];
-    for d in &lay.data {
-        etc_fds.push(sandbox::data_fd(d)?);
-    }
-
-    // Descriptors to place at fixed numbers in the child.
-    let mut place: Vec<(i32, i32)> = vec![
-        (memfd.as_raw_fd(), FD_CTL),
-        (log.as_raw_fd(), FD_LOG),
-        (opmeta.as_raw_fd(), FD_OPLOG_META),
-        (opdata.as_raw_fd(), FD_OPLOG_DATA),
-        (rt_file.as_raw_fd(), FD_RT),
-        (outcome_w.as_raw_fd(), FD_OUTCOME),
-        (export.as_raw_fd(), FD_EXPORT),
-        (stdin_mem.as_raw_fd(), FD_STDIN),
-        (stdout_mem.as_raw_fd(), FD_STDOUT),
-        (stderr_mem.as_raw_fd(), FD_STDERR),
-        (start.shm, FD_SHM),
-    ];
-    for (i, f) in etc_fds.iter().enumerate() {
-        place.push((f.as_raw_fd(), sandbox::FD_DATA0 + i as i32));
-    }
-    place.push((spec_fd.as_raw_fd(), sandbox::FD_SPEC));
-    if let Some(fd) = userns {
-        place.push((fd, sandbox::FD_USERNS));
-    }
-    // Each machine's stdio: memfds as main's (an empty stdin).
-    let mut machine_stdio = vec![];
-    for (k, n) in c.machines.iter().enumerate() {
-        let fds = [
-            stdio_memfd(&format!("patina-{}-stdin", n.name), Some(&[]))?,
-            stdio_memfd(&format!("patina-{}-stdout", n.name), None)?,
-            stdio_memfd(&format!("patina-{}-stderr", n.name), None)?,
-        ];
-        for (j, f) in fds.iter().enumerate() {
-            place.push((
-                f.as_raw_fd(),
-                sandbox::FD_MACHINE_STDIO0 + 3 * k as i32 + j as i32,
-            ));
-        }
-        machine_stdio.push(fds);
-    }
     // The plan broker's sandbox end.
     let (plan_sandbox, plan_ours) = match &start.planner {
         Some(_) => {
@@ -1413,96 +1407,272 @@ pub fn run_boot(
         }
         None => (None, None),
     };
-    if let Some(f) = &plan_sandbox {
-        place.push((f.as_raw_fd(), FD_PLAN));
-    }
-    let personality = !no_personality;
-    let perturb = PERTURB.load(Relaxed);
     let t_spec_ready = crate::profile::stamp();
 
-    let mut cmd = sandbox::command(place, move || unsafe {
-        if perturb {
-            perturb_child();
-        }
-        // The whole persona is set, not a flag added to the caller's (setarch -R/-X
-        // and friends are inherited). umask, limits, signals and the rest: sup::inherit.
-        let pers = if personality {
-            libc::ADDR_NO_RANDOMIZE as libc::c_ulong
-        } else {
-            0
-        };
-        if libc::personality(pers) < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_SET(cpu, &mut set);
-        if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        Ok(())
-    });
-    cmd.stdin(Stdio::null())
-        .stdout(sandbox_log.try_clone().map_err(|e| e.to_string())?)
-        .stderr(sandbox_log.try_clone().map_err(|e| e.to_string())?);
-    let t_spawn = mono_ns();
-    let mut child = cmd.spawn().map_err(|e| format!("sandbox: {e}"))?;
-    drop(outcome_w);
-    drop(etc_fds);
-    drop(spec_fd);
-    drop(plan_sandbox);
-    let plan_broker = match (plan_ours, &start.planner) {
-        (Some(ours), Some(p)) => Some(crate::launcher::plans::Broker::start(
-            ours,
-            p.clone(),
-            cpu,
-            // The control region outlives the broker (`stop` below, before the unmap).
-            &unsafe { Ctl::at(ctl_ptr) }.compute.planning,
-        )?),
-        _ => None,
-    };
-    // `patina debug`: the stop, the user's debugger, the release (`debug::Watch`).
-    let watch = c.debug_at.map(|_| {
-        crate::debug::Watch::start(
-            ctl_ptr as usize,
-            child.id() as i32,
-            bdir.parent().unwrap_or(Path::new(".")),
-        )
-    });
+    let mut machine_stdio = vec![];
     let mut verdict_text = String::new();
     let mut outcome_r = outcome_r;
-    let waited = wait_fd(outcome_r.as_raw_fd(), start.deadline);
-    if let Some(w) = watch {
-        w.finish(waited == Waited::Ready);
-    }
-    let timed_out = waited != Waited::Ready;
-    if timed_out {
-        end_sandbox(&mut child);
+
+    let reuse_req = if reuse_eligible {
+        let req = sandbox::JobReq {
+            sup_args: sup_args.clone(),
+            chdir: work.into(),
+            main_disk_bytes: c.main_disk_bytes()?,
+            has_plan: plan_sandbox.is_some(),
+        };
+        let bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+        (bytes.len() <= sandbox::WORKER_REQ_MAX).then_some(bytes)
     } else {
-        let _ = outcome_r.read_to_string(&mut verdict_text);
-    }
-    let t_verdict = mono_ns();
-    let status = child
-        .wait()
-        .map_err(|e| format!("wait for the sandbox: {e}"))?;
-    if waited == Waited::Terminated {
-        // Stopped (a sweep interrupted): the sandbox is gone; no result is written.
-        exit_terminated();
-    }
-    if timed_out {
-        verdict_text = Verdict::new(
-            "timeout",
-            format!(
-                "--timeout: {} s of wall time passed (boot {})",
-                o.cfg.timeout,
-                start.k + 1
-            ),
-        )
-        .encode();
-    }
-    if let Some(b) = plan_broker {
-        b.stop();
-    }
-    let t_waited = mono_ns();
+        None
+    };
+
+    let (t_spawn, t_verdict, t_waited, sandbox_status) =
+        if let (Some(slot), Some(req_bytes)) = (worker, reuse_req) {
+            let mut job_fds = vec![
+                memfd.as_raw_fd(),
+                log.as_raw_fd(),
+                opmeta.as_raw_fd(),
+                opdata.as_raw_fd(),
+                outcome_w.as_raw_fd(),
+                export.as_raw_fd(),
+                stdin_mem.as_raw_fd(),
+                stdout_mem.as_raw_fd(),
+                stderr_mem.as_raw_fd(),
+                start.shm,
+                sandbox_log.as_raw_fd(),
+            ];
+            if let Some(f) = &plan_sandbox {
+                job_fds.push(f.as_raw_fd());
+            }
+
+            let t_spawn = mono_ns();
+            let mut dispatched = false;
+            if let Some(w) = slot.as_ref() {
+                if w.dispatch(&req_bytes, &job_fds).is_ok() {
+                    dispatched = true;
+                } else {
+                    *slot = None;
+                }
+            }
+            if !dispatched {
+                let lay = match cached_layout.take() {
+                    Some(l) => l,
+                    None => layout(o, start.root)?,
+                };
+                let rt_file = rt_file()?;
+                let w = sandbox::SandboxWorker::start(
+                    &lay.ops,
+                    &lay.data,
+                    lay.copies,
+                    work,
+                    rt_file.as_raw_fd(),
+                    userns,
+                    cpu,
+                )?;
+                w.dispatch(&req_bytes, &job_fds)?;
+                *slot = Some(w);
+            }
+            drop(outcome_w);
+            drop(plan_sandbox);
+
+            let plan_broker = match (plan_ours, &start.planner) {
+                (Some(ours), Some(p)) => Some(crate::launcher::plans::Broker::start(
+                    ours,
+                    p.clone(),
+                    cpu,
+                    // The control region outlives the broker (`stop` below, before the unmap).
+                    &unsafe { Ctl::at(ctl_ptr) }.compute.planning,
+                )?),
+                _ => None,
+            };
+            let waited = wait_fd(outcome_r.as_raw_fd(), start.deadline);
+            let timed_out = waited != Waited::Ready;
+            if timed_out {
+                if let Some(w) = slot.as_ref() {
+                    w.cancel();
+                }
+            } else {
+                let _ = outcome_r.read_to_string(&mut verdict_text);
+            }
+            let t_verdict = mono_ns();
+            let finish_res = slot
+                .as_ref()
+                .ok_or_else(|| "sandbox worker missing".to_string())
+                .and_then(|w| w.finish());
+            let (code, dirty) = match finish_res {
+                Ok(v) => v,
+                Err(_) => {
+                    *slot = None;
+                    (1, true)
+                }
+            };
+            if dirty || waited == Waited::Terminated {
+                *slot = None;
+            }
+            if waited == Waited::Terminated {
+                exit_terminated();
+            }
+            if timed_out {
+                verdict_text = Verdict::new(
+                    "timeout",
+                    format!(
+                        "--timeout: {} s of wall time passed (boot {})",
+                        o.cfg.timeout,
+                        start.k + 1
+                    ),
+                )
+                .encode();
+            }
+            if let Some(b) = plan_broker {
+                b.stop();
+            }
+            let t_waited = mono_ns();
+            (t_spawn, t_verdict, t_waited, format!("exit status: {code}"))
+        } else {
+            let lay = match cached_layout.take() {
+                Some(l) => l,
+                None => layout(o, start.root)?,
+            };
+            let rt_file = rt_file()?;
+            let spec = sandbox::Spec {
+                ops: lay.ops,
+                join_userns: userns.is_some(),
+                chdir: work.into(),
+                env: vec![],
+                argv: vec![],
+                exe: None,
+                after: sandbox::After::Sup { args: sup_args },
+                machines: lay.machines,
+            };
+            let spec_fd = sandbox::data_fd(&serde_json::to_vec(&spec).map_err(|e| e.to_string())?)?;
+            let mut etc_fds = vec![];
+            for d in &lay.data {
+                etc_fds.push(sandbox::data_fd(d)?);
+            }
+
+            // Descriptors to place at fixed numbers in the child.
+            let mut place: Vec<(i32, i32)> = vec![
+                (memfd.as_raw_fd(), FD_CTL),
+                (log.as_raw_fd(), FD_LOG),
+                (opmeta.as_raw_fd(), FD_OPLOG_META),
+                (opdata.as_raw_fd(), FD_OPLOG_DATA),
+                (rt_file.as_raw_fd(), FD_RT),
+                (outcome_w.as_raw_fd(), FD_OUTCOME),
+                (export.as_raw_fd(), FD_EXPORT),
+                (stdin_mem.as_raw_fd(), FD_STDIN),
+                (stdout_mem.as_raw_fd(), FD_STDOUT),
+                (stderr_mem.as_raw_fd(), FD_STDERR),
+                (start.shm, FD_SHM),
+            ];
+            for (i, f) in etc_fds.iter().enumerate() {
+                place.push((f.as_raw_fd(), sandbox::FD_DATA0 + i as i32));
+            }
+            place.push((spec_fd.as_raw_fd(), sandbox::FD_SPEC));
+            if let Some(fd) = userns {
+                place.push((fd, sandbox::FD_USERNS));
+            }
+            // Each machine's stdio: memfds as main's (an empty stdin).
+            for (k, n) in c.machines.iter().enumerate() {
+                let fds = [
+                    stdio_memfd(&format!("patina-{}-stdin", n.name), Some(&[]))?,
+                    stdio_memfd(&format!("patina-{}-stdout", n.name), None)?,
+                    stdio_memfd(&format!("patina-{}-stderr", n.name), None)?,
+                ];
+                for (j, f) in fds.iter().enumerate() {
+                    place.push((
+                        f.as_raw_fd(),
+                        sandbox::FD_MACHINE_STDIO0 + 3 * k as i32 + j as i32,
+                    ));
+                }
+                machine_stdio.push(fds);
+            }
+            if let Some(f) = &plan_sandbox {
+                place.push((f.as_raw_fd(), FD_PLAN));
+            }
+
+            let mut cmd = sandbox::command(place, move || unsafe {
+                if perturb {
+                    perturb_child();
+                }
+                // The whole persona is set, not a flag added to the caller's (setarch -R/-X
+                // and friends are inherited). umask, limits, signals and the rest: sup::inherit.
+                let pers = if personality {
+                    libc::ADDR_NO_RANDOMIZE as libc::c_ulong
+                } else {
+                    0
+                };
+                if libc::personality(pers) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut set: libc::cpu_set_t = std::mem::zeroed();
+                libc::CPU_SET(cpu, &mut set);
+                if libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+            cmd.stdin(Stdio::null())
+                .stdout(sandbox_log.try_clone().map_err(|e| e.to_string())?)
+                .stderr(sandbox_log.try_clone().map_err(|e| e.to_string())?);
+            let t_spawn = mono_ns();
+            let mut child = cmd.spawn().map_err(|e| format!("sandbox: {e}"))?;
+            drop(outcome_w);
+            drop(etc_fds);
+            drop(spec_fd);
+            drop(plan_sandbox);
+            let plan_broker = match (plan_ours, &start.planner) {
+                (Some(ours), Some(p)) => Some(crate::launcher::plans::Broker::start(
+                    ours,
+                    p.clone(),
+                    cpu,
+                    // The control region outlives the broker (`stop` below, before the unmap).
+                    &unsafe { Ctl::at(ctl_ptr) }.compute.planning,
+                )?),
+                _ => None,
+            };
+            // `patina debug`: the stop, the user's debugger, the release (`debug::Watch`).
+            let watch = c.debug_at.map(|_| {
+                crate::debug::Watch::start(
+                    ctl_ptr as usize,
+                    child.id() as i32,
+                    bdir.parent().unwrap_or(Path::new(".")),
+                )
+            });
+            let waited = wait_fd(outcome_r.as_raw_fd(), start.deadline);
+            if let Some(w) = watch {
+                w.finish(waited == Waited::Ready);
+            }
+            let timed_out = waited != Waited::Ready;
+            if timed_out {
+                end_sandbox(&mut child);
+            } else {
+                let _ = outcome_r.read_to_string(&mut verdict_text);
+            }
+            let t_verdict = mono_ns();
+            let status = child
+                .wait()
+                .map_err(|e| format!("wait for the sandbox: {e}"))?;
+            if waited == Waited::Terminated {
+                // Stopped (a sweep interrupted): the sandbox is gone; no result is written.
+                exit_terminated();
+            }
+            if timed_out {
+                verdict_text = Verdict::new(
+                    "timeout",
+                    format!(
+                        "--timeout: {} s of wall time passed (boot {})",
+                        o.cfg.timeout,
+                        start.k + 1
+                    ),
+                )
+                .encode();
+            }
+            if let Some(b) = plan_broker {
+                b.stop();
+            }
+            let t_waited = mono_ns();
+            (t_spawn, t_verdict, t_waited, status.to_string())
+        };
     let stdio_max = std::env::var("PATINA_TEST_STDIO_MAX")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1587,7 +1757,7 @@ pub fn run_boot(
         Verdict::new(
             "infra",
             format!(
-                "no verdict from the supervisor (sandbox {status}): {last}{}",
+                "no verdict from the supervisor (sandbox {sandbox_status}): {last}{}",
                 // The keeper's or PID 1's own refusal: the host's to fix.
                 if last.starts_with("patina")
                     && (last.contains("(os error 1)") || last.contains("(os error 13)"))

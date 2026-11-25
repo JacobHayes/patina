@@ -20,7 +20,7 @@ use crate::config::Opts;
 use crate::durability::log::OpLog;
 use crate::durability::materialise::materialise;
 use crate::durability::tree::Tree;
-use crate::launch::{run_boot, shm_carrier, Start};
+use crate::launch::{run_boot_with_worker, shm_carrier, Start};
 use crate::result::RunEnd;
 use proto::faults::{CRASH_MACHINE, CRASH_NONE};
 use serde_json::json;
@@ -162,15 +162,16 @@ fn machine_crashes(
 }
 
 pub fn run_chain(o: &Opts, out: &Path, cpu: usize, no_personality: bool) -> Res<RunEnd> {
-    run_chain_with_planner(o, out, cpu, no_personality, None)
+    run_chain_with_worker(o, out, cpu, no_personality, None, None)
 }
 
-pub fn run_chain_with_planner(
+pub fn run_chain_with_worker(
     o: &Opts,
     out: &Path,
     cpu: usize,
     no_personality: bool,
     shared_planner: Option<&crate::launcher::plans::Planner>,
+    mut worker: Option<&mut Option<crate::sandbox::SandboxWorker>>,
 ) -> Res<RunEnd> {
     let t0 = Instant::now();
     if out.join("result.json").exists() || out.join("boot-1").exists() {
@@ -247,7 +248,8 @@ pub fn run_chain_with_planner(
             shm: shm.as_raw_fd(),
             planner: planner.clone(),
         };
-        let mut end = run_boot(o, &bdir, cpu, no_personality, &start)?;
+        let mut end =
+            run_boot_with_worker(o, &bdir, cpu, no_personality, &start, worker.as_deref_mut())?;
         if let Some(bt) = end.timing.take() {
             profile_boots.push(bt);
         }

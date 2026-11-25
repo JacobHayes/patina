@@ -64,6 +64,7 @@ fn main() -> ExitCode {
     let hidden = match first.as_str() {
         "__sup" => Some(sup::main(rest)),
         "__sandbox" => Some(sandbox::keeper_main(rest)),
+        "__sandbox-worker" => Some(sandbox::worker_main(rest)),
         "__native" => Some(launch::native_main(rest)),
         "__sandbox-views" => Some(sandbox::views_main()),
         "__insn-scan" => Some(insn::main(rest)),
