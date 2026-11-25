@@ -2267,7 +2267,8 @@ fn collect_watch_dirs() -> Res<Vec<WatchedDir>> {
             mtime_nsec: st.st_mtime_nsec,
             ctime: st.st_ctime,
             ctime_nsec: st.st_ctime_nsec,
-            nlink: u64::from(st.st_nlink),
+            #[allow(clippy::unnecessary_cast)]
+            nlink: st.st_nlink as u64,
             mode: st.st_mode,
         });
     }
@@ -2279,11 +2280,13 @@ fn dirs_dirty(watch: &[WatchedDir]) -> bool {
         let Ok(st) = lstat_raw(&w.path) else {
             return true;
         };
+        #[allow(clippy::unnecessary_cast)]
+        let nlink = st.st_nlink as u64;
         if st.st_mtime != w.mtime
             || st.st_mtime_nsec != w.mtime_nsec
             || st.st_ctime != w.ctime
             || st.st_ctime_nsec != w.ctime_nsec
-            || u64::from(st.st_nlink) != w.nlink
+            || nlink != w.nlink
             || st.st_mode != w.mode
         {
             return true;
